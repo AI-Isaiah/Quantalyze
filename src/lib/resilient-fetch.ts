@@ -1,8 +1,11 @@
+import { after } from "next/server";
 import { Ratelimit } from "@upstash/ratelimit";
 import { Redis } from "@upstash/redis";
 import { CircuitOpenError, SeamBodyReadError } from "./seam-errors";
 import { seamBreakerVerdict } from "./seam-discriminator";
 import { scrubSeamError } from "./seam-redaction";
+import { captureToSentry, shouldCaptureNow } from "./sentry-capture";
+import { parseRetryAfterSeconds } from "./retry/retry-after";
 
 /**
  * Phase 140 / SEAM-02 + SEAM-03 — the ONE shared resilience core for the
@@ -18,7 +21,7 @@ import { scrubSeamError } from "./seam-redaction";
  * IN-REPO PRECEDENT
  * -----------------
  * Breaker state in a shared store is this project's established pattern, not a
- * new idea: `analytics-service/services/job_worker.py:731 _check_circuit_breaker`
+ * new idea: `analytics-service/services/job_worker.py`'s `_check_circuit_breaker`
  * already runs a Postgres-backed per-exchange breaker with TTL-like cooldown
  * timestamps (`EXCHANGE_COOLDOWNS`, :416). This module is the same shape one
  * tier up, against a different resource (the Railway deployment) and a
@@ -78,9 +81,10 @@ export { CircuitOpenError, SeamBodyReadError };
 // ---------------------------------------------------------------------------
 // Breaker tuning constants
 //
-// Exported as named constants with rationale comments (the `ratelimit.ts:94-214`
-// convention) so retuning is a one-line change reviewable in isolation, rather
-// than a magic number buried in a function body.
+// Exported as named constants with rationale comments (the convention
+// `ratelimit.ts` uses for its `makeLimiter` exports) so retuning is a one-line
+// change reviewable in isolation, rather than a magic number buried in a
+// function body.
 // ---------------------------------------------------------------------------
 
 /**
@@ -142,6 +146,66 @@ export function breakerKeyFor(dependency: SeamServiceDependency): string {
  * circuit trips. 5 is low enough to react inside a single user's retry
  * patience and high enough that one unlucky request, or a single pod restart
  * mid-deploy, does not take the seam down.
+ *
+ * ⚠️ THE UNIT IS AN ATTEMPT, NOT A REQUEST, AND THIS DOCBLOCK USED TO REASON AS
+ * IF THEY WERE THE SAME THING. The sentence above predates the retry loop: it
+ * argued only from the under-trip direction, and it was written when one
+ * `resilientFetch` call could contribute at most ONE failure. Phase 141's
+ * per-attempt latch (see `recordOnce` and the Class D note at its reset) changed
+ * that deliberately — a retried attempt is a distinct request as far as the
+ * breaker is concerned, so a doubly-failing retried call now records TWO.
+ *
+ * THE ARITHMETIC, stated so this is a number rather than a wish:
+ *
+ *   | traffic shape                        | failures per user request | requests to trip |
+ *   |--------------------------------------|---------------------------|------------------|
+ *   | no retry (every row before 141)      | 1                         | 5                |
+ *   | retried, both attempts failing       | 2                         | ⌈5/2⌉ = 3        |
+ *
+ * ⚠️ "**3 user requests instead of 5**" WAS STATED HERE UNCONDITIONALLY, and it
+ * is no longer unconditional. It is kept, named, and qualified rather than
+ * quietly deleted, because it is still the right summary for the traffic shape
+ * it describes — and because two 141.2 decisions narrowed that shape from both
+ * ends:
+ *
+ *   · D-06 narrowed the FAILURE class. The second row above presupposes a
+ *     second attempt happened at all. A 503 that names a POSITIVE wait now
+ *     fails fast (`hasContractualWait` parses the header via
+ *     `parseRetryAfterSeconds` instead of testing its presence), so it records
+ *     ONE failure and trips at the ordinary five. Every SERVICE-TRANSIENT 503
+ *     the analytics service emits carries such a header by contract — so for
+ *     that status class, which is the mandatory one, the top row applies.
+ *     Two-per-request is the transport/timeout class: throws, deadlines and
+ *     header-less edge 5xx.
+ *   · D-01 and D-03 narrowed the CALLER set. A retry-enabled budget row no
+ *     longer implies a retried call: the `/process-key` verdict is taken from
+ *     `retriesForFlow` in `seam-retry-registry.ts`, which grants a retry only
+ *     to `onboard`, and only when the call carries a usable idempotency key.
+ *
+ * So: sustained degradation trips in three user requests where a call actually
+ * retries AND its failures carry no contractual wait, and in five otherwise.
+ * The trip is also WIDE: `breakerKeysFor`
+ * appends the global `BREAKER_KEY` to every call site's check, so an open global
+ * circuit gates all fifteen routes — including the anonymous public teaser
+ * (the exposure recorded and accepted at the `process-key-sync` row).
+ *
+ * ACCEPTED, decided 2026-07-31 (Phase 141.1 / D-02), and the direction is the
+ * point: a Railway blip that reaches five COUNTED failures inside 30 s is a real
+ * outage, not noise, and containing it two requests sooner is the behaviour we
+ * want from a breaker. Faster containment is bought with a fail-open breaker
+ * whose cooldown is 30 s, so the cost of an early trip is bounded and the cost
+ * of a late one is not.
+ *
+ * Raising this number is therefore TWO decisions, not one: it delays protection
+ * during a real outage AND it delays it further still for retried traffic, by a
+ * factor this docblock's table makes explicit. The two halves are pinned in two
+ * different places, on purpose: `seam-constants.pin.test.ts` pins the LITERAL,
+ * and the per-attempt-latch case in `resilient-fetch.retry.test.ts` pins the
+ * per-attempt BEHAVIOUR the table's second row rests on, by driving the real
+ * loop and counting the recordings. This docblock used to claim the pin file
+ * held both — it held the literal and an arithmetic restatement of it, which
+ * 141.2 / D-05 deleted for being unable to fail (finding 13). Neither half can
+ * move in silence now; before, only the literal could not.
  */
 export const BREAKER_FAILURE_THRESHOLD = 5;
 
@@ -201,13 +265,62 @@ export const BREAKER_COOLDOWN_S = 30;
  * decorative: the encoded expiry could never be in the past while the key still
  * existed.
  *
- * 60 s, because the guard must span the longest budget in `SEAM_BUDGETS`
- * (`process-key-sync`, 60 000 ms) measured from the instant a lock is armed:
- * `BREAKER_COOLDOWN_S + BREAKER_LOCK_TOMBSTONE_S = 90 s ≥ 60 s`, with the
- * cooldown itself absorbing the first 30. Pinned in
- * `seam-constants.pin.test.ts`, both as a literal and as that inequality.
+ * ⚠️ THE QUANTITY THIS MUST SPAN IS A REQUEST'S ADMISSION→RECORD LIFETIME, NOT
+ * ITS `timeoutMs` (153.4 review, WR-01). The A-25 predicate is evaluated inside
+ * `recordSeamFailure`, against a key read from the store at RECORDING time — so
+ * the tombstone has to still be readable then, and "then" is later than the
+ * fetch deadline by every store round trip the record path spends first. Sizing
+ * this against `timeoutMs` alone left the key dying ≈9 s BEFORE the read that
+ * needs it, i.e. A-25 violated at exactly the row it was sized against.
+ *
+ * 100 s, from the worst case admission→record, all four terms named:
+ *
+ *   REQUEST LIFETIME  120 000 ms — the longest lifetime in `SEAM_BUDGETS`,
+ *                     `(1 + retries) × timeoutMs` plus the worst-case retry
+ *                     interval where `retries > 0`. Today that maximum is
+ *                     `validate-key-serialized` at `1 × 120 000` (retries: 0);
+ *                     a RETRIED row is charged its whole leg, so a future row
+ *                     with retries cannot under-count here.
+ *   LIMITER            5 000 ms — `breakerLimiter.limit()` runs BEFORE the trip
+ *                     read. `@upstash/ratelimit`'s `timeout` defaults to 5 000
+ *                     and this module does not override it (see the A-09 note in
+ *                     `recordSeamFailure`, which depends on that default); past
+ *                     it the limiter answers `reason: "timeout"` and we return
+ *                     without reading at all, so 5 000 is a real ceiling.
+ *   TRIP READ          4 250 ms — one bounded store command:
+ *                     `(1 + BREAKER_STORE_RETRIES) × BREAKER_STORE_TIMEOUT_MS +
+ *                     BREAKER_STORE_RETRIES × BREAKER_STORE_BACKOFF_MS`. The
+ *                     same 4 250 SC-4b charges per store command.
+ *   COOLDOWN          −30 000 ms — the key's TTL is `BREAKER_COOLDOWN_S +
+ *                     BREAKER_LOCK_TOMBSTONE_S`, so the cooldown absorbs the
+ *                     first 30 s of that span.
+ *
+ * `(120 000 + 5 000 + 4 250 − 30 000) / 1000 = 99.25 s`, rounded UP to 100. The
+ * ceiling is therefore `(30 + 100) × 1000 = 130 000 ≥ 129 250`, with 750 ms of
+ * deliberate slack and no more.
+ *
+ * ⚠️ THE SLACK IS 750 ms, NOT A BUFFER. This constant was 60 while the longest
+ * budget was 60 000 ms; Phase 153.4 / D-26 raised the serialized validate budget
+ * to 120 000 ms and this constant to 90 in the same commit, and the 153.4 review
+ * then found that 90 covered the BUDGET but not the LIFETIME. Any further budget
+ * raise — or any raise of the store bounds above — must move this constant again
+ * in its own same commit; 750 ms absorbs nothing real.
+ *
+ * ⚠️ AND IT WIDENS `MAX_BREAKER_LOCK_SPAN_MS` WITH IT (153.4 review, IN-04).
+ * That bound is derived from this constant, so a corrupt or mis-written lock
+ * value can now hold every seam route open for 130 s rather than 120 s, and the
+ * clock-skew tolerance recorded in the 141.2 review loosens by the same 10 s.
+ * Both are accepted consequences of the coupling, stated here rather than
+ * discovered later.
+ *
+ * Pinned in `seam-constants.pin.test.ts` three ways, and the third is the one
+ * that can see this coupling break: a literal pin on this constant, the
+ * literal-vs-literal A-25 inequality, and the DERIVED A-25 assertion that takes
+ * `Math.max` over the live `SEAM_BUDGETS` and compares it to a ceiling built
+ * from hand-typed breaker literals. The first two catch the constants moving;
+ * only the third catches a budget outgrowing them.
  */
-export const BREAKER_LOCK_TOMBSTONE_S = 60;
+export const BREAKER_LOCK_TOMBSTONE_S = 100;
 
 /**
  * Fallback `Retry-After` for a caller that has an open circuit but no hint.
@@ -306,12 +419,51 @@ export const BREAKER_STORE_RETRIES = 1;
 export const BREAKER_STORE_BACKOFF_MS = 250;
 
 // ---------------------------------------------------------------------------
+// SEAM-06 — the retry loop's backoff (Phase 141)
+//
+// Declared beside the breaker-store constants because they are the same KIND of
+// value — a term in the SC-4b worst case, declared rather than defaulted so the
+// headroom arithmetic can read it. The retry loop lives in `resilientFetch`; the
+// wait BETWEEN a failed attempt and its one retry is `SEAM_RETRY_BACKOFF_MS +
+// Math.random() × SEAM_RETRY_JITTER_MAX_MS`.
+// ---------------------------------------------------------------------------
+
+/**
+ * Fixed pause before the single retry.
+ *
+ * FIXED, not exponential, and that is not a contradiction of SEAM-06's
+ * "exponential + jitter" wording: with EXACTLY ONE retry there is a single
+ * interval, and a single interval has no growth to be exponential ABOUT — the
+ * first (and only) exponential term `base × 2⁰` is just `base`. So "fixed +
+ * jitter" and "exponential + jitter" coincide here, and the fixed form is the
+ * one the SC-4b headroom arithmetic can state as one number (the lesson
+ * `BREAKER_STORE_BACKOFF_MS` above records verbatim). If a future policy widens
+ * to N>1 retries this becomes the exponential base and plan 04's invariant
+ * updates with it.
+ */
+export const SEAM_RETRY_BACKOFF_MS = 250;
+
+/**
+ * Upper bound on the random jitter added to `SEAM_RETRY_BACKOFF_MS`.
+ *
+ * Jitter DECORRELATES the retries of concurrent callers that all failed on the
+ * same Railway blip — without it, N lambdas retry in lock-step and re-create the
+ * synchronised storm the breaker exists to damp (T-141-04). The jitter is
+ * `Math.random() × this`, i.e. unbounded-BELOW-only: it can only ADD to the
+ * backoff, never subtract, so the worst-case interval is `SEAM_RETRY_BACKOFF_MS
+ * + SEAM_RETRY_JITTER_MAX_MS` = 500ms. SC-4b (plan 04) must charge that MAX, not
+ * the mean, because the headroom assertion has to hold for the slowest draw.
+ */
+export const SEAM_RETRY_JITTER_MAX_MS = 250;
+
+// ---------------------------------------------------------------------------
 // SEAM-02 — the ONE timeout budget table
 // ---------------------------------------------------------------------------
 
 /** Identifier for a seam call site. One key per distinct budget owner. */
 export type SeamBudgetKey =
   | "validate-key"
+  | "validate-key-serialized"
   | "encrypt-key"
   | "bridge"
   | "simulator"
@@ -323,7 +475,9 @@ export type SeamBudgetKey =
   | "process-key-enqueue"
   | "process-key-sync"
   | "keys-permissions"
-  | "process-key-unified-dormant";
+  | "keys-rotate-secret"
+  | "process-key-unified-dormant"
+  | "benchmark-refresh";
 
 /**
  * Per-call-site wall-clock budgets.
@@ -347,24 +501,79 @@ export type SeamBudgetKey =
  *     one dependency's trip still suppresses everything. Ledger row M35 is that
  *     mutation, and the isolation case is its falsifier.
  *
- * ⚠️ EVERY ENTRY IS EVIDENCE, NOT INTUITION. Derived 2026-07-27 by enumerating
- * every `dependency=` argument in `analytics-service/routers/**` together with
- * the status it is raised at. Only a `503` counts, so only a `503` can ever open
- * a per-dependency key, and the whole reachable set today is:
+ * ⚠️ EVERY ENTRY IS EVIDENCE, NOT INTUITION. Derived by enumerating every
+ * `dependency=` argument in `analytics-service/routers/**` together with the
+ * status it is raised at. FIFTEEN such arguments exist and all fifteen are
+ * accounted for below — that completeness is the property worth having, because
+ * a MISSING row silently under-declares a real breaker key, which is a worse
+ * failure than a wrong coordinate. Re-derived at HEAD on 2026-07-30 (140.5-07).
  *
- *   | dependency  | status | site                                      | reached by            |
- *   |-------------|--------|-------------------------------------------|-----------------------|
- *   | mt5-gateway | 503    | `exchange.py:314,324` `_validate_mt5_key`  | POST /api/validate-key |
- *   | supabase    | 503    | `portfolio.py:684` `_compute_portfolio_analytics` | /api/portfolio-analytics |
- *   | supabase    | 503    | `match.py:1657,1691` `recompute`          | /api/match/recompute  |
+ * ── ⭐ RE-CUT 2026-08-14 (153.7-03 / WIZFORM-02-CLASS) ──────────────────────
  *
- * Every other `dependency=` site is a `500` (never counts — `internal.py:303,319`
- * and `exchange.py:626` name `kek`, `exchange.py:132` names `egress-proxy`,
- * `exchange.py:276,287` name `mt5-gateway`) or a `424` naming a VENUE
- * (`internal.py:498`, `exchange.py:547`). `breaker:kek` and
- * `breaker:egress-proxy` therefore cannot be opened by ANY site at HEAD, so
- * declaring them anywhere would declare a key that can never be set — noise that
- * reads as protection.
+ * THIRTEEN → FIFTEEN, and the two arrivals are `MT5_GATEWAY_UNCONFIGURED`
+ * emitters this table had recorded as `(×2)` when a Python `ast` census of the
+ * same population reports FOUR. ⛔ NOT A NEW BREAKER KEY AND NOT AN
+ * UNDER-DECLARATION FOUND LATE: both are `500`s, so both were already inert by
+ * the R-1 rule stated below, and `mt5-gateway` was already declared for the
+ * counting `503` row. The COUNTING set is unchanged — re-measured this session,
+ * the only `503` `dependency=` sites in `routers/**` are the two
+ * `MT5_GATEWAY_UNREACHABLE` raises plus `supabase` in `recompute` (×2) and
+ * `_compute_portfolio_analytics` (×1), exactly the three rows below.
+ *
+ * ⚠️ AND THE ENCLOSING SYMBOLS WERE WRONG, which is the more interesting half
+ * because it is the failure mode this docblock's own next paragraph warns
+ * about, one abstraction up. `_validate_mt5_key` STILL EXISTS in `exchange.py`
+ * — so nothing was dangling and no grep would have caught it — but it encloses
+ * NONE of the six gateway emitters. A reader following either row landed in a
+ * real function and found nothing, with no signal that the anchor had rotted.
+ * Measured enclosures at HEAD: `MT5_GATEWAY_UNREACHABLE` → `_connect_and_probe`
+ * (×2); `MT5_GATEWAY_UNCONFIGURED` → `_validate_mt5_key_probe` (×3) +
+ * `_connect_and_probe` (×1). A symbol anchor survives line drift; it does not
+ * survive a refactor that splits the function it names, and this is what that
+ * looks like.
+ *
+ * ⚠️ ROWS ARE ANCHORED TO SYMBOLS — FUNCTION AND MACHINE CODE — NOT TO LINE
+ * NUMBERS, and that is a correction, not a style preference. The previous
+ * version of this table cited `exchange.py` coordinates that were ALL FOUR
+ * WRONG, every one of them low by 21 lines, while the five `internal.py` /
+ * `portfolio.py` / `match.py` coordinates beside them were still exact. A reader
+ * checking one of the correct rows would have concluded the table was
+ * trustworthy. Machine codes are unique, greppable, and are themselves the
+ * contract vocabulary `error_contract.py` validates, so they cannot drift with
+ * an unrelated edit above them the way a line number does.
+ *
+ * Only a `503` counts, so only a `503` can ever open a per-dependency key, and
+ * the whole COUNTING set today is:
+ *
+ *   | dependency  | site                                                  | reached by               |
+ *   |-------------|-------------------------------------------------------|--------------------------|
+ *   | mt5-gateway | `exchange.py` `_connect_and_probe` — `MT5_GATEWAY_UNREACHABLE` (×2: connect timeout, connect failure) | POST /api/validate-key |
+ *   | supabase    | `portfolio.py` `_compute_portfolio_analytics` — `ANALYTICS_ROW_NOT_CREATED` | /api/portfolio-analytics |
+ *   | supabase    | `match.py` `recompute` — `ADMIN_CHECK_UNAVAILABLE`, `ROLE_CHECK_UNAVAILABLE` | /api/match/recompute     |
+ *
+ * Every other `dependency=` site is breaker-inert, and each is inert for a
+ * REASON rather than by accident:
+ *   · `500`, never counts (SERVICE-PERMANENT, R-1 — an operator must act, so
+ *     counting it guarantees a self-sustaining outage):
+ *       `kek`         — `internal.py` `get_key_permissions` — `KEK_UNAVAILABLE`,
+ *                       `KEY_UNDECRYPTABLE`; `exchange.py` `encrypt_key` —
+ *                       `KEK_UNAVAILABLE`
+ *       `egress-proxy`— `exchange.py` `_validate_sfox_key` —
+ *                       `EGRESS_PROXY_MISCONFIGURED`
+ *       `mt5-gateway` — `exchange.py` `_validate_mt5_key_probe` (×3: absent
+ *                       host/port, malformed port, and the D-31 `undetermined`
+ *                       arm) + `_connect_and_probe` (×1) —
+ *                       `MT5_GATEWAY_UNCONFIGURED`. ⚠️ `_connect_and_probe` is
+ *                       the SAME FUNCTION AND SAME DEPENDENCY as the counting
+ *                       row above; only the STATUS separates them.
+ *   · `424`, never counts, and the name is the CALLER'S VENUE rather than a
+ *     dependency of ours (§4 — it must never become a breaker key):
+ *       `internal.py` `get_key_permissions` — `EXCHANGE_PROBE_FAILED`;
+ *       `exchange.py` `validate_key` — `EXCHANGE_PROBE_FAILED`
+ *
+ * `breaker:kek` and `breaker:egress-proxy` therefore cannot be opened by ANY
+ * site at HEAD, so declaring them anywhere would declare a key that can never be
+ * set — noise that reads as protection.
  *
  * ⚠️ THE TIE-BREAK, STATED. A stale or wrong declaration silently UNDER-protects,
  * and that is the direction chosen deliberately: under-protection is FAIL-OPEN,
@@ -384,26 +593,64 @@ export const SEAM_BUDGETS: Record<
     timeoutMs: number;
     /** Service dependencies whose open breaker may block THIS call site. */
     dependencies: readonly SeamServiceDependency[];
-    /** Retries this call site performs. Phase 141 flips these, one row at a time. */
+    /**
+     * ACCOUNTING ONLY — this number does NOT turn retry on (D-08).
+     *
+     * It declares how many retries this call site is EXPECTED to perform, and
+     * exactly two readers consume it: SC-4b's headroom arithmetic in
+     * `seam-budgets.invariant.test.ts` (which must charge the retried leg's
+     * wall-clock and store round trips against the route's Vercel ceiling), and
+     * the `EXPECTED_RETRIES` literal pin in `seam-constants.pin.test.ts`.
+     *
+     * What actually gates a retry is `ResilientFetchInit.retriesOverride`, a
+     * REQUIRED `0 | 1` fed by `RETRY_SAFE_FLOW_TYPES` / `RETRY_SAFE_ANALYTICS`
+     * at the two client chokepoints. Editing this literal changes the BILL, not
+     * the behaviour; editing it without the matching registry entry is caught by
+     * the row↔registry agreement assertion in `seam-constants.pin.test.ts`.
+     */
     retries: number;
     notes: string;
   }
 > = {
   "validate-key": {
     timeoutMs: 30_000,
-    // exchange.py:314,324 raise service_error(503, dependency="mt5-gateway")
-    // from _validate_mt5_key, reached by POST /api/validate-key. The sFOX and
-    // ccxt arms of the same endpoint answer 500 (egress-proxy) or 424 (venue),
-    // neither of which counts, so neither is declared.
+    // `exchange.py`'s `_validate_mt5_key` raises MT5_GATEWAY_UNREACHABLE —
+    // service_error(503, dependency="mt5-gateway") — reached by POST
+    // /api/validate-key. The sFOX and ccxt arms of the same endpoint answer 500
+    // (EGRESS_PROXY_MISCONFIGURED, egress-proxy) or 424 (EXCHANGE_PROBE_FAILED,
+    // venue), neither of which counts, so neither is declared. ⚠️ The SAME
+    // function also raises MT5_GATEWAY_UNCONFIGURED at 500 on the same
+    // dependency; the status is the only thing separating them.
     dependencies: ["mt5-gateway"],
     retries: SEAM_RETRIES,
     notes:
       "Live exchange auth probe — genuinely slow and venue-variable (Deribit, Binance, OKX all differ). Was the analytics-client 30s default.",
   },
+  "validate-key-serialized": {
+    timeoutMs: 120_000,
+    // SAME endpoint, SAME dependency as the row above — POST /api/validate-key,
+    // whose `exchange.py` `_validate_mt5_key` raises MT5_GATEWAY_UNREACHABLE at
+    // service_error(503, dependency="mt5-gateway"). Declared here for the same
+    // reason and no other; the MT5_GATEWAY_UNCONFIGURED arm of that same
+    // function is a 500 and never counts, so the status is again the only thing
+    // separating them. ⚠️ Nothing new is declared: a longer budget does not earn
+    // a wider dependency set.
+    dependencies: ["mt5-gateway"],
+    // ⛔ NEVER a literal 1 here, and never an entry in RETRY_SAFE_ANALYTICS
+    // (its NO verdict is written in `seam-retry-registry.ts`). In the OPEN state
+    // CircuitOpenError is thrown BEFORE fetch, so a retry merely re-runs
+    // isBreakerOpen, charges a second store round and throws again — and a
+    // retried 120 000 ms leg would double the wall-clock SC-4b charges against
+    // this route's Vercel ceiling. D-07 is the standing prohibition.
+    retries: SEAM_RETRIES,
+    notes:
+      "The SERIALIZED-venue arm of the live exchange auth probe — spent by venues whose VENUE_CAPABILITIES.serialized is true (today: MT5), selected by budgetKeyFor(exchange) in analytics-client.ts. One terminal, one account at a time, so a caller's own probe waits behind whoever holds the lease. It must contain a server worst case of 105 s: a 20 s BOUNDED lease acquisition + a 75 s end-to-end probe deadline + a 10 s release that runs OUTSIDE that deadline (Phase 153.3), leaving 15 s of margin. 120 000 ms is PROVISIONAL (D-27): it is the founder's stated staleness tolerance, NOT a measurement — no uncensored successful MT5 validation exists anywhere, so no p50/p95 does either. Phase 153.3's per-stage stage/duration_ms instrumentation is what will produce one, and Phase 155 (MT5-VERIFY) owns tightening this number from that data. RECORDED, NOT MITIGATED (T-153.4-03): this arm holds a Vercel lambda four times longer than the default row, and the only bound is the per-tenant 100/hour limiter on /api/validate-key — the same accepted exposure the process-key-sync row's ME-04 note carries.",
+  },
   "encrypt-key": {
     timeoutMs: 30_000,
-    // exchange.py:626 is a 500 naming `kek` — SERVICE-PERMANENT, never counts,
-    // so `breaker:kek` cannot be open and declaring it would be decorative.
+    // `exchange.py`'s `encrypt_key` raises KEK_UNAVAILABLE at 500 naming `kek` —
+    // SERVICE-PERMANENT, never counts, so `breaker:kek` cannot be open and
+    // declaring it would be decorative.
     dependencies: [],
     retries: SEAM_RETRIES,
     notes:
@@ -412,28 +659,36 @@ export const SEAM_BUDGETS: Record<
   bridge: {
     timeoutMs: 15_000,
     dependencies: [],
-    retries: SEAM_RETRIES,
+    // Phase 141 / SEAM-06 — retry-safe. Registry entry: RETRY_SAFE_ANALYTICS.bridge
+    // (findReplacementCandidates — pure compute, no persisted write on the path).
+    retries: 1,
     notes:
-      "Weighted-covariance compute. Was hardcoded at analytics-client.ts:260.",
+      "Weighted-covariance compute. Was hardcoded inside analytics-client's findReplacementCandidates.",
   },
   simulator: {
     timeoutMs: 15_000,
     dependencies: [],
-    retries: SEAM_RETRIES,
+    // Phase 141 / SEAM-06 — retry-safe. Registry entry: RETRY_SAFE_ANALYTICS.simulator
+    // (simulateAddCandidate — pure compute, no persisted write on the path).
+    retries: 1,
     notes:
-      "Portfolio impact simulator compute. Was hardcoded at analytics-client.ts:285.",
+      "Portfolio impact simulator compute. Was hardcoded inside analytics-client's simulateAddCandidate.",
   },
   "portfolio-optimizer": {
     timeoutMs: 15_000,
     dependencies: [],
-    retries: SEAM_RETRIES,
+    // Phase 141 / SEAM-06 — retry-safe. Registry entry:
+    // RETRY_SAFE_ANALYTICS["portfolio-optimizer"] (runPortfolioOptimizer — pure compute).
+    retries: 1,
     notes:
       "Heavy compute. Was OPTIMIZER_TIMEOUT_MS declared inside the route rather than the client — the budget-ownership split this table exists to end.",
   },
   "optimize-weights": {
     timeoutMs: 30_000,
     dependencies: [],
-    retries: SEAM_RETRIES,
+    // Phase 141 / SEAM-06 — retry-safe. Registry entry:
+    // RETRY_SAFE_ANALYTICS["optimize-weights"] (optimizeScenarioWeights — pure compute).
+    retries: 1,
     notes: "Scenario composer optimizer. Was the analytics-client 30s default.",
   },
   "match-eval": {
@@ -446,14 +701,16 @@ export const SEAM_BUDGETS: Record<
   },
   "match-recompute": {
     timeoutMs: 30_000,
-    // match.py:1657,1691 raise service_error(503, dependency="supabase").
+    // `match.py`'s `recompute` raises ADMIN_CHECK_UNAVAILABLE and
+    // ROLE_CHECK_UNAVAILABLE — service_error(503, dependency="supabase").
     dependencies: ["supabase"],
     retries: SEAM_RETRIES,
     notes: "Admin match engine, heavy compute. Was the 30s default.",
   },
   "portfolio-analytics": {
     timeoutMs: 30_000,
-    // portfolio.py:684 raises service_error(503, dependency="supabase"). M-5,
+    // `portfolio.py`'s `_compute_portfolio_analytics` raises
+    // ANALYTICS_ROW_NOT_CREATED — service_error(503, dependency="supabase"). M-5,
     // recorded and NOT gated on: this budget's only TypeScript wrapper
     // (computePortfolioAnalytics) has ZERO callers, so the arm is LATENT rather
     // than live. It becomes live the moment anyone calls that wrapper, which is
@@ -461,12 +718,23 @@ export const SEAM_BUDGETS: Record<
     dependencies: ["supabase"],
     retries: SEAM_RETRIES,
     notes:
-      "ZERO CALLERS TODAY — computePortfolioAnalytics (analytics-client.ts:224) is unreachable (research §4.2). Kept rather than deleted: deleting is scope creep and it is a plausible future caller. Phase 141's idempotency audit records 'no callers' for it.",
+      "ZERO CALLERS TODAY — analytics-client's computePortfolioAnalytics is unreachable (research §4.2). Kept rather than deleted: deleting is scope creep and it is a plausible future caller. Phase 141's idempotency audit records 'no callers' for it.",
   },
   "process-key-enqueue": {
     timeoutMs: 15_000,
     dependencies: [],
-    retries: SEAM_RETRIES,
+    // Phase 141 / SEAM-06 — retry-safe at the ROW grain, and the row is NOT the
+    // retry gate for ANY seam: since D-08 the gate is the required
+    // `retriesOverride`, fed by RETRY_SAFE_FLOW_TYPES / RETRY_SAFE_ANALYTICS at
+    // the two client chokepoints, and `resilientFetch` no longer reads this
+    // literal at all. What it IS: the accounting statement SC-4b's headroom
+    // arithmetic reads (an honest row — this budget really does perform two
+    // attempts in production, and the route's lambda ceiling must be charged for
+    // both). ⚠️ The row is at the WRONG GRAIN to be a gate here even in
+    // principle: it serves BOTH onboard AND resync (budgetKeyFor is
+    // many-to-one), while the audit that authorises the retry is per flow_type.
+    // Teaser/csv live on process-key-sync (retries: 0) for the same reason.
+    retries: 1,
     notes:
       "flow_type in {resync, onboard}: the server merely enqueues onto the worker dyno and returns 202 (verified in analytics-service/routers/process_key.py:_is_long_fetch). An enqueue that takes 15s means Railway is sick. Tightened from the blanket 60s; nothing observes these two budgets (research §6.4).",
   },
@@ -499,8 +767,9 @@ export const SEAM_BUDGETS: Record<
     // `analytics-service/services/error_contract.py`, whose `_validate` REFUSES
     // an unknown dependency. Adding one is a cross-language change, and this
     // phase's fence is zero Python. It is also not a one-line re-key: this row
-    // is MIXED — the authenticated `csv-validate` / `csv-finalize` paths spend
-    // it too — so containment needs keying by CALLER, not by budget row, which
+    // is MIXED — the authenticated `csv-validate` path spends it too (and
+    // `csv-finalize` did until Phase 145 moved finalize off the seam) — so
+    // containment needs keying by CALLER, not by budget row, which
     // is a change to SEAMCORE-01's keying model. Recorded for Phase 141.
     dependencies: [],
     retries: SEAM_RETRIES,
@@ -509,19 +778,87 @@ export const SEAM_BUDGETS: Record<
   },
   "keys-permissions": {
     timeoutMs: 15_000,
-    // internal.py:303,319 are 500s naming `kek`; internal.py:498 is a 424
+    // `internal.py`'s `get_key_permissions` raises KEK_UNAVAILABLE and
+    // KEY_UNDECRYPTABLE as 500s naming `kek`, and EXCHANGE_PROBE_FAILED as a 424
     // naming a VENUE. No counting 503 exists on this endpoint.
     dependencies: [],
     retries: SEAM_RETRIES,
     notes:
       "The third Railway seam (/internal/keys/{id}/permissions). Replaces two duplicated AbortSignal.timeout(15_000) constants in keys/[id]/permissions/route.ts and finalize-wizard's fetchLivePermissions.",
   },
+  "keys-rotate-secret": {
+    timeoutMs: 120_000,
+    // Phase 164.5.3 / D-04 — the credential-rotation seam
+    // (PATCH /api/keys/[id]/rotate-secret). Shares validate-key-serialized's
+    // exact budget, dependency and retry values because it calls the IDENTICAL
+    // `_validate_mt5_key` probe behind the IDENTICAL MT5 terminal lease: same
+    // 120s serialized-lease worst case, same `mt5-gateway` dependency (the
+    // probe's own MT5_GATEWAY_UNREACHABLE 503), same non-idempotent-live-probe
+    // no-retry reasoning (D-07's standing prohibition applies here verbatim —
+    // a retry would double the wall-clock SC-4b charge against this route's
+    // Vercel ceiling for the identical reason).
+    dependencies: ["mt5-gateway"],
+    retries: SEAM_RETRIES,
+    notes:
+      "D-04's credential-rotation seam — decrypts the stored MT5 credential, re-validates the NEW password against the live broker, re-encrypts on success. Shares validate-key-serialized's budget/dependency/retry values verbatim; see the row comment above for why.",
+  },
   "process-key-unified-dormant": {
     timeoutMs: 60_000,
     dependencies: [],
     retries: SEAM_RETRIES,
     notes:
-      "The DEAD _unifiedValidateAndEncryptHandler fetch at keys/validate-and-encrypt/route.ts:158, which today has NO timeout at all. Routed through the core so any revival inherits a budget and a breaker rather than re-introducing an unbounded hang.",
+      "The DEAD fetch inside keys/validate-and-encrypt's _unifiedValidateAndEncryptHandler, which today has NO timeout at all. Routed through the core so any revival inherits a budget and a breaker rather than re-introducing an unbounded hang.",
+  },
+  "benchmark-refresh": {
+    timeoutMs: 100_000,
+    // Phase 169.2 / plan 02 (D-08, W2) — the daily BTC benchmark refresh
+    // (POST /api/benchmark-refresh, reached only from the cron route
+    // src/app/api/cron/refresh-benchmark/route.ts).
+    //
+    // 100 000 ms, SIZED FROM THE SERVICE'S OWN WORST CASE (review fix WR-02;
+    // this row was 60 000 ms, copied from `process-key-sync`, and that was
+    // shorter than the fetcher it waits on). On a cache miss
+    // `services/benchmark.py` `get_benchmark_returns` calls
+    // `fetch_btc_daily_prices(days + 1)`: `_fetch_from_binance` on an
+    // `httpx.AsyncClient(timeout=30)` issues 2 requests for 1001 days at
+    // `limit: 1000`, and on failure `_fetch_from_coingecko` issues 1 more on
+    // the same 30 s client. That is 90 s of per-request read bound, plus the
+    // cache read and the upsert through `db_execute`, which carry no timeout of
+    // their own; 10 s is left for those two. The service now bounds the whole
+    // refresh itself: `routers/cron.py` `benchmark_refresh` runs it under
+    // `asyncio.wait_for` with `_BENCHMARK_REFRESH_DEADLINE_S` (80 s, review
+    // round 2 IN-01), and `test_deadline_sits_below_the_typescript_seam_budget`
+    // pins that deadline at least 10 s under this row's `timeoutMs`.
+    //
+    // THE CEILING IT MUST FIT (SC-4b in `seam-budgets.invariant.test.ts`):
+    // 100 000 + the failing-state breaker-store worst case (3 commands x
+    // 4 250 ms = 12 750) = 112 750 ms, under the route's 120 s `maxDuration`
+    // with room for the uncharged `checkLimit` round before the seam call.
+    //
+    // `dependencies: []`, NARROWER than match-recompute's ["supabase"], and
+    // measured rather than copied: the endpoint (`cron.py` `benchmark_refresh`)
+    // answers exactly 500 on every failure and `services/benchmark.py` raises no
+    // `service_error` and no 503 anywhere, so no counting site exists for any
+    // dependency key. A 500 never records a breaker failure, which is the point
+    // of W2: a stale benchmark must not trip the breaker every analytics call
+    // reads. When in doubt, declare fewer (the tie-break above).
+    //
+    // ⚠️ W2 COVERS THE 500, NOT A DEADLINE. A deadline on this key is a
+    // transport failure and records on the global `BREAKER_KEY` like every
+    // seam's (the `seamBreakerVerdict(null)` arm in `resilientFetch`). With the
+    // budget above the fetcher's worst case, a deadline no longer means "a
+    // slow price source": it means the service did not answer inside its own
+    // maximum, which IS the Railway degradation the breaker exists to count.
+    // One call a day adds at most one failure against a threshold of
+    // `BREAKER_FAILURE_THRESHOLD` (5) inside `BREAKER_WINDOW`, so this seam
+    // cannot trip the breaker on its own.
+    dependencies: [],
+    // 0, by design: a failed daily refresh answers non-2xx so Vercel Cron
+    // alarms, and tomorrow's scheduled run is the retry. Its NO verdict is in
+    // RETRY_AUDIT_NO_ANALYTICS in `seam-retry-registry.ts`.
+    retries: SEAM_RETRIES,
+    notes:
+      "Daily BTC benchmark refresh (Phase 169.2, D-08). One call per cron tick; the service reads the benchmark_prices cache and refetches from the upstream only on a miss. Budget sized from the fetcher's worst case (3 upstream requests x 30 s + DB). A service failure is a 500 (never 503) and never records a breaker failure; a deadline records one on the global key, like every seam's transport failure.",
   },
 };
 
@@ -571,10 +908,41 @@ export const SEAM_ROUTE_BUDGETS: Record<
     budgets: Array<{ key: SeamBudgetKey; calls: number; branch?: string }>;
   }
 > = {
+  // ---------------------------------------------------------------------
+  // TWO EXCLUSIVE VENUE BRANCHES on the three routes that validate a key,
+  // and none of the three rows may be read as their sum.
+  //
+  //   default-venue    (`venueIsSerialized(exchange)` false — binance, okx,
+  //                    bybit, deribit, sfox, and every unknown / empty /
+  //                    absent venue string): the request spends
+  //                    `validate-key` at 30 000 ms, exactly as it did before
+  //                    plan 153.4-02.
+  //   serialized-venue (`venueIsSerialized(exchange)` true — mt5 today):
+  //                    the request spends `validate-key-serialized` at
+  //                    120 000 ms, because the venue's probe queues behind
+  //                    one shared terminal lease and its honest verdict must
+  //                    fit inside the client's deadline (WIZFORM-05 / D-04).
+  //
+  // WHY THEY ARE MUTUALLY EXCLUSIVE. One request carries exactly ONE
+  // `exchange`, and `budgetKeyFor(exchange)` in `analytics-client.ts` returns
+  // exactly one budget key for it. A row that summed both arms would charge a
+  // request for 150 000 ms of validation on a path no request takes.
+  //
+  // LABELLED BY CAPABILITY, NOT BY VENUE FAMILY. `"ccxt"` would be wrong
+  // twice over — sFOX is not ccxt, and a second serialized venue would have
+  // no home. These two labels mirror `VENUE_CAPABILITIES.serialized`, the one
+  // fact the selector reads.
+  //
+  // THE SHARED LEGS ARE DELIBERATELY UNLABELLED. `encrypt-key` (and, on
+  // validate-and-encrypt, the dormant `process-key-unified-dormant` leg) is
+  // spent whichever venue arm was taken, so it carries no `branch` and is
+  // charged to BOTH branches — which is what no label means here.
+  // ---------------------------------------------------------------------
   "src/app/api/keys/validate-and-encrypt/route.ts": {
     expectedMaxDurationS: 300,
     budgets: [
-      { key: "validate-key", calls: 1 },
+      { key: "validate-key", calls: 1, branch: "default-venue" },
+      { key: "validate-key-serialized", calls: 1, branch: "serialized-venue" },
       { key: "encrypt-key", calls: 1 },
       { key: "process-key-unified-dormant", calls: 1 },
     ],
@@ -582,14 +950,16 @@ export const SEAM_ROUTE_BUDGETS: Record<
   "src/app/api/strategies/create-with-key/route.ts": {
     expectedMaxDurationS: 300,
     budgets: [
-      { key: "validate-key", calls: 1 },
+      { key: "validate-key", calls: 1, branch: "default-venue" },
+      { key: "validate-key-serialized", calls: 1, branch: "serialized-venue" },
       { key: "encrypt-key", calls: 1 },
     ],
   },
   "src/app/api/strategies/composite/add-key/route.ts": {
     expectedMaxDurationS: 300,
     budgets: [
-      { key: "validate-key", calls: 1 },
+      { key: "validate-key", calls: 1, branch: "default-venue" },
+      { key: "validate-key-serialized", calls: 1, branch: "serialized-venue" },
       { key: "encrypt-key", calls: 1 },
     ],
   },
@@ -652,13 +1022,27 @@ export const SEAM_ROUTE_BUDGETS: Record<
     expectedMaxDurationS: 300,
     budgets: [{ key: "process-key-sync", calls: 1 }],
   },
-  "src/app/api/strategies/csv-finalize/route.ts": {
-    expectedMaxDurationS: 300,
-    budgets: [{ key: "process-key-sync", calls: 1 }],
-  },
+  // Phase 145 (D-06 i-b): strategies/csv-finalize LEFT this table — the route
+  // no longer imports the seam (it calls the folded
+  // finalize_csv_strategy_with_returns RPC directly on the SSR Supabase
+  // client, a PostgREST call outside this core's Railway scope). Deleted
+  // deliberately with its EXPECTED_ROUTE_BUDGETS twin, per the invariant
+  // test's STALE-row instruction.
   "src/app/api/keys/[id]/permissions/route.ts": {
     expectedMaxDurationS: 300,
     budgets: [{ key: "keys-permissions", calls: 1 }],
+  },
+  "src/app/api/keys/[id]/rotate-secret/route.ts": {
+    expectedMaxDurationS: 300,
+    budgets: [{ key: "keys-rotate-secret", calls: 1 }],
+  },
+  // Phase 169.2 / plan 02 (D-08, D-20) — the daily BTC benchmark refresh cron.
+  // 120 s, not 300: one 100 000 ms leg plus its failing-state breaker-store
+  // round (12 750 ms) is 112 750 ms, inside it, and a cron that hangs should be
+  // killed sooner than an interactive route.
+  "src/app/api/cron/refresh-benchmark/route.ts": {
+    expectedMaxDurationS: 120,
+    budgets: [{ key: "benchmark-refresh", calls: 1 }],
   },
 };
 
@@ -755,11 +1139,25 @@ if (!redis) {
  *
  * ⚠️ `ephemeralCache` IS DELIBERATELY LEFT AT ITS DEFAULT, and that default is a
  * LIVE in-memory `Map` — discovered by the real-Redis lane in plan 140.2-01 and
- * previously undocumented here. `@upstash/ratelimit@2.0.8` builds one whenever
- * the option is omitted (`dist/index.mjs:757-761`); on a DENIED `limit()` it
- * calls `ctx.cache.blockUntil(identifier, reset)` (`:1580-1585`) and every later
- * call for that identifier short-circuits IN MEMORY with `reason: "cacheBlock"`,
- * never reaching Redis until the bucket ends (`:1560-1569`).
+ * previously undocumented here.
+ *
+ * OUT-OF-REPO REFERENCE — the coordinates in the next sentence point INTO A
+ * DEPENDENCY, at a pinned version, and are deliberately NOT converted to symbol
+ * anchors (140.5-07; this is the one expected allowlist entry for 140.5-08's
+ * seam citation guard, which otherwise forbids the bare `file:line` form). The
+ * reasoning: `node_modules` is not ours to anchor into, the file is a BUILD
+ * ARTEFACT with no stable symbol names to cite, and the version pin is what
+ * makes the coordinates meaningful — they are reproducible for
+ * `@upstash/ratelimit@2.0.8` specifically and are expected to be wrong for any
+ * other version, which is the opposite of the in-repo rot this phase is
+ * correcting. If the pin moves, RE-READ the artefact; do not "fix" the numbers.
+ *
+ * `@upstash/ratelimit@2.0.8` builds one whenever the option is omitted
+ * (`dist/index.mjs:757-761`); on a DENIED `limit()` it calls
+ * `ctx.cache.blockUntil(identifier, reset)` (same file, lines 1580-1585) and
+ * every later call for that identifier short-circuits IN MEMORY with
+ * `reason: "cacheBlock"`, never reaching Redis until the bucket ends (same file,
+ * lines 1560-1569).
  *
  * Three reasons it stays (140.2-06 decision, recorded rather than inherited):
  *   1. The block is keyed by IDENTIFIER, and identifiers are now per-dependency.
@@ -840,6 +1238,21 @@ export function encodeBreakerLock(
 }
 
 /**
+ * The widest span a LEGITIMATE lock can encode: its own cooldown plus the
+ * tombstone the KEY outlives the lock by. A span longer than that describes no
+ * state this module can produce — see `decodeBreakerLock`.
+ *
+ * DERIVED from the two constants rather than hand-typed, deliberately. The bound
+ * means "as long as a lock can possibly be", not "130 000 ms", so retuning
+ * either constant has to move it. It cannot drift in silence in either
+ * direction: `seam-constants.pin.test.ts` pins both constants
+ * literal-against-literal, and the G2 case in `resilient-fetch.test.ts` pins this
+ * ceiling against its own hand-typed 130 000 from the outside.
+ */
+const MAX_BREAKER_LOCK_SPAN_MS =
+  (BREAKER_COOLDOWN_S + BREAKER_LOCK_TOMBSTONE_S) * 1_000;
+
+/**
  * Parse a stored breaker lock, or `null` if the value is not one.
  *
  * ⚠️ AN UNPARSEABLE VALUE IS `null`, AND `null` READS CLOSED. That is the
@@ -850,14 +1263,74 @@ export function encodeBreakerLock(
  * `"open"`, which new instances ignore. That is at most one cooldown of
  * under-protection at a deploy boundary, in the direction this module always
  * errs.
+ *
+ * ⚠️ PARSEABLE IS NOT THE SAME AS PLAUSIBLE — LO-02 / TS-39, discharged here.
+ * The shape above accepts any two digit strings, so `open:0:100000000000000000`
+ * used to decode to a lock ~1e17 ms in the future. `isBreakerOpen` derived
+ * `retryAfterS ≈ 1e14` from it, `CircuitOpenError`'s A-15 guard accepted that
+ * (`Number.isInteger` is true of it), and the value went ON THE WIRE as a
+ * `Retry-After` — including to the anonymous teaser. A REVERSED pair
+ * (`expiresAtMs < armedAtMs`) separately made `emitBreakerTransition`'s
+ * `cooldownS` negative. A-15 exists precisely to keep implausible values out of
+ * that header, and this decoder was the one remaining path that could mint one
+ * which PASSED it.
+ *
+ * The span bound is therefore part of the parse, not a caller's duty.
+ *
+ * ⚠️ TWO SENTENCES THAT USED TO STAND HERE WERE WRONG, AND BOTH ARE NAMED
+ * RATHER THAN QUIETLY DELETED (phase 141.2, findings 10 and 11 — the review of
+ * the very change that added the span bound).
+ *
+ *  1. "The rejection direction is `null` — i.e. CLOSED — so corruption still
+ *     fails forward, UNCHANGED." True of the read side; the opposite of true of
+ *     the write side, and the write side is where it mattered. `null` conflated
+ *     two different store states — "key absent" and "key present but
+ *     undecodable" — and `recordSeamFailure`'s trip path branched its WRITE
+ *     decision on that conflation, so a corrupt-but-present value was routed
+ *     into `SET NX`, which cannot overwrite an existing key. Nothing was
+ *     written, no transition was emitted, and the circuit could not open for
+ *     the rest of that key's TTL. What is true now: the READ side still fails
+ *     forward to CLOSED, unchanged; the WRITE side distinguishes RAW presence
+ *     from a failed decode, so a corrupt value is DISPLACED and the store
+ *     self-heals on the next recorded failure. See the trip path's own branch.
+ *
+ *  2. "PARSEABLE IS NOT THE SAME AS PLAUSIBLE … discharged here", of a bound
+ *     that was purely RELATIVE. A span bound cannot see an absurd PLACE on the
+ *     timeline: every lock this module writes has span exactly
+ *     `BREAKER_COOLDOWN_S` seconds, so ANY pair sharing that delta passed —
+ *     `open:100000000000000000:100000000000030000` decoded cleanly and still
+ *     minted the ~1e14 `Retry-After` the paragraph above claims it closed. The
+ *     absolute bound below is what discharges LO-02 / TS-39 for real.
+ *
+ * ⚠️ THE ABSOLUTE BOUND IS ONE-SIDED, DELIBERATELY. A lock in the FUTURE beyond
+ * its own maximum span describes no state this module can produce. A lock in the
+ * PAST is a TOMBSTONE, and `isBreakerOpen` depends on decoding tombstones to
+ * announce the close — locked decision 3 makes TTL expiry the half-open
+ * transition, so that read is the only moment "the circuit is usable again"
+ * becomes observable. A past-side bound would report CLOSED for the right reason
+ * by the wrong mechanism, and take the close event with it.
+ *
+ * `nowMs` is a PARAMETER with a `Date.now()` default rather than a bare call, so
+ * the bound stays deterministically testable without coupling every existing
+ * case to the wall clock or to a fake timer. Existing callers are unchanged.
  */
 export function decodeBreakerLock(
   value: unknown,
+  nowMs: number = Date.now(),
 ): { armedAtMs: number; expiresAtMs: number } | null {
   if (typeof value !== "string") return null;
   const parsed = /^open:(\d+):(\d+)$/.exec(value);
   if (!parsed) return null;
-  return { armedAtMs: Number(parsed[1]), expiresAtMs: Number(parsed[2]) };
+  const armedAtMs = Number(parsed[1]);
+  const expiresAtMs = Number(parsed[2]);
+  // `<= 0` covers the reversed pair AND the zero-length lock, which is already
+  // expired at the instant it was armed and so is not an open circuit either.
+  const spanMs = expiresAtMs - armedAtMs;
+  if (spanMs <= 0 || spanMs > MAX_BREAKER_LOCK_SPAN_MS) return null;
+  // ABSOLUTE plausibility, future side only — see the one-sidedness note above.
+  // A live lock cannot expire further out than its own widest legitimate span.
+  if (expiresAtMs > nowMs + MAX_BREAKER_LOCK_SPAN_MS) return null;
+  return { armedAtMs, expiresAtMs };
 }
 
 // ---------------------------------------------------------------------------
@@ -892,17 +1365,64 @@ interface SeamBreakerTransition {
 }
 
 /**
+ * Schedule a capture so it survives the response flush.
+ *
+ * ⚠️ COPIED FROM `audit.ts`'s `logAuditEvent` AND THE FALLBACK IS NOT OPTIONAL.
+ * `after()` is only valid inside a request scope; on a non-route path (cron,
+ * prerender) it throws SYNCHRONOUSLY, and this module is reachable from such a
+ * path. Dropping the `queueMicrotask` arm would turn an observability concern
+ * into a thrown scheduling error raised from inside a catch block — replacing
+ * the real upstream error with a bookkeeping one, which is the exact failure
+ * `recordSeamFailure`'s whole-body swallow exists to prevent (research
+ * assumption A6).
+ *
+ * The capture promise's rejection is swallowed at both arms: `captureToSentry`
+ * already resolves on every failure path, and letting anything escape `after()`
+ * becomes an unhandled rejection that changes nothing about the already-flushed
+ * response.
+ */
+function scheduleSeamCapture(capture: Promise<void>, event: string): void {
+  try {
+    after(() => capture.catch(() => {}));
+  } catch {
+    // Outside a request scope. Announce the fallback with the module's stable
+    // prefix so log aggregation can distinguish it from the `after()` path and
+    // quantify the non-route drop rate, exactly as `audit.ts` does.
+    console.warn(
+      "[resilient-fetch] scheduling capture via queueMicrotask fallback (non-request scope):",
+      { event },
+    );
+    queueMicrotask(() => {
+      void capture.catch(() => {});
+    });
+  }
+}
+
+/**
  * Emit one transition.
  *
- * A PLAIN STRUCTURED LOG, deliberately — it performs no I/O, so there is nothing
- * to await and TRAP-7 (a fire-and-forget promise orphaned by Fluid Compute
- * freeze) cannot apply. If this ever gains a network sink it must become an
- * awaited call at both sites, for exactly the reason the recording arms are
- * awaited inline.
+ * ⚠️ THIS DOCBLOCK USED TO SAY *"A PLAIN STRUCTURED LOG, deliberately — it
+ * performs no I/O, so there is nothing to await and TRAP-7 … cannot apply. If
+ * this ever gains a network sink it must become an awaited call at both sites."*
+ * It has now gained that network sink, so the condition the module set for
+ * itself is live: the capture is SCHEDULED with `after()` rather than fired and
+ * forgotten. A bare fire-and-forget promise is orphaned by the Fluid Compute
+ * freeze the moment the response flushes — during precisely the correlated
+ * incident the alert exists for (TRAP-7). `after()` hands it to `waitUntil`,
+ * which holds the instance alive until the capture settles; that only works
+ * because `captureToSentry` returns its import chain rather than detaching it
+ * (`audit.ts`'s NEW-C10-03, re-created in `sentry-capture.ts` and fixed in plan
+ * 140.4-06).
  *
- * `console.warn`, not `error`: a breaker transition is an operational fact, and
- * the OPEN half is a mitigation working. Routing it to `error` would make every
- * recovery look like a fault.
+ * ⚠️ THE CONSOLE LINE STAYS. It is the operator's LOCAL trace — `grep`-able in
+ * the Vercel function log without a Sentry round trip — and the capture is the
+ * remote one. Replacing either with the other is a regression, so both are
+ * asserted.
+ *
+ * `console.warn`, not `error`, AND `level: "warning"` on the capture for the
+ * same reason: a breaker transition is an operational fact, and the OPEN half is
+ * a mitigation working. Routing it to `error` would make every recovery look
+ * like a fault.
  */
 function emitBreakerTransition(
   kind: "open" | "close",
@@ -920,6 +1440,20 @@ function emitBreakerTransition(
     correlationId: `${breakerKey}@${lock.armedAtMs}`,
   };
   console.warn(`[resilient-fetch] seam.breaker.${kind}`, payload);
+  scheduleSeamCapture(
+    captureToSentry(new Error(`[resilient-fetch] seam.breaker.${kind}`), {
+      tags: {
+        surface: "seam-breaker",
+        transition: kind,
+        breakerKey,
+      },
+      // The SAME four fields, and that ceiling holds here too: a breaker key is
+      // a module-derived value from a frozen closed set, never caller input.
+      extra: { ...payload },
+      level: "warning",
+    }),
+    `seam.breaker.${kind}`,
+  );
 }
 
 /**
@@ -1032,6 +1566,30 @@ export async function isBreakerOpen(budgetKey: SeamBudgetKey): Promise<{
       "[resilient-fetch] breaker check failed — failing OPEN:",
       scrubSeamError(err),
     );
+    // SEAMRIM-04 — and the fail-OPEN posture below is UNCHANGED. A breaker that
+    // refuses traffic because of its own misconfiguration is strictly worse
+    // than having no breaker at all (SEAM-03); what was wrong is that this arm
+    // silently removed the protection with no remote record that it had.
+    // `err` goes to the chokepoint RAW deliberately: `captureToSentry` scrubs
+    // unconditionally (and rebuilds the Error so Sentry's grouping and stack
+    // survive), whereas pre-rendering it to a string here would hand Sentry a
+    // stackless message for no security gain.
+    // 140.4-16 / WR-06 — EDGE-TRIGGERED, same reasoning as `ratelimit.ts`'
+    // posture-2 arm: this fires on EVERY request whose breaker probe rejects,
+    // which during a store outage is every request. The console.error above is
+    // unconditional; only the remote capture is throttled. Keyed on the
+    // (surface, stage) pair rather than on `budgetKey`, deliberately — an
+    // outage that hits twelve budgets is ONE incident, and keying per budget
+    // would restore twelve times the storm.
+    if (shouldCaptureNow("seam-breaker:check")) {
+      scheduleSeamCapture(
+        captureToSentry(err, {
+          tags: { surface: "seam-breaker", stage: "check", budgetKey },
+          level: "error",
+        }),
+        "seam.breaker.check_failed",
+      );
+    }
     return { open: false };
   }
 }
@@ -1125,7 +1683,17 @@ export async function recordSeamFailure(
     // failure would change the deployed breaker's timing behaviour during
     // precisely the correlated incident it exists for.
     const now = Date.now();
-    const existing = decodeBreakerLock(await redis.get<string>(breakerKey));
+    // ⚠️ THE RAW VALUE IS KEPT, AND THAT IS THE WHOLE OF FINDING 10 (141.2).
+    // `decodeBreakerLock` answers `null` for TWO different store states — the
+    // key is ABSENT, and the key is PRESENT but undecodable — and only the first
+    // of them justifies the `nx` write below. Deciding the write from `existing`
+    // alone therefore sent a corrupt-but-present value into `SET NX`, which
+    // cannot overwrite an existing key: no lock stored, no transition emitted,
+    // and the circuit unable to open for the rest of that key's TTL across every
+    // seam route. The GUARDS below still read `existing` — they are questions
+    // about a lock, and a value that is not a lock cannot answer them.
+    const rawLock = await redis.get<string>(breakerKey);
+    const existing = decodeBreakerLock(rawLock);
     if (existing) {
       // Already open. Return without writing, so the FIRST writer's expiry
       // stands and a second instance tripping 200ms later cannot ratchet the
@@ -1154,7 +1722,10 @@ export async function recordSeamFailure(
     const value = encodeBreakerLock(now, expiresAtMs);
     const ttlS = BREAKER_COOLDOWN_S + BREAKER_LOCK_TOMBSTONE_S;
     let written: unknown;
-    if (existing === null) {
+    if (rawLock === null) {
+      // The key is GENUINELY ABSENT — the raw read, not the decode, is what says
+      // so (finding 10; see the note at the read above).
+      //
       // `nx: true` makes CONCURRENT trips idempotent — two instances tripping
       // milliseconds apart, neither of which saw the other's write.
       //
@@ -1166,12 +1737,21 @@ export async function recordSeamFailure(
       // RATCHET a live lock", which reddens under `nx: false`.
       written = await redis.set(breakerKey, value, { ex: ttlS, nx: true });
     } else {
-      // ── OVERWRITING A TOMBSTONE — THE BRANCH THAT ACTUALLY RACES (HI-01) ──
+      // ── OVERWRITING A PRESENT VALUE — THE BRANCH THAT ACTUALLY RACES (HI-01) ──
       //
-      // Reaching here means the previous lock has expired AND this failure is
-      // new evidence gathered after it was armed, so a fresh cooldown is right.
-      // `nx` cannot express that: the key still EXISTS as a tombstone, so `nx`
-      // would refuse every re-arm for the whole tombstone window.
+      // Reaching here means the key HOLDS something: an expired lock whose
+      // evidence this failure post-dates, or — since 141.2 / finding 10 — a
+      // value this module's decoder rejects. In the tombstone case a fresh
+      // cooldown is right because the previous lock has expired AND this failure
+      // is new evidence gathered after it was armed. In the CORRUPT case there
+      // is no lock at all, so there is nothing to preserve and displacing it is
+      // how the store self-heals: the value decodes to `null`, `written` is
+      // therefore true, and the transition that follows is truthful — this call
+      // DID arm the circuit.
+      //
+      // `nx` cannot express either: the key still EXISTS, so `nx` would refuse
+      // every re-arm for the whole tombstone window, and would refuse the
+      // corrupt key for its entire remaining TTL.
       //
       // This used to be a BLIND write returning a truthy `"OK"` unconditionally,
       // and that made it the one door the idempotency story above does not
@@ -1240,6 +1820,22 @@ export async function recordSeamFailure(
       "[resilient-fetch] failed to record seam failure — breaker state may be stale:",
       scrubSeamError(err),
     );
+    // SEAMRIM-04. The swallow is preserved — this runs inside the caller's
+    // catch arm, so a throw here would replace the real upstream error — but a
+    // breaker whose bookkeeping is failing is a breaker that will not trip when
+    // it should, and that was invisible beyond this one console line.
+    // 140.4-16 / WR-06 — EDGE-TRIGGERED. See the `check` arm above; this one
+    // runs inside the caller's catch, so during a correlated upstream incident
+    // it fires once per FAILED REQUEST.
+    if (shouldCaptureNow("seam-breaker:record")) {
+      scheduleSeamCapture(
+        captureToSentry(err, {
+          tags: { surface: "seam-breaker", stage: "record", breakerKey },
+          level: "error",
+        }),
+        "seam.breaker.record_failed",
+      );
+    }
   }
 }
 
@@ -1269,6 +1865,32 @@ export type ResilientFetchInit = Omit<RequestInit, "signal"> & {
    * SEAM-02 exists to end.
    */
   timeoutMsOverride?: number;
+  /**
+   * How many retries THIS call performs — SEAM-06's only retry input.
+   *
+   * ⚠️ REQUIRED, AND THE ONLY THING THAT TURNS RETRY ON. There is no fallback to
+   * `SEAM_BUDGETS[budgetKey].retries`: five rows carry `retries: 1`, but the row
+   * is an ACCOUNTING declaration (see the field's docblock on `SEAM_BUDGETS`),
+   * never a gate. Being required is the mechanism, not a style choice — while it
+   * was optional, a new call site could pick a budget key whose row happened to
+   * be `1` and inherit a retry with the retry-safety registry never consulted,
+   * and it typechecked (Phase 141.1 / D-08, bucket C1). Now absence does not
+   * compile: every call site states a verdict.
+   *
+   * Where the verdict comes from: `postProcessKey` reads `RETRY_SAFE_FLOW_TYPES`
+   * by `flow_type` (never by `budgetKey`, which is many-to-one and would retry
+   * the deliberately non-idempotent `teaser` — CONTEXT registry-keying note);
+   * the analytics seam reads `RETRY_SAFE_ANALYTICS` by its 1:1 `budgetKey`. A
+   * caller outside those two chokepoints passes `0` unless it can cite an audit
+   * entry.
+   *
+   * `0 | 1` is compile-time only, so the value is ALSO validated to the integer
+   * 0 or 1 ABOVE the classification window, exactly like `timeoutMsOverride`: a
+   * JS caller or an `as any` still needs the throw, a bad value is a caller
+   * fault and never Railway degradation, and one retry is the whole locked
+   * policy (CONTEXT — "exactly ONE retry").
+   */
+  retriesOverride: 0 | 1;
 };
 
 /**
@@ -1344,9 +1966,13 @@ function isDeadlineError(err: unknown): boolean {
 /**
  * Outgoing header NAMES whose VALUES are credentials, lower-cased for matching.
  *
- * Hand-typed, and every member is a header this seam actually sends:
+ * Hand-typed. Every member is a header this seam sends or HAS sent — see
+ * the x-user-access-token note below for why a retired one stays:
  *   authorization        `Bearer <INTERNAL_API_TOKEN>` on all three seam paths.
- *   x-user-access-token  a LIVE end-user Supabase JWT.
+ *   x-user-access-token  a LIVE end-user Supabase JWT. ⛔ RETAINED WITH NO
+ *                        CURRENT EMITTER as of Phase 146.1 / B2 (2026-08-18)
+ *                        — see `credentialHeaderValues` below for why
+ *                        removing an emitter-less name re-opens the class.
  *   x-tenant-claim       the signed HMAC claim that SELECTS the rate-limit bucket.
  *   x-service-key        `ANALYTICS_SERVICE_KEY` on the analytics client.
  *   x-internal-token     the same internal token under its other name.
@@ -1375,9 +2001,9 @@ const CREDENTIAL_HEADER_NAMES: readonly string[] = [
  * "every credential undici inlined into the message".
  *
  * That was a LIVE leak, not a latent one, and it predates this plan:
- * `strategies/csv-finalize` has forwarded that JWT through this exact core since
- * Phase 19.1. The client's own log site was covered by plan 140.2-08 (it passes
- * `args.userAccessToken` explicitly); THIS site was not, because its enumeration
+ * `strategies/csv-finalize` forwarded that JWT through this exact core from
+ * Phase 19.1 until Phase 145 moved finalize off the seam. The client's own log
+ * site was covered by plan 140.2-08; THIS site was not, because its enumeration
  * was of the CLIENT's sites. Found by execution, not by reading, when 140.3-02
  * drove a token-bearing transport error through the route — recorded in that
  * plan's SUMMARY as a correction to 140.2-08's count.
@@ -1391,8 +2017,38 @@ const CREDENTIAL_HEADER_NAMES: readonly string[] = [
  * TOTAL BY CONSTRUCTION: it feeds a catch block, so every branch returns and
  * nothing propagates. All three `HeadersInit` shapes are handled because the
  * core does not control how a caller spells its headers.
+ *
+ * ⚠️ WHAT THE SEAM CARRIES TODAY (Phase 146.1 / B2, 2026-08-18). NO caller sends
+ * `X-User-Access-Token` any more: `process-key-client`'s `userAccessToken`
+ * option and its conditional header spread are GONE, and so are its two
+ * emitters (`keys/sync`, `verify-strategy`). The only Python reader
+ * (`services/db.py get_user_scoped_supabase`) had zero production callers and a
+ * gate in `analytics-service/tests/test_process_key.py` (the
+ * `not hasattr(..., "get_user_scoped_supabase")` assertion) pins that non-use.
+ * The live
+ * credential headers are now `Authorization`, `X-Tenant-Claim`, `X-Service-Key`
+ * and `X-Internal-Token`.
+ *
+ * ⛔ `x-user-access-token` NEVERTHELESS STAYS IN `CREDENTIAL_HEADER_NAMES`, and
+ * pruning it as "unused" is the mistake this note exists to prevent. The scrub
+ * is DERIVED from the headers the core was actually asked to send, so an entry
+ * with no current emitter costs one array member and covers the next one
+ * automatically; removing it converts a class fix back into an instance fix
+ * that reds nothing on the day it matters.
+ *
+ * ⭐ EXPORTED as of Phase 146.1 / B2, and the reason is the argument above.
+ * `process-key-client`'s OWN transport log site used a caller-DECLARED array
+ * (`[args.userAccessToken]`), so it scrubbed the one credential someone
+ * remembered and shipped `X-Tenant-Claim` — the signed HMAC that SELECTS the
+ * rate-limit bucket — VERBATIM to the Vercel log on every seam transport
+ * failure. That is precisely the "a caller who forgets is silently back to
+ * leaking" failure this function was written to end, and it survived because
+ * the client had no way to REUSE the derivation. Now it does. ⛔ A new seam log
+ * site must call THIS, not hand-type a list.
  */
-function credentialHeaderValues(init: RequestInit | undefined): string[] {
+export function credentialHeaderValues(
+  init: RequestInit | undefined,
+): string[] {
   const values: string[] = [];
   try {
     const headers = init?.headers;
@@ -1503,8 +2159,14 @@ function instrumentBody(
       // aborts is ONE degraded request, not two. Before the shared latch a 503
       // with a stalling body recorded twice — half the failures needed to trip,
       // from the same number of requests.
+      //
+      // NO `&& bodyVerdict.breakerKey !== null` (140.5-07 / WP-13). `counts`
+      // narrows the verdict to its counting member, on which `breakerKey` is
+      // `string`, so that conjunct was dead — and its dead FALSE branch had no
+      // else, i.e. it silently dropped a countable failure. See
+      // `SeamBreakerVerdict`.
       const bodyVerdict = seamBreakerVerdict(null);
-      if (bodyVerdict.counts && bodyVerdict.breakerKey !== null) {
+      if (bodyVerdict.counts) {
         await recordOnce(bodyVerdict.breakerKey);
       }
       // THROWS, and must keep throwing. `keys/[id]/permissions` runs its seam
@@ -1579,6 +2241,128 @@ async function readDependencyBody(res: Response): Promise<unknown> {
 }
 
 /**
+ * Does this response carry the upstream's OWN contractual wait hint?
+ *
+ * Phase 141.1 / D-01. `error_contract.service_error` makes `Retry-After`
+ * MANDATORY on every SERVICE-TRANSIENT 503 it emits — its `_validate` refuses to
+ * raise one without it — drawn from a table of 15s (supabase) / 30s
+ * (mt5-gateway). A 503 that names a wait is the upstream saying "not yet", and
+ * the retry backoff is three orders of magnitude shorter than the shortest wait
+ * it advertises.
+ *
+ * WHY ONLY 503, mirroring `readDependencyBody`'s discipline exactly: 503 is the
+ * ONE status the contract obliges to carry the header. The other counting 5xx
+ * (502/504) come from the platform EDGE, outside that contract, so a header
+ * arriving on one of those is not our upstream telling us anything and must not
+ * gate the retry.
+ *
+ * ⚠️ CAPABILITY-CHECKED, for the same reason `readDependencyBody` checks
+ * `clone`: `SeamResponse` is deliberately structural so route tests can stub the
+ * core with a `Response`-shaped object, and several existing fixtures are bare
+ * `{ ok, status }` literals with no `headers` at all. A missing `headers.get`
+ * must degrade to "no hint", never throw — a throw here lands inside the
+ * classification window and would replace the real upstream error with a
+ * bookkeeping one. `parseRetryAfterSeconds` defends the same way, so the local
+ * check is the belt in front of its braces, not a duplicate of it: it also
+ * rejects a `get` that is present but not callable.
+ *
+ * ⚠️ THE VALUE IS PARSED (Phase 141.2 / D-06, finding 9). This used to read
+ * `headers.get("Retry-After") !== null` and its docblock said *"Only presence is
+ * tested, so a malformed or hostile value cannot influence timing or logs"*.
+ * That was unsound: presence asserts the EMITTER'S contract without verifying
+ * the responder is bound by it. A `Retry-After: 0` means "retry now" (RFC 9110
+ * §10.2.3), and an empty or garbage value names no wait at all — yet all three
+ * suppressed the retry and handed the caller attempt 1's 503, for exactly the
+ * transient blip the retry exists to absorb.
+ *
+ * The predicate now DELEGATES to `parseRetryAfterSeconds` (B20 — the ONE
+ * `Retry-After` parser in this repo, enforced by the `no-raw-retry-after-parse`
+ * contract). Its contract IS this gate's predicate: strictly positive seconds,
+ * or `null` for absent / empty / zero / negative / unparseable. It covers BOTH
+ * RFC 9110 forms — delta-seconds, and an HTTP-date resolved against the
+ * response's OWN `Date` header, so a skewed client clock cannot distort the
+ * delta (no `Date` header ⇒ not reliably knowable ⇒ `null`). A date-form wait is
+ * a contractual wait like any other and fails fast; there is no deliberate gap
+ * here to work around. Do not hand-roll a second parse of this header.
+ *
+ * THE SAFETY PROPERTY SURVIVES VERBATIM: the parsed seconds are DISCARDED at the
+ * `!== null`. No `Retry-After` value reaches a sleep, a log or a timer — only the
+ * boolean changed.
+ *
+ * Scope, honestly: `error_contract.service_error` raises on a non-positive
+ * `retry_after` and refuses to emit a 503 without the header, so the only
+ * contract-bound emitter we own CANNOT produce the values above. Whether the
+ * platform edge can is UNVERIFIED — no such response has been captured. This is
+ * a repair to a check that was unsound by construction, not a fix for an
+ * observed production trace.
+ */
+function hasContractualWait(res: Response): boolean {
+  if (res.status !== 503) return false;
+  if (typeof res.headers?.get !== "function") return false;
+  return parseRetryAfterSeconds(res.headers) !== null;
+}
+
+/**
+ * Release a response this loop is about to WALK AWAY FROM (Phase 163 / OPS-10).
+ *
+ * Called from exactly ONE site — the counting-status retry arm's `continue` —
+ * and that is not an accident of where it was convenient. It is the only exit in
+ * the loop that abandons a real `Response`:
+ *   · the transport arm's `continue` follows a THROWN `fetch`, so no response
+ *     exists to release;
+ *   · the breaker pre-checks `continue` BEFORE `fetch` fires;
+ *   · every other path either returns the response to the caller or throws.
+ * ⛔ Do not sprinkle this call anywhere else. A cancel on a response the caller
+ * still receives hands every seam client an empty stream — a far worse failure
+ * than the buffering this fixes. Both directions are pinned from the outside by
+ * the `[SEAM-06 / OPS-10]` block in `resilient-fetch.retry.test.ts`.
+ *
+ * WHY IT MATTERS: `readDependencyBody` peeks through `res.clone()` and only on
+ * 503, so on every counting status the ORIGINAL body is never consumed. undici
+ * keeps buffering it until that attempt's `AbortSignal.timeout` fires, which on
+ * this seam is up to the full per-attempt budget — held on a billed lambda while
+ * the retry is already in flight.
+ *
+ * ⚠️ CAPABILITY-CHECKED AT EVERY RUNG, for the same reason `readDependencyBody`
+ * checks `clone` and `hasContractualWait` checks `headers.get`: `SeamResponse` is
+ * deliberately structural, and several existing fixtures are bare
+ * `{ ok, status }` literals with no `body` at all. This site sits OUTSIDE the
+ * classification window's `catch`, so a throw here does not get reclassified —
+ * it escapes `resilientFetch` entirely and replaces the real upstream verdict
+ * with a bookkeeping error. Hence: absent body, non-object body, absent or
+ * non-callable `cancel`, a synchronous throw, and a rejected promise are ALL
+ * shrugs. A body we cannot release is not a failure of the request.
+ *
+ * ⚠️ `res.body?.cancel().catch(() => {})` was the shape the plan sketched and it
+ * is NOT sufficient: it covers the absent body but throws on a present body
+ * whose `cancel` is missing or not callable, and on a `cancel` that returns a
+ * non-promise. The ladder below is the belt in front of those braces.
+ */
+function cancelAbandonedBody(res: Response): void {
+  const body: unknown = res.body;
+  if (body === null || typeof body !== "object") return;
+  const cancel = (body as { cancel?: unknown }).cancel;
+  if (typeof cancel !== "function") return;
+  try {
+    const settled: unknown = (cancel as () => unknown).call(body);
+    if (
+      settled !== null &&
+      typeof settled === "object" &&
+      typeof (settled as { catch?: unknown }).catch === "function"
+    ) {
+      // Swallowed deliberately and NOT logged: a stream that is already errored,
+      // locked or spent rejects here, and every one of those means the buffer we
+      // were trying to release is gone — the outcome we wanted. Logging would
+      // also put a seam response object one `console.error` argument away from a
+      // line that must never carry credentials.
+      (settled as Promise<unknown>).catch(() => {});
+    }
+  } catch {
+    // Same shrug, synchronous flavour.
+  }
+}
+
+/**
  * The ONE way to call the Railway analytics service.
  *
  * Sequence: caller/config validation → breaker check → budgeted fetch →
@@ -1612,12 +2396,17 @@ async function readDependencyBody(res: Response): Promise<unknown> {
  * not thrown — status interpretation is the caller's contract, and only the
  * caller knows whether a 404 is an error or an expected empty result.
  */
+/** Resolve after `ms` milliseconds — the retry backoff, extracted to one line. */
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 export async function resilientFetch(
   budgetKey: SeamBudgetKey,
   path: string,
-  init: ResilientFetchInit = {},
+  init: ResilientFetchInit,
 ): Promise<SeamResponse> {
-  const { timeoutMsOverride, ...requestInit } = init;
+  const { timeoutMsOverride, retriesOverride, ...requestInit } = init;
 
   // ── ABOVE THE WINDOW ────────────────────────────────────────────────────
   // Everything from here to the `try` is a CALLER or CONFIG fault if it fails,
@@ -1659,6 +2448,33 @@ export async function resilientFetch(
     }
   }
   const timeoutMs = timeoutMsOverride ?? SEAM_BUDGETS[budgetKey].timeoutMs;
+
+  // SEAM-06 / D-08. `retriesOverride` is a REQUIRED `0 | 1`, so there is no
+  // `!== undefined` guard to write and no ME-03 present-vs-absent question to
+  // answer: absence does not compile. The check below is not redundant with the
+  // type — `0 | 1` erases at runtime, and a JS caller or an `as any` can still
+  // hand this function a `2`, a NaN or a string. One retry is the whole locked
+  // policy, so the only legal values are 0 and 1; anything else is a caller bug
+  // and is raised HERE, above the classification window, so a config typo can
+  // never be recorded as Railway degradation (the reason `SeamConfigError`
+  // exists — see its docblock).
+  if (
+    typeof retriesOverride !== "number" ||
+    !Number.isInteger(retriesOverride) ||
+    retriesOverride < 0 ||
+    retriesOverride > 1
+  ) {
+    console.error(
+      `[resilient-fetch] ${budgetKey}: CONFIG fault — invalid retriesOverride ${String(retriesOverride)}. This is a caller misconfiguration, NOT an analytics-service failure; the only legal values are 0 and 1.`,
+    );
+    throw new SeamConfigError(
+      `[resilient-fetch] ${budgetKey}: invalid retriesOverride ${String(retriesOverride)} — expected the integer 0 or 1`,
+    );
+  }
+  // The caller's verdict, and nothing else. The row fallback that used to sit
+  // here is gone (D-08): it let a hand-picked budget key inherit a retry with
+  // the retry-safety registry never consulted.
+  const retries = retriesOverride;
 
   // A-22. Hoisting the template alone is NOT sufficient: a malformed base URL
   // does not throw here, it makes `fetch` REJECT — landing in the transport
@@ -1703,21 +2519,51 @@ export async function resilientFetch(
    * instant and not `Date.now()` at recording time: by construction a request
    * records after it was admitted, and the gap between the two is the entire
    * subject of the guard.
+   *
+   * ⚠️ A `let`, REASSIGNED PER ATTEMPT — see the per-attempt-state note below and
+   * the recapture inside the loop's `attempt > 0` block.
    */
-  const admittedAtMs = Date.now();
+  let admittedAtMs = Date.now();
 
   /**
-   * ONE request records AT MOST ONE failure, whichever arm classifies it.
+   * ONE ATTEMPT records AT MOST ONE failure, whichever arm classifies it.
    *
    * Wave 5 moved the body read inside the classification window and left this
-   * interaction open deliberately, because this plan replaces the status branch:
-   * a counting status AND a body that then aborts are two arms observing ONE
-   * degraded request. Recording both halves the failures needed to trip, so five
-   * genuinely-distinct incidents' worth of protection would fire after two or
-   * three — a breaker that opens early is still an outage it created itself.
+   * interaction open deliberately: a counting status AND a body that then aborts
+   * are two arms observing ONE degraded request. Recording both halves the
+   * failures needed to trip, so five genuinely-distinct incidents' worth of
+   * protection would fire after two or three — a breaker that opens early is
+   * still an outage it created itself.
    *
    * A latch rather than an ordering rule: the arms cannot be ordered, since the
    * body read happens whenever the CALLER chooses to read it, arbitrarily later.
+   *
+   * ⚠️ SEAM-06 Class D — THE LATCH IS PER-ATTEMPT, RESET AT THE TOP OF EACH LOOP
+   * ITERATION. Within one attempt the status+body dedup above still holds, but a
+   * RETRIED attempt is a distinct request as far as the breaker is concerned:
+   * two failing transient attempts must advance the counter TWICE, or a retried
+   * outage would take twice as many requests to trip. `recordOnce` closes over
+   * `recorded`, so resetting `recorded` below re-arms the same closure — and the
+   * closure handed to `instrumentBody` after the loop therefore carries the LAST
+   * attempt's latch, which is correct: a post-return body-read failure belongs
+   * to the attempt that produced the response.
+   *
+   * ⚠️ THE LATCH IS NOT THE ONLY PER-ATTEMPT STATE — `admittedAtMs` IS THE OTHER
+   * (141.2 / finding 5, D-09), and it was missed when the loop was introduced.
+   * A-25's predicate, stated in `recordSeamFailure`, is "was this request
+   * already IN FLIGHT when that lock was armed" — and "in flight" is a property
+   * of an ATTEMPT, not of the logical request: attempt 2 is admitted separately,
+   * past its own re-check of a by-then-expired lock, so its failure is evidence
+   * gathered entirely AFTER the arming and must be allowed to re-arm the
+   * circuit. Captured once above the loop, that timestamp made every retried
+   * wave's evidence look stale — on the 30 s `optimize-weights` budget the
+   * breaker could never re-arm from a retried call at all, so allocators waited
+   * 60 s+ per click instead of receiving an immediate circuit error. Reassigned
+   * below, immediately after the pre-attempt re-check passes, for the same
+   * reason `recorded` is reset there: `recordOnce` closes over the binding, so
+   * the recording arms and the post-return `instrumentBody` closure all carry
+   * the LAST admitted attempt's instant — the attempt that produced what they
+   * are recording.
    */
   let recorded = false;
   async function recordOnce(breakerKey: string): Promise<void> {
@@ -1726,13 +2572,95 @@ export async function resilientFetch(
     await recordSeamFailure(breakerKey, admittedAtMs);
   }
 
-  // Constructed after the breaker check so the budget covers the REQUEST, not
-  // the store round-trip that decides whether to make one.
-  const deadline = AbortSignal.timeout(timeoutMs);
+  // ── THE RETRY LOOP (SEAM-06) ────────────────────────────────────────────
+  // Bounded by `1 + retries`, with `retries ∈ {0, 1}` (validated above). At
+  // retries=0 — every caller whose registry verdict is 0, which is every call
+  // site outside the audited allowlist — this runs exactly once and is
+  // behaviourally byte-equivalent to the pre-141 single-attempt path.
+  // Retry-eligible outcomes are ONLY the
+  // counting/transient classes: a transport throw (what `seamBreakerVerdict(null)`
+  // counts) and a response whose `verdict.counts` is true (503/other-5xx). A
+  // 2xx or a 4xx returns immediately. `SeamConfigError` was raised above the
+  // loop; `CircuitOpenError` from the pre-attempt re-check is thrown from ABOVE
+  // the fetch `try`, so nothing in the loop can catch or swallow it (SC4 /
+  // T-141-03).
+  //
+  // ⚠️ Phase 141.1 / D-17 — WHY A STATUS IS CARRIED ACROSS ITERATIONS. `res` is
+  // declared INSIDE the loop body and is out of scope at the pre-attempt-2
+  // re-check, so the `CircuitOpenError` arm below could not name the response it
+  // was discarding. This is the minimal carry: the STATUS NUMBER only.
+  //
+  // ⚠️ DO NOT "SIMPLIFY" THIS BY HOISTING `res` ITSELF. A `Response` hoisted out
+  // of the loop keeps a body stream — and the credentials any error rendered
+  // from it could inline — alive across the backoff and into the next attempt,
+  // which is exactly the leak lifetime the H2 class names. A number cannot leak.
+  let lastCountingStatus: number | undefined;
 
-  // ── THE CLASSIFICATION WINDOW ───────────────────────────────────────────
-  let res: Response;
-  try {
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    const lastAttempt = attempt === retries;
+
+    if (attempt > 0) {
+      // Fixed backoff + jitter, THEN re-check. Jitter (`Math.random() ×
+      // SEAM_RETRY_JITTER_MAX_MS`) decorrelates concurrent callers that all
+      // failed on the same blip so they do not retry in lock-step (T-141-04).
+      // Waiting before the re-check means the read that gates the retry is the
+      // freshest one — the breaker may have opened DURING the backoff.
+      await sleep(SEAM_RETRY_BACKOFF_MS + Math.random() * SEAM_RETRY_JITTER_MAX_MS);
+
+      // SC4 — the EXACT entry gate (the `isBreakerOpen` + `CircuitOpenError`
+      // throw above this retry loop), re-run before attempt 2. The
+      // breaker may have opened from attempt 1's OWN recorded failure or from a
+      // concurrent caller; a retry that fired anyway would amplify the very
+      // outage the breaker exists to contain. Thrown here, above the fetch try.
+      const reBreaker = await isBreakerOpen(budgetKey);
+      if (reBreaker.open) {
+        // ⚠️ Phase 141.1 / D-17 — THE DIAGNOSIS DIES HERE OTHERWISE. The caller
+        // is about to receive a `CircuitOpenError` instead of attempt 1's
+        // response, and that response carried the freshest fact available: the
+        // status, and on a 503 the `dependency` and `human_message` the caller
+        // USED to receive on this path pre-141. The response itself cannot be
+        // surfaced (the breaker is open; the point is not to serve it), so the
+        // status is logged rather than silently dropped.
+        //
+        // Same discipline as the transport arm below: the budget key is a
+        // module-derived value from a closed set, and the status is a number.
+        // The path, the body and every header value stay OUT.
+        console.error(
+          `[resilient-fetch] ${budgetKey}: breaker opened between attempts — ` +
+            `discarding attempt ${attempt}'s ` +
+            (lastCountingStatus === undefined
+              ? "transport failure (no status line)"
+              : `${lastCountingStatus} response`) +
+            " and returning a circuit error instead",
+        );
+        throw new CircuitOpenError(
+          reBreaker.retryAfterS ?? DEFAULT_RETRY_AFTER_S,
+        );
+      }
+
+      // ── PER-ATTEMPT ADMISSION RECAPTURE (141.2 / finding 5, D-09) ──────────
+      // This attempt has just been admitted past a circuit re-checked HERE, and
+      // this is the instant it happened. It has to be taken AFTER the throw
+      // above, not before the re-check: an attempt the breaker refuses is never
+      // admitted at all, and stamping it as though it were would hand A-25 an
+      // admission that no request ever had. See the per-attempt-state note above
+      // `recorded` for why the guard's predicate is per attempt.
+      admittedAtMs = Date.now();
+    }
+
+    // Per-attempt latch reset (Class D).
+    recorded = false;
+
+    // Design A: each attempt gets its OWN fresh per-attempt deadline. Total
+    // worst case is `timeoutMs × (1 + retries) + backoff`; restricting the
+    // override to headroom-safe routes is plan 04's job (SC-4b). Constructed
+    // after the breaker check so the budget covers the REQUEST, not the store
+    // round-trip that decides whether to make one.
+    const deadline = AbortSignal.timeout(timeoutMs);
+
+    // ── THE CLASSIFICATION WINDOW ─────────────────────────────────────────
+    let res: Response;
+    try {
     // Headers, body, and cache pass through byte-for-byte. A dropped
     // `Authorization` turns a working call into a 401 the breaker would then
     // count as degradation, and a dropped `X-Service-Key` silently
@@ -1758,8 +2686,11 @@ export async function resilientFetch(
       // old behaviour by accident rather than by decision. Across a
       // cross-origin 302 Node strips `Authorization` but forwards
       // `X-Service-Key`, `X-Internal-Token` and `X-User-Access-Token`
-      // VERBATIM — this seam carries all three. It also removes the "up to 20
-      // hops silently consume the budget" problem.
+      // VERBATIM. This seam carries the first two today; it carried the third
+      // until Phase 146.1 / B2 (2026-08-18) removed the forward, and
+      // `redirect: "error"` is why that removal was a reduction rather than a
+      // prerequisite. It also removes the "up to 20 hops silently consume the
+      // budget" problem.
       redirect: "error",
       signal: deadline,
     });
@@ -1791,6 +2722,12 @@ export async function resilientFetch(
     // scrubbed `Authorization` and shipped `X-User-Access-Token` — a LIVE
     // end-user Supabase JWT — verbatim. See `credentialHeaderValues` for the
     // full statement; do not drop the argument to "simplify" the call.
+    //
+    // ⛔ AND DO NOT DROP IT BECAUSE THE JWT IS GONE. Phase 146.1 / B2
+    // (2026-08-18) removed the last `X-User-Access-Token` emitter, but the
+    // argument is `credentialHeaderValues(requestInit)` — DERIVED from whatever
+    // headers THIS request carries — not a hardcoded list of one credential. It
+    // is the mechanism, not the caller, and it must outlive both.
     console.error(
       deadlineExceeded
         ? `[resilient-fetch] ${budgetKey}: deadline exceeded after ${timeoutMs}ms`
@@ -1799,14 +2736,23 @@ export async function resilientFetch(
     // No status line at all, so the verdict is TRANSPORT and the key is the
     // residual global one. Asked of the discriminator rather than hardcoded here
     // so there is exactly ONE definition of that mapping.
+    // The null-key conjunct is GONE here too — see the `SeamBreakerVerdict`
+    // union. `counts` is the whole discriminator; a counting verdict always
+    // names a key.
     const transportVerdict = seamBreakerVerdict(null);
-    if (transportVerdict.counts && transportVerdict.breakerKey !== null) {
+    if (transportVerdict.counts) {
       await recordOnce(transportVerdict.breakerKey);
     }
-    // Rethrow the ORIGINAL error. Both clients map `err.name` onto their own
-    // typed errors (AnalyticsTimeoutError / UPSTREAM_TIMEOUT); wrapping here
-    // would silently reclassify every timeout in the codebase.
-    throw err;
+    // A transport failure IS retry-eligible. On the last attempt, rethrow the
+    // ORIGINAL error UNWRAPPED, exactly as the single-attempt path always has —
+    // both clients map `err.name` onto their own typed errors
+    // (AnalyticsTimeoutError / UPSTREAM_TIMEOUT), and wrapping here would
+    // silently reclassify every timeout in the codebase. Otherwise loop for the
+    // one retry; the pre-attempt-2 breaker re-check runs at the top.
+    if (lastAttempt) {
+      throw err;
+    }
+    continue;
   }
 
   // ── ATTRIBUTABILITY (SEAMCORE-01 / ROADMAP SC2) ─────────────────────────
@@ -1823,10 +2769,78 @@ export async function resilientFetch(
   // common 5xx, so a classifier that needs a body is undefined exactly there
   // (TRAP-2). The body is consulted ONLY to refine WHICH key a counting verdict
   // names, and only on the 503 arm.
-  const verdict = seamBreakerVerdict(res.status, await readDependencyBody(res));
-  if (verdict.counts && verdict.breakerKey !== null) {
-    await recordOnce(verdict.breakerKey);
-  }
+  //
+  // ⚠️ THE THIRD AND ONLY DYNAMIC ONE. The two arms above ask
+  // `seamBreakerVerdict(null)`, whose verdict is a constant; this is the site
+  // where the status and body actually decide. It carried the same dead
+  // `&& verdict.breakerKey !== null` conjunct, and here it mattered most: a 503
+  // is the one arm that can name a dependency, so this is where a keyless
+  // counting verdict would have been dropped in production. Deleted — `counts`
+  // narrows `breakerKey` to `string`. Pinned at runtime by
+  // `seam-breaker-failopen.regression.test.ts`.
+    const verdict = seamBreakerVerdict(res.status, await readDependencyBody(res));
+    if (verdict.counts) {
+      await recordOnce(verdict.breakerKey);
+      // A counting status is retry-eligible too. Not the last attempt → discard
+      // this response and loop for the one retry; last attempt → fall through
+      // and RETURN it, so a caller still sees the 503 body its contract reads.
+      //
+      // ⚠️ Phase 141.1 / D-01 — HONOUR THE UPSTREAM'S OWN CONTRACT. Every
+      // SERVICE-TRANSIENT 503 this service emits carries a mandatory
+      // `Retry-After` (see `hasContractualWait`). Retrying inside the backoff is
+      // near-certain to fail AND spends a second breaker failure learning that,
+      // on billed lambda wall clock. So a 503 that NAMES a wait fails fast: fall
+      // through and RETURN attempt 1's response with its body intact. Attempt
+      // 1's own failure is still recorded — `recordOnce` above runs first,
+      // because the 503 did happen; what is not spent is the SECOND one.
+      //
+      // The jittered backoff above is UNCHANGED for the transport/timeout
+      // class, which is the dominant Railway-blip class and carries no response
+      // at all, let alone a header to honour. A 429 never reaches this arm —
+      // `seamBreakerVerdict` classifies it `counts: false`.
+      lastCountingStatus = res.status;
+      if (!lastAttempt && !hasContractualWait(res)) {
+        // ⚠️ Phase 141.1 / D-17 — THIS ARM USED TO BE SILENT, AND IT IS THE ONE
+        // ARM THAT SHOULD NOT BE. A 503 that is retried and then succeeds is
+        // invisible to the caller by design, and it is also the ONLY signal that
+        // a dependency is degrading BELOW the breaker threshold. With no line
+        // here the retry loop made the seam quieter than the single-attempt path
+        // it replaced: the transport arm below logs, this one did not.
+        //
+        // ⚠️ THE SENTENCE SAYS "RETRYING", AND THAT IS LOAD-BEARING. Since D-01
+        // this arm has TWO exits — this `continue`, and a fall-through that is
+        // either the D-01 fail-fast (the 503 named its own wait) or the last
+        // attempt surrendering. Only the RETRY is logged, and it says so, so a
+        // line here can never be misread as a surrender. Do not generalise this
+        // message to cover the fall-through without splitting it in two: a
+        // fail-fast and a last-attempt surrender are different operator facts,
+        // and one sentence covering both would report neither.
+        //
+        // Log discipline, verbatim from the transport arm: the BUDGET KEY (a
+        // module-derived value from a frozen closed set) and the STATUS (a
+        // number). Never the path — that is caller input — and never
+        // `requestInit`, whose headers and body carry raw exchange API secrets,
+        // `INTERNAL_API_TOKEN` and a live end-user Supabase JWT. If an error
+        // object is ever rendered into this line it goes through
+        // `scrubSeamError(err, credentialHeaderValues(requestInit))` with BOTH
+        // arguments; see the TS-15 incident note on the transport arm for what
+        // dropping the second one shipped. Pinned from the outside by the
+        // sentinel case SC-M′.
+        console.error(
+          `[resilient-fetch] ${budgetKey}: attempt ${attempt + 1} of ` +
+            `${retries + 1} returned ${res.status} — retrying after backoff`,
+        );
+        // Phase 163 / OPS-10 — THE ONE ABANDONING EXIT IN THIS LOOP. Everything
+        // below this line walks away from `res` without anyone ever reading it,
+        // so release its buffer here rather than leaving undici holding it until
+        // the attempt signal fires. Capability-checked and total: see
+        // `cancelAbandonedBody`. It must stay INSIDE this branch — the two
+        // fall-throughs (D-01 fail-fast, last-attempt surrender) RETURN this
+        // response with its body intact.
+        cancelAbandonedBody(res);
+        continue;
+      }
+    }
   // 4xx NEVER records — including the `424` whose body names the caller's VENUE,
   // whose slug must never become a breaker key (STATUS_CONTRACT §4). A user's bad
   // API key returning 400 is Railway working CORRECTLY; `create-with-key` and
@@ -1839,5 +2853,13 @@ export async function resilientFetch(
   // The window does not close here. `instrumentBody` keeps `json()` and
   // `text()` inside it, which is what makes the docblock's "classified failure
   // recording" true for a stalling upstream (SEAMCORE-02 / SC1).
-  return instrumentBody(res, budgetKey, timeoutMs, recordOnce);
+    return instrumentBody(res, budgetKey, timeoutMs, recordOnce);
+  }
+
+  // Unreachable: every path inside the loop returns or throws. Present so the
+  // function's control flow is total for the type checker without a non-null
+  // assertion or a mutable `res` hoisted out of the loop.
+  throw new Error(
+    "[resilient-fetch] retry loop exited without returning — unreachable",
+  );
 }

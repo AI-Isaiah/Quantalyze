@@ -351,6 +351,85 @@ def test_denylist_contains_all_canonical_keys():
 
 
 # ---------------------------------------------------------------------------
+# ⛔ IN-05 (Phase 164.6.2 round 2) — THE CROSS-LANGUAGE CONTRACT WAS A COMMENT.
+#
+# `services/redact.py` opens with "mirrors src/lib/admin/pii-scrub.ts
+# DENYLIST_EXACT verbatim", and `pii-scrub.ts` answers "⛔ This set is mirrored
+# byte-for-byte by analytics-service/services/redact.py; the two must move
+# together". Nothing enforced either sentence. A one-sided edit — a key added to
+# the TS set and not the Python one, or the reverse — shipped GREEN on both
+# runtimes, and the two suites do not even run in the same job.
+#
+# That is a pre-existing class, but Phase 164.6.2's own WR-05 fix DEPENDS on it:
+# `password` and `investor_password` were added to BOTH sets in the same change
+# precisely so the analytics service's Sentry `before_send` (which scrubs stack-
+# frame `vars` by KEY) cannot leak an MT5 broker password. A future edit that
+# removes either from one side only would silently re-open that hole on one
+# runtime.
+#
+# ⛔ SET EQUALITY, not `issubset`, and in ONE direction only BY DESIGN: equality
+# catches drift in EITHER direction, so a second mirror-image assertion on the TS
+# side would be a duplicate rather than a second half.
+# ---------------------------------------------------------------------------
+
+#: `analytics-service/tests/` -> `analytics-service/` -> repo root.
+_TS_PII_SCRUB = Path(__file__).resolve().parents[2] / "src/lib/admin/pii-scrub.ts"
+
+
+def _ts_denylist_exact() -> set[str]:
+    """The string literals inside `pii-scrub.ts`'s `DENYLIST_EXACT` set.
+
+    ⛔ Comments are stripped BEFORE the literals are collected, so a `"quoted"`
+    word inside an explanatory comment can never be mistaken for a denylist entry
+    and silently satisfy the equality below.
+
+    ⛔ A MISSING FILE IS A FAILURE, NEVER A SKIP. The repo's standing rule is that
+    a test which skips in CI is a test that never runs, and this one exists to
+    catch a drift nobody would otherwise see.
+    """
+    assert _TS_PII_SCRUB.is_file(), (
+        f"the TypeScript mirror is not at {_TS_PII_SCRUB} — re-anchor this gate "
+        "rather than deleting it; the cross-language contract it enforces is the "
+        "reason `password` cannot be dropped from one runtime only"
+    )
+    source = _TS_PII_SCRUB.read_text()
+    opener = "const DENYLIST_EXACT = new Set<string>(["
+    assert opener in source, (
+        f"`{opener}` is no longer in {_TS_PII_SCRUB.name} — the declaration has "
+        "been reshaped and this gate would silently stop parsing anything"
+    )
+    start = source.index(opener)
+    end = source.index("]);", start)
+    block = re.sub(r"//[^\n]*", "", source[start:end])
+    return set(re.findall(r'"([^"]+)"', block))
+
+
+def test_the_denylist_is_BYTE_IDENTICAL_across_the_two_runtimes() -> None:
+    """⛔ IN-05 — the "mirrored byte-for-byte" contract, made a gate.
+
+    Both files SAY the two sets must move together and nothing checked it. The
+    surfaces are not interchangeable: the Python set is what
+    `sentry_init._redact_before_send` walks over stack-frame `vars`, and the TS
+    set is what `scrubPii` walks over admin JSONB blobs and Sentry breadcrumbs. A
+    key present on one side only is a redaction that exists on one runtime and not
+    the other — which is exactly the shape of the WR-05 defect that put `password`
+    on both in the first place.
+    """
+    ts = _ts_denylist_exact()
+    py = set(DENYLIST_EXACT)
+
+    assert ts, "parsed ZERO keys out of the TS mirror — the gate is vacuous"
+    assert ts == py, (
+        "DENYLIST_EXACT has DRIFTED between the two runtimes.\n"
+        f"  only in pii-scrub.ts        : {sorted(ts - py)}\n"
+        f"  only in services/redact.py  : {sorted(py - ts)}\n"
+        "⛔ Both files document this set as mirrored byte-for-byte. Add the key "
+        "to BOTH, never to one — a key on one side only is a redaction that "
+        "exists on one runtime and not the other."
+    )
+
+
+# ---------------------------------------------------------------------------
 # Phase 18 / A2 (Claude adversarial 2026-05-07) — freeform-redaction parity.
 # The textual-presence parity check (TS side) only verified DENYLIST_EXACT
 # entries appeared in the Python file. It missed a real drift class: a key

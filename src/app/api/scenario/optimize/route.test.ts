@@ -73,9 +73,16 @@ const STATE = vi.hoisted(() => ({
     email: "alloc@test.sec",
   } as { id: string; email: string } | null,
   csrfShouldReject: false,
+  // 140.4-13 / SEAMRIM-05 — the THIRD outcome. `reason` absent is a genuine
+  // throttle (429); "ratelimit_misconfigured" is OUR store being unreachable
+  // and must answer 503.
   checkLimitResult: { success: true } as
     | { success: true }
-    | { success: false; retryAfter: number },
+    | {
+        success: false;
+        retryAfter: number;
+        reason?: "ratelimit_misconfigured";
+      },
   // Records every call so the "never reached" negatives below are real
   // assertions about the route's ordering rather than assumptions.
   optimizeCalls: [] as Array<{
@@ -111,20 +118,54 @@ vi.mock("@/lib/csrf", () => ({
       : null,
 }));
 
-vi.mock("@/lib/ratelimit", () => ({
-  userActionLimiter: {},
-  checkLimit: async () => STATE.checkLimitResult,
-}));
+// ⚠️ EXTENDED, NOT REPLACED (140.4-13 / SEAMRIM-05). See the note in
+// `src/__tests__/csv-validate-route.test.ts`: the pure helpers come from
+// `importActual` so this mock cannot drift from the real 503-vs-429 decision.
+vi.mock("@/lib/ratelimit", async (importActual) => {
+  const actual = await importActual<typeof import("@/lib/ratelimit")>();
+  return {
+    userActionLimiter: {},
+    checkLimit: async () => STATE.checkLimitResult,
+    rateLimitDenyJson: actual.rateLimitDenyJson,
+    isRateLimitMisconfigured: actual.isRateLimitMisconfigured,
+  };
+});
 
 vi.mock("@/lib/analytics-client", async () => {
   // Hand-written shims — see the MOCK-FACTORY NOTE in the file header. Both
   // classes must exist as real constructors or the route's catch throws.
   class AnalyticsUpstreamError extends Error {
     readonly status: number;
-    constructor(message: string, status: number) {
+    // 140.3-G5 / SEAMUX-03 — additive third arg mirroring the real class
+    // (`analytics-client.ts:119`, `seamCode: string | null = null`), so the
+    // 502 arm's `err.seamCode ?? "UNKNOWN"` forwarding is falsifiable here.
+    // Every pre-existing 2-arg construction keeps `seamCode = null`.
+    readonly seamCode: string | null;
+    // 161-06 / WIZERR-05 — the 4th and 5th, mirroring the real class
+    // (`analytics-client.ts`) parameter-for-parameter. `dependency` was added
+    // there by 140.3-11 and this double never picked it up; `retryAfterSeconds`
+    // is 161-06's. Both are additive and optional, so every pre-existing
+    // construction in this file keeps passing fewer args and keeps defaulting.
+    // ⚠️ ORDER IS THE POINT, not just presence: with `dependency` missing, a
+    // 4th positional argument would be the WAIT here and the DEPENDENCY NAME in
+    // production. `analytics-upstream-error.parity.invariant.test.ts` is what
+    // makes that a failure instead of a convention — it is why this block can
+    // no longer drift in silence.
+    readonly dependency: string | null;
+    readonly retryAfterSeconds: number | null;
+    constructor(
+      message: string,
+      status: number,
+      seamCode: string | null = null,
+      dependency: string | null = null,
+      retryAfterSeconds: number | null = null,
+    ) {
       super(message);
       this.name = "AnalyticsUpstreamError";
       this.status = status;
+      this.seamCode = seamCode;
+      this.dependency = dependency;
+      this.retryAfterSeconds = retryAfterSeconds;
     }
   }
   class AnalyticsTimeoutError extends Error {
@@ -315,9 +356,18 @@ describe("POST /api/scenario/optimize", () => {
     expect(JSON.stringify(body)).not.toContain("boom-internal-detail");
     // ...but the operator MUST still get it. "Static body" must not be
     // satisfiable by discarding the diagnostic.
+    //
+    // 140.4-08 / SEAMRIM-06 — pinned to the SCRUBBED rendering. `expect.any(Error)`
+    // pinned the raw instance in place, so it failed on correct code once the
+    // site was wrapped. The replacement is strictly stronger: it pins that the
+    // value went through `scrubSeamError` (a string, not the Error) AND that
+    // the diagnosis survived the scrub. That second half is the A-10 non-drop
+    // check, and it is the only mechanism in this tree that reddens if someone
+    // "fixes" a future scrub finding by deleting the value instead — the source
+    // predicate scores a dropped value clean.
     expect(errorSpy).toHaveBeenCalledWith(
       "[scenario/optimize] unexpected error",
-      expect.any(Error),
+      expect.stringContaining("boom-internal-detail"),
     );
   });
 
@@ -337,6 +387,16 @@ describe("POST /api/scenario/optimize", () => {
     const throttled = await POST(makeRequest(validBody()));
     expect(throttled.status).toBe(429);
     expect(STATE.optimizeCalls).toHaveLength(0);
+    // 140.4-13 / SEAMRIM-05 — byte-unchanged by the chokepoint adoption.
+    // Hand-typed from the pre-adoption source, including the BESPOKE sentence
+    // and the ABSENT Retry-After: this is the one seam route whose 429 carries
+    // no such header, and preserving that is why `rateLimitDenyJson` grew a
+    // `retryAfterHeader: "misconfigured-only"` option rather than stamping one.
+    expect(await throttled.json()).toEqual({
+      error: "Too many optimize requests. Try again shortly.",
+    });
+    expect(throttled.headers.get("Retry-After")).toBeNull();
+    expect(throttled.headers.get("Cache-Control")).toBe("private, no-store");
 
     // B15 ordering: a malformed body is rejected as 400 by the validation
     // above the limiter, so it never reaches the (denying) limiter at all.
@@ -345,6 +405,38 @@ describe("POST /api/scenario/optimize", () => {
       makeRequest({ series: SERIES, objective: "max_return" }),
     );
     expect(malformed.status).toBe(400);
+  });
+
+  it("[140.4-13 / SEAMRIM-05] ratelimit_misconfigured → 503, WITH a Retry-After the 429 does not carry", async () => {
+    STATE.checkLimitResult = {
+      success: false,
+      retryAfter: 60,
+      reason: "ratelimit_misconfigured",
+    };
+    const { POST } = await import("./route");
+    const res = await POST(makeRequest(validBody()));
+
+    expect(
+      res.status,
+      "Our own limiter's store being unreachable is not the allocator running " +
+        "too many blends. 429 says it is.",
+    ).toBe(503);
+    expect(await res.json()).toEqual({ error: "Rate limiter unavailable" });
+    // The 503 DOES carry Retry-After even though the 429 does not — the canary
+    // that this fail-CLOSED status exists to reach needs to know when to retry.
+    expect(res.headers.get("Retry-After")).toBe("60");
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+    expect(STATE.optimizeCalls).toHaveLength(0);
+  });
+
+  it("[140.4-13 / SEAMRIM-05] success → the deny arm does not fire", async () => {
+    STATE.checkLimitResult = { success: true };
+    const { POST } = await import("./route");
+    const res = await POST(makeRequest(validBody()));
+
+    expect(res.status).not.toBe(429);
+    expect(res.status).not.toBe(503);
+    expect(STATE.optimizeCalls.length).toBeGreaterThan(0);
   });
 
   it("400 on a malformed point — a non-finite value never reaches the solver", async () => {
@@ -535,5 +627,134 @@ describe("[140.3-13b / SEAMUX-08] POST /api/scenario/optimize — Sentry capture
     const res = await POST(makeRequest(validBody()));
     expect(res.status).toBe(429);
     await expectNoCapture();
+  });
+});
+
+/**
+ * 140.3-G5 / SEAMUX-03 — a machine `code` on EVERY error arm this route itself
+ * emits, so a client discriminates the fault on a stable token rather than
+ * sniffing the human sentence. Baseline was ZERO coded arms here.
+ *
+ * OUT OF SCOPE (helper-emitted, not the route's own arm): the approval-gate
+ * 403 (`assertProfileApproved`) and the limiter 429/503 (`rateLimitDenyJson`)
+ * — the same class the verifier accepted keys/sync as complete without touching
+ * (withAuth's 401). Their bodies are the helpers' to code, not this plan's.
+ */
+describe("[140.3-G5 / SEAMUX-03] POST /api/scenario/optimize — a machine code on every arm", () => {
+  it("401 (no session) → UNAUTHENTICATED", async () => {
+    STATE.authUser = null;
+    const { POST } = await import("./route");
+    const res = await POST(makeRequest(validBody()));
+    expect(res.status).toBe(401);
+    expect((await res.json()).code).toBe("UNAUTHENTICATED");
+  });
+
+  it("400 invalid JSON → VALIDATION_FAILED", async () => {
+    const { POST } = await import("./route");
+    const res = await POST(makeRequest(null, { rawBody: "{not json" }));
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe("VALIDATION_FAILED");
+  });
+
+  it("400 bad objective → VALIDATION_FAILED", async () => {
+    const { POST } = await import("./route");
+    const res = await POST(makeRequest({ series: SERIES, objective: "max_return" }));
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe("VALIDATION_FAILED");
+  });
+
+  it("400 series is not an object → VALIDATION_FAILED", async () => {
+    const { POST } = await import("./route");
+    const res = await POST(makeRequest({ series: [], objective: "min_vol" }));
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe("VALIDATION_FAILED");
+  });
+
+  it("400 series count out of range → VALIDATION_FAILED", async () => {
+    const { POST } = await import("./route");
+    const res = await POST(makeRequest({ series: {}, objective: "min_vol" }));
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe("VALIDATION_FAILED");
+  });
+
+  it("400 per-series not an array → VALIDATION_FAILED", async () => {
+    const { POST } = await import("./route");
+    const res = await POST(
+      makeRequest({ series: { "strategy-a": "nope" }, objective: "min_vol" }),
+    );
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe("VALIDATION_FAILED");
+  });
+
+  it("400 malformed point → VALIDATION_FAILED", async () => {
+    const { POST } = await import("./route");
+    const res = await POST(
+      makeRequest({
+        series: { "strategy-a": [{ date: "2026-01-01", value: "0.01" }] },
+        objective: "min_vol",
+      }),
+    );
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe("VALIDATION_FAILED");
+  });
+
+  it("503 breaker → CIRCUIT_OPEN, sentence + Retry-After byte-unchanged", async () => {
+    STATE.optimizeImpl = async () => {
+      throw new CircuitOpenError(13);
+    };
+    const { POST } = await import("./route");
+    const res = await POST(makeRequest(validBody()));
+    expect(res.status).toBe(503);
+    expect(res.headers.get("Retry-After")).toBe("13");
+    const body = await res.json();
+    expect(body.code).toBe("CIRCUIT_OPEN");
+    // The SEAMUX-01 one-source-of-truth copy leaf is untouched.
+    expect(body.error).toBe(
+      "The analytics service is temporarily unavailable. Please try again in a moment.",
+    );
+  });
+
+  it("504 timeout → UPSTREAM_TIMEOUT", async () => {
+    STATE.optimizeImpl = async () => {
+      const { AnalyticsTimeoutError } = await import("@/lib/analytics-client");
+      throw new AnalyticsTimeoutError("/api/optimize-weights", 30000);
+    };
+    const { POST } = await import("./route");
+    const res = await POST(makeRequest(validBody()));
+    expect(res.status).toBe(504);
+    expect((await res.json()).code).toBe("UPSTREAM_TIMEOUT");
+  });
+
+  it("502 upstream forwards err.seamCode VERBATIM", async () => {
+    STATE.optimizeImpl = async () => {
+      const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+      throw new AnalyticsUpstreamError("solver failed", 500, "SOLVER_DIVERGED");
+    };
+    const { POST } = await import("./route");
+    const res = await POST(makeRequest(validBody()));
+    expect(res.status).toBe(502);
+    // The upstream's own machine code survives, not our fallback.
+    expect((await res.json()).code).toBe("SOLVER_DIVERGED");
+  });
+
+  it("502 upstream with a null seamCode → UNKNOWN fallback", async () => {
+    STATE.optimizeImpl = async () => {
+      const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+      throw new AnalyticsUpstreamError("optimizer down", 502);
+    };
+    const { POST } = await import("./route");
+    const res = await POST(makeRequest(validBody()));
+    expect(res.status).toBe(502);
+    expect((await res.json()).code).toBe("UNKNOWN");
+  });
+
+  it("500 terminal/unclassified → UNKNOWN", async () => {
+    STATE.optimizeImpl = async () => {
+      throw new Error("boom-internal-detail");
+    };
+    const { POST } = await import("./route");
+    const res = await POST(makeRequest(validBody()));
+    expect(res.status).toBe(500);
+    expect((await res.json()).code).toBe("UNKNOWN");
   });
 });

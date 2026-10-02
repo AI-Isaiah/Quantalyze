@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { formatPercent } from "@/lib/utils";
 import { EmptyStateCard } from "@/components/ui/EmptyStateCard";
+import { LiveRegion } from "@/components/ui/LiveRegion";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { SegmentedControl } from "@/components/strategy-v2/SegmentedControl";
 import { Button } from "@/components/ui/Button";
@@ -229,6 +230,12 @@ export function WeightOptimizerSection({ strategies, onApply }: WeightOptimizerS
 
       {status === "error" && (
         <div className="mt-3">
+          {/* B-13 named WHICH failure occurred, but delivered that name only as
+              visual text. The "Suggest weights" button stays mounted, so there
+              is no focus change either — the region is the only channel that
+              tells a screen-reader user anything happened. Carries the card's
+              own heading; no new copy, no visual delta (DESIGN-05). */}
+          <LiveRegion message={FAILURE_COPY[failure].heading} assertive />
           <EmptyStateCard
             heading={FAILURE_COPY[failure].heading}
             body={FAILURE_COPY[failure].body}

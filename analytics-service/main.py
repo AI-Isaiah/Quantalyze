@@ -3,13 +3,16 @@ import os
 import secrets
 import logging
 import time
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any, Final, Sequence, cast
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from slowapi.errors import RateLimitExceeded
+from starlette.middleware.base import RequestResponseEndpoint
 from starlette.responses import Response
 from dotenv import load_dotenv
 
@@ -20,6 +23,13 @@ from dotenv import load_dotenv
 import sentry_sdk
 import structlog
 
+# Local dev targets TEST, never PROD (incident 2026-08-20: a laptop
+# `uvicorn main:app` claimed real prod compute jobs within seconds).
+# .env.qa-local (TEST project) loads FIRST so its values win — load_dotenv
+# never overrides keys that are already set. On Railway neither file exists,
+# so both calls are no-ops and the injected env wins. Module-anchored path so
+# the load works regardless of CWD.
+load_dotenv(Path(__file__).parent / ".env.qa-local")
 load_dotenv()
 
 # Root logging config. FastAPI / uvicorn don't configure the root logger,
@@ -33,6 +43,31 @@ logging.basicConfig(
     format="%(asctime)s %(name)s %(levelname)s %(message)s",
 )
 
+# Phase 16 / OBSERV-02 + OBSERV-09: configure structlog ONCE at process startup
+# (idempotent), and import the CorrelationMiddleware so we can mount it BEFORE
+# CORSMiddleware below. structlog wraps stdlib logging — coexists with
+# logging.basicConfig() above; both can emit at the same time.
+#
+# OPS-05 (Phase 163) — this block is HOISTED ABOVE every first-party import
+# below, and that ordering is now a gate
+# (tests/test_structlog_frozen_proxy.py::TestEntrypointOrdering). It used to sit
+# after the `from routers import ...` line, which meant the API process was safe
+# only by the ACCIDENT that no router emitted a log line at import time — nothing
+# pinned that. Any line emitted before this call renders through structlog's
+# DEFAULT chain, which contains no `_redact_processor` and no stdlib
+# `setLogRecordFactory` bridge, so an HMAC-bearing ccxt string or an MT5 password
+# in that line reaches the log sink verbatim (MEASURED 2026-08-26; see the test's
+# `test_a_line_emitted_before_configure_leaks`). `services.logging_config` is a
+# near-leaf (structlog + services.redact) so importing it first costs nothing and
+# creates no cycle.
+from services.logging_config import (
+    CorrelationMiddleware,
+    configure_logging,
+    correlation_id_var,
+)
+
+configure_logging()
+
 from routers import cron, exchange, internal, match, optimizer, portfolio, simulator, csv
 from routers import process_key as process_key_router
 from routers.debug_key_flow import router as debug_key_flow_router
@@ -44,18 +79,6 @@ from services.error_contract import (
     VenueTransientHTTPException,
     service_error_response,
 )
-
-# Phase 16 / OBSERV-02 + OBSERV-09: configure structlog ONCE at process startup
-# (idempotent), and import the CorrelationMiddleware so we can mount it BEFORE
-# CORSMiddleware below. structlog wraps stdlib logging — coexists with
-# logging.basicConfig() above; both can emit at the same time.
-from services.logging_config import (
-    CorrelationMiddleware,
-    configure_logging,
-    correlation_id_var,
-)
-
-configure_logging()
 
 # Phase 16 / OBSERV-04 + OBSERV-05 — initialize sentry-sdk[fastapi] AFTER
 # configure_logging() (so structlog is wired before any sentry import side
@@ -231,7 +254,7 @@ def assert_platform_secrets_configured() -> list[str]:
 
 
 @asynccontextmanager
-async def lifespan(_app: FastAPI):
+async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     from services.encryption import validate_kek_on_startup
 
     validate_kek_on_startup()
@@ -246,15 +269,24 @@ async def lifespan(_app: FastAPI):
     from main_worker import (
         SHUTDOWN,
         WORKER_ID,
+        assert_worker_not_aimed_at_prod_off_platform,
         daily_enqueue_loop,
         dispatch_loop,
         watchdog_loop,
     )
 
+    # Merged-worker path of the same hard stop main_worker.main() applies:
+    # this lifespan is about to start job-claiming loops, so a laptop run
+    # aimed at PROD must die HERE, before the first claim (2026-08-20
+    # incident — see the guard's docstring).
+    assert_worker_not_aimed_at_prod_off_platform()
+
     # Bridge the worker's healthz signal into /health: every dispatch_tick
     # writes to main_worker_healthz.LAST_TICK_AT; read it on /health and
     # return 503 when stale. Same contract as the stand-alone worker had.
     import main_worker_healthz
+    from services.mt5_relogin import heal_mt5_terminal_session
+    from services.mt5_session_monitor import mt5_session_monitor_loop
 
     async def _bridge_healthz() -> None:
         global WORKER_LAST_TICK_AT
@@ -272,13 +304,51 @@ async def lifespan(_app: FastAPI):
         asyncio.create_task(watchdog_loop(), name="watchdog_loop"),
         asyncio.create_task(daily_enqueue_loop(), name="daily_enqueue_loop"),
         asyncio.create_task(_bridge_healthz(), name="healthz_bridge"),
+        # Phase 164.6.2 / D-08 — re-establish the MT5 terminal's broker session.
+        # A TASK, never an inline await: the boot must not depend on the gateway
+        # being reachable (an await before `yield` aborts uvicorn startup, and
+        # restartPolicyType ON_FAILURE x3 would take the whole analytics service
+        # down for a gateway nobody needed). It is safe under `_crash_handler`
+        # below ONLY because the coroutine cannot raise — its entire body sits
+        # inside a top-level catch-all, asserted structurally AND behaviourally.
+        # If that ever stops being true, this entry stops the dispatch, watchdog
+        # and enqueue loops behind a green /health.
+        #
+        # ⛔ D-08's "STARTUP ONLY" IS AMENDED, NOT QUIETLY CONTRADICTED (Phase
+        # 164.6.4 plan 02). This comment said the heal runs at startup and NOWHERE
+        # ELSE; the session monitor entry below is a SECOND caller, on a detection
+        # poll cadence, and this phase is chartered to make that sentence false.
+        # D-08's original hazard does NOT transfer, verified two independent ways:
+        # the terminal epoch binds on FIRST TOUCH rather than at construction (so
+        # a preflight-built client has no epoch until the job's own login inside
+        # the job's own lease), and the construction fence is a ContextVar that
+        # preflight never carries. The monitor takes the SAME single bounded lease
+        # this heal already takes and adds no new lease site. ⚠️ Nothing reds when
+        # a comment goes false, which is exactly why the amendment is written.
+        asyncio.create_task(heal_mt5_terminal_session(), name="mt5_boot_heal"),
+        # Phase 164.6.4 / D-2 — the SIXTH task: NOTICE a lapsed broker session
+        # without a human and without waiting on an unrelated restart
+        # (criterion 2). The boot heal above is idle between deploys, and analytics
+        # startup is not correlated with the terminal losing its session — wave 5
+        # measured NO analytics deployment at all on the day it lapsed.
+        #
+        # ⭐ IT JOINS THIS LIST, so it inherits `_crash_handler` and the shutdown
+        # gather. That is a CONTAINMENT contract, not a crash contract: the loop's
+        # own top-level guard is what makes the callback INERT. `_crash_handler`
+        # calls SHUTDOWN.set() on ANY background-task exception, so a loop that
+        # could raise would stop dispatch, watchdog and enqueue behind a green
+        # /health — a permanent hazard rather than a one-shot one, because a
+        # monitor is a LOOP. The loop is therefore guarded in TWO places: an outer
+        # containment guard and a per-tick survival guard that can neither `break`
+        # nor `raise`.
+        asyncio.create_task(mt5_session_monitor_loop(), name="mt5_session_monitor"),
     ]
 
     # Fail loudly if any loop crashes. done_callback ensures a silent
     # unhandled exception in a background task still gets logged with
     # full traceback and sets SHUTDOWN so the remaining loops (and the
     # API) terminate rather than silently drifting.
-    def _crash_handler(task: asyncio.Task) -> None:
+    def _crash_handler(task: asyncio.Task[None]) -> None:
         if task.cancelled():
             return
         exc = task.exception()
@@ -710,7 +780,9 @@ def _gate_process_key(request: Request) -> JSONResponse | None:
 
 
 @app.middleware("http")
-async def verify_service_key(request: Request, call_next):
+async def verify_service_key(
+    request: Request, call_next: RequestResponseEndpoint
+) -> Response:
     if request.url.path == "/health":
         return await call_next(request)
 
@@ -784,6 +856,40 @@ async def verify_service_key(request: Request, call_next):
         )
 
     provided = request.headers.get("X-Service-Key", "")
+
+    if not provided:
+        # PYAPI-06 site 6 (164.1-02 / D-10) — the ABSENT header, given its own
+        # machine code. It used to fall into the mismatch arm below and answer
+        # the same opaque `{"detail": "Unauthorized"}` a WRONG key gets, so no
+        # instrument could tell "our client sent nothing" from "our client sent
+        # the wrong key" — the two faults have OPPOSITE remedies (deploy the
+        # secret vs re-copy it) and only one of them was ours.
+        #
+        # 401, NOT 400. The public contract for an unauthenticated caller does
+        # not change: absent stays 401, and the wrong-key body below stays
+        # byte-identical. This is a new CODE on an unchanged status.
+        #
+        # NO `_auth_log` AND NO `_capture_secret_misconfig` HERE, deliberately
+        # (D-11). An absent header is an unauthenticated prober — internet
+        # background noise arriving continuously on any public host — and
+        # logging or capturing it buries the real signal exactly the way C-11
+        # was buried. The zero-event pin in
+        # tests/test_service_key_log_companion.py and the exact
+        # `faults == ["unset", "mismatched"]` list in
+        # tests/test_secret_misconfig_signal.py are the mechanical checks.
+        # Emitting a code costs nothing: it is read by the caller, not by us.
+        #
+        # WHY THIS IS SAFE TO NAME NOW. After PYAPI-06's TypeScript half
+        # (src/lib/analytics-client.ts) our own client REFUSES before the fetch
+        # when ANALYTICS_SERVICE_KEY is empty, so an absent header can no longer
+        # be us. It can be distinguished loudly without paging anyone.
+        return service_error_response(
+            401,
+            "SERVICE_KEY_ABSENT",
+            retryable=False,
+            detail="Unauthorized",
+        )
+
     if not secrets.compare_digest(provided, SERVICE_KEY):
         # PYAPI-06 site 5 — C-11's HEADLINE, seen from the receiving end. A
         # stale `ANALYTICS_SERVICE_KEY` on Vercel produces exactly this 401,
@@ -825,8 +931,8 @@ app.include_router(process_key_router.router)
 app.include_router(debug_key_flow_router)
 
 
-@app.get("/health")
-async def health():
+@app.get("/health", response_model=None)
+async def health() -> JSONResponse | dict[str, Any]:
     # Report 503 when the merged worker's dispatch_tick hasn't bumped the
     # heartbeat in >STALE_THRESHOLD_S. Railway's healthcheckPath=/health
     # then restarts the pod, which restores job processing automatically

@@ -1,0 +1,927 @@
+---
+schema_version: 1
+open_count: 50
+waived_count: 0
+fixed_count: 19
+total_count: 69
+last_updated: 2026-09-27T13:50:01.733Z
+---
+
+# Broken Windows Ledger
+
+> Cross-phase defect register. With `workflow.windows_enforce` enabled, `/gsd-ship` blocks while `open_count > 0`.
+> Waive with `gsd-tools windows waive <id> "<reason>"` (reason required).
+> Mark fixed with `gsd-tools windows fixed <id>`.
+
+| id | phase | kind | file | line | description | status | reason | recorded_at | resolved_at |
+|----|-------|------|------|------|-------------|--------|--------|-------------|-------------|
+| 1 | 145 | skipped-test | src/__tests__/csv-finalize-c14-regression.test.ts | 503 | NEW-C14-07 describe.skip — pins the dissolved upstream-body spread; Plan 05 rebuilds the c14 file (plan-sanctioned skip) | fixed |  | 2026-08-17T21:25:43.021Z | 2026-08-17T21:43:38.829Z |
+| 2 | 158 | deviation | src/app/api/strategies/create-with-key/route.test.ts | 2374 | Intra-file test-order dependence in 10 specs (DEF-16-1 class, one scope inward): vi.doMock in the H-0306 block is never deregistered (vi.resetModules clears the cache, not the registry). Green in declaration order; unreachable from CI (CI never shuffles tests within a file). Discovered by the 158-04 OPS-11 sweep; see phase deferred-items.md D-158-04-1. | open |  | 2026-08-20T17:00:02.116Z |  |
+| 3 | 158 | unrun-verify | .github/workflows/ci.yml | 1650 | Plan 158-06 backstop truth NOT runnable from a worktree: the five newly wired specs must each report >=1 executed (non-skipped) case in their batch on the phase PR's CI run. Wired-but-all-skip is the same false-coverage state as orphanhood. Read off the e2e + e2e-seeded Playwright per-spec output. | open |  | 2026-08-20T18:33:30.854Z |  |
+| 4 | 158 | skipped-test | e2e/csv-upload-flow.spec.ts |  | Two server-side csv-validate cases self-skip on HAS_ANALYTICS_SERVICE now that plan 158-06 wired this spec into the seeded batch. /api/strategies/csv-validate forwards to the Python analytics service and NO ci.yml job sets ANALYTICS_SERVICE_URL, so the csv wizard's upload->preview->submit happy path has no executing e2e anywhere. Un-skip by provisioning ANALYTICS_SERVICE_URL + INTERNAL_API_TOKEN into the e2e-seeded job. | open |  | 2026-08-20T18:33:44.606Z |  |
+| 5 | 159 | deviation | analytics-service/services/metrics.py |  | RANK-05 residual: the quantstats price-detection heuristic is closed in compute_all_metrics but still live in compute_qstats_scalars (8 scalars), _rolling_alpha_beta's rolling_greeks call, and the greeks benchmark leg. Four of the eight (ulcer_index, ulcer_performance_index, probabilistic_ratio, serenity_index) route TRANSITIVELY through to_drawdown_series/sharpe/sortino/cvar and cannot be closed by prepare_returns=False; they need P114 inline mirrors. See 159-05-SUMMARY.md section 'Residual'. | fixed |  | 2026-08-21T11:36:18.506Z | 2026-09-24T20:53:28.996Z |
+| 6 | 159 | unrun-verify | src/app/(dashboard)/discovery/[slug]/[strategyId]/page.tsx |  | 159-03 narrowed getStrategyDetail to the discovery projection; the composite (dqf.composite===true) render branch was never exercised against real composite data — no dev-server spot-check was possible (worktree has no .env; TEST rows have null sparklines). Render one composite strategy on /discovery/<slug>/<id> before ship. | open |  | 2026-08-21T13:37:00.684Z |  |
+| 7 | 159 | unmet-truth | src/lib/queries.ts |  | RANK-02's literal truth ('metrics_json absent from every anon-reachable response') does NOT hold: STRATEGY_V2_ANALYTICS_COLUMNS (anon /strategy/[id]/v2) and getFactsheetDetail (tearsheet) both project metrics_json, and data_quality_flags in v2's case. Both are load-bearing — removing them is a visual regression. Either scope RANK-02 to the splat class (as D-02 words it) or open a follow-up for an RPC/alias-set design. | open |  | 2026-08-21T13:37:00.898Z |  |
+| 8 | 159 | unrun-verify | supabase/tests/test_get_verified_cohort_rank_gate.sql |  | The two GATE assertions (1: occurrence count; 4a/4b: behavioural + anti-vacuity flip) have never run ARMED: TEST receives migration 20260821120000 only after merge, so on this PR the test takes its state-adaptive SKIP path. Mitigation shipped in 4d04d719 — assertions 2a/2b/3 (SECURITY DEFINER, search_path pin, anon-EXECUTE) were moved ABOVE the skip and DO run on this PR — but the gate arms only on the first post-merge sql-tests run. Say 'would have caught', never 'did catch', until that run is green. | open |  | 2026-08-21T14:29:27.024Z |  |
+| 9 | 159 | deviation | analytics-service/services/metrics.py |  | RANK-05 residual SUPPLEMENT (review specialist re-measurement, 2026-08-23): the open compute_qstats_scalars surface PERSISTS wrong values into the same metrics_json the phase guards — measured on the phase's own trigger fixture: ulcer_index=0.9947, common_sense_ratio=0.0, recovery_factor=2.0737, upi=2.9999, serenity_index=0.3204 for a 60-day all-winning series whose max_drawdown correctly reads 0.0. Signature sweep (in-env): recovery_factor, kelly_criterion, common_sense_ratio, cpc_index, r_squared ACCEPT prepare_returns= (kwarg-closable); ulcer_index/upi/serenity_index reach _prepare_prices transitively via to_drawdown_series (need P114 inline mirrors). Also: the region gate is structurally blind to the getattr(qs.stats, attr) dispatch at metrics.py:1815 — the follow-up must teach the scan that shape and add _rolling_alpha_beta (rolling_greeks lacks prepare_returns=False; feeds rendered chart series). Test stubs in the 2026-08-23 review transcript. | fixed |  | 2026-08-23T12:41:34.945Z | 2026-09-24T20:53:29.099Z |
+| 10 | 160 | deviation | src/components/strategy/ApiKeyManager.tsx |  | 160-02: if (newKey) silent-skip replaced with a loud throw on a 2xx carrying no api_key_id; link+sync blocks dedented (content byte-preserved) | open |  | 2026-08-23T15:59:31.524Z |  |
+| 11 | 161 | deviation | src/lib/wizardErrors.ts |  | 161-05: KEY_ORPHANED's UI-SPEC remedy bullet was replaced — no manager-facing surface can release an orphaned api_key (D-161-05-A) | open |  | 2026-08-24T11:53:32.055Z |  |
+| 12 | 161 | deviation | src/app/api/strategies/create-with-key/route.ts |  | 161-05: orphaned MT5 connect waits out the full 120s validate before the KEY_ORPHANED refusal (D-161-05-B) | open |  | 2026-08-24T11:53:39.722Z |  |
+| 13 | 161 | unrun-verify | .planning/phases/161-wizerr-honest-error-surfaces/161-06-PLAN.md |  | 161-06 backstop truth unverified: the rendered wait sentence's wrap/no-clipping on the E2 key-connect envelope — no renderer touched this plan | open |  | 2026-08-24T12:23:07.786Z |  |
+| 14 | 161 | unrun-verify | src/app/(dashboard)/allocations/components/AllocateDialog.tsx |  | E5 residue: founder eyes-on pass on the real Allocate dialog in Safari is unverified; layout measured only in Chromium on reproduced Modal/ErrorEnvelope markup (result: scrolls, does not clip) | open |  | 2026-08-24T21:01:39.389Z |  |
+| 15 | 161.1 | unrun-verify | supabase/tests/test_ledger_refresh_fanout.sql |  | Both phase SQL gates were run on a local Supabase harness, not against the real TEST project (TEST_SUPABASE_DB_URL is a CI secret, psql absent). Blocking CI sql-tests job covers this on PR. | open |  | 2026-08-25T10:34:25.695Z |  |
+| 16 | 162 | deviation | src/app/(dashboard)/strategies/new/wizard/steps/SyncPreviewStep.composite.render.test.tsx |  | Composite failure envelope no longer names the failing member; restoring it needs a structured member field, not a free-text column (deferred-items.md D1) | open |  | 2026-08-25T23:20:00.011Z |  |
+| 17 | 162 | unrun-verify | .planning/phases/162-honest-what-the-user-sees-is-true/162-08-PLAN.md |  | Plan 162-08 Task 1 (D-162-1) NOT EXECUTED: the PROD write lane is unreachable — the harness classifier denies reading the service-role credential (network and plain file reads are allowed; three lanes tried). 15/15 published is_example rows remain computation_status=failed since 2026-05-27; 0 recomputed, 0 unpublished, 0 touched. Also unexecuted: the repair enqueue for the 2 raw-exception-text rows. Selected mechanism plus the one unmeasured precondition (csv_daily_returns population) are recorded in 162-CENSUS.md. | open |  | 2026-08-25T23:44:15.573Z |  |
+| 18 | 162 | unmet-truth | .planning/phases/162-honest-what-the-user-sees-is-true/162-08-PLAN.md |  | 162-08 backstop truth is only HALF evidenced. Code half: proven at the seam (StrategyTable.stale-analytics 16/16, both HONEST-03 guards witnessed RED by neuter+restore). Data half: absent — the 15 example rows are still failed and still published, so discovery renders no Synced badge on them but is still not honest about them. An unevidenced backstop routes to human_needed; this one must not be read as a pass. | open |  | 2026-08-25T23:44:25.891Z |  |
+| 19 | 162 | deviation | src/app/(dashboard)/allocations/components/ScenarioComposer.tsx |  | RESTORED (originally recorded 2026-08-25T22:28:18.784Z by plan 162-04; lost from the ledger JSON by a concurrent-append race and re-added by 162-08). 162-04: metric pair now renders in all five C-4 states (previously hidden when both null); two existing SCEN-03 assertions updated accordingly | open |  | 2026-08-25T23:45:43.649Z |  |
+| 20 | 162 | deviation | src/components/strategy/StrategyGrid.tsx | 117 | RESTORED WITH A CORRECTED REASON (originally recorded 2026-08-25T22:26:27.302Z by plan 162-03; lost from the ledger JSON by a concurrent-append race). Original text said 'SyncBadge still ungated on computation_status (is_example guard added; consumer-less component)'. Re-measured at HEAD 2026-08-26: 'consumer-less' is FALSE (StrategyTable.tsx:1421 renders StrategyGrid, and grid is discovery-only by founder ruling at StrategyTable.tsx:387-398). The real gap is narrower: the grid gate has the is_example half and lacks the hasComputedAnalytics half the table carries (StrategyTable.tsx:982-983). NOT user-visible — shapeRowAnalytics blanks computed_at to empty for non-terminal-success rows — so guard-hygiene, not blocking. Filed with full reasoning in TODOS.md under 'Phase 162 (HONEST) — plan 162-08 filings'. | open |  | 2026-08-25T23:45:55.414Z |  |
+| 21 | 163 | deviation | .planning/REQUIREMENTS.md |  | SEC-02 checkbox left unchecked by plan instruction — status is the phase verifier's call | fixed |  | 2026-08-26T12:32:31.476Z | 2026-09-05T17:36:27.539Z |
+| 22 | 164 | unrun-verify | src/instrumentation.ts |  | Sentry token scrub proven only at wiring+transform level; a REAL captured event on a deployed token URL is unread (164-CONTEXT.md Blocker 3 mandates it) — post-deploy UAT | open |  | 2026-08-27T22:54:22.410Z |  |
+| 23 | 164 | deviation | src/app/factsheet-share/gone/route.ts | 77 | 164-01 comment + test name repeat the FALSE claim that Referrer-Policy 'does not strip' the path; the header is correct, the stated reason is not. Needs a one-line correction pass. | open |  | 2026-08-27T22:54:30.377Z |  |
+| 24 | 164 | unrun-verify | src/app/PlausibleScript.tsx |  | Plausible withdrawal proven in jsdom markup only; the deployed check (network panel filtered to plausible.io shows ZERO requests on a token link) is post-deploy UAT | open |  | 2026-08-27T22:54:37.686Z |  |
+| 25 | 164.3 | unrun-verify | scripts/prod-body-drift-check.sh |  | VAC-04's first real-PROD execution pends the next migrations PR; the live supabase db dump path is stub-proven only — ✅ DISPOSITIONED 2026-09-10 FROM MEASUREMENT (164.7 plan 06): it executed on PR #756, run 34146946050, job 101820921298, head 7c9aea64, 2026-09-07T17:17Z. Log carries `Drift-check credentials present.`, `Functions indexed in the PROD source: 120 (union of two independent readings)` and `4 body comparison(s) — 2 match, 2 acknowledged drift, 1 measured-absent (new)`. The live dump path is no longer stub-proven. Evidence: 164.7-VAC04-OBSERVED.md | fixed |  | 2026-08-29T02:10:57.580Z | 2026-09-10T15:30:00.000Z |
+| 26 | 164.3 | unrun-verify | scripts/test-ledger-drift-check.sh |  | VAC-08's first real-TEST execution pends the next CI run of this branch; the name-joined schema_migrations query and pg_get_functiondef read are stub-proven only (this plan may not write to the shared TEST database) | open |  | 2026-08-29T02:11:06.140Z |  |
+| 27 | 164.3 | unmet-truth | scripts/mutation-runner/run.mjs | 123 | ARMS_FLOOR ships at 0 and therefore cannot fire; plan 164.3-08 must pin it from the first full-corpus measurement | fixed |  | 2026-08-29T02:54:49.352Z | 2026-08-29T08:58:19.520Z |
+| 28 | 164.3 | unrun-verify | .github/workflows/ci.yml |  | sql-mutation's first ubuntu execution pends the first CI run of this branch: RESEARCH assumption A1 (PostgreSQL 16 server binaries under /usr/lib/postgresql/<major>/bin) has never been measured — the lane, the runner and the job were all built on macOS, where the probe reports no such glob. A red first run names a real portability defect. | fixed |  | 2026-08-29T09:24:22.877Z | 2026-09-05T17:36:27.645Z |
+| 29 | 164.3 | unmet-truth | supabase/schema/baseline.sql |  | supabase/schema/baseline.sql is committed with NO staleness gate AND NO consumer. sql-function-snapshot.yml gates supabase/schema/functions/; nothing gates this file, so production can drift from it silently. CORRECTED 2026-08-29 (WR-04/G1): this entry previously said 'the lane would keep loading stale bytes as if current', which described a wiring that does not exist — scripts/local-stack/run.sh:50 reads the gitignored scripts/local-stack/baseline.sql, so `run.sh up` exits 1 FATAL and reads nothing. Phase 164.5 owns all three together: repoint run.sh, drop .gitignore:138, and build the --check gate (including a sha256 assertion against BASELINE.md's recorded hash). Mind the 2.84.2-vs-2.98.2 pg_dump formatting skew when doing so. | open |  | 2026-08-29T11:35:00.000Z |  |
+| 30 | 164.3.1 | unmet-truth | src/__tests__/self-referential-oracle.test.ts |  | The Primitive-D self-referential-oracle AST gate ships REPORT-ONLY in plan 164.3.1-02 and blocks NOTHING until plan 164.3.1-08 flips it. Until that flip lands, a new self-referential assertion can enter the tree and the gate will print a finding without failing the suite. SC-5's calibration half is met (the rule was observed flagging src/__tests__/lint-sql-gates.test.ts:183-184 at HEAD before the site was fixed); the enforcing half is 08's. | fixed |  | 2026-09-01T18:30:00.000Z | 2026-09-05T17:36:27.743Z |
+| 31 | 164.3.1 | unmet-truth | src/__tests__/self-referential-oracle.test.ts |  | MEASURED at HEAD by plan 164.3.1-02: the rule reports 23 findings across 14 files of 128 scanned, and 19 of those are one shared false-positive mechanism - the accumulator idiom (const offenders: string[] = [] -> loop pushes -> expect(offenders).toEqual([])), which CAN fail and is not a primitive-D instance. 2 are the real target and 2 are type-level contracts in types-design-tests.test.ts that genuinely cannot fail at runtime. The rule was deliberately NOT narrowed after the count was seen - tuning a detector to produce a comfortable number is itself the self-referential move this phase exists to stop. Plan 164.3.1-08 must decide explicitly: teach mutation-awareness and re-measure and re-run the fire proof, OR allowlist the 19 by their shared mechanism with the measurement recorded. Detail in 164.3.1-02-CALIBRATION.md section III.a. | fixed |  | 2026-09-01T18:30:00.000Z | 2026-09-05T17:36:27.843Z |
+| 32 | 164.4.1 | deviation | supabase/tests/test_reconcile_dropped_enqueue_sweep.sql |  | 5 of 39 sections use GATE-FILE falsifiers (3 oracle preconditions dominated by Part 1, 1 seed-integrity control dominated by Part 2 arm A, 1 sum-of-pinned-counts whole-block invariant); each carries its domination measurement at the site | fixed |  | 2026-09-05T10:00:09.888Z | 2026-09-05T14:57:19.045Z |
+| 33 | 164.1 | todo | scripts/prod-prober/arms/pyapi06.mjs |  | PYAPI-06 arm does not classify a 401 carrying SERVICE_KEY_ABSENT in response to a PRESENT-but-wrong key (the service conflating absent with mismatched); it needs a 21st defect kind and DEFECT_KINDS is pinned at 20 by the plan-05 wiring test. Limit is documented in the arm header; plan 02's Python-half neuter test is the control. | open |  | 2026-09-05T21:56:43.339Z |  |
+| 34 | 164.1 | deviation | scripts/prod-prober/arms/cron-obs.mjs |  | cron-obs: an UNPARSABLE (non-null, non-empty) pg_net.ttl falls back to the documented 6h default with a printed note, rather than being a measure-fail — so a malformed TTL leaves the 3h scan window unclamped in the one direction that under-reports (pruned responses read as missing). Deliberate fail-open with a loud print; revisit if a real TTL ever fails to parse. | open |  | 2026-09-05T22:52:35.873Z |  |
+| 35 | 164.1 | deviation | scripts/prod-prober/arms/cron-drift.mjs |  | cron-drift: hygieneViolations never runs on a WITHHELD manifest row (command_withheld: true), by design — the row was read by a human at capture time. The gap is that a reviewer could withhold a row precisely to keep a dirty command out of the gate's reach; nothing mechanical prevents that. captureManifest still refuses to WRITE a dirty row, so the gap only opens if someone hand-edits the committed manifest. | open |  | 2026-09-05T22:52:35.974Z |  |
+| 36 | 164.1 | deviation | scripts/prod-prober/run.mjs |  | makeScrubber (plan 01) replaces EVERY occurrence of a requiredEnv VALUE anywhere in the output, with no minimum length. MEASURED during plan 03: with a one-character SUPABASE_DB_PASSWORD ('z') the log line 'cron-drift: database marker = quantalyze-fixture-db' printed as 'quantaly<redacted>e-fixture-db'. Fail-SAFE (it over-redacts, never under-redacts) and unreachable with a realistic credential, but it can mangle unrelated text. Out of plan 03's task scope (plan 01 owns the scrubber); recorded rather than fixed. | open |  | 2026-09-05T22:53:36.531Z |  |
+| 37 | 164.1 | deviation | scripts/prod-prober/run.mjs |  | makeScrubber over the mt5 arm's requiredEnv redacts ORDINARY WORDS in a live run. The mt5 arm must declare RAILWAY_PROJECT_ID / RAILWAY_MT5_SERVICE / RAILWAY_ENVIRONMENT as requiredEnv (D-06: an absent one is credential-absent, and they are 3 of the 10 slots the live run reports), but their LIVE values are 'production' and 'mt5-gateway' — short, common strings. MEASURED at plan 04: a defect detail carrying the CLI's stderr printed as 'the <redacted> relay refused the <redacted> session'. Fail-SAFE (over-redacts, never under-redacts) but it degrades the mt5-ssh-transport diagnostic, which is the one row an operator reads when the transport is broken. Extends WINDOWS entry 36 (plan 03's one-char case) with a value that is realistic rather than pathological. Not fixed here: the scrubber is plan 01's and classifying names as secret-vs-identifier is a change to a security control, out of this plan's task scope. ⭐ CLOSED 2026-09-06: fixed by NON_SECRET_ENV (run.mjs) — an allowlist BY NAME of the three Railway public identifiers, all GitHub vars that already appear verbatim in prod-prober.yml. Proven by self-test scenario 51, which uses the REAL live values ('mt5-gateway', 'production') and a SHORT secret; neutering the allowlist skip reproduces this entry's exact string and the scenario goes RED. ⛔ Entry 36 is left OPEN ON PURPOSE: a minimum-length exemption would have been fail-OPEN on a short real secret, so the mangling it describes is the deliberate fail-safe cost. | fixed |  | 2026-09-05T23:24:29.360Z |  |
+| 38 | 164.1 | unrun-verify | .github/workflows/prod-prober.yml |  | prod-prober.yml has NEVER been dispatched: plan 05 was instructed not to touch live infrastructure, so the credential-assert step, the supabase link + masked pooler export, the checksum-verified Railway CLI install and all four live arms are unexecuted on a GitHub-hosted runner. Whether the stored workspace-scoped RAILWAY_API_TOKEN authenticates railway ssh non-interactively from a hosted runner is likewise unmeasured (CONTEXT's own open question). Plan 164.1-06 owns the single first dispatch. | open |  | 2026-09-05T23:44:43.987Z |  |
+| 39 | 164.2 | unrun-verify | supabase/tests/test_sync_status_curated_sentence_survives.sql |  | The new gate is UNRUN on shared TEST and will report TEST FAILED (0) there from this PR's first CI run, alongside plan 06's TEST FAILED (0c), until 20260906120000_computation_error_provenance.sql is hand-applied to TEST. Nothing applies migrations to TEST (sql-tests has no apply step; the migrate workflow is PROD-only), so this is EXPECTED and is NOT a coupling regression - the three coupled gates' arms never read the new columns and stay green. Remedy booked as [164.2-TEST-APPLY-PROVENANCE] in TODOS.md: the which-database marker query against TEST_SUPABASE_DB_URL FIRST, then psql -f, never supabase db push (this checkout's CLI is linked to PROD). | open |  | 2026-09-06T17:20:07.111Z |  |
+| 40 | 164.2 | deviation | .planning/WINDOWS.md |  | This ledger refused every append during phase 164.2 - plans 06, 07 and 10 each recorded their deviations in their SUMMARY instead. Cause, found by the orchestrator 2026-09-06: row 37's RENDERED TABLE cell carried a closing paragraph (the NON_SECRET_ENV fix, dated 2026-09-06) that the FENCED JSON description did not, so the two sides disagreed and the writer refused. The table was hand-edited without the JSON. Repaired by syncing the JSON description to the table text (a clean prefix, +568 chars); no table cell was hand-edited, and the repair was validated by asserting the prefix invariant before writing. Lesson: hand-editing the rendered table silently disables the ledger for every later phase. | open |  | 2026-09-06T17:20:07.208Z |  |
+| 41 | 164.2.1 | deviation | src/app/(dashboard)/allocations/components/ContributionWizardOverlay.sessionid-fence.test.tsx |  | Plan 01 deviated (Rule 3): the spec installs explicit storage doubles instead of the preselect spec's guarded clear — on Node 25 window.localStorage.setItem is not a function, writeWizardState swallows it, and the seed silently never existed (SC-1c was passing vacuously). Fixed and pinned by an applied-ness probe; recorded, not open. | fixed |  | 2026-09-07T02:08:54.153Z | 2026-09-07T02:09:16.275Z |
+| 42 | 164.2.1 | deviation | .planning/phases/164.2.1-sessionid-fence/164.2.1-02-PLAN.md |  | Plan 02 deviated (Rule 3): 8 pre-existing LOCAL-USERNAME violations (the local machine username inside home-directory paths) in this phase's own 01-PLAN/02-PLAN/RESEARCH artifacts reddened check-planning-hygiene and therefore the full suite. Introduced by planning commit bedda506, an ancestor of plan 02's base; wave 1 never ran the full suite so it had not surfaced. The scanner derives its needle from the live USER, so on CI (USER=runner) it never fires - a local-only gate. Fixed at the cause with the repo's own <user> placeholder convention (9 existing .planning files already carry /Users/<user>/ and -Users-<user>-, including <automated> verify commands). Planning artifacts only; no source file, test, criterion or verify command was weakened. Recorded, not open. | fixed |  | 2026-09-07T02:28:20.652Z | 2026-09-07T02:28:47.667Z |
+| 43 | 164.2.1 | unmet-truth | src/app/(dashboard)/allocations/components/ScenarioCommitDrawer.test.tsx |  | FLAKY under full-suite load — a green full suite is therefore not a reliable truth on this file. 'focus management — pre-flight portal + failure transition > submitting → failure transition moves focus to the error banner' failed once in npm test (843 passed \| 1 failed), then passed on an immediate identical re-run (844 passed \| 14217 tests, exit 0). NOT a 164.2.1 regression, MEASURED not assumed: the file is UNTOUCHED by this phase (git diff --name-only vs merge-base is empty), it is 49/49 green in isolation, and it was green in the pre-wave full run. jsdom focus assertions are timing-sensitive and this component animates. Recorded so the next person who sees a lone red here does not bisect a phase that did not cause it, and so the underlying timing dependence is not mistaken for noise forever. | open |  | 2026-09-07T07:02:20.270Z |  |
+| 44 | 164.7 | unrun-verify | .github/workflows/ci.yml |  | sql-gate-lint's two new app-GUC steps have never run on ubuntu; the corpus step is RED by design (12 findings/5 files) until 164.7-05 annotates the tree, so no push or workflow_dispatch is permitted before then | open |  | 2026-09-07T10:11:28.312Z |  |
+| 45 | 164.7 | deviation | supabase/tests/test_analytics_service_settings_and_vault_tick.sql |  | MEASURED: a DROP POLICY <t>_service_all mutation twin is UNFALSIFIABLE repo-wide — service_role is BYPASSRLS on the pg-lane and on Supabase, so every *_service_all policy is belt-and-braces and no twin of that shape can bite (no-red R3, 164.7-02-NEUTER.log Part B2). Any existing arm relying on one is worth re-measuring. | open |  | 2026-09-07T10:18:29.567Z |  |
+| 46 | 164.7 | deviation | .planning/phases/164.7-appsettings-every-app-guc-reader-moves-to-a-mechanism-this-p/deferred-items.md |  | npm run lint is RED on the 164.7 branch: 86 planning-hygiene violations (ABSOLUTE-HOME-PATH / SCRATCH-HOME-PATH / LOCAL-USERNAME) across 13 of the phase's OWN plan, summary and neuter files, leaking the local username on a public repo. Predates plan 05 (git diff over those files vs d193e4cd is empty). Remedy edits three PENDING plans, so plan 05 recorded it instead of fixing it; owner is plan 06. See deferred-items.md D-164.7-05-1. | open |  | 2026-09-07T12:29:08.213Z |  |
+| 47 | 164.5 | unrun-verify | scripts/prod-body-drift-check.sh |  | DRIFT-05 gate (b) --baseline-live has never run against the real PROD credential; its first credentialed run is predicted red (see TODOS [DRIFT-05B-FIRST-RUN]) and that prediction is reasoning from dates, not a reading of PROD. | open |  | 2026-09-07T19:11:20.760Z |  |
+| 48 | 164.5 | unrun-verify | scripts/local-stack/run.sh |  | run.sh up boots and loads the committed baseline on Supabase CLI 2.84.2 (measured 2026-09-07, macOS, 4 legs exit 0), but NOTHING in .github/workflows/ invokes the lane and the CI-pinned CLI 2.98.2 has never started this stack or loaded this dump. Criterion 1 is proven on one developer box only. | open |  | 2026-09-07T19:02:48.367Z |  |
+| 49 | 164.5 | unrun-verify | .github/workflows/sql-function-snapshot.yml |  | The two new baseline co-edit gate steps have never been executed by GitHub Actions. actionlint 1.7.12 (exit 0) and a js-yaml parse prove the file is valid and the step order is intended; neither proves the snapshot-drift job runs green on ubuntu. A SHA-bound run is owed at PR time. | open |  | 2026-09-07T19:04:26.108Z |  |
+| 50 | 164.5 | unrun-verify | .planning/phases/164.5-baseline-snapshot-the-committed-prod-schema-baseline-becomes/164.5-03-PLAN.md |  | 164.5-03: full serialized vitest run NOT executed — the plan scopes it to before the wave merges and the box is shared with concurrent wave-1 executors (contention fakes regressions). Targeted, contracts/ and all ci.yml-reading suites were run instead. | open |  | 2026-09-07T19:07:20.161Z |  |
+| 51 | 164.6.4 | unrun-verify | analytics-service/services/mt5_session_episodes.py |  | A4 POST-DEPLOY: no Python has ever written to public.cron_runs. READ THE FIRST ROW BACK on the first deploy rather than assuming the service-role INSERT lands; the table+policy pair is the untested surface, and a failure loses criterion 1's lifetime dataset while the heal itself keeps working. | fixed |  | 2026-09-15T21:45:02.884Z | 2026-09-16T07:20:33.058Z |
+| 52 | 164.6.4 | unrun-verify | analytics-service/services/mt5_session_monitor.py |  | A2 POST-DEPLOY: the tick opens a FRESH rpyc client per tick and closes it in a finally. At the 600s default that is ~144 connections/day against a gateway container already at a three-digit thread counter. CRITERION CORRECTED 2026-09-16, and the original could never pass: it asked that the thread counter NOT climb monotonically with tick count, but CPython names threads from a globally monotonic counter and rpyc ThreadedServer spawns one thread per connection, so the number climbs once per connection whether or not threads are reaped. The real falsifier is welcome versus goodbye in the mt5-gateway log, scoped to the CURRENT process (everything after the last server-started line): a leak is welcome running ahead of goodbye with the gap GROWING across two readings hours apart. A container restart resets the counter to Thread-1 and invalidates the pair, so re-scope before comparing. BASELINE 2026-09-16T06:50Z, pre-keepalive: max Thread-27, welcome 27, goodbye 27, 0 unclosed, ~36 conn/day over 18h. READING 2 at 07:17Z: Thread-30, welcome 30, goodbye 30, 0 unclosed; the +3 equals boot heal plus two ticks, which confirms the 600s cadence but is far too small a sample to clear a slow leak. The hours-apart reading still stands. A4 fails semi-loudly; this would degrade the gateway SILENTLY over days. | fixed | VERIFIED CLOSED 2026-09-22 by the owed hours-apart reading, taken 6 days 18h after the baseline on the SAME process (one server-started line in the window, single deployment, so the counter was never reset and the pair is valid). Reading 3 at 2026-09-22T01:36:42Z: max Thread-1039, frontier welcome and goodbye both present, 0 unclosed, ~1012 cumulative connections since the baseline. Two sampled windows checked for thread-id CONTIGUITY, not just equal totals: 2026-09-21T00:00Z-06:00Z ids Thread-856..902 on both sides (47/47) and 2026-09-22T00:00Z-01:37Z ids Thread-1020..1039 on both sides (20/20), no gaps either time. Gap 0 at baseline and 0 at reading 3, so it is NOT growing, which is the stated falsifier. A one-in-twenty leak would have left ~50 unclosed threads in 1012. The gateway reaps its per-connection rpyc threads. Verdicts and counts only: peer addresses and ports are not reproduced, this repo is PUBLIC. | 2026-09-15T21:45:24.003Z | 2026-09-22T00:00:00.000Z |
+| 53 | 164.6.4 | unrun-verify | analytics-service/services/mt5_session_monitor.py |  | Criterion 2 POST-DEPLOY cross-check: reconcile this detector's recorded episodes against the INDEPENDENT hourly prod-prober, so the new instrument is not the only witness to its own claims. | open |  | 2026-09-15T21:45:24.211Z |  |
+| 54 | 164.5.1 | deviation | analytics-service/tests/test_match_router.py |  | pytest-timeout plugin absent from project deps; substituted OS-level timeout wrapper for task 3 full-suite verify (--timeout=600 flag) | open |  | 2026-09-16T16:36:49.788Z |  |
+| 55 | 164.5.1 | deviation | .planning/config.json |  | parallelization:true in .planning/config.json was NOT the effective value for phase 164.5.1 — every wave ran SEQUENTIALLY, and the reason GSD gave for it is MEASURABLY FALSE. `worktree base-check` returned shouldDegrade:true / baseref-head-ignored-by-harness, asserting the harness forks worktrees from origin/HEAD (main at de66d1b0, 27 commits behind). MEASURED 2026-09-16 on Claude Code 2.1.265 by spawning a throwaway isolation:"worktree" agent: CLAUDE_BASE == 4bd9028f == the orchestrator's own HEAD (0 commits distance), the phase PLAN.md files were PRESENT in the worktree, and SELF_TEST_SCENARIOS read 81 (the post-plan-04 value) where origin/HEAD still has 80. The harness forks from HEAD; it was fixed upstream in Claude Code 2.1.128 (anthropics/claude-code#27134 -> #54940). GSD's degrade rests on the hardcoded line `headIgnoredByHarness = deps?.effectiveBaseRef === 'head'` in bin/lib/worktree-base-ref.cjs, which infers the harness's behaviour from the SETTING HAVING A VALUE and never inspects the real fork base. Already filed by us as open-gsd/gsd-core#4588 (opened 2026-09-09, labels bug + confirmed-bug, OPEN); this entry is a fresh reproduction on 2.1.265. Note the loop #4588 records: GSD's own `worktree apply-base-ref` writes worktree.baseRef:"head" into project-local .claude/settings.local.json, and that is exactly the layer the evaluator treats as proof the harness ignores it — applying the documented mitigation is what selects the degrade. The wave labels in this phase remain CORRECT as dependency statements; they were never a concurrency guarantee. INDEPENDENT of all this and still true: analytics-service/.venv is gitignored, so it is absent in any worktree and the dead pytest path exits 0 through an echo (false green) — plans 02/05/06 belonged on the main checkout regardless. Only plan 07 (vitest-only) could have run isolated in parallel; not taken, to avoid running an untested merge-back path mid-phase across the 81->82 renumber. Do NOT read wave:2 in this phase as evidence that 05/06/07 ran concurrently. | open |  | 2026-09-16T18:05:09.913Z |  |
+| 56 | 164.5.1 | unrun-verify | src/__tests__/contracts/analytics-deploy-tree-compare.contract.test.ts, src/__tests__/lint-sql-gates.test.ts, src/__tests__/verify-plan-anchors.test.ts, src/lib/seam-venue-vocabulary.invariant.test.ts |  | plan 164.5.1-07: full-suite npx vitest run is not green at HEAD due to 4 pre-existing, unrelated failures (network-dependent, timeout-sensitive, stale plan anchor, missing KILL_SWITCH_UNAVAILABLE TS disposition) — see phase deferred-items.md | open |  | 2026-09-16T19:13:36.708Z |  |
+| 57 | 164.5.3 | deviation | .planning/ROADMAP.md, .planning/STATE.md |  | /gsd-phase --insert for the MT5CREDS phase deviated from the workflow in three MEASURED places, all recorded rather than silently absorbed. (1) NUMBERING: `phase.insert 164.5.1` computed **164.5.1.1** — a four-level number reading as a CHILD of the cron-repoint phase, which it is unrelated to. Re-run against the integer-level parent (`phase.insert 164.5`) yielded **164.5.3**, the correct SIBLING of 164.5.1/164.5.2. The stub block the first run wrote was reverted from a byte backup (cmp-verified) and its .gitkeep directory removed. (2) ORDERING: the CLI inserts the block immediately after the TARGET heading, so 164.5.3 landed at line 1357 — physically BEFORE 164.5.1 (1672) and 164.5.2 (1771). Moved by hand to line 1788, after 164.5.2 and before 164.6; the full diff against the pre-insert byte backup is exactly the 11 new lines, no collateral. (3) STATE POINTER: the workflow's `state.patch` step (Current Phase -> the inserted phase) was DELIBERATELY NOT RUN. Phase 164.5.1 is mid-flight — plan 09 and the D4 three-reviewer gate are still open — so repointing STATE.md at 164.5.3 would misdirect the next session away from an unfinished phase. `state.add-roadmap-evolution` WAS run per the try-gsd-tools-first rule and clobbered again, exactly as the memory predicts: alongside the one wanted line it injected ~100 blank lines, moved `current_phase: 159` out of the header into the progress block, rewrote the quoting of gsd_state_version/status/last_activity_desc, and recomputed progress 54% -> 36% (the -pr-filter under-count). Reverted from the byte backup and the single evolution line inserted by hand; the resulting STATE.md diff is exactly one added line. | open |  | 2026-09-16T20:30:00.000Z |  |
+| 58 | 164.5.4 | deviation | .planning/ROADMAP.md, .planning/STATE.md |  | Phase 164.5.4 MT5RECON-GAP was inserted with the SAME three deviations recorded in entry 57, handled the same way: (1) the block again landed immediately after the 164.5 heading, physically before 164.5.1/.2/.3, and was moved by hand to sit before 164.6 — diff against the pre-insert byte backup is exactly the 11 new lines, 0 removed; (2) the workflow's `state.patch` step was again DELIBERATELY NOT RUN, because 164.5.1 is still mid-flight (plan 09 + the D4 gate) and repointing STATE.md would misdirect the next session; (3) `state.add-roadmap-evolution` was NOT re-run this time and the evolution line was written by hand. ⚠️ That third point is a departure from the try-gsd-tools-first rule and is recorded as such: the clobber it is meant to detect was MEASURED on the identical operation against the identical file minutes earlier in the same session (entry 57 — ~100 injected blank lines, `current_phase` moved out of the header, quoting rewritten, progress recomputed 54% -> 36%), so re-running it only to revert it again would have measured nothing new. The resulting STATE.md diff is exactly one added line. | open |  | 2026-09-16T20:36:00.000Z |  |
+| 59 | 164.5.1 | deviation | supabase/migrations/20260916120000_service_role_statement_timeout.sql, src/__tests__/service-role-statement-timeout-migration.test.ts, .planning/ROADMAP.md, .planning/phases/164.5.1-cronrepoint-the-live-match-engine-cron-row-is-repointed-at-t/164.5.1-CONTEXT.md, TODOS.md |  | Phase 164.5.1 criterion 7 WITHDRAWN at the plan-09 D4 gate, and the withdrawal itself is the finding: the criterion rested on an ABSENCE read as a VALUE, and it survived a planner, a plan-checker, an executor and one full reviewer round before anyone measured it. The criterion and 164.5.1-CONTEXT.md/03-PLAN asserted that `service_role`'s NULL `pg_roles.rolconfig` means it 'inherits the 120000 ms database default'. MEASURED read-only on PROD 2026-09-16 (marker query first, all outputs in 164.5.1-PROD-SESSION.md): pg_db_role_setting carries anon 3s, authenticated 8s, authenticator 8s, and NO ROW AT ALL for service_role; the postgres database sets no timeout. PostgREST logs in as authenticator, so 8s lands on the session at login and the subsequent SET ROLE finds nothing to override it — the effective ceiling is 8s, meaning the planned 45s (briefly raised to 55s on a founder fix-first decision) would have LOOSENED it sevenfold across the whole service_role surface, the exact inverse of the recorded justification. ⛔ The phase's OWN 164.5.1-RESEARCH.md:441 had it right from the start, citing Supabase's docs verbatim: 'service_role: none (defaults to authenticator's 8s if unset)'. Two artifacts of one phase contradicted each other for three days and the unsourced inference won, because it was the one written into CONTEXT.md, which is what every downstream agent reads. INDEPENDENTLY sufficient second reason, found by the same reviewer: statement_timeout bounds ONE STATEMENT while the gateway 504 bounds ONE REQUEST, and cron_recompute() issues many short statements per request — the measured 44.67s is a request duration — so the conversion criterion 7 promised is unreachable by this mechanism regardless of the value; the Sentry evidence being 504s and never 57014 corroborates it. REMOVED from the branch: supabase/migrations/20260916120000_service_role_statement_timeout.sql and src/__tests__/service-role-statement-timeout-migration.test.ts (recoverable from commit 5acfb710; nothing ever reached origin/main, nothing was ever applied). Two stale live claims found in the same sweep and rebound to the real 60s gateway bound rather than deleted: analytics-service/services/db.py (retry budget described as 'strictly below the 45s statement_timeout') and analytics-service/tests/test_match_router.py's test_batch_budget_strictly_below_statement_timeout, which asserted `< 45.0` under a name claiming a statement_timeout nesting and stayed GREEN at 25 < 45 — a stale claim inside a gate, the worst place for one. ⭐ The intent is not lost: a REQUEST-level deadline plus explicit 504 classification is what criterion 9's batching already ships. | open |  | 2026-09-16T20:52:00.000Z |  |
+| 60 | 164.5.1 | deviation | .planning/phases/164.5.1-cronrepoint-the-live-match-engine-cron-row-is-repointed-at-t/164.5.1-VERIFICATION.md |  | SHIP PROCEEDED WITH verification.status: missing — explicit founder override 2026-09-17, NOT a green gate. ship:pre admits only 'passed'. Phase 164.5.1's goal is literally a PRODUCTION state (the live match_engine_cron row is repointed), so no repo-side verifier can reach 'passed' before the repoint; the repoint is plan 09, a founder-run live session whose own runbook Step 0 requires this branch MERGED AND DEPLOYED first. The gate is unsatisfiable before the act it gates. NOT overridden: pytest 5867/0; vitest (2 failures both pre-existing, both files 0 diff on this branch); prod-prober self-test 82/82; plan-anchor 24 claims; planning-hygiene 6448 files; and the ship:pre SECURITY gate, which passes on its own evidence (164.5.1-SECURITY.md, threats_open 0, re-evaluated by the orchestrator). No supabase/ diff exists, so no apply-test and no PROD apply gate were bypassed. RESOLVE BY: run the verifier after plan 09 executes; this closes when 164.5.1-VERIFICATION.md reports passed. ROOT CAUSE (gsd-core, not this repo): the security capability's PRODUCER hook sits at verify:post, which autonomous.md 3d.5 gates on 'Run only after passed', while its ENFORCER at ship:pre carries no such condition — any phase whose last plan needs a deploy deadlocks. Measured: 5 SECURITY.md repo-wide vs 14 VALIDATION.md, and the 5 are exactly the phases that reached passed. | open |  | 2026-09-16T22:05:57.392Z |  |
+| 61 | 164.5.1 | deviation | .github/workflows/ci.yml |  | THE CI SKIP TOKEN PROPAGATES THROUGH A SQUASH MERGE INTO main, and it cost two skipped pipelines in one session on 2026-09-17. Mechanism, measured twice: (1) a commit message that writes the literal token ANYWHERE — including inside a sentence saying it is NOT being used — suppresses every workflow run for that SHA; the PR board then shows only the two Vercel checks, which reads as a CLEAN board rather than an ABSENT one. (2) The documented recovery (push a token-free commit so a new head triggers the pipelines) fixes the PR branch ONLY. GitHub's squash merge concatenates EVERY branch commit message into the merge commit body, so the offending text rode into main's merge commit 5b6b7886 at line 1143 and main got ZERO runs — confirmed via the API (actions/runs?head_sha=...), not just in_progress		CI	CI	main	workflow_dispatch	35160963729	38s	2026-09-16T23:08:35Z completed	success	Phase 19 stability — no legacy writes (prod)	Phase 19 stability — no legacy writes (prod)	main	schedule	35158099181	13s	2026-09-16T22:31:33Z completed	success	Phase 164.5.1: CRONREPOINT Wave A — the hourly tick stops being able to silently do nothing (v0.77.45.0)	CI	feat/v1.20-phase-164.5.1-cronrepoint	pull_request	35156753727	18m54s	2026-09-16T22:15:27Z completed	success	Phase 164.5.1: CRONREPOINT Wave A — the hourly tick stops being able to silently do nothing (v0.77.45.0)	Contracts	feat/v1.20-phase-164.5.1-cronrepoint	pull_request	35156753510	1m45s	2026-09-16T22:15:27Z completed	cancelled	Phase 164.5.1: CRONREPOINT Wave A — the hourly tick stops being able to silently do nothing (v0.77.45.0)	CI	feat/v1.20-phase-164.5.1-cronrepoint	pull_request	35156078705	9m19s	2026-09-16T22:07:39Z completed	success	Phase 164.5.1: CRONREPOINT Wave A — the hourly tick stops being able to silently do nothing (v0.77.45.0)	Contracts	feat/v1.20-phase-164.5.1-cronrepoint	pull_request	35156078645	1m47s	2026-09-16T22:07:39Z completed	success	Analytics deploy verify (prod SHA vs main HEAD)	Analytics deploy verify (prod SHA vs main HEAD)	main	schedule	35151630562	13s	2026-09-16T21:18:23Z completed	success	prod-prober (four arms, hourly)	prod-prober (four arms, hourly)	main	schedule	35147927699	35s	2026-09-16T20:40:09Z completed	success	Phase 19 stability — no legacy writes (prod)	Phase 19 stability — no legacy writes (prod)	main	schedule	35139472094	12s	2026-09-16T19:15:34Z completed	success	prod-prober (four arms, hourly)	prod-prober (four arms, hourly)	main	schedule	35130815424	46s	2026-09-16T17:51:59Z completed	success	Analytics deploy verify (prod SHA vs main HEAD)	Analytics deploy verify (prod SHA vs main HEAD)	main	schedule	35124980370	12s	2026-09-16T16:55:40Z completed	success	Phase 19 stability — no legacy writes (prod)	Phase 19 stability — no legacy writes (prod)	main	schedule	35114018455	1m23s	2026-09-16T15:14:47Z completed	success	prod-prober (four arms, hourly)	prod-prober (four arms, hourly)	main	schedule	35104929440	47s	2026-09-16T13:54:17Z completed	failure	Nightly probes	Nightly probes	main	schedule	35099475949	55s	2026-09-16T13:03:13Z completed	success	Analytics deploy verify (prod SHA vs main HEAD)	Analytics deploy verify (prod SHA vs main HEAD)	main	schedule	35091035836	15s	2026-09-16T11:34:22Z completed	success	Phase 19 stability — no legacy writes (prod)	Phase 19 stability — no legacy writes (prod)	main	schedule	35085912551	13s	2026-09-16T10:36:44Z completed	success	Cassette refresh (OKX + Bybit)	Cassette refresh (OKX + Bybit)	main	schedule	35076641234	2m13s	2026-09-16T08:57:16Z completed	success	prod-prober (four arms, hourly)	prod-prober (four arms, hourly)	main	schedule	35071907692	34s	2026-09-16T08:05:35Z completed	success	Main CI cancelled watcher	Main CI cancelled watcher	main	workflow_run	35070404096	13s	2026-09-16T07:48:19Z completed	success	docs(164.6.4): close A4 on measured PROD evidence; correct A2's unpas…	Contracts	main	push	35068855790	1m42s	2026-09-16T07:30:17Z. CONSEQUENCE MEASURED: Railway deployed ANYWAY. 'no CI at all' is not 'CI red', so the skip-if-red guard never engaged — the empty-set-passes trap, one layer out. The deploy was nevertheless safe by measurement, not by luck: tree(5b6b7886) == tree(4c93a23c) == 667d626b, so PROD runs exactly the tree that passed 27 green checks. What was genuinely lost is the on-push-to-main gate set for that SHA; recovered by https://github.com/AI-Isaiah/Quantalyze/actions/runs/35161013969 (run 35160963729). RULE: never write the literal token in any commit message or PR body, not even to deny it — say 'the skip trailer' in prose. Verify with: gh api repos/<o>/<r>/actions/runs?head_sha=<sha> and COUNT, never read a 2-check board as green. ⛔ CORRECTION, MEASURED 2026-09-17 SAME SESSION — THE REMEDY ABOVE DOES NOT WORK CLEANLY IN THIS REPO AND MUST NOT BE COPIED AS-IS. `gh workflow run CI --ref main` produced a RED secret-scan on the very SHA it was meant to clear (run 35160963729: 20 success, 3 skipped, 1 failure). Cause is SCOPE, not content: a workflow_dispatch carries no commit range, so gitleaks-action walks the FULL history at fetch-depth 0, while a real push-to-main scans only the pushed squash commit. Measured locally with the two scopes side by side: `gitleaks git . --config .gitleaks.toml --log-opts=de66d1b0..5b6b7886` => 1 commit scanned, NO LEAKS FOUND (this is what a genuine push sees, and it is what the merge actually is); bare `gitleaks git . --config .gitleaks.toml` => 4491 commits scanned, 37 leaks. All flagged commits date from 2026-09-11 (Phase 164.8.5), NONE is on the 164.5.1 branch, and two of the three are not even ancestors of main. They are credential-SHAPED fixture literals quoted in CHANGELOG prose, the exact pattern the gitleaks lineage warns about. CONSEQUENCES: (a) the 5b6b7886 deploy is clean by measurement, not by assumption; (b) this repo's main CI CANNOT be re-triggered by workflow_dispatch without a false red, so a lost push-gate set has NO working recovery today and that is the open defect this entry now carries; (c) 37 pre-existing full-history findings are latent and would surface in any future full-scope scan. To re-measure a specific SHA, use the range form locally rather than dispatching. | open |  | 2026-09-16T23:09:17.399Z |  |
+| 62 | 164.9 | deviation | scripts/wait-for-test-schema-apply.sh |  | Plan 06's ordering wait is proven only through injected seams; its first LIVE Actions-API exercise is the next merge push touching supabase/migrations | open |  | 2026-09-21T16:01:21.347Z |  |
+| 63 | 164.9 | unrun-verify | .github/workflows/ci.yml |  | frontend-live-db-lane is wired BLOCKING and is MEASURED RED: 35 of 397 non-skipped tests fail on the local-stack baseline (362 pass). Four families booked as [164.9-LIVEDB-LANE-EXECUTION-CENSUS] in TODOS.md; F1 (privilege state absent from the schema-only baseline, ~14 failures) is NOT fixable test-side and needs a baseline re-dump. Until F1-F4 close, the frontend aggregate is red and Railway skips the analytics deploy. | open |  | 2026-09-21T17:12:21.238Z |  |
+| 64 | 167 | deviation | src/app/(dashboard)/allocations/HoldingsTabPanel.tsx |  | D-16 closed the two money surfaces and NOT the class. HoldingsTabPanel's keyStatusById map and ApiKeyManager.tsx's SyncProgress (no sign_in_failed branch, and not confirmed to be fed from api_keys.sync_status) carry the same shape: no closed set over the column, so every status that is not the one literal they test falls to the healthy branch. A key whose sign-in was refused can still read as healthy there. Mechanical to fix now that isUntrustedKeySyncStatus exists — make them callers of it. | fixed | CLOSED AS NOT-A-DEFECT 2026-09-22 — measured, not fixed. Both halves were over-scoped when filed. (a) ApiKeyManager SyncProgress reads a LOCAL six-value wizard vocabulary (idle / syncing / computing / complete / complete_with_warnings / error) driven entirely by setSyncStatus from local flow events; it is never fed from api_keys.sync_status and cannot receive the new value. (b) HoldingsTabPanel carries no trust branch at all — it maps api_key.id to sync_status and passes it through as source_key_sync_status, and the two consuming tables make the trust decision, both already via isUntrustedKeySyncStatus. The genuine half of the D-16 residual was the FILTER COPY, which is entry 65 and is now fixed. Verdicts and counts only. | 2026-09-22T17:09:03.419Z | 2026-09-22T17:41:57.032Z |
+| 65 | 167 | deviation | src/app/(dashboard)/allocations/components/HoldingsTable.tsx |  | The toggle label 'Show revoked-key holdings' and the footer '{N} holdings hidden from revoked keys' now describe a WIDER set than they NAME: a holding hidden for sign_in_failed is reported as hidden from revoked keys. Left unchanged on purpose by 167-04 — the toggle label carries a locked pin asserting it reads exactly that string, on a surface documented as preserved byte-for-byte, and 167-UI-SPEC authors no copy for these tables. Needs a copy decision, not an executor's guess. | fixed | Fixed in 167-04 task 3 (D-16): the toggle and footer read from the shared constant UNTRUSTED_KEY_SET_NOUN ("keys needing attention"), which names the whole untrusted set, not only revoked keys. A literal pin on the noun landed in review round 1 (WR-06). | 2026-09-22T17:09:18.951Z | 2026-09-22T20:24:13.815Z |
+| 66 | 167 | todo | src/lib/queries.ts |  | Phase 167 review round 1, SFH-M2 follow-up: the headline AUM (emptyLiveBaselineMetrics / liveBaselineMetricsFromPerKeyDailies, totalAum = holdingsSummary.reduce) sums holdings from untrusted keys (revoked, sign_in_failed) with no key-status test, while HoldingsTable hides those rows by default. The false comment claiming the predicate kept them out of the AUM was corrected; the money number was NOT changed. Follow-up: flag the AUM as partial (or disclose the contribution) when an untrusted key contributes — a money-number change with its own blast radius, needs its own decision. | fixed | Resolved by Phase 167.1 (D-14): disclosed, not changed. The composer live-holdings total and the Open Positions footer name the untrusted part; no money number changed (D-03). D-06 (a revoked key holdings absent from the book-mode composer AUM) answered by the founder with option (b) on 2026-09-24. | 2026-09-22T20:10:03.968Z | 2026-09-24T06:11:04.977Z |
+| 67 | 164.6.5 | deviation | src/lib/wizard/wizard-correlation.test.ts |  | gsd_run check tdd-red-evidence misclassifies vitest TAP output as zero_tests_discovered (its parser expects node --test's # tests/# pass/# fail summary footer and only matches un-indented TAP lines, never vitest's indented nested subtests) - RED evidence for plan 07's TDD tasks was established via manual inspection of named per-test failures plus the neuter-observe-restore + cp/cmp Proven-Able-to-Fail convention already used by sibling plan 04, not via the automated classifier | open |  | 2026-09-22T03:51:41.979Z |  |
+| 68 | 164.6.5 | unrun-verify | analytics-service/services/mt5_client.py |  | Two remote paths over the rpyc bridge have never run against the live gateway. (1) Mt5Client.recycle_terminal_process: the over-channel TerminateProcess half of _REMOTE_TERMINAL_RECYCLE_SRC, including its per-image file_versions read (the 2026-09-25 spike used a Linux-side kill). (2) Mt5Client.session_snapshot: the first live conn.eval of _REMOTE_SESSION_SNAPSHOT_SRC, which must resolve mt5 in the bridge namespace and return a by-value tuple of verdict-only fields (widened 2026-09-26, plan 164.6.5-08, from the verifier's anti-pattern finding; before this the entry named only the terminate step). Closes only when BOTH are read from the analytics log at the first live recycle: terminated equals matched and at least 1, exit confirmed, relaunch authorized unattended, and the snapshot line carrying its fields rather than an error. A terminate-only reading does not close it | open |  | 2026-09-25T18:47:37.964Z |  |
+| 69 | 164.9.3 | stub | supabase/migrations/20260927120000_claim_pair_pre_rank_exclusion.sql |  | VAC-04 ACKNOWLEDGEMENT placeholder in the CLAIMPAIR migration header; plan 164.9.3-04 fills the three prod-body-ack pragmas | fixed |  | 2026-09-27T13:27:33.109Z | 2026-09-27T13:50:01.733Z |
+
+````json
+[
+  {
+    "id": 1,
+    "kind": "skipped-test",
+    "phase": "145",
+    "file": "src/__tests__/csv-finalize-c14-regression.test.ts",
+    "line": 503,
+    "description": "NEW-C14-07 describe.skip — pins the dissolved upstream-body spread; Plan 05 rebuilds the c14 file (plan-sanctioned skip)",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-08-17T21:25:43.021Z",
+    "resolved_at": "2026-08-17T21:43:38.829Z"
+  },
+  {
+    "id": 2,
+    "kind": "deviation",
+    "phase": "158",
+    "file": "src/app/api/strategies/create-with-key/route.test.ts",
+    "line": 2374,
+    "description": "Intra-file test-order dependence in 10 specs (DEF-16-1 class, one scope inward): vi.doMock in the H-0306 block is never deregistered (vi.resetModules clears the cache, not the registry). Green in declaration order; unreachable from CI (CI never shuffles tests within a file). Discovered by the 158-04 OPS-11 sweep; see phase deferred-items.md D-158-04-1.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-08-20T17:00:02.116Z",
+    "resolved_at": null
+  },
+  {
+    "id": 3,
+    "kind": "unrun-verify",
+    "phase": "158",
+    "file": ".github/workflows/ci.yml",
+    "line": 1650,
+    "description": "Plan 158-06 backstop truth NOT runnable from a worktree: the five newly wired specs must each report >=1 executed (non-skipped) case in their batch on the phase PR's CI run. Wired-but-all-skip is the same false-coverage state as orphanhood. Read off the e2e + e2e-seeded Playwright per-spec output.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-08-20T18:33:30.854Z",
+    "resolved_at": null
+  },
+  {
+    "id": 4,
+    "kind": "skipped-test",
+    "phase": "158",
+    "file": "e2e/csv-upload-flow.spec.ts",
+    "line": null,
+    "description": "Two server-side csv-validate cases self-skip on HAS_ANALYTICS_SERVICE now that plan 158-06 wired this spec into the seeded batch. /api/strategies/csv-validate forwards to the Python analytics service and NO ci.yml job sets ANALYTICS_SERVICE_URL, so the csv wizard's upload->preview->submit happy path has no executing e2e anywhere. Un-skip by provisioning ANALYTICS_SERVICE_URL + INTERNAL_API_TOKEN into the e2e-seeded job.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-08-20T18:33:44.606Z",
+    "resolved_at": null
+  },
+  {
+    "id": 5,
+    "kind": "deviation",
+    "phase": "159",
+    "file": "analytics-service/services/metrics.py",
+    "line": null,
+    "description": "RANK-05 residual: the quantstats price-detection heuristic is closed in compute_all_metrics but still live in compute_qstats_scalars (8 scalars), _rolling_alpha_beta's rolling_greeks call, and the greeks benchmark leg. Four of the eight (ulcer_index, ulcer_performance_index, probabilistic_ratio, serenity_index) route TRANSITIVELY through to_drawdown_series/sharpe/sortino/cvar and cannot be closed by prepare_returns=False; they need P114 inline mirrors. See 159-05-SUMMARY.md section 'Residual'.",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-08-21T11:36:18.506Z",
+    "resolved_at": "2026-09-24T20:53:28.996Z"
+  },
+  {
+    "id": 6,
+    "kind": "unrun-verify",
+    "phase": "159",
+    "file": "src/app/(dashboard)/discovery/[slug]/[strategyId]/page.tsx",
+    "line": null,
+    "description": "159-03 narrowed getStrategyDetail to the discovery projection; the composite (dqf.composite===true) render branch was never exercised against real composite data — no dev-server spot-check was possible (worktree has no .env; TEST rows have null sparklines). Render one composite strategy on /discovery/<slug>/<id> before ship.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-08-21T13:37:00.684Z",
+    "resolved_at": null
+  },
+  {
+    "id": 7,
+    "kind": "unmet-truth",
+    "phase": "159",
+    "file": "src/lib/queries.ts",
+    "line": null,
+    "description": "RANK-02's literal truth ('metrics_json absent from every anon-reachable response') does NOT hold: STRATEGY_V2_ANALYTICS_COLUMNS (anon /strategy/[id]/v2) and getFactsheetDetail (tearsheet) both project metrics_json, and data_quality_flags in v2's case. Both are load-bearing — removing them is a visual regression. Either scope RANK-02 to the splat class (as D-02 words it) or open a follow-up for an RPC/alias-set design.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-08-21T13:37:00.898Z",
+    "resolved_at": null
+  },
+  {
+    "id": 8,
+    "kind": "unrun-verify",
+    "phase": "159",
+    "file": "supabase/tests/test_get_verified_cohort_rank_gate.sql",
+    "line": null,
+    "description": "The two GATE assertions (1: occurrence count; 4a/4b: behavioural + anti-vacuity flip) have never run ARMED: TEST receives migration 20260821120000 only after merge, so on this PR the test takes its state-adaptive SKIP path. Mitigation shipped in 4d04d719 — assertions 2a/2b/3 (SECURITY DEFINER, search_path pin, anon-EXECUTE) were moved ABOVE the skip and DO run on this PR — but the gate arms only on the first post-merge sql-tests run. Say 'would have caught', never 'did catch', until that run is green.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-08-21T14:29:27.024Z",
+    "resolved_at": null
+  },
+  {
+    "id": 9,
+    "kind": "deviation",
+    "phase": "159",
+    "file": "analytics-service/services/metrics.py",
+    "line": null,
+    "description": "RANK-05 residual SUPPLEMENT (review specialist re-measurement, 2026-08-23): the open compute_qstats_scalars surface PERSISTS wrong values into the same metrics_json the phase guards — measured on the phase's own trigger fixture: ulcer_index=0.9947, common_sense_ratio=0.0, recovery_factor=2.0737, upi=2.9999, serenity_index=0.3204 for a 60-day all-winning series whose max_drawdown correctly reads 0.0. Signature sweep (in-env): recovery_factor, kelly_criterion, common_sense_ratio, cpc_index, r_squared ACCEPT prepare_returns= (kwarg-closable); ulcer_index/upi/serenity_index reach _prepare_prices transitively via to_drawdown_series (need P114 inline mirrors). Also: the region gate is structurally blind to the getattr(qs.stats, attr) dispatch at metrics.py:1815 — the follow-up must teach the scan that shape and add _rolling_alpha_beta (rolling_greeks lacks prepare_returns=False; feeds rendered chart series). Test stubs in the 2026-08-23 review transcript.",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-08-23T12:41:34.945Z",
+    "resolved_at": "2026-09-24T20:53:29.099Z"
+  },
+  {
+    "id": 10,
+    "kind": "deviation",
+    "phase": "160",
+    "file": "src/components/strategy/ApiKeyManager.tsx",
+    "line": null,
+    "description": "160-02: if (newKey) silent-skip replaced with a loud throw on a 2xx carrying no api_key_id; link+sync blocks dedented (content byte-preserved)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-08-23T15:59:31.524Z",
+    "resolved_at": null
+  },
+  {
+    "id": 11,
+    "kind": "deviation",
+    "phase": "161",
+    "file": "src/lib/wizardErrors.ts",
+    "line": null,
+    "description": "161-05: KEY_ORPHANED's UI-SPEC remedy bullet was replaced — no manager-facing surface can release an orphaned api_key (D-161-05-A)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-08-24T11:53:32.055Z",
+    "resolved_at": null
+  },
+  {
+    "id": 12,
+    "kind": "deviation",
+    "phase": "161",
+    "file": "src/app/api/strategies/create-with-key/route.ts",
+    "line": null,
+    "description": "161-05: orphaned MT5 connect waits out the full 120s validate before the KEY_ORPHANED refusal (D-161-05-B)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-08-24T11:53:39.722Z",
+    "resolved_at": null
+  },
+  {
+    "id": 13,
+    "kind": "unrun-verify",
+    "phase": "161",
+    "file": ".planning/phases/161-wizerr-honest-error-surfaces/161-06-PLAN.md",
+    "line": null,
+    "description": "161-06 backstop truth unverified: the rendered wait sentence's wrap/no-clipping on the E2 key-connect envelope — no renderer touched this plan",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-08-24T12:23:07.786Z",
+    "resolved_at": null
+  },
+  {
+    "id": 14,
+    "kind": "unrun-verify",
+    "phase": "161",
+    "file": "src/app/(dashboard)/allocations/components/AllocateDialog.tsx",
+    "line": null,
+    "description": "E5 residue: founder eyes-on pass on the real Allocate dialog in Safari is unverified; layout measured only in Chromium on reproduced Modal/ErrorEnvelope markup (result: scrolls, does not clip)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-08-24T21:01:39.389Z",
+    "resolved_at": null
+  },
+  {
+    "id": 15,
+    "kind": "unrun-verify",
+    "phase": "161.1",
+    "file": "supabase/tests/test_ledger_refresh_fanout.sql",
+    "line": null,
+    "description": "Both phase SQL gates were run on a local Supabase harness, not against the real TEST project (TEST_SUPABASE_DB_URL is a CI secret, psql absent). Blocking CI sql-tests job covers this on PR.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-08-25T10:34:25.695Z",
+    "resolved_at": null
+  },
+  {
+    "id": 16,
+    "kind": "deviation",
+    "phase": "162",
+    "file": "src/app/(dashboard)/strategies/new/wizard/steps/SyncPreviewStep.composite.render.test.tsx",
+    "line": null,
+    "description": "Composite failure envelope no longer names the failing member; restoring it needs a structured member field, not a free-text column (deferred-items.md D1)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-08-25T23:20:00.011Z",
+    "resolved_at": null
+  },
+  {
+    "id": 17,
+    "kind": "unrun-verify",
+    "phase": "162",
+    "file": ".planning/phases/162-honest-what-the-user-sees-is-true/162-08-PLAN.md",
+    "line": null,
+    "description": "Plan 162-08 Task 1 (D-162-1) NOT EXECUTED: the PROD write lane is unreachable — the harness classifier denies reading the service-role credential (network and plain file reads are allowed; three lanes tried). 15/15 published is_example rows remain computation_status=failed since 2026-05-27; 0 recomputed, 0 unpublished, 0 touched. Also unexecuted: the repair enqueue for the 2 raw-exception-text rows. Selected mechanism plus the one unmeasured precondition (csv_daily_returns population) are recorded in 162-CENSUS.md.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-08-25T23:44:15.573Z",
+    "resolved_at": null
+  },
+  {
+    "id": 18,
+    "kind": "unmet-truth",
+    "phase": "162",
+    "file": ".planning/phases/162-honest-what-the-user-sees-is-true/162-08-PLAN.md",
+    "line": null,
+    "description": "162-08 backstop truth is only HALF evidenced. Code half: proven at the seam (StrategyTable.stale-analytics 16/16, both HONEST-03 guards witnessed RED by neuter+restore). Data half: absent — the 15 example rows are still failed and still published, so discovery renders no Synced badge on them but is still not honest about them. An unevidenced backstop routes to human_needed; this one must not be read as a pass.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-08-25T23:44:25.891Z",
+    "resolved_at": null
+  },
+  {
+    "id": 19,
+    "kind": "deviation",
+    "phase": "162",
+    "file": "src/app/(dashboard)/allocations/components/ScenarioComposer.tsx",
+    "line": null,
+    "description": "RESTORED (originally recorded 2026-08-25T22:28:18.784Z by plan 162-04; lost from the ledger JSON by a concurrent-append race and re-added by 162-08). 162-04: metric pair now renders in all five C-4 states (previously hidden when both null); two existing SCEN-03 assertions updated accordingly",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-08-25T23:45:43.649Z",
+    "resolved_at": null
+  },
+  {
+    "id": 20,
+    "kind": "deviation",
+    "phase": "162",
+    "file": "src/components/strategy/StrategyGrid.tsx",
+    "line": 117,
+    "description": "RESTORED WITH A CORRECTED REASON (originally recorded 2026-08-25T22:26:27.302Z by plan 162-03; lost from the ledger JSON by a concurrent-append race). Original text said 'SyncBadge still ungated on computation_status (is_example guard added; consumer-less component)'. Re-measured at HEAD 2026-08-26: 'consumer-less' is FALSE (StrategyTable.tsx:1421 renders StrategyGrid, and grid is discovery-only by founder ruling at StrategyTable.tsx:387-398). The real gap is narrower: the grid gate has the is_example half and lacks the hasComputedAnalytics half the table carries (StrategyTable.tsx:982-983). NOT user-visible — shapeRowAnalytics blanks computed_at to empty for non-terminal-success rows — so guard-hygiene, not blocking. Filed with full reasoning in TODOS.md under 'Phase 162 (HONEST) — plan 162-08 filings'.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-08-25T23:45:55.414Z",
+    "resolved_at": null
+  },
+  {
+    "id": 21,
+    "kind": "deviation",
+    "phase": "163",
+    "file": ".planning/REQUIREMENTS.md",
+    "line": null,
+    "description": "SEC-02 checkbox left unchecked by plan instruction — status is the phase verifier's call",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-08-26T12:32:31.476Z",
+    "resolved_at": "2026-09-05T17:36:27.539Z"
+  },
+  {
+    "id": 22,
+    "kind": "unrun-verify",
+    "phase": "164",
+    "file": "src/instrumentation.ts",
+    "line": null,
+    "description": "Sentry token scrub proven only at wiring+transform level; a REAL captured event on a deployed token URL is unread (164-CONTEXT.md Blocker 3 mandates it) — post-deploy UAT",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-08-27T22:54:22.410Z",
+    "resolved_at": null
+  },
+  {
+    "id": 23,
+    "kind": "deviation",
+    "phase": "164",
+    "file": "src/app/factsheet-share/gone/route.ts",
+    "line": 77,
+    "description": "164-01 comment + test name repeat the FALSE claim that Referrer-Policy 'does not strip' the path; the header is correct, the stated reason is not. Needs a one-line correction pass.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-08-27T22:54:30.377Z",
+    "resolved_at": null
+  },
+  {
+    "id": 24,
+    "kind": "unrun-verify",
+    "phase": "164",
+    "file": "src/app/PlausibleScript.tsx",
+    "line": null,
+    "description": "Plausible withdrawal proven in jsdom markup only; the deployed check (network panel filtered to plausible.io shows ZERO requests on a token link) is post-deploy UAT",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-08-27T22:54:37.686Z",
+    "resolved_at": null
+  },
+  {
+    "id": 25,
+    "kind": "unrun-verify",
+    "phase": "164.3",
+    "file": "scripts/prod-body-drift-check.sh",
+    "line": null,
+    "description": "VAC-04's first real-PROD execution pends the next migrations PR; the live supabase db dump path is stub-proven only — ✅ DISPOSITIONED 2026-09-10 FROM MEASUREMENT (164.7 plan 06): it executed on PR #756, run 34146946050, job 101820921298, head 7c9aea64, 2026-09-07T17:17Z. Log carries `Drift-check credentials present.`, `Functions indexed in the PROD source: 120 (union of two independent readings)` and `4 body comparison(s) — 2 match, 2 acknowledged drift, 1 measured-absent (new)`. The live dump path is no longer stub-proven. Evidence: 164.7-VAC04-OBSERVED.md",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-08-29T02:10:57.580Z",
+    "resolved_at": "2026-09-10T15:30:00.000Z"
+  },
+  {
+    "id": 26,
+    "kind": "unrun-verify",
+    "phase": "164.3",
+    "file": "scripts/test-ledger-drift-check.sh",
+    "line": null,
+    "description": "VAC-08's first real-TEST execution pends the next CI run of this branch; the name-joined schema_migrations query and pg_get_functiondef read are stub-proven only (this plan may not write to the shared TEST database)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-08-29T02:11:06.140Z",
+    "resolved_at": null
+  },
+  {
+    "id": 27,
+    "kind": "unmet-truth",
+    "phase": "164.3",
+    "file": "scripts/mutation-runner/run.mjs",
+    "line": 123,
+    "description": "ARMS_FLOOR ships at 0 and therefore cannot fire; plan 164.3-08 must pin it from the first full-corpus measurement",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-08-29T02:54:49.352Z",
+    "resolved_at": "2026-08-29T08:58:19.520Z"
+  },
+  {
+    "id": 28,
+    "kind": "unrun-verify",
+    "phase": "164.3",
+    "file": ".github/workflows/ci.yml",
+    "line": null,
+    "description": "sql-mutation's first ubuntu execution pends the first CI run of this branch: RESEARCH assumption A1 (PostgreSQL 16 server binaries under /usr/lib/postgresql/<major>/bin) has never been measured — the lane, the runner and the job were all built on macOS, where the probe reports no such glob. A red first run names a real portability defect.",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-08-29T09:24:22.877Z",
+    "resolved_at": "2026-09-05T17:36:27.645Z"
+  },
+  {
+    "id": 29,
+    "kind": "unmet-truth",
+    "phase": "164.3",
+    "file": "supabase/schema/baseline.sql",
+    "line": null,
+    "description": "supabase/schema/baseline.sql is committed with NO staleness gate AND NO consumer. sql-function-snapshot.yml gates supabase/schema/functions/; nothing gates this file, so production can drift from it silently. CORRECTED 2026-08-29 (WR-04/G1): this entry previously said 'the lane would keep loading stale bytes as if current', which described a wiring that does not exist — scripts/local-stack/run.sh:50 reads the gitignored scripts/local-stack/baseline.sql, so `run.sh up` exits 1 FATAL and reads nothing. Phase 164.5 owns all three together: repoint run.sh, drop .gitignore:138, and build the --check gate (including a sha256 assertion against BASELINE.md's recorded hash). Mind the 2.84.2-vs-2.98.2 pg_dump formatting skew when doing so.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-08-29T11:35:00.000Z",
+    "resolved_at": null
+  },
+  {
+    "id": 30,
+    "kind": "unmet-truth",
+    "phase": "164.3.1",
+    "file": "src/__tests__/self-referential-oracle.test.ts",
+    "line": null,
+    "description": "The Primitive-D self-referential-oracle AST gate ships REPORT-ONLY in plan 164.3.1-02 and blocks NOTHING until plan 164.3.1-08 flips it. Until that flip lands, a new self-referential assertion can enter the tree and the gate will print a finding without failing the suite. SC-5's calibration half is met (the rule was observed flagging src/__tests__/lint-sql-gates.test.ts:183-184 at HEAD before the site was fixed); the enforcing half is 08's.",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-09-01T18:30:00.000Z",
+    "resolved_at": "2026-09-05T17:36:27.743Z"
+  },
+  {
+    "id": 31,
+    "kind": "unmet-truth",
+    "phase": "164.3.1",
+    "file": "src/__tests__/self-referential-oracle.test.ts",
+    "line": null,
+    "description": "MEASURED at HEAD by plan 164.3.1-02: the rule reports 23 findings across 14 files of 128 scanned, and 19 of those are one shared false-positive mechanism - the accumulator idiom (const offenders: string[] = [] -> loop pushes -> expect(offenders).toEqual([])), which CAN fail and is not a primitive-D instance. 2 are the real target and 2 are type-level contracts in types-design-tests.test.ts that genuinely cannot fail at runtime. The rule was deliberately NOT narrowed after the count was seen - tuning a detector to produce a comfortable number is itself the self-referential move this phase exists to stop. Plan 164.3.1-08 must decide explicitly: teach mutation-awareness and re-measure and re-run the fire proof, OR allowlist the 19 by their shared mechanism with the measurement recorded. Detail in 164.3.1-02-CALIBRATION.md section III.a.",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-09-01T18:30:00.000Z",
+    "resolved_at": "2026-09-05T17:36:27.843Z"
+  },
+  {
+    "id": 32,
+    "kind": "deviation",
+    "phase": "164.4.1",
+    "file": "supabase/tests/test_reconcile_dropped_enqueue_sweep.sql",
+    "line": null,
+    "description": "5 of 39 sections use GATE-FILE falsifiers (3 oracle preconditions dominated by Part 1, 1 seed-integrity control dominated by Part 2 arm A, 1 sum-of-pinned-counts whole-block invariant); each carries its domination measurement at the site",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-09-05T10:00:09.888Z",
+    "resolved_at": "2026-09-05T14:57:19.045Z"
+  },
+  {
+    "id": 33,
+    "kind": "todo",
+    "phase": "164.1",
+    "file": "scripts/prod-prober/arms/pyapi06.mjs",
+    "line": null,
+    "description": "PYAPI-06 arm does not classify a 401 carrying SERVICE_KEY_ABSENT in response to a PRESENT-but-wrong key (the service conflating absent with mismatched); it needs a 21st defect kind and DEFECT_KINDS is pinned at 20 by the plan-05 wiring test. Limit is documented in the arm header; plan 02's Python-half neuter test is the control.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-05T21:56:43.339Z",
+    "resolved_at": null
+  },
+  {
+    "id": 34,
+    "kind": "deviation",
+    "phase": "164.1",
+    "file": "scripts/prod-prober/arms/cron-obs.mjs",
+    "line": null,
+    "description": "cron-obs: an UNPARSABLE (non-null, non-empty) pg_net.ttl falls back to the documented 6h default with a printed note, rather than being a measure-fail — so a malformed TTL leaves the 3h scan window unclamped in the one direction that under-reports (pruned responses read as missing). Deliberate fail-open with a loud print; revisit if a real TTL ever fails to parse.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-05T22:52:35.873Z",
+    "resolved_at": null
+  },
+  {
+    "id": 35,
+    "kind": "deviation",
+    "phase": "164.1",
+    "file": "scripts/prod-prober/arms/cron-drift.mjs",
+    "line": null,
+    "description": "cron-drift: hygieneViolations never runs on a WITHHELD manifest row (command_withheld: true), by design — the row was read by a human at capture time. The gap is that a reviewer could withhold a row precisely to keep a dirty command out of the gate's reach; nothing mechanical prevents that. captureManifest still refuses to WRITE a dirty row, so the gap only opens if someone hand-edits the committed manifest.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-05T22:52:35.974Z",
+    "resolved_at": null
+  },
+  {
+    "id": 36,
+    "kind": "deviation",
+    "phase": "164.1",
+    "file": "scripts/prod-prober/run.mjs",
+    "line": null,
+    "description": "makeScrubber (plan 01) replaces EVERY occurrence of a requiredEnv VALUE anywhere in the output, with no minimum length. MEASURED during plan 03: with a one-character SUPABASE_DB_PASSWORD ('z') the log line 'cron-drift: database marker = quantalyze-fixture-db' printed as 'quantaly<redacted>e-fixture-db'. Fail-SAFE (it over-redacts, never under-redacts) and unreachable with a realistic credential, but it can mangle unrelated text. Out of plan 03's task scope (plan 01 owns the scrubber); recorded rather than fixed.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-05T22:53:36.531Z",
+    "resolved_at": null
+  },
+  {
+    "id": 37,
+    "kind": "deviation",
+    "phase": "164.1",
+    "file": "scripts/prod-prober/run.mjs",
+    "line": null,
+    "description": "makeScrubber over the mt5 arm's requiredEnv redacts ORDINARY WORDS in a live run. The mt5 arm must declare RAILWAY_PROJECT_ID / RAILWAY_MT5_SERVICE / RAILWAY_ENVIRONMENT as requiredEnv (D-06: an absent one is credential-absent, and they are 3 of the 10 slots the live run reports), but their LIVE values are 'production' and 'mt5-gateway' — short, common strings. MEASURED at plan 04: a defect detail carrying the CLI's stderr printed as 'the <redacted> relay refused the <redacted> session'. Fail-SAFE (over-redacts, never under-redacts) but it degrades the mt5-ssh-transport diagnostic, which is the one row an operator reads when the transport is broken. Extends WINDOWS entry 36 (plan 03's one-char case) with a value that is realistic rather than pathological. Not fixed here: the scrubber is plan 01's and classifying names as secret-vs-identifier is a change to a security control, out of this plan's task scope. ⭐ CLOSED 2026-09-06: fixed by NON_SECRET_ENV (run.mjs) — an allowlist BY NAME of the three Railway public identifiers, all GitHub vars that already appear verbatim in prod-prober.yml. Proven by self-test scenario 51, which uses the REAL live values ('mt5-gateway', 'production') and a SHORT secret; neutering the allowlist skip reproduces this entry's exact string and the scenario goes RED. ⛔ Entry 36 is left OPEN ON PURPOSE: a minimum-length exemption would have been fail-OPEN on a short real secret, so the mangling it describes is the deliberate fail-safe cost.",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-09-05T23:24:29.360Z",
+    "resolved_at": null
+  },
+  {
+    "id": 38,
+    "kind": "unrun-verify",
+    "phase": "164.1",
+    "file": ".github/workflows/prod-prober.yml",
+    "line": null,
+    "description": "prod-prober.yml has NEVER been dispatched: plan 05 was instructed not to touch live infrastructure, so the credential-assert step, the supabase link + masked pooler export, the checksum-verified Railway CLI install and all four live arms are unexecuted on a GitHub-hosted runner. Whether the stored workspace-scoped RAILWAY_API_TOKEN authenticates railway ssh non-interactively from a hosted runner is likewise unmeasured (CONTEXT's own open question). Plan 164.1-06 owns the single first dispatch.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-05T23:44:43.987Z",
+    "resolved_at": null
+  },
+  {
+    "id": 39,
+    "kind": "unrun-verify",
+    "phase": "164.2",
+    "file": "supabase/tests/test_sync_status_curated_sentence_survives.sql",
+    "line": null,
+    "description": "The new gate is UNRUN on shared TEST and will report TEST FAILED (0) there from this PR's first CI run, alongside plan 06's TEST FAILED (0c), until 20260906120000_computation_error_provenance.sql is hand-applied to TEST. Nothing applies migrations to TEST (sql-tests has no apply step; the migrate workflow is PROD-only), so this is EXPECTED and is NOT a coupling regression - the three coupled gates' arms never read the new columns and stay green. Remedy booked as [164.2-TEST-APPLY-PROVENANCE] in TODOS.md: the which-database marker query against TEST_SUPABASE_DB_URL FIRST, then psql -f, never supabase db push (this checkout's CLI is linked to PROD).",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-06T17:20:07.111Z",
+    "resolved_at": null
+  },
+  {
+    "id": 40,
+    "kind": "deviation",
+    "phase": "164.2",
+    "file": ".planning/WINDOWS.md",
+    "line": null,
+    "description": "This ledger refused every append during phase 164.2 - plans 06, 07 and 10 each recorded their deviations in their SUMMARY instead. Cause, found by the orchestrator 2026-09-06: row 37's RENDERED TABLE cell carried a closing paragraph (the NON_SECRET_ENV fix, dated 2026-09-06) that the FENCED JSON description did not, so the two sides disagreed and the writer refused. The table was hand-edited without the JSON. Repaired by syncing the JSON description to the table text (a clean prefix, +568 chars); no table cell was hand-edited, and the repair was validated by asserting the prefix invariant before writing. Lesson: hand-editing the rendered table silently disables the ledger for every later phase.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-06T17:20:07.208Z",
+    "resolved_at": null
+  },
+  {
+    "id": 41,
+    "kind": "deviation",
+    "phase": "164.2.1",
+    "file": "src/app/(dashboard)/allocations/components/ContributionWizardOverlay.sessionid-fence.test.tsx",
+    "line": null,
+    "description": "Plan 01 deviated (Rule 3): the spec installs explicit storage doubles instead of the preselect spec's guarded clear — on Node 25 window.localStorage.setItem is not a function, writeWizardState swallows it, and the seed silently never existed (SC-1c was passing vacuously). Fixed and pinned by an applied-ness probe; recorded, not open.",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-09-07T02:08:54.153Z",
+    "resolved_at": "2026-09-07T02:09:16.275Z"
+  },
+  {
+    "id": 42,
+    "kind": "deviation",
+    "phase": "164.2.1",
+    "file": ".planning/phases/164.2.1-sessionid-fence/164.2.1-02-PLAN.md",
+    "line": null,
+    "description": "Plan 02 deviated (Rule 3): 8 pre-existing LOCAL-USERNAME violations (the local machine username inside home-directory paths) in this phase's own 01-PLAN/02-PLAN/RESEARCH artifacts reddened check-planning-hygiene and therefore the full suite. Introduced by planning commit bedda506, an ancestor of plan 02's base; wave 1 never ran the full suite so it had not surfaced. The scanner derives its needle from the live USER, so on CI (USER=runner) it never fires - a local-only gate. Fixed at the cause with the repo's own <user> placeholder convention (9 existing .planning files already carry /Users/<user>/ and -Users-<user>-, including <automated> verify commands). Planning artifacts only; no source file, test, criterion or verify command was weakened. Recorded, not open.",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-09-07T02:28:20.652Z",
+    "resolved_at": "2026-09-07T02:28:47.667Z"
+  },
+  {
+    "id": 43,
+    "kind": "unmet-truth",
+    "phase": "164.2.1",
+    "file": "src/app/(dashboard)/allocations/components/ScenarioCommitDrawer.test.tsx",
+    "line": null,
+    "description": "FLAKY under full-suite load — a green full suite is therefore not a reliable truth on this file. 'focus management — pre-flight portal + failure transition > submitting → failure transition moves focus to the error banner' failed once in npm test (843 passed | 1 failed), then passed on an immediate identical re-run (844 passed | 14217 tests, exit 0). NOT a 164.2.1 regression, MEASURED not assumed: the file is UNTOUCHED by this phase (git diff --name-only vs merge-base is empty), it is 49/49 green in isolation, and it was green in the pre-wave full run. jsdom focus assertions are timing-sensitive and this component animates. Recorded so the next person who sees a lone red here does not bisect a phase that did not cause it, and so the underlying timing dependence is not mistaken for noise forever.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-07T07:02:20.270Z",
+    "resolved_at": null
+  },
+  {
+    "id": 44,
+    "kind": "unrun-verify",
+    "phase": "164.7",
+    "file": ".github/workflows/ci.yml",
+    "line": null,
+    "description": "sql-gate-lint's two new app-GUC steps have never run on ubuntu; the corpus step is RED by design (12 findings/5 files) until 164.7-05 annotates the tree, so no push or workflow_dispatch is permitted before then",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-07T10:11:28.312Z",
+    "resolved_at": null
+  },
+  {
+    "id": 45,
+    "kind": "deviation",
+    "phase": "164.7",
+    "file": "supabase/tests/test_analytics_service_settings_and_vault_tick.sql",
+    "line": null,
+    "description": "MEASURED: a DROP POLICY <t>_service_all mutation twin is UNFALSIFIABLE repo-wide — service_role is BYPASSRLS on the pg-lane and on Supabase, so every *_service_all policy is belt-and-braces and no twin of that shape can bite (no-red R3, 164.7-02-NEUTER.log Part B2). Any existing arm relying on one is worth re-measuring.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-07T10:18:29.567Z",
+    "resolved_at": null
+  },
+  {
+    "id": 46,
+    "kind": "deviation",
+    "phase": "164.7",
+    "file": ".planning/phases/164.7-appsettings-every-app-guc-reader-moves-to-a-mechanism-this-p/deferred-items.md",
+    "line": null,
+    "description": "npm run lint is RED on the 164.7 branch: 86 planning-hygiene violations (ABSOLUTE-HOME-PATH / SCRATCH-HOME-PATH / LOCAL-USERNAME) across 13 of the phase's OWN plan, summary and neuter files, leaking the local username on a public repo. Predates plan 05 (git diff over those files vs d193e4cd is empty). Remedy edits three PENDING plans, so plan 05 recorded it instead of fixing it; owner is plan 06. See deferred-items.md D-164.7-05-1.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-07T12:29:08.213Z",
+    "resolved_at": null
+  },
+  {
+    "id": 47,
+    "kind": "unrun-verify",
+    "phase": "164.5",
+    "file": "scripts/prod-body-drift-check.sh",
+    "line": null,
+    "description": "DRIFT-05 gate (b) --baseline-live has never run against the real PROD credential; its first credentialed run is predicted red (see TODOS [DRIFT-05B-FIRST-RUN]) and that prediction is reasoning from dates, not a reading of PROD.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-07T19:11:20.760Z",
+    "resolved_at": null
+  },
+  {
+    "id": 48,
+    "kind": "unrun-verify",
+    "phase": "164.5",
+    "file": "scripts/local-stack/run.sh",
+    "line": null,
+    "description": "run.sh up boots and loads the committed baseline on Supabase CLI 2.84.2 (measured 2026-09-07, macOS, 4 legs exit 0), but NOTHING in .github/workflows/ invokes the lane and the CI-pinned CLI 2.98.2 has never started this stack or loaded this dump. Criterion 1 is proven on one developer box only.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-07T19:02:48.367Z",
+    "resolved_at": null
+  },
+  {
+    "id": 49,
+    "kind": "unrun-verify",
+    "phase": "164.5",
+    "file": ".github/workflows/sql-function-snapshot.yml",
+    "line": null,
+    "description": "The two new baseline co-edit gate steps have never been executed by GitHub Actions. actionlint 1.7.12 (exit 0) and a js-yaml parse prove the file is valid and the step order is intended; neither proves the snapshot-drift job runs green on ubuntu. A SHA-bound run is owed at PR time.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-07T19:04:26.108Z",
+    "resolved_at": null
+  },
+  {
+    "id": 50,
+    "kind": "unrun-verify",
+    "phase": "164.5",
+    "file": ".planning/phases/164.5-baseline-snapshot-the-committed-prod-schema-baseline-becomes/164.5-03-PLAN.md",
+    "line": null,
+    "description": "164.5-03: full serialized vitest run NOT executed — the plan scopes it to before the wave merges and the box is shared with concurrent wave-1 executors (contention fakes regressions). Targeted, contracts/ and all ci.yml-reading suites were run instead.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-07T19:07:20.161Z",
+    "resolved_at": null
+  },
+  {
+    "id": 51,
+    "kind": "unrun-verify",
+    "phase": "164.6.4",
+    "file": "analytics-service/services/mt5_session_episodes.py",
+    "line": null,
+    "description": "A4 POST-DEPLOY: no Python has ever written to public.cron_runs. READ THE FIRST ROW BACK on the first deploy rather than assuming the service-role INSERT lands; the table+policy pair is the untested surface, and a failure loses criterion 1's lifetime dataset while the heal itself keeps working.",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-09-15T21:45:02.884Z",
+    "resolved_at": "2026-09-16T07:20:33.058Z"
+  },
+  {
+    "id": 52,
+    "kind": "unrun-verify",
+    "phase": "164.6.4",
+    "file": "analytics-service/services/mt5_session_monitor.py",
+    "line": null,
+    "description": "A2 POST-DEPLOY: the tick opens a FRESH rpyc client per tick and closes it in a finally. At the 600s default that is ~144 connections/day against a gateway container already at a three-digit thread counter. CRITERION CORRECTED 2026-09-16, and the original could never pass: it asked that the thread counter NOT climb monotonically with tick count, but CPython names threads from a globally monotonic counter and rpyc ThreadedServer spawns one thread per connection, so the number climbs once per connection whether or not threads are reaped. The real falsifier is welcome versus goodbye in the mt5-gateway log, scoped to the CURRENT process (everything after the last server-started line): a leak is welcome running ahead of goodbye with the gap GROWING across two readings hours apart. A container restart resets the counter to Thread-1 and invalidates the pair, so re-scope before comparing. BASELINE 2026-09-16T06:50Z, pre-keepalive: max Thread-27, welcome 27, goodbye 27, 0 unclosed, ~36 conn/day over 18h. READING 2 at 07:17Z: Thread-30, welcome 30, goodbye 30, 0 unclosed; the +3 equals boot heal plus two ticks, which confirms the 600s cadence but is far too small a sample to clear a slow leak. The hours-apart reading still stands. A4 fails semi-loudly; this would degrade the gateway SILENTLY over days.",
+    "status": "fixed",
+    "reason": "VERIFIED CLOSED 2026-09-22 by the owed hours-apart reading, taken 6 days 18h after the baseline on the SAME process (one server-started line in the window, single deployment, so the counter was never reset and the pair is valid). Reading 3 at 2026-09-22T01:36:42Z: max Thread-1039, frontier welcome and goodbye both present, 0 unclosed, ~1012 cumulative connections since the baseline. Two sampled windows checked for thread-id CONTIGUITY, not just equal totals: 2026-09-21T00:00Z-06:00Z ids Thread-856..902 on both sides (47/47) and 2026-09-22T00:00Z-01:37Z ids Thread-1020..1039 on both sides (20/20), no gaps either time. Gap 0 at baseline and 0 at reading 3, so it is NOT growing, which is the stated falsifier. A one-in-twenty leak would have left ~50 unclosed threads in 1012. The gateway reaps its per-connection rpyc threads. Verdicts and counts only: peer addresses and ports are not reproduced, this repo is PUBLIC.",
+    "recorded_at": "2026-09-15T21:45:24.003Z",
+    "resolved_at": "2026-09-22T00:00:00.000Z"
+  },
+  {
+    "id": 53,
+    "kind": "unrun-verify",
+    "phase": "164.6.4",
+    "file": "analytics-service/services/mt5_session_monitor.py",
+    "line": null,
+    "description": "Criterion 2 POST-DEPLOY cross-check: reconcile this detector's recorded episodes against the INDEPENDENT hourly prod-prober, so the new instrument is not the only witness to its own claims.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-15T21:45:24.211Z",
+    "resolved_at": null
+  },
+  {
+    "id": 54,
+    "kind": "deviation",
+    "phase": "164.5.1",
+    "file": "analytics-service/tests/test_match_router.py",
+    "line": null,
+    "description": "pytest-timeout plugin absent from project deps; substituted OS-level timeout wrapper for task 3 full-suite verify (--timeout=600 flag)",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-16T16:36:49.788Z",
+    "resolved_at": null
+  },
+  {
+    "id": 55,
+    "kind": "deviation",
+    "phase": "164.5.1",
+    "file": ".planning/config.json",
+    "line": null,
+    "description": "parallelization:true in .planning/config.json was NOT the effective value for phase 164.5.1 — every wave ran SEQUENTIALLY, and the reason GSD gave for it is MEASURABLY FALSE. `worktree base-check` returned shouldDegrade:true / baseref-head-ignored-by-harness, asserting the harness forks worktrees from origin/HEAD (main at de66d1b0, 27 commits behind). MEASURED 2026-09-16 on Claude Code 2.1.265 by spawning a throwaway isolation:\"worktree\" agent: CLAUDE_BASE == 4bd9028f == the orchestrator's own HEAD (0 commits distance), the phase PLAN.md files were PRESENT in the worktree, and SELF_TEST_SCENARIOS read 81 (the post-plan-04 value) where origin/HEAD still has 80. The harness forks from HEAD; it was fixed upstream in Claude Code 2.1.128 (anthropics/claude-code#27134 -> #54940). GSD's degrade rests on the hardcoded line `headIgnoredByHarness = deps?.effectiveBaseRef === 'head'` in bin/lib/worktree-base-ref.cjs, which infers the harness's behaviour from the SETTING HAVING A VALUE and never inspects the real fork base. Already filed by us as open-gsd/gsd-core#4588 (opened 2026-09-09, labels bug + confirmed-bug, OPEN); this entry is a fresh reproduction on 2.1.265. Note the loop #4588 records: GSD's own `worktree apply-base-ref` writes worktree.baseRef:\"head\" into project-local .claude/settings.local.json, and that is exactly the layer the evaluator treats as proof the harness ignores it — applying the documented mitigation is what selects the degrade. The wave labels in this phase remain CORRECT as dependency statements; they were never a concurrency guarantee. INDEPENDENT of all this and still true: analytics-service/.venv is gitignored, so it is absent in any worktree and the dead pytest path exits 0 through an echo (false green) — plans 02/05/06 belonged on the main checkout regardless. Only plan 07 (vitest-only) could have run isolated in parallel; not taken, to avoid running an untested merge-back path mid-phase across the 81->82 renumber. Do NOT read wave:2 in this phase as evidence that 05/06/07 ran concurrently.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-16T18:05:09.913Z",
+    "resolved_at": null
+  },
+  {
+    "id": 56,
+    "kind": "unrun-verify",
+    "phase": "164.5.1",
+    "file": "src/__tests__/contracts/analytics-deploy-tree-compare.contract.test.ts, src/__tests__/lint-sql-gates.test.ts, src/__tests__/verify-plan-anchors.test.ts, src/lib/seam-venue-vocabulary.invariant.test.ts",
+    "line": null,
+    "description": "plan 164.5.1-07: full-suite npx vitest run is not green at HEAD due to 4 pre-existing, unrelated failures (network-dependent, timeout-sensitive, stale plan anchor, missing KILL_SWITCH_UNAVAILABLE TS disposition) — see phase deferred-items.md",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-16T19:13:36.708Z",
+    "resolved_at": null
+  },
+  {
+    "id": 57,
+    "kind": "deviation",
+    "phase": "164.5.3",
+    "file": ".planning/ROADMAP.md, .planning/STATE.md",
+    "line": null,
+    "description": "/gsd-phase --insert for the MT5CREDS phase deviated from the workflow in three MEASURED places, all recorded rather than silently absorbed. (1) NUMBERING: `phase.insert 164.5.1` computed **164.5.1.1** — a four-level number reading as a CHILD of the cron-repoint phase, which it is unrelated to. Re-run against the integer-level parent (`phase.insert 164.5`) yielded **164.5.3**, the correct SIBLING of 164.5.1/164.5.2. The stub block the first run wrote was reverted from a byte backup (cmp-verified) and its .gitkeep directory removed. (2) ORDERING: the CLI inserts the block immediately after the TARGET heading, so 164.5.3 landed at line 1357 — physically BEFORE 164.5.1 (1672) and 164.5.2 (1771). Moved by hand to line 1788, after 164.5.2 and before 164.6; the full diff against the pre-insert byte backup is exactly the 11 new lines, no collateral. (3) STATE POINTER: the workflow's `state.patch` step (Current Phase -> the inserted phase) was DELIBERATELY NOT RUN. Phase 164.5.1 is mid-flight — plan 09 and the D4 three-reviewer gate are still open — so repointing STATE.md at 164.5.3 would misdirect the next session away from an unfinished phase. `state.add-roadmap-evolution` WAS run per the try-gsd-tools-first rule and clobbered again, exactly as the memory predicts: alongside the one wanted line it injected ~100 blank lines, moved `current_phase: 159` out of the header into the progress block, rewrote the quoting of gsd_state_version/status/last_activity_desc, and recomputed progress 54% -> 36% (the -pr-filter under-count). Reverted from the byte backup and the single evolution line inserted by hand; the resulting STATE.md diff is exactly one added line.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-16T20:30:00.000Z",
+    "resolved_at": null
+  },
+  {
+    "id": 58,
+    "kind": "deviation",
+    "phase": "164.5.4",
+    "file": ".planning/ROADMAP.md, .planning/STATE.md",
+    "line": null,
+    "description": "Phase 164.5.4 MT5RECON-GAP was inserted with the SAME three deviations recorded in entry 57, handled the same way: (1) the block again landed immediately after the 164.5 heading, physically before 164.5.1/.2/.3, and was moved by hand to sit before 164.6 — diff against the pre-insert byte backup is exactly the 11 new lines, 0 removed; (2) the workflow's `state.patch` step was again DELIBERATELY NOT RUN, because 164.5.1 is still mid-flight (plan 09 + the D4 gate) and repointing STATE.md would misdirect the next session; (3) `state.add-roadmap-evolution` was NOT re-run this time and the evolution line was written by hand. ⚠️ That third point is a departure from the try-gsd-tools-first rule and is recorded as such: the clobber it is meant to detect was MEASURED on the identical operation against the identical file minutes earlier in the same session (entry 57 — ~100 injected blank lines, `current_phase` moved out of the header, quoting rewritten, progress recomputed 54% -> 36%), so re-running it only to revert it again would have measured nothing new. The resulting STATE.md diff is exactly one added line.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-16T20:36:00.000Z",
+    "resolved_at": null
+  },
+  {
+    "id": 59,
+    "kind": "deviation",
+    "phase": "164.5.1",
+    "file": "supabase/migrations/20260916120000_service_role_statement_timeout.sql, src/__tests__/service-role-statement-timeout-migration.test.ts, .planning/ROADMAP.md, .planning/phases/164.5.1-cronrepoint-the-live-match-engine-cron-row-is-repointed-at-t/164.5.1-CONTEXT.md, TODOS.md",
+    "line": null,
+    "description": "Phase 164.5.1 criterion 7 WITHDRAWN at the plan-09 D4 gate, and the withdrawal itself is the finding: the criterion rested on an ABSENCE read as a VALUE, and it survived a planner, a plan-checker, an executor and one full reviewer round before anyone measured it. The criterion and 164.5.1-CONTEXT.md/03-PLAN asserted that `service_role`'s NULL `pg_roles.rolconfig` means it 'inherits the 120000 ms database default'. MEASURED read-only on PROD 2026-09-16 (marker query first, all outputs in 164.5.1-PROD-SESSION.md): pg_db_role_setting carries anon 3s, authenticated 8s, authenticator 8s, and NO ROW AT ALL for service_role; the postgres database sets no timeout. PostgREST logs in as authenticator, so 8s lands on the session at login and the subsequent SET ROLE finds nothing to override it — the effective ceiling is 8s, meaning the planned 45s (briefly raised to 55s on a founder fix-first decision) would have LOOSENED it sevenfold across the whole service_role surface, the exact inverse of the recorded justification. ⛔ The phase's OWN 164.5.1-RESEARCH.md:441 had it right from the start, citing Supabase's docs verbatim: 'service_role: none (defaults to authenticator's 8s if unset)'. Two artifacts of one phase contradicted each other for three days and the unsourced inference won, because it was the one written into CONTEXT.md, which is what every downstream agent reads. INDEPENDENTLY sufficient second reason, found by the same reviewer: statement_timeout bounds ONE STATEMENT while the gateway 504 bounds ONE REQUEST, and cron_recompute() issues many short statements per request — the measured 44.67s is a request duration — so the conversion criterion 7 promised is unreachable by this mechanism regardless of the value; the Sentry evidence being 504s and never 57014 corroborates it. REMOVED from the branch: supabase/migrations/20260916120000_service_role_statement_timeout.sql and src/__tests__/service-role-statement-timeout-migration.test.ts (recoverable from commit 5acfb710; nothing ever reached origin/main, nothing was ever applied). Two stale live claims found in the same sweep and rebound to the real 60s gateway bound rather than deleted: analytics-service/services/db.py (retry budget described as 'strictly below the 45s statement_timeout') and analytics-service/tests/test_match_router.py's test_batch_budget_strictly_below_statement_timeout, which asserted `< 45.0` under a name claiming a statement_timeout nesting and stayed GREEN at 25 < 45 — a stale claim inside a gate, the worst place for one. ⭐ The intent is not lost: a REQUEST-level deadline plus explicit 504 classification is what criterion 9's batching already ships.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-16T20:52:00.000Z",
+    "resolved_at": null
+  },
+  {
+    "id": 60,
+    "kind": "deviation",
+    "phase": "164.5.1",
+    "file": ".planning/phases/164.5.1-cronrepoint-the-live-match-engine-cron-row-is-repointed-at-t/164.5.1-VERIFICATION.md",
+    "line": null,
+    "description": "SHIP PROCEEDED WITH verification.status: missing — explicit founder override 2026-09-17, NOT a green gate. ship:pre admits only 'passed'. Phase 164.5.1's goal is literally a PRODUCTION state (the live match_engine_cron row is repointed), so no repo-side verifier can reach 'passed' before the repoint; the repoint is plan 09, a founder-run live session whose own runbook Step 0 requires this branch MERGED AND DEPLOYED first. The gate is unsatisfiable before the act it gates. NOT overridden: pytest 5867/0; vitest (2 failures both pre-existing, both files 0 diff on this branch); prod-prober self-test 82/82; plan-anchor 24 claims; planning-hygiene 6448 files; and the ship:pre SECURITY gate, which passes on its own evidence (164.5.1-SECURITY.md, threats_open 0, re-evaluated by the orchestrator). No supabase/ diff exists, so no apply-test and no PROD apply gate were bypassed. RESOLVE BY: run the verifier after plan 09 executes; this closes when 164.5.1-VERIFICATION.md reports passed. ROOT CAUSE (gsd-core, not this repo): the security capability's PRODUCER hook sits at verify:post, which autonomous.md 3d.5 gates on 'Run only after passed', while its ENFORCER at ship:pre carries no such condition — any phase whose last plan needs a deploy deadlocks. Measured: 5 SECURITY.md repo-wide vs 14 VALIDATION.md, and the 5 are exactly the phases that reached passed.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-16T22:05:57.392Z",
+    "resolved_at": null
+  },
+  {
+    "id": 61,
+    "kind": "deviation",
+    "phase": "164.5.1",
+    "file": ".github/workflows/ci.yml",
+    "line": null,
+    "description": "THE CI SKIP TOKEN PROPAGATES THROUGH A SQUASH MERGE INTO main, and it cost two skipped pipelines in one session on 2026-09-17. Mechanism, measured twice: (1) a commit message that writes the literal token ANYWHERE — including inside a sentence saying it is NOT being used — suppresses every workflow run for that SHA; the PR board then shows only the two Vercel checks, which reads as a CLEAN board rather than an ABSENT one. (2) The documented recovery (push a token-free commit so a new head triggers the pipelines) fixes the PR branch ONLY. GitHub's squash merge concatenates EVERY branch commit message into the merge commit body, so the offending text rode into main's merge commit 5b6b7886 at line 1143 and main got ZERO runs — confirmed via the API (actions/runs?head_sha=...), not just in_progress\t\tCI\tCI\tmain\tworkflow_dispatch\t35160963729\t38s\t2026-09-16T23:08:35Z completed\tsuccess\tPhase 19 stability — no legacy writes (prod)\tPhase 19 stability — no legacy writes (prod)\tmain\tschedule\t35158099181\t13s\t2026-09-16T22:31:33Z completed\tsuccess\tPhase 164.5.1: CRONREPOINT Wave A — the hourly tick stops being able to silently do nothing (v0.77.45.0)\tCI\tfeat/v1.20-phase-164.5.1-cronrepoint\tpull_request\t35156753727\t18m54s\t2026-09-16T22:15:27Z completed\tsuccess\tPhase 164.5.1: CRONREPOINT Wave A — the hourly tick stops being able to silently do nothing (v0.77.45.0)\tContracts\tfeat/v1.20-phase-164.5.1-cronrepoint\tpull_request\t35156753510\t1m45s\t2026-09-16T22:15:27Z completed\tcancelled\tPhase 164.5.1: CRONREPOINT Wave A — the hourly tick stops being able to silently do nothing (v0.77.45.0)\tCI\tfeat/v1.20-phase-164.5.1-cronrepoint\tpull_request\t35156078705\t9m19s\t2026-09-16T22:07:39Z completed\tsuccess\tPhase 164.5.1: CRONREPOINT Wave A — the hourly tick stops being able to silently do nothing (v0.77.45.0)\tContracts\tfeat/v1.20-phase-164.5.1-cronrepoint\tpull_request\t35156078645\t1m47s\t2026-09-16T22:07:39Z completed\tsuccess\tAnalytics deploy verify (prod SHA vs main HEAD)\tAnalytics deploy verify (prod SHA vs main HEAD)\tmain\tschedule\t35151630562\t13s\t2026-09-16T21:18:23Z completed\tsuccess\tprod-prober (four arms, hourly)\tprod-prober (four arms, hourly)\tmain\tschedule\t35147927699\t35s\t2026-09-16T20:40:09Z completed\tsuccess\tPhase 19 stability — no legacy writes (prod)\tPhase 19 stability — no legacy writes (prod)\tmain\tschedule\t35139472094\t12s\t2026-09-16T19:15:34Z completed\tsuccess\tprod-prober (four arms, hourly)\tprod-prober (four arms, hourly)\tmain\tschedule\t35130815424\t46s\t2026-09-16T17:51:59Z completed\tsuccess\tAnalytics deploy verify (prod SHA vs main HEAD)\tAnalytics deploy verify (prod SHA vs main HEAD)\tmain\tschedule\t35124980370\t12s\t2026-09-16T16:55:40Z completed\tsuccess\tPhase 19 stability — no legacy writes (prod)\tPhase 19 stability — no legacy writes (prod)\tmain\tschedule\t35114018455\t1m23s\t2026-09-16T15:14:47Z completed\tsuccess\tprod-prober (four arms, hourly)\tprod-prober (four arms, hourly)\tmain\tschedule\t35104929440\t47s\t2026-09-16T13:54:17Z completed\tfailure\tNightly probes\tNightly probes\tmain\tschedule\t35099475949\t55s\t2026-09-16T13:03:13Z completed\tsuccess\tAnalytics deploy verify (prod SHA vs main HEAD)\tAnalytics deploy verify (prod SHA vs main HEAD)\tmain\tschedule\t35091035836\t15s\t2026-09-16T11:34:22Z completed\tsuccess\tPhase 19 stability — no legacy writes (prod)\tPhase 19 stability — no legacy writes (prod)\tmain\tschedule\t35085912551\t13s\t2026-09-16T10:36:44Z completed\tsuccess\tCassette refresh (OKX + Bybit)\tCassette refresh (OKX + Bybit)\tmain\tschedule\t35076641234\t2m13s\t2026-09-16T08:57:16Z completed\tsuccess\tprod-prober (four arms, hourly)\tprod-prober (four arms, hourly)\tmain\tschedule\t35071907692\t34s\t2026-09-16T08:05:35Z completed\tsuccess\tMain CI cancelled watcher\tMain CI cancelled watcher\tmain\tworkflow_run\t35070404096\t13s\t2026-09-16T07:48:19Z completed\tsuccess\tdocs(164.6.4): close A4 on measured PROD evidence; correct A2's unpas…\tContracts\tmain\tpush\t35068855790\t1m42s\t2026-09-16T07:30:17Z. CONSEQUENCE MEASURED: Railway deployed ANYWAY. 'no CI at all' is not 'CI red', so the skip-if-red guard never engaged — the empty-set-passes trap, one layer out. The deploy was nevertheless safe by measurement, not by luck: tree(5b6b7886) == tree(4c93a23c) == 667d626b, so PROD runs exactly the tree that passed 27 green checks. What was genuinely lost is the on-push-to-main gate set for that SHA; recovered by https://github.com/AI-Isaiah/Quantalyze/actions/runs/35161013969 (run 35160963729). RULE: never write the literal token in any commit message or PR body, not even to deny it — say 'the skip trailer' in prose. Verify with: gh api repos/<o>/<r>/actions/runs?head_sha=<sha> and COUNT, never read a 2-check board as green. ⛔ CORRECTION, MEASURED 2026-09-17 SAME SESSION — THE REMEDY ABOVE DOES NOT WORK CLEANLY IN THIS REPO AND MUST NOT BE COPIED AS-IS. `gh workflow run CI --ref main` produced a RED secret-scan on the very SHA it was meant to clear (run 35160963729: 20 success, 3 skipped, 1 failure). Cause is SCOPE, not content: a workflow_dispatch carries no commit range, so gitleaks-action walks the FULL history at fetch-depth 0, while a real push-to-main scans only the pushed squash commit. Measured locally with the two scopes side by side: `gitleaks git . --config .gitleaks.toml --log-opts=de66d1b0..5b6b7886` => 1 commit scanned, NO LEAKS FOUND (this is what a genuine push sees, and it is what the merge actually is); bare `gitleaks git . --config .gitleaks.toml` => 4491 commits scanned, 37 leaks. All flagged commits date from 2026-09-11 (Phase 164.8.5), NONE is on the 164.5.1 branch, and two of the three are not even ancestors of main. They are credential-SHAPED fixture literals quoted in CHANGELOG prose, the exact pattern the gitleaks lineage warns about. CONSEQUENCES: (a) the 5b6b7886 deploy is clean by measurement, not by assumption; (b) this repo's main CI CANNOT be re-triggered by workflow_dispatch without a false red, so a lost push-gate set has NO working recovery today and that is the open defect this entry now carries; (c) 37 pre-existing full-history findings are latent and would surface in any future full-scope scan. To re-measure a specific SHA, use the range form locally rather than dispatching.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-16T23:09:17.399Z",
+    "resolved_at": null
+  },
+  {
+    "id": 62,
+    "kind": "deviation",
+    "phase": "164.9",
+    "file": "scripts/wait-for-test-schema-apply.sh",
+    "line": null,
+    "description": "Plan 06's ordering wait is proven only through injected seams; its first LIVE Actions-API exercise is the next merge push touching supabase/migrations",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-21T16:01:21.347Z",
+    "resolved_at": null,
+    "milestone": "v1.20"
+  },
+  {
+    "id": 63,
+    "kind": "unrun-verify",
+    "phase": "164.9",
+    "file": ".github/workflows/ci.yml",
+    "line": null,
+    "description": "frontend-live-db-lane is wired BLOCKING and is MEASURED RED: 35 of 397 non-skipped tests fail on the local-stack baseline (362 pass). Four families booked as [164.9-LIVEDB-LANE-EXECUTION-CENSUS] in TODOS.md; F1 (privilege state absent from the schema-only baseline, ~14 failures) is NOT fixable test-side and needs a baseline re-dump. Until F1-F4 close, the frontend aggregate is red and Railway skips the analytics deploy.",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-21T17:12:21.238Z",
+    "resolved_at": null,
+    "milestone": "v1.20"
+  },
+  {
+    "id": 64,
+    "kind": "deviation",
+    "phase": "167",
+    "file": "src/app/(dashboard)/allocations/HoldingsTabPanel.tsx",
+    "line": null,
+    "description": "D-16 closed the two money surfaces and NOT the class. HoldingsTabPanel's keyStatusById map and ApiKeyManager.tsx's SyncProgress (no sign_in_failed branch, and not confirmed to be fed from api_keys.sync_status) carry the same shape: no closed set over the column, so every status that is not the one literal they test falls to the healthy branch. A key whose sign-in was refused can still read as healthy there. Mechanical to fix now that isUntrustedKeySyncStatus exists — make them callers of it.",
+    "status": "fixed",
+    "reason": "CLOSED AS NOT-A-DEFECT 2026-09-22 — measured, not fixed. Both halves were over-scoped when filed. (a) ApiKeyManager SyncProgress reads a LOCAL six-value wizard vocabulary (idle / syncing / computing / complete / complete_with_warnings / error) driven entirely by setSyncStatus from local flow events; it is never fed from api_keys.sync_status and cannot receive the new value. (b) HoldingsTabPanel carries no trust branch at all — it maps api_key.id to sync_status and passes it through as source_key_sync_status, and the two consuming tables make the trust decision, both already via isUntrustedKeySyncStatus. The genuine half of the D-16 residual was the FILTER COPY, which is entry 65 and is now fixed. Verdicts and counts only.",
+    "recorded_at": "2026-09-22T17:09:03.419Z",
+    "resolved_at": "2026-09-22T17:41:57.032Z",
+    "milestone": "v1.20"
+  },
+  {
+    "id": 65,
+    "kind": "deviation",
+    "phase": "167",
+    "file": "src/app/(dashboard)/allocations/components/HoldingsTable.tsx",
+    "line": null,
+    "description": "The toggle label 'Show revoked-key holdings' and the footer '{N} holdings hidden from revoked keys' now describe a WIDER set than they NAME: a holding hidden for sign_in_failed is reported as hidden from revoked keys. Left unchanged on purpose by 167-04 — the toggle label carries a locked pin asserting it reads exactly that string, on a surface documented as preserved byte-for-byte, and 167-UI-SPEC authors no copy for these tables. Needs a copy decision, not an executor's guess.",
+    "status": "fixed",
+    "reason": "Fixed in 167-04 task 3 (D-16): the toggle and footer read from the shared constant UNTRUSTED_KEY_SET_NOUN (\"keys needing attention\"), which names the whole untrusted set, not only revoked keys. A literal pin on the noun landed in review round 1 (WR-06).",
+    "recorded_at": "2026-09-22T17:09:18.951Z",
+    "resolved_at": "2026-09-22T20:24:13.815Z",
+    "milestone": "v1.20"
+  },
+  {
+    "id": 66,
+    "kind": "todo",
+    "phase": "167",
+    "file": "src/lib/queries.ts",
+    "line": null,
+    "description": "Phase 167 review round 1, SFH-M2 follow-up: the headline AUM (emptyLiveBaselineMetrics / liveBaselineMetricsFromPerKeyDailies, totalAum = holdingsSummary.reduce) sums holdings from untrusted keys (revoked, sign_in_failed) with no key-status test, while HoldingsTable hides those rows by default. The false comment claiming the predicate kept them out of the AUM was corrected; the money number was NOT changed. Follow-up: flag the AUM as partial (or disclose the contribution) when an untrusted key contributes — a money-number change with its own blast radius, needs its own decision.",
+    "status": "fixed",
+    "reason": "Resolved by Phase 167.1 (D-14): disclosed, not changed. The composer live-holdings total and the Open Positions footer name the untrusted part; no money number changed (D-03). D-06 (a revoked key holdings absent from the book-mode composer AUM) answered by the founder with option (b) on 2026-09-24.",
+    "recorded_at": "2026-09-22T20:10:03.968Z",
+    "resolved_at": "2026-09-24T06:11:04.977Z",
+    "milestone": "v1.20"
+  },
+  {
+    "id": 67,
+    "kind": "deviation",
+    "phase": "164.6.5",
+    "file": "src/lib/wizard/wizard-correlation.test.ts",
+    "line": null,
+    "description": "gsd_run check tdd-red-evidence misclassifies vitest TAP output as zero_tests_discovered (its parser expects node --test's # tests/# pass/# fail summary footer and only matches un-indented TAP lines, never vitest's indented nested subtests) - RED evidence for plan 07's TDD tasks was established via manual inspection of named per-test failures plus the neuter-observe-restore + cp/cmp Proven-Able-to-Fail convention already used by sibling plan 04, not via the automated classifier",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-22T03:51:41.979Z",
+    "resolved_at": null,
+    "milestone": "v1.20"
+  },
+  {
+    "id": 68,
+    "kind": "unrun-verify",
+    "phase": "164.6.5",
+    "file": "analytics-service/services/mt5_client.py",
+    "line": null,
+    "description": "Two remote paths over the rpyc bridge have never run against the live gateway. (1) Mt5Client.recycle_terminal_process: the over-channel TerminateProcess half of _REMOTE_TERMINAL_RECYCLE_SRC, including its per-image file_versions read (the 2026-09-25 spike used a Linux-side kill). (2) Mt5Client.session_snapshot: the first live conn.eval of _REMOTE_SESSION_SNAPSHOT_SRC, which must resolve mt5 in the bridge namespace and return a by-value tuple of verdict-only fields (widened 2026-09-26, plan 164.6.5-08, from the verifier's anti-pattern finding; before this the entry named only the terminate step). Closes only when BOTH are read from the analytics log at the first live recycle: terminated equals matched and at least 1, exit confirmed, relaunch authorized unattended, and the snapshot line carrying its fields rather than an error. A terminate-only reading does not close it",
+    "status": "open",
+    "reason": "",
+    "recorded_at": "2026-09-25T18:47:37.964Z",
+    "resolved_at": null,
+    "milestone": "v1.20"
+  },
+  {
+    "id": 69,
+    "kind": "stub",
+    "phase": "164.9.3",
+    "file": "supabase/migrations/20260927120000_claim_pair_pre_rank_exclusion.sql",
+    "line": null,
+    "description": "VAC-04 ACKNOWLEDGEMENT placeholder in the CLAIMPAIR migration header; plan 164.9.3-04 fills the three prod-body-ack pragmas",
+    "status": "fixed",
+    "reason": "",
+    "recorded_at": "2026-09-27T13:27:33.109Z",
+    "resolved_at": "2026-09-27T13:50:01.733Z",
+    "milestone": "v1.20"
+  }
+]
+````

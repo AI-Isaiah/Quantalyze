@@ -31,6 +31,27 @@
 -- Usage:
 --   psql "$TEST_SUPABASE_DB_URL" -v ON_ERROR_STOP=1 -f \
 --     supabase/tests/test_csv_daily_returns_perkey_rls.sql
+--
+-- ⭐ MACHINE-EXECUTABLE TWINS (phase 164.4). Each prose RED-UNDER below an arm
+-- carries an adjacent `RED-UNDER-M` object that scripts/mutation-runner executes:
+-- it mutates COPIES on a throwaway pg-lane cluster, requires the FIRST
+-- `TEST FAILED (…)` to name that arm, and restores GREEN. Schema:
+-- scripts/mutation-runner/GRAMMAR.md. The line below declares what the lane
+-- applies before this gate. DISCOVERED, not guessed — plan 164.4-06 iterated it
+-- over 2 lane runs to `All … assertions passed`, mean 0.95 s/lane over 3 timed
+-- GREEN runs.
+-- ⚠️ 07-fixture-supabase-default-privileges.sql is what makes Assertion 5
+-- falsifiable. csv_daily_returns is created by a migration IN this list, so
+-- Supabase's bootstrap default privileges give `anon` the table grant it holds in
+-- production; without them anon would answer 42501, the gate's handler would read
+-- that as 0 rows, and the arm would pass whatever the POLICY said. Its twin below
+-- opens the policy to anon and the arm reddens — which it could not do on a
+-- cluster where anon had no grant at all.
+-- ⚠️ 12-fixture-profiles-is-admin.sql defaults to FALSE on purpose: an
+-- admin-by-default profile would let csv_daily_returns_admin_select return every
+-- row and make every cross-tenant assertion here pass or fail for a reason
+-- unrelated to the policy under test.
+-- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","scripts/pg-lane/fixtures/07-fixture-supabase-default-privileges.sql","scripts/pg-lane/fixtures/12-fixture-profiles-is-admin.sql","supabase/migrations/20260522111839_csv_daily_returns.sql","supabase/migrations/20260624120000_csv_daily_returns_per_key_axis.sql"]}
 
 -- --------------------------------------------------------------------------
 -- Defensive pre-clean (a prior aborted run may have left synthetic rows).
@@ -95,6 +116,14 @@ BEGIN
   RAISE NOTICE 'Seed OK: A uid=% key=%, B uid=% key=%', uid_a, key_a, uid_b, key_b;
 
   -- ----- ASSERTION 1: A sees A's per-key row -----------------------------
+  -- RED-UNDER: narrow the per-key owner policy in migration 20260624120000 to
+  --            `allocator_id = auth.uid() AND strategy_id IS NOT NULL` — a per-key
+  --            row has strategy_id NULL, so the policy stops matching the very
+  --            rows it was added for. The policy still EXISTS, so the migration's
+  --            own post-verify (:161) passes and the gate is the only thing that
+  --            reddens. This arm is a positive control, but RLS withholds rows
+  --            SILENTLY rather than raising, so the literal drift is observable.
+  -- RED-UNDER-M: {"arm":"Assertion 1","apply":[{"kind":"edit","file":"supabase/migrations/20260624120000_csv_daily_returns_per_key_axis.sql","find":"  USING (allocator_id = auth.uid());","replace":"  USING (allocator_id = auth.uid() AND strategy_id IS NOT NULL);","occurrences":1}]}
   PERFORM set_config('request.jwt.claims',
     json_build_object('sub', uid_a::text, 'role', 'authenticated')::text, true);
   SET LOCAL ROLE authenticated;
@@ -105,6 +134,12 @@ BEGIN
   END IF;
 
   -- ----- ASSERTION 2: A does NOT see B's per-key row (cross-tenant) -------
+  -- RED-UNDER: add a SECOND permissive SELECT policy to the LIVE table admitting
+  --            every per-key row to every authenticated session — the "the
+  --            allocator dashboard needs to read these" drift. Added ALONGSIDE the
+  --            correct policy, so Assertion 1 still sees exactly its own row and
+  --            this cross-tenant arm is the first failure.
+  -- RED-UNDER-M: {"arm":"Assertion 2","apply":[{"kind":"sql","stmt":"CREATE POLICY csv_daily_returns_perkey_open_select ON public.csv_daily_returns FOR SELECT TO authenticated USING (api_key_id IS NOT NULL)"}]}
   SELECT count(*) INTO row_cnt FROM csv_daily_returns WHERE api_key_id = key_b;
   IF row_cnt <> 0 THEN
     RESET ROLE;
@@ -112,6 +147,13 @@ BEGIN
   END IF;
 
   -- ----- ASSERTION 3: strategy-owner policy still works for A's strategy --
+  -- RED-UNDER: DROP the strategy-owner SELECT policy from the LIVE table
+  --            (`csv_daily_returns_owner_select`, 20260522111839:70) — the policy
+  --            20260624120000's header promises it LEFT UNTOUCHED. A `sql` step,
+  --            because that policy is defined in a migration this gate's apply list
+  --            carries only as a prerequisite, and dropping it there would abort
+  --            its own post-verify.
+  -- RED-UNDER-M: {"arm":"Assertion 3","apply":[{"kind":"sql","stmt":"DROP POLICY csv_daily_returns_owner_select ON public.csv_daily_returns"}]}
   SELECT count(*) INTO row_cnt FROM csv_daily_returns WHERE strategy_id = strat_a;
   IF row_cnt <> 1 THEN
     RESET ROLE;
@@ -120,6 +162,16 @@ BEGIN
   RESET ROLE;
 
   -- ----- ASSERTION 4: B sees B's per-key row, never A's ------------------
+  -- RED-UNDER: shut the per-key owner policy on the LIVE table with
+  --            `ALTER POLICY … USING (false)` — the policy row survives, so the
+  --            migration post-verify and any "does the policy exist" check still
+  --            agree, and only a CONTENT assertion can see it.
+  -- ⚠️ NEEDS A `neuter`. Assertions 1 and 4a are the SAME property read from two
+  --            tenants — an allocator sees its own per-key row — so nothing that
+  --            reddens 4a can leave 1 green. Assertion 1's raise is neutered on
+  --            THIS arm's lane only; it carries its own twin above and is judged
+  --            on its own lane.
+  -- RED-UNDER-M: {"arm":"Assertion 4a","apply":[{"kind":"sql","stmt":"ALTER POLICY csv_daily_returns_allocator_owner_select ON public.csv_daily_returns USING (false)"}],"neuter":[{"arm":"Assertion 1"}]}
   PERFORM set_config('request.jwt.claims',
     json_build_object('sub', uid_b::text, 'role', 'authenticated')::text, true);
   SET LOCAL ROLE authenticated;
@@ -139,6 +191,14 @@ BEGIN
   -- ----- ASSERTION 5: anon sees 0 per-key rows --------------------------
   -- The policy is TO authenticated; anon either lacks the grant (42501) or RLS
   -- returns 0. Either way anon must not read per-key data. Treat 42501 as 0.
+  -- RED-UNDER: add a `TO anon` SELECT policy to the LIVE table — the logged-out
+  --            "public performance page" drift. Scoped to anon, so Assertions 1-4
+  --            read as `authenticated` and still bite. ⭐ This arm can only redden
+  --            because 07-fixture-supabase-default-privileges.sql gave anon the
+  --            table grant it holds in production: without it anon answers 42501,
+  --            the gate's own handler reads that as 0 rows, and no policy drift is
+  --            visible at all.
+  -- RED-UNDER-M: {"arm":"Assertion 5","apply":[{"kind":"sql","stmt":"CREATE POLICY csv_daily_returns_anon_open_select ON public.csv_daily_returns FOR SELECT TO anon USING (true)"}]}
   SET LOCAL ROLE anon;
   raised := FALSE;
   BEGIN
@@ -154,6 +214,11 @@ BEGIN
   -- ----- ASSERTION 6: owner-coherence trigger rejects mismatched owner ---
   -- Back in the seeding (service-role) context. A per-key row whose allocator_id
   -- is not the api_key's owner must be rejected by the BEFORE trigger.
+  -- RED-UNDER: DROP the owner-coherence trigger from the LIVE table. A `sql` step:
+  --            migration 20260624120000's post-verify (:166) re-reads pg_trigger
+  --            for this exact trigger, so an edit removing it aborts the apply and
+  --            never reaches the gate.
+  -- RED-UNDER-M: {"arm":"Assertion 6","apply":[{"kind":"sql","stmt":"DROP TRIGGER csv_daily_returns_owner_coherence ON public.csv_daily_returns"}]}
   raised := FALSE;
   BEGIN
     INSERT INTO csv_daily_returns (api_key_id, allocator_id, date, daily_return)
@@ -173,6 +238,10 @@ BEGIN
   END IF;
 
   -- ----- ASSERTION 7: source XOR rejects a both-set row -----------------
+  -- RED-UNDER: DROP the csv_daily_returns_source_xor CHECK from the LIVE table, so
+  --            a row can name BOTH axes at once. A `sql` step for the same reason
+  --            as Assertion 6: post-verify (:145) re-reads the constraint by name.
+  -- RED-UNDER-M: {"arm":"Assertion 7","apply":[{"kind":"sql","stmt":"ALTER TABLE public.csv_daily_returns DROP CONSTRAINT csv_daily_returns_source_xor"}]}
   raised := FALSE;
   BEGIN
     INSERT INTO csv_daily_returns (strategy_id, api_key_id, allocator_id, date, daily_return)

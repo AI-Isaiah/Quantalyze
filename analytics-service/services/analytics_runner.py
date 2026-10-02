@@ -19,6 +19,7 @@ directly, independent of any runner.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import math
 from collections import defaultdict
@@ -27,6 +28,7 @@ from datetime import datetime, timezone
 from typing import Any, TypedDict
 
 from fastapi import HTTPException
+from postgrest.exceptions import APIError
 from supabase import Client
 
 from services.benchmark import get_benchmark_returns
@@ -51,11 +53,26 @@ from services.allocated_capital import (
     metrics_day_basis,
     parse_returns_denominator_config,
 )
+from services.dispersion import dispersion_is_residue
 from services.equity.fallback import merge_dq_flags
 from services.position_reconstruction import _normalize_side
 from services.nav_twr import NAV_TWR_GUARD_KEYS
+from services.strategy_analytics_provenance import (
+    provenance_source,
+    upsert_or_drop_provenance,
+)
 
 logger = logging.getLogger("quantalyze.analytics.runner")
+
+
+# D-02 / R2 — PostgREST answers any payload naming a column its schema cache
+# does not know with this code, and writes NOTHING. It is a deploy-window
+# condition rather than a data fault: between the moment code that names
+# computing_started_at goes live and the moment PostgREST reloads its cache,
+# every write naming that column is rejected. Matching on the code (not on a
+# message substring) is the audit.py convention — server messages localize, the
+# code does not.
+_PGRST_SCHEMA_CACHE_MISS: str = "PGRST204"
 
 
 # ---------------------------------------------------------------------------
@@ -835,7 +852,11 @@ def _compute_derived_trade_metrics(
                 len(r_multiples) - 1
             )
             std_r = math.sqrt(var_r) if var_r > 0 else 0.0
-            if std_r > 0:
+            # Phase 166.1 D-16: residue std (21 identical 7.7 losses) gave SQN -4.03e16.
+            # Round-1 IN-01: `std_r > 0` stays as the structural divide guard.
+            # The floor alone has a NaN hole: a NaN mean_r gives a NaN floor,
+            # `0.0 <= NaN` is False, and `mean_r / 0.0` raises.
+            if std_r > 0 and not dispersion_is_residue(std_r, mean_r):
                 out["sqn"] = (mean_r / std_r) * math.sqrt(
                     min(len(r_multiples), SQN_TRADE_COUNT_CAP)
                 )
@@ -1163,8 +1184,121 @@ def _is_trade_mix_approximate(positions: list[dict[str, Any]]) -> bool:
     )
 
 
-async def run_csv_strategy_analytics(strategy_id: str) -> dict[str, Any]:
+# C3 topic H: page size and hard cap of the keyset series read below. Same
+# values paginated_select used, so the truncation arm's row-cap sentence is
+# unchanged (1000 x 1000 = 1,000,000 rows).
+_SERIES_PAGE_SIZE: int = 1000
+_SERIES_HARD_CAP_PAGES: int = 1000
+
+
+def _load_strategy_daily_returns(
+    supabase: Any,
+    strategy_id: str,
+    *,
+    page_size: int = _SERIES_PAGE_SIZE,
+    hard_cap_pages: int = _SERIES_HARD_CAP_PAGES,
+) -> list[dict[str, Any]]:
+    """Read one strategy's ``csv_daily_returns`` series with KEYSET pagination.
+
+    C3 topic H. This read used ``paginated_select``, which pages by OFFSET: each
+    page is a separate request with its own snapshot, and the writers that
+    rewrite this strategy's series (the dailies derive, the composite stitch)
+    can land between two pages. A write that adds or removes a day sorting
+    before the next page's offset shifts every later row by one, so a day is
+    read twice or never read, and the metrics run over that torn series.
+
+    Keyset on ``date`` removes the shift. ``(strategy_id, date)`` is UNIQUE
+    (``csv_daily_returns_strategy_date_key``), so with the strategy fixed by
+    ``eq`` a ``date > cursor`` cursor is a total order: no date is read twice,
+    and every row present for the whole read is read, because no page's start
+    depends on how many rows sort before it. It mirrors C3 fix E's
+    ``job_worker._load_allocator_daily_returns``.
+
+    The read stops on the first EMPTY page, not a short one: PostgREST clamps
+    ``limit`` to its ``max_rows``, and a short-page stop would silently end the
+    read after the first page if that cap ever sat below ``page_size``.
+
+    Past ``hard_cap_pages`` non-empty pages it raises ``PaginatedSelectTruncated``
+    with the same hint string ``paginated_select`` carried, so the runner's
+    typed truncation arm is unchanged. A count landing exactly on the cap is
+    read whole, as ``paginated_select``'s boundary peek did.
+    """
+    out: list[dict[str, Any]] = []
+    pages = 0
+    cursor: str | None = None
+    while True:
+        query = (
+            supabase.table("csv_daily_returns")
+            .select("date, daily_return")
+            .eq("strategy_id", strategy_id)
+        )
+        if cursor is not None:
+            query = query.gt("date", cursor)
+        result = query.order("date", desc=False).limit(page_size).execute()
+        chunk: list[dict[str, Any]] = list(result.data or [])
+        if not chunk:
+            return out
+        if pages >= hard_cap_pages:
+            logger.error(
+                "_load_strategy_daily_returns: hit hard cap of %d pages x %d rows "
+                "— raising PaginatedSelectTruncated (strategy %s)",
+                hard_cap_pages,
+                page_size,
+                strategy_id,
+            )
+            raise PaginatedSelectTruncated(
+                page_count=hard_cap_pages,
+                page_size=page_size,
+                hint=f"csv_daily_returns strategy_id={strategy_id}",
+            )
+        pages += 1
+        out.extend(chunk)
+        cursor = str(chunk[-1]["date"])
+
+
+async def run_csv_strategy_analytics(
+    strategy_id: str,
+    *,
+    refresh_source: str | None = None,
+    refresh_publish_status: str | None = None,
+    refresh_publish_warned: bool = False,
+    job_id: str | None = None,
+) -> dict[str, Any]:
     """Phase 19.1 / CSV → analytics pipeline Plan 02 Task 2.
+
+    ``refresh_source`` (Phase 161.1 / CR-03) is the recurring-refresh marker
+    carried by the ``compute_analytics_from_csv`` job, forwarded across the
+    chain edge by ``run_derive_broker_dailies_job``. It is KEYWORD-ONLY and
+    defaults to None, so every other caller — the CSV-first wizard route, the
+    composite finalizer, the tests — is byte-unchanged and takes the LOUD
+    terminal-failure path exactly as before. Non-None means "this run is hop 2
+    of a background maintenance refresh that no poller is watching", which is
+    the only condition under which the D-15 non-destructive branch applies.
+    The caller is responsible for passing ONLY a recognised marker.
+
+    ``refresh_publish_status`` / ``refresh_publish_warned`` (Phase 161.1 / F1)
+    are the strategy's PRE-REFRESH publish state, read once by hop 1 and carried
+    here on the job's metadata. This function CANNOT read them for itself — see
+    the snapshot block below — so they are the guard's only honest oracle. Both
+    default to the unprotected value, which keeps every non-refresh caller on
+    the loud path unchanged.
+
+    ``job_id`` (Phase 164.2 / criterion 2) is the ``compute_jobs`` row whose
+    failure a terminal-failure sentence written by this function DESCRIBES. It
+    is stamped into ``strategy_analytics.computation_error_job_id`` beside
+    ``computation_error_source = 'writer'`` in the SAME upsert as the sentence,
+    which is what stops ``sync_strategy_analytics_status`` overwriting a curated
+    sentence with its per-kind generic seconds later (migration
+    ``20260906120000``). Same shape as ``refresh_source``: KEYWORD-ONLY, default
+    None, so the three non-job callers — the CSV-first wizard route, the
+    composite finalizer, the tests — are byte-unchanged. ⚠️ A None ``job_id``
+    means BOTH markers are written as NULL, never a lone ``'writer'``: the two
+    markers are decided by one expression (:func:`provenance_source`) because
+    ``strategy_analytics_computation_error_markers_together_check`` sits on the
+    failure-recording path and a half-stamp there raises 23514 and loses the
+    failure record entirely. NULL markers are read as BRIDGE-OR-LEGACY
+    provenance, i.e. exactly the pre-164.2 behaviour, which is the right answer
+    for a failure that no compute job owns.
 
     Analytics pipeline for source='csv' strategies. Loads
     csv_daily_returns, builds a pd.Series, and calls compute_all_metrics
@@ -1223,503 +1357,1070 @@ async def run_csv_strategy_analytics(strategy_id: str) -> dict[str, Any]:
         isinstance(_strategy_row, dict) and _strategy_row.get("api_key_id")
     )
 
+    # ---- Phase 161.1 / CR-03 + F1: the D-15 guard for HOP 2 -----------------
+    # ⛔ THE SNAPSHOT IS HANDED IN, AND IT CANNOT BE READ HERE. That is not a
+    # layering preference — it is the only correct oracle, and the earlier
+    # "read it above `_mark_computing`" design was deterministically inert.
+    #
+    # Two writers move `strategy_analytics.computation_status` before this hop
+    # can look at it, and only one of them is this function:
+    #
+    #   1. `_mark_computing` below writes 'computing' unconditionally, so a read
+    #      taken after it could never answer terminal-success. That is why the
+    #      read used to sit above it.
+    #   2. The SQL status bridge got there FIRST. `run_derive_broker_dailies_job`
+    #      enqueues this job and then returns DONE; `mark_compute_job_done`
+    #      PERFORMs `sync_strategy_analytics_status` in the SAME transaction,
+    #      with this job already `pending`. A pending job is non-terminal, so the
+    #      bridge's branch (a) fires — and its CASE preserves
+    #      'complete_with_warnings' but rewrites EVERYTHING ELSE to 'computing'.
+    #      A strategy at plain 'complete' is therefore already at 'computing'
+    #      before this function is entered at all.
+    #
+    # So a read here — at ANY point, above or below `_mark_computing` — answers
+    # 'computing' for every plain-'complete' row, the snapshot is None, and every
+    # hop-2 failure takes the LOUD path: publish state downgraded to 'failed',
+    # data_quality_flags rebuilt wholesale, persisted cash series DELETEd. The
+    # production cohort survived only because all 5 rows are
+    # 'complete_with_warnings', which branch (a) happens to preserve — i.e. the
+    # guard protected them by ACCIDENT OF THEIR STATUS, and the protection
+    # vanished the moment a clean recompute left one at 'complete', which the
+    # bridge migration's own header calls "what every clean recompute leaves
+    # behind".
+    #
+    # The fix is an oracle the bridge cannot write: hop 1 reads the publish state
+    # once, at its own entry, and carries it across the chain edge on this job's
+    # metadata (`run_derive_broker_dailies_job._enqueue_csv_analytics`). The
+    # handler validates the shape and hands it in as the two parameters below.
+    #
+    # ⛔ FAIL-SAFE DIRECTION, non-negotiable and identical to D-15's on the
+    # derive path: anything unrecognised leaves the snapshot None, and a None
+    # snapshot takes the LOUD destructive path. No marker, no forwarded status,
+    # a status hop 1 declined to certify, or any value outside the
+    # terminal-success pair — all of them un-publish loudly. Never fail toward
+    # suppression: a wrongly-suppressed failure hangs the wizard poller on an
+    # infinite spinner.
+    #
+    # Restoring (rather than merely omitting) the two publish columns is also
+    # load-bearing. `_mark_computing` has already downgraded the row to
+    # 'computing' by then, so omitting them would leave a live factsheet parked
+    # at 'computing' with nothing left to move it — and the SQL bridge's
+    # protection predicate (migration 20260825150000) keys on a PUBLISHED
+    # status, so the row would not be protected there either. Writing the
+    # snapshot back puts the row where it was and keeps both ends coherent.
+    _publish_snapshot: dict[str, Any] | None = None
+    if refresh_source is not None:
+        # Function-local (the file's idiom) AND single-sourced: the same
+        # frozenset the derive-path guard and the staleness view are pinned
+        # against, never a third spelling of the pair. Only reached on the
+        # refresh path, so the normal route keeps its import graph unchanged.
+        from services.job_worker import STRATEGY_ANALYTICS_TERMINAL_SUCCESS_STATUSES
+
+        if refresh_publish_status in STRATEGY_ANALYTICS_TERMINAL_SUCCESS_STATUSES:
+            _publish_snapshot = {
+                "computation_status": refresh_publish_status,
+                "computation_warned": bool(refresh_publish_warned),
+            }
+        else:
+            logger.warning(
+                "csv analytics: a MARKED ledger refresh (source=%s) for strategy "
+                "%s carried no protectable pre-refresh publish state (%r) — "
+                "taking the LOUD terminal-failure path on any failure this run.",
+                refresh_source, strategy_id, refresh_publish_status,
+            )
+
+    def _guard_failure_payload_inplace(payload: dict[str, Any]) -> None:
+        """D-15 for hop 2: rewrite a terminal-failure upsert payload IN PLACE so
+        it records the error WITHOUT un-publishing a funded account.
+
+        No-op when unprotected — every existing caller and every existing test
+        sees the byte-unchanged payload.
+
+        ⛔ IN-PLACE, AND THAT IS NOT A STYLE CHOICE. `tests/
+        test_computing_started_at_stamp.py` is a JOB-01 census that walks the AST
+        of every `strategy_analytics` write and can only read a payload that is a
+        dict LITERAL (or a name bound to one); a payload produced by a helper
+        CALL is recorded as unreadable and stepped over (its D-07 resolution
+        policy). The first draft of this guard was a pure function wrapping each
+        literal, which made all five terminal writers in this file invisible to
+        that census — measured: its exempt count fell from 1 to 0 and the gate
+        went RED. Mutating a literal the call site still owns keeps every write
+        readable there. Do not "clean this up" into a return value.
+        """
+        if _publish_snapshot is None:
+            return
+        # Put the publish state back where the refresh found it. RESTORE rather
+        # than omit: `_mark_computing` has already written 'computing'.
+        payload["computation_status"] = _publish_snapshot["computation_status"]
+        payload["computation_warned"] = _publish_snapshot["computation_warned"]
+        # ⛔ And DROP the data_quality_flags rebuild. Three of the five stamp
+        # sites write `{"csv_source": True}` WHOLESALE, which on a live row
+        # destroys the NAV_TWR_GUARD_KEYS the derive pre-stamped — the exact
+        # laundering class migration 20260707120000 closed. On a protected
+        # refresh the live row's flags are still the truth, so leave them.
+        payload.pop("data_quality_flags", None)
+        logger.warning(
+            "csv analytics: a MARKED ledger refresh (source=%s) failed for "
+            "strategy %s; recorded computation_error and left the publish state "
+            "(%s) intact (Phase 161.1 D-15/CR-03). The failure is still visible "
+            "in compute_jobs, in computation_error, in this line, and in the "
+            "staleness view.",
+            refresh_source, strategy_id, _publish_snapshot["computation_status"],
+        )
+
+    async def _restore_publish_state_on_abort(reason: str) -> None:
+        """F3 — put the publish state back when this run dies WITHOUT reaching
+        any of the five terminal stamps.
+
+        ⛔ THE HOLE THIS CLOSES, MEASURED. The worker's per-job budget is
+        ``asyncio.wait_for(handler(job), timeout=...)`` (``services/
+        job_worker.py``). When it expires it cancels this coroutine with
+        ``CancelledError`` — a **BaseException**. The failure arms below are
+        ``except Exception``/``except HTTPException``, so NONE of them see it and
+        NONE of the five guarded stamps fire. The run therefore dies with
+        ``_mark_computing``'s unconditional ``computation_status='computing'``
+        still on the row.
+
+        ⚠️ WHAT THE ARMS THAT CALL THIS ACTUALLY COVER — stated precisely,
+        because an earlier draft of this docstring overclaimed and a comment that
+        overclaims coverage is how the next person fails to look. They cover a
+        cancellation delivered ANYWHERE inside this handler, INCLUDING one that
+        lands on an ``await`` inside one of the ``except Exception`` arms and
+        including one that lands on ``_mark_computing``'s own round trip. They do
+        that because the two abort arms live on an OUTER ``try`` that wraps both
+        ``_mark_computing`` and the whole inner arm chain. They did NOT cover
+        either case while they were siblings of those arms: Python does not
+        re-enter sibling ``except`` clauses, so a ``CancelledError`` raised
+        inside ``_mark_truncated`` / ``_mark_config_failed`` / the unrecoverable
+        arm propagated straight out and the row was left at ``'computing'`` —
+        precisely the state this exists to prevent.
+
+        On a MARKED refresh that is an un-publish by omission, and it is worse
+        than it looks: the SQL bridge (migration 20260825150000) then re-decides
+        the state, its protection conjunct reads the row and sees ``'computing'``
+        — not a PUBLISHED status — so the row is not protected there either and
+        branch (b) writes ``'failed'``. ``strategyGate`` reads that as
+        ``ANALYTICS_FAILED`` and the factsheet goes dark, on a recurring,
+        unattended job. The bridge header's claim that a budget timeout leaves
+        the row "untouched-healthy → protected" is false on hop 2: hop 2 always
+        touches it first.
+
+        ⛔ SHIELDED, NOT BLOCKING — and the distinction is a production incident,
+        not a style call. This used to run ``supabase.table(...).upsert(...)
+        .execute()`` RAW on the event loop, on the reasoning that an ``await``
+        inside a delivered cancellation could itself be cancelled. The reasoning
+        was right about the hazard and wrong about the remedy: a synchronous HTTP
+        round trip here freezes the WHOLE worker loop — every other in-flight job
+        and ``/healthz`` — for its duration, on exactly the runs where the DB is
+        already slow enough to have blown a job budget. WEDGE-01 is this repo's
+        recorded outage of precisely that shape (heavy work on the shared loop
+        froze ``/healthz``), and every other ``strategy_analytics`` write in this
+        module goes through ``db_execute`` for that reason.
+
+        ``asyncio.shield`` addresses the real hazard directly: the inner
+        ``db_execute`` task survives a re-cancellation of this frame, so the
+        restore lands even if we are cancelled again while awaiting it. Only the
+        confirmation logging is lost in that case, and ``db_execute`` runs on a
+        thread pool whose work is not interrupted by cancellation anyway.
+
+        ⛔ FAIL-SAFE DIRECTION, unchanged from the guard above: this only ever
+        RESTORES a snapshot that was read as terminal-success before
+        ``_mark_computing`` ran. No marker, no prior row, or a prior row that was
+        not terminal-success all leave ``_publish_snapshot`` None, and this is a
+        no-op — the bridge's loud ``'failed'`` stands. Never suppress toward
+        green.
+
+        This is not a third reaper. It writes only the row this job itself
+        moved to ``'computing'`` moments earlier, on this job's own way out, and
+        clears ``computing_started_at`` on exit exactly as every terminal stamp
+        in this function does — so it hands the reaper nothing to race.
+        """
+        if _publish_snapshot is None:
+            if refresh_source is not None:
+                logger.warning(
+                    "csv analytics: a MARKED ledger refresh (source=%s) for "
+                    "strategy %s was aborted by %s with no protectable publish "
+                    "snapshot; taking the LOUD path and leaving the terminal "
+                    "state to the status bridge.",
+                    refresh_source, strategy_id, reason,
+                )
+            return
+        # ⛔ Bound to NAMES, not written inline as `_publish_snapshot[...]`
+        # subscripts. `tests/test_computing_started_at_stamp.py` is a JOB-01
+        # census that walks the AST of every `strategy_analytics` write and
+        # classifies the status value; it recognises a string literal or a Name
+        # (its "variable-status exit writer" arm, which then REQUIRES
+        # computing_started_at=None — which this is). A Subscript is a value form
+        # it cannot classify, and it fails LOUD on one rather than passing it
+        # unclassified. Measured: the subscript spelling reddened that census.
+        # Keep these locals.
+        _restored_status = _publish_snapshot["computation_status"]
+        _restored_warned = _publish_snapshot["computation_warned"]
+
+        def _upsert_restore() -> None:
+            _restore_payload: dict[str, Any] = {
+                    "strategy_id": strategy_id,
+                    # RESTORE, never omit: _mark_computing already wrote
+                    # 'computing', so an omitted status is the parked-factsheet
+                    # bug rather than a fix for it.
+                    "computation_status": _restored_status,
+                    "computation_warned": _restored_warned,
+                    # JOB-01: clear on exit so a stale stamp cannot re-trigger
+                    # reap_strategy_analytics_stuck_computing.
+                    "computing_started_at": None,
+                    # The abort stays VISIBLE — in compute_jobs, in this column,
+                    # in this log line and in the staleness view. Protected is
+                    # not the same as silent.
+                    #
+                    # ⛔ NO `refresh_source` AND NO `reason` HERE. Phase 164.2
+                    # made this sentence DURABLE, so it renders to the account
+                    # holder verbatim; `refresh_source` is an internal marker
+                    # literal and `reason` is `type(_abort_exc).__name__`, a
+                    # Python class name. Both stay on the log lines below, which
+                    # are the operator channel and still name them.
+                    "computation_error": (
+                        "The data refresh was interrupted by an unexpected "
+                        "worker shutdown before it could finish; your "
+                        "previously published factsheet was left in place."
+                    ),
+                    # Phase 164.2 / criterion 2: this sentence is CURATED and
+                    # names the abort reason, so it must survive the bridge.
+                    # Both markers decided by one expression — see
+                    # services/strategy_analytics_provenance.py.
+                    "computation_error_source": provenance_source(job_id),
+                    "computation_error_job_id": job_id,
+                    # ⛔ No data_quality_flags rebuild — same laundering class
+                    # (migration 20260707120000) the guard above avoids.
+            }
+
+            def _write_restore() -> None:
+                supabase.table("strategy_analytics").upsert(
+                    _restore_payload,
+                    on_conflict="strategy_id",
+                ).execute()
+
+            upsert_or_drop_provenance(
+                _restore_payload,
+                _write_restore,
+                where="analytics_runner._upsert_restore",
+            )
+
+        try:
+            await asyncio.shield(db_execute(_upsert_restore))
+        except Exception as _restore_exc:  # noqa: BLE001
+            logger.error(
+                "csv analytics: could not restore the publish state for "
+                # ⛔ The pg_cron reaper is described, never NAMED here. JOB-07
+                # (tests/test_job07_reaper_off_worker_loop.py) forbids a reaper
+                # identifier anywhere on the worker's dispatch surface, string
+                # literals included, so that janitor work can never be moved onto
+                # the shared asyncio loop (WEDGE-01). Measured: spelling the
+                # function name in this message reddened that gate.
+                "strategy %s after %s (%s). The row may be stuck at 'computing' "
+                "until the pg_cron stuck-'computing' reaper next runs.",
+                strategy_id, reason, _restore_exc,
+            )
+        else:
+            logger.warning(
+                "csv analytics: a MARKED ledger refresh (source=%s) for strategy "
+                "%s was aborted by %s; restored the pre-refresh publish state "
+                "(%s) so the live factsheet is neither dark nor parked at "
+                "'computing' (Phase 161.1 F3).",
+                refresh_source, strategy_id, reason,
+                _publish_snapshot["computation_status"],
+            )
+
     # Mark computing.
     def _mark_computing() -> None:
         supabase.table("strategy_analytics").upsert(
-            {"strategy_id": strategy_id, "computation_status": "computing"},
+            {
+                "strategy_id": strategy_id,
+                "computation_status": "computing",
+                # JOB-01: writer-stamped transition timestamp — the pg_cron reaper
+                # reap_strategy_analytics_stuck_computing (migration 20260802120000)
+                # keys on THIS column, never computed_at. Client-side UTC ISO is
+                # mandatory: a PostgREST payload is a literal and cannot express
+                # SQL now().
+                #
+                # D-01/D-18 — the write is unconditional, but its EFFECT is not.
+                # It depends on how this job was reached, and on one of the two
+                # paths the value is written and then discarded by design:
+                #
+                #   * 4-hop chain (process_key_long -> sync_trades ->
+                #     derive_broker_dailies -> compute_analytics_from_csv): the row
+                #     has been 'computing' since hop 1, so this upsert takes its
+                #     ON CONFLICT path — an UPDATE — and the BEFORE UPDATE trigger
+                #     strategy_analytics_stamp_computing_started_trigger (migration
+                #     20260803120000) silently COERCES the payload value back to
+                #     the hop-1 chain-start stamp. The reaper's clock must measure
+                #     the whole chain, not this hop, so the override is the point.
+                #   * CSV-first path (src/app/api/strategies/csv-finalize/route.ts
+                #     :822-826 enqueues compute_analytics_from_csv as the
+                #     strategy's FIRST job, with no prior bridge call): here the
+                #     stamp IS the real transition in, and it lands as written. On
+                #     the upsert's INSERT path the UPDATE-only trigger (D-18) does
+                #     not fire at all; on a real transition-in UPDATE its arm (c)
+                #     respects an explicit stamp.
+                #
+                # Do not make this write conditional on the strength of the first
+                # bullet alone — on the second path there is no other writer.
+                "computing_started_at": datetime.now(timezone.utc).isoformat(),
+            },
             on_conflict="strategy_id",
         ).execute()
-    await db_execute(_mark_computing)
-
-    # Phase 105 (BB-02, collapse #2, D1): the single-key cash SCALAR path joins the ONE
-    # shared dailies-canonical derive route. Function-local import (matching the runner's
-    # local `import pandas` idiom) keeps the import-cycle risk low AND binds the names for
-    # BOTH the success persist and the terminal-arm heal-delete in the except block below.
-    from services.basis_series import derive_basis_series, persist_basis_series
-
+    # ⛔ F4: THIS OUTER `try` IS THE ARMS' COVERAGE, and it is not cosmetic
+    # nesting. The abort arms at the bottom used to be SIBLINGS of the failure
+    # arms in the inner `try` below, and Python does not re-enter sibling
+    # `except` clauses: a `CancelledError` delivered on an `await` INSIDE
+    # `_mark_truncated` / `_mark_config_failed` / the unrecoverable arm — all of
+    # which do their own DB round trips, on a run whose budget has just expired
+    # because the DB is slow — propagated straight out past them. So did one
+    # delivered on `_mark_computing`'s own round trip, which sat OUTSIDE the try
+    # entirely. Both cases left the row at 'computing', which is the exact state
+    # F3 was written to prevent, while F3's comment claimed the arm covered the
+    # budget-timeout path unconditionally.
+    #
+    # Wrapping `_mark_computing` AND the whole inner arm chain closes the class
+    # rather than the three instances: any future `await` added to any handler is
+    # covered by construction.
     try:
-        # Load persisted series.
-        #
-        # WR-02 (19.1-REVIEW): use paginated_select. A bare
-        # .select(...).eq(...).order(...).execute() caps at PostgREST's
-        # default 1000-row response on hosted Supabase, but
-        # persist_csv_daily_returns accepts up to 5000 rows (migration
-        # 20260522111839:160). A 1001–5000-row CSV persists fine but
-        # would silently truncate to the first 1000 rows here, feeding
-        # compute_all_metrics a partial series. Composite order_by
-        # (date asc) matches the (strategy_id, date) UNIQUE index from
-        # the same migration so paginated rows cannot duplicate or
-        # skip at page boundaries.
-        def _load_series() -> list[dict[str, Any]]:
-            return paginated_select(
-                supabase.table("csv_daily_returns")
-                .select("date, daily_return")
-                .eq("strategy_id", strategy_id),
-                order_by=(("date", False),),
-                truncation_hint=f"csv_daily_returns strategy_id={strategy_id}",
-            )
-        data = await db_execute(_load_series)
+        await db_execute(_mark_computing)
 
-        if len(data) < 2:
-            # WR-05 (19.1-REVIEW): stamp csv_source=True so the
-            # provenance pill renders "CSV upload failed — insufficient
-            # history" instead of falling through to generic "missing
-            # data" copy. Downstream consumers gate the chip on
-            # data_quality_flags?.csv_source (src/lib/types.ts:335).
-            def _mark_failed() -> None:
-                supabase.table("strategy_analytics").upsert(
-                    {
+        # Phase 105 (BB-02, collapse #2, D1): the single-key cash SCALAR path joins the ONE
+        # shared dailies-canonical derive route. Function-local import (matching the runner's
+        # local `import pandas` idiom) keeps the import-cycle risk low AND binds the names for
+        # BOTH the success persist and the terminal-arm heal-delete in the except block below.
+        from services.basis_series import derive_basis_series, persist_basis_series
+
+        try:
+            # Load persisted series.
+            #
+            # WR-02 (19.1-REVIEW): drain every page. A bare
+            # .select(...).eq(...).order(...).execute() caps at PostgREST's
+            # default 1000-row response on hosted Supabase, but the CSV finalize
+            # fold accepts up to 5000 rows (finalize_csv_strategy_with_returns,
+            # migration 20260819120000). A 1001–5000-row CSV persists fine but
+            # would silently truncate to the first 1000 rows here, feeding
+            # compute_all_metrics a partial series. C3 topic H: the pages are
+            # KEYSET on date, not OFFSET, so a concurrent rewrite of this
+            # series between two pages cannot make a day be read twice or
+            # skipped (see _load_strategy_daily_returns).
+            def _load_series() -> list[dict[str, Any]]:
+                return _load_strategy_daily_returns(supabase, strategy_id)
+            data = await db_execute(_load_series)
+
+            if len(data) < 2:
+                # WR-05 (19.1-REVIEW): stamp csv_source=True so the
+                # provenance pill renders "CSV upload failed — insufficient
+                # history" instead of falling through to generic "missing
+                # data" copy. Downstream consumers gate the chip on
+                # data_quality_flags?.csv_source (src/lib/types.ts:335).
+                def _mark_failed() -> None:
+                    _insufficient_payload: dict[str, Any] = {
+                            "strategy_id": strategy_id,
+                            "computation_status": "failed",
+                            # SI-02 (MEDIUM-2): clear the runner-owned warned marker.
+                            "computation_warned": False,
+                            # JOB-01: clear on exit so a stale stamp can never re-trigger the reaper.
+                            "computing_started_at": None,
+                            "computation_error": "Insufficient CSV history. At least 2 data points required.",
+                            # Phase 164.2 / criterion 2 — the ROADMAP's own
+                            # example of a curated sentence the bridge used to
+                            # replace with "CSV analytics computation failed."
+                            "computation_error_source": provenance_source(job_id),
+                            "computation_error_job_id": job_id,
+                            "data_quality_flags": {"csv_source": True},
+                    }
+                    _guard_failure_payload_inplace(_insufficient_payload)
+
+                    def _write_insufficient() -> None:
+                        supabase.table("strategy_analytics").upsert(
+                            _insufficient_payload,
+                            on_conflict="strategy_id",
+                        ).execute()
+
+                    upsert_or_drop_provenance(
+                        _insufficient_payload,
+                        _write_insufficient,
+                        where="analytics_runner._mark_failed",
+                    )
+                await db_execute(_mark_failed)
+                raise HTTPException(status_code=400, detail="Insufficient CSV history")
+
+            # Local import keeps the cycle risk low (analytics_runner is
+            # imported at worker startup; pandas is already pulled in via
+            # services.benchmark but the explicit local import documents
+            # intent).
+            import pandas as pd
+            dates = pd.DatetimeIndex([r["date"] for r in data])
+            values = [float(r["daily_return"]) for r in data]
+            returns = pd.Series(values, index=dates, name="returns")
+
+            # MEDIUM-1 (v1.9, DQ-03): reinstate the interior-break NaN for a
+            # BROKER-sourced series at the load boundary. A guarded interior day
+            # (flow-dominated / negative-NAV / dust) is np.nan and SKIPPED at the
+            # csv_daily_returns write (74-04 NaN policy) → ABSENT from the stored
+            # rows. Because the broker path gap-fills to a DENSE daily calendar
+            # BEFORE that NaN-skip (broker_dailies.gap_fill_daily_returns), an in-span
+            # missing calendar date can ONLY be such a refused/guarded day. Rebuilding
+            # the series verbatim from the sparse stored rows would hide the break:
+            # cumulative_twr_segmented would find no NaN and compound ACROSS it — the
+            # exact bridging DQ-03 forbids (the twr_chain_broken flag still arrives via
+            # the derive prestamp, but the money number would be the bridged figure).
+            # Reindex to the dense [min,max] daily span so the in-span gaps become NaN
+            # again; the segmenter then computes the suffix-only headline + CAGR.
+            # GATED to broker sources: a user CSV (api_key_id IS NULL) is NOT
+            # gap-filled, so its missing dates are legitimately absent and must stay
+            # sparse — NaN-filling them would fabricate a break and corrupt the
+            # headline of legitimate data.
+            #
+            # F-4 (convergence red team): the former `composite_dense_gap_fill` branch
+            # (a 0.0-gap-filled COMPOSITE headline) is GONE. run_stitch_composite_job now
+            # persists the composite headline DIRECTLY from its in-memory stitched series
+            # (headline == metrics_json_by_basis.cash_settlement by construction) and no
+            # longer routes through this function, so the flag had zero callers. Its
+            # 0.0-fill for guard days was exactly the dishonest fabrication the root-cause
+            # fix removed — keeping the dead branch invited re-routing the headline back
+            # through the divergent path.
+            if _is_broker_sourced and not returns.empty:
+                dense_index = pd.date_range(
+                    returns.index.min(), returns.index.max(), freq="D"
+                )
+                returns = returns.reindex(dense_index)
+                returns.name = "returns"
+
+            benchmark_rets, benchmark_stale = None, True
+            try:
+                benchmark_rets, benchmark_stale = await get_benchmark_returns("BTC")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "csv analytics: benchmark fetch failed for %s: %s",
+                    strategy_id, exc,
+                )
+
+            # Fix A (v1.8): thread the strategy's metrics CONVENTIONS into the SHIPPED
+            # factsheet so it matches the harness-validated path — NOT a geometric /
+            # √252 / calendar recompute of the persisted returns.
+            #
+            # Phase 105 (BB-02, collapse #2): these three conventions now feed the ONE shared
+            # derive_basis_series route (the inline compute_all_metrics is GONE). The scalar
+            # stays BYTE-IDENTICAL to the pre-105 compute BY CONSTRUCTION (D1): `returns` is
+            # passed as `scalar_returns` (the exact legacy-conditioned series — the :2272
+            # broker dense-reindex-with-NaN fork already ran), so the derive's default
+            # 0.0-densify NEVER touches the scalar. `densify_policy` echoes HOW that scalar
+            # was conditioned so the persisted series is round-trip-complete.
+            #   * periods_per_year — ASSET-CLASS driven (#597): strategies.asset_class
+            #     ('crypto' √365 / 'traditional' √252), backfilled 'crypto' for every
+            #     api_key-sourced row, so a CSV-uploaded crypto strategy is ALSO √365
+            #     (the old api_key_id proxy wrongly left it at 252). This is the same
+            #     signal the OG card / ScenarioComposer / allocator portfolio read.
+            #   * cumulative_method / day_basis — from returns_denominator_config (the
+            #     allocated-capital override; Zavara → simple + active). Absent ⇒
+            #     geometric + calendar (BYTE-IDENTICAL to the pre-Fix-A recompute).
+            _periods_per_year = periods_per_year_for_asset_class(
+                _strategy_row.get("asset_class") if isinstance(_strategy_row, dict) else None
+            )
+            _cumulative_method = "geometric"
+            _day_basis = "calendar"
+            _denominator_config = (
+                parse_returns_denominator_config(
+                    _strategy_row.get("returns_denominator_config")
+                )
+                if isinstance(_strategy_row, dict)
+                else None
+            )
+            if _denominator_config is not None:
+                _cumulative_method = _denominator_config.cumulative_method
+                # B2: EXHAUSTIVE fail-loud map (no silent calendar default on a typo'd /
+                # future metrics_basis). ReturnsDenominatorConfigError is dispositioned
+                # PERMANENT by the except branch below (mirrors the derive path).
+                _day_basis = metrics_day_basis(_denominator_config.metrics_basis)
+
+            # Phase 105 (BB-02, collapse #2): the single-key inline compute swaps for the
+            # shared derive. `returns` serves BOTH params by construction (D1): as `returns`
+            # it feeds `_drop_nonfinite` → the honest sparse rows/gap_spans; as
+            # `scalar_returns` it is the EXACT legacy compute input (the :2272 conditioning
+            # already ran), so the scalar is byte-identical to the pre-105 recompute. The
+            # densify echo is broker → "broker_nan" (in-span gaps are guard NaN), user CSV →
+            # "sparse" (verbatim — NEVER 0.0-weekend-filled: the broadest SC-4 blast radius).
+            # A ValueError (<2 finite rows) lands in the SAME error handling the legacy
+            # compute relied on. Downstream reads (.insufficient_window/.metrics_json/
+            # .sibling_kinds) are duck-compatible with the old MetricsResult.
+            metrics_result = derive_basis_series(
+                returns,
+                benchmark_rets,
+                periods_per_year=_periods_per_year,
+                cumulative_method=_cumulative_method,
+                day_basis=_day_basis,
+                benchmark_symbol="BTC",
+                scalar_returns=returns,
+                densify_policy="broker_nan" if _is_broker_sourced else "sparse",
+            )
+
+            data_quality_flags: DataQualityFlags = {"csv_source": True}  # M-0657
+            if benchmark_stale or benchmark_rets is None:
+                data_quality_flags["benchmark_unavailable"] = True
+                data_quality_flags["benchmark_note"] = "Benchmark data unavailable."
+
+            # Phase 76 (v1.8 DQ-02 + DQ-01): the broker path PRE-STAMPS the coverage
+            # terminus flag AND the NAV-denominator guard flags (negative/dust/flow-
+            # dominated) onto this strategy_analytics row (job_worker,
+            # derive_broker_dailies) BEFORE enqueuing this CSV run — the guard-broken
+            # / pre-terminus days are honestly absent from csv_daily_returns, so these
+            # flags are the only channel that tells the factsheet a day was refused.
+            # Read each pre-existing flag and PRESERVE it (a full _mark_complete upsert
+            # would otherwise wipe it) + promote status to complete_with_warnings when
+            # ANY fired (MED-2 bridges the DQ-01 guard flags to the broker factsheet).
+            def _read_existing_flags() -> dict[str, Any]:
+                res = (
+                    supabase.table("strategy_analytics")
+                    .select("data_quality_flags")
+                    .eq("strategy_id", strategy_id)
+                    .maybe_single()
+                    .execute()
+                )
+                row = getattr(res, "data", None) or {}
+                return dict(row.get("data_quality_flags") or {})
+
+            existing_flags = await db_execute(_read_existing_flags)
+            # SHOULD-1: the pre-stamped broker warn flags (the NAV/flow/uPnL guard
+            # keys derive_broker_dailies stamps onto strategy_analytics) ride the
+            # broker→CSV bridge → complete_with_warnings. Iterate the ONE shared
+            # NAV_TWR_GUARD_KEYS source so a new guard surfaces here by construction.
+            _warned = False
+            for _flag in NAV_TWR_GUARD_KEYS:
+                if existing_flags.get(_flag):
+                    data_quality_flags[_flag] = True  # type: ignore[literal-required]
+                    _warned = True
+            # S3 — the allocated-capital warn flags (NOT NAV_TWR_GUARD_KEYS members: they
+            # originate in the allocated_capital meta, not NavTWRMeta) ride the SAME
+            # bridge via the ONE shared ALLOCATED_CAPITAL_GUARD_KEYS source, iterated
+            # exactly like NAV_TWR_GUARD_KEYS above — so a new allocated warn flag
+            # promotes here by construction instead of a hand-copied branch.
+            for _flag in ALLOCATED_CAPITAL_GUARD_KEYS:
+                if existing_flags.get(_flag):
+                    data_quality_flags[_flag] = True  # type: ignore[literal-required]
+                    _warned = True
+
+            # Phase 101 (MTM-01): the broker derive PRESTAMPS `mtm_gated_reason` onto
+            # this row (job_worker._prestamp_dq_flags) BEFORE enqueuing this CSV run,
+            # when the single-key mark_to_market pass structurally degraded. This
+            # rebuild REBUILDS data_quality_flags WHOLESALE (the fresh dict above), so
+            # an unbridged reason is wiped seconds after being stamped — Phase 102's
+            # disabled-with-reason toggle would then read nothing. Carry it
+            # PRESENT-ONLY and NON-PROMOTING: it is an availability annotation (like
+            # insufficient_window / HARD-04), NOT a NAV/allocated warn flag, so it must
+            # NEVER touch `_warned` (the composite path likewise never promotes on this
+            # key). EXCLUDE composite→single transitions: a stale composite-era reason
+            # (e.g. `unsmoothed_options_book`) is meaningless for the NEW single-key
+            # headline and must not masquerade as a fresh single-key verdict — mirror
+            # the Finding-5 by-basis NULLing below (`_was_composite` is hoisted here
+            # from its original site so both this exclusion and `_clear_stale_by_basis`
+            # read the one lookup). The next broker derive re-evaluates and re-stamps
+            # honestly.
+            _was_composite = bool(existing_flags.get("composite"))
+            _mtm_reason = existing_flags.get("mtm_gated_reason")
+            if _mtm_reason and not _was_composite:
+                data_quality_flags["mtm_gated_reason"] = _mtm_reason
+
+            csv_status = "complete_with_warnings" if _warned else "complete"
+
+            # HARD-04 (#67): lift the CAGR-site insufficient_window annotation.
+            # Present-only additive; deliberately AFTER csv_status and NOT touching
+            # `_warned`, so it NEVER promotes computation_status (a young-but-clean
+            # CSV/MT5 account stays exact-string "complete" — not a NAV_TWR_GUARD_KEYS
+            # member). The CAGR value it annotates is unchanged.
+            if metrics_result.insufficient_window:
+                data_quality_flags["insufficient_window"] = True
+
+            # Finding 5 (non-composite direction): a strategy that STOPS being a
+            # composite (members removed → single-key path) — or ANY non-composite CSV
+            # recompute — is re-derived HERE with a fresh single-basis headline. The
+            # freshly-built data_quality_flags above already drops the composite-only
+            # flags (composite / per_key / gap_spans / gap_day_count / overlap_days /
+            # mtm_gated_reason) because this upsert REPLACES the column wholesale. But
+            # metrics_json_by_basis is NOT in this payload, so a prior composite's
+            # object (incl. a stale mark_to_market key) would SURVIVE next to a now
+            # single-key headline — silent disagreement. Null it so a stale composite
+            # object can't linger. Gate on the prior row's `composite` flag so a pure
+            # single-key strategy (never a composite) is byte-identical (no extra
+            # column write). run_stitch_composite_job owns its OWN by-basis write and
+            # never routes through this function, so any recompute HERE is genuinely
+            # single-key. (`_was_composite` is assigned above, hoisted so the Phase-101
+            # mtm_gated_reason exclusion shares the same lookup.)
+            _clear_stale_by_basis = _was_composite
+
+            # ── MT5-12 (D-15/D-16): producer 3's verdict of record ────────────────
+            # The THIRD csv_daily_returns producer is the keyless CSV upload
+            # (csv-finalize/route.ts → the finalize_csv_strategy_with_returns
+            # SECDEF fold since Phase 145). Its
+            # rows are written in TypeScript, so the derive seam's Python assert
+            # cannot reach it; the verdict is stamped HERE instead, at the success
+            # path's first analytics-side touchpoint. csv-finalize's own
+            # strategy_analytics writes (route.ts:724, :763) are FAILURE placeholders
+            # only, so nothing upstream of this function could have carried it.
+            #
+            # ⛔ PROVENANCE, never current column state. Stamping because "the verdict
+            # is currently NULL" would promote a KEYED funding-only perp — whose
+            # combiner honestly declined to certify it — into the gate's allow-list,
+            # which is exactly the publication D-15 exists to refuse. The
+            # discriminator is `api_key_id IS NULL` (`_is_broker_sourced`, already
+            # read from the strategy row above): the wizard's CSV branch.
+            #
+            # Two exclusions, both deliberate:
+            #   * KEYED — the column is ABSENT from this and every other payload in
+            #     this file, so the derive-stamped verdict survives the analytics
+            #     round trip by OMISSION (A1, executed against TEST in plan 142.2-04:
+            #     a PostgREST upsert projects only the payload's keys).
+            #   * FORMER COMPOSITE — composites carry api_key_id NULL too
+            #     (admin/strategy-review/route.test.ts:1073), so keyless alone would
+            #     relabel a machine stitch as a human upload and erase the
+            #     `composite_stitched` run_stitch_composite_job wrote. A CURRENT
+            #     composite cannot reach here (stitch_composite is chain-terminal in
+            #     JOB_CHAIN_FOLLOW_ON), so this fires only during a composite→keyless
+            #     transition, where the prior `composite` flag is the last honest
+            #     statement about the series. It self-heals: this upsert rebuilds
+            #     data_quality_flags wholesale, so the NEXT run sees no `composite`
+            #     flag and stamps user_supplied. Both values are allow-listed, so the
+            #     one-run lag costs approvability nothing.
+            _stamp_user_supplied = not _is_broker_sourced and not _was_composite
+
+            def _mark_complete() -> None:
+                payload: dict[str, Any] = {
+                    "strategy_id": strategy_id,
+                    "computation_status": csv_status,
+                    # SI-02: same runner-owned warned marker as the stored-trades path
+                    # (TRUE when the broker→CSV guard flags promoted csv_status,
+                    # FALSE on a clean run). The bridge branches (a)/(c) read it.
+                    "computation_warned": _warned,
+                    # JOB-01: clear on exit so a stale stamp can never re-trigger the reaper.
+                    "computing_started_at": None,
+                    "computation_error": None,
+                    # Phase 164.2 / criterion 2: a success blanks the sentence,
+                    # so it must blank the provenance in the SAME statement. A
+                    # marker left standing over a NULLed sentence would make the
+                    # next generic write look curated. (The BEFORE UPDATE
+                    # trigger strategy_analytics_drop_stale_error_provenance
+                    # would also coerce these two, but a writer that states its
+                    # intent is legible at the call site — the same reason the
+                    # JOB-01 census demands the reaper key here.)
+                    #
+                    # ⚠️ NAMING them is what puts this SUCCESS write inside the
+                    # T-164.2-17 deploy window: during the interval where this
+                    # worker runs ahead of migration 20260906120000, PostgREST
+                    # answers PGRST204 for these two keys and writes NOTHING.
+                    # Unwrapped, that APIError reached the catch-all at the end
+                    # of this function, _mark_unrecoverable recorded a COMPLETED
+                    # computation as 'failed', _heal_delete_cash_series deleted
+                    # the cash series persisted one statement earlier, and an
+                    # attempt was burned against max_attempts. Hence the
+                    # upsert_or_drop_provenance wrapper below — the same degrade
+                    # the failure writers use, landing the pre-164.2 success
+                    # payload byte for byte.
+                    "computation_error_source": None,
+                    "computation_error_job_id": None,
+                    "data_quality_flags": data_quality_flags,
+                    "trade_metrics": None,    # CSV has no fills
+                    "volume_metrics": None,
+                    "exposure_metrics": None,
+                }
+                if _clear_stale_by_basis:
+                    # SQL NULL (never JSON null) — Phase 85 CHECK allows NULL or a jsonb
+                    # object. Python None → SQL NULL.
+                    payload["metrics_json_by_basis"] = None
+                if _stamp_user_supplied:
+                    # MT5-12: the ONE site in this file that writes the verdict. A
+                    # SIBLING key — never a member of data_quality_flags, which this
+                    # very upsert REPLACES wholesale (see the rebuild above) and
+                    # whose NAV_TWR_GUARD_KEYS members auto-promote
+                    # computation_status to complete_with_warnings, a status the
+                    # publish gate PASSES (the D-16 fail-open).
+                    payload["series_completeness"] = "user_supplied"
+                payload.update(metrics_result.metrics_json)
+
+                def _write_complete() -> None:
+                    supabase.table("strategy_analytics").upsert(
+                        payload, on_conflict="strategy_id"
+                    ).execute()
+
+                upsert_or_drop_provenance(
+                    payload,
+                    _write_complete,
+                    where="analytics_runner._mark_complete",
+                )
+
+            # Phase 105 (BB-02, D5 ordering): persist the cash_settlement SERIES row BEFORE
+            # the strategy_analytics scalar/status flip, so a `complete` scalar never exists
+            # without its series (mirrors the job_worker series-before-DONE discipline). A
+            # series-persist failure MUST abort BEFORE the scalar flip (fail-loud): it
+            # propagates to the catch-all, which stamps failed AND heal-deletes the
+            # (never-written) row. The single-key cash scalar is now a cache of this series.
+            def _persist_cash_series() -> None:
+                persist_basis_series(
+                    supabase, strategy_id, basis="cash_settlement", result=metrics_result,
+                )
+            await db_execute(_persist_cash_series)
+
+            await db_execute(_mark_complete)
+
+            if metrics_result.sibling_kinds:
+                # NEW-C02-06: mirror the exchange runner's guarded sibling upsert.
+                # A transient RPC blip previously re-raised into the outer except,
+                # overwriting computation_status → 'failed' and discarding valid
+                # scalars. Now: sibling failure sets sibling_kinds_failed=True and
+                # still returns 'complete' (scalars are intact).
+                try:
+                    def _upsert_siblings() -> None:
+                        supabase.rpc(
+                            "upsert_strategy_analytics_series_batch",
+                            {
+                                "p_strategy_id": strategy_id,
+                                "p_kinds": metrics_result.sibling_kinds,
+                            },
+                        ).execute()
+                    await db_execute(_upsert_siblings)
+                except Exception as sibling_exc:  # noqa: BLE001
+                    logger.warning(
+                        "csv analytics: sibling-table batch upsert failed for %s: %s",
+                        strategy_id,
+                        str(sibling_exc),
+                    )
+                    try:
+                        existing = data_quality_flags or {}
+                        existing["sibling_kinds_failed"] = True
+                        existing["sibling_kinds_error"] = "SIBLING_BATCH_UPSERT_FAILED"
+                        csv_flag_payload: dict[str, Any] = {
+                            "strategy_id": strategy_id,
+                            "data_quality_flags": existing,
+                        }
+                        await db_execute(
+                            lambda: supabase.table("strategy_analytics")
+                            .upsert(
+                                csv_flag_payload,
+                                on_conflict="strategy_id",
+                            )
+                            .execute()
+                        )
+                    except Exception as flag_exc:  # noqa: BLE001
+                        logger.error(
+                            "csv analytics: failed to record sibling_kinds_failed flag for %s: %s",
+                            strategy_id, str(flag_exc),
+                        )
+
+            return {"status": "complete", "strategy_id": strategy_id}
+
+        except HTTPException:
+            raise
+        except PaginatedSelectTruncated as trunc:
+            # WR-03 (19.1-REVIEW) + audit-#52 fail-loud contract: mirror the
+            # exchange runner's typed-truncation branch (lines 1399-1428).
+            # The catch-all below would otherwise downgrade this to the
+            # generic "CSV analytics computation failed." message and a
+            # 500 — classify_exception then tags 500 as `unknown` →
+            # indefinite retry on a permanent data-shape fault. Preserve
+            # the typed signal so the dispatcher classifies it as permanent
+            # and the operator-facing computation_error names the specific
+            # cause.
+            logger.error(
+                "csv analytics: pagination truncation for %s "
+                "(page_count=%d, page_size=%d, hint=%s)",
+                strategy_id, trunc.page_count, trunc.page_size, trunc.hint or "n/a",
+            )
+
+            def _mark_truncated() -> None:
+                _truncated_payload: dict[str, Any] = {
                         "strategy_id": strategy_id,
                         "computation_status": "failed",
                         # SI-02 (MEDIUM-2): clear the runner-owned warned marker.
                         "computation_warned": False,
-                        "computation_error": "Insufficient CSV history. At least 2 data points required.",
+                        # JOB-01: clear on exit so a stale stamp can never re-trigger the reaper.
+                        "computing_started_at": None,
+                        # ⛔ NO `trunc.hint` HERE. Phase 164.2 made this sentence
+                        # DURABLE — the bridge no longer overwrites a stamped
+                        # sentence — so whatever is written here is what the
+                        # account holder reads in <StaleWarning> and in the
+                        # wizard's "Details:" line. `hint` is a LOG-triage
+                        # string (db.py:236-243); on the CSV path it is
+                        # literally "csv_daily_returns strategy_id=<uuid>", i.e.
+                        # an internal table name and a raw id. It stays on the
+                        # logger.error above, which is the operator channel.
+                        "computation_error": (
+                            f"CSV analytics aborted: the dataset exceeds "
+                            f"{trunc.page_count * trunc.page_size:,} rows and "
+                            "needs operator intervention. Nothing was "
+                            "published and your uploaded data was not changed."
+                        ),
+                        # Phase 164.2 / criterion 2: this sentence NAMES the row
+                        # cap and says what did NOT happen; the per-kind generic
+                        # says neither, so losing it to the bridge loses the
+                        # whole diagnosis.
+                        "computation_error_source": provenance_source(job_id),
+                        "computation_error_job_id": job_id,
                         "data_quality_flags": {"csv_source": True},
-                    },
-                    on_conflict="strategy_id",
-                ).execute()
-            await db_execute(_mark_failed)
-            raise HTTPException(status_code=400, detail="Insufficient CSV history")
+                }
+                _guard_failure_payload_inplace(_truncated_payload)
 
-        # Local import keeps the cycle risk low (analytics_runner is
-        # imported at worker startup; pandas is already pulled in via
-        # services.benchmark but the explicit local import documents
-        # intent).
-        import pandas as pd
-        dates = pd.DatetimeIndex([r["date"] for r in data])
-        values = [float(r["daily_return"]) for r in data]
-        returns = pd.Series(values, index=dates, name="returns")
-
-        # MEDIUM-1 (v1.9, DQ-03): reinstate the interior-break NaN for a
-        # BROKER-sourced series at the load boundary. A guarded interior day
-        # (flow-dominated / negative-NAV / dust) is np.nan and SKIPPED at the
-        # csv_daily_returns write (74-04 NaN policy) → ABSENT from the stored
-        # rows. Because the broker path gap-fills to a DENSE daily calendar
-        # BEFORE that NaN-skip (broker_dailies.gap_fill_daily_returns), an in-span
-        # missing calendar date can ONLY be such a refused/guarded day. Rebuilding
-        # the series verbatim from the sparse stored rows would hide the break:
-        # cumulative_twr_segmented would find no NaN and compound ACROSS it — the
-        # exact bridging DQ-03 forbids (the twr_chain_broken flag still arrives via
-        # the derive prestamp, but the money number would be the bridged figure).
-        # Reindex to the dense [min,max] daily span so the in-span gaps become NaN
-        # again; the segmenter then computes the suffix-only headline + CAGR.
-        # GATED to broker sources: a user CSV (api_key_id IS NULL) is NOT
-        # gap-filled, so its missing dates are legitimately absent and must stay
-        # sparse — NaN-filling them would fabricate a break and corrupt the
-        # headline of legitimate data.
-        #
-        # F-4 (convergence red team): the former `composite_dense_gap_fill` branch
-        # (a 0.0-gap-filled COMPOSITE headline) is GONE. run_stitch_composite_job now
-        # persists the composite headline DIRECTLY from its in-memory stitched series
-        # (headline == metrics_json_by_basis.cash_settlement by construction) and no
-        # longer routes through this function, so the flag had zero callers. Its
-        # 0.0-fill for guard days was exactly the dishonest fabrication the root-cause
-        # fix removed — keeping the dead branch invited re-routing the headline back
-        # through the divergent path.
-        if _is_broker_sourced and not returns.empty:
-            dense_index = pd.date_range(
-                returns.index.min(), returns.index.max(), freq="D"
-            )
-            returns = returns.reindex(dense_index)
-            returns.name = "returns"
-
-        benchmark_rets, benchmark_stale = None, True
-        try:
-            benchmark_rets, benchmark_stale = await get_benchmark_returns("BTC")
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "csv analytics: benchmark fetch failed for %s: %s",
-                strategy_id, exc,
-            )
-
-        # Fix A (v1.8): thread the strategy's metrics CONVENTIONS into the SHIPPED
-        # factsheet so it matches the harness-validated path — NOT a geometric /
-        # √252 / calendar recompute of the persisted returns.
-        #
-        # Phase 105 (BB-02, collapse #2): these three conventions now feed the ONE shared
-        # derive_basis_series route (the inline compute_all_metrics is GONE). The scalar
-        # stays BYTE-IDENTICAL to the pre-105 compute BY CONSTRUCTION (D1): `returns` is
-        # passed as `scalar_returns` (the exact legacy-conditioned series — the :2272
-        # broker dense-reindex-with-NaN fork already ran), so the derive's default
-        # 0.0-densify NEVER touches the scalar. `densify_policy` echoes HOW that scalar
-        # was conditioned so the persisted series is round-trip-complete.
-        #   * periods_per_year — ASSET-CLASS driven (#597): strategies.asset_class
-        #     ('crypto' √365 / 'traditional' √252), backfilled 'crypto' for every
-        #     api_key-sourced row, so a CSV-uploaded crypto strategy is ALSO √365
-        #     (the old api_key_id proxy wrongly left it at 252). This is the same
-        #     signal the OG card / ScenarioComposer / allocator portfolio read.
-        #   * cumulative_method / day_basis — from returns_denominator_config (the
-        #     allocated-capital override; Zavara → simple + active). Absent ⇒
-        #     geometric + calendar (BYTE-IDENTICAL to the pre-Fix-A recompute).
-        _periods_per_year = periods_per_year_for_asset_class(
-            _strategy_row.get("asset_class") if isinstance(_strategy_row, dict) else None
-        )
-        _cumulative_method = "geometric"
-        _day_basis = "calendar"
-        _denominator_config = (
-            parse_returns_denominator_config(
-                _strategy_row.get("returns_denominator_config")
-            )
-            if isinstance(_strategy_row, dict)
-            else None
-        )
-        if _denominator_config is not None:
-            _cumulative_method = _denominator_config.cumulative_method
-            # B2: EXHAUSTIVE fail-loud map (no silent calendar default on a typo'd /
-            # future metrics_basis). ReturnsDenominatorConfigError is dispositioned
-            # PERMANENT by the except branch below (mirrors the derive path).
-            _day_basis = metrics_day_basis(_denominator_config.metrics_basis)
-
-        # Phase 105 (BB-02, collapse #2): the single-key inline compute swaps for the
-        # shared derive. `returns` serves BOTH params by construction (D1): as `returns`
-        # it feeds `_drop_nonfinite` → the honest sparse rows/gap_spans; as
-        # `scalar_returns` it is the EXACT legacy compute input (the :2272 conditioning
-        # already ran), so the scalar is byte-identical to the pre-105 recompute. The
-        # densify echo is broker → "broker_nan" (in-span gaps are guard NaN), user CSV →
-        # "sparse" (verbatim — NEVER 0.0-weekend-filled: the broadest SC-4 blast radius).
-        # A ValueError (<2 finite rows) lands in the SAME error handling the legacy
-        # compute relied on. Downstream reads (.insufficient_window/.metrics_json/
-        # .sibling_kinds) are duck-compatible with the old MetricsResult.
-        metrics_result = derive_basis_series(
-            returns,
-            benchmark_rets,
-            periods_per_year=_periods_per_year,
-            cumulative_method=_cumulative_method,
-            day_basis=_day_basis,
-            benchmark_symbol="BTC",
-            scalar_returns=returns,
-            densify_policy="broker_nan" if _is_broker_sourced else "sparse",
-        )
-
-        data_quality_flags: DataQualityFlags = {"csv_source": True}  # M-0657
-        if benchmark_stale or benchmark_rets is None:
-            data_quality_flags["benchmark_unavailable"] = True
-            data_quality_flags["benchmark_note"] = "Benchmark data unavailable."
-
-        # Phase 76 (v1.8 DQ-02 + DQ-01): the broker path PRE-STAMPS the coverage
-        # terminus flag AND the NAV-denominator guard flags (negative/dust/flow-
-        # dominated) onto this strategy_analytics row (job_worker,
-        # derive_broker_dailies) BEFORE enqueuing this CSV run — the guard-broken
-        # / pre-terminus days are honestly absent from csv_daily_returns, so these
-        # flags are the only channel that tells the factsheet a day was refused.
-        # Read each pre-existing flag and PRESERVE it (a full _mark_complete upsert
-        # would otherwise wipe it) + promote status to complete_with_warnings when
-        # ANY fired (MED-2 bridges the DQ-01 guard flags to the broker factsheet).
-        def _read_existing_flags() -> dict[str, Any]:
-            res = (
-                supabase.table("strategy_analytics")
-                .select("data_quality_flags")
-                .eq("strategy_id", strategy_id)
-                .maybe_single()
-                .execute()
-            )
-            row = getattr(res, "data", None) or {}
-            return dict(row.get("data_quality_flags") or {})
-
-        existing_flags = await db_execute(_read_existing_flags)
-        # SHOULD-1: the pre-stamped broker warn flags (the NAV/flow/uPnL guard
-        # keys derive_broker_dailies stamps onto strategy_analytics) ride the
-        # broker→CSV bridge → complete_with_warnings. Iterate the ONE shared
-        # NAV_TWR_GUARD_KEYS source so a new guard surfaces here by construction.
-        _warned = False
-        for _flag in NAV_TWR_GUARD_KEYS:
-            if existing_flags.get(_flag):
-                data_quality_flags[_flag] = True  # type: ignore[literal-required]
-                _warned = True
-        # S3 — the allocated-capital warn flags (NOT NAV_TWR_GUARD_KEYS members: they
-        # originate in the allocated_capital meta, not NavTWRMeta) ride the SAME
-        # bridge via the ONE shared ALLOCATED_CAPITAL_GUARD_KEYS source, iterated
-        # exactly like NAV_TWR_GUARD_KEYS above — so a new allocated warn flag
-        # promotes here by construction instead of a hand-copied branch.
-        for _flag in ALLOCATED_CAPITAL_GUARD_KEYS:
-            if existing_flags.get(_flag):
-                data_quality_flags[_flag] = True  # type: ignore[literal-required]
-                _warned = True
-
-        # Phase 101 (MTM-01): the broker derive PRESTAMPS `mtm_gated_reason` onto
-        # this row (job_worker._prestamp_dq_flags) BEFORE enqueuing this CSV run,
-        # when the single-key mark_to_market pass structurally degraded. This
-        # rebuild REBUILDS data_quality_flags WHOLESALE (the fresh dict above), so
-        # an unbridged reason is wiped seconds after being stamped — Phase 102's
-        # disabled-with-reason toggle would then read nothing. Carry it
-        # PRESENT-ONLY and NON-PROMOTING: it is an availability annotation (like
-        # insufficient_window / HARD-04), NOT a NAV/allocated warn flag, so it must
-        # NEVER touch `_warned` (the composite path likewise never promotes on this
-        # key). EXCLUDE composite→single transitions: a stale composite-era reason
-        # (e.g. `unsmoothed_options_book`) is meaningless for the NEW single-key
-        # headline and must not masquerade as a fresh single-key verdict — mirror
-        # the Finding-5 by-basis NULLing below (`_was_composite` is hoisted here
-        # from its original site so both this exclusion and `_clear_stale_by_basis`
-        # read the one lookup). The next broker derive re-evaluates and re-stamps
-        # honestly.
-        _was_composite = bool(existing_flags.get("composite"))
-        _mtm_reason = existing_flags.get("mtm_gated_reason")
-        if _mtm_reason and not _was_composite:
-            data_quality_flags["mtm_gated_reason"] = _mtm_reason
-
-        csv_status = "complete_with_warnings" if _warned else "complete"
-
-        # HARD-04 (#67): lift the CAGR-site insufficient_window annotation.
-        # Present-only additive; deliberately AFTER csv_status and NOT touching
-        # `_warned`, so it NEVER promotes computation_status (a young-but-clean
-        # CSV/MT5 account stays exact-string "complete" — not a NAV_TWR_GUARD_KEYS
-        # member). The CAGR value it annotates is unchanged.
-        if metrics_result.insufficient_window:
-            data_quality_flags["insufficient_window"] = True
-
-        # Finding 5 (non-composite direction): a strategy that STOPS being a
-        # composite (members removed → single-key path) — or ANY non-composite CSV
-        # recompute — is re-derived HERE with a fresh single-basis headline. The
-        # freshly-built data_quality_flags above already drops the composite-only
-        # flags (composite / per_key / gap_spans / gap_day_count / overlap_days /
-        # mtm_gated_reason) because this upsert REPLACES the column wholesale. But
-        # metrics_json_by_basis is NOT in this payload, so a prior composite's
-        # object (incl. a stale mark_to_market key) would SURVIVE next to a now
-        # single-key headline — silent disagreement. Null it so a stale composite
-        # object can't linger. Gate on the prior row's `composite` flag so a pure
-        # single-key strategy (never a composite) is byte-identical (no extra
-        # column write). run_stitch_composite_job owns its OWN by-basis write and
-        # never routes through this function, so any recompute HERE is genuinely
-        # single-key. (`_was_composite` is assigned above, hoisted so the Phase-101
-        # mtm_gated_reason exclusion shares the same lookup.)
-        _clear_stale_by_basis = _was_composite
-
-        def _mark_complete() -> None:
-            payload: dict[str, Any] = {
-                "strategy_id": strategy_id,
-                "computation_status": csv_status,
-                # SI-02: same runner-owned warned marker as the stored-trades path
-                # (TRUE when the broker→CSV guard flags promoted csv_status,
-                # FALSE on a clean run). The bridge branches (a)/(c) read it.
-                "computation_warned": _warned,
-                "computation_error": None,
-                "data_quality_flags": data_quality_flags,
-                "trade_metrics": None,    # CSV has no fills
-                "volume_metrics": None,
-                "exposure_metrics": None,
-            }
-            if _clear_stale_by_basis:
-                # SQL NULL (never JSON null) — Phase 85 CHECK allows NULL or a jsonb
-                # object. Python None → SQL NULL.
-                payload["metrics_json_by_basis"] = None
-            payload.update(metrics_result.metrics_json)
-            supabase.table("strategy_analytics").upsert(
-                payload, on_conflict="strategy_id"
-            ).execute()
-
-        # Phase 105 (BB-02, D5 ordering): persist the cash_settlement SERIES row BEFORE
-        # the strategy_analytics scalar/status flip, so a `complete` scalar never exists
-        # without its series (mirrors the job_worker series-before-DONE discipline). A
-        # series-persist failure MUST abort BEFORE the scalar flip (fail-loud): it
-        # propagates to the catch-all, which stamps failed AND heal-deletes the
-        # (never-written) row. The single-key cash scalar is now a cache of this series.
-        def _persist_cash_series() -> None:
-            persist_basis_series(
-                supabase, strategy_id, basis="cash_settlement", result=metrics_result,
-            )
-        await db_execute(_persist_cash_series)
-
-        await db_execute(_mark_complete)
-
-        if metrics_result.sibling_kinds:
-            # NEW-C02-06: mirror the exchange runner's guarded sibling upsert.
-            # A transient RPC blip previously re-raised into the outer except,
-            # overwriting computation_status → 'failed' and discarding valid
-            # scalars. Now: sibling failure sets sibling_kinds_failed=True and
-            # still returns 'complete' (scalars are intact).
-            try:
-                def _upsert_siblings() -> None:
-                    supabase.rpc(
-                        "upsert_strategy_analytics_series_batch",
-                        {
-                            "p_strategy_id": strategy_id,
-                            "p_kinds": metrics_result.sibling_kinds,
-                        },
+                def _write_truncated() -> None:
+                    supabase.table("strategy_analytics").upsert(
+                        _truncated_payload,
+                        on_conflict="strategy_id",
                     ).execute()
-                await db_execute(_upsert_siblings)
-            except Exception as sibling_exc:  # noqa: BLE001
-                logger.warning(
-                    "csv analytics: sibling-table batch upsert failed for %s: %s",
-                    strategy_id,
-                    str(sibling_exc),
+
+                upsert_or_drop_provenance(
+                    _truncated_payload,
+                    _write_truncated,
+                    where="analytics_runner._mark_truncated",
                 )
-                try:
-                    existing = data_quality_flags or {}
-                    existing["sibling_kinds_failed"] = True
-                    existing["sibling_kinds_error"] = "SIBLING_BATCH_UPSERT_FAILED"
-                    csv_flag_payload: dict[str, Any] = {
+            try:
+                await db_execute(_mark_truncated)
+            except Exception as mark_exc:  # noqa: BLE001
+                # Same defensive logging as _mark_unrecoverable below — if
+                # the truncation-marker write itself fails, log so a stuck
+                # 'computing' row has operator-visible evidence.
+                logger.warning(
+                    "csv analytics: could not mark strategy %s truncated: %s",
+                    strategy_id,
+                    mark_exc,
+                )
+            raise
+        except ReturnsDenominatorConfigError as cfg_exc:
+            # S1 / B2: a malformed returns_denominator_config (or an unknown
+            # metrics_basis) is PERMANENT — never retry-forever. Mirror the derive path
+            # (run_derive_broker_dailies_job stamps failed + permanent): the generic
+            # `except Exception` below would downgrade this to a 500 → classify_exception
+            # 'unknown' → indefinite transient retry, losing the reason. Stamp failed and
+            # raise a 422 HTTPException (4xx ∈ 400..499 → classify_exception PERMANENT).
+            logger.error(
+                "csv analytics: malformed returns_denominator_config for %s: %s",
+                strategy_id, cfg_exc,
+            )
+
+            def _mark_config_failed() -> None:
+                _config_failed_payload: dict[str, Any] = {
                         "strategy_id": strategy_id,
-                        "data_quality_flags": existing,
+                        "computation_status": "failed",
+                        "computation_warned": False,
+                        # JOB-01: clear on exit so a stale stamp can never re-trigger the reaper.
+                        "computing_started_at": None,
+                        "computation_error": (
+                            "Strategy returns_denominator_config is malformed; "
+                            "operator intervention required."
+                        ),
+                        # Phase 164.2 / criterion 2: a PERMANENT, operator-
+                        # actionable cause. The generic would send the reader
+                        # looking at the CSV instead of at the config.
+                        "computation_error_source": provenance_source(job_id),
+                        "computation_error_job_id": job_id,
+                        "data_quality_flags": {"csv_source": True},
+                }
+                _guard_failure_payload_inplace(_config_failed_payload)
+
+                def _write_config_failed() -> None:
+                    supabase.table("strategy_analytics").upsert(
+                        _config_failed_payload,
+                        on_conflict="strategy_id",
+                    ).execute()
+
+                upsert_or_drop_provenance(
+                    _config_failed_payload,
+                    _write_config_failed,
+                    where="analytics_runner._mark_config_failed",
+                )
+            try:
+                await db_execute(_mark_config_failed)
+            except Exception as mark_exc:  # noqa: BLE001
+                logger.warning(
+                    "csv analytics: could not mark strategy %s config-failed: %s",
+                    strategy_id, mark_exc,
+                )
+            raise HTTPException(
+                status_code=422, detail="Malformed returns_denominator_config"
+            ) from cfg_exc
+        except Exception as exc:  # noqa: BLE001
+            logger.error("csv analytics failed for %s: %s", strategy_id, exc)
+
+            # WR-05 (19.1-REVIEW): stamp csv_source=True so the provenance
+            # pill survives the unrecoverable failure. Without it the
+            # owner-side UI sees null data_quality_flags and falls back to
+            # generic "missing data" copy instead of "CSV upload failed".
+            #
+            # mig 20260707120000: READ-MODIFY-WRITE — do NOT wipe the column. This
+            # path raises HTTP 500 → the job goes to failed_retry and the CSV run is
+            # re-dispatched (derive is NOT re-run). A wholesale {csv_source:True}
+            # write here destroyed any NAV_TWR_GUARD_KEYS that derive_broker_dailies
+            # pre-stamped, so attempt 2's _read_existing_flags found none →
+            # _warned=False → a clean 'complete' over a guard-refused series (the
+            # exact laundering class this migration kills). Preserve prior flags.
+            def _mark_unrecoverable() -> None:
+                prior_res = (
+                    supabase.table("strategy_analytics")
+                    .select("data_quality_flags")
+                    .eq("strategy_id", strategy_id)
+                    .maybe_single()
+                    .execute()
+                )
+                prior_flags = dict(
+                    (getattr(prior_res, "data", None) or {}).get("data_quality_flags") or {}
+                )
+                prior_flags["csv_source"] = True
+                try:
+                    _unrecoverable_payload: dict[str, Any] = {
+                            "strategy_id": strategy_id,
+                            "computation_status": "failed",
+                            # SI-02 (MEDIUM-2): clear the runner-owned warned marker.
+                            "computation_warned": False,
+                            # JOB-01: clear on exit so a stale stamp can never re-trigger the reaper.
+                            "computing_started_at": None,
+                            "computation_error": "CSV analytics computation failed.",
+                            # Phase 164.2 / criterion 2. This sentence is the
+                            # LEAST specific one this runner writes, and it is
+                            # stamped anyway: the marker is a claim about WHICH
+                            # JOB the sentence belongs to, not a claim that the
+                            # sentence is good. Leaving it unstamped would let a
+                            # later, different-kind transition re-write this row
+                            # with a generic naming the wrong kind.
+                            "computation_error_source": provenance_source(job_id),
+                            "computation_error_job_id": job_id,
+                            "data_quality_flags": prior_flags,
                     }
-                    await db_execute(
-                        lambda: supabase.table("strategy_analytics")
-                        .upsert(
-                            csv_flag_payload,
+                    _guard_failure_payload_inplace(_unrecoverable_payload)
+
+                    def _write_unrecoverable() -> None:
+                        supabase.table("strategy_analytics").upsert(
+                            _unrecoverable_payload,
                             on_conflict="strategy_id",
-                        )
-                        .execute()
+                        ).execute()
+
+                    # A 23514 on the markers is handled HERE and degrades to an
+                    # unstamped re-issue; every other APIError — PGRST204 above
+                    # all — propagates untouched to the handler below, which is
+                    # what keeps the schema-cache-miss arm reachable.
+                    upsert_or_drop_provenance(
+                        _unrecoverable_payload,
+                        _write_unrecoverable,
+                        where="analytics_runner._mark_unrecoverable",
                     )
-                except Exception as flag_exc:  # noqa: BLE001
-                    logger.error(
-                        "csv analytics: failed to record sibling_kinds_failed flag for %s: %s",
-                        strategy_id, str(flag_exc),
+                except APIError as api_exc:
+                    if getattr(api_exc, "code", None) != _PGRST_SCHEMA_CACHE_MISS:
+                        # Narrow ON PURPOSE. Swallowing every APIError here would
+                        # hide a serialization failure or a permission denial behind
+                        # a silently degraded payload; the caller logs and continues.
+                        raise
+                    # D-02 / R2 — this writer is the CATCH-ALL exit: every other
+                    # failure arm in this runner reaches it. If it cannot write, the
+                    # already-failed job leaves the row 'computing' forever and the
+                    # owner-side UI spins. So drop the key PostgREST just said it
+                    # does not know and re-issue; a degraded stamp beats a permanent
+                    # spinner. Omitting it is safe because the BEFORE UPDATE trigger
+                    # named in _mark_computing's comment owns the exit-clear as soon
+                    # as the column is visible again — and in this window the column
+                    # does not exist server-side to be left stale.
+                    logger.warning(
+                        "csv analytics: strategy_analytics schema cache does not "
+                        "know computing_started_at (code %s) — re-issuing the "
+                        "terminal 'failed' for %s without it. This is a deploy "
+                        "window; if it persists, PostgREST has not reloaded.",
+                        _PGRST_SCHEMA_CACHE_MISS,
+                        strategy_id,
+                    )
+                    # ⛔ AND THIS RE-ISSUE CARRIES NO PROVENANCE MARKERS, ON
+                    # PURPOSE (Phase 164.2 / criterion 2). It exists for the
+                    # deploy window in which PostgREST does not yet know the
+                    # NEWEST column on this table, and this phase adds TWO new
+                    # columns — so adding them here would defeat the arm on the
+                    # very window it exists for: the re-issue would fail with
+                    # the same PGRST204 that made the first write fail, and the
+                    # already-failed job would leave the row 'computing'
+                    # forever. Losing provenance in that window costs the
+                    # curated sentence and nothing else; the bridge writes its
+                    # per-kind generic, which is the pre-164.2 behaviour.
+                    # ⚠️ The key set below must stay EXACTLY these five. It is
+                    # the signature BOTH AST censuses exempt by shape rather
+                    # than by name — test_computing_started_at_stamp.py's
+                    # _STAMP_OMISSION_EXEMPT_KEYS and
+                    # test_computation_error_provenance_census.py's
+                    # PROVENANCE_EXEMPT_KEYS — so adding a key here does not
+                    # loosen an exemption, it collapses one and reddens both
+                    # gates. That is the intended direction.
+                    _unrecoverable_reissue_payload: dict[str, Any] = {
+                            "strategy_id": strategy_id,
+                            "computation_status": "failed",
+                            "computation_warned": False,
+                            "computation_error": "CSV analytics computation failed.",
+                            "data_quality_flags": prior_flags,
+                    }
+                    _guard_failure_payload_inplace(_unrecoverable_reissue_payload)
+                    supabase.table("strategy_analytics").upsert(
+                        _unrecoverable_reissue_payload,
+                        on_conflict="strategy_id",
+                    ).execute()
+
+            try:
+                await db_execute(_mark_unrecoverable)
+            except Exception as mark_exc:  # noqa: BLE001
+                # PR #273 (T-19.1-03) — log BEFORE re-raise so a stuck
+                # 'computing' row has log evidence pointing at the inner
+                # mark-unrecoverable failure. Without this, the strategy
+                # would be stuck in 'computing' forever with no operator
+                # signal.
+                logger.warning(
+                    "csv analytics: could not mark strategy %s unrecoverable: %s",
+                    strategy_id,
+                    mark_exc,
+                )
+
+            # Phase 105 (BB-02, D3 SECONDARY): heal-DELETE the cash_settlement series row so a
+            # stale row from a prior longer-history derive never outlives this authoritative
+            # 'failed' stamp. DEFENSE-IN-DEPTH — the Plan-02 read gate is the primary
+            # guarantee. A heal failure must NEVER mask the terminal stamp that invoked it:
+            # swallow + warn (mirrors job_worker._heal_delete_basis_series).
+            #
+            # ⛔ CR-03 (161.1-REVIEW): SKIPPED on a protected refresh. This is the
+            # half that is easy to miss on this path too — the payload transform
+            # above preserves the publish state, but this DELETE would still strip a
+            # live factsheet's cash_settlement series, and no bridge branch and no
+            # later run can put it back. `_publish_snapshot is not None` means the
+            # row was terminal-SUCCESS when this refresh started, so the persisted
+            # series it is rendering is current, not stale.
+            def _heal_delete_cash_series() -> None:
+                persist_basis_series(
+                    supabase, strategy_id, basis="cash_settlement", result=None,
+                )
+            if _publish_snapshot is None:
+                try:
+                    await db_execute(_heal_delete_cash_series)
+                except Exception as heal_exc:  # noqa: BLE001
+                    logger.warning(
+                        "csv analytics: cash series heal-delete failed for %s "
+                        "(terminal stamp already applied): %s",
+                        strategy_id,
+                        heal_exc,
                     )
 
-        return {"status": "complete", "strategy_id": strategy_id}
-
-    except HTTPException:
+            raise HTTPException(status_code=500, detail="CSV analytics computation failed")
+    except asyncio.CancelledError:
+        # F3 — FIRST, and it must stay above the arms below to be readable as
+        # what it is: the budget-timeout path. CancelledError is a BaseException,
+        # so the inner arms cannot catch it and every terminal stamp is skipped.
+        # See _restore_publish_state_on_abort.
+        await _restore_publish_state_on_abort("the worker's per-job budget timeout")
         raise
-    except PaginatedSelectTruncated as trunc:
-        # WR-03 (19.1-REVIEW) + audit-#52 fail-loud contract: mirror the
-        # exchange runner's typed-truncation branch (lines 1399-1428).
-        # The catch-all below would otherwise downgrade this to the
-        # generic "CSV analytics computation failed." message and a
-        # 500 — classify_exception then tags 500 as `unknown` →
-        # indefinite retry on a permanent data-shape fault. Preserve
-        # the typed signal so the dispatcher classifies it as permanent
-        # and the operator-facing computation_error names the specific
-        # cause.
-        logger.error(
-            "csv analytics: pagination truncation for %s "
-            "(page_count=%d, page_size=%d, hint=%s)",
-            strategy_id, trunc.page_count, trunc.page_size, trunc.hint or "n/a",
-        )
-
-        def _mark_truncated() -> None:
-            supabase.table("strategy_analytics").upsert(
-                {
-                    "strategy_id": strategy_id,
-                    "computation_status": "failed",
-                    # SI-02 (MEDIUM-2): clear the runner-owned warned marker.
-                    "computation_warned": False,
-                    "computation_error": (
-                        f"CSV analytics aborted: dataset exceeds "
-                        f"{trunc.page_count * trunc.page_size:,} rows "
-                        f"({trunc.hint or 'unknown source'}); operator "
-                        "intervention required."
-                    ),
-                    "data_quality_flags": {"csv_source": True},
-                },
-                on_conflict="strategy_id",
-            ).execute()
-        try:
-            await db_execute(_mark_truncated)
-        except Exception as mark_exc:  # noqa: BLE001
-            # Same defensive logging as _mark_unrecoverable below — if
-            # the truncation-marker write itself fails, log so a stuck
-            # 'computing' row has operator-visible evidence.
-            logger.warning(
-                "csv analytics: could not mark strategy %s truncated: %s",
-                strategy_id,
-                mark_exc,
-            )
+    except Exception:
+        # ⛔ A PASS-THROUGH, and it is load-bearing: it keeps the arm below
+        # BaseException-ONLY. Every ordinary failure is already dispositioned by
+        # the inner arms (which stamp, heal and re-raise); without this arm the
+        # broad one would also catch those and call the restore on a run that has
+        # already written its terminal state.
         raise
-    except ReturnsDenominatorConfigError as cfg_exc:
-        # S1 / B2: a malformed returns_denominator_config (or an unknown
-        # metrics_basis) is PERMANENT — never retry-forever. Mirror the derive path
-        # (run_derive_broker_dailies_job stamps failed + permanent): the generic
-        # `except Exception` below would downgrade this to a 500 → classify_exception
-        # 'unknown' → indefinite transient retry, losing the reason. Stamp failed and
-        # raise a 422 HTTPException (4xx ∈ 400..499 → classify_exception PERMANENT).
-        logger.error(
-            "csv analytics: malformed returns_denominator_config for %s: %s",
-            strategy_id, cfg_exc,
-        )
-
-        def _mark_config_failed() -> None:
-            supabase.table("strategy_analytics").upsert(
-                {
-                    "strategy_id": strategy_id,
-                    "computation_status": "failed",
-                    "computation_warned": False,
-                    "computation_error": (
-                        "Strategy returns_denominator_config is malformed; "
-                        "operator intervention required."
-                    ),
-                    "data_quality_flags": {"csv_source": True},
-                },
-                on_conflict="strategy_id",
-            ).execute()
-        try:
-            await db_execute(_mark_config_failed)
-        except Exception as mark_exc:  # noqa: BLE001
-            logger.warning(
-                "csv analytics: could not mark strategy %s config-failed: %s",
-                strategy_id, mark_exc,
-            )
-        raise HTTPException(
-            status_code=422, detail="Malformed returns_denominator_config"
-        ) from cfg_exc
-    except Exception as exc:  # noqa: BLE001
-        logger.error("csv analytics failed for %s: %s", strategy_id, exc)
-
-        # WR-05 (19.1-REVIEW): stamp csv_source=True so the provenance
-        # pill survives the unrecoverable failure. Without it the
-        # owner-side UI sees null data_quality_flags and falls back to
-        # generic "missing data" copy instead of "CSV upload failed".
+    except BaseException as _abort_exc:
+        # F3, the CLASS rather than the one instance. CancelledError is the
+        # measured case and has its own arm above; this catches the rest of the
+        # BaseException family (SystemExit / KeyboardInterrupt on a worker being
+        # torn down, a nested CancelledError re-raised by a helper). Every one of
+        # them means the same thing: we are leaving without a terminal stamp,
+        # and _mark_computing's 'computing' is still on the row.
         #
-        # mig 20260707120000: READ-MODIFY-WRITE — do NOT wipe the column. This
-        # path raises HTTP 500 → the job goes to failed_retry and the CSV run is
-        # re-dispatched (derive is NOT re-run). A wholesale {csv_source:True}
-        # write here destroyed any NAV_TWR_GUARD_KEYS that derive_broker_dailies
-        # pre-stamped, so attempt 2's _read_existing_flags found none →
-        # _warned=False → a clean 'complete' over a guard-refused series (the
-        # exact laundering class this migration kills). Preserve prior flags.
-        def _mark_unrecoverable() -> None:
-            prior_res = (
-                supabase.table("strategy_analytics")
-                .select("data_quality_flags")
-                .eq("strategy_id", strategy_id)
-                .maybe_single()
-                .execute()
-            )
-            prior_flags = dict(
-                (getattr(prior_res, "data", None) or {}).get("data_quality_flags") or {}
-            )
-            prior_flags["csv_source"] = True
-            supabase.table("strategy_analytics").upsert(
-                {
-                    "strategy_id": strategy_id,
-                    "computation_status": "failed",
-                    # SI-02 (MEDIUM-2): clear the runner-owned warned marker.
-                    "computation_warned": False,
-                    "computation_error": "CSV analytics computation failed.",
-                    "data_quality_flags": prior_flags,
-                },
-                on_conflict="strategy_id",
-            ).execute()
-
-        try:
-            await db_execute(_mark_unrecoverable)
-        except Exception as mark_exc:  # noqa: BLE001
-            # PR #273 (T-19.1-03) — log BEFORE re-raise so a stuck
-            # 'computing' row has log evidence pointing at the inner
-            # mark-unrecoverable failure. Without this, the strategy
-            # would be stuck in 'computing' forever with no operator
-            # signal.
-            logger.warning(
-                "csv analytics: could not mark strategy %s unrecoverable: %s",
-                strategy_id,
-                mark_exc,
-            )
-
-        # Phase 105 (BB-02, D3 SECONDARY): heal-DELETE the cash_settlement series row so a
-        # stale row from a prior longer-history derive never outlives this authoritative
-        # 'failed' stamp. DEFENSE-IN-DEPTH — the Plan-02 read gate is the primary
-        # guarantee. A heal failure must NEVER mask the terminal stamp that invoked it:
-        # swallow + warn (mirrors job_worker._heal_delete_basis_series).
-        def _heal_delete_cash_series() -> None:
-            persist_basis_series(
-                supabase, strategy_id, basis="cash_settlement", result=None,
-            )
-        try:
-            await db_execute(_heal_delete_cash_series)
-        except Exception as heal_exc:  # noqa: BLE001
-            logger.warning(
-                "csv analytics: cash series heal-delete failed for %s "
-                "(terminal stamp already applied): %s",
-                strategy_id,
-                heal_exc,
-            )
-
-        raise HTTPException(status_code=500, detail="CSV analytics computation failed")
+        # Re-raised UNCHANGED and immediately — nothing is swallowed, no control
+        # flow is altered, and an unprotected row still takes the loud path.
+        await _restore_publish_state_on_abort(type(_abort_exc).__name__)
+        raise

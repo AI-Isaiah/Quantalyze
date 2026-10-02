@@ -56,6 +56,173 @@ export const EXCHANGE_DISPLAY = {
 export type ExchangeDisplay = (typeof EXCHANGE_DISPLAY)[SupportedExchange];
 
 /**
+ * Per-venue CAPABILITY facts (Phase 153.1 — D-17, D-22).
+ *
+ * These are facts about the VENUE, not about what we offer. Deliberately NOT gated on
+ * MT5_UI_ENABLED / SFOX_UI_ENABLED below: a capability is true whether or not the card
+ * is on screen, and flag-gating it would make the copy layer's behaviour depend on a UI
+ * flag.
+ *
+ * Why a record instead of `if (venue === "mt5")`: two different layers (the
+ * finalize-wizard scope-probe gate and the wizardErrors copy filter) ask the same
+ * venue-shaped question. Answered once here, a venue that behaves like MT5 costs one
+ * row; answered at each call site, it costs an unbounded instance-check sweep — the
+ * instance-not-class defect this repo has already paid for once.
+ *
+ * Every member is OPTIONAL and ABSENT means the INCUMBENT behaviour, so a venue that
+ * omits a key behaves byte-identically to today. That is the `ExchangeOption`
+ * `requiresSecret?` / `passphraseSecret?` precedent (ConnectKeyStep.tsx), applied to
+ * an isomorphic module because these facts are needed on BOTH sides of the wire.
+ */
+export interface VenueCapabilities {
+  /**
+   * Does this venue answer a per-key permissions probe (the submit-time
+   * scope-broadening probe)? Absent → TRUE, which is what every ccxt venue does, so
+   * every existing and future venue that omits the key probes exactly as it does today.
+   *
+   * `mt5` sets false: MT5 read-only is enforced STRUCTURALLY (Mt5Client composes only
+   * read methods — there is no order/withdraw/transfer surface to broaden) and
+   * BEHAVIOURALLY (the `order_check` master-login rejection), and MT5 exposes no
+   * per-key scope endpoint. The probe has nothing to ask.
+   *
+   * ⚠️ Read this through `venueSupportsScopeProbe()`, never by indexing the record:
+   * the predicate is what makes an UNRESOLVED venue still get probed, and that
+   * direction is a security property (ASVS V4).
+   *
+   * Consumer: Phase 153.2's finalize-wizard probe gate (D-14) — not this sub-phase.
+   */
+  scopeProbeSupported?: boolean;
+  /**
+   * Is there another venue the user could plausibly use instead, i.e. is "switch to a
+   * different exchange" a REAL remedy? Absent → TRUE, which is what every ccxt venue
+   * is, so the incumbent remedy copy is preserved everywhere it renders today.
+   *
+   * `mt5` sets false: the broker account IS the venue. Telling an MT5 user to use a
+   * different exchange is an unwinnable remedy (D-17 — the same class as MT5-13 and
+   * the deleted "0 trades" message).
+   *
+   * Consumer: 153.1-03's copy filter in wizardErrors.ts.
+   */
+  substitutable?: boolean;
+  /**
+   * Are this venue's calls SERIALIZED behind one shared lease, so that a long wait is
+   * QUEUEING rather than slowness? Absent → FALSE, which is what every ccxt venue is
+   * (per-key calls run concurrently) — and claiming a queue we cannot observe would be
+   * inventing a specific fact about the user's situation.
+   *
+   * `mt5` sets true: every gateway call funnels through a single terminal lease (one
+   * logged-in account per terminal), so N concurrent validations genuinely queue.
+   *
+   * Consumer: Phase 153.4's long-wait copy (D-05).
+   */
+  serialized?: boolean;
+}
+
+/**
+ * One capability row per SUPPORTED_EXCHANGES member. `as const satisfies
+ * Record<SupportedExchange, VenueCapabilities>` makes a missing row a COMPILE error, so
+ * a seventh venue physically cannot ship without one — the same discipline
+ * EXCHANGE_DISPLAY uses above.
+ *
+ * ⛔ This adds NO membership anywhere. `mt5` is already a member of SUPPORTED_EXCHANGES
+ * and EXCHANGE_DISPLAY, so giving it a row widens nothing; it stays OUT of
+ * UI_EXCHANGE_CODES / EXCHANGES / FUNDING_EXCHANGES / CRYPTO_EXCHANGES (the chip-set
+ * widening is Phase 153.2's, D-16/D-20, and CRYPTO_EXCHANGES membership drives the
+ * √365-vs-√252 annualization split).
+ */
+export const VENUE_CAPABILITIES = {
+  binance: {},
+  okx: {},
+  bybit: {},
+  deribit: {},
+  // D-22: sFOX keeps the submit-time scope probe BYTE-UNCHANGED in this phase, so its
+  // row asserts no capability at all.
+  // ⚠️ OPEN QUESTION, logged in TODOS.md and deliberately NOT answered here (RESEARCH
+  // Q2): sFOX asserts read_only=True structurally for the same reason MT5 does and
+  // exposes no per-key scope endpoint, so it may belong in the opt-out. What is unknown
+  // is whether the ccxt probe currently SUCCEEDS for sFOX or has been silently failing
+  // — and changing sFOX's submit path is outside this phase's requirements.
+  sfox: {},
+  mt5: { scopeProbeSupported: false, substitutable: false, serialized: true },
+} as const satisfies Record<SupportedExchange, VenueCapabilities>;
+
+/**
+ * The capability row for a venue string, or undefined when the venue is null/empty or
+ * is not a supported code. Case-insensitive, like isCryptoExchange below —
+ * canonicalizeExchange hands back the DISPLAY form ("MT5"), so callers legitimately
+ * pass mixed case.
+ *
+ * ⛔ Deliberately NOT exported. Every consumer must go through one of the three
+ * predicates, because the DEFAULT — what an absent key or an unresolved venue means —
+ * is the load-bearing part, and it is different for each capability.
+ */
+function venueCapabilities(
+  venue: string | null | undefined,
+): VenueCapabilities | undefined {
+  if (!venue) return undefined;
+  const key = venue.toLowerCase();
+  // 153.1 review WR-05 — OWN-property only. The key arrives OVER THE WIRE
+  // (153.2 feeds this a venue read off the `api_keys` row), and a plain-object
+  // index resolves "constructor", "toString" and "__proto__" to inherited
+  // members, handing back a truthy object typed as a capability row. This is
+  // the Record-vs-Map rule wizardErrors.ts states twice as a security
+  // property rather than a style choice.
+  //
+  // ⚠️ Today's impact is nil for an ACCIDENTAL reason, which is exactly why
+  // this is worth closing: `Object.prototype` carries none of
+  // `scopeProbeSupported` / `substitutable` / `serialized`, so all three
+  // predicates fall to their declared defaults — the safe directions. That
+  // safety is a property of today's three capability NAMES, not of the
+  // lookup. A fourth capability whose safe default is the other polarity
+  // would be silently subverted for those three keys, and
+  // `venueSupportsScopeProbe` gates an ASVS V4 control.
+  return Object.hasOwn(VENUE_CAPABILITIES, key)
+    ? (VENUE_CAPABILITIES as Record<string, VenueCapabilities>)[key]
+    : undefined;
+}
+
+/**
+ * Should the submit-time scope-broadening probe run for this venue?
+ *
+ * ⚠️ null / undefined / "" / an unknown venue ⇒ **TRUE**, which is the OPPOSITE of
+ * isCryptoExchange's null answer. That asymmetry is deliberate — do not "unify" these
+ * three predicates. This one gates a SECURITY control (ASVS V4): a key broadened to
+ * trade/withdraw between Connect and Submit is caught by the probe, so an unresolved
+ * venue must still be probed. Answering false here would silently disable the defense
+ * for every venue the resolver could not name. The local precedent for "venue
+ * unresolved ⇒ do the conservative thing" is finalize-wizard's `skipAssetClassWrite`
+ * arm, which leaves the existing stamp intact rather than guessing.
+ */
+export function venueSupportsScopeProbe(
+  venue: string | null | undefined,
+): boolean {
+  return venueCapabilities(venue)?.scopeProbeSupported ?? true;
+}
+
+/**
+ * May copy suggest using a different venue instead of this one?
+ *
+ * null / undefined / unknown ⇒ **TRUE**: when the caller did not name a venue we keep
+ * the incumbent copy. Suppressing venue-shaped remedies wherever the venue is unknown
+ * would be a repo-wide copy regression, which is not what D-17 asked for — D-17 asks
+ * that the bullet never renders for a venue we KNOW cannot be substituted.
+ */
+export function venueIsSubstitutable(venue: string | null | undefined): boolean {
+  return venueCapabilities(venue)?.substitutable ?? true;
+}
+
+/**
+ * Are calls to this venue serialized behind one shared lease (so a wait is a queue)?
+ *
+ * null / undefined / unknown ⇒ **FALSE**: never claim queueing we cannot observe. A
+ * surface must not invent a specific fact about why the user is waiting, so the honest
+ * answer for a venue we could not resolve is "not known to queue".
+ */
+export function venueIsSerialized(venue: string | null | undefined): boolean {
+  return venueCapabilities(venue)?.serialized ?? false;
+}
+
+/**
  * Feature flag for the public sFOX offer (Phase 122 / SFOX-08). Strict equality
  * against the EXACT string "true" — fail-closed: "1" / "TRUE" / "on" / "" all
  * read as OFF. Next.js inlines the full static `process.env.NEXT_PUBLIC_SFOX_ENABLED`
@@ -106,8 +273,9 @@ export const SMOOTHED_MTM_UI_ENABLED =
  * static member access (never dynamic `process.env[...]` indexing) or the
  * inlining breaks and the flag reads undefined in the browser.
  *
- * DEFAULT OFF, dark until the founder flips it in Phase 139. It gates ONLY the
- * MT5 venue card in the add-key wizard (ConnectKeyStep's local EXCHANGES array).
+ * DEFAULT OFF, dark until the founder flips it in Phase 139. It gates the MT5
+ * venue card in the add-key wizard (ConnectKeyStep's local EXCHANGES array) and,
+ * since Phase 153.2, MT5's membership of WIZARD_EXCHANGE_CODES below.
  * Flag OFF ⇒ the wizard is BYTE-IDENTICAL to today (no MT5 pixel); a test pins
  * this (ConnectKeyStep.test.tsx + closed-sets.mt5-flag.test.ts).
  *
@@ -116,10 +284,32 @@ export const SMOOTHED_MTM_UI_ENABLED =
  * in Phase 139; either alone is an intentional SAFE half-state (card hidden but
  * gated, or card shown but connect fails closed 400).
  *
- * mt5 stays OUT of UI_EXCHANGE_CODES / EXCHANGES / FUNDING_EXCHANGES /
- * CRYPTO_EXCHANGES regardless of this flag — the manager-surface <Select> must
- * not silently widen (UI-SPEC §MT5-Manager-Parity; the closed-sets.mt5-flag
- * no-widening pin enforces it).
+ * ⚠️ THE FOUR-SET EXCLUSION, RE-CUT (Phase 153.2 / MT5-14 / D-16 / D-20). This
+ * docblock used to say mt5 stays out of UI_EXCHANGE_CODES / EXCHANGES /
+ * FUNDING_EXCHANGES / CRYPTO_EXCHANGES "regardless of this flag", full stop.
+ * Half of that is still true and half of it was outgrown, so it is REWRITTEN
+ * rather than deleted — the next reader should inherit the reasoning, not an
+ * unexplained inversion:
+ *
+ *   · mt5 still stays out of ALL FOUR of those sets, flag on or off. The
+ *     manager-surface <Select> (ApiKeyForm / StrategyForm / StrategyFilters /
+ *     MandateForm / PreferencesPanel / VerificationForm) derives from
+ *     UI_EXCHANGE_CODES and must not silently gain an MT5 option, and the public
+ *     "{EXCHANGES.length} exchanges supported" marketing count must not move
+ *     ((marketing)/page.tsx). That was the pin's original stated reason and it
+ *     is intact.
+ *   · ⛔ CRYPTO_EXCHANGES is the one that is not a UI question at all. Membership
+ *     there selects √365 over √252 for Sharpe / Sortino / volatility, so adding
+ *     mt5 would silently inflate every risk metric on a forex/CFD book (~×1.20
+ *     Sharpe vs crypto peers on the allocator-facing ranking). That is a
+ *     MONEY-MATH boundary, and no UI requirement may cross it.
+ *   · mt5 DOES enter WIZARD_EXCHANGE_CODES when this flag is on (MT5-14). The
+ *     strategy wizard must be able to declare the venue of the key it is
+ *     literally built on — refusing that is not a safety property, it is a
+ *     strategy that cannot name where it trades.
+ *
+ * The closed-sets.mt5-flag pin asserts all four negatives AND the positive, so
+ * neither half of this can drift silently.
  */
 export const MT5_UI_ENABLED = process.env.NEXT_PUBLIC_MT5_ENABLED === "true";
 
@@ -247,6 +437,89 @@ export const EXCHANGES: readonly ExchangeDisplay[] = UI_EXCHANGE_CODES.map(
   (code) => EXCHANGE_DISPLAY[code],
 );
 
+// --- The wizard-declarable set (Phase 153.2 / MT5-14, D-20 "Option B") ------
+//
+// A venue a strategy may DECLARE as supported in the wizard's metadata step.
+// Deliberately a FIFTH set rather than a widening of UI_EXCHANGE_CODES, and the
+// narrowness is the whole decision:
+//
+//   · `EXCHANGES` — and therefore the public "{EXCHANGES.length} exchanges
+//     supported" count at (marketing)/page.tsx — DOES NOT MOVE. MT5 is a broker
+//     platform, not an exchange, and claiming it as one in public copy would be
+//     a marketing statement made by a UI fix.
+//   · the six manager <Select> surfaces (ApiKeyForm, StrategyForm,
+//     StrategyFilters, MandateForm, PreferencesPanel, VerificationForm) all
+//     derive from UI_EXCHANGE_CODES and DO NOT silently widen. That was the
+//     closed-sets.mt5-flag pin's original stated reason; Option B keeps the
+//     reason intact instead of retiring it, and the pin gains a POSITIVE
+//     assertion here rather than losing a negative there.
+//
+// ⛔ The ONLY consumer is MetadataStep's "Supported exchanges" chip group. If a
+// second consumer ever appears, that is a decision to make deliberately — not a
+// set to reach for because it happens to contain the venue you wanted.
+
+/**
+ * The codes the wizard may offer OVER AND ABOVE the publicly-offered set.
+ *
+ * A separate literal (rather than a fifth hand-typed full tuple) because
+ * WIZARD_EXCHANGE_CODES composes it ON TOP of UI_EXCHANGE_CODES: two
+ * INDEPENDENT flags (SFOX_UI_ENABLED and MT5_UI_ENABLED) would otherwise need
+ * four literals kept in lockstep, and the sFOX flag's behaviour here stays
+ * automatic instead of hand-maintained. `as const satisfies readonly
+ * SupportedExchange[]` keeps the closed-set guarantee on this literal too
+ * (Shared Pattern F).
+ */
+const WIZARD_ONLY_EXCHANGE_CODES = ["mt5"] as const satisfies readonly SupportedExchange[];
+
+/**
+ * The exchange codes the strategy wizard's metadata step may offer.
+ *
+ * = UI_EXCHANGE_CODES, plus mt5 when MT5_UI_ENABLED. Flag OFF ⇒ BYTE-IDENTICAL
+ * to UI_EXCHANGE_CODES, so the wizard has no MT5 pixel and no MT5 chip exists to
+ * preselect (the lowercase "mt5" seeded into MetadataStep's state renders
+ * nowhere, exactly as today).
+ */
+export const WIZARD_EXCHANGE_CODES: readonly SupportedExchange[] = MT5_UI_ENABLED
+  ? [...UI_EXCHANGE_CODES, ...WIZARD_ONLY_EXCHANGE_CODES]
+  : UI_EXCHANGE_CODES;
+
+/**
+ * Display-case wizard-declarable set — derived through EXCHANGE_DISPLAY exactly
+ * as EXCHANGES derives from UI_EXCHANGE_CODES, so casing cannot drift between
+ * the chip a user clicks and the value that is persisted.
+ *
+ * Flag OFF ⇒ deep-equal to EXCHANGES (the pin asserts that as an EQUALITY, not
+ * as two absences).
+ */
+export const WIZARD_EXCHANGES: readonly ExchangeDisplay[] =
+  WIZARD_EXCHANGE_CODES.map((code) => EXCHANGE_DISPLAY[code]);
+
+/**
+ * Canonicalize an exchange name against the WIZARD set — the same shape as
+ * `canonicalizeExchange` in constants.ts (case-insensitive loop; an unknown name
+ * is returned UNCHANGED so a future venue is not silently dropped before this
+ * set learns about it), but looping WIZARD_EXCHANGES so `"mt5"` resolves to
+ * `"MT5"` and matches its chip.
+ *
+ * ⛔ DO NOT "just widen" `constants.ts`'s `canonicalizeExchange` instead. That
+ * function is called SERVER-SIDE at finalize-wizard/route.ts (via
+ * `canonicalizeExchangeList`, on the persisted `supported_exchanges`) and in
+ * WizardClient.tsx, so widening it would change what every caller persists for
+ * every venue — a wire-format change made to fix a chip. This canonicalizer is
+ * wizard-scoped for the same reason the set is.
+ *
+ * Lives here rather than in constants.ts because constants.ts re-exports FROM
+ * this module (the module-header no-cycle rule).
+ */
+export function canonicalizeWizardExchange(name: string): string {
+  if (!name) return name;
+  const lower = name.toLowerCase();
+  for (const canonical of WIZARD_EXCHANGES) {
+    if (canonical.toLowerCase() === lower) return canonical;
+  }
+  return name;
+}
+
 /** Case-insensitive membership against the user exchange allowlist. */
 export function isSupportedExchange(value: string): boolean {
   return (SUPPORTED_EXCHANGES as readonly string[]).includes(value.toLowerCase());
@@ -314,16 +587,45 @@ export function annualizationPeriods(
 
 /**
  * Trading periods per year for a BLENDED (multi-strategy) return series, keyed
- * off the constituent legs' `asset_class`. √365 if ANY constituent leg is
- * crypto, else √252. Rationale (locked #597 blend rule): the blended daily
- * return series is calendar-daily the moment a crypto leg is present, so it has
- * ~365 obs/year; a pure-tradfi blend stays √252. An empty or all-unknown blend
- * keeps the 252 pre-#597 default byte-identical.
+ * off the constituent legs' `asset_class`. √365 if ANY constituent leg is crypto
+ * OR of UNKNOWN class, else √252. Rationale (locked #597 blend rule): the
+ * blended daily return series is calendar-daily the moment a crypto leg is
+ * present, so it has ~365 obs/year; a pure-tradfi blend stays √252.
+ *
+ * SCOPE (#597 law — do not widen): this is the RISK basis only. Volatility,
+ * Sharpe and Sortino ride this FREQUENCY clock; RETURN/CAGR ride the CALENDAR
+ * clock (`calendarYears`, 365.25 days) and are asset-class-invariant. A change
+ * here must never move a RETURN number.
+ *
+ * EMPTY vs ALL-UNKNOWN — two different answers, deliberately (RANK-06):
+ * - An EMPTY `legs` array keeps the 252 pre-#597 default byte-identical. With no
+ *   legs there is no leg whose class could have been dropped, so there is no gap
+ *   to fail safe about.
+ * - An ALL-UNKNOWN blend is now 365, NOT 252. `strategies.asset_class` is
+ *   `NOT NULL DEFAULT 'traditional'` in the DB (migration 20260709130000), so a
+ *   leg reaching this helper with `asset_class` absent/null/undefined is never a
+ *   strategy that IS traditional — it is a CALLER PROJECTION GAP (a select list
+ *   that dropped the column; the v1.11 "per-key refs invisible to a naive diff"
+ *   class). Resolving that gap to 252 understates a crypto blend's annualized
+ *   vol by the √(365/252) factor (~17%) and correspondingly INFLATES its Sharpe
+ *   (~×1.20) on the allocator-facing ranking, i.e. the silent failure direction
+ *   is the flattering one. Unknown therefore fails toward the CONSERVATIVE
+ *   (crypto) clock: an over-stated vol is visible and honest, an under-stated
+ *   one is a trust-integrity defect. The Python composite path closed this same
+ *   class earlier via `closed_sets.py::CRYPTO_VENUES`; this is the TS half.
  *
  * The blend sibling of `annualizationPeriods` — the ONE place that maps a set of
  * legs → periods, so every wave-2/3 blend KPI call site derives its basis from
- * here rather than hand-rolling a second rule. Exact-match 'crypto' only (no
- * case/alias widening): the DB stores lowercase 'crypto' | 'traditional'.
+ * here rather than hand-rolling a second rule (MD-01: no call site may grow a
+ * local 365/252 ternary). NOTE the deliberate asymmetry with
+ * `annualizationPeriods`, whose unknown→252 default is unchanged: that helper
+ * keys off a SINGLE strategy's own stored class, where "unknown" cannot arise
+ * from a blend-leg projection gap.
+ *
+ * Exact-match 'crypto' only for NON-NULL values (no case/alias widening): the DB
+ * stores lowercase 'crypto' | 'traditional', and a caller that DID supply a class
+ * string is not a projection gap — so 'CRYPTO' or any unrecognized non-null
+ * string still reads traditional √252. RANK-06 widened NULLISH, not matching.
  *
  * Structural param type (`{ asset_class?: string | null }`) — this module
  * imports ONLY zod (module-header rule); importing StrategyForBuilder would risk
@@ -332,7 +634,10 @@ export function annualizationPeriods(
 export function blendPeriodsPerYear(
   legs: ReadonlyArray<{ asset_class?: string | null }>,
 ): number {
-  return legs.some((l) => l.asset_class === "crypto") ? 365 : 252;
+  // EMPTY → 252 falls out of `.some()` on an empty array — no guard needed.
+  return legs.some((l) => l.asset_class === "crypto" || l.asset_class == null)
+    ? 365
+    : 252;
 }
 
 /**
@@ -390,8 +695,17 @@ export type LiquidityPreference = (typeof LIQUIDITY_PREFERENCES)[number];
 // --- strategy_analytics.computation_status closed set ----------------------
 // SoT for the strategy_analytics.computation_status column. The analytics
 // worker writes 'complete_with_warnings' when a computation SUCCEEDS but used a
-// consumer-specific fallback (used_heuristic_capital / balance_error —
-// analytics_runner.py:1765); the frontend read-gates (B3) admit it; and the DB
+// consumer-specific fallback (the `used_heuristic_capital` / `balance_error` DQ
+// flags). The status literal itself is written by the `csv_status` assignment in
+// `analytics_runner.run_csv_strategy_analytics`, by `composite_status` in
+// `job_worker.run_stitch_composite_job`, and by `final_status` in
+// `job_worker.run_poll_allocator_positions_job`. For the CURRENT producer set,
+// grep `"complete_with_warnings" if` under `analytics-service/services/` — a
+// comment cannot keep a population current, so the predicate is written here
+// instead of a count. (140.5-04: this reference used to be a line number into
+// `analytics_runner.py`; that file SHRANK under its citers in a refactor and the
+// coordinate went past EOF. Symbols survive a shrink.)
+// The frontend read-gates (B3) admit it; and the DB
 // CHECK permits exactly this set (supabase/migrations/
 // 20260602120000_strategy_analytics_computation_status_add_complete_with_warnings.sql).
 // 'stale' is deliberately ABSENT — it was never a valid status (the #399 cron
@@ -436,6 +750,278 @@ export function isComputedAnalytics(
   return status === "complete" || status === "complete_with_warnings";
 }
 
+// --- RANK-01: the published-percentile rank gate (Phase 159) ---------------
+// The strategy_analytics column that decides whether a row may participate in a
+// PUBLIC ranking. Kept as its own constant, deliberately NOT a member of the KPI
+// array: queries.ts's PERCENTILE_ANALYTICS_COLUMNS and the csv-finalize
+// CLOCK_SAFETY_KPI_COLUMNS are both DERIVED from PERCENTILE_METRICS
+// (percentile-core.ts, Phase 166 D-12), and every member of that array is
+// ranked and measured as a KPI — a status column in it would be scored as one.
+// The projection sites compose the two instead (KPIs, then this column), and
+// the bytes they send are pinned by queries.percentile-columns.test.ts and the
+// csv-finalize guard's BYTE PIN test.
+export const PERCENTILE_GATE_COLUMN = "computation_status";
+
+// Whether an embedded strategy_analytics row may take part in a published
+// percentile ranking — as a SUBJECT (it receives a rank) and as a POPULATION
+// member (it shifts everyone else's).
+//
+// WHY A STATUS GATE AND NOT A NULL CHECK: a `failed` computation can still hold
+// KPI values from an earlier attempt. 159-CENSUS.md measured this in PROD — 17
+// of 18 published strategies carried a `failed` analytics row that still held
+// BOTH sharpe and cagr, so every `IS NOT NULL` predicate admitted them and dead
+// numbers were ranking against live ones. Only the status distinguishes them.
+//
+// This is the ONE gate for both TS percentile callers (getPercentiles and
+// getOwnRowPercentiles in queries.ts). It delegates to isComputedAnalytics
+// rather than re-deriving status semantics, so `complete_with_warnings` — a
+// terminal SUCCESS — stays ranked; a local exact-match against the bare
+// `complete` value would silently unrank every warned-but-valid strategy.
+// (Phrased without the literal comparison operator on purpose: the SI-01
+// census in complete-status-scan.test.ts greps raw source, so writing that
+// pattern even in prose would force an allowlist bump and blind the guard to
+// a real one landing in this file later.)
+//
+// The SQL twin is the cohort predicate in get_verified_cohort_rank
+// (supabase/migrations/20260821120000_*): its
+// `IN ('complete','complete_with_warnings')` list mirrors isComputedAnalytics
+// exactly, which is what makes that migration's parity-by-construction claim a
+// true sentence. Change one, change the other.
+export function isRankableAnalyticsRow(
+  row: { computation_status?: string | null } | null | undefined,
+): boolean {
+  return isComputedAnalytics(row?.computation_status);
+}
+
+// --- Series state (Phase 147 / SCEN-01) ------------------------------------
+// What a read surface may say about a strategy's return series. "available" is
+// decided by the RESOLVED series' own length at the call site; the other two
+// are the two honest readings of an EMPTY series, discriminated by
+// deriveEmptySeriesState below. DISTINCT from
+// STRATEGY_ANALYTICS_COMPUTATION_STATUSES: that set is the DB job lifecycle,
+// this one is the presentation vocabulary derived from it.
+export const SERIES_STATES = ["available", "computing", "empty"] as const;
+export type SeriesState = (typeof SERIES_STATES)[number];
+
+// The age after which a MISSING strategy_analytics row stops meaning "warming
+// up" and starts meaning "no data". This is deliberately the SAME threshold the
+// analytics-service reaper uses to terminalize a stuck 'computing' row —
+// STRATEGY_ANALYTICS_REAP_THRESHOLD = "16 hours"
+// (analytics-service/job_worker.py), mirrored by the pg_cron reaper migration
+// 20260802120000_* — so the system has ONE staleness threshold, not two that
+// can drift apart. Anything the reaper considers dead, the UI must too.
+export const MISSING_ROW_COMPUTING_WINDOW_MS = 16 * 60 * 60 * 1000;
+
+/**
+ * Decide what an EMPTY resolved return series MEANS: still computing, or
+ * genuinely absent. The ONE server-side discriminator — share it, do not
+ * inline this ladder at a second read site.
+ *
+ * (a) Callers invoke this ONLY when the resolved series is empty. "available"
+ *     is never returned here: that state is decided by the resolved series'
+ *     length at the call site, not by any status column.
+ *
+ * (b) Why the missing-row arm is AGE-BOUNDED (the load-bearing part): a
+ *     `strategies` row does NOT guarantee a `strategy_analytics` row. No
+ *     trigger creates one on INSERT; the finalize-wizard's enqueue_compute_job
+ *     failure is logged and swallowed inside a Promise.allSettled; and no cron
+ *     backstops a MISSING row (reconcile-strategies is scoped to funding
+ *     exchanges with a recent sync, and the reaper only terminalizes rows
+ *     already at 'computing'). So a strategy whose job was never enqueued has
+ *     status === null forever — and mapping that to "computing" without a bound
+ *     is a spinner that never stops, the exact permanent-spinner class Phase 142
+ *     killed. Past MISSING_ROW_COMPUTING_WINDOW_MS, and whenever the age is
+ *     unknown or unparseable, degrade to honest absence.
+ *
+ * `nowMs` is injected so callers/tests can be deterministic; it defaults to
+ * Date.now() for production reads.
+ */
+export function deriveEmptySeriesState(
+  status: string | null,
+  strategyCreatedAt: string | null,
+  nowMs: number = Date.now(),
+): SeriesState {
+  // A live job is authoritative — age is the reaper's problem, not ours.
+  if (status === "pending" || status === "computing") return "computing";
+  if (status === null) {
+    const created = strategyCreatedAt ? Date.parse(strategyCreatedAt) : NaN;
+    if (!Number.isFinite(created)) return "empty"; // unknown age → honest absence
+    return nowMs - created < MISSING_ROW_COMPUTING_WINDOW_MS
+      ? "computing"
+      : "empty";
+  }
+  // complete / complete_with_warnings / failed (and any unrecognised value) with
+  // no series → terminal absence. `failed` is deliberately NOT special-cased:
+  // the UI renders a MUTED "No data" for it, never a red error chip.
+  return "empty";
+}
+
+// --- Untrusted key sync_status (Phase 167 CREDTRUST / D-16) ----------------
+// THE ONE DEFINITION of "this key's data is not to be trusted as current".
+//
+// MEASURED DEFECT THIS REPLACES (founder decision D-16, 2026-09-22; found
+// independently by `rls-policy-auditor` and `silent-failure-hunter`): the
+// holdings and open-positions surfaces answered that question with SEVEN
+// hand-kept equalities against the single literal `revoked` — six in
+// `HoldingsTable.tsx`, one in `OpenPositionsTable.tsx`. There was no
+// allow-list, no enum and no closed set over `api_keys.sync_status` anywhere,
+// so EVERY status that was not `revoked` fell to the healthy branch by
+// default. The moment the holdings poll gained a second failed-credential
+// value (`sign_in_failed`, 167-04), a holding sourced from a key the venue has
+// stopped accepting would have rendered un-chipped and un-filtered.
+//
+// ⚠️ WHAT THIS PREDICATE REACHES, AND HOW (review round 1, SFH-M2 — an earlier
+// version of this comment claimed otherwise; ⛔ CORRECTED by Phase 167.1
+// AUMTRUST). Phase 167 left the chip and the `HoldingsTable` filter as its
+// only consumers. Since Phase 167.1 it also reaches the two RENDERED
+// holdings-derived dollar totals, as a DISCLOSURE and never a subtraction:
+//   * `summarizeLiveHoldings` (`allocations/lib/live-holdings-summary.ts`)
+//     feeds the Scenario composer's `scenario-aum-untrusted-note`;
+//   * the `OpenPositionsTable` footer pass feeds
+//     `open-positions-untrusted-note`.
+// Both totals keep their value and name the untrusted part (founder decision
+// 2026-09-22: keep the total and flag it). No money number changed.
+// `src/lib/queries.ts` still sums `totalAum = holdingsSummary.reduce` over
+// every holding with no key-status test, but `liveBaselineMetrics.aum` is
+// rendered nowhere — Phase 64 PRESENT-01 removed the KPI-strip AUM cell — so
+// that sum is not a surface. In book mode a `revoked` key's holdings are
+// outside the composer's summed set, because `isPerKeyDailiesEligibleKey`
+// excludes that key; whether to disclose that ABSENCE is Phase 167.1 D-06, a
+// founder decision.
+//
+// ⛔ THE EQUALITY SHAPE WAS THE DEFECT, NOT THE MISSING VALUE. Appending
+// `|| status === "sign_in_failed"` beside each `=== "revoked"` reproduces it
+// for the tenth status. Every one of those sites is now a CALLER of the
+// predicate below; ⛔ do not re-introduce a local equality on this column.
+//
+// The TWO members are two different CLAIMS with one shared consequence:
+//   * `revoked`        — the VENUE asserted the rejection (ccxt
+//                        AuthenticationError / PermissionDenied).
+//   * `sign_in_failed` — WE could not sign in and cannot say why (the MT5
+//                        login that returns an opaque False).
+// Both mean the same thing to a money surface: the numbers on this row are
+// not current. They are NOT interchangeable in COPY, which is why the label
+// map below is per-status rather than one shared sentence.
+//
+// ⚠️ SCOPE, stated rather than implied: this set governs the ROW-LEVEL trust
+// question on the allocator money surfaces. It is NOT the pill vocabulary —
+// `AllocatorSyncStatus`'s PILL_STYLES covers all nine statuses including the
+// healthy ones, and is a different question (what state is this key in?) from
+// this one (may I show this key's numbers as current?).
+export const UNTRUSTED_KEY_SYNC_STATUSES = [
+  "revoked",
+  "sign_in_failed",
+] as const;
+export type UntrustedKeySyncStatus =
+  (typeof UNTRUSTED_KEY_SYNC_STATUSES)[number];
+
+// The OTHER half of the partition: every `api_keys.sync_status` value a money
+// surface may render as current (healthy, in flight, or failed-but-transient).
+// Declared so that the partition is TOTAL and CHECKED, not implied by "whatever
+// the set above does not list".
+//
+// ⛔ WHY THIS EXISTS (review round 1, SFH-M1). `isUntrustedKeySyncStatus`
+// answers `false` for a value it has never heard of, so a FUTURE
+// credential-failure value added to `api_keys_sync_status_check` would render
+// as healthy with nothing going red. The runtime default is deliberately NOT
+// flipped (a null status is the legitimate no-key case, and striking through a
+// healthy book on a value drift is its own false claim). The guard is at CI
+// time instead: the B9 CHECK parity matrix
+// (`src/__tests__/contracts/check-zod-db-check-parity.test.ts`, row
+// `api_keys.sync_status`) resolves the LATEST `api_keys_sync_status_check`
+// from `supabase/migrations/` and asserts it equals the UNION of these two
+// lists, and `closed-sets.untrusted-key-status.test.ts` asserts they are
+// DISJOINT. Together: every value the CHECK admits is in EXACTLY ONE
+// partition, and neither partition holds a value the CHECK lacks. A migration
+// that widens the CHECK therefore reds CI until someone decides which side the
+// new value is on.
+export const TRUSTED_OR_NEUTRAL_KEY_SYNC_STATUSES = [
+  "idle",
+  "syncing",
+  "computing",
+  "complete",
+  "complete_with_warnings",
+  "error",
+  "rate_limited",
+] as const;
+
+// Per-status chip copy. `satisfies Record<UntrustedKeySyncStatus, string>`
+// makes a missing label a COMPILE error, so a future member of the set above
+// physically cannot ship rendering an EMPTY chip — a correctly-coloured blank,
+// which is the silent failure the sibling `PILL_STYLES`/`pillLabel` pair had
+// to be pinned by a runtime roster test to catch.
+//
+// ⛔ NEITHER STRING IS NEW, and that is deliberate (167-UI-SPEC § Copywriting
+// Contract — do not invent a third vocabulary for a state that already has
+// one): "Key revoked" is the byte-unchanged Phase 08 MANAGE-02 chip, and
+// "Sign-in failed" is the pill label plan 167-03 shipped in
+// `AllocatorSyncStatus`. The chip names the STATE; the remedy sentence lives
+// on the owner's key surface, which is the only surface that can act on it.
+export const UNTRUSTED_KEY_STATUS_CHIP_LABEL = {
+  revoked: "Key revoked",
+  sign_in_failed: "Sign-in failed",
+} as const satisfies Record<UntrustedKeySyncStatus, string>;
+
+// The COLLECTIVE noun for the set, for surfaces that filter on it rather than
+// label one row. ⛔ This is not a third state vocabulary: the per-state chips
+// above still name the specific cause ("Key revoked" / "Sign-in failed") on the
+// row itself. This names the SET, and it must stay cause-neutral — a filter that
+// hides two causes cannot honestly name one of them.
+//
+// ⚠️ IT REPLACES "revoked" IN USER-FACING FILTER COPY, and that was a real
+// defect: the toggle said "Show revoked-key holdings" and the footer said
+// "hidden from revoked keys" while the predicate already hid `sign_in_failed`
+// too, so the surface NAMED A NARROWER SET THAN IT HID. Derived from one
+// constant here rather than restated at each call site, because this phase has
+// a dated record of the same count drifting across seven restatements.
+export const UNTRUSTED_KEY_SET_NOUN = "keys needing attention";
+
+// Phase 167.1 review round 2 WR-05 — the noun for a holding whose key is
+// MISSING from the key list (the list dropped it, e.g. an unsupported
+// exchange). Its status is UNKNOWN, which is neither trusted nor a member of
+// `UNTRUSTED_KEY_SYNC_STATUSES`, so it is never folded into
+// `UNTRUSTED_KEY_SET_NOUN`: the untrusted filter does not find these rows. The
+// composer's AUM disclosure and the Open Positions footer both name them with
+// this one constant, and the row marker below names the same state on the row
+// itself, so a reader sent from the composer to the Holdings tab finds them.
+// ⚠️ A key PRESENT with a null status is NOT this state: it is the legitimate
+// no-status case and stays trusted.
+export const UNKNOWN_KEY_STATUS_SET_NOUN = "keys with an unknown sync status";
+export const UNKNOWN_KEY_STATUS_ROW_LABEL = "Sync status unknown";
+
+/**
+ * Whether a row's source key is in a state that forbids showing its numbers as
+ * current. A known untrusted status is never admitted to the healthy branch.
+ *
+ * ⚠️ It does NOT fail closed on an UNKNOWN value, and says so: an unknown /
+ * null / empty status answers `false` (trusted). `null` is the legitimate
+ * no-source-key case, and a value drift must not strike through a healthy
+ * book. The cost of that default — a NEW credential-failure value would read
+ * as healthy — is closed at CI time, not here: see
+ * `TRUSTED_OR_NEUTRAL_KEY_SYNC_STATUSES`, whose partition test reds the moment
+ * `api_keys_sync_status_check` admits a value neither list declares.
+ */
+export function isUntrustedKeySyncStatus(
+  status: string | null | undefined,
+): status is UntrustedKeySyncStatus {
+  return (UNTRUSTED_KEY_SYNC_STATUSES as readonly string[]).includes(
+    status ?? "",
+  );
+}
+
+/**
+ * The chip copy for an untrusted status, or `null` for anything a money
+ * surface may render as current. Returning null (rather than an empty string)
+ * keeps the caller's `{label ? <chip/> : null}` honest.
+ */
+export function untrustedKeyChipLabel(
+  status: string | null | undefined,
+): string | null {
+  return isUntrustedKeySyncStatus(status)
+    ? UNTRUSTED_KEY_STATUS_CHIP_LABEL[status]
+    : null;
+}
+
 // --- Signup roles (SECURITY BOUNDARY) --------------------------------------
 // SECURITY BOUNDARY (NEW-C15-05): the AUTHORITATIVE allowlist for the role a
 // new user receives is the SQL trigger handle_new_user
@@ -459,7 +1045,25 @@ export const MAGNITUDE_CAPS = {
   MAX_NAME_CHARS: 80,
   /** mandate_archetype free text. */
   MAX_MANDATE_CHARS: 500,
-  /** strategy description free text. */
+  /**
+   * strategy description free text — the LOWER bound (Phase 153.1 / D-23).
+   *
+   * Three consumers must read THIS constant and nothing else: the finalize-wizard
+   * server arm in `validatePayload` (re-pointed in 153.1-05), the MetadataStep inline
+   * field guard, and the MetadataStep `handleSubmit` predicate (both Phase 153.2 —
+   * D-11/D-12/D-13).
+   *
+   * Why it exists: the UPPER bound has been single-sourced here since this table was
+   * minted, while the lower bound was a naked `10` in exactly one route. The client
+   * therefore believed a short description was valid and the server refused it with a
+   * terminal envelope — the drift that cost the founder three failed submits. A bare
+   * literal in a route cannot be read by a client guard; a constant can.
+   *
+   * ⛔ Not a retune. `10` is what the server enforces today; this single-sources the
+   * EXISTING rule.
+   */
+  MIN_DESCRIPTION_CHARS: 10,
+  /** strategy description free text — the UPPER bound. */
   MAX_DESCRIPTION_CHARS: 5000,
   /** founder_notes (admin-only). */
   MAX_FOUNDER_NOTES_CHARS: 10_000,

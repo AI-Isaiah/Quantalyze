@@ -2,7 +2,8 @@
 
 import { useState, useMemo } from "react";
 import Link from "next/link";
-import { formatPercent, formatNumber, metricColor, extractAnalytics } from "@/lib/utils";
+import { formatPercent, formatNumber, metricColor, extractAnalytics, seriesEndOf } from "@/lib/utils";
+import { isRankableAnalyticsRow } from "@/lib/closed-sets";
 import { SyncBadge } from "@/components/strategy/SyncBadge";
 import type { StrategyAnalytics, AttributionRow } from "@/lib/types";
 
@@ -23,6 +24,14 @@ interface StrategyRow {
    * metrics as current (B14). `null` when the join carried no analytics.
    */
   computedAt: string | null;
+  /**
+   * Phase 163 / HONEST-08 — the last date of the constituent's return series,
+   * or `null` when the read projected none. Paired with `computedAt` so the
+   * badge buckets on the STALER of the two: a job that ran an hour ago over a
+   * track record that ended in May is not a fresh strategy, and this table
+   * makes exactly that claim about strategies its viewer does not own.
+   */
+  seriesEnd: string | null;
 }
 
 const COLUMNS: { key: SortKey; label: string; align?: "right" }[] = [
@@ -81,8 +90,33 @@ export function StrategyBreakdownTable({ strategies, attribution, portfolioId }:
   const rows: StrategyRow[] = useMemo(() => {
     return strategies.map((ps) => {
       const s = ps.strategies;
-      const analytics = s
+      const rawAnalytics = s
         ? (extractAnalytics(s.strategy_analytics) as StrategyAnalytics | null)
+        : null;
+      // STALE-01 — the constituents of an allocator's portfolio are OTHER
+      // managers' published strategies, so this table is a cross-tenant read of
+      // exactly the rows the prod census found dead: 17 of 18 published
+      // strategies at `computation_status = 'failed'`, still holding cagr /
+      // sharpe / max_drawdown and a non-null `computed_at`.
+      //
+      // `getPortfolioStrategies` has ALWAYS projected `computation_status`
+      // (queries.ts) — this component simply never read it. That is the shape
+      // of the whole defect class: the column is selected and then not filtered.
+      //
+      // Gating here nulls the three metric cells (their `formatPercent` /
+      // `formatNumber` already render the em-dash) AND the per-row `computedAt`,
+      // which is what silences SyncBadge — it early-returns on a falsy
+      // timestamp, so no separate render gate is needed. That badge is the
+      // sharper half: B14 added it so a mixed-freshness portfolio could not
+      // present stale per-strategy metrics as current, but `computed_at` on a
+      // failed row is re-stamped to the FAILURE time by the SQL status bridge,
+      // so it was reading "just synced" at the moment the sync failed.
+      //
+      // Weight and contribution survive: neither comes from the strategy's own
+      // analytics job (weight is the portfolio's, contribution is the persisted
+      // portfolio-level attribution).
+      const analytics = isRankableAnalyticsRow(rawAnalytics)
+        ? rawAnalytics
         : null;
       const attr = attribution?.find((a) => a.strategy_id === ps.strategy_id);
 
@@ -104,6 +138,22 @@ export function StrategyBreakdownTable({ strategies, attribution, portfolioId }:
         // computedAt) makes no freshness claim. The `|| null` is load-bearing —
         // do not drop it on the assumption computed_at is always present.
         computedAt: analytics?.computed_at || null,
+        // HONEST-08 — same gate, same reason: a non-terminal-success row has
+        // already been nulled to `analytics = null` above, so it claims no
+        // track-record end either.
+        //
+        // ⚠️ AT THIS CALL SITE THE SCALAR IS THE ONLY INPUT — the array arm of
+        // `seriesEndOf` is NOT a fallback here, and a comment claiming it was
+        // is what let a false-amber regression ship (163-REVIEW, finding 1).
+        // The page's `stripConstituentSeries` removes `returns_series` and
+        // `daily_returns` before this component is mounted (they must not enter
+        // the RSC flight payload), and it PROJECTS `series_end` in the same
+        // statement to replace them. So this row answers from that scalar, and
+        // if the projection were ever dropped the answer would silently become
+        // `null` — unknown — which the freshness resolver caps below "fresh"
+        // rather than trusting. That silence is exactly why the projection and
+        // the strip are one statement rather than two steps.
+        seriesEnd: seriesEndOf(analytics),
       };
     });
   }, [strategies, attribution]);
@@ -162,7 +212,15 @@ export function StrategyBreakdownTable({ strategies, attribution, portfolioId }:
                   {/* B14: per-constituent freshness so a stale strategy's
                       Sharpe/MaxDD isn't read as current. Renders nothing when
                       the row carries no computed_at. */}
-                  <SyncBadge computedAt={row.computedAt} />
+                  {/* HONEST-08 — the row carries whatever series end its read
+                      projected, and null when it projected none. A portfolio's
+                      constituents are OTHER managers' strategies, so this is
+                      the same cross-tenant claim the discovery list makes and
+                      it gets the same rule. */}
+                  <SyncBadge
+                    computedAt={row.computedAt}
+                    seriesEnd={row.seriesEnd}
+                  />
                 </div>
               </td>
               <td className="px-4 py-3 text-right font-metric text-text-secondary">

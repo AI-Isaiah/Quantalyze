@@ -763,6 +763,10 @@ describe("POST /api/admin/strategy-review — strategy.approve emission", () => 
                     data: {
                       computation_status: "complete",
                       computation_error: null,
+                      // MT5-11/12 — never stamped, which is the honest fixture:
+                      // this strategy has 100 trades and 0 csv rows, so it takes
+                      // the trade branch and the verdict is not consulted.
+                      series_completeness: null,
                     },
                     error: null,
                   }),
@@ -793,21 +797,9 @@ describe("POST /api/admin/strategy-review — strategy.approve emission", () => 
               }),
             };
           }
-          if (table === "api_keys") {
-            // P72 venue gate: approve resolves the linked key's exchange.
-            // Non-ledger-backed ("okx") — this strategy has 100 trades so it
-            // takes the trade branch regardless; the lookup must just resolve.
-            return {
-              select: () => ({
-                eq: () => ({
-                  maybeSingle: async () => ({
-                    data: { exchange: "okx" },
-                    error: null,
-                  }),
-                }),
-              }),
-            };
-          }
+          // MT5-11/12 — the `api_keys` arm is gone with the route's venue
+          // lookup. The gate reads a persisted completeness verdict now, so
+          // approve never asks which exchange a key points at.
           if (table === "strategy_keys") {
             // PUB-01 (Phase 87) composite publish-gate head-count. This test
             // strategy is single-key/CSV (100 trades, no strategy_keys members),
@@ -832,13 +824,19 @@ describe("POST /api/admin/strategy-review — strategy.approve emission", () => 
         },
       }),
     }));
-    vi.doMock("@/lib/strategyGate", () => ({
-      checkStrategyGate: () => ({ passed: true }),
-      isLedgerBackedExchange: (exchange: string | null | undefined) =>
-        exchange === "deribit",
-      STRATEGY_GATE_MIN_TRADES: 5,
-      STRATEGY_GATE_MIN_CSV_ROWS: 7,
-    }));
+    // This suite's subject is the AUDIT FANOUT, not the gate: the first-pass
+    // verdict is stubbed to `passed: true` so a gate refusal cannot mask a
+    // missing audit event. Everything else is the real module — MT5-11/12 made
+    // the TOCTOU re-check call the exported `isDailyReturnsSourced`, and a
+    // hand-written stub of it here would be a second copy of the very predicate
+    // this phase consolidated.
+    vi.doMock("@/lib/strategyGate", async () => {
+      const actual =
+        await vi.importActual<typeof import("@/lib/strategyGate")>(
+          "@/lib/strategyGate",
+        );
+      return { ...actual, checkStrategyGate: () => ({ passed: true }) };
+    });
 
     const { POST } = await import("@/app/api/admin/strategy-review/route");
     const req = new NextRequest(

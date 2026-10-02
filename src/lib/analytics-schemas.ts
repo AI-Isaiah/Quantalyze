@@ -28,12 +28,53 @@ import { z } from "zod";
 import { exchangeEnum } from "./closed-sets";
 
 // --- /api/validate-key ---
+// Phase 167.1.2 (D-01, RESEARCH Pitfall 3): `venue_account_id` is NAMED here
+// because it IS written to `api_keys.venue_account_id` by the two connect routes
+// (validate-and-encrypt's persist arm, create-with-key's RPC argument). They
+// read this one named field and nothing else. `.min(1)` refuses a blank id at
+// the boundary (a blank is non-NULL to the venue-identity unique index and
+// would collapse two accounts into one); the service already sends null
+// instead of blank. The passthrough REMAINDER is still never spread into a
+// write, which is what the sanctioned exception below covers.
+//
+// 167.1.2 REVIEW IN-02 / SF-M6 — the field FAILS SOFT. The id is an optional
+// enrichment of a validation that already succeeded ("a missing id is None and
+// never fails validation", services/exchange.py), so an id this field cannot
+// accept (blank, over 128 characters, not a string) becomes null: the key
+// connects unstamped, exactly as for a venue that reports no id, instead of the
+// whole parse and so the whole connect failing. A blank still never reaches the
+// write, because it becomes null rather than "". The log line names the issue
+// codes only, never the value, which is an account identifier.
+//
+// 167.1.2 REVIEW-R2 SF2-M1 — the line is `console.error`, not `warn`. The
+// service's `_normalise` never sends a blank, over-long or non-string id, so
+// reaching this `.catch` is a contract break, and the key it belongs to
+// connects without its duplicate-account identity. This is the level and the shape
+// the seam's other contract break (`parseResponse` in analytics-client.ts)
+// uses: `console.error`, no Sentry helper. ⚠️ Measured, not assumed: the
+// Sentry setup (`src/instrumentation.ts`, the only Sentry init in the repo)
+// registers no console integration, so
+// neither line reaches Sentry; both reach the runtime's error-level logs only.
 export const ValidateKeyResponseSchema = z.object({
   valid: z.boolean(),
   read_only: z.boolean(),
   exchange: z.string().optional(),
   permissions: z.array(z.string()).optional(),
-}).passthrough(); // eslint-disable-line quantalyze/no-passthrough-on-ipc -- B9 sanctioned-exception: forward-compat; /api/validate-key result is read for UI display only, never spread into a write
+  venue_account_id: z
+    .string()
+    .trim()
+    .min(1)
+    .max(128)
+    .nullable()
+    .optional()
+    .catch((ctx) => {
+      console.error(
+        "[analytics-schemas] /api/validate-key venue_account_id refused, connecting unstamped:",
+        ctx.error.issues.map((issue) => issue.code).join(","),
+      );
+      return null;
+    }),
+}).passthrough(); // eslint-disable-line quantalyze/no-passthrough-on-ipc -- B9 sanctioned-exception: forward-compat; only the named venue_account_id field is written (to api_keys), the passthrough remainder is never spread into a write
 
 // --- /api/encrypt-key ---
 // The analytics service uses envelope encryption: every credential (key,
@@ -63,6 +104,18 @@ export const EncryptKeyResponseSchema = z.object({
   dek_encrypted: z.string(),
   nonce: z.string().nullable(),
   kek_version: z.coerce.number().int().positive(),
+});
+
+// --- /internal/keys/{id}/rotate-secret ---
+// Phase 164.5.3 / MT5CREDS D-04 — the credential-rotation seam's success body.
+// The Python endpoint decrypts the stored row, re-validates the NEW secret
+// against the live broker, and re-encrypts on success: its response is
+// EncryptKeyResponseSchema's six ciphertext fields plus the ONE non-secret
+// field the caller needs to backfill `api_keys.venue_account_id` when it was
+// previously NULL — the login the seam just re-confirmed. Never a secret:
+// `venue_account_id` is the broker LOGIN, not the password.
+export const RotateSecretResponseSchema = EncryptKeyResponseSchema.extend({
+  venue_account_id: z.string(),
 });
 
 // --- /api/portfolio-analytics ---
@@ -111,6 +164,25 @@ export const RecomputeMatchResponseSchema = z.object({
   status: z.enum(["disabled", "skipped", "ok"]),
   allocator_id: z.string().optional(),
 }).passthrough(); // eslint-disable-line quantalyze/no-passthrough-on-ipc -- B9 sanctioned-exception: forward-compat per-branch extras; discriminated on status, never spread into a write
+
+// --- /api/benchmark-refresh ---
+// Phase 169.2 / plan 02 (D-08). The service answers 200 ONLY for a current,
+// non-empty BTC series (every other outcome is a 500), so a 200 whose `stale`
+// is anything but `false` is contract drift and must fail the parse rather
+// than report a refresh that did not happen. `through` is the last real price
+// date (ISO `YYYY-MM-DD`). `points` is the length of the series the service
+// holds (`benchmark_refresh` returns `int(len(series))`); the service refuses
+// an empty series, so it is at least 1. It is KEPT (review fix MD-06) and
+// echoed by the cron route, so a refresh that came back far shorter than the
+// fetcher's window is visible in the cron's own log line instead of being
+// stripped here.
+export const BenchmarkRefreshResponseSchema = z.object({
+  symbol: z.literal("BTC"),
+  through: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  stale: z.literal(false),
+  points: z.number().int().positive(),
+});
+export type BenchmarkRefreshResponse = z.infer<typeof BenchmarkRefreshResponseSchema>;
 
 // ─────────────────────────────────────────────────────────────────────
 // Strict primitive responses (Sprint 2 Task 2.9 and later)
@@ -193,7 +265,12 @@ export const GetUserComputeJobsRowSchema = z
     // parse failure here means the redaction layer regressed — exactly
     // what we want surfaced.
     last_error: z.null(),
-    error_kind: z.enum(["transient", "permanent", "unknown"]).nullable(),
+    // Pinned against compute_jobs_error_kind_check by
+    // src/__tests__/contracts/check-zod-db-check-parity.test.ts (bidirectional).
+    // 'orphaned' added with mig 20260826140000 (Phase 162 F-3): the reaper used
+    // to classify a job whose WORKER DIED holding the claim as 'permanent', so
+    // the user was told retrying would not help — false, and not self-healing.
+    error_kind: z.enum(["transient", "permanent", "unknown", "orphaned"]).nullable(),
     idempotency_key: z.string().max(128).nullable(),
     exchange: exchangeEnum.nullable(),
     trade_count: z.number().int().nonnegative().nullable(),
@@ -280,9 +357,11 @@ export type BridgeFitLabel = z.infer<typeof BridgeFitLabelSchema>;
 const BridgeCandidateSchema = z.object({
   strategy_id: z.string(),
   strategy_name: z.string(),
-  sharpe_delta: z.number(),
-  dd_delta: z.number(),
-  corr_delta: z.number(),
+  // 166.1 D7 (founder 2026-09-26): null = the delta does not exist (a leg
+  // whose returns do not vary has no Sharpe or correlation). Rendered "—".
+  sharpe_delta: z.number().nullable(),
+  dd_delta: z.number().nullable(),
+  corr_delta: z.number().nullable(),
   composite_score: z.number(),
   fit_label: BridgeFitLabelSchema,
 });
@@ -306,8 +385,8 @@ export type BridgeResponse = z.infer<typeof BridgeResponseSchema>;
 /**
  * Phase 15 / CSV-01 — Next.js /api/strategies/csv-finalize response.
  *
- * Returned by the route after a successful `finalize_csv_strategy` RPC
- * call. The `status` field is bound to the post-finalize value of the
+ * Returned by the route after a successful `finalize_csv_strategy_with_returns`
+ * RPC call. The `status` field is bound to the post-finalize value of the
  * strategy_verifications row (typically `pending_review` / `validated`).
  */
 export const CsvFinalizeResponseSchema = z.object({

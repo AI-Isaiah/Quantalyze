@@ -2,12 +2,93 @@
 
 import type { ReactNode } from "react";
 import { ResponsiveTable } from "@/components/ResponsiveTable";
-import type { JointMetrics } from "@/lib/factsheet/types";
+import type { FactsheetPayload, JointMetrics } from "@/lib/factsheet/types";
+import { formatRecordLength } from "@/lib/factsheet/record-length";
+import { COMPARATOR_CALENDARS, isPastCoverage, type WeekdayCalendar } from "@/lib/factsheet/align";
+import { pairedFloorReason } from "@/lib/factsheet/joint";
 import { usePayload, useActiveComparator } from "./factsheet-context";
-import { useBasisSeriesView } from "./basis-context";
-import { CalmarByYearPanel, BootstrapCIPanel } from "./AnalyticalPanels";
+import { useBasisOrCash, useBasisSeriesView, useWindowedView, type Basis, type RangeScope } from "./basis-context";
+import { CalmarByYearPanel, BootstrapCIPanel, FULL_HISTORY_NOTE, ScopeNote } from "./AnalyticalPanels";
 import { StyleDriftPanel, PeerPercentilePanel, OwnBookDeltaPanel } from "./BatchDPanels";
 import { StrategyThesisPanel, TermsPanel, LeverageProfilePanel, ConstituentMandatePanel } from "./MandatePanels";
+
+/**
+ * Phase 169 review round 1 (SFH H-1) — the caveat for a chain-broken single-key
+ * row, authored once and rendered beside the headline (the KPI strip in
+ * FactsheetView.tsx) and in the two panels here that state those figures.
+ *
+ * Python compounds the stored `cumulative_return` and annualizes CAGR over the
+ * record after its last interior break (`nav_twr._last_interior_break_suffix`),
+ * and Calmar is that CAGR over the max drawdown. The page shows those stored
+ * values (D-25, SC4), while the chart, the return windows and Years Observed
+ * cover the whole series, so the page says which span the three cover.
+ *
+ * Returns null (no caveat) unless the STORED headline is the one shown:
+ *   - `twrChainBroken` is true;
+ *   - `headlineCoversFrom` is present. The resolve stage sets it, to a date or
+ *     `null`, exactly when it overlaid the persisted cash headline on a
+ *     chain-broken row. Absent means the headline was computed in TypeScript
+ *     over the whole series, and a caveat would be false;
+ *   - the basis is cash. Under mark_to_market or smoothed the figures come
+ *     from that basis's series, not from the stored cash headline.
+ * With a date it names the date; with `null` it says the same without one. It
+ * never invents a date.
+ *
+ * Round 2, IN-R2-02: `subject` names the figures by the labels the calling
+ * surface shows (the Cumulative Return Metrics panel calls the stored
+ * cumulative return "Since Inception" and shows no Calmar; the KPI strip says
+ * "Cum. Return"), so a reader never has to infer that two names are one number.
+ */
+export function headlineCoverageCaveat(
+  dataQuality: FactsheetPayload["dataQuality"],
+  basis: Basis,
+  subject: string,
+): string | null {
+  if (basis !== "cash_settlement") return null;
+  if (dataQuality?.twrChainBroken !== true) return null;
+  const from = dataQuality.headlineCoversFrom;
+  if (from === undefined) return null;
+  const date = from === null ? null : isoToMonthDay(from);
+  return date === null || date === "—"
+    ? `${subject} cover only the record after its last break in the return chain. The chart shows the whole record.`
+    : `${subject} cover the record from ${date}, after its last break in the return chain. The chart shows the whole record.`;
+}
+
+/**
+ * Phase 169.1 review round 1 (SFH MEDIUM-2) — the chain-broken caveat for a
+ * SELECTED range, rendered in place of {@link headlineCoverageCaveat} while a
+ * range is selected (the strip in FactsheetView.tsx and Main Metrics here).
+ *
+ * A window's figures are re-derived on the slice (`windowView`), which compounds
+ * every return in it. The engine compounds only the record after the last break
+ * (`nav_twr._last_interior_break_suffix`), and `headlineCoversFrom` is that
+ * span's first day. So a range starting ON or AFTER that day compounds only days
+ * the engine also compounds: no caveat. A range starting before it compounds days
+ * the engine leaves out, and the page says so. The sentence holds whether or not
+ * the range also reaches past the date.
+ *
+ * The gates are those of {@link headlineCoverageCaveat}: cash basis, a
+ * chain-broken row, and `headlineCoversFrom` present. With `null` the break
+ * cannot be placed, so every range gets the caveat, without a date. It never
+ * invents one.
+ */
+export function windowCoverageCaveat(
+  dataQuality: FactsheetPayload["dataQuality"],
+  basis: Basis,
+  rangeStart: string,
+  subject: string,
+): string | null {
+  if (basis !== "cash_settlement") return null;
+  if (dataQuality?.twrChainBroken !== true) return null;
+  const from = dataQuality.headlineCoversFrom;
+  if (from === undefined) return null;
+  const date = from === null ? null : isoToMonthDay(from);
+  if (from === null || date === null || date === "—") {
+    return `The record has a break in the return chain at a date this view cannot name, so this range may span it. Its ${subject} compound across any break inside it.`;
+  }
+  if (rangeStart.slice(0, 10) >= from.slice(0, 10)) return null;
+  return `This range starts before ${date}, where the record resumes after its last break in the return chain. Its ${subject} compound returns from before that date, which the full-history figures leave out.`;
+}
 
 /**
  * Editorial right-column metrics. Four named sections — Performance, Risk,
@@ -36,7 +117,12 @@ export function MetricsColumn({ scenarioMode = false }: { scenarioMode?: boolean
   // Byte-identical under cash (the view returns payload by reference) and MTM-derived
   // under mark_to_market. `cmp` (the cash comparator) is retained ONLY for the
   // basis-invariant shortName label `bn` below.
-  const view = useBasisSeriesView(payload);
+  // Phase 169.1 (SC10, D-27): the rail's window-dependent figures read the WINDOWED
+  // view, the same one the KPI strip reads. At full history it is the active view
+  // BY REFERENCE, so every figure below is unchanged there; inside a selected range
+  // it is that view re-derived on the slice (`useWindowedView`, basis-context.tsx).
+  const { view, scope } = useWindowedView(payload);
+  const selected = scope.kind === "selected";
   const jointCmp = view.comparators[cmpKey];
   // Phase 103 (MTM-04, root-cause flip) — §I Performance/Main-Metrics + §II
   // MaxDD/Best-Worst read the strategy scalars from the VIEW, so the whole rail
@@ -54,24 +140,71 @@ export function MetricsColumn({ scenarioMode = false }: { scenarioMode?: boolean
   // header. Pass undefined instead so the "vs" label disappears entirely
   // when there's nothing to compare against.
   const bn = cmpKey === "none" ? undefined : cmp.shortName;
+  // Phase 169.5 (SFH-M-05, keeps D-54): a comparator whose prices stop before the
+  // strategy's last date is measured over its covered days only, so its Main
+  // Metrics / Returns / Max Drawdown figures cover a shorter span than the
+  // strategy's beside them. The bench column header carries the date the
+  // comparator's figures run to, next to the numbers. Full coverage, an
+  // unavailable comparator (every figure already "—") and an absent `through`
+  // leave the header as it was.
+  const benchThrough =
+    cmpKey === "none"
+      ? null
+      : comparatorPartialThrough(jointCmp.through, view.dates[view.dates.length - 1], COMPARATOR_CALENDARS[cmpKey]);
+  const bnDated = bn != null && benchThrough != null ? `${bn} to ${isoToMonthDay(benchThrough)}` : bn;
+  // Phase 167.1.2 plan 07 (SC-5b) — observations per year for the Main Metrics
+  // warning, read from the payload this rail already renders. Absent (a stale
+  // cache) or not a positive finite number → undefined, and the warning hides.
+  const obsPerYear =
+    typeof payload.periodsPerYear === "number" &&
+    Number.isFinite(payload.periodsPerYear) &&
+    payload.periodsPerYear > 0
+      ? payload.periodsPerYear
+      : undefined;
+  // Phase 169 D-12 / D-25 (SC5): the record length is stated one way, from the
+  // calendar years compute() reports, at Years Observed and in the warning below.
+  // Dividing the observation count by the basis read a sparse record short.
+  const recordLength = formatRecordLength({ n: m.n, years: m.years });
+  // The stored-headline caveat describes the STORED headline, which a selected range
+  // does not show (D-78). A selected range that starts before the last break gets
+  // its own caveat instead: its re-derived figures compound across days the engine
+  // leaves out (169.1 review round 1, SFH MEDIUM-2; the KPI strip's rule).
+  const railBasis = useBasisOrCash();
+  const railSubject = "Cumulative Return, CAGR and Calmar";
+  const coverageCaveat = selected
+    ? windowCoverageCaveat(payload.dataQuality, railBasis, scope.start, railSubject)
+    : headlineCoverageCaveat(payload.dataQuality, railBasis, railSubject);
 
   return (
     <aside className="flex flex-col gap-12">
       <StrategyThesisPanel />
+      {/* Phase 169.1 (D-27): the range the rail's figures cover, as on the strip. */}
+      <RangeEyebrow scope={scope} surface="rail" />
       <EditorialSection label="I" name="Performance">
         <Panel title="Compound Performance">
           <Kpm>
             <Row label="Start Date" value={isoToMonthDay(m.start)} bench="" />
             <Row label="End Date" value={isoToMonthDay(m.end)} bench="" />
-            <Row label="Years Observed" value={m.years.toFixed(2)} bench="" />
+            <Row label="Years Observed" value={recordLength.years} bench="" />
           </Kpm>
         </Panel>
-        <Panel title="Main Metrics" benchHeader={bn}>
-          {m.n < 252 && (
+        <Panel title="Main Metrics" benchHeader={bnDated}>
+          {/* Phase 167.1.2 plan 07 (SC-5b): one year is the payload's own
+              annualisation basis (365 crypto / the book's blend basis), not a
+              fixed trading-day count. A payload with no basis shows no warning:
+              assuming one is the defect this replaced. The basis sets only the
+              threshold; the stated length is calendar years (Phase 169 D-12,
+              D-51). */}
+          {obsPerYear != null && m.n < obsPerYear && (
             <p className="mb-2 text-fixed-10 italic" style={{ color: "var(--color-warning, #B45309)" }}>
-              ⚠ Only {m.n} observations ({(m.n / 252).toFixed(2)}y) — Sharpe / Sortino / Calmar below
+              ⚠ Only {m.n} observations ({recordLength.years}y) — Sharpe / Sortino / Calmar below
               have wide statistical confidence intervals. Conventional reliability threshold is
-              ≥ 252 trading days (1 year).
+              ≥ {obsPerYear} observations (1 year).
+            </p>
+          )}
+          {coverageCaveat && (
+            <p className="mb-2 text-fixed-10 italic" style={{ color: "var(--color-warning, #B45309)" }}>
+              ⚠ {coverageCaveat}
             </p>
           )}
           <Kpm>
@@ -85,27 +218,45 @@ export function MetricsColumn({ scenarioMode = false }: { scenarioMode?: boolean
             <Row label="Kurtosis" value={num(m.kurt)} bench="" />
           </Kpm>
         </Panel>
-        <Panel title="Returns" benchHeader={bn}>
+        <Panel title="Returns" benchHeader={bnDated}>
+          {/* Phase 169 D-57: 6 Month / 1 Year are omitted when the STRATEGY's
+              window is null (the record is shorter), exactly as in Cumulative
+              Return Metrics; a null bench value alone keeps the row. */}
+          {/* Phase 169.1 (D-27): the month, YTD, 3 Month, 6 Month and 1 Year rows end on
+              the RECORD's last date, not the window's, so while a range is selected
+              they are omitted, chosen by the compute() field each reads (never by
+              label: 170-13 labels the month row by the record's state, D-79). */}
+          {selected && (
+            <p className="mb-2 text-fixed-11 text-text-muted" data-testid="window-trailing-note">
+              The trailing and since-inception returns end on the record&apos;s last date, so they are hidden while a range is selected; resetting the range shows them.
+            </p>
+          )}
           <Kpm>
-            <Row label="Month-to-date" value={pct(m.mtd, true)} bench={pct(b?.mtd, true)} />
-            <Row label="Year-to-date" value={pct(m.ytd, true)} bench={pct(b?.ytd, true)} />
-            <Row label="3 Month" value={pct(m.p3m, true)} bench={pct(b?.p3m, true)} />
-            <Row label="6 Month" value={pct(m.p6m, true)} bench={pct(b?.p6m, true)} />
-            <Row label="1 Year" value={pct(m.p1y, true)} bench={pct(b?.p1y, true)} />
+            {!selected && (
+              <>
+                <Row windowKey="mtd" label={monthRowLabel(m.end)} value={pct(m.mtd, true)} bench={pct(b?.mtd, true)} />
+                <Row windowKey="ytd" label="Year-to-date" value={pct(m.ytd, true)} bench={pct(b?.ytd, true)} />
+                <Row windowKey="p3m" label="3 Month" value={pct(m.p3m, true)} bench={pct(b?.p3m, true)} />
+                {m.p6m != null && <Row windowKey="p6m" label="6 Month" value={pct(m.p6m, true)} bench={pct(b?.p6m, true)} />}
+                {m.p1y != null && <Row windowKey="p1y" label="1 Year" value={pct(m.p1y, true)} bench={pct(b?.p1y, true)} />}
+              </>
+            )}
             <Row label="Win Rate (days)" value={pct(m.win_rate)} bench={pct(b?.win_rate)} />
             <Row label="Profit Factor" value={num(m.profit_factor)} bench={num(b?.profit_factor)} />
           </Kpm>
         </Panel>
-        <EoyReturnsPanel />
-        <RollingMetricsPanel />
-        <CumulativeReturnsPanel />
+        <EoyReturnsPanel scopeNote={selected ? FULL_HISTORY_NOTE : undefined} />
+        <RollingMetricsPanel scope={scope} />
+        {!selected && <CumulativeReturnsPanel />}
       </EditorialSection>
 
       <EditorialSection label="II" name="Risk">
-        <Panel title="Max Drawdown">
+        {/* SFH-M-05: this panel carries no bench header at full coverage; it gains
+            the dated one only when the comparator's figures stop early. */}
+        <Panel title="Max Drawdown" benchHeader={benchThrough != null ? bnDated : undefined}>
           <Kpm>
             <Row label="Max Drawdown" value={pctNeg(m.max_dd)} bench={pctNeg(b?.max_dd)} accent />
-            <Row label="Longest DD (days)" value={String(m.longest_dd)} bench={b ? String(b.longest_dd) : "—"} />
+            <Row label="Longest DD (days)" value={count(m.longest_dd)} bench={count(b?.longest_dd)} />
             <Row label="VaR 95%" value={pct(m.var95, true)} bench="" />
             <Row label="CVaR 95%" value={pct(m.cvar95, true)} bench="" />
             <Row label="Avg Win" value={pct(m.avg_win, true)} bench="" />
@@ -136,7 +287,7 @@ export function MetricsColumn({ scenarioMode = false }: { scenarioMode?: boolean
         <ExtendedMetricsPanel />
       </EditorialSection>
 
-      <EditorialSection label="III" name="Style">
+      <EditorialSection label="III" name="Style" scopeNote={selected ? FULL_HISTORY_NOTE : undefined}>
         <StyleDriftPanel />
         {/* PeerPercentile renders for api strategies (demo/synthesized cohort)
             OR — Phase 42 (PEER-01, ADR-0025) — for the scenario BLEND, which
@@ -170,17 +321,43 @@ export function MetricsColumn({ scenarioMode = false }: { scenarioMode?: boolean
         <TermsPanel />
       </EditorialSection>
 
-      {jointCmp.joint && (
+      {jointCmp.joint ? (
         <EditorialSection label="IV" name={`Benchmark — vs ${bn}`}>
           <BenchmarkMetricsBody joint={jointCmp.joint} />
         </EditorialSection>
-      )}
+      ) : jointCmp.jointWithheld && bn != null ? (
+        // 169.4 review round 2 (SFH-R2 MEDIUM-2): below the paired floor §IV
+        // stays, every joint figure reads "—" and one muted line names the
+        // cause in the Allocations widget's words. No figure is shown (D-69).
+        <EditorialSection label="IV" name={`Benchmark — vs ${bn}`}>
+          <BenchmarkMetricsBody
+            joint={null}
+            withheldReason={pairedFloorReason(
+              bn,
+              jointCmp.jointWithheld.paired,
+              // D-85: inside a window the count is the slice's, named as the range's.
+              selected ? "range" : "record",
+              jointCmp.jointWithheld.floor,
+            )}
+          />
+        </EditorialSection>
+      ) : null}
     </aside>
   );
 }
 
 /** Editorial section: roman-numeral eyebrow over an Instrument Serif name + thick rule. */
-function EditorialSection({ label, name, children }: { label: string; name: string; children: ReactNode }) {
+function EditorialSection({
+  label,
+  name,
+  children,
+  scopeNote,
+}: {
+  label: string;
+  name: string;
+  children: ReactNode;
+  scopeNote?: string;
+}) {
   return (
     <section className="flex flex-col gap-6">
       <header className="border-b-[2px] border-text pb-2">
@@ -189,6 +366,7 @@ function EditorialSection({ label, name, children }: { label: string; name: stri
             §{label}
           </span>
           <h2 className="font-serif italic text-fixed-22 leading-tight text-text-primary">{name}</h2>
+          {scopeNote && <ScopeNote text={scopeNote} />}
         </div>
       </header>
       {children}
@@ -196,20 +374,28 @@ function EditorialSection({ label, name, children }: { label: string; name: stri
   );
 }
 
-function BenchmarkMetricsBody({ joint }: { joint: JointMetrics }) {
+function BenchmarkMetricsBody({ joint, withheldReason }: { joint: JointMetrics | null; withheldReason?: string }) {
+  // A null joint (withheld below the paired floor) reads "—" in every row,
+  // with no accent colour on the alpha dash.
+  const v = (f: (j: JointMetrics) => string) => (joint ? f(joint) : "—");
   return (
     <Panel title="Joint Metrics" hideHeaderRule>
       <Kpm>
-        <Row label="Alpha (ann)" value={pct(joint.alpha, true)} bench="" accent />
-        <Row label="Beta" value={num(joint.beta)} bench="" />
-        <Row label="Correlation" value={num(joint.corr)} bench="" />
-        <Row label="R²" value={num(joint.r2)} bench="" />
-        <Row label="Information Ratio" value={num(joint.info_ratio)} bench="" />
-        <Row label="Treynor" value={num(joint.treynor)} bench="" />
-        <Row label="Tracking Error" value={pct(joint.tracking_error)} bench="" />
-        <Row label="Up Capture" value={num(joint.up_capture)} bench="" />
-        <Row label="Down Capture" value={num(joint.down_capture)} bench="" />
+        <Row label="Alpha (ann)" value={v(j => pct(j.alpha, true))} bench="" accent={joint != null} />
+        <Row label="Beta" value={v(j => num(j.beta))} bench="" />
+        <Row label="Correlation" value={v(j => num(j.corr))} bench="" />
+        <Row label="R²" value={v(j => num(j.r2))} bench="" />
+        <Row label="Information Ratio" value={v(j => num(j.info_ratio))} bench="" />
+        <Row label="Treynor" value={v(j => num(j.treynor))} bench="" />
+        <Row label="Tracking Error" value={v(j => pct(j.tracking_error))} bench="" />
+        <Row label="Up Capture" value={v(j => num(j.up_capture))} bench="" />
+        <Row label="Down Capture" value={v(j => num(j.down_capture))} bench="" />
       </Kpm>
+      {withheldReason && (
+        <p className="mt-2 text-fixed-11 text-text-muted" data-testid="joint-floor-reason">
+          {withheldReason}
+        </p>
+      )}
     </Panel>
   );
 }
@@ -219,12 +405,20 @@ function Panel({
   children,
   benchHeader,
   hideHeaderRule,
+  scopeNote,
 }: {
   title: string;
   children: ReactNode;
   benchHeader?: string;
   hideHeaderRule?: boolean;
+  /** Phase 169.1 (D-27): "Full history" on a full-history panel while a range is selected. */
+  scopeNote?: string;
 }) {
+  const heading = (
+    <h3 className="text-fixed-12 font-semibold uppercase tracking-[0.18em] text-text-primary">
+      {title}
+    </h3>
+  );
   return (
     <section>
       <header
@@ -233,9 +427,14 @@ function Panel({
           (hideHeaderRule ? "" : "border-b border-border pb-1")
         }
       >
-        <h3 className="text-fixed-12 font-semibold uppercase tracking-[0.18em] text-text-primary">
-          {title}
-        </h3>
+        {scopeNote ? (
+          <div className="flex items-baseline gap-2">
+            {heading}
+            <ScopeNote text={scopeNote} />
+          </div>
+        ) : (
+          heading
+        )}
         {benchHeader != null && benchHeader !== "" && (
           <span className="text-fixed-9 font-mono uppercase tracking-[0.18em] text-text-muted">
             vs {benchHeader}
@@ -255,9 +454,22 @@ function Kpm({ children }: { children: ReactNode }) {
   );
 }
 
-function Row({ label, value, bench, accent }: { label: string; value: string; bench: string; accent?: boolean }) {
+function Row({
+  label,
+  value,
+  bench,
+  accent,
+  windowKey,
+}: {
+  label: string;
+  value: string;
+  bench: string;
+  accent?: boolean;
+  /** Phase 169.1 (D-27): the compute() field of a record-anchored return row. */
+  windowKey?: "mtd" | "ytd" | "p3m" | "p6m" | "p1y";
+}) {
   return (
-    <tr className="border-b border-border/30 last:border-0">
+    <tr className="border-b border-border/30 last:border-0" data-window-key={windowKey}>
       <td className="py-1.5 pr-2 text-text-2">{label}</td>
       <td
         className={
@@ -296,7 +508,101 @@ function BwRow({ scale, best, worst }: { scale: string; best: number; worst: num
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"] as const;
 
-function isoToMonthDay(iso: string): string {
+/** The factsheet's "Mon D, YYYY" date (UTC); "—" for an empty or unparseable input. */
+/**
+ * Phase 169.5 (SFH-M-05) — the comparator's `through` when its prices stop before
+ * the strategy's last date (its figures then cover a shorter span), else null. Null
+ * for an unavailable comparator (`through: null`, every figure is already "—"),
+ * an absent `through` (a hand-built block, D-21) and full coverage. "Stop before"
+ * is read on the comparator's OWN `calendar` through `isPastCoverage`, the rule
+ * `buildComparatorBlock`'s `pastThrough` windows and the picker caption use (review
+ * round 2 MR-01): SPX through a Friday covers a strategy ending that weekend.
+ */
+export function comparatorPartialThrough(
+  through: string | null | undefined,
+  lastDate: string | undefined,
+  calendar: WeekdayCalendar,
+): string | null {
+  if (typeof through !== "string" || lastDate === undefined) return null;
+  return isPastCoverage(through, lastDate, calendar) ? through : null;
+}
+
+/**
+ * Phase 169.5 (SFH-M-05) — the calendar year whose comparator figure is compounded
+ * over part of the year only: the year of `through` when a day of the comparator's
+ * own `calendar` lies between `through` and the strategy's last date in that same
+ * year (`isPastCoverage`, review round 2 MR-01). Null otherwise: SPX through Friday
+ * Dec 29 with the strategy's year ending on the weekend is a whole year, and a later
+ * year with no covered comparator day already reads "—".
+ */
+export function comparatorPartialYear(
+  through: string | null | undefined,
+  dates: readonly string[],
+  calendar: WeekdayCalendar,
+): string | null {
+  if (typeof through !== "string") return null;
+  const year = through.slice(0, 4);
+  let lastInYear: string | undefined;
+  for (const d of dates) {
+    if (d.slice(0, 4) === year && (lastInYear === undefined || d > lastInYear)) lastInYear = d;
+  }
+  return comparatorPartialThrough(through, lastInYear, calendar) != null ? year : null;
+}
+
+/**
+ * Phase 170 (169-routed item (a), UI-SPEC AD-10) — the label of the month row in
+ * Returns and Cumulative Return Metrics. compute()'s `mtd` is the return of the
+ * record's LAST month, and `end` is the last RETURN date, not an "ended" marker
+ * (the payload has none). So the label goes by how many UTC calendar months
+ * that last month lies behind `now` (amended 2026-10-01, review WR-03):
+ *   0 (or a future `end`) → "Month-to-date";
+ *   1 → `Last month (Sep 2026)`: neutral, because a live strategy reads this way
+ *       on the 1st of every month and, on a weekday-only market, over a
+ *       month-start weekend;
+ *   2+ → `Final month (Jun 2024)`: the record has genuinely stopped.
+ * Only the label branches on the clock; the value and 169-05's em-dash lock are
+ * unchanged. An empty or unparseable `end` keeps "Month-to-date".
+ */
+export function monthRowLabel(end: string, now: Date = new Date()): string {
+  if (!end) return "Month-to-date";
+  const d = new Date(end);
+  if (Number.isNaN(d.getTime())) return "Month-to-date";
+  const monthsBehind =
+    (now.getUTCFullYear() - d.getUTCFullYear()) * 12 + (now.getUTCMonth() - d.getUTCMonth());
+  if (monthsBehind <= 0) return "Month-to-date";
+  const named = `${MONTHS[d.getUTCMonth()]} ${d.getUTCFullYear()}`;
+  return monthsBehind === 1 ? `Last month (${named})` : `Final month (${named})`;
+}
+
+/**
+ * Phase 169.1 (SC10, D-27) — the data eyebrow naming the range the figures beside
+ * it cover: "Full history: <start> – <end>" or "Selected range: <start> – <end>".
+ * The KPI strip and the rail both render it from the same `RangeScope` their
+ * figures come from, so the label and the numbers cannot describe different spans
+ * (T-169-43). DESIGN.md data-eyebrow voice: Geist Mono, uppercase, the 0.18em
+ * tracking step, `text-micro`, muted; dates in the rail's own format.
+ */
+export function RangeEyebrow({
+  scope,
+  surface,
+  className = "",
+}: {
+  scope: RangeScope;
+  surface: "strip" | "rail";
+  className?: string;
+}) {
+  const head = scope.kind === "full" ? "Full history" : "Selected range";
+  return (
+    <p
+      data-testid={`range-eyebrow-${surface}`}
+      className={`font-mono text-micro uppercase tracking-[0.18em] text-text-muted ${className}`}
+    >
+      {`${head}: ${isoToMonthDay(scope.start)} – ${isoToMonthDay(scope.end)}`}
+    </p>
+  );
+}
+
+export function isoToMonthDay(iso: string): string {
   if (!iso) return "—";
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return "—";
@@ -325,12 +631,18 @@ function num(v: number | null | undefined): string {
   return v.toFixed(2);
 }
 
+/** A day count; "—" when absent or withheld (a withheld window's NaN, D-27 W1). */
+function count(v: number | null | undefined): string {
+  if (v == null || !Number.isFinite(v)) return "—";
+  return String(v);
+}
+
 /**
  * Rolling 6-month metrics summarised across the entire warm-window history:
- * current value (most recent non-null), min, max, average. Lets a reader judge
+ * current value (the latest window, "—" when it has none), min, max, average. Lets a reader judge
  * how stable each rolling stat has been over the strategy's life.
  */
-function RollingMetricsPanel() {
+function RollingMetricsPanel({ scope }: { scope: RangeScope }) {
   // Phase 103 (MTM-04 follow-through, Finding B): read the rolling arrays from the
   // basis view — the paired rolling CHARTS already render `view.strategyRolling*`
   // (MTM under the toggle), and the bundle carries the MTM arrays, so the summary
@@ -338,9 +650,15 @@ function RollingMetricsPanel() {
   // The window label rides `view.rollingWindow` so the table's label describes its
   // own (basis-selected) arrays.
   const view = useBasisSeriesView(usePayload());
-  const v = rollingStats(view.strategyRollingVol);
-  const sh = rollingStats(view.strategyRollingSharpe);
-  const so = rollingStats(view.strategyRollingSortino);
+  // Phase 169.1 (D-27): while a range is selected the table summarises the SAME
+  // full-history rolling arrays restricted to the window's indices, so it states
+  // exactly the values the rolling charts draw in that window ("Now" is the value
+  // at the window's last index).
+  const within = (arr: Array<number | null>) =>
+    scope.kind === "selected" ? arr.slice(scope.startIdx, scope.endIdx + 1) : arr;
+  const v = rollingStats(within(view.strategyRollingVol));
+  const sh = rollingStats(within(view.strategyRollingSharpe));
+  const so = rollingStats(within(view.strategyRollingSortino));
   return (
     <Panel title={`Rolling Metrics (${view.rollingWindow?.label ?? "6mo"})`}>
       <table className="w-full text-fixed-12">
@@ -394,34 +712,35 @@ function RollingRow({
  * trailing-window snapshot); this one walks every period for skim-readers.
  */
 function CumulativeReturnsPanel() {
-  const payload = usePayload();
   // Phase 103 (MTM-04, root-cause flip): the WHOLE panel follows the active basis.
-  // MTD/YTD/3M/6M/1Y/CAGR read the VIEW's strategyMetrics (the bundle's compute()
-  // on the MTM series under mark_to_market; `payload` by reference under cash) and
-  // the 3Y/5Y rows ride the basis-selected equity curve below — one coherent basis
-  // for every row, matching the equity CHART already MTM under the toggle.
+  // Every row is a calendar window from compute() on the active basis, read from
+  // the VIEW's strategyMetrics (the bundle's compute() on the MTM series under
+  // mark_to_market; `payload` by reference under cash), and a multi-year row
+  // exists only when the record covers its window (compute() reports it null).
+  // Phase 169 D-17, 2026-09-25: 3 Year / 5 Year rows are omitted, not em-dashed, when the window is absent or null; SC6 read literally.
+  // Phase 169 D-57, 2026-09-27: 6 Month / 1 Year rows are omitted like 3 Year / 5 Year when the record is shorter, in this panel and in Returns, on every mount including the scenario payload; YTD is a calendar window and keeps the em-dash (D-11).
+  const payload = usePayload();
   const view = useBasisSeriesView(payload);
   const m = view.strategyMetrics;
-  const eq = view.strategyEquity;
-  const n = eq.length;
-  const last = n > 0 ? eq[n - 1] : 1;
-  const periodReturn = (lookbackDays: number): number | null => {
-    if (n < 2) return null;
-    const startIdx = Math.max(0, n - 1 - lookbackDays);
-    const base = eq[startIdx];
-    return base > 0 ? last / base - 1 : null;
-  };
+  // Phase 169 review round 1 (SFH H-1): Since Inception and CAGR are the stored
+  // headline on a chain-broken row, so the panel says which span they cover.
+  const coverageCaveat = headlineCoverageCaveat(payload.dataQuality, useBasisOrCash(), "Since Inception and CAGR");
   // Inception return = cum_ret (no need to recompute).
   return (
     <Panel title="Cumulative Return Metrics">
+      {coverageCaveat && (
+        <p className="mb-2 text-fixed-10 italic" style={{ color: "var(--color-warning, #B45309)" }}>
+          ⚠ {coverageCaveat}
+        </p>
+      )}
       <Kpm>
-        <Row label="Month-to-date" value={pct(m.mtd, true)} bench="" />
+        <Row label={monthRowLabel(m.end)} value={pct(m.mtd, true)} bench="" />
         <Row label="3 Month" value={pct(m.p3m, true)} bench="" />
-        <Row label="6 Month" value={pct(m.p6m, true)} bench="" />
+        {m.p6m != null && <Row label="6 Month" value={pct(m.p6m, true)} bench="" />}
         <Row label="Year-to-date" value={pct(m.ytd, true)} bench="" />
-        <Row label="1 Year" value={pct(m.p1y, true)} bench="" />
-        <Row label="3 Year" value={pct(periodReturn(3 * 252), true)} bench="" />
-        <Row label="5 Year" value={pct(periodReturn(5 * 252), true)} bench="" />
+        {m.p1y != null && <Row label="1 Year" value={pct(m.p1y, true)} bench="" />}
+        {m.p3y != null && <Row label="3 Year" value={pct(m.p3y, true)} bench="" />}
+        {m.p5y != null && <Row label="5 Year" value={pct(m.p5y, true)} bench="" />}
         <Row label="Since Inception" value={pct(m.cum_ret, true)} bench="" accent />
         <Row label="CAGR" value={pct(m.cagr, true)} bench="" />
       </Kpm>
@@ -440,7 +759,9 @@ function ExtendedMetricsPanel() {
   // factor/pain/ulcer/…) are pure functions of the daily series, so they all follow
   // the active basis — `view.strategyMetrics` is now the bundle's series-recomputed
   // scalar cache under MTM (the seven persisted HEADLINE scalars stay KpiStrip-owned).
-  const view = useBasisSeriesView(usePayload());
+  // Phase 169.1 (D-27): the windowed view, so the quantile rows and the extended
+  // scalars describe the selected range (the active view by reference at full history).
+  const { view } = useWindowedView(usePayload());
   const m = view.strategyMetrics;
   const q = view.quantiles;
   // Tail Ratio is LABELLED "P95/|P5|", so it must equal exactly that ratio of the
@@ -480,7 +801,11 @@ function rollingStats(arr: Array<number | null>): {
   max: number | null;
   avg: number | null;
 } {
-  let current: number | null = null;
+  // "Now" is the CURRENT window: the last element, "—" when it has no value.
+  // Phase 166.2 SFH-R2-H1: under D7 a flat trailing window is null, and walking
+  // back to the last non-null value would print a months-old window as current.
+  const last = arr.length > 0 ? arr[arr.length - 1] : null;
+  const current = last != null && Number.isFinite(last) ? last : null;
   let min = Infinity;
   let max = -Infinity;
   let sum = 0;
@@ -488,7 +813,6 @@ function rollingStats(arr: Array<number | null>): {
   for (let i = arr.length - 1; i >= 0; i--) {
     const v = arr[i];
     if (v == null || !Number.isFinite(v)) continue;
-    if (current == null) current = v;
     if (v < min) min = v;
     if (v > max) max = v;
     sum += v;
@@ -514,7 +838,9 @@ function WorstDrawdownsTablePanel() {
   // coherent with the Worst-DDs chart bands. Its indices are into the ACTIVE date
   // axis, so BOTH strategyWorst10 AND dates must come from the view (an MTM index
   // mapped onto the cash calendar would mislabel peak/trough/recovery dates).
-  const view = useBasisSeriesView(usePayload());
+  // Phase 169.1 (D-27): the windowed view, whose Worst 10 indices are into its own
+  // (window) dates, so only drawdowns inside the range are listed.
+  const { view } = useWindowedView(usePayload());
   const rows = view.strategyWorst10;
   if (rows.length === 0) return null;
   return (
@@ -590,7 +916,7 @@ function ymd(iso: string | undefined): string {
  * Comparator-reactive — picker swap re-renders the right two columns.
  * Falls back to a strategy-only single column when comparator = NONE.
  */
-function EoyReturnsPanel() {
+function EoyReturnsPanel({ scopeNote }: { scopeNote?: string }) {
   // Phase 103 (MTM-04, root-cause flip): the EOY table follows the active basis to
   // match the rest of the rail (and the EOY bar chart in DistributionPanels). Both
   // the strategy per-year (`view.strategyMetrics.yearly`) and the comparator daily
@@ -605,16 +931,18 @@ function EoyReturnsPanel() {
   if (cmpKey !== "none" && Array.isArray(cmp.dailyReturns)) {
     for (let i = 0; i < view.dates.length; i++) {
       const r = cmp.dailyReturns[i];
-      if (!Number.isFinite(r)) continue;
+      if (r == null || !Number.isFinite(r)) continue;
       const yr = view.dates[i].slice(0, 4);
       benchYearly[yr] = benchYearly[yr] == null ? r : (1 + benchYearly[yr]) * (1 + r) - 1;
     }
   }
   const hasBench = cmpKey !== "none";
   const years = Array.from(new Set([...Object.keys(stratYearly), ...Object.keys(benchYearly)])).sort();
+  // SFH-M-05 (keeps D-54): the year whose comparator cell covers part of it only.
+  const partialYear = hasBench ? comparatorPartialYear(cmp.through, view.dates, COMPARATOR_CALENDARS[cmpKey]) : null;
   if (years.length === 0) return null;
   return (
-    <Panel title="EOY Returns" benchHeader={hasBench ? cmp.shortName : undefined}>
+    <Panel title="EOY Returns" benchHeader={hasBench ? cmp.shortName : undefined} scopeNote={scopeNote}>
       <table className="w-full text-fixed-11">
         <thead>
           <tr className="border-b border-border/60">
@@ -665,6 +993,11 @@ function EoyReturnsPanel() {
           })}
         </tbody>
       </table>
+      {partialYear != null && typeof cmp.through === "string" && (
+        <p className="mt-1 text-fixed-10 italic text-text-muted">
+          {cmp.shortName} {partialYear}: prices through {isoToMonthDay(cmp.through)} only.
+        </p>
+      )}
     </Panel>
   );
 }

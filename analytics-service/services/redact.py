@@ -53,6 +53,31 @@ DENYLIST_EXACT: frozenset[str] = frozenset({
     "ok-access-passphrase",
     "ok-access-key",
     "ok-access-timestamp",
+    # Phase 164.6.2 / WR-05 — the MT5 BROKER PASSWORD, as a KEY.
+    #
+    # ⛔ `password` was on `_FREEFORM_KEY_ALTERNATES` (a STRING pattern for
+    # `key=value` shapes) and NOT on this key denylist, which are different
+    # surfaces. MEASURED 2026-09-14:
+    #
+    #     >>> _is_denylisted_key("password")
+    #     False
+    #     >>> scrub_pii({"login": …, "password": "n0t-a-real-pw", …})
+    #     {"login": …, "password": "n0t-a-real-pw", …}
+    #
+    # `sentry_init._redact_before_send` scrubs `…frames[*]['vars']` through
+    # `scrub_pii`, i.e. by KEY — so a frame variable literally named `password`
+    # passed through untouched. Phase 164.6.2 added three frames that hold the
+    # plaintext MT5 password as exactly that local (`heal_mt5_terminal_session`,
+    # `_heal_blocking`, `Mt5Client.initialize_with_credentials`), and
+    # `sentry_sdk.init` here sets neither `include_local_variables=False` nor
+    # `default_integrations=False`, so `LoggingIntegration` turns ANY
+    # `logger.error(..., exc_info=…)` on that stack into an event carrying them.
+    # `main.lifespan`'s `_crash_handler` already has exactly that shape.
+    #
+    # `investor_password` is the field name `Mt5Session` already uses, so the
+    # same value reaches a frame under a second spelling.
+    "password",
+    "investor_password",
 })
 
 # Mirror of pii-scrub.ts L38 DENYLIST_PREFIX.

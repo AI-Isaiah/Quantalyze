@@ -185,10 +185,10 @@ No issues found. The a11y and interaction contract is fully met.
 
 ## Files Audited
 
-- `/Users/helios-mammut/claude-projects/quantalyze/.planning/phases/37-honest-per-data-source-toggle/37-UI-SPEC.md`
-- `/Users/helios-mammut/claude-projects/quantalyze/DESIGN.md`
-- `/Users/helios-mammut/claude-projects/quantalyze/.planning/phases/37-honest-per-data-source-toggle/37-03-SUMMARY.md`
-- `/Users/helios-mammut/claude-projects/quantalyze/src/app/(dashboard)/allocations/components/ScenarioComposer.tsx` (Phase 37 additions: lines 429–461, 586–605, 1338–1389, 1433–1471, 2096–2201)
-- `/Users/helios-mammut/claude-projects/quantalyze/src/components/ui/InfoBanner.tsx`
-- `/Users/helios-mammut/claude-projects/quantalyze/src/components/ui/EmptyStateCard.tsx`
-- `/Users/helios-mammut/claude-projects/quantalyze/src/app/globals.css` (font token mapping)
+- `.planning/phases/37-honest-per-data-source-toggle/37-UI-SPEC.md`
+- `DESIGN.md`
+- `.planning/phases/37-honest-per-data-source-toggle/37-03-SUMMARY.md`
+- `src/app/(dashboard)/allocations/components/ScenarioComposer.tsx` (Phase 37 additions: lines 429–461, 586–605, 1338–1389, 1433–1471, 2096–2201)
+- `src/components/ui/InfoBanner.tsx`
+- `src/components/ui/EmptyStateCard.tsx`
+- `src/app/globals.css` (font token mapping)

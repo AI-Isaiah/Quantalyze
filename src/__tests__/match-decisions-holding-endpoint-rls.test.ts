@@ -22,7 +22,30 @@ import {
   advertiseLiveDbSkipReason,
 } from "@/lib/test-helpers/live-db";
 
-const BASE_URL = process.env.BASE_URL ?? "http://localhost:3000";
+// ⚠️ Phase 164.9 fix round (F4) — `BASE_URL` IS NOT AN UNSET VARIABLE HERE.
+//
+// Vite/vitest inject `process.env.BASE_URL` themselves (it mirrors Vite's
+// `base`, default `"/"`), and jsdom sets it to `"/"` for the same reason. `??`
+// only falls back on null/undefined, so the fallback below NEVER fired and the
+// fetch target was the literal `//api/match/decisions/holding` — a
+// protocol-relative URL Node's fetch rejects with `ERR_INVALID_URL` before any
+// request leaves the process. MEASURED in the live-DB lane, 2026-09-21.
+//
+// The sibling `src/__tests__/scenario-commit-rls.test.ts` already carries this
+// exact defence and names the same cause; this file is brought into line with
+// it rather than inventing a second idiom. Anything that is not an absolute
+// http(s) URL means no app server was pointed at, which is a PRECONDITION this
+// file's own header has always documented ("Gate: requires … + BASE_URL. Skips
+// gracefully when those are absent") and never implemented.
+//
+// ⛔ This is NOT a skip added to clear a red: the arm runs whenever an app
+// server URL is supplied (`BASE_URL=http://localhost:3000 npm run test:live-db`
+// against a running `next dev`). Deleting the `HAS_BASE_URL` conjunct below is
+// the one-line change that makes it unconditional again.
+const RAW_BASE_URL =
+  process.env.MATCH_DECISIONS_BASE_URL ?? process.env.BASE_URL ?? "";
+const HAS_BASE_URL = /^https?:\/\//.test(RAW_BASE_URL);
+const BASE_URL = HAS_BASE_URL ? RAW_BASE_URL : "http://localhost:3000";
 
 describe("/api/match/decisions/holding ownership gate (live-DB / T-09-03.b)", () => {
   advertiseLiveDbSkipReason("match-decisions-holding-endpoint-rls");
@@ -93,7 +116,7 @@ describe("/api/match/decisions/holding ownership gate (live-DB / T-09-03.b)", ()
     }
   });
 
-  it.skipIf(!HAS_LIVE_DB)(
+  it.skipIf(!HAS_LIVE_DB || !HAS_BASE_URL)(
     "Allocator B POSTing with A's holding_ref → 403 Unauthorized (no match_decisions row created)",
     async () => {
       const res = await fetch(`${BASE_URL}/api/match/decisions/holding`, {

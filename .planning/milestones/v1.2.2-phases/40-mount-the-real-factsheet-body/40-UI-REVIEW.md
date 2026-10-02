@@ -178,11 +178,11 @@ Registry audit: 0 third-party blocks checked, not applicable.
 
 ## Files Audited
 
-- `/Users/helios-mammut/claude-projects/quantalyze/DESIGN.md`
-- `/Users/helios-mammut/claude-projects/quantalyze/.planning/phases/40-mount-the-real-factsheet-body/40-UI-SPEC.md`
-- `/Users/helios-mammut/claude-projects/quantalyze/.planning/phases/40-mount-the-real-factsheet-body/40-CONTEXT.md`
-- `/Users/helios-mammut/claude-projects/quantalyze/src/app/(dashboard)/allocations/widgets/performance/ScenarioFactsheetChart.tsx`
-- `/Users/helios-mammut/claude-projects/quantalyze/src/app/factsheet/[id]/v2/FactsheetView.tsx`
-- `/Users/helios-mammut/claude-projects/quantalyze/src/app/(dashboard)/allocations/components/ScenarioComposer.tsx` (mount context, framing elements, blank-slate branch)
-- `/Users/helios-mammut/claude-projects/quantalyze/src/app/(dashboard)/allocations/AllocationsTabs.tsx` (tab panel wrapper, padding context)
-- `/Users/helios-mammut/claude-projects/quantalyze/src/app/globals.css` (@theme tokens, print stylesheet, factsheet-v2-no-print rule, border-text dark override)
+- `DESIGN.md`
+- `.planning/phases/40-mount-the-real-factsheet-body/40-UI-SPEC.md`
+- `.planning/phases/40-mount-the-real-factsheet-body/40-CONTEXT.md`
+- `src/app/(dashboard)/allocations/widgets/performance/ScenarioFactsheetChart.tsx`
+- `src/app/factsheet/[id]/v2/FactsheetView.tsx`
+- `src/app/(dashboard)/allocations/components/ScenarioComposer.tsx` (mount context, framing elements, blank-slate branch)
+- `src/app/(dashboard)/allocations/AllocationsTabs.tsx` (tab panel wrapper, padding context)
+- `src/app/globals.css` (@theme tokens, print stylesheet, factsheet-v2-no-print rule, border-text dark override)

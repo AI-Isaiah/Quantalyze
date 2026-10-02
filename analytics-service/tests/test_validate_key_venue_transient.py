@@ -138,6 +138,14 @@ EXPECTED_PROBE_FAILED_DETAIL = (
     "Could not verify the key's permission scopes — the permission probe "
     "failed. Try again in a moment."
 )
+# 167-CREDTRUST plan 01 (D-05, D-07, S-27) — the narrowed MT5
+# `except Mt5ClientError` transient tail's own detail, no longer
+# EXPECTED_NETWORK_ERROR_DETAIL. Byte-identical to `SIGN_IN_FAILED_DETAIL`
+# (services/exchange.py), asserted below rather than assumed.
+EXPECTED_SIGN_IN_FAILED_DETAIL = (
+    "The sign-in attempt did not complete, and the venue did not confirm "
+    "the credential."
+)
 
 # The synthetic unknown-code control. Deliberately NOT a member of any real
 # vocabulary — if a future phase mints this string as a real code, this control
@@ -179,6 +187,7 @@ EXPECTED_FIXTURE_TRIGGERS = {
     "mt5_probe_timeout",
     "mt5_account_mismatch",
     "mt5_client_error_transient",
+    "mt5_post_login_client_error",
     "ccxt_rate_limited",
     "ccxt_ddos_protection",
     "ccxt_exchange_unavailable",
@@ -257,7 +266,27 @@ def _handler_globals(path: str, method: str = "POST") -> dict[str, Any]:
 
     import main
 
-    for route in main.app.routes:
+    # fastapi 0.139.0 (deps bump #592, 0.138.0 -> 0.139.0) made include_router()
+    # LAZY: instead of flattening a sub-router's APIRoutes into app.routes it
+    # leaves a single `_IncludedRouter` placeholder whose `.original_router`
+    # holds the real routes. Routing still works (the TestClient reaches every
+    # endpoint), but a FLAT scan of `main.app.routes` no longer sees
+    # /api/validate-key (exchange) or /api/verify-strategy (portfolio) — the two
+    # MULTI-route routers this file drives — so the pre-0.139 flat loop below
+    # was vacuously "route not registered". Descend through the wrapper so the
+    # lookup holds on BOTH shapes: pre-0.139 flat (route has no `original_router`
+    # -> yielded as-is) and 0.139+ lazy (recurse into `original_router.routes`).
+    # Local dev on an older globally-installed fastapi keeps the flat shape,
+    # which is exactly why this only ever reddened under CI's pinned 0.139.0.
+    def _effective(routes: Any) -> Any:
+        for route in routes:
+            original = getattr(route, "original_router", None)
+            if original is not None:
+                yield from _effective(original.routes)
+            else:
+                yield route
+
+    for route in _effective(main.app.routes):
         if getattr(route, "path", None) != path:
             continue
         if method not in (getattr(route, "methods", None) or set()):
@@ -332,8 +361,12 @@ def _arrange_mt5(
     *,
     login_raises: BaseException | None = None,
     account: dict[str, Any] | None = None,
+    account_info_raises: BaseException | None = None,
 ) -> None:
-    """Walk the MT5 branch to the probe with a stubbed synchronous Mt5Client."""
+    """Walk the MT5 branch to the probe with a stubbed synchronous Mt5Client.
+
+    `account_info_raises` makes the FIRST post-login read raise, i.e. a fault
+    that arrives after the sign-in was already accepted."""
     g = _handler_globals("/api/validate-key")
 
     client = MagicMock(name="Mt5Client-instance")
@@ -341,7 +374,12 @@ def _arrange_mt5(
         client.login = MagicMock(side_effect=login_raises)
     else:
         client.login = MagicMock(return_value=None)
-    client.account_info = MagicMock(return_value=account if account is not None else {})
+    if account_info_raises is not None:
+        client.account_info = MagicMock(side_effect=account_info_raises)
+    else:
+        client.account_info = MagicMock(
+            return_value=account if account is not None else {}
+        )
     client.order_check = MagicMock(return_value={})
     client.close = MagicMock()
     monkeypatch.setitem(g, "Mt5Client", MagicMock(return_value=client))
@@ -507,6 +545,11 @@ def test_c3_mt5_probe_timeout_carries_a_machine_code(app_client, monkeypatch) ->
     already emits SAYS. Vocabulary reused, never re-minted (the ADAPTER_INIT_FAILED
     lesson: a second name for one condition is the defect the contract exists to
     stop).
+
+    ⚠️ 167-CREDTRUST plan 01 — THE SIBLING-ARM-UNCHANGED CONTROL. No login was
+    attempted on this arm (the stage deadline fires before one completes), so
+    this case is BYTE-UNCHANGED while C5 immediately below narrows: proof the
+    167 change is NARROW, not a rename of the shared constant.
     """
     _arrange_mt5(monkeypatch, login_raises=asyncio.TimeoutError())
 
@@ -548,26 +591,197 @@ def test_c4_mt5_account_mismatch_carries_a_machine_code(
 def test_c5_mt5_transient_client_error_carries_a_machine_code(
     app_client, monkeypatch
 ) -> None:
-    """C5 — `Mt5ClientError` classified `transient` by the ONE mt5_validation seam.
+    """C5 — a LOGIN-STAGE refusal classified `transient` by the ONE
+    mt5_validation seam.
 
-    Code -10004 ("No IPC connection") is the canonical case: the terminal bridge
-    is detached (gateway down / mid-redeploy), which the classifier deliberately
-    code-gates to `transient` so a valid key is never permanently rejected during
-    an outage.
+    ⭐ 167 WR-01 — the trigger is `Mt5LoginRefusedError` (what the real
+    `Mt5Client.login` raises when the terminal answers the sign-in falsy) with a
+    code-0 text the classifier does not recognise. Until WR-01 this case drove
+    code -10004 ("No IPC connection"), and that was the defect: a detached bridge
+    was answered SIGN_IN_FAILED. A login-stage -10000…-10004 or 1, or any
+    post-login fault, now keeps NETWORK_UNAVAILABLE — see
+    `test_c5_mt5_post_login_client_error_keeps_the_network_code` below. A
+    login-stage -10005 lands HERE (D-17) — see
+    `test_c5_mt5_login_stage_refusal_codes_share_the_sign_in_body`.
+
+    ⚠️ 167-CREDTRUST plan 01 (D-05, D-07, S-27) — THIS IS THE ARM THE PHASE
+    NARROWS, and this case's own expectation moved with it: `code` and
+    `detail` are no longer the shared `NETWORK_UNAVAILABLE` /
+    `EXPECTED_NETWORK_ERROR_DETAIL` — a login was actually ATTEMPTED on this
+    arm, which is what `SIGN_IN_FAILED` claims and the shared network detail
+    does not. `recoverable` flips to `False`, deliberately diverging from
+    every sibling MT5 arm's hardcoded `True` (D-08): a retry re-sends the same
+    credential to a terminal that refused it, or that a wrong password put
+    behind a modal login dialog (D-17). The eight sibling `NETWORK_UNAVAILABLE`
+    sites (C1-C4, C6, C7 and the two others) are BYTE-UNCHANGED — see C3
+    immediately below for the sibling-arm-unchanged control that proves the
+    narrowing did not widen.
+
+    📜 164.6.5 lineage (kept on merge 2026-09-23). On the 164.6.5 branch this
+    case was RE-CUT 2026-09-22 (criterion 5, D-12/D-13) off -10004 for a
+    different reason from 167's WR-01: -10004 and -10005 LEAVE the
+    venue-transient class for an honest, non-retryable 500
+    (`MT5_TERMINAL_UNRESPONSIVE`, see
+    `test_c5b_ipc_transport_codes_leave_the_venue_transient_class` below).
+    Both phases moved the case off -10004, and 167's trigger (a login-stage
+    code-0 refusal) is the one kept. ⚠️ MERGED ROUTING: 167's refusal
+    predicate runs FIRST, so a login-stage -10005 stays here (SIGN_IN_FAILED);
+    164.6.5's arm then claims every OTHER -10004/-10005 — an `initialize()`
+    failure, a login-stage -10004 and a post-login IPC fault — so those no
+    longer keep NETWORK_UNAVAILABLE as the 167 text above says.
     """
-    from services.mt5_client import Mt5ClientError
+    from services.mt5_client import Mt5LoginRefusedError
 
-    _arrange_mt5(monkeypatch, login_raises=Mt5ClientError(-10004, "No IPC connection"))
+    _arrange_mt5(
+        monkeypatch,
+        # 167 SFH-LOW-3 — a neutral login answer, not timeout-worded text.
+        login_raises=Mt5LoginRefusedError(0, "authorization failed"),
+    )
 
     r = _post_validate_key(app_client, **_MT5_FIELDS)
 
     _assert_flat_venue_body(
         r,
         trigger="mt5_client_error_transient",
+        detail=EXPECTED_SIGN_IN_FAILED_DETAIL,
+        code="SIGN_IN_FAILED",
+        recoverable=False,
+    )
+
+
+@pytest.mark.parametrize(
+    ("code", "text"),
+    [
+        pytest.param(-10005, "IPC timeout", id="-10005-modal-login-dialog"),
+        pytest.param(-6, "Authorization failed", id="-6-res-e-auth-failed"),
+    ],
+)
+def test_c5_mt5_login_stage_refusal_codes_share_the_sign_in_body(
+    app_client, monkeypatch, code, text
+) -> None:
+    """C5, the D-17 code set on the wire — a login-stage -10005 or -6 answers the
+    SAME body as the fixture's `mt5_client_error_transient` case. -10005 is the
+    modal login dialog D-08 measured for a wrong password; before D-17 it was
+    answered `NETWORK_UNAVAILABLE` / `recoverable: true`, which is the pre-phase
+    Retry D-08 calls the harmful action.
+
+    Reuses the fixture case rather than adding one: the wire answer is the same
+    contract, only the code that reaches it differs."""
+    from services.mt5_client import Mt5LoginRefusedError
+
+    _arrange_mt5(monkeypatch, login_raises=Mt5LoginRefusedError(code, text))
+
+    r = _post_validate_key(app_client, **_MT5_FIELDS)
+
+    _assert_flat_venue_body(
+        r,
+        trigger="mt5_client_error_transient",
+        detail=EXPECTED_SIGN_IN_FAILED_DETAIL,
+        code="SIGN_IN_FAILED",
+        recoverable=False,
+    )
+
+
+def test_c5_mt5_post_login_client_error_keeps_the_network_code(
+    app_client, monkeypatch
+) -> None:
+    """C5, post-login half (167 WR-01) — the SAME `except Mt5ClientError` arm,
+    reached AFTER the sign-in was accepted.
+
+    `login()` succeeds and the first post-login `account_info()` read raises an
+    IPC timeout. No sign-in failed, so the arm must give the pre-167 answer
+    byte-for-byte: `NETWORK_UNAVAILABLE`, the shared network detail and
+    `recoverable=True`, so the Retry survives. Before WR-01 this answered
+    `SIGN_IN_FAILED` / `recoverable=False` after a sign-in that had succeeded.
+
+    ⚠️ MERGE 2026-09-23 (164.6.5 integrated) — this case drove an IPC timeout
+    (-10005) on `account_info()`. An IPC-coded post-login fault now leaves this
+    class for 164.6.5's `MT5_TERMINAL_UNRESPONSIVE` (pinned by the post-login
+    case of `test_c5b_ipc_transport_codes_leave_the_venue_transient_class`), so
+    the case drives a NON-IPC post-login fault: the population that still keeps
+    the pre-167 answer. Its claim, "no sign-in failed, so not SIGN_IN_FAILED",
+    is unchanged.
+    """
+    from services.mt5_client import Mt5ClientError
+
+    _arrange_mt5(
+        monkeypatch,
+        account_info_raises=Mt5ClientError(0, "account_info returned no data"),
+    )
+
+    r = _post_validate_key(app_client, **_MT5_FIELDS)
+
+    _assert_flat_venue_body(
+        r,
+        trigger="mt5_post_login_client_error",
         detail=EXPECTED_NETWORK_ERROR_DETAIL,
         code="NETWORK_UNAVAILABLE",
         recoverable=True,
     )
+
+
+@pytest.mark.parametrize(
+    ("stage", "code", "detail"),
+    [
+        ("login", -10004, "No IPC connection"),
+        ("login", -10005, "IPC timeout"),
+        # MERGE 2026-09-23 (164.6.5 integrated with 167) — the post-login IPC
+        # fault 167's `test_c5_mt5_post_login_client_error_keeps_the_network_code`
+        # used to drive: not a sign-in failure (167 WR-01), and an IPC code, so
+        # it leaves the class too.
+        ("post_login", -10005, "IPC timeout"),
+    ],
+)
+def test_c5b_ipc_transport_codes_leave_the_venue_transient_class(
+    app_client, monkeypatch, stage: str, code: int, detail: str
+) -> None:
+    """164.6.5 / criterion 5 (D-12/D-13) — THE CLASS BOUNDARY, proven at the
+    LIVE route. Both IPC transport codes no longer answer this file's flat
+    424 venue-transient shape at all: they answer a DIFFERENT, honest,
+    non-retryable 500 — the wedged terminal is ours to fix, not a venue
+    hiccup a retry can clear. MEASURED 2026-09-21: -10005 stayed wedged
+    1h39m across two retries, one with CORRECT credentials — the "try again
+    in a moment" copy this class's shape carries was false both times.
+
+    The router-level assertions (machine code, dependency, retryable, outcome
+    category, log scrub) live in `test_mt5_validate.py`; this test's job is
+    narrower and specific to THIS file: prove the live route no longer routes
+    this pair through the flat venue-transient body at all.
+
+    ⚠️ MERGE 2026-09-23 — a PLAIN `Mt5ClientError` only (what `initialize()`
+    raises for an already-wedged terminal). A login-stage
+    `Mt5LoginRefusedError(-10005)` is 167's refused sign-in and stays in the
+    class as SIGN_IN_FAILED (`test_c5_mt5_login_stage_refusal_codes_share_the_sign_in_body`).
+    """
+    from services.mt5_client import Mt5ClientError
+
+    if stage == "login":
+        _arrange_mt5(monkeypatch, login_raises=Mt5ClientError(code, detail))
+    else:
+        _arrange_mt5(
+            monkeypatch, account_info_raises=Mt5ClientError(code, detail)
+        )
+
+    r = _post_validate_key(app_client, **_MT5_FIELDS)
+
+    assert r.status_code == 500, (
+        f"an IPC transport fault (code={code}) must not answer this class's "
+        f"424 shape any more — got {r.status_code} with {r.json()!r}"
+    )
+    assert r.status_code != EXPECTED_STATUS, (
+        f"EXPECTED_STATUS ({EXPECTED_STATUS}) is this file's flat "
+        f"venue-transient 424 — an IPC transport fault must have LEFT that "
+        f"class, not merely changed its body"
+    )
+    body = r.json()
+    assert body["detail"]["code"] == "MT5_TERMINAL_UNRESPONSIVE"
+    assert body["detail"]["retryable"] is False
+    assert body["detail"]["dependency"] == "mt5-gateway"
+    # Never the class's own flat shape — that shape's `code` lives at the top
+    # level of `detail`, not nested one further, and never claims recoverable.
+    assert "recoverable" not in body["detail"] or body["detail"].get(
+        "recoverable"
+    ) is not True
 
 
 # --------------------------------------------------------------------------- #
@@ -745,6 +959,175 @@ def test_c6_unrecognised_code_still_offers_a_retry_affordance(
         code=UNKNOWN_CODE,
         recoverable=True,
     )
+
+
+# --------------------------------------------------------------------------- #
+# Phase 167.1.2 (D-01) — the ccxt SUCCESS path carries the venue account id.
+#
+# Why: `api_keys_user_exchange_venue_account_uniq` refuses a second live key on
+# one exchange account, but only for a row whose `venue_account_id` is written,
+# and the connect routes can only write what this response carries. A venue
+# whose id never reaches this body is a venue where one account behind two keys
+# is summed twice by every consumer that adds keys together.
+#
+# These drive the REAL `validate_key_permissions` (only `create_exchange` and
+# `aclose_exchange` are stubbed), so the oracle is the whole chain: the venue
+# response the validator already fetches, the detector or balance read, the
+# result dict and the router's return. Each fake answers like the venue does,
+# including Deribit's: `id` is present ONLY when `extended` is passed.
+# Every id is synthetic. These are NOT `_assert_flat_venue_body` cases and add
+# no fixture trigger.
+# --------------------------------------------------------------------------- #
+
+_UID = "100000001"
+
+
+def _fake_ccxt(venue: str, uid: object, *, trade_scope: bool = False) -> MagicMock:
+    """A ccxt exchange double answering the calls the validator already makes."""
+    ex = MagicMock(name=f"ccxt-{venue}")
+    ex.id = venue
+    ex.apiKey = "synthetic-key"
+    ex.secret = "synthetic-secret"
+    ex.load_markets = AsyncMock(return_value={})
+    if venue == "okx":
+        perm = "read_only,trade" if trade_scope else "read_only"
+        ex.private_get_account_config = AsyncMock(
+            return_value={"code": "0", "data": [{"perm": perm, "uid": uid, "mainUid": "100000000"}]}
+        )
+        ex.fetch_balance = AsyncMock(return_value={"info": {"code": "0", "data": []}})
+    elif venue == "bybit":
+        ex.private_get_v5_user_query_api = AsyncMock(
+            return_value={
+                "retCode": 0,
+                "result": {
+                    "readOnly": "0" if trade_scope else "1",
+                    "permissions": {"Spot": ["SpotTrade"]} if trade_scope else {},
+                    "userID": uid,
+                    "parentUid": "100000000",
+                    "isMaster": False,
+                },
+            }
+        )
+        ex.fetch_balance = AsyncMock(return_value={"info": {"retCode": 0, "result": {}}})
+    elif venue == "binance":
+        ex.sapi_get_account_apirestrictions = AsyncMock(
+            return_value={
+                "enableReading": True,
+                "enableSpotAndMarginTrading": trade_scope,
+                "enableFutures": False,
+                "enableWithdrawals": False,
+            }
+        )
+        ex.fetch_balance = AsyncMock(
+            return_value={"info": {"accountType": "SPOT", "balances": [], "uid": uid}}
+        )
+    elif venue == "deribit":
+        scope = "trade:read_write account:read" if trade_scope else (
+            "trade:read account:read wallet:read custody:read block_trade:read"
+        )
+        ex.public_get_auth = AsyncMock(return_value={"result": {"scope": scope}})
+
+        async def _deribit_balance(params: dict[str, Any] | None = None) -> dict[str, Any]:
+            # private/get_account_summaries returns `id` only with extended=true.
+            info: dict[str, Any] = {"summaries": []}
+            if (params or {}).get("extended") is True:
+                info["id"] = uid
+            return {"info": info}
+
+        ex.fetch_balance = AsyncMock(side_effect=_deribit_balance)
+    else:  # pragma: no cover - guards a typo in the parametrisation
+        raise AssertionError(f"no fake for {venue}")
+    return ex
+
+
+def _arrange_real_validator(monkeypatch: pytest.MonkeyPatch, ex: MagicMock) -> None:
+    g = _handler_globals("/api/validate-key")
+    monkeypatch.setitem(g, "create_exchange", MagicMock(return_value=ex))
+    monkeypatch.setitem(g, "aclose_exchange", AsyncMock(return_value=None))
+
+
+@pytest.mark.parametrize(
+    ("venue", "uid"),
+    [
+        ("okx", _UID),
+        ("bybit", int(_UID)),  # Bybit documents userID as an integer
+        ("binance", int(_UID)),
+        ("deribit", int(_UID)),
+    ],
+)
+def test_ccxt_success_carries_the_venue_account_id(
+    app_client: TestClient, monkeypatch: pytest.MonkeyPatch, venue: str, uid: object
+) -> None:
+    ex = _fake_ccxt(venue, uid)
+    _arrange_real_validator(monkeypatch, ex)
+
+    r = _post_validate_key(app_client, exchange=venue)
+
+    assert r.status_code == 200, r.text
+    assert r.json() == {"valid": True, "read_only": True, "venue_account_id": _UID}
+
+
+def test_deribit_asks_for_the_extended_account_summary(
+    app_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One query parameter on the call the validator already makes: no new
+    request, no new scope (DRB-03 already requires account:read)."""
+    ex = _fake_ccxt("deribit", _UID)
+    _arrange_real_validator(monkeypatch, ex)
+
+    r = _post_validate_key(app_client, exchange="deribit")
+
+    assert r.status_code == 200, r.text
+    assert ex.fetch_balance.await_count == 1
+    assert ex.fetch_balance.await_args.args == ({"extended": True},)
+
+
+def test_bybit_never_reads_parent_uid_as_the_identity(
+    app_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A Bybit sub-account has its own userID; parentUid is the master's.
+    Reading parentUid would make every sub-account look like its master and
+    refuse a genuinely different account."""
+    ex = _fake_ccxt("bybit", None)
+    _arrange_real_validator(monkeypatch, ex)
+
+    r = _post_validate_key(app_client, exchange="bybit")
+
+    assert r.status_code == 200, r.text
+    assert r.json()["venue_account_id"] is None
+
+
+@pytest.mark.parametrize("venue", ["okx", "bybit", "binance", "deribit"])
+@pytest.mark.parametrize("uid", [None, "", "   "])
+def test_a_missing_or_blank_id_never_fails_validation(
+    app_client: TestClient, monkeypatch: pytest.MonkeyPatch, venue: str, uid: object
+) -> None:
+    """Venue schema drift must not become a connect outage: the key stays
+    valid and read-only, and the id is null (never '')."""
+    ex = _fake_ccxt(venue, uid)
+    _arrange_real_validator(monkeypatch, ex)
+
+    r = _post_validate_key(app_client, exchange=venue)
+
+    assert r.status_code == 200, r.text
+    assert r.json() == {"valid": True, "read_only": True, "venue_account_id": None}
+
+
+@pytest.mark.parametrize("venue", ["okx", "bybit", "binance", "deribit"])
+def test_a_failure_path_carries_no_account_id(
+    app_client: TestClient, monkeypatch: pytest.MonkeyPatch, venue: str
+) -> None:
+    """A refused key (write scope) answers the flat venue body: no
+    `venue_account_id` key, and the uid appears nowhere in it."""
+    ex = _fake_ccxt(venue, _UID, trade_scope=True)
+    _arrange_real_validator(monkeypatch, ex)
+
+    r = _post_validate_key(app_client, exchange=venue)
+
+    assert r.status_code == EXPECTED_STATUS, r.text
+    body = r.json()
+    assert set(body) == EXPECTED_BODY_KEYS
+    assert _UID not in r.text
 
 
 # --------------------------------------------------------------------------- #
@@ -1101,11 +1484,15 @@ def test_hoisted_copy_constants_match_the_literals_pinned_here() -> None:
         AUTH_FAILED_DETAIL,
         NETWORK_ERROR_DETAIL,
         RATE_LIMITED_DETAIL,
+        SIGN_IN_FAILED_DETAIL,
     )
 
     assert RATE_LIMITED_DETAIL == EXPECTED_RATE_LIMITED_DETAIL
     assert NETWORK_ERROR_DETAIL == EXPECTED_NETWORK_ERROR_DETAIL
     assert AUTH_FAILED_DETAIL == EXPECTED_AUTH_FAILED_DETAIL
+    # 167-CREDTRUST plan 01 — the C5 arm's own hoisted constant, byte-identical
+    # to the wire case's expectation above.
+    assert SIGN_IN_FAILED_DETAIL == EXPECTED_SIGN_IN_FAILED_DETAIL
 
     # The substring the cascade actually keys on, asserted separately: equality
     # to a literal proves the string did not move, this proves WHY it matters.

@@ -49,6 +49,13 @@ const recorders = vi.hoisted(() => {
     // NEW-C03-03 regression: records `.eq(col, val)` calls on the strategies
     // table so we can assert the `status=published` predicate is always sent.
     strategyEqCalls: [] as Array<[string, unknown]>,
+    // Phase 159 (159-03 / RANK-02) — LIST-read recorder. `getStrategiesByCategory`
+    // awaits the builder itself (no `.single()`), so the strategies chain only
+    // becomes a thenable when a test seeds `listRows`. Leaving it null keeps
+    // every pre-existing `.single()`/`.maybeSingle()` test byte-identical — a
+    // permanently-thenable chain would change how those awaits resolve.
+    listRows: null as unknown[] | null,
+    listError: null as unknown,
     // Phase B pr-test-analyzer F1 — captureToSentry call recorder.
     // H-0488 / Phase B follow-up: a regression that drops Sentry capture
     // from the RPC-error or shape-mismatch paths would otherwise be invisible.
@@ -91,6 +98,19 @@ const buildChain = (data: unknown, recordStrategySelect = false) => {
   // implement both so pre-existing tests (which used `.single()`) and the
   // new shared helper (which uses `.maybeSingle()`) both work.
   chain.maybeSingle = () => Promise.resolve({ data, error: null });
+  // Phase 159 (159-03 / RANK-02): the LIST reads (`getStrategiesByCategory`)
+  // await the builder directly. Only become a thenable when the test seeded
+  // rows for that shape — see the `listRows` recorder note above.
+  if (recordStrategySelect && recorders.listRows !== null) {
+    chain.then = <T1, T2>(
+      onFulfilled: (val: { data: unknown; error: unknown }) => T1,
+      onRejected?: (err: unknown) => T2,
+    ) =>
+      Promise.resolve({
+        data: recorders.listRows,
+        error: recorders.listError,
+      }).then(onFulfilled, onRejected);
+  }
   return chain;
 };
 
@@ -168,14 +188,21 @@ vi.mock("@/lib/supabase/admin", () => ({
 }));
 
 import {
+  getStrategiesByCategory,
   getStrategyDetail,
   getPublicStrategyDetail,
   fetchStrategyLazyMetrics,
   getMyWatchlist,
   getStrategyDetailV2,
   derivePhase07Fields,
+  deriveStrategyLinkedKeyIds,
+  deriveStrategylessKeys,
+  extractTrustworthyDerivedSeries,
+  equityHistoryReadiness,
+  derivedPayloadRejection,
+  DERIVED_ROW_READ_FAILED,
 } from "./queries";
-import { equitySnapshotsToDailyPoints } from "@/lib/allocation-helpers";
+import type { SupportedExchange } from "./utils";
 
 const baseStrategy = {
   id: "strat_123",
@@ -212,6 +239,8 @@ beforeEach(() => {
   recorders.favoritesEqCalls = [];
   recorders.strategySelectCols = [];
   recorders.strategyEqCalls = [];
+  recorders.listRows = null;
+  recorders.listError = null;
   recorders.sentryCalls = [];
 });
 
@@ -303,6 +332,172 @@ describe("getStrategyDetail — status=published predicate (NEW-C03-03)", () => 
     recorders.strategyData = null;
     const result = await getStrategyDetail("strat_draft");
     expect(result).toBeNull();
+  });
+});
+
+/**
+ * Phase 159 (159-03, RANK-02 / decision D-02) — the browse + discovery LIST
+ * read is the highest-traffic ANONYMOUS `strategy_analytics` surface
+ * (`/browse/[slug]` has no auth gate). RLS is ROW-level: the `analytics_read`
+ * policy has no `TO` clause and cannot hide a COLUMN, so an explicit
+ * projection is the only lever that keeps `daily_returns`, the whole
+ * `metrics_json` blob and `data_quality_flags` out of an anon response.
+ *
+ * These pins capture the `.select()` STRING the function issues. They are
+ * neuterable in both directions: adding an excluded column to the projection
+ * constant reds the negative arm, and dropping a must-stay column reds the
+ * consumer arm (which is the user-visible failure — blank sparklines and a
+ * permanently-"Syncing" chip).
+ */
+describe("getStrategiesByCategory — RANK-02 explicit anon projection", () => {
+  /**
+   * Seeds an empty LIST result (the select is recorded before the early
+   * return) and hands back both the full select string and the
+   * `strategy_analytics (...)` embed body.
+   */
+  const captureSelect = async () => {
+    recorders.listRows = [];
+    await getStrategiesByCategory("crypto-sma");
+    const cols = recorders.strategySelectCols.at(-1) ?? "";
+    const embed = /strategy_analytics \(([^)]*)\)/.exec(cols)?.[1] ?? "";
+    return { cols, embed };
+  };
+
+  it("issues an explicit analytics column list, never the wildcard embed", async () => {
+    const { cols, embed } = await captureSelect();
+    expect(cols).not.toContain("strategy_analytics (*)");
+    expect(embed).not.toBe("*");
+    expect(embed.length).toBeGreaterThan(0);
+  });
+
+  it("keeps every analytics field the browse list actually renders", async () => {
+    const { embed } = await captureSelect();
+    // Enumerated from StrategyTable at HEAD: sparklines (:1111/:1118), the
+    // chip status (:899), the SyncBadge + `computed_at` sort (:299/:1051),
+    // the rendered metric columns and every advanced range filter (:556-562).
+    for (const column of [
+      "computed_at",
+      "computation_status",
+      "cumulative_return",
+      "cagr",
+      "sharpe",
+      "max_drawdown",
+      "volatility",
+      "six_month_return",
+      "calmar",
+      "sparkline_returns",
+      "sparkline_drawdown",
+      // Phase 163 / HONEST-08 — the badge buckets on the staler of sync- and
+      // SERIES-recency, so the series' end date is now a rendered surface too.
+      // Dropping it silently returns every row to "unknown", which caps the
+      // badge below fresh but stops it ever NAMING a dead track record.
+      "series_end",
+    ]) {
+      expect(embed).toContain(column);
+    }
+  });
+
+  it("never projects daily_returns, the metrics_json blob, data_quality_flags, or the raw returns_series", async () => {
+    const { cols, embed } = await captureSelect();
+    expect(cols).not.toContain("daily_returns");
+    expect(cols).not.toContain("data_quality_flags");
+    // `metrics_json` may appear ONLY as the JSONB-key alias below — never as a
+    // projected column (which would ship the entire blob to an anon reader).
+    expect(embed).not.toMatch(/metrics_json(?!->)/);
+    // Phase 163 / HONEST-08, threat T-163-09 — same rule, same reason, applied
+    // to the OTHER blob. `returns_series` is a multi-year array of
+    // {date,value} points; HONEST-08 needs exactly ONE date out of it, so it
+    // may appear only in the arrow/alias form. A bare `returns_series` column
+    // here would hand every point to every anonymous visitor to /browse — the
+    // regression this pin exists to catch, mirroring the metrics_json one.
+    expect(embed).not.toMatch(/returns_series(?!->)/);
+  });
+
+  it("carries the series end as an aliased LAST-element JSONB date, not the array", async () => {
+    const { embed } = await captureSelect();
+    // MEASURED against the TEST project 2026-08-26 (service role, both forms):
+    //   select=computed_at,series_end:returns_series->-1->>date
+    //     → HTTP 200, {"computed_at":"2026-04-30T…","series_end":"2026-04-29"}
+    //   select=id,strategy_analytics(computed_at,series_end:returns_series->-1->>date)
+    //     → HTTP 200, {"strategy_analytics":{"series_end":"2026-05-29",…}}
+    // The `->0->>date` control returned the series' FIRST date on the same
+    // rows, which is what proves `-1` resolves to the LAST element rather than
+    // silently yielding null. `->>` (not `->`) yields the bare date text.
+    expect(embed).toContain("series_end:returns_series->-1->>date");
+  });
+
+  it("carries the 3M advanced filter as an aliased JSONB key, not the blob", async () => {
+    const { embed } = await captureSelect();
+    // MEASURED against the TEST project 2026-08-21: this embed alias form
+    // returns `{"three_month": 0.0}` (HTTP 200, a real number) — see
+    // 159-03-SUMMARY. The A4 assumption held; the filter does not degrade.
+    expect(embed).toContain("three_month:metrics_json->three_month");
+  });
+});
+
+/**
+ * Phase 159 (159-03, RANK-02 / decision D-02) — `getStrategyDetail` splatted
+ * `strategy_analytics (*)`. RESEARCH Open Question 2 framed the tension as
+ * "the anon /strategy/[id] page and the authed discovery detail page share
+ * this function, and only one of them may see data_quality_flags", and the
+ * resolution is CALLER-SCOPED projections rather than one shared list.
+ *
+ * ⚠️ Measured correction (159-03): at HEAD `/strategy/[id]` does NOT call this
+ * function — it calls `getPublicStrategyDetail` (aliased locally through
+ * `cache()`), which already carries an explicit projection. This function's
+ * only production caller is the AUTHED discovery detail page. The `public`
+ * variant is therefore the SAFE DEFAULT for the exported surface, not a live
+ * anon path: any future anon caller gets the minimal projection unless it
+ * explicitly opts into the wider discovery list.
+ *
+ * Phase 169.1 plan 01 (D-26): the wider discovery list is gone. The discovery
+ * page builds its factsheet through the shared `fetchAndBuildPayloadWithReason`,
+ * which reads the series itself, so the two cases that pinned that list's
+ * columns were deleted with it; the minimal projection is now the only one.
+ */
+describe("getStrategyDetail — RANK-02 caller-scoped analytics projection", () => {
+  const captureEmbed = async (run: () => Promise<unknown>) => {
+    recorders.strategyData = { ...baseStrategy, disclosure_tier: "exploratory" };
+    await run();
+    const cols = recorders.strategySelectCols.at(-1) ?? "";
+    return { cols, embed: /strategy_analytics \(([^)]*)\)/.exec(cols)?.[1] ?? "" };
+  };
+
+  it("the detail projection excludes the three columns and keeps computation_status", async () => {
+    const { cols, embed } = await captureEmbed(() => getStrategyDetail("strat_123"));
+    expect(cols).not.toContain("strategy_analytics (*)");
+    expect(embed).not.toBe("*");
+    // computation_status is MANDATORY in every variant — the detail surfaces
+    // derive their still-computing placeholder from it.
+    expect(embed).toContain("computation_status");
+    expect(cols).not.toContain("daily_returns");
+    expect(cols).not.toContain("data_quality_flags");
+    // catches `metrics_json` AND `metrics_json_by_basis`, allows a `->` alias
+    expect(embed).not.toMatch(/metrics_json(?!->)/);
+  });
+
+  /**
+   * The public variant and `getPublicStrategyDetail`'s PUBLIC_ANALYTICS_COLUMNS
+   * describe the SAME thing — what an anonymous reader needs from a strategy
+   * detail row.
+   *
+   * ⚠️ WHAT THIS PINS CHANGED, and the wording is kept honest about it. It was
+   * written when the two were byte-identical LITERALS, where drift between the
+   * copies was the live hazard. `STRATEGY_DETAIL_PUBLIC_ANALYTICS_COLUMNS` is
+   * now bound to `PUBLIC_ANALYTICS_COLUMNS` (queries.ts), so that particular
+   * drift is impossible by construction and this test can no longer catch it.
+   * What it still catches is the remaining failure mode, one level up: a CALL
+   * SITE that stops routing through the shared constant — an inlined list at
+   * the variant switch, or a widened embed in either fetcher. That is now the
+   * only way these two projections can diverge, and it reds here.
+   */
+  it("public variant stays in lockstep with the anon factsheet projection", async () => {
+    const detail = await captureEmbed(() => getStrategyDetail("strat_123"));
+    const factsheet = await captureEmbed(() => getPublicStrategyDetail("strat_123"));
+    const members = (embed: string) =>
+      embed.split(",").map((c) => c.trim()).sort();
+    expect(members(detail.embed).length).toBeGreaterThan(0);
+    expect(members(detail.embed)).toEqual(members(factsheet.embed));
   });
 });
 
@@ -1149,7 +1344,7 @@ describe("getStrategyDetailV2 — METRICS-15 path-extraction perf contract", () 
 // The two cases feed a BYTE-IDENTICAL derived curve differing ONLY in the
 // persisted `is_trustworthy` flag, so the flip is attributable to that flag
 // alone. Deleting the `is_trustworthy !== true` guard in
-// extractTrustworthyDerivedCurve would make the FAIL case render 'derived' —
+// trustworthyDerivedCurve would make the FAIL case render 'derived' —
 // neuter-proof.
 // ---------------------------------------------------------------------------
 describe("derivePhase07Fields — is_trustworthy → equityCurveSource flip (FLIPRETRY-03)", () => {
@@ -1210,26 +1405,843 @@ describe("derivePhase07Fields — is_trustworthy → equityCurveSource flip (FLI
     const result = callWith(derivedRow(true));
 
     expect(result.equityCurveSource).toBe("derived");
-    // The dense curve is mapped DIRECTLY ({date, equity_usd} → {date, value}) —
-    // no snapshot forward-fill adapter.
-    expect(result.equityDailyPoints).toEqual(
-      DERIVED_CURVE.map((p) => ({ date: p.date, value: p.equity_usd })),
-    );
+    // Phase 167.1.2 / D-02: the producer withholds the display series while the
+    // history is rebuilt, so it is [] here. What it WOULD show (the payload
+    // mapped DIRECTLY, no snapshot forward-fill) is pinned on the extractor the
+    // producer calls (review round 1 SFH-04), so this case still bites.
+    // Plan 11: this fixture has no version and no returns, so it is not the
+    // display series. The source stamp above is what still proves the curve gate.
+    expect(extractTrustworthyDerivedSeries(derivedRow(true).payload)).toBeNull();
+    expect(result.equityHistoryState).toBe("rebuilding");
+    expect(result.equityDailyPoints).toEqual([]);
+    expect(result.equityDailyReturns).toEqual([]);
     expect(result.derivedCurveComputedAt).toBe(COMPUTED_AT);
   });
 
   it("FAIL: the BYTE-IDENTICAL curve with is_trustworthy=false renders 'legacy' and falls back to the snapshot render", () => {
-    const result = callWith(derivedRow(false));
+    // Review C2 round 2 R2-CR-03: version 2, so this arm really exercises the
+    // writer's untrustworthy verdict. A row with no version is pre-v2, which
+    // reads `awaiting_derivation` (see the version-1 case below).
+    const row = derivedRow(false);
+    row.payload.version = 2;
+    const result = callWith(row);
 
     expect(result.equityCurveSource).toBe("legacy");
-    // Falls back to the legacy forward-fill render over the snapshots — NOT the
-    // derived curve.
-    expect(result.equityDailyPoints).toEqual(
-      equitySnapshotsToDailyPoints(
-        SNAPSHOTS.map((s) => ({ asof: s.asof, value_usd: s.value_usd })),
-      ),
-    );
+    // Phase 167.1.2 / D-02: the producer withholds the display series while the
+    // history is rebuilt, so it is [] here. The trust gate's verdict on this
+    // byte-identical curve is pinned on the extractor (review round 1 SFH-04).
+    // Plan 11 removed the snapshot display fallback. The curve content lives in
+    // allocation-helpers.equity-adapter.test.ts; this case pins the source stamp.
+    expect(extractTrustworthyDerivedSeries(derivedRow(false).payload)).toBeNull();
+    expect(result.equityHistoryState).toBe("rebuilding");
+    // Review C2 SFH-05: a PRESENT v2 row the writer marked untrustworthy is not
+    // "awaiting" a daily recompute. The writer already ran and said no.
+    expect(result.equityHistoryRebuildReason).toBe("derivation_rejected");
+    expect(result.equityDailyPoints).toEqual([]);
     // computed_at is suppressed when the curve is not shown.
     expect(result.derivedCurveComputedAt).toBeNull();
+  });
+
+  it("a version-2 row with well-formed returns is ready and the factsheet series is those returns", () => {
+    const returns = [
+      { date: "2026-03-11", r: 0.01 },
+      { date: "2026-03-12", r: -0.004 },
+    ];
+    const row = derivedRow(true);
+    row.payload.version = 2;
+    row.payload.returns = returns;
+    const result = callWith(row);
+    const series = extractTrustworthyDerivedSeries(row.payload);
+    expect(series).toEqual({
+      curve: DERIVED_CURVE.map((p) => ({ date: p.date, value: p.equity_usd })),
+      returns: returns.map((p) => ({ date: p.date, value: p.r })),
+    });
+    expect(result.equityHistoryState).toBe("ready");
+    expect(result.equityDailyPoints).toEqual(series!.curve);
+    expect(result.equityDailyReturns).toEqual(series!.returns);
+    expect(result.equityCurveSource).toBe("derived");
+  });
+
+  it("a version-1 trustworthy curve stays rebuilding (the display series requires version 2)", () => {
+    const row = derivedRow(true);
+    row.payload.version = 1;
+    row.payload.returns = [{ date: "2026-03-11", r: 0.01 }];
+    const result = callWith(row);
+    expect(extractTrustworthyDerivedSeries(row.payload)).toBeNull();
+    expect(result.equityHistoryState).toBe("rebuilding");
+    // Review C2 round 2 R2-CR-03: the daily compose rewrites a pre-v2 row as
+    // v2, so the daily-recompute line is the true one for it.
+    expect(result.equityHistoryRebuildReason).toBe("awaiting_derivation");
+    expect(result.equityDailyPoints).toEqual([]);
+    expect(result.equityDailyReturns).toEqual([]);
+    // The curve itself is still well-formed, so the source stamp stays derived.
+    expect(result.equityCurveSource).toBe("derived");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Review C2 SFH-05 (reader half) / SFH-06 — a series that is missing for a
+// reason no daily job will fix is not "awaiting derivation".
+// ---------------------------------------------------------------------------
+describe("derived-row outcomes — the reason says why there is no series", () => {
+  const v2 = () => ({
+    version: 2,
+    is_trustworthy: true,
+    curve: [{ date: "2026-03-10", equity_usd: 100 }],
+    returns: [{ date: "2026-03-10", r: 0.01 }],
+  });
+  const callWith = (row: Parameters<typeof derivePhase07Fields>[5]) =>
+    derivePhase07Fields([], [], 0, [], false, row);
+
+  it("derivedPayloadRejection names the first thing the reader refuses, and null for an accepted row", () => {
+    expect(derivedPayloadRejection(v2())).toBeNull();
+    expect(derivedPayloadRejection({ ...v2(), version: 1 })).toBe("not_version_2");
+    expect(derivedPayloadRejection({ ...v2(), version: undefined })).toBe("not_version_2");
+    expect(derivedPayloadRejection({ ...v2(), is_trustworthy: false })).toBe("untrustworthy");
+    expect(derivedPayloadRejection({ ...v2(), returns: [] })).toBe("malformed");
+    expect(derivedPayloadRejection({ ...v2(), curve: [{ date: "x", equity_usd: 1 }] })).toBe(
+      "malformed",
+    );
+    expect(derivedPayloadRejection(null)).toBe("malformed");
+    expect(derivedPayloadRejection("not an object")).toBe("malformed");
+  });
+
+  it("no row or a pre-v2 row is awaiting_derivation; a v2 row the reader rejects is derivation_rejected; a failed read is history_read_failed", () => {
+    expect(callWith(null).equityHistoryRebuildReason).toBe("awaiting_derivation");
+    // Review C2 round 2 R2-CR-03: a pre-v2 row (every row written before C2)
+    // is rewritten as v2 by the daily compose, so it is a wait, not a refusal.
+    // An untrustworthy pre-v2 row is still pre-v2: the version is read first.
+    for (const payload of [
+      { ...v2(), version: 1 },
+      { ...v2(), version: undefined },
+      { ...v2(), version: 1, is_trustworthy: false },
+    ]) {
+      const result = callWith({ payload, computed_at: null });
+      expect(result.equityHistoryState).toBe("rebuilding");
+      expect(result.equityHistoryRebuildReason).toBe("awaiting_derivation");
+    }
+    for (const payload of [
+      { ...v2(), is_trustworthy: false },
+      { ...v2(), returns: [{ date: "2026-03-10", r: Number.NaN }] },
+    ]) {
+      const result = callWith({ payload, computed_at: null });
+      expect(result.equityHistoryState).toBe("rebuilding");
+      expect(result.equityHistoryRebuildReason).toBe("derivation_rejected");
+    }
+    const failed = callWith(DERIVED_ROW_READ_FAILED);
+    expect(failed.equityHistoryState).toBe("rebuilding");
+    expect(failed.equityHistoryRebuildReason).toBe("history_read_failed");
+    expect(failed.equityDailyPoints).toEqual([]);
+    expect(failed.equityCurveSource).toBe("legacy");
+    expect(failed.derivedCurveComputedAt).toBeNull();
+    // Positive control: the same builder with an accepted row is ready.
+    expect(callWith({ payload: v2(), computed_at: null }).equityHistoryState).toBe(
+      "ready",
+    );
+  });
+
+  // Review C2 round 3 R3-WR-03 / SFH-R3-04. Two blocking writer verdicts have
+  // an unlock the owner can act on or a cause the owner can be told, so the
+  // reader names them rather than "did not pass its checks". The tokens are
+  // read from the payload's `degrade_reasons` (where job_worker writes them),
+  // never from `flags` (where round 1's benign flag of the same name lived).
+  it("R3-WR-03: an untrustworthy v2 row names its shared-account cause from degrade_reasons", () => {
+    const untrusted = (degrade_reasons: unknown, extra: Record<string, unknown> = {}) =>
+      callWith({
+        payload: { ...v2(), is_trustworthy: false, degrade_reasons, ...extra },
+        computed_at: null,
+      }).equityHistoryRebuildReason;
+    expect(untrusted(["shared_account_no_working_key"])).toBe(
+      "shared_account_no_working_key",
+    );
+    expect(untrusted(["shared_account_history_truncated"])).toBe(
+      "shared_account_history_truncated",
+    );
+    // Both present: the one the owner can act on wins. The writer sorts the
+    // tokens, so "history_truncated" comes first; order must not decide.
+    expect(
+      untrusted(["shared_account_history_truncated", "shared_account_no_working_key"]),
+    ).toBe("shared_account_no_working_key");
+    // Alongside another blocker the named cause still wins.
+    expect(untrusted(["dropped_key", "shared_account_no_working_key"])).toBe(
+      "shared_account_no_working_key",
+    );
+    // Fallbacks: any other blocker, no tokens, a non-array, and the token in
+    // `flags` only all keep the generic line.
+    expect(untrusted(["dropped_key"])).toBe("derivation_rejected");
+    expect(untrusted([])).toBe("derivation_rejected");
+    expect(untrusted("shared_account_no_working_key")).toBe("derivation_rejected");
+    expect(untrusted([], { flags: ["shared_account_no_working_key"] })).toBe(
+      "derivation_rejected",
+    );
+    // Only the writer's untrustworthy verdict is read this way: a pre-v2 row
+    // waits, and a malformed v2 row stays derivation_rejected.
+    expect(
+      callWith({
+        payload: {
+          ...v2(),
+          version: 1,
+          is_trustworthy: false,
+          degrade_reasons: ["shared_account_no_working_key"],
+        },
+        computed_at: null,
+      }).equityHistoryRebuildReason,
+    ).toBe("awaiting_derivation");
+    expect(
+      callWith({
+        payload: {
+          ...v2(),
+          returns: [],
+          degrade_reasons: ["shared_account_no_working_key"],
+        },
+        computed_at: null,
+      }).equityHistoryRebuildReason,
+    ).toBe("derivation_rejected");
+  });
+
+  it("a key-list reason still wins over a missing series, whatever the series outcome", () => {
+    const pendingKey = {
+      id: "k-1",
+      exchange: "okx",
+      is_active: true,
+      sync_status: null,
+      last_sync_at: null,
+      disconnected_at: null,
+      venue_account_id: null,
+      account_share_kind: null,
+      account_shared_with_api_key_id: null,
+    };
+    expect(
+      derivePhase07Fields([pendingKey], [], 0, [], false, DERIVED_ROW_READ_FAILED)
+        .equityHistoryRebuildReason,
+    ).toBe("account_identity_pending");
+  });
+
+  // Review C3 IN-05. A trustworthy v2 row whose curve has one point and whose
+  // returns are empty reads as `derivation_rejected` ("did not pass its
+  // checks"), not `awaiting_derivation`. That is right because the writer
+  // cannot produce the shape (read at e9050c346, cited by symbol):
+  //   - `run_derive_broker_dailies_job` (job_worker.py), the `< 2` interpretable-day
+  //     gate: a key-mode key with under two days writes NO csv_daily_returns
+  //     rows, only its key_inputs, so every per-key series the compose reads
+  //     has at least two days (the compose then drops a returns-less anchored
+  //     key as DROPPED_KEY, untrustworthy).
+  //   - `replay_key_equity` (allocator_equity_derive.py) keeps every return
+  //     day and adds flow days, so each key's level series has two or more days.
+  //   - `portfolio_returns` (allocator_equity_compose.py) emits a return on the
+  //     union's second day from the key that opened on its first, so `returns`
+  //     is non-empty whenever the curve is.
+  //   - the B2 branch of the compose handler deletes the row on an EMPTY curve.
+  // So the shape here means the writer broke its own contract, which is the
+  // case `derivation_rejected` and its Sentry capture exist for. If a writer
+  // ever emits it for a new book, map it to `awaiting_derivation` in
+  // `derivedPayloadRejection` and the producer, and flip this arm.
+  it("IN-05: a trustworthy v2 row with a one-point curve and no returns is derivation_rejected (the writer cannot emit it)", () => {
+    const onePoint = {
+      version: 2,
+      is_trustworthy: true,
+      curve: [{ date: "2026-03-10", equity_usd: 100 }],
+      returns: [],
+    };
+    expect(derivedPayloadRejection(onePoint)).toBe("malformed");
+    const result = callWith({ payload: onePoint, computed_at: null });
+    expect(result.equityHistoryState).toBe("rebuilding");
+    expect(result.equityHistoryRebuildReason).toBe("derivation_rejected");
+    expect(result.equityDailyPoints).toEqual([]);
+    expect(result.equityDailyReturns).toEqual([]);
+    // Contrast: the same row with one return is the v2() fixture, and ready.
+    expect(callWith({ payload: v2(), computed_at: null }).equityHistoryState).toBe(
+      "ready",
+    );
+  });
+});
+
+describe("equityHistoryReadiness — plan 11 ready condition", () => {
+  const series = {
+    curve: [{ date: "2026-03-10", value: 100 }],
+    returns: [{ date: "2026-03-11", value: 0.01 }],
+  };
+  // derivePhase07Fields' key type is a superset of equityHistoryReadiness',
+  // so one builder serves both.
+  type Key = Parameters<typeof derivePhase07Fields>[0][number];
+  const key = (over: Partial<Key> = {}): Key => ({
+    id: "k-live",
+    exchange: "binance",
+    is_active: true,
+    sync_status: "ok",
+    last_sync_at: null,
+    disconnected_at: null,
+    venue_account_id: "acct-1",
+    account_share_kind: null,
+    account_shared_with_api_key_id: null,
+    ...over,
+  });
+  const holderKey = (over: Partial<Key> = {}): Key =>
+    key({
+      id: "k-holder",
+      venue_account_id: "acct-holder",
+      ...over,
+    });
+
+  it("a v2 series and one identified key is ready, reason null", () => {
+    expect(equityHistoryReadiness([key()], series)).toEqual({
+      state: "ready",
+      reason: null,
+    });
+  });
+
+  it("a duplicate of a working holder is not ready, even with a v2 series", () => {
+    const marked = key({
+      id: "k-dup",
+      account_share_kind: "duplicate",
+      account_shared_with_api_key_id: "k-holder",
+    });
+    expect(equityHistoryReadiness([holderKey(), marked], series)).toEqual({
+      state: "rebuilding",
+      reason: "duplicate_account",
+    });
+  });
+
+  // Review C2 CR-02 / SFH-04 / WR-05. The shape production writes: the stamper
+  // marks the second key and leaves ITS venue_account_id NULL, because a live
+  // holder (disconnected_at IS NULL, whatever its status) keeps the partial
+  // unique index slot. The holder carries the shared id. The fixture this
+  // replaced gave the two keys two different ids, a state that cannot occur,
+  // and passed only because of it.
+  it("a duplicate whose holder is live but not working counts on its own: its account is the holder's, so it is identity-known", () => {
+    const marked = key({
+      id: "k-dup",
+      venue_account_id: null,
+      account_share_kind: "duplicate",
+      account_shared_with_api_key_id: "k-holder",
+    });
+    for (const notWorking of [
+      holderKey({ venue_account_id: "acct-shared", is_active: false }),
+      holderKey({ venue_account_id: "acct-shared", sync_status: "revoked" }),
+      holderKey({ venue_account_id: "acct-shared", sync_status: "error" }),
+      holderKey({ venue_account_id: "acct-shared", sync_status: "sign_in_failed" }),
+    ]) {
+      expect(equityHistoryReadiness([notWorking, marked], series)).toEqual({
+        state: "ready",
+        reason: null,
+      });
+    }
+  });
+
+  it("a duplicate whose holder is disconnected counts on its own (the holder left the slot; the account is still the holder's)", () => {
+    const marked = key({
+      id: "k-dup",
+      venue_account_id: null,
+      account_share_kind: "duplicate",
+      account_shared_with_api_key_id: "k-holder",
+    });
+    const departed = holderKey({
+      venue_account_id: "acct-shared",
+      disconnected_at: "2026-03-01T00:00:00Z",
+    });
+    expect(equityHistoryReadiness([departed, marked], series)).toEqual({
+      state: "ready",
+      reason: null,
+    });
+  });
+
+  it("a marked duplicate stays identity-pending when the key list cannot name its account: holder absent, or holder with no id", () => {
+    const marked = key({
+      id: "k-dup",
+      venue_account_id: null,
+      account_share_kind: "duplicate",
+      account_shared_with_api_key_id: "k-holder",
+    });
+    // Holder not in the list: nothing here says which account the key reads.
+    expect(equityHistoryReadiness([marked], series).reason).toBe(
+      "account_identity_pending",
+    );
+    // Holder present, not working, but with no id of its own.
+    expect(
+      equityHistoryReadiness(
+        [holderKey({ venue_account_id: null, is_active: false }), marked],
+        series,
+      ).reason,
+    ).toBe("account_identity_pending");
+  });
+
+  it("a still-eligible failing holder and its healthy duplicate block nothing on identity: the writer counts the account once (fixer contract), so the reader waits only on the series", () => {
+    // `error` and `sign_in_failed` keep a holder ELIGIBLE, so it is itself a
+    // key the derive sees. The reader cannot see how the writer resolved the
+    // pair; it relies on the writer counting the account once, through the
+    // working member (CR-01 holder-drop half). With no v2 series the book
+    // stays rebuilding for the series reason, never for identity.
+    const marked = key({
+      id: "k-dup",
+      venue_account_id: null,
+      account_share_kind: "duplicate",
+      account_shared_with_api_key_id: "k-holder",
+    });
+    const failingHolder = holderKey({
+      venue_account_id: "acct-shared",
+      sync_status: "error",
+    });
+    expect(equityHistoryReadiness([failingHolder, marked], null)).toEqual({
+      state: "rebuilding",
+      reason: "awaiting_derivation",
+    });
+  });
+
+  it("an eligible ccxt key with no account id is identity-pending; a blank id is not an id", () => {
+    expect(
+      equityHistoryReadiness([key({ venue_account_id: null })], series).reason,
+    ).toBe("account_identity_pending");
+    expect(
+      equityHistoryReadiness([key({ venue_account_id: "  " })], series).reason,
+    ).toBe("account_identity_pending");
+  });
+
+  // Review C2 WR-02. The stamper runs only after a SUCCESSFUL poll, so an
+  // eligible ccxt key in `error` or `sign_in_failed` with no id is never
+  // stamped while it fails. The hold stays (its account really is unknown, and
+  // the derive still counts it), but the reason must not promise a sync that
+  // cannot happen: it names the failing key instead.
+  it("an eligible ccxt key with no id that is failing to sync is key_not_syncing, not identity-pending", () => {
+    for (const status of ["error", "sign_in_failed"]) {
+      expect(
+        equityHistoryReadiness(
+          [key({ venue_account_id: null, sync_status: status })],
+          series,
+        ),
+      ).toEqual({ state: "rebuilding", reason: "key_not_syncing" });
+    }
+    // A working key with no id is still the ordinary pending case.
+    expect(
+      equityHistoryReadiness(
+        [key({ venue_account_id: null, sync_status: null })],
+        series,
+      ).reason,
+    ).toBe("account_identity_pending");
+    // One failing and one working key, both unstamped: the failing key is the
+    // one the owner can act on, so it is named.
+    expect(
+      equityHistoryReadiness(
+        [
+          key({ id: "k-ok", venue_account_id: null }),
+          key({ id: "k-bad", venue_account_id: null, sync_status: "error" }),
+        ],
+        series,
+      ).reason,
+    ).toBe("key_not_syncing");
+    // A failing key whose account IS known does not block on identity.
+    expect(
+      equityHistoryReadiness([key({ sync_status: "error" })], series),
+    ).toEqual({ state: "ready", reason: null });
+  });
+
+  // Review C2 round 2 IN-04. The key_not_syncing line names the key when there
+  // is exactly one, so the producer hands the renderer the ids of the keys that
+  // reason is about: eligible, account unknown, failing to sync. Nothing else,
+  // and nothing at all under any other reason, so the line can never name a
+  // key the hold is not about.
+  it("IN-04: the producer lists the failing identity-pending keys, and only under key_not_syncing", () => {
+    const call = (keys: Key[]) => derivePhase07Fields(keys, [], 0, [], false, null);
+    const one = call([
+      key({ id: "k-bad", venue_account_id: null, sync_status: "error" }),
+    ]);
+    expect(one.equityHistoryRebuildReason).toBe("key_not_syncing");
+    expect(one.equityHistoryNotSyncingKeyIds).toEqual(["k-bad"]);
+    // A working unstamped key is pending but not failing, and a failing key
+    // whose account is known holds nothing: neither is listed.
+    const mixed = call([
+      key({ id: "k-ok", venue_account_id: null }),
+      key({ id: "k-known", sync_status: "error" }),
+      key({ id: "k-bad", venue_account_id: null, sync_status: "error" }),
+      key({ id: "k-bad2", venue_account_id: null, sync_status: "sign_in_failed" }),
+    ]);
+    expect(mixed.equityHistoryRebuildReason).toBe("key_not_syncing");
+    expect(mixed.equityHistoryNotSyncingKeyIds).toEqual(["k-bad", "k-bad2"]);
+    // Any other reason lists nothing.
+    expect(
+      call([key({ venue_account_id: null })]).equityHistoryNotSyncingKeyIds,
+    ).toEqual([]);
+    expect(
+      call([
+        holderKey(),
+        key({
+          id: "k-dup",
+          venue_account_id: null,
+          account_share_kind: "duplicate",
+          account_shared_with_api_key_id: "k-holder",
+        }),
+        key({ id: "k-bad", venue_account_id: null, sync_status: "error" }),
+      ]),
+    ).toMatchObject({
+      equityHistoryRebuildReason: "duplicate_account",
+      equityHistoryNotSyncingKeyIds: [],
+    });
+  });
+
+  it("a composite member, sFOX and MT5 do not block on a missing account id", () => {
+    expect(
+      equityHistoryReadiness(
+        [key({ account_share_kind: "composite_member", venue_account_id: null })],
+        series,
+      ).state,
+    ).toBe("ready");
+    expect(
+      equityHistoryReadiness(
+        [key({ exchange: "sfox", venue_account_id: null })],
+        series,
+      ).state,
+    ).toBe("ready");
+    expect(
+      equityHistoryReadiness(
+        [key({ exchange: "mt5", venue_account_id: null })],
+        series,
+      ).state,
+    ).toBe("ready");
+  });
+
+  it("duplicate wins over a missing account id", () => {
+    const marked = key({
+      id: "k-dup",
+      venue_account_id: null,
+      account_share_kind: "duplicate",
+      account_shared_with_api_key_id: "k-holder",
+    });
+    expect(equityHistoryReadiness([holderKey(), marked], series).reason).toBe(
+      "duplicate_account",
+    );
+  });
+
+  it("no series, and no identity problem, is awaiting_derivation", () => {
+    expect(equityHistoryReadiness([key()], null)).toEqual({
+      state: "rebuilding",
+      reason: "awaiting_derivation",
+    });
+  });
+
+  it("legacy snapshots and no derived row stay rebuilding with an empty curve (plan 11 removed the snapshot fallback)", () => {
+    const result = derivePhase07Fields(
+      [key()],
+      [
+        {
+          asof: "2026-03-10",
+          value_usd: 10_000,
+          breakdown: null,
+          source: "exchange_primary",
+          history_depth_months: 24,
+          pre_terminus_balance_unknown: false,
+        },
+      ],
+      1,
+      [],
+      false,
+      null,
+    );
+    expect(result.equityHistoryState).toBe("rebuilding");
+    expect(result.equityHistoryRebuildReason).toBe("awaiting_derivation");
+    expect(result.equityDailyPoints).toEqual([]);
+    expect(result.equityDailyReturns).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 151 / 151-02 Task 1 (AUM-04) — `deriveStrategyLinkedKeyIds`
+// ---------------------------------------------------------------------------
+/**
+ * This is THE manager-role discriminator for the allocator book gate. The
+ * question it answers is a ROLE question — "is this key already feeding a live
+ * strategy the owner runs as a manager?" — never a VENUE question. An
+ * `exchange === "mt5"` predicate is the named wrong-fix class (ROADMAP +
+ * CONTEXT): the founder's three deribit keys are equally manager-side (they
+ * hang off the Alpha Centauri composite), and a future manager-side bybit key
+ * would slip straight through a venue test.
+ *
+ * The fixtures below are the founder's PROD census (2026-08-05): 8 active keys
+ * → 4 live strategies → exactly 2 bare allocator keys. Three strategies carry
+ * their key directly (`strategies.api_key_id`); Alpha Centauri carries three
+ * keys through `strategy_keys` and has `api_key_id: null`. An `api_key_id`-only
+ * implementation returns 3 members instead of 6 and the census test goes RED —
+ * and, because AUM-04 SUBTRACTS this set from the allocator's eligible keys, a
+ * discriminator that over-covers would silently close the book gate on keys the
+ * allocator can legitimately reach.
+ */
+type CensusKeyFixture = {
+  id: string;
+  exchange: SupportedExchange;
+  label: string;
+  is_active: boolean;
+  sync_status: string | null;
+  disconnected_at: string | null;
+};
+
+/** An eligible key per `isPerKeyDailiesEligibleKey`. */
+function censusKey(id: string, exchange: SupportedExchange): CensusKeyFixture {
+  return {
+    id,
+    exchange,
+    label: `Key ${id}`,
+    is_active: true,
+    sync_status: "connected",
+    disconnected_at: null,
+  };
+}
+
+const CENSUS_KEYS: CensusKeyFixture[] = [
+  censusKey("k-bybit", "bybit"),
+  censusKey("k-okx", "okx"),
+  censusKey("k-deribit-1", "deribit"),
+  censusKey("k-deribit-2", "deribit"),
+  censusKey("k-deribit-3", "deribit"),
+  censusKey("k-mt5-1", "mt5"),
+  censusKey("k-mt5-2", "mt5"),
+  censusKey("k-mt5-3", "mt5"),
+];
+
+const CENSUS_STRATEGIES: Array<{
+  id: string;
+  api_key_id: string | null;
+  status: string;
+}> = [
+  { id: "mt5-a", api_key_id: "k-mt5-1", status: "private" },
+  { id: "mt5-b", api_key_id: "k-mt5-2", status: "published" },
+  { id: "mt5-c", api_key_id: "k-mt5-3", status: "draft" },
+  // Alpha Centauri — the 3-key deribit composite (no direct column).
+  { id: "alpha", api_key_id: null, status: "private" },
+];
+
+const CENSUS_LINKS: Array<{ strategy_id: string; api_key_id: string }> = [
+  { strategy_id: "alpha", api_key_id: "k-deribit-1" },
+  { strategy_id: "alpha", api_key_id: "k-deribit-2" },
+  { strategy_id: "alpha", api_key_id: "k-deribit-3" },
+];
+
+describe("deriveStrategyLinkedKeyIds — the shared manager-role discriminator (Phase 151 / AUM-04)", () => {
+  it("covers BOTH link forms: the direct api_key_id column AND a strategy_keys row", () => {
+    const covered = deriveStrategyLinkedKeyIds(
+      [
+        { id: "s1", api_key_id: "k1", status: "active" },
+        // The composite: no direct column, reachable only via strategy_keys.
+        { id: "s2", api_key_id: null, status: "private" },
+      ],
+      [{ strategy_id: "s2", api_key_id: "k2" }],
+    );
+
+    expect(covered.has("k1")).toBe(true);
+    expect(covered.has("k2")).toBe(true);
+    expect(covered.size).toBe(2);
+  });
+
+  it("archived is NOT coverage (W-4 ruling) — via either link form", () => {
+    // Direct link to an archived strategy.
+    const direct = deriveStrategyLinkedKeyIds(
+      [{ id: "s1", api_key_id: "k1", status: "archived" }],
+      [],
+    );
+    expect(direct.has("k1")).toBe(false);
+
+    // Composite link to an archived strategy.
+    const composite = deriveStrategyLinkedKeyIds(
+      [{ id: "alpha", api_key_id: null, status: "archived" }],
+      [{ strategy_id: "alpha", api_key_id: "k4" }],
+    );
+    expect(composite.has("k4")).toBe(false);
+
+    // Controls: the byte-identical fixtures at a LIVE status ARE coverage —
+    // without this pair both assertions above would also pass on an
+    // implementation that ignored every strategy row.
+    expect(
+      deriveStrategyLinkedKeyIds(
+        [{ id: "s1", api_key_id: "k1", status: "private" }],
+        [],
+      ).has("k1"),
+    ).toBe(true);
+    expect(
+      deriveStrategyLinkedKeyIds(
+        [{ id: "alpha", api_key_id: null, status: "private" }],
+        [{ strategy_id: "alpha", api_key_id: "k4" }],
+      ).has("k4"),
+    ).toBe(true);
+  });
+
+  it("drops a strategy_keys row whose strategy_id is not in the live-strategy set", () => {
+    // Defence in depth: the reads are owner-scoped, but a dangling link must
+    // never suppress a key's allocator eligibility.
+    const covered = deriveStrategyLinkedKeyIds(
+      [{ id: "s1", api_key_id: null, status: "private" }],
+      [{ strategy_id: "someone-elses", api_key_id: "k1" }],
+    );
+
+    expect(covered.has("k1")).toBe(false);
+    expect(covered.size).toBe(0);
+  });
+
+  it("founder census: 6 of 8 keys are manager-side; the bybit + okx allocator keys are NOT", () => {
+    const covered = deriveStrategyLinkedKeyIds(CENSUS_STRATEGIES, CENSUS_LINKS);
+
+    expect(covered.size).toBe(6);
+    expect([...covered].sort()).toEqual([
+      "k-deribit-1",
+      "k-deribit-2",
+      "k-deribit-3",
+      "k-mt5-1",
+      "k-mt5-2",
+      "k-mt5-3",
+    ]);
+    // The falsifier that matters for AUM-04: the allocator's own two keys must
+    // survive the subtraction, or the book gate can never open.
+    expect(covered.has("k-bybit")).toBe(false);
+    expect(covered.has("k-okx")).toBe(false);
+  });
+
+  it("no drift: deriveStrategylessKeys still returns exactly the 2 bare census keys after the extraction", () => {
+    // The extraction changed ZERO behavior for the /my-strategies consumer —
+    // both views of "strategy-linked" now come from one join and cannot drift.
+    const result = deriveStrategylessKeys(
+      CENSUS_KEYS,
+      CENSUS_STRATEGIES,
+      CENSUS_LINKS,
+    );
+
+    expect(result.map((k) => k.id)).toEqual(["k-bybit", "k-okx"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 167.1.2 plan 15 (item 8, D-16): Open Positions keeps each key's rows at
+// that key's own latest asof before the unchanged holdingScopeKey collapse.
+// ---------------------------------------------------------------------------
+/**
+ * Why this matters: the collapse keeps the newest row per venue:symbol:type
+ * across EVERY date, so a position a key closed before its latest poll
+ * survived from its last row and Open Positions showed it as still open (five
+ * symbols on 2026-09-27). The fix is per KEY, not allocator-wide: a key that
+ * did not poll on the latest day keeps its own latest rows, or a quiet key
+ * would read as flat.
+ */
+describe("derivePhase07Fields: holdingsSummary is each key's own latest asof (D-16)", () => {
+  type HoldingRow = Parameters<typeof derivePhase07Fields>[3][number];
+  const row = (
+    api_key_id: string,
+    asof: string,
+    symbol: string,
+    over: Partial<HoldingRow> = {},
+  ): HoldingRow => ({
+    symbol,
+    quantity: 1,
+    mark_price: 100,
+    value_usd: 100,
+    venue: "binance",
+    holding_type: "spot",
+    asof,
+    api_key_id,
+    side: null,
+    entry_price: null,
+    unrealized_pnl_usd: null,
+    ...over,
+  });
+  const summarize = (rows: HoldingRow[]) =>
+    derivePhase07Fields([], [], 0, rows, false, null).holdingsSummary;
+  const symbolsOf = (rows: HoldingRow[]) =>
+    summarize(rows)
+      .map((h) => `${h.api_key_id}:${h.symbol}`)
+      .sort();
+
+  it("a position the key closed before its latest poll is gone (BTC at D-1 only, ETH at D)", () => {
+    // Key A held BTC and ETH on D-1 and only ETH on D: BTC was closed. Today's
+    // collapse keeps BTC from its D-1 row because no D row replaces it.
+    const rows = [
+      row("key-a", "2026-09-26", "BTC"),
+      row("key-a", "2026-09-26", "ETH", { value_usd: 90 }),
+      row("key-a", "2026-09-27", "ETH", { value_usd: 110 }),
+    ];
+    expect(symbolsOf(rows)).toEqual(["key-a:ETH"]);
+    // The surviving ETH row is D's, not D-1's.
+    expect(summarize(rows)[0].value_usd).toBe(110);
+  });
+
+  it("a key that did not poll on the latest day keeps its own latest rows (never read as flat)", () => {
+    // Key B last polled on D-2; key A polled on D. An allocator-wide latest
+    // asof would drop B's SOL entirely.
+    const rows = [
+      row("key-a", "2026-09-27", "ETH"),
+      row("key-b", "2026-09-25", "SOL", { venue: "okx" }),
+    ];
+    expect(symbolsOf(rows)).toEqual(["key-a:ETH", "key-b:SOL"]);
+  });
+
+  it("input order is irrelevant: ascending and descending asof give the same holdingsSummary", () => {
+    const rows = [
+      row("key-a", "2026-09-25", "BTC"),
+      row("key-a", "2026-09-26", "ETH"),
+      row("key-a", "2026-09-27", "ETH"),
+      row("key-b", "2026-09-24", "SOL", { venue: "okx" }),
+    ];
+    const asc = symbolsOf(rows);
+    const desc = symbolsOf([...rows].reverse());
+    expect(asc).toEqual(["key-a:ETH", "key-b:SOL"]);
+    expect(desc).toEqual(asc);
+  });
+
+  it("the unchanged collapse still keeps the newer of two keys' rows on one venue:symbol:type", () => {
+    // Two keys on the same venue:symbol:type at their own latest asofs. The
+    // per-key filter keeps both; the D-08 collapse (holdingScopeKey, max asof)
+    // then keeps key A's newer row. The collapse is not touched by D-16.
+    const rows = [
+      row("key-a", "2026-09-27", "BTC", { value_usd: 200 }),
+      row("key-b", "2026-09-25", "BTC", { value_usd: 50 }),
+    ];
+    const summary = summarize(rows);
+    expect(summary).toHaveLength(1);
+    expect(summary[0].api_key_id).toBe("key-a");
+    expect(summary[0].value_usd).toBe(200);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Review C4 SFH-C4-04. The derive leaves a departed key the history rule
+// includes but whose starting balance is gone out of the book, and raises the
+// benign `departed_history_unavailable` flag on a curve it still marks
+// trustworthy (job_worker.py). The book reads "ready" while it is smaller than
+// the one the owner ran, so the reader carries the flag to the Overview.
+// ---------------------------------------------------------------------------
+describe("departedHistoryUnavailable: the derived payload's benign flag reaches the Overview (SFH-C4-04)", () => {
+  const readyRow = (flags: unknown) => ({
+    payload: {
+      version: 2,
+      is_trustworthy: true,
+      curve: [{ date: "2026-03-10", equity_usd: 100 }],
+      returns: [{ date: "2026-03-10", r: 0.01 }],
+      flags,
+    } as Record<string, unknown>,
+    computed_at: "2026-03-11T05:30:00Z",
+  });
+  const call = (row: Parameters<typeof derivePhase07Fields>[5]) =>
+    derivePhase07Fields([], [], 0, [], false, row);
+
+  it("is true on a ready book whose payload raises the flag", () => {
+    const result = call(
+      readyRow(["departed_history_unavailable", "shared_account_history_stitched"]),
+    );
+    expect(result.equityHistoryState).toBe("ready");
+    expect(result.departedHistoryUnavailable).toBe(true);
+  });
+
+  it.each([
+    ["no flags", []],
+    ["another flag only", ["duplicate_shared_account_counted_once"]],
+    ["a flags field that is not a list", "departed_history_unavailable"],
+    ["a missing flags field", undefined],
+  ])("is false for %s", (_label, flags) => {
+    expect(call(readyRow(flags)).departedHistoryUnavailable).toBe(false);
+  });
+
+  it("is false while the history is rebuilding (the curve is not shown)", () => {
+    const row = readyRow(["departed_history_unavailable"]);
+    row.payload.is_trustworthy = false;
+    const result = call(row);
+    expect(result.equityHistoryState).toBe("rebuilding");
+    expect(result.departedHistoryUnavailable).toBe(false);
+  });
+
+  it("is false with no derived row", () => {
+    expect(call(null).departedHistoryUnavailable).toBe(false);
   });
 });

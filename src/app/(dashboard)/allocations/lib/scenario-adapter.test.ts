@@ -15,6 +15,7 @@
  */
 import { describe, it, expect } from "vitest";
 import {
+  CONNECTED_KEY_FALLBACK_NAME,
   buildPerKeyStrategyForBuilderSet,
   buildAddedOnlySet,
   mergeAddedIntoPerKeySet,
@@ -90,7 +91,7 @@ describe("H5 brand — compile-time guards", () => {
 // ─────────────────────────────────────────────────────────────────────────
 describe("buildPerKeyStrategyForBuilderSet — per-key keying (DSRC-01)", () => {
   it("PK1 empty inputs → empty strategies + empty state", () => {
-    const result = buildPerKeyStrategyForBuilderSet({}, {});
+    const result = buildPerKeyStrategyForBuilderSet({}, {}, new Map());
     expect(result.strategies).toEqual([]);
     expect(result.state).toEqual({ selected: {}, weights: {}, startDates: {} });
   });
@@ -99,6 +100,7 @@ describe("buildPerKeyStrategyForBuilderSet — per-key keying (DSRC-01)", () => 
     const result = buildPerKeyStrategyForBuilderSet(
       { "key-A": RETURNS_60D, "key-B": RETURNS_60D },
       { "key-A": 70, "key-B": 30 },
+      new Map(),
     );
     expect(result.strategies.length).toBe(2);
     // id keying: the strategy ids ARE the api_key_ids.
@@ -125,6 +127,7 @@ describe("buildPerKeyStrategyForBuilderSet — per-key keying (DSRC-01)", () => 
     const result = buildPerKeyStrategyForBuilderSet(
       { A: RETURNS_60D, B: RETURNS_60D },
       { A: 70, B: 30 },
+      new Map(),
     );
     expect(result.state.weights.A).toBe(70);
     expect(result.state.weights.B).toBe(30);
@@ -136,6 +139,7 @@ describe("buildPerKeyStrategyForBuilderSet — per-key keying (DSRC-01)", () => 
     const result = buildPerKeyStrategyForBuilderSet(
       { "key-A": RETURNS_60D, "key-empty": [] },
       { "key-A": 70, "key-empty": 30 },
+      new Map(),
     );
     expect(result.strategies.map((s) => s.id)).toEqual(["key-A"]);
     expect(result.state.selected["key-empty"]).toBeUndefined();
@@ -147,6 +151,7 @@ describe("buildPerKeyStrategyForBuilderSet — per-key keying (DSRC-01)", () => 
     const result = buildPerKeyStrategyForBuilderSet(
       { "key-neg": RETURNS_60D },
       { "key-neg": -500 },
+      new Map(),
     );
     expect(result.state.weights["key-neg"]).toBe(0);
   });
@@ -155,6 +160,7 @@ describe("buildPerKeyStrategyForBuilderSet — per-key keying (DSRC-01)", () => 
     const result = buildPerKeyStrategyForBuilderSet(
       { "key-A": RETURNS_60D },
       {}, // no equity entry for key-A
+      new Map(),
     );
     expect(result.state.weights["key-A"]).toBe(0);
     expect(result.state.selected["key-A"]).toBe(true);
@@ -164,6 +170,7 @@ describe("buildPerKeyStrategyForBuilderSet — per-key keying (DSRC-01)", () => 
     const result = buildPerKeyStrategyForBuilderSet(
       { "key-A": RETURNS_60D },
       { "key-A": 100 },
+      new Map(),
     );
     expect(result.state.startDates["key-A"]).toBe(RETURNS_60D[0].date);
     expect(result.strategies[0].start_date).toBe(RETURNS_60D[0].date);
@@ -176,8 +183,38 @@ describe("buildPerKeyStrategyForBuilderSet — per-key keying (DSRC-01)", () => 
     const result = buildPerKeyStrategyForBuilderSet(
       { "key-A": noDateSeries },
       { "key-A": 100 },
+      new Map(),
     );
     expect(result.state.startDates["key-A"]).toBe("2022-01-01");
+  });
+
+  // Phase 167.1.2 plan 07 (SC-5). The unit's `name` is what the correlation
+  // heatmap headers and the shortest-history caveat print, so a raw api_key_id
+  // here is a raw id on screen. These two arms pin the label and the fallback.
+  it("PK9 a unit is NAMED by its key's label, never by its api_key_id (SC-5)", () => {
+    const KEY = "0f1e2d3c-4b5a-4968-8778-695a4b3c2d1e";
+    const result = buildPerKeyStrategyForBuilderSet(
+      { [KEY]: RETURNS_60D },
+      { [KEY]: 100 },
+      new Map([[KEY, "OKX — Main"]]),
+    );
+    expect(result.strategies[0].id).toBe(KEY);
+    expect(result.strategies[0].name).toBe("OKX — Main");
+    expect(result.strategies[0].name).not.toContain(KEY);
+  });
+
+  it("PK10 a key with no label falls back to 'Connected key', never its api_key_id (SC-5)", () => {
+    const KEY = "0f1e2d3c-4b5a-4968-8778-695a4b3c2d1e";
+    const result = buildPerKeyStrategyForBuilderSet(
+      { [KEY]: RETURNS_60D, "key-B": RETURNS_60D },
+      { [KEY]: 100, "key-B": 50 },
+      new Map([["key-B", "Bybit — ••••ey-B"]]),
+    );
+    const byId = new Map(result.strategies.map((s) => [s.id, s.name]));
+    expect(CONNECTED_KEY_FALLBACK_NAME).toBe("Connected key");
+    expect(byId.get(KEY)).toBe("Connected key");
+    expect(byId.get("key-B")).toBe("Bybit — ••••ey-B");
+    for (const s of result.strategies) expect(s.name).not.toMatch(/^key /);
   });
 });
 
@@ -277,6 +314,7 @@ describe("buildAddedOnlySet — the added-only engine set (ENGINE-04 preconditio
     const perKey = buildPerKeyStrategyForBuilderSet(
       { "key-A": RETURNS_60D, "key-B": RETURNS_60D },
       { "key-A": 70, "key-B": 30 },
+      new Map(),
     );
     const merged = mergeAddedIntoPerKeySet(
       perKey,
@@ -296,6 +334,7 @@ describe("buildAddedOnlySet — the added-only engine set (ENGINE-04 preconditio
     const perKey = buildPerKeyStrategyForBuilderSet(
       { "key-A": RETURNS_60D },
       { "key-A": 70 },
+      new Map(),
     );
     const addedOnly = buildAddedOnlySet(ADDED_2, ADDED_RETURNS, ADDED_META);
     const merged = mergeAddedIntoPerKeySet(
@@ -351,6 +390,7 @@ describe("asset_class population on adapter units (Phase 84, BLEND-01)", () => {
     const result = buildPerKeyStrategyForBuilderSet(
       { "key-A": RETURNS_60D, "key-B": RETURNS_60D },
       { "key-A": 70, "key-B": 30 },
+      new Map(),
     );
     for (const s of result.strategies) {
       expect(s.asset_class).toBe("crypto");
@@ -376,6 +416,7 @@ describe("asset_class population on adapter units (Phase 84, BLEND-01)", () => {
     const perKey = buildPerKeyStrategyForBuilderSet(
       { "key-A": RETURNS_60D, "key-B": RETURNS_60D },
       { "key-A": 70, "key-B": 30 },
+      new Map(),
     );
     const merged = mergeAddedIntoPerKeySet(
       perKey,

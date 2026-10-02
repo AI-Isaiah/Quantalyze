@@ -103,6 +103,9 @@ function buildStrategy(
       // the Partial spread so they can never widen to `undefined`.
       trust_tier: strategyOverrides?.trust_tier ?? null,
       is_composite: strategyOverrides?.is_composite ?? false,
+      // Phase 147 / SCEN-01 — same treatment: required, coalesced after the
+      // spread. "empty" is the honest default for a fixture with no series.
+      series_state: strategyOverrides?.series_state ?? "empty",
     },
     ...rest,
   };

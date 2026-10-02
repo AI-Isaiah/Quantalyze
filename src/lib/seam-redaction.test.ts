@@ -555,6 +555,54 @@ describe("[SEAMCORE-06 / SC6-a] seam-redaction.ts is a dependency-free leaf", ()
     ).toBe(false);
   });
 
+  it("contains no DYNAMIC import()", () => {
+    // The needle the other three missed. `/^\s*import\s/m` REQUIRES whitespace
+    // after `import`, so `import("x")` matches nothing — measured by execution
+    // at 140.5 planning against all four purity pattern sets, in every
+    // position (top level, indented, awaited). Until this case existed, any of
+    // the four leaves could acquire a dependency with green CI.
+    //
+    // ⚠️ This block is the fourth pattern set and it lives HERE, inside a
+    // general test file, not in a `*.purity.test.ts`. Anyone widening the
+    // purity needles by globbing `*.purity.test.ts` finds three of four and
+    // leaves this leaf blind — which is how it stayed blind through 140.3.
+    expect(
+      /\bimport\s*\(/.test(LEAF_CODE),
+      `${LEAF_PATH} now contains a dynamic import(). A lazy import is still a ` +
+        `dependency edge — it just moves the failure from build time to the ` +
+        `first call, and this leaf is applied from inside catch blocks, where ` +
+        `a module-load failure replaces the caller's real error with an ` +
+        `import error. ${RATIONALE}`,
+    ).toBe(false);
+  });
+
+  it("the dynamic-import needle catches the shape this repo already uses", () => {
+    // POSITIVE CONTROL, and it is not decorative: a guard asserting an ABSENCE
+    // reads as protection while doing nothing if its needle is wrong, and this
+    // needle was ADDED because the three beside it were wrong for four years of
+    // file history. `src/lib/sentry-capture.ts` uses this exact idiom in-repo
+    // (`import("@sentry/nextjs")`, documented as keeping Sentry out of
+    // bundles), so "lazy-import it so it doesn't ship" is a locally-idiomatic
+    // tidy-up that would have defeated every purity guard in this repo.
+    const smuggled = [
+      "function build() {",
+      '  const m = await import("@upstash/redis");',
+      "  return m;",
+      "}",
+    ].join("\n");
+    const clean = ["function build() {", "  return null;", "}"].join("\n");
+
+    expect(/\bimport\s*\(/.test(smuggled)).toBe(true);
+    // NEGATIVE half — the load-bearing one. A needle that fires on everything
+    // would be "fixed" by weakening it until it caught nothing.
+    expect(/\bimport\s*\(/.test(clean)).toBe(false);
+    // And the measurement that justifies the new case existing at all: the
+    // three pre-existing needles are all BLIND to the smuggled shape.
+    expect(/^\s*import\s/m.test(smuggled)).toBe(false);
+    expect(/^\s*export\s[^\n]*\bfrom\s/m.test(smuggled)).toBe(false);
+    expect(/\brequire\s*\(/.test(smuggled)).toBe(false);
+  });
+
   it("reads process.env at CALL time, never captured at module scope", () => {
     // The env read is REQUIRED here (unlike the other two leaves): the secret
     // VALUES live in the environment. What must not happen is a module-scope

@@ -1,7 +1,109 @@
 import "@testing-library/jest-dom/vitest";
 import { cleanup } from "@testing-library/react";
 import { AsyncLocalStorage } from "node:async_hooks";
-import { afterEach, vi } from "vitest";
+import { afterAll, afterEach, beforeEach, vi } from "vitest";
+import { HAS_LIVE_DB } from "@/lib/test-helpers/live-db";
+
+// [164.8.4-04 / 164.8.2-EVIDENCE-DOTENV-LEAK] — the credential-inheritance
+// fail-loud guard MUST be the first module-scope statement after the import
+// block, before every other module-scope statement below (the
+// AsyncLocalStorage global install, the approval-gate mock, the share-token
+// fixture, and the INHERITED_ENV capture). Nothing else in this bootstrap
+// should get to run on an environment that was inherited by accident.
+//
+// THE LEAK: `gstack-evidence` (a global tool wrapper, `~/.claude/skills/
+// gstack/bin/gstack-evidence`, no repo-local copy) carries `#!/usr/bin/env
+// bun`, and bun auto-loads `.env.local` into any child process it spawns —
+// including a `vitest` invocation the operator never asked to run against a
+// live database. `HAS_LIVE_DB` (`src/lib/test-helpers/live-db.ts`) is
+// `Boolean(NEXT_PUBLIC_SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY)`; once both
+// are present by accident, sixteen `it.skipIf(!HAS_LIVE_DB)` suites stop
+// skipping and perform real INSERTs against shared TEST — a database other
+// people's CI also uses.
+//
+// WHY THE FIX LIVES HERE, NOT IN THE WRAPPER: the wrapper has no repo-local
+// copy and `/gstack-upgrade` overwrites it on every run — the same
+// non-durability class this repo already records for `/gsd-update`
+// overwriting global GSD workflow files (CLAUDE.md, "GSD orchestration
+// rules"). A fix at that path is wiped by the next upgrade. Upstream has
+// since added a `childEnv()` scrubber that deletes bun-injected dotenv keys
+// and reports key names only, but it documents two fail-open holes in its
+// own comments (bun expands `${VAR}` inside dotenv values while the reader
+// compares raw file text; multi-line values are not parsed) — this repo does
+// not depend on that scrubber closing the leak completely, and does not edit
+// the global tool.
+//
+// WHY THE SKIP GATES ARE UNTOUCHED: `it.skipIf(!HAS_LIVE_DB)` is correct —
+// the defect is that `HAS_LIVE_DB` became `true` by accident, not that the
+// gate reads it wrong. `live-db.ts`'s three exports and its 49 consuming
+// call sites are read-only to this plan; the boolean is IMPORTED here, never
+// recomputed, so this file stays the one definition of "we have live-DB
+// credentials".
+//
+// WHY A SENTINEL, NOT PROVENANCE DETECTION: `process.env` carries no
+// provenance metadata, so a guard running inside the already-spawned child
+// process cannot distinguish "auto-loaded from a dotenv file" from
+// "genuinely exported by the operator" — there is no signal left to read
+// that would tell them apart. The workable shape is an explicit
+// intentional-invocation sentinel the operator sets by hand, not a detector.
+// A dotenv file could plausibly define the two commonly-present Supabase
+// variables by accident; it will not also define this one.
+//
+// WHY NO `CI` ESCAPE HATCH: measured 2026-09-19 against `.github/
+// workflows/ci.yml` — no job that invokes vitest (`frontend-test`,
+// `frontend-coverage`, `frontend-seam-redis`, `frontend-local-stack`) sets
+// both `NEXT_PUBLIC_SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` near its
+// vitest step; the jobs that DO set both (`frontend-build`, `e2e`,
+// `lighthouse-mobile` with placeholder values; `e2e-seeded`'s demo-data seed
+// step, and its own Playwright run — none of them vitest) never reach this
+// bootstrap. A `CI` escape hatch would therefore be inert today and an
+// unearned exemption tomorrow if a future job started setting the pair. To
+// regenerate: `grep -n "vitest run" .github/workflows/ci.yml` for which jobs
+// invoke vitest, then `grep -n "NEXT_PUBLIC_SUPABASE_URL\|SUPABASE_SERVICE_
+// ROLE_KEY" .github/workflows/ci.yml` for which jobs set the pair, and
+// confirm the two sets are still disjoint near their vitest invocations.
+// [164.8.4] GUARD SCOPE, MEASURED — this guard runs only in vitest configs
+// that list this file in `setupFiles`, which is NOT every config in the
+// repo. Measured 2026-09-19 by grepping `setupFiles` across all four
+// `vitest*.config.ts` / `scripts/vitest.config.ts` files: `vitest.config.ts`
+// (the main sharded suite) and `vitest.local-stack.config.ts` (the
+// VAC-07 local-stack lane) both set `setupFiles: ["src/test-setup.ts"]` and
+// so ARE covered. `vitest.redis.config.ts` (the seam-breaker real-Redis
+// lane) and `scripts/vitest.config.ts` (the `scripts/**` CLI-helper suite)
+// declare no `setupFiles` at all and are standalone root configs — neither
+// extends nor merges `vitest.config.ts` — so this guard does NOT run for
+// either. Re-grep `setupFiles` in those files before trusting this note; it
+// is a scope statement, not a gate.
+const VITEST_LIVE_DB_INTENDED_VALUE = "1";
+
+const LIVE_DB_INHERITANCE_REMEDY =
+  "vitest bootstrap: both NEXT_PUBLIC_SUPABASE_URL and " +
+  "SUPABASE_SERVICE_ROLE_KEY are set, and VITEST_LIVE_DB_INTENDED is not " +
+  `set to "${VITEST_LIVE_DB_INTENDED_VALUE}". This turns skipped live-DB ` +
+  "suites (it.skipIf(!HAS_LIVE_DB)) into real writes against a SHARED test " +
+  "database other people's CI also uses. If this run was NOT meant to " +
+  `touch a live database: unset NEXT_PUBLIC_SUPABASE_URL and ` +
+  "SUPABASE_SERVICE_ROLE_KEY — they were most likely inherited from a " +
+  ".env file a wrapper (e.g. a bun-shebang tool) auto-loaded into this " +
+  `process. If this run WAS meant to touch a live database: set ` +
+  `VITEST_LIVE_DB_INTENDED=${VITEST_LIVE_DB_INTENDED_VALUE} explicitly and ` +
+  "re-run.";
+
+/**
+ * The guard's decision, factored out as a pure function so it is drivable
+ * from a test without mutating the real process environment mid-suite. The
+ * module-scope call site below is the only side-effecting caller.
+ */
+export function assertLiveDbWasIntended(
+  hasLiveDb: boolean,
+  env: Record<string, string | undefined>,
+): void {
+  if (hasLiveDb && env.VITEST_LIVE_DB_INTENDED !== VITEST_LIVE_DB_INTENDED_VALUE) {
+    throw new Error(LIVE_DB_INHERITANCE_REMEDY);
+  }
+}
+
+assertLiveDbWasIntended(HAS_LIVE_DB, process.env);
 
 // Phase 140 — `next/dist/server/app-render/async-local-storage.js` reads
 // `globalThis.AsyncLocalStorage` EXACTLY ONCE, into a module-scope
@@ -41,11 +143,99 @@ vi.mock("@/lib/api/approval-gate", () => ({
   assertProfileApproved: vi.fn().mockResolvedValue(null),
 }));
 
+// Phase 140.5-01 / SEAMPROSE-04 — `process.env` does not travel.
+//
+// `vitest.config.ts` sets `unstubEnvs: true`, and that is NOT this. That option
+// restores only what `vi.stubEnv()` recorded. 54 test files assign
+// `process.env.X = "…"` DIRECTLY and 38 of them never restore; a direct
+// assignment mutates real process state, which nothing in vitest tracks. That
+// is DEF-16-1's other half — the reason a suite can be green on local Node 25
+// and red on CI's Node 22, depending on which file the worker ran first.
+//
+// TWO SCOPES, because there are two leaks and they are not the same leak:
+//
+//   1. TEST → TEST. A write inside a test body must not reach the next test.
+//      Restored against a baseline captured in `beforeEach`.
+//   2. FILE → FILE. A write at module scope or in `beforeAll` must not reach
+//      the next file in the worker. Restored against `INHERITED_ENV` in
+//      `afterAll`.
+//
+// ⚠️ WHY NOT ONE `afterEach` RESTORING STRAIGHT TO `INHERITED_ENV`, which is
+// the simpler shape and the one 140.5-01-PLAN.md specifies: MEASURED, it breaks
+// correct code. It reverts a file's own module-scope and `beforeAll` env after
+// that file's FIRST test, so every later test in the file runs unconfigured.
+// The full suite named 5 such files, and `src/lib/dateday.test.ts` is the
+// argument — it sets `process.env.TZ` in `beforeAll` and restores it in
+// `afterAll`, i.e. it ALREADY does, by hand and correctly, exactly what scope 2
+// does for everyone. Reverting it per-test would have forced a rewrite of
+// correct code to satisfy the harness, and would have closed no leak that the
+// two scopes above do not already close. Recorded as a deviation in
+// 140.5-01-SUMMARY.md.
+//
+// Phase 164 / D-02 — `src/lib/strategy-share-token.ts` validates
+// SHARE_TOKEN_SECRET at MODULE SCOPE and throws when it is missing or shorter
+// than 32 chars. That loudness is the point in production, but it means any
+// test file that transitively imports the token module (the recipient page, the
+// mint route, the revoke route, the owner-lane share-state read) would fail at
+// IMPORT time with an env error rather than an assertion.
+//
+// ⚠️ POSITION IS LOAD-BEARING: this must run BEFORE the `INHERITED_ENV`
+// snapshot below, so the env-restore fence treats the fixture as BASELINE. Set
+// after the snapshot, `afterAll`'s `restoreEnv(INHERITED_ENV)` would DELETE it
+// as a "key added since", and every test file after the first in a worker would
+// import the module into a throw.
+//
+// Nullish-coalescing assignment, not a bare assignment: a test that
+// deliberately drives a different secret (the cross-secret divergence pin) or a
+// real local `.env` value still wins. This is an obviously-fake fixture and
+// carries no production meaning.
+process.env.SHARE_TOKEN_SECRET ??=
+  "test-fixture-share-token-secret-not-a-real-secret-0123456789";
+
+// Captured at setup-file scope, which for each test file runs BEFORE that
+// file's own module-scope code — so this is the environment the file was
+// handed, not the environment it made.
+const INHERITED_ENV: NodeJS.ProcessEnv = { ...process.env };
+
+/** The environment as it stood when the current test started. */
+let testBaselineEnv: NodeJS.ProcessEnv = { ...process.env };
+
+/**
+ * Put `process.env` back to `target`: drop keys added since, restore keys that
+ * were changed or deleted. Deliberately mutates the live object rather than
+ * reassigning `process.env` — a reassignment is invisible to anything holding
+ * the reference from module load, which is precisely the population most likely
+ * to read a stale value.
+ */
+function restoreEnv(target: NodeJS.ProcessEnv): void {
+  for (const key of Object.keys(process.env)) {
+    if (!(key in target)) delete process.env[key];
+  }
+  for (const [key, value] of Object.entries(target)) {
+    if (process.env[key] !== value) process.env[key] = value;
+  }
+}
+
+beforeEach(() => {
+  testBaselineEnv = { ...process.env };
+});
+
 // React Testing Library only auto-cleans when the test runner registers
 // `globals: true`, which we don't (vitest.config.ts uses imported helpers).
 // Wire cleanup explicitly so each test starts with an empty DOM.
+//
+// EXTENDED, not duplicated: one `afterEach` for the whole harness. A second
+// registration would run in a hook order nobody states, and the ordering
+// between DOM cleanup and env restore would then be an accident rather than a
+// decision. (It is a decision: cleanup first, because an unmounting effect may
+// still read the env its component was rendered under.)
 afterEach(() => {
   cleanup();
+  restoreEnv(testBaselineEnv);
+});
+
+afterAll(() => {
+  restoreEnv(INHERITED_ENV);
 });
 
 // jsdom does not implement ResizeObserver. lightweight-charts (used by

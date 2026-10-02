@@ -1,61 +1,21 @@
 import type { DailyPoint } from "@/lib/portfolio-math-utils";
-import { normalizeDailyReturns } from "@/lib/portfolio-math-utils";
-import type { DailyReturn, FactsheetPayload } from "./types";
+import type { BenchmarkPricesOpt, FactsheetPayload } from "./types";
 import { buildFactsheetPayload } from "./build-payload";
+import { equityCurveToDailyReturns } from "./resolve-series";
+
+// Phase 147 / SC2 — ONE series-resolution mechanism. Both functions moved verbatim to the
+// leaf `./resolve-series` (which does NOT import ./build-payload) so the OG route and the
+// public share page can resolve a series without pulling build-payload's transitive graph;
+// re-exported here so existing importers keep their specifier at zero diff.
+export { equityCurveToDailyReturns, resolveDailyReturnSeries } from "./resolve-series";
 
 /**
- * Convert an allocator's blended equity-wealth curve into the daily-return
- * series the FactsheetPayload builder expects. `equityDailyPoints` carries
- * wealth values (cumulative product of 1 + r); successive ratios recover
- * the daily-return series.
- *
- * Returns an empty array when the input has fewer than two points (the
- * factsheet builder bails on series length below 2 anyway).
+ * Phase 169.4 plan 02 (SC2, D-69). The asset class the allocator portfolio's
+ * factsheet is built on, and so the annualization basis of the Overview's alpha
+ * vs BTC. Exported so the Allocations alpha/beta widget measures on the SAME
+ * basis and the two cannot drift. See the `assetClass` note in the build below.
  */
-export function equityCurveToDailyReturns(
-  points: DailyPoint[],
-): DailyReturn[] {
-  if (!Array.isArray(points) || points.length < 2) return [];
-  const sorted = [...points]
-    .filter(
-      (p) =>
-        p &&
-        typeof p.date === "string" &&
-        Number.isFinite(p.value) &&
-        p.value > 0,
-    )
-    .sort((a, b) => a.date.localeCompare(b.date));
-  const out: DailyReturn[] = [];
-  for (let i = 1; i < sorted.length; i++) {
-    const prev = sorted[i - 1].value;
-    const curr = sorted[i].value;
-    if (prev > 0 && Number.isFinite(curr)) {
-      out.push({ date: sorted[i].date, value: curr / prev - 1 });
-    }
-  }
-  return out;
-}
-
-/**
- * Resolve the analytics-row return series into the daily-return shape the
- * factsheet builder expects, handling the analytics-service column drift.
- *
- * The analytics-service writes the cumprod equity curve to
- * `strategy_analytics.returns_series`; the `daily_returns` column is only
- * populated by CSV ingest. Analytics-only strategies leave `daily_returns`
- * null, so reading it alone strands the factsheet on the "still computing"
- * placeholder even though the real series exists in `returns_series`. Try
- * the daily-return column first (cheaper, no derivation), fall back to
- * deriving from the wealth curve.
- */
-export function resolveDailyReturnSeries(
-  dailyReturnsRaw: unknown,
-  returnsSeriesRaw: unknown,
-): DailyReturn[] {
-  const direct = normalizeDailyReturns(dailyReturnsRaw);
-  if (direct.length > 0) return direct;
-  return equityCurveToDailyReturns(normalizeDailyReturns(returnsSeriesRaw));
-}
+export const ALLOCATOR_PORTFOLIO_ASSET_CLASS = "crypto" as const;
 
 export interface AllocatorPortfolioMetadata {
   allocatorId: string;
@@ -64,6 +24,22 @@ export interface AllocatorPortfolioMetadata {
   markets?: string[];
   startDate?: string | null;
   aum?: number | null;
+  /**
+   * Phase 167.1.2 / D-06. Persisted flow-neutral returns (`{ date, value }`).
+   * When present, these ARE the factsheet's return series. Absent (other
+   * callers) still derives ratios from the $-curve.
+   */
+  dailyReturns?: DailyPoint[];
+  /**
+   * Phase 169.4 plan 02 (SC3, D-09, D-69). The dashboard payload's database BTC
+   * closes (`MyAllocationDashboardPayload.btcBenchmarkPrices`, read through the
+   * factsheet's own `readFactsheetBenchmark`), passed on as the `benchmarkPrices`
+   * build opt so the Overview's BTC comparator is the same fed, dated series
+   * every factsheet uses. `{ unavailable: true }` renders the unavailable
+   * comparator, never the fixture. `null` / `undefined` (rebuilding, or a
+   * payload built without the field) passes no opt: today's fixture path.
+   */
+  btcBenchmarkPrices?: BenchmarkPricesOpt | null;
 }
 
 /**
@@ -82,7 +58,12 @@ export function buildAllocatorPortfolioFactsheetPayload(
   equityDailyPoints: DailyPoint[],
   meta: AllocatorPortfolioMetadata,
 ): FactsheetPayload | null {
-  const dailyReturns = equityCurveToDailyReturns(equityDailyPoints);
+  // D-06: a supplied series is used as-is, including when it is too short to
+  // build a payload. Do not fall through to $-level ratios in that case.
+  const dailyReturns =
+    meta.dailyReturns !== undefined
+      ? meta.dailyReturns
+      : equityCurveToDailyReturns(equityDailyPoints);
   if (dailyReturns.length < 2) return null;
 
   // Use a stable synthetic strategyId so the FactsheetProvider's
@@ -112,7 +93,7 @@ export function buildAllocatorPortfolioFactsheetPayload(
       // sortino) annualize on √365. CAGR stays on the calendar clock (invariant).
       // A future non-crypto venue must derive this from the book's key roster
       // (blendPeriodsPerYear over the constituent keys) instead of a literal.
-      assetClass: "crypto",
+      assetClass: ALLOCATOR_PORTFOLIO_ASSET_CLASS,
       description: null,
       subtypes: [],
       supportedExchanges: [],
@@ -124,5 +105,6 @@ export function buildAllocatorPortfolioFactsheetPayload(
       benchmark: null,
     },
     dailyReturns,
+    meta.btcBenchmarkPrices != null ? { benchmarkPrices: meta.btcBenchmarkPrices } : undefined,
   );
 }

@@ -43,8 +43,15 @@
  * The single analyze() over the whole composed <main> is preserved (no second
  * axe call) — it already scans the newly-mounted DOM; the additive work is the
  * anti-false-green anchors only.
+ *
+ * Phase 170 / C1-A3 (2026-09-28, PC-3): the Returns-distribution and
+ * Rolling-metrics cards now live inside a closed-by-default
+ * <details id="composer-blend-detail"> ("Blend distribution and rolling
+ * windows"). Closed content stays in the DOM but is not visible, so Scan 2
+ * opens that section before the data-panel toBeVisible() checks and before
+ * analyze(). Otherwise axe would miss both bodies (T-170-26).
  */
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./helpers/hydration-guard";
 import { buildAxe } from "./helpers/axe";
 import {
   cleanupStrategiesByNamePrefix,
@@ -164,6 +171,16 @@ test.describe("Phase 33 — composer axe (JOURNEY-03)", () => {
       page.locator("h2", { hasText: "Portfolio" }).first(),
     ).toBeVisible({ timeout: 10_000 });
 
+    // Phase 170 / C1-A3 (2026-09-28, PC-3) — open the closed blend-detail
+    // section before the visibility checks. A closed <details> keeps both
+    // cards in the DOM but toBeVisible() fails, and analyze() would not scan
+    // the hidden bodies. Click the summary by its title, then require open.
+    const blendDetail = page.locator("#composer-blend-detail");
+    await blendDetail
+      .locator("summary", { hasText: "Blend distribution and rolling windows" })
+      .click();
+    await expect(blendDetail).toHaveJSProperty("open", true);
+
     // BOTH Phase-30 graph cards must be mounted on the composed surface before
     // scanning — adapt the strategy-v2-axe scroll-each-card-ready idiom. We gate
     // on the card WRAPPERS (data-panel), which prove the composed surface (not a
@@ -274,6 +291,33 @@ test.describe("Phase 33 — composer axe (JOURNEY-03)", () => {
     await expect(
       page.locator('[data-testid="scenario-coverage-timeline-body"]'),
     ).toBeVisible({ timeout: 5_000 });
+
+    // --- Phase 152 / SCEN-03: scan the EXPANDED row-detail panel -------------
+    // The detail panel only exists while a row is expanded, so a scan of the
+    // collapsed surface covers none of it. Expand the fixture's row before
+    // analyze() so the single scan below reaches the panel's eyebrows, its
+    // figures and its "View factsheet →" link.
+    //
+    // The name button is targeted by its aria-controls (not by its text): the
+    // fixture is exploratory-tier, so the composer renders the masked CODENAME,
+    // and the attribute is the one stable handle. The aria-expanded assertion is
+    // the anti-false-green gate — a click that silently no-opped (the B-1
+    // double-toggle) would otherwise leave axe scanning a collapsed row and
+    // reporting a hollow pass.
+    //
+    // NOTE: a green LOCAL run of this file proves nothing — without
+    // TEST_SUPABASE_URL / TEST_SUPABASE_SERVICE_ROLE_KEY the whole describe
+    // self-skips (see the guard at the top). CI is where this executes.
+    const detailToggle = page.locator(
+      `[aria-controls="scenario-detail-${fixtureId}"]`,
+    );
+    await detailToggle.scrollIntoViewIfNeeded();
+    await expect(detailToggle).toBeVisible({ timeout: 10_000 });
+    await detailToggle.click();
+    await expect(
+      page.locator(`[data-testid="scenario-detail-${fixtureId}"]`),
+    ).toBeVisible({ timeout: 5_000 });
+    await expect(detailToggle).toHaveAttribute("aria-expanded", "true");
 
     // The composed surface EMBEDS the real factsheet body (Phase 40-43), whose own
     // internal complementary/region landmarks (the MetricsColumn <aside>, etc.) are

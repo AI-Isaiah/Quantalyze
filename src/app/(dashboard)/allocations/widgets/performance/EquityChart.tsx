@@ -15,6 +15,7 @@ import { WidgetState } from "../../components/WidgetState";
 import { isWidgetStateV2Enabled } from "@/lib/widget-state-flag";
 import { formatRelativeTime } from "@/lib/utils";
 import { captureToSentry } from "@/lib/sentry-capture";
+import { pow10 } from "@/lib/chart-ticks";
 import {
   isMonotonicByDay,
   localMidnightFromIsoString,
@@ -864,7 +865,7 @@ export function EquityChart({
       const niceMultipliers = [1, 2, 2.5, 5];
       const candidates: number[] = [];
       for (let p = -3; p <= 3; p++) {
-        const pow = Math.pow(10, p);
+        const pow = pow10(p);
         for (const m of niceMultipliers) candidates.push(m * pow);
       }
       candidates.sort((a, b) => a - b);
@@ -1124,6 +1125,12 @@ export function EquityChart({
     overlaySeries,
     width,
     hasScenario,
+    // `visible` is `sliceByPeriod(composite, period, customRange)` (:609-612), so a
+    // `period` change already re-runs this memo through `visible`. Listing it is a
+    // behavioural NO-OP and is here to satisfy exhaustive-deps honestly rather than
+    // by a disable directive — `period` IS read in the body, at the degenerate-base
+    // captureChartIssue payload (:759).
+    period,
   ]);
 
   // ── Touch tap-to-pin (CHART-01b, additive) ─────────────────────────

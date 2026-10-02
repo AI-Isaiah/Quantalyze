@@ -12,6 +12,96 @@ decision matrix in `docs/runbooks/mt5-go-live.md` Step 0 for why this beats Fly/
 > WireGuard mesh. **NEVER** attach a public domain to this service. **NEVER** expose
 > `:8001` publicly. No exceptions.
 
+## ⚠️ T-134-03 POSTURE CHANGE — the channel is now a production RECOVERY path (Phase 164.6.5, D-05)
+
+**Decision, founder-ratified 2026-09-25: D-05 = Option 2.** The terminal is supervised
+from OUTSIDE the container, over the rpyc channel the analytics-service already dials.
+Nothing inside the image supervises `terminal64.exe`: s6-overlay supervises only the
+system services (kasmvnc, nginx, cron, pulseaudio, docker, the desktop), and the vendor
+`start.sh` backgrounds the terminal once with a bare `&` and never restarts it.
+
+**Why Option 2 beat the other two.**
+- **Option 1 (wrap the image with our own s6 longrun) was rejected.** An s6 longrun
+  supervises process EXIT, and in the 1h39m outage of 2026-09-21 there was no exit. The
+  process ran and its UI answered while the IPC was dead, so a bare longrun would have
+  stayed quiet the whole time (D-06). Making it useful means building the IPC liveness
+  checker Option 2 already has, inside an image we would then own: a build and push
+  pipeline, an amd64-only build, a re-pointed deploy, and the broker's un-freezable
+  terminal self-update.
+- **Option 3 (a Railway healthcheck or restart policy) was rejected.** There is no HTTP
+  surface to probe without exposing the bridge, which the hard constraint above
+  forbids. No `railway.toml` exists for this service. And a restart policy restarts the
+  whole CONTAINER, which is not the process-only mechanism the unattended recovery was
+  measured against.
+
+**What changes, stated plainly.** The channel above is still an unauthenticated
+arbitrary-remote-code channel. It now also carries a **new class of command**: one that
+ends the terminal process. **No new network exposure is created.** The channel was
+already dialled on every validate and every heal tick, and the private-network rule
+above is unchanged and still absolute.
+
+**The narrowing that pays for it.**
+- **ONE verb:** `Mt5Client.recycle_terminal_process` in
+  `analytics-service/services/mt5_client.py`. It is NOT `Mt5Client.restart`, which
+  reconnects the rpyc socket and never touches the terminal.
+- **ONE committed constant:** `_REMOTE_TERMINAL_RECYCLE_SRC`, bound as
+  `_REMOTE_TERMINAL_RECYCLE_FN`. It is a plain string literal with no interpolation. The
+  one run-time value, the exit wait, crosses as an int argument. It ends every
+  `terminal64.exe` via Toolhelp32 + `TerminateProcess` and does nothing else.
+- **No general execution helper** and no `__getattr__` passthrough.
+- **No credential.** The verb's signature takes no parameter at all.
+- **The Wine prefix and the `/config` volume are never touched** (D-07, one-way).
+- The decision to fire belongs to the credential-free IPC detector,
+  `Mt5Client.assert_session_authorized`. The verb only acts.
+- `analytics-service/tests/test_mt5_client_contract.py` enforces all of this. Its
+  `TERMINAL_RECYCLE` tests check: the constant is an AST string literal with no brace;
+  the source can only end a process; the signature takes nothing; an abandoned session
+  is refused before anything crosses; an absent transport raises; a remote traceback is
+  scrubbed.
+
+**The live spike that proved the mechanism (founder, 2026-09-25; no agent touched the
+gateway).**
+- **Process tree.** `wineserver` and `winedevice` run alongside two bridge processes.
+  The Linux-side one is `python3 -m mt5linux --host 0.0.0.0 -p 8001 -w wine python.exe`.
+  The Wine-side one is `python.exe /tmp/mt5linux/server.py --host 0.0.0.0 -p 8001`, and
+  it is the interpreter the rpyc channel executes in. The terminal is
+  `C:\Program Files\MetaTrader 5\terminal64.exe`, with `WINEPREFIX=/config/.wine`.
+- **Image launch.** The running container's `/Metatrader/start.sh` starts the terminal
+  as `$wine_executable "$mt5file" $MT5_CMD_OPTIONS &` and starts the bridge afterwards.
+- **Run 1.** The terminal process was killed and was gone within 5 s. About 25 s later a
+  new `terminal64.exe /portable` (ppid 1) appeared with no human relaunch. It was logged
+  in, read-only, with live quotes, 86 s after the kill. No password was typed.
+- **Run 2.** The terminal was killed and was gone within 1 s. A new
+  `terminal64.exe /portable` (ppid 1) appeared about 4m45s later, again with no human
+  action. It was still up with live quotes 7h35m later.
+- **The bridge survived.** Its pids were unchanged throughout (10 days of uptime).
+- **What relaunched it.** `/portable` is the MetaTrader5 Python package's
+  `initialize()` launching a terminal that is not running. The bridge's own next
+  `initialize()` did the relaunch. So a **recycle is: terminate the process, then call
+  `initialize()`.** No Linux-side launch command is needed. The two runs' different
+  delays were simply when the next caller arrived. The verb removes that wait by issuing
+  the relaunch `initialize()` itself.
+
+**Caveats. Read these before trusting a recycle.**
+- **The terminal is shared, with per-call login.** After a relaunch it sat on whichever
+  account the last service call had logged in to. In run 2 that was a different account
+  on the same broker. Nothing may assume a fixed account after a recycle.
+- **The relaunched terminal runs with `/portable`; the original did not.** In portable
+  mode the data directory is the install directory, not the per-user one. Both came
+  back authorized. However, a setting changed while the terminal is portable lands in a
+  different directory from one changed under the image's own launch, and a container
+  restart returns to the non-portable launch. So read terminal state LIVE
+  (`terminal_info()`), never from a config file.
+- **Not yet exercised live: the terminate issued over the channel.** The spike ended the
+  terminal with a Linux-side `kill`. The verb ends it from the Wine-side bridge
+  interpreter with `TerminateProcess`. Both are an abrupt end of the same process, and
+  the relaunch half is identical. Even so, the first live run of
+  `recycle_terminal_process` is the measurement that closes this caveat. Until then,
+  treat a recycle verdict's `terminated` / `exited` counts as the only evidence the
+  terminate landed.
+- **`/gsd-secure-phase` must run before Phase 164.6.5 closes.** That is part of what
+  ratifying Option 2 ratified.
+
 ## Service source
 
 Deploy from a prebuilt Docker image (Railway → New Service → **Deploy from Docker

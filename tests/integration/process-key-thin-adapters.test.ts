@@ -113,6 +113,15 @@ vi.mock("@/lib/supabase/server", () => ({
             data: { id: TEST_STRATEGY_ID, user_id: TEST_USER.id },
             error: null,
           }),
+          // CR-01: csv-finalize probes `csv_daily_returns` for rows OUTSIDE the
+          // incoming payload's date range before persisting (the
+          // cross-submission merge fence). "Nothing already stored" is the
+          // first-submit state these adapter tests model. The fence's own
+          // behaviour is guarded in
+          // src/__tests__/csv-finalize-cross-submission-merge.test.ts.
+          or: () => ({
+            limit: async () => ({ data: [], error: null }),
+          }),
         }),
       }),
     }),
@@ -145,6 +154,14 @@ vi.mock("@/lib/supabase/admin", () => ({
         }),
       }),
       update: () => ({ eq: async () => ({ error: null }) }),
+      // 160-05 — the persist arm is the ONLY arm of keys/validate-and-encrypt
+      // now that the legacy ciphertext arm is retired, so the API-2 lock case
+      // below reaches a real INSERT.
+      insert: () => ({
+        select: () => ({
+          single: async () => ({ data: { id: "persisted-key-id" }, error: null }),
+        }),
+      }),
       upsert: async () => ({ error: null }),
     }),
     rpc: async () => ({ data: null, error: null }),
@@ -199,7 +216,10 @@ beforeEach(() => {
   rateLimitResult.success = true;
   rateLimitResult.retryAfter = 0;
   fetchCalls = [];
-  globalThis.fetch = mockFetch as unknown as typeof globalThis.fetch;
+  // stubGlobal, not `globalThis.fetch = …` — only a stub is undone by
+  // `unstubGlobals: true` (vitest.config.ts). A direct assignment leaks this
+  // mock to every later file in the worker.
+  vi.stubGlobal("fetch", mockFetch as unknown as typeof globalThis.fetch);
   process.env.ANALYTICS_SERVICE_URL = "https://analytics.test";
   process.env.INTERNAL_API_TOKEN = "test-internal-token";
 });
@@ -461,9 +481,16 @@ describe("thin adapters — flag=on delegates to /process-key (BACKBONE-10)", ()
     expect(body.status).toBe("validated");
   });
 
-  it("strategies/csv-finalize unified path forwards X-User-Id=user.id (CT-4)", async () => {
+  it("strategies/csv-finalize LEFT the seam (Phase 145 / D-06 i-b): NO /process-key dispatch", async () => {
+    // Re-pointed by Phase 145: csv-finalize is no longer a thin adapter — the
+    // route calls the folded finalize_csv_strategy_with_returns RPC directly
+    // on the SSR client (145-DECISION.md; the Python csv-finalize branch was
+    // deleted). This tripwire holds the door shut: a re-introduced dispatch
+    // here would be the second-writer regression the decision names. The CT-4
+    // X-User-Id contract this case used to pin survives on the four remaining
+    // adapters, asserted in their own cases in this file.
     const { POST } = await import("@/app/api/strategies/csv-finalize/route");
-    await POST(
+    const res = await POST(
       jsonReq("/api/strategies/csv-finalize", {
         wizard_session_id: "44444444-4444-4444-4444-444444444444",
         fmt: "daily_returns",
@@ -471,11 +498,8 @@ describe("thin adapters — flag=on delegates to /process-key (BACKBONE-10)", ()
         daily_returns_series: [{ date: "2024-01-02", daily_return: 0.01 }],
       }),
     );
-    const call = findProcessKeyCall();
-    expect(call).toBeDefined();
-    expect(
-      (call!.init.headers as Record<string, string>)["X-User-Id"],
-    ).toBe(TEST_USER.id);
+    expect(res.status).toBe(200);
+    expect(findProcessKeyCall()).toBeUndefined();
   });
 
   // CT-7 (army2) — the process-key client must abort a hung upstream
@@ -508,7 +532,7 @@ describe("thin adapters — flag=on delegates to /process-key (BACKBONE-10)", ()
         return Promise.reject(err);
       },
     );
-    globalThis.fetch = abortingFetch as unknown as typeof globalThis.fetch;
+    vi.stubGlobal("fetch", abortingFetch as unknown as typeof globalThis.fetch);
 
     try {
       const { POST } = await import("@/app/api/verify-strategy/route");
@@ -528,7 +552,7 @@ describe("thin adapters — flag=on delegates to /process-key (BACKBONE-10)", ()
       expect(typeof body.human_message).toBe("string");
     } finally {
       // Restore the default mock for subsequent tests.
-      globalThis.fetch = mockFetch as unknown as typeof globalThis.fetch;
+      vi.stubGlobal("fetch", mockFetch as unknown as typeof globalThis.fetch);
     }
   });
 
@@ -561,10 +585,11 @@ describe("thin adapters — flag=on delegates to /process-key (BACKBONE-10)", ()
     expect(Math.abs(expiresAt - ninetyDaysFromNow)).toBeLessThan(60_000);
   });
 
-  // API-2: validate-and-encrypt is locked to the legacy code path even
-  // when the unified-backbone flag is on, because the unified `/process-key`
-  // validate step does not return the encryption envelope the allocator
-  // client persists. This test documents the locked behavior — it must
+  // API-2: validate-and-encrypt is locked to the legacy validateKey +
+  // encryptKey wrappers even when the unified-backbone flag is on, because the
+  // persist arm needs the ciphertext SERVER-side to write the api_keys row, and
+  // the unified `/process-key` validate step yields no encryption envelope.
+  // This test documents the locked behavior — it must
   // FAIL if a future refactor reintroduces the unified delegation before
   // /process-key gains a real encrypt branch.
   it("keys/validate-and-encrypt flag=on STILL uses legacy path (API-2 lock)", async () => {
@@ -588,6 +613,10 @@ describe("thin adapters — flag=on delegates to /process-key (BACKBONE-10)", ()
         exchange: "binance",
         api_key: "k",
         api_secret: "s",
+        // 160-05 — without the discriminator this body is refused with
+        // STALE_CLIENT before the handler runs, and the API-2 lock this case
+        // exists to hold (legacy wrappers, never /process-key) goes unmeasured.
+        persist: true,
       }),
     );
 
@@ -704,21 +733,13 @@ describe("thin adapters — flag=on delegates to /process-key (BACKBONE-10)", ()
     expect(body!.source).toBe("csv");
   });
 
-  it("strategies/csv-finalize: flow_type=csv (re-routed from /csv/finalize)", async () => {
-    // H-1 (red-team): unified handler requires upstream to return a
-    // UUID strategy_id or it surfaces 502. Default mock omits it; override here.
-    // 140.3-02 / TS-13: it also requires `ok: true` — the semantic verdict the
-    // service states about its own work, which the real csv-finalize builder
-    // emits alongside the id. Both guards must be satisfied; neither subsumes
-    // the other.
-    mockFetch.mockImplementationOnce(async (url: string | URL, init?: RequestInit) => {
-      fetchCalls.push({ url: String(url), init: init ?? {} });
-      return new Response(
-        JSON.stringify({ ok: true, strategy_id: TEST_STRATEGY_ID, queued: true }),
-        { status: 200, headers: { "content-type": "application/json" } },
-      );
-    });
-
+  it("strategies/csv-finalize: finalizes via the fold, never via a flow_type=csv dispatch (Phase 145)", async () => {
+    // Re-pointed by Phase 145 (was: "flow_type=csv re-routed from
+    // /csv/finalize"). The finalize step's flow_type=csv dispatch is GONE —
+    // the Python branch it reached was deleted (D-06 obligation 2), and a
+    // /process-key POST from this route would silently target the 422
+    // MISSING_STRATEGY_ID refusal that replaced it. csv-VALIDATE remains the
+    // only flow_type=csv emitter (pinned by its own case above).
     const { POST } = await import("@/app/api/strategies/csv-finalize/route");
     const res = await POST(
       jsonReq("/api/strategies/csv-finalize", {
@@ -730,11 +751,10 @@ describe("thin adapters — flag=on delegates to /process-key (BACKBONE-10)", ()
     );
 
     expect(res.status).toBe(200);
-    const call = findProcessKeyCall();
-    expect(call).toBeDefined();
-    const body = parseFetchBody(call);
-    expect(body!.flow_type).toBe("csv");
-    expect(body!.source).toBe("csv");
+    const body = await res.json();
+    expect(body.ok).toBe(true);
+    expect(body.strategy_id).toBe(TEST_STRATEGY_ID);
+    expect(findProcessKeyCall()).toBeUndefined();
   });
 });
 
@@ -770,11 +790,28 @@ describe("thin adapters — INTERNAL_API_TOKEN missing returns 503 (I-T3)", () =
     expect(findProcessKeyCall()).toBeUndefined();
   });
 
-  it("I-T3c: strategies/finalize-wizard missing token → 503 OR 502 (probe), no /process-key call", async () => {
+  it("I-T3c: strategies/finalize-wizard missing token → 500 SEAM_MISCONFIGURED (probe), no /process-key call", async () => {
     delete process.env.INTERNAL_API_TOKEN;
-    // The pre-flight scope-broadening probe also needs INTERNAL_API_TOKEN —
-    // its absence triggers a 502 KEY_NETWORK_TIMEOUT BEFORE the unified
-    // delegation runs. Either way, /process-key MUST NOT be called.
+    // ⚠️ RE-CUT — 153.2-04 / WIZFORM-04 / D-14b. The I-T3 INVARIANT is
+    // untouched and is the reason this row exists: a missing internal token must
+    // never reach /process-key. What changed is the ENVELOPE this route answers
+    // with on the way to that outcome.
+    //
+    // The pre-flight scope-broadening probe needs INTERNAL_API_TOKEN too, so it
+    // refuses BEFORE the unified delegation's own 503 can run — that ordering is
+    // unchanged. But it used to refuse with `502 KEY_NETWORK_TIMEOUT`, whose
+    // copy says we could not reach the exchange and whose envelope renders a
+    // Retry. All of that was false: nothing was attempted, no exchange was
+    // involved, and the setting stays wrong until a human fixes it and
+    // redeploys, so the Retry could only ever reproduce the same message. That
+    // is the five-clicks behaviour WIZFORM-04 exists to end.
+    //
+    // ⛔ The tolerant `[502, 503]` is deliberately GONE. A set-membership
+    // assertion over the two answers this route could give was satisfied by the
+    // wrong one, which is how the lie survived here — the honest code is pinned
+    // exactly, so a regression to either reds by name. 500 because the fault is
+    // OURS: that is the status `process-key-client` already answers this class
+    // with, and 502 would blame the upstream for our own unset setting.
     const { POST } = await import("@/app/api/strategies/finalize-wizard/route");
     const res = await POST(
       jsonReq("/api/strategies/finalize-wizard", {
@@ -784,7 +821,15 @@ describe("thin adapters — INTERNAL_API_TOKEN missing returns 503 (I-T3)", () =
         category_id: "22222222-2222-2222-2222-222222222222",
       }),
     );
-    expect([502, 503]).toContain(res.status);
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(body.code).toBe("SEAM_MISCONFIGURED");
+    expect(
+      body.code,
+      "A permanent configuration fault must not be reported as a transient " +
+        "network condition — KEY_NETWORK_TIMEOUT's copy renders a Retry that " +
+        "can never succeed.",
+    ).not.toBe("KEY_NETWORK_TIMEOUT");
     expect(findProcessKeyCall()).toBeUndefined();
   });
 
@@ -807,7 +852,11 @@ describe("thin adapters — INTERNAL_API_TOKEN missing returns 503 (I-T3)", () =
     expect(findProcessKeyCall()).toBeUndefined();
   });
 
-  it("I-T3e: strategies/csv-finalize missing token → 503 envelope, no /process-key call", async () => {
+  it("I-T3e (re-pointed by Phase 145): strategies/csv-finalize no longer needs INTERNAL_API_TOKEN — the fold succeeds without it, no /process-key call", async () => {
+    // Pre-145 this pinned the 503 refusal when the seam token was unset.
+    // The route left the seam (direct fold RPC on the SSR client), so a
+    // missing INTERNAL_API_TOKEN must no longer block a CSV finalize — and
+    // no /process-key call may be issued either way.
     delete process.env.INTERNAL_API_TOKEN;
     const { POST } = await import("@/app/api/strategies/csv-finalize/route");
     const res = await POST(
@@ -818,7 +867,7 @@ describe("thin adapters — INTERNAL_API_TOKEN missing returns 503 (I-T3)", () =
         daily_returns_series: [{ date: "2024-01-02", daily_return: 0.01 }],
       }),
     );
-    expect(res.status).toBe(503);
+    expect(res.status).toBe(200);
     expect(findProcessKeyCall()).toBeUndefined();
   });
 });

@@ -45,13 +45,30 @@ function failureResponse(result: Awaited<ReturnType<typeof postProcessKey>>) {
 }
 
 /**
- * Phase 19.1 (2026-05-27) — finalize_csv_strategy is a SECURITY DEFINER RPC
- * gated on auth.uid() = p_user_id. The unified router can only satisfy that if
- * the Next.js route forwards the end user's access token, which postProcessKey
- * must place in the X-User-Access-Token header. These tests pin that the header
- * is present exactly when (and only when) userAccessToken is supplied.
+ * Phase 146.1 / B2 (2026-08-18) — INVERTED, NOT DELETED.
+ *
+ * ⭐ THE PREMISE FLIPPED. Phase 19.1 pinned that `postProcessKey` PLACES the end
+ * user's access token in `X-User-Access-Token` whenever `userAccessToken` was
+ * supplied, so the unified router could satisfy `auth.uid() = p_user_id` on
+ * user-auth SECURITY DEFINER RPCs. The v1.19 xhigh review measured the far side
+ * and found nothing ever read it: `analytics-service/services/db.py`'s
+ * `get_user_scoped_supabase` — the only reader — has had ZERO production
+ * callers since Phase 145, and `analytics-service/tests/test_process_key.py`
+ * (~:2220) actively PINS that non-use. A live end-user Supabase JWT was
+ * crossing the Vercel→Railway boundary on every keys/sync and every
+ * session-bearing teaser request and being read by no one. The
+ * `userAccessToken` option and its conditional header spread are gone.
+ *
+ * ⛔ THESE CASES ARE INVERTED RATHER THAN DELETED ON PURPOSE. An inverted
+ * assertion fires the day someone re-adds the forward; a deleted one never
+ * does, and deletion is indistinguishable from "we stopped caring".
+ *
+ * ⛔ The `Authorization` assertion in each case is UNCHANGED and is the VACUITY
+ * FENCE for the absence assertions beside it: it proves the headers object is
+ * real and populated, so a `toBeUndefined()` that passed because the whole
+ * object vanished reds here instead of shipping as a green absence.
  */
-describe("postProcessKey — X-User-Access-Token forwarding", () => {
+describe("postProcessKey — X-User-Access-Token is NOT forwarded (B2)", () => {
   const realFetch = global.fetch;
 
   beforeEach(() => {
@@ -83,7 +100,21 @@ describe("postProcessKey — X-User-Access-Token forwarding", () => {
     >;
   }
 
-  it("forwards the user JWT as X-User-Access-Token when userAccessToken is set", async () => {
+  /**
+   * Case-insensitive ABSENCE over the whole header object.
+   *
+   * ⛔ `headers["X-User-Access-Token"] === undefined` ALONE IS NOT AN ABSENCE
+   * ASSERTION on a plain object: it is satisfied by a differently-CASED key
+   * (`x-user-access-token`), which is exactly what a re-added spread would
+   * plausibly look like, and `fetch` would send it just the same.
+   */
+  function accessTokenKeys(headers: Record<string, string>): string[] {
+    return Object.keys(headers).filter(
+      (k) => k.toLowerCase() === "x-user-access-token",
+    );
+  }
+
+  it("emits no X-User-Access-Token on the csv finalize shape that used to carry it", async () => {
     const fetchMock = mockFetchOk();
 
     const result = await postProcessKey({
@@ -92,18 +123,19 @@ describe("postProcessKey — X-User-Access-Token forwarding", () => {
       context: { step: "finalize" },
       userId: "u1",
       correlationId: "c1",
-      userAccessToken: "jwt-abc",
     });
 
     expect(result.ok).toBe(true);
     expect(fetchMock).toHaveBeenCalledOnce();
     const headers = headersOf(fetchMock);
-    expect(headers["X-User-Access-Token"]).toBe("jwt-abc");
-    // The internal-token Bearer is unchanged (separate credential).
+    expect(accessTokenKeys(headers)).toEqual([]);
+    expect(headers["X-User-Access-Token"]).toBeUndefined();
+    // The internal-token Bearer is unchanged (separate credential), and it is
+    // the vacuity fence: absence only means something on a populated object.
     expect(headers["Authorization"]).toBe("Bearer internal-test-token");
   });
 
-  it("omits X-User-Access-Token when no userAccessToken (validate-only / teaser)", async () => {
+  it("emits no X-User-Access-Token on the validate-only / teaser shape either", async () => {
     const fetchMock = mockFetchOk();
 
     await postProcessKey({
@@ -115,6 +147,7 @@ describe("postProcessKey — X-User-Access-Token forwarding", () => {
     });
 
     const headers = headersOf(fetchMock);
+    expect(accessTokenKeys(headers)).toEqual([]);
     expect(headers["X-User-Access-Token"]).toBeUndefined();
     expect(headers["Authorization"]).toBe("Bearer internal-test-token");
   });
@@ -292,6 +325,217 @@ describe("postProcessKey — enqueue vs sync budget selection", () => {
       expect(coreSpy.mock.calls[0][1]).toBe("/process-key");
     },
   );
+});
+
+/**
+ * Phase 141.2 / D-03 (finding 6) — the retry VERDICT, read off the wire at the
+ * chokepoint the verdict actually reaches.
+ *
+ * ⚠️ WHY THIS PIN LIVES HERE AND NOT IN `seam-retry-registry.test.ts`. The
+ * registry file can only prove which map a key sits in. The defect class this
+ * pin fences is SEAM-CROSSING: 141.1-02 rewrote `resync`'s evidence to ADMIT the
+ * SEQUENTIAL-retry class is open (the compute worker's tick advances the draft
+ * verification out of draft status inside the backoff window, so the second
+ * attempt's `status='draft'` pre-check matches nothing and a second row is
+ * inserted) and left the retry grant that had been issued on the strength of the
+ * deleted sentence. A registry-shaped assertion agrees with the registry by
+ * construction; only driving the REAL `postProcessKey` shows what the transport
+ * is actually told. Read `retriesOverride` off `coreSpy`'s captured init, which
+ * is the exact value `resilientFetch` consumes.
+ *
+ * BOTH POLARITIES, deliberately. Without the `onboard` case a registry emptied
+ * outright would satisfy the `resync` case forever — a fence that passes because
+ * it is inspecting nothing. `onboard` keeps its verdict in this plan.
+ */
+describe("postProcessKey — the retry verdict reaching the transport (D-03)", () => {
+  beforeEach(() => {
+    process.env.INTERNAL_API_TOKEN = "internal-test-token";
+    coreSpy.mockImplementation(
+      async () =>
+        new Response(JSON.stringify({ ok: true }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+    );
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  /** Drive the REAL client and return the `retriesOverride` it handed the core. */
+  async function retriesOverrideFor(
+    flowType: "onboard" | "resync" | "teaser" | "csv",
+    context: Record<string, unknown> = {},
+  ): Promise<unknown> {
+    await postProcessKey({
+      flow_type: flowType,
+      source: "test",
+      context,
+      userId: "u1",
+      correlationId: "c1",
+    });
+    expect(coreSpy).toHaveBeenCalledTimes(1);
+    // resilientFetch(budgetKey, path, init) — the init is the third argument.
+    return (coreSpy.mock.calls[0][2] as { retriesOverride?: unknown })
+      .retriesOverride;
+  }
+
+  it("resync sends retriesOverride 0 — its verdict is NO", async () => {
+    expect(
+      // 141.2 ship review — the context below is SYNTHETIC and load-bearing for
+      // the same reason the onboard control's is. Measured: with a keyless
+      // context this pin survives re-granting `resync`, because D-01's key gate
+      // returns 0 whichever map the flow sits in — so it was pinning the gate
+      // while its message below talks about the verdict. Supplying a key leaves
+      // map membership as the only input, which is what the message claims. No
+      // production resync carries this field (`keys/sync` sends
+      // `{strategy_id, user_id}`); that is precisely why a realistic context
+      // cannot isolate the verdict here.
+      await retriesOverrideFor("resync", {
+        wizard_session_id: "ws-resync-synthetic",
+      }),
+      "a resync request left this client authorised to replay. D-03 withdrew " +
+        "that grant: `resync` carries a NO verdict in RETRY_AUDIT_NO_FLOW_TYPES " +
+        "because the strategy-scoped `status='draft'` pre-check does NOT close " +
+        "the SEQUENTIAL-retry class — the worker tick can advance the draft " +
+        "between attempts, and the second attempt then inserts a second draft " +
+        "verification row. Re-granting the retry requires a durable idempotency " +
+        "key for resync, which does not exist.",
+    ).toBe(0);
+  });
+
+  it("onboard still sends retriesOverride 1 (the pin is not vacuous)", async () => {
+    expect(
+      // 141.2 / D-01 — this control now supplies a wizard_session_id. The
+      // narrowing D-03's message anticipated ("if onboard's grant is being
+      // narrowed, this pin must move in that same commit rather than silently
+      // agreeing") HAS landed: `retriesForFlow` makes the grant conditional on a
+      // usable idempotency key, so a keyless context would make this control
+      // read 0 and stop discriminating a live registry from an emptied one.
+      await retriesOverrideFor("onboard", {
+        wizard_session_id: "33333333-3333-4333-8333-333333333333",
+      }),
+      "onboard's retry disappeared even WITH an idempotency key present. This " +
+        "plan withdrew resync's verdict ONLY; D-01 conditioned onboard's grant " +
+        "on key presence, it did not revoke it. With the registry emptied this " +
+        "pin is the only thing standing between the resync case above and a " +
+        "fence that inspects nothing.",
+    ).toBe(1);
+  });
+});
+
+/**
+ * Phase 141.2 / D-01 (finding 1), SC-K — THE KEY-PRESENCE ANTECEDENT IS
+ * ENFORCED, not merely asserted, and it is enforced HERE.
+ *
+ * ⚠️ WHY THESE PINS DRIVE THE REAL CLIENT. `onboard`'s YES verdict rests on one
+ * antecedent: *a non-NULL wizard_session_id makes `idempotent_by_session` true*.
+ * `finalize-wizard` forwards NO `wizard_session_id` when the draft's column is
+ * NULL (the column is nullable by design and the route correctly forwards
+ * absence AS absence), and the Python side then skips its duplicate pre-check and
+ * mints a fresh server-side session per attempt — so the unique index cannot
+ * collide and a retried submit inserts a SECOND verification row. That defect
+ * lives ACROSS the seam: no helper-level assertion about which map `onboard`
+ * sits in can see it, which is exactly how the grant shipped green. Only the
+ * value `resilientFetch` is actually handed can. Read it off `coreSpy`'s
+ * captured init.
+ *
+ * ⚠️ THE PREDICATE IS TRUTHINESS, NOT NULL-CHECKING. Python evaluates
+ * `bool(context.get("wizard_session_id"))` at the flow-type gate in
+ * `process_key.py`, so the empty string is FALSE there. A TypeScript guard
+ * written as `!== null` would grant a retry on `""` that the server would then
+ * refuse to dedupe — the two sides would be running different predicates while
+ * appearing to agree. The empty-string case below is what makes that divergence
+ * a RED rather than a latent disagreement.
+ *
+ * ⚠️ BOTH POLARITIES, per the oracle-shape law. A client that suppressed the
+ * retry unconditionally would satisfy the two absence cases forever; the
+ * with-key case is what forbids it.
+ *
+ * SCOPE, stated honestly: the production census for this phase found every
+ * post-F6 producer stamping the id and zero surviving NULL-carrying drafts, so
+ * this is CLASS CLOSURE — it converts an asserted antecedent into an enforced
+ * predicate at the shared chokepoint. It is not a reduction in live retry
+ * volume, and no evidence here should be read as claiming one.
+ */
+describe("postProcessKey — onboard's retry is conditional on a usable idempotency key (D-01)", () => {
+  beforeEach(() => {
+    process.env.INTERNAL_API_TOKEN = "internal-test-token";
+    coreSpy.mockImplementation(
+      async () =>
+        new Response(JSON.stringify({ ok: true }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+    );
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  /**
+   * Drive the REAL `postProcessKey` for `onboard` with the given context and
+   * return the `retriesOverride` it handed the core. Deliberately NOT a call to
+   * `retriesForFlow`: the helper agreeing with itself is not the property under
+   * test — the CHOKEPOINT consulting the helper is.
+   */
+  async function onboardRetriesWithContext(
+    context: Record<string, unknown>,
+  ): Promise<unknown> {
+    await postProcessKey({
+      flow_type: "onboard",
+      source: "test",
+      context,
+      userId: "u1",
+      correlationId: "c1",
+    });
+    expect(
+      coreSpy,
+      "the client never reached the transport, so the captured init below is " +
+        "vacuous.",
+    ).toHaveBeenCalledTimes(1);
+    // resilientFetch(budgetKey, path, init) — the init is the third argument.
+    return (coreSpy.mock.calls[0][2] as { retriesOverride?: unknown })
+      .retriesOverride;
+  }
+
+  it("an onboard context with NO wizard_session_id sends retriesOverride 0", async () => {
+    expect(
+      await onboardRetriesWithContext({}),
+      "an onboard request carrying no idempotency key left this client " +
+        "authorised to replay. The server has nothing to dedupe on in that " +
+        "state — it mints a fresh session per attempt — so attempt 2 inserts a " +
+        "SECOND strategy_verifications row on the money path. The verdict must " +
+        "be decided from flow_type AND key presence together, at the shared " +
+        "chokepoint, not from flow_type alone.",
+    ).toBe(0);
+  });
+
+  it("an EMPTY-STRING wizard_session_id sends retriesOverride 0 — truthiness, matching Python", async () => {
+    expect(
+      await onboardRetriesWithContext({ wizard_session_id: "" }),
+      "the empty string was treated as a usable idempotency key. Python gates " +
+        "on bool(context.get('wizard_session_id')), for which '' is FALSE, so " +
+        "the server would run with the dedupe OFF while this client believed " +
+        "the retry was safe. This is the signature of a `!== null` or " +
+        "`!== undefined` implementation: the two sides of the seam are running " +
+        "different predicates. Write the predicate as a truthiness test.",
+    ).toBe(0);
+  });
+
+  it("an onboard context WITH a wizard_session_id still sends retriesOverride 1", async () => {
+    expect(
+      await onboardRetriesWithContext({
+        wizard_session_id: "33333333-3333-4333-8333-333333333333",
+      }),
+      "onboard lost its retry even with the antecedent satisfied. D-01 makes " +
+        "the grant CONDITIONAL; a client that suppresses the retry " +
+        "unconditionally would satisfy both absence cases above while pinning " +
+        "nothing, which is why this polarity is asserted alongside them.",
+    ).toBe(1);
+  });
 });
 
 /**
@@ -1053,5 +1297,148 @@ describe("[140.3-15 / TS-38] a config fault returns OUR envelope, not the upstre
       code: "UPSTREAM_TIMEOUT",
       recoverable: true,
     });
+  });
+});
+
+/**
+ * Phase 140.5-03 / SEAMPROSE-02 — THE `Retry-After` RELAY, and why it is not a
+ * status branch.
+ *
+ * ⭐ HARD PREREQUISITE FOR PHASE 141. 141's retry-with-backoff consumes
+ * `Retry-After`. Before this block, the forwarded non-2xx arm of
+ * `postProcessKey` reconstructed the response from the BODY and the STATUS
+ * only, so every upstream header died at the choke point. `/process-key` is
+ * rate-limited on the Python side (two stacked `@limiter.limit` decorators on
+ * `process_key.py`'s handler; `main.py`'s `RateLimitExceeded` handler answers
+ * 429 with `headers={"Retry-After": str(retry_after)}`), so a Python-side 429
+ * reached the browser as a 429 CARRYING NO WAIT AT ALL.
+ *
+ * WHY THESE TESTS LIVE HERE AND NOT AT FIVE CALL SITES. Five callers pass
+ * through this one arm — `csv-validate`, `csv-finalize`, `finalize-wizard`,
+ * `keys/sync`, `verify-strategy` — and each does
+ * `if (!result.ok) return result.response;`. One relay reaches all five
+ * (coverage-law row 1). It reaches ZERO wizard SURFACES on its own: the client
+ * threads must also read the header, which is the other half of this plan.
+ *
+ * ⚠️ THE HEADER IS RELAYED, NEVER PARSED. `parseRetryAfterSeconds` is the ONE
+ * parser and it lives on the READ side. `main.py` also puts
+ * `retry_after_seconds` in the BODY, which makes a second extraction path
+ * available here — do not take it. Two extraction paths for one fact is the
+ * substring-cascade shape this milestone exists to remove.
+ */
+describe("[140.5-03 / SEAMPROSE-02] postProcessKey relays Retry-After on a forwarded non-2xx", () => {
+  const realFetch = global.fetch;
+
+  beforeEach(() => {
+    process.env.INTERNAL_API_TOKEN = "internal-test-token";
+    process.env.ANALYTICS_SERVICE_URL = "http://analytics.test";
+  });
+
+  afterEach(() => {
+    global.fetch = realFetch;
+    vi.restoreAllMocks();
+    // A leaked fetch stub is this repo's known CI-only (Node 22) failure cause.
+    vi.unstubAllGlobals();
+  });
+
+  function respondWith(
+    body: unknown,
+    status: number,
+    extraHeaders: Record<string, string> = {},
+  ) {
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(JSON.stringify(body), {
+          status,
+          headers: { "content-type": "application/json", ...extraHeaders },
+        }),
+    );
+    global.fetch = fetchMock as unknown as typeof fetch;
+    return fetchMock;
+  }
+
+  async function call() {
+    return postProcessKey({
+      flow_type: "resync",
+      source: "keys-sync",
+      context: { key_id: "k1" },
+      userId: "u1",
+      correlationId: "c-retry-after",
+      routeTag: "keys/sync",
+    });
+  }
+
+  it("a 429 with `Retry-After: 17` forwards the header STRING-IDENTICALLY", async () => {
+    respondWith(
+      { ok: false, code: "RATE_LIMITED", retry_after_seconds: 17 },
+      429,
+      { "Retry-After": "17" },
+    );
+    const response = failureResponse(await call());
+
+    expect(response.status).toBe(429);
+    // The literal is hand-typed, and it is a STRING: the relay must not coerce
+    // to a number and re-serialise, because that is parsing wearing a disguise.
+    expect(response.headers.get("Retry-After")).toBe("17");
+  });
+
+  it("relays an HTTP-date value BYTE-IDENTICALLY — no parsing server-side", async () => {
+    // RFC 9110 §10.2.3 permits the HTTP-date form and a CDN or WAF upstream of
+    // our route may legitimately emit it. A choke point that parsed would have
+    // to decide what to do with an unparseable value; a relay does not, and
+    // `parseRetryAfterSeconds` on the read side already resolves this form
+    // against the response's own `Date` header.
+    const httpDate = "Wed, 21 Oct 2026 07:28:00 GMT";
+    respondWith({ ok: false, code: "RATE_LIMITED" }, 429, {
+      "Retry-After": httpDate,
+    });
+    const response = failureResponse(await call());
+
+    expect(response.headers.get("Retry-After")).toBe(httpDate);
+  });
+
+  it("an upstream WITHOUT the header produces a response WITHOUT it — absence is not zero", async () => {
+    // TRAP-3. A relay that defaulted to `"0"` would hand every consumer a wait
+    // nobody advertised, and `0` fed to a backoff is the NEW-C05-01
+    // thundering-herd root cause the ONE parser exists to make unrepresentable.
+    respondWith({ ok: false, code: "GATE_NOT_ENOUGH_DATA" }, 422);
+    const response = failureResponse(await call());
+
+    expect(response.status).toBe(422);
+    expect(response.headers.get("Retry-After")).toBeNull();
+  });
+
+  it("POSITIVE CONTROL: the 403 write-capable-key verdict still forwards body and status VERBATIM", async () => {
+    // The arm being edited is the one whose 45-line docblock forbids branching
+    // on status. This case is the receipt that the relay did not become one:
+    // the PYAPI-10b 403 envelope must pass through exactly as before, header
+    // absent because the upstream sent none.
+    const verdict = {
+      ok: false,
+      code: "KEY_HAS_TRADING_PERMS",
+      human_message: "This key can trade.",
+      correlation_id: "c-retry-after",
+    };
+    respondWith(verdict, 403);
+    const response = failureResponse(await call());
+
+    expect(response.status).toBe(403);
+    await expect(response.json()).resolves.toEqual(verdict);
+    expect(response.headers.get("Retry-After")).toBeNull();
+  });
+
+  it("relays the header on a 503 too — the relay is not keyed to 429", async () => {
+    // ⭐ THE POINT OF THE WHOLE ARM, asserted rather than narrated: no code path
+    // here selects behaviour by status. A relay that only fired on 429 would be
+    // the status branch the docblock forbids, and it would drop the wait our own
+    // breaker's 503 envelope advertises (`resilient-fetch`'s BREAKER_COOLDOWN_S
+    // is stamped as a `Retry-After` on that arm).
+    respondWith({ ok: false, code: "CIRCUIT_OPEN" }, 503, {
+      "Retry-After": "30",
+    });
+    const response = failureResponse(await call());
+
+    expect(response.status).toBe(503);
+    expect(response.headers.get("Retry-After")).toBe("30");
   });
 });

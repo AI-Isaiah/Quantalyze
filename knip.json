@@ -6,8 +6,7 @@
     "scripts/build-security-packet.mjs",
     "scripts/check-gdpr-export-coverage.ts",
     "scripts/check-gdpr-export-coverage.test.ts",
-    "scripts/vitest.config.ts",
-    "src/lib/observability.ts"
+    "scripts/vitest.config.ts"
   ],
   "ignoreDependencies": [
     "postcss",

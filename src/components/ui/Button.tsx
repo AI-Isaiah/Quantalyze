@@ -30,9 +30,13 @@ export function Button({
   children,
   ...props
 }: ButtonProps) {
+  // Tailwind v4 emits `.inline-flex` after `.hidden`, so a caller class of
+  // `hidden` loses and the control stays visible (N-MATCH). Omit the base
+  // display when the caller owns it.
+  const callerOwnsDisplay = /(?:^|\s)hidden(?:\s|$)/.test(className);
   return (
     <button
-      className={cn("inline-flex items-center justify-center rounded-md font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 disabled:opacity-50 disabled:pointer-events-none", variantStyles[variant], sizeStyles[size], className)}
+      className={cn(!callerOwnsDisplay && "inline-flex", "items-center justify-center rounded-md font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 disabled:opacity-50 disabled:pointer-events-none", variantStyles[variant], sizeStyles[size], className)}
       {...props}
     >
       {children}

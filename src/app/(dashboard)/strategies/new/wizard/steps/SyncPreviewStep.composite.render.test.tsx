@@ -138,8 +138,59 @@ function defaultAnalyticsRow(
     metrics_json_by_basis: { cash_settlement: {} },
     data_quality_flags: DEFAULT_DQ,
     computed_at: "2026-07-01T00:00:00.000Z",
+    // 142.2 review FIX 3 — the TRUTHFUL post-phase fixture for a COMPLETED
+    // composite stitch. `run_stitch_composite_job` stamps a verdict on its
+    // headline write, so a row that reached this arm at all carries one; a
+    // fixture without it would model a state the successful path cannot
+    // produce. Every case in this file is a completed stitch, which is why it
+    // belongs in the shared default rather than in each test.
+    //
+    // ⚠️ Do NOT "simplify" by removing it. The composite arm now evaluates the
+    // same admissibility the admin approve path applies, so dropping this key
+    // sends all 23 completed-composite cases down the
+    // GATE_SERIES_PROVENANCE_UNVERIFIED arm and they stop testing the passed
+    // render at all — they would go green again only by weakening the
+    // assertions. The unstamped case has its own dedicated test at the bottom
+    // of this file, where the null is the SUBJECT rather than an accident.
+    series_completeness: "composite_stitched",
     ...overrides,
   };
+}
+
+/**
+ * 167.1.2 C3 fix F (SFH-C3R2-X1 sweep) — the composite series read is an id
+ * keyset drain now (`drainById`). This fake serves it the way PostgREST does:
+ * ids assigned by seed position, the `id > cursor` filter honoured, rows cut
+ * to `.limit()` AND to a 1000-row server cap (`max_rows`), whatever the
+ * client asked for.
+ */
+const SERVER_MAX_ROWS = 1000;
+function pagedSeries(
+  rows: ReadonlyArray<{ date: string; daily_return: number }>,
+) {
+  const table = rows.map((r, i) => ({ id: i + 1, ...r }));
+  let afterId: number | null = null;
+  let limitN = Number.POSITIVE_INFINITY;
+  const self = {
+    eq: () => self,
+    gt: (_column: string, value: number) => {
+      afterId = value;
+      return self;
+    },
+    order: () => self,
+    limit: (n: number) => {
+      limitN = n;
+      return self;
+    },
+    then: (resolve: (v: { data: unknown[]; error: null }) => void) =>
+      resolve({
+        data: table
+          .filter((r) => afterId === null || r.id > afterId)
+          .slice(0, Math.min(limitN, SERVER_MAX_ROWS)),
+        error: null,
+      }),
+  };
+  return self;
 }
 
 /**
@@ -249,8 +300,8 @@ function installCompositeSupabaseMock(opts: Partial<CompositeMockOpts> = {}) {
             return result(o.members, 0);
           }
 
-          if (table === "csv_daily_returns" && cols === "date, daily_return") {
-            return result(o.series, 0);
+          if (table === "csv_daily_returns" && cols === "id, date, daily_return") {
+            return pagedSeries(o.series);
           }
 
           if (table === "strategies" && cols.includes("returns_denominator_config")) {
@@ -414,20 +465,53 @@ describe("[89-03] SyncPreviewStep — composite branch", () => {
     ).not.toBeInTheDocument();
   });
 
-  // Pin 2 — FAILED BLOCKS + NAMES MEMBER. A failed status reaches the composite
-  // gate heading, names the offending member from the scrubbed
-  // computation_error, and offers no primary submit CTA.
-  it("blocks submit and names the failing member on computation_status='failed'", async () => {
+  // Pin 2 — FAILED BLOCKS SUBMIT AND ROUTES TO THE COMPOSITE GATE.
+  //
+  // ⚠️ REWRITTEN 2026-08-26 (Phase 162 / HONEST-01, UI-SPEC C-2). This pin used
+  // to be "FAILED BLOCKS + NAMES MEMBER", asserting that the envelope named the
+  // offending member "from the scrubbed computation_error" — which it did, via
+  // the `Details: {computation_error}.` appendix that phase removes.
+  //
+  // ⛔ THE AFFORDANCE IT PINNED WAS LARGELY FICTIONAL, and that is the reason
+  // this rewrite is a correction rather than a loss being waved through. The
+  // fixture supplied `"Key 2 (deribit) failed to reconstruct: geo-blocked"` — a
+  // friendly, member-naming sentence that NO WRITER PRODUCES. Measured at HEAD,
+  // what the composite path actually puts on that column is the operator string
+  // from `DispatchResult.error_message`, e.g.
+  // `run_stitch_composite_job: ccxt member crawl geo-blocked — <scrubbed ccxt
+  // exception>` (analytics-service/services/job_worker.py, the per-member arms).
+  // So the slot this pin protected rendered a function name and an exception
+  // tail to the user, not a member label. An unrepresentative fixture made a
+  // defect read as a feature.
+  //
+  // ⚠️ Naming the failing MEMBER is still worth doing — it is the one thing a
+  // composite failure should say — but it has to come through a structured
+  // channel (a member id the envelope can format), not by piping a free-text
+  // operator column into user copy. Recorded in deferred-items.md.
+  it("blocks submit and routes to the composite gate on computation_status='failed'", async () => {
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     installCompositeSupabaseMock({
       pollOutcome: () => ({
         kind: "row",
         status: "failed",
-        error: "Key 2 (deribit) failed to reconstruct: geo-blocked",
+        // The REAL shape of this column's value on the composite failure path,
+        // post-migration-20260826120000: curated copy derived from the job's
+        // error_kind. Not a member label, and not an exception either.
+        error:
+          "Analytics could not complete for this strategy, and retrying alone " +
+          "will not resolve it. Contact support if you need this strategy computed.",
       }),
     });
 
-    render(<SyncPreviewStep {...baseProps} />);
+    // ⚠️ 140.4-11 — THE FIXTURE WAS UNREPRESENTATIVE AND THE ASSERTION WAS
+    // WEAKER THAN IT READ. `baseProps` omits `onReviewKeys`, which WizardClient
+    // ALWAYS supplies at this call site. Without it the button labelled "Review
+    // your keys" actually fired `onTryAnotherKey` → `handleDeleteDraft()`, so
+    // this case was pinning a DESTRUCTIVE click wearing a non-destructive
+    // label. Supplying the prop makes the fixture match production; the click
+    // assertion below makes the case say what its name claims.
+    const onReviewKeys = vi.fn();
+    render(<SyncPreviewStep {...baseProps} onReviewKeys={onReviewKeys} />);
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(0);
@@ -439,11 +523,26 @@ describe("[89-03] SyncPreviewStep — composite branch", () => {
     expect(
       screen.getByRole("heading", { name: /we could not verify this composite/i }),
     ).toBeInTheDocument();
-    expect(screen.getByText(/Key 2 \(deribit\)/)).toBeInTheDocument();
+    // The envelope is the scripted composite-gate one, and the column value it
+    // was handed does NOT appear in it — the C-2 rule, asserted on the branch
+    // where the appendix was most load-bearing.
+    const envelope = screen.getByTestId("error-envelope");
+    expect(envelope.getAttribute("data-error-code")).toBe("GATE_ANALYTICS_FAILED");
+    expect(envelope.textContent ?? "").not.toContain("Contact support if you need");
+    expect(envelope.textContent ?? "").not.toContain("Details:");
+    // …and it still gives the user its own account of the state.
+    expect(envelope.textContent ?? "").toContain("Analytics computation failed.");
     expect(screen.queryByTestId("wizard-use-this-key")).not.toBeInTheDocument();
 
     const reviewBtn = screen.getByTestId("wizard-try-another-key");
     expect(reviewBtn).toHaveAccessibleName(/review your keys/i);
+    fireEvent.click(reviewBtn);
+    expect(onReviewKeys).toHaveBeenCalledTimes(1);
+    expect(
+      baseProps.onTryAnotherKey,
+      "WIZ-03: 'Review your keys' is a pure step transition. If it reaches " +
+        "onTryAnotherKey it cascades away every strategy_keys member.",
+    ).not.toHaveBeenCalled();
     errSpy.mockRestore();
   });
 
@@ -480,6 +579,53 @@ describe("[89-03] SyncPreviewStep — composite branch", () => {
     expect(snap.composite.gapDayCount).toBe(2);
     expect(snap.composite.series.length).toBe(DEFAULT_SERIES.length);
     expect(snap.tradeCount).toBe(0);
+  });
+
+  // 167.1.2 C3 fix F (SFH-C3R2-X1 sweep). WHY: PostgREST cuts every response
+  // to max_rows (1000) whatever `.limit()` asked for, with HTTP 200. The
+  // composite series used to be ONE `.limit(20000)` request, so a stitched
+  // composite past 1000 days reached the preview with 1000 of them: a wrong
+  // csvRowCount and an attribution series missing its newest days. 2500 days,
+  // stored newest-first so id order and date order disagree, under the cap.
+  it("reads a stitched series past the 1000-row server cap in full, date-ascending", async () => {
+    const DAYS = 2500;
+    const day = (i: number) =>
+      new Date(Date.UTC(2019, 0, 1) + i * 86_400_000).toISOString().slice(0, 10);
+    const longSeries = Array.from({ length: DAYS }, (_, i) => ({
+      date: day(DAYS - 1 - i),
+      daily_return: 0.0005 * ((i % 5) - 2),
+    }));
+    installCompositeSupabaseMock({
+      series: longSeries,
+      pollOutcome: () => ({ kind: "row", status: "complete_with_warnings" }),
+    });
+
+    render(<SyncPreviewStep {...baseProps} />);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(6000);
+    });
+
+    const primary = screen.getByRole("button", {
+      name: /use this composite and continue/i,
+    });
+    await act(async () => {
+      fireEvent.click(primary);
+    });
+
+    const snap = baseProps.onComplete.mock.calls[0][0];
+    expect(snap.csvRowCount).toBe(DAYS);
+    expect(snap.composite.series).toHaveLength(DAYS);
+    expect(snap.composite.series[0].date).toBe(day(0));
+    expect(snap.composite.series[DAYS - 1].date).toBe(day(DAYS - 1));
+    // The drain's cursor column does not leak into the snapshot.
+    expect(Object.keys(snap.composite.series[0]).sort()).toEqual([
+      "daily_return",
+      "date",
+    ]);
   });
 
   // Pin 4 — NO TRADES ROUTING (Pitfall 1/4). Across the full passed lifecycle
@@ -662,15 +808,35 @@ const GANTT_MEMBERS: MemberRow[] = [
 
 // Attribution fixture: two disjoint members whose signed contributions differ
 // by basis. Arithmetic Σr: +20.0% / −20.0%. Geometric Π(1+r)−1: +21.0% / −19.0%.
+// ⚠️ SEVEN DAYS, NOT FOUR, SINCE 161-07 / WIZERR-09 — and the three added days
+// carry a return of EXACTLY ZERO on purpose. The composite arm now applies the
+// same 7-day floor the admin approve path applies, so a 4-day composite can no
+// longer reach the passed render at all: at four days these fixtures modelled a
+// state the product cannot produce, and every assertion below them would have
+// been testing a refusal card.
+//
+// Zero is the return that is neutral in BOTH bases — `+0` under the arithmetic
+// Σ and `×1` under the geometric Π — so the member contributions this file
+// pins (+20.0% / −20.0% and +21.0% / −19.0%) are byte-identical at 7 days and
+// at 4. The lengthening changes reachability and nothing arithmetic.
+//
+// ⛔ Do NOT "simplify" back to four. The whole describe would go green on a
+// refusal envelope while asserting nothing about the attribution table.
 const ATTR_SERIES = [
   { date: "2025-01-01", daily_return: 0.1 },
   { date: "2025-01-02", daily_return: 0.1 },
   { date: "2025-01-03", daily_return: -0.1 },
   { date: "2025-01-04", daily_return: -0.1 },
+  { date: "2025-01-05", daily_return: 0 },
+  { date: "2025-01-06", daily_return: 0 },
+  { date: "2025-01-07", daily_return: 0 },
 ];
+// Full-coverage per_key: Σ days == series.length (2 + 5 == 7), which is the
+// COUNT half of the reconciliation gate. Member 2 owns the three zero-return
+// days appended above, so its contribution is unchanged in both bases.
 const ATTR_PERKEY = [
   { seq: 1, first_day: "2025-01-01", last_day: "2025-01-02", n_days: 2 },
-  { seq: 2, first_day: "2025-01-03", last_day: "2025-01-04", n_days: 2 },
+  { seq: 2, first_day: "2025-01-03", last_day: "2025-01-07", n_days: 5 },
 ];
 const ATTR_MEMBERS: MemberRow[] = [
   {
@@ -683,7 +849,9 @@ const ATTR_MEMBERS: MemberRow[] = [
   {
     api_key_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
     window_start: "2025-01-03",
-    window_end: "2025-01-04",
+    // Half-open, and extended with ATTR_SERIES: member 2 owns 01-03 through
+    // 01-07 inclusive.
+    window_end: "2025-01-08",
     seq: 2,
     api_keys: { exchange: "deribit", label: "Key B" },
   },
@@ -1097,7 +1265,7 @@ describe("[89-04] SyncPreviewStep — composite passed render", () => {
       series: ATTR_SERIES,
       analyticsRow: defaultAnalyticsRow({
         data_quality_flags: {
-          // seq 1 covers only 01-01, seq 2 only 01-04 → Σ days 2 < series 4.
+          // seq 1 covers only 01-01, seq 2 only 01-04 → Σ days 2 < series 7.
           per_key: [
             { seq: 1, first_day: "2025-01-01", last_day: "2025-01-01", n_days: 1 },
             { seq: 2, first_day: "2025-01-04", last_day: "2025-01-04", n_days: 1 },
@@ -1125,7 +1293,7 @@ describe("[89-04] SyncPreviewStep — composite passed render", () => {
       members: ATTR_MEMBERS,
       series: ATTR_SERIES,
       analyticsRow: defaultAnalyticsRow({
-        // Full coverage (Σ days 4 == series 4) but a cumulative_return that
+        // Full coverage (Σ days 7 == series 7) but a cumulative_return that
         // matches NEITHER the arithmetic Σ (0) NOR the geometric Π−1 (−0.0199).
         cumulative_return: 0.5,
         data_quality_flags: { per_key: ATTR_PERKEY, gap_spans: [], gap_day_count: 0 },
@@ -1209,9 +1377,21 @@ const DECLARED_FALLBACK_MEMBERS: MemberRow[] = [
     api_keys: { exchange: "deribit", label: "Key A" },
   },
 ];
+// ⚠️ SEVEN DAYS, NOT TWO, SINCE 161-07 / WIZERR-09 — same reason as
+// ATTR_SERIES above: the composite arm applies the 7-day floor now, so a
+// 2-day series renders a refusal card and this describe's declared-window
+// assertions would never be reached. What these tests are ABOUT is the
+// data-window column's tier selection, which reads `per_key` and the declared
+// `strategy_keys` window — never the series values — so the added days change
+// the fixture's reachability and nothing it measures.
 const DECLARED_FALLBACK_SERIES = [
   { date: "2025-08-05", daily_return: 0.01 },
   { date: "2025-08-06", daily_return: -0.02 },
+  { date: "2025-08-07", daily_return: 0.005 },
+  { date: "2025-08-08", daily_return: -0.004 },
+  { date: "2025-08-09", daily_return: 0.002 },
+  { date: "2025-08-10", daily_return: -0.001 },
+  { date: "2025-08-11", daily_return: 0.003 },
 ];
 
 describe("[93-02] SyncPreviewStep — declared-window fallback (HARD-02)", () => {
@@ -1293,14 +1473,23 @@ describe("[93-02] SyncPreviewStep — declared-window fallback (HARD-02)", () =>
           api_keys: { exchange: "deribit", label: "Key A" },
         },
       ],
+      // Seven days (161-07 / WIZERR-09 floor). The endpoints are what matter —
+      // the per_key row below still reports the reconstructed coverage this
+      // test is about, and the Tier-1 window text is read from THAT, not from
+      // the series.
       series: [
         { date: "2025-08-03", daily_return: 0.01 },
+        { date: "2025-08-04", daily_return: 0.002 },
+        { date: "2025-08-05", daily_return: -0.003 },
+        { date: "2025-08-06", daily_return: 0.001 },
+        { date: "2025-09-22", daily_return: -0.002 },
+        { date: "2025-09-23", daily_return: 0.004 },
         { date: "2025-09-24", daily_return: -0.02 },
       ],
       analyticsRow: defaultAnalyticsRow({
         data_quality_flags: {
           per_key: [
-            { seq: 1, first_day: "2025-08-03", last_day: "2025-09-24", n_days: 2 },
+            { seq: 1, first_day: "2025-08-03", last_day: "2025-09-24", n_days: 7 },
           ],
           gap_spans: [],
           gap_day_count: 0,
@@ -1336,5 +1525,304 @@ describe("[93-02] SyncPreviewStep — declared-window fallback (HARD-02)", () =>
     });
 
     expect(screen.getByText("2025-08-03 – 2025-09-30")).toBeInTheDocument();
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════════
+// 142.2 CODE REVIEW — FIX 3: THE COMPOSITE ARM SHOWED A PREVIEW THE ADMIN
+// PATH WOULD REFUSE.
+//
+// The composite arm reached `setPhase("passed")` without evaluating ANY
+// admissibility. That was harmless while the admin approve path admitted
+// composites on the `!input.apiKeyId` term this phase DELETED: keylessness
+// alone let them through on both sides, so preview and publish agreed by
+// accident. Admission now requires a POSITIVE `series_completeness` verdict,
+// which this arm never read — so a composite on an unstamped row (a legacy
+// composite, or a stitch that took the failure arm, which deliberately OMITS
+// the column so a prior verdict survives) saw "passed", submitted, and was
+// then refused at publish.
+//
+// A preview that promises what publish will refuse is worse than either side
+// refusing: the user completes the whole wizard before finding out.
+//
+// ⚠️ THE PAIR IS THE TEST. Either case alone is satisfiable by a wrong
+// implementation — "always refuse" passes the first, "never check" (i.e. the
+// pre-fix code) passes the second. Only both together pin the predicate.
+// ══════════════════════════════════════════════════════════════════════════
+
+describe("[142.2 FIX 3] SyncPreviewStep — composite preview agrees with the publish gate", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    baseProps.onComplete = vi.fn();
+    baseProps.onTryAnotherKey = vi.fn();
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({ ok: true, accepted: true, status: "syncing", composite: true }),
+        { status: 200 },
+      ),
+    );
+  });
+
+  afterEach(() => {
+    vi.clearAllTimers();
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    currentClientFactory = () => ({
+      from: () => ({
+        select: () => ({
+          eq: () => ({
+            maybeSingle: () => Promise.resolve({ data: null, error: null }),
+          }),
+        }),
+      }),
+    });
+  });
+
+  async function renderComposite(opts: Partial<CompositeMockOpts>) {
+    installCompositeSupabaseMock({
+      pollOutcome: () => ({ kind: "row", status: "complete_with_warnings" }),
+      ...opts,
+    });
+    render(<SyncPreviewStep {...baseProps} />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(6000);
+    });
+  }
+
+  it("REFUSES a composite whose stitch never stamped a verdict, instead of previewing it as passed", async () => {
+    // NULL is the state of a legacy composite and of any stitch that took the
+    // failure arm. The admin approve path refuses it; before FIX 3 this arm
+    // showed a full factsheet preview and a "Use this key" button.
+    //
+    // Fails without the fix: the pre-fix arm reaches setPhase("passed") and
+    // renders the preview, so `error-envelope` is absent.
+    await renderComposite({
+      analyticsRow: defaultAnalyticsRow({ series_completeness: null }),
+    });
+
+    const envelope = screen.getByTestId("error-envelope");
+    expect(envelope.getAttribute("data-error-code")).toBe(
+      "GATE_SERIES_PROVENANCE_UNVERIFIED",
+    );
+
+    // The ORIGINAL INTENT of this arm is preserved: a composite must never be
+    // false-failed for having zero fills. It was refused for its missing
+    // verdict, NOT for its trade count.
+    expect(screen.queryByText(/minimum of 5 trades/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/only 0 trade/i)).not.toBeInTheDocument();
+
+    // …and the remedy offered is non-destructive. `onTryAnotherKey` fires
+    // handleDeleteDraft(), which would destroy the draft and every
+    // strategy_keys member under a composite — the worst possible answer to
+    // "we could not read your stitch's verdict".
+    expect(
+      screen.queryByTestId("wizard-try-another-key"),
+    ).not.toBeInTheDocument();
+    expect(baseProps.onTryAnotherKey).not.toHaveBeenCalled();
+    expect(screen.getByTestId("wizard-back-to-strategies")).toBeInTheDocument();
+  });
+
+  it("still PASSES a properly stitched composite — the fix must not refuse the healthy case", async () => {
+    // The anti-over-refusal half. `composite_stitched` is what
+    // run_stitch_composite_job stamps on a successful headline write, and it is
+    // in the gate's allow-list, so preview and publish both admit it.
+    //
+    // Without this, "refuse every composite" would satisfy the test above and
+    // make composites permanently un-previewable.
+    await renderComposite({
+      analyticsRow: defaultAnalyticsRow({
+        series_completeness: "composite_stitched",
+      }),
+    });
+
+    expect(screen.queryByTestId("error-envelope")).not.toBeInTheDocument();
+  });
+
+  it("REFUSES a composite carrying a verdict the gate does not trust", async () => {
+    // FIX 2 downgrades a composite to `sampled_gapped` when any member carried a
+    // MEASURED coverage hole. That verdict is not in the allow-list, so the
+    // admin path refuses it — and this arm must agree rather than previewing a
+    // known-holed track record as passed. Pins that the arm evaluates the
+    // ALLOW-LIST and not merely "is the column non-null".
+    await renderComposite({
+      analyticsRow: defaultAnalyticsRow({
+        series_completeness: "sampled_gapped",
+      }),
+    });
+
+    const envelope = screen.getByTestId("error-envelope");
+    expect(envelope.getAttribute("data-error-code")).toBe(
+      "GATE_SERIES_PROVENANCE_UNVERIFIED",
+    );
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════════
+// 161-07 / WIZERR-09 — THE 7-DAY FLOOR, ON THE COMPOSITE ARM, WITH COPY.
+//
+// The arm carried a comment saying the admin approve path "also applies a
+// 7-row CSV floor that this arm still does not", booked as pre-existing rather
+// than fixed. So a composite whose stitch produced 1..6 days previewed as
+// PASSED here and was refused at publish — the same preview-promises-what-
+// publish-refuses defect FIX 3 closed for the verdict, left open for the count.
+//
+// ⚠️ THE FLOOR AND ITS COPY ARE ONE COMMIT. `gateFailureToWizardError` answered
+// `INSUFFICIENT_CSV_HISTORY` with `UNKNOWN` under a comment asserting the code
+// could never reach the wizard. Landing the floor first would have shipped a
+// real gate refusal explained by the generic unknown-error sentence — strictly
+// worse than the un-floored arm, because the user would be stopped AND told
+// nothing. Both halves are in the commit that introduced this describe.
+//
+// ⚠️ THE THREE CASES ARE ONE TEST. "Always refuse" satisfies the 6-day case;
+// "never check" (the pre-fix arm) satisfies the 7-day case; and the third case
+// is what pins the EVALUATION ORDER — an inadmissible verdict must still be
+// answered by the verdict arm, not stolen by the new count arm, because the
+// admin path evaluates the floor INSIDE the admitted branch and the two must
+// give the same answer to the same strategy.
+//
+// 0 is deliberately absent: the R2-5 repoll guard returns before this point on
+// an empty series, so the reachable failing range is 1..6. A case at 0 would
+// pin the repoll, not the floor.
+// ══════════════════════════════════════════════════════════════════════════
+
+describe("[161-07 / WIZERR-09] the composite arm applies the 7-day floor the publish gate applies", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    baseProps.onComplete = vi.fn();
+    baseProps.onTryAnotherKey = vi.fn();
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({ ok: true, accepted: true, status: "syncing", composite: true }),
+        { status: 200 },
+      ),
+    );
+  });
+
+  afterEach(() => {
+    vi.clearAllTimers();
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    currentClientFactory = () => ({
+      from: () => ({
+        select: () => ({
+          eq: () => ({
+            maybeSingle: () => Promise.resolve({ data: null, error: null }),
+          }),
+        }),
+      }),
+    });
+  });
+
+  async function renderComposite(opts: Partial<CompositeMockOpts>) {
+    installCompositeSupabaseMock({
+      pollOutcome: () => ({ kind: "row", status: "complete_with_warnings" }),
+      ...opts,
+    });
+    render(<SyncPreviewStep {...baseProps} />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(6000);
+    });
+  }
+
+  // Slices of the file's own 10-day fixture, so a series of length n differs
+  // from the passing default in LENGTH and in nothing else.
+  const seriesOfLength = (n: number) => DEFAULT_SERIES.slice(0, n);
+
+  it.each([1, 6])(
+    "REFUSES a stitched composite whose series covers only %i day(s), with copy of its own",
+    async (days) => {
+      // MEASURED RED, not assumed: with the arm's floor removed in the working
+      // tree, this case fails with `Unable to find an element by:
+      // [data-testid="error-envelope"]` — the pre-fix code reaches
+      // setPhase("passed") and renders the factsheet preview.
+      //
+      // ⚠️ WHAT THIS CASE DOES *NOT* PIN, stated because the first draft of
+      // this comment claimed it did and the neuter proved otherwise: this arm
+      // calls `setErrorCode("GATE_INSUFFICIENT_CSV_HISTORY")` DIRECTLY, exactly
+      // as the FIX-3 arm above sets its own literal. It never routes through
+      // `gateFailureToWizardError`, so reverting that mapper arm to UNKNOWN
+      // leaves this whole describe GREEN. The mapper is the SINGLE-KEY arm's
+      // path (`checkStrategyGate` → `gateFailureToWizardError`), and it is
+      // pinned where it lives, in `wizardErrors.test.ts`'s
+      // `[161-07 / WIZERR-09]` describe. What this case does depend on is the
+      // union member having COPY — a member with no entry in
+      // `WIZARD_ERROR_COPY` is a `tsc` failure, which is the half of the
+      // atomicity the type system owns.
+      await renderComposite({ series: seriesOfLength(days) });
+
+      const envelope = screen.getByTestId("error-envelope");
+      expect(envelope.getAttribute("data-error-code")).toBe(
+        "GATE_INSUFFICIENT_CSV_HISTORY",
+      );
+
+      // NOT the generic sentence. This is the assertion that makes the pair
+      // atomic rather than merely simultaneous.
+      expect(screen.queryByText(/something went wrong/i)).not.toBeInTheDocument();
+
+      // NOT the trade sentence either: a composite has zero fills BY
+      // CONSTRUCTION and must never be told it is short of trades.
+      expect(screen.queryByText(/minimum of 5 trades/i)).not.toBeInTheDocument();
+      expect(screen.queryByText(/only 0 trade/i)).not.toBeInTheDocument();
+
+      // …and NOT the provenance sentence: this stitch stamped a verdict we
+      // admit. It is short of DAYS, which is a different true thing.
+      expect(
+        screen.queryByText(/nothing on our side recorded/i),
+      ).not.toBeInTheDocument();
+    },
+  );
+
+  it("names the threshold as the NUMBER 7, and offers a remedy this surface can actually reach", async () => {
+    await renderComposite({ series: seriesOfLength(3) });
+
+    // DESIGN.md: no adjective where a number exists. Hand-typed needle — never
+    // imported from the constant it is asserting about, or a rename of the
+    // threshold would drag the oracle along with it.
+    expect(
+      screen.getByTestId("error-envelope").textContent,
+    ).toMatch(/at least 7 days/i);
+
+    // ⛔ THE REMEDY THE UI-SPEC PROPOSED IS THE ONE THIS ASSERTS IS ABSENT.
+    // "Upload a CSV covering at least 7 daily returns" names a control the
+    // composite arm does not have: this series was STITCHED from keyed member
+    // windows, and no CSV upload exists to extend. An unwinnable remedy on a
+    // real refusal is the defect class this phase closes.
+    expect(
+      screen.getByTestId("error-envelope").textContent,
+    ).not.toMatch(/upload a csv/i);
+  });
+
+  it("still PASSES at EXACTLY 7 days — the floor must not refuse the boundary it admits", async () => {
+    // Boundary parity with `strategyGate.ts`, whose own header records the
+    // historic `< 7` semantics: exactly 7 PASSES. Without this, "refuse
+    // anything under 10" would satisfy every case above.
+    await renderComposite({ series: seriesOfLength(7) });
+
+    expect(screen.queryByTestId("error-envelope")).not.toBeInTheDocument();
+  });
+
+  it("EVALUATION ORDER: an inadmissible verdict is still answered by the VERDICT arm, even below the floor", async () => {
+    // Both conditions true at once — 6 days AND a verdict the gate does not
+    // trust. `checkStrategyGate` evaluates the floor INSIDE the admitted
+    // branch, so the admin path answers this strategy on its verdict; this arm
+    // must agree. A floor placed in front of the admissibility return would
+    // green every other case in this describe and silently tell a composite
+    // with no usable verdict that it merely needs more days — a claim that is
+    // false and that more days would never satisfy.
+    await renderComposite({
+      series: seriesOfLength(6),
+      analyticsRow: defaultAnalyticsRow({ series_completeness: null }),
+    });
+
+    const envelope = screen.getByTestId("error-envelope");
+    expect(envelope.getAttribute("data-error-code")).toBe(
+      "GATE_SERIES_PROVENANCE_UNVERIFIED",
+    );
   });
 });

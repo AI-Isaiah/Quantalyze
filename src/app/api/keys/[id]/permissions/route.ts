@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { unstable_cache } from "next/cache";
 import { withAuth } from "@/lib/api/withAuth";
 import { createClient } from "@/lib/supabase/server";
-import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
+import { userActionLimiter, checkLimit, rateLimitDenyJson } from "@/lib/ratelimit";
 import { logAuditEvent } from "@/lib/audit";
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
 import { resilientFetch } from "@/lib/resilient-fetch";
@@ -42,7 +42,9 @@ import type { User } from "@supabase/supabase-js";
  * Two cache layers stack here:
  *   1. Python in-memory TTL cache — 15 minutes per (api_key_id, exchange_id),
  *      configurable via KEY_PERMISSION_CACHE_TTL.
- *   2. This Next layer — 60 seconds via unstable_cache. Conservative window
+ *   2. This Next layer — the `revalidate` window on the `unstable_cache` call
+ *      in `makeCachedFetcher` below (the ONE place that number lives; see
+ *      the note there for why it is not restated in prose). Conservative
  *      because the Python tier already absorbs the longer cool-down; this
  *      Next layer just collapses concurrent in-flight requests / refresh
  *      bursts so we don't flood the internal endpoint per render pass.
@@ -163,8 +165,19 @@ function readSeamFailureCause(err: unknown): SeamFailureCause | null {
 
 /**
  * Fetch the live permission triple from the Python service. Wrapped in
- * unstable_cache so concurrent callers + repeat hits inside 5 minutes
- * collapse to a single upstream request.
+ * unstable_cache so concurrent callers + repeat hits inside the `revalidate`
+ * window configured on the `unstable_cache` options below collapse to a single
+ * upstream request.
+ *
+ * (140.5-04) This sentence used to name a FIVE-MINUTE window. That was a 5x
+ * overstatement of the `revalidate` value set below — and it contradicted this
+ * file's own header, which describes the same Next layer correctly. One file
+ * disagreeing with itself about one constant is exactly what a derived
+ * reference prevents, so the duration now has a single home (the `revalidate`
+ * option) and this sentence points at it rather than restating it. Restating it
+ * as "60 seconds" would recreate the class on the next tuning edit: never write
+ * an integer or a duration in prose that a reader can derive from the code
+ * beside it.
  *
  * The cache tag/key array includes the keyId so a future invalidation hook
  * (e.g., on key rotation) can call revalidateTag.
@@ -226,6 +239,10 @@ function makeCachedFetcher(keyId: string): {
           },
           // No body needed — key_id is in the path. No signal either: the core
           // owns the deadline (SEAM_BUDGETS["keys-permissions"]).
+          // No retry: this probe has no entry in the SEAM-06 retry-safety
+          // registry, and D-08 makes stating that verdict mandatory rather than
+          // implicit.
+          retriesOverride: 0,
         },
       );
 
@@ -324,7 +341,7 @@ function makeCachedFetcher(keyId: string): {
       //
       // The message is diagnostics-only and deliberately matches NONE of the
       // handler's classifier substrings (`INTERNAL_API_TOKEN`, `Upstream 5`,
-      // `ECONNREFUSED`, `not configured`, `aborted`, `timeout`), so it lands on
+      // `ECONNREFUSED`, `aborted`, `timeout`), so it lands on
       // the route's existing generic `PROBE_FAILED` 502 — the same
       // probe-failure envelope this route already returns. No new copy.
       const parsed = KeyPermissionsPayloadSchema.safeParse(await res.json());
@@ -362,10 +379,10 @@ export const GET = withAuth(
     // able to grind requests through the Next layer.
     const rl = await checkLimit(userActionLimiter, `key-perms:${user.id}`);
     if (!rl.success) {
-      return NextResponse.json(
-        { error: "Too many requests" },
-        { status: 429, headers: { ...NO_STORE_HEADERS, "Retry-After": String(rl.retryAfter) } },
-      );
+      // 140.4-13 / SEAMRIM-05 — deny through the chokepoint so a limiter
+      // misconfiguration answers 503. The 429 body is the builder's default,
+      // byte-identical to what was inlined here; NO_STORE_HEADERS is kept.
+      return rateLimitDenyJson(rl, { headers: NO_STORE_HEADERS });
     }
 
     // Ownership check — reads via the user-scoped client so RLS applies.
@@ -423,7 +440,7 @@ export const GET = withAuth(
           `[keys/permissions] short-circuited for ${keyId} — the analytics circuit is open (retry_after_s=${err.retryAfterS})`,
         );
         return NextResponse.json(
-          { error: CIRCUIT_OPEN_COPY, code: "CIRCUIT_OPEN" },
+          { code: "CIRCUIT_OPEN", error: CIRCUIT_OPEN_COPY },
           {
             status: 503,
             headers: {
@@ -489,7 +506,7 @@ export const GET = withAuth(
           // The private `PROBE_*` code is what distinguishes an upstream
           // throttle from this route's own limiter arm above, which returns the
           // same sentence with no code.
-          { error: "Too many requests", code: "PROBE_RATE_LIMITED" },
+          { code: "PROBE_RATE_LIMITED", error: "Too many requests" },
           {
             status: 429,
             headers:
@@ -500,6 +517,98 @@ export const GET = withAuth(
                     "Retry-After": String(seamFailure.retryAfterSeconds),
                   },
           },
+        );
+      }
+
+      // ─────────────────────────────────────────────────────────────────────
+      // 161-01 / WIZERR-04 — THE UNDECRYPTABLE-KEY ARM.
+      //
+      // Position is load-bearing for the same reason the throttle arm above
+      // states: BELOW the `CircuitOpenError` type check (a breaker verdict must
+      // never be decided by anything an upstream can set) and ABOVE the
+      // substring cascade below (the cascade greps prose and this fault's real
+      // sentence — "This stored key could not be decrypted. It must be
+      // reconnected." — matches none of its six needles).
+      //
+      // WHAT WAS WRONG. `routers/internal.py`'s permanent 500 for a key it
+      // cannot decrypt already ships `code: "KEY_UNDECRYPTABLE"`, and this
+      // route already carries that code on the thrown error's `cause` (built at
+      // `buildSeamFailureCause` above, read for the 429 arm above). The
+      // terminal arm simply never consulted it, so a permanently orphaned key
+      // fell through to `PROBE_FAILED` — "Could not check key scopes. Try
+      // again." A retry CANNOT work here: the ciphertext is unreadable until
+      // the key is reconnected, so that sentence sent the user into an
+      // unbounded retry loop against a fault only a reconnect clears. The
+      // route's own test suite pinned the wrong answer as "unchanged by design"
+      // (140.3-01 CONTRACT A) precisely because no plan owned the response
+      // shape until this one.
+      //
+      // KEYED ON THIS ONE CODE, EXPLICITLY. This arm does NOT blanket-forward
+      // every seam code through the terminal arm: an identity admission
+      // ("whatever the upstream called it is what we call it") would hand an
+      // upstream the power to name our private vocabulary and would silently
+      // retire the cascade below, which stays authoritative for everything
+      // else. One code, one measured remedy.
+      //
+      // THE BODY IS STATIC. The upstream's own sentence never reaches the
+      // response — only this curated one does (H-1062 / F5b: on a 5xx the
+      // `error` message stays static and only the recognized CODE is
+      // forwarded). The upstream sentence still reaches the OPERATOR, scrubbed,
+      // on the line below; this arm RETURNS, so it never reaches the terminal
+      // arm's log. No `captureToSentry` here: the terminal arm remains the only
+      // capture in this route (140.3-13a / SEAMUX-08), and an orphaned key is a
+      // user-actionable state, not an incident to page on. No `Retry-After` is
+      // stamped, because no wait was advertised and absence must never become a
+      // fabricated zero (TRAP-3).
+      //
+      // ⭐ 161-REVIEW / WR-03 — `code:` FIRST, AND THE KEY ORDER IS LOAD-BEARING
+      // EVEN THOUGH JSON HAS NO ORDER.
+      //
+      // Every coverage law in this repo derives its population with a
+      // `code:`-FIRST predicate — `wizardErrors.invariant.test.ts`'s
+      // `emitterRe`, `dialog-envelope.invariant.test.ts`'s
+      // `deriveEmittedCodes`, and both of them say in their own docblocks that
+      // relaxing the key order to "cover more" would legalise the defect
+      // instead of finding it. So an arm written `{ error, code }` is invisible
+      // to ALL of them: measured three times this phase, most starkly on
+      // `keys/validate-and-encrypt`, where twelve coded rejections derived to a
+      // population of ZERO until 161-09 transposed them.
+      //
+      // This arm survives today only because
+      // `probe-vocabulary.invariant.test.ts` happens to bring an order-agnostic
+      // `\bcode:\s*"…"` scanner of its own. That is luck, not coverage: the day
+      // this route joins the `ROUTES` table or a repo-wide
+      // `NextResponse.json({ code:` contract scan lands, an `{ error, code }`
+      // arm goes dark while continuing to work. Zero behaviour change here —
+      // only visibility.
+      //
+      // ⚠️ RESIDUE, now CLOSED for the two literal arms (2026-08-25): every
+      // `code:`-first-visible literal rejection in this file is transposed —
+      // `CIRCUIT_OPEN` (~:443) and `PROBE_RATE_LIMITED` (~:509) joined the
+      // KEY_UNDECRYPTABLE arm above. They were not minted by 161-01, but the
+      // transposition is zero-behaviour and leaving them dark would have kept
+      // two thirds of this route's literal vocabulary invisible to every
+      // `code:`-first predicate in the repo.
+      //
+      // The ONE remaining exclusion is the terminal 502 (~:665), and it is
+      // excluded for a different reason that no transposition can fix: its
+      // `code` is a COMPUTED expression, not a literal, so the literal class
+      // cannot see it whatever the key order. That is a property of the arm,
+      // not an omission.
+      // ─────────────────────────────────────────────────────────────────────
+      if (seamFailure?.code === "KEY_UNDECRYPTABLE") {
+        console.error(
+          `[keys/permissions] stored key ${keyId} can no longer be decrypted ` +
+            `(code=${seamFailure.code}, upstream_status=${seamFailure.status}):`,
+          scrubSeamError(err),
+        );
+        return NextResponse.json(
+          {
+            code: "KEY_UNDECRYPTABLE",
+            error:
+              "This stored key can no longer be decrypted. Reconnect the key — retrying will not help.",
+          },
+          { status: 500, headers: NO_STORE_HEADERS },
         );
       }
 
@@ -522,11 +631,21 @@ export const GET = withAuth(
       // verdict comes from the shared typed `CircuitOpenError` and the ONE
       // `CIRCUIT_OPEN_COPY`.
       const rawMessage = err instanceof Error ? err.message : String(err);
+      // 140.5-06 fix — config-detection is scoped to OUR OWN thrown signals, not
+      // a prose-grep over the upstream body. `INTERNAL_API_TOKEN` is this route's
+      // own env-var fault sentinel (thrown above); `Upstream 5` is the
+      // unreadable-5xx fallback WE construct; `ECONNREFUSED` is a transport
+      // rejection. A bare `includes("not configured")` clause used to sit here —
+      // it was redundant (our token message already contains "not configured")
+      // AND over-broad: a reached-and-answered upstream fault whose sentence
+      // happens to contain the phrase (e.g. the missing-KEK 500 "Credential
+      // encryption is not configured…") was mis-reported as OUR layer being
+      // unreachable. Removed: such a fault now falls to the generic reached-but-
+      // failed `PROBE_FAILED` envelope, like every other answered upstream body.
       const isConfigError =
         rawMessage.includes("INTERNAL_API_TOKEN") ||
         rawMessage.startsWith("Upstream 5") ||
-        rawMessage.includes("ECONNREFUSED") ||
-        rawMessage.includes("not configured");
+        rawMessage.includes("ECONNREFUSED");
       const isTimeout =
         rawMessage.includes("aborted") ||
         rawMessage.toLowerCase().includes("timeout");

@@ -342,6 +342,40 @@ export async function seedBridgeCandidate(opts?: {
  * (strategy_analytics cascades via FK). Best-effort: a failure logs and
  * returns — stale rows degrade nothing when the caller uses unique names.
  */
+/**
+ * Phase 170 — set name and tags on ONE strategy this spec just minted.
+ *
+ * The card list needs a multi-word name and a multi-word tag, and
+ * seedWizardDraft does not take either. Scoped by id, through getAdmin(),
+ * so the production-URL guard still fires and no other row is touched.
+ */
+export async function setSeededStrategyNameAndTags(opts: {
+  strategyId: string;
+  name: string;
+  strategyTypes: string[];
+  /** Default "published". "draft" keeps the draft controls on the card. */
+  status?: "published" | "draft";
+}): Promise<void> {
+  const admin = getAdmin();
+  const { error } = await admin
+    .from("strategies")
+    .update({
+      name: opts.name,
+      strategy_types: opts.strategyTypes,
+      // The strategies page hides only source='wizard' drafts. Moving THIS
+      // row off the wizard source is what makes the card render, published
+      // or draft.
+      status: opts.status ?? "published",
+      source: "admin_import",
+    })
+    .eq("id", opts.strategyId);
+  if (error) {
+    throw new Error(
+      `[seed] setSeededStrategyNameAndTags failed: ${error.message}`,
+    );
+  }
+}
+
 export async function cleanupStrategiesByNamePrefix(
   prefix: string,
 ): Promise<void> {
@@ -375,6 +409,78 @@ export async function countStrategyKeys(strategyId: string): Promise<number> {
     throw new Error(`[seed] countStrategyKeys failed: ${error.message}`);
   }
   return count ?? 0;
+}
+
+export interface SeededWizardDraft {
+  strategyId: string;
+  apiKeyId: string;
+  name: string;
+}
+
+/**
+ * Phase 154 / WIZCONT-01 — an API-branch wizard draft owned by `ownerUserId`.
+ *
+ * The (status, source) pair is what makes it resume-eligible: the wizard-draft
+ * read matches `source='wizard' AND status='draft'` and nothing else
+ * (`src/lib/wizard/draft-query.ts`). `api_key_id` is deliberately SET — it is
+ * the discriminator that makes `deriveDraftKind` answer `"api"`; a null there
+ * would send the helper to the composite-vs-CSV membership probe and the draft
+ * would be offered on a different branch.
+ *
+ * The name prefix is the isolation mechanism on the SHARED test DB: the spec
+ * GCs its own rows with `cleanupStrategiesByNamePrefix(prefix)` and asserts on
+ * its OWN seeded row, never on a global count or a global empty state.
+ */
+export async function seedWizardDraft(opts: {
+  ownerUserId: string;
+  namePrefix?: string;
+}): Promise<SeededWizardDraft> {
+  const admin = getAdmin();
+  const prefix = opts.namePrefix ?? "e2e-wizcont-";
+
+  // The key first — the draft references it. Same placeholder-ciphertext idiom
+  // as seedAllocatorBook:645-652; no real credential is ever seeded.
+  const { data: key, error: kErr } = await admin
+    .from("api_keys")
+    .insert({
+      user_id: opts.ownerUserId,
+      exchange: "binance",
+      label: `${prefix}key-${uniqueSuffix(6)}`,
+      api_key_encrypted: "e2e-placeholder-ciphertext",
+      is_active: true,
+    })
+    .select("id")
+    .single();
+  if (kErr || !key) {
+    throw new Error(`[seed] seedWizardDraft (api_key) failed: ${kErr?.message}`);
+  }
+
+  const name = `${prefix}${uniqueSuffix(6)}`;
+  const { data: strategy, error: sErr } = await admin
+    .from("strategies")
+    .insert({
+      user_id: opts.ownerUserId,
+      name,
+      status: "draft",
+      source: "wizard",
+      api_key_id: key.id,
+      benchmark: "BTC",
+      supported_exchanges: ["binance"],
+      strategy_types: ["spot"],
+      subtypes: [],
+      markets: ["BTC"],
+    })
+    .select("id")
+    .single();
+  if (sErr || !strategy) {
+    throw new Error(`[seed] seedWizardDraft (strategy) failed: ${sErr?.message}`);
+  }
+
+  return {
+    strategyId: strategy.id as string,
+    apiKeyId: key.id as string,
+    name,
+  };
 }
 
 export async function seedStrategyWithHistory(opts: {
@@ -641,6 +747,8 @@ export async function seedAllocatorBook(opts: {
   const days = opts.days ?? 120;
 
   // 1. Active api_key (placeholder ciphertext — no DB-level validation trigger).
+  // venue_account_id is set so plan 11's readiness does not hold the book in
+  // account_identity_pending. The scrub trigger keeps a service-role value.
   const { data: key, error: kErr } = await admin
     .from("api_keys")
     .insert({
@@ -649,6 +757,7 @@ export async function seedAllocatorBook(opts: {
       label: `e2e-equitychart-book-${uniqueSuffix(6)}`,
       api_key_encrypted: "e2e-placeholder-ciphertext",
       is_active: true,
+      venue_account_id: `e2e-${uniqueSuffix(8)}`,
     })
     .select("id")
     .single();
@@ -688,6 +797,40 @@ export async function seedAllocatorBook(opts: {
     .upsert(snapshots, { onConflict: "allocator_id,asof" });
   if (sErr) {
     throw new Error(`seedAllocatorBook (equity snapshots) failed: ${sErr.message}`);
+  }
+
+  // 4. The display series is the version-2 derived row (plan 11). Snapshots
+  // alone leave the Overview rebuilding, so the EquityChart would not mount.
+  const curve = snapshots.map((s, i) => ({
+    date: s.asof,
+    equity_usd: 100_000 * (1 + Math.sin(i / 30) * 0.02),
+  }));
+  const returns = curve.slice(1).map((point, i) => ({
+    date: point.date,
+    r:
+      curve[i].equity_usd > 0
+        ? point.equity_usd / curve[i].equity_usd - 1
+        : 0,
+  }));
+  const { error: dErr } = await admin.from("allocator_equity_derived").upsert(
+    {
+      allocator_id: opts.allocatorUserId,
+      kind: "equity_curve",
+      payload: {
+        version: 2,
+        is_trustworthy: true,
+        curve,
+        returns,
+        flags: [],
+        degrade_reasons: [],
+      },
+    },
+    { onConflict: "allocator_id,kind" },
+  );
+  if (dErr) {
+    throw new Error(
+      `seedAllocatorBook (derived equity) failed: ${dErr.message}`,
+    );
   }
 
   return { apiKeyId: key.id };
@@ -1024,6 +1167,27 @@ export async function seedCompositeStrategy(opts?: {
     // Name the seq-2 member (mirrors the worker's scrubbed stamp shape) so the
     // wizard failed gate can echo the offending key label (#338).
     analyticsRow.computation_error = `${memberLabels[1]} (deribit) failed to reconstruct: upstream geo-blocked`;
+  } else {
+    // 142.2 / MT5-12 — a SUCCESSFUL stitch stamps its completeness verdict, so
+    // this fixture must too. `run_stitch_composite_job` writes
+    // `series_completeness` on the headline upsert (job_worker.py), and since
+    // 142.2 BOTH gate consumers (wizard preview and admin approve) require a
+    // POSITIVE verdict on the daily-returns branch — a composite has zero
+    // trades by construction, so that branch is its only route through.
+    //
+    // ⚠️ Omitting this is not "neutral fixture data", it is a row no producer
+    // emits: the wizard correctly refuses it and `wizard-use-this-key` never
+    // renders. That is what this seed reproduced before the stamp was added.
+    // The NULL-verdict case is deliberately covered ELSEWHERE, as a unit test
+    // (SyncPreviewStep.composite.render.test.tsx) asserting the button is
+    // ABSENT — so weakening the gate to keep this e2e green would delete a real
+    // safety property and contradict that test.
+    //
+    // The `failed` variant above deliberately leaves the column ABSENT, which is
+    // also faithful: the stitch failure arm omits it so a previously-stamped
+    // verdict survives the upsert, and `computation_status='failed'` blocks the
+    // gate anyway.
+    analyticsRow.series_completeness = "composite_stitched";
   }
   const { error: aErr } = await admin
     .from("strategy_analytics")

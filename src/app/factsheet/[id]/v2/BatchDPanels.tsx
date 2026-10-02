@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { usePayload } from "./factsheet-context";
 import { useBasisOrCash, useBasisSeriesView, BaseLeverageNote } from "./basis-context";
+import { isoToMonthDay } from "./MetricsColumn";
 
 /**
  * Batch D analytical panels. Three pieces:
@@ -248,17 +249,23 @@ function signGlyph(v: number): string {
   return "";
 }
 
-function PercentileBar({ label, pct }: { label: string; pct: number }) {
+function PercentileBar({ label, pct }: { label: string; pct: number | null }) {
+  // No rank (the strategy has no Sharpe: NaN, or null after a JSON cache
+  // round-trip) renders "—" over an empty track, never "0th" or "NaNth"
+  // (founder decision D7, 2026-09-26).
+  const ranked = pct != null && Number.isFinite(pct);
   return (
     <div className="grid grid-cols-[110px_1fr_48px] items-center gap-2 text-micro">
       <span className="text-text-2">{label}</span>
       <div className="relative h-2 bg-surface-subtle rounded-sm overflow-hidden">
-        <div
-          className="absolute inset-y-0 left-0 bg-accent"
-          style={{ width: `${Math.max(0, Math.min(100, pct))}%` }}
-        />
+        {ranked && (
+          <div
+            className="absolute inset-y-0 left-0 bg-accent"
+            style={{ width: `${Math.max(0, Math.min(100, pct))}%` }}
+          />
+        )}
       </div>
-      <span className="text-right font-mono tabular-nums text-text-primary">{Math.round(pct)}th</span>
+      <span className="text-right font-mono tabular-nums text-text-primary">{ranked ? `${Math.round(pct)}th` : "—"}</span>
     </div>
   );
 }
@@ -273,6 +280,26 @@ export function AllocatorSection() {
   const [active, setActive] = useState(portfolios?.[0]?.key ?? "");
   if (!portfolios || portfolios.length === 0) return null;
   const p = portfolios.find(x => x.key === active) ?? portfolios[0];
+  // Phase 169.4 D-70(4): a blend's prices can end before the strategy's last
+  // date (a fixture's last close, a weekday leg on a weekend-ending book); one
+  // dated caption says so. A blend with too few priced days has null figures,
+  // each rendered as the em-dash, never 0.
+  const lastDate = payload.dates[payload.dates.length - 1];
+  const unmeasured = p.cum_ret === null;
+  // Review SFH MEDIUM-2: a failed price read is named as the cause; "too few days"
+  // is kept for a genuine sparse overlap of priced legs.
+  const pricesCaption =
+    p.unavailable_leg != null
+      ? `${p.unavailable_leg} prices are unavailable right now, so this portfolio cannot be measured.`
+      : p.through === null
+        ? "Prices unavailable for this portfolio — too few days with every leg priced to measure it."
+        : p.through !== lastDate
+          ? `Prices through ${isoToMonthDay(p.through)}${
+              unmeasured
+                ? " — too few days with every leg priced to measure this portfolio."
+                : "; figures cover the days every leg is priced."
+            }`
+          : null;
 
   return (
     <section className="mt-12 border-t border-border pt-8">
@@ -308,7 +335,8 @@ export function AllocatorSection() {
           </button>
         ))}
       </div>
-      <p className="text-micro italic text-text-muted mb-6">{p.composition}</p>
+      <p className={"text-micro italic text-text-muted " + (pricesCaption ? "mb-1" : "mb-6")}>{p.composition}</p>
+      {pricesCaption && <p className="text-micro text-text-muted mb-6">{pricesCaption}</p>}
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
         <div>
@@ -320,13 +348,13 @@ export function AllocatorSection() {
           </p>
           <table className="w-full text-caption">
             <tbody>
-              <KvRow k="Portfolio Vol (ann)" v={`${(p.ann_vol * 100).toFixed(1)}%`} />
+              <KvRow k="Portfolio Vol (ann)" v={pct1(p.ann_vol)} />
               <KvRow k="Correlation with MultiMarket" v={signed(p.corr)} />
               <KvRow k="Cum. Return (full window)" v={pctSigned(p.cum_ret)} />
-              <KvRow k="Max Drawdown" v={`${(p.max_dd * 100).toFixed(1)}%`} negative />
+              <KvRow k="Max Drawdown" v={pct1(p.max_dd)} negative />
               <KvSep />
-              <KvRow k="Suggested MultiMarket sleeve" v={`${Math.round(p.sleeve_pct * 100)}%`} accent />
-              <KvRow k="Blended Vol at sleeve %" v={`${(p.blend_vol * 100).toFixed(1)}%`} />
+              <KvRow k="Suggested MultiMarket sleeve" v={pctRound(p.sleeve_pct)} accent />
+              <KvRow k="Blended Vol at sleeve %" v={pct1(p.blend_vol)} />
             </tbody>
           </table>
         </div>
@@ -340,21 +368,34 @@ export function AllocatorSection() {
           </p>
           <table className="w-full text-caption">
             <tbody>
-              <KvRow k="Stress windows in sample" v={String(p.tail_count)} />
+              <KvRow k="Stress windows in sample" v={p.tail_count === null ? "—" : String(p.tail_count)} />
               <KvRow k="MultiMarket mean return" v={pctSigned2(p.tail_mm_mean)} />
               <KvRow k="MultiMarket median return" v={pctSigned2(p.tail_mm_median)} />
-              <KvRow k="Windows MM was positive" v={`${Math.round(p.tail_mm_pos * 100)}%`} accent />
+              <KvRow k="Windows MM was positive" v={pctRound(p.tail_mm_pos)} accent />
             </tbody>
           </table>
-          <p className="mt-2 text-micro italic text-text-muted">
-            {p.tail_count === 0
-              ? "No stress windows in the observed sample — portfolio never drew ≥ 5% in any 21-day window."
-              : `During the ${p.tail_count} stress windows, MultiMarket was positive ${Math.round(p.tail_mm_pos * 100)}% of the time.`}
-          </p>
+          {p.tail_windows !== null && (
+            <p className="mt-2 text-micro italic text-text-muted">{tailCaption(p.tail_count, p.tail_windows, p.tail_mm_pos)}</p>
+          )}
         </div>
       </div>
     </section>
   );
+}
+
+/**
+ * Review SFH HIGH-2: the tail caption claims only what was measured. It names the
+ * windows examined (every leg priced) and says nothing about a window outside
+ * them; with none examined it says so rather than asserting the portfolio never
+ * drew ≥ 5%.
+ */
+function tailCaption(count: number | null, windows: number, pos: number | null): string {
+  // Review round 2 WR-01: with no window examined the count is null (the table
+  // reads "—"), and this sentence is the only claim made.
+  if (windows === 0 || count === null) return "No 21-day window with every leg priced, so no stress window could be measured.";
+  const examined = `${windows} 21-day window${windows === 1 ? "" : "s"} with every leg priced`;
+  if (count === 0) return `The portfolio did not draw ≥ 5% in any of the ${examined}.`;
+  return `${count} of the ${examined} ${count === 1 ? "was a stress window" : "were stress windows"}; MultiMarket was positive in ${pctRound(pos)} of them.`;
 }
 
 function DemoBadge({ children }: { children: React.ReactNode }) {
@@ -419,14 +460,30 @@ function fmtDelta(a: number, b: number, kind: "pct" | "ratio" | "pctSigned" | "i
   return (d >= 0 ? "+" : "") + d.toFixed(2);
 }
 
-function signed(v: number): string {
+function signed(v: number | null): string {
+  // An undefined correlation (NaN, or null after a JSON round-trip) is "—" (D7).
+  if (v == null || !Number.isFinite(v)) return "—";
   return (v >= 0 ? "+" : "") + v.toFixed(2);
 }
 
-function pctSigned(v: number): string {
+// Phase 169.4 D-70(4): an allocator figure is null when its blend cannot be
+// measured; null or non-finite renders the em-dash (DESIGN.md), never 0.
+function pctSigned(v: number | null): string {
+  if (v == null || !Number.isFinite(v)) return "—";
   return (v >= 0 ? "+" : "") + (v * 100).toFixed(1) + "%";
 }
 
-function pctSigned2(v: number): string {
+function pctSigned2(v: number | null): string {
+  if (v == null || !Number.isFinite(v)) return "—";
   return (v >= 0 ? "+" : "") + (v * 100).toFixed(2) + "%";
+}
+
+function pct1(v: number | null): string {
+  if (v == null || !Number.isFinite(v)) return "—";
+  return `${(v * 100).toFixed(1)}%`;
+}
+
+function pctRound(v: number | null): string {
+  if (v == null || !Number.isFinite(v)) return "—";
+  return `${Math.round(v * 100)}%`;
 }

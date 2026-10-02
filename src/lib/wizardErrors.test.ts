@@ -4,6 +4,7 @@ import { join, resolve } from "path";
 import {
   formatKeyError,
   gateFailureToWizardError,
+  recogniseDashboardDialogCode,
   classifyKeyValidationError,
   recogniseSeamErrorCode,
   WIZARD_ERROR_COPY,
@@ -12,10 +13,23 @@ import {
   CSV_PREVIEW_STEP_HEADINGS,
   CSV_SUBMIT_STEP_HEADINGS,
   formatCsvRuleCauseSingle,
-  formatColumnInDataframeMessage,
   type WizardErrorCode,
+  type WizardErrorContext,
 } from "./wizardErrors";
 import type { GateFailureCode } from "./strategyGate";
+// 153.1-04 / WIZFORM-02 — the DERIVATION, not a restatement of it. The claim
+// under test is "no Retry control renders", and that is decided by
+// `buildEnvelope` reading `actions` against `RECOVERABLE_ACTIONS`, then by
+// `ErrorEnvelope`'s `showRetry = recoverable && Boolean(onRetry)`. Asserting
+// the table's `actions` array instead would only restate what the table says
+// about itself and would go green if the derivation rule ever changed.
+import { buildEnvelope } from "./envelope";
+// 153.1-03 / WIZFORM-03 — the INDEPENDENT registry the class sweeps iterate.
+// The oracle for "which venues are non-substitutable" must not be the copy
+// table under test, and it must not be a hand-listed `["mt5"]` either: a second
+// non-substitutable venue has to be picked up here with no test edit, which is
+// exactly what the class-not-instance mutation checks.
+import { SUPPORTED_EXCHANGES, venueIsSubstitutable } from "@/lib/closed-sets";
 // The dependency-free leaf — the SAME module wizardErrors itself imports, so
 // `instanceof` holds by class identity. Never route this through
 // `@/lib/analytics-client` (whose re-export is wholesale-mocked by 16 route
@@ -158,18 +172,33 @@ describe("wizardErrors", () => {
       expect(result.cause).toContain("calendar day");
     });
 
-    it("appends computationError into GATE_ANALYTICS_FAILED cause", () => {
+    // ⚠️ INVERTED 2026-08-26 (Phase 162 / HONEST-01, UI-SPEC C-2). These two
+    // used to assert that `computationError` was APPENDED into the cause —
+    // i.e. they pinned the defect. `strategy_analytics.computation_error` is a
+    // SERVER column, and until migration 20260826120000 it held raw
+    // `classify_exception` output, so the `Details: …` appendix rendered Python
+    // exception strings inside the wizard's failure envelope. The column is
+    // curated at its write boundary now, and the appendix is still wrong:
+    // appending curated copy to curated copy double-renders the same claim.
+    //
+    // The context object is cast because `computationError` is no longer a
+    // field on `WizardErrorContext` — that removal is half the fix, and the
+    // cast is what lets this test assert the OTHER half: even handed the key
+    // anyway, nothing in the formatter renders it.
+    it("does NOT append computationError into GATE_ANALYTICS_FAILED cause", () => {
       const result = formatKeyError("GATE_ANALYTICS_FAILED", {
         computationError: "Railway timed out",
-      });
-      expect(result.cause).toContain("Railway timed out");
+      } as unknown as WizardErrorContext);
+      expect(result.cause).not.toContain("Railway timed out");
+      expect(result.cause).not.toContain("Details:");
     });
 
-    it("appends computationError into SYNC_FAILED cause", () => {
+    it("does NOT append computationError into SYNC_FAILED cause", () => {
       const result = formatKeyError("SYNC_FAILED", {
         computationError: "connection refused",
-      });
-      expect(result.cause).toContain("connection refused");
+      } as unknown as WizardErrorContext);
+      expect(result.cause).not.toContain("connection refused");
+      expect(result.cause).not.toContain("Details:");
     });
 
     it("does not mutate the original table", () => {
@@ -241,15 +270,28 @@ describe("wizardErrors", () => {
       );
     });
 
+    // ⚠️ 140.5-02 — BOTH TITLES BELOW WERE RE-POINTED, in the same commit as
+    // the copy change, and the old strings are recorded here rather than simply
+    // overwritten:
+    //   CSV_VALIDATION_FAILED was "Validation failed. See per-row breakdown
+    //     below." — a promise measured FALSE on both arms of the route
+    //     (RESEARCH §12.4). It is reached as the ENVELOPE HEADING via
+    //     `CsvUploadStep`'s `data.human_message ?? …title` fallback, so a
+    //     forwarded 401 printed it verbatim.
+    //   CSV_UPSTREAM_FAIL was "Validation service returned an unexpected
+    //     response. Retry shortly." — replaced by the FOUNDER-AUTHORED §4a
+    //     sentence, which is pre-approved and not open to a reword.
+    // A pin that survives the change it was written to catch is worse than no
+    // pin, so these move deliberately, with the reason attached.
     it("CSV_VALIDATION_FAILED preserves the verbatim user-visible title", () => {
       expect(WIZARD_ERROR_COPY.CSV_VALIDATION_FAILED.title).toBe(
-        "Validation failed. See per-row breakdown below.",
+        "Your file did not pass validation.",
       );
     });
 
     it("CSV_UPSTREAM_FAIL preserves the verbatim user-visible title", () => {
       expect(WIZARD_ERROR_COPY.CSV_UPSTREAM_FAIL.title).toBe(
-        "Validation service returned an unexpected response. Retry shortly.",
+        "We couldn't check your file just now.",
       );
     });
 
@@ -389,14 +431,40 @@ describe("wizardErrors", () => {
     });
   });
 
-  // Regression: /qa CSV report 2026-05-21 ISSUE-012. Before this fix the
+  // Regression: /qa CSV report 2026-05-21 ISSUE-012. Before that fix the
   // CSV validation envelope leaked panderas's raw rule-name text:
   //   Top-line: "1 row failed validation"
   //   Cause:    "Rule violated: column_in_dataframe"
   //   Detail:   "Row 0: Column 'None' failed: daily_return"
-  // None of those tell the user what to actually do. The fix routes the
-  // raw rule name through CSV_RULE_LABELS for the cause line + rewrites
-  // the per-row message via formatColumnInDataframeMessage.
+  // The fix had two halves: route the raw rule name through CSV_RULE_LABELS for
+  // the cause line, and rewrite the per-row message via a formatter.
+  //
+  // ⚰️ 161-REVIEW / CR-02 — THE SECOND HALF NEVER RAN, and its three cases are
+  // re-argued here rather than quietly deleted.
+  // `formatColumnInDataframeMessage` matched on a literal `failed:`. MEASURED
+  // at HEAD by driving a misnamed-column daily_returns upload through
+  // `validate_csv`, the producer emits only:
+  //
+  //     Failed rule 'column_in_dataframe'.
+  //     Column 'daily_return' failed rule 'daily_return_lower_bound' at row 2.
+  //
+  // The three deleted cases fed the formatter PANDERA's own text
+  // ("Column 'None' failed: daily_return") — a string `csv_validator.py` builds
+  // its own sentence instead of forwarding — so they proved the function worked
+  // on an input it never receives. That is the mirror image of a test that
+  // cannot fail: a test that passes about a code path no user reaches. The
+  // actionable remedy it promised ("Rename a column to X") has therefore never
+  // rendered to anyone.
+  //
+  // It is also UNREPAIRABLE by pattern: it was called only for
+  // `rule === "column_in_dataframe"`, and for that DATAFRAME-level check
+  // pandera reports `column` as NaN — which is why 161-03 had to strip the
+  // literal `nan` from the sentence. The expected column name is not on the
+  // wire, so a fixed regex would have nothing to extract. Restoring the remedy
+  // needs a first-class producer field (D-161-02).
+  //
+  // What survives is the half that DID run (the label) plus a pin that the dead
+  // formatter is really gone from BOTH the module and its one caller.
   describe("ISSUE-012 — column_in_dataframe envelope rewrite", () => {
     it("CSV_RULE_LABELS includes a human label for column_in_dataframe", () => {
       expect(CSV_RULE_LABELS.column_in_dataframe).toBe(
@@ -404,33 +472,53 @@ describe("wizardErrors", () => {
       );
     });
 
-    it("rewrites the panderas Column 'None' failed message into an actionable sentence", () => {
-      const raw = "Column 'None' failed: daily_return";
-      const rewritten = formatColumnInDataframeMessage(raw);
-      expect(rewritten).toContain("daily_return");
-      expect(rewritten).toContain("missing from your file");
-      // Tells the user what to do, not just what failed.
-      expect(rewritten).toMatch(/rename|switch/i);
-      // Never leaks the rule-name 'Column \'None\'' bookkeeping back to the user.
-      expect(rewritten).not.toContain("Column 'None'");
-    });
+    it("⚰️ TOMBSTONE: the dead per-row formatter is gone from the module AND from its one caller", () => {
+      // Comment-stripped on BOTH files: the deletion is recorded in prose at
+      // each site (a tombstone naming what was removed and why), so a raw scan
+      // would match those records and this case could never pass.
+      const strip = (src: string) =>
+        src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
 
-    it("returns the original message unchanged when the format does not match", () => {
-      // Defensive: if panderas changes its message shape we surface the
-      // original text rather than dropping information.
-      expect(formatColumnInDataframeMessage("something else entirely")).toBe(
-        "something else entirely",
+      const wizardErrorsSrc = strip(
+        readFileSync(join(__dirname, "wizardErrors.ts"), "utf-8"),
       );
-    });
+      const callerSrc = strip(
+        readFileSync(
+          resolve(
+            __dirname,
+            "../app/(dashboard)/strategies/new/wizard/steps/CsvValidationEnvelope.tsx",
+          ),
+          "utf-8",
+        ),
+      );
 
-    it("handles missing required column for trade-list format", () => {
-      // The same pandera rule fires on any required column. Make sure
-      // the rewrite pulls out the actual column name (not hardcoded to
-      // daily_return).
-      const raw = "Column 'None' failed: trade_qty";
-      const rewritten = formatColumnInDataframeMessage(raw);
-      expect(rewritten).toContain("trade_qty");
-      expect(rewritten).not.toContain("daily_return");
+      // ⭐ ANTI-VACUITY FIRST. A stripper that blanked either file would satisfy
+      // both negatives below while checking nothing, and the failure would look
+      // exactly like success. The controls are the deleted symbol's surviving
+      // neighbour in each file.
+      expect(wizardErrorsSrc.length).toBeGreaterThan(2000);
+      expect(callerSrc.length).toBeGreaterThan(1000);
+      expect(wizardErrorsSrc, "the stripper blanked wizardErrors.ts").toContain(
+        "export function formatCsvRuleCauseSingle",
+      );
+      expect(callerSrc, "the stripper blanked the envelope component").toContain(
+        "formatCsvRuleCauseSingle",
+      );
+
+      const dead = "formatColumnInDataframeMessage";
+      expect(dead.length).toBeGreaterThan(10); // the needle is real, not blank
+      expect(
+        wizardErrorsSrc,
+        "the formatter was restored in wizardErrors.ts. It cannot fire: this " +
+          "producer's messages read \"failed rule '<name>'\" and its regex " +
+          "requires \"failed:\". Restoring it needs D-161-02's producer field.",
+      ).not.toContain(dead);
+      expect(
+        callerSrc,
+        "CsvValidationEnvelope calls a formatter that cannot match this " +
+          "producer's messages, so the <li> renders the raw sentence while the " +
+          "call site claims it is being rewritten.",
+      ).not.toContain(dead);
     });
   });
 });
@@ -464,6 +552,13 @@ describe("M-0591 — every reachable error code resolves to real (non-UNKNOWN) c
       "INSUFFICIENT_TRADES",
       "INSUFFICIENT_DAYS",
       "INSUFFICIENT_CSV_HISTORY",
+      // 142.2 review FIX 1. Deliberately NOT added to `intentionallyUnknown`
+      // below: it is terminal AND wizard-reachable (a keyed ledger-backed
+      // strategy on an unstamped analytics row lands here, as does an unstamped
+      // composite), so it MUST resolve to real, non-UNKNOWN copy. That is the
+      // whole point of minting it — the state it names previously rendered
+      // GATE_INSUFFICIENT_TRADES, whose sentence was false for it.
+      "SERIES_PROVENANCE_UNVERIFIED",
       "ANALYTICS_MISSING",
       "ANALYTICS_PENDING",
       "ANALYTICS_COMPUTING",
@@ -608,6 +703,19 @@ describe("classifyKeyValidationError — shared key-entry error mapping", () => 
     ["Your IP is not on the allowlist", "KEY_IP_ALLOWLIST", 502],
     ["Rate limit exceeded", "KEY_RATE_LIMIT", 503],
     ["429 Too Many Requests", "KEY_RATE_LIMIT", 503],
+    // ⚠️ 140.5-02 / B-02 — RE-POINTED IN THE SAME COMMIT AS THE FIX, and the
+    // re-pointing is the load-bearing part. This row used to read
+    // `"connect ETIMEDOUT 10.0.0.1:443"` and it was the ONLY case exercising
+    // the `timeout|etimedout` branch — so the suite read as covering that arm.
+    // It does not: that is a RAW UNDICI SYSCALL STRING, and `analytics-client`
+    // wraps every transport failure before rethrowing, so no producer can put
+    // it in front of this classifier. The arm it "covered" was dead, and the
+    // real messages ("Analytics service timed out after 15000ms on …", "…is
+    // not reachable…") both fell to UNKNOWN/500. Their replay now lives in the
+    // B-02 block below, against the TYPE marker. The substring branch survives
+    // as a LAST RESORT for a raw syscall string that reaches the classifier
+    // unwrapped from somewhere new, and this row says so out loud rather than
+    // implying production coverage it does not have.
     ["connect ETIMEDOUT 10.0.0.1:443", "KEY_NETWORK_TIMEOUT", 502],
     ["Could not verify the key's permission scopes", "KEY_PROBE_FAILED", 503],
     ["This key has trading permissions", "KEY_HAS_TRADING_PERMS", 400],
@@ -1266,6 +1374,313 @@ describe("[140.3-05 / TS-35] the wire code decides before the substring cascade 
 });
 
 // ══════════════════════════════════════════════════════════════════════════
+// Phase 153.7-02 / WIZFORM-02-CLASS — the EIGHT analytics-service codes that
+// reach `classifyKeyValidationError` and had no verdict row.
+//
+// ⭐ WHY THESE EIGHT AND NOT THE TWENTY. 153.7-01 widened the Python emitter
+// scan (root `analytics-service/**`, plus the `service_error(...)` /
+// `service_error_body(...)` / `service_error_response(...)` /
+// `VenueTransientHTTPException(code=…)` call shapes) from 17 codes to 37, and
+// left 20 with no disposition. Twelve of the twenty render through a DIFFERENT
+// classifier and take a reasoned `VENUE_WIRE_CODES_WITHOUT_VERDICT` row. These
+// eight are raised inside `validate_key` / `encrypt_key` (`routers/exchange.py`)
+// or by the `verify_service_key` HTTP middleware (`main.py`), all of which sit
+// under the `try` that `create-with-key` and `composite/add-key` catch — so
+// every one of them arrives at this classifier as `err.seamCode`.
+//
+// ⭐ THE MEASURED HARM, recorded here because it is what these cases exist to
+// stop regressing: at 153.7-01's HEAD all eight replays below answered
+// `{ code: "UNKNOWN", status: 500 }` — the terminal that admits knowing nothing
+// — and `ConnectKeyStep` / `MultiKeyConnectStep` rendered "We could not
+// classify this failure" for a fault the server had classified precisely. The
+// eight-code family is NOT MT5-specific: `EXCHANGE_PROBE_FAILED` is a 424 with
+// `retryable=True` and `dependency=<the caller's venue>` on EVERY venue.
+//
+// ⚠️ THE MESSAGES BELOW ARE THE REAL PYTHON `detail=` ARGUMENTS, byte-copied
+// from their emitters, and each case carries a NO-CODE CONTROL asserting the
+// same sentence still lands where the substring cascade puts it. That control
+// is what makes "the machine code moved the verdict" checkable instead of
+// asserted — the same construction the 140.3-05 block above uses.
+// ══════════════════════════════════════════════════════════════════════════
+describe("[153.7-02 / WIZFORM-02-CLASS] every code that reaches classifyKeyValidationError has a verdict", () => {
+  /** A seam client throw: a plain Error carrying the own `seamCode` property. */
+  function seamThrow(message: string, seamCode: string): Error {
+    return Object.assign(new Error(message), { seamCode });
+  }
+
+  it("MT5_GATEWAY_UNCONFIGURED renders the permanent our-side fault, not UNKNOWN/500", () => {
+    // Four emitters, all reached from `validate_key`: the unset-env and
+    // malformed-port arms of `_validate_mt5_key_probe`, the D-24 IPC ordering
+    // inversion inside `_connect_and_probe`, and the D-31 `undetermined`
+    // refusal when the gateway terminal has trade permission off. All four are
+    // `retryable=False` — an operator must act, so no retry affordance may
+    // render.
+    const detail =
+      "The MetaTrader gateway is not configured. This needs an operator, not a retry.";
+    expect(classifyKeyValidationError(seamThrow(detail, "MT5_GATEWAY_UNCONFIGURED"))).toEqual({
+      code: "SEAM_INTERNAL_FAULT",
+      status: 500,
+    });
+    // NO-CODE CONTROL: the cascade cannot read this sentence, so the verdict
+    // above is the table's doing and not a reworded predicate's.
+    expect(classifyKeyValidationError(new Error(detail))).toEqual({
+      code: "UNKNOWN",
+      status: 500,
+    });
+  });
+
+  it("MT5_GATEWAY_UNREACHABLE renders the no-answer verdict, never the breaker's", () => {
+    // Two emitters, both in `_connect_and_probe`: the connect-stage
+    // `asyncio.TimeoutError` and the broad connect failure. `retryable=True`
+    // with a Retry-After. ⛔ NEVER `SERVICE_UNAVAILABLE_RETRY` — its copy says
+    // "this request was never sent", which is knowable for a breaker that
+    // DECLINED to send and false-by-construction here, where the connect WAS
+    // attempted. `classifyKeyValidationError`'s own transport block writes that
+    // trap down; this row is the case that proves it was obeyed.
+    const detail = "The MetaTrader gateway is not responding. Try again shortly.";
+    const verdict = classifyKeyValidationError(
+      seamThrow(detail, "MT5_GATEWAY_UNREACHABLE"),
+    );
+    expect(verdict).toEqual({ code: "SERVICE_UNREACHABLE", status: 503 });
+    expect(
+      verdict.code,
+      "A request that WAS issued must never be told nothing was submitted.",
+    ).not.toBe("SERVICE_UNAVAILABLE_RETRY");
+    expect(classifyKeyValidationError(new Error(detail))).toEqual({
+      code: "UNKNOWN",
+      status: 500,
+    });
+  });
+
+  it("EGRESS_PROXY_MISCONFIGURED renders the stopped-before-sending verdict", () => {
+    // `_validate_sfox_key`: `make_sfox_client` raises at CONSTRUCTION, above
+    // the `get_balances()` try, so no request left the process and nothing
+    // changed. That is what makes SEAM_MISCONFIGURED's "we stopped before
+    // sending the request. Nothing was submitted and nothing was changed"
+    // knowable here rather than assumed.
+    const detail =
+      "The service's outbound proxy is misconfigured. This needs an operator, not a retry.";
+    expect(classifyKeyValidationError(seamThrow(detail, "EGRESS_PROXY_MISCONFIGURED"))).toEqual({
+      code: "SEAM_MISCONFIGURED",
+      status: 500,
+    });
+    expect(classifyKeyValidationError(new Error(detail))).toEqual({
+      code: "UNKNOWN",
+      status: 500,
+    });
+  });
+
+  it("SERVICE_KEY_UNCONFIGURED renders the stopped-before-sending verdict", () => {
+    // `verify_service_key` is Starlette HTTP middleware and refuses BEFORE
+    // `call_next`, so no handler ran, no venue was contacted and no row was
+    // written. ⚠️ This is a RENDERING disposition only — the gate itself is
+    // untouched, and the copy names a remedy rather than the secret.
+    const detail = "Service not configured";
+    expect(classifyKeyValidationError(seamThrow(detail, "SERVICE_KEY_UNCONFIGURED"))).toEqual({
+      code: "SEAM_MISCONFIGURED",
+      status: 500,
+    });
+    expect(classifyKeyValidationError(new Error(detail))).toEqual({
+      code: "UNKNOWN",
+      status: 500,
+    });
+  });
+
+  it("KEK_UNAVAILABLE renders the stopped-before-sending verdict", () => {
+    // `encrypt_key`'s first statement is `get_kek()`; its RuntimeError fires
+    // before any ciphertext exists and before the storage RPC is reached, so
+    // nothing was submitted and nothing was changed.
+    const detail =
+      "Credential encryption is not configured. This needs an operator, not a retry.";
+    expect(classifyKeyValidationError(seamThrow(detail, "KEK_UNAVAILABLE"))).toEqual({
+      code: "SEAM_MISCONFIGURED",
+      status: 500,
+    });
+    expect(classifyKeyValidationError(new Error(detail))).toEqual({
+      code: "UNKNOWN",
+      status: 500,
+    });
+  });
+
+  it("EXCHANGE_PROBE_FAILED — the venue-agnostic 424 — renders the probe verdict", () => {
+    // `validate_key`'s `except ccxt.BaseError` arm: a venue-attributable escape
+    // from `validate_key_permissions`, 424, `retryable=True`,
+    // `dependency=req.exchange`. Same verdict and status as the incumbent
+    // `PROBE_FAILED` row, because it is the same fact told by a different
+    // producer.
+    const detail =
+      "Your exchange did not complete the permission check. This is a problem at the venue — try again shortly.";
+    expect(classifyKeyValidationError(seamThrow(detail, "EXCHANGE_PROBE_FAILED"))).toEqual({
+      code: "KEY_PROBE_FAILED",
+      status: 503,
+    });
+    expect(classifyKeyValidationError(new Error(detail))).toEqual({
+      code: "UNKNOWN",
+      status: 500,
+    });
+  });
+
+  it("ADAPTER_INIT_FAILED renders the permanent our-side fault", () => {
+    // `validate_key`'s `create_exchange` catch. The emitter's own comment
+    // measures the property this verdict rests on: `create_exchange` is a dict
+    // lookup, a dict build and two attribute sets — ZERO network I/O — so a
+    // ccxt signature change, a missing extra or an OOM is OURS and permanent.
+    const detail =
+      "Something went wrong on our side while opening this connection. Nothing is wrong with your key.";
+    expect(classifyKeyValidationError(seamThrow(detail, "ADAPTER_INIT_FAILED"))).toEqual({
+      code: "SEAM_INTERNAL_FAULT",
+      status: 500,
+    });
+    expect(classifyKeyValidationError(new Error(detail))).toEqual({
+      code: "UNKNOWN",
+      status: 500,
+    });
+  });
+
+  it("INTERNAL renders the permanent our-side fault, never a transient-upstream sentence", () => {
+    // `validate_key`'s generic escape from `validate_key_permissions`. The
+    // venue probe HAD been issued, so no "we stopped before sending" copy may
+    // carry it; and `retryable=False`, so no "transient upstream issue" copy
+    // may either — `KEY_PROBE_FAILED` would render a Retry control against a
+    // fault that fails identically on every attempt.
+    const detail =
+      "Something went wrong on our side while checking this key. Nothing is wrong with your key.";
+    const verdict = classifyKeyValidationError(seamThrow(detail, "INTERNAL"));
+    expect(verdict).toEqual({ code: "SEAM_INTERNAL_FAULT", status: 500 });
+    expect(
+      verdict.code,
+      "A permanent fault in our own code must not be dressed as a transient " +
+        "upstream blip with a Retry control.",
+    ).not.toBe("KEY_PROBE_FAILED");
+    expect(classifyKeyValidationError(new Error(detail))).toEqual({
+      code: "UNKNOWN",
+      status: 500,
+    });
+  });
+
+  it("none of the eight verdicts offers a control that cannot work", () => {
+    // ⭐ THE BEHAVIOURAL HALF, derived rather than restated: `buildEnvelope`
+    // decides `recoverable` from `actions` against `RECOVERABLE_ACTIONS`, and
+    // `ErrorEnvelope` renders Retry iff `recoverable && onRetry`. The four
+    // permanent codes are `retryable=False` at their emitters, so a Retry
+    // control on them is a false affordance — the 2026-08-08 defect the founder
+    // hit. The two transient ones must keep theirs.
+    for (const code of ["SEAM_MISCONFIGURED", "SEAM_INTERNAL_FAULT"] as const) {
+      expect(
+        buildEnvelope(code as WizardErrorCode, "corr-153-7").recoverable,
+        `${code} is raised with retryable=False upstream; a Retry control cannot clear it.`,
+      ).toBe(false);
+    }
+    for (const code of ["SERVICE_UNREACHABLE", "KEY_PROBE_FAILED"] as const) {
+      expect(
+        buildEnvelope(code as WizardErrorCode, "corr-153-7").recoverable,
+        `${code} is raised with retryable=True upstream; the Retry control must stay.`,
+      ).toBe(true);
+    }
+  });
+
+  /**
+   * ⭐ 153.7 review WR-01 — THE MEMBER'S OWN RULE, APPLIED TO ITS OWN COPY.
+   *
+   * `wizardErrors.ts`' union comment states the rule that picked this member:
+   * *take the MOST SPECIFIC member every one of whose claims is true at EVERY
+   * emitter*. `SEAM_INTERNAL_FAULT` shipped breaking it one clause down — it
+   * predicted *"Retrying will not clear it: the same fault runs again until we
+   * fix it"* across three wire codes where that is true at ONE:
+   *
+   *   · `MT5_GATEWAY_UNCONFIGURED` — true (operator faults, all four emitters).
+   *   · `ADAPTER_INIT_FAILED` — FALSE at a third of the emitter's OWN declared
+   *     cause set: `routers/exchange.py` enumerates "a ccxt signature change,
+   *     an ImportError on a missing extra or an **OOM**". An OOM clears.
+   *   · `INTERNAL` — UNKNOWABLE: `validate_key_permissions`' bare
+   *     `except Exception` residue, open by construction.
+   *
+   * ⛔ THE REMEDY IS NOT A RETRY CONTROL, and this test asserts that too. The
+   * CLASSIFICATION was right — all three are `retryable=False` upstream, and
+   * `recoverable` is DERIVED from `actions` carrying neither member of
+   * `RECOVERABLE_ACTIONS`. Only the PREDICTION was wrong. A "fix" that answered
+   * this test by adding `clear_and_retry` would re-open the 2026-08-08 defect
+   * (a control the founder clicked five times against a fault that cannot clear
+   * by itself), so the recoverable half is pinned in the same case.
+   *
+   * ⛔ AND IT IS NOT A PINNED SENTENCE. The assertion is over a hand-typed
+   * PHRASE CLASS, not over the copy we happen to ship, so a reword that keeps
+   * the honest meaning stays green and a reword that re-introduces the
+   * prediction reds. The POSITIVE CONTROL is what makes that checkable:
+   * `SEAM_MISCONFIGURED` legitimately claims permanence — its emitter really is
+   * a setting that stays wrong until we redeploy, true at every one of its
+   * emitters — so the same predicate MUST flag it. If the control ever goes
+   * quiet, the predicate stopped matching and the negative half below became
+   * vacuous.
+   */
+  it("[WR-01] SEAM_INTERNAL_FAULT never predicts that a retry cannot help — and still offers no Retry", () => {
+    // Hand-typed, lower-cased. Each is a claim about what a FUTURE attempt
+    // would do — the class of sentence no member homing an `except Exception`
+    // residue or an OOM-capable emitter may make.
+    const PERMANENCE_PREDICTIONS = [
+      "will not clear it",
+      "will not clear this",
+      "the same fault runs again",
+      "fails identically",
+      "retrying will not",
+      "trying again will not",
+      "will fail again",
+      "cannot succeed",
+    ] as const;
+
+    const phrasesIn = (code: WizardErrorCode): string[] => {
+      const copy = WIZARD_ERROR_COPY[code];
+      const haystack = [copy.title, copy.cause ?? "", ...(copy.fix ?? [])]
+        .join("   ")
+        .toLowerCase();
+      return PERMANENCE_PREDICTIONS.filter((p) => haystack.includes(p));
+    };
+
+    // POSITIVE CONTROL FIRST — the predicate is live, and the phrase list is
+    // not a list of sentences nobody writes.
+    expect(
+      phrasesIn("SEAM_MISCONFIGURED"),
+      "The permanence-prediction predicate matched NOTHING in SEAM_MISCONFIGURED, " +
+        "whose copy legitimately says 'Retrying will not clear it: the setting " +
+        "stays wrong until we fix it and redeploy.' The predicate has gone " +
+        "blind, so the assertion below is passing for the wrong reason. ⛔ Fix " +
+        "the phrase list, never delete this control.",
+    ).not.toEqual([]);
+
+    expect(
+      phrasesIn("SEAM_INTERNAL_FAULT"),
+      "SEAM_INTERNAL_FAULT's copy predicts what a second attempt would do. It " +
+        "homes THREE wire codes and the prediction is true at ONE of them: " +
+        "ADAPTER_INIT_FAILED's own emitter comment names an OOM among its " +
+        "causes (an OOM clears on retry), and INTERNAL is validate_key_" +
+        "permissions' bare `except Exception` residue, whose content is open by " +
+        "construction. That is the SAME true-at-three-of-four defect this member " +
+        "was minted to avoid. ⛔ THE REMEDY IS TO STOP PREDICTING — say the " +
+        "fault is ours and that no key was stored — NOT to add a Retry control, " +
+        "which the next assertion forbids.",
+    ).toEqual([]);
+
+    // The half that must NOT move. `recoverable` is derived, so this reds if a
+    // reader "fixes" the sentence above by making the fault retryable.
+    expect(
+      buildEnvelope("SEAM_INTERNAL_FAULT", "corr-wr-01").recoverable,
+      "All three wire codes are retryable=False at the emitter. Removing the " +
+        "false PREDICTION does not make the fault recoverable, and a Retry " +
+        "control here is the 2026-08-08 defect returning.",
+    ).toBe(false);
+
+    // And the measured half stays verbatim: the write was never reached, which
+    // both key routes' pre-RPC assertions pin.
+    expect(
+      WIZARD_ERROR_COPY.SEAM_INTERNAL_FAULT.cause,
+      "The 'no key was stored' claim is MEASURED (validateKey precedes " +
+        "encryptKey and the create RPC on both key routes) and is the only " +
+        "thing this card can promise. Do not lose it while rewording.",
+    ).toContain("no key was stored");
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════════
 // Phase 140.3-10 / TRAP-4 — no error state offers a destructive control as its
 // only way forward.
 //
@@ -1287,7 +1702,8 @@ describe("[140.3-10 / TRAP-4] the whole copy table, scanned for destructive-only
    * HAND-TYPED. Never derived from the module under test — deriving either set
    * from `wizardErrors.ts` would make this a self-referential oracle that
    * cannot fail when the module changes, which is the exact defect the phase's
-   * economic-invariant rule names.
+   * economic-invariant rule names. (140.5-02 bumps the size literal below to
+   * 57; see the twin guard's note for the per-entry reasoning re-run.)
    *
    * `start_fresh` is destructive because WizardClient's handler DELETEs the
    * draft row, cascading away every `strategy_keys` member under it. It is the
@@ -1336,16 +1752,386 @@ describe("[140.3-10 / TRAP-4] the whole copy table, scanned for destructive-only
    * without re-running it is how a growing table smuggles a violation past a
    * size guard.
    *
+   * **57 at 140.5-02**, which added `KEY_MISSING_READ_SCOPE` and
+   * `KEY_PERMISSION_DENIED` (SEAMPROSE-03 — two venue wire codes that had no
+   * honest verdict). Both carry `try_another_key` + `request_call`: NO
+   * destructive member, so this guard is unaffected in substance. The
+   * reasoning below was re-run over both new entries BEFORE the number moved.
+   *
+   * **61 at 142.2-07**, which added `KEY_MISSING_REQUIRED_FIELD`,
+   * `KEY_UNSUPPORTED_VENUE`, `KEY_VENUE_NOT_ENABLED` and `KEY_INPUT_TOO_LONG`
+   * (MT5-04 / D-05 — the four causes `KEY_INVALID_FORMAT` used to swallow). The
+   * reasoning was re-run over all four before the number moved: three carry
+   * `clear_and_retry` + `request_call` and the fourth (`KEY_VENUE_NOT_ENABLED`)
+   * carries `request_call` alone. NONE carries `start_fresh`, so the destructive
+   * class below is unchanged at four members and this guard is unaffected in
+   * substance. `KEY_VENUE_NOT_ENABLED`'s single-action shape was checked against
+   * the guard directly rather than assumed: the scan only examines entries that
+   * DO carry a destructive action, so an entry with one non-destructive action
+   * is out of its population by construction.
+   *
+   * **62 at the 142.2 code review (FIX 1)**, which added
+   * `GATE_SERIES_PROVENANCE_UNVERIFIED` — the honest answer for a strategy whose
+   * daily series no producer has examined, replacing a false
+   * `GATE_INSUFFICIENT_TRADES` for that state. The reasoning was re-run before
+   * the number moved, and this entry is one THIS guard has a direct stake in:
+   * its actions are `clear_and_retry` + `request_call`, carrying NEITHER
+   * `try_another_key` NOR `start_fresh`, so the destructive class below is
+   * unchanged at four members and the entry is out of the scanned population by
+   * construction. That exclusion is the fix, not a side effect — the state it
+   * replaces rendered `try_another_key`, whose control fires
+   * `handleDeleteDraft()` and destroys the draft plus every `strategy_keys`
+   * member under it. Answering "we never recorded where your returns came from"
+   * with "delete your work" is the dead end the code was minted to remove, so
+   * re-adding a destructive action here would defeat its purpose.
+   *
    * Without it a table that SHRANK — an entry deleted, or the export replaced
    * by an empty object — would satisfy every assertion below vacuously. A scan
    * over nothing passes.
+   *
+   * **63 at MT5-13**, which added `KEY_SCOPE_CHECK_UNAVAILABLE` — the permanent
+   * sibling of `KEY_NETWORK_TIMEOUT`, for a finalize scope re-check that will
+   * not succeed on a retry. The reasoning was re-run before the number moved.
+   * Its actions are `request_call` ALONE: no `try_another_key`, no
+   * `start_fresh`, so the destructive class below is unchanged at four members
+   * and the entry is out of the scanned population by construction — the same
+   * shape `KEY_VENUE_NOT_ENABLED` established. That is load-bearing here rather
+   * than incidental: the whole reason this code exists is that the condition is
+   * not the user's to clear, so offering a control that deletes their draft
+   * would be the worst possible answer to it.
+   *
+   * **64 at the 151 review (E5/E6)**, which added
+   * `ALLOCATION_NOT_ALLOCATABLE` — the allocate surface's one actionable
+   * refusal, previously collapsed to `UNKNOWN`. The reasoning was re-run before
+   * the number moved. Its actions are `leave_and_return` + `expand_log`:
+   * NEITHER `try_another_key` NOR `start_fresh`, so the destructive class below
+   * is unchanged at four members and the entry is out of the scanned population
+   * by construction. That exclusion is load-bearing rather than incidental —
+   * the remedy for this state is a MARK on a strategy the user keeps, so a
+   * control that deletes their draft would destroy the very thing the copy tells
+   * them to go and fix.
+   *
+   * **74 at 153.1-04** (WIZFORM-02), which added TEN members in one wave:
+   * the seven field-level metadata refusals (`METADATA_NAME_INVALID`,
+   * `METADATA_DESCRIPTION_TOO_SHORT`, `METADATA_DESCRIPTION_TOO_LONG`,
+   * `METADATA_CATEGORY_REQUIRED`, `METADATA_AUM_INVALID`,
+   * `METADATA_CAPACITY_INVALID`, `METADATA_CAPITAL_OWNERSHIP_INVALID`), plus
+   * `SEAM_DEADLINE_EXCEEDED`, `COMPOSITE_UNSUPPORTED_UNIFIED` and
+   * `DRAFT_STATE_INVALID`. The number was READ OUT OF THIS GUARD'S OWN FAILURE
+   * (`expected 74 to be 64`) rather than copied from the plan's arithmetic, and
+   * the reasoning below was re-run over all ten BEFORE it moved.
+   *
+   * THIS guard's population is entries carrying a DESTRUCTIVE action, and
+   * `DESTRUCTIVE_ACTIONS` has exactly one member: `start_fresh`. Per entry:
+   *   · the seven metadata refusals carry `["expand_log"]` and nothing else —
+   *     one non-destructive, non-actionable control apiece;
+   *   · `SEAM_DEADLINE_EXCEEDED` and `COMPOSITE_UNSUPPORTED_UNIFIED` carry
+   *     `request_call` + `expand_log`;
+   *   · `DRAFT_STATE_INVALID` carries `leave_and_return` + `expand_log`.
+   * NONE of the ten carries `start_fresh`, so all ten are outside the scanned
+   * population by construction and the destructive class below is unchanged at
+   * four members — which the `toEqual([...])` receipt two `it`s down asserts
+   * independently rather than by this reasoning.
+   *
+   * ⭐ That exclusion is LOAD-BEARING rather than incidental on `DRAFT_STATE_INVALID`
+   * in particular. Its condition is "this PAGE is stale"; the draft is intact
+   * and is the thing the user wants back. `start_fresh` DELETES that draft and
+   * cascades away every `strategy_keys` member under it, so offering it here
+   * would answer "your page is out of date" by destroying the work. The same
+   * argument applies to the seven metadata refusals, whose whole point is that
+   * the user's typing survives the refusal.
+   *
+   * **75 at 153.6-06** (PARITY-05), which added `KEY_SCOPE_CHECK_UNREADABLE` —
+   * the TRANSIENT half split back off `KEY_SCOPE_CHECK_UNAVAILABLE` for a probe
+   * body our schema could not read, which is what a half-rolled analytics
+   * deploy serves and therefore clears by itself. The number was READ OUT OF
+   * THIS GUARD'S OWN FAILURE (`expected 75 to be 74`), and the reasoning was
+   * re-run over the entry before it moved.
+   *
+   * THIS guard's population is entries carrying a DESTRUCTIVE action, and
+   * `DESTRUCTIVE_ACTIONS` has exactly one member: `start_fresh`. The new entry
+   * carries `clear_and_retry` + `request_call` — NEITHER `start_fresh` NOR
+   * `try_another_key` — so it is outside the scanned population by construction
+   * and the destructive class below is unchanged at four members.
+   *
+   * ⭐ That exclusion is LOAD-BEARING rather than incidental, and in a way worth
+   * stating because this entry is the first RECOVERABLE one added since 74. The
+   * condition is a deploy of OURS in flight: the draft is intact, the user did
+   * nothing wrong, and the remedy is to wait thirty seconds. `start_fresh`
+   * DELETES that draft and cascades away every `strategy_keys` member under it,
+   * so offering it here would answer "our release is still rolling" by
+   * destroying the user's work. `clear_and_retry` is the whole point of the
+   * entry — it is a control that CAN win, unlike the one on the permanent
+   * sibling it was split off — and it is not destructive.
    *
    * Deliberately NOT `Object.keys(WIZARD_ERROR_COPY).length`: reading the
    * subject to build the expectation is how a guard stops being able to fail.
    * Bumping the LITERAL when the table legitimately grows is the intended
    * maintenance cost; replacing it with a derived value removes the guard.
+   *
+   * **76 at 154.1** (the WIZCONT-02 review CR), which added
+   * `VENUE_ALREADY_CONNECTED` — the refusal for a re-connect whose venue account
+   * is already held by a strategy that has LEFT the draft state. Split off
+   * `DRAFT_ALREADY_EXISTS`, whose every clause ("a draft… already in progress",
+   * resume it, or start fresh) is false once the holder is finalized. The number
+   * was READ OUT OF THIS GUARD'S OWN FAILURE (`expected 76 to be 75`), and the
+   * reasoning was re-run over the entry before it moved.
+   *
+   * THIS guard's population is entries carrying a DESTRUCTIVE action, and
+   * `DESTRUCTIVE_ACTIONS` has exactly one member: `start_fresh`. The new entry
+   * carries `request_call` + `expand_log` — NEITHER `start_fresh` NOR either
+   * recoverable action — so it is outside the scanned population by construction
+   * and the destructive class below is unchanged at four members.
+   *
+   * ⭐ That exclusion is LOAD-BEARING rather than incidental, and it is the
+   * sharpest instance of this guard's own subject so far. The entry it was split
+   * from DOES offer `start_fresh`, and that is correct there: a draft exists and
+   * deleting it is a real choice. Here there is no draft, so the SAME control
+   * would delete the finished strategy's own wizard session — offering to
+   * destroy the very thing the copy tells the user to go and open, for a state
+   * they did not cause.
+   *
+   * **76 → 77 at 153.7-02** (WIZFORM-02-CLASS), which added
+   * `SEAM_INTERNAL_FAULT` — the permanent our-side fault that homes
+   * `MT5_GATEWAY_UNCONFIGURED`, `ADAPTER_INIT_FAILED` and `INTERNAL`, three wire
+   * codes for which `SEAM_MISCONFIGURED`'s "we stopped before sending the
+   * request" is measurably false at an emitter. THIS guard's reasoning was
+   * re-run over the entry before the number moved: its `actions` are
+   * `request_call` + `expand_log` — NEITHER `start_fresh` NOR either recoverable
+   * action — so it is outside the scanned population by construction and the
+   * destructive class below is unchanged at four members.
+   *
+   * ⭐ The exclusion is load-bearing here in the same way it is for
+   * `VENUE_ALREADY_CONNECTED` above: `start_fresh` DELETEs the draft, and this
+   * entry is reached mid-key-connect on a draft the user is still building.
+   * Offering to destroy it for a fault they did not cause, and cannot clear,
+   * would be the destructive-only class in its worst form.
+   *
+   * **77 → 80 at 153.7-03** (WIZFORM-02-CLASS), which added
+   * `DRAFT_LOOKUP_FAILED`, `DRAFT_FINALIZE_FAILED` and
+   * `SEAM_RESPONSE_UNREADABLE` — the copy for the last three `finalize-wizard`
+   * rejections that answered with no code at all, taking that route's code-less
+   * ledger to zero. THIS guard's reasoning was re-run over each of the three
+   * before the number moved, and the answer is the same for all three: their
+   * `actions` are `clear_and_retry` + `request_call` (twice) and
+   * `leave_and_return` + `request_call` + `expand_log` — NO `start_fresh` on
+   * any of them — so all three sit outside the scanned population by
+   * construction and the destructive class below is unchanged at four members.
+   *
+   * ⭐ The exclusion is load-bearing on the same ground as the two entries
+   * above, and most sharply on `SEAM_RESPONSE_UNREADABLE`: that entry is
+   * reached when a submission was ACCEPTED upstream and only its answer was
+   * unreadable, so `start_fresh` would offer to delete the draft behind a
+   * strategy that may already exist — destroying the record the copy sends the
+   * user to go and check.
+   *
+   * **80 → 81 at the 160-05 review** (WIZFORM-02-CLASS), which added
+   * `STALE_CLIENT` — the 409 `keys/validate-and-encrypt` answers a tab that
+   * predates RANK-03's `persist` conversion, and the one code that route emits
+   * which was in NEITHER the union NOR the alias table, so it resolved to
+   * `UNKNOWN`. THIS guard's reasoning was re-run over the entry before the
+   * number moved: its `actions` are `leave_and_return` + `expand_log` — NO
+   * `start_fresh`, and neither member of `RECOVERABLE_ACTIONS` — so it sits
+   * outside the scanned population by construction and the destructive class
+   * below is unchanged at four members.
+   *
+   * ⭐ The exclusion is load-bearing rather than incidental, on the same ground
+   * as `DRAFT_STATE_INVALID`: the condition is "this PAGE is out of date", and
+   * `start_fresh` DELETEs a draft. This refusal knows nothing about any draft —
+   * it fires on a key-management surface that may have none — so offering to
+   * destroy one would answer a stale bundle by destroying unrelated work.
+   *
+   * **82 → 83 at 161-07** (WIZERR-09) — `GATE_INSUFFICIENT_CSV_HISTORY`, the
+   * 7-day floor on a DAILY-RETURN series, minted in the same commit the
+   * wizard's composite arm starts evaluating that floor. (82 was
+   * `KEY_ORPHANED` at 161-05; its copy is pinned by the `[161-05 / WIZERR-03]`
+   * describe.) THIS guard's reasoning was re-run over the entry before the
+   * number moved: its `actions` are `clear_and_retry` ALONE — not a member of
+   * `DESTRUCTIVE_ACTIONS` — so it sits outside the scanned population by
+   * construction and the destructive class below is unchanged at four members.
+   *
+   * ⛔ The exclusion is load-bearing rather than incidental. `start_fresh`
+   * DELETEs a draft, and the condition here is "the series is not long enough
+   * YET" — a strategy whose data is fine and whose remedy is time. Answering a
+   * shortage of days with a control that destroys the days already accumulated
+   * is the TRAP-4 shape exactly.
+   *
+   * **83 → 84 at 161-07** (WIZERR-10) — `GATE_SERIES_EXAMINED_REFUSED`, the
+   * truthful fourth CSV-verdict outcome, replacing "Strategy has only 0
+   * trade(s)" for a strategy with a full daily-return series and no fills.
+   * THIS guard's reasoning was re-run over the entry before the number moved:
+   * its `actions` are `try_another_key` ALONE — not a member of
+   * `DESTRUCTIVE_ACTIONS` — so it too sits outside the scanned population and
+   * the destructive class below is still four members.
+   *
+   * ⚠️ IT WAS NOT ALWAYS OUTSIDE. `try_another_key` fired
+   * `handleDeleteDraft()` until 161-04 / WIZERR-02 made it a pure step
+   * transition. Had this entry been written before that commit, it would have
+   * answered "the venue's data cannot prove a complete record" with a control
+   * that destroys the draft — which is why the two requirements were sequenced
+   * into different waves rather than merely written down in the same phase.
+   *
+   * ⚠️ THIS NUMBER HAS A TWIN. The same literal is pinned in the
+   * `[140.3-12 / SEAMUX-04]` describe below, and moving one without the other
+   * is a silent half-fix — the shrink-detection it buys survives in one scan
+   * and dies in the other. 153.1-04 added a third guard (at the end of this
+   * file) that reads this source and reds when the two literals disagree.
+   *
+   * ⚠️ 84 → 88 (161-10 / WIZERR-07). FOUR entries were minted in one
+   * commit — `DASHBOARD_SIGNED_OUT`, `DASHBOARD_REQUEST_INVALID`,
+   * `DASHBOARD_WRITE_FAILED` and `DASHBOARD_ROW_STALE` — for the three
+   * dashboard write dialogs, whose routes classified their failures precisely
+   * while the dialogs rendered `code: "UNKNOWN"` for every one of them. THIS
+   * guard's reasoning was re-run over all four before the number moved: none
+   * carries a member of `DESTRUCTIVE_ACTIONS` (their `actions` are drawn from
+   * `leave_and_return` / `expand_log` / `clear_and_retry` / `request_call`
+   * only), so all four sit OUTSIDE the scanned population and the destructive
+   * class below is still four members. The baseline was re-measured at HEAD
+   * before it moved — 161-05 took it 81 → 82 and 161-07 took it 82 → 84.
+   *
+   * ⚠️ 88 → 89 (161-REVIEW / CR-01). ONE entry —
+   * `DASHBOARD_WRITE_INDETERMINATE` — split out of `DASHBOARD_WRITE_FAILED`,
+   * whose sentence ("Nothing was saved — the strategy is as it was before you
+   * pressed save") was being emitted by arms that had already SENT a
+   * data-modifying statement and could not read what it did. THIS guard's
+   * reasoning was re-run over the new entry before the number moved: its
+   * `actions` are `["leave_and_return", "expand_log"]`, neither of which is a
+   * member of `DESTRUCTIVE_ACTIONS`, so it sits OUTSIDE the scanned population
+   * and the destructive class below is still four members. The baseline was
+   * re-measured at HEAD before it moved — 161-10 took it 84 → 88 and nothing
+   * has moved it since (161-09 minted no members).
+   *
+   * ⛔ AND THE ABSENCE OF `clear_and_retry` ON THE NEW ENTRY IS LOAD-BEARING,
+   * for a reason this guard's sibling class is the closest thing to: a Retry
+   * offered against a write that MAY HAVE APPLIED is not merely futile, it is a
+   * control whose effect the person pressing it cannot foresee — and on the
+   * ownership flip the write in question deletes live positions. That is the
+   * TRAP-4 shape one step removed, which is why the split had to move the
+   * ACTIONS and not only the sentence.
+   *
+   * ⚠️ 89 → 90 (162-05 / D-162-3). ONE entry — `KEY_REUSE_UNAVAILABLE`, the
+   * use-existing-key arm's refusal when no LIVE key of the caller's matches the
+   * `reuse_api_key_id` it was handed. THIS guard's reasoning was re-run over the
+   * new entry BEFORE the number moved: its `actions` are `["try_another_key",
+   * "expand_log"]`, neither of which is a member of `DESTRUCTIVE_ACTIONS`, so it
+   * sits OUTSIDE the scanned population and the destructive class below is still
+   * four members. The baseline was re-measured at HEAD before it moved — 89 is
+   * what 161-REVIEW left and nothing between it and this plan minted a member.
+   *
+   * ⚠️ 90 → 92 (164.2-04 / criteria 4 and 5). TWO entries, and THIS guard's
+   * reasoning was re-run over both BEFORE the number moved:
+   *   · `PRESELECT_REQUEST_INVALID` — `actions: ["leave_and_return",
+   *     "expand_log"]`. Neither is `start_fresh`, so the entry is outside the
+   *     scanned population.
+   *   · `DRAFT_SESSION_COLLISION` — `actions: ["request_call", "expand_log"]`.
+   *     Same reading, and the omission is deliberate rather than incidental:
+   *     it is split off `DRAFT_ALREADY_EXISTS`, which DOES carry `start_fresh`
+   *     and IS in the population, and the resume banner that offers that
+   *     control does not render on the surface this new code is emitted to.
+   * So the destructive class below is STILL four members and neither new entry
+   * changes what this guard scans. The baseline was re-measured at HEAD before
+   * it moved — 90 is what 162-05 left and nothing between it and this plan
+   * minted a member.
+   *
+   * ⚠️ 92 → 93 (164.5.3-02). ONE entry — `KEY_VENUE_ALREADY_CONNECTED`, the
+   * `keys/validate-and-encrypt` persist-INSERT arm's venue-identity 23505
+   * branch (see the union member's own docblock for why it mints). THIS
+   * guard's reasoning was re-run over the new entry BEFORE the number moved:
+   * its `actions` are `["request_call", "expand_log"]`, neither of which is a
+   * member of `DESTRUCTIVE_ACTIONS`, so it sits OUTSIDE the scanned population
+   * and the destructive class below is still four members. The baseline was
+   * re-measured at HEAD before it moved — 92 is what 164.2-04 left and
+   * nothing between it and this plan minted a member.
+   *
+   * ⚠️ 93 → 94 (164.5.4-02 / D-03). ONE entry — `KEY_MUST_BE_RECONNECTED`, the
+   * honest answer to the wire code a decrypt failure raises on
+   * `keys/[id]/rotate-secret`, which until now had no verdict row and reached
+   * the founder as the `UNKNOWN` terminal with a Retry control.
+   *
+   * THIS GUARD IS THE DESTRUCTIVE-ACTION SCAN, so its question is "does the new
+   * entry fall INSIDE the population this scan walks?", and the reasoning was
+   * re-run over the entry BEFORE the number moved:
+   *   · the new entry's `actions` are `["request_call", "expand_log"]`;
+   *   · `DESTRUCTIVE_ACTIONS` above holds exactly ONE member, `start_fresh`;
+   *   · neither action is that member, so the entry sits OUTSIDE the scanned
+   *     population by construction and the destructive class below is
+   *     UNCHANGED at four members.
+   *
+   * ⛔ THE EXCLUSION IS LOAD-BEARING, not incidental, and on a sharper ground
+   * than most of its neighbours. `start_fresh` DELETEs a draft; the condition
+   * here is that a CREDENTIAL WE ALREADY HOLD cannot be read back. A user
+   * reaching this card is on a key-management surface that may have no draft at
+   * all, and the one thing they must not be nudged into is destroying the row
+   * whose synced history is the reason the in-place fix exists. The entry's own
+   * third fix line says as much in the other direction.
+   *
+   * ⚠️ AND THE BASELINE WAS RE-MEASURED AT HEAD BEFORE IT MOVED — 93 is what
+   * 164.5.3-02 left, nothing between it and this plan minted a member, and 94
+   * was READ OFF THIS GUARD'S OWN FAILURE MESSAGE ("expected 94 to be 93"),
+   * never counted off the table. The comment at the head of this file argues
+   * why at length: an expectation built by reading the subject is an oracle
+   * that cannot fail.
+   *
+   * 94 -> 95 (164.6.5 / criterion 5): `KEY_MT5_TERMINAL_UNRESPONSIVE` added.
+   *
+   * ⚠️ 94 → 95 (167-CREDTRUST / plan 01, D-05, D-07). ONE entry —
+   * `KEY_SIGN_IN_FAILED`, the honest answer to the wire code the narrowed
+   * MT5 `except Mt5ClientError` transient tail raises, which until now had
+   * no verdict row and reached the founder as the `KEY_NETWORK_TIMEOUT`
+   * terminal with a Retry control that would re-run the identical validate
+   * against a wedged terminal.
+   *
+   * THIS GUARD IS THE DESTRUCTIVE-ACTION SCAN, so its question is "does the
+   * new entry fall INSIDE the population this scan walks?", and the
+   * reasoning was re-run over the entry BEFORE the number moved:
+   *   · the new entry's `actions` are `["request_call", "expand_log"]`;
+   *   · `DESTRUCTIVE_ACTIONS` above holds exactly ONE member, `start_fresh`;
+   *   · neither action is that member, so the entry sits OUTSIDE the scanned
+   *     population by construction and the destructive class below is
+   *     UNCHANGED at four members.
+   * 95 was READ OFF THIS GUARD'S OWN FAILURE MESSAGE ("expected 95 to be
+   * 94"), never counted off the table.
+   *
+   * ⚠️ 95 → 96 (MERGE 2026-09-23, origin/main into
+   * feat/164.6.5-mt5validatewedge). BOTH additions above landed
+   * independently and each moved this pin 94 → 95 on its own branch:
+   * `KEY_MT5_TERMINAL_UNRESPONSIVE` (164.6.5) and `KEY_SIGN_IN_FAILED`
+   * (167). The merged table holds both, and the value was READ OFF
+   * THIS GUARD'S OWN FAILURE MESSAGE after the merge, never counted:
+   * "expected 96 to be 95". Destructive-scan reasoning re-run for the
+   * pair: `KEY_MT5_TERMINAL_UNRESPONSIVE` carries `["request_call"]`,
+   * `KEY_SIGN_IN_FAILED` carries `["request_call", "expand_log"]`;
+   * neither holds `start_fresh`, so both sit outside the scanned
+   * destructive population.
+   *
+   * ⚠️ 95 → 96 (WIZRESYNC review round 2, SFH HIGH-1). ONE entry —
+   * `SUBMITTED_ANALYTICS_NOT_QUEUED`, finalize-wizard's answer when the
+   * promotion committed and the analytics dispatch after it failed.
+   *
+   * THIS GUARD IS THE DESTRUCTIVE-ACTION SCAN, so its question is "does the
+   * new entry fall INSIDE the population this scan walks?", and the
+   * reasoning was re-run over the entry BEFORE the number moved:
+   *   · the new entry's `actions` are `["clear_and_retry", "request_call"]`;
+   *   · `DESTRUCTIVE_ACTIONS` above holds exactly ONE member, `start_fresh`;
+   *   · neither action is that member, so the entry sits OUTSIDE the scanned
+   *     population by construction and the destructive class below is
+   *     UNCHANGED at four members. That is right on the merits too: the
+   *     submission is SAVED, so the one control that must never be offered is
+   *     one that deletes the draft.
+   * 96 was READ OFF THIS GUARD'S OWN FAILURE MESSAGE in CI run 36063849235
+   * ("expected 96 to be 95"), never counted off the table.
+   *
+   * ⚠️ 96 → 97 (MERGE 2026-09-26, origin/main into
+   * feat/164.6.5-mt5validatewedge, plan 164.6.5-08). The two "95 → 96"
+   * notes above each moved this pin on their own line of history: the
+   * first counts `KEY_MT5_TERMINAL_UNRESPONSIVE` + `KEY_SIGN_IN_FAILED`,
+   * the second `KEY_SIGN_IN_FAILED` + `SUBMITTED_ANALYTICS_NOT_QUEUED`.
+   * The merged table holds all three additions, and the value was READ
+   * OFF THIS GUARD'S OWN FAILURE MESSAGE after the merge, never counted.
+   * Destructive-scan reasoning for the set is unchanged: none of the three
+   * carries `start_fresh`, so all sit outside the scanned population.
    */
-  const EXPECTED_TABLE_SIZE = 55;
+  const EXPECTED_TABLE_SIZE = 97;
 
   it("the scan actually covers the table — hand-typed size guard", () => {
     expect(
@@ -1487,8 +2273,469 @@ describe("[140.3-12 / SEAMUX-04] no entry in the copy table makes a claim we can
    * it says "nothing was changed", which is NOT the banned string and, unlike
    * the CSV case that fragment came from, is knowable — `SeamConfigError` is
    * raised before any store or network I/O, so no write could have landed.
+   *
+   * **57 at 140.5-02** (`KEY_MISSING_READ_SCOPE`, `KEY_PERMISSION_DENIED`).
+   * Both were read against all four FORBIDDEN fragments by hand before the
+   * number moved. Neither mentions notification, trade fetching, or a session
+   * field name. The one needing care is "data is unchanged": neither entry
+   * asserts anything about server state at all — both describe the EXCHANGE's
+   * refusal and the user's remedy, and the key was never stored on either path.
+   * The §4a entry `CSV_UPSTREAM_FAIL` (this plan's other copy change) says
+   * "not your data" and "Nothing was saved", neither of which is the banned
+   * string, and "Nothing was saved" is verified true at its arm at three
+   * layers rather than asserted.
+   *
+   * **61 at 142.2-07** (`KEY_MISSING_REQUIRED_FIELD`, `KEY_UNSUPPORTED_VENUE`,
+   * `KEY_VENUE_NOT_ENABLED`, `KEY_INPUT_TOO_LONG` — MT5-04 / D-05). All four
+   * were read against all four FORBIDDEN fragments by hand before the number
+   * moved. None mentions notification, trade fetching, or a session field name.
+   * The one needing care is again "data is unchanged", because three of the four
+   * DO make a server-state claim: `KEY_MISSING_REQUIRED_FIELD` says "Nothing was
+   * sent to the exchange and nothing was stored" and `KEY_VENUE_NOT_ENABLED`
+   * says "not sent anywhere and nothing was stored". Neither is the banned
+   * string, and both are KNOWABLE rather than asserted — every one of these
+   * guards returns from the route BEFORE `validateKey`, `encryptKey`, the
+   * limiter and the RPC, so no request was issued and no row was written. That
+   * is the same test 140.3-15's entry passed and the CSV case failed: the
+   * question is not whether the sentence is comforting but whether the code path
+   * makes it observable.
+   *
+   * **62 at the 142.2 code review (FIX 1)**
+   * (`GATE_SERIES_PROVENANCE_UNVERIFIED`). Read against all four FORBIDDEN
+   * fragments by hand before the number moved. It mentions no notification, no
+   * trade fetching, and no session field name. The one needing care is again
+   * "data is unchanged", because the entry DOES make a server-state claim:
+   * "nothing on our side recorded how that series was built". That is not the
+   * banned string, and — applying the same test 140.3-15's entry passed and the
+   * CSV case failed — it is OBSERVABLE rather than asserted: it restates the
+   * exact value the gate just read (`strategy_analytics.series_completeness` was
+   * NULL or unrecognised) and is the sole reason the refusal fired. It is not a
+   * negative about a write that may or may not have landed. The entry also
+   * volunteers "This is a gap in our bookkeeping, not a judgement about your
+   * trading", which is a statement about US and is the point of the code.
+   *
+   * **63 at MT5-13** (`KEY_SCOPE_CHECK_UNAVAILABLE`). Read against all four
+   * FORBIDDEN fragments by hand before the number moved. It mentions no
+   * notification, no trade fetching, and no session field name — and note it
+   * deliberately does NOT say "our team has been notified" even though the copy
+   * asks the user to tell us, which is exactly the fragment's point. The one
+   * needing care is again "data is unchanged", because the entry DOES make a
+   * server-state claim twice: "Nothing about your strategy was lost; it stays
+   * exactly where it is" and "Your draft is saved". Neither is the banned
+   * string, and — applying the same test 140.3-15's entry passed and the CSV
+   * case failed — both are OBSERVABLE rather than asserted. This arm returns
+   * from `runScopeBroadeningProbe` BEFORE `finalize_wizard_strategy` is called
+   * at all, which is not a reading of the code but a pinned assertion: the
+   * route's own probe-failure tests check `STATE.rpcCalls` holds no
+   * `finalize_wizard_strategy`. The draft row predates the request and this path
+   * issues no write, so "unchanged" is a property of the control flow rather
+   * than a comfort about a write that may or may not have landed — the
+   * distinction the CSV entry failed on, where the handler HAD run the RPC.
+   *
+   * **64 at the 151 review (E5/E6)** (`ALLOCATION_NOT_ALLOCATABLE`). Read
+   * against all four FORBIDDEN fragments by hand before the number moved. It
+   * mentions no notification, no trade fetching and no session field name. The
+   * one needing care is again the server-state claim: the entry says "the
+   * allocation was refused and nothing was saved". That is OBSERVABLE, not
+   * asserted — the refusal comes from a BEFORE INSERT trigger and from a
+   * pre-check that both run before any row is written, so "nothing was saved" is
+   * a property of the control flow (the route's own tests pin `upsertCalls`
+   * empty on the pre-check arm) rather than a comfort about a write that may or
+   * may not have landed.
+   *
+   * **74 at 153.1-04** (WIZFORM-02) — TEN new entries, every one of them read
+   * against all four FORBIDDEN fragments by hand before the number moved. None
+   * mentions notification, trade fetching, or a session field name, so as ever
+   * the fragment needing care is "data is unchanged", and nine of the ten DO
+   * make a server-state claim. Taken in three groups, because the GROUND for
+   * the claim differs:
+   *
+   *   · **The seven field-level metadata refusals** (`METADATA_NAME_INVALID`,
+   *     `METADATA_DESCRIPTION_TOO_SHORT`, `METADATA_DESCRIPTION_TOO_LONG`,
+   *     `METADATA_CATEGORY_REQUIRED`, `METADATA_AUM_INVALID`,
+   *     `METADATA_CAPACITY_INVALID`, `METADATA_CAPITAL_OWNERSHIP_INVALID`) each
+   *     say "Nothing was saved". Not the banned string, and OBSERVABLE by the
+   *     same test 140.3-15's entry passed and the CSV case failed: every one of
+   *     these is raised inside `validatePayload`, which returns its 400 BEFORE
+   *     the route reaches `finalize_wizard_strategy`, before `postProcessKey`
+   *     and before any write of any kind. "Nothing was saved" is a property of
+   *     the control flow, not a comfort about a request whose outcome we never
+   *     learned. They also claim "everything you typed is still on the form",
+   *     which is a statement about the CLIENT's own DOM — the weakest possible
+   *     claim to make and the one the user actually needs.
+   *
+   *   · **`COMPOSITE_UNSUPPORTED_UNIFIED`** deliberately does NOT claim nothing
+   *     changed, and that is the interesting one. The route stamps
+   *     `strategy_analytics` with `computation_status: "failed"` in the
+   *     statement immediately above the 409, so a "nothing changed" sentence
+   *     here would have been exactly the CSV-entry lie. The copy says instead
+   *     "We stopped and marked the strategy as failed", which restates the row
+   *     the handler just wrote, and narrows its untouched-claim to the keys —
+   *     which that upsert does not touch.
+   *
+   *   · **`DRAFT_STATE_INVALID`** says "This attempt saved nothing, and the
+   *     draft itself is untouched." Ground: the 409 is raised from SQLSTATE
+   *     22023, i.e. the RPC itself raised, so the function's transaction is
+   *     rolled back by Postgres. That is a stronger guarantee than the
+   *     returns-before-write kind above, not a weaker one.
+   *
+   *   · **`SEAM_DEADLINE_EXCEEDED`** says "Nothing was saved — your key was not
+   *     stored". ⚠️ This is the ONE of the ten whose ground is an OBLIGATION ON
+   *     A FUTURE EMITTER rather than a property of code that exists today: the
+   *     member is authored here and Phase 153.4 emits it. The claim holds only
+   *     while the abort fires before the request can persist (the UI-SPEC's
+   *     stated basis: pre-encrypt / pre-RPC). A server does not stop working
+   *     because a client stopped listening — the precise reasoning behind the
+   *     "data is unchanged" ban. The obligation is written at the entry itself
+   *     so 153.4 inherits it; if 153.4 emits this code from a path where the
+   *     write could already have landed, this sentence must change in the same
+   *     commit.
+   *
+   * **75 at 153.6-06** (PARITY-05) — `KEY_SCOPE_CHECK_UNREADABLE`. Read against
+   * all four FORBIDDEN fragments by hand before the number moved. It mentions no
+   * trade fetching and no session field name, and — like its permanent sibling
+   * at 63 — it deliberately does NOT say "our team has been notified" even
+   * though its second bullet asks the user to tell us, which is the fragment's
+   * whole point. The one needing care is again "data is unchanged", because the
+   * entry DOES make a server-state claim: "Nothing about your strategy was lost;
+   * it stays exactly where it is."
+   *
+   * Not the banned string, and OBSERVABLE rather than asserted by the same test
+   * 140.3-15's entry passed and the CSV case failed — and here the ground is a
+   * PINNED assertion rather than a reading of the code: this arm returns from
+   * `runScopeBroadeningProbe` before `finalize_wizard_strategy` is called at
+   * all, and `route.test.ts`'s `[153.6-06 / PARITY-05]` block asserts
+   * `STATE.rpcCalls` holds no `finalize_wizard_strategy` on exactly this path.
+   * The draft row predates the request and this path issues no write.
+   *
+   * ⚠️ ONE CLAUSE IS NEW IN KIND and is the one to re-read if this entry's copy
+   * is ever edited: "a release of ours was mid-rollout". That is a statement
+   * about OUR deploy state, offered as the LIKELY cause rather than as a fact
+   * we checked — the copy says "most often because", and it is hedged for the
+   * same reason the FORBIDDEN list exists. We do not read our own rollout status
+   * on this path, and a sentence asserting we did would be the next member of
+   * this ban list rather than a member of the table.
+   *
+   * **76 at 154.1** (the WIZCONT-02 review CR) — `VENUE_ALREADY_CONNECTED`. Read
+   * against all four FORBIDDEN fragments by hand before the number moved. It
+   * mentions no notification, no trade fetching and no session field name — it
+   * says "half-finished session" precisely so the mechanism's column name never
+   * reaches the user. The one needing care is again "data is unchanged", because
+   * the entry DOES make a server-state claim: "Nothing new was created and the
+   * existing strategy was left exactly as it was."
+   *
+   * Not the banned string, and OBSERVABLE rather than asserted — and it has to
+   * hold on BOTH of the arms that emit this code, which is why it is spelled out
+   * per arm at the entry itself:
+   *   · the PRE-RPC arm returns before `validateKey`, before `encryptKey` and
+   *     before `create_wizard_strategy` is called at all. That is a pinned
+   *     assertion rather than a reading of the code: `create-with-key`'s
+   *     `[154.1]` block asserts `rpcMock`, `validateKeyMock`, `encryptKeyMock`
+   *     and the asset-class update were ALL uncalled on exactly this path.
+   *   · the 23505 RACE arm is only reached because the RPC itself RAISED, so
+   *     Postgres rolled the whole SECURITY DEFINER transaction back — the same
+   *     stronger ground `DRAFT_STATE_INVALID` stands on at 74.
+   *
+   * ⚠️ ONE CLAUSE IS WORTH RE-READING if this entry is ever edited: "that
+   * strategy has moved past the draft stage". That is a claim about the row we
+   * just READ, not an inference — the refusal exists precisely because the
+   * draft-scoped read found nothing and the unscoped one found a row.
+   *
+   * **76 → 77 at 153.7-02** (WIZFORM-02-CLASS) — `SEAM_INTERNAL_FAULT`. Read
+   * against all four FORBIDDEN fragments by hand before the number moved. It
+   * mentions no notification, no trade fetching and no session field name. The
+   * one needing care is again "data is unchanged", because the entry DOES make a
+   * server-state claim: "We never store a key we could not check, so no key was
+   * stored", repeated as "Your key was not stored" in the second fix line.
+   *
+   * Not the banned string, and OBSERVABLE rather than asserted — and it has to
+   * hold at all THREE wire codes this member homes, which is why it was checked
+   * per emitter rather than per entry. All three (`MT5_GATEWAY_UNCONFIGURED`,
+   * `ADAPTER_INIT_FAILED`, `INTERNAL`) are raised inside `validate_key`, and BOTH
+   * key routes call `validateKey` before `encryptKey` and before the create RPC
+   * — the same ordering `create-with-key`'s `[154.1]` block pins with its
+   * `rpcMock` / `encryptKeyMock` uncalled assertions. So the write was never
+   * reached, which is the ground 140.3-15's entry stands on and the ground the
+   * CSV case lacked.
+   *
+   * ⭐ WHAT THE ENTRY DELIBERATELY DOES NOT CLAIM is the more interesting half:
+   * it never says WHERE we stopped. `SEAM_MISCONFIGURED`'s "we stopped before
+   * sending the request" is exactly the clause that is false at `INTERNAL`'s
+   * emitter (the venue probe HAD been issued) and at one of
+   * `MT5_GATEWAY_UNCONFIGURED`'s four, which is why this member exists at all. A
+   * future edit that "improves" the copy by adding that clause re-opens the
+   * defect it was minted to avoid.
+   *
+   * **77 → 80 at 153.7-03** (WIZFORM-02-CLASS) — `DRAFT_LOOKUP_FAILED`,
+   * `DRAFT_FINALIZE_FAILED`, `SEAM_RESPONSE_UNREADABLE`. All three were read
+   * against all four FORBIDDEN fragments by hand before the number moved. None
+   * mentions notification, trade fetching or a session field name — and the
+   * last of those is a near miss worth recording: `SEAM_RESPONSE_UNREADABLE`'s
+   * arm sits one function away from the dedupe mechanism, and the obvious
+   * reassurance ("submitting again resolves to the strategy that already
+   * exists") was DELIBERATELY NOT WRITTEN, because that promise rests on a
+   * partial unique index predicated on a NON-NULL wizard session id and this
+   * route forwards the id through a conditional spread. True for most drafts,
+   * silently false for the rest — which is exactly the shape 140.4-03 recorded
+   * when the same guarantee was published ahead of its mechanism.
+   *
+   * ⭐ "data is unchanged" is again the fragment needing care, and the three
+   * entries answer it DIFFERENTLY, which is the reason they are three members
+   * and not one:
+   *   · `DRAFT_LOOKUP_FAILED` DOES make a server-state claim — "Nothing was
+   *     submitted and nothing was changed". Not the banned string, and
+   *     observable rather than asserted: its arm is a `.maybeSingle()` SELECT
+   *     that errored, and the handler contains no `.insert`, `.update`,
+   *     `.upsert`, `.delete` or `.rpc` before it. A read that fails cannot have
+   *     written, which is the strongest ground of the three.
+   *   · `DRAFT_FINALIZE_FAILED` MAKES NO SUCH CLAIM, on purpose. It is the
+   *     generic tail of the RPC's error branch, so it catches both a SQL raise
+   *     (transaction rolled back, nothing landed) and a transport failure that
+   *     can lose the answer to a write that DID land. It says we cannot confirm
+   *     — true in both worlds — and that omission is the entry's whole point.
+   *   · `SEAM_RESPONSE_UNREADABLE` MAY NOT CLAIM EITHER OUTCOME. Its upstream
+   *     answered 2xx, so the submission was accepted and only the result is
+   *     unreadable. "Nothing was saved" would be false whenever the onboard
+   *     landed; "it went through" would be a guess about a body we could not
+   *     parse. The copy states what the 2xx establishes and nothing further.
+   *
+   * **80 → 81 at the 160-05 review** (WIZFORM-02-CLASS) — `STALE_CLIENT`, the
+   * 409 `keys/validate-and-encrypt` answers a tab loaded before RANK-03 made
+   * `persist: true` mandatory. It was read against all four FORBIDDEN fragments
+   * by hand before the number moved: it mentions no notification, no trade
+   * fetching and no session field name.
+   *
+   * ⭐ "data is unchanged" is again the fragment needing care, because the entry
+   * DOES make a server-state claim — "Nothing reached your exchange and nothing
+   * was stored". Not the banned string, and OBSERVABLE rather than asserted, on
+   * the same ground `DRAFT_LOOKUP_FAILED` stands on: the refusal returns from
+   * the route before `validateKey`, before `encryptKey` and before the insert,
+   * so no request was issued and no row was written. That is the test
+   * 140.3-15's entry passed and the CSV case failed — not whether the sentence
+   * is comforting, but whether the code path makes it observable.
+   *
+   * **82 → 83 at 161-07** (WIZERR-09) — `GATE_INSUFFICIENT_CSV_HISTORY`. Read
+   * against all four FORBIDDEN fragments by hand before the number moved: it
+   * mentions no notification, no trade fetching and no session field name.
+   *
+   * ⛔ "data is unchanged" is again the fragment needing care, and this entry
+   * makes NO claim about a write at all. It says "Nothing is wrong with the
+   * data we have — there is not yet enough of it", which restates the very
+   * measurement that fired the refusal (the gate counted the series and found
+   * it under the floor) rather than asserting a negative about a request whose
+   * outcome we never learned. That is the test 140.3-15's entry passed and the
+   * CSV case failed.
+   *
+   * ⚠️ TWO CLAUSES ARE WORTH RE-READING if this entry is ever edited:
+   *   · the fix bullet says a completed re-derive "rebuilds the series from
+   *     whatever history the venue holds by then". That states the MECHANISM a
+   *     retry runs, deliberately without promising the venue holds more — the
+   *     copy nowhere claims the missing history exists.
+   *   · the UI-SPEC's proposed bullet ("Upload a CSV covering at least 7 daily
+   *     returns") was DELETED rather than reworded, because it named a remedy
+   *     no emitter of this code can reach: the composite arm counts a STITCHED
+   *     series, the single-key arm counts a venue-DERIVED one, and the keyless
+   *     CSV upload path never reaches this surface at all. The measurement is
+   *     argued in full at the entry itself.
+   *
+   * **83 → 84 at 161-07** (WIZERR-10) — `GATE_SERIES_EXAMINED_REFUSED`. Read
+   * against all four FORBIDDEN fragments by hand before the number moved: it
+   * mentions no notification, no trade fetching and no session field name.
+   *
+   * ⛔ "data is unchanged" is again the fragment needing care, and this entry
+   * makes NO claim about a write. Its server-state claim is of a different kind
+   * — "Our pipeline records how every daily-return series was built, and for
+   * this one the record does not establish a complete track record" — which
+   * restates the persisted value the gate just read
+   * (`strategy_analytics.series_completeness`) and is the sole reason the
+   * refusal fired. Same ground `GATE_SERIES_PROVENANCE_UNVERIFIED` stands on at
+   * 62, and the mirror image of it: that entry reports the value's ABSENCE,
+   * this one reports what the value SAYS.
+   *
+   * ⚠️ THE CLAUSE TO RE-READ if this entry is ever edited is the one the
+   * UI-SPEC proposed and this entry does NOT contain: "examined and refused" /
+   * "the data was found wanting". Both assert that something looked at THIS
+   * series and judged it. Measured at the producer
+   * (`analytics-service/services/broker_dailies.py`, "Who stamps what"):
+   * `fill_derived_unproven` is stamped for binance / bybit / okx ALWAYS and
+   * unconditionally — the producer's own words are "a CONSTANT, not a
+   * data-driven refinement" — so no per-series finding exists to report. The
+   * shipped cause describes the two METHODS instead, which is true of every
+   * series that can reach it. A future edit that reaches for the more
+   * satisfying "we examined it" wording is re-opening this exact defect, and
+   * the same wording would be false in the same way.
+   *
+   * ⚠️ THIS NUMBER HAS A TWIN in the `[140.3-10 / TRAP-4]` describe above.
+   * Moving one without the other is a silent half-fix; the guard added at the
+   * end of this file reds when the two literals disagree.
+   *
+   * ⚠️ 84 → 88 (161-10 / WIZERR-07). The same four dashboard-dialog
+   * entries as the twin above. THIS guard's reasoning — no banned claim in any
+   * title, cause or fix line — was re-run over all four before the number
+   * moved: none predicts permanence, none promises a notification, none names
+   * an internal cause the user cannot act on. The baseline was re-measured at
+   * HEAD before it moved (161-05: 81 → 82; 161-07: 82 → 84).
+   *
+   * ⚠️ 88 → 89 (161-REVIEW / CR-01) — `DASHBOARD_WRITE_INDETERMINATE`. Read
+   * against all four FORBIDDEN fragments by hand before the number moved: it
+   * mentions no notification, no trade fetching and no session field name.
+   *
+   * ⛔ "data is unchanged" is the fragment needing care, and this entry is the
+   * one place in the table where the CARE IS THE POINT rather than a formality.
+   * It makes NO claim about a write in EITHER direction: not "nothing was
+   * saved", not "your change went through". Its cause says the request to save
+   * had already been sent, that we cannot tell whether it took effect, and that
+   * we would rather say so than guess. That is `:2470`'s rule
+   * ("'NOTHING WAS SAVED' IS VERIFIED, NOT ASSERTED") applied at the one arm in
+   * this family where the verification is unavailable, and it is the same shape
+   * `SEAM_RESPONSE_UNREADABLE` already carries for an unconfirmed submit.
+   *
+   * ⚠️ THE CLAUSE TO RE-READ if this entry is ever edited is the one it does
+   * NOT contain. A future edit reaching for the more reassuring "nothing was
+   * saved" is re-opening the exact defect the entry was minted to close, and
+   * `DASHBOARD_WRITE_FAILED` still carries that sentence for the arms that
+   * genuinely establish it — so the tempting "unify them again" is a
+   * re-introduction, not a simplification.
+   *
+   * ⚠️ 89 → 90 (162-05 / D-162-3), for `KEY_REUSE_UNAVAILABLE`. THIS guard is
+   * the banned-claims honesty scan, and its reasoning was re-run over the new
+   * entry before the number moved: the entry claims "Nothing was created and
+   * none of your stored keys changed", which BOTH of its emitters can actually
+   * establish — the pre-RPC one has performed two reads and no write, and the
+   * `no_data_found` one is raised inside the function before its INSERT, in a
+   * transaction that rolls back. It carries none of the four FORBIDDEN
+   * fragments.
+   *
+   * ⚠️ 90 → 92 (164.2-04 / criteria 4 and 5). TWO entries, and THIS guard is
+   * the banned-claims honesty scan, so its reasoning was re-run over both
+   * BEFORE the number moved — each read against all four FORBIDDEN fragments
+   * by hand:
+   *   · `PRESELECT_REQUEST_INVALID` claims "Nothing was created, nothing was
+   *     stored, and nothing was sent to your exchange". Its ONE emitter is a
+   *     uuid shape guard that runs before any read, any write and any venue
+   *     hop, so all three negatives are established rather than hoped for. It
+   *     names no internal field, claims no notification, and asserts nothing
+   *     about a fetch stage.
+   *   · `DRAFT_SESSION_COLLISION` claims "Nothing was created by this attempt
+   *     and none of your stored keys changed". Its ONE emitter is the reuse
+   *     arm's 23505, raised inside `create_wizard_strategy_for_key` before its
+   *     INSERT commits and in a transaction that rolls back, and that arm
+   *     writes `api_keys` never. ⚠️ It is deliberately worded as "none of your
+   *     stored keys changed" and NOT as the more reassuring "data is
+   *     unchanged", which is one of the four fragments below.
+   *   ⚠️ AND THE `wizard_session_id` BAN WAS THE SHARP ONE HERE. The collision
+   *     this second entry describes IS a wizard-session constraint, so the
+   *     obvious sentence names the column. It does not: the index name and the
+   *     column triple live in the entry's comment, and the cause says "the
+   *     wizard session this browser is still carrying" instead.
+   *
+   * ⚠️ 92 → 93 (164.5.3-02), for `KEY_VENUE_ALREADY_CONNECTED`. THIS guard is
+   * the banned-claims honesty scan, and its reasoning was re-run over the new
+   * entry before the number moved: the entry claims "Your new key was not
+   * saved", which is knowable rather than hoped for — the 23505 is caught on
+   * the `.insert().select().single()` call itself, so the row this request
+   * tried to write was never created. It names no internal field, claims no
+   * notification, asserts nothing about a fetch stage, and does not say "data
+   * is unchanged" — it carries none of the four FORBIDDEN fragments.
+   *
+   * ⚠️ 93 → 94 (164.5.4-02 / D-03), for `KEY_MUST_BE_RECONNECTED`. THIS guard
+   * is the banned-claims honesty scan, so its question is a different one from
+   * its twin's, and the entry was walked against all four FORBIDDEN fragments
+   * by hand — title, cause and every fix line — BEFORE the number moved:
+   *   · "been notified" — ABSENT. The third fix line asks the user to email
+   *     security@quantalyze.com, which is the opposite claim: it says nobody
+   *     has been told yet and names who to tell.
+   *   · "we fetched your trades" — ABSENT. The entry says nothing about any
+   *     fetch stage; the fault it describes fires before a venue is reached.
+   *   · "wizard_session_id idempotency" — ABSENT, and the near-misses were
+   *     checked rather than assumed: the entry names no column, no env
+   *     variable, no function and no key-management subsystem. The one
+   *     mechanism sentence it carries ("we hold your key encrypted") is a fact
+   *     about the user's key, not an internal identifier.
+   *   · "data is unchanged" — ABSENT, and this is the fragment that needed the
+   *     care. ⭐ THE ENTRY MAKES NO WRITE CLAIM IN EITHER DIRECTION, and that
+   *     is deliberate rather than an omission. At today's ONE reachable
+   *     emitter the reassuring "nothing was saved" would in fact be TRUE — the
+   *     decrypt failure fires before the broker probe and long before the
+   *     Next-side UPDATE — but this table is keyed on a WIRE code, so the
+   *     sentence would be inherited by any future emitter of the same code,
+   *     and `DASHBOARD_WRITE_INDETERMINATE` three paragraphs up is this file's
+   *     record of what it costs to publish a write claim a later emitter makes
+   *     false. The entry claims only what is true of the STORED KEY.
+   *
+   * ⚠️ THE CLAUSE TO RE-READ if this entry is ever edited is the ONE prediction
+   * it does make: "every attempt reads the same stored copy". That is not a
+   * guess about a retry, it is a property of the emitter — the rotation path
+   * decrypts the stored row on every call, before it touches anything the user
+   * just typed — and it is what licenses the absent Retry control. An edit that
+   * softens it into "this may not work" would leave a non-recoverable envelope
+   * with no stated reason for being one; an edit that strengthens it into a
+   * claim about the ACCOUNT would assert something the broker never told us.
+   *
+   * ⚠️ AND THE BASELINE WAS RE-MEASURED AT HEAD BEFORE IT MOVED — 93 is what
+   * 164.5.3-02 left, and 94 was READ OFF THE TWIN GUARD'S FAILURE MESSAGE
+   * ("expected 94 to be 93") rather than counted off the table.
+   *
+   * 94 -> 95 (164.6.5 / criterion 5): `KEY_MT5_TERMINAL_UNRESPONSIVE` added.
+   *
+   * ⚠️ 94 → 95 (167-CREDTRUST / plan 01, D-05, D-07), for `KEY_SIGN_IN_FAILED`.
+   * THIS guard is the banned-claims honesty scan, so its question is a
+   * different one from its twin's, and the entry was walked against all four
+   * FORBIDDEN fragments by hand — title, cause and every fix line — BEFORE
+   * the number moved:
+   *   · "been notified" — ABSENT. The fourth fix line names who to email;
+   *     it says nobody has been told yet, the opposite claim.
+   *   · "we fetched your trades" — ABSENT. The entry says nothing about any
+   *     fetch or trade stage; it is about a sign-in, not a sync.
+   *   · "wizard_session_id idempotency" — ABSENT. The entry names no
+   *     column, no env variable and no internal subsystem.
+   *   · "data is unchanged" — ABSENT, and deliberately so: the entry makes
+   *     NO storage claim in either direction (167-UI-SPEC § Open Question 5
+   *     — whether the validate arm stores anything was not measured for
+   *     this arm, so the copy does not assert it).
+   * 95 was READ OFF THE TWIN GUARD'S FAILURE MESSAGE ("expected 95 to be
+   * 94") rather than counted off the table.
+   *
+   * ⚠️ 95 → 96 (MERGE 2026-09-23, origin/main into
+   * feat/164.6.5-mt5validatewedge). BOTH additions above landed
+   * independently and each moved this pin 94 → 95 on its own branch:
+   * `KEY_MT5_TERMINAL_UNRESPONSIVE` (164.6.5) and `KEY_SIGN_IN_FAILED`
+   * (167). The merged table holds both, and the value was READ OFF
+   * THIS GUARD'S OWN FAILURE MESSAGE after the merge, never counted:
+   * "expected 96 to be 95" (the twin guard read the same). Each
+   * entry's own honesty walk is recorded in its branch's note above;
+   * the scan below runs over both.
+   *
+   * ⚠️ 95 → 96 (WIZRESYNC review round 2, SFH HIGH-1), for
+   * `SUBMITTED_ANALYTICS_NOT_QUEUED`. THIS guard is the banned-claims honesty
+   * scan, and the entry was walked against all four FORBIDDEN fragments by
+   * hand — title, cause and both fix lines — BEFORE the number moved:
+   *   · "been notified" — ABSENT. The second fix line names who to email; it
+   *     says nobody has been told yet, the opposite claim.
+   *   · "we fetched your trades" — ABSENT. The entry names no fetch or trade
+   *     stage; it says only that the analytics step was not queued.
+   *   · "wizard_session_id idempotency" — ABSENT. The entry names no column,
+   *     no env variable and no internal subsystem.
+   *   · "data is unchanged" — ABSENT. ⭐ The entry DOES make a write claim, in
+   *     the other direction ("Your submission is saved"), and it was checked
+   *     against its ONE emitter rather than assumed: finalize-wizard's
+   *     `answerDispatchFailedAfterPromotion` is reached only after
+   *     `callFinalizeWizardRpc` returned success, i.e. the RPC committed the
+   *     promotion or a replay re-read the row as already promoted. On every
+   *     path that reaches this code the claim is true. A future emitter of the
+   *     same code must meet the same precondition.
+   * 96 was READ OFF THIS GUARD'S OWN FAILURE MESSAGE in CI run 36063849235
+   * ("expected 96 to be 95") rather than counted off the table.
+   *
+   * ⚠️ 96 → 97 (MERGE 2026-09-26, origin/main into
+   * feat/164.6.5-mt5validatewedge, plan 164.6.5-08). The two "95 → 96"
+   * notes above were written on separate lines of history; the merged
+   * table holds `KEY_MT5_TERMINAL_UNRESPONSIVE`, `KEY_SIGN_IN_FAILED` and
+   * `SUBMITTED_ANALYTICS_NOT_QUEUED` together. The value was READ OFF THIS
+   * GUARD'S OWN FAILURE MESSAGE after the merge (the twin guard read the
+   * same). Each entry's honesty walk is recorded in its own note above.
    */
-  const EXPECTED_TABLE_SIZE = 55;
+  const EXPECTED_TABLE_SIZE = 97;
 
   it("the scan actually covers the table — hand-typed size guard", () => {
     expect(
@@ -1520,6 +2767,39 @@ describe("[140.3-12 / SEAMUX-04] no entry in the copy table makes a claim we can
         "written beside each fragment in FORBIDDEN above.\n" +
         FORBIDDEN.map((f) => "  - " + f.fragment + ": " + f.why).join("\n"),
     ).toEqual([]);
+  });
+
+  it("[140.4-16 / CR-01] the two CSV resubmit instructions name the CHANGED case, not only the repeat", () => {
+    // ⚠️ WHY THIS IS A GUARD AND NOT A STYLE NOTE. These two entries are the
+    // ONLY copy in the product that instructs a resubmit, and the fence they
+    // describe is scoped to a REPEAT. `wizard_session_id` survives a failed
+    // submit (localStorage.ts:390-393), so the very user reading this sentence
+    // can rename, pick a different file and submit — and until CR-01 that was
+    // silently merged into the first strategy and reported as success.
+    //
+    // Both halves are now refused (process_key.py's 23505 name check, and the
+    // stale-range fence in csv-finalize/route.ts). A refusal the user was never
+    // warned about is still a dead end, so the copy owes them the escape: start
+    // a new strategy. Asserting the ESCAPE rather than banning a phrase is
+    // deliberate — a fragment ban is satisfied by deleting the sentence, which
+    // would leave the user with less information, not more.
+    for (const code of ["CSV_SUBMIT_FAILED", "CSV_SUBMIT_NO_STRATEGY_ID"] as const) {
+      const copy = WIZARD_ERROR_COPY[code];
+      const haystack = [copy.title, copy.cause, ...copy.fix]
+        .join("   ")
+        .toLowerCase();
+      expect(
+        haystack.includes("same file"),
+        `${code} instructs a resubmit without saying WHICH file. The fence ` +
+          `only holds for an unchanged one; a changed resubmit is refused.`,
+      ).toBe(true);
+      expect(
+        haystack.includes("start a new strategy"),
+        `${code} tells the user to submit again but never tells them what to ` +
+          `do if the file or the name changed — which is now a refusal, not a ` +
+          `merge. Without the escape they are dead-ended by our own guard.`,
+      ).toBe(true);
+    }
   });
 
   it("the guard can actually see a fix[] line, not only the title", () => {
@@ -1850,5 +3130,3151 @@ describe("[140.3-15 / TS-38] SEAM_MISCONFIGURED — our fault, permanent, no ret
       "SERVICE_UNAVAILABLE_RETRY",
     );
     expect(recogniseSeamErrorCode("NOT_A_SEAM_CODE")).toBe("UNKNOWN");
+  });
+});
+
+// ===========================================================================
+// Phase 140.5-02 / SEAMPROSE-03 — the §4a vocabulary
+// ===========================================================================
+
+describe("[140.5-02 / SEAMPROSE-03] DEF-140.4-C — ONE sentence for an unrecognised upstream failure", () => {
+  /**
+   * ORACLE INDEPENDENCE. Every expected string below is a LITERAL, transcribed
+   * by hand from `140.5-CONTEXT.md` §4a (founder-authored, pre-approved copy).
+   * Nothing here is imported from, or derived from, the module under test — a
+   * `toBe(WIZARD_ERROR_COPY.X.title)` assertion passes for any implementation.
+   *
+   * ⚠️ SCOPE OF THIS ENTRY, from the CORRECTED §6c. `CSV_UPSTREAM_FAIL` is the
+   * code for the UNRECOGNISED-OR-CODELESS upstream failure only. The CSV
+   * routes' OWN caller-fault codes (`CSV_FILE_TOO_LARGE`, `CSV_INVALID_FORMAT`,
+   * `CSV_RATE_LIMIT`, `CSV_SESSION_REUSED`, `CSV_PERSIST_FAIL`,
+   * `CSV_FINALIZE_FAIL`) keep their own copy and must NEVER reach this entry:
+   * "This is on our side, not your data" is FALSE for an 11 MB upload, and
+   * "Nothing was saved" may be affirmatively false for `CSV_PERSIST_FAIL`.
+   * Routing the three-way arm that enforces that is 140.5-05's, with negative
+   * controls; this plan publishes only the vocabulary it consumes.
+   */
+  it("carries the founder heading VERBATIM", () => {
+    expect(WIZARD_ERROR_COPY.CSV_UPSTREAM_FAIL.title).toBe(
+      "We couldn't check your file just now.",
+    );
+  });
+
+  it("splits the two founder sentences across cause/fix WITHOUT rewording either", () => {
+    const copy = WIZARD_ERROR_COPY.CSV_UPSTREAM_FAIL;
+    expect(copy.cause).toBe(
+      "This is on our side, not your data. Nothing was saved.",
+    );
+    expect(copy.fix).toEqual([
+      "Try again in a moment — if it keeps happening, send us this reference.",
+    ]);
+  });
+
+  it("offers the retry control its own sentence promises (polarity re-derived, not copied)", () => {
+    // `envelope.ts`'s RECOVERABLE_ACTIONS is {clear_and_retry, try_another_key}.
+    // The copy says "try again in a moment", so without `clear_and_retry` the
+    // envelope renders no Retry CTA and the sentence names a control that does
+    // not exist. `request_call` is the "send us this reference" affordance.
+    const { actions } = WIZARD_ERROR_COPY.CSV_UPSTREAM_FAIL;
+    expect(actions).toContain("clear_and_retry");
+    expect(actions).toContain("request_call");
+    // Not destructive: this failure is ours, so nothing here offers to delete
+    // the user's draft.
+    expect(actions).not.toContain("start_fresh");
+  });
+
+  it("keeps the copy's dynamic-value count at ONE — correlation_id, rendered by the component", () => {
+    // PATTERNS §9 static-copy rule. No URL, no status, no hostname, no env
+    // name, and no interpolation token: `correlation_id` is printed by
+    // `CsvValidationEnvelope`'s own footer line, never embedded in a string
+    // here. A placeholder in the table would be a SECOND dynamic value.
+    const copy = WIZARD_ERROR_COPY.CSV_UPSTREAM_FAIL;
+    const blob = [copy.title, copy.cause, ...copy.fix].join("   ");
+    expect(blob).not.toMatch(/\{[^}]*\}/);
+    expect(blob).not.toMatch(/\$\{/);
+    expect(blob).not.toMatch(/https?:\/\//);
+    expect(blob.toLowerCase()).not.toContain("correlation_id");
+  });
+
+  it("PROMISE PIN — no CSV copy on this surface promises a per-row breakdown", () => {
+    // ⚠️ THE PROMISE IS FALSE ON **BOTH** ARMS (RESEARCH §12.4), not only the
+    // forwarded-upstream one: `csv_adapter.py` emits the rows under
+    // `debug_context.violations`, `CsvValidationEnvelope` reads
+    // `debug_context.pandera_errors` (zero Python hits), and `_envelope_error`
+    // discards `debug_context` before the wire. The `<details>` blocks never
+    // render, so the sentence is a promise the UI cannot keep.
+    //
+    // ABSENCE **and** PRESENCE, both halves. An absence-only assertion is
+    // satisfied by deleting the entry, which would leave the user with less
+    // information rather than honest information.
+    const copy = WIZARD_ERROR_COPY.CSV_VALIDATION_FAILED;
+    const blob = [copy.title, copy.cause, ...copy.fix].join("   ").toLowerCase();
+    expect(blob).not.toContain("per-row breakdown");
+    expect(blob).not.toContain("row-level breakdown");
+    expect(copy.title).toBe("Your file did not pass validation.");
+  });
+
+  it("CSV_RATE_LIMIT is an EXPLICIT row in the wire table — the CSV surface's name for the RATE_LIMITED fact", () => {
+    // The CSV routes stamp `Retry-After` on their 429 and mint the
+    // surface-local code `CSV_RATE_LIMIT`. Without this row the code resolves
+    // "UNKNOWN" and the one CSV wait the seam actually advertises is dropped.
+    // `RATE_LIMITED`'s copy deliberately carries no duration — the figure is
+    // the server's own header, rendered by `ErrorEnvelope`.
+    expect(recogniseSeamErrorCode("CSV_RATE_LIMIT")).toBe("RATE_LIMITED");
+  });
+
+  it("CSV_RATE_LIMIT is NOT a WizardErrorCode, and that absence is load-bearing", () => {
+    // ⚠️ DO NOT "FIX" THIS BY MINTING A `CSV_RATE_LIMIT` MEMBER OR ADDING IT TO
+    // A `KNOWN_*` ROSTER. 140.5-05's three-way arm tries branch (1) — the code
+    // is already a known wizard/route code, keep today's copy — BEFORE branch
+    // (2), the wire-table hop. If `CSV_RATE_LIMIT` were admitted by branch (1)
+    // it would keep today's copy and the stamped wait would never reach the
+    // shared envelope. The ABSENCE is what routes it through the table.
+    expect(Object.keys(WIZARD_ERROR_COPY)).not.toContain("CSV_RATE_LIMIT");
+  });
+
+  it("ANTI-REGRESSION: the pre-existing wire-table rows still answer as they did", () => {
+    // A new row lands in the ONE shared table. A sweep that re-pointed the
+    // table would be invisible to every assertion above.
+    expect(recogniseSeamErrorCode("RATE_LIMITED")).toBe("RATE_LIMITED");
+    expect(recogniseSeamErrorCode("VALIDATION_FAILED")).toBe("VALIDATION_FAILED");
+    expect(recogniseSeamErrorCode("CIRCUIT_OPEN")).toBe("SERVICE_UNAVAILABLE_RETRY");
+    expect(recogniseSeamErrorCode("SEAM_MISCONFIGURED")).toBe("SEAM_MISCONFIGURED");
+    expect(recogniseSeamErrorCode("CSV_VALIDATION_FAILED")).toBe("UNKNOWN");
+  });
+});
+
+describe("[140.5-02 / SEAMPROSE-03] the four scope/permission wire codes, answered BY TABLE", () => {
+  /**
+   * ⚠️ COVERAGE-LAW ROW 2. `VENUE_WIRE_CODE_TO_VERDICT` is a HAND-TYPED ROSTER
+   * and these four rows are **PARTIAL BY CONSTRUCTION**, in those words. The
+   * companion parity guard does not promote it to row 1 — what it adds is
+   * fail-loud ARRIVAL for a newly-emitted code.
+   *
+   * ORACLE INDEPENDENCE: every `detail` below is hand-transcribed BYTE-FOR-BYTE
+   * from the Python source that emits it. That byte-identity is the
+   * cross-language contract — a reword on the Python side must red here.
+   * Nothing is imported from, or derived from, the module under test.
+   */
+  function seamThrow(message: string, seamCode: string): Error {
+    return Object.assign(new Error(message), { seamCode });
+  }
+
+  // exchange.py, the deribit scope-precheck arm, via key_permissions.py's
+  // `scope_detail`.
+  const MISSING_SCOPE_DETAIL = "key is missing required scope 'account:read'";
+  // exchange.py, the ccxt.PermissionDenied arm.
+  const PERMISSION_DENIED_DETAIL =
+    "Key denied permission. Confirm the key has read-only scope and that your IP allowlist includes our service.";
+  // exchange.py, the has_withdraw / has_trade arms.
+  const WITHDRAW_SCOPE_DETAIL =
+    "Key has withdrawal permissions. Please use a read-only key.";
+  const TRADE_SCOPE_DETAIL =
+    "Key has trading permissions. Please use a read-only key.";
+
+  it("MISSING_SCOPE stops being UNKNOWN/500 — the DOGFOOD-3 dead end for a fixable key scope", () => {
+    const verdict = classifyKeyValidationError(
+      seamThrow(MISSING_SCOPE_DETAIL, "MISSING_SCOPE"),
+    );
+    expect(
+      verdict.code,
+      "A user was told 'we could not classify this failure' about their own " +
+        "key's scope, which the exchange named precisely and which they can fix " +
+        "in two clicks.",
+    ).toBe("KEY_MISSING_READ_SCOPE");
+    expect(verdict.status, "a caller fault is not a 5xx").toBe(400);
+    // The same message with NO code still lands where it always did. This is
+    // what proves the CODE — not a reworded predicate — moved the verdict.
+    expect(classifyKeyValidationError(new Error(MISSING_SCOPE_DETAIL))).toEqual({
+      code: "UNKNOWN",
+      status: 500,
+    });
+  });
+
+  it("PERMISSION_DENIED stops asserting an IP allowlist it never observed", () => {
+    const verdict = classifyKeyValidationError(
+      seamThrow(PERMISSION_DENIED_DETAIL, "PERMISSION_DENIED"),
+    );
+    expect(verdict.code).toBe("KEY_PERMISSION_DENIED");
+    expect(
+      verdict.code,
+      "TRAP-3: the exchange named TWO possible causes and we picked one.",
+    ).not.toBe("KEY_IP_ALLOWLIST");
+    expect(verdict.status, "a permission refusal is the CALLER's fault").toBe(400);
+    // ⭐ The mis-map is real, not hypothetical: the identical sentence with no
+    // machine code STILL reaches KEY_IP_ALLOWLIST through the cascade, because
+    // the `ip` + `allow` branch matches the REMEDY half of the sentence. That
+    // is the measurement of what the table row bought.
+    expect(classifyKeyValidationError(new Error(PERMISSION_DENIED_DETAIL))).toEqual(
+      { code: "KEY_IP_ALLOWLIST", status: 502 },
+    );
+    // And the new copy must name BOTH candidates without asserting either.
+    const copy = WIZARD_ERROR_COPY.KEY_PERMISSION_DENIED;
+    const blob = [copy.title, copy.cause, ...copy.fix].join("   ").toLowerCase();
+    expect(blob, "the scope candidate is missing").toContain("scope");
+    expect(blob, "the allowlist candidate is missing").toContain("allowlist");
+    // The old entry states the allowlist cause as observed fact. This one must
+    // not, or the member was pointless.
+    expect(blob).not.toContain("you enabled ip pinning");
+    expect(
+      WIZARD_ERROR_COPY.KEY_IP_ALLOWLIST.cause.toLowerCase(),
+      "the ANTI-CONTROL: the entry we stopped routing here still makes the " +
+        "single-cause claim, which is exactly why it is the wrong answer.",
+    ).toContain("you enabled ip pinning");
+  });
+
+  it("WITHDRAW_SCOPE stops rendering copy that says TRADING", () => {
+    expect(
+      classifyKeyValidationError(
+        seamThrow(WITHDRAW_SCOPE_DETAIL, "WITHDRAW_SCOPE"),
+      ),
+    ).toEqual({ code: "KEY_HAS_WITHDRAW_PERMS", status: 400 });
+    // The cascade's `trading|withdraw` branch answered KEY_HAS_TRADING_PERMS
+    // for BOTH, so a withdrawal-capable key was told its problem was trading.
+    expect(classifyKeyValidationError(new Error(WITHDRAW_SCOPE_DETAIL))).toEqual({
+      code: "KEY_HAS_TRADING_PERMS",
+      status: 400,
+    });
+    // The copy the correct member renders must name WITHDRAWAL, not trading.
+    const copy = WIZARD_ERROR_COPY.KEY_HAS_WITHDRAW_PERMS;
+    expect(copy.title.toLowerCase()).toContain("withdraw");
+  });
+
+  it("TRADE_SCOPE is right BY TABLE, not by an accident of substring order", () => {
+    // ⭐ This row changes nothing today. That is the point: it is what stops the
+    // next reword on either side from changing it. Asserted alongside the
+    // accident it replaces so the difference is visible.
+    expect(
+      classifyKeyValidationError(seamThrow(TRADE_SCOPE_DETAIL, "TRADE_SCOPE")),
+    ).toEqual({ code: "KEY_HAS_TRADING_PERMS", status: 400 });
+  });
+
+  it("the six pre-existing venue rows still answer exactly as they did", () => {
+    // ANTI-REGRESSION. Four rows landed in a shared table; a sweep that
+    // re-pointed it would be invisible to every assertion above.
+    const unchanged: Array<[string, WizardErrorCode, number]> = [
+      ["RATE_LIMITED", "KEY_RATE_LIMIT", 503],
+      ["PROBE_FAILED", "KEY_PROBE_FAILED", 503],
+      ["AUTH_FAILED", "KEY_AUTH_FAILED", 400],
+      ["EXCHANGE_UNAVAILABLE", "KEY_EXCHANGE_UNAVAILABLE", 503],
+      ["NETWORK_UNAVAILABLE", "KEY_NETWORK_TIMEOUT", 502],
+      ["DDOS_PROTECTION", "KEY_VENUE_TRANSIENT", 503],
+    ];
+    for (const [wire, code, status] of unchanged) {
+      expect(
+        classifyKeyValidationError(seamThrow("irrelevant prose", wire)),
+        `the ${wire} row moved`,
+      ).toEqual({ code, status });
+    }
+  });
+
+  it("the two EXEMPT venue codes still reach the verdicts their reasons claim", () => {
+    // ⚠️ The exemption reasons in `VENUE_WIRE_CODES_WITHOUT_VERDICT` are claims
+    // about runtime behaviour. A reason nobody executes is prose. These two are
+    // the ones whose reason says "reaches the cascade's terminal UNKNOWN/500,
+    // and that is the honest answer" — so replay them and check.
+    expect(
+      classifyKeyValidationError(
+        seamThrow("Unsupported exchange for permission verification.", "UNSUPPORTED_EXCHANGE"),
+      ),
+    ).toEqual({ code: "UNKNOWN", status: 500 });
+    expect(
+      classifyKeyValidationError(
+        seamThrow(
+          "Key validation failed unexpectedly. Contact support if this persists.",
+          "VALIDATION_UNEXPECTED",
+        ),
+      ),
+    ).toEqual({ code: "UNKNOWN", status: 500 });
+  });
+});
+
+describe("[140.5-02 / B-02] the three real analytics-client messages, replayed", () => {
+  /**
+   * ⚠️ B-02 WAS OPEN AT HEAD, CONFIRMED BY EXECUTION, NOT BY READING. The
+   * cascade's transport branch tests `lower.includes("timeout")`, and the
+   * message this client actually produces says **"timed out"**. `"timed out"`
+   * does not contain `"timeout"`. Replayed against the whole cascade before the
+   * fix, all three of the client's real messages answered `UNKNOWN`/500 — the
+   * "we could not classify this" terminal, with no retry affordance — and the
+   * breaker cannot rescue it, because it needs 5 failures in 30 s and a Railway
+   * outage arrives at human retry cadence with the breaker still CLOSED.
+   *
+   * THE FIX IS BY TYPE, NOT BY A WIDER SUBSTRING. Adding `"timed out"` to the
+   * needle is a per-site edit that the next reword re-breaks (coverage-law
+   * row 3), and it would still answer `KEY_NETWORK_TIMEOUT` — copy that blames
+   * the EXCHANGE for a failure of our own hop.
+   *
+   * ORACLE INDEPENDENCE: the two message strings below are hand-transcribed
+   * literals, byte-identical to what `analytics-client.ts` constructs. That
+   * byte-identity is the cross-module contract — a reword on either side must
+   * red here rather than silently reopening the dead arm.
+   */
+  const TIMED_OUT_MESSAGE =
+    "Analytics service timed out after 15000ms on /process-key";
+  const NOT_REACHABLE_MESSAGE =
+    "Analytics service is not reachable. Please ensure it is running.";
+
+  /** A transport throw from the seam client: the own marker, as assigned. */
+  function transportThrow(message: string, seamTransportCode: string): Error {
+    return Object.assign(new Error(message), { seamTransportCode });
+  }
+
+  it("a deadline miss reaches SERVICE_UNREACHABLE, not UNKNOWN/500", () => {
+    expect(
+      classifyKeyValidationError(
+        transportThrow(TIMED_OUT_MESSAGE, "UPSTREAM_TIMEOUT"),
+      ),
+    ).toEqual({ code: "SERVICE_UNREACHABLE", status: 502 });
+  });
+
+  it("a connection that never completed reaches SERVICE_UNREACHABLE too", () => {
+    expect(
+      classifyKeyValidationError(
+        transportThrow(NOT_REACHABLE_MESSAGE, "UPSTREAM_NETWORK_ERROR"),
+      ),
+    ).toEqual({ code: "SERVICE_UNREACHABLE", status: 502 });
+  });
+
+  it("the MARKER moved the verdict — the same prose with no marker still cannot earn it", () => {
+    // ⭐ THE MEASUREMENT OF WHAT THE TYPE BRANCH BOUGHT, and the proof the fix
+    // is not substring-carried. Both messages, unmarked, still answer exactly
+    // what they answered before this plan.
+    expect(classifyKeyValidationError(new Error(TIMED_OUT_MESSAGE))).toEqual({
+      code: "UNKNOWN",
+      status: 500,
+    });
+    expect(classifyKeyValidationError(new Error(NOT_REACHABLE_MESSAGE))).toEqual({
+      code: "UNKNOWN",
+      status: 500,
+    });
+    // And the token that makes the dead branch dead, stated as an assertion so
+    // a reword on either side is caught: "timed out" ∌ "timeout".
+    expect(TIMED_OUT_MESSAGE.toLowerCase()).not.toContain("timeout");
+  });
+
+  it("the THIRD real message — an upstream non-2xx — is untouched by this branch", () => {
+    // NEGATIVE CONTROL. RESEARCH lists three producible messages; only two are
+    // transport failures. An upstream error carries a body, so it is the
+    // `seamCode` branch's business, and a marker branch that swallowed it would
+    // report a service that ANSWERED as one we could not reach.
+    expect(
+      classifyKeyValidationError(new Error("Analytics service error (502)")),
+    ).toEqual({ code: "UNKNOWN", status: 500 });
+  });
+
+  it("SERVICE_UNREACHABLE's copy does NOT borrow the breaker's 'nothing was submitted'", () => {
+    // ⚠️ 140.3-12 fixed this once and it must not be re-merged. The breaker
+    // DECLINED to send, so "nothing was submitted" is knowable there. A
+    // deadline firing tells us nothing about whether the far side processed the
+    // request — it is the canonical case where the work may well have
+    // completed. This branch routes timeouts here, so the distinction is now
+    // load-bearing for a second producer.
+    const copy = WIZARD_ERROR_COPY.SERVICE_UNREACHABLE;
+    const blob = [copy.title, copy.cause, ...copy.fix].join("   ").toLowerCase();
+    expect(blob).not.toContain("nothing was submitted");
+    expect(WIZARD_ERROR_COPY.SERVICE_UNAVAILABLE_RETRY.cause.toLowerCase()).toContain(
+      "nothing was submitted",
+    );
+  });
+
+  it("a non-string marker is ignored and never decides a verdict", () => {
+    // Same fence as the `seamCode` read: the property is data, and data can be
+    // anything. Prototype-shaped strings must not resolve through the table
+    // either.
+    for (const bogus of [42, null, {}, [], true, undefined]) {
+      expect(
+        classifyKeyValidationError(
+          Object.assign(new Error("some unclassified string"), {
+            seamTransportCode: bogus,
+          }),
+        ),
+      ).toEqual({ code: "UNKNOWN", status: 500 });
+    }
+    expect(
+      classifyKeyValidationError(
+        Object.assign(new Error("some unclassified string"), {
+          seamTransportCode: "constructor",
+        }),
+      ),
+    ).toEqual({ code: "UNKNOWN", status: 500 });
+  });
+
+  it("the CircuitOpenError type check still outranks the marker", () => {
+    // Ordering is load-bearing: the breaker verdict must never be decided by
+    // anything an upstream — or a marker on a wrapped error — can set.
+    const breakerTrip = Object.assign(new CircuitOpenError(30), {
+      seamTransportCode: "UPSTREAM_TIMEOUT",
+    });
+    expect(classifyKeyValidationError(breakerTrip)).toEqual({
+      code: "SERVICE_UNAVAILABLE_RETRY",
+      status: 503,
+    });
+  });
+
+  it("COLLISION INVARIANT, re-derived for this branch (not copied)", () => {
+    // The branch is a table lookup, so it cannot collide with a substring the
+    // way the cascade's members do. What it CAN do is shadow an earlier
+    // verdict, so the invariant to re-run is: neither real message matches any
+    // cascade branch that would otherwise have claimed it. Asserted rather than
+    // asserted-in-a-comment.
+    for (const message of [TIMED_OUT_MESSAGE, NOT_REACHABLE_MESSAGE]) {
+      const lower = message.toLowerCase();
+      for (const needle of [
+        "signature",
+        "invalid secret",
+        "authentication failed",
+        "invalid_credentials",
+        "master password",
+        "broker server",
+        "allow",
+        "rate",
+        "429",
+        "timeout",
+        "etimedout",
+        "could not verify",
+        "permission scope",
+        "probe",
+        "trading",
+        "withdraw",
+      ]) {
+        expect(
+          lower.includes(needle),
+          `"${message}" contains "${needle}" — the cascade would have claimed ` +
+            `it, so the marker branch is now SHADOWING a verdict rather than ` +
+            `rescuing an unclassified one. Re-derive before moving either side.`,
+        ).toBe(false);
+      }
+    }
+  });
+});
+
+/**
+ * Phase 142.2-07 / MT5-04 (D-05) — THE SPLIT OF `KEY_INVALID_FORMAT`.
+ *
+ * The two wizard connect routes answered ONE code at twelve guards each. Eleven
+ * of the twelve were not format failures at all — a malformed body, an
+ * unsupported venue, a missing api_key, two venue server switches, two
+ * missing-secret arms, a missing OKX passphrase, a missing session id and three
+ * length caps — and every one rendered "This does not look like a valid API key
+ * for the selected exchange", opening with a sentence that blamed a CLIENT-SIDE
+ * check. Every one of those 24 sites is a server-side route guard, so the
+ * sentence was false at all of them.
+ *
+ * These cases cover the REGISTRY half. The (status, code) pairing per guard is
+ * pinned in the two route specs, and the three-registry membership invariant is
+ * pinned in `wizardErrors.invariant.test.ts`.
+ */
+describe("[142.2-07 / MT5-04] KEY_INVALID_FORMAT split into four honest causes", () => {
+  /**
+   * HAND-TYPED, and deliberately not derived from the union or from either
+   * roster: a derivation compared against a second derivation cannot fail. If
+   * this list and the shipped table disagree, one of them is wrong and the
+   * failure has to name which code moved.
+   */
+  const NEW_CODES = [
+    "KEY_MISSING_REQUIRED_FIELD",
+    "KEY_UNSUPPORTED_VENUE",
+    "KEY_VENUE_NOT_ENABLED",
+    "KEY_INPUT_TOO_LONG",
+  ] as const;
+
+  it("the KEY_INVALID_FORMAT cause no longer claims a CLIENT-SIDE check", () => {
+    const copy = WIZARD_ERROR_COPY.KEY_INVALID_FORMAT;
+
+    // The exact regression, stated on the string that carried it. Every site
+    // that emitted this code is a guard inside a Next route handler; the
+    // browser never ran a format check on the secret at all.
+    expect(
+      copy.cause.toLowerCase(),
+      "The cause opened 'Client-side format check failed', which was false at " +
+        "every one of the 24 sites that carried this code — all of them are " +
+        "server-side route guards. Correcting the sentence is half the fix; " +
+        "the other half is that only a genuine format failure still reaches it.",
+    ).not.toContain("client-side");
+
+    // HAND-TYPED expected sentence. Reading the module's own value onto the
+    // expected side would assert only that a string equals itself.
+    expect(copy.cause).toBe(
+      "A format check on our side rejected the API secret before anything was sent to the exchange. Binance secrets are 64 hex characters; OKX and Bybit use different formats.",
+    );
+
+    // The per-venue guidance is the half worth KEEPING, and it only becomes
+    // true once the split leaves this code on the `api_secret.length < 8` ccxt
+    // arm. A future edit that drops it makes the entry less useful, not safer.
+    expect(copy.cause).toContain("64 hex characters");
+  });
+
+  it.each(NEW_CODES)(
+    "%s resolves to a real entry — title, cause, and at least one fix step",
+    (code) => {
+      const copy = formatKeyError(code);
+
+      // Non-UNKNOWN is the load-bearing half: a code in the union with no table
+      // entry falls through to the UNKNOWN fallback, which would replace one
+      // wrong sentence with a vaguer one.
+      expect(
+        copy.title,
+        `${code} rendered the UNKNOWN fallback — it has no entry of its own.`,
+      ).not.toBe(WIZARD_ERROR_COPY.UNKNOWN.title);
+
+      expect(copy.title.length).toBeGreaterThan(4);
+      expect(copy.cause.length).toBeGreaterThan(20);
+      expect(copy.fix.length).toBeGreaterThanOrEqual(1);
+      for (const step of copy.fix) expect(step.length).toBeGreaterThan(10);
+      expect(copy.actions.length).toBeGreaterThanOrEqual(1);
+      expect(copy.docsHref).toMatch(/^\/security/);
+    },
+  );
+
+  /**
+   * HAND-TYPED INTERNAL-VOCABULARY DENYLIST.
+   *
+   * The defect this phase closes is copy that describes OUR machinery to a user
+   * who cannot act on it. The founder's actual failure was a server-side venue
+   * switch reported as a key-format problem — and the tempting "fix" is to name
+   * the switch, which trades a false sentence for an unactionable one and leaks
+   * an internal name (V7). Static strings, so no scrubber runs over them; the
+   * discipline `scrubSeamError` / `scrub_freeform_string` enforce on DERIVED
+   * strings is written into the copy by hand and asserted here.
+   *
+   * Matched at a WORD BOUNDARY with a trailing-word-character allowance, not as
+   * a bare substring: a substring match on "env" reddens on "seven" and one on
+   * "gate" reddens on "propagate", and a guard that cries wolf gets deleted.
+   * The allowance is what keeps "flags", "gated" and "environment" caught.
+   *
+   * ⚠️ KNOWN LIMIT, stated rather than hidden — and it was MEASURED by this
+   * file's own self-test failing on it, not reasoned about in advance. The
+   * trailing allowance also matches an innocent word that merely STARTS with a
+   * denylisted term: "flagrant" trips "flag". The alternative (exact-word match)
+   * lets "flags", "gated" and "environment" through, which are the forms the
+   * offending copy would actually take. The false positive is a word no error
+   * copy on this surface would use; the false negatives are the likely ones. If
+   * a legitimate string ever trips it, add the word to a narrow exemption with
+   * its reason — do not drop the allowance.
+   */
+  const INTERNAL_VOCABULARY: readonly string[] = [
+    "MT5_ENABLED",
+    "SFOX_ENABLED",
+    "flag",
+    "env",
+    "seam",
+    "gate",
+    "server-side",
+    "endpoint",
+    "worker",
+  ];
+
+  function offendingTerms(text: string): string[] {
+    return INTERNAL_VOCABULARY.filter((term) =>
+      new RegExp(`\\b${term}\\w*\\b`, "i").test(text),
+    );
+  }
+
+  it.each(NEW_CODES)("%s's copy carries no internal vocabulary", (code) => {
+    const copy = WIZARD_ERROR_COPY[code];
+    const strings = [copy.title, copy.cause, ...copy.fix];
+
+    for (const s of strings) {
+      expect(
+        offendingTerms(s),
+        `${code} names something a user cannot see or act on, in: "${s}". ` +
+          `Say what THEY should change, never what our software is doing.`,
+      ).toEqual([]);
+    }
+  });
+
+  it("SELF-TEST — the denylist scanner can actually fire, and does not cry wolf", () => {
+    // Without the positive half, "no offenders" is indistinguishable from a
+    // regex that matches nothing — the vacuity failure that makes an absence
+    // assertion green forever.
+    expect(offendingTerms("MT5_ENABLED is not set on the server")).toContain(
+      "MT5_ENABLED",
+    );
+    expect(offendingTerms("the feature flags are off")).toContain("flag");
+    expect(offendingTerms("the seam returned nothing")).toContain("seam");
+    expect(offendingTerms("this venue is gated")).toContain("gate");
+    expect(offendingTerms("read the env var")).toContain("env");
+
+    // The negative half: the boundary allowance exists so ordinary English does
+    // not redden the guard. Each of these CONTAINS a denylisted substring and
+    // must not match.
+    for (const innocent of [
+      "seven of the fields",
+      "eventually the exchange responds",
+      "we propagate the change",
+      "investigate the mismatch",
+      "the exchange rejected the request",
+    ]) {
+      expect(
+        offendingTerms(innocent),
+        `"${innocent}" is ordinary prose and must not trip the denylist.`,
+      ).toEqual([]);
+    }
+  });
+
+  it("the four new codes are members of the union AND resolve through formatKeyError", () => {
+    // A compile-time membership check would be satisfied by a cast; this is the
+    // runtime half. The `satisfies` below is the static half and fails
+    // typecheck if a name drifts.
+    const codes = NEW_CODES satisfies readonly WizardErrorCode[];
+    for (const code of codes) {
+      expect(Object.keys(WIZARD_ERROR_COPY)).toContain(code);
+      expect(formatKeyError(code).title).toBe(WIZARD_ERROR_COPY[code].title);
+    }
+  });
+
+  it("KEY_VENUE_NOT_ENABLED is NOT recoverable — no Retry control on a closed venue", () => {
+    // Behaviour, not copy: `envelope.ts` derives `recoverable` from `actions`,
+    // and neither member of RECOVERABLE_ACTIONS (`clear_and_retry`,
+    // `try_another_key`) is present. Resubmitting the identical request while
+    // the venue is closed can only fail again — the same reasoning
+    // COMPOSITE_TOO_MANY_MEMBERS and SEAM_MISCONFIGURED are built on.
+    const actions = WIZARD_ERROR_COPY.KEY_VENUE_NOT_ENABLED
+      .actions as readonly string[];
+    expect(actions).not.toContain("clear_and_retry");
+    expect(actions).not.toContain("try_another_key");
+    // ...but it must still offer a way out, or it is a dead end (TRAP-4).
+    expect(actions.length).toBeGreaterThanOrEqual(1);
+    expect(actions).toContain("request_call");
+  });
+
+  it("'not supported' and 'not open yet' stay DISTINCT codes with distinct copy", () => {
+    // The split's whole point in miniature. Collapsing these two would tell a
+    // user to abandon a venue that is coming, or to wait for one that is not.
+    const never = WIZARD_ERROR_COPY.KEY_UNSUPPORTED_VENUE;
+    const notYet = WIZARD_ERROR_COPY.KEY_VENUE_NOT_ENABLED;
+
+    expect(never.title).not.toBe(notYet.title);
+    expect(never.cause).not.toBe(notYet.cause);
+    expect(notYet.title.toLowerCase()).toContain("yet");
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════════
+// Phase 153.1-03 / WIZFORM-03 / D-17 — a remedy that presupposes a fact about
+// the context renders ONLY when the context supports it.
+//
+// ⚠️ WRITTEN OVER THE WHOLE COPY TABLE AND OVER THE WHOLE VENUE ALLOWLIST, and
+// that is the entire point. Three sweeps written over the three codes this plan
+// happened to tag would be the instance-not-class defect moved out of the
+// source and into the test — and the second Falsifiability mutation for this
+// requirement (a SECOND non-substitutable venue, no copy change) exists
+// specifically to tell the two apart.
+//
+// Oracle independence: every expectation below is a hand-typed literal, a
+// hand-typed regex, or an INDEPENDENT registry (`SUPPORTED_EXCHANGES`,
+// `venueIsSubstitutable`). Nothing reads `fixRequires` to build the value it
+// then compares `fixRequires` against.
+// ══════════════════════════════════════════════════════════════════════════
+describe("[153.1-03 / WIZFORM-03] fix[] requirements — the class, not the instances", () => {
+  const ALL_CODES = Object.keys(WIZARD_ERROR_COPY) as WizardErrorCode[];
+
+  /**
+   * HAND-TYPED. Covers all three live phrasings — "switch to a different
+   * exchange", "try a different exchange account" — plus "another venue" for a
+   * bullet nobody has written yet. Deliberately NOT derived from the table: a
+   * pattern built out of the strings it is meant to police matches them by
+   * construction and can never find a fourth one.
+   */
+  const SUBSTITUTION_RE =
+    /switch to a different exchange|different exchange account|another venue/i;
+
+  it("the substitution pattern is CAPABLE of matching — positive control", () => {
+    // Guards the failure this phase has now hit eleven times: a sweep that is
+    // green because its matcher matches nothing at all. `binance` is
+    // substitutable, so the bullet MUST be there for it.
+    expect(
+      formatKeyError("KEY_NETWORK_TIMEOUT", { venue: "binance" }).fix.some((b) =>
+        SUBSTITUTION_RE.test(b),
+      ),
+      "The substitution regex found nothing even for a substitutable venue. " +
+        "The sweep below is then vacuously green for every venue.",
+    ).toBe(true);
+    expect(
+      formatKeyError("KEY_RATE_LIMIT", { venue: "binance" }).fix.some((b) =>
+        SUBSTITUTION_RE.test(b),
+      ),
+    ).toBe(true);
+    expect(
+      formatKeyError("KEY_PROBE_FAILED", { venue: "binance" }).fix.some((b) =>
+        SUBSTITUTION_RE.test(b),
+      ),
+    ).toBe(true);
+  });
+
+  it("SWEEP 1: no non-substitutable venue receives a venue-substitution bullet, for ANY code", () => {
+    const nonSubstitutable = SUPPORTED_EXCHANGES.filter(
+      (venue) => !venueIsSubstitutable(venue),
+    );
+
+    // Non-vacuity floor A — a sweep over an empty venue list is green forever.
+    expect(
+      nonSubstitutable.length,
+      "No venue in SUPPORTED_EXCHANGES answers venueIsSubstitutable === false, " +
+        "so this sweep asserts nothing. Either the capability record lost its " +
+        "mt5 row or the predicate's default inverted (153.1-02).",
+    ).toBeGreaterThanOrEqual(1);
+
+    const offenders: string[] = [];
+    let checked = 0;
+    for (const venue of nonSubstitutable) {
+      for (const code of ALL_CODES) {
+        for (const bullet of formatKeyError(code, { venue }).fix) {
+          checked++;
+          if (SUBSTITUTION_RE.test(bullet)) {
+            offenders.push(`${venue} / ${code}: "${bullet}"`);
+          }
+        }
+      }
+    }
+
+    // Non-vacuity floor B — hand-typed, and deliberately far below the real
+    // count (~180 bullet-checks today) so ordinary table growth does not
+    // touch it, while a table or venue list that collapsed to nothing does.
+    expect(
+      checked,
+      "The loop body barely executed — the table or the venue list is empty.",
+    ).toBeGreaterThan(50);
+
+    expect(
+      offenders,
+      "A venue whose ACCOUNT IS THE VENUE was told to switch venues. That is " +
+        "the unwinnable-remedy class (D-17 / MT5-13): the user cannot act on " +
+        "it, so the panel is asking them to do something impossible. Tag the " +
+        "bullet with a substitutable requirement in WIZARD_ERROR_COPY — do " +
+        "NOT add a per-code branch to formatKeyError. Offenders:",
+    ).toEqual([]);
+  });
+
+  it("SWEEP 2: a bullet that presupposes a surface is SUPPRESSED when no surface is named (Gate B)", () => {
+    let covered = 0;
+    for (const code of ALL_CODES) {
+      const entry = WIZARD_ERROR_COPY[code];
+      const requires = entry.fixRequires;
+      if (requires === undefined) continue;
+      // Driven off fixRequires, not off a list of codes, so a fifth
+      // surface-conditional bullet added later is covered automatically.
+      requires.forEach((req, i) => {
+        if (req === null || req === undefined || req.kind !== "surface") return;
+        covered++;
+        const bullet = entry.fix[i];
+        expect(
+          formatKeyError(code).fix,
+          `${code} bullet ${i} presupposes the "${req.surface}" surface but ` +
+            "rendered with NO surface in context. Fail toward saying less: " +
+            "the live defect was this exact bullet advising a /strategies " +
+            "detour on the connect step, where nothing was being submitted.",
+        ).not.toContain(bullet);
+        expect(
+          formatKeyError(code, { surface: req.surface }).fix,
+          `${code} bullet ${i} did NOT render on the very surface it requires ` +
+            `("${req.surface}") — the requirement suppressed it everywhere, ` +
+            "which is a silent copy deletion, not a gate.",
+        ).toContain(bullet);
+      });
+    }
+    expect(
+      covered,
+      "No entry declares a surface requirement, so this sweep asserts nothing.",
+    ).toBeGreaterThanOrEqual(1);
+  });
+
+  /**
+   * SWEEP 2b — 162-06 review / B-2 (class). The `surfaceIsNot` kind, whose
+   * absence rule is the INVERSE of SWEEP 2's and is the entire reason it is a
+   * separate union member.
+   *
+   * ⚠️ SWEEP 2 IS STRUCTURALLY BLIND TO IT (`req.kind !== "surface"` skips it),
+   * so a `surfaceIsNot` bullet that suppressed itself everywhere — the silent
+   * copy deletion SWEEP 2 exists to catch — would have shipped green. The
+   * blindness is closed here in the same commit the kind is minted, rather than
+   * noted in a comment: that is the shape this file's own `KEY_ORPHANED` and
+   * `KEY_REUSE_UNAVAILABLE` rosters record paying for twice.
+   *
+   * Both halves are asserted because each fails differently:
+   *   · with NO surface named the bullet must RENDER — an incumbent remedy may
+   *     not vanish from the ~60 callers that name no surface;
+   *   · on the BARRED surface it must be GONE — otherwise the gate is decorative
+   *     and the false sentence is still on the screen that disproved it.
+   */
+  it("SWEEP 2b: a bullet BARRED from a surface renders everywhere else (the inverse absence rule)", () => {
+    let covered = 0;
+    for (const code of ALL_CODES) {
+      const entry = WIZARD_ERROR_COPY[code];
+      const requires = entry.fixRequires;
+      if (requires === undefined) continue;
+      requires.forEach((req, i) => {
+        if (req === null || req === undefined || req.kind !== "surfaceIsNot") {
+          return;
+        }
+        covered++;
+        const bullet = entry.fix[i];
+        expect(
+          formatKeyError(code).fix,
+          `${code} bullet ${i} is barred from the "${req.surface}" surface but ` +
+            "vanished when NO surface was named. That is a silent copy " +
+            "deletion for every caller that predates the gate — the opposite " +
+            "of what this kind is for. `requirementMet` must answer TRUE on " +
+            "an absent surface here.",
+        ).toContain(bullet);
+        expect(
+          formatKeyError(code, { surface: req.surface }).fix,
+          `${code} bullet ${i} declares itself false on the "${req.surface}" ` +
+            "surface and rendered there anyway, so the gate is decorative and " +
+            "the sentence the surface disproved is still being shown.",
+        ).not.toContain(bullet);
+      });
+    }
+    expect(
+      covered,
+      "No entry declares a `surfaceIsNot` requirement, so this sweep asserts " +
+        "nothing. Either the kind lost its users or it was folded back into " +
+        "`surface` — which would restore the suppress-on-absence rule and " +
+        "delete an incumbent remedy from every untagged caller.",
+    ).toBeGreaterThanOrEqual(2);
+  });
+
+  /**
+   * SWEEP 2c — the PAIRING rule the B-2 class fix depends on.
+   *
+   * A bullet barred from a surface leaves a HOLE on that surface. If nothing is
+   * gated ONTO the surface to fill it, the reader there gets a shorter list and
+   * no remedy at all — "fail toward saying less" taken past the point where it
+   * says nothing. Every entry that bars a bullet from a surface must also carry
+   * at least one bullet gated onto that same surface.
+   */
+  it("SWEEP 2c: barring a bullet from a surface never leaves that surface with no remedy", () => {
+    let covered = 0;
+    for (const code of ALL_CODES) {
+      const requires = WIZARD_ERROR_COPY[code].fixRequires;
+      if (requires === undefined) continue;
+      const barred = new Set(
+        requires
+          .filter((r) => r?.kind === "surfaceIsNot")
+          .map((r) => (r as { surface: string }).surface),
+      );
+      for (const surface of barred) {
+        covered++;
+        expect(
+          formatKeyError(code, { surface: surface as never }).fix.length,
+          `${code} bars a bullet from the "${surface}" surface and puts ` +
+            "nothing in its place, so a reader there is refused with no " +
+            "remedy at all. The UI-SPEC asks for copy that states the truth " +
+            "and invents no remedy — not for silence.",
+        ).toBeGreaterThanOrEqual(1);
+      }
+    }
+    expect(covered).toBeGreaterThanOrEqual(2);
+  });
+
+  it("SWEEP 3: every fixRequires array is index-aligned to its fix array", () => {
+    const tagged = ALL_CODES.filter(
+      (code) => WIZARD_ERROR_COPY[code].fixRequires !== undefined,
+    );
+
+    // HAND-TYPED FLOOR — the four entries 153.1-03 tags. Never
+    // `tagged.length` compared to something derived from `tagged`.
+    expect(
+      tagged.length,
+      "Fewer than the four entries 153.1-03 tagged carry fixRequires. An " +
+        "entry lost its requirements, which means a venue- or " +
+        "surface-conditional bullet is rendering unconditionally again.",
+    ).toBeGreaterThanOrEqual(4);
+
+    for (const code of tagged) {
+      const entry = WIZARD_ERROR_COPY[code];
+      expect(
+        entry.fixRequires!.length,
+        `${code}: fixRequires is a PARALLEL array — the ONE thing this shape ` +
+          "can silently get wrong. A length mismatch does not throw; it " +
+          "silently shifts every requirement onto the wrong bullet, so a " +
+          "remedy is gated on a condition that belongs to its neighbour. " +
+          "Added a bullet? Add its slot (null = always render).",
+      ).toBe(entry.fix.length);
+    }
+  });
+
+  it("SWEEP 4: every entry WITHOUT fixRequires returns the identical fix array reference", () => {
+    let checked = 0;
+    for (const code of ALL_CODES) {
+      const entry = WIZARD_ERROR_COPY[code];
+      if (entry.fixRequires !== undefined) continue;
+      checked++;
+      expect(
+        formatKeyError(code, { venue: "binance", surface: "connect" }).fix,
+        `${code} has no requirements, so the filter must not run for it at ` +
+          "all. Reference identity — not deep equality — is what proves that: " +
+          "a new array with the same strings would mean the filter DID run " +
+          "and the additive guarantee rests on it happening to agree.",
+      ).toBe(entry.fix);
+    }
+    // Hand-typed floor: ~60 untagged entries today, well clear of 40.
+    expect(
+      checked,
+      "Almost nothing was checked — either the table shrank or nearly every " +
+        "entry became conditional.",
+    ).toBeGreaterThan(40);
+  });
+
+  it("an MT5 user reads the truthful replacement, not merely a shorter list (D-17)", () => {
+    // HAND-TYPED verbatim from the UI-SPEC Gate C row. The replacement must be
+    // a static table string — nothing caller-supplied reaches the envelope
+    // through `context.venue`, which is read ONLY as a lookup key.
+    const REPLACEMENT =
+      "This is your broker account, so there is no other venue to try. If it keeps failing, email security@quantalyze.com with the correlation id below.";
+    for (const code of [
+      "KEY_PROBE_FAILED",
+      "KEY_RATE_LIMIT",
+      "KEY_NETWORK_TIMEOUT",
+    ] as const) {
+      const fix = formatKeyError(code, { venue: "mt5" }).fix;
+      expect(
+        fix,
+        `${code}: a non-substitutable venue got its substitution bullet ` +
+          "removed and NOTHING put in its place. The UI-SPEC asks for copy " +
+          "that states the truth and invents no remedy, not for silence.",
+      ).toContain(REPLACEMENT);
+      expect(fix.length).toBe(2);
+    }
+  });
+
+  it("a ccxt venue — and a caller that names no venue — is byte-identical to HEAD", () => {
+    // HAND-TYPED expected arrays: the pre-plan values. Reading the table for
+    // the expected side would assert only that a string equals itself.
+    const HEAD_TIMEOUT = [
+      "Try again in a moment.",
+      "If it keeps failing, switch to a different exchange or contact support.",
+    ];
+    expect(
+      formatKeyError("KEY_NETWORK_TIMEOUT", { venue: "binance" }).fix,
+    ).toEqual(HEAD_TIMEOUT);
+    expect(formatKeyError("KEY_NETWORK_TIMEOUT").fix).toEqual(HEAD_TIMEOUT);
+    expect(formatKeyError("KEY_RATE_LIMIT", { venue: "okx" }).fix).toEqual([
+      "Wait 60 seconds and try again.",
+      "If it persists, try a different exchange account or contact support.",
+    ]);
+    // An UNKNOWN venue string keeps the incumbent copy too — absence and
+    // unresolved both answer `substitutable` with the predicate's default.
+    expect(
+      formatKeyError("KEY_PROBE_FAILED", { venue: "kraken" }).fix,
+    ).toEqual([
+      "Try again in a moment.",
+      "If it keeps failing, switch to a different exchange or contact support.",
+    ]);
+  });
+});
+
+/**
+ * [153.1-04 / WIZFORM-02] THE TWO `EXPECTED_TABLE_SIZE` SITES ARE ONE FACT.
+ *
+ * ⚠️ WHY THIS EXISTS. The size guard is pinned TWICE — once in the
+ * `[140.3-10 / TRAP-4]` describe and once in `[140.3-12 / SEAMUX-04]` — because
+ * each scan needs its own shrink detector and each carries its own reasoning
+ * docblock. Neither `it` can see the other's constant: they are separate
+ * function scopes, so nothing has ever stopped a plan from moving one and
+ * leaving the other behind. That half-fix does not red anything at the moment
+ * it is made; it reds LATER, on the next plan, which then inherits a
+ * contradiction it did not create. 153.1-04 moved both, and this is what makes
+ * the next mover unable to move only one.
+ *
+ * The subject is this file's own SOURCE, which is the only vantage point from
+ * which both declarations are visible at once. `wizardErrors.test.ts` already
+ * reads a sibling module's source for the copy-marker hand-off, so the
+ * technique is the file's own.
+ */
+describe("[153.1-04 / WIZFORM-02] the two EXPECTED_TABLE_SIZE pins cannot silently diverge", () => {
+  it("both declarations are hand-typed literals, and they are the SAME literal", () => {
+    const source = readFileSync(join(__dirname, "wizardErrors.test.ts"), "utf-8");
+    // Matches a DECLARATION with a numeric literal only. An `EXPECTED_TABLE_SIZE
+    // = Object.keys(...).length` would not match, and would therefore fail the
+    // count assertion below rather than sneak past as agreement — which is the
+    // point: the two guards' own docblocks forbid a derived value, and this is
+    // where that prohibition becomes enforceable across both at once.
+    const declarations = [
+      ...source.matchAll(/const EXPECTED_TABLE_SIZE = (\d+);/g),
+    ].map((m) => Number(m[1]));
+
+    // ⭐ POSITIVE CONTROL, and the reason it is an assertion rather than a
+    // comment: if the regex above ever stops matching (a rename, a reformat, a
+    // derived value), `declarations` is empty and `new Set([]).size === 1` is
+    // FALSE — but `[...new Set([])].length <= 1` would have been vacuously
+    // true. Pinning the count to a hand-typed 2 is what stops this whole `it`
+    // from passing over nothing.
+    expect(
+      declarations.length,
+      "Expected exactly TWO hand-typed EXPECTED_TABLE_SIZE declarations in " +
+        "this file. Zero means the matcher stopped matching and everything " +
+        "below is vacuous; more than two means a third pin appeared and the " +
+        "reasoning docblocks no longer enumerate the sites.",
+    ).toBe(2);
+
+    expect(
+      new Set(declarations).size,
+      "The two EXPECTED_TABLE_SIZE pins disagree: " +
+        declarations.join(" vs ") +
+        ". Moving one and not the other is a silent half-fix — one scan keeps " +
+        "its shrink detection and the other one loses it, and nothing reds " +
+        "until a later plan inherits the contradiction. Move both, and re-run " +
+        "EACH docblock's reasoning over the new entries; the two guards scan " +
+        "different populations, so the clause one site needs is not the clause " +
+        "the other needs.",
+    ).toBe(1);
+
+    // Both pins describe the SAME table, so they must also still describe it.
+    // This is not a duplicate of the two size guards: they each answer "did my
+    // scan's population change?", this answers "are these two literals about
+    // the object I think they are about?" — the question that only has meaning
+    // once the two are known to agree.
+    expect(declarations[0]).toBe(Object.keys(WIZARD_ERROR_COPY).length);
+  });
+});
+
+/**
+ * [153.6-06 / PARITY-05] THE PROBE-FAILURE PAIR, ASSERTED AS A PAIR.
+ *
+ * `KEY_SCOPE_CHECK_UNAVAILABLE` and `KEY_SCOPE_CHECK_UNREADABLE` describe the
+ * same subsystem failing in two ways that differ by ONE fact — whether the probe
+ * answered — and that fact is exactly what decides whether a retry can win. They
+ * are asserted together, in one block, because every plausible regression here
+ * moves BOTH: sweeping the parse miss back onto the permanent code takes a
+ * working control away from a self-clearing condition, and widening the
+ * permanent code's `actions` to give the parse miss its Retry hands the same
+ * control to an arm where retrying is guaranteed to fail. A block that pinned
+ * only the new entry would catch the first and miss the second.
+ *
+ * ⭐ THE ORACLE IS `buildEnvelope`'s DERIVATION, never the `actions` array. The
+ * claim under test is "a Retry control renders", and that is decided by
+ * `buildEnvelope` reading `actions` against `RECOVERABLE_ACTIONS` and then by
+ * `ErrorEnvelope`'s `showRetry = recoverable && Boolean(onRetry)`. Asserting
+ * `actions` would restate what the table says about itself and would stay green
+ * if the derivation rule ever changed — the convention this file's own import
+ * comment states, applied here in the RECOVERABLE direction for the first time.
+ */
+describe("[153.6-06 / PARITY-05] the probe-failure pair renders opposite controls", () => {
+  it("the parse-miss code derives recoverable — the Retry control renders", () => {
+    const envelope = buildEnvelope("KEY_SCOPE_CHECK_UNREADABLE", "corr-1");
+    expect(
+      envelope.recoverable,
+      "A 2xx body our schema cannot read is what a half-rolled analytics " +
+        "deploy serves. It clears by itself, so a Retry is the honest control — " +
+        "and its absence was the dead end 153.6-06 exists to remove.",
+    ).toBe(true);
+  });
+
+  it("the permanent code stays NON-recoverable — no Retry, unchanged", () => {
+    const envelope = buildEnvelope("KEY_SCOPE_CHECK_UNAVAILABLE", "corr-2");
+    expect(
+      envelope.recoverable,
+      "⛔ T-153.6-E2. The parse miss got its Retry back by MINTING a code, not " +
+        "by widening this one's actions. If this is now true, the affordance " +
+        "leaked onto the arm where a retry is guaranteed to fail.",
+    ).toBe(false);
+  });
+
+  it("the two carry DIFFERENT copy — a shared entry would defeat the split", () => {
+    // The split is only real if the user can tell the two apart. Comparing the
+    // two rendered titles couples this to the table without reading either
+    // expectation out of it.
+    const unreadable = formatKeyError("KEY_SCOPE_CHECK_UNREADABLE");
+    const unavailable = formatKeyError("KEY_SCOPE_CHECK_UNAVAILABLE");
+    expect(unreadable.title).not.toBe(unavailable.title);
+    expect(unreadable.cause).not.toBe(unavailable.cause);
+  });
+
+  it("⛔ the new copy never claims we could not reach the exchange", () => {
+    // THE REMOVED LIE, pinned so it cannot come back through the copy table.
+    // 153.2-04 moved this condition off `KEY_NETWORK_TIMEOUT` precisely because
+    // that entry opens "We could not reach the exchange." — false here, because
+    // the exchange answered and OUR schema could not read the reply. Restoring
+    // the Retry control by restoring that code would have been the easy fix and
+    // would have re-shipped the untruth; this is what makes that route red.
+    const copy = formatKeyError("KEY_SCOPE_CHECK_UNREADABLE");
+    const haystack = [copy.title, copy.cause, ...copy.fix]
+      .join("   ")
+      .toLowerCase();
+    for (const banned of ["reach the exchange", "the exchange did not"]) {
+      expect(
+        haystack.includes(banned),
+        `The parse-miss copy says "${banned}". The exchange ANSWERED — the ` +
+          `body was ours to read and we could not. Blaming the venue for our ` +
+          `own deploy is the lie 153.2-04 removed.`,
+      ).toBe(false);
+    }
+    // The POSITIVE half: it must actually say the thing that makes waiting the
+    // right move. Without this the guard passes on copy that says nothing.
+    expect(
+      /again/i.test(haystack),
+      "The copy must tell the user to try again — the Retry control it now " +
+        "renders is otherwise unexplained.",
+    ).toBe(true);
+  });
+
+  it("the parse-miss entry offers no DRAFT-DESTROYING way out", () => {
+    // The condition is a deploy of ours in flight. `start_fresh` deletes the
+    // draft and cascades away every `strategy_keys` member under it, which
+    // would answer "wait thirty seconds" by destroying the user's work.
+    const copy = formatKeyError("KEY_SCOPE_CHECK_UNREADABLE");
+    expect(copy.actions).not.toContain("start_fresh");
+    expect(copy.actions).not.toContain("try_another_key");
+  });
+});
+
+/**
+ * [164.6.5 / criterion 5] `KEY_MT5_TERMINAL_UNRESPONSIVE` — the wedged-terminal
+ * arm (D-12/D-13).
+ *
+ * ⭐ THE ORACLE IS `buildEnvelope`'s DERIVATION, never the `actions` array —
+ * same convention the PARITY-05 block above states and follows. The claim
+ * under test is "no Retry control renders", decided by `buildEnvelope` reading
+ * `actions` against `RECOVERABLE_ACTIONS`, never by reading the array back.
+ */
+describe("[164.6.5 / criterion 5] the wedged-terminal arm renders honest, non-retry copy", () => {
+  it("the new code derives NON-recoverable — no Retry control renders", () => {
+    const envelope = buildEnvelope("KEY_MT5_TERMINAL_UNRESPONSIVE", "corr-mt5-1");
+    expect(
+      envelope.recoverable,
+      "⛔ PROVEN-ABLE-TO-FAIL (2026-09-22): adding `clear_and_retry` to this " +
+        "code's `actions` in wizardErrors.ts and re-running this suite flips " +
+        "this assertion to FAIL (RED observed), restored via a `cmp`-verified " +
+        "byte backup — see the SUMMARY. A wedged terminal cannot be cleared by " +
+        "resubmitting the same form; a Retry control here would be exactly the " +
+        "'try again in a moment' lie the measured 2026-09-21 incident exists " +
+        "to remove.",
+    ).toBe(false);
+  });
+
+  it("the generic transport code (KEY_NETWORK_TIMEOUT) is byte-unchanged — D-12", () => {
+    // ⛔ D-12: this arm must NOT delete or widen the honest transport code.
+    // KEY_NETWORK_TIMEOUT stays correct for a genuine transport failure, where
+    // a retry really can succeed.
+    const envelope = buildEnvelope("KEY_NETWORK_TIMEOUT", "corr-mt5-2");
+    expect(envelope.recoverable).toBe(true);
+    const copy = formatKeyError("KEY_NETWORK_TIMEOUT");
+    expect(copy.title).toBe("We could not reach the exchange.");
+  });
+
+  it("the copy does not instruct a retry and does not promise an automatic recovery", () => {
+    // ⛔ D-13: the copy must not promise a self-heal that D-05 (a separate,
+    // concurrent plan) may not have shipped when this renders. Expressed as a
+    // property of what the copy DOES say — a bare grep for an absent phrase
+    // goes green the moment someone rewords it, so this also asserts the
+    // POSITIVE half: the copy must say a LATER attempt can succeed.
+    //
+    // ⛔ CORRECTED 2026-09-25 (164.6.5 review round 1 / WR-05): the positive
+    // half used to be "the copy must say the draft is safe". That sentence is
+    // now gated to the connect step (the rotate-secret dialog has no draft), so
+    // it is asserted in the surface case below instead. The copy also used to
+    // claim PERMANENCE, which was false for -10004 (a redeploy clears it) and
+    // for the heal's own relaunch window; those phrases are now banned too.
+    const copy = formatKeyError("KEY_MT5_TERMINAL_UNRESPONSIVE");
+    const haystack = [copy.title, copy.cause, ...copy.fix]
+      .join("   ")
+      .toLowerCase();
+    for (const banned of [
+      "try again",
+      "in a moment",
+      "will recover",
+      "should recover",
+      "automatically",
+      "self-heal",
+    ]) {
+      expect(
+        haystack.includes(banned),
+        `The wedged-terminal copy says "${banned}" — a retry instruction or a ` +
+          `self-heal promise this arm exists to remove.`,
+      ).toBe(false);
+    }
+    for (const permanence of [
+      "will not clear",
+      "nothing you do",
+      "nothing you can do",
+    ]) {
+      expect(
+        haystack.includes(permanence),
+        `The wedged-terminal copy says "${permanence}" — a permanence claim ` +
+          `that is false for -10004 and for the heal's relaunch window (WR-05).`,
+      ).toBe(false);
+    }
+    // The POSITIVE half: not now, but not never.
+    expect(haystack).toContain("a later attempt can succeed");
+  });
+
+  it("the draft sentence renders on the connect step and nowhere that names no surface", () => {
+    // 164.6.5 review round 1 / WR-05 + CR-02. The same code reaches the
+    // rotate-secret dialog, which has no draft and names no surface.
+    const connect = formatKeyError("KEY_MT5_TERMINAL_UNRESPONSIVE", {
+      surface: "connect",
+    });
+    expect(connect.fix).toContain("Your draft is saved.");
+    const noSurface = formatKeyError("KEY_MT5_TERMINAL_UNRESPONSIVE");
+    expect(noSurface.fix.join(" ")).not.toMatch(/draft/i);
+    // Non-vacuity: the unconditional remedy still renders without a surface.
+    expect(noSurface.fix.length).toBe(2);
+  });
+
+  it("the classifier matches the MACHINE code, not message text", () => {
+    // Proven by giving the error a message that would classify differently
+    // under the substring cascade (it contains "timeout", which the cascade's
+    // KEY_NETWORK_TIMEOUT branch matches) — only the seamCode wins.
+    const result = classifyKeyValidationError({
+      seamCode: "MT5_TERMINAL_UNRESPONSIVE",
+      message: "connection timeout while validating",
+    });
+    expect(result).toEqual({ code: "KEY_MT5_TERMINAL_UNRESPONSIVE", status: 500 });
+  });
+});
+
+/**
+ * [153.1-04 / WIZFORM-02] THE TEN NEW MEMBERS, AS A CLASS.
+ *
+ * ⚠️ WHY A SWEEP AND NOT TEN CASES. The plan's acceptance criteria were three
+ * behaviours checked once, by hand, at authoring time: none of the ten offers a
+ * Retry, and neither optional count reaches a sentence when it was not
+ * supplied. A check run once is a measurement, not a guard — and the whole
+ * reason these members exist is that a Retry control was offered against a
+ * condition retrying could not clear, which nothing in this file would have
+ * noticed. So the measurements are pinned here.
+ *
+ * The roster below is HAND-TYPED, deliberately. Deriving it (say, every code
+ * matching /^METADATA_/) would make the sweep agree with whatever the table
+ * happens to contain, and a member accidentally dropped from the union would
+ * take its own assertion out with it. Ten names, typed out, is the oracle.
+ */
+describe("[153.1 review CR-01 / WR-03] every FIELD-LEVEL refusal is NON-recoverable", () => {
+  // The sweep above is keyed on "the ten members 153.1-04 MINTED", which is a
+  // provenance, not a class. `METADATA_DESCRIPTION_REQUIRED` is answered by the
+  // same `validatePayload` block against the same kind of rule, but it is a
+  // Phase-53 entry that 153.1-05 merely POINTED the route at — so it fell
+  // outside that roster and kept a `clear_and_retry` for the whole phase while
+  // three artefacts asserted the class held. That is the instance-not-class
+  // shape this phase exists to delete, so the class is asserted here on what
+  // the codes ARE rather than on when they were written.
+  //
+  // HAND-TYPED, and deliberately NOT derived from `KNOWN_FINALIZE_CODES` or
+  // from a `startsWith("METADATA_")` filter: an oracle read off the same
+  // structure under test moves with it. This is the roster of codes
+  // `finalize-wizard` answers a FORM FIELD with (route.ts `validatePayload`).
+  const FIELD_LEVEL: readonly WizardErrorCode[] = [
+    "METADATA_NAME_INVALID",
+    "METADATA_DESCRIPTION_REQUIRED",
+    "METADATA_DESCRIPTION_TOO_SHORT",
+    "METADATA_DESCRIPTION_TOO_LONG",
+    "METADATA_CATEGORY_REQUIRED",
+    "METADATA_AUM_INVALID",
+    "METADATA_CAPACITY_INVALID",
+    "METADATA_CAPITAL_OWNERSHIP_INVALID",
+  ];
+
+  it("all eight exist in the table, and there are eight of them", () => {
+    // Non-vacuity for the sweep below, and the rename detector.
+    expect(FIELD_LEVEL.length).toBe(8);
+    for (const code of FIELD_LEVEL) {
+      expect(
+        Object.keys(WIZARD_ERROR_COPY),
+        `${code} is named as a field-level refusal but has no copy entry.`,
+      ).toContain(code);
+    }
+  });
+
+  it("NOT ONE of the eight derives recoverable — no Retry control renders", () => {
+    // Reported as a POPULATION, not code-by-code: a per-code assertion stops at
+    // the first offender and hides the rest of the class.
+    const offenders = FIELD_LEVEL.filter(
+      (code) => buildEnvelope(code, "corr-cr01").recoverable,
+    );
+    expect(
+      offenders,
+      "A field-level refusal derived `recoverable: true`, so SubmitStep " +
+        "renders a Retry wired to `onRetry={() => setErrorCode(null)}` that " +
+        "re-POSTs the identical payload against the identical server rule and " +
+        "is refused identically. The remedy is on the FORM — see the class " +
+        "docblock in wizardErrors.ts, which forbids `clear_and_retry` here BY " +
+        "NAME because it wipes what the user typed. Recoverability is derived " +
+        "STRUCTURALLY from `actions ∩ RECOVERABLE_ACTIONS`: the fix is to " +
+        "remove the action, never to special-case the code.",
+    ).toEqual([]);
+  });
+});
+
+describe("[153.1-04 / WIZFORM-02] the ten new members offer no false affordance", () => {
+  /** HAND-TYPED — this plan's entire contract with 153.1-05, 153.2 and 153.4. */
+  const NEW_MEMBERS: readonly WizardErrorCode[] = [
+    "METADATA_NAME_INVALID",
+    "METADATA_DESCRIPTION_TOO_SHORT",
+    "METADATA_DESCRIPTION_TOO_LONG",
+    "METADATA_CATEGORY_REQUIRED",
+    "METADATA_AUM_INVALID",
+    "METADATA_CAPACITY_INVALID",
+    "METADATA_CAPITAL_OWNERSHIP_INVALID",
+    "SEAM_DEADLINE_EXCEEDED",
+    "COMPOSITE_UNSUPPORTED_UNIFIED",
+    "DRAFT_STATE_INVALID",
+  ];
+
+  it("all ten exist in the table, and there are ten of them", () => {
+    // Non-vacuity for every `it` below, plus the rename detector: a member
+    // renamed on one side only leaves a name here with no entry there.
+    expect(NEW_MEMBERS.length).toBe(10);
+    for (const code of NEW_MEMBERS) {
+      expect(
+        Object.keys(WIZARD_ERROR_COPY),
+        `${code} is named in 153.1-04's contract but has no copy entry. A code ` +
+          "with no entry renders UNKNOWN exactly as an unknown code does, " +
+          "which is the failure WIZFORM-02 is about.",
+      ).toContain(code);
+    }
+  });
+
+  it("NOT ONE of the ten derives recoverable — no Retry control renders", () => {
+    for (const code of NEW_MEMBERS) {
+      expect(
+        buildEnvelope(code, "corr-153104").recoverable,
+        `${code} derived recoverable: true, so ErrorEnvelope renders a Retry ` +
+          "button. Every one of these ten refuses on a condition an identical " +
+          "resubmission cannot change — a field the server compared against a " +
+          "fixed rule, a deadline that fires the same way every time, a draft " +
+          "the database has already moved past. A Retry there is a false " +
+          "affordance, and the founder clicking it five times is the incident " +
+          "that produced this phase. Recoverability is derived from `actions`: " +
+          "one of `clear_and_retry` / `try_another_key` got added.",
+      ).toBe(false);
+    }
+  });
+
+  it("the description pair names NO count when it was not given one (TRAP-3)", () => {
+    for (const code of [
+      "METADATA_DESCRIPTION_TOO_SHORT",
+      "METADATA_DESCRIPTION_TOO_LONG",
+    ] as const) {
+      const bare = formatKeyError(code);
+      // The BOUND may appear (a rule stated without its threshold is not a
+      // rule). What must not appear is the user's own count, or the machinery
+      // that would have carried it.
+      expect(
+        [bare.title, bare.cause, ...bare.fix].join(" "),
+        `${code} named the user's character count with no charCount in ` +
+          "context. Absence means 'we were not told how long it is' — never " +
+          "zero, never empty. A surface that invents a count turns a vague " +
+          "refusal into a specific lie.",
+      ).not.toMatch(/you have|\{n\}|\{charCount\}/);
+    }
+    // ...and the counted form really is produced when the count IS given, so the
+    // rule above is a gate rather than a deletion.
+    expect(
+      formatKeyError("METADATA_DESCRIPTION_TOO_SHORT", { charCount: 2 }).title,
+    ).toBe("Add at least 10 characters — you have 2.");
+    expect(
+      formatKeyError("METADATA_DESCRIPTION_TOO_LONG", { charCount: 5231 }).title,
+    // 153.1 review WR-02 — "to N or fewer", not "under N". The server rejects
+    // on `length > MAX_DESCRIPTION_CHARS`, so exactly 5,000 is ACCEPTED and
+    // "under 5,000" would name a ceiling of 4,999 that nothing enforces.
+    ).toBe("Keep this to 5,000 characters or fewer — you have 5,231.");
+  });
+
+  it("SEAM_DEADLINE_EXCEEDED names NO budget when it was not given one (TRAP-3)", () => {
+    const bare = formatKeyError("SEAM_DEADLINE_EXCEEDED");
+    expect(
+      bare.cause,
+      "The cause named a number with no budgetSeconds in context. Absence " +
+        "means 'no budget was named' — never zero and never 'immediately'. " +
+        "This is the same rule retryAfterSeconds states for durations, and " +
+        "the reason the table sentence says 'the time we allow'.",
+    ).not.toMatch(/\d/);
+    expect(
+      formatKeyError("SEAM_DEADLINE_EXCEEDED", { budgetSeconds: 120 }).cause,
+    ).toContain("120 seconds");
+    // The tail is shared between the two forms, so it must survive the swap.
+    expect(
+      formatKeyError("SEAM_DEADLINE_EXCEEDED", { budgetSeconds: 120 }).cause,
+    ).toContain("your key was not stored");
+  });
+
+  it("SEAM_DEADLINE_EXCEEDED pluralises its budget (153.1 review WR-04)", () => {
+    // A one-second budget rendered "We gave your broker 1 seconds to answer".
+    // 153.4 is the emitter and passes a real budget; a sub-second or
+    // one-second budget is plausible during a retune, and the
+    // MULTI_KEY_WINDOWS_INVALID arm in the same function already pluralises,
+    // so the bare form broke this file's own convention.
+    expect(
+      formatKeyError("SEAM_DEADLINE_EXCEEDED", { budgetSeconds: 1 }).cause,
+      "the singular budget rendered with a plural noun.",
+    ).toContain("1 second to answer");
+    // ...and the plural is not collateral damage: only n === 1 loses the "s".
+    for (const n of [0, 2, 120]) {
+      expect(
+        formatKeyError("SEAM_DEADLINE_EXCEEDED", { budgetSeconds: n }).cause,
+        `${n} seconds lost its plural — the ternary is inverted or too wide.`,
+      ).toContain(`${n} seconds to answer`);
+    }
+  });
+});
+
+/**
+ * [154.1 / WIZCONT-02 review CR] `VENUE_ALREADY_CONNECTED` — a refusal that is
+ * TRUE, and that offers no control which cannot work.
+ *
+ * ⚠️ WHAT THIS MEMBER REPLACED. `create-with-key`'s venue fence used to resolve a
+ * re-connect onto ANY strategy hanging off the live key, finalized ones
+ * included, and every arm downstream answered `DRAFT_ALREADY_EXISTS` — "A wizard
+ * session with this key is already in progress", with `resume_draft` and
+ * `start_fresh`. Once the resolver was narrowed to real drafts, that sentence
+ * became the fall-through for a user whose account is held by a FINISHED
+ * strategy, where all of it is false: there is no draft, nothing is in progress,
+ * there is nothing to resume, and `start_fresh` would delete a draft that is not
+ * there.
+ *
+ * These are the COPY half of the fix. The route half — that the arm exists,
+ * refuses, writes nothing, and names the strategy — is pinned in
+ * `create-with-key/route.test.ts`'s `[154.1]` block.
+ */
+describe("[154.1 / WIZCONT-02] VENUE_ALREADY_CONNECTED — the honest refusal", () => {
+  it("is a union member with copy of its OWN — not the UNKNOWN fallback", () => {
+    // A code in the union with no entry renders UNKNOWN exactly as an unknown
+    // code does, which is the silent-ship failure every roster note in this
+    // repo warns about.
+    expect(Object.keys(WIZARD_ERROR_COPY)).toContain("VENUE_ALREADY_CONNECTED");
+    expect(formatKeyError("VENUE_ALREADY_CONNECTED").title).not.toBe(
+      WIZARD_ERROR_COPY.UNKNOWN.title,
+    );
+  });
+
+  it("is DISTINCT copy from DRAFT_ALREADY_EXISTS, not an alias of it", () => {
+    const split = formatKeyError("VENUE_ALREADY_CONNECTED");
+    const parent = WIZARD_ERROR_COPY.DRAFT_ALREADY_EXISTS;
+    expect(split.title).not.toBe(parent.title);
+    expect(split.cause).not.toBe(parent.cause);
+  });
+
+  it("makes NEITHER of the two claims that were false about a finished strategy", () => {
+    const copy = WIZARD_ERROR_COPY.VENUE_ALREADY_CONNECTED;
+    const haystack = [copy.title, copy.cause, ...copy.fix]
+      .join("   ")
+      .toLowerCase();
+    // These are the two sentences the user acted on and could not satisfy: they
+    // went looking for a session that is not there.
+    expect(
+      haystack,
+      "the split kept the parent's claim that a session is under way.",
+    ).not.toContain("in progress");
+    expect(
+      haystack,
+      "there is no draft to resume — that is the entire reason this member " +
+        "exists.",
+    ).not.toContain("resume");
+  });
+
+  it("offers NO Retry control — resubmitting the same account is refused identically", () => {
+    // Behaviour, not copy: `envelope.ts` derives `recoverable` from `actions`,
+    // and neither member of RECOVERABLE_ACTIONS is present.
+    expect(
+      buildEnvelope("VENUE_ALREADY_CONNECTED", "corr-1541").recoverable,
+      "a Retry button here can only ever fail again — the account stays " +
+        "connected until the user acts on the EXISTING strategy.",
+    ).toBe(false);
+    // The UNKNOWN contrast is what keeps the assertion above discriminating: an
+    // envelope that rendered no controls at all would satisfy it vacuously.
+    expect(buildEnvelope("UNKNOWN", "corr-1541").recoverable).toBe(true);
+  });
+
+  it("offers NO start_fresh — the one destructive control, and there is no draft to delete", () => {
+    // The parent entry DOES offer it, correctly: a draft exists there. Here the
+    // same control would delete the FINISHED strategy's own wizard session —
+    // destroying the very thing the copy tells the user to go and open.
+    expect(WIZARD_ERROR_COPY.DRAFT_ALREADY_EXISTS.actions).toContain(
+      "start_fresh",
+    );
+    expect(WIZARD_ERROR_COPY.VENUE_ALREADY_CONNECTED.actions).not.toContain(
+      "start_fresh",
+    );
+    expect(WIZARD_ERROR_COPY.VENUE_ALREADY_CONNECTED.actions).not.toContain(
+      "resume_draft",
+    );
+  });
+
+  it("names NO strategy when it was not given one (TRAP-3)", () => {
+    const bare = formatKeyError("VENUE_ALREADY_CONNECTED");
+    // Absence means "we were not told which strategy" — never a placeholder,
+    // never an empty pair of quotes. The table sentence must stand alone.
+    expect(
+      [bare.title, bare.cause, ...bare.fix].join(" "),
+      "the copy printed the interpolation machinery, or an empty name.",
+    ).not.toMatch(/\{strategyName\}|""|It is connected to/);
+    expect(bare.cause.length).toBeGreaterThan(20);
+  });
+
+  it("...and DOES name it when it was given one, so the rule above is a gate not a deletion", () => {
+    const named = formatKeyError("VENUE_ALREADY_CONNECTED", {
+      strategyName: "Helios Momentum",
+    });
+    expect(named.cause).toContain('It is connected to "Helios Momentum".');
+    // The table sentence survives the prepend — the naming line ADDS a fact, it
+    // does not replace the explanation.
+    expect(named.cause).toContain(
+      WIZARD_ERROR_COPY.VENUE_ALREADY_CONNECTED.cause,
+    );
+  });
+
+  it("a BLANK name degrades to the unnamed sentence rather than empty quotes", () => {
+    // `strategies.name` is NOT NULL at the database, but whitespace is not a
+    // name, and a sentence pointing at nothing is worse than one that points at
+    // nothing in particular.
+    for (const blank of ["", "   ", "\t\n"]) {
+      expect(
+        formatKeyError("VENUE_ALREADY_CONNECTED", { strategyName: blank }).cause,
+        `a ${JSON.stringify(blank)} name produced a naming sentence.`,
+      ).toBe(WIZARD_ERROR_COPY.VENUE_ALREADY_CONNECTED.cause);
+    }
+  });
+
+  it("the naming arm is SCOPED to this code — it cannot leak onto a neighbour", () => {
+    // The arm keys on the code as well as on the context field. Passing the
+    // context to a different member must leave that member byte-identical, or
+    // an unrelated failure starts naming a strategy that has nothing to do with
+    // it.
+    expect(
+      formatKeyError("DRAFT_ALREADY_EXISTS", { strategyName: "Helios Momentum" })
+        .cause,
+    ).toBe(WIZARD_ERROR_COPY.DRAFT_ALREADY_EXISTS.cause);
+  });
+});
+
+/**
+ * [167.1.2 / D-01] The two venue-identity refusals are VENUE-NEUTRAL.
+ *
+ * Until 167.1.2 only an MT5 login could reach them, so "login" and "broker
+ * account" were true. Now the validator stamps an OKX, Bybit, Binance or
+ * Deribit account id too, and a second key on one of those accounts reaches
+ * exactly these entries. Telling an OKX user to use "a different login on the
+ * same broker" sends them looking for a thing their exchange does not have.
+ */
+describe("[167.1.2 / D-01] the venue-identity refusals name no login and no broker account", () => {
+  it.each(["KEY_VENUE_ALREADY_CONNECTED", "VENUE_ALREADY_CONNECTED"] as const)(
+    "%s copy fits every venue that can reach it",
+    (code) => {
+      const copy = WIZARD_ERROR_COPY[code];
+      const haystack = [copy.title, copy.cause, ...copy.fix].join("   ");
+      expect(haystack, `${code} still speaks MT5-only language`).not.toMatch(
+        /login|broker account/i,
+      );
+      // The refusal still says what happened and what to do — neutrality is
+      // not deletion. An exchange account is what every one of these venues has.
+      expect(haystack.toLowerCase()).toContain("exchange account");
+    },
+  );
+});
+
+/**
+ * [161-05 / WIZERR-03] KEY_ORPHANED — THE REFUSAL, AND THE ONE PROPERTY THAT
+ * MAKES IT AN IMPROVEMENT RATHER THAN A RENAME.
+ *
+ * The code it replaces (`DRAFT_ALREADY_EXISTS`, reached at `create-with-key`'s
+ * 23505 fallthrough) was false on both halves: it named a wizard session that
+ * does not exist, and it offered `resume_draft` / `start_fresh` for a draft that
+ * is gone. Minting a truer sentence is only half the fix — a truer sentence
+ * attached to a remedy that still cannot succeed is the same defect in better
+ * prose. So this block pins the REMEDY, not the wording.
+ *
+ * ⭐ THE ORACLE IS `buildEnvelope`'s DERIVATION, never the `actions` array —
+ * the convention `[153.6-06 / PARITY-05]` above states. Asserting `actions`
+ * alone would restate the table against itself and stay green if the derivation
+ * rule ever changed.
+ */
+describe("[161-05 / WIZERR-03] KEY_ORPHANED offers a remedy that can succeed", () => {
+  it("derives recoverable — and derives it from try_another_key, not clear_and_retry", () => {
+    expect(
+      buildEnvelope("KEY_ORPHANED", "corr-orphan-1").recoverable,
+      "The Retry control on ConnectKeyStep is `onRetry={() => setErrorCode(null)}`: " +
+        "it clears the banner and returns the user to the form so a DIFFERENT " +
+        "key can be typed. Losing recoverability here strands a user whose only " +
+        "route forward is that control.",
+    ).toBe(true);
+
+    expect(
+      WIZARD_ERROR_COPY.KEY_ORPHANED.actions,
+      "⛔ `clear_and_retry` means 'send the same thing again'. The same account " +
+        "is refused by the same partial UNIQUE every time, so that member would " +
+        "make `recoverable` true for a reason that is false. Recoverability on " +
+        "this arm must rest on try_another_key alone.",
+    ).not.toContain("clear_and_retry");
+  });
+
+  it("offers neither to resume a draft nor to delete one — there is no draft", () => {
+    // The two controls the false incumbent offered. `start_fresh` is the
+    // destructive one (140.3-10 / TRAP-4), and offering it on an arm whose whole
+    // premise is that no draft exists is the worst available combination: a
+    // destructive control aimed at nothing.
+    for (const forbidden of ["resume_draft", "start_fresh"] as const) {
+      expect(
+        WIZARD_ERROR_COPY.KEY_ORPHANED.actions,
+        `KEY_ORPHANED offers ${forbidden}, but this code is emitted only after ` +
+          "the resolver established that NO strategy — draft or otherwise — " +
+          "hangs off the key.",
+      ).not.toContain(forbidden);
+    }
+  });
+
+  it("names no key-management surface this arm cannot reach (the measured 161-05 divergence)", () => {
+    // MEASURED at HEAD, 2026-08-24. The user standing in this wizard is a
+    // manager, and every surface that can remove an `api_keys` row is out of
+    // their reach on this arm:
+    //   · `components/strategy/ApiKeyManager.tsx` (which does carry a delete) is
+    //     mounted at `strategies/[id]/edit/page.tsx` and nowhere else — a
+    //     per-STRATEGY surface, and this code exists because NO strategy holds
+    //     the key;
+    //   · `AllocatorExchangeManager` (profile → Exchanges), the only other list
+    //     with a Disconnect control, sits behind `allocatorOnly` in
+    //     `ProfileTabs.tsx`;
+    //   · `my-strategies` renders the orphan as a "No strategy yet" row whose
+    //     only control is "Finish setup →", which reopens this same wizard.
+    // 161-UI-SPEC's draft bullet ("Disconnect the unused key under Manage keys,
+    // then connect it here again") named the first of those. It was replaced,
+    // not reworded, and this case is what stops it coming back.
+    //
+    // Hand-typed and lower-cased: a PHRASE CLASS, not a pinned sentence, so an
+    // honest reword stays green and a re-introduction reds.
+    const UNREACHABLE_SURFACES = ["manage keys", "manage your keys"] as const;
+
+    const phrasesIn = (haystack: string): string[] =>
+      UNREACHABLE_SURFACES.filter((p) => haystack.toLowerCase().includes(p));
+
+    // POSITIVE CONTROL FIRST — the predicate is live, and the phrase list is not
+    // a list of strings nobody would write. ⛔ Never delete this: with an empty
+    // phrase list the assertion below passes while checking nothing.
+    expect(
+      phrasesIn("Disconnect the unused key under Manage keys, then connect it here again."),
+      "The unreachable-surface predicate matched NOTHING in the exact sentence " +
+        "161-UI-SPEC proposed, so it has gone blind and the assertion below is " +
+        "passing for the wrong reason. ⛔ Fix the phrase list, never delete this " +
+        "control.",
+    ).not.toEqual([]);
+
+    const copy = WIZARD_ERROR_COPY.KEY_ORPHANED;
+    const surface = [copy.title, copy.cause, ...copy.fix].join(" | ");
+    // Guards the `"anything".includes("")` shape from the other direction: an
+    // emptied haystack would satisfy the `toEqual([])` below while asserting
+    // nothing about any sentence we ship.
+    expect(
+      surface.length,
+      "the copy under test collapsed to nothing, so the scan below is vacuous",
+    ).toBeGreaterThan(80);
+    expect(
+      phrasesIn(surface),
+      "KEY_ORPHANED points the user at a key-management surface this arm cannot " +
+        "reach: no strategy holds the key, so there is no strategy edit page, " +
+        "and profile → Exchanges is allocator-only. A remedy the user cannot " +
+        "perform is the D-17 class this requirement exists to remove.",
+    ).toEqual([]);
+  });
+
+  /**
+   * [162-06 / HONEST-06 / D-162-3] THE REMEDY THAT BECAME REAL — AND THE
+   * SENTENCE THAT DENIED IT, WHICH HAD TO GO IN THE SAME COMMIT.
+   *
+   * Until 162-06, "Finish setup →" on a stored-but-unused key reopened this
+   * wizard onto its credential form, so the owner re-POSTed credentials for a
+   * key we already held and landed back on THIS refusal. The copy said so:
+   * `fix[1]` read "To reuse this exact account, email security@quantalyze.com …
+   * releasing the stored key is not something you can do from this page." That
+   * was true then and became FALSE the moment the client threaded the owner's
+   * own key id — for exactly the users this phase is about.
+   *
+   * ⚠️ TWO PROPERTIES, NOT A WORDING. (1) The self-serve route is NAMED, so
+   * deleting it reds. (2) The retired claim cannot come back. Neither asserts a
+   * sentence: an honest reword of either keeps both green.
+   *
+   * ⚠️ AND THE NAMING IS CONDITIONAL BY CONTRACT, not by taste. `/my-strategies`
+   * guards on `requireRolePage(…, "allocator")`; a `role: "manager"` profile is
+   * redirected off it, and the manager wizard is a place this refusal renders.
+   * A FLAT assertion of that page would re-open the same D-17 class the case
+   * above exists to keep closed — for the other population.
+   */
+  it("names the self-serve reuse route 162-06 made real, and names it conditionally", () => {
+    const copy = WIZARD_ERROR_COPY.KEY_ORPHANED;
+    const bullets = copy.fix.map((f) => f.toLowerCase());
+
+    // VACUITY FENCE — the copy under test exists at all.
+    expect(
+      bullets.join("").length,
+      "the fix bullets collapsed to nothing, so every assertion below is vacuous",
+    ).toBeGreaterThan(80);
+
+    const reuseBullet = bullets.find(
+      (b) => b.includes("my strategies") && b.includes("finish setup"),
+    );
+    expect(
+      reuseBullet,
+      "No bullet names the route an owner can actually take: My Strategies " +
+        "lists a stored key with no strategy as a 'No strategy yet' row, and " +
+        "162-06 made its 'Finish setup' control REUSE that key instead of " +
+        "reopening this wizard's credential form. A refusal that withholds the " +
+        "one remedy that now works is the D-17 class in a new costume.",
+    ).toBeDefined();
+
+    expect(
+      reuseBullet,
+      "The My Strategies bullet asserts that page FLATLY. It is guarded by " +
+        "requireRolePage(…, 'allocator'), and this refusal also renders in the " +
+        "manager wizard, where that page redirects away — so an unconditional " +
+        "sentence names an unreachable surface for the manager population. It " +
+        "is also not guaranteed to LIST the key: the listing filters on " +
+        "is_active / sync_status, while the fence that emits this code filters " +
+        "only on disconnected_at.",
+    ).toMatch(/\bif\b/);
+  });
+
+  it("no longer tells the owner that reusing this exact account means emailing us", () => {
+    // A PHRASE CLASS, lower-cased and hand-typed — an honest reword stays
+    // green, a restoration of the retired claim reds. ⛔ The neighbouring
+    // clause about RELEASING the key is NOT banned and must not be: nothing we
+    // ship releases a stored key for any role, so that sentence is still true
+    // and still shipped in the last bullet.
+    const RETIRED_CLAIMS = [
+      "to reuse this exact account, email",
+      "reuse this exact account, email",
+    ] as const;
+
+    const claimsIn = (haystack: string): string[] =>
+      RETIRED_CLAIMS.filter((p) => haystack.toLowerCase().includes(p));
+
+    // POSITIVE CONTROL FIRST — the predicate is live against the exact sentence
+    // that shipped before 162-06. ⛔ Never delete this: with a phrase list that
+    // matches nothing, the assertion below passes while checking nothing.
+    expect(
+      claimsIn(
+        "To reuse this exact account, email security@quantalyze.com with the " +
+          "correlation id below: releasing the stored key is not something you " +
+          "can do from this page.",
+      ),
+      "The retired-claim predicate matched NOTHING in the exact sentence 162-06 " +
+        "replaced, so it has gone blind. ⛔ Fix the phrase list, never delete " +
+        "this control.",
+    ).not.toEqual([]);
+
+    const copy = WIZARD_ERROR_COPY.KEY_ORPHANED;
+    const surface = [copy.title, copy.cause, ...copy.fix].join(" | ");
+    expect(
+      claimsIn(surface),
+      "KEY_ORPHANED tells the owner that reusing this exact account means " +
+        "emailing us. Since 162-06 an owner who can reach My Strategies reuses " +
+        "the stored key themselves through 'Finish setup', so that sentence " +
+        "lies to the population this phase exists for.",
+    ).toEqual([]);
+  });
+});
+
+/**
+ * [162-05 / D-162-3] KEY_REUSE_UNAVAILABLE — WHAT IT MAY CLAIM, AND WHAT IT
+ * MAY NOT.
+ *
+ * The use-existing-key arm's refusal, emitted when no LIVE key of the caller's
+ * matches the `reuse_api_key_id` it was handed. Two properties are pinned, and
+ * neither is the wording:
+ *
+ *   · THE REMEDY IS REAL. Unlike `KEY_ORPHANED` — where the same account is
+ *     refused by the same partial UNIQUE every time — the credential form is
+ *     REACHABLE from the refusing screen, so `try_another_key` names something
+ *     that can actually succeed. The oracle is `buildEnvelope`'s DERIVATION,
+ *     never the `actions` array restated against itself ([153.6-06 /
+ *     PARITY-05]).
+ *
+ *     ⚠️ "REACHABLE FROM", NOT "ON" — CORRECTED BY MEASUREMENT (162-06 review /
+ *     B-2). This docblock used to say "the credential form on this very step
+ *     still works", and 162-06 falsified that in the same branch: the only
+ *     screen that renders this refusal is ConnectKeyStep's PRESELECT sub-state,
+ *     which returns before the form. The form is one control away — "Use a
+ *     different key" — and ConnectKeyStep wires the envelope's Retry to that
+ *     same control.
+ *
+ *   · IT SAYS NOTHING ABOUT THE USER'S CREDENTIALS. This arm never receives
+ *     them, never sends them anywhere and never stores them — it returns before
+ *     `validateKey` and `encryptKey` are reachable at all. A sentence implying
+ *     the key or secret was rejected would send the user to regenerate a
+ *     working credential for a state that has nothing to do with it, which is
+ *     the "sends them looking for a different problem" class the phase exists to
+ *     remove.
+ */
+describe("[162-05 / D-162-3] KEY_REUSE_UNAVAILABLE offers a remedy that can succeed", () => {
+  it("derives recoverable — from try_another_key, and not from clear_and_retry", () => {
+    expect(
+      buildEnvelope("KEY_REUSE_UNAVAILABLE", "corr-reuse-1").recoverable,
+      "On ConnectKeyStep's preselect branch the Retry control is wired to the " +
+        "'Use a different key' escape hatch — which IS the remedy this entry's " +
+        "first fix line names. Losing recoverability hides Retry and strands " +
+        "the reader on a screen whose only other control ('Continue with this " +
+        "key') is refused identically every time.",
+    ).toBe(true);
+
+    expect(
+      WIZARD_ERROR_COPY.KEY_REUSE_UNAVAILABLE.actions,
+      "⛔ `clear_and_retry` means 'send the same thing again'. Re-posting the " +
+        "same reuse_api_key_id is refused identically, because the key it names " +
+        "still does not exist.",
+    ).not.toContain("clear_and_retry");
+  });
+
+  /**
+   * [162-06 review / B-2] ⛔ IT MAY NOT CLAIM A CREDENTIAL FORM IS ON THE
+   * SCREEN.
+   *
+   * ⚠️ THIS IS THE TABLE-LEVEL HALF, AND ON ITS OWN IT IS NOT ENOUGH — a
+   * copy-only assertion is precisely what let the defect ship. The load-bearing
+   * oracle is the RENDERED one in
+   * `steps/ConnectKeyStep.test.tsx` ("[162-06 review / B-2] the preselect
+   * refusal points at a control that exists"), which reads the escape hatch's
+   * label off the DOM and requires the envelope to contain it. This case exists
+   * so the banned sentence class is also refused at the source, where the next
+   * copy edit is actually typed.
+   */
+  it("never claims a credential form stands on the refusing screen", () => {
+    // Present-tense "the form is HERE" claims. ⚠️ Deliberately narrow: a
+    // sentence about where a control LEADS ("…to connect this account with its
+    // own API credentials instead") is honest and must stay green.
+    const FORM_IS_ON_THIS_SCREEN = [
+      "the form on this step",
+      "the form on this screen",
+      "the form on this page",
+      "the form below",
+      "the form above",
+      "the form behind",
+      "still works normally",
+      "connect this account here",
+    ] as const;
+
+    const claimsIn = (haystack: string): string[] =>
+      FORM_IS_ON_THIS_SCREEN.filter((p) => haystack.toLowerCase().includes(p));
+
+    // ⛔ POSITIVE CONTROL — the literal sentence that shipped and was measured
+    // false. If the predicate stops matching it, the scan below has gone blind.
+    // Fix the phrase list; never delete this control.
+    expect(
+      claimsIn(
+        "Connect this account here with its API credentials instead — the " +
+          "form on this step still works normally.",
+      ),
+      "the form-claim predicate matched NOTHING in the very sentence B-2 was " +
+        "filed against, so the assertion below passes for the wrong reason.",
+    ).not.toEqual([]);
+
+    const copy = WIZARD_ERROR_COPY.KEY_REUSE_UNAVAILABLE;
+    const surface = [copy.title, copy.cause, ...copy.fix].join(" | ");
+    expect(
+      surface.length,
+      "the copy under test collapsed to nothing, so the scan below is vacuous",
+    ).toBeGreaterThan(80);
+    expect(
+      claimsIn(surface),
+      "KEY_REUSE_UNAVAILABLE names a credential form as if it were on the " +
+        "screen. It is not: the only client emitter is ConnectKeyStep's reuse " +
+        "arm, which lives in the preselect sub-state, and that sub-state " +
+        "returns BEFORE the form. Naming it leaves the reader hunting for a " +
+        "control that is not painted while Retry blanks the banner and " +
+        "'Continue with this key' refuses identically — the unwinnable loop " +
+        "162-06 exists to close, one screen later.",
+    ).toEqual([]);
+  });
+
+  it("offers neither to resume a draft nor to delete one — no draft was read or written", () => {
+    for (const forbidden of ["resume_draft", "start_fresh"] as const) {
+      expect(
+        WIZARD_ERROR_COPY.KEY_REUSE_UNAVAILABLE.actions,
+        `KEY_REUSE_UNAVAILABLE offers ${forbidden}, but both of its emitters ` +
+          "return before any draft is read or written — and `start_fresh` is " +
+          "the destructive member (140.3-10 / TRAP-4), aimed here at nothing.",
+      ).not.toContain(forbidden);
+    }
+  });
+
+  it("blames nothing about the caller's credentials — they were never received", () => {
+    // Hand-typed PHRASE CLASS, lower-cased: an honest reword stays green, a
+    // credential-blaming sentence reds. ⛔ The positive control below is what
+    // stops an emptied list passing while checking nothing.
+    const CREDENTIAL_BLAME = [
+      "your api key",
+      "your secret",
+      "your passphrase",
+      "regenerate",
+      "invalid credentials",
+      "check your key",
+    ] as const;
+
+    const phrasesIn = (haystack: string): string[] =>
+      CREDENTIAL_BLAME.filter((p) => haystack.toLowerCase().includes(p));
+
+    expect(
+      phrasesIn("Check your key and regenerate your secret on the exchange."),
+      "The credential-blame predicate matched NOTHING in a sentence built to " +
+        "trip it, so it has gone blind and the assertion below passes for the " +
+        "wrong reason. ⛔ Fix the phrase list, never delete this control.",
+    ).not.toEqual([]);
+
+    const copy = WIZARD_ERROR_COPY.KEY_REUSE_UNAVAILABLE;
+    const surface = [copy.title, copy.cause, ...copy.fix].join(" | ");
+    expect(
+      surface.length,
+      "the copy under test collapsed to nothing, so the scan below is vacuous",
+    ).toBeGreaterThan(80);
+    expect(
+      phrasesIn(surface),
+      "KEY_REUSE_UNAVAILABLE blames the caller's credentials. This arm never " +
+        "receives them: it returns before validateKey and encryptKey are " +
+        "reachable, and the refusal turns entirely on which STORED key was " +
+        "named. Sending the user to regenerate a working key is the exact " +
+        "misdirection this phase exists to remove.",
+    ).toEqual([]);
+  });
+
+  it("claims 'nothing was created' — which BOTH emitters can actually establish", () => {
+    // ⚠️ 140.3-15: a comforting negative may only be written where it is
+    // KNOWABLE. It is here, at both sites: the pre-RPC refusal has performed two
+    // reads and no write, and the `no_data_found` raise happens inside the
+    // function BEFORE its strategies INSERT, in a transaction that rolls back.
+    // Pinned as a required clause rather than a banned one, because deleting the
+    // sentence would leave the user with LESS information, not more — the shape
+    // [140.4-16 / CR-01] uses for the CSV resubmit instructions.
+    const copy = WIZARD_ERROR_COPY.KEY_REUSE_UNAVAILABLE;
+    expect(
+      copy.cause.toLowerCase(),
+      "The user has just been refused on a write path. Whether anything was " +
+        "created is the first thing they need to know, and here we can tell " +
+        "them truthfully.",
+    ).toContain("nothing was created");
+  });
+});
+
+/**
+ * [161-05 / WIZERR-11] KEY_AUTH_FAILED STOPS NAMING DERIBIT AT EVERYONE ELSE.
+ *
+ * This code is returned by the SHARED `classifyKeyValidationError`, so every
+ * venue reaches it. Until this plan its `cause` carried "(e.g. Deribit returns
+ * invalid_credentials)" and its second bullet ended "— on Deribit the key is the
+ * ClientId and the secret is the ClientSecret", which meant a Binance user whose
+ * secret was mistyped was told to go and check a "ClientId" that does not exist
+ * in their console. A specific, checkable claim about a venue the reader is not
+ * on is a worse failure than vagueness: it sends them to a different problem.
+ *
+ * ⭐ THE ASSERTIONS ARE OVER THE FULL FORMATTED OUTPUT — title, cause and EVERY
+ * bullet joined — not over the one bullet that was gated. A test that watched
+ * only the gated bullet would have stayed green through the `cause` half of this
+ * defect, which is the half that shipped for longer.
+ *
+ * ⭐ AND THE NEGATIVE SWEEP RUNS OVER THE WHOLE VENUE REGISTRY, not over the two
+ * venues this plan happened to think of. `SUPPORTED_EXCHANGES` is an independent
+ * source (`closed-sets.ts`), so a seventh venue is covered on the day it is
+ * added rather than on the day someone remembers this file.
+ */
+describe("[161-05 / WIZERR-11] KEY_AUTH_FAILED names a venue only to that venue's own users", () => {
+  /** The full user-visible surface of the card, as one string. */
+  const rendered = (context?: Parameters<typeof formatKeyError>[1]): string => {
+    const copy = formatKeyError("KEY_AUTH_FAILED", context);
+    return [copy.title, copy.cause, ...copy.fix].join(" | ");
+  };
+
+  /**
+   * HAND-TYPED. The venue token that must not escape its own venue. Lower-cased
+   * comparison so a re-cased reintroduction ("DERIBIT", "deribit") still reds.
+   */
+  const VENUE_TOKEN = "deribit";
+
+  it("POSITIVE CONTROL — the token IS present for a Deribit user, so the sweeps below are live", () => {
+    // ⛔ Never delete this. Every assertion in this block is a "does not
+    // contain", and a copy entry that lost the bullet entirely — or a predicate
+    // that suppressed it for everyone — would satisfy all of them while the
+    // Deribit user silently lost real information.
+    const forDeribit = rendered({ venue: "deribit" }).toLowerCase();
+    expect(
+      forDeribit.includes(VENUE_TOKEN),
+      "The Deribit-specific bullet did not render for venue 'deribit'. The " +
+        "requirement suppressed it everywhere, which is a silent copy deletion " +
+        "rather than a gate — and it makes every negative assertion below pass " +
+        "for the wrong reason.",
+    ).toBe(true);
+    // And it is the NAMING bullet specifically, not an incidental match.
+    expect(
+      formatKeyError("KEY_AUTH_FAILED", { venue: "deribit" }).fix,
+    ).toContain(
+      "On Deribit the key is the ClientId and the secret is the ClientSecret.",
+    );
+  });
+
+  it("the CAUSE is venue-neutral for every venue — including Deribit's own users", () => {
+    // The `cause` was the half that could not be gated, because it was an
+    // ILLUSTRATION rather than a remedy: "(e.g. Deribit returns
+    // invalid_credentials)". Deleting it is the fix, so the sentence must carry
+    // no venue on ANY path — a gate here would have been the wrong tool.
+    for (const venue of [...SUPPORTED_EXCHANGES, undefined]) {
+      const copy = formatKeyError(
+        "KEY_AUTH_FAILED",
+        venue === undefined ? undefined : { venue },
+      );
+      expect(
+        copy.cause.toLowerCase(),
+        `the cause named a venue for ${venue ?? "an unnamed venue"}. ` +
+          "The cause explains a general authentication failure; naming one " +
+          "exchange in it is a claim about a reader we cannot identify.",
+      ).not.toContain(VENUE_TOKEN);
+    }
+  });
+
+  it("a BINANCE user sees the token NOWHERE in the whole card — and still gets a complete remedy", () => {
+    const forBinance = rendered({ venue: "binance" });
+    expect(
+      forBinance.length,
+      "the rendered card collapsed to nothing, so the scan below is vacuous",
+    ).toBeGreaterThan(120);
+    expect(
+      forBinance.toLowerCase(),
+      "A Binance user was told about Deribit's ClientId/ClientSecret. There is " +
+        "no such pair in their console, so the remedy sends them to look for a " +
+        "different problem — the false-sentence class WIZERR-11 removes.",
+    ).not.toContain(VENUE_TOKEN);
+    // ⛔ THE OTHER HALF, AND THE ONE A CARELESS FIX BREAKS: suppressing the
+    // venue-specific bullet must not cost the user the instruction it carried.
+    expect(
+      formatKeyError("KEY_AUTH_FAILED", { venue: "binance" }).fix,
+      "The generic re-copy instruction vanished along with the Deribit bullet. " +
+        "That is not a gate, it is a copy deletion: the unconditional bullet " +
+        "exists precisely so every venue keeps an actionable remedy.",
+    ).toContain("Re-copy both values with no leading or trailing spaces.");
+  });
+
+  it("an ABSENT venue sees the token NOWHERE — the STRICT rule, diverging from the capability default", () => {
+    // ⚠️ THE DIVERGENCE UNDER TEST. `venueCapability` requirements are
+    // default-PERMISSIVE: with no venue in context `venueIsSubstitutable`
+    // answers true and the incumbent bullet survives, so callers predating the
+    // field are byte-unchanged. This kind is the opposite, and it must be: a
+    // bullet that names ONE venue, rendered when the venue is unknown, is a
+    // specific claim about a user we cannot identify. `SyncPreviewStep` calls
+    // `formatKeyError(errorCode)` with no context at all, so this path is live.
+    const withNoContext = rendered();
+    expect(
+      withNoContext.length,
+      "the rendered card collapsed to nothing, so the scan below is vacuous",
+    ).toBeGreaterThan(120);
+    expect(
+      withNoContext.toLowerCase(),
+      "With no venue in context the Deribit bullet still rendered. Absence is " +
+        "not permission: unify this with the venueCapability default and every " +
+        "context-less caller starts naming Deribit again.",
+    ).not.toContain(VENUE_TOKEN);
+    expect(
+      formatKeyError("KEY_AUTH_FAILED").fix,
+      "and the venue-less caller must still get the generic instruction",
+    ).toContain("Re-copy both values with no leading or trailing spaces.");
+  });
+
+  it("SWEEP: no venue in the registry OTHER than deribit ever sees the token", () => {
+    // The class, not the two instances above. Driven off the independent venue
+    // registry so a seventh venue is covered the day it lands.
+    const others = SUPPORTED_EXCHANGES.filter((v) => v !== "deribit");
+    expect(
+      others.length,
+      "SUPPORTED_EXCHANGES yielded no non-deribit venue, so this sweep asserts " +
+        "nothing.",
+    ).toBeGreaterThanOrEqual(4);
+
+    const offenders: string[] = [];
+    for (const venue of others) {
+      const surface = rendered({ venue });
+      if (surface.toLowerCase().includes(VENUE_TOKEN)) {
+        offenders.push(`${venue}: "${surface}"`);
+      }
+    }
+    expect(
+      offenders,
+      "KEY_AUTH_FAILED named Deribit at users of another venue. ⛔ The remedy " +
+        "is a FixRequirement slot in the copy table, never a per-code branch " +
+        "inside formatKeyError. Offenders:",
+    ).toEqual([]);
+  });
+
+  it("the venue is a LOOKUP/COMPARISON KEY ONLY — no caller string round-trips into the card (D-17)", () => {
+    // T-161-13. The context field is typed `string`, so a caller CAN pass
+    // something that is not a supported venue. Whatever they pass, none of it
+    // may appear in the rendered output: the requirement compares it, it never
+    // renders it.
+    const probe = "zz-injected-venue-probe";
+    const surface = rendered({ venue: probe });
+    expect(
+      surface,
+      "A caller-supplied venue string reached the rendered card. The venue is " +
+        "read as a comparison key against a closed-set member and must never " +
+        "be interpolated into a sentence (D-17).",
+    ).not.toContain(probe);
+    // An unknown venue is not deribit, so it is suppressed like an absent one.
+    expect(surface.toLowerCase()).not.toContain(VENUE_TOKEN);
+  });
+});
+
+/**
+ * [161-07 / WIZERR-09] THE ATOMIC PAIR, FROM THE COPY SIDE.
+ *
+ * `gateFailureToWizardError` answered `INSUFFICIENT_CSV_HISTORY` with
+ * `UNKNOWN` under a comment asserting the code "never flows through the wizard
+ * error mapper". The wizard's composite arm started evaluating the 7-day floor
+ * in the SAME commit as this describe, which makes that premise false — and a
+ * floor landing without its copy would have shipped a real gate refusal
+ * explained by the generic unknown-error sentence, which is strictly worse than
+ * the un-floored arm: the user is stopped AND told nothing.
+ *
+ * The exhaustive `switch` in `gateFailureToWizardError` enforces half of the
+ * atomicity for free (a union member with no arm, or an arm with no member,
+ * fails `tsc`). What it cannot enforce is that the arm returns a member with
+ * REAL COPY rather than `UNKNOWN`, which is what the first case here pins.
+ */
+describe("[161-07 / WIZERR-09] INSUFFICIENT_CSV_HISTORY renders copy of its own, never UNKNOWN", () => {
+  const CODE: WizardErrorCode = "GATE_INSUFFICIENT_CSV_HISTORY";
+
+  /** Every user-visible string on the entry, joined — never just the title. */
+  const surface = (): string => {
+    const copy = formatKeyError(CODE);
+    const joined = [copy.title, copy.cause, ...copy.fix].join("   ");
+    // NON-VACUITY GUARD, and not a formality: `"anything".includes("")` is
+    // `true`, so every negative assertion below would pass against an empty
+    // render. This is the floor that makes them mean something.
+    expect(
+      joined.length,
+      "The rendered surface is empty or near-empty, which makes every " +
+        "not.toMatch below vacuously green.",
+    ).toBeGreaterThan(120);
+    return joined;
+  };
+
+  it("the gate code maps to a real member — the UNKNOWN fallthrough is gone", () => {
+    expect(gateFailureToWizardError("INSUFFICIENT_CSV_HISTORY")).toBe(CODE);
+  });
+
+  it("ANTI-CONTROL: the three transient analytics codes still answer UNKNOWN", () => {
+    // Without this, "map every gate code to something" satisfies the case
+    // above. The three below are POLL states, not terminal errors: rendering
+    // an error card for them would be the misuse UNKNOWN exists to flag, and
+    // the flip must be surgical rather than wholesale.
+    const transient: GateFailureCode[] = [
+      "ANALYTICS_MISSING",
+      "ANALYTICS_PENDING",
+      "ANALYTICS_COMPUTING",
+    ];
+    for (const code of transient) {
+      expect(gateFailureToWizardError(code), `${code} must stay UNKNOWN`).toBe(
+        "UNKNOWN",
+      );
+    }
+  });
+
+  it("names the threshold as the NUMBER 7 and invents no other number", () => {
+    // Hand-typed needle. ⛔ NEVER `${STRATEGY_GATE_MIN_CSV_ROWS}` — an oracle
+    // built from the constant it is asserting about follows a rename silently
+    // and can never fail.
+    expect(surface()).toMatch(/at least 7 days/i);
+
+    // TRAP-3 — the user's OWN row count is deliberately absent. The entry has
+    // no `formatKeyError` interpolation arm and no context field, so there is
+    // no path by which an unsupplied count could render as a zero or a
+    // placeholder. "only 0 trade(s)" is the sentence this phase is deleting;
+    // it must not be replaced with "only 0 day(s)".
+    expect(surface()).not.toMatch(/\b0 (day|days|row|rows)\b/i);
+  });
+
+  it("offers no remedy this code's emitters cannot reach", () => {
+    // MEASURED, per emitter, before this assertion was written:
+    //   · wizard COMPOSITE arm — counts the STITCHED series, no upload exists;
+    //   · wizard SINGLE-KEY arm — reachable only on the daily-returns branch,
+    //     i.e. a KEYED account whose dailies were DERIVED from the venue;
+    //   · admin approve — renders `gate.reason` raw, not this copy at all.
+    // The keyless CSV upload path never reaches `SyncPreviewStep`; it
+    // validates through `csv-finalize`. So the UI-SPEC's proposed bullet
+    // ("Upload a CSV covering at least 7 daily returns, then submit again")
+    // named a control no reader of this copy has.
+    expect(surface().toLowerCase()).not.toContain("upload a csv");
+    expect(surface().toLowerCase()).not.toContain("submit again");
+  });
+
+  it("RECOVERABLE is DERIVED, and the control it earns is the non-destructive one", () => {
+    // The derivation, not a restatement of the table: `buildEnvelope` reads
+    // `actions` against `RECOVERABLE_ACTIONS`.
+    expect(buildEnvelope(CODE, "corr-csv-history-1").recoverable).toBe(true);
+
+    // …and the action that earns it is `clear_and_retry`, which on
+    // SyncPreviewStep is wired to `handleKickoffRetry` (a re-SYNC), never to a
+    // resubmit of the same payload and never to a draft delete. TRAP-4.
+    const actions = WIZARD_ERROR_COPY[CODE].actions as readonly string[];
+    expect(actions).toContain("clear_and_retry");
+    expect(actions).not.toContain("start_fresh");
+  });
+});
+
+/**
+ * [161-07 / WIZERR-10] THE FOURTH OUTCOME'S COPY, AND THE REMEDY IT MAY OFFER.
+ *
+ * This code replaces `GATE_INSUFFICIENT_TRADES` for a strategy whose daily
+ * series carries a completeness record that does not earn admission. The
+ * sentence it replaces — "This account does not have enough trade history yet"
+ * over "Strategy has only 0 trade(s)" — was false about the strategy AND
+ * unwinnable for the user, so both halves are pinned: the copy must not talk
+ * about trade counts, and the remedy must be one that can actually succeed.
+ */
+describe("[161-07 / WIZERR-10] SERIES_EXAMINED_REFUSED renders a truthful fourth outcome", () => {
+  const CODE: WizardErrorCode = "GATE_SERIES_EXAMINED_REFUSED";
+
+  const surface = (): string => {
+    const copy = formatKeyError(CODE);
+    const joined = [copy.title, copy.cause, ...copy.fix].join("   ");
+    // NON-VACUITY GUARD — `"anything".includes("")` is `true`, so an empty
+    // render would satisfy every negative assertion below.
+    expect(joined.length).toBeGreaterThan(200);
+    return joined;
+  };
+
+  it("the gate code maps to a real member — never UNKNOWN, never back to the trade code", () => {
+    expect(gateFailureToWizardError("SERIES_EXAMINED_REFUSED")).toBe(CODE);
+    // The regression stated as the CODE IT MUST NOT BE. A refactor that
+    // "simplifies" the split by folding this arm back into the trade branch
+    // reds here rather than silently restoring the false sentence.
+    expect(gateFailureToWizardError("SERIES_EXAMINED_REFUSED")).not.toBe(
+      "GATE_INSUFFICIENT_TRADES",
+    );
+  });
+
+  it("the two provenance outcomes stay DISTINCT members with distinct copy", () => {
+    // "Nobody looked" and "somebody looked and the record is not enough" are
+    // different facts with different remedies (a re-sync vs a different
+    // source). Collapsing them would put a re-sync button on a permanent
+    // refusal, which is the placebo-remedy class this phase closes.
+    expect(gateFailureToWizardError("SERIES_PROVENANCE_UNVERIFIED")).not.toBe(
+      CODE,
+    );
+    expect(WIZARD_ERROR_COPY[CODE].cause).not.toBe(
+      WIZARD_ERROR_COPY.GATE_SERIES_PROVENANCE_UNVERIFIED.cause,
+    );
+  });
+
+  it("says nothing about trade counts — the sentence it replaces cannot come back", () => {
+    const s = surface();
+    expect(s).not.toMatch(/only 0 trade/i);
+    expect(s).not.toMatch(/minimum of 5 trades/i);
+    expect(s).not.toMatch(/filled trades/i);
+    // TRAP-3 — no invented figure of any kind. The entry has no interpolation
+    // arm, so there is no context field whose absence could render as a zero.
+    expect(s).not.toMatch(/\b0 (trade|trades|day|days|fill|fills)\b/i);
+  });
+
+  it("does not claim a per-series examination the producer does not perform", () => {
+    // ⭐ THE TRUTH OBLIGATION, carried onto the copy surface.
+    // `fill_derived_unproven` is stamped for its venues ALWAYS and
+    // unconditionally ("a CONSTANT, not a data-driven refinement" —
+    // `broker_dailies.py`), so no finding about THIS series exists to report.
+    // 161-UI-SPEC proposed exactly these words and they were corrected.
+    const s = surface();
+    expect(s).not.toMatch(/examined and refused/i);
+    expect(s).not.toMatch(/found wanting/i);
+    // …and no size threshold either: `sampled_gapped` fires at ANY interior
+    // hole (`nav_gap_days > 0`), so "gaps too large" would be a threshold we
+    // do not apply.
+    expect(s).not.toMatch(/too large/i);
+
+    // What it DOES say: the two methods, stated as methods.
+    expect(s).toMatch(/sampled from balance snapshots/i);
+    expect(s).toMatch(/derived from individual fills/i);
+  });
+
+  it("offers a remedy that can succeed, and NO retry that cannot", () => {
+    const actions = WIZARD_ERROR_COPY[CODE].actions as readonly string[];
+
+    // `try_another_key` is a genuine remedy: a venue whose producer folds a
+    // complete ledger stamps a verdict the gate admits.
+    expect(actions).toContain("try_another_key");
+
+    // ⛔ `clear_and_retry` IS THE ONE THAT MUST BE ABSENT. On SyncPreviewStep
+    // it is the ONLY action that passes `handleKickoffRetry` as `onRetry`, so
+    // its presence is what makes a Retry control render. A re-sync re-derives
+    // the same series by the same method and earns the same verdict — the
+    // button would promise an outcome that cannot change.
+    expect(
+      actions,
+      "A Retry on this state is a placebo: re-running the sync cannot change a " +
+        "verdict that is a property of the derivation method.",
+    ).not.toContain("clear_and_retry");
+
+    // …and nothing destructive, which is only true because 161-04 made
+    // the try-another-key handler a pure step transition.
+    expect(actions).not.toContain("start_fresh");
+
+    // The DERIVATION, not a restatement: `buildEnvelope` reads `actions`
+    // against `RECOVERABLE_ACTIONS`, and `try_another_key` is a member.
+    expect(buildEnvelope(CODE, "corr-examined-refused-1").recoverable).toBe(true);
+  });
+});
+
+/**
+ * [161-10 / WIZERR-07] THE FOUR DASHBOARD-DIALOG ENTRIES, FROM THE COPY SIDE.
+ *
+ * Three client components — `AllocateDialog`, `RenameStrategyDialog`,
+ * `MarkOwnershipDialog` — built `buildEnvelope("UNKNOWN", …)` for every
+ * failure their routes classified. The routes now put a machine code on the
+ * wire and the dialogs read it; these four members are the copy that code
+ * selects.
+ *
+ * ⭐ THE HARD PART IS NOT COVERAGE, IT IS TRUTHFULNESS. Each of the four has a
+ * near-neighbour already in the table whose SUBJECT matches and whose SENTENCE
+ * does not, because the incumbent vocabulary was written for a surface that has
+ * a wizard draft, an exchange key and a paste-the-secret step. Landing a
+ * dashboard failure on one of those would swap "we could not classify this
+ * failure" for a sentence that is specific and FALSE — a worse trade than the
+ * one this phase exists to make. The cases below pin what each entry must NOT
+ * say, per rejected neighbour, at least as hard as what it must.
+ *
+ * ORACLE INDEPENDENCE: every needle is hand-typed here. Nothing is imported
+ * from `wizardErrors.ts` except the table and the derivation helpers, and no
+ * assertion compares a string to itself.
+ */
+describe("[161-10 / WIZERR-07] the dashboard-dialog entries say only what is true of a dashboard", () => {
+  const FAMILY: readonly WizardErrorCode[] = [
+    "DASHBOARD_SIGNED_OUT",
+    "DASHBOARD_REQUEST_INVALID",
+    "DASHBOARD_WRITE_FAILED",
+    // 161-REVIEW / CR-01 — the fifth member, split out of the fourth.
+    "DASHBOARD_WRITE_INDETERMINATE",
+    "DASHBOARD_ROW_STALE",
+  ];
+
+  /** Every user-visible string on one entry, joined — never just the title. */
+  const surface = (code: WizardErrorCode): string => {
+    const copy = formatKeyError(code);
+    const joined = [copy.title, copy.cause, ...copy.fix].join("   ");
+    // NON-VACUITY FLOOR, and not a formality: `"anything".includes("")` is
+    // `true`, so every `not.toMatch` below would pass against an empty render.
+    expect(
+      joined.length,
+      `${code} renders an empty or near-empty surface, which makes every ` +
+        "negative assertion below vacuously green.",
+    ).toBeGreaterThan(140);
+    return joined;
+  };
+
+  it("the population is non-empty and all four members carry real copy", () => {
+    // A family loop over an empty list passes trivially. Hand-typed count.
+    // 4 -> 5 at 161-REVIEW / CR-01 (`DASHBOARD_WRITE_INDETERMINATE`).
+    expect(FAMILY.length).toBe(5);
+    for (const code of FAMILY) {
+      expect(surface(code).length).toBeGreaterThan(140);
+      // Never the generic terminal: the whole point is that these failures WERE
+      // classified.
+      expect(formatKeyError(code).title).not.toBe("Something went wrong.");
+    }
+  });
+
+  it("NOT ONE of the family mentions a draft, an API key, an exchange or a secret", () => {
+    // The exact false-specificity this family exists to avoid. Every rejected
+    // near-neighbour (`SESSION_EXPIRED`, `VALIDATION_FAILED`,
+    // `SEAM_INTERNAL_FAULT`, `GATE_DRAFT_GONE`, `DRAFT_STATE_INVALID`) trips at
+    // least one of these needles, which is why each was rejected.
+    for (const code of FAMILY) {
+      const s = surface(code);
+      expect(s, `${code} names a wizard draft`).not.toMatch(/\bdraft\b/i);
+      expect(s, `${code} names an API key`).not.toMatch(/\bapi key\b/i);
+      expect(s, `${code} names a key at all`).not.toMatch(/\byour key\b/i);
+      expect(s, `${code} names an exchange`).not.toMatch(/\bexchange\b/i);
+      expect(s, `${code} names a pasted secret`).not.toMatch(/\bsecret\b/i);
+    }
+  });
+
+  it("SIGNED_OUT names the session and offers signing in — not a retry that cannot work", () => {
+    const s = surface("DASHBOARD_SIGNED_OUT");
+    expect(s).toMatch(/signed out/i);
+    // The state-safety claim the user needs: the refused write changed nothing.
+    expect(s).toMatch(/nothing was saved/i);
+    expect(s).toMatch(/sign in again/i);
+    // THE DERIVATION, not a restatement of the table: `buildEnvelope` reads
+    // `actions` against `RECOVERABLE_ACTIONS`. A Retry from a signed-out
+    // session is refused identically, so no control may render.
+    expect(buildEnvelope("DASHBOARD_SIGNED_OUT", "corr-dash-401").recoverable).toBe(
+      false,
+    );
+  });
+
+  it("REQUEST_INVALID blames our software, never what the user typed", () => {
+    const s = surface("DASHBOARD_REQUEST_INVALID");
+    expect(s).toMatch(/our (own )?s(oftware|ervice)/i);
+    // ⛔ The clause that disqualified `VALIDATION_FAILED` for this surface:
+    // it instructs the user to quote a draft ID they do not have, which is a
+    // remedy that cannot be carried out (Principle 2).
+    expect(s.toLowerCase()).not.toContain("draft id");
+    expect(buildEnvelope("DASHBOARD_REQUEST_INVALID", "corr-dash-400").recoverable).toBe(
+      false,
+    );
+  });
+
+  it("WRITE_FAILED is the ONE recoverable member, and says nothing was saved", () => {
+    const s = surface("DASHBOARD_WRITE_FAILED");
+    expect(s).toMatch(/nothing was saved/i);
+    // A 500 is the one dashboard failure whose second attempt genuinely may
+    // succeed, so this is the only member of the family that earns a Retry.
+    expect(buildEnvelope("DASHBOARD_WRITE_FAILED", "corr-dash-500").recoverable).toBe(
+      true,
+    );
+    // ANTI-CONTROL: "make them all recoverable" must not satisfy the line
+    // above. The other three are pinned false in their own cases; asserting the
+    // contrast here is what makes this one a decision rather than a default.
+    expect(buildEnvelope("DASHBOARD_ROW_STALE", "corr-dash-404").recoverable).toBe(
+      false,
+    );
+  });
+
+  it("ROW_STALE points at the LIST, and names no cause the 404 cannot establish", () => {
+    const s = surface("DASHBOARD_ROW_STALE");
+    // The remedy that actually settles it: reload the list.
+    expect(s).toMatch(/reload/i);
+    // ⛔ The three routes merge several causes into one 404 on purpose (naming
+    // one would leak row existence to a caller probing ids), so the copy may
+    // not pick a cause. These are the guesses a future edit would reach for.
+    expect(s).not.toMatch(/you do not (have|own)/i);
+    expect(s).not.toMatch(/not yours/i);
+    expect(s).not.toMatch(/(was|has been) deleted\b/i);
+    expect(buildEnvelope("DASHBOARD_ROW_STALE", "corr-dash-404b").recoverable).toBe(
+      false,
+    );
+  });
+
+  it("no member of the family carries a destructive action", () => {
+    // These entries render on surfaces holding REAL MONEY positions. A remedy
+    // that removes something is never the answer to "we could not save that".
+    for (const code of FAMILY) {
+      const actions = WIZARD_ERROR_COPY[code].actions as readonly string[];
+      expect(actions.length, `${code} offers no action at all`).toBeGreaterThan(0);
+      expect(actions, `${code} offers a draft-destroying action`).not.toContain(
+        "start_fresh",
+      );
+    }
+  });
+
+  /**
+   * ⭐ 161-REVIEW / CR-01 — THE INDETERMINATE MEMBER, AND WHAT IT MAY NOT SAY.
+   *
+   * `DASHBOARD_WRITE_FAILED` covered every `internal error` 500 on all three
+   * routes, including arms whose own comments record that the outcome is
+   * unknown — the ownership flip RPC (which DELETES live positions and sets the
+   * mark in one transaction) and the allocation upsert (whose zero-rows arm
+   * names "RLS ate the row", i.e. the write LANDED and only the returning row
+   * was suppressed). Its sentence asserts "Nothing was saved", and it offered
+   * `clear_and_retry` on top of it.
+   *
+   * These cases pin the split from the COPY side, in both directions: what the
+   * new entry must not claim, and that the old entry's sentence and Retry are
+   * untouched for the arms that genuinely establish them.
+   */
+  it("INDETERMINATE claims persistence in NEITHER direction", () => {
+    const s = surface("DASHBOARD_WRITE_INDETERMINATE");
+
+    // ⛔ THE NEGATIVE HALF. `wizardErrors.ts:2470` — "'NOTHING WAS SAVED' IS
+    // VERIFIED, NOT ASSERTED". No arm reaching this code can verify it.
+    expect(
+      s,
+      "the indeterminate entry asserts a zero write. No arm that reaches it " +
+        "established one: an errored write is not a verified rollback, and " +
+        "the zero-rows arm's own comment says RLS may have eaten a row the " +
+        "upsert really wrote.",
+    ).not.toMatch(/nothing was saved/i);
+    expect(s).not.toMatch(/nothing was changed/i);
+    expect(s).not.toMatch(/as it was before/i);
+
+    // ⛔ AND THE OTHER DIRECTION, which is the correction a future edit is most
+    // likely to reach for once "nothing was saved" is forbidden. This is a
+    // STRUCTURAL rule rather than a needle list, because the honest copy has to
+    // be free to USE the word "saved" — its title is "We could not confirm
+    // whether that change was saved". What it may not do is state persistence
+    // WITHOUT a hedge. So: every sentence that mentions an outcome must also
+    // carry an epistemic qualifier.
+    const OUTCOME = /\bsaved\b|took effect|went through|\bapplied\b|succeeded/i;
+    const HEDGE =
+      /\bcannot\b|could not\b|\bwhether\b|\bif\b|\bnot there\b|\bnothing needs\b|\bmay\b/i;
+    const copy = WIZARD_ERROR_COPY.DASHBOARD_WRITE_INDETERMINATE;
+    const sentences = [copy.title, copy.cause, ...copy.fix]
+      .join(" ")
+      .split(/(?<=[.!?])\s+/)
+      .map((x) => x.trim())
+      .filter((x) => x.length > 0);
+
+    // NON-VACUITY, both ends: the split has to produce real sentences, and at
+    // least one of them has to mention an outcome — otherwise the loop below
+    // iterates over nothing that could ever fail.
+    expect(sentences.length).toBeGreaterThan(4);
+    const outcomeSentences = sentences.filter((x) => OUTCOME.test(x));
+    expect(
+      outcomeSentences.length,
+      "no sentence in this entry mentions an outcome at all, so the hedge " +
+        "rule below is checking nothing. The entry is supposed to be ABOUT an " +
+        "outcome it cannot confirm.",
+    ).toBeGreaterThan(0);
+
+    for (const sentence of outcomeSentences) {
+      expect(
+        HEDGE.test(sentence),
+        "this entry states an outcome with no qualifier: " +
+          JSON.stringify(sentence) +
+          " — a guess about a statement we never got an answer to, and the " +
+          "mirror image of the defect the entry was minted to close.",
+      ).toBe(true);
+    }
+
+    // ⭐ THE POSITIVE HALF, so "say nothing" is not a passing strategy. The
+    // entry must still name the actual state (Copy Principle 1) and carry a
+    // remedy that can succeed (Principle 2) — re-read current state, which is
+    // the ONE action that settles an unknown outcome.
+    expect(s, "the entry does not admit that we cannot tell").toMatch(
+      /cannot tell|could not confirm/i,
+    );
+    expect(s, "the entry does not send the user to re-read current state").toMatch(
+      /reload/i,
+    );
+    expect(s).toMatch(/current state/i);
+  });
+
+  it("INDETERMINATE offers NO Retry — a blind retry against a possibly-applied money write", () => {
+    const actions = WIZARD_ERROR_COPY.DASHBOARD_WRITE_INDETERMINATE
+      .actions as readonly string[];
+    expect(actions.length).toBeGreaterThan(0);
+    expect(
+      actions,
+      "`clear_and_retry` on an arm whose write may already have applied is a " +
+        "control whose effect the person pressing it cannot foresee. On the " +
+        "ownership flip that write removes live positions.",
+    ).not.toContain("clear_and_retry");
+    expect(actions).not.toContain("try_another_key");
+
+    // THE DERIVATION, not a restatement of the table: `buildEnvelope` reads
+    // `actions` against `RECOVERABLE_ACTIONS`, and `ErrorEnvelope`'s
+    // `showRetry` reads `recoverable`. Asserting the array alone would go
+    // green if the derivation rule ever changed.
+    expect(
+      buildEnvelope("DASHBOARD_WRITE_INDETERMINATE", "corr-dash-500-ind")
+        .recoverable,
+    ).toBe(false);
+
+    // ANTI-CONTROL: the split did not achieve "no Retry here" by removing the
+    // Retry everywhere. The verified-zero-write half keeps it.
+    expect(
+      buildEnvelope("DASHBOARD_WRITE_FAILED", "corr-dash-500-ver").recoverable,
+    ).toBe(true);
+  });
+
+  it("WRITE_FAILED's sentence and Retry survive the split byte-identical", () => {
+    // ⛔ The orchestrator's binding requirement for CR-01: the verified-zero
+    // arms keep TODAY's sentence, byte for byte. Hand-typed here, never
+    // imported from the table — an oracle that reads its expectation out of
+    // the thing it tests asserts copy(X) === copy(X) and cannot fail.
+    const copy = WIZARD_ERROR_COPY.DASHBOARD_WRITE_FAILED;
+    expect(copy.title).toBe("We could not save that change.");
+    expect(copy.cause).toBe(
+      "Our own service failed part-way through the change and stopped. " +
+        "Nothing was saved — the strategy is as it was before you pressed " +
+        "save. This is a fault on our side, not in your data.",
+    );
+    expect(copy.fix).toEqual([
+      "Try the same change again. This kind of fault is often momentary.",
+      "If it keeps failing, email security@quantalyze.com with the correlation id below.",
+    ]);
+    expect(copy.actions as readonly string[]).toContain("clear_and_retry");
+  });
+
+  it("the two write entries are DISTINCT copy, not one sentence twice", () => {
+    // A split that produced two members rendering the same words would satisfy
+    // every assertion above while changing nothing a user reads.
+    const failed = surface("DASHBOARD_WRITE_FAILED");
+    const indeterminate = surface("DASHBOARD_WRITE_INDETERMINATE");
+    expect(failed.length).toBeGreaterThan(140);
+    expect(indeterminate.length).toBeGreaterThan(140);
+    expect(indeterminate).not.toBe(failed);
+    expect(formatKeyError("DASHBOARD_WRITE_INDETERMINATE").title).not.toBe(
+      formatKeyError("DASHBOARD_WRITE_FAILED").title,
+    );
+  });
+});
+
+/**
+ * [161-10 / WIZERR-07] `recogniseDashboardDialogCode` — THE ONE GUARDED CAST.
+ *
+ * Pitfall 4: a recognised code must be an explicit roster member, never a
+ * `code as WizardErrorCode` written at a consumer. This is the only place the
+ * cast happens, so this is where the guard is pinned.
+ */
+describe("[161-10 / WIZERR-07] the dashboard recogniser admits only rostered codes", () => {
+  it("161-CR-01: all three routes admit DASHBOARD_WRITE_INDETERMINATE", () => {
+    // Every one of the three routes has at least one arm that fails AFTER a
+    // data-modifying statement was sent, so every roster gains it. A roster
+    // that missed it would render "we could not classify this failure" for a
+    // failure the route classified precisely — the WIZERR-07 defect, on the
+    // arm where the user most needs to be told to go and look.
+    for (const route of [
+      "strategies/[id]/name",
+      "strategies/[id]/ownership",
+      "portfolio-strategies/allocation",
+    ] as const) {
+      expect(
+        recogniseDashboardDialogCode(route, "DASHBOARD_WRITE_INDETERMINATE"),
+        `${route} does not admit the indeterminate code`,
+      ).toBe("DASHBOARD_WRITE_INDETERMINATE");
+    }
+  });
+
+  it("admits a code the route really emits, per route", () => {
+    expect(
+      recogniseDashboardDialogCode("strategies/[id]/name", "DASHBOARD_ROW_STALE"),
+    ).toBe("DASHBOARD_ROW_STALE");
+    expect(
+      recogniseDashboardDialogCode(
+        "portfolio-strategies/allocation",
+        "ALLOCATION_NOT_ALLOCATABLE",
+      ),
+    ).toBe("ALLOCATION_NOT_ALLOCATABLE");
+  });
+
+  it("REFUSES a real member of the union that THIS route does not emit", () => {
+    // The per-route split is the point (`ConnectKeyStep`'s roster docblock).
+    // A flat set would go green here while the rename dialog silently admitted
+    // an allocation-only code.
+    expect(
+      recogniseDashboardDialogCode(
+        "strategies/[id]/name",
+        "ALLOCATION_NOT_ALLOCATABLE",
+      ),
+    ).toBe("UNKNOWN");
+  });
+
+  it("REFUSES an arbitrary string, an empty string and a non-string", () => {
+    // An identity rule (`code as WizardErrorCode`) would admit all of these.
+    expect(
+      recogniseDashboardDialogCode("strategies/[id]/name", "TOTALLY_MADE_UP"),
+    ).toBe("UNKNOWN");
+    expect(recogniseDashboardDialogCode("strategies/[id]/name", "")).toBe("UNKNOWN");
+    expect(recogniseDashboardDialogCode("strategies/[id]/name", undefined)).toBe(
+      "UNKNOWN",
+    );
+    expect(recogniseDashboardDialogCode("strategies/[id]/name", null)).toBe("UNKNOWN");
+    expect(recogniseDashboardDialogCode("strategies/[id]/name", 42)).toBe("UNKNOWN");
+  });
+
+  it("REFUSES the three wire codes that are deliberately NOT envelope codes", () => {
+    // `NAME_REQUIRED` / `NAME_TOO_LONG` land inline at the Name field;
+    // `LIVE_ALLOCATION` swaps in a confirmation body. None reaches
+    // `buildEnvelope`, so none may be admitted here — admitting one would
+    // demand a copy entry for a string the user never sees as an error.
+    for (const wire of ["NAME_REQUIRED", "NAME_TOO_LONG"]) {
+      expect(recogniseDashboardDialogCode("strategies/[id]/name", wire)).toBe(
+        "UNKNOWN",
+      );
+    }
+    expect(
+      recogniseDashboardDialogCode("strategies/[id]/ownership", "LIVE_ALLOCATION"),
+    ).toBe("UNKNOWN");
+  });
+});
+
+/**
+ * ⭐ 161-REVIEW / IN-03 — THE EXAMINED-REFUSED REMEDY MUST NAME A VENUE THE
+ * READER CAN RESOLVE.
+ *
+ * The first `fix` bullet used to read "Connect a key from a venue we can read
+ * end to end — one that gives us a complete transaction ledger rather than a
+ * fill feed." Nothing on the user's screen says which venue that is, so the
+ * remedy was "guess which of the ones on offer qualifies". Short of unwinnable,
+ * short of actionable.
+ *
+ * ⛔ THE ORACLE IS NOT THE COPY TABLE. The venue→verdict mapping lives in
+ * `analytics-service/services/broker_dailies.py` and cannot be imported into
+ * TypeScript, so this case READS THAT FILE and asserts the two facts the
+ * sentence rests on. A hand-typed venue list checked against the sentence would
+ * only restate the sentence; reading the producer makes the pin red when the
+ * producer moves, which is the drift that would make the copy false.
+ */
+describe("[161-REVIEW / IN-03] GATE_SERIES_EXAMINED_REFUSED names a resolvable venue", () => {
+  const BROKER_DAILIES = readFileSync(
+    resolve(process.cwd(), "analytics-service/services/broker_dailies.py"),
+    "utf-8",
+  );
+
+  /**
+   * The venues whose producer stamps a verdict that REACHES this code. Derived
+   * from the producer's own registry docstring, asserted below rather than
+   * assumed: `combine_realized_and_funding` (binance / bybit / okx) stamps
+   * `fill_derived_unproven`, `combine_sfox_balance_history` stamps
+   * `sampled_gapped` on any interior hole. None of them can be the remedy.
+   */
+  const VENUES_THAT_REACH_THIS_CODE = ["Binance", "Bybit", "OKX", "sFOX"] as const;
+
+  it("the producer still maps deribit → ledger_complete and the ccxt venues → fill_derived_unproven", () => {
+    // Anti-vacuity: a moved/renamed file would read as an empty string and make
+    // every `toContain` below fail loudly rather than silently — but a TRUNCATED
+    // read would not, so fence the size first.
+    expect(BROKER_DAILIES.length).toBeGreaterThan(5000);
+
+    // The registry docstring's "Who stamps what" block — the truth source the
+    // copy's docblock cites.
+    expect(BROKER_DAILIES).toContain("``combine_native_ledger`` (deribit");
+    expect(BROKER_DAILIES).toContain(
+      "``combine_realized_and_funding`` (binance / bybit /",
+    );
+    expect(BROKER_DAILIES).toContain("fill_derived_unproven");
+
+    // Deribit's stamp is UNCONDITIONAL on both return paths — that is what makes
+    // it a remedy that cannot put the user back on this screen. Two literal
+    // assignment sites, not one.
+    const deribitStamps = BROKER_DAILIES.match(
+      /out_(?:ac_)?meta\["series_completeness"\] = "ledger_complete"/g,
+    );
+    expect(
+      deribitStamps?.length ?? 0,
+      "the unconditional `ledger_complete` stamp sites moved. The first fix " +
+        "bullet of GATE_SERIES_EXAMINED_REFUSED names Deribit on the basis " +
+        "that its producer stamps ledger_complete unconditionally — re-measure " +
+        "before trusting that sentence.",
+    ).toBeGreaterThanOrEqual(2);
+  });
+
+  it("the first remedy names Deribit, and never a venue that can reach this code", () => {
+    const bullet = WIZARD_ERROR_COPY.GATE_SERIES_EXAMINED_REFUSED.fix[0];
+
+    // `"anything".includes("")` is true, so establish the subject is a real
+    // sentence before asserting anything about its contents.
+    expect(typeof bullet).toBe("string");
+    expect(bullet.trim().length).toBeGreaterThan(40);
+
+    expect(
+      bullet,
+      "the examined-refused remedy no longer names a venue the reader can act " +
+        "on (161-REVIEW / IN-03). Naming the qualifying venue is the whole " +
+        "point of the bullet.",
+    ).toContain("Deribit");
+
+    for (const venue of VENUES_THAT_REACH_THIS_CODE) {
+      expect(
+        bullet.toLowerCase().includes(venue.toLowerCase()),
+        `the remedy names ${venue}, which is a venue whose producer stamps a ` +
+          "verdict that LANDS the user on this very screen — that is an " +
+          "unwinnable remedy, the defect class this phase exists to close.",
+      ).toBe(false);
+    }
+  });
+
+  it("the remedy names no FLAG-GATED venue (the WIZERR-08 / F3 disclosure class)", () => {
+    const bullet = WIZARD_ERROR_COPY.GATE_SERIES_EXAMINED_REFUSED.fix[0];
+    // MT5 also stamps `ledger_complete` unconditionally, so it would be a TRUE
+    // remedy — but its wizard presence rides `MT5_UI_ENABLED`, so a static
+    // sentence naming it would name a venue the surface may not be offering.
+    expect(BROKER_DAILIES).toContain("``combine_mt5_deal_ledger``");
+    for (const gated of ["MT5", "MetaTrader"]) {
+      expect(
+        bullet.toLowerCase().includes(gated.toLowerCase()),
+        `the remedy names ${gated}, whose wizard offer is behind a build flag ` +
+          "(MT5_UI_ENABLED). Static copy must not name a venue the surface " +
+          "may not be presenting.",
+      ).toBe(false);
+    }
+  });
+});
+
+/**
+ * ⭐ 161-REVIEW / IN-02 — PRINCIPLE 4 IS AN AUTHORING RULE, AND THE DOCBLOCKS
+ * MAY NOT CLAIM `expand_log` ENFORCES IT.
+ *
+ * The DASHBOARD roster note used to argue that "no correlation id on an
+ * actionable arm" HOLDS because `expand_log` is present only on terminal
+ * members. Two independent measurements say `expand_log` cannot carry that
+ * argument, and this case pins BOTH so the prose cannot quietly regrow:
+ *
+ *   1. `expand_log` does not imply the arm is non-actionable — `KEY_ORPHANED`
+ *      carries `try_another_key` (so `buildEnvelope` derives
+ *      `recoverable: true`) alongside it. Derived below, never hand-asserted.
+ *   2. `expand_log` does not decide what the renderer shows. That is
+ *      `ErrorEnvelope`'s call, and no entry in this table can assert it — so no
+ *      docblock here may state the property as established.
+ *
+ * ⛔ The recoverability half is DERIVED through `buildEnvelope`, matching this
+ * file's standing rule: asserting `actions` directly would restate what the
+ * table says about itself and would go green if the derivation rule changed.
+ */
+describe("[161-REVIEW / IN-02] `expand_log` is a declaration, not a Principle-4 mechanism", () => {
+  const source = readFileSync(join(__dirname, "wizardErrors.ts"), "utf-8");
+
+  it("at least one entry is RECOVERABLE and carries `expand_log` — so presence cannot mean 'terminal'", () => {
+    const codes = Object.keys(WIZARD_ERROR_COPY) as WizardErrorCode[];
+    // Population fence: an empty table would make the search below vacuous.
+    expect(codes.length).toBeGreaterThan(50);
+
+    const recoverableWithExpandLog = codes.filter(
+      (code) =>
+        buildEnvelope(code, "cid-in02").recoverable &&
+        WIZARD_ERROR_COPY[code].actions.includes("expand_log"),
+    );
+
+    expect(
+      recoverableWithExpandLog.length,
+      "no entry is both recoverable and carries `expand_log` any more. That " +
+        "would make `expand_log` presence coincide with 'terminal' again — " +
+        "which is the reading the IN-02 docblocks were corrected AWAY from. " +
+        "Do not simply delete this case: re-decide whether Principle 4 is now " +
+        "mechanically enforceable, and say so at the docblocks.",
+    ).toBeGreaterThan(0);
+  });
+
+  it("no docblock claims `expand_log`'s presence establishes Principle 4", () => {
+    // Control: the file was read, and the corrected note is the one present.
+    expect(source.length).toBeGreaterThan(100_000);
+    expect(source).toContain("PRINCIPLE 4 IS AN AUTHORING RULE");
+
+    // ⛔ NORMALISED, not raw. A raw substring pin is defeated by re-wrapping the
+    // comment — the same sentence at a different line width would slip through
+    // while reading identically to a human. Strip comment markers, collapse
+    // whitespace, then search. The corrected note QUOTES claim A verbatim (that
+    // is how the reader learns what was superseded), so the test is not "absent"
+    // but "appears once, and that once is inside the correction".
+    const normalise = (s: string) =>
+      s
+        .replace(/^\s*(?:\/\/|\*|\/\*\*?)\s?/gm, "")
+        .replace(/\s+/g, " ")
+        .trim();
+    const flat = normalise(source);
+    const count = (hay: string, needle: string) => hay.split(needle).length - 1;
+
+    // Claim A — the DASHBOARD roster note's original wording.
+    const CLAIM_A =
+      "Principle 4 (no correlation id on an actionable arm — three of the four " +
+      "are terminal, so `expand_log` is present on those and the id is what the " +
+      "user is asked to quote)";
+    // Claim B — the DASHBOARD_DIALOG_ROUTE_CODES docblock's original wording.
+    const CLAIM_B = "would show a correlation id on an ACTIONABLE arm (Principle 4)";
+
+    // Blank-needle fence — `"anything".includes("")` is true — and a normaliser
+    // control: if `normalise` blanked the file, every count below reads 0 and
+    // the whole case goes vacuously green.
+    for (const claim of [CLAIM_A, CLAIM_B]) {
+      expect(claim.trim().length).toBeGreaterThan(50);
+    }
+    expect(flat.length).toBeGreaterThan(50_000);
+    expect(flat).toContain("PRINCIPLE 4 IS AN AUTHORING RULE, NOT A PROPERTY");
+
+    // Claim A survives EXACTLY ONCE, as the quoted-and-rejected text.
+    expect(
+      count(flat, CLAIM_A),
+      "the superseded Principle-4 claim appears somewhere other than (or " +
+        "instead of) the IN-02 correction that quotes it. `expand_log` neither " +
+        "implies the arm is terminal (see the sibling case) nor decides what " +
+        "ErrorEnvelope renders — state it as an authoring rule, never as an " +
+        "established property.",
+    ).toBe(1);
+
+    // And that single occurrence is inside the correction, not standing alone.
+    const at = flat.indexOf(CLAIM_A);
+    expect(
+      flat.slice(Math.max(0, at - 200), at),
+      "the superseded claim is present without the note marking it superseded",
+    ).toContain("superseded");
+
+    // Claim B is gone outright — the correction paraphrases it rather than
+    // quoting the "(Principle 4)" tail, so any occurrence is a reintroduction.
+    expect(
+      count(flat, CLAIM_B),
+      "wizardErrors.ts has reintroduced: " + CLAIM_B + ". Nothing in this file " +
+        "decides what ErrorEnvelope renders.",
+    ).toBe(0);
+  });
+});
+
+/**
+ * ⭐ 164.5.4-02 / D-03 — THE TWO FACTS THIS PHASE EXISTS FOR, each pinned by the
+ * MECHANISM that produces it rather than by restating a table.
+ *
+ * THE DEFECT, measured before the fix. `analytics-service`'s secret-rotation
+ * endpoint already knew the answer: it raises wire `KEY_UNDECRYPTABLE` with
+ * `retryable=False` and the sentence "This stored key could not be decrypted.
+ * It must be reconnected." TypeScript threw both away. The wire code had no row
+ * in `VENUE_WIRE_CODE_TO_VERDICT`, the substring cascade has no decrypt branch,
+ * and so the founder read the `UNKNOWN` terminal — "we could not classify this
+ * failure" — beside a Retry control that could never work, because every press
+ * re-reads the same unreadable stored copy.
+ *
+ * ⛔ WHY THE ROW AND THE MINT ARE BOTH PINNED, AND SEPARATELY. A minted member
+ * with no row is unreachable; a row pointing at a recoverable member still
+ * renders the useless Retry. Either one alone closes nothing, so each case
+ * below deletes ITS OWN subject to check it can fail — the row test was
+ * observed RED naming `UNKNOWN` with the row removed, and the envelope test was
+ * observed RED with `try_another_key` added to the entry's `actions`.
+ *
+ * ⛔ AND THE RECOVERABILITY HALF IS DERIVED THROUGH `buildEnvelope`, never read
+ * off `actions`, matching this file's standing rule: asserting the array would
+ * restate what the table says about itself and would stay green if the
+ * derivation rule in `envelope.ts` ever changed.
+ */
+describe("[164.5.4-02 / D-03] an unreadable stored key routes to a remedy, with no Retry", () => {
+  /**
+   * The EXACT shape `keys/[id]/rotate-secret/route.ts` throws: a plain `Error`
+   * carrying `seamCode` as an own data property. Never an
+   * `AnalyticsUpstreamError` — the classifier reads this with `typeof`, not
+   * `instanceof`, precisely so it survives the wholesale seam mocks, and a
+   * fixture built from the class would test a path the route does not take.
+   */
+  function rotateSecretThrow(message: string, seamCode: string): Error {
+    return Object.assign(new Error(message), { seamCode });
+  }
+
+  /**
+   * Byte-identical to the `detail=` argument at the Python emitter
+   * (`rotate_key_secret`, analytics-service/routers/internal.py). Typed here as
+   * a literal so the "without the row this lands somewhere else" control below
+   * is a measurement rather than a claim.
+   */
+  const DECRYPT_FAILURE_DETAIL =
+    "This stored key could not be decrypted. It must be reconnected.";
+
+  it("the wire code routes to the minted member — NOT the UNKNOWN terminal, and NOT KEY_PROBE_FAILED", () => {
+    const verdict = classifyKeyValidationError(
+      rotateSecretThrow(DECRYPT_FAILURE_DETAIL, "KEY_UNDECRYPTABLE"),
+    );
+
+    expect(verdict).toEqual({
+      code: "KEY_MUST_BE_RECONNECTED",
+      status: 500,
+    });
+
+    // ⭐ THE TWO WRONG ANSWERS, NAMED. Both were live candidates and both are
+    // asserted against rather than merely not-produced, because a reader
+    // arriving at this case months from now needs to know WHICH failures it
+    // stands between — and because this phase's own CONTEXT.md carries a
+    // superseded bullet that, taken literally, would have produced the first.
+    expect(
+      verdict.code,
+      "the decrypt failure fell back to the terminal that admits knowing " +
+        "nothing, for a fault the service had classified precisely",
+    ).not.toBe("UNKNOWN");
+    expect(
+      verdict.code,
+      "KEY_PROBE_FAILED is RECOVERABLE, so routing here would render the same " +
+        "useless Retry control the fix exists to remove",
+    ).not.toBe("KEY_PROBE_FAILED");
+  });
+
+  it("it is the ROW that moved the verdict — the same sentence with no wire code still lands on UNKNOWN", () => {
+    // The control that makes the case above falsifiable. The substring cascade
+    // has no decrypt/reconnect branch, so the identical human sentence carrying
+    // NO machine code is exactly what the founder used to get. If this ever
+    // starts answering the minted member, someone added a cascade branch and
+    // the case above stopped measuring the row.
+    expect(
+      classifyKeyValidationError(new Error(DECRYPT_FAILURE_DETAIL)),
+    ).toEqual({ code: "UNKNOWN", status: 500 });
+  });
+
+  it("the envelope the browser receives is NOT recoverable, so no Retry control renders", () => {
+    const envelope = buildEnvelope("KEY_MUST_BE_RECONNECTED", "cid-164-5-4-02");
+
+    expect(
+      envelope.recoverable,
+      "a Retry was offered against a stored copy that will read identically on " +
+        "every attempt — the rotation path decrypts the stored row on every " +
+        "call, before it touches anything the user just typed, so pressing " +
+        "Retry cannot change the outcome. Offering it IS the defect.",
+    ).toBe(false);
+
+    // NON-VACUITY: the derivation really can answer `true`. Without this the
+    // assertion above would pass on a `buildEnvelope` that had stopped deriving
+    // recoverability at all.
+    expect(
+      buildEnvelope("KEY_PROBE_FAILED", "cid-164-5-4-02").recoverable,
+      "the nearest member by subject is still recoverable — if this flipped, " +
+        "the contrast the case above rests on is gone and so is the derivation",
+    ).toBe(true);
+  });
+
+  it("the copy names the remedy Python already established — reconnect this key", () => {
+    const copy = formatKeyError("KEY_MUST_BE_RECONNECTED");
+    const blob = `${copy.title} ${copy.cause} ${copy.fix.join(" ")}`.toLowerCase();
+
+    expect(blob).toContain("connect this account again");
+    // ⛔ AND IT MUST NOT INVITE THE ACTION IT CANNOT HONOUR. "Try again" on this
+    // card would contradict the absent Retry control one line up.
+    expect(
+      blob,
+      "the copy tells the user to retry while the envelope offers no control " +
+        "to do it with — the two halves of this fix have to agree",
+    ).not.toMatch(/try again/);
+  });
+});
+
+/**
+ * ⭐ 167-CREDTRUST / D-05, D-07 — THE WIZARD HALF OF THE FIX, pinned by the
+ * MECHANISM that produces it rather than by restating a table. Same four
+ * techniques as the [164.5.4-02 / D-03] describe above; new subject.
+ *
+ * THE DEFECT, measured before the fix. `routers/exchange.py`'s MT5
+ * `except Mt5ClientError` transient tail answered `424 NETWORK_UNAVAILABLE`;
+ * `VENUE_WIRE_CODE_TO_VERDICT` mapped that to `KEY_NETWORK_TIMEOUT`, whose
+ * `actions` include `clear_and_retry` — a member of `RECOVERABLE_ACTIONS` —
+ * so `buildEnvelope` derived `recoverable: true` and `ErrorEnvelope` rendered
+ * a Retry against a terminal a wrong password may have wedged behind a modal
+ * login dialog (D-08). The Retry was rendered by TypeScript, not by the
+ * Python detail string (D-05) — a Python-only change would have been
+ * user-invisible.
+ */
+describe("[167-01 / D-05, D-07] KEY_SIGN_IN_FAILED — an ambiguous MT5 sign-in failure routes to a remedy, with no Retry", () => {
+  /**
+   * The EXACT shape the seam client attaches to a thrown
+   * `AnalyticsUpstreamError` for a `VenueTransientHTTPException` body: a
+   * plain error carrying `seamCode` as an own data property, read with
+   * `typeof` — never `instanceof` — so it survives every wholesale seam
+   * mock, mirroring the [164.5.4-02 / D-03] describe's `rotateSecretThrow`.
+   */
+  function venueTransientThrow(message: string, seamCode: string): Error {
+    return Object.assign(new Error(message), { seamCode });
+  }
+
+  /**
+   * Byte-identical to the `detail=` argument at the Python emitter
+   * (`_validate_mt5_key_probe`'s `except Mt5ClientError` transient tail,
+   * analytics-service/routers/exchange.py's `SIGN_IN_FAILED_DETAIL`). Typed
+   * here as a literal so the "without the row this lands somewhere else"
+   * control below is a measurement rather than a claim.
+   */
+  const SIGN_IN_FAILED_DETAIL_LITERAL =
+    "The sign-in attempt did not complete, and the venue did not confirm the credential.";
+
+  it("the wire code routes to the minted member — NOT UNKNOWN, NOT KEY_NETWORK_TIMEOUT, NOT KEY_AUTH_FAILED", () => {
+    const verdict = classifyKeyValidationError(
+      venueTransientThrow(SIGN_IN_FAILED_DETAIL_LITERAL, "SIGN_IN_FAILED"),
+    );
+
+    expect(verdict).toEqual({ code: "KEY_SIGN_IN_FAILED", status: 424 });
+
+    // ⭐ THE THREE WRONG ANSWERS, NAMED — the class D-07 rules out on CAUSE
+    // grounds, asserted against rather than merely not-produced.
+    expect(
+      verdict.code,
+      "fell back to the terminal that admits knowing nothing, for a fault " +
+        "the service had classified precisely",
+    ).not.toBe("UNKNOWN");
+    expect(
+      verdict.code,
+      "KEY_NETWORK_TIMEOUT renders a Retry (clear_and_retry) against a " +
+        "terminal that may be wedged behind a modal login dialog — the " +
+        "harmful action D-08 exists to suppress",
+    ).not.toBe("KEY_NETWORK_TIMEOUT");
+    expect(
+      verdict.code,
+      "KEY_AUTH_FAILED asserts the exchange REJECTED the credentials — a " +
+        "confident claim classify_mt5_login_error deliberately refuses to " +
+        "make on this arm",
+    ).not.toBe("KEY_AUTH_FAILED");
+  });
+
+  it("it is the ROW that moved the verdict — the same sentence with no wire code still lands on UNKNOWN", () => {
+    // The control that makes the case above falsifiable. The detail string
+    // was swept clean of every needle the substring cascade matches on (see
+    // SIGN_IN_FAILED_DETAIL's docblock in services/exchange.py), so the
+    // identical human sentence carrying NO machine code is exactly what a
+    // founder would have gotten without the row — proof it was the ROW, not
+    // a reworded cascade branch, that moved the verdict above.
+    expect(
+      classifyKeyValidationError(new Error(SIGN_IN_FAILED_DETAIL_LITERAL)),
+    ).toEqual({ code: "UNKNOWN", status: 500 });
+  });
+
+  it("the envelope the browser receives is NOT recoverable, so no Retry control renders", () => {
+    const envelope = buildEnvelope("KEY_SIGN_IN_FAILED", "cid-167-01");
+
+    expect(
+      envelope.recoverable,
+      "a Retry against this arm re-runs the identical validate against a " +
+        "terminal a wrong password may have wedged behind a modal login " +
+        "dialog — repeated attempts against that one shared terminal are " +
+        "the operation implicated in wedging and account eviction " +
+        "(164.6.5 / 164.6.6). Offering it IS the harmful action D-08 names.",
+    ).toBe(false);
+
+    // NON-VACUITY: the derivation really can answer `true`.
+    expect(
+      buildEnvelope("KEY_NETWORK_TIMEOUT", "cid-167-01").recoverable,
+      "the nearest member by wire vocabulary is still recoverable — if this " +
+        "flipped, the contrast the case above rests on is gone and so is " +
+        "the derivation",
+    ).toBe(true);
+  });
+
+  it("MT5 renders all four fix bullets; every other venue and no venue render three", () => {
+    const mt5 = formatKeyError("KEY_SIGN_IN_FAILED", { venue: "mt5" });
+    expect(mt5.fix).toHaveLength(4);
+    expect(mt5.fix.join(" ")).toContain("investor (read-only) password");
+
+    const binance = formatKeyError("KEY_SIGN_IN_FAILED", { venue: "binance" });
+    expect(binance.fix).toHaveLength(3);
+    expect(
+      binance.fix.join(" "),
+      "the MT5-specific bullet must not reach a venue we know is not MT5",
+    ).not.toContain("investor (read-only) password");
+
+    const unnamed = formatKeyError("KEY_SIGN_IN_FAILED");
+    expect(
+      unnamed.fix,
+      "absent venue must SUPPRESS the venue-specific bullet — a bullet " +
+        "naming one venue, rendered with the venue unknown, is a specific " +
+        "claim about a user we cannot identify (REQUIRES_MT5's own rule)",
+    ).toHaveLength(3);
+  });
+
+  it("the copy is honest about uncertainty and asserts neither banned claim", () => {
+    const copy = formatKeyError("KEY_SIGN_IN_FAILED");
+    const blob = `${copy.title} ${copy.cause} ${copy.fix.join(" ")}`.toLowerCase();
+
+    expect(blob).toContain("we will not guess between them");
+    // ⛔ NEITHER claim D-07 rules out for this arm.
+    expect(
+      blob,
+      "must not assert the venue REJECTED the credentials — KEY_AUTH_FAILED's claim",
+    ).not.toContain("rejected these credentials");
+    expect(
+      blob,
+      "must not assert a fault on our side of the store — KEY_MUST_BE_RECONNECTED's claim",
+    ).not.toContain("fault on our side");
+  });
+});
+
+// 167.1.2 REVIEW WR-04 follow-up — KEY_ORPHANED's copy has to be true for every
+// path that can reach it now, not only for the one that existed when it was
+// written. It was authored when `create_wizard_strategy` was the only writer of
+// `api_keys.venue_account_id`, so "saved in an earlier session whose draft was
+// deleted" was the only way to collide with a stored key that no strategy uses.
+// That stopped holding when `keys/validate-and-encrypt` began stamping the
+// column (MT5 in 164.5.3-02, the ccxt venues in 167.1.2 plan 02) and the daily
+// poll began stamping keys connected before that (167.1.2 plan 04). A key
+// connected on another page (the manager key card, or the allocator Exchanges
+// page) that no strategy uses reaches this refusal too, and telling that owner
+// their draft was deleted names a history they do not have. (167.1.2
+// REVIEW-R2 CR-01: whether the poll has written holdings for that key is not
+// read and does not matter; composite membership is the only "held" signal.)
+describe("[167.1.2 / WR-04 follow-up] KEY_ORPHANED claims only what every path to it shares", () => {
+  const entry = WIZARD_ERROR_COPY.KEY_ORPHANED;
+
+  it("names what the reads measured: a stored key on this account that no strategy uses", () => {
+    expect(entry.title).toBe("This key is already stored, but no strategy uses it.");
+    expect(entry.cause).toBe(
+      "A key for this exchange account is already saved on your account, and no strategy is built on it. You may have saved it in an earlier setup whose draft was later deleted, or connected it on another page. Entering this account's credentials again cannot build a new strategy over the saved key, and the saved key does not clear on its own.",
+    );
+  });
+
+  // 167.1.2 REVIEW-R2 IN-02 — the cause used to say flatly that "a new strategy
+  // cannot be created over that key", while `fix[1]` offers "Finish setup",
+  // which builds exactly that strategy from the stored key. What cannot work is
+  // RE-ENTERING the credentials: this code is emitted only by the race arm,
+  // after a credential submit, and the same account is refused by the same
+  // index every time. The cause has to name that act, so the two lines agree.
+  it("says what cannot work (re-entering the credentials) without denying the Finish setup remedy it offers", () => {
+    expect(entry.cause).not.toMatch(/A new strategy cannot be created over that key/);
+    expect(entry.cause).toMatch(/credentials again cannot build/);
+    expect(entry.fix[1]).toMatch(/“Finish setup” on that row builds the strategy from the key already stored/);
+  });
+
+  it("never asserts the deleted-draft story as the only way here, nor that nothing at all uses the key", () => {
+    const copy = `${entry.title} ${entry.cause}`;
+    // The retired sentences: each is false for a key added outside the wizard.
+    expect(copy).not.toMatch(/whose draft was deleted, leaving/);
+    expect(copy).not.toMatch(/attached to nothing/);
+    expect(copy).not.toMatch(/nothing uses it/);
   });
 });

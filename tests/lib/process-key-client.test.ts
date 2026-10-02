@@ -4,8 +4,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
  * TC-4 (army2 testing-specialist) — focused unit coverage for the
  * unified-handler 503 path (INTERNAL_API_TOKEN missing).
  *
- * The existing finalize-wizard route integration test (I-T3c in
- * tests/integration/process-key-thin-adapters.test.ts:854) asserts
+ * The existing finalize-wizard route integration test — the case whose name
+ * starts `I-T3c:` in `tests/integration/process-key-thin-adapters.test.ts` —
+ * asserts
  * `[502, 503]` because the scope-broadening probe always intercepts
  * before the unified delegation runs — every execution lands on 502
  * (probe's KEY_NETWORK_TIMEOUT translation) and the 503 branch in
@@ -34,7 +35,10 @@ describe("postProcessKey 503 path (TC-4)", () => {
     originalToken = process.env.INTERNAL_API_TOKEN;
     delete process.env.INTERNAL_API_TOKEN;
     fetchSpy = vi.fn();
-    globalThis.fetch = fetchSpy as unknown as typeof globalThis.fetch;
+    // stubGlobal, not `globalThis.fetch = …` — only a stub is undone by
+    // `unstubGlobals: true` (vitest.config.ts). A direct assignment leaks this
+    // mock to every later file in the worker.
+    vi.stubGlobal("fetch", fetchSpy as unknown as typeof globalThis.fetch);
     process.env.ANALYTICS_SERVICE_URL = "https://analytics.test";
   });
 

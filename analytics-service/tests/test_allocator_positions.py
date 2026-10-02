@@ -21,7 +21,9 @@ needing a real KEK or live api_keys row.
 """
 from __future__ import annotations
 
+import asyncio
 import json
+import re
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import ccxt.async_support as ccxt
@@ -252,7 +254,16 @@ async def test_stablecoin_mark_price_is_one(monkeypatch):
 async def test_partial_success_emits_warnings(monkeypatch):
     """RESEARCH Q2: if fetch_balance succeeds and fetch_positions raises
     a non-auth non-429 exception, we persist spot and return a warning
-    string. The handler surfaces this as sync_status='complete_with_warnings'."""
+    string. The handler surfaces this as sync_status='complete_with_warnings'.
+
+    151 review CR-03 — the ORACLE MOVED. This test used to assert the venue's
+    exception text ("down") appeared in the warning, i.e. it PINNED the leak:
+    `warning` is written to `api_keys.sync_error`, which AllocatorSyncStatus
+    renders VERBATIM, so echoing `str(exc)` put raw Python in front of an
+    allocator (the PROD "'Mt5Session' object has no attribute 'fetch_balance'"
+    class). The partial-success CONTRACT — spot persists, derivatives don't, a
+    warning is raised — is unchanged and still asserted below; only the string's
+    audience changed."""
     mock_exchange = AsyncMock()
     mock_exchange.id = "binance"
     mock_exchange.fetch_balance = AsyncMock(return_value={
@@ -268,11 +279,346 @@ async def test_partial_success_emits_warnings(monkeypatch):
     monkeypatch.setattr(ap, "fetch_positions", _down)
 
     rows, warning = await fetch_allocator_holdings("binance", mock_exchange)
-    assert warning is not None and "down" in warning
+    assert warning is not None
+    # END-USER copy, not the exception: names the venue in product casing, says
+    # what happened and what happens next, and carries none of the venue's own
+    # error text.
+    assert warning == (
+        "Couldn't read open positions from Binance — spot balances synced and "
+        "positions will retry automatically."
+    )
+    assert "down" not in warning
     # Spot row persisted even though derivative side failed
     assert any(r["holding_type"] == "spot" and r["symbol"] == "USDT" for r in rows)
     # Zero derivative rows (the fetch raised)
     assert all(r["holding_type"] != "derivative" for r in rows)
+
+
+# ---------------------------------------------------------------------------
+# Test 5b — 151 review E1: the ccxt SPOT arm cannot leak raw Python either
+#
+# WHY (Rule 9 — intent): `warning` and `AllocatorHoldingsSyncTransientError`'s
+# message BOTH land in `api_keys.sync_error`, which `AllocatorSyncStatus`
+# renders VERBATIM — there is no frontend translation layer. The derivative arm
+# was hardened for that (test 5 above); the spot arm was not, so a malformed
+# venue payload (`KeyError('total')`, a `TypeError` in the ticker merge) reached
+# the handler's generic `except Exception`, whose `classify_exception`
+# fall-through stamps `str(exc)[:500]`. That is the PROD defect class —
+# "'Mt5Session' object has no attribute 'fetch_balance'" shown to a user — and
+# it was still live for binance/bybit/okx/deribit.
+#
+# The oracle is the PROPERTY, not the sentence: the exception's own text must
+# not appear in what the user is shown, and the two ccxt families the HANDLER
+# classifies deliberately (auth → 'revoked', 429 → its own `_stamp_429` arm)
+# must still arrive at the handler as themselves.
+# ---------------------------------------------------------------------------
+
+
+def _spot_only_exchange(raiser):
+    """A ccxt-shaped mock whose fetch_balance raises `raiser()`."""
+    mock_exchange = AsyncMock()
+    mock_exchange.id = "binance"
+    mock_exchange.fetch_balance = AsyncMock(side_effect=raiser)
+    mock_exchange.fetch_tickers = AsyncMock(return_value={})
+    return mock_exchange
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "exc",
+    [
+        KeyError("total"),
+        TypeError("'NoneType' object is not subscriptable"),
+        ccxt.ExchangeNotAvailable("binance GET /api/v3/account 503 <html>maintenance</html>"),
+        AttributeError("'Mt5Session' object has no attribute 'fetch_balance'"),
+    ],
+    ids=["keyerror", "typeerror", "ccxt-exchange-error", "attributeerror"],
+)
+async def test_spot_fetch_failure_surfaces_end_user_copy_not_python(monkeypatch, exc):
+    """A malformed/unavailable venue payload on the SPOT read reaches the caller
+    as fixed end-user copy — never the exception's own text."""
+    from services import allocator_positions as ap
+
+    async def _no_positions(*_a, **_kw):
+        return []
+
+    monkeypatch.setattr(ap, "fetch_positions", _no_positions)
+
+    def _raise(*_a, **_kw):
+        raise exc
+
+    with pytest.raises(ap.AllocatorHoldingsSyncTransientError) as caught:
+        await fetch_allocator_holdings("binance", _spot_only_exchange(_raise))
+
+    shown = str(caught.value)
+    assert shown == (
+        "Couldn't read balances from Binance — sync will retry automatically."
+    )
+    # The PROPERTY: none of the exception's own text survives into user copy.
+    for token in ("total", "NoneType", "maintenance", "Mt5Session", "attribute"):
+        if token in str(exc):
+            assert token not in shown, f"raw exception text {token!r} leaked into {shown!r}"
+    # The diagnosis is not lost — it survives in the exception chain for Sentry.
+    assert caught.value.__cause__ is exc
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "exc_factory",
+    [
+        lambda: ccxt.AuthenticationError("401 invalid api key"),
+        lambda: ccxt.PermissionDenied("403 forbidden"),
+        lambda: ccxt.RateLimitExceeded("429 too many requests"),
+    ],
+    ids=["auth", "permission", "ratelimit"],
+)
+async def test_spot_fetch_reraises_the_handler_classified_ccxt_types(
+    monkeypatch, exc_factory
+):
+    """The three types the HANDLER has dedicated arms for must still arrive as
+    themselves: swallowing them into the transient copy would turn a revoked key
+    into an endlessly retrying 'error' and would skip `_stamp_429` entirely."""
+    from services import allocator_positions as ap
+
+    async def _no_positions(*_a, **_kw):
+        return []
+
+    monkeypatch.setattr(ap, "fetch_positions", _no_positions)
+    expected = exc_factory()
+
+    def _raise(*_a, **_kw):
+        raise expected
+
+    with pytest.raises(type(expected)):
+        await fetch_allocator_holdings("binance", _spot_only_exchange(_raise))
+
+
+# ---------------------------------------------------------------------------
+# Test 5c (review [2] H1) — the wrapper must not DOWNGRADE a permanent failure
+#
+# WHY (Rule 9 — intent): the wrapper added in 5b re-raised a hand-written list
+# of three ccxt types, copied from `_map_exception_to_sync_status`. That is a
+# DIFFERENT classifier from the one that decides retry disposition
+# (`job_worker.classify_exception`), and it misses two permanent families:
+#
+#   * an egress GEO-BLOCK — Binance's regional refusal arrives as
+#     `ccxt.ExchangeNotAvailable`, and `is_geo_blocked` intercepts it BEFORE
+#     the ccxt hierarchy precisely because no ccxt type identifies it;
+#   * `ccxt.BadRequest`.
+#
+# Downgraded to transient, each buys the full 30s→6h retry ladder plus the
+# daily cron re-enqueue against a host that will never answer from this region,
+# and the operator-actionable sync_error ("move region or proxy") is replaced
+# by "sync will retry automatically" — a promise that cannot be kept. The
+# handler's transient arm hardcodes error_kind='transient' and never walks the
+# `raise ... from exc` chain, so the downgrade is FINAL.
+#
+# The oracle is the EQUIVALENCE, not a list: whatever `classify_exception`
+# calls permanent must arrive at the handler unwrapped; everything else must
+# arrive as fixed copy. Stated that way the test cannot go stale when the
+# classifier grows a family — see test 5d for the coupling itself.
+# ---------------------------------------------------------------------------
+
+# str() bodies are the real ccxt shapes — `is_geo_blocked` is SIGNATURE-based,
+# so a synthetic message would test nothing.
+_BINANCE_451 = (
+    "binance GET https://api.binance.com/api/v3/account 451 "
+    '{"code":0,"msg":"Service unavailable from a restricted location according '
+    'to b. Eligibility in https://www.binance.com/en/terms"}'
+)
+_BYBIT_CLOUDFRONT_403 = (
+    "bybit GET https://api.bybit.com/v5/account/wallet-balance 403 "
+    "<HTML><HEAD>The Amazon CloudFront distribution is configured to block "
+    "access from your country.</HEAD></HTML>"
+)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "exc_factory",
+    [
+        pytest.param(
+            lambda: ccxt.ExchangeNotAvailable(_BINANCE_451), id="geo-block-binance-451"
+        ),
+        pytest.param(
+            lambda: ccxt.RateLimitExceeded(_BYBIT_CLOUDFRONT_403),
+            id="geo-block-bybit-cloudfront",
+        ),
+        pytest.param(
+            lambda: ccxt.BadRequest('binance {"code":-1121,"msg":"Invalid symbol."}'),
+            id="ccxt-badrequest",
+        ),
+        pytest.param(
+            lambda: ccxt.AuthenticationError("401 invalid api key"), id="auth"
+        ),
+        pytest.param(lambda: ccxt.PermissionDenied("403 forbidden"), id="permission"),
+        pytest.param(
+            lambda: ccxt.RateLimitExceeded("429 too many requests"), id="ratelimit"
+        ),
+        pytest.param(
+            lambda: ccxt.ExchangeNotAvailable("binance 503 <html>maintenance</html>"),
+            id="retryable-maintenance",
+        ),
+        pytest.param(lambda: ccxt.NetworkError("connection reset"), id="retryable-net"),
+        pytest.param(lambda: KeyError("total"), id="retryable-malformed-payload"),
+        pytest.param(
+            lambda: AttributeError("'Mt5Session' object has no attribute 'fetch_balance'"),
+            id="retryable-attributeerror",
+        ),
+    ],
+)
+@pytest.mark.parametrize("arm", ["spot", "derivative"])
+async def test_permanent_failures_reach_the_handler_unwrapped(
+    monkeypatch, exc_factory, arm
+):
+    """EQUIVALENCE ORACLE: wrap ⇔ the classifier would retry it.
+
+    Both fetch arms are held to it. The derivative arm's partial-success posture
+    (persist spot, warn, complete) is for RETRYABLE failures — it already
+    re-raised two permanent families (auth / permission) and discarded the spot
+    rows to do it, so a permanent failure was never "partial success" there
+    either; it just had the same incomplete list. A DONE job carrying "positions
+    will retry automatically" is the same broken promise as the retry ladder.
+    """
+    from services import allocator_positions as ap
+    from services.job_worker import classify_exception
+
+    expected = exc_factory()
+    kind, _ = classify_exception(expected)
+    must_be_unwrapped = kind == "permanent" or isinstance(
+        expected, ccxt.RateLimitExceeded
+    )
+
+    def _raise(*_a, **_kw):
+        raise expected
+
+    async def _araise(*_a, **_kw):
+        raise expected
+
+    async def _no_positions(*_a, **_kw):
+        return []
+
+    if arm == "spot":
+        exchange = _spot_only_exchange(_raise)
+        monkeypatch.setattr(ap, "fetch_positions", _no_positions)
+    else:
+        exchange = AsyncMock()
+        exchange.id = "binance"
+        exchange.fetch_balance = AsyncMock(return_value={"total": {"USDT": 500.0}})
+        exchange.fetch_tickers = AsyncMock(return_value={})
+        monkeypatch.setattr(ap, "fetch_positions", _araise)
+
+    if must_be_unwrapped:
+        with pytest.raises(Exception) as caught:  # noqa: PT011 - identity asserted
+            await fetch_allocator_holdings("binance", exchange)
+        assert caught.value is expected, (
+            f"{kind!r} failure was swallowed into "
+            f"{type(caught.value).__name__} — the handler can no longer "
+            "classify it, and a permanent failure becomes an unbounded retry"
+        )
+        return
+
+    if arm == "spot":
+        with pytest.raises(ap.AllocatorHoldingsSyncTransientError) as wrapped:
+            await fetch_allocator_holdings("binance", exchange)
+        assert str(wrapped.value) == (
+            "Couldn't read balances from Binance — sync will retry automatically."
+        )
+        assert wrapped.value.__cause__ is expected
+    else:
+        rows, warning = await fetch_allocator_holdings("binance", exchange)
+        assert warning == (
+            "Couldn't read open positions from Binance — spot balances synced "
+            "and positions will retry automatically."
+        )
+        assert any(r["holding_type"] == "spot" for r in rows)
+
+
+# ---------------------------------------------------------------------------
+# Test 5d (review [2] H1) — the COUPLING, so the allow-list cannot drift again
+#
+# Test 5c pins today's families. This one pins the mechanism: the disposition
+# is read from `job_worker.classify_exception` AT CALL TIME, so a family added
+# to the classifier tomorrow is honoured here with no edit. Re-freeze the
+# decision into a local isinstance list and this goes RED — which is the only
+# thing that stops the exact regression under repair from recurring.
+# ---------------------------------------------------------------------------
+
+
+class _NovelPermanentError(Exception):
+    """A family the classifier does not know today (stands in for tomorrow's)."""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "verdict, unwrapped",
+    [("permanent", True), ("transient", False), ("unknown", False)],
+)
+async def test_reraise_decision_follows_the_live_classifier(
+    monkeypatch, verdict, unwrapped
+):
+    """The classifier is CONSULTED, not mirrored."""
+    from services import allocator_positions as ap
+    import services.job_worker as jw
+
+    novel = _NovelPermanentError("a family invented after this module was written")
+
+    def _fake_classify(exc):
+        assert exc is novel
+        return (verdict, "sanitized")
+
+    monkeypatch.setattr(jw, "classify_exception", _fake_classify)
+
+    async def _no_positions(*_a, **_kw):
+        return []
+
+    monkeypatch.setattr(ap, "fetch_positions", _no_positions)
+
+    def _raise(*_a, **_kw):
+        raise novel
+
+    exchange = _spot_only_exchange(_raise)
+
+    if unwrapped:
+        with pytest.raises(_NovelPermanentError) as caught:
+            await fetch_allocator_holdings("binance", exchange)
+        assert caught.value is novel
+    else:
+        with pytest.raises(ap.AllocatorHoldingsSyncTransientError):
+            await fetch_allocator_holdings("binance", exchange)
+
+
+@pytest.mark.asyncio
+async def test_unclassifiable_exception_still_becomes_end_user_copy(monkeypatch):
+    """The wrapper's ORIGINAL reason survives the new predicate.
+
+    Consulting the classifier put a second thing that can fail inside the
+    except block — `is_geo_blocked` flattens `str(exc)`, so an exception with a
+    raising `__str__` blows up INSIDE the classification. If that escaped, the
+    handler's generic arm would stamp whatever came out into a column the
+    browser renders verbatim: the AUM-02 defect, reintroduced through the fix
+    for it. No classification ⇒ fixed copy, always.
+    """
+    from services import allocator_positions as ap
+
+    class _RogueStr(Exception):
+        def __str__(self) -> str:
+            raise RuntimeError("__str__ is hostile")
+
+    async def _no_positions(*_a, **_kw):
+        return []
+
+    monkeypatch.setattr(ap, "fetch_positions", _no_positions)
+
+    def _raise(*_a, **_kw):
+        raise _RogueStr()
+
+    with pytest.raises(ap.AllocatorHoldingsSyncTransientError) as caught:
+        await fetch_allocator_holdings("binance", _spot_only_exchange(_raise))
+
+    assert str(caught.value) == (
+        "Couldn't read balances from Binance — sync will retry automatically."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -445,10 +791,16 @@ async def test_run_poll_allocator_positions_job_emits_sync_completed_audit_on_do
         "raw_payload": {"symbol": "BTCUSDT"},
     }
 
-    async def _fake_fetch(venue, exchange):
+    # Phase 151 / AUM-02: the chokepoint gained an optional api_key_id kwarg
+    # (account-level venues need an account-scoped symbol). Accepted here so the
+    # double matches the real call shape.
+    async def _fake_fetch(venue, exchange, api_key_id=None):
         return ([spot_row, deriv_row], None)
 
+    persisted_asof: list[str] = []
+
     async def _fake_persist(supa, rows, allocator_id, api_key_id, asof):
+        persisted_asof.append(asof)
         return len(rows)
 
     # Patch module-local lookups in the handler. The handler does a local
@@ -492,9 +844,19 @@ async def test_run_poll_allocator_positions_job_emits_sync_completed_audit_on_do
     assert kwargs["action"] == "allocator.holdings.sync_completed"
     assert kwargs["entity_type"] == "api_key"
     assert kwargs["entity_id"] == API_KEY_ID
+    # 167.1.2 C2 round 2 (R2-CR-01): the poll records its own outcome. The
+    # daily refresh reads final_status + row_count from this event as the proof
+    # that an account is empty, never the key's current sync_status.
+    # Round 3 (R3-WR-01): the event also records the day this poll stamped its
+    # rows with (fixed at handler start), so the refresh binds the event to
+    # that day and not to created_at, which lands on the next UTC day for a
+    # poll that runs across midnight.
+    assert persisted_asof and len(persisted_asof) == 1
     assert kwargs["metadata"] == {
         "row_count": 2,
         "holding_type_counts": {"spot": 1, "derivative": 1},
+        "final_status": "complete",
+        "asof": persisted_asof[0],
     }
 
 
@@ -531,7 +893,7 @@ async def test_run_poll_allocator_positions_job_auth_error_sets_revoked(
 
     monkeypatch.setattr(jw, "_allocator_key_preflight", _fake_preflight)
 
-    async def _fail_auth(venue, exchange):
+    async def _fail_auth(venue, exchange, api_key_id=None):
         raise ccxt.AuthenticationError("401 invalid api key")
 
     monkeypatch.setattr(ap_mod, "fetch_allocator_holdings", _fail_auth)
@@ -804,3 +1166,1658 @@ async def test_bybit_malformed_info_falls_back_to_ccxt_total(monkeypatch):
     assert len(spot) == 1
     # Existing CCXT total path used — no crash on the malformed info.
     assert spot[0]["quantity"] == pytest.approx(7777.0)
+
+
+# ---------------------------------------------------------------------------
+# AUM-02 WRITE BOUNDARY (2026-08-08) — no exception's str() may reach
+# api_keys.sync_error, for ANY exception type, on ANY arm.
+#
+# WHY (Rule 9 — intent): `sync_error` is product copy. AllocatorSyncStatus.tsx
+# renders it VERBATIM under the sync pill (`helperText = syncError ?? ""`), with
+# no translation layer. The PROD incident behind this module's AUM-02 block was
+# literally "'Mt5Session' object has no attribute 'fetch_balance'" shown to
+# three founder accounts.
+#
+# The defect kept coming back because the guard was always placed at the RAISE:
+# each venue branch converted ITS exception to copy, so the guarantee held only
+# for exceptions somebody had thought of. Then `fetch_allocator_holdings` was
+# (correctly) taught to re-raise anything `classify_exception` calls PERMANENT
+# unwrapped — the retry disposition has to survive, since the handler's
+# transient arm hardcodes error_kind='transient' and never walks the __cause__
+# chain — and that re-raise handed the handler's generic `except Exception` a
+# live exception again. `classify_exception`'s fall-through is `str(exc)[:500]`,
+# so `binance {"code":-1121,"msg":"Invalid symbol."}` became the sentence a user
+# read under "Sync failed".
+#
+# These tests pin the guarantee at the WRITE instead: whatever arrives, the
+# column gets `sync_error_copy(status, venue)` — derived from the status and the
+# venue, with no parameter an exception string could travel through. The oracle
+# is deliberately "the raw text is ABSENT from the column and PRESENT on the
+# operator surfaces", not "the copy equals X": that is the actual product
+# invariant, and it cannot go stale when a new exception family appears.
+# ---------------------------------------------------------------------------
+
+# A string no copy constant could ever legitimately contain.
+_CANARY = "CANARY-9f3b raw exception text {\"code\":-1121} <html>"
+
+
+class _UnanticipatedVenueError(Exception):
+    """An exception family invented AFTER the write boundary was built.
+
+    The point of the whole fix: the guarantee must not depend on this type
+    being known to `classify_exception`, to `_map_exception_to_sync_status`, or
+    to any list in `allocator_positions`.
+    """
+
+
+def _drive_allocator_sync(
+    monkeypatch,
+    key_row,
+    *,
+    fetch=None,
+    persist=None,
+    exchange=None,
+):
+    """Run run_poll_allocator_positions_job with every collaborator stubbed.
+
+    Returns (result, update_payloads, audit_mock). `update_payloads` is every
+    dict handed to `api_keys.update(...)` — i.e. exactly what would land in the
+    user-visible column.
+    """
+    from services import job_worker as jw
+    from services import audit as audit_module
+    from services import allocator_positions as ap_mod
+
+    mock_supabase = MagicMock()
+    mock_exchange = exchange if exchange is not None else MagicMock()
+    if exchange is None:
+        mock_exchange.close = AsyncMock()
+
+    fake_ctx = jw._ExchangeContext(
+        supabase=mock_supabase,
+        strategy_row=None,
+        key_row=key_row,
+        exchange=mock_exchange,
+    )
+
+    async def _fake_preflight(job, name):
+        return fake_ctx
+
+    monkeypatch.setattr(jw, "_allocator_key_preflight", _fake_preflight)
+
+    if fetch is not None:
+        monkeypatch.setattr(ap_mod, "fetch_allocator_holdings", fetch)
+    if persist is not None:
+        monkeypatch.setattr(ap_mod, "persist_allocator_holdings", persist)
+    else:
+        async def _ok_persist(supa, rows, allocator_id, api_key_id, asof):
+            return len(rows)
+        monkeypatch.setattr(ap_mod, "persist_allocator_holdings", _ok_persist)
+
+    update_payloads: list[dict] = []
+
+    def _capture(payload):
+        update_payloads.append(payload)
+        m = MagicMock()
+        m.eq.return_value.execute.return_value = MagicMock(data=[])
+        return m
+
+    mock_table = MagicMock()
+    mock_table.update.side_effect = _capture
+    mock_supabase.table.return_value = mock_table
+
+    log_audit_mock = MagicMock()
+    monkeypatch.setattr(audit_module, "log_audit_event", log_audit_mock)
+
+    job = {
+        "id": "job-aum02",
+        "kind": "poll_allocator_positions",
+        "api_key_id": key_row["id"],
+    }
+    return jw.run_poll_allocator_positions_job(job), update_payloads, log_audit_mock
+
+
+def _sync_errors(update_payloads):
+    return [
+        p["sync_error"]
+        for p in update_payloads
+        if p.get("sync_error") is not None
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "exc_factory",
+    [
+        pytest.param(
+            lambda: ccxt.BadRequest(f"binance {_CANARY}"), id="ccxt-badrequest"
+        ),
+        pytest.param(
+            lambda: ccxt.BadSymbol(f"binance {_CANARY}"), id="ccxt-badsymbol"
+        ),
+        pytest.param(
+            lambda: ccxt.AuthenticationError(f"401 {_CANARY}"), id="auth-revoked"
+        ),
+        pytest.param(
+            lambda: ccxt.PermissionDenied(f"403 {_CANARY}"), id="permission-revoked"
+        ),
+        pytest.param(
+            lambda: ccxt.ExchangeNotAvailable(f"503 {_CANARY}"), id="ccxt-unknown"
+        ),
+        pytest.param(lambda: KeyError(_CANARY), id="plain-keyerror"),
+        pytest.param(
+            lambda: AttributeError(
+                "'Mt5Session' object has no attribute 'fetch_balance'"
+            ),
+            id="the-prod-defect-itself",
+        ),
+        # THE point of the exercise: a family nobody has written a branch for.
+        pytest.param(
+            lambda: _UnanticipatedVenueError(_CANARY), id="never-seen-before-type"
+        ),
+    ],
+)
+async def test_no_exception_text_ever_reaches_sync_error(
+    monkeypatch, api_key_row_factory, exc_factory
+):
+    """ANY exception escaping the fetch chokepoint ⇒ the column gets COPY.
+
+    Parametrized over the families that exist today AND one invented for this
+    test, because a guarantee that only covers anticipated types is the bug.
+    """
+    from services import job_worker as jw
+    from services.allocator_positions import SYNC_ERROR_COPY_BY_STATUS
+
+    expected = exc_factory()
+
+    async def _fail(venue, exchange, api_key_id=None):
+        raise expected
+
+    key_row = api_key_row_factory(
+        id=API_KEY_ID, user_id=ALLOCATOR_ID, exchange="binance"
+    )
+    coro, payloads, audit_mock = _drive_allocator_sync(
+        monkeypatch, key_row, fetch=_fail
+    )
+    result = await coro
+
+    assert result.outcome == jw.DispatchOutcome.FAILED
+
+    written = _sync_errors(payloads)
+    assert written, f"expected a sync_error write; got {payloads!r}"
+    for text in written:
+        # (1) The raw text is ABSENT from the user-visible column.
+        assert _CANARY not in text, (
+            f"raw exception text reached api_keys.sync_error: {text!r}"
+        )
+        assert "fetch_balance" not in text
+        assert "Error" not in text and "Exception" not in text
+        # (2) And what IS there is one of the copy constants, rendered.
+        assert text in {
+            tpl.format(venue="Binance")
+            for tpl in SYNC_ERROR_COPY_BY_STATUS.values()
+        }, f"sync_error is not a known copy constant: {text!r}"
+
+    # (3) The DIAGNOSIS is not lost — it survives on the operator surfaces.
+    # compute_jobs.last_error and the audit metadata are admin-only; that is
+    # where an engineer reads what actually happened.
+    diagnostic = (result.error_message or "") + str(
+        audit_mock.call_args.kwargs["metadata"]
+    )
+    assert (_CANARY in diagnostic) or ("fetch_balance" in diagnostic), (
+        "the exception text must survive on the operator surfaces — copy at the "
+        "write boundary must not become copy everywhere"
+    )
+
+
+@pytest.mark.asyncio
+async def test_permanent_derivative_failure_shows_copy_not_venue_json(
+    monkeypatch, api_key_row_factory
+):
+    """The red team's exact scenario, end to end, through the REAL fetch path.
+
+    Spot works, `fetch_positions` raises `ccxt.BadRequest`. The classifier calls
+    that permanent, so `fetch_allocator_holdings` re-raises it UNWRAPPED (that
+    coupling is load-bearing — a permanent failure downgraded to transient buys
+    the 30s→6h ladder against a host that will never answer). It therefore
+    reaches the handler's generic arm as a live exception, which is precisely
+    why the guarantee has to live at the write.
+    """
+    from services import job_worker as jw
+    from services import allocator_positions as ap
+
+    venue_json = 'binance {"code":-1121,"msg":"Invalid symbol."}'
+    boom = ccxt.BadRequest(venue_json)
+
+    async def _positions_fail(*_a, **_kw):
+        raise boom
+
+    monkeypatch.setattr(ap, "fetch_positions", _positions_fail)
+
+    exchange = AsyncMock()
+    exchange.id = "binance"
+    exchange.fetch_balance = AsyncMock(return_value={"total": {"USDT": 250000.0}})
+    exchange.fetch_tickers = AsyncMock(return_value={})
+    exchange.close = AsyncMock()
+
+    key_row = api_key_row_factory(
+        id=API_KEY_ID, user_id=ALLOCATOR_ID, exchange="binance"
+    )
+    coro, payloads, _audit = _drive_allocator_sync(
+        monkeypatch, key_row, exchange=exchange
+    )
+    result = await coro
+
+    written = _sync_errors(payloads)
+    assert written
+    for text in written:
+        assert "-1121" not in text
+        assert "Invalid symbol" not in text
+        assert "{" not in text and "}" not in text
+    assert written[-1] == (
+        "Couldn't sync holdings from Binance — the balances shown are from the "
+        "last successful sync."
+    )
+
+    # The classification SURVIVED — this is the half the previous round fixed
+    # and this one must not undo.
+    assert result.error_kind == "permanent"
+    assert "-1121" in (result.error_message or "")
+
+
+@pytest.mark.asyncio
+async def test_rate_limit_arm_writes_copy_not_the_geo_block_body(
+    monkeypatch, api_key_row_factory
+):
+    """The 429/geo-block arm writes to the same column and must obey the same
+    rule. Pre-fix it wrote the classifier's operator instruction ("move region
+    or proxy") plus the raw CloudFront HTML body into product copy."""
+    from services import job_worker as jw
+
+    boom = ccxt.RateLimitExceeded(_BYBIT_CLOUDFRONT_403)
+
+    async def _fail(venue, exchange, api_key_id=None):
+        raise boom
+
+    key_row = api_key_row_factory(
+        id=API_KEY_ID, user_id=ALLOCATOR_ID, exchange="bybit"
+    )
+    coro, payloads, _audit = _drive_allocator_sync(
+        monkeypatch, key_row, fetch=_fail
+    )
+    result = await coro
+
+    written = _sync_errors(payloads)
+    assert written
+    for text in written:
+        assert "CloudFront" not in text
+        assert "proxy" not in text
+        assert "<HTML>" not in text
+    # A geo-block is NOT a rate limit — the status split is preserved.
+    assert [p["sync_status"] for p in payloads if "sync_status" in p] == ["error"]
+    assert result.error_kind == "permanent"
+
+
+@pytest.mark.asyncio
+async def test_persist_failure_writes_copy_not_the_db_exception(
+    monkeypatch, api_key_row_factory
+):
+    """The third write site: a PostgREST/DB failure after a SUCCESSFUL fetch.
+
+    Same defect class, sourced from our own storage layer — schema-cache misses
+    and constraint names are not product copy either.
+    """
+    async def _ok_fetch(venue, exchange, api_key_id=None):
+        return ([], None)
+
+    async def _persist_boom(*_a, **_kw):
+        raise RuntimeError(_CANARY)
+
+    key_row = api_key_row_factory(
+        id=API_KEY_ID, user_id=ALLOCATOR_ID, exchange="okx"
+    )
+    coro, payloads, _audit = _drive_allocator_sync(
+        monkeypatch, key_row, fetch=_ok_fetch, persist=_persist_boom
+    )
+    await coro
+
+    written = _sync_errors(payloads)
+    assert written
+    for text in written:
+        assert _CANARY not in text
+    assert written[-1] == (
+        "Couldn't sync holdings from OKX — the balances shown are from the last "
+        "successful sync."
+    )
+
+
+def test_transient_error_is_only_ever_constructed_from_a_copy_constant():
+    """The one remaining channel whose str() IS written verbatim.
+
+    `AllocatorHoldingsSyncTransientError`'s handler arm stamps `str(exc)` into
+    the column by design — the type's contract is "my message is end-user copy".
+    That contract is enforced at the CONSTRUCTOR, in source: every raise site
+    must pass a module copy constant (optionally `.format`-ed for the venue),
+    never an interpolated exception. A future `raise
+    AllocatorHoldingsSyncTransientError(str(exc))` goes RED here.
+
+    ⭐ WIDENED by 167-04 to the SUBCLASS. `AllocatorHoldingsSignInFailedError`
+    inherits the same "my message is end-user copy" contract and gets its own
+    verbatim-stamping handler arm, so a gate that scanned only the parent's
+    NAME left the new constructor completely unguarded — a hole opened by the
+    act of adding a subclass, and invisible to every existing case here. The
+    scan is now over the SET of constructor names, so the next subclass costs
+    one entry rather than a silent exemption.
+
+    AST, not text: a reformat must not turn this RED, and a leak must not hide
+    behind one. (The sibling closure in test_allocator_positions_non_ccxt.py
+    bans `str(exc)` / f-strings inside except arms; this one bans everything
+    that is not a copy constant at the constructor, including a value built
+    somewhere else and carried in.)
+    """
+    import ast
+    import inspect
+    import re as _re
+    from services import allocator_positions as ap
+
+    tree = ast.parse(inspect.getsource(ap))
+    constant_name = _re.compile(r"^[A-Z][A-Z0-9_]*_NOTE$")
+
+    def _is_copy_constant(node: ast.expr) -> bool:
+        # NAME_OF_NOTE
+        if isinstance(node, ast.Name):
+            return bool(constant_name.match(node.id))
+        # NAME_OF_NOTE.format(venue=...)
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "format"
+            and isinstance(node.func.value, ast.Name)
+        ):
+            return bool(constant_name.match(node.func.value.id))
+        return False
+
+    # Every type whose `str()` a handler arm stamps VERBATIM into the column.
+    # Derived from the class hierarchy, not hand-listed, so a further subclass
+    # joins the gate by existing rather than by someone remembering it.
+    verbatim_types = {
+        node.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ClassDef)
+        and (
+            node.name == "AllocatorHoldingsSyncTransientError"
+            or any(
+                isinstance(base, ast.Name)
+                and base.id == "AllocatorHoldingsSyncTransientError"
+                for base in node.bases
+            )
+        )
+    }
+    assert "AllocatorHoldingsSyncTransientError" in verbatim_types
+    assert "AllocatorHoldingsSignInFailedError" in verbatim_types, (
+        "the 167-04 sign-in type is not being scanned — a subclass whose "
+        "message is stamped verbatim must be inside this gate, not beside it"
+    )
+
+    sites = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id in verbatim_types
+    ]
+    assert sites, "no construction sites found — the scan is not seeing the code"
+    # Anti-vacuity per TYPE, not just in aggregate: without this, the subclass
+    # could have zero construction sites and the gate would still pass on the
+    # parent's, reporting coverage it does not have.
+    for name in verbatim_types:
+        assert any(
+            isinstance(c.func, ast.Name) and c.func.id == name for c in sites
+        ), f"{name} has no construction site in this module — gate is blind to it"
+
+    for call in sites:
+        assert len(call.args) == 1 and _is_copy_constant(call.args[0]), (
+            f"{call.func.id} must be constructed from a "
+            f"copy constant; line {call.lineno} passes "
+            f"{ast.unparse(call.args[0]) if call.args else '<no argument>'!r}"
+        )
+
+
+def test_sync_error_copy_constants_are_product_copy():
+    """Copy-class gate (151-UI-SPEC): ONE sentence, "{what happened} — {what
+    next}", U+2014 em dash, no Python/venue jargon. This column is rendered
+    verbatim in the browser."""
+    from services.allocator_positions import (
+        SYNC_ERROR_COPY_BY_STATUS,
+        sync_error_copy,
+    )
+
+    for status, template in SYNC_ERROR_COPY_BY_STATUS.items():
+        text = sync_error_copy(status, "okx")
+        assert "OKX" in text, f"{status}: venue not rendered in product casing"
+        assert "—" in text, f"{status}: needs an em dash"
+        assert " -- " not in text and " - " not in text
+        assert text.endswith("."), f"{status}: not a sentence"
+        assert text.count(".") == 1, f"{status}: more than one sentence"
+        assert "{" not in text and "}" not in text
+        for jargon in ("Error", "Exception", "None", "()", "_"):
+            assert jargon not in text, f"{status}: leaks jargon {jargon!r}"
+
+    # An unknown status must still produce copy, never a KeyError — this call
+    # sits inside the write that clears the UI's 'syncing' spinner.
+    assert sync_error_copy("a-status-invented-later", "binance") == (
+        SYNC_ERROR_COPY_BY_STATUS["error"].format(venue="Binance")
+    )
+
+
+# ===========================================================================
+# Phase 167-02 (D-09/D-10) — the retry PROMISE is a function of the retry
+# DISPOSITION across the WHOLE allocator holdings copy family, not just the
+# two ccxt arms tests 5c/5d above already prove (`fetch_allocator_holdings`'s
+# spot/derivative arms). MT5_UNREACHABLE_NOTE / MT5_MISSING_ACCOUNT_REF_NOTE /
+# SFOX_FETCH_FAILED_NOTE were raised UNCONDITIONALLY by every MT5/sFOX
+# except-arm; each now carries `if _must_reach_handler_unwrapped(exc): raise`
+# as its first statement, copied from the ccxt arms' placement verbatim.
+#
+# WHY EVERY CASE BELOW MOCKS `classify_exception` RATHER THAN CALLING IT FOR
+# REAL (departure from test 5c's style, deliberate — read before changing):
+# `job_worker.classify_exception` has NO Mt5ClientError / Mt5SessionAbandoned
+# / Mt5AccountMismatchError / SfoxApiError branch today — all four are plain
+# RuntimeError/Exception subclasses (D-42), so a REAL instance of any of them
+# falls straight to the classifier's final `return ("unknown", ...)`, and
+# `asyncio.TimeoutError` hits its own explicit 'transient' branch. A case
+# built ONLY from an unmocked `classify_exception` call could therefore never
+# observe a 'permanent' verdict for these types, and removing the guard would
+# change NOTHING such a case could see — the exactly-vacuous shape this
+# repo's anti-vacuity rule forbids ("a test that cannot fail is worse than
+# none"). D-10's own text says the measured wrong-password case is left
+# "truthful-but-useless" by this plan for exactly this reason (167-02-PLAN.md
+# scope_note) — the mechanism is what must be proven, not today's verdict.
+#
+# So every case follows test 5d's shape (`job_worker.classify_exception`
+# monkeypatched to a controlled verdict — "the classifier is CONSULTED, not
+# mirrored") while keeping test 5c's REAL-SHAPE discipline: every exception
+# raised is a genuinely-constructed instance of the type its except clause
+# names — `Mt5ClientError(0, "Invalid account")` is the ROADMAP's own
+# measured wrong-password corpus string (services/mt5_validation.py's
+# `_AUTH_PHRASES` table), never a synthetic marker class. That combination is
+# the only shape that is simultaneously real AND falsifiable given today's
+# classifier. See 167-02-SUMMARY.md for the full accounting (six except-arms
+# guarded, four residual `if`-sites with no exception in scope named there).
+# ===========================================================================
+
+
+class _Mt5ClientDouble:
+    """A duck-typed `_fetch_mt5_account_rows` CLIENT double.
+
+    Narrower than the real `Mt5Client` facade `test_allocator_positions_
+    non_ccxt.py` exercises through its `_connect` injection seam — that file
+    proves the terminal-lock/IPC discipline end to end; these D-09/D-10 guard
+    oracles only need the RIGHT exception TYPE to reach the except clause
+    under test, injected at the FIRST call `_mt5_read` makes
+    (``session.client.login(...)``) so every arm's setup is uniform. `cast()`
+    at the real call site is a typing-only no-op, so a duck-typed double is
+    legitimate here the same way `_SpecConstrainedClient` is in the sibling
+    file, just narrower (this file's scope is the guard, not the IPC
+    facade).
+    """
+
+    def __init__(self, *, login_raises=None, account_info=None):
+        self.terminal_key = "h:167-02"
+        self._login_raises = login_raises
+        self._account_info = account_info if account_info is not None else {}
+
+    def login(self, login, investor_password, server):  # noqa: ANN001
+        if self._login_raises is not None:
+            raise self._login_raises
+
+    def account_info(self):
+        return self._account_info
+
+
+class _Mt5SessionDouble:
+    """Matches `Mt5Session`'s shape: `.login` (the account int), `.client`."""
+
+    def __init__(self, client, login: int = 246813):
+        self.client = client
+        self.login = login
+        self.investor_password = "pw"  # noqa: S105 - test fixture, not a secret
+        self.server = "Broker-Live"
+
+
+class _SfoxClientDouble:
+    """A duck-typed `_fetch_sfox_balance_rows` client double — `get_balances()`
+    only, the ONE method that arm calls."""
+
+    def __init__(self, *, raises):
+        self._raises = raises
+
+    async def get_balances(self):
+        raise self._raises
+
+
+def _mt5_verdict_case_setup(monkeypatch) -> None:
+    """Shared drive for every MT5 arm's verdict-parametrized oracle below.
+
+    The env/reset/patch plumbing is byte-identical across all five MT5 arms
+    (MT5_ENABLED on, the shared terminal-lock/epoch registry reset, the
+    restart hook stubbed so a `TimeoutError`/`Mt5AccountMismatchError` case
+    never touches a real `Mt5Client.restart()`) — lives here ONCE rather than
+    five times.
+    """
+    from services import allocator_positions as ap
+    from services import mt5_concurrency
+
+    mt5_concurrency.reset_terminal_state_for_tests()
+    monkeypatch.setenv("MT5_ENABLED", "true")
+
+    async def _fake_restart(client, *, log_prefix="derive_broker_dailies"):
+        pass
+
+    monkeypatch.setattr(ap, "_mt5_bounded_restart", _fake_restart)
+
+
+# ---------------------------------------------------------------------------
+# Task 1 — the MEASURED wrong-password path: `except Mt5ClientError`
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "verdict, unwrapped",
+    [("permanent", True), ("transient", False), ("unknown", False)],
+)
+async def test_mt5_client_error_arm_follows_the_live_classifier_verdict(
+    monkeypatch, verdict, unwrapped
+):
+    """D-09/D-10 Task 1 — `Mt5ClientError(0, "Invalid account")` is the
+    ROADMAP's own measured wrong-password corpus string. `must_be_unwrapped`
+    is controlled (see the module note above for why) but the exception
+    object is real, and the assertion is IDENTITY — the handler must receive
+    the exact same instance, never a copy or a re-wrap.
+
+    ⭐ AMENDED by 167-04 Task 1 (D-11 arm B), and ONLY on the wrapped branch.
+    This is the arm where a LOGIN WAS ATTEMPTED AND DID NOT SUCCEED, so the
+    non-permanent verdicts now surface `AllocatorHoldingsSignInFailedError`
+    with the authored sign-in copy instead of the transport note. The
+    PERMANENT branch is byte-unchanged — plan 02's guard still does the one
+    thing it was built for. The assertions below deliberately keep BOTH the
+    subclass relationship (the retry DISPOSITION is unchanged, so the job
+    still backs off) and the `__cause__` identity (the diagnosis is not lost),
+    because dropping either would let a future "simplification" turn this into
+    a copy-string comparison that proves nothing about the chain."""
+    from services import allocator_positions as ap
+    import services.job_worker as jw
+    from services.mt5_client import Mt5ClientError, Mt5LoginRefusedError
+
+    # ⭐ 167 CR-01 — the LOGIN-STAGE marker, which is what the real
+    # `Mt5Client.login` raises when the terminal answers the sign-in falsy.
+    # A plain `Mt5ClientError` from this arm is a transport/post-login fault
+    # and keeps the pre-167 transport note — see
+    # `test_mt5_client_error_that_is_not_a_login_refusal_keeps_the_transport_note`.
+    expected = Mt5LoginRefusedError(0, "Invalid account")
+
+    def _fake_classify(exc):
+        assert exc is expected
+        return (verdict, "sanitized")
+
+    session = _Mt5SessionDouble(_Mt5ClientDouble(login_raises=expected))
+    _mt5_verdict_case_setup(monkeypatch)
+    monkeypatch.setattr(jw, "classify_exception", _fake_classify)
+
+    if unwrapped:
+        with pytest.raises(Mt5ClientError) as caught:
+            await ap.fetch_allocator_holdings("mt5", session, API_KEY_ID)
+        assert caught.value is expected, (
+            f"{verdict!r} failure was swallowed into "
+            f"{type(caught.value).__name__} instead of reaching the handler "
+            "unwrapped — a permanent failure would become an unbounded retry"
+        )
+    else:
+        with pytest.raises(ap.AllocatorHoldingsSignInFailedError) as caught:
+            await ap.fetch_allocator_holdings("mt5", session, API_KEY_ID)
+        assert str(caught.value) == ap.SIGN_IN_FAILED_NOTE.format(venue="MT5")
+        assert caught.value.__cause__ is expected
+        # Still a subclass of the transient type, so it reaches the handler's
+        # ONE typed arm (WR-05). Its job disposition is its own declared
+        # `error_kind` (permanent since WR-04; pinned in the handler cases).
+        assert isinstance(caught.value, ap.AllocatorHoldingsSyncTransientError)
+        # ⛔ And it is NARROW: the sign-in arm no longer claims the terminal
+        # was unreachable. The three sibling MT5 arms still do — their own
+        # cases below assert exactly that, and are the control for this one.
+        assert str(caught.value) != ap.MT5_UNREACHABLE_NOTE
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "make_error",
+    [
+        # Not the login-stage marker: an `initialize()` failure, a transport
+        # drop mid-login, or a post-login `account_info()` failure all arrive
+        # as a plain `Mt5ClientError`, whatever their text says.
+        pytest.param(
+            lambda m: m.Mt5ClientError(0, "Invalid account"),
+            id="plain-client-error-even-with-auth-text",
+        ),
+        # The login stage answered, but with an IPC-infrastructure code
+        # (-10000…-10004: our bridge failed to carry the call) or the success
+        # code 1. D-17: none of them is a verdict on the credential. A
+        # login-stage -10005 IS one, and is driven by
+        # `test_mt5_login_stage_refusal_code_writes_the_sign_in_claim` below.
+        pytest.param(
+            lambda m: m.Mt5LoginRefusedError(-10000, "internal fail"),
+            id="login-stage-10000-internal-fail",
+        ),
+        pytest.param(
+            lambda m: m.Mt5LoginRefusedError(-10001, "internal fail send"),
+            id="login-stage-10001-send",
+        ),
+        pytest.param(
+            lambda m: m.Mt5LoginRefusedError(-10002, "internal fail receive"),
+            id="login-stage-10002-receive",
+        ),
+        pytest.param(
+            lambda m: m.Mt5LoginRefusedError(-10003, "internal fail init"),
+            id="login-stage-10003-init",
+        ),
+        pytest.param(
+            lambda m: m.Mt5LoginRefusedError(-10004, "No IPC connection"),
+            id="login-stage-10004-connect",
+        ),
+        pytest.param(
+            lambda m: m.Mt5LoginRefusedError(1, "Success"),
+            id="login-stage-1-res-s-ok",
+        ),
+    ],
+)
+async def test_mt5_client_error_that_is_not_a_login_refusal_keeps_the_transport_note(
+    monkeypatch, make_error
+):
+    """167 CR-01 — the sign-in claim is made ONLY for a login-stage refusal.
+
+    Every other `Mt5ClientError` this arm can see keeps the pre-167 posture
+    byte-unchanged: the transient type (NOT its sign-in subclass) carrying
+    MT5_UNREACHABLE_NOTE. A gateway redeploy or wedge hits every MT5 key on the
+    terminal at once, so misreading these as sign-in failures would tell every
+    MT5 owner to fix a credential that is fine (D-03).
+
+    The classifier is left UNMOCKED here: a real `Mt5ClientError` classifies
+    `unknown`, so the wrap path is the one production takes."""
+    from services import allocator_positions as ap
+    from services import mt5_client
+
+    expected = make_error(mt5_client)
+    session = _Mt5SessionDouble(_Mt5ClientDouble(login_raises=expected))
+    _mt5_verdict_case_setup(monkeypatch)
+
+    with pytest.raises(ap.AllocatorHoldingsSyncTransientError) as caught:
+        await ap.fetch_allocator_holdings("mt5", session, API_KEY_ID)
+
+    assert not isinstance(caught.value, ap.AllocatorHoldingsSignInFailedError), (
+        f"{expected!r} is not a login-stage refusal, yet it was reported as a "
+        "sign-in failure — the owner is told to fix a working credential"
+    )
+    assert str(caught.value) == ap.MT5_UNREACHABLE_NOTE
+    assert caught.value.__cause__ is expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("code", "text"),
+    [
+        pytest.param(-10005, "IPC timeout", id="login-stage-10005-modal-dialog"),
+        pytest.param(0, "authorization failed", id="login-stage-0"),
+        pytest.param(-6, "Authorization failed", id="login-stage-6-auth-failed"),
+    ],
+)
+async def test_mt5_login_stage_refusal_code_writes_the_sign_in_claim(
+    monkeypatch, code, text
+):
+    """167 CR-01 / D-17 — a login-stage -10005, 0 or -6 is a refused sign-in on
+    the holdings surface too: `AllocatorHoldingsSignInFailedError` with the
+    sign-in copy and a `permanent` disposition, never MT5_UNREACHABLE_NOTE.
+
+    -10005 is the case D-08 is written about (the modal login dialog a wrong
+    MT5 password raises). Before D-17 it kept the transport note ("sync will
+    retry automatically") and climbed the backoff ladder, re-running `login()`
+    against the shared terminal on every rung.
+
+    The classifier is left UNMOCKED: a real `Mt5LoginRefusedError`
+    classifies `unknown`, so the wrap path is the one production takes."""
+    from services import allocator_positions as ap
+    from services.mt5_client import Mt5LoginRefusedError
+
+    expected = Mt5LoginRefusedError(code, text)
+    session = _Mt5SessionDouble(_Mt5ClientDouble(login_raises=expected))
+    _mt5_verdict_case_setup(monkeypatch)
+
+    with pytest.raises(ap.AllocatorHoldingsSignInFailedError) as caught:
+        await ap.fetch_allocator_holdings("mt5", session, API_KEY_ID)
+
+    assert str(caught.value) == ap.SIGN_IN_FAILED_NOTE.format(venue="MT5")
+    assert caught.value.sync_status == ap.SIGN_IN_FAILED_SYNC_STATUS
+    assert caught.value.error_kind == "permanent", (
+        f"a login-stage refusal with code {code} would climb the backoff "
+        "ladder, re-sending the same password to the shared terminal (D-08)"
+    )
+    assert caught.value.__cause__ is expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "make_error",
+    [
+        # A plain `Mt5ClientError` (not the login-stage marker), so only the
+        # classifier verdict can make it a sign-in failure.
+        pytest.param(
+            lambda m: m.Mt5ClientError(0, "Invalid account or password"),
+            id="plain-client-error-classified-auth",
+        ),
+        pytest.param(
+            lambda m: m.Mt5ClientError(0, "Trade server not found"),
+            id="plain-client-error-classified-wrong_server",
+        ),
+    ],
+)
+async def test_mt5_client_error_the_classifier_blames_on_the_credential_is_a_sign_in_failure(
+    monkeypatch, make_error
+):
+    """167 SFH-LOW-2 — the two surfaces must agree. The wizard answers an
+    `Mt5ClientError` that `classify_mt5_login_error` reads as `"auth"` or
+    `"wrong_server"` with a confident 400 at any stage. The holdings poll
+    used to call the same error a transport blip: MT5_UNREACHABLE_NOTE and a
+    promised retry. It now writes the sign-in claim, with the same copy and a
+    `permanent` disposition as a login-stage refusal.
+
+    Control: `plain-client-error-even-with-auth-text` in
+    `test_mt5_client_error_that_is_not_a_login_refusal_keeps_the_transport_note`
+    ("Invalid account", which the anchored phrase table does NOT match) still
+    keeps the transport note."""
+    from services import allocator_positions as ap
+    from services import mt5_client
+    from services.mt5_validation import classify_mt5_login_error
+
+    expected = make_error(mt5_client)
+    assert not isinstance(expected, mt5_client.Mt5LoginRefusedError)
+    assert classify_mt5_login_error(expected) in ("auth", "wrong_server")
+    session = _Mt5SessionDouble(_Mt5ClientDouble(login_raises=expected))
+    _mt5_verdict_case_setup(monkeypatch)
+
+    with pytest.raises(ap.AllocatorHoldingsSignInFailedError) as caught:
+        await ap.fetch_allocator_holdings("mt5", session, API_KEY_ID)
+
+    assert str(caught.value) == ap.SIGN_IN_FAILED_NOTE.format(venue="MT5")
+    assert caught.value.error_kind == "permanent"
+    assert caught.value.__cause__ is expected
+
+
+# ---------------------------------------------------------------------------
+# Task 2 — the remaining five except-arms, each its OWN case + OWN real shape
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "verdict, unwrapped",
+    [("permanent", True), ("transient", False), ("unknown", False)],
+)
+async def test_mt5_read_timeout_arm_follows_the_live_classifier_verdict(
+    monkeypatch, verdict, unwrapped
+):
+    """D-09/D-10 Task 2 — the read-timeout arm (WEDGE-01 / MT5CONC-01).
+    `asyncio.TimeoutError` classifies 'transient' for REAL (classify_
+    exception's first isinstance check) — a genuinely 'permanent' verdict for
+    this type cannot occur today, so (mirroring the Mt5ClientError case) the
+    verdict is controlled to prove the arm consults it at all.
+
+    MEASURED: `asyncio.wait_for`/`to_thread` does NOT preserve object identity
+    for a `TimeoutError` raised INSIDE the awaited thread — the object the
+    except-arm receives is not `is` the one the double raised (every OTHER
+    arm's exception survives the trip unchanged; this is `TimeoutError`-
+    specific asyncio plumbing, not a guard defect). So this case captures the
+    REAL propagated object via the classify hook instead of asserting against
+    a pre-built one — self-consistent identity, not assumed identity."""
+    from services import allocator_positions as ap
+    import services.job_worker as jw
+
+    captured: list[BaseException] = []
+
+    def _fake_classify(exc):
+        captured.append(exc)
+        return (verdict, "sanitized")
+
+    session = _Mt5SessionDouble(_Mt5ClientDouble(login_raises=asyncio.TimeoutError()))
+    _mt5_verdict_case_setup(monkeypatch)
+    monkeypatch.setattr(jw, "classify_exception", _fake_classify)
+
+    if unwrapped:
+        with pytest.raises(asyncio.TimeoutError) as caught:
+            await ap.fetch_allocator_holdings("mt5", session, API_KEY_ID)
+        assert captured and caught.value is captured[0]
+    else:
+        with pytest.raises(ap.AllocatorHoldingsSyncTransientError) as caught:
+            await ap.fetch_allocator_holdings("mt5", session, API_KEY_ID)
+        assert str(caught.value) == ap.MT5_UNREACHABLE_NOTE
+        assert captured and caught.value.__cause__ is captured[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "verdict, unwrapped",
+    [("permanent", True), ("transient", False), ("unknown", False)],
+)
+async def test_mt5_abandoned_session_arm_follows_the_live_classifier_verdict(
+    monkeypatch, verdict, unwrapped
+):
+    """D-09/D-10 Task 2 — the abandoned-session fence (WIZFORM-ABANDON/D-40).
+    `Mt5SessionAbandoned` is a plain `Exception` (D-42) with no classifier
+    branch, so a real instance is 'unknown' today — same reasoning as the
+    timeout arm above."""
+    from services import allocator_positions as ap
+    import services.job_worker as jw
+    from services.mt5_client import Mt5SessionAbandoned
+
+    expected = Mt5SessionAbandoned("account_info")
+
+    def _fake_classify(exc):
+        assert exc is expected
+        return (verdict, "sanitized")
+
+    session = _Mt5SessionDouble(_Mt5ClientDouble(login_raises=expected))
+    _mt5_verdict_case_setup(monkeypatch)
+    monkeypatch.setattr(jw, "classify_exception", _fake_classify)
+
+    if unwrapped:
+        with pytest.raises(Mt5SessionAbandoned) as caught:
+            await ap.fetch_allocator_holdings("mt5", session, API_KEY_ID)
+        assert caught.value is expected
+    else:
+        with pytest.raises(ap.AllocatorHoldingsSyncTransientError) as caught:
+            await ap.fetch_allocator_holdings("mt5", session, API_KEY_ID)
+        assert str(caught.value) == ap.MT5_UNREACHABLE_NOTE
+        assert caught.value.__cause__ is expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "verdict, unwrapped",
+    [("permanent", True), ("transient", False), ("unknown", False)],
+)
+async def test_mt5_account_mismatch_arm_follows_the_live_classifier_verdict(
+    monkeypatch, verdict, unwrapped
+):
+    """D-09/D-10 Task 2 — the login-mismatch fence (MT5CONC-02)."""
+    from services import allocator_positions as ap
+    import services.job_worker as jw
+    from services.mt5_client import Mt5AccountMismatchError
+
+    expected = Mt5AccountMismatchError(246813, 999999)
+
+    def _fake_classify(exc):
+        assert exc is expected
+        return (verdict, "sanitized")
+
+    session = _Mt5SessionDouble(_Mt5ClientDouble(login_raises=expected))
+    _mt5_verdict_case_setup(monkeypatch)
+    monkeypatch.setattr(jw, "classify_exception", _fake_classify)
+
+    if unwrapped:
+        with pytest.raises(Mt5AccountMismatchError) as caught:
+            await ap.fetch_allocator_holdings("mt5", session, API_KEY_ID)
+        assert caught.value is expected
+    else:
+        with pytest.raises(ap.AllocatorHoldingsSyncTransientError) as caught:
+            await ap.fetch_allocator_holdings("mt5", session, API_KEY_ID)
+        assert str(caught.value) == ap.MT5_UNREACHABLE_NOTE
+        assert caught.value.__cause__ is expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "verdict, unwrapped",
+    [("permanent", True), ("transient", False), ("unknown", False)],
+)
+async def test_mt5_equity_extraction_arm_follows_the_live_classifier_verdict(
+    monkeypatch, verdict, unwrapped
+):
+    """D-09/D-10 Task 2 — NEWLY MEASURED (not in 167-PATTERNS' six-arm count):
+    the equity-extraction `except (KeyError, TypeError, ValueError)` arm. See
+    167-02-SUMMARY.md's re-measurement note for why this differs from the
+    plan's own citation. A REAL, naturally-triggered `ValueError` (a
+    non-numeric `equity` field — the same malformed-payload class the ccxt
+    arms' `KeyError("total")` param already covers) drives the case; no
+    injection into `client.login` needed, unlike the four arms above."""
+    from services import allocator_positions as ap
+    import services.job_worker as jw
+
+    client = _Mt5ClientDouble(
+        account_info={"login": 246813, "currency": "USD", "equity": "not-a-number"}
+    )
+    session = _Mt5SessionDouble(client)
+    _mt5_verdict_case_setup(monkeypatch)
+
+    captured: list[BaseException] = []
+
+    def _fake_classify(exc):
+        captured.append(exc)
+        return (verdict, "sanitized")
+
+    monkeypatch.setattr(jw, "classify_exception", _fake_classify)
+
+    if unwrapped:
+        with pytest.raises(ValueError) as caught:
+            await ap.fetch_allocator_holdings("mt5", session, API_KEY_ID)
+        assert captured and caught.value is captured[0]
+    else:
+        with pytest.raises(ap.AllocatorHoldingsSyncTransientError) as caught:
+            await ap.fetch_allocator_holdings("mt5", session, API_KEY_ID)
+        assert str(caught.value) == ap.MT5_UNREACHABLE_NOTE
+        assert captured and caught.value.__cause__ is captured[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "verdict, unwrapped",
+    [("permanent", True), ("transient", False), ("unknown", False)],
+)
+async def test_sfox_balances_arm_follows_the_live_classifier_verdict(
+    monkeypatch, verdict, unwrapped
+):
+    """D-09/D-10 Task 2 — the sFOX balances read (AUM-05), dark behind
+    SFOX_ENABLED with zero stored keys today — proven correct BEFORE its
+    go-live flip, the same posture `test_sfox_fetch_failure_raises_transient_
+    human_copy` already takes in test_allocator_positions_non_ccxt.py."""
+    from services import allocator_positions as ap
+    import services.job_worker as jw
+    from services.sfox_client import SfoxApiError
+
+    monkeypatch.setenv("SFOX_ENABLED", "true")
+
+    expected = SfoxApiError(503, "Service Unavailable")
+
+    def _fake_classify(exc):
+        assert exc is expected
+        return (verdict, "sanitized")
+
+    monkeypatch.setattr(jw, "classify_exception", _fake_classify)
+
+    client = _SfoxClientDouble(raises=expected)
+
+    if unwrapped:
+        with pytest.raises(SfoxApiError) as caught:
+            await ap.fetch_allocator_holdings("sfox", client, API_KEY_ID)
+        assert caught.value is expected
+    else:
+        with pytest.raises(ap.AllocatorHoldingsSyncTransientError) as caught:
+            await ap.fetch_allocator_holdings("sfox", client, API_KEY_ID)
+        assert str(caught.value) == ap.SFOX_FETCH_FAILED_NOTE
+        assert caught.value.__cause__ is expected
+
+
+# ---------------------------------------------------------------------------
+# Task 3 — the CLASS closure: a roster case, plus the rate-limit pin
+# ---------------------------------------------------------------------------
+def test_every_retry_promising_raise_is_guarded_by_the_classifier():
+    """D-09 as a CLASS, not a list of point fixes (167-02 Task 3).
+
+    Derives the "promises a retry" note set from the module's OWN source (any
+    `*_NOTE` constant whose text contains "retry automatically"), then asserts
+    every except-arm that raises one has `_must_reach_handler_unwrapped(exc)`
+    as its FIRST statement. AST, not grep/text: comments never enter the
+    tree (this repo's dated header-prose-counted-as-code class cannot recur
+    here — `sql-gate-lint`'s R2 rule exists for exactly that class in SQL, and
+    this gate gets the same property for free from `ast.parse`), and a
+    reformat cannot turn this vacuous. A SEVENTH arm added later that raises
+    one of these notes without the guard fails here BY NAME.
+
+    Scope, stated precisely: this governs EXCEPT-catching arms only — the
+    mechanism needs an exception object to consult the classifier with. Four
+    sites raise one of these notes from a plain `if` with NO exception in
+    scope (missing account ref x2, blank currency, non-finite equity) and
+    fall outside this gate's domain by construction, exactly like the two
+    already-guarded ccxt arms fall INSIDE it for free — see
+    167-02-SUMMARY.md for the named residuals, not silently exempted here.
+    """
+    import ast
+    import inspect
+    from services import allocator_positions as ap
+
+    tree = ast.parse(inspect.getsource(ap))
+
+    # Step 1 — the retry-promising constant NAMES, derived from source. Only
+    # TOP-LEVEL module assignments count (mirrors how these constants are
+    # actually declared), so a same-named local variable inside a function
+    # body can never be mistaken for one.
+    note_re = re.compile(r"^[A-Z][A-Z0-9_]*_NOTE$")
+    retry_promising_names: set[str] = set()
+    for node in tree.body:
+        if not (isinstance(node, ast.Assign) and len(node.targets) == 1):
+            continue
+        target = node.targets[0]
+        if not (isinstance(target, ast.Name) and note_re.match(target.id)):
+            continue
+        value = getattr(ap, target.id, None)
+        if isinstance(value, str) and "retry automatically" in value.lower():
+            retry_promising_names.add(target.id)
+
+    assert retry_promising_names, (
+        "extracted no retry-promising NOTE constants — the scan is not "
+        "seeing the module's own source"
+    )
+
+    def _raises_retry_promising_note(raise_node: ast.Raise) -> bool:
+        exc = raise_node.exc
+        if not (
+            isinstance(exc, ast.Call)
+            and isinstance(exc.func, ast.Name)
+            and exc.func.id == "AllocatorHoldingsSyncTransientError"
+            and exc.args
+        ):
+            return False
+        arg = exc.args[0]
+        if isinstance(arg, ast.Name):
+            return arg.id in retry_promising_names
+        if (
+            isinstance(arg, ast.Call)
+            and isinstance(arg.func, ast.Attribute)
+            and arg.func.attr == "format"
+            and isinstance(arg.func.value, ast.Name)
+        ):
+            return arg.func.value.id in retry_promising_names
+        return False
+
+    def _is_guard_first_statement(handler: ast.ExceptHandler) -> bool:
+        if not handler.body:
+            return False
+        first = handler.body[0]
+        return (
+            isinstance(first, ast.If)
+            and isinstance(first.test, ast.Call)
+            and isinstance(first.test.func, ast.Name)
+            and first.test.func.id == "_must_reach_handler_unwrapped"
+            and len(first.body) == 1
+            and isinstance(first.body[0], ast.Raise)
+            and first.body[0].exc is None
+        )
+
+    examined: list[str] = []
+    offenders: list[str] = []
+    for handler in (n for n in ast.walk(tree) if isinstance(n, ast.ExceptHandler)):
+        raises_note = any(
+            isinstance(n, ast.Raise) and _raises_retry_promising_note(n)
+            for n in ast.walk(handler)
+        )
+        if not raises_note:
+            continue
+        exc_type = ast.unparse(handler.type) if handler.type else "<bare except>"
+        examined.append(f"{exc_type} (line {handler.lineno})")
+        if not _is_guard_first_statement(handler):
+            offenders.append(f"{exc_type} (line {handler.lineno})")
+
+    # Anti-vacuity control: prove the extractor actually found arms to check.
+    assert examined, (
+        "found zero except-arms raising a retry-promising note — the "
+        "extractor is not seeing the arms it must gate"
+    )
+    assert offenders == [], (
+        "these except-arms raise a retry-promising note without consulting "
+        f"_must_reach_handler_unwrapped FIRST (D-09/D-10): {offenders}"
+    )
+
+
+def test_a_classifier_that_raises_is_logged_at_error_with_its_traceback(
+    monkeypatch, caplog
+):
+    """167 SFH-L1 — when `classify_exception` itself raises,
+    `_must_reach_handler_unwrapped` falls back to "retryable" so the copy path
+    survives. That fallback decides the retry disposition. A permanent failure
+    lost here gets retried for good under a note that promises a retry, so the
+    classifier fault must log at ERROR with its traceback (Sentry-grade). A
+    WARNING nobody alerts on is not enough."""
+    import logging
+
+    from services import allocator_positions as ap
+    import services.job_worker as jw
+
+    def _broken_classify(exc):
+        raise RuntimeError("classifier defect")
+
+    monkeypatch.setattr(jw, "classify_exception", _broken_classify)
+
+    with caplog.at_level(logging.DEBUG, logger=ap.logger.name):
+        verdict = ap._must_reach_handler_unwrapped(ValueError("boom"))
+
+    assert verdict is False, "the fallback must still keep the copy path"
+    records = [
+        r for r in caplog.records
+        if r.name == ap.logger.name and "could not classify" in r.getMessage()
+    ]
+    assert records, "the classifier fault was not logged at all"
+    assert records[-1].levelno == logging.ERROR, (
+        f"logged at {records[-1].levelname}, not ERROR — a classifier defect "
+        "that silently downgrades a permanent failure stays invisible"
+    )
+    assert records[-1].exc_info is not None, "the traceback was dropped"
+
+
+def test_rate_limited_note_still_promises_a_retry():
+    """167-02 Task 3 — the ONE note in the family whose retry promise is
+    legitimate: rate limits ARE transient by construction. Without this pin a
+    future "clean sweep" of the retry-promising family removes it too and
+    creates a NEW dishonesty (167-RESEARCH Pitfall 2)."""
+    from services.allocator_positions import SYNC_ERROR_COPY_BY_STATUS
+
+    assert "retry automatically" in SYNC_ERROR_COPY_BY_STATUS["rate_limited"].lower()
+
+
+# ===========================================================================
+# Phase 167-04 Task 2 — PIN THE SILENT FAILURES.
+#
+# Both of this plan's traps fail without a traceback, without a log line and
+# without any test that reads source text noticing. Each is pinned by what it
+# would actually do to the column.
+# ===========================================================================
+@pytest.mark.asyncio
+async def test_sign_in_failure_reaches_its_own_arm_not_the_parents(
+    monkeypatch, api_key_row_factory
+):
+    """⛔⛔ THE HANDLER-ORDERING PIN (T-167-13), re-cut by 167 WR-05.
+
+    `AllocatorHoldingsSignInFailedError` SUBCLASSES
+    `AllocatorHoldingsSyncTransientError`, and Python matches the FIRST
+    `except` whose type the exception is an instance of. The first design gave
+    the subclass its own arm, and an arm placed below the parent's was DEAD
+    CODE. WR-05 removed that hazard structurally: there is now ONE arm, which
+    reads `sync_status` off the exception. The failure this case guards is the
+    same either way: the column silently reverting to sync_status='error' with
+    "sync will retry automatically", the exact 17-day PROD defect this phase
+    removes. That could come from a re-introduced shadowed arm or from the
+    class attribute being dropped. Nothing about it is observable except the
+    value written.
+
+    ⛔ BEHAVIOURAL, deliberately — NOT an assertion on source-text order. A
+    text assertion can be satisfied by arms in the right order that do the
+    wrong thing, and is broken by a reformat that changes nothing. This case
+    drives the REAL handler with the new type and reads the REAL write.
+
+    The subclass assertion is not decoration: it is what makes the ordering
+    load-bearing in the first place. If a later change breaks the inheritance,
+    the shadowing risk is gone and this case should be re-derived rather than
+    silently kept passing for a different reason.
+    """
+    from services import allocator_positions as ap
+    from services import job_worker as jw
+
+    assert issubclass(
+        ap.AllocatorHoldingsSignInFailedError,
+        ap.AllocatorHoldingsSyncTransientError,
+    ), (
+        "the sign-in type no longer subclasses the transient one — the "
+        "ordering trap this case pins has changed shape; re-derive it"
+    )
+
+    copy = ap.SIGN_IN_FAILED_NOTE.format(venue="MT5")
+
+    async def _raise_sign_in_failed(venue, exchange, api_key_id=None):
+        raise ap.AllocatorHoldingsSignInFailedError(copy)
+
+    key_row = api_key_row_factory(
+        id=API_KEY_ID, user_id=ALLOCATOR_ID, exchange="mt5"
+    )
+    coro, payloads, _audit = _drive_allocator_sync(
+        monkeypatch, key_row, fetch=_raise_sign_in_failed
+    )
+    result = await coro
+
+    statuses = [p["sync_status"] for p in payloads if "sync_status" in p]
+    assert statuses, f"expected a sync_status write; got {payloads!r}"
+    assert statuses[-1] == ap.SIGN_IN_FAILED_SYNC_STATUS, (
+        "the sign-in exception was written as its PARENT — either a shadowed "
+        "arm was re-introduced or the class's `sync_status` attribute is gone. "
+        f"Every sign-in failure now writes {statuses[-1]!r}, which is the "
+        "17-day defect restored"
+    )
+    assert _sync_errors(payloads)[-1] == copy
+    # 167 WR-04 — the queue disposition is NOT the parent's. A refused sign-in
+    # must not climb the backoff ladder, because every rung re-runs the same
+    # stored password against the one shared MT5 terminal (the D-08 harm). The
+    # audit carries the same disposition the queue gets.
+    assert result.error_kind == "permanent", (
+        f"a refused sign-in returned error_kind={result.error_kind!r}: the job "
+        "will retry the same wrong password against the shared terminal on "
+        "every backoff rung"
+    )
+    assert _audit.call_args.kwargs["metadata"]["error_kind"] == "permanent"
+    # 167 SFH-L1 / R2 IN-04 — the audit names the status that actually landed.
+    assert (
+        _audit.call_args.kwargs["metadata"]["sync_status_written"]
+        == ap.SIGN_IN_FAILED_SYNC_STATUS
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_refused_sign_in_status_write_falls_back_to_error(
+    monkeypatch, api_key_row_factory, caplog
+):
+    """167 SFH-H2 — the worker and the migration that admits `sign_in_failed`
+    deploy SEPARATELY (Railway vs. the migration apply, with nothing ordering
+    them). If `api_keys_sync_status_check` refuses the new value, a swallowed
+    WARNING left the key reading its last healthy/'syncing' status: a broken
+    key shown as fine.
+
+    The fake `db_execute` RUNS the update (so the attempted payload is
+    captured) and then raises the CHECK violation, the way PostgREST would.
+    The handler must log at ERROR and fall back to the parent's write,
+    `sync_status='error'`, keeping the true sign-in copy."""
+    import logging
+
+    from services import allocator_positions as ap
+    from services import job_worker as jw
+
+    copy = ap.SIGN_IN_FAILED_NOTE.format(venue="MT5")
+
+    async def _raise_sign_in_failed(venue, exchange, api_key_id=None):
+        raise ap.AllocatorHoldingsSignInFailedError(copy)
+
+    db_calls: list[object] = []
+
+    async def _check_rejects_first_write(fn):
+        db_calls.append(fn)
+        result = fn()
+        if len(db_calls) == 1:
+            raise RuntimeError(
+                'new row for relation "api_keys" violates check constraint '
+                '"api_keys_sync_status_check"'
+            )
+        return result
+
+    key_row = api_key_row_factory(
+        id=API_KEY_ID, user_id=ALLOCATOR_ID, exchange="mt5"
+    )
+    coro, payloads, _audit = _drive_allocator_sync(
+        monkeypatch, key_row, fetch=_raise_sign_in_failed
+    )
+    monkeypatch.setattr(jw, "db_execute", _check_rejects_first_write)
+
+    with caplog.at_level(logging.DEBUG, logger=jw.logger.name):
+        result = await coro
+
+    statuses = [p["sync_status"] for p in payloads if "sync_status" in p]
+    assert statuses == [ap.SIGN_IN_FAILED_SYNC_STATUS, "error"], (
+        "a refused sign_in_failed write must be followed by the parent's "
+        f"'error' write, or the key keeps a healthy status; got {statuses!r}"
+    )
+    assert _sync_errors(payloads)[-1] == copy, (
+        "the fallback must keep the TRUE cause; the transport note would "
+        "re-introduce the false one"
+    )
+    errors = [
+        r for r in caplog.records
+        if r.name == jw.logger.name and r.levelno >= logging.ERROR
+        and "falling back" in r.getMessage()
+    ]
+    assert errors and errors[-1].exc_info is not None, (
+        "the rejected write must be logged at ERROR with its traceback"
+    )
+    # 167 SFH-L1 / R2 IN-04 — the log names a CHECK rejection as one, and the
+    # audit records that the key was downgraded to 'error'.
+    assert "CHECK violation" in errors[-1].getMessage()
+    assert "not a CHECK violation" not in errors[-1].getMessage()
+    assert _audit.call_args.kwargs["metadata"]["sync_status_written"] == "error"
+    # The disposition is unaffected by the fallback.
+    assert result.error_kind == "permanent"
+
+
+@pytest.mark.asyncio
+async def test_a_sign_in_write_that_fails_for_another_reason_says_so(
+    monkeypatch, api_key_row_factory, caplog
+):
+    """167 SFH-L1 / R2 IN-04 — the fallback still runs on a failure that is NOT
+    a CHECK rejection (keeping a stale healthy status is the worse outcome), but
+    the log must not call it one: a transport error here is ambiguous, because
+    PostgREST may have committed the sign_in_failed write before the error
+    reached us, and the fallback then overwrote it. The audit records the
+    status that finally landed."""
+    import logging
+
+    from services import allocator_positions as ap
+    from services import job_worker as jw
+
+    copy = ap.SIGN_IN_FAILED_NOTE.format(venue="MT5")
+
+    async def _raise_sign_in_failed(venue, exchange, api_key_id=None):
+        raise ap.AllocatorHoldingsSignInFailedError(copy)
+
+    db_calls: list[object] = []
+
+    async def _first_write_times_out(fn):
+        db_calls.append(fn)
+        result = fn()
+        if len(db_calls) == 1:
+            raise TimeoutError("read timed out")
+        return result
+
+    key_row = api_key_row_factory(
+        id=API_KEY_ID, user_id=ALLOCATOR_ID, exchange="mt5"
+    )
+    coro, payloads, _audit = _drive_allocator_sync(
+        monkeypatch, key_row, fetch=_raise_sign_in_failed
+    )
+    monkeypatch.setattr(jw, "db_execute", _first_write_times_out)
+
+    with caplog.at_level(logging.DEBUG, logger=jw.logger.name):
+        await coro
+
+    statuses = [p["sync_status"] for p in payloads if "sync_status" in p]
+    assert statuses == [ap.SIGN_IN_FAILED_SYNC_STATUS, "error"], statuses
+    errors = [
+        r for r in caplog.records
+        if r.name == jw.logger.name and r.levelno >= logging.ERROR
+        and "falling back" in r.getMessage()
+    ]
+    assert errors, "the failed write was not logged at ERROR"
+    assert "not a CHECK violation (TimeoutError)" in errors[-1].getMessage(), (
+        "a timeout was logged as if the CHECK constraint had refused the value; "
+        "the operator is sent to the migration instead of the ambiguous write"
+    )
+    assert _audit.call_args.kwargs["metadata"]["sync_status_written"] == "error"
+
+
+@pytest.mark.asyncio
+async def test_a_refused_sign_in_write_whose_fallback_also_fails_is_loud(
+    monkeypatch, api_key_row_factory, caplog
+):
+    """167 SFH-M3 — the "fallback ALSO failed" branch. Both writes are refused
+    (the database is down, say), so the key keeps whatever status it had. That
+    is the worst outcome this arm can produce, and nothing but the log can show
+    it, so BOTH failures must be logged at ERROR with their traceback. The job
+    disposition is still the sign-in subclass's own."""
+    import logging
+
+    from services import allocator_positions as ap
+    from services import job_worker as jw
+
+    copy = ap.SIGN_IN_FAILED_NOTE.format(venue="MT5")
+
+    async def _raise_sign_in_failed(venue, exchange, api_key_id=None):
+        raise ap.AllocatorHoldingsSignInFailedError(copy)
+
+    async def _every_write_fails(fn):
+        fn()
+        raise RuntimeError("connection refused")
+
+    key_row = api_key_row_factory(
+        id=API_KEY_ID, user_id=ALLOCATOR_ID, exchange="mt5"
+    )
+    coro, payloads, _audit = _drive_allocator_sync(
+        monkeypatch, key_row, fetch=_raise_sign_in_failed
+    )
+    monkeypatch.setattr(jw, "db_execute", _every_write_fails)
+
+    with caplog.at_level(logging.DEBUG, logger=jw.logger.name):
+        result = await coro
+
+    statuses = [p["sync_status"] for p in payloads if "sync_status" in p]
+    assert statuses == [ap.SIGN_IN_FAILED_SYNC_STATUS, "error"], statuses
+    ours = [r for r in caplog.records if r.name == jw.logger.name]
+    also = [r for r in ours if "ALSO failed" in r.getMessage()]
+    assert also, "the failed fallback write was not logged at all"
+    assert also[-1].levelno == logging.ERROR, (
+        f"the failed fallback was logged at {also[-1].levelname}: the key keeps "
+        "a stale status and nothing alerts on it"
+    )
+    assert also[-1].exc_info is not None, "the fallback's traceback was dropped"
+    first = [r for r in ours if "falling back" in r.getMessage()]
+    assert first and first[-1].levelno == logging.ERROR
+    assert first[-1].exc_info is not None
+    # 167 SFH-L1 / R2 IN-04 — nothing landed, and the audit says so.
+    assert _audit.call_args.kwargs["metadata"]["sync_status_written"] is None
+    assert result.error_kind == "permanent"
+
+
+def _raise_transient(copy):
+    async def _fetch(venue, exchange, api_key_id=None):
+        from services import allocator_positions as ap
+
+        raise ap.AllocatorHoldingsSyncTransientError(copy)
+
+    return _fetch
+
+
+def _raise_rate_limited():
+    async def _fetch(venue, exchange, api_key_id=None):
+        raise ccxt.RateLimitExceeded("binance 429")
+
+    return _fetch
+
+
+def _raise_generic():
+    async def _fetch(venue, exchange, api_key_id=None):
+        raise RuntimeError("venue exploded")
+
+    return _fetch
+
+
+def _fetch_ok():
+    async def _fetch(venue, exchange, api_key_id=None):
+        return [], None
+
+    return _fetch
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("make_fetch", "persist_fails", "expected_status"),
+    [
+        pytest.param(
+            lambda: _raise_transient("MT5 terminal unreachable"),
+            False,
+            "error",
+            id="parent-transient-error-write",
+        ),
+        pytest.param(_raise_rate_limited, False, "rate_limited", id="rate_limited-write"),
+        pytest.param(_raise_generic, False, "error", id="generic-arm-write"),
+        pytest.param(_fetch_ok, True, "error", id="persist-failure-stamp"),
+    ],
+)
+async def test_every_failed_sync_status_write_in_the_poll_handler_is_an_error_log(
+    monkeypatch, api_key_row_factory, caplog, make_fetch, persist_fails,
+    expected_status,
+):
+    """167 SFH-M3 — every `sync_status` write in `run_poll_allocator_positions_job`
+    that fails is logged at ERROR with its traceback. A lost write leaves the
+    key on its previous status, which may read healthy or 'syncing' forever, and
+    until this round four of these arms logged it at WARNING, which nothing
+    alerts on. (The sign-in write and its fallback are pinned by the two cases
+    above.)"""
+    import logging
+
+    from services import job_worker as jw
+
+    async def _every_write_fails(fn):
+        fn()
+        raise RuntimeError("connection refused")
+
+    persist = None
+    if persist_fails:
+        async def persist(supa, rows, allocator_id, api_key_id, asof):
+            raise RuntimeError("persist failed")
+
+    key_row = api_key_row_factory(
+        id=API_KEY_ID, user_id=ALLOCATOR_ID, exchange="binance"
+    )
+    coro, payloads, _audit = _drive_allocator_sync(
+        monkeypatch, key_row, fetch=make_fetch(), persist=persist
+    )
+    monkeypatch.setattr(jw, "db_execute", _every_write_fails)
+    # The 429 arm stamps last_429_at first; that is not a sync_status write.
+    monkeypatch.setattr(jw, "_stamp_429", AsyncMock())
+
+    with caplog.at_level(logging.DEBUG, logger=jw.logger.name):
+        await coro
+
+    statuses = [p["sync_status"] for p in payloads if "sync_status" in p]
+    assert statuses and statuses[-1] == expected_status, statuses
+    failed = [
+        r for r in caplog.records
+        if r.name == jw.logger.name
+        and ("failed to stamp" in r.getMessage()
+             or "failed to persist sync_status" in r.getMessage())
+    ]
+    assert failed, "the failed sync_status write was not logged at all"
+    assert failed[-1].levelno == logging.ERROR, (
+        f"a failed sync_status write was logged at {failed[-1].levelname}; the "
+        "key keeps a stale status and nothing alerts on it"
+    )
+    assert failed[-1].exc_info is not None, "the traceback was dropped"
+
+
+def test_sign_in_copy_is_not_the_unknown_status_FALLBACK(monkeypatch):
+    """⛔ THE COPY-TABLE FALLBACK PIN (T-167-14), and it is fallback-SPECIFIC.
+
+    MEASURED: `sync_error_copy` does
+    `SYNC_ERROR_COPY_BY_STATUS.get(status, SYNC_ERROR_COPY_BY_STATUS["error"])`
+    — by design, because a KeyError here would abort the very write that
+    clears the UI's 'syncing' spinner. The cost of that design is that a
+    status written WITHOUT its row renders the generic holdings-sync sentence
+    and NOTHING SAYS SO.
+
+    ⛔ A case that only asserted `status in SYNC_ERROR_COPY_BY_STATUS` cannot
+    fail the way the fallback fails: it would go red on a KeyError the code
+    never raises, and green on a `.get` default it never inspects. So this
+    case asserts against the FALLBACK VALUE itself, and it proves the fallback
+    is reachable at all (the control below) rather than assuming it.
+    """
+    from services.allocator_positions import (
+        SIGN_IN_FAILED_NOTE,
+        SIGN_IN_FAILED_SYNC_STATUS,
+        SYNC_ERROR_COPY_BY_STATUS,
+        sync_error_copy,
+    )
+
+    generic = SYNC_ERROR_COPY_BY_STATUS["error"].format(venue="MT5")
+
+    # CONTROL: the fallback is live. Without this the assertion below could
+    # pass because `sync_error_copy` stopped falling back at all, which would
+    # be a different (and also untested) module.
+    assert sync_error_copy("a-status-invented-later", "mt5") == generic
+
+    text = sync_error_copy(SIGN_IN_FAILED_SYNC_STATUS, "mt5")
+    assert text != generic, (
+        "the new status fell through to the generic holdings-sync sentence — "
+        "its SYNC_ERROR_COPY_BY_STATUS row is missing. The user is told we "
+        "could not REACH the venue, for a credential the venue refused"
+    )
+    assert text == SIGN_IN_FAILED_NOTE.format(venue="MT5")
+    # And the promise the phase exists to kill is absent from it.
+    assert "retry" not in text.lower()
+
+
+def test_sign_in_copy_names_the_remedy_that_works_verbatim():
+    """167 WR-03 — THE LITERAL PIN, hand-typed and never derived from the
+    constant it checks.
+
+    The copy must name the action that FIXES a refused sign-in: replacing the
+    credential. The old wording said "reconnect this account", and on the
+    owner's card "Reconnect" re-runs the STORED credential, the one that just
+    failed, so an owner who followed the copy could not fix the problem. Every
+    other pin reads `SIGN_IN_FAILED_NOTE` itself, so without this one a rewording
+    of the constant would pass all of them."""
+    from services.allocator_positions import SIGN_IN_FAILED_NOTE
+
+    assert SIGN_IN_FAILED_NOTE == (
+        "Couldn't sign in to {venue} with these credentials — update them "
+        "to resume syncing."
+    )
+    assert "reconnect" not in SIGN_IN_FAILED_NOTE.lower()
+
+
+def test_every_status_this_module_can_write_has_its_own_copy_row():
+    """THE ROSTER PIN — no future status may ship into the silent fallback.
+
+    The status set is DERIVED from the module's own AST, never hand-listed:
+    a hand-listed roster is a second list that falls out of step with the
+    first, which is the class of defect this whole phase is made of. Two
+    derivations, unioned:
+
+      1. every string literal `_map_exception_to_sync_status` can RETURN
+         (the ccxt mapping's whole output range);
+      2. every top-level `*_SYNC_STATUS` constant (the typed-exception arms'
+         statuses, which never pass through that function).
+
+    ⛔ AST AND NOT A TEXT SCAN. This module's comments and docblocks NAME
+    several statuses in prose — `_map_exception_to_sync_status`'s own docblock
+    draws the mapping table, and the copy-table block comment quotes
+    `'revoked'` — so a grep-shaped extractor would count prose as code. That
+    is the self-invalidating-census class this repo has already paid for, and
+    `ast.parse` is immune to it for free: comments never enter the tree.
+    """
+    import ast
+    import inspect
+    import re as _re
+    from services import allocator_positions as ap
+
+    tree = ast.parse(inspect.getsource(ap))
+
+    statuses: set[str] = set()
+
+    # (1) the mapping function's return range.
+    mapper = next(
+        (
+            n
+            for n in tree.body
+            if isinstance(n, ast.FunctionDef)
+            and n.name == "_map_exception_to_sync_status"
+        ),
+        None,
+    )
+    assert mapper is not None, (
+        "the extractor cannot find _map_exception_to_sync_status — it is not "
+        "reading the module it claims to read"
+    )
+    for node in ast.walk(mapper):
+        if isinstance(node, ast.Return) and isinstance(node.value, ast.Constant):
+            if isinstance(node.value.value, str):
+                statuses.add(node.value.value)
+
+    # (2) the typed-arm status constants.
+    status_const = _re.compile(r"^[A-Z][A-Z0-9_]*_SYNC_STATUS$")
+    for node in tree.body:
+        if not (isinstance(node, ast.Assign) and len(node.targets) == 1):
+            continue
+        target = node.targets[0]
+        if not (isinstance(target, ast.Name) and status_const.match(target.id)):
+            continue
+        value = getattr(ap, target.id, None)
+        if isinstance(value, str):
+            statuses.add(value)
+
+    # (3) 167 WR-05 — the handler's single typed arm writes `exc.sync_status`,
+    # so every class in the transient family is a writer. Read the attribute
+    # off each class at RUNTIME: a future subclass declaring a literal status
+    # (not a `*_SYNC_STATUS` constant) would be invisible to (2).
+    family = [
+        obj
+        for obj in vars(ap).values()
+        if isinstance(obj, type)
+        and issubclass(obj, ap.AllocatorHoldingsSyncTransientError)
+    ]
+    assert len(family) >= 2, (
+        "derivation (3) found fewer than the parent and its sign-in subclass"
+    )
+    statuses.update(cls.sync_status for cls in family)
+
+    # Anti-vacuity: prove the extractor found a non-zero set, and that it saw
+    # BOTH derivations rather than one of them silently returning nothing.
+    assert statuses, "extracted ZERO writable statuses — the scan is blind"
+    assert "revoked" in statuses, (
+        "derivation (1) found nothing — the mapping function's returns are "
+        "not being seen"
+    )
+    assert ap.SIGN_IN_FAILED_SYNC_STATUS in statuses, (
+        "derivation (2) found nothing — the *_SYNC_STATUS constants are not "
+        "being seen"
+    )
+
+    missing = sorted(s for s in statuses if s not in ap.SYNC_ERROR_COPY_BY_STATUS)
+    assert missing == [], (
+        "these statuses can be WRITTEN to api_keys.sync_status but have no "
+        "SYNC_ERROR_COPY_BY_STATUS row, so sync_error_copy answers them with "
+        f"the generic 'error' sentence, silently: {missing}"
+    )

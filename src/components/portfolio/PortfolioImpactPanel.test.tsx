@@ -45,7 +45,11 @@ function buildResponse(
 }
 
 function mockFetch(impl: () => Promise<Response>) {
-  globalThis.fetch = vi.fn(impl) as unknown as typeof fetch;
+  // stubGlobal, not `globalThis.fetch = …`: only a stub is undone by
+  // `unstubGlobals: true` (vitest.config.ts) / the `vi.unstubAllGlobals()`
+  // below. A direct assignment leaks this mock to every later file in the
+  // worker.
+  vi.stubGlobal("fetch", vi.fn(impl) as unknown as typeof fetch);
 }
 
 describe("<PortfolioImpactPanel>", () => {
@@ -56,9 +60,9 @@ describe("<PortfolioImpactPanel>", () => {
   afterEach(() => {
     vi.restoreAllMocks();
     // A leaked global stub is this repo's known CI-only failure mode (CI Node 22
-    // vs local Node 25). This file assigns `globalThis.fetch` directly rather
-    // than via `vi.stubGlobal`, so the fence costs nothing today and closes the
-    // door if a future case reaches for the stub API.
+    // vs local Node 25). This fence used to be inert prose — the file assigned
+    // `globalThis.fetch` directly, which `vi.unstubAllGlobals()` cannot see —
+    // so `mockFetch` now installs a real stub and this line does real work.
     vi.unstubAllGlobals();
   });
 
@@ -728,6 +732,45 @@ describe("<PortfolioImpactPanel>", () => {
     );
     const status = screen.getByRole("status");
     expect(status.textContent).toMatch(/Sharpe unchanged/);
+  });
+
+  // 166.1 D7 (founder 2026-09-26) / round-1 SFH HIGH-2: a constant-yield or
+  // all-zero candidate (or book) leaves the correlation or the Sharpe delta
+  // undefined. The producer now emits null there instead of 0.0, and the panel
+  // must say "not computable" and show "—", never "unchanged".
+  it("166.1 D7: a null Sharpe and Correlation delta read 'not computable', never 'unchanged'", async () => {
+    mockFetch(async () =>
+      new Response(
+        JSON.stringify(
+          buildResponse({
+            deltas: {
+              sharpe_delta: null,
+              dd_delta: 0.01,
+              corr_delta: null,
+              concentration_delta: 0.05,
+            },
+          }),
+        ),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+
+    render(
+      <PortfolioImpactPanel
+        portfolioId="p1"
+        candidateStrategyId="c1"
+        candidateName="Constant Yield"
+        onClose={() => {}}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(screen.getByText(/Sharpe not computable/)).toBeInTheDocument(),
+    );
+    const status = screen.getByRole("status");
+    expect(status.textContent).toMatch(/Correlation not computable/);
+    expect(status.textContent).not.toMatch(/Sharpe unchanged|Correlation unchanged/);
+    expect(screen.getAllByText("—").length).toBeGreaterThanOrEqual(2);
   });
 
   // -------------------------------------------------------------------------
@@ -1477,16 +1520,39 @@ describe("[140.3-01 / TS-05] <PortfolioImpactPanel> reads the seam error body th
 
   it("CONTRACT A — a `service_error` 500 (OBJECT detail): renders `body.detail.detail`, not 'HTTP 500'", async () => {
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    // Hand-typed §2 envelope. /api/simulator is a seam route, so this is the
-    // body this component actually receives from a deliberate 5xx.
+    // §2 envelope. `/api/simulator` is a seam route, so this is the body this
+    // component actually receives from a deliberate 5xx — and it is now the
+    // EXECUTED constructor's output rather than a hand-typed approximation.
+    //
+    // ⚠️ 140.5-06 / WP-14 — WHAT THIS FIXTURE USED TO BE AND WHY IT WAS A LIE.
+    // It carried `{code:"SEAM_DEGRADED", dependency:"supabase", retryable:true}`
+    // at status 500, byte-identically to two other suites. `error_contract.
+    // _validate` REFUSES to construct it: a 500 is SERVICE-PERMANENT (rule R-1),
+    // so `retryable:true` there is the self-sustaining retry loop R-1 exists to
+    // stop. The fixture was certifying a body no raise site can emit.
+    //
+    // The replacement is this component's OWN upstream, executed:
+    // `routers/simulator.py`'s permanent 500 for a failed simulation. It names
+    // no dependency — the fault is ours but not attributable to one of our named
+    // dependencies, which the 500 arm permits — and `dependency: null` is the
+    // key the constructor really puts on the wire in that case.
+    //
+    //   cd analytics-service && python3 -c "from services.error_contract import \
+    //     service_error; print(service_error(500,'SIMULATION_FAILED', \
+    //     retryable=False, detail='Portfolio impact simulation failed').detail)"
+    //   → {'code': 'SIMULATION_FAILED', 'dependency': None,
+    //      'retryable': False, 'detail': 'Portfolio impact simulation failed'}
+    //
+    // The R-1 rule this fixture now obeys is pinned in Python by
+    // `tests/test_error_contract_r1_permanent_500.py`.
     mockFetch(async () =>
       new Response(
         JSON.stringify({
           detail: {
-            code: "SEAM_DEGRADED",
-            dependency: "supabase",
-            retryable: true,
-            detail: "The analytics store is not responding. Try again shortly.",
+            code: "SIMULATION_FAILED",
+            dependency: null,
+            retryable: false,
+            detail: "Portfolio impact simulation failed",
           },
         }),
         { status: 500, headers: { "Content-Type": "application/json" } },
@@ -1504,9 +1570,7 @@ describe("[140.3-01 / TS-05] <PortfolioImpactPanel> reads the seam error body th
 
     await waitFor(() =>
       expect(
-        screen.getByText(
-          "The analytics store is not responding. Try again shortly.",
-        ),
+        screen.getByText("Portfolio impact simulation failed"),
       ).toBeInTheDocument(),
     );
     // The pre-plan render. `ErrorResponseSchema` rejected the nested body, the

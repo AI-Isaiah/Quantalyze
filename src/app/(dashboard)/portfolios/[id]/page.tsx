@@ -19,7 +19,11 @@ import {
 } from "@/lib/queries";
 import { adaptPortfolioAnalytics } from "@/lib/portfolio-analytics-adapter";
 import { computeFreshness } from "@/lib/freshness";
-import { extractAnalytics } from "@/lib/utils";
+import { extractAnalytics, seriesEndOf } from "@/lib/utils";
+import { isRankableAnalyticsRow } from "@/lib/closed-sets";
+import { resolveDailyReturnSeries } from "@/lib/factsheet/resolve-series";
+import { normalizeDailyReturns } from "@/lib/portfolio-math-utils";
+import type { StrategyAnalytics } from "@/lib/types";
 import Link from "next/link";
 import type {
   PortfolioAnalytics,
@@ -181,7 +185,14 @@ interface PortfolioStrategyRow {
   } | null;
 }
 
-function buildCompositionRows(
+/**
+ * EXPORTED for test only, alongside `buildEquityCurveSeries` and
+ * `stripConstituentSeries` — the file's existing precedent. The one oracle
+ * that would have caught 163-REVIEW finding 1 is "the donut and the breakdown
+ * table report the same freshness for the same source row", and that oracle
+ * cannot be written without both of this page's derivations in the same test.
+ */
+export function buildCompositionRows(
   strategies: PortfolioStrategyRow[],
   attribution: PortfolioAnalytics["attribution_breakdown"],
 ) {
@@ -203,31 +214,182 @@ function buildCompositionRows(
         // analytics are absent; `|| null` collapses absent/empty computed_at to
         // null so SyncBadge renders no badge.
         computedAt: a?.computed_at || null,
+        // HONEST-08 — the slice's other clock. This read already carries
+        // `returns_series` (HONEST-04 builds the constituent wealth curve from
+        // it), so the donut CAN judge the track record and therefore must:
+        // a job that ran an hour ago over a series that ended in May is not a
+        // fresh constituent. `seriesEndOf` is the one shared derivation.
+        seriesEnd: seriesEndOf(a),
       };
     })
     .filter((row): row is NonNullable<typeof row> => row !== null);
 }
 
-function buildEquityCurveSeries(
+/**
+ * HONEST-04 — the constituent's wealth curve, or null when it has none.
+ *
+ * `strategy_analytics.returns_series` is ALREADY the cumprod wealth curve the
+ * analytics-service wrote (base 1 — what `PortfolioEquityCurve`'s
+ * RETURN_FORMATTER expects). CSV-ingested strategies leave that column null and
+ * carry only `daily_returns`, so those fold through `resolveDailyReturnSeries`
+ * plus the cumprod precedent (scenario-blend-adapter) to reach the same shape.
+ *
+ * Returns null — never an empty array, never a synthesized flat line — when
+ * neither column yields points. The chart skips null/empty curves, so the
+ * honest render of "no series" is no line at all.
+ */
+function buildWealthPoints(
+  a: StrategyAnalytics,
+): { date: string; value: number }[] | null {
+  // API rows: the wealth curve is already persisted. normalizeDailyReturns
+  // filters non-finite points and sorts by date; no derivation needed.
+  const persisted = normalizeDailyReturns(a.returns_series);
+  if (persisted.length > 0) {
+    return persisted.map((p) => ({ date: p.date, value: p.value }));
+  }
+  // CSV rows: only daily_returns. Resolve through the shared resolver, then
+  // fold to wealth (the cumprod precedent, scenario-blend-adapter.ts:136-140).
+  const daily = resolveDailyReturnSeries(a.daily_returns, a.returns_series);
+  if (daily.length === 0) return null;
+  let c = 1;
+  return daily.map((p) => {
+    c *= 1 + p.value;
+    return { date: p.date, value: c };
+  });
+}
+
+/**
+ * HONEST-04 — per-strategy equity curves, gated by the STALE-01 predicate.
+ *
+ * `isRankableAnalyticsRow` is MANDATORY on this read path. A `failed` analytics
+ * row still holds the values (and the series) of an earlier attempt — 159-CENSUS
+ * measured 17 of 18 published strategies carrying exactly that corpse — so a
+ * null/empty check would happily draw a dead run's line beside live ones. These
+ * rows do NOT pass through `shapeRowAnalytics`; the gate has to be applied here.
+ */
+export function buildEquityCurveSeries(
   strategies: PortfolioStrategyRow[],
 ): { id: string; name: string; equityCurve: { date: string; value: number }[] | null }[] {
-  // Per-strategy equity curves come from `strategy_analytics.returns_series`
-  // (cumulative-product transform). The wired chart receives an empty curve
-  // when the underlying data is missing — this matches the existing behavior
-  // before the wiring PR.
   return strategies
     .map((ps) => {
       if (!ps.strategies) return null;
+      const a = extractAnalytics(ps.strategies.strategy_analytics);
       return {
         id: ps.strategies.id,
         name: ps.strategies.name,
-        // Returns_series is not selected in the existing query (would balloon
-        // the response). The chart still renders the portfolio composite line
-        // by itself; per-strategy lines remain a future enhancement.
-        equityCurve: null as { date: string; value: number }[] | null,
+        equityCurve:
+          a && isRankableAnalyticsRow(a) ? buildWealthPoints(a) : null,
       };
     })
     .filter((s): s is NonNullable<typeof s> => s !== null);
+}
+
+/**
+ * HONEST-04 / DEF-147-A — the raw series is needed SERVER-SIDE (the curves are
+ * built from it above) but must not be serialized into the RSC flight payload:
+ * `StrategyBreakdownTable` is a client component, so every embedded analytics
+ * field it receives ships to the browser. Only the computed `{date,value}`
+ * points cross the boundary. Extends the `_rs`/`_dr` destructure idiom in
+ * `getDashboardPayload`'s embed shaper (queries.ts).
+ *
+ * ⛔ IT ALSO PROJECTS `series_end`, AND THAT IS NOT A SECOND CONCERN BOLTED ON
+ * (163-REVIEW, finding 1). Removing `returns_series` DESTROYS the only input
+ * `seriesEndOf` had at the table's call site, and `getPortfolioStrategies`
+ * projects no `series_end` alias — so every constituent row reached
+ * `resolveEffectiveRecency` with BOTH inputs absent, took the `unknown` arm,
+ * and rendered a permanent amber dot beside "Synced 20m ago". Worse, the SAME
+ * page fed `buildCompositionRows` the UN-stripped array, so `CompositionDonut`
+ * painted that same strategy green: two surfaces, one page, one strategy, two
+ * answers — the exact defect class HONEST-08 exists to close, reopened by the
+ * commit that closed it.
+ *
+ * The scalar is derived HERE, at the moment the array is taken away, rather
+ * than in a separate pass the caller must remember to run first. That coupling
+ * is the point: a future edit cannot delete the fallback without also carrying
+ * its replacement, because they are one statement. This is the same shape as
+ * the anonymous ranked read, which replaces the array with a projected
+ * `series_end` scalar in SQL — one derivation (`seriesEndOf`, which takes the
+ * LATEST point rather than the last slot), one field crossing the boundary,
+ * and the array still never reaching the browser.
+ */
+export function stripConstituentSeries<T extends PortfolioStrategyRow>(
+  strategies: T[],
+): T[] {
+  return strategies.map((ps) => {
+    const s = ps.strategies;
+    if (!s || !s.strategy_analytics) return ps;
+    const raw = s.strategy_analytics;
+    const strip = (obj: unknown) => {
+      if (!obj || typeof obj !== "object") return obj;
+      const {
+        returns_series: _rs,
+        daily_returns: _dr,
+        ...analyticsRest
+      } = obj as Record<string, unknown>;
+      return {
+        ...analyticsRest,
+        // Read off `obj` — the row WITH its series — not off the stripped
+        // rest. Deriving from `analyticsRest` would answer `null` for every
+        // row, which is precisely the bug this line repairs.
+        series_end: seriesEndOf(obj as StrategyAnalytics),
+      };
+    };
+    return {
+      ...ps,
+      strategies: {
+        ...s,
+        strategy_analytics: Array.isArray(raw) ? raw.map(strip) : strip(raw),
+      },
+    };
+  });
+}
+
+/**
+ * HONEST-04 / UI-SPEC C-3 — the chart discloses its own coverage.
+ *
+ * Counted off the SAME array the curve builder produced (one source of truth —
+ * a second, independently derived count is how the number and the picture drift
+ * apart). Colorless by contract: absence is a neutral fact, not an error and not
+ * a warning (DESIGN.md semantic-color gates). Renders nothing when every
+ * constituent has a curve; still renders when NONE does.
+ *
+ * ⭐ The sentence names the predicate this function ACTUALLY evaluates — "no
+ * usable return series" — and deliberately not a cause it never tested. It used
+ * to say "without computed analytics", which is only ONE of the two ways into
+ * the omitted set: `isRankableAnalyticsRow` false (the STALE-01 gate above), OR
+ * true while `buildWealthPoints` still returns null because both
+ * `returns_series` and `daily_returns` were unusable. A
+ * `complete_with_warnings` row whose series write was skipped lands in the
+ * second bucket — and its CAGR and Sharpe are rendering in the Strategy
+ * Breakdown table on this very page, so the old caption stood beside its own
+ * counter-example. Stating an unmeasured cause is the same defect as stating an
+ * unmeasured value; the fix is to claim only what was checked.
+ */
+export function EquityCurveCoverage({
+  series,
+}: {
+  series: { equityCurve: { date: string; value: number }[] | null }[];
+}) {
+  const total = series.length;
+  const shown = series.filter(
+    (s) => s.equityCurve !== null && s.equityCurve.length > 0,
+  ).length;
+  if (shown === total) return null;
+  const omitted = total - shown;
+  // IN-03 (162-REVIEW): the counters are computed, so the sentence around them
+  // has to agree with whatever they come out as. Both nouns are reachable at 1:
+  // `omitted` is 1 whenever exactly one constituent lacks a usable series, and
+  // `total` is 1 for a single-strategy portfolio whose only curve is missing
+  // (`shown === total` returns null above, so total===1 implies shown===0).
+  return (
+    <p className="mt-3 text-caption text-text-muted">
+      {`Equity curves shown for ${shown} of ${total} ${
+        total === 1 ? "strategy" : "strategies"
+      } — ${omitted} without a usable return series ${
+        omitted === 1 ? "is" : "are"
+      } omitted.`}
+    </p>
+  );
 }
 
 function DashboardContent({
@@ -258,6 +420,8 @@ function DashboardContent({
 
   const compositionRows = buildCompositionRows(strategies, attribution);
   const equitySeries = buildEquityCurveSeries(strategies);
+  // Curves are built above from the raw series; nothing below forwards it.
+  const clientStrategies = stripConstituentSeries(strategies);
   const strategyNames: Record<string, string> = {};
   for (const ps of strategies) {
     if (ps.strategies) strategyNames[ps.strategy_id] = ps.strategies.name;
@@ -300,6 +464,7 @@ function DashboardContent({
             portfolioEquityCurve={equityCurve}
             strategies={equitySeries}
           />
+          <EquityCurveCoverage series={equitySeries} />
         </Card>
         <Card>
           <h3 className="text-base font-semibold text-text-primary mb-3">
@@ -327,7 +492,7 @@ function DashboardContent({
       <div>
         <h2 className="text-base font-semibold text-text-primary mb-3">Strategy Breakdown</h2>
         <StrategyBreakdownTable
-          strategies={strategies as Parameters<typeof StrategyBreakdownTable>[0]["strategies"]}
+          strategies={clientStrategies as Parameters<typeof StrategyBreakdownTable>[0]["strategies"]}
           attribution={attribution}
           portfolioId={portfolioId}
         />

@@ -535,4 +535,73 @@ describe("ErrorEnvelope (DESIGN-02)", () => {
       expect(screen.queryByTestId("error-envelope-wait")).toBeNull();
     });
   });
+
+  describe("[161 REVIEW / IN-02] the Diagnostics block is UNCONDITIONAL, by design", () => {
+    /**
+     * IN-02 observed that `wizardErrors.ts` argues Copy Principle 4 ("no
+     * correlation id on an actionable arm") holds because `expand_log` is
+     * present only on terminal members — while this renderer emits the
+     * `<details> Diagnostics` block with no reference to `actions` at all.
+     *
+     * ⭐ THE RENDERER IS RIGHT AND THE ARGUMENT IS WRONG. Measured at HEAD:
+     *
+     *   1. `actions` DOES NOT CROSS THE ENVELOPE BOUNDARY. The `ErrorEnvelope`
+     *      data shape (`src/lib/envelope.ts`) has no `actions` field;
+     *      `buildEnvelope` collapses the whole action list into the single
+     *      boolean `recoverable` via `RECOVERABLE_ACTIONS`, and `expand_log` is
+     *      not a member of that set — so it survives nowhere this component can
+     *      read. Gating on it is not a tweak, it is a contract change.
+     *   2. THIS COMPONENT IS NOT WIZARD-ONLY. Envelopes are hand-built as
+     *      object literals by surfaces that never touch `WIZARD_ERROR_COPY` at
+     *      all (`api/strategies/csv-validate/route.ts`,
+     *      `api/strategies/finalize-wizard/route.ts`, and the CSV / factsheet /
+     *      admin-status surfaces named in this file's header). Those envelopes
+     *      have no `actions` to consult in ANY form, so a gate would have to
+     *      pick a default for them — and either default is a guess.
+     *   3. A correlation id is the support handle for a failure the user is
+     *      looking at. Hiding it on the arms where they are most likely to ask
+     *      for help is the wrong direction for a diagnostic identifier that is
+     *      already behind a collapsed `<details>` and already pii-scrubbed on
+     *      the clipboard path.
+     *
+     * So the honest correction is to the PROSE that claims a mechanism, not to
+     * this renderer. These two cases exist so that unconditionality is a
+     * RECORDED DECISION rather than an accident nobody pinned — which was
+     * IN-02's actual complaint.
+     */
+
+    it("renders code + correlation_id on an ACTIONABLE arm (one that shows a Retry control)", () => {
+      render(
+        <ErrorEnvelope
+          envelope={makeEnvelope({ recoverable: true })}
+          onRetry={() => {}}
+        />,
+      );
+
+      // ⚠️ PROVE THE ARM IS REACHED FIRST. Asserting a Diagnostics block on a
+      // fixture that cannot render the actionable state would be green against
+      // every implementation, including a gated one. The Retry control IS the
+      // actionable state as far as this component can observe it.
+      expect(screen.getByLabelText("Retry")).toBeInTheDocument();
+
+      const env = makeEnvelope();
+      expect(screen.getByText("Diagnostics")).toBeInTheDocument();
+      expect(screen.getByText(env.correlation_id)).toBeInTheDocument();
+      expect(screen.getByText(env.code)).toBeInTheDocument();
+    });
+
+    it("renders code + correlation_id on a TERMINAL arm (no Retry control) too", () => {
+      // The other side of the gate that does not exist. Both cases must be
+      // present: a pin that only covered the terminal arm would stay green
+      // under exactly the gate IN-02 proposed.
+      render(<ErrorEnvelope envelope={makeEnvelope({ recoverable: false })} />);
+
+      expect(screen.queryByLabelText("Retry")).toBeNull();
+
+      const env = makeEnvelope();
+      expect(screen.getByText("Diagnostics")).toBeInTheDocument();
+      expect(screen.getByText(env.correlation_id)).toBeInTheDocument();
+      expect(screen.getByText(env.code)).toBeInTheDocument();
+    });
+  });
 });

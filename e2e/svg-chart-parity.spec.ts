@@ -65,7 +65,7 @@
  */
 import { existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import { test, expect, type Locator } from "@playwright/test";
+import { test, expect, type Locator } from "./helpers/hydration-guard";
 import { seedStrategyWithHistory } from "./helpers/seed-test-project";
 
 // FLOW-01 place 2 of 2 — the spec's own seed-env self-skip guard. Without the

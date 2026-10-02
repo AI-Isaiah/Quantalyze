@@ -87,3 +87,96 @@ describe("[SFOX-08] NEXT_PUBLIC_SFOX_ENABLED gates the sFOX offer", () => {
     expect(FUNDING_EXCHANGES).toEqual(["binance", "okx", "bybit"]);
   });
 });
+
+/**
+ * Phase 153.6-04 / PARITY-04 / OQ-3 — a venue offered on a CLIENT-INSERT surface
+ * must be probeable.
+ *
+ * ── THE HOLE THIS CLOSES BEFORE IT OPENS ────────────────────────────────────
+ *
+ * `UI_EXCHANGE_CODES` is the offered set behind every client-facing picker —
+ * ApiKeyForm, StrategyForm, VerificationForm and the rest — and those surfaces
+ * reach the database through a NON-privileged INSERT. A non-privileged INSERT has
+ * its `api_keys.attested_venue` NULLed by the BEFORE INSERT trigger, so every key
+ * they mint is UNATTESTED, and by finalize-wizard's fail-toward gate an
+ * unattested key is PROBED.
+ *
+ * That composition is correct for every venue that CAN answer a per-key
+ * permissions probe, and permanently broken for one that cannot: such a key would
+ * be unattested (so always probed) and unprobeable (so the probe always fails
+ * permanently) — undeclarable and unsubmittable at once, which is the exact
+ * WIZFORM-04 outage, re-created by a one-line edit to a picker's set.
+ *
+ * ⛔ IT IS A CLASS GUARD, NOT A PIN ON TODAY'S MEMBERS. It names no venue and
+ * asserts no tuple; it asserts the INTERSECTION of "client-offered" and
+ * "probe-exempt" is empty, so it fires for the SECOND non-probing venue as
+ * readily as the first, and it fires whichever side moved.
+ *
+ * ⚠️ Both flag states are swept. `UI_EXCHANGE_CODES` is chosen at module load
+ * from an env flag, so a guard run under one value says nothing about the other —
+ * and the sFOX row is precisely the venue RESEARCH Q2 flags as the plausible next
+ * member of the opt-out set.
+ *
+ * Falsified by adding `mt5` to `UI_EXCHANGE_CODES` (measured — see the plan's
+ * mutation ledger).
+ */
+describe("[153.6-04 / OQ-3] no client-offered venue may opt out of the scope probe", () => {
+  it.each([undefined, "true"])(
+    "NEXT_PUBLIC_SFOX_ENABLED=%s — UI_EXCHANGE_CODES ∩ probe-exempt is EMPTY",
+    async (flag) => {
+      vi.stubEnv("NEXT_PUBLIC_SFOX_ENABLED", flag as unknown as string);
+      const { UI_EXCHANGE_CODES, venueSupportsScopeProbe } =
+        await loadClosedSets();
+
+      // ⛔ ANTI-VACUITY, AND IT IS NOT CEREMONY. An empty offered set satisfies
+      // the assertion below for free, and this const is built by a flag-driven
+      // ternary — the one shape that can collapse to `[]` from a typo rather
+      // than from a decision.
+      expect(
+        UI_EXCHANGE_CODES.length,
+        "UI_EXCHANGE_CODES is empty, so the guard below proves nothing.",
+      ).toBeGreaterThan(0);
+
+      const exempt = UI_EXCHANGE_CODES.filter((v) => !venueSupportsScopeProbe(v));
+      expect(
+        exempt,
+        `Venue(s) ${JSON.stringify(exempt)} are offered on a client-facing ` +
+          "picker AND opted out of the submit-time scope probe. Keys minted " +
+          "from those surfaces are INSERTed by a non-privileged caller, so the " +
+          "BEFORE INSERT trigger NULLs their attested_venue and finalize-wizard " +
+          "probes them by the fail-toward rule — a probe the venue cannot " +
+          "answer. The result is a key that can be connected and never " +
+          "submitted. Either give the venue a wizard-only surface (the " +
+          "WIZARD_ONLY_EXCHANGE_CODES pattern) or a way to be attested; do NOT " +
+          "delete this guard.",
+      ).toEqual([]);
+    },
+  );
+
+  it("the guard reads the CAPABILITY predicate, and the predicate has an opt-out to find", async () => {
+    // ⛔ THE SECOND HALF OF THE ANTI-VACUITY FENCE, and the one that matters
+    // more. If `scopeProbeSupported` were removed from every capability row —
+    // i.e. WIZFORM-04 reverted — `venueSupportsScopeProbe` would answer `true`
+    // for everything, the intersection above would be empty forever, and this
+    // whole block would pass while asserting nothing at all. The opt-out must
+    // EXIST somewhere in the supported set for "it is not in the offered set" to
+    // be a claim.
+    vi.stubEnv("NEXT_PUBLIC_SFOX_ENABLED", "true");
+    const { SUPPORTED_EXCHANGES, UI_EXCHANGE_CODES, venueSupportsScopeProbe } =
+      await loadClosedSets();
+
+    const exemptSomewhere = SUPPORTED_EXCHANGES.filter(
+      (v) => !venueSupportsScopeProbe(v),
+    );
+    expect(
+      exemptSomewhere.length,
+      "No supported venue opts out of the scope probe, so the emptiness " +
+        "asserted above is free. If the capability was removed, WIZFORM-04 was " +
+        "reverted.",
+    ).toBeGreaterThan(0);
+    // …and the offered set is a STRICT subset of the supported one, which is why
+    // the two can differ at all. Derived on both sides from the same module, so
+    // this is a structural statement about the sets, not a pin on their members.
+    expect(UI_EXCHANGE_CODES.length).toBeLessThan(SUPPORTED_EXCHANGES.length);
+  });
+});

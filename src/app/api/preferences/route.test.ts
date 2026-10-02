@@ -59,6 +59,11 @@ const STATE = vi.hoisted(() => ({
   },
   csrfResponse: null as ReturnType<typeof import("next/server").NextResponse.json> | null,
   lastCheckLimitArg: null as unknown,
+  // OPS-06 (Phase 163): a single interleaved log of admin-client constructions
+  // and user-client RPC dispatches. Ordering is the whole defect here, and an
+  // ordering claim needs an ordering oracle — two separate call counts cannot
+  // tell "constructed before the commit" from "constructed after it".
+  callOrder: [] as string[],
   // M-0338(b): when set, the log_audit_event_service RPC throws a TRANSIENT-
   // class error (network blip) which `emitAsUser()` swallows — proving the
   // fire-and-forget audit path never changes the user-facing 200. C-2: now
@@ -77,6 +82,7 @@ vi.mock("@/lib/supabase/server", () => ({
     },
     rpc: async (name: string, args: Record<string, unknown>) => {
       STATE.rpcCalls.push({ name, args });
+      STATE.callOrder.push(`rpc:${name}`);
       // C-2: log_audit_event_service (admin path) is now used instead.
       // This branch is kept as a no-op stub in case other test paths call
       // log_audit_event via the user-scoped client for non-preferences RPCs.
@@ -93,8 +99,15 @@ vi.mock("@/lib/supabase/server", () => ({
 // (service-role, JWT-immune). Mock createAdminClient so its rpc calls are
 // captured in STATE.rpcCalls alongside the user-scoped calls, and so
 // auditRpcThrows can exercise the fire-and-forget failure path (TC13).
-vi.mock("@/lib/supabase/admin", () => ({
-  createAdminClient: () => ({
+//
+// OPS-06 (Phase 163): promoted from an inline arrow to a hoisted vi.fn so a
+// test can make the CONSTRUCTOR throw the way the real one does on a missing
+// SUPABASE_SERVICE_ROLE_KEY. A double that can only succeed cannot express the
+// fault this route was fixed for.
+const createAdminClientMock = vi.hoisted(() =>
+  vi.fn(() => {
+    STATE.callOrder.push("createAdminClient");
+    return {
     rpc: async (name: string, args: Record<string, unknown>) => {
       STATE.rpcCalls.push({ name, args });
       if (name === "log_audit_event_service" && STATE.auditRpcThrows) {
@@ -105,7 +118,11 @@ vi.mock("@/lib/supabase/admin", () => ({
       }
       return { data: null, error: null };
     },
+    };
   }),
+);
+vi.mock("@/lib/supabase/admin", () => ({
+  createAdminClient: createAdminClientMock,
 }));
 
 const PREFERENCES_READ_LIMITER_SENTINEL = {
@@ -164,6 +181,8 @@ beforeEach(() => {
   STATE.csrfResponse = null;
   STATE.lastCheckLimitArg = null;
   STATE.auditRpcThrows = false;
+  STATE.callOrder = [];
+  createAdminClientMock.mockClear();
 });
 
 afterEach(() => {
@@ -686,6 +705,94 @@ describe("PUT /api/preferences", () => {
     // after this call (it was reset by beforeEach to null).
     expect(STATE.lastCheckLimitArg).toBeNull();
     spy.mockRestore();
+  });
+
+  /**
+   * OPS-06 (Phase 163) — THE ADMIN CLIENT IS CONSTRUCTED BEFORE THE RPC.
+   *
+   * This route carried TWO occurrences of the defect, not one, and they fail in
+   * different directions:
+   *   - the SUCCESS emit (`mandate_preference.update`) sat after
+   *     `update_allocator_mandates` had UPSERTed the row, bumped
+   *     `mandate_edited_at` and enqueued a rescore — a missing service key
+   *     turned that landed write into a 500;
+   *   - the ERROR-branch emit (`mandate_preference.update.failed`) commits
+   *     nothing, but a throw there replaced this route's carefully classified
+   *     400 / 401 / 500 answers with one opaque 500.
+   * One hoist above the RPC closes both, which is why these cases assert on
+   * ORDER rather than on call counts: "constructed" and "constructed early
+   * enough" are different claims and only the second one is the fix.
+   *
+   * ⭐ RED DEMO (run 2026-08-26, restored after):
+   *   Neuter: in route.ts, delete `const admin = createAdminClient()` from
+   *   above `supabase.rpc("update_allocator_mandates", ...)` and pass
+   *   `createAdminClient()` inline at BOTH `logAuditEventAsUser(...)` sites
+   *   again — i.e. move construction back below the RPC.
+   *   Observed: "constructs the admin client BEFORE the mandate RPC" FAILED —
+   *   callOrder came back ["rpc:update_allocator_mandates", "createAdminClient"],
+   *   and "a missing service-role key never reaches the RPC" FAILED with the
+   *   RPC recorded as called. Restored: both green.
+   */
+  describe("[OPS-06] a missing service-role key fails LOUD and PRE-COMMIT", () => {
+    it("constructs the admin client BEFORE the mandate RPC (order, not count)", async () => {
+      const { PUT } = await import("./route");
+      const res = await PUT(makeRequest({ max_weight: 0.25 }));
+      expect(res.status).toBe(200);
+
+      const built = STATE.callOrder.indexOf("createAdminClient");
+      const committed = STATE.callOrder.indexOf("rpc:update_allocator_mandates");
+      expect(built, "admin client was never constructed").toBeGreaterThanOrEqual(0);
+      expect(committed, "mandate RPC was never dispatched").toBeGreaterThanOrEqual(0);
+      expect(
+        built,
+        `expected construction before the commit; got ${JSON.stringify(STATE.callOrder)}`,
+      ).toBeLessThan(committed);
+    });
+
+    it("a missing service-role key never reaches the RPC — nothing is written before the throw", async () => {
+      createAdminClientMock.mockImplementationOnce(() => {
+        throw new Error("Missing SUPABASE_SERVICE_ROLE_KEY for admin operations");
+      });
+
+      const { PUT } = await import("./route");
+
+      // No try/catch wraps the constructor by design: an uncaught throw in a
+      // route handler IS the Next.js 500. The fix changes WHEN it fires.
+      await expect(PUT(makeRequest({ max_weight: 0.25 }))).rejects.toThrow(
+        /Missing SUPABASE_SERVICE_ROLE_KEY/,
+      );
+
+      expect(
+        STATE.rpcCalls.find((c) => c.name === "update_allocator_mandates"),
+        "the mandate UPSERT ran before the throw — the pre-fix behaviour",
+      ).toBeUndefined();
+      expect(
+        STATE.rpcCalls.find((c) => c.name === "log_audit_event_service"),
+      ).toBeUndefined();
+    });
+
+    it("the RPC ERROR branch keeps its CLASSIFIED status when the client is healthy (22023 → 400, not an opaque 500)", async () => {
+      // Occurrence #2's regression guard. The failure-audit emit lives inside
+      // the error branch; the hoist must leave the branch's own classification
+      // intact rather than trading one dishonest answer for another.
+      STATE.rpcState.update_allocator_mandates = {
+        data: null,
+        error: { code: "22023", message: "max_weight out of bounds" },
+      };
+      const { PUT } = await import("./route");
+      const res = await PUT(makeRequest({ max_weight: 0.25 }));
+
+      expect(res.status).toBe(400);
+      expect(res.status).not.toBe(500);
+      expect((await res.json()).error).toBe("Invalid mandate value");
+
+      await drainAuditMicrotasks();
+      const failAudit = STATE.rpcCalls.find(
+        (c) => c.name === "log_audit_event_service",
+      );
+      expect(failAudit).toBeDefined();
+      expect(failAudit!.args.p_action).toBe("mandate_preference.update.failed");
+    });
   });
 });
 

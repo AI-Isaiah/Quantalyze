@@ -9,7 +9,7 @@ import {
 } from "@/lib/analytics-client";
 import { CircuitOpenError } from "@/lib/seam-errors";
 import { CIRCUIT_OPEN_COPY } from "@/lib/seam-copy";
-import { userActionLimiter, checkLimit } from "@/lib/ratelimit";
+import { userActionLimiter, checkLimit, rateLimitDenyJson } from "@/lib/ratelimit";
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
 // 140.3-13b / SEAMUX-08 — the ONE lazy-Sentry helper, applied under the SINGLE
 // capture policy written out IN FULL in `src/app/api/admin/match/eval/route.ts`
@@ -24,6 +24,12 @@ import { NO_STORE_HEADERS } from "@/lib/api/headers";
 // list is the whole defence. Stated rather than assumed, because M78b showed the
 // env mechanism staying green while a per-request credential shipped verbatim.
 import { captureToSentry } from "@/lib/sentry-capture";
+// 140.4-08 / SEAMRIM-06 — the CONSOLE half of the same rule, and the reason it
+// is a SEPARATE import rather than a redundant one: `captureToSentry` scrubs at
+// its own chokepoint, `console.*` has none. The `secrets` reasoning above
+// carries over unchanged — no per-request credential exists here, so no second
+// argument is passed at either site.
+import { scrubSeamError } from "@/lib/seam-redaction";
 
 /**
  * Phase 28 (OPT-01/02) — suggest long-only scenario weights.
@@ -67,7 +73,7 @@ export async function POST(req: NextRequest) {
   } = await supabase.auth.getUser();
   if (!user) {
     return NextResponse.json(
-      { error: "Unauthorized" },
+      { error: "Unauthorized", code: "UNAUTHENTICATED" },
       { status: 401, headers: NO_STORE_HEADERS },
     );
   }
@@ -83,7 +89,7 @@ export async function POST(req: NextRequest) {
     body = await req.json();
   } catch {
     return NextResponse.json(
-      { error: "Invalid JSON body" },
+      { error: "Invalid JSON body", code: "VALIDATION_FAILED" },
       { status: 400, headers: NO_STORE_HEADERS },
     );
   }
@@ -91,7 +97,7 @@ export async function POST(req: NextRequest) {
   const objective = body.objective ?? "min_vol";
   if (typeof objective !== "string" || !OBJECTIVES.has(objective)) {
     return NextResponse.json(
-      { error: "objective must be 'min_vol' or 'max_sharpe'" },
+      { error: "objective must be 'min_vol' or 'max_sharpe'", code: "VALIDATION_FAILED" },
       { status: 400, headers: NO_STORE_HEADERS },
     );
   }
@@ -99,14 +105,14 @@ export async function POST(req: NextRequest) {
   const series = body.series;
   if (series === null || typeof series !== "object" || Array.isArray(series)) {
     return NextResponse.json(
-      { error: "series must be an object of { strategyId: [{date, value}] }" },
+      { error: "series must be an object of { strategyId: [{date, value}] }", code: "VALIDATION_FAILED" },
       { status: 400, headers: NO_STORE_HEADERS },
     );
   }
   const ids = Object.keys(series);
   if (ids.length === 0 || ids.length > MAX_STRATEGIES) {
     return NextResponse.json(
-      { error: `series must contain 1..${MAX_STRATEGIES} strategies` },
+      { error: `series must contain 1..${MAX_STRATEGIES} strategies`, code: "VALIDATION_FAILED" },
       { status: 400, headers: NO_STORE_HEADERS },
     );
   }
@@ -117,7 +123,7 @@ export async function POST(req: NextRequest) {
     const pts = series[id];
     if (!Array.isArray(pts) || pts.length > MAX_POINTS_PER_SERIES) {
       return NextResponse.json(
-        { error: `series['${id}'] must be an array of <= ${MAX_POINTS_PER_SERIES} points` },
+        { error: `series['${id}'] must be an array of <= ${MAX_POINTS_PER_SERIES} points`, code: "VALIDATION_FAILED" },
         { status: 400, headers: NO_STORE_HEADERS },
       );
     }
@@ -131,7 +137,7 @@ export async function POST(req: NextRequest) {
         !Number.isFinite(p.value)
       ) {
         return NextResponse.json(
-          { error: `series['${id}'] has a malformed point (need { date: string, value: finite number })` },
+          { error: `series['${id}'] has a malformed point (need { date: string, value: finite number })`, code: "VALIDATION_FAILED" },
           { status: 400, headers: NO_STORE_HEADERS },
         );
       }
@@ -144,10 +150,21 @@ export async function POST(req: NextRequest) {
   // one of the caller's own tokens.
   const rl = await checkLimit(userActionLimiter, `scenario-optimize:${user.id}`);
   if (!rl.success) {
-    return NextResponse.json(
-      { error: "Too many optimize requests. Try again shortly." },
-      { status: 429, headers: NO_STORE_HEADERS },
-    );
+    // 140.4-13 / SEAMRIM-05 — deny through the chokepoint so a limiter
+    // misconfiguration answers 503.
+    //
+    // ⚠️ `retryAfterHeader: "misconfigured-only"` IS NOT A STYLE CHOICE. This is
+    // the ONE seam route whose 429 carries no `Retry-After` today, and the
+    // measured contract is what this plan must preserve — its brief is the
+    // 503 SPLIT, not a header audit. The 503 still carries one, because the
+    // canary that the fail-CLOSED status exists to reach needs to know when to
+    // look again. Adding `Retry-After` to the 429 is a defensible improvement
+    // and it belongs to whoever owns this route's response contract.
+    return rateLimitDenyJson(rl, {
+      headers: NO_STORE_HEADERS,
+      retryAfterHeader: "misconfigured-only",
+      throttledBody: { error: "Too many optimize requests. Try again shortly." },
+    });
   }
 
   try {
@@ -177,7 +194,7 @@ export async function POST(req: NextRequest) {
         `[scenario/optimize] circuit open — short-circuited, retry in ${err.retryAfterS}s`,
       );
       return NextResponse.json(
-        { error: CIRCUIT_OPEN_COPY },
+        { error: CIRCUIT_OPEN_COPY, code: "CIRCUIT_OPEN" },
         {
           status: 503,
           headers: {
@@ -189,13 +206,25 @@ export async function POST(req: NextRequest) {
     }
     if (err instanceof AnalyticsTimeoutError) {
       return NextResponse.json(
-        { error: "The optimizer timed out. Try again shortly." },
+        { error: "The optimizer timed out. Try again shortly.", code: "UPSTREAM_TIMEOUT" },
         { status: 504, headers: NO_STORE_HEADERS },
       );
     }
     if (err instanceof AnalyticsUpstreamError) {
       // Never echo the raw upstream detail (schema/internal leak) — log it, return a clean message.
-      console.error("[scenario/optimize] upstream error", { status: err.status });
+      //
+      // ⚠️ `err.status` is a `number` we set (on `AnalyticsUpstreamError` in `analytics-client.ts`), so the
+      // leaf is a rendering no-op on it. It goes through anyway because the
+      // source guard cannot know a type and its safe-property allowlist is
+      // `retryAfterS` / `deadlineExceeded` / `code` only — and the alternatives
+      // are worse: `scrubSeamError(err)` would put the raw upstream detail this
+      // very comment excludes back into the line, and binding it to a
+      // non-error-shaped local would hide the read behind the one-hop alias
+      // hole plan 140.4-09 exists to close. Same call as the sibling sites in
+      // `src/app/api/admin/match/eval/route.ts`.
+      console.error("[scenario/optimize] upstream error", {
+        status: scrubSeamError(err.status),
+      });
       // ⚠️ 140.3-13b / SEAMUX-08 — AMBIGUITY-1 IN THE INHERITED POLICY, and the
       // reading chosen, recorded here rather than resolved silently.
       //
@@ -228,7 +257,11 @@ export async function POST(req: NextRequest) {
         });
       }
       return NextResponse.json(
-        { error: "The optimizer is unavailable right now." },
+        // SEAMUX-03 — preserve the UPSTREAM'S own machine code
+        // (`AnalyticsUpstreamError.seamCode`); UNKNOWN only when the body
+        // carried none. Never assert a transport code here — the upstream
+        // ANSWERED, so UPSTREAM_NETWORK_ERROR would claim a fault not observed.
+        { error: "The optimizer is unavailable right now.", code: err.seamCode ?? "UNKNOWN" },
         { status: 502, headers: NO_STORE_HEADERS },
       );
     }
@@ -242,9 +275,9 @@ export async function POST(req: NextRequest) {
       tags: { surface: "scenario-optimize", step: "unexpected-error" },
       extra: { objective, series_count: ids.length },
     });
-    console.error("[scenario/optimize] unexpected error", err);
+    console.error("[scenario/optimize] unexpected error", scrubSeamError(err));
     return NextResponse.json(
-      { error: "Could not compute suggested weights." },
+      { error: "Could not compute suggested weights.", code: "UNKNOWN" },
       { status: 500, headers: NO_STORE_HEADERS },
     );
   }

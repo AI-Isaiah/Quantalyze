@@ -15,7 +15,7 @@
  *    `@upstash/ratelimit`, and the resilience core's non-tree-shakeable
  *    module-load side effects (a `Redis.fromEnv()` singleton plus its
  *    unconfigured notice) into the browser bundle. The inverse guard —
- *    `import "server-only"` at `src/lib/analytics.ts:1` — is the repo
+ *    `import "server-only"` at the top of `src/lib/analytics.ts` — is the repo
  *    convention for modules that must NEVER reach the client; this leaf is the
  *    mirror image: a module that must be safe in EITHER bundle.
  *

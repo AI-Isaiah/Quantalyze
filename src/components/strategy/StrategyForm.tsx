@@ -11,6 +11,11 @@ import { Card } from "@/components/ui/Card";
 import { Modal } from "@/components/ui/Modal";
 import { STRATEGY_NAMES, STRATEGY_TYPES, SUBTYPES, MARKETS, EXCHANGES } from "@/lib/constants";
 import type { Strategy } from "@/lib/types";
+import {
+  readCredentialInput,
+  CREDENTIAL_KEY_INPUT_PROPS,
+  CREDENTIAL_SECRET_INPUT_PROPS,
+} from "@/lib/credential-input";
 
 // F4 (Phase 122): this legacy StrategyForm connect-key modal renders a HARDCODED
 // API Secret field + generic "read-only keys only" copy — it is NOT token-only /
@@ -24,23 +29,50 @@ const EXCHANGE_OPTIONS = EXCHANGES.filter((e) => e.toLowerCase() !== "sfox").map
 );
 
 /**
+ * KEYLINK-01 — what the user is told when the `api_keys` row EXISTS but could
+ * not be attached to the strategy.
+ *
+ * It is deliberately NOT the generic save-failure sentence, and not the
+ * validation sentence either. The three outcomes demand three different next
+ * actions: a validation failure means the credentials are wrong and should be
+ * re-entered; a 2xx with no id means nothing was written at all; here the
+ * credentials were accepted AND the row is already saved against the user's key
+ * quota, so re-typing them fixes nothing. Naming the half that succeeded is the
+ * only way the user can tell that a key now exists in their account.
+ *
+ * DESIGN.md §Voice: declarative, sentence-case, active voice, no adjective where
+ * a fact will do. No number is quoted because none is knowable here — this
+ * component reads no retry hint, and inventing a wait would be fabrication.
+ */
+const KEY_LINK_FAILED_COPY =
+  "Your key was saved to your account, but we couldn't attach it to this strategy. Reload the page and try again.";
+
+/**
  * H-0405 (audit-2026-05-07): map a raw Postgres/PostgREST error to a safe,
  * user-facing string. Piping `error.message` straight into the banner leaked
  * internal detail — SQLSTATE 42501 (RLS / SECURITY DEFINER trigger RAISE, such
  * as the cross-tenant api_key_id guard from migration 028/029 which embeds two
  * UUIDs + the migration name), constraint text, and column names. Keep all of
  * that server-side; show the user one of two intent-specific messages.
+ *
+ * KEYLINK-01: `intent` picks the fallback sentence. The 42501 arm is shared on
+ * purpose — "You can only link API keys you own." is already the correct
+ * sentence for BOTH a strategy save and a key link, and the redaction itself has
+ * to stay in ONE place: it is the security-relevant half, and a second copy of
+ * it is a second thing to forget when the guard changes.
  */
-function toUserFacingStrategyError(error: {
-  code?: string;
-  message?: string;
-}): string {
+function toUserFacingStrategyError(
+  error: { code?: string; message?: string },
+  intent: "save" | "link" = "save",
+): string {
   const code = error.code ?? "";
   const message = error.message ?? "";
   if (code === "42501" || message.includes("cross-tenant linkage blocked")) {
     return "You can only link API keys you own.";
   }
-  return "Couldn't save your strategy. Please try again.";
+  return intent === "link"
+    ? KEY_LINK_FAILED_COPY
+    : "Couldn't save your strategy. Please try again.";
 }
 
 interface StrategyFormProps {
@@ -99,6 +131,16 @@ export function StrategyForm({ strategy, mode }: StrategyFormProps) {
   const [apiLoading, setApiLoading] = useState(false);
   const [apiError, setApiError] = useState<string | null>(null);
   const [apiConnected, setApiConnected] = useState(!!strategy?.api_key_id);
+  // KEYLINK-01: the id of the `api_keys` row the SERVER minted for this
+  // session's connect. Before this state existed the id was destructured off the
+  // response, type-checked, and then DROPPED — nothing ever carried it to a
+  // `strategies` row. The key was billed against the user's quota,
+  // `strategies.api_key_id` stayed NULL, no sync was ever enqueued, and the
+  // button still flipped to "API Key Connected". It seeds from the strategy so
+  // this and `apiConnected` can never disagree about WHICH key is attached.
+  const [connectedKeyId, setConnectedKeyId] = useState<string | null>(
+    strategy?.api_key_id ?? null,
+  );
   const router = useRouter();
 
   function toggleItem(list: string[], item: string, setter: (v: string[]) => void) {
@@ -110,10 +152,16 @@ export function StrategyForm({ strategy, mode }: StrategyFormProps) {
     setApiError(null);
     try {
       // F4 (Phase 122): canonicalize the exchange to lowercase at the ONE point
-      // it enters the validate/insert path — the api_keys DB CHECK and the Python
+      // it enters the validate path — the api_keys DB CHECK and the Python
       // /validate-key intercept both key on lowercase, so a display-cased value
       // must never reach either. The Select value is already lowercase today; this
       // is the explicit chokepoint mirroring the wizard routes' toLowerCase().
+      //
+      // 160-03 / RANK-03: the INSERT this value used to also feed is GONE — the
+      // route writes the row now and re-normalizes independently at its own
+      // chokepoint (`exchangeNormalized`). This stays because it is what the
+      // request body carries, and a component that sends a canonical venue is
+      // one less place a stray casing can originate.
       const exchangeCanonical = apiExchange.trim().toLowerCase();
       const res = await fetch("/api/keys/validate-and-encrypt", {
         method: "POST",
@@ -123,39 +171,72 @@ export function StrategyForm({ strategy, mode }: StrategyFormProps) {
           api_key: apiKey,
           api_secret: apiSecret,
           passphrase: apiPassphrase || null,
+          // 160-03 / RANK-03 — the persist discriminator. With it, the route
+          // writes the api_keys row ITSELF, stamping `exchange` AND
+          // `attested_venue` from the venue its own validateKey call
+          // authenticated against, and returns `{ api_key_id }` with NO
+          // ciphertext. The label moves into the body because the server now
+          // composes the row; the template is this component's pre-existing
+          // default, preserved verbatim.
+          persist: true,
+          label: `${exchangeCanonical} key`,
         }),
       });
       if (!res.ok) {
+        // The route's error bodies are CURATED on every arm — the persist arm
+        // scrubs the raw PostgREST message at both log sinks and never places
+        // it in the response (160-02, route.ts). The H-0405 leak this component
+        // used to guard against was its OWN browser-composed insert error;
+        // that writer, and with it that error, no longer exists here.
         const err = await res.json().catch(() => ({ error: "Validation failed" }));
         throw new Error(err.error || "Key validation failed");
       }
-      const encrypted = await res.json();
-      const dbFields = { ...encrypted };
-      delete dbFields.valid;
-      delete dbFields.read_only;
+      const { api_key_id: newKeyId } = await res.json();
 
-      const supabase = createClient();
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) throw new Error("Not authenticated");
-      const { error: insertError } = await supabase.from("api_keys").insert({
-        user_id: user.id,
-        exchange: exchangeCanonical,
-        label: `${exchangeCanonical} key`,
-        ...dbFields,
-      });
-      if (insertError) {
-        // H-0405 (same leak class, same file as the strategies insert/update
-        // redaction): never surface the raw Postgres error — an api_keys RLS
-        // denial (42501) or unique/CHECK violation embeds SQLSTATE + constraint
-        // names. Log the detail, show a static banner.
-        console.error(
-          "[StrategyForm] api_keys insert failed:",
-          insertError.code,
-          insertError.message,
-        );
-        throw new Error("Couldn't connect this API key. Please try again.");
+      if (typeof newKeyId !== "string") {
+        // Rule 12 / fail loud. A 2xx carrying no id means the server did not
+        // persist — reporting the key as connected would leave the user
+        // believing a key exists that will never sync.
+        throw new Error("Your key was verified but not saved. Please try again.");
       }
 
+      // KEYLINK-01 — PERSIST THE LINK BEFORE CLAIMING IT.
+      //
+      // In edit mode the `strategies` row already exists, so the attach happens
+      // HERE and not at form submit. The button below reads "API Key Connected"
+      // the instant this function resolves; a user who then navigates away — or
+      // simply never presses Save — must not be looking at a claim the database
+      // cannot confirm. Deferring the write to handleSubmit leaves exactly that
+      // window open, which is the same false-success one layer down.
+      //
+      // It also closes the mint loop. `apiConnected` initialises from
+      // `strategy?.api_key_id`; for as long as that column stayed NULL, every
+      // reload re-enabled the button and every retry minted ANOTHER `api_keys`
+      // row against the user's quota.
+      //
+      // Throwing is the point (this mirrors ApiKeyManager's NEW-C37-03 arm): the
+      // catch below leaves `apiConnected` false and puts the reason in
+      // `apiError`, so a link that failed can never render as a connected key.
+      if (mode === "edit") {
+        if (!strategy) {
+          // Rule 12 / fail loud. "edit" with no strategy has no row to attach
+          // to; skipping the write silently is precisely the false-success this
+          // block exists to remove.
+          throw new Error(toUserFacingStrategyError({}, "link"));
+        }
+        const supabase = createClient();
+        const { error: linkError } = await supabase
+          .from("strategies")
+          .update({ api_key_id: newKeyId })
+          .eq("id", strategy.id);
+        if (linkError) {
+          throw new Error(toUserFacingStrategyError(linkError, "link"));
+        }
+      }
+
+      // Create mode has no row to attach to yet, so the id is held here and
+      // rides in on the INSERT that handleSubmit composes (see the payload).
+      setConnectedKeyId(newKeyId);
       setApiConnected(true);
       setDataSource("api");
       setShowApiModal(false);
@@ -197,6 +278,12 @@ export function StrategyForm({ strategy, mode }: StrategyFormProps) {
       leverage_range: leverageRange || null,
       aum: aum ? parseFloat(aum) : null,
       max_capacity: maxCapacity ? parseFloat(maxCapacity) : null,
+      // KEYLINK-01: create mode has no `strategies` row at connect time, so the
+      // id the server minted can only reach the database here. Edit mode is
+      // deliberately EXCLUDED — handleApiKeySubmit already wrote that link and
+      // threw if it could not, and a second writer for the same column is a
+      // second place the two writes can silently disagree.
+      ...(mode === "create" && connectedKeyId ? { api_key_id: connectedKeyId } : {}),
     };
 
     if (mode === "create") {
@@ -324,17 +411,17 @@ export function StrategyForm({ strategy, mode }: StrategyFormProps) {
           <Input
             label="API Key"
             value={apiKey}
-            onChange={(e) => setApiKey(e.target.value)}
+            onChange={(e) => setApiKey(readCredentialInput(e))}
             placeholder="Your read-only API key"
-            autoComplete="off"
+            {...CREDENTIAL_KEY_INPUT_PROPS}
           />
           <Input
             label="API Secret"
             value={apiSecret}
-            onChange={(e) => setApiSecret(e.target.value)}
+            onChange={(e) => setApiSecret(readCredentialInput(e))}
             placeholder="Your API secret"
             type="password"
-            autoComplete="off"
+            {...CREDENTIAL_SECRET_INPUT_PROPS}
           />
           {apiExchange === "okx" && (
             <Input
@@ -343,7 +430,7 @@ export function StrategyForm({ strategy, mode }: StrategyFormProps) {
               onChange={(e) => setApiPassphrase(e.target.value)}
               placeholder="OKX passphrase"
               type="password"
-              autoComplete="off"
+              {...CREDENTIAL_SECRET_INPUT_PROPS}
             />
           )}
           <p className="text-xs text-text-muted">

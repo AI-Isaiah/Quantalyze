@@ -195,6 +195,27 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
     rpcArgs.p_clear_fields = clearFields;
   }
 
+  // OPS-06 (Phase 163) — THE ADMIN CLIENT IS BUILT HERE, ABOVE THE RPC, AND THE
+  // DEFECT IT CLOSES IS SEQUENCING RATHER THAN ERROR HANDLING.
+  //
+  // `createAdminClient()` throws synchronously on a missing
+  // SUPABASE_SERVICE_ROLE_KEY (src/lib/supabase/admin.ts), and a call argument
+  // is evaluated BEFORE the call it belongs to — so both
+  // `logAuditEventAsUser(createAdminClient(), …)` sites below constructed it
+  // too late to be safe. On the SUCCESS branch that meant a 500 after
+  // `update_allocator_mandates` had already UPSERTed the mandate row, bumped
+  // `mandate_edited_at` and enqueued a rescore: work landed, caller told it
+  // failed. On the ERROR branch nothing is committed, but the throw still
+  // converted this route's carefully classified 400/401/500 answers into one
+  // opaque 500 — the failure-audit path swallowing the classification it exists
+  // to record. One hoist fixes both.
+  //
+  // The throw stays LOUD here (uncaught in a route handler ⇒ Next.js 500); it
+  // simply fires before anything is written. ⛔ No try/catch around the
+  // constructor and ⛔ no NON-THROWING variant of it — a quiet admin client is
+  // the anti-pattern this phase closes.
+  const admin = createAdminClient();
+
   // @audit-skip: rpc write path — logAuditEvent is called within 60 lines
   // below. audit-coverage.test.ts scans .insert/.update/.upsert/.delete
   // and does not see .rpc(); this pragma documents the audit path for
@@ -218,7 +239,7 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
     // never gates the response — see route.test TC13). entity_id = user.id
     // mirrors the happy path. error.code is captured in metadata so a single
     // emit distinguishes the three branches forensically.
-    logAuditEventAsUser(createAdminClient(), user.id, {
+    logAuditEventAsUser(admin, user.id, {
       action: "mandate_preference.update.failed",
       entity_type: "allocator_preference_mandate",
       entity_id: user.id,
@@ -286,7 +307,7 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
   // response but no audit row when the JWT expires between response-flush and
   // after() settle. The PR switched all other security-critical mutations but
   // missed this call site.
-  logAuditEventAsUser(createAdminClient(), user.id, {
+  logAuditEventAsUser(admin, user.id, {
     action: "mandate_preference.update",
     entity_type: "allocator_preference_mandate",
     entity_id: user.id,

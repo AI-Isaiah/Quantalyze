@@ -2,7 +2,12 @@ import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { withAuth } from "@/lib/api/withAuth";
-import { userActionLimiter, keysSyncUserLimiter, checkLimit } from "@/lib/ratelimit";
+import {
+  userActionLimiter,
+  keysSyncUserLimiter,
+  checkLimit,
+  rateLimitDenyJson,
+} from "@/lib/ratelimit";
 import { logAuditEventAsUser } from "@/lib/audit";
 import { getCorrelationId } from "@/lib/correlation-id";
 import { postProcessKey } from "@/lib/process-key-client";
@@ -11,7 +16,23 @@ import { isUuid } from "@/lib/utils";
 import { isComputedAnalytics } from "@/lib/closed-sets";
 import { captureToSentry } from "@/lib/sentry-capture";
 import { scrubSeamError } from "@/lib/seam-redaction";
+import {
+  retractInheritedRefreshMarker,
+  retractionFailureCode,
+} from "@/lib/ledger-refresh-marker";
 import type { User } from "@supabase/supabase-js";
+
+/**
+ * Phase 164.6 review fix (IN-04): the longest the composite kickoff waits for
+ * the inherited-marker retraction before answering its 202. The retraction is
+ * best-effort and never changes the response, but it is a read plus, when a
+ * marker is present, an UPDATE that can queue behind a claiming worker's row
+ * lock, all on the user's synchronous request. Same bounded-race shape as
+ * `SNAPSHOT_BUDGET_MS` in src/app/api/intro/route.ts. Deliberately NOT moved
+ * into `after()`: a retraction that lands after the response widens the
+ * post-claim window [164.6-COMPOSITE-CLAIMTIME-SNAPSHOT] already records.
+ */
+const MARKER_RETRACTION_BUDGET_MS = 5_000;
 
 /**
  * POST /api/keys/sync — kicks off trade sync + analytics computation.
@@ -34,22 +55,56 @@ import type { User } from "@supabase/supabase-js";
  * on an unknowable membership count.
  *
  * ─── Direct-writes audit (D.10) ───────────────────────────────────────
- * Post-2.9 R2 writers of strategy_analytics.computation_status:
+ * Post-2.9 R2 writers of strategy_analytics.computation_status.
+ *
+ * JOB-01 stamp obligation (migration 20260802120000): the TWO writers that set
+ * 'computing' — (a) and (c) — must set computing_started_at in the SAME
+ * statement, and EVERY writer that leaves 'computing' must clear it to NULL in
+ * the same payload, or the pg_cron reaper either skips the row forever
+ * (NULL-stamp skip rule) or re-fires on a stale stamp. Enforced statically at
+ * build time by analytics-service/tests/test_computing_started_at_stamp.py
+ * (Python + this TS route surface) and supabase/tests/
+ * test_strategy_analytics_stuck_computing_reaper.sql (the deployed SQL bodies).
+ *
  *   (a) Worker: sync_strategy_analytics_status RPC (migration 038) — the
  *       compute_jobs worker is the sole writer on the unified/queue path.
+ *       Branch (a) is a 'computing' WRITER and stamps computing_started_at
+ *       CONDITIONALLY, on the transition INTO computing only: it is PERFORMed on
+ *       every job hop, so an unconditional stamp would reset the clock each hop
+ *       and the row would never age past the threshold. Branches (b)/(c) are the
+ *       SQL exit transitions and clear the stamp to NULL.
  *   (c) analytics_runner.py (Python /api/compute-analytics) — upserts
  *       'computing'/'complete'/'failed' during compute, invoked by the
- *       worker internally.
+ *       worker internally. `_mark_computing` is the ONLY Python 'computing'
+ *       writer and stamps computing_started_at client-side (UTC ISO — a
+ *       PostgREST payload cannot express SQL now()). Its terminal writers, and
+ *       the job_worker.py terminal/composite-success writers, all clear the
+ *       stamp to NULL.
  *   (d) portfolio.py (Python /api/portfolio-analytics) — writes
  *       computation_status for portfolio_analytics rows only, not strategy.
+ *       Out of scope for the stamp: different table.
  *   (e) Initial strategy creation: migration 001 DEFAULT 'pending' on INSERT.
+ *       Never 'computing', so no stamp.
  *   (f) set_wizard_composite_members RPC (migration 20260712120000, RT-1) —
  *       when the composite draft's member set CHANGES, resets a COMPLETED row
  *       ('complete'/'complete_with_warnings' → 'pending') to invalidate the
  *       stale stitch so the wizard re-stitches. Scoped to completed/IDLE rows
  *       ONLY (never a 'computing' row the worker owns), so it does not race the
  *       worker's compute-time writes; an identical re-Continue leaves it
- *       untouched (WIZ-05 no-op invariant).
+ *       untouched (WIZ-05 no-op invariant). No stamp: it never touches a
+ *       'computing' row.
+ *   (g) pg_cron reaper reap_strategy_analytics_stuck_computing (migration
+ *       20260802120000) — terminalizes a stranded 'computing' row (past the
+ *       threshold, no active compute_jobs row) to 'failed' with
+ *       computation_warned=FALSE and computing_started_at=NULL. Terminalizes
+ *       only; it never re-enqueues.
+ *   (h) THIS ROUTE and its two Next.js siblings — strategies/finalize-wizard
+ *       (×2) and strategies/csv-finalize — write terminal 'failed' PLACEHOLDER
+ *       rows on their own error paths (never 'computing'), so they are
+ *       stamp-CLEARING exit sites and set computing_started_at to NULL. This
+ *       supersedes the older claim above that "this route never upserts
+ *       computation_status directly": it does, via
+ *       stampCompositeFailedUnlessComplete, on the unknowable-membership arm.
  * No other paths write strategy_analytics.computation_status for strategies.
  * ──────────────────────────────────────────────────────────────────────
  */
@@ -113,22 +168,43 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   // synonym. Each site is pinned by its own case, driven through its own
   // bucket key with its own wait, so a code dropped from one does not hide
   // behind the other's assertion.
+  //
+  // ⚠️ 140.4-13 / SEAMRIM-05 — AND THE SAME "TWO DISTINCT SITES" WARNING NOW
+  // APPLIES TO THE 503 SPLIT. Both arms deny through `rateLimitDenyJson`, and
+  // both are pinned by their own case driven through their own bucket. A guard
+  // that only asked "does this FILE mention the builder" would stay green with
+  // the second arm reverted to an inlined 429 — which is exactly the mutation
+  // this plan's ledger row M105 runs.
+  //
+  // The 429 body and headers below are UNCHANGED: `{error, code:"RATE_LIMITED"}`
+  // in that key order, with NO_STORE_HEADERS + Retry-After. The `code` is a live
+  // contract — `SyncPreviewStep`'s KNOWN_KICKOFF_CODES maps `RATE_LIMITED` — so
+  // flattening it onto the builder's default body would have been a regression,
+  // not a simplification.
   const userRl = await checkLimit(keysSyncUserLimiter, `keys-sync-user:${user.id}`);
   if (!userRl.success) {
-    return NextResponse.json(
-      { error: "Too many requests", code: "RATE_LIMITED" },
-      { status: 429, headers: { ...NO_STORE_HEADERS, "Retry-After": String(userRl.retryAfter) } },
-    );
+    return rateLimitDenyJson(userRl, {
+      headers: NO_STORE_HEADERS,
+      throttledBody: { error: "Too many requests", code: "RATE_LIMITED" },
+      misconfiguredBody: {
+        error: "Rate limiter unavailable",
+        code: "SEAM_MISCONFIGURED",
+      },
+    });
   }
   const rl = await checkLimit(
     userActionLimiter,
     `keys-sync:${user.id}:${strategy_id}`,
   );
   if (!rl.success) {
-    return NextResponse.json(
-      { error: "Too many requests", code: "RATE_LIMITED" },
-      { status: 429, headers: { ...NO_STORE_HEADERS, "Retry-After": String(rl.retryAfter) } },
-    );
+    return rateLimitDenyJson(rl, {
+      headers: NO_STORE_HEADERS,
+      throttledBody: { error: "Too many requests", code: "RATE_LIMITED" },
+      misconfiguredBody: {
+        error: "Rate limiter unavailable",
+        code: "SEAM_MISCONFIGURED",
+      },
+    });
   }
 
   // Verify ownership via the user-scoped client so we get a clean
@@ -144,7 +220,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   // a vague error arm is what turns it into a specific lie.
   //
   // The split copies the in-tree template at
-  // `strategies/finalize-wizard/route.ts:624-646` verbatim in shape:
+  // the `wizard_session_id` draft-read split in `strategies/finalize-wizard/route.ts` verbatim in shape:
   // `.maybeSingle()`, then the transport error first (a 500 ABOUT US, with the
   // caught value scrubbed through the shipped `scrubSeamError` — never a
   // hand-rolled scrub), then the genuinely-absent row.
@@ -201,7 +277,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   // because the backbone is permanent-on (Phase 106) and the unified arm
   // cannot honestly derive a NULL-api_key composite (it would mis-route to a
   // single-key path). This MIRRORS the Phase-88 finalize-wizard hoist
-  // (finalize-wizard/route.ts:517-621).
+  // (the Phase-88 hoist in finalize-wizard/route.ts).
   //
   // Scoped to api_key_id === null: a composite has strategies.api_key_id NULL
   // (members live in strategy_keys); api_key_id SET is definitively single-key
@@ -219,7 +295,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     } catch (err) {
       console.error(
         `[keys/sync] composite membership probe failed for ${strategy_id}:`,
-        err,
+        scrubSeamError(err),
       );
       // 140.3-10 — `COMPOSITE_MEMBERSHIP_UNKNOWN` is the EXISTING wizard code
       // for precisely this fail-closed: finalize-wizard already emits it from
@@ -264,7 +340,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       if (assetClassErr) {
         console.warn(
           `[keys/sync] composite asset_class derive failed (non-blocking) for ${strategy_id}:`,
-          assetClassErr,
+          scrubSeamError(assetClassErr),
         );
         // Parity with finalize (:504-507): a persistent write failure would
         // otherwise be invisible in Sentry and surface only as recurring
@@ -289,7 +365,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       if (rpcError) {
         console.error(
           `[keys/sync] enqueue_compute_job (stitch_composite) RPC failed for ${strategy_id}:`,
-          rpcError,
+          scrubSeamError(rpcError),
         );
         // 140.3-10 — a DISTINCT fact from the membership fail-closed above:
         // membership was known, the enqueue itself failed. Same sentence, same
@@ -305,6 +381,87 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       console.log(
         `[keys/sync] enqueued stitch_composite job=${rpcData} for strategy=${strategy_id}`,
       );
+
+      // Phase 164.6 / 161.1-D13 — the enqueue may have DEDUPED onto an in-flight
+      // ledger-refresh job, whose marker would keep a stale factsheet published
+      // over a failure of a request the user is watching. Retract it, exactly as
+      // Python's `_retract_refresh_marker_on_reuse` does. Best-effort: the enqueue
+      // already succeeded, so a failed retraction never changes the 202, but it
+      // is LOUD under its own tag. The read-modify-write residual (161.1-D12) is
+      // inherited; see `retractInheritedRefreshMarker`'s JSDoc.
+      //
+      // BOUNDED (164.6 review fix, IN-04) by `MARKER_RETRACTION_BUDGET_MS`. Past
+      // the budget the 202 goes out and the overrun is LOUD under its OWN tag,
+      // because a retraction that did not finish may have left the marker in
+      // place. The retraction itself is not cancelled.
+      //
+      // L2 (164.6 round 2): a rejection that lands AFTER the budget used to be
+      // absorbed by the settled race without a word, so the reason the marker
+      // stayed in place was lost. The `.catch` on the retraction promise itself
+      // reports it under its OWN `_late` tag, with its SQLSTATE. An in-time
+      // rejection is reported once, by the catch below, never also as late.
+      let retractionTimer: ReturnType<typeof setTimeout> | undefined;
+      let retractionTimedOut = false;
+      // @audit-skip: job-row provenance metadata; user intent is audited by the sync.start event below.
+      const retraction = retractInheritedRefreshMarker(admin, rpcData, correlation_id);
+      retraction.catch((err: unknown) => {
+        if (!retractionTimedOut) return;
+        const code = retractionFailureCode(err);
+        console.error(
+          `[keys/sync] composite refresh-marker retraction failed late, after the ${MARKER_RETRACTION_BUDGET_MS} ms budget, for ${strategy_id} (code=${code}):`,
+          scrubSeamError(err),
+        );
+        captureToSentry(err, {
+          tags: { op: "keys-sync.composite_refresh_marker_retract_late" },
+          extra: { strategy_id, job_id: rpcData, correlation_id },
+        });
+      });
+      try {
+        const outcome = await Promise.race([
+          retraction.then((result) => ({
+            kind: "done" as const,
+            retraction: result,
+          })),
+          new Promise<{ kind: "timeout" }>((resolve) => {
+            retractionTimer = setTimeout(() => {
+              retractionTimedOut = true;
+              resolve({ kind: "timeout" });
+            }, MARKER_RETRACTION_BUDGET_MS);
+          }),
+        ]);
+        if (outcome.kind === "timeout") {
+          console.error(
+            `[keys/sync] composite refresh-marker retraction exceeded ${MARKER_RETRACTION_BUDGET_MS} ms for ${strategy_id}; answering 202 without it, and the marker may still be in place`,
+          );
+          captureToSentry(
+            new Error(
+              `keys/sync composite refresh-marker retraction exceeded ${MARKER_RETRACTION_BUDGET_MS} ms`,
+            ),
+            {
+              tags: { op: "keys-sync.composite_refresh_marker_retract_timeout" },
+              extra: { strategy_id, job_id: rpcData, correlation_id },
+            },
+          );
+        } else if (outcome.retraction.retracted) {
+          console.warn(
+            `[keys/sync] retracted inherited ${outcome.retraction.marker} marker on job=${rpcData} for strategy=${strategy_id}`,
+          );
+        }
+      } catch (err) {
+        // LOW-2 (164.6 review fix): the thrown message is generic by design; the
+        // PostgREST SQLSTATE rides in `cause`, so it is named here.
+        const code = retractionFailureCode(err);
+        console.error(
+          `[keys/sync] composite refresh-marker retraction failed for ${strategy_id} (code=${code}):`,
+          scrubSeamError(err),
+        );
+        captureToSentry(err, {
+          tags: { op: "keys-sync.composite_refresh_marker_retract" },
+          extra: { strategy_id, job_id: rpcData, correlation_id },
+        });
+      } finally {
+        clearTimeout(retractionTimer);
+      }
 
       // Idempotent double-submit is handled by the compute_jobs partial unique
       // index (finalize comment :860-864); repeated preview mounts re-POST safely.
@@ -353,43 +510,32 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       resolvedSource = keyRow.exchange;
     }
   }
-  // Phase 140.3-02 / TS-15 — forward the END USER's Supabase access token so the
-  // unified router can build a USER-SCOPED (RLS-enforcing) client. Only the CSV
-  // finalize flow forwarded it before, which is why PYAPI-01's second defence
-  // layer had to be an explicit Python `strategies` id+user_id filter rather
-  // than letting RLS do it. With the token forwarded, that filter becomes
-  // belt-and-braces rather than the only belt.
+  // Phase 146.1 / B2 (2026-08-18) — THE FORWARD WAS REMOVED HERE. This block
+  // used to read the session and hand `postProcessKey` a LIVE end-user Supabase
+  // JWT for the `X-User-Access-Token` header. The v1.19 xhigh review measured
+  // the far side: the only Python reader, `services/db.py
+  // get_user_scoped_supabase`, has ZERO production callers, and
+  // the `not hasattr(..., "get_user_scoped_supabase")` gate in
+  // `analytics-service/tests/test_process_key.py` actively PINS that
+  // non-use. Nothing in `analytics-service` reads the header. A live credential
+  // that crosses a service boundary and is never read is pure exposure surface,
+  // so it is no longer sent.
   //
-  // BEST-EFFORT ON PURPOSE, and the direction is deliberate. `csv-finalize`
-  // fails CLOSED (401) on a missing session because its RPC is SECURITY DEFINER
-  // and CANNOT run without `auth.uid()`. Here the token is an ENHANCEMENT: the
-  // caller is already authenticated (withAuth ran `getUser` above) and ownership
-  // is already proven by the user-scoped select above, so a session read that
-  // hiccups must not fail a resync on the money-onboarding chokepoint. The
-  // header is optional by construction — an absent token simply sends no header.
+  // The 140.2 obligation that justified the forward is DISCHARGED BY
+  // SUBSTITUTION, not abandoned: the ownership pre-check it was meant to enable
+  // is already shipped as the explicit Python `strategies` id+user_id filter
+  // (`_caller_owns_strategy` in `analytics-service/routers/process_key.py`). See
+  // `.planning/phases/140.1-.../140.1-TS-OBLIGATIONS.md` TS-15 for the dated
+  // superseding note and the NOT-TAKEN option (b).
   //
-  // ⚠️ This token is a LIVE user JWT and undici embeds outgoing headers in
-  // `err.message`. It is passed to `postProcessKey` as a VALUE (never assembled
-  // into a header here) so it reaches `scrubSeamError(message, [userAccessToken])`
-  // at the client's transport log site. Do not hand-roll a second path.
-  let userAccessToken: string | undefined;
-  try {
-    const {
-      data: { session },
-    } = await supabase.auth.getSession();
-    userAccessToken = session?.access_token;
-  } catch (sessionErr) {
-    console.warn(
-      `[keys/sync] could not read the session to forward X-User-Access-Token (non-blocking) for ${strategy_id}:`,
-      sessionErr instanceof Error ? sessionErr.message : String(sessionErr),
-    );
-  }
+  // ⛔ The header name STAYS on `resilient-fetch.ts`'s CREDENTIAL_HEADER_NAMES
+  // scrub enumeration on purpose — pruning it would be an instance fix that
+  // re-opens the class for whatever this seam carries next.
 
   return await unifiedKeysSyncHandler({
     strategy_id,
     userId: user.id,
     source: resolvedSource,
-    userAccessToken,
   });
 });
 
@@ -439,7 +585,7 @@ async function stampCompositeFailedUnlessComplete(
     console.error(
       `[keys/sync] could not read existing analytics before stamping 'failed' ` +
         `(${logLabel}) for ${strategyId}:`,
-      readErr,
+      scrubSeamError(readErr),
     );
     return;
   }
@@ -453,7 +599,7 @@ async function stampCompositeFailedUnlessComplete(
     // pattern in the POST handler above).
     console.error(
       `[keys/sync] failed to stamp terminal 'failed' (${logLabel}) for ${strategyId}:`,
-      stampErr,
+      scrubSeamError(stampErr),
     );
   }
 }
@@ -498,6 +644,8 @@ async function compositeMemberCount(
       {
         computation_status: "failed",
         computation_warned: false,
+        // JOB-01: clear on exit from computing (reaper key — migration 20260802120000)
+        computing_started_at: null,
         computation_error:
           "Could not determine composite membership " +
           "(strategy_keys count unavailable). Please retry.",
@@ -520,12 +668,6 @@ async function unifiedKeysSyncHandler(args: {
   strategy_id: string;
   userId: string;
   source: string;
-  /**
-   * TS-15 — the end user's Supabase JWT, when a session was readable. OPTIONAL
-   * by construction: the client emits `X-User-Access-Token` only when this is
-   * present, so an absent value fabricates nothing.
-   */
-  userAccessToken?: string;
 }): Promise<NextResponse> {
   const result = await postProcessKey({
     flow_type: "resync",
@@ -537,9 +679,6 @@ async function unifiedKeysSyncHandler(args: {
     routeTag: "keys/sync",
     // CT-4 (army2) — forward tenant id for cross-tenant rate-limit isolation.
     userId: args.userId,
-    // TS-15 — see the block at the call site for why this is best-effort here
-    // and fail-CLOSED at csv-finalize.
-    userAccessToken: args.userAccessToken,
   });
   if (!result.ok) return result.response;
 
@@ -589,6 +728,15 @@ async function unifiedKeysSyncHandler(args: {
           // what the backbone just did: a job IS enqueued. Re-pointing the
           // branch without this would have moved the lie instead of removing it.
           queued: upstream.queued === true,
+          // Round-2 review (SFH LOW-8) — the JOB's state, forwarded verbatim
+          // from `process_key.py`: "enqueued" when the duplicate path
+          // (`_resume_duplicate_job`, the resumed wedge) queued or found a
+          // PENDING job, "running" when the job is already in flight (that
+          // path, or the chain-in-flight guard). The wizard needs it to tell a
+          // Retry that queued work from one the server refused.
+          ...(typeof upstream.job_state === "string"
+            ? { job_state: upstream.job_state }
+            : {}),
           code: "WIZARD_DUPLICATE",
           idempotent: true,
           // Unified is a single-key resync path — never a composite.

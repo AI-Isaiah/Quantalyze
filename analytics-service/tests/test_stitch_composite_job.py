@@ -143,6 +143,17 @@ class _FakeQuery:
     def lte(self, *a: Any, **k: Any) -> "_FakeQuery":
         return self
 
+    # C3 topic H: the composite writer's reconcile deletes now bound by
+    # lt/gt/in_ on `date` (upsert first, then delete what the payload lacks).
+    def lt(self, *a: Any, **k: Any) -> "_FakeQuery":
+        return self
+
+    def gt(self, *a: Any, **k: Any) -> "_FakeQuery":
+        return self
+
+    def in_(self, *a: Any, **k: Any) -> "_FakeQuery":
+        return self
+
     def single(self) -> "_FakeQuery":
         self._single = True
         return self
@@ -161,7 +172,7 @@ class _FakeQuery:
         self._conflict = on_conflict
         return self
 
-    def execute(self) -> SimpleNamespace:
+    def execute(self) -> SimpleNamespace | None:
         if self._op == "upsert":
             self.fake.upserts.append((self.table, self._payload, self._conflict))
             self.fake.call_order.append(("upsert", self.table, self._payload))
@@ -175,10 +186,54 @@ class _FakeQuery:
         if self.table == "strategies":
             return SimpleNamespace(data=dict(self.fake.strategy_row))
         if self.table == "strategy_analytics":
+            # Phase 164.6.7 (SFH-R2-02 sibling): each queued exception is raised
+            # by one select, in order, before the row is served, so a test can
+            # drive a gateway 504 through `_stamp_failed`'s flags/status read.
+            self.fake.analytics_reads += 1
+            if self.fake.analytics_read_raises:
+                raise self.fake.analytics_read_raises.pop(0)
+            # `computation_status` is served alongside the flags because
+            # `_stamp_failed` reads both columns in ONE select. It defaults to
+            # None, which is NOT in the terminal-success set, so every
+            # pre-existing test keeps taking the loud destructive branch exactly
+            # as before — see tests/test_ledger_refresh_composite_nondestructive.py.
             return SimpleNamespace(
-                data={"data_quality_flags": dict(self.fake.existing_flags)}
+                data={
+                    "data_quality_flags": dict(self.fake.existing_flags),
+                    "computation_status": self.fake.existing_status,
+                }
             )
+        if self.table == "compute_jobs":
+            # Counted so a test can prove the live re-read never ran (IN-05: the
+            # read may only NARROW a protection the snapshot already granted).
+            self.fake.compute_jobs_reads += 1
+        if self.table == "compute_jobs" and self.fake.live_job_read_raises:
+            # D-05 fail-safe arm: the live re-read itself errors.
+            raise RuntimeError("simulated compute_jobs read failure")
+        if (
+            self.table == "compute_jobs"
+            and self.fake.live_job_metadata is not _LIVE_JOB_ABSENT
+            and self.fake.live_job_id is not None
+            and ("id", self.fake.live_job_id) in self._eqs
+        ):
+            # Phase 164.6.7 / D-05: the LIVE job row, as `_stamp_failed` re-reads
+            # it before honouring a refresh marker. Served only for the seeded
+            # id, so a fix that re-reads the wrong row gets no row and takes
+            # the loud path, which the post-claim tests then catch.
+            return SimpleNamespace(data={"metadata": self.fake.live_job_metadata})
+        if self.table == "compute_jobs" and self._maybe:
+            # postgrest 2.31's `maybe_single().execute()` returns None ITSELF for
+            # zero rows, not a response carrying `data=None`. Served in that real
+            # shape so a helper that reads `res.data` directly fails here too.
+            return None
         return SimpleNamespace(data=None)
+
+
+class _LiveJobAbsent:
+    """Sentinel: the fake has NO live ``compute_jobs`` row to serve."""
+
+
+_LIVE_JOB_ABSENT = _LiveJobAbsent()
 
 
 class _FakeSupabase:
@@ -188,9 +243,41 @@ class _FakeSupabase:
         members: list[dict[str, Any]],
         strategy_row: dict[str, Any] | None = None,
         existing_flags: dict[str, Any] | None = None,
+        existing_status: str | None = None,
         raise_on_rpc: str | None = None,
+        live_job_metadata: object = _LIVE_JOB_ABSENT,
+        live_job_id: str | None = None,
+        live_job_read_raises: bool = False,
+        analytics_read_raises: list[BaseException] | None = None,
     ) -> None:
         self.members = members
+        # Exceptions the `strategy_analytics` select raises, one per read, before
+        # it answers. Default empty keeps every other construction unchanged.
+        self.analytics_read_raises: list[BaseException] = list(
+            analytics_read_raises or []
+        )
+        # How many `strategy_analytics` selects the handler issued.
+        self.analytics_reads = 0
+        # Phase 164.6.7 / D-05: the live `compute_jobs.metadata` for
+        # `live_job_id`, which `_stamp_failed` re-reads before it honours a
+        # refresh marker (the claim-time snapshot cannot see a retraction that
+        # lands after the claim). The default is ABSENT: a `compute_jobs`
+        # `maybe_single` select then answers "no row", in postgrest's own shape
+        # (None), so every construction that does not pass it takes the no-row
+        # arm.
+        self.live_job_metadata = live_job_metadata
+        self.live_job_id = live_job_id
+        # When True, the `compute_jobs` select raises instead of answering, so a
+        # test can prove an unreadable live row fails toward the LOUD path.
+        # Default False keeps every other construction unchanged.
+        self.live_job_read_raises = live_job_read_raises
+        # How many `compute_jobs` selects the handler issued.
+        self.compute_jobs_reads = 0
+        # The strategy_analytics row's CURRENT computation_status, as
+        # `_stamp_failed`'s non-destructive guard reads it. Defaults to None —
+        # i.e. no prior row — which routes to the LOUD destructive stamp, so
+        # every test written before that guard existed is unaffected.
+        self.existing_status = existing_status
         self.strategy_row = strategy_row if strategy_row is not None else {
             "id": _STRATEGY_ID, "asset_class": "crypto",
             "returns_denominator_config": _TEST_CONFIG,
@@ -535,6 +622,88 @@ async def test_traditional_asset_class_composite_fails_loud_retained_check() -> 
         isinstance(p, dict) and "metrics_json_by_basis" in p
         for _t, p, _c in fake.upserts
     ), "no by-basis object may ship for a clock-disagreement composite"
+
+
+@pytest.mark.asyncio
+async def test_clock_disagreement_user_copy_carries_no_internals() -> None:
+    """WR-01 (162-REVIEW) — HONEST-01's message/detail split at THIS refusal.
+
+    ``strategy_analytics.computation_error`` renders VERBATIM to the account
+    holder. This stamp used to write the developer sentence there: both
+    annualization clocks interpolated as ``(252/yr)`` / ``(365/yr)``, the
+    internal column name ``asset_class``, an issue number, and a remedy —
+    "Re-derive asset_class (crypto for a crypto-venue composite)." — that only an
+    engineer with repo access can act on. An account holder cannot re-derive
+    anything, so the sentence prescribed a step that could not work.
+
+    ⭐ The claim pinned here is the SENTENCE, not a word: the user-visible copy
+    carries NO numeric internal (neither clock), no internal identifier, and no
+    engineer-addressed remedy — while ``DispatchResult.error_message``
+    (→ ``compute_jobs.last_error``, admin-only) still names BOTH clocks, so the
+    operator can still tell which two disagreed. Part (3) of the same invariant
+    ``test_allocator_positions.py`` holds over ``api_keys.sync_error``.
+
+    Neuter to redden: collapse the ``detail=`` argument back into the positional
+    ``message`` (the pre-fix single-string call).
+    """
+    fake = _FakeSupabase(
+        members=[
+            _member(1, "2024-01-01", "2024-02-01"),
+            _member(2, "2024-02-01", None),
+        ],
+        strategy_row={
+            "id": _STRATEGY_ID,
+            "asset_class": "traditional",  # √252 ≠ deribit venue blend √365
+            "returns_denominator_config": _TEST_CONFIG,
+        },
+    )
+    m1 = _returns([("2024-01-01", 0.10), ("2024-01-02", 0.05)])
+    m2 = _returns([("2024-02-01", -0.04), ("2024-02-02", -0.06)])
+    with _apply(_deribit_patches(
+        fake, combine_returns=[(m1, {}), (m2, {})], has_option_activity=True,
+    )):
+        result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
+
+    assert result.outcome == DispatchOutcome.FAILED
+    stamps = [
+        p for t, p, _c in fake.upserts
+        if t == "strategy_analytics"
+        and isinstance(p, dict)
+        and "computation_error" in p
+    ]
+    assert len(stamps) == 1, (
+        "the refusal must stamp exactly one terminal row carrying the user "
+        f"sentence, or nothing below is reading the user column; got {fake.upserts!r}"
+    )
+    copy = stamps[0]["computation_error"]
+    assert isinstance(copy, str) and copy, (
+        "the refusal must still write a user-visible sentence — this test is "
+        f"about WHAT it says, not about softening it: {copy!r}"
+    )
+
+    # (1) No numeric internal. Both annualization clocks used to be interpolated
+    # here; a digit in this sentence can only have come from one of them.
+    assert not any(ch.isdigit() for ch in copy), (
+        "a number reached strategy_analytics.computation_error — the only "
+        "numbers at this site are the two annualization clocks, which mean "
+        f"nothing to the account holder who reads this verbatim: {copy!r}"
+    )
+    # (2) No internal identifier and no remedy addressed to an engineer.
+    for token in ("asset_class", "Re-derive", "venue blend", "#597"):
+        assert token not in copy, (
+            f"{token!r} reached the sentence the account holder reads: {copy!r}"
+        )
+
+    # (3) The DIAGNOSIS survives where an engineer reads it. Hand-typed clock
+    # literals: √252 traditional / √365 crypto (services/metrics.py) — the point
+    # is that the operator can still tell WHICH two clocks disagreed.
+    assert result.error_message is not None
+    for clock in ("252", "365"):
+        assert clock in result.error_message, (
+            "the operator string must still name both annualization clocks — "
+            "curating the user column must not blind the operator: "
+            f"{result.error_message!r}"
+        )
 
 
 @pytest.mark.asyncio
@@ -3950,3 +4119,265 @@ async def test_composite_mtm_overlap_error_permanent() -> None:
         isinstance(p, dict) and p.get("computation_status") == "failed"
         for _t, p, _c in fake.upserts
     ), "an MTM post-clip day collision must stamp a terminal failed row"
+
+
+# ── MT5-12 (Phase 142.2 plan 05): producer 2's verdict of record ─────────────
+# `run_stitch_composite_job` is the SECOND `csv_daily_returns` producer. The
+# publish gate is moving off the `!apiKeyId` term and onto a positive
+# `series_completeness` allow-list, and a composite carries `api_key_id = NULL`
+# with zero fills. If the stitch does not stamp a verdict, every composite reads
+# NULL → falls to the trade branch → INSUFFICIENT_TRADES → NO COMPOSITE CAN EVER
+# BE APPROVED AGAIN. (The admin approve path DOES gate composites — see
+# `strategy-review/route.test.ts:1073`, "Composites (apiKeyId null) source
+# history"; only SyncPreviewStep skips them.)
+#
+# Two things are pinned below and neither is redundant:
+#   1. the LITERAL on the headline payload — the regression that would ship an
+#      un-approvable composite class;
+#   2. its ABSENCE from that payload's data_quality_flags — because
+#      analytics_runner.py:1439 rebuilds data_quality_flags wholesale, and
+#      guard-key membership auto-promotes computation_status to
+#      `complete_with_warnings`, which the gate PASSES. Carrying the verdict
+#      inside that dict would be a fail-open (D-16), not merely a wrong home.
+
+
+def _sa_upserts(fake: _FakeSupabase) -> list[dict[str, Any]]:
+    """Every strategy_analytics upsert payload of the run, in order."""
+    return [
+        payload
+        for table, payload, _ in fake.upserts
+        if table == "strategy_analytics" and isinstance(payload, dict)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_composite_headline_stamps_composite_stitched_verdict() -> None:
+    """The stitch headline write carries series_completeness == 'composite_stitched'
+    as a TOP-LEVEL column, and no later write in the same job clears it.
+
+    Neuter: drop the key from `headline_payload` → assertion 1 reddens. Move it
+    into `merged_flags` instead → assertions 1 AND 2 redden together."""
+    fake = _FakeSupabase(members=[
+        _member(1, "2024-01-01", "2024-02-01"),
+        _member(2, "2024-02-01", None),
+    ])
+    m1 = _returns([("2024-01-01", 0.10), ("2024-01-02", 0.05)])
+    m2 = _returns([("2024-02-01", -0.04), ("2024-02-02", -0.06)])
+    with _apply(_deribit_patches(
+        fake, combine_returns=[(m1, {}), (m2, {})], has_option_activity=True,
+    )):
+        result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
+
+    assert result.outcome == DispatchOutcome.DONE
+    headline = _headline_row(fake)
+    assert headline is not None
+
+    # 1 — the literal, hand-typed here (nothing imports SERIES_COMPLETENESS_VALUES:
+    # what a producer may EMIT and what the gate may TRUST are different questions).
+    assert headline["series_completeness"] == "composite_stitched", (
+        "without this stamp every composite reads NULL at the gate → trade branch "
+        "→ INSUFFICIENT_TRADES → permanently un-approvable"
+    )
+
+    # 2 — and NOT inside data_quality_flags, the wholesale-rebuilt / auto-promoting
+    # channel. This is the fail-open guard, not a style preference.
+    assert "series_completeness" not in headline["data_quality_flags"], (
+        "the verdict must be a SIBLING of data_quality_flags — that dict is "
+        "rebuilt wholesale by analytics_runner and its guard keys auto-promote "
+        "computation_status to complete_with_warnings, which the gate PASSES"
+    )
+
+    # 3 — no LATER strategy_analytics write in the same job clears or overwrites it.
+    # `headline_payload.update(cash_metrics_json)` spreads metric scalars, and the
+    # by-basis object rides the same single upsert; a future second write that
+    # omitted the column would preserve it (A1) but one that set it to NULL would
+    # not. Scan every payload, not just the headline.
+    payloads = _sa_upserts(fake)
+    headline_idx = payloads.index(headline)
+    for later in payloads[headline_idx + 1:]:
+        assert later.get("series_completeness", "composite_stitched") == (
+            "composite_stitched"
+        ), f"a later write clobbered the composite verdict: {later!r}"
+
+
+@pytest.mark.asyncio
+async def test_composite_failure_stamp_omits_the_verdict_column() -> None:
+    """The terminal 'failed' arm must NOT write series_completeness.
+
+    Omission is deliberate and load-bearing: a PostgREST upsert projects only the
+    payload's keys, so a previously-stamped verdict SURVIVES a failed re-stitch
+    (A1, executed against TEST in plan 142.2-04). Writing NULL here would erase a
+    healthy composite's verdict on any transient failure; writing
+    'composite_stitched' would certify a stitch that never completed. Neither —
+    `computation_status='failed'` already blocks the gate."""
+    fake = _FakeSupabase(members=[_member(1, "2024-01-01", None)])
+    m1 = _returns([("2024-01-01", 0.05)])  # exactly ONE present day → degenerate
+    with _apply(_deribit_patches(
+        fake, combine_returns=[(m1, {})], has_option_activity=True,
+    )):
+        result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
+
+    assert result.outcome == DispatchOutcome.FAILED
+    failed_stamps = [
+        p for p in _sa_upserts(fake) if p.get("computation_status") == "failed"
+    ]
+    assert failed_stamps, "the degenerate composite must stamp a terminal failed row"
+    for stamp in failed_stamps:
+        assert "series_completeness" not in stamp, (
+            "the failure stamp must omit the column so a prior verdict survives "
+            f"by omission (A1); got {stamp!r}"
+        )
+
+
+# ── 142.2 code review FIX 2 — COMPOSITE LAUNDERING ──────────────────────────
+#
+# The stamp above was a BARE LITERAL: it never consulted `member_metas`, even
+# though that list is already in hand at the site (the guard-flag union loop
+# reads it twenty lines earlier). A member whose combiner MEASURED a hole was
+# therefore laundered into a composite verdict the publish gate TRUSTS.
+#
+# The two tests below are a matched pair and neither is sufficient alone. They
+# pin the two halves of a fix that is easy to get wrong in OPPOSITE directions:
+#
+#   · propagate too little (the pre-fix bare literal)  → laundering, test A reds;
+#   · propagate too much  (any non-trusted member verdict) → essentially every
+#     ccxt composite becomes permanently un-approvable, test B reds.
+#
+# THE ECONOMIC INVARIANT, stated so these are not just string comparisons:
+# a composite's daily series is the arithmetic stitch of its members' series.
+# A day missing from a member is a day missing from the composite. So a MEASURED
+# hole must survive the stitch. But `fill_derived_unproven` is not a measurement
+# of a hole — `combine_realized_and_funding` stamps it for every ccxt venue
+# unconditionally — so it says nothing about THIS composite and must not refuse
+# it. Composites have zero trades by construction, so the daily branch is their
+# only route to publication; a refusal there is terminal, not a detour.
+
+# HAND-TYPED, and deliberately NOT imported from `strategyGate.ts` or from
+# `SERIES_COMPLETENESS_VALUES`. This is the TypeScript gate's admissibility
+# subset — what the publish gate will TRUST — restated here as an independent
+# oracle. Importing it (if that were even possible across the language boundary)
+# would make these assertions follow the policy instead of pinning it.
+_VERDICTS_THE_PUBLISH_GATE_TRUSTS = frozenset(
+    {"ledger_complete", "user_supplied", "composite_stitched"}
+)
+
+
+@pytest.mark.asyncio
+async def test_a_known_gapped_member_is_not_laundered_into_a_trusted_composite() -> None:
+    """A member carrying `sampled_gapped` must NOT yield a composite verdict the
+    publish gate trusts.
+
+    `sampled_gapped` has exactly one producer — `combine_sfox_balance_history`
+    when `nav_gap_days > 0` — and it is a POSITIVE finding: interior holes were
+    measured in a sampled NAV series. Stitching cannot fill them.
+
+    Neuter (fails without the fix): restore the bare literal
+    `"series_completeness": "composite_stitched"` in `headline_payload` and this
+    reds with 'composite_stitched is in the set the gate trusts'.
+    """
+    fake = _FakeSupabase(members=[
+        _member(1, "2024-01-01", "2024-02-01"),
+        _member(2, "2024-02-01", None),
+    ])
+    m1 = _returns([("2024-01-01", 0.10), ("2024-01-02", 0.05)])
+    m2 = _returns([("2024-02-01", -0.04), ("2024-02-02", -0.06)])
+    # Member 2 is the one with the measured hole. Member 1 is clean, so this also
+    # pins that ONE bad member is enough — an `all(...)` implementation passes
+    # the both-gapped case and fails here.
+    with _apply(_deribit_patches(
+        fake,
+        combine_returns=[
+            (m1, {"series_completeness": "ledger_complete"}),
+            (m2, {"series_completeness": "sampled_gapped"}),
+        ],
+        has_option_activity=True,
+    )):
+        result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
+
+    assert result.outcome == DispatchOutcome.DONE
+    headline = _headline_row(fake)
+    assert headline is not None
+
+    verdict = headline["series_completeness"]
+    assert verdict not in _VERDICTS_THE_PUBLISH_GATE_TRUSTS, (
+        f"the composite was stamped {verdict!r}, which the publish gate TRUSTS, "
+        "even though member seq=2 carried a MEASURED coverage hole "
+        "(sampled_gapped). The stitch is arithmetic: a day missing from a "
+        "member is missing from the composite. Stamping a trusted verdict here "
+        "publishes a track record with known holes as verified."
+    )
+    # …and the verdict it DOES carry names the inherited fact, rather than being
+    # some third value that happens to fall outside the trusted set.
+    assert verdict == "sampled_gapped", (
+        f"expected the known gap to be inherited verbatim, got {verdict!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_unproven_ccxt_members_do_not_refuse_the_composite() -> None:
+    """The anti-over-refusal half. `fill_derived_unproven` members must leave the
+    composite verdict at `composite_stitched`.
+
+    ⛔ THIS IS THE TEST THAT STOPS THE OBVIOUS FIX. "Propagate any member verdict
+    the gate does not trust" looks strictly safer and is a serious regression:
+    `combine_realized_and_funding` stamps `fill_derived_unproven` for binance,
+    bybit and okx ALWAYS and unconditionally, so that rule refuses essentially
+    every ccxt composite. Single-key ccxt strategies are unaffected by the
+    verdict because they have fills in `trades` and never reach the daily branch;
+    a composite has zero trades by construction and has nowhere else to go.
+
+    Behaviour-preserving by design: this case stamped `composite_stitched` before
+    FIX 2 and must still.
+    """
+    fake = _FakeSupabase(members=[
+        _member(1, "2024-01-01", "2024-02-01"),
+        _member(2, "2024-02-01", None),
+    ])
+    m1 = _returns([("2024-01-01", 0.10), ("2024-01-02", 0.05)])
+    m2 = _returns([("2024-02-01", -0.04), ("2024-02-02", -0.06)])
+    with _apply(_deribit_patches(
+        fake,
+        combine_returns=[
+            (m1, {"series_completeness": "fill_derived_unproven"}),
+            (m2, {"series_completeness": "fill_derived_unproven"}),
+        ],
+        has_option_activity=True,
+    )):
+        result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
+
+    assert result.outcome == DispatchOutcome.DONE
+    headline = _headline_row(fake)
+    assert headline is not None
+    assert headline["series_completeness"] == "composite_stitched", (
+        "an all-ccxt composite was refused a trusted verdict. "
+        "fill_derived_unproven is the NORMAL, unconditional stamp for every ccxt "
+        "venue — not a finding about this account — and propagating it makes "
+        "ccxt composites permanently un-approvable, since a composite has zero "
+        "trades and the daily branch is its only route to publish."
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_composite_verdict_is_derived_not_hand_written() -> None:
+    """An UNSTAMPED member set still yields `composite_stitched`.
+
+    Pins the derivation's default arm and keeps the pre-142.2 fixtures honest:
+    every other test in this file passes `{}` metas, so if the derivation ever
+    started refusing an unstamped member, the failure would surface here by name
+    rather than as a diffuse collapse across the suite.
+    """
+    fake = _FakeSupabase(members=[
+        _member(1, "2024-01-01", "2024-02-01"),
+        _member(2, "2024-02-01", None),
+    ])
+    m1 = _returns([("2024-01-01", 0.10), ("2024-01-02", 0.05)])
+    m2 = _returns([("2024-02-01", -0.04), ("2024-02-02", -0.06)])
+    with _apply(_deribit_patches(
+        fake, combine_returns=[(m1, {}), (m2, {})], has_option_activity=True,
+    )):
+        result = await run_stitch_composite_job({"strategy_id": _STRATEGY_ID})
+
+    assert result.outcome == DispatchOutcome.DONE
+    headline = _headline_row(fake)
+    assert headline is not None
+    assert headline["series_completeness"] == "composite_stitched"

@@ -118,3 +118,62 @@ describe("strategy-v2 type-scale lint (DESIGN-02)", () => {
     expect(violations).toEqual([]);
   });
 });
+
+/**
+ * Phase 170 C1-F1 / C1-F3 (2026-09-27, landed 2026-09-30 by plan 170-12) — the
+ * factsheet's two stacked strips must not read as the same strip.
+ *
+ * ⛔ WHY THIS EXISTS. `SectionNav` (the document's table of contents) and
+ * `ControlBar` (its actions) were two rows of identical `text-micro font-mono
+ * uppercase tracking-wider` pills. The contents strip keeps the mono data
+ * voice; the action buttons move to the DM Sans interactive voice DESIGN.md
+ * requires for buttons (`text-caption`, sentence case). A later edit that
+ * pastes the old mono pill class back onto any factsheet button re-creates the
+ * look-alike pair, and the first arm goes red.
+ *
+ * ⚠️ There were NO pins for these controls before this block (measured at
+ * d37163993: this file linted only `src/components/strategy-v2/**` and six
+ * chart files). They are added here rather than "updated".
+ *
+ * Source lint, same style as the blocks above: jsdom does no layout, and the
+ * contract is a class-string contract.
+ */
+const FACTSHEET_VIEW = resolve(
+  process.cwd(),
+  "src/app/factsheet/[id]/v2/FactsheetView.tsx",
+);
+/** The pre-170 ControlBar pill voice, as one run of classes. */
+const MONO_PILL = "text-micro font-mono uppercase tracking-wider rounded-sm";
+
+describe("factsheet ControlBar voice vs SectionNav (Phase 170 C1-F1, C1-F3)", () => {
+  const src = readFileSync(FACTSHEET_VIEW, "utf-8");
+
+  it("no factsheet action button carries the mono pill voice", () => {
+    expect(src.split(MONO_PILL).length - 1).toBe(0);
+  });
+
+  it("the action buttons carry the DM Sans caption voice with their secondary border", () => {
+    // Display summary, Reset view, Reset 1x, ShareLinkButton, both
+    // ShareRevokeControl arms (Revoke link / Revoke; Keep link has no border),
+    // Compare strategies.
+    const bordered = "px-2.5 py-1 text-caption rounded-sm border bg-surface-subtle";
+    expect(src.split(bordered).length - 1).toBeGreaterThanOrEqual(7);
+  });
+
+  it("SectionNav keeps the mono eyebrow voice", () => {
+    expect(src).toContain(
+      'className="flex items-center gap-1 px-1 text-micro font-mono uppercase tracking-[0.18em]"',
+    );
+  });
+
+  it("the LEVERAGE input label stays a mono data label", () => {
+    expect(src).toContain(
+      'className="text-micro font-mono uppercase tracking-wider text-text-muted"',
+    );
+  });
+
+  it("the owner-pending share controls sit inside the notice, not hung below it", () => {
+    expect(src).not.toContain("-mt-4");
+    expect(src).toContain('className="mt-3 flex flex-wrap items-center gap-2"');
+  });
+});

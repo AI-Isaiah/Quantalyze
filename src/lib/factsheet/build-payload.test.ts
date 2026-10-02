@@ -1,5 +1,5 @@
-import { describe, it, expect } from "vitest";
-import { buildFactsheetPayload } from "./build-payload";
+import { describe, it, expect, vi } from "vitest";
+import { buildFactsheetPayload, hasBuildableSeries, MIN_FACTSHEET_SERIES_POINTS } from "./build-payload";
 import type { BuildFactsheetOpts } from "./build-payload";
 import type { DailyReturn } from "./types";
 
@@ -243,5 +243,78 @@ describe("MTM-04 — falsifiable: dailies-derivable panels FOLLOW the MTM basis"
     expect(bundle.strategyReturns).toEqual(payload.strategyReturns);
     expect(bundle.strategyEquity).toEqual(payload.strategyEquity);
     expect(bundle.strategyDrawdowns).toEqual(payload.strategyDrawdowns);
+  });
+});
+
+/**
+ * Phase 167.2.1 (FACTSHEETBUILDABLE, D-04) — the builder's point-count gate is
+ * the exported `hasBuildableSeries`, so the buildability probe and the builder
+ * answer from ONE predicate. The truth table pins the predicate; the second arm
+ * pins that `buildFactsheetPayload` returns null EXACTLY when it is false, over
+ * the same fixtures, so the builder cannot grow a second, divergent gate.
+ */
+describe("167.2.1 D-04 — hasBuildableSeries is the builder's own point-count gate", () => {
+  const d = (date: string, value: number): DailyReturn => ({ date, value });
+  const unsorted30 = [...genSeries("2025-03-15", 30, 777)].reverse();
+  const FIXTURES: { name: string; rows: DailyReturn[]; buildable: boolean }[] = [
+    { name: "empty", rows: [], buildable: false },
+    { name: "one point", rows: [d("2025-03-15", 0.01)], buildable: false },
+    { name: "two rows, same date", rows: [d("2025-03-15", 0.01), d("2025-03-15", 0.02)], buildable: false },
+    { name: "one finite point plus one NaN", rows: [d("2025-03-15", 0.01), d("2025-03-16", NaN)], buildable: false },
+    {
+      name: "one point plus a non-string date",
+      rows: [d("2025-03-15", 0.01), { date: 20250316 as unknown as string, value: 0.02 }],
+      buildable: false,
+    },
+    { name: "two distinct finite dated points", rows: [d("2025-03-15", 0.01), d("2025-03-16", -0.02)], buildable: true },
+    { name: "an unsorted 30-point series", rows: unsorted30, buildable: true },
+  ];
+
+  it("the minimum is 2 distinct dated points", () => {
+    expect(MIN_FACTSHEET_SERIES_POINTS).toBe(2);
+  });
+
+  for (const f of FIXTURES) {
+    it(`hasBuildableSeries(${f.name}) === ${f.buildable}`, () => {
+      expect(hasBuildableSeries(f.rows)).toBe(f.buildable);
+    });
+    it(`buildFactsheetPayload(${f.name}) is null exactly when hasBuildableSeries is false`, () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        const payload = buildFactsheetPayload(SK_STRATEGY, f.rows);
+        expect(payload === null).toBe(!hasBuildableSeries(f.rows));
+        expect(payload === null).toBe(!f.buildable);
+      } finally {
+        warn.mockRestore();
+      }
+    });
+  }
+});
+
+describe("169.5 CR-01 — stress windows take BTC null-honest (SC3), not through D-65's null-as-0", () => {
+  // The reviewer's measured scenario: the route answers `{ unavailable: true }` on any
+  // BTC read or probe error. The comparator block then says "BTC prices unavailable";
+  // the Stress Windows panel on the same page must not say BTC was flat (+0.00%,
+  // DD 0.00%) through the window. CASH_SERIES spans "Apr 2025 tariffs".
+  it("an unavailable BTC read gives null bench fields in every stress window", () => {
+    const payload = buildFactsheetPayload(SK_STRATEGY, CASH_SERIES, { benchmarkPrices: { unavailable: true } })!;
+    expect(payload.comparators.btc.summary).toBeNull();
+    const tariffs = payload.stressWindows.windows.find((w) => w.name === "Apr 2025 tariffs");
+    expect(tariffs).toBeDefined();
+    expect(tariffs!.benchReturn).toBeNull();
+    expect(tariffs!.benchMaxDD).toBeNull();
+    for (const w of payload.stressWindows.windows) {
+      expect(w.benchReturn).toBeNull();
+      expect(w.benchMaxDD).toBeNull();
+    }
+  });
+
+  it("control: with covered BTC the same window's bench fields are numbers", () => {
+    const payload = buildFactsheetPayload(SK_STRATEGY, CASH_SERIES)!;
+    const tariffs = payload.stressWindows.windows.find((w) => w.name === "Apr 2025 tariffs");
+    expect(tariffs).toBeDefined();
+    expect(typeof tariffs!.benchReturn).toBe("number");
+    expect(typeof tariffs!.benchMaxDD).toBe("number");
+    expect(tariffs!.benchReturn).not.toBe(0);
   });
 });

@@ -221,8 +221,18 @@ describe("GET /api/admin/match/eval (M-0277)", () => {
     expect(raw).not.toContain("boom");
     expect(raw).not.toContain("localhost");
     expect(JSON.parse(raw).error).toBe(GENERIC_COPY);
-    // ...and the detail is not simply discarded — it goes to the server log.
-    expect(errorSpy).toHaveBeenCalledWith(expect.any(String), leaky);
+    // ...and the detail is not simply discarded — it goes to the server log,
+    // SCRUBBED (140.4-08 / SEAMRIM-06). Pinning the raw `leaky` object here
+    // pinned the leak in place; pinning the scrubbed rendering pins two facts
+    // instead of one — that the value went through `scrubSeamError` (it is a
+    // string, not the Error instance) AND that the diagnosis survived it. The
+    // second half is the A-10 non-drop check, and it is the ONLY mechanism in
+    // this tree that catches a "fix" which answers a scrub finding by dropping
+    // the value: the source predicate cannot see a drop, this assertion can.
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.stringContaining("boom with http://localhost:8002 secret detail"),
+    );
   });
 
   it("returns 500 with the same STATIC copy when evalMatch throws a non-Error value", async () => {
@@ -248,10 +258,14 @@ describe("GET /api/admin/match/eval (M-0277)", () => {
     expect(res.status).toBe(503);
     expect(res.headers.get("Retry-After")).toBe("30");
     const raw = await res.text();
-    expect(JSON.parse(raw).error).toBe(CIRCUIT_OPEN_COPY);
-    // The breaker is an internal mechanism; its vocabulary must not reach an
-    // HTTP body (threat T-140-05 / T-140-08).
-    expect(raw).not.toMatch(/circuit|breaker|upstash|railway/i);
+    const parsed = JSON.parse(raw);
+    expect(parsed.error).toBe(CIRCUIT_OPEN_COPY);
+    // The breaker is an internal mechanism; its vocabulary must not reach the
+    // human-facing COPY (threat T-140-05 / T-140-08). Scoped to `.error`, not
+    // the raw body: 140.3-G8 puts a deliberate machine `code: "CIRCUIT_OPEN"`
+    // on `.code` as a stable discriminator (an established seam WIRE token — the
+    // same exemption the sibling scenario/optimize route's test already makes).
+    expect(parsed.error).not.toMatch(/circuit|breaker|upstash|railway/i);
   });
 
   it("forwards the breaker's own cooldown as Retry-After rather than a constant", async () => {
@@ -545,5 +559,279 @@ describe("[140.3-13a / SEAMUX-08] GET /api/admin/match/eval — Sentry capture p
     await GET(makeReq());
     await nextCapture();
     expect(errorSpy).toHaveBeenCalled();
+  });
+});
+
+/**
+ * 140.3-G8 / SEAMUX-03 — a machine `code` on every arm THIS route owns.
+ *
+ * REQUIREMENTS.md names "the admin match routes" verbatim: a consumer must be
+ * able to discriminate on a stable token instead of the prose (140.3-12's to
+ * reword). Each arm is pinned individually so a `code` dropped from one is not
+ * hidden behind another's assertion — this programme's signature failure.
+ *
+ * The 4xx-forward arm is the load-bearing one: it must carry the UPSTREAM'S own
+ * `seamCode` (the thread TS-19 started) AND keep `error` + `dependency` intact,
+ * so the case below drives an `AnalyticsUpstreamError` bearing all three and
+ * asserts all three survive together. UNAUTHENTICATED / FORBIDDEN are inline
+ * gate codes, not WizardErrorCode members, so an admin arm never forces wizard
+ * copy — the same non-union choice the keys/sync template ships.
+ */
+describe("[140.3-G8 / SEAMUX-03] GET /api/admin/match/eval — machine code per arm", () => {
+  beforeEach(() => {
+    userState.current = { id: "admin-1" };
+    adminFlag.isAdmin = true;
+    evalState.lastArgs = null;
+    evalState.throwValue = null;
+    evalState.result = { rows: [] };
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.resetModules();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it("401 answers code UNAUTHENTICATED", async () => {
+    userState.current = null;
+    const { GET } = await import("./route");
+    const res = await GET(makeReq());
+    expect(res.status).toBe(401);
+    expect((await res.json()).code).toBe("UNAUTHENTICATED");
+  });
+
+  it("403 answers code FORBIDDEN", async () => {
+    userState.current = { id: "user-1" };
+    adminFlag.isAdmin = false;
+    const { GET } = await import("./route");
+    const res = await GET(makeReq());
+    expect(res.status).toBe(403);
+    expect((await res.json()).code).toBe("FORBIDDEN");
+  });
+
+  it("the breaker 503 answers code CIRCUIT_OPEN", async () => {
+    const { CircuitOpenError } = await import("@/lib/seam-errors");
+    evalState.throwValue = new CircuitOpenError(30);
+    const { GET } = await import("./route");
+    const res = await GET(makeReq());
+    expect(res.status).toBe(503);
+    expect((await res.json()).code).toBe("CIRCUIT_OPEN");
+  });
+
+  it("the timeout 504 answers code UPSTREAM_TIMEOUT", async () => {
+    const { AnalyticsTimeoutError } = await import("@/lib/analytics-client");
+    evalState.throwValue = new AnalyticsTimeoutError("/api/match/eval", 30_000);
+    const { GET } = await import("./route");
+    const res = await GET(makeReq());
+    expect(res.status).toBe(504);
+    expect((await res.json()).code).toBe("UPSTREAM_TIMEOUT");
+  });
+
+  it("the 4xx forward carries the upstream's OWN seamCode AND keeps error + dependency (TS-18/TS-19)", async () => {
+    const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+    // All three fields present on the wire: seamCode is the Python token, the
+    // dependency names the caller's venue on the nested 424 shape.
+    evalState.throwValue = new AnalyticsUpstreamError(
+      "Binance is not responding right now. Try again shortly.",
+      424,
+      "EXCHANGE_UNAVAILABLE",
+      "binance",
+    );
+    const { GET } = await import("./route");
+    const res = await GET(makeReq());
+    expect(res.status).toBe(424);
+    const body = await res.json();
+    // The code is the UPSTREAM'S, not a route-local synonym…
+    expect(body.code).toBe("EXCHANGE_UNAVAILABLE");
+    // …and it did not eat either of the two fields beside it.
+    expect(body.error).toBe(
+      "Binance is not responding right now. Try again shortly.",
+    );
+    expect(body.dependency).toBe("binance");
+  });
+
+  it("a 4xx forward whose upstream carried NO code falls back to UNKNOWN, dependency still null", async () => {
+    const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+    // seamCode omitted → null; the flat 424 shape carries no dependency either.
+    evalState.throwValue = new AnalyticsUpstreamError("venue down", 424);
+    const { GET } = await import("./route");
+    const res = await GET(makeReq());
+    expect(res.status).toBe(424);
+    const body = await res.json();
+    expect(body.code).toBe("UNKNOWN");
+    expect(body.dependency).toBeNull();
+  });
+
+  it("the terminal 500 answers code UNKNOWN", async () => {
+    evalState.throwValue = new Error("boom");
+    const { GET } = await import("./route");
+    const res = await GET(makeReq());
+    expect(res.status).toBe(500);
+    expect((await res.json()).code).toBe("UNKNOWN");
+  });
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // 161-08 / WIZERR-06 — the terminal arm forwards the CODE and still refuses
+  // the MESSAGE.
+  //
+  // ⭐ THIS ROUTE IS THE CLEAREST CASE OF THE FIVE, and case (a) below is why.
+  // `eval_metrics` emits a SIBLING PAIR: `EVAL_WINDOW_TOO_LARGE` at 400, which
+  // the 4xx arm already forwards intact, and `EVAL_FAILED` at 500, which misses
+  // that arm and lands on the terminal. Until this plan the pair arrived as one
+  // code and one mystery purely because of which side of 500 they fell on.
+  //
+  // ⚠️ The static sentence is the file-level `GENERIC_COPY` constant declared at
+  // the top of THIS test file — hand-typed there, imported from nothing.
+  // ───────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Shaped like what T-140-11 keeps off the wire: FastAPI detail, the
+   * `parseResponse()` contract-drift string and a service base URL.
+   */
+  const LEAKY_5XX_MESSAGE =
+    "InternalError: eval_metrics raised at match.py:1204 — upstream base http://analytics.invalid:8000";
+
+  it("WIZERR-06 (a) — a 5xx seam error carrying a code forwards THAT code, sentence unchanged", async () => {
+    const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+    // `eval_metrics`'s own declared 500 residue — the sibling of the 400 the
+    // 4xx arm above already forwards verbatim.
+    evalState.throwValue = new AnalyticsUpstreamError(
+      "Eval failed on our side. This has been logged.",
+      500,
+      "EVAL_FAILED",
+    );
+    const { GET } = await import("./route");
+    const res = await GET(makeReq());
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(body.code).toBe("EVAL_FAILED");
+    expect(body.error).toBe(GENERIC_COPY);
+  });
+
+  it("WIZERR-06 (b) — a 5xx seam error with a NULL code still answers UNKNOWN, sentence unchanged", async () => {
+    const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+    evalState.throwValue = new AnalyticsUpstreamError("upstream exploded", 502);
+    const { GET } = await import("./route");
+    const res = await GET(makeReq());
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(body.code).toBe("UNKNOWN");
+    expect(body.error).toBe(GENERIC_COPY);
+  });
+
+  it("WIZERR-06 (c) — a NON-SEAM throwable answers UNKNOWN, sentence unchanged", async () => {
+    evalState.throwValue = new Error("ECONNRESET");
+    const { GET } = await import("./route");
+    const res = await GET(makeReq());
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(body.code).toBe("UNKNOWN");
+    expect(body.error).toBe(GENERIC_COPY);
+  });
+
+  it("WIZERR-06 (d) — NEGATIVE CONTROL: no substring of the thrown message reaches the body", async () => {
+    const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+    evalState.throwValue = new AnalyticsUpstreamError(
+      LEAKY_5XX_MESSAGE,
+      500,
+      "EVAL_FAILED",
+    );
+    const { GET } = await import("./route");
+    const res = await GET(makeReq());
+    const serialized = JSON.stringify(await res.json());
+
+    // ⚠️ VACUITY GUARD, FIRST — `"anything".includes("")` is `true`.
+    expect(LEAKY_5XX_MESSAGE.trim().length).toBeGreaterThan(40);
+    const tokens = LEAKY_5XX_MESSAGE.split(/\s+/).filter((t) => t.length >= 4);
+    expect(
+      tokens.length,
+      "the leak corpus produced too few usable tokens to be a real control",
+    ).toBeGreaterThan(5);
+
+    for (const token of tokens) {
+      expect(
+        serialized,
+        `the 5xx body leaked "${token}" out of err.message`,
+      ).not.toContain(token);
+    }
+    expect(serialized).not.toContain(LEAKY_5XX_MESSAGE);
+    expect(serialized).toContain("EVAL_FAILED");
+  });
+});
+
+/**
+ * 146-01 / RATE-02 — the deny arms, behaviourally (SEAMRIM-05's admin shape,
+ * mirroring the posture invariant's admin/match/recompute block).
+ *
+ * The limiter module is NOT mocked wholesale: `checkLimit` is spied on the
+ * REAL `@/lib/ratelimit` (imported from the same post-`vi.resetModules()`
+ * registry as the route — the class-identity warning in this file's header
+ * applies to module identity too), so the `rateLimitDenyJson` under test is
+ * the production builder and the 503-vs-429 decision is the chokepoint's own,
+ * not a double's. `vi.spyOn` + `restoreAllMocks`, never `vi.stubGlobal`
+ * (DEF-16-1, the CI Node 22 lesson).
+ */
+describe("[146-01 / RATE-02] GET /api/admin/match/eval — deny arms through the real chokepoint", () => {
+  beforeEach(() => {
+    userState.current = { id: "admin-1" };
+    adminFlag.isAdmin = true;
+    evalState.lastArgs = null;
+    evalState.throwValue = null;
+    evalState.result = { rows: [] };
+    vi.resetModules();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  it("limit exhausted → 429 RATE_LIMITED with Retry-After, keyed on user.id, BEFORE the seam call", async () => {
+    const ratelimit = await import("@/lib/ratelimit");
+    const spy = vi
+      .spyOn(ratelimit, "checkLimit")
+      .mockResolvedValue({ success: false, retryAfter: 42 });
+    const { GET } = await import("./route");
+
+    const res = await GET(makeReq());
+
+    expect(res.status).toBe(429);
+    // Byte-wise like the posture invariant's recompute pins: `toEqual` on
+    // parsed JSON does not compare key order (140.4-16 / WR-03).
+    expect(await res.clone().text()).toBe(
+      '{"error":"Too many requests","code":"RATE_LIMITED"}',
+    );
+    expect(res.headers.get("Retry-After")).toBe("42");
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+    // RATE-02: keyed on the authenticated admin's user.id — NOT IP — on the
+    // sibling recompute's shared adminActionLimiter bucket.
+    expect(spy).toHaveBeenCalledWith(
+      ratelimit.adminActionLimiter,
+      "match-eval:admin-1",
+    );
+    // The deny returns before the seam call ever happens.
+    expect(evalState.lastArgs).toBeNull();
+  });
+
+  it("limiter MISCONFIGURED → 503 SEAM_MISCONFIGURED — never a 429 blaming the admin during OUR outage", async () => {
+    const ratelimit = await import("@/lib/ratelimit");
+    vi.spyOn(ratelimit, "checkLimit").mockResolvedValue({
+      success: false,
+      retryAfter: 60,
+      reason: "ratelimit_misconfigured",
+    });
+    const { GET } = await import("./route");
+
+    const res = await GET(makeReq());
+
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({
+      error: "Rate limiter unavailable",
+      code: "SEAM_MISCONFIGURED",
+    });
+    expect(res.headers.get("Retry-After")).toBe("60");
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+    expect(evalState.lastArgs).toBeNull();
   });
 });

@@ -5,6 +5,7 @@ import Link from "next/link";
 import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { ScopedBanner } from "@/components/ui/ScopedBanner";
+import { LiveRegion } from "@/components/ui/LiveRegion";
 import { ResponsiveTable } from "@/components/ResponsiveTable";
 import { computeFreshness } from "@/lib/freshness";
 import { displayStrategyName } from "@/lib/strategy-display";
@@ -20,6 +21,10 @@ import { MatchQueueSkeleton } from "@/components/admin/match/MatchQueueSkeleton"
 import { ShortcutHelpModal } from "@/components/admin/match/ShortcutHelpModal";
 import { ShortlistCard } from "@/components/admin/match/ShortlistCard";
 import { venueOutageMessage } from "@/components/admin/match/venueOutageCopy";
+
+/** SFH-170-05: shown when a recompute is refused by the below-md read-only rule. */
+export const RECOMPUTE_READ_ONLY_NOTICE =
+  "Recompute did not run. Open on a tablet or desktop (768px or wider) to recompute the match queue.";
 
 // ─── Types ──────────────────────────────────────────────────────────────
 
@@ -166,11 +171,30 @@ export function AllocatorMatchQueue({
   const [showShortcutHelp, setShowShortcutHelp] = useState(false);
 
   // Viewport classification.
-  //   lg+ (1024+): keyboard shortcuts on, two-pane layout, full write mode
-  //   below lg: single-column stacked layout (list on top, detail below)
-  //   below md (768): read-only banner rendered above the list; the action
-  //     buttons still exist but a visible warning discourages use.
+  //   lg+ (1024+): keyboard shortcuts on, two-pane layout.
+  //   below lg: single-column stacked layout (list on top, detail below).
+  //   below md (768): write controls are hidden by CSS (`hidden` + `md:*`)
+  //     and every write handler returns early. The old sentence — that the
+  //     buttons still exist and a warning merely discourages use — was the
+  //     recorded defect (2026-09-27). Visibility stays CSS because
+  //     useMediaQuery's server snapshot is false; `readOnly` is the guard.
   const isLg = useMediaQuery("(min-width: 1024px)");
+  const isMd = useMediaQuery("(min-width: 768px)");
+  const readOnly = forceReadOnly || !isMd;
+
+  // SFH-170-05: the preferences panel's confirm runs `onRecomputeRequested`
+  // from a setTimeout that closed over the render in which Save was pressed.
+  // If the viewport crossed below md while the PUT was in flight, that
+  // closure still sees the old `readOnly`. The ref carries the current value.
+  const readOnlyRef = useRef(readOnly);
+  useEffect(() => {
+    readOnlyRef.current = readOnly;
+  }, [readOnly]);
+
+  // A recompute refused by the read-only rule says so instead of dropping
+  // silently. Kept apart from `error`, whose early return would replace the
+  // whole queue with the error card for what is not a failure.
+  const [recomputeNotice, setRecomputeNotice] = useState<string | null>(null);
 
   // Track in-flight load requests to prevent a stale response from overwriting
   // a newer one. Incremented on each load(); responses only apply if they match
@@ -192,6 +216,7 @@ export function AllocatorMatchQueue({
     const thisLoadId = ++loadIdRef.current;
     setLoading(true);
     setError(null);
+    setRecomputeNotice(null);
     try {
       const res = await fetch(`${sourceApiPath}/${allocatorId}`);
       if (loadIdRef.current !== thisLoadId) return; // A newer load is in flight
@@ -226,6 +251,10 @@ export function AllocatorMatchQueue({
   const selectedCandidate = data?.candidates[selectedIdx] ?? null;
 
   const handleRecompute = useCallback(async () => {
+    if (readOnly || readOnlyRef.current) {
+      setRecomputeNotice(RECOMPUTE_READ_ONLY_NOTICE);
+      return;
+    }
     if (recomputeIdRef.current !== 0) return; // A recompute is already in flight
     const thisRecomputeId = ++recomputeIdRef.current;
     setRecomputing(true);
@@ -298,10 +327,11 @@ export function AllocatorMatchQueue({
         setRecomputing(false);
       }
     }
-  }, [allocatorId, load]);
+  }, [allocatorId, load, readOnly]);
 
   const handleDecision = useCallback(
     async (strategyId: string, decision: "thumbs_up" | "thumbs_down" | "snoozed", candidateId: string | null) => {
+      if (readOnly) return;
       // Optimistic: local refetch after write
       try {
         const res = await fetch("/api/admin/match/decisions", {
@@ -320,17 +350,17 @@ export function AllocatorMatchQueue({
         alert(`Failed to save decision: ${err instanceof Error ? err.message : "Unknown error"}`);
       }
     },
-    [allocatorId, load],
+    [allocatorId, load, readOnly],
   );
 
   // Keyboard shortcuts — only active at lg+ (1024+) per Sprint 4 T10.1.
-  // `forceReadOnly` is checked by the shared `guard` wrapper below.
+  // `readOnly` (forceReadOnly, or below md) is checked by `guard`.
   const guard = useCallback(
     (fn: () => void) => () => {
-      if (forceReadOnly) return;
+      if (readOnly) return;
       fn();
     },
-    [forceReadOnly],
+    [readOnly],
   );
 
   useKeyboardShortcuts([
@@ -403,6 +433,12 @@ export function AllocatorMatchQueue({
   if (error || !data) {
     return (
       <Card className="border-negative/40">
+        {/* The announcement is the ONLY channel here: this branch returns
+            early so the loaded tree never mounts, and the queue's primary
+            action is a keyboard shortcut (`r`) with no focus change. This
+            surface regressed from a modal alert() — always announced — to a
+            silent inline card. Carries the card's own string (DESIGN-05). */}
+        <LiveRegion message={error || "Failed to load"} assertive />
         <p className="text-small text-negative">{error || "Failed to load"}</p>
         <Button variant="secondary" size="sm" onClick={load} className="mt-3">
           Retry
@@ -455,9 +491,18 @@ export function AllocatorMatchQueue({
         <div className="md:hidden rounded-md border border-accent/30 bg-accent/5 px-4 py-3">
           <p className="text-small text-text-primary">
             <strong className="font-semibold">Read-only on mobile.</strong>{" "}
-            Open on a desktop or tablet (1024px+) to use keyboard shortcuts
-            and record KEEP / SKIP / Send Intro decisions.
+            Open on a tablet or desktop (768px or wider) to record KEEP / SKIP / Send Intro decisions.
           </p>
+        </div>
+      )}
+
+      {/* SFH-170-05: a refused recompute is announced at every width. */}
+      {recomputeNotice && (
+        <div
+          role="status"
+          className="rounded-md border border-accent/30 bg-accent/5 px-4 py-3"
+        >
+          <p className="text-small text-text-primary">{recomputeNotice}</p>
         </div>
       )}
 
@@ -505,13 +550,15 @@ export function AllocatorMatchQueue({
                 size="sm"
                 onClick={handleRecompute}
                 disabled={recomputing}
+                className="hidden md:inline-flex"
               >
                 {recomputing ? "Computing..." : "Recompute now"}
               </Button>
               <Button
                 variant="secondary"
                 size="sm"
-                onClick={() => setShowPreferencesPanel(true)}
+                onClick={guard(() => setShowPreferencesPanel(true))}
+                className="hidden md:inline-flex"
               >
                 Edit preferences
               </Button>
@@ -544,7 +591,13 @@ export function AllocatorMatchQueue({
             No candidates yet for this allocator.
           </p>
           {!forceReadOnly && (
-            <Button variant="primary" size="sm" onClick={handleRecompute} disabled={recomputing}>
+            <Button
+              variant="primary"
+              size="sm"
+              onClick={handleRecompute}
+              disabled={recomputing}
+              className="hidden md:inline-flex"
+            >
               {recomputing ? "Computing..." : "Recompute now"}
             </Button>
           )}
@@ -841,6 +894,7 @@ export function AllocatorMatchQueue({
             load();
           }}
           onRecomputeRequested={handleRecompute}
+          readOnly={readOnly}
         />
       )}
 

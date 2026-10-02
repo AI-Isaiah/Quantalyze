@@ -67,10 +67,18 @@ export interface MemberProgressEntry {
 }
 
 /**
- * The `stitch_composite` compute_jobs status domain (CHECK constraint,
- * migration 20260411144407). `pending` and `running` are in-flight; `done` /
- * `done_pending_children` are terminal-success; `failed_retry` is the queue
- * retrying (progress, NOT a stall); `failed_final` is terminal-failure.
+ * The compute_jobs status domain (CHECK constraint, migration 20260411144407).
+ * `pending` and `running` are in-flight; `done` is terminal-success;
+ * `done_pending_children` is ALSO in flight (167.2 KCS-19): it is a child job
+ * waiting on its parents, flipped to `pending` when the last parent finishes,
+ * and the SQL status bridge and the in-flight unique index both count it
+ * non-terminal; `failed_retry` is the queue retrying (progress, NOT a
+ * stall); `failed_final` is terminal-failure.
+ *
+ * The CHECK is table-wide, so this union is exact for EVERY job kind — which is
+ * what lets 154-04 project the status of a single-key job (`process_key_long`,
+ * `derive_broker_dailies`, `compute_analytics_from_csv`) through the same field
+ * without widening the domain. The name is historical; it is not stitch-only.
  */
 export type StitchJobStatus =
   | "pending"
@@ -85,11 +93,20 @@ export type StitchJobStatus =
  * WHITELIST — these three keys and nothing else. 95-04 consumes this verbatim.
  */
 export interface SyncProgressResponse {
-  /** null = no `stitch_composite` job visible for this strategy (idle). */
+  /**
+   * The latest `stitch_composite` job's status, else the latest
+   * factsheet-chain job's (154-04 widened the fallback to any kind; 167.2 KCS-20
+   * narrowed it to the chain kinds). null = no factsheet-chain job is visible
+   * for this strategy; rows of other kinds (recurring cron jobs) may exist.
+   */
   jobStatus: StitchJobStatus | null;
-  /** Server-computed from the JOB heartbeat only — never `strategy_analytics`. */
+  /**
+   * Server-computed from the STITCH JOB heartbeat only — never
+   * `strategy_analytics`, and never a non-stitch job (nothing refreshes a
+   * heartbeat for those, so a long healthy run would read as stalled).
+   */
   stalled: boolean;
-  /** [] until the worker's first member-progress write. */
+  /** [] until the worker's first member-progress write; [] for non-stitch jobs. */
   memberProgress: MemberProgressEntry[];
   /**
    * SF-3 — TRUE only on the `if (rpcError)` degrade branch (the owner-scoped
@@ -100,7 +117,31 @@ export interface SyncProgressResponse {
    * degrade body until a real read arrives.
    */
   degraded?: boolean;
+  /**
+   * 167.2-REVIEW-R2 IN-04 / SFH-R2 R2-L1: present only on a DEGRADED body
+   * whose cause is DETERMINISTIC, so a reload or a retry gives the same
+   * answer: `window_full` (the job window is still full at the RPC cap with no
+   * factsheet-chain row) or `bad_status` (the selected job's status is outside
+   * the six-value domain). A closed, non-sensitive string. Absent on a
+   * transient degrade (a failed or thrown read) and on every real read.
+   */
+  degradedReason?: DegradedReason;
+  /**
+   * LOW-8 — present (and `true`) only on a real read where a job of a kind
+   * that is NEITHER a factsheet-chain kind NOR `stitch_composite` (a recurring
+   * `reconcile_strategy`, `poll_positions`, `sync_funding`, ...) is still in
+   * flight. The SQL status bridge `sync_strategy_analytics_status` holds
+   * `computing` while ANY job of the strategy is non-terminal, whatever its
+   * kind, while `jobStatus` names the factsheet job only. Without this field a
+   * finished chain plus a pending recurring job read as "chain done, status
+   * stuck at computing". Omitted when false, so every existing body stays
+   * byte-identical.
+   */
+  otherJobInFlight?: true;
 }
+
+/** 167.2-REVIEW-R2 IN-04: the deterministic degrade causes (see `degradedReason`). */
+export type DegradedReason = "window_full" | "bad_status";
 
 /**
  * Stall threshold: a `running` job whose heartbeat

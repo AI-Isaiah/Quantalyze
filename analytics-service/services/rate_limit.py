@@ -107,9 +107,12 @@ per-tenant quota lives in-handler against ``req.user_id``
 (``_check_simulator_user_rate``), so the IP key is a ceiling, not the quota — but
 the ceiling is still platform-wide behind the edge proxy.
 
-⚠️ **No limiter at all:** ``routers/match.py`` ``POST /api/match/recompute`` and
-``GET /api/match/eval``, both seam-reachable (``analytics-client.ts:399,418``).
-RATE-03 / Phase 146 owns adding one. Recorded here, not fixed here.
+Phase 146-02 / RATE-03 — the match gap, CLOSED: ``routers/match.py``
+``POST /api/match/recompute`` and ``GET /api/match/eval`` now carry
+``30/minute`` limits keyed by ``partial(tenant_or_platform_key, scope=...)``
+(scopes ``match_recompute`` / ``match_eval``). ``POST /api/match/cron-recompute``
+deliberately stays unlimited: cron surface, service-key gated (requirements
+decision #7 analogy; A2 recorded OUT of scope).
 
 ⚠️ **Storage is ``memory://`` and therefore per-replica** (ASSUMPTION-3). With N
 Railway replicas every number above is N× looser and buckets reset unevenly on
@@ -394,12 +397,18 @@ def tenant_or_platform_key(request: Request, scope: str) -> str:
     credential-hash form because there the credential genuinely varies per
     caller class.
 
-    **This becomes per-tenant on its own.** ``src/lib/analytics-client.ts``
-    mints no ``X-Tenant-Claim`` today (a recorded 140.2 obligation). The moment
-    it does, the claim arms above fire and these routes acquire real per-tenant
-    isolation with **no change to this function and no change to any decorator**
-    — that is why the claimless case is a documented fallback rather than a
-    hard-coded platform key.
+    **This IS per-tenant now.** ⚠️ CORRECTED 2026-08-26 (phase 163 review): this
+    paragraph used to say ``src/lib/analytics-client.ts`` mints no
+    ``X-Tenant-Claim``, describing the 140.2 obligation as outstanding. That is
+    FALSE at HEAD — ``analytics-client.ts:468`` sets the header
+    UNCONDITIONALLY in ``analyticsRequest``'s shared header block, so every
+    route reached through that wrapper arrives WITH a claim and the claim arms
+    above fire on real traffic.
+
+    The design point the old wording was making still stands, and is now
+    demonstrated rather than promised: the claimless case remains a documented
+    fallback rather than a hard-coded platform key, which is why the transition
+    needed **no change to this function and no change to any decorator**.
 
     **No WARN on the claimless arm**, deliberately — unlike
     :func:`tenant_rate_limit_key`, where an absent claim means "a caller that

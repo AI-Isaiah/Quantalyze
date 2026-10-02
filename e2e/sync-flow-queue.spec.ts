@@ -40,8 +40,11 @@ test.describe("Sync flow via compute_jobs queue", () => {
   });
 
   test.describe("ApiKeyManager sync button — queue path", () => {
+    // 140.5-06: was `test.skip(true, …)` while its own reason named the env var
+    // that should gate it. Absent from every .github/workflows file, so CI
+    // behaviour is unchanged; locally it is now opt-in runnable.
     test.skip(
-      true,
+      !process.env.PLAYWRIGHT_TEST_STRATEGY_ID,
       "Requires authenticated session with a strategy that has a linked API key, " +
         "and USE_COMPUTE_JOBS_QUEUE=true on the server. " +
         "Set PLAYWRIGHT_TEST_STRATEGY_ID to run.",

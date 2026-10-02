@@ -32,41 +32,83 @@ import {
   type AllocatorMandateForFit,
   type MandateFitTier,
 } from "../lib/mandate-fit";
+import { YoursChip } from "./YoursChip";
+// Review WR-05 — the ONE declaration of the added-strategy shape. Type-only, so
+// nothing from scenario-state.ts reaches this component's runtime bundle.
+import type { AddedStrategy as PersistedAddedStrategy } from "../lib/scenario-state";
+// Review F2 — the ONE declaration of the browse wire row. Type-only, so the
+// route handler's runtime (supabase server client, rate limiter, Sentry) is
+// erased at compile time and never enters this client component's bundle.
+import type { BrowseStrategyRow } from "@/app/api/strategies/browse/route";
 
 export type { AllocatorMandateForFit } from "../lib/mandate-fit";
 
 /**
- * Row shape returned by GET /api/strategies/browse (Plan 03). Defined here
- * to keep the drawer self-contained — when Plan 03 ships in this branch,
- * this can be re-exported from the route handler instead.
+ * Row shape returned by GET /api/strategies/browse — DERIVED from the route's
+ * own exported wire contract, not re-declared.
+ *
+ * Review F2 (2026-08-08), the WR-05 idiom applied a second time. This used to
+ * be a hand-written parallel interface: same six-to-nine fields, independently
+ * maintained, and already DIVERGED on every field this branch added
+ * (`isOwn: boolean` on the route against `isOwn?: boolean` here;
+ * `is_example: boolean` against `is_example?: boolean`; `created_at`/`status`
+ * duplicated verbatim). A field added to the route and not to this copy would
+ * have errored NOWHERE — the drawer would simply never see it, which is a silent
+ * feature-drop, not a compile failure. That is the exact shape WR-05 (below)
+ * eliminated for `AddedStrategy`.
+ *
+ * ⭐ The optionality difference is REAL and is preserved deliberately, not
+ * collapsed. This component's fetch does `(await res.json()) as {...}` — an
+ * UNCHECKED cast of a network response, with no runtime validation anywhere
+ * between the wire and these fields. What the route PROMISES to emit and what
+ * this component may ASSUME it received are two different claims:
+ *   * `isOwn` / `is_example` are `boolean` on the route (emitted on every row,
+ *     `false` included) but must stay OPTIONAL here, because the PRE-152 /
+ *     PRE-29 wire shapes omit them and a stale cached response is not a
+ *     hypothetical. Absent → UNKNOWN → no chip / no tag, never a fabricated
+ *     ownership or provenance claim.
+ *   * `created_at` / `status` are already optional on BOTH sides — the route
+ *     emits them only when `isOwn === true` (owner-only; a creation date is a
+ *     correlation vector against the pseudonymised codename).
+ * So the boundary widening is expressed as a `Partial<Pick<…>>` over the two
+ * fields that need it. The field LIST still flows from ONE declaration: add a
+ * field to `BrowseStrategyRow` and it appears here; rename one and this file
+ * stops compiling.
+ *
+ * Type-only import, so nothing from the route module reaches this client
+ * component's runtime bundle — `import type` is fully erased under
+ * `isolatedModules` (the same guarantee the `PersistedAddedStrategy` import
+ * below relies on).
  */
-export interface StrategyBrowseRow {
-  id: string;
-  name: string;
-  codename: string | null;
-  markets: string[];
-  strategy_types: string[];
-  /**
-   * Phase 29 (UNIFY-03 UI) — true for example-universe rows in the merged
-   * catalog (`is_example = true AND status = 'published'`). Plan 02 emits this
-   * from GET /api/strategies/browse; it gates the neutral-outline "Example"
-   * provenance tag rendered next to the row name. Optional + absent → no tag.
-   */
-  is_example?: boolean;
-}
+export type StrategyBrowseRow = Omit<
+  BrowseStrategyRow,
+  "isOwn" | "is_example"
+> &
+  Partial<Pick<BrowseStrategyRow, "isOwn" | "is_example">>;
 
 /**
- * Structural contract for the onAdd callback payload — matches the shape
- * Plan 01's scenario-state.ts `AddedStrategy` expects (id + name + markets
- * + strategy_types). The composer (Plan 06) wires this directly to the
+ * The onAdd callback payload — DERIVED from `scenario-state.ts`'s
+ * `AddedStrategy`, which the composer feeds straight into the
  * `addStrategyBrowse` mutator.
+ *
+ * Review WR-05 — this used to be a hand-written near-copy of the persisted
+ * interface: same name, same four fields, but `isOwn?: boolean` here against
+ * `isOwn?: boolean | null` there. The assignment happened to compile
+ * (`boolean | undefined` is assignable to `boolean | null | undefined`), which
+ * is exactly what made it a silent drift surface — the direction that does NOT
+ * compile was one refactor away, and a field added to one and not the other
+ * would have errored nowhere. This file's own comment had to cross-reference
+ * the other file to explain its nullability, which was the tell.
+ *
+ * The ONLY intended difference is the id's brand: `StrategyForBuilderId` is
+ * minted inside scenario-state's mutators, and the drawer holds a raw wire
+ * string, so the id is widened here and the composer casts at its two add
+ * seams (the existing construction boundary). Every other field — present and
+ * future — now flows from the single declaration.
  */
-export interface AddedStrategy {
+export type AddedStrategy = Omit<PersistedAddedStrategy, "id"> & {
   id: string;
-  name: string;
-  markets: string[];
-  strategy_types: string[];
-}
+};
 
 export interface StrategyBrowseDrawerProps {
   isOpen: boolean;
@@ -102,6 +144,26 @@ const TIER_BG: Record<MandateFitTier, string> = {
   yellow: "rgba(217,119,6,0.10)",
   red: "rgba(220,38,38,0.10)",
 };
+
+/**
+ * Phase 152 (SCEN-05) — collision key for the own-vs-own duplicate line. Trim +
+ * lowercase so "alpha centauri " and "Alpha Centauri" are recognised as the same
+ * name: a raw-string key would leave the founder's real pair undisambiguated the
+ * moment one of them carries a stray trailing space.
+ */
+const normalizeStrategyName = (name: string) => name.trim().toLowerCase();
+
+/**
+ * Phase 152 (SCEN-05) — render casing for the raw `strategies.status` enum
+ * (`draft` / `pending_review` / `published` / `archived` / `private`). The route
+ * ships the DB value verbatim rather than inventing a second vocabulary, so the
+ * product casing happens here: underscores to spaces, first letter capitalized.
+ * The raw enum must never reach the DOM (UI-SPEC copy contract).
+ */
+function productCaseStatus(raw: string): string {
+  const spaced = raw.replace(/_/g, " ");
+  return spaced.charAt(0).toUpperCase() + spaced.slice(1);
+}
 
 // M-0107 — memoized filter pill. With a stable `onToggle` (useCallback in the
 // parent) it re-renders only when its own `pressed` flips, so a search
@@ -304,6 +366,33 @@ export function StrategyBrowseDrawer({
     [strategies, q, activeMarkets, activeTypes, allocatorMandate],
   );
 
+  // Phase 152 (SCEN-05) — the set of normalized names held by TWO OR MORE of
+  // the viewer's OWN rows.
+  //
+  // D-2: the scope is `filtered`, NOT `strategies`. The line exists to break a
+  // tie the allocator can actually see, so narrowing the search until only one
+  // of the two "Alpha Centauri" rows survives must clear it — a collision set
+  // computed over the full fetch would strand the line on a row that is no
+  // longer ambiguous, turning a tiebreaker into a metadata dump.
+  //
+  // Own-only by construction (`s.isOwn === true` in pass 1): two third-party
+  // rows sharing a pseudonymised label are not the viewer's problem to resolve,
+  // and their creation dates are a correlation vector the codename exists to
+  // hide. Two O(n) passes — count, then threshold — never a quadratic scan.
+  const ownNameCollisions = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const { s } of filtered) {
+      if (s.isOwn !== true) continue;
+      const key = normalizeStrategyName(s.name);
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+    const collisions = new Set<string>();
+    for (const [key, count] of counts) {
+      if (count >= 2) collisions.add(key);
+    }
+    return collisions;
+  }, [filtered]);
+
   // M-0107 — stable per-kind toggle handlers (functional setState, no Set dep)
   // so the memoized FilterPill children re-render only when their own `pressed`
   // flips, not on every keystroke.
@@ -336,6 +425,13 @@ export function StrategyBrowseDrawer({
       name: s.name,
       markets: s.markets,
       strategy_types: s.strategy_types,
+      // Phase 152 (SCEN-02) — construction site 4-of-4 for an AddedStrategy
+      // payload, and the only one this file's suite can reach: the composer
+      // suite module-mocks this drawer away, so a drop here reddens NO test
+      // over there. Straight pass-through by design — `undefined` stays
+      // `undefined` (never `?? false`, never a default): a fabricated boolean
+      // would render a "Yours" chip, or deny one, on no evidence.
+      isOwn: s.isOwn,
     });
     setRecentlyAdded((prev) => {
       const next = new Set(prev);
@@ -530,6 +626,19 @@ export function StrategyBrowseDrawer({
             {filtered.map(({ s, tier }) => {
               const dimmed = permanentlyDimmed.has(s.id);
               const justAdded = recentlyAdded.has(s.id);
+              // Phase 152 (SCEN-05) / review WR-04 — the OWNER-ONLY creation
+              // timestamp, PARSED here so the render below can gate on a real
+              // Date. `null` covers both an absent key (pre-152 wire shape) and
+              // a present-but-unparseable string; neither may reach
+              // `toLocaleDateString`, which renders the literal "Invalid Date"
+              // rather than throwing.
+              const parsedCreatedAt =
+                typeof s.created_at === "string" ? new Date(s.created_at) : null;
+              const createdAt =
+                parsedCreatedAt != null &&
+                !Number.isNaN(parsedCreatedAt.getTime())
+                  ? parsedCreatedAt
+                  : null;
               return (
                 <li
                   key={s.id}
@@ -556,12 +665,85 @@ export function StrategyBrowseDrawer({
                             Example
                           </span>
                         )}
+                        {/* Phase 152 (SCEN-02, D-4) — ownership chip on the
+                            viewer's OWN rows. Parity with the composer-row chip
+                            (152-05) via the SAME component: one recipe, two
+                            sites, so ownership can never look like two
+                            different things.
+
+                            It is NOT a substitute for the SCEN-05 dedup line
+                            below — both rows of the founder's duplicate are own
+                            rows, so a chip on each disambiguates nothing.
+
+                            Gate is `=== true`, never `!== false`: on the pre-152
+                            wire shape `isOwn` is absent, and absent means
+                            UNKNOWN, not "not yours". Testid sits outside the
+                            `browse-add-` family (PR #620). */}
+                        {s.isOwn === true && (
+                          <YoursChip
+                            data-testid={`browse-yours-${s.id}`}
+                            className="shrink-0"
+                          />
+                        )}
                       </div>
                       <div className="mt-1 text-xs text-text-muted">
                         {s.codename ?? ""}
                         {s.codename && s.markets.length > 0 ? " · " : ""}
                         {s.markets.join(" · ")}
                       </div>
+                      {/* Phase 152 (SCEN-05) — own-vs-own duplicate
+                          disambiguation. A second sibling of the codename line
+                          above, same recipe, muted: a duplicate name is a fact
+                          to resolve, not an error, so no warning tint.
+
+                          Three independent gates, all required. `isOwn === true`
+                          (never `!== false`) is defence in depth — the route
+                          already withholds created_at/status from third-party
+                          rows, and neither fence trusts the other.
+
+                          Review WR-04 — the third gate is a PARSE, not a
+                          `typeof`. The typeof check alone covered an ABSENT
+                          key (the pre-152 wire shape) but not a
+                          present-and-unparseable string, which flowed straight
+                          into `new Date(…).toLocaleDateString(…)` and rendered
+                          the literal text "Created Invalid Date". The
+                          first-party route only emits Postgres ISO timestamps,
+                          so that was not reachable today — it becomes reachable
+                          the moment a second producer (a fixture, a cached
+                          payload, a future aggregated endpoint) feeds
+                          `strategies` into this drawer, and the comment would
+                          have told the next reader it was already handled.
+                          `createdAt` is now the parsed Date or null, and null
+                          renders NO line — the same omit-when-absent branch the
+                          status segment uses.
+
+                          D-1: there is deliberately no "{N} keys" segment. It
+                          would cost a second query per drawer open, and
+                          created_at alone already resolves the founder's real
+                          case (two private rows 15 days apart) — UI-SPEC's own
+                          omit-when-absent branch over inventing a claim.
+
+                          Testid is OUTSIDE the `browse-add-` family — see the
+                          PR #620 rationale below. */}
+                      {s.isOwn === true &&
+                        createdAt != null &&
+                        ownNameCollisions.has(
+                          normalizeStrategyName(s.name),
+                        ) && (
+                          <div
+                            className="mt-1 text-xs text-text-muted"
+                            data-testid={`browse-dedup-${s.id}`}
+                          >
+                            {`Created ${createdAt.toLocaleDateString("en-US", {
+                              month: "short",
+                              day: "numeric",
+                              year: "numeric",
+                            })}`}
+                            {typeof s.status === "string" && s.status.length > 0
+                              ? ` · ${productCaseStatus(s.status)}`
+                              : ""}
+                          </div>
+                        )}
                       <span
                         className={`mt-2 inline-block rounded px-2 py-0.5 text-fixed-11 font-medium ${TIER_CLASS[tier]}`}
                         style={{ background: TIER_BG[tier] }}

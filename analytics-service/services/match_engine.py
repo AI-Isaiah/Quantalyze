@@ -32,10 +32,12 @@ import pandas as pd
 # Import existing private helpers without extracting them. Aliased below
 # (compute_sharpe / avg_corr / max_drawdown) so the regression test can import
 # them from this module too.
+from services.dispersion import pairwise_correlation_or_none
 from services.match_defaults import merge_with_defaults
 from services.portfolio_optimizer import (
     _avg_corr,
     _compute_sharpe,
+    _leg_is_flat,
     _max_drawdown,
 )
 
@@ -289,7 +291,9 @@ def _compute_corr_with_portfolio(
     ).dropna()
     if len(aligned) < min_overlap_days:
         return None
-    corr = aligned["port"].corr(aligned["cand"])
+    # Phase 166.1 (C5, D-02): None when either leg does not disperse, as for an
+    # all-zero leg; pandas divides a constant yield's residue std instead.
+    corr = pairwise_correlation_or_none(aligned["port"], aligned["cand"])
     return _safe_float(corr)
 
 
@@ -324,11 +328,18 @@ def _eligibility_check_hard_inner(
     owned_set: set[str],
     thumbs_down_set: set[str],
     explicitly_excluded_set: set[str],
+    authored_set: Optional[set[str]] = None,
 ) -> tuple[Optional[ExclusionReason], Optional[str]]:
     """Shared hard-only eligibility check. Returns (reason_enum, provenance) or (None, None)."""
     sid = candidate["strategy_id"]
     if sid in owned_set:
         return (ExclusionReason.OWNED, "portfolio")
+    # Phase 169.3 / D-05: a strategy the allocator AUTHORED is theirs too.
+    # Same OWNED reason (no new enum member, so the SQL CHECK and the
+    # exclusion-reason census do not move); the provenance tells the two
+    # apart in the persisted audit row.
+    if authored_set and sid in authored_set:
+        return (ExclusionReason.OWNED, "authored")
     if sid in thumbs_down_set:
         return (ExclusionReason.THUMBS_DOWN, "match_decision")
     # H-0705 fix: explicit exclusion set is honored as a hard filter so callers
@@ -348,6 +359,7 @@ def _eligibility_check(
     owned_set: set[str],
     thumbs_down_set: set[str],
     explicitly_excluded_set: Optional[set[str]] = None,
+    authored_set: Optional[set[str]] = None,
 ) -> tuple[Optional[str], Optional[str]]:
     """Run eligibility checks. Returns (exclusion_reason, exclusion_provenance) or (None, None).
 
@@ -358,6 +370,7 @@ def _eligibility_check(
         explicitly_excluded_set = set()
     hard_reason, hard_provenance = _eligibility_check_hard_inner(
         candidate, preferences, owned_set, thumbs_down_set, explicitly_excluded_set,
+        authored_set,
     )
     if hard_reason is not None:
         return (hard_reason.value, hard_provenance)
@@ -404,12 +417,14 @@ def _eligibility_check_hard_only(
     owned_set: set[str],
     thumbs_down_set: set[str],
     explicitly_excluded_set: Optional[set[str]] = None,
+    authored_set: Optional[set[str]] = None,
 ) -> tuple[Optional[str], Optional[str]]:
     """Same as _eligibility_check but only the hard rules. Used during relaxation."""
     if explicitly_excluded_set is None:
         explicitly_excluded_set = set()
     hard_reason, hard_provenance = _eligibility_check_hard_inner(
         candidate, preferences, owned_set, thumbs_down_set, explicitly_excluded_set,
+        authored_set,
     )
     if hard_reason is None:
         return (None, None)
@@ -704,9 +719,14 @@ def _compute_portfolio_fit_components(
         if current_sharpe is not None and new_sharpe is not None
         else None
     )
+    # Round-1 WR-03 (166.1): `_avg_corr` skips a flat column's pairs, so a flat
+    # candidate would leave the two averages equal and report a fabricated 0.0
+    # reduction. Its correlation with the book does not exist (166.1 D7).
     corr_reduction = (
         current_avg_corr - new_avg_corr
-        if current_avg_corr is not None and new_avg_corr is not None
+        if current_avg_corr is not None
+        and new_avg_corr is not None
+        and not _leg_is_flat(aligned, "__cand__")
         else None
     )
     dd_improvement = (
@@ -836,6 +856,18 @@ def score_candidates(
     """
     prefs = merge_with_defaults(preferences or {})
     owned_set: set[str] = {ps["strategy_id"] for ps in portfolio_strategies}
+    # Phase 169.3 / D-05: `owned_set` is the PORTFOLIO; a strategy this
+    # allocator manages (`manager_id`, projected from the strategy's owner in
+    # routers/match.py `_load_candidate_universe`) is excluded the same hard
+    # way, so nobody is recommended their own strategy. A candidate with no
+    # `manager_id` matches nothing here. An already-persisted batch clears on
+    # the next daily recompute.
+    authored_set: set[str] = {
+        cand["strategy_id"]
+        for cand in candidate_strategies
+        if cand.get("manager_id") is not None
+        and cand.get("manager_id") == allocator_id
+    }
     if excluded_strategy_ids is None:
         excluded_strategy_ids = set()
     if thumbs_down_ids is None:
@@ -850,6 +882,7 @@ def score_candidates(
     for cand in candidate_strategies:
         reason, provenance = _eligibility_check(
             cand, prefs, owned_set, thumbs_down_ids, excluded_strategy_ids,
+            authored_set,
         )
         if reason is None:
             eligible.append(cand)
@@ -896,6 +929,7 @@ def score_candidates(
         for cand in candidate_strategies:
             reason, provenance = _eligibility_check_hard_only(
                 cand, relaxed_prefs, owned_set, thumbs_down_ids, excluded_strategy_ids,
+                authored_set,
             )
             if reason is None:
                 eligible.append(cand)

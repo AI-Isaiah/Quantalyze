@@ -31,7 +31,7 @@
  *
  * Total time budget: <60s (test.setTimeout(60_000)).
  */
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./helpers/hydration-guard";
 import { createClient } from "@supabase/supabase-js";
 import {
   seedTestAllocator,

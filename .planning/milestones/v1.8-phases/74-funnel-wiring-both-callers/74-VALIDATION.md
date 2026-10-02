@@ -22,7 +22,7 @@ created: 2026-07-05
 | **Config file** | `analytics-service/pytest.ini` / `pyproject.toml` |
 | **Quick run command** | `cd analytics-service && $PY312 -m pytest tests/test_transforms*.py tests/test_nav_twr.py -q` |
 | **Full suite command** | `cd analytics-service && $PY312 -m pytest -q` |
-| **Interpreter** | `$PY312` = `/private/tmp/claude-501/-Users-helios-mammut-claude-projects-quantalyze/fcce1bd5-15ef-4e42-adb9-85cfc9ad484c/scratchpad/venv312/bin/python` (local 3.14 SIGSEGVs on pandas — MANDATORY) |
+| **Interpreter** | `$PY312` = `/private/tmp/claude-501/<project-scratch>/fcce1bd5-15ef-4e42-adb9-85cfc9ad484c/scratchpad/venv312/bin/python` (local 3.14 SIGSEGVs on pandas — MANDATORY) |
 | **Estimated runtime** | ~50s full suite |
 
 ---

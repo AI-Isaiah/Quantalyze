@@ -8,7 +8,7 @@ terminator, and the CoinGecko fallback triggered when Binance raises.
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -207,9 +207,12 @@ async def test_get_benchmark_returns_uses_fresh_cache() -> None:
     from services.benchmark import get_benchmark_returns
 
     now = datetime.now(timezone.utc)
+    # Completed days only, yesterday back 15: today's row is a partial-day
+    # close and a cache short of the requested days is a miss (review-fix
+    # round 1, MEDIUM-5 and MEDIUM-6).
     cached_rows = [
         {
-            "date": (now - timedelta(days=i)).strftime("%Y-%m-%d"),
+            "date": (now - timedelta(days=i + 1)).strftime("%Y-%m-%d"),
             "close_price": 100.0 + i,
             "symbol": "BTC",
         }
@@ -221,9 +224,13 @@ async def test_get_benchmark_returns_uses_fresh_cache() -> None:
     async def _run(fn):
         return fn()
 
+    no_fetch = AsyncMock(side_effect=AssertionError("a fresh cache must not refetch"))
     with patch("services.benchmark.get_supabase", return_value=mock_supabase), \
-         patch("services.benchmark.db_execute", side_effect=_run):
+         patch("services.benchmark.db_execute", side_effect=_run), \
+         patch("services.benchmark.fetch_btc_daily_prices", no_fetch):
         returns, stale = await get_benchmark_returns(days=15)
+
+    no_fetch.assert_not_awaited()
 
     assert stale is False
     assert returns is not None

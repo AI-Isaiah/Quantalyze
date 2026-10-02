@@ -43,6 +43,18 @@ from tests.fixtures.deribit_flow_fixtures import (
 )
 
 
+# MT5-12 (D-15/D-16): every combiner in broker_dailies.py stamps a
+# `series_completeness` verdict on its meta, and the derive persist seam now
+# REFUSES (permanent FAILED) a series whose meta lacks a recognised one. A
+# combiner mock that omits the key is therefore no longer a faithful stand-in
+# for the producer it replaces, so the mocks below carry the verdict the REAL
+# function emits: `combine_realized_and_funding` (binance/bybit/okx) always
+# stamps fill_derived_unproven; `combine_native_ledger` (deribit) stamps
+# ledger_complete. Hand-typed literals — nothing here imports the registry.
+_CCXT_VERDICT = "fill_derived_unproven"
+_LEDGER_VERDICT = "ledger_complete"
+
+
 def _two_day_returns() -> pd.Series:
     """A >=2-day dense daily-return series (the upsert path requires >=2)."""
     return pd.Series(
@@ -101,9 +113,15 @@ def _build_ctx(*, key_row: dict, strategy_row: dict | None) -> tuple[MagicMock, 
                 record["filters"][f"lte:{col}"] = val
                 return chain
 
+            def _in(col: str, val: object) -> MagicMock:
+                # C3 topic H: the reconcile names the absent days explicitly.
+                record["filters"][f"in:{col}"] = list(val)  # type: ignore[call-overload]
+                return chain
+
             chain.eq.side_effect = _eq
             chain.gte.side_effect = _gte
             chain.lte.side_effect = _lte
+            chain.in_.side_effect = _in
             chain.execute.return_value = MagicMock(data=[], count=0)
             return chain
 
@@ -145,7 +163,15 @@ def _patches(ctx: MagicMock, *, key_mode: bool, returns: pd.Series) -> list:
         ),
         patch(
             "services.broker_dailies.combine_realized_and_funding",
-            new=MagicMock(return_value=(returns, {"used_heuristic_capital": False})),
+            new=MagicMock(
+                return_value=(
+                    returns,
+                    {
+                        "used_heuristic_capital": False,
+                        "series_completeness": _CCXT_VERDICT,
+                    },
+                )
+            ),
         ),
         patch(
             "services.job_worker.db_execute",
@@ -346,7 +372,16 @@ class TestStrategyModeNonRegression:
         with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6]:
             result = await run_derive_broker_dailies_job(job)
 
-        assert result.outcome == DispatchOutcome.DONE
+        # F1 (161.1 silent-failure audit): FAILED, not DONE. This arm stamps a
+        # terminal failure, and DONE routed the job to mark_compute_job_done →
+        # sync_strategy_analytics_status branch (c), which NULLs
+        # computation_error and stamps computed_at = now() — overwriting the very
+        # stamp asserted below with a fresh-looking 'complete'. The stamp and the
+        # outcome have to agree or only one of them survives the next RPC. See
+        # tests/test_derive_silent_failure_f1_f4_f7.py for the end-to-end drive
+        # through dispatch_tick.
+        assert result.outcome == DispatchOutcome.FAILED
+        assert result.error_kind == "permanent"
         sa_upserts = [u for u in capture["upserts"] if u[0] == "strategy_analytics"]
         assert len(sa_upserts) == 1, (
             f"strategy-mode <2-day must stamp strategy_analytics; got {capture['upserts']!r}"
@@ -558,7 +593,11 @@ class TestNaNSafeCsvDailyReturnsUpsert:
         combine = MagicMock(
             return_value=(
                 self._nan_bearing_returns(),
-                {"used_heuristic_capital": False, "negative_nav_guard": True},
+                {
+                    "used_heuristic_capital": False,
+                    "negative_nav_guard": True,
+                    "series_completeness": _CCXT_VERDICT,
+                },
             )
         )
         patches = _patches_with_combine(ctx, key_mode=False, combine_mock=combine)
@@ -586,7 +625,11 @@ class TestNaNSafeCsvDailyReturnsUpsert:
         combine = MagicMock(
             return_value=(
                 self._nan_bearing_returns(),
-                {"used_heuristic_capital": False, "negative_nav_guard": True},
+                {
+                    "used_heuristic_capital": False,
+                    "negative_nav_guard": True,
+                    "series_completeness": _CCXT_VERDICT,
+                },
             )
         )
         patches = _patches_with_combine(ctx, key_mode=True, combine_mock=combine)
@@ -827,12 +870,14 @@ class TestDerivePersistReconcilesAxis:
     legacy USD rows that populated the table, so recomputed track records would
     silently mix stale legacy returns into refused days.
 
-    The fix reconciles the axis: DELETE the strategy's csv_daily_returns rows
-    inside the derive's authoritative span [returns.index.min, returns.index.max]
-    (bounded gte/lte on `date`, scoped by strategy_id/api_key_id), then re-insert
-    the fresh payload. A refused interior/leading day becomes honestly ABSENT.
+    The fix reconciles the axis so the stored span equals the fresh payload.
+    Since C3 topic H it UPSERTS the payload first, then DELETES the span's
+    calendar days the payload does not carry (an explicit `in` list, still
+    bounded gte/lte on `date` to [returns.index.min, returns.index.max] and
+    scoped by strategy_id/api_key_id), so no reader ever finds a rebuilt day
+    absent. A refused interior/leading day becomes honestly ABSENT.
 
-    SPAN bound (never delete legitimate out-of-scope history): the delete is a
+    SPAN bound (never delete legitimate out-of-scope history): the delete is
     RANGED gte/lte on the dense reconstructed calendar — a row OLDER than
     returns.index.min() (written by an earlier, wider-window retention derive)
     is strictly < span_start and CANNOT be reached. For a full_history Deribit
@@ -840,7 +885,8 @@ class TestDerivePersistReconcilesAxis:
     is only the reconstructed window.
 
     Neuter: keep the upsert-only persist (drop the span DELETE) -> capture
-    ["deletes"] has no csv_daily_returns entry -> every assertion here reddens.
+    ["deletes"] has no csv_daily_returns entry -> the refused-day assertions
+    here redden.
     """
 
     @staticmethod
@@ -861,7 +907,11 @@ class TestDerivePersistReconcilesAxis:
         combine = MagicMock(
             return_value=(
                 self._refused_interior_returns(),
-                {"used_heuristic_capital": False, "negative_nav_guard": True},
+                {
+                    "used_heuristic_capital": False,
+                    "negative_nav_guard": True,
+                    "series_completeness": _CCXT_VERDICT,
+                },
             )
         )
         patches = _patches_with_combine(ctx, key_mode=False, combine_mock=combine)
@@ -886,8 +936,11 @@ class TestDerivePersistReconcilesAxis:
         assert span_start == "2024-05-01"
         assert span_end == "2024-05-03"
         # The REFUSED day D falls INSIDE the span -> its stale row is reconciled
-        # away (deleted, then NOT re-inserted since the payload omits it).
+        # away: it is the ONLY day the delete names (the payload omits it).
         assert span_start <= "2024-05-02" <= span_end
+        assert filters.get("in:date") == ["2024-05-02"], (
+            f"the delete must name exactly the refused day; got {filters!r}"
+        )
 
         # Out-of-scope history (a day BEFORE span_start) is unreachable by the
         # ranged delete -> legitimate older rows from a wider-window derive survive.
@@ -903,19 +956,22 @@ class TestDerivePersistReconcilesAxis:
             f"refused day D must not be re-inserted; got {upsert_dates!r}"
         )
 
-        # Authoritative order: the span DELETE precedes the re-insert upsert so a
-        # crash can only leave the span EMPTY (self-healing on retry), never a
-        # half-stale mix.
+        # C3 topic H order: the upsert precedes the reconcile DELETE, so no
+        # reader ever finds a rebuilt day absent. A crash between them leaves the
+        # refused day's stale row present until the retry heals it; it can no
+        # longer leave the span EMPTY. (The previous order, delete first, was
+        # pinned here; the reader-level proof is tests/test_dailies_writer_no_hole.py.)
         ops = [o for o in capture["ops"] if o[1] == "csv_daily_returns"]
-        assert ops[0][0] == "delete", (
-            f"span delete must precede the re-insert upsert; got {ops!r}"
+        assert ops == [("upsert", "csv_daily_returns"), ("delete", "csv_daily_returns")], (
+            f"the upsert must precede the reconcile delete; got {ops!r}"
         )
 
     @pytest.mark.asyncio
     async def test_strategy_mode_clean_series_deletes_and_reinserts_all(self) -> None:
-        """A day the fresh derive LEGITIMATELY still has is NOT lost: the span
-        delete + re-insert nets to the full clean payload present (no refused
-        days -> nothing dropped)."""
+        """A day the fresh derive LEGITIMATELY still has is NOT lost: with no
+        refused day the payload covers the whole span, so since C3 topic H there
+        is nothing to delete and the upsert alone leaves the full clean payload
+        present (no refused days -> nothing dropped)."""
         ctx, capture = _build_ctx(
             key_row={"id": "key-c", "exchange": "binance", "user_id": "user-1"},
             strategy_row={"id": "strat-c", "user_id": "user-1"},
@@ -927,11 +983,11 @@ class TestDerivePersistReconcilesAxis:
 
         assert result.outcome == DispatchOutcome.DONE
         csv_deletes = [d for d in capture["deletes"] if d["table"] == "csv_daily_returns"]
-        assert len(csv_deletes) == 1
-        filters = csv_deletes[0]["filters"]
-        assert filters.get("gte:date") == "2024-05-01"
-        assert filters.get("lte:date") == "2024-05-02"
-        # Both clean days are re-inserted -> retained history is preserved.
+        assert csv_deletes == [], (
+            f"no day of the span is absent from the payload, so nothing may be "
+            f"deleted; got {csv_deletes!r}"
+        )
+        # Both clean days are upserted -> retained history is preserved.
         csv_upserts = [u for u in capture["upserts"] if u[0] == "csv_daily_returns"]
         _name, payload, _oc = csv_upserts[0]
         assert sorted(row["date"] for row in payload) == ["2024-05-01", "2024-05-02"]
@@ -948,7 +1004,11 @@ class TestDerivePersistReconcilesAxis:
         combine = MagicMock(
             return_value=(
                 self._refused_interior_returns(),
-                {"used_heuristic_capital": False, "negative_nav_guard": True},
+                {
+                    "used_heuristic_capital": False,
+                    "negative_nav_guard": True,
+                    "series_completeness": _CCXT_VERDICT,
+                },
             )
         )
         patches = _patches_with_combine(ctx, key_mode=True, combine_mock=combine)
@@ -1079,10 +1139,14 @@ class TestCashSettlementSeriesPersist:
             _report(has_option_activity=True),
         ]
         ledger_mock, _calls = _recording_ledger(reports)
+        _deribit_meta = {
+            "used_heuristic_capital": False,
+            "series_completeness": _LEDGER_VERDICT,
+        }
         combine = MagicMock(side_effect=[
-            (_cash_series(), {"used_heuristic_capital": False}),
-            (_mtm_series(), {"used_heuristic_capital": False}),
-            (_mtm_series(), {"used_heuristic_capital": False}),
+            (_cash_series(), dict(_deribit_meta)),
+            (_mtm_series(), dict(_deribit_meta)),
+            (_mtm_series(), dict(_deribit_meta)),
         ])
         with _apply(_base_patches(
             ctx, key_mode=False, ledger_mock=ledger_mock, combine_mock=combine,
@@ -1154,7 +1218,7 @@ class TestCashSettlementSeriesPersist:
     async def test_cash_persist_leaves_prestamp_and_csv_byte_unchanged(self) -> None:
         """The additive cash persist NEVER perturbs the cash neighbors: the strategy_
         analytics prestamp still writes metrics_json_by_basis (NO cash_settlement key
-        ever) and the csv_daily_returns delete+upsert are the pre-change shape. The
+        ever) and the csv_daily_returns write is the dailies writer's own shape. The
         cash series lands ONLY in strategy_analytics_series, never in strategy_analytics
         or csv_daily_returns."""
         ctx, capture = _build_ctx(
@@ -1180,11 +1244,11 @@ class TestCashSettlementSeriesPersist:
             "the prestamp by-basis write must stay byte-unchanged (no cash_settlement scalar)"
         )
 
-        # csv_daily_returns byte-unchanged: one span delete (strategy axis) + one
-        # upsert of the two clean days.
+        # csv_daily_returns: one upsert of the two clean days and, since C3 topic
+        # H (upsert first, then delete only the span days the payload lacks), no
+        # delete at all, because the clean payload covers the whole span.
         csv_deletes = [d for d in capture["deletes"] if d["table"] == "csv_daily_returns"]
-        assert len(csv_deletes) == 1
-        assert csv_deletes[0]["filters"].get("eq:strategy_id") == "strat-b"
+        assert csv_deletes == []
         csv_upserts = [u for u in capture["upserts"] if u[0] == "csv_daily_returns"]
         assert len(csv_upserts) == 1
         _n2, csv_payload, on_conflict = csv_upserts[0]
@@ -1225,7 +1289,13 @@ class TestKeyModeDeribitParity:
         }
         ledger_mock, _calls = _recording_ledger([_report(has_option_activity=False)])
         combine = MagicMock(
-            return_value=(_cash_series(), {"used_heuristic_capital": False})
+            return_value=(
+                _cash_series(),
+                {
+                    "used_heuristic_capital": False,
+                    "series_completeness": _LEDGER_VERDICT,
+                },
+            )
         )
         with _apply(_base_patches(
             ctx, key_mode=True, ledger_mock=ledger_mock, combine_mock=combine,
@@ -1253,3 +1323,280 @@ class TestKeyModeDeribitParity:
             c for c in _km_enq if c[1].get("p_kind") == "compute_analytics_from_csv"
         ] == []
         assert [u for u in capture["upserts"] if u[0] == "strategy_analytics"] == []
+
+
+# ── MT5-12 (Phase 142.2 plan 05): the series-completeness VERDICT seam ───────
+# D-15/D-16. The publish gate stops asking a hardcoded venue list whether a daily
+# series can be trusted and starts reading a producer-stamped verdict. That makes
+# the derive persist seam the ONE chokepoint for producer 1: a fifth combiner
+# added to the open-ended venue registry must state whether the inputs it
+# consumed were whole, or its series never reaches csv_daily_returns.
+#
+# ⛔ The placement — BEFORE the reconcile-span DELETE, not merely before the
+# upsert — is what these tests exist to pin. The DELETE fires first, so a refusal
+# checked between DELETE and upsert would destroy the prior series and then
+# decline to write a replacement: fail-loud converted into data loss. Every
+# refusal case below asserts the DELETE was NEVER executed, which is a strictly
+# stronger claim than "the job failed".
+
+
+class TestSeriesCompletenessVerdictSeam:
+    """Producer 1's fail-loud verdict gate at the derive persist seam."""
+
+    @staticmethod
+    def _unverdicted_combine(meta_extra: dict | None = None) -> MagicMock:
+        """A combiner mock whose meta is otherwise benign but carries NO
+        recognised verdict — i.e. what a newly-added fifth venue combiner that
+        forgot to stamp would return."""
+        meta: dict = {"used_heuristic_capital": False}
+        if meta_extra:
+            meta.update(meta_extra)
+        return MagicMock(return_value=(_two_day_returns(), meta))
+
+    @pytest.mark.asyncio
+    async def test_missing_verdict_refuses_permanently_before_any_delete(self) -> None:
+        ctx, capture = _build_ctx(
+            key_row={"id": "key-v1", "exchange": "binance", "user_id": "user-1"},
+            strategy_row={"id": "strat-v1", "user_id": "user-1"},
+        )
+        job = {"id": "j", "kind": "derive_broker_dailies", "strategy_id": "strat-v1"}
+        patches = _patches_with_combine(
+            ctx, key_mode=False, combine_mock=self._unverdicted_combine()
+        )
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6]:
+            result = await run_derive_broker_dailies_job(job)
+
+        # PERMANENT: a combiner that does not stamp will not start stamping on a
+        # retry, so retrying forever is a DoS (T-74-02), not a recovery.
+        assert result.outcome == DispatchOutcome.FAILED
+        assert result.error_kind == "permanent", (
+            f"an unstamped series is a structural defect, not transient; got "
+            f"{result.error_kind!r}"
+        )
+        assert result.error_message is not None
+        assert "MT5-12" in result.error_message
+
+        # ⭐ THE LOAD-BEARING ASSERT — placement, not merely refusal. The
+        # authoritative span DELETE must never have executed: a refusal costs the
+        # strategy nothing. Neuter: move the verdict check below
+        # `await db_execute(_reconcile_span_delete)` → this reddens while a
+        # naive "the job failed" assertion would stay green.
+        assert [
+            d for d in capture["deletes"] if d["table"] == "csv_daily_returns"
+        ] == [], (
+            "the verdict refusal must precede the reconcile-span DELETE — an "
+            "assert placed after it destroys the prior series then declines to "
+            f"write a replacement; got {capture['deletes']!r}"
+        )
+        # Nothing at all touched the series table (no delete, no upsert).
+        assert [o for o in capture["ops"] if o[1] == "csv_daily_returns"] == []
+
+        # Strategy-mode terminal stamp: all four companion fields of the
+        # `_dispose_broker_nav_error` idiom, so the wizard poller reaches a gate
+        # and the reaper cannot re-fire on a stale `computing` stamp.
+        sa_upserts = [u for u in capture["upserts"] if u[0] == "strategy_analytics"]
+        assert len(sa_upserts) == 1, (
+            f"strategy-mode refusal must stamp exactly one terminal row; got "
+            f"{capture['upserts']!r}"
+        )
+        _n, payload, on_conflict = sa_upserts[0]
+        assert on_conflict == "strategy_id"
+        assert payload["computation_status"] == "failed"
+        assert payload["computation_warned"] is False, "SI-02 stale-marker guard"
+        assert payload["computing_started_at"] is None, "JOB-01 reaper guard"
+        assert payload["metrics_json_by_basis"] is None, "F-4 stale by-basis heal"
+        # A refusal must NEVER invent a verdict of record — writing one here
+        # would launder an unjudged series into the gate's allow-list.
+        assert "series_completeness" not in payload
+
+        # T-142.2-14: the message names the verdict and nothing else. No venue,
+        # no account identifier, no magnitudes.
+        assert "None" in result.error_message
+        assert "binance" not in result.error_message
+        assert "strat-v1" not in result.error_message
+
+        # No downstream CSV-analytics enqueue: the pipeline stops here.
+        assert [
+            c for c in capture["rpc_calls"]
+            if c[1].get("p_kind") == "compute_analytics_from_csv"
+        ] == []
+
+    @pytest.mark.asyncio
+    async def test_unrecognised_verdict_string_is_refused_identically(self) -> None:
+        """A typo'd or invented value is refused exactly like an omission — the
+        gate trusts an ALLOW-LIST, never "some string is present"."""
+        ctx, capture = _build_ctx(
+            key_row={"id": "key-v2", "exchange": "binance", "user_id": "user-1"},
+            strategy_row={"id": "strat-v2", "user_id": "user-1"},
+        )
+        job = {"id": "j", "kind": "derive_broker_dailies", "strategy_id": "strat-v2"}
+        combine = self._unverdicted_combine(
+            {"series_completeness": "ledger_complete_ish"}
+        )
+        patches = _patches_with_combine(ctx, key_mode=False, combine_mock=combine)
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6]:
+            result = await run_derive_broker_dailies_job(job)
+
+        assert result.outcome == DispatchOutcome.FAILED
+        assert result.error_kind == "permanent"
+        assert result.error_message is not None
+        assert "ledger_complete_ish" in result.error_message
+        assert [
+            d for d in capture["deletes"] if d["table"] == "csv_daily_returns"
+        ] == []
+        assert [o for o in capture["ops"] if o[1] == "csv_daily_returns"] == []
+
+    @pytest.mark.asyncio
+    async def test_user_column_carries_no_producer_internals(self) -> None:
+        """WR-01 (162-REVIEW) — HONEST-01's message/detail split at THIS site.
+
+        ``strategy_analytics.computation_error`` renders VERBATIM to the account
+        holder (the portfolio dashboard's StaleWarning and the wizard failure
+        envelope). This refusal used to stamp the developer sentence there: a
+        repr of the producer's ``series_completeness`` value, plus "MT5-12: every
+        daily-series producer must state whether the venue inputs it consumed
+        were whole." — a rule number and a producer contract addressed to an
+        engineer, rendered to a subscriber.
+
+        ⭐ The claim pinned here is NOT "some substring vanished" — a reworded
+        developer sentence would satisfy that and still be developer copy. It is
+        that the user-visible sentence is INVARIANT to the producer's internals
+        while the operator string still VARIES with them: drive the identical
+        refusal twice with two DIFFERENT bogus verdicts and the stamped column
+        must come out byte-identical, while ``DispatchResult.error_message``
+        (→ ``compute_jobs.last_error``, admin-only) must still name the verdict
+        it actually saw, each time.
+
+        Part (3) is the same third part ``test_allocator_positions.py`` holds
+        over ``api_keys.sync_error``: curating the write boundary must not become
+        curating every surface, or a dishonest screen is traded for a blind
+        operator.
+
+        Neuter to redden: restore the pre-fix call — pass ``_detail`` back as the
+        stamp's positional ``message`` argument.
+        """
+
+        async def _refuse_with(verdict: str, sid: str) -> tuple[object, str]:
+            ctx, capture = _build_ctx(
+                key_row={
+                    "id": f"key-{sid}",
+                    "exchange": "binance",
+                    "user_id": "user-1",
+                },
+                strategy_row={"id": sid, "user_id": "user-1"},
+            )
+            job = {"id": "j", "kind": "derive_broker_dailies", "strategy_id": sid}
+            patches = _patches_with_combine(
+                ctx,
+                key_mode=False,
+                combine_mock=self._unverdicted_combine(
+                    {"series_completeness": verdict}
+                ),
+            )
+            with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6]:
+                result = await run_derive_broker_dailies_job(job)
+            sa = [u for u in capture["upserts"] if u[0] == "strategy_analytics"]
+            assert len(sa) == 1, (
+                f"the refusal must stamp exactly one terminal row, or nothing "
+                f"below is reading the user column; got {capture['upserts']!r}"
+            )
+            stamped = sa[0][1]["computation_error"]
+            assert isinstance(stamped, str) and stamped, (
+                "the refusal must still write a user-visible sentence — this "
+                f"test is about WHAT it says, not about softening it: {stamped!r}"
+            )
+            return result, stamped
+
+        result_a, copy_a = await _refuse_with("bogus_verdict_alpha", "strat-wr01a")
+        result_b, copy_b = await _refuse_with("bogus_verdict_beta", "strat-wr01b")
+
+        # (1) The user column does not move when only an internal moves.
+        assert copy_a == copy_b, (
+            "computation_error changed when the ONLY thing that changed was the "
+            "producer's verdict value — a developer-audience internal is being "
+            f"interpolated into the sentence the account holder reads: "
+            f"{copy_a!r} vs {copy_b!r}"
+        )
+
+        # (2) And the internals are absent outright, not merely constant.
+        for token in (
+            "bogus_verdict_alpha",
+            "bogus_verdict_beta",
+            "series_completeness",
+            "MT5-12",
+        ):
+            assert token not in copy_a, (
+                f"{token!r} reached strategy_analytics.computation_error, which "
+                f"the account holder reads verbatim: {copy_a!r}"
+            )
+
+        # (3) The DIAGNOSIS survives on the operator surface, per-verdict.
+        assert result_a.error_message and result_b.error_message  # type: ignore[attr-defined]
+        assert "bogus_verdict_alpha" in result_a.error_message  # type: ignore[attr-defined]
+        assert "bogus_verdict_beta" in result_b.error_message  # type: ignore[attr-defined]
+        for msg in (result_a.error_message, result_b.error_message):  # type: ignore[attr-defined]
+            assert "MT5-12" in msg, (
+                "the MT5-12 diagnosis must survive where an engineer reads it — "
+                f"curating the user column must not blind the operator: {msg!r}"
+            )
+            assert "series_completeness" in msg
+
+    @pytest.mark.asyncio
+    async def test_key_mode_refuses_without_stamping_a_phantom_row(self) -> None:
+        """The assert covers BOTH branches of the shared seam. Key-mode (allocator)
+        owns no per-key strategy_analytics row, so it refuses WITHOUT stamping —
+        a stamp there would write a phantom row keyed on an unbound strategy_id."""
+        ctx, capture = _build_ctx(
+            key_row={"id": "key-v3", "exchange": "binance", "user_id": "alloc-v3"},
+            strategy_row=None,
+        )
+        job = {"id": "j", "kind": "derive_broker_dailies", "api_key_id": "key-v3"}
+        patches = _patches_with_combine(
+            ctx, key_mode=True, combine_mock=self._unverdicted_combine()
+        )
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6]:
+            result = await run_derive_broker_dailies_job(job)
+
+        assert result.outcome == DispatchOutcome.FAILED
+        assert result.error_kind == "permanent"
+        assert [u for u in capture["upserts"] if u[0] == "strategy_analytics"] == [], (
+            f"key-mode has no per-key analytics row to stamp; got {capture['upserts']!r}"
+        )
+        assert [o for o in capture["ops"] if o[1] == "csv_daily_returns"] == []
+
+    @pytest.mark.asyncio
+    async def test_happy_path_prestamps_verdict_as_sibling_not_a_dq_flag(self) -> None:
+        """The verdict rides `_prestamp_payload` as a TOP-LEVEL column and is NOT a
+        member of data_quality_flags.
+
+        Two independent reasons this matters, either one fatal:
+          1. data_quality_flags is REPLACED wholesale on every write (and rebuilt
+             again by analytics_runner.py:1439), so a verdict carried inside it is
+             erased by the next analytics run.
+          2. guard-key membership auto-promotes computation_status to
+             `complete_with_warnings` — a status the publish gate PASSES. Routing
+             a gating signal through the promotion channel is a fail-open (D-16).
+        """
+        ctx, capture = _build_ctx(
+            key_row={"id": "key-v4", "exchange": "binance", "user_id": "user-1"},
+            strategy_row={"id": "strat-v4", "user_id": "user-1"},
+        )
+        job = {"id": "j", "kind": "derive_broker_dailies", "strategy_id": "strat-v4"}
+        patches = _patches(ctx, key_mode=False, returns=_two_day_returns())
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6]:
+            result = await run_derive_broker_dailies_job(job)
+
+        assert result.outcome == DispatchOutcome.DONE
+        sa_upserts = [u for u in capture["upserts"] if u[0] == "strategy_analytics"]
+        assert len(sa_upserts) == 1
+        _n, prestamp, _oc = sa_upserts[0]
+        # Hand-typed literal: the ccxt combiner's real verdict, carried through
+        # the seam unchanged (never re-judged by the worker).
+        assert prestamp["series_completeness"] == "fill_derived_unproven"
+        assert "series_completeness" not in prestamp["data_quality_flags"], (
+            "the verdict must be a SIBLING of data_quality_flags, never a member "
+            "— membership routes it through the wholesale-rebuild + "
+            "complete_with_warnings promotion channel (fail-open)"
+        )
+        # And the series really was persisted (the happy path is not vacuous).
+        assert len([u for u in capture["upserts"] if u[0] == "csv_daily_returns"]) == 1

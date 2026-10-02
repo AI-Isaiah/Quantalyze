@@ -1,0 +1,19 @@
+{
+  "_comment": "RED fixture for pyapi06-health-degraded: /health names SERVICE_KEY as an unset platform secret. Only `health` differs from ok.json.",
+  "keyed": {
+    "status": 200,
+    "json": { "status": "ok", "lookback_days": 1, "strategies": [] }
+  },
+  "absent": {
+    "status": 401,
+    "json": { "detail": { "code": "SERVICE_KEY_ABSENT", "retryable": false, "detail": "Service key required" } }
+  },
+  "wrong": {
+    "status": 401,
+    "json": { "detail": "Unauthorized" }
+  },
+  "health": {
+    "status": 200,
+    "json": { "status": "ok", "version": "0.1.0", "git_sha": "0000000000000000000000000000000000000000", "config_ok": false, "config_degraded_secrets": ["SERVICE_KEY"] }
+  }
+}

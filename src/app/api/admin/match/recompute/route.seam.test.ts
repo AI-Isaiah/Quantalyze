@@ -162,6 +162,14 @@ describe("POST /api/admin/match/recompute — REAL client through the seam (SC-1
     // it every case below 500s at the mint and never reaches the seam arm it
     // is actually about.
     process.env.INTERNAL_API_TOKEN = "internal-token-under-test";
+    // 164.1-02 / PYAPI-06 (D-09): the REAL client now also REFUSES with a
+    // `SeamConfigError` before the fetch when ANALYTICS_SERVICE_KEY is absent,
+    // rather than sending an anonymous request that the service answers 401 and
+    // no breaker ever counts. Same reasoning as the token above — without it
+    // every case here 500s at the refusal and never reaches its seam arm.
+    // ⚠️ SERVICE_KEY is captured at MODULE scope in analytics-client.ts, so this
+    // must precede the `vi.resetModules()` + dynamic import below.
+    process.env.ANALYTICS_SERVICE_KEY = "analytics-service-key-under-test";
     vi.resetModules();
 
     shared.store.clear();
@@ -238,8 +246,12 @@ describe("POST /api/admin/match/recompute — REAL client through the seam (SC-1
     expect(res.status).toBe(503);
     expect(res.headers.get("Retry-After")).toBe("30");
     const raw = await res.text();
-    expect(JSON.parse(raw).error).toBe(CIRCUIT_OPEN_COPY);
-    expect(raw).not.toMatch(/circuit|breaker|upstash|railway/i);
+    const parsed = JSON.parse(raw);
+    expect(parsed.error).toBe(CIRCUIT_OPEN_COPY);
+    // 140.3-G8 / SEAMUX-03 — scoped to `.error` (the human COPY), not the raw
+    // body: the breaker arm now also carries a deliberate machine
+    // `code: "CIRCUIT_OPEN"` on `.code` as a stable discriminator.
+    expect(parsed.error).not.toMatch(/circuit|breaker|upstash|railway/i);
 
     // The load-bearing assertion: an open circuit means the seam is not
     // crossed. A 503 emitted AFTER a doomed round-trip would still pass the

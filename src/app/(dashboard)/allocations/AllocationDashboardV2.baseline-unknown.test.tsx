@@ -110,7 +110,16 @@ const baseProps = {
 
 describe("AllocationDashboardV2 — CL9 baseline-unknown banner", () => {
   it("renders the banner when equityBaselineUnknown=true, explaining the gap and that live holdings stay accurate", () => {
-    render(<AllocationDashboardV2 {...baseProps} equityBaselineUnknown />);
+    // Phase 167.1.2 / D-02: this pins the "ready" copy, which promises that a
+    // history accrues. The rebuilding variant must NOT promise it; that case is
+    // pinned in AllocationDashboardV2.rebuilding.test.tsx.
+    render(
+      <AllocationDashboardV2
+        {...baseProps}
+        equityBaselineUnknown
+        equityHistoryState="ready"
+      />,
+    );
     const banner = screen.getByTestId("dashboard-baseline-unknown-banner");
     expect(banner.textContent).toContain("Limited equity history");
     // The WHY: it must NOT read as a broken connection — live data is accurate.

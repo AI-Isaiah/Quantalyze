@@ -2,10 +2,10 @@
 -- Canonical current body of this function, replayed from supabase/migrations/**.
 -- Regenerate with `npm run schema:functions`. See tech-debt #2.
 
--- source migration: 20260603120000_compute_jobs_rpc_clear_error_and_gin_fanin.sql
--- ==========================================================================
--- STEP 1a: claim_compute_jobs (non-priority fallback path) -- clear stale error
--- ==========================================================================
+-- source migration: 20260927120000_claim_pair_pre_rank_exclusion.sql
+-- --------------------------------------------------------------------------
+-- claim_compute_jobs(integer, text), re-based from 20260603120000 STEP 1a
+-- --------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION claim_compute_jobs(
   p_batch_size INTEGER,
   p_worker_id  TEXT
@@ -43,6 +43,35 @@ BEGIN
     FROM compute_jobs
     WHERE status IN ('pending', 'failed_retry')
       AND next_attempt_at <= now()
+      -- CLAIMPAIR PRE-RANK EXCLUSION BEGIN (D-08)
+      -- Phase 164.9.3: a failed_retry row whose (kind, partition) already
+      -- holds a pending row is not a candidate. Applied here, BEFORE
+      -- row_number(), never in `deduped`: excluded after ranking, the retry
+      -- would still rank first and take its pending twin down with it (a
+      -- silent, permanent partition wedge). One clause per partition, each
+      -- matching its compute_jobs_one_inflight_per_kind_* index predicate;
+      -- that strategy index excludes compute_intro_snapshot, so this does too.
+      AND (portfolio_id IS NULL OR status <> 'failed_retry' OR NOT EXISTS (
+        SELECT 1 FROM compute_jobs x
+         WHERE x.kind         = compute_jobs.kind
+           AND x.portfolio_id = compute_jobs.portfolio_id
+           AND x.status       = 'pending'))
+      AND (strategy_id IS NULL OR status <> 'failed_retry' OR kind = 'compute_intro_snapshot' OR NOT EXISTS (
+        SELECT 1 FROM compute_jobs x
+         WHERE x.kind        = compute_jobs.kind
+           AND x.strategy_id = compute_jobs.strategy_id
+           AND x.status      = 'pending'))
+      AND (allocator_id IS NULL OR status <> 'failed_retry' OR NOT EXISTS (
+        SELECT 1 FROM compute_jobs x
+         WHERE x.kind         = compute_jobs.kind
+           AND x.allocator_id = compute_jobs.allocator_id
+           AND x.status       = 'pending'))
+      AND (api_key_id IS NULL OR status <> 'failed_retry' OR NOT EXISTS (
+        SELECT 1 FROM compute_jobs x
+         WHERE x.kind       = compute_jobs.kind
+           AND x.api_key_id = compute_jobs.api_key_id
+           AND x.status     = 'pending'))
+      -- CLAIMPAIR PRE-RANK EXCLUSION END
   ),
   deduped AS (
     SELECT id FROM ranked

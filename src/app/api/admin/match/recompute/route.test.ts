@@ -100,10 +100,28 @@ vi.mock("@/lib/admin", () => ({
   isAdminUser: async () => adminFlag.isAdmin,
 }));
 
-vi.mock("@/lib/ratelimit", () => ({
-  adminActionLimiter: {},
-  checkLimit: async () => ({ success: true, retryAfter: 0 }),
+/**
+ * 140.4-13 / SEAMRIM-05 — the limiter verdict this file drives the route with.
+ * Hoisted so the factory closes over it; default is the ALLOW every pre-existing
+ * test was written against, and the SEAMRIM-05 describe restores it.
+ */
+const limiter = vi.hoisted(() => ({
+  result: { success: true, retryAfter: 0 } as
+    | { success: true; retryAfter?: number }
+    | { success: false; retryAfter: number; reason?: "ratelimit_misconfigured" },
 }));
+
+// ⚠️ EXTENDED, NOT REPLACED. The pure helpers come from `importActual` so this
+// mock cannot drift from the real 503-vs-429 decision.
+vi.mock("@/lib/ratelimit", async (importActual) => {
+  const actual = await importActual<typeof import("@/lib/ratelimit")>();
+  return {
+    adminActionLimiter: {},
+    checkLimit: async () => limiter.result,
+    rateLimitDenyJson: actual.rateLimitDenyJson,
+    isRateLimitMisconfigured: actual.isRateLimitMisconfigured,
+  };
+});
 
 // Capture every call to recomputeMatch so we can assert the third arg.
 const recomputeCalls: Array<{
@@ -239,6 +257,77 @@ describe("POST /api/admin/match/recompute — actor binding (C-PR5-01)", () => {
   });
 });
 
+/**
+ * 140.4-13 / SEAMRIM-05 — the ADMIN auth shape of the three this plan pins
+ * behaviourally.
+ *
+ * ⚠️ WHY THE ADMIN SURFACE MATTERS HERE AND NOT LESS. This route already maps a
+ * breaker trip to 503, so an operator reading the logs during an outage sees
+ * 503s from the seam and — until this plan — 429s from the limiter beside it,
+ * for the SAME incident. The limiter runs FIRST, so during an Upstash outage
+ * the breaker never even gets to trip: the 429 was the only signal, and it says
+ * "an admin is clicking too fast".
+ */
+describe("[140.4-13 / SEAMRIM-05] POST /api/admin/match/recompute — the limiter deny arm", () => {
+  async function postAsAdmin() {
+    userState.current = { id: "admin-id" };
+    adminFlag.isAdmin = true;
+    const { POST } = await import("./route");
+    return POST(buildPostRequest({ allocator_id: "alloc-1", force: false }));
+  }
+
+  afterEach(() => {
+    limiter.result = { success: true, retryAfter: 0 };
+    vi.restoreAllMocks();
+  });
+
+  it("ratelimit_misconfigured → 503, not a 429 that reads as admin over-clicking", async () => {
+    limiter.result = {
+      success: false,
+      retryAfter: 60,
+      reason: "ratelimit_misconfigured",
+    };
+    const res = await postAsAdmin();
+
+    expect(res.status).toBe(503);
+    // 140.3-G8 / SEAMUX-03 — the sentence is BYTE-KEPT and a machine code now
+    // rides beside it. SEAM_MISCONFIGURED is the limiter-unavailable token.
+    expect(await res.json()).toEqual({
+      error: "Rate limiter unavailable",
+      code: "SEAM_MISCONFIGURED",
+    });
+    expect(res.headers.get("Retry-After")).toBe("60");
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+    expect(recomputeCalls).toHaveLength(0);
+  });
+
+  it("a genuine throttle → 429 with a BYTE-IDENTICAL body and headers", async () => {
+    limiter.result = { success: false, retryAfter: 42 };
+    const res = await postAsAdmin();
+
+    expect(res.status).toBe(429);
+    // Hand-typed from the pre-adoption source, not read back off the builder.
+    // 140.3-G8 / SEAMUX-03 — sentence BYTE-KEPT, RATE_LIMITED code beside it
+    // (OUR limiter's token, not the exchange-family KEY_RATE_LIMIT).
+    expect(await res.json()).toEqual({
+      error: "Too many requests",
+      code: "RATE_LIMITED",
+    });
+    expect(res.headers.get("Retry-After")).toBe("42");
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+    expect(recomputeCalls).toHaveLength(0);
+  });
+
+  it("success → the deny arm does not fire", async () => {
+    limiter.result = { success: true, retryAfter: 0 };
+    const res = await postAsAdmin();
+
+    expect(res.status).not.toBe(429);
+    expect(res.status).not.toBe(503);
+    expect(recomputeCalls.length).toBeGreaterThan(0);
+  });
+});
+
 describe("POST /api/admin/match/recompute — SEAM-04 error taxonomy (Phase 140)", () => {
   async function postAsAdmin() {
     userState.current = { id: "admin-id" };
@@ -255,10 +344,14 @@ describe("POST /api/admin/match/recompute — SEAM-04 error taxonomy (Phase 140)
     expect(res.status).toBe(503);
     expect(res.headers.get("Retry-After")).toBe("30");
     const raw = await res.text();
-    expect(JSON.parse(raw).error).toBe(CIRCUIT_OPEN_COPY);
-    // The breaker is an internal mechanism; its vocabulary must not reach an
-    // HTTP body (threat T-140-05 / T-140-08).
-    expect(raw).not.toMatch(/circuit|breaker|upstash|railway/i);
+    const parsed = JSON.parse(raw);
+    expect(parsed.error).toBe(CIRCUIT_OPEN_COPY);
+    // The breaker is an internal mechanism; its vocabulary must not reach the
+    // human-facing COPY (threat T-140-05 / T-140-08). Scoped to `.error`, not
+    // the raw body: 140.3-G8 puts a deliberate machine `code: "CIRCUIT_OPEN"`
+    // on `.code` as a stable discriminator (an established seam WIRE token —
+    // the same exemption the sibling scenario/optimize route's test makes).
+    expect(parsed.error).not.toMatch(/circuit|breaker|upstash|railway/i);
   });
 
   it("forwards the breaker's own cooldown as Retry-After rather than a constant", async () => {
@@ -298,8 +391,16 @@ describe("POST /api/admin/match/recompute — SEAM-04 error taxonomy (Phase 140)
     expect(raw).not.toContain("boom");
     expect(raw).not.toContain("localhost");
     expect(JSON.parse(raw).error).toBe(GENERIC_COPY);
-    // ...and the detail is not simply discarded — it goes to the server log.
-    expect(errorSpy).toHaveBeenCalledWith(expect.any(String), leaky);
+    // ...and the detail is not simply discarded — it goes to the server log,
+    // SCRUBBED (140.4-08 / SEAMRIM-06). Same strengthening as the sibling
+    // route's, for the same reason: pinning the raw object pinned the leak in
+    // place, while pinning the scrubbed rendering pins BOTH that the value went
+    // through `scrubSeamError` and that the diagnosis survived — the A-10
+    // non-drop half, which the source predicate is structurally unable to see.
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.stringContaining("boom with http://localhost:8002 secret detail"),
+    );
   });
 
   it("returns 500 with the same STATIC copy when recomputeMatch throws a non-Error value", async () => {
@@ -350,6 +451,13 @@ describe("POST /api/admin/match/recompute — SEAM-04 error taxonomy (Phase 140)
  * string and the service's base URL — the exact T-140-11 leak this file's
  * existing case pins the absence of. The case below re-pins it THROUGH the new
  * arm, so widening the range later reddens a test rather than shipping a leak.
+ *
+ * ⚠️ 161-08 / WIZERR-06 AMENDS THE SCOPE OF THAT SENTENCE, and the amendment is
+ * written here rather than left to inference. "Only 4xx forwards" is about the
+ * MESSAGE. The terminal arm now forwards the upstream's `seamCode` as well, so
+ * `code` crosses on both sides of 500 while `error` still crosses on the 4xx
+ * side alone. The four `WIZERR-06` cases in the machine-code block below pin
+ * both halves — the code that must cross, and the message that must not.
  *
  * Fixtures are hand-typed here. Nothing is imported from the module under test.
  */
@@ -561,5 +669,196 @@ describe("[140.3-13a / SEAMUX-08] POST /api/admin/match/recompute — Sentry cap
     const res = await POST(buildPostRequest({ allocator_id: "a-1" }));
     expect(res.status).toBe(403);
     await expectNoCapture();
+  });
+});
+
+/**
+ * 140.3-G8 / SEAMUX-03 — a machine `code` on every arm THIS route owns.
+ *
+ * REQUIREMENTS.md names "the admin match routes" verbatim. Each arm is pinned
+ * individually so a `code` dropped from one is not hidden behind another's
+ * assertion. MISSING_ALLOCATOR_ID is the named-id-param token (the keys/sync
+ * MISSING_STRATEGY_ID precedent), deliberately DISTINCT from VALIDATION_FAILED
+ * which this plan set reserves for the structural unparseable-JSON rejection —
+ * a case below drives BOTH so a collapse of one onto the other reddens. The two
+ * deny bodies are asserted in the SEAMRIM-05 block above (byte-kept sentence +
+ * code); the 4xx-forward seamCode survival is the load-bearing case here.
+ */
+describe("[140.3-G8 / SEAMUX-03] POST /api/admin/match/recompute — machine code per arm", () => {
+  async function postAsAdmin(body: unknown = { allocator_id: "alloc-1", force: false }) {
+    userState.current = { id: "admin-id" };
+    adminFlag.isAdmin = true;
+    const { POST } = await import("./route");
+    return POST(buildPostRequest(body));
+  }
+
+  it("401 answers code UNAUTHENTICATED", async () => {
+    userState.current = null;
+    const { POST } = await import("./route");
+    const res = await POST(buildPostRequest({ allocator_id: "alloc-1" }));
+    expect(res.status).toBe(401);
+    expect((await res.json()).code).toBe("UNAUTHENTICATED");
+  });
+
+  it("403 answers code FORBIDDEN", async () => {
+    userState.current = { id: "user-1" };
+    adminFlag.isAdmin = false;
+    const { POST } = await import("./route");
+    const res = await POST(buildPostRequest({ allocator_id: "alloc-1" }));
+    expect(res.status).toBe(403);
+    expect((await res.json()).code).toBe("FORBIDDEN");
+  });
+
+  it("an unparseable body answers 400 code VALIDATION_FAILED (structural rejection)", async () => {
+    userState.current = { id: "admin-id" };
+    adminFlag.isAdmin = true;
+    const { POST } = await import("./route");
+    const req = new NextRequest("http://localhost:3000/api/admin/match/recompute", {
+      method: "POST",
+      headers: { "content-type": "application/json", ...VALID_ORIGIN },
+      body: "{ not json",
+    });
+    const res = await POST(req);
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe("VALIDATION_FAILED");
+  });
+
+  it("a missing allocator_id answers 400 code MISSING_ALLOCATOR_ID — NOT VALIDATION_FAILED", async () => {
+    const res = await postAsAdmin({ force: false });
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    // The named-id fact is distinct from the structural VALIDATION_FAILED above.
+    expect(body.code).toBe("MISSING_ALLOCATOR_ID");
+    expect(body.code).not.toBe("VALIDATION_FAILED");
+  });
+
+  it("the breaker 503 answers code CIRCUIT_OPEN", async () => {
+    const { CircuitOpenError } = await import("@/lib/seam-errors");
+    recomputeState.throwValue = new CircuitOpenError(30);
+    const res = await postAsAdmin();
+    expect(res.status).toBe(503);
+    expect((await res.json()).code).toBe("CIRCUIT_OPEN");
+  });
+
+  it("the timeout 504 answers code UPSTREAM_TIMEOUT", async () => {
+    const { AnalyticsTimeoutError } = await import("@/lib/analytics-client");
+    recomputeState.throwValue = new AnalyticsTimeoutError("/api/match/recompute", 30_000);
+    const res = await postAsAdmin();
+    expect(res.status).toBe(504);
+    expect((await res.json()).code).toBe("UPSTREAM_TIMEOUT");
+  });
+
+  it("the 4xx forward carries the upstream's OWN seamCode AND keeps error + dependency (TS-18/TS-19)", async () => {
+    const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+    recomputeState.throwValue = new AnalyticsUpstreamError(
+      "Binance is not responding right now. Try again shortly.",
+      424,
+      "EXCHANGE_UNAVAILABLE",
+      "binance",
+    );
+    const res = await postAsAdmin();
+    expect(res.status).toBe(424);
+    const body = await res.json();
+    expect(body.code).toBe("EXCHANGE_UNAVAILABLE");
+    expect(body.error).toBe(
+      "Binance is not responding right now. Try again shortly.",
+    );
+    expect(body.dependency).toBe("binance");
+  });
+
+  it("a 4xx forward whose upstream carried NO code falls back to UNKNOWN, dependency still null", async () => {
+    const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+    recomputeState.throwValue = new AnalyticsUpstreamError("venue down", 429);
+    const res = await postAsAdmin();
+    expect(res.status).toBe(429);
+    const body = await res.json();
+    expect(body.code).toBe("UNKNOWN");
+    expect(body.dependency).toBeNull();
+  });
+
+  it("the terminal 500 answers code UNKNOWN", async () => {
+    recomputeState.throwValue = new Error("boom");
+    const res = await postAsAdmin();
+    expect(res.status).toBe(500);
+    expect((await res.json()).code).toBe("UNKNOWN");
+  });
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // 161-08 / WIZERR-06 — the terminal arm forwards the CODE and still refuses
+  // the MESSAGE. Same four cases, same shape, as the other four routes carrying
+  // the 4xx-forward / 5xx-terminal pair.
+  //
+  // ⚠️ The static sentence is the file-level `GENERIC_COPY` constant declared at
+  // the top of THIS test file — hand-typed there, imported from nothing. It is
+  // deliberately NOT the route's own constant.
+  // ───────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Shaped like what T-140-11 keeps off the wire: FastAPI detail, the
+   * `parseResponse()` contract-drift string and a service base URL.
+   */
+  const LEAKY_5XX_MESSAGE =
+    "InternalError: recompute_allocator raised at match.py:1801 — upstream base http://analytics.invalid:8000";
+
+  it("WIZERR-06 (a) — a 5xx seam error carrying a code forwards THAT code, sentence unchanged", async () => {
+    const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+    // The service's own declared 500 residue, `retryable=False`.
+    recomputeState.throwValue = new AnalyticsUpstreamError(
+      "Internal error",
+      500,
+      "INTERNAL",
+    );
+    const res = await postAsAdmin();
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(body.code).toBe("INTERNAL");
+    expect(body.error).toBe(GENERIC_COPY);
+  });
+
+  it("WIZERR-06 (b) — a 5xx seam error with a NULL code still answers UNKNOWN, sentence unchanged", async () => {
+    const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+    recomputeState.throwValue = new AnalyticsUpstreamError("upstream exploded", 502);
+    const res = await postAsAdmin();
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(body.code).toBe("UNKNOWN");
+    expect(body.error).toBe(GENERIC_COPY);
+  });
+
+  it("WIZERR-06 (c) — a NON-SEAM throwable answers UNKNOWN, sentence unchanged", async () => {
+    recomputeState.throwValue = new Error("ECONNRESET");
+    const res = await postAsAdmin();
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(body.code).toBe("UNKNOWN");
+    expect(body.error).toBe(GENERIC_COPY);
+  });
+
+  it("WIZERR-06 (d) — NEGATIVE CONTROL: no substring of the thrown message reaches the body", async () => {
+    const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+    recomputeState.throwValue = new AnalyticsUpstreamError(
+      LEAKY_5XX_MESSAGE,
+      500,
+      "INTERNAL",
+    );
+    const res = await postAsAdmin();
+    const serialized = JSON.stringify(await res.json());
+
+    // ⚠️ VACUITY GUARD, FIRST — `"anything".includes("")` is `true`.
+    expect(LEAKY_5XX_MESSAGE.trim().length).toBeGreaterThan(40);
+    const tokens = LEAKY_5XX_MESSAGE.split(/\s+/).filter((t) => t.length >= 4);
+    expect(
+      tokens.length,
+      "the leak corpus produced too few usable tokens to be a real control",
+    ).toBeGreaterThan(5);
+
+    for (const token of tokens) {
+      expect(
+        serialized,
+        `the 5xx body leaked "${token}" out of err.message`,
+      ).not.toContain(token);
+    }
+    expect(serialized).not.toContain(LEAKY_5XX_MESSAGE);
+    expect(serialized).toContain("INTERNAL");
   });
 });

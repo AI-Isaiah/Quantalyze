@@ -144,6 +144,84 @@ class TestInitSentry:
         integration_types = [type(i).__name__ for i in captured["integrations"]]
         assert "FastApiIntegration" in integration_types
         assert "StarletteIntegration" in integration_types
+        # ⛔ Phase 164.6.2 / WR-05. Local variables were captured for EVERY frame
+        # of every event, and `before_send` scrubs them by KEY — so a credential
+        # held under a key the denylist does not name shipped to Sentry verbatim.
+        # Phase 164.6.2 put the plaintext MT5 password in three such frames.
+        # Denylisting `password` closes the frames we know about; this closes the
+        # ones nobody has written yet, and neither half is sufficient alone.
+        assert captured["include_local_variables"] is False, (
+            "stack-frame local variables are being captured again — no frame "
+            "variable in this service is worth a credential (WR-05)"
+        )
+
+
+class TestPhase164_6_2_CredentialFrameVars:
+    """⛔ WR-05 — the THIRD disclosure vector of the MT5 boot heal, alongside the
+    log line the phase fenced and the by-value redaction CR-01 repaired.
+
+    `password` lived only on `_FREEFORM_KEY_ALTERNATES`, which is a STRING
+    pattern for `key=value` shapes — not a key denylist. Measured 2026-09-14
+    against the shipped module:
+
+        >>> scrub_pii({'login': …, 'password': 'n0t-a-real-pw', 'server': …})
+        {'login': …, 'password': 'n0t-a-real-pw', 'server': …}
+
+    i.e. a frame `vars` dict whose key is literally `password` passed through
+    untouched, while `_redact_before_send` reported success.
+    """
+
+    FAKE_PASSWORD = "n0t-a-real-password"
+
+    def test_password_is_denylisted_as_a_KEY_not_only_as_a_freeform_shape(self):
+        from services.redact import DENYLIST_EXACT, scrub_pii
+
+        assert "password" in DENYLIST_EXACT
+        assert "investor_password" in DENYLIST_EXACT
+        scrubbed = scrub_pii(
+            {
+                "login": 4242424,
+                "password": self.FAKE_PASSWORD,
+                "investor_password": self.FAKE_PASSWORD,
+                "server": "Broker-Demo-2",
+            }
+        )
+        assert scrubbed["password"] != self.FAKE_PASSWORD
+        assert scrubbed["investor_password"] != self.FAKE_PASSWORD
+
+    def test_a_credential_frame_var_is_scrubbed_END_TO_END_by_before_send(self):
+        """The whole path, not the helper: `before_send` over the exact event
+        shape `LoggingIntegration` builds from a `logger.error(..., exc_info=…)`
+        raised anywhere on the heal's call stack. `main.lifespan`'s
+        `_crash_handler` already has that shape."""
+        event = {
+            "exception": {
+                "values": [
+                    {
+                        "stacktrace": {
+                            "frames": [
+                                {
+                                    "function": "_heal_blocking",
+                                    "vars": {
+                                        "login": 4242424,
+                                        "password": self.FAKE_PASSWORD,
+                                        "server": "Broker-Demo-2",
+                                    },
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        }
+        out = sentry_init._redact_before_send(event, None)
+        frame_vars = out["exception"]["values"][0]["stacktrace"]["frames"][0]["vars"]
+        assert frame_vars["password"] != self.FAKE_PASSWORD, (
+            "the plaintext MT5 password reached Sentry as a stack-frame variable "
+            "(WR-05) — `before_send` scrubs `vars` by KEY and `password` was not "
+            "on the key denylist"
+        )
+        assert self.FAKE_PASSWORD not in repr(out)
 
 
 class TestPhase16ScrubPaths:

@@ -66,6 +66,40 @@ export interface BrowseStrategyRow {
    * verified row. Verified rows carry `false`.
    */
   is_example: boolean;
+  /**
+   * Phase 152 / SCEN-02 — viewer-relative ownership bit. `true` marks a row the
+   * REQUESTING session owns (`strategies.user_id === session id`, the same
+   * comparison that un-redacts the name above), so the drawer / composer can
+   * render a "Yours" chip instead of leaving an allocator to guess which of the
+   * merged catalog's rows are their own contributions. Emitted on EVERY row,
+   * `false` included — a uniform key means a missing chip downstream is a render
+   * bug, not a silent wire drop, and an optional member would let a consumer
+   * read `undefined` as "not yours" without ever knowing the field was absent.
+   * This is NOT a disclosure widening: it describes the viewer's RELATIONSHIP to
+   * a row, never the other owner's data (`user_id` itself stays read-only and is
+   * never emitted). It is computed server-side from the `withAllocatorAuth`
+   * session and can never be influenced by a request param.
+   */
+  isOwn: boolean;
+  /**
+   * Phase 152 / SCEN-05 — OWNER-ONLY. The row's creation timestamp, present
+   * ONLY when `isOwn === true`; the key is ABSENT (not `undefined`) on every
+   * other row, which is why the type reads optional. It exists so an owner can
+   * tell two of their OWN identically-named strategies apart in the drawer.
+   * It is withheld from third-party rows because a creation date is a
+   * correlation vector against the pseudonymity contract — it pins when a given
+   * codename first appeared, which the codename is meant to hide.
+   */
+  created_at?: string;
+  /**
+   * Phase 152 / SCEN-05 — OWNER-ONLY, same conditional emission as
+   * `created_at`. The raw `strategies.status` DB value (`draft` /
+   * `pending_review` / `published` / `archived` / `private`); the client
+   * product-cases it for display rather than the route inventing a second
+   * vocabulary. Withheld from third-party rows because another owner's
+   * workflow state is private to them.
+   */
+  status?: string;
 }
 
 /**
@@ -150,7 +184,15 @@ export const GET = withAllocatorAuth(
           // owner's OWN name un-redacted (see the own-row branch below). It is
           // read ONLY to compare against the session id; the raw column is never
           // emitted on the wire.
-          "id, user_id, name, codename, disclosure_tier, markets, strategy_types, is_example",
+          // Phase 152 / SCEN-05 — co-fetch `created_at` and `status` so the
+          // caller can tell two same-named strategies of their OWN apart in the
+          // Browse drawer (the founder's two "Alpha Centauri" rows are 15 days
+          // apart). Both are emitted on OWN rows ONLY: another owner's creation
+          // date is a correlation vector against the pseudonymised catalog (it
+          // pins when a codename first appeared), and their `status` discloses
+          // private workflow state. The own-only fence is in the projection
+          // below, NOT in this SELECT — the columns must be read to compare.
+          "id, user_id, name, codename, disclosure_tier, markets, strategy_types, is_example, created_at, status",
         ),
       user.id,
     )
@@ -207,6 +249,8 @@ export const GET = withAllocatorAuth(
         markets: unknown;
         strategy_types: unknown;
         is_example: unknown;
+        created_at: unknown;
+        status: unknown;
       };
       const tier: DisclosureTier = r.disclosure_tier ?? "exploratory";
       // CONTRIB-03 — the owner's OWN rows (now surfaced by withPublishedOrOwner,
@@ -242,6 +286,28 @@ export const GET = withAllocatorAuth(
         // strict boolean so a NULL/undefined source column never widens the
         // wire shape beyond `boolean`.
         is_example: r.is_example === true,
+        // Phase 152 / SCEN-02 — the ownership bit the route ALREADY computed
+        // for the name branch, now on the wire. Uniform: emitted on EVERY row,
+        // `false` included. `isOwn: false` is a viewer-relative RELATIONSHIP,
+        // not the other owner's metadata — it discloses nothing the viewer does
+        // not already know (they know which rows are theirs). `isOwnRow` is
+        // already strictly boolean; reuse it rather than recomputing, so the
+        // rendered "Yours" chip and the un-redacted name can never disagree.
+        isOwn: isOwnRow,
+        // Phase 152 / SCEN-05 — OWNER-ONLY disambiguation metadata, NEVER on a
+        // third-party row (see the SELECT comment for why). Single-key
+        // conditional spreads, so the key is ABSENT off the own branch rather
+        // than present-and-`undefined` — `undefined` would be dropped by
+        // JSON.stringify anyway, but only the absent form makes the emitted
+        // object match the H-0300 own/third-party fence arms BEFORE
+        // serialization. This is NOT a `...row` spread: each spread carries
+        // exactly one named key, so the fence stays a named-key fence.
+        ...(isOwnRow && typeof r.created_at === "string"
+          ? { created_at: r.created_at }
+          : {}),
+        ...(isOwnRow && typeof r.status === "string"
+          ? { status: r.status }
+          : {}),
       };
     });
 

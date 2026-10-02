@@ -6,6 +6,7 @@ import Link from "next/link";
 import { createClient } from "@/lib/supabase/client";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
+import { MIN_PASSWORD_LENGTH } from "@/lib/auth/password-policy";
 
 /**
  * Finish the password-reset flow.
@@ -17,8 +18,12 @@ import { Input } from "@/components/ui/Input";
  * Direct navigation to `/reset-password` (no email link) yields a 401-ish
  * "Auth session missing!" from Supabase. We surface that as a friendly
  * "open the link from your email" message rather than the raw error.
+ *
+ * The length floor is `MIN_PASSWORD_LENGTH` from `@/lib/auth/password-policy`
+ * — the ONE place the client floor is written, and where the measured hosted
+ * policy it mirrors is recorded (SEC-01). It used to be a local constant here,
+ * independent of SignupForm's own literal.
  */
-const MIN_PASSWORD_LENGTH = 6;
 
 export function ResetPasswordForm() {
   const [password, setPassword] = useState("");

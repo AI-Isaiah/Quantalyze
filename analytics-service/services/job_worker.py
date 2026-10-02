@@ -49,9 +49,11 @@ import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Final, Literal, cast
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Final, Literal, TypeVar, cast
 
 import ccxt
+import sentry_sdk
 from cryptography.fernet import InvalidToken
 from fastapi import HTTPException
 # APIResponse is the documented return type of a PostgREST builder's
@@ -75,10 +77,10 @@ if TYPE_CHECKING:
     # `-> "pd.Series"` return annotation needs the name resolvable under mypy.
     import pandas as pd
 
-    # MT5CONC-01: the bounded restart helper is typed against Mt5Client. The value
-    # is only ever a client already held by the live Mt5Session; a type-only import
+    # MT5CONC-01's `Mt5Client` type-only import moved to services/mt5_concurrency.py
+    # in Phase 151 along with `_mt5_bounded_restart`, the only annotation that used
+    # it. `_make_mt5_session` imports the class lazily at RUNTIME (see below), which
     # keeps the module-import-does-not-require-mt5linux contract intact.
-    from services.mt5_client import Mt5Client
 
 from services.analytics_status import sync_strategy_analytics_status
 from services.audit import log_audit_event
@@ -93,7 +95,14 @@ from services.closed_sets import (  # B8b: single-sourced closed sets, re-export
     mt5_enabled_server,
     sfox_enabled_server,
 )
-from services.db import db_execute, get_supabase, one, rows
+from services.db import (
+    PaginatedSelectTruncated,
+    db_execute,
+    db_read_with_retry,
+    get_supabase,
+    one,
+    rows,
+)
 from services.encryption import decrypt_credentials, get_kek
 from services.exchange import (
     aclose_exchange,
@@ -106,12 +115,78 @@ from services.exchange import (
 )
 from services.positions import fetch_positions, persist_position_snapshots
 from services.sfox_client import SfoxClient  # type annotations only
-from services.mt5_client import (  # mt5 holder + the rpyc bound the derive margins off
-    Mt5Session,
-    MT5_REQUEST_TIMEOUT_S as _MT5_REQUEST_TIMEOUT_S,
+from services.mt5_client import Mt5Session  # the worker's mt5 exchange holder
+# Phase 151: moved to services/mt5_concurrency.py (leaf) so allocator_positions.py
+# can share the ONE terminal registry without an import cycle; re-imported here so
+# existing call sites are unchanged.
+#
+# ⚠️ 151 review E2 — A MONKEYPATCH ON THIS MODULE ONLY BINDS WHAT THIS MODULE
+# READS. Re-exporting a name does not make `monkeypatch.setattr(job_worker, ...)`
+# reach the reader; the reader resolves it from its OWN module globals.
+#
+# ⭐ RE-CUT by WIZFORM-ABANDON / plan 153.5-03 — the read/re-export split MOVED.
+# This module's two terminal acquisitions now go through `mt5_terminal_lease`
+# (D-36: only the lease has a release hook, so only the lease can bump the
+# abandoned-session epoch), so of the seven names below `job_worker` itself
+# reads exactly four:
+#     `_MT5_DERIVE_READ_TIMEOUT_S`, `_mt5_bounded_restart`,
+#     `mt5_terminal_lease`, `_Mt5PostReadVerificationError`
+# — and only those four are patchable here.
+#
+# `_MT5_RESTART_TIMEOUT_S`, `_MT5_TERMINAL_LOCKS` and — NEW, this is the part
+# that changed — `_mt5_terminal_lock_for` are now re-exports NOTHING here reads.
+# `_mt5_bounded_restart` reads the first from `services.mt5_concurrency`, and
+# `mt5_terminal_lease` reads the last two from there too, so a test that wants
+# to intercept the LOCK must patch `services.mt5_concurrency._mt5_terminal_lock_for`
+# — patching it HERE is now a silent no-op. (It already was one for
+# `_MT5_RESTART_TIMEOUT_S` — see tests/test_mt5_derive_branch.py
+# `test_mt5_restart_itself_bounded`; the `neuter_lock` arm of
+# `_run_two_concurrent_mt5` in the same file was re-pointed for exactly this
+# reason.) `_mt5_terminal_lock_for` is kept in the import because the identity
+# pins in tests/test_mt5_concurrency.py assert the ONE-registry invariant
+# through this module's binding.
+from services.mt5_concurrency import (
+    _MT5_DERIVE_READ_TIMEOUT_S,
+    _MT5_RESTART_TIMEOUT_S,
+    _MT5_TERMINAL_LOCKS,
+    _mt5_bounded_restart,
+    _mt5_terminal_lock_for,
+    _Mt5PostReadVerificationError,
+    mt5_terminal_lease,
+)
+# 153.6 / A3 — the operator-fault type + its curated copy, for the
+# classify_exception arm. worker -> services leaf, the correct direction (D-07):
+# `services/mt5_probe.py` imports only mt5_client + mt5_validation and can never
+# import back into this module.
+from services.mt5_probe import (
+    Mt5GatewayMisconfigured,
+    curated_gateway_detail,
+)
+# 164.5.4 / D-01: the MT5 deal-ledger READ (login → PRE bracket →
+# history_deals_get → POST bracket) moved to services/mt5_read.py (leaf) so the
+# full-backfill job in equity_reconstruction.py can share the ONE read instead of
+# hand-writing a second copy of it. Same shape as the Phase 151 move above: a leaf
+# module plus a re-import, so no call site here changes.
+#
+# ⚠️ The two WR-02 margin constants MOVED WITH IT and are RE-IMPORTED here
+# deliberately — `tests/test_mt5_derive_branch.py` reads them as
+# `jw._MT5_DEAL_FETCH_MARGIN_S` / `jw._MT5_MAX_SERVER_UTC_OFFSET_S` through this
+# module's alias, and leaving them behind would have made `mt5_read` import from
+# `job_worker` while `job_worker` imports `mt5_read` — the cycle. Nothing in THIS
+# module reads either constant any more (the 151 review-E2 rule applies: a
+# monkeypatch aimed at `jw` on a name only re-exported here binds nothing the
+# reader resolves — the reader is `services.mt5_read`).
+from services.mt5_read import (  # noqa: F401 — re-export for the derive regression
+    _MT5_DEAL_FETCH_MARGIN_S,
+    _MT5_MAX_SERVER_UTC_OFFSET_S,
+    read_mt5_deal_ledger,
 )
 from services.sfox_factory import make_sfox_client
 from services.sfox_read import sfox_transactions_crawl_wallclock_budget_s
+from services.strategy_analytics_provenance import (
+    provenance_source,
+    upsert_or_drop_provenance,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -277,137 +352,88 @@ _SFOX_FAR_PAST_EPOCH_MS: Final[int] = 1_420_070_400_000
 # reconstructed mt5 TWR with a flat series.
 _NATIVE_RETURNS_VENUES: Final[frozenset[str]] = frozenset({"deribit", "sfox", "mt5"})
 
-# MT5RECON-01 (Phase 136): the last-resort event-loop ceiling on the mt5 derive
-# read block (login → account_info → history_deals_get, run OFF the loop via
-# asyncio.to_thread). Each RPyC round-trip is already rpyc-bounded by
-# MT5_REQUEST_TIMEOUT_S inside Mt5Client; this outer wait_for is the FLIPRETRY-01
-# baseline so a hang OUTSIDE a bounded round-trip (netref materialization, a wedged
-# Wine terminal) becomes a CLASSIFIED TRANSIENT at the bound, never an unbounded
-# wedge of the SEQUENTIAL worker. Margin above one round-trip; deep hardening is
-# delivered incrementally: restart-on-timeout landed in Phase 137 plan 01 (the
-# _MT5_RESTART_TIMEOUT_S / _mt5_bounded_restart pair below + the TimeoutError-branch
-# invocation), and the module-level per-terminal lock (_MT5_TERMINAL_LOCKS /
-# _mt5_terminal_lock_for) + the account_info().login bracket (pre+post read) landed
-# in plan 137-02 — both Phase-137 deltas now delivered. Derived
-# from MT5_REQUEST_TIMEOUT_S (+10s margin) so a retuned rpyc bound carries through
-# — mirrors ingestion/mt5.py:_MT5_PROBE_TIMEOUT_S so the derive and probe paths
-# never diverge (WR-02).
-_MT5_DERIVE_READ_TIMEOUT_S: Final[float] = float(
-    os.getenv("MT5_DERIVE_READ_TIMEOUT_S", str(_MT5_REQUEST_TIMEOUT_S + 10.0))
-)
-
-# MT5CONC-01 (Phase 137 plan 01): the wall-clock ceiling on an ACTIVE terminal
-# restart (bounded shutdown + re-connect) invoked on the derive read-timeout
-# branch. The 10s magnitude mirrors exchange.py:_ACLOSE_TIMEOUT_S — a bounded
-# teardown+rebuild is the same order as a bounded close. It MUST stay far under
-# TIMEOUT_PER_KIND["derive_broker_dailies"] (15 min) so a hung restart can never
-# itself push the job into the outer dispatch ceiling: the restart is best-effort
-# recovery, and a restart that wedged is abandoned at this bound exactly like the
-# hung read (never a nested wedge of the sequential worker).
-_MT5_RESTART_TIMEOUT_S: Final[float] = float(
-    os.getenv("MT5_RESTART_TIMEOUT_S", "10.0")
-)
-
-# WR-02 — MT5 deal-fetch upper-bound margin. ``history_deals_get``'s upper bound is
-# built from UTC ``now``, but MT5 deal ``time`` values are in the broker's SERVER
-# timezone (``mt5_deals.deal_utc_day`` is the ONE server-time→UTC correction seam).
-# A server AHEAD of UTC stamps a just-happened deal with an epoch LATER than UTC
-# ``now``, so without a margin that same-day deal would fall past the upper bound
-# and be silently CLIPPED from the ledger → under-counted terminal PnL → a wrong
-# (but plausible) series. The margin MUST cover the maximum plausible
-# server-ahead-of-UTC offset; real MT5 brokers sit within ±13h of UTC. The assert
-# ties the (deliberately generous, one full day) margin to that offset bound so a
-# future edit that tightens the window to "avoid fetching the future" can never
-# silently make it too tight to survive a same-day deal on an ahead-of-UTC server.
-_MT5_MAX_SERVER_UTC_OFFSET_S: Final[int] = 13 * 3600  # ±13h — the real-broker bound
-_MT5_DEAL_FETCH_MARGIN_S: Final[int] = 86_400  # one full day
-assert _MT5_DEAL_FETCH_MARGIN_S >= _MT5_MAX_SERVER_UTC_OFFSET_S, (
-    "MT5 deal-fetch margin must cover the max server-UTC offset so a same-day "
-    "server-time deal is never clipped by the UTC-based upper bound (WR-02)"
-)
-
 logger = logging.getLogger("quantalyze.analytics.job_worker")
 
 
-async def _mt5_bounded_restart(client: "Mt5Client") -> None:
-    """MT5CONC-01 — ACTIVELY restart a wedged MT5 terminal, bounded so it can never
-    itself nest-wedge the SEQUENTIAL worker.
+async def _fetch_mt5_account_balance(session: Mt5Session) -> float | None:
+    """MT5SYNC-02 (hotfix 2026-08-06) — best-effort account-equity read for
+    ``run_sync_trades_job``'s balance-update arm when the key is mt5.
 
-    ``Mt5Client.restart()`` is blocking RPyC (like the read), so it runs OFF the
-    event loop via ``to_thread`` and is capped by ``_MT5_RESTART_TIMEOUT_S`` (~10s,
-    far under the 15-min dispatch ceiling). A hung restart is ABANDONED at the bound
-    exactly like a hung read — the thread is never joined. Best-effort recovery: any
-    failure (the ``wait_for`` firing, a transport raise) is logged and SWALLOWED so
-    the restart can never mask or replace the caller's transient classification.
-    Kept module-level (not nested in the branch) because plan 137-02 reuses it for
-    the login-mismatch branch.
+    REUSES the derive branch's read machinery, never a second MT5 read path:
+    login → account_info through the SAME blocking RPyC ``Mt5Client``, run off
+    the event loop via ``to_thread``, bounded by the SAME
+    ``_MT5_DERIVE_READ_TIMEOUT_S`` ceiling (login+account_info is a strict
+    subset of the derive read that bound covers), and serialized under the
+    SAME Phase-137 per-terminal lock — since WIZFORM-ABANDON / D-36 acquired
+    through ``mt5_terminal_lease`` over that ONE registry — so no call ever
+    touches the ONE shared Wine terminal outside the lock discipline.
+
+    Returns ``account_info().equity`` — balance + floating uPnL of open
+    positions (the v1.8 MT5 convention the derive anchor uses) — as the
+    ``api_keys.account_balance_usdt`` analog (MT5 deposit ccy is USD-family,
+    same convention as the derive branch).
+
+    Error contract mirrors ccxt ``fetch_usdt_balance``'s swallow-with-warning
+    semantics: ANY failure (timeout, transport raise, login rejection,
+    account mismatch, missing/non-finite equity) returns ``None`` so the sync
+    completes without a balance snapshot instead of failing the job — the
+    snapshot is advisory; the follow-on derive job owns the load-bearing
+    equity read (and terminal restart recovery on a wedged pipe). The
+    MT5CONC-02 login bracket IS enforced: a mis-routed terminal presenting a
+    different account can never stamp the WRONG account's equity onto this
+    key.
     """
+    from services.mt5_client import Mt5AccountMismatchError
+    from services.redact import scrub_freeform_string
+
+    def _read() -> dict[str, Any]:
+        session.client.login(
+            session.login, session.investor_password, session.server
+        )
+        info = session.client.account_info()
+        # STRICT equality; a MISSING "login" field must FAIL LOUD, never
+        # default-match (the derive branch's _assert_expected_login contract).
+        if info.get("login") != session.login:
+            raise Mt5AccountMismatchError(session.login, info.get("login"))
+        return info
+
     try:
-        await asyncio.wait_for(
-            asyncio.to_thread(client.restart), timeout=_MT5_RESTART_TIMEOUT_S
-        )
-    except (asyncio.TimeoutError, Exception):  # noqa: BLE001 — best-effort recovery
+        # WIZFORM-ABANDON / D-36 — acquired through the LEASE, not the raw Lock:
+        # the lease's `finally` is the only release hook there is, and it is what
+        # BUMPS THE TERMINAL EPOCH so a `to_thread` body that outlived the
+        # `wait_for` above is refused instead of driving the next holder's
+        # terminal. `wait_s` is deliberately omitted (= unbounded acquire, exactly
+        # what the raw `await lock.acquire()` did): ⛔ the bounded arm's
+        # `Mt5TerminalBusyError` is the INTERACTIVE validate path's contract
+        # (D-29) — a batch worker that refused to wait would drop balance
+        # snapshots whenever the derive job happened to hold the terminal.
+        async with mt5_terminal_lease(session.client.terminal_key):
+            info = await asyncio.wait_for(
+                asyncio.to_thread(_read), timeout=_MT5_DERIVE_READ_TIMEOUT_S
+            )
+    except (asyncio.TimeoutError, Exception) as exc:  # noqa: BLE001 — best-effort read
         logger.warning(
-            "derive_broker_dailies: bounded mt5 terminal restart did not complete "
-            "within its wall-clock bound — abandoning it; the transient retry will "
-            "reconnect on the next attempt (MT5CONC-01)"
+            "sync_trades: mt5 balance read failed — continuing without a "
+            "balance snapshot (exc_class=%s scrubbed=%s)",
+            type(exc).__name__, scrub_freeform_string(str(exc)),
         )
+        return None
 
-
-# MT5CONC-02 (Phase 137 plan 02): module-level per-terminal asyncio.Lock registry,
-# keyed by the process-wide terminal identity (host:port via Mt5Client.terminal_key),
-# mirroring position_reconstruction.py:308-317. It MUST be module-level, NOT a
-# Mt5Session attribute: _make_mt5_session builds a FRESH Mt5Session + Mt5Client per
-# job, so a Session-attached lock would be a brand-new Lock object per job and
-# serialize NOTHING (the Pitfall-1 anti-pattern). Keyed by terminal_key so every job
-# hitting the ONE shared Wine terminal contends on the SAME Lock.
-#
-# The dict grows unboundedly BY DESIGN (same rationale as the reconstruct registry):
-# evicting a Lock with waiters parked on it would silently break serialization, and
-# terminal cardinality is bounded (v1 = ONE gateway terminal, O(1) keys).
-#
-# v1 SCOPE — a DOCUMENTED gap, not silently assumed: an asyncio.Lock is
-# SINGLE-EVENT-LOOP. It serializes the shared terminal only WITHIN one worker
-# process's event loop. The sequential main_worker.py:606 dispatch loop runs jobs
-# one-at-a-time in-process, so in-process interleave is structurally impossible;
-# ACROSS worker replicas / the separate FastAPI validate process it does NOT
-# serialize. Cross-process serialization of the ONE gateway is a DOCUMENTED v1 gap
-# (v1 = one serialized terminal, one worker replica); the plan-02 login bracket
-# (account_info().login == expected, asserted pre+post the read) is the cross-process
-# safety net. The dispatch-epilogue aclose_exchange close also sits OUTSIDE this lock
-# — safe under the sequential per-process loop (no terminal IPC contends with it).
-_MT5_TERMINAL_LOCKS: dict[str, asyncio.Lock] = {}
-
-
-def _mt5_terminal_lock_for(terminal_key: str) -> asyncio.Lock:
-    # setdefault is atomic across coroutine resumption — there is no await between
-    # the lookup and the insert, so within one event loop two simultaneous first-
-    # callers for the same terminal cannot end up with two different Lock objects.
-    # Single-event-loop safe (see the cross-process gap noted above).
-    return _MT5_TERMINAL_LOCKS.setdefault(terminal_key, asyncio.Lock())
-
-
-class _Mt5PostReadVerificationError(Exception):
-    """IN-01 — a transient transport blip on the ASSERTION-ONLY POST login bracket.
-
-    The POST bracket re-reads ``account_info()`` purely to re-assert the account
-    AFTER the correct account's deals were already fetched successfully. A genuine
-    network/terminal blip on that re-read surfaces as an ``Mt5ClientError``. Routing
-    it through the shared ``except Mt5ClientError`` classify/stamp arm risks a
-    PERMANENT user-attributed ``failed`` stamp (if ``classify_mt5_login_error``
-    reads it as ``auth``/``wrong_server``) even though the economic read of the
-    CORRECT account succeeded — a credential verdict for a mere verification gap.
-
-    Deliberately a PLAIN ``Exception``, NOT an ``Mt5ClientError`` subclass, so the
-    classify/stamp arm is structurally UNABLE to absorb it: it routes instead to a
-    dedicated TRANSIENT (re-queue), no-stamp branch. It carries only the already-
-    secret-scrubbed ``Mt5ClientError`` text.
-
-    It does NOT weaken the trust guarantee: a genuine wrong-account POST read raises
-    ``Mt5AccountMismatchError`` (a different type, raised by ``_assert_expected_login``
-    OUTSIDE the wrapped ``account_info()`` call), which still routes to the
-    mismatch arm — so ``api_verified`` can never be stamped on the wrong account.
-    """
+    try:
+        equity = float(info["equity"])
+    except (KeyError, TypeError, ValueError):
+        logger.warning(
+            "sync_trades: mt5 account_info carried a missing/non-numeric "
+            "equity — continuing without a balance snapshot"
+        )
+        return None
+    if not math.isfinite(equity):
+        logger.warning(
+            "sync_trades: mt5 account_info equity is non-finite (NaN/Inf) — "
+            "refusing the poisoned snapshot (mirrors the derive anchor guard)"
+        )
+        return None
+    return equity
 
 
 # ---------------------------------------------------------------------------
@@ -491,6 +517,121 @@ TIMEOUT_PER_KIND: dict[str, float] = {
     "derive_allocator_equity": 5 * 60,  # Phase 115.1 / RD-3 Option B — pure DB + math, no exchange I/O (5 min < 10 min watchdog floor → no override needed)
 }
 
+# ---------------------------------------------------------------------------
+# JOB-03: job-chain topology (which kind enqueues which follow-on)
+# ---------------------------------------------------------------------------
+# The CANONICAL chain map. The production enqueue sites READ this constant —
+# it is load-bearing, not decorative documentation. A wrong entry changes real
+# enqueue behavior and reddens the job-flow suites (tests/test_main_worker.py,
+# tests/test_job_worker_csv_kind.py), which is exactly what keeps the JOB-03
+# reaper-threshold oracle from being pinned to a fiction.
+#
+# A strategy_analytics row stays 'computing' for a WHOLE chain, not one job, so
+# TestReaperThresholdInvariant walks this map to compute the chain-inclusive
+# ceiling that STRATEGY_ANALYTICS_REAP_THRESHOLD must exceed.
+#
+# Chain edges only. The routers/cron.py daily re-entry and
+# main_worker.WATCHDOG_PER_KIND_OVERRIDES are NOT chain edges.
+JOB_CHAIN_FOLLOW_ON: Final[dict[str, tuple[str, ...]]] = {
+    # Tuple order is LOAD-BEARING: (ledger-backed tail, trade-backed tail) —
+    # read by services/ingestion/long_fetch.py tail selection.
+    "process_key_long": ("derive_broker_dailies", "sync_trades"),
+    "sync_trades": ("derive_broker_dailies",),          # run_sync_trades_job follow-on
+    "derive_broker_dailies": ("compute_analytics_from_csv",),  # _enqueue_csv_analytics
+    "compute_analytics_from_csv": (),  # chain-terminal — compiles the factsheet
+    "stitch_composite": (),            # chain-terminal — Phase 86 / COMP-02 fan-out
+}
+
+# JOB-03: the CANONICAL staleness threshold for the strategy_analytics
+# stuck-'computing' reaper, as a Postgres interval string.
+#
+# (1) CANONICAL SOURCE. Migration
+#     20260803130000_reaper_limit_bound_materialized_cte.sql
+#     embeds this literal in its pg_cron body; the drift gate (plan 142-04) fails
+#     CI if the SQL literal and this constant diverge. Change it HERE first.
+#     (The same pg_cron job has now been re-registered three times: Phase 142
+#     registered the original one-arm body, Phase 142.1 / D-11 added the
+#     NULL-stamp clock-start arm, and 142.1 / D-19 restored the LIMIT bound.
+#     This name and tests/test_main_worker.py::_REAPER_MIGRATION_NAME move
+#     together — always name the migration that registers the body pg_cron
+#     actually runs. Leaving either behind keeps the drift gate green while it
+#     guards a superseded body, which is how D-19's own pointer went stale.)
+# (2) DERIVATION — the chain-inclusive ceiling computed by
+#     tests/test_main_worker.py::TestReaperThresholdInvariant: 43,920 s (~12.2 h),
+#     the worst simple path through JOB_CHAIN_FOLLOW_ON
+#     (process_key_long → sync_trades → derive_broker_dailies →
+#     compute_analytics_from_csv), each hop costing batch-tail exposure +
+#     retried handler timeout + retry backoff. '16 hours' (57,600 s) is the
+#     smallest whole 4-hour multiple >= 1.25x that ceiling (ratio 1.31x).
+#     It is NOT batch_size x max(TIMEOUT_PER_KIND) — that is the compute_jobs
+#     formula (migration 20260720120000) and it measures ONE claimed job, which
+#     under-counts a multi-hop chain by ~4x (CONTEXT C-6).
+# (3) SAFETY lives in the reaper's NOT EXISTS(active compute_jobs) conjunct — a
+#     healthy in-flight chain always has a non-terminal compute_jobs row. This
+#     interval is defense-in-depth debounce. Do not shrink it without
+#     re-deriving the invariant.
+STRATEGY_ANALYTICS_REAP_THRESHOLD: Final[str] = "16 hours"
+
+# Phase 161.1 / D-15: the terminal-SUCCESS statuses of a `strategy_analytics`
+# row — i.e. the states in which a strategy is PUBLISHED and rendering a
+# factsheet, and from which a recurring maintenance refresh may therefore not
+# downgrade it.
+#
+# ⛔ It is a PAIR, and that is measured rather than defensive. The production
+# census of the ledger-backed cohort reads: `complete` 0, `complete_with_warnings`
+# 5. A set written as just {"complete"} would protect exactly NONE of the
+# accounts this guard exists for, while still looking like a guard in review —
+# the same one-value mistake the staleness view's SQL success set fences on
+# (migration 20260825120000, D-04).
+#
+# Single-sourced here so `_stamp_strategy_analytics_failed`'s non-destructive
+# branch and the SQL view cannot drift; plan 05 gate 9 asserts set-equality
+# between this frozenset and the view's status predicate.
+STRATEGY_ANALYTICS_TERMINAL_SUCCESS_STATUSES: Final[frozenset[str]] = frozenset(
+    {"complete", "complete_with_warnings"}
+)
+
+# Phase 161.1 / CR-03: the two `compute_jobs.metadata->>'source'` values that
+# mark a job as part of a RECURRING background maintenance refresh — the only
+# jobs the D-15 non-destructive guards may protect.
+#
+# ⛔ This is a CONSUMER-SIDE set, not the contract. The contract is spelled
+# INLINE at four places with no compiler between them: the two
+# `jsonb_build_object('source', …)` calls in the fan-out migrations
+# (20260825130000, 20260825140000), the two inline marker comparisons in
+# the guards below, and the branch (b) partition in migration 20260825150000.
+# Gates 8 and 11 pin the migrations against the guards;
+# tests/test_ledger_refresh_publish_guard.py pins THIS set against both guards
+# and against the bridge migration, so a fifth spelling cannot appear silently.
+#
+# ⛔ WHAT IT IS FOR, AND WHAT IT IS NOT. It is the CENSUS of every marker this
+# phase mints — the handle the drift gates enumerate, so a fifth spelling cannot
+# appear silently at any of the four ends. It is NOT a dispatch predicate, and
+# no runtime decision may be taken on membership in it.
+#
+# F5 (161.1 re-review): the last such decision is gone. Two sites used to ask
+# "is this job part of A refresh?" against the union while the guard they feed
+# protects exactly ONE arm's marker — safe only by accident of today's fan-outs,
+# and re-opened the moment a future arm minted the other marker on the other
+# kind. Both now name the arm they belong to
+# (`LEDGER_REFRESH_SINGLE_KEY_SOURCE`), because a hop reachable from exactly one
+# arm must say WHICH arm rather than be right by coincidence. The two markers
+# are deliberately DIFFERENT strings so the two arms' guards cannot cross-fire;
+# a union test erases exactly that distinction.
+#
+# Fail-safe direction, as everywhere else in D-15: a source an arm does not
+# recognise is passed as None, i.e. the LOUD path — an unrecognised job
+# un-publishes loudly rather than failing silently.
+#
+# The inline guard comparisons stay inline: they are the contract ends the SQL
+# gates pin, and a constant on that side would leave those gates with one
+# literal instead of two.
+LEDGER_REFRESH_SINGLE_KEY_SOURCE: Final[str] = "ledger-refresh"
+LEDGER_REFRESH_COMPOSITE_SOURCE: Final[str] = "ledger-refresh-composite"
+LEDGER_REFRESH_JOB_SOURCES: Final[frozenset[str]] = frozenset(
+    {LEDGER_REFRESH_SINGLE_KEY_SOURCE, LEDGER_REFRESH_COMPOSITE_SOURCE}
+)
+
 # Fallback derive budget (seconds) used when TIMEOUT_PER_KIND lacks
 # "derive_broker_dailies". Single-sourced so the MTM second pass and the smoothed
 # third pass can never drift; TIMEOUT_PER_KIND stays the real source of truth.
@@ -564,6 +705,24 @@ def classify_exception(exc: Exception) -> tuple[ErrorKind, str]:
     if isinstance(exc, asyncio.TimeoutError):
         return ("transient", f"Handler exceeded timeout: {str(exc)[:200]}")
 
+    # Phase 164.6.7 / D-09. ``HandlerIOUnavailable`` and both subclasses: a
+    # database read or write the handler needed before it could decide or
+    # record its outcome failed, and what was not yet written stays unwritten.
+    # Two reasons meet here, and each subclass carries one or both:
+    # - ``RefreshMarkerRereadUnavailable`` (the single-key ENTRY publish-state
+    #   read and the chain-edge re-read, round 2): the handler could not tell
+    #   whether a failure may be recorded without un-publishing a funded
+    #   account.
+    # - ``StampIOUnavailable`` (every read and write inside the two terminal
+    #   stamp closures, through ``_stamp_io``, round 4): the handler HAS a
+    #   curated cause to record and could not record it. That holds for an
+    #   unmarked user stitch too, where no publish state is at stake; its text
+    #   carries the cause so ``last_error`` keeps it.
+    # TRANSIENT: the queue retries the whole job and the next attempt reads and
+    # writes again.
+    if isinstance(exc, HandlerIOUnavailable):
+        return ("transient", str(exc)[:500])
+
     # Fernet InvalidToken means the DEK cannot be unwrapped with the
     # current KEK — either a key rotation mismatch or a corrupted row.
     # The raw exception string is NOT safe to render (older fernet
@@ -573,6 +732,53 @@ def classify_exception(exc: Exception) -> tuple[ErrorKind, str]:
             "permanent",
             "Credentials could not be decrypted — key may have rotated",
         )
+
+    # 153.6 / A3. The MT5 gateway terminal refuses automated trading, so an
+    # investor login cannot be distinguished from a master one and no read-only
+    # verdict is available. PERMANENT: it is a setting in OUR gateway and no retry
+    # can clear it.
+    #
+    # ⚠️ 161-02: TWO independent settings do this. Founder-measured live
+    # 2026-08-13, the actual blocker was the Expert-Advisors "Allow algorithmic
+    # trading" option (`Enabled` in [Experts]) — which the gateway re-sets off on
+    # every account change while THIS worker logs in on every job, so the fault
+    # recurs after every operator fix.
+    # ⛔ CORRECTED 2026-09-25 (164.6.5 review round 1): the re-set happens ONLY
+    # while "Disable algorithmic trading when the account has been changed"
+    # (`ACCOUNT_CHANGE_ALGO_DISABLE_OPTION`, services/mt5_validation.py) is
+    # ticked, and that box was founder-read UNCHECKED on 2026-09-24. The
+    # sentence above is kept as lineage. MetaQuotes' default-ON "Disable automatic
+    # trading through the external Python API" (`Api`, reported as
+    # `tradeapi_disabled`) was measured OFF at the same time, yet the message this
+    # arm returned named it — a sentence that was false about the operator's own
+    # gateway, on the surface they triage from. Before this arm the adapter raised a bare RuntimeError, which
+    # fell through to the ("unknown", str(exc)) catch-all at the bottom — and
+    # `unknown` RETRIES, so the worker re-ran the whole SERIALIZED probe against
+    # the ONE shared terminal on every attempt, queueing ahead of every other
+    # user's validate, for a fault that can never clear.
+    #
+    # Ships a message read through an ALLOW-LIST (`curated_gateway_detail`), never
+    # a bare str(exc), for the same reason the InvalidToken arm above ships a
+    # fixed one: `mt5linux` f-string-interpolates the password into the source it
+    # evaluates remotely (T-134-01 / T-153.3-23), so any text originating upstream
+    # is a credential-disclosure surface — and the pre-fix copy named investor and
+    # master passwords to the user outright. 161-02 widened this from ONE fixed
+    # constant to the curated FAMILY: returning the generic constant
+    # unconditionally discarded the cause the raise site had just derived from the
+    # terminal flags, so the operator surface kept naming an option that was
+    # measured NOT to be in force. Anything outside the family still degrades to
+    # the generic constant, so raw remote text can never ride out.
+    #
+    # ⛔ Placed ABOVE the ccxt hierarchy and the fall-through, per this function's
+    # most-specific-first contract. THIS ARM IS THE ONE DISPOSITION (D-17/OQ-4),
+    # deliberately: not a DispatchResult(error_kind="permanent") in long_fetch and
+    # not an HTTPException(422). The sink arm also covers process_key.py's other
+    # adapter.validate call sites, and importing FastAPI into an ingestion adapter
+    # would invert the dependency direction D-07 forbids. Do not "also" add either
+    # of the sibling conventions — two dispositions for one fault is the drift
+    # this phase exists to remove.
+    if isinstance(exc, Mt5GatewayMisconfigured):
+        return ("permanent", curated_gateway_detail(exc))
 
     # FastAPI HTTPException — analytics_runner raises 400 for "Insufficient
     # trade history" and similar pre-condition failures that no amount of
@@ -712,14 +918,24 @@ def _defer_lost_ownership(exc: Exception) -> bool:
     """True when a defer_compute_job call failed because THIS worker no longer
     owns the job. NEW-C12-06 fenced defer_compute_job on claim_token: a
     watchdog reclaim + re-claim under a fresh token makes defer raise
-    serialization_failure (SQLSTATE 40001, message 'preempted by watchdog
-    reclaim'); a row that is no longer 'running' raises no_data_found
-    (message 'not found or not running'). Either way the job belongs to
-    another worker now and must be yielded (DEFERRED), not failed/retried with
-    a stale token. Matched by SQLSTATE when PostgREST surfaces it, else by the
-    RPC's own RAISE-message text. Kept local to avoid a circular import with
-    main_worker (which imports this module)."""
-    if getattr(exc, "code", None) == "40001":  # serialization_failure
+    SQLSTATE 55006 (object_in_use, message 'preempted by watchdog reclaim');
+    a row that is no longer 'running' raises no_data_found (message 'not
+    found or not running'). Either way the job belongs to another worker now
+    and must be yielded (DEFERRED), not failed/retried with a stale token.
+    Matched by SQLSTATE 55006 when PostgREST surfaces it, else by the RPC's
+    own RAISE-message text.
+
+    Phase 164.9.3.2: the fence raised serialization_failure (40001) before,
+    and PostgREST 14 re-runs a 40001 without bound, so the defer never
+    returned. The message literals cover ONE deploy order: migration first,
+    old worker. The body answers a 55006 once, and an old classifier matches
+    it by the literal. The reverse order (new worker, old body) is NOT
+    covered: the body still raises 40001, PostgREST 14 re-runs it without
+    bound, and no response ever reaches this classifier. That is the pre-fix
+    hang, unchanged, until the migration applies. A bare 40001 without either literal is an unrelated serialization
+    conflict and is NOT classified (PR #149 I4 narrowing). Kept local to
+    avoid a circular import with main_worker (which imports this module)."""
+    if getattr(exc, "code", None) == "55006":  # object_in_use: the claim-token fence
         return True
     msg = str(exc).lower()
     return (
@@ -814,11 +1030,13 @@ async def _check_circuit_breaker(
     except Exception as _defer_exc:  # noqa: BLE001
         # NEW-C12-06: defer_compute_job is now claim-token fenced. If THIS
         # worker was preempted (watchdog reclaim + another worker re-claimed
-        # under a fresh token), the defer raises serialization_failure; if the
+        # under a fresh token), the defer raises SQLSTATE 55006 (Phase
+        # 164.9.3.2: it raised 40001 before, which PostgREST 14 re-ran without
+        # bound, so the call never returned); if the
         # row is no longer running, no_data_found. In both cases this worker no
         # longer owns the job — yield it as DEFERRED (the owner will process
         # it). Owning the preemption signal HERE is the point: otherwise the
-        # raw 40001 propagates to dispatch's catch-all, is classified
+        # raw fence error propagates to dispatch's catch-all, is classified
         # error_kind='unknown' and RETRIED, then carries our stale token into
         # mark_compute_job_failed — corruption-safe only incidentally via the
         # mig-117 mark fence. A genuine defer failure (DB down, etc.) is
@@ -1181,6 +1399,9 @@ AllocatorEquityAction = Literal[
     "allocator.equity.refresh_failed",
     "allocator.equity.sibling_lookup_failed",
     "allocator.equity.perp_upnl_missing",
+    # Phase 167.1.2 plan 12, review SFH-R2-01: the daily refresh held a
+    # zero-snapshot book's first row while its reconstruct was in flight.
+    "allocator.equity.refresh_held_for_reconstruct",
 ]
 
 
@@ -1263,19 +1484,7 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
     # strategy_analytics stamp below.
     exchange_dq_flags: dict[str, Any] = {}
     try:
-        trades = await fetch_all_trades(ctx.exchange, since_ms=since_ms)
-        # Drain BEFORE the next exchange call so daily-PnL flags do not
-        # get clobbered by ``fetch_raw_trades``' entry-seam reset on
-        # the same asyncio task.
-        daily_pnl_dq_flags = get_and_clear_last_dq_flags()
-        if daily_pnl_dq_flags:
-            exchange_dq_flags.update(daily_pnl_dq_flags)
-        account_balance = await fetch_usdt_balance(ctx.exchange)
-
-        # --- Phase 2: Raw fill ingestion (gated by feature flag) ---
-        # M-0673: feature flag is module-level constant. Re-reading per job
-        # produced rollout-window inconsistency.
-        #
+        # --- Phase flags (shared by the mt5 and ccxt arms below) ---
         # H-0691: `phase2_failed` tracks BOTH fetch failures (caught below)
         # and persist failures (caught further down). When True, we stamp
         # `strategy_analytics.data_quality_flags.phase2_fill_ingestion_failed`
@@ -1288,6 +1497,48 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
         # set to the *fetched* count not the *persisted* count; (b) last_sync_at
         # advancing past the unpersisted window permanently; (c) no DQ flag.
         phase1_failed = False
+
+        if isinstance(ctx.exchange, Mt5Session):
+            # MT5SYNC-02 (hotfix 2026-08-06): mt5 is non-ccxt — pre-fix this
+            # arm's ccxt reads crashed on the Mt5Session holder
+            # (fetch_all_trades → fetch_daily_pnl → exchange.id →
+            # AttributeError "'Mt5Session' object has no attribute 'id'",
+            # Sentry QUANTALYZE-K; fetch_usdt_balance's fetch_balance
+            # AttributeError degraded the balance arm on every run). Route:
+            #   * daily-PnL fetch → EXPLICIT no-op (trades=[]). MT5 dailies
+            #     come from the deal LEDGER inside the follow-on
+            #     derive_broker_dailies job (combine_mt5_deal_ledger, the
+            #     SINGLE Phase-136 mt5 read path); no ccxt daily-PnL rows
+            #     exist for mt5, and minting a deals→sync_trades conversion
+            #     here would be a second MT5 read path.
+            #   * raw-fill ingestion (Phase 2) → EXPLICIT no-op. There is no
+            #     fill-based mt5 consumer BY DESIGN (long_fetch
+            #     Mt5Adapter.fetch_raw raises NotImplementedError — a fill
+            #     path would reopen the BYB-02 corruption class).
+            #   * balance-update arm → the Mt5Client login+account_info
+            #     equity read (bounded, per-terminal-locked, best-effort;
+            #     see _fetch_mt5_account_balance).
+            # The shared epilogue below then runs UNCHANGED: sync_trades RPC
+            # skipped (no trades), advance_sync_cursor stamps last_sync_at +
+            # account_balance_usdt, and the derive_broker_dailies follow-on
+            # is enqueued — so a healthy MT5 key completes the sync instead
+            # of dying with an AttributeError.
+            trades: list[dict[str, Any]] = []
+            account_balance = await _fetch_mt5_account_balance(ctx.exchange)
+        else:
+            trades = await fetch_all_trades(ctx.exchange, since_ms=since_ms)
+            # Drain BEFORE the next exchange call so daily-PnL flags do not
+            # get clobbered by ``fetch_raw_trades``' entry-seam reset on
+            # the same asyncio task.
+            daily_pnl_dq_flags = get_and_clear_last_dq_flags()
+            if daily_pnl_dq_flags:
+                exchange_dq_flags.update(daily_pnl_dq_flags)
+            account_balance = await fetch_usdt_balance(ctx.exchange)
+
+        # --- Phase 2: Raw fill ingestion (gated by feature flag) ---
+        # M-0673: feature flag is module-level constant. Re-reading per job
+        # produced rollout-window inconsistency.
+        #
         # Audit-2026-05-07 C-0225 / M-0663 / H-0670 — DQ flags surfaced by
         # ``fetch_raw_trades`` (partial-symbol failures, page-cap truncation,
         # fee-currency mismatch) MUST be drained immediately after the
@@ -1296,7 +1547,10 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
         # the strategy_analytics stamp loop below cannot merge them into
         # ``data_quality_flags`` — silently dropping the very signals
         # that batch added.
-        if _RAW_TRADE_INGESTION_ENABLED:
+        #
+        # MT5SYNC-02: mt5 is excluded — fetch_raw_trades is ccxt-shaped and
+        # there is no fill-based mt5 consumer (see the mt5 arm above).
+        if _RAW_TRADE_INGESTION_ENABLED and not isinstance(ctx.exchange, Mt5Session):
             try:
                 raw_fills = await fetch_raw_trades(
                     ctx.exchange, strategy_id, ctx.supabase, since_ms=since_ms
@@ -1854,7 +2108,9 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
     # Follow-on analytics kind: the funding-inclusive CSV route
     # (derive_broker_dailies → compute_analytics_from_csv). The legacy
     # trades-only compute_analytics re-entry was retired in 106-08.
-    _follow_on_kind = "derive_broker_dailies"
+    # JOB-03: read the canonical chain topology — never an inline literal, so
+    # the reaper-threshold oracle and this enqueue can never disagree.
+    _follow_on_kind = JOB_CHAIN_FOLLOW_ON["sync_trades"][0]
     try:
         def _enqueue_follow_on() -> None:
             ctx.supabase.rpc(
@@ -1885,22 +2141,80 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
         # waiting_for_complete state and renders an error envelope.
         # Best-effort: if even this write fails, we log + swallow rather
         # than fail the job (the trades are already persisted).
+        # ⛔⛔ THIS WRITE IS ERASED ONE RPC LATER, AND NO PROVENANCE MARKER CAN
+        # SAVE IT (164.2-REVIEW WR-01). READ THIS BEFORE ADDING ONE BACK.
+        # --------------------------------------------------------------------
+        # Phase 164.2 stamped this payload with ('writer', <this job's id>) on
+        # the theory that the bridge's branch (b) would then keep the curated
+        # sentence. MEASURED, it never reaches a branch that consults a marker:
+        # this handler returns DispatchOutcome.DONE at the foot of the function
+        # (the trades DID persist), `main_worker.py:929` maps DONE to
+        # `mark_compute_job_done`, and that RPC ends in
+        # `PERFORM sync_strategy_analytics_status`. With this sync job now done
+        # and NO analytics job enqueued — that is the very failure being
+        # recorded — every compute_jobs row for the strategy is terminal-done,
+        # `live_failures` is empty, and the bridge takes branch (c), which
+        # writes computation_status='complete', computation_error=NULL, BOTH
+        # markers NULL and a fresh computed_at, unconditionally.
+        #
+        # So the user's row reads 'complete' with no analytics and a fresh
+        # vintage. That erasure is PRE-EXISTING — it is the 161.1 F1 class, and
+        # F1's comment at the derive handler's insufficient-history exit
+        # (:5082) describes it exactly — and this comment is what 164.2 owed it
+        # instead of a stamp that nothing reads.
+        #
+        # ⛔ AND THE F1 REMEDY DOES NOT TRANSFER TO THIS HANDLER. F1 returns
+        # FAILED/permanent so the bridge takes (b) or (b-prime). It is applied
+        # at a `derive_broker_dailies` job, and that kind is IN the bridge's
+        # `is_protected` kind list (`derive_broker_dailies`,
+        # `compute_analytics_from_csv`, `stitch_composite`) — so on a marked
+        # recurring refresh over a healthy published row it lands on (b-prime),
+        # which PRESERVES the publish state. `sync_trades` is not in that list
+        # and can never be protected, so the same edit here always lands on the
+        # LOUD branch (b): a routine cron sync whose follow-on enqueue hiccups
+        # would unpublish a live funded factsheet to 'failed' until the next
+        # tick's `done` supersedes it — and if the enqueue ever fails
+        # SYSTEMATICALLY (a bad kind, an RLS change), every live strategy on the
+        # platform goes dark within one cron tick. Correcting the outcome here
+        # needs to be scoped to the case with nothing published to lose, which
+        # is a founder-facing change and NOT a review fix. Booked in TODOS.md as
+        # [SYNCTRADES-ENQUEUE-DONE].
+        #
+        # Until that lands this payload is DELIBERATELY UNSTAMPED, and the
+        # provenance census carves it out BY EXACT KEY SET with its own count,
+        # so re-stamping it collapses the carve-out and reddens the gate rather
+        # than silently restoring an inert marker.
+        #
+        # ⚠️ The WRITE itself stays, and the paragraph above is why the comment
+        # below it must not be read as a working guarantee: the bridge runs
+        # inside the very next RPC, so the 'failed' row this lands is visible to
+        # the wizard poller for milliseconds at best. It is kept because it is
+        # the authoritative record at the moment it is made, because deleting it
+        # would be a SECOND behaviour change on the same live path, and because
+        # it is the row that becomes correct the day the TODOS item lands.
         try:
             def _mark_analytics_failed() -> None:
-                ctx.supabase.table("strategy_analytics").upsert(
-                    {
+                _enqueue_failed_payload: dict[str, Any] = {
                         "strategy_id": strategy_id,
                         "computation_status": "failed",
                         # SI-02 (MEDIUM-2): clear the runner-owned warned marker on
                         # every terminal 'failed' so the status bridge (branches
                         # a/c) cannot resurrect a stale complete_with_warnings.
                         "computation_warned": False,
+                        # JOB-01: clear on exit so a stale stamp can never re-trigger the reaper.
+                        "computing_started_at": None,
                         "computation_error": (
                             "Analytics enqueue failed during sync. "
                             "The next scheduled sync will retry — "
                             "contact support if this persists."
                         ),
-                    },
+                        # ⛔ NO computation_error_source / computation_error_job_id.
+                        # See the block above this `try`. A marker here is read by
+                        # nobody and asserts a protection that does not exist.
+                }
+
+                ctx.supabase.table("strategy_analytics").upsert(
+                    _enqueue_failed_payload,
                     on_conflict="strategy_id",
                 ).execute()
 
@@ -1944,7 +2258,57 @@ async def run_compute_analytics_from_csv_job(job: dict[str, Any]) -> DispatchRes
     # Lazy import to keep import-time cycles isolated.
     from services.analytics_runner import run_csv_strategy_analytics
 
-    await run_csv_strategy_analytics(strategy_id)
+    # CR-03 (161.1-REVIEW): hand hop 2 the refresh marker its enqueue now
+    # carries. `run_csv_strategy_analytics` writes a terminal 'failed' at five
+    # sites of its own; without this the D-15 contract stops at the chain edge
+    # and a funded account is un-published by the hop that compiles its
+    # factsheet. Recognised markers only — anything else is None, which is the
+    # runner's unchanged (LOUD) behaviour.
+    #
+    # ⛔ F5: RECOGNISED means the SINGLE-KEY marker, not the union — the same
+    # question the enqueue site now answers with the same marker. The union form
+    # was safe only by accident of today's fan-outs: migration 20260825140000
+    # marks `stitch_composite` (chain-terminal) with the composite marker, so no
+    # composite-marked job reaches this kind. If one ever did, granting hop 2 a
+    # protection hop 1 declined means the destructive stamp has ALREADY fired
+    # upstream and hop 2 would then decline to record the follow-on failure —
+    # the worst of both directions. Narrow it here, where the consumer is.
+    _metadata = job.get("metadata")
+    _source = _metadata.get("source") if isinstance(_metadata, dict) else None
+    _is_marked_refresh = _source == LEDGER_REFRESH_SINGLE_KEY_SOURCE
+
+    # F1: the pre-refresh publish state, MINTED BY HOP 1 and carried here on this
+    # job's metadata. It is deliberately NOT re-derived from the row: the SQL
+    # status bridge has already rewritten `computation_status` to 'computing' by
+    # the time this job is claimed (see `_enqueue_csv_analytics`). The runner
+    # validates the value against the single-sourced terminal-success pair, so an
+    # absent, unknown or non-published value lands as no protection at all.
+    _publish_status = (
+        _metadata.get("publish_status")
+        if _is_marked_refresh and isinstance(_metadata, dict)
+        else None
+    )
+    _publish_warned = (
+        _metadata.get("publish_warned")
+        if _is_marked_refresh and isinstance(_metadata, dict)
+        else None
+    )
+    # Phase 164.2 / criterion 2: this is the ONE caller of
+    # `run_csv_strategy_analytics` that has a compute job, so it is the one
+    # caller that can name the job a terminal-failure sentence describes. The
+    # other three (the CSV-first wizard route, the composite finalizer, the
+    # tests) leave `job_id` at its None default and take the NULL-marker path,
+    # which reproduces the pre-164.2 behaviour — correct for a failure that no
+    # job owns. T-164.2-18: `job["id"]` is the claimed job's own id from the
+    # queue RPC, the same value this worker passes to mark_compute_job_failed,
+    # so the bridge's equality test compares like with like.
+    await run_csv_strategy_analytics(
+        strategy_id,
+        refresh_source=_source if _is_marked_refresh else None,
+        refresh_publish_status=_publish_status if isinstance(_publish_status, str) else None,
+        refresh_publish_warned=bool(_publish_warned),
+        job_id=job.get("id"),
+    )
     return DispatchResult(outcome=DispatchOutcome.DONE)
 
 
@@ -2219,6 +2583,595 @@ async def _resolve_ccxt_flow_price_index(
     return price_index
 
 
+# ---------------------------------------------------------------------------
+# Phase 161.1 / REUSE-01 — PROTECTION IS NOT INHERITABLE ACROSS A DEDUP COLLISION
+# ---------------------------------------------------------------------------
+# ⛔ THE DEFECT THIS CLOSES. The D-15 marker is a property of a JOB ROW, and a job
+# row can be REUSED by a caller who never asked for it.
+# `_enqueue_compute_job_internal` (mig 20260716090000:229-262) dedupes on
+# (target, kind) over ('pending','running','done_pending_children') and RETURNS
+# the existing id — `p_metadata` is DISCARDED, there is no merge arm. MEASURED
+# against that exact function body on a throwaway Postgres: a user's resync tail
+# enqueuing `derive_broker_dailies` while a MARKED refresh of the same strategy
+# is in flight gets the fan-out's job id back, its own `correlation_id` is
+# dropped, and the row keeps the marker. The user's resync is then served by a
+# job carrying a protection that exists for work NOBODY IS WATCHING.
+#
+# The harm is production-specific and it is 5/5 of the live cohort. MEASURED by
+# driving the real `sync_strategy_analytics_status` body: with the reused job
+# pending, branch (a) rewrites a plain `complete` row to `computing` (loud — the
+# poller keeps polling) but PRESERVES `complete_with_warnings`. The production
+# ledger cohort is `complete` 0 / `complete_with_warnings` 5, so on every live
+# strategy the entry read below sees a terminal-success status, the protection
+# arms, every later failure is suppressed at BOTH hops, and
+# `useStrategySyncPoller` (src/hooks/useStrategySyncPoller.ts:285) — whose
+# terminal test is `nextStatus === 'failed' || isComputedAnalytics(nextStatus)` —
+# reads TERMINAL on its first poll and stops. SyncPreviewStep then renders the
+# PRE-RESYNC factsheet over a silently-failed resync.
+#
+# ⛔ THE RULE, and it is symmetric: a dedup collision never transfers protection,
+# in EITHER direction. The resync path RETRACTS the marker from the row it
+# discovers it has inherited (`_retract_refresh_marker_on_reuse` in
+# services/ingestion/long_fetch.py); the refresh path never LAUNDERS its marker
+# onto a foreign row it collided with (the mirror check at the chain edge below).
+# Both resolve toward the LOUD path, which is the fail-safe direction this whole
+# phase is built on.
+#
+# ⛔ WHY THIS RE-READ EXISTS AT ALL, i.e. why the retraction alone is not the fix.
+# The handler reads its metadata ONCE, at claim time, from the row the claim RPC
+# returned. A retraction that lands AFTER the claim is invisible to that
+# in-memory copy — and that is the window where the defect actually bites, since
+# a marked refresh is claimed the moment the fan-out enqueues it and the user's
+# resync attaches minutes later. So every site about to HONOUR the marker
+# re-asks the ROW, which is the only place the retraction can be seen.
+#
+# ⚠️ Deliberately NOT the same question as the entry publish-state read below.
+# That one must be a SNAPSHOT, because the SQL status bridge overwrites the
+# column it reads. This one must be LIVE, because nothing but the retraction ever
+# writes it — a snapshot here would answer with the pre-retraction value, which
+# is precisely the green-against-the-bug shape.
+#
+# ⛔ FAIL-SAFE DIRECTION, non-negotiable and identical to every other D-15
+# decision: only ``MarkerLiveState.PRESENT`` keeps a protection. A missing id, no
+# row, a non-dict metadata, a different source and a failed read all answer
+# something else, and no caller may read any of them as "still marked".
+#
+# ⭐ The answer is a STATE, not a bool (Phase 164.6.7, SFH-02 / WR-02). Four call
+# sites log from it, and while it was a bool each of them said "RETRACTED — a
+# user-initiated request was served" for all five non-present causes, including a
+# read that merely failed. An operator triaging a darkened factsheet then went
+# looking for a resync that never happened. Each state now names its own cause.
+#
+# ⛔ ``READ_ERROR`` is the one state that is NOT an answer about the row (CONTEXT
+# D-09): a failed read stamps nothing and fails the job TRANSIENT so it retries.
+# D-09 (2026-09-25) decided this for the composite stamp; its 2026-09-26
+# amendment extended it to the single-key derive stamp closure, and round 2
+# (2026-09-26) to the single-key CHAIN EDGE, which enqueues nothing and raises
+# ``RefreshMarkerRereadUnavailable`` before ``_enqueue_csv_analytics``. Since
+# round 4 the two TERMINAL STAMPS read through ``_stamp_io``, which raises
+# ``StampIOUnavailable`` on the failed read itself, so they never hold a
+# ``READ_ERROR``; only the chain edge and the tail mirror do.
+# Every other state is a DEFINITIVE answer and still takes the loud path.
+# ⚠️ The tail mirror is the one site that only logs on ``READ_ERROR``: the
+# follow-on is already enqueued, and nothing it could do would change hop 2.
+#
+# ⛔ WHAT THE TRANSIENT RETRY DOES AND DOES NOT PRESERVE (round 2, WR-01 /
+# SFH-R2-03). It holds ONLY while the strategy row is
+# ``complete_with_warnings`` or ``computation_warned``. The raise sends the job
+# to ``failed_retry``, and ``mark_compute_job_failed`` runs the SQL status bridge
+# on that transition too. With a non-terminal job present and no protect-hold,
+# the bridge's branch (a) KEEPS ``complete_with_warnings`` but REWRITES a plain
+# ``complete`` row to ``computing``. On the next attempt, the entry snapshot
+# (single-key) and the stamp-time status read (composite) therefore see
+# ``computing``, which is not terminal-success, so no protection arms and a
+# recurring failure stamps loudly. If the retries run out instead, the bridge
+# finds the row at ``computing``, which is not publish-healthy, and branch (b)
+# un-publishes it. So for a plain-``complete`` row the retry helps only when the
+# ORIGINAL failure clears on retry.
+# Python cannot close this, and the reason is the SQL bridge, not a missing
+# snapshot. A publish state kept in job metadata would still meet a row the
+# bridge has already moved to ``computing``, and on exhaustion no Python code
+# runs at all. The closure is a bridge migration: its non-terminal branch has to
+# keep a healthy publish state for a job carrying a refresh marker. That was not
+# written in this phase. The live-cohort figure (``complete`` 0 /
+# ``complete_with_warnings`` 5) is dated in the REUSE-01 comment above and was
+# not re-measured for this note.
+#
+# ⚠️ The read goes through ``db_read_with_retry``, so a gateway 504 is retried
+# inside that helper's bounded budget before it counts as a failure (WR-03). The
+# cost is up to about 3-4 s more wall time per read on a gateway-timeout path
+# (IN-03, round 3). The composite ``_stamp_failed`` makes TWO such reads before
+# any write (``_read_existing_failed_row``, then this one), so its worst case is
+# about 6-8 s of backoff plus the request timeouts. Both precede every write, so
+# a cancellation inside that time writes nothing. The helper
+# sleeps BEFORE the attempt that answers, so the window between the answering
+# read and the stamp (``[164.6.7-COMPOSITE-REREAD-RESIDUE]``) is unchanged
+# (round 2, IN-02).
+class MarkerLiveState(Enum):
+    """What the live ``compute_jobs`` row says about a refresh marker."""
+
+    PRESENT = "present"
+    """``metadata->>'source'`` still equals the marker. The only protecting state."""
+    RETRACTED = "retracted"
+    """The source is gone and ``refresh_marker_retracted`` names the marker: a
+    user's resync inherited this job through the enqueue dedup (the write shape of
+    ``_retract_refresh_marker_on_reuse`` and ``src/lib/ledger-refresh-marker.ts``)."""
+    NO_ID = "no_id"
+    """The caller had no job id to read. An invariant breach for a claimed job."""
+    NO_ROW = "no_row"
+    """The read succeeded and found no row. An invariant breach for a claimed job."""
+    OTHER_SOURCE = "other_source"
+    """The row exists but carries another source, no source, or non-dict metadata,
+    with no recorded retraction of this marker."""
+    READ_ERROR = "read_error"
+    """The read raised (after ``db_read_with_retry``'s 504 retries). Nothing is
+    known about the row."""
+
+    def __bool__(self) -> bool:
+        # Every Enum member is truthy by default, so a caller written against the
+        # old bool (``not await _refresh_marker_still_on_row(...)``) would read
+        # EVERY state as "still marked" and suppress every failure. Refuse loudly.
+        raise TypeError(
+            "MarkerLiveState has no truth value; compare against "
+            "MarkerLiveState.PRESENT explicitly"
+        )
+
+
+class HandlerIOUnavailable(Exception):
+    """A database read or write the handler needed before it could decide or
+    record its outcome FAILED. Whatever was not yet written stays unwritten, and
+    the text names the failed operation's kind plus, where one exists, the
+    handler's real cause. ``classify_exception`` maps every subclass to
+    TRANSIENT: the queue retries the job and the next attempt reads and writes
+    again (Phase 164.6.7 round 4)."""
+
+
+class RefreshMarkerRereadUnavailable(HandlerIOUnavailable):
+    """A read that a marked refresh's D-15 decision rests on FAILED OUTSIDE a
+    terminal stamp, so the handler wrote nothing and stops: the single-key ENTRY
+    publish-state read (round 2, SFH-R2-02) and the single-key chain edge before
+    it enqueues hop 2 (round 2, WR-02). The two terminal stamp closures raise
+    the sibling ``StampIOUnavailable`` instead (round 4)."""
+
+
+class StampIOUnavailable(HandlerIOUnavailable):
+    """A database read or write INSIDE a terminal-failure stamp closure failed:
+    the stamp's status read, the live refresh-marker re-read, the D-15
+    error-only write, or the loud stamp write (Phase 164.6.7 round 4,
+    SFH-R4-01). Raised only by ``_stamp_io``, the one wrapper every such call
+    goes through. The handler had a curated cause to record and could not
+    record it, so the cause rides this exception's text into
+    ``compute_jobs.last_error``."""
+
+
+class MarkerStateNotLoggable(Exception):
+    """``_log_marker_not_confirmed`` was handed a state it must not log: the
+    confirming ``PRESENT``, or a ``MarkerLiveState`` member it has no arm for.
+    Always a caller bug. ⛔ Deliberately NOT a ``ValueError`` (round 4, IN-04):
+    the composite MTM ``try`` has an ``except ValueError`` arm (F-5) that calls
+    ``_stamp_failed`` again under a different cause, and a refusal raised from
+    inside the first stamp must not be caught there and misattributed."""
+
+
+# Phase 164.6.7 round 3 (SFH-R3-02), extended in round 4 (SFH-R4-02 / IN-02): a
+# database call that raises one of these is a bug in THIS code (a renamed
+# client method, a bad call shape), not an answer from the database. EVERY site
+# that classifies a failed read or write handles them the same way: log at
+# ERROR, one tagged capture, then re-raise UNCHANGED, so ``classify_exception``
+# files them under ``unknown`` with their own text, which is the "needs a human
+# look" signal. The sites are the entry publish-state read, ``_stamp_io`` (every
+# read and write inside both terminal stamp closures) and
+# ``_refresh_marker_live_state`` at the chain edge. ⛔ TWO deliberate
+# exceptions log and capture the same way but do NOT raise, because each runs
+# after the job's outcome has already landed:
+# - the single-key TAIL MIRROR (round 5, R5 IN-02 / LOW-2) answers
+#   ``READ_ERROR`` and the job finishes DONE: it runs after the hop-2 enqueue on
+#   a job whose work already landed. See ``_refresh_marker_live_state``.
+# - the single-key SERIES HEAL (round 6, R6-01) runs after the loud stamp has
+#   landed, and the job stays ``permanent``. A raise there filed the job
+#   ``unknown`` and retried it, and ``mark_compute_job_failed`` moved it to
+#   ``failed_retry``, which ``sync_strategy_analytics_status`` branch (a) counts
+#   as non-terminal: it wrote ``computing`` and NULLed the landed stamp's
+#   cause for the whole backoff window, and a retry that took another path lost
+#   the cause for good. Ending ``permanent`` lets branch (b) keep the writer's
+#   cause. Round 5 re-raised here on the premise that "that job is failing
+#   anyway"; the attempt was, but the row stopped saying so.
+# Labelling them TRANSIENT would hide a code defect behind "the database was
+# busy" until the retry budget ran out. ``transient`` and ``unknown`` retry on
+# the same budget (``mark_compute_job_failed``) and render the same user
+# sentence (``computation_error_copy``), so the split changes only the label an
+# operator reads, and the curated cause of a stamp is still on the ERROR line.
+# ⚠️ ``ValueError`` is deliberately absent: ``json.JSONDecodeError`` subclasses
+# it, and a malformed PostgREST body is an infrastructure answer, not a bug.
+# ⚠️ The split is a heuristic (round 5, SFH-R5-06): a client library parsing an
+# unexpected gateway body can raise ``KeyError`` / ``TypeError`` /
+# ``IndexError`` too, and that infrastructure answer is then labelled a
+# programming error. Only the label moves; the budget and the sentence do not.
+_READ_PROGRAMMING_ERRORS: tuple[type[BaseException], ...] = (
+    AssertionError,
+    AttributeError,
+    ImportError,
+    IndexError,
+    KeyError,
+    NameError,
+    TypeError,
+    ZeroDivisionError,
+)
+
+
+def _read_failure_text(exc: BaseException) -> str:
+    """``ExceptionClass: scrubbed message``, bounded, for a ``last_error`` that
+    has to say WHAT failed without pushing the curated cause past
+    ``classify_exception``'s 500-character cut (SFH-R3-02 / IN-01)."""
+    from services.redact import scrub_freeform_string
+
+    return f"{type(exc).__name__}: {str(scrub_freeform_string(str(exc)))[:120]}"
+
+
+def _capture_read_failure(exc: BaseException, *, job_id: Any) -> None:
+    """``sentry_sdk.capture_exception`` tagged with the compute job it belongs
+    to (IN-02 / SFH-R2-05). The capture is the only event carrying the failed
+    read's traceback, and without the tag it could not be tied to a job. The
+    job id is an internal UUID. The tag is scoped to this one event."""
+    with sentry_sdk.new_scope() as scope:
+        scope.set_tag("compute_job_id", str(job_id))
+        sentry_sdk.capture_exception(exc)
+
+
+def _flags_object_or_dropped(
+    raw: Any, *, site: str, strategy_id: Any, job_id: Any, consequence: str
+) -> dict[str, Any]:
+    """``strategy_analytics.data_quality_flags`` as a dict to merge into.
+
+    The column is ``jsonb``, so a non-object value is storable, and ``dict()``
+    on it raises. ``None`` (no row, or no flags) is ``{}``. Any other non-object
+    value is dropped: ONE ERROR line naming the job, the value's type and a
+    bounded, scrubbed ``repr``, and ONE capture tagged with the job. Such a value
+    means some writer elsewhere is broken, and the caller's write then replaces
+    it, so this line is the only trace of it (round 6, R6-02 / R6-05; round 5
+    logged it at WARNING, which is a breadcrumb that reaches no one, and without
+    the job). ``consequence`` is the caller's own sentence about what it writes
+    instead."""
+    if isinstance(raw, dict):
+        return dict(raw)
+    if raw is None:
+        return {}
+    from services.redact import scrub_freeform_string
+
+    kind = type(raw).__name__
+    logger.error(
+        "%s: strategy %s on compute_job %s has a non-object data_quality_flags "
+        "(%s: %s). It is dropped; %s",
+        site, strategy_id, job_id, kind,
+        str(scrub_freeform_string(repr(raw)))[:120], consequence,
+    )
+    with sentry_sdk.new_scope() as scope:
+        scope.set_tag("compute_job_id", str(job_id))
+        sentry_sdk.capture_message(
+            f"{site}: non-object data_quality_flags ({kind}) dropped", level="error"
+        )
+    return {}
+
+
+async def _refresh_marker_still_on_row(
+    supabase: Any, job_id: Any, expected: str
+) -> MarkerLiveState:
+    """What ``compute_jobs.metadata`` for ``job_id`` says NOW about the marker
+    ``expected``. Only ``PRESENT`` keeps a protection. See the block comment above
+    for why a live re-read and not the claim-time snapshot, and for why the answer
+    is a state. A caller that must NAME a failed read uses
+    ``_refresh_marker_live_state``.
+
+    LOG-ONLY, and it never raises for a failed read: every failure, a
+    ``_READ_PROGRAMMING_ERRORS`` member included, is logged at ERROR, captured
+    once and answered ``READ_ERROR``. Its one handler caller is the single-key
+    TAIL MIRROR, which runs after the hop-2 enqueue (round 5, R5 IN-02 / LOW-2:
+    see ``raise_programming_errors`` on ``_refresh_marker_live_state``)."""
+    state, _failure = await _refresh_marker_live_state(
+        supabase, job_id, expected, raise_programming_errors=False
+    )
+    return state
+
+
+async def _refresh_marker_live_state(
+    supabase: Any, job_id: Any, expected: str, *, raise_programming_errors: bool
+) -> tuple[MarkerLiveState, str | None]:
+    """``_refresh_marker_still_on_row`` plus, for ``READ_ERROR`` only, the
+    failed read's ``_read_failure_text``. The chain edge carries that text into
+    ``compute_jobs.last_error`` (SFH-R3-02); every other state returns ``None``.
+
+    Used by the single-key CHAIN EDGE and TAIL MIRROR only. The two terminal
+    stamp closures call ``_read_refresh_marker_state`` through ``_stamp_io``
+    instead, so they never see ``READ_ERROR`` (round 4).
+
+    ``raise_programming_errors`` (keyword-only, no default, so every caller
+    chooses): ``True`` at the CHAIN EDGE, where a ``_READ_PROGRAMMING_ERRORS``
+    member is logged, captured and re-raised unchanged (``unknown``, SFH-R4-02)
+    before anything is enqueued. ``False`` at the TAIL MIRROR (round 5, R5
+    IN-02 / LOW-2): the member is logged and captured the same way, then
+    answered ``READ_ERROR`` and the job finishes DONE. Failing a job whose work
+    already landed and whose hop 2 is already enqueued changes nothing about hop
+    2 and costs a lot: each retry re-crawls the venue and re-writes the hop-1
+    rows, and a derive that ends ``failed_final`` is one
+    ``sync_strategy_analytics_status`` reads as a live failure, so it can write
+    the generic derive copy over a row hop 2 just published. The capture
+    already carries the "needs a human look" signal."""
+    try:
+        return await _read_refresh_marker_state(supabase, job_id, expected), None
+    except Exception as exc:  # noqa: BLE001 — every failure is reported, then answered
+        if isinstance(exc, _READ_PROGRAMMING_ERRORS):
+            # SFH-R4-02: a bug in this read, not a database answer. Reported
+            # like every site listed above ``_READ_PROGRAMMING_ERRORS``. At the
+            # chain edge it is then re-raised unchanged (filed ``unknown``); at
+            # the tail mirror it is answered ``READ_ERROR`` (see the docstring).
+            logger.error(
+                "ledger-refresh: re-reading the refresh marker on compute_job %s "
+                "raised a programming error (%s). %s",
+                job_id, _read_failure_text(exc),
+                "The error propagates unchanged."
+                if raise_programming_errors
+                else "Answering READ_ERROR: the tail mirror only logs.",
+            )
+            _capture_read_failure(exc, job_id=job_id)
+            if raise_programming_errors:
+                raise
+            return MarkerLiveState.READ_ERROR, _read_failure_text(exc)
+        logger.error(
+            "ledger-refresh: could not re-read the refresh marker on compute_job "
+            "%s (%s) — its live state is UNKNOWN. The caller decides: the "
+            "single-key chain edge enqueues nothing and fails the job "
+            "TRANSIENT; the tail mirror only logs.",
+            job_id, _read_failure_text(exc),
+        )
+        _capture_read_failure(exc, job_id=job_id)
+        return MarkerLiveState.READ_ERROR, _read_failure_text(exc)
+
+
+async def _read_refresh_marker_state(
+    supabase: Any, job_id: Any, expected: str
+) -> MarkerLiveState:
+    """The live marker read itself. It RAISES on a failed read (after
+    ``db_read_with_retry``'s 504 retries) and never answers ``READ_ERROR``: the
+    caller classifies the failure. ``_refresh_marker_live_state`` turns it into
+    ``READ_ERROR`` for the chain edge and the tail mirror, and ``_stamp_io``
+    turns it into ``StampIOUnavailable`` at both terminal stamps."""
+    if not job_id:
+        return MarkerLiveState.NO_ID
+
+    def _read_live_row() -> Any:
+        res = (
+            supabase.table("compute_jobs")
+            .select("metadata")
+            .eq("id", job_id)
+            .maybe_single()
+            .execute()
+        )
+        # postgrest's maybe_single returns None ITSELF for zero rows.
+        return getattr(res, "data", None)
+
+    row = await db_read_with_retry(_read_live_row)
+    if not isinstance(row, dict):
+        return MarkerLiveState.NO_ROW
+    metadata = row.get("metadata")
+    if isinstance(metadata, dict):
+        if metadata.get("source") == expected:
+            return MarkerLiveState.PRESENT
+        if metadata.get("refresh_marker_retracted") == expected:
+            return MarkerLiveState.RETRACTED
+    return MarkerLiveState.OTHER_SOURCE
+
+
+_StampT = TypeVar("_StampT")
+
+# The operation kinds ``_stamp_io`` names. Each is the object of "could not …"
+# in the ERROR line and in ``compute_jobs.last_error``. ⚠️ The marker one must
+# keep the words "re-read the refresh marker": the lane probe
+# (``scripts/probe_composite_claimtime.py``, ``_REREAD_FAILURE_FRAGMENT``) scans
+# the handler log for them to tell a failed re-read from a retraction.
+_STAMP_OP_STATUS_READ = "read strategy_analytics for the stamp"
+_STAMP_OP_MARKER_READ = "re-read the refresh marker"
+_STAMP_OP_ERROR_ONLY_WRITE = "write the D-15 error-only stamp"
+_STAMP_OP_LOUD_WRITE = "write the terminal failed stamp"
+
+
+async def _stamp_io(
+    call: Callable[[], Awaitable[_StampT]],
+    *,
+    op: str,
+    site: str,
+    strategy_id: Any,
+    job_id: Any,
+    cause: str,
+    scrubbed: str,
+) -> _StampT:
+    """Run ONE database read or write of a terminal-failure stamp closure.
+
+    ⛔ Phase 164.6.7 round 4 (SFH-R4-01), closing the CLASS rather than a
+    site. Rounds 2, 3 and 4 each found the same defect one database call further
+    into a stamp: a read or write fails, its exception leaves the closure as
+    itself, and the handler's curated cause is recorded nowhere
+    (``last_error`` names only the I/O, no ERROR line carries the cause, and on
+    exhaustion the bridge writes generic copy). So EVERY database call inside
+    ``_stamp_strategy_analytics_failed`` and the composite ``_stamp_failed`` goes
+    through this one wrapper: the stamp's status read, the live marker re-read,
+    the D-15 error-only write and the loud stamp write.
+
+    On a failure it logs ONE ERROR line carrying the operation kind, the
+    failure text and ``cause`` (the scrubbed curated message plus the scrubbed
+    detail), makes ONE ``_capture_read_failure`` capture tagged with the job,
+    and raises ``StampIOUnavailable`` (TRANSIENT) whose text carries the failure
+    BEFORE ``scrubbed``, so ``classify_exception``'s 500-character cut cannot
+    drop the cause. A ``_READ_PROGRAMMING_ERRORS`` member is logged and captured
+    the same way and then re-raised unchanged (``unknown``). A cancellation (a
+    deadline or a shutdown) logs ONE ERROR with the cause and is re-raised
+    unchanged, with no capture (round 5, SFH-R5-01).
+
+    ⚠️ Not wrapped, deliberately: the single-key series heal
+    (``_heal_delete_basis_series``). It runs only AFTER the loud stamp has
+    landed with the cause in ``computation_error``, so its failure loses no
+    cause. It logs at ERROR with the scrubbed failure and the cause, makes one
+    capture, and the job stays permanent (round 5, SFH-R5-03). Any raise there
+    would retry a job whose stamp already landed, so a programming error is not
+    re-raised either (round 6, R6-01): ``transient`` and ``unknown`` retry the
+    same way."""
+    try:
+        return await call()
+    except asyncio.CancelledError:
+        # SFH-R5-01 (round 5): a deadline (``dispatch``'s per-kind
+        # ``wait_for``, or an inner one) or a worker shutdown cancelled this
+        # call while it waited. ``CancelledError`` is a ``BaseException``, so
+        # the ``except Exception`` below never sees it, and without this arm
+        # the curated cause was logged nowhere: ``dispatch`` files the job
+        # ``transient`` with only "Handler exceeded timeout". Log the cause at
+        # ERROR and re-raise the cancel UNCHANGED; swallowing it would break
+        # cancellation. No capture: the cancel is not a fault of this call.
+        # ⚠️ The executor thread behind a cancelled write keeps running, so
+        # that write can still land after the job is filed.
+        logger.error(
+            "%s: %s for strategy %s on compute_job %s was CANCELLED (a deadline "
+            "or a worker shutdown). No terminal stamp is confirmed for: %s.",
+            site, op, strategy_id, job_id, cause,
+        )
+        raise
+    except Exception as exc:  # noqa: BLE001 — reported, then re-raised
+        failure = _read_failure_text(exc)
+        if isinstance(exc, _READ_PROGRAMMING_ERRORS):
+            logger.error(
+                "%s: could not %s for strategy %s on compute_job %s: a "
+                "programming error (%s). No terminal stamp is confirmed for: %s. "
+                "The error propagates unchanged.",
+                site, op, strategy_id, job_id, failure, cause,
+            )
+            _capture_read_failure(exc, job_id=job_id)
+            raise
+        logger.error(
+            "%s: could not %s for strategy %s on compute_job %s (%s). No "
+            "terminal stamp is confirmed for: %s. Failing the job TRANSIENT so "
+            "the queue can retry it.",
+            site, op, strategy_id, job_id, failure, cause,
+        )
+        _capture_read_failure(exc, job_id=job_id)
+        raise StampIOUnavailable(
+            f"{site}: could not {op} ({failure}), so no terminal stamp is "
+            f"confirmed for: {scrubbed}"
+        ) from exc
+
+
+def _log_marker_not_confirmed(
+    state: MarkerLiveState,
+    *,
+    site: str,
+    job_id: Any,
+    strategy_id: Any,
+    consequence: str,
+    subject: str = "claimed job",
+) -> None:
+    """Log why a refresh marker was NOT confirmed on the live row, naming the
+    cause ``state`` actually records. ``consequence`` is the site's own sentence
+    about what it does next. ``subject`` names the job the invariant is about:
+    the job this handler CLAIMED, or (at the tail mirror) the follow-on it just
+    ENQUEUED.
+
+    ``PRESENT`` is refused with ``MarkerStateNotLoggable`` (SFH-R2-06). It is
+    the one state that DID confirm the marker, and the last arm below would
+    otherwise log it as "no live row", a false invariant breach. Every caller
+    checks for ``PRESENT`` first, so this raise fires only on a caller bug, and
+    it is loud on purpose. Both refusals here are ``MarkerStateNotLoggable``, not
+    ``ValueError``, so no ``except ValueError`` around a stamp can catch them
+    (round 4, IN-04)."""
+    if state is MarkerLiveState.PRESENT:
+        raise MarkerStateNotLoggable(
+            f"{site}: _log_marker_not_confirmed was called with "
+            "MarkerLiveState.PRESENT, which confirms the marker; the caller "
+            "must handle PRESENT before asking why the marker is not confirmed"
+        )
+    if state is MarkerLiveState.RETRACTED:
+        logger.warning(
+            "%s: the refresh marker on compute_job %s has been RETRACTED — a "
+            "user-initiated request was served by this job through the enqueue "
+            "dedup, so nobody unwatched owns it. %s (strategy %s).",
+            site, job_id, consequence, strategy_id,
+        )
+    elif state is MarkerLiveState.OTHER_SOURCE:
+        logger.warning(
+            "%s: the live compute_job %s no longer carries the refresh marker and "
+            "records no retraction of it (another source, no source, or non-dict "
+            "metadata). %s (strategy %s).",
+            site, job_id, consequence, strategy_id,
+        )
+    elif state is MarkerLiveState.READ_ERROR:
+        # The read's own ERROR line (with the exception) precedes this one. Only
+        # the single-key chain edge and tail mirror reach this arm: the terminal
+        # stamps read through ``_stamp_io`` and never see ``READ_ERROR``.
+        logger.error(
+            "%s: the refresh marker on compute_job %s could not be confirmed "
+            "because the live re-read FAILED. %s (strategy %s).",
+            site, job_id, consequence, strategy_id,
+        )
+    elif state in (MarkerLiveState.NO_ID, MarkerLiveState.NO_ROW):
+        # A claimed or just-enqueued job must have both.
+        logger.error(
+            "%s: cannot confirm the refresh marker on compute_job %s — %s. A "
+            "%s with no id or no live row is an invariant breach. %s "
+            "(strategy %s).",
+            site, job_id,
+            "no job id" if state is MarkerLiveState.NO_ID else "no live row",
+            subject, consequence, strategy_id,
+        )
+    else:
+        # I-R3-1 (round 3): the arms above are exhaustive for today's enum. A
+        # state added later must say what it means; it is never silently
+        # reported as "no live row". The raise is filed ``unknown`` and retried.
+        # The stamp and chain-edge callers reach it before any write of their
+        # own. The tail mirror reaches it after its enqueue, so there a retry
+        # re-runs the derive and re-enqueues (the enqueue dedup serves an
+        # in-flight hop 2). Only a new enum member can reach this line.
+        # ⛔ IN-04 (round 4): not a ``ValueError``. The composite MTM ``try``'s
+        # F-5 ``except ValueError`` would otherwise catch this refusal from inside
+        # the first ``_stamp_failed`` and stamp again under a misattributed cause.
+        raise MarkerStateNotLoggable(
+            f"{site}: _log_marker_not_confirmed has no arm for {state!r}; add "
+            "one that names what the state records"
+        )
+
+
+# C3 topic H: the most dates one reconcile DELETE names in its `in.(...)` list.
+# The two csv_daily_returns writers below upsert their fresh payload FIRST and
+# then delete only the stored days the payload does not carry, so a reader never
+# finds a rebuilt day absent. Those days are sent as an explicit date list, and
+# supabase-py puts a delete's filters in the URL query string. A span can be
+# thousands of days wide, so an unbounded list could build a request line past
+# the gateway's limit (commonly 8 to 16 KB). Measured with postgrest-py's own
+# request builder: a 200-date delete with its scope and span filters is a
+# 2,770-byte URL (each date costs 13 bytes once the comma is percent-encoded),
+# and a ten-year span refused whole is 19 statements.
+_RECONCILE_DELETE_IN_BATCH: Final[int] = 200
+
+
+def _calendar_days_absent_from(
+    span_start: str, span_end: str, payload_dates: Iterable[str]
+) -> list[str]:
+    """Every calendar day in ``[span_start, span_end]`` (ISO dates, inclusive)
+    that ``payload_dates`` does not carry, ascending.
+
+    ``csv_daily_returns.date`` is a DATE, so every stored row inside the span is
+    one of these calendar days. Deleting exactly this list therefore removes the
+    same rows a ranged ``gte/lte`` delete followed by a re-insert of the payload
+    would have removed, without first making the payload's days absent. It is
+    computed client-side, so no read of the table is needed.
+    """
+    keep = set(payload_dates)
+    day = datetime.fromisoformat(span_start).date()
+    last = datetime.fromisoformat(span_end).date()
+    out: list[str] = []
+    while day <= last:
+        iso = day.isoformat()
+        if iso not in keep:
+            out.append(iso)
+        day += timedelta(days=1)
+    return out
+
+
 async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
     """Broker key full-history → daily-return series → csv_daily_returns.
 
@@ -2273,6 +3226,138 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         funding_label = strategy_id
     venue = ctx.key_row["exchange"]
 
+    # ---- Phase 161.1 / F1+F2: the refresh's publish ORACLE, read ONCE --------
+    # ⛔ THE GUARD'S ORACLE MAY NOT BE A COLUMN THE THING IT GUARDS WRITES, and
+    # until this read existed it was exactly that. The D-15 question is "was this
+    # strategy PUBLISHED before this refresh started?", and both guards used to
+    # answer it by reading `strategy_analytics.computation_status` LIVE at the
+    # moment they needed it. That column is written by the SQL status bridge
+    # (sync_strategy_analytics_status, migration 20260825150000), which
+    # mark_compute_job_done / mark_compute_job_failed PERFORM in-RPC on EVERY job
+    # transition for the strategy — and whose branch (a) rewrites the row to
+    # 'computing' whenever ANY job for it is non-terminal. Branch (a) preserves
+    # 'complete_with_warnings'; it does NOT preserve plain 'complete'.
+    #
+    # Two consequences, both measured:
+    #   * HOP 2 (F1), DETERMINISTIC. This handler enqueues the chained
+    #     compute_analytics_from_csv job and THEN returns DONE, so
+    #     mark_compute_job_done runs the bridge with that follow-on already
+    #     `pending`. A plain-'complete' row is therefore ALWAYS at 'computing'
+    #     before hop 2 starts, and hop 2's own live read could never see a
+    #     terminal-success status. Its guard was inert for every clean-recompute
+    #     row — which the bridge migration's header calls "what every clean
+    #     recompute leaves behind".
+    #   * HOP 1 (F2), PROBABILISTIC. Any sibling job (poll_positions,
+    #     sync_funding) reaching mark_compute_job_done while THIS derive is in
+    #     flight runs the same bridge; on a plain-'complete' row the stamp-time
+    #     read then answered 'computing' and declined to protect.
+    #
+    # One read, here, before the venue crawl, carried forward to both: the local
+    # below is hop 1's oracle, and it rides the chain edge on the follow-on job's
+    # metadata to become hop 2's. Neither is a column the bridge can write.
+    #
+    # ⛔ FAIL-SAFE DIRECTION, unchanged: no row, or a row that is not
+    # terminal-success, leaves this None, and None takes the LOUD destructive
+    # path everywhere it is consulted. Never fail toward suppression.
+    #
+    # ⛔ D-09, extended 2026-09-26 (round 2, SFH-R2-02): a read that FAILED is not
+    # an answer, here exactly as at the marker re-reads. Until then a failed
+    # entry read left this None too, so one gateway blip before the crawl sent a
+    # funded account down the destructive path at both hops, logged only at
+    # WARNING. The read now goes through ``db_read_with_retry``. If it still
+    # fails, the job fails TRANSIENT (``RefreshMarkerRereadUnavailable``) BEFORE
+    # any crawl or write, so the retry costs one queue round trip and no work.
+    # A DEFINITIVE answer (no row) keeps its meaning above.
+    # ⚠️ The retry reads a row the SQL bridge may already have moved. A plain
+    # ``complete`` row is rewritten to ``computing`` on the ``failed_retry``
+    # transition, so the retry's snapshot is not terminal-success and the
+    # refresh runs unprotected. This protects ``complete_with_warnings`` / warned
+    # rows only. See the WR-01 note above ``MarkerLiveState``.
+    #
+    # ⚠️ RESIDUAL WINDOW, stated rather than hidden: the fan-out enqueues this
+    # job in SQL, so the earliest oracle Python can take is here — a sibling
+    # transition between that enqueue and this line still bounces a plain-
+    # 'complete' row to 'computing' and this read then sees it. Closing that last
+    # gap means stamping the status into the job metadata at MINT time, in the
+    # fan-out migration. The direction of the residual is loud-not-silent.
+    #
+    # Gated on the marker so an ordinary derive costs no extra round trip and is
+    # byte-unchanged.
+    _refresh_publish_status: str | None = None
+    _refresh_publish_warned = False
+    if not is_key_mode:
+        _entry_metadata = job.get("metadata")
+        _entry_source = (
+            _entry_metadata.get("source") if isinstance(_entry_metadata, dict) else None
+        )
+        if _entry_source == LEDGER_REFRESH_SINGLE_KEY_SOURCE:
+
+            def _read_entry_publish_state() -> dict[str, Any]:
+                res = (
+                    ctx.supabase.table("strategy_analytics")
+                    .select("computation_status, computation_warned")
+                    .eq("strategy_id", strategy_id)
+                    .maybe_single()
+                    .execute()
+                )
+                row = getattr(res, "data", None) or {}
+                return dict(row) if isinstance(row, dict) else {}
+
+            try:
+                _entry_row = await db_read_with_retry(_read_entry_publish_state)
+            except Exception as _entry_exc:  # noqa: BLE001 — reported, then re-raised
+                # The preflight opened the exchange and the handler's
+                # ``finally: aclose_exchange`` owns only the crawl's ``try`` below,
+                # which neither raise in this arm reaches. Close it here first,
+                # the same way, so BOTH exits release it.
+                try:
+                    await aclose_exchange(ctx.exchange)
+                except Exception:  # noqa: BLE001  # pragma: no cover
+                    pass
+                # ⛔ SFH-R3-02: a programming error is a bug in this read, not a
+                # database answer. It propagates as itself, so
+                # ``classify_exception`` files it ``unknown`` under its own
+                # class and text, exactly as it does anywhere else in the
+                # worker. Relabelling it TRANSIENT would report a code defect as
+                # "the database was busy" on every attempt.
+                # ⚠️ It is still reported here first. ``dispatch`` does not log
+                # a handler's exception and the worker loop logs a failed job at
+                # WARNING, so without this pair a code defect in the read would
+                # reach Sentry as no event at all.
+                if isinstance(_entry_exc, _READ_PROGRAMMING_ERRORS):
+                    logger.error(
+                        "derive_broker_dailies: the pre-refresh publish-state read "
+                        "for strategy %s on marked compute_job %s raised a "
+                        "programming error (%s). No crawl ran and nothing was "
+                        "written; the error propagates unchanged.",
+                        strategy_id, job.get("id"), _read_failure_text(_entry_exc),
+                    )
+                    _capture_read_failure(_entry_exc, job_id=job.get("id"))
+                    raise
+                logger.error(
+                    "derive_broker_dailies: could not read the pre-refresh publish "
+                    "state for strategy %s on marked compute_job %s (%s). No "
+                    "crawl ran and nothing was written; failing the job "
+                    "TRANSIENT so the queue can retry it.",
+                    # I-R4-4 (round 4): the scrubbed, bounded form, as every
+                    # newer line in this code uses.
+                    strategy_id, job.get("id"), _read_failure_text(_entry_exc),
+                )
+                _capture_read_failure(_entry_exc, job_id=job.get("id"))
+                # SFH-R3-02 / IN-01: ``last_error`` is ``str()`` of this
+                # exception, which never includes ``__cause__``, so the failure
+                # kind is written into the text itself.
+                raise RefreshMarkerRereadUnavailable(
+                    "derive_broker_dailies: the pre-refresh publish-state read "
+                    "failed for a marked refresh, so the job stopped before any "
+                    "crawl and wrote nothing "
+                    f"({_read_failure_text(_entry_exc)})"
+                ) from _entry_exc
+            _entry_status = _entry_row.get("computation_status")
+            if isinstance(_entry_status, str):
+                _refresh_publish_status = _entry_status
+                _refresh_publish_warned = bool(_entry_row.get("computation_warned"))
+
     from services.broker_dailies import combine_realized_and_funding
     from services.nav_twr import (
         NavReconstructionError,
@@ -2321,26 +3406,21 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         from services.redact import scrub_freeform_string
 
         scrubbed = str(scrub_freeform_string(str(exc)))
-        if not is_key_mode:
-            def _stamp_nav_failed() -> None:
-                ctx.supabase.table("strategy_analytics").upsert(
-                    {
-                        "strategy_id": strategy_id,
-                        "computation_status": "failed",
-                        # SI-02 (MEDIUM-2): clear the runner-owned warned marker.
-                        "computation_warned": False,
-                        "computation_error": stamp_detail + scrubbed,
-                        "data_quality_flags": {"csv_source": True},
-                        # F-4 (Fable): authoritative-clear the by-basis column on a
-                        # terminal failure so a prior successful derive's object
-                        # (composite-era or single-key MTM) can't render as a
-                        # live-looking money number on a now-FAILED row.
-                        "metrics_json_by_basis": None,
-                    },
-                    on_conflict="strategy_id",
-                ).execute()
-
-            await db_execute(_stamp_nav_failed)
+        # CR-02 (161.1-REVIEW): this stamp used to be spelled out here, with its
+        # own byte-identical copy of the destructive payload and NO D-15 guard.
+        # It now routes through the ONE choke point, which owns the key-mode
+        # short-circuit and the D-15 non-destructive branch. See the CR-02 note
+        # above `_stamp_strategy_analytics_failed` for why four independent copies
+        # of a publish-state downgrade was the defect rather than an
+        # implementation detail.
+        #
+        # ⛔ F4: `heal_series=False` — this disposition NEVER deleted the basis
+        # series before the collapse, and a NAV-reconstruction refusal is not a
+        # reason to destroy a live factsheet's persisted series. The stamp itself
+        # is the fail-loud signal; the DELETE would be a fresh injury on top of it.
+        await _stamp_strategy_analytics_failed(
+            stamp_detail, detail=scrubbed, heal_series=False
+        )
         return DispatchResult(
             outcome=DispatchOutcome.FAILED,
             error_message=result_detail + scrubbed,
@@ -2381,8 +3461,10 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
     smoothed_attempted: bool = False
     try:
         # Phase 105 (BB-02, MED-2): resolve the returns-denominator override HERE at the
-        # branch-outer, VENUE-AGNOSTIC scope — mirroring run_csv_strategy_analytics
-        # (analytics_runner.py:2304-2316), which parses it for EVERY venue. In Phase 104
+        # branch-outer, VENUE-AGNOSTIC scope — mirroring the
+        # `_denominator_config = parse_returns_denominator_config(...)` block in
+        # `analytics_runner.run_csv_strategy_analytics`, which parses it for EVERY
+        # venue (grep `_denominator_config` there). In Phase 104
         # this parse lived ONLY inside the deribit arm, so a ccxt strategy with a
         # simple/active override echoed the geometric/calendar DEFAULT (MED-2) and a
         # malformed ccxt config was silently ignored. Both the post-branch cash-series
@@ -2399,9 +3481,10 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         # (cash_settlement + mtm_daily_returns) so a stale row never outlives an
         # authoritative-NULL terminal write — mirroring the MTM heal idiom. This is
         # DEFENSE-IN-DEPTH; the Plan-02 read gate is the primary guarantee. A heal
-        # failure must NEVER mask the terminal stamp that invoked it — swallow + warn.
+        # failure must NEVER mask the terminal stamp that invoked it — report it at
+        # ERROR and never raise (rounds 5 and 6, see below).
         # Strategy-mode only (key-mode owns no per-strategy series row).
-        async def _heal_delete_basis_series() -> None:
+        async def _heal_delete_basis_series(*, cause: str) -> None:
             if is_key_mode:
                 return
             from services.basis_series import persist_basis_series
@@ -2414,14 +3497,34 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                     ctx.supabase, strategy_id, basis="mark_to_market", result=None,
                 )
 
+            # ⛔ SFH-R5-03 (round 5): the heal runs only AFTER the loud stamp
+            # has landed with the cause in ``computation_error``, so a failure
+            # here loses no cause and is NOT raised as transient: a retry would
+            # re-crawl a job whose stamp already landed. It is still logged at
+            # ERROR with the scrubbed failure and captured once, because a heal
+            # that never succeeds leaves stale series rows behind and a WARNING
+            # reached no one.
+            # ⛔ R6-01 (round 6): a ``_READ_PROGRAMMING_ERRORS`` member is NOT
+            # re-raised either. It was in round 5, and the ``unknown`` retry
+            # un-published the stamp that had just landed (see the block
+            # comment above ``_READ_PROGRAMMING_ERRORS``). It is labelled on the
+            # ERROR line instead, and the line carries the stamp's ``cause``,
+            # because the capture and ``last_error`` do not.
             try:
                 await db_execute(_delete_both)
-            except Exception as _heal_exc:  # noqa: BLE001
-                logger.warning(
+            except Exception as _heal_exc:  # noqa: BLE001 — reported, never raised
+                logger.error(
                     "derive_broker_dailies: series heal-delete failed for strategy "
-                    "%s (terminal stamp already applied): %s",
-                    strategy_id, _heal_exc,
+                    "%s on compute_job %s (terminal stamp already applied, the job "
+                    "stays permanent): %s%s. The stale series rows stay until a "
+                    "derive succeeds. The stamp's cause: %s",
+                    strategy_id, job.get("id"), _read_failure_text(_heal_exc),
+                    ", a programming error"
+                    if isinstance(_heal_exc, _READ_PROGRAMMING_ERRORS)
+                    else "",
+                    cause,
                 )
+                _capture_read_failure(_heal_exc, job_id=job.get("id"))
 
         # P72 — fail-loud analytics stamp, now VENUE-NEUTRAL (hoisted out of the deribit
         # arm + renamed; the arm keeps calling this SAME helper for its other permanent
@@ -2429,32 +3532,329 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         # TERMINAL 'failed' gate instead of an infinitely-pending 'complete'. Strategy-
         # mode only: key-mode has no per-key strategy_analytics row (per-key reads land
         # in Phase 36).
-        async def _stamp_strategy_analytics_failed(message: str) -> None:
+        #
+        # ⛔ CR-02 (161.1-REVIEW): THIS IS THE ONLY PLACE IN THIS HANDLER THAT MAY
+        # WRITE computation_status = 'failed'. It was not, and that was the defect.
+        # Plan 02 added the D-15 non-destructive guard below to this helper, but
+        # `run_derive_broker_dailies_job` had FOUR terminal-failure stamp sites,
+        # each with its own byte-identical copy of the destructive payload:
+        # `_dispose_broker_nav_error` (the NavReconstructionError disposition),
+        # `_mark_insufficient` (<2 daily-return days — which ALSO deleted both
+        # persisted basis-series rows) and `_stamp_verdict_failed` (the MT5-12
+        # completeness refusal) never consulted `job['metadata']['source']`. A
+        # guard on one of four is not a guard; it is one guarded copy.
+        #
+        # All three now route here. Keeping them collapsed is the invariant, not
+        # a tidiness preference: a fifth stamp site added later with its own
+        # payload would silently reopen CR-02, so
+        # tests/test_ledger_refresh_publish_guard.py scans this function's source
+        # region and fails if a terminal publish-state downgrade is spelled
+        # anywhere outside this closure.
+        #
+        # ⚠️ WORDING NOTE, deliberate — the same rule the composite guard's
+        # comment already carries: that gate matches on the literal payload key
+        # and value, so naming them here in prose would trip it. Measured: an
+        # earlier draft of this paragraph quoted the pair and turned the gate
+        # RED against a CORRECT file. Prose must never satisfy or trip a
+        # mechanical gate.
+        # ⛔ ONE LINE, deliberately, at the cost of the line budget. The
+        # anti-vacuity region extractors in tests/test_ledger_refresh_gates.py and
+        # tests/test_ledger_refresh_publish_guard.py bound this closure by
+        # INDENTATION: they open at this `async def` and close at the next line
+        # indented no deeper. A wrapped signature closes the region on its own
+        # `) -> None:` line, collapsing it to ~100 characters — at which point
+        # every ABSENCE assertion scoped to the region passes vacuously. Measured:
+        # the wrapped form turned four gates RED against a correct file, which is
+        # the good failure mode; a laxer extractor would have turned them
+        # vacuously GREEN, which is the one this repo keeps getting bitten by.
+        async def _stamp_strategy_analytics_failed(message: str, *, detail: str | None = None, heal_series: bool = True) -> None:
             if is_key_mode:
                 return
             scrubbed = str(scrub_freeform_string(message))
+            # The handler's cause as every ERROR line below carries it:
+            # ``scrubbed`` plus the scrubbed detail. ``scrubbed`` alone is what
+            # ``last_error`` carries (round 4: hoisted so ``_stamp_io`` has it
+            # at every database call, not only on the marked path).
+            _cause = scrubbed + (
+                f" | detail: {scrub_freeform_string(detail)}" if detail else ""
+            )
+            # ⛔ SFH-R4-01 (round 4): EVERY database read and write below goes
+            # through ``_stamp_io`` with these arguments. See its docstring.
+            _stamp_io_args: dict[str, Any] = {
+                "site": "derive_broker_dailies",
+                "strategy_id": strategy_id,
+                "job_id": job.get("id"),
+                "cause": _cause,
+                "scrubbed": scrubbed,
+            }
+            # The publish status a marked refresh held when its live row stopped
+            # protecting it. Set only on that path, and read after the loud
+            # stamp lands.
+            _lost_protection_of: str | None = None
+            # ---- HONEST-01 / D-162-4 (strict): the detail/message SPLIT ------
+            # `message` is the CURATED sentence and it is the only thing that
+            # reaches `computation_error`, which renders verbatim in the wizard
+            # failure envelope and on the portfolio dashboard. `detail` is the
+            # scrubbed exception text; it goes HERE and to the caller's
+            # DispatchResult, and nowhere a subscriber can read it. Scrubbing
+            # removes secrets — it does not turn an internal into user copy,
+            # which is the misunderstanding that put `+ scrubbed` suffixes on
+            # fourteen stamp sites. Splitting at THIS choke point rather than
+            # at each call site is the same CR-02 discipline the terminal-stamp
+            # collapse above rests on: a fifteenth site added later has no
+            # concatenation to copy.
+            if detail:
+                logger.warning(
+                    "derive_broker_dailies: terminal analytics stamp for strategy "
+                    "%s — %s | detail: %s",
+                    strategy_id, message, str(scrub_freeform_string(detail)),
+                )
+
+            # ---- Phase 161.1 / D-15: a maintenance refresh may NOT un-publish --
+            # The stamp below is an AUTHORITATIVE clear — status 'failed', warned
+            # flag cleared, by-basis metrics NULLed, and (via the heal) both
+            # persisted basis-series rows DELETEd. That is correct for a FIRST
+            # compute that failed: the wizard poller must reach a terminal gate
+            # instead of spinning forever, which is the entire reason this helper
+            # exists (see the P72 comment above).
+            #
+            # It is wrong for the RECURRING ledger refresh. Every live
+            # ledger-backed strategy in production is terminal-SUCCESS — healthy,
+            # published, funded — and the venue gateway is on record wedging into
+            # IPC timeouts three times in one day, while a disabled venue flag
+            # fails the whole cohort at once. So the first refresh tick after
+            # activation, landing on a wedged gateway, would downgrade every one of
+            # those accounts. Founder direction: it may not.
+            #
+            # ⚠️ This RE-ROUTES the failure, it does not hide it. The failure is
+            # still recorded everywhere operators look and nowhere subscribers
+            # look: the `compute_jobs` row still records it honestly (which is what
+            # the fan-out's ATTEMPT-based cooldown reads, so a permanently failing
+            # strategy is still throttled), `computation_error` is still written,
+            # the log line below is emitted, and `ledger_refresh_staleness` keys
+            # freshness on the max date inside `returns_series` — which a FAILED
+            # refresh does not advance — so the strategy keeps surfacing as STALE
+            # rather than looking healthy.
+            #
+            # ⛔ FAIL-SAFE DIRECTION, non-negotiable: anything unrecognised falls
+            # through to the destructive stamp below. No metadata, a non-dict
+            # metadata, a different source, an unreadable status, no prior row, a
+            # prior row that is not terminal-success — all of them take the LOUD
+            # path. Never fail toward suppression: a wrongly-suppressed failure
+            # hangs the wizard poller on an infinite spinner.
+            #
+            # (Read-modify-write preservation on a live row is not a new idea
+            # here — `run_stitch_composite_job`'s `_stamp_failed` already merges
+            # rather than overwrites `data_quality_flags` for exactly this reason.
+            # D-15 extends that reasoning from one column to the publish state.)
+            job_metadata = job.get("metadata") or {}
+            job_source = (
+                job_metadata.get("source") if isinstance(job_metadata, dict) else None
+            )
+            # ⛔ The marker is spelled INLINE, and it is a CONTRACT rather than a
+            # label: the other end is `jsonb_build_object('source', …)` in
+            # supabase/migrations/20260825130000_ledger_refresh_fanout_dormant.sql.
+            # There is no compiler between the two — if they drift, the fan-out
+            # still enqueues and this still compiles, and the only symptom is that
+            # the next failed refresh silently un-publishes a funded account. Plan
+            # 05 gate 8 asserts the two literals are equal.
+            if job_source == "ledger-refresh":
+                # ⛔ F2: the ENTRY snapshot, never a re-read here. This closure can
+                # run minutes into the venue crawl, and any sibling job that
+                # reached mark_compute_job_done in that window put the row through
+                # the bridge's branch (a) — which rewrites a plain 'complete' to
+                # 'computing'. A read at THIS point therefore answers the bridge,
+                # not the question. See the entry read at the top of this handler.
+                existing_status: str | None = _refresh_publish_status
+
+                # ⛔ REUSE-01: the snapshot answers "was this strategy published
+                # before the refresh started?". It does NOT answer "is this still
+                # a refresh nobody is watching?" — and after a dedup collision it
+                # is not. The enqueue RPC hands a user's resync THIS job row and
+                # discards the resync's own metadata, so the marker on it can
+                # describe a request someone is staring at. The retraction that
+                # records that is a WRITE TO THE ROW, and this closure's copy of
+                # the metadata is the claim-time snapshot, so the row is re-asked
+                # here — the one place a post-claim retraction is visible.
+                #
+                # ⚠️ It can only NARROW. The condition below is unchanged; this
+                # gate runs only when the protection would otherwise have been
+                # GRANTED, so an ordinary marked refresh pays one read on a path
+                # it was about to suppress anyway, and an unmarked derive pays
+                # nothing at all.
+                #
+                # ⛔ D-09, amended 2026-09-26 (orchestrator decision): a read that
+                # FAILED is not an answer, here exactly as at the composite site.
+                # Stamping loud on it turned one gateway blip into a funded
+                # account going dark on a refresh nobody watches. So nothing is
+                # written and the job fails TRANSIENT: the queue retries it and
+                # the retry re-reads the row. ⚠️ That preserves the publish state
+                # only for a ``complete_with_warnings`` / warned row. The bridge
+                # rewrites a plain ``complete`` row to ``computing`` on the
+                # ``failed_retry`` transition, so the retry's entry snapshot no
+                # longer protects it. See the WR-01 note above
+                # ``MarkerLiveState``. ``_stamp_io`` already logged the failed
+                # read at ERROR with the cause and reported it to Sentry. Every
+                # caller of this closure awaits it directly, and no handler
+                # between here and ``dispatch`` catches ``StampIOUnavailable``
+                # (traced in the 164.6.7 REVIEW-FIX, "Round 1 — single-key
+                # completion"; ``StampIOUnavailable`` is no ``ValueError``).
+                #
+                # ⛔ The CAUSE is logged at ERROR exactly where it is at risk,
+                # and nowhere else (round 3, orchestrator decision reconciling
+                # WR-01 with SFH-R3-01; round 4 closed the class, SFH-R4-01):
+                # - ANY database read or write of this closure failing: its
+                #   ``_stamp_io`` line carries the cause at ERROR, and the
+                #   ``StampIOUnavailable`` text carries it into
+                #   ``compute_jobs.last_error``;
+                # - a definitive "not marked" answer: the LOUD stamp below
+                #   un-publishes a row that was published, and once it has
+                #   landed that goes out at ERROR with its cause;
+                # - ``PRESENT``: D-15 protects the row and logs at WARNING only,
+                #   below. Nothing about it needs a person, so no Sentry event.
+                if existing_status in STRATEGY_ANALYTICS_TERMINAL_SUCCESS_STATUSES:
+                    _live_state = await _stamp_io(
+                        lambda: _read_refresh_marker_state(
+                            ctx.supabase, job.get("id"), LEDGER_REFRESH_SINGLE_KEY_SOURCE
+                        ),
+                        op=_STAMP_OP_MARKER_READ,
+                        **_stamp_io_args,
+                    )
+                    if _live_state is not MarkerLiveState.PRESENT:
+                        _log_marker_not_confirmed(
+                            _live_state,
+                            site="derive_broker_dailies",
+                            job_id=job.get("id"),
+                            strategy_id=strategy_id,
+                            consequence="Taking the LOUD terminal path",
+                        )
+                        _lost_protection_of = existing_status
+                        existing_status = None
+
+                if existing_status in STRATEGY_ANALYTICS_TERMINAL_SUCCESS_STATUSES:
+
+                    def _upsert_error_only() -> None:
+                        _error_only_payload: dict[str, Any] = {
+                                "strategy_id": strategy_id,
+                                # JOB-01 still applies: clear the reaper anchor on
+                                # exit. It carries no publish meaning.
+                                "computing_started_at": None,
+                                "computation_error": scrubbed,
+                                # Phase 164.2 / criterion 2. THIS is the D-15
+                                # path: the row stays PUBLISHED and this sentence
+                                # is the entire explanation the account holder
+                                # gets for a stale factsheet. It is also the
+                                # branch (b-prime) the bridge reaches on a
+                                # recurring refresh, so an unstamped sentence
+                                # here is replaced by the per-kind generic within
+                                # seconds — the exact defect this phase closes.
+                                "computation_error_source": provenance_source(job.get("id")),
+                                "computation_error_job_id": job.get("id"),
+                        }
+
+                        def _write_error_only() -> None:
+                            ctx.supabase.table("strategy_analytics").upsert(
+                                _error_only_payload,
+                                on_conflict="strategy_id",
+                            ).execute()
+
+                        upsert_or_drop_provenance(
+                            _error_only_payload,
+                            _write_error_only,
+                            where="job_worker.run_derive_broker_dailies_job._upsert_error_only",
+                        )
+
+                    await _stamp_io(
+                        lambda: db_execute(_upsert_error_only),
+                        op=_STAMP_OP_ERROR_ONLY_WRITE,
+                        **_stamp_io_args,
+                    )
+                    # ⛔ And NO _heal_delete_basis_series(). This is the half that
+                    # is easy to miss: that helper DELETEs both the cash_settlement
+                    # and mark_to_market series rows, so leaving it in place would
+                    # strip a live factsheet's series even though the status
+                    # survived.
+                    logger.warning(
+                        "derive_broker_dailies: a MARKED ledger refresh failed for "
+                        "strategy %s; recorded computation_error and left the "
+                        "publish state and both basis series intact (D-15). The "
+                        "failure is still visible in compute_jobs, in "
+                        "computation_error, in this line, and in the staleness view.",
+                        strategy_id,
+                    )
+                    return
+            # ---- end D-15; everything below is BYTE-UNCHANGED except the -------
+            # ``_stamp_io`` wrapper around the write and the landed-stamp ERROR
+            # line after it (Phase 164.6.7 round 4).
 
             def _upsert() -> None:
-                ctx.supabase.table("strategy_analytics").upsert(
-                    {
+                _derive_failed_payload: dict[str, Any] = {
                         "strategy_id": strategy_id,
                         "computation_status": "failed",
                         # SI-02 (MEDIUM-2): clear the runner-owned warned marker.
                         "computation_warned": False,
+                        # JOB-01: clear on exit so a stale stamp can never re-trigger the reaper.
+                        "computing_started_at": None,
                         "computation_error": scrubbed,
+                        # Phase 164.2 / criterion 2. `scrubbed` is the D-162-4
+                        # message half — curated copy, never the raw exception —
+                        # and it renders VERBATIM on the account surface.
+                        "computation_error_source": provenance_source(job.get("id")),
+                        "computation_error_job_id": job.get("id"),
                         "data_quality_flags": {"csv_source": True},
                         # F-4 (Fable): authoritative-clear the by-basis column so a
                         # prior object can't render on a now-FAILED row.
                         "metrics_json_by_basis": None,
-                    },
-                    on_conflict="strategy_id",
-                ).execute()
+                }
 
-            await db_execute(_upsert)
+                def _write_derive_failed() -> None:
+                    ctx.supabase.table("strategy_analytics").upsert(
+                        _derive_failed_payload,
+                        on_conflict="strategy_id",
+                    ).execute()
+
+                upsert_or_drop_provenance(
+                    _derive_failed_payload,
+                    _write_derive_failed,
+                    where="job_worker.run_derive_broker_dailies_job._upsert",
+                )
+
+            await _stamp_io(
+                lambda: db_execute(_upsert), op=_STAMP_OP_LOUD_WRITE, **_stamp_io_args
+            )
+            # Logged only once the stamp has LANDED (round 4), so a failed write
+            # carries its cause on one ERROR line, ``_stamp_io``'s, not two.
+            if _lost_protection_of is not None:
+                logger.error(
+                    "derive_broker_dailies: stamped strategy %s FAILED over its "
+                    "%s row, because compute_job %s no longer protects it — %s",
+                    strategy_id, _lost_protection_of, job.get("id"), _cause,
+                )
             # D3 SECONDARY: single choke point — every terminal-failure stamp that flows
             # through this helper (parse-malformed + the deribit arm's ledger/scope/
             # valuation failures) heals both series rows.
-            await _heal_delete_basis_series()
+            #
+            # ⛔ F4 (161.1 silent-failure audit): the heal is OPT-OUT, and the two
+            # opt-outs are not tidiness. The CR-02 collapse routed FOUR stamp sites
+            # through this closure, but only TWO of them ever healed:
+            # `_mark_insufficient` (the <2-day arm) and the deribit arm's own
+            # failures, which already called this helper. `_dispose_broker_nav_error`
+            # and `_stamp_verdict_failed` spelled the payload themselves and did NOT
+            # delete the series — so routing them here HANDED THEM A DESTRUCTIVE
+            # DELETE THEY NEVER HAD. That matters because the runbook's repair marker
+            # `ledger-refresh-repair` is deliberately UNPROTECTED (a repair must be
+            # able to fail loudly), and the runbook promises "a failed repair … is not
+            # a fresh injury". With an unconditional heal that promise was false: a
+            # failed repair on an MT5 strategy hitting the MT5-12 verdict refusal
+            # destroyed BOTH basis-series rows, and MT5 is 4 of the 5 live
+            # ledger-backed strategies.
+            #
+            # The default stays True so the collapse's guarantee is unchanged for
+            # every site that DID heal — an opt-in default would have silently
+            # dropped the heal from the deribit arm, which is CR-02 with the sign
+            # flipped.
+            if heal_series:
+                await _heal_delete_basis_series(cause=_cause)
 
         # Per-strategy returns-denominator override (Zavara-only allocated capital).
         # ABSENT on every normal strategy (and in key-mode) → None → the unchanged NAV
@@ -2504,11 +3904,13 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 LedgerValuationError,
                 PNL_BASIS_MARK_TO_MARKET,
                 PNL_BASIS_SMOOTHED_MTM,
+                OptionRowFieldMissingError,
             )
             from services.nav_twr import UNREALIZED_MATERIALITY_RATIO
             from services.native_nav import InceptionReconciliationError
             from services.stitch_composite import (
                 MTM_REASON_ANCHOR_RACE,
+                MTM_REASON_OPTION_ROW_FIELD,
                 MTM_REASON_SECOND_PASS_TIMEOUT,
                 MTM_REASON_SUMMARY_COVERAGE,
             )
@@ -2848,10 +4250,17 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                             # PERSISTENT inception breach also lands here and STILL
                             # degrades (cash ships) — never propagate-to-retry, which
                             # would sink the healthy cash headline (deferred-items.md).
+                            #
+                            # Phase 168 (SFH-04): an option row missing its
+                            # commission/position (OptionRowFieldMissingError) gets
+                            # its OWN reason too, label-only like the anchor race —
+                            # the coverage stamp would name the wrong cause.
                             mtm_returns = None
                             mtm_gated_reason = (
                                 MTM_REASON_ANCHOR_RACE
                                 if isinstance(_mtm_exc, InceptionReconciliationError)
+                                else MTM_REASON_OPTION_ROW_FIELD
+                                if isinstance(_mtm_exc, OptionRowFieldMissingError)
                                 else MTM_REASON_SUMMARY_COVERAGE
                             )
                             logger.warning(
@@ -3093,7 +4502,8 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 # never a silently-partial track record.
                 await _stamp_strategy_analytics_failed(
                     "Deribit transaction history could not be verified as "
-                    "complete. " + str(scrub_freeform_string(str(exc)))
+                    "complete.",
+                    detail=str(scrub_freeform_string(str(exc))),
                 )
                 return DispatchResult(
                     outcome=DispatchOutcome.FAILED,
@@ -3118,8 +4528,8 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 scrubbed = str(scrub_freeform_string(str(exc)))
                 await _stamp_strategy_analytics_failed(
                     "Deribit ledger contained a transaction that could not be "
-                    "processed (unvaluable coin cash, undatable, or schema drift). "
-                    + scrubbed
+                    "processed (unvaluable coin cash, undatable, or schema drift).",
+                    detail=scrubbed,
                 )
                 return DispatchResult(
                     outcome=DispatchOutcome.FAILED,
@@ -3146,7 +4556,8 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 await _stamp_strategy_analytics_failed(
                     "Deribit native NAV reconstruction refused a structural input "
                     "(a value-bearing currency with no USD mark, or the "
-                    "full-history roll did not reconcile to inception). " + scrubbed
+                    "full-history roll did not reconcile to inception).",
+                    detail=scrubbed,
                 )
                 return DispatchResult(
                     outcome=DispatchOutcome.FAILED,
@@ -3257,8 +4668,8 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 # Permanent FAILED + terminal stamp — retrying cannot help.
                 scrubbed = str(scrub_freeform_string(str(exc)))
                 await _stamp_strategy_analytics_failed(
-                    "sFOX history crawl could not be verified as complete. "
-                    + scrubbed
+                    "sFOX history crawl could not be verified as complete.",
+                    detail=scrubbed,
                 )
                 return DispatchResult(
                     outcome=DispatchOutcome.FAILED,
@@ -3282,7 +4693,8 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 await _stamp_strategy_analytics_failed(
                     "sFOX ledger contained a value that could not be interpreted "
                     "(a non-USD-family flow, a malformed amount, an unrecognized "
-                    "action, or a non-finite NAV point). " + scrubbed
+                    "action, or a non-finite NAV point).",
+                    detail=scrubbed,
                 )
                 return DispatchResult(
                     outcome=DispatchOutcome.FAILED,
@@ -3347,7 +4759,7 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                     exc,
                     stamp_detail=(
                         "sFOX NAV/TWR reconstruction refused a structural input "
-                        "(an orphan/undatable flow or a non-finite NAV/flow amount). "
+                        "(an orphan/undatable flow or a non-finite NAV/flow amount)."
                     ),
                     result_detail=(
                         "derive_broker_dailies: sfox NAV/TWR reconstruction failed "
@@ -3391,9 +4803,21 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             # must honor the founder go-dark gate too. The DB CHECK admits 'mt5'
             # unconditionally, so after MT5_ENABLED is turned off (an incident
             # rollback) a stored mt5 key would keep firing live RPyC deal reads
-            # here every run. Gate BEFORE any decrypt/login/read. Permanent (the
-            # founder disabled it deliberately — retrying is wrong): fails cleanly
-            # and stops, never a live read while disabled.
+            # here every run. Permanent (the founder disabled it deliberately —
+            # retrying is wrong): fails cleanly and stops, never a live read
+            # while disabled.
+            #
+            # 151 review WR-08 — the previous wording ("gate BEFORE any
+            # decrypt/login/read") overstated the guarantee, and an operator
+            # makes an incident-response decision on it. `_exchange_preflight`
+            # has ALREADY decrypted the credentials and built the session
+            # (`_make_exchange_client` → `_make_mt5_session` → `Mt5Client`,
+            # whose `__init__` opens the RPyC transport) by the time control
+            # reaches here. What this gate stops is every terminal READ —
+            # login / account_info / history_deals_get — not the transport
+            # connect. A true pre-connect gate belongs at `_make_exchange_client`
+            # and would need each caller's disabled-path semantics adjusted with
+            # it (see the matching note in allocator_positions).
             if not mt5_enabled_server():
                 return DispatchResult(
                     outcome=DispatchOutcome.FAILED,
@@ -3401,7 +4825,11 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                     error_kind="permanent",
                 )
             from services.broker_dailies import combine_mt5_deal_ledger
-            from services.mt5_client import Mt5AccountMismatchError, Mt5ClientError
+            from services.mt5_client import (
+                Mt5AccountMismatchError,
+                Mt5ClientError,
+                Mt5SessionAbandoned,
+            )
             from services.mt5_deals import (
                 Mt5DealClassificationError,
                 classify_deal,
@@ -3421,54 +4849,19 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             # history (epoch 0 → now + one day margin so a same-day deal near the
             # boundary is never clipped). Each round-trip is already rpyc-bounded
             # inside Mt5Client; this bound catches a hang OUTSIDE a bounded call.
-            def _assert_expected_login(info: dict[str, Any]) -> None:
-                # MT5CONC-02 login bracket: the live terminal's account MUST be the
-                # connected key's account (mt5_session.login is the parsed api_key
-                # slot, mt5_validation.py:75). STRICT equality; a MISSING "login"
-                # field (info.get → None) must FAIL LOUD, never default-match
-                # (Pitfall 3). A mismatch is a mis-routed/stale-terminal INFRA fault
-                # → Mt5AccountMismatchError (NOT an Mt5ClientError, so the classify/
-                # stamp arm can never absorb it) → the dedicated no-stamp/no-persist
-                # transient+restart branch below.
-                _actual_login = info.get("login")
-                if _actual_login != _mt5_session.login:
-                    raise Mt5AccountMismatchError(_mt5_session.login, _actual_login)
-
-            def _mt5_read() -> tuple[dict[str, Any], list[dict[str, Any]]]:
-                _mt5_session.client.login(
-                    _mt5_session.login,
-                    _mt5_session.investor_password,
-                    _mt5_session.server,
-                )
-                _info = _mt5_session.client.account_info()  # None→typed raise
-                # None (error) is a typed raise inside the client; () → [] honest
-                # empty. NO fabricated flat account can enter here.
-                # PRE-read login bracket (MT5CONC-02): refuse the read before the
-                # deal fetch if the terminal is on the wrong account.
-                _assert_expected_login(_info)
-                _deals = _mt5_session.client.history_deals_get(
-                    0, int(_mt5_now.timestamp()) + _MT5_DEAL_FETCH_MARGIN_S
-                )
-                # POST-read login bracket (MT5CONC-02): re-read account_info and
-                # re-assert, catching a mid-read terminal re-login by another actor
-                # (the cross-process net for the module-level lock's documented
-                # cross-replica gap). The PRE _info stays the returned economic
-                # anchor (equity/balance byte-preserved from 136); this POST read is
-                # assertion-only and its dict is discarded.
-                # IN-01: the re-read is ASSERTION-ONLY — the correct account's deals
-                # were already fetched. A transient transport blip HERE
-                # (Mt5ClientError) is a retry-worthy verification gap, NOT a
-                # credential fault, so re-signal it as a distinct transient-only type
-                # rather than let it flow into the permanent-stamp classify arm. Only
-                # the account_info() CALL is wrapped; a real mismatch still raises
-                # Mt5AccountMismatchError from _assert_expected_login below, so the
-                # never-stamp-the-wrong-account guarantee is untouched.
-                try:
-                    _post_info = _mt5_session.client.account_info()
-                except Mt5ClientError as exc:
-                    raise _Mt5PostReadVerificationError(str(exc)) from exc
-                _assert_expected_login(_post_info)
-                return _info, _deals
+            #
+            # ⭐ 164.5.4 / D-01 — the read body itself is now
+            # `services.mt5_read.read_mt5_deal_ledger`, the ONE copy the full-backfill
+            # job shares. What it does is unchanged to the byte, INCLUDING both
+            # MT5CONC-02 login brackets and the IN-01 assertion-only POST re-read; its
+            # PRE `_assert_expected_login` closure is gone because the helper calls the
+            # SHARED `mt5_probe.assert_expected_login` (identical contract: STRICT
+            # equality, a missing "login" field FAILS LOUD, `Mt5AccountMismatchError`
+            # which is NOT an `Mt5ClientError`).
+            #
+            # ⛔ The helper decides NOTHING about what a failure means. The lease, this
+            # `wait_for` bound and ALL FIVE `except` arms below stay HERE, because the
+            # backfill job answers some of the same exceptions differently.
 
             # MT5CONC-02: serialize the ENTIRE terminal-IPC region (the bounded read
             # AND every except branch's terminal touch — the 137-01 TimeoutError
@@ -3479,10 +4872,22 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             # extraction, combine, persist below) stays OUTSIDE the lock: it does no
             # terminal IPC, and holding the terminal through the combine would
             # needlessly serialize CPU work that needs no terminal.
-            async with _mt5_terminal_lock_for(_mt5_session.client.terminal_key):
+            #
+            # WIZFORM-ABANDON / D-36 — acquired through the LEASE, not the raw
+            # Lock. This is finding #5's OWN path: the `wait_for` below can walk
+            # away from a `to_thread` body that is still parked in a blocked rpyc
+            # round-trip, and the ONLY thing that can fence that zombie is the
+            # epoch bump in the lease's `finally`. The raw Lock has no release
+            # hook to hang it on. `wait_s` is deliberately omitted (= unbounded
+            # acquire, byte-equivalent to the raw `await lock.acquire()` this
+            # replaced): ⛔ the bounded arm's `Mt5TerminalBusyError` is the
+            # INTERACTIVE validate path's contract (D-29), never the worker's.
+            async with mt5_terminal_lease(_mt5_session.client.terminal_key):
                 try:
                     _mt5_info, _mt5_deals = await asyncio.wait_for(
-                        asyncio.to_thread(_mt5_read),
+                        asyncio.to_thread(
+                            read_mt5_deal_ledger, _mt5_session, now=_mt5_now
+                        ),
                         timeout=_MT5_DERIVE_READ_TIMEOUT_S,
                     )
                 except asyncio.TimeoutError:
@@ -3508,6 +4913,73 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                             "derive_broker_dailies: mt5 read exceeded the per-read "
                             "wall-clock bound — retrying rather than wedging the "
                             "worker (FLIPRETRY-01)"
+                        ),
+                        error_kind="transient",
+                    )
+                except Mt5SessionAbandoned:
+                    # ⭐ WIZFORM-ABANDON / D-40. `Mt5SessionAbandoned` is a plain
+                    # `Exception` (D-42), so it matches NONE of the four arms
+                    # around it — before this one it escaped
+                    # `run_derive_broker_dailies_job` outright. That is measured,
+                    # not theorised: plan 153.5-03 watched it escape into a bare
+                    # `asyncio.gather` on 2 of 10 consecutive runs.
+                    #
+                    # ⚠️ On the genuinely abandoned path nobody awaits this read,
+                    # so the raise reaches no one and this arm never runs (D-39 —
+                    # the sink's WARNING is the signal). It exists for the
+                    # FALSE-POSITIVE path: a legitimate read refused by the fence
+                    # must be RETRIED, never charged to the strategy owner.
+                    #
+                    # ⛔ NO `_stamp_strategy_analytics_failed` — same rule as the
+                    # mismatch arm below: we never write a user-attributed
+                    # 'failed' analytics row for a fault of OURS. A fence refusal
+                    # is the purest example there is; the key is fine, the
+                    # credentials are fine, our own thread outlived its bound.
+                    #
+                    # ⛔ NO `_mt5_bounded_restart` — and this one is the opposite
+                    # of the timeout arm above it, deliberately. A timeout means
+                    # OUR pipe is wedged and healing it is right. A fence refusal
+                    # means the terminal has been HANDED ON, so a restart here
+                    # would fire `mt5.shutdown()` on the session of whoever holds
+                    # it now — one ThreadedServer, one MetaTrader5 instance, one
+                    # IPC pipe (EVIDENCE §A2 / C-1) — i.e. it would do to them
+                    # exactly what this phase exists to stop.
+                    #
+                    # ⛔ THE MESSAGE MUST CLASSIFY BLAME-FREE (D-42). It lands in
+                    # `compute_jobs.error_message`, which is re-classifiable, and
+                    # `_WRONG_SERVER_PHRASES` / `_AUTH_PHRASES`
+                    # (`services/mt5_validation.py`) are SUBSTRING-matched. Until
+                    # 164.5.4 they held BARE WORDS — "terminal", "session",
+                    # "connect", "login" and "account" were all members — so the
+                    # words an author reaches for first were exactly the ones that
+                    # would re-run the `routers/exchange.py:678-684` incident.
+                    #
+                    # ⚠️ Those tables are anchored phrases now and an unrecognised
+                    # message degrades to `transient` by the refusal rule. ⛔ The
+                    # hazard is NARROWER, NOT GONE: the tables are [ASSUMED] and
+                    # GAIN members as the live spike measures pairs, so text
+                    # written today can start matching later. Do not let
+                    # classifier-matchable text into this field on the grounds
+                    # that today's phrase set happens to miss it — the gate in
+                    # `tests/test_mt5_derive_branch.py` runs the real classifier
+                    # over this exact message and demands "transient".
+                    #
+                    # The class name lives in the log line only; a log is never
+                    # classified.
+                    logger.warning(
+                        "derive_broker_dailies: mt5 read was refused by the "
+                        "abandoned-session fence (label=%s) — classified "
+                        "transient, retrying; NOT restarting, because the "
+                        "refusal means another holder owns the hardware now "
+                        "(WIZFORM-ABANDON / D-40)",
+                        funding_label,
+                    )
+                    return DispatchResult(
+                        outcome=DispatchOutcome.FAILED,
+                        error_message=(
+                            "derive_broker_dailies: mt5 read was refused because "
+                            "the lease it began under had already ended — "
+                            "retrying"
                         ),
                         error_kind="transient",
                     )
@@ -3592,7 +5064,8 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                     _scrubbed = str(scrub_freeform_string(str(exc)))
                     if _kind == "auth":
                         await _stamp_strategy_analytics_failed(
-                            "MT5 login was rejected (bad credentials). " + _scrubbed
+                            "MT5 login was rejected (bad credentials).",
+                            detail=_scrubbed,
                         )
                         return DispatchResult(
                             outcome=DispatchOutcome.FAILED,
@@ -3674,7 +5147,8 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 await _stamp_strategy_analytics_failed(
                     "MT5 deal ledger contained a deal type that could not be "
                     "classified (an ambiguous/unknown DEAL_TYPE, or a non-finite "
-                    "money/time field). " + _scrubbed
+                    "money/time field).",
+                    detail=_scrubbed,
                 )
                 return DispatchResult(
                     outcome=DispatchOutcome.FAILED,
@@ -3689,7 +5163,7 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                     exc,
                     stamp_detail=(
                         "MT5 NAV/TWR reconstruction refused a structural input "
-                        "(an undatable deal or a non-finite NAV/flow amount). "
+                        "(an undatable deal or a non-finite NAV/flow amount)."
                     ),
                     result_detail=(
                         "derive_broker_dailies: mt5 NAV/TWR reconstruction failed "
@@ -3959,7 +5433,7 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                     stamp_detail=(
                         "Broker flow valuation failed on a structural input (a "
                         "coin flow with no same-UTC-day price, or a schema-drifted"
-                        "/undatable/non-finite flow amount). "
+                        "/undatable/non-finite flow amount)."
                     ),
                     result_detail=(
                         "derive_broker_dailies: ccxt flow valuation failed "
@@ -4030,7 +5504,7 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 exc,
                 stamp_detail=(
                     "Broker return reconstruction failed on a structural input "
-                    "(schema drift, undatable/orphan flow, or a non-finite amount). "
+                    "(schema drift, undatable/orphan flow, or a non-finite amount)."
                 ),
                 result_detail=(
                     "derive_broker_dailies: broker NAV/TWR reconstruction failed "
@@ -4311,35 +5785,171 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             strategy_id, len(realized), len(funding),
         )
 
-        def _mark_insufficient() -> None:
-            ctx.supabase.table("strategy_analytics").upsert(
-                {
-                    "strategy_id": strategy_id,
-                    "computation_status": "failed",
-                    # SI-02 (MEDIUM-2): clear the runner-owned warned marker.
-                    "computation_warned": False,
-                    "computation_error": (
-                        "Insufficient broker history. At least 2 days of "
-                        "activity required."
-                    ),
-                    "data_quality_flags": {"csv_source": True},
-                    # F-4 (Fable): authoritative-clear the by-basis column so a
-                    # prior object can't render on a now-FAILED (insufficient) row.
-                    "metrics_json_by_basis": None,
-                },
-                on_conflict="strategy_id",
-            ).execute()
+        # CR-02 (161.1-REVIEW): THE most dangerous of the three unguarded sibling
+        # stamps, and the reason CR-02 was rated critical rather than cosmetic.
+        # This arm fires whenever the crawl returns fewer than two INTERPRETABLE
+        # daily-return days — which is exactly what an MT5 terminal that has lost
+        # its login returns (the -10004 state in this repo's operational history:
+        # a successful crawl of an EMPTY deal history). It then wrote the
+        # authoritative-clear payload AND called `_heal_delete_basis_series()`,
+        # deleting BOTH persisted basis-series rows. On a live funded strategy
+        # with years of history, one refresh tick against a logged-out gateway
+        # destroyed the series — the half the D-15 comment calls "easy to miss".
+        #
+        # Routed through the ONE choke point instead. `_mark_insufficient` is the
+        # ONE of the four collapsed sites for which that is exactly equivalent on
+        # the unguarded path: `_stamp_strategy_analytics_failed` writes the same
+        # seven keys and then calls the same `_heal_delete_basis_series()` this
+        # line used to call itself. (F4 corrects the earlier wording here, which
+        # claimed the equivalence for the collapse as a whole — measured, it does
+        # NOT hold for `_dispose_broker_nav_error` or `_stamp_verdict_failed`,
+        # neither of which ever healed. Those two now pass `heal_series=False`.)
+        # The message is a constant, so the helper's scrub is a no-op on it.
+        await _stamp_strategy_analytics_failed(
+            "Insufficient broker history. At least 2 days of activity required."
+        )
+        # ⛔ F1 (161.1 silent-failure audit): FAILED, not DONE. This return is the
+        # tail of the chain that develops the origin defect's exact shape, and the
+        # stamp above is only half a fix without it.
+        #
+        # `main_worker` maps DONE → `mark_compute_job_done`, whose in-RPC
+        # `sync_strategy_analytics_status` then finds every job row terminal-done
+        # and takes branch (c): `computation_error = NULL`, `computed_at = now()`.
+        # So the arm that just recorded a failure had that failure ERASED one RPC
+        # later — on BOTH paths:
+        #   * MARKED refresh — the D-15 guard preserves the publish state and
+        #     writes `computation_error`; branch (c) NULLs it and stamps a fresh
+        #     `computed_at`. Every channel D-15 promises is gone except a log line,
+        #     and `computed_at` is not inert: it feeds the factsheet's FreshnessChip
+        #     and the portfolio PDF's "Data as of" vintage, so a month-stale funded
+        #     account renders GREEN and prints TODAY as its data date. That is the
+        #     class the FINDING-5 comment on the vintage line already names: never
+        #     fall back to "now" for a missing computed_at.
+        #   * UNMARKED first compute — the authoritative 'failed' stamp is
+        #     overwritten to 'complete' with a NULL error, so the wizard poller is
+        #     handed a success for a strategy that has no factsheet.
+        # FAILED routes to `mark_compute_job_failed` instead, and the bridge takes
+        # branch (b) (loud) or (b-prime) (protected, error preserved, computed_at
+        # untouched) — which is what both stamps above already assume.
+        #
+        # PERMANENT: a brand-new/idle account with <2 interpretable days does not
+        # grow history by being retried in a backoff loop (T-74-02 DoS). The next
+        # sync enqueues a fresh derive whose `done` SUPERSEDES this failed_final
+        # per-kind, so the strategy un-poisons the moment real history arrives.
+        return DispatchResult(
+            outcome=DispatchOutcome.FAILED,
+            error_message=(
+                "derive_broker_dailies: <2 interpretable daily-return days for "
+                f"strategy {strategy_id} — insufficient broker history."
+            ),
+            error_kind="permanent",
+        )
 
-        await db_execute(_mark_insufficient)
-        # D3 SECONDARY (Phase 105): this terminal insufficient-history arm exits BEFORE
-        # the cash/MTM series persists below, so a stale series row from a prior
-        # (longer-history) derive would outlive the now-authoritative 'failed'. Heal both
-        # rows (defense-in-depth; the Plan-02 read gate is the guarantee).
-        await _heal_delete_basis_series()
-        return DispatchResult(outcome=DispatchOutcome.DONE)
+    # ── MT5-12: the series-completeness VERDICT seam (D-15 / D-16) ──────────────
+    # THE fail-loud chokepoint for producer 1 (`run_derive_broker_dailies_job`).
+    # Every keyed venue funnels its reconstructed series through here — BOTH
+    # strategy-mode and key-mode share this one seam — so a future fifth combiner
+    # added to the open-ended venue registry cannot ship a series into
+    # csv_daily_returns without stating whether the venue inputs it consumed were
+    # whole. The publish gate reads that verdict; an unjudged series would read
+    # NULL and be silently mis-trusted.
+    #
+    # ⛔ PLACEMENT IS LOAD-BEARING. This MUST stay textually ABOVE the series
+    # write below: the chunked `_upsert_dailies` and the `_reconcile_span_delete`
+    # batches that follow it. Since C3 topic H the upsert fires FIRST and the
+    # delete after it, so an assert placed anywhere past the first upsert would
+    # refuse the NEW series only AFTER overwriting part of the OLD one (and, past
+    # the delete, after removing its refused days) — turning fail-loud into data
+    # loss. A refusal must cost nothing.
+    #
+    # ⚠️ `mypy --strict` CANNOT enforce this. The combiners return
+    # `dict[str, Any]` and `NavTWRMeta` is `total=False`, so a return path that
+    # OMITS the key type-checks cleanly. This runtime seam is the only oracle.
+    #
+    # The <2-row short-circuit at :4340 above has already returned for the three
+    # deliberately-exempt empty-series combiner paths (broker_dailies.py, marked
+    # `MT5-12 EXEMPT`), so reaching this line means a real series exists and a
+    # verdict is genuinely owed.
+    from services.broker_dailies import SERIES_COMPLETENESS_VALUES
+
+    _verdict = meta.get("series_completeness")
+    if _verdict not in SERIES_COMPLETENESS_VALUES:
+        from services.redact import scrub_freeform_string
+
+        # T-142.2-14: the operator string carries the VERDICT repr and nothing
+        # else — no venue data, no magnitudes, no account identifiers. Scrubbed
+        # anyway because `meta` is producer-supplied and a malformed value could
+        # in principle carry anything; bounded so a pathological value cannot
+        # balloon the operator column either.
+        _verdict_repr = str(scrub_freeform_string(repr(_verdict)))[:120]
+        # ---- HONEST-01 / D-162-4 (strict): the message/detail SPLIT ---------
+        # WR-01 (162-REVIEW). This site reached `computation_error` through a
+        # different mechanism than the fourteen `message + scrubbed` suffixes the
+        # phase converted — INTERPOLATED internals rather than appended exception
+        # text — and so survived that sweep. Same class, same fix.
+        #
+        # `_message` is the CURATED sentence and the ONLY thing that reaches
+        # `computation_error`, which an account holder reads verbatim on the
+        # portfolio dashboard and in the wizard failure envelope. It is FIXED:
+        # neither the producer's verdict value, nor the internal
+        # `series_completeness` key name, nor the MT5-12 rule number varies it.
+        #
+        # `_detail` keeps every one of those internals and rides the OPERATOR
+        # surfaces only — the log line below, the `detail=` log inside the stamp
+        # choke point, and `DispatchResult.error_message` (→
+        # `compute_jobs.last_error`, admin-only), which is byte-unchanged by this
+        # split. Curating the operator string as well would trade a dishonest
+        # screen for a blind operator — the rejected alternative recorded in
+        # 162-02-DECISION.md and pinned by test_allocator_positions.py part (3).
+        _message = (
+            "This strategy's daily return series could not be confirmed complete, "
+            "so its performance figures were not updated. The issue has been "
+            "reported to us and needs nothing from you."
+        )
+        _detail = (
+            "Series completeness verdict missing or unrecognised "
+            f"(series_completeness={_verdict_repr}). MT5-12: every daily-series "
+            "producer must state whether the venue inputs it consumed were whole."
+        )
+        # `funding_label` is the one identity bound on BOTH branches (strategy_id
+        # in strategy-mode, api_key_id in key-mode) — `strategy_id` itself is
+        # UNBOUND in key-mode.
+        logger.error(
+            "derive_broker_dailies: MT5-12 verdict refusal (key_mode=%s id=%s "
+            "venue=%s) — %s",
+            is_key_mode, funding_label, venue, _detail,
+        )
+        # CR-02 (161.1-REVIEW): routed through the ONE choke point. Key-mode
+        # (allocator) has NO per-key strategy_analytics row (per-key reads are
+        # Phase 36) — a stamp there would write a phantom row — and the choke
+        # point owns that short-circuit, so the `if not is_key_mode:` wrapper
+        # this replaced is now redundant rather than duplicated.
+        #
+        # ⚠️ This seam is MT5-specific (the MT5-12 series-completeness refusal)
+        # and MT5 is 4 of the 5 live ledger-backed strategies, so it is the
+        # highest-frequency route by which a recurring refresh could have
+        # downgraded a funded account.
+        #
+        # ⛔ F4: `heal_series=False`. This is THE path the runbook's repair marker
+        # rides — `ledger-refresh-repair` is deliberately unprotected, and MT5-12
+        # is the refusal an MT5 repair most often trips. Before the CR-02 collapse
+        # `_stamp_verdict_failed` did not delete the series; restoring that is what
+        # keeps the runbook's "a failed repair is not a fresh injury" true.
+        await _stamp_strategy_analytics_failed(
+            _message, detail=_detail, heal_series=False
+        )
+        # PERMANENT: a combiner that does not stamp will not start stamping on
+        # retry (T-74-02 DoS — never retry a structural defect forever).
+        return DispatchResult(
+            outcome=DispatchOutcome.FAILED,
+            error_message=_detail,
+            error_kind="permanent",
+        )
 
     # Service-role upsert into csv_daily_returns. The worker has no auth.uid()
-    # session so it cannot call persist_csv_daily_returns (auth-gated); it
+    # session so it cannot call the auth-gated CSV finalize fold (the old
+    # standalone persist RPC was folded into
+    # finalize_csv_strategy_with_returns and dropped in Phase 145); it
     # writes the table directly like it does for trades. The per-axis unique
     # index (strategy_id,date) / (api_key_id,date) makes the re-derive
     # idempotent. Chunked so a long-history account can't exceed PostgREST's
@@ -4392,9 +6002,22 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
     # differ from the legacy USD rows that populated the table, so recomputed track
     # records would silently mix stale legacy returns into refused days.
     #
-    # Reconcile the axis: DELETE the strategy's csv_daily_returns rows inside the
-    # derive's AUTHORITATIVE span, then re-insert the fresh payload below. A refused
-    # day thereby becomes honestly ABSENT (the load boundary reinstates its NaN).
+    # Reconcile the axis so that, within the derive's AUTHORITATIVE span, the
+    # stored series ends EXACTLY equal to the fresh payload. A refused day thereby
+    # becomes honestly ABSENT (the load boundary reinstates its NaN).
+    #
+    # ORDER — C3 topic H. Until topic H this DELETED the whole span first and then
+    # re-inserted the payload, as separate statements with no transaction, so a
+    # reader landing between them (the allocator compose, the analytics runner,
+    # a factsheet) found every rebuilt day absent and read it as a 0% day or a
+    # chain break. No read can close a hole the writer opens. Now the payload is
+    # UPSERTED FIRST (ON CONFLICT DO UPDATE keeps each row present) and only THEN
+    # are the span's calendar days the payload does not carry deleted. The end
+    # state is identical; a day present before and after the write is never
+    # absent in between. Partial failure changes shape accordingly: a worker
+    # death between the upsert and the delete now leaves a refused day's STALE
+    # row present until the next successful derive heals it (a retry is not
+    # guaranteed: SFH-C3R3-02), instead of leaving the span empty.
     #
     # SPAN/SCOPE bound — the delete must NEVER remove legitimate out-of-scope
     # history. The authoritative span is EXACTLY the dense reconstructed calendar
@@ -4405,30 +6028,17 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
     #     series — every stored row is in-scope and authoritative.
     #   - retention-windowed (ccxt OKX/Bybit): [min,max] is only the reconstructed
     #     window. Rows OLDER than index.min() (written by an EARLIER derive when the
-    #     retention floor sat further back) are strictly < span_start and fall
-    #     OUTSIDE the ranged delete -> PRESERVED. The delete is a bounded gte/lte on
-    #     `date`, so it can only touch days this derive actually reconstructed.
+    #     retention floor sat further back) are strictly < span_start and are never
+    #     named by the delete -> PRESERVED. Every delete names only calendar days
+    #     inside [span_start, span_end] AND carries that gte/lte bound as well, so
+    #     it can only touch days this derive actually reconstructed.
+    #
+    # The deleted days are the span's calendar minus the payload, computed
+    # client-side (`_calendar_days_absent_from`) and sent in `in.(...)` lists of at
+    # most `_RECONCILE_DELETE_IN_BATCH` dates, so a span thousands of days wide
+    # never builds an unbounded request line and no read of the table is needed.
     _span_start = returns.index.min().date().isoformat()
     _span_end = returns.index.max().date().isoformat()
-
-    def _reconcile_span_delete(
-        span_start: str = _span_start, span_end: str = _span_end,
-    ) -> None:
-        _q = (
-            ctx.supabase.table("csv_daily_returns")
-            .delete()
-            .gte("date", span_start)
-            .lte("date", span_end)
-        )
-        # Scope on the SAME axis as the upsert conflict arbiter (per-key vs
-        # per-strategy) so the reconcile can never cross-wipe a sibling series.
-        if is_key_mode:
-            _q = _q.eq("api_key_id", api_key_id)
-        else:
-            _q = _q.eq("strategy_id", strategy_id)
-        _q.execute()
-
-    await db_execute(_reconcile_span_delete)
 
     _UPSERT_CHUNK = 1000
     for _start in range(0, len(rows_payload), _UPSERT_CHUNK):
@@ -4442,6 +6052,34 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             ).execute()
 
         await db_execute(_upsert_dailies)
+
+    _absent_days = _calendar_days_absent_from(
+        _span_start, _span_end, (str(r["date"]) for r in rows_payload)
+    )
+    for _dstart in range(0, len(_absent_days), _RECONCILE_DELETE_IN_BATCH):
+        _days = _absent_days[_dstart:_dstart + _RECONCILE_DELETE_IN_BATCH]
+
+        def _reconcile_span_delete(
+            days: list[str] = _days,
+            span_start: str = _span_start,
+            span_end: str = _span_end,
+        ) -> None:
+            _q = (
+                ctx.supabase.table("csv_daily_returns")
+                .delete()
+                .gte("date", span_start)
+                .lte("date", span_end)
+                .in_("date", days)
+            )
+            # Scope on the SAME axis as the upsert conflict arbiter (per-key vs
+            # per-strategy) so the reconcile can never cross-wipe a sibling series.
+            if is_key_mode:
+                _q = _q.eq("api_key_id", api_key_id)
+            else:
+                _q = _q.eq("strategy_id", strategy_id)
+            _q.execute()
+
+        await db_execute(_reconcile_span_delete)
 
     if is_key_mode:
         # Per-key series is "dark" until Phase 36 — no compute_analytics_from_csv
@@ -4470,7 +6108,8 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
     # STRATEGY-mode only (key-mode returned above). When the second pass produced a
     # series (mtm_returns is not None) compute its seven-scalar headline object with
     # the SAME conventions run_csv_strategy_analytics threads for the cash headline
-    # (analytics_runner.py:2291-2316) so the MTM object is convention-comparable:
+    # (its `_periods_per_year` / `_cumulative_method` / `_day_basis` block) so the
+    # MTM object is convention-comparable:
     # asset-class annualization clock (#597 √365 crypto / √252 traditional) + the
     # allocated-capital cumulative_method/day_basis (geometric+calendar when no
     # override). This is the single-key sibling of the composite MTM compute
@@ -4672,6 +6311,22 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
     _prestamp_payload: dict[str, Any] = {
         "strategy_id": strategy_id,
         "data_quality_flags": _prestamp_flags,
+        # MT5-12: the series-completeness verdict rides as a SIBLING key of
+        # data_quality_flags, NEVER as a member of `_prestamp_flags`. Two reasons,
+        # both fatal if ignored:
+        #   1. `data_quality_flags` is REPLACED wholesale on every write (MED-3
+        #      above, and analytics_runner.py:1439 rebuilds it again), so a verdict
+        #      carried inside it would be erased by the very next analytics run.
+        #   2. Membership of the guard-key sets is what auto-promotes
+        #      computation_status to `complete_with_warnings` — a status the publish
+        #      gate PASSES. Routing a gating signal through the promotion channel is
+        #      a fail-open (D-16).
+        # `_verdict` is guaranteed to be a member of SERIES_COMPLETENESS_VALUES —
+        # the seam above refused permanently otherwise. Key-mode never reaches this
+        # bridge (it returns at the key-mode exit): there is no per-key
+        # strategy_analytics row to stamp, so key-mode series get the assert but no
+        # verdict of record.
+        "series_completeness": _verdict,
     }
     # 106-02 (D5 / M2): the by-basis scalar assignment + prestamp upsert are DEFERRED
     # to AFTER both basis-series persists below (see the moved block just above the
@@ -4877,13 +6532,208 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
     await db_execute(_prestamp_dq_flags)
 
     # Hand off to the standard CSV analytics route to compile the factsheet.
-    def _enqueue_csv_analytics() -> None:
-        ctx.supabase.rpc(
-            "enqueue_compute_job",
-            {"p_strategy_id": strategy_id, "p_kind": "compute_analytics_from_csv"},
-        ).execute()
+    # JOB-03: read the canonical chain topology — never an inline literal, so
+    # the reaper-threshold oracle and this enqueue can never disagree.
+    _csv_analytics_kind = JOB_CHAIN_FOLLOW_ON["derive_broker_dailies"][0]
 
-    await db_execute(_enqueue_csv_analytics)
+    # CR-03 (161.1-REVIEW): PROPAGATE THE REFRESH MARKER ACROSS THE CHAIN EDGE.
+    # A refresh is a TWO-HOP chain — the fan-out's own D-09 budget is derived
+    # from that (20260825130000:144-150) and its 20-hour attempt cooldown counts
+    # BOTH kinds. Until now the follow-on job carried no metadata at all, so
+    # `metadata->>'source'` was NULL on hop 2 and every D-15-shaped guard —
+    # today's, and the SQL bridge's partition in 20260825150000 — was
+    # STRUCTURALLY BLIND to it. Hop 2 is where the factsheet is compiled, so:
+    # derive succeeds, analytics hop fails, funded account un-published, with
+    # every hop-1 guard reading green. The phase reasoned about hop 2 as part of
+    # the refresh everywhere except the guard.
+    #
+    # ⛔ Only a RECOGNISED marker is forwarded. An unknown source is dropped, so
+    # hop 2 takes the loud path — the same fail-safe direction as every other
+    # D-15 decision. `chained_from` is provenance for operators reading
+    # compute_jobs; nothing keys on it.
+    #
+    # ⛔ F7: RECOGNISED here means the SINGLE-KEY marker, not the union. This
+    # handler's own D-15 guard protects exactly one marker (spelled inline in
+    # `_stamp_strategy_analytics_failed`), and the composite arm's guard is
+    # deliberately a DIFFERENT string so the two cannot cross-fire. Forwarding
+    # the union while guarding one was safe only by accident of the fan-outs:
+    # migration 20260825130000 enqueues `derive_broker_dailies` under the
+    # single-key marker and 20260825140000 enqueues `stitch_composite` under the
+    # composite one, so today no composite-marked job reaches this line. If one
+    # ever did, the union form would hand hop 2 a protection hop 1 had already
+    # declined it — i.e. the destructive stamp would ALREADY have fired here,
+    # and hop 2 would then decline to record the follow-on failure. The two
+    # sites now answer the same question with the same marker.
+    #
+    # ⚠️ Cooldown accounting is UNCHANGED by this. The cooldown counts
+    # `kind IN (derive_broker_dailies, compute_analytics_from_csv)` by
+    # `created_at`, ignoring status and metadata, and the fan-out's `v_existing`
+    # pre-count filters on `kind = 'derive_broker_dailies'` alone. Adding
+    # metadata to hop 2 moves neither integer.
+    _job_metadata_out = job.get("metadata")
+    _refresh_source_out = (
+        _job_metadata_out.get("source")
+        if isinstance(_job_metadata_out, dict)
+        else None
+    )
+
+    # ⛔ REUSE-01, FORWARD DIRECTION. Same reconciliation as the stamp closure and
+    # for the same reason: this metadata is the CLAIM-TIME snapshot, and a resync
+    # that inherited this job through the enqueue dedup retracts the marker on the
+    # ROW afterwards. Forwarding a retracted marker down the chain edge would hand
+    # hop 2 — the hop that COMPILES THE FACTSHEET — a protection that no longer
+    # describes anything, and hop 2 has no other way to learn the truth: it reads
+    # this metadata and nothing else.
+    #
+    # ⛔ D-09 at the chain edge (orchestrator decision 2026-09-26, round 2 WR-02 /
+    # SFH-R2-04): a read that FAILED is not an answer here either. Dropping the
+    # marker on it enqueued a hop 2 the bridge can never protect, and the read
+    # failing after ``db_read_with_retry`` is a database-health signal that hop 2,
+    # claimed against the same database moments later, shares. So the job fails
+    # TRANSIENT BEFORE ``_enqueue_csv_analytics`` (a retry therefore never
+    # enqueues twice) and the marker stays on this row. Forwarding it unverified
+    # is ruled out: if it had in fact been retracted, that would suppress a
+    # failure somebody is watching. The cost is a re-crawl on retry. The worker
+    # already pays that on a transient (``run_stitch_composite_job``'s
+    # degraded-set divergence), and the writes above are upserts. If every retry
+    # fails, the bridge's branch (b-prime) keeps the factsheet published but
+    # stale, because the marker is still on this job.
+    # ⚠️ SFH-R3-04, the END STATE of that exhaustion: "stale" means a
+    # MIXED-GENERATION row, not an untouched one. By this line hop 1 has already
+    # written ``_prestamp_dq_flags`` (``data_quality_flags`` replaced wholesale,
+    # ``series_completeness`` and ``metrics_json_by_basis``) and persisted or
+    # healed the MTM series. Hop 2 never runs, so the headline ``metrics_json``
+    # is still the PREVIOUS hop 2's. The row stays published with hop 1's
+    # flags, verdict and by-basis values beside the previous hop 2's headline
+    # metrics. That is the same class as a protected hop-2 failure, which D-15
+    # already accepts, so it is not new harm. The upserts make the RETRY safe;
+    # they do not make the terminal state consistent. ⚠️ That holds while the
+    # row is ``complete_with_warnings`` or ``computation_warned``. A plain
+    # ``complete`` row is rewritten to ``computing`` by the bridge's branch (a)
+    # on the first ``failed_retry``, and is then un-published on exhaustion (see
+    # the block comment above ``MarkerLiveState``).
+    if _refresh_source_out == LEDGER_REFRESH_SINGLE_KEY_SOURCE:
+        # SFH-R3-02: the sibling that also hands back the failed read's
+        # ``ExceptionClass: message``, so ``last_error`` says what failed.
+        _live_state_out, _read_failure_out = await _refresh_marker_live_state(
+            ctx.supabase,
+            job.get("id"),
+            LEDGER_REFRESH_SINGLE_KEY_SOURCE,
+            raise_programming_errors=True,
+        )
+        if _live_state_out is MarkerLiveState.READ_ERROR:
+            _log_marker_not_confirmed(
+                _live_state_out,
+                site="derive_broker_dailies",
+                job_id=job.get("id"),
+                strategy_id=strategy_id,
+                consequence=(
+                    f"Enqueueing NO chain edge to {_csv_analytics_kind}; failing "
+                    "the job TRANSIENT so the queue can retry it with the marker "
+                    "still on the row"
+                ),
+            )
+            raise RefreshMarkerRereadUnavailable(
+                "derive_broker_dailies: the live re-read of the refresh marker "
+                f"failed at the chain edge, so no {_csv_analytics_kind} follow-on "
+                f"was enqueued ({_read_failure_out})"
+            )
+        if _live_state_out is not MarkerLiveState.PRESENT:
+            _log_marker_not_confirmed(
+                _live_state_out,
+                site="derive_broker_dailies",
+                job_id=job.get("id"),
+                strategy_id=strategy_id,
+                consequence=(
+                    f"The chain edge to {_csv_analytics_kind} carries NO marker "
+                    "and no publish state, so a hop-2 failure is LOUD"
+                ),
+            )
+            _refresh_source_out = None
+
+    def _enqueue_csv_analytics() -> Any:
+        _payload: dict[str, Any] = {
+            "p_strategy_id": strategy_id,
+            "p_kind": _csv_analytics_kind,
+        }
+        if _refresh_source_out == LEDGER_REFRESH_SINGLE_KEY_SOURCE:
+            _metadata_out: dict[str, Any] = {
+                "source": _refresh_source_out,
+                "chained_from": "derive_broker_dailies",
+            }
+            # ⛔ F1: THE PRE-REFRESH PUBLISH STATE RIDES THE CHAIN EDGE, and it is
+            # the only way hop 2 can ever learn it. Hop 2 cannot re-read it: this
+            # handler returns DONE immediately after this enqueue, and
+            # mark_compute_job_done PERFORMs the SQL status bridge in the SAME
+            # transaction with the job just enqueued here already `pending`. That
+            # is a non-terminal job, so branch (a) fires and rewrites a plain
+            # 'complete' row to 'computing' BEFORE hop 2 is ever claimed. A hop-2
+            # guard reading the column would therefore answer 'computing' every
+            # single time and protect nothing — deterministically, for exactly the
+            # rows a clean recompute leaves behind.
+            #
+            # ⛔ Forwarded ONLY when the entry snapshot was terminal-success,
+            # against the SAME single-sourced frozenset both guards use. A row
+            # that was not published has nothing to protect and hop 2 must be told
+            # so — the fail-safe direction is loud, never a green state invented
+            # here for hop 2 to restore.
+            if _refresh_publish_status in STRATEGY_ANALYTICS_TERMINAL_SUCCESS_STATUSES:
+                _metadata_out["publish_status"] = _refresh_publish_status
+                _metadata_out["publish_warned"] = _refresh_publish_warned
+            _payload["p_metadata"] = _metadata_out
+        return ctx.supabase.rpc("enqueue_compute_job", _payload).execute().data
+
+    _tail_job_id = await db_execute(_enqueue_csv_analytics)
+
+    # ⛔ REUSE-01, MIRROR DIRECTION — protection LOST, not laundered.
+    # The same dedup that hands a resync a marked job hands THIS enqueue an
+    # UNMARKED `compute_analytics_from_csv` when one is already in flight for the
+    # strategy, and discards the marker + publish state we just built. Hop 2 then
+    # runs with no protection at all.
+    #
+    # ⛔ THAT IS THE OUTCOME, AND IT IS DELIBERATE. The alternative — writing our
+    # marker onto the row we collided with — is the forward defect wearing the
+    # other hat: it would grant a protection to a job THIS refresh did not create
+    # and whose caller may well be watching it, and a suppressed failure under a
+    # watcher is a poller that stops on a terminal-success and a stale factsheet
+    # rendered over a failed run. Protection is never inherited across a dedup
+    # collision, in either direction; both resolve toward the LOUD path.
+    #
+    # ⚠️ So what this closes is VISIBILITY, not the loss. The loss of a safety
+    # property must never be silent — that silence is the whole reason REUSE-01
+    # survived review. Pinned by
+    # tests/test_ledger_refresh_reuse_collision.py::TestMirrorDirection.
+    #
+    # ⚠️ "DEDUPED onto an unmarked job" is a claim about a row that was READ. It
+    # is logged for OTHER_SOURCE only; every other non-present state names its
+    # own cause (SFH-02), and the loss is loud either way.
+    if _refresh_source_out == LEDGER_REFRESH_SINGLE_KEY_SOURCE:
+        _tail_state = await _refresh_marker_still_on_row(
+            ctx.supabase, _tail_job_id, LEDGER_REFRESH_SINGLE_KEY_SOURCE
+        )
+        if _tail_state is MarkerLiveState.OTHER_SOURCE:
+            logger.warning(
+                "derive_broker_dailies: the %s chain edge for strategy %s DEDUPED "
+                "onto an already-in-flight unmarked job (%s) — the refresh marker "
+                "and publish state were DISCARDED by enqueue_compute_job, so hop 2 "
+                "runs UNPROTECTED and a failure there un-publishes this strategy. "
+                "The protection is deliberately not laundered onto a job this "
+                "refresh did not create.",
+                _csv_analytics_kind, strategy_id, _tail_job_id,
+            )
+        elif _tail_state is not MarkerLiveState.PRESENT:
+            _log_marker_not_confirmed(
+                _tail_state,
+                site="derive_broker_dailies",
+                job_id=_tail_job_id,
+                strategy_id=strategy_id,
+                subject="enqueued job",
+                consequence=(
+                    f"The {_csv_analytics_kind} chain edge cannot be confirmed "
+                    "to carry the marker, so hop 2 may run UNPROTECTED and a "
+                    "failure there would un-publish this strategy"
+                ),
+            )
     return DispatchResult(outcome=DispatchOutcome.DONE)
 
 
@@ -5090,7 +6940,7 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
     # remaining budget.
     _stitch_start = asyncio.get_running_loop().time()
 
-    async def _stamp_failed(message: str) -> None:
+    async def _stamp_failed(message: str, *, detail: str | None = None) -> None:
         """Terminal 'failed' stamp so the wizard poller reaches a gate instead of
         an infinite 'computing' spinner (mirrors the derive path). Scrubbed
         (T-86-10). Never touches verification/publish columns (M-3).
@@ -5106,38 +6956,286 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         MERGE the two composite markers OVER the existing flags to PRESERVE the
         mask (mirror the SUCCESS path's read-modify-write idiom below). On a
         first-derive failure with no existing row this falls back to
-        {csv_source, composite} — current behavior, byte-unchanged."""
-        scrubbed = str(scrub_freeform_string(message))
+        {csv_source, composite} — current behavior, byte-unchanged.
 
-        def _read_existing_failed_flags() -> dict[str, Any]:
+        HONEST-01 / D-162-4 (strict): `message` is the CURATED sentence and is
+        the only thing that reaches `computation_error`. `detail` is the
+        scrubbed exception text and rides the log line below plus the caller's
+        DispatchResult — never the user-readable column. Same split, same
+        reason, as the derive path's `_stamp_strategy_analytics_failed`."""
+        scrubbed = str(scrub_freeform_string(message))
+        if detail:
+            logger.warning(
+                "run_stitch_composite_job: terminal analytics stamp for strategy "
+                "%s — %s | detail: %s",
+                strategy_id, message, str(scrub_freeform_string(detail)),
+            )
+
+        # ONE select, BOTH columns: the flags for M-2's merge above, and the
+        # CURRENT status for the non-destructive guard below.
+        def _read_existing_failed_row() -> dict[str, Any]:
             res = (
                 supabase.table("strategy_analytics")
-                .select("data_quality_flags")
+                .select("data_quality_flags, computation_status")
                 .eq("strategy_id", strategy_id)
                 .maybe_single()
                 .execute()
             )
             row = getattr(res, "data", None) or {}
-            return dict(row.get("data_quality_flags") or {})
+            return dict(row) if isinstance(row, dict) else {}
 
-        existing_flags = await db_execute(_read_existing_failed_flags)
+        # The handler's cause, as it is logged on every arm below that logs it
+        # at ERROR. ``scrubbed`` alone is what ``last_error`` carries.
+        _cause = scrubbed + (
+            f" | detail: {scrub_freeform_string(detail)}" if detail else ""
+        )
+        # ⛔ SFH-R4-01 (round 4): EVERY database read and write below goes
+        # through ``_stamp_io`` with these arguments. See its docstring.
+        _stamp_io_args: dict[str, Any] = {
+            "site": "stitch_composite",
+            "strategy_id": strategy_id,
+            "job_id": job.get("id"),
+            "cause": _cause,
+            "scrubbed": scrubbed,
+        }
+
+        # SFH-R2-02 sibling: the same 504-retried read as the marker re-read
+        # below, so one gateway blip does not replace this job's real failure
+        # with the read's exception.
+        #
+        # ⛔ SFH-R3-01 / WR-03 (round 3), closed as a CLASS in round 4
+        # (SFH-R4-01): a read that still FAILS (a 504 that outlasts the budget,
+        # or any other error on the first attempt) used to leave this closure as
+        # the READ's exception, so ``last_error`` named only the read and the
+        # curated ``message`` was logged nowhere. This is the first I/O of EVERY
+        # composite terminal stamp, marked or not. ``_stamp_io`` logs the cause
+        # at ERROR with the read's failure and fails the job TRANSIENT with the
+        # cause in its text. Nothing is written and nothing suppressed: the
+        # retry decides.
+        existing_row = await _stamp_io(
+            lambda: db_read_with_retry(_read_existing_failed_row),
+            op=_STAMP_OP_STATUS_READ,
+            **_stamp_io_args,
+        )
+        # SFH-R5-05 (round 5): ``data_quality_flags`` is ``jsonb``, so a
+        # non-object value is storable. ``dict()`` on it raised AFTER the read
+        # and BEFORE any write: a ``ValueError`` from inside the composite MTM
+        # ``try`` was caught by F-5's ``except ValueError`` and stamped a second
+        # time under the chain-break cause. So only an object is merged; any
+        # other value is dropped and the stamp lands once. Round 6 (R6-02): the
+        # drop is logged at ERROR with the job and captured once, not at
+        # WARNING, because the stamp's write destroys the value.
+        existing_flags: dict[str, Any] = _flags_object_or_dropped(
+            existing_row.get("data_quality_flags"),
+            site="stitch_composite",
+            strategy_id=strategy_id,
+            job_id=job.get("id"),
+            consequence="the failed stamp writes the composite markers without it.",
+        )
+        _existing_status = existing_row.get("computation_status")
+        existing_status: str | None = (
+            _existing_status if isinstance(_existing_status, str) else None
+        )
         merged_flags: dict[str, Any] = dict(existing_flags)
         merged_flags["csv_source"] = True
         merged_flags["composite"] = True
 
+        # ---- D-15, extended to the COMPOSITE arm (Phase 161.1 / plan 04) -----
+        # The stamp below is an authoritative downgrade: `failed` +
+        # `computation_warned = False`. That is exactly RIGHT for the case this
+        # closure was written for — a user-initiated stitch, whose wizard poller
+        # must reach a terminal gate instead of spinning forever (see this
+        # closure's docstring) — and exactly WRONG for a background maintenance
+        # refresh, which no poller is watching and whose only cost is a LIVE
+        # factsheet going dark: src/lib/strategyGate.ts returns ANALYTICS_FAILED
+        # for a `failed` row, and every live ledger row in the PROD census is
+        # `complete_with_warnings`.
+        #
+        # ⚠️ WORDING NOTE, deliberate: the M-3 source-scan gate
+        # (tests/test_stitch_composite_job.py) bans the literal that names the
+        # advanced lifecycle state from this function's ENTIRE source, comments
+        # included, because this job must never advance it. Measured — an earlier
+        # draft of this comment used that word descriptively and turned the gate
+        # RED. Prose must never trip a mechanical gate; say "live" here.
+        #
+        # ⚠️ WHY THIS IS NEEDED HERE AND NOT COVERED BY PLAN 02's GUARD. That
+        # guard lives in `_stamp_strategy_analytics_failed`, on the single-key
+        # derive path, and never runs for this kind. Until plan 04 this stamp was
+        # only reachable from a user action or an owner resync; the composite
+        # refresh arm (migration 20260825140000) makes it reachable RECURRINGLY,
+        # on the one venue whose only live strategy IS a composite.
+        #
+        # ⛔ FAIL-SAFE DIRECTION, non-negotiable and identical to D-15's: anything
+        # unrecognised falls through to the destructive stamp below. No metadata,
+        # a non-dict metadata, a DIFFERENT source (including the single-key arm's
+        # marker), no prior row, or a prior row that is not terminal-success — all
+        # of them take the LOUD path. Never fail toward suppression.
+        #
+        # The failure is RE-ROUTED, not hidden: computation_error and the cleared
+        # reaper anchor still land, the compute_jobs row (which the arm's ATTEMPT
+        # cooldown reads) still records the attempt, and the freshness verdict in
+        # public.ledger_refresh_staleness cannot be advanced by a failed stitch —
+        # so a persistently failing composite keeps reading STALE, loudly, rather
+        # than healthy.
+        _job_metadata = job.get("metadata") or {}
+        _job_source = (
+            _job_metadata.get("source") if isinstance(_job_metadata, dict) else None
+        )
+        # ⛔ The marker is spelled INLINE, and it is a CONTRACT rather than a
+        # label: the other end is `jsonb_build_object('source', …)` in
+        # supabase/migrations/20260825140000_ledger_refresh_composite_arm.sql.
+        # There is no compiler between the two — if they drift, the arm still
+        # enqueues and this still compiles, and the only symptom is that the next
+        # failed refresh silently un-publishes a funded account. It is
+        # deliberately a DIFFERENT string from the single-key arm's, so the two
+        # guards cannot cross-fire.
+        _honour_marker = (
+            _job_source == "ledger-refresh-composite"
+            and existing_status in STRATEGY_ANALYTICS_TERMINAL_SUCCESS_STATUSES
+        )
+        # ⛔ Phase 164.6.7 / D-05: `job` is the CLAIM-TIME copy of the row. A
+        # user's resync that the enqueue dedup handed THIS job after the claim
+        # records that by retracting the marker on the LIVE row, and the live row
+        # is the only place that write is visible. So the row is re-asked here,
+        # exactly as the single-key honour sites do; without it this closure
+        # suppresses a failure somebody is watching while the SQL bridge reads
+        # the same job as unprotected.
+        #
+        # ⚠️ It can only NARROW: the read runs only when protection would be
+        # granted, and every DEFINITIVE answer other than "still marked" (a
+        # retraction, another source, no row, no id) takes the LOUD path.
+        #
+        # ⛔ D-09 (orchestrator decision 2026-09-25): a read that FAILED is not an
+        # answer. Stamping loud on it turned one gateway blip into a funded
+        # composite going dark on a refresh nobody watches. So nothing is written
+        # and the job fails TRANSIENT: the queue retries it, and the retry
+        # re-reads the row. ⚠️ That keeps the factsheet live only for a
+        # ``complete_with_warnings`` / warned row. The bridge rewrites a plain
+        # ``complete`` row to ``computing`` on the ``failed_retry`` transition,
+        # so the retry's ``_read_existing_failed_row`` answers ``computing`` and
+        # the guard does not arm. See the WR-01 note above ``MarkerLiveState``.
+        # ``_stamp_io`` already logged the failed read at ERROR with the cause
+        # and reported it to Sentry. Nothing is suppressed either — no
+        # error-only write happens.
+        #
+        # ⛔ The CAUSE is logged at ERROR exactly where it is at risk, and
+        # nowhere else (round 3, orchestrator decision reconciling WR-01 with
+        # SFH-R3-01; round 4 closed the class, SFH-R4-01):
+        # - ANY database read or write of this closure failing: its
+        #   ``_stamp_io`` line carries the cause at ERROR, and the
+        #   ``StampIOUnavailable`` text carries it into ``compute_jobs.last_error``;
+        # - a definitive "not marked" answer: the LOUD stamp below takes a live
+        #   row down, and once it has landed that goes out at ERROR with its cause;
+        # - ``PRESENT``: D-15 protects the row and logs at WARNING only, below.
+        #   Nothing about it needs a person, so no Sentry event.
+        _lost_protection_of: str | None = None
+        if _honour_marker:
+            _live_state = await _stamp_io(
+                lambda: _read_refresh_marker_state(
+                    supabase, job.get("id"), LEDGER_REFRESH_COMPOSITE_SOURCE
+                ),
+                op=_STAMP_OP_MARKER_READ,
+                **_stamp_io_args,
+            )
+            if _live_state is not MarkerLiveState.PRESENT:
+                _log_marker_not_confirmed(
+                    _live_state,
+                    site="stitch_composite",
+                    job_id=job.get("id"),
+                    strategy_id=strategy_id,
+                    consequence="Taking the LOUD terminal path",
+                )
+                _lost_protection_of = existing_status
+                _honour_marker = False
+
+        if _honour_marker:
+
+            def _upsert_error_only() -> None:
+                _composite_error_only_payload: dict[str, Any] = {
+                        "strategy_id": strategy_id,
+                        # JOB-01 still applies: clear the reaper anchor on exit.
+                        # It carries no publish meaning.
+                        "computing_started_at": None,
+                        "computation_error": scrubbed,
+                        # Phase 164.2 / criterion 2: same D-15 stale-but-live
+                        # shape as the derive arm, and `test_stitch_composite_job
+                        # .py:558` pins that this column renders VERBATIM to the
+                        # account holder. ⚠️ Word choice is constrained here —
+                        # M-3's source scan greps this whole function body for a
+                        # publish-status token WITHOUT stripping comments, so a
+                        # comment can redden it.
+                        "computation_error_source": provenance_source(job.get("id")),
+                        "computation_error_job_id": job.get("id"),
+                        # M-2's read-modify-write is PRESERVED, not bypassed. The
+                        # coverage mask must survive a failed refresh or real gap
+                        # days render with no missing-segment annotation.
+                        "data_quality_flags": merged_flags,
+                }
+
+                def _write_composite_error_only() -> None:
+                    supabase.table("strategy_analytics").upsert(
+                        _composite_error_only_payload,
+                        on_conflict="strategy_id",
+                    ).execute()
+
+                upsert_or_drop_provenance(
+                    _composite_error_only_payload,
+                    _write_composite_error_only,
+                    where="job_worker.run_stitch_composite_job._upsert_error_only",
+                )
+
+            await _stamp_io(
+                lambda: db_execute(_upsert_error_only),
+                op=_STAMP_OP_ERROR_ONLY_WRITE,
+                **_stamp_io_args,
+            )
+            logger.warning(
+                "stitch_composite: a MARKED maintenance refresh failed for "
+                "strategy %s whose analytics row is %s — recording the error "
+                "WITHOUT downgrading publish state (Phase 161.1 D-15). The "
+                "strategy stays stale in ledger_refresh_staleness until a stitch "
+                "succeeds.",
+                strategy_id, existing_status,
+            )
+            return
+
         def _upsert() -> None:
-            supabase.table("strategy_analytics").upsert(
-                {
+            _composite_failed_payload: dict[str, Any] = {
                     "strategy_id": strategy_id,
                     "computation_status": "failed",
                     "computation_warned": False,
+                    # JOB-01: clear on exit so a stale stamp can never re-trigger the reaper.
+                    "computing_started_at": None,
                     "computation_error": scrubbed,
+                    # Phase 164.2 / criterion 2 — see the D-15 sibling above.
+                    "computation_error_source": provenance_source(job.get("id")),
+                    "computation_error_job_id": job.get("id"),
                     "data_quality_flags": merged_flags,
-                },
-                on_conflict="strategy_id",
-            ).execute()
+            }
 
-        await db_execute(_upsert)
+            def _write_composite_failed() -> None:
+                supabase.table("strategy_analytics").upsert(
+                    _composite_failed_payload,
+                    on_conflict="strategy_id",
+                ).execute()
+
+            upsert_or_drop_provenance(
+                _composite_failed_payload,
+                _write_composite_failed,
+                where="job_worker.run_stitch_composite_job._upsert",
+            )
+
+        await _stamp_io(
+            lambda: db_execute(_upsert), op=_STAMP_OP_LOUD_WRITE, **_stamp_io_args
+        )
+        # Logged only once the stamp has LANDED (round 4), so a failed write
+        # carries its cause on one ERROR line, ``_stamp_io``'s, not two.
+        if _lost_protection_of is not None:
+            logger.error(
+                "stitch_composite: stamped strategy %s FAILED over its %s row, "
+                "because compute_job %s no longer protects it — %s",
+                strategy_id, _lost_protection_of, job.get("id"), _cause,
+            )
 
     # 1. Members ORDER BY seq (Phase 85). owner_id in the row is advisory — the
     # authoritative owner is re-read from the api_keys row inside preflight, never
@@ -5196,7 +7294,9 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         assert_windows_disjoint(windows)
     except CompositeOverlapError as exc:
         scrubbed = str(scrub_freeform_string(str(exc)))
-        await _stamp_failed("Composite member windows overlap. " + scrubbed)
+        await _stamp_failed(
+            "Composite member windows overlap.", detail=scrubbed
+        )
         return DispatchResult(
             outcome=DispatchOutcome.FAILED,
             error_message=(
@@ -5845,7 +7945,8 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
                 scrubbed = str(scrub_freeform_string(str(exc)))
                 await _stamp_failed(
                     "Composite member reconstruction failed structurally "
-                    "(incomplete/unvaluable ledger). " + scrubbed
+                    "(incomplete/unvaluable ledger).",
+                    detail=scrubbed,
                 )
                 return DispatchResult(
                     outcome=DispatchOutcome.FAILED,
@@ -5922,7 +8023,9 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         stitched_cash = stitch_clipped_series(clipped_cash)
     except CompositeOverlapError as exc:
         scrubbed = str(scrub_freeform_string(str(exc)))
-        await _stamp_failed("Composite member series collide on a calendar day. " + scrubbed)
+        await _stamp_failed(
+            "Composite member series collide on a calendar day.", detail=scrubbed
+        )
         return DispatchResult(
             outcome=DispatchOutcome.FAILED,
             error_message=(
@@ -5990,11 +8093,28 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         else DEFAULT_PERIODS_PER_YEAR
     )
     if _venue_blend_periods != periods_per_year:
+        # ---- HONEST-01 / D-162-4 (strict): the message/detail SPLIT ---------
+        # WR-01 (162-REVIEW), the composite sibling of the MT5-12 site. The old
+        # single string interpolated the two annualization clocks and closed with
+        # a remedy addressed to an engineer ("Re-derive asset_class …") — into
+        # `computation_error`, which the account holder reads verbatim. `message`
+        # is now a FIXED sentence; the clocks and the remedy go to `detail=`
+        # (log-only) and to the DispatchResult below, which already carried both
+        # numbers for `compute_jobs.last_error` and is byte-unchanged.
+        #
+        # ⚠️ WORDING: the M-3 source-scan gate in tests/test_stitch_composite_job.py
+        # bans the literal naming the advanced lifecycle state from this whole
+        # function's source, prose included. Say "were not updated" here.
         await _stamp_failed(
-            "Composite asset_class annualization clock "
-            f"({periods_per_year}/yr) disagrees with the venue blend "
-            f"({_venue_blend_periods}/yr); the factsheet and #597 surfaces would "
-            "diverge. Re-derive asset_class (crypto for a crypto-venue composite)."
+            "This composite's performance figures were not updated because its "
+            "annualization calendar disagrees with the venues behind it. The "
+            "issue has been reported to us and needs nothing from you.",
+            detail=(
+                f"Composite asset_class annualization clock ({periods_per_year}/yr) "
+                f"disagrees with the venue blend ({_venue_blend_periods}/yr); the "
+                "factsheet and #597 surfaces would diverge. Re-derive asset_class "
+                "(crypto for a crypto-venue composite)."
+            ),
         )
         return DispatchResult(
             outcome=DispatchOutcome.FAILED,
@@ -6090,7 +8210,8 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         scrubbed = str(scrub_freeform_string(str(exc)))
         await _stamp_failed(
             "Composite metrics compute rejected the stitched series "
-            "(interior chain-break under the arithmetic convention). " + scrubbed
+            "(interior chain-break under the arithmetic convention).",
+            detail=scrubbed,
         )
         return DispatchResult(
             outcome=DispatchOutcome.FAILED,
@@ -6212,7 +8333,8 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         except CompositeOverlapError as exc:
             scrubbed = str(scrub_freeform_string(str(exc)))
             await _stamp_failed(
-                "Composite MTM member series collide on a calendar day. " + scrubbed
+                "Composite MTM member series collide on a calendar day.",
+                detail=scrubbed,
             )
             return DispatchResult(
                 outcome=DispatchOutcome.FAILED,
@@ -6227,7 +8349,8 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
             scrubbed = str(scrub_freeform_string(str(exc)))
             await _stamp_failed(
                 "Composite MTM metrics compute rejected the stitched series "
-                "(interior chain-break under the arithmetic convention). " + scrubbed
+                "(interior chain-break under the arithmetic convention).",
+                detail=scrubbed,
             )
             return DispatchResult(
                 outcome=DispatchOutcome.FAILED,
@@ -6437,8 +8560,8 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
     #
     # (1) csv_daily_returns — the stitched cash_settlement series. Gap/guarded days
     # are honestly ABSENT (NaN-skip, 74-04 policy; never 0.0 as performance). The
-    # reconcile-span-delete is scoped to strategy_id over the reconstructed span so
-    # a re-derive is authoritative and idempotent.
+    # reconcile is scoped to strategy_id over the WHOLE series so a re-derive is
+    # authoritative and idempotent.
     rows_payload = [
         {
             "strategy_id": strategy_id,
@@ -6451,23 +8574,13 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
     # (The <2-present-day guard is hoisted ABOVE the compute — see F2 above —
     # so rows_payload is guaranteed to carry ≥2 rows here.)
 
-    def _reconcile_full_delete() -> None:
-        # F5(a): the composite fully OWNS its csv_daily_returns series — an
-        # authoritative re-derive replaces it WHOLESALE. Deleting only the NEW
-        # [span_start, span_end] left stale rows OUTSIDE a SHRUNK span (e.g. a
-        # re-derive after a member window shortened or a member was removed),
-        # which run_csv_strategy_analytics then folded back into the headline.
-        # Delete EVERY row for this strategy_id before the upsert so a shrinking
-        # re-derive is idempotent and can't resurrect orphaned days.
-        (
-            supabase.table("csv_daily_returns")
-            .delete()
-            .eq("strategy_id", strategy_id)
-            .execute()
-        )
-
-    await db_execute(_reconcile_full_delete)
-
+    # C3 topic H: UPSERT FIRST, then delete what the payload does not carry. Until
+    # topic H this deleted the whole series and then re-inserted it, as separate
+    # statements, so a reader landing between them found every day of the
+    # composite absent. ON CONFLICT DO UPDATE keeps each rebuilt row present; the
+    # end state is unchanged. A worker death between the upsert and the deletes
+    # now leaves stale rows present (healed by the authoritative retry) instead of
+    # an empty series.
     _UPSERT_CHUNK = 1000
     for _start in range(0, len(rows_payload), _UPSERT_CHUNK):
         _batch = rows_payload[_start:_start + _UPSERT_CHUNK]
@@ -6478,6 +8591,64 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
             ).execute()
 
         await db_execute(_upsert_dailies)
+
+    _payload_days = [str(r["date"]) for r in rows_payload]
+    _first_day = min(_payload_days)
+    _last_day = max(_payload_days)
+
+    def _reconcile_full_delete(
+        first_day: str = _first_day, last_day: str = _last_day,
+    ) -> None:
+        # F5(a): the composite fully OWNS its csv_daily_returns series — an
+        # authoritative re-derive replaces it WHOLESALE. Deleting only the NEW
+        # [span_start, span_end] left stale rows OUTSIDE a SHRUNK span (e.g. a
+        # re-derive after a member window shortened or a member was removed),
+        # which run_csv_strategy_analytics then folded back into the headline.
+        # So every row of this strategy_id OUTSIDE the new payload's first..last
+        # day goes (two ranged statements), and the in-span days the payload does
+        # not carry go in the bounded batches below. Together they delete exactly
+        # the rows the payload does not carry, so a shrinking re-derive stays
+        # idempotent and can't resurrect orphaned days.
+        (
+            supabase.table("csv_daily_returns")
+            .delete()
+            .eq("strategy_id", strategy_id)
+            .lt("date", first_day)
+            .execute()
+        )
+        (
+            supabase.table("csv_daily_returns")
+            .delete()
+            .eq("strategy_id", strategy_id)
+            .gt("date", last_day)
+            .execute()
+        )
+
+    await db_execute(_reconcile_full_delete)
+
+    # Inside [first, last] the stitched series is SPARSE (inter-member gaps and
+    # guarded days are absent), so its calendar complement is real and can be
+    # long; it goes in bounded `in.(...)` lists (see _RECONCILE_DELETE_IN_BATCH).
+    _gap_days = _calendar_days_absent_from(_first_day, _last_day, _payload_days)
+    for _dstart in range(0, len(_gap_days), _RECONCILE_DELETE_IN_BATCH):
+        _days = _gap_days[_dstart:_dstart + _RECONCILE_DELETE_IN_BATCH]
+
+        def _reconcile_gap_delete(
+            days: list[str] = _days,
+            first_day: str = _first_day,
+            last_day: str = _last_day,
+        ) -> None:
+            (
+                supabase.table("csv_daily_returns")
+                .delete()
+                .eq("strategy_id", strategy_id)
+                .gte("date", first_day)
+                .lte("date", last_day)
+                .in_("date", days)
+                .execute()
+            )
+
+        await db_execute(_reconcile_gap_delete)
 
     # (2) + (3) ONE atomic headline + by-basis write (root-cause fix). The composite
     # HEADLINE metrics_json is the SAME cash_metrics_json spread into
@@ -6551,7 +8722,7 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
     if degraded_members:
         member_warned = True
 
-    def _read_existing_flags() -> dict[str, Any]:
+    def _read_existing_flags() -> Any:
         res = (
             supabase.table("strategy_analytics")
             .select("data_quality_flags")
@@ -6560,9 +8731,20 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
             .execute()
         )
         row = getattr(res, "data", None) or {}
-        return dict(row.get("data_quality_flags") or {})
+        return row.get("data_quality_flags")
 
-    existing_flags = await db_execute(_read_existing_flags)
+    # R6-05 (round 6): the success path reads the same ``jsonb`` column as the
+    # failed stamp (R6-02), and ``dict()`` on a non-object value raised here at
+    # persist on EVERY re-stitch, so the job retried and ended ``failed_final``
+    # with no curated stamp. The same guard now drops the value loudly, and
+    # this write replaces it with the composite markers.
+    existing_flags = _flags_object_or_dropped(
+        await db_execute(_read_existing_flags),
+        site="stitch_composite",
+        strategy_id=strategy_id,
+        job_id=job.get("id"),
+        consequence="the composite persist writes its markers without it.",
+    )
     # MERGE (read-modify-write) — preserve every existing flag (e.g. a prior derive's
     # benchmark_unavailable), add the composite coverage-mask fields.
     merged_flags: dict[str, Any] = dict(existing_flags)
@@ -6629,16 +8811,128 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
 
     composite_status = "complete_with_warnings" if member_warned else "complete"
 
+    # ── MT5-12 / 142.2 review FIX 2: the composite verdict is DERIVED, never a
+    #    bare literal ────────────────────────────────────────────────────────
+    #
+    # WHAT WAS WRONG. This site stamped `composite_stitched` unconditionally
+    # while `member_metas` — each member's meta, carrying the verdict its own
+    # combiner assigned — was already in hand twenty lines above (the guard-flag
+    # union loop reads the very same list). A member reconstructed through a
+    # combiner that found a KNOWN HOLE was therefore laundered into a composite
+    # verdict the publish gate TRUSTS. The composite's series is the arithmetic
+    # stitch of those member series, so a hole in a member is a hole in the
+    # composite; claiming otherwise is a trust claim about data we know to be
+    # incomplete.
+    #
+    # ⛔ WHY THIS PROPAGATES ONLY `sampled_gapped`, AND WHY THE OBVIOUS
+    #    "PROPAGATE ANY NON-TRUSTED MEMBER VERDICT" WOULD BE A SERIOUS
+    #    REGRESSION.
+    # `combine_realized_and_funding` stamps `fill_derived_unproven` for EVERY
+    # ccxt venue (binance / bybit / okx), ALWAYS and unconditionally — see its
+    # docstring. It is the NORMAL case for that path, not evidence that this
+    # account's series has a gap. Propagating it would give essentially every
+    # ccxt composite a refused verdict, and composites cannot recover on the
+    # trade branch the way single keys do: a single-key ccxt strategy has fills
+    # in `trades` and never needs the daily branch, whereas a composite has zero
+    # trades by construction and the daily branch is its ONLY route to publish.
+    # So propagating unproven-ness would make ccxt composites permanently
+    # un-approvable — the same class of unwinnable refusal this phase exists to
+    # delete, re-created one table over.
+    #
+    # `sampled_gapped` is different in kind: its sole producer
+    # (`combine_sfox_balance_history`) stamps it only when it MEASURED interior
+    # holes in a sampled NAV series (`nav_gap_days > 0`). That is a positive
+    # finding about this account's data, and it is exactly what must survive the
+    # stitch.
+    #
+    # HONEST BOUNDARY — what is inherited and what is not. Known gaps are
+    # inherited. UNPROVEN-NESS is NOT: a composite of ccxt members still reads
+    # `composite_stitched` and the gate still trusts it, even though no member
+    # proved its fills fetch was whole. Closing that requires distinguishing "the
+    # fetch was complete" from "the fetch returned something" at ingestion, which
+    # is booked as DEF-142.2-04 and is not resolvable here.
+    #
+    # Derived from `member_metas`, never hand-written, so a member verdict that
+    # changes upstream cannot silently stop being consulted. Both literals are
+    # members of the producer registry (broker_dailies.SERIES_COMPLETENESS_VALUES).
+    _GAPPED_MEMBER_VERDICT = "sampled_gapped"
+    _member_verdicts = [_m.get("series_completeness") for _m in member_metas]
+    composite_verdict = (
+        _GAPPED_MEMBER_VERDICT
+        if _GAPPED_MEMBER_VERDICT in _member_verdicts
+        else "composite_stitched"
+    )
+
     headline_payload: dict[str, Any] = {
         "strategy_id": strategy_id,
         "computation_status": composite_status,
         "computation_warned": member_warned,
+        # JOB-01: clear on exit so a stale stamp can never re-trigger the reaper.
+        "computing_started_at": None,
         "computation_error": None,
+        # Phase 164.2 / criterion 2: a success blanks the sentence, so it blanks
+        # the provenance in the SAME statement. A marker left standing over a
+        # NULLed sentence is read by sync_strategy_analytics_status as a writer's
+        # claim over text that is gone, and the row then renders 'failed' with no
+        # sentence at all. (The BEFORE UPDATE trigger
+        # strategy_analytics_drop_stale_error_provenance would coerce these two
+        # anyway — that is F1's fix at the table — but a writer that states its
+        # intent is legible at the call site, which is what the AST censuses ask
+        # of every key here.)
+        #
+        # ⚠️ NAMING them puts this SUCCESS write inside the T-164.2-17 deploy
+        # window: while this worker runs ahead of migration 20260906120000,
+        # PostgREST answers PGRST204 for these two keys and writes NOTHING, so a
+        # finished composite stitch would be recorded as a failure by the
+        # caller's handler. `_write_headline_and_by_basis` therefore goes
+        # through upsert_or_drop_provenance, exactly like the failure writers.
+        "computation_error_source": None,
+        "computation_error_job_id": None,
         "trade_metrics": None,     # composite has no fills
         "volume_metrics": None,
         "exposure_metrics": None,
         "metrics_json_by_basis": metrics_json_by_basis,
         "data_quality_flags": merged_flags,
+        # ── MT5-12 (D-15/D-16): producer 2's verdict of record ────────────────
+        # `run_stitch_composite_job` is the SECOND csv_daily_returns producer.
+        # Once the publish gate stops asking `!apiKeyId` and starts asking for a
+        # positive verdict, an unstamped composite reads NULL → falls to the
+        # trade branch → INSUFFICIENT_TRADES → NO COMPOSITE CAN EVER BE APPROVED
+        # AGAIN (composites carry api_key_id NULL and zero fills; the admin
+        # approve path DOES route them through the gate — see
+        # strategy-review/route.test.ts:1073, "Composites (apiKeyId null) source
+        # history"). This stamp is what keeps that branch reachable.
+        #
+        # WHY its own value rather than reusing a member's: the composite series
+        # is the deterministic stitch of its members, so what it can claim is
+        # bounded by them. `ledger_complete` would be a false claim (this
+        # function consumed no venue ledger), and `user_supplied` would erase the
+        # distinction between "a machine stitched audited members" and "a human
+        # uploaded a CSV". The gate decides separately what it will trust.
+        #
+        # ⚠️ "INHERITED" IS A PARTIAL CLAIM, AND THE PARTIALITY IS THE POINT.
+        # Exactly one member property is inherited: a KNOWN gap. The derivation
+        # above downgrades the verdict to `sampled_gapped` when any member
+        # carries it. Member UNPROVEN-NESS (`fill_derived_unproven`, which every
+        # ccxt member carries unconditionally) is NOT inherited — see the long
+        # note above for why propagating it would make every ccxt composite
+        # permanently un-approvable. Do not restate this as "trust inherited from
+        # members" without that qualification; before FIX 2 the claim was not
+        # true at all, and it is still narrower than it sounds.
+        #
+        # ⛔ SIBLING KEY, never a member of `merged_flags` (built just above).
+        # data_quality_flags is rebuilt wholesale by analytics_runner.py:1439,
+        # and guard-key membership auto-promotes computation_status to
+        # `complete_with_warnings` — a status the publish gate PASSES. Routing
+        # the verdict through that channel would be a fail-open. Mirrors Task 1's
+        # `_prestamp_payload` vs `_prestamp_flags` rule at the derive seam.
+        #
+        # `headline_payload.update(cash_metrics_json)` below spreads metric
+        # SCALARS only and cannot clobber this key. The failure arm at :5299
+        # deliberately OMITS the column: omission preserves a previously-stamped
+        # verdict through a PostgREST upsert (A1, executed against TEST in plan
+        # 142.2-04), and `computation_status='failed'` blocks the gate anyway.
+        "series_completeness": composite_verdict,
     }
     # Spread the canonical composite scalars into the headline — the SAME object as
     # metrics_json_by_basis.cash_settlement. A single upsert also REPLACES
@@ -6648,7 +8942,7 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
 
     # Phase 105 (SC-5 / D5): ORDERED-IDEMPOTENT finalize. BOTH basis series (cash +
     # MTM below) land BEFORE the DONE-bearing headline/by-basis scalar flip — together
-    # with the reconcile-delete + dailies upserts above (:4520-4560). A worker death
+    # with the dailies upserts + reconcile-deletes above. A worker death
     # before the flip therefore leaves NO complete scalar without its series (MED-1's
     # read gate un-trusts a scalar whose series is absent); the kill-point test pins
     # this. Cash ALWAYS persists a real row here — a rejected cash derive already
@@ -6656,9 +8950,10 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
     #
     # D5 HONEST BOUNDARY: ordered-idempotent = GATED EVENTUAL CONSISTENCY, not
     # atomicity — supabase-py has no cross-.table() transaction. On a RE-derive of an
-    # already-complete strategy, a death between the dailies delete/upsert (:4520-4560,
-    # PRE-EXISTING) and the scalar flip leaves old-scalar + partial-dailies visible
-    # until the authoritative-re-derive retry heals it (_reconcile_full_delete
+    # already-complete strategy, a death between the dailies upsert/reconcile-delete
+    # (above; upsert-first since C3 topic H) and the scalar flip leaves old-scalar +
+    # partially-rewritten dailies visible (never absent days since topic H)
+    # until the next successful derive heals it (_reconcile_full_delete
     # idempotence + single-row series upserts). That transient chart/KPI mismatch
     # window is PRE-EXISTING and UNCHANGED here — 105 makes nothing worse. Strict
     # atomicity (a service-role SECDEF finalize RPC) is deliberately DEFERRED to ride
@@ -6738,9 +9033,21 @@ async def run_stitch_composite_job(job: dict[str, Any]) -> DispatchResult:
         await db_execute(_persist_smoothed_series)
 
     def _write_headline_and_by_basis() -> None:
-        supabase.table("strategy_analytics").upsert(
-            headline_payload, on_conflict="strategy_id"
-        ).execute()
+        def _write() -> None:
+            supabase.table("strategy_analytics").upsert(
+                headline_payload, on_conflict="strategy_id"
+            ).execute()
+
+        # T-164.2-17 deploy window: `headline_payload` NAMES the two marker
+        # columns (blanked), so a worker running ahead of migration
+        # 20260906120000 gets a PGRST204 and PostgREST writes nothing — losing a
+        # SUCCESSFUL composite stitch. The degrade drops the two unknown keys and
+        # re-issues the pre-164.2 payload.
+        upsert_or_drop_provenance(
+            headline_payload,
+            _write,
+            where="job_worker.run_stitch_composite_job._write_headline_and_by_basis",
+        )
 
     await db_execute(_write_headline_and_by_basis)
 
@@ -6814,14 +9121,51 @@ async def run_poll_positions_job(job: dict[str, Any]) -> DispatchResult:
     return DispatchResult(outcome=DispatchOutcome.DONE)
 
 
+# PostgreSQL's check_violation, which PostgREST forwards verbatim as the error
+# ``code``, and the constraint that admits each ``api_keys.sync_status`` value.
+_PG_CHECK_VIOLATION = "23514"
+_API_KEYS_SYNC_STATUS_CHECK = "api_keys_sync_status_check"
+
+
+def _sync_status_write_failure_cause(exc: BaseException) -> str:
+    """Name what refused an ``api_keys.sync_status`` write, for the log only.
+
+    167 SFH-L1 / R2 IN-04. A CHECK rejection means the value is not admitted
+    yet (the worker deployed ahead of its migration): nothing was written. Any
+    other failure is ambiguous: PostgREST may have committed the write before
+    the error reached us. The caller's fallback is the same either way; this
+    only makes the log say which case it was.
+    """
+    code = getattr(exc, "code", None)
+    text = str(getattr(exc, "message", None) or exc)
+    if code == _PG_CHECK_VIOLATION or _API_KEYS_SYNC_STATUS_CHECK in text:
+        return f"CHECK violation: {_API_KEYS_SYNC_STATUS_CHECK} refused the value"
+    return (
+        f"not a CHECK violation ({type(exc).__name__}): the write may have "
+        "committed before the error"
+    )
+
+
+# Phase 167.1.2 plan 04 — the account identity stamp's bounds. One venue call
+# plus up to three small writes; the timeout keeps a stuck venue from holding
+# the poll, and the margin keeps the step clear of the handler's own
+# TIMEOUT_PER_KIND ceiling, so the step can never time a completed poll out.
+_IDENTITY_STAMP_TIMEOUT_S: Final[float] = 20.0
+_IDENTITY_STAMP_MARGIN_S: Final[float] = 10.0
+
+
 async def run_poll_allocator_positions_job(job: dict[str, Any]) -> DispatchResult:
     """INGEST-03: poll allocator holdings (spot + derivatives) via CCXT
     and upsert into allocator_holdings.
 
     Preflight via _allocator_key_preflight — no strategy hop. On
     fetch_allocator_holdings failure, map the exception to
-    api_keys.sync_status per D-07 ('revoked' / 'rate_limited' / 'error')
-    and emit an ``allocator.holdings.sync_failed`` audit event (f7). On
+    api_keys.sync_status per D-07 ('revoked' / 'rate_limited' / 'error'),
+    or, for a venue sign-in refused at the login stage, 'sign_in_failed'
+    (Phase 167 D-11 arm B: ``AllocatorHoldingsSignInFailedError`` carries that
+    status and a ``permanent`` job disposition on the class, and the handler's
+    one typed arm reads both off it), and emit an
+    ``allocator.holdings.sync_failed`` audit event (f7). On
     DONE, update sync_status / last_sync_at and emit
     ``allocator.holdings.sync_completed`` with row_count +
     holding_type_counts metadata.
@@ -6830,13 +9174,27 @@ async def run_poll_allocator_positions_job(job: dict[str, Any]) -> DispatchResul
     strategy-side poll_positions — if it's cooling down, preflight
     returns DispatchResult(outcome=DEFERRED) and we pass it straight
     through without touching api_keys (the job stays queued).
+
+    Phase 167.1.2 plan 04 (D-01 / D-11): after the holdings persist, and while
+    the exchange session is still open (the outer ``finally`` closes it after
+    the DONE return), ``stamp_account_identity`` stamps a ccxt key's venue
+    account id or marks it as sharing an account with a live sibling. The step
+    never raises, writes no status column and is bounded by what is left of
+    this handler's timeout, so the DispatchResult is the one the poll would
+    return without it (Pitfall 4).
     """
+    from services import account_identity
     from services.allocator_positions import (
+        AllocatorHoldingsSyncTransientError,
         fetch_allocator_holdings,
         persist_allocator_holdings,
+        sync_error_copy,
         _map_exception_to_sync_status,
     )
 
+    # The handler's own start, for the identity stamp's budget below. The
+    # worker's wait_for starts its clock at the same call.
+    handler_started = asyncio.get_running_loop().time()
     ctx = await _allocator_key_preflight(job, "run_poll_allocator_positions_job")
     if isinstance(ctx, DispatchResult):
         # f8: DEFERRED passes through unchanged; api_keys.sync_status
@@ -6850,7 +9208,9 @@ async def run_poll_allocator_positions_job(job: dict[str, Any]) -> DispatchResul
 
     try:
         try:
-            rows, warning = await fetch_allocator_holdings(venue, ctx.exchange)
+            rows, warning = await fetch_allocator_holdings(
+                venue, ctx.exchange, api_key_id=api_key_id
+            )
         except ccxt.RateLimitExceeded as exc:
             await _stamp_429(ctx.supabase, ctx.key_row, exc)
             error_kind, msg = classify_exception(exc)
@@ -6860,22 +9220,32 @@ async def run_poll_allocator_positions_job(job: dict[str, Any]) -> DispatchResul
             # misleading sync_status='rate_limited' for a key that is
             # permanently geo-blocked from this region — surface 'error'.
             sync_status = "error" if is_geo_blocked(exc) else "rate_limited"
+            # AUM-02 write boundary: the COLUMN gets copy, the operator surfaces
+            # (DispatchResult.error_message → compute_jobs.last_error, the audit
+            # metadata, the log) get `sanitized`. Pre-fix this arm wrote the
+            # geo-block's "move region or proxy" text — operator instructions,
+            # and a raw venue body — into a column the browser renders verbatim.
+            rate_limited_copy = sync_error_copy(sync_status, venue)
 
             def _update_rate_limited() -> None:
                 # Return value discarded by the caller; drop it (matches
                 # _update_persist_err below) so we never annotate the Any-typed
                 # `.execute()` as APIResponse.
                 ctx.supabase.table("api_keys").update(
-                    {"sync_status": sync_status, "sync_error": sanitized}
+                    {"sync_status": sync_status, "sync_error": rate_limited_copy}
                 ).eq("id", api_key_id).execute()
 
             try:
                 await db_execute(_update_rate_limited)
             except Exception as upd_exc:  # noqa: BLE001
-                logger.warning(
+                # 167 SFH-M3 — ERROR with the traceback, like every other failed
+                # sync_status write in this handler: a lost write leaves the key
+                # on its previous (possibly healthy) status with no other signal.
+                logger.error(
                     "poll_allocator_positions: failed to persist sync_status=%r "
-                    "for api_key %s: %s",
-                    sync_status, api_key_id, upd_exc,
+                    "for api_key %s",
+                    sync_status, api_key_id,
+                    exc_info=upd_exc,
                 )
             _emit_audit(
                 allocator_id, api_key_id, "allocator.holdings.sync_failed",
@@ -6885,26 +9255,145 @@ async def run_poll_allocator_positions_job(job: dict[str, Any]) -> DispatchResul
                 outcome=DispatchOutcome.FAILED,
                 error_message=sanitized,
                 error_kind=error_kind,
+            )
+        except AllocatorHoldingsSyncTransientError as exc:
+            # AUM-02 — THE arm that keeps raw Python out of a user-visible
+            # column. It MUST precede the generic `except Exception` below:
+            # that arm's classify_exception fall-through returns str(exc), and
+            # it is exactly where the PROD AttributeError
+            # ("'Mt5Session' object has no attribute 'fetch_balance'") got
+            # stamped onto all three founder MT5 keys. A non-ccxt venue branch
+            # converts its venue-specific exception to END-USER copy and raises
+            # this type; str(exc) IS that copy, so we stamp it verbatim.
+            # The parent type is classified TRANSIENT: an unreachable terminal
+            # or a blipping broker API self-heals, so the DB backoff must retry
+            # rather than burn the key to a permanent error state.
+            # ⚠️ 167 WR-04 — the sign-in subclass declares `permanent` instead.
+            # Retrying a refused login re-runs the SAME stored password against
+            # the ONE shared MT5 terminal on every rung of the ladder (the D-08
+            # harm). The daily cron still re-enqueues the key once per day,
+            # because it skips only `revoked`. See
+            # `AllocatorHoldingsSignInFailedError`.
+            # The [:500] cap mirrors the sibling arms (copy is far shorter).
+            #
+            # ⭐ 167 WR-05 — ONE arm for this type AND its subclasses. What
+            # differs between them (the `sync_status` written and the job's
+            # `error_kind`) is declared as class attributes on the exception
+            # and read here, so `AllocatorHoldingsSignInFailedError` writes
+            # `sign_in_failed` through this same body. The earlier design gave
+            # the subclass its own arm, a line-for-line copy of this one. That
+            # made the arm ORDER load-bearing with a SILENT failure (an arm below
+            # this one is dead code) and left a second copy of the write free to
+            # drift. With one arm there is no order to get wrong.
+            human_copy = str(exc)[:500]
+            sync_status = exc.sync_status
+            exc_error_kind = exc.error_kind
+
+            def _update_transient(status: str) -> None:
+                # Return value discarded by the caller (see _update_err).
+                ctx.supabase.table("api_keys").update(
+                    {"sync_status": status, "sync_error": human_copy}
+                ).eq("id", api_key_id).execute()
+
+            # 167 R2 IN-04 / SFH-L1 — the status that actually landed, carried
+            # into the audit event so a fallback downgrade is visible after the
+            # fact. ``None`` means no write succeeded.
+            sync_status_written: str | None = sync_status
+            try:
+                await db_execute(lambda: _update_transient(sync_status))
+            except Exception as upd_exc:  # noqa: BLE001
+                sync_status_written = None
+                if sync_status == "error":
+                    # 167 SFH-M3 — ERROR with the traceback: the key keeps its
+                    # previous, possibly healthy, status.
+                    logger.error(
+                        "poll_allocator_positions: failed to stamp "
+                        "sync_status='error' for api_key %s",
+                        api_key_id,
+                        exc_info=upd_exc,
+                    )
+                else:
+                    # ⛔ 167 SFH-H2 — a status the parent does not write can be
+                    # REFUSED by `api_keys_sync_status_check`: Railway deploys
+                    # this worker and the migration that admits
+                    # `sign_in_failed` applies separately, with nothing ordering
+                    # the two. Swallowing that at WARNING left the key reading
+                    # its last healthy or 'syncing' status. So log it LOUDLY and
+                    # fall back to the parent's write, `sync_status='error'`,
+                    # which every deployed CHECK admits. `human_copy` is kept
+                    # (not MT5_UNREACHABLE_NOTE): the 'error' pill renders
+                    # `sync_error` verbatim, and the sign-in copy is the TRUE
+                    # cause. The transport note would bring back the false one.
+                    #
+                    # 167 SFH-L1 / R2 IN-04 — the fallback runs on ANY failure,
+                    # not only a CHECK rejection, and that stays: an ambiguous
+                    # transport error may leave the key on a stale status, which
+                    # is the worse outcome. But the log now says which it was,
+                    # so an operator can tell "the migration has not applied"
+                    # from "the write may have committed and been overwritten".
+                    logger.error(
+                        "poll_allocator_positions: failed to stamp "
+                        "sync_status=%r for api_key %s (%s) — falling back to "
+                        "sync_status='error' so the key does not keep a "
+                        "healthy status",
+                        sync_status, api_key_id,
+                        _sync_status_write_failure_cause(upd_exc),
+                        exc_info=upd_exc,
+                    )
+                    try:
+                        await db_execute(lambda: _update_transient("error"))
+                        sync_status_written = "error"
+                    except Exception as fallback_exc:  # noqa: BLE001
+                        logger.error(
+                            "poll_allocator_positions: fallback stamp "
+                            "sync_status='error' ALSO failed for api_key %s",
+                            api_key_id,
+                            exc_info=fallback_exc,
+                        )
+            _emit_audit(
+                allocator_id, api_key_id, "allocator.holdings.sync_failed",
+                {
+                    "error_kind": exc_error_kind,
+                    "sanitized_message": human_copy,
+                    "sync_status_written": sync_status_written,
+                },
+            )
+            return DispatchResult(
+                outcome=DispatchOutcome.FAILED,
+                error_message=human_copy,
+                error_kind=exc_error_kind,
             )
         except Exception as exc:  # noqa: BLE001
             error_kind, msg = classify_exception(exc)
             sanitized = msg[:500]
             status_target = _map_exception_to_sync_status(exc)
+            # AUM-02 write boundary — THE arm this defect class keeps coming
+            # back through. `sanitized` is `str(exc)[:500]` for every family the
+            # classifier has no fixed message for, and fetch_allocator_holdings
+            # deliberately re-raises PERMANENT failures unwrapped so the retry
+            # disposition survives (_must_reach_handler_unwrapped) — which means
+            # arbitrary exception text arrives HERE by design. It stays on the
+            # operator surfaces below (error_message → compute_jobs.last_error,
+            # audit metadata, log/Sentry); the user-visible column gets copy
+            # derived from the status, never from the exception.
+            human_copy = sync_error_copy(status_target, venue)
 
             def _update_err() -> None:
                 # Return value discarded by the caller; drop it (see
                 # _update_rate_limited / _update_persist_err).
                 ctx.supabase.table("api_keys").update(
-                    {"sync_status": status_target, "sync_error": sanitized}
+                    {"sync_status": status_target, "sync_error": human_copy}
                 ).eq("id", api_key_id).execute()
 
             try:
                 await db_execute(_update_err)
             except Exception as upd_exc:  # noqa: BLE001
-                logger.warning(
+                # 167 SFH-M3 — ERROR with the traceback (see the arms above).
+                logger.error(
                     "poll_allocator_positions: failed to stamp sync_status='%s' "
-                    "for api_key %s: %s",
-                    status_target, api_key_id, upd_exc,
+                    "for api_key %s",
+                    status_target, api_key_id,
+                    exc_info=upd_exc,
                 )
             _emit_audit(
                 allocator_id, api_key_id, "allocator.holdings.sync_failed",
@@ -6915,114 +9404,161 @@ async def run_poll_allocator_positions_job(job: dict[str, Any]) -> DispatchResul
                 error_message=sanitized,
                 error_kind=error_kind,
             )
+
+        # Persist + success status update.
+        # NEW-C12-03: wrap in a try/except that stamps sync_status='error' on
+        # failure so the UI doesn't spin forever on 'syncing'. Pre-fix a
+        # persist_allocator_holdings raise propagated to the compute_jobs FAILED
+        # handler but sync_status was never moved off 'syncing'. A failed
+        # _update_ok was previously a swallowed warning leaving the same stuck state.
+        try:
+            count = await persist_allocator_holdings(
+                ctx.supabase, rows, allocator_id, api_key_id, today_str
+            )
+
+            spot_count = sum(1 for r in rows if r.get("holding_type") == "spot")
+            deriv_count = sum(1 for r in rows if r.get("holding_type") == "derivative")
+
+            final_status = "complete_with_warnings" if warning else "complete"
+
+            # 151 review WR-03 — the LAST-LINE length cap. `sync_error` is rendered
+            # verbatim in the browser and every SIBLING write arm here truncates at
+            # [:500]; this success arm did not, so any producer whose warning
+            # interpolates venue-controlled text (an sFOX book of 100+ unpriced
+            # assets, say) could write a multi-kilobyte string into a user-visible
+            # column — a storage-poison surface as well as unreadable copy. Capping
+            # at the WRITE SITE means no future producer can bypass it by forgetting.
+            capped_warning = warning[:500] if warning else warning
+
+            def _update_ok() -> None:
+                # Return value discarded by the caller; drop it (see
+                # _update_rate_limited / _update_persist_err).
+                ctx.supabase.table("api_keys").update({
+                    "sync_status": final_status,
+                    "sync_error": capped_warning,
+                    "last_sync_at": datetime.now(timezone.utc).isoformat(),
+                }).eq("id", api_key_id).execute()
+
+            # NEW-C12-03: treat _update_ok failure as a hard error (not a swallowed
+            # warning) — a missed sync_status write leaves the UI spinner stuck on
+            # 'syncing' with no recovery path since allocator jobs have no strategy_id
+            # bridge to the dispatch UI.
+            await db_execute(_update_ok)
+        except Exception as persist_exc:  # noqa: BLE001
+            sanitized_persist = str(persist_exc)[:200]
+            logger.exception(
+                "poll_allocator_positions: persist/update failed for allocator %s "
+                "(api_key %s) — stamping sync_status='error' to unblock UI: %s",
+                allocator_id, api_key_id, sanitized_persist,
+            )
+            # Best-effort: stamp sync_status so the UI exits the spinner.
+            #
+            # AUM-02 write boundary — the third and last arm that writes this
+            # column. `sanitized_persist` is a raw PostgREST/DB exception string
+            # (schema-cache misses, constraint names, connection errors): the same
+            # raw-Python-as-product-copy defect, just sourced from our own storage
+            # layer instead of a venue. It stays in the log and the audit metadata.
+            try:
+                def _update_persist_err() -> None:
+                    ctx.supabase.table("api_keys").update(
+                        {
+                            "sync_status": "error",
+                            "sync_error": sync_error_copy("error", venue),
+                        }
+                    ).eq("id", api_key_id).execute()
+                await db_execute(_update_persist_err)
+            except Exception as stamp_exc:  # noqa: BLE001
+                # 167 SFH-M3 — ERROR with the traceback: this write is the only
+                # thing that moves the key off 'syncing' after a persist failure.
+                logger.error(
+                    "poll_allocator_positions: failed to stamp sync_status='error' "
+                    "for api_key %s after persist failure",
+                    api_key_id,
+                    exc_info=stamp_exc,
+                )
+            _emit_audit(
+                allocator_id, api_key_id, "allocator.holdings.persist_failed",
+                {"sanitized_message": sanitized_persist},
+            )
+            return DispatchResult(
+                outcome=DispatchOutcome.FAILED,
+                error_message=sanitized_persist,
+                error_kind="permanent",
+            )
+
+        _emit_audit(
+            allocator_id, api_key_id, "allocator.holdings.sync_completed",
+            {
+                "row_count": count,
+                "holding_type_counts": {"spot": spot_count, "derivative": deriv_count},
+                # Phase 167.1.2 C2 round 2 (R2-CR-01): this poll's own outcome.
+                # The daily refresh reads final_status + row_count from this
+                # event as its proof that an account is empty; the key's
+                # sync_status moves on after the poll (a later 429, a manual
+                # sync) and cannot stand in for it.
+                "final_status": final_status,
+                # Round 3 (R3-WR-01): the day this poll stamped its rows with,
+                # fixed at handler start. The event is created after the
+                # fetch and persist, so for a poll that runs across 00:00 UTC
+                # created_at lands on the NEXT day; the refresh binds the event
+                # to this day instead, or rows dated D would read as a poll
+                # after D and veto every later emptiness proof.
+                "asof": today_str,
+            },
+        )
+
+        # Phase 11 / Plan 03 / D-13 / ONBOARD-05 — stamp first_sync_success_at
+        # marker via the SECURITY DEFINER RPC shipped by Plan 01 migration 084.
+        # The RPC is idempotent (writes only when the marker is absent), so
+        # subsequent successful syncs are a no-op for this side effect. The
+        # /allocations Server Component reader fires the PostHog
+        # `first_sync_success` event on the next dashboard request.
+        #
+        # Non-blocking: a stamp failure must not affect the compute job. The
+        # RPC failure path is logged via logger.warning per the analytics-service
+        # convention (services/audit.py error handling).
+        def _stamp_first_sync() -> None:
+            # Return value discarded by the caller; drop it (see
+            # _update_rate_limited / _update_persist_err).
+            ctx.supabase.rpc(
+                "stamp_first_sync_success",
+                {"p_user_id": allocator_id},
+            ).execute()
+
+        try:
+            await db_execute(_stamp_first_sync)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "poll_allocator_positions: failed to stamp first_sync_success_at "
+                "for allocator %s: %s",
+                allocator_id, exc,
+            )
+
+        logger.info(
+            "poll_allocator_positions: persisted %d rows for allocator %s "
+            "(spot=%d, derivative=%d, status=%s)",
+            count, allocator_id, spot_count, deriv_count, final_status,
+        )
+
+        # Phase 167.1.2 plan 04 — the account identity stamp. Its token is
+        # logged by the step itself and read by nothing here: the return below
+        # does not depend on it.
+        identity_budget_s = min(
+            _IDENTITY_STAMP_TIMEOUT_S,
+            TIMEOUT_PER_KIND["poll_allocator_positions"]
+            - (asyncio.get_running_loop().time() - handler_started)
+            - _IDENTITY_STAMP_MARGIN_S,
+        )
+        await account_identity.stamp_account_identity(
+            ctx.supabase, ctx.key_row, ctx.exchange, timeout_s=identity_budget_s
+        )
+
+        return DispatchResult(outcome=DispatchOutcome.DONE)
     finally:
         try:
             await aclose_exchange(ctx.exchange)
         except Exception:  # pragma: no cover - defensive cleanup
             pass
-
-    # Persist + success status update.
-    # NEW-C12-03: wrap in a try/except that stamps sync_status='error' on
-    # failure so the UI doesn't spin forever on 'syncing'. Pre-fix a
-    # persist_allocator_holdings raise propagated to the compute_jobs FAILED
-    # handler but sync_status was never moved off 'syncing'. A failed
-    # _update_ok was previously a swallowed warning leaving the same stuck state.
-    try:
-        count = await persist_allocator_holdings(
-            ctx.supabase, rows, allocator_id, api_key_id, today_str
-        )
-
-        spot_count = sum(1 for r in rows if r.get("holding_type") == "spot")
-        deriv_count = sum(1 for r in rows if r.get("holding_type") == "derivative")
-
-        final_status = "complete_with_warnings" if warning else "complete"
-
-        def _update_ok() -> None:
-            # Return value discarded by the caller; drop it (see
-            # _update_rate_limited / _update_persist_err).
-            ctx.supabase.table("api_keys").update({
-                "sync_status": final_status,
-                "sync_error": warning,
-                "last_sync_at": datetime.now(timezone.utc).isoformat(),
-            }).eq("id", api_key_id).execute()
-
-        # NEW-C12-03: treat _update_ok failure as a hard error (not a swallowed
-        # warning) — a missed sync_status write leaves the UI spinner stuck on
-        # 'syncing' with no recovery path since allocator jobs have no strategy_id
-        # bridge to the dispatch UI.
-        await db_execute(_update_ok)
-    except Exception as persist_exc:  # noqa: BLE001
-        sanitized_persist = str(persist_exc)[:200]
-        logger.exception(
-            "poll_allocator_positions: persist/update failed for allocator %s "
-            "(api_key %s) — stamping sync_status='error' to unblock UI: %s",
-            allocator_id, api_key_id, sanitized_persist,
-        )
-        # Best-effort: stamp sync_status so the UI exits the spinner.
-        try:
-            def _update_persist_err() -> None:
-                ctx.supabase.table("api_keys").update(
-                    {"sync_status": "error", "sync_error": sanitized_persist}
-                ).eq("id", api_key_id).execute()
-            await db_execute(_update_persist_err)
-        except Exception as stamp_exc:  # noqa: BLE001
-            logger.warning(
-                "poll_allocator_positions: failed to stamp sync_status='error' "
-                "for api_key %s after persist failure: %s",
-                api_key_id, stamp_exc,
-            )
-        _emit_audit(
-            allocator_id, api_key_id, "allocator.holdings.persist_failed",
-            {"sanitized_message": sanitized_persist},
-        )
-        return DispatchResult(
-            outcome=DispatchOutcome.FAILED,
-            error_message=sanitized_persist,
-            error_kind="permanent",
-        )
-
-    _emit_audit(
-        allocator_id, api_key_id, "allocator.holdings.sync_completed",
-        {
-            "row_count": count,
-            "holding_type_counts": {"spot": spot_count, "derivative": deriv_count},
-        },
-    )
-
-    # Phase 11 / Plan 03 / D-13 / ONBOARD-05 — stamp first_sync_success_at
-    # marker via the SECURITY DEFINER RPC shipped by Plan 01 migration 084.
-    # The RPC is idempotent (writes only when the marker is absent), so
-    # subsequent successful syncs are a no-op for this side effect. The
-    # /allocations Server Component reader fires the PostHog
-    # `first_sync_success` event on the next dashboard request.
-    #
-    # Non-blocking: a stamp failure must not affect the compute job. The
-    # RPC failure path is logged via logger.warning per the analytics-service
-    # convention (services/audit.py error handling).
-    def _stamp_first_sync() -> None:
-        # Return value discarded by the caller; drop it (see
-        # _update_rate_limited / _update_persist_err).
-        ctx.supabase.rpc(
-            "stamp_first_sync_success",
-            {"p_user_id": allocator_id},
-        ).execute()
-
-    try:
-        await db_execute(_stamp_first_sync)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "poll_allocator_positions: failed to stamp first_sync_success_at "
-            "for allocator %s: %s",
-            allocator_id, exc,
-        )
-
-    logger.info(
-        "poll_allocator_positions: persisted %d rows for allocator %s "
-        "(spot=%d, derivative=%d, status=%s)",
-        count, allocator_id, spot_count, deriv_count, final_status,
-    )
-
-    return DispatchResult(outcome=DispatchOutcome.DONE)
 
 
 async def run_reconcile_strategy_job(job: dict[str, Any]) -> DispatchResult:
@@ -7762,6 +10298,473 @@ async def run_rescore_allocator_job(job: dict[str, Any]) -> DispatchResult:
     return DispatchResult(outcome=DispatchOutcome.DONE)
 
 
+# Open interval sentinels. ISO dates sort lexicographically; these sit strictly
+# outside any real YYYY-MM-DD so None (unbounded) compares without a branch.
+_OPEN_INTERVAL_START = "0000-01-01"
+_OPEN_INTERVAL_END = "9999-12-31"
+
+
+@dataclass(frozen=True)
+class AccountIdentityCollision:
+    """One group of counted keys whose known account intervals overlap.
+
+    Counts only. No key id and no venue account id — a log of this object cannot
+    leak another tenant's identity (T-167.1.2-22).
+    """
+
+    n_keys: int
+
+
+def _counted_day(value: object, *, open_end: bool) -> str:
+    """A real ISO day, or the open-interval sentinel when the bound is absent."""
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return _OPEN_INTERVAL_END if open_end else _OPEN_INTERVAL_START
+
+
+def account_identity_collisions(
+    counted: Sequence[Mapping[str, Any]],
+) -> list[AccountIdentityCollision]:
+    """Groups of counted keys that share a known account on an overlapping day.
+
+    Each item carries ``id``, ``exchange``, ``venue_account_id``,
+    ``first_counted_day`` and ``last_counted_day``. ``last_counted_day is None``
+    is an open (still-live) end; ``first_counted_day is None`` is an open start.
+    Two keys collide when their closed intervals overlap and the
+    ``(exchange, venue_account_id)`` pair is the same and the venue id is
+    non-NULL. A NULL or blank venue id is unknown identity (plan 09 case 3) and
+    never collides here. A rotation whose intervals were already clipped to
+    non-overlapping days does not collide. Pure: returns counts, logs nothing.
+
+    Plan 09 passes departed-and-included keys through this same helper. This
+    plan's caller passes the eligible live keys as open intervals.
+    """
+    by_account: dict[tuple[str, str], list[Mapping[str, Any]]] = {}
+    for row in counted:
+        venue_id = row.get("venue_account_id")
+        if not isinstance(venue_id, str) or not venue_id.strip():
+            continue
+        exchange = row.get("exchange")
+        # C2 round 2, IN-02: case-blind, like every other exchange comparison
+        # in this phase (the refresh's emptiness proof and identity rule, the TS
+        # reader's ACCOUNT_IDENTITY_EXCHANGES check).
+        exchange_key = exchange.strip().lower() if isinstance(exchange, str) else ""
+        by_account.setdefault((exchange_key, venue_id.strip()), []).append(row)
+
+    collisions: list[AccountIdentityCollision] = []
+    for group in by_account.values():
+        size = len(group)
+        if size < 2:
+            continue
+        parent = list(range(size))
+
+        def _find(index: int) -> int:
+            while parent[index] != index:
+                parent[index] = parent[parent[index]]
+                index = parent[index]
+            return index
+
+        def _union(left: int, right: int) -> None:
+            root_left, root_right = _find(left), _find(right)
+            if root_left != root_right:
+                parent[root_right] = root_left
+
+        bounds = [
+            (
+                _counted_day(row.get("first_counted_day"), open_end=False),
+                _counted_day(row.get("last_counted_day"), open_end=True),
+            )
+            for row in group
+        ]
+        for left in range(size):
+            left_first, left_last = bounds[left]
+            for right in range(left + 1, size):
+                right_first, right_last = bounds[right]
+                if left_first <= right_last and right_first <= left_last:
+                    _union(left, right)
+        component_size: dict[int, int] = {}
+        for index in range(size):
+            root = _find(index)
+            component_size[root] = component_size.get(root, 0) + 1
+        for count in component_size.values():
+            if count >= 2:
+                collisions.append(AccountIdentityCollision(n_keys=count))
+    return collisions
+
+
+# PostgREST clamps a response to max_rows (supabase/config.toml: 1000). The read
+# below stops on an EMPTY page, not a short one, so a server cap below this size
+# costs extra requests and never truncates.
+_DAILY_RETURNS_PAGE_SIZE: Final = 1000
+_DAILY_RETURNS_HARD_CAP_PAGES: Final = 1000
+
+
+def _load_allocator_daily_returns(
+    supabase: Any,
+    allocator_id: str,
+    key_ids: Iterable[str],
+    *,
+    page_size: int | None = None,
+    hard_cap_pages: int = _DAILY_RETURNS_HARD_CAP_PAGES,
+) -> list[dict[str, Any]]:
+    """Read an allocator's per-key ``csv_daily_returns`` with keyset pagination.
+
+    C3 round 2 (WR-01 / SFH-C3R2-01). Topic D paged this read by OFFSET under a
+    total order. Every page is a separate request with its own snapshot, and a
+    key-mode ``derive_broker_dailies`` for a sibling key runs at the same time
+    (the 05:30 UTC fan-out). It rewrites its key's span, adding and removing
+    days. When that write lands between two page reads and changes the row count of a key
+    that sorts before the next offset, every later row shifts. A day is then
+    read twice (the compose takes it twice) or never read (the compose carries
+    the level at r = 0 and the curve stays trustworthy).
+
+    Keyset pagination on the total order ``(api_key_id, date)`` removes the shift.
+    It is realised as one fixed key per loop (``eq``) plus a ``date > cursor``
+    cursor, so a write can only change rows the cursor has not passed yet:
+
+    * no ``(api_key_id, date)`` pair is read twice, because the cursor strictly
+      increases within a key and the keys are read one after another;
+    * every row present for the whole read is read, because no page's start
+      depends on how many rows sort before it.
+
+    ``id`` is deliberately NOT in the cursor. ``(api_key_id, date)`` is unique
+    (``csv_daily_returns_api_key_date_key``), so a tie on it can only be the
+    same day deleted and re-inserted under a new id (the writer's shape before C3
+    topic H, and still any future delete-then-insert writer's); an ``id`` arm
+    would read that day twice.
+
+    Only the keys in ``key_ids`` are read. The derive reads ``api_keys`` by owner
+    first, and every consumer of these rows looks them up by one of those ids.
+    A NULL-``api_key_id`` row is dropped by every consumer, so it is not read.
+
+    The writer-side window this read could not close (the writer deleted a
+    key's span and then upserted it in separate statements, so a page read
+    between them saw the key's rows absent) was closed in the writer by C3
+    topic H: the derive now upserts first and deletes only the days its payload
+    does not carry, so a day present before and after a rewrite is never absent.
+
+    Past ``hard_cap_pages`` non-empty pages it raises
+    ``PaginatedSelectTruncated`` rather than returning part of the rows, as
+    ``paginated_select`` does, so the caller's permanent disposal is unchanged.
+    """
+    size = page_size if page_size is not None else _DAILY_RETURNS_PAGE_SIZE
+    out: list[dict[str, Any]] = []
+    pages = 0
+    for key_id in sorted({str(k) for k in key_ids}):
+        cursor: str | None = None
+        while True:
+            query = (
+                supabase.table("csv_daily_returns")
+                .select("api_key_id,date,daily_return")
+                .eq("allocator_id", allocator_id)
+                .eq("api_key_id", key_id)
+            )
+            if cursor is not None:
+                query = query.gt("date", cursor)
+            chunk = cast(
+                list[dict[str, Any]],
+                query.order("date", desc=False).limit(size).execute().data or [],
+            )
+            if not chunk:
+                break
+            if pages >= hard_cap_pages:
+                logger.error(
+                    "_load_allocator_daily_returns: hit hard cap of %d pages x %d "
+                    "rows (allocator %s) — raising PaginatedSelectTruncated",
+                    hard_cap_pages,
+                    size,
+                    allocator_id,
+                )
+                raise PaginatedSelectTruncated(
+                    page_count=hard_cap_pages,
+                    page_size=size,
+                    hint=f"csv_daily_returns allocator_id={allocator_id}",
+                )
+            pages += 1
+            out.extend(chunk)
+            cursor = str(chunk[-1]["date"])
+    return out
+
+
+@dataclass(frozen=True)
+class DepartedHistoryDecision:
+    """Whether a departed key's history counts, until which ISO day, and why.
+
+    ``until`` is None when ``included`` is False. ``reason`` is a machine token
+    the overview turns into its sentence (src/lib/departed-history.ts)."""
+
+    included: bool
+    until: str | None
+    reason: str
+
+
+def _is_live_key(row: Mapping[str, Any]) -> bool:
+    """The allocator's eligible-key predicate. A key that is not live is departed.
+
+    ``eligible_key_predicate`` itself (IN-02), with one difference: a MISSING
+    ``is_active`` reads as active, as the shared fixture's inputs say. The job
+    always selects the column. Imported here, as the derive imports it, to keep
+    pandas off this module's import path."""
+    from services.allocator_equity_derive import eligible_key_predicate
+
+    return eligible_key_predicate({**row, "is_active": row.get("is_active", True)})
+
+
+def _utc_day(value: object) -> str | None:
+    """The UTC calendar day of a timestamptz string, or None.
+
+    An unreadable value is None, as in the TS twin (``utcDay``), so the key ends
+    on its last returns day. Raising here sat outside the job's corrupt-input
+    disposal and would have retried the job forever (IN-05 / SFH-C4-11)."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc).date().isoformat()
+
+
+def account_identity_tokens(
+    keys: Sequence[Mapping[str, Any]],
+) -> dict[str, str | None]:
+    """Which keys read the same exchange account, as one token per account.
+
+    Two keys read one account when they carry the same non-blank
+    ``(exchange, venue_account_id)`` (case-blind exchange, as
+    ``account_identity_collisions``), or when one is MARKED against the other
+    (``account_share_kind`` duplicate / composite_member naming it in
+    ``account_shared_with_api_key_id``). The marker is the stamper's own
+    evidence (D-01, D-04): the marked key hit the holder's unique account index,
+    which is exactly why its own ``venue_account_id`` stays NULL. Reading the
+    NULL alone would call it an unknown account and let an owner's 'include'
+    count one account twice. A key with neither a venue id nor a marker link is
+    unknown (``None``). The marker kinds are ``SHARED_ACCOUNT_KINDS``, the set
+    ``account_groups`` reads (IN-03), never a copy. Pure."""
+    import services.allocator_equity_derive as allocator_equity_derive
+
+    marker_kinds = allocator_equity_derive.SHARED_ACCOUNT_KINDS
+    ids = [str(row["id"]) for row in keys]
+    parent = {key_id: key_id for key_id in ids}
+
+    def _find(key_id: str) -> str:
+        while parent[key_id] != key_id:
+            parent[key_id] = parent[parent[key_id]]
+            key_id = parent[key_id]
+        return key_id
+
+    def _union(left: str, right: str) -> None:
+        root_left, root_right = _find(left), _find(right)
+        if root_left != root_right:
+            parent[max(root_left, root_right)] = min(root_left, root_right)
+
+    known: set[str] = set()
+    by_venue: dict[tuple[str, str], str] = {}
+    for row in keys:
+        key_id = str(row["id"])
+        venue_id = row.get("venue_account_id")
+        if isinstance(venue_id, str) and venue_id.strip():
+            exchange = row.get("exchange")
+            exchange_key = exchange.strip().lower() if isinstance(exchange, str) else ""
+            pair = (exchange_key, venue_id.strip())
+            known.add(key_id)
+            if pair in by_venue:
+                _union(by_venue[pair], key_id)
+            else:
+                by_venue[pair] = key_id
+    for row in keys:
+        key_id = str(row["id"])
+        holder = row.get("account_shared_with_api_key_id")
+        if (
+            row.get("account_share_kind") in marker_kinds
+            and holder is not None
+            and str(holder) != key_id
+            and str(holder) in parent
+        ):
+            known.update((key_id, str(holder)))
+            _union(key_id, str(holder))
+    return {
+        key_id: (f"account:{_find(key_id)}" if key_id in known else None)
+        for key_id in ids
+    }
+
+
+# Sorts before every real ISO day: a live key with no returns yet bounds a
+# departed key on its account to no day at all.
+_BEFORE_EVERY_DAY = "0000-00-00"
+
+
+def _day_before(day: str) -> str:
+    if day == _BEFORE_EVERY_DAY:
+        return day
+    return (datetime.fromisoformat(day).date() - timedelta(days=1)).isoformat()
+
+
+def departed_history_inclusion(
+    keys: Sequence[Mapping[str, Any]],
+) -> dict[str, DepartedHistoryDecision]:
+    """D-05 / D-09: which departed keys' history the book counts, and until when.
+
+    ``keys`` is every key of the owner, live and departed, each with ``id``,
+    ``exchange``, ``venue_account_id``, ``account_shared_with_api_key_id``,
+    ``account_share_kind``, ``is_active`` (optional, default true),
+    ``disconnected_at``, ``sync_status``, ``history_inclusion``,
+    ``first_returns_day``, ``last_returns_day`` and ``anchored`` (optional,
+    default true: false when the key has no saved balance to level its history
+    from). The spec is the shared
+    fixture ``tests/fixtures/departed_history_inclusion.json`` (its ``rule``
+    list); src/lib/departed-history.ts is the twin and is tested against the
+    same rows. Pure; never reads created_at.
+
+    * End day: the UTC day of ``disconnected_at``, else the last returns day. A
+      key counts at most until the earlier of its end day and last returns day.
+    * 'exclude' always excludes. No returns on or before the end day: excluded.
+    * Unknown account (``account_identity_tokens`` None): excluded by default
+      (founder-confirmed 2026-09-25); 'include' counts it to its end day.
+    * Known account: a LIVE key on it bounds the departed key to the day before
+      the live key's first returns day. A live key with no returns yet bounds it to
+      no day at all, under its own reason (WR-04), until that key has returns. The COUNTED departed keys on it (not
+      excluded, with returns) are ordered by (first, last, id). A key whose last
+      countable day is before that of a key ordered ahead of it is COVERED (that
+      key reads the account over all its days): it counts zero days and bounds
+      nothing, so a later key that ends first never cuts an earlier key's tail
+      (SFH-C4-07). Every other one is bounded to the day before the next
+      uncovered key's first day (B4: on no day do two counted keys share a
+      known account). 'include' never lifts a bound.
+    * WR-R2-02: a departed key with ``anchored`` false cannot be counted by the
+      book, so it neither covers nor bounds another key: it is left out of every
+      other key's ordering, as an excluded key is, and the chain re-forms around
+      the keys that can be levelled. Its own decision is taken against those
+      keys with itself added, so ``included``/``until`` on it name the days it
+      would carry that no levelled key carries; the derive leaves it out and
+      flags ``departed_history_unavailable``.
+    """
+    identity = account_identity_tokens(keys)
+    live_ids = {str(row["id"]) for row in keys if _is_live_key(row)}
+    rows_by_id = {str(row["id"]): row for row in keys}
+
+    def _own_window(row: Mapping[str, Any]) -> tuple[str, str] | None:
+        """(first returns day, last day it may count), or None: no history."""
+        first = row.get("first_returns_day")
+        last = row.get("last_returns_day")
+        end = _utc_day(row.get("disconnected_at")) or last
+        if not first or not last or not end:
+            return None
+        until = min(str(end), str(last))
+        return (str(first), until) if until >= str(first) else None
+
+    windows = {
+        key_id: _own_window(row)
+        for key_id, row in rows_by_id.items()
+        if key_id not in live_ids
+    }
+    # The last day each departed key could count, for the COVERED test below.
+    last_countable = {
+        key_id: window[1] for key_id, window in windows.items() if window is not None
+    }
+    decisions: dict[str, DepartedHistoryDecision] = {}
+    for key_id, row in rows_by_id.items():
+        if key_id in live_ids:
+            continue
+        choice = row.get("history_inclusion")
+        if choice == "exclude":
+            decisions[key_id] = DepartedHistoryDecision(False, None, "owner_excluded")
+            continue
+        window = windows[key_id]
+        if window is None:
+            decisions[key_id] = DepartedHistoryDecision(False, None, "no_returns")
+            continue
+        first, until = window
+        token = identity[key_id]
+        if token is None:
+            if choice == "include":
+                decisions[key_id] = DepartedHistoryDecision(True, until, "owner_included")
+            else:
+                decisions[key_id] = DepartedHistoryDecision(False, None, "account_unknown")
+            continue
+        same_account = [
+            other_id
+            for other_id, other_token in identity.items()
+            if other_id != key_id and other_token == token
+        ]
+        live_firsts = [
+            str(rows_by_id[other_id].get("first_returns_day") or _BEFORE_EVERY_DAY)
+            for other_id in same_account
+            if other_id in live_ids
+        ]
+        # The departed keys that count on this account, this key among them,
+        # in D-09 order: first returns day, then last returns day, then id.
+        # WR-R2-02: a key with no saved balance is never counted by the book,
+        # so it covers and bounds no other key; it is ordered only when it is
+        # the key being decided.
+        counted_departed = sorted(
+            (
+                str(rows_by_id[other_id]["first_returns_day"]),
+                str(rows_by_id[other_id]["last_returns_day"]),
+                other_id,
+            )
+            for other_id in same_account + [key_id]
+            if other_id not in live_ids
+            and rows_by_id[other_id].get("history_inclusion") != "exclude"
+            and windows[other_id] is not None
+            and (other_id == key_id or rows_by_id[other_id].get("anchored", True) is not False)
+        )
+        position = next(
+            index for index, entry in enumerate(counted_departed) if entry[2] == key_id
+        )
+        # SFH-C4-07: a key that stops counting before a key ordered ahead of it
+        # is COVERED — that earlier key reads the account over all its days. It
+        # counts zero days and bounds nothing; otherwise the earlier key's tail
+        # after the covered key's end would count nowhere.
+        covered = {
+            entry[2]
+            for index, entry in enumerate(counted_departed)
+            if any(
+                last_countable[entry[2]] < last_countable[earlier[2]]
+                for earlier in counted_departed[:index]
+            )
+        }
+        bounds = [until]
+        if live_firsts:
+            bounds.append(_day_before(min(live_firsts)))
+        successor = next(
+            (
+                entry
+                for entry in counted_departed[position + 1:]
+                if entry[2] not in covered
+            ),
+            None,
+        )
+        if key_id in covered:
+            bounds.append(_BEFORE_EVERY_DAY)
+            successor = None
+        if successor is not None:
+            bounds.append(_day_before(successor[0]))
+        if _BEFORE_EVERY_DAY in live_firsts:
+            # WR-04: the live key on this account has no returns yet (a
+            # rotation still building its history), so it reads none of these
+            # days today; the decision is made again once it has returns.
+            reason = "same_account_as_connected_key_pending"
+        elif live_firsts:
+            reason = "same_account_as_connected_key"
+        elif key_id in covered:
+            reason = "same_account_as_earlier_key"
+        elif successor is not None:
+            reason = "same_account_as_later_key"
+        elif position > 0:
+            reason = "latest_key_on_account"
+        else:
+            reason = "distinct_account"
+        counted_until = min(bounds)
+        if counted_until < first:
+            decisions[key_id] = DepartedHistoryDecision(False, None, reason)
+        else:
+            decisions[key_id] = DepartedHistoryDecision(True, counted_until, reason)
+    return decisions
+
+
 async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult:
     """Phase 115.1 (RD-3 Option B) — CRAWL-FREE, DECRYPTION-FREE allocator
     $-equity compose.
@@ -7788,7 +10791,14 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
     import pandas as pd
 
     from services.allocator_equity_compose import compose_allocator_equity
-    from services.allocator_equity_derive import eligible_key_predicate
+    from services.allocator_equity_derive import (
+        SHARED_ACCOUNT_KINDS,
+        DegradeReason,
+        account_groups,
+        eligible_key_predicate,
+        stitch_shared_account,
+        working_holder_predicate,
+    )
     from services.external_flows import ExternalFlow, validate_flow_shape
     from services.nav_twr import NavReconstructionError
     from services.redact import scrub_freeform_string
@@ -7797,8 +10807,10 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
     supabase = get_supabase()
 
     async def _delete_equity_curve_row() -> None:
-        # Degrade to the clean no-row legacy fallback (the SAFETY pin's no-row
-        # case). Shared by the empty-compose (B2), incomplete-compose (F1b), and
+        # Leave NO row, so the reader renders its rebuilding panel (Phase
+        # 167.1.2 plan 11 removed the legacy-curve fallback: a missing row is no
+        # longer drawn from allocator_equity_snapshots). Shared by the identity
+        # refusal, the empty-compose (B2), incomplete-compose (F1b), and
         # permanent-failure (F2) paths so a structurally-failed / partial / empty
         # recompute can never leave a STALE trustworthy row rendering as "derived".
         def _del() -> None:
@@ -7813,7 +10825,12 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
         return cast(
             list[dict[str, Any]],
             supabase.table("api_keys")
-            .select("id,is_active,sync_status,disconnected_at")
+            .select(
+                "id,is_active,sync_status,disconnected_at,"
+                "exchange,venue_account_id,"
+                "account_shared_with_api_key_id,account_share_kind,"
+                "history_inclusion"
+            )
             .eq("user_id", allocator_id)
             .execute()
             .data
@@ -7822,22 +10839,335 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
 
     key_rows = await db_execute(_load_keys)
     eligible_ids = {r["id"] for r in key_rows if eligible_key_predicate(r)}
+    rows_by_id = {r["id"]: r for r in key_rows}
+
+    # D-01 / D-04 / D-18: one exchange account is ONE counted key. Keys that read
+    # one account form a group (account_groups: a holder plus every key marked
+    # against it). Of a group's ELIGIBLE members exactly one is counted: a
+    # WORKING one (D-18) when any works, ordered as below. A failing holder is
+    # still eligible, so it must LEAVE the sum when a working marked key counts
+    # the account (the holder-drop half): the marked key's venue_account_id is
+    # NULL while the holder keeps the index slot, so the collision gate below
+    # cannot see the pair and would let one account be summed twice. When no
+    # member works, the account is still counted once (through the key whose
+    # history starts first, the holder on a tie) and the job says so at WARNING
+    # with a payload flag.
+    # A key left out here keeps its key_inputs row (it is still eligible; only
+    # the compose skips it), so it is never cleaned up as an orphan.
+    #
+    # C2 review WR-01 (C1 WR-03): among the members that qualify, the one whose
+    # returns START FIRST is counted, then the holder, then the id. The marker's
+    # direction follows stamp order, not seniority, so during the backfill
+    # window the holder is often the NEWER key; keeping it by default dropped the
+    # older key's earlier returns under a benign flag. The returns are loaded
+    # here for that ordering only: loading is not composing, and the identity
+    # gate below still refuses before anything is composed.
+    #
+    # C2 round 2, SFH-R2-03 / R2 IN-01: working-first can keep a member whose
+    # returns start LATER than a failing member's (a key rotation: the new
+    # key's reconstruct depth is shorter than the old key's history). The
+    # account is one series, so the failing member's returns are STITCHED in
+    # for the days before the kept member's first day (``stitch_shared_account``,
+    # D-09 case (2) ordering), with that member's flows for those days. Round 1
+    # dropped them under a benign flag and the book read "ready" over a
+    # shortened window. A join that cannot be made honestly (a gap between the
+    # series, no flows row, flows cut as non-finite) leaves the kept member
+    # alone under the BLOCKING SHARED_ACCOUNT_HISTORY_TRUNCATED. A kept member
+    # with no returns yet is not stitched: its anchor is today's equity, and
+    # hanging it on an older member's last day would misdate it; the compose
+    # already drops such a key as DROPPED_KEY (untrustworthy).
+    #
+    # C3 topic D (SFH-R3-07): the read drains every page. PostgREST caps one
+    # response at 1000 rows (supabase/config.toml max_rows), and PROD holds an
+    # allocator with 2804 rows (measured 2026-09-29), so a bare read handed the
+    # stitch and the compose an arbitrary 1000 of them: a curve built on part of
+    # each key's history, still marked trustworthy. C3 round 2 (WR-01 /
+    # SFH-C3R2-01): the pages are KEYSET, not offset, because a sibling key's
+    # dailies write runs concurrently and an offset shift skipped or doubled a
+    # day. See _load_allocator_daily_returns for the guarantee and its residual.
+    def _load_returns() -> list[dict[str, Any]]:
+        return _load_allocator_daily_returns(
+            supabase, allocator_id, (str(r["id"]) for r in key_rows)
+        )
+
+    try:
+        csv_rows = await db_execute(_load_returns)
+    except PaginatedSelectTruncated as trunc:
+        # The returns exceed the read's hard cap, and the read refuses rather
+        # than returning part of them. A retry re-reads the same
+        # rows, and this exception would otherwise reach classify_exception's
+        # catch-all as a retrying `unknown` forever (the T-74-02 class), so it
+        # ends permanent. Nothing is composed from a partial read, and the stale
+        # curve row is deleted as on every other permanent path (F2), so the book
+        # shows the rebuilding panel. The hint (with the allocator id) goes to the
+        # operator log only; the job's message carries the row cap alone.
+        logger.error(
+            "derive_allocator_equity: csv_daily_returns read for allocator %s hit "
+            "the pagination cap (page_count=%d, page_size=%d, hint=%s) — deleted "
+            "any stale equity_curve row; nothing was composed",
+            allocator_id,
+            trunc.page_count,
+            trunc.page_size,
+            trunc.hint or "n/a",
+        )
+        await _delete_equity_curve_row()
+        return DispatchResult(
+            outcome=DispatchOutcome.FAILED,
+            error_message=(
+                "derive_allocator_equity: the allocator's daily returns exceed "
+                f"{trunc.page_count * trunc.page_size:,} rows; nothing was "
+                "composed and the stale equity curve was removed"
+            ),
+            error_kind="permanent",
+        )
+    first_return_day: dict[str, str] = {}
+    last_return_day: dict[str, str] = {}
+    for r in csv_rows:
+        day = r.get("date")
+        k = r.get("api_key_id")
+        if k is None or day is None:
+            continue  # the strict per-row parse below disposes a corrupt row
+        if k not in first_return_day or str(day) < first_return_day[k]:
+            first_return_day[k] = str(day)
+        if k not in last_return_day or str(day) > last_return_day[k]:
+            last_return_day[k] = str(day)
+
+    excluded_shared: set[str] = set()
+    # kept key id → the members stitched before it, in first-return-day order.
+    stitch_sources: dict[str, list[str]] = {}
+    composite_counted_once = False
+    duplicate_counted_once = False
+    no_working_groups = 0
+    for group in account_groups(key_rows):
+        members = [row for row in group if row["id"] in eligible_ids]
+        if len(members) < 2:
+            continue
+        group_ids = {str(row["id"]) for row in group}
+        working = [row for row in members if working_holder_predicate(row)]
+        if not working:
+            no_working_groups += 1
+        pool = working or members
+
+        def _is_marked_in_group(row: Mapping[str, Any]) -> bool:
+            holder_id = row.get("account_shared_with_api_key_id")
+            return (
+                row.get("account_share_kind") in SHARED_ACCOUNT_KINDS
+                and holder_id is not None
+                and str(holder_id) != str(row["id"])
+                and str(holder_id) in group_ids
+            )
+
+        kept = min(
+            pool,
+            key=lambda row: (
+                # A key with no returns yet sorts after every key that has some.
+                first_return_day.get(row["id"], "9999-12-31"),
+                _is_marked_in_group(row),
+                str(row["id"]),
+            ),
+        )
+        excluded_shared.update(row["id"] for row in members if row is not kept)
+        kept_first = first_return_day.get(kept["id"])
+        if kept_first is not None:
+            earlier = sorted(
+                (
+                    row
+                    for row in members
+                    if row is not kept
+                    and first_return_day.get(row["id"], "9999-12-31") < kept_first
+                ),
+                key=lambda row: (first_return_day[row["id"]], str(row["id"])),
+            )
+            if earlier:
+                stitch_sources[kept["id"]] = [row["id"] for row in earlier]
+        kinds = {row.get("account_share_kind") for row in group}
+        composite_counted_once = composite_counted_once or "composite_member" in kinds
+        duplicate_counted_once = duplicate_counted_once or "duplicate" in kinds
+    counted_ids = eligible_ids - excluded_shared
+    counted_rows = [row for row in key_rows if row["id"] in counted_ids]
+
+    def _load_key_inputs() -> list[dict[str, Any]]:
+        return cast(
+            list[dict[str, Any]],
+            supabase.table("allocator_equity_derived")
+            .select("kind,payload")
+            .eq("allocator_id", allocator_id)
+            .like("kind", "key_inputs:%")
+            .execute()
+            .data
+            or []
+        )
+
+    ki_rows = await db_execute(_load_key_inputs)
+
+    # WR-R2-02: which departed keys can be levelled is decided BEFORE the D-09
+    # rule, from the same key_inputs rows the compose reads. A departed key
+    # whose row is missing (the orphan cleanup deleted every departed key's row
+    # before plan 09) or carries a null anchor (its last balance read failed)
+    # is never counted by the book, and it is never re-derived. Deciding this
+    # after the rule let such a key cover or bound a key that CAN be levelled,
+    # and that key's days then counted nowhere on a curve shown as ready.
+    departed_anchored: set[str] = set()
+    # Departed keys whose key_inputs row exists but carries no anchor → the
+    # stamped anchor_null_reason (SFH-C4-06).
+    departed_null_anchor_reasons: dict[str, str] = {}
+    for row in ki_rows:
+        kind = str(row.get("kind", ""))
+        api_key_id = kind.split(":", 1)[1] if ":" in kind else ""
+        if api_key_id not in rows_by_id or api_key_id in eligible_ids:
+            continue
+        departed_payload = row.get("payload")
+        if not isinstance(departed_payload, Mapping):
+            departed_payload = {}
+        if departed_payload.get("anchor_usd") is not None:
+            departed_anchored.add(api_key_id)
+            continue
+        _departed_reason = departed_payload.get("anchor_null_reason")
+        departed_null_anchor_reasons[api_key_id] = (
+            _departed_reason
+            if isinstance(_departed_reason, str) and _departed_reason
+            else "unstamped"
+        )
+
+    # D-05 / D-09 (plan 09): a departed key's history stays in the book up to its
+    # end day. The rule reads first/last returns days and disconnected_at only,
+    # the same inputs the overview (src/lib/departed-history.ts) reads, plus
+    # whether the key can be levelled (the overview reads the same key_inputs
+    # rows for that).
+    departed_decisions = departed_history_inclusion(
+        [
+            {
+                **row,
+                "first_returns_day": first_return_day.get(row["id"]),
+                "last_returns_day": last_return_day.get(row["id"]),
+                "anchored": row["id"] in eligible_ids or row["id"] in departed_anchored,
+            }
+            for row in key_rows
+        ]
+    )
+    # A departed key the rule includes but that cannot be levelled is left out
+    # under a benign flag: composing it would drop it as DROPPED_KEY and hold the
+    # whole book untrustworthy forever. The book stays what it was before plan 09
+    # for that key (D-22), no worse, and the rule has already let the keys that
+    # CAN be levelled carry every day they read.
+    departed_unavailable = sorted(
+        key_id
+        for key_id, decision in departed_decisions.items()
+        if decision.included and key_id not in departed_anchored
+    )
+    departed_end_by_key: dict[str, str] = {
+        key_id: decision.until
+        for key_id, decision in departed_decisions.items()
+        if decision.included
+        and decision.until is not None
+        and key_id in departed_anchored
+    }
+
+    # Identity gate. A 'duplicate' is a duplicate while its holder is WORKING
+    # (D-18) — the same rule as queries.ts countsAsDuplicate, so the writer and
+    # the reader agree — and the curve is refused, whatever the marked key's own
+    # status. A holder that is not working leaves the marked key ordinary (the
+    # group resolution above counts the account once), and a same-id overlap
+    # with another counted key is then a collision, not a duplicate. Checked
+    # BEFORE anything is composed, so a double-counted book never composes.
+    duplicate_keys = [
+        row
+        for row in key_rows
+        if row["id"] in eligible_ids
+        and row.get("account_share_kind") == "duplicate"
+        and row.get("account_shared_with_api_key_id") != row["id"]
+        and working_holder_predicate(
+            rows_by_id.get(row.get("account_shared_with_api_key_id"))
+        )
+    ]
+    # B4: over the whole HISTORY set, a live key from its first returns day
+    # (open while it has none) to an open end, a departed key over the days it
+    # counts. A rotation clipped by D-09 does not collide; two live keys on one
+    # account still do.
+    # The account is the identity token (venue id OR marker link), so a
+    # departed holder and the live key marked against it are one account here.
+    identity_tokens = account_identity_tokens(key_rows)
+    collisions = account_identity_collisions(
+        [
+            {
+                "id": row["id"],
+                "exchange": "account",
+                "venue_account_id": identity_tokens.get(str(row["id"])),
+                "first_counted_day": first_return_day.get(row["id"]),
+                "last_counted_day": None,
+            }
+            for row in counted_rows
+        ]
+        + [
+            {
+                "id": key_id,
+                "exchange": "account",
+                "venue_account_id": identity_tokens.get(str(key_id)),
+                "first_counted_day": first_return_day.get(key_id),
+                "last_counted_day": until,
+            }
+            for key_id, until in departed_end_by_key.items()
+        ]
+    )
+    if duplicate_keys or collisions:
+        await _delete_equity_curve_row()
+        # Reason token + counts only. No key id, no venue id, no USD (T-167.1.2-22).
+        # C2 silent-failure SFH-07: WARNING, not INFO. The refusal deletes the
+        # curve and ends DONE, so this line is the only trace of why the book
+        # renders "rebuilding". An audit action for it needs a member in BOTH
+        # services/audit.py and src/lib/audit.ts (test_action_literal_matches_ts_union),
+        # and this derive has no api_key to anchor it on; recorded in the
+        # 167.1.2 REVIEW-FIX report rather than half-added here.
+        # Round 2 (SFH-07 remainder): a WARNING reaches Sentry only as a
+        # breadcrumb (the SDK's default LoggingIntegration events at ERROR), so
+        # the refusal is also captured explicitly, once, at level warning:
+        # tagged with the job and the token, one static message per token so
+        # Sentry groups them, and no key id, venue id or USD figure.
+        reason = (
+            "account_duplicate" if duplicate_keys else "account_identity_collision"
+        )
+        with sentry_sdk.new_scope() as scope:
+            scope.set_tag("compute_job_id", str(job.get("id")))
+            scope.set_tag("derive_refusal", reason)
+            sentry_sdk.capture_message(
+                f"derive_allocator_equity: {reason} — the equity curve was "
+                "refused and deleted; the book shows the rebuilding panel",
+                level="warning",
+            )
+        logger.warning(
+            "derive_allocator_equity: %s for allocator %s "
+            "(counted_keys=%d duplicate_keys=%d colliding_groups=%d) — "
+            "deleted any stale equity_curve row; the book shows the rebuilding "
+            "panel until the keys are resolved",
+            reason,
+            allocator_id,
+            len(counted_rows),
+            len(duplicate_keys),
+            len(collisions),
+        )
+        return DispatchResult(outcome=DispatchOutcome.DONE)
+
+    if no_working_groups:
+        # D-18: an account none of whose keys works is still counted once,
+        # through the key whose history starts first, so its history stays; its
+        # series stops on the day the keys started failing and carries flat
+        # after it, diluting the book's return with frozen capital. C2 round 2
+        # (SFH-R2-04): that is a BLOCKING degrade reason, so the book is held
+        # (the reader shows an untrustworthy row as rebuilding), never "ready".
+        # Counts only (no key id, no venue id, no USD — T-167.1.2-22).
+        logger.warning(
+            "derive_allocator_equity: %d shared account(s) for allocator %s have "
+            "no working key — each is counted once, through a failing key whose "
+            "series may have stopped; the curve is untrustworthy (%s)",
+            no_working_groups,
+            allocator_id,
+            DegradeReason.SHARED_ACCOUNT_NO_WORKING_KEY.value,
+        )
 
     # ── 2. Per-key returns — ISO-STRING day index built DIRECTLY from the
     #      'date' column (carry-in #3). NEVER pd.to_datetime / DatetimeIndex:
     #      the core hard-asserts a 'YYYY-MM-DD' index and a DatetimeIndex would
     #      stringify to 'YYYY-MM-DD 00:00:00' and silently misalign flows. ──
-    def _load_returns() -> list[dict[str, Any]]:
-        return cast(
-            list[dict[str, Any]],
-            supabase.table("csv_daily_returns")
-            .select("api_key_id,date,daily_return")
-            .eq("allocator_id", allocator_id)
-            .execute()
-            .data
-            or [],
-        )
-
     async def _permanent_corrupt_input(exc: Exception) -> DispatchResult:
         # M3: a corrupt PERSISTED value (a NULL daily_return → float(None)
         # TypeError, a non-numeric usd_signed, a non-finite flow rejected by
@@ -7846,7 +11176,8 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
         # permanent scrubbed FAILED so the admin sees a terminal state, not an
         # infinite poison-retry. Scrubbed for defence in depth (no raw value leak).
         # F2: DELETE the stale equity_curve row first so a structurally-failed
-        # recompute degrades to legacy instead of leaving a stale trustworthy row.
+        # recompute leaves no row (the book shows "rebuilding") instead of a
+        # stale trustworthy row.
         await _delete_equity_curve_row()
         import re
 
@@ -7866,38 +11197,35 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
             error_kind="permanent",
         )
 
-    csv_rows = await db_execute(_load_returns)
+    stitch_source_ids = {k for ids in stitch_sources.values() for k in ids}
     _grouped: dict[str, list[dict[str, Any]]] = {}
     for r in csv_rows:
         k = r.get("api_key_id")
-        if k is not None and k in eligible_ids:
+        if k is not None and (
+            k in counted_ids or k in stitch_source_ids or k in departed_end_by_key
+        ):
             _grouped.setdefault(k, []).append(r)
     returns_by_key: dict[str, pd.Series] = {}
+    # SFH-R2-03: a stitch source's own series. Not an input on its own; only
+    # the days it owns join the kept member's series below.
+    source_returns: dict[str, pd.Series] = {}
     try:
         for k, rws in _grouped.items():
             rws_sorted = sorted(rws, key=lambda x: str(x["date"]))
-            returns_by_key[k] = pd.Series(
+            series = pd.Series(
                 [float(x["daily_return"]) for x in rws_sorted],
                 index=[str(x["date"]) for x in rws_sorted],
                 dtype="float64",
             )
+            if k in counted_ids or k in departed_end_by_key:
+                returns_by_key[k] = series
+            else:
+                source_returns[k] = series
     except (ValueError, TypeError, KeyError) as exc:
         return await _permanent_corrupt_input(exc)
 
     # ── 3. key_inputs rows → flows_by_key + anchors_by_key; orphan cleanup. ──
-    def _load_key_inputs() -> list[dict[str, Any]]:
-        return cast(
-            list[dict[str, Any]],
-            supabase.table("allocator_equity_derived")
-            .select("kind,payload")
-            .eq("allocator_id", allocator_id)
-            .like("kind", "key_inputs:%")
-            .execute()
-            .data
-            or []
-        )
-
-    ki_rows = await db_execute(_load_key_inputs)
+    # (ki_rows was read before the D-09 rule; see WR-R2-02 there.)
     flows_by_key: dict[str, list[ExternalFlow]] = {}
     anchors_by_key: dict[str, float | None] = {}
     # F1a×F3/M2 seam: WHY the epilogue nulled an anchor ('dust' vs a real-capital
@@ -7906,6 +11234,8 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
     # omitted → a trustworthy partial curve).
     null_anchor_reasons: dict[str, str] = {}
     key_inputs_ids: set[str] = set()
+    # SFH-R2-03: a stitch source's flows, when its key_inputs row is usable.
+    source_flows: dict[str, list[ExternalFlow]] = {}
     orphan_kinds: list[str] = []
     # M3: the JSONB→python coercions below (float(usd_signed), float(anchor_usd))
     # sit OUTSIDE the compose NavReconstructionError catch — a corrupt persisted
@@ -7917,11 +11247,50 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
         for row in ki_rows:
             kind = str(row.get("kind", ""))
             api_key_id = kind.split(":", 1)[1] if ":" in kind else ""
-            if api_key_id not in eligible_ids:
-                # A key that is no longer eligible (revoked / disconnected /
-                # deleted) keeps a stale key_inputs row — bounded orphan cleanup
-                # below.
+            if api_key_id not in rows_by_id:
+                # Plan 09 (D-05): only a DELETED key's row is an orphan. A
+                # departed (revoked / disconnected) key keeps its anchor and
+                # flows, included or not, so the owner's switch stays
+                # reversible — bounded orphan cleanup below.
                 orphan_kinds.append(kind)
+                continue
+            if api_key_id not in eligible_ids:
+                if api_key_id in departed_end_by_key:
+                    # Anchored by construction (WR-R2-02: only a key with a
+                    # saved anchor reaches departed_end_by_key).
+                    departed_payload = row.get("payload") or {}
+                    flows_by_key[api_key_id] = [
+                        validate_flow_shape(
+                            ExternalFlow(
+                                utc_day_iso=str(_f["utc_day_iso"]),
+                                usd_signed=float(_f["usd_signed"]),
+                            )
+                        )
+                        for _f in (departed_payload.get("flows") or [])
+                    ]
+                    anchors_by_key[api_key_id] = float(departed_payload["anchor_usd"])
+                continue
+            if api_key_id not in counted_ids:
+                # A shared-account key left out by the group resolution: still
+                # eligible, so the row stays. The account is counted through
+                # another key of its group; this series is not an input on its
+                # own. A stitch source's flows are kept for the days it owns,
+                # unless the epilogue cut some as non-finite (flow_drop), in
+                # which case they cannot level those days.
+                source_payload = row.get("payload") or {}
+                if (
+                    api_key_id in stitch_source_ids
+                    and source_payload.get("anchor_null_reason") != "flow_drop"
+                ):
+                    source_flows[api_key_id] = [
+                        validate_flow_shape(
+                            ExternalFlow(
+                                utc_day_iso=str(_f["utc_day_iso"]),
+                                usd_signed=float(_f["usd_signed"]),
+                            )
+                        )
+                        for _f in (source_payload.get("flows") or [])
+                    ]
                 continue
             key_inputs_ids.add(api_key_id)
             payload = row.get("payload") or {}
@@ -7945,6 +11314,65 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
     except (ValueError, TypeError, KeyError) as exc:
         return await _permanent_corrupt_input(exc)
 
+    # SFH-R2-03: join each stitched account's older members onto its kept key.
+    stitched_accounts = 0
+    truncated_accounts = 0
+    for kept_id, source_ids in stitch_sources.items():
+        kept_series = returns_by_key.get(kept_id)
+        if kept_series is None:
+            continue  # the kept key's returns vanished between the two reads
+        stitched = None
+        if all(k in source_returns and k in source_flows for k in source_ids):
+            stitched = stitch_shared_account(
+                [(source_returns[k], source_flows[k]) for k in source_ids]
+                + [(kept_series, flows_by_key.get(kept_id, []))]
+            )
+        if stitched is None:
+            truncated_accounts += 1
+            continue
+        returns_by_key[kept_id], flows_by_key[kept_id] = stitched
+        stitched_accounts += 1
+    if truncated_accounts:
+        # Counts only (no key id, no venue id, no USD — T-167.1.2-22).
+        logger.warning(
+            "derive_allocator_equity: %d shared account(s) for allocator %s keep "
+            "an older member's history that could not be joined to the counted "
+            "key's (a gap, or no usable flows) — the curve starts at the counted "
+            "key's first day and is untrustworthy (%s)",
+            truncated_accounts,
+            allocator_id,
+            DegradeReason.SHARED_ACCOUNT_HISTORY_TRUNCATED.value,
+        )
+
+    # A departed key the rule includes but whose inputs are gone was left out of
+    # departed_end_by_key before the rule's end days were used (WR-R2-02), so it
+    # never reached the returns, the flows or the collision gate.
+    if departed_unavailable:
+        # Counts only (no key id, no venue id, no USD — T-167.1.2-22). A key
+        # whose row was deleted and a key whose last balance read failed are
+        # counted apart, with the stamped reasons (SFH-C4-06).
+        null_anchor_counts: dict[str, int] = {}
+        for k in departed_unavailable:
+            if k in departed_null_anchor_reasons:
+                reason_token = departed_null_anchor_reasons[k]
+                null_anchor_counts[reason_token] = null_anchor_counts.get(reason_token, 0) + 1
+        null_anchor_total = sum(null_anchor_counts.values())
+        logger.warning(
+            "derive_allocator_equity: %d departed key(s) for allocator %s are "
+            "included by the history rule but have no usable anchor: %d with no "
+            "saved inputs row, %d whose last balance read gave no anchor (%s); "
+            "their history is left out of the book (%s)",
+            len(departed_unavailable),
+            allocator_id,
+            len(departed_unavailable) - null_anchor_total,
+            null_anchor_total,
+            ", ".join(
+                f"{token}={count}" for token, count in sorted(null_anchor_counts.items())
+            )
+            or "none",
+            "departed_history_unavailable",
+        )
+
     # A key with returns but no key_inputs row → anchor None (compose honestly
     # DROPS it, exactly as an unanchored key). Never fabricate an anchor.
     for k in returns_by_key:
@@ -7964,24 +11392,24 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
     # key_inputs row. During the founder-gated backfill the FIRST key's compose
     # runs while sibling keys still have zero rows (all 517 prod keys start empty),
     # so composing now would emit a TRUSTWORTHY curve over a SUBSET of the
-    # allocator's capital (a transient 1-of-N-capital curve labeled "Derived",
-    # suppressing a legacy curve that included every key). If ANY eligible key is
+    # allocator's capital (a transient 1-of-N-capital curve rendered as ready).
+    # If ANY eligible key is
     # absent from BOTH maps the compose is INCOMPLETE → refuse: delete the
-    # equity_curve row (degrade to legacy) rather than compose a silently-partial
+    # equity_curve row (the book shows "rebuilding") rather than compose a silently-partial
     # trustworthy curve. A key WITH a key_inputs row but no returns is NOT missing
     # here — it is visible to the compose core, which classifies it
     # anchored-without-returns → DROPPED_KEY → untrustworthy (B3). This gate is for
     # the strictly-invisible key (no returns AND no key_inputs — its derive has not
     # run yet). Self-healing: each sibling derive re-enqueues the compose.
-    missing_ids = eligible_ids - (set(returns_by_key) | key_inputs_ids)
+    missing_ids = counted_ids - (set(returns_by_key) | key_inputs_ids)
     if missing_ids:
         await _delete_equity_curve_row()
         logger.info(
             "derive_allocator_equity: INCOMPLETE compose for allocator %s "
             "(eligible_keys=%d returns_keys=%d key_inputs_keys=%d missing=%d) — "
             "an eligible key has neither returns nor key_inputs (backfill window); "
-            "deleted any stale equity_curve row, degrading to legacy until every "
-            "sibling derives (Option B, self-healing)",
+            "deleted any stale equity_curve row; the book shows the rebuilding "
+            "panel until every sibling derives (self-healing)",
             allocator_id, len(eligible_ids), len(returns_by_key),
             len(key_inputs_ids), len(missing_ids),
         )
@@ -7990,7 +11418,31 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
     # ── 4. The ONLY derivation call — the frozen-core composition layer. ──────
     try:
         payload = compose_allocator_equity(
-            returns_by_key, flows_by_key, anchors_by_key, null_anchor_reasons
+            returns_by_key,
+            flows_by_key,
+            anchors_by_key,
+            null_anchor_reasons,
+            benign_flag_tokens=[
+                token
+                for token, raised in (
+                    ("composite_shared_account_counted_once", composite_counted_once),
+                    ("duplicate_shared_account_counted_once", duplicate_counted_once),
+                    ("shared_account_history_stitched", stitched_accounts > 0),
+                    ("departed_history_unavailable", bool(departed_unavailable)),
+                )
+                if raised
+            ]
+            or None,
+            degrade_reasons=[
+                reason
+                for reason, raised in (
+                    (DegradeReason.SHARED_ACCOUNT_HISTORY_TRUNCATED, truncated_accounts > 0),
+                    (DegradeReason.SHARED_ACCOUNT_NO_WORKING_KEY, no_working_groups > 0),
+                )
+                if raised
+            ]
+            or None,
+            departed_end_by_key=departed_end_by_key or None,
         )
     except NavReconstructionError as exc:
         # A STRUCTURAL compose refusal (the core's loud asserts — carry-in #3
@@ -8000,7 +11452,8 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
         # errors carry counts/day-indices only, still scrubbed for defence in
         # depth). F2: DELETE the stale equity_curve row first — otherwise a
         # post-liquidation poison input would leave the frozen pre-liquidation curve
-        # rendering as trustworthy FOREVER; degrade to legacy instead.
+        # rendering as trustworthy FOREVER; leave no row (the book shows
+        # "rebuilding") instead.
         await _delete_equity_curve_row()
         scrubbed = str(scrub_freeform_string(str(exc)))
         return DispatchResult(
@@ -8017,18 +11470,18 @@ async def run_derive_allocator_equity_job(job: dict[str, Any]) -> DispatchResult
     #      today) returns curve=[] — is_trustworthy may be True (benign honest-empty
     #      tokens: NO_ANCHORED_KEYS/ZERO_WEIGHT_MASS) OR False (all keys DROPPED_KEY
     #      post-B3); this branch keys on EMPTINESS, not on the trust flag, so both
-    #      empty shapes degrade the same. Upserting it would blank the dashboard
-    #      while suppressing the legacy render (which has real data), and a later
+    #      empty shapes degrade the same. Upserting it would render a blank
+    #      chart as the book's history, and a later
     #      structurally-empty recompute would leave a STALE trustworthy row (L1).
-    #      Instead DELETE any existing equity_curve row → degrade to the clean
-    #      no-row legacy fallback (the SAFETY pin's no-row case). The frontend
+    #      Instead DELETE any existing equity_curve row → no row, which the
+    #      reader renders as the rebuilding panel (plan 11). The frontend
     #      extractTrustworthyDerivedCurve is the paired last-line defense (B2a). ──
     if not (payload.get("curve") or []):
         await _delete_equity_curve_row()
         logger.info(
             "derive_allocator_equity: empty compose for allocator %s "
             "(eligible_keys=%d returns_keys=%d orphans_cleaned=%d) — deleted any "
-            "stale equity_curve row, degrading to the legacy fallback (Option B)",
+            "stale equity_curve row; the book shows the rebuilding panel",
             allocator_id, len(eligible_ids), len(returns_by_key), len(orphan_kinds),
         )
         return DispatchResult(outcome=DispatchOutcome.DONE)

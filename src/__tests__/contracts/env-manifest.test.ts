@@ -42,12 +42,30 @@ const PLATFORM_KEYS = new Set([
   "AWS_LAMBDA_FUNCTION_NAME",
   "VITEST",
   "VITEST_WORKER_ID",
+  // Read only by ci-anti-skip-gate.contract.test.ts, which prepends a stub
+  // `psql` directory to PATH before executing the ci.yml sql-tests script. It
+  // is the OS process environment, not app config, so it has no .env.example
+  // plane to belong to.
+  "PATH",
 ]);
 
 // Keys read only by tests / test-helpers (live-DB integration, e2e seeding,
 // parity harnesses). Operational config, not app config.
 const TEST_ONLY_KEYS = new Set([
   "BASE_URL",
+  // Added 2026-09-21 (Phase 164.9). Read ONLY by
+  // src/__tests__/match-decisions-holding-endpoint-rls.test.ts, as an override
+  // ahead of BASE_URL, so the live-DB arm can be pointed at a PostgREST that
+  // serves the schema the PGRST205 fact needs. Test wiring, never app config —
+  // no src/ runtime path reads it, which is why it belongs here and not in
+  // .env.example.
+  "MATCH_DECISIONS_BASE_URL",
+  // Added 2026-09-26 (Phase 166.2 plan 06, registered by plan 07's full-suite
+  // sweep). Read ONLY by src/lib/return-stats.single-source.test.ts, to point
+  // its D-22 "merge-base tree" block at an archived tree; unset, that block
+  // does not run. Test wiring, never app config — no src/ runtime path reads
+  // it, which is why it belongs here and not in .env.example.
+  "QZ_166_2_06_SCAN_ROOT",
   "E2E_ADMIN_EMAIL",
   "E2E_ADMIN_PASSWORD",
   "SCENARIO_COMMIT_BASE_URL",

@@ -27,6 +27,22 @@
 -- Usage:
 --   psql "$TEST_SUPABASE_DB_URL" -v ON_ERROR_STOP=1 -f \
 --     supabase/tests/test_metrics_by_basis_write.sql
+--
+-- ⭐ MACHINE-EXECUTABLE TWINS (phase 164.4, REDUNDER-BACKFILL). Each prose
+-- RED-UNDER below carries an adjacent `RED-UNDER-M` object that
+-- scripts/mutation-runner executes on every push: it mutates COPIES on a
+-- throwaway pg-lane cluster, requires the FIRST `TEST FAILED (…)` to name that
+-- arm, and restores GREEN. Schema: scripts/mutation-runner/GRAMMAR.md.
+-- ⚠️ THE TWO CHECKS ARE LAST-DEFINED IN DIFFERENT MIGRATIONS, and each twin
+-- targets whichever LAST defines the constraint it mutates. The shape CHECK is
+-- defined ONCE, in 20260710120000. The coherence CHECK is a DROP/ADD chain
+-- re-issued in full by twelve migrations, and the last of them is
+-- 20260717233529 — NOT 20260710130000, which this file's header names as the
+-- migration under test. Mutating 20260710130000's copy would be overwritten by
+-- 20260717233529 later in the apply list and would prove nothing, so Arm 6's
+-- twin targets 20260717233529. Only arms 4 and 6 are twinned: arms 1, 2, 3 and
+-- 5 are positive-path writes that raise nothing, so they are not sections.
+-- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/15-fixture-auth-role.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","scripts/pg-lane/fixtures/07-fixture-supabase-default-privileges.sql","supabase/migrations/20260411144407_compute_jobs_queue.sql","scripts/pg-lane/fixtures/04-fixture-compute-jobs-targets.sql","supabase/migrations/20260710120000_strategy_keys.sql","supabase/migrations/20260710130000_stitch_composite_kind.sql","supabase/migrations/20260717233529_allocator_equity_derived_surface.sql"]}
 
 -- --------------------------------------------------------------------------
 -- Defensive pre-clean (a prior aborted run may have committed synthetic rows).
@@ -78,6 +94,19 @@ BEGIN
   -- ----- ARM 4: JSON null is REJECTED, pinned to the shape CHECK ----------
   -- The carry-forward hazard: writers must persist SQL NULL, never JSON null.
   -- jsonb 'null' has jsonb_typeof = 'null' (not 'object') → CHECK violation.
+  -- RED-UNDER: widen the strategy_analytics_metrics_by_basis_shape CHECK in
+  --            migration 20260710120000 to admit jsonb_typeof 'null' as well
+  --            as 'object'. That is exactly the loosening the header calls the
+  --            carry-forward hazard: writers that persist JSON `null` for an
+  --            unavailable basis stop being rejected, and every reader doing
+  --            `metrics->>'basis'` starts seeing a JSON null it cannot tell
+  --            from a missing key. The migration's own self-verify only checks
+  --            that the COLUMN exists and is nullable (:207-213) — it never
+  --            probes the CHECK's rejection behaviour — so the widened
+  --            constraint applies perfectly clean. That is precisely why this
+  --            arm has to exist: a shape CHECK that stops rejecting is not a
+  --            shape CHECK, and nothing upstream of this file would notice.
+  -- RED-UNDER-M: {"arm":"Arm 4","apply":[{"kind":"edit","file":"supabase/migrations/20260710120000_strategy_keys.sql","find":"  CHECK (metrics_json_by_basis IS NULL OR jsonb_typeof(metrics_json_by_basis) = 'object');","replace":"  CHECK (metrics_json_by_basis IS NULL OR jsonb_typeof(metrics_json_by_basis) IN ('object', 'null'));","occurrences":1}]}
   raised := FALSE; v_constraint := NULL;
   BEGIN
     UPDATE strategy_analytics SET metrics_json_by_basis = 'null'::jsonb WHERE strategy_id = strat;
@@ -101,6 +130,19 @@ BEGIN
   -- coherence arm for stitch_composite → rejected by kind_target_coherence.
   -- Pin the constraint so a wrongly-added api_key arm (or a target_xor-only
   -- rejection) fails the test.
+  -- RED-UNDER: in migration 20260717233529 (the LAST migration to re-issue
+  --            compute_jobs_kind_target_coherence in full — see the header),
+  --            widen the api_key-scoped `derive_broker_dailies` arm to
+  --            `kind = ANY (ARRAY['derive_broker_dailies','stitch_composite'])`.
+  --            That mints exactly the wrongly-added api_key arm this assertion
+  --            names: a stitch_composite job could then be enqueued against a
+  --            bare api_key, which the composite stitcher cannot resolve to a
+  --            member set, so the job would be claimed and fail per tick rather
+  --            than being refused at write time. The migration's own
+  --            self-verify (:385) only asserts the constraint text still
+  --            matches `%derive_broker_dailies%api_key_id IS NOT NULL%`, which
+  --            the widened ARRAY form still satisfies, so the apply is clean.
+  -- RED-UNDER-M: {"arm":"Arm 6","apply":[{"kind":"edit","file":"supabase/migrations/20260717233529_allocator_equity_derived_surface.sql","find":"  OR ((kind = 'derive_broker_dailies') AND (api_key_id IS NOT NULL) AND (strategy_id IS NULL) AND (portfolio_id IS NULL) AND (allocator_id IS NULL))","replace":"  OR ((kind = ANY (ARRAY['derive_broker_dailies', 'stitch_composite'])) AND (api_key_id IS NOT NULL) AND (strategy_id IS NULL) AND (portfolio_id IS NULL) AND (allocator_id IS NULL))","occurrences":1}]}
   raised := FALSE; v_constraint := NULL;
   BEGIN
     INSERT INTO compute_jobs (api_key_id, kind) VALUES (key, 'stitch_composite');

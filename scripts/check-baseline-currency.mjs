@@ -1,0 +1,1153 @@
+#!/usr/bin/env node
+/**
+ * BASELINE CURRENCY gate — is the committed schema dump at least as fresh as
+ * the migrations that have landed since it was last regenerated?
+ *
+ * ⚠️ WHY THIS EXISTS, measured at Phase 164.4.2 SUBSETSPLIT (CONTEXT.md Area A):
+ * `scripts/check-baseline-staleness.mjs` — despite its name — verifies only
+ * that `supabase/schema/baseline.sql`'s sha256 matches the row
+ * `supabase/schema/BASELINE.md` records. That is INTEGRITY (did the bytes on
+ * disk change without updating provenance?), never CURRENCY (did a migration
+ * land after the dump was last regenerated?). The only place CURRENCY was
+ * implemented anywhere in this repo was `refuse_stale_baseline()` inside
+ * `scripts/restore-test-from-baseline.sh`, reachable only from the restore
+ * path. The ephemeral local-stack path that builds throwaway test databases
+ * from this same baseline (`scripts/local-stack/run.sh`) called NEITHER
+ * check — so a schema missing real migrations could boot green and every
+ * downstream test would say nothing about the gap.
+ *
+ * THE RULE: baseline's last-changed epoch must be >= migrations dir's
+ * last-changed epoch. Equal is fresh enough — a dump regenerated in the same
+ * commit as the last migration is current. Less than is STALE.
+ *
+ * ⛔ Forbidden closure (CONTEXT.md Area A): do NOT rename or re-scope
+ * `check-baseline-staleness.mjs` to claim this behaviour — it stays an
+ * INTEGRITY gate, unchanged. This is a SEPARATE, NAMED gate, and
+ * `refuse_stale_baseline()` is re-pointed at it (164.4.2 plan 02, task 2) so
+ * there is exactly ONE currency implementation reachable from both callers,
+ * with a name that matches what it measures.
+ *
+ * An unreadable timestamp is refused BY NAME before any numeric comparison
+ * runs — a missing path prints nothing, and nothing is not an epoch.
+ * Treating "could not measure" as "measured fresh" would let a CI runner pass
+ * this gate vacuously.
+ *
+ * ⛔ CORRECTED 2026-09-24 (review 164.4.2 WR-05): this paragraph used to say a
+ * SHALLOW clone "prints nothing" too. It does not — HEAD is a grafted root that
+ * introduces every path, so both epochs print HEAD's time, compare equal, and
+ * equal reads as fresh. A shallow history is now refused by name
+ * (`history-shallow`) before the epochs are compared, whenever the freshness
+ * command reads git history.
+ *
+ * `--self-test` drives `judge()` directly over every named defect kind,
+ * proving the refusal fires rather than assuming it.
+ *
+ * The EXACT commands CI runs, and the exact commands a developer runs locally:
+ *
+ *     node scripts/check-baseline-currency.mjs --self-test
+ *     node scripts/check-baseline-currency.mjs
+ *
+ * ── `--replay-set` (Phase 164.4.2 DECISION F, founder 2026-09-23) ───────────
+ *
+ * The DEFAULT mode above is the restore path's refusal and is unchanged, byte
+ * for byte. `--replay-set` is the LOCAL-STACK LANE's use of this gate, where a
+ * migration newer than the dump is the NORMAL case: the lane loads the dump and
+ * then replays, in filename order, exactly the migrations the dump does not
+ * carry. This mode's job is "bound and name", never "refuse a newer migration":
+ *
+ *   - WHICH migrations the dump carries is read from a committed marker,
+ *     `supabase/schema/baseline-carried-migrations.txt`, bound to the dump by a
+ *     `baseline-sha256:` line — never inferred from commit dates.
+ *   - the replay set is every top-level `*.sql` in MIGRATIONS_DIR the marker does
+ *     not list, sorted by filename (the order the CLI applies them in).
+ *   - the `baseline-currency:` line prints on EVERY run; the set itself
+ *     (`baseline-replay:`) prints ONLY when it was determined (defects=0), and so
+ *     do the handover files. An undeterminable set is never printed as a set.
+ *
+ * Env (all optional; defaults are the repo paths):
+ *   CARRIED_MARKER, BASELINE_FILE, MIGRATIONS_DIR   — the three inputs
+ *   REPLAY_SET_FILE                                  — out: replay basenames, one per line
+ *   CARRIED_SET_FILE                                 — out: carried basenames, one per line
+ *   REFDATA_ALLOWLIST_IN + REFDATA_ALLOWLIST_OUT     — out: the reference-data allowlist
+ *        minus every line whose FIRST TAB FIELD is a replay basename, so an allowlisted
+ *        statement in a replayed migration runs once, in the replay, not twice.
+ *
+ *     node scripts/check-baseline-currency.mjs --replay-set
+ */
+import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { basename, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
+export const DEFECTS = ["baseline-stale", "baseline-epoch-unreadable", "migrations-epoch-unreadable", "history-shallow"];
+
+const EPOCH_RE = /^[0-9]+$/;
+
+/**
+ * PURE: given two already-read timestamp strings (and, for messaging only,
+ * the two path labels), name every defect. No I/O, so the self-test drives
+ * the REAL decision logic rather than a parallel copy of it.
+ *
+ * Mirrors `scripts/restore-test-from-baseline.sh`'s own `refuse_stale_baseline`
+ * guards exactly: baseline is checked BEFORE migrations, and an unreadable
+ * epoch on either side returns immediately — a numeric comparison against an
+ * unreadable value would be a comparison against nothing.
+ *
+ * @param {{baselineEpoch: string, migrationsEpoch: string,
+ *          baselineFile?: string, migrationsDir?: string, shallow?: string}} facts
+ *   `baselineFile`/`migrationsDir` are labels used only in message text; they
+ *   default to generic descriptors so a caller that only has the two epochs
+ *   still gets correct decision logic. `shallow` is `git rev-parse
+ *   --is-shallow-repository`'s answer when the epochs come from git history
+ *   ("false" is the only answer that passes; "" means unreadable), and
+ *   `undefined` when the freshness command reads no git history.
+ */
+export function judge({
+  baselineEpoch,
+  migrationsEpoch,
+  baselineFile = "the baseline file",
+  migrationsDir = "the migrations directory",
+  shallow = undefined,
+}) {
+  const defects = [];
+  const b = String(baselineEpoch ?? "").trim();
+  const m = String(migrationsEpoch ?? "").trim();
+
+  // ⛔ BEFORE the epochs, and it RETURNS (review 164.4.2 WR-05). In a shallow
+  // clone HEAD is a grafted root introducing every path, so both epochs are
+  // HEAD's time, they compare equal, and equal reads as fresh. Two readable,
+  // equal epochs from a shallow history are not a measurement.
+  if (shallow !== undefined && String(shallow).trim() !== "false") {
+    defects.push({
+      kind: "history-shallow",
+      detail:
+        `the git history is SHALLOW (git rev-parse --is-shallow-repository printed '${String(shallow).trim()}'), ` +
+        `so the last-changed epochs of ${baselineFile} and ${migrationsDir} are both the grafted root's time ` +
+        `and cannot be compared. Check out with full history (fetch-depth: 0).`,
+    });
+    return defects;
+  }
+
+  // ⛔ FIRST, and it RETURNS: an unreadable epoch is never fresh, and a
+  // comparison against it would be a comparison against nothing. Mirrors
+  // bash's `case "$b_ts" in ''|*[!0-9]*)` guard, which fires before `$m_ts`
+  // is even inspected.
+  if (!EPOCH_RE.test(b)) {
+    defects.push({
+      kind: "baseline-epoch-unreadable",
+      detail:
+        `FRESHNESS_TS_CMD printed no epoch for ${baselineFile} (got '${b}'). ` +
+        `An unreadable timestamp is not a fresh one.`,
+    });
+    return defects;
+  }
+  if (!EPOCH_RE.test(m)) {
+    defects.push({
+      kind: "migrations-epoch-unreadable",
+      detail:
+        `FRESHNESS_TS_CMD printed no epoch for ${migrationsDir} (got '${m}'). ` +
+        `An unreadable timestamp is not a fresh one.`,
+    });
+    return defects;
+  }
+
+  const bEpoch = Number(b);
+  const mEpoch = Number(m);
+  // Equal is fresh enough — the comparator uses `-lt`, not `-le`, matching
+  // the pre-existing bash behaviour this gate replaces (restore-test-from-
+  // baseline.sh's `refuse_stale_baseline`).
+  if (bEpoch < mEpoch) {
+    defects.push({
+      kind: "baseline-stale",
+      detail:
+        `the baseline dump is STALE: ${baselineFile} last changed at epoch ${bEpoch}, ` +
+        `${migrationsDir} at epoch ${mEpoch}. A migration landed after the last dump ` +
+        `regeneration, so this dump does not describe PROD. Regenerate the baseline first.`,
+    });
+  }
+
+  return defects;
+}
+
+/**
+ * How many `ok()` calls the sections below are declared to run: 17 across the
+ * nine default-mode sections (+4 in section 8 by review 164.4.2 WR-05, +2 by the
+ * round-2 review IN-04), plus 32 across the fourteen `--replay-set` sections (Phase 164.4.2 plan 06; +5 in R10
+ * by review 164.4.2 WR-04; +7 in R10 by round-2 WR-01 and the round-2
+ * silent-failure-hunter WR-04).
+ * ⛔ Raise it only together with the arm that adds one; lowering it to make a
+ * run green is deleting a proof.
+ */
+export const EXPECTED_ASSERTIONS = 49;
+
+function selfTest() {
+  let pass = true;
+  let asserted = 0;
+  const ok = (cond, msg) => {
+    asserted += 1;
+    console.log(`  ${cond ? "ok  " : "FAIL"} — ${msg}`);
+    if (!cond) pass = false;
+    return cond;
+  };
+
+  console.log("=== SELF-TEST 1/9: baseline epoch > migrations epoch -> clean");
+  ok(
+    judge({ baselineEpoch: "2000000000", migrationsEpoch: "1000000000" }).length === 0,
+    "no defects when the baseline is newer than the migrations dir",
+  );
+
+  console.log("=== SELF-TEST 2/9: baseline epoch == migrations epoch -> clean (the comparator uses -lt, not -le)");
+  ok(
+    judge({ baselineEpoch: "1500000000", migrationsEpoch: "1500000000" }).length === 0,
+    "equal epochs are fresh enough",
+  );
+
+  console.log("=== SELF-TEST 3/9: baseline epoch < migrations epoch -> baseline-stale, phrase and both epochs present");
+  const d3 = judge({
+    baselineEpoch: "1000000000",
+    migrationsEpoch: "2000000000",
+    baselineFile: "BF",
+    migrationsDir: "MD",
+  });
+  ok(d3.length === 1 && d3[0].kind === "baseline-stale", "baseline-stale fires when the baseline is behind");
+  ok(
+    d3[0].detail.includes("the baseline dump is STALE"),
+    "the message carries the load-bearing phrase the restore script's self-test arm 5 greps for",
+  );
+  ok(
+    d3[0].detail.includes("1000000000") && d3[0].detail.includes("2000000000"),
+    "the message names BOTH epochs, so a reader can tell which side is behind",
+  );
+
+  console.log("=== SELF-TEST 4/9: baseline timestamp empty -> baseline-epoch-unreadable");
+  ok(
+    judge({ baselineEpoch: "", migrationsEpoch: "1000000000" }).some((d) => d.kind === "baseline-epoch-unreadable"),
+    "an empty baseline epoch is refused by name — an unreadable timestamp is not a fresh one",
+  );
+
+  console.log("=== SELF-TEST 5/9: baseline timestamp non-numeric -> same defect kind");
+  ok(
+    judge({ baselineEpoch: "not-a-number", migrationsEpoch: "1000000000" }).some(
+      (d) => d.kind === "baseline-epoch-unreadable",
+    ),
+    "a non-numeric baseline epoch is the SAME kind as an empty one",
+  );
+
+  console.log("=== SELF-TEST 6/9: migrations timestamp empty or non-numeric -> migrations-epoch-unreadable");
+  ok(
+    judge({ baselineEpoch: "1000000000", migrationsEpoch: "" }).some(
+      (d) => d.kind === "migrations-epoch-unreadable",
+    ),
+    "an empty migrations epoch is refused by name",
+  );
+  ok(
+    judge({ baselineEpoch: "1000000000", migrationsEpoch: "not-a-number" }).some(
+      (d) => d.kind === "migrations-epoch-unreadable",
+    ),
+    "a non-numeric migrations epoch is refused by name",
+  );
+
+  console.log("=== SELF-TEST 7/9: an unreadable baseline is checked BEFORE migrations (bash's own order)");
+  const d7 = judge({ baselineEpoch: "", migrationsEpoch: "" });
+  ok(
+    d7.length === 1 && d7[0].kind === "baseline-epoch-unreadable",
+    "when BOTH epochs are unreadable, only baseline-epoch-unreadable fires — a comparison against two unreadable values would be a comparison against nothing, twice",
+  );
+
+  // Review 164.4.2 WR-05. In a `--depth 1` clone HEAD is a grafted root that
+  // introduces every path, so `git log -1 --format=%ct -- <path>` prints HEAD's
+  // time for BOTH sides; they compare equal, and equal reads as fresh. The
+  // epochs cannot say so themselves, so shallowness is its own fact, measured
+  // whenever the freshness command reads git history.
+  console.log("=== SELF-TEST 8/9: a SHALLOW history is refused by name, even when its equal epochs would read fresh");
+  const d8 = judge({ baselineEpoch: "1500000000", migrationsEpoch: "1500000000", shallow: "true" });
+  ok(
+    d8.length === 1 && d8[0].kind === "history-shallow",
+    `a shallow clone's equal epochs yield history-shallow, never 'fresh' (got ${JSON.stringify(d8.map((d) => d.kind))})`,
+  );
+  ok(
+    judge({ baselineEpoch: "1500000000", migrationsEpoch: "1500000000", shallow: "" }).some((d) => d.kind === "history-shallow"),
+    "an UNREADABLE shallowness answer is refused the same way — could-not-measure is not measured-deep",
+  );
+  ok(
+    judge({ baselineEpoch: "1500000000", migrationsEpoch: "1500000000", shallow: "false" }).length === 0,
+    "CONTROL: a full history with equal epochs is still fresh",
+  );
+  ok(
+    judge({ baselineEpoch: "1500000000", migrationsEpoch: "1500000000" }).length === 0,
+    "CONTROL: a freshness command that reads no git history (shallow not applicable) is judged on its epochs",
+  );
+  // Round-2 review IN-04: the shallowness fact is measured whenever the command
+  // runs git, whatever path or wrapper it is spelled with.
+  ok(
+    ["git log -1 --format=%ct --", "/usr/bin/git log -1 --format=%ct --", "env git log -1 --format=%ct --"].every(freshnessReadsGit),
+    "`git …`, `/usr/bin/git …` and `env git …` all read git history, so each is checked for shallowness",
+  );
+  ok(
+    !freshnessReadsGit("bash /tmp/stub/freshness.sh") && !freshnessReadsGit("bash /tmp/stub/git-freshness.sh"),
+    "CONTROL: the restore self-test's `bash <stub>` reads no git history, so it is judged on its epochs alone",
+  );
+
+  console.log("=== SELF-TEST 9/9: every kind judge() can emit is named in DEFECTS");
+  const emitted = new Set(
+    [
+      ...judge({ baselineEpoch: "1000000000", migrationsEpoch: "2000000000" }),
+      ...judge({ baselineEpoch: "", migrationsEpoch: "1000000000" }),
+      ...judge({ baselineEpoch: "1000000000", migrationsEpoch: "" }),
+      ...judge({ baselineEpoch: "1000000000", migrationsEpoch: "1000000000", shallow: "true" }),
+    ].map((d) => d.kind),
+  );
+  ok(
+    emitted.size === DEFECTS.length && [...emitted].every((k) => DEFECTS.includes(k)),
+    `DEFECTS names exactly the ${emitted.size} kind(s) observed: ${[...emitted].sort().join(", ")}`,
+  );
+
+  // ── --replay-set (DECISION F). Pure-function arms over in-memory facts. ──
+  const SHA = "a".repeat(64);
+  const A = "20260101000000_a.sql";
+  const B = "20260102000000_b.sql";
+  const C = "20260103000000_c.sql";
+  const D = "20260104000000_d.sql";
+  const files = (...names) => names.map((name) => ({ name, isDir: false }));
+  const marker = (entries, { sha = SHA, withSha = true } = {}) =>
+    ["# carried-migrations marker (self-test)", ...(withSha ? [`baseline-sha256: ${sha}`] : []), ...entries].join("\n") + "\n";
+  const replayRun = (over) => judgeReplaySet({ markerText: marker([A, B]), baselineSha: SHA, migrations: files(A, B), ...over });
+  const kindsOf = (r) => r.defects.map((d) => d.kind);
+  const seenKinds = new Set();
+  const see = (r) => {
+    for (const k of kindsOf(r)) seenKinds.add(k);
+    return r;
+  };
+
+  console.log("=== SELF-TEST R1/14: marker current for the directory -> K=0, zero defects, directories ignored");
+  const r1 = see(replayRun({ migrations: [...files(A, B), { name: "down", isDir: true }] }));
+  ok(r1.defects.length === 0 && r1.replay.length === 0, "a marker listing every migration yields zero defects and an EMPTY replay set");
+  ok(r1.markerSha === "match" && r1.carried.join(",") === [A, B].join(","), "the sha binding matches and the carried set is the marker's list");
+
+  console.log("=== SELF-TEST R2/14: two migrations newer than the dump -> K=2, named, sorted by filename");
+  const r2 = see(replayRun({ migrations: files(D, A, C, B), migrationTexts: { [C]: "SELECT 1;\n", [D]: "SELECT 1;\n" } }));
+  ok(r2.defects.length === 0 && r2.replay.join(",") === [C, D].join(","), `replay set is exactly [${C}, ${D}] in filename order`);
+
+  console.log("=== SELF-TEST R3/14: marker absent or unreadable -> marker-unreadable, never an empty carried set");
+  const r3 = see(replayRun({ markerText: null }));
+  ok(kindsOf(r3).includes("marker-unreadable"), "an unreadable marker is refused by name, not read as 'nothing carried'");
+
+  console.log("=== SELF-TEST R4/14: marker without a baseline-sha256 line -> marker-sha-absent");
+  const r4 = see(replayRun({ markerText: marker([A, B], { withSha: false }) }));
+  ok(kindsOf(r4).includes("marker-sha-absent"), "a list bound to no dump is refused");
+
+  console.log("=== SELF-TEST R5/14: marker sha differs from sha256(baseline.sql) -> marker-sha-mismatch naming BOTH prefixes");
+  const r5 = see(replayRun({ baselineSha: "b".repeat(64) }));
+  const d5 = r5.defects.find((d) => d.kind === "marker-sha-mismatch");
+  ok(Boolean(d5) && r5.markerSha === "MISMATCH", "a dump regenerated without its marker is refused");
+  ok(Boolean(d5) && d5.detail.includes("a".repeat(12)) && d5.detail.includes("b".repeat(12)), "the message names the marker's sha prefix AND the dump's");
+
+  console.log("=== SELF-TEST R6/14: marker with zero basenames -> marker-empty");
+  const r6 = see(replayRun({ markerText: marker([]) }));
+  ok(kindsOf(r6).includes("marker-empty"), "an empty carried list is refused — it would replay the whole chain onto the dump");
+
+  console.log("=== SELF-TEST R7/14: malformed and repeated marker lines -> marker-malformed-entry / marker-duplicate-entry");
+  const r7a = see(replayRun({ markerText: marker([A, B, "not a migration line"]) }));
+  ok(
+    r7a.defects.some((d) => d.kind === "marker-malformed-entry" && d.detail.includes("not a migration line")),
+    "a line that is neither comment, sha line nor strict basename is refused and quoted",
+  );
+  const r7b = see(replayRun({ markerText: marker([A, B, A]) }));
+  ok(
+    r7b.defects.some((d) => d.kind === "marker-duplicate-entry" && d.detail.includes(A)),
+    "a repeated basename is refused by name",
+  );
+
+  console.log("=== SELF-TEST R8/14: marker names a migration this checkout lacks -> dump-ahead-of-checkout");
+  const r8 = see(replayRun({ migrations: files(A) }));
+  ok(
+    r8.defects.some((d) => d.kind === "dump-ahead-of-checkout" && d.detail.includes(B) && d.detail.includes("base branch")),
+    "the missing basename is named and the reader is told to bring in the base branch",
+  );
+
+  console.log("=== SELF-TEST R9/14: unreadable dir / unclassifiable file -> migrations-dir-unreadable / migration-unclassifiable");
+  const r9a = see(replayRun({ migrations: null }));
+  ok(kindsOf(r9a).includes("migrations-dir-unreadable"), "'could not list' is refused, never read as 'nothing to replay'");
+  const r9b = see(replayRun({ migrations: files(A, B, "README.md") }));
+  ok(
+    r9b.defects.some((d) => d.kind === "migration-unclassifiable" && d.detail.includes("README.md")),
+    "a top-level FILE that is not a strict migration basename is refused by name",
+  );
+
+  console.log("=== SELF-TEST R10/14: a replayed file with a backslash-led line -> replay-meta-command naming file and line");
+  const r10 = see(
+    replayRun({ migrations: files(A, B, C), migrationTexts: { [C]: "SELECT 1;\n  \\! echo exfiltrate\n" } }),
+  );
+  ok(
+    r10.defects.some((d) => d.kind === "replay-meta-command" && d.detail.includes(C) && d.detail.includes("line 2")),
+    "a psql meta-command in a file the lane would hand to psql is refused before psql opens it",
+  );
+  // Review 164.4.2 WR-04: psql honours a backslash command ANYWHERE on a line
+  // outside quotes, not only at its start, and an unreadable replay file is
+  // not an empty one.
+  const r10b = see(replayRun({ migrations: files(A, B, C), migrationTexts: { [C]: "SELECT 1; \\! echo exfiltrate\n" } }));
+  ok(
+    r10b.defects.some((d) => d.kind === "replay-meta-command" && d.detail.includes("line 1")),
+    "a MID-LINE `SELECT 1; \\! cmd` is refused too — psql reads it as a meta-command",
+  );
+  const r10c = see(
+    replayRun({ migrations: files(A, B, C), migrationTexts: { [C]: "BEGIN;\nSELECT 1 \\i other.sql\nCOMMIT; \\o /tmp/x\n" } }),
+  );
+  ok(
+    r10c.defects.filter((d) => d.kind === "replay-meta-command").map((d) => d.detail.match(/line (\d+)/)?.[1]).join(",") === "2,3",
+    "`\\i` and `\\o` after code on lines 2 and 3 are each refused, by line",
+  );
+  const r10d = see(
+    replayRun({
+      migrations: files(A, B, C),
+      migrationTexts: {
+        [C]:
+          "-- a comment may say \\! freely\n/* so may \\o a block */\nSELECT '\\d', E'\\n', \"a\\b\";\n" +
+          "CREATE FUNCTION f() RETURNS text LANGUAGE sql AS $fn$ SELECT '^\\d+$' $fn$;\n",
+      },
+    }),
+  );
+  ok(
+    r10d.defects.length === 0 && r10d.replay.join(",") === C,
+    `CONTROL: backslashes inside comments, literals, identifiers and dollar bodies are NOT meta-commands (got ${JSON.stringify(r10d.defects.map((d) => d.detail))})`,
+  );
+  const r10e = see(replayRun({ migrations: files(A, B, C), migrationTexts: { [C]: "SELECT $x$ never closed\n" } }));
+  ok(
+    r10e.defects.some((d) => d.kind === "replay-meta-command" && /cannot be proven/.test(d.detail)),
+    "a file whose quoting never closes cannot be proven free of meta-commands, and is refused",
+  );
+  const r10f = see(replayRun({ migrations: files(A, B, C), migrationTexts: {} }));
+  ok(
+    r10f.defects.some((d) => d.kind === "replay-file-unreadable" && d.detail.includes(C)),
+    "a replay file whose text could not be read is refused by name — never scanned as empty",
+  );
+  // Review 164.4.2 round 2, WR-01: psql lexes a '…' literal by the SERVER's
+  // standard_conforming_strings, reported back after every SET. MEASURED on a
+  // pg-lane: this file ran its `\!` while the static reading saw one literal.
+  const r10g = see(
+    replayRun({
+      migrations: files(A, B, C),
+      migrationTexts: { [C]: "SET standard_conforming_strings = off;\nSELECT 'a\\'' ; \\! echo exfiltrate #'\n;\n" },
+    }),
+  );
+  ok(
+    r10g.defects.some((d) => d.kind === "replay-meta-command" && /cannot be proven/.test(d.detail) && d.detail.includes("standard_conforming_strings")),
+    "a file that switches standard_conforming_strings is refused by name — its lexing is data-dependent",
+  );
+  // psql's lexer also follows client_encoding: in a non-ASCII-safe encoding a
+  // lead byte swallows the next byte, which can be a quote.
+  const r10h = ["SET client_encoding = 'SJIS';\nSELECT 1;\n", "SET NAMES 'SJIS';\nSELECT 1;\n", "SELECT set_config('backslash_quote', 'on', false);\n"].map((t) =>
+    see(replayRun({ migrations: files(A, B, C), migrationTexts: { [C]: t } })),
+  );
+  ok(
+    r10h.every((r) => r.defects.some((d) => d.kind === "replay-meta-command" && /cannot be proven/.test(d.detail))),
+    "client_encoding, SET NAMES and backslash_quote are refused by name too",
+  );
+  // Silent-failure-hunter round 2, WR-04: psql reads every byte >= 0x80 as an
+  // identifier character, so `é$a$` is ONE identifier, not `é` then a dollar body.
+  // MEASURED on psql 16 (pg-lane, 2026-09-24): this shape and the `$é$` tag
+  // below each ran their shell command.
+  const r10i = see(replayRun({ migrations: files(A, B, C), migrationTexts: { [C]: "SELECT é$a$\n\\! echo exfiltrate\n, é$a$;\n" } }));
+  ok(
+    r10i.defects.some((d) => d.kind === "replay-meta-command" && d.detail.includes("line 2")),
+    "a non-ASCII identifier character before `$a$` does not open a dollar body — the `\\!` on line 2 is refused",
+  );
+  const r10j = see(replayRun({ migrations: files(A, B, C), migrationTexts: { [C]: "SELECT $é$ ' $é$; \\! echo exfiltrate; --'\n" } }));
+  ok(
+    r10j.defects.some((d) => d.kind === "replay-meta-command" && d.detail.includes("line 1")),
+    "a non-ASCII dollar TAG `$é$` opens and closes a body, so the `\\!` after it is refused",
+  );
+  // psql reads line by line, so `'…'` on the line after an E'…' literal is a NEW
+  // plain literal to psql, though the server continues it in E mode. MEASURED on
+  // psql 16 (pg-lane, 2026-09-24): this exact shape ran its shell command.
+  const r10k = see(replayRun({ migrations: files(A, B, C), migrationTexts: { [C]: "SELECT E'a'\n'\\' ; \\! echo exfiltrate #'\n" } }));
+  ok(
+    r10k.defects.some((d) => d.kind === "replay-meta-command" && d.detail.includes("line 2")),
+    "a literal on the line after an E'…' literal is lexed as psql lexes it, a new plain literal, so the `\\!` after it is refused",
+  );
+  // A number run straight into an identifier character is lexed by
+  // version-dependent junk-token rules: `1E'\'…'` is the junk token `1E` then a
+  // plain literal on one psql, and `1` then an E'…' literal on another. Refused,
+  // never guessed. MEASURED on psql 16 (pg-lane, 2026-09-24): the junk reading,
+  // and the shell command ran.
+  const r10l = ["SELECT 1E'\\'; \\! echo exfiltrate; '\n", "SELECT $1E'\\'; \\! echo exfiltrate; '\n"].map((t) =>
+    see(replayRun({ migrations: files(A, B, C), migrationTexts: { [C]: t } })),
+  );
+  ok(
+    r10l.every((r) => r.defects.some((d) => d.kind === "replay-meta-command")),
+    "a number or `$n` parameter run straight into an identifier character is refused, never read as code",
+  );
+  const r10m = see(
+    replayRun({
+      migrations: files(A, B, C),
+      migrationTexts: {
+        [C]:
+          "SELECT a$b$c, é, 1e10, 0.5, $1, E'x\\'y'\n  'z\\\\', \"é\"\"q\";\n" +
+          "CREATE FUNCTION g() RETURNS int LANGUAGE sql AS $é$ SELECT 1 $é$;\n",
+      },
+    }),
+  );
+  ok(
+    r10m.defects.length === 0 && r10m.replay.join(",") === C,
+    `CONTROL: \`$\` inside an identifier, non-ASCII identifiers and tags, numbers, parameters and a literal on the line after an E-literal are code psql can read (got ${JSON.stringify(r10m.defects.map((d) => d.detail))})`,
+  );
+
+  console.log("=== SELF-TEST R11/14: ANY defect -> the pure result carries no set at all");
+  ok(
+    [r3, r4, r5, r6, r7a, r7b, r8, r9a, r9b, r10, r10b, r10c, r10e, r10f, r10g, ...r10h, r10i, r10j, r10k, ...r10l].every((r) => r.defects.length > 0 && r.replay.length === 0 && r.carried.length === 0),
+    "an undeterminable set is never returned as a set — every defect arm above returns replay=[] and carried=[]",
+  );
+
+  console.log("=== SELF-TEST R12/14: REFDATA_ALLOWLIST_IN unreadable -> refdata-allowlist-unreadable");
+  const r12 = see(replayRun({ refdataAllowlistUnreadable: true }));
+  ok(kindsOf(r12).includes("refdata-allowlist-unreadable"), "no unfiltered or empty allowlist copy is ever handed over");
+
+  console.log("=== SELF-TEST R13/14: the allowlist filter drops exactly the replayed files' lines");
+  const allow = [
+    "# header",
+    "",
+    `${A}\tpublic.t\t1\t# carried; its comment quotes ${C} on purpose`,
+    `${C}\tpublic.t\t1\t# a replayed migration's line`,
+    "",
+  ].join("\n");
+  const f13 = filterRefdataAllowlist(allow, [C]);
+  ok(f13.excluded.join(",") === C && !f13.text.includes(`${C}\tpublic.t`), "the line whose FIRST field is the replay basename is dropped and named");
+  ok(
+    f13.text === ["# header", "", `${A}\tpublic.t\t1\t# carried; its comment quotes ${C} on purpose`, ""].join("\n"),
+    "comment, blank and carried lines are kept byte-identical — a replay basename in a carried line's comment field does not drop it",
+  );
+  const f13k0 = filterRefdataAllowlist(allow, []);
+  ok(f13k0.text === allow && f13k0.excluded.length === 0, "with K=0 the output is the input, byte for byte, excluded=0");
+
+  console.log("=== SELF-TEST R14/14: every kind judgeReplaySet() can emit is named in REPLAY_DEFECTS");
+  ok(
+    seenKinds.size === REPLAY_DEFECTS.length && [...seenKinds].every((k) => REPLAY_DEFECTS.includes(k)),
+    `REPLAY_DEFECTS names exactly the ${seenKinds.size} kind(s) observed: ${[...seenKinds].sort().join(", ")}`,
+  );
+
+  console.log("");
+  if (asserted !== EXPECTED_ASSERTIONS) {
+    console.error(
+      `=== SELF-TEST FAILED: ${asserted} assertion(s) ran, but this self-test declares ` +
+        `${EXPECTED_ASSERTIONS}. An arm was deleted, skipped, or added without updating ` +
+        `EXPECTED_ASSERTIONS. A shrinking self-test that still says PASSED is the defect. ===`,
+    );
+    return 1;
+  }
+  if (!pass) {
+    console.error(`=== SELF-TEST FAILED: ${asserted} assertion(s) run, at least one did not hold ===`);
+    return 1;
+  }
+  console.log(
+    `=== SELF-TEST PASSED: ${asserted}/${EXPECTED_ASSERTIONS} declared assertions across 9 default-mode + 14 replay-set sections, ` +
+      `every defect kind fired on its own input ===`,
+  );
+  return 0;
+}
+
+/**
+ * Invoke `FRESHNESS_TS_CMD <path>` through an argv ARRAY, never a shell
+ * string — splits the command on whitespace, uses element 0 as the binary
+ * and the remainder plus `path` as the argv tail. Reproduces what bash's
+ * unquoted `$FRESHNESS_TS_CMD "$path"` expansion does today, with no shell
+ * in the middle. A non-zero exit or a throw is an UNREADABLE epoch — its own
+ * defect kind via `judge()`, never a fresh one.
+ */
+function readEpoch(freshnessCmd, path) {
+  const parts = String(freshnessCmd).trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return "";
+  const [bin, ...rest] = parts;
+  try {
+    const out = execFileSync(bin, [...rest, path], { encoding: "utf8" });
+    return (out.split("\n")[0] ?? "").trim();
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * PURE: does FRESHNESS_TS_CMD read git history? True when ANY of its words is
+ * the git binary, by basename — `git …`, `/usr/bin/git …` and `env git …` all
+ * read history (round-2 review IN-04: the first-word-is-literally-`git` test
+ * missed the last two, so a depth-1 clone read fresh again). The restore
+ * self-test's `bash <stub>` names no git binary and is judged on its epochs.
+ */
+export function freshnessReadsGit(cmd) {
+  return String(cmd)
+    .trim()
+    .split(/\s+/)
+    .some((word) => basename(word) === "git");
+}
+
+/** `git rev-parse --is-shallow-repository`, or "" when git could not answer. */
+function readShallow() {
+  try {
+    return execFileSync("git", ["rev-parse", "--is-shallow-repository"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    }).trim();
+  } catch {
+    return "";
+  }
+}
+
+// ── --replay-set (DECISION F) ────────────────────────────────────────────────
+
+/** Every defect kind `judgeReplaySet()` can emit. Separate from `DEFECTS`, which
+ * is the default mode's list and the restore path's contract. */
+export const REPLAY_DEFECTS = [
+  "marker-unreadable",
+  "marker-sha-absent",
+  "marker-sha-mismatch",
+  "marker-empty",
+  "marker-malformed-entry",
+  "marker-duplicate-entry",
+  "dump-ahead-of-checkout",
+  "migrations-dir-unreadable",
+  "migration-unclassifiable",
+  "replay-meta-command",
+  "replay-file-unreadable",
+  "refdata-allowlist-unreadable",
+];
+
+/** A migration basename the lane will hand to psql: digits, underscore, lower snake, .sql. */
+export const MIGRATION_BASENAME_RE = /^[0-9]+_[a-z0-9_]+\.sql$/;
+const SHA_LINE_RE = /^baseline-sha256:[ \t]*(\S*)[ \t]*$/;
+
+/**
+ * Settings that change how psql's CLIENT-side lexer reads the text that follows
+ * them. psql follows the server's `standard_conforming_strings` (reported back
+ * after every SET) to decide whether a backslash inside '…' escapes the next
+ * character, and `client_encoding` to decide how many bytes a character spans
+ * (in a non-ASCII-safe encoding a lead byte swallows the next byte, which can
+ * be a quote). `backslash_quote` is refused beside them because it governs the
+ * same escape. Review 164.4.2 round 2, WR-01.
+ */
+const ESCAPING_MODE_RE = /\bstandard_conforming_strings\b|\bbackslash_quote\b|\bclient_encoding\b|\bSET\s+(?:SESSION\s+|LOCAL\s+)?NAMES\b/i;
+
+/** psqlscan.l's ident_start / ident_cont: ASCII letters, `_`, and every byte
+ * >= 0x80 — which in a UTF-8 file is every code point >= U+0080. `$` continues
+ * an identifier but never starts one. */
+const identStart = (ch) => ch !== undefined && (/[A-Za-z_]/.test(ch) || ch.charCodeAt(0) >= 0x80);
+const identCont = (ch) => ch !== undefined && (/[A-Za-z0-9_$]/.test(ch) || ch.charCodeAt(0) >= 0x80);
+/** psqlscan.l's dolqdelim: `$`, an optional tag (dolq_start dolq_cont*), `$`. No length cap. */
+const DOLQ_DELIM = /\$(?:[A-Za-z_\u0080-￿][A-Za-z0-9_\u0080-￿]*)?\$/y;
+/** A numeric literal's longest run (decimal, fraction, exponent, 0x/0o/0b, `_` separators). */
+const NUMBER = /0[xXoObB][0-9A-Fa-f_]*|[0-9][0-9_]*(?:\.[0-9_]*)?(?:[eE][+-]?[0-9][0-9_]*)?/y;
+
+/**
+ * PURE: the 1-based line numbers on which psql would read a backslash as a
+ * meta-command — any backslash outside a `--` comment, a (nested) block
+ * comment, a '…' or E'…' literal, a "…" identifier and a $tag$…$tag$ body. A
+ * meta-command may start mid-line. ⚠️ A literal continued across a newline
+ * (`E'a'` then `'…'` on the next line) is a NEW plain literal to psql, which
+ * reads its input line by line, even though the SERVER continues it in E mode.
+ * MEASURED on psql 16 in a pg-lane run, 2026-09-24: `SELECT E'a'` then
+ * `'\' ; \! cmd #'` ran `cmd`. So this lexer, like psql, never continues one.
+ *
+ * ⛔ This is psql's lexer's view ONLY under the settings psql connects with
+ * (`standard_conforming_strings = on`, an ASCII-safe `client_encoding`), and
+ * only for the token shapes modelled here. Everything else is REFUSED, never
+ * guessed, and returned as `{error, line}`:
+ *   - a comment, literal or body that never closes;
+ *   - any mention of a setting in ESCAPING_MODE_RE (review 164.4.2 round 2
+ *     WR-01: a pg-lane run executed a `\!` after `SET standard_conforming_strings
+ *     = off` that the standard-conforming reading placed inside a literal);
+ *   - a number or `$n` parameter run straight into an identifier character or
+ *     `$` (psql's junk-token rules for that shape differ between versions).
+ * Identifiers are consumed whole, so `é$a$` is one identifier as psql reads it,
+ * not `é` followed by a dollar body (silent-failure-hunter round 2, WR-04).
+ *
+ * ⚠️ KNOWN LIMIT, stated rather than implied: the setting refusal is by NAME. A
+ * migration that builds the name at run time (string concatenation, an E'…'
+ * escape, `chr()`, dynamic EXECUTE) is not seen. A PR controls its own workflow,
+ * so this is a guard against accident, not a trust boundary. psql variable
+ * interpolation (`:NAME`) is not a route either: the built-in values carry no
+ * quote or backslash, and LAST_ERROR_MESSAGE needs an error, which the replay's
+ * ON_ERROR_STOP=1 makes fatal.
+ *
+ * @returns {{lines: number[]} | {error: string, line: number}}
+ */
+export function psqlMetaCommandLines(src) {
+  const n = src.length;
+  const lines = new Set();
+  let line = 1;
+  const advance = (from, to) => {
+    for (let k = from; k < to; k++) if (src[k] === "\n") line++;
+  };
+  const mode = ESCAPING_MODE_RE.exec(src);
+  if (mode) {
+    return {
+      error: `a change of psql's string-escaping or client-encoding mode ('${mode[0]}'), after which where psql reads a backslash as a command cannot be proven statically`,
+      line: src.slice(0, mode.index).split("\n").length,
+    };
+  }
+  /** End of the '…' literal opened at `i` (one past its closing quote), or -1. */
+  const literalEnd = (i, escaped) => {
+    let j = i + 1;
+    while (j < n) {
+      if (escaped && src[j] === "\\") j += 2;
+      else if (src[j] === "'" && src[j + 1] === "'") j += 2;
+      else if (src[j] === "'") return j + 1;
+      else j++;
+    }
+    return -1;
+  };
+  let i = 0;
+  while (i < n) {
+    const c = src[i];
+    const start = line;
+    if (c === "-" && src[i + 1] === "-") {
+      let j = src.indexOf("\n", i);
+      if (j === -1) j = n;
+      i = j;
+      continue;
+    }
+    if (c === "/" && src[i + 1] === "*") {
+      let depth = 1;
+      let j = i + 2;
+      while (j < n && depth > 0) {
+        if (src[j] === "/" && src[j + 1] === "*") {
+          depth++;
+          j += 2;
+        } else if (src[j] === "*" && src[j + 1] === "/") {
+          depth--;
+          j += 2;
+        } else j++;
+      }
+      if (depth > 0) return { error: "an unterminated block comment", line: start };
+      advance(i, j);
+      i = j;
+      continue;
+    }
+    if (identStart(c)) {
+      let j = i + 1;
+      while (identCont(src[j])) j++;
+      // psql's xestart `[eE]'` outmatches the one-letter identifier `E`; a
+      // longer identifier ending in E (`xE'…'`) is an identifier, then a '…'.
+      if (j === i + 1 && (c === "E" || c === "e") && src[j] === "'") {
+        const k = literalEnd(j, true);
+        if (k === -1) return { error: "an unterminated string literal", line: start };
+        advance(i, k);
+        i = k;
+        continue;
+      }
+      i = j;
+      continue;
+    }
+    if (/[0-9]/.test(c) || (c === "$" && /[0-9]/.test(src[i + 1] ?? ""))) {
+      let j;
+      if (c === "$") {
+        j = i + 1;
+        while (/[0-9]/.test(src[j] ?? "")) j++;
+      } else {
+        NUMBER.lastIndex = i;
+        j = i + NUMBER.exec(src)[0].length;
+      }
+      if (identCont(src[j])) {
+        return { error: "a number or $n parameter run straight into an identifier character or `$`", line: start };
+      }
+      i = j;
+      continue;
+    }
+    if (c === "'") {
+      const k = literalEnd(i, false);
+      if (k === -1) return { error: "an unterminated string literal", line: start };
+      advance(i, k);
+      i = k;
+      continue;
+    }
+    if (c === '"') {
+      let j = i + 1;
+      let closed = false;
+      while (j < n) {
+        if (src[j] === '"' && src[j + 1] === '"') j += 2;
+        else if (src[j] === '"') {
+          closed = true;
+          j++;
+          break;
+        } else j++;
+      }
+      if (!closed) return { error: "an unterminated quoted identifier", line: start };
+      advance(i, j);
+      i = j;
+      continue;
+    }
+    if (c === "$") {
+      DOLQ_DELIM.lastIndex = i;
+      const m = DOLQ_DELIM.exec(src);
+      if (m) {
+        const close = src.indexOf(m[0], i + m[0].length);
+        if (close === -1) return { error: `an unterminated ${m[0]} dollar-quoted body`, line: start };
+        const j = close + m[0].length;
+        advance(i, j);
+        i = j;
+        continue;
+      }
+    }
+    if (c === "\\") {
+      // psql hands the rest of the line to the meta-command as its arguments,
+      // so it is not lexed as SQL. The file is refused on this line either way.
+      lines.add(line);
+      const eol = src.indexOf("\n", i);
+      i = eol === -1 ? n : eol;
+      continue;
+    }
+    if (c === "\n") line++;
+    i++;
+  }
+  return { lines: [...lines].sort((a, b) => a - b) };
+}
+
+/** Parse the marker's text into its sha line and its basename entries. */
+function parseMarker(text) {
+  const shas = [];
+  const entries = [];
+  const malformed = [];
+  const lines = text.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const raw = lines[i].replace(/\r$/, "");
+    if (/^[\t ]*(#|$)/.test(raw)) continue;
+    const sha = SHA_LINE_RE.exec(raw);
+    if (sha) shas.push(sha[1]);
+    else if (MIGRATION_BASENAME_RE.test(raw)) entries.push(raw);
+    else malformed.push({ lineNo: i + 1, raw });
+  }
+  return { shas, entries, malformed };
+}
+
+/**
+ * PURE: given already-read facts, determine the replay set or name why it
+ * cannot be determined. No I/O, so `--self-test` drives the real decision.
+ *
+ * @param {{
+ *   markerText: string|null,      // null = the marker could not be read
+ *   baselineSha: string|null,     // sha256 hex of baseline.sql; null = unreadable
+ *   migrations: Array<{name: string, isDir: boolean}>|null, // top-level entries; null = unreadable dir
+ *   migrationTexts?: Record<string, string>, // file name -> contents (replay files at least)
+ *   refdataAllowlistUnreadable?: boolean,
+ *   markerLabel?: string, baselineLabel?: string, migrationsLabel?: string,
+ * }} facts
+ * @returns {{carried: string[], replay: string[], markerSha: "match"|"MISMATCH"|"ABSENT",
+ *            defects: Array<{kind: string, detail: string}>}}
+ */
+export function judgeReplaySet({
+  markerText,
+  baselineSha,
+  migrations,
+  migrationTexts = {},
+  refdataAllowlistUnreadable = false,
+  markerLabel = "the carried-migrations marker",
+  baselineLabel = "the baseline file",
+  migrationsLabel = "the migrations directory",
+}) {
+  const defects = [];
+  const push = (kind, detail) => defects.push({ kind, detail });
+
+  if (refdataAllowlistUnreadable) {
+    push(
+      "refdata-allowlist-unreadable",
+      `REFDATA_ALLOWLIST_IN could not be read. The lane never falls back to an unfiltered or empty ` +
+        `copy: an unfiltered one would run a replayed migration's reference rows twice.`,
+    );
+  }
+  if (migrations === null) {
+    push(
+      "migrations-dir-unreadable",
+      `${migrationsLabel} could not be listed, so which migrations are newer than the dump is unknown. ` +
+        `"Could not list" is not "nothing to replay".`,
+    );
+  }
+  if (markerText === null || markerText === undefined) {
+    push(
+      "marker-unreadable",
+      `${markerLabel} could not be read. Without it the carried set is unknown, and an unknown set is ` +
+        `never read as empty — that would replay all 270-odd migrations onto a dump that already carries them.`,
+    );
+    return { carried: [], replay: [], markerSha: "ABSENT", defects };
+  }
+
+  const parsed = parseMarker(markerText);
+  let markerSha = "ABSENT";
+  if (parsed.shas.length === 0 || !parsed.shas[0]) {
+    push(
+      "marker-sha-absent",
+      `${markerLabel} has no \`baseline-sha256: <hex>\` line, so nothing binds its list to the dump.`,
+    );
+  } else if (parsed.shas[0] !== String(baselineSha ?? "")) {
+    markerSha = "MISMATCH";
+    push(
+      "marker-sha-mismatch",
+      `${markerLabel} is bound to baseline sha256 ${parsed.shas[0].slice(0, 12)}… but ${baselineLabel} ` +
+        `hashes to ${String(baselineSha || "UNREADABLE").slice(0, 12)}…. The dump was regenerated without ` +
+        `regenerating the marker (or the reverse) — regenerate both in ONE commit (BASELINE.md, Regenerating).`,
+    );
+  } else {
+    markerSha = "match";
+  }
+  for (const extra of parsed.shas.slice(1)) {
+    push("marker-malformed-entry", `${markerLabel} carries a SECOND baseline-sha256 line ('${extra}'); one dump, one binding.`);
+  }
+  for (const m of parsed.malformed) {
+    push(
+      "marker-malformed-entry",
+      `${markerLabel} line ${m.lineNo} is neither a comment, the baseline-sha256 line, nor a strict ` +
+        `migration basename: '${m.raw.slice(0, 120)}'`,
+    );
+  }
+  if (parsed.entries.length === 0) {
+    push(
+      "marker-empty",
+      `${markerLabel} lists no migration at all. Read literally, that would replay the whole chain onto a ` +
+        `dump that already carries it — the chain does not even replay from empty (REPLAY-SPIKE.md).`,
+    );
+  }
+  const seen = new Set();
+  for (const e of parsed.entries) {
+    if (seen.has(e)) push("marker-duplicate-entry", `${markerLabel} lists ${e} more than once.`);
+    seen.add(e);
+  }
+
+  const carried = [...seen].sort();
+  let replay = [];
+  if (migrations !== null) {
+    const onDisk = new Set();
+    for (const m of migrations) {
+      if (m.isDir) continue; // e.g. `down/` — not part of the forward chain
+      if (!MIGRATION_BASENAME_RE.test(m.name)) {
+        push(
+          "migration-unclassifiable",
+          `${migrationsLabel} holds '${m.name}', which is not a strict migration basename ` +
+            `(${MIGRATION_BASENAME_RE}). It can be neither carried nor replayed, so the set is not determinable.`,
+        );
+        continue;
+      }
+      onDisk.add(m.name);
+    }
+    for (const c of carried) {
+      if (!onDisk.has(c)) {
+        push(
+          "dump-ahead-of-checkout",
+          `${markerLabel} says the dump carries ${c}, but ${migrationsLabel} has no such file: the dump is ` +
+            `AHEAD of this checkout, so the lane would test this code against a schema its own migrations ` +
+            `do not produce. Bring in the base branch (merge or rebase onto it) and re-run.`,
+        );
+      }
+    }
+    replay = [...onDisk].filter((n) => !seen.has(n)).sort();
+    // psql meta-commands are CLIENT-side: the server cannot refuse them, and
+    // `db push` — the shape being mirrored — never interprets one. Refuse any
+    // backslash psql would read as a meta-command in a file the lane is about
+    // to hand to psql — ANYWHERE on a line, not only at its start (review
+    // 164.4.2 WR-04: `SELECT 1; \! cmd` is a meta-command too).
+    for (const r of replay) {
+      if (typeof migrationTexts[r] !== "string") {
+        push(
+          "replay-file-unreadable",
+          `${r} is in the replay set but its text could not be read, so it cannot be scanned for psql ` +
+            `meta-commands. An unreadable file is not an empty one.`,
+        );
+        continue;
+      }
+      const lines = migrationTexts[r].split("\n");
+      const scan = psqlMetaCommandLines(migrationTexts[r]);
+      if (scan.error) {
+        push(
+          "replay-meta-command",
+          `${r} cannot be proven free of psql meta-commands: ${scan.error} at line ${scan.line}, so where ` +
+            `psql would treat a backslash as a command is unknowable.`,
+        );
+        continue;
+      }
+      for (const lineNo of scan.lines) {
+        push(
+          "replay-meta-command",
+          `${r} line ${lineNo} carries a backslash outside any comment, literal or dollar body — a psql ` +
+            `meta-command, which would run on the runner, not in the database: '${lines[lineNo - 1].trim().slice(0, 80)}'`,
+        );
+      }
+    }
+  }
+
+  // ⛔ An undeterminable set is never RETURNED as a set, so no caller can print
+  // or hand over a partial one by mistake.
+  if (defects.length > 0) return { carried: [], replay: [], markerSha, defects };
+  return { carried, replay, markerSha, defects };
+}
+
+/**
+ * PURE: the reference-data allowlist minus every line whose FIRST TAB FIELD is
+ * a replay basename. Comment and blank lines (the extractor's own skip rule,
+ * `/^[\t ]*(#|$)/`) are kept verbatim, and so is every carried line — even one
+ * whose comment field happens to QUOTE a replay basename, which a substring
+ * filter would wrongly drop. With an empty replay set the output is the input,
+ * byte for byte.
+ *
+ * @returns {{text: string, excluded: string[]}} excluded = first fields dropped, in file order
+ */
+export function filterRefdataAllowlist(text, replay) {
+  const replaySet = new Set(replay);
+  const excluded = [];
+  const kept = [];
+  for (const raw of String(text).split("\n")) {
+    if (!/^[\t ]*(#|$)/.test(raw) && replaySet.has(raw.split("\t")[0])) {
+      excluded.push(raw.split("\t")[0]);
+      continue;
+    }
+    kept.push(raw);
+  }
+  return { text: kept.join("\n"), excluded };
+}
+
+function readOrNull(path) {
+  try {
+    return readFileSync(path, "utf8");
+  } catch {
+    return null;
+  }
+}
+
+function sha256OrNull(path) {
+  try {
+    return createHash("sha256").update(readFileSync(path)).digest("hex");
+  } catch {
+    return null;
+  }
+}
+
+function replayMain() {
+  const markerFile = process.env.CARRIED_MARKER || "supabase/schema/baseline-carried-migrations.txt";
+  const baselineFile = process.env.BASELINE_FILE || "supabase/schema/baseline.sql";
+  const migrationsDir = process.env.MIGRATIONS_DIR || "supabase/migrations";
+  const allowIn = process.env.REFDATA_ALLOWLIST_IN || "";
+  const allowOut = process.env.REFDATA_ALLOWLIST_OUT || "";
+  if (Boolean(allowIn) !== Boolean(allowOut)) {
+    console.error(
+      "::error::REFDATA_ALLOWLIST_IN and REFDATA_ALLOWLIST_OUT must be set together — one without the other would hand the lane no filtered allowlist.",
+    );
+    return 1;
+  }
+
+  let migrations = null;
+  try {
+    migrations = readdirSync(migrationsDir, { withFileTypes: true }).map((d) => ({
+      name: d.name,
+      isDir: d.isDirectory(),
+    }));
+  } catch {
+    migrations = null;
+  }
+  const migrationTexts = {};
+  for (const m of migrations ?? []) {
+    if (!m.isDir && MIGRATION_BASENAME_RE.test(m.name)) {
+      const t = readOrNull(join(migrationsDir, m.name));
+      if (t !== null) migrationTexts[m.name] = t;
+    }
+  }
+  const allowText = allowIn ? readOrNull(allowIn) : null;
+
+  const { carried, replay, markerSha, defects } = judgeReplaySet({
+    markerText: readOrNull(markerFile),
+    baselineSha: sha256OrNull(baselineFile),
+    migrations,
+    migrationTexts,
+    refdataAllowlistUnreadable: Boolean(allowIn) && allowText === null,
+    markerLabel: markerFile,
+    baselineLabel: baselineFile,
+    migrationsLabel: migrationsDir,
+  });
+
+  // Never let "clean" and "did not run" look alike: this line prints on every exit.
+  console.log(
+    `baseline-currency: carried=${carried.length} replay=${replay.length} marker-sha=${markerSha} ` +
+      `defects=${defects.length}`,
+  );
+  if (defects.length > 0) {
+    for (const d of defects) console.error(`::error::${d.kind} — ${d.detail}`);
+    console.error(`${defects.length} defect(s) — the replay set is UNDETERMINED; no set is printed and no handover file is written.`);
+    return 1;
+  }
+
+  console.log(
+    replay.length === 0
+      ? "baseline-replay: 0 migration(s) newer than the dump (none)"
+      : `baseline-replay: ${replay.length} migration(s) newer than the dump: ${replay.join(" ")}`,
+  );
+  const lines = (xs) => (xs.length === 0 ? "" : `${xs.join("\n")}\n`);
+  if (process.env.REPLAY_SET_FILE) writeFileSync(process.env.REPLAY_SET_FILE, lines(replay));
+  if (process.env.CARRIED_SET_FILE) writeFileSync(process.env.CARRIED_SET_FILE, lines(carried));
+  if (allowIn) {
+    const { text, excluded } = filterRefdataAllowlist(allowText, replay);
+    writeFileSync(allowOut, text);
+    console.log(
+      `baseline-replay: excluded ${excluded.length} reference-data allowlist line(s) naming replayed migrations: ` +
+        (excluded.length === 0 ? "(none)" : [...new Set(excluded)].join(" ")),
+    );
+  }
+  return 0;
+}
+
+function main(argv) {
+  if (argv.includes("--self-test")) return selfTest();
+  if (argv.length === 1 && argv[0] === "--replay-set") return replayMain();
+  // ⛔ A typo'd flag must not silently fall through to a green corpus run.
+  const unknown = argv.filter((a) => a !== "--self-test");
+  if (unknown.length > 0) {
+    console.error(
+      `::error::unknown argument(s): ${unknown.join(" ")} — this gate takes only --self-test, or --replay-set on its own`,
+    );
+    return 1;
+  }
+
+  // Same env seams and same defaults as scripts/restore-test-from-baseline.sh's
+  // `refuse_stale_baseline` assignment block — kept identical so relocating the
+  // caller onto this gate (164.4.2 plan 02, task 2) does not change what either
+  // side decides.
+  const baselineFile = process.env.BASELINE_FILE || "supabase/schema/baseline.sql";
+  const migrationsDir = process.env.MIGRATIONS_DIR || "supabase/migrations";
+  const freshnessCmd = process.env.FRESHNESS_TS_CMD || "git log -1 --format=%ct --";
+
+  const baselineEpoch = readEpoch(freshnessCmd, baselineFile);
+  const migrationsEpoch = readEpoch(freshnessCmd, migrationsDir);
+  // Shallowness is a fact about GIT history, so it is measured only when the
+  // freshness command reads git history; an injected stub (the restore
+  // script's self-test) is judged on its epochs alone.
+  const shallow = freshnessReadsGit(freshnessCmd) ? readShallow() : undefined;
+
+  const defects = judge({ baselineEpoch, migrationsEpoch, baselineFile, migrationsDir, shallow });
+
+  // Never let "clean" and "did not run" look alike: this line prints on
+  // every exit, defects=0 included.
+  console.log(
+    `baseline-currency: baseline=${baselineEpoch || "UNREADABLE"} migrations=${migrationsEpoch || "UNREADABLE"} ` +
+      `defects=${defects.length}`,
+  );
+  if (defects.length === 0) {
+    console.log(`✅ No defects — ${baselineFile} is at least as fresh as ${migrationsDir}`);
+    return 0;
+  }
+  for (const d of defects) console.error(`::error::${d.kind} — ${d.detail}`);
+  console.error(`${defects.length} defect(s)`);
+  return 1;
+}
+
+/**
+ * Realpath-safe main-module guard — the `[VAC04-C2]` lesson: comparing
+ * `import.meta.url` to `file://${process.argv[1]}` no-ops on symlinked or
+ * space-bearing paths, silently turning the CLI into a library. Same idiom as
+ * `scripts/check-baseline-staleness.mjs`, `scripts/lint-app-guc.mjs` and
+ * `scripts/check-banned-packages.mjs`.
+ */
+function invokedDirectly() {
+  if (!process.argv[1]) return false;
+  try {
+    return realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+  }
+}
+
+if (invokedDirectly()) {
+  process.exit(main(process.argv.slice(2)));
+}

@@ -192,12 +192,12 @@ No shadcn initialization. No third-party component registries. All new elements 
 
 ## Files Audited
 
-- `/Users/helios-mammut/claude-projects/quantalyze/src/app/(dashboard)/allocations/components/ScenarioComposer.tsx` — lines 1541–1607 (diversification memo + reorder), 2409–2594 (Diversification CollapsibleSection render)
-- `/Users/helios-mammut/claude-projects/quantalyze/src/components/ui/CollapsibleSection.tsx` — full (subtitle slot, storageKey handling, gap-10 children wrapper)
-- `/Users/helios-mammut/claude-projects/quantalyze/src/components/ui/EmptyStateCard.tsx` — full (prop names, typography, color)
-- `/Users/helios-mammut/claude-projects/quantalyze/src/app/globals.css` — @theme inline block (token definitions for warning, positive, accent, text-*, border)
-- `/Users/helios-mammut/claude-projects/quantalyze/src/lib/diversification.ts` — output shape (diversificationRatio, effectiveNumberOfBets, pcr, clusterOrderIds, tooSimilarPairs)
-- `/Users/helios-mammut/claude-projects/quantalyze/src/lib/storage/storage-namespaces.ts` — `composer-collapse:` namespace registration confirmed
+- `src/app/(dashboard)/allocations/components/ScenarioComposer.tsx` — lines 1541–1607 (diversification memo + reorder), 2409–2594 (Diversification CollapsibleSection render)
+- `src/components/ui/CollapsibleSection.tsx` — full (subtitle slot, storageKey handling, gap-10 children wrapper)
+- `src/components/ui/EmptyStateCard.tsx` — full (prop names, typography, color)
+- `src/app/globals.css` — @theme inline block (token definitions for warning, positive, accent, text-*, border)
+- `src/lib/diversification.ts` — output shape (diversificationRatio, effectiveNumberOfBets, pcr, clusterOrderIds, tooSimilarPairs)
+- `src/lib/storage/storage-namespaces.ts` — `composer-collapse:` namespace registration confirmed
 - `DESIGN.md` — conformance reference (color, typography, spacing, component patterns)
 - `.planning/phases/41-constituent-correlation-diversification/41-UI-SPEC.md` — design contract
 - `.planning/phases/41-constituent-correlation-diversification/41-CONTEXT.md` — implementation decisions

@@ -1,231 +1,297 @@
-# Feature Research: Production Resilience & Reliability (v1.16)
+# Feature Research: Revocable Share Links for Private Factsheets (v1.20 / SHARE — SHARELINK-01)
 
-**Domain:** Service-to-service resilience (Vercel Next.js ↔ Railway FastAPI seam) + async job-state
-reconciliation (Supabase-backed `compute_jobs` queue + Railway worker) + API rate limiting, for a
-live money-bearing analytics platform (real Deribit/MT5/sFOX accounts already syncing).
-**Researched:** 2026-07-25
-**Confidence:** MEDIUM-HIGH overall — SEAM and JOB findings are grounded directly in this
-codebase's existing (partial) implementations and a proven sibling pattern; RATE findings
-required a **correction to the milestone's own stated premise** (see Critical Finding below),
-verified via grep + git blame, not training data.
+**Domain:** Capability-URL ("secret link") sharing of a private, unpublished institutional
+document, in a product where the document's own id is deliberately a NON-secret. Comparable
+products: Google Docs/Drive link sharing, Notion "Share to web", Figma public links, Dropbox/Box
+shared links, and the fund-document niche (DocSend, virtual data rooms).
+**Researched:** 2026-08-20
+**Confidence:** **HIGH** on everything grounded in this repo (every code claim below was read at
+HEAD `ca3f0c5c` and is cited file:line); **MEDIUM** on the comparable-product conventions
+(WebSearch-tier, cross-checked across ≥2 products before being called a convention); **MEDIUM** on
+the W3C TAG capability-URL rules (fetched from the W3C source, but a 2014 Note, not a REC).
 
-## Critical Finding — the RATE premise is stale, re-scope before planning
+**Scope discipline:** the founder decision of 2026-08-13 (revocable per-strategy token, `?s=<token>`,
+Copy Link mints-or-reuses, revoke regenerates, bare `/factsheet/<id>` stays owner-only, id stays a
+non-secret) is **INPUT, not a question**. Nothing below re-litigates it. This file answers only
+*"given that decision, what does the surrounding feature set have to contain to not be a second
+founder-hit defect?"*
 
-`PROJECT.md` / `TODOS.md` describe `verify-strategy`, `keys/{sync,validate,encrypt}`,
-`admin/match/recompute`, `admin/partner-import`, `trades/upload`, and `intro` as "currently
-unlimited." **Grep + `git log -S"checkLimit"` show all seven already call `checkLimit()` with a
-named Upstash limiter**, added between 2026-04-10 and 2026-07-23 — i.e. *before* this milestone
-was opened today (2026-07-25). Cross-checking every route that imports `analytics-client.ts` /
-`process-key-client.ts` (the actual "hits the Python service" test) turns up only **one** genuinely
-unlimited Python-hitting route: `admin/match/eval` (admin-gated GET, lower risk). The rate-limiting
-infrastructure itself (`src/lib/ratelimit.ts`) is mature: sliding-window Upstash limiter, a documented
-fail-closed-in-prod/fail-open-outside-prod matrix (P709), a canonical `429 + Retry-After` /
-`503 + Retry-After` response builder, and consistent per-user keying. **This means RATE is mostly
-a verification + gap-closing task, not a build-from-scratch task** — flag this to the requirements
-step so RATE phases aren't sized as if starting from zero. (SEAM and JOB, by contrast, are real
-gaps — see below.)
+---
+
+## Critical Finding — "mint-or-reuse" is NOT free, and the in-repo precedent CANNOT deliver it
+
+The founder's shape says **"Copy Link mints-or-reuses"**. The obvious move is to copy the scenario
+share lane (migration `20260622120000`) verbatim. **That copy would not satisfy the requirement**,
+and the precedent's own code says so.
+
+`src/lib/scenario-share-token.ts:14` stores **only** `sha256(raw)`; the raw token is externalised
+exactly once, in the mint response. Consequence, documented in the precedent's own UI at
+`src/app/(dashboard)/allocations/components/SavedScenariosList.tsx:191-197`:
+
+> *"The generate route externalises the raw token EXACTLY ONCE (only its hash is persisted,
+> T-25-12), so the URL can never be re-fetched. Caching it for the session lets 'Copy link' hand out
+> the SAME link without re-minting … **Empty after a reload** / for a share generated in a prior
+> session."*
+
+So in the precedent, "reuse" works **only within one browser session**. After a reload,
+`copyExistingShare` (line 299) hits a cache miss and can only offer an explicit **"replace link"**
+confirm — i.e. rotate-and-kill. Additionally `create_scenario_share`
+(`supabase/schema/functions/create_scenario_share.sql`) **unconditionally revokes the prior active
+share** before inserting. A verbatim port therefore gives: *every* Copy Link click after a reload
+either rotates the token (killing the link the founder already emailed) or dead-ends into a scary
+confirm dialog. That is a **new** version of SHARELINK-01, not a fix for it.
+
+**Three ways out — the phase must pick one deliberately:**
+
+| Option | How reuse works | Cost | Notes |
+|---|---|---|---|
+| **A. Store the raw token** | `SELECT token FROM strategy_shares WHERE …` on every Copy Link | LOWEST | Breaks the precedent's hash-only discipline: a DB read-leak yields *live* links. Acceptable-ish here (the capability is read of one factsheet, not a book) but it must be a stated, reviewed deviation, not a silent one. |
+| **B. HMAC-over-a-stored-generation-counter** | `token = HMAC(SECRET, strategy_id ‖ generation)`; store only `generation` (int) + optionally the digest | MEDIUM | Recomputable forever ⇒ true mint-or-reuse across sessions; **revoke = `generation += 1`**, which is *literally* the founder's "a revoke control regenerates the token". Nothing secret at rest. In-repo precedent exists: `src/lib/demo-pdf-token.ts` (HMAC-SHA256 + `timingSafeEqual`). ⚠ Needs a **new required env var on Vercel** — see the RESEND_API_KEY class of failure; an unset secret makes Copy Link 500 in prod only. |
+| **C. Encrypt the token at rest** | decrypt on Copy Link | HIGHEST | Adds a KMS/crypto seam for no gain over B. Not recommended. |
+
+The scenario lib's comment (`scenario-share-token.ts:9-12`) rejects "the keyed-MAC model of
+`demo-pdf-token.ts`" because *"the revocation requirement is … impossible with a stateless HMAC
+token."* That reasoning is correct **for a stateless MAC** and does not apply to option B, which is
+a *stateful* MAC (the counter lives in the DB). This is a genuine distinction, not a loophole — but
+the phase plan must say so explicitly, because a reviewer will otherwise read option B as
+contradicting a documented decision.
+
+---
 
 ## Feature Landscape
 
-### Table Stakes (Expected of Production Resilience Hardening)
-
-These are the patterns any team hardens a live money-bearing seam with; missing them is what
-"the plumbing has no failure handling" means concretely.
+### Table Stakes (recipients and owners assume these exist)
 
 | Feature | Why Expected | Complexity | Notes |
 |---------|--------------|------------|-------|
-| **[SEAM] Unified, bounded fetch timeout budget** | A hung Railway request must not hold a Vercel lambda open until the platform kills it. | LOW | Partially done: `analytics-client.ts` has `AbortSignal.timeout()` (30s default, per-call overrides to 15s for Bridge/simulator) and `process-key-client.ts` independently hardcodes 60s. Two divergent, undocumented budgets for the same seam is the gap — unify into one exported budget table, and verify every Vercel route's `maxDuration` (30s/60s/300s observed) is comfortably ABOVE its own client timeout so the clean timeout error fires before the platform's raw kill. |
-| **[SEAM] Retry-with-backoff, idempotent reads ONLY** | Railway cold-starts (15–30s, already documented in `SyncProgress.tsx`'s `MISSING_ROW_GRACE_POLLS`) and transient network blips cause spurious read failures that a client should absorb, not surface to the user. | LOW-MED | Currently **zero** retry logic anywhere in `analytics-client.ts` / `process-key-client.ts`. Candidates: `evalMatch` (GET), the `/api/strategies/[id]/sync-progress` poll, `/api/portfolio-analytics` reads. 2-3 attempts, capped exponential backoff + jitter (thundering-herd control — this codebase already has a `RateLimitGate` primitive in `src/lib/retry/` from a DIFFERENT client-side burst-control use case that is a useful reference for the shape, not directly reusable). |
-| **[SEAM] Circuit breaker (closed/open/half-open) around the seam** | Standard fault-isolation pattern: `closed` = normal traffic; `open` = fail fast with a clean error instead of every concurrent lambda hanging to its own timeout (each burning a Vercel concurrency slot + a DB connection) during a sustained Railway outage; `half-open` = a small number of probe requests decide whether to close or re-open. | MED | None exists today — every request independently times out. Needs an in-memory (per-lambda-instance, since Vercel functions don't share process state) or Redis-backed (shared, more correct but adds a dependency on `UPSTASH` already in use for rate limiting) failure counter. Given Vercel's stateless-per-invocation model, a **shared** breaker state (Redis) is the only way the breaker actually protects the fleet — a per-instance breaker only protects that one cold lambda, which usually dies before it accumulates enough failures to trip. This is the single highest-complexity SEAM item. |
-| **[SEAM] Clean 503 "temporarily unavailable" on breaker-open / exhausted-retries, not cascade-500** | Users should see one honest, actionable message, never a raw stack trace or generic 500. | LOW | Precedent already exists: `process-key-client.ts` returns `{ok:false, code:"UPSTREAM_TIMEOUT"/"UPSTREAM_NETWORK_ERROR", human_message, recoverable:true}` at 504/502. Extend this same envelope shape with a `code:"CIRCUIT_OPEN"` variant at 503, and retrofit `analytics-client.ts` callers (which currently `throw` raw `AnalyticsTimeoutError`/`AnalyticsUpstreamError` up to route handlers — some of those routes may not catch cleanly, which IS the cascade-500 risk described in the milestone goal). |
-| **[JOB] Stuck-`computing`-row janitor for `strategy_analytics`** | A worker crash (SIGKILL, Railway redeploy) mid-job leaves `computation_status='computing'` forever; every future page load re-polls into the same wall (client caps at 120s per-session but the DB truth never resolves). | LOW | **Direct proven twin already exists** for a sibling table: `reset_stalled_portfolio_analytics` (migration `20260516122247_portfolio_analytics_stuck_row_reaper.sql`), invoked every `cron_recompute` tick with a 30-minute staleness threshold (`analytics-service/routers/cron.py`). A one-off manual script (`analytics-service/scripts/reset_stuck_computing_rows.py`) already does the ONE-TIME version of this for `strategy_analytics` but is not a recurring job. The work is: generalize the portfolio_analytics reaper pattern to a `strategy_analytics` twin, wire it into a recurring cron tick (not a manual script), and mark reaped rows `'failed'` with a user-facing, retryable message (not silently deleted). |
-| **[JOB] Dropped-enqueue detection ("has data, no job row")** | Vercel's `after()` callback is best-effort — if the lambda freezes/is killed before it runs, `finalize_csv_strategy` succeeds (strategy row exists) but `enqueue_compute_job` never fires, and no `compute_jobs` row is ever created. The wizard has nothing to poll toward a terminal state. | MED | Partially mitigated already: the existing "W-2" pattern in `csv-finalize` catches a **synchronous** enqueue failure inside the `after()` callback and writes a `strategy_analytics` placeholder row (`computation_status='failed'`) + `captureToSentry` — but this only fires if `after()` runs at all. It does NOT catch the callback never running. Needs a periodic reconciliation sweep: `strategies` rows with no matching `strategy_analytics` row AND no matching `compute_jobs` row past a grace window → auto-retry-enqueue (idempotent, since enqueue is a fresh row) + Sentry alert, exactly as TODOS.md's "Sentry alert + dashboard for pending/null rows > 2h" describes. |
-| **[JOB] Transactional (or compensating) csv-finalize** | Today `finalize_csv_strategy` (strategy + verification row), `persist_csv_daily_returns` (daily series), and the `after()` enqueue are three separate steps with no wrapping transaction — a mid-sequence failure orphans a strategy row with no data and no path to recovery. | MED | Two viable approaches, either acceptable: (a) fold `persist_csv_daily_returns` into the same SECURITY DEFINER RPC transaction as `finalize_csv_strategy` (cleanest, but the RPC boundary + `p_terminal_status` branching for CONTRIB-02 makes this a real refactor); (b) keep the steps separate but add an explicit compensating cleanup + Sentry alert on any post-strategy-creation failure, reusing the placeholder-write precedent already proven in the enqueue-failure path. Prefer (a) if the RPC surface allows it without breaking the CONTRIB-02 owner-only finalize variant; fall back to (b) otherwise. |
-| **[JOB] Wizard poll sees a terminal state, not forever-polling** | The user must not be stuck on a spinner that resolves neither to success nor to an actionable error. | LOW (already substantially shipped) | `SyncProgress.tsx` already caps at `POLL_MAX_ATTEMPTS=40` (~120s) and a `MISSING_ROW_GRACE_POLLS=10` grace window for Railway cold starts, converting to a client-visible `"error"` state on cap. This is presentation-layer good practice already in place — the remaining gap is purely server-side (the janitor + dropped-enqueue detection above), so the DB truth catches up with what the client already assumes, and a page **refresh** doesn't restart into the same "computing forever" DB row. |
-| **[RATE] `429 + Retry-After` contract, reused not reinvented** | Standard, already-adopted convention in this codebase. | LOW | `rateLimitDenyJson`/`rateLimitDenyText` in `src/lib/ratelimit.ts` are the canonical builders (429 for throttled, 503 for a misconfigured/fail-closed limiter, `Retry-After` header on both). Any newly-covered route should call these, not invent a new shape. |
-| **[RATE] Per-user keying for authed routes, per-IP for public routes** | Prevents one tenant's burst from starving another; per-IP is the only option for unauthenticated surfaces. | LOW | Already the dominant, correct convention (`` `keys-sync-user:${user.id}` ``, `` `verify-strategy:${ip}` `` for the one public-ish route). Keep this convention for `admin/match/eval` (the one confirmed gap) — key on `user.id` since it's already admin-authed. |
-| **[RATE] Sensible limits sized to the actual Python-side cost** | A limit that's too tight breaks legitimate workflows (CSV iteration, multi-tab polling); too loose doesn't cap abuse. | LOW | Already well-precedented — this codebase's existing limiters are explicitly reasoned against real usage patterns (e.g. `syncProgressLimiter` sized to the wizard's 3s poll cadence, `csvValidateLimiter` sized to both user iteration AND the upstream Python 30/hour cap). Apply the same reasoning to `admin/match/eval`: size to the eval-tooling's real cadence, not an arbitrary round number. |
+| **Copy Link always produces a link that works for the recipient** | This IS the founder-hit defect. `FactsheetView.tsx:1565` gates the Share button on `!scenarioMode` only, then flashes "Link copied" for a URL that 404s. Every comparable product (Docs, Notion, Figma, Dropbox) treats "the copy button hands out a working URL" as the contract. | **MEDIUM** (mint route + token lane) | The fix is *mint-on-copy*, not *hide-the-button*. See "Honest affordances" below for why hiding (the `strategies/page.tsx:174` pattern) is the wrong half of the class fix. |
+| **Immediate, unconditional revoke** | Universal: Docs ("Restricted"), Notion ("Remove"), Dropbox (disable), DocSend markets *"revoke access at any time, even after sharing"* as a headline. In the fund-document niche it is the single most-cited control. | **LOW** (mirror `share/revoke/route.ts`) | Precedent is complete and good: owner-scoped UPDATE setting `revoked_at`, **never a hard DELETE** (audit trail), 0 rows → 404 not 403 (no existence oracle), and 404-on-double-revoke is treated as *convergence to revoked*, not failure (`SavedScenariosList.tsx:333-341`). Copy that semantics verbatim. |
+| **The revoked/invalid-token page is DISTINCT from the app 404** | Dropbox deliberately splits *"This link is expired"* (link dead) from the generic 404 (file gone). Google Docs shows a "You need access" interstitial, not a 404. A bare 404 reads as *"the product is broken"* — which is exactly the failure mode the founder hit. | **LOW-MEDIUM** | ⭐ **Explicit spec (quality gate):** on `?s=<unknown-or-revoked>` the recipient must land on a page that says, in substance, *"This link is no longer active. The person who shared it turned it off. Ask them for a new link."* — with **no strategy name, no metrics, no id, no owner identity** on it, and `no-store`. HTTP status **410 Gone** (W3C TAG: *"servers should respond … with either a 410 Gone or a 404 Not Found"*; 410 is the semantically correct one for deliberate revocation). |
+| **⛔ The 410 applies to the TOKEN lane ONLY — the bare id lane keeps its uniform 404** | The repo's existing invariant: *"a non-owner authed viewer, an anonymous viewer and a genuinely missing id are indistinguishable from the outside (T-148-04)"* (`page.tsx:487`). | **LOW** (a branch) | Safe asymmetry: telling a holder of an unguessable 256-bit token that it *was* valid leaks nothing (they already had it); telling a holder of a **structurally leaky id** that the id exists is an existence oracle. Keep both behaviours, and pin both with tests. |
+| **Owner can see whether a live link exists** | Every comparable product shows share state in the share affordance itself. Without it, "did I already send this?" is unanswerable and the owner rotates by accident. | **LOW** | Precedent: `has_active_share` on the row + a local override (`SavedScenariosList.tsx:45-51, 199-203`). State machine: *none → `Share`; active → `Copy link` + `Revoke`*. Reuse this shape. |
+| **Revoke is confirmed before it fires** | Revoke is irreversible-in-effect (recipients lose access). Precedent already does this: inline confirm reading *"Revoke this share link? Anyone with the link will lose…"* (`SavedScenariosList.tsx:598-615`). | **LOW** | Do NOT use a `window.confirm`. Match the inline-confirm precedent. |
+| **Unguessable token, HTTPS-only, `noindex`, rate-limited** | W3C TAG capability-URL rules: ≥120 bits entropy or UUIDv4; `https` only; robots exclusion; *"access to the URL space in which capability URLs reside should be rate limited"* (enumeration defence). | **LOW** (all four already precedented) | `mintShareToken()` = 256-bit `randomBytes(32)` base64url ✅. `generateMetadata` already returns `robots: "noindex"` (`page.tsx:362`) ✅. `publicIpLimiter` + `getClientIp` is the pattern used by `scenario-share/[token]/page.tsx` ✅. There is **no `robots.txt` in the repo** — the meta tag is the only exclusion; that is adequate but worth stating. |
+| **⛔ The token render must never populate the id-keyed cache** | The founder-flagged landmine, and it is worse than it looks. | **MEDIUM** | See "Cache landmine" below — this is a *correctness* table stake, not a nicety. |
+| **Recipient chrome is suppressed** | A recipient must not be handed controls that don't apply to them. | **LOW** | ⭐ **Found while researching, not in TODOS.md:** `?share=1` already suppresses the outbound "Compare strategies" link (`FactsheetView.tsx:1566`) but does **NOT** suppress the Share button (line 1565 is gated on `!scenarioMode` alone). So a *recipient* of a token link currently sees "Copy share link", clicks it, and gets `?share=1` — the token is **stripped** by `ShareLinkButton`'s URL rebuild (line 1312: `pathname}?share=1`) — and hands out a **dead link**. This is a second instance of the same false-affordance class, on the recipient side. It must be in the same phase. |
+| **Rate-limited mint** | An unlimited mint route on an authed surface is a quota/DoS surface. | **LOW** | `userActionLimiter` + B15 ordering (validate → limit → write), misconfig → 503 not a misleading 429. Copy from `share/route.ts:110-125`. |
 
-### Differentiators (Beyond Baseline Hardening — Optional for This Milestone)
-
-Not required to close the SEAM/JOB/RATE gaps, but the kind of thing a genuinely mature
-resilience posture eventually adds. Flag as candidates for a later milestone, not v1.16 scope
-per the founder's CRON-deferred framing.
+### Differentiators (worth building, not assumed)
 
 | Feature | Value Proposition | Complexity | Notes |
 |---------|-------------------|------------|-------|
-| **[SEAM] Circuit-breaker state exposed on an ops/health dashboard** | Lets an operator SEE "Railway seam is open" instead of inferring it from a burst of Sentry 503s. | MED | Natural follow-on once the breaker itself exists; defer — the breaker's existence is the v1.16 win, observability of it is a nice-to-have. |
-| **[SEAM] Idempotency-Key header on retried/replayed POSTs** | Lets a genuinely-safe retry of a normally-unsafe write (e.g. a user-initiated resync) be replayed without double-effect, by having the Python side dedupe on a client-supplied key. | HIGH | Requires Python-side dedup-key storage + TTL; real value, but out of scope for a hardening milestone that should stay additive over existing plumbing, not add a new persistence contract. Anti-feature to attempt as a shortcut around the retry-safety rule below (see Anti-Features). |
-| **[JOB] Live job-queue depth / age metrics on an internal dashboard** | Operator visibility into `compute_jobs` backlog before it becomes a user-visible incident. | MED | Complements the janitor but isn't required to make the janitor correct. |
-| **[RATE] Adaptive/dynamic limits (backoff the limiter itself under Python-side load)** | Smarter than a static per-minute ceiling — throttles harder when the Python service itself is degraded. | HIGH | Interesting but couples RATE to SEAM's circuit-breaker signal; sequence this AFTER the breaker exists, if ever. Not v1.16 scope. |
+| **Stable, re-copyable link across sessions (true mint-or-reuse)** | The founder's literal requirement, and the thing the precedent *cannot* do. An allocator who copies the same link twice in two sessions should get the same URL both times — anything else silently kills links they already sent. | **MEDIUM** | Requires option A or B from the Critical Finding. This is the highest-value item in the whole phase: without it the feature regenerates the original bug in slow motion. |
+| **"Replace link" as a control SEPARATE from "Revoke"** | Two different intents: *"kill it"* vs *"the old one leaked, give me a new one"*. Conflating them (the precedent's mint-always-revokes) is what makes reuse impossible. | **LOW** once reuse exists | Owner-side triad: `Copy link` (idempotent) · `Replace link` (rotate, confirm) · `Revoke` (kill, confirm). This is also the founder's phrasing: *"a revoke control regenerates the token and kills old links."* |
+| **A link-scoped disclosure banner on the recipient's page** | The recipient is looking at an **unpublished, unreviewed** track record. `OwnerUnpublishedNotice` (`FactsheetView.tsx:690`) currently says *"only you can see this … anyone else who opens this link sees a 404"* — which becomes **factually false** the moment tokens ship. | **LOW-MEDIUM** | ⚠ **Hard dependency:** that banner's copy MUST change in this phase, or the product ships a false statement. Recipient-side needs its own variant: *"Shared privately by its owner. Not published or reviewed by Quantalyze."* Owner-side needs: *"Unpublished — visible to you and anyone holding your share link."* Notion's precedent of surfacing link-state **to the recipient** (the expiry banner) supports this. |
+| **Optional link expiry** | Notion (any plan), Dropbox (paid), Figma (**Enterprise only**), DocSend. The tier-gating across three products is the tell: **expiry is NOT table stakes for a first release.** | **MEDIUM** | W3C TAG says capability URLs *"should expire"*, but that is a security-purist position that three mass-market products treat as premium. **Recommendation: defer.** If built later, copy Notion's honesty move — show the expiry date **to the recipient**, in a banner, so nobody is surprised by a link dying mid-diligence. |
+| **A single "last opened" timestamp on the owner's share control** | Answers the one question an allocator actually has (*"did they look at it?"*) with one column and no surveillance apparatus. | **LOW** | Deliberately NOT the DocSend model (see anti-features). One `last_viewed_at` write, no per-page dwell, no notifications, no recipient identification. |
+| **Multiple named tokens per strategy** | W3C TAG's targeted-revocation recommendation: *"enabling users to generate multiple URLs for the same capability … allowing targeted revocation when a particular URL is compromised."* One link per LP ⇒ revoke one without breaking the rest. | **HIGH** | Genuinely the *right* end-state for fund-document sharing, and genuinely too much for this milestone. The schema should not **preclude** it: model the table as N rows with a partial-unique `WHERE revoked_at IS NULL` (exactly the precedent's index) and the door stays open. **Defer the UI.** |
 
-### Anti-Features (Do Not Build These)
+### Anti-Features (requested or precedented, but wrong here)
 
-| Anti-Feature | Why It Seems Appealing | Why It's Actually Dangerous Here | Do Instead |
-|--------------|------------------------|-----------------------------------|------------|
-| **Retrying non-idempotent POSTs** (`/api/keys/sync`, `/api/verify-strategy`, `csv-finalize`, `admin/match/recompute`) on timeout/network error | "Just retry everything that fails" feels like the simplest resilience win | These mutate state (enqueue a compute job, write a strategy row, kick off a live-key sync). A request that timed out on the CLIENT side may have **already succeeded** on the Railway/Python side — retrying blindly risks double-enqueue, duplicate `compute_jobs` rows racing the claim-token logic, or a second concurrent exchange-API sync hitting the same rate-limited broker key. This is explicitly the anti-feature the research question calls out. | Retry ONLY GET / idempotent-by-construction reads (`evalMatch`, sync-progress polls). For POSTs, surface the clean timeout/network error and let the EXISTING idempotency guards (F6 wizard/key submission idempotency, noted in git history) or an explicit user-initiated re-click handle re-attempts. |
-| **Deleting orphaned `compute_jobs`/`strategy_analytics` rows outright** | Simpler than a reset-with-message | For a LIVE investor-facing factsheet, silently vanishing a row loses the audit trail of "a sync was attempted here" and can re-trigger the SAME class of dropped-enqueue bug on the next attempt with no diagnostic residue. This is exactly the TEST-DELETE-vs-PROD-reset tension the founder already flagged for the sibling `compute_jobs` orphaned-`running` purge (WR-02, TODOS.md) — PROD should reset to a terminal, message-bearing `'failed'` state, not DELETE. | Reset to `'failed'` with a specific, user-recoverable message (mirrors the existing `reset_stuck_computing_rows.py` script's own convention: `"Sync was interrupted... Please retry."`). |
-| **A per-instance (in-memory-only) circuit breaker on Vercel** | Cheaper than wiring Redis state | Vercel functions are stateless/ephemeral per invocation (with fluid compute, an instance may live across a few invocations, but not reliably fleet-wide) — an in-memory breaker only ever sees a fraction of the traffic and typically resets on every cold start, so it never accumulates enough failures to trip before the instance recycles. It gives false confidence without the actual fail-fast protection the pattern promises. | Back the breaker with the SAME Upstash Redis instance already used for rate limiting — one shared failure counter + open-until timestamp, mirroring the existing `RateLimitGate` monotonic-forward-only design already proven in this codebase. |
-| **Unbounded exponential backoff without a retry cap** | "Just keep trying, it'll eventually work" | On a Vercel lambda with a hard `maxDuration`, an uncapped backoff loop either gets killed mid-retry (worse than failing fast) or, if capped, silently eats the ENTIRE function budget retrying instead of leaving headroom for the actual work. | 2-3 attempts max, capped total wall-clock retry budget well under `maxDuration`, then surface the clean error. |
-| **Building new RATE limiter infrastructure from scratch** | The milestone doc frames RATE as "unrated-limited routes" | As documented in the Critical Finding above, the infrastructure and convention are already mature and applied to 6 of the 7 named routes. Building a parallel or "v2" limiter would fragment the convention the codebase already got right. | Verify actual current coverage first (this research already did the grep), close the ONE real gap (`admin/match/eval`), and spend the RATE budget on **auditing** existing limits against real Python-side cost rather than re-inventing plumbing. |
-| **Retrying against an OPEN circuit breaker "just this once"** | Feels harmless for a single high-priority user request | Defeats the entire purpose of `open` state (fail fast, give the failing dependency room to recover); a bypass path is how circuit breakers silently stop protecting anything in practice. | If a request is truly high-priority, it still must respect the breaker; consider a distinct, narrower `half-open` probe budget instead of an escape hatch. |
+| Feature | Why Requested | Why Problematic | Alternative |
+|---------|---------------|-----------------|-------------|
+| **Per-view analytics / notify-on-open (the DocSend model)** | It is *the* selling point in the fund-document niche: page-by-page dwell, completion %, a ping on every open. | Turns a share link into a surveillance beacon aimed at **named allocators** — reputational risk far exceeding the feature's value pre-revenue. Also drags in consent/GDPR surface the repo has no home for (the `sanitize_user` deletion path would need to reach it), and inflates a 1-column feature into a subsystem. | The single `last_viewed_at` differentiator above. Nothing more. |
+| **Password-protecting the link** | Dropbox/Figma both offer it. | A password sent through the same channel as the link (email, Slack) adds ~zero real security and 100% of the support burden ("what was the password?"). The 256-bit token already IS the secret. | Revoke + (later) expiry. |
+| **Appending the token to the existing cache key** | Looks like the one-line fix. | ⛔ **It silently does nothing.** `page.tsx:66-69`: *"The `cacheKey` string the page passes in is split at `::` and everything after the id is DISCARDED … the effective `unstable_cache` key is id-ONLY."* The file spells out the corollary at line 76: *"viewer/lane separation can NEVER be expressed through the cacheKey string. Appending a suffix yields the SAME entry."* A token render written through `buildFactsheetPayloadCached` publishes a private strategy to every anonymous visitor for the full 3600 s TTL — **strictly worse than the bug being fixed.** | Branch **before** the cached wrapper, exactly as the owner lane already does (`page.tsx:529-536`: the owner arm calls `fetchAndBuildPayload` directly — *"no cache read, no cache write"*). The token lane is a third arm of that same `if`. |
+| **A separate `/share/[token]` route (the scenario-share pattern)** | It is the *cleaner* architecture and it is what `scenario-share/[token]/page.tsx` does. | Contradicts the settled `?s=<token>` URL shape, and forks the entire 664-line factsheet page for a second render path. | Keep `?s=` on the existing route and reuse the owner-lane bypass. Borrow only `scenario-share`'s **discipline** (`force-dynamic`, `no-store`, service-role transport, IP rate limit) — the factsheet page is already `force-dynamic` (`page.tsx:33`), so the residual hazard is the *data* cache only. |
+| **Hiding the Share button on unpublished strategies** | It is the "correct rule … one screen over" (`strategies/page.tsx:174`) that TODOS.md names, and it is half the class fix. | Hiding it **also removes the capability the founder wants**. Hidden-vs-disabled UX research: *"hide if the value is currently irrelevant"* — but here it is highly relevant, the owner genuinely wants to share. Hiding trades a lying button for a missing feature. | Keep the button **always visible and always enabled**; make it mint. The strategies-page site converges *up* to the token lane, not the factsheet site converging *down* to hidden. That is the honest reading of "fix the CLASS". |
+| **A greyed-out/disabled Share button** | The intuitive middle ground. | The repo's own UAT direction is explicit: **no disabled buttons — a blocked button becomes a clickable remedy.** A disabled control with no explanation is the same false affordance in a different colour. | Always-enabled mint. If a state genuinely cannot mint (see the open question below), the click opens a one-line explanation with the next step — never a dead grey rectangle. |
+| **Auto-minting a token on factsheet page load** | Makes Copy Link instant. | Mints a live capability for every strategy the owner merely *looks at*, including ones they never intended to share. Silent capability creation is the opposite of revocable. | Mint on the copy click (first time), reuse thereafter. |
+| **410 Gone on the bare `/factsheet/<id>` lane** | Symmetry with the token lane. | Converts the id into an existence oracle, defeating the founder's whole reason for the token model (*"the id must stay a NON-secret"*, and ids leak via history / `Referer` / `/compare?ids=`). | 410 for tokens, 404 for ids. Pin both. |
+
+---
 
 ## Feature Dependencies
 
 ```
-[SEAM: unified timeout budget]
-    └──requires──> nothing new (extends existing analytics-client.ts / process-key-client.ts)
+[Token model choice: raw-at-rest | HMAC+counter]
+    └──enables──> [Mint-or-reuse (stable link)]
+                      └──enables──> [Copy link is idempotent]
+                                        └──enables──> ["Replace link" ≠ "Revoke"]
 
-[SEAM: retry-with-backoff on reads]
-    └──requires──> [SEAM: unified timeout budget]   (retry budget must fit inside the overall budget)
+[strategy_shares table + partial-unique WHERE revoked_at IS NULL]
+    └──requires──> [Phase 156 Migration B settled against `strategies`]   ⛔ HARD BLOCKER
+    └──enables──> [Revoke]  ──enables──> [410 recipient page]
+    └──enables──> [has_active_share → owner "link is live" state]
+    └──leaves-door-open-for──> [Multiple named tokens]   (defer UI)
 
-[SEAM: circuit breaker]
-    └──requires──> [SEAM: unified timeout budget] + [SEAM: retry-with-backoff]
-                       (breaker trips on a stream of individually-timed-out/retried calls;
-                        building it before timeout/retry exist gives it nothing to count)
-    └──shares infra with──> existing Upstash Redis (RATE's rate-limit store)
+[Token read lane in factsheet/[id]/v2/page.tsx]
+    └──requires──> [Bypass of buildFactsheetPayloadCached]   ⛔ the landmine
+    └──requires──> [searchParams added to the page props]     (not currently declared)
+    └──requires──> [Recipient chrome suppression]             (?s= must imply shareMode)
+    └──conflicts──> [OwnerUnpublishedNotice's current copy]   ⛔ becomes FALSE on ship
+    └──degrades-with──> [generateMetadata + /api/og/factsheet/[id]]  (both withPublishedOnly)
 
-[SEAM: clean 503 on breaker-open]
-    └──requires──> [SEAM: circuit breaker]
-    └──enhances──> the ALREADY-EXISTING process-key-client.ts error-envelope pattern
-                       (UPSTREAM_TIMEOUT / UPSTREAM_NETWORK_ERROR → add CIRCUIT_OPEN)
-
-[JOB: stuck-computing janitor for strategy_analytics]
-    └──pattern-copies──> the EXISTING reset_stalled_portfolio_analytics reaper
-                             (proven in prod for a sibling table; lowest-risk JOB item)
-
-[JOB: dropped-enqueue detection]
-    └──requires──> [JOB: stuck-computing janitor]   (both are periodic reconciliation
-                       sweeps over the same strategies/strategy_analytics/compute_jobs
-                       triangle — natural to build/schedule together)
-
-[JOB: transactional csv-finalize]
-    └──independent of──> the other two JOB items (a different failure window:
-                             mid-finalize, not post-finalize-worker-crash)
-
-[JOB: wizard terminal-state polling]
-    └──ALREADY SHIPPED client-side (SyncProgress.tsx cap)
-    └──completed by──> [JOB: stuck-computing janitor]  (so DB truth matches client assumption)
-
-[RATE: close admin/match/eval gap]
-    └──independent──> reuses 100% existing infra, no new dependency
-
-[RATE: audit existing limits vs real cost]
-    └──independent──> no code dependency, a review pass over already-shipped limiters
+[FactsheetView.tsx:1565 Share button]  ──same class as──>  [strategies/page.tsx:174 ShareableLink]
+[FactsheetView.tsx:1312 ShareLinkButton URL rebuild]  ──strips the token──>  [recipient re-share = dead link]
 ```
 
 ### Dependency Notes
 
-- **Circuit breaker requires timeout + retry to exist first:** a breaker's failure counter needs
-  a well-defined "this call failed" signal. Building the breaker before the timeout budget is
-  unified means it counts against two different definitions of "failed" depending on which
-  client wrapper the call went through — build timeout unification and retry first, breaker last.
-- **Circuit breaker and rate limiting share Redis infrastructure:** both need a fast, shared,
-  cross-lambda-instance counter. Reusing the existing Upstash connection (already provisioned,
-  already has a documented fail-open/fail-closed philosophy in `ratelimit.ts`) avoids introducing
-  a second stateful dependency for what is conceptually the same kind of counter.
-- **JOB's two reconciliation sweeps (stuck-janitor, dropped-enqueue) are naturally one cron tick:**
-  both scan the same three tables (`strategies`, `strategy_analytics`, `compute_jobs`) for
-  different failure signatures (present-row-stale-status vs absent-row-entirely). Scheduling them
-  as one combined sweep (mirroring the existing `cron_recompute` pattern that already reaps
-  `portfolio_analytics` inline before its main work) avoids two competing cron jobs racing the
-  same tables.
-- **Transactional csv-finalize is independent** — it closes a DIFFERENT failure window (mid-request,
-  before any worker ever picks up a job) than the other two JOB items (post-request, worker-side).
-  It can be built and shipped in any order relative to the janitor/dropped-enqueue sweep.
+- **⛔ Blocker, restated from TODOS.md:** do not start on `feat/phase-156-connect-refactor` —
+  Phase 156's Migration B is still pending against `strategies`. Two concurrent migrations touching
+  the same table is how you get an ordering surprise on the auto-apply-to-PROD path.
+- **`OwnerUnpublishedNotice` becomes a false statement.** Its body currently reads *"Anyone else who
+  opens this link sees a 404 until Quantalyze review publishes it."* Once tokens ship that is wrong.
+  The component is deliberately single-sourced (`page.tsx` renders the same component on the
+  payload-pending arm — see the WR-02 note at `FactsheetView.tsx:686`), so one edit fixes both
+  sites. **A phase that ships the token lane without touching this component is incomplete.**
+- **Link-unfurl degradation is real and measured.** `generateMetadata` reads through
+  `withPublishedOnly` (`page.tsx:336`) and `/api/og/factsheet/[id]/route.tsx:40` does too. So a
+  token link pasted into Slack/WhatsApp/email unfurls as *"Strategy — Quantalyze Factsheet"* with a
+  **404 image**. Two honest options: (a) accept it and say so (a private link *should* be dull in a
+  chat preview — an unfurl bot's cache is a leak amplifier), or (b) resolve metadata through the
+  token. **Recommend (a), explicitly**, so it is a decision rather than a bug report later.
+- **A new env secret is a prod-only failure mode.** If the phase picks the HMAC option, the secret
+  must be set on Vercel **and redeployed** before the feature is reachable, or Copy Link 500s in
+  production while working perfectly everywhere else. This repo has been bitten by exactly this
+  (`RESEND_API_KEY`). Option A (raw token at rest) has no such dependency — that is its real
+  advantage, not the code size.
+- **`?s=` must imply the existing `shareMode`.** `useShareMode()` currently keys on `?share=1`
+  (`FactsheetView.tsx:1300`). Recipient-mode chrome suppression should key on *either*, so the token
+  lane inherits the suppression that already exists instead of growing a second flag.
+
+---
 
 ## MVP Definition
 
-### Launch With (v1.16 — this milestone)
+### Launch With (the SHARE phase)
 
-- [ ] **[SEAM] Unify the timeout budget** across `analytics-client.ts` and `process-key-client.ts`
-      into one exported constant/table, with every Vercel route's `maxDuration` verified to sit
-      comfortably above its own client timeout — essential because the two clients currently
-      disagree (30s vs 60s) with no documented reason, and that's the seam this milestone exists
-      to hardened.
-- [ ] **[SEAM] Retry-with-backoff on idempotent GET/read paths only** (`evalMatch`, sync-progress
-      poll, any `/api/portfolio-analytics`-style read) — 2-3 attempts, capped backoff + jitter.
-      Essential: closes the "hung request" cascade for the read half of the seam cheaply.
-- [ ] **[SEAM] Circuit breaker (closed/open/half-open) backed by the existing Upstash Redis**, with
-      a clean `503 CIRCUIT_OPEN` envelope reusing the `process-key-client.ts` error-shape
-      convention. Essential: this is the actual "top item" the milestone names first.
-- [ ] **[JOB] `strategy_analytics` stuck-`computing` janitor**, copying the proven
-      `reset_stalled_portfolio_analytics` pattern, wired into a recurring cron tick (not a manual
-      script). Essential: directly closes "no forever-spinners."
-- [ ] **[JOB] Dropped-enqueue reconciliation sweep** (strategy has data, no job/analytics row) with
-      auto-retry-enqueue + Sentry alert. Essential: closes the `after()`-never-ran gap the W-2
-      partial fix doesn't cover.
-- [ ] **[JOB] Transactional (or compensating) csv-finalize.** Essential: closes the orphan-strategy-row
-      class named explicitly in TODOS.md.
-- [ ] **[RATE] Close the one confirmed gap** (`admin/match/eval`) using the existing
-      `checkLimit`/`rateLimitDenyJson` convention. Essential but small — this is the entire real
-      RATE gap once the stale premise is corrected.
-- [ ] **[RATE] Audit existing limiter values against real Python-side cost** for the 6 routes the
-      milestone named (they already have SOME limiter — verify it's the RIGHT one, not just that
-      one exists). Essential to actually close the loop the milestone opened, even though it's a
-      review task rather than new code.
+- [ ] **`strategy_shares` table** — `strategy_id`, `created_by`, token material, `created_at`,
+      `revoked_at`; owner RLS with the **CR-01 owner-coherence `EXISTS` clause** (a plain
+      `created_by = auth.uid()` lets an authed user mint a share for *another tenant's*
+      strategy_id — the FK only proves existence); `REVOKE ALL … FROM anon`; partial-unique
+      `(strategy_id) WHERE revoked_at IS NULL`; index the lookup column.
+- [ ] **Token model decision (A or B) written down in the plan**, with the deviation from
+      `scenario-share-token.ts`'s hash-only discipline argued, not assumed.
+- [ ] **Mint-or-reuse route** (`POST`, owner-scoped, `userActionLimiter`, B15 ordering, redacted
+      DB-error envelope, `NO_STORE_HEADERS` on every response, `logAuditEvent`).
+- [ ] **Revoke route** — port `share/revoke/route.ts` semantics wholesale (soft revoke, 404-not-403,
+      double-revoke = convergence).
+- [ ] **Token read lane in `factsheet/[id]/v2/page.tsx`** — a third arm alongside public/owner that
+      **bypasses `buildFactsheetPayloadCached` entirely**, plus `searchParams` on the page props and
+      an IP rate limit on the token lookup.
+- [ ] **410 recipient page** for unknown/revoked tokens — content-free, `no-store`, distinct from the
+      app 404; the bare-id lane's 404 unchanged.
+- [ ] **`FactsheetView.tsx:1565` Share button becomes mint-or-reuse**, never flashes success on
+      failure (`ShareableLink.tsx` already models the honest copy-failure branch — reuse it).
+- [ ] **Recipient chrome suppression** — `?s=` implies `shareMode`; the recipient does **not** get a
+      Share button (today they'd copy a token-stripped, dead URL).
+- [ ] **`OwnerUnpublishedNotice` copy corrected** for both owner and recipient variants.
+- [ ] **`strategies/page.tsx:174` converged onto the same lane** — the class fix, both sites.
+- [ ] **Tests that can fail:** (1) an anon request for the id right after a **token** render still
+      404s — the phase-148 cache-poison pin, extended to the token arm; (2) revoke → next token load
+      is 410 with no strategy content in the HTML; (3) two Copy Link clicks **across a simulated
+      reload** return the *same* URL (the anti-regression pin for the precedent's session-only
+      reuse); (4) a token minted for strategy X does not open strategy Y; (5) the id lane still
+      returns a uniform 404 for anon / non-owner / missing.
 
-### Add After Validation (not this milestone, but natural next step if v1.16's gaps recur)
+### Add After Validation (v1.2x)
 
-- [ ] Circuit-breaker state on an operator dashboard — add once the breaker itself has been live
-      long enough to have tripped at least once in practice.
-- [ ] Idempotency-Key support for user-initiated retries of normally-unsafe POSTs — add if the
-      "retry only idempotent reads" restriction in v1.16 proves too limiting in practice (e.g. users
-      frequently need to manually re-click through a timed-out sync).
+- [ ] **`last_viewed_at`** on the share row — trigger: the founder asks "did they open it?" once.
+- [ ] **Optional expiry** with a recipient-visible banner — trigger: a real LP conversation needs a
+      time-boxed link.
 
-### Future Consideration (v2+, explicitly out of v1.16 scope per founder decision)
+### Future Consideration
 
-- [ ] CRON health-check + founder-LP/email idempotency — explicitly **deferred by the founder,
-      2026-07-25**, tracked separately in TODOS.md's "Reliability / observability" section.
-- [ ] Adaptive/load-aware rate limiting — couples RATE to SEAM's breaker signal; premature before
-      the breaker has real production signal to react to.
+- [ ] **Multiple named tokens per strategy** (per-recipient revocation) — defer until there is a
+      second recipient to revoke *from*. Keep the schema compatible.
+- [ ] **Owner-facing share audit list** ("minted 3 Aug, revoked 12 Aug") — the `revoked_at`
+      soft-delete already retains the data; this is presentation only.
+
+---
 
 ## Feature Prioritization Matrix
 
-| Feature | User/Ops Value | Implementation Cost | Priority |
-|---------|-----------------|----------------------|----------|
-| SEAM unified timeout budget | HIGH | LOW | P1 |
-| SEAM retry (idempotent reads) | MEDIUM | LOW | P1 |
-| SEAM circuit breaker | HIGH | MEDIUM | P1 |
-| SEAM clean 503 envelope | HIGH | LOW | P1 |
-| JOB stuck-computing janitor | HIGH | LOW | P1 |
-| JOB dropped-enqueue sweep | HIGH | MEDIUM | P1 |
-| JOB transactional csv-finalize | MEDIUM | MEDIUM | P1 |
-| RATE close admin/match/eval gap | LOW | LOW | P2 |
-| RATE audit existing limits | MEDIUM | LOW | P2 |
-| Circuit-breaker ops dashboard | MEDIUM | MEDIUM | P3 |
-| Idempotency-Key retries | MEDIUM | HIGH | P3 |
+| Feature | User Value | Implementation Cost | Priority |
+|---------|------------|---------------------|----------|
+| Copy Link produces a working link (mint) | HIGH | MEDIUM | **P1** |
+| Cache-poison bypass (token lane never writes the id key) | HIGH (correctness) | LOW | **P1** |
+| Mint-or-**reuse** across sessions | HIGH | MEDIUM | **P1** |
+| Revoke + confirm | HIGH | LOW | **P1** |
+| Distinct 410 recipient page | HIGH | LOW | **P1** |
+| Owner "link is live" state | MEDIUM | LOW | **P1** |
+| `OwnerUnpublishedNotice` copy correction | MEDIUM (honesty) | LOW | **P1** |
+| Recipient chrome suppression (`?s=` ⇒ shareMode) | MEDIUM | LOW | **P1** |
+| Both share sites on one lane (class fix) | MEDIUM | LOW | **P1** |
+| "Replace link" distinct from Revoke | MEDIUM | LOW | **P2** |
+| `last_viewed_at` | MEDIUM | LOW | **P2** |
+| Link expiry | LOW (for now) | MEDIUM | **P3** |
+| Multiple named tokens | LOW (today) | HIGH | **P3** |
+| View analytics / notify-on-open | LOW | HIGH | **anti-feature** |
+| Link password | LOW | MEDIUM | **anti-feature** |
 
-**Priority key:** P1 = must-have to close the milestone's stated goal ("no hung request / dropped
-enqueue / worker crash can strand a factsheet"). P2 = should-have, closes the RATE group's real
-(much smaller than stated) gap. P3 = defer to a later milestone.
+---
 
-## Idempotency / Retry-Safety Classification (by endpoint class)
+## Competitor Feature Analysis
 
-Explicit per the downstream consumer's quality gate — this table is the single source of truth
-for "what's safe to retry" when SEAM requirements get written.
+| Behaviour | Google Docs | Notion | Figma | Dropbox | DocSend | **Quantalyze (recommended)** |
+|---|---|---|---|---|---|---|
+| Link is a rotatable token? | ✗ (permanent file id; access is a *mode*) | ✗ (page id) | ✗ (file id) | ✓ (link id) | ✓ | **✓ — rotatable token, id stays non-secret** |
+| Copy is idempotent (same link twice) | ✓ | ✓ | ✓ | ✓ | ✓ | **✓ (needs option A or B — the precedent gives only session-scoped reuse)** |
+| Revoke | ✓ (→ Restricted) | ✓ (Remove) | ✓ | ✓ (disable) | ✓ (headline feature) | **✓ (soft, `revoked_at`)** |
+| Recipient sees a *specific* message | ✓ "You need access" | ✓ (expiry banner) | ✗ (link just stops) | ✓ "This link is expired" | ✓ | **✓ 410 "this link was turned off" — content-free** |
+| Owner sees link-live state | ✓ | ✓ | ✓ | ✓ | ✓ | **✓ (`has_active_share` pattern)** |
+| Expiry | ✗ | ✓ any plan | Enterprise only | Paid tiers | ✓ | **defer (P3)** |
+| Password | ✗ | ✗ | ✓ | ✓ | ✓ | **anti-feature** |
+| Per-view analytics | ✗ | ✗ | ✗ | ✗ | ✓ (core) | **anti-feature; `last_viewed_at` only** |
+| Targeted (per-recipient) revocation | ✓ (email invites) | ✗ | ✗ | ✗ | ✓ | **schema-compatible, UI deferred** |
 
-| Endpoint class | Examples | HTTP method | Safe to auto-retry? | Why |
-|----------------|----------|-------------|----------------------|-----|
-| Pure reads | `evalMatch`, sync-progress poll, portfolio-analytics GET | GET | YES | No side effect; a duplicate call reads the same state. |
-| Key sync / verify | `keys/sync`, `verify-strategy` | POST | **NO** | Triggers a live exchange-API sync + writes; a client-side timeout does not guarantee the server-side effect didn't complete. |
-| CSV finalize / validate | `csv-finalize`, `csv-validate` | POST | **NO** (finalize) / conditionally-idempotent (validate, if purely a dry-run check with no persistence) | Finalize creates rows; validate should be confirmed side-effect-free before treating it as retry-safe — verify at implementation time, don't assume from the name. |
-| Admin match/recompute | `admin/match/recompute` | POST | **NO** | Explicitly force-recomputes state; a duplicate concurrent recompute risks a race the existing in-flight/claim-token machinery is designed to prevent, not invite. |
-| Optimizer / simulator / bridge | `portfolio-optimizer`, `simulator`, `bridge` | POST | **CONDITIONALLY** — these are computationally read-like (no persisted side effect, pure computation over existing data) but are POSTs by HTTP verb. Treat as retry-safe ONLY if confirmed the Python handler performs no writes; otherwise treat as unsafe by default. | HTTP method alone is not a reliable signal here — verify against the actual handler, don't retry a POST just because it "feels read-like." |
+---
+
+## ⚠️ Open Product Question — surface, do NOT decide in this phase
+
+**`status='private'` strategies have zero UI actions.** `StrategyActions.tsx` branches
+`draft` → `pending_review` (line 113: `return null`) → `published` → `archived`, then falls through
+to `return null` (line 162). `private` matches nothing, so it renders **no actions at all**. The
+contribution flow lands strategies exactly there:
+`finalize-wizard/route.ts:1000` sets `terminalStatus = entryContext === "contribution" ? "private" : "pending_review"`.
+
+Consequence: a contribution-flow strategy **can never leave `private` from the UI**.
+
+This is adjacent to SHARELINK-01 (both are "an unpublished strategy has no honest path forward"),
+and the share token *partially* relieves it — with a token, a `private` strategy at least becomes
+shareable, which may be all a contribution record ever needed. But whether contribution records are
+**meant** to be permanently private, or need a publish path, is a **product decision the founder
+owns**. The phase should:
+
+1. Ship the token lane so `private` is *shareable* (removes the acute pain), and
+2. Surface the question in the phase's UAT/close notes with the two options stated —
+   **(a)** permanently private by design, leave it; **(b)** `private` needs a publish/submit-for-review
+   action, which is its own phase.
+
+Do not let a planner quietly pick (b) and grow a publish flow inside a share-link phase.
+
+---
 
 ## Sources
 
-- **Codebase (primary source, HIGH confidence):** `src/lib/analytics-client.ts`,
-  `src/lib/process-key-client.ts`, `src/lib/ratelimit.ts`, `src/components/strategy/SyncProgress.tsx`,
-  `src/app/api/strategies/csv-finalize/route.ts`, `analytics-service/routers/cron.py`,
-  `analytics-service/services/job_worker.py`, `analytics-service/scripts/reset_stuck_computing_rows.py`,
-  `supabase/migrations/20260516122247_portfolio_analytics_stuck_row_reaper.sql`, `TODOS.md`,
-  `.planning/PROJECT.md`, and `git log -S"checkLimit"` on the seven named RATE routes (dates
-  2026-04-10 through 2026-07-23, all predating the 2026-07-25 milestone open).
-- [Circuit Breaker Pattern — Azure Architecture Center](https://learn.microsoft.com/en-us/azure/architecture/patterns/circuit-breaker) — MEDIUM confidence, standard closed/open/half-open state machine description, corroborated by multiple independent sources in the same search.
-- [Vercel Functions Limits](https://vercel.com/docs/functions/limitations) / [Configuring Maximum Duration for Vercel Functions](https://vercel.com/docs/functions/configuring-functions/duration) — HIGH confidence, official docs; fluid compute raises the practical ceiling to 800s GA / 1800s beta, informing the "verify maxDuration sits above client timeout" table-stakes item.
-- [Railway Specs & Limits](https://docs.railway.com/networking/public-networking/specs-and-limits) — MEDIUM confidence (community help-station corroboration), Railway's public-networking request limit is ~5 minutes, which upper-bounds any SEAM timeout budget set from the Vercel side when reaching Railway over its public URL (private networking has no such limit, relevant if the two services are ever moved onto Railway's private network together).
+**Codebase (HIGH — read at HEAD `ca3f0c5c`, cited file:line inline)**
+- `src/app/factsheet/[id]/v2/page.tsx` — the two lanes, the owner-lane cache bypass, the
+  cacheKey-is-id-only correction (lines 33, 66-81, 362, 425-540)
+- `src/app/factsheet/[id]/v2/FactsheetView.tsx` — the mis-gated Share button (1565), `ShareLinkButton`
+  token-stripping URL rebuild (1308-1338), `useShareMode` (1293-1305), `OwnerUnpublishedNotice` (690)
+- `src/app/(dashboard)/strategies/page.tsx:174` + `src/components/strategy/ShareableLink.tsx` — the
+  correctly-gated sibling, and the honest copy-failure branch worth reusing
+- `src/components/strategy/StrategyActions.tsx:113,162` — the `private` dead end
+- `supabase/migrations/20260622120000_scenario_shares_and_read_rpc.sql`,
+  `supabase/schema/functions/{create_scenario_share,get_shared_scenario}.sql` — the revocable-share precedent
+- `src/lib/scenario-share-token.ts` (hash-only) vs `src/lib/demo-pdf-token.ts` (keyed MAC) — the two token models in-repo
+- `src/app/api/allocator/scenario/share/{route.ts,revoke/route.ts}`,
+  `src/app/(dashboard)/allocations/components/SavedScenariosList.tsx` — mint/revoke route + UX state machine
+- `src/app/scenario-share/[token]/page.tsx` — the public token-lane security boundary comment
+- `src/app/api/og/factsheet/[id]/route.tsx:40` — published-only OG image (unfurl degradation)
+
+**External (MEDIUM — WebSearch/WebFetch tier, cross-checked)**
+- [Good Practices for Capability URLs — W3C TAG](https://www.w3.org/2001/tag/doc/capability-urls/) — entropy, https, referrer, expiry, revocation, robots, rate limiting, 410-or-404
+- [Sharing & permissions settings in Notion](https://www.notion.com/help/sharing-and-permissions) and [Notion link expiration rules](https://www.metomic.io/resource-centre/how-to-use-notions-new-expiry-rules) — recipient-visible expiry banner
+- [Set an expiration on public links in design files — Figma](https://help.figma.com/hc/en-us/articles/16142157359255-Set-an-expiration-on-public-links-in-design-files) — expiry is Enterprise-gated
+- [Troubleshoot shared links — Dropbox](https://help.dropbox.com/share/shared-link-stopped-working) and [set link permissions](https://help.dropbox.com/share/set-link-permissions) — "This link is expired" vs generic 404
+- [How to Unshare a Google Doc](https://www.howtogeek.com/760665/how-to-unshare-a-google-doc/) / [Remove "Anyone with the link" sharing](https://www.patronum.io/remove-anyone-link-sharing-google-drive) — mode toggle, all-or-nothing, "you need access"
+- [DocSend document tracking and analytics](https://www.docsend.com/features/analytics/) / [Revoke Access — Peony](https://www.peony.ink/features/revoke-access) — the fund-document niche's revoke + analytics expectations
+- [410 Gone — MDN](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Status/410) — deliberate-removal semantics
+- [Hidden vs. Disabled In UX — Smashing Magazine](https://www.smashingmagazine.com/2024/05/hidden-vs-disabled-ux/) / [Disabled Buttons UX](https://uxdworld.com/disabled-buttons-ux/) — why hiding *and* disabling are both wrong here
 
 ---
-*Feature research for: Production Resilience & Reliability (v1.16) — SEAM / JOB / RATE requirement groups*
-*Researched: 2026-07-25*
+*Feature research for: revocable share links on private factsheets (v1.20 SHARE / SHARELINK-01)*
+*Researched: 2026-08-20*

@@ -9,6 +9,7 @@ import {
 import { CircuitOpenError } from "@/lib/seam-errors";
 import { CIRCUIT_OPEN_COPY } from "@/lib/seam-copy";
 import { assertSameOrigin } from "@/lib/csrf";
+import { adminActionLimiter, checkLimit, rateLimitDenyJson } from "@/lib/ratelimit";
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
 // 140.3-13a / SEAMUX-08 — the ONE lazy-Sentry helper. Scrubbing is folded INTO
 // it (SEAMCORE-06), so the caught value is passed UNMODIFIED: pre-scrubbing
@@ -16,6 +17,12 @@ import { NO_STORE_HEADERS } from "@/lib/api/headers";
 // and stack, while re-creating the per-caller convention the chokepoint exists
 // to replace. See the CAPTURE POLICY docblock below.
 import { captureToSentry } from "@/lib/sentry-capture";
+// 140.4-08 / SEAMRIM-06 — the CONSOLE half of the same rule. `captureToSentry`
+// scrubs at its own chokepoint (above); `console.*` has no chokepoint, so every
+// site standing over the caught value wraps it here. The two are not
+// alternatives: the Sentry call keeps the Error instance for grouping, the log
+// keeps a scrubbed rendering, and undici's header-inlining is covered on both.
+import { scrubSeamError } from "@/lib/seam-redaction";
 
 /**
  * Phase 140 / SEAM-02 — pinned for clarity; asserted against
@@ -37,8 +44,8 @@ export const maxDuration = 300;
  * echoed `err.message`, which on this seam carries Python contract-drift
  * strings (the multi-line Zod issue list `parseResponse()` throws), FastAPI
  * 5xx `detail`, and the analytics service's base URL. Same defect and same
- * fix as bridge H-1062 (`src/app/api/bridge/route.ts:142-145`) and
- * portfolio-optimizer M-0333 (`src/app/api/portfolio-optimizer/route.ts:144-147`);
+ * fix as bridge H-1062 (the breaker arm in `src/app/api/bridge/route.ts`) and
+ * portfolio-optimizer M-0333 (the ownership-check arm in `src/app/api/portfolio-optimizer/route.ts`);
  * these two admin/match routes were simply never included in those passes.
  * The diagnosable half stays in `console.error`, server-side only.
  *
@@ -127,11 +134,45 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
   const supabase = await createClient();
   const { data: { user } } = await supabase.auth.getUser();
   // P444 (audit-2026-05-07) — RFC 7235: 401 unauthenticated, 403 forbidden.
+  // ── 140.3-G8 / SEAMUX-03 — a machine `code` on every arm THIS route owns ──
+  // A consumer discriminates on a stable token instead of sniffing the prose
+  // (140.3-12's to reword). UNAUTHENTICATED / FORBIDDEN are inline gate codes,
+  // NOT WizardErrorCode members: admin-only arms must never force wizard copy
+  // (the keys/sync template ships the same non-union tokens). ⚠️ These two gate
+  // arms carry ONLY the auth verdict — no seam state — because they run BEFORE
+  // any breaker-aware branch (threat T-140-12): a code naming Railway health
+  // here would be an unauthenticated oracle.
   if (!user) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401, headers: NO_STORE_HEADERS });
+    return NextResponse.json({ error: "Unauthorized", code: "UNAUTHENTICATED" }, { status: 401, headers: NO_STORE_HEADERS });
   }
   if (!(await isAdminUser(supabase, user))) {
-    return NextResponse.json({ error: "Forbidden" }, { status: 403, headers: NO_STORE_HEADERS });
+    return NextResponse.json({ error: "Forbidden", code: "FORBIDDEN" }, { status: 403, headers: NO_STORE_HEADERS });
+  }
+
+  // 146-01 / RATE-02 — mirror the sibling recompute: 20/min per authenticated
+  // admin (`adminActionLimiter`), keyed on `user.id`, NOT IP. B15 NO_INPUT
+  // shape: this GET has no request body, so the "burn-a-token-on-bad-input"
+  // bug cannot occur and the limiter sits directly behind the isAdminUser
+  // gate (auth → limit → handler).
+  const rl = await checkLimit(adminActionLimiter, `match-eval:${user.id}`);
+  if (!rl.success) {
+    // 140.4-13 / SEAMRIM-05 — the ADMIN auth shape. The 503-vs-429 decision is
+    // the chokepoint's; this route keeps only NO_STORE_HEADERS.
+    //
+    // 140.3-G8 / SEAMUX-03 — the builder's default deny bodies are CODELESS
+    // (ratelimit.ts), so both are overridden to carry a machine `code` while
+    // the builder-default SENTENCES stay BYTE-KEPT (keys/sync template). The
+    // builder still decides 429-vs-503; the code names which the caller got.
+    // RATE_LIMITED is OUR limiter's token (not KEY_RATE_LIMIT, the exchange
+    // family); SEAM_MISCONFIGURED is the limiter-unavailable token.
+    return rateLimitDenyJson(rl, {
+      headers: NO_STORE_HEADERS,
+      throttledBody: { error: "Too many requests", code: "RATE_LIMITED" },
+      misconfiguredBody: {
+        error: "Rate limiter unavailable",
+        code: "SEAM_MISCONFIGURED",
+      },
+    });
   }
 
   const url = new URL(req.url);
@@ -169,12 +210,15 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
         `[api/admin/match/eval] circuit open — short-circuited, retry in ${err.retryAfterS}s`,
       );
       return NextResponse.json(
-        { error: CIRCUIT_OPEN_COPY },
+        { error: CIRCUIT_OPEN_COPY, code: "CIRCUIT_OPEN" },
         {
           status: 503,
           headers: {
             ...NO_STORE_HEADERS,
-            // Same pairing as rateLimitDenyJson (`src/lib/ratelimit.ts:263-288`).
+            // Same pairing as rateLimitDenyJson — which, since 146-01, this
+            // route's own deny arm above actually calls (the prose here used
+            // to be the file's ONLY mention of the builder; see the
+            // comment-strip note in seam-ratelimit-posture.invariant.test.ts).
             "Retry-After": String(err.retryAfterS),
           },
         },
@@ -182,9 +226,12 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     }
     // A timed-out Python round-trip is a gateway timeout, not a server fault.
     if (err instanceof AnalyticsTimeoutError) {
-      console.error("[api/admin/match/eval] upstream timeout:", err);
+      console.error(
+        "[api/admin/match/eval] upstream timeout:",
+        scrubSeamError(err),
+      );
       return NextResponse.json(
-        { error: TIMEOUT_COPY },
+        { error: TIMEOUT_COPY, code: "UPSTREAM_TIMEOUT" },
         { status: 504, headers: NO_STORE_HEADERS },
       );
     }
@@ -197,12 +244,18 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     // signature failure, so both counts are asserted per file.
     //
     // THE RANGE SPLIT IS THE POINT, copied from
-    // `src/app/api/simulator/route.ts:201` rather than invented. Only 4xx
+    // the 4xx-forward arm in `src/app/api/simulator/route.ts` rather than invented. Only 4xx
     // forwards: a 4xx `detail` is operator-curated copy, while a 5xx `message`
     // carries the FastAPI detail, the `parseResponse()` contract-drift string
     // and this service's base URL — what the STATIC-bodies docblock above
     // exists to keep off the wire (T-140-11). A 5xx keeps falling through to
     // the static arm below.
+    //
+    // ⚠️ 161-08 / WIZERR-06 — "only 4xx forwards" is about the MESSAGE, and
+    // only the message. Since WIZERR-06 the terminal arm below forwards the
+    // upstream's `seamCode` too, so `code` now crosses on BOTH sides of 500
+    // while `error` still crosses on the 4xx side alone. `EVAL_WINDOW_TOO_LARGE`
+    // (400) and `EVAL_FAILED` (500) are the sibling pair this made honest.
     //
     // The status only. No header rides along: `AnalyticsUpstreamError` carries
     // none, so a forwarded upstream 429 reaches the client WITHOUT its
@@ -214,15 +267,33 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     ) {
       // Status and machine code only — never the message, which is already
       // going to the client and would double the disclosure surface in the log.
+      //
+      // ⚠️ BOTH READS GO THROUGH THE LEAF EVEN THOUGH BOTH ARE SAFE VALUES, and
+      // the reason is the guard, not the value. `status` is a `number` and
+      // `seamCode` a machine code from a closed set (`AnalyticsUpstreamError` in `analytics-client.ts`),
+      // so the scrub is a rendering no-op on each — but the source guard
+      // (`seam-log-coverage.test.ts`) cannot know a type, and its allowlist is
+      // `retryAfterS` / `deadlineExceeded` / `code` only. The two other ways to
+      // clear it here are both worse: passing `scrubSeamError(err)` would put
+      // `err.message` — the thing this comment exists to keep OUT of the log —
+      // back in, and binding the reads to non-error-shaped locals would hide
+      // them behind the one-hop alias hole that plan 140.4-09 exists to close.
       console.error(
-        `[api/admin/match/eval] upstream ${err.status} (${err.seamCode ?? "no code"})`,
+        `[api/admin/match/eval] upstream ${scrubSeamError(err.status)} ` +
+          `(${scrubSeamError(err.seamCode ?? "no code")})`,
       );
       // 140.3-11 / TS-18 — `dependency` rides along so a 424 can be rendered as
       // the CALLER'S venue failing rather than as our outage. It is `null` on
       // every other 4xx and on the flat 424 shape, and a consumer that sees
       // `null` must say "a venue failed" without naming one.
+      //
+      // 140.3-G8 / SEAMUX-03 — `code` carries the UPSTREAM'S OWN machine token,
+      // completing the thread TS-19 started: `AnalyticsUpstreamError.seamCode`
+      // holds the Python code (e.g. the flat-424 venue-transient codes) for
+      // exactly this read. `?? "UNKNOWN"` when the upstream body carried none.
+      // `error` and `dependency` are BYTE-UNCHANGED beside it (TS-18/TS-19).
       return NextResponse.json(
-        { error: err.message, dependency: err.dependency },
+        { error: err.message, dependency: err.dependency, code: err.seamCode ?? "UNKNOWN" },
         { status: err.status, headers: NO_STORE_HEADERS },
       );
     }
@@ -242,9 +313,35 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       tags: { surface: "admin-match-eval", step: "upstream-error" },
       extra: { lookback_days: lookback },
     });
-    console.error("[api/admin/match/eval] upstream error:", err);
+    console.error(
+      "[api/admin/match/eval] upstream error:",
+      scrubSeamError(err),
+    );
+    // 161-08 / WIZERR-06 — THE CODE CROSSES; THE MESSAGE STILL DOES NOT.
+    //
+    // `GENERIC_COPY` is untouched: the STATIC-bodies docblock above still
+    // governs `error`, and a 5xx `message` still carries FastAPI detail, the
+    // `parseResponse()` contract-drift string and this service's base URL.
+    // ONLY `code` moves.
+    //
+    // ⭐ THIS ROUTE IS THE CLEAREST CASE IN THE FIVE. `eval_metrics` emits a
+    // sibling pair: `EVAL_WINDOW_TOO_LARGE` at 400, which the 4xx arm above
+    // already forwards INTACT, and `EVAL_FAILED` at 500 — the producer's own
+    // declared residue — which misses that arm and lands here. Until this edit
+    // the pair arrived as one code and one mystery, purely because of which
+    // side of 500 they fell on.
+    //
+    // ⛔ `typeof`, NOT `instanceof AnalyticsUpstreamError`: this arm is also
+    // reached by transport failures and untyped throws, and a route suite that
+    // mocks `@/lib/analytics-client` wholesale makes the class `undefined`,
+    // where `x instanceof undefined` throws from inside this very catch. The
+    // empty string is excluded because `"" ?? "UNKNOWN"` is `""`.
+    const rawSeamCode = (err as { seamCode?: unknown } | null | undefined)
+      ?.seamCode;
+    const seamCode =
+      typeof rawSeamCode === "string" && rawSeamCode !== "" ? rawSeamCode : null;
     return NextResponse.json(
-      { error: GENERIC_COPY },
+      { error: GENERIC_COPY, code: seamCode ?? "UNKNOWN" },
       { status: 500, headers: NO_STORE_HEADERS },
     );
   }

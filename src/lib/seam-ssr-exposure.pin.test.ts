@@ -128,6 +128,17 @@ const SEAM_IMPORT_EDGE = new RegExp(
 const ALLOWED_SEAM_IMPORTERS: readonly string[] = [
   "src/lib/analytics-client.ts",
   "src/lib/process-key-client.ts",
+  // Phase 141 / SEAM-05 — the retry-safety registry. Its ONLY edges to the seam
+  // modules are `import type { FlowType } from "./process-key-client"` and
+  // `import type { SeamBudgetKey } from "./resilient-fetch"` — TYPE-only imports,
+  // erased at build, so they create no runtime import edge and the leaf can never
+  // reach the seam during a server render (that browser-safety is the leaf's whole
+  // purpose; `seam-retry-registry.test.ts` pins the type-only imports). This
+  // source scan is a DIRECT-EDGE regex that cannot tell `import type` from a value
+  // import (per the "DOES NOT PROVE" note above, it is a source scan, not a
+  // runtime proof), so the registry is admitted here by hand with the reason
+  // written down.
+  "src/lib/seam-retry-registry.ts",
 ];
 
 /**
@@ -225,12 +236,16 @@ describe("[140.3-16] NEGATIVE PIN: no server directive exists anywhere under src
 });
 
 describe("[140.3-16] NEGATIVE PIN: no server-rendered module imports a seam client", () => {
-  it("the allow-list is exactly the two seam clients themselves", () => {
+  it("the allow-list is exactly the two seam clients plus the type-only registry leaf", () => {
     // Hand-typed on both sides. This is what stops the allow-list quietly
-    // absorbing a real violation: growing it is a visible, reviewable edit.
+    // absorbing a real violation: growing it is a visible, reviewable edit. The
+    // third entry (seam-retry-registry) reaches the seam modules through
+    // `import type` ONLY — erased at build, no runtime edge — which is why it is
+    // safe on a server render despite this direct-edge scan flagging it.
     expect(ALLOWED_SEAM_IMPORTERS).toEqual([
       "src/lib/analytics-client.ts",
       "src/lib/process-key-client.ts",
+      "src/lib/seam-retry-registry.ts",
     ]);
   });
 

@@ -14,11 +14,17 @@ upserts the kill-switch row (``value: "off"``), and the cosmetic
 ``compute_analytics`` JobKind residue (admin table + types) is gone. These
 must all stay dead too.
 
-This is a SOURCE-SCAN gate, mirroring the established style of
-``tests/test_cash_basis_series_sc4.py:646-750`` (``_repo_root`` +
-``_strip_comment`` + comment-stripped literal counts). Grep-gate hygiene:
-a ``#``/``//``/``*`` comment mentioning a retired token must neither trip
-nor satisfy the gate, so pure-comment lines are stripped before counting.
+This is a SOURCE-SCAN gate. Its ``_repo_root`` / ``_is_pure_comment`` /
+``_count`` / ``_py_scan_files`` helpers live in ``tests/_scan_helpers.py``
+(D-10), shared with the other static gates so the scanned surface cannot
+diverge between them. Grep-gate hygiene: a ``#``/``//``/``*`` comment
+mentioning a retired token must neither trip nor satisfy the gate, so
+pure-comment lines are stripped before counting.
+
+⚠️ The Python surface this file scans WIDENED in phase 142.1 (D-10): it was a
+five-file hand list that cherry-picked two modules out of ``services/``; it is
+now the full ``services/`` walk. A dark-path re-entry landing in any other
+``services/`` module used to be invisible here.
 
 Two directions are enforced, so the gate can never quietly rot:
   * NEGATIVE — the retired tokens appear ZERO times across the live compute
@@ -31,69 +37,7 @@ Two directions are enforced, so the gate can never quietly rot:
 
 from __future__ import annotations
 
-from pathlib import Path
-
-
-def _repo_root() -> Path:
-    """The monorepo root — the first ancestor containing BOTH ``src/`` and
-    ``analytics-service/``. Resolved by walking up so the scan works from the
-    ``analytics-service`` pytest cwd and in CI."""
-    for parent in Path(__file__).resolve().parents:
-        if (parent / "src").is_dir() and (parent / "analytics-service").is_dir():
-            return parent
-    raise RuntimeError(
-        "could not locate the repo root (an ancestor with both src/ and "
-        "analytics-service/)"
-    )
-
-
-def _strip_comment(line: str, *, lang: str) -> bool:
-    """True when ``line`` is a pure comment for its language (grep-gate
-    hygiene: a docstring/comment mentioning a token must neither trip nor
-    satisfy the gate)."""
-    stripped = line.lstrip()
-    if lang == "py":
-        return stripped.startswith("#")
-    return stripped.startswith("//") or stripped.startswith("*")
-
-
-def _count(path: Path, token: str, *, lang: str) -> int:
-    """Comment-stripped occurrences of ``token`` in ``path``."""
-    if not path.exists():
-        return 0
-    return sum(
-        line.count(token)
-        for line in path.read_text().splitlines()
-        if not _strip_comment(line, lang=lang)
-    )
-
-
-def _py_scan_files() -> list[Path]:
-    """The live PYTHON compute surface: the runner + worker + cron entrypoints
-    plus a full walk of ``routers/`` and ``scripts/``. Any re-entry into the
-    dark path would land in one of these."""
-    svc = _repo_root() / "analytics-service"
-    files: list[Path] = [
-        svc / "services" / "analytics_runner.py",
-        svc / "services" / "job_worker.py",
-        svc / "routers" / "cron.py",
-        svc / "main_worker.py",
-        svc / "main.py",
-    ]
-    for sub in ("routers", "scripts"):
-        files.extend(sorted((svc / sub).rglob("*.py")))
-    # dedupe (cron.py is also under the routers walk) while preserving the
-    # explicit entrypoints, and keep only files that exist.
-    seen: set[Path] = set()
-    scan: list[Path] = []
-    for f in files:
-        rf = f.resolve()
-        if rf in seen or not rf.exists():
-            continue
-        seen.add(rf)
-        scan.append(rf)
-    return scan
-
+from tests._scan_helpers import _count, _py_scan_files, _repo_root
 
 # ---------------------------------------------------------------------------
 # NEGATIVE — the retired dark path is gone from the live compute surface.

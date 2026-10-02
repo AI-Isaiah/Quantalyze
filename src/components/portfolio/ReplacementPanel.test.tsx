@@ -42,7 +42,10 @@ function buildCandidate(partial: Partial<BridgeCandidate> = {}): BridgeCandidate
 }
 
 function mockFetch(impl: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>) {
-  globalThis.fetch = vi.fn(impl) as unknown as typeof fetch;
+  // stubGlobal, not `globalThis.fetch = …` — only a stub is undone by
+  // `unstubGlobals: true` (vitest.config.ts). A direct assignment leaks this
+  // mock to every later file in the worker.
+  vi.stubGlobal("fetch", vi.fn(impl) as unknown as typeof fetch);
 }
 
 /**

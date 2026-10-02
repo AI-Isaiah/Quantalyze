@@ -29,7 +29,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { NextRequest } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 
 vi.mock("server-only", () => ({}));
 
@@ -44,7 +44,23 @@ vi.mock("@/lib/api/withAuth", () => ({
       h(req, USER),
 }));
 
-vi.mock("@/lib/ratelimit", () => ({
+// ⛔ THE PREDICATE IS THE REAL ONE (153.2 review WR-03). Only the two seams this
+// suite must control — the limiter handle and the async `checkLimit` call — are
+// replaced; everything else, including `isRateLimitMisconfigured`, comes through
+// `importOriginal`.
+//
+// What was here before was a hand-written double:
+//   `isRateLimitMisconfigured: (rl) => rl?.misconfigured === true`
+// over a fixture shape `CheckLimitResult` cannot express — the production type
+// has no `misconfigured` field at all, and the real predicate reads
+// `result.success === false && result.reason === "ratelimit_misconfigured"`.
+// The comment beside it claimed it was "the real predicate's shape", which was
+// false. The 503 arm did execute, so the row was not vacuous — but the
+// DISCRIMINATION it demonstrated was one the test had authored for itself, and a
+// route change that read the real discriminator would have kept it green. A
+// double that cannot be wrong in the ways the original can be is not a double.
+vi.mock("@/lib/ratelimit", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/ratelimit")>()),
   userActionLimiter: {},
   checkLimit: vi.fn(async () => ({ success: true })),
 }));
@@ -64,14 +80,46 @@ const STATE = vi.hoisted(() => ({
   strategySelectEqFilters: [] as Array<{ column: string; value: unknown }>,
   // RPC call capture (user-scoped).
   rpcCalls: [] as Array<{ name: string; args: Record<string, unknown> }>,
+  // SUBMITFIX — the owner-scoped `select("status, source")` re-read that
+  // `callFinalizeWizardRpc` issues after a 22023, driven SEPARATELY from
+  // `strategyRow` so a test can fail the re-read without failing the initial
+  // draft lookup. `null` means the re-read falls back to `strategyRow`.
+  strategyStatusRead: null as null | { data: unknown; error: unknown },
+  // SUBMITFIX — one shared, ordered log of the finalize RPC and the
+  // postProcessKey dispatch, so the ORDER of the two is assertable.
+  callOrder: [] as string[],
   rpcResult: { data: null as unknown, error: null as unknown },
   // #597 — capture the user-scoped strategies.asset_class UPDATE patch(es) so
   // tests can assert the manager's asset-class choice is persisted; the forced
   // error exercises the non-blocking log branch.
   assetClassUpdates: [] as Array<Record<string, unknown>>,
   assetClassUpdateError: null as { message: string } | null,
+  // Phase 150 / OWN-03 — every user-scoped strategies UPDATE, with the .eq()
+  // filters it carried. `assetClassUpdates` above records only the patch, which
+  // cannot express the T-150-10 mitigation (the mark write must be pinned to
+  // BOTH the finalized id and the caller's user_id — strategies_update RLS has
+  // no WITH CHECK, so an un-scoped patch is the elevation-of-privilege path).
+  strategyUpdates: [] as Array<{
+    patch: Record<string, unknown>;
+    eqs: Array<{ column: string; value: unknown }>;
+  }>,
+  // Forced error / rows for the capital_ownership UPDATE specifically, so the
+  // degradation arm is reachable without disturbing the asset_class write.
+  capitalOwnershipUpdateError: null as { message: string } | null,
+  capitalOwnershipUpdateRows: [{ id: "" }] as Array<{ id: string }> | null,
   // Admin RPC capture (after() block).
   adminRpcCalls: [] as Array<{ name: string; args: Record<string, unknown> }>,
+  // 164.6 / 161.1-D13 — the enqueued stitch_composite job's row, read by the
+  // inherited-marker retraction, and every compute_jobs UPDATE it issues. The
+  // default row carries no marker, so every pre-existing composite case sees a
+  // read-only no-op.
+  computeJobsRow: null as { metadata: Record<string, unknown> | null } | null,
+  computeJobsReadError: null as { message: string } | null,
+  computeJobsUpdateError: null as { message: string; code?: string } | null,
+  computeJobsUpdates: [] as Array<{
+    patch: Record<string, unknown>;
+    eq: [string, unknown];
+  }>,
   // H-0330 — forced error returned by admin.rpc('enqueue_compute_job').
   adminEnqueueError: null as { message: string } | null,
   // Admin client api_keys lookup (api_key_id) for the after() block.
@@ -84,6 +132,20 @@ const STATE = vi.hoisted(() => ({
   adminStrategiesError: null as { message: string } | null,
   // H-0323 — exchange returned by admin api_keys SELECT (unified path).
   adminApiKeysExchange: "okx" as string | null,
+  // 153.6-04 / PARITY-04 — the RPC-written venue returned by the same admin
+  // api_keys SELECT (the route widened it to `select("exchange, attested_venue")`,
+  // so both columns arrive on one round trip and both are drivable from a test).
+  //
+  // ⭐ IT IS A SEPARATE FIELD FROM `adminApiKeysExchange` ON PURPOSE, and the
+  // separation IS the fixture. `exchange` is client-writable at INSERT (the
+  // 20260810120000 lock only revoked UPDATE), so the two columns can DISAGREE on a
+  // real row: that is the forged label. A harness that derived one from the other
+  // could not express the state cluster D exists to close.
+  //
+  // Default mirrors `adminApiKeysExchange`'s "okx" so the baseline row is an
+  // ordinary post-backfill key that agrees with itself; the NULL (legacy /
+  // trigger-scrubbed) state is driven EXPLICITLY by the rows that test it.
+  adminApiKeysAttestedVenue: "okx" as string | null,
   // H-0323 — forced error on admin api_keys.exchange SELECT (unified
   // path) so the keyRowErr fallback branch is reachable from tests.
   adminApiKeysSelectError: null as { message: string } | null,
@@ -95,7 +157,23 @@ const STATE = vi.hoisted(() => ({
   // Phase 88 (ONB-01) — the ordered member list read by the composite-first
   // hoist's O-1 per-member scope-broadening loop (select api_key_id ORDER BY
   // seq). A read error fails CLOSED (never enqueue an un-enumerable composite).
-  strategyKeysList: [] as Array<{ api_key_id: string | null }> | null,
+  // 153.2-04 / WIZFORM-04 — the member rows carry the widened `api_keys (
+  // exchange )` embed the route now selects, so a member's VENUE is drivable
+  // from a test. OPTIONAL: every pre-existing row omits it, which is exactly the
+  // "embed came back empty" case, and those members must still be probed.
+  //
+  // 153.6-04 / PARITY-04 — the embed gained `attested_venue`, and it is OPTIONAL
+  // for the same reason `api_keys` itself is: a member row that carries only
+  // `exchange` is a real state (a legacy row, or the shape a pre-migration schema
+  // cache returns), and by the fail-toward rule it must PARSE and be PROBED rather
+  // than refuse the finalize.
+  strategyKeysList: [] as Array<{
+    api_key_id: string | null;
+    api_keys?: {
+      exchange: string | null;
+      attested_venue?: string | null;
+    } | null;
+  }> | null,
   // CR-01: typed as an open record, not `{ message: string }`. A Supabase error
   // on the NON-throwing path is a PLAIN parsed-JSON object carrying `code`,
   // `details` and `hint` as well — the fields the operator actually needs — and
@@ -160,43 +238,64 @@ vi.mock("@/lib/supabase/server", () => ({
       }
       // Chainable .eq() so we can capture each filter the route applies
       // (id + user_id) and assert the belt-and-braces ownership filter.
-      const buildEqChain = () => ({
+      const buildEqChain = (columns: string) => ({
         eq: (column: string, value: unknown) => {
           STATE.strategySelectEqFilters.push({ column, value });
-          return buildEqChain();
+          return buildEqChain(columns);
         },
-        maybeSingle: async () => ({
-          data: STATE.strategyRow,
-          error: STATE.strategyError,
-        }),
+        maybeSingle: async () =>
+          columns.includes("status") && STATE.strategyStatusRead
+            ? STATE.strategyStatusRead
+            : {
+                data: STATE.strategyRow,
+                error: STATE.strategyError,
+              },
       });
       // #597 — the route persists strategies.asset_class via a user-scoped
       // update().eq().eq() (owner-scoped) before finalize. Chainable + awaitable
       // (thenable) so `await update().eq().eq()` resolves; the route treats any
       // error as non-blocking. Records the persisted value for assertions.
-      const buildUpdateChain = () => {
+      //
+      // OWN-03 extends this: `.eq()` now RECORDS its filters (so the mark
+      // write's owner scoping is assertable) and `.select()` is chainable on
+      // an update (the mark write ends `.select("id")` to detect a zero-row
+      // write — the signature of a patch that matched nobody).
+      const buildUpdateChain = (record: {
+        patch: Record<string, unknown>;
+        eqs: Array<{ column: string; value: unknown }>;
+      }) => {
+        const isMarkWrite = "capital_ownership" in record.patch;
+        const settle = () =>
+          isMarkWrite
+            ? {
+                data: STATE.capitalOwnershipUpdateRows,
+                error: STATE.capitalOwnershipUpdateError ?? null,
+              }
+            : { data: null, error: STATE.assetClassUpdateError ?? null };
         const chain = {
-          eq: () => chain,
-          then: (
-            onFulfilled: (v: { data: null; error: unknown }) => unknown,
-          ) =>
-            Promise.resolve({
-              data: null,
-              error: STATE.assetClassUpdateError ?? null,
-            }).then(onFulfilled),
+          eq: (column: string, value: unknown) => {
+            record.eqs.push({ column, value });
+            return chain;
+          },
+          select: () => chain,
+          then: (onFulfilled: (v: unknown) => unknown) =>
+            Promise.resolve(settle()).then(onFulfilled),
         };
         return chain;
       };
       return {
-        select: () => buildEqChain(),
+        select: (columns: string) => buildEqChain(columns),
         update: (patch: Record<string, unknown>) => {
           STATE.assetClassUpdates.push(patch);
-          return buildUpdateChain();
+          const record = { patch, eqs: [] as Array<{ column: string; value: unknown }> };
+          STATE.strategyUpdates.push(record);
+          return buildUpdateChain(record);
         },
       };
     },
     rpc: async (name: string, args: Record<string, unknown>) => {
       STATE.rpcCalls.push({ name, args });
+      STATE.callOrder.push(`rpc:${name}`);
       return STATE.rpcResult;
     },
   }),
@@ -231,7 +330,15 @@ vi.mock("@/lib/supabase/admin", () => ({
               single: async () => ({
                 data: STATE.adminApiKeysSelectError
                   ? null
-                  : { exchange: STATE.adminApiKeysExchange },
+                  : {
+                      exchange: STATE.adminApiKeysExchange,
+                      // 153.6-04 — the row carries BOTH columns because the route
+                      // asks for both on ONE read. The mock ignores the
+                      // projection string, which is what lets the same chain serve
+                      // the widened asset_class/probe read AND the narrower
+                      // `resolvedSource` read further down the route.
+                      attested_venue: STATE.adminApiKeysAttestedVenue,
+                    },
                 error: STATE.adminApiKeysSelectError,
               }),
             }),
@@ -309,6 +416,32 @@ vi.mock("@/lib/supabase/admin", () => ({
           },
         };
       }
+      if (table === "compute_jobs") {
+        // 164.6 / 161.1-D13 (RESEARCH Pitfall 13) — BEFORE the throw below, or
+        // the retraction's read throws and lands in its own best-effort catch.
+        return {
+          select: () => ({
+            eq: () => ({
+              maybeSingle: async () => ({
+                data: STATE.computeJobsReadError ? null : STATE.computeJobsRow,
+                error: STATE.computeJobsReadError,
+              }),
+            }),
+          }),
+          update: (patch: Record<string, unknown>) => ({
+            eq: (col: string, val: unknown) => {
+              STATE.computeJobsUpdates.push({ patch, eq: [col, val] });
+              // LOW-1: the helper asks for the updated rows back.
+              return {
+                select: async () => ({
+                  data: STATE.computeJobsUpdateError ? null : [{ id: val }],
+                  error: STATE.computeJobsUpdateError,
+                }),
+              };
+            },
+          }),
+        };
+      }
       throw new Error(`unexpected admin from(${table})`);
     },
     rpc: async (name: string, args: Record<string, unknown>) => {
@@ -345,6 +478,7 @@ vi.mock("@/lib/process-key-client", () => ({
     // 140.3-14 / TS-33 — capture the OUTBOUND payload. Without this the
     // dedupe id is unobservable from a route test at all.
     STATE.processKeyCalls.push(args);
+    STATE.callOrder.push("postProcessKey");
     return (
       STATE.processKeyResult ?? {
         ok: true,
@@ -382,9 +516,12 @@ vi.mock("@/lib/resilient-fetch", async (importOriginal) => {
     resilientFetch: async (
       budgetKey: Parameters<typeof actual.resilientFetch>[0],
       path: string,
-      init: Parameters<typeof actual.resilientFetch>[2] = {},
+      // No `= {}` default: D-08 made `init` (and its `retriesOverride`)
+      // REQUIRED on the real signature, and a double that still defaulted would
+      // be the one call shape production can no longer express.
+      init: Parameters<typeof actual.resilientFetch>[2],
     ) => {
-      RF.lastCall = { budgetKey, path, init: init as Record<string, unknown> };
+      RF.lastCall ={ budgetKey, path, init: init as Record<string, unknown> };
       if (RF.breakerOpen) throw new CircuitOpenError(RF.retryAfterS);
       return actual.resilientFetch(budgetKey, path, init);
     },
@@ -404,6 +541,15 @@ vi.mock("@/lib/email", () => ({
 // default. Tests that need to assert side-effect fan-out (H-0330
 // enqueue_compute_job, etc.) set STATE.runAfterCallback=true to invoke
 // the callback synchronously.
+// 164.6 / 161.1-D13 (RESEARCH Pitfall 14) — the route resolves the correlation
+// id in request scope before scheduling after(); the real helper reads
+// next/headers, which throws outside a request. Copied from keys/sync's test.
+const TEST_CORRELATION_ID = "66666666-7777-8888-9999-000000000000";
+vi.mock("@/lib/correlation-id", () => ({
+  getCorrelationId: vi.fn().mockResolvedValue(TEST_CORRELATION_ID),
+  CORRELATION_HEADER: "x-correlation-id",
+}));
+
 vi.mock("next/server", async () => {
   const actual =
     await vi.importActual<typeof import("next/server")>("next/server");
@@ -463,12 +609,18 @@ beforeEach(async () => {
   STATE.strategySelectEqFilters = [];
   STATE.assetClassUpdates = [];
   STATE.assetClassUpdateError = null;
+  STATE.strategyUpdates = [];
+  STATE.capitalOwnershipUpdateError = null;
+  STATE.capitalOwnershipUpdateRows = [{ id: STRATEGY_ID }];
   STATE.rpcCalls = [];
   STATE.rpcResult = { data: STRATEGY_ID, error: null };
+  STATE.strategyStatusRead = null;
+  STATE.callOrder = [];
   STATE.adminApiKeyId = API_KEY_ID;
   STATE.adminStrategyName = "Alpha Centauri";
   STATE.adminStrategiesError = null;
   STATE.adminApiKeysExchange = "okx";
+  STATE.adminApiKeysAttestedVenue = "okx";
   STATE.adminApiKeysSelectError = null;
   STATE.strategyKeysCount = 0;
   STATE.strategyKeysCountError = null;
@@ -479,6 +631,10 @@ beforeEach(async () => {
   STATE.adminEnqueueError = null;
   STATE.notifyFounderCalls = [];
   STATE.adminRpcCalls = [];
+  STATE.computeJobsRow = { metadata: { source: "finalize-wizard" } };
+  STATE.computeJobsReadError = null;
+  STATE.computeJobsUpdateError = null;
+  STATE.computeJobsUpdates = [];
   STATE.captureToSentryCalls = [];
   STATE.processKeyResult = null;
   STATE.processKeyCalls = [];
@@ -623,6 +779,62 @@ describe("POST /api/strategies/finalize-wizard — scope-broadening defense", ()
     consoleErr.mockRestore();
     fetchSpy.mockRestore();
   });
+
+  // MT5-13 — the probe-failure split. Every non-OK probe response used to map to
+  // KEY_NETWORK_TIMEOUT, whose copy says "we could not reach the exchange, try
+  // again in a moment" and carries a Retry control. For a PERMANENT 4xx that is
+  // wrong in both halves, and it is how a blocked MT5 submit presented as a
+  // flaky network: the probe answered 400 "Unsupported exchange: mt5" on every
+  // attempt, so the invited retry could never work. What matters is not which
+  // status maps where in the abstract — it is that a user facing a condition
+  // retries cannot clear is never handed a Retry button.
+  //
+  // Both arms assert the fail-CLOSED outcome is UNCHANGED (no RPC, 502): this
+  // split changes the envelope only. A fix that unblocked finalize by letting an
+  // unverified key through would be a security regression, not a fix.
+  it.each([
+    // 400 — the venue has no probe adapter (the literal MT5 case).
+    { status: 400, expected: "KEY_SCOPE_CHECK_UNAVAILABLE" },
+    // 422 — the api_keys row carries no exchange (the service's KEY_MISSING_EXCHANGE).
+    { status: 422, expected: "KEY_SCOPE_CHECK_UNAVAILABLE" },
+    // 404 — unknown key id. Permanent until someone reconnects the key.
+    { status: 404, expected: "KEY_SCOPE_CHECK_UNAVAILABLE" },
+    // 429 — per-key probe rate limit. Carved OUT: an identical retry clears it,
+    // so the timeout copy's Retry is correct here.
+    { status: 429, expected: "KEY_NETWORK_TIMEOUT" },
+    // 424 — the VENUE did not answer. `retryable: true` in the service contract.
+    { status: 424, expected: "KEY_NETWORK_TIMEOUT" },
+    // 503 — upstream transient. Unchanged.
+    { status: 503, expected: "KEY_NETWORK_TIMEOUT" },
+  ])(
+    "a $status probe failure surfaces $expected",
+    async ({ status, expected }) => {
+      const fetchSpy = vi
+        .spyOn(globalThis, "fetch")
+        .mockResolvedValue(
+          new Response(JSON.stringify({ detail: "nope" }), {
+            status,
+            headers: { "content-type": "application/json" },
+          }),
+        );
+      const consoleErr = vi
+        .spyOn(console, "error")
+        .mockImplementation(() => {});
+
+      const POST = await importPost();
+      const res = await POST(makeReq(VALID_BODY));
+
+      expect(res.status).toBe(502);
+      expect((await res.json()).code).toBe(expected);
+      // Fail CLOSED on every arm — the RPC must not have run.
+      expect(
+        STATE.rpcCalls.find((c) => c.name === "finalize_wizard_strategy"),
+      ).toBeUndefined();
+
+      consoleErr.mockRestore();
+      fetchSpy.mockRestore();
+    },
+  );
 
   it("SEAMCORE-02: a probe whose BODY aborts still fails CLOSED", async () => {
     // The shape that used to slip through. `AbortSignal.timeout` aborts the
@@ -788,22 +1000,66 @@ describe("POST /api/strategies/finalize-wizard — scope-broadening defense", ()
  * withdraw scope published as read-only-verified.** That contradicts the
  * fail-CLOSED doctrine this file states 40 lines above the probe.
  *
- * WHAT THE FIX MUST NOT DO. A parse miss must join the EXISTING probe-failure
- * arm rather than open a second rejection path with new copy: a body that could
- * not be read is a probe that did not run, which is the doctrine already
- * written here. So the expected envelope below is hand-typed ONCE and asserted
- * against BOTH the `probe_error` arm and every parse-miss case — byte-identity
- * proven against a literal, never by comparing the two code paths to each other.
+ * ⚠️ THE ENVELOPE HALF OF THIS BLOCK WAS RE-CUT — 153.2-04 / WIZFORM-04 / D-14b.
+ *
+ * 140.3-03 required that a parse miss join the EXISTING probe-failure arm and
+ * share its envelope: "a body that could not be read is a probe that did not
+ * run". The SECURITY half of that is permanent and is untouched below — both
+ * conditions still fail CLOSED, and the finalize RPC still must not run on
+ * either. What was wrong was the second inference: that because two conditions
+ * block identically, the USER should be told the same thing about them.
+ *
+ * They are not the same thing. `KEY_NETWORK_TIMEOUT` says we could not reach the
+ * exchange and offers a Retry. For a service that REPORTED `probe_error: true`
+ * that is honest — it tried, it failed, a retry can work. For a body our own
+ * schema could not parse it is false twice over: the exchange answered, and the
+ * body stays unparseable until a deploy changes one side or the other. The
+ * founder clicked that Retry five times against a condition of exactly this
+ * shape, which is the incident WIZFORM-04 exists to close.
+ *
+ * ⚠️ AND RE-CUT ONCE MORE — 153.6-06 / PARITY-05. 153.2-04 was right that the
+ * parse miss is not a network blip and wrong that it is PERMANENT, and the two
+ * are not the same claim. "Until a deploy changes one side or the other" is
+ * satisfied by the deploy that is ALREADY ROLLING: an analytics release changes
+ * the probe body's shape for the minutes between the first new pod and the last
+ * old one, and in that window this arm fires for a condition that clears by
+ * itself. `KEY_SCOPE_CHECK_UNAVAILABLE`'s copy suppresses Retry structurally, so
+ * the fix for one dead end manufactured another. The parse miss now carries
+ * `KEY_SCOPE_CHECK_UNREADABLE` — its own code, honestly recoverable — and the
+ * permanent probe-STATUS arm keeps `KEY_SCOPE_CHECK_UNAVAILABLE` untouched. The
+ * distinction assertion below is unchanged and still load-bearing: the
+ * service-reported arm must not share a code with the parse miss either.
+ *
+ * So the two arms now carry DIFFERENT hand-typed literals, and both are still
+ * hand-typed rather than imported — the property under test is what the user is
+ * told, and importing the route's own string would make each row agree with
+ * itself. The row that used to assert byte-identity now asserts the DISTINCTION,
+ * which is the same coupling read from the other side.
  *
  * The last case is the ANTI-REGRESSION CONTROL. A gate that refuses everything
  * is not a fix, it is an outage, so a well-formed read-only 2xx must still
  * publish. It is deliberately in this block rather than the one above.
  */
 describe("[140.3-03 / SEAMUX-07] the scope probe fails CLOSED on an unreadable 2xx", () => {
-  // Hand-typed, from reading the probe-failure arm — NOT imported from it.
+  // Hand-typed, from reading the SERVICE-REPORTED probe-failure arm — NOT
+  // imported from it. This arm keeps its transient code and its Retry.
   const PROBE_FAILURE_ENVELOPE = {
     error: "Exchange permission probe failed",
     code: "KEY_NETWORK_TIMEOUT",
+  };
+  // ⚠️ RE-CUT AGAIN — 153.6-06 / PARITY-05. 153.2-04 put the parse miss on
+  // `KEY_SCOPE_CHECK_UNAVAILABLE`, whose copy is deliberately non-recoverable.
+  // The move off `KEY_NETWORK_TIMEOUT` was right; the destination was not. A 2xx
+  // body our schema cannot read is ALSO what a rolling analytics deploy
+  // produces, so it is not always permanent, and the permanent code's
+  // structural Retry suppression turned a five-minute deploy window into a dead
+  // end. It now carries its OWN code, recoverable, while
+  // `KEY_SCOPE_CHECK_UNAVAILABLE` stays exactly where it was for the genuinely
+  // permanent probe-STATUS arm. ⛔ Never back to `KEY_NETWORK_TIMEOUT`: "we
+  // could not reach the exchange" is the removed lie, and the exchange answered.
+  const PARSE_MISS_ENVELOPE = {
+    error: "Could not read the key scope response",
+    code: "KEY_SCOPE_CHECK_UNREADABLE",
   };
 
   function mockProbeBody(body: unknown): ReturnType<typeof vi.spyOn> {
@@ -829,7 +1085,7 @@ describe("[140.3-03 / SEAMUX-07] the scope probe fails CLOSED on an unreadable 2
         "true` is false at BOTH gates — so pre-fix this body returned `{ok: " +
         "true}` and the draft finalised with an unverified key.",
     ).toBe(502);
-    expect(await res.json()).toEqual(PROBE_FAILURE_ENVELOPE);
+    expect(await res.json()).toEqual(PARSE_MISS_ENVELOPE);
     expect(
       STATE.rpcCalls.find((c) => c.name === "finalize_wizard_strategy"),
       "The finalize RPC must NOT have run: an unreadable probe is a probe " +
@@ -857,7 +1113,7 @@ describe("[140.3-03 / SEAMUX-07] the scope probe fails CLOSED on an unreadable 2
     consoleErr.mockRestore();
 
     expect(res.status).toBe(502);
-    expect(await res.json()).toEqual(PROBE_FAILURE_ENVELOPE);
+    expect(await res.json()).toEqual(PARSE_MISS_ENVELOPE);
     expect(
       STATE.rpcCalls.find((c) => c.name === "finalize_wizard_strategy"),
     ).toBeUndefined();
@@ -882,17 +1138,23 @@ describe("[140.3-03 / SEAMUX-07] the scope probe fails CLOSED on an unreadable 2
     consoleErr.mockRestore();
 
     expect(res.status).toBe(502);
-    expect(await res.json()).toEqual(PROBE_FAILURE_ENVELOPE);
+    expect(await res.json()).toEqual(PARSE_MISS_ENVELOPE);
     expect(
       STATE.rpcCalls.find((c) => c.name === "finalize_wizard_strategy"),
     ).toBeUndefined();
     fetchSpy.mockRestore();
   });
 
-  it("the parse-miss envelope is BYTE-IDENTICAL to the `probe_error` arm's, asserted against the same literal", async () => {
-    // The doctrine under test: a body that could not be READ and a probe that
-    // reported its own failure are the same event to the user. Both are
-    // compared to the hand-typed literal above, never to each other.
+  it("[153.2-04 / D-14b] a SERVICE-REPORTED probe_error keeps the transient code — it is NOT the parse miss", async () => {
+    // ⚠️ RE-CUT, not deleted. This row used to assert the parse miss and this
+    // arm were BYTE-IDENTICAL. It now asserts the DISTINCTION, which is the same
+    // coupling read from the other side — and it is the half a careless fix
+    // would break: sweeping BOTH conditions onto the permanent code would strip
+    // a correct Retry from a genuine transient upstream failure, the exact
+    // inverse of the defect D-14b fixes.
+    //
+    // Here the SERVICE tried and told us it failed. A retry can succeed, so the
+    // envelope stays recoverable.
     const fetchSpy = mockProbeBody({
       read: true,
       trade: true,
@@ -905,7 +1167,25 @@ describe("[140.3-03 / SEAMUX-07] the scope probe fails CLOSED on an unreadable 2
     const res = await POST(makeReq(VALID_BODY));
 
     expect(res.status).toBe(502);
-    expect(await res.json()).toEqual(PROBE_FAILURE_ENVELOPE);
+    // ⚠️ The distinction is asserted against what the ROUTE ANSWERED, never
+    // against the other hand-typed literal. `PROBE_FAILURE_ENVELOPE.code !==
+    // PARSE_MISS_ENVELOPE.code` would compare two constants declared thirty
+    // lines apart in THIS file — true the moment they were typed, and unable to
+    // fail for any change to the route. Reading `body.code` couples the claim to
+    // production: collapse the two arms back onto one code and this reds by
+    // name, which is the whole point of stating it separately from the
+    // `toEqual` above.
+    const body = await res.json();
+    // ORDER IS DELIBERATE: the DISTINCTION is asserted before the full
+    // `toEqual`, so a collapse of the two arms reports this explanation rather
+    // than a bare `expected {…(2)} to deeply equal {…(2)}` object diff.
+    expect(
+      body.code,
+      "The service-reported arm and the parse-miss arm must not share a code: " +
+        "one is transient and keeps its Retry, the other is permanent and must " +
+        "render none.",
+    ).not.toBe(PARSE_MISS_ENVELOPE.code);
+    expect(body).toEqual(PROBE_FAILURE_ENVELOPE);
     fetchSpy.mockRestore();
   });
 
@@ -933,6 +1213,160 @@ describe("[140.3-03 / SEAMUX-07] the scope probe fails CLOSED on an unreadable 2
       STATE.rpcCalls.find((c) => c.name === "finalize_wizard_strategy"),
     ).toBeDefined();
     fetchSpy.mockRestore();
+  });
+});
+
+/**
+ * [153.6-06 / PARITY-05] THE PARSE MISS GETS ITS RETRY BACK, AND THE PERMANENT
+ * ARM DOES NOT.
+ *
+ * ⭐ THE ORACLE IS THE RENDERED TITLE, NEVER THE PRESENCE OF A RETRY CONTROL.
+ * That choice is the whole guard, and it is the OPPOSITE of the trap
+ * `SubmitStep.tsx` records for every other code it admits. A code the route
+ * emits but `KNOWN_FINALIZE_CODES` does not list falls through to `UNKNOWN` —
+ * and `UNKNOWN`'s copy carries `clear_and_retry`, so it IS recoverable and DOES
+ * render a Retry. An assertion phrased as "a Retry renders" would therefore
+ * pass against a completely unwired code, reporting the right control offered
+ * for the wrong reason, with a generic "Something went wrong." where the user
+ * needed "this is our deploy, it clears by itself". Pinning the TITLE is what
+ * distinguishes the two.
+ *
+ * ⚠️ Both titles are HAND-TYPED here, not imported from `WIZARD_ERROR_COPY`.
+ * Reading the subject to build the expectation is how a guard stops being able
+ * to fail: `expect(copy.title).toBe(WIZARD_ERROR_COPY[code].title)` is green for
+ * every possible value of the copy table, including UNKNOWN's.
+ *
+ * ⚠️ Both directions are asserted, in one block, because this plan's failure
+ * mode is a sweep. Handing the parse miss a Retry by widening
+ * `KEY_SCOPE_CHECK_UNAVAILABLE`'s actions would ALSO hand one to the permanent
+ * probe-status arm, where a retry is guaranteed to fail — the T-153.6-E2
+ * elevation. The second `it` is the one that reds if that shortcut is taken.
+ */
+describe("[153.6-06 / PARITY-05] the two probe-failure envelopes are told apart by their COPY", () => {
+  // Hand-typed from the copy table, in this file, on purpose (see the docblock).
+  const UNREADABLE_TITLE = "We could not read the permission check's answer.";
+  const UNAVAILABLE_TITLE = "We could not check this key's permissions.";
+  // `UNKNOWN`'s title, hand-typed for the same reason. This is the string a
+  // roster omission would render — recoverable, so the Retry would still be
+  // there and only this comparison would notice.
+  const UNKNOWN_TITLE = "Something went wrong.";
+
+  it("a parse miss renders the UNREADABLE copy and IS recoverable — Retry returns", async () => {
+    const { buildEnvelope } = await import("@/lib/envelope");
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      // A 2xx the schema cannot read: exactly what a half-rolled analytics
+      // deploy serves while the old pods are still answering.
+      new Response(JSON.stringify({ read: true, trade: "maybe" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+    consoleErr.mockRestore();
+
+    expect(res.status).toBe(502);
+    const body = await res.json();
+    // The code is read off the ROUTE's answer and fed to the real envelope
+    // builder, so this couples production copy to production classification.
+    const envelope = buildEnvelope(body.code, "corr-parity-05");
+
+    expect(
+      envelope.human_message,
+      "The parse miss must render its OWN copy. `Something went wrong.` means " +
+        "the code reached `UNKNOWN` — which is recoverable, so a Retry-presence " +
+        "assertion would have passed while the user read a generic dead end.",
+    ).toBe(UNREADABLE_TITLE);
+    expect(envelope.human_message).not.toBe(UNKNOWN_TITLE);
+    expect(
+      envelope.recoverable,
+      "A body we could not read is what a rolling deploy produces. It clears " +
+        "on its own, so the Retry control is the honest affordance.",
+    ).toBe(true);
+
+    // ⛔ The security half is UNCHANGED by this plan and is asserted, not
+    // assumed: a probe that did not run must still block the publish.
+    expect(
+      STATE.rpcCalls.find((c) => c.name === "finalize_wizard_strategy"),
+    ).toBeUndefined();
+    fetchSpy.mockRestore();
+  });
+
+  it("a PERMANENT probe status keeps the UNAVAILABLE copy and stays NON-recoverable — no Retry", async () => {
+    const { buildEnvelope } = await import("@/lib/envelope");
+    // 400 — the venue has no probe adapter. `isPermanentProbeStatus` says so,
+    // and no number of retries changes it.
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ detail: "Unsupported exchange: mt5" }), {
+        status: 400,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+    consoleErr.mockRestore();
+
+    expect(res.status).toBe(502);
+    const body = await res.json();
+    const envelope = buildEnvelope(body.code, "corr-parity-05");
+
+    expect(
+      envelope.human_message,
+      "The permanent arm's copy must not move. If this now reads the " +
+        "UNREADABLE title, the two conditions were swept onto one code again — " +
+        "which is the defect being fixed, in the other direction.",
+    ).toBe(UNAVAILABLE_TITLE);
+    expect(
+      envelope.recoverable,
+      "⛔ T-153.6-E2. Giving the parse miss a Retry by adding a recoverable " +
+        "action to `KEY_SCOPE_CHECK_UNAVAILABLE` would leak that control onto " +
+        "THIS arm, where the retry is guaranteed to fail. That shortcut reds here.",
+    ).toBe(false);
+
+    expect(
+      STATE.rpcCalls.find((c) => c.name === "finalize_wizard_strategy"),
+    ).toBeUndefined();
+    fetchSpy.mockRestore();
+  });
+
+  it("the two arms do not share a code — asserted against what the ROUTE answered", async () => {
+    // Both codes are read out of production on this one run's siblings above;
+    // here they are re-derived in ONE `it` so the claim is about the pair rather
+    // than about two constants declared next to each other in this file.
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const parseMissSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ read: true, trade: "maybe" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    let POST = await importPost();
+    const parseMissCode = (await (await POST(makeReq(VALID_BODY))).json()).code;
+    parseMissSpy.mockRestore();
+
+    const permanentSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ detail: "Unsupported exchange: mt5" }), {
+        status: 400,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    POST = await importPost();
+    const permanentCode = (await (await POST(makeReq(VALID_BODY))).json()).code;
+    permanentSpy.mockRestore();
+    consoleErr.mockRestore();
+
+    expect(
+      parseMissCode,
+      "The transient parse miss and the permanent probe status shared a code " +
+        "from 153.2-04 until 153.6-06. Merging them again — in either " +
+        "direction — takes a control away from one condition or gives one to " +
+        "the other, and both are user-facing regressions.",
+    ).not.toBe(permanentCode);
   });
 });
 
@@ -1057,6 +1491,12 @@ describe("POST /api/strategies/finalize-wizard — #597 asset_class persistence"
     const fetchSpy = okProbe();
     STATE.strategyRow = { api_key_id: API_KEY_ID }; // single api-keyed draft
     STATE.adminApiKeysExchange = "mt5"; // linked key is an MT5 (forex/CFD) venue
+    // RANK-04 — the stamp's authority moved from the client-writable column to
+    // the server-attested one, so an ordinary post-backfill mt5 row must attest
+    // mt5 too (PROD census: 31/31 rows satisfy attested_venue = exchange). The
+    // MT5RECON-02 economics being pinned here — mt5 ⇒ √252 — are unchanged; only
+    // the fixture gained the binding that now drives them.
+    STATE.adminApiKeysAttestedVenue = "mt5";
     const POST = await importPost();
     const res = await POST(makeReq({ ...VALID_BODY, asset_class: "traditional" }));
     expect(res.status).toBe(200);
@@ -1073,6 +1513,7 @@ describe("POST /api/strategies/finalize-wizard — #597 asset_class persistence"
     const fetchSpy = okProbe();
     STATE.strategyRow = { api_key_id: API_KEY_ID };
     STATE.adminApiKeysExchange = "bybit"; // crypto venue
+    STATE.adminApiKeysAttestedVenue = "bybit"; // …attested as such (RANK-04)
     const POST = await importPost();
     const res = await POST(makeReq({ ...VALID_BODY, asset_class: "traditional" }));
     expect(res.status).toBe(200);
@@ -1105,6 +1546,91 @@ describe("POST /api/strategies/finalize-wizard — #597 asset_class persistence"
       asset_class: "traditional",
     });
     expect(STATE.assetClassUpdates).toHaveLength(0);
+    fetchSpy.mockRestore();
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // RANK-04 / B-D2 — THE ANNUALIZATION CLOCK DERIVES FROM THE ATTESTED VENUE.
+  //
+  // The worker reads `strategies.asset_class` DIRECTLY as the annualization
+  // clock (√365 crypto / √252 traditional) — it does NOT re-derive from venue.
+  // So whichever column feeds this stamp IS the money math. `api_keys.exchange`
+  // is client-writable at INSERT (the 20260810120000 lock revoked UPDATE only),
+  // making it forgeable; `attested_venue` is written only by the two SECURITY
+  // DEFINER RPCs, from the venue the server itself validated. Annualizing on
+  // the wrong clock is a ~×1.203 (√(365/252)) Sharpe error on the
+  // allocator-facing ranking — inflating a traditional series run on √365,
+  // deflating a crypto series run on √252.
+  //
+  // ⭐ THESE FIXTURES ARE DELIBERATELY BINDING-DIVERGENT (attested ≠ exchange)
+  // and the expectations are LITERAL asset_class values, never a recomputation
+  // of the route's own conditional. An oracle that called `isCryptoExchange`,
+  // or that set both columns to the same venue, could not tell the two bindings
+  // apart and would stay green under the very swap it exists to certify.
+  // ─────────────────────────────────────────────────────────────────────────
+
+  // ECONOMICS: an attested CRYPTO venue annualizes on √365 ⇒ 'crypto', even
+  // though the forgeable column claims the traditional venue mt5. Reverting the
+  // stamp input to the forgeable binding reads 'mt5' → persists 'traditional'
+  // → this reddens.
+  it("B-D2: annualizes on the ATTESTED crypto venue (deribit) when the forgeable column says mt5", async () => {
+    const fetchSpy = okProbe();
+    STATE.strategyRow = { api_key_id: API_KEY_ID };
+    STATE.adminApiKeysExchange = "mt5"; // forgeable label: traditional √252
+    STATE.adminApiKeysAttestedVenue = "deribit"; // server-attested: crypto √365
+    const POST = await importPost();
+    const res = await POST(makeReq({ ...VALID_BODY, asset_class: "traditional" }));
+    expect(res.status).toBe(200);
+    expect(STATE.assetClassUpdates).toContainEqual({ asset_class: "crypto" });
+    expect(STATE.assetClassUpdates).not.toContainEqual({
+      asset_class: "traditional",
+    });
+    fetchSpy.mockRestore();
+  });
+
+  // ECONOMICS: an attested MT5 (forex/CFD) venue annualizes on √252 ⇒
+  // 'traditional', even though the forgeable column claims the crypto venue
+  // binance. Reverting the stamp input reads 'binance' → persists 'crypto'
+  // → this reddens.
+  it("B-D2: annualizes on the ATTESTED mt5 venue when the forgeable column claims binance", async () => {
+    const fetchSpy = okProbe();
+    STATE.strategyRow = { api_key_id: API_KEY_ID };
+    STATE.adminApiKeysExchange = "binance"; // forgeable label: crypto √365
+    STATE.adminApiKeysAttestedVenue = "mt5"; // server-attested: traditional √252
+    const POST = await importPost();
+    const res = await POST(makeReq({ ...VALID_BODY, asset_class: "crypto" }));
+    expect(res.status).toBe(200);
+    expect(STATE.assetClassUpdates).toContainEqual({
+      asset_class: "traditional",
+    });
+    expect(STATE.assetClassUpdates).not.toContainEqual({
+      asset_class: "crypto",
+    });
+    fetchSpy.mockRestore();
+  });
+
+  // ⭐ THE B-D2 ECONOMICS: A NULL ATTESTATION ANNUALIZES ON NOTHING — IT SKIPS.
+  // A legacy pre-backfill row, or a client INSERT the trigger scrubbed, carries
+  // attested_venue NULL while `exchange` still RESOLVES (so this is emphatically
+  // not the lookup-fault arm above). `isCryptoExchange(null)` is false, so a
+  // stamp that ran anyway would write 'traditional'/√252 over what may well be a
+  // crypto strategy — the exact laundering path this guard exists to close. The
+  // write is SKIPPED, leaving create-with-key's server-derived draft stamp
+  // intact, and the finalize still succeeds (200 — the skip is non-fatal).
+  // Reverting the guard to key on the forgeable binding lets this row reach the
+  // stamp arm and mint a 'traditional' update → this reddens.
+  it("B-D2: SKIPS the stamp for a NULL attestation whose forgeable venue still resolves", async () => {
+    const fetchSpy = okProbe();
+    STATE.strategyRow = { api_key_id: API_KEY_ID };
+    STATE.adminApiKeysExchange = "bybit"; // resolves — NOT a lookup fault
+    STATE.adminApiKeysAttestedVenue = null; // legacy / trigger-scrubbed row
+    const POST = await importPost();
+    const res = await POST(makeReq({ ...VALID_BODY, asset_class: "traditional" }));
+    expect(res.status).toBe(200);
+    expect(STATE.assetClassUpdates).toHaveLength(0);
+    expect(STATE.assetClassUpdates).not.toContainEqual({
+      asset_class: "traditional",
+    });
     fetchSpy.mockRestore();
   });
 
@@ -1331,6 +1857,170 @@ describe("POST /api/strategies/finalize-wizard — H-0331 founder-email canonica
  * Contract: client must send a finite number in [0, 1e12) or omit the
  * field entirely (null / undefined). Invalid values now return 400.
  */
+/**
+ * 153.1-05 / WIZFORM-02 / D-09(b) — every `validatePayload` rejection carries a
+ * code the wizard can render.
+ *
+ * ⭐ WHY THIS DESCRIBE EXISTS AT ALL. Until this plan every arm of
+ * `validatePayload` answered a correct 400 with a bare `error` string and NO
+ * `code`. `SubmitStep` maps off the code alone, so all of them rendered the
+ * UNKNOWN card — "We could not classify this failure" — for a rejection the
+ * server had classified precisely. The defect survived a year of green tests
+ * because the tests asserted the STATUS. Every `it` below therefore asserts the
+ * code, and the sweep at the end asserts the CLASS: not one arm may answer
+ * without one.
+ *
+ * ⛔ The fixtures are HAND-TYPED, never sized off the constant they test. A
+ * description of `"x".repeat(MAGNITUDE_CAPS.MIN_DESCRIPTION_CHARS - 1)` would
+ * agree with whatever the constant happens to be and could never fail; `"ok"`
+ * is two characters because that is what the founder actually submitted, and if
+ * the lower bound is ever moved below three this test SHOULD red.
+ */
+describe("POST /api/strategies/finalize-wizard — 153.1-05 validatePayload codes", () => {
+  /** Every arm, as the payload that trips it and the code it must answer. */
+  const ARMS: ReadonlyArray<{
+    readonly what: string;
+    readonly patch: Record<string, unknown>;
+    readonly code: string;
+  }> = [
+    {
+      what: "a non-object body",
+      patch: {},
+      code: "VALIDATION_FAILED",
+    },
+    {
+      what: "a malformed strategy_id",
+      patch: { strategy_id: "not-a-uuid" },
+      code: "VALIDATION_FAILED",
+    },
+    {
+      what: "a codename outside the curated list",
+      patch: { name: "Not A Real Codename" },
+      code: "METADATA_NAME_INVALID",
+    },
+    {
+      what: "a missing description",
+      patch: { description: undefined },
+      code: "METADATA_DESCRIPTION_REQUIRED",
+    },
+    {
+      what: "a non-string description",
+      patch: { description: 12345 },
+      code: "METADATA_DESCRIPTION_REQUIRED",
+    },
+    {
+      // ⭐ THE INCIDENT, ENCODED. Two characters, hand-typed.
+      what: "the founder's two-character description",
+      patch: { description: "ok" },
+      code: "METADATA_DESCRIPTION_TOO_SHORT",
+    },
+    {
+      what: "a description one character over the ceiling",
+      patch: { description: "x".repeat(5001) },
+      code: "METADATA_DESCRIPTION_TOO_LONG",
+    },
+    {
+      what: "a malformed category_id",
+      patch: { category_id: "not-a-uuid" },
+      code: "METADATA_CATEGORY_REQUIRED",
+    },
+    {
+      what: "a negative aum",
+      patch: { aum: -1 },
+      code: "METADATA_AUM_INVALID",
+    },
+    {
+      what: "a negative max_capacity",
+      patch: { max_capacity: -1 },
+      code: "METADATA_CAPACITY_INVALID",
+    },
+    {
+      what: "an entry_context outside its closed set",
+      patch: { entry_context: "garbage" },
+      code: "VALIDATION_FAILED",
+    },
+    {
+      what: "a capital_ownership outside its closed set",
+      patch: { capital_ownership: "own_capitol" },
+      code: "METADATA_CAPITAL_OWNERSHIP_INVALID",
+    },
+  ];
+
+  /**
+   * The first arm rejects the BODY ITSELF, so it cannot be expressed as a patch
+   * over `VALID_BODY` — it needs a request whose JSON is not an object.
+   */
+  function bodyFor(patch: Record<string, unknown>): unknown {
+    if (Object.keys(patch).length === 0) return "not an object";
+    const merged: Record<string, unknown> = { ...VALID_BODY, ...patch };
+    for (const [k, v] of Object.entries(patch)) {
+      if (v === undefined) delete merged[k];
+    }
+    return merged;
+  }
+
+  it.each(ARMS)("rejects $what with 400 + $code", async ({ patch, code }) => {
+    const POST = await importPost();
+    const res = await POST(makeReq(bodyFor(patch) as Record<string, unknown>));
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.code).toBe(code);
+    // The code is the RENDERABLE half; the `error` string stays the
+    // developer-facing detail and must not have been dropped.
+    expect(typeof body.error).toBe("string");
+    // ⛔ T-153.1-16 — adding a code changes the response BODY, never the
+    // DECISION. Every arm is still a gate: the RPC must not have run.
+    expect(
+      STATE.rpcCalls.find((c) => c.name === "finalize_wizard_strategy"),
+      "The RPC ran despite an invalid payload — validation is not a gate.",
+    ).toBeUndefined();
+  });
+
+  it("NOT ONE arm answers without a code (the class, not the instances)", async () => {
+    // The sweep the twelve `it`s above cannot do individually: a new arm added
+    // later without a code passes every assertion above by simply not being
+    // listed. This one reds the moment ANY rejection on this path arrives
+    // code-less — which is the state the whole route shipped in until now.
+    const POST = await importPost();
+    const codeless: string[] = [];
+    for (const arm of ARMS) {
+      const res = await POST(
+        makeReq(bodyFor(arm.patch) as Record<string, unknown>),
+      );
+      const body = await res.json();
+      if (typeof body.code !== "string" || body.code.length === 0) {
+        codeless.push(arm.what);
+      }
+    }
+    expect(
+      codeless,
+      `These validatePayload arms answered with no code: ${codeless.join(
+        ", ",
+      )}. A code-less rejection renders the UNKNOWN card ("We could not ` +
+        `classify this failure") for a failure the server classified exactly. ` +
+        `Give it a code AND admit that code to KNOWN_FINALIZE_CODES in the ` +
+        `same commit.`,
+    ).toEqual([]);
+    // Positive control: if `ARMS` is ever emptied or the loop stops running,
+    // `codeless` is [] and the assertion above is vacuously green.
+    expect(ARMS.length).toBe(12);
+  });
+
+  it("accepts a description at EXACTLY the lower bound (the boundary is <, not <=)", async () => {
+    // Hand-typed ten characters. This is the other half of the founder's
+    // incident: an off-by-one here would refuse a description that satisfies
+    // the rule the copy states, and the user would be told to add characters
+    // they had already added.
+    const fetchSpy = mockProbeReadOnly();
+    const POST = await importPost();
+    const res = await POST(
+      makeReq({ ...VALID_BODY, description: "abcdefghij" }),
+    );
+    expect(res.status).toBe(200);
+    fetchSpy.mockRestore();
+  });
+});
+
 describe("POST /api/strategies/finalize-wizard — H-0325 dollar-amount validation", () => {
   it("rejects negative aum with 400", async () => {
     const POST = await importPost();
@@ -1338,29 +2028,38 @@ describe("POST /api/strategies/finalize-wizard — H-0325 dollar-amount validati
     expect(res.status).toBe(400);
     const body = await res.json();
     expect(body.error).toMatch(/aum/);
+    // 153.1-05 / D-09(b) — the code, not just the status. A status-only
+    // assertion is precisely what let nine code-less arms live for a year:
+    // every one of them answered a correct 400 and an unrenderable body.
+    expect(body.code).toBe("METADATA_AUM_INVALID");
     expect(
       STATE.rpcCalls.find((c) => c.name === "finalize_wizard_strategy"),
     ).toBeUndefined();
   });
 
-  it("rejects aum at-or-above the 1e12 ceiling with 400", async () => {
+  it("rejects aum at-or-above the 1e12 ceiling with 400 + METADATA_AUM_INVALID", async () => {
     const POST = await importPost();
     const res = await POST(makeReq({ ...VALID_BODY, aum: 1e20 }));
     expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe("METADATA_AUM_INVALID");
   });
 
-  it("rejects non-numeric aum (string) with 400", async () => {
+  it("rejects non-numeric aum (string) with 400 + METADATA_AUM_INVALID", async () => {
     const POST = await importPost();
     const res = await POST(makeReq({ ...VALID_BODY, aum: "foo" }));
     expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe("METADATA_AUM_INVALID");
   });
 
-  it("rejects invalid max_capacity with 400", async () => {
+  it("rejects invalid max_capacity with 400 + METADATA_CAPACITY_INVALID", async () => {
     const POST = await importPost();
     const res = await POST(makeReq({ ...VALID_BODY, max_capacity: -1 }));
     expect(res.status).toBe(400);
     const body = await res.json();
     expect(body.error).toMatch(/max_capacity/);
+    // A DIFFERENT code from aum above, on an adjacent arm with an
+    // near-identical condition — the two fields are two remedies.
+    expect(body.code).toBe("METADATA_CAPACITY_INVALID");
   });
 
   it("accepts omitted aum (undefined / null)", async () => {
@@ -1447,11 +2146,20 @@ describe("POST /api/strategies/finalize-wizard — P470 RPC error-code mapping",
     consoleErr.mockRestore();
   });
 
-  it("audit-2026-05-07 H-0321: maps 22023 (invalid_parameter_value) to 409 with code='draft_state_invalid'", async () => {
+  it("audit-2026-05-07 H-0321: maps 22023 (invalid_parameter_value) to 409 with code='DRAFT_STATE_INVALID'", async () => {
     // PRE-FIX: 22023 lumped with 42501 → 403 "This draft cannot be finalized".
     // POST-FIX: 22023 is a state mismatch (already-published, missing-fields,
     // stale-snapshot), distinct from a true permission denial. 409 lets the
     // client show a refresh nudge rather than a sign-out / no-access prompt.
+    //
+    // 153.1-05 / D-34 — the LITERAL was `draft_state_invalid` (lowercase) until
+    // this plan. That is the one WIRE change in the D-34 reorder, and this
+    // assertion is where it is pinned: lowercase can never be a
+    // `WizardErrorCode`, so the 409 rendered the UNKNOWN card and its
+    // RECOVERABLE copy handed the user a Retry that re-POSTed the identical
+    // request against a draft the DB had already moved past. The uppercase
+    // member (153.1-04) has non-recoverable copy and is admitted to
+    // `KNOWN_FINALIZE_CODES` in this same commit.
     const fetchSpy = mockProbeReadOnly();
     const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
     routeThroughLegacyFinalize();
@@ -1469,7 +2177,7 @@ describe("POST /api/strategies/finalize-wizard — P470 RPC error-code mapping",
     expect(res.status).toBe(409);
     const body = await res.json();
     expect(body.error).toContain("not in a finalizable state");
-    expect(body.code).toBe("draft_state_invalid");
+    expect(body.code).toBe("DRAFT_STATE_INVALID");
     // The raw status/source details must not leak (P445-style hardening).
     expect(JSON.stringify(body)).not.toContain("source=legacy");
 
@@ -1941,6 +2649,111 @@ describe("POST /api/strategies/finalize-wizard — H-0330 enqueue failure escala
 });
 
 /**
+ * Phase 164.6 / 161.1-D13 — finalize's composite enqueue retracts an inherited
+ * ledger-refresh marker.
+ *
+ * `enqueue_compute_job` dedups a stitch_composite onto an in-flight job and
+ * returns ITS id with our p_metadata discarded. If that job is a background
+ * ledger refresh, its `metadata.source` marker keeps a stale factsheet
+ * published over a failure of the finalize the user just submitted. The route
+ * must retract it — for BOTH markers — must never touch an unmarked row, and a
+ * failed retraction must be loud under its OWN tag, never the enqueue's.
+ */
+describe("POST /api/strategies/finalize-wizard — [161.1-D13] composite refresh-marker retraction", () => {
+  it.each(["ledger-refresh", "ledger-refresh-composite"])(
+    "a deduped job carrying %s is rewritten without source, with the marker and this request's correlation id",
+    async (marker) => {
+      const fetchSpy = mockProbeReadOnly();
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+      routeThroughLegacyFinalize();
+      STATE.computeJobsRow = {
+        metadata: { source: marker, correlation_id: "fanout-run", run: 7 },
+      };
+      STATE.runAfterCallback = true;
+
+      const POST = await importPost();
+      const res = await POST(makeReq(VALID_BODY));
+      expect(res.status).toBe(200);
+      await flushAfter();
+
+      expect(STATE.computeJobsUpdates).toEqual([
+        {
+          patch: {
+            metadata: {
+              run: 7,
+              refresh_marker_retracted: marker,
+              correlation_id: TEST_CORRELATION_ID,
+            },
+          },
+          // The id the enqueue RPC RETURNED — the admin rpc double answers
+          // "fake-job-id" — never one derived from the request.
+          eq: ["id", "fake-job-id"],
+        },
+      ]);
+      fetchSpy.mockRestore();
+    },
+  );
+
+  it("a deduped job WITHOUT a ledger-refresh marker is never rewritten", async () => {
+    const fetchSpy = mockProbeReadOnly();
+    routeThroughLegacyFinalize();
+    STATE.computeJobsRow = { metadata: { source: "keys/sync" } };
+    STATE.runAfterCallback = true;
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+    expect(res.status).toBe(200);
+    await flushAfter();
+
+    expect(
+      STATE.adminRpcCalls.find((c) => c.args.p_kind === "stitch_composite"),
+    ).toBeDefined();
+    expect(STATE.computeJobsUpdates).toEqual([]);
+    fetchSpy.mockRestore();
+  });
+
+  it("a failed retraction keeps the success envelope, is captured under its OWN tag, and never as an enqueue failure", async () => {
+    const fetchSpy = mockProbeReadOnly();
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    routeThroughLegacyFinalize();
+    STATE.computeJobsRow = { metadata: { source: "ledger-refresh-composite" } };
+    STATE.computeJobsUpdateError = { message: "update denied", code: "42501" };
+    STATE.runAfterCallback = true;
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ ok: true, strategy_id: STRATEGY_ID });
+    await flushAfter();
+
+    expect(STATE.computeJobsUpdates).toHaveLength(1);
+    const retractCall = STATE.captureToSentryCalls.find(
+      (c) => c.options.tags.side_effect === "composite_refresh_marker_retract",
+    );
+    expect(retractCall).toBeDefined();
+    expect(retractCall!.options.tags.surface).toBe("finalize-wizard-after");
+    expect(retractCall!.options.extra).toEqual({
+      strategy_id: STRATEGY_ID,
+      job_id: "fake-job-id",
+      correlation_id: TEST_CORRELATION_ID,
+    });
+    // Pitfall 15: the enqueue SUCCEEDED, so nothing may report it as failed.
+    expect(
+      STATE.captureToSentryCalls.filter(
+        (c) => c.options.tags.side_effect === "enqueue_sync_trades_job",
+      ),
+    ).toEqual([]);
+    expect(errSpy).toHaveBeenCalledWith(
+      expect.stringContaining("composite refresh-marker retraction failed"),
+    );
+    // LOW-2 (164.6 review fix): the log line names the SQLSTATE from the cause.
+    expect(errSpy).toHaveBeenCalledWith(expect.stringContaining("(code=42501)"));
+    fetchSpy.mockRestore();
+  });
+});
+
+/**
  * Phase 88 (ONB-01) — composite-first finalize routing + O-1 per-member
  * scope-broadening re-probe.
  *
@@ -2175,10 +2988,13 @@ describe("POST /api/strategies/finalize-wizard — Phase 88 composite-first rout
     const POST = await importPost();
     const res = await POST(makeReq(VALID_BODY));
     expect(res.status).toBe(200);
-    // The single-key legacy finalize RPC MUST NOT fire — dispatch is unified.
+    // SUBMITFIX — dispatch is unified, AND the unified arm promotes the draft.
+    // This line used to assert the RPC was NOT called, which pinned the bug:
+    // the arm answered 'pending_review' over a row left at 'draft'.
     expect(
       STATE.rpcCalls.find((c) => c.name === "finalize_wizard_strategy"),
-    ).toBeUndefined();
+    ).toBeDefined();
+    expect(STATE.processKeyCalls).toHaveLength(1);
     // No composite failed stamp on the single-key unified path.
     expect(
       STATE.strategyAnalyticsUpserts.find(
@@ -2554,10 +3370,14 @@ describe("POST /api/strategies/finalize-wizard — CONTRIB-02 private-by-default
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.status).toBe("pending_review");
-    // Manager single-key stays on the unified arm — legacy RPC untouched.
+    // Manager single-key stays on the unified arm, which now promotes through
+    // the same RPC with the manager terminal status. (SUBMITFIX: this used to
+    // assert the RPC was untouched, which pinned the never-promoted bug.)
     expect(
-      STATE.rpcCalls.find((c) => c.name === "finalize_wizard_strategy"),
-    ).toBeUndefined();
+      STATE.rpcCalls.find((c) => c.name === "finalize_wizard_strategy")?.args
+        .p_terminal_status,
+    ).toBe("pending_review");
+    expect(STATE.processKeyCalls).toHaveLength(1);
     fetchSpy.mockRestore();
   });
 
@@ -2657,6 +3477,11 @@ describe("POST /api/strategies/finalize-wizard — CONTRIB-02 private-by-default
     expect(res.status).toBe(400);
     const body = await res.json();
     expect(String(body.error)).toContain("entry_context");
+    // 153.1-05 — VALIDATION_FAILED rather than a field-level code:
+    // `entry_context` is a context selector the wizard sets from which surface
+    // the user entered by, never something they typed, so there is no form
+    // control to route them back to (RESEARCH Q3).
+    expect(body.code).toBe("VALIDATION_FAILED");
     expect(
       STATE.rpcCalls.find((c) => c.name === "finalize_wizard_strategy"),
     ).toBeUndefined();
@@ -2681,6 +3506,32 @@ describe("POST /api/strategies/finalize-wizard — CONTRIB-02 private-by-default
  * duplicate appeared" is ALSO true when nothing appeared at all. Every case
  * below therefore asserts the POSITIVE — that the call fired, and fired
  * carrying the RIGHT identity — before asserting any absence.
+ *
+ * ── 141.2 / D-01: WHERE THE OTHER HALF OF THIS CONTRACT IS PINNED ────────────
+ *
+ * This describe owns the ROUTE half only: the context carries EXACTLY what the
+ * draft row has — the draft's own id when the column is populated, and NOTHING
+ * when it is NULL (absence forwarded as absence, never synthesised). Both
+ * polarities are asserted below, and they are a contract, not an implementation
+ * detail, because of what the OTHER side now does with them.
+ *
+ * That other side is `retriesForFlow` in `seam-retry-registry.ts`, which
+ * `postProcessKey` consults at its single `resilientFetch` chokepoint. It turns
+ * the absence this route forwards into `retriesOverride: 0` — an `onboard` call
+ * with no usable idempotency key is refused a retry, because the server has
+ * nothing to dedupe on in that state and would insert a second verification row
+ * on attempt 2. So the "no key" case below is not merely tolerated downstream;
+ * it now CHANGES the retry verdict.
+ *
+ * ⚠️ AND THIS FILE STRUCTURALLY CANNOT SEE THAT. The `vi.mock` of
+ * `@/lib/process-key-client` above replaces the seam client WHOLESALE, so no
+ * assertion here can ever observe `retriesOverride` — the real chokepoint is
+ * never executed. That is why the retry pins live in `process-key-client.test.ts`
+ * (the `retriesForFlow` cases in the D-01 describe there, which drive the REAL
+ * `postProcessKey` and read the value off the captured core init), and the
+ * helper's own branch table is pinned in `seam-retry-registry.test.ts`. A reader
+ * who changes the context contract below must look at all three; a green run
+ * here alone proves only that the route sent what the draft had.
  */
 describe("POST /api/strategies/finalize-wizard — TS-33 wizard_session_id reaches the dedupe", () => {
   const DRAFT_SESSION_ID = "33333333-3333-4333-8333-333333333333";
@@ -2854,6 +3705,1608 @@ describe("POST /api/strategies/finalize-wizard — TS-33 wizard_session_id reach
       "A client-supplied wizard_session_id displaced the one read from the " +
         "owner-scoped draft row. The caller can now choose the dedupe key.",
     ).toBe(DRAFT_SESSION_ID);
+    fetchSpy.mockRestore();
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════════
+// Phase 150 / OWN-03 — the capital-ownership mark
+//
+// The wizard now asks whose capital sits behind a key, and the answer is
+// persisted as a strategy-level mark. Three properties are load-bearing:
+//
+//  1. The mark is written by a SEPARATE owner-scoped UPDATE after the finalize
+//     RPC returns — the 13-arg SECURITY DEFINER signature is untouched. A
+//     14th argument would mean a DROP/CREATE of the RPC on the wizard's
+//     critical path, which is the higher-risk change (150-RESEARCH,
+//     Alternatives Considered).
+//  2. That non-atomicity is DELIBERATE and degrades safely: if the mark write
+//     fails, the column stays NULL, and NULL is non-allocatable. A lost mark
+//     costs the user a second click in the Mark dialog; a failed finalize
+//     costs them the whole submission. It must never become a wizard error
+//     arm — the v0.53.3.1 roster invariant means any unknown code renders the
+//     UNKNOWN card.
+//  3. The write is pinned to BOTH the finalized id and the caller's user_id.
+//     strategies_update RLS carries no WITH CHECK, so the explicit predicate
+//     is the actual boundary, not decoration (T-150-10).
+// ══════════════════════════════════════════════════════════════════════════
+describe("POST /api/strategies/finalize-wizard — OWN-03 capital-ownership mark", () => {
+  /** The mark write, if the route made one. */
+  function markWrite() {
+    return STATE.strategyUpdates.find((u) => "capital_ownership" in u.patch);
+  }
+
+  it("persists capital_ownership='own_capital' with an owner-scoped UPDATE after the RPC", async () => {
+    const fetchSpy = mockProbeReadOnly();
+    STATE.strategyRow = { api_key_id: API_KEY_ID };
+    STATE.strategyKeysCount = 0;
+
+    const POST = await importPost();
+    const res = await POST(
+      makeReq({
+        ...VALID_BODY,
+        entry_context: "contribution",
+        capital_ownership: "own_capital",
+      }),
+    );
+    expect(res.status).toBe(200);
+
+    // The finalize itself still happened through the untouched 13-arg RPC.
+    const rpc = STATE.rpcCalls.find(
+      (c) => c.name === "finalize_wizard_strategy",
+    );
+    expect(rpc).toBeDefined();
+    expect(
+      Object.keys(rpc!.args).some((k) => k.includes("capital")),
+      "The mark leaked into the RPC argument list. It must ride a separate " +
+        "UPDATE — the SECURITY DEFINER signature is not to be widened.",
+    ).toBe(false);
+
+    const write = markWrite();
+    expect(write).toBeDefined();
+    expect(write!.patch).toEqual({ capital_ownership: "own_capital" });
+    // T-150-10: both predicates, or the patch could reach another user's row.
+    expect(write!.eqs).toEqual([
+      { column: "id", value: STRATEGY_ID },
+      { column: "user_id", value: USER.id },
+    ]);
+    fetchSpy.mockRestore();
+  });
+
+  it("persists capital_ownership='team_review' the same way", async () => {
+    const fetchSpy = mockProbeReadOnly();
+    STATE.strategyRow = { api_key_id: API_KEY_ID };
+    STATE.strategyKeysCount = 0;
+
+    const POST = await importPost();
+    const res = await POST(
+      makeReq({
+        ...VALID_BODY,
+        entry_context: "contribution",
+        capital_ownership: "team_review",
+      }),
+    );
+    expect(res.status).toBe(200);
+
+    const write = markWrite();
+    expect(write).toBeDefined();
+    expect(write!.patch).toEqual({ capital_ownership: "team_review" });
+    expect(write!.eqs).toEqual([
+      { column: "id", value: STRATEGY_ID },
+      { column: "user_id", value: USER.id },
+    ]);
+    fetchSpy.mockRestore();
+  });
+
+  it("writes NOTHING when the body carries no capital_ownership (the column stays NULL)", async () => {
+    // Absence is the manager path and every pre-Phase-150 caller. An absent
+    // field must not be coerced to a default — an unasked user has not
+    // answered, and NULL (non-allocatable) is the honest record of that.
+    const fetchSpy = mockProbeReadOnly();
+    STATE.strategyRow = { api_key_id: API_KEY_ID };
+    STATE.strategyKeysCount = 0;
+
+    const POST = await importPost();
+    const res = await POST(
+      makeReq({ ...VALID_BODY, entry_context: "contribution" }),
+    );
+    expect(res.status).toBe(200);
+    expect(markWrite()).toBeUndefined();
+    fetchSpy.mockRestore();
+  });
+
+  it("rejects a garbage capital_ownership with 400 BEFORE the RPC runs", async () => {
+    // Closed set mirrored by the DB CHECK. Rejected at the boundary so a
+    // garbled value can never reach the column that gates the money action —
+    // and rejected BEFORE finalize so a bad request cannot half-succeed.
+    const POST = await importPost();
+    const res = await POST(
+      makeReq({
+        ...VALID_BODY,
+        entry_context: "contribution",
+        capital_ownership: "own_capitol",
+      }),
+    );
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    // ⚠️ 153.1-05 / D-09(b) — THIS ASSERTION USED TO PIN THE DEFECT. It read
+    // `expect(body.code).toBeUndefined()`, justified by "minting a code here
+    // would put a string the wizard roster does not know onto the client,
+    // which renders the UNKNOWN card". True premise, backwards conclusion, and
+    // the same one the source comment beside the arm carried: answering with
+    // NO code does not avoid the UNKNOWN card, it guarantees it. The remedy is
+    // to admit the code to `KNOWN_FINALIZE_CODES`, which this same commit
+    // does. A test written the old way is worse than no test — it makes the
+    // dead end a contract, so removing it would have read as a regression.
+    expect(typeof body.error).toBe("string");
+    expect(body.code).toBe("METADATA_CAPITAL_OWNERSHIP_INVALID");
+
+    expect(
+      STATE.rpcCalls.find((c) => c.name === "finalize_wizard_strategy"),
+      "The RPC ran despite an invalid payload — validation is not a gate.",
+    ).toBeUndefined();
+    expect(markWrite()).toBeUndefined();
+  });
+
+  it("still finalizes 200 when the mark UPDATE errors — a lost mark degrades to NULL, never to a failed submit", async () => {
+    // The deliberate non-atomicity. The user's strategy is finalized; only the
+    // mark is missing, and they can set it from the Mark dialog. Turning this
+    // into an error arm would throw away a successful finalize over metadata.
+    const fetchSpy = mockProbeReadOnly();
+    STATE.strategyRow = { api_key_id: API_KEY_ID };
+    STATE.strategyKeysCount = 0;
+    STATE.capitalOwnershipUpdateError = { message: "pg went away" };
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const POST = await importPost();
+    const res = await POST(
+      makeReq({
+        ...VALID_BODY,
+        entry_context: "contribution",
+        capital_ownership: "own_capital",
+      }),
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.status).toBe("private");
+    expect(body.error).toBeUndefined();
+    expect(body.code).toBeUndefined();
+
+    // Silence is the real failure mode here: the mark is gone and nobody
+    // knows. It must be logged with the id needed to find the row.
+    const logged = errSpy.mock.calls.some(
+      (c) =>
+        c.join(" ").includes("capital_ownership") &&
+        c.join(" ").includes(STRATEGY_ID),
+    );
+    expect(
+      logged,
+      "The mark write failed silently — no log line naming the strategy.",
+    ).toBe(true);
+
+    // 151 specialist F-3 — server-side logging is NOT enough. The user who
+    // explicitly answered the capital question got a plain success screen while
+    // their answer was dropped; the consequence (an unmarked strategy is
+    // non-allocatable, so `Allocate…` never appears) surfaced days later as an
+    // unexplained absence, and the documented remedy was discoverable only by
+    // someone who already knew. The 200 body now carries a non-error sidecar so
+    // the client can say so, without discarding the finalize.
+    expect(body.capital_ownership_persisted).toBe(false);
+
+    errSpy.mockRestore();
+    fetchSpy.mockRestore();
+  });
+
+  it("logs a zero-row mark write (the patch matched nobody)", async () => {
+    // Zero rows means the id+user_id predicate matched nothing: the row moved,
+    // vanished, or was never the caller's. Same safe degradation, but it is a
+    // different and more alarming story than a transport error, so it gets its
+    // own log rather than passing unnoticed.
+    const fetchSpy = mockProbeReadOnly();
+    STATE.strategyRow = { api_key_id: API_KEY_ID };
+    STATE.strategyKeysCount = 0;
+    STATE.capitalOwnershipUpdateRows = [];
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const POST = await importPost();
+    const res = await POST(
+      makeReq({
+        ...VALID_BODY,
+        entry_context: "contribution",
+        capital_ownership: "own_capital",
+      }),
+    );
+    expect(res.status).toBe(200);
+    expect(
+      errSpy.mock.calls.some(
+        (c) =>
+          c.join(" ").includes("capital_ownership") &&
+          c.join(" ").includes(STRATEGY_ID),
+      ),
+    ).toBe(true);
+    // F-3 — the zero-row arm loses the mark just as completely as a transport
+    // error, so it must carry the same user-facing signal.
+    expect((await res.json()).capital_ownership_persisted).toBe(false);
+
+    errSpy.mockRestore();
+    fetchSpy.mockRestore();
+  });
+
+  // F-3 NON-VACUITY CONTROL. The sidecar is emitted ONLY on failure, so every
+  // existing caller's response bytes are unchanged and "the flag is absent"
+  // honestly means "nothing was lost". Without this control the two assertions
+  // above would also pass against a field hardcoded to false.
+  it("omits the capital_ownership_persisted sidecar entirely when the mark LANDS", async () => {
+    const fetchSpy = mockProbeReadOnly();
+    STATE.strategyRow = { api_key_id: API_KEY_ID };
+    STATE.strategyKeysCount = 0;
+
+    const POST = await importPost();
+    const res = await POST(
+      makeReq({
+        ...VALID_BODY,
+        entry_context: "contribution",
+        capital_ownership: "own_capital",
+      }),
+    );
+    expect(res.status).toBe(200);
+
+    const body = await res.json();
+    // Non-vacuity: the write really happened on this path.
+    expect(markWrite()!.patch).toEqual({ capital_ownership: "own_capital" });
+    expect("capital_ownership_persisted" in body).toBe(false);
+
+    fetchSpy.mockRestore();
+  });
+
+  // ── 151 informational D7 — ONE RESPONSE CONTRACT, BOTH ARMS ──────────────
+  //
+  // The sidecar above is the LEGACY/contribution arm. The UNIFIED (manager) arm
+  // has no mark write at all: a `capital_ownership` arriving there is dropped
+  // unconditionally, and until this change it was dropped with only a
+  // console.warn behind a byte-identical success body. A client that sent the
+  // field and got routed to the unified arm therefore could not distinguish
+  // "saved" from "discarded" — and SubmitStep's `=== false` reader (151 review
+  // E8) showed plain success while the answer was gone. Same loss, same signal.
+  it("D7 — the UNIFIED arm emits the same sidecar when a mark it cannot persist is sent", async () => {
+    const fetchSpy = mockProbeReadOnly();
+    // Single-key manager draft with no entry_context ⇒ the unified arm.
+    STATE.strategyRow = { api_key_id: API_KEY_ID };
+    STATE.strategyKeysCount = 0;
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const POST = await importPost();
+    const res = await POST(
+      makeReq({ ...VALID_BODY, capital_ownership: "own_capital" }),
+    );
+    expect(res.status).toBe(200);
+
+    const body = await res.json();
+    // Non-vacuity: this really is the unified arm, not the legacy one. Only the
+    // unified arm dispatches to postProcessKey, and no mark UPDATE was issued,
+    // which is precisely why the mark is lost here. (SUBMITFIX: this used to
+    // key on the finalize RPC being ABSENT; the unified arm now calls it too.)
+    expect(STATE.processKeyCalls).toHaveLength(1);
+    expect(markWrite()).toBeUndefined();
+    expect(body.queued).toBe(true);
+
+    expect(
+      body.capital_ownership_persisted,
+      "The unified arm dropped the caller's mark and reported unqualified " +
+        "success — the two arms no longer share one response contract.",
+    ).toBe(false);
+
+    warnSpy.mockRestore();
+    fetchSpy.mockRestore();
+  });
+
+  it("D7 CONTROL — the unified arm's body is byte-unchanged when no mark was sent", async () => {
+    // The sidecar must be emitted ONLY when the caller asked for a mark.
+    // Without this control the assertion above would also pass against a field
+    // hardcoded onto every unified response, which would make every existing
+    // manager submission look like a data loss.
+    const fetchSpy = mockProbeReadOnly();
+    STATE.strategyRow = { api_key_id: API_KEY_ID };
+    STATE.strategyKeysCount = 0;
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+    expect(res.status).toBe(200);
+
+    const body = await res.json();
+    expect(body.queued).toBe(true);
+    expect("capital_ownership_persisted" in body).toBe(false);
+
+    fetchSpy.mockRestore();
+  });
+
+  it("D7 — the dedup-hit (queued=false) unified body carries the sidecar too", async () => {
+    // The unified arm has TWO 200 shapes. The idempotent-resume envelope is the
+    // one a duplicate submit lands on, and a duplicate submit is exactly when a
+    // user re-sends the answer they thought was saved; leaving the sidecar off
+    // this shape would make the flag depend on which 200 you happened to get.
+    const fetchSpy = mockProbeReadOnly();
+    STATE.strategyRow = { api_key_id: API_KEY_ID };
+    STATE.strategyKeysCount = 0;
+    STATE.processKeyResult = {
+      ok: true,
+      body: {
+        queued: false,
+        verification_id: "ver-dup",
+        code: "WIZARD_DUPLICATE",
+        idempotent: true,
+      },
+    };
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const POST = await importPost();
+    const res = await POST(
+      makeReq({ ...VALID_BODY, capital_ownership: "team_review" }),
+    );
+    expect(res.status).toBe(200);
+
+    const body = await res.json();
+    expect(body.queued).toBe(false);
+    expect(body.code).toBe("WIZARD_DUPLICATE");
+    expect(body.capital_ownership_persisted).toBe(false);
+
+    warnSpy.mockRestore();
+    fetchSpy.mockRestore();
+  });
+});
+
+/**
+ * Phase 153.2-04 / WIZFORM-04 + MT5-14(a) — the submit path stops asking a venue
+ * a question it has no answer to.
+ *
+ * ── WHAT WAS BROKEN ─────────────────────────────────────────────────────────
+ *
+ * `runScopeBroadeningProbe` demanded a ccxt per-key permissions probe on EVERY
+ * submit. A venue that exposes no per-key scope endpoint cannot answer it, so
+ * the seam returned a permanent failure and the route reported it as
+ * `KEY_NETWORK_TIMEOUT` — "we could not reach the exchange", with a Retry. The
+ * founder clicked that Retry five times against a condition that can never
+ * change. The strategy was undeclarable and unsubmittable at once, which is why
+ * MT5-14 and WIZFORM-04 had to ship together.
+ *
+ * ── WHY THESE ROWS ARE SHAPED THE WAY THEY ARE ──────────────────────────────
+ *
+ * ⚠️ THEY ASSERT ON THE SEAM, NOT ON THE RESPONSE. "Zero live calls on submit"
+ * (D-06) is a claim about what crossed the network, and a 200 proves nothing
+ * about it — a route that probed successfully and a route that never probed
+ * both answer 200. `RF.lastCall` is set on EVERY `resilientFetch`, so `null` is
+ * proof the chokepoint was never reached; the `globalThis.fetch` spy is asserted
+ * alongside it so a future path that bypassed the core would still be seen.
+ *
+ * ⚠️ THE SWEEP IS DERIVED FROM THE CAPABILITY RECORD, NOT FROM A VENUE NAME. An
+ * instance test over one venue is satisfied by an instance FIX (`venue === …`),
+ * and an instance fix is the defect class this milestone exists to delete. The
+ * sweep asks the same registry the route asks and holds every member to its
+ * answer, so a second non-probing venue is covered the day its row lands and a
+ * skip written as a name comparison reds here while every single-venue row
+ * stays green. ⛔ The oracle is the PREDICATE over `SUPPORTED_EXCHANGES`, which
+ * is a different derivation from the route's own branch — not the route's
+ * behaviour compared against itself.
+ */
+/**
+ * Proof the seam was never crossed, by both routes to it.
+ *
+ * 153.6-04 — hoisted out of the WIZFORM-04 `describe` so the PARITY-04 block
+ * below asserts through the SAME two helpers. Two copies of "did the probe run?"
+ * is how one copy quietly stops meaning it.
+ */
+function expectNoSeamCall(fetchSpy: ReturnType<typeof vi.spyOn>): void {
+  expect(
+    RF.lastCall,
+    "The resilience core was entered, so a live permissions probe was issued " +
+      "for a venue that has no per-key scope surface to report — the demand " +
+      "WIZFORM-04 removes.",
+  ).toBeNull();
+  expect(fetchSpy).not.toHaveBeenCalled();
+}
+
+/** Proof the seam WAS crossed, on the keys-permissions budget. */
+function expectSeamProbed(): void {
+  expect(
+    RF.lastCall,
+    "The scope-broadening probe did NOT run. It is an ASVS V4 control: a key " +
+      "broadened to trade/withdraw between Connect and Submit is caught here, " +
+      "and skipping it for a venue that can answer is a real hole.",
+  ).not.toBeNull();
+  expect(RF.lastCall!.budgetKey).toBe("keys-permissions");
+  expect(RF.lastCall!.path).toContain("/permissions?force_refresh=true");
+}
+
+describe("[153.2-04 / WIZFORM-04] the scope probe is gated on a CAPABILITY, and fails toward probing", () => {
+  it("an MT5 single-key submit crosses the keys-permissions seam ZERO times (D-06)", async () => {
+    STATE.adminApiKeysExchange = "mt5";
+    // 153.6-04 / PARITY-04 — the key is ATTESTED as mt5, which is what a key
+    // minted by the wizard RPC looks like. The capability record still governs
+    // the skip; only the AUTHORITY for the venue moved from the client-writable
+    // column to the server-attested one, so this row keeps its D-06 meaning and
+    // gains a truthful fixture.
+    STATE.adminApiKeysAttestedVenue = "mt5";
+    // The read-only mock is installed DELIBERATELY: if the route still probed,
+    // this row would pass on the response and fail only here. The spy is the
+    // assertion, not the setup.
+    const fetchSpy = mockProbeReadOnly();
+
+    const POST = await importPost();
+    await POST(makeReq(VALID_BODY));
+
+    expectNoSeamCall(fetchSpy);
+    fetchSpy.mockRestore();
+  });
+
+  it("a ccxt submit still probes, byte-identically — binance", async () => {
+    STATE.adminApiKeysExchange = "binance";
+    STATE.adminApiKeysAttestedVenue = "binance";
+    const fetchSpy = mockProbeReadOnly();
+
+    const POST = await importPost();
+    await POST(makeReq(VALID_BODY));
+
+    expectSeamProbed();
+    fetchSpy.mockRestore();
+  });
+
+  it("[D-22] sFOX keeps the submit-time scope probe BYTE-UNCHANGED", async () => {
+    // Asserted EXPLICITLY rather than left to the binance row. sFOX asserts
+    // read_only structurally for a similar reason to MT5 and is the obvious
+    // candidate for a careless second opt-out — but whether the ccxt probe
+    // currently SUCCEEDS for it is unknown, so D-22 pins it unchanged and the
+    // question is logged rather than answered.
+    STATE.adminApiKeysExchange = "sfox";
+    STATE.adminApiKeysAttestedVenue = "sfox";
+    const fetchSpy = mockProbeReadOnly();
+
+    const POST = await importPost();
+    await POST(makeReq(VALID_BODY));
+
+    expectSeamProbed();
+    fetchSpy.mockRestore();
+  });
+
+  it("⭐ an UNRESOLVED venue is STILL probed — the control fails TOWARD probing", async () => {
+    // The api_keys read faulted, so the route holds `null` for the attested
+    // venue. Skipping on null would silently disable the scope-broadening
+    // defence for every key whose venue read blipped — a control that fails open
+    // on a transient DB error is not a control (RESEARCH Pitfall 4 / ASVS V4).
+    //
+    // ⛔ 153.6-04 — the failed read is ALSO why the probe gate must not inherit
+    // the asset_class stamp's non-blocking leniency. That arm is allowed to shrug
+    // and leave the draft's stamp alone; this one has to probe.
+    STATE.adminApiKeysSelectError = { message: "transient read fault" };
+    const fetchSpy = mockProbeReadOnly();
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const POST = await importPost();
+    await POST(makeReq(VALID_BODY));
+
+    expectSeamProbed();
+    warnSpy.mockRestore();
+    fetchSpy.mockRestore();
+  });
+
+  it("an UNKNOWN venue string is STILL probed — same direction, different cause", async () => {
+    // A venue the capability registry has never heard of (a code added to the
+    // DB ahead of the registry). The registry's answer for "I do not know this
+    // venue" must be "probe it".
+    STATE.adminApiKeysExchange = "some-venue-we-have-never-heard-of";
+    STATE.adminApiKeysAttestedVenue = "some-venue-we-have-never-heard-of";
+    const fetchSpy = mockProbeReadOnly();
+
+    const POST = await importPost();
+    await POST(makeReq(VALID_BODY));
+
+    expectSeamProbed();
+    fetchSpy.mockRestore();
+  });
+
+  it("⭐ CLASS SWEEP: every supported venue's probe behaviour matches its capability row", async () => {
+    // The oracle is the capability predicate over SUPPORTED_EXCHANGES — a
+    // derivation the route does not share. An instance skip (`venue === …`)
+    // plus a second non-probing row in the registry reds HERE and nowhere else.
+    const { SUPPORTED_EXCHANGES, venueSupportsScopeProbe } = await import(
+      "@/lib/closed-sets"
+    );
+    const nonProbing = SUPPORTED_EXCHANGES.filter(
+      (v) => !venueSupportsScopeProbe(v),
+    );
+    // Anti-vacuity: a sweep over an empty opt-out set is green forever.
+    expect(
+      nonProbing.length,
+      "No venue opts out of the probe, so this sweep proves nothing. If the " +
+        "capability was removed, WIZFORM-04 was reverted.",
+    ).toBeGreaterThan(0);
+    expect(nonProbing.length).toBeLessThan(SUPPORTED_EXCHANGES.length);
+
+    // ⭐ 153.6-04 / PARITY-04 — THE SWEEP DRIVES THE ATTESTATION, AND PINS THE
+    // CLIENT-WRITABLE COLUMN TO A LABEL THAT CLAIMS EXEMPTION ON EVERY ITERATION.
+    // `exchange` is writable by the client at INSERT (the 20260810120000 lock
+    // revoked UPDATE only), so a gate that reads it can be told to skip. Holding
+    // it at a non-probing label for the whole sweep means a gate reading the
+    // WRONG column skips every venue — and every probing venue reds here.
+    //
+    // ⛔ The label is TAKEN FROM the opt-out set, never hand-named: naming a venue
+    // is the instance-fix habit this sweep exists to catch, and `nonProbing` is
+    // already fenced non-empty above.
+    const forgedLabel = nonProbing[0];
+
+    const POST = await importPost();
+    for (const venue of SUPPORTED_EXCHANGES) {
+      RF.lastCall = null;
+      STATE.adminApiKeysExchange = forgedLabel;
+      STATE.adminApiKeysAttestedVenue = venue;
+      const fetchSpy = mockProbeReadOnly();
+      await POST(makeReq(VALID_BODY));
+      const shouldProbe = venueSupportsScopeProbe(venue);
+      expect(
+        RF.lastCall !== null,
+        `attested venue "${venue}" (client label "${forgedLabel}"): the route ` +
+          `${RF.lastCall ? "probed" : "skipped"} but its capability row says it ` +
+          `should ${shouldProbe ? "probe" : "skip"}. The gate must read the ` +
+          `CAPABILITY of the ATTESTED venue — never a venue name, and never the ` +
+          `client-writable label.`,
+      ).toBe(shouldProbe);
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it("⭐ CLASS SWEEP, composite arm: the SAME gate applies per member", async () => {
+    // Gating only the single-key arm would be the instance fix wearing a
+    // different hat — correct for the path someone happened to test, and a live
+    // per-member probe demand on the other. The member's venue arrives on the
+    // widened embed; `.limit(cap + 1)` is untouched.
+    const { SUPPORTED_EXCHANGES, venueSupportsScopeProbe } = await import(
+      "@/lib/closed-sets"
+    );
+    const nonProbing = SUPPORTED_EXCHANGES.filter(
+      (v) => !venueSupportsScopeProbe(v),
+    );
+    // Anti-vacuity, restated for THIS sweep rather than borrowed from the one
+    // above: this loop now needs a non-probing label of its own, and a floor that
+    // lives in the other `it` cannot fence a derivation that happens here.
+    expect(
+      nonProbing.length,
+      "No venue opts out of the probe, so this sweep proves nothing. If the " +
+        "capability was removed, WIZFORM-04 was reverted.",
+    ).toBeGreaterThan(0);
+    expect(nonProbing.length).toBeLessThan(SUPPORTED_EXCHANGES.length);
+    // 153.6-04 — same forged-label discipline as the single-key sweep: the
+    // member's client-writable `exchange` claims exemption on every iteration, so
+    // a per-member gate reading it skips the whole set.
+    const forgedLabel = nonProbing[0];
+
+    const POST = await importPost();
+    for (const venue of SUPPORTED_EXCHANGES) {
+      RF.lastCall = null;
+      STATE.strategyRow = { api_key_id: null };
+      STATE.strategyKeysCount = 1;
+      STATE.strategyKeysList = [
+        {
+          api_key_id: MEMBER_KEY_1,
+          api_keys: { exchange: forgedLabel, attested_venue: venue },
+        },
+      ];
+      const fetchSpy = mockProbeReadOnly();
+      await POST(makeReq(VALID_BODY));
+      expect(
+        RF.lastCall !== null,
+        `composite member attested "${venue}" (client label "${forgedLabel}") ` +
+          `did not match its capability row.`,
+      ).toBe(venueSupportsScopeProbe(venue));
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it("a composite member whose venue could not be read is STILL probed", async () => {
+    // The embed resolves null when the join comes back empty. Same fail-toward
+    // rule as the single-key arm, asserted separately because it reaches the
+    // gate down a different path.
+    STATE.strategyRow = { api_key_id: null };
+    STATE.strategyKeysCount = 1;
+    STATE.strategyKeysList = [{ api_key_id: MEMBER_KEY_1, api_keys: null }];
+    const fetchSpy = mockProbeReadOnly();
+
+    const POST = await importPost();
+    await POST(makeReq(VALID_BODY));
+
+    expectSeamProbed();
+    fetchSpy.mockRestore();
+  });
+
+  it("the composite member read still asks for the truncation-detector row", async () => {
+    // The select was widened in this plan; the cap was NOT. `cap + 1` is a
+    // truncation DETECTOR whose arrival IS the refusal, and it is pinned
+    // cross-file against SEAM_ROUTE_BUDGETS. Asserted here because the two live
+    // on the same query and an edit to one is an edit next to the other.
+    STATE.strategyRow = { api_key_id: null };
+    STATE.strategyKeysCount = 1;
+    STATE.strategyKeysList = [
+      { api_key_id: MEMBER_KEY_1, api_keys: { exchange: "binance" } },
+    ];
+    const fetchSpy = mockProbeReadOnly();
+
+    const POST = await importPost();
+    await POST(makeReq(VALID_BODY));
+
+    expect(STATE.strategyKeysListLimit).toBe(11);
+    fetchSpy.mockRestore();
+  });
+
+  it("⛔ no retry is issued on the probe path (D-07)", async () => {
+    // The requirement is explicit that a naive retry multiplies the budget this
+    // route is capped on and feeds breaker:railway. This fix REMOVES calls; it
+    // must never multiply them. One submit, one crossing.
+    STATE.adminApiKeysExchange = "binance";
+    STATE.adminApiKeysAttestedVenue = "binance";
+    const fetchSpy = mockProbeReadOnly();
+
+    const POST = await importPost();
+    await POST(makeReq(VALID_BODY));
+
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(RF.lastCall!.init.retriesOverride).toBe(0);
+    fetchSpy.mockRestore();
+  });
+});
+
+/**
+ * Phase 153.6-04 / PARITY-04 — the probe gate stops believing the client.
+ * Phase 156 / CONNECT-01 — and the client can no longer reach the writer either.
+ *
+ * ── WHAT WAS BROKEN ─────────────────────────────────────────────────────────
+ *
+ * WIZFORM-04 gave the ASVS V4 scope-broadening probe a per-venue exemption and
+ * read the venue off `api_keys.exchange`. Migration 20260810120000 revoked
+ * client UPDATE on that column and backstopped it with a trigger — but INSERT
+ * was deliberately left open (the wizard's own client-side INSERT path depends
+ * on it). So the column is still client-writable at the one moment that matters:
+ * a row can be created carrying a label that CLAIMS the exemption, and the gate
+ * would honour it. The exemption was reachable by asking for it.
+ *
+ * ── THE DELIVERABLE, IN ONE SENTENCE ────────────────────────────────────────
+ *
+ * ⭐ The gate reads `attested_venue` — written only by the two SECURITY DEFINER
+ * wizard RPCs and NULLed by a BEFORE INSERT trigger for every non-privileged
+ * caller — and NOTHING else. The framing that binds THIS FILE is still "the
+ * probe no longer believes the client": every assertion below must hold on its
+ * own, on a row of any provenance, and none of them may lean on who was able to
+ * write the row. That independence is why the write half could land as a
+ * separate phase without re-cutting a single case here.
+ *
+ * ⭐ THE WRITE HALF HAS NOW LANDED (Phase 156 / CONNECT-01). This docblock used
+ * to say `attested_venue` was NOT a server-validated venue, because the RPCs
+ * wrote the `p_exchange` they were CALLED with and `authenticated` could invoke
+ * them over PostgREST. Both routes now call them from the server inside the same
+ * request that ran `validateKey`, and migration 20260814120000 withdrew
+ * `authenticated` EXECUTE from both — a browser cannot reach either RPC.
+ * ⛔ THE CEILING: the venue is the one this server observed a successful
+ * read-only authentication at. NEVER "the venue cannot be forged" — any server
+ * route holding `createAdminClient()` can still pass any uid and any venue
+ * (ADR-0001/ADR-0003). Do not delete a case below on the strength of the write
+ * half; the gate's job is to fail toward probing regardless.
+ *
+ * ⭐ THE CHECK IS STILL THE COUPLING (CONNECT-04). Both RPCs write
+ * `attested_venue` and `exchange` from one parameter, pinned by the CHECK
+ * api_keys_attested_venue_matches_exchange. These rows deliberately set the two
+ * columns to DIFFERENT values to prove which one the gate reads — a state the
+ * CHECK prevents in the database, and that is the point: the fixture is
+ * exercising the gate's READ, not a reachable row state.
+ *
+ * ⛔ NULL ⇒ PROBED, AND THERE IS NO FALLBACK TO `exchange`. A legacy row the
+ * backfill has not reached, and a row whose client-supplied attestation the
+ * trigger scrubbed, are the SAME state to this gate, and it is the state that
+ * must fail TOWARD the control. Falling back to `exchange` when the attestation
+ * is null would make the whole change a no-op for every row that has one — the
+ * hole that never closes (RESEARCH Q4.4).
+ *
+ * ── WHY THESE ROWS ARE SHAPED THE WAY THEY ARE ──────────────────────────────
+ *
+ * ⚠️ EVERY ROW SETS THE TWO COLUMNS TO DIFFERENT VALUES. A fixture where they
+ * agree cannot tell the two gates apart, and the WIZFORM-04 block above is full
+ * of such fixtures by construction (they predate the distinction). Disagreement
+ * is the entire experiment.
+ *
+ * ⚠️ ASSERTED ON THE SEAM, NOT THE RESPONSE, for the reason the WIZFORM-04
+ * docblock gives: a route that probed and a route that never probed both answer
+ * 200, so a status assertion would be green under the defect.
+ */
+describe("[153.6-04 / PARITY-04 · 156 / CONNECT-01] the probe gate reads the server-written venue, never the client label", () => {
+  it("⭐ a forged client label cannot buy a skip — an attested ccxt venue is PROBED", async () => {
+    // THE HEADLINE ORACLE. The row claims the exempt venue in the column a
+    // client can write at INSERT, and the server attested a venue that answers
+    // permissions probes. The attestation wins, so the probe runs.
+    STATE.adminApiKeysExchange = "mt5";
+    STATE.adminApiKeysAttestedVenue = "binance";
+    const fetchSpy = mockProbeReadOnly();
+
+    const POST = await importPost();
+    await POST(makeReq(VALID_BODY));
+
+    expectSeamProbed();
+    fetchSpy.mockRestore();
+  });
+
+  it("⭐ a NULL attestation is PROBED even when the client label claims the exemption", async () => {
+    // The legacy-unbackfilled row and the trigger-scrubbed row look identical
+    // from here, and both must be probed. ⛔ THIS ROW IS WHAT FORBIDS THE
+    // FALLBACK: a gate that read `attested_venue ?? exchange` would answer "mt5"
+    // here, skip, and be green on every other row in this block.
+    STATE.adminApiKeysExchange = "mt5";
+    STATE.adminApiKeysAttestedVenue = null;
+    const fetchSpy = mockProbeReadOnly();
+
+    const POST = await importPost();
+    await POST(makeReq(VALID_BODY));
+
+    expectSeamProbed();
+    fetchSpy.mockRestore();
+  });
+
+  it("an attested non-probing venue still SKIPS — only the authority moved, not the capability", async () => {
+    // ⛔ THE COUNTERWEIGHT, and it is not optional. Without it, "reads the
+    // attestation" is indistinguishable from "probes unconditionally" — which
+    // would pass both rows above while re-breaking every MT5 submit WIZFORM-04
+    // unblocked. The capability record still governs; the client label is the
+    // one that stopped mattering.
+    STATE.adminApiKeysExchange = "binance";
+    STATE.adminApiKeysAttestedVenue = "mt5";
+    const fetchSpy = mockProbeReadOnly();
+
+    const POST = await importPost();
+    await POST(makeReq(VALID_BODY));
+
+    expectNoSeamCall(fetchSpy);
+    fetchSpy.mockRestore();
+  });
+
+  it("⭐ composite: a member's forged label cannot buy a skip either — the attestation governs", async () => {
+    // The same three properties down the OTHER arm. Gating one arm is the
+    // instance fix wearing a different hat, and this route has shipped exactly
+    // that mistake before (WIZFORM-04's own composite gap).
+    STATE.strategyRow = { api_key_id: null };
+    STATE.strategyKeysCount = 1;
+    STATE.strategyKeysList = [
+      {
+        api_key_id: MEMBER_KEY_1,
+        api_keys: { exchange: "mt5", attested_venue: "binance" },
+      },
+    ];
+    const fetchSpy = mockProbeReadOnly();
+
+    const POST = await importPost();
+    await POST(makeReq(VALID_BODY));
+
+    expectSeamProbed();
+    fetchSpy.mockRestore();
+  });
+
+  it("composite: a member with a NULL attestation is PROBED, whatever its label claims", async () => {
+    STATE.strategyRow = { api_key_id: null };
+    STATE.strategyKeysCount = 1;
+    STATE.strategyKeysList = [
+      {
+        api_key_id: MEMBER_KEY_1,
+        api_keys: { exchange: "mt5", attested_venue: null },
+      },
+    ];
+    const fetchSpy = mockProbeReadOnly();
+
+    const POST = await importPost();
+    await POST(makeReq(VALID_BODY));
+
+    expectSeamProbed();
+    fetchSpy.mockRestore();
+  });
+
+  it("composite: a member with NO attestation field at all still PARSES and is PROBED", async () => {
+    // The embed shape a pre-migration schema cache returns, and the shape every
+    // pre-existing fixture in this file carries. It must PARSE — refusing it
+    // would turn a column rollout into a composite-finalize outage — and by the
+    // fail-toward rule it is probed.
+    STATE.strategyRow = { api_key_id: null };
+    STATE.strategyKeysCount = 1;
+    STATE.strategyKeysList = [
+      { api_key_id: MEMBER_KEY_1, api_keys: { exchange: "mt5" } },
+    ];
+    const fetchSpy = mockProbeReadOnly();
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(
+      res.status,
+      "A member row without the attestation column was refused as a shape drift.",
+    ).toBe(200);
+    expectSeamProbed();
+    fetchSpy.mockRestore();
+  });
+
+  it("composite: an attested non-probing member still SKIPS — the counterweight, per member", async () => {
+    STATE.strategyRow = { api_key_id: null };
+    STATE.strategyKeysCount = 1;
+    STATE.strategyKeysList = [
+      {
+        api_key_id: MEMBER_KEY_1,
+        api_keys: { exchange: "binance", attested_venue: "mt5" },
+      },
+    ];
+    const fetchSpy = mockProbeReadOnly();
+
+    const POST = await importPost();
+    await POST(makeReq(VALID_BODY));
+
+    expectNoSeamCall(fetchSpy);
+    fetchSpy.mockRestore();
+  });
+});
+
+/**
+ * Phase 153.2-04 / WIZFORM-04 / D-14b — a permanent condition is never reported
+ * as a temporary blip.
+ *
+ * `KEY_NETWORK_TIMEOUT`'s copy says we could not reach the exchange and its
+ * envelope carries a recoverable action, so a Retry control renders. Two arms
+ * that are PERMANENT used to land on it, and the Retry they offered could only
+ * ever produce the same message again — the five-clicks behaviour. The parse
+ * miss is covered by the SEAMUX-07 block above (re-cut there, beside the arm it
+ * was split off). This block covers the configuration fault.
+ */
+describe("[153.2-04 / D-14b] our own configuration fault is not a network blip", () => {
+  it("a missing INTERNAL_API_TOKEN answers SEAM_MISCONFIGURED (500), not KEY_NETWORK_TIMEOUT", async () => {
+    delete process.env.INTERNAL_API_TOKEN;
+    const fetchSpy = mockProbeReadOnly();
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(
+      res.status,
+      "The fault is OURS, not the venue's — 500, matching how process-key-client " +
+        "already answers this class. 502 would blame the upstream for our own " +
+        "unset setting.",
+    ).toBe(500);
+    const body = await res.json();
+    expect(body.code).toBe("SEAM_MISCONFIGURED");
+    expect(
+      body.code,
+      "A setting stays wrong until a human fixes it and redeploys. Reported as " +
+        "a timeout it renders a Retry whose only possible outcome is the same " +
+        "message again.",
+    ).not.toBe("KEY_NETWORK_TIMEOUT");
+
+    // Nothing was attempted, so nothing could have been unreachable.
+    expect(fetchSpy).not.toHaveBeenCalled();
+    // And it still FAILS CLOSED: no key is promoted on a probe that did not run.
+    expect(
+      STATE.rpcCalls.find((c) => c.name === "finalize_wizard_strategy"),
+    ).toBeUndefined();
+
+    errSpy.mockRestore();
+    fetchSpy.mockRestore();
+  });
+
+  it("the misconfiguration log carries the SETTING NAME and no secret", async () => {
+    // Shared Pattern E — every error path scrubs through the one leaf. The
+    // operator needs to know WHICH setting; there is no value to leak, because
+    // the whole condition is that it is absent.
+    delete process.env.INTERNAL_API_TOKEN;
+    const fetchSpy = mockProbeReadOnly();
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const POST = await importPost();
+    await POST(makeReq(VALID_BODY));
+
+    const logged = errSpy.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(logged).toMatch(/probe misconfigured/i);
+    expect(logged).toContain("INTERNAL_API_TOKEN");
+
+    errSpy.mockRestore();
+    fetchSpy.mockRestore();
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 153.2-05 / WIZFORM-02 — the limiter's two deny arms stop answering code-less.
+//
+// Both were on the KNOWN_CODELESS_FINALIZE_REJECTIONS ledger. A code-less
+// rejection renders the UNKNOWN card — "We could not classify this failure" —
+// for a failure the route classified well enough to pick a status and write a
+// sentence about, AND that card's copy is recoverable, so both arms handed the
+// user a Retry button: correct for a throttle, and a control that cannot work
+// for a misconfiguration.
+//
+// ⚠️ The status and header assertions are here because the fix must be a CODE
+// and nothing else — a change that also moved the status would be a wire
+// change wearing a classification change's clothes.
+// ═══════════════════════════════════════════════════════════════════════════
+describe("[153.2-05] the rate-limit deny arms carry codes", () => {
+  // ⛔ TYPED AS THE PRODUCTION RESULT (153.2 review WR-03), not
+  // `Record<string, unknown>`. The predicate under test is now the real one, so
+  // a fixture the production type cannot express is a compile error here rather
+  // than a green row demonstrating a discrimination nobody ships.
+  async function denyWith(
+    rl: import("@/lib/ratelimit").CheckLimitResult,
+  ) {
+    const { checkLimit } = await import("@/lib/ratelimit");
+    (checkLimit as unknown as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
+      rl,
+    );
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+    return { res, body: (await res.json()) as { code?: string; error?: string } };
+  }
+
+  it("a genuine throttle answers 429 RATE_LIMITED — OUR cap, not the exchange's", async () => {
+    // ⛔ NOT `KEY_RATE_LIMIT`, whose copy opens "The exchange rate-limited this
+    // request". This is `userActionLimiter` on our own per-user key and the
+    // exchange is never contacted on this path, so that sentence would be a
+    // specific lie in place of a vague one. `RATE_LIMITED` says "the cap is
+    // ours, not your exchange's".
+    const { res, body } = await denyWith({ success: false, retryAfter: 42 });
+
+    expect(res.status).toBe(429);
+    expect(body.code).toBe("RATE_LIMITED");
+    expect(body.code).not.toBe("KEY_RATE_LIMIT");
+    expect(body.error).toBe("Too many requests");
+    expect(res.headers.get("Retry-After")).toBe("42");
+  });
+
+  it("a limiter MISCONFIGURATION answers 503 SEAM_MISCONFIGURED — the fault is ours", async () => {
+    // The discrimination that matters: a throttle is the user hitting a cap and
+    // a misconfiguration is our own setting being wrong. They already answered
+    // different statuses; now they answer different classifications too, and
+    // SEAM_MISCONFIGURED carries no recoverable action, so no Retry control
+    // renders for a condition retrying cannot clear.
+    //
+    // ⭐ DRIVEN BY THE REAL DISCRIMINATOR (153.2 review WR-03): `reason:
+    // "ratelimit_misconfigured"` is the field the shipped predicate reads and
+    // the only one `CheckLimitResult` declares. The previous fixture said
+    // `misconfigured: true` — a key production never emits — and was told apart
+    // by a predicate this file had written for itself.
+    const { res, body } = await denyWith({
+      success: false,
+      retryAfter: 60,
+      reason: "ratelimit_misconfigured",
+    });
+
+    expect(res.status).toBe(503);
+    expect(body.code).toBe("SEAM_MISCONFIGURED");
+    expect(body.code).not.toBe("RATE_LIMITED");
+    expect(body.error).toBe("Rate limiter unavailable");
+    expect(res.headers.get("Retry-After")).toBe("60");
+  });
+
+  it("CONTROL — a successful limiter check reaches neither arm", async () => {
+    // The positive control. Both rows above would also pass on a route that
+    // denied every request, which is a far worse defect than the one being fixed.
+    const fetchSpy = mockProbeReadOnly();
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).not.toBe(429);
+    expect(res.status).not.toBe(503);
+    fetchSpy.mockRestore();
+  });
+});
+
+/**
+ * 153 review — THE COMPOSITE MEMBER EMBED IS VALIDATED, NOT CAST.
+ *
+ * The O-1 per-member scope-broadening loop used to bind its rows through
+ * `(members ?? []) as unknown as Array<…>`. A double cast asserts a shape the
+ * compiler has no evidence for and checks NOTHING at runtime, so a PostgREST
+ * shape change degraded in SILENCE rather than failing loud.
+ *
+ * ⭐ THE NAMED HAZARD IS AN ARRAY-VALUED EMBED. PostgREST returns a to-one
+ * embed as an object, but the same `select()` returns an ARRAY the moment the
+ * relationship is read as to-many (a duplicated FK, a view swapped under the
+ * table, a schema-cache reload resolving the join differently). Under the cast
+ * that array satisfied the compiler, `member.api_keys?.exchange` read
+ * `undefined`, EVERY member resolved to a `null` venue, and the finalize path
+ * proceeded on member data it never actually had — a silent downgrade of an
+ * ASVS V4 control, wearing a 200.
+ *
+ * ⚠️ WHY THE REFUSAL SHARES `COMPOSITE_MEMBERSHIP_UNKNOWN`. Membership we
+ * cannot read is membership we cannot re-probe, which is exactly what that code
+ * says. A new code would need a new rejection site, and
+ * `wizardErrors.invariant.test.ts` counts those EXACTLY
+ * (`EXPECTED_FINALIZE_REJECTION_SITES`). The user-facing envelope is therefore
+ * shared and only the OPERATOR artefacts fork — which is the half that has to
+ * discriminate, because the two incidents have different remedies.
+ */
+describe("[153 review] a composite member embed of an unexpected shape fails LOUD", () => {
+  /**
+   * The drifted read. Cast at the injection site on purpose: `STATE`'s type
+   * says this cannot happen, and the whole point of the defect is that the
+   * types lied about a runtime shape. A fixture the type could express would
+   * not be the fixture that reproduces it.
+   *
+   * ⚠️ EXACTLY ONE MEMBER, and that is a measurement, not a preference. With
+   * the double cast restored, a ONE-member drift answers **200** — the
+   * composite finalises on member data the route never had, which is the defect
+   * in its pure form. A TWO-member fixture answered 502 instead, because the
+   * second member's key is not wired into the probe mock and its probe failed
+   * for a reason unrelated to the drift. That 502 is a green-looking red: it
+   * would have let this row pass on a route that never validated anything, just
+   * by landing on a different status. One member isolates the property.
+   */
+  function embedAsArray(): typeof STATE.strategyKeysList {
+    return [
+      { api_key_id: MEMBER_KEY_1, api_keys: [{ exchange: "binance" }] },
+    ] as unknown as typeof STATE.strategyKeysList;
+  }
+
+  it("⭐ refuses the finalize instead of probing members it could not read", async () => {
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+    const fetchSpy = mockProbeReadOnly();
+    STATE.strategyRow = { api_key_id: null }; // composite
+    STATE.strategyKeysCount = 1;
+    STATE.strategyKeysList = embedAsArray();
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(503);
+    expect((await res.json()).code).toBe("COMPOSITE_MEMBERSHIP_UNKNOWN");
+
+    // ⛔ THE LOAD-BEARING HALF. A 503 that still probed, or still finalized,
+    // would be the silent degradation with a different status code on it. Under
+    // the double cast this route answered 200 and crossed the seam twice.
+    expect(
+      fetchSpy,
+      "The route probed a member whose venue it could not actually read.",
+    ).not.toHaveBeenCalled();
+    expect(RF.lastCall).toBeNull();
+    expect(
+      STATE.rpcCalls.find((c) => c.name === "finalize_wizard_strategy"),
+      "The composite was FINALIZED on member data the route never had.",
+    ).toBeUndefined();
+
+    consoleErr.mockRestore();
+    fetchSpy.mockRestore();
+  });
+
+  it("names the SHAPE drift to the operator — not the read-failure sentence", async () => {
+    // The two failures share one envelope, so the log line and the Sentry step
+    // are the ONLY artefacts that tell an operator which incident they have.
+    // Reporting a schema drift as "read failed" sends them to the RLS policy
+    // and the connection pool for a fault that is in the query.
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+    const fetchSpy = mockProbeReadOnly();
+    STATE.strategyRow = { api_key_id: null };
+    STATE.strategyKeysCount = 1;
+    STATE.strategyKeysList = embedAsArray();
+
+    const POST = await importPost();
+    await POST(makeReq(VALID_BODY));
+
+    const lines = consoleErr.mock.calls.map((args) =>
+      args.map((a) => String(a)).join(" "),
+    );
+    const drift = lines.find((l) => l.includes("SHAPE unrecognised"));
+    expect(
+      drift,
+      "A composite that will not finalise produced no operator line naming the shape drift.",
+    ).toBeDefined();
+    expect(drift).not.toContain("[object Object]");
+    // The CR-01 read-failure sentence must NOT be what fired — this read did
+    // not fail, it returned rows nobody can use.
+    expect(
+      lines.some((l) => l.includes("composite member list read failed")),
+      "A shape drift was reported as a member-list READ failure.",
+    ).toBe(false);
+
+    const steps = STATE.captureToSentryCalls.map((c) => c.options.tags.step);
+    expect(steps).toContain("composite-member-shape");
+    expect(steps).not.toContain("composite-member-list");
+
+    consoleErr.mockRestore();
+    fetchSpy.mockRestore();
+  });
+
+  it("CONTROL — every shape production actually returns still finalises", async () => {
+    // ⛔ WITHOUT THIS ROW the two above would also pass on a guard that refused
+    // EVERY composite, which is a worse defect than the one being fixed. All
+    // three legitimate embeds are real runtime states: PostgREST omits the key
+    // in the harness's pre-existing rows, returns `null` when the FK does not
+    // resolve, and returns the object on the happy path. A member with a null
+    // venue is STILL PROBED by the fail-toward rule — that is not drift.
+    const legitimate: Array<[string, typeof STATE.strategyKeysList]> = [
+      ["embed absent", [{ api_key_id: MEMBER_KEY_1 }]],
+      ["embed null", [{ api_key_id: MEMBER_KEY_1, api_keys: null }]],
+      [
+        "embed object",
+        [{ api_key_id: MEMBER_KEY_1, api_keys: { exchange: "binance" } }],
+      ],
+    ];
+
+    const POST = await importPost();
+    for (const [label, list] of legitimate) {
+      RF.lastCall = null;
+      STATE.rpcCalls = [];
+      STATE.strategyRow = { api_key_id: null };
+      STATE.strategyKeysCount = 1;
+      STATE.strategyKeysList = list;
+      const fetchSpy = mockProbeReadOnly();
+
+      const res = await POST(makeReq(VALID_BODY));
+
+      expect(res.status, `"${label}" was refused as a shape drift.`).toBe(200);
+      expect(
+        STATE.rpcCalls.find((c) => c.name === "finalize_wizard_strategy"),
+        `"${label}" did not reach the finalize RPC.`,
+      ).toBeDefined();
+      fetchSpy.mockRestore();
+    }
+  });
+});
+
+/**
+ * [153.7-03 / WIZFORM-02-CLASS] the last three code-less rejections, ON THE
+ * WIRE.
+ *
+ * ⚠️ WHY THIS BLOCK EXISTS WHEN `wizardErrors.invariant.test.ts` ALREADY PINS
+ * ALL THREE. That guard reads this route's SOURCE and counts sites — it proves
+ * the literal is written in the file. It cannot prove the literal reaches the
+ * RESPONSE BODY, because it never executes the handler. The two oracles fail
+ * for different reasons: reorder an arm to `{ error, code }` and the source
+ * scan reds while the body is unchanged; change the arm's shape so the branch
+ * is unreachable and the body loses its code while the source scan stays green.
+ * Testing the wiring rather than the literal is the standing lesson here.
+ *
+ * Each case asserts the CODE, not just the status or the sentence — the
+ * pre-existing tests on two of these arms asserted `body.error` and would have
+ * stayed green through the whole year these three answered code-less.
+ */
+describe("[153.7-03 / WIZFORM-02-CLASS] every finalize rejection carries its code", () => {
+  it("the draft-read failure answers DRAFT_LOOKUP_FAILED, never a bare 500", async () => {
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+    STATE.strategyError = { message: "connection reset by peer" };
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(body.code).toBe("DRAFT_LOOKUP_FAILED");
+    // The claim the copy makes — "nothing was submitted and nothing was
+    // changed" — is only honest while this arm really does precede every
+    // write. Assert the finalize RPC was never reached rather than trusting a
+    // reading of the handler.
+    expect(
+      STATE.rpcCalls.find((c) => c.name === "finalize_wizard_strategy"),
+    ).toBeUndefined();
+    // ⛔ H-0305: the scrubbed upstream sentence must not ride out on the wire.
+    expect(JSON.stringify(body)).not.toContain("connection reset");
+
+    consoleErr.mockRestore();
+  });
+
+  it("the finalize RPC's generic tail answers DRAFT_FINALIZE_FAILED", async () => {
+    const fetchSpy = mockProbeReadOnly();
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+    routeThroughLegacyFinalize();
+    STATE.rpcResult = {
+      data: null,
+      error: { code: "XX001", message: "internal_error: oops at line 42" },
+    };
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(body.code).toBe("DRAFT_FINALIZE_FAILED");
+    // ⛔ NOT `DRAFT_STATE_INVALID`. That member says the draft MOVED ON, a fact
+    // the 22023 arm establishes from the RPC's own SQLSTATE. This tail knows
+    // nothing about the draft's state, and it is non-recoverable copy — so
+    // answering it here would suppress a Retry that can genuinely win.
+    expect(body.code).not.toBe("DRAFT_STATE_INVALID");
+    expect(JSON.stringify(body)).not.toContain("oops at line 42");
+
+    consoleErr.mockRestore();
+    fetchSpy.mockRestore();
+  });
+
+  it("the unreadable upstream answer carries SEAM_RESPONSE_UNREADABLE", async () => {
+    const fetchSpy = mockProbeReadOnly();
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+    STATE.processKeyResult = {
+      ok: true,
+      body: { queued: "yes", verification_id: "ver-1" },
+    };
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(502);
+    const body = await res.json();
+    expect(body.code).toBe("SEAM_RESPONSE_UNREADABLE");
+    // The contract-violation capture is what makes the drift alertable, and it
+    // must survive the arm gaining a code.
+    expect(
+      STATE.captureToSentryCalls.find(
+        (c) => c.options.tags.step === "unified-response-parse",
+      ),
+    ).toBeDefined();
+
+    consoleErr.mockRestore();
+    fetchSpy.mockRestore();
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════════
+// SUBMITFIX (2026-09-24) — a single-key MANAGER submit must PROMOTE the draft.
+//
+// THE BUG THESE ROWS EXIST TO CATCH. From Phase 106 Stage B until this fix, the
+// unified arm (`unifiedFinalizeWizardHandler`) called only `postProcessKey`,
+// and both of its 200 bodies carried a hard-coded `status: "pending_review"`.
+// Nothing on that path called `finalize_wizard_strategy`, and Python never
+// writes `strategies.status`. The row stayed at `(source='wizard',
+// status='draft')`: its metadata was dropped, it never reached the admin
+// queue, and the `cleanup-wizard-drafts` cron deleted it (and revoked the key)
+// after 7 days, all while the user was told the submission succeeded. Two
+// rows in this file ASSERTED the RPC was not called, so the suite pinned the
+// defect instead of catching it.
+//
+// Each row below names the property it defends. Measured on 2026-09-24 by
+// neutering the fix and restoring it byte-identically: removing the unified
+// arm's RPC call reddens every row here except the legacy control; turning the
+// unified arm's replay opt-in off reddens both replay rows; dropping fields on
+// the way to the RPC reddens the metadata row; answering 'pending_review' over
+// an RPC failure reddens the failure rows.
+// ══════════════════════════════════════════════════════════════════════════
+describe("[SUBMITFIX] the unified single-key manager arm promotes the draft", () => {
+  it("calls finalize_wizard_strategy with p_terminal_status='pending_review', BEFORE postProcessKey", async () => {
+    const fetchSpy = mockProbeReadOnly();
+    STATE.strategyRow = { api_key_id: API_KEY_ID };
+    STATE.strategyKeysCount = 0;
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(200);
+    const rpc = STATE.rpcCalls.find((c) => c.name === "finalize_wizard_strategy");
+    // Without this call the row is never promoted and the cron deletes it.
+    expect(rpc, "the single-key manager submit never promoted the draft").toBeDefined();
+    expect(rpc!.args.p_terminal_status).toBe("pending_review");
+    // ORDER: the RPC is the transactional gate, so it runs first. A refused
+    // promotion must never leave an analytics job queued behind it.
+    expect(STATE.callOrder).toEqual([
+      "rpc:finalize_wizard_strategy",
+      "postProcessKey",
+    ]);
+    const body = await res.json();
+    expect(body.status).toBe("pending_review");
+    fetchSpy.mockRestore();
+  });
+
+  it("forwards the VALIDATED wizard metadata to the RPC (the fields the old arm dropped)", async () => {
+    const fetchSpy = mockProbeReadOnly();
+    STATE.strategyRow = { api_key_id: API_KEY_ID };
+    STATE.strategyKeysCount = 0;
+    const { canonicalizeExchangeList } = await import("@/lib/constants");
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(200);
+    const rpc = STATE.rpcCalls.find((c) => c.name === "finalize_wizard_strategy");
+    expect(rpc).toBeDefined();
+    // Every column the RPC writes. If any is missing, that field of the
+    // manager's submission never reaches the row.
+    expect(rpc!.args).toEqual({
+      p_strategy_id: STRATEGY_ID,
+      p_user_id: USER.id,
+      p_name: VALID_BODY.name,
+      p_description: VALID_BODY.description,
+      p_category_id: CATEGORY_ID,
+      p_strategy_types: ["trend"],
+      p_subtypes: ["breakout"],
+      p_markets: ["BTC/USDT"],
+      p_supported_exchanges: canonicalizeExchangeList(["binance"]),
+      p_leverage_range: "1x-3x",
+      p_aum: 100_000,
+      p_max_capacity: 10_000_000,
+      p_terminal_status: "pending_review",
+    });
+    fetchSpy.mockRestore();
+  });
+
+  it("a REPLAY (row already pending_review, RPC raises 22023) answers 200 and still dispatches", async () => {
+    const fetchSpy = mockProbeReadOnly();
+    const consoleInfo = vi.spyOn(console, "info").mockImplementation(() => {});
+    STATE.strategyRow = { api_key_id: API_KEY_ID };
+    STATE.strategyKeysCount = 0;
+    // The RPC's own refusal for a non-draft row.
+    STATE.rpcResult = {
+      data: null,
+      error: {
+        code: "22023",
+        message: "finalize_wizard_strategy: strategy x has status=pending_review (expected draft)",
+      },
+    };
+    STATE.strategyStatusRead = {
+      data: { status: "pending_review", source: "wizard" },
+      error: null,
+    };
+    // The double-submit dedupe answer Python gives the second request.
+    STATE.processKeyResult = {
+      ok: true,
+      body: {
+        queued: false,
+        code: "WIZARD_DUPLICATE",
+        idempotent: true,
+        verification_id: "ver-existing",
+      },
+    };
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    // A double click or a reload must not turn a successful submit into a
+    // "not in a finalizable state" failure.
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.ok).toBe(true);
+    expect(body.status).toBe("pending_review");
+    expect(body.code).toBe("WIZARD_DUPLICATE");
+    // The promotion was ATTEMPTED (a replay is recognised from the RPC's own
+    // refusal, never assumed), and the retry still reaches postProcessKey: that
+    // is how a submit whose dispatch failed AFTER a successful promotion
+    // recovers.
+    expect(
+      STATE.rpcCalls.find((c) => c.name === "finalize_wizard_strategy"),
+    ).toBeDefined();
+    expect(STATE.processKeyCalls).toHaveLength(1);
+    // The re-read is owner-scoped, like every other read on this route.
+    expect(STATE.strategySelectEqFilters).toContainEqual({
+      column: "user_id",
+      value: USER.id,
+    });
+    consoleInfo.mockRestore();
+    fetchSpy.mockRestore();
+  });
+
+  it("a 22023 over a row that is STILL a draft is not a replay: 409, no dispatch", async () => {
+    const fetchSpy = mockProbeReadOnly();
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+    STATE.strategyRow = { api_key_id: API_KEY_ID };
+    STATE.strategyKeysCount = 0;
+    STATE.rpcResult = {
+      data: null,
+      error: { code: "22023", message: "finalize_wizard_strategy: source=legacy (expected wizard)" },
+    };
+    STATE.strategyStatusRead = {
+      data: { status: "draft", source: "legacy" },
+      error: null,
+    };
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    expect(body.code).toBe("DRAFT_STATE_INVALID");
+    expect(body.status).toBeUndefined();
+    expect(STATE.processKeyCalls).toHaveLength(0);
+    consoleErr.mockRestore();
+    fetchSpy.mockRestore();
+  });
+
+  it("a replay whose re-read FAILS cannot confirm either way: the generic 500 tail, no dispatch", async () => {
+    const fetchSpy = mockProbeReadOnly();
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+    STATE.strategyRow = { api_key_id: API_KEY_ID };
+    STATE.strategyKeysCount = 0;
+    STATE.rpcResult = {
+      data: null,
+      error: { code: "22023", message: "finalize_wizard_strategy: status=pending_review (expected draft)" },
+    };
+    STATE.strategyStatusRead = {
+      data: null,
+      error: { message: "connection reset", code: "08006" },
+    };
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    // Not DRAFT_STATE_INVALID: that claims the draft moved past finalize, which
+    // the failed re-read did not establish.
+    expect(body.code).toBe("DRAFT_FINALIZE_FAILED");
+    expect(body.status).toBeUndefined();
+    expect(STATE.processKeyCalls).toHaveLength(0);
+    consoleErr.mockRestore();
+    fetchSpy.mockRestore();
+  });
+
+  it.each([
+    ["XX001", 500, "DRAFT_FINALIZE_FAILED"],
+    ["42501", 403, "GUARD_BLOCKED"],
+    ["P0002", 404, "GATE_DRAFT_GONE"],
+  ])(
+    "an RPC failure (%s) is NEVER reported as pending_review, and nothing is dispatched",
+    async (sqlstate, httpStatus, code) => {
+      const fetchSpy = mockProbeReadOnly();
+      const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+      STATE.strategyRow = { api_key_id: API_KEY_ID };
+      STATE.strategyKeysCount = 0;
+      STATE.rpcResult = {
+        data: null,
+        error: { code: sqlstate, message: "finalize_wizard_strategy: refused" },
+      };
+
+      const POST = await importPost();
+      const res = await POST(makeReq(VALID_BODY));
+
+      expect(res.status).toBe(httpStatus);
+      const body = await res.json();
+      expect(body.code).toBe(code);
+      expect(body.ok).toBeUndefined();
+      expect(body.status).toBeUndefined();
+      expect(JSON.stringify(body)).not.toContain("pending_review");
+      expect(STATE.processKeyCalls).toHaveLength(0);
+      consoleErr.mockRestore();
+      fetchSpy.mockRestore();
+    },
+  );
+
+  it("the LEGACY arm keeps its replay answer: a 22023 there is still 409 with no re-read", async () => {
+    const fetchSpy = mockProbeReadOnly();
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+    routeThroughLegacyFinalize();
+    STATE.rpcResult = {
+      data: null,
+      error: { code: "22023", message: "finalize_wizard_strategy: status=pending_review (expected draft)" },
+    };
+    // Would read as a replay if the legacy arm opted in; it must not.
+    STATE.strategyStatusRead = {
+      data: { status: "pending_review", source: "wizard" },
+      error: null,
+    };
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(409);
+    expect((await res.json()).code).toBe("DRAFT_STATE_INVALID");
+    consoleErr.mockRestore();
+    fetchSpy.mockRestore();
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════════
+// Round-2 review (SFH HIGH-1) — the RPC COMMITTED, then the dispatch failed.
+//
+// The strategy is promoted (saved, waiting for review) and only its analytics
+// job is missing. Before the fix the route forwarded the dispatch's own
+// envelope, so a rate-limit or outage card told a user whose strategy WAS
+// submitted that nothing was, and nothing named the job as the missing half.
+// The answer is now SUBMITTED_ANALYTICS_NOT_QUEUED, recoverable, and a Retry
+// (a replay) runs the dispatch again.
+// ══════════════════════════════════════════════════════════════════════════
+describe("[SUBMITFIX-R2] a dispatch failure after the promotion says the submission is saved", () => {
+  const failedDispatch = (code: string, status: number, retryAfter?: string) => {
+    const response = NextResponse.json(
+      { ok: false, code, human_message: "synthetic upstream copy", recoverable: true },
+      { status },
+    );
+    if (retryAfter) response.headers.set("Retry-After", retryAfter);
+    return { ok: false, response };
+  };
+
+  it.each([
+    ["RATE_LIMITED", 429, "30"],
+    ["CIRCUIT_OPEN", 503, "60"],
+    ["SEAM_MISCONFIGURED", 500, undefined],
+  ] as const)(
+    "%s from the dispatch after a successful RPC answers SUBMITTED_ANALYTICS_NOT_QUEUED",
+    async (upstreamCode, upstreamStatus, retryAfter) => {
+      const fetchSpy = mockProbeReadOnly();
+      const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+      STATE.strategyRow = { api_key_id: API_KEY_ID };
+      STATE.strategyKeysCount = 0;
+      STATE.processKeyResult = failedDispatch(upstreamCode, upstreamStatus, retryAfter);
+
+      const POST = await importPost();
+      const res = await POST(makeReq(VALID_BODY));
+
+      // The promotion really happened first.
+      expect(STATE.callOrder).toEqual(["rpc:finalize_wizard_strategy", "postProcessKey"]);
+      const body = await res.json();
+      expect(body.code).toBe("SUBMITTED_ANALYTICS_NOT_QUEUED");
+      expect(body.recoverable).toBe(true);
+      expect(body.status).toBe("pending_review");
+      expect(body.upstream_code).toBe(upstreamCode);
+      expect(res.status).toBe(503);
+      // The oracle is the RENDERED title and the Retry, not the code alone: a
+      // code without copy would render the generic UNKNOWN card.
+      const { buildEnvelope } = await import("@/lib/envelope");
+      const envelope = buildEnvelope(body.code, "corr-r2-dispatch");
+      expect(envelope.human_message).toBe(
+        "Your strategy is submitted, but its analytics are not queued yet.",
+      );
+      expect(envelope.recoverable).toBe(true);
+      if (retryAfter) expect(res.headers.get("Retry-After")).toBe(retryAfter);
+      // Logged and captured with the strategy id and the upstream code.
+      const sentry = STATE.captureToSentryCalls.find(
+        (c) => c.options.tags.step === "dispatch-after-promotion",
+      );
+      expect(sentry, "the dispatch failure after a promotion must reach Sentry").toBeDefined();
+      expect(sentry!.options.tags.upstream_code).toBe(upstreamCode);
+      expect(sentry!.options.extra?.strategy_id).toBe(STRATEGY_ID);
+      expect(
+        consoleError.mock.calls.some(
+          (c) =>
+            String(c[0]).includes("dispatch failed after the strategy was promoted") &&
+            (c[1] as { strategy_id?: string })?.strategy_id === STRATEGY_ID,
+        ),
+      ).toBe(true);
+      consoleError.mockRestore();
+      fetchSpy.mockRestore();
+    },
+  );
+
+  it("a Retry after that failure REPLAYS the finalize and runs the dispatch again, which queues the job", async () => {
+    const fetchSpy = mockProbeReadOnly();
+    const consoleInfo = vi.spyOn(console, "info").mockImplementation(() => {});
+    STATE.strategyRow = { api_key_id: API_KEY_ID };
+    STATE.strategyKeysCount = 0;
+    STATE.rpcResult = {
+      data: null,
+      error: {
+        code: "22023",
+        message: "finalize_wizard_strategy: strategy x has status=pending_review (expected draft)",
+      },
+    };
+    STATE.strategyStatusRead = {
+      data: { status: "pending_review", source: "wizard" },
+      error: null,
+    };
+    STATE.processKeyResult = { ok: true, body: { queued: true, verification_id: "ver-retry" } };
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(STATE.callOrder).toEqual(["rpc:finalize_wizard_strategy", "postProcessKey"]);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.queued).toBe(true);
+    expect(body.status).toBe("pending_review");
+    consoleInfo.mockRestore();
+    fetchSpy.mockRestore();
+  });
+
+  it("a replay whose dispatch fails again still says the submission is saved", async () => {
+    const fetchSpy = mockProbeReadOnly();
+    const consoleInfo = vi.spyOn(console, "info").mockImplementation(() => {});
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    STATE.strategyRow = { api_key_id: API_KEY_ID };
+    STATE.strategyKeysCount = 0;
+    STATE.rpcResult = {
+      data: null,
+      error: { code: "22023", message: "not draft" },
+    };
+    STATE.strategyStatusRead = {
+      data: { status: "pending_review", source: "wizard" },
+      error: null,
+    };
+    STATE.processKeyResult = failedDispatch("CIRCUIT_OPEN", 503);
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    const body = await res.json();
+    expect(body.code).toBe("SUBMITTED_ANALYTICS_NOT_QUEUED");
+    expect(STATE.processKeyCalls).toHaveLength(1);
+    consoleInfo.mockRestore();
+    consoleError.mockRestore();
     fetchSpy.mockRestore();
   });
 });

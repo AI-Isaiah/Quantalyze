@@ -1,0 +1,37 @@
+Why there is no committed "unreadable file" fixture
+===================================================
+
+Two of the six finding conditions cannot be a committed `.sql` file, so they are
+proven by `src/__tests__/lint-app-guc.test.ts` instead, and `FINDING_KINDS`
+records that with `selfTestFixture: false` — a DECLARED gap, not a silent one.
+The self-test's "every kind has a red fixture" loop skips exactly those two by
+that flag, and it separately fails on any `*.red.sql` in this directory that no
+kind declares, so a fixture can neither go missing nor go unasserted.
+
+1. MEASURE_FAIL on an unreadable corpus entry
+---------------------------------------------
+Git cannot carry an unreadable blob. A file with mode 000 is checked out
+readable; a directory named `x.sql` cannot be committed as a directory with no
+files in it. So the vitest BUILDS the condition at runtime, in a temp dir:
+
+  * an EMPTY migrations directory  → MEASURE_FAIL "zero files to scan"
+  * a DIRECTORY named `x.sql`      → MEASURE_FAIL, EISDIR, not "0 findings"
+
+That distinction is the whole point: "could not measure" must never share a code
+path with "measured zero". A corpus scan that reports a clean tree because it
+read nothing is the failure mode this gate exists to make impossible.
+
+2. `header-malformed`
+---------------------
+A malformed header, by construction, ALSO leaves the file's reads unannotated —
+so a red fixture for it would fire two kinds and could not isolate one. The
+vitest feeds bad payloads straight to `parseLineageHeader()` instead: a date of
+`2026-9-7` (not YYYY-MM-DD), a non-integer count, and a missing field each
+return `{ malformed }` with a reason naming the field.
+
+3. `allowlist-stale`
+--------------------
+This is a CORPUS-mode condition — it fires after the whole pass, for an
+allowlist entry whose file was not seen carrying a valid header. There is no
+single file that exhibits it, so the vitest drives `scanCorpus()` over a temp
+corpus with a temp allowlist naming a file that is not there.

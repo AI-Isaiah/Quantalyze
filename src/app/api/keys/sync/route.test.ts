@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { NextRequest } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 import { SUPPORTED_EXCHANGES, CRYPTO_EXCHANGES } from "@/lib/closed-sets";
 
 /**
@@ -59,6 +59,13 @@ const {
   // (strategies update BEFORE the stitch enqueue) so a regression that drops it
   // — re-opening the √252-vs-√365 preview fail-loud — reddens.
   mockStrategiesUpdate,
+  // 164.6 / 161.1-D13: the composite kickoff reads the enqueued job's
+  // metadata and retracts an inherited ledger-refresh marker. The read result
+  // is configurable per test; the update is a spy so a dropped retraction is
+  // observable (and a retraction on an unmarked row is too).
+  computeJobsRead,
+  computeJobsUpdateResult,
+  mockComputeJobsUpdate,
 } = vi.hoisted(() => ({
   TEST_USER: { id: "00000000-0000-0000-0000-aaaaaaaaaaaa" },
   mockRpc: vi.fn(),
@@ -71,9 +78,16 @@ const {
   // per-user ceiling short-circuits before the per-strategy bucket is read),
   // so a per-bucket override is what lets each site be driven — and reddened —
   // on its own.
+  // 140.4-13 / SEAMRIM-05 — `reason` is the THIRD outcome: absent is a genuine
+  // throttle (429), "ratelimit_misconfigured" is OUR store being unreachable
+  // and must answer 503.
   rateLimitByBucket: {} as Record<
     string,
-    { success: boolean; retryAfter: number }
+    {
+      success: boolean;
+      retryAfter: number;
+      reason?: "ratelimit_misconfigured";
+    }
   >,
   ownershipResult: {
     // 89-02: api_key_id joins the ownership row — null identifies a POSSIBLE
@@ -100,6 +114,20 @@ const {
   mockStrategyKeysSelect: vi.fn(),
   mockPostProcessKey: vi.fn(),
   mockStrategiesUpdate: vi.fn(),
+  computeJobsRead: {
+    data: null as { metadata: Record<string, unknown> | null } | null,
+    error: null as { message: string } | null,
+    // IN-04 (164.6 review fix): a read that never settles, so the bounded
+    // retraction's budget is the only thing that can end the wait.
+    hang: false,
+    // L2 (164.6 round 2): while `hang` is set, the hung read's resolver, so a
+    // test can settle it AFTER the budget has already answered the 202.
+    settleLate: undefined as
+      | ((v: { data: null; error: { message: string; code?: string } }) => void)
+      | undefined,
+  },
+  computeJobsUpdateResult: { error: null as { message: string; code?: string } | null },
+  mockComputeJobsUpdate: vi.fn(),
   ownershipQuery: {
     table: null as string | null,
     selectCols: null as string | null,
@@ -240,6 +268,40 @@ vi.mock("@/lib/supabase/admin", () => ({
           }),
         };
       }
+      if (table === "compute_jobs") {
+        // 164.6 / 161.1-D13: EXPLICIT, so the retraction's read never falls
+        // through to the `{ upsert }` default below — there `.select` is
+        // undefined, the TypeError lands in the route's best-effort catch, and a
+        // retraction test would pass vacuously.
+        return {
+          select: (_cols: string) => ({
+            eq: (_col: string, _val: unknown) => ({
+              maybeSingle: () =>
+                computeJobsRead.hang
+                  ? new Promise((resolve) => {
+                      computeJobsRead.settleLate = resolve;
+                    })
+                  : Promise.resolve({
+                      data: computeJobsRead.data,
+                      error: computeJobsRead.error,
+                    }),
+            }),
+          }),
+          update: (patch: Record<string, unknown>) => ({
+            eq: (col: string, val: unknown) => {
+              mockComputeJobsUpdate(patch, col, val);
+              // LOW-1: the helper asks for the updated rows back.
+              return {
+                select: (_cols: string) =>
+                  Promise.resolve({
+                    data: computeJobsUpdateResult.error ? null : [{ id: val }],
+                    error: computeJobsUpdateResult.error,
+                  }),
+              };
+            },
+          }),
+        };
+      }
       return { upsert: mockUpsert };
     },
   }),
@@ -254,20 +316,30 @@ vi.mock("@/lib/process-key-client", () => ({
   postProcessKey: mockPostProcessKey,
 }));
 
-vi.mock("@/lib/ratelimit", () => ({
-  userActionLimiter: null,
-  keysSyncUserLimiter: null,
-  checkLimit: (...args: unknown[]) => {
-    checkLimitMock(...args);
-    // 140.3-10: a per-bucket override wins over the shared default, so a test
-    // can let the per-user ceiling PASS and deny only the per-strategy bucket
-    // — the only way to reach the second throttle site at all. With no
-    // override registered the behaviour is byte-identical to before.
-    const bucket = typeof args[1] === "string" ? args[1] : "";
-    const override = rateLimitByBucket[bucket];
-    return Promise.resolve(override ?? rateLimitResult);
-  },
-}));
+// ⚠️ EXTENDED, NOT REPLACED (140.4-13 / SEAMRIM-05). See the note in
+// `src/__tests__/csv-validate-route.test.ts`: the pure helpers come from
+// `importActual` so this mock cannot drift from the real 503-vs-429 decision.
+// The per-bucket override below is what makes the TWO arms independently
+// drivable, which 140.4-13's ledger row M105 depends on.
+vi.mock("@/lib/ratelimit", async (importActual) => {
+  const actual = await importActual<typeof import("@/lib/ratelimit")>();
+  return {
+    userActionLimiter: null,
+    keysSyncUserLimiter: null,
+    checkLimit: (...args: unknown[]) => {
+      checkLimitMock(...args);
+      // 140.3-10: a per-bucket override wins over the shared default, so a test
+      // can let the per-user ceiling PASS and deny only the per-strategy bucket
+      // — the only way to reach the second throttle site at all. With no
+      // override registered the behaviour is byte-identical to before.
+      const bucket = typeof args[1] === "string" ? args[1] : "";
+      const override = rateLimitByBucket[bucket];
+      return Promise.resolve(override ?? rateLimitResult);
+    },
+    rateLimitDenyJson: actual.rateLimitDenyJson,
+    isRateLimitMisconfigured: actual.isRateLimitMisconfigured,
+  };
+});
 
 vi.mock("@/lib/csrf", () => ({
   assertSameOrigin: () => null,
@@ -329,6 +401,14 @@ describe("POST /api/keys/sync", () => {
     analyticsExisting.error = null;
     // 106-07: the unified delegate resolves a normal 202 resync by default.
     mockPostProcessKey.mockResolvedValue({ ok: true, body: { queued: true } });
+
+    // 164.6 / 161.1-D13: the enqueued job carries no marker by default, so the
+    // retraction is a read-only no-op unless a test marks the row.
+    computeJobsRead.data = { metadata: { source: "keys/sync" } };
+    computeJobsRead.error = null;
+    computeJobsRead.hang = false;
+    computeJobsRead.settleLate = undefined;
+    computeJobsUpdateResult.error = null;
 
     // Default mock implementations
     mockRpc.mockResolvedValue({ data: TEST_JOB_ID, error: null });
@@ -756,11 +836,17 @@ describe("POST /api/keys/sync", () => {
       const res = await POST(makeReq({ strategy_id: TEST_STRATEGY_ID }));
 
       expect(res.status).toBe(503);
+      // SEAMRIM-06 — the value now goes through `scrubSeamError`, so it arrives
+      // as a STRING rather than the raw PostgREST object. The assertion is
+      // strengthened rather than relaxed: it still pins that the stamp failure
+      // is logged, and it additionally pins that the diagnosis SURVIVED the
+      // scrub. Answering a scrub finding by DROPPING the value is the A-10
+      // defect, and this line is what would catch it.
       expect(consoleSpy).toHaveBeenCalledWith(
         expect.stringContaining(
           "failed to stamp terminal 'failed' (membership_unknown)",
         ),
-        expect.objectContaining({ message: "stamp write denied" }),
+        expect.stringContaining("stamp write denied"),
       );
       consoleSpy.mockRestore();
     });
@@ -801,6 +887,229 @@ describe("POST /api/keys/sync", () => {
       );
       warnSpy.mockRestore();
       errSpy.mockRestore();
+    });
+
+    // ── 164.6 / 161.1-D13: retract an inherited ledger-refresh marker ─────────
+    // `enqueue_compute_job` dedups onto an in-flight job and returns ITS id with
+    // our p_metadata discarded. If that job is a background ledger refresh, its
+    // `metadata.source` marker keeps a stale factsheet published over a failure
+    // of THIS request — one the user is watching. The route must retract it,
+    // for BOTH markers (the union), and never touch an unmarked row.
+    describe("[161.1-D13] retracts an inherited ledger-refresh marker", () => {
+      function composite(): void {
+        ownershipResult.data = {
+          id: TEST_STRATEGY_ID,
+          user_id: TEST_USER.id,
+          api_key_id: null,
+        };
+        strategyKeysProbe.count = 2;
+      }
+
+      it.each(["ledger-refresh", "ledger-refresh-composite"])(
+        "a deduped job carrying %s is rewritten without source, with the marker and this request's correlation id — and still answers 202",
+        async (marker) => {
+          composite();
+          computeJobsRead.data = {
+            metadata: { source: marker, correlation_id: "fanout-run", run: 7 },
+          };
+          const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+          const { POST } = await import("./route");
+          const res = await POST(makeReq({ strategy_id: TEST_STRATEGY_ID }));
+
+          expect(res.status).toBe(202);
+          expect(mockComputeJobsUpdate).toHaveBeenCalledTimes(1);
+          expect(mockComputeJobsUpdate).toHaveBeenCalledWith(
+            {
+              metadata: {
+                run: 7,
+                refresh_marker_retracted: marker,
+                correlation_id: TEST_CORRELATION_ID,
+              },
+            },
+            "id",
+            TEST_JOB_ID,
+          );
+          warnSpy.mockRestore();
+        },
+      );
+
+      it("a deduped job WITHOUT a ledger-refresh marker is never rewritten", async () => {
+        composite();
+        computeJobsRead.data = { metadata: { source: "finalize-wizard" } };
+
+        const { POST } = await import("./route");
+        const res = await POST(makeReq({ strategy_id: TEST_STRATEGY_ID }));
+
+        expect(res.status).toBe(202);
+        expect(mockComputeJobsUpdate).not.toHaveBeenCalled();
+      });
+
+      it("a failed retraction never changes the 202, and is LOUD under its own Sentry tag", async () => {
+        composite();
+        computeJobsRead.data = { metadata: { source: "ledger-refresh-composite" } };
+        computeJobsUpdateResult.error = { message: "update denied", code: "42501" };
+        const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+        const { captureToSentry } = await import("@/lib/sentry-capture");
+
+        const { POST } = await import("./route");
+        const res = await POST(makeReq({ strategy_id: TEST_STRATEGY_ID }));
+
+        expect(res.status).toBe(202);
+        expect(await res.json()).toMatchObject({ ok: true, composite: true });
+        expect(mockComputeJobsUpdate).toHaveBeenCalledTimes(1);
+        expect(errSpy).toHaveBeenCalledWith(
+          expect.stringContaining("composite refresh-marker retraction failed"),
+          expect.anything(),
+        );
+        // LOW-2 (164.6 review fix): the thrown message is generic; the log line
+        // must carry the PostgREST SQLSTATE that rides in its cause.
+        expect(errSpy).toHaveBeenCalledWith(
+          expect.stringContaining("(code=42501)"),
+          expect.anything(),
+        );
+        expect(vi.mocked(captureToSentry)).toHaveBeenCalledWith(
+          expect.any(Error),
+          expect.objectContaining({
+            tags: { op: "keys-sync.composite_refresh_marker_retract" },
+            extra: {
+              strategy_id: TEST_STRATEGY_ID,
+              job_id: TEST_JOB_ID,
+              correlation_id: TEST_CORRELATION_ID,
+            },
+          }),
+        );
+        // The user's intent is still audited: the retraction failure did not
+        // short-circuit the rest of the branch.
+        expect(mockLogAuditEvent).toHaveBeenCalledTimes(1);
+        errSpy.mockRestore();
+      });
+
+      // IN-04 (164.6 review fix): the retraction is bounded. A read that never
+      // settles must not hold the user's 202 past the budget, and the overrun
+      // is LOUD under its OWN tag, because the marker may still be in place.
+      it("a retraction that overruns its 5 s budget still answers 202, and the overrun is LOUD under its own tag", async () => {
+        composite();
+        computeJobsRead.hang = true;
+        const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+        const { captureToSentry } = await import("@/lib/sentry-capture");
+        const { POST } = await import("./route");
+        vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+        try {
+          let settled = false;
+          const pending = POST(makeReq({ strategy_id: TEST_STRATEGY_ID })).then((r) => {
+            settled = true;
+            return r;
+          });
+          // One millisecond short of the budget the response is still waiting.
+          // Without this, a route that never awaited the retraction at all
+          // would pass every assertion below.
+          await vi.advanceTimersByTimeAsync(4_999);
+          expect(settled, "the 202 went out before the retraction budget elapsed").toBe(false);
+          await vi.advanceTimersByTimeAsync(1);
+          const res = await pending;
+
+          expect(res.status).toBe(202);
+          expect(await res.json()).toMatchObject({ ok: true, composite: true });
+          expect(mockComputeJobsUpdate).not.toHaveBeenCalled();
+          expect(vi.mocked(captureToSentry)).toHaveBeenCalledWith(
+            expect.any(Error),
+            expect.objectContaining({
+              tags: { op: "keys-sync.composite_refresh_marker_retract_timeout" },
+              extra: {
+                strategy_id: TEST_STRATEGY_ID,
+                job_id: TEST_JOB_ID,
+                correlation_id: TEST_CORRELATION_ID,
+              },
+            }),
+          );
+          expect(errSpy).toHaveBeenCalledWith(expect.stringContaining("exceeded 5000 ms"));
+          expect(mockLogAuditEvent).toHaveBeenCalledTimes(1);
+        } finally {
+          vi.useRealTimers();
+          errSpy.mockRestore();
+        }
+      });
+
+      // L2 (164.6 round 2): past the budget the race has already settled, so a
+      // retraction that FAILS later used to be discarded without a word. The
+      // marker may then be in place for a known reason that nobody saw. The
+      // late failure is LOUD under its OWN `_late` tag, with its SQLSTATE.
+      it("a retraction that fails AFTER the budget answered 202 is still LOUD under a _late tag, with its code", async () => {
+        composite();
+        computeJobsRead.hang = true;
+        const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+        const { captureToSentry } = await import("@/lib/sentry-capture");
+        const { POST } = await import("./route");
+        vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+        try {
+          const pending = POST(makeReq({ strategy_id: TEST_STRATEGY_ID }));
+          await vi.advanceTimersByTimeAsync(5_000);
+          const res = await pending;
+          expect(res.status).toBe(202);
+          // PRECONDITION: before the late failure nothing is reported as late,
+          // so the assertions below can only be satisfied by that failure.
+          expect(errSpy).not.toHaveBeenCalledWith(
+            expect.stringContaining("failed late"),
+            expect.anything(),
+          );
+          expect(computeJobsRead.settleLate, "the hung read must expose its resolver").toBeDefined();
+
+          computeJobsRead.settleLate!({
+            data: null,
+            error: { message: "canceling statement due to statement timeout", code: "57014" },
+          });
+          await vi.advanceTimersByTimeAsync(0);
+
+          expect(errSpy).toHaveBeenCalledWith(
+            expect.stringContaining("composite refresh-marker retraction failed late"),
+            expect.anything(),
+          );
+          expect(errSpy).toHaveBeenCalledWith(
+            expect.stringContaining("(code=57014)"),
+            expect.anything(),
+          );
+          expect(vi.mocked(captureToSentry)).toHaveBeenCalledWith(
+            expect.any(Error),
+            expect.objectContaining({
+              tags: { op: "keys-sync.composite_refresh_marker_retract_late" },
+              extra: {
+                strategy_id: TEST_STRATEGY_ID,
+                job_id: TEST_JOB_ID,
+                correlation_id: TEST_CORRELATION_ID,
+              },
+            }),
+          );
+          // An in-time failure is reported ONCE, by the route's own catch, and
+          // never a second time as late.
+          expect(
+            vi.mocked(captureToSentry).mock.calls.filter(
+              ([, ctx]) => (ctx as { tags?: { op?: string } })?.tags?.op === "keys-sync.composite_refresh_marker_retract",
+            ),
+          ).toHaveLength(0);
+        } finally {
+          vi.useRealTimers();
+          errSpy.mockRestore();
+        }
+      });
+
+      it("a retraction that fails IN TIME is reported once by the route's catch, never also as late", async () => {
+        composite();
+        computeJobsRead.data = { metadata: { source: "ledger-refresh-composite" } };
+        computeJobsUpdateResult.error = { message: "update denied", code: "42501" };
+        const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+        const { captureToSentry } = await import("@/lib/sentry-capture");
+        const { POST } = await import("./route");
+        const res = await POST(makeReq({ strategy_id: TEST_STRATEGY_ID }));
+        await new Promise((r) => setTimeout(r, 0));
+        expect(res.status).toBe(202);
+        const ops = vi
+          .mocked(captureToSentry)
+          .mock.calls.map(([, ctx]) => (ctx as { tags?: { op?: string } })?.tags?.op);
+        expect(ops.filter((op) => op === "keys-sync.composite_refresh_marker_retract")).toHaveLength(1);
+        expect(ops).not.toContain("keys-sync.composite_refresh_marker_retract_late");
+        errSpy.mockRestore();
+      });
     });
   });
 });
@@ -947,6 +1256,9 @@ describe("[140.3-02 / TS-02] POST /api/keys/sync — the duplicate branch keys o
       "A resumed wedge HAS an enqueued job. Reporting `queued: false` beside " +
         "`idempotent: true` states the opposite of what the backbone just did.",
     ).toBe(true);
+    // Round-2 review (SFH LOW-8): the job's state is forwarded, so the wizard
+    // can tell a resumed wedge that QUEUED work from a refusal over a running job.
+    expect(body.job_state).toBe("enqueued");
     // Unified is a single-key resync path — never a composite.
     expect(body.composite).toBe(false);
     expect(body.ok).toBe(true);
@@ -1010,21 +1322,28 @@ describe("[140.3-02 / TS-02] POST /api/keys/sync — the duplicate branch keys o
 });
 
 /**
- * Phase 140.3-02 / TS-15 — the resync flow forwards the end user's Supabase
- * access token to the choke point.
+ * Phase 146.1 / B2 (2026-08-18) — INVERTED FROM TS-15, NOT DELETED.
  *
- * WHY IT MATTERS: only the CSV finalize flow forwarded it before, so a
- * user-scoped (RLS-enforcing) Supabase client was unavailable on onboard/resync.
- * That is exactly why PYAPI-01's second defence layer had to be an explicit
- * Python `strategies` id+user_id filter rather than letting RLS do it. With the
- * token forwarded, that filter becomes belt-and-braces rather than the only belt.
+ * TS-15 (140.3-02) pinned that the resync flow THREADS the end user's Supabase
+ * access token into the choke point, so the analytics service could build a
+ * user-scoped (RLS-enforcing) client and PYAPI-01's explicit Python
+ * `strategies` id+user_id filter would become belt-and-braces rather than the
+ * only belt.
  *
- * The header itself is emitted by the client, conditionally, from this VALUE —
- * these cases pin the value reaching the choke point, which is the whole of this
- * route's half of the contract. The redaction proof lives in
+ * ⭐ THE MEASUREMENT THAT FLIPPED IT. The v1.19 xhigh review read the far side:
+ * `analytics-service/services/db.py`'s `get_user_scoped_supabase` — the ONLY
+ * reader — has had zero production callers since Phase 145, and
+ * `analytics-service/tests/test_process_key.py` (~:2220) actively PINS that
+ * non-use. No user-scoped client is ever constructed on onboard/resync, so the
+ * filter was ALWAYS the only belt and the token was pure exposure surface.
+ * The forward is gone; these cases pin its absence at this route's boundary.
+ *
+ * ⛔ INVERTED, NOT DELETED: an inverted assertion reds the day the forward
+ * returns, and this file is the only place the ROUTE's half of the contract is
+ * observable (the client is mocked here). The wire-level proof lives in
  * `route.seam.test.ts`, where the REAL client and the REAL transport run.
  */
-describe("[140.3-02 / TS-15] POST /api/keys/sync — forwards X-User-Access-Token, and fabricates nothing without a session", () => {
+describe("[146.1 / B2] POST /api/keys/sync — does NOT forward X-User-Access-Token, with or without a session", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     rateLimitResult.success = true;
@@ -1053,19 +1372,26 @@ describe("[140.3-02 / TS-15] POST /api/keys/sync — forwards X-User-Access-Toke
     });
   });
 
-  it("threads the session access token into the choke point", async () => {
+  it("does NOT thread the session access token into the choke point, even with a READABLE session", async () => {
     const { POST } = await import("./route");
     const res = await POST(makeReq({ strategy_id: TEST_STRATEGY_ID }));
 
     expect(res.status).toBe(202);
+    // Non-vacuity, before the absence it protects: the mocked session IS
+    // readable, so "nothing threaded" cannot be explained by "nothing existed".
+    expect(sessionState.session?.access_token).toBe("test-user-jwt");
+    const threadedArgs = mockPostProcessKey.mock.calls[0]?.[0] ?? {};
     expect(
-      mockPostProcessKey.mock.calls[0]?.[0]?.userAccessToken,
-      "Without the token the analytics service cannot build a user-scoped, " +
-        "RLS-enforcing client, and PYAPI-01's explicit Python ownership filter " +
-        "is the ONLY belt rather than the second one — TS-15.",
-    ).toBe("test-user-jwt");
-    // The pre-existing tenant identity must survive alongside it: dropping
-    // X-User-Id re-opens the CT-4 cross-tenant rate-limit-bucket defect.
+      Object.keys(threadedArgs).filter(
+        (k) => k.toLowerCase() === "useraccesstoken",
+      ),
+      "A live end-user Supabase JWT is being threaded into the seam again. " +
+        "Its only reader (db.py get_user_scoped_supabase) has zero callers and " +
+        "a Python gate pins that non-use — 146.1 / B2. Re-open deliberately.",
+    ).toEqual([]);
+    // The pre-existing tenant identity must survive the removal: dropping
+    // X-User-Id re-opens the CT-4 cross-tenant rate-limit-bucket defect. It is
+    // also the vacuity fence — the call really was made, with real arguments.
     expect(mockPostProcessKey).toHaveBeenCalledWith(
       expect.objectContaining({ flow_type: "resync", userId: TEST_USER.id }),
     );
@@ -1078,6 +1404,9 @@ describe("[140.3-02 / TS-15] POST /api/keys/sync — forwards X-User-Access-Toke
     const res = await POST(makeReq({ strategy_id: TEST_STRATEGY_ID }));
 
     // Fabricating a value would be an elevation-of-privilege bug, not a shim.
+    // ⛔ UNCHANGED by 146.1 / B2 — it was green before the removal and is green
+    // after, which is what proves the inversion above did not simply delete
+    // assertions until the file agreed with the code.
     expect(mockPostProcessKey.mock.calls[0]?.[0]?.userAccessToken).toBeUndefined();
     // And the forwarding is an ENHANCEMENT, not a gate: the caller is already
     // authenticated and ownership is already proven, so an unreadable session
@@ -1218,6 +1547,133 @@ describe("[140.3-10] POST /api/keys/sync — a code on every arm, and the TRAP-3
           "fact, one token, across both routes.",
       ).toBe("GATE_DRAFT_GONE");
       expect(body.error).toBe("Strategy not found");
+    });
+  });
+
+  /**
+   * ══════════════════════════════════════════════════════════════════
+   * 140.4-13 / SEAMRIM-05 — a limiter MISCONFIGURATION is not a throttle.
+   *
+   * ⚠️ THE PER-ARM SPLIT IS THE POINT, AND IT IS WHY THIS PLAN'S LEDGER ROW
+   * MUTATES ARM 4 SPECIFICALLY. `keys/sync` has TWO `checkLimit` sites. A guard
+   * — or a reviewer — asking "does this FILE route its deny through
+   * `rateLimitDenyJson`?" stays satisfied with the second arm reverted to an
+   * inlined 429, because the first arm still does. Only a case that drives that
+   * specific bucket sees it. Each arm below is denied ALONE, with a DIFFERENT
+   * `Retry-After`, so neither case can be satisfied by the other site answering.
+   *
+   * The AUTHENTICATED auth shape of the three this plan pins behaviourally.
+   * ══════════════════════════════════════════════════════════════════
+   */
+  describe("[140.4-13 / SEAMRIM-05] the limiter's misconfiguration answers 503, per ARM", () => {
+    it("ARM 3 (per-user ceiling) — ratelimit_misconfigured → 503, not 429", async () => {
+      rateLimitByBucket[`keys-sync-user:${TEST_USER.id}`] = {
+        success: false,
+        retryAfter: 60,
+        reason: "ratelimit_misconfigured",
+      };
+
+      const { POST } = await import("./route");
+      const res = await POST(makeReq({ strategy_id: TEST_STRATEGY_ID }));
+
+      expect(
+        res.status,
+        "Our Upstash store being unreachable is OUR outage. A 429 here tells " +
+          "the allocator they are syncing too fast, which is false, and hides " +
+          "the outage from the canary that watches 5xx.",
+      ).toBe(503);
+      expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+      expect(res.headers.get("Retry-After")).toBe("60");
+      const body = await res.json();
+      expect(body.code).toBe("SEAM_MISCONFIGURED");
+      // The per-strategy bucket was never consulted — this is ARM 3 answering.
+      expect(checkLimitMock).toHaveBeenCalledTimes(1);
+      expect(mockPostProcessKey).not.toHaveBeenCalled();
+    });
+
+    it("ARM 4 (per-(user, strategy) bucket) — ratelimit_misconfigured → 503, not 429", async () => {
+      // Ceiling PASSES; only the second bucket is misconfigured. This case is
+      // reachable ONLY through the second call site.
+      rateLimitByBucket[`keys-sync-user:${TEST_USER.id}`] = {
+        success: true,
+        retryAfter: 0,
+      };
+      rateLimitByBucket[`keys-sync:${TEST_USER.id}:${TEST_STRATEGY_ID}`] = {
+        success: false,
+        retryAfter: 60,
+        reason: "ratelimit_misconfigured",
+      };
+
+      const { POST } = await import("./route");
+      const res = await POST(makeReq({ strategy_id: TEST_STRATEGY_ID }));
+
+      expect(
+        res.status,
+        "The SECOND arm. Reverting only this call site to an inlined 429 " +
+          "leaves every file-level 'does it mention rateLimitDenyJson' check " +
+          "green — that is exactly the mutation row M105 runs.",
+      ).toBe(503);
+      expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+      const body = await res.json();
+      expect(body.code).toBe("SEAM_MISCONFIGURED");
+      expect(checkLimitMock).toHaveBeenCalledTimes(2);
+      expect(mockPostProcessKey).not.toHaveBeenCalled();
+    });
+
+    it("ARM 4 — a GENUINE throttle still answers 429 with its own byte-identical body", async () => {
+      rateLimitByBucket[`keys-sync-user:${TEST_USER.id}`] = {
+        success: true,
+        retryAfter: 0,
+      };
+      rateLimitByBucket[`keys-sync:${TEST_USER.id}:${TEST_STRATEGY_ID}`] = {
+        success: false,
+        retryAfter: 9,
+      };
+
+      const { POST } = await import("./route");
+      const res = await POST(makeReq({ strategy_id: TEST_STRATEGY_ID }));
+
+      expect(res.status).toBe(429);
+      expect(res.headers.get("Retry-After")).toBe("9");
+      expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+      // Hand-typed from the pre-adoption source — `{error, code}` in THAT key
+      // order — not read back off the builder.
+      //
+      // ⚠️ 140.4-16 / WR-03 — ASSERTED BYTE-WISE, BECAUSE `toEqual` DOES NOT
+      // HOLD THE PROPERTY THIS COMMENT NAMES. `res.json()` parses to an object
+      // and `toEqual` is a structural deep-equality: key order is not compared.
+      // Measured — swapping the two keys at `keys/sync/route.ts:138` left this
+      // case and its three siblings GREEN. Four receipts across four files were
+      // asserting a property no assertion held, in the one phase that exists
+      // because unfalsifiable receipts shipped. `res.text()` is the shape that
+      // reddens. The structural claim is kept beside it, because a byte
+      // comparison alone reports "strings differ" rather than which field moved.
+      expect(await res.clone().text()).toBe(
+        '{"error":"Too many requests","code":"RATE_LIMITED"}',
+      );
+      expect(await res.json()).toEqual({
+        error: "Too many requests",
+        code: "RATE_LIMITED",
+      });
+    });
+
+    it("both buckets allowing → neither deny arm fires and the sync runs", async () => {
+      rateLimitByBucket[`keys-sync-user:${TEST_USER.id}`] = {
+        success: true,
+        retryAfter: 0,
+      };
+      rateLimitByBucket[`keys-sync:${TEST_USER.id}:${TEST_STRATEGY_ID}`] = {
+        success: true,
+        retryAfter: 0,
+      };
+
+      const { POST } = await import("./route");
+      const res = await POST(makeReq({ strategy_id: TEST_STRATEGY_ID }));
+
+      expect(res.status).not.toBe(429);
+      expect(res.status).not.toBe(503);
+      expect(checkLimitMock).toHaveBeenCalledTimes(2);
+      expect(mockPostProcessKey).toHaveBeenCalled();
     });
   });
 
@@ -1377,5 +1833,99 @@ describe("[140.3-10] POST /api/keys/sync — a code on every arm, and the TRAP-3
       ).toBe("SYNC_KICKOFF_FAILED");
       expect(body.code).not.toBe("COMPOSITE_MEMBERSHIP_UNKNOWN");
     });
+  });
+});
+
+/**
+ * [140.5-06 / WP-14] 424 — TESTED WHERE IT CAN ACTUALLY ARRIVE.
+ *
+ * ⚠️ THE MEASUREMENT THAT MOTIVATES THIS. A producer/consumer audit of 424
+ * across the service found it raised in exactly three places —
+ * `routers/exchange.py` (`validate_key` and its two private helpers),
+ * `routers/portfolio.py`'s verify-strategy arm, and `routers/process_key.py` —
+ * and in NONE of `routers/match.py`, `routers/simulator.py` or
+ * `routers/optimizer.py` (re-measured at this plan's base: `grep -c 424` → 0, 0,
+ * 0 respectively, against 14 / 1 / 4 for the three real producers).
+ *
+ * Yet four match/optimize suites plus MatchEvalDashboard drive a 424 their
+ * upstream cannot emit, while the five routes whose upstream CAN emit one —
+ * this route, verify-strategy, validate-and-encrypt, create-with-key and
+ * composite/add-key — measured ZERO mentions of it. Coverage pointed away from
+ * where the status lives.
+ *
+ * `/api/keys/sync` reaches `/process-key`, so a 424 is on ITS wire. The body
+ * below is `process_key.py`'s real one: that raise site returns
+ * `_envelope_error(...)`, whose key set is `{ok, code, human_message,
+ * debug_context, correlation_id, recoverable}` — FLAT, and NOT the nested
+ * `service_error` envelope. `recoverable: true` is STATED at that site rather
+ * than derived, because everything reaching the arm is retryable by
+ * construction: that is what selected the arm.
+ *
+ * ⚠️ Note for whoever adds the sibling cases: the OTHER 424 producer emits a
+ * DIFFERENT shape. `/api/validate-key` raises `VenueTransientHTTPException`,
+ * which `main.py`'s dedicated handler serialises FLAT as `{detail: <scalar
+ * str>, code, recoverable}` — a deliberate, documented departure from the
+ * nested rule, recorded in the class docstring so nobody "unifies" it onto
+ * `service_error`. So the three validate-key consumers need that shape, not
+ * this one, and a fixture copied from here to there would be wrong.
+ */
+describe("[140.5-06 / WP-14] POST /api/keys/sync — an upstream 424 is forwarded as 424", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    rateLimitResult.success = true;
+    rateLimitResult.retryAfter = 0;
+    for (const k of Object.keys(rateLimitByBucket)) delete rateLimitByBucket[k];
+    ownershipResult.data = { id: TEST_STRATEGY_ID, user_id: TEST_USER.id };
+    ownershipResult.error = null;
+    authState.user = { id: TEST_USER.id };
+    sessionState.session = { access_token: "test-user-jwt" };
+    strategyKeysProbe.count = 0;
+    strategyKeysProbe.error = null;
+    analyticsExisting.data = null;
+    analyticsExisting.error = null;
+    mockRpc.mockResolvedValue({ data: TEST_JOB_ID, error: null });
+    mockUpsert.mockReturnValue({ error: null });
+  });
+
+  it("forwards the upstream 424 STATUS and its machine code — the venue's fault stays the venue's fault", async () => {
+    mockPostProcessKey.mockResolvedValue({
+      ok: false,
+      response: NextResponse.json(
+        {
+          ok: false,
+          code: "EXCHANGE_UNAVAILABLE",
+          human_message:
+            "Your exchange did not answer. This is a problem at the venue — try again shortly.",
+          debug_context: {
+            verification_id: "77777777-7777-4777-8777-777777777777",
+          },
+          correlation_id: "11111111-2222-3333-4444-555555555555",
+          recoverable: true,
+        },
+        { status: 424 },
+      ),
+    });
+
+    const { POST } = await import("./route");
+    const res = await POST(makeReq({ strategy_id: TEST_STRATEGY_ID }));
+    const body = await res.json();
+
+    expect(
+      res.status,
+      "424 is CALLER'S EXCHANGE. Collapsing it to a 5xx would claim OUR service " +
+        "failed, which is false and — because a 4xx is breaker-inert while a 5xx " +
+        "is not — would also let a venue outage trip our own circuit.",
+    ).toBe(424);
+    expect(
+      body.code,
+      "The machine code must survive the hop: it is what the wizard branches on " +
+        "to tell a venue fault from one of ours.",
+    ).toBe("EXCHANGE_UNAVAILABLE");
+    expect(
+      body.recoverable,
+      "A venue may come back, so this arm is retryable. `recoverable: false` " +
+        "here is the dead-end render B-01/B-22 describe.",
+    ).toBe(true);
+    expect(body.human_message).toContain("venue");
   });
 });

@@ -22,7 +22,7 @@
  * skipped entirely; when present, a fresh allocator is seeded and signed
  * in before each axe pass.
  */
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./helpers/hydration-guard";
 import { buildAxe } from "./helpers/axe";
 import { seedTestAllocator } from "./helpers/seed-test-project";
 
@@ -236,11 +236,35 @@ test.describe("Phase 17 — wizard axe (DESIGN-05)", () => {
     // description so the step can advance.
     await page.getByTestId("wizard-csv-preview-continue").click();
     await expect(
-      page.getByRole("heading", {
-        name: "Tell allocators what this strategy is",
-      }),
+      page.getByRole("heading", { name: "Describe this strategy" }),
     ).toBeVisible({ timeout: 15_000 });
     await page.getByLabel("Description").fill("Automated axe-scan description.");
+
+    // ⛔ WAIT FOR THE CATEGORY AUTO-SELECT BEFORE CLICKING SUBMIT. Description
+    // is NOT the only required field — `category` is too
+    // (MetadataStep.tsx:724, `METADATA_CATEGORY_REQUIRED`), and nothing in the
+    // test picks one. It works only because MetadataStep fetches
+    // `discovery_categories` in a mount effect and auto-selects `data[0].id`
+    // when that resolves (:640).
+    //
+    // Until it resolves `categoryId` is null, so a submit clicked inside that
+    // window is REFUSED by `handleSubmit` (:815), which focuses the category
+    // select and leaves the wizard on this step — "Review & confirm" never
+    // renders and the next assertion burns its full 15 s.
+    //
+    // That is a live network race against the seeded TEST project, which is
+    // exactly why this spec failed / passed / failed across three CI runs on
+    // unrelated branches (PR #673 run 1, #673 rerun, #674 — the last a
+    // Python-only diff that cannot touch this page).
+    //
+    // Asserting a non-empty value is a REAL wait, not a sleep: if categories
+    // genuinely never load (RLS regression, empty table — the WR-04 dead-end
+    // this control warns about at :1026) it times out here, naming the actual
+    // precondition, instead of failing 15 s later at an unrelated heading.
+    await expect(page.getByLabel("Category")).not.toHaveValue("", {
+      timeout: 15_000,
+    });
+
     await page.getByRole("button", { name: /review and submit/i }).click();
 
     // The Review & confirm recap renders — scan it.

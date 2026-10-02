@@ -14,6 +14,24 @@ function strat(id: string, name: string): { id: string; name: string; dailyRetur
   return { id, name, dailyReturns: [{ date: "2024-01-01", value: 0.01 }] };
 }
 
+/**
+ * [140.4-05 / SEAMRIM-10] A failure heading now appears TWICE in the error
+ * render: once in the visible `EmptyStateCard`, and once in the sr-only
+ * `<LiveRegion>` that announces it.
+ *
+ * Strictly STRONGER than the `getByText(…)` it replaces: the exact count pins
+ * the visible copy AND the announcement together, so it fails if either is
+ * dropped or if a third copy appears.
+ */
+function visibleAndAnnounced(text: string): HTMLElement[] {
+  const nodes = screen.getAllByText(text);
+  expect(
+    nodes,
+    `"${text}" must appear exactly twice \u2014 the visible card + the sr-only LiveRegion`,
+  ).toHaveLength(2);
+  return nodes;
+}
+
 function mockFetchOnce(body: unknown, ok = true) {
   const f = vi.fn().mockResolvedValue({
     ok,
@@ -93,7 +111,7 @@ describe("WeightOptimizerSection", () => {
     render(<WeightOptimizerSection strategies={[strat("a", "A"), strat("b", "B")]} onApply={() => {}} />);
     fireEvent.click(screen.getByRole("button", { name: /Suggest weights/ }));
     await waitFor(() =>
-      expect(screen.getByText("Couldn't reach the optimizer")).toBeInTheDocument(),
+      expect(visibleAndAnnounced("Couldn't reach the optimizer")[0]).toBeInTheDocument(),
     );
   });
 
@@ -176,7 +194,7 @@ describe("WeightOptimizerSection — SEAMUX-05 / B-13: the failure is named", ()
     );
     renderAndRun();
     await waitFor(() =>
-      expect(screen.getByText("Couldn't reach the optimizer")).toBeInTheDocument(),
+      expect(visibleAndAnnounced("Couldn't reach the optimizer")[0]).toBeInTheDocument(),
     );
   });
 
@@ -193,7 +211,7 @@ describe("WeightOptimizerSection — SEAMUX-05 / B-13: the failure is named", ()
 
     await waitFor(() =>
       expect(
-        screen.getByText("The optimizer refused this request"),
+        visibleAndAnnounced("The optimizer refused this request")[0],
       ).toBeInTheDocument(),
     );
     // THE assertion: the availability claim must NOT be made about a request the
@@ -218,7 +236,7 @@ describe("WeightOptimizerSection — SEAMUX-05 / B-13: the failure is named", ()
 
     await waitFor(() =>
       expect(
-        screen.getByText("Couldn't read the optimizer's answer"),
+        visibleAndAnnounced("Couldn't read the optimizer's answer")[0],
       ).toBeInTheDocument(),
     );
     // We do not know whether it ran, so we must not assert availability …
@@ -242,7 +260,7 @@ describe("WeightOptimizerSection — SEAMUX-05 / B-13: the failure is named", ()
     renderAndRun();
 
     await waitFor(() =>
-      expect(screen.getByText("Couldn't reach the optimizer")).toBeInTheDocument(),
+      expect(visibleAndAnnounced("Couldn't reach the optimizer")[0]).toBeInTheDocument(),
     );
     expect(document.body.textContent).not.toMatch(/NetworkError|localhost:8002/);
     expect(errSpy).toHaveBeenCalled();
@@ -282,5 +300,103 @@ describe("WeightOptimizerSection — SEAMUX-05 / B-13: the failure is named", ()
       invalidateAt,
       "the invalidation must stay ABOVE the fetch; that ordering is the pattern, not an accident",
     ).toBeLessThan(fetchAt);
+  });
+
+  /**
+   * [140.4-05 / SEAMRIM-10] The named failure is ANNOUNCED, not only drawn.
+   *
+   * B-13 above established that this surface names WHICH failure occurred. That
+   * naming is delivered entirely through `EmptyStateCard`'s visual text, so a
+   * screen-reader user got neither the name nor the fact of the failure — the
+   * "Suggest weights" button stays mounted, so there is not even a focus change
+   * to notice.
+   *
+   * ⚠️ The expected headings are HAND-TYPED, never read from `FAILURE_COPY`.
+   * An oracle that reads the table under test cannot fail when that table
+   * changes (the C-1 lesson, and the house rule in this file already).
+   *
+   * ⚠️ `OptimizerFailure` has THREE members, not two — `refused` sits between
+   * `unavailable` and `unreadable`. All three are driven here.
+   */
+  it.each([
+    ["a 5xx", 503, "Couldn't reach the optimizer"],
+    ["a 4xx", 422, "The optimizer refused this request"],
+  ])(
+    "ANNOUNCES the named failure through role=alert — %s",
+    async (_label, status, heading) => {
+      stubFetch(() =>
+        Promise.resolve(
+          new Response(JSON.stringify({ error: "x" }), {
+            status,
+            headers: { "content-type": "application/json" },
+          }),
+        ),
+      );
+      renderAndRun();
+
+      const alert = await screen.findByRole("alert");
+      expect(alert).toHaveTextContent(heading);
+
+      // The visible EmptyStateCard is unchanged — the region is additive.
+      expect(visibleAndAnnounced(heading)[0]).toBeInTheDocument();
+    },
+  );
+
+  it("ANNOUNCES the named failure through role=alert — an unreadable 200", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    stubFetch(() =>
+      Promise.resolve(
+        new Response("<html><body>gateway</body></html>", {
+          status: 200,
+          headers: { "content-type": "text/html" },
+        }),
+      ),
+    );
+    renderAndRun();
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Couldn't read the optimizer's answer");
+    // The caught value must stay out of the announcement too — an ARIA region
+    // is DOM, so B-27's no-raw-internals rule applies to it identically.
+    expect(alert.textContent ?? "").not.toMatch(/SyntaxError|Unexpected token|JSON/);
+    errSpy.mockRestore();
+  });
+
+  it("NEGATIVE CONTROL: the idle and success renders expose NO role=alert", async () => {
+    // Without this, the three assertions above are satisfied by a component
+    // that announces unconditionally — announcing on every render is worse
+    // than silence, because it trains the user to tune the region out.
+    stubFetch(() =>
+      Promise.resolve(
+        new Response(
+          JSON.stringify({
+            ok: true,
+            objective: "min_vol",
+            n: 180,
+            k: 2,
+            weights: { a: 0.7, b: 0.3 },
+            in_sample: true,
+            reason: "ok",
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        ),
+      ),
+    );
+
+    render(
+      <WeightOptimizerSection
+        strategies={[strat("a", "A"), strat("b", "B")]}
+        onApply={() => {}}
+      />,
+    );
+    // Idle — nothing has been requested yet.
+    expect(screen.queryByRole("alert")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: /Suggest weights/ }));
+    await waitFor(() =>
+      expect(screen.getByTestId("optimizer-result")).toBeInTheDocument(),
+    );
+    // Success — the optimizer answered.
+    expect(screen.queryByRole("alert")).toBeNull();
   });
 });

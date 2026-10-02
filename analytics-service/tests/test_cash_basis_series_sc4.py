@@ -48,6 +48,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import services.basis_series as _bs
 from services.job_worker import DispatchOutcome, run_derive_broker_dailies_job
+from tests._scan_helpers import _is_pure_comment, _repo_root
 from tests.test_mtm_single_key import (
     _ALLOC_CONFIG,
     _STRATEGY_ID,
@@ -57,6 +58,7 @@ from tests.test_mtm_single_key import (
     _ctx,
     _find_failed_stamp,
     _find_prestamp,
+    _ledger_meta,
     _mtm_series,
     _patch_benchmark,
     _recording_ledger,
@@ -102,6 +104,7 @@ async def _run_seam(
     benchmark_raises: bool = False,
     returns: pd.Series | None = None,
     mtm_series: pd.Series | None = None,
+    expected_outcome: DispatchOutcome = DispatchOutcome.DONE,
 ) -> dict:
     """Run the strategy-mode Deribit broker-derive once against fully mocked I/O and
     return the supabase op capture. ``has_option_activity`` selects the two-pass
@@ -120,13 +123,13 @@ async def _run_seam(
             _report(has_option_activity=True),
         ]
         combine = MagicMock(side_effect=[
-            (_returns, {"used_heuristic_capital": False}),
-            (_mtm, {"used_heuristic_capital": False}),
-            (_mtm, {"used_heuristic_capital": False}),
+            (_returns, _ledger_meta()),
+            (_mtm, _ledger_meta()),
+            (_mtm, _ledger_meta()),
         ])
     else:
         reports = [_report(has_option_activity=False)]
-        combine = MagicMock(return_value=(_returns, {"used_heuristic_capital": False}))
+        combine = MagicMock(return_value=(_returns, _ledger_meta()))
     ledger_mock, _calls = _recording_ledger(reports)
     patches = _base_patches(
         ctx, key_mode=False, ledger_mock=ledger_mock, combine_mock=combine,
@@ -136,7 +139,12 @@ async def _run_seam(
         patches.append(_cash_noop_patch())
     with _apply(patches):
         result = await run_derive_broker_dailies_job({"strategy_id": _STRATEGY_ID})
-    assert result.outcome == DispatchOutcome.DONE
+    # F1 (161.1): the <2-interpretable-days arm terminates FAILED, not DONE —
+    # a DONE routed it to mark_compute_job_done, whose status bridge then
+    # resolved the stamp this file asserts back to 'complete'. Callers that
+    # drive that arm pass expected_outcome explicitly so the outcome stays
+    # asserted rather than widened to "whatever came back".
+    assert result.outcome == expected_outcome
     return capture
 
 
@@ -470,7 +478,12 @@ async def test_insufficient_history_arm_heals_both_series() -> None:
         [0.01], index=pd.DatetimeIndex(["2024-05-01"]), dtype="float64",
     )
     cap = await _run_seam(
-        {"asset_class": "crypto"}, has_option_activity=False, returns=one_day,
+        {"asset_class": "crypto"},
+        has_option_activity=False,
+        returns=one_day,
+        # F1: this arm's outcome is FAILED/permanent — the stamp and the dispatch
+        # outcome must agree or the status bridge overwrites the stamp.
+        expected_outcome=DispatchOutcome.FAILED,
     )
     assert len(_series_deletes(cap, _CASH_KIND)) == 1, (
         f"the <2 arm must heal-delete the cash series; got {cap['deletes']!r}"
@@ -591,8 +604,10 @@ async def test_cash_conventions_echo_ccxt_override() -> None:
     metrics_basis="active_day") now echoes {simple, active} in the persisted cash
     conventions. Pre-105 the ccxt arm NEVER parsed the override (the parse lived only
     inside ``if venue == "deribit"``), so it echoed the geometric/calendar DEFAULT — the
-    MED-2 bug. Proves the parse is hoisted VENUE-AGNOSTICALLY (analytics_runner.py:2304-2316
-    parity), feeding the SAME single derive with no venue branch inside the derive path.
+    MED-2 bug. Proves the parse is hoisted VENUE-AGNOSTICALLY (parity with the
+    `_denominator_config = parse_returns_denominator_config(...)` block in
+    ``analytics_runner.run_csv_strategy_analytics``), feeding the SAME single derive
+    with no venue branch inside the derive path.
 
     Neuter: re-scope the parse back inside the ``if venue == "deribit"`` branch →
     ``denominator_config`` stays None on the ccxt path → conventions echo
@@ -651,26 +666,10 @@ async def test_ccxt_malformed_config_fails_permanent() -> None:
 # ── boundary guards (Task 2): SERIES-ONLY + INERT read + single seam ─────────
 
 
-def _repo_root() -> Path:
-    """The monorepo root — the first ancestor containing BOTH ``src/`` and
-    ``analytics-service/``. Resolved by walking up from this file so the scan works
-    from the ``analytics-service`` pytest cwd and in CI."""
-    for parent in Path(__file__).resolve().parents:
-        if (parent / "src").is_dir() and (parent / "analytics-service").is_dir():
-            return parent
-    raise RuntimeError(
-        "could not locate the repo root (an ancestor with both src/ and "
-        "analytics-service/)"
-    )
-
-
-def _strip_comment(line: str, *, lang: str) -> bool:
-    """True when ``line`` is a pure comment for its language (grep-gate hygiene: a
-    docstring/comment mentioning a token must neither trip nor satisfy the gate)."""
-    stripped = line.lstrip()
-    if lang == "py":
-        return stripped.startswith("#")
-    return stripped.startswith("//") or stripped.startswith("*")
+# D-10: ``_repo_root`` and the comment-detection helper are shared — see
+# ``tests/_scan_helpers.py``. The helper is imported under its honest name
+# ``_is_pure_comment`` (it returns bool and strips nothing; the old local name
+# ``_strip_comment`` was a lie).
 
 
 # Phase 105 (BB-02, collapse #2) DELETED the Phase-104 SC-2 boundary guard
@@ -713,7 +712,7 @@ def test_no_reader_consumes_cash_settlement_series_row() -> None:
     offenders: list[str] = []
     for lang, f in scanned:
         for i, line in enumerate(f.read_text().splitlines(), 1):
-            if _strip_comment(line, lang=lang):
+            if _is_pure_comment(line, lang=lang):
                 continue
             if "cash_settlement" in line and (
                 "kind" in line or "strategy_analytics_series" in line
@@ -746,7 +745,7 @@ def test_single_cash_settlement_persist_seam() -> None:
     worker = _repo_root() / "analytics-service" / "services" / "job_worker.py"
     code = "\n".join(
         ln for ln in worker.read_text().splitlines()
-        if not _strip_comment(ln, lang="py")
+        if not _is_pure_comment(ln, lang="py")
     )
     total = code.count('basis="cash_settlement"')
     heals = code.count('basis="cash_settlement", result=None')

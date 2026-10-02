@@ -1,4 +1,39 @@
 import type { JointMetrics } from "./types";
+import { mean } from "@/lib/portfolio-math-utils";
+import { beta as betaOf, dispersion, pearson, sharpe } from "@/lib/return-stats";
+
+/**
+ * 169.4 review SFH MEDIUM-4: the fewest PAIRED strategy/benchmark
+ * observations the joint statistics (alpha, beta, correlation, IR, ...) are
+ * shown on. Below it an annualized alpha is noise dressed as a figure: a
+ * 3-day book pairs 2 or 3 intervals and reads e.g. "+812% annualized". The
+ * factsheet comparator block (`buildComparatorBlock`, so the allocator
+ * Overview and every factsheet) and the Allocations alpha/beta widget both
+ * gate on THIS constant, so under D-69 the two surfaces show one number or
+ * neither does. 10 is the minimum the widget carried before 169.4.
+ */
+export const MIN_PAIRED_OBSERVATIONS = 10;
+
+/**
+ * 169.4 review round 2 (SFH-R2 MEDIUM-2): the ONE sentence naming why the
+ * joint statistics are withheld below `MIN_PAIRED_OBSERVATIONS`. The
+ * Allocations alpha/beta widget ("this book") and the factsheet KPI strip and
+ * §IV ("this record") both print it, so one screen gives one cause.
+ *
+ * Phase 169.1 (D-85): inside a selected zoom range the strip and §IV print the
+ * WINDOW's paired count, so they pass "range", which reads "the selected range
+ * has <paired>." The record noun there would put the slice's count beside "this
+ * record", which has many more paired days.
+ */
+export function pairedFloorReason(
+  comparator: string,
+  paired: number,
+  noun: "book" | "record" | "range",
+  floor: number = MIN_PAIRED_OBSERVATIONS,
+): string {
+  const subject = noun === "range" ? "the selected range" : `this ${noun}`;
+  return `Alpha and beta need at least ${floor} days paired with ${comparator}; ${subject} has ${paired}.`;
+}
 
 /**
  * Port of `joint_metrics()` from `/tmp/gen_factsheet_v3.py`. Computes
@@ -15,31 +50,28 @@ export function jointMetrics(rets: number[], bench: number[], rf = 0, periodsPer
 
   const m = mean(rets);
   const mb = mean(bench);
-  const s = pstdev(rets, m);
-  const sb = pstdev(bench, mb);
 
-  let cov = 0;
-  let varB = 0;
-  for (let i = 0; i < n; i++) {
-    cov += (rets[i] - m) * (bench[i] - mb);
-    varB += (bench[i] - mb) ** 2;
-  }
-  cov /= n;
-  varB /= n;
-
-  const beta = varB > 0 ? cov / varB : 0;
+  // Beta, correlation, tracking error and information ratio are computed by
+  // `@/lib/return-stats` (Phase 166.2 D-17), not by a local formula. A leg whose
+  // only dispersion is float residue (a compounding constant yield) therefore
+  // answers exactly as an all-zero leg does (D-07). A ratio that does not exist
+  // is NaN, which `num()` / `pct()` render as "—" (founder decision D7,
+  // 2026-09-26), matching DistributionPanels' "—" for the same pair. Before D7
+  // this function answered 0 and the same page read "Correlation 0.00" in one
+  // panel and "—" in the next. Alpha and Treynor are built on beta, so an
+  // undefined beta makes both NaN, which is the honest answer.
+  const beta = betaOf(rets, bench) ?? NaN;
   const alpha = (m - beta * mb) * periodsPerYear;
-  const corr = s > 0 && sb > 0 ? cov / (s * sb) : 0;
-  const r2 = corr * corr;
+  const corr = pearson(rets, bench) ?? NaN;
+  const r2 = Number.isFinite(corr) ? corr * corr : NaN;
 
-  let teSum = 0;
-  for (let i = 0; i < n; i++) {
-    const diff = rets[i] - bench[i] - (m - mb);
-    teSum += diff * diff;
-  }
-  const trackingError = Math.sqrt(teSum / n) * Math.sqrt(periodsPerYear);
-  const infoRatio = trackingError > 0 ? ((m - mb) * periodsPerYear) / trackingError : 0;
-  const treynor = beta !== 0 ? ((m - rf / periodsPerYear) * periodsPerYear) / beta : 0;
+  // Tracking error and information ratio are the dispersion and the Sharpe of
+  // the ACTIVE series (strategy minus benchmark), population sd.
+  const active = rets.map((r, i) => r - bench[i]);
+  const trackingError = dispersion(active, 0).sd * Math.sqrt(periodsPerYear);
+  const infoRatio = sharpe(active, { periodsPerYear, ddof: 0 }) ?? NaN;
+  const treynor =
+    Number.isFinite(beta) && beta !== 0 ? ((m - rf / periodsPerYear) * periodsPerYear) / beta : NaN;
 
   let upBenchSum = 0;
   let upStratSum = 0;
@@ -54,8 +86,14 @@ export function jointMetrics(rets: number[], bench: number[], rf = 0, periodsPer
       downStratSum += rets[i];
     }
   }
-  const upCapture = upBenchSum !== 0 ? upStratSum / upBenchSum : 0;
-  const downCapture = downBenchSum !== 0 ? downStratSum / downBenchSum : 0;
+  // A capture ratio divides by the benchmark's own move on its up (down) days.
+  // It does not exist when the benchmark has no such days, or when the benchmark
+  // has no dispersion at all: every day of a compounding constant yield is an
+  // "up day" whose tiny real sum made up_capture read -0.01 to -4.47 where an
+  // all-zero benchmark read 0 (SFH-M3). Both are NaN, "—" (D7).
+  const benchDisperses = dispersion(bench, 0).sd !== 0;
+  const upCapture = benchDisperses && upBenchSum !== 0 ? upStratSum / upBenchSum : NaN;
+  const downCapture = benchDisperses && downBenchSum !== 0 ? downStratSum / downBenchSum : NaN;
 
   return {
     alpha,
@@ -68,16 +106,4 @@ export function jointMetrics(rets: number[], bench: number[], rf = 0, periodsPer
     up_capture: upCapture,
     down_capture: downCapture,
   };
-}
-
-function mean(xs: number[]): number {
-  let s = 0;
-  for (const x of xs) s += x;
-  return s / xs.length;
-}
-
-function pstdev(xs: number[], m: number): number {
-  let s = 0;
-  for (const x of xs) s += (x - m) * (x - m);
-  return Math.sqrt(s / xs.length);
 }

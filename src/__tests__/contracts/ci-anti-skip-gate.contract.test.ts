@@ -1,0 +1,984 @@
+import { afterAll, describe, expect, it } from "vitest";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { spawnSync } from "node:child_process";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+/**
+ * 161.1-REVIEW F10 — the pin for the anti-SKIP CI gate.
+ *
+ * ci.yml's "Run SQL self-tests" step is the guard that guards the other guards:
+ * it is what makes a supabase/tests file that prints `SKIP:` and exits 0 fail
+ * the job instead of counting as a pass. Until this file existed, NOTHING
+ * pinned it. Zero hits across src/__tests__ for `ARMS EXECUTED`,
+ * `sentinels_declared` or the step's log path; reverting the whole block left
+ * vitest and pytest fully green. The auditor's phrasing was exact: "I cannot
+ * name an input that fails if the anti-SKIP gate is deleted." This file is that
+ * input.
+ *
+ * ⛔ It is deliberately NOT a set of grep assertions over the YAML. A grep pin
+ * goes green the moment someone keeps the strings and guts the logic — the
+ * defanging case, which is the likelier one. So this test EXTRACTS the step's
+ * shell script out of ci.yml and RUNS it against the real corpus with a
+ * stub `psql` on PATH, and asserts on exit codes. Deleting the step makes
+ * extraction throw; weakening any branch makes a scenario stop failing.
+ *
+ * The stub is enough because every property under test is shell logic — which
+ * markers are matched, which conditions exit non-zero. No database is involved
+ * in the decision the gate makes.
+ */
+
+const ROOT = process.cwd();
+// Renamed by Phase 164.4.2 (DECISION B): the corpus left shared TEST for a
+// local-stack database private to the job's own runner, and the step's name
+// says so. The body it names is the same anti-SKIP gate — only where it
+// CONNECTS moved — so this pin follows the name rather than being retired.
+const STEP_NAME = "Run SQL self-tests against the local-stack lane";
+const CI_YML = join(ROOT, ".github/workflows/ci.yml");
+
+/** Pull a step's `run: |` body out of the workflow, dedented. */
+function extractRunScript(yml: string, stepName: string): string {
+  const lines = yml.split("\n");
+  const start = lines.findIndex((l) => l.trim() === `- name: ${stepName}`);
+  if (start === -1) {
+    throw new Error(
+      `ci.yml has no step named "${stepName}". The anti-SKIP gate is what makes a ` +
+        `supabase/tests file that prints a skip and exits 0 fail the job. If it was ` +
+        `renamed, update STEP_NAME here; if it was deleted, the SQL suite can go ` +
+        `silently vacuous again and this test is the only thing that says so.`,
+    );
+  }
+  const runIdx = lines.findIndex((l, i) => i > start && l.trim() === "run: |");
+  if (runIdx === -1) throw new Error(`step "${stepName}" has no "run: |" body`);
+  const indent = lines[runIdx].length - lines[runIdx].trimStart().length;
+  const body: string[] = [];
+  for (const line of lines.slice(runIdx + 1)) {
+    if (line.trim() === "") {
+      body.push("");
+      continue;
+    }
+    if (line.length - line.trimStart().length <= indent) break;
+    body.push(line.slice(indent + 2));
+  }
+  return `${body.join("\n")}\n`;
+}
+
+const YML = readFileSync(CI_YML, "utf8");
+const SCRIPT = extractRunScript(YML, STEP_NAME);
+
+// A `psql` that prints what a real run would print, driven by env so each
+// scenario can inject exactly one defect.
+const PSQL_STUB = `#!/bin/bash
+f=""; c=""; prev=""
+for a in "$@"; do
+  if [ "$prev" = "-f" ]; then f="$a"; fi
+  if [ "$prev" = "-c" ]; then c="$c$a"; fi
+  prev="$a"
+done
+# STUB_INVOCATION_LOG — the artifact that turns "was this file executed?"
+# from an inference into a measurement. Only -f invocations are logged (the
+# mutex/census/probe calls use -c and leave $f empty), so this is exactly
+# the set of files the gate actually handed to psql.
+if [ -n "$f" ] && [ -n "\${STUB_INVOCATION_LOG:-}" ]; then
+  basename "$f" >> "\${STUB_INVOCATION_LOG}"
+fi
+if [ -n "$c" ]; then
+  case "$c" in
+    *ANTISKIP*)
+      if [ "\${STUB_DARK:-0}" != "1" ]; then echo "NOTICE:  ANTISKIP-NOTICE-CHANNEL-OK"; fi
+      echo "DO"; exit 0;;
+  esac
+  exit 0
+fi
+b="$(basename "$f")"
+# One arbitrary extra output line, for a scenario that needs a NOTICE the
+# corpus file does not itself dictate (the runtime-composed partial label).
+if [ -n "\${STUB_EXTRA:-}" ]; then echo "\${STUB_EXTRA}"; fi
+# STUB_FAIL_BASENAME — reproduces the shipped defect (CI run 35347643700)
+# verbatim: relation "net._lane_posts" does not exist, psql exit 3.
+if [ "\${STUB_FAIL_BASENAME:-}" = "$b" ]; then
+  echo 'psql:'"$f"':645: ERROR:  relation "net._lane_posts" does not exist'
+  exit 3
+fi
+if [ "\${STUB_SKIP_BASENAME:-}" = "$b" ]; then
+  m="$(grep -aoE "RAISE NOTICE 'SKIP: [^'%]{0,60}" "$f" | sed "s/^.*RAISE NOTICE '//" | head -1)"
+  echo "psql:$f:1: \${STUB_LABEL:-NOTICE}:  \${m}"
+  exit 0
+fi
+if [ "\${STUB_NO_SENTINEL:-}" != "$b" ]; then
+  s="$(grep -aoE "ALL [0-9]+ ARMS EXECUTED[^']*" "$f" | head -1)"
+  if [ -n "$s" ]; then echo "psql:$f:1: NOTICE:  \${s}"; fi
+fi
+exit 0
+`;
+
+const workdir = mkdtempSync(join(tmpdir(), "antiskip-"));
+const bindir = join(workdir, "bin");
+mkdirSync(bindir);
+writeFileSync(join(bindir, "psql"), PSQL_STUB);
+chmodSync(join(bindir, "psql"), 0o755);
+const scriptPath = join(workdir, "step.sh");
+writeFileSync(scriptPath, SCRIPT);
+// The lane handoff `scripts/local-stack/run.sh up` writes in CI, stubbed. Since
+// Phase 164.4.2 the step reads its DSN from this file (named by LANE_ENV_FILE)
+// instead of from a secret, and refuses any DB_URL that is not loopback — so the
+// stub must name 127.0.0.1 or every scenario below would measure that refusal
+// instead of the skip behaviour it exists to pin. Never a real DSN; the psql on
+// PATH is the stub above.
+const laneEnvPath = join(workdir, "stack-env");
+writeFileSync(laneEnvPath, 'DB_URL="postgresql://stub@127.0.0.1:54322/postgres"\n');
+
+afterAll(() => rmSync(workdir, { recursive: true, force: true }));
+
+function runGate(env: Record<string, string> = {}, cwd: string = ROOT) {
+  const runnerTemp = mkdtempSync(join(tmpdir(), "antiskip-rt-"));
+  const res = spawnSync("bash", [scriptPath], {
+    cwd,
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      PATH: `${bindir}:${process.env.PATH ?? ""}`,
+      LANE_ENV_FILE: laneEnvPath,
+      RUNNER_TEMP: runnerTemp,
+      // [164.8.4] Same category as RUNNER_TEMP: since this phase the step redacts
+      // psql's captured output through `sed -E -f
+      // "${GITHUB_WORKSPACE}/scripts/redact-psql-stderr.sed"` before echoing it.
+      // Unset, that operand truncates, sed exits non-zero, and `set -euo pipefail`
+      // kills the step right after "Discovering …" — so every assertion below would
+      // measure a missing env var instead of the skip behaviour it exists to pin.
+      // A real Actions runner always sets it.
+      GITHUB_WORKSPACE: ROOT,
+      ...env,
+    },
+  });
+  rmSync(runnerTemp, { recursive: true, force: true });
+  return { code: res.status, out: `${res.stdout ?? ""}${res.stderr ?? ""}` };
+}
+
+/**
+ * A one-file corpus whose skip labels carry glob metacharacters (F15).
+ *
+ * The gate splits its marker lists with an UNQUOTED expansion under
+ * `shopt -s nullglob`, so before the fix a marker containing `*` matched no
+ * file and was deleted from the word list entirely — the loop body never ran
+ * for it. Returned path is the cwd the gate runs in; caller removes it.
+ */
+function makeGlobMarkerCorpus(): string {
+  const dir = mkdtempSync(join(tmpdir(), "antiskip-glob-"));
+  mkdirSync(join(dir, "supabase/tests"), { recursive: true });
+  writeFileSync(
+    join(dir, "supabase/tests/test_glob_marker.sql"),
+    [
+      "DO $$",
+      "BEGIN",
+      "  IF true THEN",
+      "    RAISE NOTICE 'SKIP: cron job * not scheduled here';",
+      "    RETURN;",
+      "  END IF;",
+      "END $$;",
+      "DO $$",
+      "BEGIN",
+      "  IF true THEN",
+      "    RAISE NOTICE 'SKIP Part 2: cron * absent';",
+      "    RETURN;",
+      "  END IF;",
+      "END $$;",
+      "",
+    ].join("\n"),
+  );
+  return dir;
+}
+
+const GLOB_CORPUS_FILE = "supabase/tests/test_glob_marker.sql";
+
+/**
+ * A throwaway one-file corpus. Returned path is the cwd the gate runs in.
+ *
+ * Used by the sentinel-annotation cases below. Their subject is a defect in ONE
+ * file's completion notice, and the real corpus deliberately contains no such
+ * file — so the defect has to be constructed rather than borrowed.
+ */
+function makeSentinelCorpus(basename: string, body: string): string {
+  const dir = mkdtempSync(join(tmpdir(), "antiskip-sent-"));
+  mkdirSync(join(dir, "supabase/tests"), { recursive: true });
+  writeFileSync(join(dir, `supabase/tests/${basename}`), body);
+  return dir;
+}
+
+/** N arms' worth of real, reachable assertion sites. */
+function armBodies(n: number): string {
+  return Array.from(
+    { length: n },
+    (_, i) => `DO $$\nBEGIN\n  IF false THEN RAISE EXCEPTION 'arm ${i + 1} failed'; END IF;\nEND $$;`,
+  ).join("\n");
+}
+
+describe("anti-SKIP CI gate (ci.yml sql-tests) — F10 pin", () => {
+  it("passes a run where every NON-EXCLUDED file executes and prints its sentinel", () => {
+    // Renamed from "...every file executes...", which became false the
+    // moment a file was excluded. The exclusion has to be REPORTED, or this
+    // title would be quietly false again.
+    const { code, out } = runGate();
+    expect(out).toContain("SQL self-tests passed");
+    expect(code).toBe(0);
+    expect(out).toMatch(/\d+ excluded \(LANE-ONLY/);
+  }, 90_000);
+
+  /**
+   * 164.1.1.1-01 — the LANE-ONLY exclusion for test_prod_prober_cadence.sql.
+   * Three properties: the file is never handed to psql (measured, not
+   * inferred), the exclusion cannot be silent, and the static accounting
+   * (SENTINEL_FLOOR/ARMS_FLOOR) still counts the file it excludes from
+   * execution.
+   */
+  it("never hands the excluded file to psql, proven by an invocation log over the real corpus", () => {
+    const target = "test_prod_prober_cadence.sql";
+    const logDir = mkdtempSync(join(tmpdir(), "antiskip-invlog-"));
+    const logPath = join(logDir, "invocation.log");
+    try {
+      const { code, out } = runGate({ STUB_INVOCATION_LOG: logPath });
+      expect(code).toBe(0);
+      const logged = readFileSync(logPath, "utf8").split("\n").filter(Boolean);
+      // Guard the guard: an EMPTY or missing log must not pass as "the file
+      // was excluded" — it is the LENGTH assertion that has to be able to
+      // fail, not merely the absence check below.
+      expect(logged.length).toBeGreaterThan(70);
+      expect(logged).not.toContain(target);
+      expect(out).toContain(`::notice file=supabase/tests/${target}::`);
+      // Phase 164.4.2: the job no longer runs on shared TEST, so the notice names
+      // the lane it DOES run on. What is pinned is unchanged: the exclusion is
+      // announced per file, never silent.
+      expect(out).toContain("not executed on this job's local-stack lane");
+      expect(out).toMatch(/\d+ excluded \(LANE-ONLY/);
+    } finally {
+      rmSync(logDir, { recursive: true, force: true });
+    }
+  }, 90_000);
+
+  it("propagates the shipped net._lane_posts defect through a NON-excluded file, and never through the excluded one (calibration pair)", () => {
+    // Arm 1: proves the injection is real. Without this, arm 2's exit 0
+    // would prove nothing — a stub that simply never fires also exits 0.
+    const control = "test_retention_crons_safe.sql";
+    const armed = runGate({ STUB_FAIL_BASENAME: control });
+    expect(armed.code).not.toBe(0);
+    expect(armed.out).toContain(`::error file=supabase/tests/${control}::`);
+    expect(armed.out).toContain('relation "net._lane_posts" does not exist');
+
+    // Arm 2: the SAME injection aimed at the excluded file never reaches
+    // psql, because the file is never handed to it.
+    const excluded = "test_prod_prober_cadence.sql";
+    const spared = runGate({ STUB_FAIL_BASENAME: excluded });
+    expect(spared.code).toBe(0);
+    expect(spared.out).not.toContain('relation "net._lane_posts" does not exist');
+  }, 90_000);
+
+  it("keeps the excluded file inside the static accounting — declared totals still reach the step's own floors", () => {
+    const { code, out } = runGate();
+    expect(code).toBe(0);
+    // ⛔ Read out of SCRIPT, never restated as a literal here — the repo
+    // already holds four mirrors of these two integers.
+    const sentinelFloor = Number(/SENTINEL_FLOOR=(\d+)/.exec(SCRIPT)![1]);
+    const armsFloor = Number(/ARMS_FLOOR=(\d+)/.exec(SCRIPT)![1]);
+    const summary = /(\d+) of (\d+) completion sentinel\(s\) verified against THIS run, covering (\d+) declared arms/.exec(
+      out,
+    );
+    expect(summary, "closing summary line shape changed").not.toBeNull();
+    const [, verified, declared, arms] = summary!;
+    expect(Number(declared)).toBe(sentinelFloor);
+    expect(Number(arms)).toBe(armsFloor);
+    expect(Number(verified)).toBe(sentinelFloor - 1);
+    // Guard the guard: proves the excluded file's OWN sentinel was skipped
+    // this run — not merely that the totals still add up. A different file,
+    // test_sync_status_curated_sentence_survives.sql, shares the SAME "ALL 7
+    // ARMS EXECUTED" text, so this counts occurrences rather than asserting
+    // bare presence/absence, which could not tell the two apart.
+    const okCount = (out.match(/completion sentinel OK: ALL 7 ARMS EXECUTED/g) ?? []).length;
+    expect(okCount).toBe(1);
+    expect(out).toContain(
+      "completion sentinel DECLARED but not checked against a run — LANE-ONLY",
+    );
+  }, 90_000);
+
+  it("FAILS when a file prints a whole-file SKIP marker and exits 0, naming the file", () => {
+    const target = "test_allocator_equity_derived_rls.sql";
+    const { code, out } = runGate({ STUB_SKIP_BASENAME: target });
+    expect(code).not.toBe(0);
+    expect(out).toContain(`::error file=supabase/tests/${target}::printed a whole-file SKIP`);
+  }, 90_000);
+
+  it("still FAILS that skip when the server label is not English (F14 locale net)", () => {
+    // The original gate anchored on psql's C-locale `NOTICE:` label, so a
+    // localized server made it match nothing and report a FALSE PASS. The
+    // locale-proof net reads the marker out of the .sql file instead.
+    const target = "test_allocator_equity_derived_rls.sql";
+    const { code, out } = runGate({ STUB_SKIP_BASENAME: target, STUB_LABEL: "HINWEIS" });
+    expect(code).not.toBe(0);
+    expect(out).toContain("printed a whole-file SKIP");
+    // Guard the guard: prove the label really was foreign, so this case cannot
+    // silently degrade into a duplicate of the test above.
+    expect(out).toContain("HINWEIS:");
+  }, 90_000);
+
+  it("still FAILS a whole-file skip whose marker contains a glob metacharacter (F15)", () => {
+    // The marker carries a `*` and the server label is foreign, so NET 2 cannot
+    // rescue this: NET 1 is the only net left, which is precisely the situation
+    // the unquoted-expansion bug turned off. Without `set -f` around the split,
+    // nullglob deletes the marker from the word list and the gate prints NO skip
+    // error at all — a localized server plus one `*` was a silent false pass.
+    //
+    // ⚠️ Exit code is NOT the discriminator here: this synthetic corpus declares
+    // no completion sentinels, so the SENTINEL_FLOOR/ARMS_FLOOR checks fail the
+    // step either way. Asserting on the skip error specifically is what makes
+    // this test able to fail.
+    const dir = makeGlobMarkerCorpus();
+    try {
+      const { out } = runGate(
+        { STUB_SKIP_BASENAME: "test_glob_marker.sql", STUB_LABEL: "HINWEIS" },
+        dir,
+      );
+      expect(out).toContain(`::error file=${GLOB_CORPUS_FILE}::printed a whole-file SKIP`);
+      expect(out).toContain("SKIP: cron job * not scheduled here");
+      // Guard the guard: prove NET 2 really was blind, so this can never decay
+      // into a duplicate of the plain skip test above.
+      expect(out).not.toMatch(/NOTICE: +SKIP:/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 90_000);
+
+  it("still NAMES an UNPOLICED partial skip whose label contains a glob metacharacter (F15)", () => {
+    // Same defect in the sibling loop. Here it costs a warning rather than a
+    // failure, but an unnamed partial skip is exactly the withheld coverage this
+    // block exists to surface, so it must not vanish silently either.
+    const dir = makeGlobMarkerCorpus();
+    try {
+      const { out } = runGate(
+        { STUB_EXTRA: `psql:${GLOB_CORPUS_FILE}:11: HINWEIS:  SKIP Part 2: cron * absent` },
+        dir,
+      );
+      expect(out).toContain("UNPOLICED partial skip(s): [SKIP Part 2: cron * absent]");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 90_000);
+
+  it("FAILS when NOTICE output is suppressed, instead of finding nothing and passing (F14)", () => {
+    const { code, out } = runGate({ STUB_DARK: "1" });
+    expect(code).not.toBe(0);
+    expect(out).toContain("never reached this log");
+  }, 90_000);
+
+  it("FAILS on an empty corpus instead of exiting 0 before the loop (F11)", () => {
+    const empty = mkdtempSync(join(tmpdir(), "antiskip-empty-"));
+    mkdirSync(join(empty, "supabase/tests"), { recursive: true });
+    const { code, out } = runGate({}, empty);
+    rmSync(empty, { recursive: true, force: true });
+    expect(code).not.toBe(0);
+    expect(out).toContain("corpus is EMPTY");
+  }, 90_000);
+
+  it("FAILS when a file declares a completion sentinel but never prints it", () => {
+    const target = "test_ledger_refresh_staleness.sql";
+    const { code, out } = runGate({ STUB_NO_SENTINEL: target });
+    expect(code).not.toBe(0);
+    expect(out).toContain("never printed it");
+  }, 90_000);
+
+  it("propagates a real assertion failure (psql non-zero) unchanged", () => {
+    // Pin the pre-existing behaviour so a future edit to the skip logic cannot
+    // swallow the ordinary RAISE EXCEPTION path on its way past.
+    expect(SCRIPT).toContain('if [ "$status" -ne 0 ]; then');
+    expect(SCRIPT).toContain('exit "$status"');
+  });
+
+  it("keeps the arm-count floors that make a deleted arm visible (F12)", () => {
+    // These two integers are the only expectation held OUTSIDE the .sql files,
+    // so they are what catches "delete an arm, edit the file's own count down".
+    // Raising them is normal. Lowering them must be a visible edit here — which
+    // is exactly what this assertion forces into the diff.
+    const sentinelFloor = /SENTINEL_FLOOR=(\d+)/.exec(SCRIPT);
+    const armsFloor = /ARMS_FLOOR=(\d+)/.exec(SCRIPT);
+    expect(sentinelFloor, "SENTINEL_FLOOR removed from the sql-tests step").not.toBeNull();
+    expect(armsFloor, "ARMS_FLOOR removed from the sql-tests step").not.toBeNull();
+    expect(Number(sentinelFloor![1])).toBeGreaterThanOrEqual(4);
+    expect(Number(armsFloor![1])).toBeGreaterThanOrEqual(35);
+    expect(SCRIPT).toContain('if [ "$sentinels_declared" -lt "$SENTINEL_FLOOR" ]; then');
+    expect(SCRIPT).toContain('if [ "$arms_declared" -lt "$ARMS_FLOOR" ]; then');
+  });
+
+  /**
+   * 161.1-RT E2 — the count↔roster coherence check, and its reach.
+   *
+   * A red team reproduced the floors' arithmetic exactly and then walked past
+   * them three ways without editing ci.yml. The reachable half of that was the
+   * coherence check's COVERAGE: it recognised one annotation shape, `(A-J)`,
+   * which only the three ledger files use, so 26 of 54 arms — including every
+   * arm pinning this phase's headline fix — had no expectation on them but
+   * their own file's editable integer. The gate now accepts an explicit roster
+   * too and REQUIRES one. These cases pin both halves.
+   */
+  it("FAILS a sentinel that declares a count but names no arms (E2: opt-in closed)", () => {
+    // Before this, a file could decline the coherence check simply by not
+    // annotating — the same opt-in defect F12 named one level down. `ALL 16 ARMS
+    // EXECUTED:` in test_sync_status_marked_refresh_protected.sql was exactly
+    // this shape, and it carries the whole of the CR-01 coverage.
+    //
+    // ⚠️ Exit code is NOT the discriminator: a one-file corpus is under both
+    // floors regardless, so the step fails either way. Assert the error.
+    const dir = makeSentinelCorpus(
+      "test_bare_count.sql",
+      `${armBodies(3)}\nDO $$\nBEGIN\n  RAISE NOTICE 'ALL 3 ARMS EXECUTED and passed';\nEND $$;\n`,
+    );
+    try {
+      const { out } = runGate({}, dir);
+      expect(out).toContain("::error file=supabase/tests/test_bare_count.sql::");
+      expect(out).toContain("NAMES NONE OF THEM");
+      // Guard the guard: the arm-count/RAISE-EXCEPTION check must NOT be what
+      // fired, or this case would pass while the annotation rule was gone.
+      expect(out).not.toContain("non-comment RAISE EXCEPTION");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 90_000);
+
+  it("FAILS an explicit roster whose entries do not add up to the declared count (E2)", () => {
+    // The roster form is what let the three unannotated files be covered without
+    // relabelling their arms A..P. It has to be counted, not merely present.
+    const dir = makeSentinelCorpus(
+      "test_short_roster.sql",
+      `${armBodies(4)}\nDO $$\nBEGIN\n  RAISE NOTICE 'ALL 4 ARMS EXECUTED (A, B, C) and passed';\nEND $$;\n`,
+    );
+    try {
+      const { out } = runGate({}, dir);
+      expect(out).toContain("declares 4 arms but names (A, B, C), which is 3");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 90_000);
+
+  it("still FAILS a letter range that contradicts the count (F12 regression)", () => {
+    // The range form predates the roster and must not be swallowed by it: read
+    // as a roster, `(A-H)` is ONE token, so a naive generalisation would report
+    // "which is 1" for every ledger file and redden the real corpus. The range
+    // branch is tried first; this case is what proves it still runs.
+    const dir = makeSentinelCorpus(
+      "test_bad_range.sql",
+      `${armBodies(9)}\nDO $$\nBEGIN\n  RAISE NOTICE 'ALL 9 ARMS EXECUTED (A-H) and passed';\nEND $$;\n`,
+    );
+    try {
+      const { out } = runGate({}, dir);
+      expect(out).toContain("declares 9 arms but names (A-H), which is 8");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 90_000);
+
+  it("FAILS a padding file that declares arms it has no way to fail (E3)", () => {
+    // The red team's cheapest evasion: a new supabase/tests file whose entire
+    // content is one `RAISE NOTICE 'ALL 99 ARMS EXECUTED'` lifts arms_declared
+    // past any floor and retires the ratchet, without touching ci.yml. An arm
+    // that cannot RAISE cannot fail, so declaring more arms than there are
+    // assertion sites is refused. The roster here is COMPLETE (99 entries), so
+    // the annotation rule is satisfied and this case cannot pass by accident on
+    // the wrong error.
+    const roster = Array.from({ length: 99 }, (_, i) => String(i + 1)).join(", ");
+    const dir = makeSentinelCorpus(
+      "test_zz_pad.sql",
+      `DO $$\nBEGIN\n  RAISE NOTICE 'ALL 99 ARMS EXECUTED (${roster})';\nEND $$;\n`,
+    );
+    try {
+      const { out } = runGate({}, dir);
+      expect(out).toContain("declares 99 arms but contains only 0 non-comment RAISE EXCEPTION");
+      // Guard the guard: prove the roster really did satisfy the annotation rule.
+      expect(out).not.toContain("NAMES NONE OF THEM");
+      expect(out).not.toContain("which is");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 90_000);
+
+  it("keeps ci.yml's per-file arm derivation re-derivable from the corpus (E1/E3)", () => {
+    // The floors are two integers, and a comment above them spells out which
+    // files contribute which counts so the next reader can re-derive the total
+    // instead of trusting it. That comment is prose: on 2026-08-25 the recorded
+    // derivation `(9 + 9 + 8 + 9)` matched no real set of files and nobody
+    // noticed, which is the same self-consistent-and-invisible failure the
+    // floors exist to catch, one level up. This test is what stops it recurring
+    // — and it is also the only thing in the repo that notices a NEW
+    // sentinel-bearing file, so a padding file cannot be added without the
+    // derivation and the floors moving in the same diff.
+    //
+    // Rejected in ci.yml as a per-file manifest inside the workflow (too
+    // stale-prone to stay honest in a comment); held HERE instead, where a stale
+    // expectation fails loudly on the next run rather than rotting.
+    const table = [...SCRIPT.matchAll(/^#\s+(test_[A-Za-z0-9_]+\.sql)\s+(\d+)\s*$/gm)].map(
+      (m) => [m[1], Number(m[2])] as const,
+    );
+    expect(table.length, "ci.yml's ARMS_FLOOR derivation table is gone or reformatted").toBeGreaterThan(0);
+
+    const testsDir = join(ROOT, "supabase/tests");
+    const actual = new Map<string, number>();
+    for (const name of readdirSync(testsDir)) {
+      if (!name.startsWith("test_") || !name.endsWith(".sql")) continue;
+      const src = readFileSync(join(testsDir, name), "utf8");
+      const line = src
+        .split("\n")
+        .find((l) => /RAISE NOTICE '[^']*ALL \d+ ARMS EXECUTED/.test(l));
+      if (!line) continue;
+      actual.set(name, Number(/ALL (\d+) ARMS EXECUTED/.exec(line)![1]));
+    }
+
+    expect(
+      [...actual.keys()].sort(),
+      "the set of files declaring an 'ALL N ARMS EXECUTED' sentinel no longer matches ci.yml's " +
+        "derivation table. A file gained or lost its sentinel, was renamed, or a new one appeared " +
+        "(which is how the floors get retired by inflation) — update the table AND the floors.",
+    ).toEqual(table.map(([f]) => f).sort());
+
+    for (const [file, declared] of table) {
+      expect(
+        actual.get(file),
+        `ci.yml's derivation credits ${file} with ${declared} arms; the file declares ` +
+          `${actual.get(file) ?? "none"}. A derivation the next reader cannot re-derive is the ` +
+          `exact defect the floors exist to remove, one level up — update the table AND ARMS_FLOOR.`,
+      ).toBe(declared);
+    }
+
+    const sentinelFloor = Number(/SENTINEL_FLOOR=(\d+)/.exec(SCRIPT)![1]);
+    const armsFloor = Number(/ARMS_FLOOR=(\d+)/.exec(SCRIPT)![1]);
+    expect(sentinelFloor, "SENTINEL_FLOOR disagrees with its own derivation table").toBe(table.length);
+    expect(armsFloor, "ARMS_FLOOR disagrees with the sum of its own derivation table").toBe(
+      table.reduce((n, [, c]) => n + c, 0),
+    );
+  });
+
+  it("does not claim the floors stop a .sql-only edit — that sentence was false", () => {
+    // 161.1-RT. The block used to promise that lowering a floor "can no longer be
+    // done inside a .sql file where nobody sees it". Three evasions needed no
+    // ci.yml edit at all, so the promise was false, and an overstated gate is
+    // worse than a modest one: it is what stops the next person building real
+    // coverage. The corrected claim is narrow — the DECLARED TOTAL cannot be
+    // reduced from inside a .sql file — and the residue is enumerated. This pin
+    // is a string check on purpose: the defect being guarded is a WORDING one,
+    // and nothing else in this file can see it.
+    expect(SCRIPT).not.toContain("it can no longer be done inside a .sql file");
+    expect(SCRIPT).toContain("THE DECLARED TOTAL CANNOT BE REDUCED FROM INSIDE A .sql");
+    expect(SCRIPT).toContain("DECLARED IS NOT EXECUTED");
+    // The run log is the protection on this repo (branch protection is OFF), so
+    // the limit has to be printed, not just committed.
+    expect(SCRIPT).toContain("the arm counts summed above are DECLARED, not executed");
+  });
+
+  it("still runs psql with -X, like the sibling invocations in the same job", () => {
+    expect(SCRIPT).toContain('psql "$LANE_DB_URL" -X -v ON_ERROR_STOP=1 -f "$f"');
+  });
+
+  // Phase 164.4.2: the DSN comes from the lane's handoff file, not a secret. The
+  // guard's two refusals are what keep this step from (a) passing having run
+  // nothing when the boot step did not finish, and (b) running the corpus
+  // against a database that is not the runner's own — shared TEST is shared and
+  // PROD is PROD. Both are EXECUTED here, not grepped.
+  it("fails loud when the lane handoff is absent — a run with no database is never a pass", () => {
+    const { code, out } = runGate({ LANE_ENV_FILE: join(workdir, "no-such-handoff") });
+    expect(code).not.toBe(0);
+    expect(out).toContain("the local-stack lane's DB_URL is required to run SQL self-tests");
+    expect(out).not.toContain("SQL self-tests passed");
+  }, 90_000);
+
+  it("refuses a handoff whose DB_URL is not loopback, before any file reaches psql", () => {
+    const dir = mkdtempSync(join(tmpdir(), "antiskip-remote-"));
+    const handoff = join(dir, "stack-env");
+    const logPath = join(dir, "invocation.log");
+    writeFileSync(handoff, 'DB_URL="postgresql://stub@db.example.invalid:5432/postgres"\n');
+    try {
+      // NON-VACUITY CONTROL (review 164.4.2 WR-10). The refusal below is judged by
+      // an EMPTY invocation log, and a log that is missing reads as `[]` too — so a
+      // stub that stopped logging, or a harness that never reached psql, would pass
+      // it while measuring nothing. The SAME harness with the loopback handoff must
+      // leave a NON-EMPTY log first.
+      const controlLog = join(dir, "control-invocation.log");
+      runGate({ STUB_INVOCATION_LOG: controlLog });
+      const controlLogged = existsSync(controlLog)
+        ? readFileSync(controlLog, "utf8").split("\n").filter(Boolean)
+        : [];
+      expect(
+        controlLogged.length,
+        "CONTROL: a loopback handoff through the same harness handed NO file to psql — the invocation log measures nothing, so the empty log below proves nothing",
+      ).toBeGreaterThan(0);
+
+      const { code, out } = runGate({ LANE_ENV_FILE: handoff, STUB_INVOCATION_LOG: logPath });
+      expect(code).not.toBe(0);
+      // Review 164.4.2 WR-08: the step's glob was replaced by capability-probe's
+      // parse-based rule, whose refusal is worded as a non-loopback DSN.
+      expect(out).toContain("the lane handoff's DB_URL is not a loopback DSN");
+      // Silent-failure-hunter round 2, WR-06: the step prints the line above
+      // whenever node exits non-zero, a probe that could not LOAD included. Only
+      // refuseNonLocalDsnCli prints the line below, with the rule's own reason.
+      expect(out, "the refusal came from the probe's rule, not from a probe that failed to run").toContain(
+        "::error::refusing a non-local database: the handoff's DB_URL names a host other than 127.0.0.1/localhost",
+      );
+      let logged: string[] = [];
+      try {
+        logged = readFileSync(logPath, "utf8").split("\n").filter(Boolean);
+      } catch {
+        logged = [];
+      }
+      expect(logged, "a non-loopback DSN still handed corpus files to psql").toEqual([]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 90_000);
+
+  it("refuses a loopback-looking DB_URL whose ?host= would re-point libpq — the glob it replaced accepted it (review 164.4.2 WR-08)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "antiskip-hostq-"));
+    const handoff = join(dir, "stack-env");
+    writeFileSync(handoff, 'DB_URL="postgresql://stub@127.0.0.1:54322/postgres?host=db.example.invalid"\n');
+    try {
+      const { code, out } = runGate({ LANE_ENV_FILE: handoff });
+      expect(code, out).not.toBe(0);
+      expect(out).toContain("the lane handoff's DB_URL is not a loopback DSN");
+      // Silent-failure-hunter round 2, WR-06: as above, only the probe's own rule
+      // prints this line, so a probe that failed to load cannot pass this test.
+      expect(out, "the refusal came from the probe's rule, not from a probe that failed to run").toContain(
+        "::error::refusing a non-local database: the handoff's DB_URL carries a query string",
+      );
+      expect(out, "the refusal must never echo the DSN's host").not.toContain("example.invalid");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 90_000);
+
+  it("does not re-introduce the empty-corpus 'exit 0' anywhere in the step", () => {
+    expect(SCRIPT).not.toMatch(/^\s*exit 0\s*$/m);
+  });
+});
+
+/**
+ * 164.1.1.1-02 — the LANE-ONLY exclusion register.
+ *
+ * Plan 01 gave `sql-tests` a mechanism to exclude a file whose assertion body
+ * queries an object that only exists on the throwaway pg-lane. That mechanism
+ * is a marker anybody can paste into a comment — without this register it is
+ * an exemption a file can self-grant, the same defect class the F10 gate above
+ * exists to remove one level up.
+ *
+ * ⛔ SITES, NOT A COUNT, and the distinction is load-bearing for the exact
+ * reason it is in the B3 register (`src/__tests__/drift-check-scripts.test.ts`,
+ * "softening sites in scripts/test-ledger-drift-check.sh's check()"): a tally
+ * is blind to a ONE-FOR-ONE SWAP — retire a legitimate LANE-ONLY exclusion and
+ * grant an illegitimate one to a different gate in the same diff, and
+ * `derived.length` never moves. This register is deliberately NOT a copy of
+ * that one: B3 governs softening tokens inside one bash script; this one
+ * governs which SQL gate files may skip execution inside a DIFFERENT corpus
+ * (`supabase/tests/*.sql`) via a DIFFERENT marker (`-- LANE-ONLY:` vs B3's
+ * softening tokens). Same mechanism, different corpus — copying B3's entries
+ * would pin nothing here; copying its shape is the point.
+ */
+const LANE_ONLY_ANCHOR = "-- LANE-ONLY:";
+
+/** The set of files, declared object and declared fixture the corpus carries today. */
+const LANE_ONLY_SITES: readonly { file: string; object: string; fixture: string; why: string }[] = [
+  {
+    file: "test_mark_rpc_bridge_advisory_lock.sql",
+    object: "dblink",
+    fixture: "scripts/pg-lane/fixtures/36-fixture-dblink.sql",
+    why:
+      "Every arm opens two dblink sessions back into the database it runs in, to hold one " +
+      "terminal mark uncommitted while a second waits on the per-strategy advisory lock. That " +
+      "needs COMMITTED seed rows and a trust-auth superuser loopback connection, which the local " +
+      "Supabase stack behind sql-tests does not give without a password in a committed file, and " +
+      "the dblink extension is not in the schema of record (Phase 164.5.2).",
+  },
+  {
+    file: "test_prod_prober_cadence.sql",
+    object: "net._lane_posts",
+    fixture: "scripts/pg-lane/fixtures/34-fixture-pg-net-stand-in.sql",
+    why:
+      "net._lane_posts exists only inside the throwaway pg-lane cluster — fixture 34's own header " +
+      'marks it "NEVER APPLIED TO TEST OR PROD" — while shared TEST carries the REAL pg_net. A ' +
+      "version of this gate made to run there would issue genuine outbound HTTP from shared CI " +
+      "infrastructure on every run: accommodation is unsafe, not merely inconvenient.",
+  },
+];
+
+/**
+ * Re-derive the LANE-ONLY set from a corpus directory, keyed on the SAME
+ * `^-- LANE-ONLY:` anchor ci.yml's `lane_only_marker()` predicate reads
+ * (the `lane_only_marker()` helper in ci.yml, `grep -a -m1 '^-- LANE-ONLY:' "$1"` —
+ * cited by SYMBOL: a line number here rots on the next edit). Only presence of the
+ * prefix decides whether a file carries a marker — matching ci.yml's own
+ * `grep` behaviour — so a malformed JSON payload is still DETECTED as a
+ * marker and fails loudly rather than being silently treated as "no marker
+ * here, skip".
+ */
+function deriveLaneOnlySites(dir: string): { file: string; object: string; fixture: string }[] {
+  const out: { file: string; object: string; fixture: string }[] = [];
+  for (const name of readdirSync(dir)) {
+    if (!name.startsWith("test_") || !name.endsWith(".sql")) continue;
+    const src = readFileSync(join(dir, name), "utf8");
+    const line = src.split("\n").find((l) => l.startsWith(LANE_ONLY_ANCHOR));
+    if (!line) continue;
+    const raw = line.slice(LANE_ONLY_ANCHOR.length).trim();
+    let payload: Record<string, unknown>;
+    try {
+      payload = JSON.parse(raw);
+    } catch (e) {
+      throw new Error(
+        `${name} carries a ${LANE_ONLY_ANCHOR} marker whose JSON does not parse ` +
+          `(${(e as Error).message}). A derivation that swallowed this would silently drop the ` +
+          `file from the register instead of pinning nothing loudly — never let this fall through ` +
+          `to an empty result.`,
+      );
+    }
+    // ⚠️ An EMPTY string is rejected as hard as a missing key, and that is not
+    // pedantry: `"anything".includes("")` is always true in JS, so an
+    // `"object": ""` marker would satisfy the FORWARD cross-check below
+    // trivially — the check would report a pass having measured nothing. The
+    // SITES pin catches it today only because "" does not equal a pinned
+    // object name; this guard keeps it caught if that pin is ever weakened.
+    const { object, fixture } = payload;
+    if (
+      typeof object !== "string" ||
+      object.trim() === "" ||
+      typeof fixture !== "string" ||
+      fixture.trim() === ""
+    ) {
+      throw new Error(
+        `${name}'s ${LANE_ONLY_ANCHOR} marker is missing, empty, or non-string in a required ` +
+          `"object" or "fixture" key (parsed: ${JSON.stringify(payload)}). Both must be ` +
+          `NON-EMPTY for the forward/reverse cross-checks below to mean anything: an empty ` +
+          `object satisfies a substring check against any file at all.`,
+      );
+    }
+    out.push({ file: name, object, fixture });
+  }
+  return out.sort((a, b) => a.file.localeCompare(b.file));
+}
+
+/**
+ * Drop SQL commentary so the cross-checks below read the file's ASSERTION BODY,
+ * never its prose. Both comment forms are removed: `--` line comments AND
+ * block comments, which do occur elsewhere in this corpus. Stripping only `--`
+ * would let a future `/* ... net._lane_posts ... *\/` mention satisfy the
+ * FORWARD check without the file ever querying the object.
+ */
+function stripSqlComments(text: string): string {
+  // ⛔ ORDER IS LOAD-BEARING: line comments FIRST, block comments second.
+  // MEASURED 2026-09-18 on the real corpus with the other order: this file's
+  // own prose routinely names globs like `supabase/tests/*.sql`, whose `s/*`
+  // is an incidental, unpaired `/*`. A non-greedy `/\*[\s\S]*?\*\//` then
+  // spans from that false open to the next incidental `*/` anywhere downstream
+  // (a cron literal like '*/15 * * * *' will do) and deletes everything
+  // between — 21,070 bytes of real assertion body out of
+  // test_ledger_refresh_fanout.sql and 16,065 out of
+  // test_ledger_refresh_composite_arm.sql, with the suite still at 27/27.
+  // That direction is the dangerous one: it SHRINKS what the REVERSE check can
+  // see, so a file querying a declared lane-only object without a marker stops
+  // being flagged — the excluded class growing unseen, which is the single
+  // failure this phase exists to prevent.
+  // Stripping `--` lines first removes the false opens before they can match.
+  const withoutLines = text
+    .split("\n")
+    .filter((l) => !l.trim().startsWith("--"))
+    .join("\n");
+  return withoutLines.replace(/\/\*[\s\S]*?\*\//g, "");
+}
+
+describe("stripSqlComments does not eat the assertion body it is meant to expose", () => {
+  // REGRESSION PIN. Introduced 2026-09-18 after a review round's own fix
+  // created this defect: block comments were stripped BEFORE line comments, so
+  // an incidental `/*` inside `--` prose opened a match that ran to the next
+  // incidental `*/` and deleted the real SQL in between. It was invisible —
+  // the suite stayed at 27/27, because the one declared object did not happen
+  // to sit inside a swallowed span.
+  it("keeps real SQL that sits between two incidental, unrelated `/*`-shaped substrings", () => {
+    const file = [
+      "-- Scope note: this gate scans supabase/tests/*.sql and supabase/migrations/**",
+      "DO $$ BEGIN",
+      "  PERFORM 1 FROM net._lane_posts;",
+      "END $$;",
+      "-- Cadence note: the job runs on '*/15 * * * *' in the lane fixture.",
+    ].join("\n");
+
+    const stripped = stripSqlComments(file);
+
+    expect(
+      stripped,
+      "stripSqlComments deleted real, non-comment SQL that sat between two " +
+        "incidental `/*`/`*/`-shaped substrings inside `--` prose. Strip line " +
+        "comments FIRST: with the other order the REVERSE cross-check stops " +
+        "seeing files it must see, and an unmarked lane-only gate lands unflagged.",
+    ).toContain("net._lane_posts");
+    expect(stripped).toContain("DO $$ BEGIN");
+  });
+
+  it("removes a genuine block comment, so the hardening it was added for still holds", () => {
+    const file = ["SELECT 1;", "/* net._lane_posts mentioned only in prose */", "SELECT 2;"].join(
+      "\n",
+    );
+    const stripped = stripSqlComments(file);
+    expect(stripped).not.toContain("net._lane_posts");
+    expect(stripped).toContain("SELECT 1;");
+    expect(stripped).toContain("SELECT 2;");
+  });
+
+  it("never shrinks any real corpus file's body (the defect, measured where it happened)", () => {
+    const testsDir = join(ROOT, "supabase/tests");
+    const damaged: string[] = [];
+    for (const name of readdirSync(testsDir)) {
+      if (!name.startsWith("test_") || !name.endsWith(".sql")) continue;
+      const src = readFileSync(join(testsDir, name), "utf8");
+      const lineOnly = src
+        .split("\n")
+        .filter((l) => !l.trim().startsWith("--"))
+        .join("\n");
+      // Whatever stripSqlComments removes beyond the `--` lines must be a
+      // GENUINE block comment. In this corpus there are none, so any loss at
+      // all is over-stripping. If a real block comment is ever added, this
+      // expectation is the right place to record that decision explicitly.
+      const lost = lineOnly.length - stripSqlComments(src).length;
+      if (lost > 0) damaged.push(`${name} (-${lost} bytes)`);
+    }
+    expect(
+      damaged,
+      "stripSqlComments removed text beyond the `--` lines in these corpus files. " +
+        "Either block-comment stripping is over-matching again (check the ordering), " +
+        "or a genuine block comment was added and this pin needs an explicit decision.",
+    ).toEqual([]);
+  });
+});
+
+
+describe("LANE-ONLY exclusion register — pinned as SITES, not a count", () => {
+  const testsDir = join(ROOT, "supabase/tests");
+
+  it("derives exactly the pinned LANE-ONLY set from the corpus, triple by triple", () => {
+    const derived = deriveLaneOnlySites(testsDir);
+    const pinned = LANE_ONLY_SITES.map(({ file, object, fixture }) => ({ file, object, fixture }));
+    expect(
+      derived,
+      "the corpus's marker-bearing files no longer match LANE_ONLY_SITES. A new lane-only gate " +
+        "must be added to this register in the SAME diff that adds its marker; a marker that MOVED " +
+        "from one pinned file to another — the count unchanged — is a swap that must be argued " +
+        "here, not absorbed silently.",
+    ).toEqual(pinned);
+  });
+
+  it("fails loudly, naming the file, on a marker whose JSON does not parse", () => {
+    const dir = makeSentinelCorpus(
+      "test_bad_json.sql",
+      "-- LANE-ONLY: {not valid json\nDO $$ BEGIN NULL; END $$;\n",
+    );
+    try {
+      expect(() => deriveLaneOnlySites(join(dir, "supabase/tests"))).toThrow(/test_bad_json\.sql/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("fails loudly, naming the file, on a marker missing object or fixture", () => {
+    const dir = makeSentinelCorpus(
+      "test_missing_keys.sql",
+      '-- LANE-ONLY: {"job":"sql-mutation","reason":"no object or fixture here"}\n' +
+        "DO $$ BEGIN NULL; END $$;\n",
+    );
+    try {
+      expect(() => deriveLaneOnlySites(join(dir, "supabase/tests"))).toThrow(/test_missing_keys\.sql/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  /**
+   * FORWARD — a marker cannot be pasted onto a gate it does not describe. The
+   * comment-stripping is load-bearing and measured:
+   * `test_prod_prober_cadence.sql` names `net._lane_posts` in a header comment
+   * (line ~127, "net._lane_posts stays EMPTY") as well as in fourteen real
+   * assertion-body positions. A check that counted the comment would be
+   * satisfied by prose alone — exactly the "a gate any comment satisfies"
+   * shape `lint-app-guc.mjs` already rejects once in this repo.
+   */
+  it("FORWARD — every marker's declared object appears in that file's own comment-stripped text", () => {
+    const derived = deriveLaneOnlySites(testsDir);
+    for (const { file, object } of derived) {
+      const raw = readFileSync(join(testsDir, file), "utf8");
+      const stripped = stripSqlComments(raw);
+      expect(
+        stripped.includes(object),
+        `${file}'s ${LANE_ONLY_ANCHOR} marker declares "${object}", but that string does not ` +
+          "appear anywhere in the file's own non-comment text. A marker pasted onto a gate that " +
+          "never queries the object it names would silence that gate for no reason connected to it.",
+      ).toBe(true);
+    }
+  });
+
+  /**
+   * REVERSE — a lane-only gate cannot land unmarked. The SET pin above notices
+   * a marker APPEARING; this notices a gate that queries a declared lane-only
+   * object and never grew a marker at all — a red that would be
+   * indistinguishable from an ordinary broken test, with nobody having decided
+   * the excluded class had grown.
+   */
+  it("REVERSE — every corpus file referencing a declared LANE-ONLY object carries a marker of its own", () => {
+    const derived = deriveLaneOnlySites(testsDir);
+    const declaredObjects = derived.map((d) => d.object);
+    const markedFiles = new Set(derived.map((d) => d.file));
+    const offenders: string[] = [];
+    for (const name of readdirSync(testsDir)) {
+      if (!name.startsWith("test_") || !name.endsWith(".sql")) continue;
+      if (markedFiles.has(name)) continue;
+      const raw = readFileSync(join(testsDir, name), "utf8");
+      const stripped = stripSqlComments(raw);
+      for (const obj of declaredObjects) {
+        if (stripped.includes(obj)) {
+          offenders.push(`${name} references "${obj}" but carries no ${LANE_ONLY_ANCHOR} marker`);
+        }
+      }
+    }
+    expect(
+      offenders,
+      "a corpus file references a declared LANE-ONLY object without declaring itself LANE-ONLY. " +
+        "Its red under sql-tests on shared TEST would be indistinguishable from an ordinary broken " +
+        "test — nobody decided this class had grown.",
+    ).toEqual([]);
+  });
+
+  /**
+   * The vault near-miss. `test_analytics_service_settings_and_vault_tick.sql`
+   * names `scripts/pg-lane/fixtures/32-fixture-vault-stand-in.sql` in its own
+   * RED-UNDER-SETUP apply list exactly as the prober file names fixture 34 —
+   * so "references any pg-lane fixture" is a detector that would sweep it in.
+   * It legitimately runs on BOTH sides (a stand-in TABLE on the lane, the real
+   * supabase_vault VIEW on shared TEST) and MEASURES the difference. This is
+   * the arm that fires if the detector is ever widened to fixture paths.
+   *
+   * NOT checked here, by decision rather than oversight: a cross-check that a
+   * marker's named FIXTURE also appears in the same file's RED-UNDER-SETUP
+   * apply list is DEFERRED by 164.1.1.1-CONTEXT.md; a fixture-path-based
+   * detector is FORBIDDEN by this guard.
+   */
+  it("keeps the vault near-miss OUT of the derived set", () => {
+    const vaultFile = "test_analytics_service_settings_and_vault_tick.sql";
+    expect(
+      readdirSync(testsDir).includes(vaultFile),
+      `${vaultFile} is missing from the corpus entirely — the "absent from the derived set" ` +
+        "assertion below would pass for the wrong reason if this file did not exist.",
+    ).toBe(true);
+    const derived = deriveLaneOnlySites(testsDir);
+    expect(
+      derived.map((d) => d.file),
+      `${vaultFile} legitimately runs on BOTH the lane and shared TEST and must never carry a ` +
+        `${LANE_ONLY_ANCHOR} marker — widening the detector to "references any pg-lane fixture" ` +
+        "would sweep it in and this assertion is what catches that.",
+    ).not.toContain(vaultFile);
+  });
+});

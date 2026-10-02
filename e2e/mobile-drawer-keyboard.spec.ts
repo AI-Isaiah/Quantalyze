@@ -1,6 +1,6 @@
 /**
  * Phase 45-03 / NAV-03 — SEEDED authed mobile-drawer keyboard containment +
- * app-shell skip-link + background-inert + 320px nav-shell reflow/target-size
+ * app-shell skip-link + background-inert + 390px nav-shell reflow/target-size
  * proof.
  *
  * Mirrors the LIVE seeded-auth pattern of e2e/composer-axe.spec.ts
@@ -28,7 +28,7 @@
  *       carries the `inert` attribute so focus can never land behind the
  *       backdrop (WCAG 2.1.2 No Keyboard Trap + 2.4.3 Focus Order);
  *   (e) Escape closes the drawer and restores focus to the hamburger;
- *   (f) at 320px the nav shell does not reflow horizontally and the bottom
+ *   (f) at 390px the nav shell does not reflow horizontally and the bottom
  *       nav + hamburger targets measure >=44px, reusing the Phase 44
  *       assertNoReflow / assertTargetSizes helpers.
  *
@@ -40,7 +40,7 @@
  * Each assertion is gated behind a fail-loud visible anchor so a 404 / login
  * / unseeded chrome fails LOUD rather than false-greening (the W-02 lesson).
  */
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./helpers/hydration-guard";
 import { seedTestAllocator } from "./helpers/seed-test-project";
 import { assertNoReflow, assertTargetSizes } from "./helpers/reflow";
 
@@ -72,7 +72,7 @@ test.describe("Phase 45 — mobile drawer keyboard containment (NAV-03)", () => 
       "The live keyboard/inert proof runs in CI / /qa once seed env is present.",
   );
 
-  test("skip-link first, drawer focus containment + inert, restore on close, 320px nav shell", async ({
+  test("skip-link first, drawer focus containment + inert, restore on close, 390px nav shell", async ({
     page,
   }) => {
     // /allocations is auth-gated by middleware AND the universal approval
@@ -195,10 +195,12 @@ test.describe("Phase 45 — mobile drawer keyboard containment (NAV-03)", () => 
       "closing the drawer restores focus to the hamburger",
     ).toBeFocused();
 
-    // --- (f) NAV SHELL at 320px: no reflow + >=44px targets (SC#4) ---
+    // --- (f) NAV SHELL at 390px: no reflow + >=44px targets (SC#4) ---
+    // Founder decision 2026-09-27: 390px floor, not 320px. The corrected
+    // helper measures #main-content, so 320 would demand fixes nobody asked for.
     // Reuse the Phase 44 helpers (e2e/helpers/reflow.ts). Both fail loud if
     // their anchor is not visible (blank/404/unhydrated guard).
-    await page.setViewportSize({ width: 320, height: 800 });
+    await page.setViewportSize({ width: 390, height: 800 });
     await assertNoReflow(page, "nav[aria-label='Primary mobile']");
     // Bottom-nav cells (min-h-[44px] from Plan 45-01) + the hamburger (already
     // 44px) must all measure >=44px. The interactive selector measures the

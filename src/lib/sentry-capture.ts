@@ -21,17 +21,57 @@ import { scrubSeamError, scrubSeamString } from "./seam-redaction";
  *
  * ── SEAMCORE-06 (Phase 140.2): scrubbing is folded in HERE ──────────────────
  *
- * ⚠️ THIS IS ADDITIVE INSTRUMENTATION, NOT A LEAK BEING PLUGGED. The seam
- * captures nothing to Sentry at HEAD — a `captureException` / `captureMessage`
- * grep across the resilience core, both seam clients and every seam route file
- * returns ZERO. What exists is ten `captureToSentry` calls on the two
- * key-bearing routes, and this is where they become safe.
+ * ⚠️ THIS IS ADDITIVE INSTRUMENTATION, NOT A LEAK BEING PLUGGED — the seam DOES
+ * capture to Sentry, and every one of those captures comes through HERE.
  *
- * WHY HERE AND NOT AT THE CALL SITES. Ten sites each remembering to scrub is
+ * ── (140.5-04) THE SENTENCE THAT USED TO SIT HERE WAS FALSE ─────────────────
+ *
+ * It asserted that the seam sent NOTHING to Sentry at HEAD — resting that on a
+ * `captureException` / `captureMessage` grep across the resilience core, both
+ * seam clients and every seam route file returning ZERO — and put the real
+ * figure at ten `captureToSentry` calls confined to the two key-bearing routes.
+ *
+ * ⚠️ That is a PARAPHRASE, not a quotation, and the difference is load-bearing.
+ * Quoting the false sentence verbatim inside its own correction would re-seed
+ * the exact phrase every absence check greps for, so the check would fail on
+ * CORRECTED code and an author would "fix" it by deleting the correction. Same
+ * hazard as DEF-16-2, one level up: a correction's own prose is scanner input.
+ *
+ * ⭐ THE GREP IT CITED IS LITERALLY TRUE AND THE SENTENCE IT DEFENDED IS FALSE.
+ * `captureException` / `captureMessage` really do return ZERO across the seam
+ * roster — because the ONLY place those two symbols appear is inside THIS
+ * function's body. The seam captures via `captureToSentry`, at sites spread
+ * across EVERY seam route file, not on two of them. An author reading the
+ * justification would have re-run the grep, seen zero, and shipped the false
+ * claim forward. This is CONTEXT §3's purest specimen: **a grep proves a state;
+ * only a guard proves the state is held**, and a grep for the wrong symbol
+ * proves nothing at all.
+ *
+ * NO INTEGER IS WRITTEN HERE, DELIBERATELY. The old sentence's "ten" is how it
+ * rotted, and the true number is not one number — it depends entirely on which
+ * population you ask about. Run the one you mean (comment-strip first: this very
+ * docblock contains the needle, DEF-16-2):
+ *
+ *   - the `EXPECTED_SEAM_FILES` roster in `src/lib/seam-log-coverage.test.ts`
+ *   - its `src/app/api/**` members only
+ *   - repo-wide tracked non-test `src/**`, excluding this file
+ *
+ * Those three answered with three different integers when this note was written,
+ * and none of them was "ten". A count in prose that a script can derive is a
+ * future false claim; the predicate is what belongs in a comment.
+ *
+ * WHY HERE AND NOT AT THE CALL SITES. Every call site remembering to scrub is
  * the "3 of 5" shape this programme has already paid for: a mechanism at the
- * chokepoint cannot be forgotten by an eleventh caller, and Sentry is a THIRD
+ * chokepoint cannot be forgotten by the next caller, and Sentry is a THIRD
  * PARTY — anything captured leaves our infrastructure, so "the caller will
  * remember" is not an acceptable control.
+ *
+ * ⚠️ WHAT THIS DOES NOT CLOSE. This helper is the chokepoint for the SEAM, not
+ * for the repo. Non-seam routes still reach `@sentry/nextjs` directly through
+ * their own `import("@sentry/nextjs")` — `alert-digest/route.ts` and
+ * `preferences/route.ts` both call `Sentry.captureException` without passing
+ * through this scrub. Nothing structurally forbids a seam file from doing the
+ * same tomorrow; that would need a guard, and this docblock is not one.
  *
  * WHAT IS DISPATCHED. An `Error` is rebuilt with a scrubbed `name`, `message`
  * and `stack`, and its `cause` chain is FOLDED INTO the scrubbed message rather
@@ -121,6 +161,33 @@ function scrubRecord<T extends Record<string, unknown>>(
   }
 }
 
+/**
+ * Capture to Sentry, RETURNING the import chain so the caller can hold the
+ * request alive until it settles.
+ *
+ * ── SEAMRIM-04 (Phase 140.4): NEW-C10-03, RE-CREATED HERE AND NOW FIXED ──────
+ *
+ * `src/lib/audit.ts`'s `reportToSentry` carries the diagnosis verbatim: the
+ * prior implementation used `void import(...).then(...)`, which returns
+ * SYNCHRONOUSLY — the in-flight dynamic-import promise is detached before
+ * `captureException` resolves, so under `after()` on a cold finish the lambda
+ * can be reaped before Sentry flushes and the alert is lost silently. That red
+ * team (audit-2026-05-26) fixed `reportToSentry` by returning the chain. This
+ * helper kept the defective shape until now. Two adjacent modules, one rule.
+ *
+ * ⚠️ SCHEDULING IS THE CALLER'S JOB, AND THAT IS A BUNDLE CONSTRAINT, NOT A
+ * STYLE PREFERENCE. This module is imported by SIX `"use client"` components
+ * (`ForQuantsCtas`, `ScenarioCommitDrawer`, `widget-boundary`, `EquityChart`,
+ * `useMandateAutoSave`, `storage/cross-tab`), so it MUST NOT import
+ * `next/server` — doing so would ship a server-only module into the browser
+ * bundle. It imports exactly one module (`./seam-redaction`) and must keep that
+ * property. `after()` therefore lives at the server-only call sites
+ * (`resilient-fetch.ts`, `ratelimit.ts`), never here.
+ *
+ * SOURCE-COMPATIBLE BY DESIGN: an unused returned promise is legal, so the 100+
+ * existing call sites that discard the return value are unaffected. A site that
+ * needs the capture to survive a cold finish schedules it explicitly.
+ */
 export function captureToSentry(
   err: unknown,
   options: {
@@ -135,13 +202,13 @@ export function captureToSentry(
      */
     secrets?: readonly unknown[];
   },
-): void {
+): Promise<void> {
   try {
     const secrets = options.secrets ?? [];
     const payload = scrubCaptureInput(err, secrets);
     const tags = scrubRecord(options.tags, secrets) ?? {};
     const extra = scrubRecord(options.extra, secrets);
-    void import("@sentry/nextjs")
+    return import("@sentry/nextjs")
       .then((Sentry) => {
         try {
           Sentry.captureException(payload, {
@@ -154,9 +221,136 @@ export function captureToSentry(
         }
       })
       .catch(() => {
-        // Sentry import failed — swallow.
+        // Sentry import failed — swallow. RESOLVING rather than rejecting is
+        // load-bearing now that the chain is returned: a floating rejection
+        // would become an unhandled rejection at every call site.
       });
   } catch {
-    // import() construction failed (extremely unlikely) — swallow.
+    // import() construction failed (extremely unlikely) — swallow, and still
+    // hand the caller a settled promise so `after(captureToSentry(...))` and
+    // `await` are total.
+    return Promise.resolve();
   }
+}
+
+/**
+ * 164.2-01 / 161-ERRPREFIX — ADD A SENTRY BREADCRUMB, NOT AN EXCEPTION.
+ *
+ * ⚠️ WHY THIS EXISTS AT ALL. The founder ruling of 2026-08-26 on 161-ERRPREFIX
+ * is a SPLIT, not a deletion. `KeyPermissionBadge.tsx` used to render
+ * `PROBE_BACKEND_UNAVAILABLE: Could not reach the permissions service…` — the
+ * machine code prefixed onto the curated sentence — and the comment above that
+ * line justified the prefix by SUPPORT-TICKET GREPPABILITY. Removing the prefix
+ * without preserving the code would trade a copy defect for an observability
+ * one, which fails the ruling as surely as leaving the prefix in the render. So
+ * the code goes to `console.error` (an argument of its own) AND here.
+ *
+ * ⛔ THE `message` IS A MACHINE CODE, NEVER USER PROSE. That is the whole point
+ * of the split: the prose is what the user reads, the code is what a support
+ * engineer greps. Passing the sentence here would rebuild the conflation this
+ * helper was created to end.
+ *
+ * MEASURED, 2026-09-06: `grep -rn addBreadcrumb src` returned ZERO hits before
+ * this function — this is the first breadcrumb in the codebase, so there was no
+ * prior convention to follow and `captureToSentry` above is what it copies.
+ *
+ * The skeleton is DELIBERATELY IDENTICAL to `captureToSentry`'s (outer try /
+ * dynamic import / inner try / `.catch` that RESOLVES / outer catch returning a
+ * settled promise) for the reasons stated at `:223-226` — in particular the
+ * `.catch` must resolve rather than reject, or a floating rejection becomes an
+ * unhandled rejection at every `void addSentryBreadcrumb(...)` call site.
+ *
+ * ⚠️ NO IMPORT WAS ADDED FOR THIS. The module imports exactly one module
+ * (`./seam-redaction`) and must keep that property — see `:178-185`: it is
+ * imported by `"use client"` components, so a `next/server` (or any
+ * server-only) import would ship a server module into the browser bundle.
+ */
+export function addSentryBreadcrumb(options: {
+  category: string;
+  /** THE MACHINE CODE. Never the user-facing sentence — see the docblock. */
+  message: string;
+  data?: Record<string, unknown>;
+  level?: "fatal" | "error" | "warning" | "info" | "debug";
+}): Promise<void> {
+  try {
+    // No per-request secrets here: a breadcrumb carries a code and small
+    // structured context, never a credential. The env-secret list still
+    // applies, which is what `scrubRecord` with an empty extra-secret list
+    // gives — the same call `captureToSentry` makes for its `extra`.
+    const data = scrubRecord(options.data, []);
+    return import("@sentry/nextjs")
+      .then((Sentry) => {
+        try {
+          Sentry.addBreadcrumb({
+            category: options.category,
+            message: options.message,
+            data,
+            level: options.level ?? "info",
+          });
+        } catch {
+          // Swallow — the caller already logged via console.error.
+        }
+      })
+      .catch(() => {
+        // Sentry import failed — swallow, and RESOLVE. Same reasoning as
+        // `captureToSentry`'s `.catch`: the chain is returned, so rejecting
+        // would surface as an unhandled rejection at every call site.
+      });
+  } catch {
+    // import() construction failed — hand the caller a settled promise so
+    // `void addSentryBreadcrumb(...)` and `await` are both total.
+    return Promise.resolve();
+  }
+}
+
+/**
+ * 140.4-16 / WR-06 — EDGE-TRIGGER FOR THE HIGH-VOLUME CAPTURE SITES.
+ *
+ * ⚠️ THE PROBLEM THIS SOLVES IS AN ALERT STORM DURING THE EXACT INCIDENT THE
+ * INSTRUMENTATION EXISTS TO OBSERVE. Three capture sites added by SEAMRIM-04
+ * fire once per REQUEST rather than once per state TRANSITION:
+ *   · `ratelimit.ts`' posture-2 arm — every request that wins the 5 s fail-open
+ *     race, i.e. every request for the whole duration of an Upstash outage;
+ *   · `resilient-fetch`'s `isBreakerOpen` catch — every request whose breaker
+ *     probe rejects;
+ *   · `recordSeamFailure`'s catch — every failure whose bookkeeping write fails.
+ * All three sit on the seam's highest-volume paths, and each capture is an
+ * `import("@sentry/nextjs")` + `captureException` held alive by `after()`. A
+ * sustained store outage therefore burns the Sentry quota and DROPS OTHER
+ * ALERTS during the same incident. `emitBreakerTransition` was already bounded
+ * to open/close edges; these were not.
+ *
+ * WHY A TIME WINDOW AND NOT A TRUE EDGE. An "edge" needs a prior state to
+ * compare against, and these three are stateless catch arms — there is nothing
+ * that says "the store was healthy a moment ago". A coarse window is the honest
+ * approximation: it keeps the FIRST occurrence of a burst, which is the one an
+ * operator needs, and re-arms so a long incident still produces a heartbeat.
+ *
+ * ⚠️ THE LOG LINE MUST STAY UNCONDITIONAL AT EVERY CALL SITE. This suppresses
+ * the REMOTE capture only. Dropping the local `console.warn`/`console.error`
+ * too would make the Vercel trace lie about how many requests were affected,
+ * which is the measurement an operator sizes the incident with.
+ *
+ * In-memory and per-instance by construction: serverless instances do not share
+ * it, so N instances emit up to N captures per window. That is the correct
+ * trade — a cross-instance store would put a network call on the failure path
+ * of the thing whose network call is already failing.
+ */
+const CAPTURE_WINDOW_MS = 60_000;
+const lastCapturedAtMs = new Map<string, number>();
+
+export function shouldCaptureNow(
+  key: string,
+  now: number = Date.now(),
+  windowMs: number = CAPTURE_WINDOW_MS,
+): boolean {
+  const last = lastCapturedAtMs.get(key);
+  if (last !== undefined && now - last < windowMs) return false;
+  lastCapturedAtMs.set(key, now);
+  return true;
+}
+
+/** Test-only reset. Never called from production code. */
+export function __resetCaptureThrottleForTests(): void {
+  lastCapturedAtMs.clear();
 }

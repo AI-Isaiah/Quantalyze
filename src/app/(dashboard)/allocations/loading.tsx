@@ -13,12 +13,20 @@ import { Skeleton } from "@/components/ui/Skeleton";
  * **Dominant anchor (52-UI-SPEC §Dominant visual anchor):** the KPI strip is
  * the largest, first region — a full-width 4-cell grid above the equity-chart
  * placeholder — so the skeleton reads unmistakably as the allocations dashboard
- * loading, not a generic spinner. The page shell mirrors the real page's fluid
- * `max-w-[1920px] mx-auto` so the skeleton fills the same envelope (Task 1).
+ * loading, not a generic spinner. Phase 167.1.2 plan 01 drew a text block
+ * instead, while every book was rebuilding. Plan 11 defines "ready" and
+ * restores this anchor. A book that is still rebuilding swaps the grid for the
+ * text panel; that shift is the cost of one skeleton for both states. The page
+ * shell is fully fluid (no px cap), so the skeleton fills the same envelope as
+ * the page it stands in for (Task 1; founder decision 2026-08-09 — dense tables
+ * lost their cap).
+ *
+ * ⛔ That last sentence is a CLAIM, and `loading.test.tsx` now carries the
+ * assertion behind it (153.2 review WR-06 — it did not, for a whole release).
  */
 export default function AllocationsLoading() {
   return (
-    <div className="mx-auto max-w-[1920px] px-6 py-6">
+    <div className="px-6 py-6">
       {/* Header row — title + entity name placeholder (mirrors the inline
           AllocationsTabs header the real page renders). */}
       <div className="mb-6 flex items-end justify-between gap-4">
@@ -30,7 +38,8 @@ export default function AllocationsLoading() {
       </div>
 
       {/* DOMINANT ANCHOR — the KPI strip: a full-width 4-cell grid, the first
-          and largest region, matching the live KpiStrip @container shape. */}
+          and largest region, matching the live KpiStrip @container shape.
+          Restored by Phase 167.1.2 plan 11 when "ready" was defined. */}
       <div className="@container" aria-hidden>
         {/* The `@container` HOST and the `@sm`/`@lg` grid variants must sit on
             SEPARATE elements — an element never queries its own container size

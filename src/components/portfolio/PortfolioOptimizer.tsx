@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { Skeleton, SkeletonText } from "@/components/ui/Skeleton";
+import { LiveRegion } from "@/components/ui/LiveRegion";
 import { cn, formatNumber, formatPercent } from "@/lib/utils";
 import { RouteResponseError } from "@/lib/route-response-error";
 
@@ -281,6 +282,14 @@ export default function PortfolioOptimizer({
     return (
       <Card>
         {heading}
+        {/* The announcement is the ONLY channel here: this branch returns a
+            DIFFERENT tree, so the "Re-run" button the user just activated has
+            unmounted and focus has fallen to <body>. Carries the card's own
+            sentence — no new copy, no visual delta (DESIGN-05). */}
+        <LiveRegion
+          message={error ?? "We couldn't compute suggestions for this portfolio."}
+          assertive
+        />
         <div className="rounded-lg border border-negative/30 bg-negative/5 px-4 py-3">
           <p className="text-small font-medium text-negative">
             Optimizer failed

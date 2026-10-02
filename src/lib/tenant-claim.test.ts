@@ -67,7 +67,7 @@ afterEach(() => {
 
 describe("[140.2-09 / TS-04] mintTenantClaim — wire format", () => {
   it("produces `<payload>.<exp>.<hmac>` whose MAC verifies under an HMAC computed here", () => {
-    const claim = mintTenantClaim("user-42", "internal-test-token");
+    const claim = mintTenantClaim({ userId: "user-42" }, "internal-test-token");
 
     // rsplit-compatible: the Python side splits on the LAST two dots.
     const parts = claim.split(".");
@@ -90,7 +90,7 @@ describe("[140.2-09 / TS-04] mintTenantClaim — wire format", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date(1_700_000_000_000));
 
-    const claim = mintTenantClaim("user-42", "internal-test-token");
+    const claim = mintTenantClaim({ userId: "user-42" }, "internal-test-token");
     const exp = Number(claim.split(".")[1]);
 
     expect(exp).toBe(1_700_000_000 + EXPECTED_TTL_SECONDS);
@@ -102,7 +102,10 @@ describe("[140.2-09 / TS-04] mintTenantClaim — wire format", () => {
     vi.setSystemTime(new Date((1_900_000_000 - EXPECTED_TTL_SECONDS) * 1000));
 
     expect(
-      mintTenantClaim("11111111-2222-3333-4444-555555555555", "internal-test-token"),
+      mintTenantClaim(
+        { userId: "11111111-2222-3333-4444-555555555555" },
+        "internal-test-token",
+      ),
     ).toBe(
       "11111111-2222-3333-4444-555555555555.1900000000.b6c8871017dcf8dd2410083e6f00536bb251f1fd7fe7880072c875c4ddd323b5",
     );
@@ -112,8 +115,8 @@ describe("[140.2-09 / TS-04] mintTenantClaim — wire format", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date((2_524_608_300 - EXPECTED_TTL_SECONDS) * 1000));
 
-    const a = mintTenantClaim("tenant-a", "internal-test-token");
-    const b = mintTenantClaim("tenant-b", "internal-test-token");
+    const a = mintTenantClaim({ userId: "tenant-a" }, "internal-test-token");
+    const b = mintTenantClaim({ userId: "tenant-b" }, "internal-test-token");
 
     expect(a).not.toBe(b);
     // Not merely different STRINGS — different MACs. Two claims that differed
@@ -126,8 +129,8 @@ describe("[140.2-09 / TS-04] mintTenantClaim — wire format", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date(1_700_000_000_000));
 
-    const withReal = mintTenantClaim("user-42", "internal-test-token");
-    const withWrong = mintTenantClaim("user-42", "ANALYTICS_SERVICE_KEY-value");
+    const withReal = mintTenantClaim({ userId: "user-42" }, "internal-test-token");
+    const withWrong = mintTenantClaim({ userId: "user-42" }, "ANALYTICS_SERVICE_KEY-value");
 
     // This is the M44 shape: minting with the WRONG env secret still produces a
     // syntactically perfect claim. Only the MAC tells the two apart, which is
@@ -136,20 +139,73 @@ describe("[140.2-09 / TS-04] mintTenantClaim — wire format", () => {
   });
 });
 
+describe("[140.5-07 / SEAMPROSE-05] the transposition is a COMPILE error (SC-TYPE-1)", () => {
+  /**
+   * ⚠️ THIS IS A COMPILE-TIME RECEIPT THAT CAN ACTUALLY FAIL, and that is why it
+   * is written as `@ts-expect-error` rather than as a note in a SUMMARY.
+   *
+   * `npx tsc --noEmit` exiting 0 proves only that the tree compiles; it says
+   * nothing about whether a transposed call WOULD be rejected. A bare `tsc`
+   * green is therefore vacuous as a receipt for this property — the same
+   * "a scanner that matches nothing reports agreement forever" hazard the phase's
+   * validation contract names for scanners, in its type-checking form.
+   *
+   * `@ts-expect-error` inverts it. The directive is satisfied only while the line
+   * beneath it is a genuine error. If `mintTenantClaim` ever regresses to
+   * `(payload: string, secret: string)`, this line starts compiling, the
+   * directive becomes unused, and TypeScript raises TS2578 — so `tsc --noEmit`
+   * exits NON-ZERO on the regression. The guard fails when the property breaks,
+   * which is what CONTEXT §3 requires of a receipt.
+   *
+   * The runtime half rides along free: a JavaScript caller (or a cast) CAN still
+   * make this call, and when it does the mint must refuse rather than key an HMAC
+   * with a user id and publish `INTERNAL_API_TOKEN` in a header. GUARD 1 absorbs
+   * it because `identity?.userId` on a string is `undefined`.
+   */
+  it("refuses a transposed (secret, identity) call — and would not compile", () => {
+    expect(() =>
+      mintTenantClaim(
+        // @ts-expect-error -- SC-TYPE-1: a bare `string` is not a TenantIdentity.
+        // This directive IS the receipt. Reverting the signature to two adjacent
+        // strings makes this line legal, the directive unused, and `tsc` red.
+        "internal-test-token",
+        "user-42",
+      ),
+    ).toThrow(TenantClaimError);
+  });
+
+  it("no transposed shape can put the secret on the wire", () => {
+    // The failure this pins is not "an exception happened" but "the secret did
+    // not leave". A refusal that still returned a claim would satisfy a
+    // `toThrow`-only test in a future rewrite; this asserts the payload.
+    let claim: string | undefined;
+    try {
+      claim = mintTenantClaim(
+        // @ts-expect-error -- SC-TYPE-1, second shape: see above.
+        "internal-test-token",
+        "user-42",
+      );
+    } catch {
+      claim = undefined;
+    }
+    expect(claim).toBeUndefined();
+  });
+});
+
 describe("[140.2-09 / TS-04] mintTenantClaim — the four fail-loud refusals", () => {
   it("REFUSES an empty payload rather than minting a claim over nothing", () => {
     // A claim over "" verifies fine and buckets every caller to `<scope>:t:` —
     // one shared window wearing the costume of per-tenant isolation.
-    expect(() => mintTenantClaim("", "internal-test-token")).toThrow(
+    expect(() => mintTenantClaim({ userId: "" }, "internal-test-token")).toThrow(
       TenantClaimError,
     );
   });
 
   it("REFUSES a whitespace-only payload", () => {
-    expect(() => mintTenantClaim("   ", "internal-test-token")).toThrow(
+    expect(() => mintTenantClaim({ userId: "   " }, "internal-test-token")).toThrow(
       TenantClaimError,
     );
-    expect(() => mintTenantClaim("\t\n", "internal-test-token")).toThrow(
+    expect(() => mintTenantClaim({ userId: "\t\n" }, "internal-test-token")).toThrow(
       TenantClaimError,
     );
   });
@@ -160,7 +216,7 @@ describe("[140.2-09 / TS-04] mintTenantClaim — the four fail-loud refusals", (
     // dots in it, and a future non-UUID identifier could collide with another
     // tenant's claim tail. Refuse at the mint while every real payload is a
     // dot-free UUID (or the literal "public").
-    expect(() => mintTenantClaim("user.42", "internal-test-token")).toThrow(
+    expect(() => mintTenantClaim({ userId: "user.42" }, "internal-test-token")).toThrow(
       TenantClaimError,
     );
   });
@@ -170,16 +226,16 @@ describe("[140.2-09 / TS-04] mintTenantClaim — the four fail-loud refusals", (
     // fails `compare_digest` on every request, so every route silently stays on
     // `platform:<path>` with no error anywhere. RESEARCH A3: it could not be
     // confirmed that INTERNAL_API_TOKEN is set in the Vercel production env.
-    expect(() => mintTenantClaim("user-42", "")).toThrow(TenantClaimError);
+    expect(() => mintTenantClaim({ userId: "user-42" }, "")).toThrow(TenantClaimError);
     expect(() =>
-      mintTenantClaim("user-42", undefined as unknown as string),
+      mintTenantClaim({ userId: "user-42" }, undefined as unknown as string),
     ).toThrow(TenantClaimError);
   });
 
   it("names the error so a caller can tell a mint refusal from a transport failure", () => {
     let caught: unknown;
     try {
-      mintTenantClaim("", "internal-test-token");
+      mintTenantClaim({ userId: "" }, "internal-test-token");
     } catch (e) {
       caught = e;
     }
@@ -204,7 +260,7 @@ describe("[140.2-09 / TS-04] the committed cross-language parity fixture", () =>
       vi.useFakeTimers();
       vi.setSystemTime(new Date((exp - EXPECTED_TTL_SECONDS) * 1000));
 
-      expect(mintTenantClaim(payload, secret)).toBe(claim);
+      expect(mintTenantClaim({ userId: payload }, secret)).toBe(claim);
     },
   );
 

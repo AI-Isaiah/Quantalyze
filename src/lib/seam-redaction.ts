@@ -20,10 +20,14 @@
  *
  *   · UNDER-redacting leaks a live credential. undici embeds the outgoing
  *     headers in `err.message` and, in one shape, in `err.name`. On this seam
- *     those headers are `INTERNAL_API_TOKEN`, `X-Service-Key` and
- *     `X-User-Access-Token` — a live end-user Supabase JWT — and on the
- *     key-connect path the request body carries raw exchange `api_key` /
- *     `api_secret` / `passphrase`.
+ *     those headers are TODAY `INTERNAL_API_TOKEN`, `X-Service-Key` and
+ *     `X-Tenant-Claim`, and on the key-connect path the request body carries
+ *     raw exchange `api_key` / `api_secret` / `passphrase`.
+ *     (`X-User-Access-Token` — a live end-user Supabase JWT — was on that list
+ *     until Phase 146.1 / B2, 2026-08-18, removed its last emitter. It STAYS on
+ *     `resilient-fetch.ts`'s `CREDENTIAL_HEADER_NAMES` scrub enumeration
+ *     deliberately: that scrub DERIVES per-request secrets from the outgoing
+ *     headers, so an emitter-less name costs nothing and covers the next one.)
  *   · OVER-redacting destroys the diagnosis. `ECONNREFUSED`, `ENOTFOUND`,
  *     `EAI_AGAIN` and the TLS codes are the most valuable thing in a transport
  *     line. A redactor that eats them has replaced one incident with two, and a

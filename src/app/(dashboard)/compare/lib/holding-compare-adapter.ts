@@ -15,6 +15,7 @@
  * same cumulative-product semantics.
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { dispersion, sharpe as returnStatsSharpe } from "@/lib/return-stats";
 
 export type ParsedHoldingCompareId = {
   venue: string;
@@ -57,14 +58,55 @@ export type HoldingCompareAnalytics = {
   vol: number | null;
 };
 
+/**
+ * Phase 167.1.2 / D-13 ("Hide it until correct", extended to /compare,
+ * 2026-09-25). The per-holding return, Sharpe, max drawdown and vol are level
+ * ratios over `allocator_equity_snapshots.breakdown`, the same store D-02
+ * withholds on My Allocation. That store can count one exchange account twice
+ * when two keys read it (a +100% / -50% day inside one symbol's series), and a
+ * $-level ratio reads buying or selling more of a symbol as a gain or loss.
+ * Plan 11 (2026-09-29) DECIDED to keep this "rebuilding". My Allocation can
+ * be ready off `payload.returns`, a book-level flow-neutral series; nothing
+ * here reads it. These four numbers are still `value[i] / value[i-1] - 1`
+ * over a symbol's `breakdown` dollars (`reconstructAndAnalyze`), so buying or
+ * selling more of a symbol reads as a gain or loss. Plan 10 makes the refresh
+ * write each account once from its merge on; it does not rewrite the rows
+ * already stored, and it does not touch this ratio. No per-holding
+ * flow-adjusted source exists, and no roadmap phase owns one (measured
+ * 2026-09-29); 167.1.2-11-SUMMARY.md routes that. Flip only when this
+ * computation reads such a source. The `historyState` test seam keeps the
+ * ready branch pinned.
+ *
+ * Consumers are fail-closed: anything other than an explicit "ready" renders
+ * the rebuilding note. Flipping this constant to "ready" restores the
+ * pre-D-13 behaviour (the item carries the analytics computed from the
+ * trustworthy rows, and availability is unchanged).
+ */
+export const HOLDING_COMPARE_HISTORY_STATE: "rebuilding" | "ready" =
+  "rebuilding";
+
 export type HoldingCompareItem = {
   kind: "holding";
   holding_ref: string;
   venue: string;
   symbol: string;
   holding_type: string;
-  analytics: HoldingCompareAnalytics;
-};
+} & (
+  | { historyState: "ready"; analytics: HoldingCompareAnalytics }
+  | { historyState: "rebuilding"; analytics: null }
+);
+
+/**
+ * The holding read failed (Phase 167.1.2 review round 2, SFH-R2-02). The
+ * message is deliberately generic: the database's own message is logged
+ * server-side and never rides the thrown error.
+ */
+export class HoldingCompareLoadError extends Error {
+  constructor() {
+    super("holding compare load failed");
+    this.name = "HoldingCompareLoadError";
+  }
+}
 
 /**
  * Reconstruct per-symbol daily returns from breakdown jsonb + compute institutional metrics.
@@ -72,12 +114,20 @@ export type HoldingCompareItem = {
  * - Drop absent/zero days (RESEARCH Pitfall 2 — no forward-fill)
  * - pct_change semantics: return[i] = value[i] / value[i-1] - 1
  * - cumulative_return = product(1 + r) - 1
- * - sharpe = mean(returns) / std(returns) * sqrt(365) [population std]
+ * - sharpe = `return-stats` `sharpe(returns, { periodsPerYear: 365, ddof: 0 })`
+ *   [population std], the ONE TS Sharpe (Phase 166.1 D-17): null when the
+ *   returns have no dispersion, including the float residue of a compounding
+ *   constant yield, exactly as for a flat NAV (D-07)
  * - max_drawdown via cumulative-product running-peak
- * - vol = std(returns) * sqrt(365)
+ * - vol = `return-stats` `dispersion(returns, 0).sd * sqrt(365)` (a residue sd
+ *   reads as 0, the flat-NAV value)
  * Returns null metrics when fewer than 2 symbol-present data points exist.
+ *
+ * @internal Exported for unit testing only (Phase 167.1.2 / D-13): while the
+ * item withholds its analytics, the math is pinned on this function directly
+ * so those tests can still fail.
  */
-function reconstructAndAnalyze(
+export function reconstructAndAnalyze(
   snapshots: Array<{ asof: string; breakdown: Record<string, number> | null }>,
   symbol: string,
 ): HoldingCompareAnalytics {
@@ -101,16 +151,12 @@ function reconstructAndAnalyze(
     return { cumulative_return: null, sharpe: null, max_drawdown: null, vol: null };
   }
 
-  const n = returns.length;
-  const mean = returns.reduce((a, b) => a + b, 0) / n;
-  // Population variance (matches numpy ddof=0 default)
-  const variance = returns.reduce((a, b) => a + (b - mean) ** 2, 0) / n;
-  const std = Math.sqrt(variance);
   const ANNUAL = 365;
 
   const cumulative_return = returns.reduce((acc, r) => acc * (1 + r), 1) - 1;
-  const vol = std * Math.sqrt(ANNUAL);
-  const sharpe = std > 0 ? (mean / std) * Math.sqrt(ANNUAL) : null;
+  // Population sd (numpy ddof=0 default).
+  const vol = dispersion(returns, 0).sd * Math.sqrt(ANNUAL);
+  const sharpe = returnStatsSharpe(returns, { periodsPerYear: ANNUAL, ddof: 0 });
 
   // Max drawdown via running peak on the raw value series
   let peak = values[0];
@@ -140,12 +186,26 @@ function reconstructAndAnalyze(
  *
  * Per D-15: caller cannot distinguish "unowned holding" from "nonexistent
  * holding" — both return null with no additional error information.
+ *
+ * Throws `HoldingCompareLoadError` when the query itself fails (Phase 167.1.2
+ * review round 2, SFH-R2-02). A failed read is not "not available": RLS hides
+ * an unowned holding as ZERO rows, never as an error, so surfacing the failure
+ * leaks nothing about ownership (D-15 unchanged) and gives the allocator a
+ * retry instead of a false "this comparison isn't available".
  */
 export async function fetchHoldingCompareItem(params: {
   allocator_id: string;
   holding_ref: string;
   supabase: SupabaseClient;
+  /**
+   * @internal Test seam (Phase 167.1.2 review round 2, WR-01). Production
+   * callers omit it and get HOLDING_COMPARE_HISTORY_STATE (D-13). It exists so
+   * the "ready" branch, which the constant makes unreachable today, stays
+   * pinned. Plan 11 kept the constant "rebuilding"; see its docblock.
+   */
+  historyState?: "rebuilding" | "ready";
 }): Promise<HoldingCompareItem | null> {
+  const state = params.historyState ?? HOLDING_COMPARE_HISTORY_STATE;
   const parsed = parseHoldingCompareId(params.holding_ref);
   if (!parsed) return null;
 
@@ -156,7 +216,17 @@ export async function fetchHoldingCompareItem(params: {
     .order("asof", { ascending: true })
     .limit(730);
 
-  if (error || !data || data.length === 0) return null;
+  if (error) {
+    // Phase 167.1.2 review round 1 (SFH INFO-02) logged this; round 2
+    // (SFH-R2-02) stops folding it into "not available". Log the message only
+    // (never the row payload), then throw so the page surfaces a failed load.
+    console.error(
+      "[holding-compare-adapter.fetchHoldingCompareItem] supabase error:",
+      error.message,
+    );
+    throw new HoldingCompareLoadError();
+  }
+  if (!data || data.length === 0) return null;
 
   // CL9 / NEW-C01-11: this is a SECOND read boundary on allocator_equity_snapshots
   // (the allocator dashboard's getMyAllocationDashboard is the first). Rows whose
@@ -190,12 +260,20 @@ export async function fetchHoldingCompareItem(params: {
     return null;
   }
 
-  return {
-    kind: "holding",
+  const base = {
+    kind: "holding" as const,
     holding_ref: params.holding_ref,
     venue: parsed.venue,
     symbol: parsed.symbol,
     holding_type: parsed.holding_type,
-    analytics,
   };
+
+  // Phase 167.1.2 / D-13: the analytics above decide AVAILABILITY only (the
+  // pre-D-13 "not available" rule, unchanged). While the history is rebuilt
+  // the numbers themselves are dropped here, on the server. Fail-closed:
+  // anything other than an explicit "ready" withholds them.
+  if (state !== "ready") {
+    return { ...base, historyState: "rebuilding", analytics: null };
+  }
+  return { ...base, historyState: "ready", analytics };
 }

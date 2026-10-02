@@ -93,6 +93,90 @@ describe("adaptPortfolioAnalytics", () => {
     ).toBe(0.18);
   });
 
+  // 166.1 D7 (founder 2026-09-26) / round-1 SFH HIGH-1: the optimizer's
+  // `find_improvement_candidates` emits None for a correlation or a Sharpe
+  // lift that does not exist. The adapter must carry null through, never 0.
+  it("keeps a null optimizer correlation and Sharpe lift null", () => {
+    const row = {
+      ...complete,
+      optimizer_suggestions: [
+        {
+          strategy_id: "s-flat-book",
+          strategy_name: "Candidate",
+          corr_with_portfolio: null,
+          sharpe_lift: null,
+          dd_improvement: 0.01,
+          score: 0.003,
+        },
+      ],
+    };
+    const parsed = adaptPortfolioAnalytics(row);
+    expect(parsed).not.toBeNull();
+    if (!parsed) return;
+    const s = parsed.optimizer_suggestions?.[0];
+    expect(s?.corr_with_portfolio).toBeNull();
+    expect(s?.sharpe_lift).toBeNull();
+    expect(s?.dd_improvement).toBe(0.01);
+  });
+
+  // 166.1 D7 / round-1 SFH MEDIUM-2: a portfolio with no risk has no risk
+  // share; the producer emits null and the adapter must not read it as 0.
+  it("keeps a null risk share and component VaR null", () => {
+    const row = {
+      ...complete,
+      risk_decomposition: [
+        {
+          strategy_id: "s-yield",
+          strategy_name: "Yield",
+          marginal_risk_pct: null,
+          standalone_vol: 0,
+          component_var: null,
+          weight_pct: 50,
+        },
+      ],
+    };
+    const parsed = adaptPortfolioAnalytics(row);
+    expect(parsed).not.toBeNull();
+    if (!parsed) return;
+    const r = parsed.risk_decomposition?.[0];
+    expect(r?.marginal_risk_pct).toBeNull();
+    expect(r?.component_var).toBeNull();
+    expect(r?.weight_pct).toBe(50);
+  });
+
+  // 2026-09-29, Phase 169 review round 1 SFH M-5. The producer writes
+  // `_safe_float(ordered_weights[i] * 100)`, which can be None. `?? 0` read a
+  // missing weight as "0.0% of capital", and every row with a risk share then
+  // read "Overweight risk". A weight that does not exist stays null, as the
+  // risk share already does (166.1 D7).
+  it("keeps a missing weight null, never 0", () => {
+    const row = {
+      ...complete,
+      risk_decomposition: [
+        {
+          strategy_id: "s-a",
+          strategy_name: "Alpha",
+          marginal_risk_pct: 30,
+          standalone_vol: 0.2,
+          component_var: 0.01,
+          weight_pct: null,
+        },
+        {
+          strategy_id: "s-b",
+          strategy_name: "Beta",
+          marginal_risk_pct: 70,
+          standalone_vol: 0.3,
+          component_var: 0.02,
+        },
+      ],
+    };
+    const parsed = adaptPortfolioAnalytics(row);
+    expect(parsed).not.toBeNull();
+    if (!parsed) return;
+    expect(parsed.risk_decomposition?.[0].weight_pct).toBeNull();
+    expect(parsed.risk_decomposition?.[1].weight_pct).toBeNull();
+  });
+
   it("handles a row with benchmark_comparison set to null", () => {
     const parsed = adaptPortfolioAnalytics(partialNullBenchmark);
     expect(parsed).not.toBeNull();

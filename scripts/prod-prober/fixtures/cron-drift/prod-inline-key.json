@@ -1,0 +1,29 @@
+[
+  {
+    "jobid": 1,
+    "jobname": "match_engine_cron",
+    "schedule": "0 * * * *",
+    "active": true,
+    "database": "postgres",
+    "username": "postgres",
+    "command": "SELECT net.http_post(url := 'https://analytics.example.invalid/api/match/cron-recompute', headers := jsonb_build_object('Content-Type', 'application/json', 'X-Service-Key', 'FAKE-inline-key-0123456789abcdef'), body := '{}'::jsonb, timeout_milliseconds := 60000)"
+  },
+  {
+    "jobid": 2,
+    "jobname": "audit_log_cold_purge",
+    "schedule": "17 3 * * *",
+    "active": true,
+    "database": "postgres",
+    "username": "postgres",
+    "command": "SELECT purge_audit_log_cold(interval '90 days')"
+  },
+  {
+    "jobid": 3,
+    "jobname": "retention_compute_jobs_done",
+    "schedule": "23 4 * * *",
+    "active": true,
+    "database": "postgres",
+    "username": "postgres",
+    "command": "SELECT retention_sweep('compute_jobs_done', interval '30 days')"
+  }
+]

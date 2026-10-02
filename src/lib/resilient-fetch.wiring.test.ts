@@ -16,7 +16,24 @@ import { installFetchMock, type FetchMock } from "@/test/helpers/fetch";
  * file proves the POSITIVE — the spy fires, once, with the right budget key,
  * and the raw `fetch` global is never touched. It fails the moment either
  * client regresses to a hand-rolled fetch, which no route test can catch
- * because all sixteen of them mock these clients wholesale.
+ * because every route test that mocks a seam client does so WHOLESALE — a
+ * `vi.mock("@/lib/analytics-client")` (or `process-key-client`, or
+ * `resilient-fetch`) replaces the module, so the transport underneath it is
+ * never exercised by any of them.
+ *
+ * (140.5-04) That sentence used to give a hard COUNT of those route tests. The
+ * integer is DELETED rather than corrected, because there is no single number to
+ * correct it to: the population's size swings depending on whether you count raw
+ * grep hits or comment-stripped ones, whether a route test living outside
+ * `src/app/api/**` counts, and whether the `csv-finalize-*` suites count. Five
+ * defensible readings gave five different integers when this was measured, and
+ * the old figure was right under exactly one of them. The PREDICATE is the
+ * honest thing to write down; a reader who needs the number can run it and will
+ * then know WHICH number they got.
+ *
+ * ⚠️ The discredited figure is described here, not reprinted. Reprinting it
+ * would put the very token back into the file that any absence check greps for,
+ * so the check would fail on CORRECTED code — the DEF-16-2 shape, one level up.
  *
  * ⚠️ ENV MUST BE SET BEFORE THE CLIENT MODULES LOAD. `SERVICE_KEY` is captured
  * at MODULE SCOPE in `analytics-client.ts` (`process.env.ANALYTICS_SERVICE_KEY
@@ -40,7 +57,7 @@ import { installFetchMock, type FetchMock } from "@/test/helpers/fetch";
  *     request unauthenticates, which reads as a total outage.
  *
  * ---------------------------------------------------------------------------
- * PHASE 140.2 / SEAMCORE-08 (ROADMAP SC6, clause c) — THE 13/13 BUDGET-KEY
+ * PHASE 140.2 / SEAMCORE-08 (ROADMAP SC6, clause c) — THE 14/14 BUDGET-KEY
  * CENSUS, AND WHY A CENSUS ALONE IS NOT ENOUGH.
  * ---------------------------------------------------------------------------
  *
@@ -52,29 +69,35 @@ import { installFetchMock, type FetchMock } from "@/test/helpers/fetch";
  * codebase that is exactly three syntactic families:
  *
  *   (i)   an exported wrapper in `src/lib/analytics-client.ts` carrying a
- *         `budgetKey:` property                                        →  9
+ *         `budgetKey:` property                                        → 10
+ *         (nine wrappers; `validateKey` binds TWO rows because it selects
+ *          by venue capability — 153.4-02)
  *   (ii)  an arm of `budgetKeyFor` in `src/lib/process-key-client.ts`  →  2
  *   (iii) a string literal in first-argument position of a core call    →  2
  *         (three lexical sites; the two `fetchLivePermissions` copies are
  *          one binding under two files)
  *                                                                  ------
- *                                                                     13
+ *                                                                     14
  *
  * How the count was re-derived (executor's own search, 2026-07-26 — reproduce
  * it rather than trusting this comment):
  *
- *   grep -rn 'budgetKey: "' src/lib/analytics-client.ts          -> 9
+ *   grep -rn 'budgetKey: "' src/lib/analytics-client.ts          -> 8
+ *   sed -n '/function budgetKeyFor(/,/^}/p' src/lib/analytics-client.ts
+ *                                    -> 2 returned key literals   (153.4-02:
+ *        `validateKey` moved OUT of the literal grep and into this selector,
+ *         so the first line fell 9 -> 8 while family (i) rose 9 -> 10)
  *   sed -n '/function budgetKeyFor(/,/^}/p' src/lib/process-key-client.ts
  *                                    -> 2 returned key literals
  *   grep -rn "resilientFetch(" src | grep -v test                -> 6 files,
  *        of which 3 pass a literal first argument (2 distinct bindings) and
  *        2 pass a variable (families i and ii above); the 6th is the core.
  *
- * Every one of the 13 `SeamBudgetKey` union members has at least one binding:
+ * Every one of the 14 `SeamBudgetKey` union members has at least one binding:
  * no orphan key, no unbound key.
  *
- * ⚠️ THE CENSUS ABOVE IS A CONVENTION. It records that the thirteen bindings
- * which exist today are each pinned; it proves nothing about a FOURTEENTH. A
+ * ⚠️ THE CENSUS ABOVE IS A CONVENTION. It records that the fourteen bindings
+ * which exist today are each pinned; it proves nothing about a FIFTEENTH. A
  * wrapper added next month that reuses an EXISTING budget key adds no pin,
  * breaks no pin, and would redden nothing — the class quietly re-opens and this
  * comment becomes a historical note. The `EXPECTED_BINDINGS` roster at the
@@ -297,8 +320,11 @@ describe("SC-1c — both seam clients invoke the ONE resilience core", () => {
   type AnalyticsClient = typeof import("@/lib/analytics-client");
 
   /**
-   * B-01..B-09 — family (i): the nine exported wrappers in
-   * `analytics-client.ts`, each carrying its own `budgetKey:` property.
+   * B-01..B-09 plus B-14 — family (i): the nine exported wrappers in
+   * `analytics-client.ts`, each carrying its own budget-key binding. TEN pins,
+   * not nine, because `validateKey` binds two rows: it names its key with
+   * `budgetKeyFor(exchange)` rather than a literal, so B-01 (default venue) and
+   * B-14 (serialized venue) are the same wrapper driven with different venues.
    *
    * Every expected value here is a HAND-TYPED string literal. None is read out
    * of `SEAM_BUDGETS`, out of a `SeamBudgetKey`-typed const, or out of anything
@@ -319,6 +345,20 @@ describe("SC-1c — both seam clients invoke the ONE resilience core", () => {
       budgetKey: "validate-key",
       path: "/api/validate-key",
       invoke: (m) => m.validateKey("deribit", "k", "s", undefined, WIRING_TENANT),
+    },
+    {
+      // 153.4-02 / WIZFORM-05 — the SAME wrapper as B-01, on the OTHER budget
+      // row. `validateKey` selects by venue capability, so the only difference
+      // between these two pins is the venue argument and the deadline it buys.
+      // Pinned here as well as in `analytics-client.test.ts` because THIS file
+      // owns the binding class: without a pin the roster would list B-14 with
+      // nothing driving it, and a selector that silently stopped selecting
+      // would still satisfy a source-shape scan.
+      binding: "B-14",
+      wrapper: "validateKey",
+      budgetKey: "validate-key-serialized",
+      path: "/api/validate-key",
+      invoke: (m) => m.validateKey("mt5", "k", "s", undefined, WIRING_TENANT),
     },
     {
       binding: "B-02",
@@ -384,6 +424,16 @@ describe("SC-1c — both seam clients invoke the ONE resilience core", () => {
       budgetKey: "match-eval",
       path: "/api/match/eval?lookback_days=30",
       invoke: (m) => m.evalMatch({ lookback_days: "30" }, WIRING_TENANT),
+    },
+    {
+      // Phase 169.2 / D-08 — the daily BTC benchmark refresh. No argument: the
+      // tenant is the wrapper's own fixed server literal (a scheduled job has
+      // no user).
+      binding: "B-16",
+      wrapper: "refreshBenchmark",
+      budgetKey: "benchmark-refresh",
+      path: "/api/benchmark-refresh",
+      invoke: (m) => m.refreshBenchmark(),
     },
   ];
 
@@ -454,7 +504,7 @@ describe("SC-1c — both seam clients invoke the ONE resilience core", () => {
 });
 
 // ---------------------------------------------------------------------------
-// THE BINDING ROSTER — the mechanism that keeps the 13/13 census honest.
+// THE BINDING ROSTER — the mechanism that keeps the 14/14 census honest.
 // ---------------------------------------------------------------------------
 
 /**
@@ -532,15 +582,146 @@ interface DiscoveredBinding {
   path: string;
   /** `file` for a literal call site, `file::symbol` for the two clients. */
   site: string;
+  /**
+   * Phase 141.1 / D-09 — THE SECOND CLASSIFICATION AXIS, censused here so a new
+   * call site cannot be discovered by nothing on the RETRY dimension.
+   *
+   * The normalised source expression this site passes as `retriesOverride`, or
+   * the sentinel `"<ABSENT>"` when it passes none. Phase 141 added retry as a
+   * per-call-site verdict and shipped it with no census at all — the budget-key
+   * axis below had one from the day it existed, and the retry axis is the same
+   * shape of decision made at the same call sites. Extending this roster with a
+   * FIELD rather than adding a second census file is deliberate: a parallel
+   * census would duplicate the walk and the comment-stripping (the repo already
+   * carries 17 unrewired copies of the latter) and could drift from the roster
+   * it is supposed to agree with.
+   */
+  retry: string;
 }
 
 const encodeBinding = (b: DiscoveredBinding) =>
-  `${b.family} | ${b.key} | ${b.path} | ${b.site}`;
+  `${b.family} | ${b.key} | ${b.path} | ${b.site} | ${b.retry}`;
 
 /** A first-argument-position string or template literal, or a loud sentinel. */
 function firstLiteralArg(rest: string): string {
   const m = /^\s*(["`])([^"`]*)\1/.exec(rest);
   return m ? normalisePath(m[2]) : "<NON-LITERAL PATH>";
+}
+
+/**
+ * Normalise a captured `retriesOverride` expression to something hand-typable.
+ *
+ * `readCode` has already removed whole-line comments, but a TRAILING `//`
+ * comment survives by design (see `stripComments`), so it is stripped here —
+ * otherwise re-wording a trailing note beside an unchanged expression would red
+ * this guard for no reason. The trailing property comma goes for the same
+ * reason: it is punctuation of the object literal, not of the verdict.
+ */
+function normaliseRetryExpr(raw: string): string {
+  return raw
+    .replace(/\/\/.*$/, "")
+    .trim()
+    .replace(/,$/, "")
+    .trim()
+    .replace(/\s+/g, " ");
+}
+
+/**
+ * The `retriesOverride` expression governing the core call that begins at
+ * `callIndex`, or a loud sentinel.
+ *
+ * SCAN WINDOW. From this call to the NEXT core call in the same file (or EOF).
+ * That bound is exact rather than approximate: `retriesOverride` is a member of
+ * `ResilientFetchInit`, so after D-08 made it REQUIRED it cannot legally appear
+ * anywhere but inside one of these inits — every occurrence between call N and
+ * call N+1 belongs to call N.
+ *
+ * ⚠️ THE SENTINELS FAIL IN THE SAFE DIRECTION. `"<ABSENT>"` and
+ * `"<AMBIGUOUS RETRY>"` are values that no roster entry may legally hold, so
+ * both redden the set equality below. A multi-line expression would likewise be
+ * captured partially and mismatch the roster. Every failure mode of this
+ * extractor is therefore a RED, never a silent pass — which is the only
+ * property that matters in a guard whose whole job is to notice an omission.
+ */
+function retryExprFor(code: string, callIndex: number): string {
+  const nextCall = [...code.matchAll(/resilientFetch\s*\(/g)]
+    .map((m) => m.index)
+    .find((i) => i > callIndex);
+  const window = code.slice(callIndex, nextCall ?? code.length);
+  const hits = [...window.matchAll(/retriesOverride:\s*([^\n]*)/g)];
+  if (hits.length === 0) return "<ABSENT>";
+  if (hits.length > 1) return "<AMBIGUOUS RETRY>";
+  return normaliseRetryExpr(hits[0][1]);
+}
+
+/**
+ * The retry expression at a client module's SINGLE core chokepoint.
+ *
+ * Both clients funnel every binding they own through exactly one
+ * `resilientFetch` call, so ONE expression governs all of them — the same
+ * property `discoverBudgetKeyForArms` already relies on to give both its arms
+ * one upstream path. Requiring exactly one call is itself the fence: a SECOND
+ * chokepoint in either client would mean its bindings no longer share a retry
+ * verdict, and the sentinel makes that a RED rather than a half-truth silently
+ * attributed to every binding in the family.
+ */
+function chokepointRetry(code: string): string {
+  const calls = [...code.matchAll(/resilientFetch\s*\(/g)];
+  if (calls.length !== 1) return "<NOT A SINGLE CHOKEPOINT>";
+  return retryExprFor(code, calls[0].index);
+}
+
+/**
+ * The budget keys a `budgetKeyFor`-shaped selector can RETURN, read from the
+ * given source at the given declaration.
+ *
+ * Shared by families (i) and (ii) since 153.4-02, when a SECOND module grew a
+ * selector of this shape. The extraction recipe is family (ii)'s, unchanged, and
+ * its reasoning is written out at `discoverBudgetKeyForArms` below — strip the
+ * arm TESTS so the guard is not coupled to a ternary-vs-switch spelling, then
+ * keep only RETURN positions so a fail-loud `throw` message containing a quoted
+ * string is not reported as a phantom budget key.
+ *
+ * ⚠️ ONE extractor for both selectors is deliberate here, against this file's
+ * general preference for independent duplicated scanners. Those duplicates exist
+ * so two scanners can DISAGREE about the same population; these two read
+ * DIFFERENT populations in different files, so a second copy would give nothing
+ * to disagree with and would simply be a second place to forget.
+ */
+function returnedKeyLiterals(code: string, declaration: string): string[] {
+  // 164.8.2 — BOTH lookups fail loud now, and the first is the interesting one.
+  // `if (start < 0) return []` was a SILENT EMPTY POPULATION: a renamed or moved
+  // `budgetKeyFor` made family (ii) discover nothing, and a guard that reports a
+  // smaller class than exists is exactly the failure the fence at
+  // "finds bindings at all" was built to catch — except this shape reaches that
+  // fence already emptied, with no name attached. The second lookup's -1 fed
+  // `slice(start, -1)`, which is the whole rest of the FILE minus one character,
+  // so a body that never closes at column 0 silently widened the scan. Neither
+  // is a value to substitute; an absent anchor is a finding about the source.
+  const start = code.indexOf(declaration);
+  if (start < 0) {
+    throw new Error(
+      `returnedKeyLiterals: declaration ${JSON.stringify(declaration)} is not ` +
+        "present in the scanned source — the selector was renamed or moved, and " +
+        "this discovery is blind, not empty",
+    );
+  }
+  const end = code.indexOf("\n}", start);
+  if (end < 0) {
+    throw new Error(
+      `returnedKeyLiterals: no "\\n}" body terminator after ${JSON.stringify(
+        declaration,
+      )} — the function body cannot be delimited`,
+    );
+  }
+  const body = code.slice(start, end);
+  const withoutArmTests = body
+    .replace(/===\s*"[^"]*"/g, "")
+    .replace(/\bcase\s+"[^"]*"\s*:/g, "");
+  const returned = [...withoutArmTests.matchAll(/\breturn\b[^;]*;/g)]
+    .map((m) => m[0])
+    .join("\n");
+  return [...returned.matchAll(/"([^"]+)"/g)].map((m) => m[1]);
 }
 
 /**
@@ -550,6 +731,9 @@ function firstLiteralArg(rest: string): string {
  */
 function discoverAnalyticsWrappers(): DiscoveredBinding[] {
   const code = readCode(ANALYTICS_CLIENT);
+  // D-09: every wrapper in this family reaches the core through `analyticsRequest`,
+  // so the retry verdict is that one chokepoint's expression, shared by all nine.
+  const retry = chokepointRetry(code);
   const starts: Array<{ name: string; index: number }> = [];
   for (const m of code.matchAll(/^export async function (\w+)\s*\(/gm)) {
     starts.push({ name: m[1], index: m.index });
@@ -562,14 +746,36 @@ function discoverAnalyticsWrappers(): DiscoveredBinding[] {
       index: m.index,
       path: firstLiteralArg(body.slice(m.index + m[0].length)),
     }));
-    for (const keyMatch of body.matchAll(/budgetKey:\s*"([^"]+)"/g)) {
+    // 153.4-02 — TWO SHAPES, and the second one is why this is a `matchAll`
+    // over an alternation rather than a literal scan.
+    //
+    //   `budgetKey: "<literal>"`      — the incumbent shape, one binding.
+    //   `budgetKey: budgetKeyFor(…)`  — a SELECTOR, which binds this call site
+    //                                   to EVERY key the selector can return.
+    //
+    // A wrapper that selects its budget row at run time is still a call site
+    // with a budget, and it has as many bindings as the selector has arms.
+    // Reading only the literal shape would have made `validateKey` vanish from
+    // the census the moment it went venue-aware — the guard reporting a smaller
+    // class than exists, which is the direction that fails silently once the
+    // fence below is relaxed to match.
+    for (const keyMatch of body.matchAll(
+      /budgetKey:\s*(?:"([^"]+)"|budgetKeyFor\()/g,
+    )) {
       const preceding = paths.filter((p) => p.index < keyMatch.index).pop();
-      out.push({
-        family: "i",
-        key: keyMatch[1],
-        path: preceding?.path ?? "<NO REQUEST PATH FOUND>",
-        site: `${ANALYTICS_CLIENT}::${fn.name}`,
-      });
+      const keys =
+        keyMatch[1] !== undefined
+          ? [keyMatch[1]]
+          : returnedKeyLiterals(code, "function budgetKeyFor(");
+      for (const key of keys) {
+        out.push({
+          family: "i",
+          key,
+          path: preceding?.path ?? "<NO REQUEST PATH FOUND>",
+          site: `${ANALYTICS_CLIENT}::${fn.name}`,
+          retry,
+        });
+      }
     }
   });
   return out;
@@ -578,27 +784,53 @@ function discoverAnalyticsWrappers(): DiscoveredBinding[] {
 /**
  * Family (ii) — the arms of `budgetKeyFor` in `process-key-client.ts`.
  *
- * The flow-type comparisons are removed first, so the only literals left in the
- * function body are the budget keys it can return. The upstream path is the
- * literal at that module's single core call.
+ * The extraction is stated as "the budget keys the function can RETURN", which
+ * is what the census recipe at the top of this file measures ("-> 2 returned key
+ * literals"). Two steps get there:
+ *
+ *   1. Strip the flow-type TESTS. `budgetKeyFor` has worn TWO syntactic forms
+ *      and this discovery must not be coupled to either: the pre-141.1 ternary
+ *      spelled its tests `flowType === "teaser"`, and the 141.1 / D-11
+ *      `never`-defaulted switch spells them `case "teaser":`. Handling only the
+ *      first is what made this guard red on the D-11 conversion — it reported
+ *      `teaser` / `csv` / `onboard` / `resync` as four phantom BUDGET KEYS while
+ *      the function's actual returns were unchanged.
+ *   2. Keep only RETURN statements. Stripping the tests and then scanning the
+ *      whole body was always one double-quoted string away from a phantom: the
+ *      switch's `default` arm throws a fail-loud message, and a message with a
+ *      `"` in it is prose, not a binding. Return position is the property the
+ *      roster is actually about.
+ *
+ * ⚠️ NEITHER STEP WIDENS THE GUARD. A genuinely NEW arm returning a NEW budget
+ * key is still discovered and still fails against the roster; a third syntactic
+ * form that this extractor cannot read yields FEWER bindings than the roster
+ * lists, which fails too. Both directions stay loud — that is the invariant to
+ * preserve if this ever needs touching again.
+ *
+ * The upstream path is the literal at that module's single core call.
  */
 function discoverBudgetKeyForArms(): DiscoveredBinding[] {
   const code = readCode(PROCESS_KEY_CLIENT);
-  const start = code.indexOf("function budgetKeyFor(");
-  if (start < 0) return [];
-  const body = code.slice(start, code.indexOf("\n}", start));
-  const returned = body.replace(/===\s*"[^"]*"/g, "");
+  // 153.4-02: the extraction recipe described above now lives in
+  // `returnedKeyLiterals`, because `analytics-client.ts` grew a selector of the
+  // same shape. The recipe is byte-unchanged; only its home moved.
+  const returnedKeys = returnedKeyLiterals(code, "function budgetKeyFor(");
 
   const callMatch = /resilientFetch\(\s*\w+\s*,\s*/.exec(code);
   const path = callMatch
     ? firstLiteralArg(code.slice(callMatch.index + callMatch[0].length))
     : "<NO CORE CALL FOUND>";
 
-  return [...returned.matchAll(/"([^"]+)"/g)].map((m) => ({
+  // D-09: both arms reach the core through `postProcessKey`'s single call, so
+  // one retry expression governs them — exactly as one `path` already does.
+  const retry = chokepointRetry(code);
+
+  return returnedKeys.map((key) => ({
     family: "ii" as const,
-    key: m[1],
+    key,
     path,
     site: `${PROCESS_KEY_CLIENT}::budgetKeyFor`,
+    retry,
   }));
 }
 
@@ -641,6 +873,9 @@ function discoverLiteralCallSites(): DiscoveredBinding[] {
         key: m[1],
         path: firstLiteralArg(code.slice(m.index + m[0].length)),
         site: rel,
+        // D-09: unlike the two clients, each literal call site states its own
+        // retry verdict inline, so it is read at the site.
+        retry: retryExprFor(code, m.index),
       });
     }
   }
@@ -648,8 +883,42 @@ function discoverLiteralCallSites(): DiscoveredBinding[] {
 }
 
 /**
- * The 13 bindings, typed HERE as literals — the whole class, one entry per
+ * Phase 141.1 / D-09 — the two client chokepoints' retry expressions, typed
+ * here as source text.
+ *
+ * Named constants rather than repeated string literals only because nine and
+ * two roster rows share them respectively; they are hand-typed oracles like
+ * every other value in this roster, never imported or derived from the modules
+ * they describe. On the ANALYTICS row the `?? 0` half is the load-bearing part:
+ * it is what makes a seam function ABSENT from the SEAM-06 registry resolve to no
+ * retry instead of inheriting one, so a drift to `?? 1` is a silent grant of
+ * retry to every unaudited wrapper — and reddens here.
+ *
+ * ⚠️ 141.2 / D-01 — THE PROCESS-KEY ROW NOW SHOWS A NAME, NOT ARITHMETIC, AND
+ * THAT IS THE ACCEPTED TRADEOFF. Its expression used to spell the whole verdict
+ * out (`RETRY_SAFE_FLOW_TYPES[args.flow_type]?.retries ?? 0`); the verdict now
+ * also depends on idempotency-key presence, which cannot be written inline
+ * without either a multi-line expression (which this roster's line-scoped
+ * extractor captures PARTIALLY and reddens on) or a ~200-character single-line
+ * ternary (worse to read than a name). So the belt moved INSIDE `retriesForFlow`
+ * in the registry leaf — the artifact whose whole purpose is to be the single
+ * readable verdict — and it carries its own direct unit pins there plus
+ * behavioural pins through the real client in `process-key-client.test.ts`. What
+ * this roster still guarantees is the property it was built for: that the
+ * chokepoint's retry decision is the one named here and did not drift.
+ * DO NOT widen the extractor to accommodate a multi-line expression.
+ */
+const ANALYTICS_RETRY = "RETRY_SAFE_ANALYTICS[options.budgetKey]?.retries ?? 0";
+const PROCESS_KEY_RETRY = "retriesForFlow(args.flow_type, args.context)";
+
+/**
+ * The 16 bindings, typed HERE as literals — the whole class, one entry per
  * binding, each entry listing every site that binding occupies.
+ *
+ * B-14 (153.4-02) is the second binding of ONE call site: `validateKey` selects
+ * between two budget rows by venue capability, so the site occupies two rows and
+ * appears twice. A roster keyed on call sites rather than bindings could not
+ * express that, and would have had to pick one of the two deadlines to pin.
  *
  * B-12 is one binding at TWO sites: `fetchLivePermissions` exists as two
  * verbatim copies (the route's own cached probe and finalize-wizard's
@@ -657,42 +926,72 @@ function discoverLiteralCallSites(): DiscoveredBinding[] {
  * Listing the sites rather than collapsing them means a THIRD copy of that seam
  * — a new file reusing the same key and path — is an unlisted site and fails
  * too, which key-level deduplication would have hidden.
+ *
+ * Phase 141.1 / D-09 — EVERY SITE ALSO CARRIES ITS RETRY EXPRESSION, hand-typed
+ * here as a literal exactly as its path is. The two clients resolve their
+ * verdict from the SEAM-06 registry at one chokepoint each; the three route
+ * sites state a bare `0` because none of them appears in that registry. Both
+ * shapes are pinned as source text, so deleting an override, or drifting one
+ * from `?? 0` to `?? 1`, changes a value on this roster's other side.
  */
 const EXPECTED_BINDINGS: ReadonlyArray<{
   id: string;
   family: "i" | "ii" | "iii";
   key: string;
-  sites: ReadonlyArray<{ site: string; path: string }>;
+  sites: ReadonlyArray<{ site: string; path: string; retry: string }>;
 }> = [
   { id: "B-01", family: "i", key: "validate-key",
-    sites: [{ site: `${ANALYTICS_CLIENT}::validateKey`, path: "/api/validate-key" }] },
+    sites: [{ site: `${ANALYTICS_CLIENT}::validateKey`, path: "/api/validate-key", retry: ANALYTICS_RETRY }] },
   { id: "B-02", family: "i", key: "encrypt-key",
-    sites: [{ site: `${ANALYTICS_CLIENT}::encryptKey`, path: "/api/encrypt-key" }] },
+    sites: [{ site: `${ANALYTICS_CLIENT}::encryptKey`, path: "/api/encrypt-key", retry: ANALYTICS_RETRY }] },
   { id: "B-03", family: "i", key: "optimize-weights",
-    sites: [{ site: `${ANALYTICS_CLIENT}::optimizeScenarioWeights`, path: "/api/optimize-weights" }] },
+    sites: [{ site: `${ANALYTICS_CLIENT}::optimizeScenarioWeights`, path: "/api/optimize-weights", retry: ANALYTICS_RETRY }] },
   { id: "B-04", family: "i", key: "portfolio-analytics",
-    sites: [{ site: `${ANALYTICS_CLIENT}::computePortfolioAnalytics`, path: "/api/portfolio-analytics" }] },
+    sites: [{ site: `${ANALYTICS_CLIENT}::computePortfolioAnalytics`, path: "/api/portfolio-analytics", retry: ANALYTICS_RETRY }] },
   { id: "B-05", family: "i", key: "portfolio-optimizer",
-    sites: [{ site: `${ANALYTICS_CLIENT}::runPortfolioOptimizer`, path: "/api/portfolio-optimizer" }] },
+    sites: [{ site: `${ANALYTICS_CLIENT}::runPortfolioOptimizer`, path: "/api/portfolio-optimizer", retry: ANALYTICS_RETRY }] },
   { id: "B-06", family: "i", key: "bridge",
-    sites: [{ site: `${ANALYTICS_CLIENT}::findReplacementCandidates`, path: "/api/portfolio-bridge" }] },
+    sites: [{ site: `${ANALYTICS_CLIENT}::findReplacementCandidates`, path: "/api/portfolio-bridge", retry: ANALYTICS_RETRY }] },
   { id: "B-07", family: "i", key: "simulator",
-    sites: [{ site: `${ANALYTICS_CLIENT}::simulateAddCandidate`, path: "/api/simulator" }] },
+    sites: [{ site: `${ANALYTICS_CLIENT}::simulateAddCandidate`, path: "/api/simulator", retry: ANALYTICS_RETRY }] },
   { id: "B-08", family: "i", key: "match-recompute",
-    sites: [{ site: `${ANALYTICS_CLIENT}::recomputeMatch`, path: "/api/match/recompute" }] },
+    sites: [{ site: `${ANALYTICS_CLIENT}::recomputeMatch`, path: "/api/match/recompute", retry: ANALYTICS_RETRY }] },
   { id: "B-09", family: "i", key: "match-eval",
-    sites: [{ site: `${ANALYTICS_CLIENT}::evalMatch`, path: "/api/match/eval?{}" }] },
+    sites: [{ site: `${ANALYTICS_CLIENT}::evalMatch`, path: "/api/match/eval?{}", retry: ANALYTICS_RETRY }] },
   { id: "B-10", family: "ii", key: "process-key-sync",
-    sites: [{ site: `${PROCESS_KEY_CLIENT}::budgetKeyFor`, path: "/process-key" }] },
+    sites: [{ site: `${PROCESS_KEY_CLIENT}::budgetKeyFor`, path: "/process-key", retry: PROCESS_KEY_RETRY }] },
   { id: "B-11", family: "ii", key: "process-key-enqueue",
-    sites: [{ site: `${PROCESS_KEY_CLIENT}::budgetKeyFor`, path: "/process-key" }] },
+    sites: [{ site: `${PROCESS_KEY_CLIENT}::budgetKeyFor`, path: "/process-key", retry: PROCESS_KEY_RETRY }] },
   { id: "B-12", family: "iii", key: "keys-permissions",
     sites: [
-      { site: "src/app/api/keys/[id]/permissions/route.ts", path: "/internal/keys/{}/permissions" },
-      { site: "src/app/api/strategies/finalize-wizard/route.ts", path: "/internal/keys/{}/permissions?force_refresh=true" },
+      { site: "src/app/api/keys/[id]/permissions/route.ts", path: "/internal/keys/{}/permissions", retry: "0" },
+      { site: "src/app/api/strategies/finalize-wizard/route.ts", path: "/internal/keys/{}/permissions?force_refresh=true", retry: "0" },
     ] },
   { id: "B-13", family: "iii", key: "process-key-unified-dormant",
-    sites: [{ site: "src/app/api/keys/validate-and-encrypt/route.ts", path: "/process-key" }] },
+    sites: [{ site: "src/app/api/keys/validate-and-encrypt/route.ts", path: "/process-key", retry: "0" }] },
+  // 153.4-02 / WIZFORM-05 — `validateKey` binds TWO keys, not one. It selects
+  // its row with `budgetKeyFor(exchange)`, whose arms are `validate-key` (B-01,
+  // above, unchanged) and this one, taken only when the venue's probe is
+  // SERIALIZED. Same site, same path and the same chokepoint retry expression:
+  // what differs between B-01 and B-14 is ONLY the deadline, which is the whole
+  // point of the change and exactly what this roster exists to make visible.
+  { id: "B-14", family: "i", key: "validate-key-serialized",
+    sites: [{ site: `${ANALYTICS_CLIENT}::validateKey`, path: "/api/validate-key", retry: ANALYTICS_RETRY }] },
+  // Phase 164.5.3 / MT5CREDS (D-04) — the credential-rotation route calls the
+  // Python service's rotate-secret endpoint. Family (iii) and retry "0" for the
+  // same reason B-12 and B-13 are: the call is made from a Next.js route, and
+  // the deadline is the chokepoint's, not a client wrapper's. ⛔ The retry
+  // expression stays 0 DELIBERATELY and must not drift: the call drives a LIVE
+  // broker credential probe, so a silent retry would turn one user-initiated
+  // password correction into several authentication attempts against the
+  // broker — the same non-idempotency reason validate-key-serialized states.
+  { id: "B-15", family: "iii", key: "keys-rotate-secret",
+    sites: [{ site: "src/app/api/keys/[id]/rotate-secret/route.ts", path: "/internal/keys/{}/rotate-secret", retry: "0" }] },
+  // Phase 169.2 / D-08 — `refreshBenchmark`, the daily BTC benchmark refresh.
+  // Family (i): a client wrapper, so the retry is the chokepoint expression,
+  // which resolves to 0 because the key has a NO verdict in the registry.
+  { id: "B-16", family: "i", key: "benchmark-refresh",
+    sites: [{ site: `${ANALYTICS_CLIENT}::refreshBenchmark`, path: "/api/benchmark-refresh", retry: ANALYTICS_RETRY }] },
 ];
 
 /**
@@ -706,6 +1005,7 @@ const EXPECTED_BINDINGS: ReadonlyArray<{
  */
 const EXPECTED_SEAM_CALL_FILES: string[] = [
   "src/app/api/keys/[id]/permissions/route.ts",
+  "src/app/api/keys/[id]/rotate-secret/route.ts",
   "src/app/api/keys/validate-and-encrypt/route.ts",
   "src/app/api/strategies/finalize-wizard/route.ts",
   "src/lib/analytics-client.ts",
@@ -713,11 +1013,13 @@ const EXPECTED_SEAM_CALL_FILES: string[] = [
   "src/lib/resilient-fetch.ts",
 ];
 
-/** The 13 budget keys these bindings cover — no orphan key, no unbound key. */
+/** The 16 budget keys these bindings cover — no orphan key, no unbound key. */
 const EXPECTED_BOUND_KEYS: string[] = [
+  "benchmark-refresh",
   "bridge",
   "encrypt-key",
   "keys-permissions",
+  "keys-rotate-secret",
   "match-eval",
   "match-recompute",
   "optimize-weights",
@@ -728,6 +1030,7 @@ const EXPECTED_BOUND_KEYS: string[] = [
   "process-key-unified-dormant",
   "simulator",
   "validate-key",
+  "validate-key-serialized",
 ];
 
 describe("SC6 / SEAMCORE-08 — the budget-key binding class stays closed", () => {
@@ -746,13 +1049,55 @@ describe("SC6 / SEAMCORE-08 — the budget-key binding class stays closed", () =
       discovered.length,
       "the binding discovery pass found nothing. The source moved or a pattern " +
         "stopped matching — this guard is now blind, not satisfied.",
-    ).toBeGreaterThanOrEqual(14);
+    ).toBeGreaterThanOrEqual(15);
   });
 
-  it("every discovered binding is classified in the roster (a 14th binding FAILS)", () => {
+  it("CALIBRATION (164.8.2) — returnedKeyLiterals BITES on a missing declaration and on a missing body terminator", () => {
+    const DECL = "function budgetKeyFor(";
+    const code = readCode(PROCESS_KEY_CLIENT);
+
+    // CONTROL first, so a mutant that throws for some unrelated reason cannot
+    // read as a passing calibration: the real source yields the real arms.
+    const real = returnedKeyLiterals(code, DECL);
+    expect(real).toContain("process-key-sync");
+    expect(real).toContain("process-key-enqueue");
+
+    // Mutant 1 — the declaration anchor is gone (the rename this guard must not
+    // survive silently). Before 164.8.2 this returned `[]` and family (ii)
+    // simply vanished from the census.
+    const renamed = code.replaceAll(DECL, "function budgetKeyForRenamed_(");
+    expect(renamed, "mutation 1 did not apply").not.toBe(code);
+    expect(renamed.includes(DECL), "mutation 1 left the anchor present").toBe(
+      false,
+    );
+    expect(() => returnedKeyLiterals(renamed, DECL)).toThrow(/is not present/);
+
+    // Mutant 2 — the body terminator anchor is gone. Before 164.8.2 the -1 made
+    // the body the rest of the file, so the arm roster silently widened.
+    const unterminated = code.replaceAll("\n}", "\n ");
+    expect(unterminated, "mutation 2 did not apply").not.toBe(code);
+    expect(
+      unterminated.includes("\n}"),
+      "mutation 2 left the anchor present",
+    ).toBe(false);
+    expect(unterminated.includes(DECL), "mutation 2 ate the declaration").toBe(
+      true,
+    );
+    expect(() => returnedKeyLiterals(unterminated, DECL)).toThrow(
+      /body terminator/,
+    );
+  });
+
+  it("every discovered binding is classified in the roster (a 17th binding FAILS)", () => {
     const expectedSites = EXPECTED_BINDINGS.flatMap((b) =>
       b.sites.map((s) =>
-        encodeBinding({ family: b.family, key: b.key, path: s.path, site: s.site }),
+        encodeBinding({
+          family: b.family,
+          key: b.key,
+          path: s.path,
+          site: s.site,
+          retry: s.retry,
+        }),
       ),
     ).sort();
     const actualSites = discovered.map(encodeBinding).sort();
@@ -767,17 +1112,43 @@ describe("SC6 / SEAMCORE-08 — the budget-key binding class stays closed", () =
         "that a new binding REUSING an existing budget key breaks no individual " +
         "pin above and fails only here. The correct response is to pin the new " +
         "binding and add it to the roster — a conscious decision. Never widen " +
-        "this assertion to make a diff pass.",
+        "this assertion to make a diff pass. Since 141.1/D-09 each entry also " +
+        "carries its `retriesOverride` SOURCE EXPRESSION, so a call site that " +
+        "drops its override, or drifts one from `?? 0` to `?? 1`, differs on " +
+        "this roster's other side and lands here too.",
     ).toEqual(expectedSites);
   });
 
-  it("the roster covers exactly the 13 budget keys (no orphan key, no unbound key)", () => {
+  it("no discovered site is missing its retry verdict (D-09)", () => {
+    const absent = discovered
+      .filter((b) => b.retry === "<ABSENT>")
+      .map((b) => `${b.site} (${b.key})`);
+
+    expect(
+      absent,
+      "A seam call site passes NO `retriesOverride`. The roster docblock below " +
+        "states why the file-level fence exists — a new call site that belongs " +
+        "to no family 'would be discovered by nothing'. That was true of the " +
+        "RETRY axis for the whole of phase 141: retry is a per-site verdict " +
+        "about whether replaying this request can duplicate a side effect, and " +
+        "a site that never states one is an UNAUDITED replay, not a safe " +
+        "default. Since D-08 made the field required, `tsc` catches this first " +
+        "— this assertion is the belt that survives an `as any`, a JS caller, " +
+        "or the field being relaxed back to optional, exactly as the runtime " +
+        "validator survives beside the compile-time union. The remedy is to " +
+        "decide the verdict: add the seam function to the SEAM-06 retry-safety " +
+        "registry, or state `retriesOverride: 0` at the site and say why. " +
+        "Never widen this assertion to make a diff pass.",
+    ).toEqual([]);
+  });
+
+  it("the roster covers exactly the 16 budget keys (no orphan key, no unbound key)", () => {
     const boundKeys = [...new Set(discovered.map((b) => b.key))].sort();
     expect(
       boundKeys,
       "The set of budget keys actually BOUND to a seam call drifted. A key in " +
         "the table that nothing binds is dead tuning nobody will notice is " +
-        "wrong; a bound key that is not one of these thirteen is a call site " +
+        "wrong; a bound key that is not one of these fourteen is a call site " +
         "running on a row this file never reviewed.",
     ).toEqual([...EXPECTED_BOUND_KEYS].sort());
   });

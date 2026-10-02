@@ -29,10 +29,16 @@ vi.mock("next/navigation", () => ({
 vi.mock("next/cache", () => ({
   unstable_cache: (fn: (...args: unknown[]) => unknown) => fn,
 }));
-// withPublishedOnly → passthrough builder: the published-only visibility gate
-// is SQL-side and owned by its own tests; here every fixture row is published.
+// withPublishedOnly / withPublishedOrOwner → passthrough builders: the
+// visibility gates are SQL-side and owned by their own tests; here every fixture
+// row is published, so this file always takes the published (Lane A) path.
+// ⚠️ withPublishedOrOwner MUST stay listed even though Lane B never runs here:
+// a partial factory returns `undefined` for any export the page imports but the
+// factory omits, which is a TypeError at call time rather than a missing-mock
+// warning. Lane-B behaviour itself is owned by page.owner-lane.test.tsx.
 vi.mock("@/lib/visibility", () => ({
   withPublishedOnly: (qb: unknown) => qb,
+  withPublishedOrOwner: (qb: unknown) => qb,
 }));
 vi.mock("@/lib/supabase/server", () => ({ createClient: vi.fn() }));
 vi.mock("@/lib/supabase/admin", () => ({ createAdminClient: vi.fn() }));
@@ -127,8 +133,12 @@ function mockAdmin(
   const reads: string[] = [];
   const from = (table: string) => {
     let seenKind: string | undefined;
+    let selected = "";
     const chain = {
-      select: () => chain,
+      select: (s?: string) => {
+        selected = String(s);
+        return chain;
+      },
       eq: (col: string, val: string) => {
         if (col === "kind") seenKind = val;
         return chain;
@@ -136,6 +146,12 @@ function mockAdmin(
       maybeSingle: () => {
         if (table === "strategies") {
           return Promise.resolve({ data: strategy, error: null });
+        }
+        // Phase 169.1 (D-83 (a)): a build reads the cash_settlement row's frozen
+        // CONVENTIONS echo (a JSON-path projection, not a series). It is answered
+        // with no row and not counted, so `readsByKind` still counts series reads.
+        if (table === "strategy_analytics_series" && selected === "conventions:payload->conventions") {
+          return Promise.resolve({ data: null, error: null });
         }
         if (table === "strategy_analytics_series" && seenKind) reads.push(seenKind);
         return Promise.resolve(

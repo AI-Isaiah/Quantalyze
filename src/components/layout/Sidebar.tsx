@@ -126,6 +126,22 @@ function buildNavSections(
       { label: "Compare", href: "/compare", icon: CompareIcon },
       { label: "Decks", href: "/decks", icon: DeckIcon },
     );
+    // Phase 149 NAV-01 — the read half of the workspace. Until now the
+    // allocator side was WRITE-ONLY: you could add a strategy and then never
+    // see it again unless it got published, which is the gap the founder
+    // pointed at. /my-strategies ranks every own row at every non-archived
+    // status. It sits directly ABOVE "Add a Strategy" so read-your-strategies
+    // reads beside the write CTA, and INSIDE showsAllocatorWorkspace so it
+    // never leaks to a manager-only session (T-110-16 info-disclosure — the
+    // page's own requireRolePage('allocator') guard is the backstop, not the
+    // only gate). BarChartIcon is shared with the manager "Strategies" entry
+    // DELIBERATELY: different branch, different label, and no account sees
+    // both glyphs in the same section.
+    workspaceItems.push({
+      label: "My Strategies",
+      href: "/my-strategies",
+      icon: BarChartIcon,
+    });
     // Phase 110 CONTRIB-01 (ROLE-02 scoped exception) — the allocator brings a
     // strategy to track/compose. A CLIENT ACTION (opens the
     // ContributionWizardOverlay hosted at the DashboardChrome level), NOT an

@@ -28,8 +28,9 @@
  * ═══════════════════════════════════════════════════════════════════════════
  * WHY A `globalThis.fetch` SPY IS INDIRECTION-PROOF BY CONSTRUCTION
  * ═══════════════════════════════════════════════════════════════════════════
- * `wizardFetch` (`src/lib/wizard/wizard-correlation.ts:58`) calls the
- * UNQUALIFIED global `fetch` in its body (`:63`). An unqualified `fetch`
+ * `wizardFetch` (`src/lib/wizard/wizard-correlation.ts`, the exported function
+ * of that name) calls the UNQUALIFIED global `fetch` in its body — the `return
+ * fetch(input, { ...init, headers })` on its last line. An unqualified `fetch`
  * resolves against the global object at CALL time, so a spy installed on
  * `globalThis.fetch` observes it.
  *
@@ -102,11 +103,19 @@ const SEAM_IMPORT_EDGE = new RegExp(
  * convert each to the URL path it serves.
  *
  * ⚠️ DERIVED, NOT HAND-TYPED. A hand-typed roster of seam routes re-creates the
- * roster-staleness hole this whole plan exists to close: a sixteenth seam route
- * added next month would be invisible to a typed list, and the pin would report
- * the poll safe with respect to a set that no longer describes the repo. The
+ * roster-staleness hole this whole plan exists to close: a NEW seam route added
+ * next month would be invisible to a typed list, and the pin would report the
+ * poll safe with respect to a set that no longer describes the repo. The
  * fail-loud lower bound in the first case below is what stops the derivation
  * silently returning nothing.
+ *
+ * 140.5-03 / WP-15 — this sentence used to say "a SIXTEENTH seam route", and it
+ * was REWORDED, not deleted as a count. The integer was an ORDINAL about a
+ * hypothetical FUTURE route, not a count of route tests, so the treatment the
+ * "sixteen" COUNTS get elsewhere in this phase — delete the integer, state the
+ * predicate — would have replaced one false claim with another. The point is
+ * "one more than however many there are", which "a new seam route" says exactly
+ * and which the derived roster below already answers.
  */
 function deriveSeamRoutePaths(apiRoot: string): string[] {
   const paths: string[] = [];
@@ -243,8 +252,9 @@ const RUNNING_PROGRESS: SyncProgressResponse = {
  * The sibling PROG file answers unknown URLs with `"{}"`, which is fine there
  * because nothing retargets the tick. Here, the ledger's M86 mutation DOES
  * retarget it — and with a `"{}"` body the component throws a TypeError inside
- * the progress `setState` updater (`SyncPreviewStep.tsx:757` reads
- * `json.memberProgress.length`) BEFORE this file's URL assertion ever runs. The
+ * the progress `setState` updater in `SyncPreviewStep.tsx` (the
+ * `json.degraded === true || json.memberProgress.length === 0` read) BEFORE
+ * this file's URL assertion ever runs. The
  * pin would then "redden" for the wrong reason and the M86 receipt would be
  * FALSE — a guard certified by a crash it did not cause.
  *
@@ -352,7 +362,8 @@ describe("[140.3-G1] RUNTIME PIN: the sync-poll TICK never targets a seam route"
     // the failure mode that makes a guard worse than no guard, because it reads
     // as protection. The bound is hand-typed WELL BELOW the real figure (15 at
     // the time of writing) so ordinary growth never touches it; this is the same
-    // idiom as `seam-ssr-exposure.pin.test.ts:186`.
+    // idiom as `seam-ssr-exposure.pin.test.ts`'s "the scanner actually reads
+    // production source (fail-loud on a broken scan)" case.
     expect(
       SEAM_ROUTE_PATHS.length,
       `The seam-route derivation found almost nothing, so every seam ` +

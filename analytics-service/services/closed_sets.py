@@ -110,6 +110,33 @@ def mt5_enabled_server() -> bool:
 
 
 # ---------------------------------------------------------------------------
+# WR-14 (Phase 164.6.4 round 3) — the kill-switch MISCONFIGURATION detector.
+#
+# mt5_enabled_server() above is fail-CLOSED on any value that is not exactly
+# "true" — by design, and correct for the go-live gate it serves. But that
+# means "1", "on" and "yes" read OFF exactly like a deliberate "" or "false":
+# an operator who typed one of those MEANT to switch MT5 ON and got the kill
+# switch instead. That is a MISCONFIGURATION, not a decision, and the ONE call
+# site that classifies the difference (the session monitor's tick, which
+# records a `not_measured` reading either way) needs to tell them apart so
+# only a genuine decision is exempt from the blind-run escalation. This does
+# NOT widen mt5_enabled_server() itself — every OTHER caller (the go-live
+# gate in routers/exchange.py, routers/process_key.py,
+# services/allocator_positions.py, services/job_worker.py,
+# services/ingestion/long_fetch.py) keeps the strict fail-closed "true" match
+# unchanged.
+# ---------------------------------------------------------------------------
+def mt5_enabled_is_deliberate() -> bool:
+    """True only when MT5_ENABLED names a value the reader RECOGNISES as off.
+
+    ⛔ `1`, `on`, `yes` are MISCONFIGURATIONS, not decisions: they read OFF
+    (see `mt5_enabled_server`) and the operator meant ON. Only absent, blank
+    or an explicit `false` is a DECISION.
+    """
+    return (os.getenv("MT5_ENABLED") or "").strip().lower() in ("", "false")
+
+
+# ---------------------------------------------------------------------------
 # smoothed_mtm worker kill-switch (Phase 134 — SAFE ROLLOUT of the v1.14 basis).
 #
 # The worker computes a THIRD factsheet basis (`smoothed_mtm`) at derive time for
@@ -210,6 +237,33 @@ STABLECOINS_LONGEST_FIRST: tuple[str, ...] = tuple(
 CRYPTO_VENUES: frozenset[str] = frozenset(
     {"deribit", "binance", "okx", "bybit", "sfox"}
 )
+
+
+# ---------------------------------------------------------------------------
+# Non-ccxt venues — the "this venue is NOT a ccxt.Exchange" set (Phase 151 /
+# AUM-02).
+#
+# MD-01 discipline (mirroring CRYPTO_VENUES above): this set MIRRORS the
+# non-ccxt dispatch branches of ``job_worker._make_exchange_client`` — the
+# SINGLE preflight construction chokepoint. That factory hands back a
+# ``SfoxClient`` or an ``Mt5Session`` for these venues, neither of which has a
+# ``fetch_balance`` / ``fetch_positions`` / ``id`` surface.
+#
+# ⚠️ A venue added to that factory WITHOUT being added here re-opens the AUM-02
+# crash class: the object gets built, reaches the holdings consumer
+# (``allocator_positions.fetch_allocator_holdings``), falls through to the ccxt
+# body, and raises a raw ``AttributeError`` that the worker then stamps into the
+# USER-VISIBLE ``api_keys.sync_error`` column. That is exactly the PROD defect
+# (census 2026-08-05: all three founder MT5 keys carried
+# "'Mt5Session' object has no attribute 'fetch_balance'"). Keep them in lockstep
+# — ``tests/test_allocator_positions_non_ccxt.py`` asserts set equality against
+# the factory's own source, so drift fails CI rather than PROD.
+#
+# Membership here means "do not use the ccxt path", NOT "cannot sync": a venue
+# in this set with a registered fetcher in
+# ``allocator_positions._NON_CCXT_HOLDINGS_FETCHERS`` syncs through that fetcher;
+# one without a fetcher yet skips HONESTLY with end-user copy.
+NON_CCXT_VENUES: frozenset[str] = frozenset({"mt5", "sfox"})
 
 
 # ---------------------------------------------------------------------------
