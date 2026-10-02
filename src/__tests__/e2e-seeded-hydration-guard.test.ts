@@ -13,6 +13,11 @@
  * The population is pinned at its measured size so a parser that loses the
  * list fails loudly instead of reporting "no unguarded specs" over nothing.
  * The matcher is self-tested in both polarities below.
+ *
+ * It also pins where the guard's own self-test runs: every invocation must sit
+ * in a step that can fail the `frontend` aggregator (no `continue-on-error`, no
+ * `if:`, in a job the aggregator needs and judges). Presence in an advisory
+ * step would let a guard that has gone blind merge with CI green.
  */
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
@@ -56,20 +61,96 @@ function parseSeededSpecs(workflow: string): string[] {
 
 const GUARD_SELF_TEST = "e2e/hydration-guard.self-test.spec.ts";
 
+/** The merge-gating aggregator job of `.github/workflows/ci.yml`. */
+const AGGREGATOR_JOB = "frontend";
+
+interface SelfTestPlacement {
+  job: string;
+  /** Why this invocation does not block a merge; empty when it does. */
+  advisoryBecause: string[];
+}
+
+/** Uncommented lines of `text`, with their original indentation. */
+function codeLines(text: string): string[] {
+  return text.split("\n").filter((line) => !/^\s*#/.test(line));
+}
+
 /**
- * Whether some uncommented `npx playwright test` line of the workflow runs the
- * guard's self-test. That spec is the only proof the guard bites, so dropping
- * it from CI must fail here rather than leave the guard able to go blind
- * unnoticed. The invocation is matched on one line, which is how the unseeded
- * step writes it; a reflow onto continuation lines fails this check loudly.
+ * The top-level jobs of a workflow, each as its uncommented lines. A job starts
+ * at a two-space `name:` key under `jobs:` and runs to the next one.
  */
-function selfTestRunsInCi(workflow: string): boolean {
+function workflowJobs(workflow: string): Map<string, string[]> {
+  const jobs = new Map<string, string[]>();
+  let inJobs = false;
+  let current: string[] | null = null;
+  for (const line of codeLines(workflow)) {
+    if (/^\S/.test(line)) {
+      inJobs = /^jobs:\s*$/.test(line);
+      current = null;
+      continue;
+    }
+    const key = inJobs ? line.match(/^ {2}([\w-]+):\s*$/) : null;
+    if (key) {
+      current = [];
+      jobs.set(key[1], current);
+    } else if (current) {
+      current.push(line);
+    }
+  }
+  return jobs;
+}
+
+/**
+ * Every place the workflow runs the guard's self-test, and for each one why it
+ * would NOT stop a merge. That spec is the only proof the guard bites, so it
+ * must run where a red result fails the required check: in a step with no
+ * `continue-on-error` and no `if:`, in a job with no `continue-on-error`, which
+ * the `frontend` aggregator both `needs:` and judges in its result loop
+ * (`needs:` alone only makes the aggregator wait). The invocation is matched on
+ * one line; a reflow onto continuation lines finds no placement and fails loudly.
+ */
+function selfTestPlacements(workflow: string): SelfTestPlacement[] {
   const invocation = new RegExp(
     `npx playwright test\\b.*\\s${GUARD_SELF_TEST.replace(/\./g, "\\.")}(\\s|$)`,
   );
-  return workflow
-    .split("\n")
-    .some((line) => !/^\s*#/.test(line) && invocation.test(line));
+  const jobs = workflowJobs(workflow);
+  const aggregatorText = (jobs.get(AGGREGATOR_JOB) ?? []).join("\n");
+  const needsList = aggregatorText.match(/^ {4}needs:\s*\n((?: {6}- [\w-]+[ \t]*(?:\n|$))+)/m);
+  const needs = new Set(
+    (needsList?.[1] ?? "")
+      .split("\n")
+      .map((l) => l.replace(/^\s*- /, "").trim())
+      .filter(Boolean),
+  );
+  const placements: SelfTestPlacement[] = [];
+  for (const [job, lines] of jobs) {
+    lines.forEach((line, i) => {
+      if (!invocation.test(line)) return;
+      let start = i;
+      while (start > 0 && !/^ {6}- /.test(lines[start])) start--;
+      let end = i + 1;
+      while (end < lines.length && !/^ {6}- /.test(lines[end])) end++;
+      const step = lines.slice(start, end);
+      const advisoryBecause: string[] = [];
+      if (step.some((l) => /^ {6}(?:- | {2})continue-on-error:\s*true\b/.test(l))) {
+        advisoryBecause.push("its step has `continue-on-error: true`");
+      }
+      if (step.some((l) => /^ {6}(?:- | {2})if:/.test(l))) {
+        advisoryBecause.push("its step has an `if:` that can skip it");
+      }
+      if (lines.some((l) => /^ {4}continue-on-error:\s*true\b/.test(l))) {
+        advisoryBecause.push(`job \`${job}\` has \`continue-on-error: true\``);
+      }
+      if (!needs.has(job)) {
+        advisoryBecause.push(`job \`${job}\` is not in the \`${AGGREGATOR_JOB}\` aggregator's needs:`);
+      }
+      if (!aggregatorText.includes(`"${job}=\${{ needs.${job}.result }}"`)) {
+        advisoryBecause.push(`job \`${job}\` has no row in the \`${AGGREGATOR_JOB}\` result loop`);
+      }
+      placements.push({ job, advisoryBecause });
+    });
+  }
+  return placements;
 }
 
 interface ImportBinding {
@@ -145,29 +226,147 @@ describe("seeded e2e specs run under the hydration guard (Phase 169.1.1 SC-4)", 
     ).toEqual([]);
   });
 
-  it("the guard's self-test runs in CI's e2e list", () => {
+  it("the guard's self-test runs in CI, and only where a red result blocks a merge", () => {
+    const placements = selfTestPlacements(readRepoFile(CI_WORKFLOW));
     expect(
-      selfTestRunsInCi(readRepoFile(CI_WORKFLOW)),
+      placements.length,
       `${GUARD_SELF_TEST} is not run by any \`npx playwright test\` line of ${CI_WORKFLOW}. ` +
-        "It is the only proof the hydration guard bites; put it back in the unseeded e2e list.",
-    ).toBe(true);
+        "It is the only proof the hydration guard bites; run it again in its own blocking step " +
+        "of the `e2e-seeded` job.",
+    ).toBeGreaterThan(0);
+    expect(
+      placements.filter((p) => p.advisoryBecause.length > 0),
+      `${GUARD_SELF_TEST} runs somewhere a red result WOULD SURFACE in the run log but WOULD NOT ` +
+        `stop a merge. It is the only proof the hydration guard bites, so every run of it must ` +
+        `gate the \`${AGGREGATOR_JOB}\` check.`,
+    ).toEqual([]);
   });
 
   describe("self-tests of the real matcher", () => {
-    it("finds the guard self-test on an unseeded invocation line", () => {
-      expect(
-        selfTestRunsInCi(
-          `            npx playwright test e2e/auth.spec.ts ${GUARD_SELF_TEST}\n`,
-        ),
-      ).toBe(true);
+    /** A minimal workflow: an aggregator gating `gated`, and an ungated `advisory` job. */
+    function workflow(opts: {
+      gatedStep?: string[];
+      advisoryStep?: string[];
+      needs?: string[];
+      rows?: string[];
+      gatedJobExtra?: string[];
+    }): string {
+      const needs = opts.needs ?? ["gated"];
+      const rows = opts.rows ?? ["gated"];
+      return [
+        "name: CI",
+        "jobs:",
+        `  ${AGGREGATOR_JOB}:`,
+        "    needs:",
+        ...needs.map((n) => `      - ${n}`),
+        "    if: always()",
+        "    steps:",
+        "      - name: Verify",
+        "        run: |",
+        "          for r in \\",
+        ...rows.map((n) => `            "${n}=\${{ needs.${n}.result }}" \\`),
+        "            ; do :; done",
+        "  gated:",
+        "    runs-on: ubuntu-latest",
+        ...(opts.gatedJobExtra ?? []),
+        "    steps:",
+        "      - name: Earlier",
+        "        continue-on-error: true",
+        "        run: echo earlier",
+        ...(opts.gatedStep ?? []),
+        "      - name: Later",
+        "        if: always()",
+        "        run: echo later",
+        "  advisory:",
+        "    runs-on: ubuntu-latest",
+        "    steps:",
+        ...(opts.advisoryStep ?? []),
+        "",
+      ].join("\n");
+    }
+    const blockingStep = [
+      "      - name: Hydration guard self-test",
+      `        run: npx playwright test ${GUARD_SELF_TEST} --retries 0`,
+    ];
+
+    it("passes a self-test in its own step of a job the aggregator needs and judges", () => {
+      expect(selfTestPlacements(workflow({ gatedStep: blockingStep }))).toEqual([
+        { job: "gated", advisoryBecause: [] },
+      ]);
     });
 
-    it("does not find the guard self-test when it is dropped or commented out", () => {
-      expect(selfTestRunsInCi("            npx playwright test e2e/auth.spec.ts\n")).toBe(false);
-      expect(
-        selfTestRunsInCi(`            # npx playwright test e2e/auth.spec.ts ${GUARD_SELF_TEST}\n`),
-      ).toBe(false);
-      expect(selfTestRunsInCi(`            echo ${GUARD_SELF_TEST}\n`)).toBe(false);
+    it("flags a self-test step with continue-on-error", () => {
+      const [p] = selfTestPlacements(
+        workflow({
+          gatedStep: [
+            "      - name: Hydration guard self-test",
+            "        continue-on-error: true",
+            "        run: |",
+            `          npx playwright test e2e/auth.spec.ts ${GUARD_SELF_TEST}`,
+          ],
+        }),
+      );
+      expect(p.advisoryBecause).toEqual(["its step has `continue-on-error: true`"]);
+    });
+
+    it("flags a self-test step with an if:", () => {
+      const [p] = selfTestPlacements(
+        workflow({
+          gatedStep: [
+            "      - name: Hydration guard self-test",
+            "        if: github.event_name == 'push'",
+            `        run: npx playwright test ${GUARD_SELF_TEST}`,
+          ],
+        }),
+      );
+      expect(p.advisoryBecause).toEqual(["its step has an `if:` that can skip it"]);
+    });
+
+    it("flags a job-level continue-on-error", () => {
+      const [p] = selfTestPlacements(
+        workflow({ gatedStep: blockingStep, gatedJobExtra: ["    continue-on-error: true"] }),
+      );
+      expect(p.advisoryBecause).toEqual(["job `gated` has `continue-on-error: true`"]);
+    });
+
+    it("flags a job the aggregator does not need", () => {
+      const [p] = selfTestPlacements(workflow({ gatedStep: blockingStep, needs: ["other"] }));
+      expect(p.advisoryBecause).toEqual([
+        `job \`gated\` is not in the \`${AGGREGATOR_JOB}\` aggregator's needs:`,
+      ]);
+    });
+
+    it("flags a job the aggregator needs but does not judge in its result loop", () => {
+      const [p] = selfTestPlacements(workflow({ gatedStep: blockingStep, rows: ["other"] }));
+      expect(p.advisoryBecause).toEqual([
+        `job \`gated\` has no row in the \`${AGGREGATOR_JOB}\` result loop`,
+      ]);
+    });
+
+    it("flags a copy left in an advisory job beside a blocking one", () => {
+      const placements = selfTestPlacements(
+        workflow({
+          gatedStep: blockingStep,
+          advisoryStep: [
+            "      - name: Smoke",
+            `        run: npx playwright test e2e/auth.spec.ts ${GUARD_SELF_TEST}`,
+          ],
+        }),
+      );
+      expect(placements.map((p) => p.job)).toEqual(["gated", "advisory"]);
+      expect(placements[1].advisoryBecause).toContain(
+        `job \`advisory\` is not in the \`${AGGREGATOR_JOB}\` aggregator's needs:`,
+      );
+    });
+
+    it("finds no placement when the self-test is dropped, commented out or only echoed", () => {
+      for (const gatedStep of [
+        ["      - name: S", "        run: npx playwright test e2e/auth.spec.ts"],
+        ["      - name: S", "        run: |", `          # npx playwright test ${GUARD_SELF_TEST}`],
+        ["      - name: S", `        run: echo ${GUARD_SELF_TEST}`],
+      ]) {
+        expect(selfTestPlacements(workflow({ gatedStep }))).toEqual([]);
+      }
     });
 
     it("reports a plain Playwright import", () => {

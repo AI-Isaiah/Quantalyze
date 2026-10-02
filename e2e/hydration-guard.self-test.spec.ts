@@ -17,7 +17,10 @@
  * The other releases a late #418 only after its body has returned, so the
  * expected failure needs teardown's drain as well. If teardown stops throwing or stops
  * draining, the case PASSES and Playwright reports that as a failure.
- * It runs in CI's unseeded e2e list.
+ * It runs as its own blocking step of CI's `e2e-seeded` job, before the
+ * shared-test-db mutex, so a red result fails the `frontend` check on a push or
+ * a same-repo PR. That job skips on fork and docs-only PRs, where this spec
+ * does not run. `src/__tests__/e2e-seeded-hydration-guard.test.ts` pins it there.
  *
  * Each case awaits the `weberror` event together with the `reportError` call,
  * so the event is delivered before fixture teardown runs. A plain sleep would

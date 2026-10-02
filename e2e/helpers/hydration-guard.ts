@@ -10,7 +10,9 @@ import type { BrowserContext } from "@playwright/test";
  * the Playwright package. `src/__tests__/e2e-seeded-hydration-guard.test.ts`
  * reads that list and fails when a listed spec does not, so a spec added to the
  * seeded list without the guard turns vitest red. Proof that the guard bites:
- * `e2e/hydration-guard.self-test.spec.ts`, which runs in CI's unseeded list.
+ * `e2e/hydration-guard.self-test.spec.ts`, which runs as its own blocking step
+ * of CI's `e2e-seeded` job (a red self-test fails the `frontend` check on a
+ * push or a same-repo PR; that job skips on fork and docs-only PRs).
  *
  * How a mismatch reaches this fixture: React's onRecoverableError hands the
  * hydration error to Next's reportGlobalError, which calls `reportError`, and
