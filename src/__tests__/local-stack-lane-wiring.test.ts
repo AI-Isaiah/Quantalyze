@@ -1309,6 +1309,21 @@ describe("the lane's loopback-DSN gates all use capability-probe's parse-based r
       expect(firstExport, `${job} no longer writes the lane handoff to GITHUB_ENV (D-04)`).toBeGreaterThan(-1);
       expect(firstDb, `${job} no longer runs its first DB-touching step \`${firstDbStep}\` (D-04)`).toBeGreaterThan(-1);
       expect(boot < seam, `${job} asserts the handoff BEFORE the lane boots, so it reads no handoff (D-04)`).toBe(true);
+      // Review 164.9.4 round 2, SFH-03: the guard asserts the SAME file the export
+      // reads. Called with no argument it read run.sh's default path, which matched
+      // LANE_ENV_FILE only by coincidence; a divergence would assert one file and
+      // export another, unasserted one.
+      const assign = lines.findIndex((l) => l.startsWith("lane_env_file="));
+      expect(assign, `${job} no longer names the handoff file in lane_env_file (SFH-03)`).toBeGreaterThan(-1);
+      expect(assign < seam, `${job} calls the guard before lane_env_file is set, so it cannot pass the export's file (SFH-03)`).toBe(true);
+      expect(
+        lines[seam],
+        `${job} calls the guard without the export's file, so it asserts run.sh's default path instead (SFH-03)`,
+      ).toBe('bash scripts/local-stack/run.sh --assert-local-handoff "${lane_env_file}"');
+      expect(
+        lines.filter((l) => l.includes('"${lane_env_file}"') && l.startsWith("api_url=")).length,
+        `${job}: the export no longer reads API_URL from \${lane_env_file}, so the guard and the export could name different files (SFH-03)`,
+      ).toBe(1);
       expect(
         seam < firstExport,
         `${job} writes to GITHUB_ENV BEFORE run.sh --assert-local-handoff, so a misrouted URL reaches every later step before the loopback check (D-04)`,

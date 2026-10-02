@@ -5179,8 +5179,10 @@ jobs:
       # read out of it or handed to a later step. The assertion is the lane's own
       # `--assert-local-handoff` seam in run.sh, which reuses `assert_local` for
       # API_URL and the WR-08 parse-based probe for DB_URL; no guard is re-written
-      # here. It reads run.sh's default handoff path, the same file LANE_ENV_FILE
-      # names below. It prints no URL, DSN or key.
+      # here. It is handed `${lane_env_file}`, the exact file the export below
+      # reads (review 164.9.4 round 2 SFH-03: it used to read run.sh's default
+      # path, which only matched LANE_ENV_FILE by coincidence). It prints no URL,
+      # DSN or key.
       - name: Lane handoff - assert loopback, then export the URL and keys to later steps
         working-directory: ${{ github.workspace }}
         env:
@@ -5189,8 +5191,8 @@ jobs:
           LANE_ENV_FILE: ${{ github.workspace }}/scripts/local-stack/.stack-env
         run: |
           set -euo pipefail
-          bash scripts/local-stack/run.sh --assert-local-handoff
           lane_env_file="${LANE_ENV_FILE:-scripts/local-stack/.stack-env}"
+          bash scripts/local-stack/run.sh --assert-local-handoff "${lane_env_file}"
           api_url="$(sed -n 's/^API_URL="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "${lane_env_file}" 2>/dev/null | head -1 || true)"
           service_key="$(sed -n 's/^SERVICE_ROLE_KEY="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "${lane_env_file}" 2>/dev/null | head -1 || true)"
           if [ -z "${api_url}" ]; then
@@ -6179,8 +6181,10 @@ jobs:
       # read out of it or handed to a later step. The assertion is the lane's own
       # `--assert-local-handoff` seam in run.sh, which reuses `assert_local` for
       # API_URL and the WR-08 parse-based probe for DB_URL; no guard is re-written
-      # here. It reads run.sh's default handoff path, the same file LANE_ENV_FILE
-      # names below. It prints no URL, DSN or key.
+      # here. It is handed `${lane_env_file}`, the exact file the export below
+      # reads (review 164.9.4 round 2 SFH-03: it used to read run.sh's default
+      # path, which only matched LANE_ENV_FILE by coincidence). It prints no URL,
+      # DSN or key.
       - name: Lane handoff - assert loopback, then export the URL and keys to later steps
         env:
           # A path, not a value: where the boot step's mode-600 handoff lives
@@ -6188,8 +6192,8 @@ jobs:
           LANE_ENV_FILE: ${{ github.workspace }}/scripts/local-stack/.stack-env
         run: |
           set -euo pipefail
-          bash scripts/local-stack/run.sh --assert-local-handoff
           lane_env_file="${LANE_ENV_FILE:-scripts/local-stack/.stack-env}"
+          bash scripts/local-stack/run.sh --assert-local-handoff "${lane_env_file}"
           api_url="$(sed -n 's/^API_URL="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "${lane_env_file}" 2>/dev/null | head -1 || true)"
           anon_key="$(sed -n 's/^ANON_KEY="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "${lane_env_file}" 2>/dev/null | head -1 || true)"
           service_key="$(sed -n 's/^SERVICE_ROLE_KEY="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "${lane_env_file}" 2>/dev/null | head -1 || true)"

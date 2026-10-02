@@ -779,8 +779,8 @@ describe("Critical regression guards", () => {
         );
         expectMatch(
           job,
-          /- name: Lane handoff - assert loopback, then export the URL and keys to later steps\n[\s\S]*?\n {10}bash scripts\/local-stack\/run\.sh --assert-local-handoff\n/,
-          "e2e-seeded job lost its `Lane handoff - assert loopback, then export the URL and keys to later steps` step or that step's `bash scripts/local-stack/run.sh --assert-local-handoff` line — the build would inline a URL nothing asserted is loopback (Phase 164.9.4 D-04)",
+          /- name: Lane handoff - assert loopback, then export the URL and keys to later steps\n[\s\S]*?\n {10}bash scripts\/local-stack\/run\.sh --assert-local-handoff "\$\{lane_env_file\}"\n/,
+          "e2e-seeded job lost its `Lane handoff - assert loopback, then export the URL and keys to later steps` step or that step's `bash scripts/local-stack/run.sh --assert-local-handoff \"${lane_env_file}\"` line — the build would inline a URL nothing asserted is loopback (Phase 164.9.4 D-04, review round 2 SFH-03)",
         );
         // (c) clean workspace: the placeholder artifact is never downloaded
         // here (downloading it would reintroduce the placeholder-chunk
