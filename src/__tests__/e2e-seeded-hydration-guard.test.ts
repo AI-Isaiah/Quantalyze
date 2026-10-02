@@ -54,6 +54,24 @@ function parseSeededSpecs(workflow: string): string[] {
   return [...new Set(paths)];
 }
 
+const GUARD_SELF_TEST = "e2e/hydration-guard.self-test.spec.ts";
+
+/**
+ * Whether some uncommented `npx playwright test` line of the workflow runs the
+ * guard's self-test. That spec is the only proof the guard bites, so dropping
+ * it from CI must fail here rather than leave the guard able to go blind
+ * unnoticed. The invocation is matched on one line, which is how the unseeded
+ * step writes it; a reflow onto continuation lines fails this check loudly.
+ */
+function selfTestRunsInCi(workflow: string): boolean {
+  const invocation = new RegExp(
+    `npx playwright test\\b.*\\s${GUARD_SELF_TEST.replace(/\./g, "\\.")}(\\s|$)`,
+  );
+  return workflow
+    .split("\n")
+    .some((line) => !/^\s*#/.test(line) && invocation.test(line));
+}
+
 interface ImportBinding {
   module: string;
   bindsValueTest: boolean;
@@ -127,7 +145,31 @@ describe("seeded e2e specs run under the hydration guard (Phase 169.1.1 SC-4)", 
     ).toEqual([]);
   });
 
+  it("the guard's self-test runs in CI's e2e list", () => {
+    expect(
+      selfTestRunsInCi(readRepoFile(CI_WORKFLOW)),
+      `${GUARD_SELF_TEST} is not run by any \`npx playwright test\` line of ${CI_WORKFLOW}. ` +
+        "It is the only proof the hydration guard bites; put it back in the unseeded e2e list.",
+    ).toBe(true);
+  });
+
   describe("self-tests of the real matcher", () => {
+    it("finds the guard self-test on an unseeded invocation line", () => {
+      expect(
+        selfTestRunsInCi(
+          `            npx playwright test e2e/auth.spec.ts ${GUARD_SELF_TEST}\n`,
+        ),
+      ).toBe(true);
+    });
+
+    it("does not find the guard self-test when it is dropped or commented out", () => {
+      expect(selfTestRunsInCi("            npx playwright test e2e/auth.spec.ts\n")).toBe(false);
+      expect(
+        selfTestRunsInCi(`            # npx playwright test e2e/auth.spec.ts ${GUARD_SELF_TEST}\n`),
+      ).toBe(false);
+      expect(selfTestRunsInCi(`            echo ${GUARD_SELF_TEST}\n`)).toBe(false);
+    });
+
     it("reports a plain Playwright import", () => {
       expect(unguardedReason('import { test, expect } from "@playwright/test";\n')).toBe(
         'binds `test` from "@playwright/test"',
