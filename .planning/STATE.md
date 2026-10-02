@@ -971,7 +971,7 @@ Prior-phase 141.1 close-out detail (retained; NOT about 142.1):
         after PYAPIFIX-01" ordering is now **SATISFIED**.
         2 WARNING gaps, no BLOCKER. See `140.1-VERIFICATION.md`. Not transitioned (`--no-transition`).
 
-Progress: [██████░░░░] 55%
+Progress: [█████░░░░░] 54%
 
 ### Phase 140.1 close-out — open items (do NOT lose these)
 
