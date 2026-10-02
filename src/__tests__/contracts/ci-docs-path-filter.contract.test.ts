@@ -981,7 +981,12 @@ describe("[164.9.4 WR-01] TEST_READ_PLANNING_PATHS matches the planning files th
   });
 });
 
-describe("[164.6.3 / CI-DOCSPATH-01] CALIBRATION — the classifier's self-test can FAIL", () => {
+// ⏱ A per-arm timeout, not the 5 s default: every arm below SPAWNS the full
+// self-test, which since review 164.9.4 round 2 builds scratch repos and spawns
+// main() against a fake gh for the SFH-04 and WR-01 rows (about 3-4 s wall on a
+// loaded box, measured 2026-10-02). Under the default the arms timed out before
+// the self-test answered, which is a harness red, not a classifier one.
+describe("[164.6.3 / CI-DOCSPATH-01] CALIBRATION — the classifier's self-test can FAIL", { timeout: 60_000 }, () => {
   const ORIGINAL = readFileSync(CLASSIFIER, "utf8");
 
   /** The allow-list declaration — the widening neuter's target. */
