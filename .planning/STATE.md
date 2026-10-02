@@ -5,17 +5,17 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 169.1.1
 current_phase_name: HYDRATIONTICKS
 status: planning
-stopped_at: Phase 169.1.1 inserted (urgent); runs before Phase 164.9.3.2.1 (founder 2026-10-02)
-last_updated: "2026-10-02T08:25:37.248Z"
+stopped_at: Phase 169.1.1 UI-SPEC approved
+last_updated: "2026-10-02T09:02:59.053Z"
 last_activity: 2026-10-02
 last_activity_desc: Phase 169.1.1 HYDRATIONTICKS inserted; next 169.1.1 then 164.9.3.2.1
-state_head: d566878a2f7b690212d0bb8c53c951c5f0be72be
+state_head: c0f01dc2b511772e0b3e9e3bda8726e44034ba75
 progress:
-  total_phases: 84
+  total_phases: 85
   completed_phases: 45
   total_plans: 446
   completed_plans: 439
-  percent: 54
+  percent: 53
 ---
 
 ## ⭐ STATE lineage
@@ -970,7 +970,7 @@ Prior-phase 141.1 close-out detail (retained; NOT about 142.1):
         after PYAPIFIX-01" ordering is now **SATISFIED**.
         2 WARNING gaps, no BLOCKER. See `140.1-VERIFICATION.md`. Not transitioned (`--no-transition`).
 
-Progress: [█████░░░░░] 54%
+Progress: [█████░░░░░] 53%
 
 ### Phase 140.1 close-out — open items (do NOT lose these)
 
@@ -2492,9 +2492,9 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-09-27T22:52:00.000Z
-**Stopped At:** Phase 169.1.1 inserted; next 169.1.1 then 164.9.3.2.1
-**Resume File:** None
+**Last Date:** 2026-10-02T09:02:56.666Z
+**Stopped At:** Phase 169.1.1 UI-SPEC approved
+**Resume File:** .planning/phases/169.1.1-hydrationticks-factsheet-chart-ticks-render-the-same-on-serv/169.1.1-UI-SPEC.md
 
 **Last Date:** 2026-09-24T06:17:00.000Z
 **Stopped At:** Completed 167.1-06-PLAN.md
