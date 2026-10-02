@@ -3285,6 +3285,8 @@ Plans:
 
 ⭐ **Scope record, 2026-10-02 (ENQ-SCOPE, founder):** `enq-sibling`: the Goal's "any sibling RPC with the same errcode" is met in this phase for the four fence raises in `defer_compute_job`, `mark_compute_job_done` (two) and `mark_compute_job_failed`, and the enqueue race-loss raise in `_enqueue_compute_job_internal` is routed to Phase 164.9.3.2.1 (ENQ40001; A2 refuted, race-loss unmeasured). The Goal and SC-1 above are kept as written, as lineage.
 
+⭐ **Founder override, 2026-10-02 (VAC-08 pre-merge red, "Merge now"):** PR #919 was merged at head `9e861c047` with `test-db-drift` (VAC-08) red. `mark_compute_job_done/2` on shared TEST hashed `2315eb47…`, which equals the migration's own `prod-body-ack`, so TEST held the pre-migration body and the difference was this PR's errcode change, which reaches TEST only on the merge apply. The ledger-frontier exemption covered ledger presence (`1 exempt … 0 NEW drift`) but not the body comparison (class `[164.8-PUSH-RACE-VAC08]` (b)). This departs from plan 08's ship condition, which listed a VAC-08 red as a stop. Measured after merge: Supabase Migrate run `36981647441` applied `5a88a165` to TEST then PROD, and the merge push's `test-db-drift` was green.
+
 **Evidence, measured 2026-09-27 on the local lane** by the 164.9.4 measurement-run diagnosis (run `36304648008`, head `89c5ef3d`):
 - One call to a throwaway function that raises 40001 made PostgREST re-run it about 27k times in about 9 s on postgrest v14.5. That is the version the linked PROD project reports in `supabase/.temp/rest-version`.
 - The same call re-ran about 29k times on v14.7, the lane image. On v14.7 the loop outlived the client disconnect.
