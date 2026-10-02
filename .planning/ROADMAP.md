@@ -4194,7 +4194,7 @@ Plans:
 **Goal:** Every factsheet and allocation chart computes the same y-axis ticks on the server and in the browser, so React never reports a hydration mismatch (#418) and never rebuilds the tree after first paint. The Overview EquityChart a user (or a test) is looking at is the one that stays on the page.
 **Requirements**: TBD
 **Depends on:** Phase 169.1
-**Plans:** 0 plans
+**Plans:** 4 plans in 4 waves (a strict chain), one PR
 
 ⭐ **Founder decision, 2026-10-02 (AskUserQuestion, "New phase, first"):** a phase of its own, run BEFORE Phase 164.9.3.2.1.
 
@@ -4217,7 +4217,14 @@ Plans:
 ⭐ **Founder decision, 2026-10-02 (AskUserQuestion, "Fold it in"):** the `e2e/composite-factsheet-render.spec.ts` axe (cash basis) flake is NOT hydration (research Finding 9: axe scans while the `<h1>` is still inside React's hidden streaming segment); its one-line fix (`await expect(h1).toBeVisible()` before the scan) is in this phase's scope.
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 169.1.1 to break down)
+**Wave 1**
+- [ ] 169.1.1-01-PLAN.md — shared engine-independent `chart-ticks` helper + factsheet `TimeSeriesChart` (SC-1/2/3)
+**Wave 2** *(blocked on Wave 1 completion)*
+- [ ] 169.1.1-02-PLAN.md — the other four tick builders + class guard test (SC-1/2)
+**Wave 3** *(blocked on Wave 2 completion)*
+- [ ] 169.1.1-03-PLAN.md — seeded-e2e #418 guard fixture + composite axe visibility wait (SC-4/5/6)
+**Wave 4** *(blocked on Wave 3 completion)*
+- [ ] 169.1.1-04-PLAN.md — full gate + `chore(release)` HYDRATIONTICKS
 
 ### Phase 169.2: BENCHFRESH — the BTC benchmark is refreshed daily and read in full (INSERTED)
 
@@ -4642,7 +4649,7 @@ kept verbatim.
 | 168. DRBOPTIONS (a Deribit options account ingests end to end) | 2/3 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed; plan 03 is the founder's live retry | v0.97.0.0 · #867 |
 | 169. FACTSHEETTRUTH (split from PAGETRUTH 2026-09-26) | 7 plans on `feat/169-pagetruth`, not on main | Queued — feature; comparator plans split to 169.5 on 2026-09-27 (D-61); waits for 167.1.2 PR C | - |
 | 169.1 ZOOMKPIS | 9/9 | Complete    | 2026-10-01 |
-| 169.1.1 HYDRATIONTICKS | 0/? | Queued — urgent, runs before 164.9.3.2.1 (founder 2026-10-02) | - |
+| 169.1.1 HYDRATIONTICKS | 0/4 | Planned — urgent, runs before 164.9.3.2.1 (founder 2026-10-02) | - |
 | 169.2 BENCHFRESH | 3/3 | Shipped — verification `human_needed` (14/16, 2 routed to human checks): post-deploy checks pending, not closed | v0.107.0.0 · #879 |
 | 169.3 SMALLFIXES | 1/5 (plan 01 on main; 02–05 on `feat/169-pagetruth`) | In progress — plan 01 shipped (v0.97.0.1, #868); plans 02–05 next, 03/04 gated on 167.1.2 PR C | - |
 | 169.4 ALLOCTRUTH | 3 plans on `feat/169-pagetruth`, not on main | Queued — feature; after 169, 169.5, 169.2 and 167.1.2 PR C | - |

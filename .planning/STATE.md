@@ -5,15 +5,15 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 169.1.1
 current_phase_name: HYDRATIONTICKS
 status: planning
-stopped_at: Phase 169.1.1 UI-SPEC approved
-last_updated: "2026-10-02T09:02:59.053Z"
+stopped_at: Phase 169.1.1 planned (4 plans, checker passed)
+last_updated: "2026-10-02T10:46:03.905Z"
 last_activity: 2026-10-02
 last_activity_desc: Phase 169.1.1 HYDRATIONTICKS inserted; next 169.1.1 then 164.9.3.2.1
-state_head: c0f01dc2b511772e0b3e9e3bda8726e44034ba75
+state_head: 7820da2bb3ddc0b7036e352b5e7998f7e52694ac
 progress:
   total_phases: 85
   completed_phases: 45
-  total_plans: 446
+  total_plans: 450
   completed_plans: 439
   percent: 53
 ---
@@ -180,7 +180,7 @@ no VERIFICATION.md exists for this phase yet, and this repo's own rule is that p
 is decided by verification status, never by plan counts.**
 
 Phase: 164.9.3.2 (DEFER40001) — COMPLETE 2026-10-02 (verification passed; PR #919 merged, v0.118.0.0; migration applied to TEST and PROD by Supabase Migrate run 36981647441)
-Phase: 169.1.1 (HYDRATIONTICKS) — NEXT, urgent insert (founder 2026-10-02)
+Phase: 169.1.1 (HYDRATIONTICKS) — READY TO EXECUTE, urgent insert (founder 2026-10-02); 4 plans, plan checker passed 2026-10-02
 Phase: 164.9.3.2.1 (ENQ40001) — after 169.1.1 (founder 2026-10-02)
 Phase: 166.4 (BENCHALIGN) — COMPLETE 2026-09-27 (verification passed; PR #892 merged, v0.108.0.0)
 Phase: 170 (LAYOUT — page layout reads clean and holds on every page) — COMPLETE 2026-10-01

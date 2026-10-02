@@ -61,8 +61,8 @@
   ],
   "next": {
     "command": "/gsd:progress --next",
-    "label": "Advance to the next step (plan phase 169.1.1)",
-    "reason": "Phase 169.1.1 HYDRATIONTICKS (urgent) — needs a plan; then 164.9.3.2.1"
+    "label": "Advance to the next step (execute phase 169.1.1)",
+    "reason": "Phase 169.1.1 HYDRATIONTICKS (urgent) — planned, execute next; then 164.9.3.2.1"
   },
-  "updated_at": "2026-10-02T08:49:15.480Z"
+  "updated_at": "2026-10-02T10:46:03.936Z"
 }
