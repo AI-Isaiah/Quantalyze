@@ -8,11 +8,11 @@ status: planning
 stopped_at: Phase 169.1.1 inserted (urgent); runs before Phase 164.9.3.2.1 (founder 2026-10-02)
 last_updated: "2026-10-02T08:25:37.248Z"
 last_activity: 2026-10-02
-last_activity_desc: Phase 169.1.1 HYDRATIONTICKS inserted; next 169.1.1 then 164.9.3.2.1
+last_activity_desc: Phase 164.9.5 closed (verification passed via bot PR #920); next 169.1.1 then 164.9.3.2.1
 state_head: d566878a2f7b690212d0bb8c53c951c5f0be72be
 progress:
-  total_phases: 84
-  completed_phases: 45
+  total_phases: 85
+  completed_phases: 46
   total_plans: 446
   completed_plans: 439
   percent: 54
@@ -179,6 +179,7 @@ both checkboxes updated to match. Not yet marked `completed_phases` in the front
 no VERIFICATION.md exists for this phase yet, and this repo's own rule is that phase completion
 is decided by verification status, never by plan counts.**
 
+Phase: 164.9.5 (AUTOREDUMP) — COMPLETE 2026-10-02 (verification passed; first changed re-dump opened bot PR #920, all head-sha runs green)
 Phase: 164.9.3.2 (DEFER40001) — COMPLETE 2026-10-02 (verification passed; PR #919 merged, v0.118.0.0; migration applied to TEST and PROD by Supabase Migrate run 36981647441)
 Phase: 169.1.1 (HYDRATIONTICKS) — NEXT, urgent insert (founder 2026-10-02)
 Phase: 164.9.3.2.1 (ENQ40001) — after 169.1.1 (founder 2026-10-02)
@@ -970,7 +971,7 @@ Prior-phase 141.1 close-out detail (retained; NOT about 142.1):
         after PYAPIFIX-01" ordering is now **SATISFIED**.
         2 WARNING gaps, no BLOCKER. See `140.1-VERIFICATION.md`. Not transitioned (`--no-transition`).
 
-Progress: [█████░░░░░] 54%
+Progress: [██████░░░░] 55%
 
 ### Phase 140.1 close-out — open items (do NOT lose these)
 
