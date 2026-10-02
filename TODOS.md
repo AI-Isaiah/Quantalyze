@@ -1537,6 +1537,34 @@ true for 146 and half of 142–145, and **false for 141**.
       `/gsd-phase --insert`. The ROADMAP section holds the success criteria; this entry is the
       evidence.
 
+- [ ] **`[164.9.4-DEFER-40001-RETRY-HANG]` A mismatched-token `defer_compute_job` RPC hangs through PostgREST instead of failing (booked 2026-09-26, Phase 164.9.4 D-15, evidence only).**
+      **Measured 2026-09-26 on a private local-stack lane** (no shared TEST, no other load on
+      the database). `defer_compute_job` raises `USING ERRCODE = 'serialization_failure'`
+      (SQLSTATE 40001) on its mismatched-token path, read from the function definition on the
+      lane. A direct PostgREST call with a mismatched token got no response within
+      `--max-time 25` (`http=000 real 25.18`); the same call with the matching token returned
+      `http=200 real 0.36`. The PostgREST log answered the hung request only after the row's
+      state changed (`defer_compute_job: job … not found or not running`). This is the
+      behaviour Supabase documents on its troubleshooting page "High CPU and infinite
+      transaction retries when using custom error codes in RPC functions"
+      (https://supabase.com/docs/guides/troubleshooting/high-cpu-and-infinite-transaction-retries-when-using-custom-error-codes-in-rpc-functions-77326b):
+      PostgREST retries a transaction that raises 40001. Source: `164.9.4-RESEARCH.md`,
+      `## Python on the lane (MEASURED)`.
+      **Consequence.** The skip reasons in `analytics-service/tests/test_compute_jobs_fencing.py`
+      carry a MISATTRIBUTED root cause. `test_defer_compute_job_token_fence` skips at runtime
+      after about 120 s on the idle private lane too, deterministically, so shared-TEST contention
+      is not the cause. The three `@pytest.mark.skip("P1 TODO — flaky httpx.ReadTimeout …")`
+      fence tests (`test_late_mark_done_with_stale_token_raises_serialization_failure`,
+      `test_late_mark_failed_with_stale_token_raises_serialization_failure`,
+      `test_late_mark_done_after_w2_completed_raises_serialization_failure`) blame the same
+      contention. Their functions raise the same SQLSTATE, so the 40001 retry loop is the likely
+      cause there too; that half is UNMEASURED, only `defer_compute_job` was probed. Leaving
+      shared TEST therefore does not un-skip any of them. The job worker
+      (`analytics-service/services/job_worker.py`) calls `defer_compute_job` through the same
+      PostgREST RPC path, so a stale worker may hang instead of failing fast: the compute
+      pipeline may be affected, so this may be data-integrity.
+      ⏳ **Destination: AWAITS ROUTING.** The 2026-09-26 founder freeze forbids new phases; route it with /gsd-phase when the freeze lifts. Not fixed in 164.9.4, and it moves no count there.
+
 - [x] **`[164.9.5-MANUAL-BASELINE-REDUMP]` Every PROD migration apply leaves `main` red on
       baseline-content-drift until someone runs a manual schema dump (booked 2026-09-26, founder
       decision).**
