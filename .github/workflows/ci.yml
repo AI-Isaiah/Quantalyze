@@ -4647,6 +4647,20 @@ jobs:
           #   229 -> 237, read off each file's own first `ALL N ARMS EXECUTED`
           #   sentinel on the tree merged with origin/main. The mutation runner's own
           #   ARMS_FLOOR moved 545 -> 553 in the same phase, also +8.
+          # Re-measured 2026-10-02 (Phase 164.9.3.2.1 ENQ40001, plan 03), ONE move:
+          #   test_enqueue_race_loss_40001.sql, NEW, 2 arms (R1, R2): the enqueue
+          #   race-loss raise is SQLSTATE 40001 and its re-run converges once the
+          #   winner is done. A new sentinel-bearing file changes the FILE SET, so
+          #   SENTINEL_FLOOR 12 -> 13 and ARMS_FLOOR 237 -> 239, read off each file's
+          #   own first `ALL N ARMS EXECUTED` sentinel on the tree merged with
+          #   origin/main. The mutation runner's own ARMS_FLOOR moved 553 -> 555 in
+          #   the same phase, also +2.
+          # Re-measured 2026-10-02 (Phase 164.9.3.2.1 ENQ40001, review fix WR-01), ONE
+          #   move: test_enqueue_race_loss_40001.sql 2 -> 3, arm R3 (the same race and
+          #   re-run on the api_key-target branch holdings sync uses). No file joined,
+          #   so SENTINEL_FLOOR stays 13 and ARMS_FLOOR moves 239 -> 240, read off each
+          #   file's own first `ALL N ARMS EXECUTED` sentinel. The mutation runner's own
+          #   ARMS_FLOOR moved 555 -> 556 in the same fix, also +1.
           # ⚠️ Re-measured 2026-09-17 (164.5.1, arm R): the fan-out file goes
           # 15 -> 18. Its own closing sentinel had been stuck at 15 and did not
           # list arms P or Q although both run, so this table AGREED WITH A STALE
@@ -4658,6 +4672,7 @@ jobs:
           #   test_analytics_service_settings_and_vault_tick.sql 13
           #   test_compute_job_fence_errcode.sql              8
           #   test_create_wizard_strategy_for_key.sql         9
+          #   test_enqueue_race_loss_40001.sql                3
           #   test_get_verified_cohort_rank_gate.sql          6
           #   test_ledger_refresh_composite_arm.sql          23
           #   test_ledger_refresh_fanout.sql                 26
@@ -4736,8 +4751,8 @@ jobs:
           #   test_strategy_shares_rls.sql                    103
           #   test_sync_status_curated_sentence_survives.sql    7
           #   test_sync_status_marked_refresh_protected.sql    23
-          SENTINEL_FLOOR=12  # files declaring a sentinel
-          ARMS_FLOOR=237     # 13 + 8 + 9 + 6 + 23 + 26 + 8 + 7 + 4 + 103 + 7 + 23
+          SENTINEL_FLOOR=13  # files declaring a sentinel
+          ARMS_FLOOR=240     # 13 + 8 + 9 + 3 + 6 + 23 + 26 + 8 + 7 + 4 + 103 + 7 + 23
           # RAISING these as arms are added is expected and cheap — and it is not
           # optional: src/__tests__/contracts/ci-anti-skip-gate.contract.test.ts
           # re-derives the table above from the corpus and goes red when a count,
@@ -5064,7 +5079,7 @@ jobs:
           # shared-TEST secret any more; pytest reads the lane's loopback values.
           # It still does no git op, so the persisted cred stays dropped.)
           persist-credentials: false
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version: "3.12"
           cache: pip

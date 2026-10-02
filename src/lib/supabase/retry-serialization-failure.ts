@@ -1,10 +1,39 @@
 /**
  * Retry a Supabase RPC ONCE when it loses an enqueue race (Phase 164.6, OPS-08-TS).
  *
- * `_enqueue_compute_job_internal` (mig 20260826150000) raises SQLSTATE 40001
+ * `_enqueue_compute_job_internal` raises SQLSTATE 40001
  * (`serialization_failure`) when an enqueue loses the in-flight race and the
- * winning job has already advanced past the in-flight statuses. The policy
- * here is deliberately narrow:
+ * winning job has already advanced past the in-flight statuses. Mig
+ * 20260826150000 introduced the raise; its latest definition is mig
+ * 20260924230827.
+ *
+ * ⚠️ WHETHER THIS HELPER EVER FIRES DEPENDS ON THE POSTGREST VERSION.
+ *
+ *   - DORMANT before PostgREST 16.0 (measured on 14.5 and 14.7). The gateway
+ *     runs every RPC in a retrying transaction and re-runs a 40001 itself, so
+ *     this code never sees it. The re-run converges: the winner is terminal
+ *     by then, so the second attempt enqueues a fresh job. Measured on the local-stack lane's PostgREST v14.7
+ *     in Phase 164.9.3.2.1 plan 01 (race induced once and three times, HTTP
+ *     200 both times) for the strategy-target branch, csv-finalize's shape.
+ *     Pinned DB-side, for the strategy-target branch (arms R1, R2) and the
+ *     api_key-target branch holdings sync uses (arm R3), by
+ *     supabase/tests/test_enqueue_race_loss_40001.sql. The portfolio and
+ *     allocator branches are neither measured nor pinned.
+ *   - LIVE on PostgREST 16 or later, which returns the 40001 to the client as
+ *     HTTP 500 with `code` `40001` (PostgREST PR #4222) instead of retrying it.
+ *   - It STAYS because PROD's PostgREST version can differ from the lane's,
+ *     and an upgrade to 16 would otherwise turn every lost race into a
+ *     failure. supabase-js always goes through PostgREST, so the version is
+ *     the whole question for this helper.
+ *
+ * Without PostgREST in between, a raw 40001 from this raise is still seen: the
+ * pg_cron SQL fan-outs `enqueue_ledger_refresh_for_strategies`,
+ * `enqueue_ledger_composite_refresh` and
+ * `enqueue_refresh_allocator_equity_for_all` call the enqueue directly and
+ * catch `serialization_failure` themselves. That is a fact about those SQL
+ * callers; this helper plays no part in it.
+ *
+ * The policy here is deliberately narrow:
  *
  *   - ONLY `error.code === "40001"` is retried. The SQLSTATE is the whole
  *     signal; the message riding with it is operator text. Every other error

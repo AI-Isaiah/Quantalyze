@@ -1,5 +1,67 @@
 # Changelog
 
+## [0.118.1.5] - 2026-10-02 — ENQ40001: the enqueue race-loss 40001 converges through PostgREST 14, measured and pinned
+
+### Added
+- **The D-02 verdict, measured: `converges`.** When `_enqueue_compute_job_internal` loses its in-flight race it raises SQLSTATE `40001`. That raise was induced on the local-stack lane and called through the lane's PostgREST (`rest` image `postgrest:v14.7`), in csv-finalize's call shape. Raw numbers (D-03):
+  - **psql proof:** `state=40001`, the message starts `enqueue race lost`, `shots=1 flips=1`.
+  - **Unarmed control:** `http=200 real=0.018378 shots=0 flips=0 race_lost_log=0 inflight=1 body_matches=t`.
+  - **K=1:** `http=200 real=0.012389 shots=2 flips=1 race_lost_log=1 inflight=1 body_matches=t`.
+  - **K=3:** `http=200 real=0.014372 shots=4 flips=3 race_lost_log=3 inflight=1 body_matches=t`.
+  - **Negative control (an effectively unbounded arm):** `http=000` at the 20 s bound (`real=20.005325`), `shots=33211 flips=33211 race_lost_log=42286 inflight=0`. `shots` kept rising after the client disconnected, 33245 -> 38620 in 3 s. This shows the probe can see a retry loop that does not converge.
+
+  This is a measurement on the lane's PostgREST 14.x. The gateway re-runs the 40001 itself, and the re-run enqueues once the winner is terminal, so the call answers 200 with the id of the single in-flight job.
+- **`supabase/tests/test_enqueue_race_loss_40001.sql`**, a new gate on both lanes (the throwaway pg-lane and the local Supabase stack with FORCE RLS). It pins the DB-side contract that PostgREST's convergence rests on. Each arm has its own mutation twin against migration `20260924230827`, and all three twins bite.
+  - **Arm R1:** the induced race raises `40001` with the race-lost message.
+  - **Arm R2:** once the winner is done, the re-run enqueues a new `pending` job (not the done one) and leaves exactly one in flight. A precondition refuses to run R2 if its done-winner seed inserted no row (review SFH LOW-01).
+  - **Arm R3 (review WR-01):** R1 and R2 again on the api_key-target branch, in holdings sync's call shape (`poll_allocator_positions`, `p_api_key_id`). Its twin widens the api_key look-up to `done`. R1 and R2 cover the strategy-target branch only; the portfolio and allocator branches are not pinned.
+  - **How the race is induced:** an in-transaction BEFORE/AFTER trigger pair keyed on the gate's own strategy. Sequences serve as counters, so the arm survives the transaction's own rollback.
+  - **Scope:** everything is created inside the file's own `BEGIN ... ROLLBACK`. The sentinel reads `ALL 3 ARMS EXECUTED (R1, R2, R3)`.
+
+### Changed
+- **D-04 comment corrections (comments only; no code token changed).**
+  - **`src/lib/supabase/retry-serialization-failure.ts`:** the helper is now described as DORMANT before PostgREST 16.0 (measured on 14.5 and 14.7; review IN-01 replaced an unqualified "14.x") and LIVE on PostgREST 16 or later, which returns the 40001 as HTTP 500 with `code` `40001` (PostgREST PR #4222). It STAYS because PROD's PostgREST version can differ. The PostgREST convergence it cites was measured for the strategy-target branch; the gate pins the strategy and api_key branches DB-side. The comment also cites `20260924230827` as the raise's latest definition, and it names the pg_cron SQL fan-outs that see a raw 40001 without PostgREST.
+  - **`csv-finalize/route.ts` and `allocator/holdings/sync/route.ts`:** the retry comments carry the same PostgREST 16 / before-16.0 qualification. The holdings comment says the PostgREST measurement was the strategy shape, not this route's, and that arm R3 pins this route's api_key branch DB-side. The csv-finalize Python-classifier sentence now names the fence code `55006`.
+  - **Python classifiers:** `_is_serialization_failure` and `_defer_lost_ownership` were checked and left unchanged. They already key on `55006` and never wrap an enqueue.
+- **SQL census moves to the new corpus.** Plan 03 read its values off one full mutation-runner run on the tree merged with `origin/main` (`arms: 555/555/0`). Review fix WR-01 then added arm R3 and re-read them off a full run: `scope: FULL 56/56`, `coverage: files 56/83`, `arms: 556/556/0`, `biting: 556`, `lane-invocations: 556`.
+  - **Mutation-runner floors:** `FILES_FLOOR` 55 -> 56 and `ARMS_FLOOR` 553 -> 555 (plan 03), then `ARMS_FLOOR` 555 -> 556 (WR-01), with the `KNOWN_THRESHOLD_SITES` rows moved in the same commits. Plan 03 observed both drift directions failing: at 57 / 556 a full run exits 1 naming each floor, and at 55 / 553 the floors vitest prints `RATCHET STALE` and the twin-count message. For the WR-01 +1, the stale-low direction was observed at 555; the too-high direction was not re-run. `WAIVED_CEILING` stays 0.
+  - **`sql-tests` sentinel table:** it gains `test_enqueue_race_loss_40001.sql 3`. `SENTINEL_FLOOR` moves 12 -> 13 and the step's `ARMS_FLOOR` moves 237 -> 240, re-derived from each file's own sentinel.
+
+### Tests
+- The census pins in the test files move to that run:
+  - **`mutation-annotation-parser`:** `armsSeen` 556, `stepsSeen` and the needle count 615, `filesTotal` 83, `filesAnnotated` 56, and the new gate in the sorted list.
+  - **`mutation-runner-floors`:** `totalAnchored` 556; GREEN_LOG gains its new per-file row (3 arms), and every calibration keeps its offset.
+  - **`lint-sql-gates`:** `scanned 83 file(s)`.
+  - **`drift-check-scripts`:** pins 13 / 240.
+
+### Notes
+- **No migration, no PROD apply (D-02 converge branch).** `git diff origin/main...HEAD -- supabase/migrations` is empty. `_enqueue_compute_job_internal`'s latest definition is still `20260924230827`, and the raise keeps `40001`.
+- **RESEARCH open question 1** is recorded, not changed, and booked as `TODOS.md` `[164.9.3.2.1-OQ1-DEPARTED-KEY-55006-DEFEATS-RETRY]` (review WR-02). `set_departed_key_history_inclusion` (`20260927180000`) turns the converging 40001 into a 55006 "try again" and so defeats PostgREST 14's own retry (reasoned, not measured: that call is on the allocator-target branch, which neither the measurement nor the gate exercises). Changing that would need its own migration with three reviewers.
+- **RESEARCH open question 2** is recorded, not changed, and booked as `TODOS.md` `[164.9.3.2.1-OQ2-PYTHON-ENQUEUE-NO-40001]` (review WR-02). The Python enqueue callers (`process_key.py`, `cron.py`, and by grep also `job_worker.py` and `long_fetch.py`) have no 40001 handling. They are safe on PostgREST 14, which absorbs the raise, but on 16 or later a lost race would surface as an error.
+- **RESEARCH open question 3** is out of scope. The 7-param overload's race raise is dead code, because every 7-arg call fails with 42725 first. This was already recorded in `20260924230827`'s header.
+- **RESEARCH open question 4** is decided as not wired. The PostgREST probe is not a CI step, because the lane's `rest` image is unpinned and a PostgREST 16 image would turn it red for a non-defect. The durable CI pin is the SQL gate above.
+- **The phase's planning record** sits under `.planning/phases/164.9.3.2.1-enq40001-*`: context, research, validation strategy, three plans and their summaries. Plan 01's summary carries every probe line quoted above.
+
+## [0.118.1.4] - 2026-10-02 — deps: actions/setup-python 6.3.0 → 7.0.0 (#627)
+
+### Changed
+- `actions/setup-python` moves from v6.3.0 to v7.0.0 (pinned by SHA `5fda3b95…`) at both of its steps: `ci.yml`'s `python` job and `cassette-refresh.yml`. v7 migrates the action to ESM, removes the `pip-install` input (not used here), and retries the Python-versions manifest fetch instead of failing silently. No input this repo passes changed.
+- Two merges of `origin/main` bring the Dependabot branch current; no setup-python step was added on main since the PR opened, so the two pins Dependabot moved are all of them.
+
+## [0.118.1.3] - 2026-10-02 — deps: Python pip-minor-patch group (#898), with requirements.in reconciled to pandas 3.0.3
+
+### Changed
+- Dependabot's pip-minor-patch group (12 updates): fastapi 0.139.0 → 0.141.1, uvicorn 0.51.0 → 0.54.0, ccxt 4.5.64 → 4.5.84, numpy 2.5.1 → 2.5.3, pydantic 2.13.4 → 2.13.5, python-dotenv 1.2.2 → 1.2.3, pandera 0.32.1 → 0.33.1, psycopg 3.3.4 → 3.3.6, sentry-sdk 2.64.0 → 2.70.0 in `analytics-service/requirements.in`, and mypy 2.2.0 → 2.3.1 in `requirements-dev.txt`. Transitives that move with them include cryptography 50.0.1 and typing-extensions 4.16.0.
+- `analytics-service/requirements.txt` is regenerated with the canonical `make lock` (`uv pip compile --universal`), as `.github/dependabot.yml` prescribes, not shipped in Dependabot's format. The lock now carries environment markers and lists extras' packages without the extra suffix; on the Linux CPython 3.12 image that Railway and CI install, the installed set is the resolved graph.
+- ccxt 4.5.84 no longer depends on aiodns, so `aiodns` and `pycares` leave the lock (nothing in `analytics-service/` imports aiodns; aiohttp falls back to its threaded DNS resolver). ccxt now brings `aiohttp-fast-zlib`, `orjson` and `zlib-ng`.
+- A merge of `origin/main` brings the Dependabot branch current before the reconciliation.
+
+### Root cause
+- Dependabot's lock downgraded pandas 3.0.3 → 2.3.3. `requirements.in` still pinned `pandas==2.2.3` while the lock had carried 3.0.3 since #604, which bumped the lock in place and never touched the manifest; Dependabot regenerates from the manifest. The manifest now pins `pandas==3.0.3`, the version prod and CI already run, and the two comments that still named 2.2.3 are corrected. This is the same disagreement that took the Python group out of the 0.117.0.1 batch.
+
+### Tests
+- Local, Python 3.12 venv on the regenerated lock: `pytest` from `analytics-service/` 7584 passed, 90 skipped; strict `mypy` 2.3.1 clean on the 102-file service surface.
+
 ## [0.118.1.2] - 2026-10-02 — GATECRONNAME: a SQL gate names the derive cron by jobname, not TEST's jobid
 
 ### Fixed

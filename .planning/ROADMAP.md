@@ -126,6 +126,7 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 164.9.3: CLAIMPAIR — a due failed_retry job and a pending twin of the same (kind, allocator) never wedge the compute-job claim** (INSERTED) — verification: passed (completed 2026-09-27, PR #890, v0.109.0.0)
 - [ ] **Phase 164.9.3.1: FANINGRAPH — a fan-in child never strands when its parent fails, a match_decisions delete never raises 23505 through its cascade, and a fan-in diamond never deadlocks on the parent lock** (INSERTED) — not yet verified
 - [x] **Phase 164.9.3.2: DEFER40001 — a compute-job RPC that raises SQLSTATE 40001 never makes PostgREST retry it without end** (INSERTED) — verification: passed (completed 2026-10-02, PR #919, v0.118.0.0)
+- [x] **Phase 164.9.3.2.1: ENQ40001 — the enqueue race-loss raise (SQLSTATE 40001 in `_enqueue_compute_job_internal`) answers a PostgREST caller instead of re-running the call** (INSERTED) — verification: passed (completed 2026-10-02, PR #929, v0.118.1.5)
 - [ ] **Phase 164.9.4: CIOFFMUTEX — `python` and `e2e-seeded` no longer queue on the shared-TEST advisory lock; each runs against a database private to its runner** (INSERTED) — not yet verified
 - [x] **Phase 164.9.5: AUTOREDUMP — after a migration applies to PROD, the committed baseline is re-dumped and proposed automatically** (INSERTED) — verification: passed (completed 2026-10-02, PR #875, v0.106.0.0; first bot re-dump PR #920)
 - [x] **Phase 165: DEPS — The 9-PR dependabot campaign** - pandas `requirements.in` prerequisite commit FIRST, then one PR at a time in the research-verified order, full suite between each; #614 and #606 CLOSED with reasons — ⛔ RETIRED 2026-09-27 by founder decision ("Land as maintenance, retire the phases"): closed WITHOUT delivery as a phase; the dependabot PRs land one at a time as maintenance under the green rule.
@@ -144,7 +145,7 @@ phases below carry the corrections, not the bullets.
 - [ ] **Phase 167.1.2: ACCOUNTTRUTH — one exchange account is counted once, and the allocator equity curve shows only what the data supports** (INSERTED) — not yet verified
 - [ ] **Phase 167.2: KEYCARDSYNC — the key card never shows one key's sync result as another key's** (INSERTED) — verification: human_needed
 - [ ] **Phase 167.2.1: FACTSHEETBUILDABLE — a strategy is called computed only when its factsheet can actually build** (INSERTED) — verification: human_needed
-- [ ] **Phase 168: DRBOPTIONS — a Deribit options account ingests end to end** — verification: human_needed
+- [x] **Phase 168: DRBOPTIONS — a Deribit options account ingests end to end** — verification: passed (completed 2026-10-02)
 - [ ] **Phase 169: PAGETRUTH — every number agrees across pages and with its own record length** — not yet verified
 - [ ] **Phase 169.3: SMALLFIXES — admin compute jobs, recommendations, profile exchanges and the one mandate rule show true numbers** (INSERTED) — not yet verified (plan 01 shipped in #868)
 - [x] **Phase 170: LAYOUT — page layout reads clean and holds on every page** — verification: passed (completed 2026-10-01; post-deploy defects routed to 170.2)
@@ -252,7 +253,7 @@ Plans:
 
 **Wave 6** *(gap closure, 2026-08-23 — from 160-VERIFICATION.md; the STALE_CLIENT retirement itself already landed at `2fe28b89`)*
 
-- [ ] 160-07-PLAN.md — Gap closure: independent gsd-verifier re-adjudication of the retired-legacy-arm must_have at HEAD + human PROD smoke of the persist arm (the writer's first real exercise) + honest record and TODOS hygiene (RANK-03) [Wave 6]
+- [x] 160-07-PLAN.md — Gap closure: independent gsd-verifier re-adjudication of the retired-legacy-arm must_have at HEAD + human PROD smoke of the persist arm (the writer's first real exercise) + honest record and TODOS hygiene (RANK-03) [Wave 6]
 
 **Research note:** ARCHITECTURE confidence is LOW without B-M1 — the census is this phase's first task, not a nicety.
 
@@ -670,7 +671,8 @@ Plans:
 - [x] 164.3-04-PLAN.md — VAC-07 SPIKE: 263-migration replay measured + local-stack lane with trapped teardown (D-15) [wave 1]
 - [x] 164.3-05-PLAN.md — Mutation runner core: RED-UNDER-M grammar + parser + first-failure identity + both exit-1 modes + aggregation (VAC-01, OPS-08-F8) [wave 2]
 - [x] 164.3-06-PLAN.md — Static vacuity linter, mechanisms 1/2/4 + narrow 3, red fixtures per rule, NO mechanism-5 rule (VAC-03, D-16) [wave 2]
-- [ ] 164.3-07-PLAN.md — Phase 159 closure spec: two concurrent csv-finalize POSTs, one 2xx + one honest 409, winner holds (VAC-07, D-08) [wave 2]
+- [x] 164.3-07-PLAN.md — Phase 159 closure spec: two concurrent csv-finalize POSTs, one 2xx + one honest 409, winner holds (VAC-07, D-08) [wave 2]
+  ⭐ **164.3-07 SUPERSEDED 2026-10-02:** VAC-07 was delivered and scored by Phase 164.5 plan 07 (`src/__tests__/csv-finalize-concurrent-never-classified.test.ts`, run by `frontend-local-stack`); see 164.3-07-SUMMARY.md.
 - [x] 164.3-08-PLAN.md — Corpus annotation backfill (30 arm-anchored markers, measured), full run green, ARMS_FLOOR pinned, sql-mutation CI job + aggregator row (VAC-01) [wave 3]
 - [x] 164.3-09-PLAN.md — Plan-anchor verifier: range + quote re-resolution over pending plans, CI seam + execute-time convention (VAC-05, D-06 own wave) [wave 4]
 - [x] 164.3-10-PLAN.md — All five mechanisms re-introduced and demonstrated caught, durable via vitest pin + every-push runner (VAC-06) [wave 5]
@@ -3329,15 +3331,22 @@ Plans:
 
 ### Phase 164.9.3.2.1: ENQ40001 — the enqueue race-loss raise (SQLSTATE 40001 in `_enqueue_compute_job_internal`) answers a PostgREST caller instead of re-running the call (INSERTED)
 
-**Goal:** [Urgent work - to be planned]
+**Goal:** The enqueue race-loss raise (SQLSTATE 40001 in `_enqueue_compute_job_internal`) is measured deterministically, in psql and through the lane's PostgREST, and the binding D-02 rule acts on the outcome. If it converges, 40001 is kept, a both-lanes gate pins the converging behaviour, and the app-side retry comments say why the helper stays. If it hangs, the phase is replanned for the 55006 fence remedy.
 **Requirements**: TBD
 **Depends on:** Phase 164.9.3.2
-**Plans:** 0 plans
+**Plans:** 3/3 plans complete
 
 Booked 2026-10-01 by founder decision ENQ-SCOPE = `enq-sibling` (164.9.3.2 plan 01). Evidence carried from `164.9.3.2-01-SUMMARY.md`: the two-target shape (A2) is REFUTED (rejected up front with 22023), and the conflict-wait path converges through PostgREST (answered in 2–4 s). The race-loss RAISE itself never fired in five attempts, so its PostgREST behaviour is UNMEASURED; that it converges on retry is reasoned, not measured.
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 164.9.3.2.1 to break down)
+**Wave 1**
+- [x] 164.9.3.2.1-01-PLAN.md — measure the race-loss raise on the local-stack lane (psql proof, PostgREST K=1/K=3, negative control) and record the D-02 branch
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [x] 164.9.3.2.1-02-PLAN.md — converge branch: gate `test_enqueue_race_loss_40001.sql` (R1/R2 + twins, both lanes) and the D-04 comment corrections
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- [x] 164.9.3.2.1-03-PLAN.md — census moves on the merged tree and the release commit
 
 ### Phase 164.9.4: CIOFFMUTEX — `python` and `e2e-seeded` no longer queue on the shared-TEST advisory lock; each runs against a database private to its runner (INSERTED)
 
@@ -4108,7 +4117,7 @@ Plans:
 **Requirements**: TODOS entry `[DERIBIT-ASSIGNMENT-UNCLASSIFIED]` — read it before planning; it carries the dated measurements and the forbidden remedies. Do not re-derive them. ⭐ **THE WAITING DEPENDENCY IS MET — MEASURED 2026-09-23 (founder-approved edit), read-only from the production analytics log.** A three-account Deribit composite created 2026-09-23 failed its first stitch job (`run_stitch_composite_job`) permanently at 06:50 UTC on exactly this refusal: one `assignment` row, currency BTC, change `-1.5e-5`, instrument a BTC put expiring 28 Aug 2026, side `close buy`. The refusal's own same-instrument census for that batch read **`delivery=0 settlement=0 trade=1`**. For this occurrence that answers the deciding question: Deribit emitted NO separate `delivery` or `settlement` row for the assigned instrument, so there is no second cash row the `assignment` change could be double-counted against. ⚠️ One occurrence, one instrument — the plan decides whether n=1 is enough to classify, and must say so. **Consequence:** the strategy's analytics were stamped terminal (composite member reconstruction failed structurally), and its owner factsheet and share link still read "still computing" (that copy defect is Phase 167.2's). Phase 159 UAT #2 (render a composite on the public factsheet) now has a real composite waiting on THIS phase.
 **Depends on:** PR #783 merged (the evidence channel), and ONE observed occurrence carrying the census. ⚠️ The second is a WAITING dependency, not a code one — nothing in the repo produces it; a deribit options account must hit the refusal again.
 ⭐ **SCOPE AMENDMENT 2026-09-26 — founder decision D6 (AskUserQuestion: "Fix inside 168"), recorded as D-09 in `168-CONTEXT.md`.** The round-1 review's INFO-3 measured that the smoothed option-book replay ignored Deribit's `type=expiry`, so an out-of-the-money short stayed open past expiry and any later option activity raised the daily-MTM hole, losing the smoothed basis for the account. It is fixed inside this phase, not split: the replay closes an option at a zero-cash `expiry` row and refuses an `expiry` carrying cash or a nonzero position, and any `exercise` row (unmeasured shapes). Neither type becomes cash-bearing, so both twins are unchanged. The same decision gives the new `mtm_option_row_field_missing` degrade reason its own factsheet copy. This overrides the phase-size rule for this one item.
-**Plans:** 3 plans
+**Plans:** 3/3 plans complete
 
 Plans:
 
@@ -4119,7 +4128,9 @@ Plans:
 - [x] 168-02-PLAN.md — per-site pins for every option-book reader (incl. mark_to_market and smoothed_mtm end to end, and the acceptance script's eligibility check), refusal whitelist gains `commission`/`position`, prose sweep, full suite
 
 **Wave 3** *(post-land; founder-owned, non-autonomous)*
-- [ ] 168-03-PLAN.md — after deploy the founder retries the options strategy that failed on 2026-09-23 and reports terminal status, return-point count and any refusal class, by type only. ⭐ D-09 note (2026-09-26): the retry also exercises the expiry close, but ONLY when the smoothed pass runs, which is gated on `SMOOTHED_MTM_ENABLED` (production value not measured here); a D-09 refusal reports as an `expiry`-shape or `exercise` class
+- [x] 168-03-PLAN.md — after deploy the founder retries the options strategy that failed on 2026-09-23 and reports terminal status, return-point count and any refusal class, by type only. ⭐ D-09 note (2026-09-26): the retry also exercises the expiry close, but ONLY when the smoothed pass runs, which is gated on `SMOOTHED_MTM_ENABLED` (production value not measured here); a D-09 refusal reports as an `expiry`-shape or `exercise` class
+
+⛔ **168 OVERRIDE 2026-10-02:** plan 03's post-deploy observation was read from PROD by the orchestrator (read-only SELECTs, marker first) under the founder's 2026-10-01 rule, after the founder confirmed the re-created strategy (2026-09-27, three-account Deribit composite): stitch `done` twice, 272 return points, no assignment refusal, no other error. Also in 168-CONTEXT.md. Assignment-row presence and whether the smoothed pass ran were not measured.
 
 ### Phase 169: FACTSHEETTRUTH — a factsheet's headline, benchmark, windows and record length agree with the stored record and with every other page
 
@@ -4608,7 +4619,7 @@ kept verbatim.
 |-------|----------------|--------|-----------|
 | 158. OPS-CI merge=deploy | 6/6 | Complete    | 2026-08-21 |
 | 159. RANK ranking integrity | 7/7 | Complete — plan 01 shipped its deliverable (`159-CENSUS.md` is on disk). ⭐ 159-01 SUMMARY written retrospectively 2026-09-30 by founder decision; overrides the #790 'no retro-fit' note for this plan (the cell said "its SUMMARY was never written" until then). `159-VERIFICATION.md` closed 2026-09-12 (`status: passed`): its one open item, the concurrent same-session CAS race, is discharged by `src/__tests__/csv-finalize-concurrent-never-classified.test.ts` on the blocking `frontend-local-stack` lane — green in main run 34712535912 at `733a55f5` | v0.70.0.0 |
-| 160. PROVENANCE venue/annualization | 6/7 | Complete — verification passed (closed with the v1.20 open items in #790); plan 07 was its `gap_closure` verification plan | v0.77.39.0 · #790 |
+| 160. PROVENANCE venue/annualization | 7/7 | Complete — verification passed (closed with the v1.20 open items in #790); plan 07 was its `gap_closure` verification plan | v0.77.39.0 · #790 |
 | 161. WIZERR honest errors | 10/10 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed | v0.72.0.0 |
 | 161.1 LEDGER-REFRESH (shipped dormant) | 5/5 | Complete | v0.73.0.0 |
 | 162. HONEST visible truth | 9/9 | Complete — plan 10 WITHDRAWN in `3fa26831` ("its premise was false, credentials ARE trimmed"), so the denominator is 9, not 10 | v0.74.0.0 |
@@ -4658,6 +4669,7 @@ kept verbatim.
 | 164.9.3 CLAIMPAIR | 6/6 | Complete    | 2026-09-27 |
 | 164.9.3.1 FANINGRAPH | 0/? | Queued — blocker, after 164.9.3 | - |
 | 164.9.3.2 DEFER40001 | 8/8 | Complete    | 2026-10-02 |
+| 164.9.3.2.1 ENQ40001 | 3/3 | Complete    | 2026-10-02 |
 | 164.9.4 CIOFFMUTEX | planned, not on main | In progress — draft PR #880 (measurement run) | - |
 | 164.9.5 AUTOREDUMP | 9/9 | Complete — verification passed 2026-10-02 | v0.106.0.0 · #875 |
 | 164.10 BODYDRIFT | - | Closed by decision (c): the drift is real, measured and deliberately left | v0.79.1.1 · #824 |
@@ -4678,7 +4690,7 @@ kept verbatim.
 | 167.1.2.1 RECONMARKER | 0/? | Queued — data integrity; after 167.1.2 PR C | - |
 | 167.2 KEYCARDSYNC | 10/10 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed | v0.88.0.0 · #851 |
 | 167.2.1 FACTSHEETBUILDABLE | 4/4 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed | #866 |
-| 168. DRBOPTIONS (a Deribit options account ingests end to end) | 2/3 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed; plan 03 is the founder's live retry | v0.97.0.0 · #867 |
+| 168. DRBOPTIONS (a Deribit options account ingests end to end) | 3/3 | Complete    | 2026-10-02 |
 | 169. FACTSHEETTRUTH (split from PAGETRUTH 2026-09-26) | 7 plans on `feat/169-pagetruth`, not on main | Queued — feature; comparator plans split to 169.5 on 2026-09-27 (D-61); waits for 167.1.2 PR C | - |
 | 169.1 ZOOMKPIS | 9/9 | Complete    | 2026-10-01 |
 | 169.1.1 HYDRATIONTICKS | 4/4 | Complete — PR #925, v0.118.1.0 | 2026-10-02 |
