@@ -1097,6 +1097,21 @@ describe("[164.9.4 WR-01 / CR-01] TEST_READ_PLANNING_PATHS matches the planning 
 // main() against a fake gh for the SFH-04 and WR-01 rows (about 3-4 s wall on a
 // loaded box, measured 2026-10-02). Under the default the arms timed out before
 // the self-test answered, which is a harness red, not a classifier one.
+//
+// ⏱ SFH LOW-06: `spawnSync` is synchronous, so vitest's 60 s timer cannot fire
+// while a child runs. Each spawn therefore carries its own `SPAWN_TIMEOUT_MS`
+// below the arm budget, killed with SIGKILL, and asserts right after the spawn,
+// so a hung self-test is a named, bounded red instead of a job timeout.
+const SPAWN_TIMEOUT_MS = 50_000;
+function expectNoHang(res: ReturnType<typeof spawnSync>, what: string): void {
+  expect(
+    res.error === undefined && res.signal === null,
+    `${what} HUNG or could not run: it was killed after ${SPAWN_TIMEOUT_MS} ms or failed to spawn ` +
+      `(signal ${String(res.signal)}, error ${String(res.error?.message ?? "none")}). A hang here is the ` +
+      `classifier self-test stalling, most plausibly a lookup that reached a real network call.`,
+  ).toBe(true);
+}
+
 describe("[164.6.3 / CI-DOCSPATH-01] CALIBRATION — the classifier's self-test can FAIL", { timeout: 60_000 }, () => {
   const ORIGINAL = readFileSync(CLASSIFIER, "utf8");
 
@@ -1113,7 +1128,13 @@ describe("[164.6.3 / CI-DOCSPATH-01] CALIBRATION — the classifier's self-test 
   function selfTest(src: string): { code: number | null; out: string } {
     const path = join(workdir, `classifier-${seq++}.mjs`);
     writeFileSync(path, src);
-    const res = spawnSync(process.execPath, [path, "--self-test"], { cwd: ROOT, encoding: "utf8" });
+    const res = spawnSync(process.execPath, [path, "--self-test"], {
+      cwd: ROOT,
+      encoding: "utf8",
+      timeout: SPAWN_TIMEOUT_MS,
+      killSignal: "SIGKILL",
+    });
+    expectNoHang(res, "the classifier copy's --self-test");
     return { code: res.status, out: `${res.stdout ?? ""}${res.stderr ?? ""}` };
   }
 
@@ -1256,7 +1277,13 @@ describe("[164.6.3 / CI-DOCSPATH-01] CALIBRATION — the classifier's self-test 
   // scripts that drive the shared diff are checked, through the real files.
   it("neither self-test prints a raw `fatal:` git line — git's reason travels inside the MEASURE_FAIL", () => {
     for (const script of [CLASSIFIER, join(ROOT, "scripts/sql-gate-subset.mjs")]) {
-      const res = spawnSync(process.execPath, [script, "--self-test"], { cwd: ROOT, encoding: "utf8" });
+      const res = spawnSync(process.execPath, [script, "--self-test"], {
+        cwd: ROOT,
+        encoding: "utf8",
+        timeout: SPAWN_TIMEOUT_MS,
+        killSignal: "SIGKILL",
+      });
+      expectNoHang(res, `${script} --self-test`);
       const out = `${res.stdout ?? ""}${res.stderr ?? ""}`;
       expect(res.status, `${script} self-test must pass through this spawn\n${out}`).toBe(0);
       expect(out, "AIM: the unreadable-ref arm ran").toContain("UNREADABLE diff base");
