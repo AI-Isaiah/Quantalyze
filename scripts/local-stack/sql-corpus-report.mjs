@@ -41,7 +41,7 @@
  * report does not (review 164.4.2 IN-05).
  *
  * EXIT 0 only when fail = 0 and whole-file-skip = 0; 1 otherwise; 2 when it cannot
- * measure (no DB_URL in scripts/local-stack/.stack-env, a non-loopback DSN, an empty
+ * measure (no DB_URL in the lane handoff, LANE_ENV_FILE or scripts/local-stack/.stack-env, a non-loopback DSN, an empty
  * corpus, no psql, or a `--file` that does not exist).
  *
  * ⛔ THE REPO IS PUBLIC. Output names files and the first `ERROR:` line only. The DSN
@@ -52,10 +52,12 @@ import { spawnSync } from "node:child_process";
 import { basename, delimiter, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { refuseNonLocalDsn } from "./capability-probe.mjs";
+import { laneEnvFile, refuseNonLocalDsn } from "./capability-probe.mjs";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
-const ENV_FILE = join(REPO_ROOT, "scripts", "local-stack", ".stack-env");
+// The handoff `run.sh` writes: `LANE_ENV_FILE`, else the default, resolved the
+// way `run.sh` resolves it (review 164.9.4 round 4, IN-02 + SFH LOW-10).
+const ENV_FILE = laneEnvFile();
 const CORPUS_DIR = join(REPO_ROOT, "supabase", "tests");
 const HOMEBREW_PSQL = "/opt/homebrew/opt/postgresql@16/bin/psql";
 // A single file that has not finished in 10 minutes is reported FAIL, never waited on.

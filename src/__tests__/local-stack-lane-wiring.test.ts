@@ -54,6 +54,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { LOCAL_STACK_LANE_FILES } from "../../vitest.local-stack-files";
+import { laneEnvFile } from "../../scripts/local-stack/capability-probe.mjs";
 
 const REPO_ROOT = fileURLToPath(new URL("../../", import.meta.url));
 const read = (rel: string) => readFileSync(REPO_ROOT + rel, "utf8");
@@ -1449,5 +1450,62 @@ describe("sql-corpus-report.mjs (IN-05, and the WR-08 loopback rule)", () => {
     expect(r.out, "the refusal names the query string it refused").toContain("query string");
     expect(r.out).not.toContain(MARKER);
     expect(r.out).not.toContain("example.invalid");
+  });
+});
+
+// Review 164.9.4 round 4, IN-02 + SFH LOW-10: `run.sh` writes, guards and deletes
+// the handoff at `LANE_ENV_FILE` (default `scripts/local-stack/.stack-env`), and
+// the two Node readers used to read a hard-coded default and a third variable
+// (`STACK_ENV_FILE`). Under an override, `up` then wrote one file while the
+// readers read a stale default copy that `down` never removed (a mode-600 file
+// carrying the service-role key). These arms run the readers, not a grep.
+describe("[164.9.4 IN-02 / LOW-10] every lane reader reads the handoff run.sh writes", () => {
+  const DEFAULT_HANDOFF = join(REPO_ROOT, "scripts/local-stack/.stack-env");
+
+  it("laneEnvFile() mirrors run.sh: the same default, an override, and a relative override resolved from the repo root", () => {
+    expect(
+      read(RUN_SH),
+      "run.sh's handoff assignment moved or changed; laneEnvFile() mirrors it and must move with it",
+    ).toContain('ENV_FILE="${LANE_ENV_FILE:-${LANE_DIR}/.stack-env}"');
+    expect(laneEnvFile({})).toBe(DEFAULT_HANDOFF);
+    // bash's `:-` treats an EMPTY value as unset; so must the readers.
+    expect(laneEnvFile({ LANE_ENV_FILE: "" })).toBe(DEFAULT_HANDOFF);
+    const abs = join(tmpdir(), "lane-handoff-override");
+    expect(laneEnvFile({ LANE_ENV_FILE: abs })).toBe(abs);
+    // run.sh `cd`s to the repo root before it writes, so a relative value names a repo-relative file.
+    expect(laneEnvFile({ LANE_ENV_FILE: "scripts/local-stack/.other-env" })).toBe(join(REPO_ROOT, "scripts/local-stack/.other-env"));
+  });
+
+  it("both readers fail loud NAMING the overridden handoff, and the retired STACK_ENV_FILE is ignored", () => {
+    const dir = mkdtempSync(join(tmpdir(), "lane-env-readers-"));
+    try {
+      const missing = join(dir, "no-such-handoff");
+      // A decoy at the retired variable: a reader still honouring it would read
+      // this file instead of failing on the override.
+      const decoy = join(dir, "decoy-env");
+      writeFileSync(decoy, 'DB_URL="postgresql://127.0.0.1:1/postgres"\n');
+      const env = { ...process.env, LANE_ENV_FILE: missing, STACK_ENV_FILE: decoy };
+      const report = spawnSync(process.execPath, ["scripts/local-stack/sql-corpus-report.mjs"], {
+        cwd: REPO_ROOT,
+        encoding: "utf8",
+        env,
+        timeout: 60_000,
+      });
+      expect(report.error, "sql-corpus-report did not run").toBeUndefined();
+      expect(report.status, `sql-corpus-report must refuse to measure (exit 2)\n${report.stderr}`).toBe(2);
+      expect(report.stderr, "sql-corpus-report did not read LANE_ENV_FILE").toContain("no-such-handoff");
+      const probe = spawnSync(process.execPath, ["scripts/local-stack/capability-probe.mjs"], {
+        cwd: REPO_ROOT,
+        encoding: "utf8",
+        env,
+        timeout: 60_000,
+      });
+      expect(probe.error, "capability-probe did not run").toBeUndefined();
+      expect(probe.status, `capability-probe must MEASURE_FAIL (exit 1)\n${probe.stdout}${probe.stderr}`).toBe(1);
+      expect(probe.stderr, "capability-probe did not read LANE_ENV_FILE").toContain("no-such-handoff");
+      expect(`${probe.stdout}${probe.stderr}`, "capability-probe still reads the retired STACK_ENV_FILE").not.toContain("decoy-env");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

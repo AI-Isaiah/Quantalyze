@@ -87,7 +87,10 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 LANE_DIR="${REPO_ROOT}/scripts/local-stack"
 # The env handoff. ONE name for every reader and writer (review 164.9.4 round 3,
 # IN-02): `up` writes it, `--assert-local-handoff` defaults to it, `down` and the
-# failure trap delete it, and the self-test asserts it is gone. `LANE_ENV_FILE`,
+# failure trap delete it, and the self-test asserts it is gone. Outside this
+# script, `capability-probe.mjs` and `sql-corpus-report.mjs` read it through the
+# same variable and default (`laneEnvFile()`, review 164.9.4 round 4, IN-02 + SFH
+# LOW-10), so `down` deletes the only copy. `LANE_ENV_FILE`,
 # the variable the `python` / `e2e-seeded` / `sql-tests` export steps already read,
 # overrides it HERE, so a diverging value moves the write, the guard and the
 # teardown together instead of leaving the mode-600 file (service-role key

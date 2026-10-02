@@ -28,7 +28,7 @@
  *   runs on.
  *
  *   SUPPLY comes from the lane: ONE `psql` call against the DSN in the mode-600
- *   handoff `run.sh up` writes (`scripts/local-stack/.stack-env`), with one
+ *   handoff `run.sh up` writes (`LANE_ENV_FILE`, default `scripts/local-stack/.stack-env`), with one
  *   catalogue query per class.
  *
  * VERDICTS AND EXIT CODES
@@ -58,7 +58,10 @@
  * psql's stderr is printed only after the DSN and its password are redacted.
  *
  * Env seams, used so the refusal paths can run without a stack:
- *   STACK_ENV_FILE  the handoff to read (default scripts/local-stack/.stack-env)
+ *   LANE_ENV_FILE   the handoff to read (default scripts/local-stack/.stack-env).
+ *                   The SAME variable and default `run.sh` writes and deletes,
+ *                   so `down` removes the only copy (review 164.9.4 round 4,
+ *                   IN-02 + SFH LOW-10; the old `STACK_ENV_FILE` is retired).
  *   SQL_TESTS_DIR   the corpus directory  (default supabase/tests)
  *
  * The EXACT commands CI runs, and the exact commands a developer runs locally:
@@ -320,6 +323,23 @@ export function verdictLine(corpus, result) {
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(HERE, "..", "..");
 const DEFAULT_STACK_ENV = join(HERE, ".stack-env");
+
+/**
+ * THE lane env-handoff path, for every Node reader (this probe and
+ * `sql-corpus-report.mjs`). It mirrors `run.sh` exactly: `LANE_ENV_FILE` when
+ * set and non-empty (bash's `${LANE_ENV_FILE:-…}`), else the default, with a
+ * relative value resolved against the repo root because `run.sh` `cd`s there
+ * before it writes. Review 164.9.4 round 4 (IN-02 + SFH LOW-10): the two readers
+ * used to read a hard-coded default and a third variable, so a `LANE_ENV_FILE`
+ * override moved `up`'s write and `down`'s delete while they kept reading a
+ * stale default copy.
+ *
+ * @param {Record<string, string | undefined>} [env] the environment to read; defaults to `process.env`
+ * @returns {string} the absolute handoff path
+ */
+export function laneEnvFile(env = process.env) {
+  return env.LANE_ENV_FILE ? resolve(REPO_ROOT, env.LANE_ENV_FILE) : DEFAULT_STACK_ENV;
+}
 const DEFAULT_TESTS_DIR = join(REPO_ROOT, "supabase", "tests");
 const shown = (p) => relative(REPO_ROOT, p) || ".";
 
@@ -441,7 +461,7 @@ function main(argv) {
 
   const { texts, error: corpusError } = readCorpus(process.env.SQL_TESTS_DIR || DEFAULT_TESTS_DIR);
   const corpus = deriveDemand(texts);
-  const { supply, error: supplyError } = readSupply(process.env.STACK_ENV_FILE || DEFAULT_STACK_ENV);
+  const { supply, error: supplyError } = readSupply(laneEnvFile());
   const result = judge({ files: corpus.files, demand: corpus.demand, supply });
 
   // Always printed, whatever the verdict, so "clean" and "did not run" never look alike.
