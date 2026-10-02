@@ -186,6 +186,25 @@ class NavTWRMeta(ReturnsComputationMeta, total=False):
     # exactly like every other guard key. Registered in NAV_TWR_GUARD_KEYS so the
     # flag alone promotes the status.
     pre_mark_retention_option_dailies: list[str]
+    # MT5-12 (D-15/D-16) — the SERIES-COMPLETENESS VERDICT: the producing combiner's
+    # judgement of whether the raw venue inputs it consumed were WHOLE. One of
+    # ``broker_dailies.SERIES_COMPLETENESS_VALUES``; stamped by the combiner that
+    # read the inputs, because nothing downstream can re-derive it from the series.
+    #
+    # ⛔ NOT a member of ``NAV_TWR_GUARD_KEYS`` below, and that exclusion is
+    # load-bearing, not an oversight. Membership in that tuple is what
+    # ``job_worker._prestamp_flags`` iterates to promote ``computation_status`` to
+    # ``complete_with_warnings`` — a status the publish gate PASSES. Routing a
+    # GATING signal through the promotion channel would make it invisible to the
+    # very gate it exists to feed: the fail-open trap. It rides its own column to
+    # its own allow-list check instead.
+    #
+    # ⚠️ ``total=False`` (inherited from this TypedDict's declaration) means mypy
+    # pins the key's TYPE where it is present but CANNOT flag a return path that
+    # OMITS it. Required-ness is enforced at RUNTIME by the derive persist-seam
+    # assert in ``job_worker``, which refuses to write a series whose combiner
+    # returned no verdict. Do not claim the type checker enforces presence.
+    series_completeness: str
 
 
 # SHOULD-1 (specialist-types): the ONE source of truth for the additive

@@ -1,20 +1,27 @@
 /**
  * Phase 46-04 / REFLOW-01 + REFLOW-03 — parametrized SEEDED AUTHED reflow
- * sweep (WCAG 1.4.10 Reflow) at the 320px CSS reflow width.
+ * sweep (WCAG 1.4.10 Reflow) at the phase-170 viewports.
  *
  * The authed half of the phase-46 verification backbone (the public half is
  * e2e/reflow-sweep.spec.ts). Proves every curated authed surface — the
  * allocations page + all six tabs (Overview / Holdings / Outcomes / Mandate /
  * Risk / Scenario-composer), the de-blocked onboarding wizard (WIZARD-01:
- * usable on a phone now that DesktopGate is gone), and the authed /security
- * page — has NO horizontal PAGE overflow at 320px (= 400% zoom on a 1280px
- * viewport; see reflow-sweep.spec.ts for the WCAG 1.4.4 equivalence note).
+ * usable on a phone now that DesktopGate is gone), the authed /security page,
+ * and /legal/privacy — has NO horizontal PAGE overflow. The measure is the
+ * dashboard `main` scroller (`#main-content`) as well as documentElement,
+ * via the corrected assertNoReflow (phase 170 T0).
+ *
+ * Founder decision 2026-09-27: 390px (iPhone 12) plus desktop 200% zoom are
+ * the supported widths; 320px and 400% zoom are deliberately not required.
+ * The sweep runs at V390 (390x844), V640 (640x400) and V960 (960x540). A
+ * 320px run would demand 320-only fixes nobody asked for once the helper
+ * measures main.
  *
  * REFLOW-03 degenerate-state route: a freshly-seeded allocator has a VERIFIED
  * profile but NO synced positions, so /allocations renders the honest-empty
  * AllocationDashboardV2 → EmptyState card ("No positions to analyze yet.").
  * The sweep anchors a dedicated case on that VISIBLE honest-empty <h2> — not
- * generic chrome — so a broken honest-empty layout at 320px fails LOUD
+ * generic chrome — so a broken honest-empty layout fails LOUD
  * (Pitfall 5: a too-generic anchor would false-green against a login page).
  *
  * Each route is anchored on a route-specific VISIBLE content element (the
@@ -42,7 +49,7 @@
  * (place 1). "Proven to execute in CI (passed, not skipped) when
  * vars.E2E_TEST_DB_CONFIGURED == 'true'" is the explicit post-push must_have.
  */
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./helpers/hydration-guard";
 import { seedTestAllocator } from "./helpers/seed-test-project";
 import { assertNoReflow } from "./helpers/reflow";
 
@@ -77,6 +84,7 @@ const AUTHED_ROUTES: {
   anchor: string;
   label: string;
   degenerate?: boolean;
+  headerCheck?: boolean;
 }[] = [
   // Allocations + every tab. The "My Allocation" <h1> sits above the tab-panel
   // switch (AllocationsTabs.tsx) so it is present on every ?tab= value — a
@@ -90,21 +98,29 @@ const AUTHED_ROUTES: {
   { path: "/allocations?tab=scenario", anchor: 'h1:has-text("My Allocation")', label: "allocations Scenario composer" },
   // Manager-gated standalone onboarding wizard (Phase 109 ROLE-04) — reached
   // here via the seeded role='both' user. The default ?source=api flow renders
-  // ConnectKeyStep's "Connect your exchange" <h2 id=…>. Proving this reflows at
-  // 320px is the phone-usable-wizard proof.
+  // ConnectKeyStep's "Connect your exchange" <h2 id=…>.
   { path: "/strategies/new/wizard", anchor: "#wizard-connect-key-heading", label: "onboarding wizard API entry (manager-gated route, role=both)" },
   // The CSV branch (?source=csv) initializes WizardClient to the csv_upload step
   // (WizardClient.tsx step-init), rendering CsvUploadStep's
   // <h2 id="wizard-csv-upload-heading">. The founder-with-a-track-record-CSV
-  // path must also reflow at 320px — without this the sweep only proved the API
-  // branch entry.
+  // path is swept too — without this the sweep only proved the API branch entry.
   { path: "/strategies/new/wizard?source=csv", anchor: "#wizard-csv-upload-heading", label: "onboarding wizard CSV entry (manager-gated route, role=both)" },
   // Authed /security — same <main h1> ("Security practices") as the public
-  // page, exercised inside the authed session.
-  { path: "/security", anchor: "main h1", label: "security (authed)" },
+  // page, exercised inside the authed session. headerCheck: SC2-HEADER.
+  { path: "/security", anchor: "main h1", label: "security (authed)", headerCheck: true },
+  // Authed /legal/privacy — the page's own <h1> ("Privacy Policy").
+  // headerCheck: SC2-HEADER, same signed-in masthead contract as /security.
+  { path: "/legal/privacy", anchor: 'h1:has-text("Privacy Policy")', label: "legal privacy (authed)", headerCheck: true },
 ];
 
-test.describe("reflow sweep (WCAG 1.4.10 / 1.4.4) @ 320px — authed", () => {
+// Founder decision 2026-09-27. 320px left; these three are the supported widths.
+const VIEWPORTS: { id: string; width: number; height: number }[] = [
+  { id: "V390", width: 390, height: 844 },
+  { id: "V640", width: 640, height: 400 },
+  { id: "V960", width: 960, height: 540 },
+];
+
+test.describe("reflow sweep (WCAG 1.4.10) @ V390/V640/V960 — authed", () => {
   test.skip(
     !HAS_SEED_ENV,
     "reflow-sweep-authed: seed-helper env vars not wired " +
@@ -128,39 +144,52 @@ test.describe("reflow sweep (WCAG 1.4.10 / 1.4.4) @ 320px — authed", () => {
     await loginViaForm(page, allocator.email, allocator.password);
   });
 
-  for (const r of AUTHED_ROUTES) {
-    test(`${r.label} — no horizontal overflow at 320px`, async ({ page }) => {
-      await page.setViewportSize({ width: 320, height: 800 });
-      const res = await page.goto(r.path);
-      if (res) {
-        const status = res.status();
-        if (status >= 400) {
-          throw new Error(
-            `${r.path} returned HTTP ${status} — cannot run authed reflow sweep`,
-          );
+  for (const v of VIEWPORTS) {
+    for (const r of AUTHED_ROUTES) {
+      test(`${v.id} ${r.label} — no horizontal overflow`, async ({ page }) => {
+        await page.setViewportSize({ width: v.width, height: v.height });
+        const res = await page.goto(r.path);
+        if (res) {
+          const status = res.status();
+          if (status >= 400) {
+            throw new Error(
+              `${r.path} returned HTTP ${status} — cannot run authed reflow sweep`,
+            );
+          }
         }
+        await assertNoReflow(page, r.anchor);
+        // SC2-HEADER (N-H). RED until plan 170-07 lands the signed-in
+        // masthead in the same PR: a signed-in visit shows "Go to app" and
+        // no "Sign in".
+        if (r.headerCheck) {
+          await expect(
+            page.getByRole("link", { name: "Go to app" }),
+          ).toBeVisible();
+          await expect(
+            page.getByRole("link", { name: "Sign in" }),
+          ).toHaveCount(0);
+        }
+      });
+    }
+
+    // REFLOW-03 — the degenerate honest-empty route. A freshly-seeded allocator
+    // has NO synced positions, so AllocationDashboardV2 renders the EmptyState
+    // card ("No positions to analyze yet."). Anchoring on that VISIBLE
+    // honest-empty <h2> proves the empty-state layout itself reflows — a
+    // broken honest-empty card fails LOUD rather than passing against chrome.
+    test(`${v.id} degenerate honest-empty (/allocations, 0 positions) — EmptyState reflows`, async ({
+      page,
+    }) => {
+      await page.setViewportSize({ width: v.width, height: v.height });
+      const res = await page.goto("/allocations?tab=overview");
+      if (res && res.status() >= 400) {
+        throw new Error(`/allocations returned HTTP ${res.status()} — cannot run degenerate reflow case`);
       }
-      await assertNoReflow(page, r.anchor);
+      // The honest-empty headline is the EmptyState card's own <h2> — a real
+      // honest-empty DOM node, not generic chrome (Pitfall 5).
+      await assertNoReflow(page, 'h2:has-text("No positions to analyze yet")');
     });
   }
-
-  // REFLOW-03 — the degenerate honest-empty route. A freshly-seeded allocator
-  // has NO synced positions, so AllocationDashboardV2 renders the EmptyState
-  // card ("No positions to analyze yet."). Anchoring on that VISIBLE
-  // honest-empty <h2> proves the empty-state layout itself reflows at 320px —
-  // a broken honest-empty card fails LOUD rather than passing against chrome.
-  test("degenerate honest-empty (/allocations, 0 positions) — EmptyState reflows at 320px", async ({
-    page,
-  }) => {
-    await page.setViewportSize({ width: 320, height: 800 });
-    const res = await page.goto("/allocations?tab=overview");
-    if (res && res.status() >= 400) {
-      throw new Error(`/allocations returned HTTP ${res.status()} — cannot run degenerate reflow case`);
-    }
-    // The honest-empty headline is the EmptyState card's own <h2> — a real
-    // honest-empty DOM node, not generic chrome (Pitfall 5).
-    await assertNoReflow(page, 'h2:has-text("No positions to analyze yet")');
-  });
 });
 
 // Phase 48-05 / A11Y-03 (SC#4) — rotate-stability fold. ADDITIVE to this

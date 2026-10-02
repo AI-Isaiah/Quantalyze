@@ -1184,7 +1184,7 @@ const HOLDING_SCOPE_RE = /^([a-z]+):([A-Z0-9]+):(spot|derivative)$/;
 
 ### File Created
 
-`/Users/helios-mammut/claude-projects/quantalyze/.planning/phases/08-connection-management-and-notes/08-RESEARCH.md`
+`.planning/phases/08-connection-management-and-notes/08-RESEARCH.md`
 
 ### Confidence Assessment
 

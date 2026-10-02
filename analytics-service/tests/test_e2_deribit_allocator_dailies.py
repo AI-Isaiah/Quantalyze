@@ -45,6 +45,7 @@ from services.nav_twr import NavReconstructionError
 # native-ledger + account-state stubs) rather than re-building it.
 from tests.test_mtm_single_key import (
     _apply,
+    _ledger_meta,
     _base_patches,
     _cash_series,
     _ctx,
@@ -76,7 +77,7 @@ class TestHandlerKeyModeDeribitPath:
         reports = [_report(has_option_activity=False)]  # perp-only → single pass
         ledger_mock, calls = _recording_ledger(reports)
         combine = MagicMock(
-            return_value=(_cash_series(), {"used_heuristic_capital": False})
+            return_value=(_cash_series(), _ledger_meta())
         )
         with _apply(_base_patches(
             ctx, key_mode=True, ledger_mock=ledger_mock, combine_mock=combine,
@@ -151,7 +152,7 @@ class TestHandlerKeyModeDeribitPath:
         reports = [_report(has_option_activity=False)]
         ledger_mock, _calls = _recording_ledger(reports)
         combine = MagicMock(
-            return_value=(_cash_series(), {"used_heuristic_capital": False})
+            return_value=(_cash_series(), _ledger_meta())
         )
         with _apply(_base_patches(
             ctx, key_mode=True, ledger_mock=ledger_mock, combine_mock=combine,

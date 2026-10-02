@@ -9,7 +9,7 @@ Surfaced in production via Sentry during the Phase 19 soak:
   - routers/match.py:_load_allocator_context (issue 122529812, /api/match/cron-recompute)
 
 Latent siblings of the same root cause, fixed alongside it:
-  - routers/match.py:_engine_is_enabled  (fail-open, but logged a spurious ERROR)
+  - routers/match.py:_engine_is_enabled  (returned ENABLED, but logged a spurious ERROR)
   - routers/internal.py:get_key_permissions (500 instead of the intended 404)
 
 Each test models the real contract: the prefs/flags/api_keys ``maybe_single`` chain
@@ -26,10 +26,11 @@ from fastapi.testclient import TestClient
 
 try:
     import routers.internal as internal_router
-    from routers.match import _engine_is_enabled, _load_allocator_context
+    from routers.match import KILL_SWITCH_ENABLED, _engine_is_enabled, _load_allocator_context
 
     IMPORTS_OK = True
 except ImportError:  # pragma: no cover - import guard mirrors sibling tests
+    KILL_SWITCH_ENABLED = None  # type: ignore
     _engine_is_enabled = None  # type: ignore
     _load_allocator_context = None  # type: ignore
     internal_router = None  # type: ignore
@@ -80,17 +81,18 @@ def test_load_allocator_context_survives_missing_preferences_row(monkeypatch):
 
 
 @pytest.mark.skipif(not IMPORTS_OK, reason="analytics-service imports unavailable")
-def test_kill_switch_fails_open_quietly_when_flag_row_absent(monkeypatch):
+async def test_kill_switch_returns_enabled_quietly_when_flag_row_absent(monkeypatch):
     """A missing system_flags row makes ``maybe_single().execute()`` return None.
-    ``_engine_is_enabled`` must fail open (return True) WITHOUT routing through
-    the except branch's ``logger.error`` — pre-fix the None.data AttributeError
-    tripped that error log on every cron tick, inflating the soak error rate.
+    ``_engine_is_enabled`` must return KILL_SWITCH_ENABLED WITHOUT routing
+    through the except branch's ``logger.error`` — pre-fix the None.data
+    AttributeError tripped that error log on every cron tick, inflating the
+    soak error rate.
     """
     monkeypatch.setattr("routers.match.get_supabase", lambda: _FakeSupabase())
     fake_logger = MagicMock()
     monkeypatch.setattr("routers.match.logger", fake_logger)
 
-    assert _engine_is_enabled() is True
+    assert await _engine_is_enabled() == KILL_SWITCH_ENABLED
     fake_logger.error.assert_not_called()
 
 

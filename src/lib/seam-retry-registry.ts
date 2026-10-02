@@ -99,20 +99,33 @@
  *
  * ── (c) THE GRAIN EXCLUSIONS ──────────────────────────────────────────────────
  *
- * `keys-permissions`, `process-key-enqueue`, `process-key-sync` and
- * `process-key-unified-dormant` are `SeamBudgetKey`s but are DELIBERATELY absent
- * from the analytics maps: they are ROUTE budgets, not analytics-seam-function
- * verdicts. The process-key seam is audited at `flow_type` grain (above), and
- * `keys-permissions` is protected by its `SEAM_BUDGETS` row staying `retries: 0`
- * (pinned in plan 04). Listing them here would be auditing the same seam twice at
- * two grains — the exclusion is by design, not an oversight.
+ * `keys-permissions`, `process-key-enqueue`, `process-key-sync`,
+ * `process-key-unified-dormant` and `keys-rotate-secret` are `SeamBudgetKey`s but
+ * are DELIBERATELY absent from the analytics maps: they are ROUTE budgets, not
+ * analytics-seam-function verdicts. The process-key seam is audited at
+ * `flow_type` grain (above), `keys-permissions` is protected by its
+ * `SEAM_BUDGETS` row staying `retries: 0` (pinned in plan 04), and
+ * `keys-rotate-secret` (Phase 164.5.3 / D-04) is protected the identical way —
+ * its `SEAM_BUDGETS` row stays `retries: 0` for the same non-idempotent
+ * live-credential-probe reason `validate-key-serialized` already states. Listing
+ * them here would be auditing the same seam twice at two grains — the exclusion
+ * is by design, not an oversight.
  *
  * 141.1 / D-11 — THIS EXCLUSION LIST IS NOW ENFORCED, not merely described.
- * `seam-retry-registry.test.ts` types the same four keys as `RouteBudgetKey` and
+ * `seam-retry-registry.test.ts` types the same five keys as `RouteBudgetKey` and
  * subtracts them from `SeamBudgetKey` before asserting analytics coverage, so a
- * FOURTEENTH budget key must be classified as an analytics wrapper (→ a verdict
+ * SIXTEENTH budget key must be classified as an analytics wrapper (→ a verdict
  * here) or as a route budget (→ that list) before `npm run typecheck` passes.
  * Doing neither is no longer a silent exclusion. Edit the two together.
+ * ⚠️ The fourteenth was `validate-key-serialized` (Phase 153.4 / D-26) and the
+ * fifteenth was `keys-rotate-secret` (Phase 164.5.3 / D-04) — the fence DID
+ * refuse the repo (a bare `tsc --noEmit` TS2322) until this docblock and the
+ * `RouteBudgetKey` list below were both edited, which is the mechanism
+ * exercised, not merely described.
+ * The sixteenth, `benchmark-refresh` (Phase 169.2 / D-08), is an ANALYTICS
+ * wrapper key (`refreshBenchmark`), not a route budget: it carries a NO verdict
+ * in `RETRY_AUDIT_NO_ANALYTICS` and joins the analytics-key literal in the test,
+ * not `RouteBudgetKey`.
  */
 
 import type { FlowType } from "./process-key-client";
@@ -512,8 +525,9 @@ export const RETRY_SAFE_ANALYTICS: Readonly<
 
 /**
  * Analytics-seam wrapper functions that are NOT retry-safe — evidence-only NO
- * verdicts. Exactly FIVE entries; together with the four YES entries they cover
- * all nine analytics wrappers (the exhaustiveness pin).
+ * verdicts. Exactly SEVEN entries; together with the four YES entries they cover
+ * all eleven analytics wrappers (the exhaustiveness pin). The seventh is
+ * `benchmark-refresh` (Phase 169.2, D-08).
  */
 export const RETRY_AUDIT_NO_ANALYTICS: Readonly<
   Partial<Record<SeamBudgetKey, string>>
@@ -522,6 +536,25 @@ export const RETRY_AUDIT_NO_ANALYTICS: Readonly<
     "validateKey — runs a live exchange probe against caller credentials; " +
     "non-idempotent by construction, REQUIREMENTS Out of Scope. A retry re-probes " +
     "the venue.",
+  "validate-key-serialized":
+    "validateKey on the SERIALIZED-venue arm — the budget budgetKeyFor(exchange) " +
+    "selects when VENUE_CAPABILITIES.serialized is true (today: MT5). Same live " +
+    "exchange probe against caller credentials as validate-key, and " +
+    "non-idempotent for the same reason: a retry re-probes the venue with the " +
+    "same credentials. THREE FURTHER REASONS THIS ONE IS WORSE, not merely equal. " +
+    "(1) AMPLIFICATION INTO AN OPEN BREAKER: the row declares mt5-gateway, and " +
+    "breakerKeysFor adds the global railway key to every check, so in the OPEN " +
+    "state CircuitOpenError is thrown BEFORE any fetch is issued — a retry does " +
+    "not reach the venue at all, it merely re-runs isBreakerOpen, charges a " +
+    "second store round trip and throws again. Retry here is not discouraged, it " +
+    "is structurally wasteful. (2) WALL CLOCK: this is the longest budget in the " +
+    "table at 120 000 ms, and SC-4b in seam-budgets.invariant.test.ts charges " +
+    "(1 + retries) x timeoutMs against the route's Vercel ceiling — a retried leg " +
+    "would double the largest term in that arithmetic. (3) SERIALIZATION: the " +
+    "server takes a terminal lease, one account at a time, so a retried attempt " +
+    "queues behind every other caller's probe and lengthens THEIR waits too — " +
+    "which is how one slow venue takes down every other user's submits. D-07 is " +
+    "the standing prohibition and nothing here reopens it.",
   "encrypt-key":
     "encryptKey — a credential WRITE; non-idempotent by construction, REQUIREMENTS " +
     "Out of Scope. A retry double-writes credentials.",
@@ -540,4 +573,8 @@ export const RETRY_AUDIT_NO_ANALYTICS: Readonly<
   "match-eval":
     "evalMatch — read-only admin sweep, likely safe but low value; default " +
     "no-retry (RESEARCH discretion).",
+  "benchmark-refresh":
+    "refreshBenchmark — non-retried BY DESIGN (Phase 169.2, D-08): the only " +
+    "caller is the daily cron, a failed refresh answers non-2xx so Vercel Cron " +
+    "alarms, and tomorrow's scheduled run is the retry.",
 } as const satisfies Partial<Record<SeamBudgetKey, string>>);

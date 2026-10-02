@@ -67,7 +67,8 @@ describe("computeStressWindows", () => {
     // not silently skip its assertions.
     expect(aug).toBeDefined();
     if (!aug) return;
-    expect(aug.stratReturn).toBeGreaterThan(aug.benchReturn);
+    expect(aug.benchReturn).not.toBeNull();
+    expect(aug.stratReturn).toBeGreaterThan(aug.benchReturn as number);
   });
 
   it("drops windows whose coverage falls below MIN_COVERAGE_RATIO — avoids inventing data", () => {
@@ -107,5 +108,42 @@ describe("computeStressWindows", () => {
   it("reports totalCatalogued >= windows.length", () => {
     const out = computeStressWindows(dates, stratRet, benchRet, "BTC", ["BTC"]);
     expect(out.totalCatalogued).toBeGreaterThanOrEqual(out.windows.length);
+  });
+  // Phase 169.5 CR-01 (SC3): an uncovered comparator day inside a window makes
+  // that window's bench fields null, never a compounded 0% day. Before the fix the
+  // caller entered a null as 0, so an unavailable BTC read rendered "BTC +0.00% /
+  // DD 0.00%" through the Aug 2024 unwind.
+  it("CR-01: a null comparator day inside a window nulls that window's bench fields, and only that window's", () => {
+    const wide = Array.from({ length: 500 }, (_, i) =>
+      new Date(Date.UTC(2024, 0, i + 1)).toISOString().slice(0, 10),
+    );
+    const sr = wide.map(() => 0.001);
+    const br: Array<number | null> = wide.map(() => -0.005);
+    br[wide.indexOf("2024-08-05")] = null;
+    const out = computeStressWindows(wide, sr, br, "BTC", ["BTC"]);
+    const aug = out.windows.find(w => w.name === "Aug 2024 unwind");
+    const apr = out.windows.find(w => w.name === "Apr 2025 tariffs");
+    expect(aug).toBeDefined();
+    expect(apr).toBeDefined();
+    if (!aug || !apr) return;
+    expect(aug.benchReturn).toBeNull();
+    expect(aug.benchMaxDD).toBeNull();
+    // The strategy side is real data: the row stays, its strat fields numeric.
+    expect(aug.stratReturn).toBeCloseTo(1.001 ** aug.days - 1, 12);
+    // A fully covered window is unaffected: 8 days of -0.5%.
+    expect(apr.benchReturn).toBeCloseTo(0.995 ** apr.days - 1, 12);
+    expect(apr.benchMaxDD).toBeCloseTo(0.995 ** apr.days - 1, 12);
+  });
+
+  it("CR-01: an all-null comparator (the unavailable read) nulls every window's bench fields", () => {
+    const wide = Array.from({ length: 500 }, (_, i) =>
+      new Date(Date.UTC(2024, 0, i + 1)).toISOString().slice(0, 10),
+    );
+    const out = computeStressWindows(wide, wide.map(() => 0.001), wide.map(() => null), "BTC", ["BTC"]);
+    expect(out.windows.length).toBeGreaterThan(0);
+    for (const w of out.windows) {
+      expect(w.benchReturn).toBeNull();
+      expect(w.benchMaxDD).toBeNull();
+    }
   });
 });

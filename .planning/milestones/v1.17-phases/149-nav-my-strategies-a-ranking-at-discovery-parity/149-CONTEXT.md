@@ -1,0 +1,137 @@
+# Phase 149: NAV — "My strategies": a ranking at discovery parity - Context
+
+**Gathered:** 2026-08-05
+**Status:** Ready for planning
+
+<domain>
+## Phase Boundary
+
+The allocator side stops being write-only: a sidebar "my strategies" entry (MY WORKSPACE)
+opens a ranking covering every key the allocator uploaded AND the strategies derived from
+them — including `private` and `draft` rows — at PARITY with the external/discovery ranking
+(same metric columns, same sort affordances, same `#n` + percentile presentation per
+DESIGN.md). Every row opens its factsheet via Phase 148's owner lane. Requirement: NAV-01.
+
+Out of scope: any change to public/discovery ranking behavior for anon/non-owner viewers;
+publication flow; the ranking toggle (deferred — see decisions).
+
+</domain>
+
+<decisions>
+## Implementation Decisions
+
+### Percentile population (founder decision 2026-08-05)
+- Own rows (incl. private/draft) get percentiles against the PUBLISHED UNIVERSE — the same
+  population every ranking surface uses. Semantics: "if published, this would sit at #n /
+  Pth percentile."
+- `getPercentiles()` is reused UNCHANGED — no second percentile mechanism. (Reading refined
+  by the 2026-08-05 scorer ruling below: the SIGNATURE and observable behavior are unchanged;
+  the scoring core is extracted so own rows can be scored by the same formula.)
+- The comparison set is LABELED on the surface ("ranked against N published strategies") —
+  the honest-set requirement from the roadmap trap.
+- Own unpublished rows NEVER enter the percentile population — a draft must not shift public
+  ranks nor leak unpublished data into numbers any other viewer sees.
+- "Both via toggle" explicitly deferred — can be a follow-up once the ranking exists.
+
+### Locked by ROADMAP success criteria (not re-decided)
+- Structural reuse, ASSERTED: the surface is the EXISTING ranking component/query; the
+  visibility predicate (own-including-unpublished via 148's `withPublishedOrOwner`) is the
+  only genuine difference. No second ranking implementation.
+- Parameterize the predicate — do NOT globally widen the shared query; published-only on
+  discovery/public surfaces must be PROVABLY unchanged (assert it, don't observe it).
+- Metrics for private/draft rows come from the same analytics the factsheet renders; a row
+  whose analytics have not computed shows an honest pending state, never zeros (Phase 147's
+  series_state/pending idioms are the precedent).
+- Every row — including private/draft — opens its factsheet via OWN-02's owner lane, never
+  `notFound()`.
+- Proof case: the founder's account (8 active keys — bybit, okx, deribit ×3, mt5 ×3), none
+  visible on any ranking today, all present here.
+
+### Post-research rulings (orchestrator + founder, 2026-08-05)
+- **Predicate (research Open Q1):** the page query uses OWN-ONLY `.eq("user_id", user.id)`
+  at every status — NOT `withPublishedOrOwner` (which is published-OR-own and would render
+  the entire published universe on a "My Strategies" page). RLS sanctions own-row reads
+  (`strategies_read`, migration 20260405061912:28). This is a DOCUMENTED DEVIATION from the
+  ROADMAP's literal wording; its intent ("own including unpublished") is satisfied. 148's
+  gate still powers the row → factsheet links.
+- **Key coverage (founder decision, PROD census 2026-08-05):** founder account = 8 active
+  keys → 4 strategies (1 draft, 3 private; Alpha Centauri carries 3 keys via strategy_keys,
+  three others have direct keys) → 2 keys with NO derived strategy. The table shows ranked
+  strategy rows PLUS one UNRANKED placeholder row per active key with no derived strategy:
+  exchange + label, em-dash metrics (no invented data), honest "No strategy yet" state, link
+  into the wizard. Also fixes the keys-without-strategies account view (PROD reality: one
+  account has 10 active keys, 0 strategies).
+- **Percentile scoring for own rows (FOUNDER RULING 2026-08-05 — plan-revision checker B-4;
+  supersedes the LITERAL reading of "getPercentiles() is reused UNCHANGED" above):**
+  `getPercentiles` keeps its EXACT signature and observable behavior (the signature IS
+  unchanged; `queries.percentiles.test.ts` is the byte-behavior oracle and must stay green
+  with zero edits), but its scoring core — the percentile formula + lower-is-better inversion
+  + max_drawdown magnitude (queries.ts:112-117 semantics) — is EXTRACTED into ONE pure
+  function (`scoreAgainstPopulation`, new file `src/lib/percentile-core.ts`; a NEW function,
+  the pinned queries.ts block is never reordered — phase-84 slice pins respected). A thin
+  helper (`getOwnRowPercentiles`) scores OWN rows' metrics against the SAME published
+  population via that core, so private/draft rows DO get Pnn ("if published, this would sit
+  at Pnn") — making the approved comparison-set copy true. Own rows still NEVER enter the
+  population. No second formula: the phase-149 structural gate pins BOTH callers to the one
+  core.
+- **Archived rows (checker W-4 ruling, 2026-08-05):** archived strategies do NOT count as
+  key coverage (the key gets a placeholder) AND archived rows are excluded from the ranked
+  list (`getMyStrategies` carries `.neq("status", "archived")`). Both pinned with `status`
+  literals in the deriveStrategylessKeys and getMyStrategies/page specs.
+- ⚠️ StrategyTable filters to `status === "published"` IN THE COMPONENT (`StrategyTable.tsx:331`)
+  — the reuse must parameterize this (research Pitfall 1); grid-view links dead-end via
+  `getStrategyDetail` published-only (Pitfall 3) — resolve in-plan.
+- Badge `private` mapping fix improves two existing surfaces (`strategies/page.tsx:177`,
+  `StrategyHeader.tsx:24`) — declared scope, not silent widening.
+
+### Claude's Discretion
+- Route path and sidebar wiring (MY WORKSPACE section per DESIGN.md nav conventions),
+  page-level file layout, how the visibility-predicate parameterization is threaded, test
+  placement — provided the structural-reuse assertion and the provably-unchanged public
+  predicate both hold.
+
+</decisions>
+
+<code_context>
+## Existing Code Insights
+
+### Reusable Assets
+- `getPercentiles(categorySlug?)` — `src/lib/queries.ts:118`; published-only, min-5
+  population, lower-is-better inversion. Signature/behavior REUSED UNCHANGED; scoring core
+  extracted per the 2026-08-05 scorer ruling (see Post-research rulings).
+- `withPublishedOrOwner` (`src/lib/visibility.ts:115`) — the 148-landed gate this ranking
+  consumes.
+- The existing discovery/external ranking component + query (pattern mapper to pin exact
+  files/lines).
+- Phase 148's owner-lane factsheet (`/factsheet/[id]/v2`) — row link target, cannot dead-end.
+
+### Established Patterns
+- Rank presentation: `#n` + percentile per DESIGN.md (v1.11 design pass: rank→#n+percentile,
+  table color sign-only, nav → LIGHT RAIL).
+- Honest pending states: Phase 147's series_state two-state idiom.
+- Structural-reuse assertion: the phase-147/148 source-scan gate architecture.
+
+### Integration Points
+- Sidebar (MY WORKSPACE) — DESIGN.md light-rail nav conventions.
+- Phase 150 (OWN-03) follows; Phase 152's SCEN-03 also consumes the 148 gate.
+
+</code_context>
+
+<specifics>
+## Specific Ideas
+
+- ⚠️ Reuse cuts both ways (roadmap trap): an unpublished row's metrics must never reach any
+  anon or non-owner surface through the shared path — the public predicate stays provably
+  unchanged.
+- ⛔ Phase 149 executes only AFTER Phase 148 lands on main (structural dependency) — planning
+  may proceed; execution forks from post-merge main.
+
+</specifics>
+
+<deferred>
+## Deferred Ideas
+
+- Percentile re-rank toggle (among-own-rows view) — deferred at discuss; follow-up candidate
+  once the ranking ships.
+
+</deferred>

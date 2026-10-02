@@ -31,6 +31,8 @@ import pandas as pd
 import pandera as pa
 from pandera.errors import SchemaErrors
 
+from services.dispersion import dispersion_is_residue
+
 logger = logging.getLogger("quantalyze.analytics")
 
 SHARPE_SENTINEL_DAILY = 10.0
@@ -77,7 +79,8 @@ PERCENT_FORM_AUTO_NORM_UPPER = 100.0
 # double-parse. The /process-key path has no upstream row cap (unlike the TS
 # edge route), so an unbounded CSV would make pandas read_csv + the two
 # pd.to_datetime passes run on arbitrarily many rows. Matches the 5000-row
-# persistence limit (persist_csv_daily_returns); a larger file is rejected
+# persistence limit (the finalize_csv_strategy_with_returns fold's p_rows
+# cap); a larger file is rejected
 # with an actionable error rather than silently truncated or DoS-ing the pod.
 MAX_INGEST_ROWS = 5000
 
@@ -224,8 +227,44 @@ def _check_sharpe_sentinel(df: pd.DataFrame, fmt: str) -> list[dict[str, Any]]:
     errors: list[dict[str, Any]] = []
     if fmt == "daily_returns" and "daily_return" in df.columns and len(df) >= 2:
         r = df["daily_return"].dropna()
-        if len(r) >= 2 and r.std(ddof=1) > 0:
-            sharpe = (r.mean() - DEFAULT_RISK_FREE_DAILY) / r.std(ddof=1)
+        if len(r) >= 2:
+            sd = r.std(ddof=1)
+            # Phase 166.1 (S3, D-04): a std that is only float residue (a repeated
+            # float, or a constant yield taken from a compounding NAV) has no
+            # Sharpe to print; dividing by it printed a fabricated ~1e15. Keep the
+            # VERDICT (a constant return above the risk-free rate is an unbounded
+            # Sharpe, so it is rejected) and drop the number.
+            #
+            # D-24 (founder decision 2026-09-26): an EXACTLY zero std now takes
+            # this branch too, so a constant positive series is rejected at every
+            # length with the one message below. Before D-24 this block was gated
+            # on a strictly positive std, so a short constant series (whose std
+            # sums to exactly 0) was ACCEPTED and a longer one (float residue)
+            # was REJECTED: float summation decided the verdict. That gate was
+            # kept in plan 01 for D-04 verdict preservation; D-24 supersedes that
+            # reason. A constant ZERO series is out of scope: its mean is not
+            # above the risk-free rate, so it still gets no error. A NaN std
+            # (non-finite rows) is not residue and its Sharpe comparison is
+            # False, so it still gets no error either.
+            #
+            # Round-1 WR-01 / SFH MEDIUM-3 (amends D-04, recorded in
+            # 166.1-CONTEXT): this branch emits its OWN rule key,
+            # `daily_returns_constant`. It shared `daily_sharpe_sentinel`, whose
+            # label "Daily Sharpe > 10 looks unrealistic" states a comparison
+            # that is never made here: with no dispersion there is no Sharpe.
+            # The Sharpe-number branch below keeps its key and label.
+            if dispersion_is_residue(float(sd), float(r.mean())):
+                if r.mean() - DEFAULT_RISK_FREE_DAILY > 0:
+                    errors.append({
+                        "rule": "daily_returns_constant",
+                        "row": 0,
+                        "message": (
+                            "Daily returns do not vary, so the Sharpe is unbounded; "
+                            "a constant positive return is not a realistic track record"
+                        ),
+                    })
+                return errors
+            sharpe = (r.mean() - DEFAULT_RISK_FREE_DAILY) / sd
             if sharpe > SHARPE_SENTINEL_DAILY:
                 errors.append({
                     "rule": "daily_sharpe_sentinel",
@@ -766,7 +805,14 @@ def validate_csv(raw_bytes: bytes, fmt: str) -> dict[str, Any]:
             # — that's the raw cell value. Log only the row index + rule.
             rule_name = str(row.get("check", "unknown"))
             row_idx_raw = row.get("index")
-            row_idx = int(row_idx_raw) + 1 if row_idx_raw is not None and pd.notna(row_idx_raw) else 0
+            # 161-REVIEW / CR-02 — `0` IS THE ABSENT-ROW SENTINEL ON THE WIRE.
+            # Real rows are 1-BASED here (`int(...) + 1`), so `row: 0` can only
+            # ever mean "this failure has no row". The sentinel STAYS on the
+            # wire — `_forwarded_pandera_rows` and the wizard's typed shape both
+            # expect an int — but it may never be INTERPOLATED into a sentence a
+            # human reads. See the message builder below.
+            has_row = row_idx_raw is not None and pd.notna(row_idx_raw)
+            row_idx = int(row_idx_raw) + 1 if has_row else 0
             logger.warning(
                 "[csv-validator] rule violation row=%d rule=%s",
                 row_idx, rule_name,
@@ -776,13 +822,58 @@ def validate_csv(raw_bytes: bytes, fmt: str) -> dict[str, Any]:
             # untrusted CSV content that can carry PII, and this envelope is
             # persisted into strategy_verifications metadata. Mirror the
             # no-row-data discipline (above) on the response channel too.
+            #
+            # 161-03 / WIZERR-13 — AND DO NOT NAME A COLUMN THAT DOES NOT
+            # EXIST. `column` is NaN for a DATAFRAME-level check (the schema
+            # itself failed, not a cell in a column), and pandera reports that
+            # as a float, so the pre-fix f-string rendered its `str()`:
+            #
+            #     Column 'nan' failed rule 'column_in_dataframe' at row 0.
+            #
+            # measured verbatim against a daily_returns upload whose value
+            # column is misnamed. The wizard prints that sentence unchanged.
+            # With no column to name, the clause is OMITTED rather than filled
+            # with a fabricated name.
+            #
+            # ⛔ The guard is `pd.isna`, NEVER a string match on "nan": a CSV
+            # is free to have a column literally named `nan`, and for that file
+            # the column clause is CORRECT. Only the absent reading is absent.
+            #
+            # ⛔ 161-REVIEW / CR-02 — AND DO NOT NAME A ROW THAT DOES NOT EXIST.
+            # 161-03 removed the invented COLUMN name and left the invented ROW
+            # number standing, so the founder-measured specimen still read:
+            #
+            #     Failed rule 'column_in_dataframe' at row 0.
+            #
+            # A dataframe-level check has no row either — pandera reports
+            # `index` as NaN for the same reason it reports `column` as NaN —
+            # and there is no row 0 in a 1-based sentence. The row clause is now
+            # OMITTED on exactly the same terms as the column clause: absent
+            # means absent, never a fabricated number (161-UI-SPEC Copy
+            # Principle 5).
+            #
+            # ⚠️ MEASURED, not reasoned. Driving a `daily_returns` upload whose
+            # value column is misnamed through `validate_csv` produces
+            # `has_column` False AND `has_row` False on the same failure_cases
+            # row, so this is the arm the requirement's own specimen reaches.
+            column_raw = row.get("column")
+            has_column = column_raw is not None and not pd.isna(column_raw)
+            column_name = str(column_raw).strip() if has_column else ""
+            if column_name and has_row:
+                message = (
+                    f"Column '{column_name}' failed rule "
+                    f"'{rule_name}' at row {row_idx}."
+                )
+            elif column_name:
+                message = f"Column '{column_name}' failed rule '{rule_name}'."
+            elif has_row:
+                message = f"Failed rule '{rule_name}' at row {row_idx}."
+            else:
+                message = f"Failed rule '{rule_name}'."
             all_errors.append({
                 "rule": rule_name,
                 "row": row_idx,
-                "message": (
-                    f"Column '{row.get('column')}' failed rule "
-                    f"'{rule_name}' at row {row_idx}."
-                ),
+                "message": message,
             })
         df_validated = df
 

@@ -48,6 +48,14 @@ export type ForQuantsEvent =
   // submission (name or series) changed after a failed submit. Emitted so a
   // silent re-mint is observable, since the defect it guards was itself silent.
   | "wizard_csv_session_reminted"
+  // 164.2.1 / SESSIONID-FENCE — the key fence declined to restore a stored
+  // wizardSessionId, so this mount submits under a fresh idempotency token.
+  // Emitted because the decline is otherwise INVISIBLE: the caller cannot tell
+  // it from "nothing stored", "HMAC failed" or "fresh tab nonce", so an
+  // over-declining regression (a key-resolution bug refusing EVERY API resume)
+  // would be indistinguishable in production from working correctly. The
+  // reason label rides in `step`; no key id and no session id is ever sent.
+  | "wizard_session_id_not_restored"
   | "wizard_request_call_click";
 
 // CtaLocation is reused across the landing page CTA and the wizard

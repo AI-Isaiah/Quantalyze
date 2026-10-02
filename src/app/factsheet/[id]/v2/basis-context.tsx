@@ -8,11 +8,12 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import type { FactsheetPayload, ComputeSummary } from "@/lib/factsheet/types";
+import type { FactsheetPayload, ComputeSummary, ComparatorBlock } from "@/lib/factsheet/types";
 import { overlayBasisScalars, BASIS_KPI_MAP } from "@/lib/factsheet/basis-metrics";
 import { deriveSeriesBundle } from "@/lib/factsheet/build-payload";
 import { sanitizeLeverage } from "@/lib/leverage";
 import { LeverageContext } from "./leverage-context";
+import { useXRange } from "./factsheet-context";
 
 /**
  * Phase 90 (FS-03, CONTEXT D5/D7) — the NARROW, EPHEMERAL basis context.
@@ -51,6 +52,36 @@ interface BasisContextValue {
 const BasisContext = createContext<BasisContextValue | null>(null);
 
 /**
+ * 169.1 review MD-01 — a range gesture in progress (a brush pan or handle drag).
+ * While one is held, the windowed view keeps the range the gesture STARTED on, so
+ * the strip and the rail derive once when the gesture ends instead of once per
+ * pointer move (each derive runs the 2000-resample bootstrap: measured ~290 ms at
+ * 3000 observations). The charts keep following the live range.
+ */
+type RangeGestureValue = {
+  /** The range the gesture started on, or null when no gesture is held. */
+  held: readonly [number, number] | null;
+  begin: (startRange: readonly [number, number]) => void;
+  end: () => void;
+};
+
+const RangeGestureContext = createContext<RangeGestureValue | null>(null);
+
+const NO_GESTURE = { begin: () => {}, end: () => {} };
+
+/**
+ * MD-01 — begin / end a range gesture. `begin(range)` takes the range the gesture
+ * starts on (the one the strip shows); `end()` releases it and the windowed view
+ * derives the final range once. Call `end()` on every way a gesture can stop
+ * (pointer up, cancel, lost capture, unmount): a gesture never ended keeps the
+ * strip on its start range. Outside a BasisProvider both are no-ops.
+ */
+export function useRangeGesture(): Pick<RangeGestureValue, "begin" | "end"> {
+  const v = useContext(RangeGestureContext);
+  return v ?? NO_GESTURE;
+}
+
+/**
  * Ephemeral basis state. Renders children only (no DOM element) so wrapping the
  * FactsheetBody tree is transparent to the GUARD-02 byte-identity gate. Default
  * `cash_settlement` (D5).
@@ -58,7 +89,20 @@ const BasisContext = createContext<BasisContextValue | null>(null);
 export function BasisProvider({ children }: { children: ReactNode }) {
   const [basis, setBasis] = useState<Basis>("cash_settlement");
   const value = useMemo<BasisContextValue>(() => ({ basis, setBasis }), [basis]);
-  return <BasisContext.Provider value={value}>{children}</BasisContext.Provider>;
+  const [held, setHeld] = useState<readonly [number, number] | null>(null);
+  // begin / end keep ONE identity for the provider's life, so a consumer's
+  // unmount-cleanup effect keyed on `end` never fires (and releases the hold)
+  // just because a gesture began.
+  const actions = useMemo(
+    () => ({ begin: (startRange: readonly [number, number]) => setHeld(startRange), end: () => setHeld(null) }),
+    [],
+  );
+  const gesture = useMemo<RangeGestureValue>(() => ({ held, ...actions }), [held, actions]);
+  return (
+    <BasisContext.Provider value={value}>
+      <RangeGestureContext.Provider value={gesture}>{children}</RangeGestureContext.Provider>
+    </BasisContext.Provider>
+  );
 }
 
 /** Subscribe to the active basis + setter. Throws outside the provider. */
@@ -86,11 +130,12 @@ export function useBasisOrCash(): Basis {
  * server-side D3 overlay — payload-as-arg avoids coupling to the frozen
  * FactsheetProvider).
  *
- *   - `cash_settlement` → `payload.strategyMetrics` UNTOUCHED. For composites,
- *     build-payload already overlaid the persisted cash scalars onto it (geometric
- *     or arithmetic per `returns_denominator_config` — Round-2 C-1; arithmetic
- *     only for the "simple"/allocated-capital override), so this is coherent with
- *     the persisted headline and byte-identical to today for single-key.
+ *   - `cash_settlement` → `payload.strategyMetrics` UNTOUCHED. build-payload
+ *     already overlaid the persisted cash scalars onto it (geometric or arithmetic
+ *     per `returns_denominator_config` — Round-2 C-1; arithmetic only for the
+ *     "simple"/allocated-capital override): for a composite from the stitch's
+ *     object, and since Phase 169 (D-10) for a rankable single-key row from its
+ *     persisted top-level scalars. So this is the persisted headline the lists show.
  *   - `mark_to_market` → a shallow copy overlaying ONLY the seven mapped
  *     {@link overlayBasisScalars} scalars from the PERSISTED
  *     `metrics_json_by_basis.mark_to_market`. α/IR and every unmapped key keep
@@ -158,8 +203,12 @@ export function useBasisMetrics(payload: FactsheetPayload): {
  *
  * The four guards each return `base` BY REFERENCE (no re-derive, no fabrication):
  *   1. L === 1                            — SC-4 unity short-circuit
- *   2. dataQuality.composite === true     — A2: leverage is single-key only (arithmetic
- *                                            is composite-only; composites also hide the slider)
+ *   2. dataQuality.composite === true     — A2: leverage is single-key only (composites
+ *                                            also hide the slider); since Phase 169 review
+ *                                            round 1 (SFH M-2) also a chain-broken or
+ *                                            convention-override single-key row, whose
+ *                                            stored L=1 headline the re-derive cannot
+ *                                            continue (see `leverageEligibleFor`)
  *   3. periodsPerYear == null             — fail-closed (stale cache with no annualization basis)
  *   4. MTM basis + no MTM bundle OR no     — no-fabrication: an unresolved MTM label falls back
  *      persisted MTM scalar cache            to cash data (levering it renders levered-cash as
@@ -195,6 +244,45 @@ export function useBasisMetrics(payload: FactsheetPayload): {
  * and NEVER consult this cache (SC-4 byte-identity stays first).
  */
 const leveredViewCache = new WeakMap<FactsheetPayload, Map<string, FactsheetPayload>>();
+
+/**
+ * Phase 169.1 (D-27) — the ONE argument builder for every client re-derive of the
+ * series bundle: the leverage arm below and the zoom-window arm (`windowView`).
+ * D-27 names it the anti-drift device: both arms re-derive with the same
+ * conventions, so a window and a leverage what-if cannot disagree on how a
+ * figure is computed. The caller guarantees `view.periodsPerYear` is present
+ * (the leverage arm through `leverageApplies`, the window arm through its
+ * no-annualization-basis withhold).
+ */
+function rederiveArgs(view: FactsheetPayload): Parameters<typeof deriveSeriesBundle>[1] {
+  return {
+    periodsPerYear: view.periodsPerYear!,
+    // Phase 169.1 (D-27 as amended, D-28, D-30): the strategy's own conventions,
+    // read from the payload this view derives from. The window arm needs them: an
+    // arithmetic composite's window is the running sum its chart draws, and an
+    // active-day-basis window's vol, Sharpe and Sortino exclude the zero days.
+    // For the leverage arm they are a no-op by construction, because every payload
+    // carrying a non-default convention is leverage-ineligible (a composite, or a
+    // single-key payload flagged `returnsConventionOverride`, 169 SFH H-2; plan
+    // 169.1-04 keeps that flag, D-83).
+    isArithmetic: view.cumulativeMethod === "arithmetic",
+    dayBasis: view.dayBasis,
+    calendarDense: view.dataQuality?.composite === true,
+    markets: view.markets,
+    strategyName: view.strategyName,
+    // comparatorAnnVol OMITTED — a re-derived bundle vol-matches its OWN vol
+    // (mirrors the MTM arm in build-payload.ts; passing the persisted cash ann_vol
+    // would un-lever the comparator vol-match, or mis-match a window).
+    // missingSegments passed through so the bundle spread does not clobber the base
+    // mask with undefined.
+    missingSegments: view.missingSegments,
+    // Phase 169.5 (SC3, D-09, D-21): BTC is re-aligned from the SAME closes and
+    // `dropped` list the server used, carried on the payload. A payload without
+    // the field (hand-built) has no coverage information: BTC is the unavailable
+    // form, never the bundled fixture.
+    benchmarkPrices: view.benchmarkPrices ?? { unavailable: true },
+  };
+}
 
 function readLeveredView(
   payload: FactsheetPayload,
@@ -302,17 +390,9 @@ export function useBasisSeriesView(payload: FactsheetPayload): FactsheetPayload 
     // stays un-levered (deriveSeriesBundle re-aligns BTC/SPX/… internally) — that is
     // what makes β→L·β / α→L·α honest via jointMetrics(leveredStrat, unleveredBench).
     const levered = base.strategyReturns.map((r, i) => ({ date: base.dates[i], value: L * r }));
-    const lb = deriveSeriesBundle(levered, {
-      periodsPerYear: base.periodsPerYear!,
-      isArithmetic: false,
-      markets: base.markets,
-      strategyName: base.strategyName,
-      // comparatorAnnVol OMITTED — the levered bundle vol-matches its OWN levered vol
-      // (mirrors the MTM arm at build-payload.ts:437-438; passing the persisted cash
-      // ann_vol would un-lever the comparator vol-match). missingSegments passed
-      // through so the bundle spread does not clobber the base mask with undefined.
-      missingSegments: base.missingSegments,
-    });
+    // Phase 169.1 (D-27): the argument object comes from the ONE builder the window
+    // arm also calls, so the two re-derives cannot drift.
+    const lb = deriveSeriesBundle(levered, rederiveArgs(base));
     // WR-02 (Phase 107 review): Sharpe and Sortino are LEVERAGE-INVARIANT at rf=0 —
     // r→L·r cancels in `mean·√P/sd` and `mean·P/ddDev` (compute.ts:41,45). At L=1 the
     // MTM strip shows the PERSISTED dense-Python scalars (the F3 overlay that makes the
@@ -328,26 +408,34 @@ export function useBasisSeriesView(payload: FactsheetPayload): FactsheetPayload 
     // so it is genuinely leverage-VARIANT — its boundary change under leverage is honest,
     // and pinning it to the unlevered persisted value would HIDE a real effect (see the
     // Phase 107 review-fix note; the reviewer's suggested calmar pin was declined for
-    // this reason). Only MTM carries a persisted per-basis overlay; cash's `basisM`
-    // already equals the client recompute, so there is no cash jump to reconcile.
+    // this reason). Phase 169 (D-25, SC4): cash carries a persisted overlay too now.
+    // A rankable single-key payload's L=1 cash headline is the stored value from
+    // `metricsByBasis.cash_settlement` (composite-read-path `readSingleKeyBasisOpts`),
+    // so without this re-pin the cash Sharpe/Sortino would jump to the client
+    // recompute purely by engaging leverage, exactly as MTM's did.
     //
     // B-1 (Phase 107 Fable red team): the invariance holds ONLY for L > 0. At L=0
     // (a reachable, intended state — input min="0", sanitizeLeverage keeps 0 valid)
     // the returns are all-zeros (r→0·r), so `mean·√P/sd` is 0/0 and the derive
-    // honestly yields sharpe=0 / sortino=0 / ann_vol=0 with flat charts. Pinning the
+    // honestly yields sharpe "—" (NaN, no dispersion; founder decision D7,
+    // 2026-09-26) / sortino "—" (NaN, no losing day) / ann_vol=0 with flat charts. Pinning the
     // persisted non-zero Sharpe/Sortino there would render e.g. "Sharpe 1.85" next to
     // "Cum 0.0% / Ann. Vol 0.0%" and flat charts — a fresh dishonesty. So apply the
     // pin only when L > 0; at L=0 let the honest derived zeros stand.
     const strategyMetrics = ((): typeof lb.strategyMetrics => {
-      // Phase 133 (SMTM-01): the re-pin applies under BOTH persisted-overlay bases
-      // (mark_to_market and smoothed_mtm) — each pins Sharpe/Sortino to its OWN
-      // persisted scalar cache so the L=1↔L≠1 boundary is continuous for the two
-      // invariant metrics. Cash carries no persisted per-basis overlay, so it is
-      // excluded (its L=1 KPIs already equal the client recompute).
-      if (basis === "cash_settlement" || L <= 0) return lb.strategyMetrics;
-      const persisted = (basis === "mark_to_market"
-        ? payload.metricsByBasis?.mark_to_market
-        : payload.metricsByBasis?.smoothed_mtm) as
+      // Phase 133 (SMTM-01) + Phase 169 (D-25): the re-pin applies under EVERY
+      // persisted-overlay basis — mark_to_market, smoothed_mtm, and cash_settlement
+      // when the payload carries a persisted cash headline — each pinning
+      // Sharpe/Sortino to its OWN persisted scalar cache so the L=1↔L≠1 boundary is
+      // continuous for the two invariant metrics. A cash payload with no persisted
+      // cash object (a row the owner declined to overlay) keeps the client
+      // recompute below.
+      if (L <= 0) return lb.strategyMetrics;
+      const persisted = (basis === "cash_settlement"
+        ? payload.metricsByBasis?.cash_settlement
+        : basis === "mark_to_market"
+          ? payload.metricsByBasis?.mark_to_market
+          : payload.metricsByBasis?.smoothed_mtm) as
         | Record<string, unknown>
         | undefined
         | null;
@@ -389,6 +477,225 @@ export function useBasisSeriesView(payload: FactsheetPayload): FactsheetPayload 
     writeLeveredView(payload, basis, L, view);
     return view;
   }, [basis, leverage, payload]);
+}
+
+/**
+ * Phase 169.1 (SC10, D-27) — the KPI strip and the metrics rail follow the zoom window.
+ *
+ * Founder, 2026-09-25: "when I look at a different time, it should adjust all KPIs".
+ * The MasterBrush and every chart already read the shared range (`useXRange`); the
+ * three pieces below let the strip and the rail describe that range too:
+ *   - `resolveRangeScope`: is the range the full history or a selection, and which
+ *     dates and count does it cover (one pure rule, so the label and the figures can
+ *     never disagree, T-169-43);
+ *   - `windowView`: the active view with the follow-list fields re-derived on the
+ *     slice through the SAME shared bundle (`deriveSeriesBundle` → compute() /
+ *     jointMetrics, via `rederiveArgs`), no new formula (D-25);
+ *   - `useWindowedView`: the hook every window-following consumer reads.
+ */
+
+/**
+ * D-27 (as amended 2026-09-26, W2) — the ONLY fields a window replaces. Each is
+ * read by a strip or rail figure that follows the window. Everything else
+ * (correlations, style drift, rolling arrays, heatmaps, peer and mandate panels)
+ * stays the active view's, by reference: a window never fabricates them.
+ */
+export const WINDOW_FOLLOW_FIELDS = [
+  "dates",
+  "strategyReturns",
+  "strategyEquity",
+  "strategyDrawdowns",
+  "strategyMetrics",
+  "strategyWorst10",
+  "quantiles",
+  "bootstrapCI",
+  "comparators",
+] as const satisfies ReadonlyArray<keyof FactsheetPayload>;
+
+/** Why a window shows no figures (D-27 "Short slices"; D-82 the fail-closed guard). */
+export type WindowWithheld = "short-slice" | "no-annualization-basis";
+
+/** The active view, re-derived over a window; `withheld` set when it shows no figure. */
+export type WindowedView = FactsheetPayload & { withheld?: WindowWithheld };
+
+/**
+ * The range a view's figures cover. `startIdx` / `endIdx` are the clamped indices
+ * into the ACTIVE view's axis (the rail's rolling summary restricts to them).
+ */
+export type RangeScope = {
+  kind: "full" | "selected";
+  start: string;
+  end: string;
+  n: number;
+  startIdx: number;
+  endIdx: number;
+};
+
+/**
+ * D-27 — the full-history rule. The range is the full history when it starts at
+ * index 0 and ends at or past the SHORTER of the cash axis end and the view's
+ * axis end. That covers the initial and reset range (`fullRange` is cash-sized)
+ * under every basis, an MTM axis longer or shorter than cash included. A full
+ * scope names the VIEW's first and last dates (W3, 2026-09-26): on an MTM axis
+ * longer than cash the reset range's end index is not the view's last day. A
+ * selected scope names the view's dates at the clamped indices, which bound a
+ * crafted `?range` again (T-169-44).
+ */
+export function resolveRangeScope(
+  xRange: readonly [number, number],
+  cashLen: number,
+  view: Pick<FactsheetPayload, "dates">,
+): RangeScope {
+  const viewLen = view.dates.length;
+  const last = Math.max(0, viewLen - 1);
+  const s = Math.min(Math.max(0, Math.floor(xRange[0])), last);
+  const e = Math.min(Math.max(s, Math.floor(xRange[1])), last);
+  const fullEnd = Math.min(cashLen, viewLen) - 1;
+  if (s === 0 && e >= fullEnd) {
+    return { kind: "full", start: view.dates[0] ?? "", end: view.dates[last] ?? "", n: viewLen, startIdx: 0, endIdx: last };
+  }
+  return { kind: "selected", start: view.dates[s], end: view.dates[e], n: e - s + 1, startIdx: s, endIdx: e };
+}
+
+/** The NaN-valued form of a bootstrap metric: no point, no interval, no histogram. */
+const EMPTY_BOOT = { point: NaN, lo: NaN, hi: NaN, hist: { lo: NaN, hi: NaN, bins: [] as number[] } };
+
+/**
+ * Plan-check round 1 W1 (2026-09-30) — the withheld form REPLACES every follow-list
+ * field, so no field keeps a full-history value under a "Selected range" eyebrow.
+ * dates / returns are the window's own (they need no annualization); every figure
+ * is NaN (the formatters render "—", the NaN-withhold device the leverage arm's M-1
+ * comment uses); the curves, Worst 10 and every comparator's summary, joint and
+ * paired-floor reason are empty. `strategyMetrics.start` / `end` are the window's
+ * dates exactly as compute() sets them on a slice, because the rail's Start Date
+ * and End Date rows read them off this object, and `n` is the window's count (the
+ * short-track caveat reads it).
+ */
+function withheldWindowView(
+  view: FactsheetPayload,
+  s: number,
+  e: number,
+  withheld: WindowWithheld,
+): WindowedView {
+  const dates = view.dates.slice(s, e + 1);
+  const n = dates.length;
+  const strategyMetrics = Object.fromEntries(
+    Object.entries(view.strategyMetrics).map(([k, v]) => [k, typeof v === "number" ? NaN : v === null ? null : v]),
+  ) as Record<string, unknown>;
+  strategyMetrics.n = n;
+  strategyMetrics.start = dates[0];
+  strategyMetrics.end = dates[n - 1];
+  strategyMetrics.yearly = {};
+  const quantiles = Object.fromEntries(Object.keys(view.quantiles).map((k) => [k, NaN])) as FactsheetPayload["quantiles"];
+  const bootstrapCI: FactsheetPayload["bootstrapCI"] = {
+    sharpe: { ...EMPTY_BOOT, hist: { ...EMPTY_BOOT.hist, bins: [] }, n_valid: 0 },
+    sortino: { ...EMPTY_BOOT, hist: { ...EMPTY_BOOT.hist, bins: [] }, n_valid: 0 },
+    max_dd: { ...EMPTY_BOOT, hist: { ...EMPTY_BOOT.hist, bins: [] } },
+    n_resamples: 0,
+    block_len: 0,
+    n,
+  };
+  const blank = (b: ComparatorBlock): ComparatorBlock => ({ ...b, summary: null, joint: null, jointWithheld: null });
+  const fields = {
+    dates,
+    strategyReturns: view.strategyReturns.slice(s, e + 1),
+    strategyEquity: [] as number[],
+    strategyDrawdowns: [] as number[],
+    strategyMetrics: strategyMetrics as FactsheetPayload["strategyMetrics"],
+    strategyWorst10: [] as FactsheetPayload["strategyWorst10"],
+    quantiles,
+    bootstrapCI,
+    comparators: {
+      btc: blank(view.comparators.btc),
+      spx: blank(view.comparators.spx),
+      none: blank(view.comparators.none),
+    },
+  };
+  // Narrow on the ingest discriminant before spreading (same reason as Layer 1).
+  return view.ingestSource === "api" ? { ...view, ...fields, withheld } : { ...view, ...fields, withheld };
+}
+
+/**
+ * D-27 — the active view over the window `[startIdx, endIdx]` (clamped). The slice
+ * is the ACTIVE view's own dates and returns (basis and leverage already applied by
+ * `useBasisSeriesView`), re-derived by `deriveSeriesBundle` through `rederiveArgs`.
+ * Only the follow-list fields come from the slice bundle, and its `strategyMetrics`
+ * is the bundle's own: no persisted overlay and no Sharpe / Sortino re-pin, which
+ * describe the WHOLE record (D-27 "No persisted value inside a window"). A
+ * comparator block whose summary and joint are both null in the base view (the
+ * Scenario's inert blocks, an unavailable BTC) stays the base block: a window never
+ * fills a block the full history holds unavailable (W2).
+ *
+ * Withholds (see `withheldWindowView`) below 2 observations, and when the view has
+ * no `periodsPerYear` (the leverage arm's fail-closed rule: never annualize on a
+ * guessed basis; D-82 keeps it for a hand-built or pre-bump cached payload).
+ */
+export function windowView(view: FactsheetPayload, startIdx: number, endIdx: number): WindowedView {
+  const last = Math.max(0, view.dates.length - 1);
+  const s = Math.min(Math.max(0, startIdx), last);
+  const e = Math.min(Math.max(s, endIdx), last);
+  if (e - s + 1 < 2) return withheldWindowView(view, s, e, "short-slice");
+  if (view.periodsPerYear == null) return withheldWindowView(view, s, e, "no-annualization-basis");
+  const slice = view.strategyReturns.slice(s, e + 1).map((value, i) => ({ date: view.dates[s + i], value }));
+  const wb = deriveSeriesBundle(slice, rederiveArgs(view));
+  const keepBase = (b: ComparatorBlock) => b.summary == null && b.joint == null;
+  const fields = {
+    dates: wb.dates,
+    strategyReturns: wb.strategyReturns,
+    strategyEquity: wb.strategyEquity,
+    strategyDrawdowns: wb.strategyDrawdowns,
+    strategyMetrics: wb.strategyMetrics,
+    strategyWorst10: wb.strategyWorst10,
+    quantiles: wb.quantiles,
+    bootstrapCI: wb.bootstrapCI,
+    comparators: {
+      btc: keepBase(view.comparators.btc) ? view.comparators.btc : wb.comparators.btc,
+      spx: keepBase(view.comparators.spx) ? view.comparators.spx : wb.comparators.spx,
+      none: keepBase(view.comparators.none) ? view.comparators.none : wb.comparators.none,
+    },
+  };
+  return view.ingestSource === "api" ? { ...view, ...fields } : { ...view, ...fields };
+}
+
+/**
+ * T-169-45 — one shared windowed view per base view. The strip and every rail panel
+ * read the same window, so the derive runs ONCE per window across consumers (the
+ * leverage arm's H-1 cache, narrowed to one entry: a pan replaces it).
+ */
+const windowedViewCache = new WeakMap<FactsheetPayload, { key: string; view: WindowedView }>();
+// Keyed on the PAYLOAD, with the basis and applied leverage in the entry key: under
+// a non-cash basis each `useBasisSeriesView` instance builds its own Layer-1 merge
+// object, so keying on the view object would derive once per consumer there.
+
+/**
+ * D-27 — the window-following view. At full history it returns the active view BY
+ * REFERENCE, so a reset shows exactly the stored values (the 169-01 overlay, D-10,
+ * and the leverage re-pin, D-25). The range is read through `useDeferredValue`, the
+ * same debounce the leverage read uses.
+ *
+ * 169.1 review MD-01: while a range gesture is held (`useRangeGesture`, a brush
+ * drag), the view keeps the range the gesture started on, so a drag derives once,
+ * on release, rather than once per pointer move. `scope` comes from that same held
+ * range, so the "Selected range" eyebrow always names the range its figures
+ * describe (the WR-01 caption-versus-numbers rule). The figures after release are
+ * `windowView` of the final range, exactly what a drag-free zoom to it shows.
+ */
+export function useWindowedView(payload: FactsheetPayload): { view: WindowedView; scope: RangeScope } {
+  const base = useBasisSeriesView(payload);
+  const basis = useContext(BasisContext)?.basis ?? "cash_settlement";
+  const appliedLeverage = useAppliedLeverage();
+  const liveRange = useDeferredValue(useXRange().xRange);
+  const range = useContext(RangeGestureContext)?.held ?? liveRange;
+  return useMemo(() => {
+    const scope = resolveRangeScope(range, payload.dates.length, base);
+    if (scope.kind === "full") return { view: base, scope };
+    const key = `${basis}:${appliedLeverage}:${scope.startIdx}:${scope.endIdx}`;
+    const hit = windowedViewCache.get(payload);
+    if (hit?.key === key) return { view: hit.view, scope };
+    const view = windowView(base, scope.startIdx, scope.endIdx);
+    windowedViewCache.set(payload, { key, view });
+    return { view, scope };
+  }, [payload, base, basis, appliedLeverage, range]);
 }
 
 /**
@@ -434,12 +741,26 @@ export function useAppliedLeverage(): AppliedLeverage {
  * FABRICATE the very MTM headline scalars the L=1 arm withholds. Requiring the scalar cache
  * keeps MTM leverage-ineligible in that state → the view returns base by-reference → the
  * KPIs stay "—" at every L, symmetric with guard 4. It also proves it can never disable a
- * legitimately-leverable book (a real MTM basis always has both). Cash is unaffected — it
- * carries no persisted-overlay-or-dash contract.
+ * legitimately-leverable book (a real MTM basis always has both).
+ *
+ * Phase 169 review round 1 (SFH M-2): since 169-01 the single-key cash headline at
+ * L=1 is the STORED value, and the levered arm re-derives the leverage-variant
+ * scalars (Since Inception, CAGR, volatility, drawdown) from the displayed series.
+ * D-25 (i) accepts that seam where the two agree. Two kinds of row are ineligible
+ * because they do not agree by construction, so the first step off L=1 would present
+ * the gap between them as the effect of leverage:
+ *   - `dataQuality.twrChainBroken` (SFH H-1): the stored figure covers only the
+ *     stretch after the last chain break, the re-derive the whole series;
+ *   - `dataQuality.returnsConventionOverride` (SFH H-2): the stored figure was
+ *     computed under a `simple` or active-day convention the re-derive cannot
+ *     reproduce.
+ * The view then returns `base` by reference at every L, as for a composite.
  */
 export function leverageEligibleFor(payload: FactsheetPayload, basis: Basis): boolean {
   return (
     payload.dataQuality?.composite !== true &&
+    payload.dataQuality?.twrChainBroken !== true &&
+    payload.dataQuality?.returnsConventionOverride !== true &&
     payload.periodsPerYear != null &&
     !(
       basis === "mark_to_market" &&
@@ -566,6 +887,13 @@ export function mtmDisabledReasonCopy(reason?: string): string {
       // "mtm_anchor_race" string literal is the cross-language contract — both
       // plans pin the same literal.
       return "Mark-to-market temporarily unavailable: the account changed during reconstruction; it will be recomputed on the next data refresh.";
+    case "mtm_option_row_field_missing":
+      // Phase 168 (SFH-04): stamped by the single-key MTM second pass when an
+      // options ledger row lacks its commission or position
+      // (`OptionRowFieldMissingError`; the constant is `MTM_REASON_OPTION_ROW_FIELD`
+      // in stitch_composite.py, the vocabulary owner). Steady tone: a missing
+      // field does not heal on the next refresh.
+      return "Mark-to-market unavailable: an options entry in the venue ledger is missing its fee or position, so a mark-to-market series cannot be reconstructed.";
     default:
       return "Mark-to-market unavailable for this strategy.";
   }

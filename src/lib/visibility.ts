@@ -18,6 +18,11 @@
  * (no `next/headers`, no `@/lib/supabase/server`) — so the predicate is
  * usable from React Server Components, route handlers, AND `"use client"`
  * components (the MigrationWizard strategy search) on the same helper.
+ * Its ONE import, `isUuid` from `@/lib/utils` (RANK-09), holds that line:
+ * `utils.ts` pulls only a type-only `./types` and the pure `./closed-sets`
+ * (whose sole dependency is `zod`), so nothing server-only enters through it.
+ * `console.error` is the logging floor here for the same reason — a Sentry
+ * server SDK would taint the module for client use.
  *
  * ── Deliberately NOT in this module (evidence-driven scope, Rule 2/7) ──
  *
@@ -56,6 +61,8 @@
  *     ASSERTION. Routing them through a helper adds no by-construction
  *     safety and is byte-fragile.
  */
+
+import { isUuid } from "@/lib/utils";
 
 /**
  * Append the `status = 'published'` visibility predicate to a `strategies`
@@ -111,8 +118,34 @@ export function withPublishedOnly<Q>(query: Q): Q {
  * THIS file (exempted via the `B10 visibility:` marker), so a future admin /
  * service-role client swap cannot silently drop the RLS backstop and leak every
  * user's drafts (Pitfall 4).
+ *
+ * ⭐ RANK-09 (Phase 159-07, decision D-06) — SHAPE-VALIDATED BEFORE
+ * INTERPOLATION. `authUserId` is spliced verbatim into a PostgREST filter
+ * STRING, and PostgREST parses that string as filter GRAMMAR: a value carrying
+ * its own commas, parens or operators (`x) or (user_id.neq.z`) stops being data
+ * and starts being syntax (ASVS V5 / T-159-21). Today every caller hands over a
+ * session-derived uid, so this is defence in depth — but the predicate must be
+ * safe by CONSTRUCTION rather than by the continued good behaviour of every
+ * present and future caller.
+ *
+ * A non-conforming uid fails CLOSED: the caller is treated as ANONYMOUS and
+ * gets the published-only predicate — NEVER a permissive fallback that could
+ * widen visibility on malformed input (T-159-22). And it fails LOUD: the
+ * rejection is logged under a stable, greppable prefix. The raw value travels
+ * only as a separate `console.error` ARGUMENT, never spliced into the message
+ * template and never into a filter string.
  */
 export function withPublishedOrOwner<Q>(query: Q, authUserId: string): Q {
+  if (!isUuid(authUserId)) {
+    console.error(
+      "[visibility.withPublishedOrOwner] authUserId is not a UUID — falling " +
+        "back to the published-only predicate (fail closed, treated as anon)",
+      authUserId,
+    );
+    // Routed through the ONE published-only helper rather than a second
+    // literal predicate, so the two arms cannot drift (B10).
+    return withPublishedOnly(query);
+  }
   // Same structural-cast style as withPublishedOnly: every
   // PostgrestFilterBuilder exposes `.or(filter)` returning the same builder, so
   // the predicate appends and the caller's exact query type — plus every

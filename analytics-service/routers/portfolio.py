@@ -26,6 +26,7 @@ from models.schemas import (
 from services.audit import log_audit_event
 from services.benchmark import get_benchmark_returns
 from services.db import chunked_in_query, get_supabase, one, rows
+from services.dispersion import dispersing_corrwith, pairwise_correlation_or_none
 # PYAPI-05 — the shared status contract (analytics-service/docs/STATUS_CONTRACT.md).
 from services.error_contract import RETRY_AFTER_SECONDS, service_error
 # PYAPIFIX2-01 — the FLAT venue-transient shape. C7 (the verify-strategy verdict
@@ -43,7 +44,7 @@ from services.portfolio_metrics import compute_mwr, compute_period_returns
 from services.portfolio_optimizer import find_improvement_candidates, generate_narrative
 from services.portfolio_risk import (
     compute_attribution,
-    compute_avg_pairwise_correlation,
+    compute_avg_pairwise_correlation_with_pairs,
     compute_correlation_matrix,
     compute_risk_decomposition,
     compute_rolling_correlation,
@@ -65,6 +66,32 @@ from services.rate_limit import limiter, tenant_or_platform_key
 
 router = APIRouter(prefix="/api", tags=["portfolio"])
 logger = logging.getLogger("quantalyze.analytics")
+
+
+# ---------------------------------------------------------------------------
+# HONEST-01 / D-162-4 (strict) — the catch-all's user copy.
+# ---------------------------------------------------------------------------
+# `portfolio_analytics.computation_error` is a USER-VISIBLE column: the
+# portfolio dashboard's StaleWarning renders it verbatim
+# (src/app/(dashboard)/portfolios/[id]/page.tsx). Until Phase 162 the catch-all
+# wrote `f"{type(exc).__name__}: {str(exc)[:400]}"` into it, so a KeyError or a
+# numpy broadcast error was shown to the account holder as an error message.
+#
+# The raw class + message are NOT lost — `logger.exception` at the catch-all
+# already carries them with `exc_info=True`, which is the operator surface (log
+# line + Sentry). Curating the user surface must not curate that one too; the
+# standing api_keys.sync_error invariant
+# (analytics-service/tests/test_allocator_positions.py) asserts both halves.
+#
+# ⚠️ Unlike the strategy side there is NO SQL bridge here: nothing downstream
+# re-writes portfolio_analytics.computation_error from a job row, so this
+# writer IS the boundary and a constant here is sufficient. (On the strategy
+# side the equivalent boundary turned out to be the bridge — see migration
+# 20260826120000 and 162-02-DECISION.md.)
+PORTFOLIO_COMPUTE_FAILED_COPY = (
+    "Portfolio analytics could not complete due to an unexpected error. "
+    "Retry the computation."
+)
 
 
 # Audit M-0620 — canonical enums for the literal strings the DB CHECK
@@ -690,6 +717,16 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict[str, Any]:
     analytics_id = rows(insert_result)[0]["id"]
 
     def _fail(error_msg: str) -> None:
+        """Write a terminal FAILED state onto this portfolio's analytics row.
+
+        ⛔ `error_msg` is USER COPY and nothing else. It lands in
+        `portfolio_analytics.computation_error`, which the portfolio dashboard's
+        StaleWarning renders verbatim. Every call site must pass a fixed
+        sentence (or one interpolating values the user already knows, like their
+        own strategy count) — never `str(exc)`, never a type name, never a
+        scrubbed exception. Scrubbing removes secrets; it does not turn an
+        internal into something worth showing someone. HONEST-01 / D-162-4.
+        """
         # @audit-skip: compute-job failure state.
         # error_msg is bounded to ~500 chars to keep the column readable.
         supabase.table("portfolio_analytics").update(
@@ -850,7 +887,12 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict[str, Any]:
         # Correlation matrix + rolling + avg pairwise
         corr_matrix = compute_correlation_matrix(dict(strategy_returns))
         rolling_corr = compute_rolling_correlation(dict(strategy_returns))
-        avg_pairwise_corr = compute_avg_pairwise_correlation(corr_matrix)
+        # Round-1 WR-03 / SFH MEDIUM-1: the average covers only the DEFINED
+        # pairs (a leg that does not disperse is masked by C1), so the count of
+        # pairs it used is recorded in data_quality beside it.
+        avg_pairwise_corr, avg_corr_pairs_used, avg_corr_pairs_total = (
+            compute_avg_pairwise_correlation_with_pairs(corr_matrix)
+        )
 
         # Risk decomposition + attribution
         ordered_sids = list(df.columns)
@@ -952,7 +994,10 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict[str, Any]:
                 aligned = portfolio_returns_series.reindex(benchmark_rets.index).dropna()
                 b_aligned = benchmark_rets.reindex(aligned.index).dropna()
                 if len(aligned) >= 30:
-                    corr = _safe_float(float(aligned.corr(b_aligned)))
+                    # Phase 166.1 (C6, D-02): no correlation when either leg
+                    # does not disperse (a constant-yield portfolio), as for
+                    # an all-zero one; pandas divides by the residue std.
+                    corr = _safe_float(pairwise_correlation_or_none(aligned, b_aligned))
                     btc_twr = total_return_from_equity((1 + b_aligned).cumprod())
                     benchmark_comparison = {
                         "symbol": "BTC",
@@ -1098,6 +1143,8 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict[str, Any]:
             "sharpe_status": sharpe_status,
             "cov_history_sufficient": cov_history_sufficient,
             "correlation_history_sufficient": correlation_history_sufficient,
+            "avg_pairwise_correlation_pairs_used": avg_corr_pairs_used,
+            "avg_pairwise_correlation_pairs_total": avg_corr_pairs_total,
             "benchmark_error": benchmark_error,
             "matching_status": None,  # populated only on verify_strategy
         }
@@ -1180,15 +1227,27 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict[str, Any]:
             str(exc),
             exc_info=True,
         )
-        # Persist the exception class + truncated message so operators
-        # can identify the root cause from the row alone, without having
-        # to cross-reference Sentry by timestamp. Project memory KPI-17
-        # saga (PRs #95-#100) flagged this exact debug-the-DB-row need.
+        # ⚠️ HONEST-01 / D-162-4 (Phase 162). This used to persist
+        # `f"{type(exc).__name__}: {str(exc)[:400]}"`, and the comment that
+        # stood here justified it as an operator convenience — "so operators can
+        # identify the root cause from the row alone, without cross-referencing
+        # Sentry by timestamp" (the KPI-17 saga, PRs #95-#100). The convenience
+        # was real; the surface was wrong. This column is rendered verbatim to
+        # the ACCOUNT HOLDER by the portfolio dashboard's StaleWarning, so the
+        # row was doing double duty as a debug channel and as user copy, and
+        # only one of those two readers can be served by the same string.
+        #
+        # The operator half is intact and is served ABOVE, by the
+        # `logger.exception(..., exc_info=True)` call — class, message and
+        # traceback, in the log line and in Sentry. That is a better debug
+        # channel than a 400-char DB column, and it is the one an engineer
+        # already reaches for.
+        #
         # _fail() itself can raise if Supabase is down — catch and log
         # (review CR-7) so the original computation exception isn't
         # masked by a subsequent infra error.
         try:
-            _fail(f"{type(exc).__name__}: {str(exc)[:400]}")
+            _fail(PORTFOLIO_COMPUTE_FAILED_COPY)
         except Exception as fail_exc:
             logger.exception(
                 "Failed to mark portfolio %s analytics row FAILED (row may "
@@ -1960,15 +2019,17 @@ async def portfolio_bridge(request: Request, req: BridgeRequest) -> dict[str, An
     # ownership SELECT (above) so an attacker cannot poison the
     # bucket cache with forged user_ids.
     if not _check_bridge_user_rate((req.user_id or "").strip()):
-        raise HTTPException(
-            status_code=429,
+        # TS-23 (146-02, D-146-3): TS-23's owner decided — the nested
+        # service_error envelope (internal.py's worked example) is the ONE
+        # winning 429 raise-site shape; migrated per TS-23. The wait stays the
+        # window this cap actually enforces, read from the SAME constant
+        # `_check_bridge_user_rate` uses (PYAPIFIX2-04 preserved).
+        raise service_error(
+            429,
+            "RATE_LIMITED",
+            retryable=True,
+            retry_after=_BRIDGE_USER_RATE_WINDOW_SEC,
             detail="Too many bridge requests for this user. Try again later.",
-            # PYAPIFIX2-04 — advertise the window this cap actually enforces,
-            # read from the SAME constant `_check_bridge_user_rate` uses. Body
-            # shape deliberately unchanged (header-only): migrating it would
-            # mint a fourth 429 body shape, and which shape wins belongs to
-            # TS-23's owner.
-            headers={"Retry-After": str(_BRIDGE_USER_RATE_WINDOW_SEC)},
         )
 
     # Verify the underperformer is actually in this portfolio
@@ -2251,16 +2312,19 @@ async def verify_strategy(request: Request, req: VerifyStrategyRequest) -> dict[
     # Defense-in-depth per-email rate limit (IP-only limit above is decorative
     # against rotated-IP attackers). Composed with the slowapi IP budget.
     if not _check_verify_strategy_email_rate((req.email or "").strip().lower()):
-        raise HTTPException(
-            status_code=429,
+        # TS-23 (146-02, D-146-3): migrated per TS-23 onto the nested
+        # service_error envelope — the ONE winning 429 raise-site shape. Wait
+        # from the same constant `_check_verify_strategy_email_rate` uses
+        # (PYAPIFIX2-04). ⚠️ This route has NO TS caller today (0 hits for
+        # "verify-strategy" in src/lib/analytics-client.ts), so the rationale
+        # is CLASS INTEGRITY, not user impact: a class closed at three of its
+        # four sites re-opens the moment the fourth is revived.
+        raise service_error(
+            429,
+            "RATE_LIMITED",
+            retryable=True,
+            retry_after=_VERIFY_STRATEGY_EMAIL_RATE_WINDOW_SEC,
             detail="Too many verification attempts for this email. Try again later.",
-            # PYAPIFIX2-04, from the same constant
-            # `_check_verify_strategy_email_rate` uses. ⚠️ This route has NO TS
-            # caller today (0 hits for "verify-strategy" in
-            # src/lib/analytics-client.ts), so the rationale is CLASS INTEGRITY,
-            # not user impact: a class closed at three of its four sites
-            # re-opens the moment the fourth is revived.
-            headers={"Retry-After": str(_VERIFY_STRATEGY_EMAIL_RATE_WINDOW_SEC)},
         )
 
     # Audit H-0592 — Idempotency-Key support. A flaky-client retry on the
@@ -2467,10 +2531,14 @@ async def verify_strategy(request: Request, req: VerifyStrategyRequest) -> dict[
                     df = pd.DataFrame(existing)
                     aligned = pd.concat([returns.rename("_target"), df], axis=1).dropna()
                     if len(aligned) >= 30:
-                        corrs = aligned.drop(columns=["_target"]).corrwith(aligned["_target"])
-                        # Filter NaN before idxmax — corrwith returns all-NaN when
-                        # every candidate has zero variance over the aligned window,
-                        # and corrs[NaN] raises KeyError.
+                        # Phase 166.1 (C7, D-02): only legs that really disperse can
+                        # match; a raw corrwith gave two same-yield constant
+                        # strategies a 1.0 correlation, a false "matched".
+                        corrs = dispersing_corrwith(
+                            aligned.drop(columns=["_target"]), aligned["_target"]
+                        )
+                        # Filter NaN before idxmax — idxmax over an all-NaN Series
+                        # raises, and corrs[NaN] raises KeyError.
                         corrs_clean = corrs.dropna()
                         if not corrs_clean.empty:
                             best = corrs_clean.idxmax()

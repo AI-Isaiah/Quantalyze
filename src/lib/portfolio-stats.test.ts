@@ -3,7 +3,6 @@ import type { DailyPoint } from "./portfolio-math-utils";
 import {
   computeMonthlyReturns,
   computeAnnualReturns,
-  computeRollingMetric,
   computeVaR,
   computeExpectedShortfall,
   computeReturnDistribution,
@@ -90,71 +89,6 @@ describe("computeAnnualReturns", () => {
 
   it("returns empty array for empty input", () => {
     expect(computeAnnualReturns([])).toEqual([]);
-  });
-});
-
-// ── 3. computeRollingMetric ─────────────────────────────────────────
-describe("computeRollingMetric", () => {
-  it("returns rolling Sharpe with correct length (n - window + 1)", () => {
-    const window = 60;
-    const rolling = computeRollingMetric(DAILY_RETURNS, window, "sharpe");
-    expect(rolling.length).toBe(252 - window + 1);
-    // Each point has a date from the original series
-    expect(rolling[0].date).toBe(DAILY_RETURNS[window - 1].date);
-  });
-
-  it("returns rolling volatility annualized (std * sqrt(252))", () => {
-    const window = 60;
-    const rolling = computeRollingMetric(DAILY_RETURNS, window, "volatility");
-    expect(rolling.length).toBe(252 - window + 1);
-    // Volatility should be positive
-    for (const pt of rolling) {
-      expect(pt.value).toBeGreaterThanOrEqual(0);
-    }
-  });
-
-  it("constant returns produce near-zero rolling volatility", () => {
-    const rolling = computeRollingMetric(CONSTANT_RETURNS, 20, "volatility");
-    for (const pt of rolling) {
-      expect(pt.value).toBeCloseTo(0, 6);
-    }
-  });
-
-  it("returns empty when input is shorter than window", () => {
-    const short = DAILY_RETURNS.slice(0, 5);
-    expect(computeRollingMetric(short, 60, "sharpe")).toEqual([]);
-  });
-
-  // #597 — asset-class annualization: crypto passes periodsPerYear=365.
-  it("default periodsPerYear is byte-identical to explicit 252", () => {
-    const window = 60;
-    expect(computeRollingMetric(DAILY_RETURNS, window, "sharpe")).toEqual(
-      computeRollingMetric(DAILY_RETURNS, window, "sharpe", 252),
-    );
-    expect(computeRollingMetric(DAILY_RETURNS, window, "volatility")).toEqual(
-      computeRollingMetric(DAILY_RETURNS, window, "volatility", 252),
-    );
-  });
-
-  it("crypto √365 Sharpe = √252 Sharpe × √(365/252) point-for-point", () => {
-    const window = 60;
-    const s252 = computeRollingMetric(DAILY_RETURNS, window, "sharpe", 252);
-    const s365 = computeRollingMetric(DAILY_RETURNS, window, "sharpe", 365);
-    const scale = Math.sqrt(365 / 252);
-    expect(s365.length).toBe(s252.length);
-    for (let i = 0; i < s365.length; i++) {
-      expect(s365[i].value).toBeCloseTo(s252[i].value * scale, 10);
-    }
-  });
-
-  it("crypto √365 volatility = √252 volatility × √(365/252) point-for-point", () => {
-    const window = 60;
-    const v252 = computeRollingMetric(DAILY_RETURNS, window, "volatility", 252);
-    const v365 = computeRollingMetric(DAILY_RETURNS, window, "volatility", 365);
-    const scale = Math.sqrt(365 / 252);
-    for (let i = 0; i < v365.length; i++) {
-      expect(v365[i].value).toBeCloseTo(v252[i].value * scale, 10);
-    }
   });
 });
 

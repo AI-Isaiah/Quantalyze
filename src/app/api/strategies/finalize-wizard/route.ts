@@ -1,11 +1,23 @@
 import { NextRequest, NextResponse, after } from "next/server";
+import { z } from "zod";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { withAuth } from "@/lib/api/withAuth";
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
 import { userActionLimiter, checkLimit, isRateLimitMisconfigured } from "@/lib/ratelimit";
 import { STRATEGY_NAMES, canonicalizeExchangeList } from "@/lib/constants";
-import { MAGNITUDE_CAPS, isCryptoExchange } from "@/lib/closed-sets";
+import {
+  MAGNITUDE_CAPS,
+  isCryptoExchange,
+  venueSupportsScopeProbe,
+} from "@/lib/closed-sets";
+import { isValidDollar } from "@/lib/dollar-validation";
+import {
+  OWN_CAPITAL,
+  TEAM_REVIEW,
+  isCapitalOwnership,
+  type CapitalOwnership,
+} from "@/lib/capital-ownership";
 import { notifyFounderNewStrategy, resolveManagerName } from "@/lib/email";
 import { isUuid } from "@/lib/utils";
 import { postProcessKey } from "@/lib/process-key-client";
@@ -15,6 +27,11 @@ import { CIRCUIT_OPEN_COPY } from "@/lib/seam-copy";
 import { captureToSentry } from "@/lib/sentry-capture";
 import { scrubSeamError, scrubSeamString } from "@/lib/seam-redaction";
 import { logAuditEventAsUser } from "@/lib/audit";
+import { getCorrelationId } from "@/lib/correlation-id";
+import {
+  retractInheritedRefreshMarker,
+  retractionFailureCode,
+} from "@/lib/ledger-refresh-marker";
 // Phase 140.1.1 / PYAPIFIX-01 — the onboard-reply narrow lives in a
 // dependency-free leaf so the cross-process parity test can exercise THIS
 // predicate with zero mocks. Do not re-inline it here.
@@ -22,6 +39,7 @@ import { logAuditEventAsUser } from "@/lib/audit";
 // applied here implicitly, by the predicate's `body is` narrowing — importing
 // the name explicitly would be an unused binding.)
 import { isProcessKeyOnboardResponse } from "@/lib/process-key-onboard-contract";
+import { seamCorrelationId, seamErrorCode } from "@/lib/seam-discriminator";
 // 140.3-03 / SEAMUX-07 — the publish gate's contract. ONE schema, shared with
 // the sibling route that reads the same upstream body.
 import {
@@ -122,6 +140,53 @@ export const maxDuration = 300;
 const MAX_COMPOSITE_MEMBERS = 10;
 
 /**
+ * 153 review — the shape of ONE composite member row as read by the O-1
+ * per-member scope-broadening loop below (`select("api_key_id, api_keys (
+ * exchange )")` off `strategy_keys`).
+ *
+ * ⛔ THIS REPLACES AN `as unknown as` DOUBLE CAST, and the cast is the defect.
+ * A double cast asserts a shape the compiler has no evidence for and checks
+ * NOTHING at runtime, so a PostgREST shape change degraded in SILENCE: the
+ * named hazard is the embed arriving as an ARRAY (`api_keys: [{ exchange }]`)
+ * rather than a to-one object, at which point `member.api_keys?.exchange` reads
+ * `undefined`, every member resolves to a `null` venue, and the finalize path
+ * proceeds on member data it never actually had. Same class the 140.3-03 note
+ * below records for `LivePermissions` — an `interface` + `as` on an upstream
+ * body — and the same remedy, so this file now has ONE answer to it.
+ *
+ * ⚠️ `api_keys` is `.nullish()`, NOT required, and the two misses are different
+ * things. PostgREST returns the requested embed key as `null` when the FK does
+ * not resolve, and a member whose embed is absent or null is STILL PROBED with
+ * a `null` venue by the fail-toward rule the loop relies on — that is a real
+ * runtime state, not drift, so it must parse. An ARRAY is neither of those and
+ * is refused. Unknown keys are stripped rather than rejected (zod's default):
+ * a column added to `strategy_keys` is not a reason to refuse a finalize.
+ */
+const compositeMemberRowsSchema = z.array(
+  z.object({
+    api_key_id: z.string().nullable(),
+    api_keys: z
+      .object({
+        exchange: z.string().nullable(),
+        // 153.6-04 / PARITY-04 — the RPC-written venue, and the field the
+        // per-member gate below reads. VALIDATED, never cast, for the reason the
+        // whole schema exists: this is the input to an ASVS V4 control, so a
+        // shape we cannot read must be a refusal rather than a silent `undefined`.
+        //
+        // ⚠️ `.nullable().optional()`, and the OPTIONAL half is deliberate. A row
+        // that carries no attestation KEY at all — a schema cache that has not
+        // seen the column yet, or a projection change — is the same claim as an
+        // attestation of `null`: nothing is attested, so the member is PROBED.
+        // Refusing it instead would turn a column rollout into a
+        // composite-finalize outage, and would refuse in the SAFE direction only
+        // by accident. An array or a number is still rejected.
+        attested_venue: z.string().nullable().optional(),
+      })
+      .nullish(),
+  }),
+);
+
+/**
  * 140.3-03 / SEAMUX-07 — the value a body the schema could not read resolves
  * to, and the reason this route no longer declares a `LivePermissions`
  * interface of its own.
@@ -133,14 +198,84 @@ const MAX_COMPOSITE_MEMBERS = 10;
  * class cannot drift apart again.
  *
  * A parse miss resolves to this sentinel rather than throwing or returning a
- * fabricated triple, so it lands on the EXISTING `probe_error` arm below: a
- * body that could not be read is a probe that did not run, which is the
- * fail-CLOSED doctrine this file already states. Carrying no scope fields at
- * all is deliberate — it makes it structurally impossible for a parse miss to
- * present a scope verdict, however the gates below are later reordered.
+ * fabricated triple: a body that could not be read is a probe that did not run,
+ * which is the fail-CLOSED doctrine this file already states. Carrying no scope
+ * fields at all is deliberate — it makes it structurally impossible for a parse
+ * miss to present a scope verdict, however the gates below are later reordered.
+ *
+ * ⚠️ 153.2-04 / WIZFORM-04 / D-14b — IT NO LONGER SHARES THE `probe_error` ARM.
+ * It used to fall through to it, because it carries the same field. It now has
+ * its own arm, reached by IDENTITY (`livePerms === PROBE_PARSE_MISS`) so an
+ * upstream body that happens to carry `probe_error: true` cannot be mistaken for
+ * it. The security half is unchanged — both still fail CLOSED, both still block
+ * finalize — but a body OUR schema cannot read stays unreadable until a deploy,
+ * so it is reported as permanent instead of as a network blip with a Retry.
+ * ⛔ Keep this a module-scope singleton: the identity check below is the only
+ * thing separating the two, and a per-call object literal would silently merge
+ * them again.
  */
 const PROBE_PARSE_MISS = { probe_error: true } as const;
 type ProbeParseMiss = typeof PROBE_PARSE_MISS;
+
+/**
+ * MT5-13 — a non-OK probe response, carrying the STATUS the service answered.
+ *
+ * It used to be a bare `Error` whose status survived only inside a message
+ * string, so the catch below could not tell the two classes apart and mapped
+ * every one of them to `KEY_NETWORK_TIMEOUT` — copy that says "we could not
+ * reach the exchange" and offers a Retry. For a transient 5xx that is right.
+ * For a PERMANENT 4xx (the venue has no probe adapter, the key row carries no
+ * exchange, the key id is unknown) it is a lie in both halves: nothing was
+ * unreachable, and no number of retries will change the answer. That is how a
+ * blocked MT5 submit presented as a flaky network, five clicks running.
+ */
+class ProbeUpstreamError extends Error {
+  constructor(readonly status: number) {
+    super(`permissions probe failed: ${status}`);
+    this.name = "ProbeUpstreamError";
+  }
+}
+
+/**
+ * WIZFORM-04 / D-14b — OUR OWN configuration is wrong, and no retry can fix it.
+ *
+ * `fetchLivePermissions` refuses to call the seam when `INTERNAL_API_TOKEN` is
+ * unset. That threw a BARE `Error`, which landed on the generic tail of the
+ * catch below and was reported to the user as `KEY_NETWORK_TIMEOUT` — "we could
+ * not reach the exchange", with a Retry control. Every word of that is false:
+ * nothing was reached because nothing was attempted, the exchange was never
+ * involved, and the setting stays wrong until we fix it and redeploy. The user
+ * is handed a button whose only possible outcome is the same message again,
+ * which is the five-clicks behaviour this phase exists to end.
+ *
+ * A distinct CLASS rather than a status sniff, for the same reason
+ * `ProbeUpstreamError` is one: a status that survives only inside a message
+ * string cannot be branched on without parsing prose.
+ */
+class ProbeMisconfiguredError extends Error {
+  constructor(setting: string) {
+    super(`permissions probe misconfigured: ${setting} is not configured`);
+    this.name = "ProbeMisconfiguredError";
+  }
+}
+
+/**
+ * Is this probe status permanent — i.e. will an identical retry answer the same
+ * way until an operator or a deploy acts?
+ *
+ * The 4xx block is the service's CALLER class (see the endpoint's own PYAPI-05
+ * contract): 400 unsupported venue, 403 internal-token misconfig, 404 unknown
+ * key, 422 key row has no exchange. Two 4xx are carved out because they are
+ * genuinely transient there and their existing timeout treatment is correct:
+ *   429 — per-key probe rate limit, which an identical retry clears.
+ *   424 — the VENUE did not answer; `retryable: true` in the contract.
+ * 5xx stays transient-shaped too. Some of it is service-permanent, but it is
+ * ours to page on and the user's remedy is the same either way, so this hotfix
+ * does not re-litigate that boundary.
+ */
+function isPermanentProbeStatus(status: number): boolean {
+  return status >= 400 && status < 500 && status !== 429 && status !== 424;
+}
 
 /**
  * Force-refresh the live `{read, trade, withdraw}` triple for an
@@ -169,7 +304,10 @@ async function fetchLivePermissions(
 ): Promise<LivePermissions | ProbeParseMiss> {
   const internalToken = process.env.INTERNAL_API_TOKEN;
   if (!internalToken) {
-    throw new Error("INTERNAL_API_TOKEN is not configured");
+    // D-14b — a TYPED throw, so the catch can tell our own misconfiguration
+    // apart from a transport failure. The setting NAME is the only payload; the
+    // value is absent by definition, so there is nothing here to redact.
+    throw new ProbeMisconfiguredError("INTERNAL_API_TOKEN");
   }
   const res = await resilientFetch(
     "keys-permissions",
@@ -191,7 +329,7 @@ async function fetchLivePermissions(
     },
   );
   if (!res.ok) {
-    throw new Error(`permissions probe failed: ${res.status}`);
+    throw new ProbeUpstreamError(res.status);
   }
   // SEAMCORE-02: `res.json()` is the core's INSTRUMENTED read — a body-read
   // failure records one breaker failure and throws `SeamBodyReadError`. Letting
@@ -283,8 +421,40 @@ type ValidatedPayload = {
   // publish-candidate flow ('pending_review'); 'contribution' is the allocator
   // overlay, which finalizes to an owner-only terminal status ('private').
   entryContext: "manager" | "contribution";
+  // Phase 150 / OWN-03 — whose capital sits behind this key, when the wizard
+  // asked. UNDEFINED means the question was never put to the user, which is
+  // NOT the same as an answer: the mark is left unwritten (NULL), and an
+  // unmarked strategy is non-allocatable. Never default this.
+  capitalOwnership?: CapitalOwnership;
 };
 
+/**
+ * The server-side input-validation control for this route (ASVS V5).
+ *
+ * ⭐ 153.1-05 / D-09(b) — EVERY arm below carries a `code`, and that is the
+ * whole point of this pass. Until now they answered a bare `error` string, so
+ * `SubmitStep` had nothing to map and rendered "We could not classify this
+ * failure" — the generic dead end — for a rejection the server had classified
+ * perfectly well. The arm that cost the founder three submits is the
+ * description one: a description of two characters produced a card that named
+ * neither the field nor the rule.
+ *
+ * Two properties to preserve when editing anything here:
+ *
+ *   · ⛔ A `code` changes the response BODY, never the DECISION. Not one
+ *     condition below is weakened by carrying one, and the client-side mirrors
+ *     Phase 153.2 adds are UX, never enforcement — this function stays the
+ *     control.
+ *   · ⚠️ A code emitted here must be a member of `KNOWN_FINALIZE_CODES`
+ *     (`SubmitStep.tsx`) IN THE SAME COMMIT, or it fails that membership check,
+ *     falls through to `UNKNOWN`, and the fix ships invisible while every
+ *     route-side test stays green. 153.1-06 turns that obligation into a
+ *     derived assertion so the next author cannot forget it.
+ *
+ * The `error` strings stay developer-facing detail. The USER-facing sentence
+ * now comes from the code's entry in `WIZARD_ERROR_COPY`, which is why the
+ * detail here can name a field and a rule without being written as copy.
+ */
 function validatePayload(
   body: Record<string, unknown> | null,
 ):
@@ -294,7 +464,10 @@ function validatePayload(
     return {
       ok: false,
       response: NextResponse.json(
-        { error: "Invalid request body" },
+        // Not a field-level code: a body that is not an object was never
+        // TYPED by anyone, so there is no form control to route the user
+        // back to. `VALIDATION_FAILED` is the honest answer (RESEARCH Q3).
+        { code: "VALIDATION_FAILED", error: "Invalid request body" },
         { status: 400, headers: NO_STORE_HEADERS },
       ),
     };
@@ -314,13 +487,19 @@ function validatePayload(
     max_capacity,
     asset_class,
     entry_context,
+    capital_ownership,
   } = body;
 
   if (!isUuid(strategy_id)) {
     return {
       ok: false,
       response: NextResponse.json(
-        { error: "strategy_id must be a valid UUID" },
+        // Same reasoning as the body arm: the draft id is minted by the
+        // wizard, never typed by the user, so there is no field to name.
+        {
+          code: "VALIDATION_FAILED",
+          error: "strategy_id must be a valid UUID",
+        },
         { status: 400, headers: NO_STORE_HEADERS },
       ),
     };
@@ -329,20 +508,62 @@ function validatePayload(
     return {
       ok: false,
       response: NextResponse.json(
-        { error: "name must be one of the allowed codenames" },
+        {
+          code: "METADATA_NAME_INVALID",
+          error: "name must be one of the allowed codenames",
+        },
         { status: 400, headers: NO_STORE_HEADERS },
       ),
     };
   }
-  if (
-    typeof description !== "string" ||
-    description.length < 10 ||
-    description.length > MAGNITUDE_CAPS.MAX_DESCRIPTION_CHARS
-  ) {
+  // ⭐ 153.1-05 / D-09(b) + D-23 — THIS is the incident, and it is three arms
+  // rather than one on purpose.
+  //
+  // It shipped as a single condition answering one sentence, "description must
+  // be 10-5000 characters", with no `code`. The founder submitted a
+  // two-character description three times and read "We could not classify this
+  // failure" each time. The server knew exactly what was wrong.
+  //
+  // Splitting it is not cosmetic: UI-SPEC Surface 2 maps each field-level code
+  // to exactly one field, and the two bounds are two DIFFERENT remedies — one
+  // asks the user to write more, the other to cut. A single code cannot carry
+  // both sentences, and the copy 153.1-04 authored is a pair for that reason.
+  //
+  // ⛔ D-23 — the lower bound reads `MAGNITUDE_CAPS.MIN_DESCRIPTION_CHARS`. The
+  // bare `10` that used to sit here is the drift that produced the incident:
+  // the constant and the sentence were free to disagree, and a client-side
+  // mirror written against either could be wrong about the other. Both bounds
+  // are interpolated into the developer-facing string from the same constants
+  // the conditions read, so the text cannot contradict the rule it describes.
+  if (typeof description !== "string") {
     return {
       ok: false,
       response: NextResponse.json(
-        { error: "description must be 10-5000 characters" },
+        { code: "METADATA_DESCRIPTION_REQUIRED", error: "description is required" },
+        { status: 400, headers: NO_STORE_HEADERS },
+      ),
+    };
+  }
+  if (description.length < MAGNITUDE_CAPS.MIN_DESCRIPTION_CHARS) {
+    return {
+      ok: false,
+      response: NextResponse.json(
+        {
+          code: "METADATA_DESCRIPTION_TOO_SHORT",
+          error: `description must be at least ${MAGNITUDE_CAPS.MIN_DESCRIPTION_CHARS} characters`,
+        },
+        { status: 400, headers: NO_STORE_HEADERS },
+      ),
+    };
+  }
+  if (description.length > MAGNITUDE_CAPS.MAX_DESCRIPTION_CHARS) {
+    return {
+      ok: false,
+      response: NextResponse.json(
+        {
+          code: "METADATA_DESCRIPTION_TOO_LONG",
+          error: `description must be at most ${MAGNITUDE_CAPS.MAX_DESCRIPTION_CHARS} characters`,
+        },
         { status: 400, headers: NO_STORE_HEADERS },
       ),
     };
@@ -351,7 +572,13 @@ function validatePayload(
     return {
       ok: false,
       response: NextResponse.json(
-        { error: "category_id must be a valid UUID" },
+        // A field-level code even though the detail names a UUID: the user
+        // picks a category from a <Select>, and an absent or malformed id is
+        // what an unanswered picker looks like on the wire.
+        {
+          code: "METADATA_CATEGORY_REQUIRED",
+          error: "category_id must be a valid UUID",
+        },
         { status: 400, headers: NO_STORE_HEADERS },
       ),
     };
@@ -364,18 +591,16 @@ function validatePayload(
   // exposure for a "Verified by Quantalyze" factsheet with no AUM. The
   // contract: client must send a finite number in [0, 1e12), or omit
   // the field (null / undefined) entirely.
+  // Phase 150: the validator itself moved to `@/lib/dollar-validation` so the
+  // allocation route does not mint a second one; behaviour is unchanged.
   const MAX_DOLLAR_VALUE = MAGNITUDE_CAPS.MAX_DOLLAR_VALUE_USD;
-  const isValidDollar = (v: unknown): v is number =>
-    typeof v === "number" &&
-    Number.isFinite(v) &&
-    v >= 0 &&
-    v < MAX_DOLLAR_VALUE;
   const isOmitted = (v: unknown): boolean => v === undefined || v === null;
   if (!isOmitted(aum) && !isValidDollar(aum)) {
     return {
       ok: false,
       response: NextResponse.json(
         {
+          code: "METADATA_AUM_INVALID",
           error: `aum must be a finite non-negative number under ${MAX_DOLLAR_VALUE}`,
         },
         { status: 400, headers: NO_STORE_HEADERS },
@@ -387,6 +612,7 @@ function validatePayload(
       ok: false,
       response: NextResponse.json(
         {
+          code: "METADATA_CAPACITY_INVALID",
           error: `max_capacity must be a finite non-negative number under ${MAX_DOLLAR_VALUE}`,
         },
         { status: 400, headers: NO_STORE_HEADERS },
@@ -423,13 +649,63 @@ function validatePayload(
     return {
       ok: false,
       response: NextResponse.json(
-        { error: "entry_context must be 'manager' or 'contribution'" },
+        // `VALIDATION_FAILED`, not a field-level code: `entry_context` is a
+        // trusted context selector the wizard sets from which surface the user
+        // entered by. It is never typed, so there is no control to route back
+        // to (RESEARCH Q3, same class as the two arms at the top).
+        {
+          code: "VALIDATION_FAILED",
+          error: "entry_context must be 'manager' or 'contribution'",
+        },
         { status: 400, headers: NO_STORE_HEADERS },
       ),
     };
   }
   const entryContextValidated =
     entry_context === "contribution" ? "contribution" : "manager";
+
+  // OWN-03 (Phase 150) — the capital mark. Closed set {own_capital,
+  // team_review}, mirroring the DB CHECK `strategies_capital_ownership_check`;
+  // ABSENT/null means the wizard never asked, and the mark is simply not
+  // written (the column stays NULL = unmarked = non-allocatable).
+  //
+  // A garbage value is a hard 400, NOT a silent coercion to the safe value.
+  // Coercing would let a broken or hostile client believe it had set a mark
+  // it did not set. This value is data, not privilege: marking a strategy
+  // own-capital only makes it ELIGIBLE for the allocation surface, which
+  // enforces ownership itself.
+  //
+  // ⚠️ 153.1-05 — THIS COMMENT USED TO ARGUE FOR THE DEFECT, and the paragraph
+  // is deleted rather than softened. It read: "a bare `error` string with NO
+  // `code`, because every code the wizard renders must exist in its error
+  // roster — an unknown one renders the UNKNOWN card, which tells the user
+  // nothing." The observation was true and the conclusion was backwards: the
+  // remedy for a code that is not in the roster is to PUT IT IN THE ROSTER, in
+  // the same commit, which is exactly what this one does. Answering with no
+  // code at all does not avoid the UNKNOWN card — it GUARANTEES it, for every
+  // rejection on this path, forever. WIZFORM-02 removes the premise outright:
+  // the roster is asserted against the emitting sites (153.1-06), so a member
+  // missed here REDS CI BY NAME instead of shipping a silent dead end.
+  // Leaving the old sentence in place would invite the next reader to restore
+  // the bug (RESEARCH).
+  if (
+    capital_ownership !== undefined &&
+    capital_ownership !== null &&
+    !isCapitalOwnership(capital_ownership)
+  ) {
+    return {
+      ok: false,
+      response: NextResponse.json(
+        {
+          code: "METADATA_CAPITAL_OWNERSHIP_INVALID",
+          error: `capital_ownership must be '${OWN_CAPITAL}' or '${TEAM_REVIEW}'`,
+        },
+        { status: 400, headers: NO_STORE_HEADERS },
+      ),
+    };
+  }
+  const capitalOwnershipValidated: CapitalOwnership | undefined =
+    isCapitalOwnership(capital_ownership) ? capital_ownership : undefined;
 
   // audit-2026-05-07 H-0324 — isUuid is a type predicate (value is
   // string), so the prior `as string` casts were redundant. Removing
@@ -458,6 +734,7 @@ function validatePayload(
       maxCapacityNum,
       asset_class: asset_class_validated,
       entryContext: entryContextValidated,
+      capitalOwnership: capitalOwnershipValidated,
     },
   };
 }
@@ -471,7 +748,56 @@ function validatePayload(
  */
 async function runScopeBroadeningProbe(
   apiKeyId: string,
+  venue: string | null,
 ): Promise<{ ok: true } | { ok: false; response: NextResponse }> {
+  // WIZFORM-04 / MT5-14(a) / D-06 — THE CAPABILITY SKIP. Four things about it,
+  // because this is a SECURITY control and a skip inside one needs its
+  // justification written where the skip is, not in a plan file:
+  //
+  // 1. This is the ASVS V4 scope-broadening defence: a key broadened to
+  //    trade/withdraw between Connect and Submit is caught here. The skip is a
+  //    deliberate PER-VENUE exemption, not a relaxation of the control — every
+  //    venue that answers a per-key permissions probe still gets probed, on
+  //    every submit, exactly as before.
+  //
+  // 2. The exempt venue is exempt because the question has no answer, not
+  //    because we decided to trust it. MT5 read-only is enforced STRUCTURALLY
+  //    (`Mt5Client` composes only read methods — there is no order / withdraw /
+  //    transfer surface that could be broadened) and BEHAVIOURALLY (`order_check`
+  //    is rejected for a master login, proven at `_validate_mt5_key`), and the
+  //    venue exposes no per-key scope endpoint at all. Demanding a ccxt
+  //    permissions probe from it produced a PERMANENT failure dressed as a
+  //    network blip, and that is what blocked every MT5 submit.
+  //
+  // 3. ⭐ THE PREDICATE ANSWERS `true` FOR null, "" AND ANY UNKNOWN VENUE, and
+  //    that direction is the whole safety of this line. `venue` is `null`
+  //    whenever the `api_keys` read faulted, for a composite member whose embed
+  //    came back empty, and — since 153.6-04 / PARITY-04 — for every key that
+  //    carries no SERVER ATTESTATION: a row the backfill has not reached, and a
+  //    row whose client-supplied attestation the BEFORE INSERT trigger scrubbed.
+  //    Those keys are STILL PROBED. Skipping on `null` would silently disable the
+  //    defence for every key whose venue read blipped, and would hand the
+  //    exemption back to anyone willing to INSERT a label — a control that fails
+  //    open on a transient DB error, or on a claim by its own subject, is not a
+  //    control. Read it through the predicate; never index the capability record.
+  //
+  //    ⛔ `venue` IS THE ATTESTED VENUE AT BOTH CALL SITES. This helper cannot
+  //    enforce that — it takes a string — so the rule is stated at both callers
+  //    and pinned by the PARITY-04 rows in `route.test.ts`.
+  //
+  // 4. ⛔ It is `venueSupportsScopeProbe(venue)` — a CAPABILITY question — and
+  //    never an equality test against a particular venue's name. (The literal
+  //    is not written out even in this comment: the acceptance grep proving
+  //    this route never names the venue runs over these lines too, so quoting
+  //    it here would make the prose satisfy its own gate — a trap three sibling
+  //    plans in this phase have already walked into.) The answer lives in the
+  //    capability record precisely so a second venue with the same shape costs
+  //    one row instead of a repo sweep for instance checks — and so that sFOX,
+  //    which asks a superficially similar question, stays BYTE-UNCHANGED (D-22)
+  //    by simply not carrying the capability.
+  if (!venueSupportsScopeProbe(venue)) {
+    return { ok: true };
+  }
   let livePerms: LivePermissions | ProbeParseMiss;
   try {
     livePerms = await fetchLivePermissions(apiKeyId);
@@ -493,7 +819,7 @@ async function runScopeBroadeningProbe(
       return {
         ok: false,
         response: NextResponse.json(
-          { error: CIRCUIT_OPEN_COPY, code: "CIRCUIT_OPEN" },
+          { code: "CIRCUIT_OPEN", error: CIRCUIT_OPEN_COPY },
           {
             status: 503,
             headers: {
@@ -513,10 +839,112 @@ async function runScopeBroadeningProbe(
     console.error(
       `[strategies/finalize-wizard] live permissions probe failed: ${scrubSeamError(probeErr)}`,
     );
+    // MT5-13 — ORDER: this arm sits AFTER CircuitOpenError (which is its own
+    // transient verdict) and BEFORE the generic timeout, because a permanent
+    // status is the more specific claim. Same fail-CLOSED outcome as every other
+    // probe failure — finalize is still blocked, nothing is promoted — but the
+    // envelope stops inviting a retry that cannot work. `KEY_SCOPE_CHECK_UNAVAILABLE`
+    // carries no recoverable action, so the wizard renders no Retry control at all.
+    if (
+      probeErr instanceof ProbeUpstreamError &&
+      isPermanentProbeStatus(probeErr.status)
+    ) {
+      return {
+        ok: false,
+        response: NextResponse.json(
+          {
+            code: "KEY_SCOPE_CHECK_UNAVAILABLE",
+            error: "Could not verify key scopes",
+          },
+          { status: 502, headers: NO_STORE_HEADERS },
+        ),
+      };
+    }
+    // WIZFORM-04 / D-14b — OUR CONFIGURATION IS WRONG, and it is permanent.
+    // BEFORE the generic tail, for the same "more specific claim first" reason
+    // the permanent-status arm above sits where it does.
+    //
+    // What makes it permanent: `INTERNAL_API_TOKEN` unset is a deployment
+    // setting, and a setting stays wrong until a human fixes it and redeploys.
+    // Reported as a network timeout it read "we could not reach the exchange"
+    // and offered a Retry — three untruths and a button that can only fail.
+    // `SEAM_MISCONFIGURED` carries no recoverable action, so `buildEnvelope`
+    // derives `recoverable: false` and NO Retry control renders at all (the
+    // structural suppression, never a prop). It is already a member of
+    // `SubmitStep`'s KNOWN_FINALIZE_CODES — verified at source in this commit,
+    // because an unlisted code falls to UNKNOWN, whose copy IS recoverable, and
+    // the fix would ship invisible with every route-side test green.
+    //
+    // 500, not 502: the fault is OURS, not the venue's. That is the same status
+    // `process-key-client` already answers this class with, so the two agree.
+    if (probeErr instanceof ProbeMisconfiguredError) {
+      return {
+        ok: false,
+        response: NextResponse.json(
+          {
+            code: "SEAM_MISCONFIGURED",
+            error: "Key scope check is not configured",
+          },
+          { status: 500, headers: NO_STORE_HEADERS },
+        ),
+      };
+    }
+    // The generic tail keeps KEY_NETWORK_TIMEOUT for exactly what it honestly
+    // describes: an unclassified TRANSPORT failure, where a retry really can
+    // succeed. ⛔ No retry is issued here — the user's Retry is the only one,
+    // and this route adds no loop (D-07).
     return {
       ok: false,
       response: NextResponse.json(
-        { error: "Could not verify key scopes", code: "KEY_NETWORK_TIMEOUT" },
+        { code: "KEY_NETWORK_TIMEOUT", error: "Could not verify key scopes" },
+        { status: 502, headers: NO_STORE_HEADERS },
+      ),
+    };
+  }
+  // WIZFORM-04 / D-14b — THE PARSE MISS IS NOT A NETWORK BLIP.
+  //
+  // Two conditions used to arrive on one arm because they resolve to the same
+  // SHAPE: a body our zod schema could not read (`fetchLivePermissions` returns
+  // the module-scope PROBE_PARSE_MISS sentinel) and a body in which the service
+  // itself reported `probe_error: true`. IDENTITY tells them apart — the
+  // sentinel is one module-scope object and `fetchLivePermissions` returns THAT
+  // reference, so `=== PROBE_PARSE_MISS` cannot be forged by an upstream payload
+  // that happens to carry the same field. (`as const` is a TYPE-level freeze,
+  // not `Object.freeze`; the guarantee here is reference identity, not
+  // immutability, and nothing on this path mutates it.)
+  //
+  // A body our schema cannot read is not a network blip. The SERVICE-REPORTED
+  // probe_error stays on KEY_NETWORK_TIMEOUT — there the upstream really did try
+  // and really did fail, and a retry is a real remedy.
+  //
+  // ⚠️ 153.6-06 / PARITY-05 — AND IT IS NOT PERMANENT EITHER. 153.2-04 sent this
+  // arm to KEY_SCOPE_CHECK_UNAVAILABLE on the reasoning that the body "stays
+  // unreadable until a deploy changes one side or the other". That sentence is
+  // true and it is satisfied by the deploy that is ALREADY ROLLING: during an
+  // analytics release the old and new pods answer different shapes for a few
+  // minutes, and this arm fires for every finalize in that window. The permanent
+  // code's copy suppresses Retry structurally, so the fix for one dead end built
+  // another one on the wizard's last step. The arm now carries its OWN code,
+  // KEY_SCOPE_CHECK_UNREADABLE, whose copy is honestly recoverable.
+  //
+  // ⛔ The permanent probe-STATUS arm above keeps KEY_SCOPE_CHECK_UNAVAILABLE
+  // untouched. Widening THAT code's actions instead of minting this one would
+  // have leaked a Retry onto an arm where retrying is guaranteed to fail.
+  // ⛔ And never back to KEY_NETWORK_TIMEOUT: the exchange answered, so "we
+  // could not reach the exchange" is the lie 153.2-04 correctly removed.
+  //
+  // ⚠️ The sentinel's own contract is preserved: it carries NO scope fields, so
+  // however these gates are later reordered a parse miss can never present a
+  // scope verdict. Both arms still FAIL CLOSED — nothing is promoted either way,
+  // and only what the user is TOLD changed here.
+  if (livePerms === PROBE_PARSE_MISS) {
+    return {
+      ok: false,
+      response: NextResponse.json(
+        {
+          code: "KEY_SCOPE_CHECK_UNREADABLE",
+          error: "Could not read the key scope response",
+        },
         { status: 502, headers: NO_STORE_HEADERS },
       ),
     };
@@ -526,8 +954,8 @@ async function runScopeBroadeningProbe(
       ok: false,
       response: NextResponse.json(
         {
-          error: "Exchange permission probe failed",
           code: "KEY_NETWORK_TIMEOUT",
+          error: "Exchange permission probe failed",
         },
         { status: 502, headers: NO_STORE_HEADERS },
       ),
@@ -538,8 +966,8 @@ async function runScopeBroadeningProbe(
       ok: false,
       response: NextResponse.json(
         {
-          error: "Key has been broadened beyond read-only on the exchange.",
           code: "KEY_SCOPE_BROADENED",
+          error: "Key has been broadened beyond read-only on the exchange.",
         },
         { status: 403, headers: NO_STORE_HEADERS },
       ),
@@ -590,14 +1018,55 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   );
   if (!rl.success) {
     // PR-2 full-file reviewer #5 (2026-05-28): 503 on rate-limit misconfig.
+    //
+    // 153.2-05 / WIZFORM-02 — BOTH ARMS NOW CARRY A CODE. They were two of the
+    // five rejections this route still answered code-less, and a code-less
+    // rejection renders the UNKNOWN card — "We could not classify this failure"
+    // — for a failure the route classified well enough to pick a status and
+    // write a sentence about. Worse, UNKNOWN's copy is RECOVERABLE, so the user
+    // got a Retry button in both cases: correct for a throttle, and a control
+    // that cannot work for a misconfiguration.
+    //
+    // ⚠️ THE TWO ARMS STAY EXPLICIT `NextResponse.json` SITES, and that is a
+    // decision rather than inertia. Routing them through the deny chokepoint
+    // (140.4-13 / SEAMRIM-05) was tried first and MEASURED: it drops
+    // `finalize-wizard`'s derived rejection-site count from 32 to 30, because
+    // the class scan in `wizardErrors.invariant.test.ts` finds sites by reading
+    // 4xx/5xx `NextResponse.json` literals out of this file's source. A helper
+    // call is invisible to it, so both arms would leave the population the
+    // guard watches — and a guard that stops seeing an arm is exactly how a
+    // future code-less rejection ships green. Status, headers and the
+    // `Retry-After` stamp are byte-unchanged here; only the codes are added.
+    //
+    // ⚠️ `RATE_LIMITED`, NOT `KEY_RATE_LIMIT` — and the ledger that recorded
+    // this debt named the wrong one. `KEY_RATE_LIMIT`'s copy opens "The
+    // exchange rate-limited this request", which is FALSE here: this is
+    // `userActionLimiter` on OUR own per-user key, and the exchange was never
+    // contacted. `RATE_LIMITED` says "the cap is ours, not your exchange's",
+    // which is the sentence 140.3-01 wrote for exactly this condition.
+    // ⓘ It needs no roster entry: `SEAM_CODE_TO_WIZARD_CODE` maps it to itself
+    // and the translation runs BEFORE the roster check, so `SubmitStep`
+    // surfaces it as-is. (⚠️ SUPERSEDED 2026-09-06 — the sentence that stood
+    // here read "`composite/add-key` still answers `KEY_RATE_LIMIT` here; that
+    // arm carries its own note saying the sentence is wrong for an internal
+    // limiter, and re-cutting it is not this plan's file." That debt is PAID:
+    // `composite/add-key`'s own limiter deny arm now answers `RATE_LIMITED`,
+    // and its own comment records the re-cut. The superseded
+    // sentence is kept, dated, rather than deleted, so a reader who met the old
+    // claim elsewhere can see it was closed and not merely dropped.)
+    //
+    // ⚠️ `SEAM_MISCONFIGURED` on the 503 — already a roster member, and its
+    // copy is written for precisely this: "our own configuration is wrong…
+    // Retrying will not clear it." It carries no recoverable action, so no
+    // Retry control renders at all — the structural suppression, not a prop.
     if (isRateLimitMisconfigured(rl)) {
       return NextResponse.json(
-        { error: "Rate limiter unavailable" },
+        { code: "SEAM_MISCONFIGURED", error: "Rate limiter unavailable" },
         { status: 503, headers: { ...NO_STORE_HEADERS, "Retry-After": String(rl.retryAfter) } },
       );
     }
     return NextResponse.json(
-      { error: "Too many requests" },
+      { code: "RATE_LIMITED", error: "Too many requests" },
       { status: 429, headers: { ...NO_STORE_HEADERS, "Retry-After": String(rl.retryAfter) } },
     );
   }
@@ -645,6 +1114,12 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   // memoized per PAGE LOAD, so a reload — the single most likely way a user
   // double-submits — mints a new one and would key the dedupe on a value that
   // changes per request, which is worse than sending nothing.
+  // ⛔ CORRECTED 2026-09-25 (164.6.5 review round 1 / IN-02): since plan
+  // 164.6.5-07, `wizardFetch` mints `X-Correlation-Id` per REQUEST, not per
+  // page load, so the sentence above is false about the header. The
+  // conclusion is stronger for it: a double-click now changes the value too,
+  // not only a reload. Never key the dedupe on it. The sentence is kept as
+  // lineage.
   const { data: strategyRow, error: strategyErr } = await supabase
     .from("strategies")
     .select("api_key_id, wizard_session_id")
@@ -660,13 +1135,24 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       "[strategies/finalize-wizard] strategy lookup failed:",
       scrubSeamError(strategyErr),
     );
+    // 153.7-03 / WIZFORM-02-CLASS — the code this arm never carried. It was one
+    // of the three rejections 153.1-06 recorded as known debt: the route picked
+    // a status and wrote a sentence, then answered code-less, so SubmitStep
+    // rendered "We could not classify this failure" for a failure it had
+    // classified exactly.
+    //
+    // ⭐ `DRAFT_LOOKUP_FAILED` IS NOT A NEW TOKEN. `keys/sync`'s draft-read
+    // split already mints it for this same fact, and its comment records that
+    // it copied the template from this arm. Same fact ⇒ same token, which is
+    // the rule `verify-strategy` states when it mints `VERIFY_PERSIST_FAILED`
+    // on that precedent.
     return NextResponse.json(
-      { error: "Could not load draft" },
+      { code: "DRAFT_LOOKUP_FAILED", error: "Could not load draft" },
       { status: 500, headers: NO_STORE_HEADERS },
     );
   }
   if (!strategyRow) {
-    return NextResponse.json({ error: "Draft not found", code: "GATE_DRAFT_GONE" }, { status: 404, headers: NO_STORE_HEADERS });
+    return NextResponse.json({ code: "GATE_DRAFT_GONE", error: "Draft not found" }, { status: 404, headers: NO_STORE_HEADERS });
   }
 
   const apiKeyId =
@@ -730,19 +1216,61 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   // MT5RECON-02 — resolve the single key's venue so the apiKeyId arm below can
   // stamp 'traditional' for mt5 (forex/CFD) vs 'crypto' for a crypto venue. Owner
   // scope is already enforced (the apiKeyId came off the owner-scoped strategies
-  // row above); this admin read only fetches the venue string. On a lookup fault
-  // apiKeyExchange stays null — and in that case the update below is SKIPPED
-  // (RED-TEAM): create-with-key already stamped a venue-aware asset_class on the
-  // draft, and the worker reads strategies.asset_class DIRECTLY as the
-  // annualization clock (it does NOT re-derive from venue — see job_worker
+  // row above); this admin read only fetches the venue strings. RANK-04: the arm
+  // below stamps off the ATTESTED venue, so this binding no longer feeds the
+  // money math — on a lookup fault it stays null alongside the attestation, and
+  // the update below is SKIPPED (RED-TEAM): create-with-key already stamped a
+  // venue-aware asset_class on the draft, and the worker reads
+  // strategies.asset_class DIRECTLY as the annualization clock (it does NOT
+  // re-derive from venue — see job_worker
   // periods_per_year_for_asset_class(strategies.asset_class)). Defaulting to
   // 'traditional' on a blip would silently mis-annualize a crypto strategy (√252
-  // not √365 → inflated Sharpe), so we leave the correct draft stamp untouched.
+  // not √365 → deflated Sharpe), so we leave the correct draft stamp untouched.
   let apiKeyExchange: string | null = null;
+  // 153.6-04 / PARITY-04 — the venue no client INSERT can set, and the ONLY
+  // input the scope-broadening probe gate below is allowed to read.
+  //
+  // ⛔ IT IS A SEPARATE BINDING FROM `apiKeyExchange`, AND THE SEPARATION IS THE
+  // WHOLE FIX. `api_keys.exchange` is client-writable at INSERT — migration
+  // 20260810120000 revoked UPDATE and backstopped it with a trigger, but the
+  // wizard's own client INSERT path depends on INSERT staying open — so a row can
+  // be created carrying a label that CLAIMS the probe exemption. Reading that
+  // label made an ASVS V4 control something the client could switch off by
+  // asking. `attested_venue` is written only by the two SECURITY DEFINER wizard
+  // RPCs and NULLed for every non-privileged INSERT by a BEFORE INSERT trigger.
+  //
+  // ⭐ WHAT THIS NOW IS (Phase 156 / CONNECT-01 — the connect-flow refactor that
+  // 153.6's CR-01 deferred, and this comment used to say was still owed). Both
+  // wizard RPCs are reached from the SERVER, inside the same request that
+  // already ran `validateKey` against the live venue, and as of migration
+  // 20260814120000 `authenticated` holds NO EXECUTE on either of them — a
+  // browser cannot reach /rest/v1/rpc/create_wizard_strategy or
+  // /rest/v1/rpc/add_wizard_composite_key over PostgREST at all.
+  //
+  // ⛔ THE CEILING, AND DO NOT EXCEED IT: the venue is the one this server
+  // observed a successful read-only authentication at. NEVER write "the venue
+  // cannot be forged" — any server route holding `createAdminClient()` can
+  // still pass any uid and any venue string. That is the standing `service_role`
+  // trust boundary (ADR-0001/ADR-0003), identical to
+  // `log_audit_event_service(p_user_id, …)`, and it is unchanged by 156. What
+  // changed is exactly this: "any browser session can forge an attestation"
+  // became "only our own server code can".
+  //
+  // ⭐ AND THE CHECK STAYS (CONNECT-04). Both RPCs still write `exchange` and
+  // `attested_venue` from ONE parameter, pinned by the CHECK
+  // api_keys_attested_venue_matches_exchange (20260811210000). That coupling was
+  // 153.6's whole defence; it is now an independently useful fence against a
+  // FUTURE writer letting the two columns diverge, so it is KEPT deliberately
+  // rather than retired as redundant.
+  let attestedVenue: string | null = null;
   if (apiKeyId) {
     const { data: keyVenueRow, error: keyVenueErr } = await assetClassAdmin
       .from("api_keys")
-      .select("exchange")
+      // ⚠️ ONE COLUMN ADDED, ZERO EXTRA ROUND TRIPS. The gate must not open a
+      // second seam or a second query: this route's fan-out is pinned cross-file
+      // by SEAM_ROUTE_BUDGETS, and "the security read" is exactly the kind of
+      // extra call that gets added once and never counted.
+      .select("exchange, attested_venue")
       .eq("id", apiKeyId)
       .single();
     if (keyVenueErr) {
@@ -756,22 +1284,66 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     }
     apiKeyExchange =
       typeof keyVenueRow?.exchange === "string" ? keyVenueRow.exchange : null;
+    // ⚠️ THE PROBE GATE DOES NOT INHERIT THIS READ'S LENIENCY. The error arm
+    // above is non-blocking BY DESIGN for the asset_class stamp — it shrugs and
+    // leaves the draft's own venue-aware stamp intact. For the gate, a read that
+    // faulted simply attests NOTHING, so `attestedVenue` stays null and
+    // `venueSupportsScopeProbe(null)` answers true: the key is PROBED. A control
+    // that fails open on a transient DB error is not a control.
+    //
+    // ⛔ NEVER `?? apiKeyExchange`. A null attestation is a legacy row the
+    // backfill has not reached, or a client INSERT the trigger scrubbed — the two
+    // states this change exists to cover. Falling back to the forgeable column
+    // there would make the whole thing a no-op for every row that has one.
+    attestedVenue =
+      typeof keyVenueRow?.attested_venue === "string"
+        ? keyVenueRow.attested_venue
+        : null;
   }
   //
-  // RED-TEAM: for a single-key strategy whose venue we FAILED to resolve
-  // (apiKeyExchange null after a lookup fault), SKIP the write entirely. The
-  // draft already carries create-with-key's venue-aware stamp, and the worker
-  // treats strategies.asset_class as the authoritative annualization clock — an
-  // overwrite to 'traditional' here would silently mis-annualize a crypto
-  // strategy. Only write when we have a confident value (venue resolved, or a
-  // composite/CSV path where apiKeyId is absent).
-  const skipAssetClassWrite = Boolean(apiKeyId) && apiKeyExchange === null;
+  // RED-TEAM (RANK-04): for a single-key strategy the server has ATTESTED no
+  // venue for, SKIP the write entirely. The gate is ONE binding — the attested
+  // one — and it is a strict SUPERSET of the old lookup-fault guard it replaces:
+  // a faulted read attests nothing (both bindings end null) so it still skips,
+  // and a row whose forgeable label resolves but whose attestation is NULL — a
+  // legacy pre-backfill row, or a client INSERT the trigger scrubbed — now skips
+  // too. Those last rows are the whole point: `isCryptoExchange(null)` is false,
+  // so stamping them anyway would write 'traditional'/√252 over what may well be
+  // a crypto strategy. The worker reads strategies.asset_class DIRECTLY as the
+  // annualization clock, so that write would silently mis-annualize it (~×1.203,
+  // √(365/252)) with no error anywhere. Skipping leaves create-with-key's
+  // server-derived draft stamp intact, which is why skipping is SAFE rather than
+  // merely cautious. Only write when the server itself vouched for the venue (or
+  // on the composite/CSV paths, where apiKeyId is absent).
+  const skipAssetClassWrite = Boolean(apiKeyId) && attestedVenue === null;
   if (skipAssetClassWrite) {
     console.warn(
-      "[strategies/finalize-wizard] asset_class venue unresolved for a single-key " +
-        "strategy — leaving the draft's venue-aware stamp intact (no √252 overwrite)",
+      `[strategies/finalize-wizard] asset_class venue unattested for a single-key ` +
+        `strategy (unverified label: ${apiKeyExchange ?? "unresolved"}) — leaving ` +
+        `the draft's venue-aware stamp intact (no √252 overwrite)`,
     );
   } else {
+    // ⭐ RANK-04 — THE VENUE THE SERVER ATTESTED IS THE VENUE THAT ANNUALIZES.
+    // This stamp reads the attestation, never the forgeable column. It is the
+    // money math: the worker consumes strategies.asset_class DIRECTLY as the
+    // annualization clock (√365 crypto / √252 traditional), so whatever feeds
+    // this branch sets a strategy's Sharpe denominator. Sourcing it from a
+    // client-writable label let a forged venue move the forger's own clock by
+    // ~×1.203 on the allocator-facing ranking — self-targeted, which is why it
+    // outlived the probe-gate fix, but a trust-integrity defect all the same.
+    //
+    // ⛔ THE GUARD ABOVE IS PART OF THIS CHANGE, NOT AN ADJACENT TIDY-UP. Reading
+    // the attestation here is only safe because a NULL attestation never reaches
+    // this branch: `isCryptoExchange(null)` returns false, so an unattested row
+    // that got this far would be stamped 'traditional'/√252 — the exact silent
+    // mis-annualization of a crypto strategy the swap exists to prevent. Land the
+    // two together or not at all.
+    //
+    // ⛔ THE PRAGMA BELOW MUST STAY WITHIN 8 LINES OF THE MUTATION —
+    // `audit-coverage.test.ts` scans that window, so prose inserted BETWEEN them
+    // silently un-instruments the site (measured: this note, on its first
+    // placement). New commentary goes ABOVE this line, never below it.
+    //
     // @audit-skip: non-security annualization metadata (√365 crypto / √252
     // traditional) written as part of the already-audited strategy finalization;
     // a dedicated audit event would be noise (mirrors the last_sync_at skip below).
@@ -779,7 +1351,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       .from("strategies")
       .update({
         asset_class: apiKeyId
-          ? isCryptoExchange(apiKeyExchange)
+          ? isCryptoExchange(attestedVenue)
             ? "crypto"
             : "traditional"
           : isCompositeForAssetClass
@@ -802,8 +1374,19 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   // Probe runs BEFORE both legacy and unified paths so the
   // scope-broadening defense covers either code path (Phase 19 /
   // Open Question 1 — RETAINED at the thin-adapter layer).
+  //
+  // WIZFORM-04 — the venue arrives on the SAME read the asset_class stamp issues
+  // ~50 lines above, rather than a second lookup. It is `null` when that read
+  // faulted, and the helper's gate probes on `null` — same conservative direction
+  // `skipAssetClassWrite` takes just above, for the same reason.
+  //
+  // ⭐ 153.6-04 / PARITY-04 — AND IT IS THE ATTESTED VENUE, NOT `apiKeyExchange`.
+  // The two bindings differ precisely on the rows that matter: a key whose
+  // client-supplied label claims the exemption reaches here with a null (or
+  // contradicting) attestation and is PROBED. See the read above for why there is
+  // no fallback between them.
   if (apiKeyId) {
-    const probe = await runScopeBroadeningProbe(apiKeyId);
+    const probe = await runScopeBroadeningProbe(apiKeyId, attestedVenue);
     if (!probe.ok) return probe.response;
   }
 
@@ -853,8 +1436,8 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       });
       return NextResponse.json(
         {
-          error: "Could not determine composite membership; please retry.",
           code: "COMPOSITE_MEMBERSHIP_UNKNOWN",
+          error: "Could not determine composite membership; please retry.",
         },
         { status: 503, headers: NO_STORE_HEADERS },
       );
@@ -877,9 +1460,34 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       // SEAM_ROUTE_BUDGETS declaration has to be able to trust: that table
       // declares `keys-permissions × MAX_COMPOSITE_MEMBERS` for this branch,
       // and the two numbers are pinned to each other cross-file.
+      // WIZFORM-04 — the embed carries each member's VENUE, so the same
+      // capability gate the single-key arm uses can be applied per member. The
+      // shape and the to-one embed idiom are lifted verbatim from
+      // `composite/members/route.ts`, which already reads `api_keys ( exchange )`
+      // off this table.
+      //
+      // Gating BOTH call sites is what makes this a CLASS fix. Leaving this one
+      // ungated would be the instance fix: correct for the arm someone happened
+      // to test, and a live per-member probe demand for a venue that has no
+      // answer on the other.
+      //
+      // ⛔ `.limit(MAX_COMPOSITE_MEMBERS + 1)` below is UNTOUCHED — the +1 is the
+      // truncation detector whose arrival IS the refusal, and it is pinned
+      // cross-file against SEAM_ROUTE_BUDGETS.
       const { data: members, error: membersErr } = await compositeAdmin
         .from("strategy_keys")
-        .select("api_key_id")
+        // 153.6-04 / PARITY-04 — the embed carries the RPC-written venue
+        // (client-unsettable, but not independently server-validated — see the
+        // single-key read's note and CR-01) alongside the client-writable
+        // label, and the per-member gate below reads the attestation ONLY.
+        //
+        // ⚠️ `exchange` STAYS ON THE PROJECTION even though the gate no longer
+        // reads it: the widening is ADDITIVE on purpose. The embed's shape is what
+        // the 153-review array-drift refusal is written against (`api_keys:
+        // [{ exchange }]`), and narrowing the projection in the same edit that
+        // moves the gate's authority would change two things at once — one of
+        // which nothing tests.
+        .select("api_key_id, api_keys ( exchange, attested_venue )")
         .eq("strategy_id", fields.strategy_id)
         .order("seq", { ascending: true })
         // ⚠️ cap + 1, AND THE +1 IS THE WHOLE POINT (ME-02). `.limit(cap)`
@@ -893,23 +1501,65 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
         // fan-out stays capped at `MAX_COMPOSITE_MEMBERS` and
         // `SEAM_ROUTE_BUDGETS`'s `calls: 10` plus SC-4e stay exact.
         .limit(MAX_COMPOSITE_MEMBERS + 1);
-      if (membersErr) {
+      // 153 review — VALIDATED, NOT CAST, AND VALIDATED HERE. The parse runs
+      // before the cap arm because a row set we cannot read is not a member
+      // list whose LENGTH means anything; `.length` is the only thing the cap
+      // arm touches, so it is unaffected either way.
+      const memberRowsParsed = compositeMemberRowsSchema.safeParse(
+        members ?? [],
+      );
+      if (membersErr || !memberRowsParsed.success) {
         // A member-list read error also fails CLOSED — never enqueue a
         // composite whose members we could not enumerate to re-probe.
+        //
+        // 153 review — AND A SHAPE WE CANNOT PARSE IS THE SAME REFUSAL, which
+        // is why it lands in THIS arm rather than a new one. Membership we
+        // cannot read is membership we cannot re-probe, so it is literally
+        // `COMPOSITE_MEMBERSHIP_UNKNOWN`; the alternative was a new code, and
+        // a new code needs a new rejection site, which `EXPECTED_FINALIZE_
+        // REJECTION_SITES` counts exactly (wizardErrors.invariant.test.ts).
+        // Inventing taxonomy to describe an ops-side schema drift is not worth
+        // that, so the emit is SHARED and only the operator artefacts fork.
+        //
+        // ⚠️ THE LOG LINE FORKS AND MUST. The read-failure sentence is asserted
+        // verbatim by CR-01's test; a shape drift is a different incident with
+        // a different remedy (fix the query/schema, not retry), so it gets its
+        // own sentence and its own Sentry `step` — otherwise the one artefact
+        // an operator has for a composite that will not finalise points at the
+        // wrong cause.
+        // ⛔ THE DISCRIMINATOR IS A BOOLEAN, NOT THE ERROR BINDING ITSELF, and
+        // that is SEAMCORE-06's rule rather than a style choice: `console.*`
+        // arguments may not contain a bare error-shaped identifier, because
+        // undici embeds this seam's outgoing `Authorization: Bearer` /
+        // `X-Service-Key` / `X-User-Access-Token` headers in `err.message`, and
+        // a credential reaches the Vercel log with nothing at the call site
+        // that looks wrong. Branching on `membersErr` INSIDE the call — even as
+        // a mere truth test — puts that identifier in the argument list and is
+        // refused by `seam-log-coverage.test.ts` (measured: it caught exactly
+        // this shape here). Hoisting the predicate keeps every logged value
+        // provably wrapped in `scrubSeamError`.
+        const membershipShapeDrifted = !membersErr && !memberRowsParsed.success;
+        const membershipFailure = membershipShapeDrifted
+          ? memberRowsParsed.error
+          : membersErr;
         console.error(
-          `[strategies/finalize-wizard] composite member list read failed: ${scrubSeamError(membersErr)}`,
+          membershipShapeDrifted
+            ? `[strategies/finalize-wizard] composite member list SHAPE unrecognised (PostgREST drift; the embed is not the to-one object this route reads): ${scrubSeamError(memberRowsParsed.error)}`
+            : `[strategies/finalize-wizard] composite member list read failed: ${scrubSeamError(membersErr)}`,
         );
-        captureToSentry(membersErr, {
+        captureToSentry(membershipFailure, {
           tags: {
             surface: "finalize-wizard",
-            step: "composite-member-list",
+            step: membershipShapeDrifted
+              ? "composite-member-shape"
+              : "composite-member-list",
           },
           extra: { strategy_id: fields.strategy_id },
         });
         return NextResponse.json(
           {
-            error: "Could not load composite members; please retry.",
             code: "COMPOSITE_MEMBERSHIP_UNKNOWN",
+            error: "Could not load composite members; please retry.",
           },
           { status: 503, headers: NO_STORE_HEADERS },
         );
@@ -986,22 +1636,62 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
         // The status stays 503, unchanged: this plan owns the code and the copy,
         // not the wire status. `SubmitStep` maps off `code` alone (never status),
         // so the permanent/transient distinction is carried entirely by the code.
+        //
+        // 153.1-05 / D-34 — the SENTENCE IS BYTE-IDENTICAL to what shipped; only
+        // where it is built moved. It is held in a local const rather than
+        // written inline because the emitter predicate in
+        // `wizardErrors.invariant.test.ts` caps the `error:` body at
+        // EMITTER_BODY_MAX_CHARS = 160 (measured: the cap must clear the longest
+        // real body but stay under the 202-char distance to the next emitter's
+        // `status:`, or one emitter's code gets reported against the next one's
+        // status). Inline, these three interpolated lines run ~256 characters, so
+        // this site — and ONLY this site — stayed invisible to the coverage
+        // scanner even after its keys were reordered. Hoisting the sentence makes
+        // the site scannable without relaxing a predicate to make a count come
+        // out right, which is the one thing that file forbids. Same shape as the
+        // `CIRCUIT_OPEN_COPY` emitter above: the scanner constrains the CODE
+        // literal, never the error value.
+        const compositeCapCopy =
+          `This draft has more than ${MAX_COMPOSITE_MEMBERS} keys attached; ` +
+          `a multi-key strategy can hold at most ${MAX_COMPOSITE_MEMBERS}. ` +
+          `Remove keys until ${MAX_COMPOSITE_MEMBERS} or fewer remain, then submit again.`;
         return NextResponse.json(
           {
-            error:
-              `This draft has more than ${MAX_COMPOSITE_MEMBERS} keys attached; ` +
-              `a multi-key strategy can hold at most ${MAX_COMPOSITE_MEMBERS}. ` +
-              `Remove keys until ${MAX_COMPOSITE_MEMBERS} or fewer remain, then submit again.`,
             code: "COMPOSITE_TOO_MANY_MEMBERS",
+            error: compositeCapCopy,
           },
           { status: 503, headers: NO_STORE_HEADERS },
         );
       }
-      for (const member of members ?? []) {
+      // `api_key_id` is a to-one FK into `api_keys`, so PostgREST returns a
+      // single embedded object at runtime; the generated types predate this
+      // table. A member whose embed comes back `null` yields a `null` venue —
+      // and is therefore STILL PROBED, by the same fail-toward rule the
+      // single-key arm relies on.
+      //
+      // 153 review — the rows arrive from `compositeMemberRowsSchema.safeParse`
+      // above, so this binding is PROVEN, not asserted. It used to be
+      // `(members ?? []) as unknown as Array<…>`: a double cast that silences
+      // the compiler and verifies nothing, under which an array-valued embed
+      // read back as `undefined` and finalized the composite on member data it
+      // never had. The unreadable-shape refusal is the arm above.
+      const memberRows = memberRowsParsed.data;
+      for (const member of memberRows) {
         const memberKeyId =
           typeof member.api_key_id === "string" ? member.api_key_id : null;
         if (!memberKeyId) continue;
-        const probe = await runScopeBroadeningProbe(memberKeyId);
+        // 153.6-04 / PARITY-04 — THE ATTESTED VENUE, per member, and never
+        // `member.api_keys.exchange`. Gating only the single-key arm on the
+        // attestation would be this phase committing its own headline mistake:
+        // a fix that landed on the path someone happened to test. An absent
+        // embed, an absent attestation field and an explicit `null` all resolve
+        // here to `null` ⇒ the member is PROBED. ⛔ No `??` fallback to the
+        // client-writable label — see the single-key read for why.
+        const memberVenue =
+          typeof member.api_keys?.attested_venue === "string"
+            ? member.api_keys.attested_venue
+            : null;
+        const probe = await runScopeBroadeningProbe(memberKeyId, memberVenue);
         if (!probe.ok) return probe.response;
       }
       // Route to the legacy finalize whose after() block enqueues
@@ -1016,11 +1706,13 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   }
 
   // CONTRIB-02 (Phase 110) — a single-key API contribution routes through the
-  // LEGACY finalize path, NOT the unified arm below. The unified arm delegates to
-  // process_key_long, which enqueues analytics but NEVER promotes strategies.status
-  // (only strategy_verifications advances — W1 note, 110-01). Routed there, a
-  // contribution would never reach status='private'. runLegacyFinalize calls
-  // finalize_wizard_strategy with p_terminal_status='private' AND enqueues
+  // LEGACY finalize path, NOT the unified arm below. process_key_long enqueues
+  // analytics but NEVER promotes strategies.status (only strategy_verifications
+  // advances — W1 note, 110-01). The unified arm now promotes through the shared
+  // `callFinalizeWizardRpc`, but it enqueues no sync_trades and fires no
+  // after() fan-out, so the contribution still takes the legacy arm.
+  // runLegacyFinalize calls finalize_wizard_strategy with
+  // p_terminal_status='private' AND enqueues
   // sync_trades — exactly what a private contribution needs (owner-visible KPIs,
   // no admin review-queue signal). The apiKeyId scope-broadening probe (above) has
   // already run, so the contribution key is re-checked identically to the manager
@@ -1074,9 +1766,37 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       resolvedSource = keyRow.exchange;
     }
   }
+  // OWN-03 (Phase 150) — fail LOUD on a mark that cannot land. The capital
+  // question is only rendered on the contribution entry, and every
+  // contribution routes to runLegacyFinalize above, which is where the mark is
+  // written. So a mark arriving HERE means a hand-crafted body or a future
+  // drift in the routing — and the unified arm has no mark write, so it would
+  // be dropped in silence. Dropping is still SAFE (unwritten = NULL =
+  // non-allocatable, and nothing the user was shown is contradicted), so this
+  // is not an error arm; but it must not be invisible.
+  //
+  // ONE RESPONSE CONTRACT ACROSS BOTH ARMS. The legacy arm has emitted
+  // `capital_ownership_persisted: false` since 151 specialist F-3 when a mark
+  // it was asked for did not land; this arm dropped the mark with only a
+  // console.warn and a byte-identical success body, so a client that sent
+  // `capital_ownership` and got routed here could not tell "saved" from
+  // "discarded" — and SubmitStep's reader (151 review E8) would show plain
+  // success. The flag is forwarded below so the ONE `=== false` read on the
+  // client covers both arms. Console-only visibility is for US; the sidecar is
+  // for the person whose answer was dropped.
+  const capitalOwnershipDropped = fields.capitalOwnership !== undefined;
+  if (capitalOwnershipDropped) {
+    console.warn(
+      `[strategies/finalize-wizard] capital_ownership sent on the unified (manager) arm for ` +
+        `${fields.strategy_id}; the mark is NOT persisted here and stays NULL. ` +
+        `The capital question is a contribution-entry surface only.`,
+    );
+  }
+
   return await unifiedFinalizeWizardHandler({
     strategy_id: fields.strategy_id,
     userId: user.id,
+    capitalOwnershipDropped,
     // 140.3-14 / TS-33 — read off the owner-scoped draft row above.
     wizardSessionId,
     // NEW-C14-06: forward the validated+normalized `fields` object instead
@@ -1101,32 +1821,68 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     },
     apiKeyId,
     source: resolvedSource,
+    supabase,
+    fields,
+    terminalStatus,
   });
 });
 
 /**
- * M-18 — legacy finalize path. Calls the SECURITY DEFINER RPC, schedules the
- * after() side-effect fan-out, and returns the legacy 200 envelope. Pulled
- * out of POST() so the legacy code path is grep-able as `runLegacyFinalize`
- * for the eventual M-9 cleanup.
+ * The ONE caller of the SECURITY DEFINER `finalize_wizard_strategy` RPC. It is
+ * what promotes a wizard draft out of `(source='wizard', status='draft')` to
+ * its terminal status (latest def: migration
+ * 20260716130500_finalize_terminal_status_param.sql). Both finalize arms call
+ * it, so the argument list, the SQLSTATE→envelope mapping and the replay rule
+ * cannot drift apart between them.
+ *
+ * WHY IT IS SHARED. The unified single-key arm used to skip this RPC entirely
+ * (latent since Phase 106 Stage B): `postProcessKey` enqueues analytics, but
+ * nothing on the Python side writes `strategies.status`, so a manager's
+ * single-key submit answered `status: 'pending_review'` while the row stayed a
+ * draft. Its wizard metadata was never written, it never reached the admin
+ * queue, and `cleanup-wizard-drafts` deleted it after 7 days. Routing every arm
+ * through this one function is what makes that shape unrepeatable.
+ *
+ * Returns the finalized id and the status the RPC WROTE, or the error envelope
+ * to answer with. The status is the `p_terminal_status` argument, which the RPC
+ * writes verbatim and RAISEs on before any write if it is outside
+ * ('pending_review','private').
+ *
+ * REPLAYS (`acceptAlreadyPromoted`). The RPC RAISEs 22023 on any non-draft row,
+ * so a double click, a reload or a Retry after a partial failure would read as
+ * "not in a finalizable state". When the caller opts in, a 22023 is followed
+ * by an owner-scoped re-read, and a row that is ALREADY
+ * `(source='wizard', status=<the requested terminal status>)` answers success
+ * with that status. Any other state keeps the 409. A failed re-read cannot
+ * confirm either way, so it takes the generic 500 tail, whose copy does not
+ * claim nothing was saved.
+ *
+ * ⚠️ A REPLAY WRITES NOTHING. The RPC refuses the non-draft row before any
+ * write, so form fields the user edited between the first submit and the
+ * Retry are silently NOT applied: the row keeps what the first submit wrote.
  */
-// DEPRECATED: remove after 2026-05-15 (PR-D + 7d)
-async function runLegacyFinalize(args: {
+async function callFinalizeWizardRpc(args: {
   supabase: Awaited<ReturnType<typeof createClient>>;
-  user: User;
+  userId: string;
   fields: ValidatedPayload;
-  // CONTRIB-02 (Phase 110) — the terminal status the RPC writes. Defaults to
-  // 'pending_review' (manager flow, byte-identical to pre-phase behavior); the
-  // contribution branch passes 'private'. The RPC RAISEs on anything else.
-  terminalStatus?: "pending_review" | "private";
-}): Promise<NextResponse> {
-  const { supabase, user, fields, terminalStatus = "pending_review" } = args;
+  terminalStatus: "pending_review" | "private";
+  acceptAlreadyPromoted: boolean;
+}): Promise<
+  | {
+      strategyId: string;
+      status: "pending_review" | "private";
+      replayed: boolean;
+    }
+  | NextResponse
+> {
+  const { supabase, userId, fields, terminalStatus, acceptAlreadyPromoted } =
+    args;
   // CONTRIB-02: the generated database.types.ts has not been regenerated for the
   // new trailing p_terminal_status parameter (110-01 migration
   // 20260716130500_finalize_terminal_status_param.sql), so the typed .rpc()
   // overload would reject the extra key. Cast through unknown — the single place
   // to delete once the types regeneration lands (mirrors the
-  // persist_csv_daily_returns cast in csv-finalize/route.ts). The underlying SQL
+  // finalize_csv_strategy_with_returns cast in csv-finalize/route.ts). The underlying SQL
   // function accepts nulls for leverage_range, aum, and max_capacity (the
   // wizard's "skip optional metadata" path), so those ride through unchanged.
   const { data: finalizedId, error } = await (
@@ -1139,7 +1895,7 @@ async function runLegacyFinalize(args: {
     }>
   )("finalize_wizard_strategy", {
     p_strategy_id: fields.strategy_id,
-    p_user_id: user.id,
+    p_user_id: userId,
     p_name: fields.name,
     p_description: fields.description,
     p_category_id: fields.category_id,
@@ -1164,7 +1920,7 @@ async function runLegacyFinalize(args: {
       error.code,
     );
     if (error.code === "P0002" || error.code === "02000") {
-      return NextResponse.json({ error: "Draft not found", code: "GATE_DRAFT_GONE" }, { status: 404, headers: NO_STORE_HEADERS });
+      return NextResponse.json({ code: "GATE_DRAFT_GONE", error: "Draft not found" }, { status: 404, headers: NO_STORE_HEADERS });
     }
     // audit-2026-05-07 H-0321: split the two SQLSTATEs so HTTP semantics
     // match the actual failure mode.
@@ -1181,28 +1937,203 @@ async function runLegacyFinalize(args: {
       // mislabeled pre-handler 403s (CSRF, approval-gate) as draft-finalize
       // failures and conflated them in the wizard_error funnel.
       return NextResponse.json(
-        { error: "This draft cannot be finalized", code: "GUARD_BLOCKED" },
+        { code: "GUARD_BLOCKED", error: "This draft cannot be finalized" },
         { status: 403, headers: NO_STORE_HEADERS },
       );
     }
-    if (error.code === "22023") {
+    // Replay recognition (see the docblock). Runs ONLY on 22023, the SQLSTATE
+    // the RPC raises for a non-draft row, and only for callers that opted in.
+    let replayUnconfirmed = false;
+    if (error.code === "22023" && acceptAlreadyPromoted) {
+      const { data: currentRow, error: rereadErr } = await supabase
+        .from("strategies")
+        .select("status, source")
+        .eq("id", fields.strategy_id)
+        .eq("user_id", userId)
+        .maybeSingle();
+      if (rereadErr) {
+        replayUnconfirmed = true;
+        console.error(
+          "[strategies/finalize-wizard] replay re-read failed; cannot confirm the draft's state:",
+          scrubSeamError(rereadErr),
+        );
+      } else if (
+        currentRow?.source === "wizard" &&
+        currentRow.status === terminalStatus
+      ) {
+        console.info(
+          `[strategies/finalize-wizard] finalize replay: ${fields.strategy_id} is already ${terminalStatus}; answering success`,
+        );
+        return {
+          strategyId: fields.strategy_id,
+          status: terminalStatus,
+          replayed: true,
+        };
+      }
+    }
+    if (error.code === "22023" && !replayUnconfirmed) {
       return NextResponse.json(
         {
+          // 153.1-05 / D-34 — UPPERCASED from `draft_state_invalid`, which is a
+          // WIRE change and the only one in this reorder. The lowercase literal
+          // could never be seen by the coverage scanner (its class is
+          // `[A-Z][A-Z0-9_]*`) and could never be a `WizardErrorCode`, so this
+          // 409 rendered the UNKNOWN card — whose copy is RECOVERABLE, so the
+          // user was handed a Retry button that re-POSTed an identical request
+          // against a draft the DB had already moved past. 153.1-04 minted
+          // `DRAFT_STATE_INVALID` with honest, non-recoverable copy for exactly
+          // this arm; `KNOWN_FINALIZE_CODES` admits it in this same commit.
+          code: "DRAFT_STATE_INVALID",
           error:
             "This draft is not in a finalizable state. Refresh and try again.",
-          code: "draft_state_invalid",
         },
         { status: 409, headers: NO_STORE_HEADERS },
       );
     }
+    // 153.7-03 / WIZFORM-02-CLASS — the second of the three code-less
+    // rejections, and the GENERIC TAIL of this branch: every SQLSTATE the three
+    // arms above did not claim, plus a transport failure reaching PostgREST.
+    //
+    // ⚠️ THAT RESIDUE IS WHY THE COPY IS THE WEAKER SENTENCE. A SQL raise rolls
+    // the SECURITY DEFINER transaction back and nothing lands; a transport
+    // failure can lose the answer to a write that did. `DRAFT_FINALIZE_FAILED`
+    // therefore says we cannot confirm rather than that nothing was saved,
+    // which is true in both worlds. Narrowing this arm to claim more would mean
+    // splitting it, and splitting it would move
+    // `EXPECTED_FINALIZE_REJECTION_SITES` — the pin whose non-movement is the
+    // proof this plan fixed arms instead of inventing them.
     return NextResponse.json(
-      { error: "Could not finalize wizard draft" },
+      { code: "DRAFT_FINALIZE_FAILED", error: "Could not finalize wizard draft" },
       { status: 500, headers: NO_STORE_HEADERS },
     );
   }
 
-  const resolvedId =
-    typeof finalizedId === "string" ? finalizedId : fields.strategy_id;
+  return {
+    strategyId:
+      typeof finalizedId === "string" ? finalizedId : fields.strategy_id,
+    status: terminalStatus,
+    replayed: false,
+  };
+}
+
+/**
+ * M-18 — legacy finalize path. Calls the SECURITY DEFINER RPC, schedules the
+ * after() side-effect fan-out, and returns the legacy 200 envelope. Pulled
+ * out of POST() so the legacy code path is grep-able as `runLegacyFinalize`
+ * for the eventual M-9 cleanup.
+ */
+// DEPRECATED: remove after 2026-05-15 (PR-D + 7d)
+async function runLegacyFinalize(args: {
+  supabase: Awaited<ReturnType<typeof createClient>>;
+  user: User;
+  fields: ValidatedPayload;
+  // CONTRIB-02 (Phase 110) — the terminal status the RPC writes. Defaults to
+  // 'pending_review' (manager flow, byte-identical to pre-phase behavior); the
+  // contribution branch passes 'private'. The RPC RAISEs on anything else.
+  terminalStatus?: "pending_review" | "private";
+}): Promise<NextResponse> {
+  const { supabase, user, fields, terminalStatus = "pending_review" } = args;
+  const finalized = await callFinalizeWizardRpc({
+    supabase,
+    userId: user.id,
+    fields,
+    terminalStatus,
+    // The legacy arm keeps its pre-existing replay answer (409
+    // DRAFT_STATE_INVALID): a replay here would re-run the after() fan-out,
+    // founder email included. Only the unified arm opts in.
+    acceptAlreadyPromoted: false,
+  });
+  if (finalized instanceof NextResponse) return finalized;
+
+  const resolvedId = finalized.strategyId;
+
+  // ── OWN-03 (Phase 150) — persist the capital mark ────────────────────────
+  //
+  // A SEPARATE owner-scoped UPDATE, deliberately NOT a 14th argument to
+  // finalize_wizard_strategy. Widening that signature means a DROP/CREATE of a
+  // SECURITY DEFINER function sitting on the wizard's critical path; a
+  // botched deploy there costs every submission, whereas the worst case here
+  // costs one metadata field. The 13-arg signature stays byte-untouched.
+  //
+  // The cost of that choice is real and accepted: this is not atomic with the
+  // finalize. If the write fails, the strategy is finalized with a NULL mark
+  // — unmarked, therefore non-allocatable, therefore SAFE — and the user can
+  // set it from the Mark dialog. It must never be promoted to an error arm:
+  // returning a failure here would discard a successful finalize over
+  // metadata, and any error code the wizard's roster does not carry renders
+  // the useless UNKNOWN card.
+  //
+  // Both `.eq()` predicates stay — with the justification RE-BASED onto the
+  // live policy. This comment used to say "the strategies_update RLS policy has
+  // no WITH CHECK clause, so the `user_id` filter is the actual thing standing
+  // between this patch and another owner's row". That is FALSE: the
+  // `strategies_update` policy was DROPped and recreated with an explicit
+  // `WITH CHECK (user_id = auth.uid())` by the sec005 follow-ups migration,
+  // whose own verification block RAISEs if that clause is missing. The real
+  // ground for keeping the predicates (T-150-10): they keep this UPDATE correct
+  // on its own terms if `supabase` here is ever swapped for the admin client
+  // this file already constructs elsewhere — where RLS does not apply at all —
+  // and the `user_id` filter is what makes the zero-row arm below
+  // distinguishable from a successful write.
+  // 151 specialist F-3 — the SERVER posture above is sound (never fail the
+  // finalize over metadata), but the RESPONSE was a plain success with no
+  // signal at all: a user who explicitly answered "my own capital" got the
+  // normal success screen while their answer was dropped, and the consequence
+  // (a NULL-marked strategy is non-allocatable, so `Allocate…` never appears
+  // on the Holdings tab) surfaced days later as an unexplained absence. The
+  // documented remedy ("set it from the Mark dialog") is discoverable only by
+  // someone who already knows the mark failed. That is user-visible data loss
+  // reported to the user as success.
+  //
+  // The honest minimum: a NON-ERROR sidecar in the 200 body. It is emitted ONLY
+  // on failure, so every existing caller's response bytes are unchanged and the
+  // never-fail-the-finalize contract is intact — a client that asked for a mark
+  // and sees no flag got one.
+  let capitalOwnershipPersisted = true;
+  if (fields.capitalOwnership !== undefined) {
+    // @audit-skip: strategy-level metadata written as part of the already-
+    // audited finalization (mirrors the asset_class persist above).
+    const { data: markRows, error: markErr } = await supabase
+      .from("strategies")
+      .update({ capital_ownership: fields.capitalOwnership })
+      .eq("id", resolvedId)
+      .eq("user_id", user.id)
+      .select("id");
+    if (markErr) {
+      capitalOwnershipPersisted = false;
+      console.error(
+        `[strategies/finalize-wizard] capital_ownership persist failed for ${resolvedId} ` +
+          `(non-blocking; mark stays NULL = non-allocatable): ${scrubSeamError(markErr)}`,
+      );
+      captureToSentry(markErr, {
+        tags: { op: "finalize-wizard.capital_ownership_persist" },
+        level: "warning",
+        extra: { strategy_id: resolvedId },
+      });
+    } else if (Array.isArray(markRows) && markRows.length === 0) {
+      capitalOwnershipPersisted = false;
+      // Zero rows with no error means the id+user_id predicate matched
+      // nothing. Different story from a transport failure and a louder one:
+      // the finalized row is not the caller's, or is already gone.
+      console.error(
+        `[strategies/finalize-wizard] capital_ownership write matched NO row for ${resolvedId} ` +
+          `(owner predicate excluded it; mark stays NULL)`,
+      );
+      captureToSentry(
+        new Error("finalize-wizard capital_ownership write matched no row"),
+        {
+          tags: { op: "finalize-wizard.capital_ownership_persist" },
+          level: "warning",
+          extra: { strategy_id: resolvedId },
+        },
+      );
+    }
+  }
+
+  // Phase 164.6 / 161.1-D13 — resolved in request scope, BEFORE after() is
+  // scheduled, and closed over: the composite marker retraction below records
+  // it, and this keeps the value independent of after()'s header semantics.
+  const correlationId = await getCorrelationId();
 
   // Both side effects are fire-and-forget: the row is already in
   // pending_review, so failures to notify or touch last_sync_at must
@@ -1326,7 +2257,7 @@ async function runLegacyFinalize(args: {
             // queue flag was not "true") was deleted; that guard is dormant
             // with the ratified prod pins. Enqueue stitch_composite
             // unconditionally.
-            const { error: enqueueErr } = await admin.rpc("enqueue_compute_job", {
+            const { data: jobId, error: enqueueErr } = await admin.rpc("enqueue_compute_job", {
               p_strategy_id: resolvedId,
               p_kind: "stitch_composite",
               p_metadata: { source: "finalize-wizard" },
@@ -1335,6 +2266,39 @@ async function runLegacyFinalize(args: {
               throw new Error(
                 `enqueue_compute_job failed: ${enqueueErr.message}`,
               );
+            }
+            // Phase 164.6 / 161.1-D13 — the enqueue may have DEDUPED onto an
+            // in-flight ledger-refresh job; retract its marker, as keys/sync and
+            // Python's `_retract_refresh_marker_on_reuse` do. OWN try/catch: an
+            // escaping error would reject this side effect and be captured under
+            // the ENQUEUE's tag, reporting a successful enqueue as a failed one.
+            // The read-modify-write residual is inherited (161.1-D12); see
+            // `retractInheritedRefreshMarker`'s JSDoc.
+            try {
+              // @audit-skip: job-row provenance metadata; user intent is audited by the sync.start event below.
+              const retraction = await retractInheritedRefreshMarker(admin, jobId, correlationId);
+              if (retraction.retracted) {
+                console.warn(
+                  `[strategies/finalize-wizard] retracted inherited ${retraction.marker} marker on job=${jobId} for strategy=${resolvedId}`,
+                );
+              }
+            } catch (err) {
+              // LOW-2 (164.6 review fix): the SQLSTATE rides in the cause.
+              const code = retractionFailureCode(err);
+              console.error(
+                `[strategies/finalize-wizard] composite refresh-marker retraction failed for ${resolvedId} (code=${code}): ${scrubSeamError(err)}`,
+              );
+              captureToSentry(err, {
+                tags: {
+                  surface: "finalize-wizard-after",
+                  side_effect: "composite_refresh_marker_retract",
+                },
+                extra: {
+                  strategy_id: resolvedId,
+                  job_id: jobId,
+                  correlation_id: correlationId,
+                },
+              });
             }
             // Phase 89 — audit the composite dispatch, mirroring the
             // keys/sync composite-first stitch_composite kickoff (in keys/sync/route.ts):
@@ -1416,14 +2380,21 @@ async function runLegacyFinalize(args: {
       strategy_id: resolvedId,
       // CONTRIB-02 — return the ACTUAL terminal status the RPC wrote ('private'
       // on the contribution branch, 'pending_review' for the manager flow).
-      status: terminalStatus,
+      status: finalized.status,
+      // 151 specialist F-3 — present ONLY when the caller asked for a capital
+      // mark and it did not land. The finalize still succeeded; this says the
+      // ONE metadata field was dropped, so the strategy is unmarked (therefore
+      // non-allocatable) and the user must set it from the Mark dialog. Absent
+      // ⇒ nothing was lost.
+      ...(capitalOwnershipPersisted ? {} : { capital_ownership_persisted: false }),
     },
     { headers: NO_STORE_HEADERS },
   );
 }
 
 /**
- * Phase 19 / BACKBONE-01 unified path. Delegates to /process-key with
+ * Phase 19 / BACKBONE-01 unified path. Promotes the draft through
+ * `callFinalizeWizardRpc`, then delegates to /process-key with
  * `flow_type=onboard` (finalize step). The force-refresh permissions probe
  * has already run in the caller (Open Question 1 — RETAINED at this layer).
  *
@@ -1496,6 +2467,74 @@ async function compositeMemberCount(
   return count;
 }
 
+/**
+ * Round-2 review (SFH HIGH-1) — the answer when `postProcessKey` fails AFTER
+ * `callFinalizeWizardRpc` succeeded. The strategy is promoted (saved and waiting
+ * for review); only its analytics job is not queued. So the answer is
+ * `SUBMITTED_ANALYTICS_NOT_QUEUED`, recoverable, never the dispatch's own copy.
+ *
+ * WHY A RETRY IS THE ROOT RECOVERY. The Retry re-POSTs this route. The RPC then
+ * raises 22023 on the promoted row, `acceptAlreadyPromoted` recognises it as
+ * success, and the handler goes on to `postProcessKey` again. So a promoted
+ * strategy always gets its job on a Retry that the seam lets through.
+ *
+ * The upstream code and status go to the log line and to Sentry with the
+ * strategy id. The error is built ONCE and that one object is both logged (its
+ * message, which carries no upstream prose) and captured; no raw upstream error
+ * is put on the line. A `Retry-After` the dispatch carried is relayed.
+ */
+async function answerDispatchFailedAfterPromotion(args: {
+  strategyId: string;
+  status: "pending_review" | "private";
+  replayed: boolean;
+  upstream: NextResponse;
+}): Promise<NextResponse> {
+  const upstreamBody: unknown = await args.upstream
+    .clone()
+    .json()
+    .catch(() => null);
+  const upstreamCode = seamErrorCode(upstreamBody) ?? `HTTP_${args.upstream.status}`;
+  // Built from our own tokens only (a closed upstream code and a status), so the
+  // line carries no upstream prose and no caught value.
+  const dispatchMessage = `analytics dispatch failed after the strategy was promoted (upstream ${upstreamCode}, HTTP ${args.upstream.status})`;
+  const dispatchError = new Error(dispatchMessage);
+  console.error(`[strategies/finalize-wizard] ${dispatchMessage}`, {
+    strategy_id: args.strategyId,
+    upstream_code: upstreamCode,
+    upstream_status: args.upstream.status,
+    replayed: args.replayed,
+  });
+  captureToSentry(dispatchError, {
+    tags: {
+      surface: "finalize-wizard",
+      step: "dispatch-after-promotion",
+      upstream_code: upstreamCode,
+    },
+    extra: {
+      strategy_id: args.strategyId,
+      upstream_status: args.upstream.status,
+      replayed: args.replayed,
+    },
+  });
+  const details = {
+    ok: false as const,
+    strategy_id: args.strategyId,
+    status: args.status,
+    upstream_code: upstreamCode,
+    correlation_id: seamCorrelationId(upstreamBody),
+    recoverable: true as const,
+  };
+  // `{ code, error, ... }` in THAT order and short: the wizard's emitter scan
+  // (`wizardErrors.invariant.test.ts`, `emitterRe`) reads exactly that shape.
+  const answer = NextResponse.json(
+    { code: "SUBMITTED_ANALYTICS_NOT_QUEUED", error: "Submitted; analytics not queued yet.", ...details },
+    { status: 503, headers: NO_STORE_HEADERS },
+  );
+  const advertisedWait = args.upstream.headers.get("Retry-After");
+  if (advertisedWait !== null) answer.headers.set("Retry-After", advertisedWait);
+  return answer;
+}
+
 async function unifiedFinalizeWizardHandler(args: {
   strategy_id: string;
   userId: string;
@@ -1506,9 +2545,22 @@ async function unifiedFinalizeWizardHandler(args: {
    * absence, never as a synthesised id.
    */
   wizardSessionId: string | null;
+  /**
+   * OWN-03 — TRUE when the caller asked for a `capital_ownership` mark. This
+   * arm has no mark write, so asking for one here IS a drop, and the two 200
+   * bodies below carry the same `capital_ownership_persisted: false` sidecar
+   * the legacy arm emits on a failed persist. One contract, both arms: the
+   * client's single `=== false` read (SubmitStep) never has to know which arm
+   * answered.
+   */
+  capitalOwnershipDropped: boolean;
   payload: Record<string, unknown>;
   apiKeyId: string | null;
   source: string;
+  /** The owner-scoped client and validated fields `callFinalizeWizardRpc` needs. */
+  supabase: Awaited<ReturnType<typeof createClient>>;
+  fields: ValidatedPayload;
+  terminalStatus: "pending_review" | "private";
 }): Promise<NextResponse> {
   // Finding 6: the unified backbone delegates to process_key_long — a SINGLE-KEY
   // derive that cannot honestly reconstruct a multi-key composite. Composite
@@ -1530,8 +2582,8 @@ async function unifiedFinalizeWizardHandler(args: {
     });
     return NextResponse.json(
       {
-        error: "Could not determine composite membership; please retry.",
         code: "COMPOSITE_MEMBERSHIP_UNKNOWN",
+        error: "Could not determine composite membership; please retry.",
       },
       { status: 503, headers: NO_STORE_HEADERS },
     );
@@ -1553,13 +2605,42 @@ async function unifiedFinalizeWizardHandler(args: {
     );
     return NextResponse.json(
       {
+        code: "COMPOSITE_UNSUPPORTED_UNIFIED",
         error:
           "Composite (multi-key) strategies are not yet supported on this path.",
-        code: "COMPOSITE_UNSUPPORTED_UNIFIED",
       },
       { status: 409, headers: NO_STORE_HEADERS },
     );
   }
+
+  // PROMOTE THE DRAFT. `process_key_long` enqueues analytics and advances
+  // `strategy_verifications`, but it never writes `strategies.status` or the
+  // wizard metadata; only `finalize_wizard_strategy` does. Before this call
+  // existed the arm answered 'pending_review' over a row still at 'draft'.
+  //
+  // ORDER: the RPC runs BEFORE `postProcessKey`, the same order as the legacy
+  // arm (RPC first, side effects after). Three reasons:
+  //   1. The RPC is the transactional gate (ownership, source='wizard',
+  //      status='draft'). If it refuses, nothing is enqueued for a row that
+  //      was never promoted, and the answer is the RPC's own envelope, never a
+  //      'pending_review' claim.
+  //   2. If `postProcessKey` fails AFTER a successful promotion, the user's
+  //      Retry reaches the RPC again, the replay rule (`acceptAlreadyPromoted`)
+  //      recognises the promoted row as success, and the retry goes on to
+  //      `postProcessKey`. The reverse order has no such recovery: a failed
+  //      RPC after a queued job leaves a draft the cleanup cron deletes.
+  //   3. For okx/binance/bybit keys the RPC inserts its own 'validated'
+  //      verification row. Running it first makes Python's onboard row the
+  //      NEWER one, and the trust-tier readers pick the most recent row per
+  //      strategy, so the row that tracks the real job is the one they show.
+  const finalized = await callFinalizeWizardRpc({
+    supabase: args.supabase,
+    userId: args.userId,
+    fields: args.fields,
+    terminalStatus: args.terminalStatus,
+    acceptAlreadyPromoted: true,
+  });
+  if (finalized instanceof NextResponse) return finalized;
 
   const result = await postProcessKey({
     flow_type: "onboard",
@@ -1599,7 +2680,19 @@ async function unifiedFinalizeWizardHandler(args: {
     // CT-4 (army2) — forward tenant id for cross-tenant rate-limit isolation.
     userId: args.userId,
   });
-  if (!result.ok) return result.response;
+  // Round-2 review (SFH HIGH-1) — the RPC above COMMITTED (or a replay
+  // confirmed the row is already promoted), so a dispatch failure here must not
+  // forward the dispatch's own copy: a rate-limit or outage card tells a user
+  // whose strategy IS submitted that nothing was. See
+  // `answerDispatchFailedAfterPromotion`.
+  if (!result.ok) {
+    return answerDispatchFailedAfterPromotion({
+      strategyId: args.strategy_id,
+      status: finalized.status,
+      replayed: finalized.replayed,
+      upstream: result.response,
+    });
+  }
 
   // API-9: translate the unified `{queued, verification_id}` shape back to the
   // legacy `{strategy_id, status:'pending_review'}` shape that wizard chrome
@@ -1616,23 +2709,27 @@ async function unifiedFinalizeWizardHandler(args: {
   // instead of probing an opaque `Record<string, unknown>`. A backbone-
   // side rename of `verification_id` / `queued` now surfaces here as a
   // missing branch, not as a silent null/false fallback.
-  // CONTRIB-02 (Phase 110) — the two `status: "pending_review"` literals below
-  // are correct and NOT a missed branch: contributions are diverted to
-  // runLegacyFinalize in the POST handler BEFORE this unified arm, so
-  // unifiedFinalizeWizardHandler is reached ONLY by the manager flow. The unified
-  // backbone (process_key_long) never writes a 'private' terminal status, so
-  // there is no terminalStatus to thread here — this arm always terminates
-  // 'pending_review' by construction.
+  // Both 200 bodies carry `finalized.status`, the status `finalize_wizard_strategy`
+  // wrote (or, on a replay, the status the re-read found). They used to carry
+  // a hard-coded 'pending_review' literal, which is how this arm reported a
+  // promotion that never happened.
   const upstream = result.body;
+  // OWN-03 — the dropped-mark sidecar, spelled ONCE and spread into both 200
+  // arms. Emitted ONLY when the caller asked for a mark, so every existing
+  // caller's response bytes are unchanged; absent still means nothing was lost.
+  const markSidecar = args.capitalOwnershipDropped
+    ? { capital_ownership_persisted: false as const }
+    : {};
   if (isProcessKeyOnboardResponse(upstream)) {
     if (upstream.queued) {
       return NextResponse.json(
         {
           ok: true,
           strategy_id: args.strategy_id,
-          status: "pending_review",
+          status: finalized.status,
           verification_id: upstream.verification_id,
           queued: true,
+          ...markSidecar,
         },
         { headers: NO_STORE_HEADERS },
       );
@@ -1642,11 +2739,12 @@ async function unifiedFinalizeWizardHandler(args: {
       {
         ok: true,
         strategy_id: args.strategy_id,
-        status: "pending_review",
+        status: finalized.status,
         verification_id: upstream.verification_id ?? null,
         queued: false,
         code: upstream.code,
         ...(upstream.idempotent === true ? { idempotent: true } : {}),
+        ...markSidecar,
       },
       { headers: NO_STORE_HEADERS },
     );
@@ -1680,8 +2778,20 @@ async function unifiedFinalizeWizardHandler(args: {
           : null,
     },
   });
+  // 153.7-03 / WIZFORM-02-CLASS — the last of the three code-less rejections.
+  //
+  // ⚠️ THIS ONE IS NOT LIKE ITS TWO SIBLINGS, and the difference is the whole
+  // reason it gets its own member. The upstream answered 2xx: the submission
+  // WAS accepted and only its result is unreadable. So the copy behind
+  // `SEAM_RESPONSE_UNREADABLE` may not say nothing was saved (false whenever
+  // the onboard really landed) and may not say it went through (a guess about a
+  // body we could not parse). It claims only what the 2xx establishes and sends
+  // the user to the strategies list, which is the record that settles it.
   return NextResponse.json(
-    { error: "Upstream service returned unexpected response" },
+    {
+      code: "SEAM_RESPONSE_UNREADABLE",
+      error: "Upstream service returned unexpected response",
+    },
     { status: 502, headers: NO_STORE_HEADERS },
   );
 }

@@ -161,8 +161,8 @@ None — pure documentation; no new network endpoints, auth paths, file access p
 
 ## Self-Check: PASSED
 
-- [x] DESIGN.md exists at `/Users/helios-mammut/claude-projects/quantalyze/.claude/worktrees/agent-adeb2b438def6f45e/DESIGN.md`
-- [x] `.planning/REQUIREMENTS.md` exists at `/Users/helios-mammut/claude-projects/quantalyze/.claude/worktrees/agent-adeb2b438def6f45e/.planning/REQUIREMENTS.md`
+- [x] DESIGN.md exists at `.claude/worktrees/agent-adeb2b438def6f45e/DESIGN.md`
+- [x] `.planning/REQUIREMENTS.md` exists at `.claude/worktrees/agent-adeb2b438def6f45e/.planning/REQUIREMENTS.md`
 - [x] `.planning/phases/17-design-contract/17-02-SUMMARY.md` exists at this file
 - [x] Commit 5f340cc found in `git log --oneline`
 - [x] Commit 35991ac found in `git log --oneline`

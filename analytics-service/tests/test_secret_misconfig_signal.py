@@ -316,7 +316,10 @@ async def test_a_caller_that_sends_no_key_at_all_produces_no_capture(
         resp = await client.post(_GUARDED_PATH, json={})
 
     assert resp.status_code == 401
-    assert resp.json() == {"detail": "Unauthorized"}
+    # 164.1-02 / PYAPI-06 (D-10): its own machine code on the wire. ⛔ The
+    # empty-captures assertion below is UNCHANGED — a code the CALLER reads is
+    # not a reason to page anyone.
+    assert resp.json()["detail"]["code"] == "SERVICE_KEY_ABSENT"
     assert sentry_spy.captures == []
 
 

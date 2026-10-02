@@ -55,8 +55,28 @@ interface ComputeJobRow {
   next_attempt_at: string;
   claimed_at: string | null;
   claimed_by: string | null;
+  claim_token: string | null;
   strategy_id: string | null;
   kind: string;
+}
+
+// ⚠️ Phase 164.9 fix round (F2) — THE POST-MIG-117 CLAIM-TOKEN FENCE.
+//
+// `mark_compute_job_done` and `mark_compute_job_failed` REQUIRE a non-NULL
+// `p_claim_token` (22023 otherwise) and additionally require it to MATCH the
+// row's `claim_token`. In production that token is minted by
+// `claim_compute_jobs[_with_priority]` on every claim; these fixtures seed a
+// `running` row by direct INSERT instead, so the row was `claimed_at`/
+// `claimed_by`-populated but token-less — a state a real claim can never
+// produce. Every call below therefore answered 22023 before it reached the
+// behaviour under test.
+//
+// ⛔ THE REPAIR IS AT THE CALL SITE, not at the assertion: the fixture now
+// mints the token a claim would have written, stores it on the seeded row and
+// threads it through the RPC. Nothing about what these arms assert changed —
+// they simply reach the body they were always meant to exercise.
+function mintClaimToken(): string {
+  return crypto.randomUUID();
 }
 
 async function seedStrategy(
@@ -352,8 +372,9 @@ describe("audit-2026-05-07 G10.B — mark_compute_job_failed backoff schedule", 
     marker: string,
     attempts: number,
     maxAttempts = 3,
-  ): Promise<{ strategyId: string; jobId: string }> {
+  ): Promise<{ strategyId: string; jobId: string; claimToken: string }> {
     const strategyId = await seedStrategy(admin, userId, marker);
+    const claimToken = mintClaimToken();
     const jobId = await insertComputeJob(admin, {
       strategy_id: strategyId,
       kind: "sync_trades",
@@ -362,8 +383,9 @@ describe("audit-2026-05-07 G10.B — mark_compute_job_failed backoff schedule", 
       max_attempts: maxAttempts,
       claimed_at: new Date().toISOString(),
       claimed_by: `test-worker-${marker}`,
+      claim_token: claimToken,
     });
-    return { strategyId, jobId };
+    return { strategyId, jobId, claimToken };
   }
 
   it.skipIf(!HAS_LIVE_DB)(
@@ -375,7 +397,7 @@ describe("audit-2026-05-07 G10.B — mark_compute_job_failed backoff schedule", 
         admin,
         `g10b-backoff-1-${ts}@test.sec`,
       );
-      const { strategyId, jobId } = await setupRunningJob(
+      const { strategyId, jobId, claimToken } = await setupRunningJob(
         admin,
         userId,
         "bo1",
@@ -388,6 +410,7 @@ describe("audit-2026-05-07 G10.B — mark_compute_job_failed backoff schedule", 
             p_job_id: jobId,
             p_error: "test-transient-1",
             p_error_kind: "transient",
+            p_claim_token: claimToken,
           } as never,
         );
         expect(error).toBeNull();
@@ -415,7 +438,7 @@ describe("audit-2026-05-07 G10.B — mark_compute_job_failed backoff schedule", 
         admin,
         `g10b-backoff-2-${ts}@test.sec`,
       );
-      const { strategyId, jobId } = await setupRunningJob(
+      const { strategyId, jobId, claimToken } = await setupRunningJob(
         admin,
         userId,
         "bo2",
@@ -428,6 +451,7 @@ describe("audit-2026-05-07 G10.B — mark_compute_job_failed backoff schedule", 
             p_job_id: jobId,
             p_error: "test-transient-2",
             p_error_kind: "transient",
+            p_claim_token: claimToken,
           } as never,
         );
         const row = await fetchJob(admin, jobId);
@@ -454,7 +478,7 @@ describe("audit-2026-05-07 G10.B — mark_compute_job_failed backoff schedule", 
         admin,
         `g10b-backoff-3-${ts}@test.sec`,
       );
-      const { strategyId, jobId } = await setupRunningJob(
+      const { strategyId, jobId, claimToken } = await setupRunningJob(
         admin,
         userId,
         "bo3",
@@ -465,6 +489,7 @@ describe("audit-2026-05-07 G10.B — mark_compute_job_failed backoff schedule", 
           p_job_id: jobId,
           p_error: "test-transient-3",
           p_error_kind: "transient",
+          p_claim_token: claimToken,
         } as never);
         const row = await fetchJob(admin, jobId);
         expect(row.status).toBe("failed_final");
@@ -486,7 +511,7 @@ describe("audit-2026-05-07 G10.B — mark_compute_job_failed backoff schedule", 
         admin,
         `g10b-backoff-perm-${ts}@test.sec`,
       );
-      const { strategyId, jobId } = await setupRunningJob(
+      const { strategyId, jobId, claimToken } = await setupRunningJob(
         admin,
         userId,
         "perm",
@@ -497,6 +522,7 @@ describe("audit-2026-05-07 G10.B — mark_compute_job_failed backoff schedule", 
           p_job_id: jobId,
           p_error: "test-permanent",
           p_error_kind: "permanent",
+          p_claim_token: claimToken,
         } as never);
         const row = await fetchJob(admin, jobId);
         expect(row.status).toBe("failed_final");
@@ -518,7 +544,7 @@ describe("audit-2026-05-07 G10.B — mark_compute_job_failed backoff schedule", 
         admin,
         `g10b-backoff-bad-${ts}@test.sec`,
       );
-      const { strategyId, jobId } = await setupRunningJob(
+      const { strategyId, jobId, claimToken } = await setupRunningJob(
         admin,
         userId,
         "bad",
@@ -529,6 +555,7 @@ describe("audit-2026-05-07 G10.B — mark_compute_job_failed backoff schedule", 
           p_job_id: jobId,
           p_error: "test-bad-kind",
           p_error_kind: "garbage",
+          p_claim_token: claimToken,
         } as never);
         expect(error).not.toBeNull();
         expect(error?.message ?? "").toMatch(
@@ -560,6 +587,7 @@ describe("audit-2026-05-07 G10.B / mig 109 — mark_compute_job_done idempotency
       );
       const strategyId = await seedStrategy(admin, userId, "mark-done-idem");
       try {
+        const claimToken = mintClaimToken();
         const jobId = await insertComputeJob(admin, {
           strategy_id: strategyId,
           kind: "sync_trades",
@@ -568,18 +596,26 @@ describe("audit-2026-05-07 G10.B / mig 109 — mark_compute_job_done idempotency
           max_attempts: 3,
           claimed_at: new Date().toISOString(),
           claimed_by: "test-worker-idem",
+          claim_token: claimToken,
         });
 
         // First mark_done: flips running → done.
         const first = await admin.rpc("mark_compute_job_done", {
           p_job_id: jobId,
+          p_claim_token: claimToken,
         } as never);
         expect(first.error).toBeNull();
 
         // Second mark_done: now idempotent. Used to raise NO_DATA_FOUND
         // and cascade into mark_failed false alerts. (mig 109 P6)
+        // ⚠️ The SAME token: mig 117's idempotent branch returns silently only
+        // when the caller's token matches the one recorded on the done row; a
+        // DIFFERENT token is a late mark after a watchdog reclaim and raises
+        // SQLSTATE 55006 by design (164.9.3.2; it was 40001 before, which
+        // PostgREST retried without bound).
         const second = await admin.rpc("mark_compute_job_done", {
           p_job_id: jobId,
+          p_claim_token: claimToken,
         } as never);
         expect(second.error).toBeNull();
 
@@ -599,8 +635,12 @@ describe("audit-2026-05-07 G10.B / mig 109 — mark_compute_job_done idempotency
     async () => {
       const admin = createLiveAdminClient();
       const fakeId = "00000000-0000-0000-0000-000000000000";
+      // A token is supplied so the arm reaches the row look-up rather than
+      // bouncing off the mig-117 entry fence; the row does not exist, so the
+      // assertion under test ("not found") is what must surface.
       const { error } = await admin.rpc("mark_compute_job_done", {
         p_job_id: fakeId,
+        p_claim_token: mintClaimToken(),
       } as never);
       expect(error).not.toBeNull();
       expect(error?.message ?? "").toMatch(/not found/);
@@ -637,11 +677,24 @@ describe("audit-2026-05-07 G10.B / mig 109 — fan-in chain", () => {
         // _enqueue_compute_job_internal is REVOKED for everyone; the
         // public wrapper enqueue_compute_job allows parent_job_ids via
         // its 4th positional. Use it.
+        //
+        // ⚠️ Phase 164.9 fix round — `compute_analytics` IS A RETIRED KIND on
+        // the ENQUEUE path. `_enqueue_compute_job_internal` raises
+        // `invalid_parameter_value` ("kind compute_analytics is retired (Phase
+        // 106) — no enqueue path remains") before it reaches the behaviour this
+        // arm pins. The registry still ADMITS the kind (45 historical rows FK
+        // it), which is why the sibling fan-in arms that seed children by direct
+        // INSERT are unaffected and are left alone — the reject is RPC-level
+        // only. `reconcile_strategy` is a live strategy-targeted kind, and being
+        // a DIFFERENT kind from the parent's it cannot trip
+        // `compute_jobs_one_inflight_per_kind_strategy`. Nothing about the
+        // assertion changed: the subject is that a row with parents starts in
+        // done_pending_children, not which kind it carries.
         const { data: newId, error } = await admin.rpc(
           "enqueue_compute_job",
           {
             p_strategy_id: strategyId,
-            p_kind: "compute_analytics",
+            p_kind: "reconcile_strategy",
             p_idempotency_key: null,
             p_parent_job_ids: [parentId],
           } as never,
@@ -652,6 +705,25 @@ describe("audit-2026-05-07 G10.B / mig 109 — fan-in chain", () => {
         const child = await fetchJob(admin, newId as unknown as string);
         // (mig 109 P12) New row with parents starts as done_pending_children
         // so the fan-in machinery is reachable.
+        //
+        // ✅ FIXED BY MIGRATION 20260924230827_fanin_initial_status_10param
+        // (Phase 164.9.1, [164.9-FANIN-STATUS-NEVER-SET]). This arm was RED ON
+        // PURPOSE from the Phase 164.9 fix round until that migration: the
+        // retired-kind repair above had stopped the enqueue bouncing off an
+        // RPC-level reject, and what it uncovered was a REAL CATALOGUE DEFECT,
+        // not fixture drift. `enqueue_compute_job` routes every mode to the
+        // TEN-ARG `_enqueue_compute_job_internal`, and that overload's INSERT
+        // omitted `status`, so the row took the column DEFAULT ('pending').
+        // Only the SEVEN-ARG overload carried mig 109's
+        // `v_initial_status := 'done_pending_children'` branch, and nothing
+        // reaches it (a seven-argument call cannot resolve: 42725). A job
+        // enqueued through the public wrapper WITH parents therefore never
+        // entered the fan-in state, so `mark_compute_job_done`'s fan-in advance
+        // could never see it. The migration makes the TEN-ARG overload compute
+        // and INSERT the initial status exactly as the seven-arg does.
+        //
+        // ⛔ This assertion is the regression gate (D-08). Weakening it to
+        // accept 'pending' would encode the defect as the contract.
         expect(child.status).toBe("done_pending_children");
       } finally {
         await cleanupLiveDbRow(admin, {
@@ -677,6 +749,7 @@ describe("audit-2026-05-07 G10.B / mig 109 — fan-in chain", () => {
       const strategyB = await seedStrategy(admin, userId, "fanin-b");
       try {
         // P1: leaf running job.
+        const tokenP1 = mintClaimToken();
         const p1 = await insertComputeJob(admin, {
           strategy_id: strategyA,
           kind: "sync_trades",
@@ -685,8 +758,10 @@ describe("audit-2026-05-07 G10.B / mig 109 — fan-in chain", () => {
           max_attempts: 3,
           claimed_at: new Date().toISOString(),
           claimed_by: "test-worker-p1",
+          claim_token: tokenP1,
         });
         // P2: leaf running job on a different strategy.
+        const tokenP2 = mintClaimToken();
         const p2 = await insertComputeJob(admin, {
           strategy_id: strategyB,
           kind: "sync_trades",
@@ -695,6 +770,7 @@ describe("audit-2026-05-07 G10.B / mig 109 — fan-in chain", () => {
           max_attempts: 3,
           claimed_at: new Date().toISOString(),
           claimed_by: "test-worker-p2",
+          claim_token: tokenP2,
         });
         // C: child waiting on both, in done_pending_children.
         const c = await insertComputeJob(admin, {
@@ -707,18 +783,286 @@ describe("audit-2026-05-07 G10.B / mig 109 — fan-in chain", () => {
         });
 
         // Step 1: mark P1 done — C still waiting on P2.
-        await admin.rpc("mark_compute_job_done", { p_job_id: p1 } as never);
+        await admin.rpc("mark_compute_job_done", {
+          p_job_id: p1,
+          p_claim_token: tokenP1,
+        } as never);
         let cRow = await fetchJob(admin, c);
         expect(cRow.status).toBe("done_pending_children");
 
         // Step 2: mark P2 done — C should now advance to pending.
-        await admin.rpc("mark_compute_job_done", { p_job_id: p2 } as never);
+        await admin.rpc("mark_compute_job_done", {
+          p_job_id: p2,
+          p_claim_token: tokenP2,
+        } as never);
         cRow = await fetchJob(admin, c);
         expect(cRow.status).toBe("pending");
       } finally {
         await cleanupLiveDbRow(admin, {
           userIds: [userId],
           strategyIds: [strategyA, strategyB],
+        });
+      }
+    },
+  );
+
+  // ⭐ Phase 164.9.1 plan 01 (D-01, D-02, D-03, D-26) — THE HARM PROBE.
+  //
+  // Arm P12 above proves the child LANDS in the wrong status. This arm proves
+  // what that costs, end to end through the real mechanism: the public wrapper,
+  // the claim RPC a worker calls, and the parent's mark-done that is meant to
+  // release the child. It records a verdict line FIRST and asserts AFTER, so the
+  // pre-fix run still prints what the lane actually did.
+  //
+  // WHY A RUNNING PARENT (D-01's "not done" condition): `mark_compute_job_done`
+  // is fenced on a `running` row and its claim token, so a `pending` parent
+  // could only reach step (iii) by being claimed through the very RPC under
+  // test. Seeding it running with a minted token (arm P15's shape) keeps step
+  // (ii) about the child alone and makes step (iii) executable.
+  //
+  // ⚠️ D-02: no production caller passes a non-empty `p_parent_job_ids`, so a
+  // RED here demonstrates a MECHANISM; the production harm stays latent.
+  //
+  // The assertions encode the POST-fix contract (mig 109 P12's intent): the
+  // child is held in `done_pending_children`, is NOT handed to a worker while
+  // its parent runs, and is released to `pending` — and claimable — by the
+  // parent's mark-done. Each one fails if the fan-in state is skipped again.
+  it.skipIf(!HAS_LIVE_DB)(
+    "P12-harm: a parented child is not claimable before its parent is done and is released by the parent's mark-done",
+    async () => {
+      const admin = createLiveAdminClient();
+      const ts = Date.now();
+      const userId = await createTestUser(
+        admin,
+        `g10b-harm-probe-${ts}@test.sec`,
+      );
+      const strategyId = await seedStrategy(admin, userId, "harm-probe");
+      const probeWorker = `g10b-harm-probe-${ts}`;
+      const childKind = "reconcile_strategy";
+      // The RPC's own cap (claim_kind_filter raises above 1000): the largest
+      // batch the probe may ask for, so the child cannot be crowded out.
+      const claimCap = 1000;
+
+      // D-26: all five args by name. PROD also carries a two-arg overload, so a
+      // two-named-arg call would be ambiguous (42725).
+      const claimOnce = async () => {
+        // Crowd-out fence: every row the claim could consider for this kind.
+        // A count at or above the cap would let the child be skipped for room
+        // rather than for its parent, and read as a false `false`.
+        const { count, error: countErr } = await admin
+          .from("compute_jobs")
+          .select("id", { count: "exact", head: true })
+          .eq("kind", childKind)
+          .in("status", ["pending", "failed_retry"]);
+        expect(countErr).toBeNull();
+        expect(count ?? Number.POSITIVE_INFINITY).toBeLessThan(claimCap);
+
+        const { data, error } = await admin.rpc(
+          "claim_compute_jobs_with_priority",
+          {
+            p_batch_size: claimCap,
+            p_worker_id: probeWorker,
+            p_unified_backbone_active: null,
+            p_kind_include: [childKind],
+            p_kind_exclude: null,
+          } as never,
+        );
+        expect(error).toBeNull();
+        return ((data as Array<{ id: string }>) ?? []).map((r) => r.id);
+      };
+
+      try {
+        const tokenParent = mintClaimToken();
+        const parentId = await insertComputeJob(admin, {
+          strategy_id: strategyId,
+          kind: "sync_trades",
+          status: "running",
+          attempts: 1,
+          max_attempts: 3,
+          claimed_at: new Date().toISOString(),
+          claimed_by: `${probeWorker}-parent`,
+          claim_token: tokenParent,
+        });
+
+        // The PUBLIC wrapper, exactly as arm P12 calls it. A different kind
+        // from the parent keeps the optimistic look-up from collapsing the
+        // child onto the parent.
+        const { data: childIdRaw, error: enqErr } = await admin.rpc(
+          "enqueue_compute_job",
+          {
+            p_strategy_id: strategyId,
+            p_kind: childKind,
+            p_idempotency_key: null,
+            p_parent_job_ids: [parentId],
+          } as never,
+        );
+        expect(enqErr).toBeNull();
+        expect(typeof childIdRaw).toBe("string");
+        const childId = childIdRaw as unknown as string;
+        const ownIds = new Set([parentId, childId]);
+
+        // (i) where the child landed.
+        const childStatusAtEnqueue = (await fetchJob(admin, childId)).status;
+
+        // (ii) does a worker get the child while its parent is still running?
+        const firstClaim = await claimOnce();
+        const claimedWhileParentRunning = firstClaim.includes(childId);
+        // Foreign rows are COUNTED, never printed and never reset: the probe
+        // writes no row it did not seed.
+        let foreignRowsClaimed = firstClaim.filter(
+          (id) => !ownIds.has(id),
+        ).length;
+
+        // (iii) ALWAYS, whatever (ii) showed: the parent finishes.
+        const { error: doneErr } = await admin.rpc("mark_compute_job_done", {
+          p_job_id: parentId,
+          p_claim_token: tokenParent,
+        } as never);
+        const parentMarkDoneOk = doneErr === null;
+        const childStatusAfterParentDone = (await fetchJob(admin, childId))
+          .status;
+
+        // Only the SECOND claim is conditional: re-claiming a row that is
+        // already running measures nothing.
+        let claimedAfterParentDone: boolean | "not-reached" = "not-reached";
+        if (!claimedWhileParentRunning) {
+          const secondClaim = await claimOnce();
+          claimedAfterParentDone = secondClaim.includes(childId);
+          foreignRowsClaimed += secondClaim.filter(
+            (id) => !ownIds.has(id),
+          ).length;
+        }
+
+        // Statuses, booleans and one count. No id, no DSN, no email.
+        console.log(
+          "HARM-PROBE verdict: " +
+            [
+              `child_status_at_enqueue=${childStatusAtEnqueue}`,
+              `claimed_while_parent_running=${claimedWhileParentRunning}`,
+              `parent_mark_done_ok=${parentMarkDoneOk}`,
+              `child_status_after_parent_done=${childStatusAfterParentDone}`,
+              `claimed_after_parent_done=${claimedAfterParentDone}`,
+              `foreign_rows_claimed=${foreignRowsClaimed}`,
+            ].join(" "),
+        );
+
+        // The POST-fix contract (RED on a lane without the fan-in status fix).
+        expect(childStatusAtEnqueue).toBe("done_pending_children");
+        expect(claimedWhileParentRunning).toBe(false);
+        expect(parentMarkDoneOk).toBe(true);
+        expect(childStatusAfterParentDone).toBe("pending");
+        expect(claimedAfterParentDone).toBe(true);
+      } finally {
+        await cleanupLiveDbRow(admin, {
+          userIds: [userId],
+          strategyIds: [strategyId],
+        });
+      }
+    },
+  );
+
+  // ⭐ Phase 164.9.1 round-1 review (silent-failure-hunter HIGH-2) — NO ENQUEUE
+  // CREATES A CHILD THAT NOTHING CAN RELEASE.
+  //
+  // `mark_compute_job_done` releases a done_pending_children row only when a
+  // parent is marked done AND every listed parent is 'done'. Once the ten-arg
+  // overload (the one every enqueue_compute_job mode reaches) starts parented
+  // children in done_pending_children, three parent lists would leave a child
+  // there for good, holding its (target, kind) in-flight slot so every later
+  // enqueue for that target and kind is handed the dead row's id:
+  //   (a) a parent id with no row, (b) a parent already failed_final, and
+  //   (c) parents that are ALL already done (no mark-done is left to run).
+  // (a) and (b) must be REFUSED loudly (22023) with no row written; (c) must
+  // start the child `pending`, because nothing needs to hold it. Each leg fails
+  // if the ten-arg goes back to "any parent list means done_pending_children".
+  it.skipIf(!HAS_LIVE_DB)(
+    "P12-dead-end: a missing or failed_final parent is refused, and a child of all-done parents starts pending",
+    async () => {
+      const admin = createLiveAdminClient();
+      const ts = Date.now();
+      const userId = await createTestUser(
+        admin,
+        `g10b-dead-end-${ts}@test.sec`,
+      );
+      // One strategy per leg, so the (strategy, kind) in-flight index cannot
+      // make one leg's child the answer to another leg's enqueue.
+      const strategyMissing = await seedStrategy(admin, userId, "dead-missing");
+      const strategyFailed = await seedStrategy(admin, userId, "dead-failed");
+      const strategyDone = await seedStrategy(admin, userId, "dead-done");
+      const childKind = "reconcile_strategy";
+      const childRowCount = async (strategyId: string): Promise<number> => {
+        const { data, error } = await admin
+          .from("compute_jobs")
+          .select("id")
+          .eq("strategy_id", strategyId)
+          .eq("kind", childKind);
+        expect(error).toBeNull();
+        return (data ?? []).length;
+      };
+      try {
+        // (a) a parent id with no compute_jobs row.
+        const { data: missingId, error: missingErr } = await admin.rpc(
+          "enqueue_compute_job",
+          {
+            p_strategy_id: strategyMissing,
+            p_kind: childKind,
+            p_idempotency_key: null,
+            p_parent_job_ids: [crypto.randomUUID()],
+          } as never,
+        );
+        expect(missingId).toBeNull();
+        expect(missingErr?.code).toBe("22023");
+        expect(missingErr?.message ?? "").toContain("with no compute_jobs row");
+        expect(await childRowCount(strategyMissing)).toBe(0);
+
+        // (b) a parent that already ended failed_final.
+        const failedParent = await insertComputeJob(admin, {
+          strategy_id: strategyFailed,
+          kind: "sync_trades",
+          status: "failed_final",
+          attempts: 3,
+          max_attempts: 3,
+        });
+        const { data: failedId, error: failedErr } = await admin.rpc(
+          "enqueue_compute_job",
+          {
+            p_strategy_id: strategyFailed,
+            p_kind: childKind,
+            p_idempotency_key: null,
+            p_parent_job_ids: [failedParent],
+          } as never,
+        );
+        expect(failedId).toBeNull();
+        expect(failedErr?.code).toBe("22023");
+        expect(failedErr?.message ?? "").toContain("already ended failed_final");
+        expect(await childRowCount(strategyFailed)).toBe(0);
+
+        // (c) every parent already done: the child starts pending.
+        const doneParent = await insertComputeJob(admin, {
+          strategy_id: strategyDone,
+          kind: "sync_trades",
+          status: "done",
+          attempts: 1,
+          max_attempts: 3,
+        });
+        const { data: doneChild, error: doneErr } = await admin.rpc(
+          "enqueue_compute_job",
+          {
+            p_strategy_id: strategyDone,
+            p_kind: childKind,
+            p_idempotency_key: null,
+            p_parent_job_ids: [doneParent],
+          } as never,
+        );
+        expect(doneErr).toBeNull();
+        expect(typeof doneChild).toBe("string");
+        expect((await fetchJob(admin, doneChild as unknown as string)).status).toBe(
+          "pending",
+        );
+      } finally {
+        await cleanupLiveDbRow(admin, {
+          userIds: [userId],
+          strategyIds: [strategyMissing, strategyFailed, strategyDone],
         });
       }
     },
@@ -761,16 +1105,38 @@ describe("audit-2026-05-07 G10.B — RLS + last_error redaction", () => {
 
         // The user-facing RPC redacts and synthesises a user_message.
         // Note: get_user_compute_jobs filters by auth.uid(); we cannot
-        // exercise it through service-role here. We assert the function
-        // shape via SQL information_schema (the migration's own DO block
-        // already verified this end-to-end at apply time).
-        const { data: cols, error: colsErr } = await admin
-          .from("information_schema.columns" as never)
-          .select("column_name")
-          .eq("table_name", "compute_jobs")
-          .eq("column_name", "reclaim_count");
+        // exercise it through service-role here. We assert instead that the
+        // column the migration added is present on the relation.
+        //
+        // ⚠️ Phase 164.9 fix round (F4) — THE PGRST205 SIGNATURE, MOVED OFF A
+        // SCHEMA POSTGREST CANNOT SERVE. This read used to go through
+        // `.from("information_schema.columns")`, which PostgREST resolves as a
+        // relation literally named `public."information_schema.columns"` and
+        // answers `PGRST205 Could not find the table … in the schema cache` on
+        // EVERY host — `supabase/config.toml` exposes only `public` and
+        // `graphql_public`. That is the same unexposed-schema class as plan
+        // 08's `cron` repair, and PGRST205 is the one ROADMAP failure signature
+        // plan 03 recorded as NOT reproducible from tracked text: execution
+        // reproduced it.
+        //
+        // ⛔ The repair is NOT to widen `[api].schemas`. `public.compute_jobs`
+        // IS on the REST surface, so the column's presence is asked directly of
+        // the relation: PostgREST answers PGRST204 ("column … does not exist")
+        // when a selected column is absent, so a dropped `reclaim_count` still
+        // reddens this arm. Nothing was relaxed — the same fact is asserted
+        // through a path that can actually answer.
+        const { data: reclaimCol, error: colsErr } = await admin
+          .from("compute_jobs")
+          .select("reclaim_count")
+          .eq("strategy_id", strategyId);
         expect(colsErr).toBeNull();
-        expect((cols ?? []).length).toBe(1);
+        expect((reclaimCol ?? []).length).toBe(1);
+        expect(
+          Object.prototype.hasOwnProperty.call(
+            (reclaimCol ?? [])[0] ?? {},
+            "reclaim_count",
+          ),
+        ).toBe(true);
       } finally {
         await cleanupLiveDbRow(admin, {
           userIds: [userId],
@@ -1026,6 +1392,215 @@ describe("audit-2026-05-07 G10.B / mig 110 — sync_trades date-range DELETE", (
           .eq("strategy_id", strategyId);
         // Empty payload must NOT wipe pre-existing rows. (mig 110 P1)
         expect((rows ?? []).length).toBe(1);
+      } finally {
+        await cleanupLiveDbRow(admin, {
+          userIds: [userId],
+          strategyIds: [strategyId],
+        });
+      }
+    },
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Phase 164.9.3.2 DEFER40001: the claim-token fence raises answer ONCE
+// through PostgREST
+// ---------------------------------------------------------------------------
+//
+// PostgREST 14 re-runs a call whose transaction raises SQLSTATE 40001
+// (serialization failure) without bound. A claim-token mismatch never changes
+// on retry, so a fence that raised 40001 made a worker's RPC call loop instead
+// of failing once. Migration 20261001120000 moves the four fence raises
+// (defer_compute_job once, mark_compute_job_done twice, mark_compute_job_failed
+// once) to SQLSTATE 55006, which PostgREST answers once.
+//
+// A psql gate cannot see the loop: it lives in PostgREST's retrying
+// transaction, not in the function. Only a real call through PostgREST can
+// tell "answered once" from "looping", so each arm below calls the RPC with a
+// STALE token through the lane's PostgREST, bounded on the client.
+//
+// ⛔ The 10 s client bound is the DISCRIMINATOR. On a schema without the fix
+// the call aborts at the bound (error.code is not 55006: the abort surfaces as
+// an empty code, observed on the seam lane), so the arm FAILS
+// instead of hanging the suite. Never raise the bound to make an arm pass.
+const FENCE_CALL_BOUND_MS = 10_000;
+const FENCE_LITERAL = "preempted by watchdog reclaim";
+
+describe("164.9.3.2 DEFER40001 — fence raises answer once through PostgREST", () => {
+  async function seedRunningRow(
+    admin: SupabaseClient,
+    marker: string,
+  ): Promise<{
+    userId: string;
+    strategyId: string;
+    jobId: string;
+    tokenA: string;
+  }> {
+    const userId = await createTestUser(
+      admin,
+      `g10b-fence-${marker}-${Date.now()}@test.sec`,
+    );
+    const strategyId = await seedStrategy(admin, userId, `fence-${marker}`);
+    // Token A is the one a real claim would have written (see F2 above).
+    const tokenA = mintClaimToken();
+    const jobId = await insertComputeJob(admin, {
+      strategy_id: strategyId,
+      kind: "sync_trades",
+      status: "running",
+      attempts: 1,
+      max_attempts: 3,
+      claimed_at: new Date().toISOString(),
+      claimed_by: `test-worker-fence-${marker}`,
+      claim_token: tokenA,
+    });
+    return { userId, strategyId, jobId, tokenA };
+  }
+
+  function expectAnsweredOnceWith55006(
+    error: { code?: string; message?: string } | null,
+    elapsedMs: number,
+  ): void {
+    expect(
+      error?.code,
+      `the stale-token call must answer SQLSTATE 55006 (got code=${JSON.stringify(error?.code)} elapsed=${elapsedMs}ms); an abort at the bound means PostgREST looped on a 40001`,
+    ).toBe("55006");
+    expect(
+      error?.message ?? "",
+      "the worker's classifier keys on this literal; it must survive the errcode change",
+    ).toContain(FENCE_LITERAL);
+    expect(
+      elapsedMs,
+      "the call must answer once, well inside the client bound",
+    ).toBeLessThan(FENCE_CALL_BOUND_MS);
+  }
+
+  it.skipIf(!HAS_LIVE_DB)(
+    "DEFER-55006: defer_compute_job with a stale token answers once with 55006 and leaves the row untouched",
+    async () => {
+      const admin = createLiveAdminClient();
+      const { userId, strategyId, jobId, tokenA } = await seedRunningRow(
+        admin,
+        "defer",
+      );
+      try {
+        const t0 = Date.now();
+        const { error } = await admin
+          .rpc("defer_compute_job", {
+            p_job_id: jobId,
+            p_defer_seconds: 60,
+            p_reason: "164.9.3.2 probe",
+            p_claim_token: mintClaimToken(),
+          } as never)
+          .abortSignal(AbortSignal.timeout(10_000));
+        expectAnsweredOnceWith55006(error, Date.now() - t0);
+
+        const row = await fetchJob(admin, jobId);
+        expect(row.status).toBe("running");
+        expect(row.claim_token).toBe(tokenA);
+        expect(row.attempts).toBe(1);
+      } finally {
+        await cleanupLiveDbRow(admin, {
+          userIds: [userId],
+          strategyIds: [strategyId],
+        });
+      }
+    },
+  );
+
+  it.skipIf(!HAS_LIVE_DB)(
+    "DONE-LATE-55006: a late mark_compute_job_done on a done row answers once with 55006 and leaves the row done",
+    async () => {
+      const admin = createLiveAdminClient();
+      const { userId, strategyId, jobId, tokenA } = await seedRunningRow(
+        admin,
+        "done-late",
+      );
+      try {
+        // The P6 flow: the owning worker marks the row done with token A.
+        const first = await admin.rpc("mark_compute_job_done", {
+          p_job_id: jobId,
+          p_claim_token: tokenA,
+        } as never);
+        expect(first.error, "seeding the done row with its own token").toBeNull();
+
+        const t0 = Date.now();
+        const { error } = await admin
+          .rpc("mark_compute_job_done", {
+            p_job_id: jobId,
+            p_claim_token: mintClaimToken(),
+          } as never)
+          .abortSignal(AbortSignal.timeout(10_000));
+        expectAnsweredOnceWith55006(error, Date.now() - t0);
+
+        const row = await fetchJob(admin, jobId);
+        expect(row.status).toBe("done");
+        expect(row.claim_token).toBe(tokenA);
+      } finally {
+        await cleanupLiveDbRow(admin, {
+          userIds: [userId],
+          strategyIds: [strategyId],
+        });
+      }
+    },
+  );
+
+  it.skipIf(!HAS_LIVE_DB)(
+    "DONE-RUNNING-55006: mark_compute_job_done with a stale token on a running row answers once with 55006 and leaves the row running",
+    async () => {
+      const admin = createLiveAdminClient();
+      const { userId, strategyId, jobId, tokenA } = await seedRunningRow(
+        admin,
+        "done-running",
+      );
+      try {
+        const t0 = Date.now();
+        const { error } = await admin
+          .rpc("mark_compute_job_done", {
+            p_job_id: jobId,
+            p_claim_token: mintClaimToken(),
+          } as never)
+          .abortSignal(AbortSignal.timeout(10_000));
+        expectAnsweredOnceWith55006(error, Date.now() - t0);
+
+        const row = await fetchJob(admin, jobId);
+        expect(row.status).toBe("running");
+        expect(row.claim_token).toBe(tokenA);
+        expect(row.attempts).toBe(1);
+      } finally {
+        await cleanupLiveDbRow(admin, {
+          userIds: [userId],
+          strategyIds: [strategyId],
+        });
+      }
+    },
+  );
+
+  it.skipIf(!HAS_LIVE_DB)(
+    "FAILED-55006: mark_compute_job_failed with a stale token answers once with 55006 and leaves the row running",
+    async () => {
+      const admin = createLiveAdminClient();
+      const { userId, strategyId, jobId, tokenA } = await seedRunningRow(
+        admin,
+        "failed",
+      );
+      try {
+        const t0 = Date.now();
+        // A valid error_kind, so the call passes the input guard and reaches
+        // the claim-token fence.
+        const { error } = await admin
+          .rpc("mark_compute_job_failed", {
+            p_job_id: jobId,
+            p_error: "164.9.3.2 probe",
+            p_error_kind: "transient",
+            p_claim_token: mintClaimToken(),
+          } as never)
+          .abortSignal(AbortSignal.timeout(10_000));
+        expectAnsweredOnceWith55006(error, Date.now() - t0);
+
+        const row = await fetchJob(admin, jobId);
+        expect(row.status).toBe("running");
+        expect(row.claim_token).toBe(tokenA);
+        expect(row.attempts).toBe(1);
       } finally {
         await cleanupLiveDbRow(admin, {
           userIds: [userId],

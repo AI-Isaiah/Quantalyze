@@ -41,7 +41,35 @@ async def test_missing_service_key_returns_clean_401(monkeypatch: pytest.MonkeyP
         "from ServerErrorMiddleware (which happens if the middleware `raise`s an "
         f"HTTPException instead of returning a JSONResponse). Got {resp.status_code}."
     )
-    assert resp.json() == {"detail": "Unauthorized"}
+    # 164.1-02 / PYAPI-06 (D-10). The body used to be the same opaque
+    # `{"detail": "Unauthorized"}` a WRONG key gets, so nothing could tell "our
+    # client sent NO header" from "our client sent the WRONG key" — two faults
+    # with opposite remedies. An absent header now carries its own machine code.
+    #
+    # ⚠️ NEUTER PROOF (D-12): delete the `if not provided:` branch in
+    # `main.py` and this assertion goes RED (the body falls back to the plain
+    # mismatch shape and `resp.json()["detail"]` is the string "Unauthorized",
+    # which is not subscriptable by "code"), while
+    # `test_wrong_service_key_returns_clean_401` below stays GREEN. That
+    # asymmetry is the whole point: one branch, one test, and the wrong-key
+    # contract is untouched.
+    assert resp.json()["detail"]["code"] == "SERVICE_KEY_ABSENT", (
+        "an ABSENT X-Service-Key must be distinguishable from a WRONG one — "
+        f"got {resp.json()}"
+    )
+    assert resp.json()["detail"]["retryable"] is False
+
+    # The other half of the distinction, asserted in the SAME test so this file
+    # PROVES the two bodies differ rather than leaving it to a reader to notice
+    # two assertions in two functions happen to disagree.
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        wrong = await client.post("/cron-sync", headers={"X-Service-Key": "wrong"})
+    assert wrong.status_code == 401
+    assert wrong.json() == {"detail": "Unauthorized"}, (
+        "a WRONG key's body is the PUBLIC CONTRACT and must stay byte-identical "
+        f"— got {wrong.json()}"
+    )
+    assert resp.json() != wrong.json()
 
 
 @pytest.mark.asyncio

@@ -1,0 +1,570 @@
+import { NextRequest, NextResponse } from "next/server";
+import { createClient } from "@/lib/supabase/server";
+import { assertSameOrigin } from "@/lib/csrf";
+import { mandateAutoSaveLimiter, checkLimit } from "@/lib/ratelimit";
+import { logAuditEvent } from "@/lib/audit";
+import { NO_STORE_HEADERS } from "@/lib/api/headers";
+import { MAGNITUDE_CAPS } from "@/lib/closed-sets";
+import { OWN_CAPITAL } from "@/lib/capital-ownership";
+import { isUuid } from "@/lib/utils";
+
+/**
+ * POST / DELETE /api/portfolio-strategies/allocation
+ *
+ * Phase 150 / OWN-03 — the allocator puts their OWN capital behind one of
+ * their own-capital-marked strategies, edits that amount, or removes the
+ * position. This is the phase's MONEY WRITE; the money-path review notes live
+ * in this docblock deliberately, so the next reader does not have to
+ * reconstruct them from four migrations.
+ *
+ *   POST   body { strategy_id, allocated_amount }  → 200 { ok, allocated_amount }
+ *   DELETE body { strategy_id }                    → 200 { ok }
+ *
+ * NO `portfolio_id` crosses the trust boundary (rev-4 / D-03-B). A
+ * client-supplied container id was never trustworthy input (T-150-40): the
+ * route derives the caller's real book from the session and provisions it on
+ * absence, so cross-tenant container reach is impossible by construction
+ * rather than by a pre-check that a future edit could drop.
+ *
+ * ── Money-path review notes ───────────────────────────────────────────────
+ *
+ * D-14 — this reuses the EXISTING `portfolio_strategies` write path and its
+ * existing RLS. No new table, no new policy.
+ *
+ * DUPLICATE-ADD (D-13 / SC 4) is structurally impossible, not a UI
+ * convention: `portfolio_strategies` has `PRIMARY KEY (portfolio_id,
+ * strategy_id)` (20260405061911_initial_schema.sql:138-143), so the upsert
+ * below CANNOT mint a second row for the same pair. A second allocate for the
+ * same pair is an EDIT. This survives any future surface that forgets the
+ * rule.
+ *
+ * RLS — `portfolio_strategies_owner` is `FOR ALL USING (portfolio_id IN
+ * (SELECT id FROM portfolios WHERE user_id = auth.uid()))`
+ * (20260405061912_rls_policies.sql:67-69). It declares no explicit
+ * `WITH CHECK`; under `FOR ALL` Postgres reuses `USING` as the check, so the
+ * INSERT/UPSERT arm IS covered. Noted, deliberately NOT "fixed".
+ *
+ * TRIGGER — `trg_portfolio_strategies_own_capital_only` is `BEFORE INSERT` on
+ * `portfolio_strategies` (Plan 150-01). An upsert's ON CONFLICT path still
+ * enters through the INSERT arm, so even an EDIT re-tests the mark. That is
+ * deliberate: a strategy flipped to `team_review` between two allocates must
+ * not be editable. The 409 pre-check below is UX; the trigger is the gate.
+ *
+ * DEFENCES (the /portfolio-strategies/alias six-defence stack):
+ *   1. assertSameOrigin (CSRF).
+ *   2. Auth: 401 if not logged in.
+ *   3. Input validation BEFORE the limiter, so a rejected 400 does not burn
+ *      one of the caller's own tokens (B15).
+ *   4. mandateAutoSaveLimiter (30/min per user).
+ *   5. Explicit `strategies.user_id` ownership pre-check → clean 404.
+ *   6. Count-checked write: `.select()` on the upsert/delete, so zero rows is
+ *      a deterministic status, never a silent-success oracle (G8.B.6).
+ *
+ * 161-10 / WIZERR-07 — EVERY ERROR ARM ALSO CARRIES A MACHINE `code`, written
+ * FIRST in its object literal. Purely ADDITIVE: not one `error` sentence,
+ * status or header changed, so `AllocateDialog`'s two incumbent reads (429 →
+ * RATE_LIMITED, and the 409 `not_allocatable` body) keep answering exactly as
+ * they did — pinned per arm in `route.test.ts`.
+ *
+ * ⛔ THE CODES GO THROUGH `json(...)`, NEVER AROUND IT. Every arm below is the
+ * helper's first argument; there is no second response path beside it. A
+ * parallel raw `NextResponse.json(...)` here would be the divergence shape this
+ * phase keeps closing — the helper is what stamps NO_STORE_HEADERS, so an arm
+ * that bypassed it would lose the header silently while looking correct.
+ *
+ * ⭐ 161-REVIEW / CR-01 — THE NINE `internal error` 500s SPLIT 3 / 6 ON ONE
+ * QUESTION: had a data-modifying statement already been SENT when this arm
+ * returned?
+ *
+ *   · `DASHBOARD_WRITE_FAILED` (3) — POST's strategy lookup, POST's
+ *     `resolveRealPortfolio` fault, DELETE's `resolveRealPortfolio` fault. All
+ *     three fail on a SELECT, so "Nothing was saved" is established by the
+ *     control flow and `clear_and_retry` starts from the state that sentence
+ *     describes.
+ *   · `DASHBOARD_WRITE_INDETERMINATE` (6) — the three container-provisioning
+ *     arms (an INSERT into `portfolios` was sent), the upsert erroring, the
+ *     upsert returning zero rows, and the DELETE erroring.
+ *
+ * TWO INDEPENDENT REASONS THE SECOND SET CANNOT CLAIM A ZERO WRITE, both
+ * readable in this file. (1) `supabase-js` reports a PostgREST rejection
+ * (rolled back) and a TRANSPORT failure (may have committed, answer lost)
+ * through the same `{ data, error }` shape, and no arm here discriminates them.
+ * (2) The zero-rows arm's own comment says "RLS ate the row" — which means the
+ * upsert SUCCEEDED and only the returning row was suppressed. This is the MONEY
+ * WRITE; telling an allocator "Nothing was saved" about a position that may be
+ * live, and offering a one-click Retry on top of it, is the defect the split
+ * removes. See the "'NOTHING WAS SAVED' IS VERIFIED, NOT ASSERTED" rule at the
+ * `CSV_UPSTREAM_FAIL` entry in `wizardErrors.ts`, and the
+ * `DASHBOARD_WRITE_FAILED` / `DASHBOARD_WRITE_INDETERMINATE` union members.
+ */
+
+/**
+ * ⛔ `current_weight` IS NEVER WRITTEN HERE — 150-RESEARCH § Schema Findings 2.
+ *
+ * The column has NO writer anywhere in the repo (src, supabase and
+ * analytics-service were each censused). Two analytics consumers —
+ * `analytics-service/routers/portfolio.py:594-597` and
+ * `routers/match.py:786-792` — substitute `1.0` for a NULL weight and then
+ * renormalize. So writing a real weight on ONE row while its siblings stay
+ * NULL does not "improve" the book: it silently distorts
+ * `portfolio_returns_series` and match scoring, giving the correctly-weighted
+ * strategy ~19% and each unweighted sibling ~81% of the remainder.
+ *
+ * The Holdings Weight column is RENDER-DERIVED from `allocated_amount`
+ * (D-12-B, `strategies-row-adapter.ts`) precisely so this column needs no
+ * writer before Phase 151. Adding it to the payload below is a money-math
+ * regression, not a feature.
+ */
+
+interface AllocationBody {
+  strategy_id?: unknown;
+  allocated_amount?: unknown;
+}
+
+function json(body: unknown, status: number, extraHeaders?: HeadersInit) {
+  return NextResponse.json(body, {
+    status,
+    headers: extraHeaders
+      ? { ...NO_STORE_HEADERS, ...(extraHeaders as Record<string, string>) }
+      : NO_STORE_HEADERS,
+  });
+}
+
+/**
+ * Parse the ticket amount.
+ *
+ * The parse itself is `MigrationWizard.tsx:65-69`'s (`Number()` +
+ * `Number.isFinite` + `> 0`) with the upper bound that site is MISSING added.
+ *
+ * The bound is `MAGNITUDE_CAPS.MAX_TICKET_SIZE_USD` ($1e9): an allocation
+ * amount is semantically a TICKET, and this keeps the approved "$1B sanity
+ * cap" dialog copy literally true. It is NOT `isValidDollar` — that validator
+ * carries the AUM/capacity convention ($1e12, and it accepts 0), which is the
+ * wrong shape for a money write that must reject a zero ticket.
+ *
+ * `typeof` is narrowed to number|string first, because `Number(true)`,
+ * `Number(null)` and `Number([])` are all finite and would sail through an
+ * unguarded `Number()`.
+ */
+function parseAmount(raw: unknown): number | null {
+  let n: number;
+  if (typeof raw === "number") {
+    n = raw;
+  } else if (typeof raw === "string" && raw.trim().length > 0) {
+    n = Number(raw);
+  } else {
+    return null;
+  }
+  if (!Number.isFinite(n)) return null;
+  if (n <= 0) return null;
+  if (n > MAGNITUDE_CAPS.MAX_TICKET_SIZE_USD) return null;
+  return n;
+}
+
+/**
+ * Bind + log the parse failure (the alias route's G8.B.3 fix): a bare
+ * `catch {}` hides parse failures, oversized bodies and AbortErrors alike.
+ *
+ * ⚠️ Only the LOGGING is extracted. The `await req.json()` itself stays INLINE
+ * in each verb, deliberately: `limiter-ordering.test.ts:279-296` (the B15
+ * helper-extraction guard) verifies validate-then-limit by locating a body
+ * marker and `checkLimit` in the SAME method segment. Hoisting the parse into
+ * a helper takes this route's ordering check dark without failing anything
+ * else — which is exactly the regression that guard exists to catch.
+ */
+function logBodyParseFailure(err: unknown, userId: string): void {
+  console.error("[api/portfolio-strategies/allocation] body parse failed:", {
+    message: err instanceof Error ? err.message : String(err),
+    userId,
+  });
+}
+
+export async function POST(req: NextRequest) {
+  const csrfError = assertSameOrigin(req);
+  if (csrfError) return csrfError;
+
+  const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user)
+    return json({ code: "DASHBOARD_SIGNED_OUT", error: "unauthorized" }, 401);
+
+  let body: AllocationBody;
+  try {
+    body = (await req.json()) as AllocationBody;
+  } catch (err) {
+    logBodyParseFailure(err, user.id);
+    return json(
+      { code: "DASHBOARD_REQUEST_INVALID", error: "invalid json" },
+      400,
+    );
+  }
+
+  const strategyId =
+    typeof body.strategy_id === "string" ? body.strategy_id.trim() : "";
+  if (!isUuid(strategyId)) {
+    return json(
+      { code: "DASHBOARD_REQUEST_INVALID", error: "strategy_id is required" },
+      400,
+    );
+  }
+
+  const allocatedAmount = parseAmount(body.allocated_amount);
+  if (allocatedAmount === null) {
+    return json(
+      {
+        code: "DASHBOARD_REQUEST_INVALID",
+        error: `allocated_amount must be a positive number no greater than ${MAGNITUDE_CAPS.MAX_TICKET_SIZE_USD}`,
+      },
+      400,
+    );
+  }
+
+  // Consumed AFTER validation (B15) — an invalid request must not burn one of
+  // the caller's own tokens.
+  const rl = await checkLimit(mandateAutoSaveLimiter, `allocation:${user.id}`);
+  if (!rl.success) {
+    return json({ code: "RATE_LIMITED", error: "Too many requests" }, 429, {
+      "Retry-After": String(rl.retryAfter),
+    });
+  }
+
+  // ── Strategy pre-checks run FIRST (rev-4 verify W-1) ────────────────────
+  // A request that will 404 or 409 must not mint a container. Ordering is the
+  // whole mitigation here: move provisioning above this block and a probe for
+  // someone else's strategy id starts creating portfolios.
+  const { data: strategy, error: stratErr } = await supabase
+    .from("strategies")
+    .select("id, capital_ownership")
+    .eq("id", strategyId)
+    .eq("user_id", user.id)
+    .maybeSingle();
+
+  if (stratErr) {
+    console.error(
+      "[api/portfolio-strategies/allocation] strategy lookup failed:",
+      stratErr.message,
+    );
+    return json(
+      { code: "DASHBOARD_WRITE_FAILED", error: "internal error" },
+      500,
+    );
+  }
+  if (!strategy)
+    return json(
+      { code: "DASHBOARD_ROW_STALE", error: "strategy not found" },
+      404,
+    );
+
+  // UX pre-check for a clean, actionable error. The BEFORE INSERT trigger
+  // (Plan 150-01) is the ENFORCEMENT — this arm exists so the client renders
+  // "mark it own-capital first" instead of a raw 23514.
+  if (strategy.capital_ownership !== OWN_CAPITAL) {
+    return json(
+      { code: "ALLOCATION_NOT_ALLOCATABLE", error: "not_allocatable" },
+      409,
+    );
+  }
+
+  // ── Resolve-or-provision the caller's real book (rev-4, D-03-B) ─────────
+  // Provisioning is CONTAINER-ONLY. The position write below still requires
+  // the explicit Allocate action and an amount, so SC 3 (no auto-add) is
+  // untouched: minting an empty book adds no strategy to it.
+  const resolved = await resolveRealPortfolio(supabase, user.id);
+  if (resolved.kind === "error")
+    return json(
+      { code: "DASHBOARD_WRITE_FAILED", error: "internal error" },
+      500,
+    );
+
+  let portfolioId = resolved.id;
+  let provisioned = false;
+
+  if (portfolioId === null) {
+    // The repo's ONLY `is_test = false` creation path. `CreatePortfolioForm`
+    // deliberately inserts `is_test: true` (its docblock at :11-32 says a real
+    // -book creator MUST set `is_test: false` explicitly and handle 23505
+    // deliberately) and nothing else creates a real portfolio — so without
+    // this, every allocator's book is portfolio-less and SC 2 is unreachable.
+    // `name` follows migration 023's real-book seed convention.
+    //
+    // @audit-skip: this mint IS audited, on the SAME request's
+    // `allocation.update` event — `metadata.provisioned: true` records it,
+    // anchored on the very portfolio this insert creates. A separate event
+    // would double-count one user action (there is no way to reach this line
+    // except by allocating). The emission lives past the gate's 60-line
+    // window only because the 23505 race arm sits between the two.
+    const { data: created, error: insErr } = await supabase
+      .from("portfolios")
+      .insert({ user_id: user.id, name: "Active Allocation", is_test: false })
+      .select("id")
+      .single();
+
+    // ⛔ 161-REVIEW / CR-01 — FROM HERE DOWN THE 500s ARE INDETERMINATE. The
+    // INSERT above has been SENT. The money write itself (the upsert below) has
+    // NOT been reached on any of the three arms in this block, so it is
+    // tempting to answer "Nothing was saved" — but that would be a judgement
+    // that an orphaned container does not count, and the whole point of the
+    // 161-CR-01 split is that we stop making judgements about statements we did
+    // not get an answer to. The membership rule is mechanical: a data-modifying
+    // statement was sent ⇒ INDETERMINATE.
+    if (insErr) {
+      if (insErr.code === "23505") {
+        // `portfolios_one_real_per_user` (20260409202756) — a concurrent
+        // first-allocation won the race. Re-select and proceed; that is the
+        // CreatePortfolioForm docblock's own prescription.
+        const race = await resolveRealPortfolio(supabase, user.id);
+        if (race.kind === "error" || race.id === null) {
+          // The row vanished between insert and re-select, or the re-select
+          // hit an RLS-shaped miss. NEVER fall through to the position write
+          // with an undefined portfolio_id (rev-4 verify W-2).
+          console.error(
+            "[api/portfolio-strategies/allocation] 23505 race re-select found no real portfolio:",
+            { userId: user.id },
+          );
+          return json(
+            { code: "DASHBOARD_WRITE_INDETERMINATE", error: "internal error" },
+            500,
+          );
+        }
+        portfolioId = race.id;
+      } else {
+        console.error(
+          "[api/portfolio-strategies/allocation] real-portfolio provisioning failed:",
+          insErr.message,
+        );
+        return json(
+          { code: "DASHBOARD_WRITE_INDETERMINATE", error: "internal error" },
+          500,
+        );
+      }
+    } else if (!created) {
+      console.error(
+        "[api/portfolio-strategies/allocation] provisioning returned no row",
+      );
+      return json(
+        { code: "DASHBOARD_WRITE_INDETERMINATE", error: "internal error" },
+        500,
+      );
+    } else {
+      portfolioId = created.id;
+      provisioned = true;
+    }
+  }
+
+  // ── The write ───────────────────────────────────────────────────────────
+  // Exactly three columns. See the current_weight block above before adding a
+  // fourth.
+  const { data: written, error: writeErr } = await supabase
+    .from("portfolio_strategies")
+    .upsert(
+      {
+        portfolio_id: portfolioId,
+        strategy_id: strategyId,
+        allocated_amount: allocatedAmount,
+      },
+      { onConflict: "portfolio_id,strategy_id" },
+    )
+    .select("strategy_id");
+
+  if (writeErr) {
+    // 151 review E4 — THE GATE FIRING IS NOT A SERVER FAULT.
+    //
+    // The docblock above says it plainly: the 409 pre-check at :207 is UX, the
+    // D-03-A BEFORE INSERT trigger is the gate. So when the gate actually fires
+    // — the mark flipped between that pre-check and this insert, e.g. from
+    // MarkOwnershipDialog in another tab — the ONLY refusal on this route with a
+    // one-screen remedy was being reported as `internal error` / 500: a claim
+    // that OUR software broke, for a request the caller can fix in one action.
+    // 23514 is `check_violation`, and on `portfolio_strategies` there is exactly
+    // one: that trigger. Answer it with the SAME code the pre-check emits, so
+    // the client has one thing to decode rather than two.
+    //
+    // The trigger's message carries an internal strategy UUID, so it stays in
+    // the log and never rides the response — the code is the contract.
+    if (writeErr.code === "23514") {
+      console.warn(
+        "[api/portfolio-strategies/allocation] mark flipped between pre-check and insert:",
+        { userId: user.id, strategyId },
+      );
+      return json(
+        { code: "ALLOCATION_NOT_ALLOCATABLE", error: "not_allocatable" },
+        409,
+      );
+    }
+    console.error(
+      "[api/portfolio-strategies/allocation] upsert failed:",
+      writeErr.message,
+    );
+    // ⛔ 161-REVIEW / CR-01 — INDETERMINATE, and this is THE MONEY WRITE. The
+    // upsert was sent; `supabase-js` reports a PostgREST rejection and a
+    // transport failure through one `{ data, error }` shape and this arm does
+    // not discriminate them. "Nothing was saved" about a possibly-live
+    // allocation is the false sentence WIZERR exists to remove.
+    return json(
+      { code: "DASHBOARD_WRITE_INDETERMINATE", error: "internal error" },
+      500,
+    );
+  }
+  if (!written || written.length === 0) {
+    // An upsert that returns nothing is an anomaly (RLS ate the row, or the
+    // conflict target drifted) — not a "not found". Fail loud.
+    //
+    // ⛔ 161-REVIEW / CR-01 — "RLS ate the row" MEANS THE WRITE LANDED and only
+    // the returning row was suppressed. So this arm is not merely unable to
+    // prove a zero-write; one of the two causes it names is an arm where the
+    // allocation IS live. It answers `DASHBOARD_WRITE_INDETERMINATE`, whose
+    // copy claims persistence in neither direction and sends the user to
+    // re-read current state instead of offering a blind retry.
+    console.error(
+      "[api/portfolio-strategies/allocation] upsert returned zero rows:",
+      { portfolioId, strategyId },
+    );
+    return json(
+      { code: "DASHBOARD_WRITE_INDETERMINATE", error: "internal error" },
+      500,
+    );
+  }
+
+  logAuditEvent(supabase, {
+    action: "allocation.update",
+    entity_type: "allocation",
+    // entity_id pins to the portfolio (the ownership anchor) — the alias
+    // route's precedent; portfolio_strategies has no standalone UUID.
+    entity_id: portfolioId,
+    metadata: {
+      strategy_id: strategyId,
+      allocated_amount: allocatedAmount,
+      ...(provisioned ? { provisioned: true } : {}),
+    },
+  });
+
+  return json({ ok: true, allocated_amount: allocatedAmount }, 200);
+}
+
+export async function DELETE(req: NextRequest) {
+  const csrfError = assertSameOrigin(req);
+  if (csrfError) return csrfError;
+
+  const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user)
+    return json({ code: "DASHBOARD_SIGNED_OUT", error: "unauthorized" }, 401);
+
+  let body: AllocationBody;
+  try {
+    body = (await req.json()) as AllocationBody;
+  } catch (err) {
+    logBodyParseFailure(err, user.id);
+    return json(
+      { code: "DASHBOARD_REQUEST_INVALID", error: "invalid json" },
+      400,
+    );
+  }
+
+  const strategyId =
+    typeof body.strategy_id === "string" ? body.strategy_id.trim() : "";
+  if (!isUuid(strategyId)) {
+    return json(
+      { code: "DASHBOARD_REQUEST_INVALID", error: "strategy_id is required" },
+      400,
+    );
+  }
+
+  const rl = await checkLimit(mandateAutoSaveLimiter, `allocation:${user.id}`);
+  if (!rl.success) {
+    return json({ code: "RATE_LIMITED", error: "Too many requests" }, 429, {
+      "Retry-After": String(rl.retryAfter),
+    });
+  }
+
+  // DELETE NEVER PROVISIONS. A removal that mints a container would be absurd,
+  // and it would burn the caller's one-real-portfolio slot on a no-op.
+  const resolved = await resolveRealPortfolio(supabase, user.id);
+  if (resolved.kind === "error")
+    return json(
+      { code: "DASHBOARD_WRITE_FAILED", error: "internal error" },
+      500,
+    );
+  if (resolved.id === null)
+    return json(
+      { code: "DASHBOARD_ROW_STALE", error: "portfolio not found" },
+      404,
+    );
+
+  const { data: removed, error: delErr } = await supabase
+    .from("portfolio_strategies")
+    .delete()
+    .eq("portfolio_id", resolved.id)
+    .eq("strategy_id", strategyId)
+    .select("strategy_id");
+
+  if (delErr) {
+    console.error(
+      "[api/portfolio-strategies/allocation] delete failed:",
+      delErr.message,
+    );
+    // ⛔ 161-REVIEW / CR-01 — INDETERMINATE. The DELETE was sent, and a removal
+    // whose outcome we cannot read is exactly the case where "Nothing was
+    // saved" is worst: it tells the user their position is still there.
+    return json(
+      { code: "DASHBOARD_WRITE_INDETERMINATE", error: "internal error" },
+      500,
+    );
+  }
+  if (!removed || removed.length === 0) {
+    // Count-checked (G8.B.6): a delete that touched nothing is a 404, not a
+    // silent `{ok:true}`.
+    return json(
+      { code: "DASHBOARD_ROW_STALE", error: "investment row not found" },
+      404,
+    );
+  }
+
+  logAuditEvent(supabase, {
+    action: "allocation.update",
+    entity_type: "allocation",
+    entity_id: resolved.id,
+    metadata: { strategy_id: strategyId, removed: true },
+  });
+
+  return json({ ok: true }, 200);
+}
+
+/**
+ * The caller's REAL book, resolved server-side from the session.
+ *
+ * Mirrors `getRealPortfolio` (queries.ts:1839-1858) filter-for-filter:
+ * `.eq("user_id", …).eq("is_test", false).maybeSingle()`. The `is_test = false`
+ * conjunct is ledger-pinned — without it a SCENARIO portfolio could be adopted
+ * as the allocator's real book and real money would land in a what-if
+ * container. Migration 023's partial unique index guarantees at most one row.
+ *
+ * Inlined rather than imported because `getRealPortfolio` is `React.cache()`-
+ * wrapped and returns the whole `Portfolio`; a route only needs the id, and
+ * caching a pre-provisioning miss inside the same request would defeat the
+ * 23505 re-select.
+ */
+async function resolveRealPortfolio(
+  supabase: Awaited<ReturnType<typeof createClient>>,
+  userId: string,
+): Promise<{ kind: "ok"; id: string | null } | { kind: "error" }> {
+  const { data, error } = await supabase
+    .from("portfolios")
+    .select("id")
+    .eq("user_id", userId)
+    .eq("is_test", false)
+    .maybeSingle();
+
+  if (error) {
+    console.error(
+      "[api/portfolio-strategies/allocation] real-portfolio lookup failed:",
+      error.message,
+    );
+    return { kind: "error" };
+  }
+  return { kind: "ok", id: data?.id ?? null };
+}

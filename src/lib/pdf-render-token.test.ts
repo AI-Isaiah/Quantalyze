@@ -18,6 +18,29 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { signPdfRenderToken, verifyPdfRenderToken } from "./pdf-render-token";
 
+/**
+ * The `exp` segment of a signed token, or a THROW naming the missing anchor.
+ *
+ * 164.8.2 — this was `token.slice(0, token.indexOf("."))` inline. On a token
+ * carrying no ".", `indexOf` returns -1 and `slice(0, -1)` is the token minus
+ * its LAST CHARACTER, not the exp. The one caller feeds that value into a
+ * NEGATIVE assertion (`…).toBe(false)`), which stays GREEN over the garbage —
+ * so "valid exp, wrong sig" would silently degrade into "malformed exp, wrong
+ * sig" and stop testing the thing it is named for. An absent anchor means the
+ * token is not the shape this file assumes; that is a FINDING, not a value to
+ * substitute, so there is deliberately no default here.
+ */
+function expSegment(token: string): string {
+  const dot = token.indexOf(".");
+  if (dot < 0) {
+    throw new Error(
+      `expSegment: token carries no "." separator (length ${token.length}), ` +
+        "so its exp segment cannot be read",
+    );
+  }
+  return token.slice(0, dot);
+}
+
 describe("verifyPdfRenderToken", () => {
   const originalSecret = process.env.DEMO_PDF_SECRET;
 
@@ -71,7 +94,7 @@ describe("verifyPdfRenderToken", () => {
 
   it("rejects a tampered signature (valid exp, wrong sig)", () => {
     const token = signPdfRenderToken("portfolio-1");
-    const exp = token.slice(0, token.indexOf("."));
+    const exp = expSegment(token);
     expect(verifyPdfRenderToken("portfolio-1", `${exp}.${"0".repeat(64)}`)).toBe(
       false,
     );
@@ -123,5 +146,35 @@ describe("verifyPdfRenderToken", () => {
       verifyPdfRenderToken("portfolio-1", `${exp}.ab`),
     ).not.toThrow();
     expect(verifyPdfRenderToken("portfolio-1", `${exp}.ab`)).toBe(false);
+  });
+
+  it("CALIBRATION (164.8.2) — expSegment BITES on a dotless token, and the slice form it replaced was measurably vacuous there", () => {
+    const token = signPdfRenderToken("portfolio-1");
+
+    // The mutant: the same token with its "." anchor removed.
+    const dotless = token.replace(".", "");
+    expect(dotless, "the mutation did not apply").not.toBe(token);
+    expect(dotless.includes("."), "the anchor is still present").toBe(false);
+
+    // MEASURED VACUITY of the pre-164.8.2 form. `indexOf` misses, `slice(0, -1)`
+    // hands back nearly the whole token, and the NEGATIVE assertion it fed is
+    // still GREEN — passing for a reason ("this exp is not a number") entirely
+    // unrelated to the "valid exp, wrong sig" it claims to pin.
+    const oldForm = dotless.slice(0, dotless.indexOf("."));
+    expect(oldForm).toBe(dotless.slice(0, -1));
+    expect(oldForm).not.toBe(expSegment(token));
+    expect(
+      verifyPdfRenderToken("portfolio-1", `${oldForm}.${"0".repeat(64)}`),
+      "the old form's assertion should have been GREEN over the degenerate exp — " +
+        "that green is the vacuity this fix removes",
+    ).toBe(false);
+
+    // The new form makes the same subject a FINDING instead.
+    expect(() => expSegment(dotless)).toThrow(/no "\." separator/);
+
+    // CONTROL — over the real subject it still yields the real, live exp.
+    const now = Math.floor(Date.now() / 1000);
+    expect(Number(expSegment(token))).toBeGreaterThan(now);
+    expect(verifyPdfRenderToken("portfolio-1", token)).toBe(true);
   });
 });

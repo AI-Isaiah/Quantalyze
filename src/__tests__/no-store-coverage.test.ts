@@ -58,6 +58,21 @@ const API_DIR = path.resolve(__dirname, "../app/api");
  * portfolio-optimizer + trades/upload were fixed in PR #425; the rest in the
  * no-store class-closure batch; me/audit-log/export was normalized from a
  * bare `"Cache-Control": "no-store"` to the canonical const.
+ *
+ * Phase 150 (OWN-03/OWN-05) added the last THREE entries in one edit. All three
+ * are authenticated, owner-scoped write routes that ECHO a tenant value back in
+ * the success body, which is what puts them in scope rather than in the
+ * write-ack EXEMPT class above: `{ok:true, allocated_amount}`,
+ * `{ok:true, mark}` and `{ok:true, name}` — and the ownership route's 409 body
+ * additionally carries the caller's LIVE `allocated_amount`, a figure the caller
+ * never sent. The in-list sibling `portfolio-strategies/alias/route.ts` returns
+ * `{ok:true, alias}` and is the precedent this classification follows.
+ * (Recorded because 150-05 and 150-07 both noted a target count of 34 → 35:
+ * those notes enumerated the two routes their own authors were building and did
+ * not consider `strategies/[id]/name`, which 150-04 shipped alongside the
+ * ownership route. 36 is the complete set. Each of the three ALSO pins
+ * `Cache-Control: private, no-store` per-arm in its own route.test.ts; this
+ * gate is the cross-route tripwire, not the only cover.)
  */
 const MUST_STAMP_NO_STORE: readonly string[] = [
   "portfolio-optimizer/route.ts",
@@ -93,13 +108,31 @@ const MUST_STAMP_NO_STORE: readonly string[] = [
   "portfolio-strategies/alias/route.ts",
   "portfolio-documents/route.ts",
   "me/audit-log/export/route.ts",
+  // Phase 150 — see the header note.
+  "portfolio-strategies/allocation/route.ts",
+  "strategies/[id]/ownership/route.ts",
+  "strategies/[id]/name/route.ts",
+  // Phase 154 (WIZCONT-01) — GET /api/strategies/wizard-draft returns the
+  // caller's own wizard DRAFT row (name, description, AUM, capacity, linked
+  // api_key_id). That is squarely the tenant-data class this gate locks — the
+  // sibling `strategies/draft/[id]/route.ts` is the precedent — so the route
+  // joins the allowlist at creation rather than waiting for the next audit
+  // cycle. Its own route.test.ts additionally pins `private, no-store` on the
+  // 200-with-draft, the 200-null and the 500 arms.
+  "strategies/wizard-draft/route.ts",
+  // Phase 167.2.1 D-01 — GET /api/keys/[id]/memberships returns the names and
+  // statuses of the composites the caller's own key belongs to, read on the
+  // service role for the key card's Delete confirm. Tenant data, so it joins
+  // at creation, as the Phase 154 entry above did.
+  "keys/[id]/memberships/route.ts",
 ];
 
 describe("no-store coverage: audited tenant-data routes stamp NO_STORE_HEADERS", () => {
   // Vacuity guard: a typo that drops entries from the allowlist must fail,
   // not silently shrink the gate.
-  it("locks the full audited tenant-data surface (33 routes)", () => {
-    expect(MUST_STAMP_NO_STORE.length).toBe(33);
+  // Lineage 2026-09-25 (Phase 167.2.1 D-01): 37 → 38, the membership route.
+  it("locks the full audited tenant-data surface (38 routes)", () => {
+    expect(MUST_STAMP_NO_STORE.length).toBe(38);
     expect(new Set(MUST_STAMP_NO_STORE).size).toBe(MUST_STAMP_NO_STORE.length);
   });
 

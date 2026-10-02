@@ -88,7 +88,7 @@ def _schema_cache_miss() -> APIError:
 
 def _serialization_failure() -> APIError:
     """A DIFFERENT APIError — the arm under test must not swallow this one."""
-    return APIError({"code": "40001", "message": "preempted by watchdog reclaim"})
+    return APIError({"code": "55006", "message": "preempted by watchdog reclaim"})
 
 
 class _Harness(NamedTuple):
@@ -242,7 +242,7 @@ async def test_non_pgrst204_api_errors_still_propagate(
 ) -> None:
     """The arm is narrow. Swallowing every APIError would hide real failures.
 
-    A 40001 serialization failure on the terminal write is a genuine problem: the
+    A fence preemption (SQLSTATE 55006) on the terminal write is a genuine problem: the
     caller's warning-then-continue is the correct response, and it only happens
     if the exception leaves _mark_unrecoverable unchanged.
     """

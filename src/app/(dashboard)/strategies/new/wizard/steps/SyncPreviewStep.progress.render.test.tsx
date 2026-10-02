@@ -464,10 +464,14 @@ describe("[95-04] SyncPreviewStep — progress surface (PROG-01/02/03)", () => {
   // F-3 — during a `failed_retry` backoff the queue auto-retries; the manual
   // Retry is SUPPRESSED (a re-POST would insert a duplicate stitch — the
   // idempotency index excludes failed_retry) and the copy relabels honestly.
+  //
+  // 2026-09-24 — a LIVE channel reporting failed_retry is the server saying a
+  // job is still in flight, so no banner renders at all (the Retry is
+  // suppressed more strongly than before). The relabel still applies when the
+  // banner comes up because the channel went dark after reporting failed_retry,
+  // which the second half of this test drives.
   it("suppresses the manual Retry during a failed_retry backoff", async () => {
     installWaitingMock("computing");
-    // failed_retry is never `stalled` (route truth) → the banner fires via the
-    // SF-1 backstop; the channel surfaces jobStatus so the client can relabel.
     progressOutcome = {
       kind: "json",
       body: {
@@ -477,6 +481,22 @@ describe("[95-04] SyncPreviewStep — progress surface (PROG-01/02/03)", () => {
       },
     };
     await renderWaiting();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(16 * 60_000);
+    });
+
+    // Live channel, job in flight: no banner, no Retry, however long.
+    expect(
+      screen.queryByTestId("wizard-sync-interrupted"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /retry sync/i }),
+    ).not.toBeInTheDocument();
+
+    // The channel goes dark. The last known status is still failed_retry, and
+    // with no in-flight evidence the backstop comes up after its patience.
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    progressOutcome = { kind: "reject" };
     await act(async () => {
       await vi.advanceTimersByTimeAsync(16 * 60_000);
     });
@@ -499,14 +519,17 @@ describe("[95-04] SyncPreviewStep — progress surface (PROG-01/02/03)", () => {
         (c[1] as RequestInit | undefined)?.method === "POST",
     );
     expect(posts).toHaveLength(1);
+    warnSpy.mockRestore();
   });
 
   // F-2 — a 2xx retry drops the banner, KEEPS the live per-key panel, and does
   // not immediately re-fire the backstop on the deduped `computing` status.
   it("clears the backstop on retry without wiping the panel", async () => {
     installWaitingMock("computing");
-    // Healthy channel: stalled:false + populated members → the banner fires via
-    // the SF-1 backstop (status unchanged), and the panel is populated.
+    // stalled:false + populated members, so the panel is populated. The
+    // channel then goes dark (2026-09-24: while it says a job is running the
+    // backstop does not fire at all), so the banner fires via the SF-1
+    // backstop (status unchanged, no in-flight evidence).
     progressOutcome = {
       kind: "json",
       body: { jobStatus: "running", stalled: false, memberProgress: MEMBERS_3 },
@@ -516,6 +539,8 @@ describe("[95-04] SyncPreviewStep — progress surface (PROG-01/02/03)", () => {
     expect(
       screen.queryByTestId("wizard-sync-interrupted"),
     ).not.toBeInTheDocument();
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    progressOutcome = { kind: "reject" };
 
     // Past 15min → the backstop fires.
     await act(async () => {
@@ -559,6 +584,7 @@ describe("[95-04] SyncPreviewStep — progress surface (PROG-01/02/03)", () => {
     expect(
       screen.queryByTestId("wizard-sync-interrupted"),
     ).not.toBeInTheDocument();
+    warnSpy.mockRestore();
   });
 
   // F-1 — a stuck composite at >=15min shows EXACTLY the amber recoverable
@@ -686,9 +712,24 @@ describe("[95-04] SyncPreviewStep — progress surface (PROG-01/02/03)", () => {
     warnSpy.mockRestore();
   });
 
-  // SINGLE-KEY NEUTRALITY — composite:false kickoff issues NO sync-progress
-  // fetch and renders no panel (no new traffic on the single-key path).
-  it("issues no sync-progress fetch and renders no panel on a single-key kickoff", async () => {
+  // SINGLE-KEY — PREMISE CHANGED BY 154-08 (TWIN-5), NOT WEAKENED.
+  //
+  // ⚠️ This case used to assert `progressFetches).toHaveLength(0)` under the
+  // title "SINGLE-KEY NEUTRALITY … no new traffic on the single-key path". It
+  // was pinning the third of the three `isComposite` gates that, together, left
+  // a single-key user with ZERO exits from `waiting_for_complete` — the M1 half
+  // of the 2026-08-04 stall (154-INVESTIGATION.md). 154-04 widened
+  // `sync-progress/route.ts` so a single-key job reports its status; this
+  // client gate is why that widened answer reached no screen. "No new traffic"
+  // was the cost being paid, and what it bought was a screen the user could not
+  // leave.
+  //
+  // What is UNCHANGED and asserted here as the other half: the per-key panel
+  // stays composite-only. A single-key strategy has no members, the route
+  // returns `memberProgress: []` for every non-stitch job, and the render gate
+  // is still `isComposite && …` — so widening the FETCH did not widen the
+  // PANEL, and a rogue body carrying member rows cannot paint one.
+  it("issues the sync-progress fetch on a single-key kickoff, surfaces the interrupted state, and still renders no per-key panel", async () => {
     kickoffComposite = false;
     installWaitingMock("computing");
     progressOutcome = {
@@ -703,8 +744,27 @@ describe("[95-04] SyncPreviewStep — progress surface (PROG-01/02/03)", () => {
     const progressFetches = fetchSpy.mock.calls.filter((c) =>
       String(c[0]).includes("/sync-progress"),
     );
-    expect(progressFetches).toHaveLength(0);
+    expect(
+      progressFetches.length,
+      "The single-key arm still never asks for the in-flight datum. Widening " +
+        "the route (154-04) changes no screen while this gate stands: the " +
+        "client does not ask, so the answer does not exist as far as the user " +
+        "is concerned.",
+    ).toBeGreaterThan(0);
+
+    // The interrupted state the composite arm always had, now reaching the
+    // user class that had no other one.
+    expect(screen.getByTestId("wizard-sync-interrupted")).toBeInTheDocument();
+    // Round-2 review (founder rule: Retry only when the server would act on
+    // it). The read says a job is RUNNING, so the resync guard would refuse a
+    // Retry; the banner says it may be stuck and renders no Retry control.
+    expect(screen.getByTestId("wizard-sync-maybe-stuck")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /retry sync/i }),
+    ).not.toBeInTheDocument();
+
+    // …and the per-key panel stays composite-only even though this body carries
+    // three member rows.
     expect(screen.queryByTestId("wizard-member-progress")).not.toBeInTheDocument();
-    expect(screen.queryByTestId("wizard-sync-interrupted")).not.toBeInTheDocument();
   });
 });

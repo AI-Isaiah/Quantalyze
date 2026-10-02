@@ -1,0 +1,2 @@
+# fixture allowlist — malformed-line.red: two fields, not four.
+20260101000000_fx_a.sql	public.fx_ref

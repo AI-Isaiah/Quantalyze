@@ -11,6 +11,49 @@ import type { NextConfig } from "next";
 // because the payload is ~70MB — a broad glob would bloat every function.
 const CHROMIUM_BIN = ["./node_modules/@sparticuz/chromium/bin/**/*"];
 
+/**
+ * Refuse a Vercel Production build whose `NEXT_PUBLIC_APP_URL` is not a
+ * canonical public origin. Every absolute link the app mints (share links,
+ * emails, PDFs, alert acks) prefers this variable, so a wrong value becomes a
+ * dead or wrong-host link already sent to someone. Measured 2026-09-27: the
+ * Production value pointed at the vercel.app alias, so factsheet share links
+ * minted from the canonical host came back on the alias.
+ *
+ * Only `vercelEnv === "production"` is checked: preview builds legitimately
+ * live on vercel.app hosts, and local/dev builds on localhost. This refuses;
+ * it never substitutes a host.
+ */
+export function assertCanonicalAppUrl(
+  appUrl: string | undefined,
+  vercelEnv: string | undefined,
+): void {
+  if (vercelEnv !== "production") return;
+  const expected =
+    "an https origin on the canonical domain (not a *.vercel.app host, not localhost)";
+  let url: URL;
+  try {
+    url = new URL(appUrl ?? "");
+  } catch {
+    throw new Error(
+      `NEXT_PUBLIC_APP_URL is unset or not a URL on a VERCEL_ENV=production build; expected ${expected}.`,
+    );
+  }
+  const host = url.hostname;
+  if (
+    url.protocol !== "https:" ||
+    host === "vercel.app" ||
+    host.endsWith(".vercel.app") ||
+    host === "localhost" ||
+    host === "127.0.0.1"
+  ) {
+    throw new Error(
+      `NEXT_PUBLIC_APP_URL (${url.origin}) is not the canonical origin on a VERCEL_ENV=production build; expected ${expected}.`,
+    );
+  }
+}
+
+assertCanonicalAppUrl(process.env.NEXT_PUBLIC_APP_URL, process.env.VERCEL_ENV);
+
 const nextConfig: NextConfig = {
   outputFileTracingIncludes: {
     "/api/demo/portfolio-pdf/\\[id\\]": CHROMIUM_BIN,
@@ -97,6 +140,35 @@ const nextConfig: NextConfig = {
               "default-src 'self'; worker-src 'self' blob:; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://plausible.io; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob:; connect-src 'self' https://*.supabase.co wss://*.supabase.co https://plausible.io",
           },
         ],
+      },
+      {
+        // Phase 164 / SHARE-01 — the recipient share lane carries a capability
+        // token in its PATH (ruling D-01), so this route gets `no-referrer`
+        // while the global `strict-origin-when-cross-origin` above stays
+        // untouched for everything else. Route-scoped headers are merged with
+        // the `/(.*)` block and the more specific source wins on a key
+        // collision, so this overrides Referrer-Policy here and nothing else.
+        //
+        // WHAT THE GLOBAL POLICY ACTUALLY LEAVES OPEN — stated precisely,
+        // because an earlier draft of this rationale had the mechanism wrong.
+        // Under `strict-origin-when-cross-origin` a CROSS-origin request sends
+        // only the ORIGIN: neither path nor query survives, so the global
+        // policy is already sufficient there. (The earlier claim that it
+        // "strips query strings but never the path" is FALSE and must not be
+        // repeated — it would have justified this header for a reason that
+        // does not exist.) The real gap is SAME-ORIGIN navigation, where the
+        // policy sends the FULL URL as `Referer` — path, token and all. Any
+        // same-origin subresource or link click from the recipient page would
+        // put the live token in a request header, and in this app's own server
+        // logs. `no-referrer` closes that, and costs nothing: there is no
+        // referrer-based analytics or attribution on this lane.
+        //
+        // ⚠️ It does NOT close third-party subresources loaded BY the page —
+        // those are cross-origin and were already origin-only. The remaining
+        // path-token channels are handled elsewhere: Plausible in
+        // `src/app/PlausibleScript.tsx`, Sentry in `src/instrumentation.ts`.
+        source: "/factsheet-share/:path*",
+        headers: [{ key: "Referrer-Policy", value: "no-referrer" }],
       },
       {
         // Audit-2026-05-07 P334: tightened from s-maxage=60 to s-maxage=10

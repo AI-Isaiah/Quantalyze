@@ -186,6 +186,28 @@ const okCount = (count: number) => ({ data: null, count, error: null });
  */
 const failed = (error: ReadFailure) => ({ data: null, count: null, error });
 
+/**
+ * The heavy analytics row a GENUINELY EMPTY account really has.
+ *
+ * Every metric is null because nothing was ever computed — but the ROW EXISTS,
+ * because `sync_strategy_analytics_status`
+ * (`20260707120000_sync_status_preserve_warnings.sql:154-163`) INSERTs it from
+ * the `compute_jobs` aggregate alone the moment every job reaches `done`, with
+ * no reference to any trade count. This is the state the status poll's
+ * `complete` is reporting, so it is the state this member must answer with.
+ */
+const EMPTY_ACCOUNT_ANALYTICS_ROW = {
+  cagr: null,
+  sharpe: null,
+  sortino: null,
+  max_drawdown: null,
+  volatility: null,
+  cumulative_return: null,
+  sparkline_returns: null,
+  computed_at: "2026-08-12T09:15:00.000000+00:00",
+  series_completeness: null,
+};
+
 let currentClientFactory: () => unknown = () => ({
   from: () => ({
     select: () => ({
@@ -244,7 +266,21 @@ function installClient(failing: HeavyMember | null) {
             return chain(() => okRow({ data_quality_flags: null }));
           }
           // MEMBER 1 — the heavy analytics row.
-          return chain(() => pick("analytics", okRow(null)));
+          //
+          // ⚠️ THIS USED TO ANSWER `okRow(null)` — NO ROW — WHILE THE STATUS
+          // POLL EIGHT LINES UP ANSWERED `complete` FOR THE SAME
+          // `strategy_analytics` ROW AND THE SAME `strategy_id`. PostgREST
+          // cannot produce that pair: one row either exists for both reads or
+          // for neither. The harness described an impossible world, and the
+          // genuinely-empty case below passed inside it for a reason that does
+          // not hold in production — the single-key mid-re-derive guard was
+          // keyed on `analytics != null`, so a fabricated absent row was what
+          // sent this run to its gate. In the real system the row is there:
+          // `sync_strategy_analytics_status` INSERTs it off the `compute_jobs`
+          // aggregate alone, and key-mode's <2-day branch returns DONE without
+          // writing one of its own. Answering with a real row is what lets this
+          // file measure the component instead of the fixture.
+          return chain(() => pick("analytics", okRow(EMPTY_ACCOUNT_ANALYTICS_ROW)));
         }
 
         if (table === "trades") {
@@ -283,11 +319,30 @@ function installClient(failing: HeavyMember | null) {
 function installFetchMock() {
   return vi
     .spyOn(globalThis, "fetch")
-    .mockImplementation(async () =>
-      new Response(JSON.stringify({ ok: true, composite: false }), {
+    .mockImplementation(async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : String(input);
+      // The sync-progress piggyback — issued for single-key strategies too since
+      // 154-08 closed TWIN-5. It used to fall through to the kickoff body above,
+      // whose shape is not the projection, so the client warned and discarded it
+      // and `jobStatus` stayed null forever. Answering it properly is part of
+      // describing a state the system can actually be in: these accounts' jobs
+      // have FINISHED (`done`), which is exactly why their zero is an answer
+      // rather than a hole, and why the arm may refuse instead of repolling.
+      if (url.includes("/sync-progress")) {
+        return new Response(
+          JSON.stringify({
+            jobStatus: "done",
+            stalled: false,
+            memberProgress: [],
+            degraded: false,
+          }),
+          { status: 200 },
+        );
+      }
+      return new Response(JSON.stringify({ ok: true, composite: false }), {
         status: 200,
-      }),
-    );
+      });
+    });
 }
 
 const baseProps = {

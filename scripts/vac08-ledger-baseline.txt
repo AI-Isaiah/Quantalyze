@@ -1,0 +1,155 @@
+# VAC-08 ledger baseline — migrations MEASURED absent from the TEST ledger.
+#
+# ⭐ THIS FILE HOLDS ZERO ENTRIES AS OF 2026-09-08, AND THAT IS A READING, NOT A
+#    DEFAULT. Read the 2026-09-08 paragraph below before adding one. A bare empty
+#    file and a deleted control look identical from the outside, so the cause of
+#    the emptiness is written down here and pinned by
+#    src/__tests__/vac08-ledger-dispositions.test.ts (ENTRY_COUNT = 0, asserted
+#    only AFTER an AIM that proves the classifier still classifies).
+#
+# DATED 2026-08-30, CI run 33277829284. This is a RATCHET, not a mute button:
+# the gate still fails loud on any migration missing from TEST that is NOT
+# listed here. What this file does is stop a KNOWN, pre-existing gap from
+# masking a NEW one, which is the same shape as this phase's coverage floor
+# (D-01/D-09: pinned at the measured value, fails on REGRESSION, never
+# "until zero").
+#
+# ⛔ THIS FILE MUST ONLY SHRINK. A name listed here that later turns up PRESENT
+#    in the ledger is a HARD FAILURE, not an advisory — delete the line. A
+#    baseline allowed to hold stale entries is a control that quietly stops
+#    controlling, which is what this phase exists to remove.
+#
+# ⛔ LEDGER PRESENCE IS NOT EFFECT PRESENCE, and for DML-bearing migrations it is
+#    FALSE BY CONSTRUCTION. baseline.sql carries 562 GRANT/REVOKE statements and
+#    ZERO INSERT/COPY, so a ledger row here evidences a migration's DDL and ACLs,
+#    NEVER its DML. Do not read `0 absent` as "the migrations ran on TEST".
+#    (The [SEC] trio below is unaffected — those are grants, and grants ARE in
+#    the dump.)
+#
+# ⚠️ LEDGER ABSENCE IS NOT OBJECT ABSENCE. A name on this list has no
+#    schema_migrations row under any of the four naming conventions. Whether its
+#    OBJECTS exist in TEST (hand-applied, or installed by a later migration) is a
+#    DIFFERENT question this gate does not answer. Do not read a list of N names
+#    as "TEST is missing N features".
+#
+# ⛔ DO NOT hand-apply entries to TEST to shorten the list. TEST is shared with
+#    other people's CI. Removing entries is a founder decision.
+#
+# ⭐ 2026-09-07, ON FOUNDER INSTRUCTION ("apply what is missing"), the entry
+#    20260823120000_revoke_api_keys_insert was APPLIED to TEST and removed from
+#    this list — 32 -> 31. It is the ONLY line ever removed by an apply.
+#    ⚠️ The removed caveat above guessed that this migration "may never be
+#    applicable" because it refuses on a database it cannot identify. That guess
+#    is FALSIFIED, and by the migration's own design rather than around it: its
+#    census guard requires POSITIVE evidence of which database it is on, and
+#    TEST supplied the non-PROD signature it asks for (6,098 e2e-shaped rows,
+#    ZERO rows carrying the PROD mt5 census signature), so it took the lenient
+#    branch by measurement. Its four structural post-verifies then ran and
+#    passed on TEST exactly as they would on PROD: INSERT withdrawn from anon
+#    and authenticated, DELETE still held by authenticated (the disconnect-a-key
+#    path), INSERT still held by service_role (now the ONLY writer), and the
+#    SELECT allowlist intact. Nothing was softened to make the apply pass.
+#
+# ⭐ 2026-09-08 — 31 -> 0, BY RESTORE, NOT BY HAND-APPLY. Phase 164.8 Plan 04.
+#    CAUSE, and it matters which one: the whole TEST `public` schema was rebuilt
+#    from the PROD dump and its migration ledger SEEDED from the repo file set.
+#    Nothing on this list was hand-applied, and the ⛔ block above still forbids
+#    that route.
+#      * restore run  34274355596 (workflow_dispatch, `mode=restore`, ref main)
+#      * head sha     88581b8bc66415bfa86b7d5a019741b1cbd0ff49
+#      * dump         supabase/schema/baseline.sql, sha256
+#                     27826b7660026a5b6a7fbee9223265ab98f8fbf485b87237498881034c558ec7
+#      * the transaction COMMITTED. Post-census vs pre-census, both read by the
+#        script's own census query: tables 61 -> 62, functions 117 -> 120,
+#        policies 151 -> 154, ledger_rows 243 -> 266, survivors 2 -> 2. Every
+#        value lands on the shape derived from the dump text.
+#      * ledger_rows 266 == 266 files under supabase/migrations, so every repo
+#        migration — all 31 of these included — now has a row.
+#    MEASURED, not inferred, in the FIRST CI run after that restore: run
+#    34274161551 (sha 88581b8b) reported `31 baseline entr(y/ies) are no longer
+#    MEASURED absent` and NAMED all 31. That is this file's own MUST-ONLY-SHRINK
+#    rule firing, and deleting the 31 lines is the rule being obeyed, not
+#    silenced — the gate would have stayed red for exactly as long as they sat
+#    here.
+#    FOUNDER DECISION, 2026-09-08: put verbatim to the founder with the state
+#    above (restore committed; the 31 measured present; VAC-08 naming them), the
+#    founder chose to resume Plan 04 and empty the ratchet. The ⛔ clause that
+#    reserves removals to the founder was written about hand-applying migrations
+#    to shorten the list; this removal has a different cause and its own
+#    decision, both recorded here.
+#    ⚠️ PART OF THAT RUN DID NOT RUN, and it is recorded rather than assumed.
+#    The guard exits immediately, so it also skipped the TWO ownership-class
+#    comparisons that follow it in the same A12 block (nonpostgres_rel,
+#    nonpostgres_fn) — measured by hand from the backup artifact's census files
+#    instead, five changed lines, neither class moved. Beyond those:
+#    the restore step exited 1 AFTER the commit on a post-commit extension guard
+#    — the one whose message reads `post-census extensions=… pre-census had …`
+#    in `restore-test-from-baseline.sh`; CITED BY MESSAGE, NOT BY LINE, because
+#    the `:1090` written here on 2026-09-08 was correct at the merge-base and had
+#    drifted to unrelated code by this PR's HEAD — that compares a whole-database
+#    `count(*) FROM pg_extension` for equality. It fired on a GAIN — pg_net,
+#    which TEST lacked and the dump creates — and reported it in the language of
+#    a loss. The guard is defective and is booked as separate work; the shape
+#    assertions ahead of it (tables / policies / functions / ledger_rows /
+#    survivors) had all already passed. The CLI post-verify step
+#    (`supabase db push --dry-run`) was SKIPPED as a consequence and has still
+#    NEVER been executed.
+#
+# ⚠️ WHAT THIS BUYS, STATED AS THE TOOL PRINTS IT: VAC-08 reports
+#    `ledger presence: 0 absent, all 0 baselined (see scripts/vac08-ledger-baseline.txt);
+#    0 NEW drift.` The gate is now measuring an unbaselined corpus: any repo
+#    migration that goes missing from TEST's ledger from here reddens VAC-08 on
+#    its own name, with nothing left in this file to absorb it.
+#
+# ⚠️ WHAT IT DOES NOT BUY, AND THE PHRASE THIS FILE STILL REFUSES TO ASSERT. The
+#    266 ledger rows were SEEDED from the repo file set, not produced by running
+#    266 migrations against TEST. So this is NOT a claim of
+#    "zero unledgered migrations" in the sense of every migration having been
+#    EXECUTED there, and no prose may upgrade it to that. What is true is
+#    narrower and sufficient: TEST's ledger holds one CLI-shaped row per repo
+#    migration file, which VAC-08 measures as `0 absent`. The evidence for the
+#    seed's claim is PROD's own green supabase-migrate.yml at an ancestor commit,
+#    asserted by the restore workflow before it wrote anything.
+#
+# ⛔ FROM HERE AN ENTRY MAY BE ADDED ONLY BY FOUNDER DECISION, for a migration
+#    that genuinely cannot reach TEST. Expect additions to be rare but NOT
+#    impossible. The restore was SCHEMA-ONLY: TEST mirrors PROD's CATALOGUE by
+#    construction and never its DATA. Every public table there started EMPTY at
+#    the restore. ⛔ MEASURED 2026-09-08, AND IT IS WORSE THAN "e2e RE-SEEDS":
+#    reference rows INSERTed by migrations that the ledger marks APPLIED are
+#    GONE, and `supabase db push` will never replay them because it skips applied
+#    versions. compute_job_kinds (14 migrations seed it) and discovery_categories
+#    (initial_schema) came back EMPTY; CI run 34280468314 went red on the
+#    compute_jobs_kind_fkey FK and on the e2e seeder itself. A migration that reads a
+#    PROD-populated table and RAISEs on an unexpected count — this repo's house
+#    style for data-reading DO blocks — applies cleanly to PROD and refuses on
+#    TEST; under the apply-on-merge pipeline that BLOCKS the PROD apply by
+#    design, and the interim remedy is a revert of the merge, never a YAML edit.
+#    The general disposition for that case is OPEN AND NOT YET BOOKED. The id
+#    [164.8-DATA-DEPENDENT-MIGRATION-ESCAPE] is the NAME reserved for it; writing
+#    the TODOS entry is Phase 164.8 Plan 06's job and that plan has not run.
+#    ⛔ 2026-09-09: this paragraph used to present the id as an existing entry
+#    that "carries it to a phase" — `grep -c` in TODOS.md returns 0. That is the
+#    FANOUT-GLOBAL-01 failure mode CLAUDE.md warns about: a planner sent looking
+#    for a spec nobody wrote. Do not cite this id as resolvable until Plan 06
+#    lands it. The TEST-NOT-APPLICABLE pragma was NOT built in
+#    164.8, because THIS migration (20260908120000) needed none — its object is
+#    in neither PROD, the dump, nor TEST, and its ledger row is present.
+#
+# ⚠️ THE [SEC] DISCLOSURE RULE SURVIVES THE EMPTYING. Three security migrations
+#    were on this list until 2026-09-08 — 20260529150000, 20260715120000,
+#    20260814120000 — and each was required to say, on its own line, that a
+#    TEST-side test asserting those grants may be asserting them against a schema
+#    that never received them. All three reached TEST's ledger by restore run
+#    34274355596. The rule is not deleted with them: an entry re-added carrying
+#    [SEC] must carry that disclosure, and the AIM in
+#    src/__tests__/vac08-ledger-dispositions.test.ts drives the classifier over a
+#    synthetic corpus so the rule is still ENFORCED at zero entries rather than
+#    merely remembered.
+#
+# ⚠️ DISPOSITIONS ARE MACHINE-INVISIBLE BY DESIGN. The gate parses names through
+#    `sed 's/#.*//'` (test-ledger-drift-check.sh, RATCHET block), so a trailing
+#    comment is prose to a human and nothing at all to the comparison. An entry
+#    is `<migration_basename>  # <what it does, and why it has no TEST ledger
+#    row>`; the disposition is enforced only by the contract test named above.
+# Owner: [VAC08-LEDGER-32] in TODOS.md.

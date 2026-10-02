@@ -15,6 +15,14 @@ const statusMap: Record<string, string> = {
   draft: "bg-badge-other/10 text-badge-other",
   pending_review: "bg-badge-market-neutral/10 text-badge-market-neutral",
   archived: "bg-badge-other/10 text-text-muted",
+  // Phase 149 Delta 3: `private` is a real strategy status that was missing
+  // from both maps, so it fell through to `?? statusMap.draft` / `?? label` and
+  // shipped as a DRAFT-inked badge reading raw lowercase "private" on
+  // (dashboard)/strategies/page.tsx:177. StrategyHeader.tsx:24 spells it too but
+  // is NOT a mounted surface (see that file's header), so it is not live use. Neutral
+  // owner-chosen state → the same muted ink `archived` uses (DESIGN.md
+  // semantic-color gate: never red/amber for a non-error status).
+  private: "bg-badge-other/10 text-text-muted",
   // contact_request statuses
   pending: "bg-badge-market-neutral/10 text-badge-market-neutral",
   intro_made: "bg-accent/10 text-accent",
@@ -27,6 +35,8 @@ const statusLabelMap: Record<string, string> = {
   draft: "Draft",
   pending_review: "Pending Review",
   archived: "Archived",
+  // Phase 149 Delta 3 — see statusMap above.
+  private: "Private",
   // contact_request statuses
   pending: "Pending",
   intro_made: "Intro Made",

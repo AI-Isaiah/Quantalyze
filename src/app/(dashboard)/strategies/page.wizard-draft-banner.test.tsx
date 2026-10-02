@@ -40,11 +40,67 @@ vi.mock("@/components/layout/PageHeader", () => ({
 vi.mock("@/components/strategy/StrategyActions", () => ({
   StrategyActions: () => null,
 }));
-vi.mock("@/components/strategy/ShareableLink", () => ({
-  ShareableLink: () => null,
-}));
+// Phase 164 (SHARE-04): the page now also imports the shared publication
+// predicate from this module, so a factory that returns only the component
+// leaves `isPublishedStatus` undefined and the row render throws. Re-export the
+// REAL predicate rather than a stub — it is a pure two-token function, and
+// stubbing it would let this file stay green while the page asked the wrong
+// question about which URL a row should hand out.
+vi.mock("@/components/strategy/ShareableLink", async () => {
+  const actual = await vi.importActual<
+    typeof import("@/components/strategy/ShareableLink")
+  >("@/components/strategy/ShareableLink");
+  return { ...actual, ShareableLink: () => null };
+});
 vi.mock("@/components/strategy/PendingIntros", () => ({
   PendingIntros: () => null,
+}));
+
+// Phase 167.2.1 (D-08): the page now asks `probeFactsheetBuildable` about
+// every row the analytics embed calls computed, on the service-role client.
+// This double answers every strategies read with a computed row holding a
+// 30-point series, so a computed row is BUILDABLE and shows no note, exactly as
+// before the list probed; no assertion in this file depends on the probe.
+vi.mock("@/lib/supabase/admin", () => ({
+  createAdminClient: () => ({
+    from: (table: string) => {
+      const b: Record<string, unknown> = {};
+      const self = () => b;
+      b.select = self;
+      b.eq = self;
+      b.or = self;
+      b.order = self;
+      b.limit = self;
+      b.maybeSingle = async () =>
+        table === "strategies"
+          ? {
+              data: {
+                id: "s-probe",
+                name: "Synthetic probe row",
+                status: "draft",
+                asset_class: "crypto",
+                returns_denominator_config: null,
+                strategy_analytics: {
+                  daily_returns: Array.from({ length: 30 }, (_, i) => ({
+                    date: new Date(Date.UTC(2024, 0, 2) + i * 86_400_000)
+                      .toISOString()
+                      .slice(0, 10),
+                    value: ((i % 7) - 3) / 1000,
+                  })),
+                  returns_series: null,
+                  computed_at: "2024-03-01T00:00:00Z",
+                  data_quality_flags: null,
+                  metrics_json_by_basis: null,
+                  computation_status: "complete",
+                },
+              },
+              error: null,
+            }
+          : { data: null, error: null };
+      b.then = (resolve: (v: unknown) => unknown) => resolve({ data: [], error: null });
+      return b;
+    },
+  }),
 }));
 
 const redirectMock = vi.hoisted(() => vi.fn());
@@ -86,8 +142,17 @@ vi.mock("@/lib/supabase/server", () => ({
         error: null,
       }),
     },
+    // Phase 167.2 (KCS-06 / KCS-12): the page also reads the owner's key
+    // statuses (api_keys, strategy_keys) and, per uncomputed row, the compute-job RPC. Both are allowed
+    // DELIBERATELY, answering empty; any other table still throws.
+    rpc: async () => ({ data: [], error: null }),
     from: (table: string) => {
-      if (table !== "strategies" && table !== "contact_requests") {
+      if (
+        table !== "strategies" &&
+        table !== "contact_requests" &&
+        table !== "api_keys" &&
+        table !== "strategy_keys"
+      ) {
         throw new Error(`Unexpected table: ${table}`);
       }
 
@@ -99,11 +164,11 @@ vi.mock("@/lib/supabase/server", () => ({
       // to resolve at the resolution point (whether maybeSingle is
       // called) — the list query resolves directly on the awaited
       // order() result.
-      const isContactRequests = table === "contact_requests";
       let isDraftQuery = false;
-      const listResult = isContactRequests
-        ? { data: [], error: null }
-        : { data: state.publishedStrategies, error: null };
+      const listResult =
+        table === "strategies"
+          ? { data: state.publishedStrategies, error: null }
+          : { data: [], error: null };
 
       const builder = {
         select: () => builder,
@@ -145,7 +210,10 @@ async function renderPage(): Promise<HTMLElement> {
 describe("StrategiesPage — wizard-draft Resume banner (2026-05-21 regression)", () => {
   beforeEach(() => {
     redirectMock.mockReset();
-    state.user = { id: "u-test" };
+    // Phase 167.2.1 (D-08): UUID-shaped, because the page's probe runs under
+    // `withPublishedOrOwner(q, user.id)`, which fails closed (and logs) on a
+    // non-UUID id. Synthetic.
+    state.user = { id: "00000000-0000-4000-8000-0000000000a1" };
     state.publishedStrategies = [];
     state.wizardDraft = null;
   });

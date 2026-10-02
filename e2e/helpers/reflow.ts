@@ -32,17 +32,46 @@ const MIN_TARGET_PX = 44;
 const DEFAULT_INTERACTIVE_SELECTOR = "a, button, [role=button], input, select";
 
 /**
- * Reflow gate (WCAG 1.4.10): asserts the document does not overflow
- * horizontally — `scrollWidth - clientWidth <= 1px` — at the page's CURRENT
- * viewport. Set the viewport (e.g. 320px) in the spec before calling.
+ * Reflow gate (WCAG 1.4.10): asserts neither scroller overflows horizontally
+ * — `scrollWidth - clientWidth <= 1px` on both `documentElement` and
+ * `#main-content` — at the page's CURRENT viewport. Set the viewport in the
+ * spec before calling.
+ *
+ * Both scrollers, not an opt-in. Every `(dashboard)` page scrolls inside
+ * `<main id="main-content" class="… overflow-y-auto">`, so a document-only
+ * measure is vacuous there: the document stays at slop 0 while main overflows
+ * (phase 170 RESEARCH §Structural Finding). An opt-in flag would recreate
+ * that blindness, so main is always measured when it is present (slop 0 when
+ * it is absent, which keeps the pre-existing document gate).
+ *
+ * A contained scroller is not a page overflow. The offender walk skips an
+ * element whose CONTAINING-BLOCK chain, below the overflowing scroller,
+ * reaches a box whose computed `overflow-x` is `auto`, `scroll`, `hidden` or
+ * `clip` and whose own right edge is within that scroller's bounds — the
+ * content is clipped inside a bounded region.
+ *
+ * The climb follows containing blocks, not DOM ancestry, because overflow
+ * only clips boxes whose containing-block chain passes through it. An
+ * in-flow box climbs `parentElement` (so an unpositioned overflow-x auto
+ * scroller still contains its in-flow content). A `position: absolute` box
+ * jumps to its `offsetParent`: every ancestor in between cannot clip it. CI
+ * run `36764778803` printed `offender=<unknown>` on every composed-scenario
+ * row because an sr-only `<label>` with no positioned ancestor escaped both a
+ * `ResponsiveTable` scroller and `#main-content` onto the document, while a
+ * DOM-ancestry climb called it contained by `#main-content`. A
+ * `position: fixed` box is never named: it adds nothing to the document's
+ * scrollWidth (bottom nav, Tweaks panel). Known limit: containing blocks
+ * created by `transform`, `filter` or `contain` are not modelled, since
+ * `offsetParent` ignores them.
  *
  * Anchors on `anchorSelector` (a visible content element) first so a
- * blank/404 page fails loud. On overflow, walks `body *` to name the first
- * element whose right edge extends past `clientWidth`, producing a debuggable
- * CI breadcrumb (`offender=TAG#id`).
+ * blank/404 page fails loud. On overflow, walks `body *` against the
+ * overflowing scroller's client box (main's right edge when main overflowed,
+ * else `doc.clientWidth`) and names the first offender as
+ * `TAG#id.class1.class2`. The Node log line appends ` also=<b2>,<b3>` when
+ * further offenders exist; the thrown message names the first only.
  *
- * Route-agnostic: works against any route + any visible anchor, so phases
- * 45-48 can reuse it app-wide.
+ * Route-agnostic: works against any route + any visible anchor.
  */
 export async function assertNoReflow(
   page: Page,
@@ -65,39 +94,88 @@ export async function assertNoReflow(
   await expect(async () => {
     const o = await page.evaluate(() => {
       const doc = document.documentElement;
+      const main = document.getElementById("main-content");
       // clientWidth (not innerWidth) per SC#1 — excludes the scrollbar gutter.
-      const slop = doc.scrollWidth - doc.clientWidth;
-      if (slop <= 1) return { ok: true as const };
-      // Walk the DOM for the first element overflowing the client edge — a
-      // useful failure breadcrumb so a CI failure is debuggable without a
-      // local repro (mirrors demo-public.spec.ts).
-      let offender: string | null = null;
-      for (const el of Array.from(
-        document.querySelectorAll<HTMLElement>("body *"),
-      )) {
-        if (el.getBoundingClientRect().right > doc.clientWidth + 1) {
+      const docSlop = doc.scrollWidth - doc.clientWidth;
+      const mainSlop = main ? main.scrollWidth - main.clientWidth : 0;
+      const mainOverflowed = mainSlop > 1;
+      const docOverflowed = docSlop > 1;
+      // Offenders are measured against the overflowing scroller's client
+      // box. Main wins when both overflow: that is the dashboard scroller.
+      const boundRight = mainOverflowed
+        ? main!.getBoundingClientRect().right
+        : doc.clientWidth;
+      const scroller: HTMLElement = mainOverflowed && main ? main : doc;
+      const offenders: string[] = [];
+      if (mainOverflowed || docOverflowed) {
+        for (const el of Array.from(
+          document.querySelectorAll<HTMLElement>("body *"),
+        )) {
+          if (el.getBoundingClientRect().right <= boundRight + 1) continue;
+          // A fixed box adds nothing to the document's scrollWidth; naming
+          // it would misattribute the overflow.
+          if (getComputedStyle(el).position === "fixed") continue;
+          // Clipped inside a bounded overflow region: climb the
+          // containing-block chain (offsetParent for an absolute box,
+          // parentElement otherwise) below the scroller, looking for a
+          // clipping box whose own right edge stays inside the scroller.
+          let contained = false;
+          let box: HTMLElement = el;
+          for (;;) {
+            const next: HTMLElement | null =
+              getComputedStyle(box).position === "absolute"
+                ? (box.offsetParent as HTMLElement | null)
+                : box.parentElement;
+            if (
+              !next ||
+              next === scroller ||
+              next === document.body ||
+              next === doc
+            )
+              break;
+            const ox = getComputedStyle(next).overflowX;
+            if (
+              (ox === "auto" ||
+                ox === "scroll" ||
+                ox === "hidden" ||
+                ox === "clip") &&
+              next.getBoundingClientRect().right <= boundRight + 1
+            ) {
+              contained = true;
+              break;
+            }
+            box = next;
+          }
+          if (contained) continue;
           const idPart = el.id ? `#${el.id}` : "";
           const classPart =
             typeof el.className === "string" && el.className
               ? `.${el.className.split(" ").filter(Boolean).slice(0, 2).join(".")}`
               : "";
-          offender = `${el.tagName}${idPart}${classPart}`;
-          break;
+          offenders.push(`${el.tagName}${idPart}${classPart}`);
+          if (offenders.length === 3) break;
         }
       }
-      return {
-        ok: false as const,
-        scrollWidth: doc.scrollWidth,
-        clientWidth: doc.clientWidth,
-        offender,
-      };
+      const offender = offenders[0] ?? null;
+      const also = offenders.slice(1);
+      return { mainSlop, docSlop, offender, also };
     });
-    if (!o.ok) {
+    const viewport = page.viewportSize();
+    if (o.mainSlop > 1 || o.docSlop > 1) {
+      // Node stdout, not the browser console: plan 170-11 greps the job log.
+      console.log(
+        `LAYOUT-NARROW-OFFENDER viewport=${viewport?.width ?? "?"} main=${o.mainSlop} doc=${o.docSlop} offender=${o.offender ?? "<unknown>"}` +
+          (o.also.length ? ` also=${o.also.join(",")}` : ""),
+      );
+      const scroller = o.mainSlop > 1 ? "main" : "doc";
       throw new Error(
-        `reflow: scrollWidth=${o.scrollWidth} clientWidth=${o.clientWidth} ` +
+        `reflow: main=${o.mainSlop} doc=${o.docSlop} scroller=${scroller} ` +
           `offender=${o.offender ?? "<unknown>"}`,
       );
     }
+    console.log(
+      `LAYOUT-NARROW-CLEAN viewport=${viewport?.width ?? "?"} main=${o.mainSlop} doc=${o.docSlop}`,
+    );
     // Window >= the networkidle settle above so a late-appearing wide element
     // on a slow/analytics-heavy route (phases 46-48) is still caught by a
     // re-measure rather than missed by an early pass or flaking red.

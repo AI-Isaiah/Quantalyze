@@ -675,21 +675,30 @@ describe("isBreakerOpen", () => {
   it("G2 — a lock whose span is nonsensical decodes to null and reads CLOSED (LO-02 / TS-39)", async () => {
     const mod = await import("./resilient-fetch");
 
-    // 90 000 ms, hand-typed here: the 30 s cooldown plus the 60 s tombstone,
+    // 130 000 ms, hand-typed here: the 30 s cooldown plus the 100 s tombstone,
     // never `(BREAKER_COOLDOWN_S + BREAKER_LOCK_TOMBSTONE_S) * 1000` read back
     // out of the module under test. A legitimate lock cannot outlive the window
     // in which its own key survives.
+    //
+    // ⚠️ 90 000 → 120 000 with Phase 153.4 / D-26, which moved the tombstone
+    // 60 → 90 s in the same commit as the 120 000 ms serialized validate
+    // budget; → 130 000 with the 153.4 review's WR-01, which moved it 90 → 100 s
+    // because A-25 has to span a request's admission→RECORD lifetime and not
+    // merely its fetch budget. This ceiling is DERIVED inside the module from
+    // those two constants, so it moves whenever either does — and this
+    // hand-typed twin is the only thing that notices. Moving it is a deliberate
+    // act, never a green-the-diff edit.
     const ARMED_AT = 1_700_000_000_000;
 
     // A span at the ceiling still decodes — the bound rejects the implausible,
     // not the merely long.
     expect(
-      mod.decodeBreakerLock(`open:${ARMED_AT}:${ARMED_AT + 90_000}`),
+      mod.decodeBreakerLock(`open:${ARMED_AT}:${ARMED_AT + 130_000}`),
       "The span bound rejected a lock at exactly the cooldown+tombstone " +
         "ceiling. That is a REAL state (a lock armed and read at the far edge " +
         "of its own tombstone), and rejecting it would silently disarm the " +
         "breaker at exactly the moment it is doing its job.",
-    ).toEqual({ armedAtMs: ARMED_AT, expiresAtMs: ARMED_AT + 90_000 });
+    ).toEqual({ armedAtMs: ARMED_AT, expiresAtMs: ARMED_AT + 130_000 });
     // And the ordinary 30 s cooldown, the case every other test in this file
     // depends on.
     expect(
@@ -707,7 +716,7 @@ describe("isBreakerOpen", () => {
     // One millisecond past the ceiling — the bound is a real edge, not a
     // gesture at a large number.
     expect(
-      mod.decodeBreakerLock(`open:${ARMED_AT}:${ARMED_AT + 90_001}`),
+      mod.decodeBreakerLock(`open:${ARMED_AT}:${ARMED_AT + 130_001}`),
     ).toBeNull();
     // A REVERSED pair: `expiresAtMs < armedAtMs` makes the emitted
     // `cooldownS` negative.
@@ -796,17 +805,19 @@ describe("isBreakerOpen", () => {
         "ahead of the others.",
     ).toBeNull();
 
-    // The bound is a real EDGE, not a gesture at a large number. 90 000 ms is
+    // The bound is a real EDGE, not a gesture at a large number. 130 000 ms is
     // hand-typed here (the cooldown plus the tombstone), exactly as G2 types it,
-    // never read back out of the module under test.
+    // never read back out of the module under test. 90 000 → 120 000 with
+    // Phase 153.4 / D-26 (tombstone 60 → 90 s), then → 130 000 with the 153.4
+    // review's WR-01 (tombstone 90 → 100 s), for the reason G2 states.
     expect(
-      mod.decodeBreakerLock(`open:${NOW + 60_000}:${NOW + 90_000}`, NOW),
+      mod.decodeBreakerLock(`open:${NOW + 100_000}:${NOW + 130_000}`, NOW),
       "A lock expiring exactly at the ceiling was rejected. That is a REAL " +
         "state — the widest legitimate lock, observed at the instant it was " +
         "armed — and rejecting it disarms the breaker while it is working.",
-    ).toEqual({ armedAtMs: NOW + 60_000, expiresAtMs: NOW + 90_000 });
+    ).toEqual({ armedAtMs: NOW + 100_000, expiresAtMs: NOW + 130_000 });
     expect(
-      mod.decodeBreakerLock(`open:${NOW + 60_001}:${NOW + 90_001}`, NOW),
+      mod.decodeBreakerLock(`open:${NOW + 100_001}:${NOW + 130_001}`, NOW),
     ).toBeNull();
 
     // END TO END, the harm finding 11 actually names: the future-side value
@@ -1061,6 +1072,73 @@ describe("[SEAMCORE-05 / A-25] a doomed in-flight failure cannot re-arm an expir
         "re-armed the circuit. One wave of 60s-budget calls then holds the " +
         "breaker open 90s+ without a single new request ever being attempted.",
     ).toBe(tombstone);
+  });
+
+  it("the tombstone still SPANS the longest request at the instant that request RECORDS (153.4 review, WR-01)", async () => {
+    // ── THE INVARIANT, NOT THE ARITHMETIC ─────────────────────────────────────
+    // A-25 is a guard about a READ: `recordSeamFailure` can only refuse to
+    // re-arm if the tombstone is still in the store WHEN IT LOOKS. The two cases
+    // above prove the predicate; nothing proved the key was still there to
+    // answer it. The tombstone was sized against the fetch BUDGET (120 000 ms)
+    // and the read lands LATER than that — the record path spends a limiter
+    // call and a bounded store read after the deadline fires — so the key
+    // expired ≈9 s before the guard that depends on it ran, and A-25 was
+    // violated at exactly the row it was sized against.
+    //
+    // ⚠️ THE TTL UNDER TEST IS PRODUCTION'S OWN. The lock is armed by driving
+    // `recordSeamFailure`, not by seeding an entry with a hand-typed
+    // `expiresAt` — so the store TTL this case measures is the one
+    // `BREAKER_COOLDOWN_S + BREAKER_LOCK_TOMBSTONE_S` actually produces.
+    // Seeding it would make the case a restatement of its own setup.
+    //
+    // ⚠️ THE TWO TIME LITERALS ARE HAND-TYPED, and neither is read from the
+    // module: 120 000 ms is the longest REQUEST LIFETIME in `SEAM_BUDGETS`
+    // (`validate-key-serialized`), 9 250 ms is what the record path spends
+    // before the trip read lands (`breakerLimiter.limit()` ≤ 5 000, one bounded
+    // store command ≤ 4 250). `seam-constants.pin.test.ts` states the same two
+    // figures independently as arithmetic; this case states them as BEHAVIOUR.
+    const LONGEST_REQUEST_LIFETIME_MS = 120_000;
+    const RECORD_PATH_OVERHEAD_MS = 9_250;
+
+    const mod = await import("./resilient-fetch");
+    vi.useFakeTimers({ shouldAdvanceTime: false });
+    try {
+      // A lock armed by production, with production's own TTL.
+      const ARMED_AT = Date.now();
+      await exhaustCounter(mod, "breaker:railway", ARMED_AT);
+      const armedValue = shared.store.get("breaker:railway")?.value;
+      // VACUITY FENCE: if nothing was armed, the assertion below compares
+      // `undefined` to `undefined` and passes while proving nothing.
+      expect(
+        armedValue,
+        "No lock was armed, so this case has no tombstone to outlive and its " +
+          "conclusion is vacuous.",
+      ).toMatch(/^open:/);
+
+      // The doomed request: in flight 1 ms BEFORE that lock was armed (so A-25's
+      // predicate is the only thing that can refuse it), recording at the end of
+      // the longest lifetime plus the record path's own store work.
+      const ADMITTED_AT = ARMED_AT - 1;
+      vi.setSystemTime(
+        ADMITTED_AT + LONGEST_REQUEST_LIFETIME_MS + RECORD_PATH_OVERHEAD_MS,
+      );
+
+      await exhaustCounter(mod, "breaker:railway", ADMITTED_AT);
+
+      expect(
+        shared.store.get("breaker:railway")?.value,
+        "The lock key had already expired when the doomed request recorded its " +
+          "failure, so `recordSeamFailure` read null, learned nothing about the " +
+          "lock this request overlapped, and armed a FRESH cooldown on evidence " +
+          "gathered before the previous trip. A-25 is stated for exactly this " +
+          "request and does not hold for it. The tombstone must span " +
+          "admission→RECORD, not admission→deadline: raise " +
+          "BREAKER_LOCK_TOMBSTONE_S (and its hand-typed twins, and the runbook) " +
+          "in the same commit — never lower the two literals above.",
+      ).toBe(armedValue);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("NEGATIVE CONTROL: a failure admitted AFTER that lock was armed DOES re-arm it", async () => {
@@ -2940,7 +3018,7 @@ describe("[SEAMCORE-06] the breaker emits a structured transition event", () => 
     // armedAt, same 30 s span — so the close event is derived from a REAL lock
     // and the two events are correlatable for the right reason. Rewriting the
     // entry would let this case pass against a value production never produces.
-    // The key itself outlives the lock by `BREAKER_LOCK_TOMBSTONE_S` (60 s), so
+    // The key itself outlives the lock by `BREAKER_LOCK_TOMBSTONE_S` (100 s), so
     // at +31 s it is still in the store: that window IS the tombstone.
     vi.useFakeTimers({ shouldAdvanceTime: true });
     vi.setSystemTime(new Date(Date.now() + 31_000));

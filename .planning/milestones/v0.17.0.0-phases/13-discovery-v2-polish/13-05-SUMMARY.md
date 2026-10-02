@@ -131,7 +131,7 @@ The plan's `<how-to-verify>` block on Task 2 instructed `supabase db push --incl
 
 ```bash
 # Pre-flight
-pwd                                                   # ⇒ /Users/helios-mammut/claude-projects/quantalyze
+pwd                                                   # ⇒ <repo-root>
 ls supabase/migrations/091_seed_is_example_backfill.sql
 supabase --version
 cat supabase/.temp/project-ref                        # ⇒ khslejtfbuezsmvmtsdn

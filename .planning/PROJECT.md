@@ -20,7 +20,122 @@ Allocators act on Bridge recommendations and see whether those suggestions
 actually worked — and can model the impact of composition changes before they
 make them.
 
-## Current Milestone: v1.16 Production Resilience & Reliability (planning, started 2026-07-25)
+## Current Milestone: v1.20 Backlog Burndown (started 2026-08-20)
+
+**Goal:** Close the largest relevancy-ranked slice of the verified-open backlog (root `TODOS.md`) that
+is agent-deliverable — public-trust correctness, money-path honesty, founder-hit error surfaces,
+CI/deploy integrity, small security hardening, and the booked dependabot campaign — and leave
+TODOS.md telling the truth (included items deleted into `REQUIREMENTS.md`, 31 verified-stale
+entries closed).
+
+**Scope basis (2026-08-20):** every candidate was re-verified at HEAD by a 17-agent triage
+(269 items → 211 open / 27 partial / 31 stale; 33 founder-gated set aside). Only verified-open,
+agent-deliverable items are in scope. Research: TARGETED (user call 2026-08-20) — no generic
+ecosystem sweep, but the highest-risk items get research before requirements: the SHARELINK-01
+token lane (cache-poison landmine), the server-authoritative venue-provenance write, the
+dependabot majors (ts 7, jsdom 30, actions majors), the shared-test-db concurrency eviction,
+and the public-ranking percentile change.
+
+**Target features (REQ groups — see `.planning/REQUIREMENTS.md`):**
+- **RANK — public-trust & provenance correctness:** failed-computation KPIs contaminate public
+  percentiles; anon `strategy_analytics (*)` splat; client-supplied `api_keys.exchange` +
+  forgeable `asset_class` annualization stamp (√365/√252); quantstats sign-flip;
+  blend-annualization crypto default; FILL-arm CAS + fingerprint classification.
+- **SHARE — SHARELINK-01:** the founder-decided revocable share-token lane (Copy Link must always
+  produce a viewable link; id stays a non-secret; token lane must never poison the id-keyed cache).
+- **WIZERR — honest error surfaces:** MT5 gateway wrong-checkbox copy derived from
+  `terminal_info`; "Try another key" draft destruction; orphaned-key false 409; the fourth
+  classifier's coverage law; Retry-After threading; 5xx→UNKNOWN arms; three UNKNOWN dialogs;
+  `KEY_INVALID_FORMAT` split on the remaining 9 sites; CSV floor/copy pairs.
+- **HONEST — user-visible data honesty:** raw Python TypeError as user copy; FRESH badge on an
+  89-day-dead series; missing CAGR/Sharpe on drawer-added rows; equity-curve null; wizard
+  key preselect; stale example badges.
+- **OPS — CI/deploy integrity & reliability:** shared-test-db eviction silently skipping the
+  Railway deploy (#616); `sql-tests` in no aggregator; orphaned e2e specs + DB-types drift gate;
+  TEST stale-pending drain; structlog redaction class; post-commit `createAdminClient` 500 class;
+  flag-monitor honesty trio; INTO STRICT / ORDER BY / body.cancel.
+- **SEC — small hardening:** signup password policy; `.planning` username scrub (public repo);
+  `MUTATING_RPC_NAMES` gap; 30× limiter mismatches (`bridgeComputeLimiter`); tenth IP-keyed
+  route; mid-validate credential POST abort.
+- **DEPS — the booked 9-PR dependabot campaign** (groups first, majors one at a time, full suite each).
+
+**Out of milestone by construction:** founder-gated ops (RESEND key, Zavara activation,
+sFOX/Nautilus go-live, MT5 live parity = v1.18), founder-decision items (AUM basis, retunes),
+and everything verified stale today. Phase numbering continues from **158**.
+
+## ⏸️ PARKED Milestone: v1.18 MT5-VERIFY & founder confirmations (started 2026-08-14, parked 2026-08-20 — founder-gated)
+
+⛔ **Every phase in v1.18 is founder-gated** — Phase 155 (live trading-day parity against the
+terminal's own figures) and Phase 157 (the observations only the founder can make). Blocked on new
+MT5 investor passwords AND the founder at the terminal on a trading day. The former v1.16 carry
+(Phases 143–146) shipped and closed as **v1.19 on 2026-08-20** (audit `tech_debt`, 9/9
+requirements; archive at `.planning/milestones/v1.19-ROADMAP.md`), so **no agent-deliverable
+phase is currently open** — new work starts with a new milestone.
+
+⭐ **Parity tolerance is settled at 1%, INCLUDING open P&L** (founder call 2026-08-14). The
+measurement window MUST end before the day of the run: `broker_dailies` anchors to today
+(`initial capital = current_equity − total_pnl`), so error accrues *backward* and comparing today's
+equity is near-tautological.
+
+---
+
+## ✅ Shipped: v1.17 MT5 — ingested, wizardable, surfaced (2026-08-04 → 2026-08-14)
+
+⚠️ **Scope amended on close.** The original title claimed *"usable end-to-end, not merely
+ingested"*. Phase 155 (MT5-VERIFY) was **carried to v1.18**, taking MT5-06..10, MT5-15 and
+MT5-GOAL-01 with it. What v1.17 earns: MT5 ingests, is declarable in the wizard, projects in a
+scenario, has a viewable factsheet, and the wizard's write is the server's alone. ⛔ What it does
+**NOT** earn: any claim that the performance we render matches the broker's. **Nobody has compared
+them.** Do not advertise MT5 until Phase 155 passes.
+
+**Historical goal statement, retained:**
+
+**Goal:** MT5 *works* in the founder's sense rather than the wizard's — it ingests (done), it projects
+in a scenario, and its factsheet is viewable by the allocator who uploaded it.
+
+**Founder verbatim (2026-08-04, minutes after MT5-05 was discharged on PROD):**
+> *"The goal is that MT5 works. And at the moment, maybe it ingests the data, but I cannot use it in
+> the scenario, and I can still not produce a factsheet."*
+
+**Target features (REQ groups — see `.planning/REQUIREMENTS.md`):**
+- **SCEN — the series actually reaches the engine.** `strategy_analytics.daily_returns` has **no
+  production writer at all** (PROD: 0 of 27 real strategies populated vs 15/15 demo seeds), and the
+  scenario's data route reads only that column. Affected strategies contribute nothing and the
+  composer renders zeros with no error. Plus the composer's own legibility: ownership marker,
+  clickable rows, labelled numbers, duplicate browse entries.
+- **OWN / NAV — an allocator can see and reach their own strategy.** The owner factsheet 404s today
+  (⛔ its acceptance test is adversarial: after an owner views their draft, an anon request for the
+  same id must STILL 404 — that route is publicly cached), and there is no "my strategies" nav entry,
+  so the allocator side is write-only.
+- **AUM — a book you can reach and a size you can set.** The holdings sync crashes on every non-ccxt
+  venue (a raw `AttributeError` sits in a user-visible column on PROD), an all-or-nothing per-key gate
+  hides a live book behind a forced blank slate, AUM is derived-only with no input anywhere, and the
+  refusal copy names a control that was deliberately never built.
+- **WIZ — the wizard stops costing submits.** Inline field errors, a resume path for allocators,
+  credential dedup, no stale screens, and MT5 selectable as its own venue.
+- ➡️ **MT5-VERIFY — the numbers are true.** Server-UTC offset measured live, rendered performance
+  checked against an external oracle, on a live funded account on a real trading day.
+  ⛔ **CARRIED TO v1.18 on 2026-08-14 — this was NOT delivered in v1.17.** Listed here because it
+  was in the original scope statement; struck from the delivered set.
+
+⭐ **Defining constraint: almost NONE of this is an MT5 defect.** MT5 is the first venue to traverse
+the whole path from a cold start, so it is exposing pre-existing holes in the surfaces AFTER
+ingestion. SCEN-01 affects every real strategy at every venue; OWN-02 blocks every unpublished
+strategy; AUM-05 will hit sFOX the day its flag flips. **A fix scoped to `exchange === 'mt5'` is the
+wrong fix for nearly all of it.**
+
+**Scope decisions (founder 2026-08-04):** v1.16 **PARKED at 68%, not shipped** — 13/19 phases,
+119/127 plans, with Phases 143–146 outstanding; to be reopened after v1.17 delivers. Research SKIPPED
+(zero new external features; every requirement is a defect already root-caused with PROD evidence and
+file:line citations). Phase numbering continues from **147**.
+
+## ⏸️ PARKED Milestone: v1.16 Production Resilience & Reliability (planning, started 2026-07-25)
+
+⛔ **PARKED 2026-08-04 at 68% — NOT shipped, NOT complete.** Outstanding: Phase 143 (dropped-enqueue
+sweep), 144 (WR-02 orphaned-running DELETE→terminal UPDATE — carries the live TEST-DELETE/PROD-reset
+founder call), 145 (csv-finalize atomicity), 146 (RATE audit). Resume at Phase 143. All 29 phase
+directories were deliberately PRESERVED (the workflow's `phases.clear` was skipped by founder call) so
+this milestone resumes without reconstruction.
 
 **Goal:** Give the live money-bearing plumbing failure handling — so a hung Railway request, a silently-dropped compute-job enqueue, or a mid-job worker crash can't strand a real investor factsheet on a spinner that never resolves. This is hardening of existing seams (Deribit, MT5, and sFOX/Nautilus now carry real accounts), not new external features. The biggest live-surface risk is no longer correctness math (mostly latent/flag-gated) — it's that the plumbing has no failure handling.
 
@@ -198,6 +313,12 @@ This document evolves at phase transitions and milestone boundaries.
 
 ## Current State
 
+**v1.17 in flight — Phase 151 (AUM) complete 2026-08-07** (5/9 phases done: 147–151).
+Direct AUM input + per-strategy dollar sizing, non-ccxt holdings-sync class fix
+(MT5 equity row + sFOX proof), partial-book gate with role-based manager-key
+exclusion, honest refusal copy. 30/30 must-haves verified; 4 PROD-gated UAT items
+open in `151-HUMAN-UAT.md`. Next: 152 SCEN composer legibility.
+
 **v1.15 MetaTrader 5 shipped + LIVE 2026-07-25** (tag `v1.15`, v0.49.4.0) — MT5
 elevated to a live `api_verified` account sync, flags flipped on quantalyze.xyz
 (Vantage acct soaked, factsheet proven). v1.13 Infra + v1.14 Smoothed-MTM also
@@ -256,4 +377,4 @@ the WCAG-AA floor stay green.
 </details>
 
 ---
-*Last updated: 2026-07-25 — v1.16 Production Resilience & Reliability milestone opened (scope: SEAM + JOB + RATE; CRON deferred; runner-up Money-Path Correctness Unification deferred). Current Milestone + Current State rewritten for v1.16; phase numbering continues from 140. NOTE: this document's older shipped-milestone sections still jump v1.12 → v1.10 and the `### Active` (v1.7/v1.8) / `## Last Shipped Milestone: v1.6` sections remain stale from the pre-v1.9 ledger-reconciliation gap — full shipped history (v1.13/v1.14/v1.15 included) is authoritative in `MILESTONES.md` + `milestones/`.*
+*Last updated: 2026-08-20 — v1.20 Backlog Burndown milestone opened (scope: RANK + SHARE + WIZERR + HONEST + OPS + SEC + DEPS, ~57 verified-open TODOS.md items; targeted research on the riskiest items; phase numbering continues from 158). v1.18 parked founder-gated. 51 leftover phase dirs archived under honest per-milestone labels (v1.13/v1.14/v1.15/v1.16/v1.17/v1.19-phases). NOTE: this document's older shipped-milestone sections still jump v1.12 → v1.10 and the `### Active` (v1.7/v1.8) / `## Last Shipped Milestone: v1.6` sections remain stale from the pre-v1.9 ledger-reconciliation gap — full shipped history (v1.13/v1.14/v1.15 included) is authoritative in `MILESTONES.md` + `milestones/`.*

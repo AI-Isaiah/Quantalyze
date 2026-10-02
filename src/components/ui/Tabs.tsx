@@ -16,9 +16,12 @@
  *
  * Two variants (50-UI-SPEC §Tabs):
  *   - "underline"  — AdminTabs / ProfileTabs strip (accent text + 2px accent
- *     bottom-border on the active trigger).
+ *     bottom-border on the active trigger). The strip scrolls on its own
+ *     horizontal axis; the hairline is an inset shadow so overflow does not
+ *     clip it.
  *   - "segmented"  — WatchlistTabs control (`bg-accent/10 text-accent` active
- *     cell inside an `inline-flex border rounded` container).
+ *     cell inside an `inline-flex border rounded` container). Byte-identical
+ *     to the pre-scroll strings; it does not scroll.
  *
  * `activationMode` defaults to Radix's `"automatic"` (selection follows focus) —
  * the locked behavior for all 3 consumers. `value`/`defaultValue`/
@@ -31,8 +34,10 @@
  * resolves via `aria-labelledby`.
  */
 
+import { useEffect, useRef } from "react";
 import * as TabsPrimitive from "@radix-ui/react-tabs";
 import { cn } from "@/lib/utils";
+import { computeTabStripScroll } from "@/lib/tab-strip-scroll";
 
 export type TabsVariant = "underline" | "segmented";
 
@@ -40,20 +45,62 @@ export type TabsVariant = "underline" | "segmented";
 export const Tabs = TabsPrimitive.Root;
 
 /**
- * TabsList (role="tablist"). The underline variant draws the strip's bottom
- * hairline; the segmented variant is the bordered, rounded, clipped container.
- * Consumers may override per-consumer chrome via `className`.
+ * TabsList (role="tablist"). The underline variant scrolls inside itself.
+ * `overflow-x: auto` forces `overflow-y: auto`, which would clip a trigger's
+ * negative margin overlapping a border, so the hairline is an inset shadow
+ * drawn inside the scroll box. The segmented variant is the bordered, rounded,
+ * clipped container and is not a scroll container. Consumers may override
+ * per-consumer chrome via `className` (ProfileTabs / AdminTabs pass `mb-6`).
  */
 export function TabsList({
   className,
   variant = "underline",
   ...props
 }: React.ComponentProps<typeof TabsPrimitive.List> & { variant?: TabsVariant }) {
+  const listRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (variant !== "underline") return;
+    const list = listRef.current;
+    if (!list) return;
+
+    // Horizontal axis only. A vertical correction would move the page.
+    const scrollActiveIntoView = () => {
+      const active = list.querySelector<HTMLElement>(
+        '[role="tab"][data-state="active"]',
+      );
+      if (!active || typeof list.scrollTo !== "function") return;
+      const prefersReducedMotion =
+        typeof window.matchMedia === "function" &&
+        window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+      const target = computeTabStripScroll({
+        elLeft: active.offsetLeft,
+        elWidth: active.offsetWidth,
+        viewLeft: list.scrollLeft,
+        viewWidth: list.clientWidth,
+        prefersReducedMotion,
+      });
+      if (target) {
+        list.scrollTo({ left: target.left, behavior: target.behavior });
+      }
+    };
+
+    scrollActiveIntoView();
+    const observer = new MutationObserver(scrollActiveIntoView);
+    observer.observe(list, {
+      subtree: true,
+      attributes: true,
+      attributeFilter: ["data-state"],
+    });
+    return () => observer.disconnect();
+  }, [variant]);
+
   return (
     <TabsPrimitive.List
+      ref={listRef}
       className={cn(
         variant === "underline"
-          ? "flex gap-1 border-b border-border"
+          ? "flex gap-1 overflow-x-auto [scrollbar-width:none] shadow-[inset_0_-1px_0_var(--color-border)]"
           : "inline-flex overflow-hidden rounded border border-border",
         className,
       )}
@@ -83,8 +130,9 @@ export function TabsTrigger({
         "data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
         variant === "underline"
           ? cn(
-              "-mb-px border-b-2 border-transparent px-4 py-2 text-text-muted",
+              "shrink-0 whitespace-nowrap border-b-2 border-transparent px-4 py-2 text-text-muted",
               "hover:text-text-primary",
+              "focus-visible:ring-inset",
               "data-[state=active]:border-accent data-[state=active]:text-accent",
             )
           : cn(

@@ -1,10 +1,12 @@
 "use client";
 
+import { type ReactNode } from "react";
 import {
+  CSV_FILE_LEVEL_HEADLINE,
   CSV_RULE_LABELS,
   WIZARD_ERROR_COPY,
+  formatCsvRuleCauseFileLevel,
   formatCsvRuleCauseSingle,
-  formatColumnInDataframeMessage,
 } from "@/lib/wizardErrors";
 
 /**
@@ -100,9 +102,25 @@ interface CsvValidationEnvelopeProps {
     };
     correlation_id: string | null;
   };
+  /**
+   * 146.2-08 / B1 — an optional remedy CTA, rendered BELOW the body and ABOVE
+   * the per-rule accordion. That position is DESIGN.md's Error Envelope
+   * contract for the retry CTA, and this panel is the CSV surface's stand-in
+   * for that shell; a caller that rendered its own button underneath the panel
+   * would sit outside the tinted box and read as unrelated to the sentence.
+   *
+   * A slot rather than a `code`-keyed table inside this component: WHICH codes
+   * are recoverable and BY WHAT action is the calling step's knowledge (only
+   * `CsvSubmitStep` can mint a wizard session), and baking a code list in here
+   * would put that decision two files away from the state it mutates.
+   */
+  action?: ReactNode;
 }
 
-export function CsvValidationEnvelope({ envelope }: CsvValidationEnvelopeProps) {
+export function CsvValidationEnvelope({
+  envelope,
+  action,
+}: CsvValidationEnvelopeProps) {
   const errors = envelope.debug_context?.pandera_errors ?? [];
   const byRule = errors.reduce<Record<string, typeof errors>>((acc, e) => {
     (acc[e.rule] ??= []).push(e);
@@ -110,6 +128,12 @@ export function CsvValidationEnvelope({ envelope }: CsvValidationEnvelopeProps) 
   }, {});
   const ruleKeys = Object.keys(byRule);
   const ruleCount = ruleKeys.length;
+  // 166.1 round-1 WR-01: `row` is 1-based and 0 is the absent-row sentinel of
+  // a file-level rule (see the `<li>` note below). Only a REAL row is counted:
+  // "1 row failed validation" for a rule that names no row was a row count
+  // with nothing behind it. A non-numeric `row` is not a real row either.
+  const isRealRow = (e: { row: number }) => e.row >= 1;
+  const realRowCount = errors.filter(isRealRow).length;
 
   // ⚠️ 140.4-16 / CR-02 — THE SECOND LINE MUST SAY SOMETHING THE FIRST DOES
   // NOT. Until this, the final `else` below was `envelope.human_message` — the
@@ -147,7 +171,10 @@ export function CsvValidationEnvelope({ envelope }: CsvValidationEnvelopeProps) 
   } else if (ruleCount === 1 && errors.length > 0) {
     const onlyRule = ruleKeys[0];
     const human = CSV_RULE_LABELS[onlyRule] ?? onlyRule;
-    causeText = formatCsvRuleCauseSingle(human);
+    causeText =
+      realRowCount > 0
+        ? formatCsvRuleCauseSingle(human)
+        : formatCsvRuleCauseFileLevel(human);
   } else {
     causeText = authoredCause ?? null;
   }
@@ -160,24 +187,64 @@ export function CsvValidationEnvelope({ envelope }: CsvValidationEnvelopeProps) 
       data-error-code={envelope.code}
     >
       <p className="text-body font-semibold text-negative">
-        {errors.length > 0
-          ? `${errors.length} ${errors.length === 1 ? "row" : "rows"} failed validation`
-          : envelope.human_message}
+        {realRowCount > 0
+          ? `${realRowCount} ${realRowCount === 1 ? "row" : "rows"} failed validation`
+          : errors.length > 0
+            ? CSV_FILE_LEVEL_HEADLINE
+            : envelope.human_message}
       </p>
       {causeText !== null && (
         <p className="mt-1 text-caption text-text-secondary">{causeText}</p>
       )}
+      {action !== undefined && action !== null && (
+        <div className="mt-3" data-testid="wizard-csv-error-action">
+          {action}
+        </div>
+      )}
       {Object.entries(byRule).map(([rule, list]) => (
         <details key={rule} className="mt-2 text-caption">
           <summary className="cursor-pointer text-text-secondary">
-            {CSV_RULE_LABELS[rule] ?? rule} ({list.length} rows)
+            {CSV_RULE_LABELS[rule] ?? rule}
+            {/* 166.1 WR-01: a row count only when this rule failed on real rows. */}
+            {list.some(isRealRow) ? ` (${list.filter(isRealRow).length} rows)` : ""}
           </summary>
           <ul className="mt-1 list-disc space-y-0.5 pl-5 text-text-muted">
+            {/*
+              ⛔ 161-REVIEW / CR-02 — THE ROW PREFIX IS CONDITIONAL, AND THE
+              `column_in_dataframe` FORMATTER IS GONE.
+
+              Two defects met here and each was hiding the other.
+
+              1. `formatColumnInDataframeMessage` was routed only for
+                 `rule === "column_in_dataframe"`, and its regex
+                 (`/Column\s+'[^']*'\s+failed:\s+(\S+)/`) required a literal
+                 `failed:`. MEASURED against the producer at HEAD, every shape
+                 `csv_validator.py` emits reads `… failed rule '…'` — so the
+                 regex could not match, has never matched, and the actionable
+                 remedy it existed to supply ("Rename a column to `X`") has
+                 never rendered to a user. Worse, it is UNREPAIRABLE as written:
+                 for this rule the producer reports `column` as NaN, so the
+                 expected column name is not on the wire at all and there is no
+                 `X` for a fixed regex to extract. Restoring that remedy needs a
+                 first-class producer field (deferred as D-161-02), not a
+                 better pattern. A formatter that cannot fire is a false claim
+                 in code shape, so it was deleted rather than left standing.
+
+              2. Deleting it exposed the row prefix, which was ALSO fabricating:
+                 `row` is 1-based and `0` is the producer's absent-row sentinel,
+                 so a dataframe-level failure would have rendered
+                 "Row 0: Failed rule 'column_in_dataframe'." — the invented
+                 number this phase exists to kill, one layer out from where
+                 161-03 removed the invented column name.
+
+              The prefix now renders only for a REAL row. A non-numeric or
+              absent `row` on the wire is `false` here too (`undefined >= 1`),
+              so a malformed payload degrades to the bare sentence rather than
+              to "Row undefined:".
+            */}
             {list.map((e, i) => (
               <li key={i}>
-                {rule === "column_in_dataframe"
-                  ? formatColumnInDataframeMessage(e.message)
-                  : `Row ${e.row}: ${e.message}`}
+                {e.row >= 1 ? `Row ${e.row}: ${e.message}` : e.message}
               </li>
             ))}
           </ul>

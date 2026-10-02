@@ -162,6 +162,14 @@ describe("POST /api/admin/match/recompute — REAL client through the seam (SC-1
     // it every case below 500s at the mint and never reaches the seam arm it
     // is actually about.
     process.env.INTERNAL_API_TOKEN = "internal-token-under-test";
+    // 164.1-02 / PYAPI-06 (D-09): the REAL client now also REFUSES with a
+    // `SeamConfigError` before the fetch when ANALYTICS_SERVICE_KEY is absent,
+    // rather than sending an anonymous request that the service answers 401 and
+    // no breaker ever counts. Same reasoning as the token above — without it
+    // every case here 500s at the refusal and never reaches its seam arm.
+    // ⚠️ SERVICE_KEY is captured at MODULE scope in analytics-client.ts, so this
+    // must precede the `vi.resetModules()` + dynamic import below.
+    process.env.ANALYTICS_SERVICE_KEY = "analytics-service-key-under-test";
     vi.resetModules();
 
     shared.store.clear();

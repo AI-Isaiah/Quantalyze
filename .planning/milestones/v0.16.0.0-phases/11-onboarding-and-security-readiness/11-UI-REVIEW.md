@@ -209,32 +209,32 @@ These items are not findings but worth recording for downstream phases:
 ## Files Audited
 
 **Phase 11 source files (read end-to-end):**
-- `/Users/helios-mammut/claude-projects/quantalyze/src/app/(dashboard)/allocations/components/OnboardingBanner.tsx`
-- `/Users/helios-mammut/claude-projects/quantalyze/src/app/(dashboard)/allocations/components/MandateQuickSetCard.tsx`
-- `/Users/helios-mammut/claude-projects/quantalyze/src/app/(dashboard)/allocations/components/WidgetState.tsx`
-- `/Users/helios-mammut/claude-projects/quantalyze/src/app/(dashboard)/allocations/widgets/__tests__/widget-states.fixtures.tsx`
-- `/Users/helios-mammut/claude-projects/quantalyze/src/app/(dashboard)/allocations/widgets/__tests__/widget-states.test.tsx`
-- `/Users/helios-mammut/claude-projects/quantalyze/src/app/security/page.tsx`
-- `/Users/helios-mammut/claude-projects/quantalyze/src/app/(dashboard)/strategies/new/wizard/WithdrawalWarningStrip.tsx`
-- `/Users/helios-mammut/claude-projects/quantalyze/src/app/(dashboard)/strategies/new/wizard/WizardIpAllowlistHint.tsx`
-- `/Users/helios-mammut/claude-projects/quantalyze/src/app/(dashboard)/strategies/new/wizard/WizardClient.tsx`
-- `/Users/helios-mammut/claude-projects/quantalyze/src/app/(dashboard)/strategies/new/wizard/WizardChrome.tsx`
-- `/Users/helios-mammut/claude-projects/quantalyze/src/app/(dashboard)/profile/components/AuditLogSubsection.tsx`
-- `/Users/helios-mammut/claude-projects/quantalyze/src/components/auth/ProfileTabs.tsx`
-- `/Users/helios-mammut/claude-projects/quantalyze/src/lib/widget-state-flag.ts`
-- `/Users/helios-mammut/claude-projects/quantalyze/src/lib/hooks/useSessionStorageBoolean.ts`
+- `src/app/(dashboard)/allocations/components/OnboardingBanner.tsx`
+- `src/app/(dashboard)/allocations/components/MandateQuickSetCard.tsx`
+- `src/app/(dashboard)/allocations/components/WidgetState.tsx`
+- `src/app/(dashboard)/allocations/widgets/__tests__/widget-states.fixtures.tsx`
+- `src/app/(dashboard)/allocations/widgets/__tests__/widget-states.test.tsx`
+- `src/app/security/page.tsx`
+- `src/app/(dashboard)/strategies/new/wizard/WithdrawalWarningStrip.tsx`
+- `src/app/(dashboard)/strategies/new/wizard/WizardIpAllowlistHint.tsx`
+- `src/app/(dashboard)/strategies/new/wizard/WizardClient.tsx`
+- `src/app/(dashboard)/strategies/new/wizard/WizardChrome.tsx`
+- `src/app/(dashboard)/profile/components/AuditLogSubsection.tsx`
+- `src/components/auth/ProfileTabs.tsx`
+- `src/lib/widget-state-flag.ts`
+- `src/lib/hooks/useSessionStorageBoolean.ts`
 
 **Reference files (read for context):**
-- `/Users/helios-mammut/claude-projects/quantalyze/.planning/phases/11-onboarding-and-security-readiness/11-UI-SPEC.md`
-- `/Users/helios-mammut/claude-projects/quantalyze/.planning/phases/11-onboarding-and-security-readiness/11-REVIEW.md`
-- `/Users/helios-mammut/claude-projects/quantalyze/.planning/phases/11-onboarding-and-security-readiness/11-REVIEW-FIX.md`
-- `/Users/helios-mammut/claude-projects/quantalyze/DESIGN.md`
-- `/Users/helios-mammut/claude-projects/quantalyze/src/components/ui/WarningBanner.tsx`
-- `/Users/helios-mammut/claude-projects/quantalyze/src/components/ui/Card.tsx`
-- `/Users/helios-mammut/claude-projects/quantalyze/src/components/ui/Button.tsx`
-- `/Users/helios-mammut/claude-projects/quantalyze/src/app/globals.css`
-- `/Users/helios-mammut/claude-projects/quantalyze/src/app/(dashboard)/allocations/AllocationsTabs.tsx`
-- `/Users/helios-mammut/claude-projects/quantalyze/src/app/(dashboard)/allocations/widgets/meta/KpiStripWidget.tsx`
+- `.planning/phases/11-onboarding-and-security-readiness/11-UI-SPEC.md`
+- `.planning/phases/11-onboarding-and-security-readiness/11-REVIEW.md`
+- `.planning/phases/11-onboarding-and-security-readiness/11-REVIEW-FIX.md`
+- `DESIGN.md`
+- `src/components/ui/WarningBanner.tsx`
+- `src/components/ui/Card.tsx`
+- `src/components/ui/Button.tsx`
+- `src/app/globals.css`
+- `src/app/(dashboard)/allocations/AllocationsTabs.tsx`
+- `src/app/(dashboard)/allocations/widgets/meta/KpiStripWidget.tsx`
 
 **Audit method:** static code review against UI-SPEC §Acceptance Criteria + DESIGN.md tokens. Grep-based passes for hardcoded hex/rgb (zero hits across Phase 11 files), arbitrary spacing (one justified hit: `min-h-[44px]` for touch target), font-weight distribution (two `font-medium` hits flagged on new Phase 11 surfaces), font-size distribution (text-lg / text-sm / text-xs / text-2xl on `/security`), and primitive composition correctness (`<WarningBanner>`, `<Card>`, `<Button>`).
 

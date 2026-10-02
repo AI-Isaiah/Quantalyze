@@ -108,6 +108,10 @@ function basePayload(
     hasSyncing: false,
     equityDailyPoints: [],
     equityCurveSource: "legacy",
+    // Phase 167.1.2 / D-02: the producer emits "rebuilding" for every allocator.
+    equityHistoryState: "rebuilding",
+    equityDailyReturns: [],
+    equityHistoryRebuildReason: null,
     derivedCurveComputedAt: null,
     minHistoryDepthMonths: null,
     equityBaselineUnknown: false,
@@ -130,6 +134,10 @@ function basePayload(
     perKeyReturnsByApiKeyId: {},
     perKeyDailiesGateSatisfied: false,
     eligibleApiKeyIds: [],
+    // Phase 151 / AUM-04 — the split book-entry gate (empty/false defaults).
+    allocatorEligibleApiKeyIds: [],
+    contributingApiKeyIds: [],
+    bookEntryGateSatisfied: false,
     apiKeysCount: 0,
     mandateIsSet: false,
     ...overrides,

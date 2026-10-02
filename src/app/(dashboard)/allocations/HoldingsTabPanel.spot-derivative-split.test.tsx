@@ -173,3 +173,43 @@ describe("HoldingsTabPanel — spot vs derivative split (2026-05-20 regression)"
     expect(positionRows.find((r) => r.symbol === "USDT")).toBeUndefined();
   });
 });
+
+/**
+ * Review round 2 WR-05 (silent-failure-hunter) — the panel used to map a key
+ * MISSING from `apiKeys` and a key PRESENT with a null status to the same
+ * "unknown", which the tables read as trusted. The composer names the first
+ * as "from keys with an unknown sync status", so the tab must be able to tell
+ * them apart. A present-but-null key stays trusted and unflagged.
+ */
+describe("HoldingsTabPanel — a key missing from apiKeys is flagged, a present null status is not (167.1 review round 2 WR-05)", () => {
+  it("sets source_key_missing only on rows whose key is absent from apiKeys, on both tables", () => {
+    const payload = {
+      ...PAYLOAD,
+      apiKeys: [
+        { id: "key-1", sync_status: null, venue: "binance", key_label: "BNB" },
+      ],
+      holdingsSummary: [
+        SPOT_USDT,
+        { ...SPOT_USDT, symbol: "BTC", api_key_id: "key-missing" },
+        PERP_ETH,
+        { ...PERP_ETH, symbol: "SOLUSDT", api_key_id: "key-missing" },
+      ],
+    };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { container } = render(<HoldingsTabPanel {...(payload as any)} />);
+    type Row = { symbol: string; source_key_sync_status: string; source_key_missing?: boolean };
+    const holdingsRows = JSON.parse(
+      container.querySelector("[data-testid='holdings-table-legacy']")!.getAttribute("data-holdings") ?? "[]",
+    ) as Row[];
+    const positionRows = JSON.parse(
+      container.querySelector("[data-testid='open-positions-table-stub']")!.getAttribute("data-rows") ?? "[]",
+    ) as Row[];
+    const flags = (rows: Row[]) =>
+      Object.fromEntries(rows.map((r) => [r.symbol, r.source_key_missing === true]));
+    expect(flags(holdingsRows)).toEqual({ USDT: false, BTC: true });
+    expect(flags(positionRows)).toEqual({ ETHUSDT: false, SOLUSDT: true });
+    // The present-but-null key keeps its trusted "unknown" status.
+    expect(holdingsRows.find((r) => r.symbol === "USDT")?.source_key_sync_status).toBe("unknown");
+  });
+});
+

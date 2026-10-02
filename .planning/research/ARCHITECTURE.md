@@ -1,373 +1,430 @@
-# Architecture Research — v1.16 Production Resilience & Reliability
+# Architecture Research — v1.20 Backlog Burndown (TARGETED: the three risky items)
 
-**Domain:** Hardening existing Vercel↔Railway↔Supabase plumbing (SEAM + JOB + RATE)
-**Researched:** 2026-07-25
-**Confidence:** HIGH (all findings read directly from live source + migrations, not training data)
+**Domain:** Integration design inside an existing Next.js 16 App Router / Supabase RLS / FastAPI-worker system
+**Researched:** 2026-08-20
+**Confidence:** HIGH — every claim below is read from live source at HEAD (`ca3f0c5c`) with file:line; nothing is inferred from training data. Two items carry an explicitly-named MEASUREMENT that is still owed (B-M1, C-M1) and one carries a founder DECISION that is still owed (A-D1).
 
-This is a **subsequent-milestone hardening research** doc, not greenfield domain research.
-It maps the *existing* wiring for the three v1.16 capabilities and states exactly where
-new code should attach. No new external technology is required — every gap below is
-closable with code already-idiomatic to this codebase (AbortSignal.timeout, pg_cron,
-Upstash `checkLimit`).
+> Scope note: this is **not** ecosystem research. No new technology is required for A, B or C — every gap closes with code already idiomatic here (`unstable_cache` + `revalidateTag`, hash-in-Node share tokens, SECURITY DEFINER RPCs, `createAdminClient()` writers, `withPublishedOnly`). The value of this document is *where the new code attaches* and *what breaks if it attaches in the obvious place*.
 
-## System Overview (as it exists today)
+---
+
+## The three items at a glance
+
+| | A — SHARELINK-01 token lane | B — server-authoritative venue provenance | C — public-ranking integrity |
+|---|---|---|---|
+| **Layer** | read path + write path + DDL + cache | write path + DDL (maybe) + one money-math read | read path only |
+| **New DDL** | YES — `strategy_shares` table + `get_shared_factsheet` SECDEF RPC + `create_strategy_share` INVOKER RPC | MAYBE — only if the non-wizard INSERT paths move server-side (`REVOKE INSERT ON api_keys FROM authenticated`) | NO |
+| **New routes** | 3 (mint, revoke, public read surface) | 1 modified (`validate-and-encrypt` returns a row id) or 1 new | 0 |
+| **Cache design** | LOAD-BEARING (this is the landmine) | none | none |
+| **Blast radius** | 13 currently-unpublished rows become reachable-by-token; 0 published rows change | annualization clock (√365 vs √252) on API-keyed strategies | every percentile badge on `/browse/[slug]`, `/discovery/[slug]`, the tearsheet, and `/my-strategies` |
+| **Depends on** | nothing in this milestone | Phase 156 (LANDED, PR #682) | nothing |
+| **Recommended order** | 3rd | 2nd | 1st |
+
+---
+
+## A — SHARELINK-01: the revocable share-token lane
+
+### A.0 The system as it exists today
 
 ```
-Browser ── fetch /api/** ──▶ Next.js 16 (Vercel, Fluid Compute)
-                                │
-                ┌───────────────┼────────────────────────────┐
-                │               │                            │
-                ▼               ▼                            ▼
-     src/lib/analytics-   src/lib/process-key-      src/app/api/**/route.ts
-     client.ts             client.ts                 (withAuth/withRole,
-     (analyticsRequest())  (postProcessKey())          checkLimit, assertSameOrigin)
-                │               │
-                │  X-Service-Key│  Bearer INTERNAL_API_TOKEN
-                ▼               ▼
-     ┌──────────────────────────────────────┐
-     │   FastAPI  analytics-service/main.py  │  (Railway, HTTP)
-     │   routers/{analytics,portfolio,match, │
-     │   exchange,process_key,csv,internal}  │
-     └───────────────┬───────────────────────┘
-                      │ enqueue_compute_job RPC (sync, in same request
-                      │  OR fire-and-forget via Next `after()`)
-                      ▼
-     ┌──────────────────────────────────────┐
-     │        Supabase Postgres              │
-     │  compute_jobs (queue) + RPCs:         │
-     │   claim_compute_jobs_with_priority    │
-     │   mark_compute_job_done/failed        │
-     │   reset_stalled_compute_jobs (in-worker│
-     │     watchdog, 60s loop)               │
-     │  pg_cron: retention_compute_jobs_     │
-     │   orphaned_running (daily 04:15 UTC,  │
-     │   DELETE running rows >4h old)        │
-     └───────────────┬───────────────────────┘
-                      │ claim (FOR UPDATE SKIP LOCKED)
-                      ▼
-     ┌──────────────────────────────────────┐
-     │  analytics-service/main_worker.py     │  (Railway, separate CMD,
-     │  3 asyncio loops: dispatch(30s),      │   same Docker image)
-     │  watchdog(60s), daily-enqueue(24h)    │
-     │  + main_worker_healthz (side HTTP)    │
-     └────────────────────────────────────────┘
+                          GET /factsheet/<id>            GET /factsheet/<id>/v2
+                                   │                              │
+                                   └──────────┬───────────────────┘
+                    src/app/factsheet/[id]/page.tsx:5 re-EXPORTS ./v2/page
+                                              │
+                            ┌─────────────────▼──────────────────┐
+                            │  FactsheetV2Page  (force-dynamic)  │
+                            │  v2/page.tsx:33, :378              │
+                            └─────────────────┬──────────────────┘
+                                              │
+                     LANE A (published)  ─────┼─────  LANE B (owner)
+                     v2/page.tsx:402-411      │       v2/page.tsx:438-521
+                     request-scoped client    │       request-scoped client
+                     withPublishedOnly        │       withPublishedOrOwner(q, user.id)
+                              │               │                │
+                              ▼               │                ▼
+        buildFactsheetPayloadCached           │   fetchAndBuildPayload(id, ownerPredicate)
+        v2/page.tsx:279-327                   │   v2/page.tsx:535-538
+        unstable_cache(                       │   ⛔ DIRECT — no cache read, no cache write
+          keyParts ["factsheet-v2-payload-v6", id]
+          revalidate 3600
+          tags ["factsheet-v2", `factsheet-v2:${id}`]
+        )
+                              │
+                              ▼
+        fetchAndBuildPayload(id, withPublishedOnly)   ← predicate is a LITERAL, v2/page.tsx:296
+        runs on createAdminClient() (SERVICE ROLE)    ← v2/page.tsx:86
 ```
 
-**Key correction to the milestone framing:** there are **two** distinct Vercel→Railway
-client chokepoints today, not one:
+Four measured facts that constrain every design below:
 
-1. **`src/lib/analytics-client.ts`** (`analyticsRequest()`) — used by `portfolio-optimizer`,
-   `bridge`, `simulator`, `admin/match/recompute`, `admin/match/eval`,
-   `keys/validate-and-encrypt` (`validateKey`/`encryptKey`), `scenario/optimize`. Has its
-   own `AbortSignal.timeout(30_000)` default, `X-Service-Key` auth, Zod response
-   validation, `AnalyticsTimeoutError`/`AnalyticsUpstreamError` classes. **No retry, no
-   circuit breaker.**
-2. **`src/lib/process-key-client.ts`** (`postProcessKey()`) — a **separate, parallel**
-   fetch wrapper hitting `${ANALYTICS_URL}/process-key` with `Bearer INTERNAL_API_TOKEN`
-   + `X-Correlation-Id` + `X-User-Id`. Used by `keys/sync`, `verify-strategy`,
-   `csv-finalize`, `finalize-wizard`, `csv-validate`. Has its **own independent**
-   `AbortSignal.timeout(60_000)`, its own timeout/network-error → `504`/`502` mapping.
-   **No retry, no circuit breaker. Zero code sharing with `analytics-client.ts`.**
+1. **The effective cache key is id-ONLY.** `buildFactsheetPayloadCached` receives `` `${id}::${computedAt}` `` (v2/page.tsx:538) and *discards everything after the `::`* (`const [id] = cacheKey.split("::")`, v2/page.tsx:282). Next derives the key from callback source + `keyParts` + args; the suffix never reaches it. The file states this itself at :63-73.
+2. **Therefore lane separation can never be expressed through the key string** (v2/page.tsx:75-80). The wrapper deliberately takes **no** visibility parameter so a viewer-dependent predicate is *unrepresentable*.
+3. **The builder runs on the service-role client** (v2/page.tsx:86) — the injected predicate is the ONLY gate. There is no RLS backstop inside `fetchAndBuildPayload`.
+4. **`/factsheet/[id]` and `/factsheet/[id]/v2` are the same module** (page.tsx:5 re-exports `default` and `generateMetadata`). They share ONE `unstable_cache` entry per id. Any token handling added to the v2 page is automatically live on the bare path too — which is a feature, not a hazard, provided the invariant in A.1 holds.
 
-The milestone's own description ("`analytics-client.ts` ... cascade-500s `keys/sync`,
-`verify-strategy`") is imprecise: `keys/sync` and `verify-strategy` do **not** call
-`analytics-client.ts` at all — they call `process-key-client.ts`. `admin/match/*` is the
-one named route that genuinely goes through `analytics-client.ts` (`recomputeMatch`,
-`evalMatch`). **SEAM must cover both files** or unify them behind one shared resilience
-core — see Recommendation below.
+Related surfaces the current affordance touches:
 
-## Component Responsibilities
+| Site | Gate today | Verdict |
+|---|---|---|
+| `FactsheetView.tsx:1565` → `ShareLinkButton` (`:1307-1338`) | `!scenarioMode` only — **no publish check**; copies `${origin}${pathname}?share=1` and flashes "Link copied" | the defect |
+| `(dashboard)/strategies/page.tsx:175` | `{s.status === "published" && <ShareableLink …/>}` | the correct rule, one screen over |
+| `(dashboard)/discovery/[slug]/[strategyId]/page.tsx:187` | inherits the page's published gate | third site of the same class — **fix the CLASS, all three** |
 
-| Component | Responsibility | Current resilience | Gap |
-|-----------|-----------------|---------------------|-----|
-| `src/lib/analytics-client.ts` | Typed client for `/api/*` FastAPI endpoints (validate-key, encrypt-key, portfolio-analytics/optimizer/bridge, simulator, match/recompute, match/eval) | 30s `AbortSignal.timeout`, typed timeout/upstream-error classes, Zod schema validation | No retry-with-backoff, no circuit breaker — a hung Railway pod holds the Vercel lambda open the full timeout on every call, every time |
-| `src/lib/process-key-client.ts` | Single shared wrapper for the unified `/process-key` endpoint (flows: teaser, onboard, resync, csv) | 60s `AbortSignal.timeout`, distinct `UPSTREAM_TIMEOUT`/`UPSTREAM_NETWORK_ERROR` error codes | Same as above — no retry, no breaker, and **duplicated** timeout/error-mapping logic vs `analytics-client.ts` (two independent implementations of the same resilience concern) |
-| `compute_jobs` (Postgres table + RPCs, migration `20260411144407`) | Durable queue: `pending → running → done/failed/done_pending_children`; partial-unique index prevents duplicate in-flight jobs per (target, kind) | `claim_compute_jobs_with_priority` (FOR UPDATE SKIP LOCKED), `mark_compute_job_done/failed` (claim-token fenced), `defer_compute_job` | None — this is the solid foundation JOB builds on |
-| `main_worker.py` watchdog loop (in-process, 60s) | Resets `running` rows whose `claimed_at` exceeds a **per-kind** threshold back to `pending` | `reset_stalled_compute_jobs` RPC, `WATCHDOG_PER_KIND_OVERRIDES` dict, healthz heartbeat during long dispatches (WEDGE-01 fix) | Only runs **while the worker process is alive** — a full worker crash/outage silences this loop entirely |
-| pg_cron `retention_compute_jobs_orphaned_running` (migration `20260720120000`) | External backstop: `DELETE FROM compute_jobs WHERE status='running' AND claimed_at < now() - interval '4 hours'`, daily 04:15 UTC | Runs **inside Postgres**, independent of worker liveness — this is the correct backstop for "worker died, in-worker watchdog never fires" | Daily cadence only (up to ~24h detection latency); DELETEs (not resets) — a genuinely orphaned job leaves **no terminal row** the wizard/UI can key off; this is the exact WR-02 tradeoff the memory ledger flags as still-open |
-| `after()` fire-and-forget enqueue (csv-finalize, finalize-wizard) | Schedules `enqueue_compute_job` RPC + a `strategy_analytics` placeholder write **after the HTTP response is sent**, via Next 16 `after()` | Already writes a `computation_status='failed'` placeholder **if the enqueue RPC itself errors** (guarded SELECT-then-UPSERT so it never stomps a worker's `complete` row) | The placeholder write lives **inside the same `after()` callback** as the enqueue call. If `after()` itself never runs to completion (Vercel kills/freezes the instance before the callback finishes), **neither the enqueue nor the placeholder fires** — the strategy is stuck with data persisted (`persist_csv_daily_returns` already committed, synchronously, before `after()` is scheduled) but no `compute_jobs` row and no terminal `strategy_analytics` row at all. This is the literal "detect strategy-with-data-but-no-compute-job" case the JOB requirement names. |
-| Upstash rate limiter (`src/lib/ratelimit.ts`) | Named `Ratelimit` instances (`userActionLimiter`, `keysSyncUserLimiter`, `adminActionLimiter`, `simulatorLimiter`, etc.), each call-site imports the specific limiter and calls `checkLimit(limiter, key)` inline | Fail-closed in prod (`VERCEL_ENV==='production'`) if Upstash misconfigured, fail-open elsewhere | **No shared middleware/wrapper** — every route hand-wires its own `checkLimit(...)` call. Extending coverage means editing N route files individually (same pattern as the existing CSRF retrofit, flagged in CONCERNS.md as "no CI gate stops a new route from skipping it") |
-| slowapi (Python side, `analytics-service/main.py` + per-router `Limiter`) | Second, independent layer of rate limiting inside FastAPI itself | `/process-key` POST has ONE blanket `@limiter.limit("100/hour", key_func=_process_key_rate_limit_key)` keyed on `(token_hash, X-User-Id)` covering **all** flow_types (teaser/onboard/resync/csv) together; `portfolio.py` has per-route `10/hour` (`portfolio-analytics`, `portfolio-optimizer`, `portfolio-bridge`) and a now-dead `5/hour` on a **legacy** `/verify-strategy` Python route (superseded by the unified `/process-key` path — the Next.js route no longer calls it) | **`routers/match.py` `/recompute` and `/eval` have NO slowapi decorator at all** — their only protection today is the Vercel-side `adminActionLimiter` (20/min). This is a genuine single-layer gap (no defense-in-depth), distinct from — and narrower than — the milestone's broader "currently-unlimited" framing, which does not hold for most of the named Next.js routes (see RATE findings below). |
+### A.1 ⛔ The poison-proof invariant — stated precisely
 
-## RATE finding: reconcile the milestone framing against the live code
+> **INVARIANT SL-1 (cache):** For any strategy id `X`, the value stored in the `unstable_cache` entry whose `keyParts` are `["factsheet-v2-payload-vN", X]` MUST be *exactly* the value `fetchAndBuildPayload(X, withPublishedOnly)` returns — i.e. it must be a pure function of `(X, database state)` and independent of the request's viewer, session, cookies, query string, headers, and of **any** share token. Equivalently: **the token lane must produce zero cache WRITES and consume zero cache READS at that key.** A `null` return is a value like any other and is subject to the same rule (`unstable_cache` stores `null` unconditionally — v2/page.tsx:530-533).
 
-PROJECT.md's REQ description lists `verify-strategy`, `keys/{sync,validate,encrypt}`,
-`admin/match/recompute`, `admin/partner-import`, `trades/upload`, `intro` as
-"currently-unlimited." **Verified against the live route files, this is not accurate as
-stated** — every one of these Next.js routes already calls `checkLimit(...)` with a named
-Upstash limiter:
+Three corollaries, each of which has already bitten this file once and is written into it:
 
-| Route | Existing Vercel-side limiter | Existing Python-side (slowapi) limiter |
-|-------|------------------------------|------------------------------------------|
-| `verify-strategy` | `publicIpLimiter` (10/min per IP — it's an unauthenticated public route, not "authed") | shared `/process-key` 100/hour (all flow_types combined) |
-| `keys/sync` | `keysSyncUserLimiter` (30/min/user) **+** `userActionLimiter` (5/min per user+strategy) | shared `/process-key` 100/hour |
-| `keys/validate-and-encrypt` (there is no separate `keys/validate` or `keys/encrypt` route — the milestone's `{validate,encrypt}` maps to this one combined route) | `userActionLimiter` (5/min/user) | none dedicated (validate-key/encrypt-key endpoints, not process-key) |
-| `admin/match/recompute` | `adminActionLimiter` (20/min/admin) | **none** — `routers/match.py` has no `@limiter.limit` |
-| `admin/partner-import` | `adminActionLimiter` (20/min/admin) | not applicable (no Python compute call in the hot path) |
-| `trades/upload` | `userActionLimiter` (5/min/user) | not verified in this pass |
-| `intro` | `userActionLimiter` (5/min/user) | not applicable |
+- **SL-1a — a key SUFFIX is not a key.** Appending `::token` yields the *same* entry (A.0 fact 1). Any design whose safety argument is "we vary the cacheKey string" is wrong by construction.
+- **SL-1b — the wrapper must stay predicate-free.** The single structural defence is that `buildFactsheetPayloadCached` accepts no visibility argument (v2/page.tsx:287-294). Do not "generalise" it to take one. If a token lane needs a payload, it calls `fetchAndBuildPayload` **directly**, exactly as the owner lane does at v2/page.tsx:535-538.
+- **SL-1c — the failure is silent and TTL-long.** A violation ships green: the poisoning request is the *owner's own*, so it renders correctly; the 3600s window in which every anonymous visitor to `/factsheet/<id>` receives a private strategy opens afterwards. There is no error, no log, no Sentry event. **The regression test must therefore be adversarial in the phase-148 shape**: owner-with-token request first, then an anonymous request for the same id must still `notFound()`. That test already exists in spirit for lane B (T-148-04) and is the template.
 
-**Implication for the roadmap/requirements phase:** RATE's real gap is narrower and more
-specific than "add rate limiting to unlimited routes." The two concrete, verified gaps
-are:
-1. `analytics-service/routers/match.py` (`/recompute`, `/eval`) has zero Python-side
-   rate limiting — a caller that reaches Railway directly (bypassing Vercel, e.g. via a
-   leaked `X-Service-Key` or a compromised Vercel deploy) has no backstop. Add a
-   `@limiter.limit(...)` decorator mirroring `portfolio.py`'s `10/hour` pattern.
-2. The wiring pattern itself is per-route manual `checkLimit(...)` calls, not a shared
-   middleware — this is the actual "minimal wiring" question RATE should answer:
-   whether to keep hand-wiring (matches existing convention, `withAuth`/`withRole`
-   composition) or introduce a `withRateLimit(handler, limiter)` wrapper. Given
-   `withAuth`/`withAdminAuth`/`withRole` already exist as the composition point and CSRF
-   already composes through them, the **lowest-friction path is a `withRateLimit`
-   higher-order wrapper that composes the same way** — not a global middleware, since
-   different routes need different limiter identities (per-user vs per-IP vs
-   per-user+strategy). This matches Rule 11 (match codebase conventions) better than
-   introducing a new cross-cutting middleware layer.
-3. Re-verify against `.planning/REQUIREMENTS.md` before roadmapping: the requirements
-   phase should re-confirm which specific routes/endpoints are the actual targets,
-   since the founder's plain-English list in PROJECT.md does not match "currently
-   unlimited" literally for the Next.js layer.
+A fourth, easily-missed corollary specific to this milestone:
 
-## SEAM: where timeout/retry/breaker attach
+- **SL-1d — the CDN is a second cache.** `generateMetadata` (v2/page.tsx:329-376) points `openGraph.images` at `/api/og/factsheet/${id}`, and that route is **published-only** (`og/.../route.tsx:40` `withPublishedOnly`) and served `public, max-age=3600, s-maxage=86400, stale-while-revalidate=604800` (`:154`). For an unpublished strategy it will not render a card. ⛔ **Do not "fix" that by making the OG route token-aware** — it would put a CDN-cached, URL-keyed, un-revocable public image of a private strategy behind a 7-day `stale-while-revalidate`. The correct answer is: the token lane ships **no** OG image, keeps `robots: "noindex"` (already set at v2/page.tsx:361), and its `generateMetadata` must not leak the strategy NAME either (today's fallback path resolves the name from a `withPublishedOnly` probe, so it already degrades to `"Strategy"` — verify, do not widen).
 
-**Two chokepoints, not one.** Both need the same resilience wrapper (retry-with-backoff
-on idempotent reads only + circuit breaker), but they are separate modules today:
+### A.2 Recommended shape: a **separate token route**, not a `?s=` param on the id route
 
-- `analyticsRequest()` in `src/lib/analytics-client.ts:65` — the single internal function
-  every exported wrapper (`validateKey`, `encryptKey`, `computePortfolioAnalytics`,
-  `runPortfolioOptimizer`, `findReplacementCandidates`, `simulateAddCandidate`,
-  `recomputeMatch`, `evalMatch`) funnels through. **This is already a single
-  chokepoint for its own callers** — good news, SEAM work here is additive to one
-  function.
-- `postProcessKey()` in `src/lib/process-key-client.ts:83` — the single function every
-  `flow_type` (teaser/onboard/resync/csv) funnels through, called by `keys/sync`,
-  `verify-strategy`, `csv-finalize`, `finalize-wizard`, `csv-validate`. **Also already a
-  single chokepoint for its own callers.**
+The founder's stated shape is `?s=<token>` on the existing URL (TODOS.md:53). That is a UX statement about what the recipient sees; it is not a routing decision, and there are two defensible realisations. **This is decision A-D1 (see A.6) — but the architectural recommendation is the separate route**, for reasons that are measured, not stylistic:
 
-**Recommendation:** rather than wrap each file independently (duplicating the same
-breaker-state logic twice), extract a shared `src/lib/resilient-fetch.ts` (or similar)
-implementing `{ timeout, retry-with-backoff, circuit breaker }` as a small composable
-core, and have both `analyticsRequest()` and `postProcessKey()` call through it. This
-avoids the two-clients-drift problem already visible in production (they independently
-reinvented timeout-error-mapping once already). Circuit breaker state should be
-**per-target** (Railway is one deployment, so effectively one breaker instance is fine,
-but keep it identity-scoped so a future second backend doesn't silently share state).
+| | Option 1 — `?s=` on `/factsheet/[id]` (in-place lane C) | Option 2 — `/factsheet-share/[token]` (RECOMMENDED) |
+|---|---|---|
+| SL-1 enforcement | **behavioural** — a third branch inside a 664-line page that already has two lanes and three "⛔ do not route this through the cache" comments; correctness depends on a future editor reading them | **structural** — a different module, a different `unstable_cache` callback (or none), literally cannot reach `["factsheet-v2-payload-v6", id]` |
+| Shares the id-keyed entry? | yes, by construction (A.0 fact 4) — one mistake away from SL-1c | no |
+| Proxy / public-route registration | none needed (`/factsheet` already in `PUBLIC_ROUTES`, `proxy.ts:17`) | +1 entry in `proxy.ts:17` and +1 prefix arm at `proxy.ts:117` — exactly what `/scenario-share` has |
+| Precedent in-repo | none | **`/scenario-share/[token]` — the whole pattern already exists and is CI-pinned** |
+| Recipient URL aesthetics | `/factsheet/<id>?s=<tok>` — id visible | `/factsheet-share/<tok>` — id NOT in the URL, which *strengthens* the founder's "the id must stay a non-secret" rationale (TODOS.md:48-51) |
+| Owner "Copy Link" for a PUBLISHED strategy | unchanged, no token needed | unchanged, no token needed |
 
-**Retry-safety analysis (idempotent reads only, per the milestone's own constraint):**
-- Safe to retry: `evalMatch` (GET), `computePortfolioAnalytics`, `runPortfolioOptimizer`,
-  `findReplacementCandidates`, `simulateAddCandidate` (all read-and-compute, no
-  mutation on the Postgres side beyond the caller's own analytics cache) — verify each
-  handler is side-effect-free server-side before flipping retry on, since some (e.g.
-  `recomputeMatch`) may have write side effects the SEAM work must NOT blindly retry.
-- **Do not retry** `validateKey`/`encryptKey` (encrypts credentials — retrying a
-  timed-out-but-actually-succeeded encrypt could double-write or race) and
-  `postProcessKey()` calls (the unified `/process-key` router performs real writes —
-  `finalize_csv_strategy`, `persist_csv_daily_returns`, RPC enqueues — a naive retry on
-  a request that *did* succeed upstream but timed out on the response leg would
-  double-execute). The `/process-key` router's existing `WIZARD_DUPLICATE` idempotency
-  handling (visible in `keys/sync`'s `upstream.code === "WIZARD_DUPLICATE"` branch)
-  suggests some idempotency already exists server-side for the wizard flows — SEAM
-  should confirm which `/process-key` flow_types are provably idempotent (safe to
-  retry) before enabling retry broadly, rather than assume none are.
+The `/scenario-share` precedent is the strongest argument, and it is complete:
 
-## JOB: lifecycle end-to-end + where the janitor belongs
+- `src/app/scenario-share/[token]/page.tsx:56-61` — `export const dynamic = "force-dynamic"; export const runtime = "nodejs";` with a comment that states exactly why: *"Shared caches are keyed on the URL, not the token's revocation state. A cached response could be replayed after the token is revoked."*
+- `src/lib/scenario-share-token.ts` — 256-bit `randomBytes(32).toString("base64url")`, sha256 hex hashed **in Node** (pgcrypto `digest` is enabled nowhere in this repo — see the migration header at `20260622120000:24-29`). Raw token lives ONLY in the URL; only the hash is at rest.
+- `supabase/migrations/20260622120000_scenario_shares_and_read_rpc.sql` — `scenario_shares` table, owner RLS with an owner-coherence `EXISTS` clause (`:81-91`), `UNIQUE (scenario_id) WHERE revoked_at IS NULL` partial index (`:111-116`), a `get_shared_scenario(p_token_hash)` SECDEF reader `REVOKE ALL … FROM PUBLIC, anon` + `GRANT EXECUTE … TO service_role` (`:296-297`), an `_assert_no_public_execute` self-verify (`:304`), and a **body-shape DO-block** that reads `pg_get_functiondef` and aborts the apply if the body lost `revoked_at IS NULL` or `status = 'published'` (`:315-342`).
+- `POST /api/allocator/scenario/share` (mint) and `.../share/revoke` — three-layer ownership (route probe → RLS `WITH CHECK` → RPC predicate), atomic revoke-prior-then-insert via a SECURITY **INVOKER** RPC `create_scenario_share`, `NO_STORE_HEADERS` on every response, rate-limit *after* validation, redacted DB-error envelopes.
 
-**Enqueue sites (grep-verified, using Next 16 `after()`):**
-`src/app/api/strategies/csv-finalize/route.ts` (`enqueueCsvAnalyticsAfter`),
-`src/app/api/strategies/finalize-wizard/route.ts` (mirrors the same pattern),
-plus 20+ other `after()` call sites for non-compute-job work (audit logging, email,
-notifications) — the two above are the compute-job-relevant ones.
+Reusing that spine means item A is **mostly a transposition**, not an invention — which is why it is a phase and not a patch, but also why it is lower-risk than its size suggests.
 
-**The actual crash point (verified in `csv-finalize/route.ts`):** `persist_csv_daily_returns`
-runs **synchronously** in the request (before the response is sent) — so by the time
-`after()` schedules the enqueue, the daily-returns data is already durably committed.
-The enqueue + placeholder-on-failure logic then runs **inside** the `after()` closure.
-Today's guard (`writeFailedStrategyAnalyticsPlaceholder`) only fires if the RPC call
-inside `after()` **throws or returns an error** — it does **not** cover the case where
-`after()` itself never completes (Vercel kills the lambda instance before the callback
-runs — documented Vercel behavior under sustained load/instance recycling). That gap is
-exactly JOB's "detect strategy-with-data-but-no-compute-job" scope: a periodic sweep
-must find strategies where `csv_daily_returns` (or equivalent) rows exist for a
-`strategy_id` but `compute_jobs` has no row (of any status) for it, and no
-`strategy_analytics` terminal row exists — then either re-enqueue or write the failed
-placeholder from *outside* the request lifecycle, where `after()` reliability is not a
-factor.
+⚠️ **One thing the scenario precedent does NOT transfer:** `get_shared_scenario` hard-codes `status = 'published'` on the series it resolves. The factsheet share RPC's entire purpose is the opposite — resolving a row that is **not** published. So the pinned body-shape assertion must be re-authored, not copied: assert `revoked_at IS NULL`, assert the `token_hash` predicate, assert the ownership-coherence join to `strategies.user_id`, and assert the body does **not** reference `api_keys` / `portfolios` / `holdings`. Copying the `status='published'` assertion verbatim would abort the apply; deleting it without replacement would leave the reader unpinned.
 
-**Worker crash point:** `main_worker.py`'s `dispatch_tick` claims a **batch of 5** jobs
-per tick (`p_batch_size: 5`) and dispatch is **sequential** within the batch
-(`for job in jobs: ... await dispatch(job)`). The longest per-kind handler timeout is
-30 min (`process_key_long`, `reconstruct_allocator_history`) — so a batch's 5th job can
-legitimately have a `claimed_at` up to ~2.5h old on a healthy worker (this is the exact
-math the `20260720120000` migration's header derives to justify the 4h purge window).
-If the **worker process itself dies** mid-dispatch (OOM, Railway restart, uncaught
-exception escaping the per-job try/except), the row stays `running` forever with no
-in-process watchdog to reset it (the watchdog is *also* part of the dead process).
+### A.3 Components — new vs modified
 
-**Reconciling with the existing orphaned-`running` purge — extend, don't duplicate:**
-The correct mental model is **two tiers, already correctly separated**, and JOB should
-extend the existing migration rather than build a new mechanism:
-1. **In-worker watchdog** (`reset_stalled_compute_jobs`, 60s loop, per-kind thresholds
-   in `WATCHDOG_PER_KIND_OVERRIDES`) — handles "job hung on a live worker," resets to
-   `pending` (retryable), minutes-scale detection. **No JOB change needed here** — this
-   layer is sound.
-2. **External pg_cron purge** (`retention_compute_jobs_orphaned_running`, migration
-   `20260720120000`, daily 04:15 UTC) — handles "worker itself died, nobody is running
-   the watchdog." This is **the correct location for JOB's janitor extension**: it
-   already runs independent of worker liveness (the load-bearing property a Vercel cron
-   route or the worker's own loop cannot offer — a Vercel cron route adds a *third*
-   liveness dependency, and the worker's own loop is exactly what's dead in this
-   scenario). **Do not build a Vercel cron route or a fourth worker loop for this** —
-   it would either (a) depend on the same failure domain (worker loop) or (b) add
-   Vercel Hobby-plan cron-slot pressure (already at its 2-cron ceiling per CONCERNS.md)
-   for a job that Postgres can already run natively and reliably.
-3. **What JOB should actually add to the pg_cron layer:**
-   - Tighten the *cadence* — 04:15-daily leaves up to ~24h of a stuck spinner before
-     detection. The founder's WR-02 decision to widen 2h→4h fixed a false-positive
-     hazard (deleting a live batch-tail job); it did not address detection latency. A
-     more frequent (e.g. hourly) pg_cron run of the *same* DELETE, still gated at the
-     4h `claimed_at` threshold, gets detection latency down without reopening the
-     false-positive risk (the threshold, not the cron frequency, is what protects
-     against eating a live job).
-   - Resolve the WR-02 DELETE-vs-reset question explicitly as part of JOB, since it's
-     the one open decision blocking a clean go-live gate per the memory ledger
-     (`project_worker04_purge_delete_vs_reset_prod_outage`): a DELETE leaves the
-     strategy with **no terminal row at all** (the wizard poller spins forever even
-     after the row is gone) — JOB's "detect stuck computing" sweep (previous
-     paragraph) and this purge should be **the same mechanism**: instead of a bare
-     DELETE, transition truly-orphaned `running` rows to `failed` (a terminal status)
-     so downstream pollers can break out, and only actually delete via the existing
-     30/90-day `retention_compute_jobs_failed`/`done` crons already in place
-     (migration `056`). This closes JOB's "no forever-spinners" goal and the founder's
-     open WR-02 call in one change, reusing 100% of the existing migration
-     infrastructure (just changing the cron body's SQL from DELETE to UPDATE ... SET
-     status='failed').
-   - The csv-finalize/finalize-wizard "data but no job row" case (previous section) is
-     a **different failure mode** from "job row exists but stuck" — it needs its own
-     sweep (a new pg_cron function or an extension of the existing daily retention
-     job family) that looks for orphaned strategies by absence, not by a stale
-     `claimed_at`. This is new, not an extension of `20260720120000` — flag it as a
-     separate JOB sub-requirement.
+**NEW**
 
-**WEDGE-01 constraint (already-fixed precedent, must not be reintroduced):** the P-97
-soak incident proved that heavy synchronous work sharing the worker's single asyncio
-event loop starves the healthz heartbeat past `STALE_THRESHOLD` (90s) → Railway restarts
-the worker mid-job. The fix already in place (`main_worker_healthz`, the
-`_HEARTBEAT_INTERVAL_S` background task cancelled in `finally`, `asyncio.to_thread` for
-Postgres calls in `services/db.py`) is the template: **any new JOB code that runs
-inside `main_worker.py` must never block the event loop** (no synchronous pandas/CPU
-work, no un-awaited blocking I/O). Because the recommended reaper lives in **pg_cron**
-(a separate Postgres-native execution context, not the worker's asyncio loop), it is
-**structurally immune** to WEDGE-01 by construction — this is an additional argument
-for the pg_cron placement over a worker-loop-based janitor, beyond the liveness
-argument above.
+| Component | Kind | Contract |
+|---|---|---|
+| `supabase/migrations/<ts>_strategy_shares_and_read_rpc.sql` | migration | `strategy_shares(id, strategy_id FK, created_by, token_hash, created_at, revoked_at)`; owner RLS mirroring `scenario_shares_owner` with the owner-coherence `EXISTS (SELECT 1 FROM strategies s WHERE s.id = strategy_id AND s.user_id = auth.uid())`; `UNIQUE (strategy_id) WHERE revoked_at IS NULL`; index on `token_hash`; `REVOKE ALL … FROM anon` |
+| `get_shared_factsheet(p_token_hash TEXT)` | SECDEF RPC | resolves token → the SAME column list `fetchAndBuildPayload` selects (v2/page.tsx:90-95) + its `strategy_analytics` embed, gated on `revoked_at IS NULL`. `REVOKE … FROM PUBLIC, anon`; `GRANT EXECUTE … TO service_role`. Body-shape DO-block per A.2 ⚠️ |
+| `create_strategy_share(p_strategy_id UUID, p_token_hash TEXT)` | SECURITY **INVOKER** RPC | atomic: revoke any active row + insert the new one in one transaction (mirrors `create_scenario_share`, `20260622120000:233,289`) |
+| `src/lib/strategy-share-token.ts` | lib | ⚠️ **do not import `scenario-share-token.ts`** — see A.5 anti-pattern 5 |
+| `POST /api/strategies/[id]/share` | route | mint-or-reuse; owner-scoped client; returns `{ url }` exactly once |
+| `POST /api/strategies/[id]/share/revoke` | route | sets `revoked_at = now()`; never deletes |
+| `src/app/factsheet-share/[token]/page.tsx` | RSC | `force-dynamic`, `runtime = "nodejs"`, `publicIpLimiter` (`ratelimit.ts:117`, 10/60s — the same limiter `/scenario-share` uses), **no `unstable_cache` anywhere in the module** |
 
-## New vs Modified — summary table for the roadmapper
+**MODIFIED**
 
-| Item | New or Modified | Where |
-|------|------------------|-------|
-| Shared resilience core (timeout/retry/breaker) | **New** | e.g. `src/lib/resilient-fetch.ts` |
-| `analyticsRequest()` in `analytics-client.ts` | **Modified** | call through the new shared core |
-| `postProcessKey()` in `process-key-client.ts` | **Modified** | call through the new shared core |
-| Retry-safety audit per exported wrapper function | **New** (analysis, then modified call sites) | both client files |
-| "Data but no job" sweep (csv/wizard orphan detection) | **New** pg_cron function or migration | `supabase/migrations/` |
-| Orphaned-`running` purge cadence + DELETE→UPDATE | **Modified** | extends `20260720120000` (new migration on top, do not edit the shipped one) |
-| `withRateLimit` composable wrapper (if adopted) | **New** | `src/lib/api/` alongside `withAuth`/`withRole` |
-| `analytics-service/routers/match.py` rate limiting | **Modified** | add `@limiter.limit(...)` mirroring `portfolio.py` |
-| In-worker watchdog (`reset_stalled_compute_jobs`) | **Unchanged** | already sound, no JOB work needed |
-| `main_worker.py` healthz/heartbeat pattern | **Unchanged** (reference pattern only) | precedent for WEDGE-01 discipline |
+| Site | Change |
+|---|---|
+| `FactsheetView.tsx:1307-1338` (`ShareLinkButton`) | becomes state-aware: published → today's plain-URL copy; unpublished + owner → mint-or-reuse then copy the token URL; never flashes success for an action that cannot succeed |
+| `FactsheetView.tsx:1565` | the `!scenarioMode`-only gate |
+| `(dashboard)/strategies/page.tsx:175` and `(dashboard)/discovery/[slug]/[strategyId]/page.tsx:187` | ⛔ **class fix** — all three share affordances derive from ONE predicate/helper, not three literals. This is the `feedback_close_whole_batch_complete_surface` rule and the 153.6 lesson (a fix landing on one of two twins) |
+| `src/proxy.ts:17` + `:117` | register `/factsheet-share` (Option 2 only) |
+| `src/app/factsheet/[id]/v2/page.tsx` | **ideally zero diff under Option 2.** If it must change, the only acceptable diff is *strengthening* the SL-1 comments. Under Option 1 this file gains a third lane and becomes the phase's entire risk surface |
 
-## Suggested Build Order
+**Revoke UI** — a control has to live where the owner can find it. `StrategyActions` is the natural home and it has a known hole: it branches on `draft`/`pending_review`/`published`/`archived` then `return null`, so **`status='private'` renders zero actions** (TODOS.md:64-69). Contribution-flow strategies are minted `private` (`finalize-wizard/route.ts:1000`). So a revoke control placed in `StrategyActions` is **unreachable for exactly the rows most likely to be shared**. That is decision A-D2.
 
-1. **SEAM first** (the founder's own top-priority ranking, and structurally the
-   highest-leverage single change): extract the shared resilience core, wire
-   `analytics-client.ts` first (it's the simpler, more clearly-idempotent set of
-   callers — `bridge`, `simulator`, `portfolio-optimizer`, `match/eval`), then
-   `process-key-client.ts` (needs the retry-safety-per-flow_type audit before enabling
-   retry, since some flows are non-idempotent writes). Ship timeout+breaker before
-   retry if sequencing needs to split further — breaker alone (fail fast, no retry)
-   is a strict improvement with zero double-execution risk.
-2. **JOB second**, because the "data but no job" sweep and the purge-to-failed-not-delete
-   change both build on SEAM's error classification (a distinguishable
-   `AnalyticsTimeoutError`/`AnalyticsUpstreamError` split is what lets a sweep decide
-   "retry" vs "terminal fail" for a stuck strategy). Two independent sub-tracks that can
-   run in parallel once SEAM lands:
-   - 2a. Extend `20260720120000`'s purge: new migration, cadence tightened, DELETE→
-     terminal-status UPDATE. Low risk, pure SQL, reuses existing retention-cron
-     infrastructure.
-   - 2b. New "data but no job row" sweep — needs a bit more design (what counts as
-     "orphaned," which tables to check per strategy source: csv vs wizard vs
-     resync) before it's a single migration.
-3. **RATE last** (lowest technical risk, most mechanical): confirm the actual gap list
-   against `.planning/REQUIREMENTS.md` (per the RATE finding above, several named
-   routes already have limiters — don't re-wire what's already wired), add the missing
-   `match.py` slowapi decorator, and decide once whether to introduce `withRateLimit`
-   or continue the manual `checkLimit(...)` convention for any genuinely-new coverage.
+### A.4 Data flows
 
-This order respects dependencies (JOB's sweep benefits from SEAM's error taxonomy;
-RATE is independent but cheapest to sequence last given the framing needs
-re-verification first) and keeps the WEDGE-01 constraint satisfied throughout (no new
-JOB code proposed here runs inside the worker's asyncio loop).
+```
+MINT                                          READ (recipient, anonymous)
+────                                          ──────────────────────────
+owner clicks Copy Link                        GET /factsheet-share/<raw>
+  → POST /api/strategies/<id>/share             → publicIpLimiter (10/60s)
+    → withAuth (session)                        → hashShareToken(raw)          [Node]
+    → owner probe on RLS client → 404 if not    → createAdminClient()
+    → mintShareToken() → {raw, hash}            → rpc get_shared_factsheet(hash)
+    → create_strategy_share(id, hash)              ├ token miss → notFound()
+    → 200 { url }   ← raw externalised ONCE        └ revoked   → notFound()
+                                                → build payload from the RPC ROW
+REVOKE                                          → render FactsheetView
+──────                                          ⛔ zero unstable_cache calls in this module
+owner clicks Revoke
+  → POST .../share/revoke → revoked_at = now()
+  → next recipient load 404s IMMEDIATELY
+    (force-dynamic + no-store ⇒ no cache outlives the write)
+```
 
-## Anti-Patterns to Avoid
+⚠️ **The payload-builder seam is the one real integration question.** `fetchAndBuildPayload` (v2/page.tsx:82) is a *query + build* fused into one function, and it takes a visibility predicate rather than a row. The token lane has already done its gating in SQL, so it needs the *build* half without the *query* half. Two shapes:
 
-### Anti-Pattern 1: Building the reaper as a fourth worker loop or a new Vercel cron route
-**What people might do:** add a 4th `asyncio` loop to `main_worker.py`, or a new
-`src/app/api/cron/reap-orphaned-jobs/route.ts` on Vercel.
-**Why it's wrong:** a worker-loop reaper shares the exact failure domain it's meant to
-backstop (worker died → reaper also dead). A Vercel cron route adds pressure to the
-Hobby-plan 2-cron ceiling already flagged as a recurring production incident cause
-(CONCERNS.md: "production was dark Sprint 4 → 2026-04-17 because of the Hobby cap
-breach") and depends on Vercel Cron's own liveness instead of Postgres's.
-**Instead:** pg_cron, extending the migration that already does this correctly.
+- **(a) Extract the build half** into a shared function taking the fetched row — the "ONE path" discipline this file already applies for composites (`readCompositeFactsheet`, v2/page.tsx:153) and single-key basis opts (`readSingleKeyBasisOpts`, v2/page.tsx:196). Higher up-front cost, but it prevents the token surface and the id surface from drifting — which is the exact failure `readSingleKeyBasisOpts` was created to fix (WR-01, v2/page.tsx:182-186).
+- **(b) Pass a token-derived predicate** into `fetchAndBuildPayload` — i.e. `(q) => q.eq("id", resolvedId)` after the RPC has authorised. Cheaper, but it re-queries on the admin client with a predicate that is *not* a visibility predicate, which is precisely the shape `StrategyVisibility` (v2/page.tsx:46) exists to prevent, and it re-opens SL-1b pressure.
 
-### Anti-Pattern 2: Wrapping each client file's fetch call independently
-**What people might do:** add retry/breaker logic separately inside
-`analytics-client.ts` and `process-key-client.ts` (mirroring how they already
-independently reinvented timeout-error mapping).
-**Why it's wrong:** two independent circuit-breaker state machines against the same
-Railway backend can disagree about whether the backend is "open" or "closed," and any
-future bug fix has to land twice (exactly the drift class this codebase's memory
-ledger repeatedly flags — e.g. `feedback_close_whole_batch_complete_surface`).
-**Instead:** one shared core, both clients call through it.
+**Recommend (a).** Note that (a) touches the composite arm and the single-key basis arm, so its diff is wider than it looks — budget for it in the phase, don't discover it.
 
-### Anti-Pattern 3: Blanket-enabling retry on every analytics-client call
-**What people might do:** wrap the whole `analyticsRequest`/`postProcessKey` function
-in a generic retry-on-any-5xx-or-timeout loop.
-**Why it's wrong:** several wrapped calls perform real writes (`validateKey`/
-`encryptKey` encrypt+store credentials; `/process-key` flows finalize strategies,
-persist daily-returns, enqueue jobs) — retrying a request whose response was lost but
-whose write succeeded server-side can double-execute. The milestone description itself
-scopes retry to "idempotent reads only" — honor that literally, per-function, not
-per-file.
-**Instead:** an explicit allowlist of retry-safe functions, verified against what each
-upstream handler actually mutates.
+### A.5 Anti-patterns (each one is a way this ships green and leaks)
+
+1. **Varying the cacheKey string to separate lanes** — SL-1a. The suffix is discarded (v2/page.tsx:282).
+2. **Adding a `visibility` parameter to `buildFactsheetPayloadCached`** — deletes the structural defence at v2/page.tsx:287-294.
+3. **Letting the token lane store `null`** — a token pointing at a strategy whose payload fails to build must not reach the wrapper (v2/page.tsx:530-533).
+4. **Making `/api/og/factsheet/[id]` token-aware** — SL-1d. A CDN-cached, un-revocable public image.
+5. **Reusing `scenario-share-token.ts` for factsheets.** `scenario-share-token.test.ts:53-55` pins `hashShareToken("scenario-share")` to a literal digest; more importantly, one token namespace for two resources invites a cross-resource replay if either RPC ever loosens. Separate module, same algorithm, separate pin.
+6. **Reaching for `use cache` / `cacheLife` / `cacheTag`.** `next.config.ts` does **not** enable `cacheComponents` (verified — no such key), and Next is 16.2.11. The existing `revalidateTag(tag, "max")` call at `admin/strategy-review/route.ts:501` is the Next-16 two-arg form and works today. Introducing Cache Components in this phase would be an unrelated, repo-wide behaviour change riding a security fix.
+7. **Any `Cache-Control` other than no-store on the token surface** — `/scenario-share/[token]/page.tsx:56-61` records the replay-after-revoke reasoning verbatim.
+8. **Fixing the Share button on one of the three sites.** See A.3 MODIFIED.
+
+### A.6 Decisions owed (NOT research — a human/founder call)
+
+- **A-D1 — route vs query param.** `/factsheet-share/[token]` (structural SL-1 enforcement, id not in the URL, +2 proxy lines) vs `?s=` on `/factsheet/[id]` (founder's literal words, zero proxy change, behavioural SL-1 enforcement). Architecture recommends the route.
+- **A-D2 — `status='private'` has no actions at all.** Is a contribution record permanently private (leave `StrategyActions` alone, put revoke on the factsheet itself) or does `private` need a publish path (widen `StrategyActions`)? TODOS.md:64-69 names this an *open product question*. It is on A's critical path because the revoke control needs a home.
+- **A-D3 — does the token lane extend to `/factsheet/[id]/tearsheet` and the PDF routes?** The tearsheet carries its own `force-dynamic` pin and disclosure-tier redaction; the PDF route is separate again. Scoping the token to the HTML factsheet only is defensible and smaller; deciding it *implicitly* is how a second unguarded surface appears.
+
+---
+
+## B — Server-authoritative venue provenance
+
+### B.0 What Phase 156 actually closed, and what it left
+
+Phase 156 landed both migrations (`20260813150106_wizard_rpcs_service_role_writer.sql` = Migration A, `20260814120000_wizard_rpcs_revoke_authenticated.sql` = Migration B, PR #682 @ `5d43df6b`). At HEAD the **wizard** connect path is server-authoritative:
+
+- `create_wizard_strategy` / `add_wizard_composite_key` are SECURITY DEFINER, owned by `postgres`, with a role gate written on `auth.role()` (never `current_user` — the no-op bug named at `20260813150106:125-129`), and `authenticated` holds **no** EXECUTE (Migration B).
+- Both write `exchange` **and** `attested_venue` from the SAME `p_exchange` parameter (`20260813150106:243-255`, `:383-395`), inseparable by CHECK `api_keys_attested_venue_matches_exchange` (post-verify (g), `:585-592`).
+- `attested_venue` survives only because the DEFINER body runs as the OWNER — the `api_keys_scrub_attested_venue` trigger NULLs it for every non-privileged INSERT (`20260813150106:62-67`, `:205-207`).
+- The honest ceiling is written into the code and must not be exceeded: *"the venue is the one this server observed a successful read-only authentication at… NEVER write 'the venue cannot be forged'"* (`finalize-wizard/route.ts:1228-1233`).
+
+Two residuals remain, and **they are one item with two halves**:
+
+**B-i — the non-wizard INSERT paths (TODOS.md:947-975).** Three client components still perform the `api_keys` INSERT themselves, on the user-scoped client, with a client-chosen `exchange` string:
+
+| Site | Payload |
+|---|---|
+| `src/components/strategy/ApiKeyManager.tsx:254` | `{ user_id, exchange, label, ...dbFields }` then auto-links `strategies.api_key_id` (`:270-273`) |
+| `src/components/strategy/StrategyForm.tsx:140` | `{ user_id, exchange: exchangeCanonical, label, ...dbFields }` |
+| `src/components/exchanges/AllocatorExchangeManager.tsx:591` | `{ user_id, exchange, label, …, sync_status: "idle" }` |
+
+All three POST `/api/keys/validate-and-encrypt` first — a route that **already knows the canonical venue it validated** (`validate-and-encrypt/route.ts:78` `exchangeNormalized`, `:185` passed into the legacy handler, `:309` `validateKey(exchange, …)`, `:325` `encryptKey(exchange, …)`). It returns ciphertext but **not** a row id, so the browser does the write. RLS `api_keys_owner` (`20260405061912_rls_policies.sql:22`) is `FOR ALL USING (user_id = auth.uid())` — it constrains *ownership*, not the venue label. Rows created this way carry `attested_venue = NULL` (scrubbed).
+
+**B-ii — the annualization stamp (TODOS.md:2522-2533).** `finalize-wizard/route.ts` reads `exchange, attested_venue` in ONE query (`:1249-1256`), binds them to two deliberately-separate variables (`:1266`, `:1279`), routes the **security** gate through `attestedVenue` (`:1358` `runScopeBroadeningProbe(apiKeyId, attestedVenue)`), and routes the **money-math** stamp through the forgeable `apiKeyExchange` (`:1323` `isCryptoExchange(apiKeyExchange)`), with the reason written out at `:1299-1310`.
+
+### B.1 ⛔ Why "a one-identifier change" is the wrong mental model
+
+TODOS.md:2529 calls B-ii *"a one-identifier change with a two-outcome money-math blast radius"*, and the code comment at `:1303` says the same. **That framing is dangerously incomplete, and this is the single most important architectural finding in this document.**
+
+`attested_venue` is `NULL` in two live populations:
+
+- rows created **on or after 2026-08-11** through the three client-INSERT paths in B-i (trigger-scrubbed);
+- any row the backfill did not reach — the one-time backfill in `20260811210000` is bounded by a DATED cutoff, `SET LOCAL quantalyze.attest_backfill_cutoff = '2026-08-11 00:00:00+00'` with `WHERE attested_venue IS NULL AND created_at < cutoff` (`:695-700`). It is explicitly **not** a "fill forever" rule (`:204-219`).
+
+Now trace the naive swap. `isCryptoExchange` (`closed-sets.ts:569`) answers **false** for `null`. The stamp at `:1321-1329` is `apiKeyId ? (isCryptoExchange(V) ? "crypto" : "traditional") : …`. So `V = attestedVenue = null` ⟹ **`"traditional"` ⟹ √252 on a crypto strategy** — the exact mis-annualization the neighbouring RED-TEAM comment (`:1285-1291`) engineered `skipAssetClassWrite` to prevent, reintroduced through the front door. And it is *worse* than a skip, because `strategies.asset_class` is read **directly** by the worker as the annualization clock (`job_worker` `periods_per_year_for_asset_class(strategies.asset_class)`, per `:1206-1208`) — it does not re-derive from venue.
+
+**Therefore the swap must move with its guard.** The correct shape is: extend the existing fail-toward-honesty rule — `skipAssetClassWrite = Boolean(apiKeyId) && <the venue this stamp reads> === null` — so a null **attestation** produces a SKIP (leave `create-with-key`'s venue-aware draft stamp intact, `create-with-key/route.ts:1089`), never a `'traditional'` default. That is a two-line change, not a one-identifier change, and it is the difference between a correct fix and a silent Sharpe inflation of ~1.20× on every affected crypto strategy.
+
+**B-M1 — MEASUREMENT OWED (blocks B-ii, do not plan around it).** Count, on PROD:
+1. `api_keys` rows with `attested_venue IS NULL AND created_at >= '2026-08-11'`, split by `exchange` and by whether any `strategies` row links them (`api_key_id`);
+2. of those, how many belong to a strategy that has passed or will pass through `finalize-wizard` (i.e. carries `wizard_session_id`).
+If (2) is zero the swap+skip is inert-but-correct; if non-zero, those strategies' `asset_class` changes and that is a re-annualization event needing the golden-parity treatment. This is exactly the pre-flight census pattern `20260811210000:567-676` already established — copy its discipline (a *count-pinned* census that ABORTs on drift), not just its intent.
+
+### B.2 Recommended architecture — extend the Phase-156 writer pattern, don't invent a second one
+
+The Phase-156 pattern generalises cleanly, and its two-migration split is the deployment lesson to reuse verbatim (`20260813150106:16-29`): **deploy-first, revoke-second, never migration-first** — because revoking a grant while the old deploy is still calling with the user-scoped client 42501s every connect for the width of the merge window, and *"the merge IS the apply"* with no ordering against the Vercel build.
+
+```
+TODAY (non-wizard)                        TARGET
+──────────────────                        ──────
+browser                                   browser
+  → POST /api/keys/validate-and-encrypt     → POST /api/keys/validate-and-encrypt
+      (server validates venue V)                (server validates venue V)
+  ← ciphertext                                  → server WRITES the row with V
+  → browser INSERTs api_keys                       via a SECDEF writer RPC
+       with a CLIENT-chosen venue                  (stamps exchange = attested_venue = V)
+                                            ← { api_key_id }
+                                            then: REVOKE INSERT ON api_keys FROM authenticated
+```
+
+Sequenced as three landings, mirroring 156 exactly:
+
+| PR | Content | Safe because |
+|---|---|---|
+| **B-1** | migration: `create_connected_key(p_user_id, p_exchange, …)` SECDEF writer + `GRANT EXECUTE TO service_role`. **No REVOKE.** Additive; the client INSERT path keeps working unchanged | `service_role` already holds EXECUTE by `pg_default_acl` (measured for the 156 twins at `20260813150106:417-425`) — verify, don't assume, for a NEW function |
+| **B-2** | `validate-and-encrypt` (or a sibling route) writes the row via the admin client and returns `{ api_key_id }`; the three client components stop inserting and consume the id | deploy-first; both paths work simultaneously |
+| **B-3** | migration: `REVOKE INSERT ON api_keys FROM authenticated` + post-verify. **After B-2 is live on PROD** | the browser no longer needs INSERT |
+| **B-4** | `finalize-wizard/route.ts:1323` `apiKeyExchange` → `attestedVenue`, **with** the null-guard extension of `skipAssetClassWrite` (`:1292`) | after B-3 every new row is attested; B-M1 bounds the legacy tail |
+
+⚠️ **B-3 has a wider surface than `exchange`.** DELETE is also a live client path (`ApiKeyManager.tsx:352`) and `20260810120000` deliberately left both INSERT and DELETE alone (TODOS.md:962-963). Revoking INSERT without checking every other client writer is how a connect flow dies at merge. Grep for every `.from("api_keys")` mutation before B-3 — at HEAD the write sites are `ApiKeyManager.tsx:254/:352`, `StrategyForm.tsx:140`, `AllocatorExchangeManager.tsx:591`, plus reads/updates at `SyncPreviewStep.tsx:1486`, `SyncProgress.tsx:170`, `keys/sync/route.ts:408`, `keys/[id]/permissions/route.ts:391`.
+
+⚠️ **Migration hygiene that is non-negotiable here** (all sourced from `20260813150106`): `CREATE OR REPLACE`, never `DROP+CREATE` (a fresh function's default ACL grants EXECUTE to PUBLIC — a silent escalation introduced by the act of dropping, `:69-73`); `SET search_path`; `SET lock_timeout`; a role gate on `auth.role()` inside a fail-closed `BEGIN…EXCEPTION` wrapper (`:130-134`); **no `auth.uid()` check on the service_role arm** — it is a permanent silent no-op there (measured, `:139-142`); and a post-verify DO-block that asserts the *comparison*, not merely the *call* (`:540-562` — the "flat union" tell).
+
+### B.3 Components — new vs modified
+
+**NEW:** one migration for the SECDEF writer (B-1); one migration for the REVOKE + post-verify (B-3); `supabase/tests/test_*.sql` gates (RLS/SQL gates MUST live there to run in CI).
+**MODIFIED:** `src/app/api/keys/validate-and-encrypt/route.ts` (returns a row id); `ApiKeyManager.tsx:254`, `StrategyForm.tsx:140`, `AllocatorExchangeManager.tsx:591` (stop inserting); `finalize-wizard/route.ts:1292` + `:1323` (guard + swap); `create-with-key/route.ts:1089` — **audit whether its stamp reads a server-validated venue too** (it reads the route-local `exchange`, which the same request validated, so it is already correct; confirm, and say so in the plan rather than leaving it ambiguous).
+
+### B.4 Decisions owed
+
+- **B-D1 — scope.** Does v1.20 take all of B-1..B-4, or only B-4 (the stamp) gated on B-M1? B-4 alone is small and closes the *money-math* residual; B-1..B-3 close the *provenance* residual and are a three-component connect-flow refactor that TODOS.md:972-975 has deferred twice. Splitting them is legitimate — but B-4-alone is only correct **with** the null-guard, and its value is bounded by how many un-attested rows exist (B-M1).
+- **B-D2 — the oracle.** TODOS.md:2530 says the swap *"needs its own oracle over √365 vs √252"*. Per `feedback_economic_invariant_oracles_not_self_referential`, that oracle must pin the ECONOMICS (a crypto venue annualizes on the calendar clock; a null attestation annualizes on *nothing* — it skips), never re-derive the implementation's own expression. Who authors it, and against what fixture, is a plan-level call.
+
+---
+
+## C — Public-ranking integrity (`getPercentiles`)
+
+### C.0 The system today
+
+```
+/browse/[slug]/page.tsx:39 ─┐
+/discovery/[slug]/page.tsx:42 ─┼─→ getPercentiles(slug)  ──┐
+/factsheet/[id]/tearsheet/page.tsx:147 ─┘                  │
+                                                            ├─→ scoreAgainstPopulation(rows, rows)
+/my-strategies/page.tsx ──→ getOwnRowPercentiles(ownRows) ─┘        src/lib/percentile-core.ts
+                                                                     (the ONE core, founder ruling 2026-08-05)
+```
+
+Both callers project the SAME hoisted constant so they cannot drift:
+
+```
+src/lib/queries.ts:126-127
+const PERCENTILE_ANALYTICS_COLUMNS =
+  "cagr, sharpe, sortino, calmar, max_drawdown, volatility, cumulative_return";
+```
+
+used at `:144`/`:150`/`:155` (`getPercentiles`) and `:625` (`getOwnRowPercentiles`). Neither selects `computation_status`, so a published strategy whose analytics row is `failed` contributes its stale KPIs to **every other strategy's denominator**. Measured on PROD 2026-08-19: 7 CSV strategies carry a non-null `sharpe` + `cagr` on a `failed` row (TODOS.md:828-829).
+
+The gating is **per-surface, not systemic** — `queries.ts:1197` (`isComputedAnalytics(a?.computation_status)`), `:1951`, `:1959-1960` all gate; `PUBLIC_ANALYTICS_COLUMNS` (`:704`) already ships `computation_status` to anonymous readers. The percentile path is the outlier.
+
+### C.1 Where the fix belongs: **query projection + filter, at the ONE core boundary**
+
+Not a view, not a recompute:
+
+- **A DB view is wrong here.** The population is already assembled in TS by two callers that must stay byte-identical to each other; a view would add a migration, a second definition of "published + complete", and a `.planning`-visible DDL surface, while the *actual* defect is a missing column in a string constant. The repo's own precedent for this shape is the hoisted constant at `:123-127` ("so the two projections cannot drift") — strengthen it, don't route around it.
+- **A recompute is wrong here.** Nothing is mis-computed. The KPI values on a `failed` row are honest artefacts of an older successful run or a partial one; the defect is that they are **admitted to a population** they should not be in. Recomputing them would be fixing a different problem (and PROD's 7 rows are historical-class fossils — `csv-finalize/route.ts:1497-1506` documents exactly why they exist and that no current writer can create more).
+- **Projection + filter is right,** and the filter must be applied **once**, on the population construction that both callers share — not twice, in two loops, which is how the two surfaces drift and the same strategy shows two ranks (`percentile-core.ts:10-13`).
+
+### C.2 ⛔ Two landmines that a literal reading of the TODO walks straight into
+
+**C-L1 — `!== "complete"` is the wrong predicate.** TODOS.md:831 says *"exclude non-`complete` rows"*. Taken literally, that also excludes `complete_with_warnings`, which is a **terminal SUCCESS** — a run whose factsheet is valid but had a DQ guard fire (`closed-sets.ts:696-719`). The closed set is `["pending","computing","complete","complete_with_warnings","failed"]` and the codebase-wide rule is written into that file: *"every read-gate MUST use this predicate instead of an exact-match on `'complete'`"* or *"a warned strategy dead-ends"*. **Use `isComputedAnalytics(status)`** (`closed-sets.ts:715`). Note `complete_with_warnings` is a live, populated state — the v1.8 uPnL DQ decision (`PROJECT.md`, `unrealized_pnl_in_anchor`) writes it deliberately. Excluding warned rows would silently shrink the public population and change every rank for a *correctness* reason that does not exist.
+
+**C-L2 — the `< 5` cliff is a rank-disappearance event, not a rank-shift event.** Both functions return `null` below five population rows, in two places each (`:141`/`:171` in `getPercentiles`; `:634`/`:645` in `getOwnRowPercentiles`) and the thresholds are documented as *mirroring each other exactly, "so the page's Pnn presence and its 'ranked against N strategies' copy flip together"* (`:611-614`). Category-scoped calls (`/browse/[slug]`, `/discovery/[slug]`) run against a **much smaller** population than the un-scoped call. Filtering out failed rows in a thin category can push it under 5 ⟹ **every percentile badge in that category vanishes**, plus `/my-strategies` loses its comparison copy. That is a user-visible regression shipped as a correctness fix.
+
+**C-M1 — MEASUREMENT OWED (cheap, blocks nothing but the copy decision).** Per `discovery_categories.slug` on PROD: count published strategies with an analytics row, and the same count after the `isComputedAnalytics` filter. Any slug crossing 5 → 4 is the decision surface for C-D1.
+
+### C.3 The mirror the fix must not break
+
+`src/app/api/strategies/csv-finalize/route.ts:1029-1048` defines `CLOCK_SAFETY_KPI_COLUMNS` and states it **mirrors `PERCENTILE_ANALYTICS_COLUMNS` member for member**, deliberately duplicated rather than imported (`queries.ts` is client-reachable and the constant is not exported), with the instruction *"If that set ever changes, this one must follow."* And at `:1509-1515` it records the 146.2-03/G1 ruling that `computation_status` **joins the projection but is NOT a member of the KPI set** — *"it is not a ranked KPI, it is the marker that says whether the KPI columns are final."*
+
+**Therefore: do NOT append `computation_status` to `PERCENTILE_ANALYTICS_COLUMNS`.** That would make the csv-finalize mirror prose false at three sites (`:1031`, `:1489`, and the `:1509` ruling) and re-open exactly the KPI-set-vs-marker conflation 146.2-03 just resolved. The clean shape preserves both invariants literally:
+
+```ts
+// queries.ts — KPI set unchanged; the marker is appended at the projection site.
+const PERCENTILE_ANALYTICS_COLUMNS =
+  "cagr, sharpe, sortino, calmar, max_drawdown, volatility, cumulative_return";
+/** The gate marker. NOT a ranked KPI — see csv-finalize 146.2-03/G1. */
+const PERCENTILE_GATE_COLUMN = "computation_status";
+const PERCENTILE_PROJECTION = `${PERCENTILE_ANALYTICS_COLUMNS}, ${PERCENTILE_GATE_COLUMN}`;
+```
+
+…and the filter applied where `extractAnalytics` already runs (`:169-174` and `:636-643`), through one shared helper so both loops cannot diverge.
+
+⚠️ `extractAnalytics` (`utils.ts:171-176`) is a pure unwrap — array-or-object, no field filtering — so `computation_status` passes through untouched. And it changes **no disclosure boundary**: `PUBLIC_ANALYTICS_COLUMNS` (`queries.ts:704`) already ships the column to anon.
+
+### C.4 Blast radius on published factsheets
+
+| Surface | Effect |
+|---|---|
+| `/browse/[slug]`, `/discovery/[slug]` | every `Pnn` suffix in `StrategyTable` re-ranks (the suffix rides the active sort column, `StrategyTable.tsx:1078-1096`); the excluded rows lose their badges entirely |
+| `/factsheet/[id]/tearsheet` (`:147`) | `PercentileRankBadge` values shift |
+| `/my-strategies` | `publishedMap` **and** `populationSize` shift together (`:661-665`) — the "ranked against N strategies" copy is derived from the same map, so it stays coherent by construction. Verify it does |
+| A **failed** published strategy's own factsheet | its percentile panel disappears. This is the honest outcome, but it is a visible change to a live page and belongs in the phase's UAT, not in a footnote |
+| `/api/scenario/peer-rank` | **NOT affected** — it goes through `get_verified_cohort_rank` (migration `20260626120000`), a separate cohort path that only *cites* the getPercentiles convention (`peer-rank/route.ts:159`). ⚠️ Check whether that RPC has the same defect; if it does, it is a *sibling* item, not this one, and should be logged rather than absorbed |
+| **Direction is not uniform.** Removing rows changes each surviving strategy's denominator *and* the count of values `<= v`. A strategy can move up or down. Any test asserting "ranks improve" is wrong | |
+
+`StrategyTable.tsx:1091` rendering `formatNumber(s.analytics.sharpe)` ungated (only the status *chip* is gated) is a **separate, adjacent** question — TODOS.md:831-832 explicitly says "decide separately". Keep it separate; bundling it turns a read-path filter into a table-rendering redesign.
+
+### C.5 The test must pin the economics, not the projection
+
+TODOS.md:832 is explicit and matches `feedback_economic_invariant_oracles_not_self_referential`: **a failed row must not move another strategy's percentile rank.** The shape that can actually fail: construct a population, score it, then add a `failed` row carrying an extreme KPI, re-score, and assert every other strategy's rank is *identical*. A test that merely asserts the SQL projection string contains `computation_status` cannot fail when the filter is deleted, and is worse than no test (`feedback_every_test_must_be_able_to_fail`).
+
+⚠️ `queries.percentiles.test.ts` is named at `percentile-core.ts:22` as *"the untouched behaviour oracle"* for the byte-identity of the pre-extraction map. Filtering the population **will** change its fixtures if any carry a non-complete status. Re-baselining it is a deliberate act to be recorded, not a green-making edit.
+
+### C.6 Decisions owed
+
+- **C-D1 — the `< 5` cliff.** If C-M1 shows a category crossing 5 → 4: accept the disappearance (honest, matches the existing convention), or lower the threshold for filtered populations (a second convention — argues against), or fall back to the un-scoped population (changes the meaning of the rank — argues strongly against). Recommend **accept**, and say so in the UAT.
+- **C-D2 — `StrategyTable`'s ungated KPI cells.** Explicitly in-or-out for v1.20. Recommend **out**, logged.
+
+---
+
+## Build order for the milestone
+
+```
+   C  (read-path only, no DDL, no deploy ordering)
+   │   └─ unblocks: nothing. Blocked by: nothing.  ← START HERE
+   ▼
+   B  (extends a LIVE migration pattern; multi-PR deploy ordering)
+   │   B-M1 census ─→ B-4 (stamp + null-guard)          [small, high value]
+   │   B-1 → B-2 → B-3 (writer → deploy → revoke)       [larger, deploy-ordered]
+   ▼
+   A  (own migration + own cache design + own public surface + 2 open decisions)
+       blocked on A-D1 (route vs param) and A-D2 (private-status actions)
+```
+
+**Rationale.**
+
+1. **C first.** Zero DDL, zero deploy ordering, one file plus tests, and it is the only one of the three that is purely a read path — so it can land, be observed on PROD, and be reverted trivially. It also front-loads the two measurements-and-decisions (C-M1, C-D1) that are cheapest to resolve.
+2. **B second.** It *extends a pattern that is already applied to PROD* (`20260813150106` + `20260814120000`), so the risky design work is done and re-usable; what remains is sequencing discipline. It must not be last, because B-3's REVOKE needs a full deploy-then-migrate cycle with soak time. If the milestone runs short, **B-4 alone (stamp + null-guard, gated on B-M1) is the correct minimal cut** and closes the money-math half.
+3. **A last.** It is the only item that introduces a NEW public, anonymous, un-authenticated surface; it needs its own migration, its own token module, its own cache invariant (SL-1) and an adversarial regression test, and it carries two unresolved product decisions. It also has the largest "ships green and leaks" surface (SL-1c). It should get the full plan → discuss → execute → red-team treatment, and it should not share a PR with anything else.
+
+⚠️ **No file-level collisions between the three** (A: `factsheet/**` + new share module; B: `api/keys/**`, `api/strategies/finalize-wizard`, three components, migrations; C: `lib/queries.ts` + `lib/percentile-core.ts`). They *can* be planned in parallel. They should **not** be executed in parallel by concurrent agents — `feedback_concurrent_agents_share_git_index_race` applies, and B and C both touch `supabase/tests/`.
+
+---
+
+## Integration points summary
+
+| Boundary | A | B | C |
+|---|---|---|---|
+| Next `unstable_cache` / `revalidateTag` | **load-bearing (SL-1)** | — | — |
+| `src/proxy.ts` PUBLIC_ROUTES | +1 (Option 2 only) | — | — |
+| Supabase RLS | new owner policy + owner-coherence EXISTS | `api_keys_owner` unchanged; grant-level REVOKE | — |
+| SECURITY DEFINER | new reader RPC | new writer RPC (Phase-156 shape) | — |
+| Service-role client (`createAdminClient`) | token read surface | connect writer | — |
+| `src/lib/visibility.ts` | ⚠️ B25 lint bans a raw `.eq("status","published")` on `strategies` — a token predicate must respect that boundary or be explicitly exempted | — | `withPublishedOnly` unchanged, filter is downstream |
+| Vercel CDN | `/api/og/factsheet/[id]` must stay published-only (SL-1d) | — | — |
+| Railway worker | — | reads `strategies.asset_class` as the annualization clock — the reason B-ii is money-math | — |
+| CI SQL gates | `supabase/tests/test_strategy_shares_rls.sql` (content-by-field, per the `20260622120000:16-22` discipline) | `supabase/tests/test_*.sql` for the grant state | vitest only |
+
+---
+
+## Confidence
+
+| Area | Level | Basis |
+|---|---|---|
+| A — cache invariant + poison mechanism | **HIGH** | read at v2/page.tsx:63-80, :279-327, :527-538; the file documents it against itself |
+| A — token pattern transposability | **HIGH** | `/scenario-share` read end-to-end (token lib, migration, both routes, the page) |
+| A — payload-builder seam (extract vs predicate) | **MEDIUM** | the extraction's true diff width depends on the composite/basis arms; not measured |
+| B — what 156 closed | **HIGH** | both migrations read in full; Migration B confirmed landed at `5d43df6b` (PR #682) |
+| B — the null-attestation √252 trap | **HIGH** | `isCryptoExchange(closed-sets.ts:569)` + the dated backfill cutoff (`20260811210000:695-700`) + the stamp expression (`finalize-wizard:1321-1329`) |
+| B — reachability of un-attested rows through finalize-wizard | **LOW → B-M1** | requires a PROD census; not inferable from source |
+| C — where the fix belongs | **HIGH** | both callers, the shared core, and the csv-finalize mirror read directly |
+| C — `complete_with_warnings` landmine | **HIGH** | `closed-sets.ts:696-719` states the rule explicitly |
+| C — per-category population sizes | **LOW → C-M1** | requires a PROD census |
 
 ## Sources
 
-- `src/lib/analytics-client.ts`, `src/lib/process-key-client.ts` (read in full)
-- `analytics-service/main_worker.py` (read in full)
-- `analytics-service/routers/{match,portfolio,process_key,csv,exchange}.py` (grepped for
-  `@router.`/`@limiter.limit`)
-- `src/app/api/strategies/csv-finalize/route.ts` (read in full — representative
-  `after()` enqueue + placeholder pattern, shared with `finalize-wizard`)
-- `src/app/api/keys/sync/route.ts`, `src/app/api/verify-strategy/route.ts` (read in
-  full)
-- `supabase/migrations/20260411144407_compute_jobs_queue.sql`,
-  `20260412094449_compute_jobs_admin_and_defer.sql`,
-  `20260719120000_*` / `20260720120000_retention_orphaned_running_window_4h.sql` (read
-  in full — the live orphaned-`running` purge + its WR-02/RT-01 rationale)
-- `src/lib/ratelimit.ts` (read in full — all named limiters + fail-open/closed policy)
-- `.planning/PROJECT.md` (Current Milestone section — REQ framing for SEAM/JOB/RATE)
-- `.planning/codebase/ARCHITECTURE.md`, `.planning/codebase/INTEGRATIONS.md`,
-  `.planning/codebase/CONCERNS.md` (2026-04-17 snapshot — cross-referenced, several
-  findings there, e.g. Hobby-cron-cap fragility and the CSRF-retrofit-has-no-CI-gate
-  pattern, are directly relevant precedent for how RATE coverage should NOT be wired)
-- Memory ledger: `project_worker04_purge_delete_vs_reset_prod_outage`,
-  `project_stitch_composite_wedge01_fix_and_local_prod_worker` (grounded the
-  DELETE-vs-reset open question and the WEDGE-01 constraint against the actual shipped
-  fix, not just the summary)
+All in-repo at HEAD `ca3f0c5c` (2026-08-20). Confidence tier for every claim below: **HIGH — primary source, this repository.**
+
+- `src/app/factsheet/[id]/v2/page.tsx` (:33, :46, :63-80, :82-99, :279-327, :329-376, :402-411, :413-521, :527-538)
+- `src/app/factsheet/[id]/page.tsx:5`; `src/app/api/og/factsheet/[id]/route.tsx` (:40, :154)
+- `src/app/factsheet/[id]/v2/FactsheetView.tsx` (:690, :1307-1338, :1565)
+- `src/app/(dashboard)/strategies/page.tsx:175`; `src/app/(dashboard)/discovery/[slug]/[strategyId]/page.tsx:187`; `src/components/strategy/ShareableLink.tsx`
+- `src/app/scenario-share/[token]/page.tsx` (:1-19, :56-61); `src/app/scenario-share/[token]/share-resolve.ts`; `src/lib/scenario-share-token.ts`; `src/app/api/allocator/scenario/share/route.ts`; `.../share/revoke/route.ts`
+- `supabase/migrations/20260622120000_scenario_shares_and_read_rpc.sql` (:5-54, :81-91, :111-116, :233, :289, :296-297, :304, :315-342)
+- `supabase/migrations/20260813150106_wizard_rpcs_service_role_writer.sql` (:16-29, :62-73, :125-142, :205-255, :383-395, :412-433, :540-592)
+- `supabase/migrations/20260814120000_wizard_rpcs_revoke_authenticated.sql`; `20260811210000_api_keys_attested_venue.sql` (:143-219, :294, :567-676, :695-700, :790-805); `20260810120000_lock_api_keys_exchange_column.sql`; `20260405061912_rls_policies.sql:22`
+- `src/app/api/strategies/finalize-wizard/route.ts` (:1160-1233, :1235-1262, :1266, :1279, :1285-1330, :1352-1358); `src/app/api/strategies/create-with-key/route.ts` (:1075-1089); `src/app/api/keys/validate-and-encrypt/route.ts` (:63-78, :185, :306-326)
+- `src/components/strategy/ApiKeyManager.tsx` (:254, :270-273, :352); `src/components/strategy/StrategyForm.tsx:140`; `src/components/exchanges/AllocatorExchangeManager.tsx:591`
+- `src/lib/queries.ts` (:116-127, :141-181, :575-665, :704, :1197, :1951-1960); `src/lib/percentile-core.ts` (:1-30, :31-80); `src/lib/utils.ts:171-208`; `src/lib/closed-sets.ts` (:569, :696-719); `src/components/strategy/StrategyTable.tsx:1078-1096`
+- `src/app/api/strategies/csv-finalize/route.ts` (:1029-1048, :1485-1520); `src/app/api/admin/strategy-review/route.ts:501`; `src/lib/visibility.ts`; `src/lib/ratelimit.ts` (:97, :117); `src/proxy.ts` (:17, :117); `next.config.ts` (no `cacheComponents`); `next@16.2.11`
+- `TODOS.md` (:27-73, :818-833, :940-975, :2522-2534); `.planning/PROJECT.md` § Current Milestone v1.20
 
 ---
-*Architecture research for: v1.16 Production Resilience & Reliability (SEAM + JOB + RATE)*
-*Researched: 2026-07-25*
+*Targeted integration research for v1.20 items A (SHARELINK-01), B (venue provenance), C (ranking integrity).*
+*Researched: 2026-08-20*

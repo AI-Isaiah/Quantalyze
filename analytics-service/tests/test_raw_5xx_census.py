@@ -206,7 +206,59 @@ EXPECTED_NON_LITERAL_STATUS_SITES_UNDER_LOOSE_READING = 4
 #: BLIND SPOT (b): in-tree ``HTTPException`` subclasses and their construction
 #: sites. Latent, not live — every site is a 4xx today.
 EXPECTED_HTTPEXCEPTION_SUBCLASSES = 1
-EXPECTED_SUBCLASS_CONSTRUCTION_SITES = 7
+#: 7 -> 8 (2026-08-09, Phase 153.3 / D-31): ``_validate_mt5_key`` gained a FOURTH
+#: ``VenueTransientHTTPException(424)`` site — the capability-``undetermined``
+#: refusal taken when the gateway terminal's trade-permission signal is
+#: unreadable or the terminal is detached from the trade server. It reuses the
+#: EXISTING transient arm (no new user-facing code is minted here; 153.1 owns the
+#: TS code table), and it is a 4xx like every other site, so blind spot (b) stays
+#: latent rather than live.
+#: 8 -> 9 (2026-08-09, Phase 153.3-03 / D-03): the MT5 validate probe gained ONE
+#: end-to-end deadline above its per-stage ceilings, and its expiry routes to the
+#: SAME transient arm as a probe-stage timeout (a hung terminal is a hung terminal)
+#: — a fifth ``VenueTransientHTTPException(424)`` construction, again a 4xx.
+#: The three MT5 probe-arm sites now resolve to the enclosing ``_connect_and_probe``
+#: rather than ``_validate_mt5_key``: connect+probe moved into one inner coroutine so
+#: a single deadline could bound them. Same function, same arms, one scope deeper.
+#: 9 -> 10 (2026-08-09, Phase 153.3-04 / D-29): the MT5 validate path now takes the
+#: shared terminal lease with a BOUNDED acquisition wait, and a caller still queued
+#: at that bound routes to the SAME transient arm — a busy terminal is recoverable
+#: ("try again" is honest advice: it frees up) and is OUR infrastructure, never the
+#: user's key. A sixth ``VenueTransientHTTPException(424)`` construction; no new
+#: user-facing code is minted (153.1 owns the TS code table) and it is a 4xx like
+#: every other site, so blind spot (b) stays LATENT rather than live.
+#: 10 -> 11 (2026-08-11, Phase 153.5-04 / WIZFORM-ABANDON D-40): the MT5 validate
+#: probe gained an ``except Mt5SessionAbandoned`` arm routing to the SAME transient
+#: shape as a probe-stage timeout. It is a REMOVAL of a 5xx, not an addition: the
+#: abandoned-session fence added in waves 1-2 raises a plain ``Exception`` (D-42, so
+#: no credential-classify arm can absorb an operator fault into a user verdict),
+#: which matched none of this route's arms and left as an unhandled BODYLESS 500 —
+#: exactly the class this census exists to count, and under R-1 a claim of
+#: "service-permanent, do not retry" about the most retryable condition there is.
+#: A seventh ``VenueTransientHTTPException(424)`` construction; no new user-facing
+#: code is minted (153.1 owns the TS code table), so blind spot (b) stays LATENT.
+#: 11 -> 12 (2026-08-11, Phase 153.6-05 / B2): the MT5 validate CONNECT stage gained
+#: its own ``except Mt5SessionAbandoned`` arm, byte-mirroring the D-40 disposition
+#: the PROBE stage got at 10 -> 11 above. Same fence type, DIFFERENT ``try`` — the
+#: construction fence (D-36 AMENDED (ii)) raises from inside ``Mt5Client.__init__``,
+#: which the stage-2 arm cannot see. Like its twin it is a REMOVAL, not an addition:
+#: the refusal was previously absorbed by the broad ``except Exception as
+#: connect_err`` and answered **503 MT5_GATEWAY_UNREACHABLE with
+#: dependency="mt5-gateway"** — one of exactly three sites that COUNT toward
+#: ``breaker:mt5-gateway`` (``src/lib/resilient-fetch.ts``), so our own abandoned
+#: thread was voting to trip the breaker against a healthy gateway. An eighth
+#: ``VenueTransientHTTPException(424)`` construction; no new user-facing code is
+#: minted (153.1 owns the TS code table) and it is a 4xx like every other site, so
+#: blind spot (b) stays LATENT rather than live.
+#: 12 -> 13 (2026-09-22, Phase 167 WR-01): the MT5 validate probe's
+#: ``except Mt5ClientError`` transient tail now answers in TWO ways. A login-stage
+#: refusal with a non-IPC code (``is_mt5_login_refusal``) keeps the 167
+#: ``SIGN_IN_FAILED`` site. Every other transient, meaning a post-login read failure
+#: or an IPC code, gets back the pre-167 ``NETWORK_UNAVAILABLE`` answer, which is
+#: this ninth ``VenueTransientHTTPException(424)`` construction. It reuses an
+#: EXISTING code (no new user-facing code is minted) and it is a 4xx, so blind spot
+#: (b) stays LATENT rather than live.
+EXPECTED_SUBCLASS_CONSTRUCTION_SITES = 13
 
 #: Vacuity fence. A scanner that matched nothing would report agreement with the
 #: quarantine forever, so the scan must prove it saw the tree. Loose floors on

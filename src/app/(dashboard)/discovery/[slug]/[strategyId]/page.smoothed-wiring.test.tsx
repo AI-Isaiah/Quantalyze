@@ -14,6 +14,13 @@
  * neuters the threading. Neuter check: bypass `readSingleKeyBasisOpts` (or
  * drop its spread) in the page's single-key arm → the bundle assertions
  * redden. ("Test the wiring, not just the helper.")
+ *
+ * Phase 169.1 plan 01 (D-26): the page now builds through the shared
+ * `fetchAndBuildPayloadWithReason`, which reads the strategy row (with its
+ * analytics embed) through the service-role client. The admin stub therefore
+ * also answers that `strategies` read with the same row the
+ * `getStrategyDetail` mock returns. The assertions are unchanged: the series
+ * bundles must still reach the payload, now through the shared path.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -80,21 +87,39 @@ const seriesPayload = (basis: "mark_to_market" | "smoothed_mtm") => ({
   conventions: { periods_per_year: 365, cumulative_method: "geometric", day_basis: "calendar" },
 });
 
-/** Admin stub serving `strategy_analytics_series` reads, dispatched on `kind`. */
-function mockAdminSeries(byKind: Record<string, unknown>): {
+/**
+ * Admin stub serving the shared path's `strategies` read (`row`, the strategy
+ * plus its analytics embed) and the `strategy_analytics_series` reads,
+ * dispatched on `kind`.
+ */
+function mockAdminSeries(
+  byKind: Record<string, unknown>,
+  row: Record<string, unknown> = { ...strategyRow(), status: "published", strategy_analytics: analyticsRow() },
+): {
   admin: SupabaseClient;
   readsByKind: () => string[];
 } {
   const reads: string[] = [];
   const from = (table: string) => {
     let seenKind: string | undefined;
+    let selected = "";
     const chain = {
-      select: () => chain,
+      select: (s?: string) => {
+        selected = String(s);
+        return chain;
+      },
       eq: (col: string, val: string) => {
         if (col === "kind") seenKind = val;
         return chain;
       },
       maybeSingle: () => {
+        if (table === "strategies") return Promise.resolve({ data: row, error: null });
+        // Phase 169.1 (D-83 (a)): a build reads the cash_settlement row's frozen
+        // CONVENTIONS echo (a JSON-path projection, not a series). It is answered
+        // with no row and not counted, so `readsByKind` still counts series reads.
+        if (table === "strategy_analytics_series" && selected === "conventions:payload->conventions") {
+          return Promise.resolve({ data: null, error: null });
+        }
         if (table === "strategy_analytics_series" && seenKind) reads.push(seenKind);
         return Promise.resolve(
           table === "strategy_analytics_series" && seenKind && seenKind in byKind
@@ -212,11 +237,16 @@ describe("discovery page — single-key per-basis series wiring (WR-01 regressio
   });
 
   it("hot non-options path: no by-basis keys → NO series roundtrips, payload stays cash-only", async () => {
-    const { admin, readsByKind } = mockAdminSeries({});
+    const analytics = { ...analyticsRow(), metrics_json_by_basis: null };
+    const { admin, readsByKind } = mockAdminSeries({}, {
+      ...strategyRow(),
+      status: "published",
+      strategy_analytics: analytics,
+    });
     vi.mocked(createAdminClient).mockReturnValue(admin as never);
     vi.mocked(getStrategyDetail).mockResolvedValue({
       strategy: strategyRow(),
-      analytics: { ...analyticsRow(), metrics_json_by_basis: null },
+      analytics,
       disclosureTier: "exploratory",
     } as never);
 
@@ -229,5 +259,40 @@ describe("discovery page — single-key per-basis series wiring (WR-01 regressio
     expect(payload!.mtmGate).toBeUndefined();
     expect(payload!.smoothedGate).toBeUndefined();
     expect(readsByKind()).toEqual([]);
+  });
+});
+
+/**
+ * Phase 159 (159-03 / RANK-02) — CALL-SITE pin for this page's detail read,
+ * in the same "test the wiring, not just the helper" spirit as the WR-01
+ * block above.
+ *
+ * Phase 169.1 plan 01 (D-26): the page used to pass a third argument,
+ * `"discovery"`, opting into a wider analytics projection that only its own
+ * builder assembly read. The page now builds through the shared
+ * `fetchAndBuildPayloadWithReason`, which reads the series itself, so that
+ * projection was removed and the read is `getStrategyDetail(id, slug)`.
+ *
+ * What still matters is the SLUG: it is the G11.E.7 cross-category guard
+ * (`discovery_categories!inner(slug)`), and a dropped slug would let
+ * `/discovery/<any-slug>/<id>` render any published strategy. Positional,
+ * whole-argument-list equality, so a dropped or reordered slug reddens.
+ */
+describe("discovery page — the detail read's call site (G11.E.7 slug guard)", () => {
+  it("reads the detail row by id AND slug, with the default projection", async () => {
+    const { admin } = mockAdminSeries({});
+    vi.mocked(createAdminClient).mockReturnValue(admin as never);
+    // The suite does not auto-clear mocks (no `clearMocks` in vitest.config.ts),
+    // so calls accumulate across tests in this file. Clear the CALL LOG only —
+    // `mockClear` leaves the beforeEach `mockResolvedValue` implementation in
+    // place — and this assertion is then order-independent.
+    vi.mocked(getStrategyDetail).mockClear();
+
+    await StrategyDetailPage({
+      params: Promise.resolve({ slug: SLUG, strategyId: STRATEGY_ID }),
+    });
+
+    expect(vi.mocked(getStrategyDetail).mock.calls).toHaveLength(1);
+    expect(vi.mocked(getStrategyDetail).mock.calls[0]).toEqual([STRATEGY_ID, SLUG]);
   });
 });

@@ -3,6 +3,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { formatRelativeTime } from "@/lib/utils";
 import { RouteResponseError } from "@/lib/route-response-error";
+// 164.2-01 / 161-ERRPREFIX — client-safe by construction: `sentry-capture`
+// imports exactly one module and pulls Sentry in dynamically, and it is
+// already imported from `"use client"` components (e.g. EquityChart.tsx:17).
+import { addSentryBreadcrumb } from "@/lib/sentry-capture";
 
 /**
  * The one sentence shown when the failure did NOT come from a route response.
@@ -46,16 +50,30 @@ export interface KeyPermissionBadgeProps {
 
 interface PillProps {
   label: "Read" | "Trade" | "Withdraw";
-  granted: boolean;
+  /**
+   * 162-09 — `null` means the probe did not answer, so this scope is UNKNOWN.
+   * It is a third state, not a synonym for `false`: rendering a failed probe
+   * as "not granted" is as false as rendering it as "granted", and on the
+   * Read chip it would additionally read as "your key is revoked".
+   */
+  granted: boolean | null;
 }
 
 function Pill({ label, granted }: PillProps) {
   // Read+granted is the GOOD state → accent (the institutional teal).
   // Trade/Withdraw + granted is the BAD state → negative (red).
   // Trade/Withdraw + not granted is the NORMAL state → muted + strikethrough.
+  // granted === null is the UNKNOWN state → em-dash, colorless (see below).
   let cls: string;
   let glyph: string;
-  if (label === "Read") {
+  if (granted === null) {
+    // 162-UI-SPEC §C-3/C-4 vocabulary, reused rather than reinvented: an
+    // em-dash for a value that cannot be claimed, muted ink, and no semantic
+    // color in either direction — absence is not an error, so no red, and not
+    // reassurance either, so no accent.
+    cls = "text-text-muted";
+    glyph = "—";
+  } else if (label === "Read") {
     cls = granted ? "text-accent" : "text-negative";
     glyph = granted ? "✓" : "✗";
   } else if (granted) {
@@ -69,8 +87,12 @@ function Pill({ label, granted }: PillProps) {
     <span
       className={`inline-flex items-center gap-1 rounded-sm border border-border px-2 py-0.5 text-fixed-13 ${cls}`}
       data-testid={`key-perm-pill-${label.toLowerCase()}`}
-      data-granted={granted ? "true" : "false"}
-      aria-label={`${label} ${granted ? "granted" : "not granted"}`}
+      data-granted={granted === null ? "unknown" : granted ? "true" : "false"}
+      // The glyph is aria-hidden, so the state has to live in the label:
+      // a screen-reader user must hear "unknown", never a verdict we don't have.
+      aria-label={`${label} ${
+        granted === null ? "scope unknown" : granted ? "granted" : "not granted"
+      }`}
     >
       {label} <span aria-hidden>{glyph}</span>
     </span>
@@ -81,11 +103,29 @@ export function KeyPermissionBadge({ apiKeyId, className = "" }: KeyPermissionBa
   const [perms, setPerms] = useState<Permissions | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  /**
+   * 164.5.4-D3 / A-02 — the route's LAST refusal code, retained for ONE
+   * purpose: deciding whether the "Re-check" control below is an honest offer.
+   *
+   * ⚠️ It is never rendered, and that is a constraint rather than an accident.
+   * The 164.2-01 / 161-ERRPREFIX ruling of 2026-08-26 splits the two audiences
+   * — the user reads the route's curated prose, the machine code goes to the
+   * console and the Sentry breadcrumb. Retaining the code for an AFFORDANCE
+   * decision adds a third consumer of the same fact without moving it into the
+   * render, so that ruling is preserved exactly as it stands.
+   */
+  const [errorCode, setErrorCode] = useState<string | null>(null);
   const mountedRef = useRef(true);
 
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
+    // Invalidated with `error` and `perms` below, for the same reason and in
+    // the same breath: a verdict from the PREVIOUS attempt must never decide
+    // anything about this one. Without this line a single undecryptable answer
+    // would kill the control permanently, including on a key that has since
+    // been reconnected.
+    setErrorCode(null);
     // 140.3-07 / SEAMUX-09 / B-26 member 2 — invalidate BEFORE the refetch.
     // Identical shape to `PortfolioOptimizer`'s `setSuggestions(null)`, itself
     // copied from `WeightOptimizerSection.tsx`'s `setResult(null)`: ONE pattern
@@ -116,11 +156,55 @@ export function KeyPermissionBadge({ apiKeyId, className = "" }: KeyPermissionBa
           );
         }
         const message = err.error ?? `HTTP ${res.status}`;
-        // Prepend the route's structured `code` (e.g. PROBE_BACKEND_UNAVAILABLE)
-        // so the displayed text is greppable in support tickets.
-        throw new RouteResponseError(
-          err.code ? `${err.code}: ${message}` : message,
-        );
+        // 164.2-01 / 161-ERRPREFIX — THE CODE IS SPLIT OUT OF THE SENTENCE.
+        //
+        // This used to throw a ternary that interpolated the structured code,
+        // a colon and a space in front of the route's sentence, and the
+        // comment here justified it by support-ticket greppability.
+        //
+        // ⚠️ THAT IS A PARAPHRASE, NOT A QUOTATION, AND THE DIFFERENCE IS
+        // LOAD-BEARING — the same DEF-16-2 hazard `sentry-capture.ts:36-44`
+        // records one level up. 164.2's own verification greps this file for
+        // the removed expression; quoting it verbatim inside its own
+        // correction would re-seed the exact phrase the absence check looks
+        // for, so the check would fail on CORRECTED code and the next author
+        // would "fix" it by deleting the explanation.
+        // The founder ruling of 2026-08-26 is that both halves are owed, to
+        // DIFFERENT readers: the user reads the route's curated prose (they
+        // are not the reader of `PROBE_BACKEND_UNAVAILABLE`), and the machine
+        // code goes where the people who grep actually look — the browser
+        // console and Sentry. Dropping the code would have failed the ruling
+        // as surely as leaving the prefix in the render, so it is RELOCATED,
+        // not deleted.
+        //
+        // ⚠️ THE CODE MUST BE ITS OWN console.error ARGUMENT. Interpolating it
+        // into the string would defeat the identity assertion in the test
+        // (`call.some((arg) => arg === code)`, the B-27 idiom) and, more to
+        // the point, would put it back inside a sentence — the exact shape
+        // this change exists to end.
+        if (typeof err.code === "string" && err.code.length > 0) {
+          // Retained HERE — in the one branch that has already established the
+          // code is a non-empty string — so the affordance gate below and the
+          // two observability sinks beside it all read the SAME fact under the
+          // same guard. `mountedRef` for the same reason every other state
+          // write in this component takes it.
+          if (mountedRef.current) setErrorCode(err.code);
+          console.error(
+            "[KeyPermissionBadge] probe refused with code:",
+            err.code,
+            message,
+          );
+          // Not awaited: observability must never delay or fail the render
+          // path. `addSentryBreadcrumb` always RESOLVES (see its docblock), so
+          // `void` cannot produce an unhandled rejection here.
+          void addSentryBreadcrumb({
+            category: "key-permission-badge",
+            message: err.code,
+            data: { status: res.status },
+            level: "warning",
+          });
+        }
+        throw new RouteResponseError(message);
       }
       const data = (await res.json()) as Permissions;
       if (mountedRef.current) setPerms(data);
@@ -154,16 +238,78 @@ export function KeyPermissionBadge({ apiKeyId, className = "" }: KeyPermissionBa
     };
   }, [load]);
 
+  // 162-09 / HONEST-02 — ONE fact, decided ONCE, for every claim this panel
+  // makes about the probe result. The plain-English summary below already
+  // branched on `probe_error`; the scope chips and the "Detected … from the
+  // exchange" caption did not. Live PROD QA (2026-08-25) caught the two halves
+  // disagreeing on one screen: "Could not contact the exchange to verify
+  // scopes." directly above "Read ✓ Trade ✓ Withdraw ✓ — Detected 1m ago from
+  // the exchange." The chips are the load-bearing falsehood, not the caption —
+  // Trade ✓ / Withdraw ✓ sits under the connect form's "only read-only keys are
+  // accepted", so a user who believes them concludes their read-only key can
+  // move funds. Presentation only: server-side scope ENFORCEMENT is unaffected.
+  //
+  // ⚠️ COUPLING, recorded by the 162 silent-failure audit (A-5). `=== true`
+  // means an ABSENT `probe_error` reads as a successful probe — the optimistic
+  // arm. That is correct TODAY only because of a fact that lives in another
+  // language, in another repo directory: `analytics-service/routers/internal.py`
+  // always emits the key (`bool(perms.get("probe_error", False))`), so absence
+  // never occurs on the wire. The wire SCHEMA does not enforce that —
+  // `LivePermissionsSchema` marks the field `.optional()`
+  // (src/lib/analytics-schemas.ts) — so nothing between the emitter and this
+  // line would fail if a future response dropped it. It would simply be read as
+  // "the probe succeeded", and the chips would state scopes nobody verified.
+  //
+  // The audit deliberately left the logic ALONE: the component is otherwise
+  // correct, and flipping to a fail-closed default (`!== false`) would make
+  // every legacy/cached body render the failure copy. If that emitter ever
+  // stops emitting the key unconditionally, this line must become the
+  // pessimistic read — and the schema should stop calling optional what the
+  // producer treats as required.
+  const probeFailed = perms?.probe_error === true;
+
   return (
     <div className={`space-y-2 ${className}`} data-testid="key-permission-badge">
       <div className="flex items-baseline justify-between">
         <h3 className="font-display text-base text-text-primary">
           Detected key scopes
         </h3>
+        {/*
+          164.5.4-D3 / A-02 — THE CONTROL IS AN OFFER, AND AN OFFER IS A CLAIM.
+          A pressable "Re-check" says pressing it can change the answer. For
+          ONE code in this route's vocabulary that is false and permanently so:
+          `KEY_UNDECRYPTABLE` means the STORED CIPHERTEXT cannot be read, and
+          no number of re-checks reads it — only reconnecting the key does. The
+          route's own sentence beside this button already says exactly that
+          ("Reconnect the key — retrying will not help."), so until this gate
+          existed the sentence and the button contradicted each other on one
+          screen. That is the same 162-09 / HONEST-02 class this component was
+          already fixed for once, in the chips.
+
+          WHERE THAT JUDGEMENT IS RECORDED: the roster in
+          `src/lib/probe-vocabulary.invariant.test.ts` answers the question
+          "does trying again clear THIS fault, unaided?" for every code this
+          route emits, and `KEY_UNDECRYPTABLE` is its only `retryClearsIt:
+          false` member. That file also holds the law binding every such member
+          to this expression, so a seventh code answered the same way cannot
+          ship a live control by omission.
+
+          ⛔ THE LITERAL IS HARDCODED ON PURPOSE. The roster is a TEST module
+          and importing production behaviour out of one would be worse than
+          this duplication; the route emits the same literal the same way. And
+          the gate is DELIBERATELY NARROW — keyed on this one code, never on
+          "an error occurred". Disabling the control for `CIRCUIT_OPEN` or
+          `PROBE_RATE_LIMITED` would withhold the retry during exactly the
+          outages a retry is the correct remedy for.
+
+          DISABLED, NOT REMOVED: the founder still sees the control and the
+          sentence explaining why it is dead. A vanished button explains
+          nothing.
+        */}
         <button
           type="button"
           onClick={load}
-          disabled={loading}
+          disabled={loading || errorCode === "KEY_UNDECRYPTABLE"}
           className="text-fixed-12 text-text-muted underline-offset-4 hover:text-text-primary hover:underline disabled:cursor-not-allowed disabled:opacity-50"
           data-testid="key-permission-recheck"
         >
@@ -247,18 +393,38 @@ export function KeyPermissionBadge({ apiKeyId, className = "" }: KeyPermissionBa
               </p>
             );
           })()}
+          {/*
+            The chips read from the SAME `probe_error` fact as the summary
+            above. A failed probe still ships read/trade/withdraw booleans on
+            the wire (the _FAIL_CLOSED payload), but none of them is knowable,
+            so each renders as unknown — `—`, colorless — rather than as a
+            verdict in either direction.
+          */}
           <div className="flex flex-wrap gap-2">
-            <Pill label="Read" granted={perms.read} />
-            <Pill label="Trade" granted={perms.trade} />
-            <Pill label="Withdraw" granted={perms.withdraw} />
+            <Pill label="Read" granted={probeFailed ? null : perms.read} />
+            <Pill label="Trade" granted={probeFailed ? null : perms.trade} />
+            <Pill
+              label="Withdraw"
+              granted={probeFailed ? null : perms.withdraw}
+            />
           </div>
-          <p className="text-fixed-12 text-text-muted">
-            Detected{" "}
-            <time dateTime={perms.detected_at} title={perms.detected_at}>
-              {formatRelativeTime(perms.detected_at, Date.now())}
-            </time>
-            {" "}from the exchange.
-          </p>
+          {/*
+            `detected_at` on a failed probe is the timestamp of the FAILURE, so
+            "Detected {t} from the exchange" is false twice over: nothing was
+            detected, and it did not come from the exchange. The summary above
+            already states the limitation plainly, and 162-UI-SPEC §C-4's
+            single-note discipline says one sentence names the state — so this
+            caption is omitted rather than restated.
+          */}
+          {!probeFailed && (
+            <p className="text-fixed-12 text-text-muted">
+              Detected{" "}
+              <time dateTime={perms.detected_at} title={perms.detected_at}>
+                {formatRelativeTime(perms.detected_at, Date.now())}
+              </time>
+              {" "}from the exchange.
+            </p>
+          )}
         </>
       )}
     </div>

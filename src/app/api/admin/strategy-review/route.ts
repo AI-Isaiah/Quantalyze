@@ -8,7 +8,7 @@ import { isComputedAnalytics } from "@/lib/closed-sets";
 import { assertSameOrigin } from "@/lib/csrf";
 import { adminActionLimiter, checkLimit } from "@/lib/ratelimit";
 import { notifyManagerApproved } from "@/lib/email";
-import { checkStrategyGate, isLedgerBackedExchange, StrategyGateUnevaluableError, STRATEGY_GATE_MIN_TRADES, STRATEGY_GATE_MIN_CSV_ROWS } from "@/lib/strategyGate";
+import { checkStrategyGate, isDailyReturnsSourced, StrategyGateUnevaluableError, STRATEGY_GATE_MIN_TRADES, STRATEGY_GATE_MIN_CSV_ROWS } from "@/lib/strategyGate";
 import { logAuditEventAsUser } from "@/lib/audit";
 // 140.4-16 / WR-04 — this route imports NONE of the three seam modules, so
 // `seam-log-coverage.test.ts`'s derived roster is structurally blind to it and
@@ -137,12 +137,6 @@ export async function POST(req: NextRequest) {
   const admin = createAdminClient();
 
   let strategyData: { api_key_id: string | null; name: string; user_id: string } | null = null;
-  // P72 — the linked key's id + whether its exchange is ledger-backed (Deribit).
-  // Both are resolved in the first-pass approve block and reused by the TOCTOU
-  // re-check (immutable across the review window). Captured into plain locals so
-  // the re-check predicate does not depend on `strategyData`'s cross-block type.
-  let approveApiKeyId: string | null = null;
-  let isLedgerBacked = false;
 
   if (action === "approve") {
     const [
@@ -157,7 +151,10 @@ export async function POST(req: NextRequest) {
       admin.from("trades").select("id", { count: "exact", head: true }).eq("strategy_id", id),
       admin.from("trades").select("timestamp").eq("strategy_id", id).order("timestamp", { ascending: true }).limit(1),
       admin.from("trades").select("timestamp").eq("strategy_id", id).order("timestamp", { ascending: false }).limit(1),
-      admin.from("strategy_analytics").select("computation_status, computation_error").eq("strategy_id", id).single(),
+      // `series_completeness` rides this existing select — the gate's
+      // daily-returns branch is decided by the persisted completeness verdict,
+      // so it must be read wherever the gate is called. Zero new queries.
+      admin.from("strategy_analytics").select("computation_status, computation_error, series_completeness").eq("strategy_id", id).single(),
       // CSV-uploaded strategies keep their history in csv_daily_returns, not
       // `trades`. Count it so the gate recognizes it as a valid data source
       // (else every CSV strategy is un-approvable — NO_DATA_SOURCE).
@@ -228,32 +225,19 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // P72 — resolve the linked key's exchange so the gate can distinguish a
-    // ledger-backed (Deribit) keyed strategy — which legitimately has zero
-    // `trades` and a `csv_daily_returns` series — from a keyed FILL-based (perp)
-    // strategy whose 0-trade + funding-series state must NOT publish (no
-    // completeness gate). Immutable across the review window, so fetched once
-    // and reused for the TOCTOU re-check below.
-    approveApiKeyId = strategy?.api_key_id ?? null;
-    if (approveApiKeyId) {
-      const { data: keyRow, error: keyRowError } = await admin
-        .from("api_keys")
-        .select("exchange")
-        .eq("id", approveApiKeyId)
-        .maybeSingle();
-      // Fail LOUD (WR-01): a coerced `isLedgerBacked=false` on a transient read
-      // error would reject a legitimate Deribit onboarding with a misleading
-      // "0 trades / INSUFFICIENT_TRADES" 400. Mirror the csvCountError 503 guard
-      // above — never let an unread venue silently divert the gate branch.
-      if (keyRowError) {
-        console.error("[admin/strategy-review] api_keys exchange lookup failed:", scrubSeamError(keyRowError));
-        return NextResponse.json(
-          { error: "Cannot verify strategy data source. Please try again.", code: "REVIEW_SOURCE_READ_FAILED" },
-          { status: 503 },
-        );
-      }
-      isLedgerBacked = isLedgerBackedExchange(keyRow?.exchange);
-    }
+    // MT5-11/12 — the api_keys `exchange` lookup that used to sit here is GONE.
+    // It existed only to feed the deleted venue-list predicate, a hardcoded
+    // roster of trusted exchanges standing in for "is this daily series
+    // complete?" — a question a venue name cannot answer. That
+    // question is now answered where it can actually be answered — by the
+    // producer that wrote the series — and read back off
+    // `strategy_analytics.series_completeness` in the select above. The route
+    // holds no venue knowledge, so it no longer needs the venue.
+    //
+    // The WR-01 fail-loud property that guard carried is NOT dropped: it moves
+    // to the verdict's own read, which is the `analyticsError` 503 guard above.
+    // An unread verdict must answer 503 about US, never decay into a
+    // "0 trades / INSUFFICIENT_TRADES" 400 about the manager's strategy.
 
     // `checkStrategyGate` is PARTIAL: it refuses (throws) rather than answering
     // for an input it cannot evaluate — trades present, span unreadable. The
@@ -272,7 +256,7 @@ export async function POST(req: NextRequest) {
         computationStatus: analytics?.computation_status ?? null,
         computationError: analytics?.computation_error ?? null,
         csvRowCount: csvRowCount ?? 0,
-        isLedgerBacked,
+        seriesCompleteness: analytics?.series_completeness ?? null,
       });
     } catch (err) {
       if (!(err instanceof StrategyGateUnevaluableError)) throw err;
@@ -334,7 +318,7 @@ export async function POST(req: NextRequest) {
         .eq("strategy_id", id),
       admin
         .from("strategy_analytics")
-        .select("computation_status")
+        .select("computation_status, series_completeness")
         .eq("strategy_id", id)
         .single(),
     ]);
@@ -369,16 +353,20 @@ export async function POST(req: NextRequest) {
     // Daily-returns-sourced strategies (zero trades, history in
     // csv_daily_returns) must re-check the CSV row count, not the trade count —
     // the trade branch would 409 every such strategy on a `trades < 5` that is 0
-    // by construction. This covers keyless CSV uploads AND keyed LEDGER-BACKED
-    // exchanges (Deribit) — but NOT a keyed fill-based (perp) strategy whose
-    // 0-trade + funding-series state must stay on the trade branch. Mirrors the
-    // first-pass gate's isDailyReturnsSourced predicate EXACTLY (P72), including
-    // the `!api_key_id || isLedgerBacked` venue term — the two must never diverge.
-    const isDailyReturnsSourced =
-      recheckTradeCount === 0 &&
-      (recheckCsvCount ?? 0) > 0 &&
-      (!approveApiKeyId || isLedgerBacked);
-    if (isDailyReturnsSourced) {
+    // by construction.
+    //
+    // MT5-11/12 — this CALLS the first-pass gate's predicate; it no longer
+    // restates it. What stood here was a hand-written copy under a comment
+    // saying the two "must never diverge", and they diverged anyway: the
+    // enforcement mechanism was prose. A shared function cannot drift.
+    // `recheckCsvCount`'s existing `?? 0` null-guard semantics are preserved
+    // verbatim, including at the threshold comparison below.
+    const recheckDailyReturnsSourced = isDailyReturnsSourced({
+      tradeCount: recheckTradeCount,
+      csvRowCount: recheckCsvCount ?? 0,
+      seriesCompleteness: recheckAnalytics?.series_completeness ?? null,
+    });
+    if (recheckDailyReturnsSourced) {
       if ((recheckCsvCount ?? 0) < STRATEGY_GATE_MIN_CSV_ROWS) {
         return NextResponse.json(
           { error: "Cannot approve: CSV history fell below threshold during review.", code: "REVIEW_RECHECK_FAILED" },

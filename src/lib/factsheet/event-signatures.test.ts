@@ -1,6 +1,13 @@
 import { describe, it, expect } from "vitest";
 import { computeEventSignatures } from "./event-signatures";
 import { cumEq } from "./compute";
+import type { EventSignature } from "./types";
+
+/** A view that must be populated in the fixture; fails loud on the CR-01 null. */
+const present = (s: EventSignature | null): EventSignature => {
+  if (s === null) throw new Error("expected a populated signature view, got null");
+  return s;
+};
 
 describe("computeEventSignatures", () => {
   // Build a 50-day toy series where every other day is +1%, -1% alternating.
@@ -16,27 +23,31 @@ describe("computeEventSignatures", () => {
   it("counts win/loss events at 1d horizon", () => {
     expect(sigs.h1.winCount).toBe(11);
     expect(sigs.h1.lossCount).toBe(11);
+    // No null anywhere: both views hold the same population.
+    expect(sigs.h1.benchWinCount).toBe(11);
+    expect(sigs.h1.benchLossCount).toBe(11);
   });
 
   it("anchors mean trajectory at 0 on the event day (t=WINDOW)", () => {
     // By construction the rebased trace at t=14 is always 0.
-    expect(sigs.h1.winOfBenchmark.mean[14]).toBeCloseTo(0, 8);
-    expect(sigs.h1.winOfEquity.mean[14]).toBeCloseTo(0, 8);
-    expect(sigs.h1.lossOfBenchmark.mean[14]).toBeCloseTo(0, 8);
-    expect(sigs.h1.lossOfEquity.mean[14]).toBeCloseTo(0, 8);
+    expect(present(sigs.h1.winOfBenchmark).mean[14]).toBeCloseTo(0, 8);
+    expect(present(sigs.h1.winOfEquity).mean[14]).toBeCloseTo(0, 8);
+    expect(present(sigs.h1.lossOfBenchmark).mean[14]).toBeCloseTo(0, 8);
+    expect(present(sigs.h1.lossOfEquity).mean[14]).toBeCloseTo(0, 8);
   });
 
   it("produces 29-point traces (±14d window)", () => {
-    expect(sigs.h1.winOfBenchmark.mean).toHaveLength(29);
-    expect(sigs.h1.winOfBenchmark.median).toHaveLength(29);
-    expect(sigs.h1.winOfBenchmark.p25).toHaveLength(29);
-    expect(sigs.h1.winOfBenchmark.p75).toHaveLength(29);
-    expect(sigs.h1.winOfBenchmark.p05).toHaveLength(29);
-    expect(sigs.h1.winOfBenchmark.p95).toHaveLength(29);
+    const s = present(sigs.h1.winOfBenchmark);
+    expect(s.mean).toHaveLength(29);
+    expect(s.median).toHaveLength(29);
+    expect(s.p25).toHaveLength(29);
+    expect(s.p75).toHaveLength(29);
+    expect(s.p05).toHaveLength(29);
+    expect(s.p95).toHaveLength(29);
   });
 
   it("p25 ≤ median ≤ p75 at every offset", () => {
-    const s = sigs.h1.winOfBenchmark;
+    const s = present(sigs.h1.winOfBenchmark);
     for (let t = 0; t < 29; t++) {
       expect(s.p25[t]).toBeLessThanOrEqual(s.median[t] + 1e-9);
       expect(s.median[t]).toBeLessThanOrEqual(s.p75[t] + 1e-9);
@@ -44,7 +55,7 @@ describe("computeEventSignatures", () => {
   });
 
   it("p05 ≤ p25 and p75 ≤ p95 at every offset", () => {
-    const s = sigs.h7.lossOfEquity;
+    const s = present(sigs.h7.lossOfEquity);
     for (let t = 0; t < 29; t++) {
       expect(s.p05[t]).toBeLessThanOrEqual(s.p25[t] + 1e-9);
       expect(s.p75[t]).toBeLessThanOrEqual(s.p95[t] + 1e-9);
@@ -80,10 +91,111 @@ describe("computeEventSignatures", () => {
     const r = Array.from({ length: 50 }, (_, i) => (i === 7 ? -1 : 0.01));
     const out = computeEventSignatures(r, r, cumEq(r).map(x => Math.max(x, 1e-9)));
     // Every aggregated number must be finite — no NaN, no Infinity.
-    const s = out.h1.winOfBenchmark;
+    const s = present(out.h1.winOfBenchmark);
     for (let t = 0; t < 29; t++) {
       expect(Number.isFinite(s.mean[t])).toBe(true);
       expect(Number.isFinite(s.p95[t])).toBe(true);
+    }
+  });
+});
+
+/**
+ * Phase 169.4 ALLOCTRUTH plan 05 (169.5 D-65, 169.4 D-70(1)): a comparator null is a
+ * day with no data, never a 0% day. An event whose verdict reads a null is skipped;
+ * a trace whose window reads a null is dropped, like an edge event. The
+ * trace reads the 28 daily returns at indices eventIdx-13 .. eventIdx+14 (the
+ * point at -14 is the close ending day eventIdx-14, so that day's own return is
+ * not part of any trace).
+ */
+describe("computeEventSignatures: a comparator null is skipped, never read as 0 (D-65, D-70(1))", () => {
+  const N = 80;
+  const J = 40; // the one null
+  const nullAsZero = (a: ReadonlyArray<number | null>) => a.map((r) => r ?? 0);
+
+  it("strategy-driven: a null in the benchmark drops exactly the benchmark traces that read it; equity traces are unchanged", () => {
+    const strat = Array.from({ length: N }, (_, i) => (i % 2 === 0 ? 0.01 : -0.01));
+    const benchDense = Array.from({ length: N }, (_, i) => (i % 3 === 0 ? 0.004 : -0.002));
+    const bench: Array<number | null> = benchDense.map((r, i) => (i === J ? null : r));
+    const eq = cumEq(strat);
+    const honest = computeEventSignatures(strat, bench, eq);
+    const dense = computeEventSignatures(strat, benchDense, eq);
+    // Window-eligible events are 14..65 (52). Those reading index 40 are 26..53 (28).
+    expect(dense.h1.benchWinCount + dense.h1.benchLossCount).toBe(52);
+    expect(honest.h1.benchWinCount + honest.h1.benchLossCount).toBe(52 - 28);
+    // CR-01: the equity view keeps its own population, and says so.
+    expect(honest.h1.winCount + honest.h1.lossCount).toBe(52);
+    // The verdict reads only the strategy, so the eligible population is unchanged ...
+    expect(honest.h1.eligibleWinCount).toBe(dense.h1.eligibleWinCount);
+    // ... and so are the equity traces (the strategy carries no null).
+    expect(honest.h1.winOfEquity).toEqual(dense.h1.winOfEquity);
+    expect(honest.h7.lossOfEquity).toEqual(dense.h7.lossOfEquity);
+    // The same series 0-filled keeps all 52: the null would have been a flat day.
+    const zeroFilled = computeEventSignatures(strat, nullAsZero(bench), eq);
+    expect(zeroFilled.h1.benchWinCount + zeroFilled.h1.benchLossCount).toBe(52);
+  });
+
+  it("benchmark-driven: an event at a null, an h7 event whose trailing 7 hold a null, and an equity trace reading a null are all skipped", () => {
+    // Every day +1% except one null: every surviving equity trace is exactly
+    // 1.01^(t-14) - 1, so any trace built across a 0-filled day shows up as a
+    // spread between p05 and p95.
+    const ret: Array<number | null> = Array.from({ length: N }, (_, i) => (i === J ? null : 0.01));
+    const out = computeEventSignatures(ret, ret, cumEq(nullAsZero(ret)));
+
+    // h1: the event AT the null is skipped (79 eligible), and the traces reading it
+    // are dropped (52 - 28 = 24 benchmark traces).
+    expect(out.h1.eligibleWinCount).toBe(N - 1);
+    expect(out.h1.eligibleLossCount).toBe(0);
+    expect(out.h1.benchWinCount).toBe(24);
+    // The equity traces compound the same event series, so they drop the same 28.
+    expect(out.h1.winCount).toBe(24);
+    // h7: indices 6..79 have a trailing window (74); those whose trailing 7 hold
+    // index 40 are 40..46 (7), skipped rather than read as a 0% day.
+    expect(out.h7.eligibleWinCount).toBe(74 - 7);
+    // Equity traces: none reads the null, so every one is the exact +1% path.
+    for (const s of [present(out.h1.winOfEquity), present(out.h7.winOfEquity)]) {
+      for (let t = 0; t < 29; t++) {
+        expect(s.p05[t], `t=${t}`).toBeCloseTo(s.p95[t], 12);
+        expect(s.mean[t], `t=${t}`).toBeCloseTo(Math.pow(1.01, t - 14) - 1, 12);
+      }
+    }
+  });
+});
+
+/**
+ * Phase 169.4 CR-01 (review round 1, + SFH MEDIUM-1): a BTC read that failed, or
+ * BTC ending more than 14 days before the strategy, leaves the benchmark series
+ * all null. Every benchmark trace is dropped; every equity trace is kept. Before
+ * the fix the set was counted by benchmark traces (0 wins · 0 losses over
+ * populated equity panels) and the empty benchmark view aggregated to six
+ * all-zero series (a flat 0% "trajectory" of a benchmark with no data).
+ */
+describe("computeEventSignatures: each view is counted by its own traces; an empty view is null (CR-01)", () => {
+  const N = 60;
+  const strat = Array.from({ length: N }, (_, i) => (i % 2 === 0 ? 0.01 : -0.01));
+  const benchNull: Array<number | null> = new Array(N).fill(null);
+  const out = computeEventSignatures(strat, benchNull, cumEq(strat));
+
+  it("an all-null benchmark: the benchmark views are null with a 0 count, the equity views keep their own count", () => {
+    for (const set of [out.h1, out.h7]) {
+      expect(set.winOfBenchmark).toBeNull();
+      expect(set.lossOfBenchmark).toBeNull();
+      expect(set.benchWinCount).toBe(0);
+      expect(set.benchLossCount).toBe(0);
+      expect(set.winOfEquity).not.toBeNull();
+      expect(set.lossOfEquity).not.toBeNull();
+    }
+    // Window-eligible events 14..45 (32), alternating: 16 wins, 16 losses.
+    expect(out.h1.winCount).toBe(16);
+    expect(out.h1.lossCount).toBe(16);
+    expect(out.h7.winCount + out.h7.lossCount).toBeGreaterThan(0);
+  });
+
+  it("a series too short for any ±14d window: every view is null, never an all-zero series", () => {
+    const r = Array.from({ length: 20 }, () => 0.01);
+    const short = computeEventSignatures(r, r, cumEq(r));
+    for (const set of [short.h1, short.h7]) {
+      expect([set.winOfBenchmark, set.lossOfBenchmark, set.winOfEquity, set.lossOfEquity]).toEqual([null, null, null, null]);
+      expect([set.winCount, set.lossCount, set.benchWinCount, set.benchLossCount]).toEqual([0, 0, 0, 0]);
     }
   });
 });

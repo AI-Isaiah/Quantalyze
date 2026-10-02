@@ -1,0 +1,399 @@
+/**
+ * `tokenizeStatements` — THE SPAN CONTRACT (phase 164.3.1, Primitive A).
+ *
+ * ============================================================================
+ * WHO CONSUMES THIS AND WHY IT IS PINNED SEPARATELY
+ * ============================================================================
+ * `mutation-runner-neuter.test.ts` pins what the neuter DOES. This file pins
+ * the SHAPE the tokenizer emits, because that shape is a published contract
+ * with a consumer outside this file:
+ *
+ *   Plan 164.3.1-05 (Primitive B — source-location attribution) resolves a
+ *   raise's file line from psql's verbose error output as
+ *
+ *       raise_file_line = DO_statement.startLine + CONTEXT_block_line − 1
+ *
+ *   (verified twice on PostgreSQL 16.13 in the phase research: 3+5−1=7 and
+ *   2+4−1=5). That arithmetic is wrong unless a `DO $$ … $$;` block is ONE
+ *   statement whose `startLine` is the DO line, and unless the numbering is
+ *   1-based. So those are pinned here, not left to a reading of the code.
+ *
+ * Plans 09, 10 and 11 inherit the same spans transitively. Renaming the export
+ * or reshaping `{ startLine, endLine, text, executableText }` is a COSTLY
+ * change after Wave 2 lands; this file is what makes that cost visible.
+ *
+ * ============================================================================
+ * THE BLOCK-COMMENT NESTING DECISION SHIPS WITH A FIXTURE (RESEARCH A4)
+ * ============================================================================
+ * PostgreSQL block comments NEST. The line-local regex this tokenizer replaced
+ * did not handle that, and the research recorded nesting in the corpus as
+ * ASSUMED-ABSENT rather than measured. A choice recorded only in a comment is
+ * a choice nobody can check, so the fixture below states which behaviour
+ * shipped: NESTING. If someone un-nests it, this file goes red by name.
+ *
+ * Reads via node:fs, never shell grep — grep is silently NUL-blind in this repo
+ * (`src/lib/wizardErrors.test.ts` carries a deliberate NUL at line 1572).
+ */
+import { describe, expect, it } from "vitest";
+
+import { readdirSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+import {
+  BRANCH_HEAD_KEYWORDS,
+  maskNonCode,
+  skipBlockComment,
+  tokenizeStatements,
+} from "../../scripts/mutation-runner/parse.mjs";
+import { scanSql } from "../../scripts/sql-body-normalize.mjs";
+import { BLOCK_CLOSERS, BRANCH_HEAD_BARE_CODE } from "./helpers/branch-head-bare-code";
+
+const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
+
+interface Statement {
+  startLine: number;
+  endLine: number;
+  text: string;
+  executableText: string;
+  head: boolean;
+  terminated: boolean;
+  depth: number;
+  start: number;
+  end: number;
+}
+
+/** `run.mjs` and `parse.mjs` are untyped; narrowing here keeps `any` from making every assertion vacuous. */
+const tokenize = (text: string): Statement[] => tokenizeStatements(text) as Statement[];
+const mask = (text: string): string => maskNonCode(text) as string;
+
+const span = (s: Statement) => `${s.startLine}-${s.endLine}`;
+
+describe("span contract: 1-based inclusive line spans", () => {
+  it("a single-line statement spans exactly its own line", () => {
+    const statements = tokenize(["SELECT 1;", "SELECT 2;", "SELECT 3;"].join("\n"));
+    expect(statements.map(span)).toEqual(["1-1", "2-2", "3-3"]);
+    // 1-BASED. An off-by-one here silently shifts every raise plan 05 resolves.
+    expect(statements[0].startLine).toBe(1);
+  });
+
+  it("a multi-line single-quoted literal is ONE statement spanning every line it covers", () => {
+    const statements = tokenize(
+      ["PERFORM set_config('x', 'a", "b THEN", "c', false);", "SELECT 2;"].join("\n"),
+    );
+    expect(statements.map(span)).toEqual(["1-3", "4-4"]);
+    // The interior line `b THEN` must not have been read as a branch head —
+    // that is the R3 residual "multi-line literal ending in THEN".
+    expect(statements.filter((s) => s.head)).toEqual([]);
+  });
+
+  it("a multi-line dollar-quoted body is ONE statement, and its interior is depth+1", () => {
+    const statements = tokenize(["EXECUTE $q$", "BEGIN", "junk int;", "$q$;", "SELECT 2;"].join("\n"));
+    const top = statements.filter((s) => s.depth === 0);
+    expect(top.map(span)).toEqual(["1-4", "5-5"]);
+    // The `BEGIN` inside the body is NOT a depth-0 head. It exists only as an
+    // interior unit, which no consumer at depth 0 ever walks.
+    expect(top.filter((s) => s.head)).toEqual([]);
+    expect(statements.some((s) => s.depth === 1 && s.head)).toBe(true);
+  });
+
+  it("a NESTED block comment is one region — the whole thing, not up to the first close", () => {
+    // RESEARCH A4's decision, made checkable. If nesting were dropped, the
+    // scanner would end the comment at the inner `*/` and `still comment */`
+    // would become a statement — so this assertion fails BY NAME.
+    const statements = tokenize(
+      ["/* outer /* inner */ still comment */", "SELECT 1;"].join("\n"),
+    );
+    expect(statements.map((s) => s.text)).toEqual(["SELECT 1;"]);
+    expect(statements.map(span)).toEqual(["2-2"]);
+  });
+
+  it("an UNNESTED reading would have produced a second statement — the fixture can fail", () => {
+    // Non-vacuity: the fixture above only proves something if the un-nested
+    // reading really differs. Here is the same bytes with the outer comment
+    // removed, so the trailing text IS code — proving the input is not inert.
+    const statements = tokenize(["/* inner */ still_comment();", "SELECT 1;"].join("\n"));
+    expect(statements.map((s) => s.text)).toEqual(["still_comment();", "SELECT 1;"]);
+  });
+});
+
+describe("block-comment skipping is ONE helper, bounded by the REGION", () => {
+  // `scanRegion` and `peekNextWord` each carried their own nesting `/* … */`
+  // walk, and the peek copy read `text[i + 1]` without checking `i + 1 < to`.
+  // A region is a dollar-quoted BODY, so the byte at `to` belongs to the
+  // enclosing statement, not to the comment — a two-character look must never
+  // cross it. Both sites now call `skipBlockComment`; this pins the bound.
+  const skip = (text: string, to: number): number => skipBlockComment(text, 0, to) as number;
+
+  it("an unterminated `/*` stops at `to`, never past it", () => {
+    // `/* */` cut at 4: the `*` is the last byte IN the region, the `/` is
+    // the first byte OUTSIDE it. The un-bounded copy paired them, closed the
+    // comment and returned 5 — an index past the region. MEASURED RED with
+    // the `j + 1 < to` checks removed (the old peek copy): 5 and 4 vs 4 and 3.
+    expect(skip("/* */", 4)).toBe(4);
+    expect(skip("/*/*", 3)).toBe(3); // a straddling `/*` is not a nested open either
+    expect(skip("/* x", 4)).toBe(4);
+  });
+
+  it("a terminated comment returns the index after its OUTERMOST close (non-vacuity)", () => {
+    // The same helper, the same bytes with the region wide enough: the bound
+    // above only proves something if the closer is honoured when it is inside.
+    expect(skip("/* */", 5)).toBe(5);
+    expect(skip("/* a /* b */ c */ SELECT", 24)).toBe(17);
+  });
+
+  it("reached through the EXCEPTION peek: an unterminated `/*` at the end of a body yields a bare EXCEPTION head", () => {
+    // The peek looks past `EXCEPTION` for `WHEN`; the comment runs to the end
+    // of the `$$` body, so the peek finds nothing and the head is `EXCEPTION`
+    // alone. Documented limit: the byte at `to` is always the closing `$`, so
+    // this path cannot OBSERVE the bound — the two `skip` cases above are what
+    // fail without it; this pins that the shared path stays sane at the edge.
+    const statements = tokenize("DO $$ BEGIN NULL; EXCEPTION /* $$; WHEN OTHERS THEN NULL;");
+    expect(statements.filter((s) => s.depth === 1).map((s) => [s.head, s.text])).toEqual([
+      [true, "BEGIN"],
+      [false, "NULL;"],
+      [true, "EXCEPTION"],
+    ]);
+  });
+});
+
+describe("span contract: a DO block is ONE statement starting on its DO line", () => {
+  const SOURCE = [
+    "BEGIN;", //                                   1
+    "", //                                         2
+    "DO $$", //                                    3
+    "DECLARE", //                                  4
+    "  v int;", //                                 5
+    "BEGIN", //                                    6
+    "  RAISE EXCEPTION 'TEST FAILED (X 1): x';", // 7
+    "END $$;", //                                  8
+    "", //                                         9
+    "ROLLBACK;", //                               10
+  ].join("\n");
+
+  it("the DO statement starts at the DO line and ends at its terminator", () => {
+    const doStmt = tokenize(SOURCE).find((s) => s.depth === 0 && s.text.startsWith("DO $$"));
+    expect(doStmt, "no depth-0 DO statement was emitted at all").toBeDefined();
+    expect(span(doStmt as Statement)).toBe("3-8");
+  });
+
+  it("plan 05's resolution formula lands on the raise's real line", () => {
+    // psql reports `CONTEXT: PL/pgSQL function inline_code_block line N at
+    // RAISE`, where line 1 is the remainder of the `DO $$` line. For this
+    // source psql reports N=5, and 3 + 5 − 1 = 7 — the RAISE's actual line.
+    // Asserting the arithmetic here is what makes the span a contract rather
+    // than a coincidence plan 05 would discover in CI on ubuntu.
+    const statements = tokenize(SOURCE);
+    const doStmt = statements.find((s) => s.depth === 0 && s.text.startsWith("DO $$")) as Statement;
+    const CONTEXT_BLOCK_LINE = 5;
+    expect(doStmt.startLine + CONTEXT_BLOCK_LINE - 1).toBe(7);
+
+    // Emission is PRE-ORDER, so the enclosing DO block is listed before the
+    // statements of its body and it CONTAINS the raise's text too. A consumer
+    // that takes the first match gets the whole block; the raise is the
+    // INNERMOST carrier. `run.mjs`'s `innermostCarriers` exists for exactly
+    // this, and pinning the ordering here is what makes that a contract rather
+    // than an accident of the walk.
+    const carriers = statements.filter((s) => s.text.includes("TEST FAILED (X 1)"));
+    expect(carriers.map((s) => s.depth)).toEqual([0, 1]);
+    const raise = carriers[carriers.length - 1];
+    expect(raise.startLine).toBe(7);
+    expect(raise.endLine).toBe(7);
+  });
+});
+
+describe("span contract: a compound line yields multiple statements sharing that line", () => {
+  it("decomposes the real corpus's EXCEPTION-compound line into head + two statements", () => {
+    // The REAL bytes, read from the REAL file. A retyped copy would drift.
+    const compound = readFileSync(
+      join(REPO_ROOT, "supabase", "tests", "test_profiles_privileged_columns_locked.sql"),
+      "utf8",
+    )
+      .split("\n")
+      .filter((l) => /^\s*EXCEPTION\s+WHEN\s+OTHERS\s+THEN\s+\S.*;\s*END\s*;\s*$/.test(l));
+    expect(compound.length).toBeGreaterThanOrEqual(7);
+
+    const statements = tokenize(compound[0]);
+    expect(statements.map((s) => [s.head, s.text])).toEqual([
+      [true, "EXCEPTION WHEN OTHERS THEN"],
+      [false, "v_raised := true;"],
+      [false, "END;"],
+    ]);
+    // All three share one line — which is the whole point.
+    expect(statements.map(span)).toEqual(["1-1", "1-1", "1-1"]);
+  });
+
+  it("decomposes the [R4-C01] compound HEAD shape so the privileged statement is separable", () => {
+    const statements = tokenize("SET ROLE postgres; IF NOT ok THEN");
+    expect(statements.map((s) => [s.head, s.text])).toEqual([
+      [false, "SET ROLE postgres;"],
+      [true, "IF NOT ok THEN"],
+    ]);
+  });
+});
+
+describe("branch-head units", () => {
+  it("every keyword the implementation publishes produces a head in its bare-code spelling", () => {
+    // The list is exported so the neuter test's cross-product can generate from
+    // it. That only means anything if each entry really produces a head, so the
+    // list is checked against the tokenizer rather than against a second list.
+    // The bare-code table is SHARED with that test (IN-04): one table, two
+    // oracles, and a keyword without a spelling fails by name in both.
+    const BARE = BRANCH_HEAD_BARE_CODE;
+    expect((BRANCH_HEAD_KEYWORDS as string[]).length).toBeGreaterThan(0);
+    expect(Object.keys(BARE).sort()).toEqual([...(BRANCH_HEAD_KEYWORDS as string[])].sort());
+    for (const [keyword, source] of Object.entries(BARE)) {
+      const statements = tokenize(source);
+      expect(statements.length, `${keyword}: ${source}`).toBe(1);
+      expect(statements[0].head, `${keyword}: ${source} is not a head unit`).toBe(true);
+    }
+  });
+
+  it("a block CLOSER is not a head — END LOOP; tokenizes exactly like END IF;, END CASE; and END;", () => {
+    // CR-01 (164.3.1 review). `END` sat in the tokenizer's LOOP_OPENERS, so
+    // `END LOOP;` came out `[head: true, terminated: false, "END LOOP"]` while
+    // `END IF;` was an ordinary terminated statement. Two consumers read `head`
+    // as "the head of the enclosing branch": the neuter walk stopped on the
+    // closer and accepted a neuter with `SET ROLE postgres;` left live behind a
+    // multi-line loop, and `failureBranches` anchored the branch on it and lost
+    // the guard. The opener spellings above never asserted the closers.
+    // Non-vacuity on the shared closer table: one closer per kind the runner's
+    // block matcher recognises (LOOP, IF, CASE, and the bare BEGIN…END).
+    expect([...BLOCK_CLOSERS].sort()).toEqual(["END CASE;", "END IF;", "END LOOP;", "END;"]);
+    for (const closer of BLOCK_CLOSERS) {
+      const statements = tokenize(closer);
+      expect(
+        statements.map((s) => [s.head, s.terminated, s.text]),
+        `${closer} must be one terminated, non-head statement`,
+      ).toEqual([[false, true, closer]]);
+    }
+  });
+
+  it("a CASE expression's THEN and ELSE are not heads", () => {
+    // Otherwise `v := CASE WHEN a THEN 1 ELSE 2 END;` would split into four
+    // units and the backward scan would terminate inside an expression.
+    const statements = tokenize("v := CASE WHEN a THEN 1 ELSE 2 END;");
+    expect(statements.map((s) => [s.head, s.text])).toEqual([
+      [false, "v := CASE WHEN a THEN 1 ELSE 2 END;"],
+    ]);
+  });
+
+  it("WR-01: an E'…' literal honours backslash escapes, so the statement after it survives", () => {
+    // MEASURED 2026-09-02 pre-fix: `[[false, "RAISE EXCEPTION E'it\'s x'; SELECT 1;"]]`
+    // — ONE unterminated statement. The scanner closed the literal at `\'`, the
+    // tail opened a second literal that ran to EOF, and `SELECT 1;` was
+    // swallowed into the raise's span. The normalizer read the same bytes
+    // correctly, so the two definitions of "what is code" disagreed.
+    const statements = tokenize("RAISE EXCEPTION E'it\\'s x'; SELECT 1;");
+    expect(statements.map((s) => [s.terminated, s.text])).toEqual([
+      [true, "RAISE EXCEPTION E'it\\'s x';"],
+      [true, "SELECT 1;"],
+    ]);
+    // The literal's interior is DATA: nothing inside it may reach the
+    // projection a consumer classifies on.
+    expect(statements[0].executableText).not.toContain("s x");
+    expect(statements[0].executableText).toMatch(/^RAISE EXCEPTION E' +';$/);
+  });
+
+  it("WR-01: an ordinary literal whose PRECEDING identifier ends in E is not an escape literal", () => {
+    // The prefix rule is `E` NOT preceded by an identifier character — the
+    // normalizer's exact condition. `CASE'a\'` would otherwise read `\'` as an
+    // escape and swallow the terminator the other way round.
+    const statements = tokenize("SELECT CASE'a\\'; SELECT 2;");
+    expect(statements.map((s) => [s.terminated, s.text])).toEqual([
+      [true, "SELECT CASE'a\\';"],
+      [true, "SELECT 2;"],
+    ]);
+  });
+
+  it("an unterminated statement is marked, never silently shortened", () => {
+    const statements = tokenize("RAISE EXCEPTION 'TEST FAILED (X 1): x'");
+    expect(statements.length).toBe(1);
+    expect(statements[0].terminated).toBe(false);
+    expect(tokenize("SELECT 1;")[0].terminated).toBe(true);
+  });
+});
+
+describe("the masking projection preserves offsets", () => {
+  it("blanks every non-code region and keeps length and line count identical", () => {
+    const source = [
+      "SELECT 'a THEN b', \"quoted THEN\"; -- trailing THEN",
+      "/* block",
+      "THEN",
+      "*/",
+      "EXECUTE $q$ THEN $q$;",
+    ].join("\n");
+    const masked = mask(source);
+
+    expect(masked.length, "offsets must be identical or every span is wrong").toBe(source.length);
+    expect(masked.split("\n").length).toBe(source.split("\n").length);
+
+    // A keyword survives ONLY where PostgreSQL would read one. The quoted
+    // IDENTIFIER is code and is deliberately kept.
+    expect(masked).toContain('"quoted THEN"');
+    expect(masked.replace(/"quoted THEN"/, "").includes("THEN")).toBe(false);
+  });
+});
+
+describe("WR-01 — the tokenizer and the normalizer agree on WHAT IS CODE", () => {
+  // Two readers with different blind spots over one text compose into a silent
+  // hole — [VAC04-C1], this phase's own thesis. `maskNonCode` (this tokenizer)
+  // and `scanSql(…).masked` (scripts/sql-body-normalize.mjs) are the two
+  // definitions of "non-code" the repo carries. Their ONE structural
+  // difference is deliberate: the tokenizer blanks a dollar-quote's tags with
+  // its body, the normalizer keeps the tags — so the normalizer's mask is
+  // compared with its tags blanked. Everything else (comment bodies AND
+  // delimiters, literal interiors, quoted identifiers kept) must agree
+  // byte-for-byte. MEASURED 2026-09-02: 71/71 corpus files agree.
+  const normalizerProjection = (text: string): string => {
+    const scanned = scanSql(text);
+    const chars = scanned.masked.split("");
+    for (const r of scanned.dollarRegions) {
+      for (let k = r.start; k < r.contentStart; k += 1) if (text[k] !== "\n") chars[k] = " ";
+      for (let k = r.contentEnd; k < r.end; k += 1) if (text[k] !== "\n") chars[k] = " ";
+    }
+    return chars.join("");
+  };
+
+  /** The MEASURED pre-fix disagreement: a backslash-escaped apostrophe. */
+  const ESCAPE_FIXTURE = "RAISE EXCEPTION E'it\\'s x'; SELECT 1;";
+
+  it("CALIBRATION: both readers blank the escape fixture's literal to the same shape", () => {
+    // Pinned as the SHAPE both must reach, not as "equal to each other": two
+    // identity functions are equal too. Pre-fix the tokenizer produced
+    // `RAISE EXCEPTION E'   's x'           ` here — the second apostrophe
+    // opened a literal that ran to EOF and blanked the terminator.
+    const shape = /^RAISE EXCEPTION E' {7}'; SELECT 1;$/;
+    expect(maskNonCode(ESCAPE_FIXTURE)).toMatch(shape);
+    expect(normalizerProjection(ESCAPE_FIXTURE)).toMatch(shape);
+  });
+
+  it("agree byte-for-byte on EVERY gate file in the corpus and on the escape fixture", () => {
+    const dir = join(REPO_ROOT, "supabase", "tests");
+    const files = readdirSync(dir)
+      .filter((f) => f.endsWith(".sql"))
+      .sort();
+    expect(files.length, "an empty corpus agrees with anything").toBeGreaterThan(0);
+
+    const members: Array<[string, string]> = [
+      ...files.map((f): [string, string] => [f, readFileSync(join(dir, f), "utf8")]),
+      ["<escape fixture>", ESCAPE_FIXTURE],
+    ];
+    const disagreements: string[] = [];
+    for (const [name, text] of members) {
+      const fromTokenizer = maskNonCode(text);
+      const fromNormalizer = normalizerProjection(text);
+      if (fromTokenizer === fromNormalizer) continue;
+      let at = 0;
+      while (at < fromTokenizer.length && fromTokenizer[at] === fromNormalizer[at]) at += 1;
+      const around = (s: string) => JSON.stringify(s.slice(Math.max(0, at - 12), at + 12));
+      disagreements.push(`${name} @${at}: tokenizer ${around(fromTokenizer)} vs normalizer ${around(fromNormalizer)}`);
+    }
+    expect(
+      disagreements,
+      "the two definitions of 'what is code' diverged — bytes one reader classifies on and the other treats as data are a silent hole",
+    ).toEqual([]);
+    // Non-vacuity: the corpus AND the fixture were compared.
+    expect(members.length).toBe(files.length + 1);
+  });
+});

@@ -1,0 +1,907 @@
+/**
+ * Phase 164 / SHARE-01 + SHARE-02 — the recipient token lane, at the route
+ * layer (no real DB, no real network).
+ *
+ * What each group is actually protecting:
+ *
+ *   RENDER — a valid token must render the factsheet for an ANONYMOUS session,
+ *   in recipient mode. If `recipientShare` or the "shared privately" notice ever
+ *   stopped being passed, the recipient would see a Copy-Link control that
+ *   rebuilds the URL WITHOUT the token — handing out a link that 404s for the
+ *   next person. That is the founder-hit defect, one lane over.
+ *
+ *   MISS → 410 — unknown, malformed and read-failed tokens must all converge on
+ *   `/factsheet-share/gone`, never `notFound()`. 410 is honest on THIS lane
+ *   (the holder already had the token); 404 stays the bare-id lane's answer,
+ *   because telling an id holder that an id exists is an existence oracle.
+ *
+ *   ORDERING — the limiter runs BEFORE any DB or crypto work, and the format
+ *   guard before any DB work. Both are asserted by proving the admin client was
+ *   NEVER constructed, not by reading the source. An enumeration defence that
+ *   runs after the scan defends nothing.
+ *
+ *   PENDING ≠ DEAD — a valid token whose payload is not built yet must NOT 410.
+ *   Telling someone a live link is dead is a false statement, and "still
+ *   computing" is exactly when an owner is most likely to have shared it.
+ *
+ *   METADATA — SL-1d. The token page must ship static metadata with
+ *   `robots: noindex`, no `generateMetadata`, and no reference to the OG image
+ *   route: that route is CDN-cached, URL-keyed and un-revocable, so an OG image
+ *   of a private strategy could never be withdrawn.
+ */
+import { describe, it, expect, vi, beforeEach } from "vitest";
+import { renderToStaticMarkup } from "react-dom/server";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import type { ReactElement } from "react";
+
+import { deriveShareToken } from "@/lib/strategy-share-token";
+
+vi.mock("server-only", () => ({}));
+
+// redirect() throws to unwind the RSC render (mirrors next/navigation).
+const redirectMock = vi.hoisted(() => vi.fn());
+const notFoundMock = vi.hoisted(() => vi.fn());
+vi.mock("next/navigation", () => ({
+  redirect: (path: string) => {
+    redirectMock(path);
+    throw new Error("__REDIRECT__");
+  },
+  // Present so an accidental notFound() on this lane is COUNTED rather than
+  // crashing with "not a function" — the assertion below reads better as
+  // "never called" than as an import error.
+  notFound: () => {
+    notFoundMock();
+    throw new Error("__NOT_FOUND__");
+  },
+}));
+
+vi.mock("next/headers", () => ({
+  headers: async () => new Headers({ "x-forwarded-for": "203.0.113.7" }),
+}));
+
+const checkLimitMock = vi.hoisted(() => vi.fn(async () => ({ success: true })));
+vi.mock("@/lib/ratelimit", () => ({
+  publicIpLimiter: {},
+  checkLimit: (...args: unknown[]) => checkLimitMock(...(args as [])),
+  getClientIp: () => "203.0.113.7",
+}));
+
+// The admin client. `createAdminClient` itself is counted, so "no DB work" can
+// be asserted as "the client was never even constructed" — a stronger and much
+// less fakeable claim than counting queries.
+const createAdminMock = vi.hoisted(() => vi.fn());
+// 167.2-REVIEW-SFH M-6: the compute-state read failure is captured.
+const captureToSentryMock = vi.hoisted(() => vi.fn());
+vi.mock("@/lib/sentry-capture", () => ({ captureToSentry: captureToSentryMock }));
+// 167.2-REVIEW IN-03: the head count's answer and its filters.
+const memberCountValue = vi.hoisted(() => ({ value: 1 as number }));
+const memberCountCalls = vi.hoisted(() => [] as Array<[string, unknown]>);
+const adminFromMock = vi.hoisted(() => vi.fn());
+const sharesReadMock = vi.hoisted(() =>
+  vi.fn(async (_cols?: string, _isCol?: string, _isVal?: unknown) => ({
+    // `data` is nullable because that is the shape PostgREST actually returns
+    // on an error — {data: null, error} without throwing. Typing it non-null
+    // here would make the "DB error" case below unwritable, which is exactly
+    // the case most likely to regress.
+    data: [] as Array<{
+      strategy_id: string;
+      generation: number;
+      nonce: string;
+    }> | null,
+    error: null as { message?: string } | null,
+  })),
+);
+/**
+ * Read (3), the pending card's compute-state read (Phase 167.2, KCS-11). The
+ * builder RECORDS every call made on it, so the projection, every `eq` bound,
+ * the order and the limit are asserted from what the page actually sent, and
+ * answers whatever `{ data, error }` the test queued at `.limit()`.
+ */
+type JobsReadCall = {
+  cols: string | null;
+  eqs: Array<[string, unknown]>;
+  order: [string, unknown] | null;
+  limit: number | null;
+  ins: Array<[string, unknown]>;
+};
+type JobsReadAnswer = {
+  data: Array<Record<string, unknown>> | null;
+  error: { message?: string } | null;
+};
+const jobsReadMock = vi.hoisted(() =>
+  vi.fn(
+    async (_call: JobsReadCall): Promise<JobsReadAnswer> => ({
+      data: [],
+      error: null,
+    }),
+  ),
+);
+vi.mock("@/lib/supabase/admin", () => ({
+  createAdminClient: () => {
+    createAdminMock();
+    return {
+      from: (table: string) => {
+        adminFromMock(table);
+        if (table === "strategy_shares") {
+          return {
+            select: (cols: string) => ({
+              is: (isCol: string, isVal: unknown) =>
+                sharesReadMock(cols, isCol, isVal),
+            }),
+          };
+        }
+        if (table === "compute_jobs") {
+          const call: JobsReadCall = {
+            cols: null,
+            eqs: [],
+            order: null,
+            limit: null,
+            ins: [],
+          };
+          const builder = {
+            select: (cols: string) => {
+              call.cols = cols;
+              return builder;
+            },
+            eq: (col: string, val: unknown) => {
+              call.eqs.push([col, val]);
+              return builder;
+            },
+            order: (col: string, opts: unknown) => {
+              call.order = [col, opts];
+              return builder;
+            },
+            // 167.2-REVIEW-SFH M-5: the read is narrowed to factsheet kinds.
+            in: (col: string, vals: unknown) => {
+              call.ins.push([col, vals]);
+              return builder;
+            },
+            limit: (n: number) => {
+              call.limit = n;
+              return jobsReadMock(call);
+            },
+          };
+          return builder;
+        }
+        // 167.2-REVIEW IN-03: a HEAD count of the matched strategy's members
+        // (no row, no column). Any other projection on it throws. Default 1,
+        // so every case before it keeps the stitch-preferring selection.
+        if (table === "strategy_keys") {
+          const countChain = {
+            select: (_cols: string, opts?: { count?: string; head?: boolean }) => {
+              if (opts?.count !== "exact" || opts?.head !== true) {
+                throw new Error("strategy_keys must be head-counted on this page");
+              }
+              return countChain;
+            },
+            eq: (col: string, val: unknown) => {
+              memberCountCalls.push([col, val]);
+              return countChain;
+            },
+            then: (resolve: (v: unknown) => unknown, reject?: (e: unknown) => unknown) =>
+              Promise.resolve({ count: memberCountValue.value, error: null }).then(resolve, reject),
+          };
+          return countChain;
+        }
+        // Any other table on this page is a disclosure bug by construction:
+        // nothing here is bounded except the shares read and the matched id.
+        throw new Error(`token page read an arbitrary table: ${table}`);
+      },
+    };
+  },
+}));
+
+// The payload builder — the SAME one the owner lane calls. Mocked so this file
+// stays a ROUTE test; what it pins is the call SHAPE (which id, which
+// predicate), because the predicate is the only visibility gate the builder has.
+const buildMock = vi.hoisted(() =>
+  vi.fn(
+    async (_id: string, _visibility: unknown) =>
+      ({ strategyId: "stub" }) as unknown as Record<string, unknown> | null,
+  ),
+);
+vi.mock("@/lib/factsheet/fetch-and-build-payload", () => ({
+  fetchAndBuildPayload: (id: string, visibility: unknown) =>
+    buildMock(id, visibility),
+}));
+
+// FactsheetView is a heavy client tree; stub it to a sentinel that ECHOES the
+// two lane props so the recipient-mode assertions read what actually flowed in.
+vi.mock("@/app/factsheet/[id]/v2/FactsheetView", () => ({
+  FactsheetView: ({
+    viewerNotice,
+    recipientShare,
+  }: {
+    viewerNotice?: string;
+    recipientShare?: boolean;
+  }) => (
+    <div
+      data-testid="factsheet-view"
+      data-viewer-notice={String(viewerNotice)}
+      data-recipient-share={String(recipientShare)}
+    />
+  ),
+}));
+
+// --- Fixtures --------------------------------------------------------------
+
+const STRATEGY_ID = "11111111-2222-3333-4444-555555555555";
+const GENERATION = 3;
+
+/**
+ * The share row's MAC witness (founder ruling 2026-08-27). It joined the
+ * pre-image so that a row destroyed and re-created — via the `strategies`
+ * ON DELETE CASCADE, which no control on `strategy_shares` can observe — lands
+ * in a token space disjoint from every token ever issued. The route must SELECT
+ * it and pass it to `verifyShareToken`, which is what the projection pin and the
+ * resolve tests below jointly enforce.
+ */
+const NONCE = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+
+/** Derived under the test-setup fixture secret — a genuinely valid token. */
+const VALID_TOKEN = deriveShareToken(STRATEGY_ID, NONCE, GENERATION);
+
+/** A well-formed token that matches no active row. */
+const UNKNOWN_TOKEN = deriveShareToken(
+  "99999999-8888-7777-6666-555555555555",
+  NONCE,
+  1,
+);
+
+/** One active-share candidate row, in the projection the route asks for. */
+const ROW = {
+  strategy_id: STRATEGY_ID,
+  generation: GENERATION,
+  nonce: NONCE,
+};
+
+/** An ISO instant `m` minutes before the REAL clock the page reads. */
+const isoMinutesAgo = (m: number) => new Date(Date.now() - m * 60_000).toISOString();
+
+/**
+ * One `compute_jobs` row in the five-field projection read (3) asks for.
+ * Timestamps default to a RECENT instant on the real clock the page reads
+ * (`Date.now()`), as do the stall cases' own.
+ *
+ * ⚠️ They used to default to a fixed calendar instant (2026-09-20T10:00Z).
+ * WIZRESYNC review round 2 taught `selectFactsheetJob` the resync guard's
+ * dead-row rule (`computeJobDeadReason`): an in-flight row created 8 h or more
+ * before `nowMs` is dead, because the server would no longer treat it as work
+ * in progress. That rule is right for this card too (arm (a) promises the
+ * factsheet is "being prepared", which a days-old stuck job will never do), so
+ * a fixed date that silently aged past 8 h stopped meaning "a job in flight".
+ * The fixture's clock was the defect, not the rule.
+ */
+function jobRow(
+  overrides: Partial<{
+    kind: string;
+    status: string;
+    created_at: string;
+    claimed_at: string | null;
+    member_progress_at: string | null;
+  }> = {},
+): Record<string, unknown> {
+  return {
+    kind: "process_key_long",
+    status: "running",
+    created_at: isoMinutesAgo(10),
+    claimed_at: isoMinutesAgo(9.9),
+    member_progress_at: null,
+    ...overrides,
+  };
+}
+
+/**
+ * The two recipient arms (UI-SPEC KCS11-A / KCS11-B), as literals and as
+ * `renderToStaticMarkup` escapes them (the apostrophe becomes `&#x27;`).
+ * Typed out rather than imported from the copy module, so a change to the
+ * copy has to be made twice to stay green.
+ */
+const escaped = (s: string) => s.replaceAll("'", "&#x27;");
+const KCS11_A_HEADING = escaped("This factsheet isn't ready yet");
+const KCS11_A_BODY = escaped(
+  "The link works \u2014 the strategy's performance data is being prepared. Try again later.",
+);
+const KCS11_B_HEADING = escaped("This factsheet isn't available yet");
+const KCS11_B_BODY = escaped(
+  "The link works \u2014 the strategy's performance data is not available yet. Check with the person who shared this link before trying again.",
+);
+
+/**
+ * Words no pending card may carry (KCS-11, 164.2 criterion 9): nothing names
+ * an internal cause, job state or error kind, and nothing promises a time.
+ */
+const NEVER_ON_THE_CARD = [
+  "failed",
+  "error",
+  "computed",
+  "minutes",
+  "permanent",
+  "stitch",
+  "stalled",
+] as const;
+
+async function loadPage() {
+  return (await import("./page")).default;
+}
+
+async function renderPage(token: string): Promise<string> {
+  const Page = await loadPage();
+  const el = (await Page({ params: Promise.resolve({ token }) })) as ReactElement;
+  return renderToStaticMarkup(el);
+}
+
+/** Render and swallow the redirect throw, returning the paths redirected to. */
+async function renderExpectingRedirect(token: string): Promise<string[]> {
+  const Page = await loadPage();
+  await expect(
+    Page({ params: Promise.resolve({ token }) }),
+  ).rejects.toThrow("__REDIRECT__");
+  return redirectMock.mock.calls.map((c) => c[0] as string);
+}
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  checkLimitMock.mockResolvedValue({ success: true });
+  sharesReadMock.mockResolvedValue({ data: [], error: null });
+  buildMock.mockResolvedValue({ strategyId: "stub" } as never);
+  jobsReadMock.mockResolvedValue({ data: [], error: null });
+  memberCountValue.value = 1;
+  memberCountCalls.length = 0;
+});
+
+// ---------------------------------------------------------------------------
+
+describe("recipient render — a valid token shows the factsheet in recipient mode", () => {
+  beforeEach(() => {
+    sharesReadMock.mockResolvedValue({
+      data: [ROW],
+      error: null,
+    });
+  });
+
+  it("renders FactsheetView with the shared-privately notice and recipientShare", async () => {
+    const html = await renderPage(VALID_TOKEN);
+    expect(html).toContain('data-testid="factsheet-view"');
+    expect(html).toContain('data-viewer-notice="shared_privately"');
+    expect(html).toContain('data-recipient-share="true"');
+  });
+
+  it("calls the SHARED builder with the matched strategy id and an IDENTITY predicate", async () => {
+    await renderPage(VALID_TOKEN);
+    expect(buildMock).toHaveBeenCalledTimes(1);
+    const [id, visibility] = buildMock.mock.calls[0];
+    expect(id).toBe(STRATEGY_ID);
+    // The predicate is the ONLY visibility gate the service-role builder has.
+    // Identity is CORRECT here — the HMAC match already authorized — and the
+    // feature only works because of it: a published-only predicate would make
+    // every share link 410 for exactly the unpublished strategies this exists
+    // for. Prove it is identity by applying it, not by reading its name.
+    const probe = { sentinel: true };
+    expect((visibility as <Q>(q: Q) => Q)(probe)).toBe(probe);
+  });
+
+  it("scans only NON-REVOKED rows — the revoke filter is in the query, not in JS", async () => {
+    await renderPage(VALID_TOKEN);
+    const [cols, isCol, isVal] = sharesReadMock.mock.calls[0];
+    expect(cols).toBe("strategy_id, generation, nonce");
+    expect(isCol).toBe("revoked_at");
+    expect(isVal).toBeNull();
+  });
+
+  it("a token for a PREVIOUS generation of the same strategy no longer resolves (revocation works)", async () => {
+    // The row says generation 3; the recipient holds a generation-2 link.
+    const stale = deriveShareToken(STRATEGY_ID, NONCE, GENERATION - 1);
+    const paths = await renderExpectingRedirect(stale);
+    expect(paths).toEqual(["/factsheet-share/gone"]);
+    expect(buildMock).not.toHaveBeenCalled();
+  });
+
+  it("a token minted against a DESTROYED row does not resolve against the row that replaced it — at the SAME generation", async () => {
+    // ⭐ THE CASCADE-REBIRTH PROPERTY, AT THE ROUTE. `strategy_shares.strategy_id`
+    // cascades from `strategies`, and `strategies.id` is client-suppliable, so a
+    // share row can be destroyed and re-created at the same strategy id — and
+    // the replacement starts at generation 1 again, because the counter really
+    // was discarded. The generation arm above therefore CANNOT catch this: both
+    // rows can be at the same generation, so the two tokens differ only through
+    // the nonce.
+    //
+    // Held at the SAME generation deliberately. If the route ever stopped
+    // passing `candidate.nonce` into `verifyShareToken`, the previous arm would
+    // still pass (generations differ there) and this one would fail — which is
+    // what makes it an arm rather than a restatement.
+    const REBORN = { ...ROW, nonce: "ffffffff-0000-1111-2222-333333333333" };
+    sharesReadMock.mockResolvedValue({ data: [REBORN], error: null });
+
+    const paths = await renderExpectingRedirect(VALID_TOKEN);
+    expect(paths).toEqual(["/factsheet-share/gone"]);
+    expect(buildMock).not.toHaveBeenCalled();
+
+    // Positive control on the SAME shape, so the arm above cannot be passing
+    // because the lane is simply broken: the reborn row's OWN token resolves.
+    vi.clearAllMocks();
+    checkLimitMock.mockResolvedValue({ success: true });
+    buildMock.mockResolvedValue({ strategyId: "stub" } as never);
+    sharesReadMock.mockResolvedValue({ data: [REBORN], error: null });
+    const html = await renderPage(
+      deriveShareToken(STRATEGY_ID, REBORN.nonce, GENERATION),
+    );
+    expect(html).toContain('data-testid="factsheet-view"');
+  });
+});
+
+describe("every miss class lands on a genuine 410, never notFound()", () => {
+  it("an UNKNOWN but well-formed token redirects to /factsheet-share/gone", async () => {
+    sharesReadMock.mockResolvedValue({
+      data: [ROW],
+      error: null,
+    });
+    const paths = await renderExpectingRedirect(UNKNOWN_TOKEN);
+    expect(paths).toEqual(["/factsheet-share/gone"]);
+    expect(notFoundMock).not.toHaveBeenCalled();
+    expect(buildMock).not.toHaveBeenCalled();
+  });
+
+  it("a REVOKED share (no active rows) redirects to /factsheet-share/gone", async () => {
+    sharesReadMock.mockResolvedValue({ data: [], error: null });
+    const paths = await renderExpectingRedirect(VALID_TOKEN);
+    expect(paths).toEqual(["/factsheet-share/gone"]);
+  });
+
+  it("a DB error on the share read redirects to gone and NEVER echoes the error", async () => {
+    // error-absent ≠ legit-absent: PostgREST returns {data:null,error} without
+    // throwing. The recipient must get the uniform miss, and the schema detail
+    // must not reach them.
+    sharesReadMock.mockResolvedValue({
+      data: null,
+      error: { message: 'column "secret_column" does not exist' },
+    });
+    const paths = await renderExpectingRedirect(VALID_TOKEN);
+    expect(paths).toEqual(["/factsheet-share/gone"]);
+    expect(buildMock).not.toHaveBeenCalled();
+  });
+
+  it("a MALFORMED token redirects WITHOUT ever constructing the admin client", async () => {
+    for (const bad of ["", "short", "a".repeat(44), `${"a".repeat(42)}%`]) {
+      vi.clearAllMocks();
+      const paths = await renderExpectingRedirect(bad);
+      expect(paths).toEqual(["/factsheet-share/gone"]);
+      // The format guard is the cheap gate: no DB round-trip, no HMAC work.
+      expect(createAdminMock).not.toHaveBeenCalled();
+      expect(adminFromMock).not.toHaveBeenCalled();
+    }
+  });
+});
+
+describe("rate limiting runs FIRST (the enumeration defence)", () => {
+  it("a denied request renders a neutral card — no DB call, no redirect, no 410", async () => {
+    checkLimitMock.mockResolvedValue({ success: false });
+    const html = await renderPage(VALID_TOKEN);
+    // Neutral by design: answering 410 while rate-limited would turn the
+    // limiter into a token-existence oracle for anyone willing to be throttled.
+    expect(html).toContain("Please try again shortly");
+    expect(html).not.toContain("factsheet-view");
+    expect(createAdminMock).not.toHaveBeenCalled();
+    expect(redirectMock).not.toHaveBeenCalled();
+    expect(buildMock).not.toHaveBeenCalled();
+  });
+
+  it("the limiter key is namespaced to this lane, so it cannot share a budget with another public route", async () => {
+    await renderExpectingRedirect(UNKNOWN_TOKEN);
+    expect(checkLimitMock).toHaveBeenCalledWith({}, "factsheet-share:203.0.113.7");
+  });
+});
+
+describe("a valid token whose payload is not built yet is PENDING, not dead", () => {
+  it("renders the pending card rather than redirecting to gone", async () => {
+    sharesReadMock.mockResolvedValue({
+      data: [ROW],
+      error: null,
+    });
+    buildMock.mockResolvedValue(null);
+    // Arm (a) since KCS-11: "ready yet" is said only while a job is working.
+    jobsReadMock.mockResolvedValue({
+      data: [jobRow({ kind: "process_key_long", status: "running" })],
+      error: null,
+    });
+    const html = await renderPage(VALID_TOKEN);
+    expect(html).toContain("isn&#x27;t ready yet");
+    expect(redirectMock).not.toHaveBeenCalled();
+    // Content-free: the pending state must not name the strategy or leak a
+    // metric while the recipient waits.
+    expect(html).not.toContain(STRATEGY_ID);
+  });
+});
+
+describe("KCS-11 — the pending card promises nothing when no job will finish the factsheet", () => {
+  beforeEach(() => {
+    sharesReadMock.mockResolvedValue({ data: [ROW], error: null });
+    buildMock.mockResolvedValue(null);
+  });
+
+  it("IN03-CONVERTED (167.2-REVIEW IN-03): with no members, an old done stitch does not hide a newer running chain job, and the count is bounded by the matched id", async () => {
+    memberCountValue.value = 0;
+    jobsReadMock.mockResolvedValue({
+      data: [
+        // The running chain job is recent (in flight on the real clock); the
+        // done stitch is ten days older, the converted-strategy shape.
+        jobRow({ kind: "process_key_long", status: "running", created_at: isoMinutesAgo(5) }),
+        jobRow({ kind: "stitch_composite", status: "done", created_at: isoMinutesAgo(10 * 24 * 60) }),
+      ],
+      error: null,
+    });
+    const out = await renderPage(VALID_TOKEN);
+    expect(out).toContain(KCS11_A_HEADING);
+    expect(memberCountCalls).toEqual([["strategy_id", STRATEGY_ID]]);
+  });
+
+  it("TRIGGER-SHAPE-B: a permanently failed composite stitch renders 'not available yet', never 'ready yet'", async () => {
+    // The measured founder trigger: the link said "still being computed … try
+    // again in a few minutes" over a stitch_composite that had failed for good.
+    // The older chain rows are the members' finished fetches; the stitch row is
+    // preferred whenever one exists, so it answers.
+    jobsReadMock.mockResolvedValue({
+      data: [
+        jobRow({
+          kind: "stitch_composite",
+          status: "failed_final",
+          created_at: "2026-09-20T12:00:00.000Z",
+        }),
+        jobRow({
+          kind: "compute_analytics_from_csv",
+          status: "done",
+          created_at: "2026-09-20T11:00:00.000Z",
+        }),
+        jobRow({
+          kind: "process_key_long",
+          status: "done",
+          created_at: "2026-09-20T10:00:00.000Z",
+        }),
+      ],
+      error: null,
+    });
+    const out = await renderPage(VALID_TOKEN);
+    expect(out).toContain(KCS11_B_HEADING);
+    expect(out).toContain(KCS11_B_BODY);
+    expect(out).not.toContain("ready yet");
+    expect(out).not.toContain("being prepared");
+    for (const word of NEVER_ON_THE_CARD) {
+      expect(out.toLowerCase()).not.toContain(word);
+    }
+    expect(redirectMock).not.toHaveBeenCalled();
+    // The read really ran, once, on the matched strategy.
+    expect(jobsReadMock).toHaveBeenCalledTimes(1);
+    expect(adminFromMock).toHaveBeenCalledWith("compute_jobs");
+  });
+
+  it("a running fetch renders arm (a), with no number of minutes", async () => {
+    jobsReadMock.mockResolvedValue({
+      data: [jobRow({ kind: "process_key_long", status: "running" })],
+      error: null,
+    });
+    const out = await renderPage(VALID_TOKEN);
+    expect(out).toContain(KCS11_A_HEADING);
+    expect(out).toContain(KCS11_A_BODY);
+    expect(out).not.toContain("available yet");
+    for (const word of NEVER_ON_THE_CARD) {
+      expect(out.toLowerCase()).not.toContain(word);
+    }
+  });
+});
+
+describe("KCS-11 — read (3) is pinned to one bound and one five-field projection", () => {
+  beforeEach(() => {
+    sharesReadMock.mockResolvedValue({ data: [ROW], error: null });
+    buildMock.mockResolvedValue(null);
+  });
+
+  it("PROJECTION-PIN: selects exactly the five fields the derivation needs, the heartbeat through a JSON-path alias", async () => {
+    await renderPage(VALID_TOKEN);
+    expect(jobsReadMock).toHaveBeenCalledTimes(1);
+    const [call] = jobsReadMock.mock.calls[0];
+    // No last_error, no error_kind, no bare metadata (it carries source and
+    // correlation ids): this is a public route and the recipient is anonymous.
+    expect(call.cols).toBe(
+      "status, kind, created_at, claimed_at, member_progress_at:metadata->>member_progress_at",
+    );
+  });
+
+  it("BOUND-PIN: the only bound is the HMAC-matched strategy id, newest first, 100 rows", async () => {
+    await renderPage(VALID_TOKEN);
+    const [call] = jobsReadMock.mock.calls[0];
+    // A second eq, or an eq on anything but the matched id, is a disclosure
+    // path: the match is the only authorisation this route has.
+    expect(call.eqs).toEqual([["strategy_id", STRATEGY_ID]]);
+    expect(call.order).toEqual(["created_at", { ascending: false }]);
+    expect(call.limit).toBe(100);
+  });
+
+  it("KIND-FILTER-PIN (167.2-REVIEW-SFH M-5): the read is narrowed to the factsheet kinds, so recurring cron rows cannot fill its window", async () => {
+    await renderPage(VALID_TOKEN);
+    const [call] = jobsReadMock.mock.calls[0];
+    // Hand-typed: the five FACTSHEET_CHAIN_KINDS and the stitch. A strategy
+    // whose newest 100 rows were reconcile_strategy / sync_funding used to
+    // derive "unreadable" on every render. The filter adds no column and keeps
+    // the one bound (the matched id) the pin above guards.
+    expect(call.ins).toEqual([
+      [
+        "kind",
+        [
+          "process_key_long",
+          "sync_trades",
+          "derive_broker_dailies",
+          "compute_analytics_from_csv",
+          "compute_analytics",
+          "stitch_composite",
+        ],
+      ],
+    ]);
+  });
+
+  it("PAYLOAD-NO-READ: a built payload renders the recipient view and never reads compute_jobs", async () => {
+    buildMock.mockResolvedValue({ strategyId: "stub" } as never);
+    const out = await renderPage(VALID_TOKEN);
+    expect(out).toContain('data-testid="factsheet-view"');
+    expect(jobsReadMock).not.toHaveBeenCalled();
+    expect(adminFromMock).not.toHaveBeenCalledWith("compute_jobs");
+  });
+});
+
+describe("KCS-11 — every derived state lands on exactly one arm", () => {
+  beforeEach(() => {
+    sharesReadMock.mockResolvedValue({ data: [ROW], error: null });
+    buildMock.mockResolvedValue(null);
+  });
+
+  const minutesAgo = (m: number) =>
+    new Date(Date.now() - m * 60_000).toISOString();
+
+  // Arm (a): a job that will still do work. The card may say "being prepared".
+  const ARM_A_CASES: Array<[string, () => Record<string, unknown>[]]> = [
+    ["pending", () => [jobRow({ status: "pending", claimed_at: null })]],
+    [
+      "done_pending_children",
+      () => [jobRow({ kind: "compute_analytics_from_csv", status: "done_pending_children" })],
+    ],
+    ["failed_retry", () => [jobRow({ status: "failed_retry" })]],
+    ["running process_key_long", () => [jobRow({ status: "running" })]],
+    [
+      "running stitch with a fresh heartbeat",
+      () => [
+        jobRow({
+          kind: "stitch_composite",
+          status: "running",
+          claimed_at: minutesAgo(30),
+          member_progress_at: minutesAgo(1),
+        }),
+      ],
+    ],
+  ];
+
+  it.each(ARM_A_CASES)("ARM-A: %s renders KCS11-A", async (_name, rows) => {
+    jobsReadMock.mockResolvedValue({ data: rows(), error: null });
+    const out = await renderPage(VALID_TOKEN);
+    expect(out).toContain(KCS11_A_HEADING);
+    expect(out).toContain(KCS11_A_BODY);
+    expect(out).not.toContain(KCS11_B_HEADING);
+  });
+
+  // Arm (b): nothing will finish the factsheet on its own, so nothing is
+  // promised. error_kind is NOT projected, so every failure kind lands here
+  // alike; the rows below carry one anyway to prove it changes nothing.
+  const ARM_B_CASES: Array<[string, () => Record<string, unknown>[]]> = [
+    ...(["permanent", "transient", "unknown", "orphaned"] as const).map(
+      (kind): [string, () => Record<string, unknown>[]] => [
+        `failed_final (${kind})`,
+        () => [{ ...jobRow({ status: "failed_final" }), error_kind: kind }],
+      ],
+    ),
+    [
+      "running stitch whose heartbeat is older than 12 minutes (stalled)",
+      () => [
+        jobRow({
+          kind: "stitch_composite",
+          status: "running",
+          claimed_at: minutesAgo(40),
+          member_progress_at: minutesAgo(13),
+        }),
+      ],
+    ],
+    [
+      "done with no payload (finished)",
+      () => [jobRow({ kind: "compute_analytics_from_csv", status: "done" })],
+    ],
+    ["no job on record, short window (never_started)", () => []],
+  ];
+
+  it.each(ARM_B_CASES)("ARM-B: %s renders KCS11-B", async (_name, rows) => {
+    jobsReadMock.mockResolvedValue({ data: rows(), error: null });
+    const out = await renderPage(VALID_TOKEN);
+    expect(out).toContain(KCS11_B_HEADING);
+    expect(out).toContain(KCS11_B_BODY);
+    expect(out).not.toContain("ready yet");
+    expect(out).not.toContain("being prepared");
+    for (const word of NEVER_ON_THE_CARD) {
+      expect(out.toLowerCase()).not.toContain(word);
+    }
+  });
+});
+
+describe("KCS-11 — every way read (3) can fail renders the arm that promises nothing", () => {
+  beforeEach(() => {
+    sharesReadMock.mockResolvedValue({ data: [ROW], error: null });
+    buildMock.mockResolvedValue(null);
+  });
+
+  it("READ-ERROR-B: a PostgREST error renders KCS11-B and is logged by message only", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      jobsReadMock.mockResolvedValue({
+        data: null,
+        error: { message: 'relation "compute_jobs_secret" does not exist' },
+      });
+      const out = await renderPage(VALID_TOKEN);
+      expect(out).toContain(KCS11_B_HEADING);
+      expect(out).toContain(KCS11_B_BODY);
+      expect(out).not.toContain(KCS11_A_HEADING);
+      // Nothing from the error reaches the recipient.
+      expect(out).not.toContain("compute_jobs_secret");
+      // Moved by the 167.2 review fix round (SFH M-6, lineage): the log was
+      // `{ message }` only, so a share-page failure could not be tied to a
+      // strategy; it now carries the matched strategy id (server log only,
+      // never the page), and the failure is captured with tags only.
+      expect(errSpy).toHaveBeenCalledWith(
+        "[factsheet-share/page] compute-state read failed",
+        {
+          strategyId: STRATEGY_ID,
+          message: 'relation "compute_jobs_secret" does not exist',
+        },
+      );
+      expect(captureToSentryMock).toHaveBeenCalledWith(expect.any(Error), {
+        tags: { route: "factsheet-share/page", stage: "compute-state" },
+      });
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  it("READ-THROWS-B: a throw from the read renders KCS11-B, never an uncaught error", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      jobsReadMock.mockImplementation(() => {
+        throw new Error("socket hang up");
+      });
+      const out = await renderPage(VALID_TOKEN);
+      expect(out).toContain(KCS11_B_HEADING);
+      expect(out).not.toContain("socket hang up");
+      // Moved by the 167.2 review fix round (SFH M-6, lineage): the log now
+      // carries the matched strategy id; the throw is captured, tags only.
+      expect(errSpy).toHaveBeenCalledWith(
+        "[factsheet-share/page] compute-state read failed",
+        { strategyId: STRATEGY_ID, message: "socket hang up" },
+      );
+      expect(captureToSentryMock).toHaveBeenCalledWith(expect.any(Error), {
+        tags: { route: "factsheet-share/page", stage: "compute-state" },
+      });
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  it("DEAD-ROW-B (WIZRESYNC round 2): a 'running' chain job 9 h old will not finish the factsheet, so the card promises nothing", async () => {
+    // The resync guard treats an in-flight row older than 8 h as dead, and so
+    // does the selection. Arm (a) would promise "being prepared" over it.
+    jobsReadMock.mockResolvedValue({
+      data: [jobRow({ status: "running", created_at: isoMinutesAgo(9 * 60), claimed_at: isoMinutesAgo(9 * 60) })],
+      error: null,
+    });
+    const out = await renderPage(VALID_TOKEN);
+    expect(out).not.toContain(KCS11_A_HEADING);
+    expect(out).toContain(KCS11_B_HEADING);
+  });
+
+  it("FULL-WINDOW-B: 100 rows with no factsheet-chain job prove nothing and render KCS11-B", async () => {
+    // A full window of cron rows can hide the chain job behind it, so the
+    // absence of one is not "never started" and certainly not "in progress".
+    jobsReadMock.mockResolvedValue({
+      data: Array.from({ length: 100 }, (_, i) =>
+        jobRow({
+          kind: "reconcile_strategy",
+          status: "done",
+          created_at: new Date(Date.UTC(2026, 8, 20, 0, i)).toISOString(),
+        }),
+      ),
+      error: null,
+    });
+    const out = await renderPage(VALID_TOKEN);
+    expect(out).toContain(KCS11_B_HEADING);
+    expect(out).not.toContain(KCS11_A_HEADING);
+  });
+});
+
+/**
+ * Strip `//` line comments and `/* *\/` block comments before matching.
+ *
+ * LOAD-BEARING, not hygiene: `page.tsx`'s own prose is where the reasons live.
+ * Its header explains that the module must not import `v2/page.tsx`, must not
+ * reach `buildFactsheetPayloadCached`, and must not touch `unstable_cache` — so
+ * a bare grep for those tokens would be red on a healthy tree and the only way
+ * to green it would be to DELETE the explanations. Same discipline as
+ * `src/__tests__/phase-148-owner-lane-cache-isolation.test.ts`.
+ */
+function stripComments(src: string): string {
+  return src
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .split("\n")
+    .filter((line) => !/^\s*\/\//.test(line))
+    .join("\n");
+}
+
+describe("SL-1d — the token lane ships no OG image and stays noindex", () => {
+  const RAW_SOURCE = readFileSync(join(__dirname, "page.tsx"), "utf8");
+  const SOURCE = stripComments(RAW_SOURCE);
+
+  it("exports STATIC metadata with robots noindex", async () => {
+    const mod = await import("./page");
+    expect(mod.metadata).toBeDefined();
+    expect(mod.metadata.robots).toBe("noindex");
+  });
+
+  it("the metadata names no strategy and carries no openGraph / twitter card", async () => {
+    const mod = await import("./page");
+    // A <title> is fetched by unauthenticated crawlers and cached by third
+    // parties. It must be a constant, never the private strategy's name.
+    expect(mod.metadata.title).toBe("Factsheet — Quantalyze");
+    expect(mod.metadata.openGraph).toBeUndefined();
+    expect(mod.metadata.twitter).toBeUndefined();
+  });
+
+  it("exports NO generateMetadata (a dynamic title is how the name would leak back in)", async () => {
+    const mod = (await import("./page")) as Record<string, unknown>;
+    expect(mod.generateMetadata).toBeUndefined();
+  });
+
+  it("the source never references the OG image route", () => {
+    // Source-level, not module-level, because the hazard is a URL STRING: the
+    // OG route is CDN-cached under a 7-day stale-while-revalidate and keyed by
+    // URL, so an image of a private strategy could never be revoked. Reading
+    // the source catches it wherever in the file it appears.
+    expect(SOURCE).not.toContain("/api/og/");
+    // Non-vacuity: the file really was read.
+    expect(SOURCE).toContain("FactsheetSharePage");
+  });
+
+  it("the comment-stripping is load-bearing, so an empty match means CLEAN and not BLIND", () => {
+    // Every forbidden token below appears in `page.tsx`'s prose, explaining why
+    // it is forbidden. If `stripComments` were ever dropped from the scans, the
+    // suite would go red on a healthy tree — which is what makes the green
+    // assertions above meaningful rather than accidental.
+    for (const token of [
+      "v2/page",
+      "buildFactsheetPayloadCached",
+      "unstable_cache",
+    ]) {
+      expect(RAW_SOURCE).toContain(token);
+      expect(SOURCE).not.toContain(token);
+    }
+    // …and the stripper did not simply return "" (which would green everything).
+    expect(SOURCE.length).toBeGreaterThan(500);
+  });
+
+  it("the source imports the CANONICAL builder and never the factsheet page module (SL-1)", () => {
+    expect(SOURCE).toContain("@/lib/factsheet/fetch-and-build-payload");
+    // Importing the page would put `buildFactsheetPayloadCached` within reach,
+    // and the id-keyed cache is exactly what this lane must never touch.
+    expect(SOURCE).not.toContain("v2/page");
+    expect(SOURCE).not.toContain("buildFactsheetPayloadCached");
+    expect(SOURCE).not.toContain("unstable_cache");
+  });
+
+  it("the route is pinned force-dynamic on the nodejs runtime", () => {
+    // A cached response would be keyed on the URL, not on revocation state —
+    // a revoked link could then be replayed from the edge.
+    expect(SOURCE).toContain('export const dynamic = "force-dynamic"');
+    expect(SOURCE).toContain('export const runtime = "nodejs"');
+  });
+});

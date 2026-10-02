@@ -70,8 +70,11 @@ const clearWizardStateMock = vi.fn();
 // debounced write of the typed strategy name.
 const saveWizardStateMock = vi.fn(async (..._args: unknown[]) => {});
 // WIZ-03: a spy (not a bare arrow) so a test can assert whether the wizard
-// regenerated its session id. Only the DESTRUCTIVE "Try another key" path calls
-// it after mount; the non-destructive "Review your keys" path must NOT.
+// regenerated its session id.
+// 161-04 / WIZERR-02: this used to read "Only the DESTRUCTIVE 'Try another key'
+// path calls it after mount". Since the remedy stopped deleting, NEITHER review
+// affordance mints a session id — the only post-mount callers are the CONFIRMED
+// delete and the local-only clear inside `handleDeleteDraft`.
 const newWizardSessionIdMock = vi.fn(() => "ssr-session-throwaway");
 vi.mock("@/lib/wizard/localStorage", async (importOriginal) => {
   const actual = (await importOriginal()) as Record<string, unknown>;
@@ -88,10 +91,13 @@ vi.mock("@/lib/wizard/localStorage", async (importOriginal) => {
 // WIZ-03: stub the two step children so this WizardClient-level test drives the
 // step machine + callback wiring directly, not the children's internals.
 // SyncPreviewStep exposes BOTH review affordances as separate buttons so each
-// WizardClient callback (non-destructive onReviewKeys vs destructive
-// onTryAnotherKey) can be exercised in isolation. MultiKeyConnectStep renders a
-// marker so "step is now connect_key" is observable. None of the pre-existing
-// tests assert either child's content, so these stubs are inert for them.
+// WizardClient callback (onReviewKeys, onTryAnotherKey — 161-04 / WIZERR-02:
+// both non-destructive now; this comment used to contrast them as
+// "non-destructive vs destructive") can be exercised in isolation. Keeping them
+// as two buttons still matters: they are two props, and a collapse must be
+// visible. MultiKeyConnectStep renders a marker so "step is now connect_key" is
+// observable. None of the pre-existing tests assert either child's content, so
+// these stubs are inert for them.
 // WIZ-04: a minimal snapshot the sync-complete trigger fires so the stepper
 // tests can drive syncSnapshot != null (⇒ metadata/review become navigable).
 const SYNC_SNAPSHOT = {
@@ -156,6 +162,9 @@ vi.mock("./steps/MultiKeyConnectStep", () => ({
       strategyId: string;
       apiKeyId: string;
       exchange: string;
+      // 154-06 / WIZCONT-02 — optional, exactly as `ConnectKeySuccess` declares
+      // it, so the mock cannot claim a shape the real component never sends.
+      deduped?: boolean;
     }) => void;
     onDirtyChange?: (dirty: boolean) => void;
   }) => (
@@ -175,6 +184,23 @@ vi.mock("./steps/MultiKeyConnectStep", () => ({
         }
       >
         Connect success
+      </button>
+      {/* 154-06 / WIZCONT-02: the same advance, but carrying the server's
+          dedup marker — the token-less re-connect that resolved onto a
+          strategy the user already had. */}
+      <button
+        type="button"
+        data-testid="connect-success-deduped"
+        onClick={() =>
+          props.onSuccess?.({
+            strategyId: "strat-existing",
+            apiKeyId: "key-existing",
+            exchange: "okx",
+            deduped: true,
+          })
+        }
+      >
+        Connect success (deduped)
       </button>
       {/* F2: drive the dirty signal so the stepper-gating test can prove a
           forward jump is blocked while connect_key holds unsaved edits. */}
@@ -217,9 +243,19 @@ const METADATA_DRAFT_STUB = {
   assetClass: "crypto",
 };
 
+// Phase 150 / OWN-03 D-07: the mock surfaces `showCapitalQuestion` for the same
+// reason it surfaces `entryContext` on the submit steps — the render gate is
+// DERIVED here, and MetadataStep's own spec can only prove what it does with the
+// prop it is handed, never what this file decides to hand it.
 vi.mock("./steps/MetadataStep", () => ({
-  MetadataStep: (props: { onComplete?: (draft: typeof METADATA_DRAFT_STUB) => void }) => (
+  MetadataStep: (props: {
+    showCapitalQuestion?: boolean;
+    onComplete?: (draft: typeof METADATA_DRAFT_STUB) => void;
+  }) => (
     <div data-testid="mock-metadata-step">
+      <span data-testid="metadata-show-capital-question">
+        {String(props.showCapitalQuestion ?? false)}
+      </span>
       <button
         type="button"
         data-testid="metadata-complete"
@@ -415,6 +451,96 @@ describe("[H-0182] WizardClient — resume banner on LS pointer mismatch", () =>
   });
 });
 
+/**
+ * Phase 154-05 / WIZCONT-01 (TWIN-6) — "the draft is not consulted before the
+ * step is chosen", the CSV half.
+ *
+ * The pre-154 initializer read `if (source === "csv") return "csv_upload";`
+ * BEFORE it looked at `initialDraft`, so a CSV draft never resumed: the branch
+ * chose its step without ever learning a draft existed, and `handleResume`
+ * hard-coded `sync_preview` — an API-branch step with no key behind it.
+ *
+ * These cases assert the ORDER through its consequences, not through the
+ * source: what the founder sees when a draft of each kind is offered.
+ */
+describe("[154-05 / TWIN-6] WizardClient — the draft decides the step, not the branch", () => {
+  // A CSV draft: no api_key_id (the column is null for BOTH csv and composite,
+  // which is exactly why the KIND has to be passed rather than re-derived).
+  const CSV_DRAFT = {
+    ...DRAFT,
+    id: "draft-csv-1",
+    name: "Aurora CSV",
+    api_key_id: null,
+  };
+  const COMPOSITE_DRAFT = {
+    ...DRAFT,
+    id: "draft-composite-1",
+    api_key_id: null,
+  };
+
+  it("a CSV draft resumes ON the CSV branch: banner + csv_upload + the draft bound", async () => {
+    resumeOverrides = { showResumeBanner: true };
+    searchParamsString = "source=csv";
+    render(<WizardClient initialDraft={CSV_DRAFT} initialDraftKind="csv" />);
+
+    // The founder gets the explicit choice (never a silent jump).
+    expect(await screen.findByTestId("wizard-resume")).toBeInTheDocument();
+    expect(screen.getByTestId("wizard-start-fresh")).toBeInTheDocument();
+    // The step is csv_upload — the CSV draft's own step.
+    expect(screen.getByTestId("wizard-csv-dropzone")).toBeInTheDocument();
+    // …and the SERVER draft is bound behind it: `strategyId` seeds `canDelete`,
+    // so the chrome's delete-draft control only exists when a draft is loaded.
+    expect(screen.getByTestId("wizard-delete-draft")).toBeInTheDocument();
+    // The banner body is the CSV copy (UI-SPEC state contract 1).
+    expect(
+      screen.getByText(/A CSV upload draft from an earlier session is ready/i),
+    ).toBeInTheDocument();
+  });
+
+  it("Resume on a CSV draft stays on csv_upload — it never lands on sync_preview", async () => {
+    resumeOverrides = { showResumeBanner: true };
+    searchParamsString = "source=csv";
+    render(<WizardClient initialDraft={CSV_DRAFT} initialDraftKind="csv" />);
+
+    fireEvent.click(await screen.findByTestId("wizard-resume"));
+    await waitFor(() =>
+      expect(screen.queryByTestId("wizard-resume")).toBeNull(),
+    );
+
+    expect(screen.getByTestId("wizard-csv-dropzone")).toBeInTheDocument();
+    // handleResume used to hard-code sync_preview for every draft, which would
+    // drop a CSV resume onto an API step with no key behind it.
+    expect(screen.queryByTestId("mock-sync-preview")).toBeNull();
+  });
+
+  it("a COMPOSITE draft resumes on sync_preview, never on csv_upload (A4)", async () => {
+    resumeOverrides = { showResumeBanner: true };
+    render(
+      <WizardClient
+        initialDraft={COMPOSITE_DRAFT}
+        initialDraftKind="composite"
+      />,
+    );
+
+    // api_key_id is null here too — a kind-blind `api_key_id === null ? csv`
+    // rule would have routed this member-bearing draft to the upload step.
+    expect(await screen.findByTestId("mock-sync-preview")).toBeInTheDocument();
+    expect(screen.queryByTestId("wizard-csv-dropzone")).toBeNull();
+  });
+
+  it("no draft on the CSV branch still starts fresh on csv_upload (unchanged)", async () => {
+    resumeOverrides = {};
+    searchParamsString = "source=csv";
+    render(<WizardClient initialDraft={null} />);
+
+    expect(await screen.findByTestId("wizard-csv-dropzone")).toBeInTheDocument();
+    expect(screen.queryByTestId("wizard-resume")).toBeNull();
+    // No draft ⇒ no strategyId ⇒ no delete control. The positive counterpart to
+    // the first case's assertion, so "renders nothing at all" cannot pass both.
+    expect(screen.queryByTestId("wizard-delete-draft")).toBeNull();
+  });
+});
+
 describe("[H-0182] WizardClient — wizard_start telemetry", () => {
   it("fires wizard_start once after hydration with resume=false for a fresh start", async () => {
     render(<WizardClient initialDraft={null} />);
@@ -553,28 +679,42 @@ describe("[94-03] WizardClient — non-destructive composite review (WIZ-03)", (
     expect(screen.getByTestId("connect-session").textContent).toBe(sessionBefore);
   });
 
-  // Destructive pin (research Pitfall 3): the split must NOT blanket-remove the
-  // single-key "Try another key" delete. This fails if onTryAnotherKey were
-  // pointed at the non-destructive callback.
-  it("Try another key (single-key destructive path) still issues the draft DELETE", async () => {
-    const fetchSpy = vi
-      .spyOn(globalThis, "fetch")
-      .mockResolvedValue(new Response(null, { status: 200 }));
+  // ⚠️ RE-ARGUED 161-04 / WIZERR-02. This slot held "Try another key
+  // (single-key destructive path) still issues the draft DELETE" — a pin on
+  // research Pitfall 3, that the WIZ-03 split must not blanket-remove the
+  // single-key delete. WIZERR-02 removes that delete DELIBERATELY (a remedy
+  // offered on every refusal may not destroy the user's draft), so the old pin
+  // asserted the defect. It is not deleted quietly: the no-DELETE half moved to
+  // the `[161-04 / WIZERR-02]` describe at the foot of this file, WITH the
+  // negative control proving deletion still works where it is confirmed.
+  //
+  // What survives here is Pitfall 3's actual worry — that the two affordances
+  // are SEPARATE callbacks and must not be collapsed into one. Their bodies are
+  // now the same shape, so the observable that keeps them distinguishable is the
+  // telemetry: the key remedy is counted, the composite review is not. Collapse
+  // `onTryAnotherKey` onto `onReviewKeys` and this goes red.
+  it("the two review affordances stay distinct: only Try another key is counted as a key remedy", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(null, { status: 200 }),
+    );
 
     render(<WizardClient initialDraft={DRAFT} />);
 
+    fireEvent.click(await screen.findByTestId("sync-review-keys"));
+    expect(
+      trackMock.mock.calls.filter((c) => c[0] === "wizard_try_different_key"),
+      "Review your keys is not a key remedy and must not be counted as one.",
+    ).toHaveLength(0);
+
+    // Back to sync_preview to reach the other affordance from the same mount.
+    fireEvent.click(await screen.findByTestId("wizard-step-sync_preview"));
     fireEvent.click(await screen.findByTestId("sync-try-another"));
 
-    await waitFor(() => {
-      const deleteCalls = fetchSpy.mock.calls.filter(
-        (c) =>
-          String(c[0]).includes("/api/strategies/draft/draft-1") &&
-          (c[1] as RequestInit | undefined)?.method === "DELETE",
-      );
-      expect(deleteCalls).toHaveLength(1);
-    });
-    // And the destructive path re-arms the F6 fence by minting a fresh session.
-    expect(newWizardSessionIdMock.mock.calls.length).toBeGreaterThan(1);
+    await waitFor(() =>
+      expect(
+        trackMock.mock.calls.filter((c) => c[0] === "wizard_try_different_key"),
+      ).toHaveLength(1),
+    );
   });
 });
 
@@ -675,6 +815,91 @@ describe("[94.1 F1] WizardClient — stale snapshot invalidation on re-connect",
     // the step re-probes the DB for the CURRENT member set (no stale render).
     await screen.findByTestId("mock-sync-preview");
     expect(screen.getByTestId("cached-snapshot")).toHaveTextContent("null");
+  });
+});
+
+/**
+ * ═══════════════════════════════════════════════════════════════════════════
+ * 154-06 / WIZCONT-02 — the dedup notice (UI-SPEC State Contract 4).
+ *
+ * ⚠️ IT IS PINNED HERE AND NOT IN `ConnectKeyStep.test.tsx` FOR A MECHANICAL
+ * REASON. The dedup arrives on the SUCCESS path, and success is the step
+ * advance — `handleConnectSuccess` calls `setStep("sync_preview")`, so
+ * `ConnectKeyStep` unmounts in the same commit and any strip of its own could
+ * never paint. Only a test that drives the REAL parent, and therefore the real
+ * step change, can tell a rendered notice from dead markup.
+ * ═══════════════════════════════════════════════════════════════════════════
+ */
+describe("[154-06 / WIZCONT-02] WizardClient — the dedup notice", () => {
+  /** Hand-typed from 154-UI-SPEC.md's Copywriting table — never imported. */
+  const DEDUP_COPY =
+    "These credentials are already connected. We continued with your existing strategy instead of creating a duplicate.";
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("renders the neutral strip after a connect the server resolved onto the existing strategy", async () => {
+    render(<WizardClient initialDraft={null} />);
+    await screen.findByTestId("mock-connect-step");
+
+    fireEvent.click(screen.getByTestId("connect-success-deduped"));
+    await screen.findByTestId("mock-sync-preview");
+
+    const strip = screen.getByTestId("wizard-dedup-notice");
+    expect(strip).toHaveTextContent(DEDUP_COPY);
+  });
+
+  it("is NEUTRAL, not an error: no ErrorEnvelope, and none of the warning/negative tokens", async () => {
+    // Nothing failed — the user pressed Connect with credentials we already
+    // hold and we continued with the strategy they already had. The semantic
+    // gate in DESIGN.md/UI-SPEC reserves amber for recoverable in-flight states
+    // and red for terminal failures; this is neither.
+    render(<WizardClient initialDraft={null} />);
+    await screen.findByTestId("mock-connect-step");
+
+    fireEvent.click(screen.getByTestId("connect-success-deduped"));
+    await screen.findByTestId("mock-sync-preview");
+
+    expect(screen.queryByTestId("error-envelope")).toBeNull();
+    const cls = screen.getByTestId("wizard-dedup-notice").className;
+    expect(cls).not.toContain("warning");
+    expect(cls).not.toContain("negative");
+    // The session-expired strip's tokens, byte-for-byte — the donor UI-SPEC
+    // names, so the notice cannot drift into a bespoke style.
+    expect(cls).toContain("border-border");
+    expect(cls).toContain("bg-page");
+    expect(cls).toContain("text-caption");
+    expect(cls).toContain("text-text-secondary");
+  });
+
+  it("VACUITY FENCE: an ordinary connect renders NO strip", async () => {
+    render(<WizardClient initialDraft={null} />);
+    await screen.findByTestId("mock-connect-step");
+
+    fireEvent.click(screen.getByTestId("connect-success"));
+    await screen.findByTestId("mock-sync-preview");
+
+    expect(screen.queryByTestId("wizard-dedup-notice")).toBeNull();
+    expect(screen.queryByText(DEDUP_COPY)).toBeNull();
+  });
+
+  it("is SELF-CLEARING: a later ordinary connect takes the notice down", async () => {
+    // A `true` that only ever got set would eventually be a claim about a
+    // different submit than the one on screen.
+    render(<WizardClient initialDraft={null} />);
+    await screen.findByTestId("mock-connect-step");
+
+    fireEvent.click(screen.getByTestId("connect-success-deduped"));
+    await screen.findByTestId("mock-sync-preview");
+    expect(screen.getByTestId("wizard-dedup-notice")).toBeInTheDocument();
+
+    fireEvent.click(await screen.findByTestId("wizard-step-connect_key"));
+    await screen.findByTestId("mock-connect-step");
+    fireEvent.click(screen.getByTestId("connect-success"));
+    await screen.findByTestId("mock-sync-preview");
+
+    expect(screen.queryByTestId("wizard-dedup-notice")).toBeNull();
   });
 });
 
@@ -781,6 +1006,48 @@ describe("[110-03] WizardClient — contribution-mode terminal paths", () => {
     await waitFor(() =>
       expect(pushMock).toHaveBeenCalledWith("/strategies?wizard_submitted=1"),
     );
+  });
+
+  // ── Phase 150 / OWN-03 D-07 — the capital question's RENDER GATE ─────────
+  //
+  // MetadataStep's own spec proves what the step does with each value of
+  // `showCapitalQuestion`. Neither of these cases existed until the Phase-150
+  // gate's mutation campaign measured the hole: replacing the derivation with a
+  // literal `true` left all 28 wizard spec files / 420 assertions GREEN, because
+  // MetadataStep is mocked here and the mock did not surface the prop. The
+  // property is a CALL-SITE decision, so only a call-site oracle can see it.
+  //
+  // Why it matters rather than merely differing: on the manager path the person
+  // at the keyboard is onboarding SOMEONE ELSE's key. "Whose capital is this?"
+  // is not their question to answer, and the answer is the single input that
+  // unlocks the money action (D-03-A: `own_capital` is the only allocatable
+  // mark). A manager idly leaving the default would be stating a fact about a
+  // client's money.
+  it("[OWN-03 D-07] does NOT ask the capital question on the manager entry path", async () => {
+    render(<WizardClient initialDraft={DRAFT} />);
+
+    fireEvent.click(await screen.findByTestId("sync-complete"));
+    expect(
+      await screen.findByTestId("metadata-show-capital-question"),
+    ).toHaveTextContent("false");
+  });
+
+  it("[OWN-03 D-01] asks the capital question on the allocator contribution path", async () => {
+    render(
+      <WizardClient
+        initialDraft={DRAFT}
+        entryContext="contribution"
+        onSuccess={vi.fn()}
+        onClose={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(await screen.findByTestId("sync-complete"));
+    // The positive arm is what makes the negative above a GATE rather than a
+    // dead prop: without it, deleting the question entirely would also pass.
+    expect(
+      await screen.findByTestId("metadata-show-capital-question"),
+    ).toHaveTextContent("true");
   });
 
   it("sourceOverride='csv' drives the CSV branch WITHOUT any route searchParams (Pitfall 3)", async () => {
@@ -962,19 +1229,198 @@ describe("[140.3-10 / TRAP-4] Start fresh is confirmed before it destroys anythi
     );
   });
 
-  it("ANTI-REGRESSION — the INTENTIONAL delete path is untouched and still deletes", async () => {
-    // `onTryAnotherKey` discards a draft holding a REJECTED key, and its
-    // in-file comment says so. Routing it through the dialog too would have
-    // been the over-correction; this pins that it was not.
+  // ⚠️ RE-ARGUED 161-04 / WIZERR-02. This slot held "ANTI-REGRESSION — the
+  // INTENTIONAL delete path is untouched and still deletes", which pinned that
+  // TRAP-4 had not over-corrected by routing `onTryAnotherKey` through the
+  // dialog too. Its premise was that a SECOND intentional delete existed,
+  // outside the confirmation. WIZERR-02 retires that premise the stronger way:
+  // not by confirming the remedy's delete, but by removing it. TRAP-4's law —
+  // "an ERROR STATE's own control must not destroy a draft in one click" — is
+  // therefore satisfied by construction on that control.
+  //
+  // The replacement pins what TRAP-4 actually cares about now: the trap surface
+  // is CLOSED (every reachable delete goes through the dialog) AND closing it
+  // did not cost the wizard its ability to delete. Both halves in one mount, in
+  // sequence, because the failure worth catching is an over-eager class fix that
+  // makes the first half true by breaking the second.
+  it("ANTI-REGRESSION — the trap surface is closed, and closing it did not break deletion", async () => {
+    resumeOverrides = { showResumeBanner: true };
     const fetchSpy = vi
       .spyOn(globalThis, "fetch")
       .mockResolvedValue(new Response(null, { status: 200 }));
 
     render(<WizardClient initialDraft={DRAFT} />);
-    fireEvent.click(await screen.findByTestId("sync-try-another"));
 
-    await waitFor(() => expect(draftDeletes(fetchSpy)).toHaveLength(1));
-    // No dialog was interposed on this path.
+    // (1) The remedy formerly known as destructive: no delete, and no dialog
+    // either — there is nothing to confirm.
+    fireEvent.click(await screen.findByTestId("sync-try-another"));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(
+      draftDeletes(fetchSpy),
+      "An error state's own control must not destroy a draft in one click.",
+    ).toHaveLength(0);
     expect(confirmDialogIsOpen()).toBe(false);
+
+    // (2) The SAME mount can still delete, through the one confirmed path. If a
+    // class fix had merely broken deletion, (1) would pass and this would not.
+    fireEvent.click(screen.getByTestId("wizard-start-fresh"));
+    await waitFor(() => expect(confirmDialogIsOpen()).toBe(true));
+    const dialog = screen
+      .getByText(/Delete this draft\?/i)
+      .closest("dialog") as HTMLDialogElement;
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Delete draft" }),
+    );
+    await waitFor(() => expect(draftDeletes(fetchSpy)).toHaveLength(1));
+  });
+});
+
+/**
+ * 161-04 / WIZERR-02 — "Try another key" is a REMEDY, and a remedy may not
+ * destroy anything.
+ *
+ * These two cases are a matched pair and must be read as one. The positive case
+ * alone would be satisfied by a wizard that had simply lost the ability to
+ * delete drafts at all; the NEGATIVE CONTROL is what distinguishes "the remedy
+ * stopped deleting" from "an over-eager class fix broke deletion". Delete one
+ * and the other stops meaning what it says.
+ *
+ * These pin the WIRING — the real `WizardClient` callback reached through the
+ * real `SyncPreviewStep` prop and the real confirm dialog. A test of a
+ * hand-built callback would prove nothing about the call site.
+ */
+describe("[161-04 / WIZERR-02] Try another key destroys nothing; the deliberate delete still deletes", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function draftDeletes(spy: ReturnType<typeof vi.spyOn>) {
+    return (spy.mock.calls as unknown[][]).filter(
+      (c) =>
+        String(c[0]).includes("/api/strategies/draft/draft-1") &&
+        (c[1] as RequestInit | undefined)?.method === "DELETE",
+    );
+  }
+
+  /**
+   * Tolerant variant of the TRAP-4 helper: this describe asserts the dialog is
+   * ABSENT/CLOSED on a path that never opens it, so a `getByText` that throws
+   * would be the wrong shape.
+   */
+  function confirmDialogIsOpen(): boolean {
+    const heading = screen.queryByText(/Delete this draft\?/i);
+    const dialog = heading?.closest("dialog") as HTMLDialogElement | null;
+    return Boolean(dialog?.hasAttribute("open"));
+  }
+
+  it("clicking Try another key issues NO draft DELETE, and the draft stays bound to the wizard", async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response(null, { status: 200 }));
+
+    render(<WizardClient initialDraft={DRAFT} />);
+
+    // initialDraft present → the wizard mounts on sync_preview, where the
+    // gate-failure envelope offers the remedy.
+    const tryAnother = await screen.findByTestId("sync-try-another");
+    const sessionBefore = screen.getByTestId("sync-session").textContent;
+    // Guard the identity assertion below: `"x" === ""` is false but
+    // `expect("").toBe("")` passes, so a blank id would make the session-survival
+    // check compare nothing against nothing.
+    expect(sessionBefore, "the mounted session id must be a real string").toBeTruthy();
+    const sessionGensAtMount = newWizardSessionIdMock.mock.calls.length;
+
+    fireEvent.click(tryAnother);
+
+    // (1) A pure step transition back to connect_key.
+    expect(await screen.findByTestId("mock-connect-step")).toBeInTheDocument();
+    expect(screen.queryByTestId("mock-sync-preview")).toBeNull();
+
+    // (2) Nothing was destroyed. `wizardFetch` has no `await` before its
+    // `fetch` call, so a fire-and-forget `void handleDeleteDraft()` puts the
+    // DELETE on the spy inside the click handler's own tick — this assertion is
+    // not racing a pending promise. The microtask flush is belt-and-braces for
+    // a delete deferred by one tick.
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(
+      draftDeletes(fetchSpy),
+      "A remedy-labeled control must not delete the user's draft.",
+    ).toHaveLength(0);
+    expect(clearWizardStateMock).not.toHaveBeenCalled();
+
+    // (3) The draft is still BOUND, not merely un-deleted on the server. The
+    // chrome's delete control is gated on `canDelete={Boolean(strategyId)}`, so
+    // its presence is the observable that `strategyId` survived the transition.
+    expect(
+      screen.getByTestId("wizard-delete-draft"),
+      "strategyId must survive — the wizard still holds the draft it was on.",
+    ).toBeInTheDocument();
+
+    // (4) No session id was minted (the onReviewKeys precedent). Regenerating it
+    // is what made a FAILED background delete replay as a clean slate (LOW-2);
+    // with no delete attempted, client belief and server state agree.
+    expect(newWizardSessionIdMock.mock.calls.length).toBe(sessionGensAtMount);
+    expect(screen.getByTestId("connect-session").textContent).toBe(sessionBefore);
+
+    // (5) And no confirmation was interposed either — there is nothing to
+    // confirm. This is NOT the TRAP-4 shape (destructive-but-confirmed); it is
+    // non-destructive.
+    expect(confirmDialogIsOpen()).toBe(false);
+
+    // (6) The resume pointer FOLLOWS the user to connect_key, as it does on the
+    // onReviewKeys precedent. This is a deliberate addition, not incidental: the
+    // old callback did not persist because it was deleting the draft outright.
+    // Now that the draft survives, a pointer still naming `sync_preview` would
+    // be a small copy of the very divergence LOW-2 was about — the client on one
+    // step, the persisted belief on another.
+    await waitFor(() =>
+      expect(
+        saveWizardStateMock.mock.calls.some(
+          (c) =>
+            (c[0] as { step?: string; strategyId?: string } | undefined)
+              ?.step === "connect_key" &&
+            (c[0] as { strategyId?: string } | undefined)?.strategyId ===
+              "draft-1",
+        ),
+        "the surviving draft's resume pointer must follow the user to connect_key",
+      ).toBe(true),
+    );
+  });
+
+  it("NEGATIVE CONTROL — the confirm-dialog danger button still issues the DELETE", async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response(null, { status: 200 }));
+
+    render(<WizardClient initialDraft={DRAFT} />);
+
+    // The chrome's own Delete-draft control — the deliberate path, entered the
+    // way a user enters it. (The TRAP-4 describe covers the `start_fresh`
+    // entrance to the same dialog; this covers the chrome entrance.)
+    fireEvent.click(await screen.findByTestId("wizard-delete-draft"));
+    await waitFor(() => expect(confirmDialogIsOpen()).toBe(true));
+
+    // Opening confirms nothing.
+    expect(draftDeletes(fetchSpy)).toHaveLength(0);
+
+    // Scoped to the DIALOG: the chrome trigger carries the same label, and a
+    // bare getByText would silently start clicking the wrong control.
+    const dialog = screen
+      .getByText(/Delete this draft\?/i)
+      .closest("dialog") as HTMLDialogElement;
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Delete draft" }),
+    );
+
+    await waitFor(() =>
+      expect(
+        draftDeletes(fetchSpy),
+        "WIZERR-02 removes destruction from the REMEDY, not from the wizard.",
+      ).toHaveLength(1),
+    );
   });
 });

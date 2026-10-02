@@ -168,7 +168,7 @@
 ### What this means for the 8-week plan
 
 - [ ] **PROCEED unchanged.** Plan stands. Move to Sprint 1 T1.0 (fix send-intro email dispatch).
-- [ ] **PROCEED with edits.** Specific edits needed to the plan: ____. Make those edits in `/Users/helios-mammut/.claude/plans/rosy-cuddling-teacup.md` before starting Sprint 1.
+- [ ] **PROCEED with edits.** Specific edits needed to the plan: ____. Make those edits in `<home>/.claude/plans/rosy-cuddling-teacup.md` before starting Sprint 1.
 - [ ] **PIVOT.** Reshape Sprints 1-8 around the partner's actual criteria. Re-run `/autoplan` if the changes are structural. Specific reshape: ____.
 - [ ] **REWRITE.** Stop the 8-week build. New plan: focus on LP outbound for 8 weeks. Quantalyze stays in soft-launch mode until 2-3 signed LPs exist. Open new `/autoplan` session for the LP-outbound plan.
 - [ ] **NEW PARTNER.** This partner is not the right partner. Pause the 8-week build. Find a different cap-intro partner first. (This is also an acceptable outcome — see "What's right about this plan" in §14 of the plan file.)

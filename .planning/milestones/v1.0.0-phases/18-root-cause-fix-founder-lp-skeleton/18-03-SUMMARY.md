@@ -69,26 +69,26 @@ Ships LP-01 + LP-02 in full: a Vercel cron at `/api/cron/founder-lp-report` that
 
 ### Created
 
-- `/Users/helios-mammut/claude-projects/quantalyze/src/app/api/cron/founder-lp-report/route.ts` (318 lines)
+- `src/app/api/cron/founder-lp-report/route.ts` (318 lines)
   - GET/POST handler delegating to a single `handle(req)` function
   - Auth FIRST → `getCorrelationId()` → config check → `checkStrategyReadiness()` → `fetchFactsheetPdfWithRetry()` → Resend send → `dualAlert()` on failure
-- `/Users/helios-mammut/claude-projects/quantalyze/src/app/api/cron/founder-lp-report/route.test.ts` (363 lines)
+- `src/app/api/cron/founder-lp-report/route.test.ts` (363 lines)
   - 10 it() blocks covering auth, happy path, Grok W5 precheck, PDF 4xx, W1 503 retry, Pitfall 7 Resend throw, W7 Sentry throw, B4 double-failure, ConfigError
-- `/Users/helios-mammut/claude-projects/quantalyze/scripts/check-founder-lp-readiness.ts` (61 lines)
+- `scripts/check-founder-lp-readiness.ts` (61 lines)
   - npm-runnable preflight that exits non-zero unless `strategies.status='published'` AND `strategy_analytics.computation_status='complete'`
-- `/Users/helios-mammut/claude-projects/quantalyze/.planning/phase-18/founder-lp-runbook.md` (local artifact; `.planning/` is gitignored)
+- `.planning/phase-18/founder-lp-runbook.md` (local artifact; `.planning/` is gitignored)
   - Founder pre-flight runbook with timestamp checklist and Supabase Studio SQL block
 
 ### Modified
 
-- `/Users/helios-mammut/claude-projects/quantalyze/src/app/api/factsheet/[id]/pdf/route.ts`
+- `src/app/api/factsheet/[id]/pdf/route.ts`
   - Added `import { safeCompare } from "@/lib/timing-safe-compare";`
   - Wrapped existing `publicIpLimiter` block in `if (!isInternalCall) {...}` guarded by `safeCompare(req.headers.get("x-internal-token"), process.env.INTERNAL_API_TOKEN)`
-- `/Users/helios-mammut/claude-projects/quantalyze/vercel.json`
+- `vercel.json`
   - Added 7th cron entry: `{ "path": "/api/cron/founder-lp-report", "schedule": "15 9 1 * *" }` (soft cap 10; JSON valid)
-- `/Users/helios-mammut/claude-projects/quantalyze/.env.example`
+- `.env.example`
   - Added `# ─── Founder LP report cron (Phase 18 / LP-01) ─` section documenting `FOUNDER_LP_STRATEGY_ID` + `FOUNDER_LP_REPORT_TO`
-- `/Users/helios-mammut/claude-projects/quantalyze/package.json`
+- `package.json`
   - Added `"check:founder-lp-readiness": "tsx scripts/check-founder-lp-readiness.ts"` to scripts block
 
 ## Commits

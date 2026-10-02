@@ -14,7 +14,7 @@ run_stitch_composite_job writes the headline DIRECTLY from the SAME in-memory
 compute that produces the by-basis object, so headline == by-basis by construction
 (the divergent recompute is retired entirely).
 
-F5(a) (LOW): the composite re-derive must delete the WHOLE csv_daily_returns
+F5(a) (LOW): the composite re-derive must reconcile the WHOLE csv_daily_returns
 series for the strategy (it fully OWNS it), not just the new [span_start,
 span_end] — otherwise a SHRUNK re-derive leaves stale out-of-span rows that the
 headline folds back in. Pure-stub supabase / exchange mocks (no live DB / creds);
@@ -60,6 +60,9 @@ class _StatefulQuery:
         self._eqs: list[tuple[str, Any]] = []
         self._gte: tuple[str, Any] | None = None
         self._lte: tuple[str, Any] | None = None
+        self._lt: tuple[str, Any] | None = None
+        self._gt: tuple[str, Any] | None = None
+        self._in: tuple[str, list[Any]] | None = None
         self._single = False
         self._maybe = False
         self._range: tuple[int, int] | None = None
@@ -80,6 +83,18 @@ class _StatefulQuery:
 
     def lte(self, col: str, val: Any) -> "_StatefulQuery":
         self._lte = (col, val)
+        return self
+
+    def lt(self, col: str, val: Any) -> "_StatefulQuery":
+        self._lt = (col, val)
+        return self
+
+    def gt(self, col: str, val: Any) -> "_StatefulQuery":
+        self._gt = (col, val)
+        return self
+
+    def in_(self, col: str, vals: Any) -> "_StatefulQuery":
+        self._in = (col, list(vals))
         return self
 
     def order(self, *a: Any, **k: Any) -> "_StatefulQuery":
@@ -112,7 +127,8 @@ class _StatefulQuery:
             return self.fake._do_upsert(self.table, self._payload, self._conflict)
         if self._op == "delete":
             return self.fake._do_delete(
-                self.table, list(self._eqs), self._gte, self._lte
+                self.table, list(self._eqs), self._gte, self._lte,
+                lt=self._lt, gt=self._gt, in_=self._in,
             )
         return self.fake._do_select(
             self.table, list(self._eqs), self._single, self._maybe, self._range
@@ -133,6 +149,9 @@ class _StatefulSupabase:
         self.analytics_flags: dict[str, Any] = {}
         self.upserts: list[tuple[str, Any, str | None]] = []
         self.deletes: list[tuple[str, list[tuple[str, Any]], Any, Any]] = []
+        # C3 topic H: the lt / gt / in_ date bounds of each delete, index-aligned
+        # with `deletes` (kept separate so the 4-tuple shape above is unchanged).
+        self.delete_bounds: list[dict[str, Any]] = []
         self.rpc_calls: list[tuple[str, dict[str, Any]]] = []
 
     def table(self, name: str) -> _StatefulQuery:
@@ -156,18 +175,33 @@ class _StatefulSupabase:
         return SimpleNamespace(data=payload)
 
     def _do_delete(
-        self, table: str, eqs: list[tuple[str, Any]], gte: Any, lte: Any
+        self,
+        table: str,
+        eqs: list[tuple[str, Any]],
+        gte: Any,
+        lte: Any,
+        *,
+        lt: Any = None,
+        gt: Any = None,
+        in_: Any = None,
     ) -> SimpleNamespace:
         self.deletes.append((table, eqs, gte, lte))
+        self.delete_bounds.append({"lt": lt, "gt": gt, "in": in_})
         if table == "csv_daily_returns":
             keep: dict[str, float] = {}
             for date, val in self.csv_rows.items():
-                # Honor an optional [gte, lte] date window (the PRE-fix span
-                # delete); post-fix there is no window so every row is removed.
+                # Honor every optional date bound; a row is deleted only when it
+                # satisfies all of them (PostgREST ANDs filters).
                 in_window = True
                 if gte is not None and date < str(gte[1]):
                     in_window = False
                 if lte is not None and date > str(lte[1]):
+                    in_window = False
+                if lt is not None and not date < str(lt[1]):
+                    in_window = False
+                if gt is not None and not date > str(gt[1]):
+                    in_window = False
+                if in_ is not None and date not in {str(v) for v in in_[1]}:
                     in_window = False
                 if not in_window:
                     keep[date] = val
@@ -367,11 +401,12 @@ async def test_gapped_composite_headline_equals_by_basis_cash_settlement() -> No
 
 @pytest.mark.asyncio
 async def test_shrinking_rederive_deletes_stale_out_of_span_rows() -> None:
-    """F5(a): the composite re-derive OWNS the whole series — it must delete every
-    csv_daily_returns row for the strategy before the upsert. Seed a stale row
-    OUTSIDE the new span (Feb-20); after a re-derive over Jan-01..Jan-11 it must
-    be GONE. Neuter (restore the [span_start, span_end] delete) → the stale Feb-20
-    row survives → the headline folds it back in → this reddens."""
+    """F5(a): the composite re-derive OWNS the whole series — every
+    csv_daily_returns row for the strategy that the new payload does not carry
+    must be gone afterwards (since C3 topic H: deleted AFTER the upsert). Seed a
+    stale row OUTSIDE the new span (Feb-20); after a re-derive over Jan-01..Jan-11
+    it must be GONE. Neuter (bound the delete to [span_start, span_end], i.e. drop
+    its lt/gt arms) → the stale Feb-20 row survives → this reddens."""
     fake = _StatefulSupabase(
         members=[
             _member(1, "2024-01-01", "2024-01-03"),
@@ -390,12 +425,18 @@ async def test_shrinking_rederive_deletes_stale_out_of_span_rows() -> None:
     assert set(fake.csv_rows) == {
         "2024-01-01", "2024-01-02", "2024-01-10", "2024-01-11",
     }
-    # The delete that ran must be UNBOUNDED by date (whole-series ownership).
-    csv_deletes = [d for d in fake.deletes if d[0] == "csv_daily_returns"]
-    assert csv_deletes, "expected a csv_daily_returns delete on re-derive"
-    for _table, eqs, gte, lte in csv_deletes:
-        assert ("strategy_id", _STRATEGY_ID) in eqs
-        assert gte is None and lte is None, "re-derive delete must not bound by date"
+    # Whole-series ownership. Since C3 topic H the writer upserts first and then
+    # deletes only what the payload lacks, so ownership is no longer one
+    # date-unbounded delete: it is a delete of every row BEFORE the payload's
+    # first day and every row AFTER its last day (plus the in-span gaps). Those
+    # two open-ended arms are what reach the stale Feb-20 row.
+    csv_idx = [i for i, d in enumerate(fake.deletes) if d[0] == "csv_daily_returns"]
+    assert csv_idx, "expected a csv_daily_returns delete on re-derive"
+    for i in csv_idx:
+        assert ("strategy_id", _STRATEGY_ID) in fake.deletes[i][1]
+    bounds = [fake.delete_bounds[i] for i in csv_idx]
+    assert any(b["lt"] == ("date", "2024-01-01") for b in bounds), bounds
+    assert any(b["gt"] == ("date", "2024-01-11") for b in bounds), bounds
 
 
 @pytest.mark.asyncio

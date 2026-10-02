@@ -35,8 +35,8 @@ semantic mutations to the Phase-140 seam core once produced a byte-identical
 """
 from __future__ import annotations
 
-import asyncio
 import sys
+import time
 from unittest.mock import AsyncMock, MagicMock
 
 import ccxt
@@ -223,18 +223,18 @@ async def test_s04_mt5_gateway_connect_timeout_is_transient_503(
     (the bridge restarts on every deploy), so it stays 503. What it gains is the
     two things 140.2 needs to stop it being a global outage: a named dependency
     to key the breaker on instead of ``breaker:railway`` (A-01), and an honest
-    Retry-After so 140.3 can name the real wait (B-11)."""
+    Retry-After so 140.3 can name the real wait (B-11).
+
+    RE-CUT for 153.3-03 (D-03): this used to fire the ceiling by timing out the
+    FIRST ``wait_for`` call, which was the connect stage. Connect and probe now
+    share ONE end-to-end deadline, so the first call is the DEADLINE and the old
+    form would have walked into the 424 transient arm — i.e. it would have silently
+    started testing a different S-row. It now fires the CONNECT STAGE by name:
+    a genuinely slow construction against a hair-width stage ceiling. No ordinal, so
+    a future stage cannot re-point it."""
     router = exchange_router
-    router.Mt5Client = MagicMock(return_value=MagicMock())
-
-    async def _timeout_on_first_wait(aw, timeout=None):
-        # Close the underlying coroutine so it never runs (no thread, no
-        # "coroutine was never awaited" warning), then simulate the ceiling.
-        if hasattr(aw, "close"):
-            aw.close()
-        raise asyncio.TimeoutError
-
-    monkeypatch.setattr(router.asyncio, "wait_for", _timeout_on_first_wait)
+    router.Mt5Client = MagicMock(side_effect=lambda *a, **k: time.sleep(0.3))
+    monkeypatch.setattr(router, "_MT5_VALIDATE_STAGE_TIMEOUT_S", 0.05)
 
     with pytest.raises(HTTPException) as ei:
         await _call_validate(router, _validate_req(router))

@@ -333,3 +333,36 @@ describe("solveLeverageForMaxDD — Plan 113-02 honest states + input gate + eva
     }
   });
 });
+
+// Phase 167.1.2 SC-4 caller walk. `computeScenario` now returns its honest empty
+// shape when the blend's weight mass is not positive. The solver is a caller,
+// but it builds its OWN weight-1 sleeve state (`sleeveStateAt`), so a book whose
+// live weights are all 0 cannot hand the empty shape to it: the solve is over
+// the sleeve's own series. This pins that, so a future edit that spreads the
+// live weights into the sleeve fails here instead of refusing every solve.
+describe("solveLeverageForMaxDD — [167.1.2 SC-4] a zero-mass book cannot reach the sleeve", () => {
+  it("engineState weights all 0 → still the founder's real solve (L = 4.000), never a NaN or a fabricated no-drawdown", () => {
+    const s = makeStrategy([0, 0, 0, 0, 0, -0.05, 0, 0, 0, 0, 0, 0]);
+    const zeroMassState: ScenarioState = {
+      ...sleeveStateAt(1, s.id),
+      weights: { [s.id]: 0 },
+    };
+    // The live blend itself is the honest empty shape…
+    const live = computeScenario(
+      [s],
+      zeroMassState,
+      buildDateMapCache([s]),
+      252,
+    );
+    expect(live.n).toBe(0);
+    expect(live.max_drawdown).toBeNull();
+    // …and the solver, which blends the sleeve alone at weight 1, still solves.
+    const result = solveLeverageForMaxDD(
+      solveArgs(s, 0.2, { engineState: zeroMassState }),
+    );
+    expect(result.ok).toBe(true);
+    const ok = asOk(result);
+    expect(Number.isFinite(ok.leverage)).toBe(true);
+    expect(Math.abs(ok.leverage - 4.0)).toBeLessThanOrEqual(L_TOL);
+  });
+});

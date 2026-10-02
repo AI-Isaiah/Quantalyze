@@ -97,7 +97,7 @@ during the post-deploy backfill window. Plan 12-10 Task 2 records the probe data
 
 **How to run** (every 60s for ~12 min after `python -m scripts.phase12_deploy` exits 0):
 ```bash
-cd /Users/helios-mammut/claude-projects/quantalyze
+cd <repo-root>
 export SUPABASE_ACCESS_TOKEN="${SUPABASE_ACCESS_TOKEN:?Set this from local env}"
 supabase db remote query "SELECT priority, status, count(*) FROM compute_jobs WHERE kind='compute_analytics' AND status='pending' GROUP BY priority, status ORDER BY priority;"
 ```

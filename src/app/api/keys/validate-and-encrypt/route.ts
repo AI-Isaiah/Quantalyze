@@ -10,10 +10,34 @@ import { CIRCUIT_OPEN_COPY } from "@/lib/seam-copy";
 // 140.3-G4 / SEAMUX-03 — reads the upstream's own machine code off a forwarded
 // body so the legacy-forward arm preserves it rather than overwriting.
 import { seamErrorCode } from "@/lib/seam-discriminator";
+// 164.2 review B2 — the curated sentence for a status-MAPPED code, read from
+// the one copy table rather than retyped, so it cannot drift from what the
+// envelope renders. `recogniseSeamErrorCode` is the same seam→wizard
+// translation the client applies to this body's `code`.
+import { WIZARD_ERROR_COPY, recogniseSeamErrorCode } from "@/lib/wizardErrors";
 import { resilientFetch } from "@/lib/resilient-fetch";
 import { captureToSentry } from "@/lib/sentry-capture";
 import { scrubSeamError } from "@/lib/seam-redaction";
+// 164.5.3-02 / Pitfall 1 — the ONE reader of "which constraint did Postgres
+// actually refuse on", shared with `composite/add-key/route.ts` and
+// `create-with-key/route.ts` so the three copies cannot drift. Parses
+// `error.message` only (Postgres catalog names), never `error.details`,
+// which can carry the offending login value — see that leaf's own rationale.
+import {
+  pgConstraintName,
+  VENUE_IDENTITY_CONSTRAINT,
+} from "@/lib/api/pgConstraintName";
 import { withAuth } from "@/lib/api/withAuth";
+// 160-02 / RANK-03 — the service-role writer for the persist arm. Same factory
+// the sibling connect routes use (the `createAdminClient` import in
+// `create-with-key/route.ts`); it THROWS when
+// SUPABASE_SERVICE_ROLE_KEY is absent, which the persist arm answers honestly.
+import { createAdminClient } from "@/lib/supabase/admin";
+// 160 review F1 — the encrypt contract is imported HERE, as a TYPE SOURCE, so
+// the persist INSERT's ciphertext columns are a compile-time-total projection of
+// it rather than a hand-maintained list. See `EncryptedColumns` at the writer.
+import { EncryptKeyResponseSchema } from "@/lib/analytics-schemas";
+import type { z } from "zod";
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
 import { userActionLimiter, checkLimit, rateLimitDenyJson } from "@/lib/ratelimit";
 import type { User } from "@supabase/supabase-js";
@@ -37,11 +61,83 @@ import { isSfoxEnabledServer, isMt5EnabledServer } from "@/lib/closed-sets";
  */
 export const maxDuration = 300;
 
+/**
+ * 160-02 / RANK-03 — the cap on a persist-mode `label`.
+ *
+ * Before this phase the label was written by the browser's own INSERT and was
+ * bounded by nothing this codebase controlled. In persist mode it becomes
+ * SERVER-written text rendered back into the key list, so it gets an explicit
+ * length bound (ASVS V5). 120 is one notch above the sibling connect route's
+ * 100-char `KEY_INPUT_TOO_LONG` label rejection in `create-with-key/route.ts`
+ * because this
+ * arm TRUNCATES rather than rejects — see the persist arm for why a cosmetic
+ * string must not fail an already-validated connect.
+ */
+const MAX_KEY_LABEL_LENGTH = 120;
+
 // Phase 140.3 / SEAMUX-01 — the breaker body is NOT declared here. It is the
 // ONE constant in `@/lib/seam-copy`, imported above, which every seam emitter
 // reads. The leaf's header carries the constraint that matters most on THIS
 // route: the copy must never blame the user's key for an outage in which no
 // request to the exchange was ever issued.
+
+/**
+ * 164.2-05 / WIZFORM-02 — a BARE upstream 4xx status, classified.
+ *
+ * ── THE MEASUREMENT ─────────────────────────────────────────────────────────
+ *
+ * PRODUCTION, 2026-08-25: this route answered a key-connect attempt with
+ *
+ *     {"error":"Unauthorized","code":"UNKNOWN"}
+ *
+ * The Railway analytics service rejected OUR service key and answered a bare
+ * 401 — no seam envelope, so `AnalyticsUpstreamError.seamCode` was `null` and
+ * the 4xx-forward arm's `err.seamCode ?? "UNKNOWN"` had nothing left to read.
+ * WIZFORM-02's criterion is *"no wizard failure renders UNKNOWN when the server
+ * DID classify it"*, and a 401 IS a classification. It was discarded one line
+ * before it could be used, because the only channel that arm consulted was the
+ * envelope's.
+ *
+ * ⛔ NO ROSTER ROW CAN CLOSE THIS. Every roster, alias table and coverage law
+ * in this repo operates on a code that already exists; here the wire literally
+ * carried the string `"UNKNOWN"`. The status is the only classification present
+ * on the path, so the status is what has to be read.
+ *
+ * ── WHY 401/403 IS OURS ─────────────────────────────────────────────────────
+ *
+ * The credential on THIS hop is the analytics service key held in our own
+ * environment (PYAPI-06). The user's exchange credentials are the request BODY,
+ * never the authorization. So a 401 or 403 here means our own service rejected
+ * our own key — a configuration fault on our side, which is exactly what
+ * `SEAM_MISCONFIGURED`'s copy already says (*"We could not send this request —
+ * our own configuration is wrong"*). Reading it as "your key was rejected"
+ * would be a fresh false attribution, the class this phase exists to close.
+ *
+ * 422 is the service's own shape refusal → `VALIDATION_FAILED`, whose copy was
+ * deliberately authored to name NO producer so it serves both that 422 and our
+ * own 400. 429 is a throttle on that hop → `RATE_LIMITED`.
+ *
+ * ⛔ 400 IS DELIBERATELY ABSENT. A bare 400 from the validator is a verdict
+ * about the USER's key whose specific sentence we did not receive, and
+ * `VALIDATION_FAILED`'s copy (*"The fault is in our software, not in your key
+ * or your data"*) would be FALSE for it. An unmapped 4xx is genuinely
+ * unclassified and still answers `UNKNOWN` — that residue is honest, not a hole
+ * to be filled by widening this table.
+ *
+ * ⛔ EVERY VALUE MUST BE A KEY OF `SEAM_CODE_TO_WIZARD_CODE`. The client's
+ * `recogniseSeamErrorCode` answers `UNKNOWN` for anything outside that table,
+ * so a row minting a code it does not carry would buy nothing at the surface
+ * while reading like a fix here. `wizardErrors.invariant.test.ts` asserts it.
+ */
+const UPSTREAM_STATUS_TO_SEAM_CODE: ReadonlyMap<number, string> = new Map<
+  number,
+  string
+>([
+  [401, "SEAM_MISCONFIGURED"],
+  [403, "SEAM_MISCONFIGURED"],
+  [422, "VALIDATION_FAILED"],
+  [429, "RATE_LIMITED"],
+]);
 
 export const POST = withAuth(async (req: NextRequest, user: User) => {
   const body = await req.json();
@@ -87,13 +183,44 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   // never a live probe. ccxt exchanges are entirely unaffected (isSfox is false).
   // ── Phase 140.3-G4 / SEAMUX-03 — a machine code on EVERY error arm this
   // route emits, so a client discriminates the fault on a stable token instead
-  // of sniffing prose. The four request-shape rejections all answer
-  // KEY_INVALID_FORMAT (create-with-key's exact token for the same facts, two
-  // of them byte-identical sentences). Response bodies only — this route's
-  // request body carries RAW key material (SEAMCORE-06).
+  // of sniffing prose. Response bodies only — this route's request body carries
+  // RAW key material (SEAMCORE-06).
+  //
+  // ── 161-09 / WIZERR-08 — THE FOUR REQUEST-SHAPE ARMS NO LONGER SHARE ONE
+  // CODE, and the sentence this comment used to carry is the reason. It said
+  // all four "answer KEY_INVALID_FORMAT (create-with-key's exact token for the
+  // same facts)". That was an accurate description of a defect, not a design:
+  // 142.2 had already split `KEY_INVALID_FORMAT` into four codes at the two
+  // wizard connect routes precisely because one code for four facts told a
+  // founder with a COMPLETE form that their key format was wrong. This route
+  // was the third carrier of the collapsed vocabulary and kept saying it.
+  //
+  // WHICH FACT MAPS TO WHICH CODE, so the next reader inherits the split rather
+  // than the collapsed claim:
+  //
+  //   · the two venue gates below (sfox, mt5) → KEY_VENUE_NOT_ENABLED. We
+  //     SUPPORT the venue; it is not switched on here yet. Not
+  //     KEY_UNSUPPORTED_VENUE, whose copy ("We do not support that exchange")
+  //     would be false of a venue we do support and would tell a founder to
+  //     abandon a venue that is coming.
+  //   · the two presence guards below (the mt5 three-credential check, the
+  //     generic check) → KEY_MISSING_REQUIRED_FIELD. A required slot arrived
+  //     blank. Nothing about the value's FORMAT was examined.
+  //
+  // ⛔ `KEY_INVALID_FORMAT` HAS NO EMITTER LEFT ON THIS ROUTE, and that is the
+  // correct end state rather than an omission: this route runs no format check
+  // of its own. The `api_secret.length < 8` ccxt check — the one guard of the
+  // twelve that was ever a format failure, and the reason that code's copy is
+  // true again — lives on `create-with-key` and `composite/add-key`, not here.
+  //
+  // ⚠️ CODE-KEY-FIRST IS LOAD-BEARING ON EVERY ARM IN THIS FILE. See the
+  // key-order note at the STALE_CLIENT arm.
+  //
+  // ⛔ STATUS, HEADERS AND SENTENCE ARE UNCHANGED ON ALL FOUR. These are
+  // structural gates; only what the failure is CALLED moved.
   if (isSfox && !isSfoxEnabledServer()) {
     return NextResponse.json(
-      { error: "sFOX integration is not yet available.", code: "KEY_INVALID_FORMAT" },
+      { code: "KEY_VENUE_NOT_ENABLED", error: "sFOX integration is not yet available." },
       { status: 400, headers: NO_STORE_HEADERS },
     );
   }
@@ -108,7 +235,7 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   // ccxt/sfox exchanges are unaffected (isMt5 is false).
   if (isMt5 && !isMt5EnabledServer()) {
     return NextResponse.json(
-      { error: "MT5 integration is not yet available.", code: "KEY_INVALID_FORMAT" },
+      { code: "KEY_VENUE_NOT_ENABLED", error: "MT5 integration is not yet available." },
       { status: 400, headers: NO_STORE_HEADERS },
     );
   }
@@ -131,13 +258,101 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
       passphrase.trim().length === 0)
   ) {
     return NextResponse.json(
-      { error: "Missing required fields", code: "KEY_INVALID_FORMAT" },
+      { code: "KEY_MISSING_REQUIRED_FIELD", error: "Missing required fields" },
       { status: 400, headers: NO_STORE_HEADERS },
     );
   }
 
   if (!exchange || !api_key || (!isSfox && !api_secret)) {
-    return NextResponse.json({ error: "Missing required fields", code: "KEY_INVALID_FORMAT" }, { status: 400, headers: NO_STORE_HEADERS });
+    return NextResponse.json({ code: "KEY_MISSING_REQUIRED_FIELD", error: "Missing required fields" }, { status: 400, headers: NO_STORE_HEADERS });
+  }
+
+  // ── 160-05 / RANK-03 — THE PERSIST DISCRIMINATOR, now a GATE rather than a
+  // fork. `persist === true` is a STRICT boolean comparison and the strictness
+  // is still the whole point, but what the other branch does has changed.
+  //
+  // During the soak window it fell through to a legacy arm that handed the
+  // ciphertext back so a stale tab could INSERT for itself. That window is
+  // CLOSED: `20260823120000_revoke_api_keys_insert` withdrew INSERT on
+  // `api_keys` from `anon` and `authenticated`, so a stale tab's own INSERT now
+  // dies at the table with a bare 42501. Serving it the ciphertext first would
+  // ship encrypted key material to a browser that provably cannot do anything
+  // with it — so the refusal below is both the honest answer and the narrower
+  // blast radius. No LIVE arm of this route returns ciphertext to any caller.
+  // (The dormant `_unifiedValidateAndEncryptHandler` below still blind-forwards
+  // its upstream bodies; see the note at its forwarding site. It has zero
+  // callers, so it is not a live exposure — but the invariant is "live path",
+  // not "route".)
+  //
+  // STRICTNESS still earns its keep: a truthy `"true"` / `1` that some future
+  // caller stringified must NOT be read as consent to write a row. It lands
+  // here, on the refusal, not on the writer. (threat T-160-06)
+  //
+  // ⛔ PLACEMENT IS LOAD-BEARING — ABOVE the rate limiter, BELOW `withAuth`.
+  // It sits here with the sfox/mt5 structural gates, for the reason they
+  // already state in prose: a request this route will do no work for gets a
+  // clean, honest 4xx BEFORE the rate limit and the live round-trip. Below the
+  // limiter this error DEFEATED ITS OWN REMEDY: `userActionLimiter` is
+  // 5-per-60s, so a stale tab that clicks Connect five times burned the whole
+  // bucket on requests that did nothing, and then the reload this very sentence
+  // PRESCRIBES came back 429 "Too many requests". (160 review F1)
+  // ⚠️ It must stay BELOW `withAuth`: the answer reveals which contract version
+  // this deployment is running, and an unauthenticated caller must never be
+  // able to read deploy skew off it.
+  //
+  // ⛔ 409, NOT 400 — deliberate, do not re-litigate. This phase's own
+  // `160-REVIEW.md` recommended 400, and 400 is defensible (the body IS
+  // malformed against the current contract). 409 was chosen because the fact
+  // being reported is a CONFLICT between the client's contract version and this
+  // deployment's — deploy skew, not a typo — and 409 is already what this
+  // codebase spends on "your view of the world and mine disagree"
+  // (`create-with-key` and `composite/add-key` on an already-connected key;
+  // `CsvSubmitStep` reads `409 && ok === true` as idempotent success). Because
+  // 409 is that loaded here, `code` — not the status — is the discriminator
+  // clients are expected to branch on: STALE_CLIENT is the stable token.
+  if (body.persist !== true) {
+    // 160 review F2 — ONE server-side signal, because the copy below prescribes
+    // a remedy only the USER can perform and therefore reports nothing to us
+    // when the remedy cannot work. If the cause is a genuinely stale tab, the
+    // reload fixes it and this line is a harmless deploy-skew tick. If the cause
+    // is OURS — a fourth connect surface added without the discriminator, or a
+    // refactor dropping `persist: true` from one of the three live call sites —
+    // then every connect from that surface 409s, the user reloads as instructed,
+    // gets the same bundle and fails identically, and until this line existed
+    // the ONLY detection channel was a user emailing support (see
+    // `STALE_CLIENT.fix[2]` in `wizardErrors.ts`). In aggregate this makes a
+    // caller regression visible.
+    //
+    // ⛔ DELIBERATELY NOT A SENTRY CAPTURE, do not "upgrade" it. A real deploy
+    // skew is a shared, self-healing state that fires once per stale tab for the
+    // whole soak window — capturing it would bury the signal in noise, the same
+    // stance the breaker / 4xx-forward / 504 arms below take.
+    //
+    // ⚠️ No secrets are in scope at this point: this gate runs BEFORE any
+    // credential is forwarded anywhere, and `user.id` is already what the rate
+    // limiter keys on two statements down.
+    console.error(
+      "[keys/validate-and-encrypt] STALE_CLIENT refusal — caller sent no persist discriminator",
+      { userId: user.id },
+    );
+    // ⭐ 161-09 / WIZERR-08 — KEY ORDER IS LOAD-BEARING, NOT COSMETIC, and this
+    // arm is the receipt. Every coverage law in this repo derives its
+    // population with a `code:`-FIRST predicate (`wizardErrors.invariant.test.ts`
+    // header; `dialog-envelope.invariant.test.ts`). Until 161-09 all twelve of
+    // this route's rejection arms were written `{ error, code }`, so the
+    // derivation over this file returned ZERO — measured, not assumed — and NO
+    // law watched this route at all. `STALE_CLIENT` shipped here in Phase 160
+    // with nothing checking that any client could render it, which is exactly
+    // the regrowth vector the 4th ROUTES row now closes.
+    //
+    // ⛔ AN ARM REORDERED BACK TO `{ error, code }` GOES INVISIBLE SILENTLY —
+    // it keeps working, nothing throws, and the law's hand-typed site count is
+    // the only thing that reddens. Do not reorder to satisfy a formatter.
+    return NextResponse.json({
+      code: "STALE_CLIENT",
+      error:
+        "This page is out of date and can no longer add keys. Reload the page and try again.",
+    }, { status: 409, headers: NO_STORE_HEADERS });
   }
 
   const rl = await checkLimit(userActionLimiter, `keys-validate-encrypt:${user.id}`);
@@ -148,13 +363,39 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     //
     // 140.3-G4 / SEAMUX-03 — the builder's DEFAULT deny bodies are codeless, so
     // pass overrides carrying the byte-identical sentence PLUS a code (exactly
-    // keys/sync:136-158 / create-with-key:240-243). KEY_RATE_LIMIT (not
-    // RATE_LIMITED) because this is the key-connect family and its two
-    // already-coded siblings both chose it — one fact, one token within the
-    // family. SEAM_MISCONFIGURED on the 503 outage arm.
+    // the `keys/sync` and `create-with-key` deny arms). SEAM_MISCONFIGURED on
+    // the 503 outage arm.
+    //
+    // ⚠️ 164.2-05 / criterion 4 — RATE_LIMITED, AND THE SUPERSEDED REASON IS
+    // KEPT SO IT IS NOT RE-ARGUED. This block used to read:
+    //
+    //     "KEY_RATE_LIMIT (not RATE_LIMITED) because this is the key-connect
+    //      family and its two already-coded siblings both chose it — one fact,
+    //      one token within the family."
+    //
+    // ⛔ That is an argument for consistency, made about a token that was
+    // FALSE in every member of the family. `KEY_RATE_LIMIT`'s copy says *"The
+    // exchange asked us to slow down … a transient, exchange-side throttle"*
+    // and its second fix line offers *"try a different exchange account"*. The
+    // bucket that denied one line above is `userActionLimiter` keyed
+    // `keys-validate-encrypt:<uid>` — OURS, per USER. No exchange was
+    // consulted, and no other exchange account can clear it. One token per fact
+    // is still the rule; the fact here is our own cap.
+    //
+    // `RATE_LIMITED` needed no new copy — it already said *"the cap is ours,
+    // not your exchange's"*. 164.2-04 moved `create-with-key`'s two arms and
+    // this plan moves the remaining three, so the family is consistent again,
+    // on the sentence that is true. `KEY_RATE_LIMIT` keeps its union member,
+    // its copy entry and its roster rows: `classifyKeyValidationError` still
+    // returns it at 503 for a GENUINE venue throttle, which is the one place
+    // its sentence holds.
+    //
+    // ⚠️ THE `{ error, code }` KEY ORDER IS UNCHANGED. `composite/add-key`
+    // spells the same body `{ code, error }`; neither order is a contract, and
+    // churning this one would move a byte-wise pin for nothing.
     return rateLimitDenyJson(rl, {
       headers: NO_STORE_HEADERS,
-      throttledBody: { error: "Too many requests", code: "KEY_RATE_LIMIT" },
+      throttledBody: { error: "Too many requests", code: "RATE_LIMITED" },
       misconfiguredBody: {
         error: "Rate limiter unavailable",
         code: "SEAM_MISCONFIGURED",
@@ -165,24 +406,34 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
   // Phase 19 / API-2 — DO NOT delegate to /process-key for validate-and-encrypt.
   //
   // Why this route is locked to the legacy path even when the unified-backbone
-  // flag is on:
-  // The allocator client (src/components/exchanges/AllocatorExchangeManager.tsx)
-  // reads `result.api_key_encrypted` / `result.api_secret_encrypted` /
-  // `result.passphrase_encrypted` / `result.dek_encrypted` / `result.nonce` /
-  // `result.kek_version` from the response and persists them to api_keys.
-  // The unified `/process-key` validate step returns
-  // `{ ok, valid, read_only, correlation_id, step }` — there is NO encryption
-  // payload. Delegating here would silently drop those fields and the
-  // allocator would write all-NULL ciphertext to api_keys.
+  // flag is on — stated as it is TRUE AT HEAD, which is no longer the Phase-19
+  // reason: this route is now its own PERSISTER. It needs the ciphertext
+  // SERVER-side, because it performs the `api_keys` INSERT itself (the persist
+  // arm in `legacyValidateAndEncryptHandler` below). The unified `/process-key`
+  // validate step returns `{ ok, valid, read_only, correlation_id, step }` —
+  // there is NO encryption payload in it at all. Delegating would leave the
+  // persist arm holding a verdict and nothing to write.
   //
-  // TODO(phase-19+): once /process-key gains an encrypt branch (or a separate
-  // /process-key/encrypt endpoint that returns the same envelope shape as
-  // legacy encryptKey), restore the flag-gated unified handler below and
-  // route through it. Tracked under the unified-encrypt deferred work item.
+  // ⚠️ The superseded rationale (kept here only so it is not resurrected)
+  // claimed the allocator client read `result.api_key_encrypted` /
+  // `result.dek_encrypted` / `result.kek_version` off THIS route's response and
+  // persisted them from the browser. That has been false since 160-05: the
+  // allocator sends `persist: true` and reads `result.api_key_id` only, and no
+  // live arm here returns ciphertext to any caller. Do not restore that
+  // reading — it is the exact shape this phase closed.
+  //
+  // TODO(phase-19+): once /process-key gains an encrypt branch THE SERVER can
+  // consume — one that hands the envelope back to THIS route, which still does
+  // its own INSERT — the flag-gated unified handler below can be restored and
+  // routed through. Never phrase the unblocking condition as "returns the same
+  // envelope shape as legacy encryptKey" TO A CALLER: that is a description of
+  // the ciphertext round-trip 160-05 deleted, and a future editor following it
+  // would rebuild it. Tracked under the unified-encrypt deferred work item.
+  //
   // TS-04 / SC7 — `userId` is threaded into the legacy handler (rather than
   // re-derived inside it) so the tenant identity provably comes from THIS
   // route's withAuth session and cannot drift to a body field.
-  return await legacyValidateAndEncryptHandler({ exchange: exchangeNormalized, api_key, api_secret: api_secret_normalized, passphrase, userId: user.id });
+  return await legacyValidateAndEncryptHandler({ exchange: exchangeNormalized, api_key, api_secret: api_secret_normalized, passphrase, userId: user.id, label: body.label });
 });
 
 /**
@@ -203,7 +454,7 @@ async function _unifiedValidateAndEncryptHandler(args: {
     // 140.3-G4 / SEAMUX-03 — a missing internal token is OUR config fault
     // (SEAM_MISCONFIGURED). This handler is DORMANT (zero callers); coded anyway
     // so a reviver inherits the correct behaviour, not the 2026 codeless one.
-    return NextResponse.json({ error: "Service unavailable", code: "SEAM_MISCONFIGURED" }, { status: 503, headers: NO_STORE_HEADERS });
+    return NextResponse.json({ code: "SEAM_MISCONFIGURED", error: "Service unavailable" }, { status: 503, headers: NO_STORE_HEADERS });
   }
 
   const correlationId = await getCorrelationId();
@@ -263,6 +514,18 @@ async function _unifiedValidateAndEncryptHandler(args: {
     // TOP-LEVEL code: preserve the upstream's own (`body.code`, else
     // `seamErrorCode(body)`), falling back to UNKNOWN only when it genuinely
     // carried none. NEVER overwrite an upstream-carried code. (Dormant handler.)
+    //
+    // ⛔ TO WHOEVER REVIVES THIS HANDLER (160 review F5): this arm — and the
+    // success arm below it — BLIND-FORWARD the entire upstream body into this
+    // route's response. That is why the no-ciphertext invariant stated in POST
+    // and in `legacyValidateAndEncryptHandler`'s docblock is scoped to the LIVE
+    // path: it is an accurate description of what ships, not of this dormant
+    // code. On the one route whose whole stated invariant is that key material
+    // stops round-tripping to a browser, a revival must PROJECT the upstream
+    // payload onto a NAMED contract (as the persist INSERT's `encryptedColumns`
+    // does — a local typed from the response schema, so the projection is
+    // compile-time TOTAL rather than a hand-maintained list) rather than spread
+    // whatever /process-key happened to return.
     const forwardBody =
       typeof err === "object" && err !== null
         ? (err as Record<string, unknown>)
@@ -282,13 +545,34 @@ async function _unifiedValidateAndEncryptHandler(args: {
 }
 
 /**
- * Legacy path preserved verbatim from the pre-Phase-19 implementation.
+ * The LEGACY path in the legacy-vs-unified-/process-key sense ONLY (see NOTE
+ * (M-9) below, which fixes that meaning) — it is NO LONGER "preserved verbatim
+ * from the pre-Phase-19 implementation", as this line used to claim. Two
+ * landings changed the body: 160-02 added the server-side `api_keys` writer,
+ * and 160-05 removed the ciphertext response arm. It now validates, encrypts,
+ * INSERTs via a service-role client, and answers `{ api_key_id }`.
  *
  * NOTE (M-9): this branch is the ONLY active code path on this route — the
  * unified handler is intentionally dormant pending the deferred encrypt
  * branch (see API-2 comment in POST). The deprecation date below applies to
  * the unified-handler decision, not to this function which stays around
  * until /process-key gains an encrypt step.
+ *
+ * ── 160-05 / RANK-03: this function serves the PERSIST arm only. It writes
+ * the `api_keys` row here on the server and returns `{ api_key_id }`. The
+ * legacy ciphertext arm it briefly shared a body with is GONE — POST refuses
+ * absent-discriminator bodies with `STALE_CLIENT` before reaching here, so
+ * there is no longer a LIVE code path on this route that returns key material
+ * to a caller. ("Live" is the honest scope, not a hedge: the dormant,
+ * zero-caller `_unifiedValidateAndEncryptHandler` above still forwards upstream
+ * bodies verbatim, and carries a note at its forwarding site telling a reviver
+ * to project onto a named contract instead.)
+ *
+ * It stays ONE body rather than splitting: the rate limiter, the sfox/mt5
+ * gates, the presence checks, the breaker arm, the curated-4xx forward, the
+ * timeout arm and the scrubbed terminal arm all police this arm. Duplicating
+ * the seam calls into a parallel handler is exactly how one arm silently loses
+ * a control (threat T-160-09).
  */
 // DEPRECATED: remove after unified encrypt branch lands (deferred from PR-D)
 async function legacyValidateAndEncryptHandler(args: {
@@ -302,8 +586,15 @@ async function legacyValidateAndEncryptHandler(args: {
    * cannot be the one member of the class that stays on a platform bucket.
    */
   userId: string;
+  /**
+   * 160-02 / RANK-03 — the caller's optional display label, UNVALIDATED. It is
+   * typed `unknown` on purpose: it arrives straight off the request body and
+   * is normalized (trim + 120-char cap + server default) inside the persist
+   * arm before it can become server-written text.
+   */
+  label?: unknown;
 }): Promise<NextResponse> {
-  const { exchange, api_key, api_secret, passphrase, userId } = args;
+  const { exchange, api_key, api_secret, passphrase, userId, label } = args;
   try {
     // Validate and encrypt atomically to prevent TOCTOU race
     const validation = await validateKey(exchange, api_key, api_secret, passphrase, { userId });
@@ -317,13 +608,270 @@ async function legacyValidateAndEncryptHandler(args: {
       // 140.3-G4 / SEAMUX-03 — KEY_NOT_READ_ONLY (union member; its docblock
       // describes this exact fact: read-only unconfirmed, no write scope observed).
       return NextResponse.json({
-        error: "This key could not be verified as read-only. Only read-only keys are accepted.",
         code: "KEY_NOT_READ_ONLY",
+        error: "This key could not be verified as read-only. Only read-only keys are accepted.",
       }, { status: 400, headers: NO_STORE_HEADERS });
     }
 
     const encrypted = await encryptKey(exchange, api_key, api_secret, passphrase, { userId });
-    return NextResponse.json({ ...encrypted, valid: true, read_only: true }, { headers: NO_STORE_HEADERS });
+
+    // ⛔ 160-05 — THE LEGACY ARM WAS HERE and is deliberately not coming back.
+    // It returned `{ ...encrypted, valid: true, read_only: true }` so the
+    // browser could INSERT for itself. `REVOKE INSERT` closed that door at the
+    // table; re-adding a ciphertext response would hand out key material no
+    // caller can use. If a future caller needs the envelope, it needs a
+    // service-role writer, not this route's response body.
+
+    // ── PERSIST ARM (160-02 / RANK-03) ────────────────────────────────────
+    //
+    // ⭐ THE ONE BINDING. `exchange` here is the value THIS route normalized at
+    // the top of POST (the sfox/mt5 canonicalization), and which `validateKey`
+    // then authenticated against the live venue two statements ago. Both venue
+    // columns below are written from this single local — never two reads of the
+    // body, never the raw client string. A divergent `exchange` /
+    // `attested_venue` pair is therefore impossible AT THE WRITER, and
+    // independently impossible AT THE DB (the CHECK
+    // `api_keys_attested_venue_matches_exchange`, migration 20260811210000).
+    // The BEFORE INSERT scrub trigger NULLs `attested_venue` for
+    // non-privileged writers but admits `service_role` by name, so the value
+    // supplied here survives.
+    //
+    // ⛔ THE CEILING, AND DO NOT EXCEED IT. What this establishes is that the
+    // venue is the one this server observed a successful read-only
+    // authentication at. NEVER write "the venue cannot be forged": any server
+    // route holding `createAdminClient()` can still pass any uid and any venue
+    // string. That is the standing `service_role` trust boundary
+    // (ADR-0001/ADR-0003) and this phase does not change it. What changes is
+    // exactly this: "any browser session can forge an attestation" becomes
+    // "only our own server code can". (threat T-160-07, accepted)
+    const exchangeNormalized = exchange;
+
+    // The label becomes SERVER-WRITTEN text, so it is normalized here rather
+    // than trusted: trim, then CAP (not reject) at MAX_KEY_LABEL_LENGTH. The
+    // cap is deliberate — a cosmetic display string must never fail a connect
+    // whose credentials already validated against the live venue. An absent or
+    // whitespace-only label falls back to the same server default the sibling
+    // connect route uses (its own `labelOrDefault` binding in
+    // `create-with-key/route.ts`).
+    const labelTrimmed = typeof label === "string" ? label.trim() : "";
+    const labelOrDefault =
+      labelTrimmed.length > 0
+        ? labelTrimmed.slice(0, MAX_KEY_LABEL_LENGTH)
+        : `${exchangeNormalized} key`;
+
+    // `createAdminClient()` THROWS when SUPABASE_SERVICE_ROLE_KEY is absent.
+    // Caught HERE rather than left to the terminal arm below, which would
+    // answer "Key validation failed" — a sentence that blames the user's key
+    // for our own missing credential. Same posture and code as the sibling
+    // connect route (its `SEAM_MISCONFIGURED` 503 arm in
+    // `create-with-key/route.ts`).
+    let admin: ReturnType<typeof createAdminClient>;
+    try {
+      admin = createAdminClient();
+    } catch (adminErr) {
+      const perRequestSecrets = [api_key, api_secret, passphrase];
+      console.error(
+        "[keys/validate-and-encrypt] persist arm unavailable — no service credential:",
+        scrubSeamError(adminErr, perRequestSecrets),
+      );
+      captureToSentry(adminErr, {
+        tags: { route: "api/keys/validate-and-encrypt", arm: "persist" },
+        secrets: perRequestSecrets,
+      });
+      return NextResponse.json(
+        { code: "SEAM_MISCONFIGURED", error: "Service credential unavailable" },
+        { status: 503, headers: NO_STORE_HEADERS },
+      );
+    }
+
+    // `user_id` is the withAuth session's id threaded in as `userId` (TS-04 /
+    // SC7). A body-supplied uid can never reach this row: the POST handler
+    // never reads one, and this function only ever sees the session value.
+    // (threat T-160-05)
+    //
+    // The skip rationale (the PRAGMA ITSELF is immediately above the `.insert()`
+    // chain below, NOT here — see the ⚠️ at the end of this block):
+    // this INSERT replaces the browser-side INSERT
+    // ApiKeyManager performed unaudited until 160-02, so moving the writer
+    // server-side neither adds nor removes a forensic obligation. The
+    // api_key.* connect taxonomy is the ADR-0023 follow-up tracked with the
+    // sibling wizard path (the `@audit-skip: wizard draft` pragma on the
+    // `create_wizard_strategy` call in `create-with-key/route.ts`), not this
+    // phase.
+    //
+    // ⚠️ `audit-coverage.test.ts` looks back only 8 lines from the mutation
+    // chain start (the P694 tightening), so the pragma cannot live up here with
+    // its rationale — `encryptedColumns` sits between them. Keep the pragma
+    // adjacent to `.insert()` or the coverage gate goes red.
+    //
+    // ⛔ NO SPREAD OF THE UPSTREAM RESPONSE (160 review WR-01, completed by 160
+    // review F3). Ordering `...encrypted` first hardened only the four columns
+    // re-assigned after it; every OTHER `api_keys` column (`id`, `is_active`,
+    // `last_sync_at`, `created_at`, `disconnected_at`, `sync_status`) stayed
+    // fully writable by whatever the upstream returned, so the row still rested
+    // on `EncryptKeyResponseSchema` being strip-mode Zod — a guarantee living
+    // two modules away, in a file with a sanctioned `.passthrough()` sibling,
+    // which is precisely the distant dependency the design must not rest on.
+    // Naming the columns makes the claim true of the WHOLE ROW: an upstream
+    // field this route did not name cannot reach ANY column, whatever that
+    // schema's mode becomes.
+    //
+    // ⭐ BUT A BARE PICK TRADED ONE SILENT FAILURE FOR ANOTHER (160 review F1),
+    // and `encryptedColumns` is what pays that back. The spread was at least
+    // STRUCTURALLY TOTAL over the contract; a hand-written list of six is total
+    // only until someone edits it, and NOTHING here was checking. The seventh
+    // field the encrypt service grows — or the six-field list one line-delete
+    // away from five — is unenforced at every gate this repo owns:
+    // `createAdminClient()` returns a DELIBERATELY UNTYPED client (see the
+    // comment in `@/lib/supabase/admin`), so this `.insert()` literal is never
+    // checked against `api_keys.Insert` and not even a NOT-NULL column breaks
+    // `tsc`. Drop `kek_version` and the INSERT SUCCEEDS: the row claims KEK v1
+    // (`INTEGER NOT NULL DEFAULT 1`) while the blob is wrapped under whatever
+    // KEK the encrypt service actually used, `insertError` is null, the caller
+    // gets 200 and "connected", and the key fails to decrypt in a DIFFERENT
+    // service, days later, forever — no error, no log, no Sentry.
+    //
+    // So the projection is declared against a NAMED LOCAL CONTRACT whose type is
+    // the encrypt schema itself. The mapped type is homomorphic over
+    // `keyof EncryptedColumns`, so it requires EVERY member: a seventh field
+    // added to `EncryptKeyResponseSchema`, or a member deleted from the literal
+    // below, is a compile error HERE — at the writer, in this repo, in CI. That
+    // is exactly the totality the spread provided and the bare pick gave up,
+    // recovered WITHOUT re-acquiring the dependency on the schema's strip mode
+    // (the type says which fields; the literal still says which values, so an
+    // upstream extra still cannot reach a column). It is also the discipline
+    // the dormant handler's reviver note above already prescribes.
+    //
+    // The provenance columns are still assigned explicitly and still win — the
+    // spread below is safe precisely because `encryptedColumns` is a local this
+    // route constructed, not an upstream response object.
+    // 164.5.3-02 — `venue_account_id` (Phase 154 / WIZCONT-02) was populated
+    // ONLY by the wizard's `create_wizard_strategy` RPC before this plan, so
+    // every MT5 key connected through THIS route's "Add Key" persist arm
+    // (ApiKeyManager.tsx / AllocatorExchangeManager.tsx, both POST here with
+    // `persist: true`) stayed permanently NULL — unidentifiable on the card.
+    // `exchangeNormalized` two lines up is this route's one existing
+    // MT5-branch condition, already validated by `validateKey` above; reusing
+    // it (rather than re-deriving a fresh check) keeps that condition the
+    // single source of truth for "is this an MT5 row". Mirrors
+    // `create-with-key/route.ts`'s `const venueAccountId = isMt5 ?
+    // api_key.trim() : null;` verbatim, including the bare `.trim()` — the
+    // login already passed the three-credential non-blank gate above, so no
+    // further normalization belongs here (the SQL-side `NULLIF(btrim(...),
+    // '')` lives in the RPC path, for a different reason).
+    //
+    // Phase 167.1.2 (D-01): a ccxt row now carries the venue account id that
+    // `/api/validate-key` read from the credential being connected (OKX
+    // account/config uid, Bybit query-api userID, Binance balance uid, Deribit
+    // extended account summary id). Only the NAMED schema field is read, never a
+    // spread of the response. `null` when the venue returned none: the connect
+    // proceeds and the key is stamped later. sFOX has no id and stays `null`
+    // (D-10). Stamping it is what makes the 23505 arm below reachable for a
+    // ccxt key: a second live key on one exchange account is refused there.
+    const isMt5 = exchangeNormalized === "mt5";
+    const venueAccountId = isMt5
+      ? api_key.trim()
+      : (validation.venue_account_id ?? null);
+
+    type EncryptedColumns = z.infer<typeof EncryptKeyResponseSchema>;
+    const encryptedColumns: { [K in keyof EncryptedColumns]: EncryptedColumns[K] } = {
+      api_key_encrypted: encrypted.api_key_encrypted,
+      api_secret_encrypted: encrypted.api_secret_encrypted,
+      passphrase_encrypted: encrypted.passphrase_encrypted,
+      dek_encrypted: encrypted.dek_encrypted,
+      nonce: encrypted.nonce,
+      kek_version: encrypted.kek_version,
+    };
+
+    // @audit-skip: key connect — rationale in the block above `encryptedColumns`.
+    const { data: inserted, error: insertError } = await admin
+      .from("api_keys")
+      .insert({
+        ...encryptedColumns,
+        user_id: userId,
+        exchange: exchangeNormalized,
+        attested_venue: exchangeNormalized,
+        label: labelOrDefault,
+        // 164.5.3-02 / 167.1.2 — see the `venueAccountId` derivation above.
+        venue_account_id: venueAccountId,
+      })
+      .select("id")
+      .single();
+
+    if (insertError || typeof inserted?.id !== "string") {
+      // 164.5.3-02 / Pitfall 1 — the venue-identity unique index
+      // (`api_keys_user_exchange_venue_account_uniq`, migration
+      // 20260812083206) becomes reachable on THIS path for the first time now
+      // that the derivation above stamps `venue_account_id` here: before this
+      // plan the column was always NULL on this route's INSERT, so the
+      // partial index (which only fires when `venue_account_id IS NOT NULL`)
+      // could never trip. A 23505 naming it means the founder already has a
+      // live MT5 key connected for this exact login — an honest, distinct
+      // fact, not the generic "couldn't be saved" the fallback below answers
+      // for every other insert failure. Mirrors `composite/add-key/route.ts`'s
+      // own "discriminate by constraint name, fall through for everything
+      // else" shape, adapted to this direct-INSERT route.
+      //
+      // ⛔ ABOVE the generic fallback, deliberately — every other 23505
+      // (including one on a null/unparseable constraint) falls through
+      // unchanged.
+      if (
+        insertError?.code === "23505" &&
+        pgConstraintName(insertError) === VENUE_IDENTITY_CONSTRAINT
+      ) {
+        // 167.1.2 (T-167.1.2-11): Postgres' DETAIL line echoes the colliding
+        // `venue_account_id`. For MT5 that is the login (already `api_key`);
+        // for a ccxt key it is the venue uid, so it is scrubbed by value too.
+        // The response copy names no id and is venue-neutral.
+        console.error(
+          "[keys/validate-and-encrypt] persist INSERT failed — venue-identity collision:",
+          scrubSeamError(insertError, [api_key, api_secret, passphrase, venueAccountId]),
+        );
+        return NextResponse.json(
+          {
+            code: "KEY_VENUE_ALREADY_CONNECTED",
+            error:
+              "This exchange account is already connected on your account. Use the key you already have, or disconnect it first.",
+          },
+          { status: 409, headers: NO_STORE_HEADERS },
+        );
+      }
+
+      // Rule 12 / Pitfall 3: the fault is surfaced, and the raw PostgREST
+      // message — which can echo SQLSTATE text and the offending values back —
+      // is scrubbed at BOTH sinks and NEVER placed in the response body. The
+      // copy is honest about what did and did not happen: the key validated,
+      // the save did not.
+      // 167.1.2: the venue account id is scrubbed too — any other 23505 or
+      // CHECK failure DETAIL can echo the row's `venue_account_id`.
+      const perRequestSecrets = [api_key, api_secret, passphrase, venueAccountId];
+      const insertFault =
+        insertError ?? new Error("api_keys insert returned no row");
+      console.error(
+        "[keys/validate-and-encrypt] persist INSERT failed:",
+        scrubSeamError(insertFault, perRequestSecrets),
+      );
+      captureToSentry(insertFault, {
+        tags: { route: "api/keys/validate-and-encrypt", arm: "persist" },
+        secrets: perRequestSecrets,
+      });
+      return NextResponse.json(
+        {
+          code: "UNKNOWN",
+          error: "Your key was verified but couldn't be saved. Please try again.",
+        },
+        { status: 500, headers: NO_STORE_HEADERS },
+      );
+    }
+
+    // ⭐ NO CIPHERTEXT. The persist response carries the row id and the
+    // validation verdict ONLY — key material stops round-tripping through the
+    // browser on this path entirely (threat T-160-08). NO_STORE_HEADERS is
+    // kept regardless: `api_key_id` is per-tenant.
+    return NextResponse.json(
+      { api_key_id: inserted.id, valid: true, read_only: true },
+      { headers: NO_STORE_HEADERS },
+    );
   } catch (err) {
     // Phase 140 / SEAM-04 — the breaker arm, FIRST among the typed arms.
     //
@@ -354,7 +902,7 @@ async function legacyValidateAndEncryptHandler(args: {
       // emits for this fact and the client-side map already recognises. The
       // CIRCUIT_OPEN_COPY sentence and Retry-After header stay byte-unchanged.
       return NextResponse.json(
-        { error: CIRCUIT_OPEN_COPY, code: "CIRCUIT_OPEN" },
+        { code: "CIRCUIT_OPEN", error: CIRCUIT_OPEN_COPY },
         {
           status: 503,
           headers: {
@@ -378,8 +926,43 @@ async function legacyValidateAndEncryptHandler(args: {
       // 140.3-G4 / SEAMUX-03 — preserve the upstream's own machine code
       // (`err.seamCode`, set by `AnalyticsUpstreamError`), UNKNOWN only when it
       // carried none. Never overwrite an upstream-carried code.
+      //
+      // ⚠️ 164.2-05 / WIZFORM-02 — THE ORDER OF THE TWO `??`s IS THE WHOLE
+      // CONTRACT, and it preserves the rule above rather than replacing it.
+      // `err.seamCode` is a classification the service made about THIS failure
+      // and still wins outright; the status map is consulted only when the
+      // envelope carried nothing, which is precisely the 2026-08-25 PROD case
+      // (a bare 401 answering `code: "UNKNOWN"`). Swapping the order would
+      // replace a specific true verdict with an inference from a channel that
+      // carries less. `UNKNOWN` remains the terminal for an unmapped status.
+      //
+      // ⭐ 164.2 review B2 — WHEN THE CODE COMES FROM THE STATUS MAP, THE
+      // MESSAGE MUST NOT COME FROM THE UPSTREAM. Every consumer of this route
+      // renders `error` and ignores `code`
+      // (`AllocatorExchangeManager.tsx`, `ApiKeyManager.tsx`,
+      // `StrategyForm.tsx`), so the PROD reproduction shipped a body whose two
+      // fields contradicted each other: `code: "SEAM_MISCONFIGURED"` (our own
+      // service key is stale) beside `error: "Unauthorized"` — which on a
+      // key-connect form reads as THEIR key being refused. That is the
+      // misattribution this phase exists to eliminate, so on the mapped arm the
+      // upstream's bare status text is replaced with the curated sentence the
+      // mapped code already owns, read from `WIZARD_ERROR_COPY` rather than
+      // retyped here.
+      //
+      // ⚠️ ONLY the mapped arm. When `err.seamCode` was present the upstream
+      // sent a CURATED 4xx detail about the USER's key and F5a forwards it
+      // byte-unchanged — `mappedCode` is computed only when `seamCode` is
+      // absent, precisely so that arm cannot be touched.
+      const mappedCode = err.seamCode
+        ? null
+        : (UPSTREAM_STATUS_TO_SEAM_CODE.get(err.status) ?? null);
       return NextResponse.json(
-        { error: err.message, code: err.seamCode ?? "UNKNOWN" },
+        {
+          error: mappedCode
+            ? WIZARD_ERROR_COPY[recogniseSeamErrorCode(mappedCode)].title
+            : err.message,
+          code: err.seamCode ?? mappedCode ?? "UNKNOWN",
+        },
         { status: err.status, headers: NO_STORE_HEADERS },
       );
     }
@@ -388,7 +971,7 @@ async function legacyValidateAndEncryptHandler(args: {
       // hop timing out; NOT KEY_NETWORK_TIMEOUT, which asserts the EXCHANGE was
       // unreachable — a fact not observed here).
       return NextResponse.json(
-        { error: "Key validation timed out. Please try again.", code: "UPSTREAM_TIMEOUT" },
+        { code: "UPSTREAM_TIMEOUT", error: "Key validation timed out. Please try again." },
         { status: 504, headers: NO_STORE_HEADERS },
       );
     }
@@ -409,8 +992,44 @@ async function legacyValidateAndEncryptHandler(args: {
     });
     // 140.3-G4 / SEAMUX-03 — UNKNOWN, the repo's terminal/unclassified fallback
     // (create-with-key's terminal precedent).
+    //
+    // 161-08 / WIZERR-06 — THE CODE CROSSES; THE MESSAGE STILL DOES NOT.
+    //
+    // F5b above is UNCHANGED and still governs `error`: a 4xx `detail` from the
+    // Python validator is curated copy and forwards; a 5xx `message` can carry a
+    // raw traceback, a crypto internal or a contract-violation string and must
+    // NOT. What moves is only `code` — a machine token from the seam's own
+    // closed vocabulary, already forwarded by the 4xx arm above. A classified
+    // 500 (`KEK_UNAVAILABLE`, `EGRESS_PROXY_MISCONFIGURED`) used to arrive here
+    // indistinguishable from a failure nobody could name.
+    //
+    // ⭐ THE SCRUBBING ABOVE IS UNTOUCHED AND STILL WRAPS THIS ARM. This route's
+    // request body carries the RAW `api_key` / `api_secret` / `passphrase`, so
+    // `perRequestSecrets` is named explicitly at BOTH sinks two statements up
+    // and neither call is edited here. `seamCode` is a closed-vocabulary machine
+    // token — never request material — so nothing new can reach the body.
+    //
+    // ⛔ THE `persist: true` ARM IS NOT TOUCHED by this edit, deliberately. The
+    // persist-INSERT failure earlier in this file answers `code: "UNKNOWN"` with
+    // its own copy ("verified but couldn't be saved"), and its fault is a
+    // PostgREST error that carries no seam code at all. Its first real PROD
+    // connect is an owed verification; changing it here would make a smoke
+    // failure unattributable.
+    //
+    // ⛔ `typeof`, NOT `instanceof AnalyticsUpstreamError`: this arm is also
+    // reached by transport failures and untyped throws, and a route suite that
+    // mocks `@/lib/analytics-client` wholesale makes the class `undefined`,
+    // where `x instanceof undefined` throws from inside this very catch. The
+    // empty string is excluded because `"" ?? "UNKNOWN"` is `""`.
+    const rawSeamCode = (err as { seamCode?: unknown } | null | undefined)
+      ?.seamCode;
+    const seamCode =
+      typeof rawSeamCode === "string" && rawSeamCode !== "" ? rawSeamCode : null;
     return NextResponse.json(
-      { error: "Key validation failed. Please try again.", code: "UNKNOWN" },
+      {
+        code: seamCode ?? "UNKNOWN",
+        error: "Key validation failed. Please try again.",
+      },
       { status: 500, headers: NO_STORE_HEADERS },
     );
   }

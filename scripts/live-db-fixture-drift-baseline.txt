@@ -1,0 +1,49 @@
+# live-db-fixture-drift baseline — findings the static census MEASURES today, seeded once
+# (Phase 164.9, plan 03, ROADMAP criterion 13 / `[164.9-CREDENTIALED-TESTS-RED-AND-UNGATED]`).
+#
+# AIM: this file SHRINKS TO EMPTY. A finding is removed only once its destination plan closes
+# it (call-site fix, fixture repair, or the read-only exposure decision named below) — never to
+# make a red run green. A finding is NEVER ADDED to this file to clear a red; a NEW live-DB
+# test referencing a table, column, function or schema the tree does not have is a real defect,
+# not a candidate for this ledger.
+#
+# Every non-comment line names EXACTLY ONE finding: <class> file=<path> identifier=<id>
+# Destination: <plan or phase that closes it>. ENTRY_COUNT below is verified by the tool itself
+# against the number of non-comment lines, so a silent hand-edit that adds or drops an entry
+# without moving the count fails the run.
+#
+# DATED 2026-09-21, first seed. `node scripts/live-db-fixture-drift-census.mjs` at HEAD, corpus
+# 51 file(s), reports exactly these 4 findings and 69 `unresolved` call sites (computed
+# relation/schema/function names, or `.insert`/`.update`/`.upsert` payloads that are not a plain
+# object literal — arrays, spread, variables). The `unresolved` count is NOT zero and is NOT
+# claimed to be: it is the residue plan 08 classifies by execution in the lane it stands up, per
+# this plan's objective. RESEARCH traced only 3 of the ROADMAP's 5 failure signatures
+# statically (PGRST203 overload ambiguity, unexposed `cron` schema, stale `key_hash` fixture);
+# this seed independently REPRODUCES all 3 from the real corpus (not merely the catalogue), plus
+# the `status` column finding RESEARCH's own sample did not name. The 5th signature
+# (`42501` permission denial) is not statically decidable and is NOT represented here — see the
+# SUMMARY for that gap stated in full rather than rounded away.
+#
+# ENTRY_COUNT: 0
+#
+# DATED 2026-09-21, SECOND AND (so far) FINAL READING — Phase 164.9 plan 08. All FOUR seeded
+# findings were REPAIRED AT THE CALL SITE, so the ledger is now EMPTY and ENTRY_COUNT is 0.
+# Nothing was retargeted to a later phase, and no entry was added. What changed, per class:
+#   * absent-column x2 (api_keys.key_hash, api_keys.status) — the insert now names the columns
+#     the committed catalogue declares and supplies every NOT NULL column without a default.
+#   * unexposed-schema x1 (cron) — the `cron` call site was moved OFF the REST surface onto the
+#     Management-API path the same file already uses. `supabase/config.toml` was NOT widened:
+#     exposing `cron` would be a real REST-surface widening with its own review burden, and it
+#     is explicitly not the default repair.
+#   * ambiguous-overload x1 (claim_compute_jobs_with_priority) — the CALL SITE now names a
+#     parameter unique to the 5-arg declaration, so PostgREST can choose. The root-cause fix
+#     (dropping the stale 2-arg overload) is a PROD-affecting migration and remains OUT of this
+#     phase's scope, unchanged from the first seed's reading.
+# ⛔ An EMPTY ledger is not a licence to add to it. The AIM paragraph above still governs: a new
+# live-DB test naming a relation, column, function or schema the tree does not have is a real
+# defect and is fixed, never allowlisted.
+# ⚠️ The `unresolved` count is NOT zero and is still not claimed to be. Measured at this commit:
+# 69 call sites the static reader cannot decide (computed names, non-object-literal payloads).
+# They are residue for EXECUTION to classify — which is what the `frontend-live-db-lane` job
+# this plan stands up exists to do.
+

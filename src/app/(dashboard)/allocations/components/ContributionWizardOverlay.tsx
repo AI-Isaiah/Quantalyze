@@ -29,23 +29,83 @@
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { WizardClient } from "@/app/(dashboard)/strategies/new/wizard/WizardClient";
+import {
+  draftMatchesSource,
+  type InitialDraft,
+  type WizardDraftKind,
+} from "@/lib/wizard/draft-query";
+import type { PreselectedKey } from "@/app/(dashboard)/strategies/new/wizard/steps/ConnectKeyStep";
+
+/**
+ * What the overlay learned from `GET /api/strategies/wizard-draft` (154-02).
+ *
+ * `draft: null` is a SETTLED answer meaning "you have no draft" — distinct from
+ * the `undefined` state variable below, which means "we have not asked yet".
+ */
+interface OverlayDraftRead {
+  draft: InitialDraft | null;
+  kind: WizardDraftKind | null;
+}
 
 export interface ContributionWizardOverlayProps {
   isOpen: boolean;
   onClose: () => void;
   /** Receives the finalized (private) strategy id when the wizard completes. */
   onSuccess?: (strategyId: string) => void;
+  /**
+   * 162-06 / HONEST-06 / D-162-3 — the stored key this open is ABOUT.
+   *
+   * Set by /my-strategies when the owner clicks "Finish setup →" on a bare-key
+   * placeholder row; absent (the default) for every other mount, which keeps
+   * those byte-identical to the pre-162 overlay.
+   *
+   * Two things follow from it here, and the wizard owns the rest:
+   *   · the id joins the WizardClient remount key below, so switching away from
+   *     the preselect tears the wizard down instead of leaving its `useState`
+   *     initializers holding a key the user just rejected;
+   *   · a draft that belongs to a DIFFERENT key is not offered (see
+   *     `offeredRead`) — resuming it would silently move the user onto a key
+   *     they did not click.
+   */
+  preselectKey?: PreselectedKey | null;
 }
 
 export function ContributionWizardOverlay({
   isOpen,
   onClose,
   onSuccess,
+  preselectKey = null,
 }: ContributionWizardOverlayProps) {
   // The overlay owns the CSV↔API branch (no route searchParams, Pitfall 3).
   // `key={source}` on WizardClient below drives the remount on toggle, exactly
   // like the manager page's URL keying (wizard/page.tsx:120).
   const [source, setSource] = useState<"api" | "csv">("api");
+  // Phase 154 / WIZCONT-01 — the caller's latest wizard draft.
+  //
+  // `undefined` = the read has not settled. It is NOT the same as a settled
+  // `{draft: null}`, and the difference is load-bearing: the WizardClient mount
+  // below is DEFERRED while this is undefined, because WizardClient's useState
+  // initializers read `initialDraft` ONCE at mount. Handing a late-arriving
+  // draft to an already-mounted wizard changes nothing on screen.
+  //
+  // SSR-safe by construction: the initial value is a constant, so this branch
+  // renders identically on both passes (the hydration rule WizardClient.tsx:178
+  // states for the same reason).
+  const [draftRead, setDraftRead] = useState<OverlayDraftRead | undefined>(
+    undefined,
+  );
+  // 162-06 / HONEST-06 — has the owner said "Use a different key" this open?
+  //
+  // ⭐ THE STATE LIVES HERE, NOT IN THE STEP THAT RENDERS THE BUTTON, because
+  // this component owns the remount key the preselected id is part of. Dropping
+  // the preselect must TEAR THE WIZARD DOWN: `WizardClient` seeds its step, its
+  // `apiKeyId` and (through the connect step) its exchange from the preselect in
+  // `useState` initializers, which run once. Flipping a flag in place would
+  // leave every one of them holding the key the owner just rejected, which is
+  // the "reads correct in a diff, does nothing in the browser" shape the draft
+  // deferral above already had to fix once.
+  const [preselectDismissed, setPreselectDismissed] = useState(false);
+  const activePreselect = preselectDismissed ? null : preselectKey;
   // Panel node so we can pull focus INTO the dialog on open (see below).
   const panelRef = useRef<HTMLDivElement>(null);
 
@@ -58,8 +118,13 @@ export function ContributionWizardOverlay({
       // Close-reset (same pattern StrategyBrowseDrawer:210-227 blesses): the
       // overlay stays mounted while closed (renders null), so reset the source
       // toggle to its default so a reopen always starts on the API branch.
-      // eslint-disable-next-line react-hooks/set-state-in-effect
       setSource("api");
+      // 162-06 — the same close-reset, for the same reason: the dismissal
+      // belongs to ONE open. Without it, an owner who clicked "Use a different
+      // key", closed the overlay, and clicked "Finish setup →" on another row
+      // would reopen onto a blank credential form with their new choice
+      // silently discarded.
+      setPreselectDismissed(false);
       return;
     }
     // Move focus INTO the dialog on open. Without this, opening from the mobile
@@ -76,6 +141,74 @@ export function ContributionWizardOverlay({
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
   }, [isOpen, onClose]);
+
+  // Phase 154 / WIZCONT-01 — read the caller's own latest draft on open.
+  //
+  // Same hooks-above-the-null-gate discipline as the Esc effect: this MUST run
+  // unconditionally, so it sits above `if (!isOpen) return null`.
+  useEffect(() => {
+    if (!isOpen) {
+      // ⭐ Close-reset, the companion of setSource("api") above. A draft
+      // fetched on open must be CLEARED on close, or a reopen resumes a draft
+      // the founder just deleted (or just finished submitting) — and the
+      // deferred mount below would not even re-ask.
+      setDraftRead(undefined);
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await fetch("/api/strategies/wizard-draft", {
+          headers: { Accept: "application/json" },
+        });
+        if (!res.ok) {
+          throw new Error(`wizard-draft read answered ${res.status}`);
+        }
+        const json = (await res.json()) as Partial<OverlayDraftRead> | null;
+        if (cancelled) return;
+        const kind = json?.kind ?? null;
+        // Open ON the draft's branch so its resume banner is actually visible.
+        // A CSV draft offered while the API tab is selected would be filtered
+        // out by draftMatchesSource below and silently never surface.
+        if (kind === "csv") setSource("csv");
+        setDraftRead({ draft: json?.draft ?? null, kind });
+      } catch (err) {
+        if (cancelled) return;
+        // T-154-05-C: a failed read must NEVER block a fresh start. Degrade to
+        // "no draft" — and say so out loud, because the alternative (leaving
+        // the pending line up forever) is a dead overlay with no diagnosis.
+        console.warn(
+          "[ContributionWizardOverlay] wizard-draft read failed; starting fresh:",
+          err,
+        );
+        setDraftRead({ draft: null, kind: null });
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [isOpen]);
+
+  // The draft is offered ONLY on the branch it belongs to. The rule is the one
+  // exported by the query module (154-02), never re-derived here — `api_key_id`
+  // alone cannot tell a CSV draft from a composite one. Switching tabs
+  // therefore offers a FRESH flow rather than hijacking a draft into a step it
+  // cannot feed.
+  //
+  // 162-06 / HONEST-06 — AND ONLY IF IT BELONGS TO THE KEY THE OWNER CLICKED.
+  // The draft read above asks for the caller's LATEST draft, which has nothing
+  // to do with which placeholder row was clicked: with a preselect for key B and
+  // a live draft on key A, the unguarded expression resumed A — landing the user
+  // on a sync_preview for a key they did not choose, from a click that named B.
+  // The predicate is the draft's OWN `api_key_id`, so the preselected key's own
+  // draft (the stale-page case: another tab started it) still resumes normally.
+  const offeredRead =
+    draftRead?.draft &&
+    draftRead.kind &&
+    draftMatchesSource(draftRead.kind, source) &&
+    (!activePreselect || draftRead.draft.api_key_id === activePreselect.id)
+      ? draftRead
+      : null;
 
   if (!isOpen) return null;
   if (typeof document === "undefined") return null;
@@ -134,19 +267,43 @@ export function ContributionWizardOverlay({
 
         <div className="px-6 py-5">
           {/*
-            initialDraft={null} = a fresh wizard on every open. The overlay does
-            not resume server drafts in Phase 110; any abandoned overlay draft is
-            reaped by the wizard-draft cleanup cron (migration 20260713120000).
-            key={source} drives the CSV↔API remount (Pitfall 3 — no URL keying).
+            Phase 154 / WIZCONT-01. The overlay reads the caller's own latest
+            draft (the 154-02 route, above) and DEFERS this mount until that
+            read settles. The deferral IS the fix: WizardClient's useState
+            initializers read `initialDraft` once at mount, so threading a
+            late-arriving draft into an already-mounted wizard is a change that
+            reads correct in a diff and does nothing in the browser.
+
+            The key carries the offered draft's id as well as the source, so a
+            Start-fresh delete or a branch toggle forces a clean remount rather
+            than leaving initializers holding a draft that no longer applies
+            (the `key={source}` precedent, extended — Pitfall 3, no URL keying).
           */}
-          <WizardClient
-            key={source}
-            entryContext="contribution"
-            sourceOverride={source}
-            initialDraft={null}
-            onSuccess={(id) => onSuccess?.(id)}
-            onClose={onClose}
-          />
+          {draftRead === undefined ? (
+            <p
+              className="text-caption text-text-muted"
+              data-testid="overlay-draft-pending"
+            >
+              Checking for a saved draft…
+            </p>
+          ) : (
+            <WizardClient
+              // 162-06 — the preselected key id JOINS the key. Choosing a
+              // different key changes this string, which is what tears the
+              // wizard down: the same `useState`-initializers-read-once
+              // property that forced the draft deferral above would otherwise
+              // leave the step holding the key the user just rejected.
+              key={`${source}:${offeredRead?.draft?.id ?? "new"}:${activePreselect?.id ?? "none"}`}
+              entryContext="contribution"
+              sourceOverride={source}
+              initialDraft={offeredRead?.draft ?? null}
+              initialDraftKind={offeredRead?.kind ?? null}
+              preselectKey={activePreselect}
+              onUseDifferentKey={() => setPreselectDismissed(true)}
+              onSuccess={(id) => onSuccess?.(id)}
+              onClose={onClose}
+            />
+          )}
         </div>
       </div>
     </div>,

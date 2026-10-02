@@ -7,10 +7,19 @@ import { Modal } from "@/components/ui/Modal";
 import { Button } from "@/components/ui/Button";
 import { RequestCallModal } from "@/app/(marketing)/for-quants/RequestCallModal";
 import { WizardChrome, WIZARD_STEPS_CSV } from "./WizardChrome";
-import { type ConnectKeySuccess } from "./steps/ConnectKeyStep";
+import {
+  type ConnectKeySuccess,
+  type PreselectedKey,
+} from "./steps/ConnectKeyStep";
 import { MultiKeyConnectStep } from "./steps/MultiKeyConnectStep";
 import { SyncPreviewStep, type SyncPreviewSnapshot } from "./steps/SyncPreviewStep";
-import { MetadataStep, type MetadataDraft } from "./steps/MetadataStep";
+import {
+  MetadataStep,
+  metadataFieldIsRendered,
+  type MetadataDraft,
+  type MetadataFieldId,
+} from "./steps/MetadataStep";
+import type { WizardErrorCode } from "@/lib/wizardErrors";
 import { canonicalizeExchangeList } from "@/lib/constants";
 import { SubmitStep } from "./steps/SubmitStep";
 import { ReviewStep } from "./steps/ReviewStep";
@@ -21,7 +30,7 @@ import { WithdrawalWarningStrip } from "./WithdrawalWarningStrip";
 import { WizardIpAllowlistHint } from "./WizardIpAllowlistHint";
 import {
   clearWizardState,
-  csvSubmissionSignature,
+  csvSubmissionFingerprint,
   deriveWizardResumeOverrides,
   loadWizardState,
   newWizardSessionId,
@@ -31,6 +40,11 @@ import {
 import { wizardFetch } from "@/lib/wizard/wizard-correlation";
 import { trackForQuantsEventClient } from "@/lib/for-quants-analytics";
 import type { CtaLocation } from "@/lib/analytics";
+// Phase 154 / WIZCONT-01: TYPE-ONLY import (erased at build). The draft shape
+// and its branch discriminator are single-sourced in `@/lib/wizard/draft-query`
+// — this component used to re-declare `InitialDraft` locally, which is the
+// second-shape drift 154-02 exists to prevent.
+import type { InitialDraft, WizardDraftKind } from "@/lib/wizard/draft-query";
 
 /**
  * WizardClient owns the 4-step state machine for /strategies/new/wizard.
@@ -38,25 +52,27 @@ import type { CtaLocation } from "@/lib/analytics";
  * only stores a pointer so a tab close/reopen can resume.
  */
 
-interface InitialDraft {
-  id: string;
-  name: string | null;
-  description: string | null;
-  category_id: string | null;
-  strategy_types: string[] | null;
-  subtypes: string[] | null;
-  markets: string[] | null;
-  supported_exchanges: string[] | null;
-  leverage_range: string | null;
-  aum: number | null;
-  max_capacity: number | null;
-  api_key_id: string | null;
-  asset_class: string | null;
-}
-
 interface WizardClientProps {
   /** Initial draft row from the server (null when no draft exists yet). */
   initialDraft: InitialDraft | null;
+  /**
+   * Phase 154 / WIZCONT-01 — which BRANCH `initialDraft` belongs to.
+   *
+   * The step initializer below consults the draft BEFORE it consults
+   * `source`, and a draft's step depends on its kind: a CSV draft resumes on
+   * `csv_upload` (re-select the file, metadata preserved), an api/composite
+   * draft on `sync_preview`. `api_key_id === null` is true for BOTH a CSV and
+   * a member-bearing composite draft, so the kind CANNOT be re-derived here —
+   * it comes from `deriveDraftKind` in `@/lib/wizard/draft-query`, the one
+   * place that owns the membership probe (A4 / Pitfall W-2).
+   *
+   * Optional and additive: both production callers (the SSR page and
+   * `ContributionWizardOverlay`) pass it, and both first apply
+   * `draftMatchesSource`, so a draft only ever reaches the branch it belongs
+   * to. When it is absent the draft is assumed to belong to the branch it was
+   * handed to — which is byte-identical to the pre-154 behavior.
+   */
+  initialDraftKind?: WizardDraftKind | null;
   /**
    * Phase 110 / CONTRIB-01..02 — which surface mounted the wizard.
    *
@@ -89,6 +105,26 @@ interface WizardClientProps {
    * finalize). Manager mode ignores this (it navigates to `/strategies`).
    */
   onClose?: () => void;
+  /**
+   * 162-06 / HONEST-06 / D-162-3 — the stored key this wizard was opened ON,
+   * from the /my-strategies placeholder row the owner clicked.
+   *
+   * Two seams here, and the connect step owns the rest: the step initializer
+   * below starts on `connect_key` so the saved-key summary is what the owner
+   * SEES (the whole requirement is that the choice is visible and changeable),
+   * and `apiKeyId` is seeded from it.
+   *
+   * Absent for the manager route and every other overlay mount.
+   */
+  preselectKey?: PreselectedKey | null;
+  /**
+   * 162-06 — "Use a different key". Threaded straight through to the connect
+   * step; the OVERLAY owns the decision because dropping the preselect must
+   * remount this component (its `useState` initializers read the preselect
+   * once, so flipping a flag in place would leave them holding the rejected
+   * key).
+   */
+  onUseDifferentKey?: () => void;
 }
 
 const STEP_INDEX: Record<WizardStepKey, 1 | 2 | 3 | 4 | 5> = {
@@ -144,10 +180,13 @@ interface CsvPreview {
 
 export function WizardClient({
   initialDraft,
+  initialDraftKind = null,
   entryContext = "manager",
   sourceOverride,
   onSuccess,
   onClose,
+  preselectKey = null,
+  onUseDifferentKey,
 }: WizardClientProps) {
   const router = useRouter();
   // Phase 110: the useSearchParams hook keeps running unconditionally (hooks
@@ -155,6 +194,11 @@ export function WizardClient({
   // passes `sourceOverride` instead (Pitfall 3). Manager mode is unchanged.
   const searchParams = useSearchParams();
   const isContribution = entryContext === "contribution";
+  // ONE expression, read by BOTH the prop that decides the render and the
+  // routing guard that decides whether a server refusal on that field is
+  // deliverable (153.2 review WR-01). Two spellings of this fact is how the
+  // guard and the render drift into disagreeing.
+  const showCapitalQuestion = isContribution;
 
   // Phase 15: ?source=csv branch detection. Default 'api' for back-compat.
   // The query param is read once at mount; tab navigation changes are not
@@ -184,17 +228,62 @@ export function WizardClient({
     newWizardSessionId(),
   );
 
+  /**
+   * Phase 154 / WIZCONT-01 (TWIN-6) — the draft's branch, resolved BEFORE any
+   * step is chosen.
+   *
+   * `initialDraftKind` is the authoritative answer and comes from
+   * `deriveDraftKind` (the only place allowed to run the composite-vs-CSV
+   * membership probe). The fallback is NOT a second discriminator: it says
+   * "a draft handed to this branch belongs to this branch", which is exactly
+   * what `draftMatchesSource` guarantees for both production callers, and it
+   * reproduces the pre-154 behavior for a caller that supplies no kind.
+   *
+   * Props only — SSR-deterministic, per the hydration docblock above.
+   */
+  const draftKind: WizardDraftKind | null = initialDraft
+    ? (initialDraftKind ?? (source === "csv" ? "csv" : "api"))
+    : null;
+
+  /**
+   * The step a resumed draft lands on. Read by BOTH the initializer below and
+   * `handleResume` — one expression, because two spellings of "where does this
+   * draft resume" is how the mount and the button drift into disagreeing.
+   */
+  const draftResumeStep: WizardStepKey =
+    draftKind === "csv" ? "csv_upload" : "sync_preview";
+
   const [step, setStep] = useState<WizardStepKey>(() => {
+    // ⭐ 162-06 — A PRESELECT IS CONSULTED BEFORE THE DRAFT, and the ordering is
+    // the requirement rather than a preference. The owner clicked a specific
+    // stored key; landing them on `sync_preview` (which is where a draft
+    // resumes) would skip the one screen that says WHICH key this is about and
+    // offers to change it. The overlay has already refused to hand us a draft
+    // belonging to a different key, so when both are present they name the same
+    // key — and "Continue with this key" resolves onto that same draft through
+    // the server's own idempotent reuse arm.
+    if (preselectKey) return "connect_key";
+    // ⭐ THE DRAFT IS CONSULTED FIRST. Before Phase 154 the `source === "csv"`
+    // short-circuit sat above this and returned "csv_upload" without ever
+    // looking at `initialDraft` — so a CSV draft could never resume (the
+    // banner is gated on the draft, and the CSV branch never learned there
+    // was one). That is the same class as the overlay's `initialDraft={null}`:
+    // the step was chosen before the draft was consulted.
+    if (initialDraft) return draftResumeStep;
     if (source === "csv") return "csv_upload";
-    if (!initialDraft) return "connect_key";
-    return "sync_preview";
+    return "connect_key";
   });
 
   const [strategyId, setStrategyId] = useState<string | null>(
     initialDraft?.id ?? null,
   );
+  // 162-06 — the draft's own key wins when there is one (it is the persisted
+  // fact); otherwise the preselected key seeds this, so a step that reads
+  // `apiKeyId` is not looking at a null for a key the owner has already named.
+  // The two cannot disagree: the overlay only offers a draft whose
+  // `api_key_id` IS the preselected key.
   const [apiKeyId, setApiKeyId] = useState<string | null>(
-    initialDraft?.api_key_id ?? null,
+    initialDraft?.api_key_id ?? preselectKey?.id ?? null,
   );
 
   const [showResumeBanner, setShowResumeBanner] = useState<boolean>(false);
@@ -255,6 +344,19 @@ export function WizardClient({
   const [savedAt, setSavedAt] = useState<number | null>(null);
   const [toastKey, setToastKey] = useState(0);
   const [sessionExpired, setSessionExpired] = useState(false);
+  /**
+   * 154-06 / WIZCONT-02. True when the last connect was resolved by the server
+   * onto a strategy the user ALREADY had — the token-less re-connect of
+   * credentials we already hold. Drives one neutral line; see the strip below.
+   *
+   * ⭐ IT LIVES HERE, NOT IN `ConnectKeyStep`, FOR A MECHANICAL REASON: the
+   * dedup arrives on the SUCCESS path, and success calls `handleConnectSuccess`
+   * → `setStep("sync_preview")` in the same commit, so `ConnectKeyStep`
+   * unmounts before any strip of its own could paint a single frame. The
+   * notice belongs to the chrome that survives the step change — which is also
+   * where its visual donor, the session-expired strip, already lives.
+   */
+  const [dedupedExisting, setDedupedExisting] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [requestCallOpen, setRequestCallOpen] = useState(false);
   const wizardStartFiredRef = useRef(false);
@@ -278,7 +380,7 @@ export function WizardClient({
   const [csvValidationPassed, setCsvValidationPassed] = useState<boolean>(false);
   const [strategyName, setStrategyName] = useState<string>("");
   // CR-01 (140.4-REVIEW) — the durable half of the CSV double-submit fence.
-  // Holds the content signature (name + series) captured at the moment a CSV
+  // Holds the content fingerprint (name + series) captured at the moment a CSV
   // submit FAILED, or null when the live session has no burned submission. A
   // later change to the name or the series is then detectable as a DIFFERENT
   // submission, which must not reuse the session id the failed attempt already
@@ -286,12 +388,45 @@ export function WizardClient({
   // strategy the first attempt created. A ref (not state) because reading it
   // must never itself trigger a render, and the mint below is the only writer
   // of the derived session id.
+  //
+  // RT-3 (v1.19 red team, Phase 146.1-07) — this ref is now the in-session
+  // CACHE of a value that also lives in the SIGNED wizard-state envelope. It is
+  // hydrated from that envelope on mount and written through at both the set
+  // and clear sites below, so a reload no longer disarms the fence. Before
+  // RT-3, `wizardSessionId` was persisted while its burn was not — so a refresh
+  // restored the spent session id with nothing left to retire it.
+  //
+  // ⚠️ RT-3 IS DEFENSE IN DEPTH. The OPERATIVE fence is the SERVER-side
+  // equality refusal at `src/app/api/strategies/csv-finalize/route.ts:820-863`
+  // (shipped 2026-08-18), which refuses a resubmit whose committed series does
+  // not match. This ref never justifies weakening that arm.
   const failedCsvSubmitSigRef = useRef<string | null>(null);
   // QA report 2026-05-21 ISSUE-010: classification metadata captured on
   // the new csv_metadata step. Reused MetadataStep shape — same fields as
   // the API branch's metadataDraft, but populated by the CSV-only user
   // typing instead of detection from synced trades.
   const [csvMetadataDraft, setCsvMetadataDraft] = useState<MetadataDraft | null>(null);
+
+  /**
+   * 153.2-05 / WIZFORM-01 — THE HANDOFF. A refusal `finalize-wizard` raised
+   * about one metadata field, carried back to the step that owns that field.
+   *
+   * ⚠️ This client is the only owner of `step`, which is why the routing has to
+   * land here rather than inside `SubmitStep`: taking the user to the field
+   * means a step change, and a step change means this component.
+   *
+   * ⛔ `metadataDraft` IS NOT RESET (UI-SPEC Surface 3, Gate D). The user is
+   * returned to a POPULATED form with one field flagged — never to a blank one.
+   * A form that loses its contents on a validation failure is a worse outcome
+   * than the envelope this replaces.
+   *
+   * Cleared whenever the user leaves the step or completes it, so a stale
+   * refusal cannot outlive the edit that fixed it.
+   */
+  const [metadataServerFieldError, setMetadataServerFieldError] = useState<{
+    field: MetadataFieldId;
+    code: WizardErrorCode;
+  } | null>(null);
 
   // Single post-mount localStorage read. Computes resume overrides from
   // the LS payload (if any) and applies them via setState. `hydrated`
@@ -305,13 +440,96 @@ export function WizardClient({
     (async () => {
       const loaded = await loadWizardState();
       if (cancelled) return;
+      // Phase 164.2.1 / SESSIONID-FENCE — the key THIS mount will submit
+      // under, and `null` when it will submit under none.
+      //
+      // Hoisted into a local rather than passed inline because the decline
+      // warning below has to read the SAME value; recomputing the expression
+      // there would let the two drift apart, and a triage label computed from a
+      // different key than the gate saw is worse than no label.
+      //
+      // API branch: deliberately the SAME expression that seeds the
+      // `apiKeyId` state above, so the gate compares the stored token against
+      // exactly the key the submission carries; reading the state variable
+      // here instead would make the comparison depend on render timing.
+      //
+      // ⛔ CSV branch: a LITERAL `null`, and this ternary is what makes the
+      // "no key on the CSV branch" sentences in `localStorage.ts` true by
+      // CONSTRUCTION rather than merely usually-true. `ContributionWizard
+      // Overlay` passes `preselectKey` regardless of source and renders the
+      // "CSV upload" pill under a live preselect, so "Finish setup → on key
+      // B" followed by "CSV upload" arrives here with a preselect in hand.
+      // A CSV submission carries no key, so a key comparison on this branch
+      // can never decline anything MEANINGFUL — the only thing it can do is
+      // strip a live CSV session id together with the `failedCsvSubmitSig`
+      // burn riding on it (the gate emits the pair or neither), which is
+      // precisely the RT-3 hazard of a fresh id with the burn gone. Claiming
+      // no key is therefore the honest claim, not a loophole. Pinned by
+      // `ContributionWizardOverlay.csv-preselect-burn.test.tsx`.
+      const incomingApiKeyId =
+        source === "csv"
+          ? null
+          : (initialDraft?.api_key_id ?? preselectKey?.id ?? null);
       const overrides = deriveWizardResumeOverrides(
         loaded,
         source,
         initialDraft?.id ?? null,
+        incomingApiKeyId,
       );
+      // Phase 164.2.1 / SESSIONID-FENCE — THE DECLINE MUST NOT BE SILENT.
+      //
+      // `deriveWizardResumeOverrides` refuses by OMISSION — it just does not
+      // emit `wizardSessionId` — so the branch below cannot tell a decline from
+      // "nothing was stored", an unverifiable payload, or a fresh tab nonce.
+      // Every other refusal in the storage module says so on the console
+      // (`localStorage_payload_refused: …`); this one decides which idempotency
+      // token the submission carries, and a key-resolution regression that
+      // declined EVERY API resume would be indistinguishable in production from
+      // the fence working. A payload that LOADED and HELD a session id which
+      // did not come back is therefore reported here.
+      //
+      // ⛔ NEVER the key ids or the session id themselves — a coarse reason
+      // only, and no user data.
+      //
+      // ⚠️ The reason is a TRIAGE LABEL recomputed at this call site, NOT the
+      // gate. It is deliberately written to degrade rather than lie: anything it
+      // cannot account for — including a condition the derivation grows later —
+      // falls through to "other" instead of being mislabelled as a key refusal.
+      if (loaded?.wizardSessionId && !overrides.wizardSessionId) {
+        let reason = "other";
+        if ((loaded.source ?? "api") !== source) {
+          reason = "source_mismatch";
+        } else if (incomingApiKeyId !== null) {
+          if (typeof loaded.apiKeyId !== "string") {
+            // Payloads written before this phase carry no key at all — the
+            // accepted one-time cost on the record (CONTEXT.md D-02). Named
+            // apart from a real mismatch so the transient post-ship population
+            // is not read as a live defect.
+            reason = "stored_key_absent";
+          } else if (loaded.apiKeyId !== incomingApiKeyId) {
+            reason = "key_mismatch";
+          }
+        }
+        // COUNTABLE, not merely diagnosable. A console warning is a Sentry
+        // breadcrumb; it cannot answer "how often does this fence fire in
+        // production", which is the only question that distinguishes working
+        // correctly from an over-declining regression. `step` carries the
+        // reason label — never a key id, never a session id.
+        trackForQuantsEventClient("wizard_session_id_not_restored", {
+          step: reason,
+        });
+        console.warn(
+          `[wizard] session_id_not_restored: ${reason} — submitting under a fresh token`,
+        );
+      }
       if (overrides.wizardSessionId) {
         setWizardSessionId(overrides.wizardSessionId);
+      }
+      // RT-3 — re-seat the burn alongside the session id it retired.
+      // `deriveWizardResumeOverrides` emits the two together or not at all, so
+      // the fence can never be armed against an id the burn never applied to.
+      if (overrides.failedCsvSubmitSig) {
+        failedCsvSubmitSigRef.current = overrides.failedCsvSubmitSig;
       }
       if (overrides.step) {
         setStep(overrides.step);
@@ -330,8 +548,17 @@ export function WizardClient({
     return () => {
       cancelled = true;
     };
-    // Run once on mount. `source` and `initialDraft` come from props/URL
-    // and are stable for the lifetime of this component instance.
+    // Run once on mount. `source`, `initialDraft` AND `preselectKey` come from
+    // props/URL and are stable for the lifetime of this component instance —
+    // `preselectKey` is named explicitly because 164.2.1 made this effect
+    // capture it, and a disable justified by a list that omits what it captures
+    // licenses nothing. Its stability is structural, not incidental: the
+    // contribution overlay's remount key includes `activePreselect?.id`
+    // (ContributionWizardOverlay.tsx), so choosing a different key tears this
+    // instance down rather than changing the prop in place, and the manager
+    // route never passes one at all. ⚠️ A future caller that mutates
+    // `preselectKey` WITHOUT a remount would silently gate the session-id
+    // restore on a key this effect read once and never re-read.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -454,28 +681,89 @@ export function WizardClient({
         step: "csv_upload",
         source: "csv",
         strategyName,
+        // 164.2.1 — the LITERAL null, never the `apiKeyId` state. See the
+        // ternary at the `deriveWizardResumeOverrides` call site above: this is
+        // a CSV save, the CSV branch carries no key, and stamping a preselected
+        // key here is what would let the gate strip a CSV burn.
+        apiKeyId: null,
       });
       setSavedAt(Date.now());
     }, NAME_AUTOSAVE_DEBOUNCE_MS);
     return () => clearTimeout(timer);
+    // 164.2.1 — the payload above captures NOTHING key-related (it stamps a
+    // literal), so nothing key-related belongs in these deps.
   }, [source, step, hydrated, strategyName, wizardSessionId]);
 
+  // RANK-08 (159-07) — the CLASSIFICATION half of the CSV submission identity.
+  // Read off `csvMetadataDraft`: that is the draft `CsvSubmitStep` posts as
+  // `metadata.category_id` / `metadata.asset_class`, and therefore the one the
+  // 146.2 classification-conflict 409 refuses on. (The API branch's
+  // `metadataDraft` never reaches csv-finalize and is deliberately NOT read
+  // here.) Narrowed to two primitives so the effect/callback deps below compare
+  // by VALUE — depending on the draft OBJECT would re-run on every unrelated
+  // metadata keystroke.
+  const csvCategoryId = csvMetadataDraft?.categoryId ?? null;
+  const csvAssetClass = csvMetadataDraft?.assetClass ?? null;
+
   // CR-01 (140.4-REVIEW) — the durable double-submit fence. When the CSV
-  // wizard's submission content (name or series) changes AFTER a failed submit,
-  // mint a fresh wizard_session_id so the changed submission is a NEW one by
-  // construction and the server's 23505 idempotency arm can only ever fire for
-  // a genuine repeat. Keyed on the CONTENT signature, not array identity: a
-  // re-upload of the same file yields an equal-but-new-reference series and
-  // must NOT mint (that repeat is exactly what the idempotent 200 arm serves).
+  // wizard's submission content (name, series or classification) changes AFTER
+  // a failed submit, mint a fresh wizard_session_id so the changed submission
+  // is a NEW one by construction and the server's 23505 idempotency arm can
+  // only ever fire for a genuine repeat. Keyed on the CONTENT signature, not
+  // array identity: a re-upload of the same file yields an equal-but-new-
+  // reference series and must NOT mint (that repeat is exactly what the
+  // idempotent 200 arm serves).
   useEffect(() => {
     if (source !== "csv") return;
     const burned = failedCsvSubmitSigRef.current;
     if (burned === null) return;
-    const current = csvSubmissionSignature(strategyName, csvDailyReturnsSeries);
+    // RT-3 — NOTHING TO COMPARE YET. The series is deliberately not persisted
+    // (too large for localStorage), so immediately after a reload the burn is
+    // restored while `csvDailyReturnsSeries` is still undefined. Comparing then
+    // would find a "change" that the user never made and re-mint on every
+    // refresh — which would break the case this fence must NOT touch: an
+    // IDENTICAL retry after a reload, whose whole point is to reuse the session
+    // id so the server's idempotent 200 arm echoes the committed strategy
+    // instead of creating a second one. In-session this guard is inert: the
+    // series is only ever set (never unset) by a successful upload, so it is
+    // always defined by the time a submit can fail.
+    if (csvDailyReturnsSeries === undefined) return;
+    const current = csvSubmissionFingerprint(
+      strategyName,
+      csvDailyReturnsSeries,
+      csvCategoryId,
+      csvAssetClass,
+    );
     if (current === burned) return;
     // A material change to a burned submission: retire the spent session id.
+    // R4 (v1.19 review of 146.1) — MINT FIRST, INTO A LOCAL. The React setter
+    // and the persisted envelope are fed from this ONE local, so the pair
+    // (session id, burn) cannot de-sync — the same house rule the burn site
+    // below states. Writing the envelope before the swap persisted the RETIRED
+    // id next to the CLEARED burn, and a reload in that window resumed a spent
+    // session id with the fence disarmed: the corrected resubmit then takes the
+    // server's equality refusal with no burn left to re-mint it, and nothing
+    // repairs it (the name autosave is gated on step `csv_upload`; this fires
+    // past it).
+    const nextWizardSessionId = newWizardSessionId();
     failedCsvSubmitSigRef.current = null;
-    setWizardSessionId(newWizardSessionId());
+    // RT-3 write-through: clear the PERSISTED burn too, so a legitimately
+    // different resubmit is not blocked forever by a burn that outlives the
+    // content it described. Explicit `null` — the field is sticky, so omitting
+    // it would carry the stale burn forward. ONE call carries both halves: the
+    // save queue serializes by CALL order, so a single call cannot be
+    // interleaved — no second save, no flush choreography.
+    void saveWizardState({
+      strategyId: "",
+      wizardSessionId: nextWizardSessionId,
+      step,
+      source: "csv",
+      strategyName,
+      failedCsvSubmitSig: null,
+      // 164.2.1 — literal null: CSV save, no key on this branch.
+      apiKeyId: null,
+    });
+    setWizardSessionId(nextWizardSessionId);
     // The RETIRED session id (the one the failed submit spent) — so an operator
     // can correlate the re-mint with the earlier wizard_error on that session.
     trackForQuantsEventClient("wizard_csv_session_reminted", {
@@ -484,20 +772,137 @@ export function WizardClient({
     // wizardSessionId is read only for telemetry; the mint sets a NEW one, but
     // this effect early-returns on the resulting re-run (ref is now null), so
     // there is no loop.
-  }, [source, strategyName, csvDailyReturnsSeries, wizardSessionId]);
+    //
+    // ⚠️ RANK-08 — `csvCategoryId` / `csvAssetClass` MUST STAY IN THIS ARRAY.
+    // A fingerprint widened with classification but read through a dep array
+    // that omits it compares YESTERDAY's classification, reports "no material
+    // change", and the 409's remedy dead-ends exactly as it did before the
+    // widening. Listing them makes the fence correct by construction rather
+    // than by the accident that today every classification edit also moves
+    // `step` (csv_metadata → csv_review).
+  }, [
+    source,
+    strategyName,
+    csvDailyReturnsSeries,
+    csvCategoryId,
+    csvAssetClass,
+    wizardSessionId,
+    step,
+  ]);
 
   // CR-01 — record the content the FAILED submit was made with. The next
-  // change past this signature is what the effect above re-mints on. Stable
+  // change past this fingerprint is what the effect above re-mints on. Stable
   // identity so CsvSubmitStep's submit handler isn't re-created per render.
+  //
+  // RT-3 — the same value is written THROUGH to the signed wizard-state
+  // envelope, so the burn survives the refresh/tab-restore on which the fence
+  // previously evaporated. The ref and the envelope are set from one expression
+  // so they cannot disagree.
   const handleCsvSubmitFailed = useCallback(() => {
-    failedCsvSubmitSigRef.current = csvSubmissionSignature(
+    const fingerprint = csvSubmissionFingerprint(
       strategyName,
       csvDailyReturnsSeries,
+      csvCategoryId,
+      csvAssetClass,
     );
-  }, [strategyName, csvDailyReturnsSeries]);
+    failedCsvSubmitSigRef.current = fingerprint;
+    // Fire-and-forget, matching every other save on this branch (P473: the
+    // envelope is signed with async Web Crypto). The server-side equality
+    // refusal remains the operative fence if this write never lands.
+    void saveWizardState({
+      strategyId: "",
+      wizardSessionId,
+      step,
+      source: "csv",
+      strategyName,
+      failedCsvSubmitSig: fingerprint,
+      // 164.2.1 — literal null: CSV save, no key on this branch.
+      apiKeyId: null,
+    });
+    // ⚠️ RANK-08 — same rule as the effect above: the classification values
+    // MUST stay listed here. This callback CAPTURES the values it burns; a
+    // stale dep array would record the burn against a classification the user
+    // has already changed, and the re-mint comparison would then be made
+    // against a fingerprint that never described the failed submit.
+  }, [
+    strategyName,
+    csvDailyReturnsSeries,
+    csvCategoryId,
+    csvAssetClass,
+    wizardSessionId,
+    step,
+  ]);
 
+  /**
+   * ⭐ 146.2-08 / B1 — THE USER-DRIVEN HALF OF THE RE-MINT.
+   *
+   * The effect above re-mints when the CONTENT changes past a burn. There is
+   * one refusal that no content change can clear: the server's 409
+   * `CSV_SESSION_REUSED`. That response burns the session id against the file
+   * the user is submitting, and the user's answer to it is "yes, make this a
+   * separate strategy" — the SAME file, deliberately. The content-keyed effect
+   * cannot see that intent (`current === burned`), so the resubmit replays the
+   * spent id and takes the same 409 forever, and neither reset control reaches
+   * this branch (Start fresh needs `initialDraft`, Delete draft needs
+   * `strategyId`; on the CSV branch both are structurally absent). This is the
+   * escape hatch `CsvSubmitStep` renders as "Start a new strategy".
+   *
+   * ⚠️ MINT FIRST, INTO A LOCAL — the R4 house rule the effect above states at
+   * length. The React setter and the persisted envelope are fed from this ONE
+   * local so the (session id, burn) pair cannot de-sync; writing the envelope
+   * before the swap would persist the RETIRED id beside the CLEARED burn, and a
+   * reload in that window resumes a spent session with the fence disarmed.
+   *
+   * ⚠️ AND IT DELIBERATELY TOUCHES NOTHING ELSE. `csvPreview`,
+   * `csvDailyReturnsSeries`, `csvMetadataDraft`, `strategyName` and `step` are
+   * all left standing: the series is never persisted (too large for
+   * localStorage), so resetting to `csv_upload` here would force a re-upload of
+   * a file this component is already holding — the refusal would have cost the
+   * user their work rather than one click.
+   */
+  const handleCsvStartNewStrategy = useCallback(() => {
+    const nextWizardSessionId = newWizardSessionId();
+    failedCsvSubmitSigRef.current = null;
+    // ONE call carries both halves (the save queue serializes by call order),
+    // and `failedCsvSubmitSig: null` is EXPLICIT because the field is sticky —
+    // omitting it would carry the stale burn forward onto the fresh id.
+    void saveWizardState({
+      strategyId: "",
+      wizardSessionId: nextWizardSessionId,
+      step,
+      source: "csv",
+      strategyName,
+      failedCsvSubmitSig: null,
+      // 164.2.1 — literal null: CSV save, no key on this branch.
+      apiKeyId: null,
+    });
+    setWizardSessionId(nextWizardSessionId);
+    // Same event as the content-keyed re-mint: the FACT is identical (a session
+    // id was retired) and operators correlate on the retired id, which is what
+    // is reported here. `step` is what discriminates the two — the automatic
+    // re-mint sends none — so a user-taken escape is countable without adding a
+    // name to the closed `ForQuantsEvent` union.
+    trackForQuantsEventClient("wizard_csv_session_reminted", {
+      wizard_session_id: wizardSessionId,
+      step: "csv_submit_start_new",
+    });
+  }, [step, strategyName, wizardSessionId]);
+
+  /**
+   * ⚠️ Phase 164.2.1 / SESSIONID-FENCE — `keyId` IS A PARAMETER, NOT A CLOSURE
+   * READ, and that is load-bearing rather than a style choice.
+   *
+   * `handleConnectSuccess` calls `setApiKeyId(result.apiKeyId)` and this
+   * function IN THE SAME TICK. A `useCallback` recreates on the NEXT render, so
+   * an `apiKeyId` read from this closure would be the PRE-connect key — `null`
+   * on the credentials arm, and on the reuse arm the preselected id, which
+   * happens to equal `result.apiKeyId` and therefore hides the defect in
+   * exactly the preselect test one would write for it. This is the ONE
+   * API-branch writer, so the wrong key here is the wrong key in the only
+   * payload the fence reads on the API branch.
+   */
   const persistPointer = useCallback(
-    (nextStep: WizardStepKey, id: string | null) => {
+    (nextStep: WizardStepKey, id: string | null, keyId: string | null) => {
       if (!id) return;
       // P473: saveWizardState is async (HMAC sign). Fire-and-forget —
       // the optimistic setSavedAt below + the server-side draft as the
@@ -506,6 +911,21 @@ export function WizardClient({
         strategyId: id,
         wizardSessionId,
         step: nextStep,
+        // 164.2.1 / IN-02 — `|| null`, and the empty string it collapses is a
+        // REAL value arriving here, not a defensive flourish.
+        // `handleConnectSuccess` is also `MultiKeyConnectStep`'s `onSuccess`,
+        // and that step's success shape coalesces a null member key to `""`
+        // (MultiKeyConnectStep.tsx, `apiKeyId: first.apiKeyId ?? ""`). The
+        // field is documented as an `api_keys.id` or `null`; `""` is neither,
+        // and the load-time validator would accept it (a string of length 0).
+        // Inert today — a composite draft has `api_key_id = null` and the
+        // overlay never offers one under a preselect, so the incoming key is
+        // always `null` there and `""` is never compared — but a stored value
+        // outside its own documented domain is one call-site change away from
+        // being compared. Normalised HERE because this is the one API-branch
+        // writer, which is the smallest place that makes code and docblock
+        // agree.
+        apiKeyId: keyId || null,
       });
       setSavedAt(Date.now());
       setToastKey((k) => k + 1);
@@ -566,10 +986,43 @@ export function WizardClient({
   // so a backward-then-forward round-trip redoes no work (T-94-16).
   const handleStepSelect = useCallback(
     (key: WizardStepKey) => {
+      // 153.2-05 — a server refusal belongs to the visit it was raised in.
+      // Navigating away from metadata by any route retires it, so a user who
+      // leaves and comes back does not meet a message about a submit they have
+      // since abandoned.
+      if (key !== "metadata") setMetadataServerFieldError(null);
       setStep(key);
-      persistPointer(key, strategyId);
+      persistPointer(key, strategyId, apiKeyId);
     },
-    [persistPointer, strategyId],
+    [persistPointer, strategyId, apiKeyId],
+  );
+
+  /**
+   * 153.2-05 / WIZFORM-01 — `SubmitStep` resolved a field-level code to the ONE
+   * field it belongs to. Take the user there.
+   *
+   * The `persistPointer` companion is not optional: without it the resume
+   * pointer still reads `submit`, so a reload would drop the user back on a
+   * submit screen carrying a refusal they can neither see nor fix.
+   *
+   * ⛔ ANSWERS `false` RATHER THAN NAVIGATING BLIND (153.2 review WR-01). This
+   * is the only place that knows BOTH which fields the metadata step renders
+   * (`showCapitalQuestion` is decided here) and where the user is being sent.
+   * Routing to a field that surface does not render produced a form that
+   * refused every submit with no message, no focus target and no way to clear
+   * it — `capitalOwnership` on the manager surface is the concrete instance.
+   * Declining hands the refusal back to `SubmitStep`'s existing fall-through, so
+   * the user reads the terminal envelope instead of meeting a silent wall.
+   */
+  const handleMetadataFieldError = useCallback(
+    (field: MetadataFieldId, code: WizardErrorCode): boolean => {
+      if (!metadataFieldIsRendered(field, { showCapitalQuestion })) return false;
+      setMetadataServerFieldError({ field, code });
+      setStep("metadata");
+      persistPointer("metadata", strategyId, apiKeyId);
+      return true;
+    },
+    [persistPointer, strategyId, showCapitalQuestion, apiKeyId],
   );
 
   const handleConnectSuccess = useCallback(
@@ -586,8 +1039,16 @@ export function WizardClient({
       // the persisted keys ({A,B,C}). WIZ-05 durability still applies from the
       // persisted COMPLETE composite row, not the discarded in-memory snapshot.
       setSyncSnapshot(null);
+      // 154-06 / WIZCONT-02 — set from THIS result, every time, so it is
+      // self-clearing: an ordinary connect after a deduped one carries no
+      // marker and takes the notice down with it. A `true` that only ever got
+      // set and never cleared would eventually be a claim about a different
+      // submit.
+      setDedupedExisting(result.deduped === true);
       setStep("sync_preview");
-      persistPointer("sync_preview", result.strategyId);
+      // 164.2.1 — `result.apiKeyId`, never the `apiKeyId` state: setApiKeyId
+      // above has not been applied yet in this tick.
+      persistPointer("sync_preview", result.strategyId, result.apiKeyId);
       trackForQuantsEventClient("wizard_step_complete_1", {
         wizard_session_id: wizardSessionId,
         strategy_id: result.strategyId,
@@ -601,31 +1062,35 @@ export function WizardClient({
     (snapshot: SyncPreviewSnapshot) => {
       setSyncSnapshot(snapshot);
       setStep("metadata");
-      persistPointer("metadata", strategyId);
+      persistPointer("metadata", strategyId, apiKeyId);
       trackForQuantsEventClient("wizard_step_complete_2", {
         wizard_session_id: wizardSessionId,
         strategy_id: strategyId ?? undefined,
         trade_count: snapshot.tradeCount,
       });
     },
-    [strategyId, wizardSessionId, persistPointer],
+    [strategyId, wizardSessionId, persistPointer, apiKeyId],
   );
 
   const handleMetadataComplete = useCallback(
     (draft: MetadataDraft) => {
       setMetadataDraft(draft);
+      // 153.2-05 — the step was completed, so whatever the server refused last
+      // time has been re-answered. Keeping it would re-flag a field the user
+      // has already dealt with the moment they came back.
+      setMetadataServerFieldError(null);
       // Phase 53 / APPLY-02: metadata now advances to the read-only review
       // recap (not straight to submit). The review step's "Continue to create"
       // CTA advances to submit, where the unchanged finalize POST ("Submit for
       // review") fires.
       setStep("review");
-      persistPointer("review", strategyId);
+      persistPointer("review", strategyId, apiKeyId);
       trackForQuantsEventClient("wizard_step_complete_3", {
         wizard_session_id: wizardSessionId,
         strategy_id: strategyId ?? undefined,
       });
     },
-    [strategyId, wizardSessionId, persistPointer],
+    [strategyId, wizardSessionId, persistPointer, apiKeyId],
   );
 
   const handleSubmitSuccess = useCallback(
@@ -733,15 +1198,38 @@ export function WizardClient({
   const handleResume = useCallback(() => {
     if (!initialDraft) return;
     setShowResumeBanner(false);
-    // Honor the server-side draft; jump to sync_preview because the key
-    // is already there but the sync status may be stale.
-    setStep("sync_preview");
-    persistPointer("sync_preview", initialDraft.id);
+    // Honor the server-side draft. `draftResumeStep` is the SAME expression the
+    // mount initializer used: sync_preview for an api/composite draft (the key
+    // is already there but the sync status may be stale), csv_upload for a CSV
+    // draft (Phase 154 — sending a CSV draft to sync_preview would land it on
+    // an API-branch step with no key behind it).
+    setStep(draftResumeStep);
+    // 164.2.1 / SESSIONID-FENCE — the DRAFT'S OWN KEY, OR NOTHING.
+    //
+    // This resume is about THAT draft, so the only key claim its payload may
+    // carry is the one the draft itself persisted. `api_key_id === null` is a
+    // draft with no key (a composite, or a CSV-sourced one), and `null` is the
+    // true value for it — the same reason every `saveWizardState` call on the
+    // CSV branch below stamps a literal `null`, and the same reason
+    // `persistPointer` normalises `""` away.
+    //
+    // ⛔ This used to read `initialDraft.api_key_id ?? apiKeyId`, justified by a
+    // first-paint divergence between the draft and the `apiKeyId` state. The
+    // fallback FABRICATED a claim: on a keyless draft it stamped whatever the
+    // state held — on the contribution overlay, the PRESELECTED key — so the
+    // stored payload asserted the draft had been built over a key it had never
+    // been built over, and the fence downstream compares against exactly what
+    // is written here. There is also no divergence to defend against: this
+    // reads the `initialDraft` PROP directly, not a state derived from it.
+    persistPointer(draftResumeStep, initialDraft.id, initialDraft.api_key_id);
     trackForQuantsEventClient("wizard_resume", {
       wizard_session_id: wizardSessionId,
       strategy_id: initialDraft.id,
     });
-  }, [initialDraft, persistPointer, wizardSessionId]);
+    // `apiKeyId` is deliberately NOT a dependency: this callback no longer reads
+    // it (see above), and listing an unread value would re-create the handler on
+    // every key change for no reason.
+  }, [initialDraft, draftResumeStep, persistPointer, wizardSessionId]);
 
   /**
    * ⚠️ Phase 140.3-10 / TRAP-4 — `start_fresh` DESTROYS THE DRAFT, so it goes
@@ -766,11 +1254,16 @@ export function WizardClient({
    * `handleDeleteDraft` on a CONFIRMED delete instead, so the banner's
    * lifetime tracks the draft's.
    *
-   * NOT touched, deliberately: the two paths whose comments state that a
-   * delete IS intended — `onTryAnotherKey`'s fire-and-forget
-   * `void handleDeleteDraft()` (discarding a draft holding a REJECTED key,
-   * with the idempotency token regenerated first) and the confirm dialog's own
-   * danger button.
+   * 161-04 / WIZERR-02 — this paragraph used to close by naming TWO paths
+   * "not touched, deliberately: the two paths whose comments state that a
+   * delete IS intended" — `onTryAnotherKey`'s fire-and-forget
+   * `void handleDeleteDraft()` and the confirm dialog's own danger button.
+   * The first of those is gone: a remedy offered on a refusal is not a place a
+   * delete may be "intended", which is the same argument this docblock already
+   * makes about `start_fresh` one paragraph up. ONE deliberate delete now
+   * remains — the confirm dialog's danger button — and BOTH entrances to it
+   * (this handler and the chrome's Delete-draft control) go through the
+   * confirmation. `handleDeleteDraft` has exactly one caller as a result.
    */
   const handleStartFresh = useCallback(() => {
     setConfirmDelete(true);
@@ -824,6 +1317,36 @@ export function WizardClient({
               Sign in again
             </a>{" "}
             to continue.
+          </div>
+        )}
+
+        {/*
+          154-06 / WIZCONT-02 — the dedup notice (UI-SPEC State Contract 4).
+
+          ⭐ DELIBERATELY SMALL, AND NEUTRAL. Nothing failed: the user pressed
+          Connect with credentials we already hold and we continued with the
+          strategy they already had. So it is the session-expired strip's exact
+          markup — `rounded-md border border-border bg-page px-3 py-2
+          text-caption text-text-secondary` — and NOT an `ErrorEnvelope`, NOT
+          amber, NOT red. The wizard proceeds exactly as it always does; this
+          line is the entire UI delta, with no confirmation and no fork.
+
+          Gated on `sync_preview` because that is the step the dedup lands the
+          user on — the flow they are already in — rather than following them
+          through metadata and review restating a resolved fact.
+
+          ⛔ IT NEVER NAMES THE CREDENTIAL OR THE ACCOUNT ID, in the copy or in
+          its accessible text. The venue's non-secret identity stays
+          server-side; the route never sends it and this strip has no access to
+          it (T-154-06-C).
+        */}
+        {dedupedExisting && step === "sync_preview" && (
+          <div
+            data-testid="wizard-dedup-notice"
+            className="mb-4 rounded-md border border-border bg-page px-3 py-2 text-caption text-text-secondary"
+          >
+            These credentials are already connected. We continued with your
+            existing strategy instead of creating a duplicate.
           </div>
         )}
 
@@ -883,6 +1406,10 @@ export function WizardClient({
                 draftStrategyId={strategyId}
                 // Phase 94.1 / F2 — dirty signal gates forward stepper jumps.
                 onDirtyChange={setConnectKeyDirty}
+                // 162-06 — pass-through to State A's ConnectKeyStep, which owns
+                // the saved-key summary.
+                preselectKey={preselectKey}
+                onUseDifferentKey={onUseDifferentKey}
               />
             )}
 
@@ -898,29 +1425,69 @@ export function WizardClient({
                 onComplete={handleSyncComplete}
                 onReviewKeys={() => {
                   // WIZ-03: composite "Review your keys" is NON-destructive —
-                  // it is a pure step transition back to connect_key. Unlike
-                  // onTryAnotherKey it does NOT handleDeleteDraft (which would
-                  // cascade away every strategy_keys member) and does NOT
-                  // regenerate wizardSessionId (the F6 duplicate-submit fence is
-                  // only re-armed on the destructive discard-the-key path). The
-                  // draft + its members + the session all survive; the
-                  // MultiKeyConnectStep rehydrates the stored keys via WIZ-02.
+                  // it is a pure step transition back to connect_key. It does
+                  // NOT handleDeleteDraft (which would cascade away every
+                  // strategy_keys member) and does NOT regenerate
+                  // wizardSessionId. The draft + its members + the session all
+                  // survive; the MultiKeyConnectStep rehydrates the stored keys
+                  // via WIZ-02.
+                  //
+                  // 161-04 / WIZERR-02: `onTryAnotherKey` below is now the SAME
+                  // shape. This comment used to read "unlike onTryAnotherKey,
+                  // which deletes" — that sentence has been false since the
+                  // remedy stopped destroying anything, and a comment describing
+                  // behavior that no longer exists is a false sentence in
+                  // exactly the class this phase closes.
                   setStep("connect_key");
-                  persistPointer("connect_key", strategyId);
+                  persistPointer("connect_key", strategyId, apiKeyId);
                 }}
                 onTryAnotherKey={() => {
+                  // 161-04 / WIZERR-02 — A REMEDY MAY NOT DESTROY ANYTHING.
+                  //
+                  // This used to setWizardSessionId(newWizardSessionId()) and
+                  // then `void handleDeleteDraft()`: one click on a control
+                  // offered by an ERROR STATE deleted the draft and every
+                  // strategy_keys member under it, fire-and-forget, with no
+                  // confirmation and no way back. The recorded class is
+                  // user-inflicted data loss, and it was offered on EVERY
+                  // refusal. It is now the pure step transition its neighbour
+                  // `onReviewKeys` already models, one prop above.
+                  //
+                  // DECISION — keep-and-resume (RESEARCH Open Question 3). The
+                  // draft deliberately SURVIVES. A user who wants a clean slate
+                  // still has the two deliberate delete paths, both of which
+                  // keep their existing confirmation: the chrome's Delete-draft
+                  // button and `start_fresh`, which share one confirm dialog.
+                  //
+                  // LOW-2 RE-ANSWER (the red-team finding the deleted lines were
+                  // written to close, re-answered for the new shape rather than
+                  // dropped with them). LOW-2's threat was a FAILED background
+                  // DELETE leaving the old draft alive while a REGENERATED
+                  // session id made the client believe it had a clean slate —
+                  // the SILENT DIVERGENCE between client belief and server state
+                  // was the bug, not the delete itself. With no delete attempted
+                  // and no id regenerated, client belief and server state agree
+                  // by construction:
+                  //   · SAME key resubmitted ⇒ `resolveByVenueIdentity` finds
+                  //     the live key and its surviving `source='wizard'` /
+                  //     `status='draft'` row and returns kind:"draft", so
+                  //     create-with-key answers ok+deduped and the wizard
+                  //     RESUMES that draft [MEASURED at HEAD:
+                  //     create-with-key/route.ts:269 + :634-649]. That is
+                  //     honest: the draft IS current state, and the neutral
+                  //     dedup strip (WIZCONT-02) says so on screen.
+                  //   · DIFFERENT key ⇒ the normal create path runs. The old
+                  //     draft ages into the existing ≥7-day nightly sweep or the
+                  //     user's own explicit delete.
+                  // There is no silent divergence left to exploit, so there is
+                  // nothing for an optimistic re-mint to close.
+                  //
+                  // `persistPointer` mirrors onReviewKeys for the same reason it
+                  // exists there: now that the draft survives the click, a
+                  // resume pointer still naming `sync_preview` would be its own
+                  // small version of the divergence above.
                   setStep("connect_key");
-                  // Regenerate the idempotency token OPTIMISTICALLY (before the
-                  // fire-and-forget delete) so the next create-with-key always
-                  // carries a FRESH session and mints a new draft for the new
-                  // key. handleDeleteDraft also regenerates it, but only on a
-                  // confirmed 2xx/404 (NEW-C14-08) — if the DELETE fails, the old
-                  // session id would otherwise persist and the F6 fence would
-                  // silently replay the OLD draft + OLD key on resubmit
-                  // (red-team LOW-2). Regenerating here closes that window; the
-                  // orphaned old draft is reaped by the cleanup-wizard-drafts cron.
-                  setWizardSessionId(newWizardSessionId());
-                  void handleDeleteDraft();
+                  persistPointer("connect_key", strategyId, apiKeyId);
                   trackForQuantsEventClient("wizard_try_different_key", {
                     wizard_session_id: wizardSessionId,
                   });
@@ -935,10 +1502,30 @@ export function WizardClient({
                 initial={metadataDraft}
                 detectedMarkets={syncSnapshot.detectedMarkets}
                 detectedExchange={syncSnapshot.exchange}
+                // Phase 150 / OWN-03 (D-01, D-07) — the capital question is
+                // asked on the allocator key-add surface, where "whose capital
+                // is behind this key" is a question the person actually knows
+                // the answer to. This is a trusted CONTEXT SELECTOR, not a
+                // client-trusted privilege flag: it chooses which question to
+                // render, and grants nothing. Compare `entry_context`, which
+                // travels to finalize-wizard as a routing HINT while the RPC's
+                // terminal-status guard does the real enforcement
+                // (route.ts:452-453). Nothing here can publish, move money, or
+                // widen access; a manager who saw this question would only be
+                // marking their own strategy. (The money verb is deliberately
+                // not spelled in this file — the phase gate greps this source
+                // to prove the wizard grew no money shortcut, and prose would
+                // match it.)
+                showCapitalQuestion={showCapitalQuestion}
+                // 153.2-05 / WIZFORM-01 — the field `finalize-wizard` refused,
+                // if the user is here because of one. The step reveals it,
+                // opens its disclosure if it is inside one, and focuses it.
+                serverFieldError={metadataServerFieldError}
                 onComplete={handleMetadataComplete}
                 onBack={() => {
+                  setMetadataServerFieldError(null);
                   setStep("sync_preview");
-                  persistPointer("sync_preview", strategyId);
+                  persistPointer("sync_preview", strategyId, apiKeyId);
                 }}
               />
             )}
@@ -955,15 +1542,15 @@ export function WizardClient({
                 metadata={metadataDraft}
                 onContinue={() => {
                   setStep("submit");
-                  persistPointer("submit", strategyId);
+                  persistPointer("submit", strategyId, apiKeyId);
                 }}
                 onBack={() => {
                   setStep("metadata");
-                  persistPointer("metadata", strategyId);
+                  persistPointer("metadata", strategyId, apiKeyId);
                 }}
                 onEdit={(owningStep) => {
                   setStep(owningStep);
-                  persistPointer(owningStep, strategyId);
+                  persistPointer(owningStep, strategyId, apiKeyId);
                 }}
               />
             )}
@@ -978,12 +1565,18 @@ export function WizardClient({
                 snapshot={syncSnapshot}
                 metadata={metadataDraft}
                 entryContext={entryContext}
+                // 153.2-05 / WIZFORM-01 — a refusal about ONE metadata field
+                // goes back to that field instead of rendering a terminal
+                // envelope here. Passing the handler is what makes the routing
+                // reachable: without it SubmitStep falls back to the envelope
+                // (deliberately — never silence).
+                onFieldLevelError={handleMetadataFieldError}
                 onSubmitted={handleSubmitSuccess}
                 onBack={() => {
                   // Phase 53 / APPLY-02 — Back from submit returns to the
                   // review recap (the step that now precedes submit).
                   setStep("review");
-                  persistPointer("review", strategyId);
+                  persistPointer("review", strategyId, apiKeyId);
                 }}
               />
             )}
@@ -997,9 +1590,30 @@ export function WizardClient({
           // defeats the resume guard above (which treats undefined as 'api'
           // for back-compat). Missing `strategyName` makes back-navigation
           // forget the user's typed name. Reviewer should diff the entire
-          // CSV branch in one read and confirm: (a) all 4 saveWizardState
-          // calls have BOTH discriminator fields, (b) strategyName flows
-          // through the 3 step props, (c) the wrapping conditional balanced.
+          // CSV branch in one read and confirm: (a) EVERY `saveWizardState`
+          // call in this branch carries BOTH discriminator fields, (b) every
+          // step component that renders or edits the name is passed the
+          // current `strategyName` (`CsvUploadStep` takes it as
+          // `initialStrategyName`), (c) the wrapping conditional balanced.
+          //
+          // ⚠️ NO COUNTS IN THIS CHECKLIST, DELIBERATELY. It used to read
+          // "all 4 saveWizardState calls" and "the 3 step props". The branch has
+          // grown past both since, so a reviewer following the instruction
+          // literally stopped short of the calls that were added after the
+          // integer was written — and the 164.2.1 sentence below silently
+          // inherited the stale "4" by binding to it. A count in a checklist
+          // over code that grows goes wrong invisibly; a quantifier cannot.
+          //
+          // ⛔ 164.2.1 / SESSIONID-FENCE — and EVERY `saveWizardState` call in
+          // this branch stamps the LITERAL `apiKeyId: null`, never the
+          // `apiKeyId` state. The state can hold a preselected key even here
+          // (the overlay passes `preselectKey` regardless of source and renders
+          // its "CSV upload" pill under a live preselect), and a CSV payload
+          // carrying a key is what lets
+          // `deriveWizardResumeOverrides` decline a CSV session id — taking the
+          // `failedCsvSubmitSig` burn with it, since the gate emits the pair or
+          // neither. A CSV submission carries no key, so `null` is the true
+          // value, not a placeholder.
           <>
             {step === "csv_upload" && (
               <CsvUploadStep
@@ -1027,6 +1641,7 @@ export function WizardClient({
                     step: "csv_preview",
                     source: "csv",
                     strategyName: payload.strategyName,
+                    apiKeyId: null,
                   });
                   setSavedAt(Date.now());
                   setToastKey((k) => k + 1);
@@ -1049,6 +1664,7 @@ export function WizardClient({
                     step: "csv_upload",
                     source: "csv",
                     strategyName,
+                    apiKeyId: null,
                   });
                   setSavedAt(Date.now());
                   setToastKey((k) => k + 1);
@@ -1062,6 +1678,7 @@ export function WizardClient({
                     step: "csv_metadata",
                     source: "csv",
                     strategyName,
+                    apiKeyId: null,
                   });
                   setSavedAt(Date.now());
                   setToastKey((k) => k + 1);
@@ -1093,6 +1710,7 @@ export function WizardClient({
                     step: "csv_review",
                     source: "csv",
                     strategyName,
+                    apiKeyId: null,
                   });
                   setSavedAt(Date.now());
                   setToastKey((k) => k + 1);
@@ -1105,6 +1723,7 @@ export function WizardClient({
                     step: "csv_preview",
                     source: "csv",
                     strategyName,
+                    apiKeyId: null,
                   });
                   setSavedAt(Date.now());
                   setToastKey((k) => k + 1);
@@ -1136,6 +1755,7 @@ export function WizardClient({
                     step: "csv_submit",
                     source: "csv",
                     strategyName,
+                    apiKeyId: null,
                   });
                   setSavedAt(Date.now());
                   setToastKey((k) => k + 1);
@@ -1148,6 +1768,7 @@ export function WizardClient({
                     step: "csv_metadata",
                     source: "csv",
                     strategyName,
+                    apiKeyId: null,
                   });
                   setSavedAt(Date.now());
                   setToastKey((k) => k + 1);
@@ -1160,6 +1781,7 @@ export function WizardClient({
                     step: owningStep,
                     source: "csv",
                     strategyName,
+                    apiKeyId: null,
                   });
                   setSavedAt(Date.now());
                   setToastKey((k) => k + 1);
@@ -1182,6 +1804,10 @@ export function WizardClient({
                 // CR-01: burn the session id for THIS (name, series) on a
                 // failed submit so a later change re-mints (durable fence).
                 onSubmitFailed={handleCsvSubmitFailed}
+                // 146.2-08 / B1: the escape from the 409 refusal the burn
+                // itself makes permanent. Mints + clears the burn; keeps the
+                // upload.
+                onStartNewStrategy={handleCsvStartNewStrategy}
                 onBack={() => {
                   // Phase 53 / APPLY-02 — Back from csv_submit returns to the
                   // review recap (the step that now precedes csv_submit).
@@ -1193,6 +1819,7 @@ export function WizardClient({
                     step: "csv_review",
                     source: "csv",
                     strategyName,
+                    apiKeyId: null,
                   });
                   setSavedAt(Date.now());
                   setToastKey((k) => k + 1);

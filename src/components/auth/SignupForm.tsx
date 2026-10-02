@@ -6,6 +6,7 @@ import { createClient } from "@/lib/supabase/client";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { cn } from "@/lib/utils";
+import { MIN_PASSWORD_LENGTH } from "@/lib/auth/password-policy";
 import type { SignupRole as ProfileRole } from "@/lib/closed-sets";
 
 /**
@@ -236,9 +237,9 @@ export function SignupForm() {
         name="password"
         value={password}
         onChange={(e) => setPassword(e.target.value)}
-        placeholder="At least 6 characters"
+        placeholder={`At least ${MIN_PASSWORD_LENGTH} characters`}
         required
-        minLength={6}
+        minLength={MIN_PASSWORD_LENGTH}
         autoComplete="new-password"
       />
       {error && (

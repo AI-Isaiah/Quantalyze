@@ -269,16 +269,16 @@ Priority order if 9.5 sessions becomes 6:
 - [quantstats reports.py — metrics() table contents](https://raw.githubusercontent.com/ranaroussi/quantstats/main/quantstats/reports.py)
 - [Quants.Space marketing — features](https://quants.space/#features) (no platform access)
 - Project files (HIGH confidence):
-  - `/Users/helios-mammut/claude-projects/quantalyze/analytics-service/services/metrics.py`
-  - `/Users/helios-mammut/claude-projects/quantalyze/analytics-service/services/position_reconstruction.py`
-  - `/Users/helios-mammut/claude-projects/quantalyze/src/components/strategy/StrategyFilters.tsx`
-  - `/Users/helios-mammut/claude-projects/quantalyze/src/components/strategy/StrategyTable.tsx`
-  - `/Users/helios-mammut/claude-projects/quantalyze/src/components/strategy/StrategyGrid.tsx`
-  - `/Users/helios-mammut/claude-projects/quantalyze/src/components/strategy/PerformanceReport.tsx`
-  - `/Users/helios-mammut/claude-projects/quantalyze/src/components/strategy/ManagerIdentityPanel.tsx`
-  - `/Users/helios-mammut/claude-projects/quantalyze/src/app/strategy/[id]/page.tsx`
-  - `/Users/helios-mammut/claude-projects/quantalyze/src/app/(dashboard)/discovery/[slug]/page.tsx`
-  - `/Users/helios-mammut/claude-projects/quantalyze/supabase/migrations/001_initial_schema.sql` (line 64 — is_example)
-  - `/Users/helios-mammut/claude-projects/quantalyze/supabase/migrations/024_user_favorites.sql` (watchlist schema)
-  - `/Users/helios-mammut/claude-projects/quantalyze/DESIGN.md`
-  - `/Users/helios-mammut/.claude/plans/strategy-teams-kpi-parity.md` (plan provenance, partially refuted by codebase grep)
+  - `analytics-service/services/metrics.py`
+  - `analytics-service/services/position_reconstruction.py`
+  - `src/components/strategy/StrategyFilters.tsx`
+  - `src/components/strategy/StrategyTable.tsx`
+  - `src/components/strategy/StrategyGrid.tsx`
+  - `src/components/strategy/PerformanceReport.tsx`
+  - `src/components/strategy/ManagerIdentityPanel.tsx`
+  - `src/app/strategy/[id]/page.tsx`
+  - `src/app/(dashboard)/discovery/[slug]/page.tsx`
+  - `supabase/migrations/001_initial_schema.sql` (line 64 — is_example)
+  - `supabase/migrations/024_user_favorites.sql` (watchlist schema)
+  - `DESIGN.md`
+  - `<home>/.claude/plans/strategy-teams-kpi-parity.md` (plan provenance, partially refuted by codebase grep)

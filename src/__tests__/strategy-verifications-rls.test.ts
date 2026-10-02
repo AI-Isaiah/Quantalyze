@@ -12,8 +12,17 @@
  *   - strategy_verifications_service_all: ALL for service_role.
  *
  * No INSERT/UPDATE/DELETE policy exists for authenticated users — rows
- * are written exclusively by the SECURITY DEFINER finalize_csv_strategy
- * RPC, which the csv-finalize-rpc.test.ts integration test covers.
+ * are written exclusively by the SECURITY DEFINER csv finalize RPC (since
+ * Phase 145 the folded finalize_csv_strategy_with_returns), which
+ * `supabase/tests/test_csv_finalize_atomic_fold.sql` covers — Part 3 for
+ * the verification-row write, Parts 6 and 7 for the input guards that
+ * refuse a write outright.
+ *
+ * (Re-pointed 2026-08-18, Phase 146.1 / v1.19 review B5: this used to cite
+ * the retired csv-finalize RPC vitest suite, whose live-DB cases called a
+ * function migration 20260819120000 had DROPped and which CI never executed.
+ * A citation that outlives the thing it cites is how a reader concludes a
+ * behaviour is covered when nothing checks it.)
  *
  * This file pins the RLS contract end-to-end against the live test
  * Supabase project (qmnijlgmdhviwzwfyzlc):
@@ -68,7 +77,7 @@ interface SeededRow {
  *
  * Uses static fixed string fields (source='csv', flow_type='csv',
  * trust_tier='csv_uploaded', status='validated') matching what the
- * production finalize_csv_strategy RPC writes.
+ * production finalize_csv_strategy_with_returns RPC writes.
  */
 async function seedStrategyAndVerification(
   admin: SupabaseClient,
@@ -261,12 +270,13 @@ describe("Migration 093 — strategy_verifications RLS (Phase 15 / CSV-01..CSV-0
   // -------------------------------------------------------------------------
   // 3. Owner write-attempt is blocked — no INSERT/UPDATE/DELETE policy
   //    exists for authenticated, so RLS rejects direct writes. The only
-  //    write path is the SECURITY DEFINER finalize_csv_strategy RPC.
+  //    write path is the SECURITY DEFINER finalize fold
+  //    (finalize_csv_strategy_with_returns since Phase 145).
   //    This pins the contract: a quant cannot bypass the RPC and forge
   //    a verification row by going directly through PostgREST.
   // -------------------------------------------------------------------------
   it.skipIf(!HAS_LIVE_DB)(
-    "owner cannot directly INSERT into strategy_verifications (only finalize_csv_strategy RPC writes)",
+    "owner cannot directly INSERT into strategy_verifications (only the finalize fold RPC writes)",
     async () => {
       const admin = createLiveAdminClient();
       const ts = Date.now();

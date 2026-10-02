@@ -15,8 +15,9 @@ import { CircuitOpenError } from "@/lib/seam-errors";
  * Coverage anchors:
  *   - C-0106 (pr-test-analyzer c8): unauth 401, missing portfolio_id
  *     400, cross-tenant 403, timeout 504, analytics 5xx 503.
- *   - C-0107 (api-contract c8): rate-limit wired to userActionLimiter,
- *     429 + Retry-After.
+ *   - C-0107 (api-contract c8): rate-limit wired to a per-caller limiter,
+ *     429 + Retry-After. (Phase 163 SEC-04 moved it from `userActionLimiter`
+ *     to `bridgeComputeLimiter`; WR-03 then removed the 5xx token refund.)
  *   - C-0108 (red-team c5): assertPortfolioOwnership is called with
  *     (portfolioId, user.id); a non-owner gets 403 without ever
  *     invoking the analytics client.
@@ -97,9 +98,39 @@ const STATE = vi.hoisted(() => ({
     actorId: string;
     ms?: number;
   }>,
-  // Audit-2026-05-07 red-team R-0002: track refund calls so the
-  // symmetric-refund tests can assert the 504/503 paths refund the token.
+  // WR-03 (163 review): every `resetUsedTokens` the route makes, in call order.
+  // The assertions INVERTED in this phase — they used to pin that the 5xx arms
+  // refund; they now pin that the token stays spent. See the WR-03 block below.
   refundCalls: [] as string[],
+  /**
+   * WR-03 — a stateful stand-in for the real sliding window, `null` unless a
+   * test opts in (so every other case keeps driving `checkLimitResult`
+   * directly).
+   *
+   * ⚠️ THIS MODELS THE LIBRARY, NOT THE FIX. `used` counts consumed tokens and
+   * `reset()` sets it back to ZERO — because that is what
+   * `@upstash/ratelimit` v2.0.8 actually does: `resetUsedTokens` DELETES every
+   * store key matching `<prefix>:<identifier>*` (dist/index.js:881-884 ->
+   * `resetTokens`), and the package exposes no decrement. If the double
+   * implemented a one-token give-back the invariant test below would pass with
+   * the defect in place, which is the vacuity this note exists to prevent.
+   */
+  bucket: null as null | { limit: number; used: number },
+  // Phase 163 SEC-04 — every limiter instance handed to `checkLimit`, in call
+  // order, so a test can assert WHICH bucket this route spends BY IDENTITY.
+  limitersSeen: [] as unknown[],
+}));
+
+/**
+ * Phase 163 SEC-04 — the limiter instance this route must consume.
+ *
+ * A distinguishable object, not `{}`: the identity assertion compares against
+ * this exact reference, so "the route called checkLimit" and "the route called
+ * checkLimit WITH THE COMPUTE BUCKET" stay different claims.
+ */
+const BRIDGE_COMPUTE_LIMITER_SENTINEL = vi.hoisted(() => ({
+  __id: "bridgeComputeLimiter",
+  __limit: "10/3600s",
 }));
 
 vi.mock("@/lib/supabase/server", () => ({
@@ -117,15 +148,33 @@ vi.mock("@/lib/csrf", () => ({
 // ⚠️ EXTENDED, NOT REPLACED (140.4-13 / SEAMRIM-05). See the note in
 // `src/__tests__/csv-validate-route.test.ts`: the pure helpers come from
 // `importActual` so this mock cannot drift from the real 503-vs-429 decision.
+// Phase 163 SEC-04 — this route consumes `bridgeComputeLimiter` (10/3600s),
+// NOT the shared `userActionLimiter` (5/60s). The mock exposes ONLY the
+// limiter the route is supposed to use, so a revert to the shared bucket
+// fails here rather than passing quietly. The refund spy hangs off the SAME
+// object, which is what pins that a refunded token returns to the bucket the
+// token was taken from.
 vi.mock("@/lib/ratelimit", async (importActual) => {
   const actual = await importActual<typeof import("@/lib/ratelimit")>();
   return {
-    userActionLimiter: {
+    bridgeComputeLimiter: Object.assign(BRIDGE_COMPUTE_LIMITER_SENTINEL, {
       resetUsedTokens: async (key: string) => {
         STATE.refundCalls.push(key);
+        // WR-03: the LIBRARY's semantics, faithfully — a reset clears the whole
+        // window. Modelling it as "give back one" would hide the defect.
+        if (STATE.bucket) STATE.bucket.used = 0;
       },
+    }),
+    checkLimit: async (limiter: unknown) => {
+      STATE.limitersSeen.push(limiter);
+      if (!STATE.bucket) return STATE.checkLimitResult;
+      // WR-03: consume for real, so denial is an OUTCOME rather than a fixture.
+      if (STATE.bucket.used >= STATE.bucket.limit) {
+        return { success: false, retryAfter: 3600 };
+      }
+      STATE.bucket.used += 1;
+      return { success: true };
     },
-    checkLimit: async () => STATE.checkLimitResult,
     rateLimitDenyJson: actual.rateLimitDenyJson,
     isRateLimitMisconfigured: actual.isRateLimitMisconfigured,
   };
@@ -171,6 +220,8 @@ beforeEach(() => {
   });
   STATE.optimizerCalls = [];
   STATE.refundCalls = [];
+  STATE.limitersSeen = [];
+  STATE.bucket = null;
   sentryState.captured.length = 0;
 });
 
@@ -227,6 +278,64 @@ describe("POST /api/portfolio-optimizer — audit-2026-05-07 cluster A", () => {
     });
     expect(res.headers.get("retry-after")).toBe("60");
     expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+  });
+
+  /**
+   * Phase 163 SEC-04 — the deny arms above, bound to the limiter IDENTITY.
+   *
+   * ⚠️ WHY THESE EXIST WHEN THE 429/503 CASES ALREADY COVER THE SHAPES. Those
+   * drive `STATE.checkLimitResult` directly, so they assert what the route does
+   * GIVEN a denial — identically, whichever bucket produced it. Reverting this
+   * route to the shared `userActionLimiter` leaves them green. The contracts
+   * are therefore not evidence about WHICH budget the caller spends, and
+   * SEC-04 is entirely a claim about which budget.
+   *
+   * ── RED DEMO: neuter -> RED -> restore (performed on the sibling route) ────
+   * Reverting a route to `checkLimit(userActionLimiter, ...)` fails on BOTH
+   * tiers: STRUCTURALLY in `seam-ratelimit-posture.invariant.test.ts` via
+   * EXPECTED_ROUTE_LIMITERS, which names the route and both limiters; and
+   * BEHAVIOURALLY here, because the mock exports ONLY `bridgeComputeLimiter`,
+   * so the revert cannot resolve its import and fails at the module boundary
+   * instead of quietly spending the wrong bucket. Observed on
+   * `src/app/api/bridge/route.ts`, then restored from a byte backup (NOT
+   * `git checkout --`, which would have destroyed uncommitted work) and
+   * verified by shasum.
+   */
+  it("[163 SEC-04] the 429 is spent from bridgeComputeLimiter, BY IDENTITY", async () => {
+    STATE.checkLimitResult = { success: false, retryAfter: 42 };
+    const res = await POST(buildRequest({ portfolio_id: "x" }));
+
+    expect(res.status).toBe(429);
+    expect(await res.json()).toEqual({
+      error: "Too many requests",
+      code: "RATE_LIMITED",
+    });
+    expect(res.headers.get("retry-after")).toBe("42");
+
+    expect(
+      STATE.limitersSeen,
+      "This route must spend the COMPUTE bucket (10/3600s), not the shared " +
+        "userActionLimiter (5/60s = 300/hour). /portfolio-optimizer is capped " +
+        "at 10/hour per tenant on the Python side and fires a ~15s round-trip " +
+        "per call, so the shared bucket advertised 30x a budget the backend " +
+        "will not serve.",
+    ).toEqual([BRIDGE_COMPUTE_LIMITER_SENTINEL]);
+  });
+
+  it("[163 SEC-04] the misconfigured 503 arm is unchanged by the swap", async () => {
+    STATE.checkLimitResult = {
+      success: false,
+      retryAfter: 60,
+      reason: "ratelimit_misconfigured",
+    };
+    const res = await POST(buildRequest({ portfolio_id: "x" }));
+
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({
+      error: "Rate limiter unavailable",
+      code: "SEAM_MISCONFIGURED",
+    });
+    expect(STATE.limitersSeen).toEqual([BRIDGE_COMPUTE_LIMITER_SENTINEL]);
   });
 
   it("[140.4-13 / SEAMRIM-05] success → the deny arm does not fire", async () => {
@@ -325,32 +434,106 @@ describe("POST /api/portfolio-optimizer — audit-2026-05-07 cluster A", () => {
     expect(res.status).toBe(400);
   });
 
-  it("red-team R-0002: 504 timeout refunds the 5/min token (analytics-side failure)", async () => {
+  // ── WR-03 (163 review) — THE REFUND IS GONE, AND THESE PIN THAT ────────────
+  //
+  // ⚠️ THESE THREE CASES USED TO ASSERT THE OPPOSITE. They pinned that the 504
+  // and 503 arms called `bridgeComputeLimiter.resetUsedTokens(key)` — red-team
+  // R-0002's "symmetric refund", correct against the 5/60s bucket this route
+  // spent when it was written. Phase 163 SEC-04 moved the route to 10/3600s
+  // WITHOUT revisiting the refund, and `resetUsedTokens` clears the WHOLE
+  // window (there is no decrement in @upstash/ratelimit v2.0.8), so the refund
+  // handed back up to ten tokens and up to an hour per failed call. They are
+  // INVERTED rather than deleted because the old behaviour is the defect and a
+  // reader needs to see that the reversal was deliberate.
+  it("[163 WR-03] a 504 timeout does NOT reset the window — the token stays spent", async () => {
     STATE.optimizerImpl = async () => {
       throw new FakeAnalyticsTimeoutError();
     };
     const res = await POST(buildRequest({ portfolio_id: "x" }));
     expect(res.status).toBe(504);
-    expect(STATE.refundCalls).toContain(
-      "optimizer:00000000-0000-0000-0000-000000000001",
-    );
+    expect(
+      STATE.refundCalls,
+      "`resetUsedTokens` clears the caller's entire 10/3600s window. On the " +
+        "arm that fires the full ~15s Python round-trip before failing, that " +
+        "is an authenticated caller resetting their own cap on every attempt.",
+    ).toHaveLength(0);
   });
 
-  it("red-team R-0002: 503 analytics-unreachable refunds the 5/min token", async () => {
+  it("[163 WR-03] a 503 analytics-unreachable does NOT reset the window", async () => {
     STATE.optimizerImpl = async () => {
       throw new Error("connection refused");
     };
     const res = await POST(buildRequest({ portfolio_id: "x" }));
     expect(res.status).toBe(503);
-    expect(STATE.refundCalls).toContain(
-      "optimizer:00000000-0000-0000-0000-000000000001",
-    );
+    expect(STATE.refundCalls).toHaveLength(0);
   });
 
-  it("red-team R-0002: 200 happy path does NOT refund (only failure paths refund)", async () => {
+  it("[163 WR-03] the 200 happy path does not reset the window either", async () => {
     const res = await POST(buildRequest({ portfolio_id: "x" }));
     expect(res.status).toBe(200);
     expect(STATE.refundCalls).toHaveLength(0);
+  });
+
+  /**
+   * ⭐ WR-03 — THE ECONOMIC INVARIANT. This is the load-bearing case; the three
+   * above are its mechanism spelled out.
+   *
+   * It deliberately does NOT assert that `resetUsedTokens` went uncalled — that
+   * assertion pins the implementation to itself and would survive any refund
+   * built out of a different call. It asserts the OUTCOME the limiter exists
+   * for: a caller who loops into upstream failures is eventually DENIED at the
+   * front door. `bridgeComputeLimiter`'s docblock clause (c) states the
+   * property in full — "without a compute-sized cap an authenticated caller can
+   * hold the single analytics replica busy far past the backend's own budget,
+   * degrading every other tenant on it".
+   *
+   * The bucket double models the LIBRARY (consume decrements; reset zeroes the
+   * window), never the fix. With the refund restored, the loop below runs to
+   * its 40-iteration ceiling without ever seeing a 429.
+   */
+  it("[163 WR-03] a caller looping into upstream 504s is EVENTUALLY DENIED", async () => {
+    STATE.bucket = { limit: 10, used: 0 };
+    STATE.optimizerImpl = async () => {
+      throw new FakeAnalyticsTimeoutError();
+    };
+
+    const statuses: number[] = [];
+    // 40 = 4x the bucket. Bounded so a regression fails the assertion rather
+    // than hanging the suite.
+    for (let i = 0; i < 40; i += 1) {
+      const res = await POST(buildRequest({ portfolio_id: "x" }));
+      statuses.push(res.status);
+      if (res.status === 429) break;
+    }
+
+    expect(
+      statuses,
+      "The caller was NEVER denied across 40 consecutive failing calls. Each " +
+        "one spends a token, fires the ~15s Python round-trip and times out — " +
+        "so an unbounded loop is sustaining 15s round-trips against a single " +
+        "already-unhealthy replica while the front door says yes. That is the " +
+        "DoS `bridgeComputeLimiter` was added to prevent, re-opened by its " +
+        "own 5xx escape hatch.",
+    ).toContain(429);
+
+    // ...and the cap is the REAL one, not merely "eventually something denied".
+    // A refund that gave back a bounded number of tokens would still admit more
+    // than the bucket, and this is what tells the two apart.
+    expect(
+      statuses.filter((s) => s === 504),
+      "The bucket is 10/hour, so at most 10 attempts may reach the analytics " +
+        "service before the 11th is refused.",
+    ).toHaveLength(10);
+    expect(statuses[statuses.length - 1]).toBe(429);
+  });
+
+  it("[163 WR-03] control: the bucket double can still ADMIT — the denial above is earned, not universal", async () => {
+    // Without this, a double that answered 429 unconditionally would satisfy
+    // the invariant test while proving nothing about the route.
+    STATE.bucket = { limit: 10, used: 0 };
+    const res = await POST(buildRequest({ portfolio_id: "x" }));
+    expect(res.status).toBe(200);
+    expect(STATE.bucket.used).toBe(1);
   });
 
   // Phase 140 / SEAM-04 (SC-5c). Status alone does NOT discriminate here: the
@@ -384,22 +567,22 @@ describe("POST /api/portfolio-optimizer — audit-2026-05-07 cluster A", () => {
     expect(body.error).not.toMatch(/circuit|breaker|upstash|railway|http/i);
   });
 
-  // red-team R-0002 consistency: this route already refunds the 5/min token on
-  // both upstream-failure arms (504 timeout, 503 unreachable) because the
-  // failure is upstream of the caller. A breaker trip is the PUREST case of
-  // that — the request was never even issued — so it must refund too. Without
-  // this, a Railway outage silently burns a legitimate user's whole budget on
-  // requests that never left Vercel.
-  it("red-team R-0002: the CIRCUIT_OPEN arm refunds the 5/min token", async () => {
+  // ⚠️ WR-03 — INVERTED, and this is the arm where the reversal costs
+  // something. It used to read "the CIRCUIT_OPEN arm refunds the 5/min token",
+  // on the argument that a breaker trip is the purest upstream failure: the
+  // request was never issued, so nothing was consumed. That argument is still
+  // right and the refund is gone anyway, because the only refund
+  // @upstash/ratelimit offers is a whole-window reset — so a caller looping
+  // against an open breaker would hold a permanently full bucket. A limiter any
+  // caller can zero on demand is not a limiter.
+  it("[163 WR-03] the CIRCUIT_OPEN arm does NOT reset the window either", async () => {
     STATE.optimizerImpl = async () => {
       throw new CircuitOpenError(9);
     };
     const res = await POST(buildRequest({ portfolio_id: "x" }));
 
     expect(res.status).toBe(503);
-    expect(STATE.refundCalls).toContain(
-      "optimizer:00000000-0000-0000-0000-000000000001",
-    );
+    expect(STATE.refundCalls).toHaveLength(0);
   });
 
   // Phase 140 / SEAM-02: the route's deadline is owned by the ONE budget table
@@ -592,12 +775,13 @@ describe("[140.3-13b / SEAMUX-08] POST /api/portfolio-optimizer — Sentry captu
       throw new CircuitOpenError(13);
     };
     const res = await POST(buildRequest({ portfolio_id: "pf-77" }));
-    // The POSITIVE half: the breaker arm really ran — status, cooldown header
-    // AND the R-0002 refund — so the zero below is about the policy and not
-    // about the request never reaching the catch.
+    // The POSITIVE half: the breaker arm really ran — status AND the breaker's
+    // own cooldown header — so the zero below is about the capture POLICY and
+    // not about the request never reaching the catch. (WR-03 removed the third
+    // witness that used to stand here, the R-0002 refund; the cooldown header
+    // is arm-specific enough on its own — the generic 503 carries none.)
     expect(res.status).toBe(503);
     expect(res.headers.get("Retry-After")).toBe("13");
-    expect(STATE.refundCalls).toHaveLength(1);
     await expectNoCapture();
   });
 

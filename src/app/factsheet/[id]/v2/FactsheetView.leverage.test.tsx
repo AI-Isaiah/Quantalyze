@@ -3,7 +3,7 @@ import { render, fireEvent, act } from "@testing-library/react";
 import type { DailyPoint } from "@/lib/portfolio-math-utils";
 import type { FactsheetPayload } from "@/lib/factsheet/types";
 import { buildScenarioFactsheetPayload } from "@/app/(dashboard)/allocations/widgets/performance/scenario-factsheet-payload";
-import { deriveSeriesBundle } from "@/lib/factsheet/build-payload";
+import { deriveSeriesBundle, fixtureBenchmarkPrices } from "@/lib/factsheet/build-payload";
 import { FactsheetProvider } from "./factsheet-context";
 import { FactsheetBody } from "./FactsheetView";
 import { PeerPercentilePanel } from "./BatchDPanels";
@@ -110,6 +110,7 @@ function buildSmall(): { payload: FactsheetPayload; base: ReturnType<typeof deri
     isArithmetic: false,
     markets: p.markets,
     strategyName: p.strategyName,
+    benchmarkPrices: fixtureBenchmarkPrices([clipped]),
   });
   const payload = {
     ...p,
@@ -118,6 +119,9 @@ function buildSmall(): { payload: FactsheetPayload; base: ReturnType<typeof deri
       ...p.comparators,
       btc: { ...p.comparators.btc, joint: base.comparators.btc.joint },
     },
+    // Phase 169.5 (D-21): the builders always carry the BTC series the joint was
+    // computed from; the levered re-derive aligns BTC from it.
+    benchmarkPrices: fixtureBenchmarkPrices([clipped]),
   } as FactsheetPayload;
   return { payload, base };
 }
@@ -135,10 +139,14 @@ function v5SingleKey(): FactsheetPayload {
 
 // v4-shaped single-key (no periodsPerYear) — fail-closed: control hidden.
 function v4SingleKey(): FactsheetPayload {
-  return buildScenarioFactsheetPayload({
+  // Phase 167.1.2 plan 07: the scenario builder now CARRIES periodsPerYear, so
+  // the stale-v4 shape (no basis) is made by omitting the key explicitly.
+  const { periodsPerYear: _omit, ...v4 } = buildScenarioFactsheetPayload({
     portfolioDaily: makeReturnsSeries(300),
     benchmark: null,
   });
+  void _omit;
+  return v4 as FactsheetPayload;
 }
 
 const MTM_SCALARS = {
@@ -171,6 +179,7 @@ function fixtureMtmWithBundle(): FactsheetPayload {
         isArithmetic: false,
         markets: p.markets,
         strategyName: p.strategyName,
+        benchmarkPrices: fixtureBenchmarkPrices([clipped]),
       }),
     },
   } as unknown as FactsheetPayload;
@@ -224,6 +233,7 @@ function fixtureMtmNoLossBook(): FactsheetPayload {
         isArithmetic: false,
         markets: p.markets,
         strategyName: p.strategyName,
+        benchmarkPrices: fixtureBenchmarkPrices([clipped]),
       }),
     },
   } as unknown as FactsheetPayload;
@@ -251,6 +261,7 @@ function fixtureMtmBundleNoScalars(): FactsheetPayload {
         isArithmetic: false,
         markets: p.markets,
         strategyName: p.strategyName,
+        benchmarkPrices: fixtureBenchmarkPrices([clipped]),
       }),
     },
   } as unknown as FactsheetPayload;
@@ -295,10 +306,14 @@ function v4Composite(): FactsheetPayload {
   } as unknown as FactsheetPayload;
 }
 
+// Phase 167.1.2 plan 07: mounted WITHOUT scenarioMode. The leverage input is
+// the real factsheet's control and ControlBar now hides it in scenarioMode (the
+// composer levers each constituent itself), so these arms render the surface
+// the control actually lives on.
 function renderBody(payload: FactsheetPayload) {
   return render(
     <FactsheetProvider payload={payload} persist={false}>
-      <FactsheetBody payload={payload} scenarioMode hideAllocatorSection />
+      <FactsheetBody payload={payload} hideAllocatorSection />
     </FactsheetProvider>,
   );
 }
@@ -581,7 +596,7 @@ describe("FactsheetView — M-1: a per-scalar null in the persisted MTM cache st
 });
 
 describe("FactsheetView — B-1: the leverage-invariance pin does NOT apply at L=0 (0/0 is not invariant)", () => {
-  it("at L=0 on an MTM book, Sharpe/Sortino render the honest derived 0 — NOT the persisted overlay", () => {
+  it("at L=0 on an MTM book, Sharpe and Sortino render the honest '—' — NOT the persisted overlay", () => {
     const { container, getByText } = renderBody(fixtureMtmWithBundle());
     act(() => {
       fireEvent.click(getByText("Mark-to-market"));
@@ -594,13 +609,16 @@ describe("FactsheetView — B-1: the leverage-invariance pin does NOT apply at L
       fireEvent.change(levInput(container)!, { target: { value: "0" } });
     });
 
-    // r → 0·r zeroes every daily return, so the client derive honestly yields sharpe=0,
-    // sortino=0, ann_vol=0 and flat charts. The invariance proof (mean·√P/sd) is 0/0 at
-    // L=0 and does NOT hold there, so the pin must NOT overwrite the derived zeros with
-    // the persisted non-zero value (else "Sharpe 1.20" would render next to "Ann. Vol
-    // 0.0%"). Pre-fix (unguarded pin) rendered the persisted 1.20/1.90 here.
-    expect(readCell(container, "Sharpe")).toBe(num(0));
-    expect(readCell(container, "Sortino")).toBe(num(0));
+    // r → 0·r zeroes every daily return, so the client derive honestly yields no
+    // Sharpe ("—": an all-zero series has no dispersion, founder decision D7,
+    // 2026-09-26), no Sortino ("—": no losing day, review round 2 HI-02),
+    // ann_vol=0 and flat charts. The invariance proof
+    // (mean·√P/sd) is 0/0 at L=0 and does NOT hold there, so the pin must NOT
+    // overwrite the derived values with the persisted non-zero value (else "Sharpe
+    // 1.20" would render next to "Ann. Vol 0.0%"). Pre-fix (unguarded pin) rendered
+    // the persisted 1.20/1.90 here.
+    expect(readCell(container, "Sharpe")).toBe("—");
+    expect(readCell(container, "Sortino")).toBe("—");
     // Sanity: leverage genuinely applied (Ann. Vol collapsed to 0) — not the L=1 path.
     expect(readCell(container, "Ann. Vol")).toBe(pct(0, 1));
   });

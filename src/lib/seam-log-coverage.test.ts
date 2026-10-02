@@ -218,11 +218,16 @@ const EXPECTED_SEAM_FILES: readonly string[] = [
   "src/lib/process-key-client.ts",
   "src/lib/ratelimit.ts",
   "src/lib/resilient-fetch.ts",
-  // The 15 seam routes, in the sorted order the walk produces.
+  // The 16 seam routes, in the sorted order the walk produces.
   "src/app/api/admin/match/eval/route.ts",
   "src/app/api/admin/match/recompute/route.ts",
   "src/app/api/bridge/route.ts",
+  // Phase 169.2 / D-08 — the daily BTC benchmark refresh cron joined the seam
+  // (it calls refreshBenchmark through analytics-client).
+  "src/app/api/cron/refresh-benchmark/route.ts",
   "src/app/api/keys/[id]/permissions/route.ts",
+  // Phase 164.5.3 / D-04 — the credential-rotation route joined the seam.
+  "src/app/api/keys/[id]/rotate-secret/route.ts",
   "src/app/api/keys/sync/route.ts",
   "src/app/api/keys/validate-and-encrypt/route.ts",
   "src/app/api/portfolio-optimizer/route.ts",
@@ -230,7 +235,11 @@ const EXPECTED_SEAM_FILES: readonly string[] = [
   "src/app/api/simulator/route.ts",
   "src/app/api/strategies/composite/add-key/route.ts",
   "src/app/api/strategies/create-with-key/route.ts",
-  "src/app/api/strategies/csv-finalize/route.ts",
+  // Phase 145 (D-06 i-b): strategies/csv-finalize LEFT the seam — it no
+  // longer imports process-key-client (the folded RPC is called directly on
+  // the SSR Supabase client). Deleted deliberately, per this guard's LEFT
+  // instruction; its console sites still scrub via scrubSeamError but no
+  // longer stand over seam outgoing headers.
   "src/app/api/strategies/csv-validate/route.ts",
   "src/app/api/strategies/finalize-wizard/route.ts",
   "src/app/api/verify-strategy/route.ts",
@@ -289,7 +298,8 @@ const SAFE_PROPERTIES = ["retryAfterS", "deadlineExceeded", "code"];
  * a bare `Error` — the global constructor, which carries no data at all, let
  * alone an undici header. Measured under the widened roster of `140.4-10`: the
  * false positive surfaces at exactly three sites (`keys/sync`,
- * `portfolio-optimizer`, `csv-finalize`), all of them the `instanceof` shape.
+ * `portfolio-optimizer`, and — until Phase 145 removed it from the roster —
+ * `csv-finalize`), all of them the `instanceof` shape.
  *
  * THE EXCLUSION IS NARROW, and deliberately an EXACT-NAME match rather than a
  * pattern: a binding named `readError` or `rpcErr` is still flagged. Shadowing

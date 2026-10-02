@@ -66,6 +66,11 @@ const CANONICAL = new Set([
   "intro/route.ts",
   "intro-response/route.ts",
   "keys/[id]/permissions/route.ts",
+  // Phase 164.5.3 / MT5CREDS (D-04) — CANONICAL, measured not assumed: the
+  // PATCH handler reads and shape-checks the body BEFORE `checkLimit`, so a
+  // malformed rotation request 400s without burning a token (B15
+  // validate-then-limit), exactly like its sibling validate-and-encrypt below.
+  "keys/[id]/rotate-secret/route.ts",
   "keys/sync/route.ts",
   "keys/validate-and-encrypt/route.ts",
   "notes/route.ts",
@@ -80,6 +85,18 @@ const CANONICAL = new Set([
   // load-bearing probe-resistance control (see route + ratelimit.ts comments).
   "scenario/peer-rank/route.ts",
   "portfolio-strategies/alias/route.ts",
+  // Phase 150 / OWN-03 allocation write — both verbs parse the body, guard the
+  // strategy_id shape and (POST) the $1B ticket amount BEFORE checkLimit, so a
+  // 400 never burns a token (B15 validate-then-limit). The money write itself
+  // sits behind the limiter.
+  "portfolio-strategies/allocation/route.ts",
+  // Phase 150 / OWN-03 + OWN-05 owner writes — both PATCH routes validate the
+  // `[id]` segment (isUuid) AND parse + closed-set/length-validate the body
+  // BEFORE checkLimit, so neither a malformed id nor a bad mark/name burns a
+  // token (B15 validate-then-limit). Both keep the body parse INLINE in the
+  // method for the helper-extraction guard below.
+  "strategies/[id]/ownership/route.ts",
+  "strategies/[id]/name/route.ts",
   "preferences/route.ts",
   "simulator/route.ts",
   "strategies/create-with-key/route.ts",
@@ -117,11 +134,19 @@ const NO_INPUT = new Set([
   "account/export/route.ts",
   "admin/allocators/[id]/holdings/route.ts",
   "admin/deletion-requests/[id]/approve/route.ts",
-  // Public BTC benchmark GET — added to PUBLIC_ROUTES so the anonymous
-  // scenario-share recipient page can self-fetch the overlay. publicIpLimiter
-  // (10/min/IP), no request body (symbol hard-coded), limit-FIRST before the DB
-  // read. Same shape as demo/match below (public per-IP, no body).
-  "benchmark/btc/route.ts",
+  // 146-01 / RATE-02 — admin match-eval GET. Admin-gated (isAdminUser), then
+  // adminActionLimiter keyed `match-eval:<user.id>` (per-user, NOT IP), but NO
+  // request body: the only inputs are query params (lookback_days /
+  // partner_tag), so the "burn-a-token-on-bad-input" bug cannot occur — same
+  // NO_INPUT shape as the browse/returns siblings below. Deny routed through
+  // rateLimitDenyJson (pinned by route.test.ts + the seam posture invariant).
+  "admin/match/eval/route.ts",
+  // Phase 169.4 (D-67) — public BTC closes GET, reached by the anonymous
+  // scenario-share recipient page. publicIpLimiter per IP, NO request body
+  // and no query parameter (the symbol is fixed to 'BTC' in the route), and
+  // the limit is taken FIRST, before the benchmark_prices read, so the
+  // "burn-a-token-on-bad-body" bug cannot occur.
+  "benchmark/btc/prices/route.ts",
   "demo/match/[allocator_id]/route.ts",
   "factsheet/[id]/pdf/route.ts",
   "me/audit-log/export/route.ts",
@@ -140,6 +165,30 @@ const NO_INPUT = new Set([
   // (isUuid → 400) BEFORE auth/checkLimit — same NO_INPUT shape as the
   // returns/browse siblings above.
   "strategies/[id]/sync-progress/route.ts",
+  // Phase 164 / SHARE-01 + SHARE-03 — share mint and revoke POSTs. Both are
+  // body-less: the ONLY input is the `[id]` URL param, validated (isUuid → 400)
+  // BEFORE checkLimit — a malformed id is a shape error, distinct from the 404
+  // both routes return for a well-formed id the caller does not own, which is
+  // what keeps the lane from being an existence oracle. With no body to parse,
+  // the burn-a-token-on-bad-body bug cannot
+  // occur — the same NO_INPUT shape as the returns/sync-progress siblings above.
+  // They are POSTs rather than GETs, which changes nothing here: the bucket is
+  // about whether there is input to validate ahead of the limiter, not the verb.
+  "strategies/[id]/share/route.ts",
+  "strategies/[id]/share/revoke/route.ts",
+  // Phase 167.2.1 D-01 — the key card's composite-membership GET. withAuth +
+  // per-user userActionLimiter (`key-memberships:<user.id>`), but NO request
+  // body: the only input is the `[id]` URL param, validated (isUuid → 400)
+  // BEFORE checkLimit, so a malformed id never burns a token. Same NO_INPUT
+  // shape as the returns/sync-progress/share siblings above.
+  "keys/[id]/memberships/route.ts",
+  // Phase 169.2 / D-20 — the daily BTC benchmark refresh cron. CRON_SECRET
+  // Bearer gate, then adminActionLimiter under one fixed identifier
+  // (`benchmark-refresh:cron`), and NO request body: the handler reads only
+  // the Authorization header, so the burn-a-token-on-bad-body bug cannot occur.
+  // Deny routed through rateLimitDenyJson (pinned by its route.test.ts and the
+  // seam posture invariant).
+  "cron/refresh-benchmark/route.ts",
 ]);
 
 // limit-FIRST is intentional here (public/unauth scraper defense).

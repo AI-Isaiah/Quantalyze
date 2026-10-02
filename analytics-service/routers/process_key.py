@@ -33,23 +33,35 @@ import os
 import secrets
 import time
 import uuid
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Annotated, Any
 
+import httpx
+import sentry_sdk
 import structlog
 from fastapi import APIRouter, Body, HTTPException, Request
 from fastapi.responses import JSONResponse
+from postgrest.exceptions import APIError
 from pydantic import BaseModel, ValidationInfo, field_validator, model_validator
 
 from services import exchange as exchange_svc
 from services.basis_series import derive_basis_series
-from services.db import get_supabase, get_user_scoped_supabase, one, rows
+from services.db import db_read_with_retry, get_supabase, one, rows
 from services.ingestion import get_adapter
 from services.ingestion.adapter import FlowType, KeySubmissionRequest, Source, Trade
 from services.ingestion.serde import metrics_to_jsonb as _metrics_to_jsonb
 from services.closed_sets import CRYPTO_VENUES as _CRYPTO_VENUES
 from services.closed_sets import sfox_enabled_server
 from services.closed_sets import mt5_enabled_server
+from services.job_worker import CLAIMABLE_STATUSES, JOB_CHAIN_FOLLOW_ON
 from services.metrics import periods_per_year_for_asset_class
+# WIZFORM-ABANDON / D-40 — imported from the module that OWNS it
+# (`services.mt5_client`, a leaf whose only in-tree import is `services.redact`),
+# never through a re-export: a name reached through a re-export is a DIFFERENT
+# binding and an `except` on it would still be a class match, but the import edge
+# would be one nobody can reason about. Two `adapter.validate` call sites below
+# had no enclosing try at all before this phase.
+from services.mt5_client import Mt5SessionAbandoned
 from services.rate_limit import limiter, platform_ceiling_key, tenant_rate_limit_key
 from services.teaser_anchor import TEASER_ANCHOR_STRATEGY_ID
 
@@ -330,10 +342,11 @@ def _verify_internal_token(request: Request) -> None:
 #   1. `ok` is present and is a JSON boolean.
 #   2. when `ok` is false, `code` is a non-empty string.
 #
-# Before this, three of the six 200 shapes carried no discriminator at all and
-# consumers classified replies by sniffing which fields happened to be present.
-# The shapes, by behaviour: WIZARD_DUPLICATE (`_wizard_duplicate_reply`, TWO
-# emitters), `queued:true`, validate-only success, csv-finalize success,
+# Before this, three of the then-six 200 shapes carried no discriminator at all
+# and consumers classified replies by sniffing which fields happened to be
+# present. The shapes, by behaviour: WIZARD_DUPLICATE (`_wizard_duplicate_reply`,
+# TWO emitters), `queued:true`, validate-only success, csv-finalize success
+# (branch deleted in Phase 145 — the route finalizes via the folded RPC now),
 # synchronous success, and this envelope. `job_state` (PYAPI-09) rides the
 # duplicate shape rather than existing as a parallel discriminator.
 #
@@ -371,6 +384,60 @@ _ROUTE_TERMINAL_ERROR_CODES = frozenset(
     }
 )
 
+# 161-03 / WIZERR-13 — THE PER-ROW BREAKDOWN'S DATA HALF, AND THE PROJECTION
+# THAT KEEPS IT SAFE.
+#
+# `CsvValidationEnvelope.tsx` has always read `debug_context.pandera_errors`
+# and this route never wrote the key: `_envelope_error` rebuilt `debug_context`
+# from the verification id alone, so every submit-path CSV rejection rendered a
+# headline with nothing beneath it. The upload path never had the problem —
+# `routers/csv.py` returns `validate_csv`'s envelope whole and `CsvUploadStep`
+# maps its `errors` onto `pandera_errors` client-side. This closes the gap at
+# the producer so BOTH paths render identically with zero client edits.
+#
+# ⛔ A PROJECTION, NEVER A PASSTHROUGH, AND THAT IS THE SECURITY PROPERTY.
+# `csv_validator` emits exactly {rule, row, message} today and takes deliberate
+# care never to include `failure_case` (the raw failing cell — untrusted CSV
+# content that can carry PII). Forwarding `val.debug_context["violations"]` by
+# reference would make that discipline a promise held in ANOTHER file: the day
+# a producer adds a fourth key, it crosses the wire and lands in
+# strategy_verifications metadata silently. Naming the three keys here means an
+# added key is dropped by construction rather than by remembering.
+_FORWARDED_ROW_KEYS = ("rule", "row", "message")
+
+
+def _forwarded_pandera_rows(source_debug_context: Any) -> list[dict[str, Any]]:
+    """Project an adapter's per-row CSV errors into the wizard's wire shape.
+
+    Reads `debug_context["violations"]` — where `services/ingestion/
+    csv_adapter.py` puts `validate_csv`'s `errors` list — and returns
+    `{rule, row, message}` rows. Defensive about every reading: an adapter with
+    no debug context, a non-list `violations`, or a non-dict member yields an
+    empty list rather than raising, because a malformed upstream payload must
+    not turn a 403 verdict into a 500.
+    """
+    if not isinstance(source_debug_context, dict):
+        return []
+    raw = source_debug_context.get("violations")
+    if not isinstance(raw, list):
+        return []
+    rows: list[dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        row_raw = item.get("row")
+        rows.append(
+            {
+                "rule": str(item.get("rule", "unknown")),
+                # A row index that did not come back is reported as 0 — the
+                # same "no row" sentinel `csv_validator` already uses for a
+                # dataframe-level failure. Never invented, never omitted.
+                "row": row_raw if isinstance(row_raw, int) and not isinstance(row_raw, bool) else 0,
+                "message": str(item.get("message", "")),
+            }
+        )
+    return rows
+
 
 def _envelope_error(
     code: str | None,
@@ -378,8 +445,17 @@ def _envelope_error(
     cid: str,
     vid: str | None,
     recoverable: bool | None = None,
+    source_debug_context: Any = None,
 ) -> dict[str, Any]:
     """Phase 17 DESIGN-05 envelope. ok=False renders as wizard error UI.
+
+    ``source_debug_context`` (161-03 / WIZERR-13): the rejecting
+    ``ValidationResult``'s own ``debug_context``. Pass it at every arm that has
+    a ``val`` in scope; its ``violations`` are PROJECTED onto
+    ``debug_context.pandera_errors`` (see ``_forwarded_pandera_rows``). No
+    rows ⇒ the key is ABSENT, mirroring what the panel treats as absent
+    (``pandera_errors ?? []``); an empty list would tell a reader of the
+    persisted envelope that a breakdown was produced and was empty.
 
     ``recoverable`` (PYAPIFIX-02): pass an explicit bool to STATE the verdict.
     Left as ``None`` it is DERIVED from ``code`` — a probe code that is in
@@ -396,11 +472,15 @@ def _envelope_error(
     codes makes the forgetful case retryable instead.
     """
     _code = code or "UNKNOWN"
+    debug_context: dict[str, Any] = {"verification_id": vid} if vid else {}
+    forwarded_rows = _forwarded_pandera_rows(source_debug_context)
+    if forwarded_rows:
+        debug_context["pandera_errors"] = forwarded_rows
     return {
         "ok": False,
         "code": _code,
         "human_message": msg or "Unknown error",
-        "debug_context": {"verification_id": vid} if vid else {},
+        "debug_context": debug_context,
         "correlation_id": cid,
         "recoverable": (
             recoverable
@@ -426,17 +506,32 @@ def _caller_owns_strategy(
     **Fails closed on a missing/blank user_id.** A row cannot be owned by
     nobody, so "no user_id" is a miss, not a bypass — otherwise the whole gate
     would be opt-out by omission. Every non-teaser production caller forwards
-    ``context.user_id`` (``keys/sync/route.ts:417``,
-    ``finalize-wizard/route.ts:1310``, ``keys/validate-and-encrypt/route.ts:210``,
-    ``csv-finalize/route.ts:1183``), and the I-SEC2 warning below already flags
-    the absent case — this promotes that warning to a refusal on the one path
-    that then reads ANOTHER table by that caller-supplied id.
+    ``context.user_id`` (``keys/sync/route.ts``,
+    ``finalize-wizard/route.ts``, ``keys/validate-and-encrypt/route.ts``;
+    csv-finalize left this seam in Phase 145 — the route calls the folded RPC
+    directly), and the I-SEC2 warning below already flags the absent case —
+    this promotes that warning to a refusal on the one path that then reads
+    ANOTHER table by that caller-supplied id.
 
-    Deliberately uses the service-role client: only the csv flow forwards
-    ``X-User-Access-Token`` today, so a user-scoped (RLS-enforcing) client is
-    not available on onboard/resync and the ownership predicate has to be an
-    explicit filter. Forwarding that header on every authenticated flow is a
-    recorded Phase 140.2 obligation.
+    ⭐ **THIS FILTER IS THE ONLY BELT, PERMANENTLY, AND THAT IS NOW A DECISION
+    RATHER THAN A GAP.** Phase 146.1 / B2 (2026-08-18) settled the drop-vs-wire
+    adjudication in favour of DROPPING: ``X-User-Access-Token`` is no longer
+    forwarded by ANY Next route. It had two emitters (keys/sync,
+    verify-strategy) and zero readers — ``get_user_scoped_supabase`` (db.py)
+    has had no callers since Phase 145 deleted the csv-finalize branch that
+    consumed it, and ``tests/test_process_key.py`` (~:2220) pins that non-use —
+    so a live end-user JWT was crossing a service boundary and being read by
+    nobody. The Phase 140.2 obligation to "forward it on every authenticated
+    flow" is therefore DISCHARGED BY SUBSTITUTION: this explicit filter IS the
+    substitute, already shipped and gated. See
+    ``.planning/phases/140.1-.../140.1-TS-OBLIGATIONS.md`` TS-15 for the dated
+    superseding note and the NOT-TAKEN option (b).
+
+    ⛔ Do not "restore" the forward to make a 42501 go away. Wiring a genuinely
+    user-scoped client is option (b): it needs the non-use gate flipped and an
+    RLS analysis for every read that would newly run as the user rather than
+    ``service_role``. It remains a founder call, which is why
+    ``get_user_scoped_supabase`` was kept rather than deleted.
 
     Not wrapped in try/except on purpose: a lookup failure is a service-side
     fault, and answering 403 to it would blame the caller for our outage. The
@@ -634,10 +729,190 @@ def _is_long_fetch(body: _ProcessKeyBody) -> bool:
 # verification the user already completed.
 _RESUMABLE_VERIFICATION_STATUSES = frozenset({"draft"})
 
+# OPS-09 (Phase 163) — how far back the resync draft pre-check (the
+# `body.flow_type == "resync"` block in `process_key`) is willing to reach. A
+# draft older than this is treated as ABSENT, not as work in progress.
+#
+# DERIVED, not a round number picked to feel safe.
+#
+# (1) WHICH ENVELOPE APPLIES. A draft `strategy_verifications` row leaves `draft`
+#     INSIDE the `process_key_long` handler — `services/ingestion/long_fetch.py`
+#     advances the state machine and only THEN enqueues the tail job — so the
+#     longest a HEALTHY draft can still be awaiting its work is ONE hop. No
+#     follow-on kind in `JOB_CHAIN_FOLLOW_ON` can hold a row at `draft`, which is
+#     why this is sized off the single-hop envelope and NOT off the 4-hop
+#     chain-inclusive ceiling the strategy_analytics reaper uses.
+#
+# (2) THE SINGLE-HOP CEILING, using the same per-hop formula
+#     `tests/test_main_worker.py::_chain_inclusive_ceiling_seconds` applies:
+#
+#       (P_BATCH_SIZE - 1) x max(TIMEOUT_PER_KIND)  4 x 1800 = 7200s  batch-tail
+#       + TIMEOUT_PER_KIND["process_key_long"] x 3  3 x 1800 = 5400s  retried handler
+#       + RETRY_BACKOFF_TOTAL_S (30 + 120 + 480)               630s  scheduled waits
+#       = 13,230s ~ 3.7h
+#
+#     (13,230s is the "single-hop 13,230s" figure already on the record in that
+#     test's TestReaperThresholdInvariant docstring.)
+#
+# (3) THE SIZING RULE is the house one at `services/job_worker.py:546-551` —
+#     the smallest whole 4-hour multiple >= 1.25x the ceiling. 1.25 x 13,230s =
+#     16,538s = 4.6h -> 8 hours (ratio 2.18x). That sits strictly BELOW
+#     `STRATEGY_ANALYTICS_REAP_THRESHOLD` ("16 hours"), the point at which the
+#     platform itself declares such a chain dead — so this window can never
+#     resume a session the reaper has already written off.
+#
+# ⚠️ THE ERROR DIRECTION IS DELIBERATE. Too TIGHT re-opens the duplicate-submit
+# residual this guard exists to close: every slow-but-healthy resync would mint a
+# second draft row, which is a real regression on a live surface. Too LOOSE only
+# leaves the (low-severity, T-163-19) ancient-orphan revival partly open. Err
+# loose. Do not shrink this without re-deriving (2).
+_RESYNC_DRAFT_RESUME_WINDOW = timedelta(hours=8)
+
 # compute_jobs statuses that mean "already being worked" rather than "waiting".
 # Mirrors the non-terminal set _enqueue_compute_job_internal dedupes over
 # (migrations/20260716090000...sql:181+) minus 'pending'.
 _IN_FLIGHT_JOB_STATUSES = frozenset({"running", "done_pending_children"})
+
+# Every compute_jobs status that will still do work: the claimable set
+# (`pending`, `failed_retry`) plus the in-flight set above. `done` and
+# `failed_final` are the only terminal statuses. The TypeScript mirror is
+# `IN_FLIGHT_JOB_STATUSES` in `src/lib/compute-state.ts`.
+_NON_TERMINAL_JOB_STATUSES = frozenset(CLAIMABLE_STATUSES) | _IN_FLIGHT_JOB_STATUSES
+
+
+def _chain_kinds_from(head: str) -> frozenset[str]:
+    """The job kinds a chain starting at ``head`` can reach, walked over the
+    canonical ``JOB_CHAIN_FOLLOW_ON`` map rather than re-listed here."""
+    seen: set[str] = set()
+    frontier = [head]
+    while frontier:
+        kind = frontier.pop()
+        if kind in seen:
+            continue
+        seen.add(kind)
+        frontier.extend(JOB_CHAIN_FOLLOW_ON.get(kind, ()))
+    return frozenset(seen)
+
+
+# The chain a resync starts: process_key_long and every follow-on it can
+# enqueue (sync_trades, derive_broker_dailies, compute_analytics_from_csv).
+# This is `FACTSHEET_CHAIN_KINDS` in `src/lib/compute-state.ts` minus the
+# legacy `compute_analytics` kind, which nothing enqueues any more.
+_RESYNC_CHAIN_KINDS = _chain_kinds_from("process_key_long")
+
+# Review-fix round 1 (HIGH-1) — how old a non-terminal chain job may be and
+# still count as LIVE for the resync chain-in-flight guard in `process_key`. An
+# older row reads as absent, so it cannot refuse a resync for ever.
+#
+# DERIVED, the same way as `_RESYNC_DRAFT_RESUME_WINDOW` above. Each
+# compute_jobs row is ONE hop of the chain: a follow-on hop is a NEW row with
+# its own `created_at`. So the most a healthy row can age is the single-hop
+# ceiling. `process_key_long` has the largest `TIMEOUT_PER_KIND` of the four
+# chain kinds (1800 s), so its 13,230 s (~3.7 h) single-hop figure bounds every
+# kind, and the house sizing rule gives 8 hours. That is strictly below
+# `STRATEGY_ANALYTICS_REAP_THRESHOLD` ("16 hours").
+#
+# ⚠️ Err loose, as the draft window does: too tight lets a slow but healthy
+# hop admit a second chain, which is the defect this guard closes.
+_RESYNC_CHAIN_JOB_LIVE_WINDOW = timedelta(hours=8)
+
+# The only `last_error` that `reset_stalled_compute_jobs` writes when it puts
+# a stuck `running` row back to `pending` (migration
+# 20260516104201_compute_jobs_audit_2026_05_07_residual.sql). A claim clears
+# `last_error`, so only a reset row that has not been re-claimed carries it.
+_WORKER_STALLED_LAST_ERROR = "worker_stalled"
+
+
+# Round-2 review (SFH MED-2) — the failures a resync chain-guard read may meet
+# and still be reported QUIETLY (a warning, no exception capture): a PostgREST
+# error, and a transport or timeout error. The same split as
+# `services/benchmark.py`'s `_CACHE_READ_ERRORS`. Anything else is a
+# programming or infrastructure error: it logs at error level and is captured.
+_GUARD_READ_QUIET_ERRORS: tuple[type[BaseException], ...] = (
+    APIError,
+    httpx.HTTPError,
+    OSError,
+)
+
+
+def _sentry_report(send: Any, *, what: str) -> None:
+    """Run one Sentry call without ever masking the request it reports on, and
+    say so in the log when it fails (round-2 review, LOW-6: this used to be a
+    bare ``except: pass``)."""
+    try:
+        send()
+    except Exception as sentry_exc:  # noqa: BLE001 — the report must not break the resync
+        log.warning(
+            "process_key.sentry_report_failed",
+            what=what,
+            error_type=type(sentry_exc).__name__,
+        )
+
+
+def _report_guard_read_failure(
+    exc: BaseException,
+    *,
+    event: str,
+    strategy_id: Any,
+    correlation_id: str,
+    guard_skipped: bool,
+) -> None:
+    """Log and report a failed resync chain-guard read (round-2 review, SFH
+    MED-2).
+
+    A DB or network error (`_GUARD_READ_QUIET_ERRORS`) logs at warning. Any
+    other exception logs at error level and is captured. When the failure
+    makes the guard SKIP (``guard_skipped``), that fall-through is itself
+    reported to Sentry whatever the error, because it can admit a second
+    chain."""
+    fields: dict[str, Any] = {
+        "strategy_id": strategy_id,
+        "correlation_id": correlation_id,
+        "error_type": type(exc).__name__,
+        "error": str(exc)[:200],
+    }
+    if isinstance(exc, _GUARD_READ_QUIET_ERRORS):
+        log.warning(event, **fields)
+    else:
+        log.error(event, **fields)
+        _sentry_report(lambda: sentry_sdk.capture_exception(exc), what=event)
+    if guard_skipped:
+        _sentry_report(
+            lambda: sentry_sdk.capture_message(
+                "resync chain guard skipped: its compute_jobs read failed "
+                f"({type(exc).__name__}); a second chain may start",
+                level="warning",
+            ),
+            what=event,
+        )
+
+
+def _chain_job_dead_reason(job: dict[str, Any]) -> str | None:
+    """Why a non-terminal chain job is NOT live evidence of a running chain, or
+    None when it is live.
+
+    `reset_stalled_compute_jobs` puts a stuck `running` row back to `pending`
+    without touching `attempts`, and the claim increments `attempts` with no
+    cap. So a job whose worker keeps dying cycles running -> pending for ever
+    and never reaches a terminal status. Such a row must not refuse a resync.
+    - ``worker_stalled``: the watchdog reset it; the last worker died on it.
+    - ``attempts_exhausted``: it has used its whole attempt budget and is not
+      running. A normal failure at that count goes `failed_final`, so only a
+      stall reset leaves such a row claimable.
+    - ``attempts_over_budget``: it is running past its budget, which only a
+      stall reset plus a re-claim can produce. A `running` row AT its budget
+      is its legitimate final attempt (the claim counts it), so it stays live.
+    """
+    if job.get("last_error") == _WORKER_STALLED_LAST_ERROR:
+        return "worker_stalled"
+    attempts = job.get("attempts")
+    max_attempts = job.get("max_attempts")
+    if isinstance(attempts, int) and isinstance(max_attempts, int):
+        if attempts > max_attempts:
+            return "attempts_over_budget"
+        if attempts >= max_attempts and job.get("status") != "running":
+            return "attempts_exhausted"
+    return None
 
 
 def _resume_duplicate_job(
@@ -724,7 +999,9 @@ def _wizard_duplicate_reply(
     """The single WIZARD_DUPLICATE body, shared by BOTH emitters.
 
     There are two of them — the pre-check and the 23505 race-winner arm — and
-    they drifted apart in every prior fix to this contract. One builder means a
+    they drifted apart in every prior fix to this contract. (A third caller,
+    the resync chain-in-flight guard in ``process_key``, reuses this builder
+    for the same reason.) One builder means a
     future change to the shape cannot land on one arm only.
 
     Status 200 (NOT 409) per the API-7 spec: idempotency is a feature, not a
@@ -751,7 +1028,7 @@ async def _run_validate_only(
     body: "_ProcessKeyBody",
     correlation_id: str,
     started_at: float,
-) -> dict[str, Any]:
+) -> dict[str, Any] | JSONResponse:
     """CR-02 — pre-strategy validation flow.
 
     Runs only `adapter.validate()` (no DB insert, no state-machine
@@ -764,6 +1041,10 @@ async def _run_validate_only(
     consuming (`{ ok, code, human_message, debug_context, ... }` for failure;
     `{ valid: true, ... }` for success), so the thin adapters do not need
     to branch on the flow shape.
+
+    ⚠️ The return type widened to include ``JSONResponse`` for the
+    WIZFORM-ABANDON transient arm below, which needs a STATUS as well as a
+    body. Every pre-existing return is untouched and still a bare dict at 200.
     """
     submission = KeySubmissionRequest(
         flow_type=body.flow_type,
@@ -771,7 +1052,50 @@ async def _run_validate_only(
         context=body.context,
     )
     adapter = get_adapter(body.source)
-    val = await adapter.validate(submission)
+    try:
+        val = await adapter.validate(submission)
+    except Mt5SessionAbandoned:
+        # ⭐ WIZFORM-ABANDON / D-40. Until this arm existed, `adapter.validate`
+        # here had NO enclosing try at all (ast-verified), and
+        # `Mt5SessionAbandoned` is a plain `Exception` by design (D-42, so no
+        # credential-classify arm anywhere can absorb an operator fault into a
+        # user verdict) — so it left as an unhandled BODYLESS 500 on the wizard's
+        # own validate-and-encrypt leg. Under STATUS_CONTRACT R-1 a 500 means
+        # SERVICE-PERMANENT, "do not retry", the exact inverse of the truth: the
+        # next submission simply gets a fresh lease.
+        #
+        # ⚠️ On the genuinely abandoned path nobody awaits this call, so the arm
+        # never runs (D-39 — the sink's WARNING is the signal). It exists for the
+        # FALSE-POSITIVE path: a legitimate submission that trips the fence must
+        # be told "transient, retry", never that its credentials are wrong.
+        #
+        # Disposition is the route's EXISTING venue-transient shape — the 424
+        # FAILED_DEPENDENCY / `recoverable: True` envelope the synchronous
+        # pipeline's own pre-gate emits (PYAPIFIX-02 H-1). ⛔ No new user-facing
+        # code is minted (153.1 owns that table): `NETWORK_UNAVAILABLE` is an
+        # existing venue code, absent from both permanent allow-lists, and the
+        # copy is the ONE shared transient string this service already uses at
+        # every arm of this class. ⛔ Never a 4xx blaming credentials or the
+        # broker server, and never a 500 with `retryable: false`.
+        #
+        # The log names the decision only — no host, port, terminal key,
+        # generation number or credential (WIZFORM-03 / T-134-01).
+        log.warning(
+            "process_key.validate_only_session_abandoned",
+            source=body.source,
+            correlation_id=correlation_id,
+            duration_ms=int((time.monotonic() - started_at) * 1000),
+        )
+        return JSONResponse(
+            status_code=424,
+            content=_envelope_error(
+                "NETWORK_UNAVAILABLE",
+                exchange_svc.NETWORK_ERROR_DETAIL,
+                correlation_id,
+                None,
+                recoverable=True,
+            ),
+        )
     duration_ms = int((time.monotonic() - started_at) * 1000)
     if not val.valid:
         log.info(
@@ -779,8 +1103,15 @@ async def _run_validate_only(
             error_code=val.error_code,
             duration_ms=duration_ms,
         )
+        # 161-03 / WIZERR-13 — `val.debug_context` is threaded so the CSV
+        # adapter's per-row `violations` reach the panel that has always read
+        # them. Projected, not passed through.
         return _envelope_error(
-            val.error_code, val.human_message, correlation_id, None
+            val.error_code,
+            val.human_message,
+            correlation_id,
+            None,
+            source_debug_context=val.debug_context,
         )
     log.info("process_key.validate_only_ok", duration_ms=duration_ms)
     envelope: dict[str, Any] = {
@@ -1053,254 +1384,62 @@ async def process_key(
                 correlation_id=correlation_id,
                 started_at=started_at,
             )
-        # API-3 — csv-finalize step. The CSV wizard's finalize step (POST
-        # /api/strategies/csv-finalize) lands here AFTER validate but
-        # BEFORE the strategies row exists. We delegate to the
-        # finalize_csv_strategy RPC (migration 093 STEP 5) which atomically
-        # creates the strategies row + strategy_verifications row in a
-        # single SECURITY DEFINER transaction. Pre-fix this returned 422
-        # because the strategy_id branch only allowed step='validate'.
-        if (
-            body.flow_type == "csv"
-            and step == "finalize"
-            and body.source == "csv"
-        ):
-            user_id = body.context.get("user_id")
-            wsid = body.context.get("wizard_session_id")
-            fmt = body.context.get("fmt")
-            strategy_name = body.context.get("strategy_name")
-            # finalize_csv_strategy is SECURITY DEFINER and enforces
-            # auth.uid() = p_user_id (migration 20260501055202): a user may
-            # only finalize their OWN strategy. The module service-role client
-            # has no auth.uid(), so calling it with `supabase` raised 42501
-            # "called without an auth session" on every flag-on finalize. Call
-            # it with a user-scoped client built from the access token the
-            # Next.js csv-finalize route forwards in X-User-Access-Token; the
-            # RPC's auth.uid() = p_user_id check still runs (defense in depth).
-            # Everything else in this handler stays service-role.
-            user_token = request.headers.get("X-User-Access-Token", "")
-            if not user_token:
-                log.warning("process_key.csv_finalize_missing_user_token")
-                return JSONResponse(
-                    status_code=401,
-                    content=_envelope_error(
-                        "CSV_FINALIZE_FAILED",
-                        "finalize requires an authenticated user session.",
-                        correlation_id,
-                        None,
-                    ),
-                )
-            try:
-                user_sb = get_user_scoped_supabase(user_token)
-                rpc_result = (
-                    user_sb.rpc(
-                        "finalize_csv_strategy",
-                        {
-                            "p_user_id": user_id,
-                            "p_wizard_session_id": wsid,
-                            "p_fmt": fmt,
-                            "p_strategy_name": strategy_name,
-                        },
-                    ).execute()
-                )
-                new_strategy_id = rpc_result.data
-            except Exception as exc:  # noqa: BLE001
-                msg = str(exc)
-                # SEAMRIM-03 (review finding C-2) — the double-submit fence.
-                # Migration 20260728120000 gave `strategies` a partial unique
-                # index on (user_id, wizard_session_id, source) and made
-                # finalize_csv_strategy write the session id, so a repeat submit
-                # now raises 23505 and rolls BOTH inserts back (the RPC has no
-                # EXCEPTION block). That duplicate is the one the product's own
-                # copy INSTRUCTS — CSV_SUBMIT_NO_STRATEGY_ID says "Submit
-                # again." — so it must resolve to the existing strategy at 200,
-                # not become a 422 dead end.
-                #
-                # Same detection predicate as the race-winner arm below
-                # (`if "23505" in msg or "duplicate key" in msg.lower()`), and
-                # the same rules: maybe_single so a no-row result is a value and
-                # not a PGRST116 500, and surface the ORIGINAL failure if the
-                # re-fetch finds nothing rather than fabricating a success.
-                if "23505" in msg or "duplicate key" in msg.lower():
-                    # PYAPI-01d / C-08: the re-fetch MUST carry the same scope as
-                    # the index. Filtering on wizard_session_id alone would
-                    # re-fetch, and echo, another strategy's row. `source` is in
-                    # the filter for the same reason it is in the index: an
-                    # abandoned source='wizard' draft can hold the very same
-                    # session id (localStorage.ts:379-381 restores it across the
-                    # CSV/API boundary), and echoing THAT row would hand the user
-                    # a different strategy's id as if it were their CSV upload.
-                    #
-                    # It runs on `user_sb`, not the service-role client: RLS then
-                    # fences the read a second time, under the explicit filters,
-                    # instead of trusting the caller-supplied body.user_id.
-                    try:
-                        existing = one(
-                            user_sb.table("strategies")
-                            # CR-01: `name` is SELECTed because the arm must
-                            # compare the request to the row before it asserts
-                            # they are the same submission. See the refusal
-                            # below.
-                            .select("id, status, name")
-                            .eq("user_id", user_id)
-                            .eq("wizard_session_id", wsid)
-                            .eq("source", "csv")
-                            .maybe_single()
-                            .execute()
-                        )
-                    except Exception as refetch_exc:  # noqa: BLE001
-                        # The re-fetch is itself a network call. Letting it throw
-                        # from inside this handler would turn a well-understood
-                        # duplicate into an uncaught 500, which is the "cryptic
-                        # 500" this arm exists to avoid. Treat it as a miss and
-                        # fall through to the static residual reply.
-                        log.warning(
-                            "process_key.csv_finalize_idempotent_refetch_failed",
-                            error=str(refetch_exc)[:200],
-                        )
-                        existing = None
-                    if existing:
-                        # ⚠️ CR-01 — ESTABLISH THE PRECONDITION BEFORE ASSERTING
-                        # IDEMPOTENCY. This arm used to echo the resolved id at
-                        # 200 without ever comparing the request to the row it
-                        # found, and that is not idempotency — it is "any
-                        # submission wearing this session id gets that
-                        # strategy".
-                        #
-                        # `wizard_session_id` identifies a SESSION, not a
-                        # SUBMISSION. `clearWizardState` fires only on success /
-                        # delete-draft / start-fresh (localStorage.ts:390-393
-                        # says so, and says it is load-bearing), so after a
-                        # FAILED submit the id survives. A user who follows
-                        # `CSV_SUBMIT_FAILED`'s instruction can step back,
-                        # rename, upload a DIFFERENT file and submit — and the
-                        # arm resolved that to the first strategy. The caller
-                        # (src/app/api/strategies/csv-finalize/route.ts) then
-                        # applies THIS request's metadata and returns to THAT
-                        # id, and persist_csv_daily_returns is an upsert with no
-                        # delete outside the new range: the row ends up named
-                        # after file A, carrying A ∪ B, reported as success.
-                        #
-                        # WHY REFUSE RATHER THAN OVERWRITE. Overwriting would
-                        # need a stale-range delete, a name update, and a
-                        # re-verification — and `status` here may already be
-                        # 'published'. Silently replacing the data under a
-                        # PUBLISHED verified track record through a CREATE
-                        # endpoint is a worse failure than the one being fixed.
-                        # A changed track record is a NEW strategy.
-                        #
-                        # WHY `name` AND WHY IT IS A FLOOR, STATED HONESTLY.
-                        # `name` is the only submission-identifying field this
-                        # arm both receives and can read back: the daily-return
-                        # series never reaches this service (the Next.js route
-                        # persists it separately), and the existing row may
-                        # legitimately carry NO rows yet — that is exactly the
-                        # recovery case the fence exists for, so "compare the
-                        # series" cannot be the test HERE. The residual — same
-                        # name, different file — is closed one layer out, at the
-                        # site of the merge itself, by the stale-range fence in
-                        # persistDailyReturnsOrErrorResponse. Neither layer is
-                        # sufficient alone; both are cheap.
-                        existing_name = existing.get("name")
-                        if (
-                            isinstance(existing_name, str)
-                            and isinstance(strategy_name, str)
-                            and existing_name != strategy_name
-                        ):
-                            log.warning(
-                                "process_key.csv_finalize_session_reused_with_new_payload",
-                                strategy_id=str(existing["id"]),
-                            )
-                            return JSONResponse(
-                                status_code=409,
-                                content=_envelope_error(
-                                    "CSV_SESSION_REUSED",
-                                    # No id, no name, no file name: the refusal
-                                    # names the STATE, and the remedy is the one
-                                    # action that cannot merge anything.
-                                    "This wizard session already created a "
-                                    "strategy under a different name. Start a "
-                                    "new strategy to upload a different track "
-                                    "record.",
-                                    correlation_id,
-                                    None,
-                                    # Retrying the identical action re-raises the
-                                    # identical 23505 and lands here again.
-                                    recoverable=False,
-                                ),
-                            )
-                        # Distinguishable from a first submit in the logs, so an
-                        # operator can tell a dedup from a create. Mirrors
-                        # `process_key.idempotent_race_resolved`.
-                        log.info(
-                            "process_key.csv_finalize_idempotent_hit",
-                            strategy_id=str(existing["id"]),
-                        )
-                        # `status` is ECHOED from the row rather than hardcoded
-                        # to 'pending_review' like the first-submit reply: this
-                        # row already exists and may sit at 'private' (the
-                        # CONTRIB-02 flow). Reporting a status we did not read
-                        # would be fabricating an observation.
-                        return {
-                            "ok": True,
-                            "strategy_id": existing["id"],
-                            "status": existing.get("status") or "pending_review",
-                            "correlation_id": correlation_id,
-                            "step": "finalize",
-                        }
-                    log.warning(
-                        "process_key.csv_finalize_idempotent_refetch_missed",
-                        error=msg[:200],
-                    )
-                log.warning("process_key.csv_finalize_rpc_failed", error=msg[:200])
-                # STATIC message. The old body interpolated `exc`, so the raw
-                # `duplicate key value violates unique constraint "..."` — and
-                # every other internal error string, DSNs and hostnames included
-                # — was painted onto the user's screen. That is a live member of
-                # C-1's surviving class (raw internal prose into the browser),
-                # and this fix would have CREATED a new one. The operator half
-                # stays in the structured log above.
-                #
-                # It deliberately makes NO claim about whether the write landed:
-                # this arm catches every non-23505 failure too, and from here we
-                # cannot observe the outcome. Asserting "nothing was created"
-                # would be the same fabricated-measurement defect the phase
-                # exists to close.
-                return JSONResponse(
-                    status_code=422,
-                    content=_envelope_error(
-                        "CSV_FINALIZE_FAILED",
-                        (
-                            "We could not complete the save. Check /strategies "
-                            "before submitting again — we cannot tell from here "
-                            "whether the strategy was created."
-                        ),
-                        correlation_id,
-                        None,
-                    ),
-                )
-            log.info(
-                "process_key.csv_finalize_ok",
-                strategy_id=str(new_strategy_id),
-            )
-            return {
-                "ok": True,
-                "strategy_id": new_strategy_id,
-                "status": "pending_review",
-                "correlation_id": correlation_id,
-                "step": "finalize",
-            }
+        # ⛔ Phase 145 (D-06 option i-b, obligation 2) — the csv-finalize
+        # branch that lived here (API-3, Phase 19.1 token forwarding, the
+        # SEAMRIM-03 23505 resolve arm and its CR-01 name check) was DELETED.
+        # The Next.js route now calls the folded SECURITY DEFINER
+        # `finalize_csv_strategy_with_returns` RPC directly on its SSR
+        # user-scoped client (migration 20260819120000; the founder decision
+        # is recorded in .planning/phases/145-job-csv-finalize-atomicity/
+        # 145-DECISION.md). Leaving this branch live would have been a second
+        # writer to strategies/csv_daily_returns — a drift bomb. The 23505
+        # resolve arm and the CR-01 identity checks moved into the route
+        # (csv-finalize/route.ts, resolveExistingStrategyOrRefuse). A
+        # flow_type='csv' step='finalize' request now deliberately falls
+        # through to the API-6 422 below: this service no longer finalizes
+        # CSV strategies, and answering anything else here would silently
+        # re-open the second-writer path.
+        #
         # API-6 — Phase 17 DESIGN-05 envelope (top-level code/human_message,
         # not nested under `detail`). The wizard's error renderer reads the
         # envelope shape directly off the response body.
+        #
+        # Phase 146.1-07 (C4) — TOMBSTONE MESSAGE, NOT A NEW CODE. The
+        # fall-through above is deliberate, but the sentence a caller reads was
+        # not: "context.strategy_id is required" tells a stale or external CSV
+        # finalize caller to supply a field, when the truth is that this
+        # endpoint stopped being a writer for that flow entirely. Supplying the
+        # field would not help; it would take them down a path that no longer
+        # exists here.
+        #
+        # ⛔ The code stays `MISSING_STRATEGY_ID`. Minting `CSV_FINALIZE_MOVED`
+        # would put a NEW code into the WIZFORM-02 coverage-law population, and
+        # that class is recorded OPEN — server-classified codes still render as
+        # `code: UNKNOWN` at the wizard, so a new code would ship straight into
+        # a known-broken classification path. The option is filed in TODOS.md
+        # gated on WIZFORM-02 closing.
+        #
+        # ⚠️ The DEFAULT sentence below is byte-identical to what every other
+        # caller received before this change. A copy fix that leaks into
+        # unrelated 422s is a regression dressed as copy; both arms are pinned
+        # by tests.
+        if body.flow_type == "csv" and step == "finalize":
+            human_message = (
+                "CSV finalize moved to the Next.js route in migration "
+                "20260819120000 and this service is no longer a writer for "
+                "that flow. Supplying context.strategy_id will not change "
+                "this answer — submit through /api/strategies/csv-finalize."
+            )
+        else:
+            human_message = (
+                "context.strategy_id is required for this flow_type. "
+                "Validate-only flows must set context.step='validate'."
+            )
         return JSONResponse(
             status_code=422,
             content=_envelope_error(
                 "MISSING_STRATEGY_ID",
-                (
-                    "context.strategy_id is required for this flow_type. "
-                    "Validate-only flows must set context.step='validate'."
-                ),
+                human_message,
                 correlation_id,
                 None,
             ),
@@ -1340,14 +1479,15 @@ async def process_key(
     #   (a) there was no strategy_id in scope yet, so the read could only
     #       filter on the caller-supplied wizard_session_id — a platform-global
     #       key — and returned another tenant's row on any collision;
-    #   (b) it short-circuited EVERY flow, including csv-finalize. Once
-    #       finalize_csv_strategy had written an SV row carrying that session
-    #       id, every later csv call for the session hit this return instead of
-    #       the finalize branch — a plain double-submit, no timeout needed.
+    #   (b) it short-circuited EVERY flow, including the then-live csv-finalize
+    #       delegate (deleted in Phase 145). Once the finalize RPC had written
+    #       an SV row carrying that session id, every later csv call for the
+    #       session hit this return instead of the finalize branch — a plain
+    #       double-submit, no timeout needed.
     # Running it here fixes both: `strategy_id` exists (so the read key equals
-    # the DB's `UNIQUE (strategy_id, wizard_session_id)` key), and the arms that
-    # write no SV row at all — validate-only and the csv-finalize delegate —
-    # have already returned above.
+    # the DB's `UNIQUE (strategy_id, wizard_session_id)` key), and the arms
+    # that write no SV row at all — validate-only, and since Phase 145 the
+    # csv step='finalize' 422 refusal — have already returned above.
     if idempotent_by_session:
         existing = one(
             supabase.table("strategy_verifications")
@@ -1426,15 +1566,21 @@ async def process_key(
     # compute_jobs dedup's non-terminal restriction: a FINISHED (non-draft)
     # resync verification is a genuinely new sync, not a retry.
     #
-    # TENANT SCOPE (PYAPI-01d): this runs strictly AFTER the :1316 ownership
-    # gate, so `strategy_id` has already passed the strategies id+user_id check
+    # TENANT SCOPE (PYAPI-01d): this runs strictly AFTER the `_caller_owns_strategy`
+    # gate (:1307 — anchored by NAME as well, because the bare line number in this
+    # sentence had drifted ~47 lines before OPS-09 re-measured it), so
+    # `strategy_id` has already passed the strategies id+user_id check
     # (140.1-02). Scoping this read by strategy_id therefore carries the tenant
     # scope — no wizard_session_id / user_id echo of a foreign row is possible.
     #
     # SCOPE BOUND (documented residual, restated 141.2 / D-03): this guard does
     # NOT make a resync replay safe, and the original text here claiming it
     # closed the SEQUENTIAL retry class was the over-claim that kept a retry
-    # grant alive after the evidence for it had been withdrawn. The filter is
+    # grant alive after the evidence for it had been withdrawn. (That correction
+    # IS the discharge of DEF-141.1-02-A — landed 2026-08-01 by 141.2 plan 02,
+    # `71d5b3ab`, and recorded discharged at TODOS.md:1778. Re-verified unchanged
+    # at HEAD by Phase 163 / OPS-09: no sequential-class over-claim survives in
+    # this block. Do not re-open it.) The filter is
     # status='draft', and the compute worker's tick advances the first draft
     # verification OUT of draft — so a second attempt arriving after that
     # transition matches nothing here and inserts a second draft row. What the
@@ -1445,15 +1591,44 @@ async def process_key(
     # residuals are OUT of scope here: no new
     # migration and no new unique index (PATTERNS records the migration path as
     # the scope decision deliberately NOT taken); this is an application-level
-    # SELECT-then-guarded-INSERT. `.limit(1)` keeps `.maybe_single()` from
-    # raising on that rare two-draft residual rather than papering over it.
+    # SELECT-then-guarded-INSERT.
+    #
+    # ORDERED AND BOUNDED (OPS-09, Phase 163). This block used to end: "`.limit(1)`
+    # keeps `.maybe_single()` from raising on that rare two-draft residual rather
+    # than papering over it." That was true and remains true — but it was the whole
+    # story only if you never asked WHICH of the two drafts `.limit(1)` hands back.
+    # With no ORDER BY the answer was whatever PostgREST and the planner happened
+    # to emit first, so the two-tab residual resolved ARBITRARILY: the same pair of
+    # rows could resume either tab's session, run to run, with nothing in the code
+    # expressing a preference. Two clauses close that:
+    #
+    #   .order("created_at", desc=True)  the NEWEST draft always wins — the row the
+    #                                    caller in front of the browser is actually
+    #                                    waiting on, not an arbitrary sibling.
+    #   .gte("created_at", cutoff)       a draft older than
+    #                                    `_RESYNC_DRAFT_RESUME_WINDOW` reads as
+    #                                    ABSENT, so an orphan left behind by a dead
+    #                                    worker is never silently revived into a
+    #                                    live session; it falls through to the
+    #                                    fresh-draft INSERT below instead.
+    #
+    # ⚠️ This makes the residual's RESOLUTION deterministic. It does not stop the
+    # residual OCCURRING — two concurrent tabs can still mint two drafts, and only
+    # the unique index deliberately not taken above would change that.
+    #
+    # Reordering this read is tenant-safe for the reason stated in TENANT SCOPE
+    # above: it runs strictly after the `_caller_owns_strategy` gate, so every row
+    # it can possibly see is already known to belong to the caller.
     if body.flow_type == "resync":
+        resume_cutoff = datetime.now(timezone.utc) - _RESYNC_DRAFT_RESUME_WINDOW
         existing_resync = one(
             supabase.table("strategy_verifications")
             .select("*")
             .eq("strategy_id", strategy_id)
             .eq("flow_type", "resync")
             .eq("status", "draft")
+            .gte("created_at", resume_cutoff.isoformat())
+            .order("created_at", desc=True)
             .limit(1)
             .maybe_single()
             .execute()
@@ -1475,6 +1650,166 @@ async def process_key(
                 correlation_id=correlation_id,
                 queued=_queued,
                 job_state=_job_state,
+            )
+
+    # CHAIN-IN-FLIGHT GUARD (2026-09-24). The draft pre-check above only sees a
+    # verification that is still `draft`, and process_key_long moves it out of
+    # draft within seconds. A full chain (process_key_long -> sync_trades ->
+    # derive_broker_dailies -> compute) can take many minutes after that. Before
+    # this guard, every wizard reload or Retry in that window started a SECOND
+    # chain. The SQL status bridge then wrote `computing` back while any job of
+    # the strategy was non-terminal, so the first chain's `complete` lasted
+    # under a second and the wizard poll never saw it.
+    #
+    # So a resync is refused as a duplicate while ANY job of the chain it would
+    # start is non-terminal for this strategy. No draft is minted and nothing is
+    # enqueued. `queued` is True because a non-terminal job does exist, and
+    # `job_state` is "running" because it was in flight before this call (the
+    # PYAPI-09 contract above).
+    #
+    # WHICH VERIFICATION THE REPLY NAMES (review-fix round 1, MEDIUM-4). Only a
+    # `process_key_long` row carries its session's `verification_id` (in
+    # `metadata`); the follow-on hops are enqueued with none. The newest
+    # verification of the strategy is NOT necessarily that chain's session, so
+    # its status is reported only when its id equals the job's own
+    # `verification_id`. Otherwise (a follow-on hop, or a newer unrelated
+    # verification) the reply carries the job's verification id, which may be
+    # None, and `status: None`, and a warning is logged. An unrelated
+    # verification's status is never presented as this chain's.
+    #
+    # Tenant scope is the same as the draft pre-check's: this runs after the
+    # `_caller_owns_strategy` gate, so the strategy_id filter carries it.
+    #
+    # Both reads go through `db_read_with_retry` (a gateway 504 is retried inside
+    # one gateway window). If the job read still fails, the guard is SKIPPED and
+    # the resync takes the path it took before this guard existed, logged with
+    # context and reported (`_report_guard_read_failure`: a DB or network error
+    # at warning, anything else at error with an exception capture, and the
+    # fall-through itself always to Sentry): a read failure must never become a
+    # bare 500 on a user's Retry.
+    # The cost is the pre-guard behaviour (a possible second chain), not a
+    # stuck user.
+    #
+    # A job that is non-terminal is not always LIVE (review-fix round 1,
+    # HIGH-1). A row older than `_RESYNC_CHAIN_JOB_LIVE_WINDOW` reads as absent,
+    # and a crash-looping row (`_chain_job_dead_reason`) is logged at warning
+    # and reported to Sentry, then skipped, so the resync goes through. Without
+    # both, a job whose worker keeps dying would refuse every resync for ever.
+    if body.flow_type == "resync":
+        live_cutoff = datetime.now(timezone.utc) - _RESYNC_CHAIN_JOB_LIVE_WINDOW
+        try:
+            chain_job_rows = rows(
+                await db_read_with_retry(
+                    lambda: supabase.table("compute_jobs")
+                    .select(
+                        "id,kind,status,attempts,max_attempts,last_error,created_at,metadata"
+                    )
+                    .eq("strategy_id", strategy_id)
+                    .in_("kind", sorted(_RESYNC_CHAIN_KINDS))
+                    .in_("status", sorted(_NON_TERMINAL_JOB_STATUSES))
+                    .gte("created_at", live_cutoff.isoformat())
+                    .order("created_at", desc=True)
+                    .limit(20)
+                    .execute()
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 — classified and reported below
+            _report_guard_read_failure(
+                exc,
+                event="process_key.resync_chain_inflight_read_failed",
+                strategy_id=strategy_id,
+                correlation_id=correlation_id,
+                guard_skipped=True,
+            )
+            chain_job_rows = []
+        inflight_chain_job: list[dict[str, Any]] = []
+        for chain_job in chain_job_rows:
+            dead_reason = _chain_job_dead_reason(chain_job)
+            if dead_reason is None:
+                inflight_chain_job = [chain_job]
+                break
+            log.warning(
+                "process_key.resync_chain_job_not_live",
+                strategy_id=strategy_id,
+                correlation_id=correlation_id,
+                job_id=str(chain_job.get("id")),
+                job_kind=chain_job.get("kind"),
+                job_status=chain_job.get("status"),
+                attempts=chain_job.get("attempts"),
+                max_attempts=chain_job.get("max_attempts"),
+                reason=dead_reason,
+            )
+            _sentry_report(
+                lambda: sentry_sdk.capture_message(
+                    f"resync chain guard skipped a non-live {chain_job.get('kind')} "
+                    f"job ({dead_reason})",
+                    level="warning",
+                ),
+                what="process_key.resync_chain_job_not_live",
+            )
+        if inflight_chain_job:
+            try:
+                latest_verification = one(
+                    await db_read_with_retry(
+                        lambda: supabase.table("strategy_verifications")
+                        .select("id,status,trust_tier")
+                        .eq("strategy_id", strategy_id)
+                        .order("created_at", desc=True)
+                        .limit(1)
+                        .maybe_single()
+                        .execute()
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001 — a job IS in flight; reply without it
+                _report_guard_read_failure(
+                    exc,
+                    event="process_key.resync_chain_inflight_verification_read_failed",
+                    strategy_id=strategy_id,
+                    correlation_id=correlation_id,
+                    guard_skipped=False,
+                )
+                latest_verification = None
+            live_job = inflight_chain_job[0]
+            job_metadata = live_job.get("metadata")
+            chain_verification_id = (
+                job_metadata.get("verification_id")
+                if isinstance(job_metadata, dict)
+                else None
+            )
+            if (
+                chain_verification_id is not None
+                and latest_verification is not None
+                and latest_verification.get("id") == chain_verification_id
+            ):
+                reply_verification: dict[str, Any] = latest_verification
+            else:
+                log.warning(
+                    "process_key.resync_chain_inflight_verification_unmatched",
+                    strategy_id=strategy_id,
+                    correlation_id=correlation_id,
+                    job_id=str(live_job.get("id")),
+                    job_kind=live_job.get("kind"),
+                    chain_verification_id=chain_verification_id,
+                    latest_verification_id=(
+                        latest_verification.get("id") if latest_verification else None
+                    ),
+                )
+                reply_verification = {
+                    "id": chain_verification_id,
+                    "status": None,
+                    "trust_tier": None,
+                }
+            log.info(
+                "process_key.resync_chain_inflight_dedup_hit",
+                job_id=str(live_job.get("id")),
+                job_kind=live_job.get("kind"),
+                job_status=live_job.get("status"),
+            )
+            return _wizard_duplicate_reply(
+                existing=reply_verification,
+                correlation_id=correlation_id,
+                queued=True,
+                job_state="running",
             )
 
     trust_tier = "csv_uploaded" if body.source == "csv" else "api_verified"
@@ -1583,7 +1918,45 @@ async def process_key(
     adapter = get_adapter(body.source)
 
     # validate
-    val = await adapter.validate(submission)
+    try:
+        val = await adapter.validate(submission)
+    except Mt5SessionAbandoned:
+        # ⭐ WIZFORM-ABANDON / D-40 — the SECOND unguarded `adapter.validate`
+        # site, and it is covered because the class is "an unguarded validate
+        # call site", not "the one an author had in mind". See
+        # `_run_validate_only`'s arm above for the full rationale; the
+        # disposition is the SAME shape this function already emits ~40 lines
+        # below at its PYAPIFIX-02 venue-transient pre-gate — 424 with
+        # `recoverable` STATED rather than derived, and no new code minted.
+        #
+        # ⚠️ Not reachable by an mt5 body TODAY: `mt5` is admitted to
+        # `onboard`/`resync` only (MT5RECON-01) and both are long-fetch, so they
+        # return at the enqueue above. Written anyway — an instance fix at the
+        # first site alone leaves this one open the day any lease-taking adapter
+        # is admitted to a synchronous flow, and the wizard would then meet the
+        # bodyless 500 this phase exists to remove.
+        #
+        # ⛔ NO `transition_strategy_verification` to 'draft' with an errors
+        # array, unlike the scope-rejection arm below. That transition RECORDS A
+        # VERDICT about the caller's key on their verification row; there is no
+        # verdict here, because the terminal was never read. Leaving the row in
+        # its current state is what makes an identical retry able to succeed.
+        log.warning(
+            "process_key.validate_session_abandoned",
+            source=body.source,
+            verification_id=verification_id,
+            correlation_id=correlation_id,
+        )
+        return JSONResponse(
+            status_code=424,
+            content=_envelope_error(
+                "NETWORK_UNAVAILABLE",
+                exchange_svc.NETWORK_ERROR_DETAIL,
+                correlation_id,
+                verification_id,
+                recoverable=True,
+            ),
+        )
     # Unified rejection gate: covers both ordinary validation failures
     # (not val.valid — e.g. AUTH_FAILED, PERMISSION_DENIED) and
     # NEW-C31-01: write-capable key scope violations that must be caught
@@ -1691,6 +2064,7 @@ async def process_key(
                     correlation_id,
                     verification_id,
                     recoverable=True,
+                    source_debug_context=val.debug_context,
                 ),
             )
 
@@ -1714,7 +2088,11 @@ async def process_key(
         return JSONResponse(
             status_code=403,
             content=_envelope_error(
-                _reject_code, val.human_message, correlation_id, verification_id
+                _reject_code,
+                val.human_message,
+                correlation_id,
+                verification_id,
+                source_debug_context=val.debug_context,
             ),
         )
 
@@ -1888,8 +2266,9 @@ async def process_key(
         },
     ).execute()
 
-    # reconstruct_positions (BACKBONE-09 wiring); persisted in P8.
-    await adapter.reconstruct_positions(trades)
+    # No reconstruct_positions call here (removed 2026-09-24): its result was
+    # discarded, never persisted, and its missing-mark warning misreported
+    # a diagnostic as understated equity. Same removal as long_fetch step 5.
 
     # Final transition
     supabase.rpc(

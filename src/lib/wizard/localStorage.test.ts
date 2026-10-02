@@ -1,6 +1,8 @@
 import { afterEach, describe, it, expect, beforeEach, vi } from "vitest";
 import {
   computeWizardHmac,
+  csvSubmissionFingerprint,
+  csvSubmissionSignature,
   deriveWizardResumeOverrides,
   formatSavedAt,
   loadWizardState,
@@ -28,9 +30,24 @@ import { UUID_RE } from "@/lib/utils";
 // silently re-introduce the trap.
 
 describe("deriveWizardResumeOverrides — pure LS-derivation helper", () => {
-  it("returns no overrides when loaded is null (SSR + fresh client)", () => {
+  it("returns no overrides when loaded is null AND there is no draft (SSR + fresh client)", () => {
     expect(deriveWizardResumeOverrides(null, "csv", null)).toEqual({});
-    expect(deriveWizardResumeOverrides(null, "api", "draft-1")).toEqual({});
+    expect(deriveWizardResumeOverrides(null, "api", null)).toEqual({});
+  });
+
+  // Phase 154 / WIZCONT-01. Previously this answered `{}`, so a server draft
+  // reached by a client with NO stored pointer — the ContributionWizardOverlay
+  // opening fresh, a second device, cleared storage, an expired tab nonce —
+  // mounted straight onto the draft's step with no banner: a silent resume.
+  // "The founder always chooses" is the CONTEXT.md lock, so an unpointed draft
+  // is offered exactly like a mismatched pointer.
+  it("offers the banner when a draft exists and there is NO local pointer at all", () => {
+    expect(deriveWizardResumeOverrides(null, "api", "draft-1")).toEqual({
+      showResumeBanner: true,
+    });
+    expect(deriveWizardResumeOverrides(null, "csv", "draft-1")).toEqual({
+      showResumeBanner: true,
+    });
   });
 
   describe("CSV branch", () => {
@@ -334,6 +351,201 @@ describe("deriveWizardResumeOverrides — pure LS-derivation helper", () => {
       expect(out.strategyName).toBe("Aurora Capital");
     });
   });
+
+  /**
+   * Phase 164.2.1 / SESSIONID-FENCE — the SECOND trigger the gate above
+   * anticipated. The same shared storage key that lets an abandoned API draft
+   * meet the CSV wizard also lets it meet the API wizard opened over a DIFFERENT
+   * key: the owner clicks "Finish setup →" on key B while key A's abandoned
+   * payload is still in localStorage, and key B's submission goes out carrying
+   * key A's idempotency token. `create-with-key` then takes 23505 on
+   * `strategies_user_wizard_session_source_uniq` — permanently, because the
+   * stored token is stable and Continue re-sends the same id.
+   *
+   * The guarantee is still that index. These pin the trigger's removal.
+   */
+  describe("same-key wizardSessionId gate (Phase 164.2.1 / SESSIONID-FENCE)", () => {
+    const abandonedDraftOnKeyA: WizardLocalState = {
+      strategyId: "draft-uuid",
+      wizardSessionId: "api-session-id",
+      step: "sync_preview",
+      savedAt: 1_700_000_000_000,
+      source: "api",
+      apiKeyId: "key-a",
+    };
+
+    it("does NOT lend key A's session id to a wizard opened over key B", () => {
+      const out = deriveWizardResumeOverrides(
+        abandonedDraftOnKeyA,
+        "api",
+        null,
+        "key-b",
+      );
+      expect(out.wizardSessionId).toBeUndefined();
+    });
+
+    it("DOES restore the session id when the incoming key is the one it was minted under", () => {
+      const out = deriveWizardResumeOverrides(
+        abandonedDraftOnKeyA,
+        "api",
+        null,
+        "key-a",
+      );
+      expect(out.wizardSessionId).toBe("api-session-id");
+    });
+
+    // ⭐ THE DELIBERATE INVERSION, and the case that catches a gate written to
+    // mirror the `?? "api"` back-compat idiom directly above it in the source.
+    // That idiom defaults an absent field to the COMMON case; here the
+    // defaulting population — every payload written before this phase shipped,
+    // none of which carries `apiKeyId` — is PRECISELY the set of drafts that
+    // carry the dead end. So absent means "cannot prove same key" and DECLINES
+    // (CONTEXT.md D-02). The cost is stated and accepted there: one lost token
+    // for pre-existing drafts, never the draft itself.
+    it("does NOT restore a LEGACY payload's session id (no apiKeyId) against a present incoming key", () => {
+      const legacyPayload: WizardLocalState = {
+        strategyId: "draft-uuid",
+        wizardSessionId: "legacy-session-id",
+        step: "sync_preview",
+        savedAt: 1_700_000_000_000,
+        source: "api",
+      };
+      const out = deriveWizardResumeOverrides(
+        legacyPayload,
+        "api",
+        null,
+        "key-b",
+      );
+      expect(out.wizardSessionId).toBeUndefined();
+    });
+
+    it("does NOT restore a payload whose stored key is null against a present incoming key", () => {
+      const out = deriveWizardResumeOverrides(
+        { ...abandonedDraftOnKeyA, apiKeyId: null },
+        "api",
+        null,
+        "key-b",
+      );
+      expect(out.wizardSessionId).toBeUndefined();
+    });
+
+    // The asymmetry, stated as its own pin: a caller that names no key makes no
+    // claim, so nothing may be declined. This is the CSV branch (there is no key
+    // on it at all), the manager route mounted with neither draft nor preselect,
+    // and every legacy three-argument caller in this file.
+    it("DOES restore when the caller names NO incoming key — no claim, nothing to compare", () => {
+      const out = deriveWizardResumeOverrides(
+        abandonedDraftOnKeyA,
+        "api",
+        null,
+        null,
+      );
+      expect(out.wizardSessionId).toBe("api-session-id");
+    });
+
+    // The gate must touch ONLY wizardSessionId (and the burn that rides with
+    // it). Same fence as the SEAMRIM suite above: `step`, `strategyName` and
+    // `showResumeBanner` have independent rules further down the source, and a
+    // clause written one line too high would swallow all three.
+    it("leaves step, strategyName and showResumeBanner exactly as the three-arg call returns them", () => {
+      const csvDraftOnKeyA: WizardLocalState = {
+        strategyId: "",
+        wizardSessionId: "csv-session-id",
+        step: "csv_upload",
+        savedAt: 1_700_000_000_000,
+        source: "csv",
+        strategyName: "Aurora Capital",
+        apiKeyId: "key-a",
+      };
+      const threeArg = deriveWizardResumeOverrides(
+        csvDraftOnKeyA,
+        "csv",
+        "draft-uuid",
+      );
+      const declined = deriveWizardResumeOverrides(
+        csvDraftOnKeyA,
+        "csv",
+        "draft-uuid",
+        "key-b",
+      );
+      // The three-arg call is the control: all three fields are non-trivially
+      // set, so "unchanged" is a claim with content.
+      expect(threeArg.wizardSessionId).toBe("csv-session-id");
+      expect(declined.wizardSessionId).toBeUndefined();
+      expect(declined.step).toBe(threeArg.step);
+      expect(declined.strategyName).toBe(threeArg.strategyName);
+      expect(declined.showResumeBanner).toBe(threeArg.showResumeBanner);
+    });
+
+    // RT-3's rule inherited for free by ANDing the key clause into the SAME
+    // `if`: a burn identifies which submission spent THAT session id, so it may
+    // never be re-seated without it.
+    it("does NOT restore the burn either when the key declines the session id", () => {
+      const burnedCsvDraftOnKeyA: WizardLocalState = {
+        strategyId: "",
+        wizardSessionId: "csv-session-id",
+        step: "csv_upload",
+        savedAt: 1_700_000_000_000,
+        source: "csv",
+        strategyName: "Aurora Capital",
+        failedCsvSubmitSig: "1k.deadbeefcafef00d",
+        apiKeyId: "key-a",
+      };
+      const out = deriveWizardResumeOverrides(
+        burnedCsvDraftOnKeyA,
+        "csv",
+        null,
+        "key-b",
+      );
+      expect(out.wizardSessionId).toBeUndefined();
+      expect(out.failedCsvSubmitSig).toBeUndefined();
+    });
+  });
+
+  /**
+   * RT-3 — the burn is restored WITH the session id it retired, or not at all.
+   * A burn without its session id would arm the re-mint against an id the burn
+   * never applied to; a session id without its burn is the pre-RT-3 hole.
+   */
+  describe("RT-3 burned csv-submit fingerprint", () => {
+    const burnedCsvDraft: WizardLocalState = {
+      strategyId: "",
+      wizardSessionId: "csv-session-id",
+      step: "csv_upload",
+      savedAt: 1_700_000_000_000,
+      source: "csv",
+      strategyName: "Aurora Capital",
+      failedCsvSubmitSig: "1k.deadbeefcafef00d",
+    };
+
+    it("restores the burn together with the CSV session id", () => {
+      const out = deriveWizardResumeOverrides(burnedCsvDraft, "csv", null);
+      expect(out.wizardSessionId).toBe("csv-session-id");
+      expect(out.failedCsvSubmitSig).toBe("1k.deadbeefcafef00d");
+    });
+
+    it("does NOT restore the burn when the session id is refused (cross-source)", () => {
+      // The CSV payload reaching the API wizard through the ONE shared storage
+      // key. The session id is already refused here; the burn must not sneak
+      // past on its own.
+      const out = deriveWizardResumeOverrides(burnedCsvDraft, "api", "draft-1");
+      expect(out.wizardSessionId).toBeUndefined();
+      expect(out.failedCsvSubmitSig).toBeUndefined();
+    });
+
+    it("does NOT emit a burn override when the payload carries none", () => {
+      const out = deriveWizardResumeOverrides(
+        { ...burnedCsvDraft, failedCsvSubmitSig: null },
+        "csv",
+        null,
+      );
+      expect(out.wizardSessionId).toBe("csv-session-id");
+      // Absence, not a falsy placeholder — WizardClient only re-seats its ref
+      // on a truthy override, and a "" would be indistinguishable from a burn
+      // of the empty submission.
+      expect("failedCsvSubmitSig" in out).toBe(false);
+    });
+  });
 });
 
 /**
@@ -407,6 +619,7 @@ describe("P473 — HMAC envelope tamper / replay defense", () => {
       strategyId: "00000000-0000-4000-8000-000000000001",
       wizardSessionId: "session-1",
       step: "sync_preview",
+      apiKeyId: null,
     });
 
     // Envelope-shape sanity: stored payload is an object with v/p/h.
@@ -431,6 +644,7 @@ describe("P473 — HMAC envelope tamper / replay defense", () => {
       strategyId: "00000000-0000-4000-8000-000000000aaa",
       wizardSessionId: "session-aaa",
       step: "sync_preview",
+      apiKeyId: null,
     });
 
     // Tamper: rewrite p to point at a different strategyId, keep h.
@@ -460,6 +674,7 @@ describe("P473 — HMAC envelope tamper / replay defense", () => {
       strategyId: "00000000-0000-4000-8000-000000000bbb",
       wizardSessionId: "session-bbb",
       step: "metadata",
+      apiKeyId: null,
     });
 
     // Simulate a new tab: a fresh sessionStorage nonce.
@@ -525,6 +740,7 @@ describe("P473 — HMAC envelope tamper / replay defense", () => {
       strategyId: "00000000-0000-4000-8000-000000000eee",
       wizardSessionId: "session-review",
       step: "review",
+      apiKeyId: null,
     });
     const loaded = await loadWizardState();
     expect(loaded).not.toBeNull();
@@ -538,6 +754,7 @@ describe("P473 — HMAC envelope tamper / replay defense", () => {
       step: "csv_review",
       source: "csv",
       strategyName: "Aurora Capital",
+      apiKeyId: null,
     });
     const loaded = await loadWizardState();
     expect(loaded).not.toBeNull();
@@ -557,6 +774,7 @@ describe("P473 — HMAC envelope tamper / replay defense", () => {
       // Cast through unknown: an attacker/old-code-written value the enum
       // does not know about.
       step: "not_a_real_step" as unknown as WizardLocalState["step"],
+      apiKeyId: null,
     });
     const loaded = await loadWizardState();
     expect(loaded).toBeNull();
@@ -580,6 +798,575 @@ describe("P473 — HMAC envelope tamper / replay defense", () => {
     const a = await computeWizardHmac("the-payload", "key-1");
     const b = await computeWizardHmac("the-payload", "key-2");
     expect(a).not.toBe(b);
+  });
+
+  /**
+   * RT-3 (v1.19 red team, Phase 146.1-07) — the burned CSV-submit fingerprint
+   * rides INSIDE the signed envelope.
+   *
+   * ⚠️ These pin the STORAGE CONTRACT only. The behavioural oracle — "after a
+   * reload, does a changed submission still re-mint?" — lives in
+   * `WizardClient.csv-burn-persistence.test.tsx`, because a field that
+   * round-trips but is read by nothing is a helper, not wiring.
+   *
+   * ⚠️ RT-3 is DEFENSE IN DEPTH. The operative fence is the server-side
+   * equality refusal at `csv-finalize/route.ts:820-863`.
+   */
+  describe("RT-3 — burned csv-submit fingerprint in the signed envelope", () => {
+    const BURN = "1k.deadbeefcafef00d";
+
+    it("round-trips the burn inside the signed payload (not a second key)", async () => {
+      await saveWizardState({
+        strategyId: "",
+        wizardSessionId: "session-burn",
+        step: "csv_submit",
+        source: "csv",
+        strategyName: "Alpha 2024",
+        failedCsvSubmitSig: BURN,
+        apiKeyId: null,
+      });
+
+      // ABSENCE assertion: exactly ONE localStorage key exists, and it is the
+      // signed envelope. A second, unsigned key would be tamperable — the whole
+      // reason the envelope is signed is that its contents steer behaviour.
+      expect(Object.keys(localStore)).toEqual(["quantalyze_wizard_state_v1"]);
+      // ...and the burn is not sitting at the envelope's top level either: it
+      // must be inside `p`, the string the HMAC actually covers.
+      const stored = JSON.parse(localStore["quantalyze_wizard_state_v1"]);
+      expect(Object.keys(stored).sort()).toEqual(["h", "p", "v"]);
+      expect(JSON.parse(stored.p).failedCsvSubmitSig).toBe(BURN);
+
+      const loaded = await loadWizardState();
+      expect(loaded?.failedCsvSubmitSig).toBe(BURN);
+    });
+
+    it("loads as null/absent when nothing was ever burned", async () => {
+      await saveWizardState({
+        strategyId: "",
+        wizardSessionId: "session-clean",
+        step: "csv_upload",
+        source: "csv",
+        strategyName: "Alpha 2024",
+        apiKeyId: null,
+      });
+      const loaded = await loadWizardState();
+      // Absence must be falsy so no downstream reader can mistake it for a burn.
+      expect(loaded?.failedCsvSubmitSig ?? null).toBeNull();
+    });
+
+    it("STICKY: a save that OMITS the field carries a live burn forward", async () => {
+      await saveWizardState({
+        strategyId: "",
+        wizardSessionId: "session-burn",
+        step: "csv_submit",
+        source: "csv",
+        strategyName: "Alpha 2024",
+        failedCsvSubmitSig: BURN,
+        apiKeyId: null,
+      });
+
+      // The shape of the eight CSV step-transition saves in WizardClient: they
+      // know nothing about the burn. Stepping back from csv_submit to change
+      // the file fires one of these — if it clobbered the burn, the fence would
+      // be disarmed by the very navigation that precedes the re-upload.
+      await saveWizardState({
+        strategyId: "",
+        wizardSessionId: "session-burn",
+        step: "csv_review",
+        source: "csv",
+        strategyName: "Alpha 2024",
+        apiKeyId: null,
+      });
+
+      const loaded = await loadWizardState();
+      expect(loaded?.step).toBe("csv_review");
+      expect(loaded?.failedCsvSubmitSig).toBe(BURN);
+    });
+
+    it("an EXPLICIT null clears the burn (a resubmit is not blocked forever)", async () => {
+      await saveWizardState({
+        strategyId: "",
+        wizardSessionId: "session-burn",
+        step: "csv_submit",
+        source: "csv",
+        strategyName: "Alpha 2024",
+        failedCsvSubmitSig: BURN,
+        apiKeyId: null,
+      });
+      await saveWizardState({
+        strategyId: "",
+        wizardSessionId: "session-fresh",
+        step: "csv_preview",
+        source: "csv",
+        strategyName: "Alpha 2025",
+        failedCsvSubmitSig: null,
+        apiKeyId: null,
+      });
+
+      const loaded = await loadWizardState();
+      expect(loaded?.failedCsvSubmitSig ?? null).toBeNull();
+    });
+
+    it("a TAMPERED burn fails verification instead of taking effect", async () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      await saveWizardState({
+        strategyId: "",
+        wizardSessionId: "session-burn",
+        step: "csv_submit",
+        source: "csv",
+        strategyName: "Alpha 2024",
+        failedCsvSubmitSig: BURN,
+        apiKeyId: null,
+      });
+
+      // Rewrite the burn in place, keeping the original h.
+      const envelope = JSON.parse(localStore["quantalyze_wizard_state_v1"]);
+      localStore["quantalyze_wizard_state_v1"] = JSON.stringify({
+        ...envelope,
+        p: JSON.stringify({
+          ...JSON.parse(envelope.p),
+          failedCsvSubmitSig: "1k.0000000000000000",
+        }),
+      });
+
+      // Not "the tampered burn is ignored" — the WHOLE payload is refused.
+      expect(await loadWizardState()).toBeNull();
+      expect(
+        warn.mock.calls.some((args) =>
+          String(args[0]).includes("localStorage_signature_mismatch"),
+        ),
+      ).toBe(true);
+      warn.mockRestore();
+    });
+
+    it("refuses a payload whose burn exceeds the length bound", async () => {
+      // A validly-SIGNED envelope carrying an over-long burn — the shape a
+      // same-tab script could write. The bound is what keeps the megabyte-scale
+      // series (deliberately never persisted) out of this envelope.
+      const payloadJson = JSON.stringify({
+        strategyId: "",
+        wizardSessionId: "session-burn",
+        step: "csv_submit",
+        savedAt: Date.now(),
+        source: "csv",
+        failedCsvSubmitSig: "x".repeat(65),
+      });
+      const nonce = sessionStore["quantalyze_wizard_signing_nonce_v1"] ?? "n";
+      sessionStore["quantalyze_wizard_signing_nonce_v1"] = nonce.padEnd(32, "0");
+      const h = await computeWizardHmac(
+        payloadJson,
+        sessionStore["quantalyze_wizard_signing_nonce_v1"],
+      );
+      localStore["quantalyze_wizard_state_v1"] = JSON.stringify({
+        v: 2,
+        p: payloadJson,
+        h,
+      });
+
+      expect(await loadWizardState()).toBeNull();
+    });
+
+    it("a burn just inside the bound is accepted (the guard is not blanket)", async () => {
+      const payloadJson = JSON.stringify({
+        strategyId: "",
+        wizardSessionId: "session-burn",
+        step: "csv_submit",
+        savedAt: Date.now(),
+        source: "csv",
+        failedCsvSubmitSig: "x".repeat(64),
+      });
+      const nonce = sessionStore["quantalyze_wizard_signing_nonce_v1"] ?? "n";
+      sessionStore["quantalyze_wizard_signing_nonce_v1"] = nonce.padEnd(32, "0");
+      const h = await computeWizardHmac(
+        payloadJson,
+        sessionStore["quantalyze_wizard_signing_nonce_v1"],
+      );
+      localStore["quantalyze_wizard_state_v1"] = JSON.stringify({
+        v: 2,
+        p: payloadJson,
+        h,
+      });
+
+      expect((await loadWizardState())?.failedCsvSubmitSig).toBe("x".repeat(64));
+    });
+  });
+
+  /**
+   * Phase 164.2.1 / SESSIONID-FENCE — the key the draft was built over, in the
+   * signed envelope. The gate that reads it is pinned on the pure helper above;
+   * these pin that the field SURVIVES a real save/load, because a gate reading a
+   * field the writer never persisted would decline every restore and look like a
+   * working fence.
+   */
+  describe("164.2.1 — apiKeyId in the signed envelope", () => {
+    it("round-trips a stored key through save/load", async () => {
+      await saveWizardState({
+        strategyId: "00000000-0000-4000-8000-00000000000a",
+        wizardSessionId: "session-key-a",
+        step: "sync_preview",
+        source: "api",
+        apiKeyId: "key-a",
+      });
+      // Inside `p` — the string the HMAC covers — not beside it, where a
+      // same-tab script could rewrite which key a token belongs to.
+      const stored = JSON.parse(localStore["quantalyze_wizard_state_v1"]);
+      expect(JSON.parse(stored.p).apiKeyId).toBe("key-a");
+      expect((await loadWizardState())?.apiKeyId).toBe("key-a");
+    });
+
+    // ⛔ THE CSV HAZARD. THIRTEEN of the fourteen save sites are CSV-branch and
+    // write the literal `apiKeyId: null` (the branch has no key at all); the
+    // fourteenth, `persistPointer`, is the one API-branch writer. A
+    // validator written like `source`'s — present ⇒ must be a string — would
+    // refuse EVERY CSV payload, and the whole CSV wizard would silently lose its
+    // resume. Null is a legal value, not a malformed one.
+    it("ACCEPTS an explicit null and still loads the payload (the CSV branch writes null)", async () => {
+      await saveWizardState({
+        strategyId: "",
+        wizardSessionId: "session-csv",
+        step: "csv_upload",
+        source: "csv",
+        strategyName: "Alpha 2024",
+        apiKeyId: null,
+      });
+      const loaded = await loadWizardState();
+      expect(loaded).not.toBeNull();
+      expect(loaded?.wizardSessionId).toBe("session-csv");
+      expect(loaded?.apiKeyId).toBeNull();
+    });
+
+    it("loads a payload that OMITS the field, with the field still absent (the pre-164.2.1 shape)", async () => {
+      await saveWizardState({
+        strategyId: "00000000-0000-4000-8000-00000000000b",
+        wizardSessionId: "session-legacy",
+        step: "sync_preview",
+        source: "api",
+        // ⛔ `undefined`, NOT `null`: this pin's whole subject is the pre-164.2.1
+        // payload shape, and `null` is a payload that DOES make a key claim — it
+        // would serialise the field and the assertion below would be pinning a
+        // different thing than its name says. `WizardSaveInput` makes the property
+        // REQUIRED so no save site can forget it; `undefined` is how a caller says
+        // "this payload makes no key claim" out loud, and `JSON.stringify` then drops
+        // it, reproducing the legacy bytes byte-for-byte.
+        apiKeyId: undefined,
+      });
+      const loaded = await loadWizardState();
+      expect(loaded).not.toBeNull();
+      // Absent, not null: `JSON.stringify` drops `undefined`, and the gate
+      // distinguishes the two nowhere — both mean "cannot prove same key".
+      expect(loaded && "apiKeyId" in loaded).toBe(false);
+    });
+
+    it("refuses a validly-SIGNED payload whose apiKeyId is not a string", async () => {
+      // Hand-forged so the bad value gets past the signature — the shape a
+      // same-tab script could write. Reaching the gate with a number would make
+      // `stored === incoming` answer on a type the contract never admits.
+      const payloadJson = JSON.stringify({
+        strategyId: "00000000-0000-4000-8000-00000000000c",
+        wizardSessionId: "session-forged",
+        step: "sync_preview",
+        savedAt: Date.now(),
+        source: "api",
+        apiKeyId: 42,
+      });
+      const nonce = sessionStore["quantalyze_wizard_signing_nonce_v1"] ?? "n";
+      sessionStore["quantalyze_wizard_signing_nonce_v1"] = nonce.padEnd(32, "0");
+      const h = await computeWizardHmac(
+        payloadJson,
+        sessionStore["quantalyze_wizard_signing_nonce_v1"],
+      );
+      localStore["quantalyze_wizard_state_v1"] = JSON.stringify({
+        v: 2,
+        p: payloadJson,
+        h,
+      });
+
+      expect(await loadWizardState()).toBeNull();
+    });
+
+    it("refuses a payload whose apiKeyId exceeds the length bound", async () => {
+      const payloadJson = JSON.stringify({
+        strategyId: "00000000-0000-4000-8000-00000000000d",
+        wizardSessionId: "session-long-key",
+        step: "sync_preview",
+        savedAt: Date.now(),
+        source: "api",
+        apiKeyId: "x".repeat(65),
+      });
+      const nonce = sessionStore["quantalyze_wizard_signing_nonce_v1"] ?? "n";
+      sessionStore["quantalyze_wizard_signing_nonce_v1"] = nonce.padEnd(32, "0");
+      const h = await computeWizardHmac(
+        payloadJson,
+        sessionStore["quantalyze_wizard_signing_nonce_v1"],
+      );
+      localStore["quantalyze_wizard_state_v1"] = JSON.stringify({
+        v: 2,
+        p: payloadJson,
+        h,
+      });
+
+      expect(await loadWizardState()).toBeNull();
+    });
+
+    it("a key just inside the bound is accepted (the guard is not blanket)", async () => {
+      const payloadJson = JSON.stringify({
+        strategyId: "00000000-0000-4000-8000-00000000000e",
+        wizardSessionId: "session-bound-key",
+        step: "sync_preview",
+        savedAt: Date.now(),
+        source: "api",
+        apiKeyId: "x".repeat(64),
+      });
+      const nonce = sessionStore["quantalyze_wizard_signing_nonce_v1"] ?? "n";
+      sessionStore["quantalyze_wizard_signing_nonce_v1"] = nonce.padEnd(32, "0");
+      const h = await computeWizardHmac(
+        payloadJson,
+        sessionStore["quantalyze_wizard_signing_nonce_v1"],
+      );
+      localStore["quantalyze_wizard_state_v1"] = JSON.stringify({
+        v: 2,
+        p: payloadJson,
+        h,
+      });
+
+      expect((await loadWizardState())?.apiKeyId).toBe("x".repeat(64));
+    });
+
+    /**
+     * IN-02, READ LAYER — the EMPTY STRING is refused, and it is a real value
+     * rather than a hypothetical: `MultiKeyConnectStep`'s composite success
+     * shape coalesces a null member key to `""` (`apiKeyId: first.apiKeyId ?? ""`),
+     * and that payload is what the one API-branch writer receives.
+     *
+     * `""` satisfies every OTHER clause of this arm — it is a string, and 0 is
+     * within the bound — so without the length check the validator would ADMIT a
+     * value outside the field's own documented domain (an `api_keys.id` or
+     * `null`, never the empty string), and `sessionKeyMatches` would then compare
+     * it against a present incoming key as if it were one.
+     *
+     * ⚠️ TWO LAYERS, PINNED SEPARATELY AND ON PURPOSE. `persistPointer` also
+     * normalises `""` away at the WRITER, and that pin lives in
+     * `ContributionWizardOverlay.sessionid-fence.test.tsx`, asserting on the
+     * bytes it writes without ever calling `loadWizardState`. This one asserts
+     * the READ refusal, so it holds for a payload the writer never produced — a
+     * future writer's, or a same-tab script's. Neither test can pass for the
+     * other's reason.
+     *
+     * The save goes through the REAL writer (which does not validate on write),
+     * so the stored bytes genuinely carry `""` rather than being hand-forged.
+     */
+    it("refuses a payload whose apiKeyId is the EMPTY STRING (outside the field's domain)", async () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      await saveWizardState({
+        strategyId: "00000000-0000-4000-8000-00000000000f",
+        wizardSessionId: "session-empty-key",
+        step: "sync_preview",
+        source: "api",
+        apiKeyId: "",
+      });
+      // The empty string really did reach the signed envelope — otherwise this
+      // would be pinning a write-side normalisation that does not live here.
+      const stored = JSON.parse(localStore["quantalyze_wizard_state_v1"]);
+      expect(JSON.parse(stored.p).apiKeyId).toBe("");
+
+      expect(await loadWizardState()).toBeNull();
+      expect(
+        warn.mock.calls.some((args) =>
+          String(args[0]).includes("localStorage_payload_refused: apiKeyId"),
+        ),
+        "The payload was refused without naming the offending field, so the " +
+          "refusal is indistinguishable from a tamper/nonce failure in a console.",
+      ).toBe(true);
+      warn.mockRestore();
+    });
+
+    it("a ONE-character key is accepted (the empty-string guard is not a blanket)", async () => {
+      // The lower-end bracket for the arm above, mirroring the upper-end
+      // "just inside the bound" case: without it, a guard that refused EVERY
+      // present key would pass the empty-string test for the wrong reason.
+      await saveWizardState({
+        strategyId: "00000000-0000-4000-8000-000000000010",
+        wizardSessionId: "session-short-key",
+        step: "sync_preview",
+        source: "api",
+        apiKeyId: "k",
+      });
+      expect((await loadWizardState())?.apiKeyId).toBe("k");
+    });
+  });
+});
+
+/**
+ * RT-3 — `csvSubmissionFingerprint` is what the fence compares. It must be
+ * SENSITIVE to any real edit and INSENSITIVE to array identity, and it must
+ * stay bounded no matter how large the series is (the raw signature it digests
+ * serialises the whole return series, which this envelope must never carry).
+ */
+describe("csvSubmissionFingerprint — bounded CSV submission fingerprint", () => {
+  const SERIES_A = [
+    { date: "2024-01-01", daily_return: 0.01 },
+    { date: "2024-01-02", daily_return: -0.02 },
+  ];
+  // RANK-08 — classification is held CONSTANT across every pair below so each
+  // test still isolates the field it names (name / series / boundedness).
+  const CAT = "11111111-1111-4111-8111-111111111111";
+  const ASSET = "traditional";
+
+  it("is stable for an equal-but-new-reference series (a re-upload must not mint)", () => {
+    expect(csvSubmissionFingerprint("Alpha", SERIES_A, CAT, ASSET)).toBe(
+      csvSubmissionFingerprint(
+        "Alpha",
+        [
+          { date: "2024-01-01", daily_return: 0.01 },
+          { date: "2024-01-02", daily_return: -0.02 },
+        ],
+        CAT,
+        ASSET,
+      ),
+    );
+  });
+
+  it("changes when the name changes", () => {
+    expect(csvSubmissionFingerprint("Alpha", SERIES_A, CAT, ASSET)).not.toBe(
+      csvSubmissionFingerprint("Alpha 2025", SERIES_A, CAT, ASSET),
+    );
+  });
+
+  it("changes on an INTERIOR edit that leaves count and boundary dates equal", () => {
+    // The exact case the server's boundary-only echo cannot see (C1 residual) —
+    // the client fence must at least not be blind to it as well.
+    const interiorEdit = [
+      { date: "2024-01-01", daily_return: 0.01 },
+      { date: "2024-01-02", daily_return: -0.03 },
+    ];
+    expect(csvSubmissionFingerprint("Alpha", SERIES_A, CAT, ASSET)).not.toBe(
+      csvSubmissionFingerprint("Alpha", interiorEdit, CAT, ASSET),
+    );
+  });
+
+  it("changes when a row is appended", () => {
+    expect(csvSubmissionFingerprint("Alpha", SERIES_A, CAT, ASSET)).not.toBe(
+      csvSubmissionFingerprint(
+        "Alpha",
+        [...SERIES_A, { date: "2024-01-03", daily_return: 0.03 }],
+        CAT,
+        ASSET,
+      ),
+    );
+  });
+
+  it("distinguishes an undefined series from an empty one only via the raw signature's shape", () => {
+    // Both serialise to the same rows string by design (`series ?? []`), so the
+    // fingerprint agreeing here is the DOCUMENTED behaviour, not a collision.
+    expect(csvSubmissionFingerprint("Alpha", undefined, CAT, ASSET)).toBe(
+      csvSubmissionFingerprint("Alpha", [], CAT, ASSET),
+    );
+  });
+
+  it("stays inside the persisted length bound for a 20-year daily series", () => {
+    // ~5,000 rows — a raw signature of ~130KB. The persisted field must not
+    // grow with the series; that is the whole reason a fingerprint exists.
+    const big = Array.from({ length: 5000 }, (_, i) => ({
+      date: `20${String(10 + Math.floor(i / 365)).padStart(2, "0")}-01-01`,
+      daily_return: i / 100000,
+    }));
+    const fingerprint = csvSubmissionFingerprint("Alpha", big, CAT, ASSET);
+    expect(fingerprint.length).toBeLessThanOrEqual(64);
+    // And it is not vacuously constant: a one-row change still moves it.
+    const nudged = [...big.slice(0, 4999), { date: "2029-01-01", daily_return: 9.9 }];
+    expect(csvSubmissionFingerprint("Alpha", nudged, CAT, ASSET)).not.toBe(
+      fingerprint,
+    );
+  });
+});
+
+/**
+ * RANK-08 (Phase 159-07, decision D-05 default arm) — CLASSIFICATION IS PART OF
+ * THE SUBMISSION'S IDENTITY.
+ *
+ * The 146.2 classification-conflict 409 refuses a resubmit whose classification
+ * disagrees with the one already committed against this `wizard_session_id`.
+ * Its remedy is "change the classification and resubmit" — but a fingerprint
+ * blind to classification reports NO material change, so the burn is never
+ * retired, the spent session id is replayed, and the user takes the same 409
+ * forever. Including `category_id` / `asset_class` in the signature is what
+ * makes that remedy reachable.
+ *
+ * The other half of the invariant is the negative control: a TRUE duplicate
+ * (same name, same series, same classification) must still produce the SAME
+ * fingerprint, so the widening cannot free real duplicates past the fence.
+ */
+describe("csvSubmissionSignature/Fingerprint — classification (RANK-08)", () => {
+  const SERIES = [
+    { date: "2024-01-01", daily_return: 0.01 },
+    { date: "2024-01-02", daily_return: -0.02 },
+  ];
+  const CAT_A = "11111111-1111-4111-8111-111111111111";
+  const CAT_B = "22222222-2222-4222-8222-222222222222";
+
+  it("changes when ONLY the category changes (the 409's remedy re-mints)", () => {
+    expect(
+      csvSubmissionFingerprint("Alpha", SERIES, CAT_A, "traditional"),
+    ).not.toBe(csvSubmissionFingerprint("Alpha", SERIES, CAT_B, "traditional"));
+  });
+
+  it("is IDENTICAL for a true duplicate — same name, series AND classification", () => {
+    // The burn fence still blocks the genuine repeat the idempotent 200 arm
+    // serves: widening the signature must not free real duplicates.
+    expect(csvSubmissionFingerprint("Alpha", SERIES, CAT_A, "crypto")).toBe(
+      csvSubmissionFingerprint(
+        "Alpha",
+        [
+          { date: "2024-01-01", daily_return: 0.01 },
+          { date: "2024-01-02", daily_return: -0.02 },
+        ],
+        CAT_A,
+        "crypto",
+      ),
+    );
+  });
+
+  it("changes when ONLY the asset class changes", () => {
+    // #597 — asset_class drives annualization (√365 crypto / √252 traditional),
+    // so it is a genuinely different submission, not a cosmetic edit.
+    expect(csvSubmissionFingerprint("Alpha", SERIES, CAT_A, "traditional")).not.toBe(
+      csvSubmissionFingerprint("Alpha", SERIES, CAT_A, "crypto"),
+    );
+  });
+
+  it("keeps every field boundary unambiguous across the two NEW fields", () => {
+    // Without the NUL separators these pairs would concatenate identically —
+    // the same guarantee the original name/rows boundary already carries.
+    expect(csvSubmissionSignature("N", [], "a", "bc")).not.toBe(
+      csvSubmissionSignature("N", [], "ab", "c"),
+    );
+    expect(csvSubmissionSignature("N", [], "", "a")).not.toBe(
+      csvSubmissionSignature("N", [], "a", ""),
+    );
+    // ...and a name that ends where the rows field begins still cannot collide.
+    expect(csvSubmissionSignature("N", [], "a", null)).not.toBe(
+      csvSubmissionSignature("N\u0000", [], "a", null),
+    );
+  });
+
+  it("serialises a null classification to a PINNED sentinel, distinct from '' and from 'null'", () => {
+    // The exact serialisation is pinned so a future edit cannot silently swap
+    // the sentinel and invalidate every persisted burn.
+    expect(csvSubmissionSignature("N", [], null, null)).toBe(
+      "N\u0000\u0000\u0001\u0000\u0001",
+    );
+    // Deterministic across calls.
+    expect(csvSubmissionFingerprint("N", [], null, null)).toBe(
+      csvSubmissionFingerprint("N", [], null, null),
+    );
+    // A real value that merely LOOKS empty/null is a DIFFERENT submission —
+    // the sentinel must not be reachable by user input.
+    expect(csvSubmissionFingerprint("N", [], null, null)).not.toBe(
+      csvSubmissionFingerprint("N", [], "", ""),
+    );
+    expect(csvSubmissionFingerprint("N", [], null, null)).not.toBe(
+      csvSubmissionFingerprint("N", [], "null", "null"),
+    );
   });
 });
 

@@ -46,12 +46,51 @@ merge *is* the apply.
   up talking to an old prod schema (`PGRST204`) while every dashboard stays
   green. A manual `workflow_dispatch` on an unconfigured clone still skips
   tolerantly. See [`docs/runbooks/migration-failure.md`](docs/runbooks/migration-failure.md).
-- **Behavioural SQL gates run in the `sql-tests` CI job**, which shares the
-  repo-wide `shared-test-db` concurrency group with `python` and `e2e-seeded`
-  and is ordered behind `python`. That ordering is not a preference: the group
-  holds exactly one pending slot, so a third simultaneous arrival cancels a
-  pending gate — which renders grey, not red. Do not remove the `needs: python`,
-  and do not give the job its own group name; the ⛔ comments in `ci.yml` say why.
+- **Behavioural SQL gates run in the `sql-tests` CI job**, which serializes
+  with `python` and `e2e-seeded` through a Postgres session advisory lock on
+  the TEST project (key 61616158, the "Acquire shared-test-db mutex" step —
+  Phase 158). Serialization lasts only as long as the holder session does —
+  the session must zero `statement_timeout` first, or TEST's server-wide
+  120 s statement kill ends it mid-job ([158-MUTEX-01], runbook §2).
+  The old repo-wide `shared-test-db` **concurrency group is gone**:
+  it held exactly one pending slot, so a PR opening mid-run could evict a
+  queued main-branch run, conclude main CI `cancelled`, and silently skip the
+  Railway deploy (issue #616). `sql-tests` is still ordered behind `python`
+  (`needs: python` is kept) and now gates the `frontend` aggregator. Do not
+  reintroduce a job-level concurrency group for these jobs; the ⛔ comments in
+  `ci.yml` and
+  [`docs/runbooks/shared-test-db-mutex.md`](docs/runbooks/shared-test-db-mutex.md)
+  say why.
+- **⭐ There are TWO shared-TEST advisory keys, and a job adding DB work needs
+  both.** (1) The **mutual-exclusion key `61616158`** above — its unit is *the
+  shared TEST database*, and contenders BLOCK on it. (2) The
+  **schema-apply-in-flight FLAG**, `SHARED_TEST_SCHEMA_APPLY_INFLIGHT_KEY` in
+  [`scripts/shared-test-db-keys.sh`](scripts/shared-test-db-keys.sh) — its unit
+  is *"a schema apply against this project is in flight"*. ⛔ **The second is a
+  FLAG, not a lock: nothing blocks on it.** It is held by the two schema WRITERS
+  (`apply-test` in `supabase-migrate.yml`, `restore` in
+  `test-restore-from-baseline.yml`) and READ, non-blockingly, by the readers.
+  ⛔ Cite it BY SYMBOL, never by value — it is written once, in that script.
+  A mutex says two holders never overlap; it says nothing about which goes
+  FIRST, so on a merge push the three reader jobs also run
+  `Wait for the TEST schema apply to conclude (merge pushes only)`
+  ([`scripts/wait-for-test-schema-apply.sh`](scripts/wait-for-test-schema-apply.sh))
+  IMMEDIATELY BEFORE their acquire step — never while holding the key, which
+  would starve the apply they are waiting for. Its three outcomes
+  (`apply-concluded`, `no-apply-run`, `wait-exhausted`) and what to do about
+  each are in runbook §7.
+- **⛔ A migration that adds a column the frontend already `SELECT`s must be
+  applied to prod BEFORE the deployment that reads it.** The auto-apply and the
+  Vercel build both fire on the same merge with **no ordering between them**, so
+  "they land together" is not "they land in order". If the deployment wins,
+  PostgREST answers `42703` / `PGRST204` for the duration — and a route that
+  fails CLOSED on an unreadable shape (the correct posture for a security read)
+  turns that window into a full outage of that path, not a degraded one.
+  Procedure: apply the migration first (Supabase MCP `apply_migration` or
+  `supabase db push`), confirm the `Supabase Migrate` run is green, **then**
+  merge/promote. Worked example and the exact blast radius:
+  `20260811210000_api_keys_attested_venue.sql`, whose header carries the same
+  warning (Phase 153.6 WR-03 / MIG-03).
 - The **test project lags prod** (it is not on the auto-apply path — that
   workflow writes only to the prod ref). A PR that adds a column the frontend
   `SELECT`s can fail the e2e gate with "column does not exist" because e2e runs
@@ -63,8 +102,11 @@ merge *is* the apply.
 
 Merging an `analytics-service/**` change does **not** guarantee a Railway
 deploy. Railway **skips** the deploy when the `main` CI check-suite is red
-(`skippedReason="CI check suite failed"`), with no alert. If a fix seems not to
-have shipped:
+(`skippedReason="CI check suite failed"`), with no alert for a red run. When a
+main run concludes **`cancelled`**, the `main-ci-cancelled-watcher` workflow
+(Phase 158) files a dedup'd `main-ci-cancelled` issue — triage via
+[`docs/runbooks/shared-test-db-mutex.md`](docs/runbooks/shared-test-db-mutex.md)
+§6. If a fix seems not to have shipped:
 
 ```bash
 railway deployment list      # check whether the deploy ran
@@ -72,8 +114,15 @@ railway deployment list      # check whether the deploy ran
 railway up                   # force a deploy
 ```
 
-The `/health` endpoint reports worker-tick liveness only (no deployed git SHA),
-so "is prod running main HEAD?" is not machine-checkable today.
+The `/health` endpoint reports worker-tick liveness and the deployed `git_sha`,
+so "is prod running main HEAD?" is machine-checkable:
+`curl .../health | jq -r .git_sha`. The `analytics-deploy-verify` workflow
+checks it on a 6h schedule. ⭐ CHANGED 2026-09-19: it READS ONCE and does not
+poll. A commit younger than 900 s is treated as still in flight and files
+nothing; the 6h schedule is the retry. 📜 It used to poll for 4800 s (Phase 158),
+sized for post-mutex CI queue depth — but that loop held the job's check suite
+open on main HEAD, and Railway waits on the whole suite, so the probe became a
+deploy-hold. ⛔ Do not reintroduce polling there.
 
 ## Invariants that break CI or prod
 
@@ -84,6 +133,13 @@ so "is prod running main HEAD?" is not machine-checkable today.
 - **Railway one-off scripts use `SUPABASE_SERVICE_KEY`** (not
   `SUPABASE_SERVICE_ROLE_KEY`). Run prod backfills/one-offs via:
   `railway ssh "cd /app && python -m scripts.<name>"`.
+- **Never point a local analytics-service run at the prod Supabase project.** Both
+  `uvicorn main:app` and `python -m main_worker` start job-claiming worker loops, so a
+  laptop aimed at prod claims real `compute_jobs` and strands them as orphaned `running`
+  rows when you Ctrl-C. Local env loads `analytics-service/.env.qa-local` (TEST) before
+  `.env`, and startup refuses outright when `SUPABASE_URL` names the prod project off
+  Railway. `ALLOW_PROD_WORKER_OFF_PLATFORM=1` is the deliberate escape hatch for a
+  sanctioned emergency run.
 - **Never commit a recorded VCR cassette** that contains a real
   `DEBUG_KEY_FLOW_*` value or a high-entropy literal in a signing-key field —
   `scripts/repro-key-flow.sh` exits non-zero on either, and the secret-scan CI

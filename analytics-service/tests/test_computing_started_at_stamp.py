@@ -610,23 +610,93 @@ def test_python_writer_census_counts() -> None:
     """Anti-vacuity. EXACT literal counts so a NEW writer forces a conscious update
     of this census rather than sliding in under a green gate.
 
-    Census (verified 2026-08-02 against the post-142-01/142-02 tree):
-      * 13 status-writing dicts — 7 in ``analytics_runner.py`` (1 entry + 5 exits
-        + the D-02/R2 schema-cache-miss re-issue in ``_mark_unrecoverable``) and 6
-        in ``job_worker.py`` (5 terminal 'failed' + the composite success
-        headline). A would-be 14th, ``scripts/reset_stuck_computing_rows.py``, is
-        GONE: plan 142-02 deleted that broken one-off, which is why plan 142-03
+    Census (re-measured 2026-08-25 against the post-161.1-CR-02 tree):
+      ⬆️ **+1 on 2026-08-25 (Phase 161.1 / F3).** ``analytics_runner`` went from 7
+        to 8 with ``_restore_publish_state_on_abort``. It is a genuine new EXIT
+        writer, not a carve-out: the worker's per-job budget is
+        ``asyncio.wait_for``, whose expiry cancels the handler with
+        ``CancelledError`` — a **BaseException** that none of the five guarded
+        ``except Exception`` stamps can see. Before it, a marked refresh killed by
+        the budget left ``_mark_computing``'s 'computing' standing, the SQL bridge
+        read that non-published status, refused to protect the row and wrote
+        'failed', and the live factsheet went dark on a recurring unattended job.
+        The new arm restores the pre-refresh publish state and, like every exit
+        here, clears ``computing_started_at`` to None. Its status value is bound to
+        a local (``_restored_status``) rather than written as a
+        ``_publish_snapshot[...]`` subscript SPECIFICALLY so this census can
+        classify it — measured: the subscript spelling reddened the value-form arm
+        of :func:`test_python_status_writers_stamp_and_clear`, which is that gate
+        working as designed. It resolved through the direct-literal arm, so
+        ``EXPECTED_KEPT_VIA_N1`` was unchanged.
+        ⬆️ **+4 on 2026-09-06 (Phase 164.2 plan 08).** ``EXPECTED_KEPT_VIA_N1``
+        went 7 → 11 and NOTHING moved kept→skipped. Four payloads that used to be
+        written INLINE inside their ``upsert()`` call are now BOUND to a local
+        first — ``analytics_runner._upsert_restore`` and ``job_worker``'s
+        ``_mark_analytics_failed``, ``run_derive_broker_dailies_job._upsert`` and
+        ``run_stitch_composite_job._upsert`` — so they resolve through the n1
+        ``ast.Name`` arm like the rest rather than through the direct-literal
+        arm. The binding is required, not cosmetic:
+        ``services/strategy_analytics_provenance.upsert_or_drop_provenance`` must
+        be able to POP the two ``computation_error_*`` marker keys out of that
+        exact dict and re-issue it if the database refuses them (TODOS
+        ``[PROV-WRITER-23514]``), and an inline literal is not a thing the retry
+        can reach. Each site is still ONE readable literal at ONE call site,
+        which is all this census asks of it — 11 of the 12 kept payloads now
+        resolve via n1, the twelfth being ``_mark_computing``, the sole entry
+        writer, which is untouched by that plan.
+      * 12 status-writing dicts — 8 in ``analytics_runner.py`` (1 entry + 6 exits
+        + the D-02/R2 schema-cache-miss re-issue in ``_mark_unrecoverable``) and 4
+        in ``job_worker.py`` (3 terminal 'failed' + the composite success
+        headline).
+        ⬇️ **−3 on 2026-08-25 (Phase 161.1 / CR-02).** ``job_worker.py`` went from
+        7 to 4, and NOT because any exit was deleted. ``run_derive_broker_dailies_
+        job`` carried FOUR byte-identical copies of the terminal-'failed' payload
+        (``_dispose_broker_nav_error``, ``_mark_insufficient``,
+        ``_stamp_verdict_failed`` and the guarded
+        ``_stamp_strategy_analytics_failed``), and the D-15 non-destructive guard
+        was on exactly one of them — so a recurring maintenance refresh could
+        un-publish a funded account through any of the other three, and
+        ``_mark_insufficient`` additionally DELETED both persisted basis-series
+        rows. The three now route through the single guarded closure. The exits
+        still exist; they no longer each own a payload.
+        ⚠️ Do NOT "restore" this to 7 by giving a site its own payload again.
+        ``tests/test_ledger_refresh_publish_guard.py`` asserts the one-choke-point
+        invariant directly and reddens first if it is broken.
+        ⚠️ The 7 in ``analytics_runner.py`` are unchanged in COUNT but each
+        terminal payload is now bound to a local and passed through
+        ``_guard_failure_payload_inplace`` before the upsert (Phase 161.1 /
+        CR-03). That guard is an in-place mutator precisely so these stay dict
+        literals this census can read — a pure-function wrapper made all five
+        unreadable and dropped the exempt count to 0.
+        A would-be extra one, ``scripts/reset_stuck_computing_rows.py``,
+        is GONE: plan 142-02 deleted that broken one-off, which is why plan 142-03
         depends on it.
+        ⬆️ **+1 on 2026-08-03 (plan 142.2-05, MT5-12).** The sixth job_worker
+        terminal 'failed' is the series-completeness VERDICT refusal at the derive
+        persist seam (``run_derive_broker_dailies_job``). It is a genuine new
+        terminal exit — a producer that ships a daily series without stating
+        whether its venue inputs were whole is refused PERMANENTLY, before the
+        reconcile DELETE — so it carries the full companion set
+        (``computing_started_at: None``, ``computation_warned: False``,
+        ``metrics_json_by_basis: None``) exactly like its five siblings. Counted,
+        not carved out.
         ⚠️ The re-issue payload is the ONE terminal dict that omits the stamp
         key. It is not silently tolerated — it is carved out by shape and pinned
         at ``EXPECTED_STAMP_OMISSION_EXEMPT``, asserted in
         :func:`test_python_status_writers_stamp_and_clear`.
-      * 2 of those 12 are reached ONLY through the n1 ``ast.Name`` arm — the
-        ``payload`` bound in ``analytics_runner._mark_complete`` and the
+      * 7 of those 11 are reached ONLY through the n1 ``ast.Name`` arm — the
+        ``payload`` bound in ``analytics_runner._mark_complete``, the
         ``headline_payload`` bound in the OUTER ``run_stitch_composite_job`` body but
-        upserted inside the NESTED ``_write_headline_and_by_basis``. This count is
-        the n1 liveness proof: chain-scoping alone would silently DROP both and still
-        report a plausible-looking total of 10.
+        upserted inside the NESTED ``_write_headline_and_by_basis``, and (⬆️ **+5 on
+        2026-08-25, Phase 161.1 / CR-03**) the five ``analytics_runner`` terminal
+        payloads, each now bound to a uniquely-named local so
+        ``_guard_failure_payload_inplace`` can rewrite it before the upsert. This
+        count is the n1 liveness proof: chain-scoping alone would silently DROP all
+        seven and still report a plausible-looking total.
+        ⚠️ The five names are unique ON PURPOSE. Two of them share a function scope
+        (the catch-all's primary upsert and its PGRST204 re-issue); a shared name
+        there makes ``_resolve_name`` report ``2 dict bindings in one scope —
+        ambiguous, not read`` and BOTH writers drop out of the census. Measured.
       * exactly 1 write site is classified through the n2 parameter-default arm —
         ``job_worker._prestamp_dq_flags(payload: dict[str, Any] = _prestamp_payload)``.
         It resolves to a dict with keys {strategy_id, data_quality_flags} and NO
@@ -652,10 +722,10 @@ def test_python_writer_census_counts() -> None:
     sibling-upsert failure arm — but it is a partial data_quality_flags upsert with
     no status key, so it is not among the 12 and is not counted here.)
     """
-    EXPECTED_STATUS_DICTS = 13
-    EXPECTED_RUNNER_DICTS = 7
-    EXPECTED_WORKER_DICTS = 6
-    EXPECTED_KEPT_VIA_N1 = 2
+    EXPECTED_STATUS_DICTS = 12
+    EXPECTED_RUNNER_DICTS = 8
+    EXPECTED_WORKER_DICTS = 4
+    EXPECTED_KEPT_VIA_N1 = 11
     EXPECTED_SITES_VIA_N2 = 1
     EXPECTED_COMPUTING_DICTS = 1
     EXPECTED_SKIPPED_UNRESOLVED = 0

@@ -514,7 +514,11 @@ describe("isRateLimitMisconfigured", () => {
  * ⚠️ WHY THE EXTENSION EXISTS RATHER THAN A BLANKET ADOPTION. Measured on the
  * untouched tree, four seam routes' genuine 429s are NOT interchangeable with
  * this builder's fixed body: `strategies/create-with-key` and
- * `strategies/composite/add-key` carry `code: "KEY_RATE_LIMIT"`, `keys/sync`
+ * `strategies/composite/add-key` carry `code: "KEY_RATE_LIMIT"` (⚠️ the reading
+ * OF THAT DAY — 164.2-04 and 164.2-05 moved both to `RATE_LIMITED`, because
+ * `userActionLimiter` is our own per-user cap and the exchange-blaming copy was
+ * false there; the point this sentence makes is that the bodies DIFFER, which
+ * is unaffected), `keys/sync`
  * carries `code: "RATE_LIMITED"` at BOTH of its arms, `strategies/csv-validate`
  * and `strategies/csv-finalize` carry the CSV v0 envelope, and
  * `scenario/optimize` carries a bespoke sentence with NO `Retry-After` at all.

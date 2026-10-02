@@ -140,6 +140,22 @@ TypeScript caller and is closed on class-integrity grounds only. (Re-derive thes
 `grep -n "raise VenueTransientHTTPException"` before trusting them — they move whenever
 anything above them in either router does.)
 
+⚠️ **The enumeration above is STALE and is kept as lineage** (167 review IN-01): measured
+2026-09-22, `grep -c "raise VenueTransientHTTPException"` finds 11 in `routers/exchange.py`
+on `main` and 12 at the 167 head — not six. Re-derive by grep; never trust a count here.
+
+**A second raise in the MT5 transient-client-error arm (167-CREDTRUST plan 01, S-27), cited
+BY SYMBOL rather than by line number** — it SPLITS that existing arm (the MT5
+transient-client-error entry in the stale enumeration above) rather than adding a new
+failure: `routers/exchange.py`'s
+`_validate_mt5_key_probe()`, the narrowed transient tail of its
+`except Mt5ClientError` arm — code `SIGN_IN_FAILED`, `recoverable=False`. Reached from
+the SAME `POST /api/validate-key` path AND from `/internal/keys/{id}/rotate-secret`
+(`routers/internal.py`'s `rotate_key_secret`, whose `_validate_mt5_key` call is a thin
+bracket over the same probe function) — the first site in this class to be reachable from
+two endpoints. The arm's other raise keeps the pre-167 `NETWORK_UNAVAILABLE`,
+`recoverable=True` answer for every fault that is not a login-stage refusal (167 WR-01).
+
 The class is a **CALLER-class 4xx by construction** and refuses anything outside
 `400 <= status < 500`: it carries no `dependency`, no `Retry-After` and no
 `correlation_id`, so a 5xx in this shape would violate R-2 and mis-key 140.2's
@@ -355,14 +371,28 @@ nullified if 140.2 gets it wrong.
 
 ---
 
-## 7. The full S-01…S-24 site map
+## 7. The full S-01…S-28 site map
 
 The authoritative enumeration of every 5xx-capable site reachable from the seam.
 `140.2` can diff its assumptions against this table.
 
-**Legend.** *Plan* is the Phase 140.1 plan that owns the edit.
-`✅` = implemented. As of plan 04 **all 21 explicit sites are ✅**; the three
-remaining rows (S-21, S-22, S-24) are `n/a` by construction, not pending.
+⚠️ **S-27 is the first row that is never 5xx** — `VenueTransientHTTPException`'s
+CALLER-class construction guard refuses anything outside `4xx` (§2.1), so it is a
+424-only site. Recorded here rather than silently widening the header above: §8's
+"add the row to §7" instruction makes no 5xx-only exception, and this table is the
+one place a reader diffs assumptions against, so a 3b site earns a row on the same
+footing as a 3a one even though the table's own opening sentence predates that case.
+
+**Legend.** *Plan* is the Phase 140.1 plan that owns the edit, except where a
+later phase is named. `✅` = implemented. All **25 explicit sites are ✅**; the
+three remaining rows (S-21, S-22, S-24) are `n/a` by construction, not pending.
+
+⛔ **The `routers/match.py` rows cite by SYMBOL, not by `file:line`.** They read
+`:1655`/`:1689` until 2026-09-16, by which point the real raise sites had moved
+61 lines down — the `[164.7-CITATION-DRIFT-01]` class, whose recorded remedy is
+to cite the symbol rather than re-number prose that will drift again. A stale
+anchor in THIS table is worse than in most prose: it is the document a future
+reviewer diffs their assumptions against.
 
 | # | Site | Endpoint | Today | Trigger | Class | Target | Plan | Done |
 |---|---|---|---|---|---|---|---|---|
@@ -378,11 +408,11 @@ remaining rows (S-21, S-22, S-24) are `n/a` by construction, not pending.
 | S-10 | `routers/internal.py:218` | `/internal/keys/{id}/permissions` | **502** | `api_keys.exchange` NULL/empty | **CALLER** | **422** `KEY_MISSING_EXCHANGE` | 03 | ✅ |
 | S-11 | `routers/internal.py:442` (`except Exception:`), raise at `:471` | `/internal/keys/{id}/permissions` | 502 → 424 | `create_exchange` raised non-`ValueError` | **SERVICE-PERMANENT** (was CALLER'S EXCHANGE — **deliberately reversed**, see below) | **500** `ADAPTER_INIT_FAILED`, `retryable:false`, **`dependency: null`**, no `Retry-After` | 03, **re-classed 140.1.1-04** | ✅ |
 | S-12 | `routers/internal.py:339` | `/internal/keys/{id}/permissions` | 502 | any exception from `detect_permissions` | CALLER'S EXCHANGE | **424** `EXCHANGE_PROBE_FAILED` | 03 | ✅ |
-| S-13 | `routers/match.py:1655` | `/api/match/recompute` | 503 | `_is_admin_profile` returned `None` | SERVICE-TRANSIENT | **503** `ADMIN_CHECK_UNAVAILABLE`, `dependency:supabase` + `Retry-After` | 04 | ✅ |
-| S-14 | `routers/match.py:1689` | `/api/match/recompute` | 503 | `_is_allocator_profile` returned `None` | SERVICE-TRANSIENT | **503** `ROLE_CHECK_UNAVAILABLE`, `dependency:supabase` + `Retry-After` | 04 | ✅ |
-| S-15 | `routers/match.py:1798` | `/api/match/recompute` | 500 `f"Scoring failed: {err}"` | `_score_one_allocator` raised | SERVICE-PERMANENT | **500** `SCORING_FAILED`, **`{err}` stripped** → server log + `correlation_id` | 04 | ✅ |
-| S-16 | `routers/match.py:1863` | `/api/match/eval` | 503 | `PaginatedSelectTruncated` — caller's `lookback_days` too large | **CALLER** | **400** `EVAL_WINDOW_TOO_LARGE` | 04 | ✅ |
-| S-17 | `routers/match.py:1882` | `/api/match/eval` | 500 `f"Eval failed: {err}"` | any exception | SERVICE-PERMANENT | **500** `EVAL_FAILED`, **`{err}` stripped** → server log + `correlation_id` | 04 | ✅ |
+| S-13 | `routers/match.py` `recompute()`, the `_is_admin_profile is None` arm | `/api/match/recompute` | 503 | `_is_admin_profile` returned `None` | SERVICE-TRANSIENT | **503** `ADMIN_CHECK_UNAVAILABLE`, `dependency:supabase` + `Retry-After` | 04 | ✅ |
+| S-14 | `routers/match.py` `recompute()`, the `_role_check is None` arm | `/api/match/recompute` | 503 | `_is_allocator_profile` returned `None` | SERVICE-TRANSIENT | **503** `ROLE_CHECK_UNAVAILABLE`, `dependency:supabase` + `Retry-After` | 04 | ✅ |
+| S-15 | `routers/match.py` `recompute()`, `except` around `_score_one_allocator` | `/api/match/recompute` | 500 `f"Scoring failed: {err}"` | `_score_one_allocator` raised | SERVICE-PERMANENT | **500** `SCORING_FAILED`, **`{err}` stripped** → server log + `correlation_id` | 04 | ✅ |
+| S-16 | `routers/match.py` `eval_endpoint`, `except PaginatedSelectTruncated` | `/api/match/eval` | 503 | `PaginatedSelectTruncated` — caller's `lookback_days` too large | **CALLER** | **400** `EVAL_WINDOW_TOO_LARGE` | 04 | ✅ |
+| S-17 | `routers/match.py` `eval_endpoint`, terminal `except Exception` | `/api/match/eval` | 500 `f"Eval failed: {err}"` | any exception | SERVICE-PERMANENT | **500** `EVAL_FAILED`, **`{err}` stripped** → server log + `correlation_id` | 04 | ✅ |
 | S-18 | `routers/simulator.py:460` | `/api/simulator` | 500 `{error, correlation_id}` | any exception in the sim body | SERVICE-PERMANENT | **500** `SIMULATION_FAILED` (keeps `correlation_id`) | 04 | ✅ |
 | S-19 | `routers/portfolio.py:661` | `/api/portfolio-analytics` | 500 | insert returned no row | SERVICE-TRANSIENT | **503** `ANALYTICS_ROW_NOT_CREATED`, `dependency:supabase` + `Retry-After` | 04 | ✅ |
 | S-20 | `routers/portfolio.py:1181` | `/api/portfolio-analytics` | 500 | compute raised | SERVICE-PERMANENT | **500** `PORTFOLIO_ANALYTICS_FAILED` | 04 | ✅ |
@@ -390,11 +420,37 @@ remaining rows (S-21, S-22, S-24) are `n/a` by construction, not pending.
 | S-22 | *(implicit)* `/process-key` | `/process-key` | **500 `text/plain`** | any unhandled exception | UNCLASSIFIED | **500**, no body. `routers/process_key.py` contains ZERO explicit 5xx sites | — | n/a |
 | S-23 | `main.py:246` | all except `/health`, `/internal/*`, `/process-key` | 503 | `SERVICE_KEY` env unset | SERVICE-PERMANENT | **500** `SERVICE_KEY_UNCONFIGURED`. ⚠️ a `JSONResponse` **literal**, not an `HTTPException` — it does NOT appear in a `status_code=5` `HTTPException` grep, and it must stay **returned**, never raised | 04 | ✅ |
 | S-24 | `main.py:299` | `/health` | 503 `{status:"stale"}` | worker heartbeat stale | SERVICE-TRANSIENT | **unchanged** — `/health` is outside the seam; see O-7 | — | n/a |
+| S-25 | `routers/match.py` `recompute()`, the `_kill_switch_state == KILL_SWITCH_UNAVAILABLE` arm | `/api/match/recompute` | — (new) | the kill-switch read exhausted `db_read_with_retry` — the engine stops FAIL-CLOSED rather than guessing | SERVICE-TRANSIENT | **503** `KILL_SWITCH_UNAVAILABLE`, `dependency:supabase` + `Retry-After` | **164.5.1** | ✅ |
+| S-26 | `routers/match.py` `cron_recompute()`, the `except` around `_read_cron_cursor()` | `/api/match/cron-recompute` | **500 `text/plain`** (unhandled) | the batching-cursor read exhausted `db_read_with_retry` | SERVICE-TRANSIENT | **503** `CURSOR_UNAVAILABLE`, `dependency:supabase` + `Retry-After` | **164.5.1** | ✅ |
+| S-27 | `routers/exchange.py` `_validate_mt5_key_probe()`, the `except Mt5ClientError` transient tail (also reached via `rotate_key_secret`'s `_validate_mt5_key` call) | `/api/validate-key`, `/internal/keys/{id}/rotate-secret` | 424 `NETWORK_UNAVAILABLE` | `classify_mt5_login_error` classified the caught `Mt5ClientError` `transient` AND `is_mt5_login_refusal` holds — the terminal answered the sign-in itself falsy with a code outside `_LOGIN_STAGE_NOT_A_REFUSAL_CODES` (the `-10000`…`-10004` IPC-infrastructure family and the success code `1`), and never told us why. A login-stage `-10005` IS such a refusal (D-17: the modal login dialog D-08 measured for a wrong password). **167 WR-01 / D-17:** a post-login read failure, an `initialize()` failure, or a login-stage `-10000`…`-10004` / `1` reaching the same arm keeps the pre-167 424 `NETWORK_UNAVAILABLE`, `recoverable:true` | CALLER'S EXCHANGE (3b FLAT — §2.1) | **424** `SIGN_IN_FAILED`, **`recoverable:false`** — DIVERGES from this class's `recoverable:true` default: a retry re-sends the same credential to a terminal that refused it, or that a wrong password put behind a modal login dialog (D-08, D-17) | **167-CREDTRUST plan 01** | ✅ |
+| S-28 | `routers/cron.py` `benchmark_refresh()` and `_benchmark_refresh_once()`, all six failure arms | `/api/benchmark-refresh` | raw `500` `{detail:"<string>"}` (Phase 169.2 as first shipped) | the BTC refresh returned no series, a stale or empty series, or raised; the stored-date read-back raised or is older than yesterday (UTC); or the 80 s `_BENCHMARK_REFRESH_DEADLINE_S` expired | SERVICE-PERMANENT (W2: never 503, so a stale benchmark cannot trip the shared breaker) | **500** `BENCHMARK_REFRESH_FAILED`, `retryable:false`, no `dependency` | **169.2** | ✅ |
 
-**Tally:** 24 rows = **21 explicit editable sites** (S-01…S-20 `HTTPException` raises,
-plus S-23 the `JSONResponse` literal) + 2 implicit unhandled-500s (S-21, S-22, no edit
-possible or needed) + 1 deliberately unchanged (S-24). The `21` is the number that an
-`HTTPException` grep sweep under-counts by one, because S-23 is not an `HTTPException`.
+**Tally:** 28 rows = **25 explicit editable sites** (S-01…S-20 plus S-25/S-26
+`HTTPException` raises, plus S-28 the six `benchmark-refresh` arms counted as one site because they share one code, plus S-23 the `JSONResponse` literal, plus S-27 the
+`VenueTransientHTTPException` `SIGN_IN_FAILED` raise Phase 167 split out of the existing
+MT5 transient-client-error arm — a new raise, not a new failure) + 2 implicit
+unhandled-500s (S-21, S-22, no edit possible or needed) + 1 deliberately unchanged
+(S-24). A `raise HTTPException` grep sweep over these rows finds **22** of the 24, not
+24: it misses S-23, which is not an `HTTPException` at all, and S-27, whose raise is
+spelled `raise VenueTransientHTTPException`. That sweep predates S-28 and is not re-measured here; S-28's arms are spelled
+`raise service_error(`.
+
+**S-25 and S-26 were added by Phase 164.5.1**, and both are the same shape: a
+Supabase read that has already exhausted `db_read_with_retry`'s gateway-timeout
+retries, on a path whose only safe answer is to STOP. S-25 (`KILL_SWITCH_UNAVAILABLE`)
+shipped its raise site in 164.5.1 with no row here and no wire test — it was the
+only one of `recompute()`'s three `503` arms with neither, while its two siblings
+S-13/S-14 had both. S-26 (`CURSOR_UNAVAILABLE`) is a *conversion*, not a new failure:
+the batching-cursor read already propagated out of `cron_recompute()` and FastAPI
+answered a bare `500 text/plain`, which R-1 classifies as "do not retry" — exactly
+backwards for a gateway blip, and a violation of `routers/match.py`'s own header rule
+that every deliberate error in a seam-reachable arm goes through `service_error`.
+⚠️ Neither is reachable from a browser through a 4xx path, but S-25 **does** reach
+one: `src/app/api/admin/match/recompute/route.ts` forwards `code: err.seamCode` on
+5xx as well as 4xx (its `161-08 / WIZERR-06` comment says so explicitly), and its
+consumer is the founder-facing `AllocatorMatchQueue`. That component renders
+`errBody.error` and never reads `code`, which is the real reason it needs no
+`wizardErrors.ts` verdict row.
 
 ### ⚠️ S-11 was re-classed by Phase 140.1.1 (PYAPIFIX-03 / H-2) — this is deliberate
 

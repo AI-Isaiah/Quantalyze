@@ -37,6 +37,15 @@ vi.mock("resend", () => ({
   },
 }));
 
+// OPS-07 (Phase 163): the terminal denominator arms capture to Sentry alongside
+// the non-200. Mocked so the capture is ASSERTABLE — the real helper swallows
+// every failure by design, so a route that quietly stopped capturing would be
+// indistinguishable from one that still does.
+const captureMock = vi.fn(async () => undefined);
+vi.mock("@/lib/sentry-capture", () => ({
+  captureToSentry: (...args: unknown[]) => captureMock(...(args as [])),
+}));
+
 function makeReq(headers: Record<string, string> = {}): NextRequest {
   return {
     headers: {
@@ -67,16 +76,46 @@ const POSTGREST_MAX_ROWS = 1000;
  * which makes exactly that point about the Sentry side.
  *
  * `featureFlagsRows` is a dict keyed by flag_key. `auditLogTotal` is the true
- * attempt-row count, answered uncapped to the COUNT chain. `auditLogRows`
- * overrides the row-materialising answer per test; by default it is a
- * max_rows-capped page, exactly what deployed PostgREST would return.
+ * attempt-row count, answered uncapped to the COUNT chain. The
+ * row-materialising branch always answers a max_rows-capped page, exactly what
+ * deployed PostgREST would return.
+ *
+ * ── OPS-07 (Phase 163): `auditLogRows` IS GONE, AND `auditLogError` /
+ *    `auditLogCount` REPLACE IT ────────────────────────────────────────────
+ *
+ * `auditLogRows` was an override that NO TEST EVER PASSED (recorded in the
+ * 141.2 close-out). An option no test passes is not neutral: it reads as
+ * coverage of the truncation path at review time while guarding nothing, and it
+ * was sitting in a harness whose whole subject is a monitor reporting health it
+ * has not verified. Deleted rather than exercised — the route no longer
+ * materialises rows at all (D-02 replaced the dedup with a server-side COUNT),
+ * so there is no live path for it to override. The shape-distinguishing default
+ * STAYS: a route that regressed to row materialisation still gets `count: null`
+ * back and terminates, which is the disagreement this double exists to produce.
+ *
+ * The two new options are the ones the failure cases below actually pass, and
+ * they exist because the same close-out found that no test drove a read error,
+ * a null count, or a NaN count — so the file stayed green under BOTH shipped
+ * denominator mutations.
+ *   - `auditLogError`: a PostgREST error on the COUNT read.
+ *   - `auditLogCount`: overrides the count VALUE independently of
+ *     `auditLogTotal`, including `null` and `NaN` — the two shapes postgrest-js
+ *     produces when the content-range header is absent or `*` / `*`.
  */
 function makeAdminMock(opts: {
   featureFlagsRows?: Record<string, { value: string }>;
   auditLogTotal: number;
-  auditLogRows?: Array<{ correlation_id: unknown }>;
+  auditLogCount?: number | null;
+  auditLogError?: { message: string; code?: string };
 }) {
-  const { featureFlagsRows = {}, auditLogTotal, auditLogRows } = opts;
+  const { featureFlagsRows = {}, auditLogTotal, auditLogError } = opts;
+  // `??` is wrong here: `auditLogCount: null` is a MEANINGFUL value (the
+  // absent-content-range shape), and `??` would silently swap it for the
+  // healthy total — reintroducing the exact collapse these cases exist to
+  // falsify, inside the double that is supposed to falsify it.
+  const countAnswer = Object.prototype.hasOwnProperty.call(opts, "auditLogCount")
+    ? (opts.auditLogCount as number | null)
+    : auditLogTotal;
   const upsertCalls: Array<{ table: string; row: Record<string, unknown> }> = [];
 
   function fromTable(table: string) {
@@ -95,12 +134,10 @@ function makeAdminMock(opts: {
       };
     }
     if (table === "audit_log") {
-      const rows =
-        auditLogRows ??
-        Array.from(
-          { length: Math.min(auditLogTotal, POSTGREST_MAX_ROWS) },
-          (_, i) => ({ correlation_id: `cid-${i}` }),
-        );
+      const rows = Array.from(
+        { length: Math.min(auditLogTotal, POSTGREST_MAX_ROWS) },
+        (_, i) => ({ correlation_id: `cid-${i}` }),
+      );
       return {
         select: (
           _cols: string,
@@ -109,7 +146,11 @@ function makeAdminMock(opts: {
           const answer =
             selectOpts?.head === true
               ? // Server-side COUNT: no rows cross the wire, no cap.
-                { data: null, count: auditLogTotal, error: null }
+                {
+                  data: null,
+                  count: countAnswer,
+                  error: auditLogError ?? null,
+                }
               : // Row materialisation: capped, with no truncation signal.
                 { data: rows, count: null, error: null };
           return {
@@ -150,6 +191,7 @@ describe("/api/cron/flag-monitor", () => {
     process.env.FOUNDER_LP_REPORT_TO = "founder@example.com";
     sendMock.mockReset();
     sendMock.mockResolvedValue({ id: "email-id" });
+    captureMock.mockClear();
     fetchSpy = vi.spyOn(globalThis, "fetch");
     vi.resetModules();
   });
@@ -551,6 +593,336 @@ describe("/api/cron/flag-monitor", () => {
     expect(streakUpserts[0].row.value).toBe("0");
     // No SEV-2 email — first non-zero window after a streak does NOT alert
     expect(sendMock).not.toHaveBeenCalled();
+  });
+
+  // -------------------------------------------------------------------------
+  // OPS-07 (Phase 163) — THE DENOMINATOR READ MUST PAGE, AND THIS FILE MUST BE
+  // ABLE TO SAY SO.
+  //
+  // ⚠️ WHY THESE EXIST AT ALL — THIS SUITE WAS THE THING THAT FAILED.
+  //
+  // The 141.2 close-out recorded that this file gained an `auditLogRows` option
+  // NO TEST PASSED, and that no case here drove a read error, a `count: null`
+  // or a `count: NaN`. Consequence, measured then and re-measured now: under
+  // BOTH shipped denominator mutations — (M1) collapsing a read error into
+  // zero, and (M2) restoring `count ?? 0` — every test in this file stayed
+  // GREEN. A monitor's own integration suite reported health it had not
+  // verified, which is the same defect the monitor exists to catch, one level
+  // up. The three runs below are the falsifiers that were missing.
+  //
+  // They pin the FULL terminal answer, not just the reason string:
+  //   - reason `denominator_read_failed`, which kills M1 and M2 (both would
+  //     answer `zero_denominator` instead), and
+  //   - a NON-200 status, which is what makes the run register FAILED in Vercel
+  //     cron history. Before this phase both arms returned at the default 200,
+  //     so a persistent Supabase read failure logged a green run every 15
+  //     minutes forever. Distinguishing a state and then reporting it as
+  //     success is not distinguishing it — 141.2's own lesson ("the remedy
+  //     replaced a wrong page with no page") recurring inside 141.2's remedy.
+  //
+  // ⭐ RED DEMOS (each run, restored after — see 163-05-SUMMARY.md for the
+  //    verbatim failure output):
+  //   (a) revert DENOMINATOR_FAILURE_STATUS to 200 → all THREE runs fail on
+  //       `expected 200 to be 503`, and ONLY on that: every reason assertion
+  //       still passes. That is precisely why the status is asserted
+  //       separately — the classification was already right and paged nobody.
+  //   (b) M1 — collapse the read-error arm to `{ kind: "ok", total: 0 }` → the
+  //       read-error run fails, `expected 'zero_denominator' to be
+  //       'denominator_read_failed'`.
+  //   (c) M2 — disarm the usable-count guard and restore `count ?? 0` → TWO
+  //       runs fail: `count: null` on the same reason mismatch, and `count:
+  //       NaN` on `expected true to be false` (ok:true, i.e. NaN passed
+  //       straight through as a rate with both alert arms disarmed).
+  //   Under M1 and M2 this file used to be entirely green.
+  // -------------------------------------------------------------------------
+  /** The three shapes of "we could not read the denominator", and the one
+   *  shape that is genuinely zero. Table-driven so a fourth failure shape is a
+   *  one-line addition rather than a fourth copy-pasted block. */
+  const DENOMINATOR_FAILURES = [
+    {
+      name: "a PostgREST read ERROR",
+      opts: {
+        auditLogTotal: 5000, // irrelevant — the read never succeeds
+        auditLogError: { message: "PGRST301: JWT expired", code: "PGRST301" },
+      },
+    },
+    {
+      name: "an ABSENT count (`count: null`, no error — `?? 0` calls this zero traffic)",
+      opts: { auditLogTotal: 1000, auditLogCount: null },
+    },
+    {
+      name: "a NaN count (`*/*` content-range — not `=== 0`, so no zero-check catches it)",
+      opts: { auditLogTotal: 1000, auditLogCount: Number.NaN },
+    },
+  ] as const;
+
+  for (const scenario of DENOMINATOR_FAILURES) {
+    it(`OPS-07: ${scenario.name} ends the run NON-200 with reason denominator_read_failed, and PAGES`, async () => {
+      mockSentry(0);
+      const admin = makeAdminMock({ ...scenario.opts });
+      vi.doMock("@/lib/supabase/admin", () => ({
+        createAdminClient: () => admin,
+      }));
+      const handler = await loadHandler();
+      const res = await handler(
+        makeReq({ authorization: `Bearer ${process.env.CRON_SECRET}` }),
+      );
+      const body = await res.json();
+
+      // The classification (kills M1 and M2)...
+      expect(body.ok).toBe(false);
+      expect(body.reason).toBe("denominator_read_failed");
+      expect(body.reason).not.toBe("zero_denominator");
+
+      // ...and the PAGE. Asserted separately because the classification alone
+      // was already correct before this phase and still paged nobody.
+      expect(res.status).toBe(503);
+      expect(res.status).not.toBe(200);
+      expect(captureMock).toHaveBeenCalledTimes(1);
+      const tags = (captureMock.mock.calls[0] as unknown[])[1] as {
+        tags: Record<string, string>;
+      };
+      expect(tags.tags).toMatchObject({
+        route: "cron.flag-monitor",
+        denominator_read_failed: "true",
+      });
+
+      // A failed read is NOT a zero window: advancing the H-2 streak would
+      // eventually page with the wrong story (the SEV-2 email asserts "no
+      // traffic OR the audit-write is failing", both false here), and the
+      // no-traffic email must not fire either.
+      const streakUpserts = admin.upsertCalls.filter(
+        (c) => c.row.flag_key === "flag_monitor_zero_denominator_streak",
+      );
+      expect(streakUpserts).toHaveLength(0);
+      expect(sendMock).not.toHaveBeenCalled();
+    });
+  }
+
+  it("OPS-07 control: a genuinely EMPTY window stays 200 and does NOT page — the streak machinery still owns it", async () => {
+    // The positive control, and the reason the paging fix is not just "return
+    // 503 more often". A change that reddened every quiet window would satisfy
+    // all three runs above while destroying the H-2 escalation, replacing a
+    // no-page with a permanent page — the same trade 141.2 made in reverse.
+    mockSentry(0);
+    const admin = makeAdminMock({ auditLogTotal: 0 });
+    vi.doMock("@/lib/supabase/admin", () => ({
+      createAdminClient: () => admin,
+    }));
+    const handler = await loadHandler();
+    const res = await handler(
+      makeReq({ authorization: `Bearer ${process.env.CRON_SECRET}` }),
+    );
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.reason).toBe("zero_denominator");
+    expect(body.reason).not.toBe("denominator_read_failed");
+    expect(captureMock).not.toHaveBeenCalled();
+    // The streak DOES advance here — that is this arm's whole job.
+    expect(
+      admin.upsertCalls.filter(
+        (c) => c.row.flag_key === "flag_monitor_zero_denominator_streak",
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("OPS-07: a HEALTHY window is still a 200 — the paging arms did not leak into the success path", async () => {
+    mockSentry(1);
+    const admin = makeAdminMock({ auditLogTotal: 1000 });
+    vi.doMock("@/lib/supabase/admin", () => ({
+      createAdminClient: () => admin,
+    }));
+    const handler = await loadHandler();
+    const res = await handler(
+      makeReq({ authorization: `Bearer ${process.env.CRON_SECRET}` }),
+    );
+    expect(res.status).toBe(200);
+    expect((await res.json()).ok).toBe(true);
+    expect(captureMock).not.toHaveBeenCalled();
+  });
+
+  // -------------------------------------------------------------------------
+  // WR-02 (163 review) — THE NUMERATOR HALF OF THE SAME CLASS.
+  //
+  // ⚠️ WHY THESE EXIST WHEN THE ARMS THEY COVER WERE ALREADY TESTED. Every one
+  // of the five faults below ALREADY had a case in this file (I-T4a, I-T4b,
+  // "test_sentry_unreachable_returns_warn_response", I-perf-cron) and every one
+  // of them asserted the `reason` string and NOTHING ELSE. The classification
+  // was correct the whole time and paged nobody: all five returned at the
+  // default HTTP 200, so Vercel's cron history — which keys "did this run
+  // succeed?" off the status code, and is this route's page channel — recorded
+  // an unbroken run of green while the monitor was blind. OPS-07 fixed the
+  // denominator's two arms and left these four in the same file, so a suite
+  // that could see a Supabase read failure still could not see a rotated
+  // SENTRY_AUTH_TOKEN, which is the likelier fault of the two.
+  //
+  // These pin the FULL terminal answer, and the status is asserted SEPARATELY
+  // from the reason for exactly the reason above: a reason-only assertion is
+  // green on both sides of the defect.
+  //
+  // ⭐ RED DEMO (performed, then restored from a byte backup — never `git
+  //    checkout --`, which would destroy uncommitted work; see the commit body
+  //    for the verbatim failure output): reverting each arm to its pre-fix
+  //    `return { kind: "terminal", res: NextResponse.json({ ok: false, reason })
+  //    }` fails all five runs on `expected 200 to be 503` — and ONLY on that.
+  //    Every `reason` assertion, old and new, stays green.
+  // -------------------------------------------------------------------------
+  /** The five shapes of "we could not read the numerator". Table-driven so a
+   *  sixth is a one-line addition rather than a sixth copy-pasted block. */
+  const NUMERATOR_FAILURES = [
+    {
+      name: "the Sentry fetch THREW (ECONNRESET)",
+      reason: "sentry_unreachable",
+      setup: () => {
+        fetchSpy.mockImplementation((async (url: string) => {
+          if (typeof url === "string" && url.includes("sentry.io")) {
+            throw new Error("ECONNRESET");
+          }
+          throw new Error(`unexpected fetch: ${url}`);
+        }) as typeof fetch);
+      },
+    },
+    {
+      // THE headline scenario: an expired or rotated Sentry auth token. Every
+      // 15 minutes, forever, until someone happens to look at the body.
+      name: "a ROTATED auth token (Sentry 401)",
+      reason: "sentry_unreachable",
+      setup: () => {
+        fetchSpy.mockImplementation((async (url: string) => {
+          if (typeof url === "string" && url.includes("sentry.io")) {
+            return new Response(JSON.stringify({ detail: "Invalid token" }), {
+              status: 401,
+              headers: { "content-type": "application/json" },
+            });
+          }
+          throw new Error(`unexpected fetch: ${url}`);
+        }) as typeof fetch);
+      },
+    },
+    {
+      name: "a Sentry 5xx",
+      reason: "sentry_unreachable",
+      setup: () => mockSentry(0, 502),
+    },
+    {
+      name: "Sentry THROTTLING us (429 + rate-limit headers)",
+      reason: "sentry_rate_limited",
+      setup: () => {
+        fetchSpy.mockImplementation((async (url: string) => {
+          if (typeof url === "string" && url.includes("sentry.io")) {
+            return new Response("Too Many Requests", {
+              status: 429,
+              headers: {
+                "content-type": "text/plain",
+                "retry-after": "60",
+                "x-sentry-rate-limit-remaining": "0",
+              },
+            });
+          }
+          throw new Error(`unexpected fetch: ${url}`);
+        }) as typeof fetch);
+      },
+    },
+    {
+      // Not transient at all — a deploy defect that persists until someone
+      // acts, which makes reporting it as a successful run the most durable
+      // false-health this route can emit.
+      name: "SENTRY_ORG_SLUG missing (a deploy defect, not a blip)",
+      reason: "sentry_not_configured",
+      setup: () => {
+        delete process.env.SENTRY_ORG_SLUG;
+      },
+    },
+    {
+      name: "SENTRY_AUTH_TOKEN missing",
+      reason: "sentry_not_configured",
+      setup: () => {
+        delete process.env.SENTRY_AUTH_TOKEN;
+      },
+    },
+  ] as const;
+
+  for (const scenario of NUMERATOR_FAILURES) {
+    it(`WR-02: ${scenario.name} ends the run NON-200 with its own reason, and PAGES`, async () => {
+      scenario.setup();
+      const admin = makeAdminMock({ auditLogTotal: 1000 });
+      vi.doMock("@/lib/supabase/admin", () => ({
+        createAdminClient: () => admin,
+      }));
+      const handler = await loadHandler();
+      const res = await handler(
+        makeReq({ authorization: `Bearer ${process.env.CRON_SECRET}` }),
+      );
+      const body = await res.json();
+
+      // The classification — UNCHANGED by this fix, and that is the point:
+      // it was already right, and on its own it never reached an operator.
+      expect(body.ok).toBe(false);
+      expect(body.reason).toBe(scenario.reason);
+
+      // ...and the PAGE. This is the assertion the pre-fix arms failed.
+      expect(
+        res.status,
+        "Vercel's cron history keys 'did this run succeed?' off the status " +
+          "code. A 200 here means a blind monitor logs a GREEN run every 15 " +
+          "minutes and the /process-key error-rate alert is silently dead.",
+      ).toBe(503);
+      expect(res.status).not.toBe(200);
+
+      expect(captureMock).toHaveBeenCalledTimes(1);
+      const captureArgs = (captureMock.mock.calls[0] as unknown[])[1] as {
+        tags: Record<string, string>;
+      };
+      expect(captureArgs.tags).toMatchObject({
+        route: "cron.flag-monitor",
+        monitor_read_failed: "true",
+        monitor_term: "numerator",
+      });
+
+      // A numerator failure is NOT a denominator failure: the denominator was
+      // never read, so tagging it as one would send the operator to Supabase
+      // for a fault that lives in the Sentry query.
+      expect(captureArgs.tags.denominator_read_failed).toBeUndefined();
+
+      // No zero-traffic story, and no email — same reasoning as the
+      // denominator arms above.
+      expect(
+        admin.upsertCalls.filter(
+          (c) => c.row.flag_key === "flag_monitor_zero_denominator_streak",
+        ),
+      ).toHaveLength(0);
+      expect(sendMock).not.toHaveBeenCalled();
+    });
+  }
+
+  it("WR-02: the denominator arms KEEP their own Sentry tag — widening the helper did not retire an existing filter", async () => {
+    // `denominator_read_failed:"true"` is the tag any Sentry alert rule or
+    // saved search written for 141.2 / OPS-07 matches on. Generalising
+    // `denominatorReadFailed` into `monitorReadFailed` must not silently drop
+    // it, or the widening trades one blind spot for another.
+    mockSentry(0);
+    const admin = makeAdminMock({
+      auditLogTotal: 5000,
+      auditLogError: { message: "PGRST301: JWT expired", code: "PGRST301" },
+    });
+    vi.doMock("@/lib/supabase/admin", () => ({
+      createAdminClient: () => admin,
+    }));
+    const handler = await loadHandler();
+    const res = await handler(
+      makeReq({ authorization: `Bearer ${process.env.CRON_SECRET}` }),
+    );
+
+    expect(res.status).toBe(503);
+    const tags = ((captureMock.mock.calls[0] as unknown[])[1] as {
+      tags: Record<string, string>;
+    }).tags;
+    expect(tags).toMatchObject({
+      denominator_read_failed: "true",
+      monitor_read_failed: "true",
+      monitor_term: "denominator",
+    });
   });
 
   // -------------------------------------------------------------------------

@@ -1,12 +1,26 @@
 import { cache } from "react";
+import { after } from "next/server";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { castRow } from "@/lib/supabase/cast";
 import { loadManagerIdentity as loadManagerIdentityRaw } from "./manager-identity";
-import { extractAnalytics, EMPTY_ANALYTICS } from "./utils";
-import { blendPeriodsPerYear, isComputedAnalytics } from "./closed-sets";
+import { extractAnalytics, EMPTY_ANALYTICS, seriesEndOf } from "./utils";
+import {
+  blendPeriodsPerYear,
+  deriveEmptySeriesState,
+  isComputedAnalytics,
+  isRankableAnalyticsRow,
+  PERCENTILE_GATE_COLUMN,
+  type SeriesState,
+} from "./closed-sets";
+import { isWorkingHolder, NOT_WORKING_SYNC_STATUSES } from "@/lib/account-share-note";
+import { resolveDailyReturnSeries } from "@/lib/factsheet/resolve-series";
+// Phase 169.4 plan 02 (D-69, D-77): the ONE BTC read, from its server-safe home.
+// Never from `@/lib/factsheet/fetch-and-build-payload`: that module pulls
+// `server-only` (composite-read-path.ts) into every test importing this file.
+import { readFactsheetBenchmark } from "@/lib/factsheet/benchmark-read";
+import type { BenchmarkPricesOpt } from "@/lib/factsheet/types";
 import { API_KEY_USER_COLUMNS, type ApiKeyUserColumn } from "./constants";
-import { equitySnapshotsToDailyPoints } from "@/lib/allocation-helpers";
 import {
   buildDateMapCache,
   computeScenario,
@@ -15,6 +29,10 @@ import {
   type StrategyForBuilder,
 } from "@/lib/scenario";
 import { deriveSnapshotDrawdowns } from "@/app/(dashboard)/allocations/lib/drawdown";
+// Review round 3 E2 — the SHARED MTD reducer, called server-side so the full
+// return series never reaches the client. Same import direction as the line
+// above; the adapter's own `@/lib/queries` import is type-only, so no cycle.
+import { computeMtd } from "@/app/(dashboard)/allocations/lib/strategies-row-adapter";
 import type { FlaggedHolding } from "@/app/(dashboard)/allocations/lib/holding-outcome-adapter";
 import type {
   Strategy,
@@ -35,12 +53,28 @@ import type {
 } from "./types";
 import { SUPPORTED_EXCHANGES, type SupportedExchange } from "./utils";
 import { holdingScopeKey } from "./keys";
+import {
+  fetchLatestHoldingsPerKey,
+  latestHoldingsPerKey,
+} from "./latest-holdings-per-key";
 import { getOwnPreferences, type AllocatorOwnPreferences } from "./preferences";
 import { displayStrategyName } from "@/lib/strategy-display";
 import { captureToSentry } from "@/lib/sentry-capture";
 import { deriveSyncFreshness } from "@/lib/sync-freshness/types";
 import { safeFraction } from "./units";
+import { drainById } from "./drain-by-id";
 import { withPublishedOnly } from "./visibility";
+import {
+  PERCENTILE_METRICS,
+  scoreAgainstPopulation,
+  type CommaSpaceJoined,
+  type PercentileMap,
+} from "./percentile-core";
+import {
+  OWN_CAPITAL,
+  isAllocatable,
+  type CapitalOwnership,
+} from "./capital-ownership";
 
 /**
  * Load + redact the manager identity for a strategy.
@@ -84,36 +118,67 @@ function readDisclosureTier(strategy: unknown): DisclosureTier {
 
 type StrategyWithAnalytics = Strategy & { analytics: StrategyAnalytics };
 
-/** Metric keys we compute percentile ranks for */
-const PERCENTILE_METRICS = [
-  "cagr",
-  "sharpe",
-  "sortino",
-  "calmar",
-  "max_drawdown",
-  "volatility",
-  "cumulative_return",
-] as const;
+/**
+ * Phase 149 (149-02) — a row for a RANKED strategy list, carrying the
+ * absent-analytics signal alongside the crash-free `analytics` fallback.
+ * `analyticsPresent === false` means NO `strategy_analytics` row exists, which
+ * is NOT the same as a row whose computation is pending. See `shapeRankingRows`
+ * for why conflating them ships a permanent "Syncing" chip.
+ *
+ * Public consumers that only read `Strategy & { analytics }` ignore the extra
+ * field (structural typing — zero behaviour change for discovery/browse).
+ */
+export type RankedStrategyRow = StrategyWithAnalytics & { analyticsPresent: boolean };
 
-type PercentileMetric = (typeof PERCENTILE_METRICS)[number];
+// Phase 149 (149-02): PERCENTILE_METRICS / LOWER_IS_BETTER / PercentileMap and
+// the scoring formula itself now live in ./percentile-core — the ONE core both
+// `getPercentiles` and `getOwnRowPercentiles` delegate to (FOUNDER RULING
+// 2026-08-05). Re-exported here so existing importers (StrategyTable, the
+// discovery/browse pages, the tearsheet, the peer-rank route) are unchanged.
+export type { PercentileMap } from "./percentile-core";
 
-/** Metrics where lower values are better — percentile is inverted */
-const LOWER_IS_BETTER: ReadonlySet<string> = new Set(["max_drawdown", "volatility"]);
-
-export type PercentileMap = Record<string, Record<PercentileMetric, number>>;
+/**
+ * The analytics columns BOTH percentile callers project. Hoisted to a module
+ * const so the two projections cannot drift.
+ *
+ * ⚠️ BYTE-FROZEN (Phase 159 D-03 / RANK-01). This list is the KPI set and
+ * nothing else. Since Phase 166 (D-12) it is DERIVED from `PERCENTILE_METRICS`
+ * (percentile-core.ts), the one KPI array — the csv-finalize route's
+ * clock-safety guard derives its column list from the same array, so the two
+ * cannot diverge. The bytes are enforced by the hand-written pin in
+ * `queries.percentile-columns.test.ts`, not by this comment: a reorder, rename
+ * or separator change in `PERCENTILE_METRICS` turns that pin RED.
+ *
+ * The RANK-01 gate column is a SEPARATE constant (`PERCENTILE_GATE_COLUMN`,
+ * closed-sets.ts) that each projection site composes ALONGSIDE this one, never
+ * appended to it — the KPI array must stay KPIs only, because the percentile
+ * scorer ranks every member of it.
+ */
+// The cast narrows `join`'s plain `string` to the literal postgrest-js needs to
+// type the rows; `CommaSpaceJoined` derives that literal from the same tuple.
+const PERCENTILE_ANALYTICS_COLUMNS = PERCENTILE_METRICS.join(", ") as CommaSpaceJoined<
+  typeof PERCENTILE_METRICS
+>;
 
 /**
  * Compute percentile ranks for each published strategy across key metrics.
  * Returns null when fewer than 5 published strategies exist (not enough data).
  *
  * If categorySlug is provided, computes within that category only.
- * Percentile formula: (count of values <= v) / N * 100
- * For lower-is-better metrics: percentile = 100 - raw_percentile
+ * The scoring formula lives in `./percentile-core` (see that file's header for
+ * the count-based rank, the lower-is-better inversion and the max_drawdown
+ * magnitude normalisation). Passing `rows` as BOTH subjects and population is
+ * what preserves this function's pre-extraction behaviour byte-for-byte: every
+ * subject is already a population row, so the core's identity dedupe leaves
+ * each denominator exactly as it was.
  */
 export async function getPercentiles(categorySlug?: string): Promise<PercentileMap | null> {
   const supabase = await createClient();
 
-  const analyticsColumns = "cagr, sharpe, sortino, calmar, max_drawdown, volatility, cumulative_return";
+  // RANK-01: the gate column rides ALONGSIDE the byte-frozen KPI list, never
+  // appended to it. Both select branches below interpolate this one composition,
+  // so the categorized and uncategorized projections cannot disagree.
+  const analyticsColumns = `${PERCENTILE_ANALYTICS_COLUMNS}, ${PERCENTILE_GATE_COLUMN}` as const;
 
   const query = categorySlug
     ? withPublishedOnly(
@@ -146,48 +211,17 @@ export async function getPercentiles(categorySlug?: string): Promise<PercentileM
   for (const s of strategies) {
     const a = extractAnalytics((s as Record<string, unknown>).strategy_analytics);
     if (!a) continue;
+    // RANK-01: a non-computed row (failed/pending/computing) neither RECEIVES a
+    // published percentile nor JOINS the population others are scored against.
+    // Dropping it here — before `rows` — is what makes the floor below count the
+    // honest denominator, mirroring the RPC's gated min-N cohort.
+    if (!isRankableAnalyticsRow(a)) continue;
     rows.push({ id: s.id, analytics: castRow<Record<string, number | null>>(a, "analytics") });
   }
 
   if (rows.length < 5) return null;
 
-  const result: PercentileMap = {};
-
-  for (const metric of PERCENTILE_METRICS) {
-    // Collect non-null values for this metric
-    const values: { id: string; val: number }[] = [];
-    for (const row of rows) {
-      const raw = row.analytics[metric];
-      if (raw == null) continue;
-      // max_drawdown is stored as a NEGATIVE percentage (quantstats
-      // convention: -0.30 = 30% peak-to-trough drop). Without Math.abs the
-      // LOWER_IS_BETTER inversion below ranks the WORST drawdown as the
-      // best percentile, because -0.50 < -0.05 numerically. Take the
-      // magnitude so the inversion treats "small drawdown" as "low value
-      // = good" the same way it does for volatility.
-      const v = metric === "max_drawdown" ? Math.abs(raw) : raw;
-      values.push({ id: row.id, val: v });
-    }
-
-    const n = values.length;
-    if (n === 0) continue;
-
-    for (const entry of values) {
-      const countLessOrEqual = values.filter((x) => x.val <= entry.val).length;
-      let percentile = (countLessOrEqual / n) * 100;
-
-      if (LOWER_IS_BETTER.has(metric)) {
-        percentile = 100 - percentile;
-      }
-
-      if (!result[entry.id]) {
-        result[entry.id] = {} as Record<PercentileMetric, number>;
-      }
-      result[entry.id][metric] = Math.round(percentile);
-    }
-  }
-
-  return result;
+  return scoreAgainstPopulation(rows, rows);
 }
 
 // Convenience re-export so callers that already pull from `@/lib/queries` for
@@ -195,7 +229,123 @@ export async function getPercentiles(categorySlug?: string): Promise<PercentileM
 // Both helpers are pure and have no Supabase dependency — they live in utils.
 export { extractAnalytics, EMPTY_ANALYTICS };
 
-export async function getStrategiesByCategory(categorySlug: string): Promise<StrategyWithAnalytics[]> {
+/**
+ * Phase 159 (159-03, RANK-02 / decision D-02) — the compare analytics
+ * projection, replacing a wildcard analytics embed.
+ *
+ * Compare is an AUTHED allocator surface, but it is CROSS-TENANT: an allocator
+ * reads other managers' published strategies, which is why the requirement
+ * names this site alongside the anonymous ones. RLS is ROW-level and cannot
+ * hide a column, so an explicit column list is the only control over what
+ * leaves the database — `daily_returns`, the `metrics_json` blob and
+ * `data_quality_flags` are all absent here and none of them was ever read.
+ *
+ * Enumerated from the compare UI at HEAD (enumerate before cutting):
+ *   - the nine `METRICS` rows in CompareTable (:27-37), read by DYNAMIC key
+ *     (`getValue(item.analytics, metric.key)`), so a missing column shows as
+ *     an em-dash rather than a crash — a silent regression, hence the pin in
+ *     page.test.tsx.
+ *   - `returns_series`, read by BOTH CompareEquityOverlay (:40) and
+ *     CompareCorrelationMatrix (:26). Dropping it blanks both charts.
+ *
+ * Lives here (not in the page file) so every "which analytics columns may
+ * leave the DB" list is auditable with one grep of this module, alongside
+ * PUBLIC_ANALYTICS_COLUMNS and the STRATEGY_DETAIL_* constants.
+ */
+export const COMPARE_ANALYTICS_COLUMNS =
+  "cumulative_return, cagr, sharpe, sortino, calmar, max_drawdown, max_drawdown_duration_days, volatility, six_month_return, returns_series";
+
+/**
+ * Phase 159 (159-03, RANK-02 / decision D-02) — the RANKED-LIST analytics
+ * projection, replacing the wildcard `strategy_analytics (*)` embed.
+ *
+ * `/browse/[slug]` has NO auth gate, so this is the highest-traffic ANONYMOUS
+ * `strategy_analytics` read in the app. RLS is ROW-level — the `analytics_read`
+ * policy (`status='published' OR user_id=auth.uid()`, migration
+ * 20260405061912, no `TO` clause) applies to `anon` and cannot hide a COLUMN.
+ * An explicit projection is therefore the ONLY lever that keeps
+ * `daily_returns`, the whole `metrics_json` blob and `data_quality_flags` out
+ * of an anon response. Same column-explicitness discipline as
+ * `readPublicVerificationSignals` / the `get_published_trust_signals` SECDEF
+ * function, and the same shape as `STRATEGY_V2_ANALYTICS_COLUMNS` below.
+ *
+ * ⚠️ MUST-STAY columns — every one of these is a rendered surface, and
+ * dropping it is a silent VISUAL regression, not a bandwidth win:
+ *   - `sparkline_returns` / `sparkline_drawdown` — StrategyTable's two
+ *     sparkline cells (:1111 / :1118). Dropping them blanks the charts.
+ *   - `computation_status` — the ONE chip-state derivation site (:899 →
+ *     `deriveEmptySeriesState`). Dropping it makes every row read the
+ *     EMPTY_ANALYTICS `"pending"` default and spin "Syncing" forever, which
+ *     is precisely the Phase-147/149 forever-spinner class.
+ *   - `computed_at` — the SyncBadge (:1051) and the `computed_at` sort (:299).
+ * The remaining scalars are the rendered metric columns, the table sorts
+ * (`SortKey`, discovery-types.ts) and the advanced range filters (:556-562);
+ * `calmar` and `six_month_return` are filter/sort-only but still user-visible.
+ *
+ * ⚠️ `three_month:metrics_json->three_month` is a JSONB-KEY ALIAS, not the
+ * blob. StrategyTable's ONLY `metrics_json` use is the 3M advanced filter
+ * (:567-568), so projecting the whole blob to keep one number would ship every
+ * other key (alpha/beta/VaR/CVaR/skew/…) to anonymous readers. MEASURED
+ * against the TEST project on 2026-08-21: this embed-alias form returns
+ * `{"three_month": 0.0}` (HTTP 200, a real number). That measurement CORRECTS
+ * the `getStrategyDetailV2` docblock's claim below that "PostgREST cannot
+ * project a JSONB sub-tree without an RPC" — see the note there.
+ *
+ * ⚠️ `series_end:returns_series->-1->>date` is the SAME device applied to the
+ * OTHER blob, added by Phase 163 / HONEST-08. The badge on this surface must
+ * bucket on the staler of sync-recency and SERIES-recency (measured on
+ * production 2026-08-26: a published row rendered "Synced 7h ago" over a
+ * return series that ended 112 days earlier, while its own factsheet chip
+ * correctly read `Track record · old`). Answering "where does the track record
+ * end" needs ONE date, and `returns_series` is a multi-year array of
+ * `{date,value}` points — projecting it to answer a one-date question would
+ * ship the entire series to every anonymous visitor, which is the exact class
+ * this constant exists to prevent.
+ *
+ * MEASURED against the TEST project 2026-08-26, both forms, service role:
+ *   `select=computed_at,series_end:returns_series->-1->>date`
+ *     → HTTP 200, `{"computed_at":"2026-04-30T…","series_end":"2026-04-29"}`
+ *   `select=id,strategy_analytics(computed_at,series_end:returns_series->-1->>date)`
+ *     → HTTP 200, `{"strategy_analytics":{"series_end":"2026-05-29",…}}`
+ * The control `->0->>date` returned the series' FIRST date on the same rows,
+ * which is what proves `-1` resolves to the LAST element and not to a silent
+ * null. `->>` (not `->`) is load-bearing: it yields the bare `"2026-04-29"`
+ * text rather than a quoted JSON scalar.
+ *
+ * The array itself is STILL not projected here, and `queries.test.ts` pins
+ * that with a regex: `returns_series` may appear only in the arrow form.
+ *
+ * ⛔ PRECONDITION, STATED BECAUSE IT IS LOAD-BEARING AND WAS NOT (163-REVIEW).
+ * `->-1` is a POSITIONAL pick: it returns the last ELEMENT, which is the last
+ * DATE only while `returns_series` is stored date-ascending. This projection
+ * therefore depends on an ordering property of a JSONB column, and a
+ * silently-wrong "last point" here is a freshness lie on the most public
+ * surface in the product — the anonymous discovery list.
+ *
+ * THE PRECONDITION HOLDS TODAY, and it holds because a writer ASSERTS it, not
+ * because it happens to be true: `compute_all_metrics` RAISES ValueError when
+ * the returns index is not monotonic-increasing
+ * (analytics-service/services/metrics.py:491-499), and `returns_series` is
+ * built by iterating that index a few hundred lines later (:910-913). So no
+ * run that produced an unsorted series can persist one.
+ *
+ * ⚠️ IT IS NEVERTHELESS A WEAKER FORM THAN THE REST OF THE CODEBASE USES.
+ * `public.ledger_refresh_staleness`
+ * (supabase/migrations/20260825120000_ledger_refresh_staleness_view.sql, D-03)
+ * asks this exact question of this exact column and adopted
+ * `max((e->>'date')::date)` — order-independent by construction. The TS array
+ * arm (`seriesEndOf`, lib/utils.ts) was moved to the same `max` derivation by
+ * 163-REVIEW. This projection cannot follow, because PostgREST's select
+ * grammar can express a positional index but not an aggregate over a JSONB
+ * array; closing the gap needs an RPC or a generated column, which is a schema
+ * change and out of this fix's scope. Recorded rather than left implicit: the
+ * consequence of the assumption breaking is a wrong date, not an error, and an
+ * unstated assumption is how it would go unnoticed.
+ */
+const CATEGORY_RANKING_ANALYTICS_COLUMNS =
+  "computed_at, computation_status, cumulative_return, cagr, sharpe, calmar, max_drawdown, volatility, six_month_return, sparkline_returns, sparkline_drawdown, three_month:metrics_json->three_month, series_end:returns_series->-1->>date";
+
+export async function getStrategiesByCategory(categorySlug: string): Promise<RankedStrategyRow[]> {
   const supabase = await createClient();
 
   // Single query: join strategies with category filter + analytics +
@@ -215,7 +365,9 @@ export async function getStrategiesByCategory(categorySlug: string): Promise<Str
   const { data: strategies, error } = await withPublishedOnly(
     supabase
       .from("strategies")
-      .select(`*, discovery_categories!inner(slug), strategy_analytics (*)`)
+      .select(
+        `*, discovery_categories!inner(slug), strategy_analytics (${CATEGORY_RANKING_ANALYTICS_COLUMNS})`,
+      )
       .eq("discovery_categories.slug", categorySlug),
   );
 
@@ -234,18 +386,656 @@ export async function getStrategiesByCategory(categorySlug: string): Promise<Str
   // zero rows for non-owner viewers, hiding every list badge for anon (same root
   // cause as the factsheet — see readPublicVerificationSignals). One batched read
   // for the whole list.
+  //
+  // ⚠️ Phase 163 / HONEST-08 — the cast is NOT laziness, and it is narrow. It
+  // covers exactly one postgrest-js TYPE-LEVEL limitation: its select parser
+  // cannot read a NEGATIVE JSONB array index, so
+  // `series_end:returns_series->-1->>date` resolves to
+  // `ParserError<"Unable to parse renamed field …">` at compile time. The
+  // SERVER accepts it — measured against the TEST project 2026-08-26, HTTP 200
+  // with a bare ISO date, in this exact embedded form (see the projection
+  // constant's docblock for the queries and the `->0` control). This is the
+  // same shape `getMyStrategies` already casts at its own tail, and the runtime
+  // contract it stands in for is pinned by the projection tests in
+  // queries.test.ts, not by this line.
+  return shapeRankingRows(
+    strategies as unknown as { id: string; strategy_analytics: unknown }[],
+  );
+}
+
+/**
+ * Phase 149 (149-02) — the shared row-shaper for every RANKED strategy list
+ * (discovery/browse via `getStrategiesByCategory`, /my-strategies via
+ * `getMyStrategies`). Extracted verbatim from the former
+ * `getStrategiesByCategory` tail so both surfaces project trust_tier the same
+ * way and neither can drift.
+ *
+ * ⚠️ B-1 (the load-bearing correction): the `EMPTY_ANALYTICS` fallback keeps
+ * cells crash-free (they render em-dashes), but it HARDCODES
+ * `computation_status: "pending"` and `computed_at: ""` (utils.ts:178).
+ * Substituting it silently turns every never-enqueued strategy into a live
+ * "pending" job, which downstream renders as a PERMANENT "Syncing" chip — the
+ * exact forever-spinner class the 16h bound in `deriveEmptySeriesState` exists
+ * to kill. So the ABSENT-row signal must survive the fallback:
+ * `analyticsPresent` is false iff no `strategy_analytics` row exists.
+ * Same coercion precedent as `returns/route.ts:310-341` and
+ * `queries.ts:3604-3615`, which derive a `status: string | null` where null
+ * means "no row", not "pending".
+ */
+async function shapeRankingRows(
+  strategies: { id: string; strategy_analytics: unknown }[],
+): Promise<RankedStrategyRow[]> {
   const signals = await readPublicVerificationSignals(
     strategies.map((s) => (s as unknown as Strategy).id),
   );
 
   return strategies.map((s) => {
     const strat = s as unknown as Strategy;
+    const a = extractAnalytics(s.strategy_analytics);
     return {
       ...strat,
       trust_tier: (signals.get(strat.id)?.trust_tier ?? null) as Strategy["trust_tier"],
-      analytics: extractAnalytics(s.strategy_analytics) ?? { ...EMPTY_ANALYTICS, strategy_id: s.id },
+      analytics: shapeRowAnalytics(a, s.id),
+      analyticsPresent: a !== null,
     };
   });
+}
+
+/**
+ * STALE-01 — decide what a ranked list row is ALLOWED to say its numbers are.
+ *
+ * WHY THIS EXISTS (measured on the production database, 2026-08-25): of 18
+ * published strategies, exactly 1 carried a terminal-SUCCESS analytics row.
+ * The other 17 sat at `computation_status = 'failed'` while still holding the
+ * sharpe / cagr / max_drawdown values — and a non-null `computed_at` — left
+ * behind by an EARLIER run. Nothing in this read path distinguished "these
+ * numbers are current" from "these numbers are the corpse of a failed run", so
+ * every anonymous visitor to /browse/[slug] and /discovery/[slug] was shown
+ * dead figures stamped "Synced <date>" and ordered `#1`…`#18` by them.
+ *
+ * ⚠️ THE DATE IS NOT MERELY OLD — IT IS THE WRONG EVENT, and this is what
+ * makes the badge a false CLAIM rather than a stale one. The SQL status bridge
+ * `sync_strategy_analytics_status` re-stamps `computed_at = now()` on EVERY
+ * transition it writes, INCLUDING the `failed` branch (migration
+ * 20260710150000_sync_status_supersede_failed_per_kind.sql:179, and the
+ * `computing` branch at :125). So on a failed row `computed_at` dates the
+ * FAILURE while the KPIs beside it date some earlier, unrecorded success. The
+ * SyncBadge then renders that pair as "Synced <failure time>". There is no
+ * timestamp anywhere on the row that honestly describes the numbers it holds —
+ * which is precisely why the numbers cannot be shown.
+ *
+ * Phase 159 / RANK-01 already drew exactly this line ONCE, for the percentile
+ * cohort (`isRankableAnalyticsRow`, closed-sets.ts) — its docblock cites this
+ * same census. What it gated was only who RECEIVES and who JOINS a percentile
+ * population; the row's own rendered cells were never gated, so the suffix
+ * disappeared while the number it hedged stayed. This applies the SAME
+ * predicate — deliberately the shared helper and not a local re-derivation, so
+ * the cohort gate and the cell gate can never disagree — one layer earlier, to
+ * the VALUES themselves.
+ *
+ * THE SHAPE IS BORROWED, NOT INVENTED. The `a === null` branch below already
+ * knew how to say "this row has no computed analytics": substitute
+ * EMPTY_ANALYTICS and let the honest-null formatters render em-dashes
+ * (DESIGN.md's load-bearing `—` rule — "a metric that cannot be computed says
+ * so with a dash", never a fabricated value). A `failed` row is the SAME
+ * epistemic state — we do not know what these numbers describe — so it gets
+ * the same shape. No new UI, no new vocabulary, nothing red: absence, which is
+ * this codebase's established convention and the founder rule (never show a
+ * number the data cannot justify; hide the panel rather than synthesize).
+ *
+ * ⚠️ TWO FIELDS DELIBERATELY SURVIVE the substitution, and both are
+ * load-bearing:
+ *   - `computation_status`, restored from the REAL row. EMPTY_ANALYTICS
+ *     hardcodes `"pending"`, and letting that stand would turn a terminally
+ *     `failed` row into a live job — a permanent "Syncing" chip on
+ *     /my-strategies, the exact forever-spinner class the 16h bound in
+ *     `deriveEmptySeriesState` exists to kill (the B-1 defect above, one layer
+ *     down). It is also what keeps `getOwnRowPercentiles`' subject-side
+ *     `isRankableAnalyticsRow` filter reading the same status it reads today.
+ *   - `analyticsPresent` (set by the caller, NOT here) stays TRUE. The row
+ *     EXISTS; it just failed. Conflating "failed" with "never enqueued" would
+ *     re-route it through the missing-row age window and resurrect the
+ *     spinner from the other direction.
+ *
+ * WHAT THIS DOES **NOT** DO, deliberately: it does not drop the row. The
+ * percentile gate may exclude a dead row from a cohort silently, but deleting
+ * 17 of 18 published strategies from the public category pages would be a
+ * product decision (a manager's published strategy vanishing from discovery),
+ * not an honesty fix. The strategy still exists and is still published — only
+ * its numbers are unknown. Existence is a fact we have; the metrics are not.
+ * `aum`, `start_date`, name, types and trust tier all live on the `strategies`
+ * row, are NOT products of the analytics job, and are untouched here.
+ *
+ * ── STALE-01 part 2: this is now the shaper for the DETAIL fetchers too ──
+ * `getPublicStrategyDetail`, `getFactsheetDetail` and `getStrategyDetail` read
+ * the SAME `strategy_analytics` columns for a SINGLE strategy and rendered them
+ * with the same ungated confidence the ranked list did — /browse/[slug]/[id]'s
+ * hero grid, /factsheet/[id]/tearsheet's whole metric grid + monthly heatmap,
+ * /strategy/[id]'s `generateMetadata` (the KPI triple goes into `<meta
+ * description>`, OpenGraph and Twitter, where it outlives the page in every
+ * unfurl cache), and /discovery/[slug]/[id]'s factsheet payload.
+ *
+ * They reuse THIS function rather than each growing a local status check, for
+ * the reason the ranked path already gave: the row that is denied a percentile,
+ * the row that is denied its list cells and the row that is denied its DETAIL
+ * cells must be the SAME row, decided once. A per-page copy is the drift.
+ *
+ * ⚠️ The detail callers pass a NON-NULL `a` only. Their absent-row behaviour is
+ * NOT this function's `a === null` arm and must not be routed through it — two
+ * of the three answer a missing analytics row with `null` (which their pages
+ * render as "Strategy not found"), and turning that into EMPTY_ANALYTICS would
+ * resurrect a page for a strategy that never had one. Only the substitution
+ * matters here, never the fallback.
+ */
+/**
+ * Phase 163 / HONEST-08 — make `series_end` present on EVERY shaped row, not
+ * just the ones whose read projected the alias.
+ *
+ * Two reads feed `shapeRankingRows` and they carry different columns. The anon
+ * ranked read projects `series_end:returns_series->-1->>date` explicitly (see
+ * CATEGORY_RANKING_ANALYTICS_COLUMNS); `getMyStrategies` keeps the wildcard
+ * embed under the D-02 owner-scoped exemption, so it carries the whole
+ * `returns_series` array and NO alias. Without this the owner surface would
+ * see `series_end === undefined` on every row and the badge would cap at
+ * "unknown" for rows whose series is right there in the payload — a
+ * conservatism with no informational excuse.
+ *
+ * ⚠️ This is a DERIVATION, never a fabrication: a missing/empty/unparseable
+ * series answers `null` (unknown), which the freshness resolver treats as
+ * "cannot support a freshness claim" — never as "fine". And it does not touch
+ * the anon path's payload shape: when the alias ANSWERED, that answer is
+ * authoritative and is left alone.
+ *
+ * ⛔ "ANSWERED" MEANS TRUTHY, NOT MERELY DEFINED (163-REVIEW, finding 3). The
+ * guard was `!== undefined`, which is the same footgun `seriesEndOf` carried:
+ * `EMPTY_ANALYTICS` sets `series_end: null` EXPLICITLY, and the arm above hands
+ * this function rows composed over that constant, so a defined `null` short-
+ * circuited the derivation for a row whose `returns_series` was right there.
+ * A falsy scalar is not an answer — re-deriving it either finds the array (the
+ * repair) or returns `null` again (unchanged). Nothing that genuinely answered
+ * is overwritten.
+ */
+function withResolvedSeriesEnd(a: StrategyAnalytics): StrategyAnalytics {
+  if (a.series_end) return a;
+  return { ...a, series_end: seriesEndOf(a) };
+}
+
+export function shapeRowAnalytics(
+  a: StrategyAnalytics | null,
+  strategyId: string,
+): StrategyAnalytics {
+  // No `strategy_analytics` row at all — the pre-existing crash-free fallback,
+  // byte-identical to what this line has always done.
+  if (a === null) return { ...EMPTY_ANALYTICS, strategy_id: strategyId };
+
+  // Terminal SUCCESS (`complete` / `complete_with_warnings`) — the values
+  // describe a run that finished. Handed through with `series_end` resolved
+  // (a no-op on the ranked anon path, which projects the alias already).
+  if (isRankableAnalyticsRow(a)) return withResolvedSeriesEnd(a);
+
+  // failed / pending / computing — a run that did not produce these numbers.
+  //
+  // `computing` is included DELIBERATELY, and it is the one arm with a real
+  // cost: a published row under recompute loses its figures for the ~10-15 min
+  // the job runs, rather than showing the previous run's. Three reasons it is
+  // still the right arm, in order of weight:
+  //   1. The bridge stamps `computed_at = now()` on the `computing` branch too
+  //      (migration :125), so keeping the values would render "Synced just
+  //      now" over numbers from the PREVIOUS run — the identical false pairing,
+  //      merely shorter-lived. There is no honest date to show them under.
+  //   2. `isRankableAnalyticsRow` is the ONE gate Phase 159 / RANK-01 already
+  //      drew for this exact question, and it already excludes `computing`
+  //      from every percentile cohort. Splitting the arms here would mean a
+  //      row could hold a rendered figure while being barred from the ranking
+  //      computed off that same figure — two predicates that drift.
+  //   3. Measured rarity: the 20260802120000 reaper's census recorded 0 rows
+  //      at `computing` in BOTH the test and production projects, so the
+  //      window this costs anything in is close to empty in practice.
+  return {
+    ...EMPTY_ANALYTICS,
+    strategy_id: strategyId,
+    computation_status: a.computation_status,
+  };
+}
+
+/**
+ * Phase 149 (149-02, NAV-01) — every strategy the SESSION OWNER has, at every
+ * non-archived status, shaped exactly like the discovery rows so /my-strategies
+ * reaches discovery parity.
+ *
+ * ⚠️ DOCUMENTED ROADMAP DEVIATION (founder ruling 2026-08-05). SC-3 and CONTEXT
+ * name `withPublishedOrOwner` as the predicate. That helper is `published OR
+ * own` (visibility.ts:130-133) — on a page titled "My Strategies" it would
+ * render the ENTIRE published universe. This uses OWN-ONLY
+ * `.eq("user_id", userId)` at every status instead, which is strictly NARROWER
+ * than the named helper and cannot leak. RLS is the backstop: `strategies_read`
+ * = `status='published' OR user_id = auth.uid()` (migration 20260405061912:28),
+ * with `analytics_read` as its EXISTS-mirror. The ROADMAP wording's intent
+ * ("own including unpublished") is satisfied.
+ *
+ * `.neq("status", "archived")` is the W-4 ruling (2026-08-05): archived rows
+ * are excluded from the ranked list, and their keys become placeholder-eligible
+ * via `deriveStrategylessKeys` — archived is not coverage.
+ *
+ * NO `discovery_categories!inner`: `category_id` is nullable and PostgREST
+ * drops rows on an `!inner` miss, which would silently hide the owner's own
+ * uncategorised drafts (research Pitfall 4).
+ *
+ * Error contract (149 review WR-01, the `getMyWatchlist` idiom): returns
+ * `null` on a transient DB/RLS failure — never `[]` — so the page can
+ * distinguish "empty account" (empty-success, still `[]`) from "fetch failed"
+ * and render a temporarily-unavailable notice instead of the definitive
+ * "No strategies yet." empty state + wizard CTA to an owner who HAS
+ * strategies. Still no throw (the `getUserApiKeys` idiom is for money paths):
+ * a degraded render beats an error boundary here, and a fetched row is never
+ * FABRICATED. `captureToSentry` keeps the ops signal (the getPercentiles
+ * idiom).
+ */
+export async function getMyStrategies(
+  userId: string,
+): Promise<RankedStrategyRow[] | null> {
+  const supabase = await createClient();
+
+  const { data, error } = await supabase
+    .from("strategies")
+    // RANK-02 / D-02 EXEMPTION — the wildcard analytics embed stays HERE and
+    // only here: the `.eq("user_id", userId)` on the next line scopes this read
+    // to the session owner's OWN rows, so the columns RANK-02 keeps from
+    // anonymous readers (daily_returns, metrics_json, data_quality_flags) never
+    // leave the owner they belong to. Every other embed in the class is now an
+    // explicit projection; adding a NON-owner-scoped caller to this function
+    // would silently re-open that class.
+    .select(`*, strategy_analytics (*)`)
+    .eq("user_id", userId)
+    .neq("status", "archived");
+
+  if (error) {
+    console.error("[queries.getMyStrategies] supabase error:", error.message ?? error);
+    captureToSentry(error, { tags: { op: "getMyStrategies" }, level: "error" });
+    return null;
+  }
+
+  return shapeRankingRows(
+    (data ?? []) as unknown as { id: string; strategy_analytics: unknown }[],
+  );
+}
+
+/**
+ * Review round 2 F6 — "does this owner have ANY non-archived strategy?", asked
+ * as an existence question instead of by fetching the whole ranked list and
+ * reading `.length`.
+ *
+ * The allocations dashboard only ever needed the boolean (the D-15 empty-state
+ * arm-2/arm-3 discriminator), but was calling `getMyStrategies`, which selects
+ * `*, strategy_analytics (*)` — every JSONB series column (daily_returns,
+ * returns_series, drawdown_series, rolling_metrics, monthly_returns,
+ * sparklines) for every non-archived strategy — and then does a SECOND, serial
+ * round-trip through `readPublicVerificationSignals` to shape rows that were
+ * discarded on the next line. On every SSR render of the money surface.
+ *
+ * ⚠️ The null-vs-empty contract is the load-bearing part and is PRESERVED
+ * verbatim from `getMyStrategies`: `null` means the read failed (the page
+ * renders its temporarily-unavailable notice), `false` means the read
+ * succeeded and the owner genuinely has none (the definitive "No strategies
+ * yet." empty state + wizard CTA). Collapsing a failure into `false` would
+ * tell an owner who HAS strategies that they have none. No throw — a degraded
+ * render beats an error boundary here (the `getMyWatchlist` idiom the sibling
+ * docblock above names).
+ *
+ * Same predicate as `getMyStrategies` — owner-scoped + the W-4 archived rule —
+ * so the two can only ever disagree if one of them changes its filter. `id` is
+ * the narrowest projection PostgREST will accept; `.limit(1)` stops the read at
+ * the first row.
+ */
+export async function hasAnyOwnStrategies(
+  userId: string,
+): Promise<boolean | null> {
+  const supabase = await createClient();
+
+  const { data, error } = await supabase
+    .from("strategies")
+    .select("id")
+    .eq("user_id", userId)
+    .neq("status", "archived")
+    .limit(1);
+
+  if (error) {
+    console.error(
+      "[queries.hasAnyOwnStrategies] supabase error:",
+      error.message ?? error,
+    );
+    captureToSentry(error, { tags: { op: "hasAnyOwnStrategies" }, level: "error" });
+    return null;
+  }
+
+  return (data ?? []).length > 0;
+}
+
+/** Phase 149 (149-02) — an active key with no live strategy behind it. */
+export type StrategylessKey = { id: string; exchange: SupportedExchange; label: string };
+
+/**
+ * Phase 151 (151-02, AUM-04) — THE manager-role discriminator: which of the
+ * owner's keys are already feeding a LIVE strategy they run as a MANAGER?
+ *
+ * ⚠️ ROLE, never VENUE. `exchange === "mt5"` is the named wrong-fix class
+ * (ROADMAP + CONTEXT). The founder's three deribit keys are equally
+ * manager-side (they hang off the Alpha Centauri composite), and a future
+ * manager-side bybit key would slip straight through a venue test.
+ *
+ * ⚠️ Coverage must consider BOTH link forms. `strategies.api_key_id` is the
+ * direct link; `strategy_keys` (migration 20260710120000) is the composite
+ * link, where N keys map to 1 strategy — the Alpha Centauri composite carries
+ * its 3 keys that way and has `api_key_id: null`.
+ *
+ * ⚠️ W-4 ruling (2026-08-05): archived strategies are NOT coverage. The owner
+ * archived them, so their keys are the owner's to use again.
+ *
+ * Extracted from `deriveStrategylessKeys` and SHARED with the allocator book
+ * gate in `getMyAllocationDashboard`. What the two callers share is the
+ * MECHANISM, not the result:
+ *   • the two-link-form join (`strategies.api_key_id` ∪ `strategy_keys`), and
+ *   • the W-4 archived rule (archived ≠ coverage),
+ * so neither caller can quietly grow a third link form or a different archived
+ * rule.
+ *
+ * ⚠️ They do NOT subtract the same set, by design. The ROLE narrowing lives in
+ * the AUM-04 caller, which passes only strategies failing `isAllocatable`
+ * (`getMyAllocationDashboard`, the `deriveStrategyLinkedKeyIds(...)` call site
+ * — search "Filtered HERE, at the role call site"). /my-strategies asks a
+ * COVERAGE question ("does this key have a strategy behind it?") where an
+ * own-capital strategy IS coverage, so it passes the strategies unfiltered.
+ * One helper, two questions: an own-capital strategy's key is covered on
+ * /my-strategies (no "No strategy yet" placeholder) and still allocator-
+ * eligible for the book. Changing which strategies reach this helper is a
+ * CALLER-side decision; do not re-add a role filter in here.
+ */
+export function deriveStrategyLinkedKeyIds(
+  ownStrategies: readonly { id: string; api_key_id: string | null; status: string }[],
+  strategyKeyLinks: readonly { strategy_id: string; api_key_id: string }[],
+): Set<string> {
+  // W-4: archived ≠ coverage.
+  const live = ownStrategies.filter((s) => s.status !== "archived");
+  const liveIds = new Set(live.map((s) => s.id));
+
+  return new Set<string>([
+    ...live
+      .map((s) => s.api_key_id)
+      .filter((id): id is string => id != null),
+    // A key may hold TWO disjoint windows on the same composite (there is no
+    // (strategy_id, api_key_id) uniqueness constraint) — the Set de-dupes.
+    // Links whose strategy is archived or not the owner's are dropped by the
+    // liveIds membership check.
+    ...strategyKeyLinks
+      .filter((l) => liveIds.has(l.strategy_id))
+      .map((l) => l.api_key_id),
+  ]);
+}
+
+/**
+ * @internal Exported for unit testing only (the `isPerKeyDailiesEligibleKey`
+ * precedent) — see `queries.my-strategies.test.ts`.
+ *
+ * The Delta-5 anti-join: which of the owner's ACTIVE keys have no live
+ * strategy behind them?
+ *
+ * ⚠️ Coverage must consider BOTH link forms. `strategies.api_key_id` is the
+ * direct link; `strategy_keys` (migration 20260710120000) is the composite
+ * link, where N keys map to 1 strategy. The founder's Alpha Centauri composite
+ * carries 3 keys that way and has `api_key_id: null` — an `api_key_id`-only
+ * anti-join fabricates 3 spurious placeholders on the founder's own account
+ * (PROD census 2026-08-05: 8 active keys → 4 strategies → exactly 2 bare keys).
+ *
+ * ⚠️ W-4 ruling (2026-08-05): archived strategies are NOT coverage. The owner
+ * archived them, so their keys must reappear as placeholders — matching
+ * `getMyStrategies`'s `.neq("status", "archived")` exclusion from the list.
+ *
+ * Eligibility reuses the exported `isPerKeyDailiesEligibleKey` predicate
+ * (queries.ts) rather than re-deriving `is_active && sync_status !== "revoked"
+ * && disconnected_at == null`.
+ */
+export function deriveStrategylessKeys(
+  keys: Pick<
+    ApiKeyUserView,
+    "id" | "exchange" | "label" | "is_active" | "sync_status" | "disconnected_at"
+  >[],
+  ownStrategies: readonly { id: string; api_key_id: string | null; status: string }[],
+  strategyKeyLinks: readonly { strategy_id: string; api_key_id: string }[],
+): StrategylessKey[] {
+  const covered = deriveStrategyLinkedKeyIds(ownStrategies, strategyKeyLinks);
+
+  return keys
+    .filter(isPerKeyDailiesEligibleKey)
+    .filter((k) => !covered.has(k.id))
+    .map(({ id, exchange, label }) => ({
+      id,
+      exchange: exchange as SupportedExchange,
+      label,
+    }));
+}
+
+/**
+ * Phase 149 (149-02, Delta 5) — the owner's ACTIVE keys that have no live
+ * strategy behind them, rendered as "No strategy yet" placeholder rows.
+ *
+ * All three reads are OWNER-SCOPED on the USER client (`user_id`/`owner_id`),
+ * so RLS is a backstop rather than the only gate. `api_keys` MUST project
+ * `API_KEY_USER_COLUMNS` — after migration 027 (SEC-005) any other projection
+ * silently returns NULL for revoked columns on a user client.
+ *
+ * Error contract matches `getMyStrategies` (149 review WR-01): `null` on a
+ * transient DB failure so the page renders its unavailable notice instead of
+ * silently dropping the placeholder rows and the K sentence; `[]` stays the
+ * honest empty-success. A placeholder row is never fabricated, and Sentry
+ * keeps the ops signal.
+ */
+export async function getStrategylessActiveKeys(
+  userId: string,
+): Promise<StrategylessKey[] | null> {
+  const supabase = await createClient();
+
+  // `strategy_keys` (migration 20260710120000) is NOT present in the generated
+  // `database.types.ts` — the types file predates the table and has not been
+  // regenerated. Every other reader in the codebase filters on `strategy_id`
+  // (a column name the type-checker resolves against some OTHER generated
+  // table), which is why none of them hit this; an owner-scoped read cannot
+  // dodge it. Narrow ONE builder to the exact shape used here rather than
+  // widening the whole client, so the owner scope stays a literal
+  // `.eq("owner_id", …)`. Regenerating database.types.ts is the real fix and is
+  // logged as deferred (out of this plan's declared file scope).
+  type StrategyKeyLinkRow = { strategy_id: string; api_key_id: string };
+  const strategyKeysTable = (
+    supabase as unknown as {
+      from: (relation: "strategy_keys") => {
+        select: (columns: string) => {
+          eq: (
+            column: string,
+            value: string,
+          ) => PromiseLike<{
+            data: StrategyKeyLinkRow[] | null;
+            error: { message: string } | null;
+          }>;
+        };
+      };
+    }
+  ).from("strategy_keys");
+
+  const [keysRes, strategiesRes, linksRes] = await Promise.all([
+    supabase.from("api_keys").select(API_KEY_USER_COLUMNS).eq("user_id", userId),
+    // `status` is projected so the archived filter is decidable in-memory.
+    supabase.from("strategies").select("id, api_key_id, status").eq("user_id", userId),
+    strategyKeysTable.select("strategy_id, api_key_id").eq("owner_id", userId),
+  ]);
+
+  const error = keysRes.error ?? strategiesRes.error ?? linksRes.error;
+  if (error) {
+    console.error(
+      "[queries.getStrategylessActiveKeys] supabase error:",
+      error.message ?? error,
+    );
+    captureToSentry(error, { tags: { op: "getStrategylessActiveKeys" }, level: "error" });
+    return null;
+  }
+
+  // Trust-boundary guard, mirroring getUserApiKeys:2078-2101 — the DB column is
+  // plain TEXT with no CHECK constraint, so a typo row would break downstream
+  // EXCHANGE_DISPLAY lookups with `undefined`. Drop + escalate.
+  const rows = (keysRes.data ?? []) as ApiKeyUserView[];
+  const validKeys: ApiKeyUserView[] = [];
+  let droppedRows = 0;
+  for (const row of rows) {
+    if (SUPPORTED_EXCHANGE_SET.has(row.exchange as SupportedExchange)) {
+      validKeys.push(row);
+    } else {
+      droppedRows += 1;
+    }
+  }
+  if (droppedRows > 0) {
+    console.warn(
+      "[queries.getStrategylessActiveKeys] dropped api_keys rows with unknown exchange",
+      { userId, dropped: droppedRows },
+    );
+    captureToSentry(
+      new Error(
+        "[queries.getStrategylessActiveKeys] dropped api_keys rows with unknown exchange",
+      ),
+      {
+        tags: {
+          op: "getStrategylessActiveKeys",
+          reason: "unknown_exchange_in_api_key_row",
+        },
+        extra: { userId, dropped: droppedRows },
+        level: "warning",
+      },
+    );
+  }
+
+  return deriveStrategylessKeys(
+    validKeys,
+    (strategiesRes.data ?? []) as { id: string; api_key_id: string | null; status: string }[],
+    linksRes.data ?? [],
+  );
+}
+
+/**
+ * Phase 149 (149-02) — the /my-strategies percentile helper.
+ *
+ * ONE published-universe fetch (I-2 ruling): returns the own-row map, the
+ * published map computed from the SAME population via the SAME core, and the
+ * population size — so the page never makes a second `getPercentiles` call.
+ * `populationSize` is byte-equal to the old
+ * `Object.keys(await getPercentiles()).length`, which is the N the comparison
+ * copy on the page claims.
+ */
+export type OwnRowPercentiles = {
+  ownMap: PercentileMap;
+  publishedMap: PercentileMap;
+  populationSize: number;
+};
+
+/**
+ * Score the owner's OWN rows — drafts and private rows included — against the
+ * PUBLISHED population, without ever joining them to it.
+ *
+ * ⚠️ security_requirement (d) + FOUNDER RULING / W-A 2026-08-05: own rows never
+ * enter the population OTHER rows are scored against. The population query
+ * below is the same un-scoped `withPublishedOnly(...)` shape `getPercentiles`
+ * uses; an own row's value participates ONLY in its own self-inclusive score
+ * (see percentile-core's header). So a draft is told "if published, this would
+ * sit at Pnn" LITERALLY, and it cannot shift any public rank.
+ *
+ * Both `< 5` thresholds mirror `getPercentiles` exactly — including RANK-01's
+ * gate: the second threshold counts RANKABLE rows (those passing
+ * `isRankableAnalyticsRow`), not every row carrying an analytics embed. So the
+ * page's Pnn presence and its "ranked against N strategies" copy flip together,
+ * and the N it claims is the same honest denominator /discovery ranks against —
+ * the page can never show a rank while claiming there is no comparison set, nor
+ * count a dead `failed` row into the comparison set it names.
+ *
+ * The gate is applied to the SUBJECTS too, not only to the population: an own
+ * row whose analytics are `failed`/`pending`/`computing` (or absent, which
+ * arrives as EMPTY_ANALYTICS' `"pending"`) gets NO entry in `ownMap`, and the
+ * page renders that as "no rank". A `failed` row can still carry a stale
+ * sharpe/cagr from an earlier successful run, so without this the owner would
+ * be shown a percentile computed from dead numbers — and, being gated out of
+ * the population, scored as a NON-member of it. Hence: failed/stale analytics
+ * can neither contribute to NOR receive a percentile.
+ *
+ * The gate reads `computation_status`, NOT published status — deliberately. A
+ * DRAFT whose analytics are `complete` is still scored, because that is the
+ * whole point of the own-row map: "if published, this would sit at Pnn".
+ *
+ * `getPercentiles` remains the discovery-surface caller; plan 04 calls ONLY
+ * this helper.
+ */
+export async function getOwnRowPercentiles(
+  ownRows: readonly { id: string; analytics: StrategyAnalytics }[],
+): Promise<OwnRowPercentiles | null> {
+  const supabase = await createClient();
+
+  // RANK-01: same composition as getPercentiles — the gate column rides
+  // ALONGSIDE the byte-frozen KPI list, never appended to it.
+  const { data: strategies, error } = await withPublishedOnly(
+    supabase
+      .from("strategies")
+      .select(
+        `id, strategy_analytics (${PERCENTILE_ANALYTICS_COLUMNS}, ${PERCENTILE_GATE_COLUMN})`,
+      ),
+  );
+
+  if (error) {
+    console.error("[queries.getOwnRowPercentiles] supabase error:", error.message ?? error);
+    captureToSentry(error, { tags: { op: "getOwnRowPercentiles" }, level: "error" });
+    return null;
+  }
+  if (!strategies) return null;
+  if (strategies.length < 5) return null;
+
+  const populationRows: { id: string; analytics: Record<string, number | null> }[] = [];
+  for (const s of strategies) {
+    const a = extractAnalytics((s as Record<string, unknown>).strategy_analytics);
+    if (!a) continue;
+    // RANK-01: the SAME shared gate getPercentiles uses — deliberately the one
+    // helper and not a local predicate, so the owner surface and the public
+    // surface can never disagree about who is in the comparison set.
+    if (!isRankableAnalyticsRow(a)) continue;
+    populationRows.push({
+      id: s.id,
+      analytics: castRow<Record<string, number | null>>(a, "analytics"),
+    });
+  }
+
+  if (populationRows.length < 5) return null;
+
+  // Identity dedupe (W-A) is REFERENCE equality in the core, so an own row that
+  // is ALSO published must be handed to the scorer as the very population row
+  // it already is — otherwise a fresh copy of it would be appended to its own
+  // denominator and the founder would see one rank on /my-strategies and a
+  // different one on /discovery for the same published strategy.
+  const populationById = new Map(populationRows.map((r) => [r.id, r]));
+  const ownSubjects = ownRows
+    // RANK-01, subject side: the SAME gate the population is built with. A row
+    // that may not CONTRIBUTE a rank may not RECEIVE one either — otherwise a
+    // `failed` row's stale KPIs would be scored against a population it was
+    // just excluded from, i.e. as a non-member, and shown to its owner as a
+    // real percentile. Rows dropped here simply have no `ownMap` entry, which
+    // /my-strategies already renders as "no rank".
+    .filter((r) => isRankableAnalyticsRow(r.analytics))
+    .map(
+      (r) =>
+        populationById.get(r.id) ?? {
+          id: r.id,
+          analytics: castRow<Record<string, number | null>>(r.analytics, "analytics"),
+        },
+    );
+
+  const publishedMap = scoreAgainstPopulation(populationRows, populationRows);
+
+  return {
+    ownMap: scoreAgainstPopulation(ownSubjects, populationRows),
+    publishedMap,
+    populationSize: Object.keys(publishedMap).length,
+  };
 }
 
 export async function getPopulatedCategorySlugs(): Promise<string[]> {
@@ -425,9 +1215,22 @@ export async function getPublicStrategyDetail(strategyId: string): Promise<{
   const disclosureTier = readDisclosureTier(strategyWithTier);
   const manager = await loadManagerIdentity(strategyWithTier, disclosureTier);
 
+  // STALE-01 — shape BEFORE returning, never at the render sites. This
+  // function feeds two public surfaces (/browse/[slug]/[id] and /strategy/[id],
+  // the latter through a React.cache alias that serves BOTH the page body and
+  // `generateMetadata`), so a dead row's figures must not leave the server at
+  // all; gating per-consumer would have to be repeated in four places, one of
+  // which is a metadata builder whose output is cached by third parties.
+  //
+  // The `?? null` arm is UNCHANGED: no analytics row still means `null` here,
+  // which both callers render as their existing not-found / placeholder state.
+  const publicAnalytics = extractAnalytics(strategy.strategy_analytics);
+
   return {
     strategy: strategyWithTier,
-    analytics: extractAnalytics(strategy.strategy_analytics),
+    analytics: publicAnalytics
+      ? shapeRowAnalytics(publicAnalytics, strategyId)
+      : publicAnalytics,
     manager,
     disclosureTier,
   };
@@ -456,16 +1259,65 @@ export async function getFactsheetDetail(strategyId: string): Promise<{
   const analytics = extractAnalytics(strategy.strategy_analytics);
   if (!analytics) return null;
 
+  // STALE-01 — the tearsheet is the widest single-strategy metric surface in
+  // the app (hero grid, detail grid, the `metrics_json` VaR/CVaR/best/worst
+  // block and the monthly-returns heatmap) and it is PUBLIC: /factsheet/[id]/
+  // tearsheet sits in PUBLIC_ROUTES so a cap-intro recipient can open it
+  // without a login. Its PDF wrapper already refuses a non-computed strategy
+  // with a 400, but the wrapper only guards the door it owns — the HTML page it
+  // screenshots is directly reachable and had no gate at all, so the numbers
+  // the PDF withheld were served in full to anyone with the URL. Shaping here
+  // closes the page and the wrapper's side door with one predicate. Nulling
+  // `metrics_json` and `monthly_returns` (EMPTY_ANALYTICS holds both as null)
+  // is what empties the heatmap and the VaR block; the surrounding sections
+  // already hide themselves on a null.
+  const shapedAnalytics = shapeRowAnalytics(analytics, strategyId);
+
   const disclosureTier = readDisclosureTier(strategy);
   const manager = await loadManagerIdentity(strategy, disclosureTier);
 
   return {
     strategy,
-    analytics,
+    analytics: shapedAnalytics,
     manager,
     disclosureTier,
   };
 }
+
+/**
+ * The anon-safe detail projection. Excludes all three RANK-02 columns
+ * (`daily_returns`, `metrics_json`, `data_quality_flags`) and RETAINS
+ * `computation_status`, which is mandatory in every variant — the detail
+ * surfaces derive their still-computing placeholder from it, and
+ * `computed_at` drives the freshness sentinel.
+ *
+ * Membership IS `PUBLIC_ANALYTICS_COLUMNS` (the projection
+ * `getPublicStrategyDetail` already uses for the ANON factsheet at
+ * `/strategy/[id]`): that is the measured anon-detail need, and the two lists
+ * describing the same surface must not disagree.
+ *
+ * ⭐ It is an ALIAS, not a copy. This was a byte-for-byte duplicate of that
+ * literal, with the mirroring enforced by nothing — two independently-editable
+ * strings both claiming to be "the anon-safe analytics column set". Drift is
+ * asymmetric and security-relevant: widening the copy ships an extra column
+ * under `getStrategyDetail`'s only projection (the discovery-only wider list
+ * was removed in Phase 169.1 plan 01), which is precisely the door an
+ * explicit projection exists to keep shut. Binding the name to the
+ * original makes the mirror true by construction. The separate name is kept
+ * because the two lists are separate DECISIONS that merely coincide today —
+ * if the anon detail surface ever needs a column the factsheet does not (or
+ * vice versa), this is the seam to widen, and the lockstep pin in
+ * queries.test.ts is what will notice.
+ *
+ * ⚠️ Measured at HEAD (159-03): `/strategy/[id]` does NOT call
+ * `getStrategyDetail` — it calls `getPublicStrategyDetail`, aliased locally
+ * through `cache()` (page.tsx:18). RESEARCH classified this function as
+ * anon-reachable via that page; that classification was reading the LOCAL
+ * alias, not this export. This function's only production caller today is the
+ * AUTHED discovery detail page, so `public` is the safe default for future
+ * callers rather than a live anon path.
+ */
+const STRATEGY_DETAIL_PUBLIC_ANALYTICS_COLUMNS = PUBLIC_ANALYTICS_COLUMNS;
 
 export async function getStrategyDetail(
   strategyId: string,
@@ -512,9 +1364,15 @@ export async function getStrategyDetail(
   // discovery_categories with `!inner` + an `.eq("discovery_categories.slug",
   // …)` predicate. PostgREST drops the row entirely when the inner-join
   // misses, so a slug-shuffle URL turns into a clean null → not-found UI.
+  // Phase 159 (159-03 / RANK-02, D-02): the analytics embed is an explicit
+  // column list — never a wildcard (Phase 169.1 plan 01 removed the
+  // discovery-only wider list with the page assembly that read it). RLS is ROW-level and cannot
+  // hide a column, so the projection is the only control over which analytics
+  // columns leave the database.
+  const analyticsColumns = STRATEGY_DETAIL_PUBLIC_ANALYTICS_COLUMNS;
   const baseSelect = expectedCategorySlug
-    ? "*, discovery_categories!inner(slug), strategy_analytics (*)"
-    : "*, strategy_analytics (*)";
+    ? `*, discovery_categories!inner(slug), strategy_analytics (${analyticsColumns})`
+    : `*, strategy_analytics (${analyticsColumns})`;
 
   // NEW-C03-03 / NEW-C38-01: add the `status='published'` predicate as
   // defence-in-depth mirror of all sibling fetchers (getPublicStrategyDetail,
@@ -571,9 +1429,24 @@ export async function getStrategyDetail(
   const disclosureTier = readDisclosureTier(strategyWithTier);
   const manager = await loadManagerIdentity(strategyWithTier, disclosureTier);
 
+  // STALE-01 — /discovery/[slug]/[strategyId] is AUTHED but CROSS-TENANT: every
+  // allocator reads other managers' published rows through it. Since Phase
+  // 169.1 plan 01 that page builds its `FactsheetView` through the shared
+  // `fetchAndBuildPayloadWithReason`, whose own G1 gate refuses a failed run,
+  // and reads only the header, tier and gates from this row. Shaping still
+  // withholds a not-computed row's figures here, so nothing this function
+  // returns can show a failed run's numbers. `shapeRowAnalytics` is the same
+  // call the ranked list and the two public detail fetchers make.
+  //
+  // The `?? EMPTY_ANALYTICS` fallback below is UNCHANGED and still the
+  // absent-row arm; only a PRESENT-but-not-computed row is substituted.
+  const detailAnalytics = extractAnalytics((strategy as unknown as { strategy_analytics?: unknown }).strategy_analytics);
+
   return {
     strategy: strategyWithTier,
-    analytics: extractAnalytics((strategy as unknown as { strategy_analytics?: unknown }).strategy_analytics) ?? { ...EMPTY_ANALYTICS, strategy_id: strategyId },
+    analytics: detailAnalytics
+      ? shapeRowAnalytics(detailAnalytics, strategyId)
+      : { ...EMPTY_ANALYTICS, strategy_id: strategyId },
     manager,
     disclosureTier,
   };
@@ -708,9 +1581,19 @@ export interface StrategyV2Detail {
  * Analytics columns: every field that getStrategyDetailV2 unpacks below.
  * `metrics_json` is intentionally a single blob fetch — its keys
  * (history_days, equity_series_1y, btc_benchmark_returns, benchmark_returns,
- * alpha/beta/IR/Treynor) drive multiple panels and PostgREST cannot project
- * a JSONB sub-tree without an RPC. Trimming the surrounding scalar/array
+ * alpha/beta/IR/Treynor) drive multiple panels, so pulling the blob once beats
+ * enumerating a dozen key aliases. Trimming the surrounding scalar/array
  * columns is the bandwidth win the p95<50ms detail-fetch contract requires.
+ *
+ * ⚠️ CORRECTION (Phase 159 / 159-03). This docblock previously asserted that
+ * "PostgREST cannot project a JSONB sub-tree without an RPC". That is FALSE
+ * and was corrected by measurement, not by argument: against the TEST project
+ * on 2026-08-21, `strategy_analytics(three_month:metrics_json->three_month)`
+ * returned HTTP 200 with `{"three_month": 0.0}` — a real number under the
+ * alias. The blob fetch HERE remains the right call for the reason above (many
+ * keys, one panel-set), but the capability exists and is now used by
+ * CATEGORY_RANKING_ANALYTICS_COLUMNS to keep the whole blob away from
+ * anonymous list readers.
  */
 const STRATEGY_V2_STRATEGY_COLUMNS =
   "id, name, start_date, supported_exchanges, strategy_types, subtypes, markets, leverage_range, avg_daily_turnover";
@@ -1317,6 +2200,176 @@ export async function getPortfolioStrategies(portfolioId: string) {
 }
 
 /**
+ * Phase 150 / OWN-03 — one of the caller's own-capital-marked strategies.
+ *
+ * The Holdings STRATEGIES panel is UNION-shaped (D-12-A): marked strategies ∪
+ * strategies with an existing position. This type is the FIRST half — a
+ * marked strategy that may have no `portfolio_strategies` row at all, which is
+ * exactly why it cannot be expressed as a widening of the dashboard's
+ * position-rooted embed.
+ *
+ * `strategy_analytics` reuses the dashboard payload's `Pick` so the adapter
+ * reads the same scalar fields off both halves of the union with no cast.
+ *
+ * Review WR-01 — the series IS resolved for this payload (an API-ingested
+ * strategy has `daily_returns = NULL` in the DB and its real track in
+ * `returns_series`, so a raw-column reader strands every such row), but —
+ *
+ * Review round 3 E2 — the resolved series is CONSUMED SERVER-SIDE and never
+ * emitted. This payload is handed straight to a `"use client"` tree
+ * (page.tsx → AllocationsTabs → HoldingsTabPanel), so every field here is
+ * serialized into the RSC flight payload on first paint. Its only consumer was
+ * `computeMtd`, which reads ~31 days off the end of a potentially multi-year
+ * series to produce ONE number — and a strategy that is both marked AND
+ * positioned shipped that series TWICE, since `payload.strategies` carries the
+ * same embed. So the server computes `mtd` here and neither `daily_returns` nor
+ * the raw `returns_series` crosses the boundary for this panel.
+ */
+export interface OwnCapitalStrategy {
+  id: string;
+  name: string | null;
+  codename: string | null;
+  disclosure_tier: DisclosureTier;
+  status: string | null;
+  capital_ownership: CapitalOwnership | null;
+  /**
+   * Month-to-date return, computed SERVER-side by the shared `computeMtd` off
+   * the resolved series. `null` when the strategy has no usable series — the
+   * same value the client-side call produced, by construction: it is the same
+   * function on the same input, not a reimplementation.
+   */
+  mtd: number | null;
+  strategy_analytics: Pick<
+    StrategyAnalytics,
+    "cagr" | "sharpe" | "volatility" | "max_drawdown"
+  > | null;
+}
+
+/**
+ * Phase 150 / OWN-03 — the caller's own-capital-marked, non-archived
+ * strategies: everything the Holdings panel may offer an `Allocate…` action
+ * for, whether or not money is behind it yet.
+ *
+ * The `.eq("user_id", userId)` tenant gate is kept INLINE with the query (the
+ * `match_decisions` fan-out convention at :3752-3757) so a reviewer cannot
+ * accidentally drop it while editing the projection — this feeds a money
+ * surface, and a missing owner filter would offer another allocator's
+ * strategies as allocatable.
+ *
+ * `capital_ownership` is filtered through the imported `OWN_CAPITAL` constant
+ * rather than an inline string. The phase gate greps this file for the raw
+ * mark value and expects ZERO occurrences, so the value is deliberately not
+ * spelled anywhere here — including in this comment, which the grep also
+ * reads (the 140.2-08 / Plan-02 self-matching-comment lesson). A second
+ * spelling of the domain is the drift `capital-ownership.ts` exists to
+ * prevent (T-150-07).
+ *
+ * The `strategy_analytics` embed carries BOTH `daily_returns` AND
+ * `returns_series`. A bare `daily_returns` reader strands every API-ingested
+ * strategy at `[]` — the repo-wide phase-147 sweep
+ * (`phase-147-series-resolution-guards.test.ts:204`) fails the build on a
+ * single-column select here.
+ *
+ * Review WR-01 — selecting both columns is necessary but NOT sufficient: the
+ * rows are mapped through `resolveDailyReturnSeries` below. Returning the raw
+ * rows satisfied the grep while leaving the MTD column blank for every
+ * marked-but-unallocated API-key strategy — this phase's primary persona, since
+ * the capital question is asked at key-add.
+ *
+ * Review round 3 E2 — the resolved series is REDUCED here (`computeMtd`) and
+ * dropped; the payload carries the scalar. Both series columns stay in the
+ * SELECT — that is the input the resolution needs, and the phase-147 sweep
+ * greps this select, not the return shape.
+ *
+ * Error contract mirrors `getMyStrategies`: `null` on a transient DB/RLS
+ * failure — never `[]` — so a caller can distinguish "nothing marked yet"
+ * (empty success) from "fetch failed" and avoid rendering a definitive
+ * empty state to an owner who HAS marked strategies.
+ */
+export async function getOwnCapitalStrategies(
+  userId: string,
+): Promise<OwnCapitalStrategy[] | null> {
+  const supabase = await createClient();
+
+  const { data, error } = await supabase
+    .from("strategies")
+    .select(
+      `
+      id,
+      name,
+      codename,
+      disclosure_tier,
+      status,
+      capital_ownership,
+      strategy_analytics (
+        daily_returns,
+        cagr,
+        sharpe,
+        volatility,
+        max_drawdown,
+        returns_series
+      )
+      `,
+    )
+    .eq("user_id", userId)
+    .eq("capital_ownership", OWN_CAPITAL)
+    .neq("status", "archived");
+
+  if (error) {
+    console.error(
+      "[queries.getOwnCapitalStrategies] supabase error:",
+      error.message ?? error,
+    );
+    captureToSentry(error, {
+      tags: { op: "getOwnCapitalStrategies" },
+      level: "error",
+    });
+    return null;
+  }
+
+  // Review WR-01 — resolve the series HERE, server-side, so an API-ingested
+  // strategy (daily_returns NULL, track in returns_series) is not stranded.
+  // Review round 3 E2 — and REDUCE it here too: `computeMtd` is the shared
+  // adapter function, called rather than copied, so the number is identical to
+  // the one the client used to produce. Both series columns are then dropped
+  // (the `_dr` / `_rs` destructure, extending the :3988 idiom) — neither
+  // crosses the RSC boundary.
+  // PostgREST returns a one-to-one embed as an object but a one-to-many embed
+  // as an array; the dashboard path (:3941) tolerates both and so does this.
+  return (data ?? []).map((row) => {
+    const rowObj = row as unknown as Record<string, unknown>;
+    const rawAnalytics = rowObj.strategy_analytics;
+    const analyticsObj = (Array.isArray(rawAnalytics)
+      ? rawAnalytics[0]
+      : rawAnalytics) as Record<string, unknown> | null | undefined;
+
+    let strategy_analytics: OwnCapitalStrategy["strategy_analytics"] = null;
+    let mtd: number | null = null;
+    if (analyticsObj) {
+      const {
+        returns_series: _rs,
+        daily_returns: _dr,
+        ...analyticsRest
+      } = analyticsObj;
+      mtd = computeMtd(
+        resolveDailyReturnSeries(
+          analyticsObj.daily_returns,
+          analyticsObj.returns_series,
+        ),
+      );
+      strategy_analytics =
+        analyticsRest as OwnCapitalStrategy["strategy_analytics"];
+    }
+
+    return {
+      ...rowObj,
+      mtd,
+      strategy_analytics,
+    } as unknown as OwnCapitalStrategy;
+  });
+}
+
+/**
  * audit-2026-05-07 M-0559: the previous shape
  * `{ latest, lastGood }: { ...|null, ...|null }` permitted the impossible
  * state `{ latest: null, lastGood: <row> }` — `lastGood` is the latest
@@ -1663,6 +2716,17 @@ export interface MyAllocationDashboardPayload {
        * shipped to the client — only this boolean projection (T-111-03).
        */
       is_composite: boolean;
+      /**
+       * Phase 147 / SCEN-01 — what an EMPTY `strategy_analytics.daily_returns`
+       * MEANS for this book row: a live job ("computing"), or genuine absence
+       * ("empty"). Derived server-side by `deriveEmptySeriesState`, the SAME
+       * single predicate the lazy /returns route uses — UI-SPEC §3 forbids a
+       * second derivation table, so the composer's chip cannot disagree with
+       * itself depending on which path supplied the leg. The RAW
+       * `computation_status` column that feeds this is NEVER shipped (T-147-10);
+       * only this three-valued presentation string crosses to the client.
+       */
+      series_state: SeriesState;
       strategy_analytics: Pick<
         StrategyAnalytics,
         "daily_returns" | "cagr" | "sharpe" | "volatility" | "max_drawdown"
@@ -1710,6 +2774,12 @@ export interface MyAllocationDashboardPayload {
    * may still be running). The `history_depth_months` column carries
    * the per-venue retention cap so the UI can show venue-specific
    * warm-up copy (f9).
+   *
+   * Phase 167.1.2 / D-02: `[]` while `equityHistoryState` is not `"ready"`.
+   * These rows are the raw levels the withheld curve is built from, so they
+   * are withheld from the client payload with it (review round 1 SFH-03).
+   * `snapshotCount` and `minHistoryDepthMonths` are computed from the rows
+   * before they are withheld and stay populated.
    */
   equitySnapshots: Array<{
     asof: string;
@@ -1757,6 +2827,13 @@ export interface MyAllocationDashboardPayload {
     side: "long" | "short" | "flat" | null;
     entry_price: number | null;
     unrealized_pnl_usd: number | null;
+    /**
+     * Review C4 SFH-C4-08: the day this row's key read it (`allocator_holdings.asof`,
+     * the key's own latest read under D-16). Open Positions dates a key's rows
+     * when that day is older than the newest read. Optional so legacy fixtures
+     * compile; the dashboard read always sets it.
+     */
+    asof?: string;
   }>;
   /** Row count of TRUSTWORTHY snapshots (flagged zero-baseline rows excluded) — drives the warm-up gate (snapshotCount < 30 → KPIs render `—`). */
   snapshotCount: number;
@@ -1778,31 +2855,53 @@ export interface MyAllocationDashboardPayload {
   /** True when any active api_key has sync_status='syncing'. */
   hasSyncing: boolean;
   /**
-   * Per VOICES-ACCEPTED f7: DailyPoint[] derived from equitySnapshots
-   * via equitySnapshotsToDailyPoints. Consumed by EquityCurve /
-   * DrawdownChart through the parallel-prop path (prefer this over
-   * strategies-derived compute when provided).
+   * The allocator $-equity curve (EquityCurve / DrawdownChart parallel-prop).
+   * Phase 167.1.2 plan 11: the version-2 derived curve when `"ready"`, else
+   * `[]`. Not built from `equitySnapshots`.
    */
   equityDailyPoints: DailyPoint[];
   /**
-   * Phase 115.1 / BACKBONE-02 (RD-1 + RD-2). Provenance of `equityDailyPoints`:
-   *   - `"derived"`: the series came from the NEW keyed `allocator_equity_derived`
-   *     surface (worker-side flow-aware $-curve), used ONLY when a row exists AND
-   *     its `payload.is_trustworthy === true` AND `payload.curve` is well-formed.
-   *   - `"legacy"`: the series came from the legacy `allocator_equity_snapshots`
-   *     `value_usd` path via `equitySnapshotsToDailyPoints` (the pre-115.1
-   *     rendering, byte-unchanged).
+   * Phase 167.1.2 / D-06. Flow-neutral book returns from
+   * `allocator_equity_derived.payload.returns` when the row is version 2,
+   * mapped `{ date, value: r }`. Empty unless `equityHistoryState` is
+   * `"ready"`. Factsheet KPIs and the Scenario own-book delta read this,
+   * never ratios of `equityDailyPoints`.
+   */
+  equityDailyReturns: DailyPoint[];
+  /**
+   * Phase 169.4 plan 02 (SC3, D-09, D-69). The database BTC closes the
+   * /allocations Overview builds its BTC comparator from, read through the
+   * factsheet's own `readFactsheetBenchmark` over the book's dates
+   * (`equityDailyReturns`), so the Overview and every factsheet read one series.
+   *   - closes (`{ prices, through, dropped }`) when the history is `"ready"`;
+   *   - `{ unavailable: true }` on a read error or when the read leaves nothing
+   *     to compare (never the bundled fixture);
+   *   - `null` while the history is rebuilding: no read is issued.
+   * `getMyAllocationDashboard` ALWAYS assigns it. It is optional only so hand-
+   * built payload literals elsewhere keep type-checking; every reader treats
+   * `undefined` exactly as `null`.
    *
-   * This is repointed at the ONE producer site (`derivePhase07Fields`) so ALL
-   * downstream consumers — the equity chart, the V2 Overview factsheet
-   * (`buildAllocatorPortfolioFactsheetPayload`), and the ScenarioComposer
-   * baseline — deliberately share the SAME basis (RD-1: one producer, all
-   * consumers). The legacy fallback is LOAD-BEARING until the founder-gated
-   * per-key backfill runs: all 517 prod allocator keys currently have zero
-   * per-key rows, so a hard cutover would blank every dashboard (the A1 census
-   * safety invariant). The UI renders an honest provenance indicator off this
-   * field — a legacy-fallback curve is NEVER presented as `api_verified`-grade
-   * (RD-2 / DESIGN.md Numbers Contract honesty).
+   * ⛔ NOT named `btcBenchmark`: `EquityChartWidget` receives this whole
+   * payload and its schema already types that key as an array of daily points
+   * (onInvalid "empty"), so this object under that key would blank every ready
+   * Overview's equity curve. `EquityChartWidget.payload-contract.test.tsx` pins it.
+   */
+  btcBenchmarkPrices?: BenchmarkPricesOpt | null;
+  /**
+   * Phase 115.1 / BACKBONE-02, narrowed by Phase 167.1.2 plan 11.
+   *   - `"derived"`: a trustworthy, well-formed `payload.curve` was present.
+   *     The DISPLAY series (`equityDailyPoints`) is that curve only when the
+   *     row is also a version-2 returns series and the book is `"ready"`.
+   *   - `"legacy"`: no such curve. Snapshots are not rendered as the curve
+   *     (plan 11 removed that fallback). The label stays because the union
+   *     is pinned (`equityChartWidgetDataSchema`'s enum).
+   *
+   * The only production reader is `EquityChart`'s provenance stamp, which
+   * mounts in the `"ready"` branch only, where this is always `"derived"`.
+   * Nothing reads it while the book is rebuilding. Review C3 SFH-C3-02 /
+   * IN-02: plan 14 removed the Overview warm-up and Scenario disclosure
+   * readers. Both now choose by `equityHistoryState` alone (D-15), and no
+   * consumer may gate on this field again.
    */
   equityCurveSource: "derived" | "legacy";
   /**
@@ -1811,6 +2910,55 @@ export interface MyAllocationDashboardPayload {
    * provenance indicator (a muted freshness stamp); null on the legacy path.
    */
   derivedCurveComputedAt: string | null;
+  /**
+   * Phase 167.1.2 / D-02 ("Hide it until correct"). Whether the allocator's
+   * $-equity history may be shown. `"rebuilding"`: `equityDailyPoints` is
+   * withheld (always `[]`) because both the legacy snapshot sum and the derived
+   * curve can count one exchange account twice or read a no-sync day as zero,
+   * so the curve and every ratio built from it are unreliable. Consumers render
+   * an honest "being rebuilt" state instead and are fail-closed: every value
+   * other than an explicit `"ready"` (a missing field, `null`, `""`, a state
+   * added later) reads as `"rebuilding"`. `"ready"` requires a version-2
+   * trustworthy series, no eligible key counted through a working holder, and
+   * a known account on every eligible ccxt key (sFOX and MT5 exempt). See
+   * `equityHistoryReadiness`.
+   */
+  equityHistoryState: "rebuilding" | "ready";
+  /**
+   * Why `equityHistoryState` is not `"ready"`. Null when it is. One of
+   * `duplicate_account`, `key_not_syncing`, `account_identity_pending`,
+   * `awaiting_derivation`, `derivation_rejected`,
+   * `shared_account_no_working_key`, `shared_account_history_truncated`
+   * (review C2 round 3 R3-WR-03), `history_read_failed`.
+   */
+  equityHistoryRebuildReason: EquityHistoryRebuildReason | null;
+  /**
+   * Review C2 round 2 IN-04. When the reason is `key_not_syncing`, the ids of
+   * the keys it is about (eligible, account unknown, failing to sync), so the
+   * line can name the key when there is exactly one. `[]` under every other
+   * reason. Optional so a payload built without it (a stale cache, a hand-built
+   * fixture) renders the unnamed line rather than a wrong name.
+   */
+  equityHistoryNotSyncingKeyIds?: string[];
+  /**
+   * Review C4 SFH-C4-04. True when the history on screen (state "ready") left
+   * out at least one departed account the history rule includes, because the
+   * balance its history is measured from is gone. The derive raises the
+   * benign `departed_history_unavailable` flag in the payload's `flags` and
+   * still marks the curve trustworthy (job_worker.py); the Overview says so in
+   * one line. The flag carries no count. False whenever the curve is not shown.
+   * Optional so legacy fixtures compile; the producer always sets it.
+   */
+  departedHistoryUnavailable?: boolean;
+  /**
+   * Review C4 round 2 WR-R2-03. The keys whose rows in `holdingsSummary` were
+   * written, on `asof`, by a poll that could not read their open positions
+   * (`fetchLatestHoldingsPerKey`'s `partialReads`). Bound to the poll that
+   * wrote the rows, not to the key's current `sync_status`, so a later failed
+   * poll does not clear it. Optional so legacy fixtures compile; the dashboard
+   * read always sets it.
+   */
+  partialPositionReads?: Array<{ api_key_id: string; asof: string }>;
   /**
    * Per VOICES-ACCEPTED f9: min(history_depth_months) across the
    * allocator's snapshots, or null when every snapshot's column is
@@ -1935,6 +3083,47 @@ export interface MyAllocationDashboardPayload {
    * read-only for the composer; a subset of `apiKeys[].id`.
    */
   eligibleApiKeyIds: string[];
+  // ─────────────────────────────────────────────────────────────────────
+  // Phase 151 / 151-02 (AUM-04) — the SPLIT book-entry gate
+  // ─────────────────────────────────────────────────────────────────────
+  /**
+   * Phase 151 / AUM-04. `eligibleApiKeyIds` MINUS the keys that already feed a
+   * live strategy the owner runs as a MANAGER (`deriveStrategyLinkedKeyIds` —
+   * role, never venue). These are the keys the allocator can actually put in
+   * their own book.
+   *
+   * Read-only; the client must NEVER re-derive it. The discriminator needs two
+   * owner-scoped SSR reads (`strategies` + the `strategy_keys` composite link
+   * table) that the browser has no business making.
+   */
+  allocatorEligibleApiKeyIds: string[];
+  /**
+   * Phase 151 / AUM-04. The subset of `allocatorEligibleApiKeyIds` that has a
+   * non-empty per-key series — i.e. the keys that can actually project. The
+   * partial-book copy ("{N} of {M} keys not yet contributing") is
+   * `contributingApiKeyIds.length` of `allocatorEligibleApiKeyIds.length`; a
+   * manager key belongs to NEITHER count, because it never will contribute.
+   *
+   * Read-only; the client must NEVER re-derive it (the Python backfill owns
+   * which keys have a series — see `isPerKeyDailiesEligibleKey`).
+   */
+  contributingApiKeyIds: string[];
+  /**
+   * Phase 151 / AUM-04. `contributingApiKeyIds.length > 0` — SOME-semantics,
+   * deliberately a SIBLING of the all-or-nothing `perKeyDailiesGateSatisfied`
+   * above rather than a replacement for it.
+   *
+   * ⚠️ These two flags must never be merged. `perKeyDailiesGateSatisfied`
+   * selects the `liveBaselineMetrics` SOURCE: relaxing it to SOME-semantics
+   * would present a 2-of-8-key blend as "your live book" on the Overview KPI
+   * strip — the mixed-basis honesty regression Phase 63 ENGINE-04 hardened
+   * against. This flag answers a different question: "can the allocator reach
+   * their own book at all?" — which, for an owner who is ALSO a manager, the
+   * all-or-nothing flag answers `false` forever.
+   *
+   * Read-only; the client must NEVER re-derive it.
+   */
+  bookEntryGateSatisfied: boolean;
   // ─────────────────────────────────────────────────────────────────────
   // Phase 11 / 11-05 (onboarding & security readiness — D-02 + D-04)
   // ─────────────────────────────────────────────────────────────────────
@@ -2294,7 +3483,9 @@ export function liveBaselineMetricsFromPerKeyDailies(
     if (!returns || returns.length === 0) continue;
     strategies.push({
       id: apiKeyId,
-      name: `key ${apiKeyId}`,
+      // Phase 167.1.2 plan 07 (SC-5): a neutral constant. This unit's name is
+      // not rendered, but a raw api_key_id must not sit in a name field.
+      name: "Connected key",
       codename: null,
       disclosure_tier: "exploratory",
       strategy_types: [],
@@ -2448,27 +3639,24 @@ export function buildPerKeyReturnsByApiKeyId(
   return result;
 }
 
+const DERIVED_DAY = /^\d{4}-\d{2}-\d{2}$/;
+
 /**
- * Phase 115.1 / BACKBONE-02 (RD-1). The derived-curve trust gate + malformed-
- * payload defence for the $-equity display repoint.
- *
- * Returns the derived $-curve as `DailyPoint[]` ONLY when the row is present,
- * `payload.is_trustworthy === true`, AND `payload.curve` is a well-formed dense
- * array of `{ date: string, equity_usd: finite number }`. Any other shape —
- * absent row, untrustworthy flag, non-array curve, a single malformed/NaN point
- * — returns `null`, which drives the LEGACY fallback at the producer site. This
- * is the safety invariant: a corrupt worker-written JSONB payload must degrade
- * to the legacy snapshot render, never crash SSR and never surface a NaN
- * coordinate to the chart (T-115.1-18). The JSONB is worker-written but treated
- * as an UNTRUSTED shape here (the DB→SSR trust boundary).
- *
- * The derived curve is already dense per the interfaces contract, so it maps
- * DIRECTLY to `{ date, value }` — NO `equitySnapshotsToDailyPoints` forward-fill
- * adapter, NO `new Date()` re-parsing.
+ * Review C4 SFH-C4-04. The benign flag the derive raises when it leaves a
+ * departed key's history out for want of an anchor (`departed_history_unavailable`
+ * in `derive_allocator_equity`'s `benign_flag_tokens`, job_worker.py). The name
+ * is the writer's; do not rename it here.
  */
-export function extractTrustworthyDerivedCurve(
-  payload: unknown,
-): DailyPoint[] | null {
+const DEPARTED_HISTORY_UNAVAILABLE_FLAG = "departed_history_unavailable";
+
+/**
+ * The pre-167.1.2 curve check: trustworthy + a non-empty well-formed curve.
+ * Does NOT require version 2. `extractTrustworthyDerivedSeries` builds on it
+ * and adds the version-2 returns check. The producer also stamps
+ * `equityCurveSource` / `derivedCurveComputedAt` from it (a provenance stamp,
+ * not a gate: nothing renders or hides on it while the book is rebuilding).
+ */
+function trustworthyDerivedCurve(payload: unknown): DailyPoint[] | null {
   if (payload === null || typeof payload !== "object") return null;
   const p = payload as Record<string, unknown>;
   if (p.is_trustworthy !== true) return null;
@@ -2482,20 +3670,350 @@ export function extractTrustworthyDerivedCurve(
     const equityUsd = point.equity_usd;
     // F4a: require a strict YYYY-MM-DD calendar day — a non-empty but malformed
     // date string (e.g. "not-a-date", "2026/03/10") would otherwise reach
-    // parseISO / the SVG x-scale as a NaN coordinate. Degrade to legacy instead.
-    if (typeof date !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return null;
+    // parseISO / the SVG x-scale as a NaN coordinate.
+    if (typeof date !== "string" || !DERIVED_DAY.test(date)) return null;
     if (typeof equityUsd !== "number" || !Number.isFinite(equityUsd)) {
       return null;
     }
     points.push({ date, value: equityUsd });
   }
-  // B2 (115.1-close): an EMPTY curve is not a renderable series. A zero-anchored-
-  // keys allocator (every prod allocator today) composes { curve: [],
-  // is_trustworthy: true } — the honest-empty tokens are BENIGN in the frozen
-  // core. Returning [] here would keep `[] ?? legacy === []` and stamp the source
-  // "derived", blanking the chart while suppressing the legacy render that has
-  // real data. Degrade an empty curve to null → legacy fallback.
+  // B2 (115.1-close): an EMPTY curve is not a renderable series.
   return points.length > 0 ? points : null;
+}
+
+/**
+ * Phase 167.1.2 plan 11 (D-06, T-167.1.2-21). The display series.
+ *
+ * Returns the curve and the persisted flow-neutral returns ONLY when
+ * `version === 2`, `is_trustworthy === true`, the curve is well-formed as
+ * `trustworthyDerivedCurve`, and `returns` is a non-empty array of
+ * `{ date: YYYY-MM-DD, r: finite number }` in strictly ascending date order.
+ * Any other shape — a v1 row, a missing or reordered returns array, one
+ * non-finite `r` — returns null. The JSONB is worker-written and untrusted.
+ */
+export function extractTrustworthyDerivedSeries(
+  payload: unknown,
+): { curve: DailyPoint[]; returns: DailyPoint[] } | null {
+  if (payload === null || typeof payload !== "object") return null;
+  const p = payload as Record<string, unknown>;
+  if (p.version !== 2) return null;
+  const curve = trustworthyDerivedCurve(payload);
+  if (!curve) return null;
+  const returns = p.returns;
+  if (!Array.isArray(returns) || returns.length === 0) return null;
+  const points: DailyPoint[] = [];
+  let prevDate = "";
+  for (const raw of returns) {
+    if (raw === null || typeof raw !== "object") return null;
+    const point = raw as Record<string, unknown>;
+    const date = point.date;
+    const r = point.r;
+    if (typeof date !== "string" || !DERIVED_DAY.test(date)) return null;
+    if (prevDate !== "" && date <= prevDate) return null;
+    if (typeof r !== "number" || !Number.isFinite(r)) return null;
+    prevDate = date;
+    points.push({ date, value: r });
+  }
+  return { curve, returns: points };
+}
+
+/**
+ * Review C2 round 2 SFH-R2-05. Schedule a derived-row capture so it survives
+ * the response flush. `captureToSentry` returns its import chain for exactly
+ * this: a discarded chain can be reaped on a cold finish and the alert is lost.
+ * `after()` hands it to the platform's `waitUntil` (Next 16 docs: usable from
+ * Server Components, which is where `getMyAllocationDashboard` runs).
+ *
+ * The fallback is NOT optional (same shape as `ratelimit.ts`'s
+ * `scheduleLimiterCapture`): `after()` throws synchronously outside a request
+ * scope, and an observability call must never throw into the dashboard read.
+ * The console line before each capture is the local trace either way.
+ */
+function scheduleDerivedRowCapture(capture: Promise<void>): void {
+  try {
+    after(() => capture.catch(() => {}));
+  } catch {
+    console.warn(
+      "[queries.getMyAllocationDashboard] scheduling capture via queueMicrotask fallback (non-request scope)",
+    );
+    queueMicrotask(() => {
+      void capture.catch(() => {});
+    });
+  }
+}
+
+/**
+ * Review C2 round 3 R3-WR-04. How long one (allocator, rejection) pair stays
+ * reported. `router.refresh()` re-runs the dashboard read every 30 s while the
+ * Overview is open (AllocationsTabs' PERFORMANCE_POLL_INTERVAL_MS), and an
+ * untrustworthy row can last for days. Capturing on every load was ~120 events
+ * an hour per open tab, which kept the Sentry issue permanently active.
+ */
+export const DERIVED_ROW_CAPTURE_WINDOW_MS = 6 * 60 * 60 * 1000;
+
+// ponytail: per-instance and in memory. It resets on a cold start, and each
+// warm instance keeps its own window, so the real ceiling is one event per
+// (allocator, rejection) per 6 h per instance, not per deployment. Entries are
+// never evicted; the map holds at most one per allocator per rejection token.
+const derivedRowCaptureLastAt = new Map<string, number>();
+
+/** Whether this (allocator, rejection) may be reported now; records it if so. */
+function shouldCaptureDerivedRowRejection(
+  allocatorId: string,
+  rejection: DerivedPayloadRejection,
+): boolean {
+  const key = `${allocatorId}:${rejection}`;
+  const now = Date.now();
+  const last = derivedRowCaptureLastAt.get(key);
+  if (last !== undefined && now - last < DERIVED_ROW_CAPTURE_WINDOW_MS) return false;
+  derivedRowCaptureLastAt.set(key, now);
+  return true;
+}
+
+/** @internal Test-only reset of the R3-WR-04 capture window. */
+export function __resetDerivedRowCaptureThrottleForTests(): void {
+  derivedRowCaptureLastAt.clear();
+}
+
+/** Why the reader refused a PRESENT derived row. A token, never a value. */
+export type DerivedPayloadRejection = "not_version_2" | "untrustworthy" | "malformed";
+
+/**
+ * Review C2 SFH-05 (reader half). `null` when `extractTrustworthyDerivedSeries`
+ * accepts the payload, else the first thing it refuses: a pre-v2 row, a row the
+ * writer marked untrustworthy, or any other shape defect. The reader uses it
+ * to report a present-but-rejected row (token only) and to tell the outcomes
+ * the daily recompute answers (no row yet, or a pre-v2 row, which the daily
+ * compose rewrites as v2: review C2 round 2 R2-CR-03) apart from the ones it
+ * does not.
+ */
+export function derivedPayloadRejection(
+  payload: unknown,
+): DerivedPayloadRejection | null {
+  if (extractTrustworthyDerivedSeries(payload) !== null) return null;
+  if (payload === null || typeof payload !== "object") return "malformed";
+  const p = payload as Record<string, unknown>;
+  if (p.version !== 2) return "not_version_2";
+  if (p.is_trustworthy !== true) return "untrustworthy";
+  return "malformed";
+}
+
+/**
+ * Review C2 SFH-06. The derived-row read's outcome when the read itself
+ * failed, as distinct from "no row" (`null`). The producer turns it into
+ * `history_read_failed`, never into a promise of a daily recompute.
+ */
+export const DERIVED_ROW_READ_FAILED = "read_failed" as const;
+
+/** What the `allocator_equity_derived` read hands the producer. */
+export type DerivedEquityRowRead =
+  | { payload: unknown; computed_at: string | null }
+  | null
+  | typeof DERIVED_ROW_READ_FAILED;
+
+/**
+ * Venues whose account id can be read. sFOX has no stable id (D-10) and MT5
+ * is not in this set, so both are exempt rather than "pending".
+ */
+const ACCOUNT_IDENTITY_EXCHANGES: ReadonlySet<string> = new Set([
+  "binance",
+  "okx",
+  "bybit",
+  "deribit",
+]);
+
+export type EquityHistoryRebuildReason =
+  | "duplicate_account"
+  | "key_not_syncing"
+  | "account_identity_pending"
+  | "awaiting_derivation"
+  | "derivation_rejected"
+  | "shared_account_no_working_key"
+  | "shared_account_history_truncated"
+  | "history_read_failed";
+
+/**
+ * Why there is no display series, once the key list is clear. Only
+ * `awaiting_derivation` is answered by the daily recompute: no row yet, or a
+ * pre-v2 row. Review C2 round 2 R2-CR-03: every row written before C2 is
+ * pre-v2, and `derive-allocator-key-dailies` (05:30 UTC) re-composes each book
+ * as v2, so "recomputed once a day" is true for it. Review C2 SFH-05 / SFH-06:
+ * a v2 row the reader rejected, or a read that failed, must not be shown as a
+ * wait. Review C2 round 3 R3-WR-03: a v2 row the writer marked untrustworthy
+ * for a shared account names that cause (`untrustworthyRebuildReason`).
+ */
+export type MissingSeriesReason = Extract<
+  EquityHistoryRebuildReason,
+  | "awaiting_derivation"
+  | "derivation_rejected"
+  | "shared_account_no_working_key"
+  | "shared_account_history_truncated"
+  | "history_read_failed"
+>;
+
+/**
+ * Review C2 round 3 R3-WR-03 / SFH-R3-04. The reason for a v2 row the writer
+ * marked untrustworthy. Two of the writer's blocking tokens (job_worker's
+ * compose call puts them in `degrade_reasons`, never in `flags`) have a cause
+ * the owner can be told, so they get their own line instead of "did not pass
+ * its checks". When both are present, `shared_account_no_working_key` wins
+ * because it is the one the owner can fix; the writer sorts the tokens, so
+ * array order must not decide. Every other token, and a payload with no
+ * readable tokens, keeps `derivation_rejected`.
+ *
+ * Residual (recorded): alongside another blocker (for example `dropped_key`)
+ * the named line is still true, but fixing the key alone may not unlock the
+ * history. The TS side does not mirror the writer's blocking set.
+ */
+function untrustworthyRebuildReason(
+  payload: unknown,
+): Extract<
+  MissingSeriesReason,
+  "derivation_rejected" | "shared_account_no_working_key" | "shared_account_history_truncated"
+> {
+  const tokens =
+    payload !== null && typeof payload === "object"
+      ? (payload as Record<string, unknown>).degrade_reasons
+      : undefined;
+  if (!Array.isArray(tokens)) return "derivation_rejected";
+  if (tokens.includes("shared_account_no_working_key")) {
+    return "shared_account_no_working_key";
+  }
+  if (tokens.includes("shared_account_history_truncated")) {
+    return "shared_account_history_truncated";
+  }
+  return "derivation_rejected";
+}
+
+export type EquityHistoryKey = {
+  id: string;
+  exchange: string;
+  is_active: boolean;
+  sync_status: string | null;
+  disconnected_at: string | null;
+  venue_account_id: string | null;
+  account_share_kind: string | null;
+  account_shared_with_api_key_id: string | null;
+};
+
+function knownVenueAccountId(id: string | null | undefined): boolean {
+  return typeof id === "string" && id.trim() !== "";
+}
+
+/**
+ * A duplicate blocks "ready" only while its holder is working. "Working" is
+ * D-18's rule (`isWorkingHolder`, the column comment on account_share_kind
+ * from migration 20260927180000), the same rule the Exchanges page note uses,
+ * so the reason line and the note agree. A holder that is inactive,
+ * disconnected, failing or absent from the key list leaves the marked key
+ * ordinary. The marked key itself is judged by eligibility, as the derive job
+ * judges it.
+ */
+function countsAsDuplicate(
+  key: EquityHistoryKey,
+  byId: ReadonlyMap<string, EquityHistoryKey>,
+): boolean {
+  if (!isPerKeyDailiesEligibleKey(key)) return false;
+  if (key.account_share_kind !== "duplicate") return false;
+  const holderId = key.account_shared_with_api_key_id;
+  if (!holderId) return false;
+  const holder = byId.get(holderId);
+  if (!holder) return false;
+  return isWorkingHolder(holder);
+}
+
+/**
+ * Whether an eligible ccxt key's account is still unknown.
+ *
+ * Review C2 CR-02 / SFH-04: a key marked `duplicate` keeps a NULL
+ * `venue_account_id` for as long as its holder is live, because the holder
+ * keeps the partial unique index slot (`disconnected_at IS NULL`) whatever its
+ * status, and the stamper leaves the marked key's id NULL until the holder has
+ * left. Its account is still KNOWN: it is the holder's. So a marked duplicate
+ * whose holder is in the key list with a known id is identity-known. Reading
+ * it as unknown held the book in `account_identity_pending` for as long as a
+ * dead holder stayed connected, and no sync could ever clear that. Whether the
+ * pair then blocks "ready" is `countsAsDuplicate`'s question (a working
+ * holder), not this one.
+ */
+function identityStillPending(
+  key: EquityHistoryKey,
+  byId: ReadonlyMap<string, EquityHistoryKey>,
+): boolean {
+  if (!isPerKeyDailiesEligibleKey(key)) return false;
+  if (!ACCOUNT_IDENTITY_EXCHANGES.has(key.exchange.toLowerCase())) return false;
+  if (key.account_share_kind === "composite_member") return false;
+  if (knownVenueAccountId(key.venue_account_id)) return false;
+  const holder = key.account_shared_with_api_key_id
+    ? byId.get(key.account_shared_with_api_key_id)
+    : undefined;
+  return !(
+    key.account_share_kind === "duplicate" &&
+    holder !== undefined &&
+    knownVenueAccountId(holder.venue_account_id)
+  );
+}
+
+/** Review C2 WR-02: a key whose last sync failed (D-18's not-working statuses). */
+function failingToSync(key: EquityHistoryKey): boolean {
+  return key.sync_status !== null && NOT_WORKING_SYNC_STATUSES.has(key.sync_status);
+}
+
+/**
+ * Review C2 round 2 IN-04. The keys a `key_not_syncing` reason is about:
+ * identity-pending (the same `identityStillPending` rule the readiness check
+ * uses) AND failing to sync. `equityHistoryReadiness` returns
+ * `key_not_syncing` iff this list is non-empty and no duplicate blocks first,
+ * so the renderer can name the key when there is exactly one.
+ */
+export function notSyncingIdentityPendingKeyIds(
+  apiKeys: readonly EquityHistoryKey[],
+): string[] {
+  const byId = new Map<string, EquityHistoryKey>();
+  for (const key of apiKeys) byId.set(key.id, key);
+  return apiKeys
+    .filter((key) => identityStillPending(key, byId) && failingToSync(key))
+    .map((key) => key.id);
+}
+
+/**
+ * Phase 167.1.2 plan 11. Ready iff the version-2 series is present, no
+ * eligible key is a duplicate of a working holder, and every eligible key on
+ * okx/bybit/binance/deribit has a venue account id, is a composite member, or
+ * is a duplicate whose holder in the key list carries the shared id.
+ * The reason names the first failing condition, in that order. An unknown
+ * account on a key that is failing to sync is `key_not_syncing` (review C2
+ * WR-02); on any other key it is `account_identity_pending`.
+ *
+ * ⚠️ Review C2 fix coupling: a marked duplicate behind a NOT-working holder
+ * reads as identity-known and ordinary here, so "ready" relies on the writers
+ * counting that account once, through its working member (review CR-01's
+ * holder-drop half, in the Python writers). Ship the two together.
+ */
+export function equityHistoryReadiness(
+  apiKeys: readonly EquityHistoryKey[],
+  series: { curve: DailyPoint[]; returns: DailyPoint[] } | null,
+  missingSeriesReason: MissingSeriesReason = "awaiting_derivation",
+): { state: "ready" | "rebuilding"; reason: EquityHistoryRebuildReason | null } {
+  const byId = new Map<string, EquityHistoryKey>();
+  for (const key of apiKeys) byId.set(key.id, key);
+  if (apiKeys.some((key) => countsAsDuplicate(key, byId))) {
+    return { state: "rebuilding", reason: "duplicate_account" };
+  }
+  const pending = apiKeys.filter((key) => identityStillPending(key, byId));
+  // Review C2 WR-02: the stamper runs only after a SUCCESSFUL poll, so a key
+  // failing to sync (`error` / `sign_in_failed`; eligibility already excludes
+  // `revoked`) is never stamped while it fails. The hold stays, because its
+  // account really is unknown and the derive still counts it, but the reason
+  // names the failing key rather than promising a sync that cannot stamp it.
+  if (pending.some(failingToSync)) {
+    return { state: "rebuilding", reason: "key_not_syncing" };
+  }
+  if (pending.length > 0) {
+    return { state: "rebuilding", reason: "account_identity_pending" };
+  }
+  if (!series) return { state: "rebuilding", reason: missingSeriesReason };
+  return { state: "ready", reason: null };
 }
 
 /**
@@ -2511,6 +4029,7 @@ export function extractTrustworthyDerivedCurve(
  */
 export function derivePhase07Fields(
   apiKeys: Array<{
+    id: string;
     is_active: boolean;
     exchange: string;
     sync_status: string | null;
@@ -2518,6 +4037,13 @@ export function derivePhase07Fields(
     // DOGFOOD-1 (Phase 110.1): required by isPerKeyDailiesEligibleKey to
     // distinguish a genuinely connected key from a soft-disconnected one.
     disconnected_at: string | null;
+    // Phase 167.1.2 plan 11: read by equityHistoryReadiness. Required, not
+    // optional: a key list that omits them would read every duplicate as
+    // absent and a double-counted book as ready. getUserApiKeys projects all
+    // of them (API_KEY_USER_COLUMNS).
+    venue_account_id: string | null;
+    account_share_kind: string | null;
+    account_shared_with_api_key_id: string | null;
   }>,
   equitySnapshots: MyAllocationDashboardPayload["equitySnapshots"],
   snapshotCount: number,
@@ -2542,12 +4068,15 @@ export function derivePhase07Fields(
   equityBaselineUnknown: boolean,
   // Phase 115.1 / BACKBONE-02 (RD-1). The row read from the NEW keyed
   // `allocator_equity_derived` surface (kind='equity_curve'), or null when
-  // absent / the table is missing pre-migration. Threaded in so the ONE
-  // producer site below can gate the $-equity series onto the derived curve
-  // when trustworthy, else fall back to the legacy snapshot render. Null is
-  // the SAFETY default (legacy render) — every prod allocator hits this until
-  // the founder-gated backfill runs.
-  derivedEquityRow: { payload: unknown; computed_at: string | null } | null,
+  // there is no row. Threaded in so the ONE producer site below can gate the
+  // $-equity series onto the derived curve. Since plan 11 there is no legacy
+  // snapshot render to fall back to: without an accepted row the history is
+  // rebuilding. Review C2 SFH-06: or DERIVED_ROW_READ_FAILED when the read
+  // itself failed, which the producer names as `history_read_failed`.
+  derivedEquityRow: DerivedEquityRowRead,
+  // Review C4 round 2 WR-R2-03: the read's `partialReads`. Defaulted so
+  // callers that pass no holdings read (fixtures) name no key.
+  partialReads: ReadonlyArray<{ api_key_id: string; asof: string }> = [],
 ): Pick<
   MyAllocationDashboardPayload,
   | "equitySnapshots"
@@ -2557,8 +4086,14 @@ export function derivePhase07Fields(
   | "lastSyncAt"
   | "hasSyncing"
   | "equityDailyPoints"
+  | "equityDailyReturns"
   | "equityCurveSource"
   | "derivedCurveComputedAt"
+  | "equityHistoryState"
+  | "equityHistoryRebuildReason"
+  | "equityHistoryNotSyncingKeyIds"
+  | "departedHistoryUnavailable"
+  | "partialPositionReads"
   | "minHistoryDepthMonths"
   | "activeVenues"
   | "hasConnectedKeys"
@@ -2582,30 +4117,66 @@ export function derivePhase07Fields(
   const lastSyncAt = freshness.lastSyncAt;
   const hasSyncing = freshness.syncing;
 
-  // Phase 115.1 / BACKBONE-02 (RD-1) — the ONE producer site for the allocator
-  // $-equity display series (chart + V2 factsheet + composer baseline all read
-  // this). Repoint rule (the safety invariant, verbatim): a derived row that
-  // exists AND is `is_trustworthy` AND carries a well-formed dense curve →
-  // render the derived curve (already dense — mapped DIRECTLY, NO forward-fill
-  // adapter). ELSE the legacy `equitySnapshotsToDailyPoints(...)` render,
-  // byte-unchanged. A malformed/untrusted/absent derived row degrades to legacy
-  // (see extractTrustworthyDerivedCurve) — never crashes SSR, never renders NaN.
-  // The legacy fallback is load-bearing until the founder-gated per-key backfill
-  // runs (all 517 prod keys currently have zero per-key rows — the A1 census).
-  const derivedCurve = extractTrustworthyDerivedCurve(
-    derivedEquityRow?.payload ?? null,
-  );
-  // f7 adapter (legacy path): DailyPoint[] for EquityCurve/DrawdownChart
-  // parallel-prop.
-  const equityDailyPoints =
-    derivedCurve ??
-    equitySnapshotsToDailyPoints(
-      equitySnapshots.map((s) => ({ asof: s.asof, value_usd: s.value_usd })),
-    );
+  // Phase 167.1.2 plan 11 — the ONE producer of the display series. Ready only
+  // when equityHistoryReadiness says so (v2 series, no working-holder
+  // duplicate, ccxt identity known). Otherwise both arrays are empty.
+  // Snapshots are not a display fallback.
+  const derivedReadFailed = derivedEquityRow === DERIVED_ROW_READ_FAILED;
+  const derivedRow = derivedReadFailed ? null : derivedEquityRow;
+  const derivedPayload = derivedRow?.payload ?? null;
+  const series = extractTrustworthyDerivedSeries(derivedPayload);
+  // Review C2 SFH-05 / SFH-06: a missing row waits on the daily recompute. A
+  // present v2 row the reader rejects already had its recompute, and a failed
+  // read says nothing about the history at all. Review C2 round 2 R2-CR-03: a
+  // pre-v2 row is a wait too. It passed every check its writer ran; only the
+  // reader's contract moved, and the daily compose rewrites it as v2.
+  const rejection =
+    derivedRow !== null ? derivedPayloadRejection(derivedRow.payload) : null;
+  const missingSeriesReason: MissingSeriesReason = derivedReadFailed
+    ? "history_read_failed"
+    : rejection === null || rejection === "not_version_2"
+      ? "awaiting_derivation"
+      : rejection === "untrustworthy"
+        ? untrustworthyRebuildReason(derivedPayload)
+        : "derivation_rejected";
+  const readiness = equityHistoryReadiness(apiKeys, series, missingSeriesReason);
+  const equityHistoryState = readiness.state;
+  const equityHistoryRebuildReason = readiness.reason;
+  const equityHistoryNotSyncingKeyIds =
+    equityHistoryRebuildReason === "key_not_syncing"
+      ? notSyncingIdentityPendingKeyIds(apiKeys)
+      : [];
+  // Review C4 SFH-C4-04: the writer's token, read defensively (the JSONB is
+  // worker-written and untrusted), and only for the curve on screen.
+  const payloadFlags =
+    derivedPayload !== null && typeof derivedPayload === "object"
+      ? (derivedPayload as Record<string, unknown>).flags
+      : undefined;
+  const departedHistoryUnavailable =
+    equityHistoryState === "ready" &&
+    Array.isArray(payloadFlags) &&
+    payloadFlags.includes(DEPARTED_HISTORY_UNAVAILABLE_FLAG);
+  const equityDailyPoints: DailyPoint[] =
+    equityHistoryState === "ready" && series ? series.curve : [];
+  const equityDailyReturns: DailyPoint[] =
+    equityHistoryState === "ready" && series ? series.returns : [];
+  // Ready always stamps "derived", and EquityChart (mounted in "ready" only) is
+  // the one production reader. Review C3 SFH-C3-02 / IN-02: while rebuilding,
+  // no consumer reads either field. Plan 14 removed the Overview warm-up and
+  // Scenario disclosure readers; both choose by equityHistoryState (D-15). Do
+  // NOT restore a source-based gate. The rebuilding-state stamp is kept only
+  // because it is where the trust check stays observable while D-02 withholds
+  // the curve: FLIPRETRY-03 in queries.test.ts and the plan-05 arms in
+  // queries.my-allocation.test.ts pin it.
+  const curveForSource = trustworthyDerivedCurve(derivedPayload);
   const equityCurveSource: "derived" | "legacy" =
-    derivedCurve !== null ? "derived" : "legacy";
+    equityHistoryState === "ready"
+      ? "derived"
+      : curveForSource !== null
+        ? "derived"
+        : "legacy";
   const derivedCurveComputedAt =
-    derivedCurve !== null ? (derivedEquityRow?.computed_at ?? null) : null;
+    curveForSource !== null ? (derivedRow?.computed_at ?? null) : null;
 
   // f9: min non-null history_depth_months across snapshots. Null when
   // every snapshot's column is NULL (e.g. pure CoinGecko-fallback).
@@ -2625,11 +4196,9 @@ export function derivePhase07Fields(
 
   // Collapse holdings to latest-asof-per-{venue}:{symbol}:{holding_type}
   // via linear scan of the max-asof comparator. Input order is IRRELEVANT
-  // for correctness — the `.order("asof", { ascending: false })` clause on
-  // the PostgREST query above is a log-inspection hedge (newest rows render
-  // first in debug dumps), not a correctness requirement. Do NOT flip the
-  // comparator to "first-seen wins" thinking ordering is guaranteed —
-  // removing `.order()` would silently regress that assumption.
+  // for correctness: the read (fetchLatestHoldingsPerKey) concatenates the
+  // keys' rows in no guaranteed order. Do NOT flip the comparator to
+  // "first-seen wins" thinking ordering is guaranteed.
   //
   // NEW-C03-02: Key by `${venue}:${symbol}:${holding_type}`, not just
   // `symbol`. Keying on symbol alone silently collapsed multi-venue
@@ -2639,8 +4208,16 @@ export function derivePhase07Fields(
   // surviving venue could flip between page loads. The scope_ref keyspace
   // used everywhere else in the pipeline already uses this triple-key
   // format (see buildHoldingRef).
+  //
+  // Phase 167.1.2 D-16: the collapse runs only over each key's rows at that
+  // key's own latest asof (latestHoldingsPerKey), so a position a key closed
+  // before its latest poll no longer survives from an older row. Review C4
+  // SFH-C4-01 / SFH-C4-02: the read already dropped a key whose account a
+  // newer reading superseded (another key on the same exchange account, or
+  // the key's own later clean poll), so this collapse never picks a departed
+  // key's row for a symbol the account has closed since.
   const holdingsMap = new Map<string, (typeof holdingsRows)[number]>();
-  for (const r of holdingsRows) {
+  for (const r of latestHoldingsPerKey(holdingsRows)) {
     // B8: same canonical triple key as the scope_ref sites above
     // (holdingScopeKey) so the dedup keyspace cannot drift from the rest of
     // the pipeline. The "holding:" prefix is immaterial to a local dedup map.
@@ -2659,18 +4236,31 @@ export function derivePhase07Fields(
     side: r.side,
     entry_price: r.entry_price,
     unrealized_pnl_usd: r.unrealized_pnl_usd,
+    asof: r.asof,
   }));
 
   return {
-    equitySnapshots,
+    // Phase 167.1.2 / D-02 (review round 1 SFH-03): the raw snapshot levels are
+    // the same history as the withheld curve, so they do not cross to the
+    // client either. Nothing on the client reads them today; withholding them
+    // keeps a future reader from bypassing D-02, and the 30s refresh from
+    // re-sending the full history. The two counts derived from them are
+    // computed above and stay.
+    equitySnapshots: equityHistoryState === "rebuilding" ? [] : equitySnapshots,
     holdingsSummary,
     snapshotCount,
     allKeysStale,
     lastSyncAt,
     hasSyncing,
     equityDailyPoints,
+    equityDailyReturns,
     equityCurveSource,
     derivedCurveComputedAt,
+    equityHistoryState,
+    equityHistoryRebuildReason,
+    equityHistoryNotSyncingKeyIds,
+    departedHistoryUnavailable,
+    partialPositionReads: partialReads.map((p) => ({ ...p })),
     minHistoryDepthMonths,
     activeVenues,
     hasConnectedKeys,
@@ -2742,6 +4332,30 @@ export const getMyAllocationDashboard = cache(
       return res.data;
     };
 
+    // Phase 151 / 151-02 (AUM-04). `strategy_keys` (migration 20260710120000)
+    // is NOT present in the generated `database.types.ts` — the types file
+    // predates the table and has not been regenerated. Narrow ONE builder to
+    // the exact shape used here rather than widening the whole client, so the
+    // owner scope stays a literal `.eq("owner_id", …)` (the
+    // getStrategylessActiveKeys:406-419 precedent, byte-for-byte in shape).
+    // Regenerating database.types.ts is the real fix and remains deferred.
+    type StrategyKeyLinkRow = { strategy_id: string; api_key_id: string };
+    const phase151StrategyKeysTable = (
+      supabase as unknown as {
+        from: (relation: "strategy_keys") => {
+          select: (columns: string) => {
+            eq: (
+              column: string,
+              value: string,
+            ) => PromiseLike<{
+              data: StrategyKeyLinkRow[] | null;
+              error: { message: string } | null;
+            }>;
+          };
+        };
+      }
+    ).from("strategy_keys");
+
     const [
       portfolio,
       phase07EquityRes,
@@ -2778,12 +4392,20 @@ export const getMyAllocationDashboard = cache(
       phase36PerKeyDailiesRes,
       // Phase 115.1 / BACKBONE-02 (RD-1) — the derived $-equity curve row from
       // the NEW keyed `allocator_equity_derived` surface. Resolves to
-      // `{ payload, computed_at }` or null. NON-FATAL by design (never
-      // assertOk'd below): the derived curve is an ADDITIVE enhancement over the
-      // legacy snapshot render, so any read failure degrades to the legacy
-      // fallback (the prod-cutover SAFETY invariant) rather than blanking a
-      // working dashboard.
+      // `{ payload, computed_at }`, null (no row), or DERIVED_ROW_READ_FAILED.
+      // NON-FATAL by design (never assertOk'd below): a failed read must not
+      // blank the rest of the dashboard. Since plan 11 there is no legacy
+      // curve to fall back to; a failed read renders the history as
+      // rebuilding with reason `history_read_failed` (review C2 SFH-06).
       phase115DerivedRow,
+      // Phase 151 / 151-02 (AUM-04) — the owner's OWN strategies and the
+      // composite `strategy_keys` links, the two halves of the manager-role
+      // discriminator (`deriveStrategyLinkedKeyIds`). Fetched in THIS batch
+      // rather than after the fan-out so the new gate costs zero extra waves.
+      // Both are NON-FATAL by design (never `assertOk`'d): see the degradation
+      // note at the read sites below.
+      phase151OwnStrategiesRes,
+      phase151StrategyKeyLinksRes,
     ] = await Promise.all([
       getRealPortfolio(userId),
       supabase
@@ -2798,22 +4420,25 @@ export const getMyAllocationDashboard = cache(
         // Cap to the reconstruction BACKFILL_CAP_DAYS (2 years) so the
         // payload can't grow unbounded as the table accumulates days.
         .limit(730),
-      supabase
-        .from("allocator_holdings")
-        .select(
-          // Phase 08 Plan 02 — api_key_id projected so HoldingsTable can
-          // resolve source_key_sync_status via the shared `apiKeys` array
-          // (avoids a nested PostgREST join).
-          //
-          // `side`, `entry_price`, `unrealized_pnl_usd` projected so the
-          // dashboard can render derivative rows in a separate Open
-          // Positions section without conflating notional `value_usd`
-          // with equity contribution (only `unrealized_pnl_usd` counts
-          // toward the equity curve for derivatives).
-          "symbol, quantity, mark_price, value_usd, venue, holding_type, asof, api_key_id, side, entry_price, unrealized_pnl_usd",
-        )
-        .eq("allocator_id", userId)
-        .order("asof", { ascending: false }),
+      // Phase 167.1.2 D-16: each key's rows at that key's own latest asof,
+      // read in bounded steps (the owner's key ids, then per key its latest
+      // asof, then its rows at it). Returns `{ data, error }` and never
+      // throws; a read that reaches the row cap returns a named error, so the
+      // `assertOk` below fails loud instead of rendering a partial list.
+      fetchLatestHoldingsPerKey(
+        supabase,
+        userId,
+        // Phase 08 Plan 02 — api_key_id projected so HoldingsTable can
+        // resolve source_key_sync_status via the shared `apiKeys` array
+        // (avoids a nested PostgREST join).
+        //
+        // `side`, `entry_price`, `unrealized_pnl_usd` projected so the
+        // dashboard can render derivative rows in a separate Open
+        // Positions section without conflating notional `value_usd`
+        // with equity contribution (only `unrealized_pnl_usd` counts
+        // toward the equity curve for derivatives).
+        "symbol, quantity, mark_price, value_usd, venue, holding_type, asof, api_key_id, side, entry_price, unrealized_pnl_usd",
+      ),
       getUserApiKeys(userId),
       admin
         .from("match_batches")
@@ -2844,45 +4469,66 @@ export const getMyAllocationDashboard = cache(
         .order("created_at", { ascending: false })
         .limit(200),
       // Phase 36 / 36-03 (D1, UNIFY-01/02) — per-key dailies for the Overview
-      // repoint. Bound by a DATE-WINDOW filter (`.gte("date", ...)`), NOT a
-      // bare ascending `.limit()`: the snapshot path caps at 730 rows because
-      // it is a single per-allocator series, but the per-key series spans K
-      // keys — a bare ascending `.limit(730)` over K keys would silently DROP
-      // the NEWEST rows (truncating the most recent ~730/K days), corrupting
-      // the curve. Filter by date instead so every key keeps its full 730-day
-      // window. `.limit(20000)` is a flat SAFETY CEILING (≈27 keys × 730d) so
-      // the payload cannot grow unbounded as csv_daily_returns accumulates
-      // (T-36-03-03), without truncating recent data for any realistic key
-      // count. User client + owner RLS gates the read (T-36-03-01).
-      supabase
-        .from("csv_daily_returns")
-        // allocator_id is NOT selected: RLS + the .eq below already scope the
-        // read to this allocator, and buildPerKeyReturnsByApiKeyId only consumes
-        // api_key_id / date / daily_return (trims wire bytes per review).
-        .select("api_key_id, date, daily_return")
-        .eq("allocator_id", userId)
-        .gte(
-          "date",
-          new Date(Date.now() - 730 * 24 * 60 * 60 * 1000)
-            .toISOString()
-            .slice(0, 10),
-        )
-        .order("date", { ascending: true })
-        .limit(20000),
+      // repoint. Bound by a DATE-WINDOW filter (`.gte("date", ...)`): every
+      // key keeps its full 730-day window, and the window is what bounds the
+      // payload as csv_daily_returns accumulates (T-36-03-03). User client +
+      // owner RLS gates the read (T-36-03-01).
+      //
+      // 167.1.2 C3 fix F (SFH-C3R2-X1): this used to be ONE request,
+      // `.order("date", asc).limit(20000)`, under a comment calling the
+      // limit a "flat SAFETY CEILING" that truncated nothing. That was false:
+      // PostgREST caps every response at max_rows (1000 on PROD) whatever the
+      // limit, answers 200 with a partial body, and the ascending order made
+      // the dropped rows the NEWEST. PROD 2026-09-29: an allocator with 2348
+      // rows in the window read only its oldest 1000. The read now drains
+      // every row through `drainById` (id keyset, stops on an empty page,
+      // fails loud at its page ceiling or on a non-monotone cursor). A drain
+      // failure resolves `{ data: null, error }`, so `assertOk` below logs
+      // and throws on it exactly as on a PostgREST error; never a silent
+      // partial series. Rows come back sorted by (api_key_id, date), which is
+      // the per-key date order buildPerKeyReturnsByApiKeyId relies on.
+      // A NULL api_key_id row (a strategy-scoped row) is excluded at the
+      // query: buildPerKeyReturnsByApiKeyId drops it anyway, and without the
+      // filter those rows would share natural keys across strategies.
+      (async () => {
+        const windowStart = new Date(Date.now() - 730 * 24 * 60 * 60 * 1000)
+          .toISOString()
+          .slice(0, 10);
+        return drainById<{
+          id: number;
+          api_key_id: string;
+          date: string;
+          daily_return: number;
+        }>({
+          label: "csv_daily_returns",
+          naturalKey: (r) => `${r.api_key_id}|${r.date}`,
+          fetchPage: (afterId, pageSize) => {
+            // allocator_id is NOT selected: RLS + the .eq below already scope
+            // the read to this allocator. `id` is selected because it is the
+            // keyset cursor.
+            let page = supabase
+              .from("csv_daily_returns")
+              .select("id, api_key_id, date, daily_return")
+              .eq("allocator_id", userId)
+              .not("api_key_id", "is", null)
+              .gte("date", windowStart);
+            if (afterId !== null) page = page.gt("id", afterId);
+            return page.order("id", { ascending: true }).limit(pageSize);
+          },
+        });
+      })(),
       // Phase 115.1 / BACKBONE-02 (RD-1) — one JSONB row per
       // (allocator_id, kind); the display row is kind='equity_curve'. USER
       // client + owner RLS + explicit `.eq("allocator_id", userId)` (the
       // phase36 T-36-03-01 pattern: RLS is the tenant boundary, the .eq is
-      // defence-in-depth; the admin client would bypass RLS). PGRST205 (table
-      // missing from the PostgREST schema cache on a pre-migration env) is
-      // swallowed to null so the SAFETY fallback renders the legacy curve —
-      // exactly the cutover-safe semantics. Any OTHER read failure also
-      // degrades to legacy (non-fatal enhancement) but logs a breadcrumb so a
-      // real fault stays observable.
-      (async (): Promise<{
-        payload: unknown;
-        computed_at: string | null;
-      } | null> => {
+      // defence-in-depth; the admin client would bypass RLS).
+      // Review C2 SFH-06: every read failure, PGRST205 included (the table
+      // exists on every environment now, so a schema-cache miss is a real
+      // fault), is logged, reported to Sentry, and returned as
+      // DERIVED_ROW_READ_FAILED. There is no legacy curve to fall back to.
+      // Review C2 SFH-05 (reader half): a PRESENT row the reader rejects is
+      // reported with its rejection token only, never a value.
+      (async (): Promise<DerivedEquityRowRead> => {
         const res = await supabase
           .from("allocator_equity_derived")
           .select("payload, computed_at")
@@ -2890,20 +4536,88 @@ export const getMyAllocationDashboard = cache(
           .eq("kind", "equity_curve")
           .maybeSingle();
         if (res.error) {
-          const code = (res.error as { code?: string }).code;
-          if (code !== "PGRST205") {
-            console.error(
-              "[queries.getMyAllocationDashboard] allocator_equity_derived read failed (falling back to legacy curve):",
-              res.error,
-            );
-          }
-          return null;
+          console.error(
+            "[queries.getMyAllocationDashboard] allocator_equity_derived read failed (rendering the history as rebuilding, reason history_read_failed):",
+            res.error,
+          );
+          scheduleDerivedRowCapture(
+            captureToSentry(res.error, {
+              tags: {
+                op: "getMyAllocationDashboard",
+                reason: "derived_row_read_failed",
+              },
+              level: "error",
+            }),
+          );
+          return DERIVED_ROW_READ_FAILED;
         }
-        return (res.data ?? null) as {
+        const row = (res.data ?? null) as {
           payload: unknown;
           computed_at: string | null;
         } | null;
+        if (row !== null) {
+          const rejection = derivedPayloadRejection(row.payload);
+          if (rejection === "not_version_2") {
+            // Review C2 round 2 R2-CR-03: every row written before C2 is
+            // pre-v2, and the daily compose rewrites it. That is a normal
+            // transition, not a fault, so it is logged and NOT sent to Sentry:
+            // a capture here fired once per dashboard load for every book on
+            // deploy day. Residual (recorded, not captured): a book whose
+            // compose never runs keeps its v1 row and reads
+            // awaiting_derivation; this log line is its only trace.
+            console.warn(
+              "[queries.getMyAllocationDashboard] allocator_equity_derived row is pre-version-2 (not_version_2); rendering the history as rebuilding, reason awaiting_derivation, until the daily compose rewrites it",
+            );
+          } else if (rejection !== null) {
+            console.error(
+              `[queries.getMyAllocationDashboard] allocator_equity_derived row rejected (${rejection}); rendering the history as rebuilding`,
+            );
+            // Review C2 round 3 R3-WR-04: the log line above runs on every
+            // load; the capture runs once per (allocator, rejection) window.
+            if (shouldCaptureDerivedRowRejection(userId, rejection)) {
+              scheduleDerivedRowCapture(
+                captureToSentry(
+                  new Error(`allocator_equity_derived row rejected: ${rejection}`),
+                  {
+                    tags: {
+                      op: "getMyAllocationDashboard",
+                      reason: "derived_row_rejected",
+                      rejection,
+                    },
+                    // A writer's own untrustworthy verdict is a data state; a
+                    // malformed row is a writer bug.
+                    level: rejection === "malformed" ? "error" : "warning",
+                  },
+                ),
+              );
+            }
+          }
+        }
+        return row;
       })(),
+      // Phase 151 / AUM-04 — the owner's own strategies. `.eq("user_id",
+      // userId)` (NOT allocator_id): on this table the owner column is
+      // `user_id`, mirroring getStrategylessActiveKeys:426. `status` is
+      // projected so the W-4 archived filter stays decidable in-memory.
+      // ⚠️ The `.eq` is LOAD-BEARING, not defence-in-depth: `strategies_read`
+      // RLS is `status='published' OR user_id = auth.uid()` (migration
+      // 20260405061912:28), so dropping it would return the entire PUBLISHED
+      // universe and mark every allocator key that any manager anywhere has
+      // linked as manager-side — closing this allocator's book gate on keys
+      // they own. Own-only, always.
+      // Review [4] — `capital_ownership` is projected because the mark is part
+      // of the ROLE question this discriminator answers. See the filter below.
+      supabase
+        .from("strategies")
+        .select("id, api_key_id, status, capital_ownership")
+        .eq("user_id", userId),
+      // Phase 151 / AUM-04 — the composite link rows. ⚠️ Owner-column
+      // asymmetry: `strategies` scopes `user_id`, `strategy_keys` scopes
+      // `owner_id`. The literal `.eq("owner_id", userId)` IS the tenant control
+      // here (RLS is the backstop) — see T-151-03.
+      phase151StrategyKeysTable
+        .select("strategy_id, api_key_id")
+        .eq("owner_id", userId),
     ]);
 
     // G-1 fix — normalize outcomes once, use in both !portfolio and
@@ -3105,7 +4819,18 @@ export const getMyAllocationDashboard = cache(
       // Phase 115.1 / BACKBONE-02 (RD-1) — the derived $-equity row (or null)
       // threaded into the ONE producer site so the repoint gates there.
       phase115DerivedRow,
+      // Review C4 round 2 WR-R2-03: keys whose rows' poll left positions unread.
+      phase07HoldingsRes.partialReads,
     );
+
+    // Phase 169.4 plan 02 (SC3, D-09, D-69): the Overview's BTC comparator
+    // reads the database through the factsheet's one read, over the book's own
+    // dates. `admin` because the reader is typed on the admin client and the
+    // table is public-SELECT (no tenant data). No read while rebuilding (SC2).
+    const btcBenchmarkPrices: BenchmarkPricesOpt | null =
+      phase07.equityHistoryState === "ready"
+        ? await readFactsheetBenchmark(admin, phase07.equityDailyReturns, undefined, null)
+        : null;
 
     // Phase 09 / D-07 + D-08 + D-11 + finding f5
     // Derive flaggedHoldings by READING match_batches.holding_flags JSONB.
@@ -3255,6 +4980,92 @@ export const getMyAllocationDashboard = cache(
       eligibleKeyIds,
       perKeyReturnsByApiKeyId,
     );
+    // ───────────────────────────────────────────────────────────────────────
+    // Phase 151 / 151-02 (AUM-04) — the SPLIT book-entry gate.
+    //
+    // An owner who is ALSO a manager has keys that feed live strategies. Those
+    // keys will never carry an allocator per-key series, so the all-or-nothing
+    // gate above is pinned false FOREVER and the allocator cannot reach their
+    // own book (founder PROD census 2026-08-05: 8 eligible keys, 6 of them
+    // manager-side, 2 with real series). Subtract the manager keys by ROLE —
+    // `deriveStrategyLinkedKeyIds`, shared with /my-strategies so the two views
+    // of "strategy-linked" cannot drift — and ask a SOME question of what is
+    // left. `perKeyDailiesGateSatisfied` above is deliberately NOT touched:
+    // it still selects the liveBaselineMetrics source, where SOME-semantics
+    // would present a partial blend as the whole live book (Phase 63
+    // ENGINE-04's mixed-basis honesty invariant).
+    //
+    // Degradation: both reads are non-fatal (never assertOk'd — a transient
+    // failure must not blank a working dashboard, and `strategy_keys` can be
+    // missing from the PostgREST schema cache on a pre-migration environment).
+    // On error we fall back to an EMPTY link list, which biases keys toward
+    // ALLOCATOR eligibility: the failure mode is an allocator who can still
+    // reach their book, not one locked out of it — the exact defect AUM-04
+    // exists to fix. The Sentry breadcrumb keeps the fault observable.
+    const phase151LinkReadError =
+      phase151OwnStrategiesRes.error ?? phase151StrategyKeyLinksRes.error;
+    if (phase151LinkReadError) {
+      console.error(
+        "[queries.getMyAllocationDashboard] role-discriminator read failed (book gate degrades to allocator-eligible):",
+        phase151LinkReadError.message ?? phase151LinkReadError,
+      );
+      captureToSentry(phase151LinkReadError, {
+        tags: { op: "getMyAllocationDashboard", reason: "role_discriminator_read_failed" },
+        extra: { userId },
+        level: "warning",
+      });
+    }
+    // Review [4] — OWN CAPITAL IS NOT A MANAGER ROLE. The discriminator asks
+    // "is this key manager-side?", and a live `strategies` row was the whole
+    // answer. Phase 150 shipped, on this same branch, an explicit answer to the
+    // same question: the wizard's capital mark. `own_capital` means the money
+    // behind the key is the allocator's own — the STRONGEST possible statement
+    // that the key is NOT manager-side — so a strategy carrying that mark must
+    // not evict its key from the allocator's book.
+    //
+    // Without this filter, finalizing a key through the wizard and answering
+    // "my own capital" writes a `strategies` row that lands the key in
+    // `strategyLinkedKeyIds`, subtracts it from `allocatorEligibleApiKeyIds`
+    // below, and — if it was their only series-carrying key — flips
+    // `bookEntryGateSatisfied` false and removes book mode from the composer,
+    // with copy claiming they have no book. That is the very lockout AUM-04
+    // exists to fix, re-entered through the other phase in this branch.
+    //
+    // `team_review` (a trading team's key under verification) and NULL (never
+    // asked) both stay manager-side — NULL deliberately, because it is the
+    // pre-150 population and inferring a role from an absent answer is exactly
+    // the fabrication the nullable-no-default column was chosen to avoid.
+    //
+    // Filtered HERE, at the role call site, and NOT inside
+    // `deriveStrategyLinkedKeyIds`: that helper is shared with
+    // `deriveStrategylessKeys`, where the question is COVERAGE ("does this key
+    // have a strategy behind it?") and an own-capital strategy is coverage. Two
+    // questions, one helper — so the role-only narrowing belongs to the caller.
+    //
+    // The predicate is the SHARED one (`isAllocatable`), never a re-spelled
+    // literal: Phase 150's OWN-03 census (threat T-150-07) pins the mark string
+    // to `src/lib/capital-ownership.ts` alone, and an ad-hoc `!== "own_capital"`
+    // here is precisely the drift it forbids — it fails OPEN for a garbled value
+    // off the untyped `text` column where `isAllocatable` fails CLOSED. The row
+    // shape is asserted at the READ boundary (the untyped PostgREST select), so
+    // the mark arrives typed as `CapitalOwnership | null` and the predicate needs
+    // no cast of its own.
+    const strategyLinkedKeyIds = deriveStrategyLinkedKeyIds(
+      ((phase151OwnStrategiesRes.data ?? []) as Array<{
+        id: string;
+        api_key_id: string | null;
+        status: string;
+        capital_ownership: CapitalOwnership | null;
+      }>).filter((s) => !isAllocatable(s.capital_ownership)),
+      phase151StrategyKeyLinksRes.data ?? [],
+    );
+    const allocatorEligibleApiKeyIds = eligibleKeyIds.filter(
+      (id) => !strategyLinkedKeyIds.has(id),
+    );
+    const contributingApiKeyIds = allocatorEligibleApiKeyIds.filter(
+      (id) => (perKeyReturnsByApiKeyId[id]?.length ?? 0) > 0,
+    );
+    const bookEntryGateSatisfied = contributingApiKeyIds.length > 0;
     // RT1 (Phase 37 DSRC-03) parity for the live-book BASELINE source.
     // `liveBaselineMetrics` is the "your current live book" reference the Scenario
     // composer lifts (liveBaselineToComputedMetrics) to compare a hypothetical
@@ -3264,28 +5075,72 @@ export const getMyAllocationDashboard = cache(
     // persist for audit continuity, so they are NOT in eligibleKeyIds yet still
     // appear in the map. Blending the unfiltered map folds a key the allocator
     // disconnected into this baseline (its own holdings give it weight, and even
-    // at weight 0 its series still enters avgRho) — while the composer's per-key
-    // BLEND leg already filters to eligibleApiKeyIds (ScenarioComposer DSRC-03/
-    // RT1). So the composer compared an eligible-filtered blend against a baseline
-    // that included an ineligible key. Mirror the eligible filter HERE so both
-    // legs share the same source set. The GATE above deliberately still reads the
-    // FULL map — it only asks whether every ELIGIBLE key has a series — and the
-    // payload below keeps the full map (the composer does its own eligible filter).
-    const eligibleKeyIdSet = new Set(eligibleKeyIds);
-    const eligiblePerKeyReturns = Object.fromEntries(
-      Object.entries(perKeyReturnsByApiKeyId).filter(([id]) =>
-        eligibleKeyIdSet.has(id),
-      ),
-    );
+    // at weight 0 its series still enters avgRho).
+    //
+    // Review [6] — that filter is now SUBSUMED, not dropped:
+    // `contributingApiKeyIds` (built just above) is a strict subset of
+    // `eligibleKeyIds`, so the baseline source below can no longer contain a
+    // revoked or disconnected key. The payload further down still carries the
+    // FULL map (the composer does its own eligible filter).
     // Phase 63 ENGINE-04 — the gate=false SSR baseline is now the honest
     // emptyDefault (AUM preserved from holdings, all metrics null → KpiStrip
     // "—"), NOT a holdings-snapshot reconstruction. The old collapse-based path
     // served 0 real users (D1) and re-poisoned avgRho with fabricated ρ=1.0. The
     // gate=true per-key branch is byte-untouched.
-    const liveBaselineMetrics = perKeyDailiesGateSatisfied
+    //
+    // Review [6] — GATED ON THE SAME FLAG AS BOOK ENTRY. Phase 151 split entry
+    // onto `bookEntryGateSatisfied` (SOME eligible key carries a series) but
+    // left this baseline on the untouched all-or-nothing
+    // `perKeyDailiesGateSatisfied` (EVERY eligible key does). The two disagree
+    // for exactly the partial-book population the split exists to admit — the
+    // founder's own PROD census, 8 eligible keys and 2 with a series — and the
+    // result was a composer that let them into book mode and then showed them
+    // an all-null live column: every `pushDelta` returned early, the "vs your
+    // live book" strip was permanently empty, and the KpiStrip live column was
+    // em-dashes. Worse, ScenarioComparePanel on the SAME SCREEN runs
+    // `buildLiveBookDraft(bookEntryGateSatisfied, contributingApiKeyIds)` and
+    // showed real numbers for that same book: two surfaces, one screen,
+    // contradicting each other about whether the allocator's live book exists.
+    //
+    // The source is `contributingApiKeyIds` — NOT the eligible set — for the
+    // same reason: it is the exact key set the compare panel's live-book column
+    // is built from, so the baseline and the comparison now describe one book.
+    // When the old all-or-nothing gate WAS satisfied the two sets differ only
+    // by the manager-side keys the 151 role split removed from the book, which
+    // is the intended new meaning of "your live book".
+    const contributingKeyIdSet = new Set(contributingApiKeyIds);
+    const contributingPerKeyReturns = Object.fromEntries(
+      Object.entries(perKeyReturnsByApiKeyId).filter(([id]) =>
+        contributingKeyIdSet.has(id),
+      ),
+    );
+    // Review round 2 F1 — the HOLDINGS narrow, and it is not optional garnish:
+    // `liveBaselineMetricsFromPerKeyDailies` reads its holdings argument TWICE,
+    // for two different things. It is the per-key WEIGHT source (already
+    // key-scoped by construction — a key absent from the returns map gets no
+    // engine unit), but it is ALSO the AUM source (`Σ holdingEquityContribution`
+    // over EVERY row) and, through `totalAum`, the DOLLAR scaling of the
+    // drawdown series. Repointing only the returns source left one object whose
+    // `aum` + `drawdown` described all 8 eligible keys while its `ytdTwr` /
+    // `sharpe` / `maxDd` / `avgRho` / `equity` described the 2 contributing
+    // ones — precisely the mixed-basis presentation the sibling docblock on
+    // `bookEntryGateSatisfied` forbids ("a 2-of-8-key blend presented as your
+    // live book on the Overview KPI strip"), committed inside one object
+    // instead of across two.
+    //
+    // Narrowing here makes every field of `liveBaselineMetrics` describe ONE
+    // key set: the contributing one, which is also the set `ScenarioComparePanel`
+    // and the composer's per-key engine already build their live-book column
+    // from. The gate=false arm below KEEPS the full holdings on purpose — there
+    // is no blend there, so its `aum` is the honest custody total and nothing
+    // else in the object claims otherwise (every metric is null).
+    const contributingHoldings = phase07.holdingsSummary.filter((h) =>
+      contributingKeyIdSet.has(h.api_key_id),
+    );
+    const liveBaselineMetrics = bookEntryGateSatisfied
       ? liveBaselineMetricsFromPerKeyDailies(
-          phase07.holdingsSummary,
-          eligiblePerKeyReturns,
+          contributingHoldings,
+          contributingPerKeyReturns,
         )
       : emptyLiveBaselineMetrics(phase07.holdingsSummary);
 
@@ -3328,10 +5183,19 @@ export const getMyAllocationDashboard = cache(
         perKeyReturnsByApiKeyId,
         perKeyDailiesGateSatisfied,
         eligibleApiKeyIds: eligibleKeyIds,
+        // Phase 151 / AUM-04 — the split book-entry gate (additive; computed
+        // before this !portfolio split). A fresh allocator has no keys, so
+        // these are [] / [] / false — emitted EXPLICITLY rather than left
+        // undefined, because every downstream `?? []` / `?? false` fallback
+        // would mask a missing field instead of failing loudly.
+        allocatorEligibleApiKeyIds,
+        contributingApiKeyIds,
+        bookEntryGateSatisfied,
         // Phase 11 / D-02 + D-04 — onboarding visibility predicate inputs.
         apiKeysCount,
         mandateIsSet,
         ...phase07,
+        btcBenchmarkPrices,
       };
     }
 
@@ -3396,6 +5260,7 @@ export const getMyAllocationDashboard = cache(
             markets,
             start_date,
             asset_class,
+            created_at,
             organization:organizations(name),
             strategy_verifications (
               trust_tier,
@@ -3408,7 +5273,9 @@ export const getMyAllocationDashboard = cache(
               sharpe,
               volatility,
               max_drawdown,
-              data_quality_flags
+              data_quality_flags,
+              returns_series,
+              computation_status
             )
           )
           `,
@@ -3532,13 +5399,67 @@ export const getMyAllocationDashboard = cache(
       const analyticsObj = (analytics ?? null) as Record<string, unknown> | null;
       const dqf = analyticsObj?.data_quality_flags as { composite?: unknown } | null | undefined;
       const is_composite = dqf?.composite === true;
+      // Phase 147 / SCEN-01 — resolve the series HERE, server-side, and emit it
+      // under the SAME `daily_returns` field name. The analytics-service writes
+      // the cumprod WEALTH curve to `returns_series` and leaves `daily_returns`
+      // null for analytics-only strategies; the scenario composer reads THIS
+      // payload first for strategies already in the allocator's book and
+      // deliberately skips the lazy /returns fetch for them, so a bare
+      // daily_returns projection has no rescue path and collapses to 0.00
+      // (RESEARCH P2 — the founder's own-portfolio anchor). Resolving here fixes
+      // all six downstream payload consumers with zero change to any of them.
+      //
+      // The raw `returns_series` and `computation_status` columns are stripped
+      // by the same `_dqf` destructure idiom above — only the resolved series
+      // and the derived state cross to the client (T-147-10).
+      const resolvedDailyReturns = analyticsObj
+        ? resolveDailyReturnSeries(
+            analyticsObj.daily_returns,
+            analyticsObj.returns_series,
+          )
+        : [];
       let strategyAnalyticsForPayload:
         | MyAllocationDashboardPayload["strategies"][number]["strategy"]["strategy_analytics"] = null;
       if (analyticsObj) {
-        const { data_quality_flags: _dqf, ...analyticsRest } = analyticsObj;
+        const {
+          data_quality_flags: _dqf,
+          returns_series: _rs,
+          computation_status: _cs,
+          ...analyticsRest
+        } = analyticsObj;
+        // P3: keep the intermediate at the Record<string, unknown> idiom this
+        // block already uses. Annotating it (rather than casting an object
+        // literal) preserves the index signature the payload cast needs, so the
+        // client-facing Pick<> never has to admit a raw series column.
+        const analyticsForPayload: Record<string, unknown> = {
+          ...analyticsRest,
+          daily_returns: resolvedDailyReturns,
+        };
         strategyAnalyticsForPayload =
-          analyticsRest as MyAllocationDashboardPayload["strategies"][number]["strategy"]["strategy_analytics"];
+          analyticsForPayload as MyAllocationDashboardPayload["strategies"][number]["strategy"]["strategy_analytics"];
       }
+
+      // Phase 147 / SCEN-01 — ONE rule shared with the returns route via
+      // deriveEmptySeriesState; UI-SPEC §3 forbids a second table (SC2). A
+      // non-empty resolved series is decided by LENGTH here (the predicate
+      // never returns "available"); everything else defers to the shared
+      // ladder, including the 16h bound that terminates the missing-row
+      // spinner — a `strategies` row does not guarantee a `strategy_analytics`
+      // row, so status stays null forever when the compute job was never
+      // enqueued.
+      const seriesStatus =
+        typeof analyticsObj?.computation_status === "string"
+          ? analyticsObj.computation_status
+          : null;
+      const strategyCreatedAt =
+        typeof (strategy as unknown as { created_at?: unknown }).created_at ===
+        "string"
+          ? ((strategy as unknown as { created_at: string }).created_at)
+          : null;
+      const series_state: SeriesState =
+        resolvedDailyReturns.length > 0
+          ? "available"
+          : deriveEmptySeriesState(seriesStatus, strategyCreatedAt);
 
       // eligibility: a strategy is eligible for outcome
       // recording only when:
@@ -3587,13 +5508,19 @@ export const getMyAllocationDashboard = cache(
       // `organization_name` is emitted). Phase 111 / CONSTIT-02: likewise drop
       // the raw `strategy_verifications` embed — only the derived `trust_tier`
       // string is emitted (the embed's status/created_at never ship).
+      // Phase 147 / SCEN-01: `created_at` is selected ONLY to feed the
+      // missing-row age bound above; it is dropped here for the same reason as
+      // the embeds — this projection ships exactly the fields the payload type
+      // declares, never an undeclared passenger.
       const {
         organization: _rawOrganization,
         strategy_verifications: _rawVerifications,
+        created_at: _rawStrategyCreatedAt,
         ...strategyRest
       } = strategy as StrategyPayload & {
         organization?: unknown;
         strategy_verifications?: unknown;
+        created_at?: unknown;
       };
 
       // NEW-C09-08 (B1, audit-2026-05-07) — CLOSED. Gate `current_weight`
@@ -3630,6 +5557,7 @@ export const getMyAllocationDashboard = cache(
             // the raw verification + flags embeds are stripped above).
             trust_tier,
             is_composite,
+            series_state,
             strategy_analytics: strategyAnalyticsForPayload,
           },
         },
@@ -3688,10 +5616,17 @@ export const getMyAllocationDashboard = cache(
       perKeyReturnsByApiKeyId,
       perKeyDailiesGateSatisfied,
       eligibleApiKeyIds: eligibleKeyIds,
+      // Phase 151 / AUM-04 — the split book-entry gate (additive). The manager
+      // keys subtracted here are a SUBSET of eligibleApiKeyIds above: the two
+      // deliberately differ for an owner who also runs strategies.
+      allocatorEligibleApiKeyIds,
+      contributingApiKeyIds,
+      bookEntryGateSatisfied,
       // Phase 11 / D-02 + D-04 — onboarding visibility predicate inputs.
       apiKeysCount,
       mandateIsSet,
       ...phase07,
+      btcBenchmarkPrices,
     };
   },
 );

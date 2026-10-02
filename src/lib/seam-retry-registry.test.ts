@@ -103,21 +103,40 @@ const _flowVerdictExhaustiveness: _MissingFlowVerdict extends never
 void _flowVerdictExhaustiveness;
 
 /**
- * The FOUR `SeamBudgetKey`s that are ROUTE budgets, not analytics-seam-function
+ * The FIVE `SeamBudgetKey`s that are ROUTE budgets, not analytics-seam-function
  * verdicts, and are therefore DELIBERATELY absent from the analytics maps —
  * registry §(c). Hand-typed here so the `Exclude` below cannot quietly absorb a
- * new key: a 14th `SeamBudgetKey` must be classified as an analytics wrapper
+ * new key: a 16th `SeamBudgetKey` must be classified as an analytics wrapper
  * (→ a verdict) or as a route budget (→ this list), and doing NEITHER is a
  * compile error rather than a silent exclusion.
+ *
+ * ⚠️ THAT FENCE HAS NOW FIRED TWICE, IN ANGER. Phase 153.4 / D-26 landed the
+ * 14th key (`validate-key-serialized`) and `npx tsc --noEmit` refused the repo
+ * until it was classified. Phase 164.5.3 / D-04 landed the 15th
+ * (`keys-rotate-secret` — the credential-rotation route, protected the same way
+ * `keys-permissions` is: its `SEAM_BUDGETS` row stays `retries: 0`) and the
+ * fence refused again — which is the whole point: an unclassified budget would
+ * otherwise carry NO retry audit verdict at all and nothing would say so.
  */
 type RouteBudgetKey =
   | "keys-permissions"
+  | "keys-rotate-secret"
   | "process-key-enqueue"
   | "process-key-sync"
   | "process-key-unified-dormant";
 
-/** The nine analytics-seam wrapper budget keys (Class E, PATTERNS). */
+/**
+ * The eleven analytics-seam wrapper budget keys (Class E, PATTERNS).
+ *
+ * SORTED, because the union assertion below compares sorted arrays. Phase 153.4
+ * / D-26 added `validate-key-serialized`, which sorts immediately AFTER
+ * `validate-key` (a prefix sorts first). It is an analytics-wrapper budget, not
+ * a route budget, so it joins THIS list and not `RouteBudgetKey`.
+ * Phase 169.2 / D-08 added `benchmark-refresh` (`refreshBenchmark`, the daily
+ * BTC refresh), an analytics wrapper with a NO verdict; it sorts first.
+ */
 const EXPECTED_ALL_ANALYTICS_KEYS = [
+  "benchmark-refresh",
   "bridge",
   "encrypt-key",
   "match-eval",
@@ -127,6 +146,7 @@ const EXPECTED_ALL_ANALYTICS_KEYS = [
   "portfolio-optimizer",
   "simulator",
   "validate-key",
+  "validate-key-serialized",
 ] as const satisfies readonly SeamBudgetKey[];
 
 type _MissingAnalyticsVerdict = Exclude<
@@ -183,7 +203,7 @@ describe("[SEAM-05 / SC1] seam retry-safety registry", () => {
       ].sort();
       expect(union).toEqual(EXPECTED_ALL_FLOW_KEYS);
     });
-    it("YES∪NO analytics keys cover ALL nine wrappers", () => {
+    it("YES∪NO analytics keys cover ALL eleven wrappers", () => {
       const union = [
         ...Object.keys(RETRY_SAFE_ANALYTICS),
         ...Object.keys(RETRY_AUDIT_NO_ANALYTICS),
@@ -436,7 +456,7 @@ describe("[SEAM-05 / SC1] seam retry-safety registry", () => {
   const EXPECTED_FLOW_YES_EVIDENCE = 1; // onboard (resync withdrawn, 141.2/D-03)
   const EXPECTED_ANALYTICS_YES_EVIDENCE = 4; // bridge, simulator, portfolio-optimizer, optimize-weights
   const EXPECTED_FLOW_NO_EVIDENCE = 3; // teaser, csv, resync
-  const EXPECTED_ANALYTICS_NO_EVIDENCE = 5; // validate-key, encrypt-key, match-recompute, portfolio-analytics, match-eval
+  const EXPECTED_ANALYTICS_NO_EVIDENCE = 7; // validate-key, validate-key-serialized, encrypt-key, match-recompute, portfolio-analytics, match-eval, benchmark-refresh (169.2)
   const EXPECTED_EVIDENCE_STRING_COUNT =
     EXPECTED_FLOW_YES_EVIDENCE +
     EXPECTED_ANALYTICS_YES_EVIDENCE +
@@ -498,7 +518,7 @@ describe("[SEAM-05 / SC1] seam retry-safety registry", () => {
       },
     );
 
-    it("scans 13 non-empty evidence strings in total (the four maps, summed)", () => {
+    it("scans 15 non-empty evidence strings in total (the four maps, summed)", () => {
       // The total is DERIVED from the four per-map literals above, so it cannot
       // disagree with them; it is kept because it is the number the citation
       // guard below actually inspects, and a shape the flattener mishandles

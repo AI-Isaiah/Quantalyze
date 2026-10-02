@@ -1,5 +1,81 @@
 # Milestones
 
+
+## v1.19 — JOB/RATE: job-lifecycle reliability and the rate limits that hold (CLOSED 2026-08-20, v0.63.0.0 → v0.68.1.0, Phases 143–146 + 146.1, 146.2)
+
+**6 phases, 24 plans, PRs #687–#695, 2026-08-16 → 2026-08-20.** Audit `tech_debt`, 9/9
+requirements (JOB-04/05/06/08, RATE-01..05). Archive: `.planning/milestones/v1.19-ROADMAP.md`.
+
+### Key Accomplishments
+1. **143 / JOB-04** — dropped-enqueue reconciliation sweep: a strategy whose `after()` enqueue
+   never ran is detected by absence, re-enqueued idempotently, and alerts Sentry cross-language
+   (SQL marker → Python de-dupe). LIVE on PROD: jobid 36, hourly, first ticks observed succeeding.
+2. **144 / JOB-05 + JOB-08** — orphaned-`running` jobs transition to terminal `failed_final`
+   (never DELETE — WR-02 resolved, audit trail survives, pollers break out); stale-`pending`
+   decided by committed PROD measurement (WON'T-FIX, population 0).
+3. **145 / JOB-06** — csv-finalize is ONE SECURITY DEFINER transaction with NO handler clause;
+   a mid-fold fault proven (CI-executed, at close) to leave ZERO rows across all three tables.
+   The stale 42501 claim got a committed CANNOT-REPRODUCE verdict (four arms) instead of a fix;
+   the 18 standing PROD orphans terminalized with reasons preserved — close census 0/0.
+4. **146 / RATE-01..05** — fresh route×limiter census; `admin/match/eval` limited keyed on
+   `user.id`; `match.py` slowapi defense-in-depth; limiter VALUES audited against measured cost
+   (5 retune candidates filed, founder territory per D-146-4); Python whole-surface coverage law
+   so a new limiterless route reds CI.
+5. **146.1 + 146.2 review close-outs** — the resolve/echo path lands the user's classification
+   instead of silently defaulting the annualization clock (truth-table guard, neuter-proven);
+   the 409 refusal gained a working "Start a new strategy" escape (live-UAT'd); readmit bounded
+   `< 3`; raw exchange passphrases scrubbed from Sentry; SC#5 discharged by OBSERVED-RED
+   falsification of all four gap-closure oracles.
+6. **Rider (#695)** — local analytics-service defaults to TEST and hard-stops off-platform when
+   aimed at PROD (`ALLOW_PROD_WORKER_OFF_PLATFORM=1` escape hatch): the laptop-becomes-prod-worker
+   incident class is closed in code, 9 tests each proven able to fail.
+
+### Deferred at close
+INT-1..4 (TODOS.md, measured-zero populations): 144→143 readmit unreachable for mid-compute
+orphans (fail-safe); no Next-side whole-surface limiter law; RATE-05 name drift
+(`withRateLimit` → `withAuthLimited`); 145's fold moved csv-finalize out of 146's seam census.
+Plus 5 RATE-04 value-parity candidates awaiting founder retune.
+
+
+## v1.17 — MT5: ingested, wizardable, surfaced (CLOSED 2026-08-14, v0.53.x → v0.62.0.0, Phases 147–154 + 156)
+
+⚠️ **Scope amended on close, and the amendment is the headline.** Originally *"MT5 — usable
+end-to-end, not merely ingested"* (147–155). Phase 155 (MT5-VERIFY — the live trading-day parity
+run) was **carried to v1.18**, taking MT5-06..10, MT5-15 and the umbrella acceptance MT5-GOAL-01.
+A bounded alternative — move 155 to TODOS and tick v1.17 complete — was offered and **declined**.
+⛔ **Do not advertise MT5.** Our rendered numbers have never been compared to the terminal's.
+
+- **147 SCEN-01** — the scenario engine receives the real series (silent money-path correctness bug, not MT5-specific).
+- **148 OWN** — the owner can view the full factsheet of their own unpublished strategy, no cache disclosure.
+- **149 NAV-01** — my-strategies, a ranking at discovery parity. ⚠️ Zero e2e coverage (TODOS `E2E-NAV-01`).
+- **150 OWN-03** — the wizard asks whose capital this is; the money-path write isolated.
+- **151 AUM** — a book you can reach and a size you can set.
+- **152 SCEN** — composer legibility.
+- **153 WIZFORM (+153.1–153.7)** — form errors belong on the form; MT5 declarable. ⭐ Goal met via the INSERTED 153.7; the 153.1→153.6 span verdict REMAINS `failed` 5/6 as the historical record that the span shipped short on WIZFORM-02.
+- **153.7 WIZFORM-02-CLASS** — the coverage law's population went 17 → 37 codes and a new undisposed code now reds CI *by name*. Landed RED by design, greened only by the dispositions.
+- **154 WIZCONT/STALE** — draft-aware entry, stale-screen root cause found BEFORE it was fixed, token-less credential dedup toward the existing row.
+- **156 CONNECT-REFACTOR** — the venue the server validated is the venue the server writes; `authenticated` EXECUTE withdrawn from both wizard RPCs. Two PRs with a live PROD gate between them.
+
+**Audit:** `v1.17-MILESTONE-AUDIT.md` — `gaps_found` 82/100. All four blockers were ledger-honesty,
+zero source changes, all closed before archiving. ⭐ Three of the four were the *refused claim
+resurfacing in a file the amendment commit never touched* — the lesson being that a scope
+amendment landing in one file is almost always incomplete.
+**Archive:** `milestones/v1.17-ROADMAP.md` + `v1.17-REQUIREMENTS.md`.
+
+## v1.16 — Production Resilience & Reliability (CLOSED 2026-08-14, Phases 140–142)
+
+⚠️ **Scope amended on close.** Ran 140–146 and sat ⏸️ PARKED at 13/19 for weeks. Phases **143–146
+were CARRIED to v1.19 JOB/RATE**, not dropped and not ticked, taking JOB-04/05/06/08 and
+RATE-01..05 with them. Numbers deliberately unchanged — REQUIREMENTS.md and TODOS.md cite them by
+number in dozens of places.
+
+⛔ **What it earns:** the shared resilience core + Upstash breaker, the Python service contract and
+per-tenant limiter identity, the wizard/client seam error surface, retry-with-backoff gated on an
+idempotency audit, and the stuck-computing reaper with its transition-timestamp DDL.
+⛔ **What it does NOT earn:** dropped-enqueue detection, orphaned-`running` visible termination,
+csv-finalize atomicity, or a rate limit a new route cannot silently bypass.
+**Archive:** phase detail retained in `ROADMAP.md` § v1.16 (CLOSED).
+
 ## v1.15 MetaTrader 5 — live api_verified account sync — SHIPPED + LIVE (2026-07-25)
 
 **Phases:** 134–139 (6, all complete) | **Timeline:** 2026-07-23 → 2026-07-25
@@ -17,7 +93,7 @@ broker server).
 
 - **134 MT5SPIKE** — offline `Mt5Client`/`Mt5ClientError` RPyC facade + 25-test contract + `scripts/mt5_spike.py` four-leg live harness. mt5linux supply-chain verified + pinned.
 - **135 MT5SRC** — `'mt5'` first-class Source lockstep; worker read-only validate branch (3-cred, master rejection, wrong-server distinct); 3 key routes; RED-guarded 4-CHECK migration `20260723172032` (prod-verified).
-- **136 MT5RECON** — `combine_mt5_deal_ledger` → daily NAV → backbone + `api_verified`; √252 mutation-guarded; ground-truth parity vs `account_info().equity`; deposit-day-not-a-spike; fail-loud unclassifiable DEAL_TYPE.
+- **136 MT5RECON** — `combine_mt5_deal_ledger` → daily NAV → backbone + `api_verified`; √252 mutation-guarded; ground-truth parity vs `account_info().equity`; deposit-day-not-a-spike; fail-loud unclassifiable DEAL_TYPE. ⚠️ **"ground-truth parity" here means the OFFLINE reconstruction anchor only — a single `account_info().equity` read used to anchor the ledger. It is NOT a trading-day comparison of rendered performance against the terminal's own figures, which has never been done and is v1.18 Phase 155 (MT5-07/08).** Qualified 2026-08-14 (v1.17 milestone audit, W4): this line is where someone asking *"have MT5 numbers ever been checked?"* would land, and unqualified it answers yes.
 - **137 MT5CONC** — `to_thread`+`wait_for` + terminal-restart-on-timeout (WEDGE-01 lesson); per-terminal lock + `login==expected` bracket so `api_verified` never stamps the wrong account.
 - **138 MT5UI** — flag-gated wizard (`NEXT_PUBLIC_MT5_ENABLED`, OFF=byte-identical) 3-field + investor-pw guide + `api_verified` badge + all-roles e2e.
 - **139 MT5GOLIVE** — soak runner `scripts/mt5_soak.py` + `docs/runbooks/mt5-go-live.md` + `deploy/mt5-gateway/`; founder LIVE-ops legs done 2026-07-25.

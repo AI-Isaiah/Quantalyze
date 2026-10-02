@@ -1,331 +1,420 @@
-# Requirements: Quantalyze — v1.16 Production Resilience & Reliability
+# Requirements: Quantalyze — Milestone v1.20 Backlog Burndown
 
-**Defined:** 2026-07-25
+**Defined:** 2026-08-20
 **Core Value:** Allocators act on Bridge recommendations and see whether those suggestions actually worked — and can model the impact of composition changes before they make them.
 
-**Milestone goal:** Give the live money-bearing plumbing failure handling — so a hung Railway
-request, a silently-dropped compute-job enqueue, or a mid-job worker crash can't strand a real
-investor factsheet on a spinner that never resolves.
+Every requirement below maps 1:1 to verified-open TODOS.md items (re-measured at HEAD 2026-08-20
+by a 17-agent triage; L-refs cite TODOS.md line numbers at that snapshot). On scope commit the
+included items are DELETED from TODOS.md — this file is their new home. Founder-gated and
+verified-stale items are excluded by construction.
 
-> ⚠️ **These requirements are written against the RESEARCH-CORRECTED scope**
-> (`.planning/research/SUMMARY.md`), NOT the original `PROJECT.md` / `TODOS.md` prose. All four
-> researchers independently contradicted three of the milestone's stated premises using fresh
-> greps + `git blame` against current `main`. Summary of the corrections that reshaped this list:
-> 1. **RATE was ~85% already shipped** — all seven "unlimited" routes already call `checkLimit()`
->    (landed 2026-04-10 → 2026-07-23). Real gaps: `admin/match/eval` + the Python `routers/match.py`.
-> 2. **SEAM timeouts already exist** in BOTH clients (`AbortSignal.timeout`). Missing = retry +
->    breaker. And there are **TWO** chokepoints — `keys/sync`/`verify-strategy` go through
->    `process-key-client.ts`, not `analytics-client.ts`.
-> 3. **Retry-safety is a property of `flow_type`, not path** — `teaser` is deliberately
->    NON-idempotent.
-> 4. **"The janitor also fixes the fence flake"** is UNVERIFIED and is NOT an acceptance criterion.
-> 5. **The 42501 / `PROCESS_KEY_UNIFIED_BACKBONE` bullet is likely stale** — reproduce before fixing.
+## v1.20 Requirements
 
-**Decisions taken at requirements time** (research Open Decisions 1–8, resolved here):
-| # | Decision | Resolution |
-|---|----------|------------|
-| 1 | Janitor target table | **BOTH, as two distinct mechanisms** — `strategy_analytics.computation_status='computing'` (new reaper, JOB-02) AND `compute_jobs.status='running'` (extend WORKER-04, JOB-05). Neither requirement implies the other. |
-| 2 | Fence-flake "two birds" claim | **NOT an acceptance criterion.** Observe only; if it clears, note it as a side-effect. |
-| 3 | 42501 / unified-backbone bullet | **Reproduce-first gate** (JOB-06). "Could not reproduce" is a valid, budget-saving outcome. |
-| 4 | Breaker key identity | **ONE shared `breaker:railway` key** — both clients hit the same physical deployment. |
-| 5 | Rate-limit wiring convention | **`withRateLimit` HOF** composing alongside `withAuth`/`withRole`. Not global middleware. |
-| 6 | csv-finalize fold-RPCs vs compensate | **Deferred to JOB-06 after the reproduction pass.** |
-| 7 | `cron/warm-analytics` | **OUT of RATE scope** — cron route, service-key gated, different threat model. |
-| 8 | Python limiters beyond `match.py` | **OUT of scope** — `match.py` is the one verified Python-side gap. |
+### RANK — Public-trust & provenance correctness
 
----
+- [x] **RANK-01** (L818): Published percentile rankings never fold failed/stale-computation KPIs into any strategy's rank. ⚠️ Research corrections are binding: gate on `isComputedAnalytics` semantics (a literal `complete` filter would wrongly drop `complete_with_warnings`); use a separate gate constant, NOT a `computation_status` append to `PERCENTILE_ANALYTICS_COLUMNS` (that falsifies the csv-finalize mirror prose at three sites); fix BOTH the TS side and the `get_verified_cohort_rank` SQL RPC (documented parity-by-construction); measure per-category population counts first (C-M1 — the <5/<20 floors mean a filter can blank a whole category's badges).
+- [x] **RANK-02** (L1143): Anonymous readers receive only the columns the public surface needs — the `strategy_analytics (*)` splats (`queries.ts:218`, `compare/page.tsx:68`) become explicit projections excluding `daily_returns`/`metrics_json`/`data_quality_flags`.
+- [ ] **RANK-03** (L947): `api_keys.exchange` is server-authoritative at every INSERT path — no client-supplied venue can differ from the venue the server validated (extends the Phase-156 service-role-writer pattern).
+- [ ] **RANK-04** (L2522): The `asset_class` annualization stamp (√365 vs √252) derives from the server-validated venue, never from client-supplied `apiKeyExchange` (`finalize-wizard/route.ts:1288-1311`). ⚠️ NOT the "one-identifier change" TODOS claimed: `attested_venue` is NULL for trigger-scrubbed and pre-backfill rows and `isCryptoExchange(null) === false`, so a naive swap stamps `traditional`/√252 onto crypto strategies — the swap moves together with a null-attestation extension of the `skipAssetClassWrite` guard, gated on the B-M1 PROD census.
+- [x] **RANK-05** (L855): The quantstats price-detection sign-flip is closed on the strategy-analytics path (all-non-negative returns with a >100% day must not be re-read as prices).
+- [x] **RANK-06** (L858): Blend annualization treats unknown-`asset_class` legs as crypto for RISK, so a sole crypto leg no longer inflates Sharpe via √252.
+- [x] **RANK-07** (L3184): Two concurrent same-session resubmits cannot both take the FILL arm — the FILL UPDATE is compare-and-set (`.is("category_id", null)`).
+- [x] **RANK-08** (L3169): The re-mint fingerprint accounts for classification, so the classification-conflict 409's own remedy can mint a fresh session (or the exclusion is documented at the fingerprint).
+- [x] **RANK-09** (L2088): `withPublishedOrOwner` validates the uid's shape before interpolating it into the PostgREST `.or()` filter.
 
-## v1 Requirements
+### SHARE — SHARELINK-01 revocable share links (founder-decided model)
 
-### SEAM — Vercel→Railway resilience
+- [x] **SHARE-01** (L27): "Copy Link" always yields a URL its recipient can view — a revocable per-strategy share token carried in the URL, mint-or-reuse on copy; the bare `/factsheet/<id>` URL stays owner-only and the id stays a non-secret. (URL shape — `?s=<token>` on the id route vs a separate `/factsheet-share/[token]` route — is the SHARE phase plan's decision; research disagrees and the choice must be argued, not defaulted: A-D1.)
+- [x] **SHARE-02** (L27): The token lane never contaminates the id-keyed public cache — after any token-lane render, an anonymous request for `/factsheet/<id>` of an unpublished strategy STILL 404s (adversarial acceptance, same class as OWN-02).
+- [x] **SHARE-03** (L27): A revoke control regenerates the token and kills previously-copied links.
+- [x] **SHARE-04** (L27): The share affordance is honest as a CLASS — no "Link copied!" success for a link that cannot work, consistent across `FactsheetView` and the strategies page, and covering the two research-found siblings: a token-link RECIPIENT must not see a Copy-Link control that rebuilds the URL without the token (`FactsheetView.tsx:1312` strips it today), and `OwnerUnpublishedNotice`'s "anyone else sees a 404" sentence must be corrected in the same phase (it becomes false the moment tokens ship).
 
-- [x] **SEAM-01**: Both Vercel→Railway chokepoints (`analyticsRequest()` in `analytics-client.ts` AND `postProcessKey()` in `process-key-client.ts`) route through ONE shared resilience core, so hardening cannot cover one path and silently miss the money-onboarding path.
-- [x] **SEAM-02**: Every seam call site has a documented, exported timeout budget re-derived against its route's `maxDuration`, replacing the two divergent ad-hoc budgets (30s vs hardcoded 60s); a test asserts `timeout × (1 + retries) < maxDuration` per route.
-- [x] **SEAM-03**: A circuit breaker backed by the existing Upstash store (NOT in-memory) trips on repeated Railway failures and is observed consistently across concurrent Fluid Compute instances; it fails **OPEN** (attempts the real call) when Redis itself errors, so a broken breaker can never become the outage.
-- [x] **SEAM-04**: When the breaker is open or the seam fails, the caller receives a clean typed `503 CIRCUIT_OPEN` envelope with a human message — no raw error escapes a route handler as a cascade-500.
-- [x] **SEAM-05**: A committed retry-safety audit artifact maps every seam function and `/process-key` `flow_type` to retry-safe yes/no with traced evidence of server-side side effects, including the currently-unaudited `recomputeMatch` / `computePortfolioAnalytics` / optimizer / simulator / bridge set, and resolves whether `_get_recompute_lock` is distributed or process-local.
-- [x] **SEAM-06**: Bounded retry with exponential backoff + full jitter (2–3 attempts) is enabled ONLY for allowlisted entries from SEAM-05, respects the open breaker with no bypass, and provably NEVER retries `flow_type: teaser` (a retry there mints a duplicate verification + `public_token` + lead).
+### WIZERR — Honest error surfaces (the recorded WIZFORM-02 class residue)
 
-### JOB — Job-state integrity (no forever-spinners)
+- [x] **WIZERR-01** (L75): The MT5 "gateway misconfigured" copy names the actual blocker, derived from the `terminal_info` flags the probe already holds (`tradeapi_disabled` vs `trade_allowed`) — fixed as a class across all six carrier sites, within the curated-message test fence.
+- [x] **WIZERR-02** (L1788): "Try another key" never destroys the draft or cascades away composite members.
+- [x] **WIZERR-03** (L2466): An orphaned live key (no strategy) surfaces an honest remedy instead of a false `DRAFT_ALREADY_EXISTS` 409.
+- [x] **WIZERR-04** (L410): The `keys/[id]/permissions` private `PROBE_*` cascade gets a derived-population coverage law, and `KEY_UNDECRYPTABLE`'s remedy sentence says "reconnect the key", not "try again".
+- [x] **WIZERR-05** (L486): `MT5_GATEWAY_UNREACHABLE`'s server-advertised `Retry-After` threads end-to-end (a fourth optional `AnalyticsUpstreamError` field, relayed by both key-route catches).
+- [x] **WIZERR-06** (L436): The five 5xx→`UNKNOWN` terminal arms (admin match/eval, simulator) forward recognized `seamCode`s instead of collapsing the severe half of the vocabulary.
+- [x] **WIZERR-07** (L2581): `AllocateDialog`, `RenameStrategyDialog`, and `MarkOwnershipDialog` stop minting `code: UNKNOWN` — the coverage law reaches the dashboard dialogs this class regrew on.
+- [x] **WIZERR-08** (L1779): The `KEY_INVALID_FORMAT` one-code-many-causes split lands on the remaining 2 routes / 9 sites, honoring their internal-vs-public copy contracts.
+- [x] **WIZERR-09** (L1871 + L1879): The 7-row CSV floor is evaluated on the wizard composite arm, and `INSUFFICIENT_CSV_HISTORY` renders its own copy instead of UNKNOWN — landed together or not at all.
+- [x] **WIZERR-10** (L1883 + L1907): Examined-but-refused verdicts render truthful copy (a fourth outcome replaces the false "only 0 trade(s)" sentence; the publish-time TOCTOU re-check wording follows), with D-15's oracle re-cut deliberately.
+- [x] **WIZERR-11** (L1948): Wizard `AUTH_FAILED` copy is parameterized by the selected venue — never names Deribit while Binance is selected.
+- [x] **WIZERR-12** (L3091): The csv-finalize A2 409 sentence describes the actual case (same track record, different flow).
+- [x] **WIZERR-13** (L1518): The per-row CSV breakdown renders its data half without leaking `'nan'` or echoing untrusted cell contents.
 
-- [x] **JOB-01**: `strategy_analytics` carries a dedicated writer-stamped `computing_started_at`, set in the SAME statement/transaction that sets `computation_status='computing'` — never `updated_at`/`computed_at`, the exact mistake that forced the 106-janitor revert.
-- [x] **JOB-02**: A recurring pg_cron reaper transitions stranded `strategy_analytics` rows (stuck `computing` past threshold AND no active `compute_jobs` row) to a TERMINAL `failed` state carrying a user-recoverable message, so a wizard poll — or a page refresh — sees a real outcome instead of spinning forever. Supersedes the one-off `reset_stuck_computing_rows.py` script.
-- [x] **JOB-03**: The reaper's staleness threshold is derived from the **chain-inclusive** worst case a `strategy_analytics` row can legitimately sit at `computing` — walk `JOB_CHAIN_FOLLOW_ON` over `TIMEOUT_PER_KIND` and sum the per-hop ceiling `(batch_size - 1) × max_handler + handler × max_attempts + backoff` across the longest chain, yielding a **43,920 s (12.2 h)** ceiling that sits under the shipped 16 h threshold — never copied from the `compute_jobs` 4h number, and a CI invariant (mirroring `test_every_kind_has_watchdog_headroom`) fails if any handler's real worst case exceeds it. ⛔ REJECTED derivation, recorded so it is never re-derived: `batch_size × max_per_kind_timeout` is the **`compute_jobs`** formula (`20260720120000:24-25`); research collision C-6 proved that re-applying it here yields **9,000 s (≈4.9× too small)** because it counts only the LAST chain hop, and a reaper on that threshold would reap healthy in-flight chains. It is named here only as the rejected answer.
-- [ ] **JOB-04**: A reconciliation sweep detects strategies with persisted daily-returns data but NO `compute_jobs` row of any status and no terminal `strategy_analytics` row past a grace window — the "`after()` never ran at all" hole that the in-closure placeholder guard structurally cannot catch — and idempotently re-enqueues + alerts Sentry.
-- [ ] **JOB-05**: The existing orphaned-`running` `compute_jobs` purge transitions rows to a terminal `failed` status instead of bare `DELETE` (so pollers break out and the audit trail survives), at a tightened cadence with the 4h `claimed_at` threshold UNCHANGED; delivered as a NEW migration layered on `20260720120000`, reconciling the TEST-DELETE / PROD-reset split (WR-02).
-- [ ] **JOB-06**: The stale 42501 / `PROCESS_KEY_UNIFIED_BACKBONE` claim is reproduced against current `main` before any fix is scoped (documented pass/fail); the genuinely-open gap — csv-finalize's three-step RPC → RPC → `after()` sequence having no wrapping transaction — is closed by either one SECURITY DEFINER transaction or explicit compensating cleanup + Sentry, so a partial failure leaves no orphan strategy row.
-- [ ] **JOB-08**: The retention family's **stale-`pending` gap is decided on measured evidence, not skipped by default**. `retention_compute_jobs_done` (jobid 4), `retention_compute_jobs_failed` (jobid 8) and `retention_compute_jobs_orphaned_running` (jobid 11) exist; **nothing sweeps stale `pending`** — the one status an undrained enqueue cron produces. A committed measurement of the stale-`pending` population **on PROD** exists BEFORE any sweep is scoped, and the outcome is EITHER a sweep added as a fourth swept status using JOB-05's terminal-UPDATE pattern, OR an explicit WON'T-FIX carrying that measurement as evidence — **"population is zero on prod" is a valid, budget-saving outcome** (same measure-first shape as JOB-06). ⛔ The sweep, if built, transitions to a terminal status and NEVER `DELETE`s: a `DELETE` of `pending` under `supabase/migrations/**` auto-applies to PRODUCTION on merge and destroys real queued work. Evidence that the gap is real on the TEST project (where it is certain, since TEST has no draining worker): the `derive-allocator-key-dailies` cron fanned out 1,884 `derive_broker_dailies` rows on 2026-08-02, and because `claim_compute_jobs_with_priority` orders by `next_attempt_at` ASC before `LIMIT p_batch_size`, the backlog sat permanently at the head of the claim queue and starved every live claim test — 10 deterministic `python` failures on ANY branch including main, cleared only by hand. ⛔ Do NOT close this by `cron.unschedule(9)`: `supabase/tests/test_derive_allocator_keys_fanout.sql` assertion 6 requires that cron registered, so unscheduling reddens the `sql-tests` gate instead.
-- [ ] **JOB-07**: No reaper or sweep runs heavy work on the worker's shared asyncio event loop; a regression test proves a large synthetic backlog does not stall `healthz` past `STALE_THRESHOLD` (the WEDGE-01 crash class the janitor exists to clean up after).
+### HONEST — User-visible data honesty
 
-### RATE — Rate limiting (audit + close verified gaps)
+- [x] **HONEST-01** (L1939): Raw Python exception strings never render as user-facing `computation_error` copy — curated at the write boundary.
+- [ ] **HONEST-07** (split from HONEST-01, 2026-08-26): Root-cause the `str`/`None` compare behind the 2 damaged rows. Stage (`poll_positions`), window (2026-06-10 … 06-14) and population (2 strategies, one shared 59-char `TypeError`) are pinned; no site exists at HEAD and no traceback survives, and the job kind is retired (0 successes ever, dead since 2026-06-14). May prove unclosable — reassess rather than carry forever.
+- [x] **HONEST-08** (found by post-deploy QA 2026-08-26, assigned to Phase 163): The public discovery table's "Synced Nd ago" badge must not advertise freshness a dead return series contradicts. MEASURED ON PROD: `Phoenix Protocol` renders "Synced 7h ago" on `/browse/crypto-sma` while its series ends 2026-05-06 — **112 days stale**; its own factsheet chip correctly reads `Track record · old`. Two public surfaces, one strategy, contradicting each other. HONEST-02 fixed the factsheet chip; HONEST-03 scoped the badge fix to EXAMPLE rows only, so real published strategies were never covered — and with the 15 examples deleted the `is_example` gate now sees no row that would exercise it. ⛔ Do NOT close by removing the badge: bucket it on the staler of sync- and series-recency, mirroring `FreshnessChip`.
+  ✅ **VERIFIED LIVE ON PROD 2026-08-26** (real browser, unauthenticated). Both original defect
+  rows now name the staler clock: `Momentum Sphinx` renders "Track record ends 7d ago" (was
+  "Synced 16m ago") and `Phoenix Protocol` renders "Track record ends 112d ago" (was
+  "Synced 7h ago"). The badge changed SUBJECT, not just wording.
+  ⚠️ Limit not cleared: both visible rows legitimately bind to the series arm, so this page
+  cannot distinguish correct staler-of-two from always-binds-to-series — the over-binding
+  failure `FreshnessChip` warns about (it would delete the sync copy everywhere) needs a
+  published row with a FRESH series to prove absent. Newest series end across PROD is 1 day
+  old, so such a row exists but is not on this cohort.
 
-- [ ] **RATE-01**: A kickoff re-grep produces the authoritative current gap list (every `src/app/api` route calling either seam client, checked for `checkLimit`), replacing the stale `TODOS.md` route list as the basis for this group's scope.
-- [ ] **RATE-02**: `admin/match/eval` enforces a rate limit keyed on `user.id`, sized to real eval-tooling cadence — the one verified Next.js-layer gap.
-- [ ] **RATE-03**: The Python `routers/match.py` endpoints (`/recompute`, `/eval`) enforce server-side slowapi limits mirroring `portfolio.py`'s pattern, giving defense-in-depth if a leaked `X-Service-Key` reaches Railway directly and bypasses the Vercel-side limiter.
-- [ ] **RATE-04**: Existing limiter VALUES on the seven already-limited routes are audited against real Python-side cost and adjusted where wrong — the substantive remaining RATE question is whether each route has the RIGHT limit, not whether it has one.
-- [ ] **RATE-05**: A `withRateLimit(handler, limiter)` HOF exists and composes alongside `withAuth`/`withRole`, so a newly-added route cannot silently ship with no limiter (today's per-route hand-wiring has no CI gate).
+- [x] **HONEST-02** (L1953): The factsheet freshness badge reflects series recency — a strategy whose return series ended 89 days ago cannot read FRESH; investigate (flat account vs derive gap) before fixing.
+- [x] **HONEST-03** (L1959): Example strategies don't advertise stale "Synced Nd ago" badges on discovery.
+- [x] **HONEST-04** (L1991): `buildEquityCurveSeries` serves real per-strategy equity curves now that `returns_series` is selected — the hard-coded `equityCurve: null` and its false comment go.
+- [x] **HONEST-05** (L2209): Drawer-added strategies render CAGR/Sharpe like book rows.
+- [x] **HONEST-06** (L2110): "Finish setup →" opens the wizard with the clicked key preselected.
 
----
+### OPS — CI/deploy integrity & reliability
 
-## v1 Requirements — added 2026-07-26 (post-140 review programme)
+- [x] **OPS-01** (L2258 + L2259): The `shared-test-db` concurrency group no longer evicts queued main-branch jobs — a PR opened mid-run cannot make main CI conclude `cancelled` and silently skip the Railway analytics deploy; GitHub issue #616 closed on the fix. ⚠️ Research correction is binding: shrinking the group does NOT fix this (eviction is cross-run — one member + three runs still evicts queued main); the fix is an external FIFO mutex for DB-touching jobs plus a `cancelled`-conclusion watcher. ⛔ Hard prerequisite for DEPS-01.
+- [x] **OPS-02** (L1741): `sql-tests` is in an aggregator's `needs:` — the only gate that executes the deployed cron body cannot be present-and-failing with nothing gating on it.
+- [x] **OPS-03** (L2570 + L1035): The orphaned e2e specs (incl. the NAV-01 surface) run in a CI batch, and DB-types drift gets a regeneration gate (or an explicit recorded decision not to).
+- [x] **OPS-04** (L2715 + L2265 + L2730): The TEST stale-`pending` backlog gets a TEST-only drain (⛔ never a migration, never `cron.unschedule(9)`), and `test_compute_jobs_fencing.py` stamps `claimed_at` in its two direct UPDATEs.
+- [x] **OPS-05** (L360): The structlog frozen-proxy class is fixed at the class level (no module-level proxy can bind a pre-`configure_logging` chain that skips `_redact_processor`), with a regression test. ⚠️ Two failure modes, each candidate fix closes only one: dropping `cache_logger_on_first_use` misses module-scope `.bind()` (broken regardless of the cache flag per structlog docs) — needs a source-scan gate for Mode A plus a behavioral redaction test for Mode B.
+- [x] **OPS-06** (L3116): `createAdminClient()` cannot throw on the request path after an irreversible commit — the class is closed at all three known sites.
+- [x] **OPS-07** (L1594 + L1595 + L1600): Flag-monitor honesty — a failed monitor read PAGES instead of logging success, and the integration test actually falsifies it.
+  ⚠️ AMENDED 2026-08-26. The original wording opened with "`checkStuckNotifications` distinguishes 'nothing stuck' from 'could not tell'". That clause is closed BY DELETION, not by implementation: the phase did rewrite the function to a discriminated union so `0` would stop meaning both — and review WR-11 then found the function had ZERO production callers and never had any. It originated in a v1.0.0 diagnostic spike that was never wired. The whole module is gone (`src/lib/observability.ts`, 68 lines, its test, its byte-gate fixture, and a `knip.json` entry-point declaration that existed solely to silence the dead-code detector on it — three separate guards protecting code nobody called).
+  ⭐ The reason this is a closure and not a regression: an uncalled monitor is not observability. It reads as coverage while providing none, which is the same defect the requirement's own word "honesty" is about. Wiring a caller would have manufactured a monitor no one asked for or consumed.
+  The surviving clauses are MET and strengthened — review WR-02 found the fix had closed one of four blind arms, and the three numerator arms (sentry fetch threw, non-ok response, missing credentials) now return 503 like the denominator arms already did.
 
-> Phase 140 shipped SEAM-01..04 verified, then five review rounds (~20 reviewer reports, 4 red teams,
-> 57 harness mutations) found 46 + ~120 defects **in that shipped code**. Five ad-hoc fix batches were
-> **discarded wholesale** (archive branch `wip/v1.16-phase140-fix-archive`) because repairs without a
-> plan→plan-check gate ran ~1:1 fix-to-defect. These groups re-enter that work through the normal
-> gate. Full evidence, per-finding, in
-> `.planning/phases/140-seam-shared-resilience-core-circuit-breaker/140-FINDINGS-CONSOLIDATED.md`
-> (PART 2 "TRAPS" is binding on any plan that touches these).
->
-> Requirement IDs cite finding IDs as *evidence*, not as scope — each requirement must be satisfiable
-> and testable on its own terms.
+- [~] **OPS-08** (L1562): The 10-param `_enqueue_compute_job_internal` no longer uses `INTO STRICT` on its lost-race branches (parity with the deliberately de-STRICT-ed 7-param overload).
+  ✅ MET — MEASURED ON PROD 2026-08-26 after the merge: the 10-param body carries **0**
+  `INTO STRICT` lost-race re-reads, raises `serialization_failure`, and holds the OPS-08 marker
+  comment. Prior note said "no database has the migration"; that is now true only of TEST.
+  ⛔ TEST still runs the PRE-FIX body and nothing applies migrations to it, so the SQL gate's
+  pre-apply SKIP is PERMANENT there and no test executes the deployed body — see SKIP-01.
+  ⚠️ MET-AT-MERGE, not pending. The requirement is worded about the DEPLOYED function and
+  merging was the only automated apply path, so the merge WAS the remedy and blocking on it
+  would have been causally backwards. ⛔ Verified consequence: the gate's
+  `SKIP (Part 3)` marker does not match CI's anti-SKIP net, so the lane stays green and NO CI
+  signal will ever redden to report the unapplied state — only prose tracks it. See DRIFT-01.
 
-### PYAPIFIX — Close Phase 140.1's own review findings (Phase 140.1.1)
+- [x] **OPS-09** (L1561): The resync draft pre-check is deterministic (`ORDER BY created_at DESC` + bounded window).
+- [x] **OPS-10** (L1558): The retry loop cancels abandoned response bodies (`body.cancel()`) so undici stops buffering until the attempt signal fires.
+- [x] **OPS-11** (L1531): The `MultiKeyConnectStep` order-sensitive flake is root-caused (unrestored `vi.stubGlobal`/`vi.mock` class) and fixed, not retried-away.
 
-> From `.planning/phases/140.1-.../140.1-REVIEW.md` — 36 findings, **36 mutations injected and 12
-> SURVIVED**. These are defects in code 140.1 *landed*, not in the original Phase 140 surface.
+### LEDGER — Recurring strategy refresh for ledger-backed venues (Phase 161.1)
 
-- [x] **PYAPIFIX-01**: the `/process-key` duplicate reply and its consumer agree on one contract, proven by a test that exercises the **real** Python response against the **real** TypeScript guard — not two suites each mocking the other. *(H-5: `routers/process_key.py:680-690` emits `queued:true` with `code`/`idempotent`; `finalize-wizard/route.ts:1433-1450` rejects that shape → Sentry + 502.)* ⚠️ **Two corrections, both source-verified:** the guard is **NOT deployed** (Phase 140's commit `57b11813` on this same unmerged branch) so there is no rollout-ordering constraint — choose the fix on contract quality; and **no live caller can trigger the 502 today** (`finalize-wizard`/`keys/sync` contain zero `wizard_session_id`; the duplicate path requires a caller-supplied one per `process_key.py:977-979`). This is contract incoherence with a live trap arm, **not** a production break. Also absorb the unowned **M-11 re-triage**: onboard has no request-level double-submit protection, only job-level dedupe.
-- [x] **PYAPIFIX-06**: `error_contract.py`'s remaining guard gaps are closed, breaking a **circular deferral** — no downstream phase can reach them (140.2/140.3 are TypeScript-only by their own CONTEXTs; 146 is a rate-limit phase). **(a)** A `429` carrying `Retry-After` is constructable — today `retry_after` requires `retryable:true` while the CALLER arm raises on it (`_validate`, `:146-155` + ~`:100`), yet `140.1-VERIFICATION.md` gap 1 and obligation TS-23 both mandate migrating the two in-handler 429 sites onto that envelope. **(b)** The `>=500` arm rejects a venue `dependency` — today `service_error(500, "X", dependency="binance", retryable=False)` validates, and **Phase 140.2 keys the breaker on `dependency`**, so a venue name on a 500 poisons a breaker key. *(M-1, M-2 — same function PYAPIFIX-04 already opens; excluding them half-closes the class in the phase whose stated principle is "enforce, don't document".)*
-- [x] **PYAPIFIX-02**: A fault at the caller's venue answers **424/retryable** at every site a Python-side change can correct without depending on an unlanded TypeScript obligation, with the remainder (`routers/exchange.py:145`, `:152`, `:505`) enumerated and blocker-named (**BLOCKED-BY: TS-05** — migrating them to `service_error(424)` turns `body.detail` from scalar to object, which `src/lib/analytics-client.ts:177-180` feeds into `classifyKeyValidationError` as `"[object Object]"` → terminal UNKNOWN dead-end render), not 403 — implemented as a **permanent-code ALLOW-LIST** (never a transient denylist), the class closed rather than point-fixed, and no body contradicting itself (`recoverable:false` beside "Try again in a moment"). *(H-1.* ⚠️ **Corrected at source 2026-07-26:** `/exchange/validate-key` does **NOT** already handle this — `read_only is False` appears exactly twice repo-wide (`process_key.py:1297`, `long_fetch.py:331`); the real analog is `long_fetch.py:386-397`. The research's **transient denylist fails unsafe — it is the existing bug's own shape**. `MISSING_SCOPE` **must** be allow-listed (`exchange.py:1047-1058` sets `read_only=False` + that code without `valid=True`, and it is absent from `long_fetch`'s `permanent_codes`) or a permanent scope fault becomes a retryable 424. The review also **missed `process_key.py:358-359`'s `recoverable` set**, which omits `PROBE_FAILED`/`DDOS_PROTECTION` — no status-code change fixes that.)*
-- [x] **PYAPIFIX-03**: A failure in code that performs **no network I/O** is attributed to us (500), never to the caller's venue — so it counts, and someone is paged, **at all three sites**. *(H-2: `internal.py:416-431`. ⚠️ **Corrected 2026-07-26 — this is a 3-site class, not 1**: the pattern-mapper found `routers/portfolio.py:2266`, and the **same function's second `create_exchange` at `:2316` already answers 500**, which is in-repo proof the class is real. The instance-not-class defect this programme exists to catch.)*
-- [x] **PYAPIFIX-04**: The `body.detail.detail` scalar guarantee is **enforced by a guard**, matching every other rule in `error_contract.py`, because Phase 140.2 renders from it. *(H-3)*
-- [x] **PYAPIFIX-05**: Every one of the 12 surviving mutations turns a test RED, re-run and observed first-hand — including the ccxt-subclass narrowing that survived **twice** while making `RateLimitExceeded` answer 500, and `default_platform_key` returning `""`, which makes slowapi **skip limiting entirely** and ships green. *(H-4 + the Medium mutation set.)* **Also folds in M-15** — `tests/test_process_key_200_discriminator.py:416-424` asserts `len(_SHAPES) == 6` against a list literal **in the same file**, and its docstring's claim that a seventh return site reddens it is false. A toothless *Python* test squarely inside this phase's goal, which the "12 survivors" wording would otherwise skip and whose triage destination (140.2) cannot edit Python.
+- [x] **LEDGER-01**: A recurring enqueuer reaches `strategy_analytics` for every ledger-backed venue via the strategy-keyed chain TAIL (`derive_broker_dailies` strategy-mode = `JOB_CHAIN_FOLLOW_ON["process_key_long"][0]`), never the ccxt fill path and never a re-enqueue of `process_key_long` (provably a no-op: `long_fetch.py:154` returns DONE on `published`, `:193` on the whole advanced-status set). Cohort scoped off `_LEDGER_BACKED_SOURCES`, never off absence from `EXCHANGE_CLASSES` — deribit is in `EXCHANGE_CLASSES`.
+- [x] **LEDGER-02**: It ships DORMANT behind two locks with real readers — no schedule registered anywhere in the repo (WORKER-03 rule: `supabase/migrations/**` auto-applies to PROD) plus a fail-closed activation setting the fan-out itself reads — and activation is a documented, ordered, reversible founder LIVE op (`docs/runbooks/ledger-refresh-go-live.md`). Merging changes no prod behaviour.
+- [x] **LEDGER-03**: Staleness is observable on a timestamp that advances ONLY when new analytics data lands — the max date inside `strategy_analytics.returns_series`, conjoined with `computation_status` treating BOTH `complete` and `complete_with_warnings` as success. ⛔ Never `last_sync_at` (advanced daily by key-scoped jobs) and never `strategy_analytics.computed_at` (re-stamped `now()` on EVERY job transition including the `failed` arm), proven by a test that advances both rejected timestamps without new data and shows the check still fails.
+- [x] **LEDGER-04**: A regression pin fails if any ledger venue is dropped from the refresh set, behind an anti-vacuity floor, proven RED by neutering. The venue set is written in exactly ONE place in SQL and drift-gated against the Python constant; no TypeScript mirror (`strategyGate.invariant.test.ts` bans venue literals after a mirror drifted).
 
-### PYAPIFIX2 — Surviving findings from the 140.1.1 review cycle (Phase 140.1.2)
+### SEC — Small security hardening
 
-> From 5 Stage-1 lenses + 5 Stage-2 red teams over `56fb7167..39688d69`. **An adversarial refutation
-> pass refuted 4 of 10 findings outright and reduced 3 more** — the list below is only what survived.
-> Evidence: `140.1.1-STAGE1-FINDINGS.md`, `140.1.1-STAGE2-FINDINGS.md`, `140.1.1-REVIEW.md`.
-> **All five code items are Python; Phase 140.2 is TypeScript-only by its own CONTEXT, so they have
-> no other home** — the same circular deferral that forced PYAPIFIX-06 into 140.1.1.
+- [x] **SEC-01** (L940): The server-side password policy is verified and enforced — client `minLength={6}` is backed by an explicit Supabase-side policy, documented. ⚠️ MEASURED 2026-08-26 and recorded as a point-in-time READING, never as an invariant.
+  ⚠️ QUALIFIED 2026-08-26 (review WR-10). What was delivered is a MEASUREMENT, not a raised
+  floor: the hosted minimum was READ from the live endpoint's own rejection (6 characters,
+  `reasons: ["length"]` alone ⇒ no character-class rule) and mirrored in one exported constant,
+  retiring the assumption that it was the GoTrue default. That is what "verified" means here.
+  ⛔ It does NOT mean the floor was found adequate. A platform custodying decryptable exchange
+  keys still accepts a six-character all-lowercase password, and nothing in this phase raised
+  the actual gate — the client constant is UX only, the real gate is hosted GoTrue, and both the
+  minimum and leaked-password protection are dashboard-owned with no repo representation.
+  ✅ ACCEPTED RISK — founder decision 2026-08-26 (WR-10 in TODOS.md). The six-character,
+  no-character-class floor stands, knowingly, with the key-material exposure path understood.
+  This entry therefore claims exactly two things and no more: the hosted policy was MEASURED
+  rather than assumed, and the resulting floor was ACCEPTED rather than cleared. It does not
+  claim the floor is adequate. Revisit on paying clients, a custody/compliance requirement, or
+  any evidence of credential stuffing; the remedy in TODOS does not expire.
 
-- [x] **PYAPIFIX2-01** *(HIGH)* — ⚠️ **PYTHON HALF CLOSED (7/7 sites carry code+recoverable); RENDER HALF → OB-1, owner 140.3** (ledger row **TS-35** in `140.1-TS-OBLIGATIONS.md` carries it, with `analytics-service/tests/fixtures/validate_key_venue_transient_contract.json` as its parity input). Not a bare tick: ROADMAP SC1 also demands that a Binance-maintenance-shaped failure *no longer renders* as `UNKNOWN`/500 with no retry affordance, and that render assertion is **not delivered by this phase** — `create-with-key/route.ts` returns the status the classifier computed and the upstream status is discarded (RESEARCH C-1), so it can only be fixed in TypeScript. The venue-transient class is closed at **every** consumer of `validate_key_permissions`, including the **live key-connect route**. Today `routers/exchange.py:522` (`/api/validate-key` — used by `create-with-key`, `composite/add-key`, `keys/validate-and-encrypt`) and `routers/portfolio.py:2322` collapse `RATE_LIMITED`/`DDOS_PROTECTION`/`EXCHANGE_UNAVAILABLE`/`NETWORK_UNAVAILABLE`/`PROBE_FAILED` into an opaque 400 with no `code` and no `retryable`. **The arm 140.1.1 fixed serves teaser/csv/internal_report; the unfixed one carries strictly more real traffic.** Traced consequence: `EXCHANGE_UNAVAILABLE` and `NETWORK_UNAVAILABLE` fall through `classifyKeyValidationError`'s substring cascade (`wizardErrors.ts:967-1035`) to **`UNKNOWN`/500 "our team has been notified" with no retry affordance** — the DOGFOOD-3 dead end that cascade exists to kill. Also enumerate `_validate_mt5_key`'s three classified-upstream 400 arms (`exchange.py:335`, `:345`, `:361`), which sit outside TS-32's carve-out.
-- [x] **PYAPIFIX2-02** *(reproduce-first)* — **REPRODUCED, then FIXED** (plan 01): `error_kind="transient"` was observed first-hand on **both** codes through the real `Mt5Adapter`, so the gate opened and the fix landed — permanence is now **stated by the adapter** (provenance), not by a fifth string list. A permanent MT5 credential fault is not classified as a recoverable venue fault. `MT5_WRONG_SERVER` (`services/ingestion/mt5.py:104`) and `MT5_MASTER_PASSWORD` (`:224`) are absent from **both** `PERMANENT_VALIDATION_ERROR_CODES` and `long_fetch.py:391`'s local `permanent_codes`, so on the live worker path they yield `error_kind="transient"` → **3 gateway-serialised retries → `failed_final`** for a credential that can never succeed. **MT5 is `ENABLED=true` in production.** The TS side already classifies both as 400 client faults (`wizardErrors.ts:1002/1005`) — **Python and TypeScript hold opposite verdicts on the same codes.** ⚠️ **Reproduce the worker path before scoping** — one red team held that MT5 branches before `create_exchange` and never calls `validate_key_permissions`; "could not reproduce" is a valid, budget-saving outcome.
-- [x] **PYAPIFIX2-03** — closed (plan 02): the raw `HTTPException(429)` now goes through `service_error(429, "RATE_LIMITED", retryable=True, retry_after=...)`, giving that builder arm its first consumer; the `error_contract.py` comment it invalidated was inverted in the SAME commit. `/internal` throttling emits the service's own envelope. `routers/internal.py:226` raises a raw `HTTPException(429)` one line from a builder arm that would validate it cleanly — so the 429 arm added in 140.1.1 has **zero call sites** and the response carries no `code`. *(Its consumer additionally launders the 429 into `502 / PROBE_FAILED`, discarding the `Retry-After` — that half is TypeScript and belongs to 140.3.)*
-- [x] **PYAPIFIX2-04** — closed (plan 02): all four user-facing 429s carry `Retry-After`. Every **user-facing** 429 carries a `Retry-After`. Four do not: `match.py:1742`, `portfolio.py:1960`, `simulator.py:249` (+ `portfolio.py:2245` on a dead route). This is the 429-shaped hole in the "503 carries `Retry-After`; honour it" rule.
-- [x] **PYAPIFIX2-05** — closed (plan 04): `_SHAPES` is bound to the router's AST by a one-to-one containment oracle (router source AST vs live HTTP bodies — two artifacts, never a count). Falsifiability OBSERVED: deleting a row reddens naming the uncovered fingerprint, and the M-15 fence still reddens on a 7th 200-capable return. The 200-discriminator corpus cannot silently shrink. 140.1.1 deleted `test_pyapi_10a_exactly_six_shapes_are_covered` as self-referential — correctly — but it was **also** the only guard on `_SHAPES`, and the AST fence that replaced it does not read `_SHAPES` at all. **Deleting a row was OBSERVED to survive** (141→140 passed). One assertion, bound to the fingerprint set.
-- [x] **PYAPIFIX2-06** — closed (plans 02 + 04): all four artifact items corrected, each replacement coordinate RE-DERIVED by reading source at current HEAD (never `old + N`); the fifth item was a scope collision, settled below. The phase's own artifacts state only what they can support. `140.1.1-VERIFICATION.md` must read `gaps_found`: its Direction-2 claim *"no already-correct test was weakened or removed"* is **false** (two tests were deleted; one is missing from the deletions table), and PYAPIFIX-02's carve-out completeness was evidenced by `grep -c "BLOCKED-BY: TS-05" → 1`, which proves a marker exists, not that a list is complete. In `docs/STATUS_CONTRACT.md`: the "not seam-reachable" list's `exchange.py:491` **currently points at a live 424 arm**; S-11's `internal.py:414` is wrong (at HEAD `2c55ece0` the `except Exception:` is `:442` and the `service_error(500, "ADAPTER_INIT_FAILED", ...)` raise is `:471`; the `:421`/`:450` pair quoted here was itself read at `39688d69` and has since drifted — which is the point); `## 1. The four classes` heads a **five**-row table. ⚠️ **Do NOT run a general comment sweep** — the "six refs off by the inserted-line count" diagnosis was **refuted**; most drift pre-dates the phase, so any number recomputed as old+18 would be wrong.
-  - ⚠️ **W-1 — location clause corrected.** This requirement originally placed the 6/7→6/10 census *"In `docs/STATUS_CONTRACT.md`"*. **That was false.** The census is a CODE COMMENT at `analytics-service/services/error_contract.py` ≈:158-163. The planner settled the scope collision as a fenced comment-only exception and it landed in plan 02 (`e5aead5d`), with the arithmetic re-derived by AST — **6 of 16** `service_error(500, …)` sites carry `dependency` — never as `7 + 3`. Plan 04 therefore touches no code for this item. Leaving the false location on a ticked requirement would be the identical defect class this requirement exists to correct.
+  1. **The reading.** The hosted production project's minimum password length is **6**, with **no character-class requirement**. Both facts are the server's own, not the GoTrue default — which is exactly what RESEARCH assumption A1 assumed and this measurement retires.
+  2. **The method, and why it was the only lane.** No management-API token exists on the machine that ran this (`~/.supabase/access-token` absent, `SUPABASE_ACCESS_TOKEN` unset) and the Supabase MCP exposes no auth-config reader, so the policy was read directly off the live signup endpoint with a deliberately-failing 1-character password — rejected at validation, so no account is created. It answered `422 weak_password` ("Password should be at least 6 characters.") with `weak_password.reasons = ["length"]`. The second fact needs no second probe: a 1-character lowercase password violates length AND every character class at once, GoTrue enumerates every violated reason, and a configured character policy would have added `"characters"`. It returned `["length"]` alone.
+  3. **"Enforced" cannot mean enforced HERE — and that is not a shortfall.** Signup goes browser → hosted GoTrue directly (`supabase.auth.signUp`); there is no Next.js server hop to enforce anything on, and `minLength` on an input is an HTML affordance devtools bypasses. So the client floor is UX only, and the requirement's "backed by" is the real claim: the hosted minimum is EQUAL to the client floor, not merely compatible with it. The plan's escalation branch (hosted minimum < 6 ⇒ a founder-visible live op to raise it) did not fire.
+  4. **Drift-proofing.** The two independent client constants — a bare `minLength={6}` literal in `SignupForm.tsx` and a private `const MIN_PASSWORD_LENGTH = 6` in `ResetPasswordForm.tsx` — are unified into one exported `MIN_PASSWORD_LENGTH` in `src/lib/auth/password-policy.ts`, whose docblock carries the value, the date and the method. Both forms now derive their `minLength` **and** their user-facing copy from it. ⛔ `supabase/config.toml` (`minimum_password_length`, `password_requirements`) is NOT the hosted policy — it governs only the LOCAL dev stack, and citing it as evidence is the specific mis-citation this entry exists to prevent.
+  5. **The limit of the guarantee, stated rather than papered over.** The setting is dashboard-owned with no repo representation; it can change outside git at any time and no test here can observe that. `src/lib/auth/password-policy.test.ts` therefore pins only what the repo controls — that the constant still equals the recorded reading, and that neither form has re-hardcoded a numeric `minLength`. Proven able to fail in three directions (each neuter observed RED, then restored and hash-verified): re-hardcoding `minLength={6}` in `SignupForm.tsx`, dropping the constant to 5, and reverting `ResetPasswordForm.tsx` to its own private constant.
+- [x] **SEC-02** (L2953): The tracked docs no longer carry local absolute paths / the macOS username; verified by a no-allowlist scan (the gitleaks allowlist is path-based and blind here). ⚠️ MEASURED 2026-08-26 (pre-edit, NUL-safe, tree-wide): **95** tracked files of 5693 carry the token — **88** under `.planning/` and **7** outside it — across ~940 raw occurrences. Earlier figures were undercounts: the ROADMAP's "~50" was low, and both "80" and "87" are `.planning/`-only figures that leave the 7 non-planning files leaking. Always re-measure live; the count drifts as files are added.
 
-### SEAMCORE — Seam core & breaker correctness (Cluster A + D)
+  Four decisions are RECORDED here because the requirement, not just the code, has to carry them:
 
-- [x] **SEAMCORE-01**: Breaker failure recording is driven by an **attributability** decision, not by `status >= 500`: a fault caused by the caller, the caller's credentials, or the caller's exchange must not count as Railway degradation, and a genuine service fault must. The discriminator handles the `text/plain` body an unhandled FastAPI exception produces. *(A-01, A-02, A-03, A-05, A-22, C-12; TRAP-2)*
-- [x] **SEAMCORE-02**: The failure-recording window covers the **whole** request lifecycle including the response-body read, so a deadline that fires after headers arrive — the most common Railway degradation — is recorded, and the body-read rejection surfaces as a typed seam error rather than a raw `DOMException`. *(A-21)*
-- [x] **SEAMCORE-03**: Every breaker-store round trip is bounded by an explicit retry/timeout configuration and is **counted in the budget invariant**, so a hung Upstash cannot hold a lambda to `maxDuration` and the declared per-route budgets remain true in the open, closed and failing-store states. *(A-04, A-26)*
-- [x] **SEAMCORE-04**: Breaker state reads are self-consistent — a healed circuit is never reported open, and a known-open state is never discarded by a secondary-call failure. *(A-24)*
-- [x] **SEAMCORE-05**: Trip and recovery behaviour is **measured and asserted**, not assumed: recovery latency matches its documentation, cooldown-vs-window ordering is enforced by a test, an in-flight pre-trip failure cannot re-arm an expired lock, and the store's fail-open sentinel is never read as counter exhaustion. *(A-08, A-09, A-14, A-25)*
-- [x] **SEAMCORE-06**: Breaker open/close transitions emit a structured operational event, and transport failures are logged with a diagnostic that **preserves the syscall token** (`ECONNREFUSED`/`ENOTFOUND`/TLS/DNS) while scrubbing every credential the seam carries — at every log site and every Sentry capture, including per-request secrets. *(A-10, A-11; TRAP-1 is binding)*
-- [x] **SEAMCORE-07**: Every breaker constant and every per-route timeout budget is pinned by an oracle the implementation **does not supply** (literals in the test, not values read back from the table under test), so changing any tuning value fails a test in both directions. *(D-07, D-08, D-10, D-13)*
-- [x] **SEAMCORE-08**: Structural invariants of the core are mechanically enforced rather than documented: the shared-error leaf stays dependency-free, each call site's budget key is pinned, health-warmer paths provably cannot enter the core, and the lint guard catches the URL shapes that actually occur in this codebase. *(A-12, A-13, A-16, A-18, D-09, D-11, D-14)*
-- [x] **SEAMCORE-09**: The breaker's Redis-side semantics are verified against **real Redis** — a fake that cannot execute the deployed Lua cannot verify sliding-window decay, weighted carry-over, no-increment-on-denial, or `nx` trip idempotency. *(D-01, D-02, D-13)*
-- [x] **SEAMCORE-10**: Multi-call routes declare their real worst case: fan-out over composite members is bounded, the bound is enforced at the query, and the budget table models the branch actually taken rather than a sibling branch. *(A-06, A-29)*
-- [x] **SEAMCORE-11**: The core fails loud on malformed inputs and refuses ambiguous transports: invalid timeout/retry-after values raise at construction, redirects are not followed (secret headers must never survive a cross-origin hop), and non-JSON 2xx / 204 / 304 responses resolve to one defined, non-crashing outcome across both clients. *(A-15, A-23, A-27, A-28)*
+  1. **Founder ruled forward-only redaction; history rewrite declined (2026-08-26).** The username was pushed to a PUBLIC repo, so it is already cloned, forked, and cached. A `filter-repo` over ~700 commits would break every open PR ref, invalidate the `archive/v1.20-phase-162-planning-artifacts` tag, and STILL not unpublish the strings. The scrub therefore stops NEW leakage; it does not undo the old. That limit is accepted, not overlooked.
+  2. **Severity framing: metadata, not credentials — do not inflate it.** The token is a macOS username and local directory layout. It is not a secret, no runtime reads it, and nothing needs rotating (RESEARCH runtime-state inventory: zero stored data, zero service config, zero env vars). This entry exists to stop drip-leakage of local identity on a public repo, and treating it as a credential incident would misprice every future finding of this class.
+  3. **Scope extended beyond `.planning/`, including a COMMENT-ONLY exception on two APPLIED migrations.** A gate scoped to `.planning/` would itself be a path restriction — the very blindness it exists to fix — so the scrub covered the whole tracked tree: 5 files under `docs/` and 2 applied Supabase migrations. Editing an applied migration violates migration-reviewer rule 11, so this is a DELIBERATE, recorded deviation, bounded three ways: only comment lines changed (every changed line begins with `--`, zero SQL bytes), each file carries a `⚠️ RECORDED EXCEPTION` header stating what was edited and why, and the precondition was verified read-only BEFORE the edit — the Supabase CLI reconciles applied migrations by VERSION, never by content hash (history table `schema_migrations (version text NOT NULL PRIMARY KEY)`; reconciliation read `SELECT version FROM supabase_migrations.schema_migrations ORDER BY version`; upsert `ON CONFLICT (version)`; upstream `FindPendingMigrations` diffs version strings parsed from filenames). Had reconciliation been content-hashed, the plan's precondition required a HALT instead. Exception headers: `supabase/migrations/20260517013000_revoke_probe_oracle_assert_strategy_visible_to_allocator.sql` and `supabase/migrations/20260517013100_sanitize_user_recipient_email_case_insensitive.sql`.
+  4. **The gate is no-allowlist BY CONSTRUCTION** (`scripts/check-planning-hygiene.ts`, chained into `npm run lint`, which rides the `frontend-lint` CI job already inside the `frontend` aggregator — ⛔ deliberately NOT the `secret-scan` job, which is outside the aggregator and already red on `workflow_dispatch`). It scans every tracked file with ZERO path exclusions — not its own source, not tests, not `supabase/migrations/`, not fixtures. Its ONE exemption is by VALUE: the placeholder `<user>` immediately following a matched prefix, which is non-identifying wherever it sits. A path carve-out is forbidden — that is precisely how gitleaks went blind. Two blind spots are closed structurally: the needle is stored base64/char-coded so the scanner passes its own scan without needing the carve-out it forbids, and every file is read `latin1` (byte-exact) so a NUL byte cannot hide content the way `git grep -I` does on `src/lib/wizardErrors.test.ts`. Proven able to fail in BOTH directions: a scratch tracked file with one raw occurrence took `npm run lint` green → exit 1 → green, and injecting a `supabase/migrations/` path allowlist into the scanner turned its own no-path-allowlist test RED (restored).
+- [x] **SEC-03** (L2511): `add_wizard_composite_key` is policed by the audit-coverage gate — the pragma-vs-real-emission decision is made and recorded, not dodged.
 
-### SEAMUX — Client & wizard error surface (Cluster B)
+  1. **The decision: KEEP the pragma; do NOT emit at add-key time.** `add_wizard_composite_key` writes a DRAFT strategy plus an `api_keys` row that is not yet user-visible; the user-visible creation is audited at finalize time in `strategies/finalize-wizard/route.ts`. Its sibling `create_wizard_strategy` — column-for-column the same signature — already follows that draft-then-finalize audit shape, so emitting here would duplicate the finalize event and make the audit log say a strategy was created twice. The pragma's stated reason was already coherent; what was missing was any mechanism that reads it.
+  2. **Why the entry was needed at all — MEASURED, not argued.** The gate's RPC detection is allowlist-driven, and the name's ABSENCE from `MUTATING_RPC_NAMES` is what made the `@audit-skip` pragma at the call site decorative: the gate never saw the call, so it never evaluated the pragma. Control run 2026-08-26 — with the name unlisted, DELETING the pragma entirely left `audit-coverage.test.ts` GREEN (17 passed): an unaudited, unpragma'd mutating RPC sailing through the audit law. That is the escape, observed rather than inferred.
+  3. **The pragma is now live law.** With `"add_wizard_composite_key"` listed, the same deletion turns the gate RED, naming the exact site (`strategies/composite/add-key/route.ts:477`); restoring the pragma returns it to green. Falsifier observed in both directions on 2026-08-26, restore hash-verified.
+  4. **Phase 164 prerequisite.** This allowlist is the ONE edit SHARE's mint/revoke RPCs must land in. They now land in a gate proven to work — SEC-03 standing is what makes that dependency real rather than nominal.
+  5. **Adjacent debt corrected, not inherited (DEF-141.2-03-A).** The `it.skip` H-0001 comment in the same file cited retired coordinates. Its census was re-measured: every line number was stale, the "kill-switch flip" site it named no longer exists (Phase 106 Stage B made flag-monitor alert-only), and three sites it never listed do exist — the uncovered single-line-mutation set is **6**, not 4. The comment now carries the re-measured list, the method that produced it, and a warning not to trust the numbers past the next refactor. ⚠️ Those six remain UNFIXED and out of this requirement's scope; H-0001 is still deferred.
+- [x] **SEC-04** (L3006 + L3013): The bridge and portfolio-optimizer flows get a named `bridgeComputeLimiter` sized to backend reality (closing the 30× front/back mismatch) — ⛔ without resizing the shared `userActionLimiter`.
+- [x] **SEC-05** (L604): The tenth IP-keyed route (`simulator.py`) is repaired along with the test whose wrapper-check conceals it (equality assertion, quarantine shrinks to 0).
+- [x] **SEC-06** (L2361): Removing a panel mid-validate aborts the in-flight credential-carrying POST.
 
-- [ ] **SEAMUX-01**: Seam error codes and their user-facing copy have **one source of truth**; a drift between any two production copies fails a test, and `CIRCUIT_OPEN` is a first-class code the wizard classifier recognises rather than an unknown-code dead end. *(B-01, B-07, D-12)*
-- [ ] **SEAMUX-02**: The wizard error classifier is pinned against the **actual** messages the seam clients emit, so the common breaker-closed Railway outage classifies correctly instead of falling through to `UNKNOWN`. *(B-02)*
-- [ ] **SEAMUX-03**: Every seam-touching route answers with the repo's typed error envelope carrying a `code`, on every arm — including the public teaser, the CSV routes, the admin match routes, and `keys/sync`'s currently codeless arms — so a client can discriminate without sniffing prose. *(B-08, B-10, B-12, C-04)*
-- [ ] **SEAMUX-04**: No error surface makes a **false claim about the user's data or its cause**: our outage is never reported as the user's exchange, the user's file, or the user's credentials being at fault, and no copy asserts work completed (or didn't) that the client cannot know. *(B-03, B-04, B-16, B-18, B-20; C-02 bounds what may truthfully be claimed)*
-- [ ] **SEAMUX-05**: Every seam call site observes the **HTTP outcome**, not just transport rejection: an unrecognised or unparseable body is a failure, not a success, and never starts a poll for work that was never enqueued. *(B-05, B-06, B-13, B-15, B-17, C-07)*
-- [ ] **SEAMUX-06**: A recoverable seam error always offers a retry, that retry is never the sole route to a destructive control, and `Retry-After` is honoured at every surface that renders one — for the breaker's 503 as well as 429. *(B-11, B-22, B-23; TRAP-4 is binding)*
-- [ ] **SEAMUX-07**: Every analytics response consumed by a decision is **schema-validated and fails closed**. A publish/permission gate must never pass because a field went missing. *(B-14, B-24, C-05, C-06)*
-- [ ] **SEAMUX-08**: Seam failures are observable to us as well as to the user: funnel events carry the specific error code rather than a collapsed bucket, every wizard variant emits them, and unexpected failures actually reach Sentry wherever the copy claims a team was notified. *(B-21, B-25)*
-- [ ] **SEAMUX-09**: A failed recompute **discards the result it invalidates**. No surface may present a prior successful result as current after a subsequent attempt failed — in particular, no failed compute may leave money-bearing output (ranked allocations, weights, candidate lists) rendered with live action controls, and no unvalidated shape may render as an empty-but-successful panel. *(B-26 — CRITICAL — plus B-27, B-28; the correct pattern already exists in `WeightOptimizerSection.tsx`)*
+### DEPS — The booked dependency campaign
 
-### PYAPI — Python service contract & limiter identity (Cluster C)
+- [ ] **DEPS-01** (L798): All 9 open dependabot PRs are RESOLVED — landed or deliberately closed — in the research-verified order, full local suite between each. Binding corrections from STACK research (2026-08-20): prerequisite commit fixes `requirements.in` pandas 2.2.3→3.0.3 on main BEFORE #685 (which otherwise silently downgrades production pandas 3.0.3→2.3.3); #686's nine red checks are one incomplete dependabot lockfile — rebase + `npm install`, don't bisect; #614 (TypeScript 7) is CLOSED with reasons, not landed (compiler-API import in the seam-log coverage gate + typescript-eslint peer <6.1.0); #646 lands jsdom 30.0.1 not 30.0.0 (getComputedStyle calc() regression; note Node-25 local exclusion); #612 (supabase/setup-cli 3 — rides the PROD auto-migrate workflow, install source changes GitHub→npm) lands ALONE, validated on migration-drift-check first; #606 is closed as stale (bump the `fast-uri` override instead). Order: pandas prereq → #643 → #627/#626 → #612 → #685 → #686 → #645 → #646 → close #614/#606. ⛔ Blocked on OPS-01.
 
-- [x] **PYAPI-01**: Wizard-session uniqueness is **tenant-scoped**, and no duplicate pre-check can return another tenant's verification id, status or trust tier. Proven by an RLS/SQL gate under `supabase/tests/`. *(C-08 — the programme's only CRITICAL)*
-  - **DONE (2026-07-26) — both halves, across two plans.**
-    - *Constraint half* (Plan 140.1-01): `UNIQUE (strategy_id, wizard_session_id)` (migration `20260726000225`), gated by `supabase/tests/test_strategy_verifications_wizard_session_tenant_scope.sql`, proven RED pre-migration and GREEN post-migration.
-    - *Query half* (Plan 140.1-02, commit `ca9a9235`): **both** service-role read sites now scoped — the duplicate pre-check (`routers/process_key.py:930`) and the 23505 race-winner re-fetch (`:1009`), each filtering `strategy_id` AND `wizard_session_id`. The pre-check had to **move** below the `strategy_id is None` branch before it could be scoped at all. A `strategies` id+user_id ownership gate runs ahead of the first read (403 `STRATEGY_NOT_OWNED`), because `strategy_id` is caller-supplied and a scoped read alone is necessary-not-sufficient. Proven by pytest oracles PYAPI-01d (one per read site) and PYAPI-01e; mutation M2 (drop the scoping from the race site only) reddens the race oracle while the pre-check oracle stays green.
-    - The SQL gate passes with the query half unfixed, which is why both plans were required before this box could be ticked.
-- [x] **PYAPI-02**: `/process-key` throttling is bounded **per tenant**, so no single caller — and in particular no anonymous caller of the public teaser — can exhaust the allowance for paying tenants. *(C-09, C-23)*
-  - **DONE (2026-07-26) — Plan 140.1-06, commits `f8c85b07` (Python) + `eb88d53e` (TS mint).**
-    - Buckets: `process_key:t:<user_id>` 100/hour · `process_key:anon` **30/hour** ·
-      `process_key:unverified:<sha256(cred)[:16]>` 100/hour + WARN · stacked platform ceiling
-      `process_key:ceiling:<hash>` 500/hour. Identity is an HMAC-SHA256 `X-Tenant-Claim`
-      (`<payload>.<exp>.<mac>`) keyed on `INTERNAL_API_TOKEN` — **no new secret, no new library**.
-    - The anonymous half is closed by a DEDICATED bucket sized *below* a tenant's, proven live:
-      `test_anon_bucket_exhausts_at_30_without_touching_a_tenant` (31 teaser calls 429 the teaser
-      and a tenant call still passes).
-    - Forgery closed by four oracles — tampered MAC, wrong secret, expired claim, and unsigned
-      `X-User-Id` — each asserting the attacker lands in `unverified`, never a tenant bucket.
-    - Both stacked limits proven to evaluate against a live `TestClient` in both directions
-      (ASSUMPTION-1: RESEARCH read slowapi 0.1.9, prod pins 0.1.10).
-    - Requires PYAPI-04 in the same wave: without it an *unauthenticated* caller could allocate
-      `unverified` buckets. That is why the two shipped together.
-- [x] **PYAPI-03**: No router declares its own request-address-keyed limiter; all throttling goes through the shared limiter service with a documented token cost per flow. *(C-10; distinct from RATE-03, which adds `match.py` coverage)*
-  - Closed by 140.1-07 (`7297f941`, `60086ce3`, `e26f0520`, `139f3153`). 9/9 routes rekeyed onto `partial(tenant_or_platform_key, scope=...)`; 0 private `Limiter()` (AST-gated); singleton default no longer IP-derived; flow-cost table in `services/rate_limit.py`'s docstring; 63 oracles in `tests/test_limiter_identity.py`.
-  - ⚠️ **FINDING-10 open**: `routers/simulator.py:92` is a TENTH IP-keyed route (`simulator:ip:<addr>`) that the plan's do-not-touch list calls "correctly user-keyed". Reported, quarantined by an equality gate, NOT fixed — needs its own plan.
-- [x] **PYAPI-04**: On `/process-key`, authentication is decided **before** validation and throttling, so an unauthenticated caller can neither enumerate configuration nor consume the throttle budget. *(C-18)*
-  - **DONE (2026-07-26) — Plan 140.1-06, commit `3a1bee30`.**
-    - Gate order was pydantic 422 → slowapi 429 → handler 403; it is now
-      **bearer 500/401 → 422 → 429 → 403**. `main.verify_service_key`'s `/process-key` carve-out
-      became a GATE (`main.py:_gate_process_key`) — middleware is the only layer that runs before
-      pydantic resolves.
-    - *Enumeration* closed by a substring oracle, not a status check: an unauthenticated POST with
-      `source:"sfox"` answers 401 and the body contains none of `SFOX` / `SFOX_ENABLED` / `MT5` /
-      `MT5_ENABLED`. Positive control: the SAME body with a valid bearer still 422s **with** the
-      flag name, so the silence is provably the auth gate and not a broken harness.
-    - *Budget burn* closed with a storage oracle: 105 unauthenticated POSTs record **zero** slowapi
-      hits on `/process-key`. ("the next authenticated call is not 429" alone is vacuous — an
-      anonymous caller lands in its own bucket either way.)
-    - Unset `INTERNAL_API_TOKEN` ⇒ **500 `INTERNAL_TOKEN_UNCONFIGURED` `retryable:false`**, checked
-      BEFORE any comparison: `compare_digest(provided, getenv(...) or "")` matches empty-vs-empty
-      and ADMITS the request (plan-check blocker B4). 500 not 401 — it is OUR misconfiguration.
-    - Mutation M3 (restore the bare skip) ⇒ 8 tests RED. Reverted and verified clean.
-    - Both refusals RETURN a `service_error_response`, never raise (QUANTALYZE-4), pinned by an
-      `ast.Raise` assertion over both functions. `_verify_internal_token` stays in the handler as
-      defence-in-depth, with its original 403 assertions kept verbatim as handler-level tests.
-- [x] **PYAPI-05**: Status codes are attributable at the source: a fault in the caller's request, credentials or exchange answers 4xx; only a genuine service-side fault answers 5xx. This is the emit-side contract SEAMCORE-01 consumes. *(C-12, C-16, C-17; A-01)*
-- [x] **PYAPI-06**: A missing or stale platform secret produces an unambiguous operator signal rather than a green `/health` with a silently broken seam. *(C-11)*
-  - **DONE (2026-07-26) — Plan 140.1-06 (`3a1bee30`) + Plan 140.1-08 (`49e0cf2d`).**
-    `/process-key`'s auth gate emits **three distinct** structured events so an operator can
-    tell a config fault from a rotation from an attack: `process_key.auth.secret_unset` (ERROR),
-    `process_key.auth.token_absent` (WARN), `process_key.auth.token_mismatch` (WARN). None
-    references the token variable — no token, no prefix, no length. Plus
-    `rate_limit.tenant_claim_unverified` (WARN, claim PRESENCE only, never content).
-    - *`/health` half closed by 140.1-08*: `main.py:768-769` adds `config_ok` (the secret verdict,
-      deliberately NOT crossed with the worker-heartbeat `status`) and `config_degraded_secrets`
-      (names only), plus `REQUIRED_PLATFORM_SECRETS` + a lifespan startup assertion whose
-      before-the-worker ordering is AST-pinned, plus rate-limited Sentry captures on all four
-      secret arms. **`/health` stays HTTP 200** on config degradation — a red `/health` is a
-      Railway restart loop that suppresses the very signal being added (T-140.1-24).
-    - *No-echo proven*: every contiguous 6-gram of two canary secrets AND two caller-presented
-      wrong values is asserted absent from Sentry captures, stdout, stderr and the stdlib log
-      stream; a positive control asserts the capture DOES name `SERVICE_KEY`. Mutation S-07
-      (echo the secret value into the capture) reddens it.
-    - ⚠️ **RESIDUAL, carried as TS-26**: a *stale* (as opposed to missing) Vercel-side
-      `ANALYTICS_SERVICE_KEY` is detectable only *after the fact*, via the `config_fault=mismatched`
-      Sentry trail on each 401. Proactive detection needs a credential-carrying probe on the
-      `warm-analytics` warmer — and it can NEVER be a `/health` extension (A-12 / O-7 forbid routing
-      `/health` through the seam core, or the breaker blocks its own recovery probe).
-- [x] **PYAPI-07**: No response body echoes caller-supplied credentials, and structured validation detail reaches logs and users **as structure**, not stringified to `[object Object]`. *(C-13, C-14)*
-- [x] **PYAPI-08**: Throttle responses carry a machine-readable code and a `Retry-After`, so a throttle never renders as an unknown internal error. *(C-15)*
-- [x] **PYAPI-09**: Idempotency is complete rather than partial: a replay can never return "duplicate" for work that was never enqueued, and there is no state from which a client is told to retry forever with no path to success. *(C-01, C-19, C-20, C-21)*
-- [x] **PYAPI-10**: The `/process-key` success surface has **one discriminator**, and no security verdict is delivered under a success status. *(C-22)*
+### VAC — A control that cannot fail is caught by machine (Phase 164.3)
 
----
+Derived from ROADMAP §Phase 164.3 success criteria 1-6 plus the decisions locked in
+`164.3-CONTEXT.md`. The ROADMAP line previously read `TBD (run /gsd-discuss-phase 164.3)`;
+discuss ran 2026-08-28 and these are its output.
 
-## v2 Requirements
+- [x] **VAC-01**: A mutation runner runs IN CI over every arm carrying a `RED-UNDER` annotation — applies the named mutation, asserts the file goes RED, restores, asserts GREEN. It prints coverage as `files_annotated / files_total` on every run. Both failure modes exit 1: an annotation whose mutation does not redden its arm, and coverage below a ratchet floor pinned at the measured value (1/71 at HEAD; fails on REGRESSION, never "until 71/71").
+- [x] **VAC-02**: The disposable-PostgreSQL lane is real — ONE script with identical semantics locally and in a CI job that hosts its own throwaway cluster. It MUST stop and remove every cluster it starts, including on failure and on interrupt. ⛔ It may not use the shared TEST database: a mutation run deliberately breaks and restores arms, and TEST sits behind an advisory-lock mutex shared with other CI.
+- [x] **VAC-03**: A static linter rejects the **four statically-decidable** measured vacuity shapes on new gate files (mechanisms 1, 2, 4 and a narrow 3), so a further mechanism of those kinds is a lint failure rather than a red-team finding. ⛔ Mechanism 5 — an arm made unreachable by an earlier arm covering the same state — is **not statically decidable in SQL text** and is deliberately DELEGATED to the mutation runner's first-failure identity discipline (D-16). Shipping a fifth rule to round the count up would be a lint rule that cannot fire, which is this phase's own named defect. The delegation is machine-pinned by the linter's `DELEGATED_MECHANISMS` export. *(Corrected 2026-08-29, verification gap G3: this sentence still gave the pre-D-16 count after D-16 narrowed the scope — the shipped artifact was right and the requirement over-claimed it. Pinned by machine in `src/__tests__/lint-sql-gates.test.ts`.)* ⭐ **UPDATE 2026-09-04 (Phase 164.4, review finding WR-03):** the linter now ships **seven** rules, not four — R5/R6/R7 close a SIXTH mechanism (a pg-lane stand-in that SHADOWS the object under test) found by hand twice during the 164.4 backfill. ⛔ This does NOT touch the mechanism-5 delegation above, and R5/R6/R7 are not "a fifth rule to round the count up": mechanism 5 is still delegated to first-failure identity, and each new rule was proven to make live contact with the real corpus by DISABLING its repair escape and counting the reds (R5=1, R6=3, R7=5 real gate files), pinned as a per-rule floor.
+- [x] **VAC-04**: No whole-body `CREATE OR REPLACE` merges without a repo-vs-PROD body diff (`DRIFT-02b`), run as a step in the existing `pull_request`-triggered `migration-drift-check.yml` (which already reaches PROD), diffing against the committed `supabase/schema/functions/` snapshot as the canonical left-hand side. ⛔ PR-triggered, NOT main-push: a red main board makes Railway skip analytics deploys. Swapping to a zero-table-grant role is booked as `[VAC-04-ROLE]`, not required here. ⚠️ It MUST strip `--` comments before matching — `pg_get_functiondef` returns them, and matching a comment is mechanism 2 on this phase's own list. When the credential is absent it exits 1 with an explicit error; it NEVER skips and never exits 0 (a skip would be this phase committing `SKIP-01`).
+- [x] **VAC-05**: A PLAN.md's claims about the tree are verified, not trusted — every `file:line` anchor and named symbol is re-resolved at execute time and a miss fails loud.
+- [x] **VAC-06**: Each of the five historical mechanisms is re-introduced against the phase-164 corpus and demonstrated caught. All five live in `supabase/tests/test_strategy_shares_rls.sql`, the only annotated file, so this is reachable without 164.4.
+- [x] **VAC-07**: Phase 159's two blocked items close on the new lane as ONE spec — two concurrent `csv-finalize` POSTs on one never-classified `wizard_session_id`; exactly one 2xx applied receipt, one honest raced refusal, `category_id` holds the winner. Bounded to one spec, no production code changes. ⭐ **SCORED 2026-09-07 (Phase 164.5 plan 07), and only after the `[VAC-07-DEFER]` fence was satisfied BY OBSERVATION.** `src/__tests__/csv-finalize-concurrent-never-classified.test.ts` drives the two POSTs from two supabase-js clients with SEPARATE access tokens (a single-client `Promise.all` serializes over one pooled connection and cannot open the race — the measured H-0033 / H-0036 lesson). Observed **RED** with the double-submit fence `strategies_user_wizard_session_source_uniq` removed from the lane's schema — `Both outcomes were: A:200:ok, B:200:ok`, i.e. two applied receipts — and **GREEN** with it restored from a byte backup; both runs are pasted verbatim in `164.5-07-SUMMARY.md`. ⛔ **SUBSTRATE IS THE LOCAL-STACK LANE** (`scripts/local-stack/run.sh up`), NOT the pg-lane: the route reaches the database through supabase-js, i.e. PostgREST + GoTrue over HTTP, and a bare Postgres cluster serves neither. It EXECUTES in CI through the `frontend-local-stack` job, wired into the `frontend` aggregator's `needs:` list AND its result loop, and it FAILS rather than skips when the lane is absent (measured: `Tests 2 failed (2)`, exit 1, zero skipped). No production code was changed.
+- [x] **VAC-08**: The repo-vs-TEST drift check (`DRIFT-01` / `SKIP-01`) joins `supabase_migrations.schema_migrations` on **`name`**, not `version`. ⛔ MEASURED 2026-08-28: the ledger re-stamps `version` at apply time while preserving the repo filename in `name`; joining on `version` reports 12 of 12 recent migrations missing when all 12 are present. A check that joins on `version` is itself a vacuous control. Pairs with a body-level assertion — presence in the ledger is not evidence the deployed body matches.
 
-Deferred to a future milestone. Tracked, not in this roadmap.
 
-### CRON — Cron & email reliability (founder-deferred 2026-07-25)
+## Future Requirements (deferred, stay in TODOS.md)
 
-- **CRON-01**: Match-engine cron failures are visible (a `/api/cron/health-check` route) instead of causing silent data staleness.
-- **CRON-02**: Founder-LP cron cannot double-email if the lambda dies post-Resend (idempotency row on `(cron_name, year_month)`).
-- **CRON-03**: Resend webhook svix-id idempotency store; email correlation-id per-batch not per-email; retry false-alarm on UNIQUE(23505) resolved.
-- **CRON-04**: Founder-LP 85s worst case exceeds the 60s `maxDuration` — re-budget or chunk.
-
-### MONEY — Money-path correctness unification (runner-up milestone, deferred)
-
-- **MONEY-01**: `_compute_portfolio_analytics` + `equity_reconstruction.py` absorbed into the unified backbone (independent Sharpe/TWR stacks today).
-- **MONEY-02**: Frontend TS bespoke annualization (`portfolio-stats.ts` / `scenario-blend-panels.ts` / `health-score.ts`) + `match.py` unified.
-- **MONEY-03**: quantstats price-detection sign-flip closed on the strategy-analytics path (P114 fixed only portfolio/verify).
-- **MONEY-04**: Blend annualization defaults unknown-`asset_class` → crypto for the RISK basis.
-- **MONEY-05**: Short-window CAGR over-annualization flagged `insufficient_window` without changing CAGR.
-
-### OPS — Observability depth
-
-- **OPS-01**: Circuit-breaker state/ops dashboard.
-- **OPS-02**: Job-queue depth + age metrics.
-- **OPS-03**: `Idempotency-Key` header support for normally-unsafe POSTs (would make teaser retry-safe — needs a Python-side dedup store + TTL, a new persistence contract).
-- **OPS-04**: Adaptive/load-aware rate limiting driven by the breaker signal.
-
----
+All verified-open items NOT listed above remain in TODOS.md untouched — notably the r2 quick-win
+pool (offered as "even more ambitious", declined), the founder-gated set (33 items), the
+L-effort structural items (god-file decomposition, CSP nonce migration, D-09 composite healer,
+FILL-arm recompute guarantee L3257, distributed match-recompute lock), and everything blocked on
+another workstream.
 
 ## Out of Scope
 
 | Feature | Reason |
 |---------|--------|
-| Rate-limiting the seven routes named "unlimited" in `TODOS.md` | **Already shipped** (2026-04-10 → 2026-07-23). Verified by grep + `git log -S"checkLimit"`. Re-doing it would be a no-op diff. |
-| Adding fetch timeouts to the seam | **Already shipped** in both clients via `AbortSignal.timeout()`. Only the budget UNIFICATION (SEAM-02) is in scope. |
-| A new circuit-breaker / retry npm dependency (`cockatiel`, `opossum`, `p-retry`) | Both breakers are in-memory-only and would still need a hand-written Redis adapter — an abstraction over logic we must write anyway. `@upstash/*` is already installed and proven. |
-| Changing the in-worker per-kind watchdog (`reset_stalled_compute_jobs`) | Sound as-is; handles "job hung on a LIVE worker," a different failure mode. |
-| Reaper in the worker loop or a Vercel cron | Worker loop shares the failure domain it backstops and re-exposes WEDGE-01; Vercel cron hits the plan cron-slot ceiling (a documented past cause of prod going dark). pg_cron only. |
-| "Janitor also fixes the shared-test-DB fence flake" as an acceptance criterion | UNVERIFIED — the flake was root-caused to a different table/layer with a shipped WORKER-04 fix. Not inherited by inference. |
-| `cron/warm-analytics` rate limiting | Cron route, service-key gated, different threat model. |
-| Python-side limiters beyond `routers/match.py` | `match.py` is the only verified Python-side gap; broader defense-in-depth was not in the brief. |
-| Global rate-limit middleware | Routes need different key identities (per-user / per-IP / per-user+strategy). HOF composes; middleware flattens. |
-| Retrying credential writes (`validateKey`, `encryptKey`) or `flow_type: teaser` | Non-idempotent by construction. An ANTI-feature — a retry double-writes credentials or mints duplicate leads. |
-
----
+| Founder-gated ops (RESEND key, Zavara activation, sFOX/Nautilus go-live, MT5 live parity) | Not agent-deliverable; v1.18 owns the MT5 half |
+| Founder-decision items (AUM basis L2237, manual-AUM clear L2238, retunes D-146-4 beyond the two 30× mismatches) | Value/product calls reserved to the founder |
+| The 31 verified-stale TODOS.md entries | Solved by earlier milestones — closed in the same purge commit, not re-done |
+| CSP nonce migration (L939) | L-effort, low blast radius today; stays in backlog |
+| D-09 composite `stitch_composite` re-run mechanism (L2649) + FILL-arm recompute guarantee (L3257) | Each is its own phase-scale predicate design; deliberately not squeezed into a burndown |
 
 ## Traceability
 
-Populated during roadmap creation.
+Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| SEAM-01 | Phase 140 | Complete |
-| SEAM-02 | Phase 140 | Complete |
-| SEAM-03 | Phase 140 | Complete |
-| SEAM-04 | Phase 140 | Complete |
-| SEAM-05 | Phase 141 | Complete |
-| SEAM-06 | Phase 141 | Complete |
-| JOB-01 | Phase 142 | Complete |
-| JOB-02 | Phase 142 | Complete |
-| JOB-03 | Phase 142 | Complete |
-| JOB-04 | Phase 143 | Pending |
-| JOB-05 | Phase 144 | Pending |
-| JOB-08 | Phase 144 | Pending |
-| JOB-06 | Phase 145 | Pending |
-| JOB-07 | Phase 142 | Pending |
-| RATE-01 | Phase 146 | Pending |
-| RATE-02 | Phase 146 | Pending |
-| RATE-03 | Phase 146 | Pending |
-| RATE-04 | Phase 146 | Pending |
-| RATE-05 | Phase 146 | Pending |
-| PYAPI-01..10 | Phase 140.1 | Complete (9/10; gaps deferred) |
-| PYAPIFIX-01..06 | Phase 140.1.1 | Complete |
-| PYAPIFIX2-01..06 | Phase 140.1.2 | Complete (PYAPIFIX2-01 Python half only — render half owned by 140.3 / TS-35) |
-| SEAMCORE-01..11 | Phase 140.2 | **Complete (11/11, 12 plans / 12 waves, closed 2026-07-27).** Each row was ticked against a falsifier OBSERVED RED at the phase's final tree by plan 140.2-12's re-run, not against a predecessor SUMMARY's claim: -01 (M25/M35/M38/M39) · -02 (M26/M31/M36/M37) · -03 (M29/M41) · -04 (M30) · -05 (M16/M27/M40) · -06 (M33/M34/M42/M43) · -07 (M1–M17, M24, **M14b**) · -08 (M21/M22×3/M22b/M23/M57) · -09 (M14/M15/M16/M18/M19R/M20/M20R against real Redis) · -10 (M32/M47/M48) · -11 (M49/M50/M58). ⚠️ **SEAMCORE-09 carries ONE named residual:** its own wording lists `nx` trip idempotency, and the `nx` flag is no longer falsified by any test (wave 7 put an early return ahead of the lock write) — trip idempotency itself IS falsified, via M19R. Residual handed to Phase 141. |
-| SEAMUX-01..09 | Phase 140.3 | Pending (2 plans re-homed in from 140.2; the rest TBD) |
-
-**Inherited-obligation traceability (the `TS-*` rows in `140.1-TS-OBLIGATIONS.md`).** These are not
-numbered v1 requirements and so have no row above, but they are phase-owned work and the re-home
-moved nine of them. Recorded here so the ownership is reproducible from a committed document rather
-than only from a gitignored ledger:
-
-| Obligations | Owner | Status |
-|-------------|-------|--------|
-| TS-01, TS-03 | Phase 140.1.1 | Complete |
-| TS-04 (ROADMAP SC7), TS-06, TS-07, TS-16 | Phase 140.2 (plans 09, 06, —, 06) | **Complete** (2026-07-27, at the 140.2 gate). TS-07 is a **NEGATIVE** obligation — X-6's one-line 429 fix was NOT scheduled by any of the twelve plans, and not doing it IS its terminal state. |
-| TS-02, TS-05, TS-08, TS-09, TS-11, TS-12, TS-13, TS-14, TS-15 | **Phase 140.3** (plans `140.3-01`, `140.3-02`) | Pending — **RE-HOMED from 140.2 on 2026-07-26** with the two plans that carry them; **marked RE-HOMED, never SATISFIED**, in `140.1-TS-OBLIGATIONS.md` by plan 140.2-12 on 2026-07-27 — `140.3-01` owns TS-05/08/09, `140.3-02` owns the other six. Neither plan has run. |
-| TS-10 | **Phase 141** | Pending — **re-home EXECUTED in the ledger 2026-07-27** by plan 140.2-12: it is a Python edit whose stated justification ("140.2 owns the retry semantics") is false, since retry is Phase 141 and 140.2 is TypeScript-only |
-| TS-23 | Phase 140.2 (tolerance half) / Phase 146 (Python migration) | **Split disposition recorded 2026-07-27.** 140.2's half **DONE** — all three 429 wire shapes classified without knowing the route, one pinned case per shape, and a 429 records ZERO in every shape. **Still owed by 146:** the `match.py`/`simulator.py` migration AND the which-shape-wins decision; it must **PRESERVE** the `Retry-After` header 140.1.2 added, not re-derive it. |
-| TS-26 | ops | **Handed off 2026-07-27; 140.2 built NOTHING for it, deliberately.** The credential-carrying probe goes on the `warm-analytics` warmer and must **NEVER** extend `/health` (A-12 / O-7: the breaker would block its own recovery probe, and `/health` stays HTTP 200 when config is degraded so the signal cannot become the outage). |
-| TS-32 | Phase 140.3 (both halves) | ⛔ **STILL BLOCKED, re-confirmed 2026-07-27.** A superseded plan-14 text claimed the block was "CLEARED by plan 140.2-12"; that plan is now `140.3-01` and **has not run**. |
-| TS-33 | **Phase 140.3 — DECIDED 2026-07-27** by plan 140.2-12 | Pending. ONE field (`wizard_session_id`) in the finalize-wizard payload; it is an envelope/consumer change on the surface `140.3-02` already opens, not a render, retry or limiter concern. ⚠️ **Schedule in 140.3's own pass (numbering starts at `140.3-03`); do NOT retrofit into the already-authored `140.3-02`.** Its strictly-after-TS-01 ordering constraint is SATISFIED. |
-| TS-34, TS-35, TS-20 | Phase 140.3 | Pending |
+| RANK-01 | Phase 159 | Complete |
+| RANK-02 | Phase 159 | Complete |
+| RANK-03 | Phase 160 | Pending |
+| RANK-04 | Phase 160 | Pending |
+| RANK-05 | Phase 159 | Complete |
+| RANK-06 | Phase 159 | Complete |
+| RANK-07 | Phase 159 | Complete |
+| RANK-08 | Phase 159 | Complete |
+| RANK-09 | Phase 159 | Complete |
+| SHARE-01 | Phase 164 | Complete |
+| VAC-01 | Phase 164.3 | Complete |
+| VAC-02 | Phase 164.3 | Complete |
+| VAC-03 | Phase 164.3 | Complete |
+| VAC-04 | Phase 164.3 | Complete |
+| VAC-05 | Phase 164.3 | Complete |
+| VAC-06 | Phase 164.3 | Complete |
+| VAC-07 | Phase 164.5 | Complete — 2026-09-07, plan 07. The `[VAC-07-DEFER]` fence was satisfied BY OBSERVATION: the concurrent csv-finalize spec went RED with the double-submit fence removed (two 2xx receipts) and GREEN with it restored, both pasted in `164.5-07-SUMMARY.md`. ⚠️ SUBSTRATE CORRECTED — this row previously said "on the pg-lane", which is wrong and would send the next reader to a lane that structurally cannot host it: the route reaches the database through PostgREST + GoTrue, so the substrate is the **local-stack lane** (`scripts/local-stack/run.sh`) |
+| VAC-08 | Phase 164.3 | Complete |
+| SHARE-02 | Phase 164 | Complete |
+| SHARE-03 | Phase 164 | Complete |
+| SHARE-04 | Phase 164 | Complete |
+| WIZERR-01 | Phase 161 | Complete |
+| WIZERR-02 | Phase 161 | Complete |
+| WIZERR-03 | Phase 161 | Complete |
+| WIZERR-04 | Phase 161 | Complete |
+| WIZERR-05 | Phase 161 | Complete |
+| WIZERR-06 | Phase 161 | Complete |
+| WIZERR-07 | Phase 161 | Complete |
+| WIZERR-08 | Phase 161 | Complete |
+| WIZERR-09 | Phase 161 | Complete |
+| WIZERR-10 | Phase 161 | Complete |
+| WIZERR-11 | Phase 161 | Complete |
+| WIZERR-12 | Phase 161 | Complete |
+| WIZERR-13 | Phase 161 | Complete |
+| LEDGER-01 | Phase 161.1 | Complete |
+| LEDGER-02 | Phase 161.1 | Complete |
+| LEDGER-03 | Phase 161.1 | Complete |
+| LEDGER-04 | Phase 161.1 | Complete |
+| HONEST-01 | Phase 162 | Complete |
+| HONEST-07 | Unassigned | Deferred — retired job kind, no site at HEAD, no traceback; reassess at the v1.20 milestone audit rather than carry as Pending |
+| HONEST-08 | Phase 163 | Complete |
+| HONEST-02 | Phase 162 | Complete |
+| HONEST-03 | Phase 162 | Complete |
+| HONEST-04 | Phase 162 | Complete |
+| HONEST-05 | Phase 162 | Complete |
+| HONEST-06 | Phase 162 | Complete |
+| OPS-01 | Phase 158 | Complete |
+| OPS-02 | Phase 158 | Complete |
+| OPS-03 | Phase 158 | Complete |
+| OPS-04 | Phase 158 | Complete |
+| OPS-05 | Phase 163 | Complete |
+| OPS-06 | Phase 163 | Complete |
+| OPS-07 | Phase 163 | Complete |
+| OPS-08 | Phase 163 | Complete — APPLIED + verified on PROD 2026-08-26. ⛔ NOT on TEST (see SKIP-01) |
+| OPS-09 | Phase 163 | Complete |
+| OPS-10 | Phase 163 | Complete |
+| OPS-11 | Phase 158 | Complete |
+| SEC-01 | Phase 163 | Complete |
+| SEC-02 | Phase 163 | Complete |
+| SEC-03 | Phase 163 | Complete |
+| SEC-04 | Phase 163 | Complete |
+| SEC-05 | Phase 163 | Complete |
+| SEC-06 | Phase 163 | Complete |
+| DEPS-01 | Phase 165 | Pending |
 
 **Coverage:**
-- v1 requirements: 60 total (18 original + 30 added 2026-07-26 + 6 PYAPIFIX + 6 PYAPIFIX2 from the two review cycles)
-- Mapped to phases: 60 ✓ (Phases 140–146 + inserted 140.1 / 140.2 / 140.3, each requirement in exactly one phase)
-- **Unchanged by the 2026-07-26 re-home.** Moving two plans from 140.2 to 140.3 touched no numbered
-  requirement: those plans carry `TS-*` inherited obligations, not `SEAMCORE-*` rows. All eleven
-  `SEAMCORE-01..11` remain wholly owned by 140.2, and all nine `SEAMUX-01..09` by 140.3.
-- Unmapped: 0
 
-**Why decimal phases:** 140.1–140.3 repair the surface Phase 140 created, so they must land before
-141 builds retry on top of it. Decimal numbering inserts them in execution order without renumbering
-141–146 (whose requirement mappings are already committed above).
-
-**Sequencing within the insert:** **140.3 first.** PYAPI-01 is the only CRITICAL and is independent of
-the breaker entirely — it must not wait behind a distributed-systems phase. It also settles the
-status-code contract (PYAPI-05) that SEAMCORE-01 consumes, so planning it first prevents 140.1 from
-shipping a discriminator against a contract about to change. Then 140.1 (owns the error TYPES), then
-140.2 (owns how they RENDER).
-
-**Suggested phase shape** (from research; the roadmapper will finalize — phases continue from **140**):
-140 SEAM core+breaker → 141 SEAM retry (gated on the SEAM-05 audit) → 142 JOB reaper+DDL →
-143 JOB dropped-enqueue sweep → 144 JOB WR-02 → 145 JOB csv-finalize (reproduce-first) →
-146 RATE audit+close. Breaker ships BEFORE retry: fail-fast alone carries zero double-execution
-risk and can land while the idempotency audit is still being written.
+- v1.20 requirements: 50 total
+- Mapped to phases: 49 (Phases 158–166 incl. 164.3/164.5; roadmap created 2026-08-20, VAC-* added 2026-08-28)
+- Unmapped: 1 — HONEST-07, deliberately (see its row). ⚠️ This line read "50 / Unmapped: 0" from 2026-08-20 to 2026-09-05 while HONEST-07 sat `Unassigned` on the same page.
 
 ---
-*Requirements defined: 2026-07-25*
-*Last updated: 2026-07-25 after research synthesis (4 parallel researchers + synthesizer) and the 8 open-decision resolutions above.*
+*Requirements defined: 2026-08-20*
+*Last updated: 2026-09-07 — VAC-07 flipped to Complete (Phase 164.5 plan 07) after the `[VAC-07-DEFER]` RED-then-GREEN observation, and its substrate corrected from "pg-lane" to the local-stack lane. Prior entry, kept as lineage: 2026-09-05 — 164-family re-partition: VAC-01…06/08 Complete (164.3 shipped v0.77.0.0), VAC-07 → 164.5 Pending, HONEST-07 marked Deferred; 49/50 mapped, 1 deliberately unassigned*
+
+## Parked Milestone v1.18 requirements (NOT v1.20 scope — restored verbatim 2026-08-20)
+
+v1.18 (MT5-VERIFY & founder confirmations, Phases 155/157) is PARKED, founder-gated: it needs
+new MT5 investor passwords and the founder at the terminal on a trading day. These are its
+requirements, restored verbatim from the pre-v1.20 accumulated REQUIREMENTS.md (archived at
+`.planning/milestones/pre-v1.20-REQUIREMENTS-accumulated-snapshot.md`) so the open milestone
+keeps a live requirements home. Do NOT plan these in v1.20.
+
+#### MT5-06..10 — moved to Phase 142.3 (split 2026-08-03 at the D-14 valve)
+
+⚠️ The five requirements below were **split out of Phase 142.2 into Phase 142.3** on 2026-08-03,
+on the sizing finding in `142.2-RESEARCH.md`. They are unchanged in content — only their owning
+phase moved. The cut is the founder's pre-authorised D-14 valve (*"we can do another phase right
+after this one, if this one becomes too large"*), **not** a scope cut: nothing here is dropped,
+deferred to v2, or made optional.
+
+Why these five and not others: they are exactly the requirements that **cannot be satisfied
+offline**. MT5-06/07/08 need a founder at the MT5 terminal on a trading day with the live funded
+account; MT5-09/10 can only run once that comparison has produced numbers. MT5-10 is additionally
+**uncapped by founder decision**, so bundling it with the reachability work made the combined
+phase unsizeable rather than merely large. The dependency across the cut is one-directional —
+142.2 makes MT5 reachable, 142.3 proves it correct.
+
+⛔ **142.2 closing is not "MT5 is done."** It means MT5 is *reachable*. v1.15's failure mode was
+shipping 6/6 green with both open items intact; these five are the items. Do not archive the
+milestone or advertise MT5 until 142.3 passes.
+
+- [ ] **MT5-06** *(measure-first)*: The MT5 server-UTC offset is **measured live and asserted on**,
+  not assumed. The gateway's server time is read against UTC at connect and the observed offset is
+  persisted (`139-VERIFICATION.md:12` names `MT5_SOAK_SERVER_OFFSET_MIN` as the intended carrier);
+  a **near-midnight deal** becomes an explicit regression test — a deal within the offset window of
+  midnight must land on the day the terminal shows. MT5 brokers stamp deals in broker-server time
+  (commonly UTC+2/+3, DST-shifting) while dailies bucket by UTC date. ⚠️ This is the one failure the
+  MT5-07 oracle **cannot see unaided**: a wrong offset leaves period totals reconciling perfectly
+  while the daily series is shifted, corrupting Sharpe, max drawdown and every risk metric derived
+  from it. Hardcoding the broker's offset is not acceptable — it breaks at the next DST transition
+  and is wrong for every other broker.
+
+- [ ] **MT5-07**: Rendered performance is verified against an **external** oracle — the MT5
+  terminal's own equity and balance figures, or the broker statement, over a fixed window, matching
+  within a stated tolerance. ⛔ Internal consistency (dailies compound to displayed equity, backbone
+  agrees with UI) does **not** satisfy this: that is the self-referential oracle shape that let
+  three money bugs survive six review passes. `analytics-service/services/broker_dailies.py` already claims `account_info()
+  .equity` is authoritative (`combine_mt5_deal_ledger`'s docstring — "``account_info().equity`` is ALWAYS authoritative" :604; `def combine_mt5_deal_ledger(` :545); this tests the claim.
+
+- [ ] **MT5-08**: Verification runs against the **live funded account** on a **trading day** — real
+  fills, fees, swap charges and equity, via the read-only investor password. A demo account does
+  not satisfy this (synthetic fills/swaps, artificial starting balance exercising different anchor
+  logic), nor does reusing the v1.15 soak account (it shipped green with both open items intact, so
+  it has already demonstrated it does not catch these). A weekend run proves nothing.
+
+- [ ] **MT5-09**: Every surface that renders strategy performance shows the same, correct MT5
+  numbers — strategy detail, public factsheet, scenario composer, portfolio PDF, browse. The
+  architecture says these agree by construction (`analytics-service/services/job_worker.py` — the
+  `# 5. #5 collapse (D4): asset_class is THE annualization clock selector` block :6163-6172, whose
+  `periods_per_year = periods_per_year_for_asset_class(` is :6170, via shared
+  `strategies.asset_class`), and MT5's annualization clock is already correct
+  (`src/app/api/strategies/create-with-key/route.ts` stamps `asset_class: isCryptoExchange(exchange) ? "crypto" : "traditional",` :514;
+  `src/app/api/strategies/finalize-wizard/route.ts` says "stamp `traditional` for mt5 (forex/CFD)" :829; `portfolio-stats
+  .ts` **defaults** to 252, so a caller that forgets the basis still lands on MT5's right clock —
+  crypto is the fragile direction, not MT5). This requirement exists to **test that invariant, not
+  assume it**: the backbone-bypass surfaces logged in `TODOS.md` — `_compute_portfolio_analytics`
+  (`analytics-service/routers/portfolio.py` — `async def _compute_portfolio_analytics(` :628), `equity_reconstruction.py`, and the bespoke TS
+  stacks `portfolio-stats.ts` / `scenario-blend-panels.ts` / `health-score.ts` — **re-derive**
+  metrics rather than reading them, and are the one place it could be false. One daily series
+  checked five ways; a divergence is a finding.
+
+- [ ] **MT5-10** *(uncapped by founder decision)*: Any discrepancy MT5-07/09 surfaces is **fixed
+  within this phase**, wherever its root cause lives — including in shared backbone money-math
+  affecting every venue. A bounded alternative (split shared-cause fixes into their own phase) was
+  offered and **declined**, so the planner must size for the unbounded case rather than treat it as
+  an escape hatch. The phase does not close while the terminal and the UI disagree: a known-wrong
+  number rendered to users is worse than an unfinished phase.
+
+- [ ] **MT5-13** *(found by the MT5-05 live run, 2026-08-04 — BLOCKS a clean MT5-05 pass)*: **A venue
+  with no API-scope concept never renders a failed scope probe.** The MT5 success screen shows
+  `PROBE_FAILED: Could not check key scopes. Try again.` in red, with copy blaming the venue
+  ("This is a problem at the venue — try again shortly"). It is **deterministic, not flaky**: the
+  probe handler (`analytics-service/routers/internal.py` — `@router.post("/keys/{key_id}/permissions")` :184 / `async def get_key_permissions(` :185, running to EOF :564) contains **zero `mt5` references**
+  and its own docstring names step 5 as *"Open a CCXT exchange + call `detect_permissions`"*. MT5 is
+  not a ccxt venue and a login / investor-password / server triple **has no scopes to detect**, so
+  `detect_permissions` throws → 424 `EXCHANGE_PROBE_FAILED` → `src/lib/wizardErrors.ts` maps it to
+  `KEY_PROBE_FAILED` (`VENUE_WIRE_CODE_TO_VERDICT` :1795, its `["PROBE_FAILED", { code: "KEY_PROBE_FAILED", status: 503 }],` row :1802; cascade fallback :2104). Every MT5 key hits it, every time.
+  **Why this blocks MT5-05:** that requirement's wording is "without needing to know an internal
+  error code", and a literal `PROBE_FAILED:` string on the success screen is exactly that. The
+  "try again" advice is also unwinnable — retrying can never succeed.
+  ⛔ **NOT a security hole, and the fix must not be sold as one.** Read-only IS enforced for MT5, by
+  a different and appropriate mechanism: `_validate_mt5_key` (`analytics-service/routers/exchange.py` — `async def _validate_mt5_key(` :222; ⚠️ `routers/`, not `services/exchange.py`), built as
+  the fail-CLOSED clone of the sFOX validator, probes with `client.order_check(mt5_probe_request())`
+  and rejects any credential that can trade. Verified 2026-08-04. The defect is the *badge*, not the
+  enforcement.
+  **Shape:** follow the D-03 precedent set by `passphraseSecret` — a per-venue capability flag whose
+  DEFAULT preserves today's behaviour, so every ccxt venue stays byte-identical and MT5 opts out. MT5
+  renders an explanatory line (investor passwords are read-only by design), never a failed probe.
+
+- [x] **MT5-14** *(found by the MT5-05 live run, 2026-08-04)*: An MT5 strategy can declare **MT5** as
+  its supported exchange in the wizard metadata step, and the venue is **preselected from the key the
+  founder already connected** rather than asked again.
+  ⛔ **SEVERITY CORRECTED 2026-08-04 — this was mis-filed as cosmetic and it is a HARD BLOCKER.**
+  The same ccxt-only probe is called by `finalize-wizard` on EVERY submit as a scope-broadening
+  defence. ⚠️ **Line numbers re-derived from source 2026-08-08** (the previous set — `:175`,
+  `:194`, `:519` — had drifted; phases 150–152 moved this file). In
+  `src/app/api/strategies/finalize-wizard/route.ts`: the probe fetch of
+  `/internal/keys/{id}/permissions?force_refresh=true` at **:220**, the `if (!res.ok)` throw at
+  **:237**, and the catch mapping to `KEY_NETWORK_TIMEOUT` at **:617** and **:628**. For MT5 the
+  probe throws `Unsupported exchange: mt5` (confirmed in Sentry 2026-08-04T11:53:52 on
+  `GET /api/keys/6d36dd92-…/permissions`), so a PERMANENT venue-unsupported condition is
+  reported to the user as a temporary network blip that says "try again" — the founder clicked Retry
+  **five times** against a failure that can never succeed.
+  **Consequence: an MT5 strategy cannot be submitted AT ALL.** MT5 reaching the wizard's preview
+  (v0.53.0.0) is real, but the LAST click fails in a different subsystem, so MT5 is **not usable
+  end-to-end in production**. MT5-05 is not completable until this lands.
+  **Two distinct fixes, both required:** (a) the probe must handle MT5 (or finalize must not demand a
+  ccxt scope probe for a venue that has none — read-only is already proven by `_validate_mt5_key`);
+  (b) the catch-all mapping of any probe failure to `KEY_NETWORK_TIMEOUT` must stop — a permanent
+  unsupported-venue error must never render as a retryable timeout.
+  **Observed (the badge, same root cause):** the "Supported exchanges" chips render Binance / OKX / Bybit / Deribit / sFOX — no MT5
+  — on a strategy whose only key IS MT5. The founder must either mis-declare the venue or leave it blank.
+  ⛔ **This is NOT the MT5-11 drift class — do not "fix the stale list".** It is DELIBERATE:
+  `src/lib/closed-sets.ts:119-122` (the docblock above `export const MT5_UI_ENABLED` :124) states *"mt5 stays OUT of UI_EXCHANGE_CODES / EXCHANGES / FUNDING_EXCHANGES
+  / CRYPTO_EXCHANGES regardless of this flag — the manager-surface `<Select>` must not silently
+  widen"*, citing UI-SPEC §MT5-Manager-Parity and enforced by the `closed-sets.mt5-flag` no-widening
+  pin. **A test WILL go red when this changes, and that is the guard working, not a regression to
+  route around.** The pin must be re-cut deliberately, with its reasoning updated, in the same commit.
+  **Why the decision is now outgrown:** it was taken while MT5 could not reach the end of the wizard.
+  As of v0.53.0.0 it can, so a live MT5 strategy now hits a metadata step that cannot describe it.
+  **Second half, independent of the list:** the wizard already knows the connected key's exchange, so
+  preselecting it removes the question entirely. Do not ship the widening without the preselect —
+  widening alone just adds a sixth chip the founder still has to find.
+
+- [ ] **MT5-15** *(raised by the MT5-05 close, 2026-08-04 — the caveat on that checkbox, given its own
+  ID so it cannot be lost)*: An MT5 strategy's analytics complete **without warnings**, or the warning
+  is understood and accepted in writing. **All three** MT5 strategies on PROD carry
+  `computation_status='complete_with_warnings'` (`8d382aaf` Alpha Centauri, `4eab92b0` Black Swan, and
+  Arctic Fox) with `computation_error = NULL`.
+  ⚠️ **NOT investigated.** MT5-05 is discharged on the wizard-completion criterion it was written
+  against, and this does not reopen it — but it is the reason that checkbox must not be read as "the
+  MT5 numbers are audited". Establish what the warning IS before deciding whether it matters; it may
+  be benign (short history, non-trading days) or it may be the same class MT5-07 exists to catch.
+  ⛔ Do NOT plan MT5-07 (external-oracle verification) as closing this — MT5-07 compares rendered
+  performance against the terminal; this asks why our own pipeline flagged itself.
+
+---
+
+So the phase requirement measured the wizard, and the founder measures the **product**. Both readings
+are defensible; the founder's is the one that decides whether MT5 ships. The gap between them is
+exactly SCEN-01 (the series never reaches the scenario engine) and OWN-02 (no factsheet for an
+unpublished strategy you own) — neither of which is an MT5 defect. **MT5 is the first venue to
+traverse this path from a cold start, so it is exposing pre-existing holes in the surfaces AFTER
+ingestion, not bugs of its own.** Every one of the findings below reproduces for non-MT5 strategies.
+
+- [ ] **MT5-GOAL-01**: An MT5 strategy is usable end-to-end by the allocator who uploaded it: it
+  ingests (done), it **projects in a scenario** (blocked by SCEN-01), and its **factsheet is
+  viewable** (blocked by OWN-02). This is an umbrella acceptance requirement — it closes only when its
+  three dependencies close, and it exists so "MT5-05 ✅" can never be mistaken for "MT5 works".

@@ -3,12 +3,19 @@ import quantstats as qs
 import pandas as pd
 import numpy as np
 import math
-from collections.abc import ItemsView, KeysView, ValuesView
+from collections.abc import Callable, ItemsView, KeysView, ValuesView
 from dataclasses import dataclass, field
 from typing import Any, Literal, TypedDict
 
+from scipy.stats import linregress, norm
+
 from .transforms import downsample_series, cap_data_points
 from .nav_twr import cumulative_twr_segmented, _last_interior_break_suffix
+from services.dispersion import (
+    dispersion_is_real as _dispersion_is_real,
+    dispersion_is_residue as _dispersion_is_residue,
+    residue_floor as _residue_floor,
+)
 
 logger = logging.getLogger("quantalyze.analytics.metrics")
 
@@ -165,9 +172,11 @@ MAR: float = 0.0
 # `_finalize_rolling.dropna()`. `log1p(-1 + 1e-9) ≈ -20.72`.
 _LOG_RETURN_FLOOR: float = -1.0 + 1e-9
 
-# H-0710 / H-0713 / H-0723 dispatch table: (result_key, qs.stats attribute name).
+# H-0710 / H-0713 / H-0723 dispatch keys for `_QSTATS_SINGLE_ARG_SCALARS`, which
+# is defined BELOW the Phase 166 mirror functions it points at (it holds module
+# callables now, so it must follow their definitions).
 # `r_squared` (needs benchmark) and `time_in_market` (not a qs call) are handled
-# inline since their shapes differ from the single-arg pattern below.
+# inline since their shapes differ from the single-arg pattern.
 _QstatsScalarKey = Literal[
     "recovery_factor",
     "ulcer_index",
@@ -178,20 +187,6 @@ _QstatsScalarKey = Literal[
     "cpc_index",
     "serenity_index",
 ]
-# Typing the key as the literal union of QstatsScalarsResult's float|None fields
-# lets the `result[result_key] = ...` loop below write into the TypedDict
-# (which requires literal keys) AND fails type-check if a dispatch-table key is
-# ever typo'd or drifts from the result shape — no cast, no ignore.
-_QSTATS_SINGLE_ARG_SCALARS: tuple[tuple[_QstatsScalarKey, str], ...] = (
-    ("recovery_factor", "recovery_factor"),
-    ("ulcer_index", "ulcer_index"),
-    ("upi", "ulcer_performance_index"),
-    ("kelly_criterion", "kelly_criterion"),
-    ("probabilistic_sharpe_ratio", "probabilistic_ratio"),
-    ("common_sense_ratio", "common_sense_ratio"),
-    ("cpc_index", "cpc_index"),
-    ("serenity_index", "serenity_index"),
-)
 
 
 def _drop_nonfinite(series: pd.Series) -> pd.Series:
@@ -199,6 +194,86 @@ def _drop_nonfinite(series: pd.Series) -> pd.Series:
     helper that writes to JSONB (Postgres rejects NaN — H-0715/H-0720 class).
     """
     return series.replace([np.inf, -np.inf], np.nan).dropna()
+
+
+def _mirror_keys_defined_by(returns: pd.Series) -> frozenset[str]:
+    """The dispatched mirror keys whose ratio ``returns`` DEFINES, each by its own precondition.
+
+    SFH LOW-4, made per mirror in review round 2 (SFH R2-MED-1). A mirror that
+    goes non-finite on an input that defines it is a BROKEN mirror, and
+    ``_safe_qstats_scalar`` logs it as one. A mirror that goes non-finite on an
+    input missing one of its ingredients is a D-09 undefined ratio and stays
+    silent. The round-1 predicate was ONE boolean for all eight mirrors and
+    required a NEGATIVE 5% quantile, so a strategy that loses on fewer than 5% of
+    days (a carry, market-making or option-selling shape, where all eight
+    mirrors are finite) got no broken-mirror signal at all.
+
+    ``P(r)`` is the fillna(0) series the mirrors read; "raw" is ``returns`` as
+    given. The preconditions, each read off the mirror's own undefined arms and
+    each NECESSARY (``test_q166r2_each_mirror_precondition_is_necessary`` holds
+    one input per conjunct on which the mirror is non-finite):
+
+    - ``recovery_factor``: a losing day in ``P(r)`` (so ``max_dd != 0``).
+    - ``ulcer_index``: at least 2 rows (its ``n - 1`` denominator). With no loss
+      it is a DEFINED 0.0.
+    - ``upi``: at least 2 rows, a losing day (ulcer != 0) and finite raw values
+      (its numerator compounds the RAW series, so an inf day makes it inf).
+    - ``kelly_criterion`` and ``cpc_index``: a losing day AND a winning day, so
+      the payoff ratio is finite and non-zero.
+    - ``common_sense_ratio``: a losing day (``profit_factor`` finite) and a
+      NON-ZERO 5% quantile (``tail_ratio``'s denominator). It need not be
+      negative: the round-1 ``< 0`` was stricter than the ratio.
+    - ``probabilistic_sharpe_ratio``: real dispersion on ``P(r)`` (the Sharpe
+      base), and a POSITIVE estimated variance of the Sharpe estimator, computed
+      here in the published form ``1 - g3*SR + ((g4 - 1)/4)*SR**2`` (Bailey and
+      Lopez de Prado). The term is NaN, so the test is False, below 4 real
+      observations (no sample kurtosis) or with a non-finite raw value, which
+      is how the round-1 ``count() >= 4`` is carried now. Sample moments of a
+      short, steady series can also make it negative (measured:
+      ``[0.01, 0.01, 0.02, 0.02]``); the ratio is then undefined, not broken.
+    - ``serenity_index``: real raw dispersion (``std_returns``) and real
+      dispersion in the drawdown series (its value-at-risk needs a positive
+      scale). The second implies a losing day (with none the drawdown is all
+      0), and it also excludes a single loss followed by flat days, which holds
+      the drawdown constant.
+
+    "Real dispersion" is ``_dispersion_is_real`` (above the residue floor), the
+    same test each mirror's own guard applies. SUFFICIENCY, measured 2026-09-25
+    by fuzzing (164,357 key-and-series checks over eleven random shapes, n = 1
+    to 399, with NaN gaps, an inf day, a +150% day, cent-rounded values and
+    compounding constant yields, plus every series of length 1 to 5 over a
+    7-value grid including NaN): no mirror returned non-finite on an input whose
+    precondition held.
+    ``test_q166r2_every_mirror_is_finite_wherever_its_precondition_holds`` keeps
+    a deterministic sample of that fuzz in the suite.
+    """
+    p = _prepared_returns_no_guess(returns)
+    raw = returns.dropna()
+    loss = bool((p < 0).any())
+    win = bool((p > 0).any())
+    defined: set[str] = set()
+    if loss:
+        defined.add("recovery_factor")
+    if len(returns) >= 2:
+        defined.add("ulcer_index")
+        if loss and bool(np.isfinite(raw.to_numpy(dtype="float64")).all()):
+            defined.add("upi")
+    if loss and win:
+        defined.update(("kelly_criterion", "cpc_index"))
+    if loss and float(p.quantile(0.05)) != 0.0:
+        defined.add("common_sense_ratio")
+    p_sd, p_mean = float(p.std()), float(p.mean())
+    if _dispersion_is_real(p_sd, p_mean):
+        sr = p_mean / p_sd
+        g3 = float(raw.skew())
+        g4 = float(raw.kurtosis()) + 3.0
+        if 1.0 - g3 * sr + ((g4 - 1.0) / 4.0) * sr**2 > 0.0:
+            defined.add("probabilistic_sharpe_ratio")
+    if _dispersion_is_real(float(raw.std()), float(raw.mean())):
+        dd = _drawdown_series_no_guess(returns)
+        if _dispersion_is_real(float(dd.std()), float(dd.mean())):
+            defined.add("serenity_index")
+    return frozenset(defined)
 
 
 def _format_series_points(
@@ -226,25 +301,39 @@ def _format_series_points(
 
 def _safe_qstats_scalar(
     name: str,
-    fn: Any,
+    fn: Callable[[pd.Series], float],
     returns: pd.Series,
     returns_len: int | None,
+    must_be_defined: bool = False,
 ) -> float | None:
-    """Run a single-arg qs.stats scalar, returning None and logging on failure.
+    """Run one single-arg scalar mirror, returning None and logging on failure.
+
+    Two named WARNINGs, never confused with each other or with a silent None:
+    ``... failed`` when the mirror RAISES, and ``... the mirror is suspect``
+    when it returns non-finite although ``must_be_defined`` says the input
+    defines THIS mirror (SFH LOW-4, per mirror since round 2:
+    ``_mirror_keys_defined_by``). A non-finite result on any other input
+    is a legitimately undefined ratio (D-09) and maps to None without a log.
+
+    Since Phase 166 every ``fn`` is a module mirror from
+    ``_QSTATS_SINGLE_ARG_SCALARS`` (quantstats 0.0.81 minus the price guess),
+    not a ``qs.stats`` function. Its only remaining quantstats calls are the
+    kwarg-proven leaves.
 
     Failure-soft contract (H-0710 / H-0713 / H-0723): one failing scalar must
-    not take down the other nine. Logs include the scalar `name` so operators
+    not take down the others. Logs include the scalar `name` so operators
     can spot silent regressions in Railway logs without inferring from latency.
 
     PR #181 take-2 red-team F16: traceback attachment is process-deduped via
-    `_should_emit_traceback` so a fundamental qs upgrade tripping multiple
-    scalars doesn't multiply Railway retention pressure linearly with call
-    volume. First occurrence per (scalar_name, exc-type) pair emits
-    exc_info=True; subsequent occurrences emit the WARNING text without
-    traceback. Operators still get the full first-incident traceback.
+    `_should_emit_traceback`, so one defect shared by several mirrors (for
+    example a pandas or quantstats-leaf upgrade that changes a return shape)
+    does not multiply Railway retention pressure linearly with call volume.
+    First occurrence per (scalar_name, exc-type) pair emits exc_info=True;
+    subsequent occurrences emit the WARNING text without traceback. Operators
+    still get the full first-incident traceback.
     """
     try:
-        return _safe_float(fn(returns))
+        raw = fn(returns)
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "qstats scalar %s failed (returns_len=%s): %s",
@@ -252,6 +341,18 @@ def _safe_qstats_scalar(
             exc_info=_should_emit_traceback(name, exc),
         )
         return None
+    value = _safe_float(raw)
+    if value is None and must_be_defined:
+        # SFH LOW-4: D-09 maps a legitimately undefined ratio to None silently.
+        # A mirror that goes non-finite on a series that defines it
+        # (``_mirror_keys_defined_by``) is a BROKEN mirror, not an undefined
+        # ratio, and it must not look the same in the logs.
+        logger.warning(
+            "qstats scalar %s returned non-finite %r on a series that defines it "
+            "(returns_len=%s): not a D-09 undefined ratio, the mirror is suspect",
+            name, raw, returns_len,
+        )
+    return value
 
 
 @dataclass
@@ -394,6 +495,1080 @@ def sanitize_metrics(data: dict[str, Any]) -> dict[str, Any]:
         else:
             result[key] = value
     return result
+
+
+# ---------------------------------------------------------------------------
+# RANK-05 / Phase 166 primitives — the money-math that Phase 159 hand-copied
+# inline, extracted ONCE (TODOS 0f `[159-SIMPLIFY-DEFER]`, Phase 166 D-04).
+# Each reproduces the operation order of the site it came from EXACTLY (D-08:
+# no convention change), so the extraction is byte-neutral against the golden
+# parity file. They return RAW floats (NaN/inf allowed); every caller keeps its
+# own `_safe_float` wrapper and its own status / "undefined" handling.
+# ---------------------------------------------------------------------------
+
+
+def _max_drawdown_from_wealth(wealth: pd.Series) -> float:
+    """Max drawdown of a WEALTH curve — quantstats 0.0.81 ``max_drawdown`` minus the price guess.
+
+    Caller: ``compute_all_metrics`` geometric-path ``max_dd`` (wealth built from
+    ``returns.fillna(0)``, UNCLIPPED). Plan 166-03's ``_recovery_factor`` reuses it.
+
+    RANK-05 (Phase 159) — WHY INLINE, NOT quantstats. ``max_drawdown`` and
+    ``to_drawdown_series`` route through ``_utils._prepare_prices``, the mirror
+    image of the ``_prepare_returns`` price guess documented at the headline
+    sharpe/sortino site in ``compute_all_metrics``::
+
+        elif data.min() < 0 or data.max() < 1:
+            data = to_prices(data, base)
+
+    A series is converted returns->prices ONLY when it has a negative day or
+    stays under 1. An all-non-negative daily-RETURNS series with one >100% day
+    fails BOTH tests and is therefore consumed AS a price path. Measured pre-fix
+    on the 60-day ALL-WINNING fixture: max_drawdown = -0.9973 — a 99.7% drawdown
+    reported for a series that never lost a single day. Neither function carries
+    a ``prepare_returns=`` kwarg in the pinned 0.0.81 (in-env signature sweep,
+    2026-08-21), so inline pandas is the only closure (D-04 / the P114 pattern).
+
+    MATH PARITY — quantstats 0.0.81 ``max_drawdown`` / ``to_drawdown_series``
+    minus the guess. ``_prepare_prices(r, base=1.0)`` calls ``to_prices``, which
+    is ``base + base * compsum(r)`` == ``(1 + r).cumprod()``; both functions then
+    prepend a phantom inception point at the baseline and take
+    ``price / expanding-max - 1``. Prepending is equivalent to flooring the
+    running peak at the baseline — the phantom's own ratio is exactly 1.0 and
+    every other ratio is <= 1, so it can never be the minimum — hence
+    ``cummax().clip(lower=1.0)``.
+
+    ONE DELIBERATE DIVERGENCE, recorded: quantstats' ``_get_baseline_value``
+    GUESSES the inception capital from the first price (>1000 -> 1e5,
+    >10 -> 100.0, else 1.0). That ladder exists for series that arrive as real
+    prices. The wealth curve is BUILT by the caller with base 1.0, so inception
+    capital is known exactly and the ladder can only misfire — it would fabricate
+    a ~-100% drawdown for an account whose first day gained more than +900%.
+    Baseline is pinned at 1.0. Benign parity is untouched: the ladder returns 1.0
+    for every first price <= 10.
+
+    OPERATION ORDER (load-bearing): ``min`` of the ratio, THEN ``- 1.0``, with NO
+    inf/-0.0 replace — a zero drawdown stays ``+0.0`` (RESEARCH Pitfall 6).
+    Takes a WEALTH curve, not returns: the caller owns the NaN convention and
+    any clip, and the two ``compute_all_metrics`` callers deliberately build
+    different wealth curves.
+    """
+    return float((wealth / wealth.cummax().clip(lower=1.0)).min()) - 1.0
+
+
+def _drawdown_series_from_wealth(wealth: pd.Series) -> pd.Series:
+    """Drawdown (underwater) SERIES of a WEALTH curve — quantstats 0.0.81 ``to_drawdown_series`` minus the price guess.
+
+    Caller: ``compute_all_metrics`` geometric-path ``dd_series`` (wealth is the
+    chart ``cumulative``, derived from ``returns_for_chart`` floored at
+    ``_LOG_RETURN_FLOOR``). Plan 166-03's ulcer / UPI / serenity mirrors reuse it.
+
+    Same WHY-INLINE, MATH PARITY and baseline-pinned-at-1.0 rationale as
+    ``_max_drawdown_from_wealth``. The trailing ``replace`` mirrors quantstats'
+    own inf/-0 cleanup and is part of this primitive's operation order (it is
+    deliberately ABSENT from ``_max_drawdown_from_wealth``).
+    """
+    return (wealth / wealth.cummax().clip(lower=1.0) - 1.0).replace(
+        [np.inf, -np.inf, -0.0], 0.0
+    )
+
+
+# Phase 166's dispersion floor lives in services/dispersion.py (Phase 166.1 D-03).
+
+
+def _annualized_vol_sharpe(r: pd.Series, periods_per_year: int) -> tuple[float, float]:
+    """Annualized ``(vol, sharpe)`` — quantstats 0.0.81 ``volatility`` / ``sharpe`` minus the price guess.
+
+    ``vol = r.std() * sqrt(periods_per_year)`` (pandas ddof=1, skipna) and
+    ``sharpe = (r.mean() * periods_per_year) / vol`` — the P114 form (annualized
+    mean over annualized vol), algebraically identical to quantstats'
+    ``mean / std * sqrt(periods)`` and bit-identical to every spelling it replaces
+    (RESEARCH Pattern 1). With ``periods_per_year=1`` it yields ``mean / std``
+    exactly — the per-period Sharpe base ``_probabilistic_sharpe_ratio`` consumes.
+
+    Callers: ``compute_all_metrics`` headline ``sharpe`` (operand
+    ``stat_returns``) and ``info_ratio`` (operand ``excess``, guarded by its own
+    ``te > 0``), and ``sharpe_vol_status_from_backbone`` (operand ``returns``;
+    its ``insufficient_history`` / ``nan_vol`` / ``zero_volatility`` / ``ok``
+    status ladder stays OUTSIDE this primitive).
+
+    NO-DIVIDE BRANCH: when ``vol`` is NaN this returns ``(nan, nan)``, and when
+    the dispersion is zero or float residue (``_dispersion_is_residue``) it
+    returns ``(0.0, nan)``, in both cases WITHOUT performing the division. The
+    backbone checked vol BEFORE dividing, so its zero/NaN-vol path never emitted
+    a numpy divide RuntimeWarning; now that it calls this primitive ahead of its
+    status ladder, dividing here would add one. An inf ``vol`` still divides
+    (``x / inf`` raises no warning), exactly as every prior spelling did.
+
+    FLOAT-RESIDUE GUARD (Phase 166 review, SFH HIGH-1, 2026-09-24): pandas
+    ``std()`` of a CONSTANT series is not always 0.0. For 120 business days of
+    ``0.001`` it is ``4.35e-19``, and the quotient persisted a headline Sharpe of
+    ``3.645e+16`` (measured), ranked at the top of every Sharpe percentile, and
+    the backbone reported that number with status ``ok``. The old guard caught
+    only an EXACT zero. A constant series has no dispersion, so its Sharpe is
+    undefined: ``nan -> None`` (the "no invented data" rule: an absent panel,
+    never a synthesized number), and its vol is reported as the true ``0.0`` so
+    the backbone's ``zero_volatility`` status and ``info_ratio``'s ``te > 0``
+    guard see it. On a series with real dispersion the values are bit-identical
+    to before.
+
+    ROUND 2 (CR-01 / SFH R2-HIGH-1, 2026-09-25): the same guard now also sees a
+    constant yield derived from a compounding NAV, whose residue is ABSOLUTE
+    (about 1e-16) rather than relative to the mean. See ``_residue_floor``.
+
+    Returns RAW floats (NaN allowed); callers keep their own ``_safe_float``.
+    """
+    sd = r.std()
+    vol = float(sd * math.sqrt(periods_per_year))
+    if math.isnan(vol):
+        return vol, float("nan")
+    if _dispersion_is_residue(sd, r.mean()):
+        return 0.0, float("nan")
+    return vol, float((r.mean() * periods_per_year) / vol)
+
+
+def _downside_rms(x: pd.Series) -> float:
+    """Downside RMS — the ``downside`` leg of quantstats 0.0.81 ``sortino``, on the skipna count.
+
+    quantstats: ``sqrt((r[r < 0] ** 2).sum() / len(r))`` after ``_prepare_returns``'
+    ``fillna(0)``. Here the denominator is ``int(x.count())``, the number of REAL
+    observations (identical to ``len`` on every NaN-free series) — the skipna NaN
+    CONVENTION recorded at the headline sharpe/sortino site. Returns NaN when the
+    count is 0. The "downside == 0 means Sortino is undefined" handling stays at
+    each call site.
+
+    Callers: ``compute_all_metrics`` headline ``sortino`` (operand
+    ``_sortino_excess``) and ``smart_sortino`` (operand ``_smart_r``, already
+    ``dropna()``-ed, so count == len). A pure dedup: no Phase 166 mirror consumes it.
+    """
+    n = int(x.count())
+    if n == 0:
+        return float("nan")
+    return math.sqrt(float((x[x < 0.0] ** 2).sum()) / n)
+
+
+def _cvar_of_tail(series: pd.Series, threshold: float) -> float:
+    """Mean of the tail below ``threshold`` — quantstats 0.0.81 ``conditional_value_at_risk``'s Series branch.
+
+    quantstats: ``c_var = returns[returns < var].values.mean()``, falling back to
+    ``var`` when no observation lies below it; reproduced verbatim, minus the
+    empty-slice RuntimeWarning ``.values.mean()`` emits. The caller supplies the
+    threshold (a kwarg-closed ``value_at_risk``) and keeps the ``None``-threshold
+    branch. Named ``_cvar_of_tail`` so it cannot collide with a ``_cvar_tail``
+    local.
+
+    Callers: ``compute_all_metrics`` ``cvar`` (operand ``returns``). Plan 166-03's
+    serenity mirror reuses it on a drawdown series.
+    """
+    tail = series[series < threshold]
+    return float(tail.mean()) if len(tail) > 0 else float(threshold)
+
+
+# ---------------------------------------------------------------------------
+# Phase 166 — quantstats 0.0.81 mirrors, MINUS the price guess
+# ---------------------------------------------------------------------------
+# The eight single-arg scalars `compute_qstats_scalars` dispatches persist to
+# `strategy_analytics.metrics_json` (WINDOWS.md entry 9). Phase 166 research Q2
+# wrapped quantstats' `_prepare_returns` / `_prepare_prices` in a spy and called
+# each scalar on the RANK-05 trigger: the `prepare_returns=` keyword closes NONE
+# of them, because each one reaches a preparer transitively (or has no keyword
+# at all). So each is an inline mirror (D-03 outcome), built on the plan-01
+# primitives above (D-04), reproducing the 0.0.81 expression order so benign
+# series stay bit-identical to live quantstats (D-08).
+#
+# NaN CONVENTION (recorded divergence, Rule 7): these mirrors use ``P(r)`` =
+# ``_prepared_returns_no_guess`` — quantstats' own cleanup, fillna(0) — and keep
+# quantstats' raw-vs-prepared choice per sub-term. That deliberately DIFFERS
+# from Phase 159's skipna choice at the headline sites (see the NaN CONVENTION
+# note at the headline sharpe/sortino site in ``compute_all_metrics``). The
+# reason: with fillna(0) ONLY trigger-shaped series (all-non-negative with a
+# >100% day) change value, so the D-11 census predicate describes the whole
+# affected population. A skipna switch would also move every NaN-bearing
+# series, which that predicate does not describe.
+#
+# Every mirror returns a RAW float (NaN/inf allowed). `_safe_qstats_scalar` ->
+# `_safe_float` maps NaN and ±inf to None; the D-09 Nones (a ratio over a
+# drawdown that does not exist) arise from that mapping and are never
+# special-cased here.
+
+
+def _prepared_returns_no_guess(r: pd.Series) -> pd.Series:
+    """``P(r)``: quantstats 0.0.81 ``_utils._prepare_returns`` (rf=0 path) MINUS the price guess.
+
+    0.0.81 body, in order: ``data.copy()``; ``elif data.min() >= 0 and
+    data.max() > 1: data = data.pct_change()`` (THE GUESS, dropped here);
+    ``replace([inf, -inf], NaN)``; ``fillna(0).replace([inf, -inf], NaN)``; then a
+    tz normalisation of the index that no scalar reads. Reused by plans 166-04
+    to 166-06.
+    """
+    return (
+        r.copy()
+        .replace([np.inf, -np.inf], np.nan)
+        .fillna(0)
+        .replace([np.inf, -np.inf], np.nan)
+    )
+
+
+def _drawdown_series_no_guess(r: pd.Series) -> pd.Series:
+    """``DD(r)``: quantstats 0.0.81 ``to_drawdown_series`` MINUS the price guess.
+
+    ``to_prices`` fills NaN with 0 before compounding, so the wealth curve is
+    ``(1 + r.fillna(0)).cumprod()``. Phase 166 research measured max abs diff
+    0.0 against ``qs.stats.to_drawdown_series`` on five benign fixtures.
+    """
+    return _drawdown_series_from_wealth((1.0 + r.fillna(0)).cumprod())
+
+
+def _recovery_factor(r: pd.Series) -> float:
+    """quantstats 0.0.81 ``recovery_factor`` (rf=0, Series input) minus the price guess.
+
+    WHY INLINE: research Q2's spy saw ``recovery_factor(r, prepare_returns=False)``
+    still reach ``_prepare_prices`` through ``max_drawdown``, which has no
+    keyword. On the RANK-05 trigger it returned 1.9733 with the keyword and
+    2.0737 without it. Both are wrong: the series never lost a day. The
+    "kwarg-closable" reading in WINDOWS.md entry 9 and the 159-05 Residual table
+    is REFUTED for this scalar.
+
+    MATH PARITY (0.0.81 body)::
+
+        returns = _prepare_returns(returns)
+        total_returns = returns.sum() - rf
+        max_dd = max_drawdown(returns)
+        if max_dd == 0: return nan
+        return abs(total_returns) / abs(max_dd)
+
+    ``max_drawdown`` of a returns series is the drawdown of
+    ``to_prices(r, base=1)`` = ``(1 + r).cumprod()``, i.e.
+    ``_max_drawdown_from_wealth``.
+
+    RECORDED, NOT CHANGED (D-08): the numerator is an ARITHMETIC sum of daily
+    returns, while ``upi``'s numerator is the COMPOUNDED return (``comp``). That
+    is a quantstats inconsistency. Changing it would move benign values, which
+    this phase forbids, so it is reproduced as is.
+
+    RECORDED, NOT CHANGED (D-08; SFH LOW-3, 2026-09-24): ``abs(total)`` drops
+    the sign, so a NET-LOSING strategy shows a POSITIVE recovery factor (a
+    -30% total over a -40% drawdown reads 0.75, the same as a +30% one). That is
+    a second quantstats inconsistency and it reaches the UI. It is reproduced
+    for the same reason, and recorded in 166-CONTEXT.md.
+
+    D-09: an all-winning series has ``max_dd == 0`` -> NaN -> None.
+    """
+    p = _prepared_returns_no_guess(r)
+    total = p.sum()
+    max_dd = _max_drawdown_from_wealth((1.0 + p).cumprod())
+    if max_dd == 0:
+        return float("nan")
+    return float(abs(total) / abs(max_dd))
+
+
+def _ulcer_index(r: pd.Series) -> float:
+    """quantstats 0.0.81 ``ulcer_index`` minus the price guess.
+
+    WHY INLINE: ``ulcer_index`` has no ``prepare_returns=`` keyword, and research
+    Q2's spy saw it reach ``_prepare_prices`` through ``to_drawdown_series``.
+
+    MATH PARITY (0.0.81 body)::
+
+        dd = to_drawdown_series(returns)
+        return np.sqrt(np.divide((dd**2).sum(), returns.shape[0] - 1))
+
+    The denominator is the RAW row count minus 1, NaN rows included, exactly as
+    quantstats does it. ``np.divide`` / ``np.sqrt`` are kept so a length-1 series
+    gives NaN (as before) rather than raising.
+
+    D-09: no losing day -> ``dd`` is all 0 -> exactly 0.0.
+    """
+    dd = _drawdown_series_no_guess(r)
+    return float(np.sqrt(np.divide((dd**2).sum(), r.shape[0] - 1)))
+
+
+def _ulcer_performance_index(r: pd.Series) -> float:
+    """quantstats 0.0.81 ``ulcer_performance_index`` (rf=0, Series input) minus the price guess.
+
+    WHY INLINE: no ``prepare_returns=`` keyword; it inherits ``ulcer_index``'s
+    transitive ``_prepare_prices`` call (research Q2).
+
+    MATH PARITY (0.0.81 body)::
+
+        ulcer = ulcer_index(returns)
+        if ulcer == 0: return nan
+        return (comp(returns) - rf) / ulcer
+
+    with ``comp(r) = r.add(1).prod() - 1`` on the RAW series (a skipna product,
+    equal to fillna(0) for this purpose).
+
+    D-09: ulcer 0 -> NaN -> None.
+    """
+    u = _ulcer_index(r)
+    if u == 0:
+        return float("nan")
+    return float((r.add(1).prod() - 1) / u)
+
+
+def _serenity_index(r: pd.Series) -> float:
+    """quantstats 0.0.81 ``serenity_index`` (rf=0, Series input) minus the price guess.
+
+    WHY INLINE: no ``prepare_returns=`` keyword; research Q2's spy saw two
+    ``_prepare_prices`` calls through ``to_drawdown_series``. Its ``cvar`` of the
+    drawdown series also prepares, but it cannot guess there (a drawdown series
+    is <= 0).
+
+    MATH PARITY (0.0.81 body, Series branch)::
+
+        dd = to_drawdown_series(returns)
+        std_returns = returns.std()
+        if std_returns == 0: return nan
+        pitfall = -cvar(dd) / std_returns
+        denominator = ulcer_index(returns) * pitfall
+        if denominator == 0: return nan
+        return (returns.sum() - rf) / denominator
+
+    ``returns.std()`` and ``returns.sum()`` are on the RAW series (skipna).
+    ``cvar(dd)`` is ``_cvar_of_tail(dd, value_at_risk(dd))``: the mean of the
+    drawdowns below the 95% VaR, falling back to the VaR. ``value_at_risk`` is
+    the kwarg-proven leaf (research Q2), called with ``prepare_returns=False``.
+    The drawdown series carries no NaN, so skipping its fillna(0) changes
+    nothing.
+
+    D-09: no losing day -> ulcer 0 and VaR of an all-zero series NaN -> NaN -> None.
+
+    ``std_returns == 0`` is tested through ``_dispersion_is_residue`` (Phase 166
+    review, SFH HIGH-1 class): a constant LOSING series has a residue ``std()``
+    (4.3e-19 for 250 days of -0.002, measured), the pitfall over it is ~1e16,
+    and 0.0.81's exact test let a fabricated ``-2.2e-18`` through. Reached by an
+    all-zero series (exact 0) and by any constant series (residue), including a
+    constant yield taken as ``pct_change`` of a compounding NAV (round 2,
+    ``_residue_floor``).
+
+    The ``denominator == 0`` arm is kept for 0.0.81 parity and has NO natural
+    input: ulcer is 0 only when every drawdown is 0, and then the VaR of the
+    all-zero drawdown series is NaN, so the denominator is NaN, not 0; and
+    whenever a drawdown exists the CVaR is strictly negative, so the pitfall is
+    not 0. ``test_q166r_serenity_undefined_arms_are_none_not_zero`` reaches it
+    by forcing ulcer to 0.
+    """
+    dd = _drawdown_series_no_guess(r)
+    sd = r.std()
+    if _dispersion_is_residue(sd, r.mean()):
+        return float("nan")
+    var = qs.stats.value_at_risk(dd, confidence=0.95, prepare_returns=False)
+    pitfall = -_cvar_of_tail(dd, var) / sd
+    den = _ulcer_index(r) * pitfall
+    if den == 0:
+        return float("nan")
+    return float(r.sum() / den)
+
+
+def _payoff_ratio_no_guess(p: pd.Series) -> float:
+    """quantstats 0.0.81 ``payoff_ratio`` (Series input) on an ALREADY-prepared ``p``.
+
+    WHY NOT CALL IT: 0.0.81 ``payoff_ratio(returns, prepare_returns=False)`` calls
+    ``avg_loss(returns)`` and ``avg_win(returns)`` WITHOUT forwarding the keyword,
+    so both leaves prepare again and the price guess fires (research Q2 spy,
+    finding F-5). ``win_loss_ratio`` is an alias of it and has the same hole.
+    This composes the two kwarg-proven leaves directly instead.
+
+    MATH PARITY (0.0.81 body, Series branch)::
+
+        avg_loss_val = avg_loss(returns)
+        avg_win_val = avg_win(returns)
+        if avg_loss_val == 0: return nan
+        return avg_win_val / abs(avg_loss_val)
+
+    ``avg_loss`` is the mean of the negative days. An empty set gives NaN,
+    which propagates.
+
+    UNREACHABLE ARM, KEPT ON PURPOSE (SFH INFO-1): ``avg_loss_val == 0`` cannot
+    happen, because a mean of strictly negative values is negative, or NaN when
+    there are none. Drill N14 (the arm returning 0.0) therefore survives the
+    suite, and that is expected. The arm is kept because it is a line of the
+    0.0.81 body this mirror reproduces (D-08 parity), and it is the right answer
+    should a future ``avg_loss`` ever return 0: an undefined payoff, not a
+    division by zero.
+
+    Callers: ``_kelly_criterion`` and ``_cpc_index``.
+    """
+    avg_loss_val = qs.stats.avg_loss(p, prepare_returns=False)
+    avg_win_val = qs.stats.avg_win(p, prepare_returns=False)
+    if avg_loss_val == 0:
+        return float("nan")
+    return float(avg_win_val / abs(avg_loss_val))
+
+
+def _kelly_criterion(r: pd.Series) -> float:
+    """quantstats 0.0.81 ``kelly_criterion`` (Series input) minus the price guess.
+
+    WHY INLINE: research Q2's spy saw ``kelly_criterion(r, prepare_returns=False)``
+    still reach ``_prepare_returns`` through ``payoff_ratio`` and ``win_rate``.
+    The "kwarg-closable" reading in WINDOWS.md entry 9 and the 159-05 Residual
+    table is REFUTED for this scalar. On the non-monotone trigger live
+    quantstats returned 0.3890395480225989 for a series with no losing day.
+
+    MATH PARITY (0.0.81 body, Series branch)::
+
+        returns = _prepare_returns(returns)
+        win_loss_ratio = payoff_ratio(returns)
+        win_prob = win_rate(returns)
+        lose_prob = 1 - win_prob
+        if win_loss_ratio == 0 or isna(win_loss_ratio): return nan
+        return ((win_loss_ratio * win_prob) - lose_prob) / win_loss_ratio
+
+    ``win_rate`` is the kwarg-proven leaf, called with ``prepare_returns=False``
+    on ``P(r)``. The payoff is ``_payoff_ratio_no_guess``.
+
+    NaN CONVENTION: ``P(r)`` (fillna(0)), as for every Phase 166 mirror.
+
+    D-09: no losing day -> average loss undefined -> payoff NaN -> NaN -> None.
+    """
+    p = _prepared_returns_no_guess(r)
+    wl = _payoff_ratio_no_guess(p)
+    wp = qs.stats.win_rate(p, prepare_returns=False)
+    lose_prob = 1 - wp
+    if wl == 0 or pd.isna(wl):
+        return float("nan")
+    return float(((wl * wp) - lose_prob) / wl)
+
+
+def _probabilistic_sharpe_ratio(r: pd.Series) -> float:
+    """Probabilistic Sharpe Ratio PSR(0): quantstats 0.0.81 ``probabilistic_ratio`` minus the price guess, with D-16's kurtosis fix.
+
+    WHY INLINE: ``probabilistic_ratio`` has no ``prepare_returns=`` keyword, and
+    research Q2's spy saw it reach ``_prepare_returns`` through ``sharpe``. On the
+    canonical all-winning trigger live quantstats returned 0.1531252134903383, a
+    below-even probability for a series that never lost a day.
+
+    0.0.81 BODY (base "sharpe", rf=0, not annualized)::
+
+        base = sharpe(series, periods=periods, annualize=False)  # P(r).mean() / P(r).std(ddof=1)
+        skew_no = skew(series, prepare_returns=False)            # raw r.skew()
+        kurtosis_no = kurtosis(series, prepare_returns=False)    # raw r.kurtosis(), EXCESS
+        n = len(series)                                          # raw row count
+        sigma_sr = np.sqrt((1 + (0.5 * base**2) - (skew_no * base)
+                            + (((kurtosis_no - 3) / 4) * base**2)) / (n - 1))
+        return norm.cdf((base - rf) / sigma_sr)
+
+    D-16 CORRECTION (research §Q5 F-2, founder-approved 2026-09-24). The
+    variance term above expects the NON-excess fourth moment gamma4 (3 for a
+    normal distribution): with it, ``1 + 0.5*SR**2 - g3*SR + ((gamma4 - 3)/4)*SR**2``
+    is exactly the published ``1 - g3*SR + ((gamma4 - 1)/4)*SR**2`` (Bailey &
+    Lopez de Prado, https://www.davidhbailey.com/dhbpapers/deflated-sharpe.pdf).
+    pandas' ``kurtosis()`` is EXCESS kurtosis, so 0.0.81 subtracts 3 twice and its
+    variance is short by ``0.75*SR**2/(n-1)``. That is small on typical series,
+    but on a steadily winning series the term goes negative and live PSR is
+    None. This mirror changes exactly ONE input: it feeds ``r.kurtosis() + 3``.
+    The expression is otherwise the 0.0.81 one, in its order.
+
+    D-10 DISCLOSURE: this moves the persisted value on every series. The golden
+    ``metrics_json.metrics_json.probabilistic_sharpe_ratio`` moved with it, and
+    the before/after rows are in the plan 166-04 SUMMARY. The correctness anchor
+    is ``test_q166_psr_matches_the_published_formula``, which computes the
+    published formula from sample moments with scipy. It is NOT live quantstats,
+    which carries the defect, so PSR has no live-quantstats parity row.
+
+    The base comes from the plan 166-01 primitive ``_annualized_vol_sharpe`` with
+    ``periods_per_year=1``, which is ``mean / std`` bit-identically (D-04: no
+    third hand-copy of the Sharpe arithmetic). ``periods`` (default 252) only
+    de-annualizes a non-zero rf, so it has no effect here (research Q5).
+    ``np.sqrt`` is kept, so a negative inner term gives NaN -> None rather than
+    an exception.
+
+    NaN CONVENTION: the base is on ``P(r)`` (fillna(0)). Skew, kurtosis and n
+    are on the RAW series, exactly as 0.0.81 computes them.
+    """
+    n = len(r)
+    if n < 2:
+        # Review IN-01: `base` is a Python float, so `(...) / (n - 1)` with n = 1
+        # raised ZeroDivisionError and `_safe_qstats_scalar` logged a false
+        # "scalar failed" WARNING. 0.0.81's numpy division gave NaN silently.
+        # One observation defines no Sharpe, so this is undefined -> None.
+        return float("nan")
+    base = _annualized_vol_sharpe(_prepared_returns_no_guess(r), 1)[1]
+    skew_no = r.skew()
+    gamma4 = r.kurtosis() + 3  # D-16: non-excess fourth moment
+    sigma_sr = np.sqrt(
+        (1 + (0.5 * base**2) - (skew_no * base) + (((gamma4 - 3) / 4) * base**2))
+        / (n - 1)
+    )
+    return float(norm.cdf(base / sigma_sr))
+
+
+def _common_sense_ratio(r: pd.Series) -> float:
+    """quantstats 0.0.81 ``common_sense_ratio`` minus the price guess.
+
+    WHY INLINE: research Q2's spy saw ``common_sense_ratio(r, prepare_returns=False)``
+    still reach ``_prepare_returns`` through ``profit_factor`` and ``tail_ratio``.
+    The "kwarg-closable" reading in WINDOWS.md entry 9 and the 159-05 Residual
+    table is REFUTED for this scalar. On the canonical trigger live quantstats
+    returned 0.0 for a series with no losing day.
+
+    MATH PARITY (0.0.81 body)::
+
+        returns = _prepare_returns(returns)
+        return profit_factor(returns) * tail_ratio(returns)
+
+    Both leaves are kwarg-proven, and they are the same calls
+    ``compute_all_metrics`` already makes for its own ``profit_factor`` and
+    ``tail_ratio``, so neither gets a second implementation.
+
+    NaN CONVENTION: ``P(r)`` (fillna(0)).
+
+    D-09: no losing day -> ``profit_factor`` is +inf -> inf (or NaN) -> None.
+    """
+    p = _prepared_returns_no_guess(r)
+    return float(
+        qs.stats.profit_factor(p, prepare_returns=False)
+        * qs.stats.tail_ratio(p, prepare_returns=False)
+    )
+
+
+def _cpc_index(r: pd.Series) -> float:
+    """quantstats 0.0.81 ``cpc_index`` minus the price guess.
+
+    WHY INLINE: research Q2's spy saw ``cpc_index(r, prepare_returns=False)``
+    still reach ``_prepare_returns`` through ``profit_factor``, ``win_rate`` and
+    ``win_loss_ratio``. The "kwarg-closable" reading in WINDOWS.md entry 9 and
+    the 159-05 Residual table is REFUTED for this scalar. On the non-monotone
+    trigger live quantstats returned 11.695887516415286 for a series with no
+    losing day.
+
+    MATH PARITY (0.0.81 body)::
+
+        returns = _prepare_returns(returns)
+        return profit_factor(returns) * win_rate(returns) * win_loss_ratio(returns)
+
+    ``win_loss_ratio`` is ``payoff_ratio``, composed here by
+    ``_payoff_ratio_no_guess``. The other two leaves are kwarg-proven.
+
+    NaN CONVENTION: ``P(r)`` (fillna(0)).
+
+    D-09: no losing day -> payoff NaN -> NaN -> None.
+    """
+    p = _prepared_returns_no_guess(r)
+    return float(
+        qs.stats.profit_factor(p, prepare_returns=False)
+        * qs.stats.win_rate(p, prepare_returns=False)
+        * _payoff_ratio_no_guess(p)
+    )
+
+
+# ---------------------------------------------------------------------------
+# Phase 166 plan 05: the SCALAR benchmark leg.
+#
+# quantstats 0.0.81 ``r_squared`` and ``greeks`` both run the benchmark through
+# ``_utils._prepare_benchmark``, which ends in ``_prepare_returns`` and never
+# receives the caller's ``prepare_returns=`` keyword. So no keyword closes the
+# price guess on the benchmark leg (research Q2). Both are inline here, built on
+# ``_align_benchmark_like_qs``. Plan 166-06 reuses that primitive for the
+# rolling leg.
+# ---------------------------------------------------------------------------
+
+
+def _tz_naive_like_qs(s: pd.Series) -> pd.Series:
+    """The tz normalisation step of quantstats 0.0.81 ``_prepare_benchmark`` and ``_prepare_returns``, verbatim.
+
+    0.0.81::
+
+        if hasattr(benchmark.index, 'tz') and benchmark.index.tz is not None:
+            benchmark = benchmark.tz_convert('UTC').tz_localize(None)
+    """
+    if hasattr(s.index, "tz") and s.index.tz is not None:
+        s = s.tz_convert("UTC").tz_localize(None)
+    return s
+
+
+def _wall_clock_is_utc(s: pd.Series) -> bool:
+    """True when every stamp of a tz-aware ``s`` reads the same wall clock in UTC."""
+    idx = s.index
+    return bool((idx.tz_localize(None) == idx.tz_convert("UTC").tz_localize(None)).all())
+
+
+def _refuse_mismatched_day_labels(returns: pd.Series, benchmark: pd.Series) -> None:
+    """Raise when the two legs label their days in different time zones.
+
+    Phase 166 review round 2 (IN-03). ``_tz_naive_like_qs`` converts a tz-aware
+    leg to UTC and drops the zone, so it treats a NAIVE stamp as UTC. That is
+    lossless when the aware leg's wall clock IS UTC. It is not when the zone is
+    east or west of UTC: a Tokyo midnight becomes 15:00 on the previous UTC day,
+    and ``_benchmark_pair`` would then assign each shifted stamp to the wrong
+    holding interval, pairing each strategy day with the wrong benchmark
+    interval (166.4 D-A). Before 166.4 the same shift produced a silently
+    shifted ``r_squared`` with status ``ok`` (measured on a naive strategy
+    against an Asia/Tokyo benchmark).
+
+    The pair is accepted when both legs are naive, both carry the same zone, or
+    every aware leg's wall clock equals UTC at every stamp (a naive leg is read
+    as UTC, the convention ``_tz_naive_like_qs`` already applies). Anything else
+    is refused LOUDLY: guessing which day a foreign-zone bar belongs to would be
+    inventing the pairing. Each caller's ``except`` logs the refusal by name
+    (``compute_qstats_scalars``' r_squared block sets status ``error``).
+    """
+    tz_r = getattr(returns.index, "tz", None)
+    tz_b = getattr(benchmark.index, "tz", None)
+    if tz_r is None and tz_b is None:
+        return
+    if tz_r is not None and tz_b is not None and str(tz_r) == str(tz_b):
+        return
+    if all(_wall_clock_is_utc(s) for s in (returns, benchmark) if s.index.tz is not None):
+        return
+    raise ValueError(
+        f"strategy and benchmark label their days in different time zones "
+        f"(strategy tz={tz_r}, benchmark tz={tz_b}); normalising both to UTC would "
+        "pair each strategy day with a shifted benchmark day, so the pair is refused"
+    )
+
+
+def _align_benchmark_like_qs(benchmark: pd.Series, period: pd.Index) -> pd.Series:
+    """quantstats 0.0.81 ``_utils._prepare_benchmark(benchmark, period, prepare_returns=True)`` MINUS the price guess, on an ALREADY-PAIRED leg.
+
+    quantstats 0.0.81 rebuilds benchmark prices, back-fills them onto the
+    strategy's dates whenever the two date sets differ, and zero-fills the first
+    return; this engine no longer does any of that. What is kept is the
+    equal-index path: tz normalisation, ``dropna()``, and 0.0.81's final
+    ``_prepare_returns`` with the guess removed (``_prepared_returns_no_guess``).
+    On an equal-index pair every value is bit-identical to what this function
+    returned before 166.4.
+
+    SUPERSEDED BY 166.4 D-A (founder, 2026-09-27). Phase 166 kept 0.0.81's
+    reindex arm on purpose, arguing that aligning any other way would move
+    ``r_squared`` for everyone and would be a convention change rather than a
+    closure. The founder made that convention change (166.4 D-A; the rationale
+    is rewritten under 166.4 D-01): every benchmark-relative metric now reads
+    the ONE interval pair from ``_benchmark_pair``, and nothing is filled across
+    a benchmark gap. Every caller (``_greeks_no_guess`` from the
+    ``compute_all_metrics`` fan-out, ``_rolling_greeks`` from
+    ``_rolling_alpha_beta``) hands this function an equal-index pair, so a
+    ``period`` whose date set differs from the benchmark's is a caller that
+    skipped the pairing, and it is refused with a ``ValueError`` naming 166.4
+    D-A instead of being filled. INVARIANT: the frame ``fillna(0)`` of
+    ``_rolling_greeks`` can never see an unpaired benchmark value, because an
+    unpaired date never reaches it.
+
+    WHY NOT CALL THE PRIVATE SYMBOL: ``_prepare_benchmark(..., prepare_returns=False)``
+    would also skip the guess, but it would put a private quantstats symbol into
+    production money math and into the D-14 gate's allowlist, and it would break
+    silently on any quantstats refactor (research "Alternatives Considered").
+    These lines of pandas are the whole of it.
+    """
+    # Phase 166 review (SFH LOW-1 / IN-02): the benchmark is tz-normalised
+    # FIRST, exactly like the strategy leg every caller normalises before it
+    # builds ``period``, so a naive ``period`` and a tz-aware benchmark compare
+    # by date. A naive benchmark is untouched, so every existing value is
+    # bit-identical.
+    benchmark = _tz_naive_like_qs(benchmark)
+    if set(period) != set(benchmark.index):
+        raise ValueError(
+            "the benchmark leg does not share the strategy's dates; pair the legs "
+            "with _benchmark_pair first, a benchmark is never filled onto the "
+            "strategy's calendar (166.4 D-A)"
+        )
+    return _prepared_returns_no_guess(benchmark.dropna())
+
+
+# ---------------------------------------------------------------------------
+# Phase 166.4 BENCHALIGN (166.4 D-A): the ONE interval-matched benchmark pair.
+#
+# A strategy return dated t_k is the move over the holding interval
+# (t_{k-1}, t_k]. For a strategy sparser than BTC's 7-day calendar that
+# interval spans several BTC days, so every benchmark-relative metric pairs it
+# with BTC's return over the SAME interval, compounded, and pairs it only when
+# BTC has a close at both endpoints. Nothing is filled across a gap. M1
+# (``d16b2fb4c``) paired a Monday with BTC's Sunday-to-Monday daily move; that
+# convention is superseded (founder decision D-A, 2026-09-27).
+# ---------------------------------------------------------------------------
+
+
+def _interval_matched_benchmark(index: pd.DatetimeIndex, benchmark: pd.Series) -> pd.Series:
+    """For each strategy date t_k, the benchmark return over (t_{k-1}, t_k]; NaN when unpaired (166.4 D-A).
+
+    PAIRING RULE: interval k is paired ONLY when the benchmark has a close
+    dated t_{k-1} AND a close dated t_k. It is the pairing rule of the D-58
+    amendment of Phase 169.5 BENCHCOMPARE, whose TypeScript twin is
+    ``src/lib/factsheet/align.ts``; the two implementations cite each other
+    (166.4 D-A, D-02). They differ in two places. At index 0, 169.5 keeps
+    index 0 = 0 per its D-54 parity convention, while this helper pairs index
+    0 with the benchmark return dated t_0 (166.4 D-05). For k >= 1, this helper
+    also unpairs an interval that is missing a date of the benchmark's own
+    calendar strictly inside it (INTERIOR GAPS below, review WR-01). The
+    TypeScript twin has no such rule; adopting it there is a 169.5 decision.
+
+    VALUE: exactly one benchmark return inside the interval is used VERBATIM
+    (recomputing it as ``(1 + x) - 1`` breaks dense bit-identity at 1e-16); two
+    or more are compounded, ``prod(1 + b) - 1``. When both endpoints are closes
+    and every date of the benchmark's own calendar inside the interval carries
+    a return, this telescopes to ``price[t_k] / price[t_{k-1}] - 1``.
+
+    INTERIOR GAPS (review WR-01): a date of the benchmark's own calendar
+    strictly inside the interval that carries no return UNPAIRS the interval.
+    A missing PRICE row would still telescope (``pct_change`` spans it), but a
+    missing RETURN row drops a move, and compounding past it reads that move
+    as 0, a fill across a gap. This helper receives returns, so it cannot tell
+    the two apart and treats both as a gap. The benchmark's calendar is the
+    set of weekdays it ever carries: seven for BTC, so a weekday strategy's
+    (Friday, Monday] interval needs Saturday and Sunday returns; five for a
+    business-day series, so the same interval needs the Monday return only.
+
+    A CLOSE at date d exists iff d carries a finite benchmark return, or d is
+    the base close (166.4 D-07 below). A NaN or +-inf benchmark return means no
+    close at d, and an interval holding one is unpaired. Unpaired dates are NaN
+    here and are excluded by ``_benchmark_pair``; nothing is ever filled.
+
+    ``index`` must be sorted and free of duplicates (``_benchmark_pair``
+    enforces both); ``np.searchsorted`` requires the sort.
+    """
+    out = pd.Series(np.nan, index=index, dtype="float64")
+    b = (
+        _tz_naive_like_qs(benchmark)
+        .astype("float64")
+        .replace([np.inf, -np.inf], np.nan)
+        .sort_index()
+    )
+    n = len(index)
+    if n == 0 or len(b) == 0:
+        return out
+
+    b_vals = b.to_numpy(dtype="float64")
+    b_finite = ~np.isnan(b_vals)
+
+    # [166.4 D-07, ratified by the founder 2026-09-27] The base close is
+    # ``benchmark.index[0]`` minus one day: the first stored benchmark return is
+    # the move from a close on the day before it (``prices_to_returns`` drops
+    # the first price date). So a strategy date one day before BTC's first
+    # stored return counts as a close, and a dense strategy older than the BTC
+    # window keeps its first in-window pair. This assumes the stored BTC return
+    # series is contiguous at its start (166.4 RESEARCH A1).
+    base_close = b.index[0] - pd.Timedelta(days=1)
+    close_dates = b.index[b_finite].append(pd.DatetimeIndex([base_close]))
+    is_close = np.asarray(index.isin(close_dates), dtype=bool)
+
+    # Interval id per benchmark date: date d falls in (t_{k-1}, t_k] for
+    # k = searchsorted(index, d, side="left"). Dates after the last strategy
+    # date belong to no interval. Both sides are cast to one resolution so the
+    # comparison never depends on how each index was built.
+    k_of = np.searchsorted(
+        np.asarray(index.values, dtype="datetime64[ns]"),
+        np.asarray(b.index.values, dtype="datetime64[ns]"),
+        side="left",
+    )
+    keep = k_of < n
+    frame = pd.DataFrame(
+        {
+            "k": k_of[keep],
+            "v": b_vals[keep],
+            "nan": ~b_finite[keep],
+            "growth": 1.0 + b_vals[keep],
+        }
+    )
+    grouped = frame.groupby("k", sort=True)
+    sizes = grouped.size()
+    ks = sizes.index.to_numpy()
+    count = np.zeros(n, dtype="int64")
+    any_nan = np.zeros(n, dtype=bool)
+    first = np.full(n, np.nan)
+    compounded = np.full(n, np.nan)
+    count[ks] = sizes.to_numpy()
+    any_nan[ks] = grouped["nan"].any().to_numpy()
+    # ``first`` skips NaN; that is safe only because an interval holding a NaN
+    # is excluded below.
+    first[ks] = grouped["v"].first().to_numpy()
+    compounded[ks] = grouped["growth"].prod().to_numpy() - 1.0
+
+    # [166.4 D-A, review WR-01] Every date of the benchmark's OWN calendar
+    # inside (t_{k-1}, t_k] must carry a return. The calendar is the set of
+    # weekdays the benchmark ever carries (all seven for BTC, Monday to Friday
+    # for a business-day series), so a weekend is a gap for BTC and not for a
+    # business-day benchmark. ``expected[k]`` counts those dates in the
+    # interval with a running count over the calendar days from t_0 to t_last;
+    # 1970-01-01 (day 0) is a Thursday, pandas ``dayofweek`` 3.
+    traded = np.zeros(7, dtype=bool)
+    traded[np.unique(np.asarray(b.index.dayofweek))] = True
+    day_num = (
+        np.asarray(index.values, dtype="datetime64[ns]").astype("datetime64[D]").astype("int64")
+    )
+    first_day = int(day_num[0])
+    calendar_days = np.arange(first_day, int(day_num[-1]) + 1, dtype="int64")
+    traded_to_date = np.cumsum(traded[(calendar_days + 3) % 7])
+    at_t = traded_to_date[day_num - first_day]
+    expected = np.zeros(n, dtype="int64")
+    expected[1:] = at_t[1:] - at_t[:-1]
+
+    # [166.4 D-A] k >= 1 is paired iff t_k is a close, no benchmark value in the
+    # interval is non-finite, the interval holds at least one return, and it
+    # holds a return for every date of the benchmark's calendar inside it.
+    paired = is_close & ~any_nan & (count >= 1) & (count == expected)
+    # [166.4 D-04, ratified by the founder 2026-09-27] The t_{k-1} endpoint must
+    # be a close too, WHICHEVER leg is sparser: a daily strategy's Monday
+    # against a business-day benchmark has no close dated Sunday, so it is
+    # unpaired, exactly as a weekday strategy's Monday needs a close dated Friday.
+    paired[1:] &= is_close[:-1]
+    paired[0] = False
+    values = np.where(count == 1, first, compounded)
+    out.iloc[np.flatnonzero(paired)] = values[paired]
+
+    # [166.4 D-05, ratified by the founder 2026-09-27] Index 0 has no previous
+    # strategy date. It is paired with the benchmark return dated t_0 when t_0
+    # carries a finite one (the one-period convention, today's inner-join
+    # value), and is unpaired otherwise. Never a fabricated 0. Benchmark dates
+    # before t_0 fall in interval 0 and are ignored.
+    t0 = index[0]
+    if t0 in b.index:
+        v0 = float(b.loc[t0])
+        if np.isfinite(v0):
+            out.iloc[0] = v0
+    return out
+
+
+def _benchmark_pair(returns: pd.Series, benchmark: pd.Series) -> tuple[pd.Series, pd.Series]:
+    """The ONE (strategy, benchmark) pair every benchmark-relative metric reads (166.4 D-A, SC1).
+
+    Order of operations: the day-label refusal FIRST
+    (``_refuse_mismatched_day_labels``: a shifted day label would pair each
+    strategy day with the wrong benchmark interval), then the strategy's tz
+    normalisation (``_tz_naive_like_qs``), then a sort of the strategy by date.
+    Not every production entry point sorts (``derive_basis_series`` hands a
+    caller's ``scalar_returns`` through as given), and the interval ids come
+    from ``np.searchsorted``, which requires a sorted index.
+
+    DUPLICATE DATES are refused with a ``ValueError`` on either leg: an
+    interval cannot be defined twice, and picking one of two values would be
+    guessing.
+
+    Both legs are restricted to the dates ``_interval_matched_benchmark``
+    pairs. Strategy NaN is RETAINED: each metric keeps its own existing NaN
+    convention (pairwise drop for the scalars, the frame ``fillna(0)`` of
+    ``_rolling_greeks``). An unpaired benchmark date never reaches any metric.
+
+    A strategy +-inf is read as NaN HERE, once (review WR-02), so every
+    benchmark-relative metric drops the same rows: correlation, beta and the
+    rest of the fan-out as well as r_squared. Before, only the two r_squared
+    helpers mapped it, and a strategy with one inf day persisted an ``ok``
+    r_squared beside a None correlation and beta.
+    """
+    _refuse_mismatched_day_labels(returns, benchmark)
+    r = _tz_naive_like_qs(returns).sort_index().replace([np.inf, -np.inf], np.nan)
+    b = _tz_naive_like_qs(benchmark)
+    if r.index.has_duplicates or b.index.has_duplicates:
+        raise ValueError(
+            "the strategy or the benchmark carries a duplicated date; an interval "
+            "cannot be defined twice, so the pair is refused (166.4 D-A)"
+        )
+    paired_benchmark = _interval_matched_benchmark(pd.DatetimeIndex(r.index), b)
+    mask = paired_benchmark.notna().to_numpy()
+    return r[mask], paired_benchmark[mask]
+
+
+def strategy_calendar_is_sparse(index: pd.DatetimeIndex) -> bool:
+    """True iff some two consecutive strategy dates are more than one calendar day apart (166.4 D-03, SC7).
+
+    This is the engine's definition of a "sparse calendar". Against a
+    contiguous benchmark it is exactly the condition under which the 166.4 D-A
+    interval pair (``_benchmark_pair``) differs from a daily inner join: every
+    interval of a non-sparse calendar is one day long. The dates are
+    tz-normalised the way ``_tz_naive_like_qs`` normalises a series, sorted,
+    and de-duplicated first. NaN VALUES do not remove dates, so a broker
+    series with NaN guard days is dense. An index of fewer than two dates is
+    not sparse.
+
+    Broker and composite series are densified before compute, so in production
+    only user CSV series can be sparse (166.4 RESEARCH Q2, Q9). The read-only
+    SQL Phase 166.3 runs applies the same definition: consecutive
+    ``csv_daily_returns.date`` values more than one day apart.
+
+    PUBLIC because Phase 166.3 cites it by name. No metric calls it; it exists
+    for the 166.3 handoff and is pinned by ``tests/test_benchalign.py``.
+    """
+    idx = pd.DatetimeIndex(index)
+    if idx.tz is not None:
+        idx = idx.tz_convert("UTC").tz_localize(None)
+    idx = idx.unique().sort_values()
+    if len(idx) < 2:
+        return False
+    return bool((idx[1:] - idx[:-1]).max() > pd.Timedelta(days=1))
+
+
+def _r_squared(returns: pd.Series, benchmark: pd.Series) -> float:
+    """quantstats 0.0.81 ``r_squared`` minus the price guess, on BOTH legs.
+
+    WHY INLINE: ``r_squared(r, b, prepare_returns=False)`` closes the strategy
+    leg only. The benchmark goes through ``_prepare_benchmark`` twice, and each
+    pass ends in ``_prepare_returns`` with the guess (research Q2). On the
+    benchmark trigger (an all-non-negative benchmark with a +150% day) live
+    quantstats returned 0.006670639650444322. The squared correlation of the
+    raw pair is 0.0037210240094842067.
+
+    MATH PARITY (0.0.81 body)::
+
+        returns = _prepare_returns(returns)
+        benchmark = _prepare_benchmark(benchmark, returns.index)
+        _, _, r_val, _, _ = linregress(returns, _prepare_benchmark(benchmark, returns.index))
+        return r_val ** 2
+
+    166.4 D-A and D-06 (ratified by the founder 2026-09-27): the pair is
+    ``_benchmark_pair``'s, the ONE interval pair every benchmark-relative
+    metric reads, so r_squared is the squared correlation of the same pair the
+    persisted ``correlation`` is computed on. 0.0.81 instead rebuilt benchmark
+    prices, back-filled them onto the strategy's dates and zero-filled the
+    first return; on any pair whose calendars differ, and on every dense pair
+    through its zero-filled first return, r_squared therefore moves by
+    construction. On a same-calendar NaN-free pair (the golden) the pair is
+    the input as given and the value is bit-identical to 0.0.81.
+    ``linregress`` is the function quantstats imports. ``np.corrcoef`` is
+    algebraically equal but not bit-identical to the golden, so it is not used.
+
+    NaN CONVENTION (166.4 D-06): the strategy's +-inf is read as NaN (the part
+    of ``_prepared_returns_no_guess`` that is not a fill), once, inside
+    ``_benchmark_pair`` (review WR-02), and the regression runs over
+    pairwise-complete rows, the rows the persisted correlation uses.
+    A strategy NaN day is dropped, no longer zero-filled for r_squared only.
+
+    A pair whose legs label their days in different time zones is refused
+    (``_refuse_mismatched_day_labels``, reached first inside ``_benchmark_pair``,
+    review round 2 IN-03).
+    """
+    r, b = _benchmark_pair(returns, benchmark)
+    pair = pd.concat([r, b], axis=1).dropna()
+    _, _, r_val, _, _ = linregress(pair.iloc[:, 0], pair.iloc[:, 1])
+    return float(r_val**2)
+
+
+def _r_squared_pair_varies(returns: pd.Series, benchmark: pd.Series) -> bool:
+    """True when the pair ``_r_squared`` regresses DEFINES an R^2: >= 3 rows and real dispersion on both legs.
+
+    Built with the same pairing ``_r_squared`` uses (``_benchmark_pair``, then
+    pairwise-complete rows, 166.4 D-A), so it describes the exact pair
+    ``linregress`` sees. ``compute_qstats_scalars`` asks it FIRST
+    (review round 2, WR-02): a pair it rejects persists ``r_squared = None``,
+    status ``error``, with no log, and only a pair it accepts is regressed. A
+    non-finite R^2 on an accepted pair is a broken mirror and is logged (SFH
+    INFO-2).
+
+    Each conjunct is necessary:
+
+    - ``len(p) >= 3``: with two rows the fitted line passes through both
+      points, so ``linregress`` returns ``r = +-1`` whatever the data (zero
+      residual degrees of freedom). That R^2 of 1.0 measures nothing, so it is
+      undefined (D-09), not a perfect fit.
+    - real dispersion on each leg (``_dispersion_is_real``): a leg that never
+      moves has no variance to explain, or none to explain it with. scipy's
+      ``linregress`` tests only ``ssxm == 0.0``, so a constant NON-ZERO
+      benchmark, whose variance is float residue, came back as a residue
+      correlation (about 1e-34) with status ``ok`` (WR-02, measured at n = 120,
+      250 and 1000). ``_dispersion_is_real`` is False on a NaN ``sd``, so a
+      one-row pair reads "does not vary" and never "varies" (SFH R2-LOW-2).
+    """
+    r, b = _benchmark_pair(returns, benchmark)
+    pair = pd.concat([r, b], axis=1).dropna()
+    p, b = pair.iloc[:, 0], pair.iloc[:, 1]
+    return bool(
+        len(p) >= 3
+        and len(b) == len(p)
+        and _dispersion_is_real(p.std(), p.mean())
+        and _dispersion_is_real(b.std(), b.mean())
+    )
+
+
+def _greeks_no_guess(
+    aligned_returns: pd.Series, aligned_benchmark: pd.Series, periods: int
+) -> tuple[float | None, float | None]:
+    """(alpha, beta): quantstats 0.0.81 ``greeks`` minus the price guess, over pairwise-complete rows (D-05, D-15).
+
+    WHY INLINE: ``greeks(r, b, prepare_returns=False)`` closes the strategy leg
+    only. It runs the benchmark through ``_prepare_benchmark`` ->
+    ``_prepare_returns`` unconditionally, so an all-non-negative benchmark with
+    a >100% day is re-read as prices (research Q2). On the benchmark trigger
+    live quantstats returned beta -0.015400848308443902; the OLS slope of the
+    raw pair is 0.007651507459018336.
+
+    MATH PARITY (0.0.81 body; production passed ``prepare_returns=False``)::
+
+        benchmark = _prepare_benchmark(benchmark, returns.index)
+        matrix = np.cov(returns, benchmark)
+        beta = nan if matrix[1, 1] == 0 else matrix[0, 1] / matrix[1, 1]
+        alpha = returns.mean() - beta * benchmark.mean()
+        alpha = alpha * periods
+        return Series({"beta": beta, "alpha": alpha}).fillna(0)
+
+    The benchmark leg is ``_align_benchmark_like_qs``. The expression order is
+    kept, so NaN-free input is bit-identical to live 0.0.81.
+
+    D-15 DISCLOSURE (F-3): the trailing ``.fillna(0)`` is NOT reproduced. Since
+    Phase 159 the strategy leg arrives raw, so a single NaN day made ``np.cov``
+    NaN and the fillna persisted a confident ``alpha = 0.0, beta = 0.0``,
+    rendered as 0.000 in the Benchmark greeks table, with treynor silently
+    dropped. Here both legs are restricted to the rows where both are present
+    (the convention the sibling ``aligned_returns.corr(aligned_benchmark)``
+    already uses), and beta is undefined -> ``(None, None)`` when fewer than 2
+    complete rows remain or the benchmark variance is 0 (D-09: undefined is
+    None, never 0.0). On NaN-free input the restriction removes nothing.
+
+    F-1, RECORDED AND NOT CHANGED (D-08): alpha is an arithmetic return
+    annualized on the FREQUENCY clock (``periods``), not the calendar clock.
+    ``test_periods_param_rescales_365`` pins that it rescales exactly x365/252.
+
+    Both legs are tz-normalised (the strategy here, the benchmark inside
+    ``_align_benchmark_like_qs``), so the pairwise join lines them up by date.
+    0.0.81 needs no such step because ``np.cov`` pairs its inputs by position.
+    A pair whose legs label their days in different zones is refused
+    (``_refuse_mismatched_day_labels``, review round 2 IN-03).
+
+    RESIDUE ON EITHER LEG (review round 2, CR-01). A benchmark with no real
+    dispersion defines no beta: ``(None, None)``. A STRATEGY with no real
+    dispersion has a covariance of exactly 0 with any benchmark, so its beta is
+    the true ``0.0`` and alpha is its annualized mean. Without that snap the
+    residue covariance gave a beta of about 4e-16, which passed treynor's
+    ``beta != 0`` guard and persisted a treynor of about 1e15 (measured on a
+    compounding 1e-3 daily yield).
+    """
+    _refuse_mismatched_day_labels(aligned_returns, aligned_benchmark)
+    r = _tz_naive_like_qs(aligned_returns)
+    b = _align_benchmark_like_qs(aligned_benchmark, r.index)
+    pair = pd.concat([r, b], axis=1, join="inner").dropna()
+    if len(pair) < 2:
+        return None, None
+    r, b = pair.iloc[:, 0], pair.iloc[:, 1]
+    matrix = np.cov(r, b)
+    # 0.0.81 tests `matrix[1, 1] == 0`. A constant benchmark's variance is often
+    # float residue instead (1.9e-37 for 120 days of 0.001, measured), and the
+    # slope over it was a fabricated beta (-1.92 on a 250-day constant pair).
+    # Same class as SFH HIGH-1, same guard: no dispersion -> beta undefined.
+    if _dispersion_is_residue(math.sqrt(matrix[1, 1]), b.mean()):
+        return None, None
+    if _dispersion_is_residue(math.sqrt(matrix[0, 0]), r.mean()):
+        return float(r.mean() * periods), 0.0
+    beta = matrix[0, 1] / matrix[1, 1]
+    alpha = r.mean() - beta * b.mean()
+    alpha = alpha * periods
+    return float(alpha), float(beta)
+
+
+# H-0710 / H-0713 / H-0723 dispatch table: (result_key, callable). Each callable
+# takes the raw returns series and returns a raw float; `compute_qstats_scalars`
+# runs each one through `_safe_qstats_scalar` (failure-soft, WARNING naming the
+# key). Phase 166 replaced the old (result_key, qs.stats attribute name) shape,
+# so there is no longer a `getattr` dispatch over the quantstats namespace.
+#
+# Every entry is a Phase 166 module mirror (0.0.81 minus the price guess). No
+# entry references a quantstats function object. The only quantstats calls left
+# inside the mirrors are leaves research Q2 proved honour `prepare_returns=False`
+# (avg_win, avg_loss, win_rate, profit_factor, tail_ratio, value_at_risk), each
+# called with that keyword on an already-prepared series.
+#
+# Typing the key as the literal union of QstatsScalarsResult's float|None fields
+# lets the `result[result_key] = ...` loop write into the TypedDict (which
+# requires literal keys) AND fails type-check if a dispatch-table key is ever
+# typo'd or drifts from the result shape — no cast, no ignore.
+_QSTATS_SINGLE_ARG_SCALARS: tuple[
+    tuple[_QstatsScalarKey, Callable[[pd.Series], float]], ...
+] = (
+    ("recovery_factor", _recovery_factor),
+    ("ulcer_index", _ulcer_index),
+    ("upi", _ulcer_performance_index),
+    ("kelly_criterion", _kelly_criterion),
+    ("probabilistic_sharpe_ratio", _probabilistic_sharpe_ratio),
+    ("common_sense_ratio", _common_sense_ratio),
+    ("cpc_index", _cpc_index),
+    ("serenity_index", _serenity_index),
+)
 
 
 def compute_all_metrics(
@@ -697,20 +1872,118 @@ def compute_all_metrics(
             insufficient_window = True
         else:
             insufficient_window = _elapsed_days < MIN_ANNUALIZATION_DAYS
-        max_dd = _safe_float(qs.stats.max_drawdown(returns))
-        # Drawdown series — chart continuity per F3 (same fillna(0) rationale).
-        dd_series = qs.stats.to_drawdown_series(returns_for_chart)
+        # RANK-05 (Phase 159) — WHY INLINE, NOT quantstats: see the docstring of
+        # `_max_drawdown_from_wealth` (price guess, math parity, baseline pinned at
+        # 1.0). NaN CONVENTION at this site: fillna(0), UNCHANGED and deliberate. A
+        # gap day must carry the equity curve FORWARD — a cumulative product cannot
+        # skip a NaN without truncating every later point — which is the same
+        # rationale `returns_for_chart` documents at F3 above. This is exactly what
+        # `_prepare_prices` did, so no fixture can move on this account.
+        _wealth = (1.0 + returns.fillna(0)).cumprod()
+        max_dd = _safe_float(_max_drawdown_from_wealth(_wealth))
+        # Drawdown series — chart continuity per F3 (same fillna(0) rationale);
+        # `returns_for_chart` is already NaN-free and floored above -100%. See
+        # `_drawdown_series_from_wealth`. Reuses the `cumulative` wealth curve bound
+        # above (same operand, same block); the two wealth curves are NOT unified.
+        dd_series = _drawdown_series_from_wealth(cumulative)
 
     # Headline annualized RISK on the day-basis series (Fix A): `stat_returns` IS
     # `returns` on the calendar basis (byte-identical), or the nonzero-day series on
     # the active basis. `periods_per_year` sets the annualization clock (crypto 365).
-    volatility = _safe_float(qs.stats.volatility(stat_returns, periods=periods_per_year))
-    sharpe = _safe_float(qs.stats.sharpe(stat_returns, periods=periods_per_year))
-    # Audit 2026-05-07 H-0725: pass `rf=MAR` explicitly so the scalar sortino
+    # RANK-05 (Phase 159) — KWARG ARM, the first of the sites closed this way.
+    # `volatility` DOES carry `prepare_returns=` in the pinned quantstats 0.0.81
+    # (in-env `inspect.signature` sweep, 2026-08-21), and passing False was
+    # MEASURED to fully neutralize the price guess here — not merely assumed from
+    # the signature. Passing it removes three `_prepare_returns` behaviours:
+    #   (1) the price-detection guess — the entire point (see the block below);
+    #   (2) `fillna(0)` — a NaN gap day is no longer counted as a real 0.00%
+    #       return. This is the SAME skipna convention the headline sharpe/sortino
+    #       math below adopts, so the two stay coherent; NaN-free series (every
+    #       golden/parity fixture) are byte-unaffected;
+    #   (3) the inf->NaN->0 fill — a non-finite input now degrades to None through
+    #       `_safe_float` instead of being silently zero-substituted into a
+    #       finite-looking number. Fail-soft beats fabricated (Rule 12).
+    # Every kwarg site below shares this rationale and cites it rather than
+    # repeating it. Each is pinned by a live-quantstats benign-parity test.
+    # Review round 2 (IN-02): a series with no real dispersion reports the true
+    # 0.0, the same answer `_annualized_vol_sharpe` and the backbone give, not
+    # the float residue `std()` leaves (3.4e-18 persisted for a constant 0.001).
+    volatility = (
+        0.0
+        if _dispersion_is_residue(float(stat_returns.std()), float(stat_returns.mean()))
+        else _safe_float(qs.stats.volatility(stat_returns, periods=periods_per_year, prepare_returns=False))
+    )
+    # RANK-05 (Phase 159) — WHY INLINE, NOT quantstats. The pinned quantstats
+    # 0.0.81 routes every stat through `_utils._prepare_returns`, which carries a
+    # PRICE-detection heuristic the platform never asked for:
+    #
+    #     elif data.min() >= 0 and data.max() > 1:
+    #         data = data.pct_change(fill_method=None)
+    #
+    # An all-non-negative daily-RETURNS series whose max > 1 — a young
+    # ALL-WINNING account with one >100% day — is assumed to be a PRICE path and
+    # silently differenced, which FLIPS the sign of Sharpe and Sortino. Measured
+    # on a 60-day all-winning fixture (opening +150% day, decaying positive
+    # gains): pre-fix sharpe = -4.3469, sortino = -4.2254 for a series that never
+    # lost a day. These two scalars are RANKED, publicly-served KPIs, so that is a
+    # money-math lie reaching anonymous readers.
+    #
+    # `sharpe` and `sortino` carry NO `prepare_returns=` kwarg in 0.0.81 (verified
+    # by an in-env `inspect.signature` sweep, 2026-08-21), so the kwarg closure
+    # used at the sites below CANNOT reach them. The only closure is inline pandas
+    # — the same mechanism that already closed this class on the portfolio /
+    # verify_strategy path in `sharpe_vol_status_from_backbone` (see its "WHY
+    # INLINE" docblock below).
+    #
+    # MATH PARITY — reproduces quantstats 0.0.81 exactly, MINUS the price guess
+    # (quantstats/stats.py, `sharpe` and `sortino`):
+    #     sharpe:  divisor = returns.std(ddof=1)
+    #              res = returns.mean() / divisor; return res * sqrt(periods)
+    #     sortino: downside = sqrt((r[r < 0] ** 2).sum() / len(r))
+    #              res = returns.mean() / downside; return res * sqrt(periods)
+    # Both after `_prepare_returns(returns, rf, periods)`, whose only OTHER
+    # effects are the inf->NaN->0 fill (see the NaN note) and, when rf > 0, the
+    # de-annualized excess-return subtraction reproduced verbatim below. The
+    # Sharpe expression is written in the P114 form (annualized mean over
+    # annualized vol); it is algebraically identical to quantstats' mean/std*sqrt
+    # and is pinned against LIVE quantstats on benign series by
+    # `test_rank05_benign_*` in tests/test_metrics.py.
+    #
+    # NaN CONVENTION (deliberate, recorded): pandas' default skipna — an interior
+    # NaN day is DROPPED from the statistic, exactly as the P114 path does.
+    # `_prepare_returns` instead did `fillna(0)`, counting a gap day as a real
+    # 0.00% return (diluting mean and std, and inflating Sortino's denominator N).
+    # "No observation" is not "a flat day"; skipna is the honest reading and keeps
+    # this site coherent with the already-closed path. NaN-free series — every
+    # golden/parity fixture — are unaffected.
+    # See `_annualized_vol_sharpe` (pandas default ddof=1 == quantstats' std(ddof=1)).
+    sharpe = _safe_float(_annualized_vol_sharpe(stat_returns, periods_per_year)[1])
+    # Audit 2026-05-07 H-0725: MAR is threaded EXPLICITLY so the scalar sortino
     # and `_rolling_sortino` share the SAME minimum acceptable return constant.
-    # Relying on qs.stats.sortino's implicit `rf=0` default silently diverges
-    # the moment MAR is ever tuned away from 0.
-    sortino = _safe_float(qs.stats.sortino(stat_returns, rf=MAR, periods=periods_per_year))
+    # quantstats applied it as `_prepare_returns(returns, rf=MAR, nperiods=periods)`,
+    # which (only when rf > 0) de-annualizes rf via `(1+rf)**(1/nperiods) - 1` and
+    # subtracts it (`_utils.to_excess_returns`). That subtraction is reproduced
+    # verbatim here and is an EXACT no-op at the current MAR = 0.0 (x - 0.0 == x),
+    # so today's values are byte-identical while a future MAR tune still flows
+    # through automatically. Pinned by
+    # `test_scalar_sortino_threads_mar_as_the_downside_floor`.
+    _mar_per_period = (1.0 + MAR) ** (1.0 / periods_per_year) - 1.0
+    _sortino_excess = stat_returns - _mar_per_period
+    # quantstats divides by `len(returns)` on its fillna(0) series; under the
+    # skipna convention above the honest denominator is the count of REAL
+    # observations (identical on every NaN-free series). See `_downside_rms`.
+    _downside = _downside_rms(_sortino_excess)
+    # downside == 0 (no day below MAR) leaves Sortino mathematically UNDEFINED;
+    # quantstats returns NaN there, which `_safe_float` maps to None. Same result,
+    # reached explicitly instead of via a divide-by-zero warning.
+    sortino = (
+        _safe_float(
+            (_sortino_excess.mean() * periods_per_year)
+            / (_downside * math.sqrt(periods_per_year))
+        )
+        if _downside > 0.0
+        else None
+    )
     # TWR-05: calmar = CAGR / |max_drawdown|, computed DIRECTLY so it shares the
     # CAGR basis above (geometric calendar-CAGR, or the simple arithmetic annualized).
     # quantstats' calmar helper is NO LONGER called: it recomputes its own CAGR leg
@@ -821,19 +2094,51 @@ def compute_all_metrics(
     # var_1d_95 was missing from every factsheet; the sweep WARNINGs then
     # made the permanent failure a Railway noise floor that erodes the
     # signal value of the new fail-loud emissions.
+    # RANK-05 kwarg arm — see the `volatility` site for the shared rationale.
+    # Kept on ONE source line so the region gate can see the kwarg.
+    _var_95: float | None = None
+    _var_95_exc: Exception | None = None
     try:
-        metrics_json["var_1d_95"] = _safe_float(
-            qs.stats.value_at_risk(returns, confidence=0.95)
-        )
+        _var_95 = _safe_float(qs.stats.value_at_risk(returns, confidence=0.95, prepare_returns=False))
+        metrics_json["var_1d_95"] = _var_95
     except Exception as exc:  # noqa: BLE001
+        _var_95_exc = exc
         logger.warning(
             "qstats scalar var_1d_95 failed (returns_len=%s, nonnan_len=%s): %s",
             returns_len_for_log, returns_nonnan_len_for_log, exc,
             exc_info=_should_emit_traceback("var_1d_95", exc),
         )
+    # RANK-05 — MEASURED DIVERGENCE from the research matrix, recorded here
+    # because the signature lies. `cvar` DOES advertise `prepare_returns=`, but
+    # 0.0.81's `conditional_value_at_risk` does NOT forward it to the VaR
+    # threshold it computes internally:
+    #
+    #     var = value_at_risk(returns, sigma, confidence)   # <- kwarg dropped
+    #     c_var = returns[returns < var].values.mean()
+    #
+    # So `cvar(r, prepare_returns=False)` derives the threshold from the
+    # PRICE-GUESSED series while selecting the tail from the raw one — a mixed
+    # basis that is worse than either. Measured on the 60-day all-winning fixture:
+    # `cvar(r, prepare_returns=False)` returned -0.24153, exactly the guessed-VaR
+    # value, versus the honest -0.28406. The kwarg is therefore NOT a closure for
+    # this site; the two-line wrapper is inlined instead, keeping the underlying
+    # `value_at_risk` primitive (which DOES honour the kwarg) as the threshold
+    # source. quantstats' Series branch falls back to the VaR value when no
+    # observation lies below the threshold; reproduced verbatim, minus the
+    # empty-slice RuntimeWarning its `.values.mean()` emits.
     # fail-soft: optional scalar.
     try:
-        metrics_json["cvar"] = _safe_float(qs.stats.cvar(returns))
+        # Threshold reuses the SINGLE VaR evaluation above — "same threshold
+        # source" is now true by construction, not by two calls agreeing. A VaR
+        # failure is re-raised here so cvar keeps its OWN fail-loud warning
+        # (fail-soft for the result, loud for the operator — same as before).
+        if _var_95_exc is not None:
+            raise _var_95_exc
+        _cvar_threshold = _var_95
+        if _cvar_threshold is None:
+            metrics_json["cvar"] = None
+        else:
+            metrics_json["cvar"] = _safe_float(_cvar_of_tail(returns, _cvar_threshold))
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "qstats scalar cvar failed (returns_len=%s, nonnan_len=%s): %s",
@@ -879,27 +2184,57 @@ def compute_all_metrics(
     # the noise floor; if/when gini is needed it should be re-introduced
     # as either (a) a manual numpy/pandas implementation, or (b) after a
     # quantstats version bump that re-exposes the attribute.
+    # RANK-05 inline arm — `omega` carries no `prepare_returns=` kwarg in 0.0.81,
+    # so it is mirrored inline. quantstats 0.0.81 `omega`, with this call site's
+    # arguments (rf=0.0, required_return=0.0, periods=252):
+    #     return_threshold = (1 + 0.0) ** (1 / 252) - 1   # == 0.0 exactly
+    #     numer = returns_less_thresh[returns_less_thresh > 0].sum()
+    #     denom = -1.0 * returns_less_thresh[returns_less_thresh < 0].sum()
+    #     return numer / denom if denom > 0 else NaN
+    # With a zero threshold the deviation series IS the return series, so this
+    # reduces to total gains over total losses. NaN convention: IDENTICAL either
+    # way — `fillna(0)` maps a gap day to 0.0, which satisfies neither `> 0` nor
+    # `< 0`, exactly as a skipped NaN does. No fixture can move here.
     # fail-soft: optional scalar.
     try:
-        metrics_json["omega"] = _safe_float(qs.stats.omega(returns))
+        _omega_gain = float(returns[returns > 0.0].sum())
+        _omega_pain = -float(returns[returns < 0.0].sum())
+        metrics_json["omega"] = (
+            _safe_float(_omega_gain / _omega_pain) if _omega_pain > 0.0 else None
+        )
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "qstats scalar omega failed (returns_len=%s, nonnan_len=%s): %s",
             returns_len_for_log, returns_nonnan_len_for_log, exc,
             exc_info=_should_emit_traceback("omega", exc),
         )
+    # RANK-05 inline arm — `gain_to_pain_ratio` carries no `prepare_returns=`
+    # kwarg in 0.0.81. Mirrored from its source (rf=0, resolution="D"):
+    #     returns = _prepare_returns(returns, rf).resample("D").sum()
+    #     downside = abs(returns[returns < 0].sum())
+    #     return returns.sum() / downside   (NaN when downside == 0)
+    # The daily resample is reproduced because it is load-bearing for an index
+    # with more than one row per calendar day; on a one-row-per-day index it only
+    # inserts 0.0 rows for absent calendar days, which change neither sum. NaN
+    # convention: IDENTICAL either way — `resample().sum()` skips NaN, and
+    # quantstats' `fillna(0)` contributes 0.0 to the same sums.
     # fail-soft: optional scalar.
     try:
-        metrics_json["gain_pain"] = _safe_float(qs.stats.gain_to_pain_ratio(returns))
+        _gp = returns.resample("D").sum()
+        _gp_pain = abs(float(_gp[_gp < 0.0].sum()))
+        metrics_json["gain_pain"] = (
+            _safe_float(float(_gp.sum()) / _gp_pain) if _gp_pain > 0.0 else None
+        )
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "qstats scalar gain_pain failed (returns_len=%s, nonnan_len=%s): %s",
             returns_len_for_log, returns_nonnan_len_for_log, exc,
             exc_info=_should_emit_traceback("gain_pain", exc),
         )
+    # RANK-05 kwarg arm — see the `volatility` site for the shared rationale.
     # fail-soft: optional scalar.
     try:
-        metrics_json["tail_ratio"] = _safe_float(qs.stats.tail_ratio(returns))
+        metrics_json["tail_ratio"] = _safe_float(qs.stats.tail_ratio(returns, prepare_returns=False))
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "qstats scalar tail_ratio failed (returns_len=%s, nonnan_len=%s): %s",
@@ -930,18 +2265,78 @@ def compute_all_metrics(
             returns_len_for_log, returns_nonnan_len_for_log, exc,
             exc_info=_should_emit_traceback("kurtosis", exc),
         )
+    # RANK-05 inline arm — `smart_sharpe` / `smart_sortino` are thin wrappers over
+    # `sharpe` / `sortino` with `smart=True`, and inherit their total lack of a
+    # `prepare_returns=` kwarg in 0.0.81. Mirrored from source:
+    #     autocorr_penalty(r): num = len(r)
+    #         coef = abs(corrcoef(r[:-1], r[1:])[0, 1])
+    #         x = arange(1, num); corr = ((num - x) / num) * (coef ** x)
+    #         return sqrt(1 + 2 * corr.sum())
+    #     smart_sharpe  = mean / (std(ddof=1) * penalty)      * sqrt(periods)
+    #     smart_sortino = mean / (downsideRMS  * penalty)     * sqrt(periods)
+    # PRESERVED EXACTLY (pre-existing, deliberately NOT touched here): both call
+    # sites use quantstats' DEFAULT `periods=252` rather than `periods_per_year`,
+    # and `smart_sortino` uses rf=0 rather than MAR. Changing either would be an
+    # unrelated behaviour change riding a security fix — recorded as a finding
+    # instead.
+    # NaN convention: the autocorrelation penalty needs a dense array (`corrcoef`
+    # propagates NaN), so the penalty and the moments are taken on `dropna()` —
+    # the skipna reading used by the headline sharpe/sortino, in place of
+    # quantstats' `fillna(0)`. Identical on every NaN-free series.
+    # The shared legs are bound BEFORE either try so a failure inside the
+    # smart_sharpe block cannot cascade into smart_sortino as a NameError — the
+    # two scalars degrade independently, which is what the failure-soft contract
+    # promises. A NaN penalty propagates to a non-positive divisor and therefore
+    # to a present-but-None key, exactly as quantstats' NaN did.
+    _smart_r = returns.dropna()
+    _smart_n = len(_smart_r)
+    _smart_penalty = float("nan")
     # fail-soft: optional scalar.
     try:
-        metrics_json["smart_sharpe"] = _safe_float(qs.stats.smart_sharpe(returns))
+        if _smart_n >= 2:
+            _smart_arr = _smart_r.to_numpy()
+            _smart_coef = abs(
+                float(np.corrcoef(_smart_arr[:-1], _smart_arr[1:])[0, 1])
+            )
+            _smart_x = np.arange(1, _smart_n)
+            _smart_penalty = float(
+                np.sqrt(
+                    1.0
+                    + 2.0
+                    * float((((_smart_n - _smart_x) / _smart_n) * (_smart_coef**_smart_x)).sum())
+                )
+            )
+        # Review round 2 (WR-01): the divisor is guarded by the residue floor,
+        # not only by `> 0.0`. A constant series' `std()` is float residue, and
+        # the quotient over it persisted smart_sharpe = 4.6e15 (250 days of a
+        # constant 0.001) while the headline sharpe was already None.
+        _smart_sd = float(_smart_r.std())
+        _smart_sharpe_divisor = _smart_sd * _smart_penalty
+        metrics_json["smart_sharpe"] = (
+            _safe_float((float(_smart_r.mean()) / _smart_sharpe_divisor) * math.sqrt(252))
+            if _smart_sharpe_divisor > 0.0
+            and _dispersion_is_real(_smart_sd, float(_smart_r.mean()))
+            else None
+        )
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "qstats scalar smart_sharpe failed (returns_len=%s, nonnan_len=%s): %s",
             returns_len_for_log, returns_nonnan_len_for_log, exc,
             exc_info=_should_emit_traceback("smart_sharpe", exc),
         )
+    # RANK-05 inline arm — see the `smart_sharpe` site above for the full source
+    # mirror. Reuses the SAME `_smart_r` / `_smart_penalty` so the pair stays on
+    # one convention. quantstats' downside leg is an RMS over len(returns), NOT a
+    # pandas std — `sqrt((r[r < 0] ** 2).sum() / len(r))` — mirrored verbatim,
+    # with the skipna count as the denominator per the note above.
     # fail-soft: optional scalar.
     try:
-        metrics_json["smart_sortino"] = _safe_float(qs.stats.smart_sortino(returns))
+        _smart_sortino_downside = _downside_rms(_smart_r) * _smart_penalty
+        metrics_json["smart_sortino"] = (
+            _safe_float((float(_smart_r.mean()) / _smart_sortino_downside) * math.sqrt(252))
+            if _smart_sortino_downside > 0.0
+            else None
+        )
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "qstats scalar smart_sortino failed (returns_len=%s, nonnan_len=%s): %s",
@@ -961,9 +2356,10 @@ def compute_all_metrics(
         avg_loss_abs = abs(float(losses.mean()))
         if avg_loss_abs > 0:
             metrics_json["payoff_ratio"] = _safe_float(wins.mean() / avg_loss_abs)
+    # RANK-05 kwarg arm — see the `volatility` site for the shared rationale.
     # fail-soft: optional scalar.
     try:
-        metrics_json["profit_factor"] = _safe_float(qs.stats.profit_factor(returns))
+        metrics_json["profit_factor"] = _safe_float(qs.stats.profit_factor(returns, prepare_returns=False))
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "qstats scalar profit_factor failed (returns_len=%s, nonnan_len=%s): %s",
@@ -1002,6 +2398,16 @@ def compute_all_metrics(
     # (e.g. -12.5 means -12.5%) and start/valley/end are date strings (dtype=object).
     # Ongoing drawdowns are encoded as `end == last date` with dd_series.iloc[-1] < 0
     # (quantstats does NOT use NaN for ongoing episodes).
+    #
+    # RANK-05 — the ONE quantstats call in this function deliberately left without
+    # `prepare_returns=False`, because it is provably outside the defect class:
+    # `drawdown_details` takes the ALREADY-COMPUTED underwater curve, not a return
+    # or price series, and neither it nor the `remove_outliers` helper it calls
+    # touches `_prepare_returns` or `_prepare_prices` in 0.0.81. That is not a
+    # claim on trust — `test_rank05_drawdown_details_is_heuristic_free` scans the
+    # installed source and goes RED if a future quantstats ever routes it through
+    # either preparer. The region gate for this function excludes this call BY
+    # NAME for the same reason.
     try:
         details = qs.stats.drawdown_details(dd_series)
         if details is not None and len(details) > 0:
@@ -1061,7 +2467,11 @@ def compute_all_metrics(
     try:
         mean_ret = float(returns.mean())
         std_ret = float(returns.std())
-        if std_ret > 0:
+        # Review round 2 (CR-01 class): a residue std is no dispersion, so no
+        # day is an outlier of it. The exact `> 0` test let a compounding
+        # constant yield report an outlier_loss_ratio of 0.0027 (one residue
+        # day below mean - 2 * 1e-16).
+        if _dispersion_is_real(std_ret, mean_ret):
             outlier_threshold = 2 * std_ret
             metrics_json["outlier_win_ratio"] = _safe_float((returns > mean_ret + outlier_threshold).mean())
             metrics_json["outlier_loss_ratio"] = _safe_float((returns < mean_ret - outlier_threshold).mean())
@@ -1072,42 +2482,63 @@ def compute_all_metrics(
             exc_info=_should_emit_traceback("outlier_ratios", exc),
         )
 
-    # Benchmark metrics (single greeks() call for alpha + beta)
+    # Benchmark metrics (alpha + beta from ONE `_greeks_no_guess` call)
     if benchmark_returns is not None and len(benchmark_returns) > 0:
         try:
-            # M1 (red-team 2026-05-27): align ONCE on the inner-join
-            # intersection and feed the SAME (returns, benchmark) pair into
-            # EVERY benchmark-relative metric (alpha/beta via greeks,
-            # correlation, info_ratio, treynor) so they are mutually
-            # consistent — all computed over the exact same dates.
+            # 166.4 D-A (founder, 2026-09-27): build the ONE interval-matched
+            # pair (`_benchmark_pair`) and feed it to EVERY benchmark-relative
+            # metric here (alpha/beta, correlation, info_ratio, treynor,
+            # btc_rolling_correlation_90d), so they are mutually consistent
+            # over the exact same intervals. Each strategy return dated t_k is
+            # paired with the benchmark return over (t_{k-1}, t_k], and only
+            # when the benchmark has a close at both endpoints; nothing is
+            # filled across a gap.
             #
-            # Previously alpha/beta came from `qs.stats.greeks(returns,
-            # benchmark_returns)`, which internally calls quantstats'
-            # `_prepare_benchmark(benchmark, returns.index)` — reindexing the
-            # benchmark onto the strategy's FULL date range with bfill. The
-            # other metrics used `returns.align(benchmark, join="inner")` (the
-            # intersection only). On a calendar mismatch (24/7 crypto strategy
-            # vs a benchmark with weekend/holiday gaps) alpha/beta were over
-            # the gap-filled full range while correlation/info_ratio were over
-            # the shorter intersection — internally inconsistent, and IR's
-            # tracking error was on a silently-truncated sample. Feeding the
-            # single inner-join pair to greeks() too removes that skew. When
-            # the calendars already match (e.g. the golden fixture) the
-            # intersection equals the full range, so the stored values are
-            # unchanged.
-            aligned = returns.align(benchmark_returns, join="inner")
-            aligned_returns, aligned_benchmark = aligned[0], aligned[1]
+            # SUPERSEDED: M1 (`d16b2fb4c`, red-team 2026-05-27) paired the two
+            # legs on their daily inner-join intersection. That kept every
+            # metric on one sample, which this pair keeps too, but it paired a
+            # weekday strategy's Monday return with BTC's Sunday-to-Monday
+            # daily move instead of the Friday-to-Monday move the strategy
+            # actually held, which flipped beta's sign on real data. On a dense
+            # daily strategy against contiguous BTC every interval is one day,
+            # so the pair equals the old intersection bit-for-bit.
+            #
+            # The pair is built INSIDE this `try`: its day-label refusal and
+            # its duplicate-date refusal degrade to the WARNING below instead
+            # of escaping `compute_all_metrics`.
+            aligned_returns, aligned_benchmark = _benchmark_pair(returns, benchmark_returns)
             if len(aligned_returns) > 1:
-                greeks = qs.stats.greeks(
-                    aligned_returns, aligned_benchmark, periods=periods_per_year
+                # Phase 166 (D-05, D-15): alpha/beta are the inline mirror
+                # `_greeks_no_guess`, on this same pair. It closes the
+                # benchmark leg that `greeks(..., prepare_returns=False)` left
+                # open (the RANK-05 residual), and it drops 0.0.81's trailing
+                # `.fillna(0)`: an undefined beta is None, never a fabricated
+                # 0.0. The treynor guard below already skips a None beta.
+                alpha, beta_val = _greeks_no_guess(aligned_returns, aligned_benchmark, periods_per_year)
+                metrics_json["alpha"] = _safe_float(alpha)
+                metrics_json["beta"] = _safe_float(beta_val)
+                # Review round 2 (CR-01 class): correlation divides by BOTH legs'
+                # std, over the rows where both are present (pandas' pairwise
+                # rule). A leg with no real dispersion defines no correlation
+                # (None, D-09). Unguarded, a compounding constant yield persisted
+                # a residue correlation (0.10 measured against a random benchmark).
+                _corr_pair = pd.concat([aligned_returns, aligned_benchmark], axis=1).dropna()
+                metrics_json["correlation"] = (
+                    _safe_float(aligned_returns.corr(aligned_benchmark))
+                    if all(
+                        _dispersion_is_real(
+                            float(_corr_pair.iloc[:, i].std()), float(_corr_pair.iloc[:, i].mean())
+                        )
+                        for i in (0, 1)
+                    )
+                    else None
                 )
-                metrics_json["alpha"] = _safe_float(greeks.get("alpha", 0))
-                metrics_json["beta"] = _safe_float(greeks.get("beta", 0))
-                metrics_json["correlation"] = _safe_float(aligned_returns.corr(aligned_benchmark))
                 excess = aligned_returns - aligned_benchmark
-                te = float(excess.std() * np.sqrt(periods_per_year))
+                # Tracking error and information ratio ARE annualized vol/Sharpe
+                # of the excess series — see `_annualized_vol_sharpe`.
+                te, _info_ratio = _annualized_vol_sharpe(excess, periods_per_year)
                 if te > 0:
-                    metrics_json["info_ratio"] = _safe_float(excess.mean() * periods_per_year / te)
+                    metrics_json["info_ratio"] = _safe_float(_info_ratio)
                 beta = metrics_json.get("beta", 0)
                 if beta and beta != 0 and cagr is not None:
                     metrics_json["treynor"] = _safe_float(cagr / beta)
@@ -1201,7 +2632,7 @@ def compute_all_metrics(
     # Heavy-series storage per D-02 — these go to strategy_analytics_series via
     # the atomic batch RPC (M-Grok-1) at the runner level, NOT into metrics_json.
     has_benchmark = benchmark_returns is not None and len(benchmark_returns) > 0
-    # H-0711: compute rolling alpha + beta from ONE rolling_greeks pass.
+    # H-0711: compute rolling alpha + beta from ONE _rolling_greeks pass.
     if has_benchmark:
         rolling_alpha_series, rolling_beta_series = _rolling_alpha_beta(
             returns, benchmark_returns, 90
@@ -1333,7 +2764,9 @@ def sharpe_vol_status_from_backbone(
       * NaN vol (``std`` is NaN: all-NaN or single non-NaN observation, since
         pandas skipna ``std`` needs >= 2 finite values) -> ``(None, None,
         "nan_vol")`` gracefully, WITHOUT raising (the legacy anti-500 baseline).
-      * ``vol == 0.0`` (flat returns) -> ``(0.0, None, "zero_volatility")``.
+      * ``vol == 0.0`` (flat returns, including a constant series whose
+        ``std()`` is float residue rather than exactly 0; see
+        ``_dispersion_is_residue``) -> ``(0.0, None, "zero_volatility")``.
       * else -> ``(vol, sharpe, "ok")``.
 
     Interior-NaN days (a guard-NaN flanked by valid returns, the shape
@@ -1357,13 +2790,15 @@ def sharpe_vol_status_from_backbone(
     # statistic exactly as the deleted helper did; an all-NaN or single-obs series
     # yields NaN std -> "nan_vol" gracefully (no raise, matching the legacy
     # anti-500 baseline).
-    vol = _safe_float(returns.std() * math.sqrt(periods_per_year))
-    mean_ret = returns.mean() * periods_per_year
+    # `_annualized_vol_sharpe` does not divide on a zero/NaN vol, so this path
+    # emits no divide RuntimeWarning (the status ladder below stays here).
+    _raw_vol, _raw_sharpe = _annualized_vol_sharpe(returns, periods_per_year)
+    vol = _safe_float(_raw_vol)
     if vol is None:
         return None, None, "nan_vol"
     if vol == 0.0:
         return 0.0, None, "zero_volatility"
-    sharpe = _safe_float(mean_ret / vol)
+    sharpe = _safe_float(_raw_sharpe)
     if sharpe is None:
         # UNREACHABLE under skipna once vol is finite/nonzero (>= 2 non-NaN obs
         # force a finite mean/vol); folded into nan_vol as a defensive backstop.
@@ -1529,6 +2964,15 @@ def compute_qstats_scalars(
         common_sense_ratio, cpc_index, serenity_index, r_squared (vs benchmark),
         time_in_market (fraction in [0, 1], not ceil-rounded percent),
         r_squared_status (companion: 'no_benchmark' | 'ok' | 'error').
+
+    Phase 166: the eight single-arg scalars come from
+    ``_QSTATS_SINGLE_ARG_SCALARS`` (key -> callable). ``recovery_factor``,
+    ``ulcer_index``, ``upi`` and ``serenity_index`` are inline mirrors of
+    quantstats 0.0.81 minus its price guess (``_recovery_factor``,
+    ``_ulcer_index``, ``_ulcer_performance_index``, ``_serenity_index``), and so
+    are ``kelly_criterion``, ``probabilistic_sharpe_ratio``,
+    ``common_sense_ratio`` and ``cpc_index`` (``_kelly_criterion``,
+    ``_probabilistic_sharpe_ratio``, ``_common_sense_ratio``, ``_cpc_index``).
     """
     result: QstatsScalarsResult = {
         "recovery_factor": None,
@@ -1545,9 +2989,23 @@ def compute_qstats_scalars(
     }
     returns_len = len(returns) if returns is not None else None
 
-    for result_key, qs_attr in _QSTATS_SINGLE_ARG_SCALARS:
+    defined_keys: frozenset[str]
+    try:
+        defined_keys = _mirror_keys_defined_by(returns)
+    except Exception as exc:  # noqa: BLE001
+        # SFH R2-LOW-1: a failing predicate switches the broken-mirror signal
+        # off for every key, so it is logged by name. The mirrors below still
+        # log their own failures; this line is about the predicate itself.
+        logger.warning(
+            "qstats mirror predicate failed (returns_len=%s): %s; the broken-mirror "
+            "warning is off for this series",
+            returns_len, exc,
+            exc_info=_should_emit_traceback("mirror_predicate", exc),
+        )
+        defined_keys = frozenset()
+    for result_key, fn in _QSTATS_SINGLE_ARG_SCALARS:
         result[result_key] = _safe_qstats_scalar(
-            result_key, getattr(qs.stats, qs_attr), returns, returns_len
+            result_key, fn, returns, returns_len, result_key in defined_keys
         )
 
     # H-0718: distinguish 'no benchmark' (default), 'ok', and 'error' for r_squared.
@@ -1556,9 +3014,28 @@ def compute_qstats_scalars(
     # not promise 'ok' when r_squared is actually None.
     if benchmark is not None and len(benchmark) > 0:
         try:
-            r_squared_val = _safe_float(qs.stats.r_squared(returns, benchmark))
-            result["r_squared"] = r_squared_val
-            result["r_squared_status"] = "ok" if r_squared_val is not None else "error"
+            if not _r_squared_pair_varies(returns, benchmark):
+                # Review round 2 (WR-02): a pair that defines no R^2 (a leg with
+                # no real dispersion, or fewer than 3 rows) persists None with
+                # status `error` and no log: a legitimately undefined ratio
+                # (D-09). It is asked FIRST because scipy's `linregress` tests
+                # only an EXACT zero variance, so a constant non-zero benchmark
+                # came back as a residue R^2 of about 1e-34 with status `ok`.
+                result["r_squared_status"] = "error"
+            else:
+                r_squared_raw = _r_squared(returns, benchmark)
+                r_squared_val = _safe_float(r_squared_raw)
+                result["r_squared"] = r_squared_val
+                result["r_squared_status"] = "ok" if r_squared_val is not None else "error"
+                if r_squared_val is None:
+                    # SFH INFO-2: `error` used to be set here with no log line.
+                    # The pair defines R^2 (checked above), so no R^2 is a defect.
+                    logger.warning(
+                        "qstats scalar r_squared returned non-finite %r on a pair "
+                        "where both legs vary (returns_len=%s, benchmark_len=%s): "
+                        "r_squared_status=error, the mirror is suspect",
+                        r_squared_raw, returns_len, len(benchmark),
+                    )
         except Exception as exc:  # noqa: BLE001
             result["r_squared_status"] = "error"
             logger.warning(
@@ -1645,12 +3122,18 @@ def _rolling_sharpe(
     emits a RuntimeWarning and produces ±Inf, which _finalize_rolling scrubs
     to NaN — silently dropping the point. Using np.where avoids the warning
     and makes the intent explicit.
+
+    Review round 2 (CR-01 class): the window's std must clear the residue floor
+    (``_residue_floor``), not just be ``> 0``. A window of a compounding constant
+    yield has a residue std of about 1e-16, and the quotient over it rendered
+    rolling Sharpe values around 1.9e13. Such a window has no Sharpe, so it is
+    NaN and ``_finalize_rolling`` drops it, exactly like an exact-zero window.
     """
     if len(returns) < window:
         return []
     roll_mean = returns.rolling(window).mean()
     roll_std = returns.rolling(window).std()
-    ratio = np.where(roll_std > 0, roll_mean / roll_std, np.nan)
+    ratio = np.where(roll_std > _residue_floor(roll_mean), roll_mean / roll_std, np.nan)
     ratio_series = pd.Series(ratio, index=returns.index)
     return _finalize_rolling(ratio_series * np.sqrt(periods_per_year))
 
@@ -1792,70 +3275,140 @@ def _rolling_volatility(
     return _finalize_rolling(returns.rolling(window).std() * np.sqrt(periods_per_year))
 
 
+def _rolling_greeks(
+    returns: pd.Series, benchmark: pd.Series, window: int
+) -> pd.DataFrame:
+    """Rolling (alpha, beta): quantstats 0.0.81 ``rolling_greeks`` minus the price guess on BOTH legs, with a windowed alpha (D-06, D-17).
+
+    WHY INLINE: 0.0.81 ``rolling_greeks`` runs the benchmark through
+    ``_prepare_benchmark`` -> ``_prepare_returns`` unconditionally, whatever
+    ``prepare_returns=`` says, so no keyword closes the benchmark leg (research
+    Q2). The strategy leg took no keyword at the old call site at all. On the
+    benchmark trigger (an all-non-negative benchmark with a +150% day) live
+    quantstats' last rolling beta was -0.08887237598396791; the rolling
+    cov/var of the raw pair over the same 90 rows is -0.7554623350323423.
+
+    MATH PARITY (0.0.81 body, ``periods`` is the rolling window)::
+
+        returns = _prepare_returns(returns)
+        df = DataFrame({"returns": returns,
+                        "benchmark": _prepare_benchmark(benchmark, returns.index)})
+        df = df.fillna(0)
+        corr = df.rolling(periods).corr().unstack()["returns"]["benchmark"]
+        std = df.rolling(periods).std()
+        beta = corr * std["returns"] / std["benchmark"].replace(0, nan)
+        alpha = df["returns"].mean() - beta * df["benchmark"].mean()
+        return DataFrame(index=returns.index, data={"beta": beta, "alpha": alpha})
+
+    ``_prepare_returns`` becomes ``_prepared_returns_no_guess`` plus its tz
+    step (``_tz_naive_like_qs``), and ``_prepare_benchmark`` becomes
+    ``_align_benchmark_like_qs``. Beta keeps 0.0.81's expression order, so a
+    benign pair's rolling beta is bit-identical to live quantstats.
+
+    NaN CONVENTION, A DELIBERATE DIVERGENCE FROM D-15 (SFH LOW-2, recorded
+    2026-09-24): the joined frame keeps 0.0.81's ``df.fillna(0)``, so a gap day
+    enters every window that covers it as a 0.0 return on the missing leg. The
+    SCALAR greeks (``_greeks_no_guess``) drop that day instead
+    (pairwise-complete, D-15). The two series on one page therefore read gap
+    days differently. The rolling convention is kept for D-08 parity: changing
+    it would move every NaN-bearing rolling beta, which this phase does not
+    disclose. Recorded in 166-CONTEXT.md; the behaviour is unchanged.
+
+    D-17 (founder-approved 2026-09-24, disclosed under D-10): ALPHA IS THE
+    WINDOWED INTERCEPT ``mean_w(r) - beta_t * mean_w(b)`` over the same window
+    as beta. 0.0.81 used FULL-SAMPLE means (research F-4), which made the
+    rendered ``rolling_alpha`` a linear transform of rolling beta rather than a
+    rolling alpha. Rolling beta is unchanged.
+
+    NOTE (Phase 34): quantstats 0.0.81 ``rolling_greeks(returns, benchmark,
+    periods=252)`` uses ``periods`` as the ROLLING WINDOW length (its source
+    says "Calculate rolling alpha (not annualized for rolling version)"), so
+    there is no annualization factor to thread. Rolling alpha stays
+    UNANNUALIZED (a per-period intercept) and rolling beta is a unitless ratio;
+    ``periods_per_year`` deliberately does not apply here. Only the SCALAR
+    greeks alpha is annualized.
+
+    A pair whose legs label their days in different zones is refused
+    (``_refuse_mismatched_day_labels``, review round 2 IN-03).
+    """
+    _refuse_mismatched_day_labels(returns, benchmark)
+    prepared = _tz_naive_like_qs(_prepared_returns_no_guess(returns))
+    df = pd.DataFrame(
+        data={
+            "returns": prepared,
+            "benchmark": _align_benchmark_like_qs(benchmark, prepared.index),
+        }
+    ).fillna(0)
+    rolling = df.rolling(int(window))
+    corr = rolling.corr().unstack()["returns"]["benchmark"]
+    std = rolling.std()
+    means = rolling.mean()
+    # Review round 2 (CR-01 class): 0.0.81's `std["benchmark"].replace(0, nan)`
+    # catches only an EXACT zero. A window of a compounding constant benchmark
+    # has a residue std (~1e-16), and the beta over it rendered about 5e13. A
+    # benchmark window with no real dispersion defines no beta: NaN, dropped by
+    # `_finalize_rolling`. Wherever the std clears the floor this is the 0.0.81
+    # expression, so a benign pair stays bit-identical.
+    bench_std = std["benchmark"].where(std["benchmark"] > _residue_floor(means["benchmark"]))
+    beta = corr * std["returns"] / bench_std
+    alpha = means["returns"] - beta * means["benchmark"]
+    return pd.DataFrame(index=prepared.index, data={"beta": beta, "alpha": alpha})
+
+
 def _rolling_alpha_beta(
     returns: pd.Series, benchmark: pd.Series, window: int = 90
 ) -> tuple[list[SeriesPoint], list[SeriesPoint]]:
-    """Rolling (alpha, beta) projections from ONE `qs.stats.rolling_greeks` call.
+    """Rolling (alpha, beta) projections from ONE ``_rolling_greeks`` pass.
 
     Audit 2026-05-07 H-0711: previously `_rolling_alpha` and `_rolling_beta`
-    each independently called `qs.stats.rolling_greeks(returns, benchmark, window)`
+    each independently ran the rolling greeks (then `qs.stats.rolling_greeks`)
     — doubling the rolling OLS regression work on every analytics run. The
     expensive part is the regression; alpha and beta come out of the SAME pass
     on the same DataFrame. This helper computes greeks once and returns both
     projections.
 
-    Audit 2026-05-07 H-0726: scalar greeks computation upstream aligns returns
-    and benchmark via `returns.align(benchmark, join='inner')` before calling
-    qs; the rolling pair was passing raw un-aligned series, letting qs internally
-    NaN-pad or shift across mismatched trading calendars. We now (1) align the
-    two series before calling rolling_greeks, (2) validate that BOTH the
-    strategy AND the benchmark have at least `window` aligned observations
-    (the old guard only checked `len(returns) < window`, allowing a too-short
-    benchmark to slip through), and (3) log a WARNING when the qs DataFrame
-    is missing the expected alpha/beta columns instead of silently returning
-    empty lists — that path masked qs version drift.
+    Audit 2026-05-07 H-0726, as amended by 166.4 D-A: the rolling leg reads
+    the SAME pair as the scalar fan-out, ``_benchmark_pair`` (each strategy
+    return against the benchmark return over its own holding interval, paired
+    only when the benchmark has a close at both endpoints). Before 166.4 it
+    built a second, independent daily inner join of its own. We (1) pair the
+    two series before the rolling pass, (2) validate that the pair has at least
+    ``window`` PAIRED intervals (the 90-row window is 90 paired intervals,
+    about 126 calendar days for weekday data, the same count convention as
+    before), and (3) log a WARNING and return ``([], [])`` when the pairing or
+    the rolling pass fails, instead of propagating: ``compute_all_metrics``
+    calls this helper with no handler of its own, so a day-label or
+    duplicate-date refusal must degrade here.
+
+    Phase 166 (D-06): the rolling pass is the inline ``_rolling_greeks``, closed
+    on both legs. The old "missing alpha/beta columns" branch guarded a
+    quantstats column rename; the frame is now built here, so that branch could
+    no longer run and was removed together with its test.
     """
     if returns is None or benchmark is None:
         return [], []
-    aligned_returns, aligned_benchmark = returns.align(benchmark, join="inner")
-    aligned_n = len(aligned_returns)
-    if aligned_n < window:
-        return [], []
+    # Initialised BEFORE the `try`: when the pairing itself raises, the handler
+    # formats `aligned_n=None` instead of raising UnboundLocalError.
+    aligned_n: int | None = None
     try:
-        # NOTE (Phase 34): quantstats 0.0.81 `rolling_greeks(returns, benchmark,
-        # periods=252)` uses `periods` as the ROLLING WINDOW length (the source
-        # comments "Calculate rolling alpha (not annualized for rolling version)"
-        # — there is NO annualization factor here to thread). `window` (90) is
-        # passed as that window arg. So `periods_per_year` deliberately does NOT
-        # apply to the rolling alpha/beta path: rolling alpha is unannualized,
-        # rolling beta is a unitless ratio. This corrects the RESEARCH claim that
-        # rolling_greeks annualizes alpha (that is only true for the SCALAR
-        # `greeks()` at site #5).
-        greeks = qs.stats.rolling_greeks(aligned_returns, aligned_benchmark, window)
+        aligned_returns, aligned_benchmark = _benchmark_pair(returns, benchmark)
+        aligned_n = len(aligned_returns)
+        if aligned_n < window:
+            return [], []
+        greeks = _rolling_greeks(aligned_returns, aligned_benchmark, window)
     except Exception as exc:  # noqa: BLE001
-        # H-0726.3: surface qs-side rolling_greeks failures explicitly instead
-        # of letting them propagate to the caller's `except Exception` (or worse,
-        # to an uncaught path on a new qs version).
+        # H-0726.3: surface rolling_greeks failures explicitly instead of
+        # letting them propagate to the caller's `except Exception`.
         logger.warning(
             "rolling_greeks failed (aligned_n=%s, window=%s): %s",
             aligned_n, window, exc, exc_info=True,
-        )
-        return [], []
-    columns = set(getattr(greeks, "columns", []))
-    if "alpha" not in columns or "beta" not in columns:
-        # H-0726.3: silent fallback on missing columns previously masked qs
-        # version drift (column rename). Log it so a future qs bump that drops
-        # one of the columns produces an operator-visible signal.
-        logger.warning(
-            "rolling_greeks missing expected alpha/beta columns (got %s)",
-            sorted(columns),
         )
         return [], []
     return _finalize_rolling(greeks["alpha"]), _finalize_rolling(greeks["beta"])
 
 
 def _rolling_alpha(returns: pd.Series, benchmark: pd.Series, window: int = 90) -> list[SeriesPoint]:
-    """Rolling alpha vs benchmark via qs.stats.rolling_greeks.
+    """Rolling alpha vs benchmark via the inline ``_rolling_greeks`` (windowed intercept, D-17).
 
     Thin wrapper around `_rolling_alpha_beta` retained for backward compat with
     tests that import the public helper directly. Production code paths
@@ -1864,15 +3417,15 @@ def _rolling_alpha(returns: pd.Series, benchmark: pd.Series, window: int = 90) -
 
     Window default 90d trading per UC#6 BTC-only scope.
 
-    No `periods_per_year` here: rolling alpha is unannualized in quantstats
-    0.0.81 (see `_rolling_alpha_beta`).
+    No `periods_per_year` here: rolling alpha is unannualized, as in quantstats
+    0.0.81 (see `_rolling_greeks`).
     """
     alpha, _ = _rolling_alpha_beta(returns, benchmark, window)
     return alpha
 
 
 def _rolling_beta(returns: pd.Series, benchmark: pd.Series, window: int = 90) -> list[SeriesPoint]:
-    """Rolling beta vs benchmark via qs.stats.rolling_greeks.
+    """Rolling beta vs benchmark via the inline ``_rolling_greeks``.
 
     Thin wrapper around `_rolling_alpha_beta` retained for backward compat.
     See `_rolling_alpha` docstring for rationale. Beta is a unitless ratio, so
@@ -1917,10 +3470,19 @@ def _log_returns_series(returns: pd.Series) -> list[SeriesPoint]:
 
 
 def _rolling_correlation(a: pd.Series, b: pd.Series, window: int) -> list[SeriesPoint]:
-    """Vectorized rolling Pearson correlation between two aligned series."""
+    """Vectorized rolling Pearson correlation between two aligned series.
+
+    Review round 2 (CR-01 class): a window in which either leg has no real
+    dispersion (std at or below ``_residue_floor``) defines no correlation, so
+    it is NaN and ``_finalize_rolling`` drops it. pandas divides by the residue
+    std instead and renders a noise correlation (up to 0.28 measured on a
+    compounding constant yield against a random benchmark).
+    """
     if len(a) < window:
         return []
-    return _finalize_rolling(a.rolling(window).corr(b))
+    ra, rb = a.rolling(window), b.rolling(window)
+    both_move = (ra.std() > _residue_floor(ra.mean())) & (rb.std() > _residue_floor(rb.mean()))
+    return _finalize_rolling(ra.corr(b).where(both_move))
 
 
 def _return_quantiles(

@@ -1,18 +1,28 @@
 ---
-gsd_state_version: 1.0
-milestone: v1.16
-milestone_name: Production Resilience & Reliability
-status: ready_to_plan
-stopped_at: Phase 142.1 complete (8/8) — ready to discuss Phase 143
-last_updated: 2026-08-03T05:59:33.622Z
-last_activity: 2026-08-02
+gsd_state_version: "1.0"
+milestone: v1.20
+milestone_name: Backlog Burndown (Phases 158+)
+current_phase: 164.9.3.2.1
+current_phase_name: ENQ40001
+status: planning
+stopped_at: Phase 164.4.2 complete (SUBSET observed in CI on PR #927); next Phase 164.9.3.2.1
+last_updated: "2026-10-02T10:48:30.128Z"
+last_activity: 2026-10-02
+last_activity_desc: Phase 164.4.2 SUBSETSPLIT complete — verification passed (SUBSET run read from CI on PR #927, merged fd4d86cd)
+state_head: 4dd2aacfb
 progress:
-  total_phases: 17
-  completed_phases: 12
-  total_plans: 119
-  completed_plans: 153
-  percent: 71
+  total_phases: 85
+  completed_phases: 48
+  total_plans: 450
+  completed_plans: 449
+  percent: 56
 ---
+
+## ⭐ STATE lineage
+
+Census-Methode, Clobber-Protokoll und historische Notizen stehen in
+[`STATE-LINEAGE.md`](STATE-LINEAGE.md). ⛔ Nicht hierher zurückholen — jeder
+STATE-Handler zerstört `#`-Zeilen, auch unterhalb des Frontmatters (gemessen 2026-09-17).
 
 # Project State — Quantalyze
 
@@ -22,51 +32,625 @@ progress:
 
 **Core value:** Allocators act on Bridge recommendations and see whether those suggestions actually worked — and can model the impact of composition changes before they make them.
 
-**Milestone v1.16 — Production Resilience & Reliability, Phases 140–146.** Real
-money-bearing integrations are now LIVE (Deribit, MT5; sFOX/Nautilus next); the top
-live-surface risk is that the plumbing has no failure handling. Scope = **SEAM**
-(Vercel→Railway retry + Upstash breaker + unified timeout budgets across BOTH
-chokepoints — `analytics-client.ts` AND `process-key-client.ts`), **JOB** (job-state
-integrity: `strategy_analytics` reaper + `computing_started_at` DDL, dropped-enqueue
-sweep, WR-02 DELETE→terminal-UPDATE, csv-finalize atomicity — all in **pg_cron**,
-never the worker loop), **RATE** (audit + close `admin/match/eval` and Python
-`routers/match.py`; limiter-value audit; `withRateLimit` HOF). CRON + MONEY groups
-deferred (founder 2026-07-25).
+⛔ **v1.17 CLOSED 2026-08-14 as "MT5 — ingested, wizardable, surfaced" (Phases 147–154, 156).**
+Its original title claimed *"usable end-to-end"*. Phase 155 (MT5-VERIFY — the live trading-day
+parity run) was **REMOVED from scope and carried to v1.18**, taking MT5-06..10, MT5-15 and the
+umbrella acceptance MT5-GOAL-01 with it. A bounded alternative — move 155 to TODOS and tick v1.17
+complete — was offered and **declined**, precisely because it would leave every ledger reading
+"usable end-to-end" while our numbers had never been compared to the broker's.
+⚠️ **This paragraph was itself a v1.17-MILESTONE-AUDIT blocker (B1).** The amendment landed in
+`ROADMAP.md` only; this file went on asserting the refused claim for several hours. If you are
+amending scope, `git show --stat` the commit — one file is almost always wrong.
 
-⚠️ **Requirements were written against the RESEARCH-CORRECTED scope**
-(`.planning/research/SUMMARY.md` — all four researchers contradicted three milestone
-premises): RATE was ~85% already shipped; seam timeouts already exist in both clients;
-retry-safety is per-`flow_type` (`teaser` deliberately NON-idempotent); the fence-flake
-"two birds" claim is NOT an acceptance criterion; the 42501 claim gets a
-reproduce-first gate.
+⭐ **PARKED milestone: v1.18 — MT5-VERIFY & founder confirmations (Phases 155, 157).** EVERY
+phase in it is founder-gated. Blocked on (1) new MT5 investor passwords — the founder changed them
+~2026-08-14, so stored credentials are stale and the three PROD keys will flip to `error`, which
+is **EXPECTED, not a regression** — and (2) the founder at the MT5 terminal on a **trading day**.
+Phases 143–146 became **v1.19, CLOSED 2026-08-20** (audit tech_debt, 9/9 requirements — see `.planning/milestones/v1.19-ROADMAP.md`). v1.18 waits on the founder; agent-deliverable work is **v1.20 Backlog Burndown (Phases 158–165)** — see ROADMAP.md § Current Milestone.
 
-Requirements: `.planning/REQUIREMENTS.md` (18 v1 reqs — SEAM-01..06, JOB-01..07,
-RATE-01..05 — all mapped, Traceability filled). Roadmap: `.planning/ROADMAP.md`
-(v1.16 section, Phases 140–146). Research: `.planning/research/SUMMARY.md` (2026-07-25).
+**Historical scope statement for v1.17, retained:**
+Founder verbatim (2026-08-04, minutes after MT5-05 was discharged on PROD): *"The goal is that
+MT5 works. And at the moment, maybe it ingests the data, but I cannot use it in the scenario,
+and I can still not produce a factsheet."* Scope = **SCEN** (the series actually reaches the
+engine — SCEN-01 is a silent money-path bug: `strategy_analytics.daily_returns` has NO
+production writer, 0/27 real strategies vs 15/15 demo seeds; fix the READER via the existing
+`resolveDailyReturnSeries`, difference the wealth-index `returns_series`, never backfill against
+migration 087), **OWN/NAV** (owner factsheet without cache disclosure — adversarial anon-404
+acceptance — plus "my strategies" nav, preview link, and the own-capital-vs-verifying-a-team
+wizard question, money-path reviewed — THREE phases 148/149/150 since the 2026-08-04 revision: NAV-01 was sharpened to a RANKING at discovery parity and split out, OWN-03's money-path write isolated), **AUM** (direct AUM input; non-ccxt holdings-sync crash
+fixed as a CLASS incl. latent sFOX; all-or-nothing book gate + cross-role contamination; honest
+copy), **WIZ** (inline field errors, honest codes, absorbed transient failures, continuity,
+token-less dedup, MT5 declarable + preselected), **STALE** (root cause NOT established —
+investigate before fixing), **MT5-VERIFY** (live trading-day external-oracle verification,
+MT5-10 UNCAPPED, `complete_with_warnings` explained; MT5-GOAL-01 umbrella acceptance gate).
+⭐ Almost NONE of this is an MT5 defect — MT5 is the first venue through the whole path from a
+cold start; a fix scoped to `exchange === 'mt5'` is the wrong fix for nearly all of it.
+Research SKIPPED (every requirement already root-caused with PROD evidence + file:line).
+
+Requirements: `.planning/REQUIREMENTS.md` (29 in-scope IDs — SCEN-01..05, AUM-01..05, NAV-01,
+OWN-02..04, MT5-06..10, MT5-14, MT5-15, WIZFORM-01..04, WIZCONT-01..02, STALE-01 + MT5-GOAL-01
+umbrella — 29/29 mapped to Phases 147–155, Traceability updated; OWN-01 excluded, already met).
+Roadmap: `.planning/ROADMAP.md` (v1.17 section, Phases 147–155).
+
+⏸️ **v1.16 Production Resilience & Reliability is PARKED at 68%** (13/19 phases, 119/127 plans)
+— NOT shipped, NOT complete. Outstanding: 143 (dropped-enqueue sweep), 144 (WR-02 — carries the
+LIVE TEST-DELETE/PROD-reset founder decision, same migration), 145 (csv-finalize,
+reproduce-first), 146 (RATE). **Resume at Phase 143 after v1.17.** All 29 phase directories
+preserved (`phases.clear` skipped by founder call). Phase 142.3's scope (MT5-06..10) and MT5-14
+are re-homed into v1.17 (Phases 155 / 153); 142.3 will not run as a v1.16 phase.
+
+## Scope Amendments (in force)
+
+⚖️ **Phase 164.4 REDUNDER-BACKFILL — criterion 1 NARROWED, founder decision 2026-09-02.**
+Original: "every arm in `supabase/tests/*.sql` carries a `RED-UNDER`". Amended: **every arm in the
+44 `TEST FAILED (` idiom files**, with the **27 non-idiom files PRINTED BY NAME by the runner on
+every run**. Measured basis: 1398 `RAISE EXCEPTION` sites across all 71 files (zero files have
+none), of which only 890 use the idiom the runner keys on (`run.mjs:544`; identity defined once at
+`run.mjs:947`); 27 files / 334 raises assert through their own message prefixes and are
+structurally unreachable. Rejected alternatives, both measured: renaming the 27 into the idiom
+(authoring, not mechanical — 321 raises carry only 139 distinct prefixes, so identities must be
+INVENTED) and generalising the identity grammar to a per-file prefix (weakens primitives 3a/3b that
+164.3.1 just closed, and buys no precision since prefixes are SHARED across arms).
+**Arm unit = SECTION** (not per-raise, not per-identity): **252 sections / 262 twins over the 39
+reachable files** (MEASURED at the phase end state 2026-09-04: `coverage: files 39/71`,
+`arms: 262/262/0`, 0 waivers, exit 0); 100 sections in 4 lane-blocked files owed to
+`[REDUNDER-PGCRON]`, plus a 5th file under `pending:` owed to Phase 164.4.1. ⛔ The `255 sections /
+~265 twins over the 40 reachable files` this sentence carried until 2026-09-04 is SUPERSEDED by the
+ARITHMETIC CORRECTION below — it predates plan 09's founder-decided deferral. Kept here as lineage,
+not as a live claim. The identity unit would have been 516 and pushed CI past the 20-minute split threshold.
+⚠️ Recorded in FOUR places on purpose — `ROADMAP.md` § Phase 164.4 (goal, SCOPE AMENDMENT block,
+criterion 1, progress table), here, and `TODOS.md` `[REDUNDER-NONIDIOM]`. The v1.17 lesson is that
+an amendment landing in ONE file leaves the refused claim alive in the others.
+⚠️ Also measured: the reference file `test_strategy_shares_rls.sql` holds 103 identities in **35
+sections with only 30 twins — 15 sections have no twin**, so the "1 file fully annotated" baseline
+was never true. Closing those 15 is inside this phase, not a precondition of it.
+
+⚖️ **SCOPE AMENDMENT #2 — ARITHMETIC CORRECTION, 2026-09-04 (Plan 164.4-11).** #2's count below
+was 40 files / 255 sections reachable. MEASURED at the phase's end state it is **39 files / 252
+sections / 262 twins** (`coverage: files 39/71`, `arms: 262/262/0`, `biting: 262`, 0 waivers, exit
+0). No new decision: this is the arithmetic consequence of the founder decision already taken in
+Plan 09. A FIFTH idiom file, `test_compute_jobs_error_kind_copy_parity.sql`, is equally
+un-baselineable without pg_cron — its blocker is migration `20260826140000` in its APPLY LIST rather
+than its own text, so `gateNeedsPgCron` cannot see it and the runner prints it under `pending:`
+rather than `lane-blocked:` (TODOS `[REDUNDER-LANEBLOCKED-BLIND]`). It is owed to Phase 164.4.1
+PGCRON-LANE with the other four. ⛔ The runner's `pending:` line names exactly ONE file at the end
+of this phase and must not be read — or made — empty; the parser test pins it as a one-name SET.
+
+⚖️ **SCOPE AMENDMENT #2** (founder 2026-09-03, Plan 164.4-03): of the 44 idiom files, 4 probe
+`pg_extension` for pg_cron and the pg-lane has no pg_cron — 40 files / 255 sections are reachable
+(⛔ SUPERSEDED by the ARITHMETIC CORRECTION above; this paragraph stays as the dated record);
+the 4 (100 sections) are printed by the runner as `lane-blocked:` every run, probed against the lane
+every run, and owed to `[REDUNDER-PGCRON]`. Criterion 1's standard is unchanged. Measured mechanism,
+which CORRECTS the earlier all-files-RAISE record: `reconcile_dropped_enqueue_sweep.sql:268` (39
+sections) and `retention_orphaned_running.sql:212` (25) RAISE EXCEPTION on the absent extension, so
+their baseline can never be GREEN; `strategy_analytics_stuck_computing_reaper.sql:282/326/483` (29)
+and `derive_allocator_keys_fanout.sql:159/169` (7) baseline GREEN but withhold whole Parts behind a
+pg_cron-conditional `RAISE NOTICE`, so those arms are un-falsifiable on the lane. All four deferred
+together under CONTEXT's no-half-annotated-file rule.
+⚠️ Recorded in EIGHT places on purpose — `ROADMAP.md` (goal line, narrowing goal sentence,
+section-unit paragraph, criterion 1, progress table row, and its own amendment block), here (this
+paragraph and the arm-unit line above), and `TODOS.md` `[REDUNDER-PGCRON]`. Same v1.17 lesson: an
+amendment landing in ONE file leaves the refused claim alive in the others.
+
+## Deferred Verification
+
+Phases whose code is complete but whose verification is gated on a human action. Autonomous
+re-entry SKIPS these — resume each only through its recorded command, so the gate cannot be
+silently absorbed by a later phase.
+
+| Phase | Status | Blocked on | Resume with |
+|-------|--------|-----------|-------------|
+| ~~160~~ | 🟡 **PARTIAL 2026-08-25 21:38Z — arm PROVEN, 1 of 3 surfaces smoked** | **PROD persist smoke (Part A) PASSED.** Founder connected a real OKX read-only key through `ApiKeyManager` at `/strategies/<id>/edit` on production. BOTH confirmations hold: `api_keys` census 32 → 33 with the new row's `attested_venue` EQUAL to its `exchange` (`okx`/`okx` — the 160-02/RANK-03 invariant), and prod request logs show `/api/keys/validate-and-encrypt`, so the write went through the persist arm and not the Phase-156 RPC path. ⚠️ The gate was not merely untested — the arm was DEAD: Vercel's `ANALYTICS_SERVICE_KEY` did not match Railway's `SERVICE_KEY`, so every guarded analytics route refused and key-connect was impossible in production (TODOS 0.05, resolved; detection gap 0.04 → Phase 164.1). Evidence in `160-UAT.md`. ⚠️ NOT 32/32: the prescribed test names THREE converted surfaces; only `ApiKeyManager` was smoked. `StrategyForm` is un-smoked (own fetch at `StrategyForm.tsx:161`) and `AllocatorExchangeManager` is un-smoked. ⚠️ CORRECTED 2026-08-26: an earlier note here said it is UNREACHABLE and that no page mounts it. That is FALSE — `profile/page.tsx` populates `exchanges` for allocators, `ProfileTabs` renders `ExchangesTabContent`, and that renders `AllocatorExchangeManager`. The whole branch is `isAllocator`-gated and the 160 QA ran on a MANAGER account, which is almost certainly why it looked unmounted. It is a live surface and 160 can be closed by smoking it with an ALLOCATOR login — it does NOT need mounting, and the component must NOT be deleted. The shared arm is proven, which retires the large risk; per-surface payload risk remains unmeasured. NO LONGER SKIPPED on autonomous re-entry. | `/gsd-verify-work 160` for the remaining surfaces |
+
+Part B of that phase (the PROD `STALE_CLIENT` refusal) is ✅ CLOSED — measured on PROD 2026-08-23
+after #705 deployed. See `160-VERIFICATION.md` § PROD smoke record.
+
+## Needs Human
+
+| Phase | State | Resume with |
+|-------|-------|-------------|
+| 161 | `needs_human` — **planning incomplete, 7 of 13 requirements** | resolve the model-quota blocker below, then `/gsd-plan-phase 161` (it will see `has_plans: true` — the six uncovered requirements must be planned explicitly) |
+
+**Blocker (2026-08-24): the `gsd-planner` subagent terminated on a Fable 5 quota limit** after 288k
+tokens / 33 tool uses. This is a resource limit, not a planning failure — the five plans it finished
+are complete and well-formed.
+
+Planned: WIZERR-01, -02, -03, -04, -11, -12, -13 (commit `40cc9383`).
+**NOT planned — no plan file exists:** WIZERR-05, -06, -07, -08, -09, -10.
+
+⛔ **Do NOT run `/gsd-execute-phase 161` against this state.** `has_plans` reads `true`, so execution
+would silently deliver 7 of 13 requirements and seal the phase.
+
+⚠️ The whole remaining pipeline is Fable-assigned under the 2026-08-18 model policy — `gsd-planner`,
+`gsd-plan-checker`, AND `gsd-verifier` are all `fable`. Finishing Phase 161 therefore needs either
+Fable quota to reset, or a founder decision to run those three roles on Opus for this phase. That is
+a cost decision against a different quota, so it was not taken autonomously.
+
+Completed and committed before the blocker: `161-UI-SPEC.md` (checker-approved 6/6, both curated-message
+fences re-verified first-hand, `## UI Considerations` rebuilt from the state probe — 52 considerations,
+zero unclassified) and `161-VALIDATION.md` (Nyquist strategy, 4 Wave-0 gaps, anti-vacuity clause).
 
 ## Current Position
 
-Phase: 143
-Plan: Not started
-        All 8 plans complete across 5 waves. Verified `human_needed` (41/42, zero
-        gaps) — 7 items persisted to `142.1-HUMAN-UAT.md`. Scope + hazards below.
+⭐ **RECONCILED 2026-09-18 (164.1.1.1 plan 02, FINAL PLAN OF THE PHASE). THIS block is the
+current position and SUPERSEDES the 164.1.1.1-plan-01 block immediately below (retained as
+lineage). Phase 164.1.1.1 (LANEONLYGATES) is now 2/2 plans DONE; ROADMAP.md's Plans line and
+both checkboxes updated to match. Not yet marked `completed_phases` in the frontmatter above —
+no VERIFICATION.md exists for this phase yet, and this repo's own rule is that phase completion
+is decided by verification status, never by plan counts.**
 
-Phase 142 (JOB — strategy_analytics stuck-computing reaper + computing_started_at DDL) — EXECUTED
-        Six plans across three waves, each wave gated at its boundary; final suite
-        10 487 vitest + 4 824 pytest green, typecheck clean, coverage above ratchet.
-        13 findings CLOSED PER THEIR DISPOSITIONS — twelve remediated, finding 8
-        DISPOSITIONED (retry→limiter amplification still live, booked in TODOS.md).
-        Next: VERSION bump → `/ship` → `/land-and-deploy`.
-        ⛔ DO NOT SHIP 141.1 AS-IS. The xhigh code review (30 agents, 25 findings
-        deduped to 13) found a DATA-INTEGRITY defect on the money path: `onboard`'s
-        retry can insert TWO `strategy_verifications` rows for one user submit when
-        `strategies.wizard_session_id` is NULL, because the retry-safety grant rests
-        on an `idempotent_by_session` that is false in exactly that case. Also: the
-        D-16 flag-monitor denominator rewrite shipped three monitoring-integrity
-        regressions — a silently-truncating unbounded `.select()`, dedup on an
-        attacker-controllable header reachable unauthenticated, and a dedup that
-        collapses nothing on the only two retry-eligible flows. Evidence with
-        per-finding failure scenarios: `141.2-FINDINGS.md`.
+Phase: 164.9.5 (AUTOREDUMP) — COMPLETE 2026-10-02 (verification passed; first changed re-dump opened bot PR #920, all head-sha runs green)
+Phase: 164.9.3.2 (DEFER40001) — COMPLETE 2026-10-02 (verification passed; PR #919 merged, v0.118.0.0; migration applied to TEST and PROD by Supabase Migrate run 36981647441)
+Phase: 169.1.1 (HYDRATIONTICKS) — COMPLETE 2026-10-02 (verification passed; PR #925 merged, v0.118.1.0)
+Phase: 164.9.3.2.1 (ENQ40001) — NEXT, after the 164.4.2 gate-only close (founder 2026-10-02)
+Phase: 166.4 (BENCHALIGN) — COMPLETE 2026-09-27 (verification passed; PR #892 merged, v0.108.0.0)
+Phase: 170 (LAYOUT — page layout reads clean and holds on every page) — COMPLETE 2026-10-01
+Plan: 1 of 4
+Phase: 164.9.5 (AUTOREDUMP) — EXECUTING
+Plan: 9 of 9 DONE; VERIFICATION human_needed (4/6 verified, 2 live-only), SECURITY SECURED 37/37; shipped as a PR, not merged
+Phase: 166.2 (COMPUTEONCE) — EXECUTING
+Plan: 1 of 7
+Phase: 166.1 (ENGINEFLOOR) — EXECUTING
+Plan: 4 of 4
+Phase: 166 (QSTATS-TRUTH — every quantstats-derived number reflects the returns it was given) — READY TO EXECUTE
+Plan: Not started
+Phase: 168 (DRBOPTIONS — a Deribit options account ingests end to end) — EXECUTING 2026-09-26, 3 plans; plan 03 is a founder post-deploy checkpoint
+Plan: 2 of 3 DONE (`168-01-SUMMARY.md`: `assignment` cash-bearing in the census shape only, `assert_assignment_uncontested` in both twins, `_OPTION_BOOK_EVENT_TYPES` at the six literal sites in one commit, windowed-crawl backstop in `_crawl_deribit_ledger`, counts-only evidence file; `168-02-SUMMARY.md`: one pin per option-book site, each seen RED under a one-site revert, mark_to_market and smoothed_mtm end to end, `check_perp_only_eligibility` reads `_OPTION_BOOK_EVENT_TYPES`, `_SIBLING_TYPES` + assignment, `_SHAPE_FIELDS` + commission/position, prose sweep, full suite green). Next is plan 03, a founder post-deploy checkpoint.
+Phase: 164.5.2 (BRIDGELOCK — the per-strategy advisory lock 161.1-D1 asked for, in its own phase as DEC-4 required (INSERTED)) — EXECUTED, verification human_needed, PR open (merge after #870)
+Plan: 3 of 3 DONE
+Phase: 164.6 (gate-hygiene-ops-08-f9-sentinel-plus-the-two-ci-yml-integers) — EXECUTING
+Plan: 5 of 5 DONE (`164.6-01-SUMMARY.md`, OPS-08-TS: a 40001 is retried once at csv-finalize and holdings sync; `164.6-02-SUMMARY.md`, 161.1-D13 TS half: keys/sync and finalize-wizard retract an inherited ledger-refresh marker; `164.6-03-SUMMARY.md`, OPS-08-F2 SQL layer: migration 20260924120000 makes both fan-outs write one counted cron_runs row naming failed candidates, arm N in both ledger gates, 36 twins re-pointed; `164.6-04-SUMMARY.md`, OPS-08-F2 pins: ARMS_FLOOR 428 from a full lane run with no defects, parser/floors/registry censuses at 428 arms and 443 steps/needles, ci.yml sentinel rows 16/19 and ARMS_FLOOR 215; `164.6-05-SUMMARY.md`, runbooks read the candidate_enqueue_failed row counts-only and carry the BLOCKING precondition [164.6-COMPOSITE-CLAIMTIME-SNAPSHOT] owned by Phase 164.6.7, phase-level vitest/typecheck/lint/anchors green)
+      ⚠️ RETAINED — the three lines below were this block's own `Phase:`/`Plan:` lines
+      until `state.begin-phase` overwrote them in place on 2026-09-20. They are indented
+      so a future handler cannot match them again; their continuation prose follows unbroken.
+      Phase: 164.8.4 (GATERESIDUE) — READY TO EXECUTE
+      fixture) — EXECUTING (2/2 plans done, verification not yet run)
+      Plan: 2 of 2 DONE (`164.1.1.1-02-SUMMARY.md`, commits `0d9d2408` (test, `LANE_ONLY_SITES`
+register pinned as SITES-not-a-count, re-derived from the corpus with a named failure mode on a
+malformed or key-less marker) and `11f46389` (test, FORWARD/REVERSE object-binding cross-checks
+plus the vault near-miss guard) on branch `chore/164.1.1.1-laneonlygates`). Task 3 (four
+neuter/observe-RED/restore calibrations, including the one-for-one swap M1b where the marker
+moved between two files with the corpus-wide count unchanged at one — the SET pin reddened
+anyway) produced no net code change; both mutated SQL files restored byte-identical
+(`shasum -a 256` equal pre/post every cycle — see the SUMMARY's Calibration Log). Evidence
+regenerated fresh, not restated: `mutation-runner --parse-only` —
+`test_prod_prober_cadence.sql: 7 prose / 7 twin(s) / 0 waiver(s)`, `coverage: files 47/74`,
+`arms: 0/402/0`, exit 0. Collateral suites + a full serial `npm test` (15,117 tests): the only
+failure both times is the pre-existing, box-local `Test timed out in 5000ms` inside
+`lint-sql-gates.test.ts`'s EXECUTION ORACLE block (carved out by this plan's own `<fails_when>`,
+already shown green on CI). The two deferred items plan 01 logged
+(`check-planning-hygiene.test.ts`, `verify-plan-anchors.test.ts`) were already resolved by an
+intervening commit (`d693e3c7`) before this plan began — no new deferred items this session.
+This closes T-164.1.1.1-01 (plan 01's own threat register entry) and T-164.1.1.1-05 through -08
+(this plan's threat register) as mitigated-and-calibrated. Next: Phase 164.1.1 plan 06 — the
+founder-gated live PROD session that closes `[PROBER-CADENCE-UNDELIVERED-01]` — is now unblocked
+on the CI side (`sql-tests` no longer reds on `test_prod_prober_cadence.sql`); the requirement's
+TODOS.md checkbox stays open until plan 06 itself executes.
+
+⭐ **RECONCILED 2026-09-18 (164.1.1.1 plan 01). THIS block was the current position from plan
+01's close until the block above (plan 02, the final plan of the phase) superseded it. Retained
+as lineage. Phase 164.1.1.1 is the URGENT inserted phase named in Roadmap Evolution —
+LANEONLYGATES — a SIBLING of 164.1.1, not a continuation of it; the block below (164.1.1-plan-05)
+covers 164.1.1's own history.**
+
+Phase: 164.1.1.1 (LANEONLYGATES — sql-tests must not run gates that require a pg-lane-only
+fixture) — EXECUTING
+Plan: 1 of 2 DONE (`164.1.1.1-01-SUMMARY.md`, commits `1bd4e681` (feat, the LANE-ONLY marker +
+ci.yml exclusion mechanism), `6c3fce03` (test, invocation log + defect-injection pair + static-
+accounting scenario), `346e0850` (docs, calibration log + deferred items) on branch
+`chore/164.1.1.1-laneonlygates`). `supabase/tests/test_prod_prober_cadence.sql` no longer
+executes against shared TEST — it declares itself LANE-ONLY via one structured comment line
+naming `net._lane_posts`, the fixture, and `sql-mutation` as the owning job — while
+`SENTINEL_FLOOR` (11), `ARMS_FLOOR` (213) and ci.yml's per-file derivation table stay
+byte-unchanged, proven by `mutation-runner --parse-only` and a whitespace-blind `git diff -w`.
+The exclusion is measured, not inspected: `ci-anti-skip-gate.contract.test.ts` gained a real
+stub-psql invocation log and a defect-injection calibration pair (21/21 passing), and all three
+new properties were individually neutered, observed RED for the predicted reason, and restored
+byte-identically (`shasum -a 256` equal pre/post every cycle — see the SUMMARY's Calibration
+Log). Two pre-existing, out-of-scope `npm test` failures (`check-planning-hygiene.test.ts`,
+`verify-plan-anchors.test.ts`, both against this phase's own PLAN.md content authored before
+this execution session) logged to `deferred-items.md` rather than fixed. Next: Plan 02 — the
+cross-check pinning the excluded SET as sites (not a count) per the threat register's
+T-164.1.1.1-01 mitigation.
+
+⭐ **RECONCILED 2026-09-18 (plan 05). THIS block was the current position for Phase 164.1.1
+(PROBERCADENCE) from plan 05's close until the block above (a different, sibling phase,
+164.1.1.1) superseded it as the CURRENT position. Retained as lineage — 164.1.1 plan 06 is
+still the next plan for THAT phase.**
+
+Phase: 164.1.1 (PROBERCADENCE — the prober's detection latency is measured and alarmed from a
+scheduler that cannot silently drop it (INSERTED)) — EXECUTING
+Plan 05 DONE (`164.1.1-05-SUMMARY.md`, commits `7ae2fe98` (docs, the go-live runbook), `988463eb`
+(docs, `TODOS.md[PGCRON-LIVENESS-UNWATCHED-01]` + the plan-05 progress note) and `33144af6`
+(docs, the runbook's placeholder replaced so the residual is reachable from both surfaces) on
+branch `feat/164.1.1-probercadence`). Ships `docs/runbooks/prod-prober-cadence-go-live.md` —
+blast radius before the pre-flight, five blocking pre-flight checks, the exact
+`cron.schedule('prod_prober_cadence_check', '20 * * * *', …)` statement (never a migration), the
+manifest re-capture as step 2 of the SAME session, first-tick expectations, watching it (routed
+through plan 03's `a-sentry-already-set` checkpoint outcome), and a two-part rollback. Criterion
+5's turtle is named, measured and disposed: `TODOS.md[PGCRON-LIVENESS-UNWATCHED-01]` — ACCEPTED
+as a named residual (narrowness + the rejected fifth-prober-arm alternative), the manual
+`latest_cron_success()` reading marked manual and never coverage, left UNROUTED by design.
+`[PROBER-CADENCE-UNDELIVERED-01]` carries a dated progress note and its checkbox stays open —
+this plan wrote the runbook, it did not execute it; nothing touched PROD, a migration, or
+`scripts/prod-prober/cron-manifest.json`. Next: Plan 06 — the founder-run live session that
+executes this runbook and closes `[PROBER-CADENCE-UNDELIVERED-01]`.
+
+⭐ **RECONCILED 2026-09-18 (plan 04). THIS block was the current position from plan 04's close
+until the block above superseded it. This update ADDS plan 04's completion.**
+
+Phase: 164.1.1 (PROBERCADENCE — the prober's detection latency is measured and alarmed from a
+scheduler that cannot silently drop it (INSERTED)) — EXECUTING
+Plan 04 DONE (`164.1.1-04-SUMMARY.md`, commits `524b300f` (feat, the guarded
+`POST /api/prober-cadence-alert` route) and `06ccd703` (test, calibrated suite + a
+Rule 2 quarantine-roster fix in `test_limiter_route_coverage.py`) on branch
+`feat/164.1.1-probercadence`). Implements the 164.1.1-03 checkpoint's recorded outcome
+(`a-sentry-already-set` — `SENTRY_DSN` confirmed set on Railway analytics-service production,
+presence only, founder-measured 2026-09-18): a rate-limited `sentry_sdk` escalation (one per
+hour) plus an unconditional structured log on every occurrence, guarded by the existing
+`SERVICE_KEY` middleware, zero new credential. All four load-bearing behaviours (unconditional
+log, escalation window, escalation-failure containment, body validation) were manually
+neutered, observed RED by name, and restored byte-identical (`cmp`) — see the plan's SUMMARY
+calibration log. Full analytics-service suite green (5877 passed, 0 failed); CI-scoped strict
+mypy (`services/ routers/ models/`) clean. Standing caveat, NOT resolved by this plan: delivery
+still depends on a Railway environment variable outside this repository's control. Next:
+whichever of Plans 05/06 the orchestrator dispatches — see their own PLAN files for current
+status.
+
+⭐ **RECONCILED 2026-09-18 (plan 02). THIS block was the current position from plan 02's close
+until the block above superseded it. This update ADDS plan 02's completion — it does not
+assert anything about plan 04's status, tracked separately in its own PLAN/SUMMARY files at
+the time this block was written; the block above now resolves that.**
+
+Phase: 164.1.1 (PROBERCADENCE — the prober's detection latency is measured and alarmed from a
+scheduler that cannot silently drop it (INSERTED)) — EXECUTING
+Plan 02 DONE (`164.1.1-02-SUMMARY.md`, commits `165173b0` (test, five expansion arms
+O1/A1/N1/U1/V1 in `test_prod_prober_cadence.sql`) and `6088811d` (test, `ARMS_FLOOR` 397→402
+
++ every sibling pin) on branch `feat/164.1.1-probercadence`). All seven arms of
+
+`test_prod_prober_cadence.sql` now proven RED on a real pg-lane; full-corpus mutation run
+confirms `arms 402/402/0`, `biting 402`, `✅ No defects`, `FILES_FLOOR` unmoved at 47,
+`WAIVED_CEILING` still 0. No migration file touched. Plans 04/05/06 (the escalation route, the
+live `cron.schedule` op) can build on the now-fully-hardened observer function without
+re-deriving its edge-case behaviour. Next: whichever of the remaining plans the orchestrator
+dispatches — see their own PLAN/SUMMARY files for current status.
+
+⭐ **RECONCILED 2026-09-18 (plan 03). THIS block was the current position from plan 03's close
+until the block above superseded it. THIS update only ADDS plan 03's completion — it does not
+assert anything about plan 02's status, which was tracked separately in its own PLAN/SUMMARY
+files at the time this block was written; the block above now resolves that.**
+
+Phase: 164.1.1 (PROBERCADENCE — the prober's detection latency is measured and alarmed from a
+scheduler that cannot silently drop it (INSERTED)) — EXECUTING
+Plan 03 DONE (`164.1.1-03-SUMMARY.md`, commits `9a1b0a8b` (test, criterion-4 pin +
+calibration twin, `.github/workflows/prod-prober.yml` byte-unchanged) and `3ce0d461` (docs,
+plan close-out) on branch `feat/164.1.1-probercadence`). Plan 03's checkpoint (Task 1,
+`gate="blocking-human"`) was answered before this executor ran: `SENTRY_DSN` IS set on Railway
+→ analytics-service → production → Variables, option `a-sentry-already-set`, founder-measured
+2026-09-18 — presence only, no value recorded anywhere. Standing caveat: delivery still
+depends on a variable outside this repository, so a later unset would silently re-open the gap;
+neither this line nor any future plan may claim the alarm permanently reaches a human without
+that caveat attached. Plan 04 (the escalation route) is now unblocked to implement against
+this answer. Next: whichever of Plan 02 / Plan 04 the orchestrator dispatches next — see their
+own PLAN/SUMMARY files for current status.
+
+⭐ **RECONCILED 2026-09-18 (plan 01). THIS block was the current position from plan 01's close
+until the block above superseded it, including the 2026-09-09 block that reconciled the one
+before it. Nothing below is deleted — it is lineage.**
+
+Phase: 164.1.1 (PROBERCADENCE — the prober's detection latency is measured and alarmed from a scheduler that cannot silently drop it (INSERTED)) — EXECUTING
+Plan: 1 of 6 DONE (`164.1.1-01-SUMMARY.md`, commits `d1d6ca63`/`2e03771b`/`16e962ad` on branch
+`feat/164.1.1-probercadence`). Next is Plan 02. Plan 01 shipped `public.prod_prober_cadence_check()`
+(forward migration, no `cron.schedule(...)`), the prober's own unconditional contact write, a
+two-arm matched-pair SQL gate proven RED on a disposable pg-lane, and both mutation floors moved
+from a measured full-corpus run (`FILES_FLOOR` 46→47, `ARMS_FLOOR` 395→397) with every sibling pin
+(`gate-family-meta.test.ts`, `mutation-runner-floors.test.ts`, `mutation-annotation-parser.test.ts`,
+a new dated `ci.yml` leg-count entry) moved in the same commit as Task 3. Full verification passed:
+`dump-sql-functions --self-test/--check`, `prod-prober --self-test` (83/83), full-corpus
+`mutation-runner` (`✅ No defects`, `files 47/74`, `arms 397/397/0`), `lint-sql-gates` (0 findings),
+and all four sibling vitest files (310/310). No older migration file changed; nothing ran
+`supabase db push`/`db reset`/`--project-ref`/`--db-url`.
+
+⭐ **RECONCILED 2026-09-09. THIS block was the current position from 2026-09-09 until the block
+above superseded it on 2026-09-18, including the 2026-09-06 `Phase: 164.2 (CURATED-COPY)` pointer
+that reconciled the block before it. Nothing below is deleted — it is lineage.**
+
+Phase: 164.1.1 (PROBERCADENCE — the prober's detection latency is measured and alarmed from a scheduler that cannot silently drop it (INSERTED)) — EXECUTING
+Branch: `phase-164.8-05-test-first-migrate` (carries Phase 164.8 plan 05 AND 164.8.1's
+close-out; 12 commits ahead of `origin/main`, NOT yet pushed).
+Version: `0.77.30.0` (VERSION and package.json byte-equal), one unified CHANGELOG entry
+covering every commit on the branch.
+
+**How it closed, because the shape matters more than the verdict.** `gsd-code-reviewer`
+returned 1 blocker + 10 warnings; the fixes went in; `gsd-verifier` then found 3 further
+gaps + 4 record items in the FIXES. Two of the defects were anti-vacuity failures inside
+this phase's own new code — the count-aware SHORT branch shipped with no falsifier at any
+layer, and the arm ratchet's calibration mutation had silently become a no-op — which is
+the class this repo ranks above correctness. A third was live: bash was command-
+substituting SQL comment prose inside the unquoted `TXN_*` heredocs while assembling the
+destructive restore. All closed and each falsified by neutering.
+
+⛔ **NEXT, and both are gates, not suggestions:**
+
+1. **Phase 164.8 plan 05 Task 3** is halted at a human checkpoint — merge the PR, then
+   dispatch `supabase-migrate.yml` on `main`, selecting the run by `headSha == MERGE_SHA`.
+   The TEST-first apply's version-set comparison assumes a `supabase db push` output shape
+   that ONLY a real run can confirm; until that run, that is an unverified assumption in a
+   path that gates PROD.
+2. **Phase 164.8 plan 06** still owns writing `[164.8-DATA-DEPENDENT-MIGRATION-ESCAPE]`
+   and `[164.8-TEST-DATA-RESEEDED]` — measured 2026-09-09: neither exists in `TODOS.md`.
+
+Routed OUT of 164.8.1 to Phase 164.9 (all three carry ROUTED HERE blocks in the ROADMAP):
+`[164.8.1-REPLAY-INSERT-ONLY-SCOPE]`, `[164.8.1-TEST-ANALYTICS-URL-PROD]`,
+`[164.8-PUSH-RACE-VAC08]`.
+
+Phase: 164.2 (CURATED-COPY) — IN PROGRESS, planning not started
+Plan: 1 of 6
+⛔ 2026-09-06: this line deliberately carries NO `N of M` pair. Written as `0 of 0` it parsed, and
+`state.advance-plan` then answered `reason: last_plan` / `status: ready_for_verification` — an
+unplanned phase reported as ready to verify (measured in a sandbox copy). With no numeric pair the
+verb cannot mis-advance. Restore the `N of M` shape when planning produces real plans.
+
+⭐ **RECONCILED 2026-09-06. Everything from here to the `⚠️ RETAINED — Phase 164.4.1 execution
+log` marker below is the CURRENT position. It SUPERSEDES the `Phase: 164.4.1 (PGCRON-LANE) —
+EXECUTING` / `Plan: 5 of 6` pointer that stood on these two lines until now, and it supersedes the
+`Status:` and `Last activity:` lines further down, which were both written mid-164.4 and are kept
+as lineage. Nothing below was deleted.**
+
+**Where the work actually is.** Phase **164.2 (CURATED-COPY)** is in flight on branch
+`phase-164.2-curated-copy`. `164.2-CONTEXT.md` (commit `24618f73`) and `164.2-RESEARCH.md`
+(`cf402eb0`) are written and committed, and `03ae5fa0` records the four CONTEXT decisions RESEARCH
+refuted. Pattern-mapping is running. **No PLAN file exists yet** — `.planning/phases/164.2-…/`
+holds CONTEXT and RESEARCH only, which is why `roadmap.analyze` reports its `disk_status` as
+`researched`. ⛔ Do not read `Plan: 0 of 0` as "nothing to do"; read it as "the plan count is not
+yet known because planning has not run".
+
+**Phases that shipped since the superseded pointer was written — each with the citation, none
+asserted from memory:**
+
+- **164.4 REDUNDER-BACKFILL — COMPLETE.** PRs #741 (`a55ff918`), #742 (`75e58cb1`), #743
+  (`3ed6919e`). `164.4-VERIFICATION.md` on `origin/main`: `status: passed`, 4/4 must-haves, and
+  its one `human_verification` item is recorded `human_verification_resolved: 2026-09-05` by
+  founder decision on the superseding ubuntu run 33961609382 at `1aa8bb70`.
+- **164.4.1 PGCRON-LANE — COMPLETE.** PR #744, squash-merged `e01cc2e6` (v0.77.13.0).
+  `164.4.1-VERIFICATION.md`: `status: passed`, 5/5 must-haves, `verified_at_head: 581d54cb`, and
+  SC-1's human item closed by ubuntu run **33973362161** at `ab0d5644`.
+- **164.3.1 SOUND-PRIMITIVES — COMPLETE.** `164.3.1-VERIFICATION.md`: `status: passed`, 9/9
+  criteria, re-verified at `e30f7c33`.
+- **164-family re-partition — SHIPPED.** PR #745, `ce5d2983` (v0.77.13.1).
+- **164.1 PROD-OBSERVABILITY — ALL SIX PLANS EXECUTED AND MERGED, but FORMALLY UNVERIFIED.**
+  Code merged as PR #746 (`42868a9b`); the phase's planning artifacts plus plan 06 (the first live
+  PROD prober run, the captured cron manifest, the posture flip and the new `version-gate` CI job)
+  merged as PR #748 (`d679f638`, v0.77.15.0, 2026-09-06). All six `164.1-0N-SUMMARY.md` files exist
+  on `origin/main` and `164.1-06-SUMMARY.md` reads `status: complete`. ⛔ **There is NO
+  `164.1-VERIFICATION.md` anywhere in the repo** — `/gsd-verify-work 164.1` has not been run, so
+  this phase is CLOSED-BY-MERGE, not VERIFIED. Do not restate it as verified.
+  ⚠️ Its first live run found a REAL open production fault: MT5 `initialize()` returned **-6**
+  (authorization failed — terminal up and answering IPC, but not logged in), filed as issue
+  **#747** and left for founder action. That is an open production item, not a phase defect.
+
+⛔ **THIS CHECKOUT IS ONE COMMIT BEHIND `origin/main`, and that is why the phase-directory
+readings lie. Measured 2026-09-06:** `git rev-list --left-right --count origin/main...HEAD` = `1 5`
+— the branch forked at `42868a9b` and does **not** contain `d679f638`, which is precisely the
+commit that carried 119 planning artifacts for 164.1 / 164.3.1 / 164.4 / 164.4.1 onto main (PR #746
+was squashed and `/gsd-pr-branch` filtered the transient `.planning/` files out of the reviewer's
+diff, so they reached main only via #748). Consequence: in THIS working tree those four phase
+directories contain nothing but `.gitkeep` (164.4.1 has no directory at all), so
+`roadmap.analyze` reports them `empty` / `no_directory` and every derived progress integer is
+depressed. **They were NOT archived and NOT lost** — `git ls-tree -r origin/main .planning/phases/`
+shows 164.1 at 6 PLAN + 6 SUMMARY, 164.3.1 at 13 + 13, 164.4 at 12 + 12, 164.4.1 at 6 + 6, and
+`git show --diff-filter=D d679f638 -- .planning/phases/` is EMPTY, so nothing was deleted.
+✅ **Fix: merge `origin/main` into this branch.** `d679f638` touches neither `STATE.md` nor
+`ROADMAP.md` (verified: `git diff 42868a9b d679f638 -- .planning/STATE.md .planning/ROADMAP.md` is
+empty), so the merge is clean apart from `state.json`. It was deliberately NOT done in this
+reconciliation pass because a pattern-mapper is running against this checkout and a merge would
+change the tree underneath it. **Do it before the next `/gsd-plan-phase 164.2`.**
+
+⚠️ **The two phase counters disagree BY DESIGN — neither is a completion oracle, and picking the
+larger one is wrong. Diagnosed 2026-09-06 by reading the SDK, not by preference:**
+
+- `query init.milestone-op` → `completed_phases` counts a current-milestone ROADMAP phase whose
+  directory holds **at least one SUMMARY file** (`init.cjs:1912-1935`,
+  `listPhaseSummaryFiles(...).length > 0`). It answers *"how many phases have produced any output
+  at all"*. Measured here today: **9 of 20**.
+- `query roadmap.analyze` → `completed_phases` counts phases whose **`disk_status === 'complete'`**
+  (`roadmap.cjs:535`), i.e. plan_count > 0 AND every plan has its SUMMARY. It answers *"how many
+  phases have no unfinished plan on disk"*. Measured here today: **4 of 20**.
+- Both read ONLY `.planning/phases/<dir>/`. Neither reads a VERIFICATION.md, a PR, or a merge
+  commit — so **neither number can tell you whether a phase shipped**, and on this behind-main
+  checkout both are additionally depressed by the four artifact-less directories above. The
+  per-phase `roadmap_complete` field is a THIRD, unrelated thing: it reads the `✅ COMPLETE` marker
+  in the ROADMAP heading, which is why only 158 and 163 carry it.
+- ⛔ Consequence for planners: **cite a merge commit, a PR number or a VERIFICATION.md status when
+  you claim a phase is done. Do not cite either counter.**
+
+⚠️ **`roadmap.analyze`'s `next_phase: "164.7"` is a FILE-ORDER ARTIFACT, not a scheduling signal.**
+`nextPhase` is `phases.find(disk_status ∈ {empty, no_directory, discussed, researched})`
+(`roadmap.cjs:531`) over headings in the order they appear in `ROADMAP.md`. The v1.20 heading order
+is 158, 159, 160, 161, 161.1, 162, 163, 164, **164.7**, 164.3, 164.3.1, 164.4, 164.4.1, 164.1,
+164.2, 164.2.1, 164.5, 164.6, 166, 165 — the 164-family inserts sit in insertion order, not
+execution order — so 164.7 wins on position over the in-flight 164.2 (which is `researched` and
+therefore also matches the predicate). The **intended** order is
+**164.1 → 164.2 → 164.2.1 → 164.7 → 164.5 → 164.6 → 166 → 165**; it lives in ROADMAP prose and in
+each phase's `Depends on:` line, and is not encoded in heading position. Same defect in
+`current_phase: "159"`, which is just the first `planned|partial` heading (159 is 7 plans / 6
+summaries) — an oldest-incomplete pointer, not the live position. **Read this section, not those
+two fields.**
+
+⚠️ RETAINED — Phase 164.4.1 execution log (2026-09-04/05). SUPERSEDED AS POSITION by the block
+above; kept verbatim as that phase's own dated record. 164.4.1 is COMPLETE (PR #744, `e01cc2e6`),
+so every "Next is plan NN" below has been discharged:
+      class + lane probe + SCOPE AMENDMENT #2, 04-11 the eight annotation batches) —
+      hand-maintained; `state.advance-plan` still REFUSES on this section
+      (`ambiguous_position_phase`, see § Known Issues)
+      ⚠️ 2026-09-05: plans 01 (substrate + tripwire observed) and 02 (file move 1) are
+      DONE. Next is plan 03. Measured at 164.4.1-02: `coverage: files 41/71`,
+      `arms: 272/272/0`, `biting: 272`, `pending: 0`, `lane-blocked: 3`,
+      `FILES_FLOOR` 41, `ARMS_FLOOR` 272, `WAIVED_CEILING` still 0.
+      ⛔ Every `run.mjs` run in this interval EXITS 1 on ONE `lane-blocked-stale`
+      row — the tripwire, not a regression. It clears when plan 05 lands.
+      ✅ 2026-09-05, SUPERSEDING the two lines above (kept as the dated record of
+      the 01-04 interval): plans 03, 04 and 05 are DONE and **the tripwire is
+      CLEARED**. Measured at 164.4.1-05 (HEAD b6b830cf), `node
+      scripts/mutation-runner/run.mjs` exiting **0**: `coverage: files 44/71`,
+      `lane-blocked: 0 file(s)`, `lane-probe: pg_cron AVAILABLE`, `  pending: 0`,
+      `arms: 363/363/0`, `biting: 363`, `lane-invocations: 363` (tallies agree),
+      `mean 1.1s`, `✅ No defects`. `FILES_FLOOR` 44, `ARMS_FLOOR` 363,
+      `WAIVED_CEILING` still 0 — fifteen arms moves, zero waivers. From here a
+      NON-ZERO exit is a regression. Next is plan 06 (closure: the false-reading
+      `lane-probe: … class is STALE` sentence, the `lane-blocked:` line's own
+      prose, [REDUNDER-LANEBLOCKED-BLIND], and the ubuntu measurement).
+Status: Ready to plan Phase 164.9.3.2.1
+      ⚠️ RETAINED — this was the `Status:` line until the 2026-09-06 reconciliation, kept as
+      lineage: *"164-family re-partition SHIPPED — PR #745 (chore/164-family-repartition,
+      v0.77.13.1). Phase 164.4.1 COMPLETE — PR #744 squash-merged as `e01cc2e6` (v0.77.13.0),
+      Railway on `e01cc2e6`. 164-family RE-PARTITIONED 2026-09-05 (164.1 → PROD-OBSERVABILITY,
+      164.2 CURATED-COPY +161-ERRPREFIX, NEW 164.5 BASELINE-SNAPSHOT, NEW 164.6 GATE-HYGIENE,
+      order 164.6 → 166 → 165). Next: `/gsd-autonomous --only 164.1`."* — that `Next:` is
+      DISCHARGED; 164.1 ran and merged.
+      `arms: 262/262/0`, `biting: 262`, 0 waivers, exit 0. Next: land 164.4-11 as its own PR with
+      `sql-mutation` GREEN on ubuntu SHA-bound to the head, then `/gsd-verify-work 164.4`.
+      ⏳ Phase 164.4.1 PGCRON-LANE is still owed the 4 lane-blocked files plus the 1 `pending:`
+      file (`test_compute_jobs_error_kind_copy_parity.sql`, ~100 sections).
+      ✅ 2026-09-06: both ⏳ items above are DISCHARGED. 164.4-11 landed (PR #742 `75e58cb1`,
+      closed by PR #743 `3ed6919e`) and 164.4.1 annotated all five remaining files —
+      `lane-blocked: 0`, `pending: 0` at `files 44/71`. Read `FILES_FLOOR` / `ARMS_FLOOR` off
+      `scripts/mutation-runner/run.mjs`, never off a number restated here.
+Last activity: 2026-10-02 — Phase 164.4.2 complete (SUBSET observed on PR #927)
+      ⚠️ RETAINED — this was the `Last activity:` line until 2026-09-06:
+      *"2026-09-04 — Phase 164.4.1 execution started"*
+      all twinned and proven on real pg-lanes with **ZERO waivers** (cumulative 0 across all eight
+      arms moves; `WAIVED_CEILING` unedited). Full corpus **exit 0**: `coverage: files 39/71`,
+      `arms: 262/262/0`, `biting: 262`, `lane-invocations: 262` (tallies agree), `mean 1.0s`, 0
+      defects, 347 s local; the 39 per-file `biting` counts SUM to 262 and the `sections` counts to
+      252. `FILES_FLOOR` 32 → **39**, `ARMS_FLOOR` 247 → **262**, both separation directions driven
+      on real lanes — (39, 262) silent, (40, 263) fires both regressions. Every lockstep pin moved,
+      including `pendingFiles` pinned as a ONE-NAME SET so an empty `pending:` line cannot be
+      shipped as an attestation of completeness. The measured shadow in these files is
+      PRIVILEGE-shaped: a withdrawn privilege aborts with `permission denied for table …`, which
+      carries no `TEST FAILED (…)` and scores NO-IDENTITY — five twins use the RLS ROW filter
+      instead. Two LAYERED arms, each proven layered by running the single-step version (one GREEN,
+      one aborting the apply at its own post-verify). One arm scored NO-RED and the APPLY LIST was
+      the defect: `profiles_self_update` was inert without 20260405061912, the only statement that
+      ENABLEs RLS on profiles. Four new additive stand-ins (25 e2e census seed — 20260823120000
+      refuses to apply on an unidentified database; 26 strategies.api_key_id FK; 27
+      strategy_analytics.computation_error; 28 five privileged profiles columns). `ci.yml`'s
+      sql-mutation timeout projection corrected from an ARMS model to a LEGS model
+      (legs = arms + 2 × annotated files); `timeout-minutes` STAYS 15. SCOPE AMENDMENT #2's
+      40 / 255 recorded as SUPERSEDED and corrected to **39 / 252 / 262** in all seven ledger sites.
+      ⏳ `164.4-11`'s `<human-check>` is OPEN: not landed, so `sql-mutation` has not been observed on
+      ubuntu at a PR head SHA, and the ci.yml legs PROJECTION has not yet been replaced by that
+      run's measurement.
+Prior activity: 2026-09-04 — 164.4-09 executed on the branch as a REDUCED batch (5 of 6 planned
+      files; 20 sections). Both blockers the previous session escalated are DECIDED and discharged.
+      Blocker 2 (`test_resync_retry_single_job.sql` assertion (b), a measured waiver candidate) was
+      resolved by the ROOT-CAUSE FIX, following the founder's own wave-9 `[REDUNDER-WAIVER-01]`
+      precedent: its INSERT is wrapped in the `BEGIN … EXCEPTION WHEN unique_violation` idiom the
+      SAME FILE already used at assertion (c), so a narrowed SV index now reports `TEST FAILED (b)`
+      (single-frame CONTEXT, LOCATION last) instead of a raw 23505 naming no arm. **`WAIVED_CEILING`
+      stays 0** — the second arm this phase has rescued structurally rather than by exception.
+      Blocker 1 (`test_compute_jobs_error_kind_copy_parity.sql`, un-baselineable without pg_cron) is
+      DEFERRED by founder decision to a dedicated plan that puts pg_cron ON the pg-lane, retiring
+      `[REDUNDER-PGCRON]` and unblocking that file plus the four already-deferred ones (~100
+      sections); nothing in `scripts/pg-lane/` or the classifier was touched here.
+      Full corpus run **exit 0**: `coverage: files 28/71`, `arms: 239/239/0`, `biting: 239`,
+      `lane-invocations: 239` (tallies agree), `mean 1.0s over 239 arm run(s)`, 0 defects, 297 s
+      local; the 28 per-file `biting` counts SUM to 239. `FILES_FLOOR` 23 → **28** and `ARMS_FLOOR`
+      219 → **239**, both ratcheted to the run's OWN printed values (NOT the plan's projected
+      29 / 242, which assumed six files) with both separation directions driven on real lanes
+      — (28, 239) silent, (29, 240) fires both regressions. Every lockstep pin moved in the same
+      commit. `.github/workflows/ci.yml` untouched. Two findings booked to TODOS.md:
+      `[REDUNDER-LANEBLOCKED-BLIND]` (the classifier is apply-list-blind, so a pg_cron-blocked gate
+      is miscounted into `pending:`; a tripwire test pins it) and `[REDUNDER-SAVEPOINT]` extended to
+      a class of exactly THREE migrations. ⏳ `164.4-09`'s `<human-check>` is OPEN: not yet landed,
+      so `sql-mutation` has not been observed on ubuntu at a PR head SHA.
+Prior activity: 2026-09-03 — 164.4-02 executed on the branch: the reference file's 15 un-twinned
+      SECTIONS closed (45 twins over 35/35 sections, `arms: 45/45/0`, `biting: 45`, tallies agree),
+      `ARMS_FLOOR` ratcheted 30 → 45 with both separation directions measured, and the durable
+      SET-INCLUSION section pin armed and watched to fail. ✅ 164.4-02's `<human-check>` is CLOSED:
+      landed as **PR #732** (head `b912e4f6`, squash-merged `465985b5`, v0.77.3.0); CI run
+      **33743816665** reports `sql-mutation` success on ubuntu in **102 s**, its own log reading
+      `arms: 45/45/0` / `lane-invocations: 45` / `tallies agree`. Run id + head SHA + wall clock
+      are recorded in `164.4-02-SUMMARY.md` § coverage D6, which is what 164.4-03's precondition
+      reads. The working branch is merged up to that commit, so the tree is at/after the merge
+      both by content and by ancestry. **164.4-03 is unblocked.**
+      ⭐ 2026-09-03 — **164.4-03 executed** on the branch: the runner now DERIVES and prints a
+      `lane-blocked:` class (the 4 idiom files that probe `pg_extension` for pg_cron), PROBES the
+      pg-lane itself once per lane-spawning run (`lane-probe:`), and exits 1 with `lane-blocked-stale`
+      the day pg_cron is available while the class is non-empty — so the deferral can expire instead
+      of parking 100 sections behind a true-looking line. `sql-mutation` MEASURE_FAILs on either line
+      going missing or self-contradicting. SCOPE AMENDMENT #2 is written to all 6 ROADMAP sites and
+      all 3 STATE sites, with criterion 1's silent-exclusion sentence kept verbatim. Full run exit 0,
+      `coverage: files 1/71`, `arms: 45/45/0`, `biting: 45`, `lane-invocations: 45`, floors UNEDITED
+      (1 / 45 / 0); `--self-test` 17/17. ⚠️ Its `<human-check>` is OPEN — nothing pushed, no PR; the
+      ubuntu SHA-bound `sql-mutation` green is owed. Commits `0a9ed7ce`, `508847e9`, `1611ece2`.
+
+⚠️ Phase 160 remains OPEN on its human gate — see `## Deferred Verification`. Advancing this
+pointer to 161 does NOT close it; resume it only via `/gsd-verify-work 160`.
+OPS-CI first (the shared-test-db eviction / #616 mutex protects every later merge), 165 DEPS
+last (hard-blocked on OPS-01), 160 provenance before 164 SHARE (REVOKE soak), SHARE alone in
+its own PR and never branched from `feat/phase-156-connect-refactor`.
+
+### Retained — Phase 156 close-out (COMPLETE 2026-08-13, do NOT lose this)
+
+⚠️ **SHAPE FIX 2026-09-06 — the two field labels below were `Phase:` and `Plan:` and are now
+`Retained phase:` / `Retained plan:`. Nothing else in this block changed; no sentence was cut.**
+Reason: `stateCurrentPositionSlice` (`gsd-core/bin/lib/state-document.cjs:510`) collects
+`## Current Position` with `levelBounded: true`, so every `###` block nested under it — this one
+included — is inside the slice, and `advancePlanCore`
+(`gsd-core/bin/lib/state-transition.cjs:1067`) refuses with `ambiguous_position_phase` when that
+slice matches `/^Phase:.*$/gm` more than once. The `### Blockers` entry recorded the diagnosis and
+proposed moving this whole block to its own top-level section; relabelling the two lines is the
+smaller change that reaches the same result — promoting the heading to `##` would have swallowed
+`### Phase 142.1 scope` and `### Phase 140.1 close-out` into a Phase-156 section they do not belong
+to. This block is still marked *do NOT lose this* and is still retained verbatim below.
+
+Retained phase: 156 (connect-refactor — the venue the server validated is the venue the server writes) — ✅ COMPLETE 2026-08-13
+Retained plan: 10 of 10 complete. PR A shipped as v0.60.0.0 (merge `25e28d3a`) and is LIVE ON PROD; PR B is authored on `feat/phase-156-migration-b` and NOT yet opened.
+
+⚠️ **Progress counters reconciled 2026-08-13 (plan 156-10), and the reconciliation is stated because
+the numbers moved by more than this phase's own delta.** `total_phases: 16` is v1.17's ten phases plus
+the six 153.x splits; `percent` is phase-weighted (`completed_phases / total_phases`), NOT plan-weighted
+— 13/16 was 81. `completed_plans` now reads 88 = every AUTHORED v1.17 plan: phases 153 and 155 contribute
+**zero** because they were never planned, not because their plans are outstanding. ⚠️ The previous value
+`83` over-counted by 3 against a disk census (80 SUMMARY files before this phase's last eight); it was
+hand-set at some point and is not reproducible from `.planning/phases/`. ⛔ Do NOT run
+`state.update-progress` to "fix" this: it recalculates from SUMMARY.md counts on disk and Phase 156 has
+two plans that deliberately produced no SUMMARY (**156-06**, whose artifact is `156-LIVE-ACCEPTANCE.md`,
+and **156-07**, whose output is Migration B itself) — the verb would write 8/10 for a phase that ran all
+ten.
+
+⚠️ **Re-cut 2026-08-14 (plan 153.7-01), by HAND and on the same rule.** `total_phases` 16 → **17**
+(Phase 153.7 was INSERTED 2026-08-14, so it is a seventh 153.x split, not one of the six);
+`total_plans` 88 → **91** (153.7 authors three); `completed_plans` 88 → **89** (this plan);
+`completed_phases` stays **14** because 153.7 is two plans from done; `percent` 87 → **82** on the
+same phase-weighted rule (14/17 = 82). ⛔ `state.advance-plan` and `state.update-progress` were run
+once and **reverted**: they are pointed at Phase 156, and they overwrote the hand-written Migration-B
+warning above with "Phase complete — ready for verification" while setting `completed_phases` 14 → 13.
+That is the failure mode the ⛔ two paragraphs up predicts; it is recorded here rather than repeated.
+
+⚠️ **Re-cut 2026-08-17 (Phase 144 Wave 1), by HAND and on the same rule — stated because the numbers
+moved by more than one phase's own delta.** `completed_phases` 15 → **16** (Phase 143 is done: 4 plans,
+4 SUMMARYs, shipped as PR #687 and merged to `main` at `26a3105d`, migration live on PROD). Its four
+plans were already inside `total_plans: 95` — the baseline's 95−91 = 4 outstanding WERE 143's — so
+`completed_plans` 91 → **95** on 143, then → **96** for 144-01. `total_plans` 95 → **98** (Phase 144
+authors three). `total_phases` stays **21**. `percent` 71 → **76** on the phase-weighted rule
+(16/21 = 76), NOT plan-weighted. `completed_phases` does NOT advance for 144 — it is two plans from done.
+
+⛔ **`state.update-progress` and `state.advance-plan` were NOT run, deliberately.** Both are still
+pointed at Phase 156 and both recalculate from on-disk SUMMARY counts; a repo-wide census reads 257
+PLAN / 258 SUMMARY files against these milestone-scoped 98/96, so either verb would overwrite the
+counters with meaningless repo-wide totals and clobber the hand-written notes above — the exact
+failure recorded in the 2026-08-14 paragraph. Phase 144's Wave-1 executor independently declined to
+touch this file for the same reason (it saw `current_phase: 153.7` next to a Phase-143 `stopped_at`
+and refused to advance a counter against the wrong phase). That refusal was correct.
+
+⚠️ **Corrected 2026-08-13:** this block read `Phase: 153.6 … EXECUTING, Plan: 1 of 6` until now.
+153.6 shipped on `main` (PR #675, commit 54a0d26d) and the position had not been advanced since.
+⚠️ The **Session → Next step** paragraph at the foot of this file was stale for the same reason
+(it said 153.6 "is booked and NOT yet planned") until 2026-08-21, when the Phase 158 closure updated
+it to the current position (Phase 159).
 
 ### Phase 142.1 scope (inserted 2026-08-02)
 
@@ -254,7 +838,6 @@ The line that used to sit here claimed no such file existed; it was stale.
 
 Prior phase: 141.1 (seambackoff-…) — COMPLETE and verified, merged, NOT pushed
 Plan: 8 of 8 (142.1 executed; verification `human_needed`, 7 UAT items open)
-Status: Ready to plan
 
 Prior-phase 141.1 close-out detail (retained; NOT about 142.1):
         `feat/v1.16-141-jobs-rate-retry`. Post-merge gate after Wave 2 GREEN: tsc clean,
@@ -387,9 +970,8 @@ Prior-phase 141.1 close-out detail (retained; NOT about 142.1):
         at `finalize-wizard/route.ts:840-851`), now ledger row TS-33; its "strictly
         after PYAPIFIX-01" ordering is now **SATISFIED**.
         2 WARNING gaps, no BLOCKER. See `140.1-VERIFICATION.md`. Not transitioned (`--no-transition`).
-Last activity: 2026-08-02 -- Phase 142 execution started
 
-Progress: [██████████] 95%
+Progress: [██████░░░░] 56%
 
 ### Phase 140.1 close-out — open items (do NOT lose these)
 
@@ -426,20 +1008,29 @@ Progress: [██████████] 95%
 
 ## Current Focus
 
-**Next: `/gsd:plan-phase 142.1`.** Phase order 140 → 141 → 142 → **142.1 (INSERTED)** → 143 → 144 → 145 → 146.
-Load-bearing sequencing (do not reorder):
+**Next: `/gsd:plan-phase 147`.** v1.17 phase order 147 → 148 → 149 → 150 → 151 → 152 → 153 → 154 → 155.
+Load-bearing sequencing (real dependencies, do not reorder):
 
-- **Breaker (140) BEFORE retry (141)** — fail-fast alone has zero double-execution
-  risk and can land while the SEAM-05 idempotency audit is written; retry without a
-  breaker amplifies an outage. 141 is GATED on the committed audit artifact.
+- **SCEN-01 (147) FIRST** — silent money-path bug AND it blocks meaningful verification of every
+  other scenario surface; the READER is wrong (reuse `resolveDailyReturnSeries`, difference the
+  wealth index, never backfill against migration 087).
 
-- **SEAM before JOB** — JOB sweeps consume SEAM's timeout/upstream/network taxonomy.
-- **142 before 143** — same `strategies`/`strategy_analytics`/`compute_jobs` triangle;
-  one non-racing mechanism.
+- **OWN-02 (148) before NAV-01 (149) / OWN-04 (same phase) / SCEN-03 (152)** — they link to a
+  factsheet that today 404s. 148/149/150 split 2026-08-04: 149 = NAV-01 as a RANKING at discovery
+  parity (reuse the existing ranking component/query — the visibility predicate is the only
+  difference); 150 = OWN-03 wizard question (first OWN write — money-path review isolated).
+  ⛔ Adversarial acceptance: after an owner views their draft, anon must still 404 (the route is
+  public and `unstable_cache`d).
 
-- **145 reproduce-first** — "could not reproduce" the 42501 claim is a valid outcome.
-- **146 (RATE) last** — gap list comes from a fresh kickoff grep, never the stale
-  TODOS.md route list.
+- **AUM (151) after SCEN-01** — its zeros-on-screen symptom is entangled with SCEN-01's; fix the
+  non-ccxt holdings-sync CLASS (sFOX latent, close before its go-live flip), not the MT5 instance.
+
+- **MT5-06..10 (155) LAST** — live funded account, real trading day, stable surface; human- and
+  calendar-gated; MT5-10 UNCAPPED by founder decision; ⛔ no MT5-07 tolerance number exists —
+  founder call at discuss-phase. MT5-GOAL-01 (umbrella) closes there.
+
+- ⏸️ **v1.16 PARKED at 68%** — resume at Phase 143 after v1.17; Phase 144 carries the live WR-02
+  TEST-DELETE/PROD-reset founder decision. 142.3's scope re-homed to 155; MT5-14 to 153.
 
 ## Performance Metrics
 
@@ -472,18 +1063,514 @@ Load-bearing sequencing (do not reorder):
 | Phase 140.3 PG7 | ~12 min | 2 tasks | 1 file |
 | Phase 140.3 PG8 | ~15 min | 2 tasks | 5 files |
 | Phase 140.3 PG9 | ~18 min | 2 tasks | 2 files |
+| Phase 153.3 P01 | 75m | 3 tasks | 8 files |
+| Phase 153.3 P02 | ~65m | 2 tasks | 6 files |
+| Phase 153.3 P03 | 75 min | 3 tasks | 8 files |
+| Phase 153.3 P04 | ~70 min | 2 tasks | 5 files |
+| Phase 153.3 P05 | 85 min | 3 tasks | 5 files |
+| Phase 153.3 P06 | ~70 min | 3 tasks | 10 files |
+| Phase 153.1 P01 | ~35 min | 3 tasks | 2 modified files |
+| Phase 153.1 P02 | 25m | 3 tasks | 3 files |
+| Phase 153.1 P03 | ~55m | 3 tasks | 2 files |
+| Phase 153.1 P04 | 80m | 3 tasks | 2 files |
+| Phase 153.1 P05 | 55m | 3 tasks | 4 files |
+| Phase 153.1 P06 | 75min | 2 tasks | 3 files |
+| Phase 153.2 P01 | 27 | 2 tasks | 2 files |
+| Phase 153.2 P03 | 6min | 2 tasks | 2 files |
+| Phase 153.2 P02 | 20min | 2 tasks | 2 files |
+| Phase 153.2 P04 | ~55 min | 3 tasks | 8 modified files |
+| Phase 153.2 P05 | ~75 min | 5 tasks | 9 files |
+| Phase 153.4 P01 | 21min | 3 tasks | 8 files |
+| Phase 153.4 P02 | 30min | 4 tasks | 6 files |
+| Phase 153.4 P03 | 19min | 2 tasks | 6 files |
+| Phase 153.4 P04 | 25min | 2 tasks | 4 files |
+| Phase 153.4 P05 | 35min | 2 tasks | 4 files |
+| Phase 156 P02 | ~24 min | 2 tasks | 2 modified files |
+| Phase 153.7 P01 | ~22 min | 3 tasks | 1 modified file |
+| Phase 143 P01 | 22min | 2 tasks | 2 files |
+**Per-Plan Metrics:**
+
+| Plan | Duration | Tasks | Files |
+|------|----------|-------|-------|
+| Phase 143 P02 | ~95 min | 3 tasks | 3 created files |
+| Phase 143 P03 | 26min | 3 tasks | 3 files |
+| Phase 145 P03 | 24m | 3 tasks | 6 files |
+| Phase 145 P04 | 56m | 3 tasks | 34 files |
+| Phase 145 P05 | 25m | 2 tasks | 5 files |
+| Phase 146-rate P01 | 11m | 3 tasks | 6 files |
+| Phase 146 P03 | ~25m | 2 tasks | 4 files |
+| Phase 161 P01 | 24min | 2 tasks | 3 files |
+| Phase 161 P02 | 41min | 2 tasks | 9 files |
+| Phase 161 P03 | 50m | 3 tasks | 10 files |
+| Phase 161 P04 | ~55 min | 2 tasks | 3 files |
+| Phase 161-wizerr-honest-error-surfaces P05 | 75m | 3 tasks | 8 files |
+| Phase 161 P06 | 75m | 3 tasks | 13 files |
+| Phase 161 P07 | 85 min | 3 tasks | 8 files |
+| Phase 161 P08 | 35m | 3 tasks | 11 files |
+| Phase 161 P10 | 2h40m | 3 tasks | 15 files |
+| Phase 161 P09 | 1h20m | 3 tasks | 6 files |
+| Phase 161.1 P02 | 96min | 3 tasks | 5 files |
+| Phase 161.1 P05 | 82min | 1 tasks | 1 files |
+| Phase 161.1 P03 | 71min | 2 tasks | 2 files |
+| Phase 162 P01 | ~35m | 2 tasks | 1 files |
+| Phase 162 P03 | 35m | 3 tasks | 5 files |
+| Phase 162 P04 | 25m | 2 tasks | 4 files |
+| Phase 162 P09 | 25m | 2 tasks | 2 files |
+| Phase 162 P02 | 2h40m | 3 tasks | 11 files |
+| Phase 163 P01 | 50min | 2 tasks | 6 files |
+| Phase 163 P03 | 50m | 3 tasks | 98 files |
+| Phase 163 P04 | 33min | 3 tasks | 16 files |
+| Phase 163 P08 | 35min | 2 tasks | 4 files |
+| Phase 164 P07 | 12min | 2 tasks | 2 files |
+| Phase 164 P05 | 32min | 3 tasks | 13 files |
+| Phase 164 P03 | 21min | 2 tasks | 6 files |
+| Phase 164.3.1 P09 | 12 min | 2 tasks | 2 files |
+| Phase 164.3.1 P10 | 22 min | 3 tasks | 3 files |
+| Phase 164.3.1 P11 | 8h 31m | 3 tasks | 8 files |
+| Phase 164.3.1 P12 | 26 min | 3 tasks | 3 files |
+| Phase 164.3.1 P13 | 16 min | 3 tasks | 2 files |
+| Phase 164.4 P00 | 19 min | 3 tasks | 4 files |
+| Phase 164.4 P01 | 34 min | 3 tasks | 9 files |
+| Phase 164.4 P02 | 46 min | 3 tasks | 10 files |
+| Phase 164.4 P03 | 35 min | 3 tasks | 13 files |
+| Phase 164.4 P04 | 84 min | 3 tasks | 12 files |
+| Phase 164.4 P05 | 85 min | 3 tasks | 17 files |
+| Phase 164.4 P06 | 58 min | 3 tasks | 15 files |
+| Phase 164.4 P07 | 63 min | 3 tasks | 15 files |
+| Phase 164.4 P08 | ~75m | 3 tasks | 8 files |
+| Phase 164.4 P09 | resumed session | 3 tasks | 9 files |
+| Phase 164.4 P10 | ~3h | 3 tasks | 9 files |
+| Phase 164.4 P11 | ~3h | 3 tasks | 23 files |
+| Phase 164.4.1 P02 | 68 min | 3 tasks | 7 files |
+| Phase 164.4.1 P03 | 92 min | 3 tasks | 4 files |
+| Phase 164.4.1 P04 | 118 min | 3 tasks | 7 files |
+| Phase 164.4.1 P05 | 175 min | 3 tasks | 6 files |
+| Phase 164.4.1 P06 | 35m | 2 tasks | 9 files |
+| Phase 164.1 P01 | 30 min | 2 tasks | 9 files |
+| Phase 164.1 P02 | 25 min | 2 tasks | 10 files |
+| Phase 164.1 P03 | 22 min | 2 tasks | 24 files |
+| Phase 164.1 P04 | 24 min | 2 tasks | 9 files |
+| Phase 164.1 P05 | 17 min | 2 tasks | 2 files |
+| Phase 164.2.1 P01 | 35m | 3 tasks | 4 files |
+| Phase 164.2.1 P02 | 20m | 2 tasks | 4 files |
+| Phase 164.8 P01 | 22min | 2 tasks | 6 files |
+| Phase 164.8 P02 | (executor died before reporting) | 3 tasks | 1 file |
+| Phase 164.8 P03 | 33min | 3 tasks | 2 files |
+| Phase 164.6.3 P01 | 55min | 2 tasks | 6 files |
+| Phase 164.6.3 P04 | 35min | 3 tasks | 0 files (evidence only) |
+| Phase 164.8.3 P01 | 14 min | 2 tasks | 4 files |
+| Phase 164.8.3 P02 | 12 min | 2 tasks | 2 files |
+| Phase 164.8.3 P03 | 22 min | 2 tasks | 3 files |
+| Phase 164.8.3 P04 | 9 min | 3 tasks | 2 files |
+| Phase 164.6.2 P01 | 41 min | 2 tasks | 2 files |
+| Phase 164.6.2 P02 | 52 min | 3 tasks | 4 files |
+| Phase 164.6.4 P01 | ~50 min | 2 tasks | 4 files |
+| Phase 164.6.4 P02 | ~2h10m | 2 tasks | 6 files |
+| Phase 164.6.4 P03 | ~1h40m | 2 tasks | 2 files |
+| Phase 164.6.4 P04 | ~28 min | 2 tasks | 3 files |
+| Phase 164.6.4 P05 | ~35 min | 2 tasks | 2 files |
+| Phase 164.5.1 P02 | 55min | 3 tasks | 5 files |
+| Phase 164.5.1 P03 | ~35min | 2 tasks | 2 files |
+| Phase 164.5.1 P04 | ~40min | 2 tasks | 2 files |
+| Phase 164.5.1 P05 | ~25min | 2 tasks | 2 files |
+| Phase 164.5.1 P07 | ~50min | 2 tasks | 3 files |
+| Phase 164.5.1 P08 | ~35min | 3 tasks | 4 files |
+| Phase 164.1.1 P01 | 87 min | 3 tasks | 4 created, 8 modified |
+| Phase 164.1.1 P04 | ~55 min | 2 tasks | 3 modified |
+| Phase 164.1.1 P05 | ~50 min | 3 tasks | 1 created, 2 modified |
+| Phase 164.1.1.1 P01 | ~50 min | 3 tasks | 1 created, 3 modified |
+| Phase 164.5.1.4 P01 | ~41 min | 2 tasks | 1 created |
+| Phase 164.5.1.3 P01 | ~20 min | 3 tasks | 3 modified |
+| Phase 164.6 P01 | ~11 min | 3 tasks | 2 created, 4 modified |
+| Phase 164.6 P02 | ~11 min | 3 tasks | 2 created, 4 modified |
+| Phase 164.6 P03 | ~20 min | 3 tasks | 1 created, 5 modified |
+| Phase 164.6 P04 | ~26 min | 2 tasks | 6 modified |
+| Phase 164.6 P05 | ~9 min | 2 tasks | 2 modified |
+| Phase 164.6.5 P08 | ~40 min | 2 tasks | 11 modified |
+| Phase 166.1 P09 | ~20 min | 3 tasks | 5 modified |
+| Phase 164.9.3 P01 | 20 min | 2 tasks | 1 files |
+| Phase 164.9.3 P02 | 15 min | 2 tasks | 1 files |
+| Phase 164.9.3 P03 | 6 min | 2 tasks | 1 files |
+| Phase 164.9.3 P04 | 25 min | 2 tasks | 4 files |
+| Phase 164.9.3 P05 | 57 min | 2 tasks | 5 files |
+| Phase 164.9.3 P06 | 7 min | 2 tasks | 5 files |
+| Phase 170 P02 | 8 min | 3 tasks | 4 files |
+| Phase 170 P03 | 5 min | 3 tasks | 7 files |
+| Phase 170 P04 | 5 min | 2 tasks | 4 files |
+| Phase 170 P05 | 12 min | 2 tasks | 6 files |
+| Phase 170 P06 | 18 min | 2 tasks | 8 files |
+| Phase 170 P07 | 12 min | 3 tasks | 8 files |
+| Phase 170 P08 | 9 min | 2 tasks | 4 files |
+| Phase 170 P09 | 18 min | 3 tasks | 6 files |
+| Phase 170 P10 | 13 min | 2 tasks | 9 files |
 
 ## Accumulated Context
 
+### Phase 170 decisions (plan 02)
+
+- Contract-first geometry spec stays RED at HEAD; assertions are not weakened to pass today.
+- N-STRAT name and tag update goes through getAdmin() via setSeededStrategyNameAndTags.
+- N-MATCH has no match-batch seed; the V960 positive control is the header action bar.
+
+### Phase 170 decisions (plan 03)
+
+- Active-tab scroll stays horizontal-only through computeTabStripScroll; scrollIntoView with block nearest is not reintroduced.
+- Pressed Tweaks tint is aria-pressed:bg-accent/10, the nearest existing accent utility. No new colour.
+
+### Phase 170 decisions (plan 04)
+
+- Empty state prints once in the change-count chip; the summary slot renders only when hasDiffs.
+- Summary items wrap between items: each value-label pair is whitespace-nowrap and the joiner sits outside that span.
+- ResponsiveTable keeps its default hint; list wording is a later copy question.
+
+### Phase 170 decisions (plan 05)
+
+- NowrapWords root is a display:contents div, not a span, so the word spans are the only spans and the name stays in the link's inline flow.
+- Literal space text nodes stay between those spans; dropping them makes noteOf() miss every multi-word name.
+- ShareableLink size defaults to md. Only /strategies passes sm. The discovery detail page is not edited.
+
+### Phase 170 decisions (plan 06)
+
+- Below md, readOnly is forceReadOnly or not isMd. JSX still keys off forceReadOnly so desktop does not flash hidden; CSS hidden md:* hides the write controls.
+- Button omits its base inline-flex when the caller passes a bare hidden class. Tailwind v4 emits inline-flex after hidden, so the base class would keep the control visible.
+- A display name with no email reads "by {name} · Computed {recency}". Unknown is only when both name and email are absent.
+
+### Phase 170 decisions (plan 07)
+
+- The session read stays in the async child. The layout function stays synchronous. JSX is outside the try, because the error-boundaries lint rejects JSX built in try/catch. A failed read still renders Sign in / Sign up.
+- DEFAULT_AUTHENTICATED_ROUTE has one definition. Other copies of the same path were left in place.
+- The one-item note renders when one item resolved, including a single holding. The sentence is the Copywriting Contract literal.
+
+### Phase 170 decisions (plan 08)
+
+- The inset focus ring is on the underline trigger only. The segmented arm keeps the HEAD class strings.
+- The active underline tab is scrolled with computeTabStripScroll from offsetLeft, offsetWidth, scrollLeft and clientWidth. The element scroll-into-view API is not used.
+- A disconnected key row has Reconnect, not Disconnect. That row's action group wraps the buttons it actually renders.
+
+### Phase 170 decisions (plan 09)
+
+- KpiPanel variant defaults to cards. Only the scenario composer passes panel.
+- Panel hairlines are right and top borders, cleared on the last column and the first row with container nth-child, so two columns and four columns do not double the outer edge.
+- The eyebrow is "Scenario blend" in every state. No comparison wording was added.
+- composer-blend-detail stays closed. The composer axe spec opens it before the card checks.
+- SC1-LAYERS stays open. Plan 170-12 also declares it, and REQUIREMENTS.md has no checkbox for it.
+
+### Phase 170 decisions (plan 10)
+
+- The table wrapper carries isolate. The sticky th z-20 and z-30 classes were not changed.
+- The filter bar is top-12 md:top-0 so it sits under the 48 px mobile top bar. The drawer header's bare top-0 was left alone.
+- Strategy names use NowrapWords from plan 170-05. The tag row is flex flex-wrap gap-1 and each tag badge is whitespace-nowrap.
+- The four grey chip sites use text-text-secondary on bg-track. globals.css was not edited.
+- SC2-NOSCROLL stays open. Plans 170-11 and 170-13 also declare it. (k), (l) and CHIP have no later plan and no REQUIREMENTS.md checkbox.
+
 ### Roadmap Evolution
 
+- Phase 169.1.1 HYDRATIONTICKS **inserted 2026-10-02 after Phase 169.1 (URGENT, hand-edited)**: factsheet chart ticks differ between server and browser (`Math.pow(10,n)` engine rounding), React #418 rebuilds the tree and replaces the Overview EquityChart; flakes `e2e/target-size.spec.ts` and turned main CI red. Founder (AskUserQuestion "New phase, first"): runs before 164.9.3.2.1.
+- Phase 166.3.1 NAVBREACH **inserted 2026-10-01 after Phase 166.3 (URGENT, hand-edited)**: the Deribit composite's `native_nav` inception reconciliation breach, which failed Phase 166.3's R5 recompute on PROD. Founder 2026-10-01: record R5 as a residual and route the breach to a named phase.
+- Phase 170.2 PROBEFIXES **inserted 2026-10-01 after Phase 170 (URGENT, hand-edited)**: three user-facing defects from the post-170 browser pass (Holdings sideways scroll, BTC refresh fallback, /compare equity overlay). Founder: one inserted phase with three plans; 169, 169.2 and 170 are closed and get nothing added. `phase.insert`'s ROADMAP blank-line collateral and its `state.json` rewrite were reverted from byte backups.
+- Phase 164.6.5 MT5VALIDATEWEDGE **per-criterion outcome recorded 2026-09-26 (plan 08, hand-edited)**: C3, C5, C6, C7 MET. C1 OPEN (D-03 path, `MT5-SWITCH-WEDGE-CAUSE-01`, Phase 164.6.6). C2 OPEN on its live half (`.planning/WINDOWS.md` entry 68, widened to name the first live `Mt5Client.session_snapshot` read beside the terminate step; founder, post-deploy). C4 OPEN on its calibration half: D-10 answered by scheduled prod-prober run 36134914962 (head `01dcf1cc`) onward; D-11 booked as `TODOS.md` `MT5-PROBER-WEDGE-CALIBRATION-01`, owned by Phase 164.6.6, trigger the next live `-10005` captured before the heal recycles it. Inherited criteria 7 and 8 OPEN (founder UAT). The phase is NOT transitioned to complete: verification is `gaps_found`. ⛔ Scope fence: the eviction is Phase 164.6.6; `[MT5-VERDICT-SINK-01]` stays deferred under its own owner.
+- Phase 164.6.5 MT5VALIDATEWEDGE **edited 2026-09-24 (hand-edited)**: inherited success criteria 7 and 8 were added, routed by founder decision 2026-09-24 (via AskUserQuestion). 7 comes from 161's live MT5 `undetermined` verdict and 8 from 164.5.3's end-to-end live MT5 credential update. Both source VERIFICATION files mark the item resolved-by-routing. The same day, 164.6-VERIFICATION.md was closed to `passed` (7/7 post-merge items, evidence by run id), and 164.4.2's Area E was measured FINAL at 5 runs: the change did not work and the slowdown holds. The founder's follow-up phase for that is NOT booked yet. The frontmatter census above was not recomputed.
+- Phase 164.5.3 inserted after Phase 164.5: MT5CREDS — MT5 account number on the key card + a credential-update path (URGENT)
+- Phase 164.5.4 inserted after Phase 164.5: MT5RECON-GAP — the MT5 backfill path and the login-error classifier both fail silently (URGENT)
+
+- Phase 164.11 DEPLOYGATE **inserted after Phase 164 on 2026-09-13 (URGENT, via `/gsd-phase --insert`)**: Railway's "wait for CI" reads the WHOLE check-suite on `main`'s head, so a red check that does not gate the analytics service silently turns the deployment into `SKIPPED` — FIVE measured in three days (`aa9accb8`, `b076139c`, `05b257f7`, `ffeff9e2`, `9ab3a83a`). Measured end-to-end on the PR #795 merge: CI run `34763669052` went red at 15:05:02Z on a shared-TEST PostgREST 504 (zero real jobs red — two aggregators red via a `needs:` skip), the deploy was skipped, and the re-run's green at 15:39:09Z arrived ~34 min after Railway had already decided. ⚠️ Prod was unharmed ONLY because the `analytics-service/` tree hash was identical at both commits. ⛔ The phase owns the COUPLING; the two causes are owned by 164.9 and 165.
+- Phase 165 DEPS **edited 2026-09-13 (via `/gsd-phase --edit`)**: criterion 5 `[165-NIGHTLY-AUDIT-RED]` added — `nightly.yml` has been RED on `main` for FIVE consecutive days (2026-09-09 → 09-13); run `34758789452` reports `10 vulnerabilities (3 moderate, 6 high, 1 critical)`. ⛔ The critical is `next` itself (GHSA-p293-qw3h-jr36, GHSA-2xp9-vwfh-vxw4) and this repo runs `next@16.2.11`, inside the vulnerable range. ⚠️ Exposure assessed BEFORE routing: Windows arm N/A (Vercel/Linux), AVIF arm needs an `images.formats` opt-in that `next.config.ts` does not make, no component imports `next/image` — but `/_next/image` is live and unauthenticated (`200` measured on prod). Founder chose 165 over a carve-out phase, so it lands with the rest of the churn.
+- Phase 164.9 TESTISOLATION **edited 2026-09-13 (via `/gsd-phase --edit`)**: criteria 11-13 added, routed out of the PR #795 land. `[164.9-SHARED-TEST-TRANSPORT-FLAKE]` supplies the MEASUREMENT criterion 4 asked for — run `34763669052` needed three attempts on identical code (504 → ECONNRESET on a different test set → green), and a live probe proved the PostgREST pool was NOT wedged, so `pg_terminate_backend` was correctly not fired at shared infrastructure. `[164.9-MUTEX-HOLDER-DIED-UNSERIALIZED]` — a job logged that its lock holder died and "the DB work after its death ran UNSERIALIZED" while its verdict stayed unaffected. `[164.9-CREDENTIALED-TESTS-RED-AND-UNGATED]` — 38 live-DB tests red under credentials (skips 280 → 94), with `⛔ UNVERIFIED` written into the criterion because whether CI runs them was NOT measured.
+- Phase 164.1 PROD-OBSERVABILITY **progress corrected 2026-09-12** to `6/6 plans executed`, and Phase 164.6 GATE-HYGIENE **edited** to own the root cause. ⛔ The phase was NOT behind — plan 06 has carried `status: complete` since 2026-09-06 and every artifact it owes is on `main` (`scripts/prod-prober/cron-manifest.json`, `.github/workflows/prod-prober.yml`, `scripts/prod-prober/run.mjs`, and the three dated `SHIPPED in Phase 164.1` lines in root `TODOS.md`). What was broken was the BOOKKEEPING, and it could not be repaired by the handler that exists to repair it: `.planning/phases/` held TWO `164.1-*` directories — the live `164.1-prod-observability-…` and a stale `164.1-harden-guards-…` holding nothing but a `.gitkeep` from the phase's original name — so `find-phase` could not disambiguate, `init.phase-op 164.1` returned `phase_found: false`, `roadmap analyze` called a 6-plan shipped phase `empty`, and `roadmap.update-plan-progress 164.1` refused with `"No plans found"`. Removing the orphan made the handler resolve the phase and it then applied the correct 2-line edit with NO collateral. ⚠️ Fixed once before (`46daa47c`) and regressed by the `-pr` filter (`22a5fe96`), which empties a phase directory but keeps it alive with a `.gitkeep`; booked as `[PHASEDIR-ORPHAN-GITKEEP]` and routed to 164.6. Milestone scope re-derived before and after both writes: UNCHANGED.
+- Phase 168 DRBOPTIONS **edited 2026-09-12** (via `/gsd-phase --edit`): the EXPOSURE paragraph claimed Phase 161.1's go-live step was *"likely blocked by THIS, not by scheduling"*. That was a GUESS written before anyone read the composite, and PROD refutes it. MEASURED 2026-09-12: Alpha Centauri (`081f2912`) last computed 2026-08-25 `complete_with_warnings`, 272 return points; its one failed job (`978e2d20`, `stitch_composite`, `failed_final`) reports `run_stitch_composite_job: member ledger unrecoverable — native_nav inception reconciliation breached venue=deribit currencies=[BTC] breach_ratio=436` — a NAV reconciliation breach that NEVER REACHED the classifier. ⭐ Planning consequence, now stated in the entry: settling 168 will NOT by itself unblock 161.1's go-live step, and the reconciliation breach is a separate defect still needing an owner. The same correction is applied to root `TODOS.md`'s `[DERIBIT-ASSIGNMENT-UNCLASSIFIED]`. Milestone scope re-derived before and after the write: UNCHANGED (`complete`, same phase set). ⚠️ `state.add-roadmap-evolution` WAS run first per the founder's 2026-09-11 rule (try the handler, intervene only on a MEASURED clobber) — it clobbered, exactly as this file's banner predicts: it DELETED `current_phase:`, injected a blank line between every `#` line of the census banner, and recomputed the HAND-SET progress block from local disk (29/15/141/137 -> 33/8/111/105). Reverted from a byte backup; this entry is hand-written.
+- Phase 164.8.4 GATERESIDUE **edited 2026-09-10** (founder request, via `/gsd-phase --edit`): criterion 7 annotated with a hand-off from Phase 164.7 plan 06, which touched `.planning/WINDOWS.md` that same day. Two changes, different in kind, and the note keeps them apart: (a) a REAL defect already fixed — the frontmatter carried TWO `last_updated:` keys with the later one first, so a YAML parser took the OLDER value; a duplicate key that silently loses the newer write is a plausible member of the very mechanism criterion 7 names, and a planner must read the frontmatter at HEAD rather than hunt a duplicate that is gone; (b) NOT a drift correction — `open_count` 37→36 / `fixed_count` 10→11 went with entry 25 being dispositioned from measurement (VAC-04's first real-PROD execution, run 34146946050), which is normal bookkeeping. ⛔ The criterion is explicitly NOT closed by either: whether an append is accepted without a rewrite, and whether the counts can drift by another route, stays unmeasured. Milestone scope re-derived before and after: UNCHANGED. ⚠️ `state.add-roadmap-evolution` again deliberately NOT used (clobberer list).
+- Phase 164.8.3 PROBERAUTH **edited 2026-09-10** (founder request, via `/gsd-phase --edit`): success criteria 6 → 8. Added (7) `terminal_info()` must be recorded as `connected` and `trade_allowed` — two separate booleans, not the present/absent string the arm writes today (`arms/mt5.mjs:113-117`) — because those are exactly the two fields `mt5-go-live.md` Step 2 names as the verification, so the instrument does not check the criterion it exists for; and (8) the narrowed `--arm` diagnostic must PUBLISH what it measured — measured on dispatch run 34497471175, `--arm mt5` emitted no arm output at all and exited 1, because the narrowed path writes to `$RUNNER_LOG` and neither echoes nor uploads it. Plus a dated evidence block carrying the Journal lines that identified the real root cause (the terminal re-attached to an unauthorizable account on 2026-09-07 04:05 and failed identically for three days) and its resolution at ~16:10Z, verified by prober run 34500455961 whose issue-comment step was SKIPPED. Milestone scope re-derived before and after the write: UNCHANGED. ⚠️ `state.add-roadmap-evolution` was deliberately NOT used — it is on this file's clobberer list and recomputes the progress block from local disk.
+- Phase 156 added after Phase 155: CONNECT-REFACTOR — service-role writer + withdraw `authenticated` EXECUTE, closing the CR-01 deferred-control residual shipped live in 153.6. ⛔ sFOX go-live PULLS IT FORWARD (the residual's defence expires when a syncable venue joins scopeProbeSupported:false).
+- Phase 156 PULLED FORWARD AHEAD OF 155 (founder call 2026-08-13) and ✅ **COMPLETE the same day, 10/10 plans**. 155 stayed blocked on three gates none of 156's work could clear (a founder at the terminal on a trading day, a working MT5 validate, and a tolerance number that does not exist and must not be invented), while sFOX go-live was already booked — so waiting bought nothing and left a live-on-PROD deferred control open for longer. ⭐ Shipped as **TWO PRs with a live PROD gate between them** (PR A = v0.60.0.0 `25e28d3a`, gate = `156-LIVE-ACCEPTANCE.md` rows 1–5 pass, PR B = Migration B + gates + prose). This is the worked example a future privilege change copies: both single-migration orderings produce a total connect-a-key outage window.
 - Phase 140.1 inserted after Phase 140: PYAPI — Python service contract, status attributability & limiter identity (URGENT)
 - Phase 140.2 inserted after Phase 140: SEAMCORE — Seam core & breaker correctness + harness integrity (URGENT)
 - Phase 140.3 inserted after Phase 140: SEAMUX — Client & wizard seam error surface (URGENT)
 - Phase 141.1 inserted after Phase 141: 8-agent review campaign: Retry-After built by 140.5 never consumed; breaker threshold uncalibrated for per-attempt counting; SEAM-05 evidence wrong in 4 places. Zero user-facing/data-integrity defects. (URGENT)
 - Phase 142.1 inserted after Phase 142: Close 142 code-review findings: chain-start stamp preservation, deploy sequencing, terminal-writer parity, census boundary, SQL gate lock scope (URGENT)
+- Phase 142.2 inserted after Phase 142: Get MetaTrader 5 running end to end on the unified backbone (URGENT)
+- v1.17 roadmap created 2026-08-04 (Phases 147–153); v1.16 PARKED at 68% (13/19 phases, 119/127 plans; resume at Phase 143). Phase 142.3's scope (MT5-06..10) re-homed to Phase 153, MT5-14 to Phase 151. Ordering locked: SCEN-01 first, OWN-02 before NAV-01/OWN-04/SCEN-03, AUM after SCEN-01, MT5 numeric verification last
+- v1.17 roadmap REVISED 2026-08-04 (Phases 147–155): the approved Phase 148 (OWN-02/03/04 + NAV-01) split into 148 OWN-02/04 (owner factsheet, adversarial cache acceptance), 149 NAV-01 (my-strategies ranking at DISCOVERY PARITY — founder sharpened the ask from 'an overview' to ranking parity over every uploaded key incl. private/draft), 150 OWN-03 (own-capital-vs-verifying wizard question, money-path review isolated); later phases renumbered +2 (AUM→151, SCEN→152, WIZFORM+MT5-14→153, WIZCONT/STALE→154, MT5-VERIFY→155). All ordering constraints unchanged and now structural (149 cannot start before 148)
+- Phase 153.6 inserted after Phase 153: PARITY — nine findings from the /code-review xhigh over the 153->153.5 span; three of four root causes are one-path-only fixes (URGENT)
+- Phase 161.1 inserted after Phase 161: LEDGER-REFRESH — recurring strategy refresh for ledger-backed venues (mt5/sfox/deribit). Founder-reported 2026-08-23, root-caused by PROD measurement 2026-08-24: process_key_long is the ONLY path reaching strategy_analytics for a ledger venue and is enqueued solely at strategy creation; both daily strategy crons gate on ccxt-only exchange sets. Ship the mechanism DORMANT (schedule unregistered, founder-gated live op) per the SFOX_ENABLED / WORKER-03 pattern. (URGENT)
+- Phase 164.1 inserted after Phase 164: HARDEN-GUARDS. Scope collected in TODOS 0.01: DEC-1/3/4 (spine gates, composite twin, advisory lock), the PYAPI-06 detection gap found in the 2026-08-25 prod outage, phase 161's deferred error-surface items D-161-01..07-B, and WIZFORM-02 (code:UNKNOWN) with a live 2026-08-25 reproduction. Ordering is load-bearing: MUST follow 164, because DEC-1 retires guards over scenarios/scenario_shares and 164 is the phase that touches them. NOTE: Current Phase pointer deliberately NOT moved to 164.1 — work is in flight on 162 and this phase is scheduled, not urgent-next.
+- Phase 164 RESTRUCTURED to three waves 2026-08-27 (5 plans -> 7). Driver: the red-team synthesis established that 164-03's merge is a GATE, not a step — the moment the mint route makes `strategy_shares` owner-writable, N1 (INT4 generation overflow) becomes reachable by any owner via a single PATCH, is unrecoverable without DDL, and ABORTS that data subject's own Art.17 erasure. Harmless only while the table has zero rows, which is the window 164-03 closes. New wave 2 = 164-05 (moved up) + 164-06 (N1+N2 root closure, NEW) + 164-07 (F6 transitive cache guard, NEW); wave 3 = 164-03 + 164-04. Six merge conditions tabulated in ROADMAP against SYNTHESIS.md:270-287. ⛔ `20260827130000_sanitize_user_revoke_strategy_shares.sql` is BLOCKED on DRIFT-02 (re-based on a repo file PROD superseded by a surgical in-place patch; shipping it would point Art.17 erasure at a VIEW). Three residuals accepted and NAMED in TODOS.md: SHARE-RES-R4 (PITR), SHARE-RES-R2g (service_role), SHARE-RES-F5 (capability-URL channels). Three process standards routed to 164.1: PROC-01 (runnable PG before authoring), PROC-02 (reviewers declare execution status), PROC-03 (per-arm RED-UNDER).
+- FOUNDER RULING 2026-08-27: N2 DROPPED, 164-06 is N1-ONLY. Gate condition 3 closed as not-a-defect on measured evidence (3 interleavings x 2 concurrent sessions, all converge; both RPCs are single statements, no read-then-write window). Overrides the red-team corpus, which records N2 as [M]-severity. The prescribed remedy was the hazard: `revoked_at IS NULL` is the convergence contract and STEP 6 arm (i-b) guards it, so adding `SELECT ... FOR UPDATE` and rewriting that arm would have REMOVED the guard and created the counter-inflation bug. Re-opening requires new MEASURED evidence, not re-reasoning. N1 still reproduces and 164-06 still exists to close it.
+- Phase 164.3 inserted after Phase 164: VACUITY — mechanical detection of controls that cannot fail. Driver: phase 164 produced FIVE distinct vacuity mechanisms plus the DRIFT family; every one was GREEN in CI, survived review, and was found only by adversarial execution after a six-team red team. Deliverables are mechanisms not instances: a mutation runner over RED-UNDER annotations, the throwaway-Postgres CI lane (PROC-01), a static linter for the five measured shapes, and a repo-vs-PROD body diff before any whole-body CREATE OR REPLACE (DRIFT-02b). Ordered after 164.2 by number only. EXCLUDES the GSD-machinery gaps (depends_on unenforced, wave frontmatter drift, NYQ-01) — different system.
+- Phase 164.4 inserted after Phase 164.3: REDUNDER-BACKFILL: RED-UNDER coverage measured at 1 file of 71 at HEAD; 164.3 criterion 1 assumed all arms already annotated. HARD dep on 164.3 — its mutation runner is what makes a hand-authored RED-UNDER machine-checkable instead of a claim. (URGENT)
+- Phase 164.3.1 inserted after Phase 164.3: SOUND-PRIMITIVES: both mutation-runner primitives re-opened a FOURTH time (R4-C01 neuter scan, R4-C02 identity nonce). Blocks 164.4. (URGENT)
+- Phase 164.3.1 edited: scope widened from TWO primitives to FOUR (founder decision): adds PRIMITIVE C (VAC-04 reports PASS having compared nothing, WR-01 -> R2-W03 -> SP-C05 -> round 4) and PRIMITIVE D (a control whose own oracle or fixture agrees with it by construction); absorbs VAC04-C1..C4, AUDCOV-01, VAC-SELFREF-01, MUT-I01, MUT-W02; deliverables 4 -> 7; success criteria added. Only MUT-I02 and MUT-I03 remain in TODOS.
+- Phase 164.3.1 edited: added deliverables 8 (diagnostic-first) and 9 (VAC-08 regression instances + absurdity floor on VAC-04 and the mutation runner); widened PRIMITIVE C to both verdict directions after VAC-08's 253-of-262 mirror case; success criteria 7-9 added; sample-vs-corpus logged as a RULE, deliberately NOT a fifth primitive (one instance vs four reopenings for A-D)
+- Phase 164.1 edited: edited fields: goal, success_criteria — scope ADDED 2026-09-01: CRON-OBS-01, MT5-WEDGE-OBS-01 (production observability; routed here not to 164.3/164.3.1 which own gate integrity)
+- Phase 164.2 edited: added Success Criteria (6, was 0): pins WIZFORM-02 code:UNKNOWN to measurement-not-inspection after Phase 153 span verification failed 2026-08-13; also resolved the 164.1-vs-164.2 WIZFORM-02 ownership contradiction left by the 2026-08-28 dedup
+- Phase 166 added at the END of milestone v1.20 (after 165): QSTATS-TRUTH — every quantstats-derived number reflects the returns it was given. ⚠️ RESEARCH-FIRST + discuss REQUIRED; the upgrade-vs-inline-mirror shape is not decidable from the codebase. Closes the RANK-05 price-detection residual recorded in `.planning/WINDOWS.md` entries 5 and 9 (both `open`), which persisted MEASURED-wrong scalars (`ulcer_index=0.9947`, `upi=2.9999`, `serenity_index=0.3204`, `recovery_factor=2.0737`, `common_sense_ratio=0.0`) into `metrics_json` for a series whose `max_drawdown` correctly read 0.0. ⛔ Also fixes the RANK-05 region gate, which matches LINES and is therefore structurally blind to the `getattr(qs.stats, attr)` dispatch at `metrics.py:1826` and to `_rolling_alpha_beta` (`:2071`, feeds RENDERED chart series) — it reports clean over the exact surface still open, a 164.3-class control that cannot fail. Carries TODOS 0f `[159-SIMPLIFY-DEFER]`. ⭐ Routing decision (founder asked 2026-09-03 whether it belonged in 164.1 or 164.2): NEITHER — 164.1 is gate hygiene + production observability, 164.2 is the failure SENTENCE a user reads. A wrong Sharpe is not an error surface, it is a confident lie, so the thesis is Phase 162's (HONEST) and it earns its own phase.
+- Phase 164.1 edited: re-partition 2026-09-05: edited fields title, goal, requirements, success_criteria (HARDEN-GUARDS -> PROD-OBSERVABILITY; gate-hygiene half moved to 164.5/164.6, 161-ERRPREFIX to 164.2)
+- Phase 164.2 edited: re-partition 2026-09-05: edited fields requirements, success_criteria (+RE-PARTITION block: 161-ERRPREFIX moved in from 164.1, WR-06-UTC both bucketers, HONEST-08-RESIDUAL; old criterion 6 wizardSessionId dropped as already satisfied)
+- Phase 164.5 inserted: BASELINE-SNAPSHOT created 2026-09-05 by the 164-family re-partition: baseline.sql load-bearing, DRIFT-04 drop, DRIFT-05 both directions, VAC08-LEDGER-32, VAC-07 (deferred from 164.3)
+- Phase 164.6 inserted: GATE-HYGIENE created 2026-09-05: OPS-08-F9/F8/TS/F2, composite-stamp twin (161.1-D13) TS half, PROC-02, PROC-03 residual, H-0001 residual, WINDOWS 23
+- Phase 166 reordered: moved ahead of 165 on 2026-09-05 so dependency churn lands LAST; 166 depends_on 164.6 (ordering only)
+- Phase 164.5 edited: added item (7) CRON-DRIFT-01-REPAIR + criterion 7; title 'the one'->'the two production objects'; requirements +CRON-DRIFT-01 (repair half); depends_on +164.1
+- Phase 164.5 AMENDED 2026-09-07 (founder decision): item (7) CRON-DRIFT-01-REPAIR and its criterion 7 were SPLIT OUT into new Phase 164.5.1 CRONREPOINT; criterion 8 renumbered to 7; title reverted 'the two production objects'->'the one production object'; CRON-DRIFT-01 dropped from 164.5 Requirements and the Phase 164.1 cron-manifest clause dropped from its Depends on. REASON: item (7) was the only item resting on an unresolved conflict — ROADMAP said write a forward migration that re-schedules, while migration 20260907120000 (merged the same day) states a migration that schedules is a scope violation and the registration statement lives in the runbook. The conflict was surfaced, not averaged. Two of old criterion 7's clauses were also measured FALSIFIED: the 'grep decrypted_secrets returns ZERO hits' claim now returns 3 files (two of them annotations Phase 164.7 itself added in 14b3b6c3), and repointing jobid 1 would turn Phase 164.1's cron-drift arm RED unless cron-manifest.json is re-captured in the same phase.
+- Phase 164.5 PLANNED 2026-09-07: 8 plans, 2 waves. gsd-plan-checker returned 1 blocker + 6 warnings, ALL FIXED and re-validated (frontmatter valid, plan-structure 0/0 on all 8). The blocker was authority-shaped: plan 05 rewrote a ROADMAP success criterion autonomously; it now carries a blocking decision checkpoint and autonomous: false. THREE founder gates in this phase: criterion 5's amendment (plan 05 task 3), DEC-4 on 161.1-D1 (plan 08 task 1), and the DRIFT-04 DROP apply (plan 06 task 4, one-way production DDL).
+- Phase 164.5.2 BRIDGELOCK INSERTED 2026-09-07 via `/gsd-phase --insert` (founder answered DEC-4: own-phase). Plan 08 lifted whole out of 164.5 and renamed 164.5.2-01; only its frontmatter and its now-answered DEC-4 checkpoint changed. 164.5 drops to 7 plans and ONE production-DDL apply. ⚠️ The CLI placed 164.5.2 immediately after 164.5, i.e. BEFORE the existing 164.5.1; reordered by hand so .1 precedes .2. ⚠️ The insert-phase workflow's update_project_state step calls `state.add-roadmap-evolution`, which is on THIS FILE's banned-handler list — it was NOT run, and this entry was written by hand instead.
+- Phase 164.5 WAVE 2 COMPLETE 2026-09-07. Criterion 6/VAC-07 EARNED (RED with the fence removed naming its own assertion, GREEN restored by byte backup; two clients, two access tokens, the race observed opening in the route's own logs). Criterion 3 BUILT and REVIEWED but NOT APPLIED — the apply is the founder's, and its PROD pre-flight has never run. Three reviewers: rls-policy-auditor SAFE TO APPLY, migration-reviewer DO NOT APPLY YET (sequencing), silent-failure-hunter NOT TRUSTWORTHY (--expect-absent was a check that could not fail). All findings FIXED and orchestrator-verified: preflight self-test 24/24 -> 41/41, HIGH-1 now exits 1, and a marker-check mutation reproduces the vacuity on demand. ⭐ DECISIVE FINDING: create_allocator_connected_strategy has been NON-COMPLETABLE since 2026-08-06 (never sets capital_ownership; the own-capital BEFORE INSERT trigger aborts its third insert) — measured on the pg-lane with the real bodies. TODOS' 'MEASURED 2026-08-29: still WORKS' was false and is corrected. That, not pg_stat_statements, is the authorising basis. ⛔ BEFORE THE APPLY: set ALLOC_EXPECT_DB_MARKER, run the pre-flight against PROD (a non-zero exit stops the attempt), and schedule the baseline.sql regeneration + NAME_SET_RATCHET deletion as the SAME follow-up PR or every later migration PR goes red on a gate with no ratchet.
+- Phase 164.5 SHIPPED 6/7 as PR #757 (branch phase-164.5-baseline-snapshot-pr) 2026-09-07. Founder decisions: (1) pre-flight only, then report — the apply is NOT authorised; (2) baseline.sql regeneration rides the SAME PR as the DROP; (3) ship the six completed criteria now.
+- ✅ **DECISION 2 REVISED 2026-09-07, AFTER the consequence below was measured.** The founder's first answer was same-PR regeneration; shown that it turns gate (b) red on the DROP PR itself, the founder chose **regenerate in the FOLLOW-UP PR** instead. SO THE SEQUENCE IS: PR 1 carries the DROP ONLY; PR 2 regenerates `baseline.sql` from the now-correct PROD **and** deletes the `NAME_SET_RATCHET` row — both in that same PR 2, because once the baseline is regenerated the ratchet row becomes neither-side and gate (a) goes red until it is deleted. ⚠️ A RED WINDOW exists between the two PRs: gate (b) blocks any OTHER migration PR opened in between, so PR 2 must follow immediately. No ratchet was added to gate (b) and no allowlist was widened — the post-apply snapshot is honest by construction. The paragraph below is retained as the dated reasoning that produced this revision.
+- ⛔ **DECISION 1 2026-09-07: the DROP is NOT authorised on hand-taken measurements.** The founder requires `scripts/preflight-drop-allocator-fn.sh` ITSELF to run against PROD first. My four measurements all pass, but a hand measurement is not the artifact that gates, and this is the one gap all three reviewers named. It also gives the NEW identity control (exit 7) its first exercise against a real database — today it is stub-proven only. Needs in the environment: `SUPABASE_PROJECT_REF`, `SUPABASE_DB_HOST`, `SUPABASE_DB_PASSWORD`, `SUPABASE_ACCESS_TOKEN`, plus `ALLOC_EXPECT_DB_MARKER=PRODUCTION`. ⛔ Claude does not handle those values.
+- ⚠️ DECISION 2 HAS A MEASURED CONSEQUENCE TO SEE BEFORE THE APPLY (not a reason to change it, a reason to sequence it): baseline.sql is a snapshot OF PROD, and PROD does not lose the function until the merge. Regenerating in the SAME PR means the committed baseline loses it while live PROD still has it, so DRIFT-05 gate (b) — which has NO ratchet in either direction, its base-only branch setting bad=1 unconditionally — goes RED on the DROP PR ITSELF, not merely on the next one. Needs either a scoped expiring ratchet row on gate (b) added FIRST, or gate (b) taught that the PR's own migrations explain the difference. ⛔ Never by silently widening an allowlist.
+- ⭐ PROD PRE-FLIGHT MEASUREMENTS 2026-09-07 (read-only; the GATE SCRIPT DID NOT RUN — credentials absent, it refused with exit 1 as designed): marker=PRODUCTION (so ALLOC_EXPECT_DB_MARKER can pin 'PRODUCTION'); signature 11 args EXACT match to the DROP; ACL authenticated=X AND service_role=X (both grantees confirmed on PROD); (a) md5 325b9b52… len 2271 byte-identical both sides; (b.1) 0 pg_depend rows; (b.2) 0 pg_proc bodies naming it — the MED-1 reader, closing that gap on real PROD; (c) pg_stat_statements INSTALLED (no exit-6 abort), 5 matching statements ALL DDL from the hand-creation, ZERO invocations. TEST: 0 overloads, confirming [164.5-TEST-EXCEPT-DRIFT04].
+- ⛔ ORCHESTRATOR ERROR 2026-09-07, recorded because it nearly shipped: a `git checkout` back to this branch FAILED (untracked transient .planning copies left by the PR filter blocked it) and the next commit landed on the `-pr` branch instead. Caught by re-reading the branch, reset to the pushed head 187bcfed, redone here. ⚠️ ALWAYS re-read `git branch --show-current` after a checkout in a PR-filter flow; the checkout's own failure is easy to miss in a compound command.
+- Phase 164.5 criterion 5 AMENDED 2026-09-07 (founder: amend): pinned to `0 NEW drift` with 31 named dispositions, since "zero unledgered migrations" is unsatisfiable on the disposition route by construction. Count corrected 32 -> 31. The stronger TEST-really-holds-them goal moves to Phase 164.8.
+- Phase 164.2 edited: added in-scope item 5 (public uncomputed-factsheet placeholder speaks to a developer on the anonymous prod path) + success criterion 9; found 2026-09-05 while re-measuring Phase 159 item 2 in a live browser
+- Phase 164.6 edited: requirements +VAC08-COUNT-SPM01 (test-ledger-drift-check.sh:372-373 false-clean; booked 2026-09-05)
+- Phase 164.6 edited: requirements +MT5-VERDICT-SINK-01 (MT5 capability verdict has no durable sink; routed here not 164.1 because 164.1's ledger and ARMS_FLOOR are already pinned)
+- Phase 164.7 inserted after Phase 164: APPSETTINGS — app.* GUCs are unsettable on Supabase (ALTER DATABASE and ALTER ROLE both 42501, measured on PROD 2026-09-05); 12 read sites across 4 settings; blocks 161.1 activation. Founder rejected the in-cron-command workaround in favour of the proper fix. MUST precede 164.5. (URGENT)
+- Phase 164.7 edited: carried in VAC04-ARMS-OBSERVE (observation half of [VAC04-ARMS-UNRUN]) — goal paragraph, success criterion 7, requirements line; [VAC-04-ROLE] deliberately excluded
+- Phase 164.6 edited: carried in MYPY-MAINPY-01 from 164.1-02 deferred-items — goal item (9), success criterion 6, requirements entry; analytics-service/tests/ policy question deliberately excluded
+- Phase 164.2.1 inserted after Phase 164.2: SESSIONID-FENCE — stale wizardSessionId root cause; the 2026-09-05 re-partition dropped it from 164.2 as already satisfied, measured FALSE 2026-09-06 (URGENT)
+- Phase 164.6 edited: carried in PROBER-CALIBRATION-01 (commit `61aa8cf0`, 2026-09-06) — goal item (10), success criterion 7, requirements entry. Found BY HAND at the PR #748 merge gate, not by a gate: the arm named `CALIBRATION: an UNGUARDED exit 0 on the probe path is still caught` (`src/__tests__/prod-prober-wiring.test.ts:292`, shipped in PR #748 / v0.77.15.0) mutates the schedule guard and then asserts only that the text changed — it never re-runs the `guardAt`/`exitZeroAt` check at `:279-281` against the mutant, so it passes with `:279-281` deleted outright. NOT vacuous in effect (removing the guard IS caught by the `toContain` at `:277`), but the arm's name promises a proof it does not perform. Non-blocking by the stopping rule — neither user-facing nor data-integrity — so #748 landed at v0.77.15.0 with this booked rather than fixed. ⚠️ `61aa8cf0` touched ROADMAP.md ALONE; this STATE entry was added 2026-09-06 during the STATE reconciliation, because a scope amendment touching one file is incomplete.
+- Phase 164.8 inserted after Phase 164.6: TESTPREPROD — TEST becomes a real pre-prod. Founder decision 2026-09-06: bring the shared TEST project current, then apply migrations to TEST on merge BEFORE PROD. Closes the class where sql-tests goes red on migration PRs purely because the migration never reached TEST (nothing applies migrations to TEST today, so pre-apply gate SKIPs are permanent). Queued LAST in the 164.x series, after 164.6 — accepted cost: 164.7 and 164.5 each write forward migrations and will each hit the hand-apply path first. Current Phase pointer deliberately NOT moved (scheduled, not urgent-next; same precedent as the 164.1 insertion). ⭐ **SUPERSEDED 2026-09-08 — 164.8 is PULLED FORWARD and runs NEXT, ahead of 164.5.1, 164.5.2 and 164.6.** The sentence above stays as the dated record of the 2026-09-06 decision; it is no longer the live ordering. Two things changed on 2026-09-08. (1) The accepted cost stopped being per-PR friction: VAC-08 enumerates EVERY repo migration against the TEST ledger on every `sql-tests` run, not just a PR's diff, so `main` itself is RED at `78cfaef4` and every PR opened until 164.8 lands inherits a red `sql-tests` + `frontend` that a human must hand-triage as "the known one". (2) 164.8's OWN design was found to break on the migration that caused it — `20260908120000` is a bare `DROP FUNCTION` with no `IF EXISTS` and TEST has ZERO overloads of the target, so BOTH halves of 164.8 (bring-TEST-current and apply-on-merge) hit `42883` and abort on a migration that is CORRECT for PROD. The former dependency was documented "ordering only — no code dependency", so nothing technical resisted. Booked as `[164.5-TEST-VAC08-DROP-UNAPPLIABLE]`.
+- Phase 164.6 edited: carried in CI-DOCSPATH-01 (2026-09-06, at the PR #750 merge gate) — goal item (12), success criterion 9, requirements entry, and a TODOS entry. MEASURED on PR #750 itself, not estimated: a four-file `.planning/`-only diff ran 21 jobs / ~3,001 job-seconds (~50 min), excluding `e2e-seeded` and `sql-tests` which were still running at census time; `sql-mutation` 559s, `python` 494s, `e2e` 405s. The mutex cost is the real one — `e2e-seeded` and `sql-tests` each take the shared-TEST-DB advisory lock, so a roadmap edit delays real code PRs on a database shared with other people's CI. ⛔ Booked in 164.6 rather than left in TODOS because a job-skipping path filter has the shape of a gate silently not running, which is this milestone's defect class: criterion 9 requires proof on a CODE push that everything still executes, not merely proof that a docs push got fast. ⚠️ STATE entry written BY HAND: `state.add-roadmap-evolution` recomputes the `progress:` block from local disk as an undocumented side effect (observed earlier the same day on the 164.8 insertion), and this checkout cannot see the filtered 164.2 plans.
+- Phase 164.9 inserted after Phase 164: TESTISOLATION — per-run isolation replaces global truth against the shared TEST project, closing FANOUT-GLOBAL-01. Inserted because two hardening items were deferred to no phase during 164.8 discuss. (URGENT)
+- Phase 164.10 inserted after Phase 164: BODYDRIFT — PROD runs an EARLIER revision of three function bodies than the migration chain renders; DRIFT-06 repaired under the three-reviewer rule. (URGENT)
+- Phase 164.8.3 inserted after Phase 164.8: PROBERAUTH — prod-prober names MT5 -6 (no authorized account) instead of the catch-all mt5-terminal-error (URGENT)
+- Phase 164.9 moved after Phase 164.8: CORRECTION to the two entries above: phase.insert places a new decimal immediately after the named INTEGER phase, so 164.9 and 164.10 were written directly after Phase 164 — ahead of 164.7, 164.3, 164.5 and 164.8. Both sections were then RELOCATED BY HAND to the tail, after 164.8, because ROADMAP file order is the queue and 164.9 depends on the TEST restore that 164.8 delivers. Their 'inserted after Phase 164' wording above describes the tool call, NOT the final position.
+- Phase 164.8 moved after Phase 164.5: Section physically relocated to sit after 164.5 and before 164.5.1, so FILE ORDER matches the pull-forward decided earlier the same day. Until this move the phase was pulled forward in prose only, and roadmap.analyze walks file order — it would have returned 164.6 as next_phase. Prose is not the queue.
+- Phase 164.9 edited: edited fields: requirements — routed TODOS [164.8-DATA-DEPENDENT-MIGRATION-ESCAPE] here from Phase 164.8 plan-checker blocker B4 (restore is schema-only, so TEST mirrors PROD's catalogue not its data); 164.10 rejected as home, function-body scope only
+- Phase 164.8 edited: edited fields: plans — 5 to 6 after the plan-checker REVISE split plan 01's self-test harness into its own plan (W8, plan 01 was at 0.95 budget)
+- Phase 164.9 edited: routed [164.8.1-REPLAY-INSERT-ONLY-SCOPE] here from Phase 164.8.1 PR review: requirements line + ROUTED HERE block
+- Phase 164.9 edited: routed [164.8-PUSH-RACE-VAC08] here from Phase 164.8 plan 05: VAC-08 and apply-test share advisory key 61616158
+- Phase 164.5.1 edited: A1 measured on shared TEST (Vault read permitted) — gate lifted; migration-vs-runbook narrowed to the rebuild statement
+- Phase 164.8.5 inserted after Phase 164.8: PROBERPARSE — the prober's dodgeable hygiene rules and silently-dropping parser, from Phase 164.7's post-merge code review (URGENT) Current Phase pointer deliberately NOT moved — these are DEFERRAL DESTINATIONS for Phase 164.7's post-merge review findings, scheduled rather than urgent-next (same precedent as the 164.1, 164.8 and 164.4.1 insertions). ⛔ `state.patch` cannot write `Current Phase` / `Next recommended run` in any case.
+- Phase 164.8.6 inserted after Phase 164.8: VAULTTICKFIX — the forward migration for Phase 164.7's SQL-side findings, including a verification check that cannot fail (URGENT) Current Phase pointer deliberately NOT moved — these are DEFERRAL DESTINATIONS for Phase 164.7's post-merge review findings, scheduled rather than urgent-next (same precedent as the 164.1, 164.8 and 164.4.1 insertions). ⛔ `state.patch` cannot write `Current Phase` / `Next recommended run` in any case.
+- Phase 164.8.3 edited: routed: MT5 -6 confirmed live on prod-prober run 34609247983
+- Phase 164.5.1 edited: routed: cron-manifest re-captured at ws-collapse-v2 (PR #776); residual is the missing CI normalization-match gate
+- Phase 168 added: DRBOPTIONS — classify Deribit's `assignment` transaction-log type against a CAPTURED row census rather than a guess. Owner of [DERIBIT-ASSIGNMENT-UNCLASSIFIED], a live customer-visible ingestion failure measured on PROD 2026-09-12 (job 0c5ad574). Founder chose a NEW phase over folding it into 161.1 or 166.
+- Phase 164.8.6.1 inserted after Phase 164.8.6 and then DISSOLVED the same day as over-booking: it held one finished chore (the baseline regen, done as a normal commit) and three documentation notes. The one genuinely deferred item — carrying the prod-body-ack / comment-drift corrections FORWARD in header prose — was folded into Phase 164.5.1, the next phase that writes a migration.
+- Phase 164.8.4 edited: absorbed [164.8.5-HYGIENE-RESIDUALS] from 164.8.6 by founder decision — tokenMeasure needs a REDESIGN, not a third repair (8 of 14 committed PROD commands already carry the rule's positive signal; the fromConcat waiver is the only separator and it is the broken part)
+- Phase 164.6.1 inserted after Phase 164.6: GATEINFRA — founder decision 2026-09-12. MYPY-MAINPY-01, MT5-GATEWAY-LOGIN-01 and CI-DOCSPATH-01 split out of Phase 164.6 because they differ in KIND from lint-and-prose hygiene: they change the Python type gate, a production gateway's login path, and WHEN CI gates fire — the last being the riskiest change in a milestone about controls that cannot fire. Folding them in would have given the riskiest items the lightest review posture. 164.6 keeps 10 live criteria and 3 numbered MOVED stubs so TODOS and Phase 164.1 cross-references stay valid; item numbering is deliberately NOT compacted. MT5 credentials are founder-set: no agent enters them, and criterion 2 closes only on an OBSERVED restart self-heal.
+- Phase 164.6.2 inserted after Phase 164.6: MT5RELOGIN. Founder decision 2026-09-12 chose ONE PHASE PER ITEM over a single combined GATEINFRA: 164.6.1 MYPYSTRICT, 164.6.2 MT5RELOGIN, 164.6.3 CIDOCSPATH. 164.6.1 was re-scoped from GATEINFRA (all three) to mypy only and its directory renamed. ORDER IS DELIBERATE: CIDOCSPATH runs LAST because it moves the gate corpus underneath the other two. MT5RELOGIN is founder-gated at criterion 2 (an OBSERVED restart self-heal) and must not block 164.6.3.
+- Phase 164.6 edited: criteria 14 [WINDOWS-LEDGER-COUNT-DRIFT], 15 [164.6.3-PLANNING-SUBJECT-DEFERRED-DETECTION], 16 [SERVICEKEY-MISMATCH-UNATTRIBUTED] added; fields changed: success_criteria. ⚠️ STATE entry written BY HAND: `state.add-roadmap-evolution` was RUN (it returned added:true) and its write reverted — measured collateral this time was the `progress:` block reset to disk-derived 13/137/130/36 against the re-derived 19/163/160/53, a blank line injected between every `#` comment, `current_phase` relocated out of the frontmatter head, and a historical Phase 140.1 progress bar rewritten 42%->36%. Milestone scope re-derived before and after the ROADMAP edits: unchanged, 36 phases, identical set.
+- Phase 164.5.1 edited: criteria 7-9 (`service_role` explicit statement_timeout below the 60s gateway ceiling, set by forward migration; kill switch proven to FAIL CLOSED by an injected+observed failure; no analytics request doing its whole unit of work inside one gateway-bounded call) + the dated `[164.5.1-GATEWAY-CEILING-INVERSION]` PROD measurement block and a Requirements entry. Founder decision 2026-09-13: routed here rather than into 164.6.3 because these are production behaviour changes and this phase already owns the fail-open kill switch. ⚠️ STATE entry written BY HAND for the second time today: `state.add-roadmap-evolution` was RUN (returned added:true) and reverted — 77 changed lines for one append, `progress:` reset to disk-derived 13/137/130/36 against the re-derived 19/163/160/53, same shape as the 164.6 entry above. ⛔ A matching `TODOS.md` entry is still OWED and is named as owed in the ROADMAP text itself.
+- Phase 164.6.2 edited: the `-6` naming DEFERRED to Phase 164.8.3 PROBERAUTH, which is now the NAMED OWNER — discharging the ROADMAP's own "fold or defer explicitly with a named owner" instruction on that overlap. Title ("and -6 is named as itself"), the goal's SECOND deliverable, and criterion 3 were all struck; criterion 3 is now an explicit NOT-in-scope pointer so the absence is readable rather than silent. ⛔ DIRECTION REVERSED MID-EDIT AND THE REVERSAL IS THE RECORD: the first proposal folded 164.8.3 INTO this phase and was written, scope-checked and then REVERTED after reading past criterion 2 — 164.8.3 carries EIGHT criteria and six are not naming at all (registered red fixture, the catch-all surviving as a meaningful bucket, the `mt5-diag.sh` READ-ONLY fence, the falsifier observed RED, `terminal_info()` as two booleans, `--arm` publishing its own output). Founder chose the reversed direction on two grounds: 164.8.3 depends on Phase 164.1 which owns the prober's MT5 defect vocabulary, and 164.8.3 is closeable WITHOUT the founder while 164.6.2 is founder-gated at criterion 2. ⚠️ STATE entry written BY HAND for the THIRD time: `state.add-roadmap-evolution` was RUN (returned added:true) and its write reverted — 151 changed lines for one append, `progress:` reset to disk-derived 13/137/131/36 against the re-derived 19/163/160/53, `gsd_state_version` re-quoted, `current_phase` relocated, a historical Phase 140.1 bar rewritten 42%->36%, and a blank line injected between every `#` comment. Same shape as the 164.6 and 164.5.1 entries above, now measured three times.
+- Phase 164.8.3 edited: recorded as the NAMED OWNER of the MT5 `-6` vocabulary (receiving the deferral from 164.6.2 above), plus a dated live-evidence block — `prod-prober` run `34758502223` at repo `f10b0e2`, `arms: 4/4/0`, one defect, `kind: mt5-terminal-error`, `subject: -6`, remedy "Read the reported code against the MT5 error table". ⭐ That reading also says the terminal has LOST ITS SESSION AGAIN, three days after the 2026-09-10 hand resolution — which is the recurrence 164.6.2 exists to stop, so the two phases are confirmed as separate live problems rather than one. The prober itself is correct: it refused to implicate IPC, which is Phase 164.1 criterion 3 working. Fields changed: goal (evidence + ownership note only); all eight success criteria UNCHANGED.
+- Phase 164.8.3 edited: criterion 8 restated as ✅ MET BEFORE THE PHASE BEGAN rather than deleted, because the way it was WRONG is worth more than the criterion was. Its stated cause — "the narrowed path neither prints $RUNNER_LOG nor uploads it" — was wrong ON THE DAY IT WAS WRITTEN: `cat "$RUNNER_LOG"` runs unconditionally outside both branches and `git log -L` dates that line to 42868a9b, 2026-09-06, FOUR DAYS before the 2026-09-10 measurement. The real cause was ERREXIT (`set -uo pipefail` does not cancel the `-e` GitHub passes via `shell: /usr/bin/bash -e {0}`), so the untested redirect terminated the step and took status=$?, the cat, the ^❌ summary and the POSTURE LINE with it. ⭐ Settled from the run LOG ARCHIVE, never `gh run view --log` — that view TRUNCATES and returned every step as UNKNOWN STEP. Already fixed by 604d655f (PR #774, Phase 164.8.5, 2026-09-11) and proven by narrowed dispatch 34706551355 on 2026-09-12. The phase ships SEVEN live criteria and adds NO artifact upload — shipping a change whose justifying defect was fixed two days earlier is the vacuity class this milestone removes. ⚠️ Criterion 7 is ALSO partly stale (arms/mt5.mjs:118-120 already copies five fields and already prints connected=/trade_allowed=), so that work is a NARROWING to exactly two booleans, not an addition. ⚠️ STATE entry hand-applied for the FOURTH time today: state.add-roadmap-evolution RUN (added:true) and reverted — 79 changed lines, progress: reset to disk-derived against the true 19/163/160/53, percent 53->36, gsd_state_version re-quoted, current_phase relocated. Milestone scope re-derived before and after the ROADMAP write: unchanged, complete, 36 phases.
+- Phase 164.8.4 edited: admitted `[164.8.3-CAPTURE-MANIFEST-ERREXIT]` as ADMISSION 2 — founder decision 2026-09-13, recorded the way ADMISSION 1 was: goal line, a merits block naming the forbidden half-fix in advance, group (d) bullet, success criterion 9, Requirements list. The fence is re-armed as "STILL NOT A PRECEDENT" for a THIRD item.
+- Phase 164.6.2 edited: criteria 1-2 and the goal's DELIVERABLE sentence corrected — the Railway gateway is the PREBUILT third-party image `gmag11/metatrader5_vnc:2.3` and CANNOT perform `login()` at startup (it reads only `CUSTOM_USER`/`PASSWORD`/`mt5server_port`). Founder decision 2026-09-13: worker-side re-login via the existing `Mt5Client.login()`, over forking the image. Criterion 2's timing claim narrowed to "without a human" with the window required to be MEASURED; a new criterion 3 states that no agent enters a credential.
+- Phase 164.6.2 edited AGAIN (2nd premise correction, post-research): `Mt5Client.login()` CANNOT heal a `-6` — it opens with a credential-less `initialize()` and raises before reaching its own credentialed `login()`, so the deliverable as written was a no-op against its target fault (probed live: `initialize: false, last_error: -6`). Founder decisions: a NEW credentialed-initialize method rather than changing shipped `login()`, with the T-134-01 by-value redaction moved onto the `initialize` arm FIRST; and the call site narrowed to STARTUP-ONLY in `main.lifespan` (the production path), because `_make_mt5_session` touches `_epoch` outside the lease and can manufacture `Mt5SessionAbandoned` on live reads.
+- Phase 164.11 edited: edited fields: success_criteria (+2) — routed in from 164.6.2 plan 04: the gateway image digest pin, and the downstream consumer (164.6.2 criterion 2 needs an OBSERVED deploy)
+- Phase 164.6 edited: edited fields: success_criteria (+1) — routed in from 164.6.2 plan 04: [164.6.2-KILLSWITCH-COMMENT-DRIFT]
+- Phase 164.8.4 edited: edited fields: success_criteria (+1) — routed in from 164.6.2 plan 04: [164.6.2-PLAN04-GATE-INTENT-DRIFT], three instrument defects
+- Phase 164.6.2 edited: edited fields: success_criteria (+4, --force: phase is in_progress) — held OPEN on OUTCOME 0; wave 5 post-ship; question THREE unsettled; [164.6.2-RAISE-LAST-SHAPE-ONLY] stays here as its own post-ship plan ✅ SUPERSEDED — the item moved to Phase 164.6.4 (2026-09-15) and is CLOSED there by `4f1963fd`; this entry is lineage, not a live claim
+- Phase 164.6.2 edited: edited fields: success_criteria (criterion 7 amended MATCHES -> CONTAINMENT; +2, --force: phase is in_progress) — criterion 10 records criterion 2 CLOSED on the wave-5 observation (2026-09-15); criterion 11 holds the phase OPEN for plan 06 (question THREE R2) and [164.6.2-RAISE-LAST-SHAPE-ONLY] ✅ SUPERSEDED — the item moved out the same day and is CLOSED in Phase 164.6.4 by `4f1963fd`; plan 06 alone holds 164.6.2 open
+- Phase 164.6.4 inserted after Phase 164.6.3: MT5KEEPALIVE — booked on wave 5's measurement (founder decision 2026-09-15, option book-keepalive); the interval is deliberately NOT chosen there (URGENT)
+- Phase 164.6.4 edited: edited fields: success_criteria (+1) — [164.6.2-RAISE-LAST-SHAPE-ONLY] ROUTED IN from 164.6.2 criterion 9 (founder 2026-09-15): _raise_last is SHARED by login() and initialize_with_credentials(), so a keepalive multiplies how often the shape-only scrub can fire ✅ CLOSED 2026-09-15 by `4f1963fd` (Phase 164.6.4 plan 01): the shared site is parameterised and redacts BY VALUE
+- Phase 164.6.2 edited: edited fields: success_criteria (criteria 9 and 11) — [164.6.2-RAISE-LAST-SHAPE-ONLY] MOVED OUT to Phase 164.6.4; plan 06 (question THREE R2) is now the ONLY item holding this phase open ✅ and the moved item is CLOSED in 164.6.4 by `4f1963fd` (2026-09-15)
+- Phase 164.5.1.1 inserted after Phase 164.5.1: FANOUTCOHORT — the fan-out selected ZERO candidates on its first live tick because every PROD strategy is status='private'; blocks 164.5.1's verification (URGENT)
+- Phase 164.1.1 inserted: PROBERCADENCE inserted after 164.1: the prober declares hourly and delivers 27% (75/273 over 273.4h), median gap 3.28h, max 7.13h — worse than the 6h window its own workflow comment rejects by name. Owner of TODOS [PROBER-CADENCE-UNDELIVERED-01].
+- Phase 164.4.2 inserted after Phase 164.4: Owner phase for TODOS [REDUNDER-SUBSET-SPLIT], unowned since 2026-09-05. sql-mutation timeout-minutes has taken its ONE allowed raise; 20 is a declared CEILING and the next escalation is a subset split, never a third value. Inserted 2026-09-18 while Phase 164.1.1 was mid-execution — the STATE current-phase pointer was deliberately NOT repointed.
+- Phase 164.1.1.1 inserted after Phase 164.1.1: LANEONLYGATES — sql-tests runs a pg-lane-only gate against shared TEST and is permanently red, blocking the analytics-service deploy (URGENT)
+- Phase 164.5.1.4 inserted after Phase 164.5.1: SYNCCURSOR - per-KEY cursor vs per-STRATEGY stores strands failed strategies' window (URGENT)
+- Phase 164.5.4 edited: added defect (3) KEY_UNDECRYPTABLE routed from 164.5.3; corrected the stale independent-of-164.5.3 clause
+- Phase 164.4.2 edited: scope: also owns the shared-TEST mutex contention (founder 2026-09-21); corrected two stale restated floors
+- Phase 167.1 inserted after Phase 167: AUMTRUST — the headline AUM says when it includes holdings from keys needing attention (from 167 review M2)
+- Phase 167.2 inserted after Phase 167: KEYCARDSYNC — the key card never shows one key's sync result as another key's (from 167-06 D-18 residuals)
+- Phase 167.2 edited: goal widened (founder 2026-09-23) — the owner's still-computing factsheet states the real compute-job state; public lane stays neutral
+- Phase 168 edited: edited fields: requirements (the waiting census dependency met 2026-09-23)
+- Phase 167.2 edited: edited fields: goal (share link for a failed/stalled compute says so)
+- Phase 164.6.7 COMPOSITECLAIMSNAPSHOT inserted after Phase 164.6 on 2026-09-24 (via `/gsd-phase --insert`, founder-authorized): the composite run reads the live job marker, not its claim-time snapshot (`[164.6-COMPOSITE-CLAIMTIME-SNAPSHOT]`, data-integrity).
+- Phase 167.1.1 HOLDINGKEYSCOPE inserted after Phase 167.1 on 2026-09-24 (via `/gsd-phase --insert`, founder-authorized): `holdingScopeKey` carries no `api_key_id`, so two accounts on one venue holding the same asset merge into one holding (data-integrity).
+- Phase 167.2.1 FACTSHEETBUILDABLE inserted after Phase 167.2 on 2026-09-24 (via `/gsd-phase --insert`, founder-authorized): a computed row whose factsheet cannot build reads as "has a factsheet" while its recipient sees the pending page (167.2 review WR-02, user-facing).
+- Phase 164.9.2 REFDATAUPDATES inserted after Phase 164.9 on 2026-09-24 (via `/gsd-phase --insert`, founder-approved by AskUserQuestion): the shared-TEST restore replay also replays migration UPDATEs on public tables it just filled. Found by preflight run `36003106273`, which aborted on the 164.9 plan-07 wrong-state check. It owns `[164.8.1-REPLAY-INSERT-ONLY-SCOPE]` and unblocks 164.9 criterion 8.
+- Phase 164.4.2.1 DRIFTOFFMUTEX inserted after Phase 164.4.2 on 2026-09-24 (hand-inserted; founder rule "book the phase if it holds", AskUserQuestion; runs 2–5 confirmed the slowdown)
+- Phase 167.1.2 ACCOUNTTRUTH inserted after Phase 167.1.1 on 2026-09-24 (hand-inserted; founder UAT on the allocator book; founder decisions "Refuse a second key" and "Hide it until correct", AskUserQuestion)
+- Phases 169.1 ZOOMKPIS, 169.2 BENCHFRESH, 169.3 SMALLFIXES and 169.4 ALLOCTRUTH inserted after Phase 169 on 2026-09-26 (via `/gsd-phase --insert`; founder decision 2026-09-26: one logical topic per phase, one reviewable PR each). Phase 169 PAGETRUTH narrowed to 169 FACTSHEETTRUTH (`/gsd-phase --edit`). The already-checked plans were moved by hand, not re-planned (169 D-37). Execution order is 169.2 and 169.3, then 169, then 169.4, then 169.1, NOT the numeric order: 169 needs 169.2 (and 167.1.2 PR C and 167.2.1), 169.4 needs 169 and 169.2, and 169.1 needs 169 and 169.4.
+- Phase 169 edited: edited fields: title, goal, depends_on, success_criteria, plans (narrowed to FACTSHEETTRUTH at the 2026-09-26 split, 169 D-37)
+- Phase 169.4.1 OGSHARPE inserted after Phase 169.4 on 2026-09-26 (via `/gsd-phase --insert`; gsd-tools numbered it 169.4.1). Split from Phase 169 (founder decision 2026-09-26, Option A after 169 plan-check round 3): the OG share card's Sharpe edit, which needs Phase 166.2, moved out of 169-01 so Phase 169 no longer waits on 166.2. Depends on 166.2 and 169.
+- Phase 164.6.6 edited: edited fields: goal, success_criteria (criterion 3 split out to 164.6.8 OUTAGEALERT, founder decision 2026-09-26: one topic per phase)
+- Phase 164.6.8 inserted after Phase 164.6.6: OUTAGEALERT, split from 164.6.6 criterion 3 by founder decision 2026-09-26 (one topic per phase); owns MT5-PROBER-WEDGE-CALIBRATION-01 (routed by PR #863)
+- Phase 170 edited: edited fields: title (PAGECOPY → LAYOUT), goal, success_criteria (criteria 2, 3, 4, 6 split out to 170.1 COPY, founder decision 2026-09-26: one topic per phase)
+- Phase 170.1 inserted after Phase 170: COPY, split from 170 criteria 2, 3, 4, 6 (plus its own copy of criterion 7) by founder decision 2026-09-26 (one topic per phase)
+- Phase 165 edited: title (DEPS → ACTIONSDEPS), goal, success_criteria: three-way split by ecosystem in the verified order, founder decision 2026-09-26 (one topic per phase); replaces the declined PYDEPS/JSDEPS split
+- Phase 165.1 inserted after Phase 165: PIPDEPS, the pandas prerequisite commit + #685 (now #755), split from 165 by founder decision 2026-09-26
+- Phase 165.2 inserted after Phase 165.1: NPMDEPS, #686 (now #836), #645, #646, #614 and #606 closures, [165-NIGHTLY-AUDIT-RED], zero-open close criterion, split from 165 by founder decision 2026-09-26
+- Phase 164.6.8 edited: owns MT5-SWITCH-WEDGE-CAUSE-01 (moved from 164.6.6, same next-wedge capture as the calibration item); #863-side re-homing deferred until #863 merges
+- Phase 164.9.3 inserted after Phase 164.9.2: CLAIMPAIR, a due failed_retry job plus a pending twin of the same (kind, allocator) raises 23505 in every claim entry point (latent; measured on the pg-lane 2026-09-26); owns [164.9.3-CLAIM-PAIR-23505]; orchestrator decision
+- Phase 164.9.4 inserted after Phase 164.9.3: CIOFFMUTEX, python and e2e-seeded off the shared-TEST advisory lock (36 and 28 min of mutex wait on run 36229959820); owns [164.9.4-CI-MUTEX-QUEUE]; founder decision
+- Phase 164.9.5 inserted after Phase 164.9.4: AUTOREDUMP, the baseline is re-dumped and proposed automatically after a PROD migration apply; security-sensitive workflow; owns [164.9.5-MANUAL-BASELINE-REDUMP]; founder decision
+- Phase 164.9.3.1 inserted after Phase 164.9.3: FANINGRAPH, the stranded fan-in child, the match_decisions cascade 23505 and the 40P01 diamond deadlock (items 1-3 of 164.5.2's routed list); owns [164.9.3.1-FANIN-GRAPH-RESIDUALS]; founder decision 2026-09-26 ("Re-route, don't start"); booked under the new-phase freeze, NOT started
+- Phase 164.9.3 edited: scope widened to the (kind, api_key_id) claim wedge, item 4 of 164.5.2's routed list, and to all four claim partitions; founder decision 2026-09-26
+- Phase 164.9.2 criterion 4 recorded 2026-09-26: preflight 36235362126 success, restore 36242946174 success (attempt 36237060668 refused by the activity gate); closes Phase 164.9 criterion 8 and [164.9-CRIT8-RESTORE-DISPATCH-RECORD]
+- Phase 166.1.1 inserted after Phase 166.1: DDSIGN, the drawdown-delta sign in the simulator, the optimizer and the match engine (found by the 166.1 round-2 review, outside its diff, pre-existing); founder decision 2026-09-26 ("Route as proposed"); booked under the new-phase freeze, NOT started
+- Phase 166.1 SPLIT into three on 2026-09-26 (founder decision: too large to review as one PR after five plan-check rounds; 166.1-CONTEXT D-23). Phase 166.1 edited (via `/gsd-phase --edit 166.1`) to ENGINEFLOOR, the Python half: plans 01, 01b, 03 and a new release plan 09.
+- Phase 166.2 COMPUTEONCE inserted after Phase 166.1 on 2026-09-26 (via `/gsd-phase --insert`, `--sibling` allocation): the TypeScript half, old 166.1 plans 04-08 moved as 166.2-01..07; does not depend on 166.1.
+- Phase 166.3 RECOMPUTE inserted after Phase 166.2 on 2026-09-26 (via `/gsd-phase --insert`, `--sibling` allocation): the founder PROD recompute, old 166.1 plan 02 moved as 166.3-01; depends only on the Phase 166 deploy.
+- Phase 164.9.3.2 DEFER40001 inserted after Phase 164.9.3 on 2026-09-27 (via `/gsd-phase --insert`; founder decision F1, "New blocker phase"): a compute-job RPC that raises SQLSTATE 40001 never makes PostgREST retry it without end. A blocker, beside 164.9.3.
+- Phase 166.4 BENCHALIGN inserted after Phase 166 on 2026-09-27 (via `/gsd-phase --insert`; founder decision D-B, "New phase under 166"): a strategy with a sparser calendar than BTC is compared to BTC over the same holding interval, in every benchmark-relative metric (founder decision D-A). Data integrity, ahead of features. Phase 166.3 RECOMPUTE is halted until it ships.
+- Phase 170 edited: edited fields: goal, success_criteria (390px decision; narrow-width findings 2026-09-27)
+- Phase 170.1 edited: edited fields: success_criteria (390px decision; scenario copy findings 2026-09-27)
+- Phase 170 edited: edited fields: success_criteria (profile exchanges tab row and Disconnect clipped, 2026-09-27)
+- Phase 169 edited: edited fields: success_criteria (SC-6 period-row gating widened to 6M and 1Y, 2026-09-27)
+- Phase 164.6.5 edited: edited (--force): dated note, 320px check replaced by 390px + desktop 200% zoom (founder 2026-09-27)
+- Phase 167.1 edited: edited (--force): dated note, 320px check replaced by 390px + desktop 200% zoom (founder 2026-09-27)
+- Phase 167.2 edited: edited (--force): dated note, 320px check replaced by 390px + desktop 200% zoom (founder 2026-09-27)
+- Phase 167.2.1 edited: edited (--force): dated note, 320px check replaced by 390px + desktop 200% zoom (founder 2026-09-27)
+- Phase 169.3 edited (--force): routed in: credential inputs strip pasted whitespace (passphrase excluded) (founder UAT 2026-09-27)
+- Phase 169.5 inserted after Phase 169: BENCHCOMPARE — the factsheet BTC comparator read through 169.2's reader, interval-paired, gap-null, payload-carried, rolling series on the comparator basis; split from Phase 169 by topic after plan-check round 3 (169 D-60, D-61) (URGENT)
+- Phase 166.4.1 inserted after Phase 166.4: PORTFOLIOANALYTICS — the /portfolios/[id] analytics compute reads columns that exist and treats a cumulative series correctly (data integrity; evidence verified by the orchestrator 2026-09-27) (URGENT)
+- Phase 164.9.4 edited: routed in: a docs-only push to main runs the full corpus; the short path must cover a docs-only push too (founder 2026-09-27)
+- Phase 167.1.1 edited: routed in: three holdings readers still allocator-wide (R-15-1 scenario commit route, R-15-2 _load_holding_portfolio_context, R-15-3 getLatestExposureSnapshot) (from the 167.1.2 PR C executor, 2026-09-27)
+- Phase 167.1.2.1 inserted after Phase 167.1.2: RECONMARKER — a per-key history-reconstructed marker so no key's equity history is lost or skipped (data integrity; routed from the 167.1.2 PR C executor, 2026-09-27) (URGENT)
+- Phase 167.1.2.1 edited: edited fields: evidence, success_criteria (criterion 7, the fast-fail race, routed 2026-09-27 from the 167.1.2-12 round-3 silent-failure review)
+- Phase 166.4.1 edited: edited fields: evidence, success_criteria (criterion 6: benchmark_comparison must use the D-A interval-matched pairing; routed 2026-09-27 from the 166.4 BENCHALIGN research)
+- Phase 169.4 edited: edited fields: success_criteria (criterion 12: the allocations scenario benchmark's innerJoinByDate must use the D-A interval-matched pairing and the day-one rule; routed 2026-09-27 from the 166.4 BENCHALIGN research)
+- Phase 167.1.1 edited: routed in: D-13 /compare per-holding metrics need a flow-neutral per-holding source (from 167.1.2 PR C2, 2026-09-29)
+- Phase 167.1.2.1 edited: routed in: 8 C2 writer-side residuals from review rounds 1-3 (SFH-05 writer half, single failing key dilution, SFH-R3-02, SFH-R3-07, SFH-08, SFH-09, R2-CR-02 residual, R3-WR-02) (from 167.1.2 PR C2, 2026-09-29)
+- Phase 164.9.3.2.1 inserted after Phase 164.9.3.2: ENQ40001: enqueue race-loss 40001 raise, booked by ENQ-SCOPE=enq-sibling
 
-### Decisions (requirements-time, from research Open Decisions 1–8)
+### Decisions
+
+<!-- ⛔ HEADING IS LOAD-BEARING — do NOT re-add a parenthetical suffix here.
+     gsd-sdk `state.add-decision` matches /###?\s*(?:Decisions|Decisions Made|Accumulated.*Decisions)\s*\n/i
+     and appends to the FIRST match. With "### Decisions (requirements-time, ...)" it matched
+     NOTHING, so the verb returned "Decisions section not found in STATE.md" on every call and
+     every decision an executor tried to record was silently dropped. Diagnosed 2026-08-09.
+     The sibling "### Decisions (execution-time, Phase N)" headings below are fine — only the
+     FIRST match is used as the append target, and they are historical archives. -->
+
+*(execution-time, Phase 168 DRBOPTIONS — plan 02, 2026-09-26)*
+
+- **D-168-02-A — `assignment` is APPENDED to `_SIBLING_TYPES`** (after delivery/settlement/trade), so the existing census rendering order is unchanged and the next unknown-type refusal (likely `exercise` or `expiry`) reports whether an assignment co-occurred. `_SHAPE_FIELDS` gains only `commission` and `position` (a fee and a signed size; no identifier). Both neutered RED.
+- **D-168-02-B — the historical Phase-82 section comment in `tests/test_deribit_txn.py` that describes PRE-FIX code as summing option `trade`/`delivery` premium is kept verbatim**: it describes code as it was, not today's option book, and rewriting it would falsify lineage.
+
+*(execution-time, Phase 168 DRBOPTIONS — plan 01, 2026-09-26)*
+
+- **D-168-01-A — the co-occurrence guard fires on EVERY `assignment`, regardless of `change`** (plan must_haves, overriding RESEARCH's nonzero-only recommendation): deciding by size would be a magnitude rule, which D-01 forbids. Pinned by ZERO-CHANGE-STILL-GUARDED, neutered RED.
+- **D-168-01-B — the guard's self-skip is by IDENTITY (`other is row`), not equality**, so two equal-but-distinct rows still contest each other. The refusal phrases are module constants (`_ASSIGNMENT_CONTESTED_PHRASE`, `_ASSIGNMENT_UNNAMED_PHRASE`) that the tests import; each appears once in `services/deribit_txn.py`.
+
+*(execution-time, Phase 167.1 AUMTRUST — plan 06, the release, 2026-09-24)*
+
+- **D-167.1-06-A — the release is v0.89.0.0 (second segment), on the orchestrator's direction for a user-facing disclosure.** The plan named a third-segment bump (0.88.1.0 at today's main); recorded as a deviation in `167.1-06-SUMMARY.md`.
+- **D-167.1-06-B — plan 05's handoff line "a dropped holding whose key is missing from the key list is named by no part" is NOT a current limit.** Review round 3 WR-01 fixed it; the CHANGELOG lists the unknown-status excludes clause under Added instead.
+
+*(execution-time, Phase 167.1 AUMTRUST — plan 05, D-06 (b) and the D-18 reopen, 2026-09-24)*
+
+- **D-167.1-05-A — D-06 = (b) and D-18 REOPENED are the FOUNDER's answers (2026-09-24, recorded in `5d62a1a60`), not executor inferences.** The D-18 reopen was a founder-directed scope addition to plan 05.
+- **D-167.1-05-B — State C: at live ≤ 0 the "Required to size and commit." hint names the live total and nests the one marker.** "The live-holdings total is -$X, which <clause>." is the State B construction. State 7 (manual, live ≤ 0) stays absent because nothing on screen contains the live total.
+- **D-167.1-05-C — the shared noun is said once only when both sides are plain amounts of the untrusted set.** With an unknown-status part or an "(… unavailable …)" count, each side keeps its own noun, so the count is never misattributed.
+
+*(execution-time, Phase 167.1 AUMTRUST — plan 04, premise corrections and the interim byte-identity gate, 2026-09-24)*
+
+- **D-167.1-04-A — the ROADMAP D-03 correction is dated to plan 04's measurement, not stated as a standing fact.** It says `queries.ts`, the commit route, `supabase/` and `analytics-service/` WERE byte-unchanged when plan 04 measured them and names plan 06 as the re-measure, because plan 05 option (b) edits source.
+
+*(execution-time, Phase 167.1 AUMTRUST — plan 03, State B and the marker's absence states, 2026-09-24)*
+
+- **D-167.1-03-A — the plan's drill 2 (drop the on-screen conjunct from `showUntrustedMarker`) cannot bite, and the source was left unchanged.** Each render site carries its own placement gate (`fieldShowsLive` for State A, `overrideNoteShowsLive` for State B), so that conjunct is redundant at render. Substitute drill 2b neutered `fieldShowsLive`'s `liveHoldingsSum > 0` half and turned state 4 RED. ⚠️ For plan 05: a new site reading `showUntrustedMarker` needs its own placement gate.
+
+*(execution-time, Phase 167.1 AUMTRUST — plan 02, the Open Positions footer qualifier, 2026-09-24)*
+
+- **D-167.1-02-A — the Open Positions footer pass calls `isUntrustedKeySyncStatus` directly, not `untrustedKeyChipLabel(...) !== null`.** The footer needs membership, not a label; both go through the same predicate, and the plan allowed either.
+- **D-167.1-02-B — the plan's acceptance grep for a status equality reads 1, not 0, and the one hit was left alone.** It is the pre-existing Phase 167 comment recording the removed equality, and it already read 1 at the plan's base; no code equality exists.
+
+*(execution-time, Phase 167.1 AUMTRUST — plan 01, the State A marker and the single-pass summary, 2026-09-24)*
+
+- **D-167.1-01-A — `capitalizeFirst` is a module-level helper beside `buildUntrustedAumClause` in `ScenarioComposer.tsx`.** No capitalize utility exists in `src/lib` or `src/app`. The builder keeps its lower-case clause so plan 03 can nest the same clause in the override note without a second wording.
+- **D-167.1-01-B — the "Required to size and commit." hint keeps its own condition. Only the override note reads the hoisted `overrideNoteShowsLive`.** The plan names only the override note for the rewrite, and changing the hint as well would be a change the plan did not ask for.
+
+*(execution-time, Phase 164.1.1 PROBERCADENCE — plan 05, the go-live runbook and the disposed residual, 2026-09-18)*
+
+- **D-164.1.1-05-A — the runbook's criterion-5 residual reference was written as a placeholder in task 1 and filled in by a separate, third commit (task 3), rather than folded into task 1.** This repository has a measured incident (T-164.1.1-23) of a scope amendment touching one file while the refused claim went on standing in the others; making the two-surface reachability (`TODOS.md` + the runbook) its own verified, committed act is the mitigation itself, not ceremony.
+- **D-164.1.1-05-B — a fifth prober arm reading the observer's own recency was considered and explicitly rejected as the fix for criterion 5, not merely left undone.** The prober shares GitHub Actions' own unreliability (the 27% delivery rate this whole phase's premise rests on), so a GitHub-hosted watchdog cannot close a gap in a scheduler GitHub itself might have dropped the watchdog's own run for — the same reasoning `164.1.1-CONTEXT.md` (CTX-02) already applied to the prober's own contact-write design.
+- **D-164.1.1-05-C — no literal `db push` / `db reset` / `--project-ref` / `--db-url` substring appears anywhere in the runbook, including inside its own prohibition sentences.** The plan's automated `<verify>` greps for those exact substrings; a warning that quotes the forbidden command verbatim would defeat its own gate. Phrased instead as "this checkout's linked CLI performs no write anywhere in this runbook."
+
+*(execution-time, Phase 164.5.1 CRONREPOINT — plan 08, Wave B go-live runbook + P3-C repair, 2026-09-16)*
+
+- **D-164.5.1-08-A — the dead-column repair closed the WHOLE class, not just the named P3-C instance.** `compute_jobs.completed_at` does not exist; the same dead reference also appeared in `ledger-refresh-go-live.md`'s "Watching it" duration expression and its "Rollback, part 2 — Detect" LATERAL query — the two places an operator reaches for during an incident. All four sites repointed to `updated_at` in one task, with a dated explanatory sentence beside each.
+- **D-164.5.1-08-B — the `duration` expression's meaning changed on repoint and is stated, not silently relabeled.** `completed_at - claimed_at` was work duration; `updated_at - claimed_at` is time-since-last-touch, a proxy meaningful only for a `done`-status row — the runbook says so in one clause rather than presenting it as an exact completion duration.
+- **D-164.5.1-08-C — the ledger fan-out's all-candidates-failed branch (per-candidate `EXCEPTION WHEN OTHERS`) is unreachable while dormant.** Fabricating a real PROD enqueue failure to exercise it on funded strategies was considered and rejected as an invented-failure-state. Exercised instead via a mandated manual first invocation (reading the interactive `NOTICE`/`WARNING` panel, which `cron.job_run_details.return_message` never surfaces) plus an explicit code-read confirming the handler cannot leak the advisory lock or abort the tick — recorded as a code-read if no `WARNING` fires, not mistaken for a live exercise.
+- **D-164.5.1-08-D — P3-C is referenced from the new go-live section, never pasted a third time.** The plan's own must_haves forbid a third copy that can rot independently of the other two; Step 3 points at `ledger-refresh-go-live.md` § P3 Part C by section reference.
+
+*(execution-time, Phase 164.5.1 CRONREPOINT — plan 05, worker retry seam, 2026-09-16)*
+
+- **D-164.5.1-05-A — only the two named call sites were converted; both legacy-claim fallback calls stay on the fail-fast `db_execute`.** Verified with a source-scan acceptance criterion asserting exactly 2 `db_read_with_retry(` sites in `main_worker.py`. The legacy call is a last resort that must fail fast, not spend a second retry budget on an already-failed tick.
+- **D-164.5.1-05-B — anti-vacuity ran THREE levers, not two.** Levers 1 and 2 neuter each call site's retry back to `db_execute` and each reddens exactly its own two tests. Lever 3 neuters the SHARED `_is_gateway_timeout` predicate to a dynamic-dispatch mutant (hard-coded `return True`) rather than deleting or renaming it, proving the 42883-narrowness assertion (invocation count == 1) detects a genuine behavior widening rather than merely the presence of a name or string literal.
+- **D-164.5.1-05-C — the new test class name (`TestWorkerGatewayTimeoutRetry`) does not itself contain the literal substring "gateway_timeout", but every method name does.** Verified empirically before writing the tests (`pytest -k gateway_timeout --collect-only` against plan 02's own `TestGatewayTimeoutCalibration`) that `-k` matches via full node-id substring, so method-name coverage is what actually matters for the plan's `-k gateway_timeout` verify command.
+
+*(execution-time, Phase 164.5.1 CRONREPOINT — plan 04, repoint pre-flight, 2026-09-16)*
+
+- **D-164.5.1-04-A — `preflightCronRepoint` reads the committed manifest FIRST, unlike the live `cron-drift` arm, which reads it LAST so a bad oracle never silences its PROD-side credential scan.** This verb has no credential scan of its own to protect — it is a single yes/no gate — so refusing immediately on an unreadable oracle is the simpler, more honest order, and matches the plan's own task 1 action text.
+- **D-164.5.1-04-B — the self-test's own anti-vacuity source-scan anchor self-matched its own scenario text, on two successive attempts.** `indexOf("export async function preflightCronRepoint")`, then `indexOf("export async function captureManifest")`, both found the SCENARIO'S OWN quoted literal first (the scenario runs earlier in the file than either real declaration and names both functions repeatedly). Fixed by anchoring off the preceding `captureManifest` export, built via `["export async function ", "captureManifest", "({"].join("")` so the searched phrase never appears as a contiguous literal in the scenario's own source bytes — only the real declaration can match.
+- **D-164.5.1-04-C — the two tasks were committed as genuinely separate, non-overlapping diffs despite both touching `scripts/prod-prober/run.mjs`.** Task 2's additions (the self-test scenario, `SELF_TEST_SCENARIOS` bump) were temporarily reverted, Task 1's acceptance criteria re-verified in isolation, then committed; Task 2's changes were re-applied, re-verified (self-test 81/81, vitest 87/87), and committed separately — preserving per-task atomicity even though the plan's own task 1 acceptance criteria explicitly defer the "no write call" proof to task 2's calibration.
+
+*(execution-time, Phase 164.5.1 CRONREPOINT — plan 03, gateway-ceiling migration + static gate, 2026-09-16)*
+
+- **D-164.5.1-03-A — Corrected a self-contradiction between Task 1's acceptance criteria (zero raw-text occurrences of the `prod-body-ack`/`APP-GUC-LINEAGE` tokens) and its own action prose (which spelled both repeatedly).** Resolved under Rule 1: extended the same "describe, don't spell" hygiene the plan already mandated for the schedule-registration verbs to these two tokens as well, since the acceptance criteria and Task 2's static gate are the actual verifiable contract.
+- **D-164.5.1-03-B — the superseded `prod-body-ack` pragma count was MEASURED at HEAD (6 across 4 files: 1+2+1+2) rather than transcribed from the ROADMAP's "three" beside four named files.** Per-file breakdown and the measurement date are carried in the new migration's header.
+- **D-164.5.1-03-C — the vitest gate's string-concatenation-fold regex omits the ES2018-only `s` (dotAll) flag present in the shape of the Python original, since this repo's `tsconfig.json` targets ES2017** (confirmed by a real `tsc --noEmit` error during verification). No semantic change — the character classes used never rely on `.` matching a newline.
+
+*(execution-time, Phase 164.5.1 CRONREPOINT — plan 02, fail-closed kill switch tracer, 2026-09-16)*
+
+- **D-164.5.1-02-A — async tri-state kill switch (ENABLED/DISABLED/UNAVAILABLE) with a named retry seam beside `db_execute`; TTL cache invalidates rather than caches on failure.** Closes Sentry `QUANTALYZE-1D` (fail-open kill switch); the async structural fork CONTEXT.md left open was answered exactly as the plan's own objective directs (`_engine_is_enabled`/`_engine_is_enabled_cached` become `async def`, `db_read_with_retry` wraps `db_execute`), not re-derived. Proven by an injected neuter/observe-RED/restore for both safety levers (the disposition and `_is_gateway_timeout`'s wire-type predicate) — each neuter PROVEN applied via diff against a `cp` byte backup before the RED was believed, restored and PROVEN byte-identical via `cmp`.
+- **D-164.5.1-02-B — real test-surface count measured and reported plainly: 36 `_engine_is_enabled` references (33 `monkeypatch.setattr` + 3 direct calls), not the plan's ~23 estimate.** All 36 converted; a repo-wide grep confirmed only the 4 files this plan's frontmatter lists carry any reference.
+- **D-164.5.1-02-C — `pytest-timeout` was NOT installed (Rule 3's package-install exclusion) to satisfy task 3's `--timeout=600` verify flag.** Substituted an OS-level `timeout` shell wrapper for the identical safety property; both full-suite runs (task 3 and the plan-level coverage verification) reported `0 failed`.
+
+*(execution-time, Phase 164.5.1 CRONREPOINT — plan 01 TODOSFANOUT, 2026-09-16)*
+
+- **D-164.5.1-01-A — the criterion-6 scope amendment held: only the `reason:` string in `lint-app-guc.mjs`'s `LINEAGE_ALLOWLIST` was edited, never the applied migration files.** `occurrences: 4` and `successor:` for the `20260408215026` entry stayed byte-identical, verified by grep before and after; `--self-test` and the corpus scan both stayed green at 0 findings. `git status --porcelain -- supabase/` was empty at every task boundary.
+- **D-164.5.1-01-B — the new redirect uses the literal `Phase 164.5 item 7` (no parens), distinct from the pre-existing `Phase 164.5 item (7)` phrasing, so both spellings coexist at each of the four sites and a grep for either lands on the same result set.**
+
+- **D-164.6.4-W3-A — ⭐ the three plans ran CONCURRENTLY in harness worktrees, and it was PROVEN before it was trusted.** A read-only probe measured the worktree HEAD equal to the orchestrator HEAD (`c29a7dd6`) with both wave-2 modules present, because `gsd worktree base-check` degrades to sequential on a HARDCODED `effectiveBaseRef === 'head'` assumption it never measures. All three branches forked from `c29a7dd6`, touched DISJOINT files (verified: `git diff --name-only` intersection EMPTY), and merged with zero conflicts.
+- **D-164.6.4-W3-B — ⛔ `record-dispatch-isolation` NULLED the sentinel's `harness_flag` and BLOCKED the first dispatch, reporting it as an unreadable `.planning/config.json`.** The config was present, readable and valid; `resolveRegistryIsolation` answered correctly on its own. `query dispatch-isolation` writes the flag as a side effect and `record-dispatch-isolation` does not — calling the second AFTER the first is purely destructive. Diagnosed by reproducing the guard's own state resolution rather than believing its message, and the three dispatches were dry-run through `evaluateDispatch` before any was spent.
+- **D-164.6.4-W3-C — ⭐ the shared predicate's `required_names` had a REAL HOLE, found by neuter C5 reading GREEN, and it was repaired at INTEGRATION rather than mid-wave.** `required not in ast.dump(guard.body)` is a substring test, and `ast.dump` serialises string literals — so `globals()["run_mt5_session_monitor_tick"]()` satisfied a gate that exists to prove the tick is CALLED. Plan 03 closed it at its own consumer and deliberately NOT in `tests/test_mt5_relogin.py`, because plan 04 was importing that file concurrently from another worktree. The orchestrator tightened it to resolve an actual `Name`/`Attribute` reference (`156ace02`) and CALIBRATED the repair: reverting to the substring form reds the new test, and the control is the real heal source, not a synthetic body. ⚠️ Deletion alone cannot separate a real check from that fake one — it bites on both.
+- **D-164.6.4-W3-D — ⚠️ `analytics-service/.venv` DOES NOT EXIST inside a harness worktree, and all three executors hit it independently.** It is gitignored, so a worktree is a checkout of tracked files only. The plans' literal `.venv/bin/python` is a DEAD PATH there, and it fails in the worst way: `no such file or directory` on stderr while an enclosing `echo`/pipeline exits 0 — a verify leg reads GREEN having run nothing. Each resolved it the same way: the main checkout's interpreter by absolute path with cwd inside the worktree, imports confirmed to resolve to worktree sources via `pytest.ini`'s `pythonpath = .`. ⛔ No per-worktree venv was created (the dependency set would no longer be the one the gates were measured against) and no symlink (`.gitignore`'s `*.venv/` would have surfaced it as untracked at integration).
+- **D-164.6.4-W3-E — a second calibration hole of a DIFFERENT shape: a neuter applied to the WRONG OCCURRENCE reds loudly while measuring nothing.** `.eq("status", "running")` occurs twice; occurrence 0 is the SELECT's filter in `_read_open_rows`, not the UPDATE's compare-and-set. Cut there it redded six unrelated legs while proving nothing about the guard. Re-cut at occurrence 1 it reds exactly the supersede-cannot-overwrite test. Both are kept. Companion to a THIRD (plan 05's N10): an account-bracket claim drove only the `-6` path, exercising the code check's TRUE side twice and its FALSE side not at all, so `if False:` left everything green — closed with an IPC-fault third arm.
+- **D-164.6.4-W3-F — plan 03 found its own plan's PREMISE wrong and did not bend the code to satisfy the sentence.** The plan asserted the LOOP reads the kill switch; measured, the TICK does. The loop was given the names it actually owes rather than moving the switch read. Stronger than the plan anticipated: ALL NINE P-inner mutants pass P-outer clean, now gated so P-inner cannot be mistaken for a duplicate and deleted.
+- **D-164.6.4-W3-G — ⛔ `state.update-progress` / `record-session` / `record-metric` were NOT RUN, on the THIRD consecutive measurement of the same clobber.** Plans 01 and 02 each ran them and reverted the output. `roadmap.update-plan-progress` WAS run and was CLEAN — exactly four intended edits (`2/5` → `5/5` plus three checkboxes), zero collateral, consistent with its record. The distinction is the `progress:` block recomputed DOWNWARD from local disk, which under-reports phases whose artifacts the `-pr` filter strips.
+- **D-164.6.4-W3-H — ⚠️ RECORDED, NOT FIXED: a persistently failing interval WAIT would spin the loop hot.** Believed unreachable (`_env_float` never raises, `Event.wait()` does not raise) but NOT PROVEN, and both available remedies — a bare `asyncio.sleep`, or a `break` — are forbidden by plan 03's own rules. It needs a design decision, not an in-plan auto-fix. Plan 03 correctly declined to append it to `.planning/WINDOWS.md` or `deferred-items.md`, both shared across the three concurrent executors. ⛔ Owed a named phase via `/gsd-phase --edit` before this phase ships.
+- **D-164.6.4-W3-I — ⚠️ A4 REMAINS OPEN and cannot be closed from here.** No Python has ever written to `public.cron_runs`, so the first production row must be read back after deploy. Plan 04 declined to simulate it green.
+
+*(execution-time, Phase 164.6.4 — MT5KEEPALIVE plan 02, 2026-09-15)*
+
+- **D-164.6.4-02-A — the superseded close is a COMPARE-AND-SET, and a read-then-branch was REFUSED as the fix.** The `status='running'` predicate lives in the UPDATE itself, so a superseded close is a no-op against an already-closed row. Under the two-container Railway overlap this design exists to tolerate, container A closes a row GENUINELY (`close_is_measured: true`) and container B — already mid-open on a read taken BEFORE A's write — stamps `false` over `true`; the successor's `close_is_measured` filter then EXCLUDES a genuinely measured episode. MEASURED on a harness: unguarded the lifetime dataset came back `[]`, guarded `['R']`. ⚠️ Reading first and branching in Python does NOT fix it — the interleave is between the read and the write.
+- **D-164.6.4-02-B — the recorder's `global` was EXTRACTED rather than the shared never-raises predicate WIDENED to tolerate an `ast.Global`.** `record_mt5_session_reading` needed the stamp; a `global` beside the `try` is a SECOND top-level statement and correctly redded the predicate that also polices `heal_mt5_terminal_session`. Weakening a gate for a declaration would have cost the heal its own strictness, so the stamp moved into `_stamp_reading_and_measure_gap()` with a ⛔ comment forbidding the inline "simplification".
+- **D-164.6.4-02-C — `_env_float`'s OUT-OF-RANGE message body was made caller-neutral too, not only its prefix.** The body described the BUDGET's hazard ("expires MID-round-trip", "on EVERY boot") and `_env_float` is now also the DETECTION CADENCE's reader, whose out-of-range hazard is the opposite shape (ticks overlapping). ⛔ A SENTENCE correction; the throttle, the names-only rule and the fault classes are byte-unchanged. ⚠️ MEASURED correction to the plan's own arithmetic: there are SIX module-scope configuration messages, not seven — the port message IS one of the two gateway-endpoint messages.
+- **D-164.6.4-02-D — `from main_worker import SHUTDOWN` is imported INSIDE the loop's guard.** It avoids a `services/` → root-module import edge, and it CONTAINS an import fault instead of letting it reach `_crash_handler` — the same argument `mt5_relogin`'s own record makes about an unguarded module-scope read aborting uvicorn startup under `restartPolicyType ON_FAILURE x3`.
+- **D-164.6.4-02-E — ⭐ the CALIBRATION FOUND FOUR REAL HOLES, which is why it is not a formality.** Each read GREEN on its first pass, i.e. each was a gate that could not fire: (1) a `limit 1` read did not red, because `_open_row`'s invariant-restoring loop closed the orphan anyway — the case it actually loses is a NEWEST row needing NO transition; (2) `status` following the new READING rather than the run was invisible, because no test superseded-closed an AUTHORIZED run; (3) the loop's OUTER containment guard was never exercised, because the raising-tick test fails the TICK and the per-tick guard catches it first — so the inner property was measured twice and the outer one not at all; (4) the rejected-cadence assertion drove only ONE of `_env_float`'s two fault classes, so a neuter putting "mt5 boot heal" back into the out-of-range message read GREEN. All four are now gated by named assertions.
+- **D-164.6.4-02-F — ⚠️ `state.update-progress` and `state.record-metric` were RUN and their output REVERTED on a MEASURED clobber, for the SECOND consecutive plan.** Both recomputed `progress:` from local disk and UNDER-reported it (completed_phases 20→14, total_plans 171→151, completed_plans 166→142, percent 54→37 — the documented `-pr`-filter under-count), re-quoted `gsd_state_version`, moved `current_phase`, and injected **92 blank lines**. The metric ROW each produced was correct and was hand-applied. `roadmap.update-plan-progress 164.6.4` was CLEAN (exactly 2 lines: `**Plans:** 1/5 → 2/5` and the plan-02 checkbox) and was KEPT. `state.advance-plan` again refused with `ambiguous_position_phase` and wrote NOTHING — pre-existing and self-documented; ⛔ deliberately not "resolved" as a side effect of an unrelated plan.
+
+*(execution-time, Phase 164.6.4 — MT5KEEPALIVE plan 01, 2026-09-15)*
+
+- **D-164.6.4-01-A — `_raise_last` takes a KEYWORD-ONLY `credentials` TUPLE, and the shape is what makes the derived gates behave.** A `password` parameter would have made the method RESIDUAL (a gate asserts that set is EMPTY with the message "EXTEND THE DRIVER", which is not extendable for a method that makes no transport call); a POSITIONAL `(login, password, server)` triple would have made it DRIVABLE, and the driver would then demand a credential-carrying transport call it does not have. The tuple is NEITHER, correctly: the gates' class is "methods that hand a credential to a transport call", and `_raise_last` hands credentials to nothing — it formats. Keyword-only so a positional slip at any of the EIGHT call sites is a `TypeError`, not a silent mis-bind. ⛔ No credential is cached on the client.
+- **D-164.6.4-01-B — the `removeprefix` unwrap in `initialize_with_credentials` was DELETED, not kept alongside the fix.** With the shared site redacting, the MT5 code survives BY CONSTRUCTION rather than by stripping a typed prefix whose own comment admitted it degrades to a no-op if the message format changes; and `Mt5SessionAbandoned` (D-42) now escapes untouched structurally, because there is no longer a `catch` that could absorb it. The narrow `except Mt5ClientError` existed to make that structural — deleting the whole catch reaches the same guarantee more cheaply.
+- **D-164.6.4-01-C — the criterion landed as a STRENGTHENING of the signature-derived gate, never as the deletion of a pin.** The gate that asserted the disclosure became the gate that asserts the symmetry, and the transport gate was widened to `sorted(_DRIVABLE) × {raise, falsy}` with the scenario DERIVED. A third credentialed verb written later is fenced on both arms for free.
+- **D-164.6.4-01-D — STATE.md's five dated log occurrences of the booked item were closed by APPENDED dated addenda, not by rewriting the entries.** Rewriting a dated record to read CLOSED falsifies what was true on its date. The requirement the plan protects — zero occurrences left claiming the item is open — is met and measured (ROADMAP 4 lines/4 occ, STATE 5 lines/6 occ, both unchanged after; TODOS 0).
+- **D-164.6.4-01-E — ⚠️ `state.update-progress` and `state.record-session` were RUN and their output REVERTED on a MEASURED clobber.** Both recomputed `progress:` from local disk and UNDER-reported it (completed_phases 20→14, total_plans 171→151, percent 54→37 — the `-pr`-filter under-count), re-quoted `gsd_state_version`, moved `current_phase`, and injected **92 blank lines**. The clobber is common to EVERY STATE writer, not to one verb. `roadmap.update-plan-progress 164.6.4` was clean (2 lines: `**Plans:** 1/5 plans executed` and the plan-01 checkbox) and was KEPT. `state.advance-plan` refused with `ambiguous_position_phase` and wrote NOTHING — a pre-existing, self-documented condition of the Current Position section, left untouched here rather than "resolved" as a side effect of an unrelated plan.
+
+*(execution-time, Phase 164.8.3 — PROBERAUTH plan 04, 2026-09-13)*
+
+- **D-164.8.3-04-A — the tmp-dir mutant is loaded by a CHILD Node process, not by `await import()`, and NOT by relocating it somewhere Vite can resolve.** Both import shapes were MEASURED failing under vitest and both messages are quoted at the call site. The tempting remedy — put the mutant where the module runner can see it — means putting it in the working tree, which is the single thing this idiom exists to avoid and the origin of the `git checkout --` hazard. `execFileSync(process.execPath, …)` is also the stronger claim: the mutant is parsed and linked by the SAME Node that runs the real arm in CI, with no bundler anywhere in the path.
+- **D-164.8.3-04-B — a difference check is NOT a sufficient precondition on a mutant.** `expect(mutant).not.toBe(original)` cannot distinguish a branch-sized excision from one whose block terminator matched far past the branch; both differ, and both leave the falsifier green. The builder therefore also asserts the anchor is GONE and that the byte delta is under 1200 (measured 630), and pins that `arms/mt5.mjs` still carries ZERO `import`/`require` — the property that makes a standalone mutant possible at all, so a future dependency reveals itself by name.
+- **D-164.8.3-04-C — each lever's SECOND failure is CORROBORATION, never a second control.** Both levers also reddened self-test scenario 75/80 (the criterion-2 row/remedy check). Counting those as independent would be precisely the "one RED credited to N controls" failure this plan exists to remove, and it is the reason the durable half is three separate `it()`s rather than one.
+- **D-164.8.3-04-D — the two lever transcripts are recorded as PROSE with their limit stated, not as an assertion.** Nothing in CI re-runs an on-disk neuter, so any gate over the record can only prove the RECORD exists — not that it was observed. That asymmetry is written at the block rather than left to be inferred, and it is the argued reason the falsifier carries the re-running half.
+- **D-164.8.3-04-E — `#753` got NO fabricated requirements row.** MEASURED at HEAD: `grep -c '753' .planning/REQUIREMENTS.md` -> `0`, exit 1. `#753` is a GitHub issue id, not a v1.20 requirement id, so `requirements.mark-complete` was not forced against an id with no checkbox. The state is reported in the SUMMARY instead; inventing a traceability row would be the same defect class this phase exists to remove.
+
+*(execution-time, Phase 164.8.3 — PROBERAUTH plan 01, 2026-09-13)*
+
+- **D-164.8.3-01-A — `mt5-terminal-error` KEEPS its name AND its lookup-table remedy (assumption-delta `no-change`).** It is a RESIDUAL bucket whose noun is already correctly non-specific — *"the bridge answered and the terminal is the problem, cause not enumerated"* — and pluralising the enumerated set does not change what the residue is. Its lookup instruction is CORRECT advice for a genuinely unenumerated code such as the `-2` that `init-false-other.txt` carries. Only its enumeration sentence widened, from *"neither -10004 nor -10005"* to the three enumerated codes. ⛔ A FOURTH code earning its own kind is what would force a promote; at that point the enumeration should be DERIVED from the branch set rather than hand-typed.
+- **D-164.8.3-01-B — branch `(6b)` sits ABOVE branch (8), never below it.** Branch (8) is the unguarded tail, so anything placed under it is dead code that nothing at review time would name. The `-6` branch guards between the `-10005` branch and the `probe.initialize === true` branch.
+- **D-164.8.3-01-C — the `run.mjs` roster prose was NOT bumped to "ALL TWENTY-ONE KINDS WERE REGISTERED UP FRONT".** The plan said *"correct both numerals"*, but that sentence is a HISTORICAL claim about plan 01 and the twenty-first was not registered then; bumping it literally would have shipped a prose lie into the file whose whole argument is that prose must not drift from what was measured. The live-count half was corrected to twenty-one and a separate ⚠️ paragraph records that `mt5-not-authorized` landed in 164.8.3 with its fixture, remedy, `KIND_ASSERTIONS` entry and both counters in the SAME commit. Recorded as a deviation in the SUMMARY.
+- **D-164.8.3-01-D — the scenario count is MEASURED, never derived.** The plan predicted 78 → 79 from the +1-`red:`-row rule and instructed that the RUN wins on disagreement. The run's own tail assertion printed `79 header(s) printed, SELF_TEST_SCENARIOS is 79`; the two agreed, and 79 is recorded as what the run counted rather than what the rule predicted.
+- **D-164.8.3-01-E — criterion 8's pin counts MATCHES with comment lines filtered, and ALSO asserts the UNFILTERED count is 3.** The workflow's own 20-line argument quotes the idiom it mandates, so an unfiltered gate would be satisfied by prose. Asserting both numbers makes the filter a measured reading rather than an unexamined formality.
+- ⛔ **`state.record-metric` and `state.add-decision` BOTH clobbered `STATE.md` on 2026-09-13** — 70 insertions / 11 deletions and 153 diff lines respectively, each for a ONE-LINE append: `current_phase: 164.8.3` deleted, `gsd_state_version` requoted, and 59 blank lines injected between comment lines. Both were restored from `cp` byte backups verified with `cmp` and the single intended line hand-applied. `state.advance-plan` refused outright with `ambiguous_position_phase` (the Current Position section carries two `Phase:` entries) and wrote nothing. This is the third dated instance; the CLAUDE.md warning holds.
+
+*(execution-time, Phase 156 — CONNECT-REFACTOR, 2026-08-13)*
+
+- **D-156-1 — the transitional gate's two arms are BRANCHED, never UNIONED.** Migration A admits a `service_role` caller on one arm and keeps the full `auth.uid()` ownership check on the `authenticated` arm; Migration B deletes the second arm. A `service_role`-only body in Migration A would have refused the still-live old deploy — a total connect-a-key outage for the whole rollout window. ⛔ A UNIONed condition (`auth.role() = 'service_role' OR auth.uid() = p_user_id`) was rejected: it reads as equivalent and is not, because under `service_role` `auth.uid()` is NULL, so the union silently degrades to "service_role always wins" for every caller and the ownership check becomes unreachable rather than transitional.
+- **D-156-2 — the live PROD gate sits BETWEEN the two landings, not after both.** PR A ships the writer; a real browser then connects a real single key and a real 2-member composite on PROD; only then is Migration B authored. ⭐ The point is directional: PR B can only *close* a door, so gating it on observed-working PROD behaviour means the REVOKE removes a path our own code was **observed** no longer taking. Gating after both landings would have allowed converting a working-but-open state into a broken-and-closed one, which is strictly worse than the residual being closed.
+- **D-156-3 — `SEAM_MISCONFIGURED` at 503 is REUSED, no new code minted,** for the missing-service-key fail-closed arm in both connect routes. Both routes already emit it for server-side misconfiguration, its copy's promise ("nothing submitted, nothing changed") is literally true at that return, and it does not blame the user's key. ⭐ Minting a new member would have moved `EXPECTED_TABLE_SIZE` and the `KNOWN_FINALIZE_CODES` union that PARITY-05's ledger polices — pins that exist precisely so a code addition is a deliberate act. Reuse keeps them unmoved, which is itself the proof this was a fix and not an addition.
+- **D-156-4 — `156-PATTERNS.md` REJECTS the precedent's `IN (...)` width (Rule 7: pick one, say why).** `log_audit_event_service` (audit-2026-05-07 P919) gates in-body on `v_role NOT IN ('authenticated','service_role')`, and three of that precedent's four elements were carried verbatim — `auth.role()` rather than `current_user` (Trap C: inside a SECDEF body `current_user` is the OWNER, so a `current_user` test always passes), the `BEGIN … EXCEPTION WHEN OTHERS THEN v_role := NULL` fail-closed wrapper, and `v_role IS NULL → RAISE`. ⛔ The **width** was rejected: `authenticated` is the exact caller this phase exists to lock out, so admitting it in-body would make the in-body gate a **permanent no-op** — a future GRANT leak would then pass BOTH the grant layer and the body. `<> 'service_role'` instead. ⭐ The precedent's width is defensible *there* (`log_audit_event_service` has an authenticated caller by design) and a security hole *here*; the divergence is written down so a reader diffing the two is not looking at an oversight.
+- ⚠️ **Phase 156 did NOT close two things, and both are logged in `TODOS.md` § Phase 156 rather than half-done:** the `asset_class` annualization stamp still reads the forgeable `apiKeyExchange` (self-targeted residual; needs its own √365-vs-√252 oracle), and `p_venue_account_id` has no in-database oracle (reachability half closed, provenance half not — nothing in the database can ask MT5 whether a login is real). A third, `add_wizard_composite_key`'s absence from `MUTATING_RPC_NAMES`, is a pre-existing audit-coverage gap deliberately left logged-not-fixed.
+
+*(requirements-time, from research Open Decisions 1–8)*
 
 - Janitor targets BOTH tables as two DISTINCT mechanisms: `strategy_analytics.computation_status='computing'` (new reaper, JOB-02/Phase 142) AND `compute_jobs.status='running'` (extend WORKER-04, JOB-05/Phase 144).
 - Fence-flake "two birds" claim: observation-only, never an acceptance criterion.
@@ -492,6 +1579,216 @@ Load-bearing sequencing (do not reorder):
 - csv-finalize fold-vs-compensate deferred to after the Phase 145 reproduction pass.
 - `cron/warm-analytics` OUT of RATE scope; Python limiters beyond `match.py` OUT of scope.
 - Roadmap kept research's 7-phase shape; 143/144 NOT merged (different tables/mechanisms, 143 has a design-pass flag, 144 is the founder's WR-02 call). JOB-07 mapped to Phase 142 only; constrains 143–145 (pg_cron by construction).
+- 153.3-05: MT5 stage-telemetry event fields are a CLOSED ALLOW-LIST (stage/duration_ms/ok/error_class/terminal_key/outcome) — secret hygiene is structural, not call-site discipline
+- 153.3-05: the timing bracket composes INTO _guarded_read, so the measured span is the RAW round-trip and error_class names the raw transport class rather than the uniform Mt5ClientError
+- 153.3-05: the per-validate outcome event hangs off a try/finally at a NEW function boundary, NOT off the release block — that block sits inside the terminal lease and cannot see lease_busy or gateway_unconfigured
+- 153.3-05: structlog loggers must be bound PER CALL — logging_config sets cache_logger_on_first_use=true, so a module-level proxy freezes its processor chain (including the PII scrub) at first use
+- 153.3-05: D-27 honoured literally — not one timeout constant moved; the runbook records the whole chain as PROVISIONAL with Phase 155 named as the owner of the tightening
+- [Phase ?]: Phase 153.3: MT5 gateway honesty shipped — teardown deleted at the sink (D-35), terminal lease taken by the validate path (D-29), initialize() bound and the ordering guard extended to the class (D-24), read-only fails CLOSED (D-31), stages instrumented (D-32)
+- [Phase ?]: 153.1-01: emitter lazy-body cap = 160 chars — measured longest real error body 90, shortest reach to the next emitter's status 202; the cap must sit between them or a malformed body reports its code against the NEXT emitter's status
+- [Phase ?]: 153.1-01: the A-25 SELF-TEST synthetic is 150_000 not 120_000 — 120_000 clears today's 90_000 ceiling but goes FALSE when D-26 (153.4) raises the tombstone to 90 s and the ceiling becomes exactly 120_000
+- [Phase ?]: 153.1-01: both incumbent wizard routes keep statusRe 400 — widening them would move their site count 12 to 16 and add DRAFT_ALREADY_EXISTS/UNKNOWN to the pinned vocabulary, i.e. a population change dressed as a scanner improvement
+- [Phase ?]: 153.1-02: sfox's VENUE_CAPABILITIES row is {} — NOT RESEARCH's sketch { scopeProbeSupported: false }. D-22 and the sketch's own warning win; copying the sketch would have opted a live venue out of a security control as a side effect of minting a foundation. Logged to TODOS.md as RESEARCH Q2.
+- [Phase ?]: 153.1-02: venueCapabilities() (the row lookup) is deliberately NOT exported — consumers read the three predicates, because the DEFAULT is the load-bearing part and differs per capability (probe true / substitutable true / serialized false).
+- [Phase 153.1]: 153.1-03: a fix[] bullet carries a FixRequirement; ONE filter in formatKeyError applies it — never a per-code branch — D-17 is a class (a remedy presupposing a fact about the context), not three instances. Three if-arms would re-ship the instance-not-class defect; the filter also serves UI-SPEC Gate B unchanged.
+- [Phase 153.1]: 153.1-03: context.venue absent => venue-conditional bullet still renders; context.surface absent => surface-conditional bullet is SUPPRESSED — Deliberately asymmetric. An unnamed venue must leave incumbent ccxt copy byte-identical; an unnamed surface must withhold a detour we cannot support (fail toward saying less).
+- [Phase 153.1]: 153.1-04: all ten new wizard codes are non-recoverable BY ABSENCE of a RECOVERABLE_ACTIONS member, decided once for the class — and DRAFT_STATE_INVALID's arrival REMOVES a live false Retry that ships today, because UNKNOWN's fallback IS recoverable and its Retry re-POSTed an identical finalize against a draft the DB had already moved past
+- [Phase 153.1]: 153.1-04: EXPECTED_TABLE_SIZE = 74 at BOTH wizardErrors.test.ts sites (:1486, :1750), the number READ OUT OF the guard's own failure rather than copied from the plan — and a third guard now reads the test file's own source (the only vantage point that sees both declarations) so the two pins cannot diverge again; its declaration count is pinned to a hand-typed 2 as the positive control
+- [Phase 153.1]: 153.1-04: SEAM_DEADLINE_EXCEEDED's 'Your key details are still on this page' bullet declares REQUIRES_CONNECT_SURFACE — Phase 153.4 MUST pass surface: 'connect' (and budgetSeconds) in the same commit it starts emitting the code, or Gate B's absence-suppresses rule silently withholds the reassurance
+- [Phase 153.1]: 153.1-05: COMPOSITE_TOO_MANY_MEMBERS' error body hoisted into a const — inline it runs ~256 chars over EMITTER_BODY_MAX_CHARS=160, so the D-34 reorder ALONE left that site blind (measured 13 vs 14). The scanner cap was NOT relaxed.
+- [Phase 153.1]: 153.1-05: finalize-wizard now derives 25 emitting sites (was 0), 19 distinct codes, KNOWN_FINALIZE_CODES 10 -> 21. CIRCUIT_OPEN is emitted and correctly NOT in the roster — 153.1-06's coverage assertion MUST map through SEAM_CODE_TO_WIZARD_CODE or it reports a false miss forever.
+- [Phase 153.1]: 153.1-06: the wizard coverage law consults SEAM_CODE_TO_WIZARD_CODE before membership — CIRCUIT_OPEN is a wire code, correctly absent from KNOWN_FINALIZE_CODES
+- [Phase 153.1]: 153.1-06: WIZFORM-02 NOT marked complete — five finalize-wizard rejections still answer code-less and render UNKNOWN (DEF-153.1-06-A, owner 153.2)
+- [Phase 153.2]: 153.2-01: the description bound is mirrored client-side from MAGNITUDE_CAPS, and both bounds measure the RAW value.length — exactly what finalize-wizard measures; .trim() is used solely for the emptiness test, where the client is deliberately stricter than the server
+- [Phase 153.2]: 153.2-01: noValidate on the MetadataStep form, keeping required on the control for AT semantics — native constraint validation was intercepting the EMPTY refusal state with a browser bubble, so only two of three refusal states would have reached the inline message
+- [Phase 153.2]: 153.2-01: the submit disabled prop is deleted outright, not replaced by aria-disabled — the step performs no write of its own, so there is no in-flight state to guard; a dead button names no field, which is the D-13 mechanism
+- [Phase 153.2]: 153.2-01: WIZFORM-01 deliberately NOT marked complete in REQUIREMENTS.md — this plan closes only the DESCRIPTION field; 153.2-02 owns the category/AUM/capacity mirrors and the first-invalid-control focus, 153.2-03 owns AllocateDialog (D-12), 153.2-05 owns server-side field-level routing. Same call as 153.1-06 made for WIZFORM-02
+- [Phase 153.2]: AllocateDialog's invalid border derives from the ARIA state Field writes, never a JS ternary — The ternary was correct only by coincidence (fieldError also fed Field's error prop). Deriving the colour makes a red control with broken a11y wiring structurally impossible rather than merely unlikely (Shared Pattern A / FLAG-1). This was the last such holdout.
+- [Phase 153.2]: The amount field's live re-evaluation takes the mirror's VERDICT, it does not blanket-clear — D-12: a corrected amount must not still read red. Gating on a message already showing gives live-clear AND pre-refusal silence from one branch; taking the verdict (not null) also swaps the message when the value is still invalid for a different reason, so a user who types $1B+1 is not told it is fine until the next click.
+- [Phase 153.2]: 153.2-02: the AUM/capacity client mirror IMPORTS finalize-wizard's own isValidDollar plus its omitted-case half, so client and server cannot drift
+- [Phase 153.2]: 153.2-02: a refused submit opens the collapsed <details> before focusing the first invalid control; containment is tested, not hard-coded
+- [Phase 153.2]: 153.2-02: the submit summary agrees with its number ('1 field needs attention') — a recorded deviation from the UI contract's plural-only template
+- [Phase 153.2]: 153.2-04: the finalize-wizard scope probe is gated on venueSupportsScopeProbe (a CAPABILITY) at BOTH call sites, and fails TOWARD probing — null / unknown / absent-row venues are still probed, so a transient api_keys.exchange read fault cannot disable an ASVS V4 control
+- [Phase 153.2]: 153.2-04: MT5 ships as Option B — WIZARD_EXCHANGE_CODES / WIZARD_EXCHANGES are wizard-only, so EXCHANGES.length (the public marketing count) does not move and CRYPTO_EXCHANGES stays mt5-free (membership there selects √365 over √252 — a money-math boundary, not a UI one)
+- [Phase 153.2]: 153.2-04: a parse miss (KEY_SCOPE_CHECK_UNAVAILABLE, 502) and a missing INTERNAL_API_TOKEN (SEAM_MISCONFIGURED, 500) are split off KEY_NETWORK_TIMEOUT as PERMANENT — both non-recoverable, so no Retry control renders. No retry loop was added (D-07)
+- [Phase 153.2]: 153.2-04 audit lesson: an inherited test's not.toBe between two literals declared in the SAME file is a guard that cannot fail — assert off the response body, and order the named assertion before the broad toEqual. A tolerant expect([502,503]).toContain(status) is what let the D-14b misclassification survive in tests/integration/process-key-thin-adapters.test.ts
+- [Phase ?]: 153.2-05: FIELD_BY_CODE routes every field-level METADATA_* code back to ONE metadata field, with a totality assertion derived from WIZARD_ERROR_COPY plus an anti-vacuity floor — an unmapped code reds BY NAME instead of falling through to a page-level envelope
+- [Phase ?]: 153.2-05: MetadataFieldId widened 4 -> 6 and EXPORTED — the codename and the capital question have NO CLIENT RULE but DO have a field; conflating those two facts is what sent a description refusal to an envelope that named no field
+- [Phase ?]: 153.2-05: the server's refusal MERGES into MetadataStep's existing fieldErrors map rather than rendering beside it, so the inline message, the aria-derived border, the submit predicate, the focus target and the summary line stay ONE derivation; the client mirror wins on ?? because it judges the value on screen now
+- [Phase ?]: 153.2-05: a server refusal is retired on the FIRST EDIT of its field, unconditionally — not on the edit becoming valid. A message the user cannot clear by acting on it is a dead end, and the client mirror re-raises its own code in the same render when it still disagrees
+- [Phase ?]: 153.2-05: wizard_error telemetry fires on BOTH branches and the routing is keyed on FIELD_BY_CODE, never on the HTTP status — a rule that moves arms must not silently revert a field refusal to a full-page dead end
+- [Phase ?]: 153.2-05: WIZFORM-03 was shipped-and-inert since 153.1-03 — the fixRequires filter was correct but zero of fourteen call sites passed a venue, and venue-absence preserves incumbent copy. Passing context.venue at SubmitStep is what turns it on; ConnectKeyStep/MultiKeyConnectStep remain 153.4's
+- [Phase ?]: 153.2-05: the finalize limiter's 429 answers RATE_LIMITED, NOT the ledger's suggested KEY_RATE_LIMIT — that entry's copy blames the exchange for OUR own per-user cap. A ledger entry is a suggestion, not a verdict
+- [Phase ?]: 153.2-05: the two limiter arms stay explicit NextResponse.json sites — routing them through the deny chokepoint was MEASURED to drop the derived rejection-site count 32 -> 30, i.e. to make the class guard blind to them
+- [Phase ?]: 153.2-05: three of nine seam citations in wizardErrors.ts had ALREADY drifted, and a tenth claim was substantively false (MetadataStep reads .title, not .cause, since 153.2-01) — re-derive against HEAD, never rename the symbol at the stale line
+- [Phase ?]: 153.2-05: WIZFORM-01 marked COMPLETE — checkbox and traceability row now agree (closes D-153.2-A). WIZFORM-02 and WIZFORM-03 recorded as PARTIAL with their remaining owners named
+- [Phase ?]: 153.4-02: budgetKeyFor selects the validate budget by CAPABILITY (venueIsSerialized), never by a venue name — a second serialized venue is covered by editing VENUE_CAPABILITIES, never this function
+- [Phase ?]: 153.4-02: budgetKeyFor NEVER throws, deliberately diverging from process-key-client.ts's never-assignment analog — exchange is a caller-supplied wizard form value, so an unrecognised string is normal input and the default row is byte-identical to pre-153.4 behaviour
+- [Phase ?]: 153.4-02: the T-140-01 prohibition is written as validate-key-<exchange>, NOT as a template literal — a grep for an interpolated budget key would otherwise be permanently satisfied by the sentence forbidding interpolation
+- [Phase ?]: 153.4-02: a call site may SELECT its budget row at run time, so it has as many BINDINGS as the selector has arms — resilient-fetch.wiring.test.ts's roster is keyed on bindings and validateKey now appears twice (B-01 default, B-14 serialized)
+- [Phase ?]: 153.4-02: deleting a branch label moves SC-4b's arithmetic in the OVER-stating direction, so no headroom assertion can ever notice — only the hand-typed four-row multiBranch roster can, and F3 proves SC-4b stays green under the mutation
+- [Phase ?]: 153.4-02: WIZFORM-05 stays PARTIAL — the client selection leg is live but D-05's honest long-wait UI is 153.4-03's, and D-27 leaves 120 000 ms provisional until Phase 155
+- [Phase ?]: 153.4-04: the wait's venue is FROZEN at submit so a mid-flight exchange click cannot re-time the client deadline or advertise a budget nobody granted
+- [Phase ?]: 153.4-04: an AbortError is one rejection with two opposite meanings — a recorded abort REASON separates a user cancel (no error code, no console.error, NO wizard_error) from a spent budget (SEAM_DEADLINE_EXCEEDED + exactly one funnel event)
+- [Phase ?]: 153.4-04: surface: connect + budgetSeconds + venue are passed to buildEnvelope in the SAME commit that starts emitting SEAM_DEADLINE_EXCEEDED — the REQUIRES_CONNECT_SURFACE gate 153.4-02/03 re-homed is paid for the single-key step; 153.4-05 owns the three MultiKeyConnectStep sites
+- [Phase ?]: 153.4-04: the browser gives up LAST — the client deadline fires at budget + WAIT_ABORT_GRACE_MS, never at the budget, or an abort cuts off a verdict already on the wire and re-creates the silent UNKNOWN
+- [Phase ?]: 153.4-05: composite wait controllers keyed by panel.id, never index — a reorder must not redirect an abort
+- [Phase ?]: 153.4-05: every validate OUTCOME patches its panel by IDENTITY (updatePanelById), not by the index the request was launched from — a mid-flight reorder would write one member's failure, cancelled line or verified key id onto another panel
+- [Phase ?]: 153.4-05: PanelState gained a FOURTH wait field beyond the plan's three — waitExchange, the venue frozen at validate — because the exchange cards stay clickable mid-flight and every duration a panel states must describe the request actually on the wire (T-153.4-12)
+- [Phase ?]: 153.4-05: the composite card's 300 ms render gate is the step's 1 s TICK, not a per-panel timer — waitElapsedMs is 0 for the whole first second, so a sub-300 ms answer cannot flash a card, and N panels do not mean N timers (T-153.4-22)
+- [Phase 156]: 156-02: the wrong-door supabase mock DELEGATES by default and its throw is ARMED per-case — an unconditional throw would red every pre-existing wizard route case for the width of the RED window (G11's noise problem, inverted)
+- [Phase 156]: 156-02: CONNECT-02/03 left UNCHECKED in REQUIREMENTS.md — this plan wrote the contract as failing tests only; 156-04 makes it true
+- [Phase 143]: 143-01 (D-11 correction discharged): the analytics worker had ZERO Sentry wiring — init_sentry() now runs in main_worker.main(), so worker-side capture_* is no longer a silent no-op. The main()-calls-init_sentry pytest is the load-bearing half; the capture test mocks the SDK and stays GREEN with init removed (observed, Neuter A).
+- [Phase 143]: 143-01: reconcile-sweep marker contract, Python half — keys 'source'/'detected_at', value 'reconcile-sweep', read in the dispatch_tick claim loop BEFORE the try: that owns the heartbeat try/finally (DX-07). Emission wrapped in try/except: unwrapped, a Sentry fault escapes dispatch_tick and kills the whole claimed batch (observed, Neuter D).
+- [Phase ?]: 143-02 (MEASURED, corrects the plan): ON CONFLICT DO NOTHING is NOT what makes a sequential sweep re-run a no-op — the zero-jobs conjunct is. Tick 1's INSERT removes the strategy from the predicate, so tick 2's batch is empty and the INSERT is never reached. A gate that 'proves' ON CONFLICT by running the body twice in one session is VACUOUS (relevant to Plan 03).
+- [Phase ?]: 143-02 (MEASURED): FOR UPDATE SKIP LOCKED is the FIRST line of race defense, not just a bound helper — an INSERT into compute_jobs takes an FK KEY SHARE lock on its parent strategies row, which conflicts with the batch's FOR UPDATE, so the sweep skips a strategy the live enqueue path is mid-insert on. Removing BOTH it and ON CONFLICT is the only combination that yields 23505 at READ COMMITTED.
+- [Phase ?]: 143-02 (MEASURED): AS MATERIALIZED does not create the bound in this shape — EXPLAIN is byte-identical with and without it because Postgres does not inline a CTE carrying a locking clause, and the 26-row arm still heals 25. Keyword and gate RETAINED as shape enforcement against a future edit dropping FOR UPDATE; the bound is proven ONLY by executing the body against LIMIT+1 rows.
+- [Phase ?]: 143-02 census (read-only PostgREST, Supabase MCP unavailable): 0 candidates on TEST and PROD, both STOP rules clear. D-03 confirmed EMPIRICALLY — on PROD 4 of 4 zero-job strategies-with-dailies are excluded SOLELY by the terminal-analytics conjunct, so weakening it is a 4-row mass re-enqueue today. L-2 (cron role BYPASSRLS) is UNOBTAINABLE over PostgREST (HTTP 404 measured) and stays with Plan 04.
+- [Phase 143]: 143-03: Part 3 of the SQL gate is LABELLED a double-mutation observable, not an ON CONFLICT proof — 143-02 measured that a two-tick single-session gate cannot fail; both single neuters were run to confirm the labelling
+- [Phase 143]: 143-03: the plan's neuters (6) MATERIALIZED and (7) bare-INSERT are FALSE — executed, GREEN in isolation, substitutes N6b (23505) and N7b (LIMIT removed) added and observed RED; N7b is the only real bound proof
+- [Phase 143]: 143-03: a SQL gate's Part-1 text anchors MASK its behavioural arms under ON_ERROR_STOP=1 — neuter runs must isolate the part under observation or six of eight REDs prove nothing about the arms
+- [Phase 143]: 143-03: the neuter campaign found a real vacuity in this plan's own marker-contract gate (a Sentry TAG satisfied a bare-literal check); fixed to pin the comparison operator, re-observed RED (f62c3866)
+- [Phase ?]: 145-03: csv-finalize folded into one SECDEF transaction (finalize_csv_strategy_with_returns); both parents DROPped; atomicity oracle executed (mid-body fault -> 0/0/0 rows); 10-neuter RED matrix, zero vacuities
+- [Phase ?]: 145-04: fold-failure envelope moved to 500 CSV_FINALIZE_FAIL (retry-enabling; the frozen-button CSV_PERSIST_FAIL default would contradict the honest retry copy) — pinning tests updated in the same diff
+- [Phase ?]: 145-04: third capture step finalize-resolve-read-fail added so the fail-closed resolve-read arm (window B's successor) is not capture-less
+- [Phase ?]: 145-05: NEW-C14-07 deleted (not unskipped) — its upstream-body-spread arm dissolved with hop 0; TS-13 discipline pinned in route.test.ts
+- [Phase ?]: 145-05: window E's re-rank trigger fired at PROD=1 but attributed to the known composite (143 D-09) — entry filed mid-term with attribution recorded
+- [Phase ?]: 146-01: RATE-05 closed VERIFIED-EXISTING per D-146-1 (no withRateLimit symbol minted; reversal = ship gate); eval limiter reuses adminActionLimiter 20/min per D-146-4
+- [Phase 160]: 161-01: KEY_UNDECRYPTABLE arm keyed on ONE code with === (never a blanket seam-code forward) — the cascade stays authoritative so an upstream cannot name our private vocabulary
+- [Phase 160]: 161-01: the PROBE_* law brings its OWN two-shape scanner; the incumbent wizardErrors emitterRe is code-first and would see neither of this route's real emitter shapes
+- [Phase 160]: 161-02: the MT5 flag->cause builder lives in mt5_probe.py (mt5_validation cannot import it back — cycle) and CALLS terminal_trade_permission_off rather than re-deriving its shape test
+- [Phase 160]: 161-02: job_worker.classify_exception reads the Mt5GatewayMisconfigured message through an ALLOW-LIST — a curated cause survives the sink, raw remote text degrades to the generic constant (T-134-01 + honesty at once)
+- [Phase 160]: 161-02: when both MT5 blockage flags are set the NAMED external-API option wins (documented precedence, pinned by test); absent/unreadable flags render the generic constant, never a guessed cause (A1 quarantine)
+- [Phase 160]: 161-03: the csv-finalize A2 409 sentence was ADJUSTED from the UI-SPEC's proposal — 'this track record' and 'a different flow' are both unestablished at that arm (it runs before the name and series checks, and admin/strategy-review moves a same-flow row to published)
+- [Phase 160]: 161-03: the CSV per-row forward is a PROJECTION naming {rule,row,message}, never a passthrough — the producer's no-echo discipline stops being a promise held in another file
+- [Phase 160]: 161-04 / WIZERR-02: keep-and-resume — 'Try another key' is a pure step transition; the draft survives and a same-key resubmit resolves kind:'draft' and RESUMES (measured at create-with-key/route.ts:269 + :634-649).
+- [Phase 160]: 161-04: deletion now has exactly ONE caller (the confirm dialog's danger button), reachable from two confirmed entrances; a remedy-labeled control is non-destructive by construction.
+- [Phase 160]: 161-05: A2 CONFIRMED by re-reading the sweep SQL at HEAD — cleanup_abandoned_wizard_drafts never re-collects an already-orphaned key, so KEY_ORPHANED's copy claims permanence rather than a time-bound
+- [Phase 160]: 161-05: 161-UI-SPEC's WIZERR-03 'Manage keys' remedy was replaced — measured unreachable for a manager holding an orphaned key (D-161-05-A)
+- [Phase 160]: 161-05: composite/add-key does NOT mirror KEY_ORPHANED — the venue-identity constraint is unreachable there and mirroring would delete a premise-changed alarm
+- [Phase 160]: D-161-06-A: the Retry-After wait's ONLY wire source is the response HEADER — service_error_body emits no retry_after leaf (measured); a body fallback would be the second extraction path process-key-client.ts already refused
+- [Phase 160]: D-161-06-B: both key-route catches share keyRouteFailureHeaders() — one conditional, documented precedence (breaker wins); this also absorbed the pre-existing duplicated CircuitOpenError ternary
+- [Phase 160]: D-161-06-C: AnalyticsUpstreamError is at FIVE positional params — the recorded ceiling; a sixth optional field or a second number|null one makes the trailing-options-object refactor mandatory
+- [Phase 161]: 161-07: the examined-refused verdict Set became a Map whose VALUE is the user-visible sentence — a verdict cannot join the class without bringing its own copy
+- [Phase 161]: 161-07: BOTH 161-UI-SPEC WIZERR-10 clauses corrected against broker_dailies.py (no size threshold; no per-series examination), and its WIZERR-09 'upload a CSV' remedy replaced — a fifth measured UI-SPEC copy defect
+- [Phase 161]: 161-08: widen the terminal 5xx code channel on five seam routes; the shape law's membership requires a 4xx range split, which excludes scenario/optimize whose bare terminal UNKNOWN is correct by construction
+- [Phase 161]: 161-10: dashboard routes emit code-first literals; dialogs recognise through ONE shared per-route roster (DASHBOARD_DIALOG_ROUTE_CODES) holding the only guarded cast
+- [Phase 161]: 161-10: 4 DASHBOARD_* members minted (pins 84 -> 88) because each near-neighbour's SENTENCE is false on a dashboard dialog
+- [Phase 161]: 161-09: keys/validate-and-encrypt derived ZERO under the code:-first coverage predicate — all 11 literal-coded arms reordered so the 4th ROUTES row lands over a real population
+- [Phase 161]: 161-09: KNOWN_VALIDATE_AND_ENCRYPT_CODES enforces typed+has-copy only — measured, none of the route's 3 consumers reads its code field. Named debt, not a claimed contract.
+- [Phase 161]: 161.1-02: the refresh fan-out ships DORMANT behind app.ledger_refresh_enabled (exact-equality, fail-closed); the binding bound is the 20h attempt cooldown, LIMIT 4 is a burst cap only
+- [Phase 161]: 161.1-02 D-15: a refresh-marked failure on an already terminal-success strategy_analytics row records computation_error only — no status flip, no basis-series heal-delete; every unrecognised job falls through to the loud destructive stamp
+- [Phase 161]: 161.1-05: gate 7 reads a DECLARATION PRELUDE region, not the dollar-quoted body — SET search_path lives outside the delimiters, so the plan as written would have been RED against a correct file
+- [Phase 161]: 161.1-03: the plan's blast-radius claim (a flag-off tick downgrades the MT5 cohort) is FALSE at HEAD — the MT5 kill-switch returns before any stamp and a -10005 wedge classifies transient; runbook states the measured model instead
+- [Phase 161]: 161.1-03: the remediation detect query keys on damage + the BEFORE census diff, NOT the fan-out marker — the marked path is the D-15-guarded one, so a marker-only filter returns zero rows on the very incident it investigates
+- [Phase 161]: 161.1-03: both gates this plan mandated were VACUOUS — ';'-separated greps under bash -c always print OK (measured), and both task-2 tokens ('stored' 14x, '471-472' 1x) already existed pre-edit. Gate tokens must be counted against the PRE-EDIT artifact
+- [Phase 162]: HONEST-02 verdict flat-account: decided on the key-side sync witness (last_fetched_trade_timestamp frozen 111d while the poller succeeds daily), not on the empty trades count
+- [Phase 162]: HONEST-01 root cause recorded inconclusive: stage/window/population pinned (poll_positions, 2026-06-10..06-14, 2 strategies) but no str/None site at HEAD and no traceback survives
+- [Phase 161]: 162-03: RSC series strip lives in portfolios/[id]/page.tsx, not getPortfolioStrategies — the page needs the series server-side to build curves; only forwarded props narrow
+- [Phase 161]: 162-03: mayClaimSyncRecency is a new decided predicate, not a widening of hasComputedAnalytics — that value also gates the rank cell and owner pending chip
+- [Phase 161]: 162-04: one rankability boolean gates BOTH the series and the co-served cagr/sharpe on /returns — the scalar gate is not a second status ladder
+- [Phase 161]: 162-04: composer distinguishes an unanswered metrics fetch (id absent from addedMetricsById) from a settled null pair — only the settled case renders the absence note
+- [Phase 161]: 162-09: failed scope probe renders chips as unknown (em-dash, colorless) and omits the freshness caption — one probe_error gate feeds every claim
+- [Phase 161]: 162-02: computation_error is curated at the SQL bridge from compute_jobs.error_kind, never from last_error; the operator column keeps raw text
+- [Phase 161]: 162-02: classify_exception is NOT curated (rejected option 2 — it would strip diagnosis from compute_jobs.last_error and redden the api_keys.sync_error invariant)
+- [Phase 161]: 162-02: the three compute_jobs error kinds yield TWO honest sentences plus a cautious default — transient and unknown reach failed_final only via attempt exhaustion
+- [Phase 161]: OPS-05: configure_logging() at MODULE scope in main_worker.py (not inside main()) — python -m main_worker runs the module top-down, so an import-time log would emit before any main()-time call
+- [Phase 161]: MEASURED CORRECTION: structlog Mode B is a pre-configure WINDOW, not a permanent freeze (default config has cache_logger_on_first_use=False, so a plain module-scope proxy self-heals). Only a module-scope .bind() RESULT is permanently frozen
+- [Phase 161]: OPS-05 deviation: the stdlib redact bridge was DELETING log lines — scrubbing a %-format template ate conversion specifiers, getMessage() raised, and stdlib logging dropped the record at 3 measured call sites (2 live in PROD). Fix: keep the scrubbed template only if it still formats against record.args
+- [Phase 161]: SEC-02: forward-only redaction — founder declined history rewrite; the scan stops new leakage, it does not unpublish
+- [Phase 161]: SEC-02 gate has ZERO path exclusions — one value-only exemption for the <user> placeholder; a path carve-out is the gitleaks blindness it exists to fix
+- [Phase 161]: Two APPLIED migrations edited comment-only under a RECORDED EXCEPTION — precondition verified read-only first: Supabase CLI reconciles by version, never content hash
+- [Phase 161]: HONEST-08: the staler-of-two comparison is between VERDICTS on per-subject ladders (job 12h/48h, series 3d/7d), not raw dates — a daily series' last point is always older than a fresh job, so older-date-wins would have deleted the sync copy product-wide
+- [Phase 161]: HONEST-08: the 3d/7d series ladder moved from FactsheetView.tsx into lib/freshness.ts and the chip now imports it — one pair of numbers for the list badge and the factsheet chip
+- [Phase 161]: HONEST-08: PostgREST accepts a negative JSONB array index as a projection alias (series_end:returns_series->-1->>date, MEASURED HTTP 200) — but postgrest-js cannot TYPE-parse it, so the call site carries a narrow documented cast
+- [Phase 161]: 163-08: the seam body cancel uses a full capability ladder, not res.body?.cancel().catch() — the sketch throws on a present body whose cancel is missing or not callable, measured RED
+- [Phase 161]: 163-08: doRemove does NOT clean the abort ref maps (plan deviation, measured) — the catch reads the reason a microtask later, so a synchronous delete reds the funnel with SERVICE_UNREACHABLE; validatePanel's finally already cleans both
+- [Phase 161]: 163-08: vi.fn attaches its own handler to a returned promise, suppressing unhandledRejection — a spy is not a neutral observer of promise handling; use a plain closure when the oracle IS the rejection
+- [Phase 163]: 164-07: cache-reach guard extends phase-148-owner-lane-cache-isolation.test.ts over the builder's whole 38-module transitive closure; floor >= 30 cites an INDEPENDENT pre-edit measurement, never the walker's own output
+- [Phase 163]: 164-07: RED planted at DEPTH 3 (src/lib/utils.ts), not on the entry — all 12 pre-existing assertions in the same file stayed GREEN under that mutation, which is the measured asymmetry justifying the closure pin
+- [Phase 163]: 164-05: Plausible mitigated by conditional script omission, NOT data-exclude — the assumed mechanism is pageview-only AND removed from Plausible's current script (both measured 2026-08-28)
+- [Phase 163]: 164-05: per-route no-referrer is justified by the SAME-ORIGIN gap; the CONTEXT/PLAN claim that strict-origin-when-cross-origin 'never strips the path' is FALSE (cross-origin it sends origin only) and is recorded as false in code + test
+- [Phase 163]: 164-03: deriveShareToken takes THREE arguments (id, nonce, generation) — the mint route round-trips a minted url through verifyShareToken because a 43-char shape assertion passes for the stale two-argument pre-image too
+- [Phase 163]: 164-03: MEASURED — the audit-coverage mutating-RPC detector scans line-by-line, so a Prettier wrap between .rpc( and the name disarms it exactly as a method-cast does; both share routes cast the CLIENT and keep the call on one line (deferred-items D-164-C)
+- [Phase 164.3.1]: 164.3.1-09: ARMS_FLOOR=30 and FILES_FLOOR=1 RE-DERIVED under the sound primitives and HOLD — 30/30/0, biting 30, 0 of 30 arms moved; comments-only diff, floors test untouched per the lockstep rule. — The gate file blob is byte-identical at the phase base and HEAD (5ae6855f), so the input was fixed and only the mechanism moved — that is what makes no-movement a measurement rather than two different corpora agreeing by luck.
+- [Phase 164.3.1]: 164.3.1-09: biting 30 is the SAME integer over a STRICTLY SMALLER admissible set — plan 10 must carry that qualitative fact with the number when it sets absurdity-floor thresholds. — identity ok moved from a transmitted nonce (readable by the gate via current_query()) to a three-legged source-location rule, so a floor of 30 is harder to satisfy than it was pre-phase.
+- [Phase 164.3.1]: 164.3.1-10: dedicated 'absurdity' defect kind (instrument failing) kept distinct from 'floor' (corpus regression); lane tally arm-scoped, relation EXACT equality, counter monotonic and read as a snapshot delta
+- [Phase 164.3.1]: 164.3.1-10: vitest print-contract pin is cluster-free; the non-zero-through-real-lanes proof lives in --self-test scenario 6 so the unobserved-ubuntu risk (WINDOWS 28) stays out of the blocking vitest shards
+- [Phase 164.3.1]: 164.3.1-11: corpus entries pin the runner's VERDICT TABLE through real lanes, each with a passing control in the same run; P5's silent over-neuter is made loud inside the fixture (SURVIVOR LOST) rather than by exposing lane output; the two Primitive-B entries are proven to fail under DIFFERENT neuters (N3 whole attribution → {8,11,12}; N4 chain length only → {12})
+- [Phase 164.3.1]: 164.3.1-12: VAC08-JOIN evaluates the gate's clauses via a JS interpreter of the four documented shapes that REFUSES unknown clauses; rows from a fixed table, predicate from the script (a first draft that built rows from the script stayed green under the neuter)
+- [Phase 164.3.1]: 164.3.1-12: join clause 2 (version||'_'||name) measured SUBSUMED by clause 4 (desc-only); pinned as EXPECTED_SPECIFICITY, script header :44-47 reported stale not patched
+- [Phase 164.3.1]: 164.3.1-12: meta-arm allowlists classified BEFORE keys were transcribed (17 of 68 emissions, four classes); KNOWN_THRESHOLD_SITES exact set of 6; ${GATE} excluded from what counts as a runtime value
+- [Phase 164.3.1]: 164.3.1-13: gate-level arms assert the wiring's positive evidence line (readers-ran) as the pass condition, never the D-13 refusal; per-reader-visible fixtures make each VAC-04 union member individually load-bearing; scratch neuters proven by ABSENCE so standing calibration legs stay green under a recorded real-source neuter
+- [Phase 164.4]: Fixture strategy for Phase 164.4 RED-UNDER-SETUP lists: STAND-INS, not a stubbed real migration chain — Decided by the rule fixed before any probe ran. The stubbed chain failed rule (i) terminally at stub iteration 3 of 8, reaching 51 of 262 migrations, on a PL/pgSQL SAVEPOINT that cannot parse; it never reached a baseline to time. The stand-in candidate is GREEN at a 1.01 s/lane mean over three runs, projecting ~5.9 min for the 453-lane end state.
+- [Phase 164.4]: 164.4-01: the runner DERIVES and PRINTS the 27 excluded non-idiom gate files by name on every run, in both modes, and CI MEASURE_FAILs on absence or on a claimed count that disagrees with the names beside it. — Criterion 1 as amended (founder 2026-09-02) makes a silent exclusion fail exactly like a missing annotation. A hand-maintained list would be one more claim nobody compares, so scanCorpus classifies every unannotated .sql with the runner's own statement tokenizer. MEASURED: 1 annotated + 43 pending + 27 unreachable + 0 inert = 71, matching RESEARCH Option (a) file for file.
+- [Phase 164.4]: 164.4-01: the identity CARRIER is read off a statement's RAW text, never off its masking projection. — MEASURED: the masking projection blanks string literals and the identity lives inside the raise message, so reading the carrier from executableText classifies all 70 unannotated files as permanently out of scope (70 unreachable / 0 pending). The RAISE test still runs against executableText, so a raise in a comment or a literal is not one.
+- [Phase 164.4]: 164.4-01: GRAMMAR rule 4 — no RED-UNDER-M step may target scripts/pg-lane/fixtures/**. Refused at parse time, keyed on the twin's TARGET and never on a fixture's POSITION in the apply list. — A mutation to a stand-in proves the fixture author's guess, not production, and the arm is counted as biting anyway (threat T-164.4-01). Parse time is the 3a seam: a refused annotation is malformed, never counted as a twin, and the refusal fires in --parse-only with no database. MEASURED 2026-09-02: 0 twins in all 71 files target a fixture, so it refuses nothing that exists. Position-keying was rejected because plan 164.4-00 measured a legitimate stand-in sitting BETWEEN two migrations.
+- [Phase 164.4]: 164.4-02: the arm chosen for a section is the identity that ACTUALLY speaks under the mutation, not the section's first identity — TENANT 3b, SERVICE-ROLE 1-grant and REVOKE 1b were each predicted by the file's own prose and confirmed on the lane
+- [Phase 164.4]: 164.4-02: ARMS_FLOOR moved 30 -> 45 but FILES_FLOOR stayed 1 — no new FILE was annotated; SECTION coverage moved WITHIN the one annotated file (20/35 -> 35/35). The asymmetry is stated at both constants.
+- [Phase 164.4]: 164.4-02: the durable half-annotation control is SET INCLUSION, never a count — 'annotated >= sections' is satisfied by two twins on half the sections, which is exactly the shape the reference file was in until this plan
+- [Phase 164.4]: The lane-blocked deferral is PROBED against the lane every run, not just derived from the corpus — pg_cron AVAILABLE with a non-empty class is a lane-blocked-stale MEASURE_FAIL that exits 1 — A printed reason that cannot expire is the control-that-cannot-fail this phase exists to remove: the class is derived from the corpus, but 'the pg-lane cannot host pg_cron' is a fact about the LANE and no derivation measures it.
+- [Phase 164.4]: Arm J of a SECURITY DEFINER fan-out gate must move its RLS-enabled tables with the function: left behind, a non-exempt owner reads them empty and the positive arm fires hundreds of lines earlier
+- [Phase 164.4]: A non-idiom raise that makes the VIEW itself raise scores NO-IDENTITY, not 'the arm bit' — resolve by choosing a mutation the arm can OBSERVE, never by a waiver (WAIVED_CEILING stays 0)
+- [Phase 164.4]: gsd-core `neuter` is per-RAISE, not per-arm: naming an arm suppresses only its FIRST raise, so a section that raises twice cannot be fully suppressed
+- [Phase 164.4]: PATTERNS section P4's lockstep checklist is incomplete by at least 4 items — grep scripts/mutation-runner/ as well as src/__tests__/ for every literal a floor move touches
+- [Phase 164.4]: 164.4-06: a pg-lane stand-in NARROWER than production can make an arm structurally unfalsifiable while the gate prints ALL PASS — three arms of test_strategies_private_owner_isolation.sql were in that state — 01-fixture-core.sql scopes strategies_read TO authenticated and grants authenticated SELECT only. MEASURED: GUARD 6 and GUARD 7 were refused by the GRANT layer with the same 42501 their handlers read as trigger proof, and anon held no grant at all so RLS 4 could never be reddened by any policy mutation. 10-fixture-strategies-rls-baseline.sql DROPs the stand-in so the REAL 20260405061912_rls_policies.sql defines the object, and restores production's table grants.
+- [Phase 164.4]: 164.4-06: an arm behind a runtime SKIP is answered by the APPLY LIST, and the proof is read off the baseline's own state-aware summary line — test_api_keys_venue_identity_uniq.sql hides two assertions behind RAISE NOTICE 'SKIP (...)' unless migration 20260814120000 is applied. The list carries it and its prerequisites; the baseline prints ZERO 'SKIP (' notices and the PASS (structural) variant rather than PASS WITH 3 SKIPS. Section 4's twin drives the v_b_live-armed assertion itself, so its RED is a second independent proof the skip is inert.
+- [Phase 164.4]: 164.4-06: FILES_FLOOR 9 -> 13 and ARMS_FLOOR 134 -> 163, both separation directions driven on real lanes; WAIVED_CEILING stays 0 — Read off the run's own lines: coverage files 13/71, arms 163/163/0, biting 163, lane-invocations 163, tallies agree, 191 s wall, exit 0. runCorpus(13,163) SILENT; runCorpus(14,164) FIRES both regressions. ci.yml timeout-minutes stays 15 — a three-point ubuntu fit (1.27 s/arm job cost + ~62 s fixed) projects 163 arms at ~4.5 min.
+- [Phase 164.4]: Batch 4 mutations are mostly MIGRATION-TEXT edits, not live-object drift: 24 of 26 new arms carry a find/anchor. Where a migration self-verify re-reads the object it just wrote (allocator_equity_derived STEP 6(c) role checks), the edit aborts the apply and the arm must take a post-apply sql step instead.
+- [Phase 164.4]: A stand-in NARROWER than production can pre-empt the REAL migration entirely: 02-fixture-sanitize-tables.sql one-column user_notes made 20260412094453 CREATE TABLE IF NOT EXISTS a no-op, so every object the gate asserts on would have been missing from a table that nonetheless existed. 16-fixture-user-notes-baseline.sql DROPs it.
+- [Phase 164.4]: ci.yml timeout-minutes stays 15. Four-point ubuntu fit (45/119s, 86/171s, 134/232s, 163/278s) = 1.35s per arm of JOB cost plus ~58s fixed, so 189 arms projects to ~5.2 min and the phase end state to ~6.9 min.
+- [Phase 164.4]: 164.4-08: [REDUNDER-WAIVER-01] resolved by founder decision with the ROOT-CAUSE FIX (reorder the anon-EXECUTE precondition ahead of its dependents), not a waiver — WAIVED_CEILING stays 0 and the arm is first-failure mutable
+- [Phase 164.4]: 164.4-08: sql-mutation timeout-minutes STAYS 15 — largest MEASURED ubuntu run is 458 s (7.6 min) and the worst-case phase-end projection is 9.8 min, both under the 10-min raise rule; the falsified arm-count linear fit was replaced by a per-lane model citing 1.0s and 1.7s, dated
+- [Phase 164.4]: 164.4-09: assertion (b)'s un-twinnable arm resolved by the ROOT-CAUSE FIX (wrap its INSERT in the file's own unique_violation handler), not a waiver — WAIVED_CEILING stays 0
+- [Phase 164.4]: 164.4-09: pg_cron goes ON the pg-lane as its own plan, retiring [REDUNDER-PGCRON] — test_compute_jobs_error_kind_copy_parity.sql stays pending rather than being worked around
+- [Phase 164.4]: 164.4-09: floors ratcheted to the RUN's printed 28/239, not the plan's projected 29/242 — a five-file batch may not inherit a six-file number
+- [Phase 164.4]: Phase 164.4-10: floors ratcheted to the RUN's printed 32/247, not the plan's projected 33/250 — the plan assumed a six-file wave 10 that landed five
+- [Phase 164.4]: Phase 164.4-10: arm B1's twin is LAYERED because the single-step mutation was measured GREEN on a real lane — enqueue dedupe has two independent arbiters (RPC look-up + partial unique index)
+- [Phase 164.4]: 164.4-11: the mixed files' shadow is PRIVILEGE-shaped — a withdrawn privilege aborts with 'permission denied for table …', which carries no TEST FAILED (…) and scores NO-IDENTITY. The falsifier that works is the RLS ROW filter, which returns zero rows instead of raising (MEASURED, 5 of 15 twins).
+- [Phase 164.4]: 164.4-11: SCOPE AMENDMENT #2's 40 files / 255 sections is SUPERSEDED — measured end state 39 / 252 / 262 twins. Corrected in all seven ledger sites as an ARITHMETIC CORRECTION, not a new decision; it follows from plan 09's founder-decided pg_cron deferral.
+- [Phase 164.4]: 164.4-11: WAIVED_CEILING stays 0 — Phase 164.4 finished with ZERO waivers across all eight arms moves. Every shadowed arm was reached by mutating a layer its shadow does not observe.
+- [Phase 164.4]: 164.4-11: ci.yml's sql-mutation timeout projection counts LEGS (arms + 2 × annotated files), not arms — the job runs a baseline and a restore leg per FILE. Phase end 340 legs ≈ 494 s ≈ 8.2 min; timeout-minutes stays 15.
+- [Phase 164.4.1]: 164.4.1-02: D-04 pending pin moved to the MEASURED empty set, guarded by a pending AIM (D-04) arm that classifies a stripped copy of a real gate — the AIM proven able to fail by neutering classifyGateIdiom's pending branch
+- [Phase 164.4.1]: 164.4.1-02: FILES_FLOOR 39->41 and ARMS_FLOOR 262->272, read off the run's own coverage:/biting: lines; separation driven both ways on real lanes ((41,272) one lane-blocked-stale row only; (42,273) adds both floor regressions). WAIVED_CEILING UNEDITED at 0 — nine arms moves, zero waivers
+- [Phase 164.4.1]: 164.4.1-02: a gate assertion's genuine falsifier may be REJECTED when it kills an earlier assertion first as a raw driver error (derive assertion 5 narrows the coherence arm instead of deleting it); and a LAYERED twin can be forced by defence-in-depth, where removing either half alone is a measured no-red (derive assertion 2)
+- [Phase 164.4.1]: 164.4.1-04: section 3 of the reaper gate RECLASSIFIED (identity removed), not waived — second use of the fcbc0159 precedent; WAIVED_CEILING stays 0 across 11 arms moves
+- [Phase 164.4.1]: 164.4.1-04: FILES_FLOOR 43 / ARMS_FLOOR 324, measured and separated both ways; new stand-in fixture 29-fixture-compute-jobs-priority.sql because migration 20260428120836 cannot coexist with 20260515114555 on one lane (42725)
+- [Phase 164.4.1]: 164.4.1-05: ARMS_FLOOR is 363, not the plan's projected 365 (324+39). Floors are set to what the run PRINTS.
+- [Phase 164.4.1]: 164.4.1-05: the lane-blocked-stale tripwire is CLEARED BY ANNOTATION — parse.mjs, the probe fixture and the probe/defect code are untouched (0 non-comment changed lines matching lane-blocked-stale|pg_available_extensions) and SELF-TEST 17/17 still fires.
+- [Phase 164.4.1]: 164.4.1-05: FIVE arms use GATE-FILE falsifiers (3 oracle preconditions, 1 seed-integrity control, 1 sum-of-pinned-counts invariant), each with its domination measurement at the site. A gate-file falsifier is NOT a waiver — the arm still raises, names itself first and counts in biting. WAIVED_CEILING unedited at 0.
+- [Phase 164.4.1]: D-07 closed by DOCUMENTING the classifier's text-only boundary and pinning it with a hand-built test — the proposed apply-list widening was retired because it would classify UNANNOTATED files by a line only ANNOTATED files carry (dead code behind a passing test)
+- [Phase 164.4.1]: sql-mutation timeout-minutes STAYS 15 and ci.yml is byte-unchanged by plan 06: the DECISION rule accepts only a measured ubuntu run, and that measurement was scoped out of the executor (worktree branch is not the phase branch, so a dispatch would not be SHA-bound)
+- [Phase 164.1]: ARMS_FLOOR is the literal 4 while only ONE prober arm is registered — the live run exits 1 on '1 registered arm(s) < floor 4' until plans 03/04 land — A floor ratcheted up as arms land can only ever agree with reality, which is not a floor. An incomplete prober must be loud.
+- [Phase 164.1]: KIND_ASSERTIONS lives INSIDE selfTest() — a table-driven isolation loop asserting through a variable is invisible to the plan-05 source-scanning coverage extractor — MEASURED: with the map at module level the extractor reported pyapi06-absent-uncoded and pyapi06-wrong-key-accepted as UNCOVERED.
+- [Phase 164.1]: PYAPI-06 closed at BOTH halves: analytics-client.ts throws a named SeamConfigError above the try when ANALYTICS_SERVICE_KEY is empty (and X-Service-Key is now unconditional), and verify_service_key answers an absent header with its own 401 code SERVICE_KEY_ABSENT. — The truthiness-guarded header spread was TODOS 0.04: with the secret absent every wrapper sent an anonymous request, the service answered 401, a 401 never trips the 140.2 breaker, and the seam ran dark for seven days behind a green board. Absent and wrong had identical bodies, so two faults with opposite remedies were indistinguishable.
+- [Phase 164.1]: SERVICE_KEY_ABSENT is dispositioned as a reasoned EXEMPTION in VENUE_WIRE_CODES_WITHOUT_VERDICT, never a verdict row — the hand-typed roster was OBSERVED going red before the row was typed. — SEAM_MISCONFIGURED's user copy says nothing was submitted, which is false by construction here: a request WAS sent, it simply carried no credential. After the TypeScript half the code cannot arrive from our own client at all, so it reaches no user-facing surface.
+- [Phase 164.1]: 164.1-04: MT5_PROBE_PY emits terminal_info in BOTH branches — the healthy reading must be a positive marker, not the absence of a key
+- [Phase 164.1]: 164.1-04: a non-zero railway ssh exit is DATA, not a measure-fail — a CLI exiting 255 while the terminal answered -10004 still gets the REDEPLOY remedy (proven by a positive control)
+- [Phase 164.1]: 164.1-04: the two IPC remedies are asserted different on the DEFECT ROWS, not on the REMEDIES table — the rows are what an operator reads
+- [Phase 164.1]: 164.1-05: the prober ships as its OWN hourly workflow (prod-prober.yml) with mode identity to the script — the two bare commands, self-test first, status captured on the next line — and a vitest pin whose every predicate is calibrated on a mutated copy. — A script proven by its own self-test proves nothing about a CI invocation that wraps it. ci.yml carries zero references (D-18) so a red prober can never make Railway skip the analytics deploy that would fix it.
+- [Phase 164.1]: 164.1-05: the self-test scenario count is pinned by EXECUTING the runner and counting the headers it prints, not by scraping literals from its source. — The runner auto-numbers its headers at runtime off the same counter its completeness assertion reads, so there is no 'k/50' literal in the source to count; the plan's stated source-grep would have matched zero headers and read as a passing pin.
+- [Phase 164.2]: 164.2.1-01: deriveWizardResumeOverrides gained a 4th positional incomingApiKeyId defaulted to null (D-01), so all 25 pre-existing three-arg calls compile and pass byte-unmodified; null incoming = no key claim and changes nothing.
+- [Phase 164.2]: 164.2.1-01: an ABSENT or null stored apiKeyId meeting a PRESENT incoming key DECLINES the session-id restore (D-02) — the deliberate inversion of the '?? "api"' back-compat idiom, because the defaulting population is exactly the drafts carrying the dead end. Cost: one fresh token for pre-existing drafts.
+- [Phase 164.2]: 164.2.1-01: the loadWizardState validator arm for apiKeyId follows the failedCsvSubmitSig shape (absent OR null accepted, else bounded string) — a source-shaped arm would refuse every CSV payload, since nine of the fourteen save sites write null.
+- [Phase 164.2]: 164.2.1-01: persistPointer takes an explicit keyId argument and handleConnectSuccess passes result.apiKeyId — a closure read is the PRE-connect key, and on the reuse arm it coincidentally equals the preselect id, so the WIRE test's responder answers a third distinct key id.
+- [Phase 164.2]: 164.2.1-01 DEVIATION: the new component spec installs explicit storage doubles rather than the preselect spec's guarded clear — MEASURED on Node 25, window.localStorage.setItem is not a function, writeWizardState swallows it, and the seed silently never existed (SC-1c was passing for the wrong reason). An applied-ness probe in the seed helper now names that failure.
+- [Phase 164.2]: 164.2.1-02: criterion 2 is CLOSED by two INDEPENDENT neuters, not one — the helper's key clause (7 RED arms incl. both component cases) and the call site's 4th argument (2 RED component cases, helper untouched). A single neuter at the helper cannot distinguish a correct helper the call site never feeds; the wiring needs its own proof.
+- [Phase 164.2]: 164.2.1-02: criterion 3's REAL evidence is the six SEAMRIM-03 pins staying GREEN *under neuter A* — the whitespace-stripped clause grep is only a tripwire, since it detects a REWRITE of the source clause but not an additive narrowing. Both were taken; both hold.
+- [Phase 164.2]: 164.2.1-02: `--reporter=verbose` is MANDATORY for any "these pins stayed green" claim — the default reporter prints zero occurrences of a passing test's title, so a file-level pass count cannot name a pin, and a `tail` on the log cuts the SEAMRIM names that sit mid-file.
+- [Phase 164.2]: 164.2.1-02 DEVIATION (Rule 3): 8 pre-existing LOCAL-USERNAME violations in this phase's own PLAN/RESEARCH artifacts (from planning commit bedda506) reddened check-planning-hygiene and the full suite. Fixed at the cause with the repo's existing `<user>` placeholder convention. ⚠️ The scanner's needle is the LIVE `USER`, so it never fires on CI — a local-only gate that any phase skipping `npm test` will keep re-introducing.
+- [Phase 164.2]: 164.2.1-02 MEASURED: `state.record-metric` and `state.record-session` BOTH clobber STATE.md's hand-set `progress:` block, contradicting the banner plan 01 left saying they were safe. No `state.*` handler may be assumed safe; re-read and restore the five lines after every call.
+- [Phase 164.1.1]: Phase 164.1.1 plan 02: expansion arm ordering (G1,S1,O1,A1,U1,V1,N1) is load-bearing — arms mutating shared staleness logic (G1/S1) must run before arms depending on it, and arms sensitive to same-transaction now() pollution (N1) must run after every self-observability-row-producing arm. — Discovered via mutation-runner cross-arm interaction bugs; documented in the gate file's own header for future arms in this family.
+- [Phase 164.1.1]: 164.1.1-04: escalation window set to 3600s (Claude's discretion, unspecified by CONTEXT.md) — Bounds Sentry noise to one capture/hour of sustained staleness regardless of future cron.schedule() cadence; the structured log still fires on every occurrence.
+- [Phase 164.1.1]: 164.1.1-04 MEASURED: `state.add-decision` ALSO clobbers STATE.md's hand-set `progress:` block the same way `state.record-metric`/`state.record-session` do (see the line above from plan 02.1) — `completed_phases` 20→18, `percent` 45→41, plus two stray blank-line insertions at ~L205-208. Confirms the prior finding generalises to a third handler; treat every `state.*` write as suspect and diff before trusting it.
+- [Phase 164.1.1.1]: 164.1.1.1-01: No-floor-move LANE-ONLY exclusion — skip execution plus the three "$out"-derived checks only; the static accounting (sentinel declaration, roster-vs-count coherence, n_arms<=RAISE-sites) stays outside the branch and runs for every file including the excluded one, so SENTINEL_FLOOR (11) and ARMS_FLOOR (213) never move.
+- [Phase 164.1.1.1]: 164.1.1.1-01 MEASURED (re-confirms the pattern above, a fourth time): `state.add-decision` and `state.update-progress` both clobber the `progress:` block downward again this session (`completed_phases` 20→18, `total_plans` 201→203, `percent` 44→40, plus stray blank-line insertions at ~L252-255). Reverted both calls; kept only the decision text, applied by hand.
+- [Phase 164.1.1.1]: 164.1.1.1-01: the static-accounting contract-test scenario counts occurrences of "completion sentinel OK: ALL 7 ARMS EXECUTED" rather than bare presence/absence, because test_sync_status_curated_sentence_survives.sql independently declares the identical "ALL 7 ARMS EXECUTED" text and a presence check could not distinguish the excluded file's line from that other file's.
+- [Phase 164.9.3]: 164.9.3-01: CLAIMPAIR gate seeds a real parent row per partition id under the replica role; replica-only seeding fails at the claim with 23503 (same-transaction FK re-check) — Measured on the local-stack lane: W-INTRO red with 23503 on the strategy foreign key until parents were seeded
+- [Phase 164.9.3]: 164.9.3-02: the migration's verify anchors pin PLACEMENT as well as text (each pre-rank clause must match between the ranked CTE opening and the deduped opening; the 2-arg C39 port between deduped and the batch UPDATE), so a later edit moving the guard post-rank, the rejected option (a), refuses at apply
+- [Phase 164.9.3]: 164.9.3-03: the CLAIMPAIR gate's pg-lane SETUP list is the enqueue dedupe gate's list plus fixtures 29 and 36-fixture-compute-jobs-claim-token.sql, with the migration last; the template entries were kept because the lane run showed no need to drop any
+- [Phase 164.9.3]: 164.9.3-04: each CLAIMPAIR twin mutates ONE body and ONE partition (OR TRUE inserted before the pre-rank NOT EXISTS, body chosen by measured nth) and stands down only that body-by-partition anchor; the VAC-04 acks are derived locally from --diff-bodies against origin/main and were cross-checked read-only against the PR's VAC-04 PROD MATCH hashes
+- [Phase 164.9.3]: 164.9.3-05: the mutation runner and pg-lane run WITHOUT the shared lane lock (coordinator correction: the lock guards only the local-stack lane); both floors were pushed to measured+1 in ONE full run, whose two defects named each floor
+- [Phase 164.9.3]: 164.9.3-06: the release is a MINOR bump to 0.108.0.0 (the migration changes the PROD claim path and auto-applies on merge); SC3 stays OPEN as a ship precondition in 164.9.3-MIGRATION-REVIEW.md (three reviewers before merge)
 
 ### Decisions (execution-time, Phase 140.2)
 
@@ -1163,7 +2460,9 @@ Load-bearing sequencing (do not reorder):
 
 ### Blockers / Concerns
 
-- **⏳ PR #656 is OPEN and unmerged** (`feat/v1.16-141-jobs-rate-retry`, 131 commits ahead of `origin/main`, MERGEABLE). 141 / 141.1 / 141.2 are all verified `passed` but NOT shipped. Founder call — everything else in the SEAM group is closed.
+- **⛔ 164.6.2 FOUNDER GATE IS OPEN — the three MT5 Railway variables are NOT set** (`MT5_LOGIN`, `MT5_PASSWORD`, `MT5_SERVER` on the `quantalyze-analytics` service, production). Plan 03 handed over the exact command with placeholders (`164.6.2-HANDOVER.md`); plan 04's D-06 measurement cannot begin until the founder acts. ⛔ **Never satisfy this by inference:** a green `/health`, a passing suite, a completed redeploy and a quiet log are ALL consistent with the variables being ABSENT — the heal logs once and continues in exactly that case. Clears on an explicit founder statement in words PLUS a KEY-ONLY listing showing all three names.
+- **⛔ `[164.6.2-HYGIENE-PROSE-SELF-TRIP]` — `npm run lint` is RED, and was before Phase 164.6.2 plan 03 wrote anything.** `check:planning-hygiene` reports 3 `ABSOLUTE-HOME-PATH` violations, in `164.6.2-01-SUMMARY.md`, `164.6.2-03-PLAN.md` and `164.6.2-04-PLAN.md`. All three are the bare structural prefix appearing in prose or inside a verify regex, with **no username after it** — nothing identifying leaks. NOT hand-patched: two of the three are runnable verify commands (one of them plan 04's, which wave 4 will execute). Routed to plan 04's decision checkpoint. Remedy is the gate's own: spell the pattern escaped.
+- ~~**PR #656 is OPEN and unmerged**~~ — **RESOLVED: #656 MERGED** (v0.51.0.0, seam retry — 141 + 141.1 + 141.2). Verified 2026-08-08; the entry was stale.
 - **⚠️ Phase 140's `human_verification` item was never dispositioned — still owed as live ops.** "Watch Sentry during the next real Railway degradation window: confirm `CIRCUIT_OPEN` 503 envelopes appear and that no cascade-500s occur in the same window." It cannot be closed from the repo (no live Upstash in CI/local — 20+ test files delete the env vars — and no controllable Railway failure injection); it was declared manual-only in `140-VALIDATION.md`. `140-VERIFICATION.md` still reads `human_needed` for this one reason. Mirrored into TODOS.md.
 - **📋 Close-out lesson (2026-08-01):** the SEAM group's phase-close bookkeeping went un-run because the phases were hand-driven per-phase rather than under `/gsd-autonomous`, so nothing owned **autonomous step 3d (post-execution routing)**. Consequences found and fixed in one pass: 141.1 sat at `gaps_found` for a day after all three of its gaps were closed in the tree (`22332e34` + the ledger reconciliation) simply because the VERIFICATION was never re-run; 141.2 sat at `human_needed` with four probes nobody had been asked to run (three were dischargeable read-only in minutes); 141.1/141.2 had **no milestone-list entry at all**; and 41 plan checkboxes across 140.4, 140.5, 141, 141.1 and 141.2 were never ticked, plus 8 missing G-series rows under 140.3. See memory `feedback_hand_driving_gsd_skips_orchestrator_gates`. **If a phase is hand-driven, run the close-out explicitly — the verifier flags these as "orchestrator-owned" and then nothing owns them.**
 - **SEAM-05 audit is the Phase 141 long pole** — retry-safety of `recomputeMatch` / `computePortfolioAnalytics` / optimizer / simulator / bridge is UNAUDITED; `_get_recompute_lock` may be process-local, not distributed. Default everything unproven to no-retry.
@@ -1180,14 +2479,286 @@ Load-bearing sequencing (do not reorder):
 - **Standing latent bugs (TODOS.md):** quantstats price-detection Sharpe sign-flip (strategy-analytics path — v2 MONEY-03); blend unknown-asset_class annualization (v2 MONEY-04); `allocator_equity_snapshots` retirement (post-FLIP only).
 - **Backlog ground truth = root TODOS.md** — add/close items ONLY there.
 
-## Session Continuity
+<!-- ⛔ THE HEADING AND FIELD NAMES BELOW ARE LOAD-BEARING. Do NOT rename the heading to
+     "Session Continuity", and do NOT reword the three field labels.
+     gsd-sdk matches the section with /##\s*Session\s*\n/i and reads three fields by name
+     (Last Date / Stopped At / Resume File). With "## Session Continuity" the section match
+     FAILED, so `state.record-session` reported "No session fields found", the body copy went
+     stale, and three executors in a row "restored" frontmatter stopped_at FROM that stale copy.
+     Two sources of truth for one fact, only one maintained. Keep this block and the YAML
+     frontmatter in agreement — the SDK rebuilds frontmatter FROM this block.
+     ⚠️ Keep prose out of the section body: any commentary containing the literal field
+     markers is matched by the SDK's regex INSTEAD of the real data. That is why this note
+     sits ABOVE the heading. Diagnosed 2026-08-09. -->
 
-**Last activity:** 2026-08-03
-**Stopped at:** Completed 140.3-G4-PLAN.md (SEAMUX-03 coded arms on verify-strategy + validate-and-encrypt)
-**Next step:** run `/gsd:verify-work` on Phase 140.1.1. Nothing is left to execute.
+## Session
+
+**Last Date:** 2026-10-02T09:02:56.666Z
+**Stopped At:** Phase 164.4.2 complete; next 164.9.3.2.1
+**Resume File:** .planning/phases/169.1.1-hydrationticks-factsheet-chart-ticks-render-the-same-on-serv/169.1.1-UI-SPEC.md
+
+**Last Date:** 2026-09-24T06:17:00.000Z
+**Stopped At:** Completed 167.1-06-PLAN.md
+**Resume File:** None
+
+**Last Date:** 2026-09-24T04:36:00.000Z
+**Stopped At:** Completed 164.6-02-PLAN.md
+**Resume File:** .planning/phases/164.6-gate-hygiene-ops-08-f9-sentinel-plus-the-two-ci-yml-integers/164.6-03-PLAN.md
+
+**Last Date:** 2026-09-24T03:57:00.000Z
+**Stopped At:** Completed 167.2-06-PLAN.md (wave 6; three commits `4de1ba074`, `df83f863a`, `2b6079c7a`, not pushed). No migration (the KCS-17 checkpoint did not fire). All ten 167.2 plans have a SUMMARY. Finding for review, logged to the phase's `deferred-items.md`: the locked KCS23-COMPOSITE line says the composite "reads from every key below" while the card lists all of the owner's keys. Pending founder visual checks: the S2 sync panel and the KCS23-COMPOSITE line at 320px. Next: 167.2 review and verification.
+**Resume File:** None
+
+**Last Date:** 2026-09-24T03:44:00.000Z
+**Stopped At:** Completed 167.2-05-PLAN.md (wave 5; three commits `f916c78e1`, `2ff5bd203`, `2fea0ad9a`, not pushed). No migration; `/api/keys/sync` unchanged (maxDuration 300). After a bound expires the handler still awaits the late answer so it is logged, and the liveness guard drops it. Pending founder visual check (carried from 03): the S2 sync panel at 320px. Next: 167.2-06.
+**Resume File:** None
+
+**Last Date:** 2026-09-24T03:38:00.000Z
+**Stopped At:** Completed 167.2-04-PLAN.md (wave 4; five commits `6bbc07a38`, `3816edd57`, `ed6e00750`, `0e2ac686b`, `bb2146069`, not pushed). No migration; the wizard's ladder arm is unchanged. KCS22-NOROW kept; SyncProgress PIN 7 moved to the poll cap (a failed read is not evidence that nothing was recorded). Pending founder visual check (carried from 03): the S2 sync panel at 320px. Next: 167.2-05.
+**Resume File:** None
+
+**Last Date:** 2026-09-24T03:25:00.000Z
+**Stopped At:** Completed 167.2-10-PLAN.md (wave 3; two commits `dc2cdc397`, `32d9ba109`, not pushed). No migration; the route, limiter and poller hook are unchanged. Pending founder visual check (carried from 03): the S2 sync panel at 320px.
+**Resume File:** None
+
+**Last Date:** 2026-09-24T03:15:00.000Z
+**Stopped At:** Completed 167.2-09-PLAN.md (wave 2; five commits `e5156c652`, `7c1449f07`, `6e54b4871`, `da9c04ebc`, `2dc93bd48`, not pushed). Verification residual for the orchestrator to route: a computed row whose series cannot build shows no share note (not decidable from an owner-readable column). Pending founder visual check: the S4/S5 band at 320px.
+**Resume File:** None
+
+**Last Date:** 2026-09-24T03:05:00.000Z
+**Stopped At:** Completed 167.2-08-PLAN.md (wave 2; two commits `baac7438c`, `186ec544e`, not pushed). The 167 D-04 share-route checkpoint was not taken: the read is bounded by the matched id, projects five fields, and both SL-1 tests stay unedited and green.
+**Resume File:** None
+
+**Last Date:** 2026-09-24T02:55:00.000Z
+**Stopped At:** Completed 167.2-07-PLAN.md (wave 2; five commits `6808c4aa6`, `217a6fe47`, `c892dfcb5`, `06a613b6f`, `ac08bc590`, not pushed). Out-of-scope finding logged to the phase's `deferred-items.md` (discovery-detail fallback still says "still computing").
+**Resume File:** None
+
+**Last Date:** 2026-09-24T02:40:00.000Z
+**Stopped At:** Completed 167.2-03-PLAN.md (wave 2; two commits `d68dc02b3`, `1518841dd`, not pushed). Next: 167.2-10 (KCS-18 job-state check on this gate).
+**Resume File:** None
+
+**Last Date:** 2026-09-24T02:30:00.000Z
+**Stopped At:** Completed 167.2-02-PLAN.md (wave 1; four commits `315e15691`, `cbba4e5b8`, `cfb907acf`, `c1743fa42`, not pushed). Wave 1 complete. Next: 167.2 wave 2.
+**Resume File:** None
+
+**Last Date:** 2026-09-24T02:15:48.000Z
+**Stopped At:** Completed 167.2-01-PLAN.md (wave 1; three task commits `016cfc73c`, `9275ff5ac`, `42353f928`, not pushed). Next: 167.2-02.
+**Resume File:** None
+
+**Last Date:** 2026-09-23T22:01:27.358Z
+**Stopped At:** Phase 167.2 UI-SPEC approved
+**Resume File:** .planning/phases/167.2-keycardsync-the-key-card-never-shows-one-key-s-sync-result-a/167.2-UI-SPEC.md
+
+**Last Date:** 2026-09-19T20:05:00.000Z
+**Stopped At:** Completed 164.5.1.4-04-PLAN.md (Phase 164.5.1.4 SYNCCURSOR, plan 04 of 4, wave 4 — the closure; isolation `worktree`, branch `feat/164.5.1.4-synccursor`). `files_modified` was `TODOS.md` alone; no code, test, migration, `VERSION`, `package.json` or `CHANGELOG.md` was touched. **`SYNC-CURSOR-PER-KEY-STRANDS-STRATEGY-01` is disposed of in TWO statements rather than one, deliberately:** CLOSED IN CODE 2026-09-19, and explicitly NOT closed in production, because the thing the entry tracks is the stranding in production and that is not closed until the migration applies there. Its measured history, reachability list and the PRE-EXISTING-AND-DELIBERATE note are kept unchanged; the "not fixable by tweaking `should_advance_cursor`" note is now CONFIRMED rather than inherited (the expression is byte-identical to `origin/main` and 0 removed lines in the branch's whole `cron.py` diff touch it, `synced_count` or `update_data`); and the entry's stale research instruction is ANSWERED instead of left open — migration 045 is an `ALTER TABLE api_keys ADD COLUMN`, so it is per-KEY, the very granularity that causes this defect, and the fenced `advance_sync_cursor` RPC takes `p_api_key_id` first, so it is the right mechanism on the wrong axis. The TRIGGER is re-pointed at production: both new Supabase paths fail open, so while the marker table is absent every strategy falls back to the key cursor and that fall-back state IS the defect; confirm from the `Supabase Migrate` workflow run for the merge commit, never from the file being in the tree. **VERDICT 1 — the per-KEY cursor is SUPPLEMENTED** (not replaced, not merely kept): it is still the fallback for every strategy with no marker row, still carries `account_balance_usdt` on the same `api_keys` UPDATE, and still is the only cursor for a key with no eligible strategies, while the marker took over the resume FLOOR and the per-strategy HOLD; evidence is the byte-identical expression, the 0-removed-lines diff check, the 3 unchanged `TestC0198CursorOnlyAdvancesWhenStored` members and the two calibrated gates. **VERDICT 2 — SYNCADMIT is unblocked BY THE MIGRATION APPLYING TO PROD, not by this branch merging**; the repo has the fix, production does not until `apply-test` and then the `Production`-gated `apply` have run, and a widening deployed ahead of the table re-opens the closed path silently. **NON-REGRESSION, mechanical:** `gate_governor_files_changed = 0` against the branch base across `mutation-runner/run.mjs`, `mutation-runner-floors.test.ts`, `vac08-ledger-baseline.txt`, `lint-app-guc.mjs`, `lint-sql-gates.mjs`; `FILES_FLOOR` 47 / `ARMS_FLOOR` 402 / `WAIVED_CEILING` 0 all UNMOVED; hygiene OK over 6673 tracked files. The SUMMARY carries the written reviewer handoff with all three reviewers named individually, the additive claim re-derived (`functions_created=0 existing_tables_altered=0 destructive_statements=0 create_table=1 cron_schedule=0 raise_arms=7`), the deploy-order skew, and the note that a red VAC-08 or applied-ness probe on this PR is expected by construction and must never be cleared by widening a baseline. ⚠️ **Recorded rather than glossed:** `c93ce86a` closed the migration reviewers' findings but touches the MIGRATION FILE ONLY — the two `cron.py` findings from the same round are NOT in this branch's committed history at `4af31b8f` and must be confirmed committed before the merge. One task commit `4d71155c`, NOT pushed. ⛔ No database command of any kind; nothing applied, merged or pushed. `roadmap.update-plan-progress 164.5.1.4` ran and was CLEAN (3/4 → 4/4 plus the plan-04 checkbox, no collateral); `state.advance-plan` refused on an ambiguous Current Position and wrote nothing; `state.update-progress` NOT run; `completed_phases` 28 and `percent` 62 deliberately unmoved (the phase closes on a VERIFICATION, not on a plan count), `completed_plans` 206 → 207 by hand. Next: the three reviewers' `cron.py` half confirmed on the branch, then ship — and Phase 164.5.1.3 SYNCADMIT may be planned but must not be deployed before the PROD apply succeeds.
+**Resume File:** None
+
+**Last Date:** 2026-09-19T19:30:00.000Z
+**Stopped At:** Completed 164.5.1.4-03-PLAN.md (Phase 164.5.1.4 SYNCCURSOR, plan 03 of 4, wave 3 — isolation `worktree`, branch `feat/164.5.1.4-synccursor`). The advance condition's SECOND conjunct is now proven on its OWN failure axis: `test_failed_recompute_enqueue_holds_that_strategys_marker` makes BOTH `sync_trades` RPCs SUCCEED and fails only strat-B's `enqueue_compute_job`, so `stored > 0` is TRUE and only `sid not in recompute_enqueue_errors` can hold the marker — the one injection plan 02's gate cannot express, and the exact case RESEARCH's Pitfall 1 says a storage-only gate would wave through. ⭐ The key-level status on that axis is `ok`, READ off the classifier not assumed: the tick looks HEALTHY from the key's side while strat-B's dashboard is frozen against trades that exist. CALIBRATED: the conjunct was DELETED (reducing the condition to the verbatim per-strategy mirror of `should_advance_cursor`), `cmp` proved it applied (`differ: char 39834, line 760`, exactly one hunk), and the OBSERVED RED is quoted in `164.5.1.4-CALIBRATION.md` section 2. ⚠️ Two things recorded there that a tidy green board would have hidden: plan 02's two tests STAYED GREEN under this neuter (`1 failed, 2 passed`) — so the two gates measure different things rather than one riding on the other, which is structural, since plan 02's injection drives the first conjunct False by itself — and because the first RED landed on a marker-ROW assertion that short-circuits, a SECOND observation was taken with the row assertions temporarily disabled, showing the fetch-window arm (`since_ms == t0_ms`) bites too. Restores from `cp` byte backups only, proven two ways (`git diff --quiet` = 0 and working-tree sha256 == `git show HEAD:<path>` sha256, `9d06eeb2…`). Also shipped: `_make_mock_supabase_for_cron_sync` now SERVES `strategy_sync_cursors` (`sc_data=`) and captures its upsert — MEASURED why that was load-bearing, and the first draft of the docstring had the mechanism WRONG: with no chain a bare MagicMock's `.data` iterates EMPTY, so NOTHING raises, the fail-open wrapper never fires and no `strategy_cursor_lookup_error` reaches the response; the wiring was green, unexercised, and silent about it. `TestCronSyncDeliversStrategyCursorsToFanOut` now runs a REAL `cron_sync` with a pass-through spy on `_sync_key_with_timeout` and proves the served marker reaches the fan-out with the unserved strategy ABSENT (membership, not a null) plus one batched upsert carrying both. The accepted per-key fetch-window growth is FIXED as a runtime signal rather than routed to a phase: `strategy_cursors_held` in the envelope plus ONE warning per key naming the cost, asserted both positively and negatively; no new `SyncStatus` value. Three measured pieces of stale prose corrected (the C-0198 partial-success docstring, the drift class's docstring AND its inline comment, and `cron.py`'s "a failed enqueue is NOT re-driven" note, which this phase makes false) — assertions untouched, each site carrying the greppable `164.5.1.4 SYNCCURSOR (shipped)` token; the three stale phrasings now grep to 0. MEASURED: full `analytics-service` suite **5892 passed / 89 skipped** (plan 02's close was 5888/89 — delta exactly +4, this plan's four new tests), `mypy --strict` clean, `should_advance_cursor` byte-identical to `origin/main`, 0 removed diff lines touching `synced_count`/`update_data`, hygiene OK over 6672 tracked files, 0 stub hits in the plan diff. Three task commits `889f4bc3` / `9c2649b5` / `d11cc510`, NOT pushed. ⚠️ `.venv`/`node_modules` absent in a worktree, so pytest and tsx ran from the MAIN checkout by absolute path with cwd in the worktree; module resolution and `rootdir:` both verified to point at the worktree. ⛔ `state.update-progress` NOT run (plan 02 measured it inventing a completed phase); `completed_phases` 28 and `percent` 62 deliberately unmoved, `completed_plans` 205 → 206 by hand. `roadmap.update-plan-progress` ran and was CLEAN (2/4 → 3/4 plus the plan-03 checkbox, no collateral); `state.advance-plan` refused on an ambiguous Current Position and wrote nothing. Next: plan 04 — the closure, which OWNS the disposition of `SYNC-CURSOR-PER-KEY-STRANDS-STRATEGY-01` (untouched here) and the SYNCADMIT verdict.
+**Resume File:** None
+
+**Last Date:** 2026-09-19T18:45:00.000Z
+**Stopped At:** Completed 164.5.1.4-02-PLAN.md (Phase 164.5.1.4 SYNCCURSOR, plan 02 of 4, wave 2 — the tracer and the heaviest plan in the phase; isolation `worktree`, branch `feat/164.5.1.4-synccursor`). `strategy_sync_cursors` is now wired END TO END in `analytics-service/routers/cron.py`: a chunked, fail-open marker SELECT in `cron_sync` at `_CRON_IN_LIST_PAGE_SIZE`; `_strategy_resume_point`, the ONE membership-correct resolver shared by the read floor and the hold-write so the two cannot drift; `_resume_floor_ms`, the N-way fetch-window floor; and a persist-on-hold upsert placed AFTER both the storage loop and the recompute-enqueue loop, because it reads `recompute_enqueue_errors`. ⭐ Two coupled properties, neither droppable: EVERY strategy in the fan-out gets a row (held or advancing — advance-only writing passes a row-was-written assertion and fixes nothing), and the reader tells row-ABSENT from present-and-NULL by MEMBERSHIP, never by a `.get()` that returns the same `None` for both. The advance condition is deliberately NOT a mirror of `should_advance_cursor`: the extra `sid not in recompute_enqueue_errors` conjunct is what closes the recompute-stranding criterion. PROVEN, not asserted: `TestSyncCursorPerStrategyResume` runs `_sync_single_key` TWICE with tick 2's inputs DERIVED from tick 1's captured outputs, and asserts on the `since_ms` that reaches `fetch_all_trades` — RED against unmodified code (`collected 2 items`, 2 failed), GREEN after (2 passed), with a control proving the window DOES advance on full success. All three `TestC0198CursorOnlyAdvancesWhenStored` members pass with bodies UNCHANGED; MEASURED 0 removed diff lines touching `should_advance_cursor` / `synced_count` / `update_data`. CALIBRATED: the marker READ was neutered while the WRITE stayed intact (the sharpest target — "a marker nothing reads" cannot survive it), `cmp` proved the neuter applied (`differ: char 24155, line 494`), the OBSERVED RED was the fetch-window assertion and NOT any row assertion, and the restore was proven byte-identical two ways (`git diff --quiet` = 0 and working-tree sha256 == `git show HEAD:<path>` sha256). Full `analytics-service` suite 5888 passed / 89 skipped both before and after the restore (pre-phase baseline 5886/89; delta = exactly these two tests); `mypy --strict` clean; `check:planning-hygiene` OK over 6671 tracked files. Three task commits `9a58e668` / `ac2a5586` / `b3974d2e`, NOT pushed. ⚠️ `.venv` and `node_modules` are absent in a worktree, so pytest and tsx were run from the MAIN checkout by absolute path with cwd in the worktree — module resolution verified to point at the worktree's `cron.py`, and every arm read off a real `collected N items` / `OK —` line rather than an exit code. Next: plan 03 (calibrate the recompute-enqueue conjunct independently, appending section 2 to `164.5.1.4-CALIBRATION.md`), then plan 04.
+**Resume File:** None
+
+**Last Date:** 2026-09-19T18:12:51.639Z
+**Stopped At:** Completed 164.5.1.4-01-PLAN.md (Phase 164.5.1.4 SYNCCURSOR, plan 01 of 4, wave 1 — isolation `worktree`, branch `feat/164.5.1.4-synccursor`). Shipped `supabase/migrations/20260919120000_strategy_sync_cursors.sql`: a per-STRATEGY trade-sync resume table, PK `strategy_id` alone with an `ON DELETE CASCADE` FK to `strategies`, nullable `last_sync_at` (mirroring `api_keys.last_sync_at` in meaning, NOT a payload maximum) and `updated_at`. No api-key column in any form — that FK is mutable and `ON DELETE SET NULL`, so a composite key would strand the row on a re-point; and deliberately not a column on `strategies`, whose `strategies_read` policy is PUBLIC-read. RLS is `USING (false) WITH CHECK (false)` on the shipped `compute_jobs_deny_all` precedent rather than the `allocator_holdings_service_all` explicit-role form, taken on the table's posture (no owner tier, one service-role writer) and on ADR-0003's default RLS bypass; no `REVOKE` was added on top, because that would move the live control from the POLICY to the GRANT and make any later denial assertion vacuous. Self-verify is CATALOG-ONLY with 6 arms (relation, PK column set exactly `{strategy_id}`, cascading FK, RLS enabled, named policy, `polcmd = '*'`), so it cannot pass PROD and refuse shared TEST. PROVEN, not reviewed: the disposable pg-lane cluster applied the file as both `--apply` and `--gate`, so it executed TWICE and exited 0. MEASURED static arms over the comment-stripped file: `row_count_assertions=0 scheduled_job_calls=0 api_key_id_refs=0 raise_exception_arms=6 deny_all_policy=6 cascade=2`. Two recorded decisions in the SUMMARY: the RLS form (both precedents named), and NO dedicated `supabase/tests/*.sql` gate — MEASURED 7 `*_rls.sql` gates, all 7 owner-facing (`auth.uid()`), zero deny-all, and `compute_jobs_deny_all` named by zero of the 76 gate files; the migration's own every-apply self-verify stands in its place. The plan's text said "two" such gates; the measured count is 7 and the SUMMARY carries the correction. `FILES_FLOOR` 47, `ARMS_FLOOR` 402, `WAIVED_CEILING` 0 all UNMOVED; nothing was applied, merged or pushed to any database. `check:planning-hygiene` OK over 6670 tracked files (run with the main checkout's `tsx` by absolute path — `node_modules` is absent in a worktree, so the plain `npm run` would have been a false RED). Next: plans 02/03/04 (read path, criterion-4 axis, closure), then the three migration reviewers before any apply.
+**Resume File:** None
+
+**Last Date:** 2026-09-18T17:12:00.000Z
+**Stopped At:** Completed 164.1.1.1-01-PLAN.md (Phase 164.1.1.1 LANEONLYGATES, plan 01 of 2, wave 1 — sequential on the main working tree, isolation `none`, branch `chore/164.1.1.1-laneonlygates`). `supabase/tests/test_prod_prober_cadence.sql` gained one `-- LANE-ONLY: {json}` header line naming `net._lane_posts`, fixture 34, and `sql-mutation` as the owning job — no executable change. `ci.yml`'s "Run SQL self-tests" step reads that marker pre-execution via `lane_only_marker()`, censuses and prints every exclusion (`::notice::` per file) before the loop, and skips only the `psql` invocation plus the three `"$out"`-derived checks inside the loop for a marked file — the whole static-analysis half (sentinel declaration, roster-vs-count coherence, `n_arms` <= RAISE-EXCEPTION-sites) keeps running for every file including the excluded one, so `SENTINEL_FLOOR` (11), `ARMS_FLOOR` (213) and the per-file derivation table stay byte-unchanged (confirmed via `mutation-runner --parse-only` and a whitespace-blind `git diff -w`). The closing summary now reports executed/found, excluded count, and sentinels verified-this-run vs. declared, plus a fifth standing limit. `ci-anti-skip-gate.contract.test.ts` gained `STUB_INVOCATION_LOG`/`STUB_FAIL_BASENAME` and three new scenarios (a real stub-psql invocation log proving the file is never executed, a defect-injection calibration pair reproducing the shipped `relation "net._lane_posts" does not exist` failure, and a static-accounting scenario) plus one honest rename — 21/21 passing. All three new properties individually neutered, observed RED for the predicted reason, and restored byte-identically (`shasum -a 256` equal pre/post every cycle). Three commits (`1bd4e681` feat, `6c3fce03` test, `346e0850` docs), NOT pushed. Collateral check: the five named suites + contract test show only the pre-existing, box-local `Test timed out in 5000ms` in `lint-sql-gates.test.ts` (carved out by the plan's own `<fails_when>`); a full `npm test` surfaced two further pre-existing, out-of-scope failures (`check-planning-hygiene.test.ts`, `verify-plan-anchors.test.ts`, both against this phase's own PLAN.md content authored before this execution session) logged to `deferred-items.md` rather than fixed. Next: plan 02 — the cross-check pinning the excluded SET as sites (not a count) per threat-register item T-164.1.1.1-01.
+**Resume File:** None
+
+**Last Date:** 2026-09-18T10:06:01.000Z
+**Stopped At:** Completed 164.1.1-05-PLAN.md
+**Resume File:** None
+
+**Last Date:** 2026-09-18T07:35:00Z
+**Stopped At:** Completed 164.1.1-03-PLAN.md (Phase 164.1.1 PROBERCADENCE, plan 03 of 6, wave 1 — sequential on the main working tree, branch `feat/164.1.1-probercadence`). Task 1's checkpoint (`gate="blocking-human"`, decide the alarm's terminal channel) was already answered by the founder before this executor ran: `SENTRY_DSN` IS set on Railway → analytics-service → production → Variables, option `a-sentry-already-set`, measured 2026-09-18 — recorded as presence only, no value written anywhere, with the outside-this-repo delivery caveat carried forward explicitly. Task 2 pinned criterion 4 (already corrected in `126517a8`, verify-only): added one `describe` block to `src/__tests__/prod-prober-wiring.test.ts` slicing the `.github/workflows/prod-prober.yml` schedule region by named anchor and asserting it states the measured delivery rate (27%), median gap (3.28h), max gap (7.13h), a date and a Phase 164.1.1 reference, with a calibration twin stripping those figures from a scratch copy and asserting each is reported missing BY NAME — manually neutered the predicate, observed the calibration test go RED with the exact expected diff, then restored and confirmed byte-identical via `cmp`. `.github/workflows/prod-prober.yml` stays byte-unchanged (`git diff` — 0 lines). Two commits (`9a1b0a8b` test, `3ce0d461` docs), NOT pushed. Full suite `npx vitest run src/__tests__/prod-prober-wiring.test.ts` → 102/102 green. Next: whichever of plan 02 / plan 04 the orchestrator dispatches — plan 04 is now unblocked to implement the Sentry escalation route against this checkpoint's answer.
+**Resume File:** None
+
+**Last Date:** 2026-09-18T06:33:31Z
+**Stopped At:** Completed 164.1.1-01-PLAN.md (Phase 164.1.1 PROBERCADENCE, plan 01 of 6, wave 1 — the phase's tracer, sequential on the main working tree, isolation `none`, branch `feat/164.1.1-probercadence`). Shipped the forward migration `supabase/migrations/20260918120000_prod_prober_cadence.sql` (`public.prod_prober_cadence_check()`, SECURITY DEFINER, pinned search_path, service-role-only EXECUTE, a measured-and-dated 10h25m ceiling constant, an absent-contact-row-is-stale guard, an unconditional self-observability row, and a stale-only `net.http_post` reusing `match_engine_cron_tick()`'s destination and Vault key — zero `cron.schedule(...)`), the prober's own unconditional contact write (`recordProberContact`, gated `arms === ARMS` so isolated self-test scenarios and a credential-blocked-all-4-arms run are both unaffected), a lane-only `net.http_post` recording stand-in (fixture 34), and a two-arm matched-pair SQL gate (`test_prod_prober_cadence.sql`, arms G1/S1 — renamed from the plan's bare G/S after `sectionOfIdentity()`'s digit-suffix rule left a bare SETUP raise un-twinned) proven RED on a disposable pg-lane. Both mutation floors moved from a measured full-corpus run (`FILES_FLOOR` 46→47, `ARMS_FLOOR` 395→397) with every sibling pin (`gate-family-meta.test.ts`, `mutation-runner-floors.test.ts`, `mutation-annotation-parser.test.ts`, a new dated `ci.yml` leg-count entry — 491 legs, ~975s local macOS, 20-minute ceiling still clear but flagged as closer than the prior reading) moved in the same Task 3 commit. Three commits (`d1d6ca63`, `2e03771b`, `16e962ad`), NOT pushed. Full plan-level verification green: `dump-sql-functions --self-test/--check`, `prod-prober --self-test` 83/83, full-corpus `mutation-runner` `✅ No defects` (`files 47/74`, `arms 397/397/0`, `biting 397`), `lint-sql-gates --self-test` + full corpus (0 findings), all four sibling vitest files 310/310, zero lines changed in any migration older than this plan's own, and nothing ran `supabase db push`/`db reset`/`--project-ref`/`--db-url`. Next: plan 02 (the observer's own error-row self-observability arm).
+**Resume File:** None
+
+**Last Date:** 2026-09-16T19:51:21Z
+**Stopped At:** Phase 164.1 complete, ready to plan Phase 159
+**Resume File:** None
+
+**Last Date:** 2026-09-16T19:20:00Z
+**Stopped At:** Completed 164.5.1-07-PLAN.md (Phase 164.5.1 CRONREPOINT, plan 07 of 9, wave 2 — sequential on the main working tree, isolation `none`, branch `feat/v1.20-phase-164.5.1-cronrepoint`, depends_on 164.5.1-04). The `T-OPEN-04` / `164.8.5-MANIFEST-SIDE-LOOP-DEAD` RESIDUAL (the GATE, not the data — the DATA half was already discharged by the 2026-09-11 re-capture, PR #776) is closed: a new `[164.5.1-07]` vitest describe block reads the COMMITTED `scripts/prod-prober/cron-manifest.json` from disk (via newly-imported `MANIFEST_PATH`) and asserts its `normalization`/`schema_version` agree with `cron-drift.mjs`'s exported `NORMALIZATION`/`MANIFEST_SCHEMA_VERSION`, calibrated with 5 mutants (superseded value, third never-used value, schema_version bump, missing key, empty object with its own dedicated anti-vacuity-guard message) each proven to throw. Paired with a fourth `--self-test` broken-oracle scenario in `run.mjs` (`HOIST: the PROD credential scan fires with the oracle STALE (normalization superseded)`, scenario 48/82) proving the PROD-side `cron-secret-in-command` finding survives a normalization-stale oracle and zero `cron-drift` fires — grouped beside the three existing HOIST scenarios. New fixture `scripts/prod-prober/fixtures/cron-drift/manifest-normalization-stale.json` (one-key mutant of `manifest.json`). `SELF_TEST_SCENARIOS` moved 81 -> 82 in Task 2 alone (Task 1 verified in isolation at the pre-bump count first, preserving per-task atomicity). Anti-vacuity proven against the REAL committed file: neutered `cron-manifest.json`'s `normalization`, confirmed the byte change applied via `cmp` against a `cp` backup, observed 3 tests go RED, restored and verified byte-identical via `cmp` + matching sha256, re-ran green. `node scripts/prod-prober/run.mjs --self-test` -> 82/82; `npx vitest run src/__tests__/prod-prober-wiring.test.ts` -> 93/93. Two commits (`191b5e1e`, `8ae43f8b`), NOT pushed. Full-suite `npx vitest run` surfaces 4 PRE-EXISTING, unrelated failures (network-dependent, 5000ms-timeout-sensitive, a stale plan-anchor elsewhere in `.planning/`, and a missing TypeScript disposition for `KILL_SWITCH_UNAVAILABLE` from plan `164.5.1-02`) — documented in this phase's `deferred-items.md` and `.planning/WINDOWS.md` entry #56, NOT fixed here per scope boundary. `T-OPEN-04`, `T-OPEN-03` and `164.8.5-MANIFEST-SIDE-LOOP-DEAD` are ROADMAP/TODOS-tracked IDs only (zero REQUIREMENTS.md hits), so `requirements-completed: []`. Next: plan 08 (P3-C repair + runbook go-live section) or later Wave B/C plans, per phase ordering.
+**Resume File:** None
+
+**Last Date:** 2026-09-16T18:45:18Z
+**Stopped At:** Completed 164.5.1-06-PLAN.md (Phase 164.5.1 CRONREPOINT, plan 06 of 9, wave 2 — sequential on the main working tree, isolation `none`, branch `feat/v1.20-phase-164.5.1-cronrepoint`, depends_on 164.5.1-02). Criterion 9: `cron_recompute()` batched with a count bound (`CRON_BATCH_SIZE`, default 10) AND an elapsed-time bound (`CRON_BATCH_BUDGET_S`, default 25.0s, strictly below plan 03's 45s `statement_timeout`), whichever comes first — no longer performs its whole unit of work inside one gateway-bounded request. New keyset-paginated allocator query (`.gt(id,cursor).order(id).limit(N+1)`, the extra row as a has-more flag, trimmed before the demo-allocator M-3 filter). `_read_cron_cursor`/`_write_cron_cursor` in `analytics-service/routers/match.py` are the FIRST Python read/write path against `public.system_settings` in this service (measured: zero non-test hits before this plan) — stated explicitly as first-of-kind, not described as reuse of Phase 164.7's mechanism. Three return outcomes: batch boundary reached → `status="partial"` + `next_cursor` at the last COMPLETED allocator (budget check runs strictly BETWEEN allocators, never mid-allocator); set exhausted → cursor wraps to the empty-string marker, existing `ok`/`degraded`/`total_failure` discriminator untouched (`partial` is a FOURTH, orthogonal axis); mid-run kill-switch flip → returns the kill-switch status, cursor left completely UNWRITTEN so the next tick re-attempts the same slice. `docs/runbooks/match-engine.md`'s `match_engine_recompute_total{status}` bullet extended with `partial` + `kill_switch_unavailable`, bound to the router by a new AST-derived contract test (`TestRunbookStatusVocabulary`, never a hand-typed status list) with an anti-vacuity floor and a calibration case. Four commits (`4185f28d`, `1fc837f0`, `f869afcc`, `bdc13131`), plus the SUMMARY commit (`eba2b36b`), NOT pushed. One self-correction disclosed rather than squashed: the batching tests were first written as a fresh parallel class, violating the orchestrator's explicit "extend `TestCronResponseShape`" guardrail — caught before finalizing and folded in via a separate `f869afcc` commit. Full suite `5849 passed, 89 skipped, 0 failed` (>= plan 02's `5828` baseline); coverage 91.21% against the 80% gate; `mypy --strict --follow-imports=silent routers/match.py services/db.py` clean (`tests/` is outside CI's mypy scope). `164.5.1-GATEWAY-CEILING-INVERSION` stays blocked (shared across plans 01/02/03/05/06/09) until the last declaring plan finishes. Deliberately NOT verified here: the post-change `duration_s` on PROD against the measured 44.67s baseline — that is plan 09's live session, after deployment. Next: plan 07 or later Wave B/C plans, per phase ordering.
+**Resume File:** None
+
+**Last Date:** 2026-09-16T17:57:00Z
+**Stopped At:** Completed 164.5.1-05-PLAN.md (Phase 164.5.1 CRONREPOINT, plan 05 of 9, wave 2 — sequential on the main working tree, isolation `none`, branch `feat/v1.20-phase-164.5.1-cronrepoint`, depends_on 164.5.1-02). `dispatch_tick`'s priority claim call and `watchdog_tick`'s reset call in `analytics-service/main_worker.py` both swapped from `db_execute` to plan 02's `db_read_with_retry` seam; both legacy-claim fallback call sites deliberately stay on `db_execute` (fail-fast, no second retry budget for an already-failed tick). The except arm's 42883 classification, `_FALLBACK_CLAIM_RPC` latch and re-probe interval are byte-identical apart from two explanatory comments — proven by a source-scan acceptance criterion (exactly 2 `db_read_with_retry(` sites) and a three-lever anti-vacuity procedure (two call-site neuters plus a dynamic-dispatch mutant on the shared `_is_gateway_timeout` predicate), each proven applied via diff against a cp byte backup and restored byte-identical (cmp exit 0). 5 new tests (`TestWorkerGatewayTimeoutRetry`, `pytest -k gateway_timeout`). Two commits (`4bd9028f`, `9a1eae99`), NOT pushed. Full suite `5833 passed, 89 skipped, 0 failed`; `mypy --strict --follow-imports=silent services/ routers/ models/` clean. `164.5.1-GATEWAY-CEILING-INVERSION` stays blocked (shared across plans 01/02/03/05/06/09) until the last declaring plan finishes. Deliberately NOT verified here: whether Sentry `QUANTALYZE-11`/`QUANTALYZE-X` actually stop accruing gateway-timeout events on PROD — that is plan 09's live session, after deployment. Next: plan 06 or later Wave A/B plans, per phase ordering.
+**Resume File:** None
+
+**Last Date:** 2026-09-16T19:25:00Z
+**Stopped At:** Completed 164.5.1-04-PLAN.md (Phase 164.5.1 CRONREPOINT, plan 04 of 9, wave 1 — sequential on the main working tree, isolation `none`, branch `feat/v1.20-phase-164.5.1-cronrepoint`). New verb `preflightCronRepoint` in `scripts/prod-prober/run.mjs`, beside `captureManifest`: reads the committed cron manifest, the live database marker and `cron.job`, then calls the SAME `CRON_DRIFT_MOD.compareManifest` the live `cron-drift` arm uses. Mirrors `captureManifest`'s exit-code partition (3/1/0) and its `Nothing was written.` refusal sentence; never prints a defect's command text. New `--preflight-repoint [--manifest <path>]` CLI flag, mutually exclusive with `--capture-manifest`. Proven by a new `--self-test` scenario (MATCH -> 0, MISMATCH via `prod-schedule-moved.json` -> 1 naming `match_engine_cron` with no command text, marker-failure -> 3 seam-tally-proven never to reach `cron.job`), with "writes nothing" proven by a sha256 digest of the fixture manifest before/after every leg, not inspection. `SELF_TEST_SCENARIOS` 80 -> 81 (ONE-EDIT RENUMBER, both sides). Self-test 81/81 passed; `npx vitest run src/__tests__/prod-prober-wiring.test.ts` 87/87 passed. One deviation: the self-test's own source-scan anchor self-matched its own scenario text twice before being fixed by anchoring off the preceding `captureManifest` export. Three commits (`d38f96f1`, `1ade4f2e`, `5b8d5167`), NOT pushed. `CRON-DRIFT-01` stays blocked (shared across plans 04/08/09) until the last declaring plan finishes. Deliberately NOT verified here: whether the pre-flight returns 0 against the REAL PROD `cron.job` after the repoint — that is plan 09's live PROD session. Next: plan 05 or later Wave A/B plans, per phase ordering.
+**Resume File:** None
+
+**Last Date:** 2026-09-16T19:10:00Z
+**Stopped At:** Completed 164.5.1-03-PLAN.md (Phase 164.5.1 CRONREPOINT, plan 03 of 9, wave 1 — sequential on the main working tree, isolation `none`, branch `feat/v1.20-phase-164.5.1-cronrepoint`). Wrote the reviewable forward migration `supabase/migrations/20260916120000_service_role_statement_timeout.sql` (`ALTER ROLE service_role SET statement_timeout = '45s'`, strictly inside the (44.67s, 60s) band) and its calibrated vitest static gate `src/__tests__/service-role-statement-timeout-migration.test.ts` (12/12 passed, 9 calibration mutants covering both value-band directions, comment-embedded and concatenation-assembled schedule verbs, and misapplied prod-body-ack/APP-GUC-LINEAGE pragmas). No local push performed — the schema-push gate's recorded project override was honored throughout; apply path is merge -> `apply-test` (shared TEST) -> PROD's human-reviewed `apply`. Measured (not transcribed) the superseded prod-body-ack pragma count at HEAD: 6 across 4 files. Two commits (`5acfb710`, `6dfcdf44`), NOT pushed. `164.5.1-GATEWAY-CEILING-INVERSION` stays blocked (shared across plans 01/02/03/05/06/09) until the last declaring plan finishes. Deliberately NOT verified here: whether the ALTER ROLE statement applies on PROD — that is plan 09's D4-gated, recorded `pg_roles.rolconfig` read. Next: plan 04 or later Wave A plans (batching/retry consumers), per phase ordering.
+**Resume File:** None
+
+**Last Date:** 2026-09-16T16:42:29Z
+**Stopped At:** Completed 164.5.1-02-PLAN.md (Phase 164.5.1 CRONREPOINT, plan 02 of 9, wave 1 — the phase's TRACER, sequential on the main working tree, isolation `none`, branch `feat/v1.20-phase-164.5.1-cronrepoint`). Fail-closed kill switch: async tri-state guard, `db_read_with_retry` seam beside `db_execute`, fail-closed TTL cache contract, anti-vacuity neuter/observe-RED/restore proof for both levers (disposition + predicate wire type). Tracer feedback gate was APPROVED by the founder after the orchestrator independently re-measured every Task 1 claim. Four commits (`43ce2233`, `a909136c`, `1817bfff`, `fce3c151`), NOT pushed. Full suite `5828 passed, 89 skipped, 0 failed`; coverage 91.18% against the 80% gate. `164.5.1-GATEWAY-CEILING-INVERSION` stays blocked (shared across plans 01/02/03/05/06/09) until the last declaring plan finishes. Next: plan 03 (statement_timeout migration).
+**Resume File:** None
+
+**Last Date:** 2026-09-16T09:21:41Z
+**Stopped At:** Completed 164.5.1-01-PLAN.md (Phase 164.5.1 CRONREPOINT, plan 01 of 9, wave 1 — the phase's FIRST act, sequential on the main working tree, isolation `none`, branch `feat/v1.20-phase-164.5.1-cronrepoint`). Closed `FANOUT-GLOBAL-01` for `[164.5.1-GATEWAY-CEILING-INVERSION]`, `[T-OPEN-03]`, `[T-OPEN-04]` (each previously ROADMAP-only prose, zero `TODOS.md` hits measured 2026-09-16, now dated and owned). Discharged criterion 6 (amended 2026-09-16) across three LIVE files with a redirect beside every historical "Phase 164.5 item (7)" mention; all applied migrations under `supabase/migrations/` stayed byte-identical throughout. `lint-app-guc.mjs --self-test` and its corpus scan both green at 0 findings, `occurrences: 4` / `successor:` unmoved. Three commits (`4890536b`, `9f964f2d`, `c9bd80cd`), NOT pushed. Plan 02 (the phase's tracer — fail-closed kill switch) is next, wave 1, file-disjoint from this plan.
+**Resume File:** None
+
+**Last Date:** 2026-09-15T16:30:00Z
+**Stopped At:** Completed 164.6.4-02-PLAN.md (wave 2, the TRACER, sequential on the main working tree, isolation `none`). Criteria 1–3 have their mechanism: `services/mt5_session_episodes.py` writes ONE ROW PER TRANSITION into `public.cron_runs` under the new `cron_name` `mt5_session_episode` (D-5, no migration), and `services/mt5_session_monitor.py` is the SIXTH `main.lifespan` task on a DETECTION POLL CADENCE. ⛔ The KEEPALIVE INTERVAL was NOT chosen — MEASURED: 0 symbols, 0 env vars, 0 constants, 0 defaults and 0 file names carry the token anywhere in `analytics-service/services/` (9 PROSE occurrences, all refusals). `_LIFESPAN_CREATE_TASK_COUNT_AT_164_6_2` re-cut 5 → 6 in the SAME commit as the sixth entry, ⛔ never weakened to `>=`, and its mutant sibling's "falls by exactly one" arithmetic re-confirmed. `_PRODUCTION_LEASE_SITES` MEASURED at SIX before and after — the tick DELEGATES. Two commits on `phase-164.6.4-fold-raiselast` (`dfd1540a`, `9949e8ab`), NOT pushed. Full analytics suite `5653 passed, 89 skipped`; mypy --strict clean; **26 neuters each observed RED and restored from a byte backup**, of which **FOUR were real HOLES the calibration found** (a `limit 1` read, `status` following the reading, the loop's outer containment guard never exercised where it lives, and a rejected-cadence assertion driving only one of `_env_float`'s two fault classes) — all four now gated. ⛔ Plans 03–05 are WAVE 3 and were deliberately not started. ⚠️ THREE post-deploy human checks are OUTSTANDING and are the phase's real risk: assumption A4 (no Python code has ever written to `public.cron_runs`, so READ THE ROW BACK on the first deploy), assumption A2 (the gateway's rpyc thread counter across two prober runs), and criterion 2's cross-check against the hourly prober.
+**Resume File:** None
+
+**Last Date:** 2026-09-15T15:35:00Z
+**Stopped At:** Completed 164.6.4-01-PLAN.md (wave 1, sequential on the main working tree, isolation `none`). Criterion 5 CLOSED: `Mt5Client._raise_last` redacts BY VALUE at the one shared site via an optional keyword-only credential triple; the asymmetry gate became a SYMMETRY gate and the signature-derived transport gate now covers BOTH arms of every drivable verb; a calibrated AST fence keeps `assert_session_authorized` credential-free. `[164.6.2-RAISE-LAST-SHAPE-ONLY]` CLOSED at every occurrence (ROADMAP 4/4, STATE 5 lines/6 occ, TODOS 0). Two commits on `phase-164.6.4-fold-raiselast` (`4f1963fd`, `5ce04acd`), NOT pushed. 312 passed across the five named suites; mypy --strict clean; seven neuters each observed RED and restored. ⛔ Plans 02–05 are LATER WAVES and were deliberately not started — plan 02 carries `depends_on: ["164.6.4-01"]`, which this plan satisfies.
+**Resume File:** None
+
+**Last Date:** 2026-09-14T05:40:00Z
+**Stopped At:** 164.6.2-03-PLAN.md task 1 COMMITTED (`0036f45f`, `2d738684`) — the founder handover `164.6.2-HANDOVER.md` and the runbook's `Step 2a`. ⛔ **STOPPED AT TASK 2, a `checkpoint:human-action` with `gate=blocking-human`, and it is OPEN.** Plan 04 must NOT begin until the founder sets the three MT5 variables on `quantalyze-analytics` and a KEY-ONLY listing confirms all three NAMES. ⛔ No credential was entered, read, echoed or requested (criterion 3) — the only `railway` calls made were `--help` reads. ⚠️ Two premise failures reported, neither designed around: `npm run lint` is RED on 3 PRE-EXISTING hygiene violations (zero on either file written here; see Blockers), and the `.planning/WINDOWS.md` append was REFUSED for the third consecutive wave with the same byte-identical ledger-count message. ⚠️ A competing agent mutated both artifacts between the write and the commit; every verify leg was RE-RUN against the committed bytes and one reading moved (7 → 5, still ≥3), and a duplicate `Step 2a` it created was resolved by picking one section, not averaging. Previously: Completed 164.6.2-02-PLAN.md — Phase 164.6.2 MT5RELOGIN wave 2 (2/4). ⛔ CRITERION 1 DISCHARGED AS A MEASUREMENT: the boot heal is built, wired into `main.lifespan`, and OBSERVED to red on two levers when the call is removed. It ships safely with the three MT5 variables still unset. Wave 3 (the founder handover) is unblocked and its failure modes are measured rather than guessed. Three commits on `phase-164.6.2-mt5relogin`, not pushed. ⚠️ Open: D-06's healing-window measurement (closes the phase, owned by wave 4) and [164.6.2-KILLSWITCH-COMMENT-DRIFT] needing a destination phase at plan 04's decision checkpoint. Previously: Phase 164.6.2 wave 1 — the ordered security precondition discharged. Previously: Phase 164.8.3 PROBERAUTH COMPLETE (4/4, verification passed, not yet shipped).
+**Resume File:** None
+**Last Date:** 2026-09-13T00:16:55.388Z
+**Stopped At:** Completed 164.6.3-01-PLAN.md (tracer, wave 1). ⛔ BLOCKER raised for wave 2: [164.6.3-MW02-DOCSONLY-BLIND] — see the phase's deferred-items.md.
+**Last Date:** 2026-08-25T22:26:01.687Z
+**Stopped At:** Completed 162-03-PLAN.md
+**Last Date:** 2026-08-25T22:28:04.096Z
+**Stopped At:** Completed 162-04-PLAN.md
+**Last Date:** 2026-08-25T22:14:55.798Z
+**Stopped At:** Completed 162-09-PLAN.md
+**Last Date:** 2026-08-25T23:19:36.303Z
+**Stopped At:** Completed 162-02-PLAN.md
+**Resume File:** None
+**Next step:** Phase 161 (WIZERR — honest error surfaces) is next and NOT yet planned — run `/gsd-plan-phase 161`. Phase 161.1 (LEDGER-REFRESH) was inserted after it on 2026-08-24 for the founder-reported MT5 staleness; it is URGENT and production-facing, so it may be pulled ahead of 161 if you prefer the live data-integrity fix first.
+
+⭐ **Foundation names later waves import by name** (from `153.1-02-SUMMARY.md`, all in
+`src/lib/closed-sets.ts`): `VenueCapabilities` (`:77`), `VENUE_CAPABILITIES` (`:133`),
+`venueSupportsScopeProbe` (`:180`, 153.2's probe gate), `venueIsSubstitutable` (`:194`,
+153.1-03's copy filter), `venueIsSerialized` (`:205`, 153.4's long-wait copy),
+`MAGNITUDE_CAPS.MIN_DESCRIPTION_CHARS` (`:702`, = **10**; 153.1-05 re-points
+`finalize-wizard/route.ts:389` at it **without changing the value**).
+⛔ The row lookup `venueCapabilities()` is **module-private** — read the predicates, never
+index the record, or the per-capability default is bypassed.
+⚠️ Every `closed-sets.ts` symbol below `:56` shifted **+151**; `closed-sets.test.ts` symbols
+below the new `venue capabilities` describe (`:285`) shifted **+130**.
+⚠️ Three hand-typed `1`s pin "only mt5 opts out" (probe / substitutable / serialized). If
+153.2 or 153.4 adds a second opt-out those tests red **by design** — move the count in the
+same commit, deliberately.
+
+⭐ **Three numbers 153.1-06 must reconcile against** (measured in `153.1-01-SUMMARY.md`):
+`deriveRoster(SubmitStep.tsx, "KNOWN_FINALIZE_CODES")` = **10** (comment-stripped path);
+`deriveEmittedCodes(finalize-wizard, "[45]\\d\\d")` = **0** at HEAD — if the D-34 reorder
+leaves it at 0 the scanner is blind, not the route clean; `EMITTER_BODY_MAX_CHARS` = **160**
+(longest real body 90, nearest-neighbour reach 202), so a `finalize-wizard` error body longer
+than 160 chars makes its emitter invisible.
+⚠️ `DERIVED_FLOOR` is still **14** — 153.1-06 must re-size it against the REORDERED total
+(14 pre-existing finalize-wizard arms + the 9 new codes), never against the 9.
+⚠️ 153.4 moves the hand-typed `60` in the DERIVED A-25 assertion
+(`seam-constants.pin.test.ts:790`) to `90` in the SAME commit as the budget raise.
+
+⚠️ **Post-land CI state (2026-08-08):** `secret-scan` went RED on main at `e0481411` — a
+false-positive `generic-api-key` hit on the Phase 151 E1 fixture `E1_KEY_DERIV = "e1-key-deriv"`
+in `ScenarioComposer.test.tsx` (green on PR #668; the push-to-main full scan flags what the
+PR-diff scan does not — the same asymmetry six existing `.gitleaks.toml` entries document).
+**Red main CI blocks the Railway analytics deploy**, so the Phase 151 worker fixes
+(`sync_error` copy selection, MT5/sFOX holdings) are NOT yet live — the service is still serving
+pre-merge `e0493913`. Fix is PR #669. Supabase migrations and the Vercel frontend DID land.
 
 ⚠️ **Env changed and LEFT changed:** `slowapi` was synced **0.1.9 → 0.1.10** (the CI pin at `analytics-service/requirements.txt:226`) and deliberately NOT restored — matching CI is the point, and every #3/#4/#5 mutation row is version-stamped against it. A verifier re-running those cycles on 0.1.9 would not be reproducing this evidence.
 
 **Gates at `39688d69`:** pytest **4743 passed / 96 skipped / 0 failed** · `mypy --strict` **89 files clean** · `npx tsc --noEmit` **0** · full `npm run test:coverage` **8878 passed / 287 skipped / 0 failed** (697 files, all four thresholds clear) · `npm run lint` **0 errors** · **0** new `# type: ignore` across `56fb7167..HEAD` · `grep -rn MUTANT` → 0 · tree clean (only the orchestrator's `TODOS.md` and the pre-existing untracked `scripts/nautilus_factsheet.py`, neither touched).
 
 **Open items the verifier inherits (not this plan's):** the two Phase 140.1 `gaps_found` warnings (`simulator.py:92` IP-keying → PYAPI-03 is 9/9 not 10/10; the two in-handler `HTTPException(429)` sites), O-1..O-4 in the repair programme, and the 12 non-environmental pytest skips.
+
+### Blockers
+
+- ~~143-01 leaves SC#1's alert MUTE until SENTRY_DSN is verified on the WORKER Railway service~~ — ⛔ PREMISE FALSE, RESOLVED 2026-08-17 (Plan 04). There is NO separate worker service and has not been since April: the loops were merged into the FastAPI process (main.py:80-86, after the 2026-04-20 'jobs queued but never processed' incident), dispatch_loop runs in the app lifespan (main.py:271), that process calls init_sentry() at import (main.py:69, since Phase 16), and SENTRY_DSN IS set on its Railway service. SC#1's alert half is TRUE in production. 143-01's init_sentry() covers the STANDALONE path only.
+- 161-07 D-161-07-A: the wizard COMPOSITE arm still renders GATE_SERIES_PROVENANCE_UNVERIFIED for sampled_gapped — a false sentence on a reachable path (the 142.2 FIX-2 downgrade). Fix = route that arm through the examined/unexamined split; requires re-cutting one 142.2 oracle.
+- 161.1: OQ-3 still OPEN — closes only when a founder executes the runbook's step 1 and records whether the database-level or role-level app.* GUC form verified. Also: deribit has ZERO live refresh coverage until plan 04's stitch_composite arm lands (TODOS 0.3)
+- 161.1-04 (wave 4, 2026-08-25): the composite arm LANDED DORMANT — `enqueue_ledger_composite_refresh` (migration `20260825140000`), 8-arm SQL gate, static gates 10-11, and the D-15 non-destructive guard EXTENDED to `run_stitch_composite_job._stamp_failed` (a second destructive stamp plan 02's guard never covered; found by measurement, fixed under Rule 2). ⛔ **Task 3 is a BLOCKING founder LIVE op and is NOT done:** one manual `stitch_composite` enqueue for the one live PROD composite must be observed to completion (`last_return_date` advancing in the staleness view, NOT a job going green) before the composite schedule is documented as activatable. The runbook's composite section is deliberately UNWRITTEN until then. TODOS 0.3 stays OPEN — half of its close condition (the arm exists) is met, half (a composite observed to refresh) is not.
+- 164-05 MEASURED: the phase-148 guard does NOT catch a second unstable_cache call site outside factsheet/[id]/v2/page.tsx (12/12 green under NEUTER-D). 164-07's closure guard does not close it either — the page imports the builder, not the reverse. Closed for the token route by src/app/factsheet-share/[token]/page.no-cache-reach.test.ts; the general repo-wide call-site pin is still unowned.
+- `state.advance-plan` REFUSES on this STATE.md (measured 2026-09-01 by 164.3.1-09): the `## Current Position` section carries a **second** `Phase:` line — line 129, inside the retained `### Retained — Phase 156 close-out` block — so the verb returns `ambiguous_position_phase` and will not advance rather than silently picking the first. Left UNRESOLVED on purpose: that block is marked *do NOT lose this*, and restructuring a retained ledger is outside a measure-only plan's scope. ⚠️ Consequence: the `Plan: 1 of 12` line under Current Position is **STALE** (9 of 12 plans now have SUMMARYs on disk). Read the frontmatter `progress` block or count `.planning/phases/164.3.1-*/`, never that line. Fix = move the Phase-156 retained block out of `## Current Position` into its own top-level section, or teach the verb to ignore `###`-nested entries.
+  ✅ **RESOLVED 2026-09-06, SUPERSEDING the entry above (kept as the dated diagnosis).** The two
+  offending field labels in the retained Phase-156 block were relabelled `Retained phase:` /
+  `Retained plan:`; `/^Phase:.*$/gm` no longer matches them, the `## Current Position` slice now
+  carries exactly ONE `Phase:` line, and no sentence of the retained block was cut — the block
+  carries its own dated SHAPE FIX note saying so. The relabel was chosen over the proposed
+  "move the block to its own top-level section" because promoting its heading to `##` would have
+  swallowed `### Phase 142.1 scope` and `### Phase 140.1 close-out` into a Phase-156 section.
+  ⚠️ The entry above also cited "`Plan: 1 of 12` … 164.3.1" — that pointer is long gone; both
+  pointer lines were re-cut in the same 2026-09-06 pass and now read the live 164.2 position.
+  ⛔ Still true and unchanged: `state.patch` cannot write `Current Phase` / `Next recommended run`,
+  because `## Current Position` is hand-maintained PROSE with bare `Field: value` lines rather than
+  the `**Field:** last_activity_desc
+  edited by hand, on purpose.
+- ⚠️ **A working branch that is BEHIND main makes every GSD phase-directory reading lie, silently.**
+  Measured 2026-09-06 on `phase-164.2-curated-copy`: 1 behind / 5 ahead of `origin/main`, missing
+  exactly `d679f638` — the commit that carried 119 planning artifacts for 164.1 / 164.3.1 / 164.4 /
+  164.4.1 onto main after `/gsd-pr-branch` filtered them out of PR #746's reviewer diff. In that
+  checkout all four directories hold only `.gitkeep`, so `roadmap.analyze` calls four SHIPPED
+  phases `empty` / `no_directory` and the derived progress integers drop. There is no gate for
+  this. ⛔ Before trusting any `disk_status`, `completed_phases` or `next_phase` reading, run
+  `git rev-list --left-right --count origin/main...HEAD` and confirm the left number is 0.
+  See `## Current Position` for the full diagnosis and for why the two counters differ by design.
+- [REDUNDER-PGCRON] **4** idiom gate files (**100** of 355 sections, incl. Phase 164.4 rank 1) cannot be falsified on the pg-lane, which has no pg_cron. Mechanism re-measured 2026-09-03 and it is **2 RAISE + 2 green-skip**, not the blanket all-files-RAISE this line used to claim: reconcile `:268` and retention `:212` RAISE EXCEPTION on the absent extension so their baseline is never GREEN; derive `:159` and the reaper `:282` baseline GREEN but withhold whole Parts behind a pg_cron-conditional NOTICE, so those arms are un-falsifiable. DEFERRED by founder decision 2026-09-03 (SCOPE AMENDMENT #2) and printed by the runner as `lane-blocked:` every run, with a per-run lane probe that reddens the gate (`lane-blocked-stale`) once pg_cron IS available. Needs a lane-substrate plan. Booked in TODOS.md.
+- 164.4-01 <human-check> UNMET: the PR number, merged head SHA and SHA-bound sql-mutation ubuntu run id + wall clock are PENDING in 164.4-01-SUMMARY.md. Plan 164.4-02's precondition is gate=blocking-human and reads exactly those fields — it WILL halt until 164.4-01 is landed (/ship, /gsd-pr-branch + the CLAUDE.md deletion guard) and its CI board read SHA-bound.
+- 164.4-02 <human-check> OPEN: the batch (b5fa08c2 / c850a790 / 9cffb584) was NOT pushed and no PR was opened, so there is no SHA-bound sql-mutation ubuntu green for it. Plan 03's precondition reads that run id / head SHA / wall clock out of 164.4-02-SUMMARY.md coverage D6, which is status: pending.
+- 164.4-04 human-check CLOSED 2026-09-03: landed as PR #734 (head 03fb3bc9, squash-merged 6644dd3b, v0.77.5.0). CI run 33774615747 reports sql-mutation success in 171 s, the ubuntu job's own log carrying `arms: 86/86/0`, `biting: 86`, `lane-invocations: 86`, `tallies agree`, `coverage: files 4/71`, `per-arm lane time: mean 1.0s` — IDENTICAL to the macOS measurement, so the two hosts agree on this batch and the identity attribution held on the ubuntu PostgreSQL build. Recorded in coverage D9 of 164.4-04-SUMMARY.md. Plan 164.4-05 is UNBLOCKED.
+- 164.4-05 human-check CLOSED 2026-09-03: landed as PR #735 (head f0d19bf7, squash-merged 5b97aadb, v0.77.6.0). CI run 33785233457 reports sql-mutation success in 232 s, the ubuntu job's own log carrying `arms: 134/134/0`, `biting: 134`, `lane-invocations: 134`, `tallies agree`, `coverage: files 9/71`, `per-arm lane time: mean 1.0s`, `No defects` — again identical to macOS. Recorded in coverage D11 of 164.4-05-SUMMARY.md. Plan 164.4-06 is UNBLOCKED.
+- ⏱️ THREE ubuntu timing points now exist for `sql-mutation`: 45 arms/119 s, 86/171 s, 134/232 s. Linear fit **1.27 s per arm of JOB cost + ~62 s fixed overhead** — larger than the runner's own `per-arm lane time: mean 1.0s`, which measures the LANE only. The ~265-arm end state projects to ~399 s ≈ 6.6 min, inside `timeout-minutes: 15` without a raise. Plan 164.4-08 still re-justifies the timeout against its OWN measured run.
+- 164.4-06 human-check CLOSED 2026-09-03: landed as PR #736 (head ba6fe1e2, squash-merged 6d6368ef, v0.77.7.0). CI run 33794810067 reports sql-mutation success in 278 s; the ubuntu job's own log carries `arms: 163/163/0`, `biting: 163`, `lane-invocations: 163`, `tallies agree`, `coverage: files 13/71`, `No defects` — identical to macOS for the fourth batch running. Recorded in coverage D10 of 164.4-06-SUMMARY.md. Plan 164.4-07 is UNBLOCKED.
+- ⏱️ FOUR ubuntu timing points: 45 arms/119 s, 86/171 s, 134/232 s, 163/278 s. Refit **1.35 s per arm of JOB cost + ~58 s fixed** (the runner's own `per-arm lane time: mean 1.0s` measures the LANE only). ~265-arm end state projects to ~416 s ≈ 6.9 min, inside `timeout-minutes: 15`. The 3-point fit predicted 269 s for this run and measured 278 — 3% over, so the model is slightly optimistic; plan 164.4-08 re-justifies the timeout against its own run.
+- 164.4-07 human-check CLOSED 2026-09-03: landed as PR #737 (head 4a9f33da, squash-merged 214184d7, v0.77.8.0). CI run 33804312706, sql-mutation success, 23/23 checks. Corpus identical to macOS (`arms: 189/189/0`, `biting: 189`, `lane-invocations: 189`, `coverage: files 17/71`, `No defects`). Recorded in coverage D10 of 164.4-07-SUMMARY.md. Plan 164.4-08 is UNBLOCKED.
+- ✅ 164.4-09 human-check CLOSED 2026-09-04: landed as PR #741 (head f9f455b6, squash-merged a55ff918, v0.77.10.0), **24/24 green**. `sql-mutation` run 33872399902, 369 s: `coverage: files 28/71`, `arms: 239/239/0`, `biting: 239`, `lane-invocations: 239`, `mean 1.0s`, `No defects`. FILES_FLOOR 28, ARMS_FLOOR 239, WAIVED_CEILING still 0. Batch 6 landed REDUCED — 5 files, not 6.
+- ⚖️ FOUNDER CALL 2026-09-04 on the pg_cron blocker: **retire the deferral, do not grow it.** A FIFTH file (`test_compute_jobs_error_kind_copy_parity.sql`) turned out to be un-baselineable because its apply list needs `20260826140000`, the only migration widening `compute_jobs_error_kind_check` to admit `'orphaned'`, and that migration hard-RAISEs `0A000` at :206-208 without pg_cron. Rather than defer a fifth file, pg_cron goes ON the lane. Inserted as **Phase 164.4.1 PGCRON-LANE** (`gsd-tools phase next-decimal` resolved the number; precedent 164.3 → 164.3.1). ⚠️ It is a PHASE, not a plan in 164.4: adding it inside 164.4 would silently reverse SCOPE AMENDMENT #2, and pg_cron changes lane startup for EVERY arm while 164.4's floors are still ratcheting sequentially. STATE's `current_phase` pointer was deliberately NOT advanced to it — 164.4 has waves 11 and 12 left.
+- ⚖️ ORCHESTRATOR CALL 2026-09-04 (by precedent, not re-escalated): `test_resync_retry_single_job.sql` assertion (b) was the SAME shape as `[REDUNDER-WAIVER-01]` — arm bites, no first-failure mutation — which the founder had already resolved one wave earlier as *fix, not waive*. (b)'s INSERT now uses the `EXCEPTION WHEN unique_violation` idiom assertion (c) already uses ten lines below it in the same file. Measured: `TEST FAILED (` occurrences 0 before, exactly 1 after, and it is (b). `WAIVED_CEILING` stays 0; the phase has taken ZERO waivers across ten waves.
+- ⚠️ TWO CHECKS WERE WEAKER THAN THEY CLAIMED, both found by MEASURING rather than reading. (1) `test_resync_retry_single_job.sql`'s header credited assertion (a)'s dedup to `compute_jobs_one_inflight_per_kind_strategy`; excluding `process_key_long` from it — proved applied by re-reading `pg_indexes.indexdef` — left the gate at exit 0, and so did deleting the RPC's select-existing ALONE (the index dedups via `ON CONFLICT DO NOTHING` and the lost-race re-read returns the same id). (a)'s twin had to be LAYERED; a single-anchor twin would have shipped looking correct and proving nothing. (2) Plan 09 claimed the RED-arm fixtures "derive from GREEN_LOG and follow automatically" — false, 15 literal integers live in their own regexes.
+- ⚠️ THE ci.yml TIMING PROJECTION UNDERCOUNTS: it multiplies ARMS by per-lane time, but the job also runs a baseline AND a restore leg per FILE (the runner prints `plus 28 baseline / 28 restore leg(s)` — those are lanes too). Measured wave 9 → 10: +20 arms cost +36 s, because 5 new files added 10 further legs. Phase end is ~7.9 min, not the 6.6 min the comment projects. Inside `timeout-minutes: 15` either way, so it is a MODEL correction, not a budget problem — fix the formula to count LEGS, not arms, in the next batch that touches the comment.
+- ✅ 164.4-08 human-check CLOSED 2026-09-04: landed as PR #738 (head 33e5a8c6, squash-merged f82d9c1b, v0.77.9.0). `sql-mutation` SUCCESS on ubuntu, run 33854344121: `coverage: files 23/71`, `arms: 219/219/0`, `biting: 219`, `lane-invocations: 219`, tallies agree, `No defects`. FILES_FLOOR 23, ARMS_FLOOR 219, WAIVED_CEILING still 0 — the phase has taken ZERO waivers. Plan 164.4-09 is UNBLOCKED.
+- ⭐⏱️ **THE WAVE-8 TIMING SCARE IS RESOLVED: IT WAS HOST VARIANCE.** Wave 9 measured **333 s for 219 arms at `mean 1.0s`/lane** against wave 8's **458 s for 189 arms at 1.7s**. LARGER AND FASTER — a real per-lane cost cannot be unpaid by a bigger corpus, so run 33804312706 is an outlier. The linear model holds at ~1.0 s/lane + ~130 s fixed, putting the ~265-arm phase end near **6.6 min** against `timeout-minutes: 15`. ci.yml now records both observations and says which reading a future 1.7 s would falsify.
+- ⚖️ FOUNDER CALL 2026-09-04 on `[REDUNDER-WAIVER-01]`: **reorder, do not waive.** `test_get_published_trust_signals.sql` assertion 5 proves the anon EXECUTE grant that assertions 1-3 need in order to call the function at all, so it is a PRECONDITION that belonged ahead of them; `REVOKE EXECUTE` used to abort at assertion 1 with a raw 42501 naming no arm. Now it fails as `TEST FAILED (5)`, first and only error, zero 42501 in the log. Byte-identical relocation (6 non-comment lines out, the same 6 in) and the phase's ONE authorised executable-SQL edit to a gate file.
+- ⚖️ FOUNDER CALL 2026-09-04 on the Phase 29 frozen-spine collision: **tighten the pin, do not retire it.** `test_scenarios_rls.sql` was pinned by FILENAME-absence from the phase delta, which a comment trips. It now compares the file's NON-COMMENT lines against the baseline and requires them byte-identical — stricter than the Phase 59 precedent (which retired the sibling pin in favour of a guard-regex presence check) and stricter than the filename proxy it replaces. Proven falsifiable: executable line changed -> RED naming the file; whole-line comment appended -> GREEN; restored -> 7/7.
+- ⚠️ CI IS ADVISORY-RED ON MAIN AND IT IS NOT THIS PHASE'S DOING — `[CI-GDPR-TIMEOUT-01]`. `gdpr-export-coverage-hook.test.ts` B10 #8 times out at 30 s on slow runners; PROVEN pre-existing by control PR #739 (empty commit, main's tree unchanged) failing identically, run 33856182272. Runner spread measured at 2x (714 s vs 356 s for the same shard). ⛔ FIX IT BEFORE WAVE 10 so the remaining waves land on a clean board and no real failure hides in the noise.
+- ⚠️ TOOLING TRAP measured 2026-09-04: `gh run view --log` TRUNCATES — it cut the two minutes holding the `Failed Tests` block, so a clean assertion failure read as a HANG with no summary for three investigations. Use `gh api repos/<owner>/<repo>/actions/jobs/<id>/logs`.
+- ⛔⏱️ THE TIMING MODEL BROKE ON WAVE 8 AND THE TIMEOUT MARGIN IS NO LONGER COMFORTABLE. Run 33804312706 took **458 s** against a 313 s projection (46% over). The cause is in the job's OWN log: `per-arm lane time: mean 1.7s over 189 arm run(s)`. Every earlier ubuntu run reported **1.0s**, and the orchestrator's LOCAL run of the identical corpus also measured 1.0s — so this is NOT arm count and NOT the batch's content; the ubuntu lanes ran ~70% slower. One observation cannot separate CI-host variance from a real per-lane cost this batch's longer apply lists impose only on the ubuntu build. ⚠️ At the WORST observed 1.7 s/arm the ~265-arm end state projects to roughly **11 minutes** against `timeout-minutes: 15`. The earlier 6.9-min projection assumed 1.0 s and is now superseded. **Plan 164.4-08 must re-justify the timeout against the WORST observed per-lane cost, not the mean, and should treat raising it as the likely correct answer** — the trigger its own ci.yml comment names is 'a measured run approaching ~10 minutes'.
+- ⛔ ORCHESTRATOR TRAP, measured wave 6: editing ANY tracked file while `run.mjs` is in flight fails the run with a `dirty-checkout` defect (a version bump did it), and `RUNNER_EXIT=1` then reads exactly like a broken batch. Read the defect KIND before concluding — `dirty-checkout` with no arm and no file named is the orchestrator's own hand, not the corpus. Serialise: clean tree -> run -> then bump.
+- 164.4.1-03 BLOCKED on a founder decision: the retention gate's 3/JOB-05 section has NO first-failure mutation (measured twice on real lanes), so the corpus carries 1 waiver against WAIVED_CEILING 0. The full mutation-runner run now exits 1 on TWO defects and mutation-runner-floors.test.ts's WAIVER CREEP arm is RED, both deliberately. Decide: raise WAIVED_CEILING to 1, or restructure the gate's three-deep registration guard. See 164.4.1-03-SUMMARY.md.
+- SC-1's ubuntu half and SC-3's ubuntu cleared half are UNMEASURED at 164.4.1-06: no SHA-bound workflow_dispatch of the finished 44-file/363-arm tree exists, so there is no ubuntu wall clock, no ubuntu per-arm lane time, and ci.yml's TIMEOUT DECISION block carries no number from this phase. Owed to the orchestrator after merge.
+- Plan 164.4.1-06 Task 2's CLEARED grep over 164.4.1-TRIPWIRE-FIRED.log ALREADY returns 1 at base ddfd55d3, satisfied by plan 01's own header sentence — a green there proves nothing. Booked as deferred-items D-164.4.1-06-1; repair belongs in the assertion (bind to run id + 40-hex sha), not the document.
+- Phase 164.5 plan 05 task 3 is a blocking-human checkpoint:decision, UNANSWERED: amend ROADMAP criterion 5 to the '0 NEW drift' reading, or hold it open pending the founder's decision on applying the 31 migrations to shared TEST. Tasks 1-2 are complete; ROADMAP.md and TODOS.md were deliberately NOT edited. Criterion 5 is recorded OPEN.
+
+- ✅ **164.8.2 GATEHARDENING SHIPPED 2026-09-10 as PR #772** (head `0c160c28` on the filtered branch `phase-164.8.2-gatehardening-pr`; filter reports picked=102, on-branch=102, skipped-planning-only=14, CODE IDENTICAL at 15965 lines, 0 forbidden paths, deletion-guard count 0, working 54 files -> pr 32). **ZERO migrations** — `supabase-migrate.yml`'s `paths:` filter means the merge applies nothing to any database, so neither the PROD auto-apply nor the TEST-first gate is in play.
+- ⭐ **THE RECURSION IS THE RESULT, not any single gate.** Six review rounds ran over this phase. **Rounds one through five EACH found a control weaker than the sentence beside it — including inside the previous round's fixes.** Round 2 found twelve findings against round 1; round 3 found five blockers against those; round 4 found a guard that was unreachable, blind and unfalsifiable at once; round 5 found that the CURE for it had blinded the scanner to 18% of its own file. Round 6 found none, and both reviewers reached that independently by REBUILDING the shipped logic and re-deriving its claims over all 874 test files rather than reading the code. ⚠️ Read that as a standing warning about review depth on gate code, not as a story about this phase.
+- ⛔ **THE CLASS THAT COST THE MOST WAS TRIVIAL: `String.indexOf`/`lastIndexOf`/`search` return `-1`.** `s.slice(-1)` is the LAST CHARACTER and `s.slice(0, -1)` is nearly the WHOLE string, so an assertion over either passes VACUOUSLY. Found live, not hypothetically: a byte-identity pin over an entire mutex protocol comparing one newline literal to another; an arm asserting *"the credential gate carries no `if:`"* that passed **because the step no longer existed**; and an adjacency check written `Math.abs(a.indexOf(x) - a.indexOf(y)) === 1`, true when one index is `-1` and the other `0` — it passed exactly when a leg it names was MISSING. Twelve sites closed across eleven files, each behind a helper that THROWS naming the missing anchor. ⛔ No `?? ''`, no `|| 0`, no `Math.max(0, i)`: an absent anchor means the subject is not the shape the code assumed, which is a FINDING, not a value to substitute. A standing gate now enforces the class across every test file in `src/__tests__`.
+- ⚠️ **THE GATE ITSELF WAS REBUILT THREE TIMES, THEN CUT BACK.** Its comment stripper was a REGEX, and these files pin SHELL workflows and quote their globs verbatim — `"${outdir}"/*.err` opens a block comment. **Measured: 858 lines, 18% of its own subject, deleted before the scan ever saw them.** Its scope claimed a class and delivered 2 files, then 137 while silently skipping 346 `.test.tsx`. Its own anti-vacuity floor read the RAW source, where both pinned files carry the offending expression in comments BY DESIGN — green forever regardless of the code. Then it lost its self-referential edge: 96 lines of tolerance machinery whose own calibration legs called the untolerated path and therefore COULD NOT FAIL, a duplicate copy that had been given the naive stripper *in the same branch that diagnosed it*, and a 4718-line strip subject replaced by a 201-line synthetic that cannot rot. Deleting the duplication was PROVEN, not assumed — an offender injected at five depths into the file whose local rule was removed is reported by the survivor, each at the correct line.
+- Gates re-run by the orchestrator on the merged tree, none delegated: vitest **853 files / 14,644 tests / 0 failed** (19 files / 280 tests skipped), `restore-test-from-baseline.sh --self-test` **27/27**, `test-ledger-drift-check.sh --self-test` **11/11**, `tsc --noEmit` clean, `eslint` clean. Every assertion added or changed was neutered, observed RED, and restored **from a byte backup** — never `git checkout --`.
+- `164.8.2-SECURITY.md` written from State B (no prior file, PLAN threat model on disk): **24/24 closed, `threats_open: 0`**, ASVS level 1, `block_on: high`, 3 accepted risks and 7 residuals each recorded with a severity and a destination phase. ⚠️ The auditor found TWO of the orchestrator's own errors: an item claimed by two phases at once, and a FALSE BINARY put to the founder — the refuse-vs-withhold question has a third option that costs neither side, now recorded before anyone is asked to choose.
+- 📋 **14 residuals booked in `TODOS.md`, each naming exactly ONE destination phase** (164.8.4 GATERESIDUE, 164.9 TESTISOLATION). **None is CARDINAL** — no control that cannot fail, no assertion vacuous today, no gate green over an empty corpus. The three worth knowing: the published-`.sql` scan **refuses without withholding** (the file it names still ships in a 90-day artifact); one psql read leaves stderr unredirected into a **public** Actions log against its own file's NON-NEGOTIABLES; and a local wrapper's `bun` shebang auto-loaded `.env.local` into a child `vitest`, producing **real INSERTs against shared TEST** — PROD provably untouched, and the ONE residual with a confirmed incident rather than a latent path.
+- ⚠️ **THE CLASS-LINT'S SCOPE CLAIM OUTRAN ITS FILTER THREE TIMES ON ONE BRANCH** (2 files -> 137 -> 139, the last still skipping 5 by directory depth). Phase 164.8.4's routed deliverable is explicitly **NOT a fourth widening** but a mechanism that makes claim and file set agree BY CONSTRUCTION. A fourth widening would be the same defect wearing the fix's clothes.
+- ⚖️ **ORCHESTRATOR CALL 2026-09-10 on phase creation:** the founder's stopping rule was *"wenn dann immer noch Kardinalsfehler, in eine neue Phase"* — CONDITIONAL on a cardinal error. Round six found none, so opening Phase 164.8.5 SCOPEAXIS was an over-application of the rule; it was FOLDED INTO 164.8.4 and removed, and its empty artifact directory deleted here. ⛔ Separately: the ROADMAP was hand-edited before that was caught. The CLAUDE.md "handlers clobber ROADMAP" warning covers the PROGRESS/STATE handlers ONLY — it does NOT license hand-editing a phase into the roadmap. Phase edits go through `/gsd-phase --edit`.
+- ⛔ **PHASE 164.6.2 CRITERION 2 CANNOT CLOSE AT HEAD, and the cause is DEPLOY ORDERING, not the broker.** MEASURED 2026-09-14 (plan 04, `164.6.2-MEASUREMENT.md`): the founder set the three Railway variables and the redeploy fired and SUCCEEDED — ⭐ RESEARCH assumption A5 is now a measured fact — but the deployed analytics sha is `5dead88a` (= `main` = Phase 164.8.3's ship), and `heal_mt5_terminal_session`, `initialize_with_credentials` and `mt5_terminal_key` have **ZERO** occurrences under `analytics-service/` at that sha; `services/mt5_relogin.py` does not exist there; the deployed `lifespan` starts **4** tasks, not 5. **20 of the last 20** analytics deployments carry `branch: main`, and the phase branch is unmerged. ⛔ The gateway was therefore deliberately NOT restarted: a restart has exactly one possible outcome, entailed by the absence of the code, so recording it as outcome 3 would name RESEARCH assumption A3 (a broker-side block) as the live suspect against a state nobody measured. Recorded as **OUTCOME 0**. ⚠️ Question THREE is `verdict: UNSETTLED` (`terminal_info` null ⇒ `trade_allowed` unreadable), so plan 04 task 2 edited NOTHING and both instruments are `cmp`-proven byte-identical to their pre-edit backups. ⚠️ `164.6.2-HANDOVER.md` section 3 is false OF PRODUCTION — it promises the founder that a new analytics process starts the heal. ⛔ **Plan 04's `checkpoint:decision` was DECIDED 2026-09-14 (see the decision entry below); the phase remains deliberately HELD OPEN and criterion 2 does NOT close until wave 5.** ⚠️ The ship that would deploy the heal was itself blocked by `[164.6.2-HYGIENE-PROSE-SELF-TRIP]` — ✅ CLOSED by the founder in `a2ac07ae`, lint GREEN, so that blocker is lifted.
+- ⭐ **PHASE 164.6.2 — FOUNDER DECISIONS TAKEN 2026-09-14 at plan 04's decision checkpoint; the checkpoint is now CLOSED and the PHASE is deliberately HELD OPEN.** **DECISION 1:** the FOURTH option was taken — *hold 164.6.2 OPEN on OUTCOME 0, ship the branch, take the real measurement as a post-ship **WAVE 5***. Criterion 2 is UNCHANGED; only its precondition is now explicit. ⛔ `window-acceptable` REJECTED (it presupposes a measured window that does not exist) and `hold-open-outcome-3` REJECTED (it blames a broker-side block, RESEARCH assumption A3, for our own absent code). ⛔ **The keepalive is NOT booked** — no window was measured and an interval chosen now is the guess D-06 exists to prevent. **DECISION 2:** `[164.6.2-RAISE-LAST-SHAPE-ONLY]` (✅ its destination was settled on 2026-09-15 — Phase 164.6.4 criterion 5 — and it is CLOSED there by `4f1963fd`; both mentions in this dated entry are lineage, not live claims) goes to a new phase or a post-ship plan of its own, ⛔ **NOT** Phase 164.6 GATE-HYGIENE — kind mismatch, it edits `Mt5Client.login()` on the live job path while 164.6's remaining scope is lint rules, tests and prose. **ROUTED, all via `/gsd-phase --edit`, milestone scope re-derived before and after (unchanged, 37 phases, identical set) and `roadmap validate` returning zero warnings:** `[164.6.2-KILLSWITCH-COMMENT-DRIFT]` → **164.6** (criterion 17); `[164.6.2-PLAN04-GATE-INTENT-DRIFT]` → **164.8.4** (criterion 10, all three instrument defects recorded concretely); the gateway image digest pin AND the downstream deploy-observation dependency → **164.11** (criteria 7-8); `[164.6.2-CRITERION2-NEEDS-DEPLOY]`, wave 5, question THREE and `[164.6.2-RAISE-LAST-SHAPE-ONLY]` → **164.6.2** (criteria 6-9, `--force`, phase is in_progress). ⛔ No blank destination and nothing booked into a shipped phase. ⚠️ **WAVE 5's PRECONDITION, and it is TWO facts not one:** the branch must be MERGED *and* the merge must be OBSERVED to have DEPLOYED — Phase 164.11 measured FIVE SKIPPED analytics deployments in three days, so confirm `/health`'s `git_sha` matches the merge commit BEFORE restarting anything or reading `trade_allowed`. ✅ `[164.6.2-HYGIENE-PROSE-SELF-TRIP]` CLOSED by the founder in `a2ac07ae` — lint GREEN (`6385 tracked files scanned`); the two RUNNABLE regexes were RESPELLED (`/Us[e]rs/`, identical matched language) and the prose hit spelled escaped, then re-calibrated four ways. ⛔ A respelling, not a relaxation.
+
+## ⛔ Standing constraint from Phase 164.3.1 — do not lose this between sessions
+
+**Hold migration PRs until Phase 164.3.1 AND Phase 164.4 have BOTH landed.**
+
+VAC-04's zero path now fails closed (amended D-07, 2026-09-01, reversing a same-day call that
+would have deferred the flip to 164.4 and left success criterion 4 unmet). The wedge risk that
+deferral was meant to avoid is carried by ORDERING instead of by weakening the gate.
+
+D-13 narrows what is actually held: a changed set containing **no textual `CREATE … FUNCTION`
+anywhere** passes with a notice (measured: 108 of 262 migrations), so only a genuinely BLIND zero
+refuses. A block at `scripts/prod-body-drift-check.sh`'s zero path is the gate WORKING — route the
+ordering, never the gate. Do not add an ack-pragma; the reopen pin in
+`src/__tests__/drift-check-scripts.test.ts` REDs by execution if the path is reverted to `exit 0`,
+and by name if the `VAC04-ZERO-PATH-FAILS-CLOSED` marker is deleted.
+
+**SC-4 is MET, not PARTIAL.** Any artifact still saying PARTIAL is superseded — see
+`164.3.1-CONTEXT.md` § Amendment 2026-09-01.

@@ -1,0 +1,5450 @@
+/**
+ * Red/green proof for the two drift gates (Phase 164.3, VAC-04 + VAC-08).
+ *
+ * ⛔ FOUNDER RULE, MACHINE-CHECKED HERE: a control that cannot fail is worse
+ * than no control. Every case below drives a real invocation of the real shell
+ * script with a stubbed data source, and asserts the EXIT CODE — the only
+ * channel CI reads. A gate is only shipped once this file proves it goes red
+ * with the condition present and green with it absent.
+ *
+ * Both gates take their live-database access through an INJECTABLE command
+ * (`BODY_FETCH_CMD`, `LEDGER_QUERY_CMD`) precisely so this file can exercise
+ * them without touching PROD or the SHARED TEST database.
+ *
+ * ⚠️ SCOPE BOUNDARY, stated rather than implied: these cases prove the gates'
+ * DECISION LOGIC and exit codes. They do not prove the SQL the CI steps hand to
+ * psql — that is proven by the object-level measurements recorded in
+ * 164.3-CONTEXT.md (VERIFIED CORRECTION 1) and by the first live run.
+ */
+import { describe, it, expect, vi } from "vitest";
+import { spawnSync } from "node:child_process";
+import {
+  mkdtempSync,
+  mkdirSync,
+  writeFileSync,
+  readFileSync,
+  readdirSync,
+  existsSync,
+  rmSync,
+  chmodSync,
+  symlinkSync,
+  cpSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { basename, dirname, join, resolve } from "node:path";
+
+import { normalizeSql } from "../../scripts/sql-body-normalize.mjs";
+import { createHash } from "node:crypto";
+
+// ⛔ THE DELIBERATE DEGENERACY DEMONSTRATION, ROUTED THROUGH ITS ONE NAMED HOME
+// (Phase 164.8.2 / W3). The calibration below must WRITE the unchecked narrow —
+// that expression IS its evidence — but the class rule in
+// `test-restore-workflow-wiring.test.ts` now scans every test file. A file:line
+// allowlist rots and fragment assembly ("sl" + "ice") would make the evidence
+// unreadable, so the trap lives in one announced function instead.
+import { degenerateNarrow } from "../test/helpers/degenerate-narrow";
+
+/**
+ * ⚠️ THIS FILE'S LEGS SPAWN REAL SHELL GATES, AND vitest's 5 s DEFAULT WAS
+ * ALREADY UNDER-SIZED BEFORE THIS PHASE TOUCHED IT. MEASURED 2026-09-21 on this
+ * machine: `bash scripts/test-ledger-drift-check.sh --self-test` took **4.93 s**
+ * at the commit BEFORE the two retry arms were added — a 70 ms margin against
+ * the default, i.e. a red that depended on scheduling luck rather than on the
+ * gate. Adding the arms took it to 5.97 s and turned that luck into a
+ * reproducible timeout, and it also starved the neighbouring VAC-04 legs, which
+ * spawn their own gate in the same worker.
+ *
+ * ⛔ THIS RAISES NO FLOOR AND WEAKENS NO ASSERTION. A test timeout is not a gate
+ * on behaviour; an under-sized one only manufactures false reds that get
+ * "fixed" by deleting coverage. Every assertion in this file is unchanged.
+ * ⚠️ It stays BOUNDED at 60 s: a genuine hang in a spawned gate must still fail
+ * the run rather than sit on a runner.
+ */
+vi.setConfig({ testTimeout: 60_000 });
+
+const PROD_GATE = "scripts/prod-body-drift-check.sh";
+const LEDGER_GATE = "scripts/test-ledger-drift-check.sh";
+/**
+ * The ledger gate's source, read ONCE. Legs that DERIVE a pin from a constant in
+ * that script (rather than restating it) read it through here — see
+ * `ledgerGateAttemptBudget`. Legs that must prove something about the FILE's own
+ * shape keep their own `readFileSync`, deliberately, so they cannot inherit a
+ * reader from the thing they are checking.
+ */
+const LEDGER_GATE_SRC = readFileSync(LEDGER_GATE, "utf8");
+
+/** Credentials the VAC-04 gate asserts the PRESENCE of. Values are never read. */
+const FAKE_CREDS = {
+  SUPABASE_PROJECT_REF: "stub-ref",
+  SUPABASE_ACCESS_TOKEN: "stub-token",
+  SUPABASE_DB_PASSWORD: "stub-password",
+};
+
+// ---------------------------------------------------------------------------
+// ⛔ ANCHOR DISCIPLINE (Phase 164.8.2 / WR-07). READ THIS BEFORE WRITING A SLICE.
+//
+// `String.indexOf`/`lastIndexOf` return -1 on a miss, and JavaScript's `slice`
+// reads a negative index FROM THE END: `s.slice(-1)` is the LAST CHARACTER and
+// `s.slice(0, -1)` is nearly the WHOLE string. A narrowing slice whose anchor has
+// been renamed therefore does not fail — it degenerates into a subject an
+// assertion sails straight over. MEASURED on this branch: a byte-identity pin
+// over an entire mutex protocol comparing `"\n"` to `"\n"` and PASSING.
+//
+// ⛔ AN ABSENT ANCHOR IS A FINDING, NOT A VALUE. No `?? ''`, no `|| 0`, no
+// `Math.max(0, i)` — a defaulted anchor is the same defect wearing a hat. Throw,
+// and NAME the anchor. Restated per-file rather than imported, matching the
+// self-containment convention these gate-proof files are built on.
+// ---------------------------------------------------------------------------
+
+/** `text.indexOf(anchor)`, but a miss THROWS by name instead of returning -1. */
+function anchorIndex(text: string, anchor: string, from = 0): number {
+  const at = text.indexOf(anchor, from);
+  if (at < 0) {
+    throw new Error(
+      `ANCHOR MISSING: ${JSON.stringify(anchor)} is not present in the subject text. ` +
+        `The narrowing slice that wanted it would have degenerated (slice(-1) is the LAST ` +
+        `CHARACTER, slice(0, -1) is nearly the WHOLE string) and every assertion over the ` +
+        `result would have passed vacuously. Fix the anchor or the subject — do not default it.`,
+    );
+  }
+  return at;
+}
+
+/** `text.lastIndexOf(anchor)`, same discipline: a miss THROWS by name. */
+function lastAnchorIndex(text: string, anchor: string): number {
+  const at = text.lastIndexOf(anchor);
+  if (at < 0) {
+    throw new Error(
+      `ANCHOR MISSING (last): ${JSON.stringify(anchor)} is not present in the subject text. ` +
+        `The narrowing slice that wanted it would have degenerated and every assertion over ` +
+        `the result would have passed vacuously. Fix the anchor or the subject.`,
+    );
+  }
+  return at;
+}
+
+function withTempDir<T>(fn: (dir: string) => T): T {
+  const dir = mkdtempSync(join(tmpdir(), "drift-check-"));
+  try {
+    return fn(dir);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+function run(script: string, env: Record<string, string>) {
+  const res = spawnSync("bash", [script], {
+    cwd: process.cwd(),
+    encoding: "utf8",
+    env: { ...process.env, ...env },
+  });
+  return { status: res.status, out: `${res.stdout ?? ""}${res.stderr ?? ""}` };
+}
+
+/**
+ * A PATH shim for `tool` — the SP-M01 idiom. `bin/<tool>` runs `lines` with
+ * `$@` intact and `$REAL` bound to the real tool, so ONE call (keyed on its
+ * flags and its file) can be broken while every other call delegates. Returns
+ * the PATH value to run the gate under.
+ */
+function withPathShim(dir: string, tool: string, lines: string[]): string {
+  const bin = join(dir, "bin");
+  mkdirSync(bin, { recursive: true });
+  const real = spawnSync("bash", ["-c", `command -v ${tool}`], { encoding: "utf8" }).stdout.trim();
+  expect(real, `no real ${tool} on PATH to delegate to`).not.toBe("");
+  writeFileSync(
+    join(bin, tool),
+    ["#!/usr/bin/env bash", `REAL=${JSON.stringify(real)}`, ...lines, 'exec "$REAL" "$@"'].join("\n"),
+  );
+  chmodSync(join(bin, tool), 0o755);
+  return `${bin}:${process.env.PATH ?? ""}`;
+}
+
+/** A stub fetcher: `stub.sh <name>` cats live/<name>.sql, or emits nothing. */
+function writeStubFetcher(dir: string): string {
+  const p = join(dir, "stub-fetch.sh");
+  writeFileSync(
+    p,
+    [
+      "#!/usr/bin/env bash",
+      'f="' + join(dir, "live") + '/$1.sql"',
+      'if [ -f "$f" ]; then cat "$f"; fi',
+      "exit 0",
+    ].join("\n"),
+  );
+  chmodSync(p, 0o755);
+  return p;
+}
+
+/**
+ * A stub PROD function-name index (WR-01). It lists the names the fetcher's
+ * source really holds, so the gate can tell "genuinely not in PROD" from "the
+ * extractor returned nothing". `names` defaults to whatever is in `live/`.
+ */
+function writeStubNameIndex(
+  dir: string,
+  names?: string[],
+  filename = "stub-index.sh",
+): string {
+  const p = join(dir, filename);
+  const body =
+    names === undefined
+      ? [
+          `for f in "${join(dir, "live")}"/*.sql; do`,
+          '  [ -e "$f" ] || continue',
+          '  basename "$f" .sql',
+          "done",
+        ]
+      : names.map((n) => `echo "${n}"`);
+  writeFileSync(
+    p,
+    ["#!/usr/bin/env bash", ...body, "exit 0"].join("\n"),
+  );
+  chmodSync(p, 0o755);
+  return p;
+}
+
+const COMMITTED_BODY =
+  "CREATE OR REPLACE FUNCTION public.demo_fn(p_id UUID)\nRETURNS UUID\nLANGUAGE plpgsql\nAS $$\nBEGIN\n  RETURN p_id;\nEND\n$$;";
+
+/** Same code, re-rendered the way pg_get_functiondef/pg_dump renders it. */
+const PROD_BODY_EQUIVALENT =
+  "CREATE OR REPLACE FUNCTION public.demo_fn(p_id uuid)\n RETURNS uuid\n LANGUAGE plpgsql\nAS $function$\nBEGIN\n    -- an out-of-band comment, and different indentation\n    RETURN p_id;\nEND\n$function$\n";
+
+/** Genuine drift: a different body. This is DRIFT-02's shape. */
+const PROD_BODY_DRIFTED =
+  "CREATE OR REPLACE FUNCTION public.demo_fn(p_id uuid)\n RETURNS uuid\n LANGUAGE plpgsql\nAS $function$\nBEGIN\n  RETURN gen_random_uuid();\nEND\n$function$\n";
+
+function prodBodyHash(rendered: string): string {
+  const m = /AS \$function\$([\s\S]*)\$function\$/.exec(rendered);
+  if (!m) throw new Error("fixture is not shaped as expected");
+  return createHash("sha256").update(normalizeSql(m[1]), "utf8").digest("hex");
+}
+
+/** The real readers, as migration-drift-check.yml wires them. */
+const REAL_NORMALIZER = "scripts/sql-body-normalize.mjs";
+const REAL_NAIVE = "scripts/sql-function-names-naive.mjs";
+
+/** What PROD holds in the gate-level scaffolds — a function the PR does not name, so the PR's own name is measured absent. */
+const SOME_OTHER_FN =
+  "CREATE OR REPLACE FUNCTION public.some_other_fn(a int)\n" +
+  "RETURNS int LANGUAGE sql AS $$ SELECT a $$;\n";
+
+/** Substring count — the same reading as `countOf` in gate-family-meta.test.ts. */
+function occurrences(haystack: string, needle: string): number {
+  return haystack.split(needle).length - 1;
+}
+
+/**
+ * The VAC-08 self-test's arm ratchet, READ FROM THE SCRIPT BY SYMBOL.
+ *
+ * ⛔ WHY THIS EXISTS (Phase 164.8.2, B2). The IN-01 and F6 blocks below asserted
+ * on `"12 arms ran but EXPECTED_ARMS is 11"` and `"SELF-TEST FAIL: 10/11"` as
+ * literals, in three places, while the WR-03 leg in this same file already
+ * derived the constant. Adding one self-test arm therefore reddened three
+ * assertions that had no opinion about the count — the ratchet's own
+ * `EXPECTED_ARMS` line, moved in the same commit as the arm, is the only place
+ * that number is supposed to be maintained.
+ *
+ * ⚠️ `l.trim()`, NOT `^EXPECTED_ARMS=`. This phase already learned the anchored
+ * form: a `^EXPECTED_ARMS=` grep MISSES the INDENTED live occurrence, which is
+ * the only one there is. Do not re-anchor this.
+ *
+ * ⚠️ WR-03's own leg deliberately keeps its region-sliced copy of this read.
+ * That leg is what PROVES the line is single, live and inside `self_test()`, and
+ * it must not be able to inherit a laxer reader from the helper it is checking.
+ */
+function ledgerGateExpectedArms(src: string): number {
+  const lines = src.split("\n").filter((l) => /^EXPECTED_ARMS=\d+$/.test(l.trim()));
+  expect(
+    lines.length,
+    "EXPECTED_ARMS is not a single live line in the gate script — every count derived from it below would be a guess",
+  ).toBe(1);
+  const n = Number(lines[0].trim().split("=")[1]);
+  expect(n, "EXPECTED_ARMS did not read as a positive number").toBeGreaterThan(0);
+  return n;
+}
+
+/**
+ * The retry's ATTEMPT BUDGET, read out of the gate script (Phase 164.9 plan 06).
+ *
+ * ⚠️ DERIVED, NEVER RESTATED, and for a reason this repo has paid for: the
+ * `ledger_rows` and `missing` failure arms below assert how many lines of stderr
+ * the gate says it withheld, and that count is now ONE PER ATTEMPT because the
+ * seam is retried and NO attempt's channel is discarded. A literal `1` was right
+ * before the retry and would silently become a stale pin the moment the budget
+ * moves — which is exactly the `[164.7-CITATION-DRIFT-01]` class.
+ *
+ * ⛔ It matches a FIXED assignment (`LEDGER_QUERY_ATTEMPT_BUDGET=3`), not a
+ * `${VAR:-3}` default. The budget must not be overridable from a workflow's
+ * `env:` — that would disable the retry with nothing in the run saying so — and
+ * this reader would stop finding it if someone made it one.
+ */
+function ledgerGateAttemptBudget(src: string): number {
+  const lines = src
+    .split("\n")
+    .filter((l) => /^LEDGER_QUERY_ATTEMPT_BUDGET=\d+$/.test(l.trim()));
+  expect(
+    lines.length,
+    "LEDGER_QUERY_ATTEMPT_BUDGET is not a single live, non-overridable assignment line in the gate script — every attempt count derived from it below would be a guess, and an overridable budget could switch the retry off from a workflow env:",
+  ).toBe(1);
+  const n = Number(lines[0].trim().split("=")[1]);
+  expect(n, "LEDGER_QUERY_ATTEMPT_BUDGET did not read as a budget above 1").toBeGreaterThan(1);
+  return n;
+}
+
+/**
+ * The VAC-04 gate wired exactly as migration-drift-check.yml wires it, over a
+ * scratch PROD dump read by the REAL readers — with, optionally, injected
+ * left-hand readers (the C2 / C4 gate-level arms) and a committed snapshot for
+ * one name. ONE scaffold for the three gate-level describes (IN-08, 164.3.1
+ * review); each describe keeps its own fixtures, which are the load-bearing
+ * part. A fourth `BODY_*` command, or a change to the env contract, is now
+ * one edit.
+ */
+function gateScaffold(
+  dir: string,
+  opts: {
+    migrationBasename: string;
+    migrationBody: string;
+    dumpBody?: string;
+    snapshotFor?: string;
+    readers?: { normalizer: string; naive: string };
+  },
+): { env: Record<string, string>; migration: string } {
+  mkdirSync(join(dir, "snapshot"), { recursive: true });
+  const dump = join(dir, "prod-dump.sql");
+  const dumpBody = opts.dumpBody ?? SOME_OTHER_FN;
+  writeFileSync(dump, dumpBody);
+  const migration = join(dir, opts.migrationBasename);
+  writeFileSync(migration, opts.migrationBody);
+  if (opts.snapshotFor) {
+    writeFileSync(join(dir, "snapshot", `${opts.snapshotFor}.sql`), dumpBody);
+  }
+  const env: Record<string, string> = {
+    ...FAKE_CREDS,
+    BODY_FETCH_CMD: `node ${REAL_NORMALIZER} --extract-fn ${dump}`,
+    BODY_NAME_INDEX_CMD: `node ${REAL_NORMALIZER} --function-names ${dump}`,
+    BODY_NAME_INDEX_XCHECK_CMD: `node ${REAL_NAIVE} ${dump}`,
+    CHANGED_MIGRATIONS: migration,
+    SNAPSHOT_DIR: join(dir, "snapshot"),
+  };
+  if (opts.readers) {
+    env.NORMALIZER = opts.readers.normalizer;
+    env.NAIVE_NAMES = opts.readers.naive;
+  }
+  return { env, migration };
+}
+
+/** Lay out snapshot/, live/ and migrations/ and return the env for the gate. */
+function scaffoldProdCase(
+  dir: string,
+  opts: {
+    prodBody?: string;
+    migrationExtra?: string;
+    snapshot?: boolean;
+    /** Override the PROD name index. Undefined = derive it from live/. */
+    indexNames?: string[];
+    /**
+     * Override the INDEPENDENT cross-check index (SP-C05). Undefined = the
+     * same names as the primary, i.e. two readings that agree.
+     */
+    xcheckNames?: string[];
+    /** Replace the migration body outright (e.g. to use another schema). */
+    migrationBody?: string;
+  },
+): Record<string, string> {
+  mkdirSync(join(dir, "snapshot"), { recursive: true });
+  mkdirSync(join(dir, "live"), { recursive: true });
+  mkdirSync(join(dir, "migrations"), { recursive: true });
+
+  if (opts.snapshot !== false) {
+    writeFileSync(join(dir, "snapshot", "demo_fn.sql"), COMMITTED_BODY);
+  }
+  if (opts.prodBody !== undefined) {
+    writeFileSync(join(dir, "live", "demo_fn.sql"), opts.prodBody);
+  }
+  const migration = join(dir, "migrations", "20260829120000_demo.sql");
+  writeFileSync(
+    migration,
+    `${opts.migrationExtra ?? ""}\n${opts.migrationBody ?? COMMITTED_BODY}\n`,
+  );
+
+  const indexNames =
+    opts.indexNames ??
+    (opts.prodBody === undefined ? ["other_fn"] : ["demo_fn", "other_fn"]);
+
+  return {
+    ...FAKE_CREDS,
+    BODY_FETCH_CMD: `bash ${writeStubFetcher(dir)}`,
+    // Always non-empty: the gate fails closed on an empty index, and an index
+    // derived purely from live/ would be empty in the "absent from PROD" cases.
+    // `other_fn` stands for the rest of PROD's catalogue.
+    BODY_NAME_INDEX_CMD: `bash ${writeStubNameIndex(dir, indexNames)}`,
+    // SP-C05: the gate now requires a SECOND, independently derived index and
+    // unions the two. These arms stub it to agree with the primary, so they
+    // keep measuring what they were written to measure. The arms that prove
+    // the two are really different code paths are in their own describe block
+    // below, and they use the REAL CI commands rather than stubs.
+    BODY_NAME_INDEX_XCHECK_CMD: `bash ${writeStubNameIndex(dir, opts.xcheckNames ?? indexNames, "stub-index-xcheck.sh")}`,
+    CHANGED_MIGRATIONS: migration,
+    SNAPSHOT_DIR: join(dir, "snapshot"),
+  };
+}
+
+describe("VAC-04 — scripts/prod-body-drift-check.sh", () => {
+  it("RED: a missing credential exits 1 and says so — it NEVER skips and never exits 0", () => {
+    withTempDir((dir) => {
+      const env = scaffoldProdCase(dir, { prodBody: PROD_BODY_EQUIVALENT });
+      const { status, out } = run(PROD_GATE, {
+        ...env,
+        SUPABASE_DB_PASSWORD: "",
+      });
+      expect(status).toBe(1);
+      expect(out).toContain("SUPABASE_DB_PASSWORD is not configured");
+      expect(out).toContain("HARD FAILURE, not a skip");
+      // Proof it failed on the credential and not on the work: no comparison ran.
+      expect(out).not.toContain("body comparison(s)");
+    });
+  });
+
+  it("RED: the credential check runs BEFORE work detection — an unconfigured gate with nothing to do still exits 1", () => {
+    withTempDir((dir) => {
+      const env = scaffoldProdCase(dir, { prodBody: PROD_BODY_EQUIVALENT });
+      const { status } = run(PROD_GATE, {
+        ...env,
+        SUPABASE_ACCESS_TOKEN: "",
+        CHANGED_MIGRATIONS: "",
+        BASE_REF: "HEAD",
+      });
+      expect(status).toBe(1);
+    });
+  });
+
+  it("RED: an unset BODY_FETCH_CMD exits 1 — a gate that cannot read cannot pass", () => {
+    withTempDir((dir) => {
+      const env = scaffoldProdCase(dir, { prodBody: PROD_BODY_EQUIVALENT });
+      const { status, out } = run(PROD_GATE, { ...env, BODY_FETCH_CMD: "" });
+      expect(status).toBe(1);
+      expect(out).toContain("BODY_FETCH_CMD is unset");
+    });
+  });
+
+  it("RED: a body mismatch with NO acknowledgment exits 1, printing hashes and a hunk count", () => {
+    withTempDir((dir) => {
+      const env = scaffoldProdCase(dir, { prodBody: PROD_BODY_DRIFTED });
+      const { status, out } = run(PROD_GATE, env);
+      expect(status).toBe(1);
+      expect(out).toContain("PROD's live body is NOT the committed body");
+      expect(out).toMatch(/PROD\s+sha256 : [0-9a-f]{64}/);
+      expect(out).toMatch(/differing lines\s+: [1-9]/);
+    });
+  });
+
+  it("GREEN: a mismatch WITH a correct-hash acknowledgment exits 0 and warns", () => {
+    withTempDir((dir) => {
+      const ack = `-- prod-body-ack: ${prodBodyHash(PROD_BODY_DRIFTED)}`;
+      const env = scaffoldProdCase(dir, {
+        prodBody: PROD_BODY_DRIFTED,
+        migrationExtra: ack,
+      });
+      const { status, out } = run(PROD_GATE, env);
+      expect(status).toBe(0);
+      expect(out).toContain("acknowledged by a matching");
+      expect(out).toContain("1 acknowledged drift");
+    });
+  });
+
+  it("RED: an acknowledgment carrying the WRONG hash does NOT wave drift through", () => {
+    withTempDir((dir) => {
+      // The hash of the COMMITTED body, not of PROD's — the shape of an ack
+      // written without looking at what PROD actually holds.
+      const wrong = createHash("sha256")
+        .update(normalizeSql("\nBEGIN\n  RETURN p_id;\nEND\n"), "utf8")
+        .digest("hex");
+      const env = scaffoldProdCase(dir, {
+        prodBody: PROD_BODY_DRIFTED,
+        migrationExtra: `-- prod-body-ack: ${wrong}`,
+      });
+      const { status } = run(PROD_GATE, env);
+      expect(status).toBe(1);
+    });
+  });
+
+  it("GREEN: bodies differing ONLY by comments and formatting exit 0 (D-05)", () => {
+    withTempDir((dir) => {
+      const env = scaffoldProdCase(dir, { prodBody: PROD_BODY_EQUIVALENT });
+      const { status, out } = run(PROD_GATE, env);
+      expect(status).toBe(0);
+      expect(out).toContain("no unacknowledged repo-vs-PROD body drift");
+      expect(out).toContain("1 match");
+    });
+  });
+
+  it("GREEN: a function MEASURED absent from PROD's name index is a NEW function, not drift", () => {
+    withTempDir((dir) => {
+      const env = scaffoldProdCase(dir, {});
+      const { status, out } = run(PROD_GATE, env);
+      expect(status).toBe(0);
+      expect(out).toContain("measured absent");
+      // The zero is stated, not silent — it is the one case where a green run
+      // legitimately compares nothing.
+      expect(out).toContain("ZERO bodies compared");
+      expect(out).toContain("measured zero, not an unread one");
+    });
+  });
+
+  // ── WR-01 ────────────────────────────────────────────────────────────────
+  // `--extract-fn` exits 0 with EMPTY stdout for a name it cannot find, and
+  // the gate read that as "absent in PROD — a NEW function (pass)". So any
+  // regression in the extractor's name matching turned every name into a pass
+  // and the whole gate green having compared nothing.
+
+  it("RED: a name that IS in PROD's index but yields no body is an EXTRACTOR failure, not a new function", () => {
+    withTempDir((dir) => {
+      // No live/demo_fn.sql (the fetcher returns empty), but PROD's index says
+      // demo_fn exists. That combination can only mean extraction failed.
+      const env = scaffoldProdCase(dir, { indexNames: ["demo_fn", "other_fn"] });
+      const { status, out } = run(PROD_GATE, env);
+      expect(status).toBe(1);
+      expect(out).toContain("IS in the PROD source's function-name index");
+      expect(out).toContain("extraction failure, not a new");
+      expect(out).not.toContain("no unacknowledged repo-vs-PROD body drift");
+    });
+  });
+
+  it("RED: an unset BODY_NAME_INDEX_CMD exits 1 — absence must be measured, not inferred from an empty pipe", () => {
+    withTempDir((dir) => {
+      const env = scaffoldProdCase(dir, { prodBody: PROD_BODY_EQUIVALENT });
+      const { status, out } = run(PROD_GATE, {
+        ...env,
+        BODY_NAME_INDEX_CMD: "",
+      });
+      expect(status).toBe(1);
+      expect(out).toContain("BODY_NAME_INDEX_CMD is unset");
+    });
+  });
+
+  it("RED: an EMPTY PROD name index fails closed — a broken index is not a database with no functions", () => {
+    withTempDir((dir) => {
+      const env = scaffoldProdCase(dir, {
+        prodBody: PROD_BODY_EQUIVALENT,
+        indexNames: [],
+      });
+      const { status, out } = run(PROD_GATE, env);
+      expect(status).toBe(1);
+      expect(out).toContain("index came back EMPTY");
+    });
+  });
+
+  it("RED: an index command that ERRORS exits 1, and its stderr is withheld", () => {
+    withTempDir((dir) => {
+      const env = scaffoldProdCase(dir, { prodBody: PROD_BODY_EQUIVALENT });
+      const bad = join(dir, "index-boom.sh");
+      writeFileSync(
+        bad,
+        // No user:password here ON PURPOSE. The assertion pins `not.toContain("postgresql://")`,
+        // so a credential adds nothing to what is proven — but a password-shaped DSN trips the
+        // pre-push credential scanner on every push of this file (measured 2026-08-29, 2 HIGH).
+        '#!/usr/bin/env bash\necho "postgresql://host:5432/db" >&2\nexit 9\n',
+      );
+      chmodSync(bad, 0o755);
+      const { status, out } = run(PROD_GATE, {
+        ...env,
+        BODY_NAME_INDEX_CMD: `bash ${bad}`,
+      });
+      expect(status).toBe(1);
+      expect(out).toContain("could not index PROD's function names");
+      expect(out).not.toContain("postgresql://");
+    });
+  });
+
+  it("VAC04-C3 RED: a grep that ERRORS on the name index is a MEASURE_FAIL, not 'measured absent'", () => {
+    // ⛔ [VAC04-C3]. The membership test was a bare
+    //     if grep -aqxF -- "$fname" "$TMP/prod-names.txt"; then … else … fi
+    // and `grep` exits 0 on a match, 1 on NO match, and >= 2 on an ERROR
+    // (unreadable file, I/O failure, a broken locale). Exit 1 and exit 2 both
+    // fall to the SAME `else`, which prints
+    //     "measured absent — … Treated as a NEW function (pass)."
+    // So an index the gate COULD NOT READ was reported as an index it read and
+    // found nothing in — turning the one fail-CLOSED arm of this gate (WR-01's
+    // "absence is a MEASUREMENT") into a fail-OPEN one. Repeated across every
+    // name, it is the whole gate green having compared nothing.
+    //
+    // MEASURED at this plan's base 420b8fcb, this exact fixture:
+    //   "  demo_fn: measured absent — not in the PROD source's 1-name index.
+    //    Treated as a NEW function (pass)."
+    //   "::notice::…: ZERO bodies compared — all 1 function(s) … measured absent
+    //    … This is a measured zero, not an unread one."          exit 0
+    // …while the index read had failed outright.
+    //
+    // Driven with the SP-M01 idiom: a PATH-shim `grep` that delegates to the
+    // real one for everything EXCEPT this one call. Keyed on the FLAGS AND the
+    // file (`-aqxF` + `*prod-names.txt`) rather than the file alone, because
+    // `PROD_NAME_COUNT` counts the same file with `-ac` — targeting the file
+    // alone would redden the run one step earlier and prove the wrong branch.
+    withTempDir((dir) => {
+      const bin = join(dir, "bin");
+      mkdirSync(bin, { recursive: true });
+      const realGrep = spawnSync("bash", ["-c", "command -v grep"], {
+        encoding: "utf8",
+      }).stdout.trim();
+      expect(realGrep, "no real grep on PATH to delegate to").not.toBe("");
+      writeFileSync(
+        join(bin, "grep"),
+        [
+          "#!/usr/bin/env bash",
+          "flag=0; idx=0",
+          'for a in "$@"; do',
+          '  case "$a" in',
+          "    -aqxF) flag=1 ;;",
+          "    *prod-names.txt) idx=1 ;;",
+          "  esac",
+          "done",
+          '[ "$flag" = 1 ] && [ "$idx" = 1 ] && exit 2',
+          `exec ${realGrep} "$@"`,
+        ].join("\n"),
+      );
+      chmodSync(join(bin, "grep"), 0o755);
+
+      // No live/demo_fn.sql -> the fetcher returns empty; the index does not
+      // hold demo_fn -> the UNSHIMMED run takes the measured-absent pass. So
+      // the only thing that can change this run's verdict is the broken grep.
+      const env = scaffoldProdCase(dir, {});
+      const clean = run(PROD_GATE, env);
+      expect(clean.status, "the fixture must be GREEN before the grep is broken").toBe(0);
+      expect(clean.out).toContain("measured absent");
+
+      const { status, out } = run(PROD_GATE, {
+        ...env,
+        PATH: `${bin}:${process.env.PATH ?? ""}`,
+      });
+      expect(status, "an UNREADABLE index was reported as an index that measured absence").toBe(1);
+      expect(out).toContain("MEASURE_FAIL");
+      // Diagnostic-first (SC-7): it must name the file, the searched name and
+      // the exit code — a conclusion without its evidence is the thing this
+      // phase exists to stop.
+      expect(out).toContain("prod-names.txt");
+      expect(out).toContain("demo_fn");
+      expect(out).toMatch(/grep exited\s*:\s*2\b/);
+      // The fail-OPEN text must be GONE — the whole point of the branch.
+      expect(out).not.toContain("Treated as a NEW function (pass)");
+      expect(out).not.toContain("no unacknowledged repo-vs-PROD body drift");
+    });
+  });
+
+  it("VAC04-C3 CONTROL: exit 1 (genuinely not in a READABLE index) is still a measured-absent pass", () => {
+    // The other direction. A three-way branch that treats 1 like 2 fails every
+    // add-a-function PR; this arm is what stops the C3 fix from being a fix
+    // that breaks the gate's only legitimate silent pass. It is the standing
+    // arm at "GREEN: a function MEASURED absent…", restated here so the C3
+    // branching carries its own control beside it.
+    withTempDir((dir) => {
+      const env = scaffoldProdCase(dir, { indexNames: ["other_fn"] });
+      const { status, out } = run(PROD_GATE, env);
+      expect(status, out).toBe(0);
+      expect(out).toContain("Treated as a NEW function (pass)");
+      expect(out).not.toContain("MEASURE_FAIL");
+    });
+  });
+
+  it("WR-04 RED: a grep that ERRORS on the FETCHED BODY is a MEASURE_FAIL, not an empty body routed to 'measured absent'", () => {
+    // ⛔ WR-04 (164.3.1 review). The whitespace-only test on the fetched body,
+    //     if [ ! -s "$live" ] || ! grep -aqE '[^[:space:]]' "$live"; then
+    // carried the bare idiom [VAC04-C3] fixed twenty lines below it: a grep
+    // exit >= 2 was read as "empty body" and routed to the index lookup —
+    // fail-CLOSED when the name is in the index (an "extraction failure"
+    // with the wrong cause), but the measured-absent PASS when it is not,
+    // for a body this run FETCHED and then could not read.
+    //
+    // MEASURED at HEAD 89cbef8b with a `grep` shimmed to exit 2 on this call
+    // alone, live body present, name not in the index:
+    //   "  demo_fn: measured absent — not in the PROD source's 1-name index.
+    //    Treated as a NEW function (pass)."                          exit 0
+    //
+    // The live body must be NON-EMPTY: `[ ! -s "$live" ]` short-circuited
+    // before grep on an empty one, so the shim would never fire.
+    withTempDir((dir) => {
+      const env = scaffoldProdCase(dir, { prodBody: PROD_BODY_EQUIVALENT, indexNames: ["other_fn"] });
+      const clean = run(PROD_GATE, env);
+      expect(clean.status, "the fixture must be GREEN (1 match) before the grep is broken").toBe(0);
+      expect(clean.out).toContain("1 match");
+
+      const PATH = withPathShim(dir, "grep", [
+        "flag=0; hit=0",
+        'for a in "$@"; do case "$a" in -aqE) flag=1 ;; *.live.sql) hit=1 ;; esac; done',
+        '[ "$flag" = 1 ] && [ "$hit" = 1 ] && exit 2',
+      ]);
+      const { status, out } = run(PROD_GATE, { ...env, PATH });
+      expect(status, "a body the gate could not READ was reported as measured absent — the fail-open pass").toBe(1);
+      expect(out).toContain("MEASURE_FAIL");
+      expect(out).toContain("demo_fn");
+      expect(out).toContain(".live.sql");
+      expect(out).toMatch(/grep exited\s*:\s*2\b/);
+      expect(out).not.toContain("Treated as a NEW function (pass)");
+      expect(out).not.toContain("no unacknowledged repo-vs-PROD body drift");
+    });
+  });
+
+  it("RED: ZERO comparisons for any reason OTHER than measured absence is a MEASURE_FAIL", () => {
+    withTempDir((dir) => {
+      // A floor on `checked` alone would be wrong — a PR that only ADDS
+      // functions legitimately compares nothing. So the floor is: zero
+      // comparisons is acceptable ONLY when every named function was measured
+      // absent. Here the fetcher errors, so neither happened.
+      const env = scaffoldProdCase(dir, { prodBody: PROD_BODY_EQUIVALENT });
+      const boom = join(dir, "fetch-boom.sh");
+      writeFileSync(boom, "#!/usr/bin/env bash\nexit 3\n");
+      chmodSync(boom, 0o755);
+      const { status, out } = run(PROD_GATE, {
+        ...env,
+        BODY_FETCH_CMD: `bash ${boom}`,
+      });
+      expect(status).toBe(1);
+      expect(out).toContain("ZERO bodies compared, and only 0 of 1");
+      expect(out).not.toContain("no unacknowledged repo-vs-PROD body drift");
+    });
+  });
+
+  it("RED: a definition in a schema the PROD dump does not cover exits 1 instead of passing as 'new'", () => {
+    withTempDir((dir) => {
+      // The dump is taken with `--schema public`. `private.hidden_fn` is absent
+      // from it whatever PROD holds, so "absent = new = pass" would be a pass
+      // for something never looked at.
+      const env = scaffoldProdCase(dir, {
+        migrationBody:
+          "CREATE OR REPLACE FUNCTION private.hidden_fn(p_id UUID)\nRETURNS UUID\nLANGUAGE plpgsql\nAS $$\nBEGIN\n  RETURN p_id;\nEND\n$$;",
+        indexNames: ["other_fn"],
+      });
+      const { status, out } = run(PROD_GATE, env);
+      expect(status).toBe(1);
+      expect(out).toContain("private.hidden_fn");
+      expect(out).toContain("covers only schema(s): public");
+    });
+  });
+
+  it("GREEN: an UNQUALIFIED definition is accepted — it resolves through search_path into the dumped schema", () => {
+    withTempDir((dir) => {
+      // 56 of the repo's own definitions are unqualified (measured
+      // 2026-08-29), so refusing them would break every real PR.
+      const env = scaffoldProdCase(dir, {
+        migrationBody:
+          "CREATE OR REPLACE FUNCTION demo_fn(p_id UUID)\nRETURNS UUID\nLANGUAGE plpgsql\nAS $$\nBEGIN\n  RETURN p_id;\nEND\n$$;",
+        prodBody: PROD_BODY_EQUIVALENT,
+      });
+      const { status, out } = run(PROD_GATE, env);
+      expect(status).toBe(0);
+      expect(out).toContain("1 match");
+    });
+  });
+
+  it("RED: PROD has the function but the committed snapshot does not — stale snapshot, fail loud", () => {
+    withTempDir((dir) => {
+      const env = scaffoldProdCase(dir, {
+        prodBody: PROD_BODY_EQUIVALENT,
+        snapshot: false,
+      });
+      const { status, out } = run(PROD_GATE, env);
+      expect(status).toBe(1);
+      expect(out).toContain("The snapshot is STALE");
+    });
+  });
+
+  it("RED: a fetcher that ERRORS exits 1, and its stderr is withheld from the public log", () => {
+    withTempDir((dir) => {
+      const env = scaffoldProdCase(dir, { prodBody: PROD_BODY_EQUIVALENT });
+      const bad = join(dir, "boom.sh");
+      writeFileSync(
+        bad,
+        // Host-only DSN, same reason as above.
+        '#!/usr/bin/env bash\necho "postgresql://host:5432/db" >&2\nexit 7\n',
+      );
+      chmodSync(bad, 0o755);
+      const { status, out } = run(PROD_GATE, {
+        ...env,
+        BODY_FETCH_CMD: `bash ${bad}`,
+      });
+      expect(status).toBe(1);
+      expect(out).toContain("stderr withheld");
+      expect(out).not.toContain("postgresql://");
+    });
+  });
+
+  it("R2-W03 RED: a name whose every comparator row is ADVISORY is short in the disposition sum, even beside a name that compared cleanly", () => {
+    // ⛔ This is the case the old `accounted != NAME_COUNT` floor could not
+    // see. That counter was incremented once on every path through the loop,
+    // so it was guaranteed by the loop's structure and could only be reddened
+    // by deleting one of its own increments — which is not a proof.
+    //
+    // The adversarial input, built from OUTSIDE: a fetcher that returns
+    // NON-EMPTY text carrying no extractable definition for one of two names.
+    // That is what a psql notice, a stray comment or an error printed on
+    // stdout looks like. It survives the empty-body check; the comparator
+    // emits a single SNAPSHOT_ONLY row, so `rows` is 1 and the zero-rows guard
+    // stays quiet; SNAPSHOT_ONLY increments nothing. The SECOND name is what
+    // makes it silent — it compares normally, so `checked` is non-zero and the
+    // `checked -eq 0` branch stays quiet too.
+    //
+    // MEASURED before the fix, this exact fixture:
+    //   "1 body comparison(s) … 0 measured-absent" for 2 named functions
+    //   "::notice:: no unacknowledged repo-vs-PROD body drift"      exit 0
+    // …while `ghost_fn`, which PROD's index says EXISTS, was compared against
+    // nothing at all.
+    withTempDir((dir) => {
+      mkdirSync(join(dir, "snapshot"), { recursive: true });
+      mkdirSync(join(dir, "live"), { recursive: true });
+      mkdirSync(join(dir, "migrations"), { recursive: true });
+
+      const bodyFor = (n: string) => COMMITTED_BODY.replace("demo_fn", n);
+      writeFileSync(join(dir, "snapshot", "good_fn.sql"), bodyFor("good_fn"));
+      writeFileSync(join(dir, "snapshot", "ghost_fn.sql"), bodyFor("ghost_fn"));
+      writeFileSync(join(dir, "live", "good_fn.sql"), bodyFor("good_fn"));
+      writeFileSync(join(dir, "live", "ghost_fn.sql"), "-- no rows returned for ghost_fn\n");
+
+      const migration = join(dir, "migrations", "20260829120000_demo.sql");
+      writeFileSync(migration, `${bodyFor("good_fn")}\n\n${bodyFor("ghost_fn")}\n`);
+
+      const { status, out } = run(PROD_GATE, {
+        ...FAKE_CREDS,
+        BODY_FETCH_CMD: `bash ${writeStubFetcher(dir)}`,
+        BODY_NAME_INDEX_CMD: `bash ${writeStubNameIndex(dir, ["good_fn", "ghost_fn", "other_fn"])}`,
+        BODY_NAME_INDEX_XCHECK_CMD: `bash ${writeStubNameIndex(dir, ["good_fn", "ghost_fn", "other_fn"], "stub-index-xcheck.sh")}`,
+        CHANGED_MIGRATIONS: migration,
+        SNAPSHOT_DIR: join(dir, "snapshot"),
+      });
+
+      expect(status, "the gate reported a pass for a function it compared against nothing").toBe(1);
+      expect(out).toContain("the dispositions sum to 1");
+      expect(out).toContain("1 compared / 0 measured-absent / 0 failed");
+      expect(out).not.toContain("no unacknowledged repo-vs-PROD body drift");
+    });
+  });
+
+  it("R2-W03 GREEN: the disposition sum closes for each of the three real dispositions", () => {
+    // The other direction. A floor that fires on everything is as useless as
+    // one that fires on nothing, and this one is subtractive — it must not go
+    // red on the states the gate is supposed to accept. One case per tally.
+    withTempDir((dir) => {
+      // compared
+      const env = scaffoldProdCase(dir, { prodBody: PROD_BODY_EQUIVALENT });
+      const a = run(PROD_GATE, env);
+      expect(a.status, a.out).toBe(0);
+      expect(a.out).not.toContain("dispositions sum to");
+    });
+    withTempDir((dir) => {
+      // measured-absent: the name is not in PROD's index at all
+      const env = scaffoldProdCase(dir, { indexNames: ["other_fn"] });
+      const b = run(PROD_GATE, env);
+      expect(b.status, b.out).toBe(0);
+      expect(b.out).toContain("measured absent");
+      expect(b.out).not.toContain("dispositions sum to");
+    });
+    withTempDir((dir) => {
+      // failed: the fetcher errors. Exit 1, but on the READ failure, never on
+      // an accounting complaint — the sum still closes.
+      const env = scaffoldProdCase(dir, { prodBody: PROD_BODY_EQUIVALENT });
+      const boom = join(dir, "fetch-boom.sh");
+      writeFileSync(boom, "#!/usr/bin/env bash\nexit 3\n");
+      chmodSync(boom, 0o755);
+      const c = run(PROD_GATE, { ...env, BODY_FETCH_CMD: `bash ${boom}` });
+      expect(c.status).toBe(1);
+      expect(c.out).toContain("the PROD body fetcher failed");
+      expect(c.out, "the fetch failure must not ALSO read as an unaccounted name").not.toContain(
+        "dispositions sum to",
+      );
+    });
+  });
+
+  it("REDACTION: a successful run prints no body text (public repo, T-164.3-04)", () => {
+    withTempDir((dir) => {
+      const env = scaffoldProdCase(dir, { prodBody: PROD_BODY_EQUIVALENT });
+      const { out } = run(PROD_GATE, env);
+      expect(out).not.toContain("gen_random_uuid");
+      expect(out).not.toContain("RETURN p_id");
+      expect(out).not.toContain("out-of-band comment");
+    });
+  });
+});
+
+// ── SP-C05 ───────────────────────────────────────────────────────────────────
+//
+// ⛔ THE DEFECT, AND WHY THE ARMS ABOVE COULD NOT SEE IT.
+//
+// VAC-04's one silent pass is "measured absent from PROD's index — a NEW
+// function". `prod-body-drift-check.sh` claims in prose that the index makes
+// that absence "a MEASUREMENT". It did not: the index (`--function-names`) and
+// the body fetcher (`--extract-fn`) were the SAME function
+// (`extractFunctionDefs`) over the SAME dump, and that function silently
+// `continue`s past any definition it cannot parse. A dropped definition was
+// therefore missing from BOTH, the two agreed BY CONSTRUCTION, and the gate
+// reported a pass.
+//
+// The arms above could not detect that, because every one of them stubs the
+// index with a shell script — proving the helper, never the wiring. So these
+// arms drive the REAL commands the workflow pastes, over a REAL file, with the
+// measured input.
+describe("SP-C05 — 'absent from PROD' must be measured by an instrument that did not produce the absence", () => {
+  /** The measured SP-C05 input: a `$` in the identifier is enough. */
+  const DOLLAR_FN =
+    "CREATE OR REPLACE FUNCTION public.sanitize_user$v2(p uuid)\n" +
+    "RETURNS void\nLANGUAGE plpgsql\nAS $fn$\nBEGIN\n" +
+    "  DELETE FROM audit_log WHERE user_id = p;\nEND;\n$fn$;\n";
+
+  /** An ordinary function, so no fixture below is a one-definition special case. */
+  const PLAIN_FN =
+    "CREATE OR REPLACE FUNCTION public.some_other_fn(a int)\n" +
+    "RETURNS int LANGUAGE sql AS $$ SELECT a $$;\n";
+
+  const NORMALIZER = "scripts/sql-body-normalize.mjs";
+  const NAIVE = "scripts/sql-function-names-naive.mjs";
+
+  /**
+   * The gate wired EXACTLY as `.github/workflows/migration-drift-check.yml`
+   * wires it — real normalizer, real independent reader, one dump file.
+   */
+  function realWiring(dumpPath: string) {
+    return {
+      BODY_FETCH_CMD: `node ${NORMALIZER} --extract-fn ${dumpPath}`,
+      BODY_NAME_INDEX_CMD: `node ${NORMALIZER} --function-names ${dumpPath}`,
+      BODY_NAME_INDEX_XCHECK_CMD: `node ${NAIVE} ${dumpPath}`,
+    };
+  }
+
+  function scaffold(dir: string, dumpBody: string) {
+    mkdirSync(join(dir, "snapshot"), { recursive: true });
+    const dump = join(dir, "prod-dump.sql");
+    writeFileSync(dump, dumpBody);
+    const migration = join(dir, "20260829120000_dollar.sql");
+    writeFileSync(migration, DOLLAR_FN);
+    return {
+      ...FAKE_CREDS,
+      ...realWiring(dump),
+      CHANGED_MIGRATIONS: migration,
+      SNAPSHOT_DIR: join(dir, "snapshot"),
+    };
+  }
+
+  // ── The independence itself, measured from the two real programs ──────────
+  // If this arm ever reports agreement, every arm below it becomes vacuous:
+  // two readings that see the same thing cannot cross-check each other. It is
+  // deliberately the FIRST arm.
+  it("the two readings genuinely DISAGREE on the measured input — otherwise nothing below proves anything", () => {
+    withTempDir((dir) => {
+      const f = join(dir, "in.sql");
+      writeFileSync(f, DOLLAR_FN);
+      const lexer = spawnSync("node", [NORMALIZER, "--function-names", f], {
+        encoding: "utf8",
+      });
+      const naive = spawnSync("node", [NAIVE, f], { encoding: "utf8" });
+      expect(lexer.status, "the normalizer must EXIT 0 — it drops the definition silently, which is the whole problem").toBe(0);
+      expect(naive.status).toBe(0);
+      expect(
+        lexer.stdout.trim(),
+        "the lexer-based reading is expected to see NOTHING here (readQualifiedName stops at the `$`)",
+      ).toBe("");
+      expect(
+        naive.stdout.trim(),
+        "the independent reading MUST see the definition, or it cannot contradict the first",
+      ).toBe("sanitize_user$v2");
+    });
+  });
+
+  it("the independent reader DEPENDS on nothing but node builtins — 'independent' is a claim about the code, so it is read off the code", () => {
+    // ⚠️ A raw `not.toContain("sql-body-normalize")` over the file would be
+    // WRONG here, and measurably so: the file names the normalizer a dozen
+    // times, in its header and in its own self-test messages, because saying
+    // WHICH reading it exists to contradict is the point. So the subject is the
+    // set of MODULE SPECIFIERS, static and dynamic — which is what "shares no
+    // implementation" is actually a statement about.
+    const specifiers = (src: string) => [
+      ...[...src.matchAll(/^import\s[\s\S]*?from\s+"([^"]+)"/gm)].map((m) => m[1]),
+      ...[...src.matchAll(/\bimport\s*\(\s*["']([^"']+)["']/g)].map((m) => m[1]),
+      ...[...src.matchAll(/\brequire\s*\(\s*["']([^"']+)["']/g)].map((m) => m[1]),
+    ];
+
+    // Calibration — the extractor is driven against a source that DOES depend
+    // on the normalizer, all three ways, so a broken extractor cannot report
+    // "no dependencies" for the real file below.
+    const planted = specifiers(
+      'import { extractFunctionDefs } from "./sql-body-normalize.mjs";\n' +
+        'const a = await import("./sql-body-normalize.mjs");\n' +
+        'const b = require("./sql-body-normalize.mjs");\n',
+    );
+    expect(planted.filter((s) => s === "./sql-body-normalize.mjs")).toHaveLength(3);
+
+    const found = specifiers(readFileSync(NAIVE, "utf8"));
+    expect(found.length, "a file with NO dependencies at all would make the next assertion vacuous").toBeGreaterThan(0);
+    expect(found.every((s) => s.startsWith("node:")), `unexpected dependency: ${found.join(", ")}`).toBe(true);
+  });
+
+  // ── The end-to-end defect, RED before and GREEN after ─────────────────────
+
+  it("RED: a definition the normalizer cannot parse but PROD HOLDS now exits 1 — it used to be 'nothing to compare', exit 0", () => {
+    withTempDir((dir) => {
+      const env = scaffold(dir, PLAIN_FN + DOLLAR_FN);
+      const { status, out } = run(PROD_GATE, env);
+      expect(status, "PROD holds a body this gate cannot extract; that is a failure to measure, never a pass").toBe(1);
+      expect(out).toContain("IS in the PROD source's function-name index");
+      expect(out).toContain("extraction failure, not a new");
+      // The old silent line must NOT appear: that string is what exit 0 said.
+      expect(out).not.toContain("define no functions — nothing to compare");
+      expect(out).not.toContain("no unacknowledged repo-vs-PROD body drift");
+    });
+  });
+
+  it("the same input is still classified honestly when PROD does NOT hold it: measured absent, and the disagreement is REPORTED", () => {
+    withTempDir((dir) => {
+      const env = scaffold(dir, PLAIN_FN);
+      const { status, out } = run(PROD_GATE, env);
+      expect(status).toBe(0);
+      // It reached a disposition instead of the "no functions" early exit.
+      expect(out).toContain("Functions defined or replaced by this PR: 1");
+      expect(out).toContain("sanitize_user$v2: measured absent");
+      expect(out).toContain("ZERO bodies compared");
+      // A name only one reading can see is surfaced, never swallowed.
+      expect(out).toContain(
+        "the independent name reader found function definition(s) the normalizer's parser did not",
+      );
+    });
+  });
+
+  it("RED: an unset BODY_NAME_INDEX_XCHECK_CMD exits 1 — one index is the instrument measuring itself", () => {
+    withTempDir((dir) => {
+      const env = scaffold(dir, PLAIN_FN + DOLLAR_FN);
+      const { status, out } = run(PROD_GATE, {
+        ...env,
+        BODY_NAME_INDEX_XCHECK_CMD: "",
+      });
+      expect(status).toBe(1);
+      expect(out).toContain("BODY_NAME_INDEX_XCHECK_CMD is unset");
+    });
+  });
+
+  it("RED: an EMPTY cross-check index exits 1 — a cross-check that finds nothing cannot contradict anything", () => {
+    withTempDir((dir) => {
+      const env = scaffold(dir, PLAIN_FN + DOLLAR_FN);
+      const empty = join(dir, "empty.sh");
+      writeFileSync(empty, "#!/usr/bin/env bash\nexit 0\n");
+      chmodSync(empty, 0o755);
+      const { status, out } = run(PROD_GATE, {
+        ...env,
+        BODY_NAME_INDEX_XCHECK_CMD: `bash ${empty}`,
+      });
+      expect(status).toBe(1);
+      expect(out).toContain("cross-check index of PROD's function names came back EMPTY");
+    });
+  });
+
+  it("RED: pointing the two READINGS at the same program exits 1 — two invocations are not two derivations", () => {
+    withTempDir((dir) => {
+      const env = scaffold(dir, PLAIN_FN + DOLLAR_FN);
+      const { status, out } = run(PROD_GATE, {
+        ...env,
+        NAIVE_NAMES: NORMALIZER,
+      });
+      expect(status).toBe(1);
+      expect(out).toContain("resolve to the SAME file");
+    });
+  });
+
+  // ── Non-vacuity: the union must refuse nothing that exists ────────────────
+
+  it("the two readings agree on the ENTIRE real corpus, so the union widens nothing today", async () => {
+    const { extractFunctionDefs } = await import(
+      "../../scripts/sql-body-normalize.mjs"
+    );
+    const { naiveFunctionDefs } = await import(
+      "../../scripts/sql-function-names-naive.mjs"
+    );
+    const files: string[] = [];
+    for (const d of ["supabase/migrations", "supabase/schema/functions"]) {
+      for (const f of readdirSync(d)) if (f.endsWith(".sql")) files.push(`${d}/${f}`);
+    }
+    expect(files.length, "an empty corpus would make this arm unfailable").toBeGreaterThan(200);
+    let definitions = 0;
+    const disagreements: string[] = [];
+    for (const f of files) {
+      const sql = readFileSync(f, "utf8");
+      const a = new Set(extractFunctionDefs(sql).map((d: { name: string }) => d.name));
+      const b = new Set(naiveFunctionDefs(sql).map((d: { name: string }) => d.name));
+      definitions += a.size;
+      for (const n of a) if (!b.has(n)) disagreements.push(`${f}: lexer-only ${n}`);
+      for (const n of b) if (!a.has(n)) disagreements.push(`${f}: naive-only ${n}`);
+    }
+    expect(definitions, "zero definitions would make the comparison trivially equal").toBeGreaterThan(100);
+    expect(disagreements).toEqual([]);
+  });
+
+  // ── The WIRING, not the helper — SP-C05's own complaint about the old test ─
+
+  it("the workflow wires the cross-check to a DIFFERENT script from the fetcher and the primary index", () => {
+    const yml = readFileSync(
+      ".github/workflows/migration-drift-check.yml",
+      "utf8",
+    );
+    const grab = (name: string) => {
+      const m = new RegExp(`export ${name}="([^"]+)"`).exec(yml);
+      expect(m, `${name} must be exported by the workflow`).not.toBeNull();
+      return (m as RegExpExecArray)[1];
+    };
+    const fetch = grab("BODY_FETCH_CMD");
+    const primary = grab("BODY_NAME_INDEX_CMD");
+    const xcheck = grab("BODY_NAME_INDEX_XCHECK_CMD");
+    // The old wiring's exact shape: fetcher and index naming one script.
+    expect(fetch).toContain("sql-body-normalize.mjs");
+    expect(primary).toContain("sql-body-normalize.mjs");
+    expect(
+      xcheck,
+      "the cross-check must not be the program whose blindness it exists to detect",
+    ).not.toContain("sql-body-normalize.mjs");
+    expect(xcheck).toContain("sql-function-names-naive.mjs");
+    // All three read the SAME dump — the disagreement must be about the
+    // READING, never about looking at two different things.
+    // ⛔ WR-07: `lastIndexOf(" ")` on a command that lost its arguments returns
+    // -1 and `slice(0)` hands back the WHOLE command, so two single-token
+    // commands would "agree about their dump" while naming no dump at all.
+    const dumpOf = (cmd: string) => cmd.slice(lastAnchorIndex(cmd, " ") + 1);
+    expect(dumpOf(xcheck)).toBe(dumpOf(primary));
+    expect(dumpOf(fetch)).toBe(dumpOf(primary));
+    // An edit to the new reader must re-run the gate that depends on it.
+    expect(yml).toContain("- 'scripts/sql-function-names-naive.mjs'");
+  });
+
+  it("WR-04: gate (b)'s SUBJECT re-runs gate (b) — baseline.sql is in migration-drift-check.yml's paths", () => {
+    // The gate's own failure text names regenerating `supabase/schema/
+    // baseline.sql` as the remedy for a red run. Without this path entry the
+    // regeneration PR is the ONE PR that does not re-run the gate that demanded
+    // it, and the operator learns whether the remedy worked from someone else's
+    // later migration PR, off a state stale again by then. MEASURED absent
+    // 2026-09-08.
+    const yml = readFileSync(
+      ".github/workflows/migration-drift-check.yml",
+      "utf8",
+    );
+    // ⛔ [WR-B, iteration 2] LINE-EXACT, matching the WR-03 pin twelve lines
+    // below. MEASURED 2026-09-08: a whole-file `toContain` left the suite at
+    // 405/405 with the entry COMMENTED OUT, while WR-03's `l.trim() === …`
+    // went RED under the identical mutation.
+    const hits = yml
+      .split("\n")
+      .filter((l) => l.trim() === "- 'supabase/schema/baseline.sql'");
+    expect(
+      hits.length,
+      "the entry must be a LIVE paths entry, not commented-out text — a commented entry does not trigger the workflow",
+    ).toBe(1);
+  });
+
+  it("WR-03: gate (a)'s normalizer dependency re-runs gate (a) — both trigger lists name it", () => {
+    // `scripts/dump-sql-functions.ts` imports `extractFunctionDefs` from
+    // `scripts/sql-body-normalize.mjs`, and BOTH of gate (a)'s name sets
+    // (baseline and migration-replay) are derived through it — so an edit there
+    // changes the gate's verdict. It was in NEITHER trigger list until
+    // 2026-09-08. Both lists are asserted: `pull_request` alone leaves the
+    // main-push arm blind.
+    const dumper = readFileSync("scripts/dump-sql-functions.ts", "utf8");
+    expect(
+      dumper,
+      "if the dumper stops importing the normalizer this pin is stale, not passing",
+    ).toContain('from "./sql-body-normalize.mjs"');
+    const yml = readFileSync(
+      ".github/workflows/sql-function-snapshot.yml",
+      "utf8",
+    );
+    const hits = yml.split("\n").filter((l) =>
+      l.trim() === "- 'scripts/sql-body-normalize.mjs'",
+    );
+    expect(
+      hits.length,
+      "the entry must appear in BOTH the pull_request and the push paths list",
+    ).toBe(2);
+  });
+
+  it("SP-C06: a FAILING `git diff` is a MEASURE_FAIL, not 'no migration files changed'", () => {
+    // ⛔ The line read `git diff … > changed.txt || true`, which converted
+    // "could not list the changed files" into "the list is empty" and then into
+    // the HONEST-EXIT-0 branch — whose own comment asserts that "could not
+    // measure" never reaches it. `set -e` would have caught it; the `|| true`
+    // is what defeated `set -e`.
+    //
+    // Driven with a stub `git` that RESOLVES the merge base and then FAILS the
+    // diff, which is the exact state the branch could not distinguish (a bad
+    // object, a shallow object database, a pathspec error).
+    withTempDir((dir) => {
+      const bin = join(dir, "bin");
+      mkdirSync(bin, { recursive: true });
+      const realGit = spawnSync("bash", ["-c", "command -v git"], {
+        encoding: "utf8",
+      }).stdout.trim();
+      expect(realGit, "no real git on PATH to delegate to").not.toBe("");
+      writeFileSync(
+        join(bin, "git"),
+        [
+          "#!/usr/bin/env bash",
+          'case "$1" in',
+          "  merge-base) echo 0000000000000000000000000000000000000000; exit 0;;",
+          '  diff) echo "fatal: bad object" >&2; exit 128;;',
+          `  *) exec ${realGit} "$@";;`,
+          "esac",
+        ].join("\n"),
+      );
+      chmodSync(join(bin, "git"), 0o755);
+
+      const env = scaffold(dir, PLAIN_FN);
+      const { status, out } = run(PROD_GATE, {
+        ...env,
+        // Force the derive-from-git branch.
+        CHANGED_MIGRATIONS: "",
+        PATH: `${bin}:${process.env.PATH ?? ""}`,
+      });
+      expect(status, "an unreadable file list was read as an empty one").toBe(1);
+      expect(out).toContain("could not enumerate this PR's migration changes");
+      expect(out).not.toContain("changes no migration files");
+      expect(out).not.toContain("no unacknowledged repo-vs-PROD body drift");
+    });
+  });
+
+  it("SP-I07: a function name that is not a safe path component is REFUSED, not written to disk", () => {
+    // ⛔ `live="$TMP/${fname}.live.sql"` and `snapshot="${SNAPSHOT_DIR}/${fname}.sql"`
+    // make the function name a path component, and it comes from a reader that
+    // accepts a quoted, schema-qualified identifier. `public."../../x"` is a
+    // traversal write. Hardening rather than an open hole — it needs a
+    // maintainer-authored migration — but a gate whose failure mode is "wrote
+    // outside its scratch directory" cannot be the thing that guards PROD.
+    withTempDir((dir) => {
+      mkdirSync(join(dir, "snapshot"), { recursive: true });
+      const dump = join(dir, "prod-dump.sql");
+      writeFileSync(dump, PLAIN_FN);
+      const migration = join(dir, "20260829120000_traversal.sql");
+      writeFileSync(
+        migration,
+        'CREATE OR REPLACE FUNCTION public."../../pwned"(a int)\nRETURNS int LANGUAGE sql AS $$ SELECT a $$;\n',
+      );
+      // Calibration: the readers really do surface that name, so the refusal
+      // below is refusing something that reached the loop.
+      const seen = spawnSync("node", [NAIVE, migration], { encoding: "utf8" });
+      expect(seen.stdout.trim()).toBe("../../pwned");
+
+      const { status, out } = run(PROD_GATE, {
+        ...FAKE_CREDS,
+        ...realWiring(dump),
+        CHANGED_MIGRATIONS: migration,
+        SNAPSHOT_DIR: join(dir, "snapshot"),
+      });
+      expect(status).toBe(1);
+      expect(out).toContain("refuses to use as a filename component");
+      // Nothing was written outside the scratch dir under either name.
+      expect(existsSync(join(dir, "pwned.live.sql"))).toBe(false);
+      expect(existsSync(join(dir, "snapshot", "../../pwned.sql"))).toBe(false);
+    });
+  });
+
+  it("SP-I07 the other direction: a `$` is LEGAL in an identifier and must NOT be refused", () => {
+    // A guard that refuses everything is as useless as one that refuses
+    // nothing — and `$` is exactly the character SP-C05's measured case turns
+    // on, so refusing it would make this gate fail on the wrong thing.
+    withTempDir((dir) => {
+      const env = scaffold(dir, PLAIN_FN);
+      const { status, out } = run(PROD_GATE, env);
+      expect(status).toBe(0);
+      expect(out).not.toContain("refuses to use as a filename component");
+      expect(out).toContain("sanitize_user$v2: measured absent");
+    });
+  });
+
+  it("the independent reader's own self-test passes and is non-empty", () => {
+    const r = spawnSync("node", [NAIVE, "--self-test"], { encoding: "utf8" });
+    expect(r.status).toBe(0);
+    const m = /self-test OK \((\d+) checks\)/.exec(r.stdout);
+    expect(m, "the self-test must SAY how many checks it ran").not.toBeNull();
+    expect(Number((m as RegExpExecArray)[1])).toBeGreaterThan(5);
+  });
+});
+
+// ── [VAC04-C1] ───────────────────────────────────────────────────────────────
+//
+// ⛔ THE DEFECT. SP-C05 above proves the two readings are independent. This
+// block is about what happens when they are independent AND BOTH BLIND — because
+// independence is not coverage. `prod-body-drift-check.sh`'s zero path read
+//
+//     "this PR's migrations define no functions — nothing to compare.
+//      (Two independent readings agree; see SP-C05.)"          exit 0
+//
+// and "two independent readings agree" was doing work it cannot do. Agreement
+// between two instruments whose blind spots OVERLAP is not evidence of absence;
+// it is one absence observed twice. MEASURED 2026-09-01 on the P8 composing
+// shape (RESEARCH § Pattern 3) — a mid-line `$`-identifier definition — both
+// readers print NOTHING and exit 0, so the gate reported success having compared
+// nothing at all, over PRODUCTION function bodies. That is Primitive C's
+// canonical case: a VERDICT not bounded by what was MEASURED.
+//
+// ── THE REOPEN PIN (amended D-08, 2026-09-01) ────────────────────────────────
+// The blast-radius decision that would have deferred the fail-closed flip to
+// Phase 164.4 was REVERSED the same day (CONTEXT.md § Amendment 2026-09-01,
+// D-07), so there is no future flip left to guarantee and the superseded
+// FILES_FLOOR flip-coupling design is retired. The arms below are a STANDING
+// REGRESSION PIN on the CLOSED state instead, failing in two independent ways:
+//
+//   (a) BY EXECUTION — the refusal arm drives the real gate on the real
+//       composing fixture and requires a NON-ZERO exit. Reverting the branch to
+//       `exit 0` flips that assertion.
+//   (b) BY NAME — the marker arm reads the gate's own bytes (node:fs, never
+//       shell grep: this repo carries a measured NUL-blind file) and requires
+//       the `VAC04-ZERO-PATH-FAILS-CLOSED` token. Deleting or rerouting the
+//       branch fails here even if some other path happens to exit non-zero.
+//
+// ⛔ ORDERING, carried here as well as in the gate script so it is not lost:
+// migration PRs are HELD until Phase 164.3.1 AND Phase 164.4 have both landed.
+// A block at this refusal is the gate WORKING — route the ordering, never the
+// gate.
+describe("[VAC04-C1] — the zero path FAILS CLOSED: both readers' evidence, THEN a refusal", () => {
+  /**
+   * P8's composing shape (RESEARCH § Pattern 3, MEASURED-TRUE). One line, two
+   * statements: the line-anchored reader never starts because the line does not
+   * BEGIN with `CREATE`, and the lexer's `readQualifiedName` stops at the `$`
+   * (SP-C05's measured limitation). Neither reading can see it.
+   */
+  const COMPOSING_FN =
+    "SELECT 1; CREATE OR REPLACE FUNCTION public.fn$v2(p uuid) RETURNS void " +
+    "LANGUAGE plpgsql AS $fn$ BEGIN NULL; END; $fn$;\n";
+
+  /** A definition BOTH readers see — the control's only difference from the above. */
+  const VISIBLE_FN =
+    "CREATE OR REPLACE FUNCTION public.some_other_fn(a int)\n" +
+    "RETURNS int LANGUAGE sql AS $$ SELECT a $$;\n";
+
+  const NORMALIZER = "scripts/sql-body-normalize.mjs";
+  const NAIVE = "scripts/sql-function-names-naive.mjs";
+
+  /** The gate wired exactly as `migration-drift-check.yml` wires it (`gateScaffold`, IN-08). */
+  function scaffold(
+    dir: string,
+    migrationBody: string,
+    opts: { dumpBody?: string; snapshotFor?: string } = {},
+  ): Record<string, string> {
+    return gateScaffold(dir, {
+      migrationBasename: "20260901120000_zero_path.sql",
+      migrationBody,
+      dumpBody: opts.dumpBody ?? VISIBLE_FN,
+      snapshotFor: opts.snapshotFor,
+    }).env;
+  }
+
+  // ── Calibration. Deliberately FIRST: if either reader can see the fixture,
+  // the refusal arm below is exercising an ordinary empty-input path and proves
+  // nothing about COMPOSING blindness. The fixture has to be the real thing.
+  it("CALIBRATION: the composing fixture is invisible to BOTH readers — and the control is visible to both", () => {
+    withTempDir((dir) => {
+      const blind = join(dir, "composing.sql");
+      writeFileSync(blind, COMPOSING_FN);
+      const seen = join(dir, "visible.sql");
+      writeFileSync(seen, VISIBLE_FN);
+
+      const blindLexer = spawnSync("node", [NORMALIZER, "--function-names", blind], {
+        encoding: "utf8",
+      });
+      const blindNaive = spawnSync("node", [NAIVE, blind], { encoding: "utf8" });
+      expect(blindLexer.status, "the lexer must EXIT 0 — dropping the definition silently is the defect").toBe(0);
+      expect(blindNaive.status).toBe(0);
+      expect(blindLexer.stdout.trim(), "the lexer reading must see NOTHING here").toBe("");
+      expect(blindNaive.stdout.trim(), "the line-anchored reading must see NOTHING here").toBe("");
+
+      // Without this half, "both saw nothing" could equally mean "both readers
+      // are broken", and the arm would pass for the wrong reason.
+      const seenLexer = spawnSync("node", [NORMALIZER, "--function-names", seen], {
+        encoding: "utf8",
+      });
+      const seenNaive = spawnSync("node", [NAIVE, seen], { encoding: "utf8" });
+      expect(seenLexer.stdout.trim()).toBe("some_other_fn");
+      expect(seenNaive.stdout.trim()).toBe("some_other_fn");
+    });
+  });
+
+  // ── (a) The reopen pin's EXECUTION direction ───────────────────────────────
+  it("REOPEN PIN: the composing zero path prints BOTH readers' evidence and then EXITS NON-ZERO", () => {
+    // MEASURED at this task's base bab02576, this exact fixture, before the fix:
+    //   "Migrations changed by this PR: 1"
+    //   "::notice::VAC-04 repo-vs-PROD function-body drift gate: this PR's
+    //    migrations define no functions — nothing to compare. (Two independent
+    //    readings agree; see SP-C05.)"                                  exit 0
+    // One line of conclusion, zero lines of evidence, for a run that compared
+    // nothing over PRODUCTION function bodies.
+    withTempDir((dir) => {
+      const env = scaffold(dir, COMPOSING_FN);
+      const { status, out } = run(PROD_GATE, env);
+
+      expect(
+        status,
+        "the gate exited 0 having compared NOTHING — the zero path has been reopened",
+      ).not.toBe(0);
+
+      // Evidence BEFORE the conclusion (D-12 / SC-7): a gate must never ship a
+      // bare verdict. The changed-file list and BOTH readers' outputs.
+      expect(out).toContain("20260901120000_zero_path.sql");
+      expect(out).toContain(NORMALIZER);
+      expect(out).toContain(NAIVE);
+      expect(out, "the evidence must state that BOTH readings returned zero names").toMatch(
+        /0 name\(s\)[\s\S]*0 name\(s\)/,
+      );
+      expect(out).toContain("MEASURE_FAIL");
+      // The reasoning, not just the refusal.
+      expect(out).toContain("blind spots");
+      // The ordering constraint must be readable AT the point of refusal.
+      expect(out).toContain("164.4");
+      // The old fail-open conclusion must be GONE — these two strings ARE what
+      // the exit-0 branch printed, quoted from bab02576. Pinned as the exact
+      // sentences rather than a loose phrase: the refusal's own prose argues
+      // ABOUT reader agreement, so a substring like "readings agree" would
+      // match the fix and make this assertion unfailable.
+      expect(out).not.toContain("define no functions — nothing to compare");
+      expect(out).not.toContain("(Two independent readings agree; see SP-C05.)");
+      expect(out).not.toContain("no unacknowledged repo-vs-PROD body drift");
+    });
+  });
+
+  // ── The PASSING CONTROL. Load-bearing: a gate that refuses EVERYTHING also
+  // passes its own refusal arm, so the refusal proves nothing without this.
+  it("CONTROL: a legitimate non-empty comparison still reaches its normal verdict", () => {
+    withTempDir((dir) => {
+      // Identical wiring; the ONLY difference from the arm above is that the
+      // migration's definition is one both readers can see.
+      const env = scaffold(dir, VISIBLE_FN, { snapshotFor: "some_other_fn" });
+      const { status, out } = run(PROD_GATE, env);
+      expect(status, out).toBe(0);
+      expect(out).toContain("Functions defined or replaced by this PR: 1");
+      expect(out).toContain("1 match");
+      expect(out).toContain("no unacknowledged repo-vs-PROD body drift");
+      expect(out, "the refusal must fire ONLY on the compared-nothing state").not.toContain(
+        "VAC04-ZERO-PATH-FAILS-CLOSED",
+      );
+    });
+  });
+
+  it("CONTROL: the OTHER zero path — a PR that changes no migration files at all — is still a quiet exit 0", () => {
+    // `:198-199` is a legitimate nothing-to-do: the merge base RESOLVED and the
+    // diff is genuinely empty. It is NOT the compared-nothing state, and the
+    // fail-closed change must not have swept it up.
+    withTempDir((dir) => {
+      const env = scaffold(dir, VISIBLE_FN, { snapshotFor: "some_other_fn" });
+      const { status, out } = run(PROD_GATE, {
+        ...env,
+        CHANGED_MIGRATIONS: "",
+        BASE_REF: "HEAD",
+      });
+      expect(status, out).toBe(0);
+      expect(out).toContain("changes no migration files");
+      expect(out).not.toContain("MEASURE_FAIL");
+    });
+  });
+
+  // ── THE THIRD DIRECTION (D-13, 2026-09-01) ─────────────────────────────────
+  //
+  // ⛔ WHY THIS EXISTS. The refusal above was UNCONDITIONAL: every changed set
+  // with no extractable function refused, not only the composing shape.
+  // MEASURED at HEAD over all 262 migrations in this repo — 111 define no
+  // function either structural reader can see — so it permanently blocked
+  // roughly two migration PRs in five from a gate whose subject is function
+  // BODY drift. A gate that reds on `ALTER TABLE` acquires an escape hatch from
+  // whoever is on call, which is a slower version of the failure this phase
+  // exists to prevent.
+  //
+  // So the zero path now discriminates with a deliberately CRUDE textual scan,
+  // used ONLY here and never as a reader. Three directions, all required, and
+  // all three are needed together: the refusal arm alone is passed by a gate
+  // that refuses everything, the pass arm alone by a gate that passes
+  // everything, and BOTH are passed by a tripwire wired to a constant. The two
+  // neuter directions were driven by hand and are recorded in
+  // `164.3.1-07-SUMMARY.md` § "Follow-up 2026-09-01".
+  const ALTER_ONLY =
+    "ALTER TABLE public.api_keys ADD COLUMN IF NOT EXISTS kek_version INTEGER NOT NULL DEFAULT 1;\n" +
+    "CREATE INDEX IF NOT EXISTS api_keys_kek_version_idx ON public.api_keys (kek_version);\n";
+
+  it("CALIBRATION: the ALTER-only fixture is invisible to both readers for the RIGHT reason — there is no function in it", () => {
+    // Deliberately paired with the composing calibration above. Both fixtures
+    // produce zero names from both readers; the ONLY thing separating them is
+    // whether a definition is actually there. If this fixture were visible to a
+    // reader, the pass arm below would be exercising the ordinary non-empty
+    // path and would prove nothing about the legitimate-zero branch.
+    withTempDir((dir) => {
+      const f = join(dir, "alter_only.sql");
+      writeFileSync(f, ALTER_ONLY);
+      const lexer = spawnSync("node", [NORMALIZER, "--function-names", f], { encoding: "utf8" });
+      const naive = spawnSync("node", [NAIVE, f], { encoding: "utf8" });
+      expect(lexer.status).toBe(0);
+      expect(naive.status).toBe(0);
+      expect(lexer.stdout.trim()).toBe("");
+      expect(naive.stdout.trim()).toBe("");
+    });
+  });
+
+  it("LEGITIMATE ZERO: an ALTER-only changed set PASSES, with a notice naming what was scanned", () => {
+    withTempDir((dir) => {
+      // Identical wiring to the refusal arm; the ONLY difference is that this
+      // changed set contains no function definition for anything to have missed.
+      const env = scaffold(dir, ALTER_ONLY);
+      const { status, out } = run(PROD_GATE, env);
+
+      expect(
+        status,
+        "a changed set with genuinely no function in it must PASS — refusing it makes " +
+          "a function-body gate a nuisance on 41% of migration PRs, and nuisance gates " +
+          "get escape hatches\n" + out,
+      ).toBe(0);
+
+      // The notice must be EVIDENCE, not a bare verdict (D-12/SC-7): what was
+      // changed, what each of the three readings returned.
+      expect(out).toContain("Migrations changed by this PR: 1");
+      expect(out).toContain("20260901120000_zero_path.sql");
+      expect(out, "the pass must SAY the third scan ran and found nothing").toMatch(
+        /crude textual scan[^\n]*-> 0 definition\(s\) in 1 file\(s\)/,
+      );
+      expect(out).toContain("LEGITIMATE");
+      // A legitimate zero is a measurement, not a measurement failure.
+      expect(out).not.toContain("MEASURE_FAIL");
+      // And it is not the old fail-open text returning by another door.
+      expect(out).not.toContain("(Two independent readings agree; see SP-C05.)");
+    });
+  });
+
+  it("WR-04 RED: a grep that ERRORS on the tripwire's HIT LIST is a MEASURE_FAIL, never the LEGITIMATE-ZERO exit 0", () => {
+    // ⛔ WR-04 (164.3.1 review), the same bare idiom on the zero path itself:
+    //     if ! grep -aqE '[^[:space:]]' "$TMP/textual-hits.txt"; then
+    // The hit list is pre-created, so exit 1 is "no hits" — but exit >= 2 fell
+    // into the SAME branch and the run exited 0 as a legitimate zero it had
+    // not read. MEASURED at HEAD 89cbef8b, ALTER-only changed set, grep
+    // shimmed to exit 2 on this call alone: "the zero is LEGITIMATE", exit 0.
+    withTempDir((dir) => {
+      const env = scaffold(dir, ALTER_ONLY);
+      const PATH = withPathShim(dir, "grep", [
+        "flag=0; hit=0",
+        'for a in "$@"; do case "$a" in -aqE) flag=1 ;; *textual-hits.txt) hit=1 ;; esac; done',
+        '[ "$flag" = 1 ] && [ "$hit" = 1 ] && exit 2',
+      ]);
+      const { status, out } = run(PROD_GATE, { ...env, PATH });
+      expect(status, "a hit list the gate could not READ was reported as a legitimate zero").toBe(1);
+      expect(out).toContain("MEASURE_FAIL");
+      expect(out).toContain("textual-hits.txt");
+      expect(out).toMatch(/grep exited 2\b/);
+      expect(out).not.toContain("the zero is LEGITIMATE");
+    });
+  });
+
+  it("CORPUS: on REAL repo migrations the masked tripwire passes an ALTER-only one, passes the three comment-only mentions, and passes the one double-definition file", () => {
+    // The measured separation, driven against the actual files rather than
+    // restated as a number. MEASURED at HEAD 8969513e across all 262
+    // migrations, comments masked, DISTINCT textual definition tokens vs the
+    // union of the two structural readers per file: 0 files have textual >
+    // structural. Before masking, 3 comment-only mentions BLOCKED (the old
+    // fail-safe imprecision, F2 (d)); after masking they are legitimate zeros.
+    // One file defines the same function TWICE (create, then replace) — the
+    // readers dedupe names, so the tripwire counts DISTINCT tokens too, and
+    // that file passes 1 vs 1 rather than blocking 2 vs 1.
+    const LEGIT = "supabase/migrations/20260405093827_kek_version.sql";
+    const COMMENT_ONLY = [
+      "supabase/migrations/20260515130001_enqueue_compute_job_internal_acl_remediation.sql",
+      "supabase/migrations/20260516170100_reset_stalled_portfolio_analytics_revoke_public.sql",
+      "supabase/migrations/20260517013200_notification_dispatches_recipient_email_lower_idx.sql",
+    ];
+    const DOUBLE_DEF = "supabase/migrations/20260716090000_retire_compute_analytics_kind_rpc_guard.sql";
+
+    withTempDir((dir) => {
+      const base = scaffold(dir, ALTER_ONLY);
+
+      const legit = run(PROD_GATE, { ...base, CHANGED_MIGRATIONS: LEGIT });
+      expect(
+        legit.status,
+        `a real ALTER-only migration must not be blocked by a function-body gate\n${legit.out}`,
+      ).toBe(0);
+      expect(legit.out).toContain("LEGITIMATE");
+
+      for (const f of COMMENT_ONLY) {
+        // CALIBRATION inside the arm: the mention really is there, so a pass
+        // is masking at work and not an empty file.
+        expect(readFileSync(f, "utf8")).toMatch(/CREATE\s+(OR\s+REPLACE\s+)?FUNCTION/i);
+        const res = run(PROD_GATE, { ...base, CHANGED_MIGRATIONS: f });
+        expect(
+          res.status,
+          `${f} mentions CREATE … FUNCTION only inside a comment — after masking that is a ` +
+            `LEGITIMATE zero, not a block\n${res.out}`,
+        ).toBe(0);
+        expect(res.out).toContain("LEGITIMATE");
+        expect(res.out).not.toContain("MEASURE_FAIL");
+      }
+
+      // The double definition: PROD (the scaffold's dump) does not hold it, so
+      // the normal verdict is "measured absent — new function", exit 0. The
+      // load-bearing part is that the tripwire did NOT refuse it.
+      const dbl = run(PROD_GATE, { ...base, CHANGED_MIGRATIONS: DOUBLE_DEF });
+      expect(dbl.status, `two definitions of ONE name must count as one\n${dbl.out}`).toBe(0);
+      expect(dbl.out).toContain("Functions defined or replaced by this PR: 1");
+      expect(dbl.out).not.toContain("MEASURE_FAIL");
+    });
+  });
+
+  // ── F2 (164.3.1 red team + adversarial review): TWO holes in the tripwire ──
+  //
+  // (a) It ran ONLY inside the `NAME_COUNT -eq 0` branch. A migration defining
+  //     one function both readers see AND one both miss reached the comparison
+  //     loop with only the visible one, compared it, and exited 0 — the
+  //     invisible definition was never looked at, on a gate over PRODUCTION
+  //     bodies. MEASURED at HEAD 8969513e on VISIBLE_FN + COMPOSING_FN in one
+  //     file: "Functions defined or replaced by this PR: 1 … 1 match", exit 0.
+  // (b) It was COMMENT-BLIND in the wrong direction: `CREATE /*c*/ OR REPLACE
+  //     FUNCTION` gives lexer 0, naive 0 AND tripwire 0 (the regex wants
+  //     `CREATE` and `OR` separated by whitespace only), so all three agreed on
+  //     zero and the run took the LEGITIMATE-ZERO exit 0. MEASURED at HEAD
+  //     8969513e: "the zero is LEGITIMATE", exit 0.
+  //
+  // The fix runs the scan UNCONDITIONALLY over every changed file, masks
+  // `/* … */` and `-- …` comments FIRST (so a prose mention no longer blocks,
+  // and a comment can no longer split the keywords), counts distinct textual
+  // definitions per file and refuses when that count EXCEEDS what the two
+  // structural readers found for the same file. Over-count errs toward the
+  // block; under-count is harmless because the readers already saw the rest.
+  const SPLIT_BY_COMMENT_FN =
+    "CREATE /*c*/ OR REPLACE FUNCTION public.fn$v2(p uuid) RETURNS void " +
+    "LANGUAGE plpgsql AS $fn$ BEGIN NULL; END; $fn$;\n";
+
+  it("F2 (a) RED: one definition BOTH readers see beside one BOTH miss is REFUSED, naming the file — not compared-one-and-passed", () => {
+    withTempDir((dir) => {
+      const env = scaffold(dir, VISIBLE_FN + COMPOSING_FN, { snapshotFor: "some_other_fn" });
+      const { status, out } = run(PROD_GATE, env);
+      expect(
+        status,
+        "a file with a definition NEITHER reader can see was compared on its visible one alone and passed\n" + out,
+      ).toBe(1);
+      expect(out).toContain("MEASURE_FAIL");
+      expect(out, "the refusal must NAME the file").toMatch(
+        /20260901120000_zero_path\.sql: textual 2 definition\(s\) vs structural 1/,
+      );
+      expect(out).toContain("blind spots");
+      expect(out).not.toContain("no unacknowledged repo-vs-PROD body drift");
+      expect(out).not.toContain("1 match");
+    });
+  });
+
+  it("F2 (b) CALIBRATION: the comment-split spelling is invisible to BOTH readers", () => {
+    withTempDir((dir) => {
+      const f = join(dir, "split.sql");
+      writeFileSync(f, SPLIT_BY_COMMENT_FN);
+      const lexer = spawnSync("node", [NORMALIZER, "--function-names", f], { encoding: "utf8" });
+      const naive = spawnSync("node", [NAIVE, f], { encoding: "utf8" });
+      expect(lexer.status).toBe(0);
+      expect(naive.status).toBe(0);
+      expect(lexer.stdout.trim(), "if the lexer sees it, the arm below exercises the ordinary path").toBe("");
+      expect(naive.stdout.trim()).toBe("");
+    });
+  });
+
+  it("F2 (b) RED: `CREATE /*c*/ OR REPLACE FUNCTION` with zero visible definitions is REFUSED, not passed as a legitimate zero", () => {
+    withTempDir((dir) => {
+      const env = scaffold(dir, SPLIT_BY_COMMENT_FN);
+      const { status, out } = run(PROD_GATE, env);
+      expect(
+        status,
+        "a comment between CREATE and OR REPLACE blinded all THREE readings and the run passed as a legitimate zero\n" + out,
+      ).toBe(1);
+      expect(out).toContain("MEASURE_FAIL");
+      expect(out).toMatch(/20260901120000_zero_path\.sql: textual 1 definition\(s\) vs structural 0/);
+      expect(out).not.toContain("the zero is LEGITIMATE");
+    });
+  });
+
+  it("F2 (c) CONTROL: textual == structural stays GREEN — a prose mention in a comment beside a real definition does not over-count", () => {
+    withTempDir((dir) => {
+      const env = scaffold(
+        dir,
+        "-- helper; see the CREATE OR REPLACE FUNCTION below\n" +
+          "/* an older CREATE FUNCTION public.some_other_fn lived here */\n" +
+          VISIBLE_FN,
+        { snapshotFor: "some_other_fn" },
+      );
+      const { status, out } = run(PROD_GATE, env);
+      expect(status, out).toBe(0);
+      expect(out).toContain("Functions defined or replaced by this PR: 1");
+      expect(out).toContain("1 match");
+      expect(out).not.toContain("MEASURE_FAIL");
+    });
+  });
+
+  it("F2 (d) CONTROL: a comment that merely MENTIONS `CREATE OR REPLACE FUNCTION` in an ALTER-only file is a LEGITIMATE zero after masking", () => {
+    withTempDir((dir) => {
+      const env = scaffold(
+        dir,
+        "-- deliberately no CREATE OR REPLACE FUNCTION in this migration\n" +
+          "/* nor a CREATE FUNCTION\n   split across lines */\n" +
+          ALTER_ONLY,
+      );
+      const { status, out } = run(PROD_GATE, env);
+      expect(
+        status,
+        "a comment MENTION was counted as a definition — masking is not applied\n" + out,
+      ).toBe(0);
+      expect(out).toContain("LEGITIMATE");
+      expect(out).toMatch(/crude textual scan[^\n]*-> 0 definition\(s\) in 1 file\(s\)/);
+      expect(out).not.toContain("MEASURE_FAIL");
+    });
+  });
+
+  it("COVERAGE RED: a grep that ERRORS on the per-file textual scan is a MEASURE_FAIL naming the file, never a scan that found nothing", () => {
+    // The `_tw_rc >= 2` arm — same PATH-shim technique as the WR-04 arms,
+    // keyed on this call's own flags (`-aoiE`) so every other grep delegates.
+    withTempDir((dir) => {
+      const env = scaffold(dir, ALTER_ONLY);
+      const PATH = withPathShim(dir, "grep", [
+        'for a in "$@"; do case "$a" in -aoiE) exit 2 ;; esac; done',
+      ]);
+      const { status, out } = run(PROD_GATE, { ...env, PATH });
+      expect(status, "an unscannable file was read as a clean one").toBe(1);
+      expect(out).toContain("MEASURE_FAIL");
+      expect(out).toContain("could not read");
+      expect(out).toContain("20260901120000_zero_path.sql");
+      expect(out).toMatch(/grep exited 2\b/);
+      expect(out).not.toContain("LEGITIMATE");
+    });
+  });
+
+  it("REOPEN PIN: the tripwire's crudeness is documented AS DELIBERATE, so it is not upgraded into a parser", () => {
+    // By name, node:fs, same reasoning as the marker arm below. The rationale is
+    // the load-bearing part: a later reader who "fixes" the scan into a real
+    // parser would give it the same blind spots as the two readers it exists to
+    // check, and the discriminator would silently stop discriminating.
+    const src = readFileSync(PROD_GATE, "utf8");
+    expect(src).toContain("VAC04-ZERO-PATH-TRIPWIRE");
+    expect(
+      src,
+      "the crudeness rationale was deleted — the next reader has nothing stopping them",
+    ).toContain('DO NOT "IMPROVE" THIS INTO A PARSER');
+    expect(src.toLowerCase()).toContain("blind spots do not overlap");
+    // No human override. The tripwire is a measurement, not a knob (D-13).
+    expect(src).toContain("the tripwire is a MEASUREMENT, not a");
+  });
+
+  // ── (b) The reopen pin's BY-NAME direction ─────────────────────────────────
+  it("REOPEN PIN: the gate script carries the VAC04-ZERO-PATH-FAILS-CLOSED marker and its ordering note", () => {
+    // node:fs, never shell grep — `src/lib/wizardErrors.test.ts` carries a
+    // measured NUL byte that makes grep exit 1 and read as "clean", and a pin
+    // that can be defeated by a byte is not a pin.
+    const src = readFileSync(PROD_GATE, "utf8");
+    expect(
+      src,
+      "the fail-closed branch was deleted or rerouted — [VAC04-C1] is reopened",
+    ).toContain("VAC04-ZERO-PATH-FAILS-CLOSED");
+    // The marker alone would let the branch be gutted to `exit 0` under an
+    // intact comment; the execution arm above covers that. What THIS arm adds is
+    // that the ordering constraint stays where a blocked reader will find it.
+    expect(src).toContain("164.4");
+    expect(src.toLowerCase()).toContain("hold");
+  });
+});
+
+// ── [VAC04-C2] GATE-LEVEL ────────────────────────────────────────────────────
+//
+// SC-4 says each of [VAC04-C1]..[VAC04-C4] is "driven end-to-end through the
+// real gate". [VAC04-C2] — the main-module guard that no-oped on a symlinked or
+// space-containing reader path, so main() never ran, stdout was empty and the
+// process exited 0 — was proven in vac04-reader-guards.test.ts on the two
+// reader CLIs only; the gate-level propagation rested on a code-read of the
+// `|| fail` wrappers (164.3.1-VERIFICATION.md gaps[0]). This block drives the
+// REAL gate, scripts/prod-body-drift-check.sh, with its env-injectable reader
+// paths (`NORMALIZER` / `NAIVE_NAMES`, :143-144) pointing at a symlink and at a
+// copy under a directory whose name carries a space.
+//
+// WHY THE FIXTURES ARE PER-READER-VISIBLE. MEASURED 2026-09-02 (164.3.1-13):
+// on a definition BOTH readers see, the gate's union masks a single reader's
+// silent zero — the other member still yields the name, the gate still prints
+// the readers-ran line, and a neuter of one guard cannot RED. So fixture A is
+// visible to the NAIVE reader only (a `$` in the identifier stops the lexer's
+// readQualifiedName) and fixture B to the NORMALIZER only (the definition does
+// not START its line — the naive reader's pinned LIMITATION 1). Each fixed-leg
+// case therefore has exactly ONE load-bearing union member, and that member is
+// the one reached through the unusual path.
+//
+// WHY THE PASS CONDITION IS THE READERS-RAN LINE, NOT THE TRIPWIRE (D-13).
+// Since D-13 a silent zero from a symlinked reader on a real definition is ALSO
+// caught by [VAC04-C1]'s textual tripwire — both readers `0 name(s)`, then
+// MEASURE_FAIL. A gate-level arm that expected THAT refusal would prove C1's
+// tripwire, not the guard fix. So the fixed leg asserts
+// `Functions defined or replaced by this PR: 1` (the reader RAN through the
+// injected path), and the refusal appears only in the calibration leg as the
+// NEUTERED outcome. VERIFICATION gaps[0] "Note for the fixer".
+//
+// STATED BOUND. The PROD-side commands (`BODY_FETCH_CMD`, `BODY_NAME_INDEX_CMD`,
+// `BODY_NAME_INDEX_XCHECK_CMD`) are word-split on IFS by the gate, so they are
+// never handed a space-containing path here; they stay on the canonical repo
+// reader paths, and only the left-hand readers take the injected shapes.
+describe("[VAC04-C2] GATE-LEVEL — the realpath guard driven THROUGH THE REAL GATE: a reader reached through a symlink or a space path must RUN", () => {
+  const NORMALIZER = "scripts/sql-body-normalize.mjs";
+  const NAIVE = "scripts/sql-function-names-naive.mjs";
+
+  /** Fixture A: seen by the NAIVE reader ONLY — the `$` stops the lexer. */
+  const NAIVE_ONLY_FN =
+    "CREATE OR REPLACE FUNCTION public.sanitize_user$v2(p uuid) RETURNS void " +
+    "LANGUAGE plpgsql AS $fn$ BEGIN END; $fn$;\n";
+  const NAIVE_ONLY_NAME = "sanitize_user$v2";
+
+  /** Fixture B: seen by the NORMALIZER ONLY — the line does not start with CREATE. */
+  const NORMALIZER_ONLY_FN =
+    "SELECT 1; CREATE OR REPLACE FUNCTION public.mid_fn(a int) RETURNS int " +
+    "LANGUAGE sql AS $$ SELECT a $$;\n";
+  const NORMALIZER_ONLY_NAME = "mid_fn";
+
+  /** The arm's PASS condition: the gate's name count, reached only if a reader RAN. */
+  const READERS_RAN = "Functions defined or replaced by this PR: 1";
+  /** Printed only when the naive reader saw a name the normalizer did not (:239). */
+  const NAIVE_ONLY_WARNING =
+    "the independent name reader found function definition(s) the normalizer's parser did not";
+
+  /** The fixed guard's idiom (naive.mjs:340 / normalize.mjs:767) and the pre-fix one it replaced. */
+  const REALPATH_IDIOM = "realpathSync(process.argv[1])";
+  const PRE_FIX_IDIOM = "import.meta.url === `file://${process.argv[1]}`";
+  const PRE_FIX_RETURN = "return import.meta.url === `file://${process.argv[1]}`;";
+  const FIXED_RETURN_REALPATH =
+    "return realpathSync(process.argv[1]) === fileURLToPath(import.meta.url);";
+  const FIXED_RETURN_FALLBACK =
+    "return resolve(process.argv[1]) === fileURLToPath(import.meta.url);";
+
+  type Shape = "symlink" | "space";
+
+  /**
+   * A reader reached through the given shape. Both shapes keep the script's own
+   * basename, so the two readers stay DISTINCT files — the gate refuses at :151
+   * when NORMALIZER and NAIVE_NAMES resolve to the same path, before either runs.
+   */
+  function readerPath(shape: Shape, script: string, dir: string): string {
+    if (shape === "symlink") {
+      mkdirSync(join(dir, "links"), { recursive: true });
+      const link = join(dir, "links", basename(script));
+      symlinkSync(resolve(script), link);
+      return link;
+    }
+    // The directory name carries the space; the copy runs from anywhere because
+    // both readers import node: builtins only.
+    mkdirSync(join(dir, "reader copies"), { recursive: true });
+    const copy = join(dir, "reader copies", basename(script));
+    cpSync(resolve(script), copy);
+    return copy;
+  }
+
+  /** The gate wired as migration-drift-check.yml wires it, plus the injected left-hand readers (`gateScaffold`, IN-08). */
+  function scaffold(
+    dir: string,
+    migrationBody: string,
+    readers: { normalizer: string; naive: string },
+  ): Record<string, string> {
+    return gateScaffold(dir, { migrationBasename: "20260902120000_gate_level_c2.sql", migrationBody, readers }).env;
+  }
+
+  // ── Calibration. Deliberately FIRST: if a fixture were visible to BOTH
+  // readers, "the gate reached 1" would hold with either reader silent, and
+  // the single-member neuter cycles (C2-N1 / C2-N2) could not RED.
+  it("CALIBRATION: fixture A is visible to the NAIVE reader only, fixture B to the NORMALIZER only — each case has ONE load-bearing member", () => {
+    withTempDir((dir) => {
+      const a = join(dir, "fixture_a.sql");
+      writeFileSync(a, NAIVE_ONLY_FN);
+      const b = join(dir, "fixture_b.sql");
+      writeFileSync(b, NORMALIZER_ONLY_FN);
+
+      const aLexer = spawnSync("node", [NORMALIZER, "--function-names", a], { encoding: "utf8" });
+      const aNaive = spawnSync("node", [NAIVE, a], { encoding: "utf8" });
+      expect(aLexer.status, aLexer.stderr).toBe(0);
+      expect(aNaive.status, aNaive.stderr).toBe(0);
+      expect(aLexer.stdout.trim(), "fixture A must be INVISIBLE to the lexer, or the naive member is not load-bearing").toBe("");
+      expect(aNaive.stdout.trim(), "fixture A must be seen by the naive reader").toBe(NAIVE_ONLY_NAME);
+
+      const bLexer = spawnSync("node", [NORMALIZER, "--function-names", b], { encoding: "utf8" });
+      const bNaive = spawnSync("node", [NAIVE, b], { encoding: "utf8" });
+      expect(bLexer.status, bLexer.stderr).toBe(0);
+      expect(bNaive.status, bNaive.stderr).toBe(0);
+      expect(bLexer.stdout.trim(), "fixture B must be seen by the lexer").toBe(NORMALIZER_ONLY_NAME);
+      expect(bNaive.stdout.trim(), "fixture B must be INVISIBLE to the naive reader, or the normalizer member is not load-bearing").toBe("");
+    });
+  }, 30_000);
+
+  // ── FIXED LEG: four cases, one `it` each, so a neuter's RED set names the
+  // reader and the shape it broke. Titles name the load-bearing reader FIRST.
+  const FIXED_CASES = [
+    {
+      name: "case 1: NAIVE reader load-bearing through a SPACE path (normalizer through a symlink) — fixture A",
+      naiveShape: "space" as Shape,
+      normalizerShape: "symlink" as Shape,
+      fixture: NAIVE_ONLY_FN,
+      fnName: NAIVE_ONLY_NAME,
+      naiveOnly: true,
+    },
+    {
+      name: "case 2: NAIVE reader load-bearing through a SYMLINK (normalizer through a space path) — fixture A",
+      naiveShape: "symlink" as Shape,
+      normalizerShape: "space" as Shape,
+      fixture: NAIVE_ONLY_FN,
+      fnName: NAIVE_ONLY_NAME,
+      naiveOnly: true,
+    },
+    {
+      name: "case 3: NORMALIZER load-bearing through a SYMLINK (naive through a space path) — fixture B",
+      naiveShape: "space" as Shape,
+      normalizerShape: "symlink" as Shape,
+      fixture: NORMALIZER_ONLY_FN,
+      fnName: NORMALIZER_ONLY_NAME,
+      naiveOnly: false,
+    },
+    {
+      name: "case 4: NORMALIZER load-bearing through a SPACE path (naive through a symlink) — fixture B",
+      naiveShape: "symlink" as Shape,
+      normalizerShape: "space" as Shape,
+      fixture: NORMALIZER_ONLY_FN,
+      fnName: NORMALIZER_ONLY_NAME,
+      naiveOnly: false,
+    },
+  ];
+
+  it.each(FIXED_CASES)("FIXED LEG $name: the real gate reaches the readers-ran line", (c) => {
+    // MEASURED 2026-09-02 with the fixed readers, both shapes, both fixtures:
+    //   "Functions defined or replaced by this PR: 1"
+    //   "  <name>: measured absent — not in the PROD source's 1-name index. Treated as a NEW function (pass)."
+    //   exit 0
+    withTempDir((dir) => {
+      const env = scaffold(dir, c.fixture, {
+        normalizer: readerPath(c.normalizerShape, NORMALIZER, dir),
+        naive: readerPath(c.naiveShape, NAIVE, dir),
+      });
+      const { status, out } = run(PROD_GATE, env);
+      expect(
+        status,
+        `the gate did not pass — a reader reached through a ${c.naiveShape}/${c.normalizerShape} path did not RUN\n${out}`,
+      ).toBe(0);
+      // The pass condition: the reader RAN through the injected path and the
+      // gate counted its name. Not the tripwire refusal (D-13 note).
+      expect(out).toContain(READERS_RAN);
+      expect(out).toContain(`${c.fnName}: measured absent`);
+      expect(out, "the D-13 refusal is the NEUTERED outcome, never the pass").not.toContain("MEASURE_FAIL");
+      if (c.naiveOnly) {
+        // Proof the NAIVE reader ran through ITS injected path: only it can
+        // have produced this name, and the gate says so.
+        expect(out).toContain(NAIVE_ONLY_WARNING);
+      }
+    });
+  }, 30_000);
+
+  // ── CALIBRATION LEG: the standing RED direction. Scratch copies of both
+  // readers carrying the pre-fix URL-string guard, reached through symlinks,
+  // turn the SAME gate wiring into zero names and the D-13 blind-zero refusal.
+  // This is what cycles C2-N1 / C2-N2 produce on the REAL readers (recorded in
+  // 164.3.1-13-SUMMARY.md); here it runs on every CI run so the fixed leg can
+  // never pass for a reason unrelated to the guard.
+  it("CALIBRATION LEG (standing RED direction): readers carrying the PRE-FIX guard, reached through symlinks AND through a space path, give ZERO names and the MEASURE_FAIL refusal — the readers-ran line never prints", () => {
+    // By-name pin on the REAL sources first: a real reader that lost its
+    // realpath guard reds HERE, by name, before any scratch copy is derived.
+    for (const script of [NAIVE, NORMALIZER]) {
+      expect(
+        occurrences(readFileSync(script, "utf8"), REALPATH_IDIOM),
+        `${script} no longer carries the realpath guard \`${REALPATH_IDIOM}\` — [VAC04-C2] is reopened in the real reader`,
+      ).toBeGreaterThanOrEqual(1);
+    }
+
+    withTempDir((dir) => {
+      mkdirSync(join(dir, "pre-fix"), { recursive: true });
+      mkdirSync(join(dir, "pre-fix-links"), { recursive: true });
+      // IN-05 (164.3.1 review): the fixed leg claims TWO shapes (cases 1 and 4
+      // are space-path load-bearing), so the standing RED direction shows both
+      // — the pre-fix copies are also written under a directory whose name
+      // carries a space and run through that path. Recorded cycles C2-N1/C2-N2
+      // showed it; this makes it run on every CI run.
+      mkdirSync(join(dir, "pre-fix copies"), { recursive: true });
+      const links: Record<string, string> = {};
+      const spaced: Record<string, string> = {};
+      for (const script of [NAIVE, NORMALIZER]) {
+        const neutered = readFileSync(script, "utf8")
+          .replace(FIXED_RETURN_REALPATH, PRE_FIX_RETURN)
+          .replace(FIXED_RETURN_FALLBACK, PRE_FIX_RETURN);
+        // A neuter not proven applied makes this leg vacuous: the copy must
+        // carry NO realpath idiom and at least one pre-fix idiom.
+        expect(occurrences(neutered, REALPATH_IDIOM), `${script}: the scratch copy still carries the fixed guard`).toBe(0);
+        expect(occurrences(neutered, PRE_FIX_IDIOM), `${script}: the scratch copy does not carry the pre-fix guard`).toBeGreaterThanOrEqual(1);
+        const copy = join(dir, "pre-fix", basename(script));
+        writeFileSync(copy, neutered);
+        const link = join(dir, "pre-fix-links", basename(script));
+        symlinkSync(copy, link);
+        links[script] = link;
+        const spacedCopy = join(dir, "pre-fix copies", basename(script));
+        writeFileSync(spacedCopy, neutered);
+        spaced[script] = spacedCopy;
+      }
+
+      // MEASURED 2026-09-02 (both fixtures, both shapes): both evidence lines
+      // `0 name(s)`, "MEASURE_FAIL — NOTHING WAS COMPARED.", exit 1.
+      for (const [shape, readers] of [
+        ["symlink", { normalizer: links[NORMALIZER], naive: links[NAIVE] }],
+        ["space", { normalizer: spaced[NORMALIZER], naive: spaced[NAIVE] }],
+      ] as const) {
+        for (const [label, fixture] of [
+          ["fixture-A", NAIVE_ONLY_FN],
+          ["fixture-B", NORMALIZER_ONLY_FN],
+        ] as const) {
+          // The scratch sub-dir name carries NO space: the `BODY_*_CMD`
+          // strings word-split over `${dump}` (describe comment above).
+          const sub = join(dir, `${shape}-${label}`);
+          mkdirSync(sub, { recursive: true });
+          const env = scaffold(sub, fixture, readers);
+          const { status, out } = run(PROD_GATE, env);
+          expect(
+            status,
+            `${shape}/${label}: the gate PASSED with readers whose guard cannot run through a ${shape} path — the fixed leg above proves nothing\n${out}`,
+          ).not.toBe(0);
+          expect(out).toContain("MEASURE_FAIL");
+          // Evidence lines (D-12/SC-7) naming the INJECTED paths, each at zero.
+          expect(out).toContain(`${readers.normalizer} --function-names -> 0 name(s)`);
+          expect(out).toContain(`${readers.naive} -> 0 name(s)`);
+          expect(out, `${shape}/${label}: the readers-ran line printed although neither reader ran`).not.toContain(READERS_RAN);
+        }
+      }
+    });
+  }, 30_000);
+});
+
+// ── [VAC04-C4] GATE-LEVEL ────────────────────────────────────────────────────
+//
+// MEASURED PRE-FIX GATE BEHAVIOUR (164.3.1-04, reproduced 2026-09-02 through
+// the real gate with both refusals disabled in scratch copies): on
+// `CREATE OR REPLACE FUNCTION public.fúnc_é(p uuid)` the naive reader
+// TRUNCATED the identifier to `f` (its charset regex stops at the first
+// non-ASCII byte) and the normalizer DROPPED the definition; the gate unioned
+// {f}, looked `f` up in PROD's index, reported
+//     "Functions defined or replaced by this PR: 1"
+//     "  f: measured absent — … Treated as a NEW function (pass)."
+//     "no unacknowledged repo-vs-PROD body drift"          exit 0
+// — a pass for a function nobody defined, over PRODUCTION bodies. The fix
+// (plan 04) makes both readers REFUSE with the offending codepoint. Plan 04
+// proved that on the reader CLIs; this block drives it THROUGH THE REAL GATE
+// (SC-4), on the same P10 input, and asserts the gate's own output.
+//
+// WHICH SITE THE INPUT REACHES. Cited by SYMBOL, not by line — these anchors
+// drifted the moment prod-body-drift-check.sh grew its --baseline-live leg
+// (Phase 164.5 plan 04). The normalizer's `--function-names` call guarded by
+// `|| fail "could not extract function names from the changed migrations."` is
+// the FIRST reader call and the ONLY site this input reaches: that `|| fail`
+// wraps the refusal and exits 1. The naive reader's call, guarded by
+// `|| fail "the independent name reader failed on the changed migrations."`,
+// is never executed on this input — so the naive refusal's reachability AT
+// GATE LEVEL on THIS input is a STATED NON-COVERAGE, not a claim. What IS
+// shown (the stated-bound `it` below) is that with ONLY the normalizer's
+// refusal disabled the naive refusal still reaches the verdict through its own
+// `|| fail`, which is why the recorded
+// neuter cycle C4-N1 (164.3.1-13-SUMMARY.md) disables BOTH members: a
+// single-member neuter cannot flip the gate's exit code.
+//
+// WHY BODY TEXT MUST NEVER APPEAR. The gate and its readers run in a PUBLIC CI
+// log, and the normalizer's index run reads a PROD dump. The refusal may name
+// the identifier prefix, the byte, the codepoint and the file:line — never a
+// slice of a body. Asserted here at gate level with a calibrated sentinel.
+describe("[VAC04-C4] GATE-LEVEL — the charset refusal driven THROUGH THE REAL GATE: a non-ASCII identifier must be REFUSED, never compared as a different function", () => {
+  const NORMALIZER = "scripts/sql-body-normalize.mjs";
+  const NAIVE = "scripts/sql-function-names-naive.mjs";
+
+  /** Appears ONLY inside the function body; the gate output must never carry it. */
+  const BODY_SENTINEL = "ZZ_VAC04_BODY_SENTINEL_ZZ";
+
+  /**
+   * The P10 input, verbatim from vac04-reader-guards.test.ts. The leading
+   * comment line puts the definition on line 2, so the diagnostic's 1-based
+   * line number is computed, not a hardcoded 1.
+   */
+  const P10_SQL =
+    "-- fixture header, so the definition is NOT on line 1\n" +
+    "CREATE OR REPLACE FUNCTION public.fúnc_é(p uuid)\n" +
+    "RETURNS void\nLANGUAGE plpgsql\nAS $$\nBEGIN\n" +
+    `  PERFORM 1; -- ${BODY_SENTINEL}\nEND;\n$$;\n`;
+
+  const MIGRATION_BASENAME = "20260902120000_gate_level_c4.sql";
+
+  /** The refusal diagnostic (normalize.mjs:568 / naive.mjs:305) and the gate's wrapper (:208). */
+  const CHARSET_DIAGNOSTIC = "leaves the unquoted charset";
+  const OFFENDING_CODEPOINT = "U+00FA";
+  const GATE_WRAPPER = "could not extract function names from the changed migrations";
+  const NAIVE_WRAPPER = "the independent name reader failed on the changed migrations";
+  const READERS_RAN = "Functions defined or replaced by this PR: 1";
+  const SUCCESS_NOTICE = "no unacknowledged repo-vs-PROD body drift";
+
+  /** The two refusal sites the scratch neuters disable (naive.mjs:171, normalize.mjs:369). */
+  const NAIVE_REFUSAL_CONDITION =
+    'follower !== undefined && !/\\s/.test(follower) && follower !== "("';
+  const NORMALIZER_REFUSAL_THROW = "throw charsetRefusal(sql, j,";
+
+  /** The gate wired as migration-drift-check.yml wires it, on the P10 migration (`gateScaffold`, IN-08). */
+  function scaffold(
+    dir: string,
+    readers: { normalizer: string; naive: string } = { normalizer: NORMALIZER, naive: NAIVE },
+  ): { env: Record<string, string>; migration: string } {
+    return gateScaffold(dir, { migrationBasename: MIGRATION_BASENAME, migrationBody: P10_SQL, readers });
+  }
+
+  /**
+   * Scratch copies with the refusal DISABLED — the pre-fix truncate/drop
+   * behaviour. Each copy keeps its script's basename (distinct basenames, so
+   * the gate's :151 same-file refusal does not fire before either reader runs).
+   *
+   * Proven neutered by ABSENCE only — the replaced refusal text is gone from
+   * the copy. Deliberately NOT a `source !== copy` check: under the recorded
+   * C4-N1 cycle the REAL sources are already neutered, the replacements no-op
+   * and the copies come out byte-identical, and a differs-from-source assertion
+   * would RED this leg for a reason unrelated to the gate. The leg's teeth are
+   * its gate-outcome assertions, which RED the moment a copy still refuses.
+   */
+  function neuteredCopies(dir: string): { normalizer: string; naive: string } {
+    mkdirSync(join(dir, "neutered"), { recursive: true });
+
+    const naiveCopy = readFileSync(NAIVE, "utf8").replace(NAIVE_REFUSAL_CONDITION, "false");
+    expect(naiveCopy, "the naive scratch copy still carries its follower-byte refusal").not.toContain(
+      NAIVE_REFUSAL_CONDITION,
+    );
+    const naivePath = join(dir, "neutered", basename(NAIVE));
+    writeFileSync(naivePath, naiveCopy);
+
+    const normalizerCopy = readFileSync(NORMALIZER, "utf8").replace(
+      /^[ \t]*throw charsetRefusal\(sql, j,.*$/m,
+      "      continue;",
+    );
+    expect(normalizerCopy, "the normalizer scratch copy still carries its charset throw").not.toContain(
+      NORMALIZER_REFUSAL_THROW,
+    );
+    const normalizerPath = join(dir, "neutered", basename(NORMALIZER));
+    writeFileSync(normalizerPath, normalizerCopy);
+
+    return { normalizer: normalizerPath, naive: naivePath };
+  }
+
+  /** 1-based line of the definition inside P10_SQL — computed, so the `:N:` assertion is not a hardcoded 2. */
+  function definitionLine(): number {
+    return P10_SQL.split("\n").findIndex((l) => l.startsWith("CREATE")) + 1;
+  }
+
+  // ── THE REFUSAL ARM: the real gate, the real readers, the P10 migration.
+  it("REFUSAL: the real gate exits 1 on `public.fúnc_é`, naming U+00FA and the file:line — and prints NO body text, no readers-ran line, no verdict", () => {
+    // MEASURED 2026-09-02 through the gate:
+    //   "::error::sql-body-normalize: <migration>:2: identifier leaves the unquoted
+    //    charset [A-Za-z0-9_$] — read 'public.f' then hit 'ú' (U+00FA). …"
+    //   "::error::VAC-04 …: could not extract function names from the changed migrations."
+    //   exit 1
+    withTempDir((dir) => {
+      const { env, migration } = scaffold(dir);
+      const { status, out } = run(PROD_GATE, env);
+      expect(status, `the gate did not refuse a non-ASCII identifier\n${out}`).toBe(1);
+
+      // Diagnostic-first (D-12 / SC-7): the evidence, not only the exit code.
+      expect(out).toContain(CHARSET_DIAGNOSTIC);
+      expect(out).toContain(OFFENDING_CODEPOINT);
+      expect(out, "the refusal must name the file and the 1-based line of the definition").toContain(
+        `${migration}:${definitionLine()}:`,
+      );
+      expect(out, "the refusal must say what prefix was read before the offending byte").toContain("read 'public.f'");
+      expect(out, "the gate's own wrapper must carry the reader's exit into the verdict").toContain(GATE_WRAPPER);
+
+      // Non-leakage. Calibration: the sentinel really is in the input.
+      expect(P10_SQL).toContain(BODY_SENTINEL);
+      expect(out, "function body text reached the gate output — a PUBLIC CI log").not.toContain(BODY_SENTINEL);
+      // IN-06 (164.3.1 review): the readers' rule is stronger than "no body"
+      // — never the SOURCE LINE either (naive.mjs:302-303). `(p uuid)` sits on
+      // the definition line and is the only line-2 fragment beyond the allowed
+      // `read 'public.f'` prefix. Calibrated against the line, then pinned.
+      expect(P10_SQL.split("\n")[definitionLine() - 1]).toContain("(p uuid)");
+      expect(out, "the refusal echoed the definition line").not.toContain("(p uuid)");
+
+      // No comparison happened, and the output must not pretend one did.
+      expect(out).not.toContain("Functions defined or replaced by this PR");
+      expect(out).not.toContain("measured absent");
+      expect(out).not.toContain(SUCCESS_NOTICE);
+    });
+  }, 30_000);
+
+  // ── CALIBRATION LEG: the standing RED direction. With BOTH refusals
+  // disabled the SAME wiring compares the WRONG subject and PASSES — the exact
+  // pre-fix behaviour, measured verbatim 2026-09-02. Runs on every CI run so the
+  // refusal arm above can never pass for a reason unrelated to the refusal.
+  it("CALIBRATION LEG (standing RED direction): with BOTH refusals disabled, the gate counts a truncated `f`, measures it absent and PASSES — the wrong-subject pass", () => {
+    withTempDir((dir) => {
+      const { env } = scaffold(dir, neuteredCopies(dir));
+      const { status, out } = run(PROD_GATE, env);
+      expect(
+        status,
+        `the neutered readers still refused — the calibration copies are not the pre-fix shape\n${out}`,
+      ).toBe(0);
+      expect(out).toContain(READERS_RAN);
+      // IN-07 (164.3.1 review): pinned as the EXACT line the gate prints
+      // (two-space indent, :718), not a suffix — `xf: measured absent` would
+      // satisfy "f: measured absent" and READERS_RAN's `: 1` only bounds it
+      // to one name ending in f.
+      expect(out, "the truncated name `f` — exactly `f` — must be what the gate looked up").toContain(
+        "\n  f: measured absent",
+      );
+      expect(out).toContain(SUCCESS_NOTICE);
+      expect(out, "no refusal may fire with both refusals disabled").not.toContain(OFFENDING_CODEPOINT);
+    });
+  }, 30_000);
+
+  // ── STATED BOUND, its OWN `it`: with ONLY the normalizer's refusal disabled
+  // the REAL naive reader still refuses through :221's `|| fail`. This depends
+  // on the real naive reader, which is why it REDs under the recorded C4-N1
+  // cycle (both real refusals disabled → the gate exits 0, no U+00FA) while
+  // the calibration leg above, built from copies only, stays green. Folding it
+  // into that leg would blur the RED set.
+  it("STATED BOUND: with only the normalizer's refusal disabled, the REAL naive reader's refusal still reaches the verdict through :221 — exit 1 naming U+00FA under its own prefix", () => {
+    withTempDir((dir) => {
+      const { normalizer } = neuteredCopies(dir);
+      const { env } = scaffold(dir, { normalizer, naive: NAIVE });
+      const { status, out } = run(PROD_GATE, env);
+      expect(status, `the naive refusal did not reach the gate's verdict\n${out}`).toBe(1);
+      expect(out).toMatch(/sql-function-names-naive: [^\n]*U\+00FA/);
+      expect(out).toContain(NAIVE_WRAPPER);
+      expect(out).not.toContain(READERS_RAN);
+      expect(out).not.toContain(BODY_SENTINEL);
+      expect(out, "the naive refusal echoed the definition line (IN-06)").not.toContain("(p uuid)");
+    });
+  }, 30_000);
+});
+
+// ── VAC-04 ABSURDITY FLOOR (D-09's VAC-04 half) ──────────────────────────────
+//
+// ⛔ THE DEFECT SHAPE. The empty-index guards answer "is the reader broken?"
+// only for EXACTLY zero names. One name through and they go quiet — and a
+// near-empty index is precisely the "every function is new — pass" state,
+// because a name absent from a tiny index takes the gate's measured-absent pass
+// on every iteration. So VAC-04 could report a clean run off a reader that had
+// stopped matching, which is Primitive C over PRODUCTION function bodies.
+//
+// The floor is calibrated against a SECOND, independently produced population
+// the gate already holds — the committed snapshot bodies, generated FROM PROD
+// by `npm run schema:functions`. It is a RATIO, not a literal, so it cannot rot
+// as PROD's catalogue changes (D-10: thresholds by MEASUREMENT, never taste).
+//
+// Proven TWO-DIRECTIONALLY below, because a floor that fires unconditionally
+// also passes its own RED arm (D-10, SC-8).
+describe("VAC-04 absurdity floor — a tiny PROD index is a broken reader, not an empty database", () => {
+  /** The REAL committed snapshot: 118 bodies, measured 2026-09-01 at 15ab417b. */
+  const REAL_SNAPSHOT_DIR = "supabase/schema/functions";
+
+  const FN_BODY =
+    "CREATE OR REPLACE FUNCTION public.demo_fn(p_id UUID)\nRETURNS UUID\n" +
+    "LANGUAGE plpgsql\nAS $$\nBEGIN\n  RETURN p_id;\nEND\n$$;";
+
+  /**
+   * The population the floor calibrates against, read the same way the gate
+   * reads it. Asserted rather than assumed: if this ever drops below the gate's
+   * SNAPSHOT_MIN the floor goes inert and BOTH arms below would pass for the
+   * wrong reason.
+   */
+  const snapshotBodyCount = () =>
+    readdirSync(REAL_SNAPSHOT_DIR).filter((f) => f.endsWith(".sql")).length;
+
+  it("CALIBRATION: the real snapshot population is large enough to calibrate against", () => {
+    // The gate's SNAPSHOT_MIN is 50. Read off the script rather than restated
+    // here, so the two cannot drift apart silently.
+    const src = readFileSync(PROD_GATE, "utf8");
+    const m = /^SNAPSHOT_MIN=(\d+)$/m.exec(src);
+    expect(m, "the gate must declare SNAPSHOT_MIN — the floor's precondition").not.toBeNull();
+    const min = Number((m as RegExpExecArray)[1]);
+    expect(snapshotBodyCount()).toBeGreaterThanOrEqual(min);
+    // And the measured record beside the rule must not go missing (SC-9).
+    expect(src).toContain("SAMPLE SIZE AND COVERAGE");
+    expect(src).toContain("WIDE SEPARATION");
+  });
+
+  it("FIRES: a plausible-but-TINY PROD index is a MEASURE_FAIL with evidence, never the all-new pass", () => {
+    withTempDir((dir) => {
+      mkdirSync(join(dir, "migrations"), { recursive: true });
+      const migration = join(dir, "migrations", "20260901120000_demo.sql");
+      writeFileSync(migration, `${FN_BODY}\n`);
+
+      // A handful of names — the shape a reader that has stopped matching
+      // produces. Non-empty on BOTH readings, so the existing empty-index
+      // guards stay quiet and this arm is exercising the FLOOR, not them.
+      const tiny = ["some_fn", "another_fn", "third_fn"];
+      const { status, out } = run(PROD_GATE, {
+        ...FAKE_CREDS,
+        BODY_FETCH_CMD: `bash ${writeStubFetcher(dir)}`,
+        BODY_NAME_INDEX_CMD: `bash ${writeStubNameIndex(dir, tiny)}`,
+        BODY_NAME_INDEX_XCHECK_CMD: `bash ${writeStubNameIndex(dir, tiny, "stub-index-xcheck.sh")}`,
+        CHANGED_MIGRATIONS: migration,
+        SNAPSHOT_DIR: REAL_SNAPSHOT_DIR,
+      });
+
+      expect(status, "a near-empty index was accepted as a measurement of PROD").toBe(1);
+      expect(out).toContain("MEASURE_FAIL");
+      expect(out).toContain("this is the GATE failing, not the database");
+      // Evidence, not just a verdict (SC-7): both counts and a sample of what
+      // WAS read.
+      expect(out).toMatch(/PROD function-name index\s*:\s*3 name\(s\)/);
+      expect(out).toMatch(
+        new RegExp(`committed snapshot bodies:\\s*${snapshotBodyCount()}\\b`),
+      );
+      expect(out).toContain("some_fn");
+      // The pass it must never reach.
+      expect(out).not.toContain("Treated as a NEW function (pass)");
+      expect(out).not.toContain("no unacknowledged repo-vs-PROD body drift");
+      expect(out).not.toContain("measured zero, not an unread one");
+    });
+  });
+
+  it("SILENT: a realistic index built from the repo corpus leaves the floor quiet and the run reaches its normal verdict", () => {
+    // The load-bearing direction. A floor that fires unconditionally would also
+    // pass the arm above, so without this one nothing is proven. Same real
+    // snapshot dir, same PR — the ONLY difference is a realistically sized
+    // index, generated from the repo's own corpus rather than hand-written.
+    withTempDir((dir) => {
+      mkdirSync(join(dir, "migrations"), { recursive: true });
+      const migration = join(dir, "migrations", "20260901120000_demo.sql");
+      writeFileSync(migration, `${FN_BODY}\n`);
+
+      const realistic = readdirSync(REAL_SNAPSHOT_DIR)
+        .filter((f) => f.endsWith(".sql"))
+        .map((f) => basename(f, ".sql"));
+      expect(
+        realistic.length,
+        "a short 'realistic' index would make this arm prove nothing",
+      ).toBeGreaterThan(100);
+      // `demo_fn` is deliberately NOT in it, so this run takes the gate's one
+      // silent pass — the measured-absent path the floor exists to protect.
+      // Proving the floor quiet HERE is stronger than proving it quiet on a
+      // drift comparison: this is the exact verdict a broken reader would fake.
+      expect(realistic).not.toContain("demo_fn");
+
+      const { status, out } = run(PROD_GATE, {
+        ...FAKE_CREDS,
+        BODY_FETCH_CMD: `bash ${writeStubFetcher(dir)}`,
+        BODY_NAME_INDEX_CMD: `bash ${writeStubNameIndex(dir, realistic)}`,
+        BODY_NAME_INDEX_XCHECK_CMD: `bash ${writeStubNameIndex(dir, realistic, "stub-index-xcheck.sh")}`,
+        CHANGED_MIGRATIONS: migration,
+        SNAPSHOT_DIR: REAL_SNAPSHOT_DIR,
+      });
+
+      expect(status, out).toBe(0);
+      expect(out).not.toContain("MEASURE_FAIL");
+      expect(out).not.toContain("this is the GATE failing");
+      expect(out).toContain("Treated as a NEW function (pass)");
+      expect(out).toContain("measured zero, not an unread one");
+    });
+  });
+
+  it("WR-04 RED: a `find` that FAILS mid-walk is a MEASURE_FAIL, not a small population that puts the floor to sleep", () => {
+    // ⛔ WR-04 (164.3.1 review). The denominator was ONE pipeline,
+    //     find "$SNAPSHOT_DIR" … -print | grep -ac '[^[:space:]]'
+    // under `pipefail`, and `[ "$_snap_rc" -le 1 ]` accepted status 1 as
+    // "counted, no rows". A `find` that fails mid-walk (permission, I/O)
+    // exits 1 too — so a failed walk read as a LOW population, the floor went
+    // INERT with a `::warning::`, and the "every function is new — pass"
+    // shape the floor exists to catch was unguarded for that run.
+    //
+    // MEASURED at HEAD 89cbef8b, realistic index, `find` shimmed to print
+    // three entries and exit 1: "absurdity floor is INERT this run", exit 0.
+    withTempDir((dir) => {
+      mkdirSync(join(dir, "migrations"), { recursive: true });
+      const migration = join(dir, "migrations", "20260901120000_demo.sql");
+      writeFileSync(migration, `${FN_BODY}\n`);
+      const realistic = readdirSync(REAL_SNAPSHOT_DIR)
+        .filter((f) => f.endsWith(".sql"))
+        .map((f) => basename(f, ".sql"));
+      expect(realistic.length).toBeGreaterThan(100);
+
+      const env = {
+        ...FAKE_CREDS,
+        BODY_FETCH_CMD: `bash ${writeStubFetcher(dir)}`,
+        BODY_NAME_INDEX_CMD: `bash ${writeStubNameIndex(dir, realistic)}`,
+        BODY_NAME_INDEX_XCHECK_CMD: `bash ${writeStubNameIndex(dir, realistic, "stub-index-xcheck.sh")}`,
+        CHANGED_MIGRATIONS: migration,
+        SNAPSHOT_DIR: REAL_SNAPSHOT_DIR,
+      };
+      const clean = run(PROD_GATE, env);
+      expect(clean.status, "the fixture must be GREEN before the walk is broken").toBe(0);
+      expect(clean.out).not.toContain("absurdity floor is INERT");
+
+      // A walk that lists three files and then dies: the shape of a mid-walk
+      // permission or I/O failure.
+      const PATH = withPathShim(dir, "find", [
+        'case " $* " in *" -name "*) "$REAL" "$@" | head -n 3; exit 1 ;; esac',
+      ]);
+      const { status, out } = run(PROD_GATE, { ...env, PATH });
+      expect(status, "a walk that FAILED was accepted as a small snapshot population").toBe(1);
+      expect(out).toContain("MEASURE_FAIL");
+      expect(out).toContain("could not enumerate");
+      expect(out).toMatch(/find exited 1\b/);
+      expect(out).not.toContain("absurdity floor is INERT");
+      expect(out).not.toContain("no unacknowledged repo-vs-PROD body drift");
+    });
+  });
+
+  it("COVERAGE RED: a grep that ERRORS while COUNTING the snapshot population is a MEASURE_FAIL, not a denominator of zero", () => {
+    // The `_snap_rc >= 2` arm — the walk succeeded, the COUNT could not be
+    // read. Same PATH-shim technique as the find arm above, keyed on this
+    // call's own flag (`-ac`) and file so every other grep delegates.
+    withTempDir((dir) => {
+      mkdirSync(join(dir, "migrations"), { recursive: true });
+      const migration = join(dir, "migrations", "20260901120000_demo.sql");
+      writeFileSync(migration, `${FN_BODY}\n`);
+      const realistic = readdirSync(REAL_SNAPSHOT_DIR)
+        .filter((f) => f.endsWith(".sql"))
+        .map((f) => basename(f, ".sql"));
+      expect(realistic.length).toBeGreaterThan(100);
+
+      const env = {
+        ...FAKE_CREDS,
+        BODY_FETCH_CMD: `bash ${writeStubFetcher(dir)}`,
+        BODY_NAME_INDEX_CMD: `bash ${writeStubNameIndex(dir, realistic)}`,
+        BODY_NAME_INDEX_XCHECK_CMD: `bash ${writeStubNameIndex(dir, realistic, "stub-index-xcheck.sh")}`,
+        CHANGED_MIGRATIONS: migration,
+        SNAPSHOT_DIR: REAL_SNAPSHOT_DIR,
+      };
+      const clean = run(PROD_GATE, env);
+      expect(clean.status, "the fixture must be GREEN before the count is broken").toBe(0);
+
+      const PATH = withPathShim(dir, "grep", [
+        "flag=0; hit=0",
+        'for a in "$@"; do case "$a" in -ac) flag=1 ;; *snapshot-bodies.txt) hit=1 ;; esac; done',
+        '[ "$flag" = 1 ] && [ "$hit" = 1 ] && exit 2',
+      ]);
+      const { status, out } = run(PROD_GATE, { ...env, PATH });
+      expect(status, "an uncountable snapshot population was accepted").toBe(1);
+      expect(out).toContain("MEASURE_FAIL");
+      expect(out).toContain("could not count the committed snapshot bodies");
+      expect(out).toMatch(/grep exited 2\b/);
+      expect(out).not.toContain("absurdity floor is INERT");
+      expect(out).not.toContain("no unacknowledged repo-vs-PROD body drift");
+    });
+  });
+
+  it("SILENT: ordinary DRIFT against a realistic index still reaches its drift verdict, not the floor", () => {
+    // The second silent direction: the floor must not PRE-EMPT a real finding.
+    // Driven on a REAL committed function against the REAL snapshot dir, so the
+    // floor is genuinely ACTIVE (118 bodies) rather than merely switched off by
+    // a scratch dir too small to calibrate against.
+    withTempDir((dir) => {
+      const FN = "_assert_owner";
+      const committed = readFileSync(join(REAL_SNAPSHOT_DIR, `${FN}.sql`), "utf8");
+      // split/join, never String.replace: `$&`, `$1`, "$`" and "$'" are special
+      // in a replacement string, and this body is full of `$$` and `$1`.
+      const drifted = committed.split("v_found := FOUND;").join("v_found := TRUE;");
+      expect(drifted, "the drift edit must actually change the body").not.toBe(committed);
+
+      mkdirSync(join(dir, "migrations"), { recursive: true });
+      mkdirSync(join(dir, "live"), { recursive: true });
+      const migration = join(dir, "migrations", "20260901120000_assert_owner.sql");
+      writeFileSync(migration, committed);
+      writeFileSync(join(dir, "live", `${FN}.sql`), drifted);
+
+      const realistic = readdirSync(REAL_SNAPSHOT_DIR)
+        .filter((f) => f.endsWith(".sql"))
+        .map((f) => basename(f, ".sql"));
+      expect(realistic).toContain(FN);
+
+      const { status, out } = run(PROD_GATE, {
+        ...FAKE_CREDS,
+        BODY_FETCH_CMD: `bash ${writeStubFetcher(dir)}`,
+        BODY_NAME_INDEX_CMD: `bash ${writeStubNameIndex(dir, realistic)}`,
+        BODY_NAME_INDEX_XCHECK_CMD: `bash ${writeStubNameIndex(dir, realistic, "stub-index-xcheck.sh")}`,
+        CHANGED_MIGRATIONS: migration,
+        SNAPSHOT_DIR: REAL_SNAPSHOT_DIR,
+      });
+
+      expect(status).toBe(1);
+      // Exit 1 for the RIGHT reason: drift, not the floor.
+      expect(out).toContain("PROD's live body is NOT the committed body");
+      expect(out).not.toContain("this is the GATE failing, not the database");
+      expect(out).not.toContain("absurdity floor is INERT");
+    });
+  });
+
+  it("the floor announces itself INERT rather than going quiet when it has no denominator", () => {
+    // RESEARCH anti-pattern 5: a control that stops controlling must SAY so.
+    // Every scaffolded arm in this file runs with a 0-1 body snapshot dir, so
+    // this is also the state the rest of the suite runs in — worth being loud.
+    withTempDir((dir) => {
+      const env = scaffoldProdCase(dir, { prodBody: PROD_BODY_EQUIVALENT });
+      const { status, out } = run(PROD_GATE, env);
+      expect(status, out).toBe(0);
+      expect(out).toContain("absurdity floor is INERT this run");
+      expect(out).not.toContain("MEASURE_FAIL");
+    });
+  });
+});
+
+// ── VAC-08 ───────────────────────────────────────────────────────────────────
+
+/** A stub ledger query: emits the names it was told are MISSING from the ledger. */
+/**
+ * The row count every arm gets unless it asks for another, and the reason it is
+ * SMALL rather than absent.
+ *
+ * ⛔ F7 (Phase 164.8.2). This used to default to `null` — the stub printed
+ * NOTHING for `ledger_rows` — under the comment "an unreadable row count leaves
+ * the absurdity floor silent rather than letting it decide anything". That
+ * sentence described the defect and called it a convenience: an unreadable count
+ * did not leave the floor silent, it left the floor INERT, which is the one
+ * outcome a control must never have. The gate now MEASURE_FAILs on an empty
+ * answer, so the scaffold hands it a real one. 12 sits UNDER the floor's `>= 50`
+ * precondition, so every arm that was written against a silent floor keeps
+ * failing or passing for exactly the reason its own comment claims.
+ */
+const DEFAULT_STUB_LEDGER_ROWS = "12";
+
+function writeStubLedger(
+  dir: string,
+  missing: string[],
+  advisory: string[] = [],
+  ledgerRows: string | null = DEFAULT_STUB_LEDGER_ROWS,
+  /** Non-zero => the `ledger_rows` direction FAILS, with stderr, like a real psql would. */
+  ledgerRowsRc = 0,
+  /** Non-zero => the ADVISORY `extra` direction FAILS, with stderr, like a real psql would. */
+  extraRc = 0,
+  /** Non-zero => the `missing` direction FAILS, with stderr, like a real psql would. */
+  missingRc = 0,
+): string {
+  const p = join(dir, "stub-ledger.sh");
+  writeFileSync(
+    p,
+    [
+      "#!/usr/bin/env bash",
+      '# $1 = "missing" | "extra" | "ledger_rows" | "shape"',
+      'if [ "$1" = "ledger_rows" ]; then',
+      ledgerRowsRc !== 0
+        ? `  echo "psql: error: connection to server at \"db.example\" failed" >&2\n  exit ${ledgerRowsRc}`
+        : ledgerRows === null
+          ? "  exit 0"
+          : `  echo "${ledgerRows}"`,
+      'elif [ "$1" = "shape" ]; then',
+      '  echo "rows_total=stub"',
+      'elif [ "$1" = "missing" ]; then',
+      ...(missingRc !== 0
+        ? [
+            '  echo "psql: error: connection to server at \\"db.example\\" failed" >&2',
+            `  exit ${missingRc}`,
+          ]
+        : ["  true", ...missing.map((m) => `  echo "${m}"`)]),
+      "else",
+      ...(extraRc !== 0
+        ? [
+            '  echo "psql: error: connection to server at \\"db.example\\" failed" >&2',
+            `  exit ${extraRc}`,
+          ]
+        : ["  true", ...advisory.map((m) => `  echo "${m}"`)]),
+      "fi",
+      "exit 0",
+    ].join("\n"),
+  );
+  chmodSync(p, 0o755);
+  return p;
+}
+
+function scaffoldLedgerCase(
+  dir: string,
+  opts: {
+    missing?: string[];
+    testBody?: string;
+    snapshot?: boolean;
+    /** `undefined` => `DEFAULT_STUB_LEDGER_ROWS`; `null` => the query prints NOTHING. */
+    ledgerRows?: string | null;
+    /** Non-zero => the `ledger_rows` query itself fails. */
+    ledgerRowsRc?: number;
+    /** Non-zero => the ADVISORY `extra` query itself fails (F-R2-04). */
+    extraRc?: number;
+    /** Non-zero => the `missing` query itself fails (164.8.2-LEDGER-STDERR-PUBLIC-LOG). */
+    missingRc?: number;
+  },
+): Record<string, string> {
+  mkdirSync(join(dir, "snapshot"), { recursive: true });
+  mkdirSync(join(dir, "live"), { recursive: true });
+  mkdirSync(join(dir, "migrations"), { recursive: true });
+  writeFileSync(
+    join(dir, "migrations", "20260829120000_demo.sql"),
+    COMMITTED_BODY,
+  );
+  if (opts.snapshot !== false) {
+    writeFileSync(join(dir, "snapshot", "demo_fn.sql"), COMMITTED_BODY);
+  }
+  writeFileSync(
+    join(dir, "live", "demo_fn.sql"),
+    opts.testBody ?? PROD_BODY_EQUIVALENT,
+  );
+
+  // Default to an EMPTY baseline. Without this every arm inherits the repo's
+  // real 32-entry vac08-ledger-baseline.txt, whose entries are "stale" against
+  // a one-migration fixture — a scaffold leaking production data into unit
+  // arms. Arms that exercise the ratchet set LEDGER_BASELINE_FILE explicitly.
+  const emptyBaseline = join(dir, "baseline.empty.txt");
+  writeFileSync(emptyBaseline, "# intentionally empty\n");
+
+  return {
+    LEDGER_BASELINE_FILE: emptyBaseline,
+    TEST_SUPABASE_DB_URL: "stub-dsn-never-used",
+    // Phase 164.9 plan 06. The bounded retry around the query seam WAITS between
+    // attempts; every arm here measures the gate's VERDICT and its MESSAGES, not
+    // its wall clock, and the real backoff would push these cases past vitest's
+    // per-test timeout. ⛔ Zeroing the backoff does NOT disable the retry — every
+    // attempt still runs, every retry line is still printed, and the same verdict
+    // is still reached. The ATTEMPT BUDGET is deliberately NOT overridable, so no
+    // arm here can accidentally test a gate with the retry switched off, and
+    // LEDGER_QUERY_RETRY_BACKOFF_ARM below pins the SHIPPED default.
+    LEDGER_QUERY_RETRY_BACKOFF_SECONDS: "0",
+    LEDGER_QUERY_CMD: `bash ${writeStubLedger(
+      dir,
+      opts.missing ?? [],
+      [],
+      opts.ledgerRows === undefined ? DEFAULT_STUB_LEDGER_ROWS : opts.ledgerRows,
+      opts.ledgerRowsRc ?? 0,
+      opts.extraRc ?? 0,
+      opts.missingRc ?? 0,
+    )}`,
+    BODY_FETCH_CMD: `bash ${writeStubFetcher(dir)}`,
+    MIGRATIONS_DIR: join(dir, "migrations"),
+    SNAPSHOT_DIR: join(dir, "snapshot"),
+    BODY_CHECK_FUNCTIONS: "demo_fn",
+  };
+}
+
+describe("VAC-08 — scripts/test-ledger-drift-check.sh", () => {
+  // ── ABSURDITY FLOOR ────────────────────────────────────────────────────────
+  // Regression pin for the 2026-08-29 defect: VAC-08's FIRST real run reported
+  // "253 of 262 repo migrations are not present in the TEST ledger" against a
+  // database `e2e-seeded` was passing on in the same run. The number was a
+  // wrong join key, not drift — but the gate said the frightening thing, which
+  // points a reader at hand-applying migrations to a SHARED database.
+  //
+  // Three arms, and the CONTROL is load-bearing: without it a floor that fired
+  // unconditionally would also pass arm 1.
+  // ── RATCHET ────────────────────────────────────────────────────────────────
+  // 32 migrations were MEASURED absent from TEST on 2026-08-30 (CI 33277829284)
+  // and are carried in a dated baseline. The gate must still fail on drift that
+  // is NOT baselined, and must refuse to let the baseline hold stale entries —
+  // a baseline allowed to rot is a control that quietly stops controlling.
+  describe("baseline ratchet", () => {
+    const writeBaseline = (dir: string, names: string[]) => {
+      const f = join(dir, "baseline.txt");
+      writeFileSync(f, ["# dated baseline", ...names].join("\n") + "\n");
+      return f;
+    };
+
+    it("RED: drift that is NOT baselined still fails, and is named", () => {
+      withTempDir((dir) => {
+        const env = scaffoldLedgerCase(dir, { missing: ["20260829120000_demo"] });
+        const { status, out } = run(LEDGER_GATE, {
+          ...env,
+          LEDGER_BASELINE_FILE: writeBaseline(dir, ["20260101000000_something_else"]),
+        });
+        expect(status).toBe(1);
+        expect(out).toContain("NOT baselined");
+        expect(out).toContain("20260829120000_demo");
+      });
+    });
+
+    it("GREEN: the SAME drift passes once it is baselined — and says so", () => {
+      withTempDir((dir) => {
+        const env = scaffoldLedgerCase(dir, { missing: ["20260829120000_demo"] });
+        const { status, out } = run(LEDGER_GATE, {
+          ...env,
+          LEDGER_BASELINE_FILE: writeBaseline(dir, ["20260829120000_demo"]),
+        });
+        expect(status).toBe(0);
+        // It must not go quiet: a ratchet that hides the carried gap is a mute
+        // button. The count has to stay visible in the output.
+        expect(out).toContain("1 absent");
+        expect(out).toContain("0 NEW drift");
+      });
+    });
+
+    it("RED: a baseline entry that is now PRESENT is a hard failure, not an advisory", () => {
+      withTempDir((dir) => {
+        const env = scaffoldLedgerCase(dir, { missing: [] });
+        const { status, out } = run(LEDGER_GATE, {
+          ...env,
+          LEDGER_BASELINE_FILE: writeBaseline(dir, ["20260829120000_demo"]),
+        });
+        expect(status).toBe(1);
+        expect(out).toContain("may only shrink");
+        expect(out).toContain("20260829120000_demo");
+      });
+    });
+  });
+
+  // ── ROUND-2 SILENT FAILURES (Phase 164.8.2) ────────────────────────────────
+  // Two adjacent measurements in `check()` used to disagree about what an
+  // unreadable result means. Both arms below are RUNTIME: they break exactly
+  // one read and watch the gate say so.
+  describe("F-R2-04 — the ADVISORY extra-ledger query narrates its own unreadability", () => {
+    it("RED: a failed advisory query names its exit code; the run continues because the direction is advisory", () => {
+      withTempDir((dir) => {
+        // Before the fix this produced NO OUTPUT AT ALL: the `if` swallowed the
+        // status and `2>/dev/null` swallowed the channel, so a DEAD advisory
+        // query and a CLEAN one were byte-identical in the log — while the grep
+        // three lines below it already warned in exactly this situation.
+        const env = scaffoldLedgerCase(dir, { missing: [], extraRc: 3 });
+        const { status, out } = run(LEDGER_GATE, env);
+        expect(status, out).toBe(0);
+        expect(out).toContain("the ADVISORY extra-ledger query exited 3");
+        expect(out).toContain("because it could not read, not because there was nothing");
+        // The CHANNEL stays suppressed: psql's stderr names a host and this
+        // job's log is PUBLIC. The exit code is the diagnosis, not the text.
+        expect(out).not.toContain("db.example");
+      });
+    });
+
+    it("CONTROL: a clean advisory query says nothing — the warning is not printed unconditionally", () => {
+      withTempDir((dir) => {
+        const env = scaffoldLedgerCase(dir, { missing: [] });
+        const { status, out } = run(LEDGER_GATE, env);
+        expect(status, out).toBe(0);
+        expect(out).not.toContain("ADVISORY extra-ledger query exited");
+      });
+    });
+  });
+
+  describe("F-R2-05 — an unreadable measured-missing list never reads as PRESENT", () => {
+    it("RED: grep rc >= 2 at the frontier-tip loop is a MEASURE_FAIL, not a present migration", () => {
+      withTempDir((dir) => {
+        // `-aqFx` is the frontier-tip presence test and NOTHING else in this
+        // gate (the shim delegates every other grep call to the real binary),
+        // so this breaks one read. Unbounded, rc 2 read as "present", which
+        // RAISES the tip and WIDENS the exemption window — toward `0 NEW
+        // drift` and a clean board.
+        const env = scaffoldLedgerCase(dir, { missing: [] });
+        const PATH = withPathShim(dir, "grep", [
+          'for a in "$@"; do if [ "$a" = "-aqFx" ]; then exit 2; fi; done',
+        ]);
+        const { status, out } = run(LEDGER_GATE, { ...env, PATH });
+        expect(status, out).toBe(1);
+        expect(out).toContain("MEASURE_FAIL: could not test whether");
+        expect(out).toContain("20260829120000_demo");
+        expect(out).toContain("widens the exemption");
+      });
+    });
+
+    it("CONTROL: the same case with a delegating shim is GREEN — the shim itself is not the failure", () => {
+      withTempDir((dir) => {
+        const env = scaffoldLedgerCase(dir, { missing: [] });
+        // Same shim shape, broken on a flag the gate never passes.
+        const PATH = withPathShim(dir, "grep", [
+          'for a in "$@"; do if [ "$a" = "--never-passed" ]; then exit 2; fi; done',
+        ]);
+        const { status, out } = run(LEDGER_GATE, { ...env, PATH });
+        expect(status, out).toBe(0);
+        expect(out).not.toContain("MEASURE_FAIL");
+      });
+    });
+  });
+
+  describe("distinguishes a broken instrument from a drift finding", () => {
+    it("RED: a populated ledger matching under half the repo is MEASURE_FAIL, not drift", () => {
+      withTempDir((dir) => {
+        const env = scaffoldLedgerCase(dir, {
+          missing: ["20260829120000_demo"], // 0 of 1 matched
+          ledgerRows: "239", // ...against a clearly populated ledger
+        });
+        const { status, out } = run(LEDGER_GATE, env);
+        expect(status).toBe(1);
+        expect(out).toContain("MEASURE_FAIL");
+        expect(out).toContain("this is the GATE failing, not the database");
+        // It must NOT tell the reader to go apply migrations to shared TEST.
+        expect(out).toContain("Do NOT hand-apply migrations to TEST");
+      });
+    });
+
+    it("CONTROL: the same populated ledger with everything matched stays silent", () => {
+      withTempDir((dir) => {
+        const env = scaffoldLedgerCase(dir, {
+          missing: [], // 1 of 1 matched
+          ledgerRows: "239", // same ledger size as the arm above
+        });
+        const { status, out } = run(LEDGER_GATE, env);
+        expect(out).not.toContain("MEASURE_FAIL");
+        expect(status).toBe(0);
+      });
+    });
+
+    it("CONTROL: a SMALL ledger with nothing matched is ordinary drift, not MEASURE_FAIL", () => {
+      withTempDir((dir) => {
+        // Under 50 rows the ledger is not established enough to accuse the
+        // join; the honest report is the drift finding, loudly.
+        const env = scaffoldLedgerCase(dir, {
+          missing: ["20260829120000_demo"],
+          ledgerRows: "12",
+        });
+        const { status, out } = run(LEDGER_GATE, env);
+        expect(status).toBe(1);
+        expect(out).not.toContain("MEASURE_FAIL");
+        expect(out).toContain("not present in the TEST ledger");
+      });
+    });
+
+    // ── F7 (Phase 164.8.2) — THE FLOOR'S OWN INPUT WAS UNREADABLE-SAFE ───────
+    // Every arm above proves the absurdity floor fires, stays silent, and is
+    // bounded — on the assumption that `ledger_rows` was READ. It was not: the
+    // count came from
+    //   `ledger_rows="$(run_ledger_query ledger_rows … 2>/dev/null || echo "")"`
+    // and `[ -n "$ledger_rows" ]` gated the whole floor on it. That is the sixth
+    // `|| true` in this script and the only one that failed toward SILENCE: the
+    // five F5 bounded make the gate RED, this one made the CONTROL NOT ACT.
+    //
+    // ⛔ EVERY LEG ASSERTS ON THE SENTENCE, NEVER ON `exit 1` ALONE, and it has
+    // to. MEASURED 2026-09-10 against the PRE-FIX script (`git show HEAD:…`) with
+    // a stub whose `ledger_rows` direction exits 3: the gate printed
+    //   `::error::… 1 repo migration(s) are not present in the TEST ledger and are
+    //    NOT baselined:` … exit 1
+    // — red, with the floor switched off and the reader pointed at hand-applying
+    // a migration to a SHARED database, which is the outcome the floor's own
+    // comment exists to prevent. An arm binding to the exit code would have
+    // passed against that.
+    describe("F7 — an unreadable ledger row count is a MEASURE_FAIL, not a disabled floor", () => {
+      /** The floor's own red mode: a populated ledger matching under half the repo. */
+      const FLOOR_FIXTURE = { missing: ["20260829120000_demo"], ledgerRows: "239" };
+
+      /**
+       * The control every leg below runs FIRST. It proves the fixture reaches the
+       * ABSURDITY FLOOR and reddens THERE, so a leg that then breaks the count
+       * cannot be satisfied by one of this gate's several other exit-1 paths.
+       */
+      const expectFloorFiresOn = (dir: string) => {
+        const control = run(LEDGER_GATE, scaffoldLedgerCase(dir, FLOOR_FIXTURE));
+        expect(
+          control.status,
+          "the fixture does not reach the absurdity floor, so breaking its input below would prove nothing",
+        ).toBe(1);
+        expect(control.out).toContain("this is the GATE failing, not the database");
+      };
+
+      it("RED: a ledger_rows query that FAILS is named — the floor is never left to decide on a count nobody read", () => {
+        withTempDir((dir) => {
+          expectFloorFiresOn(dir);
+
+          const { status, out } = run(
+            LEDGER_GATE,
+            scaffoldLedgerCase(dir, { ...FLOOR_FIXTURE, ledgerRowsRc: 3 }),
+          );
+          expect(status).toBe(1);
+          expect(out).toContain("could not read the TEST ledger row count");
+          expect(out, "the failing query's exit status is not reported").toContain("exited 3");
+          // The pre-fix behaviour, pinned as an ABSENCE: the floor went inert and
+          // the run reported drift instead, on a shared database.
+          expect(
+            out,
+            "the gate still reported drift on a run whose absurdity floor could not be evaluated — that is the 2026-08-29 defect with the control switched off",
+          ).not.toContain("are not present in the TEST ledger and are NOT baselined");
+          expect(out).not.toContain("ledger and body checks clean");
+          // Public-log redaction: the captured stderr is counted, never echoed.
+          expect(out, "the withheld stderr leaked into a PUBLIC job log").not.toContain(
+            "connection to server",
+          );
+        });
+      });
+
+      it("⭐ G2: the count in that MEASURE_FAIL is TOTAL — an uncountable stderr renders `?`, never a blank", () => {
+        // The failure message that reports the channel is gone used to read its
+        // count FROM that channel, inline: `$(wc -l < "$ledger_rows_err" | tr …)`.
+        // If the substitution failed BECAUSE the redirect target was gone, the
+        // diagnosis reached the operator with a HOLE where its one quantity
+        // belongs. Driven with the SP-M01 PATH-shim idiom: a `wc` that fails on
+        // exactly the `wc -l` this message takes, and delegates everything else.
+        withTempDir((dir) => {
+          expectFloorFiresOn(dir);
+
+          // CONTROL: red for ITS OWN reason — the ledger_rows MEASURE_FAIL — and
+          // carrying a REAL count, so the leg below cannot be satisfied by one of
+          // this gate's several other exit-1 paths, nor by a `?` that was always
+          // there.
+          const env = scaffoldLedgerCase(dir, { ...FLOOR_FIXTURE, ledgerRowsRc: 3 });
+          const control = run(LEDGER_GATE, env);
+          expect(control.status).toBe(1);
+          expect(control.out).toContain("could not read the TEST ledger row count");
+          // ⚠️ ONE LINE PER ATTEMPT, DERIVED (Phase 164.9 plan 06). The seam is
+          // retried and NO attempt's stderr channel is discarded, so a read that
+          // failed every attempt captures one stub stderr line per attempt. The
+          // literal `1` that stood here was right before the retry and would be a
+          // stale pin the moment the budget moves.
+          expect(
+            control.out,
+            "the control did not print a countable stderr, so breaking `wc` below proves nothing",
+          ).toContain(`${ledgerGateAttemptBudget(LEDGER_GATE_SRC)} line(s) of stderr captured`);
+
+          const PATH = withPathShim(dir, "wc", [
+            // Only the single-argument `wc -l` the diagnosis uses; everything else
+            // delegates to the real binary.
+            'if [ "$#" -eq 1 ] && [ "$1" = "-l" ]; then exit 7; fi',
+          ]);
+          const { status, out } = run(LEDGER_GATE, { ...env, PATH });
+          expect(status).toBe(1);
+          // CALIBRATION: the shim APPLIED — the control's real count is gone.
+          expect(out, "the `wc` shim did not bite; the count is still the real one").not.toContain(
+            `${ledgerGateAttemptBudget(LEDGER_GATE_SRC)} line(s) of stderr captured`,
+          );
+          expect(out).toContain("could not read the TEST ledger row count");
+          expect(
+            out,
+            "the diagnosis rendered a BLANK where its count belongs — the operator is handed a sentence with a hole in it (D-12/SC-7)",
+          ).not.toContain("; line(s) of stderr captured");
+          expect(
+            out,
+            "an uncountable stderr must still SAY something — `?` is the count that could not be taken",
+          ).toContain("? line(s) of stderr captured");
+        });
+      });
+
+      it("RED: a ledger_rows query that exits 0 and returns NO ROW is a broken read, not a ledger of zero rows", () => {
+        withTempDir((dir) => {
+          expectFloorFiresOn(dir);
+
+          const { status, out } = run(
+            LEDGER_GATE,
+            // `null` is exactly what the stub did for every arm before this fix.
+            scaffoldLedgerCase(dir, { ...FLOOR_FIXTURE, ledgerRows: null }),
+          );
+          expect(status).toBe(1);
+          expect(out).toContain("returned NO ROW");
+          expect(out).not.toContain("are not present in the TEST ledger and are NOT baselined");
+          expect(out).not.toContain("ledger and body checks clean");
+        });
+      });
+
+      it("RED: a ledger_rows answer that is not a number is a MEASURE_FAIL, and its value is withheld", () => {
+        withTempDir((dir) => {
+          expectFloorFiresOn(dir);
+
+          const { status, out } = run(
+            LEDGER_GATE,
+            // A failed psql can print connection detail on STDOUT; before the fix
+            // the `case` silently rewrote exactly this into the inert empty string.
+            scaffoldLedgerCase(dir, { ...FLOOR_FIXTURE, ledgerRows: "FATAL: no pg_hba.conf entry" }),
+          );
+          expect(status).toBe(1);
+          expect(out).toContain("returned something that is not a number");
+          expect(out, "the unparseable answer was echoed into a PUBLIC job log").not.toContain(
+            "pg_hba.conf",
+          );
+          expect(out).not.toContain("ledger and body checks clean");
+        });
+      });
+
+      it("CONTROL: a READABLE count still decides — the floor fires above 50 and a clean run stays green", () => {
+        // The other direction, and it is load-bearing: without it the fix could be
+        // "MEASURE_FAIL on every count", which would satisfy all three legs above
+        // while turning the gate into a permanent red.
+        withTempDir((dir) => {
+          expectFloorFiresOn(dir);
+          const { status, out } = run(LEDGER_GATE, scaffoldLedgerCase(dir, {}));
+          expect(status).toBe(0);
+          expect(out).not.toContain("MEASURE_FAIL");
+          expect(out).toContain("ledger and body checks clean");
+        });
+      });
+    });
+  });
+
+  // ── 164.8.4-03 / 164.8.2-LEDGER-STDERR-PUBLIC-LOG ─────────────────────────
+  // The `missing`-direction call site redirected stdout and left stderr BARE
+  // — no redirect at all — so a psql connect/auth/DNS failure streamed the
+  // shared-TEST pooler host and DB user straight into a world-readable
+  // Actions log, while the site's own `|| fail` message already claimed the
+  // output was withheld. The fix reuses the `ledger_rows` arm's
+  // capture-count-WITHHOLD idiom verbatim: stderr captured to a per-run
+  // file, its line count computed with the braced-before-pipe fallback so an
+  // unreadable capture renders `?` rather than a blank, and only the count —
+  // never the content — reaches the failure message.
+  describe("[164.8.4-03 / 164.8.2-LEDGER-STDERR-PUBLIC-LOG] the `missing`-direction query withholds its stderr like `ledger_rows` does", () => {
+    it("RED: a missing-direction query that FAILS is named — its stderr is counted, never echoed", () => {
+      withTempDir((dir) => {
+        const env = scaffoldLedgerCase(dir, { missing: [], missingRc: 3 });
+        const { status, out } = run(LEDGER_GATE, env);
+        expect(status, out).toBe(1);
+        expect(out, "the failing query's exit status is not reported").toContain("exited 3");
+        expect(out, "the diagnosis must say the content was withheld").toContain("WITHHELD");
+        expect(
+          out,
+          "the diagnosis rendered a BLANK where its count belongs — the operator is handed a sentence with a hole in it (D-12/SC-7)",
+        ).not.toContain("; line(s) of stderr captured and WITHHELD");
+        // Public-log redaction: the injected stderr marker must not leak.
+        expect(out, "the withheld stderr leaked into a PUBLIC job log").not.toContain(
+          "connection to server",
+        );
+      });
+    });
+
+    it("⭐ the count in that failure message is TOTAL — an uncountable stderr renders `?`, never a blank", () => {
+      withTempDir((dir) => {
+        const env = scaffoldLedgerCase(dir, { missing: [], missingRc: 3 });
+        const control = run(LEDGER_GATE, env);
+        expect(control.status, control.out).toBe(1);
+        expect(
+          control.out,
+          "the control did not print a countable stderr, so breaking `wc` below proves nothing",
+        ).toContain(`${ledgerGateAttemptBudget(LEDGER_GATE_SRC)} line(s) of stderr captured`);
+
+        const PATH = withPathShim(dir, "wc", [
+          // Only the single-argument `wc -l` the diagnosis uses; everything
+          // else delegates to the real binary.
+          'if [ "$#" -eq 1 ] && [ "$1" = "-l" ]; then exit 7; fi',
+        ]);
+        const { status, out } = run(LEDGER_GATE, { ...env, PATH });
+        expect(status, out).toBe(1);
+        // CALIBRATION: the shim APPLIED — the control's real count is gone.
+        expect(out, "the `wc` shim did not bite; the count is still the real one").not.toContain(
+          `${ledgerGateAttemptBudget(LEDGER_GATE_SRC)} line(s) of stderr captured`,
+        );
+        expect(
+          out,
+          "an uncountable stderr must still SAY something — `?` is the count that could not be taken",
+        ).toContain("? line(s) of stderr captured");
+      });
+    });
+
+    it("CONTROL: a clean missing-direction query stays on the existing pass/drift path, unchanged", () => {
+      withTempDir((dir) => {
+        const env = scaffoldLedgerCase(dir, { missing: [] });
+        const { status, out } = run(LEDGER_GATE, env);
+        expect(status, out).toBe(0);
+        expect(out).not.toContain("WITHHELD");
+        expect(out).toContain("ledger and body checks clean");
+      });
+    });
+  });
+
+  // ── VAC08-JOIN (164.3.1-12, SC-1) ─────────────────────────────────────────
+  // The join key was validated on 12 rows, applied to 262, and wrong for 253.
+  // The fix is FOUR conventions OR-ed together in `default_ledger_query`
+  // (test-ledger-drift-check.sh :36-60 records how each was found). Nothing
+  // above exercises those clauses: every arm stubs the query, so a clause could
+  // be deleted and this file would stay green while CI resurrected the false
+  // 253. This block reads the clauses OUT OF THE SCRIPT at run time, builds one
+  // ledger row per convention, and asks the real gate for its verdict.
+  //
+  // ⚠️ HONEST BOUNDARY. The stub cannot run SQL. The predicate is evaluated in
+  // JS by an interpreter that knows exactly the four documented clause shapes
+  // and REFUSES any other (fail-by-text, never a silent pass) — so a fifth
+  // convention widens this arm's required coverage by making it red until the
+  // interpreter and a fixture row exist for it. What the gate is driven with is
+  // therefore the JS reading of the script's own clause list, and what is
+  // proven is that the gate's VERDICT follows that list: remove a load-bearing
+  // clause from the script and the row that only it matched is reported
+  // missing, by name (164.3.1-12-CORPUS-PROOFS.md, cycle 1).
+  describe("VAC08-JOIN — the join key is the union of every ledger naming convention", () => {
+    type LedgerRow = { version: string; name: string };
+    type JoinConvention = {
+      id: string;
+      /** The clause EXACTLY as the gate's SQL spells it, whitespace-collapsed. */
+      clause: string;
+      /** The same predicate, in JS. */
+      matches: (m: LedgerRow, fname: string) => boolean;
+      /** A ledger row shaped the way the ledger REALLY stores this convention. */
+      rowFor: (fname: string) => LedgerRow;
+    };
+    // ⛔ WR-07: a migration basename with no `_` used to make `tsOf` return
+    // nearly the WHOLE name (`slice(0, -1)`) and `descOf` return ALL of it
+    // (`slice(0)`), so the fixture rows below would have been built out of
+    // garbage that still looked like a timestamp/description pair.
+    const tsOf = (f: string) => f.slice(0, anchorIndex(f, "_"));
+    const descOf = (f: string) => f.slice(anchorIndex(f, "_") + 1);
+
+    // One entry per convention the script's header documents (:39-51). The row
+    // shapes are the MEASURED ones from those lines, not invented: an old row
+    // carries version=<ts> name=<desc>; a recent row carries a re-stamped
+    // version and the whole basename in name; a bare-ts row carries the
+    // timestamp alone; a desc-only row carries the description alone.
+    const JOIN_CONVENTIONS: readonly JoinConvention[] = [
+      {
+        id: "name-only",
+        clause: "m.name = r.fname",
+        matches: (m, f) => m.name === f,
+        rowFor: (f) => ({ version: "20260828061901", name: f }),
+      },
+      {
+        id: "version_name",
+        clause: "(m.version || '_' || m.name) = r.fname",
+        matches: (m, f) => `${m.version}_${m.name}` === f,
+        rowFor: (f) => ({ version: tsOf(f), name: descOf(f) }),
+      },
+      {
+        id: "bare-ts",
+        clause: "m.name = split_part(r.fname, '_', 1)",
+        matches: (m, f) => m.name === f.split("_")[0],
+        rowFor: (f) => ({ version: "20260826084633", name: tsOf(f) }),
+      },
+      {
+        id: "desc-only",
+        clause: "m.name = substr(r.fname, strpos(r.fname, '_') + 1)",
+        matches: (m, f) => m.name === descOf(f),
+        rowFor: (f) => ({ version: "20260826210044", name: descOf(f) }),
+      },
+    ];
+
+    /**
+     * The OR-clauses of the EXISTS predicate for one direction, read off the
+     * script's bytes. Anchored on the `case` label and the `WHERE NOT EXISTS (`
+     * marker the script itself carries; whitespace-collapsed so an indentation
+     * change is not a clause change.
+     */
+    function readJoinClauses(script: string, direction: "missing" | "extra"): string[] {
+      const label = `\n    ${direction})\n`;
+      const start = script.indexOf(label);
+      expect(start, `the '${direction})' case label is not where default_ledger_query keeps it`).toBeGreaterThan(-1);
+      const end = script.indexOf("\n      ;;", start);
+      expect(end, `the '${direction})' case has no ';;' terminator`).toBeGreaterThan(start);
+      const block = script.slice(start, end);
+      // `missing` spells it `WHERE NOT EXISTS (`, `extra` spells it `AND NOT EXISTS (`.
+      const m = /(?:WHERE|AND) NOT EXISTS \(\s*SELECT 1 FROM [^\n]*\n\s*WHERE ([\s\S]*?)\);"/.exec(block);
+      expect(m, `the '${direction}' query no longer carries a 'NOT EXISTS ( SELECT 1 FROM … WHERE …);' predicate`).not.toBeNull();
+      return (m as RegExpExecArray)[1]
+        .split(/\n\s*OR\s+/)
+        .map((c) => c.replace(/\s+/g, " ").trim())
+        .filter((c) => c.length > 0);
+    }
+
+    /** The interpreter: every clause the script carries MUST be one it knows. */
+    function conventionsOf(clauses: string[]): JoinConvention[] {
+      return clauses.map((clause) => {
+        const known = JOIN_CONVENTIONS.find((c) => c.clause === clause);
+        expect(
+          known,
+          `the gate carries a join clause this arm cannot evaluate: \`${clause}\`. Teach JOIN_CONVENTIONS its JS reading AND the ledger row shape that matches only under it — do not delete the clause and do not skip it here; an unevaluated clause is a convention the corpus does not cover`,
+        ).toBeDefined();
+        return known as JoinConvention;
+      });
+    }
+
+    const isMissing = (conv: JoinConvention[], ledger: LedgerRow[], fname: string) =>
+      !ledger.some((m) => conv.some((c) => c.matches(m, fname)));
+
+    function scaffoldJoinCase(dir: string, names: string[], ledger: LedgerRow[], conv: JoinConvention[]) {
+      mkdirSync(join(dir, "snapshot"), { recursive: true });
+      mkdirSync(join(dir, "live"), { recursive: true });
+      mkdirSync(join(dir, "migrations"), { recursive: true });
+      for (const n of names) writeFileSync(join(dir, "migrations", `${n}.sql`), COMMITTED_BODY);
+      writeFileSync(join(dir, "snapshot", "demo_fn.sql"), COMMITTED_BODY);
+      writeFileSync(join(dir, "live", "demo_fn.sql"), PROD_BODY_EQUIVALENT);
+      const emptyBaseline = join(dir, "baseline.empty.txt");
+      writeFileSync(emptyBaseline, "# intentionally empty\n");
+      const missing = names.filter((f) => isMissing(conv, ledger, f));
+      const extra = ledger
+        .filter((m) => !names.some((f) => conv.some((c) => c.matches(m, f))))
+        .map((m) => m.name);
+      return {
+        LEDGER_BASELINE_FILE: emptyBaseline,
+        TEST_SUPABASE_DB_URL: "stub-dsn-never-used",
+        LEDGER_QUERY_CMD: `bash ${writeStubLedger(dir, missing, extra, String(ledger.length))}`,
+        BODY_FETCH_CMD: `bash ${writeStubFetcher(dir)}`,
+        MIGRATIONS_DIR: join(dir, "migrations"),
+        SNAPSHOT_DIR: join(dir, "snapshot"),
+        BODY_CHECK_FUNCTIONS: "demo_fn",
+      };
+    }
+
+    /** One repo basename per convention, distinct so a verdict names its row. */
+    const FIXTURE_NAMES: Record<string, string> = {
+      "name-only": "20260101000000_join_name_only",
+      version_name: "20260102000000_join_version_name",
+      "bare-ts": "20260103000000_join_bare_ts",
+      "desc-only": "20260104000000_join_desc_only",
+    };
+
+    it("VAC08-JOIN: a ledger row matching under EACH convention is not reported missing; one matching under NONE still is, by name", () => {
+      const script = readFileSync(LEDGER_GATE, "utf8");
+      const clauses = readJoinClauses(script, "missing");
+      expect(clauses.length, "the missing-direction predicate parsed to ZERO clauses — the read broke, not the join").toBeGreaterThanOrEqual(1);
+      const conv = conventionsOf(clauses);
+
+      // ── ROWS come from the FIXED convention table, never from the script ──
+      // The predicate is the script's; the rows are not. MEASURED 2026-09-02
+      // while proving this arm: a first draft built rows from the clauses it
+      // had just read, so deleting a clause deleted its row and the arm stayed
+      // GREEN under the exact neuter it exists to catch (CORPUS-PROOFS cycle 1).
+      const rows: Array<{ id: string; fname: string; row: LedgerRow }> = JOIN_CONVENTIONS.map((c) => ({
+        id: c.id,
+        fname: FIXTURE_NAMES[c.id],
+        row: c.rowFor(FIXTURE_NAMES[c.id]),
+      }));
+      for (const r of rows) {
+        expect(r.fname, `no fixture basename for convention ${r.id}`).toBeDefined();
+        const own = JOIN_CONVENTIONS.find((c) => c.id === r.id) as JoinConvention;
+        expect(own.matches(r.row, r.fname), `the ${r.id} row does not even match its own clause — the fixture is wrong, not the gate`).toBe(true);
+      }
+
+      // ── DRIVEN, direction 1: every convention's row is FOUND ─────────────
+      withTempDir((dir) => {
+        const env = scaffoldJoinCase(
+          dir,
+          rows.map((r) => r.fname),
+          rows.map((r) => r.row),
+          conv,
+        );
+        const { status, out } = run(LEDGER_GATE, env);
+        expect(
+          status,
+          `the gate reported a migration MISSING although a ledger row matches it under one of its own conventions — a clause was removed and the false-253 path is open again:\n${out}`,
+        ).toBe(0);
+        expect(out).toContain("ledger presence: 0 absent");
+        for (const r of rows) expect(out, `${r.id}'s row (${r.fname}) was named as absent`).not.toContain(r.fname);
+      });
+
+      // ── DRIVEN, direction 2 (contrast): a row matching under NONE is still
+      // reported missing, and NAMED — the union is not so wide that it
+      // matches everything.
+      withTempDir((dir) => {
+        // ⛔ THE STRAY MUST SIT BELOW THE FRONTIER. Phase 164.8 plan 05 added
+        // the apply-on-merge exemption: a measured-missing migration authored
+        // ABOVE the newest PRESENT one is exempt, because nothing has yet had
+        // the chance to apply it. The stray was `20260105000000_…`, one tick
+        // ABOVE all four fixtures, so it became exempt and this arm went green
+        // for a reason that has nothing to do with the join key it exists to
+        // test. Dated BELOW them instead, so the only thing deciding this arm
+        // is still whether the row matches a convention.
+        const stray = "20251231000000_join_no_match";
+        const strayRow: LedgerRow = { version: "20260105999999", name: "unrelated_row" };
+        for (const c of conv) expect(c.matches(strayRow, stray), `the stray row matches under ${c.id}; it must match under nothing`).toBe(false);
+        const env = scaffoldJoinCase(
+          dir,
+          [...rows.map((r) => r.fname), stray],
+          [...rows.map((r) => r.row), strayRow],
+          conv,
+        );
+        const { status, out } = run(LEDGER_GATE, env);
+        expect(status, `a row matching under no convention must still be drift:\n${out}`).toBe(1);
+        expect(out).toContain("not present in the TEST ledger");
+        expect(out).toContain(stray);
+        for (const r of rows) expect(out, `${r.fname} matched and must not be named as absent`).not.toContain(r.fname);
+      });
+
+      // ── SPECIFICITY, MEASURED: which of the script's clauses does each row
+      // satisfy? A row that also matches under ANOTHER clause cannot detect
+      // that clause's removal at runtime. Pinned exactly so the record cannot
+      // rot: at HEAD (2026-09-02, four clauses) the `version_name` row
+      // {version=<ts>, name=<desc>} ALSO satisfies `desc-only` — m.name IS the
+      // description — so clause 2 is SUBSUMED by clause 4 for every
+      // underscore-free version and its removal is unobservable here (MEASURED
+      // in CORPUS-PROOFS cycle 1b: arm stays green). The other three rows
+      // match under exactly one clause each. The script header's ":44-47 BOTH
+      // clauses are required; neither is redundant" predates clauses 3 and 4
+      // and is stale for clause 2 — recorded in 164.3.1-12-SUMMARY.md, not
+      // patched here (the script is edited by no plan in this phase).
+      const specificity = Object.fromEntries(
+        rows.map((r) => [r.id, conv.filter((c) => c.matches(r.row, r.fname)).map((c) => c.id).sort()]),
+      );
+      const EXPECTED_SPECIFICITY: Record<string, string[]> = {
+        "name-only": ["name-only"],
+        version_name: ["desc-only", "version_name"],
+        "bare-ts": ["bare-ts"],
+        "desc-only": ["desc-only"],
+      };
+      expect(
+        specificity,
+        "the clause-subsumption structure changed. If a clause became load-bearing (or stopped being), update EXPECTED_SPECIFICITY WITH the measurement — do not loosen this to `toBeTruthy`",
+      ).toEqual(EXPECTED_SPECIFICITY);
+    });
+
+    it("the ADVISORY extra direction uses the SAME clause set as the missing direction — one predicate, two readings (:62-67)", () => {
+      const script = readFileSync(LEDGER_GATE, "utf8");
+      const missing = readJoinClauses(script, "missing");
+      const extra = readJoinClauses(script, "extra");
+      expect(missing.length, "zero clauses parsed out of the missing direction").toBeGreaterThanOrEqual(1);
+      expect(
+        extra,
+        "the two directions disagree BY CONSTRUCTION again — before 2026-08-30 the advisory direction joined on `name` alone and reported 224 phantom extras while the missing direction used all the clauses",
+      ).toEqual(missing);
+    });
+  });
+
+  it("RED: a repo migration with no matching schema_migrations.name row exits 1 and names it", () => {
+    withTempDir((dir) => {
+      const env = scaffoldLedgerCase(dir, { missing: ["20260829120000_demo"] });
+      const { status, out } = run(LEDGER_GATE, env);
+      expect(status).toBe(1);
+      expect(out).toContain("20260829120000_demo");
+      expect(out).toContain("not present in the TEST ledger");
+    });
+  });
+
+  it("RED: a TEST body that differs from the committed snapshot exits 1 with hashes only", () => {
+    withTempDir((dir) => {
+      const env = scaffoldLedgerCase(dir, { testBody: PROD_BODY_DRIFTED });
+      const { status, out } = run(LEDGER_GATE, env);
+      expect(status).toBe(1);
+      expect(out).toContain("does not match the committed body");
+      expect(out).not.toContain("gen_random_uuid");
+    });
+  });
+
+  it("GREEN: every migration present and every body matching after normalization exits 0", () => {
+    withTempDir((dir) => {
+      const env = scaffoldLedgerCase(dir, {});
+      const { status, out } = run(LEDGER_GATE, env);
+      expect(status).toBe(0);
+      expect(out).toContain("ledger and body checks clean");
+    });
+  });
+
+  it("RED: with NO injected commands and no TEST_SUPABASE_DB_URL, the real path exits 1 — never a silent skip", () => {
+    withTempDir((dir) => {
+      const env = scaffoldLedgerCase(dir, {});
+      // Drop the seams so the gate takes its production route, then withhold
+      // the DSN. This is the sql-tests "Run SQL self-tests" contract, not the
+      // mutex step's exit 0: a work step with no credential FAILS.
+      const { status, out } = run(LEDGER_GATE, {
+        ...env,
+        LEDGER_QUERY_CMD: "",
+        BODY_FETCH_CMD: "",
+        TEST_SUPABASE_DB_URL: "",
+      });
+      expect(status).toBe(1);
+      expect(out).toContain("TEST_SUPABASE_DB_URL is required and is not set");
+    });
+  });
+
+  it("SP-I06: a BODY_CHECK_FUNCTIONS name that is not a bare identifier is REFUSED before it reaches SQL", () => {
+    // ⛔ Half 1 applies an explicit charset allowlist to migration filenames
+    // before interpolating them into SQL, and fails loud. `fname` had no
+    // equivalent, and it is interpolated into `p.proname = '$1'` in
+    // `default_body_fetch` AND used twice as a filesystem path component.
+    // BODY_CHECK_FUNCTIONS is env-overridable, so that is one environment
+    // variable away from injecting SQL into the SHARED TEST database.
+    withTempDir((dir) => {
+      const env = scaffoldLedgerCase(dir, {});
+      const hostile = "selftest_fn'; DROP TABLE x; --";
+      const { status, out } = run(LEDGER_GATE, {
+        ...env,
+        BODY_CHECK_FUNCTIONS: hostile,
+      });
+      expect(status).toBe(1);
+      expect(out).toContain("refuses to interpolate into SQL");
+      expect(out).not.toContain("ledger and body checks clean");
+      // Refused BEFORE any comparison — not caught afterwards by the tallies.
+      expect(out).not.toContain("body comparison(s)");
+    });
+
+    // The other direction: the SHIPPED DEFAULT must still be accepted, or the
+    // guard has quietly disabled half 2 — which is the WR-02 defect it sits
+    // beside. Derived from the script, not restated here.
+    const src = readFileSync(LEDGER_GATE, "utf8");
+    const m = /BODY_CHECK_FUNCTIONS="\$\{BODY_CHECK_FUNCTIONS:-([^}]*)\}"/.exec(src);
+    expect(m, "could not read the default BODY_CHECK_FUNCTIONS list").not.toBeNull();
+    const defaults = (m as RegExpExecArray)[1].trim().split(/\s+/);
+    expect(defaults.length, "an empty default list would make this check vacuous").toBeGreaterThan(2);
+    for (const n of defaults) expect(n, `the shipped default "${n}" is refused by the guard`).toMatch(/^[A-Za-z0-9_$]+$/);
+
+    withTempDir((dir) => {
+      const env = scaffoldLedgerCase(dir, {});
+      const { status } = run(LEDGER_GATE, env);
+      expect(status, "the guard reddened the normal green path").toBe(0);
+    });
+  });
+
+  it("SP-M02: SIGINT EXITS — it does not delete the scratch dir and carry on", () => {
+    // ⛔ `trap "rm -rf '$tmp'" EXIT INT TERM`. A bash signal handler RESUMES
+    // the script when it returns; it does not exit. So Ctrl-C deleted $tmp and
+    // execution CONTINUED against files that no longer exist, inside a function
+    // whose whole subject is comparing file contents.
+    //
+    // Driven: the injected ledger query signals the script that invoked it, so
+    // the interrupt lands at a real point in the run rather than at a guessed
+    // moment.
+    withTempDir((dir) => {
+      const env = scaffoldLedgerCase(dir, {});
+      const interrupt = join(dir, "interrupt-query.sh");
+      writeFileSync(
+        interrupt,
+        [
+          "#!/usr/bin/env bash",
+          "# Produce nothing, then interrupt the gate that called us.",
+          'kill -INT "$PPID"',
+          "exit 0",
+        ].join("\n"),
+      );
+      chmodSync(interrupt, 0o755);
+
+      const { status, out } = run(LEDGER_GATE, {
+        ...env,
+        LEDGER_QUERY_CMD: `bash ${interrupt}`,
+      });
+      expect(status, "SIGINT did not terminate the gate — it resumed after the handler").toBe(130);
+      // The tell-tale of resumption: the run reaching the COUNT of a file the
+      // handler has already deleted.
+      expect(out).not.toContain("could not count the missing-migration rows");
+      expect(out).not.toContain("ledger and body checks clean");
+    });
+  });
+
+  it("SP-M01 RED: a grep that ERRORS while counting is a MEASURE_FAIL, not 'counted zero'", () => {
+    // ⛔ `missing_count="$(grep -ac … || true)"; missing_count="${missing_count:-0}"`.
+    // grep exits 0 with a count, 1 on no match, and >= 2 on an ERROR — and on
+    // >= 2 the substitution is EMPTY, `${:-0}` makes it 0, and the gate prints
+    // "all N repo migrations found by name."
+    //
+    // Driven with a `grep` that delegates to the real one for everything EXCEPT
+    // the missing-row file, where it exits 2. That is the only way to reach the
+    // branch: the file is created inside the script's own scratch dir.
+    withTempDir((dir) => {
+      const bin = join(dir, "bin");
+      mkdirSync(bin, { recursive: true });
+      const realGrep = spawnSync("bash", ["-c", "command -v grep"], {
+        encoding: "utf8",
+      }).stdout.trim();
+      expect(realGrep, "no real grep on PATH to delegate to").not.toBe("");
+      writeFileSync(
+        join(bin, "grep"),
+        [
+          "#!/usr/bin/env bash",
+          'for a in "$@"; do case "$a" in *missing.txt) exit 2;; esac; done',
+          `exec ${realGrep} "$@"`,
+        ].join("\n"),
+      );
+      chmodSync(join(bin, "grep"), 0o755);
+
+      // The ledger itself is CLEAN, so the only thing that can redden this run
+      // is the unreadable count — otherwise the arm would pass for the wrong
+      // reason.
+      const env = scaffoldLedgerCase(dir, {});
+      const clean = run(LEDGER_GATE, env);
+      expect(clean.status, "the fixture must be green before the grep is broken").toBe(0);
+
+      const { status, out } = run(LEDGER_GATE, {
+        ...env,
+        PATH: `${bin}:${process.env.PATH ?? ""}`,
+      });
+      expect(status, "an uncountable result was reported as a count of zero").toBe(1);
+      expect(out).toContain("could not count the missing-migration rows");
+      expect(out).not.toContain("repo migrations found by name");
+      expect(out).not.toContain("ledger and body checks clean");
+    });
+  });
+
+  // ── F5 (Phase 164.8.2) — THE RATCHET BLOCK'S FOUR REMAINING `|| true` READS ─
+  // SP-M01 above bounded ONE read. The ratchet block below it kept four more on
+  // the old shape — two `grep -aFxv` FILTERS and two `grep -ac` COUNTS — and
+  // every one of them decides the verdict: an empty `missing.new.txt` IS
+  // `0 NEW drift`, exit 0, `ledger and body checks clean`.
+  //
+  // ⛔ EACH ARM IS DRIVEN, NOT READ. The shim is a REAL `grep` that REALLY exits
+  // 2 for exactly one file and delegates every other call, which is the only way
+  // to reach these branches — the files are created inside the script's own
+  // scratch dir. And each arm asserts its CONTROL is red FOR ITS OWN REASON
+  // first: without that, "the broken run exits 1" would be satisfied by any of
+  // the gate's several other ways to exit 1.
+  //
+  // MEASURED 2026-09-10 against the PRE-FIX script, all four: exit 1 -> exit 0,
+  // `0 NEW drift.` and `::notice:: ledger and body checks clean.` A false green.
+  //
+  // A corpus of one BELOW-tip migration plus one applied above it. The tip is
+  // the greatest PRESENT timestamp (20260201000000), so a missing 20260101…
+  // sits UNDER it and is NOT exempt — the ONLY finding is NEW drift, which is
+  // exactly the disposition `missing.new.txt` carries.
+  const belowTipCorpus = (dir: string, name: string) => {
+    const d = join(dir, name);
+    mkdirSync(d, { recursive: true });
+    writeFileSync(join(d, "20260101000000_below.sql"), "");
+    writeFileSync(join(d, "20260201000000_applied.sql"), "");
+    return d;
+  };
+
+  it("F5 RED: a grep that ERRORS while counting the NEW-drift rows is a MEASURE_FAIL, never `0 NEW drift`", () => {
+    withTempDir((dir) => {
+      const migrations = belowTipCorpus(dir, "mig_below");
+      const env = {
+        ...scaffoldLedgerCase(dir, { missing: ["20260101000000_below"] }),
+        MIGRATIONS_DIR: migrations,
+      };
+
+      const control = run(LEDGER_GATE, env);
+      expect(
+        control.status,
+        "the fixture must be RED for NEW drift before the count is broken — otherwise the arm below proves nothing about this read",
+      ).toBe(1);
+      expect(control.out).toContain("are not present in the TEST ledger and are NOT baselined");
+
+      const { status, out } = run(LEDGER_GATE, {
+        ...env,
+        PATH: withPathShim(dir, "grep", [
+          'for a in "$@"; do case "$a" in */missing.new.txt) exit 2;; esac; done',
+        ]),
+      });
+      expect(status, "an uncountable NEW-drift count was reported as a clean gate").toBe(1);
+      expect(out).toContain("could not count the NEW-drift rows");
+      expect(out).not.toContain("0 NEW drift");
+      expect(out).not.toContain("ledger and body checks clean");
+    });
+  });
+
+  it("F5 RED: a grep that ERRORS while counting the STALE-baseline rows is a MEASURE_FAIL, not a baseline with nothing stale in it", () => {
+    withTempDir((dir) => {
+      const migrations = belowTipCorpus(dir, "mig_below");
+      // Nothing measured missing + a baseline naming a migration that IS
+      // present => the ONLY finding is a stale baseline entry.
+      const baseline = join(dir, "baseline.stale-entry.txt");
+      writeFileSync(baseline, "20260101000000_below\n");
+      const env = {
+        ...scaffoldLedgerCase(dir, { missing: [] }),
+        MIGRATIONS_DIR: migrations,
+        LEDGER_BASELINE_FILE: baseline,
+      };
+
+      const control = run(LEDGER_GATE, env);
+      expect(
+        control.status,
+        "the fixture must be RED for a STALE baseline entry before the count is broken",
+      ).toBe(1);
+      expect(control.out).toContain("are no longer MEASURED absent");
+
+      const { status, out } = run(LEDGER_GATE, {
+        ...env,
+        PATH: withPathShim(dir, "grep", [
+          'for a in "$@"; do case "$a" in */baseline.stale.txt) exit 2;; esac; done',
+        ]),
+      });
+      expect(status, "an uncountable stale count was reported as a clean gate").toBe(1);
+      expect(out).toContain("could not count the stale-baseline rows");
+      expect(out).not.toContain("ledger and body checks clean");
+    });
+  });
+
+  it("F5 RED: a grep that ERRORS while FILTERING the measured-missing rows against the baseline is a MEASURE_FAIL", () => {
+    withTempDir((dir) => {
+      const migrations = belowTipCorpus(dir, "mig_below");
+      const env = {
+        ...scaffoldLedgerCase(dir, { missing: ["20260101000000_below"] }),
+        MIGRATIONS_DIR: migrations,
+      };
+
+      const control = run(LEDGER_GATE, env);
+      expect(control.status, "the fixture must be RED for NEW drift before the filter is broken").toBe(1);
+      expect(control.out).toContain("are not present in the TEST ledger and are NOT baselined");
+
+      // The filter writes `missing.new.txt`; an rc-2 filter wrote it EMPTY and
+      // the whole finding disappeared without the count ever being wrong.
+      const { status, out } = run(LEDGER_GATE, {
+        ...env,
+        PATH: withPathShim(dir, "grep", [
+          'for a in "$@"; do case "$a" in */baseline.names.txt) exit 2;; esac; done',
+        ]),
+      });
+      expect(status, "an unreadable filter input was reported as a run with no new drift").toBe(1);
+      expect(out).toContain("could not filter the measured-missing rows against");
+      expect(out).not.toContain("0 NEW drift");
+      expect(out).not.toContain("ledger and body checks clean");
+    });
+  });
+
+  it("F5 RED: a grep that ERRORS while FILTERING the baseline against the measured-missing rows is a MEASURE_FAIL", () => {
+    withTempDir((dir) => {
+      const migrations = belowTipCorpus(dir, "mig_below");
+      const baseline = join(dir, "baseline.stale-entry.txt");
+      writeFileSync(baseline, "20260101000000_below\n");
+      const env = {
+        ...scaffoldLedgerCase(dir, { missing: [] }),
+        MIGRATIONS_DIR: migrations,
+        LEDGER_BASELINE_FILE: baseline,
+      };
+
+      const control = run(LEDGER_GATE, env);
+      expect(control.status, "the fixture must be RED for a STALE baseline entry before the filter is broken").toBe(1);
+      expect(control.out).toContain("are no longer MEASURED absent");
+
+      // ⛔ THE SHIM KEYS ON THE LAST ARGUMENT, NOT ON ANY ARGUMENT. Both filter
+      // lines name `baseline.names.txt`; only the STALE one takes it as its
+      // INPUT file. Keyed on any argument, the NEW-drift filter one line above
+      // fires first and this arm would pass on the other site's message.
+      const { status, out } = run(LEDGER_GATE, {
+        ...env,
+        PATH: withPathShim(dir, "grep", [
+          'last="${!#}"',
+          'case "$last" in */baseline.names.txt) exit 2;; esac',
+        ]),
+      });
+      expect(status, "an unreadable baseline was reported as a baseline with no stale entries").toBe(1);
+      expect(out).toContain("against the measured-missing rows");
+      expect(out).not.toContain("ledger and body checks clean");
+    });
+  });
+
+  it("RED: an EMPTY migrations corpus is an error, not a quiet pass (F11's shape)", () => {
+    withTempDir((dir) => {
+      const env = scaffoldLedgerCase(dir, {});
+      rmSync(join(dir, "migrations"), { recursive: true, force: true });
+      mkdirSync(join(dir, "migrations"), { recursive: true });
+      const { status, out } = run(LEDGER_GATE, env);
+      expect(status).toBe(1);
+      expect(out).toContain("that is not a pass");
+    });
+  });
+
+  it("WR-02 RED: a WHITESPACE-ONLY BODY_CHECK_FUNCTIONS exits 1 — half 2 must not compare nothing and pass", () => {
+    withTempDir((dir) => {
+      // `${BODY_CHECK_FUNCTIONS:-default}` only substitutes for EMPTY, so a
+      // single space survives it and then `for fname in $LIST` iterates zero
+      // times. MEASURED before the guard: "0 body comparison(s)" … "ledger and
+      // body checks clean" … exit 0, with DRIFT-01 unchecked.
+      const env = scaffoldLedgerCase(dir, {});
+      const { status, out } = run(LEDGER_GATE, {
+        ...env,
+        BODY_CHECK_FUNCTIONS: " ",
+      });
+      expect(status).toBe(1);
+      expect(out).toContain("half 2 compared NOTHING");
+      expect(out).not.toContain("ledger and body checks clean");
+    });
+  });
+
+  it("WR-02 RED: a non-empty list that yields ZERO comparisons is a MEASURE_FAIL", () => {
+    withTempDir((dir) => {
+      // The list guard cannot see this shape: the names are there, but the
+      // fetcher returns nothing for any of them.
+      const env = scaffoldLedgerCase(dir, {});
+      const silent = join(dir, "silent-fetch.sh");
+      writeFileSync(silent, "#!/usr/bin/env bash\nexit 0\n");
+      chmodSync(silent, 0o755);
+      const { status, out } = run(LEDGER_GATE, {
+        ...env,
+        BODY_FETCH_CMD: `bash ${silent}`,
+      });
+      expect(status).toBe(1);
+      expect(out).toContain("ZERO body comparisons");
+      expect(out).not.toContain("ledger and body checks clean");
+    });
+  });
+
+  // ⛔ The arm labels are pinned BY NAME, not by count. Phase 164.8 plan 05
+  // added three: a below-frontier RED (the ratchet is intact), an above-frontier
+  // GREEN (the apply-on-merge window is exempt) and the tip-EQUAL RED (the
+  // boundary, where an off-by-one would silently exempt a real defect). Deleting
+  // any one of them reds this test on the missing label rather than on a number.
+  // Phase 164.8.2 added three more: the harness-calibration arm (WR-03), and the
+  // ceiling pair `frontier-ceiling-exceeded RED` / `frontier-ceiling-boundary
+  // GREEN` (WR-02 — over the ceiling, and exactly AT it).
+  // ── Phase 164.9 plan 06 — THE RETRY'S TWO CONSTANTS, PINNED STATICALLY ─────
+  // ⛔ WHY THIS LEG EXISTS AT ALL. Every harness that drives the retry — this
+  // file's `scaffoldLedgerCase` and the gate's own `arm_env_retry` — sets
+  // `LEDGER_QUERY_RETRY_BACKOFF_SECONDS=0`, because they measure the retry's
+  // LOGIC and the real backoff would only buy them wall clock. That means NOTHING
+  // ELSE in this repo ever observes the SHIPPED default, so a typo in it (or a
+  // quiet change to 0) would ship green. This leg is the only thing standing
+  // there, and it is deliberately STATIC: it reads the constants, it does not run
+  // the gate.
+  it("the retry's budget is a FIXED assignment and its backoff default is what it claims", () => {
+    const budget = ledgerGateAttemptBudget(LEDGER_GATE_SRC);
+    expect(budget, "the attempt budget must be above 1 or there is no retry").toBeGreaterThan(1);
+
+    // ⚠️ THE TRAILING `\` EXCLUSION IS LOAD-BEARING, not tidiness. The gate's own
+    // `arm_env_retry` prefixes a child process with
+    // `LEDGER_QUERY_RETRY_BACKOFF_SECONDS=0 \`, which is an ENV PREFIX on a
+    // command, not an assignment of the shipped default. Counting it made this
+    // leg read "2 assignments" and fail for a reason that says nothing about the
+    // constant.
+    const backoffLines = LEDGER_GATE_SRC.split("\n").filter(
+      (l) =>
+        /^LEDGER_QUERY_RETRY_BACKOFF_SECONDS=/.test(l.trim()) &&
+        !l.trimEnd().endsWith("\\"),
+    );
+    expect(
+      backoffLines.length,
+      "LEDGER_QUERY_RETRY_BACKOFF_SECONDS is not a single live assignment line",
+    ).toBe(1);
+    const shipped = /^LEDGER_QUERY_RETRY_BACKOFF_SECONDS="\$\{LEDGER_QUERY_RETRY_BACKOFF_SECONDS:-(\d+)\}"$/.exec(
+      backoffLines[0].trim(),
+    );
+    expect(
+      shipped,
+      "the backoff is no longer an env-overridable assignment with a literal default — the harnesses that zero it would break, or the default became unreadable",
+    ).not.toBeNull();
+    expect(
+      Number(shipped?.[1]),
+      "the SHIPPED backoff default is 0, so a retry would hammer a fault it is supposed to wait out. Nothing else in this repo observes this value — every harness overrides it — so this leg is the only place it can be caught",
+    ).toBeGreaterThan(0);
+
+    // ⛔ THE BUDGET MUST NOT BE OVERRIDABLE. An env-overridable budget could be
+    // set to 1 from a workflow's `env:`, switching the retry off with nothing in
+    // the run saying so. `ledgerGateAttemptBudget` above only matches the fixed
+    // form, so this is a second, explicit statement of the same requirement in
+    // the words a future editor would search for.
+    expect(
+      LEDGER_GATE_SRC,
+      "the attempt budget became env-overridable — a workflow could then disable the retry silently",
+    ).not.toContain("LEDGER_QUERY_ATTEMPT_BUDGET=${LEDGER_QUERY_ATTEMPT_BUDGET");
+  });
+
+  it("--self-test proves every red mode and both green paths, and exits 0", () => {
+    const res = spawnSync("bash", [LEDGER_GATE, "--self-test"], {
+      cwd: process.cwd(),
+      encoding: "utf8",
+    });
+    const out = `${res.stdout ?? ""}${res.stderr ?? ""}`;
+    expect(res.status).toBe(0);
+    expect(out).toContain("missing-ledger-row RED");
+    expect(out).toContain("body-mismatch RED");
+    expect(out).toContain("empty-body-check-list RED");
+    expect(out).toContain("zero-comparisons RED");
+    expect(out).toContain("green path");
+    expect(out).toContain("below-frontier-missing RED");
+    expect(out).toContain("above-frontier-missing GREEN");
+    expect(out).toContain("tip-equal-missing RED");
+    expect(out).toContain("frontier-ceiling-exceeded RED");
+    expect(out).toContain("frontier-ceiling-boundary GREEN");
+    // Phase 164.9 plan 06 — the two retry arms. Named here for the same reason
+    // as every arm above: an arm that vanished from the corpus must fail THIS
+    // leg by name, not merely move a count.
+    expect(out).toContain("retry recovers a transient ledger read (GREEN)");
+    expect(out).toContain(
+      "retry EXHAUSTS loudly, and answer-level failures are not retried RED",
+    );
+    expect(out).toContain("harness calibration: run_arm can report FAIL, and the flip inverts");
+  });
+
+  // ── WR-03 (Phase 164.8.2) — THE ARM RATCHET IS A LIVE, DATED, SINGLE LINE ──
+  // ⚠️ THIS BLOCK IS A DELIBERATE HAND COPY of the twin in
+  // src/__tests__/restore-test-from-baseline.test.ts ("EXPECTED_ARMS=26 is a live
+  // line, exactly once, with its MEASURED date beside it"), including its region
+  // slicer. This repo's wiring tests are self-contained files by convention
+  // (Phase 164.8 Plan 05 Task 2) — do NOT extract a shared helper.
+  //
+  // ⛔ WHY THE COPY EXISTS AT ALL: `EXPECTED_ARMS` does not match
+  // gate-family-meta.test.ts's threshold name class (no FLOOR/MIN/CEILING/MAX/
+  // LIMIT), so SC-9's bare-measurement scan will never see it. These legs are the
+  // ONLY thing keeping the constant single, live, and its date honest.
+  //
+  // ⛔ AND WHY THE COUNT IS DERIVED, NOT RESTATED: the sibling hardcodes the
+  // needle, which reds on any bump and forces a reviewed test edit. Here the same
+  // job is done by the `prints N/N` AGREEMENT leg — you cannot move the constant
+  // without also moving the dated MEASURED sentence beside it. That is the leg the
+  // sibling had to ADD after its date check proved blind to a count drift.
+  it("WR-03: EXPECTED_ARMS is a live line, exactly once, with its MEASURED date and an agreeing `prints N/N`", () => {
+    const SRC = readFileSync(LEDGER_GATE, "utf8");
+
+    /** A line is LIVE when its first non-blank character does not open a `#` comment. */
+    const isLive = (l: string) => {
+      const t = l.trim();
+      return t !== "" && !t.startsWith("#");
+    };
+    /** How many LIVE lines of `text` contain `needle`. */
+    const liveCount = (text: string, needle: string) =>
+      text.split("\n").filter((l) => isLive(l) && l.includes(needle)).length;
+    /**
+     * `self_test() {` to the closing `}` before the `case "${1:-}"` dispatcher.
+     * Sliced rather than asserted whole-file: `EXPECTED_ARMS` must live INSIDE the
+     * harness it ratchets, and a needle found in the dispatcher would be prose.
+     */
+    const selfTestRegion = (text: string): string => {
+      const lines = text.split("\n");
+      const a = lines.findIndex((l) => l.startsWith("self_test() {"));
+      if (a < 0) return "";
+      const b = lines.findIndex((l, i) => i > a && l.startsWith('case "${1:-}"'));
+      return b < 0 ? "" : lines.slice(a, b).join("\n");
+    };
+
+    const region = selfTestRegion(SRC);
+    expect(
+      region.split("\n").length,
+      "the self_test() region is empty — its anchor moved, and every pin below is now vacuously true",
+    ).toBeGreaterThan(20);
+
+    // (a) EXACTLY ONE live constant. A commented-out ratchet is not a ratchet,
+    // and two of them can disagree.
+    const armsLines = region
+      .split("\n")
+      .filter((l) => isLive(l) && /^EXPECTED_ARMS=\d+$/.test(l.trim()));
+    expect(
+      armsLines.length,
+      "the arm ratchet is no longer a single live `EXPECTED_ARMS=<n>` line inside self_test()",
+    ).toBe(1);
+    const ARMS = Number(armsLines[0].trim().split("=")[1]);
+    expect(ARMS > 0).toBe(true);
+    const NEEDLE = `EXPECTED_ARMS=${ARMS}`;
+    expect(liveCount(region, NEEDLE)).toBe(1);
+
+    // (b) SC-9's shape, applied by hand because SC-9 itself cannot see this name:
+    // a MEASURED token AND a date on the line or the one above it.
+    const lines = region.split("\n");
+    const at = lines.findIndex((l) => isLive(l) && /^EXPECTED_ARMS=\d+$/.test(l.trim()));
+    const beside = `${lines[at - 1] ?? ""}\n${lines[at]}`;
+    expect(beside, "EXPECTED_ARMS carries no MEASURED token beside it").toContain("MEASURED");
+    expect(beside, "EXPECTED_ARMS carries no date beside it").toMatch(/\b20\d\d-\d\d-\d\d\b/);
+
+    // (c) The harness must ASSERT the count, and assert it BEFORE the pass check.
+    expect(liveCount(region, 'if [ "$total" -ne "$EXPECTED_ARMS" ]; then')).toBe(1);
+    expect(liveCount(region, 'if [ "$pass" -ne "$total" ]; then')).toBe(1);
+    const countAt = lines.findIndex((l) => isLive(l) && l.includes('-ne "$EXPECTED_ARMS"'));
+    const passAt = lines.findIndex((l) => isLive(l) && l.includes('if [ "$pass" -ne "$total" ]'));
+    expect(
+      countAt,
+      "the pass check runs before the count check — a run that lost an arm would report a smaller PASSED first",
+    ).toBeLessThan(passAt);
+
+    // (d) The SUCCESS LINE's denominator is the RATCHET, not the running total.
+    expect(
+      liveCount(region, "${pass}/${EXPECTED_ARMS} arms"),
+      "the success line no longer prints the constant as its denominator — `${total}` moves with the corpus and reads as a pass for having tested less",
+    ).toBe(1);
+    expect(liveCount(region, "${pass}/${total} arms —")).toBe(0);
+
+    // (e) THE PROSE AGREES WITH THE CONSTANT. Derived from the constant so this
+    // assertion cannot itself go stale.
+    const printsClaims = SRC.split("\n").filter((l) => /prints \d+\/\d+/.test(l));
+    expect(
+      printsClaims.length,
+      "no `prints N/N` sentence beside the ratchet — it is the human-readable half of the same fact and this leg exists to keep the two from drifting",
+    ).toBeGreaterThan(0);
+    for (const claim of printsClaims) {
+      expect(
+        claim,
+        `a comment claims ${/prints \d+\/\d+/.exec(claim)?.[0]} while EXPECTED_ARMS is ${ARMS}`,
+      ).toContain(`prints ${ARMS}/${ARMS}`);
+    }
+
+    // ── CALIBRATIONS. Each mutation is asserted to have APPLIED first: a neuter
+    // that does not apply reads as GREEN, which is the defect class this whole
+    // phase is about.
+    // MOVED — the value-exact needle must stop matching, and the prose must disagree.
+    const moved = SRC.replace(`\n  ${NEEDLE}\n`, `\n  EXPECTED_ARMS=${ARMS + 1}\n`);
+    expect(moved).not.toBe(SRC);
+    expect(liveCount(selfTestRegion(moved), NEEDLE)).toBe(0);
+    expect(
+      SRC.split("\n")
+        .filter((l) => /prints \d+\/\d+/.test(l))
+        .every((l) => l.includes(`prints ${ARMS + 1}/${ARMS + 1}`)),
+      "the `prints N/N` prose still agrees with a MOVED constant, so the agreement leg is vacuous",
+    ).toBe(false);
+
+    // COMMENTED OUT — a whole-file `toContain` would still pass; this pin must not.
+    const commented = SRC.replace(`\n  ${NEEDLE}\n`, `\n  # ${NEEDLE}\n`);
+    expect(commented).not.toBe(SRC);
+    expect(liveCount(selfTestRegion(commented), NEEDLE)).toBe(0);
+
+    // DOUBLED — two ratchets are a disagreement waiting to happen.
+    const doubled = SRC.replace(`\n  ${NEEDLE}\n`, `\n  ${NEEDLE}\n  ${NEEDLE}\n`);
+    expect(doubled).not.toBe(SRC);
+    expect(liveCount(selfTestRegion(doubled), NEEDLE)).toBe(2);
+  });
+
+  // ── WR-02 (Phase 164.8.2) — THE FRONTIER EXEMPTION HAS A CEILING ──────────
+  // The exemption tolerates migrations authored above the TEST ledger's frontier
+  // tip, because under apply-on-merge they cannot be present yet. That tolerance
+  // was UNBOUNDED: a stalled `apply-test` exempted every later migration forever
+  // while the gate printed `0 NEW drift`.
+  describe("WR-02 — the frontier exemption's count ceiling", () => {
+    // ⛔ ALL READS GO THROUGH `node:fs`, NEVER A SHELL GREP. This repo has a
+    // measured NUL-blind tracked file (`src/lib/wizardErrors.test.ts`) where grep
+    // exits 1 and the absence reads as "clean".
+    const SRC = readFileSync(LEDGER_GATE, "utf8");
+    const isLive = (l: string) => {
+      const t = l.trim();
+      return t !== "" && !t.startsWith("#");
+    };
+    const liveCount = (text: string, needle: string) =>
+      text.split("\n").filter((l) => isLive(l) && l.includes(needle)).length;
+
+    /**
+     * The ceiling, READ FROM THE SCRIPT rather than restated here. The two driven
+     * arms below size their corpora from it (ceiling+1 breaches, ceiling is the
+     * boundary), so LOWERING the ratchet — the one direction it is allowed to
+     * move — keeps them measuring the boundary instead of silently measuring a
+     * number that used to be the boundary.
+     */
+    const CEILING = Number(
+      (SRC.split("\n").find((l) => isLive(l) && /^FRONTIER_EXEMPT_CEILING=\d+$/.test(l.trim())) ?? "=0")
+        .trim()
+        .split("=")[1],
+    );
+
+    // ⛔ WHAT THIS LAYER DOES NOT COVER, said plainly. CLAUDE.md's two-layer rule
+    // is satisfied for a REPO corpus by re-deriving it from disk — that is what
+    // `mutation-runner-floors.test.ts` does for FILES_FLOOR ("RATCHET STALE: …").
+    // It CANNOT be done here: the exempt count is a property of a LIVE, shared
+    // ledger, not of this repo, so a ceiling left STALE-HIGH relative to reality
+    // is not detectable without a database. What this block does cover is that
+    // the ceiling EXISTS, is single, is live, could ever fire, and is compared.
+    // Lowering it when reality allows stays a human act, recorded by the dated
+    // MEASURED line beside the constant and by its KNOWN_THRESHOLD_SITES entry.
+    it("FRONTIER_EXEMPT_CEILING is a single live line, a positive integer, and is actually compared", () => {
+      const ceilLines = SRC.split("\n").filter(
+        (l) => isLive(l) && /^FRONTIER_EXEMPT_CEILING=\d+$/.test(l.trim()),
+      );
+      expect(
+        ceilLines.length,
+        "the ceiling is not a single live top-level `FRONTIER_EXEMPT_CEILING=<digits>` line. 0 means it is missing, commented out, or spelled `${…:-3}` (which hands CI a knob that raises the ceiling with no reviewed diff, and which gate-family-meta's threshold scanner cannot see at all); 2 means it was doubled and two of them can disagree",
+      ).toBe(1);
+
+      // Copied idiom from mutation-runner-floors.test.ts ("is a positive integer
+      // — a floor of 0 could never fire"). Here the failure runs the other way: a
+      // ceiling of 0 would refuse EVERY exemption and red every migration-adding
+      // PR by construction, re-opening what [164.8-PUSH-RACE-VAC08] recorded.
+      const ceiling = Number(ceilLines[0].trim().split("=")[1]);
+      expect(Number.isInteger(ceiling)).toBe(true);
+      expect(
+        ceiling,
+        "a ceiling of 0 disables the apply-on-merge exemption entirely",
+      ).toBeGreaterThan(0);
+
+      // A constant nothing compares is decoration.
+      expect(
+        liveCount(SRC, 'if [ "$exempt_count" -gt "$FRONTIER_EXEMPT_CEILING" ]; then'),
+        "the ceiling is declared but never compared, or the comparison was rewritten against a literal",
+      ).toBe(1);
+
+      // CALIBRATIONS. Each mutation is asserted to have APPLIED first — a neuter
+      // that does not apply reads as GREEN.
+      const envKnob = SRC.replace(
+        `\nFRONTIER_EXEMPT_CEILING=${ceiling}\n`,
+        `\nFRONTIER_EXEMPT_CEILING="\${FRONTIER_EXEMPT_CEILING:-${ceiling}}"\n`,
+      );
+      expect(envKnob).not.toBe(SRC);
+      expect(
+        envKnob.split("\n").filter((l) => isLive(l) && /^FRONTIER_EXEMPT_CEILING=\d+$/.test(l.trim())).length,
+      ).toBe(0);
+
+      const commented = SRC.replace(
+        `\nFRONTIER_EXEMPT_CEILING=${ceiling}\n`,
+        `\n# FRONTIER_EXEMPT_CEILING=${ceiling}\n`,
+      );
+      expect(commented).not.toBe(SRC);
+      expect(
+        commented.split("\n").filter((l) => isLive(l) && /^FRONTIER_EXEMPT_CEILING=\d+$/.test(l.trim())).length,
+      ).toBe(0);
+
+      const comparisonGone = SRC.replace(
+        'if [ "$exempt_count" -gt "$FRONTIER_EXEMPT_CEILING" ]; then',
+        'if [ "$exempt_count" -gt 999 ]; then',
+      );
+      expect(comparisonGone).not.toBe(SRC);
+      expect(liveCount(comparisonGone, 'if [ "$exempt_count" -gt "$FRONTIER_EXEMPT_CEILING" ]; then')).toBe(0);
+    });
+
+    /**
+     * A migrations corpus of ONE applied file plus `above` files above its
+     * timestamp, written where the gate will read it.
+     *
+     * ⚠️ TWO CORPORA, NOT ONE — the same trap the script's own arms carry. The tip
+     * is the greatest PRESENT timestamp, so deriving the boundary case by making
+     * one above-tip file "present" in the over-the-ceiling corpus would MOVE THE
+     * TIP UP and turn the rest into BELOW-tip absences: still red, but as
+     * below-frontier drift rather than as a ceiling breach.
+     */
+    const ceilingCorpus = (dir: string, name: string, above: number) => {
+      const d = join(dir, name);
+      mkdirSync(d, { recursive: true });
+      writeFileSync(join(d, "20260201000000_applied.sql"), "");
+      const names: string[] = [];
+      for (let i = 1; i <= above; i++) {
+        const n = `2026${String(i + 2).padStart(2, "0")}01000000_above${i}`;
+        writeFileSync(join(d, `${n}.sql`), "");
+        names.push(n);
+      }
+      return { dir: d, names };
+    };
+
+    it("RED: more exempted migrations than the ceiling fails the gate and NAMES every one of them", () => {
+      expect(CEILING, "the ceiling could not be read from the script — every arm below would be vacuous").toBeGreaterThan(0);
+      withTempDir((dir) => {
+        const corpus = ceilingCorpus(dir, "mig_ceil_over", CEILING + 1);
+        const env = scaffoldLedgerCase(dir, { missing: corpus.names });
+        const { status, out } = run(LEDGER_GATE, { ...env, MIGRATIONS_DIR: corpus.dir });
+
+        expect(status).toBe(1);
+        expect(out).toContain("FRONTIER_EXEMPT_CEILING exceeded");
+        // ⛔ It must not merely refuse — it must say WHAT is exempted, and say it
+        // on the ERROR channel. The pre-existing `::notice::` block prints the
+        // same names, so a bare `toContain(name)` would stay green with the
+        // ceiling's own naming `sed` deleted.
+        for (const n of corpus.names) {
+          expect(out).toContain(`::error::  exempt (above tip): ${n}`);
+        }
+        // And it must tell the reader the fix is the apply, not the ceiling.
+        expect(out).toContain("do NOT raise the ceiling");
+      });
+    });
+
+    // ⛔ IN-02 (Phase 164.8.2) — THE SUMMARY MUST NOT READ CLEAN BESIDE ITS OWN
+    // ERROR. `new_count` really is 0 on a ceiling breach, so the trailing
+    // `0 NEW drift.` was not WRONG — it was a VERDICT printed unconditionally
+    // next to an `::error::` that contradicts it. MEASURED 2026-09-10 pre-fix,
+    // one run:
+    //   ::error::… FRONTIER_EXEMPT_CEILING exceeded: 4 … > ceiling 3.
+    //     ledger presence: 4 absent — 0 baselined (…), 4 exempt …; 0 NEW drift.
+    // The board was red and the line a reader scans for the verdict was not.
+    //
+    // ⛔ THE NEEDLE IS `0 NEW drift.` WITH ITS TERMINATING PERIOD. `0 NEW drift`
+    // without one still appears post-fix, inside the caveat — binding to the
+    // bare phrase would make this arm unable to fail.
+    it("IN-02 RED: a ceiling breach's summary does not claim a clean verdict beside its own ::error::", () => {
+      expect(CEILING).toBeGreaterThan(0);
+      withTempDir((dir) => {
+        const corpus = ceilingCorpus(dir, "mig_ceil_over", CEILING + 1);
+        const env = scaffoldLedgerCase(dir, { missing: corpus.names });
+        const { status, out } = run(LEDGER_GATE, { ...env, MIGRATIONS_DIR: corpus.dir });
+
+        expect(status).toBe(1);
+        expect(out).toContain("FRONTIER_EXEMPT_CEILING exceeded");
+        // The MEASUREMENT half stays — hiding the counts is not the fix.
+        expect(out).toContain(`${CEILING + 1} exempt as above the ledger frontier`);
+        // The VERDICT half must not read clean.
+        expect(
+          out,
+          "the presence summary still ends `0 NEW drift.` while an ::error:: is being raised — two contradictory sentences in one run",
+        ).not.toContain("0 NEW drift.");
+        expect(out).toContain("but this run is NOT clean");
+      });
+    });
+
+    it("IN-02 CONTROL: a genuinely clean run still ends `0 NEW drift.` with no caveat", () => {
+      // The other direction. Without this leg the fix could be "always print the
+      // caveat", which would make the RED arm above pass while telling every
+      // green run it is not clean.
+      expect(CEILING).toBeGreaterThan(0);
+      withTempDir((dir) => {
+        const corpus = ceilingCorpus(dir, "mig_ceil_edge", CEILING);
+        const env = scaffoldLedgerCase(dir, { missing: corpus.names });
+        const { status, out } = run(LEDGER_GATE, { ...env, MIGRATIONS_DIR: corpus.dir });
+
+        expect(status).toBe(0);
+        expect(out).toContain("0 NEW drift.");
+        expect(out).not.toContain("but this run is NOT clean");
+        expect(out).toContain("ledger and body checks clean");
+      });
+    });
+
+    // ⛔ F5 (Phase 164.8.2) — THE CEILING SAT ON A READ THAT COULD RETURN 0
+    // WITHOUT MEASURING. `exempt_count` was `grep -ac … || true`, and 0 is the
+    // ONE value `-gt FRONTIER_EXEMPT_CEILING` can never fire on. So a run whose
+    // read failed did not merely lose the count — it made this whole control
+    // unreachable while printing `0 above-tip migration(s) exempted` and
+    // `ledger and body checks clean`.
+    //
+    // MEASURED 2026-09-10 against the PRE-FIX script with this exact shim:
+    //   `::error::… FRONTIER_EXEMPT_CEILING exceeded: 4 …`, exit 1
+    //     became
+    //   `ledger frontier: tip=20260201000000; 0 above-tip migration(s) exempted.`
+    //   `::notice::… ledger and body checks clean.`, exit 0.
+    it("F5 RED: a grep that ERRORS while counting the EXEMPTED migrations is a MEASURE_FAIL — an uncountable exemption must not read as the one count no ceiling can exceed", () => {
+      expect(CEILING).toBeGreaterThan(0);
+      withTempDir((dir) => {
+        const corpus = ceilingCorpus(dir, "mig_ceil_over", CEILING + 1);
+        const env = {
+          ...scaffoldLedgerCase(dir, { missing: corpus.names }),
+          MIGRATIONS_DIR: corpus.dir,
+        };
+
+        const control = run(LEDGER_GATE, env);
+        expect(
+          control.status,
+          "the fixture must BREACH the ceiling before the count is broken — otherwise the arm below proves nothing about this read",
+        ).toBe(1);
+        expect(control.out).toContain("FRONTIER_EXEMPT_CEILING exceeded");
+
+        const { status, out } = run(LEDGER_GATE, {
+          ...env,
+          PATH: withPathShim(dir, "grep", [
+            'for a in "$@"; do case "$a" in */exempt.frontier.txt) exit 2;; esac; done',
+          ]),
+        });
+        expect(status, "an uncountable exemption disabled the ceiling and passed the gate").toBe(1);
+        expect(out).toContain("could not count the frontier-exempted migrations");
+        expect(out).not.toContain("ledger and body checks clean");
+        expect(out).not.toContain("0 above-tip migration(s) exempted");
+      });
+    });
+
+    it("GREEN: exactly the ceiling stays green — and the carried count stays VISIBLE", () => {
+      expect(CEILING).toBeGreaterThan(0);
+      withTempDir((dir) => {
+        const corpus = ceilingCorpus(dir, "mig_ceil_edge", CEILING);
+        const env = scaffoldLedgerCase(dir, { missing: corpus.names });
+        const { status, out } = run(LEDGER_GATE, { ...env, MIGRATIONS_DIR: corpus.dir });
+
+        expect(status).toBe(0);
+        expect(out).not.toContain("FRONTIER_EXEMPT_CEILING exceeded");
+        // A ratchet that hides the gap it carries is a mute button.
+        expect(out).toContain(`${CEILING} above-tip migration(s) exempted`);
+        expect(out).toContain("0 NEW drift");
+      });
+    });
+  });
+
+  // ── IN-01 (Phase 164.8.2) — THE ARMS RATCHET NAMES THE DIRECTION IT SAW ───
+  // The ratchet fired correctly in both directions and described only one of
+  // them. MEASURED 2026-09-10 with a `run_arm` line DUPLICATED against the
+  // pre-fix script: `12 arms ran but EXPECTED_ARMS is 11. An arm that
+  // disappeared is a RED, not a smaller PASSED.` — the count right, the reader
+  // sent looking for a deletion that never happened.
+  //
+  // ⛔ BOTH LEGS DRIVE THE REAL HARNESS. A static read of the two message
+  // strings would pass on a script where the `-lt` branch is unreachable.
+  describe("IN-01 — the arms ratchet says which direction it measured", () => {
+    const SRC = readFileSync(LEDGER_GATE, "utf8");
+    /**
+     * The ratchet, DERIVED. The two legs below duplicate and delete one arm, so
+     * the counts they expect are `ARMS + 1` and `ARMS - 1` BY CONSTRUCTION — a
+     * restated `11` here is a second place to maintain the same fact, and it
+     * would red on the next arm that lands without having an opinion about it.
+     */
+    const ARMS = ledgerGateExpectedArms(SRC);
+    /** One whole `run_arm` invocation, unique in the file. */
+    const ARM_LINE = '  run_arm "green path" 0 arm_env "$tmp/live" ""\n';
+
+    /** Runs `--self-test` on a scratch copy carrying `mutated`. */
+    const selfTest = (mutated: string) =>
+      withTempDir((dir) => {
+        const copy = join(dir, "gate-arm-count.sh");
+        writeFileSync(copy, mutated);
+        chmodSync(copy, 0o755);
+        const res = spawnSync("bash", [copy, "--self-test"], {
+          cwd: process.cwd(),
+          encoding: "utf8",
+        });
+        return { status: res.status, out: `${res.stdout ?? ""}${res.stderr ?? ""}` };
+      });
+
+    it("an ADDED arm is reported as ADDED — with the remedy that fits it", () => {
+      expect(
+        occurrences(SRC, ARM_LINE),
+        "the arm line this mutation duplicates is not unique — the neuter would not apply cleanly",
+      ).toBe(1);
+      const doubled = SRC.replace(ARM_LINE, ARM_LINE + ARM_LINE);
+      expect(doubled, "the neuter did not change the script").not.toBe(SRC);
+      expect(occurrences(doubled, ARM_LINE)).toBe(2);
+
+      const { status, out } = selfTest(doubled);
+      expect(status).toBe(1);
+      expect(out).toContain(`${ARMS + 1} arms ran but EXPECTED_ARMS is ${ARMS}`);
+      expect(
+        out,
+        "an ADDED arm is still described as one that disappeared — the reader is sent looking for a deletion that never happened",
+      ).toContain("An arm was ADDED without raising the ratchet");
+      expect(out).not.toContain("An arm DISAPPEARED");
+    });
+
+    it("a VANISHED arm is reported as vanished — and the ratchet is not offered as the fix", () => {
+      const deleted = SRC.replace(ARM_LINE, "");
+      expect(deleted, "the neuter did not change the script").not.toBe(SRC);
+      expect(occurrences(deleted, ARM_LINE)).toBe(0);
+
+      const { status, out } = selfTest(deleted);
+      expect(status).toBe(1);
+      expect(out).toContain(`${ARMS - 1} arms ran but EXPECTED_ARMS is ${ARMS}`);
+      expect(out).toContain("An arm DISAPPEARED");
+      expect(out).toContain("Never lower EXPECTED_ARMS");
+      expect(out).not.toContain("An arm was ADDED");
+    });
+  });
+
+  // ── F6 (Phase 164.8.2) — A FAILING ARM MUST SAY WHY ───────────────────────
+  // `run_arm` ran every arm as `( "$@" ) >/dev/null 2>&1`. The exit-code
+  // contract was correct — `arm_frontier_ceiling_exceeded` is `want 1` and
+  // `return 0`s on each of its FOUR MEASURE_FAIL paths, so the arm genuinely
+  // FAILs — but all four causes printed to a discarded channel and the operator
+  // saw one undifferentiated `FAIL frontier-ceiling-exceeded RED`.
+  //
+  // ⛔ THIS ARM BINDS TO THE DIAGNOSIS, NOT TO THE EXIT CODE, and it has to:
+  // the exit code was ALREADY right, so an arm asserting `status === 1` would
+  // have passed against the pre-fix script and proved nothing. MEASURED
+  // 2026-09-10 on the same mutated copy, pre-fix vs post-fix — byte-identical
+  // `FAIL frontier-ceiling-exceeded RED (exit 0, expected 1)` and
+  // `SELF-TEST FAIL: 10/11`, exit 1 both times; only the sentence differs.
+  it("F6: a FAILING self-test arm re-emits its own MEASURE_FAIL sentence — the exit code was never the missing half", () => {
+    const SRC = readFileSync(LEDGER_GATE, "utf8");
+    // Derived, not restated: the neuter below costs exactly one arm's worth of
+    // passing, so the tally it produces is `ARMS - 1` of `ARMS` by construction.
+    const ARMS = ledgerGateExpectedArms(SRC);
+    // The ceiling arm's own naming `sed`. Deleting it leaves the gate exiting 1
+    // for the right reason but no longer NAMING what was exempted, which is one
+    // of the arm's four MEASURE_FAIL paths — the gate's own red mode, not an
+    // invented failure.
+    const NAMING_SED = `    sed 's/^/::error::  exempt (above tip): /' "$exempt_file"\n`;
+    expect(
+      occurrences(SRC, NAMING_SED),
+      "the ceiling's naming `sed` is not where this mutation expects it — the neuter below would not apply, and a neuter that does not apply reads as GREEN",
+    ).toBe(1);
+    const mutated = SRC.replace(NAMING_SED, "");
+    expect(mutated, "the neuter did not change the script").not.toBe(SRC);
+    expect(mutated.split("\n").length).toBe(SRC.split("\n").length - 1);
+
+    withTempDir((dir) => {
+      const copy = join(dir, "gate-no-naming.sh");
+      writeFileSync(copy, mutated);
+      chmodSync(copy, 0o755);
+      const res = spawnSync("bash", [copy, "--self-test"], {
+        cwd: process.cwd(),
+        encoding: "utf8",
+      });
+      const out = `${res.stdout ?? ""}${res.stderr ?? ""}`;
+
+      // The contract half, unchanged and re-asserted so a future edit cannot
+      // buy diagnosability by weakening it.
+      expect(res.status, "the mutated gate must still FAIL the arm").toBe(1);
+      expect(out).toContain("FAIL frontier-ceiling-exceeded RED");
+      expect(out).toContain(`SELF-TEST FAIL: ${ARMS - 1}/${ARMS} arms behaved as declared.`);
+
+      // The half this arm exists for.
+      expect(
+        out,
+        "the arm failed mutely — its MEASURE_FAIL sentence went to the discarded channel, which is the whole of F6",
+      ).toContain("MEASURE_FAIL: the ceiling ERROR did not NAME the exempted migration 20260301000000_above1.");
+      expect(out, "the arm's output is not indented under its own verdict").toContain(
+        "       | MEASURE_FAIL: the ceiling ERROR did not NAME",
+      );
+    });
+  });
+
+  it("F6: a PASSING arm stays silent — capturing must not turn a green run into a wall of text", () => {
+    // The other direction, and the reason the capture is re-emitted on the FAIL
+    // branch only: `arm_calib_leg` alone prints ~20 lines of the gate's own
+    // output on a run that is entirely green.
+    const res = spawnSync("bash", [LEDGER_GATE, "--self-test"], {
+      cwd: process.cwd(),
+      encoding: "utf8",
+    });
+    const out = `${res.stdout ?? ""}${res.stderr ?? ""}`;
+    expect(res.status).toBe(0);
+    expect(out, "a green run grew an arm-output block").not.toContain("       | ");
+    // And no arm's captured text leaked into the green narrative.
+    expect(out).not.toContain("calibration, flip ON");
+    expect(out).not.toContain("Repo migrations:");
+  });
+
+  it("--self-test FAILS when the gate is neutered (the self-test itself can fail)", () => {
+    // Drives the gate through its own stub seam with a condition present but
+    // the assertion inverted, proving the self-test's arms are not decorative.
+    const res = spawnSync(
+      "bash",
+      [LEDGER_GATE, "--self-test", "--expect-inverted"],
+      {
+        cwd: process.cwd(),
+        encoding: "utf8",
+      },
+    );
+    expect(res.status).toBe(1);
+  });
+});
+
+describe("IN-04 — the scratch directory does not survive a fail() path", () => {
+  it("MEASURED: a failing VAC-08 run leaves no new mktemp directory behind", () => {
+    // `trap "rm -rf '$tmp'" RETURN` fires when the FUNCTION returns. Every
+    // `fail` inside `check()` `exit`s the shell instead, so all ~8 failure
+    // paths leaked their `mktemp -d`. Measured 2026-08-29 with the EXIT trap
+    // removed: leaked=1 per failing run; with it: leaked=0.
+    //
+    // ⛔ R2-W01: ASK the child where its `mktemp -d` lands. Do not compute it.
+    //
+    // The previous version was `dirname(mkdtempSync(join(tmpdir(), "probe-")))`,
+    // which is IDENTICALLY `os.tmpdir()` — mkdtemp creates its directory INSIDE
+    // the path it is given, so dirname gives that path straight back. Measured:
+    //   test computes tempRoot as:   /var/folders/…/T
+    //   os.tmpdir():                 /var/folders/…/T        IDENTICAL: true
+    // So the comment claiming it "counts the REAL temp root, not $TMPDIR"
+    // described the exact quantity it had just been rewritten to stop using.
+    // Under a TMPDIR override — which GSD worktrees and wrapper harnesses set
+    // routinely — the two diverge and the assertion goes blind: measured, with
+    // the gate's EXIT traps REMOVED and TMPDIR pointed at a scratch dir, this
+    // case PASSED while 63 `tmp.*` directories sat in the real temp root.
+    //
+    // Asking a `bash -c mktemp -d` child is derivation-independent: it is the
+    // same primitive, the same interpreter and the same environment the gate
+    // itself uses, and it is correct on macOS (confstr, ignores TMPDIR) and on
+    // Linux (GNU mktemp, honours TMPDIR) without this test knowing which.
+    // It also cleans up after itself — the old probe directory was never removed,
+    // so the anti-leak test leaked.
+    const probe = spawnSync("bash", ["-c", 'd=$(mktemp -d); printf %s "$d"; rmdir "$d"'], {
+      cwd: process.cwd(),
+      encoding: "utf8",
+    });
+    expect(
+      probe.status,
+      "could not locate the shell's temp root — the measurement below would be pointed at nothing",
+    ).toBe(0);
+    // ⛔ R3-I02: `dirname("")` is `"."`. An empty stdout would point `tempRoot`
+    // at the REPO ROOT, and the calibration step below would then plant a
+    // `tmp.*` directory in the checkout — a dirty tree, which the mutation
+    // runner reports as its own defect kind. The status guard above makes that
+    // unreachable for a working `mktemp`, which is exactly why the failure
+    // would be a surprise rather than a diagnosis.
+    expect(probe.stdout.trim(), "the probe printed no path").toMatch(/^\//);
+    const tempRoot = dirname(probe.stdout.trim());
+
+    // ⛔ R2-W02: attribute by CONTENT, never by a bare count of a machine-wide
+    // directory. `tmp.` is the default `mktemp -d` prefix used by three scripts
+    // in this repo and by a great deal of unrelated software, and vitest runs
+    // files in parallel workers — a raw `count - before` is red when a stranger
+    // creates one and red again when a stranger removes one. This gate's scratch
+    // directory always holds `missing.txt` by the time the fail() path driven
+    // below is reached (half 1 writes it; the BODY_CHECK_FUNCTIONS guard is in
+    // half 2), so that file is a signature no other process shares.
+    const scratchDirs = () =>
+      readdirSync(tempRoot)
+        .filter((n) => n.startsWith("tmp."))
+        .filter((n) => existsSync(join(tempRoot, n, "missing.txt")));
+
+    // CALIBRATION, so a filter that matches nothing cannot masquerade as
+    // "no leak". Plant a directory of exactly the shape the detector looks for
+    // and require the detector to see it. Without this the two filters above
+    // could both be wrong and the case would still read green.
+    const planted = mkdtempSync(join(tempRoot, "tmp."));
+    try {
+      writeFileSync(join(planted, "missing.txt"), "");
+      expect(
+        scratchDirs(),
+        "the leak detector cannot see a planted scratch directory, so it could not see a real one",
+      ).toContain(basename(planted));
+    } finally {
+      rmSync(planted, { recursive: true, force: true });
+    }
+
+    withTempDir((dir) => {
+      const env = scaffoldLedgerCase(dir, {});
+      const before = new Set(scratchDirs());
+      const { status } = run(LEDGER_GATE, { ...env, BODY_CHECK_FUNCTIONS: " " });
+      expect(status).toBe(1); // it must have taken a fail() path at all
+      const added = scratchDirs().filter((n) => !before.has(n));
+      expect(
+        added,
+        "a failing run left its mktemp -d behind. RETURN traps do not fire on exit; this script " +
+          "family's stated purpose is that nothing it creates survives.",
+      ).toEqual([]);
+    });
+  });
+
+  it("R3-W03 DRIVEN: a pg-lane run that fails at initdb leaves no scratch directory", () => {
+    // ⛔ THIS ARM REPLACES A CLAIM, NOT JUST A GAP. The round-2 fix report said
+    // of the structural pin below: "Driving the leak needs a real cluster
+    // failure mid-`legacy_run`." That was not true. The script already has the
+    // seam — `PGBIN` — and driving it takes three seconds and no PostgreSQL:
+    //
+    //   pg_ctl stub exits 0  -> run_lane's `[ -x "$PGBIN/pg_ctl" ]` preflight passes
+    //   initdb  stub exits 1 -> `set -e` aborts INSIDE legacy_run, after
+    //                           OWNED_WORKDIR=$(mktemp -d) and after mkdir "$PGD"
+    //   the EXIT trap fires  -> nothing may survive
+    //
+    // The structural pin below compares LINE NUMBERS and says nothing about
+    // what `cleanup` does: deleting the whole `OWNED_WORKDIR` block from
+    // `cleanup()` leaves it green while every failing run leaks. That is IN-04's
+    // defect restored under a green control. This arm reds on exactly that.
+    const probe = spawnSync("bash", ["-c", 'd=$(mktemp -d); printf %s "$d"; rmdir "$d"'], {
+      cwd: process.cwd(),
+      encoding: "utf8",
+    });
+    expect(probe.status, "could not locate the shell's temp root").toBe(0);
+    expect(probe.stdout.trim(), "the probe printed no path").toMatch(/^\//);
+    const tempRoot = dirname(probe.stdout.trim());
+
+    // Attribute by CONTENT, as R2-W02 established: `tmp.` is a shared prefix
+    // and vitest runs files in parallel workers, so a bare count is red when a
+    // stranger creates a directory and red again when one removes it. By the
+    // time the stub `initdb` fails, `run_lane` has already done `mkdir -p
+    // "$PGD"`, so a `pgd` subdirectory is this lane's signature.
+    const laneScratch = () =>
+      readdirSync(tempRoot)
+        .filter((n) => n.startsWith("tmp."))
+        .filter((n) => existsSync(join(tempRoot, n, "pgd")));
+
+    // CALIBRATION: a filter that matches nothing must not read as "no leak".
+    const planted = mkdtempSync(join(tempRoot, "tmp."));
+    try {
+      mkdirSync(join(planted, "pgd"), { recursive: true });
+      expect(
+        laneScratch(),
+        "the leak detector cannot see a planted lane scratch directory, so it could not see a real one",
+      ).toContain(basename(planted));
+    } finally {
+      rmSync(planted, { recursive: true, force: true });
+    }
+
+    const bin = mkdtempSync(join(tempRoot, "tmp.pglane-stubbin-"));
+    try {
+      writeFileSync(join(bin, "pg_ctl"), "#!/bin/sh\nexit 0\n");
+      writeFileSync(join(bin, "initdb"), '#!/bin/sh\necho "initdb: stub failure" >&2\nexit 1\n');
+      // ⚠️ The `postgres` stub is LOAD-BEARING, not decoration. resolve_pgbin()
+      // and both PGBIN guards refuse a directory carrying pg_ctl but no
+      // `postgres` server binary — the homebrew-libpq shadowing measured
+      // 2026-09-07, where a client-only keg killed the lane inside initdb with
+      // no diagnosis reaching the caller. Without this stub the guard fires
+      // FIRST and neither of these tests reaches the path it exists to drive:
+      // the D-04 case failed outright, and the R3-W03 case kept PASSING for the
+      // wrong reason (the guard's own fail() also removes the scratch dir, so
+      // "no scratch directory survives" stayed true while initdb never ran).
+      // It is never executed — pg_ctl start is stubbed to exit 1.
+      writeFileSync(join(bin, "postgres"), ["#!/bin/sh", "exit 1"].join("\n"));
+      chmodSync(join(bin, "pg_ctl"), 0o755);
+      chmodSync(join(bin, "initdb"), 0o755);
+      chmodSync(join(bin, "postgres"), 0o755);
+
+      const before = new Set(laneScratch());
+      const res = spawnSync("bash", [join(process.cwd(), "scripts", "pg-lane", "run.sh")], {
+        cwd: process.cwd(),
+        encoding: "utf8",
+        env: { ...process.env, PGBIN: bin },
+        timeout: 120_000,
+      });
+      expect(
+        res.status,
+        "the stub must make the lane FAIL — otherwise nothing is driven and this arm proves nothing",
+      ).not.toBe(0);
+      // ⛔ A NON-ZERO EXIT IS NOT EVIDENCE THE RIGHT PATH RAN. The PGBIN guard
+      // refuses a client-only keg and also exits non-zero, so the status check
+      // above is satisfied by a run that never reached initdb and never created
+      // the scratch directory this arm is about — the leak detector then reads
+      // "no leak" against a lane that did nothing. MEASURED 2026-09-07: with the
+      // `postgres` stub absent this test stayed GREEN for exactly that reason.
+      // Naming initdb's own message is what separates the two.
+      expect(
+        `${res.stderr ?? ""}${res.stdout ?? ""}`,
+        "the lane must actually reach initdb — a PGBIN guard refusal exits non-zero too, and would satisfy the status check while driving nothing",
+      ).toContain("initdb: stub failure");
+
+      const added = laneScratch().filter((n) => !before.has(n));
+      expect(
+        added,
+        "the EXIT trap did not remove legacy_run's OWNED_WORKDIR. This script family's stated " +
+          "purpose is that nothing it creates survives; D-04's measured cost was 27 orphans and a " +
+          "disk-exhaustion incident.",
+      ).toEqual([]);
+    } finally {
+      rmSync(bin, { recursive: true, force: true });
+    }
+  });
+
+  it("D-04 DRIVEN: a pg_ctl stop that FAILS in cleanup is WARNED loudly, the postmaster.pid is SIGKILLed, the data dir still goes, and the lane's exit status survives", () => {
+    // ⛔ silent-failure finding (164.3.1 fix round). `cleanup` ran
+    //     pg_ctl … stop … >/dev/null 2>&1 || true
+    //     rm -rf "$PGD"
+    // so a stop that failed left a postmaster running against a data dir that
+    // was then deleted out from under it — the D-04 orphan the trap exists to
+    // prevent — with NOTHING printed. Driven through PGBIN stubs, no
+    // PostgreSQL needed: initdb creates the data dir and plants a
+    // `postmaster.pid` naming a long-lived `sleep` (the stand-in postmaster);
+    // pg_ctl exits 1 on BOTH `start` (so the lane fails after CREATED=1) and
+    // `stop` (the defect's trigger). MEASURED at HEAD 8969513e: exit 1, no
+    // WARNING, the sleep still alive after the lane returned.
+    withTempDir((dir) => {
+      const bin = join(dir, "bin");
+      mkdirSync(bin, { recursive: true });
+      const pidSide = join(dir, "planted.pid");
+      writeFileSync(
+        join(bin, "pg_ctl"),
+        [
+          "#!/bin/sh",
+          'case " $* " in *" stop "*) echo "pg_ctl: stub stop failure" >&2; exit 1 ;; *" start "*) exit 1 ;; esac',
+          "exit 0",
+        ].join("\n"),
+      );
+      writeFileSync(
+        join(bin, "initdb"),
+        [
+          "#!/bin/sh",
+          'd=""; while [ $# -gt 0 ]; do case "$1" in -D) d="$2"; shift ;; esac; shift; done',
+          '[ -n "$d" ] || exit 9',
+          'mkdir -p "$d"',
+          "nohup sleep 300 >/dev/null 2>&1 </dev/null &",
+          'printf "%s\\n" "$!" > "$d/postmaster.pid"',
+          `printf "%s" "$!" > ${JSON.stringify(pidSide)}`,
+          "exit 0",
+        ].join("\n"),
+      );
+      // ⚠️ The `postgres` stub is LOAD-BEARING, not decoration. resolve_pgbin()
+      // and both PGBIN guards refuse a directory carrying pg_ctl but no
+      // `postgres` server binary — the homebrew-libpq shadowing measured
+      // 2026-09-07, where a client-only keg killed the lane inside initdb with
+      // no diagnosis reaching the caller. Without this stub the guard fires
+      // FIRST and neither of these tests reaches the path it exists to drive:
+      // the D-04 case failed outright, and the R3-W03 case kept PASSING for the
+      // wrong reason (the guard's own fail() also removes the scratch dir, so
+      // "no scratch directory survives" stayed true while initdb never ran).
+      // It is never executed — pg_ctl start is stubbed to exit 1.
+      writeFileSync(join(bin, "postgres"), ["#!/bin/sh", "exit 1"].join("\n"));
+      chmodSync(join(bin, "pg_ctl"), 0o755);
+      chmodSync(join(bin, "initdb"), 0o755);
+      chmodSync(join(bin, "postgres"), 0o755);
+      const apply = join(dir, "apply.sql");
+      const gate = join(dir, "gate.sql");
+      writeFileSync(apply, "SELECT 1;\n");
+      writeFileSync(gate, "SELECT 1;\n");
+      const workdir = join(dir, "work");
+      const port = String(56000 + Math.floor(Math.random() * 900));
+
+      let planted: number | undefined;
+      try {
+        const res = spawnSync(
+          "bash",
+          [join(process.cwd(), "scripts", "pg-lane", "run.sh"), "--workdir", workdir, "--apply", apply, "--gate", gate],
+          { cwd: process.cwd(), encoding: "utf8", env: { ...process.env, PGBIN: bin, PORT: port }, timeout: 120_000 },
+        );
+        expect(existsSync(pidSide), "the initdb stub never ran — nothing was driven\n" + res.stderr).toBe(true);
+        planted = Number(readFileSync(pidSide, "utf8"));
+        expect(planted).toBeGreaterThan(0);
+
+        // The lane's own status is the failing `pg_ctl start` (exit 1 under
+        // set -e), and cleanup must not replace it with its own.
+        expect(res.status, res.stderr).toBe(1);
+        expect(res.stderr, "a failed stop must be LOUD").toContain("WARNING");
+        expect(res.stderr, "the warning must name the port").toContain(port);
+        expect(res.stderr, "the warning must name the data dir").toContain(join(workdir, "pgd", "data"));
+        expect(res.stderr).toContain(`SIGKILL`);
+        expect(res.stderr).toContain(String(planted));
+
+        // The stand-in postmaster is dead, and the data dir is gone.
+        let alive = true;
+        try {
+          process.kill(planted, 0);
+        } catch {
+          alive = false;
+        }
+        expect(alive, `the orphan postmaster (pid ${planted}) survived cleanup — D-04 restored`).toBe(false);
+        expect(existsSync(join(workdir, "pgd")), "the data dir must still be removed").toBe(false);
+      } finally {
+        if (planted) {
+          try {
+            process.kill(planted, "SIGKILL");
+          } catch {
+            /* already dead — the fixed path */
+          }
+        }
+      }
+    });
+  });
+
+  it("pg-lane registers its cleanup trap BEFORE the first mktemp, not inside run_lane", () => {
+    // Kept ALONGSIDE the driven arm above, not instead of it. This one is
+    // cheap, is independent of the environment, and catches the specific
+    // regression of moving the trap back inside `run_lane` — a shape the driven
+    // arm would also catch, but only on the paths it exercises.
+    //
+    // ⚠️ What it does NOT check is what `cleanup` DOES, which is why the arm
+    // above exists. The round-2 report's claim that this path could only be
+    // driven with a real cluster was wrong, and is corrected there.
+    // Line numbers, over EXECUTABLE lines only — a first version of this
+    // compared string offsets and matched the words "mktemp -d" inside the
+    // very comment that explains the fix, so it failed on correct code.
+    const lines = readFileSync("scripts/pg-lane/run.sh", "utf8").split("\n");
+    const code = lines.map((l, i) => ({ l, n: i + 1 })).filter(({ l }) => !/^\s*#/.test(l));
+
+    const trapAt = code.find(({ l }) => /^trap cleanup EXIT\b/.test(l))?.n;
+    const firstMktemp = code.find(({ l }) => /mktemp -d/.test(l))?.n;
+
+    expect(trapAt, "no TOP-LEVEL `trap cleanup EXIT` in scripts/pg-lane/run.sh").toBeDefined();
+    expect(firstMktemp, "no executable `mktemp -d` found — update this test").toBeDefined();
+    expect(
+      trapAt as number,
+      "the cleanup trap is registered AFTER the first mktemp -d, so a failure between them leaks " +
+        "the scratch directory (IN-04).",
+    ).toBeLessThan(firstMktemp as number);
+  });
+
+  it("SP-H01: every SKIP in pg-lane's self-test is TALLIED, and a tallied skip exits 1", () => {
+    // ⛔ Arm 2 printed "Not a pass" and NOTHING ACTED ON IT: the arm was
+    // silently dropped from the count, the run still printed "SELF-TEST PASSED
+    // (5/5)" and exited 0. MEASURED before the fix, with `node` removed from
+    // PATH: exit 0, "SKIP non-postgres-listener arm … Not a pass." followed by
+    // "=== SELF-TEST PASSED (5/5) ===". The dropped arm is precisely the one
+    // proving the collision guard is as WIDE as its message (IN-07).
+    //
+    // Driving this in vitest would mean standing up four PostgreSQL clusters,
+    // so the DRIVEN proof lives in the fix's own measurement (recorded in the
+    // commit) and what is pinned here is the structural property: SKIPs and
+    // tallies are COUNTED against each other, so a sixth arm that skips without
+    // tallying fails.
+    const src = readFileSync("scripts/pg-lane/run.sh", "utf8");
+    // ⛔ WR-07: unanchored, a renamed `self_test()` made `start` -1 and the slice
+    // below returned an empty body whose only symptom was a length assertion.
+    // Fail on the ANCHOR, naming it, rather than on a downstream consequence.
+    const start = anchorIndex(src, "self_test() {");
+    // ⚠️ COMMENTS STRIPPED FIRST. A first version searched the raw text and
+    // matched "SELF-TEST PASSED (5/5)" inside the very comment that explains
+    // this fix — the same trap the trap-ordering arm above records. The subject
+    // is the CODE.
+    const body = src
+      .slice(start, anchorIndex(src, "\n# ---", start))
+      .split("\n")
+      .filter((l) => !/^\s*#/.test(l))
+      .join("\n");
+    expect(body.length, "self_test() must be findable in the source").toBeGreaterThan(500);
+    expect(body, "the comment stripper removed the code as well").toContain("st_skipped=0");
+
+    const countSkipEchoes = (text: string) =>
+      text.split("\n").filter((l) => /^\s*echo "\s*SKIP /.test(l)).length;
+    const countTallies = (text: string) =>
+      text.split("\n").filter((l) => /st_skipped=\$\(\(st_skipped \+ 1\)\)/.test(l)).length;
+
+    const skips = countSkipEchoes(body);
+    expect(skips, "no SKIP branch found — either the arm moved or this predicate stopped matching").toBeGreaterThan(0);
+    expect(
+      countTallies(body),
+      "a self-test arm prints SKIP without incrementing st_skipped, so it is silently dropped from the count",
+    ).toBe(skips);
+
+    // Calibration: the same predicates report the mismatch when the tally is
+    // deleted, so a matching pair is evidence rather than a coincidence.
+    const withoutTally = body
+      .split("\n")
+      .filter((l) => !/st_skipped=\$\(\(st_skipped \+ 1\)\)/.test(l))
+      .join("\n");
+    expect(countSkipEchoes(withoutTally)).toBe(skips);
+    expect(countTallies(withoutTally)).toBe(0);
+
+    // The verdict subtracts, names the skips, and EXITS 1 — before the
+    // "PASSED" line can be reached.
+    const incompleteAt = body.indexOf("SELF-TEST INCOMPLETE");
+    // ⚠️ The ARM COUNT is deliberately not pinned as a literal here. It was
+    // `(5/5)`, and a legitimate sixth arm (164.4.1-01, the pg_cron preload
+    // proof) made that literal unfindable — `indexOf` returned -1 and this arm
+    // failed for a reason that had nothing to do with what it tests. PATTERNS
+    // C2 had already flagged `N/5` as a literal repeated in nine places and
+    // pinned by nothing.
+    //
+    // Matching N/N is STRICTER than the old literal, not looser: it still
+    // requires the verdict to exist and to follow INCOMPLETE, and it ADDS a
+    // check the literal could never make — that the caption's two halves agree,
+    // so a `6/5` mismatch fails here instead of shipping.
+    const passedMatch = body.match(/SELF-TEST PASSED \((\d+)\/(\d+)\)/);
+    expect(incompleteAt, "no INCOMPLETE verdict — a skipped arm would still read as a pass").toBeGreaterThan(-1);
+    expect(passedMatch, "no `SELF-TEST PASSED (N/N)` verdict found in self_test()").not.toBeNull();
+    const [passedCaption, ranArms, totalArms] = passedMatch!;
+    expect(ranArms, `the PASSED caption's halves disagree: ${passedCaption}`).toBe(totalArms);
+    const passedAt = body.indexOf(passedCaption);
+    expect(passedAt).toBeGreaterThan(-1);
+    expect(incompleteAt).toBeLessThan(passedAt);
+    expect(body).toMatch(/if \[ "\$st_skipped" -ne 0 \]; then/);
+    expect(body.slice(incompleteAt, passedAt)).toContain("exit 1");
+    // The count is DERIVED from the tally, not a caption — and the INCOMPLETE
+    // line must subtract against the SAME arm total the PASSED line claims.
+    expect(body).toContain(`$((${totalArms} - st_skipped))/${totalArms} run`);
+
+    // ⛔ IN-02 — PIN THE TOTAL TO REALITY, not to itself. Everything above is
+    // SELF-CONSISTENT: `totalArms` is read out of the caption, so a script that
+    // grew a seventh arm but still captioned `(6/6)` — or one captioned `(7/7)`
+    // with only six arms present — satisfied every assertion above. Both halves
+    // agreeing is a property of the CAPTION; it says nothing about how many arms
+    // the function actually contains. Count the arm headers themselves and
+    // require the caption to match that.
+    const armCaptions = body.split("\n").filter((l) => /^\s*echo "=== SELF-TEST [0-9]+\//.test(l));
+    expect(
+      armCaptions.length,
+      `self_test() contains ${armCaptions.length} numbered arm captions but the verdict claims ` +
+        `${totalArms}. Adding an arm without bumping the verdict (or bumping the verdict without ` +
+        `adding the arm) makes "SELF-TEST PASSED" a count of nothing.`,
+    ).toBe(Number(totalArms));
+
+    // Each caption must also be numbered N/<total> against the SAME total, so
+    // an arm carrying a stale denominator (`3/5` beside `PASSED (6/6)`) is
+    // caught rather than read past.
+    for (const caption of armCaptions) {
+      expect(caption, `an arm caption's denominator disagrees with the verdict's ${totalArms}`).toMatch(
+        new RegExp(`=== SELF-TEST [0-9]+/${totalArms}\\b`),
+      );
+    }
+
+    // Calibration — the predicate above is shown to be able to FAIL, so a
+    // matching count is evidence and not an artefact of a regex that matches
+    // nothing. Delete one arm caption and the count must drop by exactly one.
+    const withoutOneArm = body.replace(/^\s*echo "=== SELF-TEST [0-9]+\/.*$/m, "");
+    const recount = withoutOneArm.split("\n").filter((l) => /^\s*echo "=== SELF-TEST [0-9]+\//.test(l)).length;
+    expect(recount, "the arm-caption predicate matched nothing, so its count could never disagree").toBe(
+      armCaptions.length - 1,
+    );
+  });
+});
+
+describe("IN-02 — no INVISIBLE characters in the Phase 164.3 gate scripts", () => {
+  // Two of these files carried a U+200B inside a JSDoc block comment, put there
+  // to stop the comment terminating early (`a/*c*<ZWSP>/b`). It worked, and it
+  // is the wrong tool: an invisible control character cannot be seen in review,
+  // it trips this environment's injection scanners on every read, and this repo
+  // already has one measured file that a bare `grep` is silently blind to
+  // because of an embedded NUL. A gate script is the last place a reader should
+  // have to trust that what they see is what is there. Escape visibly instead
+  // (`a/*c*\/b`).
+  //
+  // Read with node:fs, never shell grep, for the reason above.
+  //
+  // ⛔ R3-W04. The list used to be nine hand-written script paths plus this
+  // file. Of the sixteen files round 2 changed it covered THREE — it did not
+  // cover `ci.yml`, `GRAMMAR.md`, the self-test SQL fixtures, or ANY of the
+  // five test files that round authored. The NUL R2-I02 caught happened to land
+  // in a listed file; nothing structural made that so. A hand-list of a moving
+  // surface is the same defect as a hand-picked oracle.
+  //
+  // So the surface is DERIVED: everything under `scripts/` (recursively — that
+  // is where every gate, fixture and corpus file this phase owns lives), the CI
+  // workflow the gates are wired into, and every test file in `src/__tests__/`.
+  // Adding a gate script or a gate test enrols it automatically.
+  //
+  // ⚠️ `src/lib/wizardErrors.test.ts` carries a DELIBERATE NUL at line 1572 — a
+  // known, owned exception that makes `grep` silently blind to that file. It is
+  // not under `src/__tests__/`, so this derivation does not reach it, and the
+  // derivation is deliberately NOT widened to all of `src/`.
+  // ⚠️ Derived from the TRACKED surface, via `git ls-files`, not from a
+  // filesystem walk. MEASURED: a `readdirSync` walk of `scripts/` picked up
+  // `scripts/__pycache__/*.pyc` — gitignored Python bytecode, dense with C0
+  // bytes, which reddened three arms in the main checkout while passing in a
+  // clean worktree that had never run the Python scripts. An untracked build
+  // artefact is not part of this phase's surface; `git ls-files` says so by
+  // construction, and it cannot drift the way an extension denylist would.
+  const tracked = (...pathspecs: string[]): string[] => {
+    const res = spawnSync("git", ["ls-files", "-z", "--", ...pathspecs], {
+      cwd: process.cwd(),
+      encoding: "utf8",
+    });
+    expect(res.status, "git ls-files failed — the surface below would be empty").toBe(0);
+    return res.stdout.split("\u0000").filter((p) => p.length > 0);
+  };
+
+  const SCRIPTS = [
+    ...tracked("scripts"),
+    ...tracked(".github/workflows/ci.yml"),
+    ...tracked("src/__tests__").filter((f) => f.endsWith(".test.ts")),
+  ].sort();
+
+  /**
+   * Invisible and text-smuggling characters.
+   *
+   * ⛔ R3-W04 widened the shipped class, which covered only NUL, soft hyphen,
+   * U+180E, the ZW-star/bidi block and the BOM. It missed:
+   *   - every C0 control except NUL, including U+001B ESC (which injects ANSI
+   *     escape sequences into a CI log), and the whole C1 range;
+   *   - U+00A0 NBSP and the other space separators (U+2000-200A, U+202F,
+   *     U+205F, U+3000). An NBSP inside a shell script's `[ -n "$x" ]` is a
+   *     syntax error that is invisible in review — precisely what this pin
+   *     exists for;
+   *   - U+2028/U+2029, which `.split("\n")` does not separate on either;
+   *   - U+FFF9-FFFB interlinear annotation;
+   *   - the astral TAG block U+E0000-E007F, the standard modern text-smuggling
+   *     range, entirely outside the BMP the old class covered.
+   *
+   * ⚠️ VARIATION SELECTORS ARE CONDITIONAL, a deliberate departure from the
+   * reviewer's suggested class. U+FE0F is the second code point of every emoji
+   * this codebase writes in emoji presentation — the warning sign, the no-entry
+   * sign, the star, the check mark — so a blanket U+FE00-FE0F ban reports 11
+   * offenders in `run.mjs` alone and would have to be switched off, which is
+   * worse than a narrower rule that stays on. A variation selector NOT preceded
+   * by an Extended_Pictographic has no legitimate use here and is still refused.
+   *
+   * Written entirely in ESCAPES, per R2-I02: this file is in its own list, and a
+   * class written with raw bytes makes the file that forbids invisible
+   * characters a tripwire for every scanner that reads it.
+   */
+  const INVISIBLE = new RegExp(
+    "[\\u0000-\\u0008\\u000B\\u000C\\u000E-\\u001F\\u007F-\\u009F" +
+      "\\u00A0\\u00AD\\u180E\\u2000-\\u200F\\u2028\\u2029\\u202A-\\u202F" +
+      "\\u205F-\\u2064\\u2066-\\u206F\\u3000\\uFEFF\\uFFF9-\\uFFFB]" +
+      "|[\\u{E0000}-\\u{E007F}]" +
+      "|(?<!\\p{Extended_Pictographic})[\\uFE00-\\uFE0F]",
+    "u",
+  );
+
+  it("the derived surface is non-empty, covers this phase's gates, and every entry exists", () => {
+    // Without this, the loop below is satisfied by a glob that matched nothing.
+    expect(SCRIPTS.length).toBeGreaterThan(20);
+    for (const rel of SCRIPTS) {
+      expect(existsSync(rel), `${rel} is missing — the derivation is broken`).toBe(true);
+    }
+    // The files round 2 changed that the old hand-list did NOT cover.
+    for (const rel of [
+      ".github/workflows/ci.yml",
+      "scripts/mutation-runner/GRAMMAR.md",
+      "scripts/mutation-runner/fixtures/selftest/identity-rewrite-gate.sql",
+      "src/__tests__/mutation-runner-neuter.test.ts",
+      "src/__tests__/mutation-annotation-parser.test.ts",
+      "src/__tests__/verify-plan-anchors.test.ts",
+      "src/__tests__/baseline-wiring-claim.test.ts",
+      "src/__tests__/local-stack-teardown-assertion.test.ts",
+      "src/__tests__/drift-check-scripts.test.ts",
+    ]) {
+      expect(SCRIPTS, `${rel} is not covered by the derived surface`).toContain(rel);
+    }
+  });
+
+  it("the class catches every widened category, and does NOT fire on emoji presentation", () => {
+    // ⭐ A widened class that cannot fire on its new categories is a widening in
+    // name only, and one that fires on the warning sign would be switched off.
+    // Both directions are asserted. Every sample is built from ESCAPES.
+    const CATEGORIES: Array<[string, string]> = [
+      ["NUL", "a\u{0000}b"],
+      ["ESC", "a\u{001B}b"],
+      ["DEL", "a\u{007F}b"],
+      ["C1 control", "a\u{0085}b"],
+      ["NBSP", "a\u{00A0}b"],
+      ["en quad", "a\u{2000}b"],
+      ["narrow no-break space", "a\u{202F}b"],
+      ["medium mathematical space", "a\u{205F}b"],
+      ["ideographic space", "a\u{3000}b"],
+      ["line separator", "a\u{2028}b"],
+      ["paragraph separator", "a\u{2029}b"],
+      ["soft hyphen", "a\u{00AD}b"],
+      ["zero-width space", "a\u{200B}b"],
+      ["LTR mark", "a\u{200E}b"],
+      ["bidi override", "a\u{202E}b"],
+      ["word joiner", "a\u{2060}b"],
+      ["bidi isolate", "a\u{2066}b"],
+      ["BOM", "a\u{FEFF}b"],
+      ["interlinear annotation anchor", "a\u{FFF9}b"],
+      ["tag character (astral)", "a\u{E0041}b"],
+      ["bare variation selector", "a\u{FE0F}b"],
+    ];
+    for (const [label, sample] of CATEGORIES) {
+      expect(INVISIBLE.test(sample), `the class does not catch ${label}`).toBe(true);
+    }
+    // Non-vacuity: the table must actually have been walked.
+    expect(CATEGORIES.length).toBeGreaterThan(15);
+
+    for (const [label, sample] of [
+      ["warning sign in emoji presentation", "\u{26A0}\u{FE0F}"],
+      ["check mark in emoji presentation", "\u{2714}\u{FE0F}"],
+      ["no-entry sign", "\u{26D4}"],
+      ["plain ASCII", "const x = 1;"],
+    ] as const) {
+      expect(INVISIBLE.test(sample), `the class FALSELY fires on ${label}`).toBe(false);
+    }
+  });
+
+  for (const rel of SCRIPTS) {
+    it(`${rel} carries no invisible or text-smuggling characters`, () => {
+      const offenders = readFileSync(rel, "utf8")
+        .split("\n")
+        .map((line, i) => ({ line, n: i + 1 }))
+        .filter(({ line }) => INVISIBLE.test(line))
+        .map(({ n, line }) => `${rel}:${n}: ${JSON.stringify(line.trim().slice(0, 100))}`);
+      expect(
+        offenders,
+        `Invisible character(s) found. They cannot be seen in review and they trip secret/injection scanners. ` +
+          `If you needed to stop a block comment terminating, escape it visibly: a/*c*\\/b.`,
+      ).toEqual([]);
+    });
+  }
+});
+
+describe("OPS-08-F9 — the anti-skip floors are already raised (verify and record, do NOT change)", () => {
+  it("ci.yml still declares SENTINEL_FLOOR=12 and ARMS_FLOOR=237 at HEAD", () => {
+    // VERIFIED CORRECTION 3: the TODOS entry prescribes a 7->8 / 63->68 raise
+    // that is ALREADY DONE (and ARMS is far past it). This pins the measured
+    // values so a silent REDUCTION is caught; it is not a raise.
+    //
+    // ⚠️ RAISED 2026-09-17 (164.5.1, arm R): ARMS_FLOOR 203 -> 206, SENTINEL_FLOOR
+    // unchanged at 10 because no FILE was added. This pin catches reductions, and
+    // a raise carrying its reason is exactly what it is meant to allow through.
+    // ⛔ This is the FOURTH place that number lives: ci.yml's derivation table,
+    // ci.yml's ARMS_FLOOR (their sum), the gate file's own `ALL N ARMS EXECUTED`
+    // sentinel — whose value the anti-skip gate reads with `... | head -1`, so the
+    // first PROSE mention in the file wins — and here. Moving one moves all four.
+    //
+    // MOVED 2026-09-06 (Phase 164.2 plan 10), 8/166 -> 9/180. Phase 164.2 plan
+    // 07's commit 39cc7ae4 added supabase/tests/test_sync_status_curated_
+    // sentence_survives.sql and raised ci.yml's sql-tests anti-SKIP floors to
+    // SENTINEL_FLOOR=9 / ARMS_FLOOR=180 (:2896-2897) WITHOUT moving this pin,
+    // so the pin went red for a raise it should have mirrored. That red was the
+    // pin working: an exact-literal mirror is deliberately intolerant in BOTH
+    // directions, because the failure it exists to catch -- a floor edited down
+    // to match a deleted arm -- is self-consistent inside ci.yml and invisible
+    // to anything that reads only that file.
+    // => WHENEVER ci.yml:2896-2897 moves, move these two literals in the SAME
+    //    commit. Do not relax this to a >= comparison: that would tolerate a
+    //    raise silently and hand the next author the same trap.
+    //
+    // MOVED 2026-09-07 (Phase 164.7, SQL-fixer pass), 9/180 -> 10/195. Two
+    // raises land here at once, and they are NOT the same kind of change:
+    //   * SENTINEL_FLOOR 9 -> 10 and ARMS_FLOOR 180 -> 191 came earlier in this
+    //     phase, when test_analytics_service_settings_and_vault_tick.sql joined
+    //     the sentinel-bearing set with 7 arms.
+    //   * ARMS_FLOOR 191 -> 195 is this pass: the fixer grew that same file
+    //     from 7 arms to 11, so its row in ci.yml's derivation table moves
+    //     7 -> 11 and the total follows.
+    // The pin went red across both because it is an exact-literal mirror, which
+    // is the design. Moving it here is mirroring a raise, never authorising one.
+    //
+    // MOVED 2026-09-11 (Phase 164.8.6 VAULTTICKFIX, plan 05), 10/195 -> 10/203.
+    // SENTINEL_FLOOR does NOT move: no file joined or left the sentinel-bearing
+    // set. ARMS_FLOOR 195 -> 203 is EIGHT arms across THREE existing rows of
+    // ci.yml's derivation table — test_analytics_service_settings_and_vault_tick
+    // .sql 11 -> 13 (arms V2, G1) and the ledger PAIR 12 -> 15 each (S1, M1, M2)
+    // — which is the shape the two floors are meant to distinguish: arms grew,
+    // the file set did not.
+    // ⭐ Worth recording: scripts/mutation-runner/run.mjs's OWN ARMS_FLOOR moved
+    // 384 -> 392 in the same commit, also +8, and the two count DIFFERENT things
+    // (sentinel arms here, RED-UNDER-M twins there). Agreement is evidence each
+    // new arm got both a sentinel and a biting twin — not evidence one number
+    // was copied from the other.
+    // ⚠️ This pin went red only in the FULL suite, after ci.yml was edited — a
+    // file-scoped run of the contract test that prompted the ci.yml edit passed
+    // while this one still said 195. Two separate mirrors of the same two
+    // integers, and only running everything shows both.
+    //
+    // MOVED 2026-09-18 (Phase 164.1.1 plan 01), 10/206 -> 11/213. BOTH move, and
+    // that combination is the one this pair is designed to tell apart: a new FILE
+    // joined the sentinel-bearing set — supabase/tests/test_prod_prober_cadence.sql
+    // with 7 arms (G1,S1,O1,A1,U1,V1,N1) — so the file count moves AND the arm sum
+    // follows it. Contrast 164.8.6 above, where arms grew inside existing files and
+    // SENTINEL_FLOOR correctly did not move.
+    // ⚠️ THE WARNING DIRECTLY ABOVE PREDICTED THIS EXACT MISS, AND IT HAPPENED
+    // AGAIN ANYWAY. The ci.yml edit was prompted by ci-anti-skip-gate.contract
+    // .test.ts going red; that contract test was run file-scoped, then the whole
+    // contracts/ directory was run — both green — and this mirror, which lives in
+    // src/__tests__/ and not in contracts/, stayed at 10/206 until the FULL suite
+    // ran in CI. A directory-scoped run is not a full run. The fourth-place rule
+    // below is the durable answer; re-reading it before editing ci.yml is cheaper
+    // than another CI round trip.
+    //
+    // MOVED 2026-09-24 (Phase 164.6 GATE-HYGIENE, plan 04), 11/213 -> 11/215.
+    // SENTINEL_FLOOR does NOT move: no file joined the sentinel-bearing set.
+    // ARMS_FLOOR moves by TWO across two EXISTING rows of ci.yml's derivation
+    // table — the ledger pair, composite 15 -> 16 and fan-out 18 -> 19, one arm
+    // N each (plan 03, OPS-08-F2). Read off each gate file's own first
+    // `ALL N ARMS EXECUTED` sentinel. The mutation runner's OWN ARMS_FLOOR moved
+    // 426 -> 428 in the same phase, also +2, counting RED-UNDER-M twins rather
+    // than sentinel arms: each new arm got both a sentinel and a biting twin.
+    //
+    // MOVED 2026-09-24 (Phase 164.6 GATE-HYGIENE, review fix round 1), 11/215 ->
+    // 11/229. SENTINEL_FLOOR does NOT move: the one new gate file,
+    // test_cron_runs_rls.sql, declares no sentinel. ARMS_FLOOR moves by FOURTEEN
+    // across the same two rows, composite 16 -> 23 and fan-out 19 -> 26 (N2, N3,
+    // T, U, V1, V2 and W in each), read off each file's own first `ALL N ARMS
+    // EXECUTED` sentinel. The runner's own ARMS_FLOOR moved 428 -> 445, +17: the
+    // same fourteen plus the new file's three twins, which carry no sentinel.
+    //
+    // MOVED 2026-10-01 (Phase 164.9.3.2 DEFER40001, plan 06), 11/229 -> 12/237.
+    // SENTINEL_FLOOR moves: the NEW gate file test_compute_job_fence_errcode.sql
+    // declares `ALL 8 ARMS EXECUTED`, so the sentinel-bearing FILE SET grows by one,
+    // and ARMS_FLOOR moves by its EIGHT arms (D1, D1L, M1, M1L, M2, M2L, F1, F1L),
+    // read off each gate file's own first sentinel on the tree merged with
+    // origin/main. The runner's own ARMS_FLOOR moved 545 -> 553, also +8: each new
+    // arm got both a sentinel and a biting twin.
+    const res = spawnSync(
+      "grep",
+      ["-ac", "SENTINEL_FLOOR=12", ".github/workflows/ci.yml"],
+      {
+        cwd: process.cwd(),
+        encoding: "utf8",
+      },
+    );
+    expect(res.status).toBe(0);
+    expect(Number(res.stdout.trim())).toBeGreaterThanOrEqual(1);
+
+    const arms = spawnSync(
+      "grep",
+      ["-ac", "ARMS_FLOOR=237", ".github/workflows/ci.yml"],
+      {
+        cwd: process.cwd(),
+        encoding: "utf8",
+      },
+    );
+    expect(arms.status).toBe(0);
+    expect(Number(arms.stdout.trim())).toBeGreaterThanOrEqual(1);
+  });
+});
+
+// ── B3 (Phase 164.8.2) — THE LEDGER GATE'S SOFTENINGS ARE AN EXACT SET OF SITES
+//
+// `scripts/restore-test-from-baseline.sh` has a softening-token scan over its
+// `--run` region. This gate had NONE. F5 bounded five `|| true` reads with
+// `set +e; …; rc=$?; set -e`, F7 bounded a sixth, and every one of those `set +e`
+// sites was then governed by nothing at all: a seventh could be added tomorrow,
+// unbounded, and no gate in this repo would notice. A softening that nobody
+// counts is exactly the shape this phase exists to remove — the control weaker
+// than the sentence beside it.
+//
+// ⛔ SITES, NOT A COUNT, and the distinction is load-bearing. A count is blind to
+// a ONE-FOR-ONE SWAP: delete a benign suppression and add a dangerous one and the
+// tally never moves. The swap calibration below performs exactly that — it takes
+// the ADVISORY extra-ledger direction's `2>/dev/null` away and puts one back on
+// the `ledger_rows` read, which is F7's defect, restored — and asserts that the
+// SUPERSEDED count rule (kept here as a reference oracle) reports NOTHING while
+// the site rule reports both halves. "The new control is stronger" is a claim;
+// that arm is what makes it a measurement.
+//
+// ⚠️ THE TOKEN LIST IS DELIBERATELY *NOT* A FOURTH COPY of the nine-token YAML
+// list in `test-restore-workflow-wiring.test.ts` / `supabase-migrate-test-first.test.ts`
+// / `prod-prober-wiring.test.ts` — that trio pins its own length at nine and says
+// so, and a silent fourth copy would make their sentence false. This one governs a
+// BASH FILE, where the legitimate idioms differ: `set +e` is not banned here (it is
+// the SP-M01 BOUND), `continue-on-error` cannot occur, and `>/dev/null 2>&1` on a
+// `command -v … || fail` probe is the canonical presence check. Same mechanism,
+// different corpus, stated rather than blended.
+describe("B3 — softening sites in scripts/test-ledger-drift-check.sh's check()", () => {
+  const SRC = readFileSync(LEDGER_GATE, "utf8");
+
+  /**
+   * The GATE PROPER: `check() {` up to `self_test() {`. Sliced rather than scanned
+   * whole-file for the reason the sibling slices out its mutex steps — the
+   * self-test harness legitimately writes stub scripts containing `exit 0` into a
+   * heredoc, and scanning them would make two requirements contradict.
+   */
+  const checkRegion = (text: string): string => {
+    const lines = text.split("\n");
+    const a = lines.findIndex((l) => l.startsWith("check() {"));
+    if (a < 0) return "";
+    const b = lines.findIndex((l, i) => i > a && l.startsWith("self_test() {"));
+    return b < 0 ? "" : lines.slice(a, b).join("\n");
+  };
+  const liveLines = (block: string): string[] =>
+    block.split("\n").filter((l) => l.trim() !== "" && !l.trim().startsWith("#"));
+
+  /**
+   * ⛔ FOUR OF THESE ARE FORBIDDEN OUTRIGHT (they have no entry in ALLOWED_SITES):
+   * `|| :`, `|| exit 0`, `set +o pipefail`, and a bare `exit 0`. This gate's whole
+   * contract is that a work step with nothing to say still exits 1 — a zero-status
+   * escape inside `check()` would be the SKIP-01 shape returning by the back door.
+   */
+  const SOFTENING_TOKENS = [
+    "|| true",
+    "|| :",
+    "|| exit 0",
+    "exit 0",
+    "set +e",
+    "set +o pipefail",
+    "2>/dev/null",
+    ">/dev/null 2>&1",
+    "::warning",
+  ];
+
+  /**
+   * Every softening `check()` is allowed to carry, as the distinguishing text of
+   * its SITE, WITH THE REASON IT IS THERE.
+   *
+   * ⛔ A SITE IS MATCHED AGAINST A TWO-LINE WINDOW (the token line and the next live
+   * line), because three of the `set +e` sites are the bare string `set +e` and are
+   * distinguishable only by the read they bound. The window is what lets the entry
+   * name that read, which is also the only thing that makes the list readable.
+   *
+   * ⛔ THE RULE IS A BIJECTION. A new softening is red (UNLISTED SITE) and a vanished
+   * one is red too (VANISHED SITE) — a site disappearing means either an exit status
+   * that used to be handled stopped being handled, or the slicing moved and the scan
+   * is looking at less than it thinks.
+   */
+  const ALLOWED_SITES: readonly { token: string; site: string; why: string }[] = [
+    // ── `|| true` — ONE site, and it is the only one F5/F7 left standing ──────
+    {
+      token: "|| true",
+      site: "sed 's/^/::error::  /' || true",
+      why: "the shape DIAGNOSTIC re-emitted on the absurdity floor's own failure path. The `exit 1` is on the next line and does not depend on it; a shape probe that cannot run must not convert a decided RED into a shell error that hides the verdict.",
+    },
+    // ── `set +e` — 11 sites, every one the SP-M01 BOUND, not a softening ───
+    {
+      token: "set +e",
+      site: `missing_count="$(grep -ac '[^[:space:]]' "$missing_file")"`,
+      why: "SP-M01. Bounds the missing-row count so grep's rc >= 2 becomes a MEASURE_FAIL instead of a count of zero.",
+    },
+    {
+      token: "set +e",
+      site: 'ledger_rows="$(run_ledger_query ledger_rows "$names_csv" 2>"$ledger_rows_err")"',
+      why: "F7. Bounds the ABSURDITY FLOOR's own input. Unbounded, an unreadable count left the floor INERT rather than red.",
+    },
+    {
+      token: "set +e",
+      site: 'grep -aFxv -f "$base_names" "$missing_file"',
+      why: "F5. Bounds the NEW-drift filter: rc 1 is the ordinary clean case, rc >= 2 is unreadable, and an empty `$new_file` is this gate's CLEAN verdict.",
+    },
+    {
+      token: "set +e",
+      site: 'grep -aFxv -f "$missing_file" "$base_names"',
+      why: "F5. Bounds the STALE-baseline filter, on the same rc 1 vs rc >= 2 distinction.",
+    },
+    {
+      token: "set +e",
+      site: 'exempt_count="$(grep -ac',
+      why: "F5. Bounds the frontier-exemption count, which feeds FRONTIER_EXEMPT_CEILING — 0 is the one value that ceiling can never fire on.",
+    },
+    {
+      token: "set +e",
+      site: 'new_count="$(grep -ac',
+      why: "F5. Bounds the count that IS the verdict: 0 prints `0 NEW drift` and exits 0.",
+    },
+    {
+      token: "set +e",
+      site: 'stale_count="$(grep -ac',
+      why: "F5. Bounds the stale-baseline count; an uncountable result is not a baseline with nothing stale in it.",
+    },
+    {
+      token: "set +e",
+      site: `extra_count="$(grep -ac '[^[:space:]]' "$extra_file")"`,
+      why: "F5. Bounds the ADVISORY extra-ledger count. This direction warns rather than failing, but it is still never allowed to read as 'counted zero, nothing to report'.",
+    },
+    {
+      token: "set +e",
+      site: 'run_ledger_query extra "$names_csv" > "$extra_file"',
+      why: "F-R2-04. Bounds the ADVISORY extra-ledger QUERY itself. The `if run_ledger_query …; then` it replaces swallowed the status and the channel together, so a dead query and a clean one both printed nothing — not even the warning the grep three lines below it already prints.",
+    },
+    {
+      token: "set +e",
+      site: 'grep -aqFx -e "$nm" "$missing_file"',
+      why: "F-R2-05. Bounds the frontier-TIP presence test. Unbounded, rc >= 2 read as 'present', which RAISES the tip, widens the exemption window and removes findings — the softening direction.",
+    },
+    {
+      token: "set +e",
+      site: 'run_ledger_query missing "$names_csv" > "$missing_file" 2>"$missing_err"',
+      why: "164.8.2-LEDGER-STDERR-PUBLIC-LOG (Phase 164.8.4). Bounds the missing-direction QUERY itself, mirroring F-R2-04's ledger_rows/extra bound: an unbounded failure here used to exit the whole script under `set -euo pipefail` with stderr already bare — now the rc is captured and narrated, never left to trip errexit silently.",
+    },
+    // ── `2>/dev/null` — FIVE sites: three psql channels that can name a host, ─
+    // ── and two `wc` calls whose suppression is what keeps a DIAGNOSIS from ──
+    // ── blanking ──────────────────────────────────────────────────────────────
+    {
+      token: "2>/dev/null",
+      site: "2>/dev/null | sed 's/^/::error::  /' || true",
+      why: "the absurdity floor's shape diagnostic. psql's stderr can carry a DSN, host or username and this job's log is PUBLIC (NON-NEGOTIABLES, top of the script); the probe's STDOUT is the evidence and is printed.",
+    },
+    {
+      token: "2>/dev/null",
+      site: 'if run_ledger_query shape "$names_csv" 2>/dev/null',
+      why: "the same shape diagnostic on the NEW-drift path — and here the rc IS consumed: the `if` prints `(shape probe failed — the ledger could not be described)` on the else branch.",
+    },
+    {
+      token: "2>/dev/null",
+      site: `wc -l < "$ledger_rows_err" 2>/dev/null || echo '?'`,
+      why: "G2. The ONLY site here where suppression is the strict direction: this `wc` counts the stderr the two ledger_rows MEASURE_FAILs report, and an unreadable `$tmp` made `wc` fail INSIDE the message, rendering a BLANK where the operator's one quantity belongs. `|| echo '?'` makes the count total; letting `wc`'s own error through would buy nothing and cost the diagnosis its number (D-12/SC-7).",
+    },
+    {
+      token: "2>/dev/null",
+      site: '> "$extra_file" 2>/dev/null',
+      why: "the ADVISORY extra-ledger direction. Its rc is captured into `extra_q_rc` on the next line and narrated (F-R2-04), so the suppressed channel is redaction — psql's stderr can carry a DSN, host or username and this job's log is PUBLIC — and never evidence.",
+    },
+    {
+      token: "2>/dev/null",
+      site: `wc -l < "$missing_err" 2>/dev/null || echo '?'`,
+      why: "164.8.2-LEDGER-STDERR-PUBLIC-LOG (Phase 164.8.4). Same shape as G2's ledger_rows_err site: this `wc` counts the stderr the missing-direction failure message reports, and an unreadable capture file must render `?`, never a blank, inside the diagnosis (D-12/SC-7).",
+    },
+    // ── `>/dev/null 2>&1` — TWO sites, both `command -v … || fail` ────────────
+    {
+      token: ">/dev/null 2>&1",
+      site: "command -v node >/dev/null 2>&1",
+      why: "a presence probe whose status is consumed by the `|| fail` on the same line. The suppressed channel is the path echo, not a diagnosis.",
+    },
+    {
+      token: ">/dev/null 2>&1",
+      site: "command -v psql >/dev/null 2>&1",
+      why: "the same probe for psql, with the same `|| fail` on the same line.",
+    },
+    // ── `::warning` — 3 sites, all DECLARED-advisory, none a verdict ────
+    {
+      token: "::warning",
+      site: "no ledger baseline at",
+      why: "an absent baseline file makes every measured absence NEW — which is the strict direction, so the run still fails on drift. The warning explains the strictness; it does not soften a finding.",
+    },
+    {
+      token: "::warning",
+      site: "could not count the advisory extra-ledger rows",
+      why: "the extra direction is ADVISORY BY DESIGN (squashes and CLI-era rows make it noisy), so an uncountable result warns rather than failing — and the warning says outright that it reported nothing because it could not read.",
+    },
+    {
+      token: "::warning",
+      site: "the ADVISORY extra-ledger query exited",
+      why: "F-R2-04. The same advisory direction one layer OUT: the query itself, whose failure used to print nothing at all. It warns rather than failing because the direction is advisory, and it distinguishes 'there were no extra rows' from 'the query could not run' by naming the exit code.",
+    },
+  ];
+
+  /** The token line joined with the next live line — see ALLOWED_SITES. */
+  const siteWindows = (text: string, token: string) => {
+    const lines = liveLines(checkRegion(text));
+    const out: { line: string; ctx: string }[] = [];
+    lines.forEach((l, i) => {
+      if (l.includes(token)) out.push({ line: l, ctx: `${l}\n${lines[i + 1] ?? ""}` });
+    });
+    return out;
+  };
+
+  function softeningOffenders(text: string): string[] {
+    const offenders: string[] = [];
+    for (const token of SOFTENING_TOKENS) {
+      const entries = ALLOWED_SITES.filter((e) => e.token === token);
+      const hits = siteWindows(text, token);
+      if (entries.length === 0) {
+        if (hits.length > 0) {
+          offenders.push(
+            `${token} (${hits.length}) — FORBIDDEN OUTRIGHT in check(): ${hits
+              .map((h) => h.line.trim())
+              .join(" | ")}`,
+          );
+        }
+        continue;
+      }
+      for (const h of hits) {
+        const matched = entries.filter((e) => h.ctx.includes(e.site));
+        if (matched.length !== 1) {
+          offenders.push(
+            `${token} (UNLISTED SITE, matched ${matched.length} allowlist entr(ies)) — a new softening has to earn its place in ALLOWED_SITES with a per-site reason: ${h.line.trim()}`,
+          );
+          continue;
+        }
+        const n = h.line.split(token).length - 1;
+        if (n !== 1) {
+          offenders.push(
+            `${token} (${n} on ONE allowlisted line — the extra one is riding in on its neighbour's justification): ${h.line.trim()}`,
+          );
+        }
+      }
+      for (const e of entries) {
+        const n = hits.filter((h) => h.ctx.includes(e.site)).length;
+        if (n !== 1) {
+          offenders.push(
+            `${token} (VANISHED OR DUPLICATED SITE, matched ${n} live site(s), want exactly 1): ${e.site}`,
+          );
+        }
+      }
+    }
+    return offenders;
+  }
+
+  /**
+   * The SUPERSEDED count rule, kept as a REFERENCE ORACLE and nothing else. Its
+   * only caller is the swap calibration, which asserts this reports NOTHING on a
+   * mutant the site rule reports twice.
+   */
+  function countRuleOffenders(text: string): string[] {
+    const live = liveLines(checkRegion(text)).join("\n");
+    const out: string[] = [];
+    for (const token of SOFTENING_TOKENS) {
+      const want = ALLOWED_SITES.filter((e) => e.token === token).length;
+      const n = live.split(token).length - 1;
+      if (n !== want) out.push(`${token}: ${n}, want ${want}`);
+    }
+    return out;
+  }
+
+  /**
+   * Every `set +e` must be BOUNDED — an rc capture, a `set -e` within its own
+   * four live lines, AND a READ of the captured status somewhere in `check()`.
+   * The site list says each one is a bound; this measures it, so the control is
+   * not weaker than the sentence beside it.
+   *
+   * ⛔ G1 (Phase 164.8.2) — THE THIRD LEG IS WHY THIS IS A BOUND AND NOT A
+   * RITUAL. Capture and restoration were the whole rule, and neither proves the
+   * status is ever CONSUMED: a `set +e` that writes `foo_rc=$?`, restores `-e`
+   * and then never branches on `foo_rc` is the discarded-exit-code shape this
+   * phase exists to eliminate, and it passed both legs AND the site allowlist,
+   * because a site entry's prose reason is never checked against behaviour. The
+   * read is counted as `$foo_rc` / `${foo_rc}` USES across the region — the
+   * assignment itself carries no `$`, so it can never satisfy its own leg.
+   */
+  function unboundedSetE(text: string): string[] {
+    const lines = liveLines(checkRegion(text));
+    const region = lines.join("\n");
+    const out: string[] = [];
+    lines.forEach((l, i) => {
+      if (!l.includes("set +e")) return;
+      const win = lines.slice(i, i + 4).join("\n");
+      const missing: string[] = [];
+      const captured = /(\w+)=\$\?/.exec(win);
+      if (!captured) missing.push("no `rc=$?` capture");
+      if (!/set -e\b/.test(win)) missing.push("never turns `-e` back on");
+      if (captured) {
+        const name = captured[1];
+        const reads = region.split(new RegExp(`\\$\\{?${name}(?![A-Za-z0-9_])`)).length - 1;
+        if (reads === 0) {
+          missing.push(`captures \`${name}\` and then never reads it — a DISCARDED exit code`);
+        }
+      }
+      if (missing.length > 0) {
+        out.push(`UNBOUNDED \`set +e\` (${missing.join(", ")}): ${l.trim()}`);
+      }
+    });
+    return out;
+  }
+
+  it("the scanned region is the gate proper, and it is not empty", () => {
+    // Without this every pin below is vacuously true — the anchor moved and the
+    // scan is looking at nothing.
+    expect(
+      liveLines(checkRegion(SRC)).length,
+      "the check() region did not slice — its anchors moved and the whole scan is vacuous",
+    ).toBeGreaterThan(150);
+    // And the harness's own stub heredocs are OUT, deliberately: they carry the
+    // `exit 0` that is forbidden inside check().
+    expect(checkRegion(SRC)).not.toContain("STUB");
+  });
+
+  it("the real script satisfies its own site allowlist, and every `set +e` is bounded", () => {
+    expect(softeningOffenders(SRC), "check() carries a softening nobody wrote down").toEqual([]);
+    expect(unboundedSetE(SRC), "a `set +e` in check() is not bounded").toEqual([]);
+    // The allowlist is a set of distinct entries, not a list with a duplicate in it.
+    expect(new Set(ALLOWED_SITES.map((e) => `${e.token}::${e.site}`)).size).toBe(
+      ALLOWED_SITES.length,
+    );
+    for (const e of ALLOWED_SITES) {
+      expect(e.why.length, `the site \`${e.site}\` carries no reason`).toBeGreaterThan(40);
+      expect(SOFTENING_TOKENS, `\`${e.token}\` is allowlisted but never scanned`).toContain(e.token);
+    }
+  });
+
+  it("UP: a NEW softening site is reported as UNLISTED", () => {
+    // On the F7 read — the one whose suppression made the absurdity floor inert.
+    const widened = SRC.replace('2>"$ledger_rows_err"', '2>/dev/null');
+    expect(widened, "the site-addition mutation changed nothing").not.toBe(SRC);
+    expect(softeningOffenders(widened).join(" | "), "a NEW unlisted site went unreported").toContain(
+      "UNLISTED SITE",
+    );
+  });
+
+  it("DOWN: a VANISHED allowlisted site is reported too — the rule is a set, not a ceiling", () => {
+    const narrowed = SRC.replace('> "$extra_file" 2>/dev/null', '> "$extra_file"');
+    expect(narrowed, "the site-removal mutation changed nothing").not.toBe(SRC);
+    expect(
+      softeningOffenders(narrowed).join(" | "),
+      "a VANISHED allowlisted site went unreported",
+    ).toContain("VANISHED OR DUPLICATED SITE");
+  });
+
+  it("⭐ SWAP: the shape a COUNT cannot see — one benign suppression out, F7's back in", () => {
+    // The ADVISORY extra-ledger direction loses its (justified, rc-consumed)
+    // `2>/dev/null`, and the `ledger_rows` read — the ABSURDITY FLOOR's own input —
+    // gains one. Three in, three out. This is F7 restored, wearing a count that
+    // never moved.
+    const narrowed = SRC.replace('> "$extra_file" 2>/dev/null', '> "$extra_file"');
+    const swapped = narrowed.replace('2>"$ledger_rows_err"', '2>/dev/null');
+    expect(swapped, "the swap mutation changed nothing beyond the deletion").not.toBe(narrowed);
+
+    expect(
+      liveLines(checkRegion(swapped)).join("\n").split("2>/dev/null").length - 1,
+      "CALIBRATION: the swap did NOT preserve the count, so it is not exercising the direction a count is blind to",
+    ).toBe(ALLOWED_SITES.filter((e) => e.token === "2>/dev/null").length);
+    expect(
+      countRuleOffenders(swapped),
+      "CALIBRATION: the SUPERSEDED count rule already caught this swap, so the site set is not buying anything and B3 was not a finding",
+    ).toEqual([]);
+
+    const offenders = softeningOffenders(swapped);
+    expect(
+      offenders.join(" | "),
+      "the count-preserving swap went unreported by the SITE rule too — the new mechanism is no stronger than the one it replaced",
+    ).toContain("UNLISTED SITE");
+    expect(
+      offenders.join(" | "),
+      "the swap's VANISHED half went unreported — only half a bijection is being checked",
+    ).toContain("VANISHED OR DUPLICATED SITE");
+  });
+
+  it("a token with NO allowlisted site is forbidden outright, wherever it lands", () => {
+    const forbidden = SOFTENING_TOKENS.filter((t) => !ALLOWED_SITES.some((e) => e.token === t));
+    // ⛔ An empty loop passes. The four are `|| :`, `|| exit 0`, `exit 0` and
+    // `set +o pipefail`; if a future edit gives one of them a site, this leg must
+    // be re-read rather than allowed to iterate over nothing.
+    expect(forbidden, "no token is forbidden outright any more — this arm would loop zero times and pass").toEqual([
+      "|| :",
+      "|| exit 0",
+      "exit 0",
+      "set +o pipefail",
+    ]);
+    for (const token of forbidden) {
+      const mutant = SRC.replace(
+        '  echo "Repo migrations: ${#repo_names[@]}"',
+        `  echo "Repo migrations: \${#repo_names[@]}" ${token}`,
+      );
+      expect(mutant, `the ${token} mutation changed nothing`).not.toBe(SRC);
+      expect(
+        softeningOffenders(mutant).join(" | "),
+        `\`${token}\` was tolerated inside check(). It has no allowlisted site and must be refused outright.`,
+      ).toContain("FORBIDDEN OUTRIGHT");
+    }
+  });
+
+  it("a SECOND suppression on an allowlisted line does not ride in on the first's reason", () => {
+    const doubled = SRC.replace(
+      '> "$extra_file" 2>/dev/null\n',
+      '> "$extra_file" 2>/dev/null 2>/dev/null\n',
+    );
+    expect(doubled, "the double-suppression mutation changed nothing").not.toBe(SRC);
+    expect(
+      softeningOffenders(doubled).join(" | "),
+      "two suppressions on one allowlisted line were accepted",
+    ).toContain("on ONE allowlisted line");
+  });
+
+  it("an UNBOUNDED `set +e` is reported even when its site is allowlisted", () => {
+    // The exact shape B3 exists for: a seventh `set +e` added tomorrow, or an
+    // existing bound quietly losing its `set -e`. The SITE is unchanged, so the
+    // allowlist alone would stay green — this is the leg that makes the list's
+    // word "bound" mean something.
+    const unset = SRC.replace(
+      '  ledger_rows_rc=$?\n  set -e\n',
+      '  ledger_rows_rc=$?\n',
+    );
+    expect(unset, "the `set -e` removal changed nothing").not.toBe(SRC);
+    expect(softeningOffenders(unset), "the SITE rule alone should not see this").toEqual([]);
+    expect(unboundedSetE(unset).join(" | "), "a `set +e` that never restores `-e` went unreported").toContain(
+      "never turns `-e` back on",
+    );
+
+    const uncaptured = SRC.replace(
+      '  ledger_rows="$(run_ledger_query ledger_rows "$names_csv" 2>"$ledger_rows_err")"\n  ledger_rows_rc=$?\n',
+      '  ledger_rows="$(run_ledger_query ledger_rows "$names_csv" 2>"$ledger_rows_err")"\n',
+    );
+    expect(uncaptured, "the rc-capture removal changed nothing").not.toBe(SRC);
+    expect(
+      unboundedSetE(uncaptured).join(" | "),
+      "a `set +e` whose status is never captured went unreported — that is the discarded exit code the bound exists to keep",
+    ).toContain("no `rc=$?` capture");
+  });
+
+  it("⭐ G1: a status CAPTURED and then never READ is reported — capture is not consumption", () => {
+    // The gap the first two legs cannot see. This mutation keeps the SITE
+    // byte-identical (same `set +e`, same allowlisted bounded read), keeps the
+    // capture and keeps the `set -e` — it only renames the variable the status
+    // lands in, so nothing ever branches on it. That is the ninth-`set +e`
+    // shape stated in prose beside the list, made real on an existing site.
+    const orphaned = SRC.replace("  ledger_rows_rc=$?\n", "  ledger_rows_discarded_rc=$?\n");
+    expect(orphaned, "the capture-rename mutation changed nothing").not.toBe(SRC);
+    // CALIBRATION: the mutation APPLIED, and applied where it was aimed.
+    expect(orphaned, "the mutant does not carry the orphaned capture").toContain(
+      "ledger_rows_discarded_rc=$?",
+    );
+    expect(
+      liveLines(checkRegion(orphaned))
+        .join("\n")
+        .split(/\$\{?ledger_rows_discarded_rc(?![A-Za-z0-9_])/).length - 1,
+      "CALIBRATION: the renamed status is read somewhere after all, so this is not the discarded-capture shape",
+    ).toBe(0);
+
+    // GREEN CONTROL, on the real script: all eight sites capture AND consume.
+    expect(
+      unboundedSetE(SRC),
+      "the REAL script trips the new leg — one of its `set +e` bounds captures a status nobody reads",
+    ).toEqual([]);
+
+    // The two older legs stay silent on this mutant, and so does the site rule —
+    // which is the whole point: without the third leg this passes everything.
+    const report = unboundedSetE(orphaned).join(" | ");
+    expect(report, "the capture leg fired, so the mutant is not exercising the READ leg").not.toContain(
+      "no `rc=$?` capture",
+    );
+    expect(report, "the restore leg fired, so the mutant is not exercising the READ leg").not.toContain(
+      "never turns `-e` back on",
+    );
+    expect(
+      softeningOffenders(orphaned),
+      "the SITE rule alone should not see this — the site is unchanged, only the consumption is gone",
+    ).toEqual([]);
+
+    expect(
+      report,
+      "a `set +e` whose captured status is never read went unreported — the bound proves capture and restoration and calls that consumption",
+    ).toContain("captures `ledger_rows_discarded_rc` and then never reads it");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ⛔ WR-07 CALIBRATION — the anchor check must BITE.
+//
+// A guard added and never shown to fire is the same defect it was added to
+// close, so both helpers are driven with the anchor ABSENT (asserting the
+// mutation actually removed it FIRST, so a no-op replace cannot read as a pass)
+// and then with the real subject as a control.
+// ---------------------------------------------------------------------------
+describe("[164.8.2-WR-07] slice anchors fail loud instead of degenerating", () => {
+  it("anchorIndex throws BY NAME on a missing anchor and stays silent on a present one", () => {
+    const basename = "20260828061901_add_thing.sql";
+    // Control: the real shape resolves, so the check is a check and not a refusal.
+    expect(basename.slice(0, anchorIndex(basename, "_"))).toBe("20260828061901");
+    expect(() => anchorIndex(basename, "_")).not.toThrow();
+
+    // Mutant: the separator is GONE. Assert the mutation applied before the flip.
+    const mutant = basename.split("_").join("-");
+    expect(mutant, "the mutation must actually change the subject").not.toBe(basename);
+    expect(mutant.includes("_"), "the mutation must actually REMOVE the anchor").toBe(false);
+    expect(() => anchorIndex(mutant, "_")).toThrow(/ANCHOR MISSING: "_"/);
+    // ⚠️ And the degenerate value the old code returned is exactly the trap: an
+    // unchecked `slice(0, -1)` here is nearly the WHOLE basename, which still
+    // looks like a plausible timestamp to every assertion downstream.
+    expect(degenerateNarrow(mutant, { upTo: "_" })).toBe(
+      "20260828061901-add-thing.sq",
+    );
+  });
+
+  it("lastAnchorIndex throws BY NAME when the command has no argument separator", () => {
+    const cmd = "psql -Atc script.sql /tmp/dump.sql";
+    expect(cmd.slice(lastAnchorIndex(cmd, " ") + 1)).toBe("/tmp/dump.sql");
+    expect(() => lastAnchorIndex(cmd, " ")).not.toThrow();
+
+    const mutant = cmd.split(" ").join("");
+    expect(mutant, "the mutation must actually change the subject").not.toBe(cmd);
+    expect(mutant.includes(" "), "the mutation must actually REMOVE the anchor").toBe(false);
+    expect(() => lastAnchorIndex(mutant, " ")).toThrow(/ANCHOR MISSING \(last\): " "/);
+    // The trap it replaces: `slice(-1 + 1)` is `slice(0)` — the WHOLE command,
+    // so two argument-less commands would "agree about their dump" naming none.
+    expect(degenerateNarrow(mutant, { fromLast: " ", plus: 1 })).toBe(mutant);
+  });
+});

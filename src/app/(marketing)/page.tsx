@@ -1,6 +1,7 @@
 import { redirect } from "next/navigation";
 import Link from "next/link";
 import { createClient } from "@/lib/supabase/server";
+import { DEFAULT_AUTHENTICATED_ROUTE } from "@/lib/routing/default-route";
 import { withPublishedOnly } from "@/lib/visibility";
 import { EXCHANGES } from "@/lib/constants";
 import { VerificationSection } from "@/components/landing/VerificationSection";
@@ -38,7 +39,7 @@ export default async function Home() {
   } = await supabase.auth.getUser();
 
   if (user) {
-    redirect("/discovery/crypto-sma");
+    redirect(DEFAULT_AUTHENTICATED_ROUTE);
   }
 
   const stats = await getSocialProofStats();

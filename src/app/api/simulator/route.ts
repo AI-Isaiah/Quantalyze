@@ -228,8 +228,30 @@ export async function POST(req: NextRequest) {
     captureToSentry(err, {
       tags: { route: "api/simulator", op: "simulateAddCandidate" },
     });
+    // 161-08 / WIZERR-06 — THE CODE CROSSES; THE MESSAGE STILL DOES NOT.
+    //
+    // The paragraph above is unchanged and still governs `error`: a 5xx
+    // `message` carries the `parseResponse()` contract-violation string, FastAPI
+    // detail and this service's base URL, and none of it may cross. What moves
+    // is only `code` — a machine token from the seam's own closed vocabulary,
+    // already forwarded by the 4xx arm above. Collapsing it here meant a
+    // classified 500 (`SIMULATION_FAILED`, the `portfolio_simulator` residue)
+    // arrived indistinguishable from a transport failure we could not name.
+    //
+    // ⛔ `typeof`, NOT `instanceof AnalyticsUpstreamError`: this arm is also
+    // reached by transport failures and untyped throws, and a suite that mocks
+    // `@/lib/analytics-client` wholesale makes the class `undefined`, where
+    // `x instanceof undefined` throws from inside this very catch. The empty
+    // string is excluded because `"" ?? "UNKNOWN"` is `""`.
+    const rawSeamCode = (err as { seamCode?: unknown } | null | undefined)
+      ?.seamCode;
+    const seamCode =
+      typeof rawSeamCode === "string" && rawSeamCode !== "" ? rawSeamCode : null;
     return NextResponse.json(
-      { error: "Portfolio impact simulation failed.", code: "UNKNOWN" },
+      {
+        error: "Portfolio impact simulation failed.",
+        code: seamCode ?? "UNKNOWN",
+      },
       { status: 500, headers: NO_STORE_HEADERS },
     );
   }

@@ -242,6 +242,10 @@ const STUB_PROPS: MyAllocationDashboardPayload & {
   hasSyncing: false,
   equityDailyPoints: [],
   equityCurveSource: "legacy",
+  // Phase 167.1.2 / D-02: the producer emits "rebuilding" for every allocator.
+  equityHistoryState: "rebuilding",
+  equityDailyReturns: [],
+  equityHistoryRebuildReason: null,
   derivedCurveComputedAt: null,
   minHistoryDepthMonths: null,
   equityBaselineUnknown: false,
@@ -281,6 +285,11 @@ const STUB_PROPS: MyAllocationDashboardPayload & {
   perKeyReturnsByApiKeyId: {},
   perKeyDailiesGateSatisfied: false,
   eligibleApiKeyIds: [],
+  // Phase 151 / AUM-04 — the split book-entry gate. No eligible keys here, so
+  // no key can be allocator-side and none can contribute.
+  allocatorEligibleApiKeyIds: [],
+  contributingApiKeyIds: [],
+  bookEntryGateSatisfied: false,
   apiKeysCount: 1,
   mandateIsSet: false,
 };

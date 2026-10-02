@@ -237,6 +237,19 @@ export function CorrelationHeatmap({
   function label(id: string): string {
     return strategyNames[id] ?? id.slice(0, 8);
   }
+  // How many off-diagonal pairs the caption's average covers. A pair whose
+  // correlation is undefined has no cell (the engine leaves it out, founder
+  // decision D7), renders "—", and is not in the host's average either, so the
+  // caption says how many pairs it averages when that is fewer than all of them.
+  // This COUNTS cells; it never computes the average (CORR-03 still holds).
+  const totalPairs = (n * (n - 1)) / 2;
+  let measuredPairs = 0;
+  for (let i = 0; i < n; i++) {
+    for (let j = i + 1; j < n; j++) {
+      const v = correlationMatrix[ids[i]]?.[ids[j]];
+      if (v != null && Number.isFinite(v)) measuredPairs++;
+    }
+  }
 
   return (
     <div>
@@ -315,6 +328,13 @@ export function CorrelationHeatmap({
       {avgAbsCorrelation != null && Number.isFinite(avgAbsCorrelation) ? (
         <div className="mt-2 text-micro text-text-muted">
           Avg |ρ| <span className="font-metric">{avgAbsCorrelation.toFixed(2)}</span>
+          {measuredPairs < totalPairs ? (
+            <>
+              {" "}
+              · <span className="font-metric">{measuredPairs}</span> of{" "}
+              <span className="font-metric">{totalPairs}</span> pairs measured
+            </>
+          ) : null}
         </div>
       ) : null}
     </div>

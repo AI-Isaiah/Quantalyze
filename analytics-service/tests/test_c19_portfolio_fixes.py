@@ -19,6 +19,7 @@ Covers:
 
 from __future__ import annotations
 
+import importlib
 import sys
 from unittest.mock import MagicMock, patch
 
@@ -147,6 +148,22 @@ def _restore_router_state_at_module_teardown_c19():
     _restore_slowapi()
     evict_module("routers.portfolio")
     evict_module("routers.cron")
+    # ⛔ EVICTION ALONE LEAVES A HOLE, and it is not this file's own tests that pay.
+    # `evict_module` deletes the attribute from the PARENT `routers` package too
+    # (deliberately — see its docstring: popping sys.modules alone lets
+    # `_handle_fromlist` hand back the stale object). Nothing re-imports it, so
+    # every later file in the same process sees a `routers` package with no
+    # `portfolio` attribute. `monkeypatch.setattr("routers.portfolio.<x>", ...)`
+    # then dies in `annotated_getattr` with
+    # `module 'routers' has no attribute 'portfolio'` — nowhere near the line that
+    # looks wrong, and only when the two files land in the same xdist worker, which
+    # is why it read as an intermittent flake rather than a deterministic break.
+    # MEASURED 2026-09-15: `pytest tests/test_c19_portfolio_fixes.py
+    # tests/test_portfolio_compute_integration.py` fails 1/83 every single time.
+    # Re-import AFTER `_restore_slowapi()` so the rebuilt module carries the REAL
+    # limiter, not this file's `_NoopLimiter`.
+    importlib.import_module("routers.portfolio")
+    importlib.import_module("routers.cron")
 
 
 # ---------------------------------------------------------------------------

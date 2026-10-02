@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./helpers/hydration-guard";
 import { assertTargetSizes } from "./helpers/reflow";
 import {
   seedStrategyWithHistory,
@@ -184,6 +184,10 @@ test.describe("target-size gate (WCAG 2.5.5/2.5.8) — chart tap-rects @ 320px (
  * Phase 48-04 / CHART-01b — EquityChart coarse tap-rect target-size at 320px
  * on the SEEDED `/allocations` Overview tab.
  *
+ * Phase 167.1.2 plan 11 restored this measurement. The seed writes a version-2
+ * derived series and a venue account id, which is what "ready" requires. A
+ * snapshot-only book stays rebuilding and would not mount the chart.
+ *
  * The Phase-48-03 EquityChart edit wires the Phase-47 useTapPin gesture core
  * onto the hand-rolled `<svg role="img" aria-label="Equity chart">` and wraps
  * it in a `pointer-coarse:min-h-[44px]` layer (EquityChart.tsx:1500-1511) — the
@@ -198,8 +202,9 @@ test.describe("target-size gate (WCAG 2.5.5/2.5.8) — chart tap-rects @ 320px (
  * allocator has zero holdings, so this case seeds a minimal connected BOOK
  * (seedAllocatorBook: one active api_key + one holding + a daily equity curve)
  * for a freshly-seeded allocator, then logs in and lands on Overview. Without
- * the book the page renders EmptyState and the EquityChart never mounts — the
- * visible-anchor gate below then fails LOUD (not a hollow-zero false-green).
+ * the book the page renders EmptyState and neither the EquityChart nor (while
+ * D-02 holds) the rebuilding panel mounts — the visible-anchor gate below then
+ * fails LOUD (not a hollow-zero false-green).
  *
  * COARSE-POINTER EMULATION: like the Phase-47 block, `test.use({ hasTouch,
  * isMobile })` makes Chromium report pointer:coarse so the
@@ -244,7 +249,8 @@ test.describe("target-size gate (WCAG 2.5.5/2.5.8) — EquityChart tap-rect @ 32
     await page.setViewportSize({ width: 320, height: 800 });
 
     // Seed a verified allocator with a connected BOOK so the Overview tab
-    // renders the EquityChart (not EmptyState), then sign in.
+    // renders the EquityChart (not EmptyState), then sign in. The book is a
+    // version-2 series with a venue account id, so plan 11 reads it as ready.
     const allocator = await seedTestAllocator();
     await seedAllocatorBook({ allocatorUserId: allocator.userId, days: 120 });
     await loginViaForm(page, allocator.email, allocator.password);
@@ -258,8 +264,9 @@ test.describe("target-size gate (WCAG 2.5.5/2.5.8) — EquityChart tap-rect @ 32
     }
 
     // Anchor on the EquityChart svg itself (role=img + aria-label="Equity
-    // chart"). A redirect-to-login / EmptyState page would NOT show it, so a
-    // hollow zero is impossible — the measurement only runs on a mounted chart.
+    // chart"). A redirect-to-login / EmptyState / rebuilding page would NOT
+    // show it, so a hollow zero is impossible — the measurement only runs on
+    // a mounted chart.
     const equity = page
       .locator('[data-testid="overview-equity-curve"]')
       .getByRole("img", { name: "Equity chart" })
@@ -270,9 +277,6 @@ test.describe("target-size gate (WCAG 2.5.5/2.5.8) — EquityChart tap-rect @ 32
       "EquityChart svg not visible — EmptyState/login page would false-green",
     ).toBeVisible({ timeout: 15_000 });
 
-    // Measure the coarse tap surface — the EquityChart svg (role=img) under its
-    // pointer-coarse:min-h-[44px] wrapper. assertTargetSizes asserts >= 44px
-    // and fails loud if zero elements are measured (false-green guard).
     await assertTargetSizes(
       page,
       '[data-testid="overview-equity-curve"] [aria-label="Equity chart"]',

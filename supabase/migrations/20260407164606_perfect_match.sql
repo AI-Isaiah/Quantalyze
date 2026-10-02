@@ -1,3 +1,7 @@
+-- APP-GUC-LINEAGE: retired 2026-09-07; occurrences: 1; successor: none; reason: the ONE app-namespace read in this file — the is_admin backfill DO block below — ran ONCE when this migration applied on 2026-04-07 and can never run again. It is not a function body, not cron command text and not a view, and `grep -rln 'perfect_match|v_admin_email' supabase/migrations/` returns only this file, so nothing reads that value anywhere today. successor is `none` because there is no live value to move: pointing a block that already ran at a new mechanism would change the behaviour of code that will never execute again, and deleting the statement would make the repo stop describing what was applied to PROD. Disposition D-04, a SCOPE AMENDMENT recorded in ROADMAP criterion 2, 164.7-CONTEXT.md and the 164.7-05 SUMMARY.
+-- The mechanism that replaces app-namespace settings generally on this platform is
+-- public.system_settings + Vault (20260907120000_analytics_service_settings_and_vault_tick.sql).
+-- It is named here for the reader, NOT as this file's successor: this read has no live value.
 -- Migration 011: Perfect Match Engine (founder-amplifier)
 -- See docs/superpowers/plans/2026-04-07-perfect-match-engine.md for the plan + dual-voice review.
 --

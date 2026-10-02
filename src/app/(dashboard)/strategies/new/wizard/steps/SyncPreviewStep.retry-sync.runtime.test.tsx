@@ -362,4 +362,35 @@ describe("[140.5-03 / SEAMPROSE-03] SyncPreviewStep — the fifth transport catc
     expect(screen.getByTestId("wizard-sync-retry")).not.toBeDisabled();
     warnSpy.mockRestore();
   });
+
+  // 164.6.5-07 / D-14 (task 3) — CLOSE THE CLASS. This surface shares ONE
+  // envelope between TWO distinct requests (the mount kickoff and this
+  // retry), exactly like ConnectKeyStep's credential/reuse pair — the sharpest
+  // test of the fix, because a wiring mistake here would show neither
+  // request's id, only the page-load one.
+  it("[164.6.5-07 / D-14] the retry's envelope carries the id sent on THE RETRY, not the kickoff's", async () => {
+    syncPostQueue = [kickoffAccepted(), denied(401, "Unauthorized")];
+    const fetchSpy = installFetchMock();
+    await renderStalled();
+    await clickRetrySync();
+
+    const envelope = screen.getByTestId("error-envelope");
+    const syncCalls = fetchSpy.mock.calls.filter((c) =>
+      String(c[0]).includes("/api/keys/sync"),
+    );
+    expect(syncCalls).toHaveLength(2);
+    const kickoffId = new Headers(
+      (syncCalls[0][1] as RequestInit).headers,
+    ).get("X-Correlation-Id");
+    const retryId = new Headers((syncCalls[1][1] as RequestInit).headers).get(
+      "X-Correlation-Id",
+    );
+    expect(retryId).toMatch(/^wizard:[0-9a-f-]{36}$/);
+    expect(
+      retryId,
+      "the kickoff and the retry must send DIFFERENT ids — each is its own request",
+    ).not.toBe(kickoffId);
+    expect(within(envelope).getByText(retryId!)).toBeInTheDocument();
+    expect(within(envelope).queryByText(kickoffId!)).not.toBeInTheDocument();
+  });
 });
