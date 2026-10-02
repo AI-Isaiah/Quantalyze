@@ -1570,8 +1570,12 @@ true for 146 and half of 142–145, and **false for 141**.
       **Closed when:** the compute selects only real columns, derives daily returns from the stored
       series, and a test that fails on today's select pins both.
 
-- [ ] **`[164.9.4-CI-MUTEX-QUEUE]` `python` and `e2e-seeded` spend most of their CI wall clock
+- [x] **`[164.9.4-CI-MUTEX-QUEUE]` `python` and `e2e-seeded` spend most of their CI wall clock
       queued on the shared-TEST advisory lock (booked 2026-09-26, founder decision).**
+      ✅ **CLOSED 2026-10-03 by Phase 164.9.4 CIOFFMUTEX (v0.119.0.0).** `ci.yml` holds the key 0×; both jobs
+      boot a runner-private local-stack lane. Measured on run `37039941530` against tree-matched `37028872024`:
+      `python` 41m33s → 13m06s, `e2e-seeded` 30m19s → 11m14s (`164.9.4-MEASUREMENT.md`). SC-3's e2e-seeded
+      count is graded on the ship run (founder decision 2026-10-03).
       **Measured 2026-09-26 on CI run `36229959820` (PR #864, 52 min wall clock).** `python` took
       50 min: 36 min in "Acquire shared-test-db mutex" and 13 min in pytest. `e2e-seeded` took
       36 min: 28 min on the mutex and 5 min on specs. Every other job took 12 min or less. The wait

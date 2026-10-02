@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.119.0.0] - 2026-10-03 — CIOFFMUTEX: `python` and `e2e-seeded` run on a database private to their runner and no longer queue on the shared-TEST lock
+
+### Changed
+- **`python` and `e2e-seeded` boot the runner-private local-stack lane** (`scripts/local-stack/run.sh up`) and read no shared TEST. `ci.yml` now holds the shared-TEST advisory key `61616158` **0×** (was 27×); the remaining takers are `supabase-migrate.yml` `apply-test`, `test-restore-from-baseline.yml` `restore` and the `mutex-probe.yml` drill. Neither job reads a `TEST_SUPABASE_*` secret any more. `test-db-drift` is the only `ci.yml` job still running the schema-apply wait.
+- **A docs-only push to `main` takes the short CI path (D-16), but only when it is safe.** `scripts/classify-changed-paths.mjs` classifies the pushed range (`classifyPushRange`). The short path needs every commit in the range to be a PR merge (`isPrMergeCommit`; a direct push to `main` now runs the full corpus), no `.planning/` file a test reads (`TEST_READ_PLANNING_PATHS`, 7 entries, derived from the whole tree, `config.json` included), and a proven-green predecessor (`predecessorVerdict`): a completed, successful `frontend` check run, every GitHub Actions check run non-red (read with `filter=all`, deduped per suite and name), and every Actions check suite completed and non-red. This mirrors Railway's own all-check-runs gate. Every lookup failure falls back to the full corpus with its reason printed. The `changed-paths` job gains `checks: read`, with `GH_TOKEN` on the classify step only.
+- The build's CSP `connect-src` now carries the configured Supabase origin (`next.config.ts`, D-14), so a build pointed at the lane's loopback API can reach it. The origin is charset-checked, http/https only, reduced to `url.origin`, and `*` or an unparseable URL falls back to the static CSP.
+
+### Added
+- `run.sh --assert-local-handoff`: before any `GITHUB_ENV` write or seed, the lane handoff must name a loopback API URL and DSN. URLs are parsed rather than globbed, and userinfo, `@` and backslash forms are refused (`refuseNonLocalUrl` in `scripts/local-stack/capability-probe.mjs`). Keys are masked before export.
+- The lane's env handoff honours `LANE_ENV_FILE` for write, guard and teardown, and every lane reader reads the file `run.sh` wrote (`STACK_ENV_FILE` retired). `e2e-seeded` gains a three-arm "Verify build inlined" step: the lane host is required, placeholder and hosted shapes are refused, and a grep error fails loud.
+
+### Fixed
+- **The `e2e-seeded` flake of `e2e/full-flow.spec.ts` "factsheet page loads for published strategy" (root-caused, not retried away).** On the lane, the crypto-sma category holds only example rows, `/browse` server-renders them and then hides them on mount for anonymous visitors, and the test sampled for a row once before hydration inside a silent `if (hasStrategies)` branch. A fast runner passed vacuously, a medium one hung 60 s, a slow one raced through. The test now waits for the hydrated "Hide examples" state, unticks it, requires a visible factsheet link, and checks the factsheet heading names the strategy it opened; an empty table fails. Verified on the lane at 1x/4x/8x/16x CPU throttling (70/70 with every assertion executed) and with a negative probe. No timeout raise, no retry, no seed or product change.
+- Lane teardown skips the stop when the Supabase CLI never installed; the contract test bounds its self-test spawns and names a hang; the push classifier's fail-safe arms keep git's own reason.
+
+### Tests
+- The mutex pins no longer depend on `ci.yml`'s copies: the dead-holder drill and its Test 3b, the cross-file byte-identity pins (`supabase-migrate-test-first.test.ts`, `test-restore-workflow-wiring.test.ts`) and the absolute protocol loops (`MUTEX_HOLDERS` with an anti-vacuity length check in `critical-regressions.test.ts`), with `ci.yml` pinned to an exact-empty holder list.
+- New `csp-connect-src-supabase-origin.contract.test.ts`; `ci-docs-path-filter.contract.test.ts` grows the push-range, predecessor and planning-read cases with neuter legs and a fake `gh`; `local-stack-lane-wiring.test.ts` pins the boot → assert → `GITHUB_ENV` → first DB step order and runs the refusal matrix.
+
+### Notes
+- **Measured** on run `37039941530` against tree-matched `main` run `37028872024`: `python` 41m33s → 13m06s, `e2e-seeded` 30m19s → 11m14s. The comparand spent 28m21s and 18m16s waiting on the key. `python` counts held (7602 passed vs 7601, coverage 92.44% both).
+- **Shipped with one CI-bound verification item (founder decision 2026-10-03):** SC-3's `e2e-seeded` count (≥ 201 passed, no flaky line) is graded on this release's own CI run; the PR merges only on that reading.
+- **Known limits.** The predecessor gate's live GitHub API shape is first exercised by a real push to `main` after merge. The three `test_compute_jobs_fencing.py` skips still cite shared-TEST contention and have no owner. The flash of example rows for anonymous visitors on `/browse` is booked as a follow-up, not fixed here.
+- Docs: `CLAUDE.md`, `CONTRIBUTING.md`, `TODOS.md` and `docs/runbooks/shared-test-db-mutex.md` §7.2/§7.3 carry dated corrections with the key census (0× `ci.yml`, 7× migrate, 8× restore, 5× mutex-probe, 1× deploy-verify). `[164.9.4-CI-MUTEX-QUEUE]` is closed.
+
 ## [0.118.1.5] - 2026-10-02 — ENQ40001: the enqueue race-loss 40001 converges through PostgREST 14, measured and pinned
 
 ### Added
