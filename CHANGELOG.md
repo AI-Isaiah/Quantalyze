@@ -1,5 +1,46 @@
 # Changelog
 
+## [0.118.1.3] - 2026-10-02 — ENQ40001: the enqueue race-loss 40001 converges through PostgREST 14, measured and pinned
+
+### Added
+- **The D-02 verdict, measured: `converges`.** When `_enqueue_compute_job_internal` loses its in-flight race it raises SQLSTATE `40001`. That raise was induced on the local-stack lane and called through the lane's PostgREST (`rest` image `postgrest:v14.7`), in csv-finalize's call shape. Raw numbers (D-03):
+  - **psql proof:** `state=40001`, the message starts `enqueue race lost`, `shots=1 flips=1`.
+  - **Unarmed control:** `http=200 real=0.018378 shots=0 flips=0 race_lost_log=0 inflight=1 body_matches=t`.
+  - **K=1:** `http=200 real=0.012389 shots=2 flips=1 race_lost_log=1 inflight=1 body_matches=t`.
+  - **K=3:** `http=200 real=0.014372 shots=4 flips=3 race_lost_log=3 inflight=1 body_matches=t`.
+  - **Negative control (an effectively unbounded arm):** `http=000` at the 20 s bound (`real=20.005325`), `shots=33211 flips=33211 race_lost_log=42286 inflight=0`. `shots` kept rising after the client disconnected, 33245 -> 38620 in 3 s. This shows the probe can see a retry loop that does not converge.
+
+  This is a measurement on the lane's PostgREST 14.x. The gateway re-runs the 40001 itself, and the re-run enqueues once the winner is terminal, so the call answers 200 with the id of the single in-flight job.
+- **`supabase/tests/test_enqueue_race_loss_40001.sql`**, a new gate on both lanes (the throwaway pg-lane and the local Supabase stack with FORCE RLS). It pins the DB-side contract that PostgREST's convergence rests on. Each arm has its own mutation twin against migration `20260924230827`, and both twins bite.
+  - **Arm R1:** the induced race raises `40001` with the race-lost message.
+  - **Arm R2:** once the winner is done, the re-run enqueues a new `pending` job (not the done one) and leaves exactly one in flight.
+  - **How the race is induced:** an in-transaction BEFORE/AFTER trigger pair keyed on the gate's own strategy. Sequences serve as counters, so the arm survives the transaction's own rollback.
+  - **Scope:** everything is created inside the file's own `BEGIN ... ROLLBACK`. The sentinel reads `ALL 2 ARMS EXECUTED (R1, R2)`.
+
+### Changed
+- **D-04 comment corrections (comments only; no code token changed).**
+  - **`src/lib/supabase/retry-serialization-failure.ts`:** the helper is now described as DORMANT on PostgREST 14.x and LIVE on PostgREST 16 or later, which returns the 40001 as HTTP 500 with `code` `40001` (PostgREST PR #4222). It STAYS because PROD's PostgREST version can differ. The comment also cites `20260924230827` as the raise's latest definition, and it names the pg_cron SQL fan-outs that see a raw 40001 without PostgREST.
+  - **`csv-finalize/route.ts` and `allocator/holdings/sync/route.ts`:** the retry comments carry the same PostgREST 16 / 14.x qualification. The csv-finalize Python-classifier sentence now names the fence code `55006`.
+  - **Python classifiers:** `_is_serialization_failure` and `_defer_lost_ownership` were checked and left unchanged. They already key on `55006` and never wrap an enqueue.
+- **SQL census moves to the new corpus.** All values were read off one full mutation-runner run on the tree merged with `origin/main`: `scope: FULL 56/56`, `coverage: files 56/83`, `arms: 555/555/0`, `biting: 555`, `lane-invocations: 555`, `No defects`.
+  - **Mutation-runner floors:** `FILES_FLOOR` 55 -> 56 and `ARMS_FLOOR` 553 -> 555, with both `KNOWN_THRESHOLD_SITES` rows moved in the same commit. Both drift directions were observed failing. At 57 / 556 a full run exits 1 naming each floor. At 55 / 553 the floors vitest prints `RATCHET STALE` and the twin-count message. `WAIVED_CEILING` stays 0.
+  - **`sql-tests` sentinel table:** it gains `test_enqueue_race_loss_40001.sql 2`. `SENTINEL_FLOOR` moves 12 -> 13 and the step's `ARMS_FLOOR` moves 237 -> 239, re-derived from each file's own sentinel.
+
+### Tests
+- The census pins in the test files move to that run:
+  - **`mutation-annotation-parser`:** `armsSeen` 555, `stepsSeen` and the needle count 614, `filesTotal` 83, `filesAnnotated` 56, and the new gate in the sorted list.
+  - **`mutation-runner-floors`:** `totalAnchored` 555; GREEN_LOG gains its new per-file row, and every calibration keeps its offset.
+  - **`lint-sql-gates`:** `scanned 83 file(s)`.
+  - **`drift-check-scripts`:** pins 13 / 239.
+
+### Notes
+- **No migration, no PROD apply (D-02 converge branch).** `git diff origin/main...HEAD -- supabase/migrations` is empty. `_enqueue_compute_job_internal`'s latest definition is still `20260924230827`, and the raise keeps `40001`.
+- **RESEARCH open question 1** is recorded, not changed. `set_departed_key_history_inclusion` (`20260927180000`) turns the converging 40001 into a 55006 "try again" and so defeats PostgREST 14's own retry. Changing that would need its own migration with three reviewers.
+- **RESEARCH open question 2** is recorded, not changed. The Python enqueue callers (`process_key.py`, `cron.py`) have no 40001 handling. They are safe on PostgREST 14, which absorbs the raise, but on 16 or later a lost race would surface as an error.
+- **RESEARCH open question 3** is out of scope. The 7-param overload's race raise is dead code, because every 7-arg call fails with 42725 first. This was already recorded in `20260924230827`'s header.
+- **RESEARCH open question 4** is decided as not wired. The PostgREST probe is not a CI step, because the lane's `rest` image is unpinned and a PostgREST 16 image would turn it red for a non-defect. The durable CI pin is the SQL gate above.
+- **The phase's planning record** sits under `.planning/phases/164.9.3.2.1-enq40001-*`: context, research, validation strategy, three plans and their summaries. Plan 01's summary carries every probe line quoted above.
+
 ## [0.118.1.2] - 2026-10-02 — GATECRONNAME: a SQL gate names the derive cron by jobname, not TEST's jobid
 
 ### Fixed
