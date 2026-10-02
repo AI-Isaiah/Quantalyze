@@ -5,16 +5,16 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 164.5.2.1
 current_phase_name: BRIDGERESIDUE
 status: executing
-stopped_at: "Completed 164.5.2.1-01-PLAN.md (migration filename is 20261003120000_sync_status_bridge_residues.sql, not the planned 20260927140000)"
-last_updated: "2026-10-02T22:17:50.000Z"
+stopped_at: "Completed 164.5.2.1-02-PLAN.md (RETRY-PLAIN-COMPLETE closed in 20261003120000; pre-merge decision [164.5.2.1-02-KEPT-ROW-COMPUTED-AT] open in deferred-items.md)"
+last_updated: "2026-10-02T22:45:00.000Z"
 last_activity: 2026-10-03
-last_activity_desc: Phase 164.5.2.1 plan 01 complete
+last_activity_desc: Phase 164.5.2.1 plan 02 complete
 state_head: f9fb8b252dfc58c7b57713ea75af40feff6d9a0e
 progress:
   total_phases: 85
   completed_phases: 48
   total_plans: 458
-  completed_plans: 450
+  completed_plans: 451
   percent: 56
 ---
 
@@ -179,7 +179,7 @@ both checkboxes updated to match. Not yet marked `completed_phases` in the front
 no VERIFICATION.md exists for this phase yet, and this repo's own rule is that phase completion
 is decided by verification status, never by plan counts.**
 
-Phase: 164.5.2.1 (BRIDGERESIDUE) — EXECUTING (plan 2 of 5; plan 01 complete 2026-10-03, migration 20261003120000_sync_status_bridge_residues.sql)
+Phase: 164.5.2.1 (BRIDGERESIDUE) — EXECUTING (plan 3 of 5; plans 01-02 complete 2026-10-03, migration 20261003120000_sync_status_bridge_residues.sql; pre-merge decision [164.5.2.1-02-KEPT-ROW-COMPUTED-AT] open)
 Phase: 164.9.4 (CIOFFMUTEX) — VERIFYING (review loop closed by the founder after round 6; e2e-seeded flake fix, option D, in progress)
 Phase: 164.9.3.2.1 (ENQ40001) — COMPLETE 2026-10-02 (verification passed; PR #929 merged, v0.118.1.5; no migration)
 Phase: 160 / 168 / 164.3 leftover plans — CLOSED 2026-10-02 (160-07 PROD smoke 2/3 surfaces; 168-03 observed on the re-created composite; 164.3-07 superseded by 164.5-07)
@@ -519,7 +519,7 @@ Status: Executing Phase 164.5.2.1
       closed by PR #743 `3ed6919e`) and 164.4.1 annotated all five remaining files —
       `lane-blocked: 0`, `pending: 0` at `files 44/71`. Read `FILES_FLOOR` / `ARMS_FLOOR` off
       `scripts/mutation-runner/run.mjs`, never off a number restated here.
-Last activity: 2026-10-03 — Phase 164.5.2.1 plan 01 complete (COMPOSITE-REREAD closed in SQL, arms W1..W7 biting)
+Last activity: 2026-10-03 — Phase 164.5.2.1 plan 02 complete (RETRY-PLAIN-COMPLETE closed in SQL, arms R1..R6 biting, gate sealed at ALL 13 ARMS EXECUTED)
       ⚠️ RETAINED — this was the `Last activity:` line until 2026-09-06:
       *"2026-09-04 — Phase 164.4.1 execution started"*
       all twinned and proven on real pg-lanes with **ZERO waivers** (cumulative 0 across all eight
@@ -1207,6 +1207,13 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 170 P10 | 13 min | 2 tasks | 9 files |
 
 ## Accumulated Context
+
+### Phase 164.5.2.1 decisions (plan 02)
+
+- D-05 shipped: read 1 folds an unmarked non-terminal count (same statement); v_refresh_keep = healthy AND unmarked = 0 AND failed = 0 (both COALESCE 1); keep arms in branch (a)'s status and stamp CASEs.
+- Residue gate sentinel N = 13 (W1..W7, R1..R6); ci.yml sql-tests SENTINEL_FLOOR 14, ARMS_FLOOR 253, drift pin moved in the same commit.
+- R6 (assumption A2) measured: green on plan 01's body and on the fix, RED under its twin.
+- PRE-MERGE: a kept row still gets computed_at = now() from branch (a) (inherited from the warned keep arm); recorded as [164.5.2.1-02-KEPT-ROW-COMPUTED-AT] in the phase's deferred-items.md for an orchestrator/founder decision.
 
 ### Phase 164.5.2.1 decisions (plan 01)
 
@@ -2501,6 +2508,10 @@ Load-bearing sequencing (real dependencies, do not reorder):
      sits ABOVE the heading. Diagnosed 2026-08-09. -->
 
 ## Session
+
+**Last Date:** 2026-10-02T22:45:00.000Z
+**Stopped At:** Completed 164.5.2.1-02-PLAN.md
+**Resume File:** .planning/phases/164.5.2.1-bridgeresidue-the-two-164-6-7-bridge-residues-in-sync-strate/164.5.2.1-03-PLAN.md
 
 **Last Date:** 2026-10-02T22:17:50.000Z
 **Stopped At:** Completed 164.5.2.1-01-PLAN.md
