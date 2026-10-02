@@ -9268,6 +9268,15 @@ backs ~9 surfaces — the remedy for any of its flows is a NEW named limiter, ne
   docs-only PR opening and either of those, and inside it a red arrives LATE, not never. ⛔ Do not
   restate this as "the gate was lost", and do not restate it as "nothing changed" — both halves are
   load-bearing and stating only one of them misroutes whoever picks this up.
+  ⛔ **CORRECTED 2026-10-02 (Phase 164.9.4 review round 2, WR-01): the merge push to `main` is no
+  longer unfiltered.** Since 164.9.4 a `.planning/`-only push is classified by its pushed range
+  (`scripts/classify-changed-paths.mjs` `classifyPushRange`) and takes the short path. To keep the
+  first backstop above, the founder decided on 2026-10-02 that a push range touching a `.planning/`
+  file a `frontend-test` assertion reads is CODE: `TEST_READ_PLANNING_PATHS` lists the six measured
+  files (`REQUIREMENTS.md`, `ROADMAP.md`, `159-VERIFICATION.md`, and Phase 164.3's
+  `164.3-07-DEFERRED.md`, `164.3-07-PLAN.md` and absent `164.3-07-SUMMARY.md`), so the merge push of
+  a docs-only PR that touches one of them still runs `frontend-test`. Both halves above therefore
+  still hold for those files. The paragraph above is kept as lineage.
   ⛔ **TWO REMEDIES WERE CONSIDERED AND BOTH REFUSED, recorded so neither is re-proposed as new.**
   (1) Widen the always-on set to include `frontend-test` — REFUSED: that job is most of the saving
   the filter exists to produce, so buying two deferred assertions back at that price undoes the

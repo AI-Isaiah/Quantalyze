@@ -82,6 +82,51 @@ import { join, resolve } from "node:path";
 export const DOCS_ONLY_PREFIXES = [".planning/"];
 
 /**
+ * The `.planning/` files a `frontend-test` assertion reads FROM THE REAL TREE.
+ * A PUSH range that changes one of them is CODE, not docs-only, even though
+ * every path in it is under `.planning/`.
+ *
+ * WHY (review 164.9.4 round 2 WR-01, founder decision 2026-10-02, "Treat those
+ * as code"): a docs-only PR skips `frontend-test`, and `[CI-DOCSPATH-01]`
+ * accepted that because the UNFILTERED merge push re-ran it. Once a docs-only
+ * push took the short path too, a docs merge that broke one of these
+ * assertions went green on `main` and the red surfaced on the next unrelated
+ * code change, which got blamed for it. Keeping the push full for exactly
+ * these files restores that backstop and keeps the short path for the common
+ * STATE / state.json / VERIFICATION close-out merges.
+ *
+ * Each entry, and the assertion that reads it:
+ *   - REQUIREMENTS.md, ROADMAP.md: `src/__tests__/lint-sql-gates.test.ts` G3
+ *     ("the PLANNING DOCUMENTS do not claim more shapes than the linter ships").
+ *   - 159-VERIFICATION.md, 164.3-07-DEFERRED.md: `src/__tests__/verify-plan-anchors.test.ts`
+ *     G2 ("an exempted plan is ROUTED"), read by name.
+ *   - 164.3-07-PLAN.md: the same file's "phase 164.3 plan 07 … is exempt and
+ *     REPORTED" pin and its R2-W05 real-marker arm, by name.
+ *   - 164.3-07-SUMMARY.md: ABSENT today, and listed for that reason. Creating
+ *     it ends the deferral those two pins assert, so adding it reds them.
+ *
+ * ⚠️ The founder's question named THREE files (the review listed REQUIREMENTS,
+ * ROADMAP and 159-VERIFICATION). Measured against the two test files, G2 and
+ * its neighbours also read the 164.3-07 trio by name, so the exact set is six.
+ * The whole-corpus `--pending` scans in `verify-plan-anchors.test.ts` are NOT
+ * listed: `plan-anchor-verify` runs the same scan, unfiltered, on every PR,
+ * docs-only PRs included, so the PR board already carries that backstop.
+ *
+ * ⛔ PUSH ONLY. The PR path is unchanged: the PR board is green by the
+ * accepted `[CI-DOCSPATH-01]` trade, and this list is what makes the merge
+ * push re-check it. The list is hand-kept; `ci-docs-path-filter.contract.test.ts`
+ * re-derives it from the two test files so it cannot drift silently.
+ */
+export const TEST_READ_PLANNING_PATHS = [
+  ".planning/REQUIREMENTS.md",
+  ".planning/ROADMAP.md",
+  ".planning/phases/159-rank-public-ranking-integrity/159-VERIFICATION.md",
+  ".planning/phases/164.3-vacuity-a-control-that-cannot-fail-must-be-caught-by-machine/164.3-07-DEFERRED.md",
+  ".planning/phases/164.3-vacuity-a-control-that-cannot-fail-must-be-caught-by-machine/164.3-07-PLAN.md",
+  ".planning/phases/164.3-vacuity-a-control-that-cannot-fail-must-be-caught-by-machine/164.3-07-SUMMARY.md",
+];
+
+/**
  * PURE: given the changed-file list, is this diff docs-only? No I/O, so the
  * self-test drives it directly.
  *
@@ -242,6 +287,11 @@ export function classifyPushRange({ before, forced, cwd, fetchCheckRuns = readCh
   if (files.length === 0) return code("the range changed no files");
   const range = `${files.length} changed file(s) in the pushed range ${sha.slice(0, 12)}..HEAD`;
   if (!judge(files)) return { docsOnly: false, reason: range };
+  // Review 164.9.4 round 2, WR-01 (founder decision 2026-10-02): a push that
+  // touches a `.planning/` file a `frontend-test` assertion reads keeps the
+  // merge-push backstop. See `TEST_READ_PLANNING_PATHS`.
+  const read = files.filter((f) => TEST_READ_PLANNING_PATHS.includes(f));
+  if (read.length > 0) return fullCorpus(`the pushed range changes ${read.length} planning file(s) a frontend-test assertion reads: ${read.join(", ")}`);
   // Review 164.9.4 round 2, SFH-04. A docs-only range proves nothing about the
   // CODE under it, which is exactly `before`'s code. The short path is taken
   // only when `before` itself carries a successful `frontend` verdict; see
@@ -597,7 +647,7 @@ const CASES = [
       const r = scratchRepo("push-docs");
       try {
         const before = r.commit({ "src/a.ts": "export {};\n" });
-        r.commit({ ".planning/ROADMAP.md": "# r\n" });
+        r.commit({ ".planning/STATE.md": "# s\n" });
         let pass = ok(
           classifyPushRange({ before, cwd: r.dir, fetchCheckRuns: GREEN }).docsOnly === true,
           "classifyPushRange says docs-only for a .planning/-only pushed range on a green predecessor",
@@ -733,6 +783,40 @@ const CASES = [
         called = false;
         const codeRange = classifyPushRange({ before, cwd: r.dir, fetchCheckRuns: spy });
         pass = ok(codeRange.docsOnly === false && !called, `a code-touching range is code without consulting the predecessor (${codeRange.reason})`) && pass;
+        return pass;
+      } finally {
+        r.cleanup();
+      }
+    },
+  },
+  {
+    claim: "WR-01 round 2: a push touching a .planning/ file a frontend-test assertion reads runs the FULL corpus, even on a green predecessor",
+    run: (ok) => {
+      // RED against the round-1 code, which classified every such push as
+      // docs-only and so dropped the merge-push backstop for these files.
+      const r = scratchRepo("push-testread");
+      try {
+        let pass = ok(TEST_READ_PLANNING_PATHS.length === 6, `the list carries the six measured paths (got ${TEST_READ_PLANNING_PATHS.length})`);
+        pass = ok(TEST_READ_PLANNING_PATHS.every((f) => judge([f])), "CALIBRATION: every listed path is docs-only to judge(), so only the new rule can make it code") && pass;
+        let head = r.commit({ "src/a.ts": "export {};\n" });
+        // CALIBRATION: a planning file NOT on the list still takes the short path.
+        let before = head;
+        head = r.commit({ ".planning/STATE.md": "# s\n" });
+        pass = ok(classifyPushRange({ before, cwd: r.dir, fetchCheckRuns: GREEN }).docsOnly === true, "CALIBRATION: a STATE.md-only push on a green predecessor stays docs-only") && pass;
+        for (const f of TEST_READ_PLANNING_PATHS) {
+          before = head;
+          head = r.commit({ [f]: `# ${f}\n` });
+          const v = classifyPushRange({ before, cwd: r.dir, fetchCheckRuns: GREEN });
+          pass = ok(v.docsOnly === false && v.reason.includes(f), `${f} alone classifies as code (${v.reason})`) && pass;
+        }
+        // Mixed with an unlisted planning file it is still code.
+        before = head;
+        head = r.commit({ ".planning/ROADMAP.md": "# r2\n", ".planning/STATE.md": "# s2\n" });
+        pass = ok(classifyPushRange({ before, cwd: r.dir, fetchCheckRuns: GREEN }).docsOnly === false, "ROADMAP.md beside STATE.md classifies as code") && pass;
+        const e2e = runMainOnPush(r.dir, { PUSH_BEFORE_SHA: before }, { gh: "success" });
+        pass = ok(e2e.code === 0 && e2e.docsOnly === "false", `main() writes docs_only=false for it and exits 0 (got exit ${e2e.code}, docs_only=${e2e.docsOnly})`) && pass;
+        // The PR path is unchanged by decision: judge() still says docs-only.
+        pass = ok(judge([".planning/ROADMAP.md"]) === true, "the PR predicate judge() is untouched: a ROADMAP-only PR is still docs-only") && pass;
         return pass;
       } finally {
         r.cleanup();

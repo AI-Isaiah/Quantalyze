@@ -3383,6 +3383,8 @@ suite unable to catch a CSP edit that breaks login.
   - A push that touches any code path runs the full corpus.
   - A test fails on the old behaviour (a docs-only push classified as code), and a second test proves that a code-touching push is not filtered.
   - The existing rule that `changed-paths` itself carries no `if:` is kept. The job still runs on every event, because a skipped `needs:` job skips its dependents.
+- ⭐ **2026-10-02 (founder, AskUserQuestion "Treat those 3 as code"; review round 2 WR-01): a push that touches a `.planning/` file a `frontend-test` assertion reads is CODE, not docs-only.** The short path above had removed the merge-push backstop `[CI-DOCSPATH-01]` relied on, so a docs merge breaking `lint-sql-gates.test.ts` G3 or a `verify-plan-anchors.test.ts` real-tree pin went green on `main` and reddened the next unrelated code change. ⚠️ The question named three files; the exact set measured from the two test files is SIX (`REQUIREMENTS.md`, `ROADMAP.md`, `159-VERIFICATION.md`, and Phase 164.3's `164.3-07-DEFERRED.md`, `164.3-07-PLAN.md` and absent `164.3-07-SUMMARY.md`). Listed in `scripts/classify-changed-paths.mjs` `TEST_READ_PLANNING_PATHS`, re-derived by `ci-docs-path-filter.contract.test.ts`. PR path unchanged. Recorded as D-16 in `164.9.4-CONTEXT.md`.
+- ⭐ **2026-10-02 (review round 2 SFH-04, fixed):** the push short path is also taken only when `before`'s own `frontend` check run concluded `success`. Red, cancelled, pending, absent or an API error runs the full corpus, so a docs-only push cannot turn `main` green (and release a Railway deploy) over a red or unfinished code commit.
 
 ## Success Criteria
 1. Neither job acquires advisory key `61616158`.

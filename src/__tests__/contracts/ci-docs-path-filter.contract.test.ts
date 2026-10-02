@@ -1,9 +1,9 @@
 import { afterAll, describe, expect, it } from "vitest";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { judge } from "../../../scripts/classify-changed-paths.mjs";
+import { judge, TEST_READ_PLANNING_PATHS } from "../../../scripts/classify-changed-paths.mjs";
 
 /**
  * Phase 164.6.3 / CI-DOCSPATH-01 — the pin for the docs-only path filter's
@@ -923,6 +923,64 @@ describe("[164.6.3 / CI-DOCSPATH-01] the PARTITION, pinned as an exact set in BO
 // allow-list, and the classifier's own self-test row 4 pins that — so every PR
 // that can break this arm's subject is a code PR on which `frontend-test` runs.
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Review 164.9.4 round 2, WR-01 (founder decision 2026-10-02): a push touching a
+// `.planning/` file a `frontend-test` assertion reads is CODE. The classifier's
+// list is hand-kept, so it is RE-DERIVED here from the two test files that read
+// the real tree, in both directions, and cannot drift silently.
+// ---------------------------------------------------------------------------
+describe("[164.9.4 WR-01] TEST_READ_PLANNING_PATHS matches the planning files the tests read", () => {
+  const SOURCES = ["src/__tests__/lint-sql-gates.test.ts", "src/__tests__/verify-plan-anchors.test.ts"];
+  // A literal that resolves to a real repo file but is only ever written into a
+  // TEMP fixture tree, never read from the real one. verify-plan-anchors.test.ts
+  // seeds `.planning/STATE.md` into a scratch tree for its @-reference arm.
+  const FIXTURE_COLLISIONS = new Set([".planning/STATE.md"]);
+
+  /** Every real-tree `.planning/` FILE the two tests name, by full literal or dir + basename join. */
+  function derive(): Set<string> {
+    const out = new Set<string>();
+    for (const rel of SOURCES) {
+      const text = readFileSync(join(ROOT, rel), "utf8");
+      const literals = [...text.matchAll(/"(\.planning[^"]*)"/g)].map((m) => m[1]);
+      const basenames = [...text.matchAll(/"([\w.-]+\.md)"/g)].map((m) => m[1]);
+      for (const lit of literals) {
+        const abs = join(ROOT, lit);
+        if (!existsSync(abs)) continue;
+        if (statSync(abs).isFile()) {
+          if (!FIXTURE_COLLISIONS.has(lit)) out.add(lit);
+          continue;
+        }
+        if (lit === ".planning") continue;
+        // G2 reads 164.3-07-DEFERRED.md as join(<dir literal>, "<basename>").
+        for (const b of basenames) if (existsSync(join(abs, b))) out.add(`${lit}/${b}`);
+      }
+    }
+    return out;
+  }
+
+  it("every real-tree planning file the two tests read is on the list (the list cannot lag the tests)", () => {
+    const derived = derive();
+    expect(derived.size, `vacuity fence: the derivation found ${derived.size} file(s)`).toBeGreaterThanOrEqual(5);
+    for (const f of derived) {
+      expect(
+        TEST_READ_PLANNING_PATHS,
+        `${f} is read by a frontend-test assertion but is NOT in TEST_READ_PLANNING_PATHS, so a ` +
+          `docs-only push that breaks it goes green on main. Add it to the list in scripts/classify-changed-paths.mjs.`,
+      ).toContain(f);
+    }
+  });
+
+  it("every listed path is derived, or is the ABSENT -SUMMARY sibling of a derived deferred plan (no stale entry)", () => {
+    const derived = derive();
+    for (const f of TEST_READ_PLANNING_PATHS) {
+      if (derived.has(f)) continue;
+      const plan = f.replace(/-SUMMARY\.md$/, "-PLAN.md");
+      expect(plan !== f && derived.has(plan), `${f} is on the list but no test reads it`).toBe(true);
+      expect(existsSync(join(ROOT, f)), `${f} now EXISTS, so the deferral the pins assert has ended; revisit the list`).toBe(false);
+    }
+  });
+});
+
 describe("[164.6.3 / CI-DOCSPATH-01] CALIBRATION — the classifier's self-test can FAIL", () => {
   const ORIGINAL = readFileSync(CLASSIFIER, "utf8");
 
@@ -1060,6 +1118,15 @@ describe("[164.6.3 / CI-DOCSPATH-01] CALIBRATION — the classifier's self-test 
     expect(out).toContain("FAIL — a RED predecessor (frontend concluded failure) classifies as code");
     expect(out).toContain("FAIL — a PENDING predecessor (its CI still running) classifies as code");
     expect(out).toContain("FAIL — an API ERROR during the lookup classifies as code");
+  });
+
+  // ── neuter leg 6: the test-read planning rule (review 164.9.4 round 2, WR-01)
+  it("CALIBRATION — dropping the test-read planning rule turns the self-test RED (WR-01)", () => {
+    const mutated = mutate("if (read.length > 0) return fullCorpus(", "if (false) return fullCorpus(", "test-read-rule");
+    const { code, out } = selfTest(mutated);
+    expect(code, `a classifier that shortens a ROADMAP.md push must EXIT NON-ZERO.\n${out}`).not.toBe(0);
+    expect(out).toContain(FAILED_BANNER);
+    expect(out).toContain("FAIL — .planning/ROADMAP.md alone classifies as code");
   });
 
   // ── review 164.4.2 IN-02: no raw git line above a PASSED verdict ──────────
