@@ -3380,6 +3380,7 @@ suite unable to catch a CSP edit that breaks login.
 - **Measured 2026-09-27:** five roadmap-only merges to `main` each ran `python` and `e2e-seeded` on push. Runs `36311440078` and `36311239974` (push, `main`) failed with `timed out after 3600s waiting for the shared-test-db advisory lock (key 61616158)`, with 8 and 7 jobs waiting.
 - **Success:**
   - A push to `main` whose diff against its first parent is docs-only takes the short path. It still produces a recorded green CI run that Railway can wait on.
+    - ⛔ **NARROWED 2026-10-02 (review round 2):** the short path now requires BOTH (a) `before`'s own `frontend` check run concluded `success` (SFH-04), and (b) the pushed range touches none of the six `TEST_READ_PLANNING_PATHS` (D-16, which include `ROADMAP.md`). Any other docs-only push runs the full corpus. Consequence: a ROADMAP-only merge, the shape measured above, runs the full corpus again, and a close-out merge landing while its predecessor's CI is still running does too. The short path now fires mainly for STATE / state.json / VERIFICATION-only pushes made after the previous push went green. Since this phase that costs runner minutes, not mutex timeouts.
   - A push that touches any code path runs the full corpus.
   - A test fails on the old behaviour (a docs-only push classified as code), and a second test proves that a code-touching push is not filtered.
   - The existing rule that `changed-paths` itself carries no `if:` is kept. The job still runs on every event, because a skipped `needs:` job skips its dependents.
