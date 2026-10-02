@@ -48,6 +48,15 @@
 --   W4            same scenario: computation_warned FALSE after the mark.
 --   W5            same scenario: computing_started_at set after the mark, so
 --                 the 16-hour reaper can see the row.
+--   W6  (guard)   SI-02: an UNMARKED sibling's permanent failure on a row with
+--                 no provenance keeps computation_warned TRUE. GREEN on the
+--                 pre-fix AND the fixed body by design; only its twin (the fix
+--                 widened to every loud failure) proves it can fail.
+--   W7  (guard)   protected honour, never retracted, with a same-kind unmarked
+--                 later successor in flight: X's mark keeps
+--                 complete_with_warnings and computation_warned TRUE. GREEN on
+--                 both bodies by design; only its twin (protected failures let
+--                 into the id array) proves it can fail.
 --
 -- ⚠️ W1 alone is green under D-04 as first written (branch (b) only, keyed on
 -- the latest failure). W2 is the arm that tells D-04 and D-04b apart, and
@@ -450,6 +459,153 @@ BEGIN
   -- RED-UNDER-M: {"arm":"W5","apply":[{"kind":"edit","file":"supabase/migrations/20261003120000_sync_status_bridge_residues.sql","find":"             WHEN strategy_analytics.computation_error_source = 'writer' AND strategy_analytics.computation_error_job_id = ANY (v_unprotected_job_ids)\n             THEN CASE WHEN strategy_analytics.computation_status IS DISTINCT FROM 'computing' THEN now() ELSE strategy_analytics.computing_started_at END\n","replace":"","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261003120000_sync_status_bridge_residues.sql","find":"IF v_membership_sites <> 4 THEN","replace":"IF v_membership_sites <> 3 THEN","occurrences":1}]}
   IF v_stamp IS NULL THEN
     RAISE EXCEPTION 'TEST FAILED (W5): after X''s mark, with a sibling still in flight, computing_started_at is NULL. The row must be stamped as it enters computing; the 16-hour reaper keys on that stamp, so a row parked at computing with no stamp is never reaped if the sibling wedges.';
+  END IF;
+END $$;
+
+-- ===== ARM W6 — SI-02 guard: a sibling's failure keeps the warning ========
+-- GREEN on both the pre-fix and the fixed body BY DESIGN; only its twin proves
+-- it can fail. The row carries NO provenance (no writer reached it for this
+-- failure), and an UNMARKED sibling Z fails permanently. The flag is the
+-- runner's record of an earlier warned success, and branch (c) restores it
+-- once Z is superseded (SI-02, mig 20260708120000). Clearing it here would be
+-- the fix widened past its own predicate.
+-- ⚠️ Z must be UNMARKED: a marked Z on a healthy row is PROTECTED, which skips
+-- branch (b) entirely and leaves the twin nothing to bite. W6-SETUP checks it.
+DO $$
+DECLARE
+  uid        UUID := gen_random_uuid();
+  k          UUID;
+  s          UUID;
+  j          UUID;
+  tok        UUID;
+  v_status   TEXT;
+  v_warned   BOOLEAN;
+  v_jobstat  TEXT;
+  v_jobsrc   TEXT;
+BEGIN
+  INSERT INTO auth.users (id, instance_id, email, created_at, updated_at)
+  VALUES (uid, '00000000-0000-0000-0000-000000000000',
+          'bres-' || uid::text || '@quantalyze.test', now(), now());
+  INSERT INTO profiles (id, display_name, email, role)
+  VALUES (uid, 'bres', 'bres-' || uid::text || '@quantalyze.test', 'manager')
+  ON CONFLICT (id) DO UPDATE SET role = EXCLUDED.role;
+  INSERT INTO api_keys (user_id, exchange, label, api_key_encrypted, is_active)
+  VALUES (uid, 'mt5', 'bres mt5', 'x', TRUE) RETURNING id INTO k;
+  INSERT INTO strategies (user_id, api_key_id, name) VALUES (uid, k, 'bres W6') RETURNING id INTO s;
+
+  INSERT INTO strategy_analytics (strategy_id, computation_status, computation_warned)
+  VALUES (s, 'complete_with_warnings', TRUE);
+
+  tok := gen_random_uuid();
+  INSERT INTO compute_jobs (strategy_id, kind, status, claim_token, attempts, max_attempts)
+  VALUES (s, 'process_key_long', 'running', tok, 1, 3)
+  RETURNING id INTO j;
+
+  PERFORM mark_compute_job_failed(j, 'venue rejected the key', 'permanent', tok);
+
+  SELECT status, metadata ->> 'source' INTO v_jobstat, v_jobsrc FROM compute_jobs WHERE id = j;
+  SELECT computation_status, computation_warned INTO v_status, v_warned
+    FROM strategy_analytics WHERE strategy_id = s;
+  IF v_jobstat IS DISTINCT FROM 'failed_final' OR v_jobsrc IS NOT NULL
+     OR v_status IS DISTINCT FROM 'failed' THEN
+    RAISE EXCEPTION 'TEST FAILED (W6-SETUP): Z is % with source %, and the row reads %, so Z''s mark did not reach branch (b) as an UNMARKED unprotected failure and the warned assertion below would measure some other branch.', v_jobstat, COALESCE(v_jobsrc, 'NULL'), COALESCE(v_status, 'NULL');
+  END IF;
+
+  -- RED-UNDER: branch (b)'s warned CASE replaced by an unconditional FALSE, i.e. the
+  --            fix widened to every loud failure. W1/W2 expect FALSE anyway and
+  --            W3..W5 reach branch (a), so W6 is the first to fail. ⚠️ LAYERED: anchor
+  --            (ii) stood down, count anchors (iii) and (iv) re-baselined.
+  -- RED-UNDER-M: {"arm":"W6","apply":[{"kind":"edit","file":"supabase/migrations/20261003120000_sync_status_bridge_residues.sql","find":"           computation_error_job_id = CASE WHEN strategy_analytics.computation_error_source = 'writer' AND strategy_analytics.computation_error_job_id = v_latest_job_id THEN strategy_analytics.computation_error_job_id ELSE NULL END,\n           computation_warned = CASE WHEN strategy_analytics.computation_error_source = 'writer' AND strategy_analytics.computation_error_job_id = ANY (v_unprotected_job_ids) THEN FALSE ELSE strategy_analytics.computation_warned END,\n","replace":"           computation_error_job_id = CASE WHEN strategy_analytics.computation_error_source = 'writer' AND strategy_analytics.computation_error_job_id = v_latest_job_id THEN strategy_analytics.computation_error_job_id ELSE NULL END,\n           computation_warned = FALSE,\n","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261003120000_sync_status_bridge_residues.sql","find":"IF NOT v_b_warned_anchored THEN","replace":"IF FALSE AND NOT v_b_warned_anchored THEN","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261003120000_sync_status_bridge_residues.sql","find":"IF v_membership_sites <> 4 THEN","replace":"IF v_membership_sites <> 3 THEN","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261003120000_sync_status_bridge_residues.sql","find":"IF v_warned_case_sites <> 2 THEN","replace":"IF v_warned_case_sites <> 1 THEN","occurrences":1}]}
+  IF v_warned IS DISTINCT FROM TRUE THEN
+    RAISE EXCEPTION 'TEST FAILED (W6): a sibling''s permanent failure, on a row no writer stamped for it, cleared computation_warned (now %). The flag records an earlier warned success that branch (c) restores once the sibling is superseded (SI-02); the residue fix may clear it ONLY when the row''s own writer-provenance job is the unprotected failure.', COALESCE(v_warned::text, 'NULL');
+  END IF;
+END $$;
+
+-- ===== ARM W7 — protected honour guard: no retraction, nothing changes ====
+-- GREEN on both bodies BY DESIGN; only its twin proves it can fail. X keeps its
+-- ledger-refresh marker (in scope, row healthy), so X is PROTECTED and the new
+-- id array holds only UNPROTECTED failures: here it is NULL and every new arm
+-- falls through. A same-kind, unmarked, later-created successor Y is in flight,
+-- so the protected-hold stands down and X's mark takes branch (a), which is
+-- the branch the twin mutates. Asserts status and warned only: branch (a)
+-- clears the provenance on every body (the Phase 164.2 contract).
+-- ⚠️ Y is failed_retry, NOT pending: the partial unique index
+-- compute_jobs_one_inflight_per_kind_strategy forbids a second pending or
+-- running row of the same kind beside X, while the bridge's in-flight count and
+-- the live-successor test both count failed_retry as in flight.
+DO $$
+DECLARE
+  uid        UUID := gen_random_uuid();
+  k          UUID;
+  s          UUID;
+  j          UUID;
+  j_y        UUID;
+  tok        UUID;
+  v_status   TEXT;
+  v_warned   BOOLEAN;
+  v_jobstat  TEXT;
+  v_x_at     TIMESTAMPTZ;
+  v_x_src    TEXT;
+  v_y_at     TIMESTAMPTZ;
+  v_y_kind   TEXT;
+  v_y_src    TEXT;
+  v_y_stat   TEXT;
+BEGIN
+  INSERT INTO auth.users (id, instance_id, email, created_at, updated_at)
+  VALUES (uid, '00000000-0000-0000-0000-000000000000',
+          'bres-' || uid::text || '@quantalyze.test', now(), now());
+  INSERT INTO profiles (id, display_name, email, role)
+  VALUES (uid, 'bres', 'bres-' || uid::text || '@quantalyze.test', 'manager')
+  ON CONFLICT (id) DO UPDATE SET role = EXCLUDED.role;
+  INSERT INTO api_keys (user_id, exchange, label, api_key_encrypted, is_active)
+  VALUES (uid, 'mt5', 'bres mt5', 'x', TRUE) RETURNING id INTO k;
+  INSERT INTO strategies (user_id, api_key_id, name) VALUES (uid, k, 'bres W7') RETURNING id INTO s;
+
+  INSERT INTO strategy_analytics (strategy_id, computation_status, computation_warned)
+  VALUES (s, 'complete_with_warnings', TRUE);
+
+  tok := gen_random_uuid();
+  INSERT INTO compute_jobs (strategy_id, kind, status, claim_token, attempts, max_attempts, metadata, created_at)
+  VALUES (s, 'derive_broker_dailies', 'running', tok, 1, 3,
+          jsonb_build_object('source', 'ledger-refresh', 'enqueued_at', now()),
+          now() - INTERVAL '2 hours')
+  RETURNING id INTO j;
+
+  INSERT INTO compute_jobs (strategy_id, kind, status, attempts, max_attempts, created_at)
+  VALUES (s, 'derive_broker_dailies', 'failed_retry', 1, 3, now() - INTERVAL '1 hour')
+  RETURNING id INTO j_y;
+
+  UPDATE strategy_analytics
+     SET computation_error        = 'The MT5 gateway did not answer this account for 6 hours.',
+         computation_error_source = 'writer',
+         computation_error_job_id = j
+   WHERE strategy_id = s;
+
+  SELECT created_at, metadata ->> 'source' INTO v_x_at, v_x_src FROM compute_jobs WHERE id = j;
+  SELECT created_at, kind, metadata ->> 'source', status
+    INTO v_y_at, v_y_kind, v_y_src, v_y_stat
+    FROM compute_jobs WHERE id = j_y;
+  IF v_x_src IS DISTINCT FROM 'ledger-refresh' OR v_y_kind IS DISTINCT FROM 'derive_broker_dailies'
+     OR v_y_src IS NOT NULL OR v_y_stat IS DISTINCT FROM 'failed_retry' OR NOT (v_y_at > v_x_at) THEN
+    RAISE EXCEPTION 'TEST FAILED (W7-SETUP): X carries source % (created %), Y is % / % / source % (created %), so X is not a protected honour with a same-kind, unmarked, later-created successor in flight, and X''s mark would not reach branch (a) with a protected-only failure set.', COALESCE(v_x_src, 'NULL'), v_x_at, v_y_kind, v_y_stat, COALESCE(v_y_src, 'NULL'), v_y_at;
+  END IF;
+
+  PERFORM mark_compute_job_failed(j, 'mt5 gateway IPC timeout (-10005)', 'permanent', tok);
+
+  SELECT status INTO v_jobstat FROM compute_jobs WHERE id = j;
+  IF v_jobstat IS DISTINCT FROM 'failed_final' THEN
+    RAISE EXCEPTION 'TEST FAILED (W7-SETUP): X is %, not failed_final, so the bridge was never asked to decide X''s failure.', v_jobstat;
+  END IF;
+
+  SELECT computation_status, computation_warned INTO v_status, v_warned
+    FROM strategy_analytics WHERE strategy_id = s;
+  -- RED-UNDER: drop the FILTER from the new id pick, so PROTECTED failures enter the
+  --            membership array and branch (a)'s new arms fire on X. W1..W6 hold no
+  --            protected live failure, so their arrays are unchanged. ⚠️ LAYERED:
+  --            anchor (i) spans the pick and its FILTER, so it is stood down.
+  -- RED-UNDER-M: {"arm":"W7","apply":[{"kind":"edit","file":"supabase/migrations/20261003120000_sync_status_bridge_residues.sql","find":"    array_agg(id) FILTER (WHERE NOT is_protected)\n    INTO v_failed_count","replace":"    array_agg(id)\n    INTO v_failed_count","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261003120000_sync_status_bridge_residues.sql","find":"IF NOT v_unprotected_agg_anchored THEN","replace":"IF FALSE AND NOT v_unprotected_agg_anchored THEN","occurrences":1}]}
+  IF v_status IS DISTINCT FROM 'complete_with_warnings' OR v_warned IS DISTINCT FROM TRUE THEN
+    RAISE EXCEPTION 'TEST FAILED (W7): a PROTECTED refresh failure (marker never retracted, row healthy) changed the published state to % with computation_warned = %. Only an UNPROTECTED failure may enter the membership array; a protected one must leave the row exactly as the honour path left it.', COALESCE(v_status, 'NULL'), COALESCE(v_warned::text, 'NULL');
   END IF;
 END $$;
 
