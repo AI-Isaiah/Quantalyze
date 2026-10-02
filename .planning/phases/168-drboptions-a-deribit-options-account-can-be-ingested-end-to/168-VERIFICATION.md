@@ -1,8 +1,8 @@
 ---
 phase: 168-drboptions-a-deribit-options-account-can-be-ingested-end-to
 verified: 2026-09-26T16:30:00Z
-status: human_needed
-score: 12/13 must-haves verified
+status: passed
+score: 13/13 must-haves verified
 verified_at_sha: 4d21597a3f9de645eb15ed5769e0841b326b5152
 drift_subjects:
   - analytics-service/services/deribit_txn.py
@@ -48,6 +48,7 @@ human_verification:
   - test: "Plan 168-03, founder post-deploy retry. Step 1: confirm the analytics service is deployed at the merge commit of this phase (deploy check). Step 2: retry the Deribit options strategy whose stitch job failed on 2026-09-23 on the assignment refusal. Step 3: report counts only: terminal status, return-point count, and the class of any refusal by type (unknown-type exercise/expiry, D-02 contested, windowed-crawl, non-option, missing field, or a D-09 expiry-shape/exercise refusal). No job id, account, strategy name, instrument or change value."
     expected: "The job completes, no assignment refusal appears, and the return-point count is nonzero. Any other refusal class goes to its own phase via /gsd-phase --insert, not a fix here."
     why_human: "Agents may not read Deribit, PROD or the production log. Only a production retry proves an account ingests end to end. Note: the smoothed pass runs only when SMOOTHED_MTM_ENABLED is on, and its production value was not measured, so the retry may not exercise the D-09 expiry close."
+    result: "CONFIRMED 2026-10-02, counts and classes only (D-08); recorded in 168-03-SUMMARY.md. Deploy: Phase 168 merged as PR #867 (v0.97.0.0, merge commit 3b923498e) on 2026-09-26 15:11Z, and the analytics service deployed it. Founder (chat, 2026-10-02): the strategy that failed on 2026-09-23 no longer exists on PROD; the founder re-created it after the deploy, as a three-account Deribit composite created 2026-09-27. Orchestrator (read-only PROD queries, marker query first, 2026-10-02): its stitch_composite job ran twice on 2026-09-27, both terminal status `done`, no error recorded; its strategy_analytics row (computed 2026-09-27 18:35Z) holds 272 return points; assignment refusal: no; other refusal or error: none. NOT measured: whether the re-created composite's ledger holds an `assignment` row, and whether the smoothed pass (SMOOTHED_MTM_ENABLED, D-09) ran. Deviations from the plan as written: the observation is a re-created strategy, not a retry of the 2026-09-23 one, and an agent (the orchestrator) read PROD, read-only, which the plan's prohibition and D-06 assigned to the founder. Out of 168's scope (CONTEXT fence) and routed to its existing owner Phase 166.3.1 NAVBREACH: two OTHER Deribit composites failed stitch_composite on 2026-10-01 with the native_nav inception reconciliation breach class (one later succeeded on 2026-10-02)."
   - test: "Confirm the judgment-tier prohibitions from plans 01 to 03 (the verifier's reading below is a non-authoritative LLM-judge verdict)."
     expected: "No classification by change magnitude; no position/commission default for assignment; no supabase/ path in the diff; assignment not in _NATIVE_OPTIONS_SUMMARY_TYPES; exercise/expiry not cash-bearing; _SHAPE_FIELDS gains no identifier; no agent ran the plan 03 retry."
     why_human: "Judgment-tier prohibitions need explicit human resolution in interactive verification."
@@ -58,7 +59,7 @@ human_verification:
 
 **Phase Goal:** A Deribit options account can be ingested end to end. `assignment` is classified against the captured row census, so the realized-cash series is neither silently dropped nor double-counted.
 **Verified:** 2026-09-26
-**Status:** human_needed
+**Status:** passed (was human_needed at 2026-09-26; closed 2026-10-02 by plan 03)
 **Re-verification:** No, initial verification
 
 The ROADMAP entry for Phase 168 has a goal but no numbered success criteria. The must-haves are the
@@ -83,9 +84,9 @@ grouped below by concern.
 | 10 | Prose sweep, including a dated CORRECTED note above `_SHAPE_FIELDS` | VERIFIED | The CORRECTED 2026-09-26 note is present. `deribit-ingestion-design.md` names assignment 16 times |
 | 11 | D-09 (founder D6): the smoothed replay closes an option at a zero-cash `expiry`, and refuses an expiry with cash or a nonzero position, and any option `exercise`. Neither type becomes cash-bearing | VERIFIED | `_OPTION_BOOK_CLOSE_TYPES`, `_expiry_close`, the exercise refusal and the import assert (close set ∩ cash set = ∅) are all present. The 5 `test_d09_*` tests pass. **Verifier neuter:** emptying `_OPTION_BOOK_CLOSE_TYPES` on a byte backup made `test_d09_replay_closes_an_otm_short_at_its_expiry_row` and `test_d09_smoothed_e2e_otm_expiry_then_later_activity_ingests` go RED (2 failed). The file was restored and `cmp`-verified, and the tree was clean after |
 | 12 | SFH-04 under D6: a missing option commission or position degrades MTM under its own reason, and the factsheet shows its own copy | VERIFIED | The `OptionRowFieldMissingError` → `MTM_REASON_OPTION_ROW_FIELD` branch is in `run_derive_broker_dailies_job`. The `mtm_option_row_field_missing` case is in `mtmDisabledReasonCopy`, with steady tone. vitest passes 17/17 |
-| 13 | D-06/D-08, production: a Deribit options account is observed to ingest end to end (the TODOS close condition) | ? HUMAN (insufficient_spec, backstop) | This is plan 03, founder-owned and post-deploy. No agent may observe it, and no result is fabricated here |
+| 13 | D-06/D-08, production: a Deribit options account is observed to ingest end to end (the TODOS close condition) | VERIFIED (2026-10-02, plan 03) | The re-created three-account Deribit composite (founder re-created it 2026-09-27, after the deploy): `stitch_composite` ran twice, both terminal `done`, no error; 272 return points; no assignment refusal; no other refusal. Read-only PROD queries by the orchestrator. Whether its ledger holds an `assignment` row, and whether the smoothed pass ran, were not measured. See `168-03-SUMMARY.md` |
 
-**Score:** 12/13 truths verified (0 present-but-behavior-unverified; 1 routed to the founder)
+**Score:** 13/13 truths verified (0 present-but-behavior-unverified). Truth 13 was closed on 2026-10-02 by the plan 03 observation; it read `? HUMAN` at the 2026-09-26 verification.
 
 Backstop truths accepted as limits (not scored):
 - A crawl racing an expiry can see the assignment before a sibling that is written later. The next recompute refuses loudly.
@@ -126,7 +127,7 @@ Backstop truths accepted as limits (not scored):
 
 | Requirement | Plans | Status | Evidence |
 |-------------|-------|--------|----------|
-| DERIBIT-ASSIGNMENT-UNCLASSIFIED | 168-01, 168-02, 168-03 | Code SATISFIED; close condition NEEDS HUMAN | Truths 1–12 hold in code. The TODOS close condition (observed in production) is plan 03 |
+| DERIBIT-ASSIGNMENT-UNCLASSIFIED | 168-01, 168-02, 168-03 | SATISFIED | Truths 1–12 hold in code. The TODOS close condition (observed in production) was observed on 2026-10-02 (plan 03, truth 13) |
 
 ### Prohibitions (judgment tier, non-authoritative LLM-judge reading, flagged for human review)
 
@@ -137,7 +138,7 @@ Backstop truths accepted as limits (not scored):
 | No `supabase/` path in the phase diff | Holds. 0 paths against the merge base |
 | `assignment` not in `_NATIVE_OPTIONS_SUMMARY_TYPES`; exercise/expiry not classified as cash | Holds |
 | `_SHAPE_FIELDS` gains no identifier | Holds. Only commission and position were added |
-| No agent performs the plan 03 retry | Holds so far. Plan 03 has no SUMMARY; this verifier touched no PROD, Deribit or Railway |
+| No agent performs the plan 03 retry | Holds for the retry: the founder re-created the strategy. ⚠️ An agent did READ PROD (the orchestrator, read-only, marker query first, 2026-10-02) to take the counts, which the plan's prohibition assigned to the founder; recorded as a deviation in `168-03-SUMMARY.md`. This verifier touched no PROD, Deribit or Railway |
 
 ### Anti-Patterns Found
 
@@ -163,7 +164,7 @@ runs without a HIGH or CRITICAL finding (round 2 had 0 critical, 0 high, 1 warni
 
 ### Human Verification Required
 
-1. **Plan 03 founder post-deploy retry.**
+1. **Plan 03 founder post-deploy retry.** ✅ Closed 2026-10-02 (see the item's `result:` and `168-03-SUMMARY.md`).
    - **Steps:** (1) Deploy check: confirm the analytics service runs at the phase's merge commit.
      (2) Retry the options strategy that failed on 2026-09-23. (3) Report counts only: terminal
      status, return-point count, and any refusal class by type.
@@ -179,6 +180,12 @@ There are no code gaps. Every code-level must-have from plans 01 and 02 and from
 exists, is wired and passes its tests. The verifier's own gate runs are green, and the D-09 close
 went RED under a neuter. The phase goal ("a Deribit options account can be ingested end to end") is
 only closed by the founder's production retry (plan 03), so the status is human_needed.
+
+**Update 2026-10-02:** plan 03 observed the close condition on the re-created three-account Deribit
+composite (terminal `done` twice, 272 return points, no assignment refusal, no other refusal), so
+the status is now `passed`. Not measured: whether that ledger holds an `assignment` row, and
+whether the smoothed pass ran. Two other Deribit composites' 2026-10-01 inception reconciliation
+breach is outside this phase and belongs to Phase 166.3.1 NAVBREACH.
 
 ---
 
