@@ -13,6 +13,12 @@ interface Props {
   onClose: () => void;
   onSuccess: () => void;
   onRecomputeRequested: () => void;
+  /**
+   * SFH-170-05: below md the match queue is read-only. The panel is
+   * `fixed inset-0`, so CSS does not hide it if it was opened at md or wider
+   * and the viewport then narrowed. Save follows the same rule as the queue.
+   */
+  readOnly?: boolean;
 }
 
 export function PreferencesPanel({
@@ -21,6 +27,7 @@ export function PreferencesPanel({
   onClose,
   onSuccess,
   onRecomputeRequested,
+  readOnly = false,
 }: Props) {
   const [archetype, setArchetype] = useState(preferences?.mandate_archetype ?? "");
   const [ticketSize, setTicketSize] = useState<string>(
@@ -98,6 +105,8 @@ export function PreferencesPanel({
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
+    // Disabling Save does not stop an implicit or scripted submit.
+    if (readOnly) return;
     setSubmitting(true);
     setError(null);
 
@@ -459,8 +468,20 @@ export function PreferencesPanel({
             </p>
           )}
 
+          {readOnly && (
+            <div
+              role="status"
+              className="rounded-md border border-accent/30 bg-accent/5 px-4 py-3"
+            >
+              <p className="text-small text-text-primary">
+                <strong className="font-semibold">Read-only on mobile.</strong>{" "}
+                Open on a tablet or desktop (768px or wider) to save preferences.
+              </p>
+            </div>
+          )}
+
           <div className="sticky bottom-0 bg-surface border-t border-border -mx-6 px-6 pt-4 pb-0 flex items-center gap-2">
-            <Button type="submit" variant="primary" disabled={submitting}>
+            <Button type="submit" variant="primary" disabled={submitting || readOnly}>
               {submitting ? "Saving..." : "Save preferences"}
             </Button>
             <Button type="button" variant="ghost" onClick={onClose} disabled={submitting}>

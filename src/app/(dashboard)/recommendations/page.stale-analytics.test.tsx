@@ -80,7 +80,8 @@ vi.mock("@/lib/supabase/server", () => ({
           table === "investor_attestations"
             ? { data: { attested_at: "2026-01-01T00:00:00Z" }, error: null }
             : {
-                data: { mandate_archetype: "systematic", target_ticket_size_usd: 1 },
+                // A mandate the engine reads (D-03, plan 169.3-04): max_weight.
+                data: { max_weight: 0.2, preferred_strategy_types: [], target_ticket_size_usd: 1 },
                 error: null,
               },
         );

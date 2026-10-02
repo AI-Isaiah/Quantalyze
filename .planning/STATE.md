@@ -2,19 +2,19 @@
 gsd_state_version: "1.0"
 milestone: v1.20
 milestone_name: Backlog Burndown (Phases 158+)
-current_phase: 164.9.3
-current_phase_name: CLAIMPAIR
-status: executing
-stopped_at: Completed 164.9.3-06-PLAN.md
-last_updated: "2026-09-27T15:08:00.000Z"
-last_activity: 2026-09-27
-last_activity_desc: Phase 164.9.3 execution started
-state_head: dd42818862a2c2c9ba81cf3d0b1da5bb0fcff35d
+current_phase: 164.9.3.2.1
+current_phase_name: ENQ40001
+status: planning
+stopped_at: Phase 164.4.2 complete (SUBSET observed in CI on PR #927); next Phase 164.9.3.2.1
+last_updated: "2026-10-02T10:48:30.128Z"
+last_activity: 2026-10-02
+last_activity_desc: Phase 164.4.2 SUBSETSPLIT complete — verification passed (SUBSET run read from CI on PR #927, merged fd4d86cd)
+state_head: 4dd2aacfb
 progress:
-  total_phases: 73
-  completed_phases: 41
-  total_plans: 353
-  completed_plans: 347
+  total_phases: 85
+  completed_phases: 48
+  total_plans: 450
+  completed_plans: 449
   percent: 56
 ---
 
@@ -179,14 +179,13 @@ both checkboxes updated to match. Not yet marked `completed_phases` in the front
 no VERIFICATION.md exists for this phase yet, and this repo's own rule is that phase completion
 is decided by verification status, never by plan counts.**
 
-Phase: 164.9.3 (CLAIMPAIR) — EXECUTING
-Plan: 6 of 6 (01 done: the CLAIMPAIR gate, pre-fix census 14 arms RED with 23505, W-INTRO GREEN; 02 done: the pre-rank exclusion migration, all 15 arms GREEN on the replayed local-stack lane; 03 done: D-09 lane proof, corpus 78 of 78 on the replayed local-stack lane, the gate green on the pg-lane from its own SETUP list; 04 done: all 15 arms bite on the pg-lane through layered twins, runner biting 15; snapshots regenerated; three VAC-04 acks earned; 05 done: FILES_FLOOR 52 -> 53 and ARMS_FLOOR 491 -> 506 from one full run, coverage 53/80, separated in both directions, every census pin moved to its measured value; 06 done: origin/main merged again with the migration still sorting last, TODOS [164.9.3-CLAIM-PAIR-23505] closed, CHANGELOG [0.108.0.0] with VERSION/package.json at 0.108.0.0, SC3 record opened with three PENDING reviewer rows)
-Phase: 169.2 (BENCHFRESH) — EXECUTING
-Plan: 1 of 3
-Phase: 166.4 (BENCHALIGN) — EXECUTING
+Phase: 164.9.5 (AUTOREDUMP) — COMPLETE 2026-10-02 (verification passed; first changed re-dump opened bot PR #920, all head-sha runs green)
+Phase: 164.9.3.2 (DEFER40001) — COMPLETE 2026-10-02 (verification passed; PR #919 merged, v0.118.0.0; migration applied to TEST and PROD by Supabase Migrate run 36981647441)
+Phase: 169.1.1 (HYDRATIONTICKS) — COMPLETE 2026-10-02 (verification passed; PR #925 merged, v0.118.1.0)
+Phase: 164.9.3.2.1 (ENQ40001) — NEXT, after the 164.4.2 gate-only close (founder 2026-10-02)
+Phase: 166.4 (BENCHALIGN) — COMPLETE 2026-09-27 (verification passed; PR #892 merged, v0.108.0.0)
+Phase: 170 (LAYOUT — page layout reads clean and holds on every page) — COMPLETE 2026-10-01
 Plan: 1 of 4
-Phase: 166.4 (BENCHALIGN) — PLANNED 2026-09-27 (4 plans, 4 waves; on branch feat/166.4-benchalign)
-Plan: 0 of 4
 Phase: 164.9.5 (AUTOREDUMP) — EXECUTING
 Plan: 9 of 9 DONE; VERIFICATION human_needed (4/6 verified, 2 live-only), SECURITY SECURED 37/37; shipped as a PR, not merged
 Phase: 166.2 (COMPUTEONCE) — EXECUTING
@@ -502,7 +501,7 @@ so every "Next is plan NN" below has been discharged:
       NON-ZERO exit is a regression. Next is plan 06 (closure: the false-reading
       `lane-probe: … class is STALE` sentence, the `lane-blocked:` line's own
       prose, [REDUNDER-LANEBLOCKED-BLIND], and the ubuntu measurement).
-Status: Executing Phase 164.9.3
+Status: Ready to plan Phase 164.9.3.2.1
       ⚠️ RETAINED — this was the `Status:` line until the 2026-09-06 reconciliation, kept as
       lineage: *"164-family re-partition SHIPPED — PR #745 (chore/164-family-repartition,
       v0.77.13.1). Phase 164.4.1 COMPLETE — PR #744 squash-merged as `e01cc2e6` (v0.77.13.0),
@@ -518,7 +517,7 @@ Status: Executing Phase 164.9.3
       closed by PR #743 `3ed6919e`) and 164.4.1 annotated all five remaining files —
       `lane-blocked: 0`, `pending: 0` at `files 44/71`. Read `FILES_FLOOR` / `ARMS_FLOOR` off
       `scripts/mutation-runner/run.mjs`, never off a number restated here.
-Last activity: 2026-09-27 — Phase 164.9.3 execution started
+Last activity: 2026-10-02 — Phase 164.4.2 complete (SUBSET observed on PR #927)
       ⚠️ RETAINED — this was the `Last activity:` line until 2026-09-06:
       *"2026-09-04 — Phase 164.4.1 execution started"*
       all twinned and proven on real pg-lanes with **ZERO waivers** (cumulative 0 across all eight
@@ -1195,11 +1194,80 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 164.9.3 P04 | 25 min | 2 tasks | 4 files |
 | Phase 164.9.3 P05 | 57 min | 2 tasks | 5 files |
 | Phase 164.9.3 P06 | 7 min | 2 tasks | 5 files |
+| Phase 170 P02 | 8 min | 3 tasks | 4 files |
+| Phase 170 P03 | 5 min | 3 tasks | 7 files |
+| Phase 170 P04 | 5 min | 2 tasks | 4 files |
+| Phase 170 P05 | 12 min | 2 tasks | 6 files |
+| Phase 170 P06 | 18 min | 2 tasks | 8 files |
+| Phase 170 P07 | 12 min | 3 tasks | 8 files |
+| Phase 170 P08 | 9 min | 2 tasks | 4 files |
+| Phase 170 P09 | 18 min | 3 tasks | 6 files |
+| Phase 170 P10 | 13 min | 2 tasks | 9 files |
 
 ## Accumulated Context
 
+### Phase 170 decisions (plan 02)
+
+- Contract-first geometry spec stays RED at HEAD; assertions are not weakened to pass today.
+- N-STRAT name and tag update goes through getAdmin() via setSeededStrategyNameAndTags.
+- N-MATCH has no match-batch seed; the V960 positive control is the header action bar.
+
+### Phase 170 decisions (plan 03)
+
+- Active-tab scroll stays horizontal-only through computeTabStripScroll; scrollIntoView with block nearest is not reintroduced.
+- Pressed Tweaks tint is aria-pressed:bg-accent/10, the nearest existing accent utility. No new colour.
+
+### Phase 170 decisions (plan 04)
+
+- Empty state prints once in the change-count chip; the summary slot renders only when hasDiffs.
+- Summary items wrap between items: each value-label pair is whitespace-nowrap and the joiner sits outside that span.
+- ResponsiveTable keeps its default hint; list wording is a later copy question.
+
+### Phase 170 decisions (plan 05)
+
+- NowrapWords root is a display:contents div, not a span, so the word spans are the only spans and the name stays in the link's inline flow.
+- Literal space text nodes stay between those spans; dropping them makes noteOf() miss every multi-word name.
+- ShareableLink size defaults to md. Only /strategies passes sm. The discovery detail page is not edited.
+
+### Phase 170 decisions (plan 06)
+
+- Below md, readOnly is forceReadOnly or not isMd. JSX still keys off forceReadOnly so desktop does not flash hidden; CSS hidden md:* hides the write controls.
+- Button omits its base inline-flex when the caller passes a bare hidden class. Tailwind v4 emits inline-flex after hidden, so the base class would keep the control visible.
+- A display name with no email reads "by {name} · Computed {recency}". Unknown is only when both name and email are absent.
+
+### Phase 170 decisions (plan 07)
+
+- The session read stays in the async child. The layout function stays synchronous. JSX is outside the try, because the error-boundaries lint rejects JSX built in try/catch. A failed read still renders Sign in / Sign up.
+- DEFAULT_AUTHENTICATED_ROUTE has one definition. Other copies of the same path were left in place.
+- The one-item note renders when one item resolved, including a single holding. The sentence is the Copywriting Contract literal.
+
+### Phase 170 decisions (plan 08)
+
+- The inset focus ring is on the underline trigger only. The segmented arm keeps the HEAD class strings.
+- The active underline tab is scrolled with computeTabStripScroll from offsetLeft, offsetWidth, scrollLeft and clientWidth. The element scroll-into-view API is not used.
+- A disconnected key row has Reconnect, not Disconnect. That row's action group wraps the buttons it actually renders.
+
+### Phase 170 decisions (plan 09)
+
+- KpiPanel variant defaults to cards. Only the scenario composer passes panel.
+- Panel hairlines are right and top borders, cleared on the last column and the first row with container nth-child, so two columns and four columns do not double the outer edge.
+- The eyebrow is "Scenario blend" in every state. No comparison wording was added.
+- composer-blend-detail stays closed. The composer axe spec opens it before the card checks.
+- SC1-LAYERS stays open. Plan 170-12 also declares it, and REQUIREMENTS.md has no checkbox for it.
+
+### Phase 170 decisions (plan 10)
+
+- The table wrapper carries isolate. The sticky th z-20 and z-30 classes were not changed.
+- The filter bar is top-12 md:top-0 so it sits under the 48 px mobile top bar. The drawer header's bare top-0 was left alone.
+- Strategy names use NowrapWords from plan 170-05. The tag row is flex flex-wrap gap-1 and each tag badge is whitespace-nowrap.
+- The four grey chip sites use text-text-secondary on bg-track. globals.css was not edited.
+- SC2-NOSCROLL stays open. Plans 170-11 and 170-13 also declare it. (k), (l) and CHIP have no later plan and no REQUIREMENTS.md checkbox.
+
 ### Roadmap Evolution
 
+- Phase 169.1.1 HYDRATIONTICKS **inserted 2026-10-02 after Phase 169.1 (URGENT, hand-edited)**: factsheet chart ticks differ between server and browser (`Math.pow(10,n)` engine rounding), React #418 rebuilds the tree and replaces the Overview EquityChart; flakes `e2e/target-size.spec.ts` and turned main CI red. Founder (AskUserQuestion "New phase, first"): runs before 164.9.3.2.1.
+- Phase 166.3.1 NAVBREACH **inserted 2026-10-01 after Phase 166.3 (URGENT, hand-edited)**: the Deribit composite's `native_nav` inception reconciliation breach, which failed Phase 166.3's R5 recompute on PROD. Founder 2026-10-01: record R5 as a residual and route the breach to a named phase.
+- Phase 170.2 PROBEFIXES **inserted 2026-10-01 after Phase 170 (URGENT, hand-edited)**: three user-facing defects from the post-170 browser pass (Holdings sideways scroll, BTC refresh fallback, /compare equity overlay). Founder: one inserted phase with three plans; 169, 169.2 and 170 are closed and get nothing added. `phase.insert`'s ROADMAP blank-line collateral and its `state.json` rewrite were reverted from byte backups.
 - Phase 164.6.5 MT5VALIDATEWEDGE **per-criterion outcome recorded 2026-09-26 (plan 08, hand-edited)**: C3, C5, C6, C7 MET. C1 OPEN (D-03 path, `MT5-SWITCH-WEDGE-CAUSE-01`, Phase 164.6.6). C2 OPEN on its live half (`.planning/WINDOWS.md` entry 68, widened to name the first live `Mt5Client.session_snapshot` read beside the terminate step; founder, post-deploy). C4 OPEN on its calibration half: D-10 answered by scheduled prod-prober run 36134914962 (head `01dcf1cc`) onward; D-11 booked as `TODOS.md` `MT5-PROBER-WEDGE-CALIBRATION-01`, owned by Phase 164.6.6, trigger the next live `-10005` captured before the heal recycles it. Inherited criteria 7 and 8 OPEN (founder UAT). The phase is NOT transitioned to complete: verification is `gaps_found`. ⛔ Scope fence: the eviction is Phase 164.6.6; `[MT5-VERDICT-SINK-01]` stays deferred under its own owner.
 - Phase 164.6.5 MT5VALIDATEWEDGE **edited 2026-09-24 (hand-edited)**: inherited success criteria 7 and 8 were added, routed by founder decision 2026-09-24 (via AskUserQuestion). 7 comes from 161's live MT5 `undetermined` verdict and 8 from 164.5.3's end-to-end live MT5 credential update. Both source VERIFICATION files mark the item resolved-by-routing. The same day, 164.6-VERIFICATION.md was closed to `passed` (7/7 post-merge items, evidence by run id), and 164.4.2's Area E was measured FINAL at 5 runs: the change did not work and the slowdown holds. The founder's follow-up phase for that is NOT booked yet. The frontmatter census above was not recomputed.
 - Phase 164.5.3 inserted after Phase 164.5: MT5CREDS — MT5 account number on the key card + a credential-update path (URGENT)
@@ -1347,6 +1415,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 167.2 edited: edited (--force): dated note, 320px check replaced by 390px + desktop 200% zoom (founder 2026-09-27)
 - Phase 167.2.1 edited: edited (--force): dated note, 320px check replaced by 390px + desktop 200% zoom (founder 2026-09-27)
 - Phase 169.3 edited (--force): routed in: credential inputs strip pasted whitespace (passphrase excluded) (founder UAT 2026-09-27)
+- Phase 169.5 inserted after Phase 169: BENCHCOMPARE — the factsheet BTC comparator read through 169.2's reader, interval-paired, gap-null, payload-carried, rolling series on the comparator basis; split from Phase 169 by topic after plan-check round 3 (169 D-60, D-61) (URGENT)
 - Phase 166.4.1 inserted after Phase 166.4: PORTFOLIOANALYTICS — the /portfolios/[id] analytics compute reads columns that exist and treats a cumulative series correctly (data integrity; evidence verified by the orchestrator 2026-09-27) (URGENT)
 - Phase 164.9.4 edited: routed in: a docs-only push to main runs the full corpus; the short path must cover a docs-only push too (founder 2026-09-27)
 - Phase 167.1.1 edited: routed in: three holdings readers still allocator-wide (R-15-1 scenario commit route, R-15-2 _load_holding_portfolio_context, R-15-3 getLatestExposureSnapshot) (from the 167.1.2 PR C executor, 2026-09-27)
@@ -1354,6 +1423,9 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 167.1.2.1 edited: edited fields: evidence, success_criteria (criterion 7, the fast-fail race, routed 2026-09-27 from the 167.1.2-12 round-3 silent-failure review)
 - Phase 166.4.1 edited: edited fields: evidence, success_criteria (criterion 6: benchmark_comparison must use the D-A interval-matched pairing; routed 2026-09-27 from the 166.4 BENCHALIGN research)
 - Phase 169.4 edited: edited fields: success_criteria (criterion 12: the allocations scenario benchmark's innerJoinByDate must use the D-A interval-matched pairing and the day-one rule; routed 2026-09-27 from the 166.4 BENCHALIGN research)
+- Phase 167.1.1 edited: routed in: D-13 /compare per-holding metrics need a flow-neutral per-holding source (from 167.1.2 PR C2, 2026-09-29)
+- Phase 167.1.2.1 edited: routed in: 8 C2 writer-side residuals from review rounds 1-3 (SFH-05 writer half, single failing key dilution, SFH-R3-02, SFH-R3-07, SFH-08, SFH-09, R2-CR-02 residual, R3-WR-02) (from 167.1.2 PR C2, 2026-09-29)
+- Phase 164.9.3.2.1 inserted after Phase 164.9.3.2: ENQ40001: enqueue race-loss 40001 raise, booked by ENQ-SCOPE=enq-sibling
 
 ### Decisions
 
@@ -2421,9 +2493,9 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-09-27T15:08:00.000Z
-**Stopped At:** Completed 164.9.3-06-PLAN.md
-**Resume File:** None
+**Last Date:** 2026-10-02T09:02:56.666Z
+**Stopped At:** Phase 164.4.2 complete; next 164.9.3.2.1
+**Resume File:** .planning/phases/169.1.1-hydrationticks-factsheet-chart-ticks-render-the-same-on-serv/169.1.1-UI-SPEC.md
 
 **Last Date:** 2026-09-24T06:17:00.000Z
 **Stopped At:** Completed 167.1-06-PLAN.md

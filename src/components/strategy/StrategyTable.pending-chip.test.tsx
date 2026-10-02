@@ -378,7 +378,9 @@ describe("StrategyTable Delta 4 — SC-4a honest pending chip", () => {
     const chip = chipIn(row, "No data");
     expect(chip).not.toBeNull();
     expect(chip!.className).toContain("bg-track");
-    expect(chip!.className).toContain("text-text-muted");
+    // 2026-09-28 Phase 170: 164.9.4 axe color-contrast. text-text-muted on
+    // bg-track was 4.34:1; text-text-secondary is 6.87:1. bg-track stays.
+    expect(chip!.className).toContain("text-text-secondary");
   });
 
   it("shows a MUTED 'No data' chip for a failed job — never red, row still clickable", () => {
@@ -616,7 +618,9 @@ describe("StrategyTable Delta 5 — unranked placeholder rows for bare keys", ()
     const chip = chipIn(first, "No strategy yet");
     expect(chip).not.toBeNull();
     expect(chip!.className).toContain("bg-track");
-    expect(chip!.className).toContain("text-text-muted");
+    // 2026-09-28 Phase 170: 164.9.4 axe color-contrast. text-text-muted on
+    // bg-track was 4.34:1; text-text-secondary is 6.87:1. bg-track stays.
+    expect(chip!.className).toContain("text-text-secondary");
     expect(chip!.className).not.toContain("text-negative");
     expect(chip!.className).not.toContain("bg-warning-bg");
 

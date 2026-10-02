@@ -39,15 +39,108 @@ export const isValidDollar = (v: unknown): v is number =>
   v < MAGNITUDE_CAPS.MAX_DOLLAR_VALUE_USD;
 
 /**
- * Whole-dollar USD rendering for the allocations surface.
- * `null` renders the em-dash, never `$0` (no-invented-data).
+ * Whole-dollar USD rendering for amounts (AUM, notional, allocations, balances).
+ * `null` and non-finite input render the em-dash, never `$0`, `$NaN` or `$∞`
+ * (no-invented-data).
+ *
+ * Phase 169 review round 1 (IN-04, SFH L-3), 2026-09-29: the value is rounded
+ * to whole dollars BEFORE it is formatted, and a negative that rounds to zero
+ * is normalised (`+ 0` turns -0 into 0), so -0.4 reads "$0", never "-$0". This
+ * is the rounded-value sign rule `formatUsdSigned` follows. `toFixed` rounds
+ * half away from zero, as `toLocaleString` does, so -0.5 still reads "-$1".
  */
 export function formatUsd(n: number | null): string {
-  if (n == null) return "—";
-  return n.toLocaleString("en-US", {
+  if (n == null || !Number.isFinite(n)) return "—";
+  const whole = Number(n.toFixed(0)) + 0;
+  return whole.toLocaleString("en-US", {
     style: "currency",
     currency: "USD",
     minimumFractionDigits: 0,
     maximumFractionDigits: 0,
   });
+}
+
+/**
+ * Phase 169 D-50 — the sign of a money value AS IT WILL BE READ, i.e. of the
+ * value rounded to cents. This is the ONE rounding decision both the text sign
+ * (`formatUsdSigned`) and a P&L colour read, so the two cannot disagree: a
+ * value that rounds to zero (-0.0001, 0.004) is `"zero"`, which shows no sign
+ * and the neutral colour, never a red "−$0" (DESIGN.md: red is never for a
+ * zero). `null` means there is no value to sign (null or non-finite input).
+ *
+ * `toFixed(2)` rounds the exact binary value half away from zero, the same
+ * rule `toLocaleString` applies, so the rounded value here is the one the text
+ * shows. A negative that rounds to zero parses back as -0, which is neither
+ * above nor below 0.
+ */
+export type MoneySign = "positive" | "negative" | "zero";
+
+export function signAtCents(n: number | null): MoneySign | null {
+  if (n == null || !Number.isFinite(n)) return null;
+  const rounded = Number(n.toFixed(2));
+  if (rounded > 0) return "positive";
+  if (rounded < 0) return "negative";
+  return "zero";
+}
+
+/**
+ * Phase 169 D-50 — a signed money amount (unrealized P&L) at 2 decimals, e.g.
+ * "+$0.37", "−$0.21" (U+2212 minus), "+$1,300.00". The sign comes from
+ * `signAtCents`, so a value that rounds to zero reads "$0.00" with no sign.
+ * Null or non-finite renders the em-dash, never a fabricated $0.00.
+ * Assignable to `KeyTrustClauseRender.amount`.
+ */
+export function formatUsdSigned(n: number | null): string {
+  const sign = signAtCents(n);
+  if (sign === null) return "—";
+  const magnitude = Math.abs(Number((n as number).toFixed(2))).toLocaleString(
+    "en-US",
+    {
+      style: "currency",
+      currency: "USD",
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    },
+  );
+  if (sign === "positive") return `+${magnitude}`;
+  if (sign === "negative") return `−${magnitude}`;
+  return magnitude;
+}
+
+/**
+ * Phase 169 D-50 — a unit price (entry, mark). A price of $1 or more shows 2
+ * decimals ("$60,000.00"); a price under $1 shows 4 significant digits
+ * ("$0.4213", "$0.00009876"), so a sub-dollar instrument never reads "$0".
+ * A sub-dollar price that rounds to 1 at 4 significant digits takes the $1
+ * form ("$1.00"), and a zero price, which has no significant digits, reads
+ * "$0.00". Null or non-finite renders the em-dash.
+ *
+ * Amounts (AUM, notional, allocations) are NOT prices and stay whole dollars
+ * through `formatUsd`.
+ *
+ * Phase 169 review round 1 SFH L-3, 2026-09-29: a negative zero (a mark derived
+ * as 0 / -qty) is normalised to 0 first, so it reads "$0.00", never "-$0.00".
+ * Only an exact -0 can reach the 2-decimal branch as a zero: any other negative
+ * under $1 takes the significant-digits branch and keeps a real sign.
+ */
+export function formatUsdPrice(n: number | null): string {
+  if (n == null || !Number.isFinite(n)) return "—";
+  const price = n + 0;
+  const subDollar = price !== 0 && Math.abs(Number(price.toPrecision(4))) < 1;
+  return price.toLocaleString(
+    "en-US",
+    subDollar
+      ? {
+          style: "currency",
+          currency: "USD",
+          minimumSignificantDigits: 4,
+          maximumSignificantDigits: 4,
+        }
+      : {
+          style: "currency",
+          currency: "USD",
+          minimumFractionDigits: 2,
+          maximumFractionDigits: 2,
+        },
+  );
 }

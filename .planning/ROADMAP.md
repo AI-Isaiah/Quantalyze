@@ -91,7 +91,7 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 164.3.1: SOUND-PRIMITIVES — all FOUR cycling primitives closed by construction: neuter scan, mutation identity, VAC-04, self-referential oracle** (INSERTED)
 - [x] **Phase 164.4: REDUNDER-BACKFILL — every SQL gate arm gets a RED-UNDER annotation that a machine PROVES bites** (INSERTED)
 - [x] **Phase 164.4.1: PGCRON-LANE — put pg_cron on the throwaway pg-lane and retire the REDUNDER-PGCRON deferral** (INSERTED)
-- [ ] **Phase 164.4.2: SUBSETSPLIT — `sql-mutation` runs only the CHANGED gate files on a PR, with a scheduled full-corpus run that still enforces the floors, because `timeout-minutes` has taken its ONE allowed raise and 20 is a declared CEILING. Owner of TODOS `[REDUNDER-SUBSET-SPLIT]`, booked 2026-09-05 by Phase 164.4.1 and unowned since. NOT hygiene: when `sql-mutation` times out the job dies and EVERY SQL gate stops being enforced — those gates pin RLS, tenant isolation and ledger correctness, so the failure mode is the controls silently stop firing, which is this milestone whole subject. MEASURED TREND moving the wrong way: run 33961609382 @ 1aa8bb70 = 363 arms / 451 legs / 567 s (9.45 min); run 33973362161 @ ab0d5644 = 361 arms / 449 legs / 646 s (10.8 min) — FEWER legs, SLOWER run, ~80 s of pure runner variance. Phase 164.1.1 then added arms twice more: plan 01 measured 491 legs / ~975 s and plan 02 measured 496 legs / ~1020 s locally, both flagged in ci.yml as closer to the ceiling than any prior reading. SCOPE: (1) a runner subset mode (--changed against a base ref) in scripts/mutation-runner/run.mjs; (2) the .github/workflows/ci.yml wiring that selects it on PRs; (3) a scheduled full-corpus job that still enforces FILES_FLOOR/ARMS_FLOOR, since the subset cannot. LOCKED (164.4-CONTEXT.md): 20 minutes is the CEILING — if a MEASURED ubuntu run reaches it, the answer is this phase, NEVER a third timeout-minutes value. The split MUST BE PRINTED on every run, never silent: a subset that does not say it is a subset is the same defect class as a gate reporting PASS having measured nothing.** (INSERTED) — verification: human_needed
+- [x] **Phase 164.4.2: SUBSETSPLIT — `sql-mutation` runs only the CHANGED gate files on a PR, with a scheduled full-corpus run that still enforces the floors, because `timeout-minutes` has taken its ONE allowed raise and 20 is a declared CEILING. Owner of TODOS `[REDUNDER-SUBSET-SPLIT]`, booked 2026-09-05 by Phase 164.4.1 and unowned since. NOT hygiene: when `sql-mutation` times out the job dies and EVERY SQL gate stops being enforced — those gates pin RLS, tenant isolation and ledger correctness, so the failure mode is the controls silently stop firing, which is this milestone whole subject. MEASURED TREND moving the wrong way: run 33961609382 @ 1aa8bb70 = 363 arms / 451 legs / 567 s (9.45 min); run 33973362161 @ ab0d5644 = 361 arms / 449 legs / 646 s (10.8 min) — FEWER legs, SLOWER run, ~80 s of pure runner variance. Phase 164.1.1 then added arms twice more: plan 01 measured 491 legs / ~975 s and plan 02 measured 496 legs / ~1020 s locally, both flagged in ci.yml as closer to the ceiling than any prior reading. SCOPE: (1) a runner subset mode (--changed against a base ref) in scripts/mutation-runner/run.mjs; (2) the .github/workflows/ci.yml wiring that selects it on PRs; (3) a scheduled full-corpus job that still enforces FILES_FLOOR/ARMS_FLOOR, since the subset cannot. LOCKED (164.4-CONTEXT.md): 20 minutes is the CEILING — if a MEASURED ubuntu run reaches it, the answer is this phase, NEVER a third timeout-minutes value. The split MUST BE PRINTED on every run, never silent: a subset that does not say it is a subset is the same defect class as a gate reporting PASS having measured nothing.** (INSERTED) — verification: passed (completed 2026-10-02; SUBSET observed in CI on PR #927)
 - [x] **Phase 164.4.2.1: DRIFTOFFMUTEX — `test-db-drift` stops waiting on the shared-TEST advisory lock to do seconds of VAC-08 work, so a merge push's critical path falls back inside its BEFORE band** (INSERTED)
 - [x] **Phase 164.5: BASELINE-SNAPSHOT — the committed PROD schema baseline becomes the local stack's source and a gate, and the one production object no migration owns is dispositioned under review** (INSERTED)
 - [x] **Phase 164.5.1: CRONREPOINT — the live `match_engine_cron` row is repointed at the mechanism the repo actually describes, and the migration-vs-runbook rule is settled first** (INSERTED)
@@ -123,11 +123,11 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 164.9: TESTISOLATION — a run's assertions against the shared TEST project stop being unreliable: per-run isolation replaces global truth** (INSERTED)
 - [x] **Phase 164.9.1: JOBRPCTRUTH — the compute-job RPC surface does what its own comments say** (INSERTED) — verification: passed (completed 2026-09-27)
 - [x] **Phase 164.9.2: REFDATAUPDATES — the shared-TEST restore replay also replays migration UPDATEs on the public tables it just filled, so rebuilt reference rows match PROD** (INSERTED)
-- [ ] **Phase 164.9.3: CLAIMPAIR — a due failed_retry job and a pending twin of the same (kind, allocator) never wedge the compute-job claim** (INSERTED) — not yet verified
+- [x] **Phase 164.9.3: CLAIMPAIR — a due failed_retry job and a pending twin of the same (kind, allocator) never wedge the compute-job claim** (INSERTED) — verification: passed (completed 2026-09-27, PR #890, v0.109.0.0)
 - [ ] **Phase 164.9.3.1: FANINGRAPH — a fan-in child never strands when its parent fails, a match_decisions delete never raises 23505 through its cascade, and a fan-in diamond never deadlocks on the parent lock** (INSERTED) — not yet verified
-- [ ] **Phase 164.9.3.2: DEFER40001 — a compute-job RPC that raises SQLSTATE 40001 never makes PostgREST retry it without end** (INSERTED) — not yet verified
+- [x] **Phase 164.9.3.2: DEFER40001 — a compute-job RPC that raises SQLSTATE 40001 never makes PostgREST retry it without end** (INSERTED) — verification: passed (completed 2026-10-02, PR #919, v0.118.0.0)
 - [ ] **Phase 164.9.4: CIOFFMUTEX — `python` and `e2e-seeded` no longer queue on the shared-TEST advisory lock; each runs against a database private to its runner** (INSERTED) — not yet verified
-- [ ] **Phase 164.9.5: AUTOREDUMP — after a migration applies to PROD, the committed baseline is re-dumped and proposed automatically** (INSERTED) — verification: human_needed (shipped; founder/post-deploy checks pending)
+- [x] **Phase 164.9.5: AUTOREDUMP — after a migration applies to PROD, the committed baseline is re-dumped and proposed automatically** (INSERTED) — verification: passed (completed 2026-10-02, PR #875, v0.106.0.0; first bot re-dump PR #920)
 - [x] **Phase 165: DEPS — The 9-PR dependabot campaign** - pandas `requirements.in` prerequisite commit FIRST, then one PR at a time in the research-verified order, full suite between each; #614 and #606 CLOSED with reasons — ⛔ RETIRED 2026-09-27 by founder decision ("Land as maintenance, retire the phases"): closed WITHOUT delivery as a phase; the dependabot PRs land one at a time as maintenance under the green rule.
 - [x] **Phase 165.1: PIPDEPS — the pip dependabot work lands with production pandas never downgraded** (INSERTED) — ⛔ RETIRED 2026-09-27 by founder decision ("Land as maintenance, retire the phases"): closed WITHOUT delivery as a phase; the dependabot PRs land one at a time as maintenance under the green rule.
 - [x] **Phase 165.2: NPMDEPS — the npm dependabot work lands and the nightly audit goes green** (INSERTED) — ⛔ RETIRED 2026-09-27 by founder decision ("Land as maintenance, retire the phases"): closed WITHOUT delivery as a phase; the dependabot PRs land one at a time as maintenance under the green rule.
@@ -135,8 +135,9 @@ phases below carry the corrections, not the bullets.
 - [ ] **Phase 166.1: QSTATSRECOMPUTE — PROD rows computed before Phase 166 are recomputed, and the last exact-zero dispersion guards go** (INSERTED) — verification: human_needed (shipped; founder/post-deploy checks pending)
 - [ ] **Phase 166.1.1: DDSIGN — a drawdown improvement is positive when the drawdown gets shallower, in the simulator, the optimizer and the match engine** (INSERTED) — not yet verified
 - [ ] **Phase 166.2: COMPUTEONCE — the TypeScript side computes Sharpe/Pearson/beta once and every page reads it** (INSERTED) — verification: human_needed (shipped; founder/post-deploy checks pending)
-- [ ] **Phase 166.3: RECOMPUTE — PROD rows computed before Phase 166 are recomputed through the normal job path** (INSERTED) — planned (1 plan); HALTED 2026-09-27 at Task 3; resumes after Phase 166.4 ships
-- [ ] **Phase 166.4: BENCHALIGN — a strategy with a sparser calendar than BTC is compared to BTC over the same holding interval, in every benchmark-relative metric** (INSERTED) — planned 2026-09-27, 4 plans in 4 waves; data integrity, ahead of features
+- [ ] **Phase 166.3: RECOMPUTE — PROD rows computed before Phase 166 are recomputed through the normal job path** (INSERTED) — complete with routed residuals 2026-10-01 (halted 2026-09-27, resumed after 166.4); verification pending
+- [ ] **Phase 166.3.1: NAVBREACH — the Deribit composite's member ledger reconciles at inception, so its stitch_composite recompute succeeds** (INSERTED) — not planned; inserted 2026-10-01 (founder); 166.3's R5 recompute waits on it
+- [x] **Phase 166.4: BENCHALIGN — a strategy with a sparser calendar than BTC is compared to BTC over the same holding interval, in every benchmark-relative metric** (INSERTED) — planned 2026-09-27, 4 plans in 4 waves; data integrity, ahead of features
 - [x] **Phase 167: CREDTRUST — an invalid venue credential is named to the customer as the reason their factsheet stopped updating, instead of going quietly stale behind a transient-sounding error**
 - [ ] **Phase 167.1: AUMTRUST — the headline AUM says when it includes holdings from keys needing attention** (INSERTED) — verification: human_needed
 - [ ] **Phase 167.1.1: HOLDINGKEYSCOPE — two accounts on one venue holding the same asset never merge into one holding** (INSERTED) — not yet verified
@@ -146,7 +147,7 @@ phases below carry the corrections, not the bullets.
 - [ ] **Phase 168: DRBOPTIONS — a Deribit options account ingests end to end** — verification: human_needed
 - [ ] **Phase 169: PAGETRUTH — every number agrees across pages and with its own record length** — not yet verified
 - [ ] **Phase 169.3: SMALLFIXES — admin compute jobs, recommendations, profile exchanges and the one mandate rule show true numbers** (INSERTED) — not yet verified (plan 01 shipped in #868)
-- [ ] **Phase 170: LAYOUT — page layout reads clean and holds on every page** — not yet verified
+- [x] **Phase 170: LAYOUT — page layout reads clean and holds on every page** — verification: passed (completed 2026-10-01; post-deploy defects routed to 170.2)
 - [ ] **Phase 170.1: COPY — page copy reads clean on every page** (INSERTED) — not yet verified
 
 ### Phase 158: OPS-CI — A merge means a deploy
@@ -192,12 +193,12 @@ Plans:
   4. The two money-math defects are closed on the strategy-analytics path: an all-non-negative return series with a >100% day is never re-read as prices (no sign-flipped Sharpe), and a blend leg with unknown `asset_class` is treated as crypto for RISK (a sole crypto leg no longer inflates Sharpe via √252).
   5. Two concurrent same-session resubmits cannot both take the FILL arm (compare-and-set on `category_id IS NULL`); the classification-conflict 409's own remedy can mint a fresh session (the re-mint fingerprint accounts for classification, or the exclusion is documented at the fingerprint); and `withPublishedOrOwner` validates the uid's shape before interpolating it into the PostgREST `.or()` filter.
 
-**Plans**: 7 plans
+**Plans**: 7/7 plans complete
 
 Plans:
 **Wave 1**
 
-- [ ] 159-01-PLAN.md — C-M1 PROD census artifact `159-CENSUS.md` (checkpoint: ORCHESTRATOR runs the read-only SQL against PROD and commits results — the D-01 gate) (RANK-01) [Wave 1]
+- [x] 159-01-PLAN.md — C-M1 PROD census artifact `159-CENSUS.md` (checkpoint: ORCHESTRATOR runs the read-only SQL against PROD and commits results — the D-01 gate) (RANK-01) [Wave 1]
 - [x] 159-05-PLAN.md — quantstats price-guess closed across `compute_all_metrics`: kwarg arm + P114 inline mirror for headline sharpe/sortino, benign-parity oracles, golden adjudication (RANK-05) [Wave 1]
 - [x] 159-06-PLAN.md — FILL-arm CAS `.is("category_id", null)` + observed row count + honest `raced` refusal on the real POST harness (RANK-07) [Wave 1]
 - [x] 159-07-PLAN.md — Re-mint fingerprint includes classification (both call sites + both dep arrays) + `withPublishedOrOwner` strict-UUID fail-closed validation (RANK-08, RANK-09) [Wave 1]
@@ -906,7 +907,7 @@ Plans:
 
 **Requirements**: TBD — no v1.20 requirement IDs. The binding obligation is TODOS `[REDUNDER-SUBSET-SPLIT]`, booked 2026-09-05 by Phase 164.4.1 and unowned until this phase. ⛔ `WAIVED_CEILING` is 0 and has stayed 0 through two founder decisions that each took the root-cause fix over an exception — this phase must not be the one that adds a waiver.
 **Depends on:** Phase 164.4
-**Plans:** 5/10 plans executed
+**Plans:** 11/11 plans complete
 
 Plans:
 
@@ -915,12 +916,12 @@ Plans:
 - [x] 164.4.2-03-PLAN.md — Area A wiring: founder regenerates the stale baseline (blocking-human), `load_baseline()` refuses a stale dump, `fetch-depth: 0` on both lane-booting jobs
 - [x] 164.4.2-04-PLAN.md — Area B precondition MEASURED on a real runner: corpus DEMAND vs lane SUPPLY (`pg_net`/vault/auth/roles/pg_cron), then a blocking decision — proceed, or take DECISION C on the written refutation
 - [x] 164.4.2-05-PLAN.md — Area B tracer: `sql-tests` onto the ephemeral lane with no mutex; VAC-08 rehomed to a new `test-db-drift` job that keeps the key, the wait and the gate; aggregator arms and comment currency (also completed the pre-replan plan 06's pin tasks)
-- [ ] 164.4.2-06-PLAN.md — Area F (DECISION F): committed carried-migrations marker bound to the dump's sha256; the currency gate's `--replay-set` mode ("bound and name"); `run.sh up` replays the migrations newer than the dump with ledger rows, fails loud on an undeterminable set or a failing replay; lane pins and BASELINE.md re-argued
-- [ ] 164.4.2-07-PLAN.md — Area D machinery (same wave as 06, file-disjoint): runner `--subset-from` mode that CAN exit 0 while `--file` still cannot, the `scope:` line, one merge-base diff exported and re-used by `scripts/sql-gate-subset.mjs`, and the floors ratchet's subset arms
-- [ ] 164.4.2-08-PLAN.md — Area F CI surface + Area B close-out: currency steps renamed for the replay, clone depth by measured consumer, mutex runbook and dated CLAUDE.md corrections, then an orchestrator-read COUNTED SHA-bound green covering plan 05's PENDING criteria and plan 06's lane lines
-- [ ] 164.4.2-09-PLAN.md — Area D wiring: `changed-paths` publishes the subset, `sql-mutation` narrows only on a pull request, the assert step's fence arms driven RED and GREEN on synthetic logs, and the real run's `scope:` line read by the orchestrator
-- [ ] 164.4.2-10-PLAN.md — ship: the AFTER protocol for four jobs against the CORRECTED refutation clauses (a)-(d), `[REDUNDER-SUBSET-SPLIT]` closed by its mechanism with follow-ons booked (incl. the restore path's epoch-based currency), VERSION + CHANGELOG cross-checked commit by commit
-- [ ] 164.4.2-11-PLAN.md — Area G (DECISION G): the lane replays the PROD objects outside `public` that the dump lacks (the `auth.users` trigger and the pg_cron registrations), extracted from the migrations, with a drift gate that fails the boot; the 8 SQL files that failed on the lane pass unedited
+- [x] 164.4.2-06-PLAN.md — Area F (DECISION F): committed carried-migrations marker bound to the dump's sha256; the currency gate's `--replay-set` mode ("bound and name"); `run.sh up` replays the migrations newer than the dump with ledger rows, fails loud on an undeterminable set or a failing replay; lane pins and BASELINE.md re-argued
+- [x] 164.4.2-07-PLAN.md — Area D machinery (same wave as 06, file-disjoint): runner `--subset-from` mode that CAN exit 0 while `--file` still cannot, the `scope:` line, one merge-base diff exported and re-used by `scripts/sql-gate-subset.mjs`, and the floors ratchet's subset arms
+- [x] 164.4.2-08-PLAN.md — Area F CI surface + Area B close-out: currency steps renamed for the replay, clone depth by measured consumer, mutex runbook and dated CLAUDE.md corrections, then an orchestrator-read COUNTED SHA-bound green covering plan 05's PENDING criteria and plan 06's lane lines
+- [x] 164.4.2-09-PLAN.md — Area D wiring: `changed-paths` publishes the subset, `sql-mutation` narrows only on a pull request, the assert step's fence arms driven RED and GREEN on synthetic logs, and the real run's `scope:` line read by the orchestrator
+- [x] 164.4.2-10-PLAN.md — ship: the AFTER protocol for four jobs against the CORRECTED refutation clauses (a)-(d), `[REDUNDER-SUBSET-SPLIT]` closed by its mechanism with follow-ons booked (incl. the restore path's epoch-based currency), VERSION + CHANGELOG cross-checked commit by commit
+- [x] 164.4.2-11-PLAN.md — Area G (DECISION G): the lane replays the PROD objects outside `public` that the dump lacks (the `auth.users` trigger and the pg_cron registrations), extracted from the migrations, with a drift gate that fails the boot; the 8 SQL files that failed on the lane pass unedited
 
 ⭐ **Replanned 2026-09-23 for DECISION F** (plans 06–10 replace the pre-replan 06–09): the pre-replan 06's Tasks 1–2 were already done inside plan 05 and are not repeated; the pre-replan 09's AFTER protocol restated the refutation condition CONTEXT Area E struck on 2026-09-21 and now uses the corrected clauses. ⚠️ Plan 06 has a precondition: the phase branch must carry every migration the committed dump carries — merge `origin/main` (which holds `20260922120000_api_keys_sync_status_sign_in_failed.sql`) into the phase branch before wave 5.
 
@@ -1274,7 +1275,7 @@ Plans:
 
 **Requirements**: TODOS entry `[PROBER-CADENCE-UNDELIVERED-01]` — this phase is its named owner.
 **Depends on:** Phase 164.1 (the prober it observes), Phase 164.7 (the settled Vault-backed `cron.job` mechanism any new PROD cron row must consume rather than invent a second answer to)
-**Plans:** 4/6 plans executed
+**Plans:** 6/6 plans complete — ⭐ **2026-09-30 (closure note, founder decision):** 6/6. Plan 06 ran on PROD on 2026-09-18 (PR #819 `b8e375283`), and its SUMMARY was written retrospectively on 2026-09-30.
 
 ⛔ **Criterion 4 is ALREADY MET** by commit `126517a8`, which corrected the workflow header at its own
 site. Plan 03 pins it with a calibrated test and does NOT re-edit it — re-deriving the figures would
@@ -1302,9 +1303,9 @@ Plans:
 - [x] 164.1.1-03-PLAN.md — CHECKPOINT: is `SENTRY_DSN` set on the Railway analytics-service? The alarm's last hop is decided by measurement, not inference. Plus the calibrated criterion-4 pin. (wave 1, `autonomous: false`) — DONE 2026-09-18: `SENTRY_DSN` IS set (option `a-sentry-already-set`, founder-measured), criterion 4 pinned with an observed-RED calibration twin, `.github/workflows/prod-prober.yml` byte-unchanged. Commits `9a1b0a8b`/`3ce0d461`.
 - [x] 164.1.1-04-PLAN.md — The alarm's far end: one guarded `/api` route in analytics-service implementing the escalation the checkpoint recorded, with every load-bearing behaviour observed RED under a neuter. (wave 2)
 - [x] 164.1.1-05-PLAN.md — `docs/runbooks/prod-prober-cadence-go-live.md` (blast radius, blocking pre-flight, the statement, the same-session manifest re-capture, rollback) and criterion 5's named residual. (wave 3)
-- **SHIPPED 5/6 as v0.77.51.0 (2026-09-18).** Two workflow deviations taken and recorded in `164.1.1-CONTEXT.md` `<deviations>`: **D-SHIP-01** the ship-note omits the CI skip trailer `ship.md`'s `track_shipping` step would have written (CLAUDE.md forbids it; a squash carries it into `main`), and **D-SHIP-02** the `verification.status` gate was WAIVED, not satisfied — VERIFICATION.md needs Plan 06, Plan 06 needs this migration applied, and the migration applies on merge. VERIFICATION.md is owed the moment Plan 06 executes.
-- ⛔ **PLAN 06 IS BLOCKED ON A BASELINE REGENERATION, not just on the merge.** `sql-gate-lint` is blocking in the `frontend` aggregator and `baseline-content-drift` reports `SNAPSHOT_MISSING prod_prober_cadence_check` until `baseline.sql` is regenerated from PROD after the apply. Main CI therefore stays red, and `ci.yml:2205` records what that costs: Railway SKIPS the analytics-service deploy when main CI is red — so the alarm's last hop route does not reach PROD. Required order: merge → migration applies → regenerate baseline → main green → route deploys → THEN plan 06. Booked as `[BASELINE-REGEN-164.1.1]`.
-- [ ] 164.1.1-06-PLAN.md — The live PROD session behind a decision checkpoint: register, re-capture the manifest in the same act, observe the first tick, record it auditably, close `[PROBER-CADENCE-UNDELIVERED-01]`. (wave 4, `autonomous: false`)
+- **SHIPPED 5/6 as v0.77.51.0 (2026-09-18).** Two workflow deviations taken and recorded in `164.1.1-CONTEXT.md` `<deviations>`: **D-SHIP-01** the ship-note omits the CI skip trailer `ship.md`'s `track_shipping` step would have written (CLAUDE.md forbids it; a squash carries it into `main`), and **D-SHIP-02** the `verification.status` gate was WAIVED, not satisfied — VERIFICATION.md needs Plan 06, Plan 06 needs this migration applied, and the migration applies on merge. VERIFICATION.md is owed the moment Plan 06 executes. ⭐ **2026-09-30 (closure note, founder decision):** delivered. Plan 06 executed on 2026-09-18, and `164.1.1-VERIFICATION.md` went to `status: passed` in `b760efbac` (PR #819 `b8e375283`), so D-SHIP-02's owed verification is paid.
+- ⛔ **PLAN 06 IS BLOCKED ON A BASELINE REGENERATION, not just on the merge.** `sql-gate-lint` is blocking in the `frontend` aggregator and `baseline-content-drift` reports `SNAPSHOT_MISSING prod_prober_cadence_check` until `baseline.sql` is regenerated from PROD after the apply. Main CI therefore stays red, and `ci.yml:2205` records what that costs: Railway SKIPS the analytics-service deploy when main CI is red — so the alarm's last hop route does not reach PROD. Required order: merge → migration applies → regenerate baseline → main green → route deploys → THEN plan 06. Booked as `[BASELINE-REGEN-164.1.1]`. ⭐ **2026-09-30 (closure note, founder decision):** resolved before plan 06 ran. Main went green at `f04d224a` (Phase 164.1.1.1 LANEONLYGATES), after the baseline regeneration `eeeee320`, as recorded in `164.1.1-VERIFICATION.md`'s CI-health row. Plan 06 then executed on 2026-09-18.
+- [x] 164.1.1-06-PLAN.md — The live PROD session behind a decision checkpoint: register, re-capture the manifest in the same act, observe the first tick, record it auditably, close `[PROBER-CADENCE-UNDELIVERED-01]`. (wave 4, `autonomous: false`) — DONE 2026-09-18. `prod_prober_cadence_check` is scheduled as jobid 41, the manifest was re-captured (`0c316bba`), and the first tick at 18:20:00Z succeeded. The record is `164.1.1-PROD-SESSION.md`, shipped in PR #819 `b8e375283`. The SUMMARY was written retrospectively on 2026-09-30.
 
 ### Phase 164.1.1.1: LANEONLYGATES — sql-tests must not run gates that require a pg-lane-only fixture, and the exclusion must be impossible to grow silently. MEASURED DEFECT shipped in PR #815 and RED ON MAIN (run 35347643700, merge eec8a659): supabase/tests/test_prod_prober_cadence.sql fails under sql-tests with ERROR relation net._lane_posts does not exist at :645. That table is the pg-net stand-in from scripts/pg-lane/fixtures/34-fixture-pg-net-stand-in.sql, whose own header says NEVER APPLIED TO TEST OR PROD — it exists only inside the throwaway pg-lane cluster. But sql-tests globs supabase/tests/test_*.sql unconditionally, so the gate passes on the lane (sql-mutation SUCCESS, mutation-covered there) and CANNOT pass on shared TEST, permanently. NOT hygiene: sql-tests is BLOCKING in the frontend aggregator and ci.yml:2205 records that Railway SKIPS the analytics-service deploy while main CI is red, so this red is what prevents POST /api/prober-cadence-alert (shipped in #815) from reaching production. SAFETY, and it forbids the lazy fix: shared TEST carries the REAL pg_net, so a gate that worked there would make genuine outbound HTTP from shared infrastructure every run — it must be EXCLUDED from that lane, never accommodated into it. LOCKED: do NOT weaken WR-03. sql-tests is built on A PRINTED SKIP IS NOT A PASS and fails the step on a whole-file RAISE NOTICE SKIP bail-out, so the fix must be a FILE-LEVEL EXCLUSION (never executed by this job, coverage asserted by sql-mutation instead), NOT an in-file skip, and that distinction must be argued in the artifact rather than assumed. SCOPE: (1) a machine-readable LANE-ONLY declaration in the gate file naming the fixture it requires; (2) the sql-tests loop honouring it and PRINTING every exclusion on every run, since a silent exclusion is the same defect class as a gate reporting PASS having measured nothing; (3) the excluded SET pinned as SITES NOT A COUNT per the B3 convention in drift-check-scripts.test.ts, re-derived from the corpus by a contract test so a one-for-one swap or a new exclusion cannot land unseen; (4) evidence the excluded file is still mutation-covered. Check whether any OTHER gate references a scripts/pg-lane/fixtures/** object — the vault stand-in vault.decrypted_secrets is the near-miss: it EXISTS on both sides (stand-in table on the lane, real view on TEST) so it is explicitly NOT this class and must not be swept in. (INSERTED)
 
@@ -2651,6 +2652,8 @@ the former 4 is renumbered 3 below, text unchanged.
 (dated 2026-09-25, from 164.6.5 plan 01) here. Both close only on the next live wedge captured before
 any restart or heal, which is 164.6.8's evidence, so both `**Owns**` lines now live under Phase
 164.6.8, carried verbatim. This phase owns neither.
+**⭐ ROUTED IN 2026-09-30 (from 169.3-06 planning; founder AskUserQuestion "164.6.6 TERMINALISOLATION"; data-integrity; 169.3 D-76):** an MT5 investor password is stored differently depending on the path that saved it. The connect wizard trims it (create-with-key → `validateKey` → `trimCredential` in `src/lib/analytics-client.ts`); the password-update dialog stores it exactly as typed (`src/app/api/keys/[id]/rotate-secret/route.ts` :221, :227, :312 → `analytics-service/routers/internal.py` :739, :762). A password with a leading or trailing space is therefore saved correctly on rotate but wrongly through the wizard, which then fails to log in. Success: an MT5 password is never trimmed on any path (wizard, rotate, validate), pinned by a test that fails under the old trim; API key and secret trimming for other venues is unchanged. 169.3-06 deliberately leaves both server paths alone and only stops the client from stripping the MT5 password.
+
 **Plans:** 0 plans
 
 ⛔ **SAME INCIDENT AS 164.6.5, DIFFERENT DEFECT.** 164.6.5 makes validation stop breaking the
@@ -3276,9 +3279,13 @@ Plans:
 **Goal:** A compute-job RPC called through PostgREST never raises SQLSTATE 40001, so PostgREST never re-runs the call in a loop. A preempted worker's `defer_compute_job` (and any sibling RPC with the same errcode) fails once, with an error the caller can read.
 **Requirements**: TODOS-style id `[164.9.4-DEFER-40001-RETRY-HANG]` (owned here)
 **Depends on:** none in code. ⭐ It is a BLOCKER in the ratified 2026-09-27 order: it sits in the blockers group beside Phase 164.9.3, and Phase 164.9.4's SC-3 cannot pass until it lands.
-**Plans:** 0 plans
+**Plans:** 8/8 plans complete
 
 ⭐ **Founder decision, 2026-09-27 (AskUserQuestion, "New blocker phase (Recommended)"):** the 40001 retry loop gets its own blocker phase, not a fold into 164.9.4.
+
+⭐ **Scope record, 2026-10-02 (ENQ-SCOPE, founder):** `enq-sibling`: the Goal's "any sibling RPC with the same errcode" is met in this phase for the four fence raises in `defer_compute_job`, `mark_compute_job_done` (two) and `mark_compute_job_failed`, and the enqueue race-loss raise in `_enqueue_compute_job_internal` is routed to Phase 164.9.3.2.1 (ENQ40001; A2 refuted, race-loss unmeasured). The Goal and SC-1 above are kept as written, as lineage.
+
+⭐ **Founder override, 2026-10-02 (VAC-08 pre-merge red, "Merge now"):** PR #919 was merged at head `9e861c047` with `test-db-drift` (VAC-08) red. `mark_compute_job_done/2` on shared TEST hashed `2315eb47…`, which equals the migration's own `prod-body-ack`, so TEST held the pre-migration body and the difference was this PR's errcode change, which reaches TEST only on the merge apply. The ledger-frontier exemption covered ledger presence (`1 exempt … 0 NEW drift`) but not the body comparison (class `[164.8-PUSH-RACE-VAC08]` (b)). This departs from plan 08's ship condition, which listed a VAC-08 red as a stop. Measured after merge: Supabase Migrate run `36981647441` applied `5a88a165` to TEST then PROD, and the merge push's `test-db-drift` was green.
 
 **Evidence, measured 2026-09-27 on the local lane** by the 164.9.4 measurement-run diagnosis (run `36304648008`, head `89c5ef3d`):
 - One call to a throwaway function that raises 40001 made PostgREST re-run it about 27k times in about 9 s on postgrest v14.5. That is the version the linked PROD project reports in `supabase/.temp/rest-version`.
@@ -3297,7 +3304,40 @@ Plans:
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 164.9.3.2 to break down)
+**Wave 1**
+
+- [ ] 164.9.3.2-01-PLAN.md — MEASURE: each 40001 raise site probed through the lane's PostgREST on today's code (four fence raises, enqueue A1/A2), ending in founder decision ENQ-SCOPE (lane: local-stack)
+- [ ] 164.9.3.2-02-PLAN.md — the fix migration (three functions re-based, four fence raises on 55006, messages byte-identical), its both-lanes SQL gate RED without and GREEN with, and the regenerated snapshots (lanes: pg-lane, local-stack)
+
+**Wave 2** *(blocked on plan 02)*
+
+- [ ] 164.9.3.2-03-PLAN.md — SC-2 PostgREST proof: four live-DB arms bounded by abortSignal, RED on a lane without the fix, GREEN with it (lane: local-stack)
+- [ ] 164.9.3.2-04-PLAN.md — Python classifiers on 55006 with the literal fallback; live fence tests assert 55006; SC-2 Python half proven locally, skip match unchanged (lane: local-stack)
+- [ ] 164.9.3.2-05-PLAN.md — the migration completed (COMMENTs re-issued, three earned prod-body-acks) and the [BLOCKING] schema proof on its final bytes by local-stack replay, never a push (lanes: local-stack, pg-lane)
+
+**Wave 3** *(blocked on plans 01-05)*
+
+- [ ] 164.9.3.2-06-PLAN.md — census on the merged tree: mutation-runner floors and every corpus pin, read off one run (lane: pg-lane)
+
+**Wave 4** *(blocked on plan 06)*
+
+- [ ] 164.9.3.2-07-PLAN.md — TODOS entry landed then closed, ENQ-SCOPE recorded in this ROADMAP entry, release commit; no push, /gsd-ship pushes after the worktree merge-back (lane: none)
+
+**Wave 5** *(blocked on plan 07)*
+
+- [ ] 164.9.3.2-08-PLAN.md — REVIEW-GATE: three pre-merge migration reviewers (blocking), SC-3 asked alongside without blocking, ship condition under the founder's green-then-merge rule (lane: none)
+
+### Phase 164.9.3.2.1: ENQ40001 — the enqueue race-loss raise (SQLSTATE 40001 in `_enqueue_compute_job_internal`) answers a PostgREST caller instead of re-running the call (INSERTED)
+
+**Goal:** [Urgent work - to be planned]
+**Requirements**: TBD
+**Depends on:** Phase 164.9.3.2
+**Plans:** 0 plans
+
+Booked 2026-10-01 by founder decision ENQ-SCOPE = `enq-sibling` (164.9.3.2 plan 01). Evidence carried from `164.9.3.2-01-SUMMARY.md`: the two-target shape (A2) is REFUTED (rejected up front with 22023), and the conflict-wait path converges through PostgREST (answered in 2–4 s). The race-loss RAISE itself never fired in five attempts, so its PostgREST behaviour is UNMEASURED; that it converges on retry is reasoned, not measured.
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 164.9.3.2.1 to break down)
 
 ### Phase 164.9.4: CIOFFMUTEX — `python` and `e2e-seeded` no longer queue on the shared-TEST advisory lock; each runs against a database private to its runner (INSERTED)
 
@@ -3353,7 +3393,7 @@ Plans:
 **Goal:** After a migration applies to PROD, the committed baseline is re-dumped and proposed automatically, so main never sits red on baseline-content-drift waiting for a manual dump.
 **Requirements**: TODOS `[164.9.5-MANUAL-BASELINE-REDUMP]` (owned here)
 **Depends on:** Phase 164.9.1
-**Plans:** 9/9 plans executed
+**Plans:** 9/9 plans complete
 
 ⭐ **Founder decision, 2026-09-26 (AskUserQuestion).**
 
@@ -3659,6 +3699,33 @@ SELECT CASE WHEN EXISTS (SELECT 1 FROM public.strategy_keys sk WHERE sk.strategy
 - **Resume condition.** Phase 166.3 may resume after Phase 166.4 merges and its worker is deployed.
 - **Ratified the same day.** The founder also ratified 166.4 D-04 (the both-endpoints rule applies when BTC is the sparser leg too), D-05 (the first strategy date pairs with BTC's same-day return) and D-07 (BTC's base close is the day before its first stored return) on 2026-09-27. Phase 169.5 BENCHCOMPARE adopts D-05's day-one rule before it executes.
 
+⭐ **RESUMED AND COMPLETED 2026-10-01, with routed residuals (see `166.3-01-SUMMARY.md`).** 14 benchmarked strategies: 9 recompute jobs done, 2 failed, 3 not enqueued because they were already computed on post-166.4 code (2 of them published, and both lack stored daily returns, so the job would have failed them). The failed composite is routed to Phase 166.3.1 NAVBREACH (founder D-R5); the trailing 1000-day BTC window that moved alpha/beta is Phase 170.2 item 5 (founder D-BENCH). No published row was recomputed.
+⚠️ **FOUNDER OVERRIDE (D-OVR, 2026-10-01, verbatim "can't you use CLI for that?"):** from R2 on, the orchestrator ran the PROD statements through `psql`, marker-guarded, instead of the founder. This overrides the "every PROD statement is a founder step" rule above for that run only; recorded in `166.3-CONTEXT.md` too.
+
+### Phase 166.3.1: NAVBREACH — the Deribit composite's member ledger reconciles at inception, so its stitch_composite recompute succeeds (INSERTED)
+
+**Goal:** The private three-key Deribit composite (Phase 166.3's R5) recomputes through the normal `stitch_composite` job path, because the root cause of its `native_nav` inception reconciliation breach is found and fixed on the real member ledger, without weakening the gate.
+**Requirements**: success criteria below
+**Depends on:** nothing. Phase 166.3's R5 recompute waits on this phase. **Priority:** data integrity.
+**Plans:** 0 plans
+
+**Evidence (orchestrator, measured on PROD read-only, 2026-10-01; counts and error classes only):**
+- Phase 166.3 enqueued `stitch_composite` for the composite at 2026-10-01 11:38 UTC. It ended `failed_final` after one attempt, error class `run_stitch_composite_job: member ledger unrecoverable — native_nav inception reconciliation breached venue=deribit currencies=[BTC]`.
+- The same class failed it on 2026-08-25 (the job the Phase 168 and 161.1 notes cite). The composite has 3 member keys, all `deribit`.
+- Phase 168's CONTEXT fences this out as "a separate defect with its own owner", and `TODOS.md` item 0.2 records the same. No phase owned it until this one.
+- Side effects of the failed job: `computation_status` moved `complete_with_warnings` → `failed`, and `computed_at` was re-stamped to 2026-10-01 while `metrics_json` stayed on pre-fix values. `metrics_json_by_basis` is intact and the strategy is still private, so no public page is wrong.
+
+⭐ **ROUTED IN 2026-10-01 (founder, AskUserQuestion "Residual, route the breach").** Phase 166.3 records R5 as an unpublished failed-recompute residual, and the breach is routed here.
+
+## Success Criteria
+1. The root cause of the inception breach is identified on the real member ledger, and a test that fails on today's code reproduces it.
+2. The fix never weakens the reconciliation gate: no widened tolerance and no forged inception row.
+3. The composite's `stitch_composite` recompute on PROD succeeds through the normal job path, with its before/after recorded counts-only.
+4. A failed stitch no longer re-stamps `computed_at` as if the row were current, or that is recorded as a separate defect with an owner.
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 166.3.1 to break down)
+
 ### Phase 166.4: BENCHALIGN — a strategy with a sparser calendar than BTC is compared to BTC over the same holding interval, in every benchmark-relative metric (INSERTED)
 
 **Goal:** For a strategy whose date index is sparser than BTC's 7-day calendar (for example weekday-only), every benchmark-relative metric pairs each strategy return with the BTC return over the SAME holding interval, so alpha, beta, correlation, information ratio, Treynor, r² and the rolling greeks and correlation describe the strategy's real co-movement with BTC, and r² equals correlation² again.
@@ -3813,11 +3880,21 @@ Plans:
 
 After 167.1.2 PR C ships, Open Positions (per key, latest asof) and the exposure panel will disagree about a quiet key until these three move. Success: each reads per key, with a test that fails on the allocator-wide read. Each symbol was verified at `origin/main` `c052ab4d` on 2026-09-27.
 
+⭐ **ROUTED IN 2026-09-29 (from 167.1.2 PR C2, D-13; user-facing): `/compare` per-holding metrics stay withheld until a flow-neutral per-holding source exists.**
+- `/compare`'s per-holding return, Sharpe, max drawdown and vol are computed as day-over-day ratios of dollar values (`src/app/(dashboard)/compare/lib/holding-compare-adapter.ts`), so buying more of an asset reads as a gain. Plan 11 kept them at "rebuilding" (D-13 decided, evidence in `167.1.2-11-SUMMARY.md`); plan 10 fixes new rows only and changes neither the stored rows nor that calculation.
+- Success: each per-holding metric reads a source that removes purchases, sales and transfers, with a test that fails on the dollar-ratio read; only then does `/compare` flip back to "ready".
+
 Plans:
 
 - [ ] TBD (run /gsd-plan-phase 167.1.1 to break down)
 
 ### Phase 167.1.2: ACCOUNTTRUTH — one exchange account is counted once, and the allocator equity curve shows only what the data supports (INSERTED)
+
+**D-15 amended 2026-09-29 (PR C3 review fix A; recorded in 167.1.2-CONTEXT.md):** the ready-branch warm-up note now promises panels after three days of blended history, not two (the factsheet builder needs 2 returns, and N days give N-1), and counts the days of the curve on screen. The Scenario sentence and the Overview heading follow one four-class reason classifier (C3 fixes B, G, I).
+
+**D-09 case (2) amended 2026-09-29 (PR C4 review rounds 1 and 2, SFH-C4-07 and WR-R2-02; recorded in 167.1.2-CONTEXT.md):** a departed key whose last countable day falls before that of a key ordered ahead of it on the same known account is covered (zero days, reason `same_account_as_earlier_key`), so every day of the account is counted exactly once; and a departed key with no usable saved balance neither covers nor bounds any other key, so a dropped key never leaves a gap another key would have filled. Founder-ratified 2026-09-29 (AskUserQuestion, "Ratify as built").
+
+**D-16 amended 2026-09-29 (PR C4 review rounds 1 and 2, SFH-C4-01, SFH-C4-02, SFH-R2-01; recorded in 167.1.2-CONTEXT.md):** Open Positions groups keys that read one exchange account and shows only the account's newest reading, and hides a key's rows once a newer clean poll has read it; the scenario-commit fingerprint (migration 20260929120000) applies the same row set.
 
 **Goal:** An allocator's book counts each exchange ACCOUNT exactly once, and "My Allocation" never shows an equity curve, return or ratio that the data does not support. A second key on an account that is already connected is refused. The equity history is rebuilt as one series per account from per-key returns and flows, and hidden until that series exists.
 **Requirements**: TBD. Source: founder browser UAT 2026-09-24 on the founder's own allocator book ("completely wrong, obviously"), with a read-only root-cause trace at `96b5db4c`.
@@ -3873,6 +3950,8 @@ Plans:
 
 - [ ] TBD (run /gsd-plan-phase 167.1.2 to break down)
 
+**Cross-phase note 2026-09-27 (Phase 169 D-51, D-57):** Phase 169 plan 169-05 now owns `MetricsColumn`'s period rows and record length (it was "Phase 169 plan 07" in 167.1.2-07's text). After C3 merges, 169-05 may edit only the observation-clock length assertion in C3's `MetricsColumn.periods-per-year.test.tsx` (to the calendar-year length, D-12), and may move a C3 assertion that pinned a 6 Month / 1 Year row on a too-short record to the row-absent form (D-57); its SUMMARY records each such edit. 167.1.2's own CONTEXT lives on its branch and should carry the same note.
+
 ### Phase 167.1.2.1: RECONMARKER — a per-key "history reconstructed" marker so no key's equity history is lost or skipped (INSERTED)
 
 **Goal:** Each API key's equity-history reconstruct state is recorded durably, per key, so no key's history is skipped, wiped or left unreconstructed. Today that state is inferred from allocator-wide snapshot counts.
@@ -3899,9 +3978,29 @@ Plans:
 6. **Migration review before merge.** Any migration this phase writes is reviewed by migration-reviewer, rls-policy-auditor and silent-failure-hunter, because a merge of `supabase/migrations/**` auto-applies to PROD.
 7. **The fast-fail race (added 2026-09-27):** when a zero-snapshot book's reconstruct reaches `failed_final` before the daily refresh (`run_refresh_allocator_equity_daily_job`) is claimed, the key is still recorded as owing its reconstruct, the refresh's first row does not strand its history, and the history is rebuilt. A test written first reproduces the race (reconstruct failed, refresh claimed after) and fails on the old behaviour.
 
+⭐ **ROUTED IN 2026-09-29 (from 167.1.2 PR C2 review rounds 1-3; data integrity): writer-side residuals of the history rebuild.** Sources: `167.1.2-C2-REVIEW-SFH*.md`, `167.1.2-C2-REVIEW-R*.md`, `167.1.2-C2-REVIEW-FIX*.md`.
+- **SFH-05 (writer half):** the derive deletes the curve on a refusal instead of persisting why, so the reader can only name the generic reason.
+- **One failing key with a known account id** is carried flat inside a book that reads "ready", diluting its returns (two failing keys on one account now hide the history; the single-key case is not reconciled).
+- **SFH-R3-02:** the stitch drops a deposit that only the newer key lists on a day the older key owns; the curve stays trusted.
+- **SFH-R3-07 (pre-existing):** the derive reads per-key daily returns in one unordered call against the 1000-row read cap, and the stitch now chooses keys from that read.
+- **SFH-08:** a key that has never polled adds $0 to the day's persisted total; only a counter records it.
+- **SFH-09:** a carried balance has no age limit (a WARNING above 3 days only). The limit is a founder call.
+- **R2-CR-02 residual:** two WORKING keys on one account that are both still unstamped are counted twice while that lasts.
+- **R3-WR-02 (landing constraint, recorded here for the next writer change):** a deploy between the 04:00 poll and the 05:00 refresh writes one stale row per emptied account.
+- Success: each item is fixed with a test that fails on the old behaviour, or closed by a recorded founder decision.
+
 Plans:
 
 - [ ] TBD (run /gsd-plan-phase 167.1.2.1 to break down)
+
+⭐ **ROUTED IN 2026-09-29 (from 167.1.2 PR C4 review rounds 1-3 and its verification; data integrity and user-facing).** Sources: `167.1.2-C4-REVIEW-FIX-K1.md`, `-K2a.md`, `-R2C.md`, `167.1.2-C4-VERIFY.md`, `167.1.2-C4-REVIEW-R3.md`. Items (1)-(3) are the D-16 gaps the founder chose to book here (AskUserQuestion 2026-09-29, "Book them to a phase") rather than accept or fix in C4; (4)-(7) were routed out of C4's fix rounds because each needs a file set or a migration outside a fixer's topic.
+(1) **D-16, unlinked departed key:** a departed key never stamped with `venue_account_id` and never marked is not grouped with its account by `accountIdentityTokens`, so its older rows still show on Open Positions (dated, never as current dollars).
+(2) **D-16, same-day empty poll:** a clean empty poll on the same UTC day as a key's latest rows does not hide them (the supersede rule is strictly later), so a position closed and polled the same day still shows.
+(3) **D-16, Bybit UTA parse-miss:** when the Bybit unified-account id is not parsed the key stays ungrouped, with (1)'s effect.
+(4) **WR-02 (data integrity, needs a migration):** the `allocator_holdings` unique index `allocator_holdings_owner_venue_symbol_asof_key` and the writer's `on_conflict` do not include `api_key_id`, so two keys reading one account on one day can overwrite each other's rows. Any change must move `commit_scenario_batch` (migration `20260929120000`) and the TS reader together (see WR-R3-01).
+(5) **WR-03 (data integrity):** `account_groups` in `analytics-service/services/allocator_equity_derive.py` (also used by `equity_reconstruction.py`) and the dashboard reader in `src/lib/queries.ts` must change together; gating on the marker alone would reopen the double count the identity token closed.
+(6) **SFH-C4-04 remainder (user-facing):** the derive's `departed_history_unavailable` warning reaches Sentry only as a breadcrumb, not an event, and the Overview line cannot say how many accounts' history is missing (needs a count field written in `job_worker.py`).
+(7) **User-facing:** the Overview's "No positions to analyze yet" card is checked before the equity-history state, so a book whose positions are all closed (e.g. expired Deribit options) hides a ready curve (predates C4); and a stale key's spot rows in Exchange Positions carry no date (C4 dated Open Positions only).
 
 ### Phase 167.2: KEYCARDSYNC — the key card never shows one key's sync result as another key's (INSERTED)
 
@@ -3997,28 +4096,33 @@ Plans:
 ⭐ **ROUTED HERE 2026-09-26 (Phase 167.2.1 CONTEXT D-07, verifier warning):** a composite whose `csv_daily_returns` read fails transiently is cached as a null payload on the public factsheet until the `unstable_cache` TTL, because `readCompositeFactsheet` cannot tell a read error from an empty composite. 167.2.1 fixed the single-key half (WR-02, `FactsheetReadError`). The composite half needs a distinguishable read error from `readCompositeFactsheet` and a throw in the public cache callback, with a red-first test. After the 2026-09-26 split of Phase 169 it belongs to the factsheet-truth phase.
 
 **Goal:** A strategy's factsheet agrees with itself and with every other page that shows the same strategy: its headline CAGR and Sharpe read the stored metric, its benchmark figures cover only the dates with real prices and say so, its return windows follow the calendar, and its dates and record length are stated one way. Each contradiction is traced to ONE source of truth and fixed there, not patched per page.
+**Narrowed 2026-09-27 (169 D-61):** the clause "its benchmark figures cover only the dates with real prices and say so" (SC3) moved to Phase 169.5 BENCHCOMPARE with the comparator plans; Phase 169 is judged on SC4, SC5, SC6, SC9, R1, R2 and R3.
 **Narrowed 2026-09-26 by `/gsd-phase --edit` (169 D-37); the goal before the split, kept as lineage:** Every number a page shows agrees with the same number on every other page and with the length of the record it describes. Each contradiction below is traced to ONE source of truth and fixed there, not patched per page.
 **Split, 2026-09-26 (founder decision; 169 D-37):** one logical topic per phase, one reviewable PR each. Phase 169 PAGETRUTH was split into Phases 169 FACTSHEETTRUTH, 169.1 ZOOMKPIS, 169.2 BENCHFRESH, 169.3 SMALLFIXES and 169.4 ALLOCTRUTH; the already-checked plans were moved by hand, not re-planned, and D-13's two-PR packaging retired. Each success criterion keeps its original number in the phase that owns it (a criterion several phases serve is copied verbatim to each), so the plans' requirement ids stay valid. **Execution order is not the numeric order:** 169.2 and 169.3, then 169, then 169.4, then 169.1 (167.1.2 PR C before 169, 169.3-03/04, 169.4 and 169.1-02; 167.2.1 before 169 and 169.1).
 **Founder decision, 2026-09-25 (AskUserQuestion):** the session QA sweep and the 2026-09-24 layout notes book as TWO phases; this numbers phase ships FIRST, Phase 170 PAGECOPY second. Phase 167.1.2 ACCOUNTTRUTH already owns the Allocations equity curve, Sharpe beside a negative return, the Scenario zero weights/UUID/$0 total, and the holdings total; they are EXCLUDED here.
 **Evidence:** the 2026-09-25 in-depth QA sweep of every page in the logged-in account (14 data-integrity findings) and the 2026-09-24 visual UAT. Counts only here; the reports hold no identifiers and are not tracked.
-**Requirements**: TBD (phase-local SC ids)
+**Requirements**: SC4, SC5, SC6, SC9 (phase-local), plus the routed items R1 (risk attribution unit), R2 (sub-dollar money), R3 (composite read error). *(Was "TBD (phase-local SC ids)" until the 2026-09-27 replan; SC3 left with the comparator plans for Phase 169.5 on 2026-09-27, D-61.)*
+**Split, 2026-09-27 (169 D-60, D-61; founder standing rule of 2026-09-26: split by topic when plan-check needs more than 3 rounds):** plan-check stopped at round 3 with one blocker open, and every blocker of rounds 2 and 3 sat in the benchmark comparator. Plans 169-02, 169-03, 169-11 and 169-12 moved by hand to **Phase 169.5 BENCHCOMPARE** as 169.5-01 to 169.5-04, with D-48, D-54, D-58, D-59 and D-60; 169-06's comparator half became 169.5-05. **Execution order:** 169, then 169.5, then 169.4, then 169.1.
 **Depends on:** none in code. Plan after 167.1.2 plan 01 (HIDE) so the two do not edit the same Allocations widgets at once.
-**Depends on (2026-09-26 split, D-37):** Phase 169.2 (plan 169-02 reads plan 169.2-01's BTC reader). 167.1.2 PR C on `origin/main` (plan 169-05's order gate). Phase 167.2.1 on `origin/main` (plan 169-07's order gate, D-41; merged 2026-09-26 as PR #866, so D-42's second timing holds). ~~Phase 166.2 on `origin/main` (plan 169-01 builds its OG-card edit on 166.2's shared-Sharpe `og-metrics.ts` and keeps its NaN-Sharpe side cases, D-43).~~ **Removed 2026-09-26 (founder decision, 169 D-44):** the OG-card edit moved to Phase 169.4.1 OGSHARPE, which depends on 166.2; Phase 169 no longer depends on 166.2. The phase branch takes these in through two syncs (D-42 as amended 2026-09-26). The first is the phase-entry merge of `origin/main` before wave 1, which brings in Phase 169.2: 169.2 must be on `origin/main` AND merged into the phase branch before any wave-1 code commit, which 169-01's and 169-04's Task 1 gates prove (`PAGETRUTH_W1_ENTRY_SYNC_OK`). The second is plan 169-08's wave-4 rebase, which brings 167.1.2 PR C and, unless the entry merge already did, 167.2.1. Consequence: plans 169-01 to 169-04, which shipped in PR 1 independently of 167.1.2 before the split, now wait for PR C with 169-05.
+**Depends on (2026-09-26 split, D-37):** ~~Phase 169.2 (plan 169-02 reads plan 169.2-01's BTC reader).~~ *(2026-09-27, D-61: that dependency moved to Phase 169.5 with plan 169-02; Phase 169.2 is merged, #879.)* 167.1.2 PR C on `origin/main` (plan 169-05's order gate). Phase 167.2.1 on `origin/main` (plan 169-07's order gate, D-41; merged 2026-09-26 as PR #866, so D-42's second timing holds). ~~Phase 166.2 on `origin/main` (plan 169-01 builds its OG-card edit on 166.2's shared-Sharpe `og-metrics.ts` and keeps its NaN-Sharpe side cases, D-43).~~ **Removed 2026-09-26 (founder decision, 169 D-44):** the OG-card edit moved to Phase 169.4.1 OGSHARPE, which depends on 166.2; Phase 169 no longer depends on 166.2. The phase branch takes these in through two syncs (D-42 as amended 2026-09-26). The first is the phase-entry merge of `origin/main` before wave 1, which brings in Phase 169.2: 169.2 must be on `origin/main` AND merged into the phase branch before any wave-1 code commit, ~~which 169-01's and 169-04's Task 1 gates prove (`PAGETRUTH_W1_ENTRY_SYNC_OK`). The second is plan 169-08's wave-4 rebase, which brings 167.1.2 PR C and, unless the entry merge already did, 167.2.1.~~ *(Lineage, 2026-09-27: D-47 dropped 169-08, the syncs are orchestrator merges of `origin/main`, and D-55 removed the wave-1 entry gates; 169-05's own precondition proves 167.1.2 C3.)* Consequence: plans 169-01 to 169-04, which shipped in PR 1 independently of 167.1.2 before the split, now wait for PR C with 169-05.
 **Routed in, 2026-09-25 (Phase 167.2.1 D-03):** the discovery detail page (`src/app/(dashboard)/discovery/[slug]/[strategyId]/page.tsx`) assembles the factsheet builder a second time. It calls `resolveDailyReturnSeries`, `readCompositeFactsheet`, `readSingleKeyBasisOpts` and `buildFactsheetPayload` itself instead of `fetchAndBuildPayload`. That is a drift risk on a factsheet number surface, not a false claim today: it serves published rows only and falls back to the honest KCS-10 sentence. Phase 167.2.1 splits the builder into one shared resolve stage (its D-04); folding this page onto it belongs here, beside SC4. Backlog entry: `[167.2.1-DISCOVERY-DETAIL-DOUBLE-ASSEMBLY]` in `TODOS.md`, written by Phase 167.2.1 plan 04.
 
 ## Success Criteria
 
-3. The BTC benchmark is current: MTD and 3-month returns, win rate, volatility and drawdown come from a benchmark series that is refreshed, and a stale benchmark is shown as stale rather than as +0.00%.
 4. A strategy's CAGR and Sharpe are identical on discovery, recommendations, my-strategies and its factsheet (one computation, one stored value), or a surface that must differ says why.
 5. A factsheet's header date, its "track record through" date and its stated record length agree, and record length is stated one way.
 6. 3-year and 5-year rows are not shown for a record shorter than that period.
    *Widened 2026-09-27 by `/gsd-phase --edit` (measured by the orchestrator and the founder in the logged-in browser on PROD, main at `320fba4e`/`e6c196d5`):* the scenario "Cumulative return metrics" panel on `/allocations?tab=scenario`, for a record shorter than six months, shows 6 Month = Year-to-date = 1 Year = the same value (the since-inception figure relabelled). The period-row gating this criterion asks for must cover the 6-month and 1-year rows too, not only 3Y and 5Y.
 9. Every fix carries a test that fails on the old behaviour (neuter → RED → restore), and each page is re-checked in the logged-in browser after deploy.
 
-*(Criteria 1, 2, 7, 8 and 10 moved on 2026-09-26 to Phases 169.3, 169.4 and 169.1, verbatim with their numbers; criteria 3, 4 and 9 are also served by other phases of the split.)*
+*(Criteria 1, 2, 7, 8 and 10 moved on 2026-09-26 to Phases 169.3, 169.4 and 169.1, verbatim with their numbers; criteria 3, 4 and 9 are also served by other phases of the split.)* *(Criterion 3 moved on 2026-09-27 to Phase 169.5 with the comparator plans, verbatim, D-61; no remaining 169 plan serves it.)*
 
-**Plans:** 8 plans in 6 waves, one PR (split 2026-09-26, D-37; 169-07 added the same day, D-41; 169-08 added the same day, D-42): W1 169-01 KPISOURCE, 169-04 CHIP+WINDOWS; W2 169-02 BENCHTRUTH-CORE; W3 169-03 BENCHTRUTH-PAGE; W4 169-08 REBASE (inline on the phase branch; W1 plans open with the phase-entry gate, D-42 as amended); W5 169-05 RECORDLENGTH+3Y/5Y, 169-07 COMPOSITEREADERR; W6 169-06 integration run + post-deploy browser re-check. Decisions D-01…D-37 and D-41 to D-44 in `169-CONTEXT.md` (D-38 to D-40 are 169.1's; D-43 retired by D-44, 2026-09-26); no migration.
+**Plans (split 2026-09-27, D-61):** 7 plans in 3 waves, one PR: W1 169-01, 169-04, 169-09, 169-10; W2 169-07, 169-05 (after 167.1.2 C3 on origin/main and an orchestrator merge); W3 169-06. The comparator plans are Phase 169.5's. No migration.
+**Lineage, the plan line before the 2026-09-27 split (replanned 2026-09-27, D-46 to D-60; plan-check NOT passed):** 11 plans in 8 waves: W1 169-01, 169-04, 169-09, 169-10; W2 169-07; W3 169-02 (after 169.2 on origin/main, now merged); W4 169-03; W5 169-11; W6 169-05 (after 167.1.2 C3 on origin/main and an orchestrator merge); W7 169-12; W8 169-06. 169-08 dropped (D-47). Plan-check: round 1 four blockers, round 2 one, round 3 one open (the rolling beta over paired intervals, 169-03). A fourth round was not taken; D-60 recommends splitting the benchmark-comparator topic (169-02, 169-03, 169-11, 169-12) into its own phase. No migration.
+**Lineage, the plan line before the 2026-09-27 replan:** 8 plans in 6 waves, one PR (split 2026-09-26, D-37; 169-07 added the same day, D-41; 169-08 added the same day, D-42): W1 169-01 KPISOURCE, 169-04 CHIP+WINDOWS; W2 169-02 BENCHTRUTH-CORE; W3 169-03 BENCHTRUTH-PAGE; W4 169-08 REBASE (inline on the phase branch; W1 plans open with the phase-entry gate, D-42 as amended); W5 169-05 RECORDLENGTH+3Y/5Y, 169-07 COMPOSITEREADERR; W6 169-06 integration run + post-deploy browser re-check. Decisions D-01…D-37 and D-41 to D-44 in `169-CONTEXT.md` (D-38 to D-40 are 169.1's; D-43 retired by D-44, 2026-09-26); no migration.
 **Lineage, the plan line before the 2026-09-26 split:** 21 plans in 10 waves, 2 PRs (planned 2026-09-25, revised the same day after the plan-checker pass, after the round-3 re-check, and on the D-23 amendment; revised 2026-09-26 after the final plan-check, the founder's decision to fix the D-27 compounding limit, the orchestrator's decisions D-28 to D-31, and the plan-check revision D-32 to D-36): W1 01 ADMINJOBS, 02 BENCHFEED, 02b BENCHCRON, 03 RECS, 04 KPISOURCE, 06 CHIP+WINDOWS; W2 05a BENCHTRUTH-CORE; W3 05b BENCHTRUTH-PAGE + the PR 1 post-deploy browser checkpoint (PR 1 = W1–W3); W4 07 RECORDLENGTH+3Y/5Y, 08 RISKTAB, 09 EXCHANGES, 10 MANDATERULE, 11 ALLOCBENCH (each gated on 167.1.2 PR C and 169 PR 1 merged); W5 13 DISCOVERYONEPATH (gated on Phase 167.2.1 merged), 14 ZOOMKPIS (added 2026-09-26, D-27); W6 14b ZOOMKPIS-COMPOUNDING (added 2026-09-26, D-27 as amended; the day basis folded in, D-28, D-30); W7 14c SINGLEKEY-METHOD, 14d ARITHMETIC-BUCKETS (added 2026-09-26, D-31); W8 14e DAYBASIS-DENSITY (added 2026-09-26, D-32, D-33); W9 14f HEADLINE-NEIGHBOURS (added 2026-09-26, D-34); W10 12 the PR 2 integration run + post-deploy browser checkpoint (PR 2 = W4–W10). Decisions D-01…D-36 in `169-CONTEXT.md`; no migration.
+**D-11 amended 2026-09-29 (review round 1, fix T2 WR-02; recorded in 169-CONTEXT.md):** a return window counts as covered when every day between its cutoff and the record's first date is a non-trading day for that venue. Weekday venues skip Saturday, Sunday, 1 January and 25 December; crypto venues keep "cutoff + 1 day". Any other holiday shows "—", never a wrong number. The original D-11 text stays in CONTEXT as lineage.
+**D-11 amended again 2026-09-29 (review round 2, fix T6 WR-R2-01; recorded in 169-CONTEXT.md, the note above kept as lineage):** the venue calendar is read off the series, not the asset class. The weekday tolerance applies only when the record spans a Saturday and has no Saturday or Sunday observation; any weekend print, or a record too short to span a weekend, keeps "cutoff + 1 day". The asset class no longer decides whether a return window shows.
 **Founder principle, 2026-09-25 (169 D-25):** "calculate Sharpe once; every page reads it." Any CAGR, Sharpe or record-length figure a page shows comes from the stored metric or ONE shared function, never a local re-computation. 169's plans were audited against it the same day; the two gaps found are planned (plan 04 step 5: the leverage toggle keeps the persisted cash Sharpe/Sortino; plan 13: the discovery detail page's second builder assembly).
 
 **Routed in, 2026-09-26 (Phase 167.2.1 CONTEXT D-07, round-2 revision; 167.2.1-REVIEW-R2 WR-02, 167.2.1-REVIEW-SFH-R2 N-6):** a composite whose `csv_daily_returns` read fails transiently is cached as a null payload on the public factsheet for up to the `unstable_cache` TTL, because `readCompositeFactsheet` (`composite-read-path.ts`) cannot tell that read error from a genuinely empty composite, so the cached callback cannot throw on it the way the single-key read-error path now does (`FactsheetReadError`, 167.2.1 WR-02). 167.2.1 D-07 names "Phase 169 plan 04" as the owner; after the split that is this phase. The composite read must surface a distinguishable read error and the public cache callback must throw on it, with a red-first test. Planned as a new plan of this phase (see the plan list).
@@ -4026,13 +4130,25 @@ Plans:
 Plans:
 
 - [ ] 169-01-PLAN.md — factsheet headline reads the persisted scalars; cash leverage re-pin (SC4) (was 169-04; its OG-card task moved to 169.4.1-01 on 2026-09-26, D-44)
-- [ ] 169-02-PLAN.md — coverage-aware comparator numbers, DB-fed BTC, cache key v7 (SC3) (was 169-05a)
-- [ ] 169-03-PLAN.md — payload-carried BTC prices, chart gap, dated caption (SC3, SC9) (was 169-05b; its PR 1 browser checkpoint moved to 169-06 at the split, D-37)
+- [-] ~~169-02-PLAN.md~~ — MOVED 2026-09-27 to Phase 169.5 as 169.5-01 (D-61): DB-fed BTC through 169.2's reader with its dropped list; interval-matched, gap-null comparators (D-54, D-58); comparator basis the smaller of the two (D-59); cache key v7 -> v8 (D-48) (SC3)
+- [-] ~~169-03-PLAN.md~~ — MOVED 2026-09-27 to Phase 169.5 as 169.5-02 (D-61; the round-3 fix applied there): payload-carried BTC prices and dropped list, chart gap, rolling series on the comparator basis (SC3, SC9) — ⚠️ round-3 blocker open: rolling beta over paired intervals (D-60)
 - [ ] 169-04-PLAN.md — freshness chip date line and calendar return windows (SC5, SC6) (was 169-06)
-- [ ] 169-05-PLAN.md — record length stated one way; 3 Year / 5 Year rows hidden on a shorter record; comparator dailies null past `through` (SC3, SC5, SC6) (was 169-07)
-- [ ] 169-07-PLAN.md — a composite's transient series read error is surfaced and never cached as a null payload (SC4, SC9, D-41; routed from 167.2.1 D-07)
-- [ ] 169-08-PLAN.md — the phase's wave-4 rebase onto origin/main (the second of two syncs; the first is the gated phase-entry merge), on the phase branch: v7 cache key reconciled with 167.2.1's three-part key, D-22 parity + SC1 re-run (SC4, SC9, D-42)
-- [ ] 169-06-PLAN.md — integration run + post-deploy browser re-check (SC9; items from old 05b's Task 4 and old 12, verbatim)
+- [ ] 169-05-PLAN.md — record length stated one way; 3 Year / 5 Year AND 6 Month / 1 Year rows not shown on a shorter record, in both panels and on the scenario mount (SC5, SC6, D-57); gated on 167.1.2 C3; may edit only C3's length assertion (D-51); wave 2, before 169.5-03 edits MandatePanels.tsx (D-61)
+- [ ] 169-07-PLAN.md — a composite's transient series read error is surfaced and never cached as a null payload (SC4, SC9, D-41; routed from 167.2.1 D-07); plus the factsheet cache key v7 -> v8 in its Task 3 (D-62, 2026-09-27)
+- [-] ~~169-08-PLAN.md — the wave-4 rebase~~ — DROPPED 2026-09-27 (D-47): the branch already contains origin/main with 167.2.1 and the three-part v7 key; syncs are orchestrator merges.
+- [ ] 169-09-PLAN.md — risk attribution shows the producer's percent once, unsigned (R1, D-49)
+- [ ] 169-10-PLAN.md — sub-dollar prices keep their precision; a zero-rounded money value has no sign (R2, D-50)
+- [-] ~~169-11-PLAN.md~~ — MOVED 2026-09-27 to Phase 169.5 as 169.5-03 (D-61): comparator caption and prose state the covered span (SC3, D-56)
+- [-] ~~169-12-PLAN.md~~ — MOVED 2026-09-27 to Phase 169.5 as 169.5-04 (D-61): comparator dailyReturns null past through and across gaps; the EoY loop never counts an uncovered day (SC3, D-56)
+- [ ] 169-06-PLAN.md — (narrowed 2026-09-27 to the plans that stayed, D-61) integration run (D-22 parity), release (one CHANGELOG entry, VERSION bump), post-deploy browser re-check at 390px and desktop 200% zoom (SC9)
+
+**⭐ ROUTED IN 2026-09-26 (founder, "Route as proposed"; found by the 166.1 round-2 silent-failure review, pre-existing, outside that diff):** risk attribution renders a share in percent twice. The producer sends `marginal_risk_pct` and `weight_pct` already in percent (the `complete.json` fixture carries 28.0 and 40.0), and `RiskAttribution` passes them to `formatPercent`, which multiplies by 100 again, so a 28% share renders as "+2800.00%". `RiskAttribution.test.tsx` feeds fractions the producer never sends, so the test suite encodes the wrong unit. Success: the page shows the producer's number once, and a test built from the producer's real shape fails on the double scale. ⚠️ Added after 169's plans were checked; the plan set must take this item before execution.
+
+**⚠️ REBASE NOTE 2026-09-26 (from 166.2 D-29):** 166.2 edited `src/app/factsheet/[id]/v2/types.ts` and `fetch-and-build-payload.ts` (NaN/null statistic fields, the optional `n_valid`, the v7 payload cache key). 169's plans must re-read both at HEAD before editing.
+
+**⭐ ROUTED IN 2026-09-27 (founder, UAT 2026-09-27):** /allocations Open Positions shows entry/mark prices under $1 as $0, and unrealized P&L as −$0 / +$0 (price formatter rounds to whole dollars). Success: a sub-dollar price and a sub-dollar P&L render with their real precision, and a zero-rounded value never shows a sign.
+
+*(The three paragraphs above were moved here from the end of Phase 169.4.1's section on 2026-09-27 by the Phase 169 replan: they are Phase 169's routed items and are planned as 169-09 RISKUNIT, 169-10 MONEYFMT and the D-48 cache-key bump in 169-02.)* *(2026-09-27, D-61 and D-62: 169-02 moved to Phase 169.5; Phase 169 now moves the key v7 -> v8 itself, and 169.5-01 moves it v8 -> v9.)*
 
 ### Phase 169.1: ZOOMKPIS — the KPI strip and metrics rail follow the zoom window, and every windowed figure follows the engine's conventions (INSERTED)
 
@@ -4040,7 +4156,7 @@ Plans:
 **Split, 2026-09-26 (founder decision; 169 D-37):** one logical topic per phase, one reviewable PR each. Phase 169 PAGETRUTH was split into Phases 169 FACTSHEETTRUTH, 169.1 ZOOMKPIS, 169.2 BENCHFRESH, 169.3 SMALLFIXES and 169.4 ALLOCTRUTH; the already-checked plans were moved by hand, not re-planned, and D-13's two-PR packaging retired. Each success criterion keeps its original number in the phase that owns it (a criterion several phases serve is copied verbatim to each), so the plans' requirement ids stay valid. **Execution order is not the numeric order:** 169.2 and 169.3, then 169, then 169.4, then 169.1 (167.1.2 PR C before 169, 169.3-03/04, 169.4 and 169.1-02; 167.2.1 before 169 and 169.1).
 **Founder decision, 2026-09-25 (AskUserQuestion):** the session QA sweep and the 2026-09-24 layout notes book as TWO phases; this numbers phase ships FIRST, Phase 170 PAGECOPY second. Phase 167.1.2 ACCOUNTTRUTH already owns the Allocations equity curve, Sharpe beside a negative return, the Scenario zero weights/UUID/$0 total, and the holdings total; they are EXCLUDED here.
 **Requirements**: TBD (phase-local SC ids)
-**Depends on:** Phase 169 (plan 169.1-02 builds on 169-03's basis-context re-derive and edits MetricsColumn.tsx after 169-05), Phase 169.4 (plan 169.1-01 edits `src/lib/queries.ts` after 169.4-02), Phase 167.2.1 (plan 169.1-01's order gate), and 167.1.2 PR C (plan 169.1-02's order gate). Split 2026-09-26, D-37.
+**Depends on:** Phase 169.5 (added 2026-09-27, 169 D-61: plan 169.1-02 builds on 169.5-02's, was 169-03's, basis-context re-derive), Phase 169 (plan 169.1-02 edits MetricsColumn.tsx after 169-05), Phase 169.4 (plan 169.1-01 edits `src/lib/queries.ts` after 169.4-02), Phase 167.2.1 (plan 169.1-01's order gate), and 167.1.2 PR C (plan 169.1-02's order gate). Split 2026-09-26, D-37., Phase 170 (added 2026-09-30, 169.1 D-79: plan 169.1-02 edits `FactsheetView.tsx` and `MetricsColumn.tsx` after 170-11 and 170-13; 169.1-01 does not wait)
 
 ## Success Criteria
 
@@ -4054,6 +4170,7 @@ Plans:
 **Plans:** 9 plans in 6 waves, one PR (split 2026-09-26, D-37; 169.1-09 added the same day, D-38 to D-40): W1 169.1-01 DISCOVERYONEPATH, 169.1-02 ZOOMKPIS; W2 169.1-03 ZOOMKPIS-COMPOUNDING; W3 169.1-04 SINGLEKEY-METHOD, 169.1-05 ARITHMETIC-BUCKETS; W4 169.1-06 DAYBASIS-DENSITY; W5 169.1-07 HEADLINE-NEIGHBOURS, 169.1-09 ROLLINGLINE; W6 169.1-08 integration run + post-deploy browser re-check. Decisions carried in `169.1-CONTEXT.md`; no migration.
 **Founder decision, 2026-09-26 (AskUserQuestion, 169 D-27 as amended):** "Fix it in plan 14 (Recommended)". The zoom window's compounding limit (a composite stored with arithmetic compounding showed geometric windowed CAGR and cumulative return beside an arithmetic chart) is fixed, not recorded: the payload carries the stored method and the one shared function returns the arithmetic figures. Packaged as plan 14's second half, **169-14b** (it edits `build-payload.ts` after plan 13 and plan 14's shared builder), as D-18 split plan 05.
 **Orchestrator decisions, 2026-09-26 (169 D-28 to D-31, under the founder's standing "no clients, take decisions"):** the 14b split is accepted as honouring the founder's decision, and the arithmetic logic lives in `compute()` (D-28); the Scenario tab's withheld window figures are accepted, and its `periodsPerYear` is booked to Phase 167.1.2 as `[169-SCENARIO-WINDOW-ANNUALIZATION]` in `TODOS.md` (D-29); the day basis (measured: frozen only in the persisted series `conventions` echo) is carried and applied in 14b (D-30); two pre-existing number-truth defects become **169-14c** (a single-key simple-compounding strategy drew geometric curves) and **169-14d** (MTD, YTD, trailing windows, buckets and the monthly heatmap were compounded on arithmetic series) (D-31).
+**Reversal, 2026-09-30 (169.1 D-82, measured):** the D-29 sentence above is kept as lineage and no longer governs. Phase 167.1.2 plan 07 gave the Scenario payload its `periodsPerYear` and hid the leverage control under `scenarioMode`, so the Scenario tab shows window figures annualized on its own basis (169.1-02); the withheld form stays only as the fail-closed guard for a payload with no `periodsPerYear`, and it withholds every follow-list field, on the strip and on the rail (plan-check round 1 W1). 169.1-08 ticks `[169-SCENARIO-WINDOW-ANNUALIZATION]`.
 **Plan-check revision, 2026-09-26 (169 D-32 to D-36, orchestrator):** D-30 recorded two limits as not fixed: a gapped composite's calendar-basis windowed volatility, Sharpe and Sortino ran over the present days while the engine runs them over the zero-filled calendar series, and the rolling Sharpe ignored the day basis. Both are now **fixed in 169-14e** (D-32, D-33), because the founder's rule (D-27) is that zooming recomputes ALL KPIs and every number agrees with the engine. **169-14f** makes the bootstrap CI and the stress windows follow the headline's method and day basis (D-34). 14f runs in wave 9, not beside 14e, because both edit the same `build-payload.ts` call sites (measured, D-35). The fixes switch input series and add no ratio expression (D-36). Reported to the orchestrator, not resolved: the rolling Sharpe line breaks at each zero-return day on an active-basis strategy (D-33). *(Superseded 2026-09-26 by 169.1 D-38; the sentence is kept as lineage.)*
 **Founder principle, 2026-09-25 (169 D-25):** "calculate Sharpe once; every page reads it." Any CAGR, Sharpe or record-length figure a page shows comes from the stored metric or ONE shared function, never a local re-computation. 169's plans were audited against it the same day; the two gaps found are planned (plan 04 step 5: the leverage toggle keeps the persisted cash Sharpe/Sortino; plan 13: the discovery detail page's second builder assembly).
 **Routing, 2026-09-25 (169 D-23 as amended):** the discovery detail page's second assembly of the factsheet builder, routed here by Phase 167.2.1 D-03 (`[167.2.1-DISCOVERY-DETAIL-DOUBLE-ASSEMBLY]` in `TODOS.md` and 167.2.1's "Routed in" note under this heading, both arriving with 167.2.1's merge), is consolidated by plan **169-13** onto `fetchAndBuildPayload`. PR 2 therefore cannot ship before Phase 167.2.1 merges. Plan 13 closes the TODOS entry when it lands.
@@ -4069,8 +4186,47 @@ Plans:
 - [ ] 169.1-05-PLAN.md — calendar windows, buckets and the monthly heatmap sum on arithmetic series (SC4, D-31) (was 169-14d)
 - [ ] 169.1-06-PLAN.md — a gapped composite's risk figures over the zero-filled series; the rolling Sharpe on the headline's day basis; rolling vol and Sortino on the zero-filled series of a calendar composite (SC10, SC4, D-32, D-33, D-39) (was 169-14e)
 - [ ] 169.1-07-PLAN.md — the bootstrap CI and the stress windows follow the headline's method and day basis (SC10, SC4, D-34) (was 169-14f)
-- [ ] 169.1-09-PLAN.md — the rolling Sharpe line stays continuous across excluded days; only the warm-up is a gap (SC10, SC9, D-38, D-40)
+- [ ] 169.1-09-PLAN.md — the rolling Sharpe line stays continuous across the days the day basis excluded; the warm-up and no-dispersion (D7) windows stay gaps (SC10, SC9, D-38, D-40, D-84)
 - [ ] 169.1-08-PLAN.md — integration run + post-deploy browser re-check (SC9; this phase's items from old 12, verbatim) (was 169-12, narrowed)
+
+### Phase 169.1.1: HYDRATIONTICKS — factsheet chart ticks render the same on server and client, so hydration never fails (INSERTED)
+
+**Goal:** Every factsheet and allocation chart computes the same y-axis ticks on the server and in the browser, so React never reports a hydration mismatch (#418) and never rebuilds the tree after first paint. The Overview EquityChart a user (or a test) is looking at is the one that stays on the page.
+**Requirements**: TBD
+**Depends on:** Phase 169.1
+**Plans:** 4/4 plans complete in 4 waves (a strict chain), one PR
+
+⭐ **Founder decision, 2026-10-02 (AskUserQuestion, "New phase, first"):** a phase of its own, run BEFORE Phase 164.9.3.2.1.
+
+**Root cause, measured 2026-10-02** (debug session `e2e-equitychart-detached-320`): `Math.pow(10, n)` returns different doubles in Node 22's V8 and in Chromium for n = -4 and -5 (Node: `9.999999999999999e-5`; Chromium: exactly `1e-4`); `10 ** n` behaves the same. `niceLinearTicks` in `src/app/factsheet/[id]/v2/TimeSeriesChart.tsx` derives the tick step from it, so on the daily-returns chart the zero tick is exactly 0 on the server ("+0.0%", baseline style) and a tiny negative in the browser ("-0.0%", gridline style). The exact `t.value === config.baseline` comparison turns that ulp into different markup. Reproduced 10/10 on a private local-stack lane with no shared TEST; an engine-independent power of ten turned it 10/10 green with no #418.
+
+**Symptom:** `e2e/target-size.spec.ts:246` (EquityChart tap rect at 320px on /allocations) has failed with "Element is not attached to the DOM" in 16 of 64 CI runs since 2026-09-29, when Phase 167.1.2 PR C2 restored that test. It turned main CI red at `dbe329186` and `05ebb559b`, and a red main makes Railway skip the analytics deploy.
+
+**Same idiom, found by reading (unverified):** `TimeSeriesChart.tsx` (log-scale path), `AnalyticalPanels.tsx`, `CrossSignaturePanels.tsx`, `SignaturePanels.tsx`, `src/app/(dashboard)/allocations/widgets/performance/EquityChart.tsx`. Cite by symbol at planning; line numbers drift.
+
+## Success Criteria
+1. Tick values never depend on an engine's power-of-ten rounding: every site of the class builds ticks so server and browser produce byte-identical values (for example integer index times step, rounded to the step's decimals). The whole class is fixed, not one site.
+2. A near-zero tick snaps to exactly 0, and the baseline comparison no longer depends on exact float equality.
+3. A test that fails on today's code proves server and browser tick arrays agree for the measured daily-returns span.
+4. Seeded e2e pages fail on a `pageerror` carrying React #418, so a future hydration mismatch is red, not flaky.
+5. ⛔ `e2e/target-size.spec.ts` is not weakened: no re-query-until-stable at its line 274, no added retry.
+6. Whether the `e2e/composite-factsheet-render.spec.ts` axe (cash basis) flake is the same class is measured and recorded.
+
+⭐ **Founder decision, 2026-10-02 (AskUserQuestion, "Minimal fix"), overriding CONTEXT.md's earlier wording:** the shared helper keeps today's `v += step` accumulation and replaces only the power of ten with an engine-independent exact one (`Number("1e"+exp)`, exponent from `toExponential()`, no `Math.pow`/`Math.log10`), plus snap-to-zero. The earlier sentence "tick values should come from an integer index times the step, rounded to the step's decimals" is withdrawn: research (`169.1.1-RESEARCH.md` Finding 3) measured that it changes non-zero labels at `toFixed` half-way points (377/4,400 EquityChart cases, 2/4,400 factsheet), breaking UI-SPEC TK-4, while the accumulation is IEEE-exact in every engine and never caused #418. The minimal construction is identical in Node and Chromium on all six sites and changes only zero ticks.
+
+⭐ **Founder decision, 2026-10-02 (AskUserQuestion, "Fold it in"):** the `e2e/composite-factsheet-render.spec.ts` axe (cash basis) flake is NOT hydration (research Finding 9: axe scans while the `<h1>` is still inside React's hidden streaming segment); its one-line fix (`await expect(h1).toBeVisible()` before the scan) is in this phase's scope.
+
+Plans:
+**Wave 1**
+- [x] 169.1.1-01-PLAN.md — shared engine-independent `chart-ticks` helper + factsheet `TimeSeriesChart` (SC-1/2/3)
+**Wave 2** *(blocked on Wave 1 completion)*
+- [x] 169.1.1-02-PLAN.md — the other four tick builders + class guard test (SC-1/2)
+**Wave 3** *(blocked on Wave 2 completion)*
+- [x] 169.1.1-03-PLAN.md — seeded-e2e #418 guard fixture + composite axe visibility wait (SC-4/5/6)
+**Wave 4** *(blocked on Wave 3 completion)*
+- [x] 169.1.1-04-PLAN.md — full gate + `chore(release)` HYDRATIONTICKS
+
+⚖️ **Founder override 2026-10-02 ("Draft PR, then verify"):** shipped as a draft PR so CI can produce the `human_needed` reads (seeded #418 guard, blocking self-test step, composite axe, unseeded `/demo`); VERIFICATION flips to `passed` on those SHA-bound reads before ready/merge. Recorded in `169.1.1-CONTEXT.md`.
 
 ### Phase 169.2: BENCHFRESH — the BTC benchmark is refreshed daily and read in full (INSERTED)
 
@@ -4112,7 +4268,7 @@ Plans:
 
 *(Moved from Phase 169 on 2026-09-26, verbatim with their original numbers, D-37.)*
 
-**Plans:** 5 plans in 3 waves, one PR (split 2026-09-26, D-37): W1 169.3-01 ADMINJOBS, 169.3-02 RECS, 169.3-03 EXCHANGES; W2 169.3-04 MANDATERULE; W3 169.3-05 integration run + post-deploy browser re-check. Decisions carried in `169.3-CONTEXT.md`; no migration.
+**Plans:** 6 plans in 4 waves, one PR (split 2026-09-26, D-37; W4 added 2026-09-30 as gap closure): W1 169.3-01 ADMINJOBS, 169.3-02 RECS, 169.3-03 EXCHANGES; W2 169.3-04 MANDATERULE; W3 169.3-05 integration run + post-deploy browser re-check; W4 169.3-06 CREDINPUT (gap closure). Decisions carried in `169.3-CONTEXT.md`; no migration.
 
 Plans:
 
@@ -4121,10 +4277,15 @@ Plans:
 - [ ] 169.3-03-PLAN.md — Exchanges counts live keys only, no repeated balance (SC7) (was 169-09)
 - [ ] 169.3-04-PLAN.md — one mandate rule across recommendations and allocations (SC8) (was 169-10)
 - [ ] 169.3-05-PLAN.md — integration run + post-deploy browser re-check (SC9; this phase's items from old 05b's Task 4 and old 12, verbatim)
+- [ ] 169.3-06-PLAN.md — gap closure (added 2026-09-30, from `169.3-VERIFICATION.md` truths 12 and 13): the Connect-exchange dialog and both wizard connect steps opt their credential inputs out of saved-login autofill, and strip pasted whitespace (incl. U+200B/U+FEFF) from the api-key and api-secret inputs, OKX passphrase excluded, through one shared client helper (D-76; SC9). Widened 2026-09-30 (orchestrator decision, close the class across its whole surface): Task 4 also covers the `/strategies/[id]/edit` "Connect Exchange API Key" modal (`StrategyForm.tsx`, full rule) and the MT5 "Update password" dialog (`UpdateMt5SecretDialog.tsx`, autofill attributes only, no strip, because its rotate path never trims)
 
-**⭐ ROUTED IN 2026-09-27 (seen in the logged-in browser):** the `/profile` Exchanges "Connect exchange" dialog's API Key and API Secret inputs accept the browser's saved-login autofill. A saved site login was filled into both fields. Success: both fields opt out of autocomplete, so a password manager never fills a site login into a key field. No values are recorded here.
+**⭐ DECISION 2026-09-30 (founder ruling, 169.3 D-73, review WR-01):** `/recommendations` withholds its list only when NO engine-read allocator preference is saved (the field set is measured in D-73). D-03's `deriveMandateIsSet` still decides the mandate wording there and on `/allocations`, unchanged, so an allocator with only a drawdown tolerance sees their list under "No mandate is set yet".
 
-**⭐ ROUTED IN 2026-09-27 (founder, UAT):** pasting a Client ID or Client Secret copied from a spreadsheet cell leaves leading whitespace in the field (the founder saw two leading spaces via "show Client Secret"). The server already trims (`trimCredential` in `src/lib/analytics-client.ts`, used by validate and encrypt), so the stored value is correct, but the field shows something other than what is sent and invites a false "my key is wrong" conclusion. Success: the api-key and api-secret inputs in the wizard connect steps (`ConnectKeyStep`, `MultiKeyConnectStep`) and the profile Connect-exchange dialog (`src/components/exchanges/AllocatorExchangeManager.tsx`) strip leading/trailing whitespace, including line breaks and zero-width characters (U+200B, U+FEFF), on paste/change; the OKX passphrase is NOT trimmed (user-chosen, may carry significant whitespace, as `trimCredential`'s docblock records); a test that fails on the old behaviour.
+**⭐ DECISION 2026-09-30 (founder ruling, 169.3 D-74, review WR-02 / SFH-04):** on `/profile` Exchanges each exchange account's balance shows once, on one row, grouped by the 167.1.2 D-16(a) account identity (`accountIdentityTokens`), so a `composite_member` pair and two unmarked keys on one venue account id no longer show it twice. The other rows of that account show no balance and a muted "Balance shown on <key label>" line. Fix B's order picks the row (working before failing, the holder before a marked key, lowest id), and a revoked key never carries it. **This supersedes plan 03's recorded choice that "a live composite_member key keeps its balance".**
+
+**⭐ ROUTED IN 2026-09-27 (seen in the logged-in browser):** the `/profile` Exchanges "Connect exchange" dialog's API Key and API Secret inputs accept the browser's saved-login autofill. A saved site login was filled into both fields. Success: both fields opt out of autocomplete, so a password manager never fills a site login into a key field. No values are recorded here. **→ Planned 2026-09-30 as `169.3-06` (gap closure, D-76).**
+
+**⭐ ROUTED IN 2026-09-27 (founder, UAT):** pasting a Client ID or Client Secret copied from a spreadsheet cell leaves leading whitespace in the field (the founder saw two leading spaces via "show Client Secret"). The server already trims (`trimCredential` in `src/lib/analytics-client.ts`, used by validate and encrypt), so the stored value is correct, but the field shows something other than what is sent and invites a false "my key is wrong" conclusion. Success: the api-key and api-secret inputs in the wizard connect steps (`ConnectKeyStep`, `MultiKeyConnectStep`) and the profile Connect-exchange dialog (`src/components/exchanges/AllocatorExchangeManager.tsx`) strip leading/trailing whitespace, including line breaks and zero-width characters (U+200B, U+FEFF), on paste/change; the OKX passphrase is NOT trimmed (user-chosen, may carry significant whitespace, as `trimCredential`'s docblock records); a test that fails on the old behaviour. **→ Planned 2026-09-30 as `169.3-06` (gap closure, D-76).**
 
 ### Phase 169.4: ALLOCTRUTH — the Allocations Risk tab and alpha/beta read the book series and the live BTC feed (INSERTED)
 
@@ -4132,7 +4293,7 @@ Plans:
 **Split, 2026-09-26 (founder decision; 169 D-37):** one logical topic per phase, one reviewable PR each. Phase 169 PAGETRUTH was split into Phases 169 FACTSHEETTRUTH, 169.1 ZOOMKPIS, 169.2 BENCHFRESH, 169.3 SMALLFIXES and 169.4 ALLOCTRUTH; the already-checked plans were moved by hand, not re-planned, and D-13's two-PR packaging retired. Each success criterion keeps its original number in the phase that owns it (a criterion several phases serve is copied verbatim to each), so the plans' requirement ids stay valid. **Execution order is not the numeric order:** 169.2 and 169.3, then 169, then 169.4, then 169.1 (167.1.2 PR C before 169, 169.3-03/04, 169.4 and 169.1-02; 167.2.1 before 169 and 169.1).
 **Founder decision, 2026-09-25 (AskUserQuestion):** the session QA sweep and the 2026-09-24 layout notes book as TWO phases; this numbers phase ships FIRST, Phase 170 PAGECOPY second. Phase 167.1.2 ACCOUNTTRUTH already owns the Allocations equity curve, Sharpe beside a negative return, the Scenario zero weights/UUID/$0 total, and the holdings total; they are EXCLUDED here.
 **Requirements**: TBD (phase-local SC ids)
-**Depends on:** Phase 169 (plan 169.4-02 uses 169-02's benchmarkPrices opt and alignment and 169-03's payload-carried prices), Phase 169.2 (169.2-01's reader), and 167.1.2 PR C (both plans' order gates). Split 2026-09-26, D-37.
+**Depends on:** Phase 169.5 (added 2026-09-27, 169 D-61: plan 169.4-02 uses 169.5-01's, was 169-02's, benchmarkPrices opt and alignment and 169.5-02's, was 169-03's, payload-carried prices), Phase 169, Phase 169.2 (169.2-01's reader), and 167.1.2 PR C (both plans' order gates). Split 2026-09-26, D-37.
 
 ## Success Criteria
 
@@ -4144,13 +4305,27 @@ Plans:
 
 *(Moved from Phase 169 on 2026-09-26, verbatim with their original numbers, D-37.)* *(Criterion 11 is new, added 2026-09-27; it is numbered past the highest id any 169.x phase uses, so it collides with none.)* *(Criterion 12 is new, added 2026-09-27, numbered past 11 for the same reason.)*
 
-**Plans:** 3 plans in 2 waves, one PR (split 2026-09-26, D-37): W1 169.4-01 RISKTAB, 169.4-02 ALLOCBENCH; W2 169.4-03 integration run + post-deploy browser re-check. Decisions carried in `169.4-CONTEXT.md`; no migration.
+⭐ **ROUTED IN 2026-09-30 (from Phase 169.5 D-65; user-facing): the api arm's synthesized panels must be null-honest about a missing comparator day.** 169.5-01 feeds `blend` / `buildAllocatorMetrics` and `computeEventSignatures` the comparator's returns with a null entered as 0 (one named local per series, commented `D-65`), so `SignaturePanels`, `CrossSignaturePanels` and `BatchDPanels` count a missing BTC day as a 0% day (at index 0 when database BTC differs from the bundled file, and over the two intervals around a dropped close). The fix here: those consumers skip or break on a null, never read it as a 0% day, pinned by a case that turns red under the 0-fill. Source: `169.5-CONTEXT.md` D-65; 169.5-05 records the boundary in its release known limits and observes the three panels in its browser re-check.
+
+**Revised 2026-09-30 (planner, revision mode; `169.4-CONTEXT.md` D-66 to D-72):** the plan set now also covers SC11, SC12 and the 169.5 D-65 routing above, reusing 169.5's `alignCoveredReturns` / `COMPARATOR_CALENDARS` and `readFactsheetBenchmark` (no second pairing or read). SC11 is met by pairing rather than by changing `pricesToDailyReturns` (D-66); the Scenario surfaces read BTC closes from a new public route `/api/benchmark/btc/prices`, and the returns route is removed (D-67); one Scenario pairing function replaces the inner join (D-68); the Overview and the alpha/beta widget read BTC through `readFactsheetBenchmark` (D-69); the signature and allocator panels skip or break on a null, each blend on its legs' common calendar, and **multi_asset annualizes on 252, superseding #597 BLEND-02's 365 for that panel** (D-70; ⭐ **founder ruling 2026-09-30, AskUserQuestion: "Allow 252 here", a narrow exception to #597 BLEND-02 for that panel only, because its points are weekdays once weekend gaps are no longer 0-filled; the 60/40 blend stays 252 and the crypto blend stays 365**); the factsheet cache key moves v9 -> v10 (D-71). The old 169.4-03 (integration + re-check) is now 169.4-07, and its browser re-check runs after Phase 170 lands (founder, 2026-09-30; D-72). Anchors re-resolved at `f1ca32b56`. Surfaced for routing: the portfolio compute's BTC date intersection in `analytics-service/routers/portfolio.py`, and plan 169.1-01's order-gate token (`readBenchmarkPrices` -> `readFactsheetBenchmark` in `queries.ts`). No migration.
+**Plans (pre-revision, kept as lineage):** 3 plans in 2 waves, one PR (split 2026-09-26, D-37): W1 169.4-01 RISKTAB, 169.4-02 ALLOCBENCH; W2 169.4-03 integration run + post-deploy browser re-check. Decisions carried in `169.4-CONTEXT.md`; no migration.
+
+**Plans:** 8 plans in 4 waves, one PR (revised 2026-09-30, D-72; plan-check round 1 split 169.4-08 out of 169.4-04): W1 169.4-01 RISKTAB, 169.4-02 ALLOCBENCH, 169.4-03 SCENBTC source, 169.4-05 SIGNULL; W2 169.4-04 SCENBTC switch, 169.4-06 BLENDNULL; W3 169.4-08 returns route removed + composer key label; W4 169.4-07 integration run + post-deploy browser re-check (after Phase 170). Decisions in `169.4-CONTEXT.md`; no migration.
 
 Plans:
 
-- [ ] 169.4-01-PLAN.md — Allocations Risk tab on the book series (SC2) (was 169-08)
-- [ ] 169.4-02-PLAN.md — allocator BTC feed and alpha/beta vs BTC (SC2, SC3) (was 169-11)
-- [ ] 169.4-03-PLAN.md — integration run + post-deploy browser re-check (SC9; this phase's items from old 12, verbatim)
+- [ ] 169.4-01-PLAN.md — Allocations Risk tab on the book series, keys named by one label rule (SC2) (was 169-08)
+- [ ] 169.4-02-PLAN.md — allocator Overview BTC through `readFactsheetBenchmark`, alpha/beta vs BTC on the comparator's pairing (SC2, SC3, D-69) (was 169-11)
+- [ ] 169.4-03-PLAN.md — BTC closes route and the one Scenario pairing function, additive (SC11, SC12, D-66 to D-68)
+- [ ] 169.4-04-PLAN.md — Scenario tab and share page switch to closes and the pairing (SC11, SC12, D-66, D-68)
+- [ ] 169.4-05-PLAN.md — event signatures break on a comparator null (D-65, D-70)
+- [ ] 169.4-06-PLAN.md — allocator blends on the legs' common calendar, unavailable form, cache key v10 (D-65, D-70, D-71)
+- [ ] 169.4-07-PLAN.md — integration run + post-deploy browser re-check after Phase 170 (SC9; was 169.4-03)
+- [ ] 169.4-08-PLAN.md — returns route and its test removed, composer on the one key-label rule (SC11, SC12, D-67; split out of 169.4-04)
+
+**Amended 2026-09-30 (code review round 1, recorded at round 2):** D-70(2)'s allocator-blend calendar is narrowed to the dates every leg actually priced, so a US-market holiday is not a blend date and BTC's move across it is carried; the day after a holiday is unpaired for the weekday legs. Full text in 169.4-CONTEXT.md D-70 (AMENDED line).
+
+**Amended 2026-09-30 (code review, recorded at round 3):** alpha, beta and IR are withheld below 10 days paired with the comparator on every factsheet and the alpha/beta widget, shown as "—" with one shared reason sentence. Full text in 169.4-CONTEXT.md D-69 (AMENDED line).
 
 ### Phase 169.4.1: OGSHARPE — the OG share card's Sharpe reads the one shared sharpe() (166.2) (INSERTED)
 
@@ -4158,6 +4333,7 @@ Plans:
 **Split, 2026-09-26 (founder decision, AskUserQuestion "Split OG-card to 169.5", option A; 169 D-44):** the OG-card task of plan 169-01 (old 169 plan 04 Task 4) and 169 D-43 moved here after Phase 169's plan-check round 3 found that 166.2 was not on `origin/main` and no gate held Phase 169's wave-1 code behind it. Registered through `/gsd-phase --insert 169.4`; gsd-tools numbered it 169.4.1 (not 169.5) and the number is kept. **Execution order:** after Phase 169 and after Phase 166.2 has merged; it is independent of 169.4 and 169.1.
 **Requirements**: TBD (phase-local SC ids)
 **Depends on:** Phase 166.2 (the shared `sharpe(` arm of `computeOgHeadline`), Phase 169 (the persisted-headline contract, 169-01 and 169 D-10). Both are proven on `origin/main` by plan 169.4.1-01's Task 1 gate before any code commit (D-44).
+**Founder ruling, 2026-09-30 (AskUserQuestion; 169.4.1 D-46):** a chain-broken row's OG card shows CAGR as "—" (review round 1 CR-01 = SFH-01, fix `134f353dd`), while the factsheet shows the post-break figure with a "covers from" note. That difference is the accepted one under SC4. Declined: showing the stored CAGR when the post-break stretch is itself at least 0.95 years, or with a "since <date>" label.
 
 ## Success Criteria
 
@@ -4173,11 +4349,32 @@ Plans:
 - [ ] 169.4.1-01-PLAN.md — the OG card reads the persisted CAGR and Sharpe, on top of 166.2's shared `sharpe(` (SC4, SC9) (was 169-01 Task 4)
 - [ ] 169.4.1-02-PLAN.md — integration run + post-deploy browser re-check (SC9)
 
-**⭐ ROUTED IN 2026-09-26 (founder, "Route as proposed"; found by the 166.1 round-2 silent-failure review, pre-existing, outside that diff):** risk attribution renders a share in percent twice. The producer sends `marginal_risk_pct` and `weight_pct` already in percent (the `complete.json` fixture carries 28.0 and 40.0), and `RiskAttribution` passes them to `formatPercent`, which multiplies by 100 again, so a 28% share renders as "+2800.00%". `RiskAttribution.test.tsx` feeds fractions the producer never sends, so the test suite encodes the wrong unit. Success: the page shows the producer's number once, and a test built from the producer's real shape fails on the double scale. ⚠️ Added after 169's plans were checked; the plan set must take this item before execution.
+### Phase 169.5: BENCHCOMPARE — a factsheet's BTC comparator is read from the database through 169.2's reader, paired over the same interval as the strategy (a gap is null, never 0), carried in the payload, and its rolling series use the comparator's basis (INSERTED)
 
-**⚠️ REBASE NOTE 2026-09-26 (from 166.2 D-29):** 166.2 edited `src/app/factsheet/[id]/v2/types.ts` and `fetch-and-build-payload.ts` (NaN/null statistic fields, the optional `n_valid`, the v7 payload cache key). 169's plans must re-read both at HEAD before editing.
+**Goal:** A factsheet's BTC comparator is read from the database through 169.2's reader, paired over the same interval as the strategy (a gap is null, never 0), carried in the payload, and its rolling series use the comparator's basis.
+**Split, 2026-09-27 (orchestrator; 169 D-60 recommended it, D-61 made it; founder standing rule of 2026-09-26: split by topic when plan-check needs more than 3 rounds, new phases only through `/gsd-phase --insert`, plans that passed are moved by hand):** Phase 169's plan-check stopped at round 3 with one blocker open, and every blocker of rounds 2 and 3 sat in the benchmark comparator. Plans 169-02, 169-03, 169-11 and 169-12 moved here by hand as 169.5-01 to 169.5-04, with D-48, D-54, D-58, D-59 and D-60 copied verbatim into `169.5-CONTEXT.md`; the round-3 fix recorded in D-60 (rolling beta over paired intervals) is applied to 169.5-02; 169.5-05 is 169-06's comparator half. Registered through `/gsd-phase --insert 169`; gsd-tools numbered it 169.5 and the number is kept. **Execution order:** after Phase 169; before 169.4 and 169.1.
+**Cross-reference (founder, 2026-09-27):** Phase 166.4 BENCHALIGN (Python) and this phase (TypeScript) both apply 166.4 founder decision D-A, the Friday-to-Monday interval-matched pairing rule, and must cite each other.
+**Revised 2026-09-30 (planner, `169.5-CONTEXT.md` D-64), applying the founder ruling of 2026-09-27 ("Engine's rule; 169.5 follows", on 166.4 D-05):** the comparator follows the Python engine's pairing (`_interval_matched_benchmark`). Day one pairs with the benchmark's own return for that date instead of 0 (166.4 D-05). An interval with a benchmark date missing inside it is left out of the benchmark-relative metrics, and its return stays in the comparator's own series (engine fix `d1d1fc077`, review WR-01). The base close is the first stored close (166.4 D-07, adopted; the TypeScript helper holds it as a stored price, so it holds by construction). The first 169.5-01 executor halted at Task 1 with nothing committed because the plans pinned the opposite in two places. Superseded text in D-54, the D-58 amendment, D-59 and the D-60 fix is kept with dated markers. Plan ids, waves and dependencies are unchanged. Anchors were re-resolved at `3357a2eb5`. Surfaced for routing, with no owner assigned: the engine's pairing docstring and 166.4 D-02 still say the TypeScript side keeps day one at 0, which becomes false when this phase ships.
+**Revised again 2026-09-30 (planner, revision 2 after plan-check; `169.5-CONTEXT.md` D-64(4) Amendments A and B, D-65):** (A) the BTC read and trim span every date axis a comparator is aligned on (cash, mark-to-market, smoothed), so each view's day one has its prior close; (B) the bundled fixture fills only dates before the database's true first stored BTC date, learned by a one-row probe, so a hole inside stored history stays a gap and a database with no BTC row inside the window is the unavailable form, never the fixture (D-09); (D-65) on API-ingested strategies the synthesized allocator-portfolio and event-signature panels (SignaturePanels, CrossSignaturePanels, BatchDPanels) still take the comparator's returns with a missing day entered as 0, a recorded boundary named in the release entry and observed in 169.5-05's re-check; **its null-honest fix is owned by Phase 169.4 ALLOCTRUTH** (orchestrator to route). 169.5-04's day-one null is now asserted on `dailyReturns[0]`, where its neuter can bite. The engine pairing rule of the 2026-09-30 revision above is unchanged, and that note stands as lineage.
+**Requirements**: SC3, SC9 (phase-local)
+**Depends on:** Phase 169 (169.5-01 builds on 169-01, 169-04 and 169-07's edits of the same files; 169.5-03 and 169.5-04 edit MandatePanels.tsx and MetricsColumn.tsx after 169-05) and Phase 169.2 (169.5-01 reads 169.2-01's BTC reader; merged, #879). Both proven on `origin/main` AND in HEAD by the plans' preconditions.
 
-**⭐ ROUTED IN 2026-09-27 (founder, UAT 2026-09-27):** /allocations Open Positions shows entry/mark prices under $1 as $0, and unrealized P&L as −$0 / +$0 (price formatter rounds to whole dollars). Success: a sub-dollar price and a sub-dollar P&L render with their real precision, and a zero-rounded value never shows a sign.
+## Success Criteria
+
+3. The BTC benchmark is current: MTD and 3-month returns, win rate, volatility and drawdown come from a benchmark series that is refreshed, and a stale benchmark is shown as stale rather than as +0.00%.
+9. Every fix carries a test that fails on the old behaviour (neuter → RED → restore), and each page is re-checked in the logged-in browser after deploy.
+
+*(Moved from Phase 169 on 2026-09-27, verbatim with their original numbers, 169 D-61; criterion 9 is also Phase 169's.)*
+
+**Plans:** 5 plans in 5 waves, one PR (split 2026-09-27, 169 D-61): W1 169.5-01; W2 169.5-02; W3 169.5-03; W4 169.5-04; W5 169.5-05 integration run, release + post-deploy browser re-check. Decisions carried in `169.5-CONTEXT.md`; no migration.
+
+Plans:
+
+- [ ] 169.5-01-PLAN.md — DB-fed BTC through 169.2's reader with its dropped list; interval-matched, gap-null comparators (D-54, D-58) paired by the engine's rule (D-64, revised 2026-09-30); comparator basis the smaller of the two (D-59); cache key v8 -> v9 (D-48 as amended by 169 D-62) (SC3) (was 169-02)
+- [ ] 169.5-02-PLAN.md — payload-carried BTC prices and dropped list, chart gap, rolling series on the comparator basis, rolling beta over paired intervals (D-60 fix; D-64 pairing, revised 2026-09-30) (SC3, SC9) (was 169-03)
+- [ ] 169.5-03-PLAN.md — comparator caption and prose state the covered span (SC3, D-56) (was 169-11)
+- [ ] 169.5-04-PLAN.md — comparator dailyReturns null past through and across gaps; the EoY loop never counts an uncovered day (SC3, D-56) (was 169-12)
+- [ ] 169.5-05-PLAN.md — integration run (D-22 parity), release, post-deploy browser re-check at 390px and desktop 200% zoom (SC9) (169-06's comparator half)
 
 ### Phase 170: LAYOUT — page layout reads clean and holds on every page
 
@@ -4198,11 +4395,34 @@ Plans:
    *Evidence, measured 2026-09-27 on PROD `/allocations?tab=scenario` at a 367 CSS px viewport (narrower than the 390 px floor), named offenders to fix under this criterion:* (a) the page overflows horizontally by 235 px: the allocations tab bar (`<div className="ml-auto flex items-center gap-1">` in `src/app/(dashboard)/allocations/AllocationsTabs.tsx`) is 682 px wide and neither scrolls in its own strip nor wraps; (b) the Stress / Streaks / Metrics sub-tabs overflow; (c) a chart container (class `flex-1 relative pointer-coarse:min-h-[44px]`, in `src/app/factsheet/[id]/v2/HeatmapPanels.tsx`) is 770 px wide and does not shrink; (d) the scenario member rows (weight / mode / leverage / notional) are fixed at 573 px; (e) the drawdown table (~389 px) and one other table (~378 px) overflow. *Second instance of (a)'s root cause, measured the same day on PROD `/profile?tab=exchanges` at narrow width:* the tab row (Exchanges / Security / Organizations / Account) runs past the viewport, and each key card's "Disconnect" button sits about 420 px from the left edge, past 390 px; both are clipped, not scrollable, so they cannot be reached.
 3. Each page is re-checked at 390 px (iPhone 12) and at desktop 200% zoom in the logged-in browser after deploy, by the orchestrator, and shows no horizontal page scroll and no clipped primary action *(was "at 320 px and 200% zoom"; edited 2026-09-27, founder decision above)*.
 
-**Plans:** 0 plans
+**Plans:** 20 plans
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 170 to break down)
+- [x] 170-01: main-aware reflow helper and the three supported viewports (wave 1)
+- [x] 170-02: seeded narrow-layout spec, wired into CI (wave 1)
+- [x] 170-03: allocations tab strip and the Tweaks control (wave 2)
+- [x] 170-04: scenario footer and constituent rows (wave 2)
+- [x] 170-05: strategies row, private link, whole-word names (wave 2)
+- [x] 170-06: admin match read-only below md, owner line, intro count (wave 2)
+- [x] 170-07: signed-in marketing header and the compare pointer (wave 2)
+- [x] 170-08: shared tab strip on profile and admin (wave 3)
+- [x] 170-09: blend-window panel; the scenario strip stops stacking (wave 3)
+- [x] 170-10: strategy table sticky header, tags, and chip contrast (wave 3)
+- [ ] 170-11: factsheet KPI ladder, after 169 is on main (wave 4)
+- [ ] 170-12: factsheet ControlBar voice and private-link placement (wave 4)
+- [ ] 170-13: residual factsheet offenders and the final-month label (wave 5)
+- [ ] 170-14: post-deploy browser pass at 390 px and 200% zoom (wave 6)
+- [ ] 170-15: gap closure: the reflow walker follows the containing block and names an escaping element (gap wave 1)
+- [ ] 170-16: gap closure: the ResponsiveTable scroller contains its absolutely positioned content; composed scenario stops overflowing (gap wave 2)
+- [ ] 170-17: gap closure: the tab strip stays one scrolling line; the /strategies row stacks below md (gap wave 1)
+- [ ] 170-18: gap closure: layout-narrow spec asserts the fits-or-scrolls contract and fixes the N-TABLE and profile test defects (gap wave 1)
+- [ ] 170-19: gap closure: /admin/match renders an allocator with no preferences row (gap wave 1)
+- [ ] 170-20: gap closure: re-bake the 320 px streak-distribution golden (gap wave 3)
+
+**Gap-closure decisions, 2026-09-30 (orchestrator, after `170-VERIFICATION.md` gaps_found at `650448ee`; recorded in `170-CONTEXT.md` as GC-01..GC-03):** GC-01 a tab list never makes the page scroll sideways, scrolls inside itself only when its tabs do not fit, keeps its last tab reachable, and at V960 the Allocations tab list is one line on the Export row (the UI-SPEC tab-strip row and assertion are superseded); GC-02 the `/strategies` row stacks below `md`, not `sm`, so the name block keeps at least 160 px at V640 (UI-SPEC N-STRAT superseded); GC-03 the 320 px streak-distribution golden is re-baked through the `bake_svg_goldens` dispatch, not moved to 390 px.
+
+**Review-fix amendments, 2026-10-01 (orchestrator, round-1 code review; recorded in `170-CONTEXT.md`):** (a) **GC-02 amended (CR-01):** from `md` up the /strategies row keeps one line, but the name block has a 160 px floor and the control group may wrap its own items, because with the 260 px sidebar a draft row's controls measured 401 px and left the name 0 px wide at 768 and 800 px (desktop 200% zoom). (b) **The month-row label rule (WR-03) changed:** the record's last month in the current UTC month reads `Month-to-date`, one calendar month back `Last month (MMM YYYY)`, two or more back `Final month (MMM YYYY)`; the earlier rule labelled every live record "Final month" on the 1st of the month. DESIGN.md AD-10 carries the same amendment.
 
 **⭐ ROUTED IN 2026-09-26 (founder, "Route as proposed"; found in the post-deploy 320px check of 167.2.1, measured in the logged-in browser):** on /strategies at 320px the "Get private link" button overlaps the strategy name in the row header and cuts it to two letters. At 640px (200% zoom) the row is clean. Success: at 320px the name, the button, the status pill and the date never overlap, and the name is readable or ellipsised.
 Same pass, same width: on /allocations the floating "Tweaks" button overlaps the bottom navigation's "Strategies" and "Profile" labels. Success: no floating control covers the bottom navigation at 320px. Evidence: `.planning/uat/2026-09-26-browser-pass.md`.
@@ -4253,6 +4473,36 @@ Plans:
 **⭐ ROUTED IN 2026-09-27 (measured by the orchestrator and the founder in the logged-in browser on PROD `/allocations?tab=scenario`, main at `320fba4e`/`e6c196d5`):**
 (a) With no benchmark selected, the scenario Returns chart subtitle reads "vs None". Root cause: `src/app/(dashboard)/allocations/widgets/performance/scenario-factsheet-payload.ts` builds the `none` comparator with `inertComparatorBlock("None", "None")`, and `subtitleFor` in `src/app/factsheet/[id]/v2/TimeSeriesChart.tsx` prints `vs ${cmpName}` whenever the chart config has a `comparatorField`. Success: with no benchmark chosen the subtitle is empty or says "no benchmark".
 (b) The scenario KPI tiles show an unlabelled delta line (e.g. "+0.00") under each value. Success: the delta says what it is compared against (e.g. "vs current book").
+
+### Phase 170.2: PROBEFIXES — Holdings stops scrolling sideways, the BTC refresh fallback works, and the compare chart reads stored equity (INSERTED)
+
+**Goal:** Five user-facing items are fixed, four from Phase 170's post-deploy pass and one from Phase 166.3's recompute. The Allocations Holdings tab never scrolls sideways. The daily BTC benchmark refresh still lands a day when Binance fails. The /compare equity chart shows each strategy's real cumulative return. A CSV-ingested strategy's factsheet masthead states its venue as self-reported. Every benchmark-relative metric is measured over the strategy's full history wherever BTC prices exist.
+**Founder decision, 2026-10-01 (AskUserQuestion):** one inserted phase with three plans. Phases 169, 169.2 and 170 are closed, and nothing is added to them.
+**Evidence (measured 2026-10-01 on PROD, after the Phase 170 merge e3b4542da deployed):**
+(1) On `/allocations?tab=holdings` at 735 CSS px (desktop 200% zoom), `#main-content` scrollWidth is 885 against clientWidth 735. `HoldingsTabPanel.tsx`'s `<div data-tab-panel="holdings" className="grid gap-8">` has no column template, so its implicit track resolves to the min-content of its widest item (845 px). The Holdings and Open Positions tables (843 px) and the Exposure drill-down table (811 px) sit in `overflow-x-auto` scrollers. Those scrollers grow with their tables because their grid-item ancestors keep `min-width: auto`. The floor does not depend on the viewport, so every width below about 1000 CSS px overflows. CI missed it because the seeded book has no wide positions table.
+(2) The 2026-10-01 00:10 UTC Vercel cron `/api/cron/refresh-benchmark` answered 502 "no BTC series" (Sentry QUANTALYZE-1M, 1N and 1P). The newest stored BTC close is 2026-09-29; the 2026-09-30 run succeeded through 09-29. `fetch_btc_daily_prices` in `analytics-service/services/benchmark.py` falls back from Binance to CoinGecko `market_chart` with `days=1000`. The CoinGecko free tier refuses that (HTTP 401, error_code 10012, measured), while `days=365` answers 200. Any Binance failure therefore loses that day.
+(3) `/compare?ids=<one strategy>` draws an equity axis reading about 1e35%. `CompareEquityOverlay.tsx` compounds `strategy_analytics.returns_series` (`cum *= 1 + p.value`), but that column stores equity LEVELS. For the measured strategy it runs 0.99998 → 1.1454 over 112 days, with `cumulative_return` 0.1454, so 112 compounds of about 2 explode.
+(4) A CSV-ingested strategy's factsheet masthead shows no venue label. Phase 170's UI-SPEC copy row "Venue label on CSV-ingested strategies (169-routed (b))" sets the rule. Where a venue is declared, the label reads `{declared venue} · self-reported`. Where none is declared, the label is omitted (it is a label, not a metric, so there is no em-dash). The founder named the site under checkpoint FC-2.
+(5) Every benchmark-relative metric (alpha, beta, Treynor, R², correlation, information ratio, rolling alpha/beta) reads BTC as a TRAILING 1000-day window ending yesterday: `get_benchmark_returns(symbol="BTC", days=1000)` in `analytics-service/services/benchmark.py`, whose cache read is `.limit(days + 1)`. A strategy whose history starts more than 1000 days back is measured over a truncated overlap, each later recompute loses more of it, and the factsheet says full history. Measured on PROD 2026-10-01 during Phase 166.3 (counts only): three recomputed user-CSV strategies lost 41, 33 and 128 rolling alpha/beta points. Each loss matches, within one day, how far the window's start had moved past the strategy's first return since its previous compute, and their alpha, beta, Treynor and R² moved with it. It is the same file as item (2). ⚠️ Phase 169.2 BENCHFRESH shipped as "read in full"; at `e3b4542da` the read is still capped at 1000 days, so that claim is to be re-measured here, not trusted.
+**Requirements**: TBD (phase-local SC ids)
+**Depends on:** Phase 170
+
+## Success Criteria
+
+1. At 390, 640 and 735 CSS px the Holdings tab's `#main-content` overflow is 0, and each wide table scrolls inside its own scroller. A seeded e2e case with a wide positions table fails on the old code.
+2. When Binance fails, the refresh still returns a current BTC series: the fallback stays within the free-tier window and merges with cached history, or uses another free source. A test fails on the old 1000-day request, and a missed day is backfilled by the next run.
+3. The /compare overlay's last point equals each strategy's stored cumulative return (+14.5% for the measured example). A test fails on the old compounding.
+4. On `/factsheet/[id]`, a CSV-ingested strategy with a declared venue shows `{venue} · self-reported` in the masthead. One with no declared venue shows no venue label. A test that fails on the current masthead pins both.
+5. Every benchmark-relative metric pairs over the strategy's FULL history wherever BTC prices exist: the benchmark read covers the strategy's first date, not a fixed trailing count. A test with a strategy older than 1000 days fails on today's code. The recompute that restores the stored rows is named: every benchmarked strategy, through the normal compute-job path.
+
+**⭐ ROUTED IN 2026-10-01 (founder, FC-2; edited by `/gsd-phase --edit`):** this is Phase 170 plan 14's FC-2 answer. Asked to name the site for the CSV-ingested venue label, the founder chose "Factsheet masthead". Phase 170 is closed and gets nothing added, so this became item (4) and criterion 4 of this phase.
+
+**⭐ ROUTED IN 2026-10-01 (founder, 1000-day benchmark window; edited by `/gsd-phase --edit`):** found by the orchestrator while checking Phase 166.3's recomputes. Asked where it goes, the founder chose "Add to 170.2" (AskUserQuestion), since item (2) is in the same file. It became item (5) and criterion 5.
+
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 170.2 to break down)
 
 ### Phase 165: ACTIONSDEPS — the four GitHub Actions dependabot PRs land first, in the verified order
 
@@ -4322,12 +4572,12 @@ phase's newest plans live only on an open branch, the count says "on main". The 
 table (measured at `733a55f5`, 33 rows) is superseded by this one; its still-accurate rows are
 kept verbatim.
 
-**Totals: 41 of 81 v1.20 phases complete by verification; 3 retired (165, 165.1, 165.2); 1 closed by decision (164.10).** Recounted 2026-09-27 from this table's own rows after adding the 169 split (169.1, 169.2, 169.4, 169.4.1) and 164.9.1's close; the earlier "40 of 73" was taken before those rows existed. 81 counts 166.4.1 PORTFOLIOANALYTICS and 167.1.2.1 RECONMARKER, both added 2026-09-27.
+**Totals: 41 of 82 v1.20 phases complete by verification; 3 retired (165, 165.1, 165.2); 1 closed by decision (164.10).** Recounted 2026-09-27 from this table's own rows after adding the 169 split (169.1, 169.2, 169.4, 169.4.1) and 164.9.1's close; the earlier "40 of 73" was taken before those rows existed. 82 counts 166.4.1 PORTFOLIOANALYTICS and 167.1.2.1 RECONMARKER, both added 2026-09-27, and 169.5 BENCHCOMPARE, added 2026-09-27 (169 D-61); the branch-side "80" and main-side "81" were each one merge short.
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 158. OPS-CI merge=deploy | 6/6 | Complete    | 2026-08-21 |
-| 159. RANK ranking integrity | 6/7 | Complete — plan 01 shipped its deliverable (`159-CENSUS.md` is on disk); its SUMMARY was never written. `159-VERIFICATION.md` closed 2026-09-12 (`status: passed`): its one open item, the concurrent same-session CAS race, is discharged by `src/__tests__/csv-finalize-concurrent-never-classified.test.ts` on the blocking `frontend-local-stack` lane — green in main run 34712535912 at `733a55f5` | v0.70.0.0 |
+| 159. RANK ranking integrity | 7/7 | Complete — plan 01 shipped its deliverable (`159-CENSUS.md` is on disk). ⭐ 159-01 SUMMARY written retrospectively 2026-09-30 by founder decision; overrides the #790 'no retro-fit' note for this plan (the cell said "its SUMMARY was never written" until then). `159-VERIFICATION.md` closed 2026-09-12 (`status: passed`): its one open item, the concurrent same-session CAS race, is discharged by `src/__tests__/csv-finalize-concurrent-never-classified.test.ts` on the blocking `frontend-local-stack` lane — green in main run 34712535912 at `733a55f5` | v0.70.0.0 |
 | 160. PROVENANCE venue/annualization | 6/7 | Complete — verification passed (closed with the v1.20 open items in #790); plan 07 was its `gap_closure` verification plan | v0.77.39.0 · #790 |
 | 161. WIZERR honest errors | 10/10 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed | v0.72.0.0 |
 | 161.1 LEDGER-REFRESH (shipped dormant) | 5/5 | Complete | v0.73.0.0 |
@@ -4335,7 +4585,7 @@ kept verbatim.
 | 163. HARDEN reliability + security | 9/9 | Complete | v0.75.0.0 |
 | 164. SHARE revocable links | 7/7 | Complete | v0.76.0.0 |
 | 164.1 PROD-OBSERVABILITY (one prober: PYAPI-06, CRON-OBS-01, CRON-DRIFT-01, MT5-WEDGE-OBS-01) | 6/6 | Complete — PR #746 `42868a9b` + PR #748 `d679f638`; VERIFIED 2026-09-18, `passed` 5/5. ⚠️ The cadence residual is NOT closed: booked `[PROBER-CADENCE-UNDELIVERED-01]`, owner Phase 164.1.1 | v0.77.15.0 · 2026-09-18 |
-| 164.1.1 PROBERCADENCE | 5/6 | Complete — verification passed (plans 01–05; plan 06 is the post-merge cadence reading) | v0.77.51.0 · #815/#819 |
+| 164.1.1 PROBERCADENCE | 6/6 | Complete — verification passed. ⭐ 2026-09-30: 5/6 → 6/6. Plan 06 ran on PROD on 2026-09-18 (jobid 41, first tick observed, `164.1.1-PROD-SESSION.md`), and its SUMMARY was written retrospectively by founder decision. SECURITY is 35/35 closed. | v0.77.51.0 · #815/#819 |
 | 164.1.1.1 LANEONLYGATES | 2/2 | Complete | #817 |
 | 164.2 CURATED-COPY (+ WIZFORM-02, WR-06-UTC both bucketers, HONEST-08-RESIDUAL, 161-ERRPREFIX) | 10/10 | Complete — PR #749 merged `05994f1d`, main CI green, PROD verified by effect. All 21 artifacts stripped from main by `22a5fe96` | v0.77.16.0 |
 | 164.2.1 SESSIONID-FENCE | 2/2 | Complete | v0.77.17.0 |
@@ -4343,7 +4593,7 @@ kept verbatim.
 | 164.3.1 SOUND-PRIMITIVES (four cycling primitives) | 13/13 | Complete | v0.77.1.x |
 | 164.4 REDUNDER-BACKFILL (39 idiom files annotated; 5 pg_cron-blocked files handed to 164.4.1) | 12/12 | Complete — the phase was planned as 13 and replanned to 12 against the Plan 00 spike (`9b83b064`); plan 12 was dropped there, not left undone | v0.77.12.0 |
 | 164.4.1 PGCRON-LANE (pg_cron on the lane; 5 deferred gates annotated; lane-blocked 0; ARMS_FLOOR 361) | 6/6 | Complete — PR #744 merged `e01cc2e6`, ubuntu-measured | v0.77.13.0 |
-| 164.4.2 SUBSETSPLIT | 11/11 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed | v0.87.0.0 · #842 |
+| 164.4.2 SUBSETSPLIT | 11/11 | Complete — verification passed 2026-10-02 (SUBSET observed on #927) | v0.87.0.0 · #842 |
 | 164.4.2.1 DRIFTOFFMUTEX | 3/3 | Complete — SC-3 speed claim routed to 164.9.4 (founder 2026-09-27) | v0.93.0.1 · #861 |
 | 164.5 BASELINE-SNAPSHOT (baseline.sql load-bearing, DRIFT-04 drop, DRIFT-05, VAC08-LEDGER, VAC-07) | 7/7 | Complete — DRIFT-04 applied and shipped 2026-09-08 in the two-PR sequence. Plan 08 was LIFTED into new Phase 164.5.2 BRIDGELOCK (`7910f614`), so the denominator is 7 | v0.77.21.0 |
 | 164.5.1 CRONREPOINT (the live `match_engine_cron` row repointed; migration-vs-runbook rule settled first) | 9/9 | Complete    | 2026-09-17 |
@@ -4375,11 +4625,11 @@ kept verbatim.
 | 164.9 TESTISOLATION | 11/11 | Complete | #837 |
 | 164.9.1 JOBRPCTRUTH | 14/14 | Complete — verification passed 2026-09-27 (last browser check closed) | v0.93.0.0 · #860 |
 | 164.9.2 REFDATAUPDATES | 5/5 | Complete | v0.93.0.1 · #862 |
-| 164.9.3 CLAIMPAIR | 0/? | Queued — blocker | - |
+| 164.9.3 CLAIMPAIR | 6/6 | Complete    | 2026-09-27 |
 | 164.9.3.1 FANINGRAPH | 0/? | Queued — blocker, after 164.9.3 | - |
-| 164.9.3.2 DEFER40001 | 0/? | Queued — blocker, beside 164.9.3 (founder 2026-09-27) | - |
+| 164.9.3.2 DEFER40001 | 8/8 | Complete    | 2026-10-02 |
 | 164.9.4 CIOFFMUTEX | planned, not on main | In progress — draft PR #880 (measurement run) | - |
-| 164.9.5 AUTOREDUMP | 9/9 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed | v0.106.0.0 · #875 |
+| 164.9.5 AUTOREDUMP | 9/9 | Complete — verification passed 2026-10-02 | v0.106.0.0 · #875 |
 | 164.10 BODYDRIFT | - | Closed by decision (c): the drift is real, measured and deliberately left | v0.79.1.1 · #824 |
 | 165. DEPS dependabot campaign | - | ⛔ RETIRED 2026-09-27 (founder) — not delivered as a phase; dependabot PRs land as maintenance | - |
 | 165.1 PIPDEPS | - | ⛔ RETIRED 2026-09-27 (founder), as 165 | - |
@@ -4389,7 +4639,7 @@ kept verbatim.
 | 166.1.1 DDSIGN | 0/? | Queued — feature | - |
 | 166.2 COMPUTEONCE | 7/7 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed | v0.102.0.0 · #874 |
 | 166.3 RECOMPUTE | 0/1 | HALTED 2026-09-27 at Task 3 — resumes after 166.4 ships | - |
-| 166.4 BENCHALIGN | 4/4 | Executed — review and verification pending | - |
+| 166.4 BENCHALIGN | 4/4 | Complete (verification passed 7/7) | v0.108.0.0 · #892 |
 | 166.4.1 PORTFOLIOANALYTICS | 0/? | Queued — data integrity | - |
 | 167. CREDTRUST (an invalid venue credential is named to the customer) | 6/6 | Complete | v0.86.0.0 · #841 |
 | 167.1 AUMTRUST | 6/6 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed | v0.89.0.0 · #852 |
@@ -4399,13 +4649,15 @@ kept verbatim.
 | 167.2 KEYCARDSYNC | 10/10 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed | v0.88.0.0 · #851 |
 | 167.2.1 FACTSHEETBUILDABLE | 4/4 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed | #866 |
 | 168. DRBOPTIONS (a Deribit options account ingests end to end) | 2/3 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed; plan 03 is the founder's live retry | v0.97.0.0 · #867 |
-| 169. FACTSHEETTRUTH (split from PAGETRUTH 2026-09-26) | 8 plans on `feat/169-pagetruth`, not on main | Queued — feature; plans being rebuilt (cache-key anchor moved); waits for 167.1.2 PR C | - |
-| 169.1 ZOOMKPIS | 9 plans on `feat/169-pagetruth`, not on main | Queued — feature; split order runs it last, after 169 and 169.4 | - |
+| 169. FACTSHEETTRUTH (split from PAGETRUTH 2026-09-26) | 7 plans on `feat/169-pagetruth`, not on main | Queued — feature; comparator plans split to 169.5 on 2026-09-27 (D-61); waits for 167.1.2 PR C | - |
+| 169.1 ZOOMKPIS | 9/9 | Complete    | 2026-10-01 |
+| 169.1.1 HYDRATIONTICKS | 4/4 | Complete — PR #925, v0.118.1.0 | 2026-10-02 |
 | 169.2 BENCHFRESH | 3/3 | Shipped — verification `human_needed` (14/16, 2 routed to human checks): post-deploy checks pending, not closed | v0.107.0.0 · #879 |
 | 169.3 SMALLFIXES | 1/5 (plan 01 on main; 02–05 on `feat/169-pagetruth`) | In progress — plan 01 shipped (v0.97.0.1, #868); plans 02–05 next, 03/04 gated on 167.1.2 PR C | - |
-| 169.4 ALLOCTRUTH | 3 plans on `feat/169-pagetruth`, not on main | Queued — feature; after 169, 169.2 and 167.1.2 PR C | - |
+| 169.4 ALLOCTRUTH | 3 plans on `feat/169-pagetruth`, not on main | Queued — feature; after 169, 169.5, 169.2 and 167.1.2 PR C | - |
 | 169.4.1 OGSHARPE | 2 plans on `feat/169-pagetruth`, not on main | Queued — feature; after 166.2 and 169 | - |
-| 170. LAYOUT | 0/? | Queued — feature | - |
+| 169.5 BENCHCOMPARE (split from 169 2026-09-27) | 5 plans on `feat/169-pagetruth`, not on main | Queued — data integrity; after 169, before 169.4 and 169.1 | - |
+| 170. LAYOUT | 5/14 | In Progress | - |
 | 170.1 COPY | 0/? | Queued — feature, after 170 | - |
 
 ### Requirement Coverage (v1.20)

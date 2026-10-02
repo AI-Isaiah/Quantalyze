@@ -113,9 +113,15 @@ def _build_ctx(*, key_row: dict, strategy_row: dict | None) -> tuple[MagicMock, 
                 record["filters"][f"lte:{col}"] = val
                 return chain
 
+            def _in(col: str, val: object) -> MagicMock:
+                # C3 topic H: the reconcile names the absent days explicitly.
+                record["filters"][f"in:{col}"] = list(val)  # type: ignore[call-overload]
+                return chain
+
             chain.eq.side_effect = _eq
             chain.gte.side_effect = _gte
             chain.lte.side_effect = _lte
+            chain.in_.side_effect = _in
             chain.execute.return_value = MagicMock(data=[], count=0)
             return chain
 
@@ -864,12 +870,14 @@ class TestDerivePersistReconcilesAxis:
     legacy USD rows that populated the table, so recomputed track records would
     silently mix stale legacy returns into refused days.
 
-    The fix reconciles the axis: DELETE the strategy's csv_daily_returns rows
-    inside the derive's authoritative span [returns.index.min, returns.index.max]
-    (bounded gte/lte on `date`, scoped by strategy_id/api_key_id), then re-insert
-    the fresh payload. A refused interior/leading day becomes honestly ABSENT.
+    The fix reconciles the axis so the stored span equals the fresh payload.
+    Since C3 topic H it UPSERTS the payload first, then DELETES the span's
+    calendar days the payload does not carry (an explicit `in` list, still
+    bounded gte/lte on `date` to [returns.index.min, returns.index.max] and
+    scoped by strategy_id/api_key_id), so no reader ever finds a rebuilt day
+    absent. A refused interior/leading day becomes honestly ABSENT.
 
-    SPAN bound (never delete legitimate out-of-scope history): the delete is a
+    SPAN bound (never delete legitimate out-of-scope history): the delete is
     RANGED gte/lte on the dense reconstructed calendar — a row OLDER than
     returns.index.min() (written by an earlier, wider-window retention derive)
     is strictly < span_start and CANNOT be reached. For a full_history Deribit
@@ -877,7 +885,8 @@ class TestDerivePersistReconcilesAxis:
     is only the reconstructed window.
 
     Neuter: keep the upsert-only persist (drop the span DELETE) -> capture
-    ["deletes"] has no csv_daily_returns entry -> every assertion here reddens.
+    ["deletes"] has no csv_daily_returns entry -> the refused-day assertions
+    here redden.
     """
 
     @staticmethod
@@ -927,8 +936,11 @@ class TestDerivePersistReconcilesAxis:
         assert span_start == "2024-05-01"
         assert span_end == "2024-05-03"
         # The REFUSED day D falls INSIDE the span -> its stale row is reconciled
-        # away (deleted, then NOT re-inserted since the payload omits it).
+        # away: it is the ONLY day the delete names (the payload omits it).
         assert span_start <= "2024-05-02" <= span_end
+        assert filters.get("in:date") == ["2024-05-02"], (
+            f"the delete must name exactly the refused day; got {filters!r}"
+        )
 
         # Out-of-scope history (a day BEFORE span_start) is unreachable by the
         # ranged delete -> legitimate older rows from a wider-window derive survive.
@@ -944,19 +956,22 @@ class TestDerivePersistReconcilesAxis:
             f"refused day D must not be re-inserted; got {upsert_dates!r}"
         )
 
-        # Authoritative order: the span DELETE precedes the re-insert upsert so a
-        # crash can only leave the span EMPTY (self-healing on retry), never a
-        # half-stale mix.
+        # C3 topic H order: the upsert precedes the reconcile DELETE, so no
+        # reader ever finds a rebuilt day absent. A crash between them leaves the
+        # refused day's stale row present until the retry heals it; it can no
+        # longer leave the span EMPTY. (The previous order, delete first, was
+        # pinned here; the reader-level proof is tests/test_dailies_writer_no_hole.py.)
         ops = [o for o in capture["ops"] if o[1] == "csv_daily_returns"]
-        assert ops[0][0] == "delete", (
-            f"span delete must precede the re-insert upsert; got {ops!r}"
+        assert ops == [("upsert", "csv_daily_returns"), ("delete", "csv_daily_returns")], (
+            f"the upsert must precede the reconcile delete; got {ops!r}"
         )
 
     @pytest.mark.asyncio
     async def test_strategy_mode_clean_series_deletes_and_reinserts_all(self) -> None:
-        """A day the fresh derive LEGITIMATELY still has is NOT lost: the span
-        delete + re-insert nets to the full clean payload present (no refused
-        days -> nothing dropped)."""
+        """A day the fresh derive LEGITIMATELY still has is NOT lost: with no
+        refused day the payload covers the whole span, so since C3 topic H there
+        is nothing to delete and the upsert alone leaves the full clean payload
+        present (no refused days -> nothing dropped)."""
         ctx, capture = _build_ctx(
             key_row={"id": "key-c", "exchange": "binance", "user_id": "user-1"},
             strategy_row={"id": "strat-c", "user_id": "user-1"},
@@ -968,11 +983,11 @@ class TestDerivePersistReconcilesAxis:
 
         assert result.outcome == DispatchOutcome.DONE
         csv_deletes = [d for d in capture["deletes"] if d["table"] == "csv_daily_returns"]
-        assert len(csv_deletes) == 1
-        filters = csv_deletes[0]["filters"]
-        assert filters.get("gte:date") == "2024-05-01"
-        assert filters.get("lte:date") == "2024-05-02"
-        # Both clean days are re-inserted -> retained history is preserved.
+        assert csv_deletes == [], (
+            f"no day of the span is absent from the payload, so nothing may be "
+            f"deleted; got {csv_deletes!r}"
+        )
+        # Both clean days are upserted -> retained history is preserved.
         csv_upserts = [u for u in capture["upserts"] if u[0] == "csv_daily_returns"]
         _name, payload, _oc = csv_upserts[0]
         assert sorted(row["date"] for row in payload) == ["2024-05-01", "2024-05-02"]
@@ -1203,7 +1218,7 @@ class TestCashSettlementSeriesPersist:
     async def test_cash_persist_leaves_prestamp_and_csv_byte_unchanged(self) -> None:
         """The additive cash persist NEVER perturbs the cash neighbors: the strategy_
         analytics prestamp still writes metrics_json_by_basis (NO cash_settlement key
-        ever) and the csv_daily_returns delete+upsert are the pre-change shape. The
+        ever) and the csv_daily_returns write is the dailies writer's own shape. The
         cash series lands ONLY in strategy_analytics_series, never in strategy_analytics
         or csv_daily_returns."""
         ctx, capture = _build_ctx(
@@ -1229,11 +1244,11 @@ class TestCashSettlementSeriesPersist:
             "the prestamp by-basis write must stay byte-unchanged (no cash_settlement scalar)"
         )
 
-        # csv_daily_returns byte-unchanged: one span delete (strategy axis) + one
-        # upsert of the two clean days.
+        # csv_daily_returns: one upsert of the two clean days and, since C3 topic
+        # H (upsert first, then delete only the span days the payload lacks), no
+        # delete at all, because the clean payload covers the whole span.
         csv_deletes = [d for d in capture["deletes"] if d["table"] == "csv_daily_returns"]
-        assert len(csv_deletes) == 1
-        assert csv_deletes[0]["filters"].get("eq:strategy_id") == "strat-b"
+        assert csv_deletes == []
         csv_upserts = [u for u in capture["upserts"] if u[0] == "csv_daily_returns"]
         assert len(csv_upserts) == 1
         _n2, csv_payload, on_conflict = csv_upserts[0]

@@ -118,11 +118,11 @@ export function StressWindowsPanel() {
               </td>
               <td
                 className="py-1.5 px-2 text-right font-mono tabular-nums"
-                style={{ color: w.benchReturn >= 0 ? "var(--color-positive)" : "var(--color-negative)" }}
+                style={{ color: benchColor(w.benchReturn, w.benchReturn != null && w.benchReturn >= 0 ? "var(--color-positive)" : "var(--color-negative)") }}
               >
                 {pctSigned(w.benchReturn)}
               </td>
-              <td className="py-1.5 pl-2 text-right font-mono tabular-nums" style={{ color: "var(--color-negative)" }}>
+              <td className="py-1.5 pl-2 text-right font-mono tabular-nums" style={{ color: benchColor(w.benchMaxDD, "var(--color-negative)") }}>
                 {pct(w.benchMaxDD)}
               </td>
             </tr>
@@ -134,11 +134,17 @@ export function StressWindowsPanel() {
   );
 }
 
-function pctSigned(v: number): string {
-  if (!Number.isFinite(v)) return "—";
+/** CR-01 (SC3): a null bench field is an uncovered comparator day inside the
+ *  window — rendered "—" in the muted color, never as a green 0%. */
+function benchColor(v: number | null, covered: string): string {
+  return v == null ? "var(--color-text-muted)" : covered;
+}
+
+function pctSigned(v: number | null): string {
+  if (v == null || !Number.isFinite(v)) return "—";
   return (v >= 0 ? "+" : "") + (v * 100).toFixed(1) + "%";
 }
-function pct(v: number): string {
-  if (!Number.isFinite(v)) return "—";
+function pct(v: number | null): string {
+  if (v == null || !Number.isFinite(v)) return "—";
   return (v * 100).toFixed(1) + "%";
 }

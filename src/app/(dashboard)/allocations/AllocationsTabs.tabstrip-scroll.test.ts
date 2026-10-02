@@ -1,4 +1,6 @@
 import { describe, it, expect } from "vitest";
+// Canonical module is src/lib/tab-strip-scroll.ts (Phase 170). This import
+// stays on the re-export so a dropped re-export fails here.
 import { computeTabStripScroll } from "./AllocationsTabs";
 
 /**

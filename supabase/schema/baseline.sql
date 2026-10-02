@@ -2108,7 +2108,7 @@ COMMENT ON FUNCTION "public"."cleanup_abandoned_wizard_drafts"() IS 'CLEAN-01 + 
 CREATE OR REPLACE FUNCTION "public"."commit_scenario_batch"("p_allocator_id" "uuid", "p_diffs" "jsonb", "p_idempotency_key" "text" DEFAULT NULL::"text", "p_request_hash" "text" DEFAULT NULL::"text", "p_portfolio_fingerprint" "text" DEFAULT NULL::"text") RETURNS "jsonb"
     LANGUAGE "plpgsql" SECURITY DEFINER
     SET "search_path" TO 'public', 'pg_catalog'
-    AS $$
+    AS $_$
 DECLARE
   v_caller            uuid := auth.uid();
   v_diff              jsonb;
@@ -2236,11 +2236,46 @@ BEGIN
   -- (position cron refreshed a snapshot, another tab/device edited) → the
   -- frozen diffs would write outcomes against a stale shape (lost-update).
   --
+  -- Phase 167.1.2 review C4 SFH-R2-01: "current holdings" is the set the
+  -- client fingerprinted, which is `holdingsSummary` as
+  -- fetchLatestHoldingsPerKey (src/lib/latest-holdings-per-key.ts) reads it.
+  -- The server used to take the newest row per triple over EVERY date, so a
+  -- position closed on an earlier day stayed in its set and was missing from
+  -- the client's, and every book-mode commit of such an allocator returned
+  -- portfolio_fingerprint_stale, which no refresh cleared. The CTE below is
+  -- that reader's rule, step for step:
+  --   1. the owner's keys, departed ones included;
+  --   2. per key, its latest asof, and its newest audit event
+  --      'allocator.holdings.sync_completed' with final_status 'complete'
+  --      (newest by created_at DESC, NULLs first, as PostgREST orders). That
+  --      event is evidence only when row_count is a non-negative whole number
+  --      and asof is a YYYY-MM-DD string (cleanPollDay). When its day is
+  --      STRICTLY after the key's latest rows, the key's reading is that day
+  --      with no rows (SFH-C4-02); otherwise it is the latest asof with rows;
+  --   3. keys grouped by exchange account (accountIdentityTokens, the D-09
+  --      identity: a shared non-blank venue_account_id on one exchange, or an
+  --      account_shared_with_api_key_id marker of a shared kind, joined
+  --      transitively). A key with neither is its own account. Only the keys
+  --      whose reading is the account's newest, and have rows on it,
+  --      contribute (SFH-C4-01);
+  --   4. the contributing keys' rows at their reading day, one token per
+  --      (venue, symbol, holding_type).
+  -- Days are compared as 'YYYY-MM-DD' text under COLLATE "C", as the reader
+  -- compares strings. They are never cast to date, so a malformed day in an
+  -- audit event can never raise here. Everything is scoped to p_allocator_id,
+  -- which (1) proved equals auth.uid().
+  --
+  -- ⚠️ TWIN. This is the third copy of the rule (TypeScript reader, this, and
+  -- the grain rule in plan 10's Python helper). A change to
+  -- latest-holdings-per-key.ts or to accountIdentityTokens that is not made
+  -- here re-opens SFH-R2-01. The gate is
+  -- supabase/tests/test_commit_scenario_batch_fingerprint_precondition.sql
+  -- tests 10-14.
+  --
   -- The token format MIRRORS computeHoldingsFingerprint (scenario-state.ts):
-  -- symbol-first "symbol:venue:holding_type", latest-asof-per-(venue,symbol,
-  -- holding_type) to match the client dedup, and NO value_usd filter (the
-  -- client fingerprint includes value_usd<=0 latest rows; the ownership
-  -- probe's value_usd>0 is WRONG here). We do NOT reproduce the client's JS
+  -- symbol-first "symbol:venue:holding_type", and NO value_usd filter (the
+  -- client fingerprint includes value_usd<=0 rows; the ownership probe's
+  -- value_usd>0 is WRONG here). We do NOT reproduce the client's JS
   -- localeCompare sort (no Postgres collation is byte-identical to it):
   -- instead we compare the order-invariant token SET, sorting BOTH sides with
   -- the SAME COLLATE "C" so equality is set equality, collation-independent.
@@ -2248,12 +2283,136 @@ BEGIN
   -- here, so a network retry of an already-committed batch is not re-checked
   -- against now-changed holdings).
   IF p_portfolio_fingerprint IS NOT NULL THEN
-    SELECT COALESCE(array_agg(tok ORDER BY tok COLLATE "C"), ARRAY[]::text[])
+    WITH RECURSIVE
+    owner_keys AS (
+      SELECT k.id,
+             lower(btrim(k.exchange)) AS exchange_norm,
+             NULLIF(btrim(k.venue_account_id), '') AS venue_norm,
+             k.account_share_kind,
+             k.account_shared_with_api_key_id
+        FROM api_keys k
+       WHERE k.user_id = p_allocator_id
+    ),
+    account_edges AS (
+      -- one exchange account id on one exchange
+      SELECT a.id AS a, b.id AS b
+        FROM owner_keys a
+        JOIN owner_keys b
+          ON b.exchange_norm = a.exchange_norm
+         AND b.venue_norm    = a.venue_norm
+         AND b.id           <> a.id
+      UNION
+      -- a shared-account marker naming another key of this owner, both ways
+      SELECT m.id, m.account_shared_with_api_key_id
+        FROM owner_keys m
+       WHERE m.account_share_kind IN ('duplicate', 'composite_member')
+         AND m.account_shared_with_api_key_id <> m.id
+         AND m.account_shared_with_api_key_id IN (SELECT id FROM owner_keys)
+      UNION
+      SELECT m.account_shared_with_api_key_id, m.id
+        FROM owner_keys m
+       WHERE m.account_share_kind IN ('duplicate', 'composite_member')
+         AND m.account_shared_with_api_key_id <> m.id
+         AND m.account_shared_with_api_key_id IN (SELECT id FROM owner_keys)
+    ),
+    known_account AS (
+      SELECT id FROM owner_keys WHERE venue_norm IS NOT NULL
+      UNION
+      SELECT a FROM account_edges
+    ),
+    reach (root, node) AS (
+      SELECT id, id FROM known_account
+      UNION
+      SELECT r.root, e.b
+        FROM reach r
+        JOIN account_edges e ON e.a = r.node
+    ),
+    key_account AS (
+      SELECT k.id,
+             COALESCE(
+               (SELECT 'account:' || min(r.root::text COLLATE "C")
+                  FROM reach r
+                 WHERE r.node = k.id),
+               'key:' || k.id::text
+             ) AS account
+        FROM owner_keys k
+    ),
+    key_evidence AS (
+      SELECT k.id,
+             (SELECT max(h.asof)
+                FROM allocator_holdings h
+               WHERE h.allocator_id = p_allocator_id
+                 AND h.api_key_id   = k.id) AS latest_asof,
+             (SELECT al.metadata
+                FROM audit_log al
+               WHERE al.user_id     = p_allocator_id
+                 AND al.action      = 'allocator.holdings.sync_completed'
+                 AND al.entity_type = 'api_key'
+                 AND al.entity_id   = k.id
+                 AND al.metadata->>'final_status' = 'complete'
+               ORDER BY al.created_at DESC
+               LIMIT 1) AS poll_meta
+        FROM owner_keys k
+    ),
+    key_poll AS (
+      SELECT e.id,
+             e.latest_asof,
+             to_char(e.latest_asof, 'YYYY-MM-DD') AS latest_day,
+             -- cleanPollDay. CASE arms run in order, so the numeric cast only
+             -- ever sees a JSON number.
+             CASE
+               WHEN e.poll_meta IS NULL THEN NULL
+               WHEN jsonb_typeof(e.poll_meta) <> 'object' THEN NULL
+               WHEN jsonb_typeof(e.poll_meta->'row_count') IS DISTINCT FROM 'number' THEN NULL
+               WHEN (e.poll_meta->>'row_count')::numeric < 0 THEN NULL
+               WHEN (e.poll_meta->>'row_count')::numeric
+                    <> trunc((e.poll_meta->>'row_count')::numeric) THEN NULL
+               WHEN jsonb_typeof(e.poll_meta->'asof') IS DISTINCT FROM 'string' THEN NULL
+               WHEN (e.poll_meta->>'asof') !~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' THEN NULL
+               ELSE e.poll_meta->>'asof'
+             END AS poll_day
+        FROM key_evidence e
+    ),
+    key_reading AS (
+      SELECT p.id,
+             p.latest_asof,
+             (p.poll_day IS NOT NULL
+              AND (p.latest_day IS NULL
+                   OR p.poll_day COLLATE "C" > p.latest_day COLLATE "C")) AS polled_after_rows
+        FROM key_poll p
+    ),
+    key_day AS (
+      SELECT r.id,
+             r.latest_asof,
+             NOT r.polled_after_rows AS has_rows,
+             CASE WHEN r.polled_after_rows THEN p.poll_day ELSE p.latest_day END AS day
+        FROM key_reading r
+        JOIN key_poll p ON p.id = r.id
+    ),
+    account_newest AS (
+      SELECT a.account, max(d.day COLLATE "C") AS day
+        FROM key_day d
+        JOIN key_account a ON a.id = d.id
+       WHERE d.day IS NOT NULL
+       GROUP BY a.account
+    ),
+    contributing AS (
+      SELECT d.id, d.latest_asof
+        FROM key_day d
+        JOIN key_account a    ON a.id = d.id
+        JOIN account_newest n ON n.account = a.account
+                             AND n.day COLLATE "C" = d.day COLLATE "C"
+       WHERE d.has_rows
+    )
+    SELECT COALESCE(array_agg(latest.tok ORDER BY latest.tok COLLATE "C"), ARRAY[]::text[])
       INTO v_server_fp_tokens
       FROM (
         SELECT DISTINCT ON (ah.venue, ah.symbol, ah.holding_type)
                ah.symbol || ':' || ah.venue || ':' || ah.holding_type AS tok
           FROM allocator_holdings ah
+          JOIN contributing c
+            ON c.id = ah.api_key_id
+           AND ah.asof = c.latest_asof
          WHERE ah.allocator_id = p_allocator_id
          ORDER BY ah.venue, ah.symbol, ah.holding_type, ah.asof DESC
       ) latest;
@@ -2542,13 +2701,13 @@ BEGIN
 
   RETURN jsonb_build_object('ok', true, 'recorded', v_recorded);
 END;
-$$;
+$_$;
 
 
 ALTER FUNCTION "public"."commit_scenario_batch"("p_allocator_id" "uuid", "p_diffs" "jsonb", "p_idempotency_key" "text", "p_request_hash" "text", "p_portfolio_fingerprint" "text") OWNER TO "postgres";
 
 
-COMMENT ON FUNCTION "public"."commit_scenario_batch"("p_allocator_id" "uuid", "p_diffs" "jsonb", "p_idempotency_key" "text", "p_request_hash" "text", "p_portfolio_fingerprint" "text") IS 'audit-2026-05-07 H-0974 / H-0976 / H-0977 + mig 131 idempotency dedup + B11 NEW-C18-10 portfolio-fingerprint precondition. SECURITY DEFINER RPC that commits a batch of <=50 scenario diffs in a single Postgres transaction. auth.uid() = p_allocator_id guard. Per-row ownership probe with asof + value_usd > 0 filter (mig 128 P1957). voluntary_modify uses single canonical percent_allocated encoding (mig 128 P1956). Idempotency-Key reservation lives in the same tx as the data inserts (mig 131). When p_portfolio_fingerprint is supplied, the CURRENT latest-asof holdings token set is recompared against it (order-invariant, COLLATE "C", no value_usd filter) and a divergence returns ok:false code=portfolio_fingerprint_stale (route -> 409). On success, emits one scenario.commit audit_log row attributed to the allocator (fail-soft).';
+COMMENT ON FUNCTION "public"."commit_scenario_batch"("p_allocator_id" "uuid", "p_diffs" "jsonb", "p_idempotency_key" "text", "p_request_hash" "text", "p_portfolio_fingerprint" "text") IS 'audit-2026-05-07 H-0974 / H-0976 / H-0977 + mig 131 idempotency dedup + B11 NEW-C18-10 portfolio-fingerprint precondition. SECURITY DEFINER RPC that commits a batch of <=50 scenario diffs in a single Postgres transaction. auth.uid() = p_allocator_id guard. Per-row ownership probe with asof + value_usd > 0 filter (mig 128 P1957). voluntary_modify uses single canonical percent_allocated encoding (mig 128 P1956). Idempotency-Key reservation lives in the same tx as the data inserts (mig 131). When p_portfolio_fingerprint is supplied, the CURRENT holdings token set is recompared against it (order-invariant, COLLATE "C", no value_usd filter) and a divergence returns ok:false code=portfolio_fingerprint_stale (route -> 409). Since 20260929120000 (Phase 167.1.2 SFH-R2-01) the current set is the one the My Allocation reader shows (fetchLatestHoldingsPerKey): each key''s rows at its own latest reading, one reading per exchange account, and no rows from a key whose newer clean poll read nothing. On success, emits one scenario.commit audit_log row attributed to the allocator (fail-soft).';
 
 
 
@@ -3425,7 +3584,7 @@ BEGIN
   IF NOT FOUND THEN
     -- Distinguish a token mismatch on a still-running row (W1 lost the race
     -- to W2's watchdog re-claim) from a genuine not-found / not-running,
-    -- mirroring mark_compute_job_done's P97 serialization_failure branch.
+    -- mirroring mark_compute_job_done's P97 preempted branch (SQLSTATE 55006).
     SELECT status, claim_token
       INTO v_current_status, v_current_token
       FROM compute_jobs
@@ -3437,7 +3596,7 @@ BEGIN
        AND v_current_token IS DISTINCT FROM p_claim_token THEN
       RAISE EXCEPTION 'defer_compute_job: job % preempted by watchdog reclaim (caller token=%, current token=%)',
         p_job_id, p_claim_token, v_current_token
-        USING ERRCODE = 'serialization_failure';
+        USING ERRCODE = '55006';
     END IF;
 
     RAISE EXCEPTION 'defer_compute_job: job % not found or not running', p_job_id
@@ -3467,7 +3626,7 @@ $$;
 ALTER FUNCTION "public"."defer_compute_job"("p_job_id" "uuid", "p_defer_seconds" integer, "p_reason" "text", "p_claim_token" "uuid") OWNER TO "postgres";
 
 
-COMMENT ON FUNCTION "public"."defer_compute_job"("p_job_id" "uuid", "p_defer_seconds" integer, "p_reason" "text", "p_claim_token" "uuid") IS 'Defers a running job back to pending for circuit-breaker cooldowns. Decrements attempts by 1 to cancel claim_compute_jobs increment so the defer does not burn a retry. NEW-C12-06 (CL10): p_claim_token fences the running-row read (back-compat NULL arm for the deploy window) and a token mismatch on a still-running row raises serialization_failure; the deferred row has claim_token NULLed so it drops the stale fence token. Worker is sole caller (services/job_worker._check_circuit_breaker). See migrations 033 + 117.';
+COMMENT ON FUNCTION "public"."defer_compute_job"("p_job_id" "uuid", "p_defer_seconds" integer, "p_reason" "text", "p_claim_token" "uuid") IS 'Defers a running job back to pending for circuit-breaker cooldowns. Decrements attempts by 1 to cancel claim_compute_jobs increment so the defer does not burn a retry. NEW-C12-06 (CL10): p_claim_token fences the running-row read (back-compat NULL arm for the deploy window) and a token mismatch on a still-running row raises SQLSTATE 55006 (object_in_use), which PostgREST answers once; the deferred row has claim_token NULLed so it drops the stale fence token. Worker is sole caller (services/job_worker._check_circuit_breaker). See migrations 033 + 117.';
 
 
 
@@ -5299,7 +5458,19 @@ CREATE OR REPLACE FUNCTION "public"."enqueue_refresh_allocator_equity_for_all"()
     AS $$
 DECLARE
   v_key   RECORD;
+  v_book  RECORD;
+  v_rkey  RECORD;
   v_today TEXT := to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD');
+  -- A reconstruct runs up to 30 minutes, and the first run after this
+  -- migration applies must not flood the worker. The cap is soft at book
+  -- granularity: splitting a book lets a sibling's first snapshot row strand
+  -- the rest. Books beyond it drain on later runs (the cap is per call, and
+  -- pg_cron calls once a day).
+  v_bootstrap_cap CONSTANT integer := 25;
+  v_bootstrap_enqueued integer := 0;
+  v_boot_key uuid;
+  v_loop_state text;
+  v_loop_msg   text;
 BEGIN
   IF NOT pg_try_advisory_lock(hashtext('daily_equity_refresh')) THEN
     RAISE NOTICE 'enqueue_refresh_allocator_equity_for_all: another run holds the lock; skipping';
@@ -5307,15 +5478,147 @@ BEGIN
   END IF;
 
   BEGIN
+    -- Phase 167.1.2 D-17: bootstrap a zero-snapshot book. Whole books, newest
+    -- qualifying key first; never split a book across runs.
+    -- ISOLATED (167.1.2-12 review SFH-02): this loop runs in its own
+    -- sub-block. An error that escapes the per-book block below (the
+    -- book-selection query itself, for one) rolls back every bootstrap
+    -- enqueue of this run, logs a WARNING and falls through to the refresh
+    -- loop, so a failure here never cancels the daily refresh of every
+    -- allocator. That is safe by construction: a book whose reconstructs were
+    -- rolled back is not bootstrapped, so the refresh loop still withholds its
+    -- refresh.
+    BEGIN
+      FOR v_book IN
+        SELECT bq.user_id AS owner_id
+        FROM api_keys bq
+        WHERE bq.is_active = TRUE
+          AND bq.sync_status IS DISTINCT FROM 'revoked'
+          AND coalesce(bq.sync_status, '') NOT IN ('sign_in_failed', 'error')
+          AND bq.disconnected_at IS NULL
+          AND lower(bq.exchange) <> 'deribit'
+          AND NOT EXISTS (SELECT 1 FROM strategies bqs WHERE bqs.api_key_id = bq.id AND bqs.user_id = bq.user_id AND bqs.status <> 'archived')
+          AND NOT EXISTS (SELECT 1 FROM strategy_keys bqsk JOIN strategies bqks ON bqks.id = bqsk.strategy_id WHERE bqsk.api_key_id = bq.id AND bqks.user_id = bq.user_id AND bqks.status <> 'archived')
+          AND NOT EXISTS (SELECT 1 FROM compute_jobs bqj WHERE bqj.api_key_id = bq.id AND bqj.kind = 'reconstruct_allocator_history' AND bqj.status IN ('pending', 'running', 'done_pending_children', 'failed_retry', 'done'))
+          AND NOT EXISTS (SELECT 1 FROM allocator_equity_snapshots bqe WHERE bqe.allocator_id = bq.user_id)
+        GROUP BY bq.user_id
+        ORDER BY max(bq.created_at) DESC, bq.user_id
+      LOOP
+        EXIT WHEN v_bootstrap_enqueued >= v_bootstrap_cap;
+        -- ONE BOOK AT A TIME (167.1.2-12 review SFH-R2-03): any other error
+        -- while enqueueing this book rolls back THIS book's enqueues only and
+        -- the loop moves on to the next book, so one key whose enqueue fails
+        -- every day cannot cancel every other book's bootstrap. The skipped
+        -- book has no in-flight-or-done reconstruct row, so the refresh loop
+        -- still withholds its refresh, and the next run takes it again.
+        v_boot_key := NULL;
+        BEGIN
+          FOR v_rkey IN
+            SELECT rk.id AS api_key_id
+            FROM api_keys rk
+            WHERE rk.user_id = v_book.owner_id
+              AND rk.is_active = TRUE
+              AND rk.sync_status IS DISTINCT FROM 'revoked'
+              AND coalesce(rk.sync_status, '') NOT IN ('sign_in_failed', 'error')
+              AND rk.disconnected_at IS NULL
+              AND lower(rk.exchange) <> 'deribit'
+              AND NOT EXISTS (SELECT 1 FROM strategies rks WHERE rks.api_key_id = rk.id AND rks.user_id = rk.user_id AND rks.status <> 'archived')
+              AND NOT EXISTS (SELECT 1 FROM strategy_keys rksk JOIN strategies rkks ON rkks.id = rksk.strategy_id WHERE rksk.api_key_id = rk.id AND rkks.user_id = rk.user_id AND rkks.status <> 'archived')
+              AND NOT EXISTS (SELECT 1 FROM compute_jobs rkj WHERE rkj.api_key_id = rk.id AND rkj.kind = 'reconstruct_allocator_history' AND rkj.status IN ('pending', 'running', 'done_pending_children', 'failed_retry', 'done'))
+            ORDER BY rk.created_at DESC, rk.id
+          LOOP
+            v_boot_key := v_rkey.api_key_id;
+            BEGIN
+              PERFORM enqueue_compute_job(
+                p_strategy_id     := NULL,
+                p_kind            := 'reconstruct_allocator_history',
+                p_idempotency_key := 'reconstruct-alloc-' || v_rkey.api_key_id::text || '-initial',
+                p_api_key_id      := v_rkey.api_key_id
+              );
+            -- serialization_failure is the enqueue helper's lost-race signal
+            -- (the winner already left the in-flight statuses). unique_violation
+            -- cannot fire today (the helper inserts ON CONFLICT DO NOTHING) and
+            -- is kept as belt. Either skips ONE key, never the run.
+            EXCEPTION WHEN unique_violation OR serialization_failure THEN
+              RAISE WARNING 'enqueue_refresh_allocator_equity_for_all: reconstruct enqueue skipped for api_key % (SQLSTATE %)', v_rkey.api_key_id, SQLSTATE;
+            END;
+            v_bootstrap_enqueued := v_bootstrap_enqueued + 1;
+          END LOOP;
+        EXCEPTION WHEN OTHERS THEN
+          -- v_boot_key is the key being enqueued, or NULL when the per-key
+          -- query itself failed before the first key.
+          RAISE WARNING 'enqueue_refresh_allocator_equity_for_all: the bootstrap of one book was rolled back and skipped; the other books continue (api_key %, SQLSTATE %)', v_boot_key, SQLSTATE;
+          -- DURABLE TRACE (review SFH-R2-02, MIG-R2-01): a WARNING lives only
+          -- in the server log, and pg_cron records the run as succeeded. One
+          -- public.cron_runs row per skipped book, the sink the ledger fan-outs
+          -- write their candidate_enqueue_failed rows to; row security lets
+          -- only platform admins and service_role read it. Deliberately NOT
+          -- wrapped: if the sink refuses this row, the error reaches the
+          -- sub-block below, which rolls this run's bootstrap back and writes
+          -- its own row, so a skip is never left with no trace at all.
+          INSERT INTO public.cron_runs (cron_name, status, completed_at, error, metadata)
+          VALUES ('equity_refresh_fanout', 'error', now(), 'bootstrap_book_skipped',
+                  jsonb_build_object('function', 'enqueue_refresh_allocator_equity_for_all',
+                                     'cause', 'bootstrap_book_skipped',
+                                     'owner_id', v_book.owner_id,
+                                     'api_key_id', v_boot_key,
+                                     'sqlstate', SQLSTATE,
+                                     'message', SQLERRM));
+        END;
+      END LOOP;
+    EXCEPTION WHEN OTHERS THEN
+      v_loop_state := SQLSTATE;
+      v_loop_msg   := SQLERRM;
+      RAISE WARNING 'enqueue_refresh_allocator_equity_for_all: the bootstrap loop failed and was rolled back; the refresh loop still runs (SQLSTATE %: %)', v_loop_state, v_loop_msg;
+      -- DURABLE TRACE (review SFH-R2-02, MIG-R2-01), the same sink as the
+      -- per-book row. Wrapped, unlike that row: this is the last handler
+      -- before the refresh loop, and a sink that refuses this row too must
+      -- not cancel the daily refresh of every allocator.
+      BEGIN
+        INSERT INTO public.cron_runs (cron_name, status, completed_at, error, metadata)
+        VALUES ('equity_refresh_fanout', 'error', now(), 'bootstrap_loop_failed',
+                jsonb_build_object('function', 'enqueue_refresh_allocator_equity_for_all',
+                                   'cause', 'bootstrap_loop_failed',
+                                   'sqlstate', v_loop_state,
+                                   'message', v_loop_msg));
+      EXCEPTION WHEN OTHERS THEN
+        RAISE WARNING 'enqueue_refresh_allocator_equity_for_all: the bootstrap failure row could not be written (SQLSTATE %)', SQLSTATE;
+      END;
+    END;
+
+    -- The refresh loop runs AFTER the bootstrap loop on purpose: its
+    -- bootstrapped test reads the reconstruct rows the loop above just
+    -- enqueued in this transaction, so a book taken this run is refreshed this
+    -- run, and a book beyond the cap is refreshed only once a later run has
+    -- enqueued its reconstructs. A reconstruct row counts only while it is in
+    -- flight or done: a book whose only reconstruct ended failed_final is not
+    -- bootstrapped, so no refresh row closes its zero-snapshot gate before the
+    -- retry the loop above enqueues.
     FOR v_key IN
       SELECT ak.id AS api_key_id, ak.user_id
       FROM api_keys ak
       WHERE ak.is_active = TRUE
+        AND ak.sync_status IS DISTINCT FROM 'revoked'
         AND ak.disconnected_at IS NULL  -- migration 075
-        AND EXISTS (
-          SELECT 1 FROM allocator_equity_snapshots aes
-          WHERE aes.allocator_id = ak.user_id
-          LIMIT 1
+        AND (
+          EXISTS (SELECT 1 FROM allocator_equity_snapshots aes WHERE aes.allocator_id = ak.user_id)
+          OR (
+            NOT EXISTS (SELECT 1 FROM strategies aks WHERE aks.api_key_id = ak.id AND aks.user_id = ak.user_id AND aks.status <> 'archived')
+            AND NOT EXISTS (SELECT 1 FROM strategy_keys aksk JOIN strategies akks ON akks.id = aksk.strategy_id WHERE aksk.api_key_id = ak.id AND akks.user_id = ak.user_id AND akks.status <> 'archived')
+            AND NOT EXISTS (
+              SELECT 1
+              FROM api_keys bk
+              WHERE bk.user_id = ak.user_id
+                AND bk.is_active = TRUE
+                AND bk.sync_status IS DISTINCT FROM 'revoked'
+                AND coalesce(bk.sync_status, '') NOT IN ('sign_in_failed', 'error')
+                AND bk.disconnected_at IS NULL
+                AND lower(bk.exchange) <> 'deribit'
+                AND NOT EXISTS (SELECT 1 FROM strategies bks WHERE bks.api_key_id = bk.id AND bks.user_id = bk.user_id AND bks.status <> 'archived')
+                AND NOT EXISTS (SELECT 1 FROM strategy_keys bksk JOIN strategies bkks ON bkks.id = bksk.strategy_id WHERE bksk.api_key_id = bk.id AND bkks.user_id = bk.user_id AND bkks.status <> 'archived')
+                AND NOT EXISTS (SELECT 1 FROM compute_jobs bkj WHERE bkj.api_key_id = bk.id AND bkj.kind = 'reconstruct_allocator_history' AND bkj.status IN ('pending', 'running', 'done_pending_children', 'failed_retry', 'done'))
+            )
+          )
         )
     LOOP
       BEGIN
@@ -5325,8 +5628,8 @@ BEGIN
           p_idempotency_key := 'daily-equity-' || v_key.api_key_id::text || '-' || v_today,
           p_api_key_id      := v_key.api_key_id
         );
-      EXCEPTION WHEN unique_violation THEN
-        NULL;
+      EXCEPTION WHEN unique_violation OR serialization_failure THEN
+        RAISE WARNING 'enqueue_refresh_allocator_equity_for_all: refresh enqueue skipped for api_key % (SQLSTATE %)', v_key.api_key_id, SQLSTATE;
       END;
     END LOOP;
   EXCEPTION WHEN OTHERS THEN
@@ -5342,7 +5645,7 @@ $$;
 ALTER FUNCTION "public"."enqueue_refresh_allocator_equity_for_all"() OWNER TO "postgres";
 
 
-COMMENT ON FUNCTION "public"."enqueue_refresh_allocator_equity_for_all"() IS 'Daily cron fan-out for per-allocator equity refresh. Migration 075 added disconnected_at IS NULL filter so soft-disconnected keys stop receiving refresh jobs. Preserves advisory lock + per-key loop from migration 070.';
+COMMENT ON FUNCTION "public"."enqueue_refresh_allocator_equity_for_all"() IS 'Daily cron fan-out for the per-allocator legacy equity store. Two arms, inside one advisory lock. (1) Bootstrap, first, in its own sub-block, one book per inner block (an error enqueueing one book rolls back and skips that book only; an error outside any book rolls back every bootstrap enqueue of the run; neither cancels the refresh; both are logged as a WARNING and as one public.cron_runs row, cron_name equity_refresh_fanout, error bootstrap_book_skipped or bootstrap_loop_failed): for an owner with ZERO allocator_equity_snapshots rows, one reconstruct_allocator_history job for every qualifying key with no reconstruct job in flight (pending, running, done_pending_children, failed_retry) or done, so a failed_final reconstruct is retried; qualifying = active, not revoked, sync_status not sign_in_failed or error, not disconnected, not linked to one of its owner''s non-archived strategies (strategies.api_key_id or strategy_keys, mirroring deriveStrategyLinkedKeyIds) and not Deribit. The job carries idempotency key reconstruct-alloc-<key>-initial, the RPC''s correlation label; dedupe is the in-flight partial unique index plus the in-flight-or-done gate, not that key. Whole books, newest key first, stopping before a new book once 25 keys (v_bootstrap_cap) were enqueued this call. (2) Refresh: one refresh_allocator_equity_daily job per eligible key (active, not revoked, not disconnected) whose owner has a snapshot row, or which is unlinked on a book where every qualifying key has a reconstruct job in flight or done. A lost enqueue race (serialization_failure) skips one key with a WARNING. Phase 167.1.2 D-17; re-based on migration 075.';
 
 
 
@@ -6987,7 +7290,7 @@ BEGIN
       END IF;
       RAISE EXCEPTION 'mark_compute_job_done: job % preempted by watchdog reclaim (late mark on already-done row, caller token=%, current token=%)',
         p_job_id, p_claim_token, v_current_token
-        USING ERRCODE = 'serialization_failure';
+        USING ERRCODE = '55006';
     END IF;
 
     -- mig 117 P97: token mismatch on a still-running row.
@@ -6995,7 +7298,7 @@ BEGIN
        AND v_current_token IS DISTINCT FROM p_claim_token THEN
       RAISE EXCEPTION 'mark_compute_job_done: job % preempted by watchdog reclaim (caller token=%, current token=%)',
         p_job_id, p_claim_token, v_current_token
-        USING ERRCODE = 'serialization_failure';
+        USING ERRCODE = '55006';
     END IF;
 
     -- Row in some other state (failed_retry, failed_final, pending,
@@ -7039,7 +7342,7 @@ $$;
 ALTER FUNCTION "public"."mark_compute_job_done"("p_job_id" "uuid", "p_claim_token" "uuid") OWNER TO "postgres";
 
 
-COMMENT ON FUNCTION "public"."mark_compute_job_done"("p_job_id" "uuid", "p_claim_token" "uuid") IS 'Terminal success transition. Migration 117 P97 fence + B5 strict-token gate (20260528183100): p_claim_token MUST be non-NULL (NULL raises 22023); mismatch raises serialization_failure. THIS migration (G23-187-mig-01/03): re-applies the GIN-supported set-based `parent_job_ids @> ARRAY[p_job_id]` fan-in advance (the strict-token rewrite had reverted it to a `= ANY(...)` FOR-loop). Preserves the mig 099 Phase-18 atomic UI status bridge.';
+COMMENT ON FUNCTION "public"."mark_compute_job_done"("p_job_id" "uuid", "p_claim_token" "uuid") IS 'Terminal success transition. Migration 117 P97 fence + B5 strict-token gate (20260528183100): p_claim_token MUST be non-NULL (NULL raises 22023); mismatch raises SQLSTATE 55006 (object_in_use), which PostgREST answers once. THIS migration (G23-187-mig-01/03): re-applies the GIN-supported set-based `parent_job_ids @> ARRAY[p_job_id]` fan-in advance (the strict-token rewrite had reverted it to a `= ANY(...)` FOR-loop). Preserves the mig 099 Phase-18 atomic UI status bridge.';
 
 
 
@@ -7092,7 +7395,7 @@ BEGIN
        AND v_current_token IS DISTINCT FROM p_claim_token THEN
       RAISE EXCEPTION 'mark_compute_job_failed: job % preempted by watchdog reclaim (caller token=%, current token=%)',
         p_job_id, p_claim_token, v_current_token
-        USING ERRCODE = 'serialization_failure';
+        USING ERRCODE = '55006';
     END IF;
 
     RAISE EXCEPTION 'mark_compute_job_failed: job % not running (status=%)', p_job_id, v_current_status
@@ -7139,7 +7442,7 @@ $$;
 ALTER FUNCTION "public"."mark_compute_job_failed"("p_job_id" "uuid", "p_error" "text", "p_error_kind" "text", "p_claim_token" "uuid") OWNER TO "postgres";
 
 
-COMMENT ON FUNCTION "public"."mark_compute_job_failed"("p_job_id" "uuid", "p_error" "text", "p_error_kind" "text", "p_claim_token" "uuid") IS 'Terminal failure transition. Mig 117 / P97 fence + B5 strict-token follow-up: p_claim_token MUST be non-NULL (NULL raises 22023 invalid_parameter_value); mismatch raises serialization_failure. Backoff schedule preserved verbatim from mig 109 P4. HOTFIX 20260529180000: writes error_kind (not the non-existent last_error_kind that mig 20260528183100 typo-introduced, which 42703-errored every failed mark).';
+COMMENT ON FUNCTION "public"."mark_compute_job_failed"("p_job_id" "uuid", "p_error" "text", "p_error_kind" "text", "p_claim_token" "uuid") IS 'Terminal failure transition. Mig 117 / P97 fence + B5 strict-token follow-up: p_claim_token MUST be non-NULL (NULL raises 22023 invalid_parameter_value); mismatch raises SQLSTATE 55006 (object_in_use), which PostgREST answers once. Backoff schedule preserved verbatim from mig 109 P4. HOTFIX 20260529180000: writes error_kind (not the non-existent last_error_kind that mig 20260528183100 typo-introduced, which 42703-errored every failed mark).';
 
 
 

@@ -48,7 +48,7 @@
  * skipped entirely (place 1 of the two-place rule; place 2 is 91-05's ci.yml
  * MA-8 entry for `composite-onboarding.spec.ts`).
  */
-import { test, expect, type Page } from "@playwright/test";
+import { test, expect, type Page } from "./helpers/hydration-guard";
 import {
   seedCompositeStrategy,
   seedTestAllocator,

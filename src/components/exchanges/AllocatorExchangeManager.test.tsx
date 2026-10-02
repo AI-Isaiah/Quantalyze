@@ -102,6 +102,23 @@ vi.mock("@/lib/supabase/client", () => ({
             },
           };
         }
+        // Phase 167.1.2 plan 09 — the departed-history reads a departed key's
+        // card makes (first/last returns day, its key_inputs anchor). Answered
+        // empty here, and kept off the holdings probe below so they can never
+        // consume a holdingsCountMock value a delete test queued. The overview
+        // itself is tested in AllocatorExchangeManager.departed-history.test.tsx.
+        if (table === "csv_daily_returns") {
+          return {
+            eq: () => ({
+              order: () => ({
+                limit: () => Promise.resolve({ data: [], error: null }),
+              }),
+            }),
+          };
+        }
+        if (table === "allocator_equity_derived") {
+          return { in: () => Promise.resolve({ data: [], error: null }) };
+        }
         // Phase 08 Plan 02 Task 1 — allocator_holdings count probe used by
         // openDeleteConfirm. Shape matches the call:
         //   .from("allocator_holdings").select("*", {count:"exact", head:true}).eq("api_key_id", keyId)
@@ -2798,5 +2815,117 @@ describe("AllocatorExchangeManager — duplicate-account note and reconnect refu
       );
     });
     errSpy.mockRestore();
+  });
+});
+
+/**
+ * 2026-09-29, Phase 169 review round 1 IN-04. The key card's balance renders
+ * through the ONE money module (`formatUsd`, whole dollars), not a private
+ * compact copy that read "$12.3k". DESIGN.md's Currency row: amounts stay
+ * whole dollars, null and non-finite are the em-dash. Typed-literal oracles.
+ */
+describe("AllocatorExchangeManager — the key card's balance (169 IN-04)", () => {
+  it.each([
+    [12_345, "Balance $12,345"],
+    [2_500_000, "Balance $2,500,000"],
+    [null, "Balance —"],
+    [Number.NaN, "Balance —"],
+  ])("a balance of %s renders %s", (balance, expected) => {
+    render(
+      <AllocatorExchangeManager
+        hasHoldings={true}
+        initialKeys={[makeKey({ account_balance_usdt: balance })]}
+      />,
+    );
+    const line = screen.getByText(/Read-only · Balance/);
+    expect(line.textContent).toContain(expected);
+  });
+});
+
+// SC2-PROFILE (N-PROFILE). A nowrap row inside overflow-hidden is clipped,
+// not scrolled, so Disconnect sits past a phone viewport. Both key rows wrap,
+// and each row's actions share one group that takes its own line below sm.
+describe("AllocatorExchangeManager — key rows wrap so Disconnect is reachable (SC2-PROFILE)", () => {
+  function surfaceRow(el: HTMLElement): HTMLElement {
+    let node: HTMLElement | null = el;
+    while (node && !/\bbg-surface\b/.test(node.className)) {
+      node = node.parentElement;
+    }
+    if (!node) throw new Error("key row not found");
+    return node;
+  }
+
+  function expectActionGroup(el: HTMLElement) {
+    for (const token of [
+      "basis-full",
+      "sm:basis-auto",
+      "sm:ml-auto",
+      "flex-wrap",
+      "gap-2",
+    ]) {
+      expect(el.className, token).toContain(token);
+    }
+  }
+
+  it("wraps active and disconnected rows, and groups Disconnect with Sync now", () => {
+    render(
+      <AllocatorExchangeManager
+        hasHoldings={true}
+        initialKeys={[
+          makeKey(),
+          makeKey({
+            id: "key-mt5-1",
+            exchange: "mt5",
+            label: "My MT5",
+            venue_account_id: "1001",
+          }),
+          makeKey({
+            id: "key-okx-gone",
+            exchange: "okx",
+            label: "Old OKX",
+            disconnected_at: "2026-04-22T09:00:00Z",
+          }),
+        ]}
+      />,
+    );
+
+    const disconnect = screen.getByRole("button", {
+      name: "Disconnect binance key",
+    });
+    const sync = screen.getByRole("button", { name: "Sync binance now" });
+    const group = disconnect.parentElement;
+    expect(group).not.toBeNull();
+    expectActionGroup(group!);
+    expect(sync.parentElement).toBe(group);
+
+    const activeRow = surfaceRow(disconnect);
+    expect(activeRow).not.toBe(group);
+    expect(activeRow.className).toContain("flex-wrap");
+
+    const update = screen.getByRole("button", {
+      name: "Update password for mt5 key",
+    });
+    const mt5Disconnect = screen.getByRole("button", {
+      name: "Disconnect mt5 key",
+    });
+    expect(update.parentElement).toBe(mt5Disconnect.parentElement);
+    expectActionGroup(mt5Disconnect.parentElement!);
+    expect(surfaceRow(mt5Disconnect).className).toContain("flex-wrap");
+
+    const reconnect = screen.getByRole("button", { name: "Reconnect okx key" });
+    const disconnectedGroup = reconnect.parentElement;
+    expect(disconnectedGroup).not.toBeNull();
+    expectActionGroup(disconnectedGroup!);
+    const disconnectedRow = surfaceRow(reconnect);
+    expect(disconnectedRow).not.toBe(disconnectedGroup);
+    expect(disconnectedRow.className).toContain("flex-wrap");
+    expect(disconnectedRow.className).toContain("opacity-75");
+
+    for (const button of [disconnect, sync, update, mt5Disconnect, reconnect]) {
+      expect(button.className).toContain("min-h-[44px]");
+      expect(button.className).toContain("px-4");
+      expect(button.className).toContain("py-2.5");
+      expect(button.className).toContain("text-body");
+    }
   });
 });

@@ -34,7 +34,7 @@ export default async function AdminPage() {
       .from("strategies")
       .select(
         `id, name, status, source, strategy_types, created_at, user_id,
-         profiles!strategies_user_id_fkey(display_name),
+         profiles!strategies_user_id_fkey(display_name, email),
          strategy_analytics (cagr, sharpe, max_drawdown, computation_status, computed_at)`,
       )
       .eq("status", "pending_review")
@@ -61,6 +61,27 @@ export default async function AdminPage() {
       .order("created_at", { ascending: false })
       .returns<PendingManagerRow[]>(),
   ]);
+
+  // SFH-170-03: read every query's error. `data ?? []` alone turned a failed
+  // read into an empty queue, so a PostgREST failure on the review queue read
+  // "All caught up" while strategies sat in pending_review. Same pattern as
+  // src/lib/admin/match.ts: log with the query name, then throw so the admin
+  // error boundary (`./error.tsx`) renders a visible load-error state.
+  const results = {
+    introRequests,
+    pendingStrategies,
+    pendingAllocators,
+    pendingManagers,
+  };
+  for (const [name, res] of Object.entries(results)) {
+    if (res.error) {
+      console.error(`[admin] ${name} query failed`, {
+        code: res.error.code,
+        message: res.error.message,
+      });
+      throw new Error(`Admin dashboard: ${name} query failed`);
+    }
+  }
 
   return (
     <>

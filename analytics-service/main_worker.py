@@ -367,32 +367,42 @@ WATCHDOG_PER_KIND_OVERRIDES: dict[str, str] = {
 # ---------------------------------------------------------------------------
 # Late-mark detection (audit-2026-05-07 P97 / G12.A.2 — claim-token fence)
 # ---------------------------------------------------------------------------
-# Migration 117 raises `serialization_failure` (PostgreSQL SQLSTATE 40001)
-# from mark_compute_job_done / mark_compute_job_failed when the caller's
-# p_claim_token doesn't match the row's current claim_token. This means
-# the watchdog reclaimed the row and a second worker has taken over —
-# the late mark is expected behavior, not a failure. Detect by:
+# mark_compute_job_done / mark_compute_job_failed raise SQLSTATE 55006
+# (object_in_use) when the caller's p_claim_token doesn't match the row's
+# current claim_token. This means the watchdog reclaimed the row and a
+# second worker has taken over — the late mark is expected behavior, not a
+# failure. Detect by:
 #   (a) sniffing the PostgREST APIError `.code` attribute for the
-#       SQLSTATE '40001', OR
+#       SQLSTATE '55006', OR
 #   (b) for transports that don't surface .code cleanly, checking for our
 #       specific RAISE message literal 'preempted by watchdog reclaim'
-#       (set in migration 117 STEP 4 + STEP 5).
+#       (set in migration 117 STEP 4 + STEP 5, kept byte-identical since).
+#
+# Phase 164.9.3.2: migration 117 raised these as serialization_failure
+# (40001). PostgREST 14 re-runs a transaction that raised 40001 without
+# bound, so a stale-token mark never returned to the worker at all; the
+# fence now raises 55006 instead. The literal branch (b) covers ONE deploy
+# order: migration first, old worker. The body answers a 55006 once, and an
+# old classifier (which checks code '40001') matches it by the literal. The
+# reverse order (new worker, old body) is NOT covered: the body still raises
+# 40001, PostgREST 14 re-runs it without bound, and no response ever reaches
+# this classifier. That is the pre-fix hang, unchanged, until the migration
+# applies.
 #
 # PR #149 review I4 (maintainability conf 8 + security conf 6): the
 # previous version also matched the bare strings '40001' and
 # 'serialization_failure' anywhere in the message. That collides with
 # any OTHER source of a serialization conflict (manual SERIALIZABLE
 # isolation, advisory-lock contention surfacing as 40001, third-party
-# library messages embedding '40001' for unrelated reasons). Tighten to:
-# either .code == '40001' OR our specific message literal. This makes
-# the detection P97-specific and prevents silent swallowing of unrelated
-# 40001s.
+# library messages embedding '40001' for unrelated reasons). Tightened to
+# a code match OR our specific message literal; since 164.9.3.2 the code
+# is 55006, so a bare 40001 without the literal is never swallowed.
 _PREEMPTED_MESSAGE_LITERAL = "preempted by watchdog reclaim"
 
 
 def _is_serialization_failure(exc: BaseException) -> bool:
     code = getattr(exc, "code", None)
-    if code == "40001":
+    if code == "55006":
         return True
     msg = str(exc) if exc is not None else ""
     return _PREEMPTED_MESSAGE_LITERAL in msg
@@ -541,7 +551,8 @@ def _is_undefined_function_structured(exc: BaseException) -> bool:
 # Safe mark wrapper (DRY for the 3 try/except blocks in dispatch_tick)
 # ---------------------------------------------------------------------------
 # PR #149 review I5 (maintainability conf 9) + I6 (red-team conf 8):
-# extract the "call mark RPC, swallow 40001, log LATE_MARK_IGNORED, re-
+# extract the "call mark RPC, swallow a fence preemption (SQLSTATE 55006,
+# see `_is_serialization_failure`), log LATE_MARK_IGNORED, re-
 # raise anything else" pattern that was repeated 3 times in dispatch_tick.
 # Single source of truth = single place to fix any future bug in the
 # late-mark detection / logging contract.
@@ -552,14 +563,15 @@ def _is_undefined_function_structured(exc: BaseException) -> bool:
 #
 # `outer_exc` is set when called from the outer-catch fallback path
 # (I6): the original dispatch exception that triggered the
-# `_mark_failed_fallback`. If `_safe_mark` itself swallows a 40001 in
-# that path, the LATE_MARK_IGNORED log line carries
+# `_mark_failed_fallback`. If `_safe_mark` itself swallows a fence
+# preemption in that path, the LATE_MARK_IGNORED log line carries
 # `event_type="preempted_after_dispatch_error"` and includes the outer
 # exception context — so the late-mark line subsumes the original
 # error log instead of triplicating it.
 #
-# Returns: True iff `_safe_mark` swallowed a 40001 (LATE_MARK_IGNORED
-# fired). False iff the mark succeeded normally. Re-raises any other
+# Returns: True iff `_safe_mark` swallowed a fence preemption that
+# `_is_serialization_failure` classifies (LATE_MARK_IGNORED fired).
+# False iff the mark succeeded normally. Re-raises any other
 # exception. PR #149 second-pass review fix #4 (HIGH conf 8): callers
 # in the outer-catch fallback path use the return value to decide
 # whether to log the original `dispatch_tick: unhandled error` line —
@@ -812,9 +824,10 @@ async def dispatch_tick(worker_id: str) -> None:
         # The claim RPC stamps a fresh UUID into compute_jobs.claim_token at
         # claim time; we read it from the row here and pass it through to the
         # mark RPCs. If the watchdog reclaims this row mid-handler and a
-        # second worker takes over, our late mark RPC raises
-        # serialization_failure — that's the expected late-mark-ignored path,
-        # not a failure. INVEST-P97 §Recommendation point 2.
+        # second worker takes over, our late mark RPC raises SQLSTATE 55006
+        # (object_in_use) carrying the 'preempted by watchdog reclaim'
+        # literal — that's the expected late-mark-ignored path, not a
+        # failure. INVEST-P97 §Recommendation point 2.
         claim_token = job.get("claim_token")
 
         # JOB-04 (Phase 143): a job carrying the reconcile-sweep marker means an
@@ -991,7 +1004,8 @@ async def dispatch_tick(worker_id: str) -> None:
             #
             # PR #149 second-pass review fix #4 (HIGH conf 8): defer the
             # "dispatch_tick: unhandled error" log line until AFTER the
-            # fallback mark resolves. If the mark swallows a 40001
+            # fallback mark resolves. If the mark swallows a fence
+            # preemption that `_is_serialization_failure` classifies
             # (LATE_MARK_IGNORED with event_type="preempted_after_
             # dispatch_error"), the late-mark line already carries the
             # outer_exc context via its `extra` dict — logging the
@@ -1038,7 +1052,8 @@ async def dispatch_tick(worker_id: str) -> None:
                 # outer exc context lives in that record's `extra`
                 # dict. Don't double-log.
             except Exception as mark_exc:  # noqa: BLE001
-                # `_safe_mark` only re-raises NON-40001 exceptions, so we
+                # `_safe_mark` only re-raises exceptions that
+                # `_is_serialization_failure` does not classify, so we
                 # reach this branch when the fallback mark itself failed
                 # for a reason unrelated to the P97 fence. The original
                 # dispatch error is also unattributed — log BOTH so the
@@ -1223,6 +1238,17 @@ async def watchdog_loop(interval: float = 60.0) -> None:
 
 async def daily_enqueue_loop(interval: float = 86400.0) -> None:
     """Daily enqueue loop: once per day, seed poll_positions jobs."""
+    # A `backfill` worker runs NEXT TO the API's merged worker (FLIP runbook
+    # Step 1), which already seeds the daily poll. Seeding here too would give
+    # every strategy a second poll_positions job per day (the in-flight dedup
+    # does not cover completed rows), doubling exchange calls.
+    if WORKER_CLAIM_ROLE == "backfill":
+        logger.info(
+            "daily_enqueue: disabled for WORKER_CLAIM_ROLE=backfill — the "
+            "interactive/merged worker owns the daily poll seed.",
+            extra={"event_type": "daily_enqueue_disabled_backfill_role"},
+        )
+        return
     # Run on startup ONLY if the daily enqueue hasn't already run today.
     # redteam-2026-05 W1 (LOW9): without this gate, every Railway
     # redeploy/crash within one day re-ran the full enqueue, inflating the

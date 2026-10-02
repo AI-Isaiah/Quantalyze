@@ -84,10 +84,10 @@ replay it, and boot green on a schema missing it. A full list cannot make that m
 
 | | |
 |---|---|
-| Taken | 2026-09-28 |
+| Taken | 2026-10-02 |
 | Source | production catalogue, read-only `supabase db dump --linked` |
-| Supabase CLI | 2.98.2 (the `redump-dump` job, Supabase Migrate run `36391461817`) |
-| sha256 | `af1760aabcec1f655e6b8596fe3477f33fe23ada603586edeb89aab789050cea` |
+| Supabase CLI | 2.98.2 (the `redump-dump` job, Supabase Migrate run `36981647441`) |
+| sha256 | `a45dcc44ce599951f0baa059955ae23bcfa88a8de8c08cf491117086a47b8468` |
 | Shape | 63 tables, 155 policies, 125 function statements (123 distinct names), **0 data statements** |
 
 Secret-scanned before commit with the exact pattern recorded in
@@ -95,6 +95,66 @@ Secret-scanned before commit with the exact pattern recorded in
 no project ref. The only matches for the words `SECRET` / `PASSWORD` / `api_key` are inside
 documentation comments that already ship publicly in `supabase/migrations/**`, so this file
 discloses nothing that the migration history did not already.
+
+### Regenerated 2026-10-02 — automated re-dump after Supabase Migrate run 36981647441
+
+Taken read-only by the `redump-dump` job of Supabase Migrate run `36981647441`, after that run's `apply` job applied merge `5a88a165` to PRODUCTION, and composed onto `main` by the `redump-pr` job. Every value below is measured.
+
+**Which migrations the new dump now carries** — from the marker diff:
+
+- `20261001120000_compute_job_fence_errcode_55006.sql`
+
+**MEASURED:**
+
+| | |
+|---|---|
+| Taken | 2026-10-02 |
+| Supabase CLI | 2.98.2 |
+| Shape | tables 63 → 63, policies 155 → 155, function statements 125 → 125, distinct function names 123 → 123 |
+| Data statements | 0 → 0 |
+| sha256 | `43302190…` → `a45dcc44…` |
+| Currency gate | `baseline-currency: carried=284 replay=0 marker-sha=match defects=0` |
+| Body drift | `baseline-content-drift: functions compared 125 — MATCH 122, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`; `baseline-content-drift: findings 0` |
+
+### Regenerated 2026-09-30 — automated re-dump after Supabase Migrate run 36679743686
+
+Taken read-only by the `redump-dump` job of Supabase Migrate run `36679743686`, after that run's `apply` job applied merge `a953d5b5` to PRODUCTION, and composed onto `main` by the `redump-pr` job. Every value below is measured.
+
+**Which migrations the new dump now carries** — from the marker diff:
+
+- `20260929120000_commit_scenario_batch_fingerprint_reader_set.sql`
+
+**MEASURED:**
+
+| | |
+|---|---|
+| Taken | 2026-09-30 |
+| Supabase CLI | 2.98.2 |
+| Shape | tables 63 → 63, policies 155 → 155, function statements 125 → 125, distinct function names 123 → 123 |
+| Data statements | 0 → 0 |
+| sha256 | `92b7d216…` → `43302190…` |
+| Currency gate | `baseline-currency: carried=283 replay=0 marker-sha=match defects=0` |
+| Body drift | `baseline-content-drift: functions compared 125 — MATCH 122, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`; `baseline-content-drift: findings 0` |
+
+### Regenerated 2026-09-29 — automated re-dump after Supabase Migrate run 36590346974
+
+Taken read-only by the `redump-dump` job of Supabase Migrate run `36590346974`, after that run's `apply` job applied merge `6ca90e73` to PRODUCTION, and composed onto `main` by the `redump-pr` job. Every value below is measured.
+
+**Which migrations the new dump now carries** — from the marker diff:
+
+- `20260928140000_refresh_fanout_bootstraps_zero_snapshot_books.sql`
+
+**MEASURED:**
+
+| | |
+|---|---|
+| Taken | 2026-09-29 |
+| Supabase CLI | 2.98.2 |
+| Shape | tables 63 → 63, policies 155 → 155, function statements 125 → 125, distinct function names 123 → 123 |
+| Data statements | 0 → 0 |
+| sha256 | `af1760aa…` → `92b7d216…` |
+| Currency gate | `baseline-currency: carried=282 replay=0 marker-sha=match defects=0` |
+| Body drift | `baseline-content-drift: functions compared 125 — MATCH 122, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`; `baseline-content-drift: findings 0` |
 
 ### Regenerated 2026-09-28 — automated re-dump after Supabase Migrate run 36391461817
 

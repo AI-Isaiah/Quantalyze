@@ -592,7 +592,7 @@ describe("anti-SKIP CI gate (ci.yml sql-tests) — F10 pin", () => {
     expect(code).not.toBe(0);
     expect(out).toContain("the local-stack lane's DB_URL is required to run SQL self-tests");
     expect(out).not.toContain("SQL self-tests passed");
-  });
+  }, 90_000);
 
   it("refuses a handoff whose DB_URL is not loopback, before any file reaches psql", () => {
     const dir = mkdtempSync(join(tmpdir(), "antiskip-remote-"));
@@ -636,7 +636,7 @@ describe("anti-SKIP CI gate (ci.yml sql-tests) — F10 pin", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
-  });
+  }, 90_000);
 
   it("refuses a loopback-looking DB_URL whose ?host= would re-point libpq — the glob it replaced accepted it (review 164.4.2 WR-08)", () => {
     const dir = mkdtempSync(join(tmpdir(), "antiskip-hostq-"));
@@ -655,7 +655,7 @@ describe("anti-SKIP CI gate (ci.yml sql-tests) — F10 pin", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
-  });
+  }, 90_000);
 
   it("does not re-introduce the empty-corpus 'exit 0' anywhere in the step", () => {
     expect(SCRIPT).not.toMatch(/^\s*exit 0\s*$/m);

@@ -22,7 +22,7 @@
  * skipped entirely; when present, a fresh allocator is seeded and signed
  * in before each axe pass.
  */
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./helpers/hydration-guard";
 import { buildAxe } from "./helpers/axe";
 import { seedTestAllocator } from "./helpers/seed-test-project";
 
