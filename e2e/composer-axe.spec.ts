@@ -51,7 +51,7 @@
  * opens that section before the data-panel toBeVisible() checks and before
  * analyze(). Otherwise axe would miss both bodies (T-170-26).
  */
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./helpers/hydration-guard";
 import { buildAxe } from "./helpers/axe";
 import {
   cleanupStrategiesByNamePrefix,

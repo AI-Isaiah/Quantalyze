@@ -12,7 +12,7 @@
  * Shared TEST: every seed uses this spec's own per-worker prefix and
  * cleanup deletes only that prefix. Never assert a global count.
  */
-import { test, expect, type Page } from "@playwright/test";
+import { test, expect, type Page } from "./helpers/hydration-guard";
 import { assertNoReflow } from "./helpers/reflow";
 import {
   assertChildrenInside,

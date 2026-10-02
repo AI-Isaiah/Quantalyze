@@ -6270,6 +6270,25 @@ jobs:
           else
             npx playwright install --with-deps chromium
           fi
+      # Phase 169.1.1 (169.1.1-REVIEW iteration 2, WR-01): the proof that the
+      # hydration guard (`e2e/helpers/hydration-guard.ts`) bites. It moved here
+      # from the `e2e` job's smoke step, whose `continue-on-error: true` and
+      # absence from the `frontend` aggregator meant a red self-test WOULD
+      # SURFACE in the run log and WOULD NOT stop a merge. Here it is its own
+      # step with no `if:` and no `continue-on-error`, in a job the `frontend`
+      # aggregator both needs and judges, so a guard that has gone blind
+      # reddens the required check. It needs no app server and no seeded data
+      # (`page.setContent` only), so it runs before the ordering wait and the
+      # shared-test-db mutex acquire and never holds the key. `--retries 0`
+      # because its `test.fail()` cases make retries pure noise; `list` so a red
+      # result reads in this step's log (this job uploads no report).
+      # ⚠️ What this does NOT buy: this job's own `if:` skips it on fork PRs and
+      # docs-only PRs, and the aggregator tolerates that skip. On those events
+      # the self-test does not run at all. On a push or a same-repo PR it
+      # blocks. `src/__tests__/e2e-seeded-hydration-guard.test.ts` pins every
+      # invocation of the self-test to a placement like this one.
+      - name: Hydration guard self-test (proof the guard bites; blocking)
+        run: npx playwright test e2e/hydration-guard.self-test.spec.ts --retries 0 --reporter=list
       # ── THE ORDERING WAIT (Phase 164.9 plan 06, [164.8-PUSH-RACE-VAC08]) ───
       # On a merge push this job's DB work must not begin before the TEST schema
       # apply for the SAME commit has concluded. The mutex below guarantees the

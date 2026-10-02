@@ -4,16 +4,16 @@ milestone: v1.20
 milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 169.1.1
 current_phase_name: HYDRATIONTICKS
-status: planning
-stopped_at: Phase 169.1.1 inserted (urgent); runs before Phase 164.9.3.2.1 (founder 2026-10-02)
-last_updated: "2026-10-02T08:25:37.248Z"
+status: executing
+stopped_at: Phase 169.1.1 ready to ship (verification human_needed: CI reads on the pushed head)
+last_updated: "2026-10-02T10:48:30.128Z"
 last_activity: 2026-10-02
-last_activity_desc: Phase 164.9.5 closed (verification passed via bot PR #920); next 169.1.1 then 164.9.3.2.1
-state_head: d566878a2f7b690212d0bb8c53c951c5f0be72be
+last_activity_desc: Phase 169.1.1 executed (4/4 plans), 3 review rounds fixed, secured, verified human_needed (CI reads at ship); 164.9.5 closed earlier
+state_head: 4dd2aacfb
 progress:
   total_phases: 85
   completed_phases: 46
-  total_plans: 446
+  total_plans: 450
   completed_plans: 439
   percent: 54
 ---
@@ -181,11 +181,11 @@ is decided by verification status, never by plan counts.**
 
 Phase: 164.9.5 (AUTOREDUMP) — COMPLETE 2026-10-02 (verification passed; first changed re-dump opened bot PR #920, all head-sha runs green)
 Phase: 164.9.3.2 (DEFER40001) — COMPLETE 2026-10-02 (verification passed; PR #919 merged, v0.118.0.0; migration applied to TEST and PROD by Supabase Migrate run 36981647441)
-Phase: 169.1.1 (HYDRATIONTICKS) — NEXT, urgent insert (founder 2026-10-02)
+Phase: 169.1.1 (HYDRATIONTICKS) — SHIPPING, urgent insert (founder 2026-10-02); 4 plans, plan checker passed 2026-10-02; then 164.9.3.2.1
 Phase: 164.9.3.2.1 (ENQ40001) — after 169.1.1 (founder 2026-10-02)
 Phase: 166.4 (BENCHALIGN) — COMPLETE 2026-09-27 (verification passed; PR #892 merged, v0.108.0.0)
 Phase: 170 (LAYOUT — page layout reads clean and holds on every page) — COMPLETE 2026-10-01
-Plan: Not started
+Plan: 1 of 4
 Phase: 164.9.5 (AUTOREDUMP) — EXECUTING
 Plan: 9 of 9 DONE; VERIFICATION human_needed (4/6 verified, 2 live-only), SECURITY SECURED 37/37; shipped as a PR, not merged
 Phase: 166.2 (COMPUTEONCE) — EXECUTING
@@ -501,7 +501,7 @@ so every "Next is plan NN" below has been discharged:
       NON-ZERO exit is a regression. Next is plan 06 (closure: the false-reading
       `lane-probe: … class is STALE` sentence, the `lane-blocked:` line's own
       prose, [REDUNDER-LANEBLOCKED-BLIND], and the ubuntu measurement).
-Status: Ready to plan Phase 169.1.1; then Phase 164.9.3.2.1
+Status: Executing Phase 169.1.1
       ⚠️ RETAINED — this was the `Status:` line until the 2026-09-06 reconciliation, kept as
       lineage: *"164-family re-partition SHIPPED — PR #745 (chore/164-family-repartition,
       v0.77.13.1). Phase 164.4.1 COMPLETE — PR #744 squash-merged as `e01cc2e6` (v0.77.13.0),
@@ -517,7 +517,7 @@ Status: Ready to plan Phase 169.1.1; then Phase 164.9.3.2.1
       closed by PR #743 `3ed6919e`) and 164.4.1 annotated all five remaining files —
       `lane-blocked: 0`, `pending: 0` at `files 44/71`. Read `FILES_FLOOR` / `ARMS_FLOOR` off
       `scripts/mutation-runner/run.mjs`, never off a number restated here.
-Last activity: 2026-10-02 — Phase 169.1.1 HYDRATIONTICKS inserted (urgent); next 169.1.1 then 164.9.3.2.1
+Last activity: 2026-10-02 — Phase 169.1.1 execution started
       ⚠️ RETAINED — this was the `Last activity:` line until 2026-09-06:
       *"2026-09-04 — Phase 164.4.1 execution started"*
       all twinned and proven on real pg-lanes with **ZERO waivers** (cumulative 0 across all eight
@@ -2493,9 +2493,9 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Session
 
-**Last Date:** 2026-09-27T22:52:00.000Z
-**Stopped At:** Phase 169.1.1 inserted; next 169.1.1 then 164.9.3.2.1
-**Resume File:** None
+**Last Date:** 2026-10-02T09:02:56.666Z
+**Stopped At:** Phase 169.1.1 UI-SPEC approved
+**Resume File:** .planning/phases/169.1.1-hydrationticks-factsheet-chart-ticks-render-the-same-on-serv/169.1.1-UI-SPEC.md
 
 **Last Date:** 2026-09-24T06:17:00.000Z
 **Stopped At:** Completed 167.1-06-PLAN.md
