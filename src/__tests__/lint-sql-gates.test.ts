@@ -1133,7 +1133,11 @@ describe("lint-sql-gates: the CI invocation (mode identity)", () => {
     // MOVED 2026-09-29 (Phase 167.1.2 PR C2, review fix B, WR-04), 80 -> 81: plan 12's
     // supabase/tests/test_refresh_fanout_zero_snapshot_bootstrap.sql joined the corpus.
     // MEASURED: `node scripts/lint-sql-gates.mjs` printed `scanned 81 file(s); 0 finding(s)`.
-    expect(res.out).toMatch(/scanned 81 file/);
+    // MOVED 2026-10-01 (Phase 164.9.3.2 DEFER40001, plan 06), 81 -> 82: the new
+    // supabase/tests/test_compute_job_fence_errcode.sql joined the corpus.
+    // MEASURED on the tree merged with origin/main: `node scripts/lint-sql-gates.mjs` printed
+    // `scanned 82 file(s); 0 finding(s)`.
+    expect(res.out).toMatch(/scanned 82 file/);
     expect(res.status, res.out).toBe(0);
   });
 
@@ -1432,7 +1436,10 @@ describe("lint-sql-gates: the CI invocation (mode identity)", () => {
   });
 
   // ── [MUT-W02] by EXECUTION (WR-03) ────────────────────────────────────
-  describe("EXECUTION ORACLE — the result loop is RUN, so a skip tolerance is observed in ANY spelling", () => {
+  // Every case below EXECUTES the real result loop in bash, once per guard combination,
+  // so the file's 20 s budget for subprocess cases applies to the whole block; at the
+  // 5 s default three of them timed out under load (169.1 CI shard 1, db5d559b0).
+  describe("EXECUTION ORACLE — the result loop is RUN, so a skip tolerance is observed in ANY spelling", { timeout: 20_000 }, () => {
     // ⛔ EVERY call site in this block takes the SCRIPT slice — the one that
     // starts at `fail=0` and therefore carries the step's prologue. One helper
     // is used throughout precisely so "which extractor did this call use?"

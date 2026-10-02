@@ -1,5 +1,180 @@
 # Changelog
 
+## [0.118.1.2] - 2026-10-02 — GATECRONNAME: a SQL gate names the derive cron by jobname, not TEST's jobid
+
+### Fixed
+- `supabase/tests/test_reconcile_dropped_enqueue_sweep.sql` (comment only) called the derive cron "cron jobid 9" as if the id were universal. `9` is its id on the shared TEST project; on PROD the job is absent — unscheduled by hand at the v1.11 recovery and never re-registered (measured 2026-10-02 by read-only SELECT on `cron.job` / `cron.job_run_details`, see the derive-cron diagnosis). The refusal now names it by jobname, as every `cron.unschedule` in the repo does.
+
+### Notes
+- This is deliberately a gate-file-only change (no migration, runner, lane or `ci.yml` change): it is the first such PR since Phase 164.4.2 SUBSETSPLIT merged, and its `sql-mutation` run is the CI observation that closes 164.4.2's open post-merge item (the SUBSET path, previously verified only on a local pg-lane).
+
+## [0.118.1.1] - 2026-10-02 — BACKFILLDAILY: a backfill-role worker no longer seeds the daily position poll
+
+### Fixed
+- `analytics-service/main_worker.py` `daily_enqueue_loop` now returns immediately when `WORKER_CLAIM_ROLE=backfill`. FLIP runbook Step 1 (`docs/runbooks/flipretry-derived-equity-go-live.md`) adds a second Railway service running `python -m main_worker` with that role, next to the API's merged worker, which already runs the daily `poll_positions` seed. Without this guard the second service would have enqueued a second `poll_positions` job per strategy per day from its first 24h tick (the in-flight dedup does not cover completed rows), doubling exchange calls. The `interactive` and `all` roles keep seeding.
+
+### Tests
+- `tests/test_main_worker.py` `test_daily_enqueue_loop_skipped_only_for_backfill_role`, parametrized over `backfill` (0 ticks), `interactive` and `all` (1 tick each). Red on the previous code for `backfill`, green after; the two other arms stop a guard that disabled the seed for every role from passing.
+
+### Notes
+- The runbook still describes the pre-merge topology (a separate worker service). Production today is one combined API+worker service plus the new backfill service; Step 2 (`WORKER_CLAIM_ROLE=interactive` on the API service) is unchanged by this fix.
+
+## [0.118.1.0] - 2026-10-02 — HYDRATIONTICKS: factsheet and allocation chart ticks render the same on the server and in the browser
+
+⭐ **What changed for whoever reads this next.** Phase 169.1.1 (HYDRATIONTICKS) ships plans 01 to 04. This entry covers the branch's 44 commits after `origin/main`: smart-discuss context, UI-SPEC, research, founder decisions, validation strategy, pattern map, plans and two plan-check rounds (14); the tick fix (3); its tests, the guard and the 26 guard-import swaps (7); the composite axe wait with one CI list line (1); the per-plan SUMMARY and record commits (6); three code-review rounds, their 9 fix commits and 2 report commits (11); and two release commits, the second folding the review rounds into this entry (2).
+- The factsheet's daily-returns chart used to compute its y-axis ticks with the engine's own power of ten. Node and Chromium round that differently for some exponents, so the server could print one zero tick as `+0.0%` while the browser printed it as `-0.0%`. React then threw hydration error #418 and rebuilt the page after first paint, which detached elements that e2e tests (the Overview EquityChart tap-rect test among them) were holding.
+- **Visible change:** a zero tick that the browser drew as `-0.0%` now reads `+0.0%`, the chart's zero label, and is drawn in the solid baseline style. No non-zero tick label, value or tick count moves (measured identical to today's Chromium output in 4,400 of 4,400 sweep cases).
+
+⚠️ **A third-digit bump (0.118.0.1 → 0.118.1.0)**: a user-visible bug fix with no schema or API change, following the fix-phase precedent of SMALLFIXES (0.114.1.0) and OGSHARPE (0.113.1.0).
+
+### Fixed
+- **One engine-independent tick helper, `src/lib/chart-ticks.ts` (SC-1, SC-2; plan 01).** It reads the base-10 exponent from `toExponential()` and parses the power of ten from the literal `1e<n>`. Both are exactly specified, so every engine gets the same value, and the module calls no transcendental Math function. `niceStepValues` keeps today's `step = nice * magnitude` and `v += step` accumulation, and snaps a tick within a millionth of a step of the anchor onto the anchor exactly, always positive zero. `tickTolerance` lets the baseline style use a tolerance compare in place of exact equality.
+- **All six sites of the class route through it (SC-1; plans 01 and 02).** `TimeSeriesChart` `niceLinearTicks` and its log branch's candidate power of ten (anchored on `config.baseline`, so a par tick at 1 snaps too); `SignaturePanels` and `CrossSignaturePanels` `niceTicks`; the `AnalyticalPanels` count axis magnitude; and the allocations `EquityChart` y-tick walker's candidate line. Each site keeps its own degenerate return, formatter, caps, stroke and font values. The signature panels' zero tick is now exact positive 0, so their existing zero-dash test selects it on both engines.
+
+### Root cause
+- Node 22's V8 returns `9.999999999999999e-5` and `9.999999999999999e-6` for the native power of ten at n = -4 and -5, where Chromium 153 returns exactly `1e-4` and `1e-5`. Research measured wider disagreement too: ten exponents in -30..30, and a one-ulp difference on the base-10 log, natural log and exp for a few percent of inputs. On the measured daily-returns span, the one-ulp step error accumulated through `v += step` left the zero crossing at exact 0 under Node's power of ten and at about `-5.42e-20` under Chromium's, and the formatter printed those as `+0.0%` and `-0.0%`. The label text differed, so React discarded the server tree.
+
+### Tests
+- **SC-3, server-render markup identity (plan 01).** `TimeSeriesChart.ticks.test.tsx` renders the daily-returns chart under a stubbed Node-inexact and a stubbed Chromium-exact power of ten and requires byte-identical markup, a `+0.0%` zero tick and exactly one solid baseline. It was red on the old code (the labels differed at the zero tick) and is green after the fix. A non-vacuity pin proves the seeded span crosses zero.
+- **Helper unit matrix (plan 01).** Node-env: five engine regimes compared with `Object.is`, a run with the native functions throwing, shape, caps, anchor 1 on a measured domain, and `tickTolerance`. A permanent control arm runs the pre-fix algorithm and asserts the Node and Chromium regimes still DIFFER there, so the matrix can still fail after the old code is gone.
+- **SC-1 class guard, `src/__tests__/chart-ticks-class-guard.test.ts` (plan 02).** It fails if any non-test file under `src/` brings back the native base-10 power, if the helper calls a transcendental Math function, if the four builders call the base-10 log, or if a rewired file stops importing the helper. Self-tests run the real matchers in both polarities, and a scan of the pre-fix tree with the same matcher reported all six original sites.
+- **SC-4, hydration guard for the seeded e2e lane (plan 03).** `e2e/helpers/hydration-guard.ts` is a Playwright `test` with an auto fixture that fails a test in teardown when its page reports #418 or the dev hydration message, so a mismatch that a race swallowed still turns the test red. `e2e/hydration-guard.self-test.spec.ts` proves it bites (its final shape is in the code-review bullet below). `src/__tests__/e2e-seeded-hydration-guard.test.ts` reads the seeded list from `ci.yml`, pins it at 26 specs and fails on any spec not bound to the guard.
+- **EquityChart memo tests retargeted (plan 02).** They count the walker by `pow10` calls through a delegating partial mock instead of spying on the Math global; their structure and assertions are unchanged. They were red against the unchanged walker and green after it.
+
+- **Code review, three rounds (`169.1.1-REVIEW.md`, `169.1.1-REVIEW-FIX.md`): 0 critical; 7 warnings, all fixed, each shown red before and green after.**
+  - The guard settles every open page (load event, then one idle callback, bounded) before its teardown assert, so a #418 that React reports just after a test body returns still fails the test. A seeded page that does not reach its load event within 10s now fails its test and names the URL (`SETTLE_LOAD_TIMEOUT_MS`); before, it passed unchecked. A `test.fail()` case proves teardown itself runs the drain.
+  - The self-test asserts the recorded hits through a `hydrationHits` fixture instead of relying on `test.fail()` alone, which accepted a failure for any reason.
+  - The placement pin in `src/__tests__/e2e-seeded-hydration-guard.test.ts` reads `ci.yml` and fails unless the self-test step's `run:` is exactly the expected command, in a job the `frontend` aggregator gates, with no `continue-on-error` (any value) or `if:` on the step or job. Six disarming edits (`|| true`, an expression-valued `continue-on-error`, `--list`, `--grep NOMATCH --pass-with-no-tests`, an `if false` wrapper, an echo) were false passes before and are named failures now.
+  - The EquityChart memo tests clear the `pow10` spy before each mount (it entered the first test at 210 calls, so "mount ran the walker" could not fail).
+  - The class guard's helper check is an allowlist (only `Math.ceil` and `Math.abs`), and its power-of-ten matchers also catch `10.0` and `1e1`.
+
+### Changed
+- **All 26 seeded e2e specs import `test` from the guard**, each a one-line import swap with the named imports unchanged (plan 03). `e2e/target-size.spec.ts` changes by that line only (SC-5): no retry and no re-query was added to its EquityChart tap-rect test, which passes because of the tick fix.
+- **The composite factsheet axe test (cash basis) waits for the masthead `<h1>` to be visible** before it scans, after asserting there is exactly one (SC-6, plan 03). The `mark_to_market` sibling already waited on a visible element and is unchanged.
+- **CI:** the guard's self-test runs as its own BLOCKING step of `e2e-seeded` (`Hydration guard self-test (proof the guard bites; blocking)`, `--retries 0`), after `Install Playwright` and before the ordering wait and the shared-TEST mutex acquire, so it never holds advisory key `61616158`. It needs no app server and no seeded data, and it is no longer in the advisory `e2e` smoke list.
+
+### Notes
+- **Founder decisions, 2026-10-02.** "Minimal fix": keep the accumulation and change only the power-of-ten source, plus the snap. The earlier "integer index times the step" direction was withdrawn because research measured it moving non-zero labels (377 of 4,400 EquityChart cases, 2 of 4,400 factsheet). "Fold it in": the composite axe visibility fix is in this phase.
+- **SC-6 verdict: the composite axe flake is NOT the hydration class.** Research reproduced it 3 of 3 on a private lane with zero page errors: axe scanned while the `<h1>` was still inside React's hidden streaming segment, a test-side reveal race the tick fix does not touch. Whether the CI flake is gone is read from `e2e-seeded` on the pushed head.
+- **Known limit, kept on purpose:** `makeYTicks`'s log branch still takes its decade bounds from the base-10 log and the log-domain exp. Both are outside the locked class (0 of 4,400 sweep diffs come from them once the power of ten is exact), and the class guard backstops the power of ten. This path is server-rendered by default, because three factsheet configs set `defaultScale: "log"` in `chart-configs.ts` (`cumulative`, `volMatched`, `worstDDs`).
+- **Known limit, pre-existing:** the `toFixed(1)` formatter prints `±0.0%` on small non-zero ticks (the measured daily-returns span reads `-0.1% -0.0% -0.0% +0.0% +0.0% +0.0% +0.1%`). The UI contract locks the formatter, so it is unchanged; it is worth a look in the post-deploy visual check.
+- **Known gaps from review, recorded:** the self-test does not run on fork PRs (`e2e-seeded` skips there and the aggregator accepts that skip; the push to `main` runs it blocking). The placement pin does not inspect a step-level `shell:`, `defaults.run.shell` or `env:` (none is present today). A named constant (`Math.pow(TEN, n)`) or an aliased `pow` still passes the class guard's line matcher.
+- **Screenshot goldens are a backstop only.** `e2e/svg-chart-parity.spec.ts-snapshots/` holds 29 goldens, and their tolerances cannot prove a one-label change. Any golden diff after this fix is unexpected and must be explained, never re-baked blindly.
+- Planning-only commits on the branch: discuss context, UI-SPEC, research, founder decisions, validation strategy, pattern map, plans and plan-check rounds, and each plan's SUMMARY and record commits.
+
+## [0.118.0.1] - 2026-10-02 — BASELINE: automated re-dump after the PROD apply of 5a88a165
+
+### Changed
+- `supabase/schema/baseline.sql` re-dumped from PRODUCTION by Supabase Migrate run `36981647441`, after the PROD apply of merge `5a88a165`: sha256 `43302190…` → `a45dcc44…`.
+- Shape, old → new: tables 63 → 63, policies 155 → 155, function statements 125 → 125, distinct function names 123 → 123, data statements 0 → 0.
+- Migrations the dump newly carries, from the marker diff: `20261001120000_compute_job_fence_errcode_55006.sql`.
+- `supabase/schema/BASELINE.md` gets the new `## Provenance` capture rows and a dated `### Regenerated 2026-10-02` section; `baseline-carried-migrations.txt` is regenerated from the merge tree; VERSION and package.json 0.118.0.0 → 0.118.0.1.
+- The gates on the composed tree, verbatim: `baseline-currency: carried=284 replay=0 marker-sha=match defects=0`, `baseline-content-drift: functions compared 125 — MATCH 122, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`, `baseline-content-drift: findings 0`.
+
+### Notes
+- The dump was taken read-only by the `redump-dump` job after the `apply` job of Supabase Migrate run `36981647441` succeeded, and this entry was composed by the `redump-pr` job. Run `36981647441` is the provenance anchor.
+- The "what it adds" judgment for each newly carried migration is a human one, so it is left to the reviewer. Every figure above is measured.
+
+## [0.118.0.0] - 2026-10-02 — DEFER40001: a compute-job fence raise answers a PostgREST caller once instead of being retried without end
+
+⭐ **What changed for whoever reads this next.** Phase 164.9.3.2 (DEFER40001) ships plans 01 to 07. This entry covers the branch's 42 non-merge commits after `origin/main` `05ebb559b`: pre-execution research, pattern map, plans and four plan-check rounds (12); plan 01's raise-site measurements and the sibling booking (5); the fix migration and its gate (2); its comments and VAC-04 acknowledgements plus the header routing sentence (3); the four live-DB arms (2); the two worker classifiers, each RED then GREEN (4); the census floors and pins (2); the ledger entry landed then closed (2); the ENQ-SCOPE line in the phase CONTEXT (1); and the per-plan SUMMARY and record commits (9). The 3 merge commits of `origin/main` are not counted.
+- `defer_compute_job`, `mark_compute_job_done` (two sites) and `mark_compute_job_failed` used to raise SQLSTATE 40001 when a stale claim token met a reclaimed row. PostgREST 14 retries 40001 without bound, so the caller never got an answer and the database re-ran the call thousands of times a second. They now raise `55006` (object_in_use), which PostgREST returns once.
+- The fix is live only after this merge applies the migration to TEST and then PROD. Merging is the PROD apply; there is no human stop after it.
+
+⚠️ **A second-digit bump (0.117.0.2 → 0.118.0.0)** because three production SQL functions and the analytics worker's preemption classifiers change behaviour, the class of the BRIDGE releases.
+
+### Fixed
+- **The four claim-token fence raises answer once (plan 02).** Migration `20261001120000_compute_job_fence_errcode_55006.sql` re-bases the three functions on their latest definitions (`20260529170000` for defer, `20260926120000` for both marks) and changes only the errcode at the four raises and one defer comment. The message text is byte-identical, so the `preempted by watchdog reclaim` literal still reaches the worker. REVOKEs are restated, and one comment-stripped self-verify block checks each body for exactly the expected `55006` count and no `serialization_failure` (PD-01, PD-03).
+- **The deployed comments name the new code (plan 05, PD-02).** Each `COMMENT ON FUNCTION` is re-issued from its latest statement, with only "raises serialization_failure" changed. The VAC-04 acknowledgement carries three `prod-body-ack` lines, each derived from `origin/main`'s snapshot, not from a PROD read.
+- **The worker classifiers read 55006 (plan 04).** `main_worker._is_serialization_failure` and `job_worker._defer_lost_ownership` match code `55006` and keep the message literal as a fallback. The literal covers ONE deploy order: migration first, old worker. The body answers a 55006 once, and the old classifier, which checks for code 40001, matches it by the literal. The reverse order is NOT covered: a new worker meeting an old body still sees a 40001 that PostgREST 14 re-runs without bound, so no response reaches the classifier and the pre-fix hang continues until the migration applies. That is no regression, but it means deploy order matters. A bare 40001 without the literal is no longer swallowed (PR #149 I4).
+
+### Root cause
+- PostgREST 14.x runs every RPC inside hasql-transaction's retrying transaction, which re-runs the call on 40001 or 40P01 with no limit. Upstream fixed this in PostgREST 16.0, and no 14.x release carries the fix. A token mismatch cannot change on retry, so each raise looped. Plan 01 measured all four sites through the lane's PostgREST v14.7. None answered within 20 s, and the loop kept running after the client disconnected (about 2,700 to 4,100 re-executions per second). The migration header now carries the rule: never raise 40001 or 40P01 from a PostgREST-callable function on PostgREST < 16 (PD-04).
+
+### Tests
+- **A both-lanes SQL gate, `supabase/tests/test_compute_job_fence_errcode.sql` (plan 02).** It has 8 arms, two per site (errcode and literal), with a sentinel. Without the migration the gate went RED (first failure D1, SQLSTATE 40001), and with it GREEN. Each of its 8 mutation twins was observed biting its own arm.
+- **Four live-DB arms in `compute-jobs-audit-2026-05-07-g10b.test.ts` (plan 03, PD-05).** Each calls one RPC with a stale token through the lane's PostgREST, bounded at 10 s on the client. On a lane without the fix, all four aborted at the bound. On the lane that replays the migration, all four answer `55006` once and the row is untouched. They live in an existing file, so the live-DB corpus and `CORPUS_FLOOR` do not move.
+- **Python (plan 04).** Named classifier tests cover 55006, the 40001-plus-literal deploy window and the bare-40001 refusal. On the lane, `test_defer_compute_job_token_fence` was SKIPPED after 121.61 s before the fix and PASSED in 0.01 s after it, and the three decorated late-mark tests PASSED. Three extra mock sites now send 55006 (PD-06).
+- **The census moves to the measured corpus (plan 06).** `FILES_FLOOR` 54 → 55 and `ARMS_FLOOR` 545 → 553 were read off one full mutation-runner run on the merged tree. Both drift directions were observed failing, and `WAIVED_CEILING` stays 0. The `sql-tests` anti-skip floors move to 12 sentinel files and 237 arms, and every vitest census pin follows.
+
+### Notes
+- **ENQ-SCOPE = `enq-sibling` (founder, 2026-10-01).** This phase covers the four fence raises only. The enqueue race-loss raise in `_enqueue_compute_job_internal`, also SQLSTATE 40001, is routed to **Phase 164.9.3.2.1 ENQ40001**, booked on this branch with plan 01's evidence. Its two-target shape was refuted, and the race-loss raise itself never fired in a measurement, so its PostgREST behaviour is unmeasured. The routing is recorded in four places, all naming 164.9.3.2.1: the phase CONTEXT.md, the migration header's WHAT IT DOES NOT CLOSE paragraph, the TODOS closeout, and a scope-record line in the ROADMAP's `### Phase 164.9.3.2` entry. That last line is the orchestrator's own commit and lands after this release commit. The Goal and SC-1 stay as written, as lineage.
+- **`TODOS.md`:** `[164.9.4-DEFER-40001-RETRY-HANG]` is copied byte-identical from the 164.9.4 branch, then closed in a separate commit with one dated line citing the evidence above. Every copied line, including its `AWAITS ROUTING` line, is kept.
+- **PD-07, founder-visible:** `_rpc_retry_timeout`'s skip match and the three `@pytest.mark.skip` decorators are unchanged. The `python` CI job still reads shared TEST, which keeps the old bodies until this merge applies the migration, and it stays there until Phase 164.9.4. On this PR, that job's defer fence test therefore skips as before.
+- **Three migration reviewers before merge.** migration-reviewer, rls-policy-auditor and silent-failure-hunter must all run before this merges, because the merge auto-applies to TEST and then PROD.
+- **Checks that may be red at PR time, and how the founder's 2026-09-27 green-then-merge rule treats each:**
+  - `baseline-content-drift` is expected red: three function rows plus their comments differ until the post-apply re-dump. It is a step inside the `sql-gate-lint` job, so the board shows a red `sql-gate-lint` and `frontend`. It counts as the tolerated stale-baseline class only when all of these hold: it is the job's sole failing step, every step before it concluded `success`, and every step GitHub skipped after it was replayed at the same head SHA with `failed=0` by the phase's skipped-step replay, with the replayed set equal to the skipped set and the output pasted in the PR body. The skipped steps include the data-dependence gate (`[164.8-DATA-DEPENDENT-MIGRATION-ESCAPE]`), the reference-data audit and the DRIFT-05 self-test. A skipped step nobody ran is not green. At this commit's parent the replay ran all 10 steps with `failed=0`.
+  - VAC-08 in `test-db-drift` is not in the tolerated class. A red stops the ship and goes to the founder.
+  - VAC-04 is green only if PROD's body hash equals each earned `prod-body-ack`. A red is real PROD drift to fold in, never an acknowledgement edit, and it stops the ship.
+- Planning-only commits on the branch: research, pattern map, plans and plan-check rounds, plan 01's measurements, and each plan's SUMMARY and record commits.
+
+## [0.117.0.2] - 2026-10-01 — LIVEDBGUARD: the live-DB test helper never calls the Management API with a lane URL or a production ref
+
+### Security
+- `src/lib/test-helpers/live-db.ts` decided whether to run its catalogue checks through the Supabase Management API from `SUPABASE_ACCESS_TOKEN` plus a project ref. The ref fell back to a regex over `NEXT_PUBLIC_SUPABASE_URL` that only matched `https://`, so a local lane URL came through unchanged. During Phase 164.9.3.2 plan 03 a developer shell holding a real access token sent it to `api.supabase.com/v1/projects/http://127.0.0.1:54421/database/query` about 49 times. Every request was refused with 404, so nothing was read or changed. The same path had no production check: a URL or `SUPABASE_PROJECT_REF` naming production would have run the test SQL on production, and the `assertNotProductionSupabaseUrl` guard covers only the service-role client.
+- The ref now counts only when it is a well-formed 20-character hosted ref, and never one of `PROD_PROJECT_REFS`. Otherwise `HAS_INTROSPECTION` is false and those arms skip, as they already do in CI, which sets neither variable.
+
+### Tests
+- `live-db.introspection-guard.test.ts`: four arms (loopback URL, production URL, explicit production ref, malformed explicit ref) fail on the old helper and pass on the new one; a fifth keeps a hosted test project working.
+
+### Notes
+- `TODOS.md` books two UI findings from the Phase 169.1 post-deploy browser pass for Phase 170.1: the doubled "READ ONLY ONLY" key warning (a test pins it as the D-08 sentence, so the decision is checked before the copy changes), and the /allocations Scenario commit bar floating about 74 px above the bottom nav at narrow widths. They ride here so the 169.1 close-out PR stays `.planning/`-only.
+
+## [0.117.0.1] - 2026-10-01 — DEPS: the npm minor and patch group and the `actions/checkout` 7.0.1 pin, in one batch
+
+This entry covers two dependency updates replayed onto `main` as one branch, so they cost one CI run instead of two. It supersedes Dependabot #897 and the manual replay #900 of Dependabot #643. Dependabot #898 (Python) was tried in this batch and taken out again; see Notes. No application code changes.
+
+### Changed
+- **npm (#897):** minor and patch updates to 28 of its 29 packages, among them `next` 16.3.6, `react` and `react-dom` 19.3.0, `@supabase/supabase-js` 2.117.1, `zod` 4.6.5, `recharts` 3.10.1 and `@playwright/test` 1.63.0. `@upstash/ratelimit` stays at 2.0.8: 2.2.0's Lua scripts carry a `#!lua flags=allow-key-locking` shebang, which CI's pinned `redis:7-alpine` rejects (`ERR Unexpected flag in script shebang`). That failed `frontend-seam-redis` on this PR's first run. Whether production Upstash accepts the flag is unmeasured, and rate limiting is a security control, so the bump waits until it is.
+- **GitHub Actions (#900, from #643):** all 44 `actions/checkout` pins move from v7.0.0 (`9c091bb2`) to v7.0.1 (`3d3c42e5`).
+
+### Fixed
+- Dependabot's `package-lock.json` for #897 did not match its own `package.json`: `npm ci` refused it, missing `puppeteer-core`'s new proxy-agent dependencies. The lockfile is regenerated with `npm install` under Node 22, and `npm ci` passes on it.
+
+### Notes
+- The `@playwright/test` bump ships a newer Chromium, so the SVG chart goldens may need a re-bake on this branch.
+- Neither banned package (`react-native-international-phone-number`, `react-native-country-select`) is in the regenerated lockfile.
+- The major-version Dependabot PRs (#612, #614, #626, #627, #645, #646) are not part of this batch. Each is handled on its own.
+- **The Python group (#898) is out of this batch, and the reason is a drift already on `main`.** `main`'s `analytics-service/requirements.in` pins `pandas==2.2.3`, but its lock `requirements.txt` (the file that gets installed) pins `pandas==3.0.3`. Dependabot regenerated the lock from `.in`, which quietly downgraded pandas 3.0.3 → 2.3.3 and dropped `aiodns` and `pycares`. The `python` job then failed 11 byte-identity tests (`datetime64[us]` vs `[ns]` indexes), and the ACC-01 flowless-controls gate classified deribit, okx, bybit and binance accounts as `unexplained`. All three `analytics-service` requirement files are restored byte-for-byte to `main`. Reconciling `.in` with the lock comes before any further Python bump.
+
+## [0.117.0.0] - 2026-10-01 — ZOOMKPIS: the factsheet's KPI strip and metrics rail follow the zoom window, in the strategy's own compounding method and day basis
+
+⭐ **What changed for whoever reads this next.** Phase 169.1 (ZOOMKPIS) ships plans 01 to 07 and 09, plan 08's integration run (its post-deploy browser re-check is pending by design), one round of code review and silent-failure review with four fix topics, a round-2 confirmation review that came back clean, and a round-2 silent-failure review whose two findings were fixed in a third round.
+- Selecting a range on the factsheet chart now moves the KPI strip and the metrics rail to that range, through one windowed view. A figure the range cannot support reads "—" with its reason. Nothing is fabricated.
+- Inside a window, figures use the strategy's stored compounding method and day basis, the same ones the engine used for the headline. A composite reads them from its conventions echo, and a single-key strategy reads its frozen echo before the live config.
+- The discovery detail page builds its factsheet through the same `fetchAndBuildPayloadWithReason` path as the owner and share pages.
+
+⚠️ **A second-digit bump (0.116.0.0 → 0.117.0.0) because the factsheet's numbers move on a selection,** and some full-history figures change for arithmetic and gapped-composite strategies: calendar windows, heatmap years and Calmar-by-year now sum an arithmetic year, and rolling Sharpe, vol and Sortino follow the engine's day basis.
+
+### Added
+- **The KPI strip and metrics rail follow the zoom window (plan 02).** One windowed view feeds both. A "Selected range" eyebrow names the range, and rows anchored to the whole record step aside while a range is selected.
+- **Conventions-aware windows (plans 03, 04).** The composite read path resolves the compounding method and day basis from where they are stored. A single-key strategy's curve follows its frozen conventions echo over the live config.
+- **A chain-break caveat inside a range (review topic C).** A selected range that starts before the last return-chain break carries its own caveat on the strip and the rail, naming the figures that compound across it (Cum. Return, CAGR, Calmar; not Max DD, which the engine measures over the whole record).
+
+### Changed
+- **Discovery detail page on the shared builder (plan 01).** It calls `fetchAndBuildPayloadWithReason`; a source guard replaces the old LOCKSTEP case, and the discovery-only projection is removed.
+- **Arithmetic years are sums (plan 05).** An arithmetic series' calendar windows, buckets, Monthly Returns heatmap and Calmar by Year sum the year, as the engine does.
+- **Rolling metrics follow the engine (plans 06, 09; review MD-02).** The rolling Sharpe runs on the headline's day basis and joins the days the active basis excludes. A composite's rolling vol and Sortino run over the zero-filled calendar series under every day basis. Every other line chart still breaks its strategy line at a null.
+- **Bootstrap and stress windows agree with the headline (plan 07).** The bootstrap CI's point figures equal the headline beside them, and the stress windows follow the headline's cumulative method. The public factsheet cache key moves from v10 to v11 once (D-80).
+- **One derive per gesture (review MD-01, topic D).** A brush drag, chart pan, x-axis pull or wheel burst holds the strip and rail on the starting range and derives once on release (a wheel settles after 150 ms). The charts still follow the gesture live.
+
+### Fixed
+- **A failed or malformed conventions read is no longer silent (review HIGH-1, round-3 MEDIUM-2).** It reaches Sentry once per build, never per probe, and that build is kept out of the public `unstable_cache`. Public viewers still get the factsheet, uncached, on the config fallback (D-30). A conventions value that is present but not an object counts as a failure; a null or absent one is still an older run.
+- **Ann. Vol reads "—" below two non-zero days (review MD-03).** An active-basis range with fewer than two non-zero days has no volatility, matching the engine's None, instead of "0.0%".
+- **The vol-matched comparator never scales by an unmeasured number (topic D, round-3 MEDIUM-1).** When either side's volatility is not measurable, the series and its legend are null. There is no "× NaN" and no "× 1.00". The "Volatility Matched" panel is then hidden, with a one-line "Not available" reason when the comparator has data (D-86, accepted as a deviation from D-27 because the panel only repeated the Equity Curve).
+
+### Tests
+- Each fix carries a test that fails on the old code. Every fixer neutered its fix, saw red and restored it with `cp` and `cmp`.
+- The anti-skip CI gate's three subprocess cases get the file's 90 s timeout, and the lint-sql-gates execution-oracle block gets its 20 s budget.
+- Two SVG chart goldens are re-baked for the changed strip and brush: `quantile-box-plot-desktop` and `master-brush-ultrawide-2560`.
+- Four more SVG chart goldens are re-baked: `correlations-matrix-desktop`, `histogram-desktop`, `full-page-desktop` and `full-page-ultrawide-2560`. The new full-history range label makes the page 25 px taller, which made these four fail on size. The correlation numbers they now show are Phase 169.5's paired-interval values (D-54, D-58), which the goldens had kept since 169.5 merged. Playwright's bake rewrites only failing snapshots, and those values stayed inside the 2% tolerance.
+- The frozen `compute()` snapshot is re-baked under Node 22, the version `.nvmrc` and CI pin. It had been baked under Node 25, where `skew` differs by one ULP in two fixtures. `compute()` from before the change gives the same values under Node 22, so the freeze still holds.
+
+### Notes
+- Verification: 14/14 must-haves in code at `551c119fc`. The post-deploy browser re-check at 390 px and desktop 200% zoom is pending. Security: 36/37 threats closed and 0 blocking; the open one is that same post-deploy check.
+- Dated planning corrections: D-39 (a composite's rolling vol and Sortino use the zero-filled series under every basis) and D-78 (the leverage arm never had a chain-break caveat rule) were both disproved by the review round. Their originals are kept as lineage.
+- Planning-only commits on the branch: the plan-check rounds, code reviews and fix reports, verification and security reports, and the D-86 decision.
+
 ## [0.116.0.0] - 2026-10-01 — LAYOUT: pages hold at 390 px and desktop 200% zoom, with tab strips that scroll inside themselves, stacked rows, one Scenario blend-window panel and a factsheet that reads as one voice
 
 ⭐ **What changed for whoever reads this next.** Phase 170 (LAYOUT) ships plans 01 to 13, gap-closure plans 15 to 20, one round of code review and silent-failure review with four fix topics, and a round-2 confirmation review. This entry covers the branch's 125 non-merge commits after `origin/main` `76bec2022`: research, UI contract, pattern map, plan and plan-check before execution (8); plans 01 to 13 (72); the first verification (`gaps_found`, 9/19) and the gap-closure plan with two plan-check rounds (5); gap plans 15 to 20 (17); the round-1 code review and silent-failure review (2); the four fix topics with their reports and the ROADMAP amendment (14); the CR-01 draft-row e2e case and its record (2); the round-2 confirmation reviews (2); the security and re-verification records (2); and one ROADMAP tick for Phases 159 and 164.1.1 (1). The 12 merge commits are not counted.

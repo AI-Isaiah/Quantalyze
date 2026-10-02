@@ -163,7 +163,7 @@ def _stamp_schema_cache_miss() -> APIError:
 
 def _serialization_failure() -> APIError:
     """A DIFFERENT APIError — the fallback must not swallow this one."""
-    return APIError({"code": "40001", "message": "preempted by watchdog reclaim"})
+    return APIError({"code": "55006", "message": "preempted by watchdog reclaim"})
 
 
 class _Harness(NamedTuple):
@@ -642,7 +642,7 @@ async def test_marker_23514_still_records_the_failure() -> None:
 async def test_non_23514_is_not_answered_by_dropping_provenance(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Narrowness. A 40001 must not be masked behind a silently degraded payload."""
+    """Narrowness. A fence preemption (SQLSTATE 55006) must not be masked behind a silently degraded payload."""
     boom = _serialization_failure()
     harness = _build_harness(boom)
 

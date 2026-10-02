@@ -8,7 +8,7 @@ import { unavailableComparatorBlock } from "@/lib/factsheet/comparator-block";
 import { BTC_DAILY } from "@/lib/factsheet/benchmarks";
 import { BasisProvider, useBasis, useBasisSeriesView } from "./basis-context";
 import { LeverageProvider, useLeverage } from "./leverage-context";
-import { fetchAndBuildPayload, BENCHMARK_READ_FAILED_MESSAGE } from "@/lib/factsheet/fetch-and-build-payload";
+import { BENCHMARK_READ_FAILED_MESSAGE } from "@/lib/factsheet/fetch-and-build-payload";
 import StrategyDetailPage from "@/app/(dashboard)/discovery/[slug]/[strategyId]/page";
 import { createClient } from "@/lib/supabase/server";
 import { getStrategyDetail } from "@/lib/queries";
@@ -16,7 +16,7 @@ import { captureToSentry } from "@/lib/sentry-capture";
 import { DISCOVERY_CATEGORIES } from "@/lib/constants";
 
 /*
- * Doubles for the D-23 LOCKSTEP block at the foot of this file (the build tests
+ * Doubles for the D-23 block at the foot of this file (the build tests
  * above use none of these modules). ONE admin double serves both builds: the
  * `strategies` read of the factsheet route, the `strategy_analytics_series` reads
  * of `readSingleKeyBasisOpts` (dispatched on `kind`), and `benchmark_prices`
@@ -241,11 +241,12 @@ describe("169.5-02 SC3 / D-09: the browser re-derive aligns BTC from the payload
 });
 
 /* ------------------------------------------------------------------------------
- * D-23 LOCKSTEP (Phase 169.5 plan 02 Task 2; SC3, D-09, D-54, D-64(4) as amended
- * 2026-09-30). The discovery detail page keeps its own builder assembly until
- * Phase 169.1 plan 169.1-01 consolidates it onto `fetchAndBuildPayload` and
- * deletes this case by name. Until then this case fails the day the page and the
- * factsheet route pass different `benchmarkPrices` for the same strategy.
+ * D-23 (Phase 169.5 plan 02 Task 2; SC3, D-09, D-54, D-64(4) as amended
+ * 2026-09-30). This block's LOCKSTEP case pinned the discovery detail page's own
+ * builder assembly to the factsheet route's BTC read. Phase 169.1 plan 01 moved
+ * the page onto the shared `fetchAndBuildPayloadWithReason` and deleted that case
+ * (one path, nothing to keep in lockstep). The error-arm cases below stay: they
+ * pin what the discovery page shows when the BTC read fails.
  *
  * The fixture: a single-key crypto row whose persisted MTM series starts TWO days
  * before its cash series (so the all-axis read bound differs from a cash-only one),
@@ -359,8 +360,6 @@ async function discoveryPayload(): Promise<FactsheetPayload> {
   return payload;
 }
 
-const publicVisibility = <Q,>(q: Q): Q => q;
-
 describe("169.5-02 D-23: the discovery detail page reads BTC exactly as the factsheet route does", () => {
   beforeEach(() => {
     fake.bench.rows = [];
@@ -374,33 +373,7 @@ describe("169.5-02 D-23: the discovery detail page reads BTC exactly as the fact
     seedLockstep();
   });
 
-  it("LOCKSTEP: the same strategy through fetchAndBuildPayload and through the discovery page carries deep-equal benchmarkPrices from the same reader call bounds", async () => {
-    const route = await fetchAndBuildPayload(LOCK_ID, publicVisibility);
-    const routeCalls = fake.bench.calls;
-    fake.bench.calls = [];
-    const page = await discoveryPayload();
-    const pageCalls = fake.bench.calls;
-
-    // The MTM axis was really threaded on both surfaces, so the bound is all-axis.
-    expect(route!.seriesByBasis?.mark_to_market).toBeDefined();
-    expect(page.seriesByBasis?.mark_to_market).toBeDefined();
-    const reads = routeCalls.filter((c) => !c.ascending);
-    expect(reads.length).toBeGreaterThan(0);
-    for (const c of reads) {
-      expect(c.gte).toBe("2024-01-01"); // the MTM axis's first date minus one day
-      expect(c.lte).toBe(LOCK_LAST);
-    }
-    expect(pageCalls).toEqual(routeCalls);
-
-    const bp = route!.benchmarkPrices;
-    if (!bp || "unavailable" in bp) throw new Error("expected route prices");
-    // The fixture filled only the dates before the DB's first stored date, trimmed.
-    expect(bp.prices[0].date).toBe("2024-01-01");
-    expect(bp.prices.some((p) => p.date < "2024-01-01")).toBe(false);
-    expect(bp.dropped).toEqual(["2024-01-15"]);
-    expect(page.benchmarkPrices).toEqual(bp);
-    expect(page.comparators.btc).toEqual(route!.comparators.btc);
-  });
+  // LOCKSTEP case removed (169.1 D-23 as amended 2026-09-25): the discovery page now builds through the shared `fetchAndBuildPayloadWithReason`, so there is one path and nothing to keep in lockstep; the phase-147 source guard and `page.one-path.test.tsx` replace it.
 
   const errorArms: Array<[string, () => void]> = [
     ["the reader answers ok:false", () => (fake.bench.error = { code: "PGRST000", message: "boom" })],

@@ -1285,19 +1285,6 @@ export async function getFactsheetDetail(strategyId: string): Promise<{
 }
 
 /**
- * Phase 159 (159-03, RANK-02 / decision D-02) — which caller is asking for a
- * strategy detail row. RESEARCH Open Question 2 asked whether the anon and
- * authed detail surfaces should share ONE analytics projection (forcing
- * `data_quality_flags` — an exclusion-list column — into anon responses) or
- * whether the function should grow a caller-scoped list. Resolved EXPLICITLY,
- * per caller, rather than silently in either direction.
- *
- * `"public"` is the DEFAULT, so the exported surface is safe by construction:
- * a caller must opt IN to the wider list. See the constants below.
- */
-export type StrategyDetailVariant = "public" | "discovery";
-
-/**
  * The anon-safe detail projection. Excludes all three RANK-02 columns
  * (`daily_returns`, `metrics_json`, `data_quality_flags`) and RETAINS
  * `computation_status`, which is mandatory in every variant — the detail
@@ -1313,8 +1300,9 @@ export type StrategyDetailVariant = "public" | "discovery";
  * literal, with the mirroring enforced by nothing — two independently-editable
  * strings both claiming to be "the anon-safe analytics column set". Drift is
  * asymmetric and security-relevant: widening the copy ships an extra column
- * under `getStrategyDetail`'s `public` DEFAULT, which is precisely the door
- * the caller-scoped split exists to keep shut. Binding the name to the
+ * under `getStrategyDetail`'s only projection (the discovery-only wider list
+ * was removed in Phase 169.1 plan 01), which is precisely the door an
+ * explicit projection exists to keep shut. Binding the name to the
  * original makes the mirror true by construction. The separate name is kept
  * because the two lists are separate DECISIONS that merely coincide today —
  * if the anon detail surface ever needs a column the factsheet does not (or
@@ -1330,25 +1318,6 @@ export type StrategyDetailVariant = "public" | "discovery";
  * callers rather than a live anon path.
  */
 const STRATEGY_DETAIL_PUBLIC_ANALYTICS_COLUMNS = PUBLIC_ANALYTICS_COLUMNS;
-
-/**
- * The AUTHED discovery-detail projection: the public list plus exactly the
- * columns `/discovery/[slug]/[strategyId]` reads off the analytics row.
- * Enumerated from that page at HEAD (Pitfall 5 — enumerate before cutting):
- *
- *   - `data_quality_flags` (:85) — `dqf` picks the composite vs single-key
- *     branch and feeds `singleKeyDataQuality`. On the exclusion list for ANON
- *     responses, which is exactly why it lives HERE and not in the public list.
- *   - `daily_returns` (:66) + `returns_series` (:69) — `resolveDailyReturnSeries`.
- *     ⚠️ Dropping either renders the "still computing" placeholder instead of
- *     the factsheet: a silent, total visual regression.
- *   - `metrics_json_by_basis` — threaded into `readCompositeFactsheet` and
- *     `readSingleKeyBasisOpts` (the MTM/smoothed basis story).
- *   - `computation_status` — `readSingleKeyBasisOpts` (the page comment at
- *     :123 documents this dependency explicitly).
- */
-const STRATEGY_DETAIL_DISCOVERY_ANALYTICS_COLUMNS =
-  `${STRATEGY_DETAIL_PUBLIC_ANALYTICS_COLUMNS}, data_quality_flags, daily_returns, returns_series, metrics_json_by_basis`;
 
 export async function getStrategyDetail(
   strategyId: string,
@@ -1369,12 +1338,6 @@ export async function getStrategyDetail(
    * other means.
    */
   expectedCategorySlug?: string,
-  /**
-   * Phase 159 (159-03 / RANK-02): which analytics projection to issue.
-   * Defaults to the minimal anon-safe list — a caller needing the wider
-   * discovery columns must ask for them by name.
-   */
-  variant: StrategyDetailVariant = "public",
 ): Promise<{
   strategy: Strategy;
   analytics: StrategyAnalytics;
@@ -1401,14 +1364,12 @@ export async function getStrategyDetail(
   // discovery_categories with `!inner` + an `.eq("discovery_categories.slug",
   // …)` predicate. PostgREST drops the row entirely when the inner-join
   // misses, so a slug-shuffle URL turns into a clean null → not-found UI.
-  // Phase 159 (159-03 / RANK-02, D-02): the analytics embed is an explicit,
-  // caller-scoped column list — never a wildcard. RLS is ROW-level and cannot
+  // Phase 159 (159-03 / RANK-02, D-02): the analytics embed is an explicit
+  // column list — never a wildcard (Phase 169.1 plan 01 removed the
+  // discovery-only wider list with the page assembly that read it). RLS is ROW-level and cannot
   // hide a column, so the projection is the only control over which analytics
   // columns leave the database.
-  const analyticsColumns =
-    variant === "discovery"
-      ? STRATEGY_DETAIL_DISCOVERY_ANALYTICS_COLUMNS
-      : STRATEGY_DETAIL_PUBLIC_ANALYTICS_COLUMNS;
+  const analyticsColumns = STRATEGY_DETAIL_PUBLIC_ANALYTICS_COLUMNS;
   const baseSelect = expectedCategorySlug
     ? `*, discovery_categories!inner(slug), strategy_analytics (${analyticsColumns})`
     : `*, strategy_analytics (${analyticsColumns})`;
@@ -1469,14 +1430,13 @@ export async function getStrategyDetail(
   const manager = await loadManagerIdentity(strategyWithTier, disclosureTier);
 
   // STALE-01 — /discovery/[slug]/[strategyId] is AUTHED but CROSS-TENANT: every
-  // allocator reads other managers' published rows through it, and it builds
-  // the SAME `FactsheetView` the public factsheet does, off `daily_returns` /
-  // `returns_series` / `metrics_json_by_basis` on this row. Shaping nulls those
-  // series, `buildFactsheetPayload` returns null on an empty one, and the page
-  // falls to the still-computing placeholder it ALREADY renders for a strategy
-  // with no ingested series — the existing state, reached by one more input,
-  // never a new one. `shapeRowAnalytics` is the same call the ranked list and
-  // the two public detail fetchers make.
+  // allocator reads other managers' published rows through it. Since Phase
+  // 169.1 plan 01 that page builds its `FactsheetView` through the shared
+  // `fetchAndBuildPayloadWithReason`, whose own G1 gate refuses a failed run,
+  // and reads only the header, tier and gates from this row. Shaping still
+  // withholds a not-computed row's figures here, so nothing this function
+  // returns can show a failed run's numbers. `shapeRowAnalytics` is the same
+  // call the ranked list and the two public detail fetchers make.
   //
   // The `?? EMPTY_ANALYTICS` fallback below is UNCHANGED and still the
   // absent-row arm; only a PRESENT-but-not-computed row is substituted.

@@ -2,7 +2,7 @@
 -- Canonical current body of this function, replayed from supabase/migrations/**.
 -- Regenerate with `npm run schema:functions`. See tech-debt #2.
 
--- source migration: 20260926120000_mark_compute_job_bridge_advisory_lock.sql
+-- source migration: 20261001120000_compute_job_fence_errcode_55006.sql
 -- --------------------------------------------------------------------------
 -- mark_compute_job_failed
 -- --------------------------------------------------------------------------
@@ -62,7 +62,7 @@ BEGIN
        AND v_current_token IS DISTINCT FROM p_claim_token THEN
       RAISE EXCEPTION 'mark_compute_job_failed: job % preempted by watchdog reclaim (caller token=%, current token=%)',
         p_job_id, p_claim_token, v_current_token
-        USING ERRCODE = 'serialization_failure';
+        USING ERRCODE = '55006';
     END IF;
 
     RAISE EXCEPTION 'mark_compute_job_failed: job % not running (status=%)', p_job_id, v_current_status

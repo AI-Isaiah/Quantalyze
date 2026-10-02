@@ -91,7 +91,7 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 164.3.1: SOUND-PRIMITIVES — all FOUR cycling primitives closed by construction: neuter scan, mutation identity, VAC-04, self-referential oracle** (INSERTED)
 - [x] **Phase 164.4: REDUNDER-BACKFILL — every SQL gate arm gets a RED-UNDER annotation that a machine PROVES bites** (INSERTED)
 - [x] **Phase 164.4.1: PGCRON-LANE — put pg_cron on the throwaway pg-lane and retire the REDUNDER-PGCRON deferral** (INSERTED)
-- [ ] **Phase 164.4.2: SUBSETSPLIT — `sql-mutation` runs only the CHANGED gate files on a PR, with a scheduled full-corpus run that still enforces the floors, because `timeout-minutes` has taken its ONE allowed raise and 20 is a declared CEILING. Owner of TODOS `[REDUNDER-SUBSET-SPLIT]`, booked 2026-09-05 by Phase 164.4.1 and unowned since. NOT hygiene: when `sql-mutation` times out the job dies and EVERY SQL gate stops being enforced — those gates pin RLS, tenant isolation and ledger correctness, so the failure mode is the controls silently stop firing, which is this milestone whole subject. MEASURED TREND moving the wrong way: run 33961609382 @ 1aa8bb70 = 363 arms / 451 legs / 567 s (9.45 min); run 33973362161 @ ab0d5644 = 361 arms / 449 legs / 646 s (10.8 min) — FEWER legs, SLOWER run, ~80 s of pure runner variance. Phase 164.1.1 then added arms twice more: plan 01 measured 491 legs / ~975 s and plan 02 measured 496 legs / ~1020 s locally, both flagged in ci.yml as closer to the ceiling than any prior reading. SCOPE: (1) a runner subset mode (--changed against a base ref) in scripts/mutation-runner/run.mjs; (2) the .github/workflows/ci.yml wiring that selects it on PRs; (3) a scheduled full-corpus job that still enforces FILES_FLOOR/ARMS_FLOOR, since the subset cannot. LOCKED (164.4-CONTEXT.md): 20 minutes is the CEILING — if a MEASURED ubuntu run reaches it, the answer is this phase, NEVER a third timeout-minutes value. The split MUST BE PRINTED on every run, never silent: a subset that does not say it is a subset is the same defect class as a gate reporting PASS having measured nothing.** (INSERTED) — verification: human_needed
+- [x] **Phase 164.4.2: SUBSETSPLIT — `sql-mutation` runs only the CHANGED gate files on a PR, with a scheduled full-corpus run that still enforces the floors, because `timeout-minutes` has taken its ONE allowed raise and 20 is a declared CEILING. Owner of TODOS `[REDUNDER-SUBSET-SPLIT]`, booked 2026-09-05 by Phase 164.4.1 and unowned since. NOT hygiene: when `sql-mutation` times out the job dies and EVERY SQL gate stops being enforced — those gates pin RLS, tenant isolation and ledger correctness, so the failure mode is the controls silently stop firing, which is this milestone whole subject. MEASURED TREND moving the wrong way: run 33961609382 @ 1aa8bb70 = 363 arms / 451 legs / 567 s (9.45 min); run 33973362161 @ ab0d5644 = 361 arms / 449 legs / 646 s (10.8 min) — FEWER legs, SLOWER run, ~80 s of pure runner variance. Phase 164.1.1 then added arms twice more: plan 01 measured 491 legs / ~975 s and plan 02 measured 496 legs / ~1020 s locally, both flagged in ci.yml as closer to the ceiling than any prior reading. SCOPE: (1) a runner subset mode (--changed against a base ref) in scripts/mutation-runner/run.mjs; (2) the .github/workflows/ci.yml wiring that selects it on PRs; (3) a scheduled full-corpus job that still enforces FILES_FLOOR/ARMS_FLOOR, since the subset cannot. LOCKED (164.4-CONTEXT.md): 20 minutes is the CEILING — if a MEASURED ubuntu run reaches it, the answer is this phase, NEVER a third timeout-minutes value. The split MUST BE PRINTED on every run, never silent: a subset that does not say it is a subset is the same defect class as a gate reporting PASS having measured nothing.** (INSERTED) — verification: passed (completed 2026-10-02; SUBSET observed in CI on PR #927)
 - [x] **Phase 164.4.2.1: DRIFTOFFMUTEX — `test-db-drift` stops waiting on the shared-TEST advisory lock to do seconds of VAC-08 work, so a merge push's critical path falls back inside its BEFORE band** (INSERTED)
 - [x] **Phase 164.5: BASELINE-SNAPSHOT — the committed PROD schema baseline becomes the local stack's source and a gate, and the one production object no migration owns is dispositioned under review** (INSERTED)
 - [x] **Phase 164.5.1: CRONREPOINT — the live `match_engine_cron` row is repointed at the mechanism the repo actually describes, and the migration-vs-runbook rule is settled first** (INSERTED)
@@ -125,9 +125,9 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 164.9.2: REFDATAUPDATES — the shared-TEST restore replay also replays migration UPDATEs on the public tables it just filled, so rebuilt reference rows match PROD** (INSERTED)
 - [x] **Phase 164.9.3: CLAIMPAIR — a due failed_retry job and a pending twin of the same (kind, allocator) never wedge the compute-job claim** (INSERTED) — verification: passed (completed 2026-09-27, PR #890, v0.109.0.0)
 - [ ] **Phase 164.9.3.1: FANINGRAPH — a fan-in child never strands when its parent fails, a match_decisions delete never raises 23505 through its cascade, and a fan-in diamond never deadlocks on the parent lock** (INSERTED) — not yet verified
-- [ ] **Phase 164.9.3.2: DEFER40001 — a compute-job RPC that raises SQLSTATE 40001 never makes PostgREST retry it without end** (INSERTED) — not yet verified
+- [x] **Phase 164.9.3.2: DEFER40001 — a compute-job RPC that raises SQLSTATE 40001 never makes PostgREST retry it without end** (INSERTED) — verification: passed (completed 2026-10-02, PR #919, v0.118.0.0)
 - [ ] **Phase 164.9.4: CIOFFMUTEX — `python` and `e2e-seeded` no longer queue on the shared-TEST advisory lock; each runs against a database private to its runner** (INSERTED) — not yet verified
-- [ ] **Phase 164.9.5: AUTOREDUMP — after a migration applies to PROD, the committed baseline is re-dumped and proposed automatically** (INSERTED) — verification: human_needed (shipped; founder/post-deploy checks pending)
+- [x] **Phase 164.9.5: AUTOREDUMP — after a migration applies to PROD, the committed baseline is re-dumped and proposed automatically** (INSERTED) — verification: passed (completed 2026-10-02, PR #875, v0.106.0.0; first bot re-dump PR #920)
 - [x] **Phase 165: DEPS — The 9-PR dependabot campaign** - pandas `requirements.in` prerequisite commit FIRST, then one PR at a time in the research-verified order, full suite between each; #614 and #606 CLOSED with reasons — ⛔ RETIRED 2026-09-27 by founder decision ("Land as maintenance, retire the phases"): closed WITHOUT delivery as a phase; the dependabot PRs land one at a time as maintenance under the green rule.
 - [x] **Phase 165.1: PIPDEPS — the pip dependabot work lands with production pandas never downgraded** (INSERTED) — ⛔ RETIRED 2026-09-27 by founder decision ("Land as maintenance, retire the phases"): closed WITHOUT delivery as a phase; the dependabot PRs land one at a time as maintenance under the green rule.
 - [x] **Phase 165.2: NPMDEPS — the npm dependabot work lands and the nightly audit goes green** (INSERTED) — ⛔ RETIRED 2026-09-27 by founder decision ("Land as maintenance, retire the phases"): closed WITHOUT delivery as a phase; the dependabot PRs land one at a time as maintenance under the green rule.
@@ -907,7 +907,7 @@ Plans:
 
 **Requirements**: TBD — no v1.20 requirement IDs. The binding obligation is TODOS `[REDUNDER-SUBSET-SPLIT]`, booked 2026-09-05 by Phase 164.4.1 and unowned until this phase. ⛔ `WAIVED_CEILING` is 0 and has stayed 0 through two founder decisions that each took the root-cause fix over an exception — this phase must not be the one that adds a waiver.
 **Depends on:** Phase 164.4
-**Plans:** 5/10 plans executed
+**Plans:** 11/11 plans complete
 
 Plans:
 
@@ -916,12 +916,12 @@ Plans:
 - [x] 164.4.2-03-PLAN.md — Area A wiring: founder regenerates the stale baseline (blocking-human), `load_baseline()` refuses a stale dump, `fetch-depth: 0` on both lane-booting jobs
 - [x] 164.4.2-04-PLAN.md — Area B precondition MEASURED on a real runner: corpus DEMAND vs lane SUPPLY (`pg_net`/vault/auth/roles/pg_cron), then a blocking decision — proceed, or take DECISION C on the written refutation
 - [x] 164.4.2-05-PLAN.md — Area B tracer: `sql-tests` onto the ephemeral lane with no mutex; VAC-08 rehomed to a new `test-db-drift` job that keeps the key, the wait and the gate; aggregator arms and comment currency (also completed the pre-replan plan 06's pin tasks)
-- [ ] 164.4.2-06-PLAN.md — Area F (DECISION F): committed carried-migrations marker bound to the dump's sha256; the currency gate's `--replay-set` mode ("bound and name"); `run.sh up` replays the migrations newer than the dump with ledger rows, fails loud on an undeterminable set or a failing replay; lane pins and BASELINE.md re-argued
-- [ ] 164.4.2-07-PLAN.md — Area D machinery (same wave as 06, file-disjoint): runner `--subset-from` mode that CAN exit 0 while `--file` still cannot, the `scope:` line, one merge-base diff exported and re-used by `scripts/sql-gate-subset.mjs`, and the floors ratchet's subset arms
-- [ ] 164.4.2-08-PLAN.md — Area F CI surface + Area B close-out: currency steps renamed for the replay, clone depth by measured consumer, mutex runbook and dated CLAUDE.md corrections, then an orchestrator-read COUNTED SHA-bound green covering plan 05's PENDING criteria and plan 06's lane lines
-- [ ] 164.4.2-09-PLAN.md — Area D wiring: `changed-paths` publishes the subset, `sql-mutation` narrows only on a pull request, the assert step's fence arms driven RED and GREEN on synthetic logs, and the real run's `scope:` line read by the orchestrator
-- [ ] 164.4.2-10-PLAN.md — ship: the AFTER protocol for four jobs against the CORRECTED refutation clauses (a)-(d), `[REDUNDER-SUBSET-SPLIT]` closed by its mechanism with follow-ons booked (incl. the restore path's epoch-based currency), VERSION + CHANGELOG cross-checked commit by commit
-- [ ] 164.4.2-11-PLAN.md — Area G (DECISION G): the lane replays the PROD objects outside `public` that the dump lacks (the `auth.users` trigger and the pg_cron registrations), extracted from the migrations, with a drift gate that fails the boot; the 8 SQL files that failed on the lane pass unedited
+- [x] 164.4.2-06-PLAN.md — Area F (DECISION F): committed carried-migrations marker bound to the dump's sha256; the currency gate's `--replay-set` mode ("bound and name"); `run.sh up` replays the migrations newer than the dump with ledger rows, fails loud on an undeterminable set or a failing replay; lane pins and BASELINE.md re-argued
+- [x] 164.4.2-07-PLAN.md — Area D machinery (same wave as 06, file-disjoint): runner `--subset-from` mode that CAN exit 0 while `--file` still cannot, the `scope:` line, one merge-base diff exported and re-used by `scripts/sql-gate-subset.mjs`, and the floors ratchet's subset arms
+- [x] 164.4.2-08-PLAN.md — Area F CI surface + Area B close-out: currency steps renamed for the replay, clone depth by measured consumer, mutex runbook and dated CLAUDE.md corrections, then an orchestrator-read COUNTED SHA-bound green covering plan 05's PENDING criteria and plan 06's lane lines
+- [x] 164.4.2-09-PLAN.md — Area D wiring: `changed-paths` publishes the subset, `sql-mutation` narrows only on a pull request, the assert step's fence arms driven RED and GREEN on synthetic logs, and the real run's `scope:` line read by the orchestrator
+- [x] 164.4.2-10-PLAN.md — ship: the AFTER protocol for four jobs against the CORRECTED refutation clauses (a)-(d), `[REDUNDER-SUBSET-SPLIT]` closed by its mechanism with follow-ons booked (incl. the restore path's epoch-based currency), VERSION + CHANGELOG cross-checked commit by commit
+- [x] 164.4.2-11-PLAN.md — Area G (DECISION G): the lane replays the PROD objects outside `public` that the dump lacks (the `auth.users` trigger and the pg_cron registrations), extracted from the migrations, with a drift gate that fails the boot; the 8 SQL files that failed on the lane pass unedited
 
 ⭐ **Replanned 2026-09-23 for DECISION F** (plans 06–10 replace the pre-replan 06–09): the pre-replan 06's Tasks 1–2 were already done inside plan 05 and are not repeated; the pre-replan 09's AFTER protocol restated the refutation condition CONTEXT Area E struck on 2026-09-21 and now uses the corrected clauses. ⚠️ Plan 06 has a precondition: the phase branch must carry every migration the committed dump carries — merge `origin/main` (which holds `20260922120000_api_keys_sync_status_sign_in_failed.sql`) into the phase branch before wave 5.
 
@@ -3279,9 +3279,13 @@ Plans:
 **Goal:** A compute-job RPC called through PostgREST never raises SQLSTATE 40001, so PostgREST never re-runs the call in a loop. A preempted worker's `defer_compute_job` (and any sibling RPC with the same errcode) fails once, with an error the caller can read.
 **Requirements**: TODOS-style id `[164.9.4-DEFER-40001-RETRY-HANG]` (owned here)
 **Depends on:** none in code. ⭐ It is a BLOCKER in the ratified 2026-09-27 order: it sits in the blockers group beside Phase 164.9.3, and Phase 164.9.4's SC-3 cannot pass until it lands.
-**Plans:** 0 plans
+**Plans:** 8/8 plans complete
 
 ⭐ **Founder decision, 2026-09-27 (AskUserQuestion, "New blocker phase (Recommended)"):** the 40001 retry loop gets its own blocker phase, not a fold into 164.9.4.
+
+⭐ **Scope record, 2026-10-02 (ENQ-SCOPE, founder):** `enq-sibling`: the Goal's "any sibling RPC with the same errcode" is met in this phase for the four fence raises in `defer_compute_job`, `mark_compute_job_done` (two) and `mark_compute_job_failed`, and the enqueue race-loss raise in `_enqueue_compute_job_internal` is routed to Phase 164.9.3.2.1 (ENQ40001; A2 refuted, race-loss unmeasured). The Goal and SC-1 above are kept as written, as lineage.
+
+⭐ **Founder override, 2026-10-02 (VAC-08 pre-merge red, "Merge now"):** PR #919 was merged at head `9e861c047` with `test-db-drift` (VAC-08) red. `mark_compute_job_done/2` on shared TEST hashed `2315eb47…`, which equals the migration's own `prod-body-ack`, so TEST held the pre-migration body and the difference was this PR's errcode change, which reaches TEST only on the merge apply. The ledger-frontier exemption covered ledger presence (`1 exempt … 0 NEW drift`) but not the body comparison (class `[164.8-PUSH-RACE-VAC08]` (b)). This departs from plan 08's ship condition, which listed a VAC-08 red as a stop. Measured after merge: Supabase Migrate run `36981647441` applied `5a88a165` to TEST then PROD, and the merge push's `test-db-drift` was green.
 
 **Evidence, measured 2026-09-27 on the local lane** by the 164.9.4 measurement-run diagnosis (run `36304648008`, head `89c5ef3d`):
 - One call to a throwaway function that raises 40001 made PostgREST re-run it about 27k times in about 9 s on postgrest v14.5. That is the version the linked PROD project reports in `supabase/.temp/rest-version`.
@@ -3300,7 +3304,40 @@ Plans:
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 164.9.3.2 to break down)
+**Wave 1**
+
+- [ ] 164.9.3.2-01-PLAN.md — MEASURE: each 40001 raise site probed through the lane's PostgREST on today's code (four fence raises, enqueue A1/A2), ending in founder decision ENQ-SCOPE (lane: local-stack)
+- [ ] 164.9.3.2-02-PLAN.md — the fix migration (three functions re-based, four fence raises on 55006, messages byte-identical), its both-lanes SQL gate RED without and GREEN with, and the regenerated snapshots (lanes: pg-lane, local-stack)
+
+**Wave 2** *(blocked on plan 02)*
+
+- [ ] 164.9.3.2-03-PLAN.md — SC-2 PostgREST proof: four live-DB arms bounded by abortSignal, RED on a lane without the fix, GREEN with it (lane: local-stack)
+- [ ] 164.9.3.2-04-PLAN.md — Python classifiers on 55006 with the literal fallback; live fence tests assert 55006; SC-2 Python half proven locally, skip match unchanged (lane: local-stack)
+- [ ] 164.9.3.2-05-PLAN.md — the migration completed (COMMENTs re-issued, three earned prod-body-acks) and the [BLOCKING] schema proof on its final bytes by local-stack replay, never a push (lanes: local-stack, pg-lane)
+
+**Wave 3** *(blocked on plans 01-05)*
+
+- [ ] 164.9.3.2-06-PLAN.md — census on the merged tree: mutation-runner floors and every corpus pin, read off one run (lane: pg-lane)
+
+**Wave 4** *(blocked on plan 06)*
+
+- [ ] 164.9.3.2-07-PLAN.md — TODOS entry landed then closed, ENQ-SCOPE recorded in this ROADMAP entry, release commit; no push, /gsd-ship pushes after the worktree merge-back (lane: none)
+
+**Wave 5** *(blocked on plan 07)*
+
+- [ ] 164.9.3.2-08-PLAN.md — REVIEW-GATE: three pre-merge migration reviewers (blocking), SC-3 asked alongside without blocking, ship condition under the founder's green-then-merge rule (lane: none)
+
+### Phase 164.9.3.2.1: ENQ40001 — the enqueue race-loss raise (SQLSTATE 40001 in `_enqueue_compute_job_internal`) answers a PostgREST caller instead of re-running the call (INSERTED)
+
+**Goal:** [Urgent work - to be planned]
+**Requirements**: TBD
+**Depends on:** Phase 164.9.3.2
+**Plans:** 0 plans
+
+Booked 2026-10-01 by founder decision ENQ-SCOPE = `enq-sibling` (164.9.3.2 plan 01). Evidence carried from `164.9.3.2-01-SUMMARY.md`: the two-target shape (A2) is REFUTED (rejected up front with 22023), and the conflict-wait path converges through PostgREST (answered in 2–4 s). The race-loss RAISE itself never fired in five attempts, so its PostgREST behaviour is UNMEASURED; that it converges on retry is reasoned, not measured.
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 164.9.3.2.1 to break down)
 
 ### Phase 164.9.4: CIOFFMUTEX — `python` and `e2e-seeded` no longer queue on the shared-TEST advisory lock; each runs against a database private to its runner (INSERTED)
 
@@ -3381,7 +3418,7 @@ Plans:
 **Goal:** After a migration applies to PROD, the committed baseline is re-dumped and proposed automatically, so main never sits red on baseline-content-drift waiting for a manual dump.
 **Requirements**: TODOS `[164.9.5-MANUAL-BASELINE-REDUMP]` (owned here)
 **Depends on:** Phase 164.9.1
-**Plans:** 9/9 plans executed
+**Plans:** 9/9 plans complete
 
 ⭐ **Founder decision, 2026-09-26 (AskUserQuestion).**
 
@@ -4144,7 +4181,7 @@ Plans:
 **Split, 2026-09-26 (founder decision; 169 D-37):** one logical topic per phase, one reviewable PR each. Phase 169 PAGETRUTH was split into Phases 169 FACTSHEETTRUTH, 169.1 ZOOMKPIS, 169.2 BENCHFRESH, 169.3 SMALLFIXES and 169.4 ALLOCTRUTH; the already-checked plans were moved by hand, not re-planned, and D-13's two-PR packaging retired. Each success criterion keeps its original number in the phase that owns it (a criterion several phases serve is copied verbatim to each), so the plans' requirement ids stay valid. **Execution order is not the numeric order:** 169.2 and 169.3, then 169, then 169.4, then 169.1 (167.1.2 PR C before 169, 169.3-03/04, 169.4 and 169.1-02; 167.2.1 before 169 and 169.1).
 **Founder decision, 2026-09-25 (AskUserQuestion):** the session QA sweep and the 2026-09-24 layout notes book as TWO phases; this numbers phase ships FIRST, Phase 170 PAGECOPY second. Phase 167.1.2 ACCOUNTTRUTH already owns the Allocations equity curve, Sharpe beside a negative return, the Scenario zero weights/UUID/$0 total, and the holdings total; they are EXCLUDED here.
 **Requirements**: TBD (phase-local SC ids)
-**Depends on:** Phase 169.5 (added 2026-09-27, 169 D-61: plan 169.1-02 builds on 169.5-02's, was 169-03's, basis-context re-derive), Phase 169 (plan 169.1-02 edits MetricsColumn.tsx after 169-05), Phase 169.4 (plan 169.1-01 edits `src/lib/queries.ts` after 169.4-02), Phase 167.2.1 (plan 169.1-01's order gate), and 167.1.2 PR C (plan 169.1-02's order gate). Split 2026-09-26, D-37.
+**Depends on:** Phase 169.5 (added 2026-09-27, 169 D-61: plan 169.1-02 builds on 169.5-02's, was 169-03's, basis-context re-derive), Phase 169 (plan 169.1-02 edits MetricsColumn.tsx after 169-05), Phase 169.4 (plan 169.1-01 edits `src/lib/queries.ts` after 169.4-02), Phase 167.2.1 (plan 169.1-01's order gate), and 167.1.2 PR C (plan 169.1-02's order gate). Split 2026-09-26, D-37., Phase 170 (added 2026-09-30, 169.1 D-79: plan 169.1-02 edits `FactsheetView.tsx` and `MetricsColumn.tsx` after 170-11 and 170-13; 169.1-01 does not wait)
 
 ## Success Criteria
 
@@ -4158,6 +4195,7 @@ Plans:
 **Plans:** 9 plans in 6 waves, one PR (split 2026-09-26, D-37; 169.1-09 added the same day, D-38 to D-40): W1 169.1-01 DISCOVERYONEPATH, 169.1-02 ZOOMKPIS; W2 169.1-03 ZOOMKPIS-COMPOUNDING; W3 169.1-04 SINGLEKEY-METHOD, 169.1-05 ARITHMETIC-BUCKETS; W4 169.1-06 DAYBASIS-DENSITY; W5 169.1-07 HEADLINE-NEIGHBOURS, 169.1-09 ROLLINGLINE; W6 169.1-08 integration run + post-deploy browser re-check. Decisions carried in `169.1-CONTEXT.md`; no migration.
 **Founder decision, 2026-09-26 (AskUserQuestion, 169 D-27 as amended):** "Fix it in plan 14 (Recommended)". The zoom window's compounding limit (a composite stored with arithmetic compounding showed geometric windowed CAGR and cumulative return beside an arithmetic chart) is fixed, not recorded: the payload carries the stored method and the one shared function returns the arithmetic figures. Packaged as plan 14's second half, **169-14b** (it edits `build-payload.ts` after plan 13 and plan 14's shared builder), as D-18 split plan 05.
 **Orchestrator decisions, 2026-09-26 (169 D-28 to D-31, under the founder's standing "no clients, take decisions"):** the 14b split is accepted as honouring the founder's decision, and the arithmetic logic lives in `compute()` (D-28); the Scenario tab's withheld window figures are accepted, and its `periodsPerYear` is booked to Phase 167.1.2 as `[169-SCENARIO-WINDOW-ANNUALIZATION]` in `TODOS.md` (D-29); the day basis (measured: frozen only in the persisted series `conventions` echo) is carried and applied in 14b (D-30); two pre-existing number-truth defects become **169-14c** (a single-key simple-compounding strategy drew geometric curves) and **169-14d** (MTD, YTD, trailing windows, buckets and the monthly heatmap were compounded on arithmetic series) (D-31).
+**Reversal, 2026-09-30 (169.1 D-82, measured):** the D-29 sentence above is kept as lineage and no longer governs. Phase 167.1.2 plan 07 gave the Scenario payload its `periodsPerYear` and hid the leverage control under `scenarioMode`, so the Scenario tab shows window figures annualized on its own basis (169.1-02); the withheld form stays only as the fail-closed guard for a payload with no `periodsPerYear`, and it withholds every follow-list field, on the strip and on the rail (plan-check round 1 W1). 169.1-08 ticks `[169-SCENARIO-WINDOW-ANNUALIZATION]`.
 **Plan-check revision, 2026-09-26 (169 D-32 to D-36, orchestrator):** D-30 recorded two limits as not fixed: a gapped composite's calendar-basis windowed volatility, Sharpe and Sortino ran over the present days while the engine runs them over the zero-filled calendar series, and the rolling Sharpe ignored the day basis. Both are now **fixed in 169-14e** (D-32, D-33), because the founder's rule (D-27) is that zooming recomputes ALL KPIs and every number agrees with the engine. **169-14f** makes the bootstrap CI and the stress windows follow the headline's method and day basis (D-34). 14f runs in wave 9, not beside 14e, because both edit the same `build-payload.ts` call sites (measured, D-35). The fixes switch input series and add no ratio expression (D-36). Reported to the orchestrator, not resolved: the rolling Sharpe line breaks at each zero-return day on an active-basis strategy (D-33). *(Superseded 2026-09-26 by 169.1 D-38; the sentence is kept as lineage.)*
 **Founder principle, 2026-09-25 (169 D-25):** "calculate Sharpe once; every page reads it." Any CAGR, Sharpe or record-length figure a page shows comes from the stored metric or ONE shared function, never a local re-computation. 169's plans were audited against it the same day; the two gaps found are planned (plan 04 step 5: the leverage toggle keeps the persisted cash Sharpe/Sortino; plan 13: the discovery detail page's second builder assembly).
 **Routing, 2026-09-25 (169 D-23 as amended):** the discovery detail page's second assembly of the factsheet builder, routed here by Phase 167.2.1 D-03 (`[167.2.1-DISCOVERY-DETAIL-DOUBLE-ASSEMBLY]` in `TODOS.md` and 167.2.1's "Routed in" note under this heading, both arriving with 167.2.1's merge), is consolidated by plan **169-13** onto `fetchAndBuildPayload`. PR 2 therefore cannot ship before Phase 167.2.1 merges. Plan 13 closes the TODOS entry when it lands.
@@ -4173,8 +4211,47 @@ Plans:
 - [ ] 169.1-05-PLAN.md — calendar windows, buckets and the monthly heatmap sum on arithmetic series (SC4, D-31) (was 169-14d)
 - [ ] 169.1-06-PLAN.md — a gapped composite's risk figures over the zero-filled series; the rolling Sharpe on the headline's day basis; rolling vol and Sortino on the zero-filled series of a calendar composite (SC10, SC4, D-32, D-33, D-39) (was 169-14e)
 - [ ] 169.1-07-PLAN.md — the bootstrap CI and the stress windows follow the headline's method and day basis (SC10, SC4, D-34) (was 169-14f)
-- [ ] 169.1-09-PLAN.md — the rolling Sharpe line stays continuous across excluded days; only the warm-up is a gap (SC10, SC9, D-38, D-40)
+- [ ] 169.1-09-PLAN.md — the rolling Sharpe line stays continuous across the days the day basis excluded; the warm-up and no-dispersion (D7) windows stay gaps (SC10, SC9, D-38, D-40, D-84)
 - [ ] 169.1-08-PLAN.md — integration run + post-deploy browser re-check (SC9; this phase's items from old 12, verbatim) (was 169-12, narrowed)
+
+### Phase 169.1.1: HYDRATIONTICKS — factsheet chart ticks render the same on server and client, so hydration never fails (INSERTED)
+
+**Goal:** Every factsheet and allocation chart computes the same y-axis ticks on the server and in the browser, so React never reports a hydration mismatch (#418) and never rebuilds the tree after first paint. The Overview EquityChart a user (or a test) is looking at is the one that stays on the page.
+**Requirements**: TBD
+**Depends on:** Phase 169.1
+**Plans:** 4/4 plans complete in 4 waves (a strict chain), one PR
+
+⭐ **Founder decision, 2026-10-02 (AskUserQuestion, "New phase, first"):** a phase of its own, run BEFORE Phase 164.9.3.2.1.
+
+**Root cause, measured 2026-10-02** (debug session `e2e-equitychart-detached-320`): `Math.pow(10, n)` returns different doubles in Node 22's V8 and in Chromium for n = -4 and -5 (Node: `9.999999999999999e-5`; Chromium: exactly `1e-4`); `10 ** n` behaves the same. `niceLinearTicks` in `src/app/factsheet/[id]/v2/TimeSeriesChart.tsx` derives the tick step from it, so on the daily-returns chart the zero tick is exactly 0 on the server ("+0.0%", baseline style) and a tiny negative in the browser ("-0.0%", gridline style). The exact `t.value === config.baseline` comparison turns that ulp into different markup. Reproduced 10/10 on a private local-stack lane with no shared TEST; an engine-independent power of ten turned it 10/10 green with no #418.
+
+**Symptom:** `e2e/target-size.spec.ts:246` (EquityChart tap rect at 320px on /allocations) has failed with "Element is not attached to the DOM" in 16 of 64 CI runs since 2026-09-29, when Phase 167.1.2 PR C2 restored that test. It turned main CI red at `dbe329186` and `05ebb559b`, and a red main makes Railway skip the analytics deploy.
+
+**Same idiom, found by reading (unverified):** `TimeSeriesChart.tsx` (log-scale path), `AnalyticalPanels.tsx`, `CrossSignaturePanels.tsx`, `SignaturePanels.tsx`, `src/app/(dashboard)/allocations/widgets/performance/EquityChart.tsx`. Cite by symbol at planning; line numbers drift.
+
+## Success Criteria
+1. Tick values never depend on an engine's power-of-ten rounding: every site of the class builds ticks so server and browser produce byte-identical values (for example integer index times step, rounded to the step's decimals). The whole class is fixed, not one site.
+2. A near-zero tick snaps to exactly 0, and the baseline comparison no longer depends on exact float equality.
+3. A test that fails on today's code proves server and browser tick arrays agree for the measured daily-returns span.
+4. Seeded e2e pages fail on a `pageerror` carrying React #418, so a future hydration mismatch is red, not flaky.
+5. ⛔ `e2e/target-size.spec.ts` is not weakened: no re-query-until-stable at its line 274, no added retry.
+6. Whether the `e2e/composite-factsheet-render.spec.ts` axe (cash basis) flake is the same class is measured and recorded.
+
+⭐ **Founder decision, 2026-10-02 (AskUserQuestion, "Minimal fix"), overriding CONTEXT.md's earlier wording:** the shared helper keeps today's `v += step` accumulation and replaces only the power of ten with an engine-independent exact one (`Number("1e"+exp)`, exponent from `toExponential()`, no `Math.pow`/`Math.log10`), plus snap-to-zero. The earlier sentence "tick values should come from an integer index times the step, rounded to the step's decimals" is withdrawn: research (`169.1.1-RESEARCH.md` Finding 3) measured that it changes non-zero labels at `toFixed` half-way points (377/4,400 EquityChart cases, 2/4,400 factsheet), breaking UI-SPEC TK-4, while the accumulation is IEEE-exact in every engine and never caused #418. The minimal construction is identical in Node and Chromium on all six sites and changes only zero ticks.
+
+⭐ **Founder decision, 2026-10-02 (AskUserQuestion, "Fold it in"):** the `e2e/composite-factsheet-render.spec.ts` axe (cash basis) flake is NOT hydration (research Finding 9: axe scans while the `<h1>` is still inside React's hidden streaming segment); its one-line fix (`await expect(h1).toBeVisible()` before the scan) is in this phase's scope.
+
+Plans:
+**Wave 1**
+- [x] 169.1.1-01-PLAN.md — shared engine-independent `chart-ticks` helper + factsheet `TimeSeriesChart` (SC-1/2/3)
+**Wave 2** *(blocked on Wave 1 completion)*
+- [x] 169.1.1-02-PLAN.md — the other four tick builders + class guard test (SC-1/2)
+**Wave 3** *(blocked on Wave 2 completion)*
+- [x] 169.1.1-03-PLAN.md — seeded-e2e #418 guard fixture + composite axe visibility wait (SC-4/5/6)
+**Wave 4** *(blocked on Wave 3 completion)*
+- [x] 169.1.1-04-PLAN.md — full gate + `chore(release)` HYDRATIONTICKS
+
+⚖️ **Founder override 2026-10-02 ("Draft PR, then verify"):** shipped as a draft PR so CI can produce the `human_needed` reads (seeded #418 guard, blocking self-test step, composite axe, unseeded `/demo`); VERIFICATION flips to `passed` on those SHA-bound reads before ready/merge. Recorded in `169.1.1-CONTEXT.md`.
 
 ### Phase 169.2: BENCHFRESH — the BTC benchmark is refreshed daily and read in full (INSERTED)
 
@@ -4541,7 +4618,7 @@ kept verbatim.
 | 164.3.1 SOUND-PRIMITIVES (four cycling primitives) | 13/13 | Complete | v0.77.1.x |
 | 164.4 REDUNDER-BACKFILL (39 idiom files annotated; 5 pg_cron-blocked files handed to 164.4.1) | 12/12 | Complete — the phase was planned as 13 and replanned to 12 against the Plan 00 spike (`9b83b064`); plan 12 was dropped there, not left undone | v0.77.12.0 |
 | 164.4.1 PGCRON-LANE (pg_cron on the lane; 5 deferred gates annotated; lane-blocked 0; ARMS_FLOOR 361) | 6/6 | Complete — PR #744 merged `e01cc2e6`, ubuntu-measured | v0.77.13.0 |
-| 164.4.2 SUBSETSPLIT | 11/11 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed | v0.87.0.0 · #842 |
+| 164.4.2 SUBSETSPLIT | 11/11 | Complete — verification passed 2026-10-02 (SUBSET observed on #927) | v0.87.0.0 · #842 |
 | 164.4.2.1 DRIFTOFFMUTEX | 3/3 | Complete — SC-3 speed claim routed to 164.9.4 (founder 2026-09-27) | v0.93.0.1 · #861 |
 | 164.5 BASELINE-SNAPSHOT (baseline.sql load-bearing, DRIFT-04 drop, DRIFT-05, VAC08-LEDGER, VAC-07) | 7/7 | Complete — DRIFT-04 applied and shipped 2026-09-08 in the two-PR sequence. Plan 08 was LIFTED into new Phase 164.5.2 BRIDGELOCK (`7910f614`), so the denominator is 7 | v0.77.21.0 |
 | 164.5.1 CRONREPOINT (the live `match_engine_cron` row repointed; migration-vs-runbook rule settled first) | 9/9 | Complete    | 2026-09-17 |
@@ -4575,9 +4652,9 @@ kept verbatim.
 | 164.9.2 REFDATAUPDATES | 5/5 | Complete | v0.93.0.1 · #862 |
 | 164.9.3 CLAIMPAIR | 6/6 | Complete    | 2026-09-27 |
 | 164.9.3.1 FANINGRAPH | 0/? | Queued — blocker, after 164.9.3 | - |
-| 164.9.3.2 DEFER40001 | 0/? | Queued — blocker, beside 164.9.3 (founder 2026-09-27) | - |
+| 164.9.3.2 DEFER40001 | 8/8 | Complete    | 2026-10-02 |
 | 164.9.4 CIOFFMUTEX | planned, not on main | In progress — draft PR #880 (measurement run) | - |
-| 164.9.5 AUTOREDUMP | 9/9 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed | v0.106.0.0 · #875 |
+| 164.9.5 AUTOREDUMP | 9/9 | Complete — verification passed 2026-10-02 | v0.106.0.0 · #875 |
 | 164.10 BODYDRIFT | - | Closed by decision (c): the drift is real, measured and deliberately left | v0.79.1.1 · #824 |
 | 165. DEPS dependabot campaign | - | ⛔ RETIRED 2026-09-27 (founder) — not delivered as a phase; dependabot PRs land as maintenance | - |
 | 165.1 PIPDEPS | - | ⛔ RETIRED 2026-09-27 (founder), as 165 | - |
@@ -4598,7 +4675,8 @@ kept verbatim.
 | 167.2.1 FACTSHEETBUILDABLE | 4/4 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed | #866 |
 | 168. DRBOPTIONS (a Deribit options account ingests end to end) | 2/3 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed; plan 03 is the founder's live retry | v0.97.0.0 · #867 |
 | 169. FACTSHEETTRUTH (split from PAGETRUTH 2026-09-26) | 7 plans on `feat/169-pagetruth`, not on main | Queued — feature; comparator plans split to 169.5 on 2026-09-27 (D-61); waits for 167.1.2 PR C | - |
-| 169.1 ZOOMKPIS | 9 plans on `feat/169-pagetruth`, not on main | Queued — feature; split order runs it last, after 169, 169.5 and 169.4 | - |
+| 169.1 ZOOMKPIS | 9/9 | Complete    | 2026-10-01 |
+| 169.1.1 HYDRATIONTICKS | 4/4 | Complete — PR #925, v0.118.1.0 | 2026-10-02 |
 | 169.2 BENCHFRESH | 3/3 | Shipped — verification `human_needed` (14/16, 2 routed to human checks): post-deploy checks pending, not closed | v0.107.0.0 · #879 |
 | 169.3 SMALLFIXES | 1/5 (plan 01 on main; 02–05 on `feat/169-pagetruth`) | In progress — plan 01 shipped (v0.97.0.1, #868); plans 02–05 next, 03/04 gated on 167.1.2 PR C | - |
 | 169.4 ALLOCTRUTH | 3 plans on `feat/169-pagetruth`, not on main | Queued — feature; after 169, 169.5, 169.2 and 167.1.2 PR C | - |

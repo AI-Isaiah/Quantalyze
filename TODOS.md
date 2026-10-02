@@ -1368,6 +1368,25 @@ true for 146 and half of 142–145, and **false for 141**.
 
 ## 🟡 FIX MID-TERM
 
+- [ ] **`[170.1-READ-ONLY-ONLY-COPY]` The connect-key warning strip reads "READ ONLY ONLY — keys with
+      Trade or Withdraw permissions are refused on submission." (seen by the founder on the composite
+      wizard, 2026-10-01).**
+      - **Where.** `src/app/(dashboard)/strategies/new/wizard/WithdrawalWarningStrip.tsx`; the bold
+        span `READ ONLY` is followed by the text `ONLY — …`, so the page shows the word twice.
+      - ⚠️ **A test pins it:** `WithdrawalWarningStrip.test.tsx`
+        asserts the sentence byte for byte as the "verbatim D-08 sentence". Find the D-08 decision
+        before changing it; if D-08 meant the doubled form, the fix is a decision, not a typo.
+      - **Destination: Phase 170.1 COPY.**
+
+- [ ] **`[169.1-UAT-SCENARIO-COMMIT-BAR-GAP]` On the /allocations Scenario tab at narrow widths, the
+      sticky `No changes yet / Commit scenario` bar floats about 74 px above the bottom nav, and the
+      chart scrolls visibly through the gap (seen in the 169.1 browser pass, 2026-10-01).**
+      - **Measured.** At a 735 px viewport the bar's bottom edge sat at 629 px and the nav's top at
+        703 px. The bar carries `sticky bottom-16 md:bottom-0`; the 64 px offset alone does not explain
+        the 74 px gap, so measure the scroll container's own bottom padding before fixing.
+      - Seen at 500 px and 735 px. Not caused by 169.1.
+      - **Destination: Phase 170.1 COPY** (page-layout pass), or fix-or-drop if 170.1 declines it.
+
 - [ ] **`[164.6.7-RETRY-PLAIN-COMPLETE]` The transient retry keeps a factsheet published only if
       its row was `complete_with_warnings` or warned; a plain `complete` row is not protected across
       the retry (booked 2026-09-26, Phase 164.6.7 round-2 review WR-01 / SFH-R2-03).**
@@ -1466,7 +1485,7 @@ true for 146 and half of 142–145, and **false for 141**.
       ✅ **Destination: Phase 169.4 ALLOCTRUTH**, whose plans read BTC through `readBenchmarkPrices`
       and `mergeWithFixture`. **Closed when:** consumers build the overlay from closes (or levels)
       and the metrics from exactly-one-day returns, with a test for each across a missing day.
-- [ ] **`[169-SCENARIO-WINDOW-ANNUALIZATION]` A selected range on the `/allocations` Scenario tab
+- [x] **`[169-SCENARIO-WINDOW-ANNUALIZATION]` A selected range on the `/allocations` Scenario tab
       shows the withheld form, because the Scenario payload carries no `periodsPerYear`
       (booked 2026-09-26, Phase 169 D-29).**
       Phase 169 plan 14 makes the KPI strip and the rail follow the zoom window on every
@@ -1485,6 +1504,12 @@ true for 146 and half of 142–145, and **false for 141**.
       `FactsheetBody` under a sub-range and asserts figures (not the em-dash) that equal
       `compute()` of the slice; and 167.1.2 records whether the leverage control should appear on
       the Scenario tab.
+      ✅ **CLOSED 2026-10-01 by Phase 169.1 ZOOMKPIS (plan 169.1-02, D-82).** The Scenario payload has
+      carried `periodsPerYear` since Phase 167.1.2 plan 07, and the leverage control is hidden in
+      `scenarioMode` (`FactsheetView.tsx`, `!scenarioMode && leverageEligible`). The gate test is
+      `FactsheetView.window-kpis.test.tsx` > "the Scenario mount shows window figures equal to
+      compute() of its slice, keeps its inert comparator blocks, renders no leverage control, and
+      resets exactly (D-82, W2)", commit `c78baf846`.
 
 - [ ] **`[169-PORTFOLIO-ANALYTICS-COLUMNS]` The portfolio analytics compute behind `/portfolios/[id]`
       may never refresh (booked 2026-09-27, Phase 169 D-53; inferred from source, NOT measured).**
@@ -1512,7 +1537,7 @@ true for 146 and half of 142–145, and **false for 141**.
       `/gsd-phase --insert`. The ROADMAP section holds the success criteria; this entry is the
       evidence.
 
-- [ ] **`[164.9.4-DEFER-40001-RETRY-HANG]` A mismatched-token `defer_compute_job` RPC hangs through PostgREST instead of failing (booked 2026-09-26, Phase 164.9.4 D-15, evidence only).**
+- [x] **`[164.9.4-DEFER-40001-RETRY-HANG]` A mismatched-token `defer_compute_job` RPC hangs through PostgREST instead of failing (booked 2026-09-26, Phase 164.9.4 D-15, evidence only).**
       **Measured 2026-09-26 on a private local-stack lane** (no shared TEST, no other load on
       the database). `defer_compute_job` raises `USING ERRCODE = 'serialization_failure'`
       (SQLSTATE 40001) on its mismatched-token path, read from the function definition on the
@@ -1539,6 +1564,7 @@ true for 146 and half of 142–145, and **false for 141**.
       PostgREST RPC path, so a stale worker may hang instead of failing fast: the compute
       pipeline may be affected, so this may be data-integrity.
       ⏳ **Destination: AWAITS ROUTING.** The 2026-09-26 founder freeze forbids new phases; route it with /gsd-phase when the freeze lifts. Not fixed in 164.9.4, and it moves no count there.
+      ✅ CLOSED 2026-10-02 by Phase 164.9.3.2 DEFER40001. Migration `supabase/migrations/20261001120000_compute_job_fence_errcode_55006.sql` moves all four claim-token fence raises (`defer_compute_job`, `mark_compute_job_done` twice, `mark_compute_job_failed`) from SQLSTATE 40001 to `55006` with the message text unchanged, and PostgREST answers that code once. Evidence, plans 01-05: all four raises measured hanging through the lane's PostgREST v14.7 before the fix (no answer at 20 s, the retry loop still running after the client left); the gate `supabase/tests/test_compute_job_fence_errcode.sql` RED without the migration (first failure D1, SQLSTATE 40001) and GREEN with it (`ALL 8 ARMS EXECUTED`), each of its 8 twins observed biting; the four live-DB arms in `src/__tests__/compute-jobs-audit-2026-05-07-g10b.test.ts` aborted at their 10 s bound on the seam lane and answered `55006` once on the fixed lane; in Python, `test_defer_compute_job_token_fence` was SKIPPED after 121.61 s before the fix and PASSED in 0.01 s with no skip after, and the three decorated late-mark tests measured PASSED on the lane (their decorators stay until 164.9.4 moves `python` off shared TEST). ENQ-SCOPE = `enq-sibling` (founder, 2026-10-01): the enqueue race-loss raise in `_enqueue_compute_job_internal` is routed to Phase 164.9.3.2.1 ENQ40001. The fix is live only once this phase's merge applies the migration to PROD. The text above is kept as lineage.
 
 - [x] **`[164.9.5-MANUAL-BASELINE-REDUMP]` Every PROD migration apply leaves `main` red on
       baseline-content-drift until someone runs a manual schema dump (booked 2026-09-26, founder
@@ -3742,7 +3768,7 @@ and `[VAC08-LEDGER-32]`. ⛔ **Every entry below names a PHASE, not just a probl
       script that takes a shared-TEST lock.
       **Owner:** Phase 164.9 TESTISOLATION.
 
-- [ ] **`[167.2.1-DISCOVERY-DETAIL-DOUBLE-ASSEMBLY]` the discovery detail page assembles the
+- [x] **`[167.2.1-DISCOVERY-DETAIL-DOUBLE-ASSEMBLY]` the discovery detail page assembles the
       factsheet builder a second time, beside `fetchAndBuildPayload` (booked 2026-09-25, Phase
       167.2.1 D-03; routed to Phase 169 PAGETRUTH)** — `src/app/(dashboard)/discovery/[slug]/[strategyId]/page.tsx` calls the
       builder's steps itself: `resolveDailyReturnSeries`, `readCompositeFactsheet`,
@@ -3763,6 +3789,9 @@ and `[VAC08-LEDGER-32]`. ⛔ **Every entry below names a PHASE, not just a probl
       **Routing:** Phase 169 PAGETRUTH, which owns factsheet KPI sourcing (its SC4). The ROADMAP
       carries the matching dated note under `### Phase 169`, "Routed in, 2026-09-25 (Phase 167.2.1
       D-03)", written at planning time.
+      **Closed 2026-10-01 by Phase 169.1 plan 169.1-01 (commit `509b0d68c`):** the page builds
+      through `fetchAndBuildPayloadWithReason(strategy.id, withPublishedOnly)` and makes none of
+      the four calls itself; `page.one-path.test.tsx` and the phase-147 source guard pin it.
 
 - [ ] **`[167.2.1-CLIENT-SENTRY-NOOP]` every `captureToSentry` call in browser code is a silent
       no-op, because there is no client `Sentry.init` (booked 2026-09-26, Phase 167.2.1

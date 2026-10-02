@@ -32,7 +32,7 @@
  * hermetic seeded DB) flips `HAS_ADMIN_SEED` once an admin-user seed exists. The
  * migrated ComputeJobsTable's a11y is covered now by its semantic-DOM unit test.
  */
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./helpers/hydration-guard";
 import { buildAxe } from "./helpers/axe";
 import { seedTestAllocator } from "./helpers/seed-test-project";
 

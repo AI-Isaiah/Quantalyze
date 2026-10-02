@@ -68,7 +68,7 @@ jobs:
     if: needs.changed-paths.outputs.docs_only != 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
@@ -177,7 +177,7 @@ jobs:
       sql_gate_mode: ${{ steps.sql_gate_subset.outputs.sql_gate_mode }}
       sql_gate_files: ${{ steps.sql_gate_subset.outputs.sql_gate_files }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
           fetch-depth: 0   # the classifier diffs against the base branch
@@ -223,7 +223,7 @@ jobs:
     if: needs.changed-paths.outputs.docs_only != 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           # retro-PR179-M-persist-chain: drop the default persisted
           # GITHUB_TOKEN cred from .git/config. No subsequent step in
@@ -290,7 +290,7 @@ jobs:
     # ever gives this job a skip route. ⛔ Do not delete either half as dead weight.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           # retro-PR179-M-persist-chain: drop the default persisted
           # GITHUB_TOKEN cred from .git/config. No subsequent step in
@@ -371,7 +371,7 @@ jobs:
       matrix:
         shard: [1, 2]
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           # fetch-depth: 0 — the phase-29/30 frozen-spine guards
           # (src/__tests__/phase-{29,30}-frozen-spine-guards.test.ts) resolve
@@ -490,7 +490,7 @@ jobs:
       - frontend-test
       - changed-paths
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
@@ -594,7 +594,7 @@ jobs:
       UPSTASH_REDIS_REST_URL: http://localhost:8079
       UPSTASH_REDIS_REST_TOKEN: ci-seam-breaker-token
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           # No fetch-depth: 0 — the phase-29/30 frozen-spine guards resolve a
           # merge-base and run in the SHARDS, not here.
@@ -741,7 +741,7 @@ jobs:
       contents: read
       packages: read
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
           # 📜 LINEAGE (Phase 164.4.2 plan 03): this checkout used to fetch FULL
@@ -1080,7 +1080,7 @@ jobs:
       contents: read
       packages: read
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
           # 📜 LINEAGE: this checkout used to fetch FULL HISTORY (`fetch-depth: 0`),
@@ -1271,7 +1271,7 @@ jobs:
     if: needs.changed-paths.outputs.docs_only != 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           # retro-PR179-M-persist-chain: drop the default persisted
           # GITHUB_TOKEN cred from .git/config. No subsequent step in
@@ -1374,7 +1374,7 @@ jobs:
     if: needs.changed-paths.outputs.docs_only != 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
@@ -1442,7 +1442,7 @@ jobs:
     if: needs.changed-paths.outputs.docs_only != 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           # retro-PR179-M-persist-chain: drop the default persisted
           # GITHUB_TOKEN cred from .git/config. No subsequent step in
@@ -1571,7 +1571,7 @@ jobs:
     if: needs.changed-paths.outputs.docs_only != 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
@@ -2275,7 +2275,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
@@ -3180,7 +3180,7 @@ jobs:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
@@ -3846,7 +3846,7 @@ jobs:
       contents: read
       packages: read
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           # retro-PR179-M-persist-chain: drop the default persisted
           # GITHUB_TOKEN cred from .git/config. This job does no git op beyond
@@ -4603,6 +4603,14 @@ jobs:
           # Re-measured 2026-09-24 (Phase 164.6): composite 15 -> 16, fan-out 18 -> 19 (arm N each).
           # Re-measured 2026-09-24 (Phase 164.6 review fix): composite 16 -> 23, fan-out 19 -> 26
           # (N2, N3, T, U, V1, V2, W each). The new test_cron_runs_rls.sql declares no sentinel.
+          # Re-measured 2026-10-01 (Phase 164.9.3.2 DEFER40001, plan 06), ONE move:
+          #   test_compute_job_fence_errcode.sql, NEW, 8 arms (D1, D1L, M1, M1L, M2,
+          #   M2L, F1, F1L): the four claim-token fence raises of migration
+          #   20261001120000 answer SQLSTATE 55006, never 40001. A new sentinel-bearing
+          #   file changes the FILE SET, so SENTINEL_FLOOR 11 -> 12 and ARMS_FLOOR
+          #   229 -> 237, read off each file's own first `ALL N ARMS EXECUTED`
+          #   sentinel on the tree merged with origin/main. The mutation runner's own
+          #   ARMS_FLOOR moved 545 -> 553 in the same phase, also +8.
           # ⚠️ Re-measured 2026-09-17 (164.5.1, arm R): the fan-out file goes
           # 15 -> 18. Its own closing sentinel had been stuck at 15 and did not
           # list arms P or Q although both run, so this table AGREED WITH A STALE
@@ -4612,6 +4620,7 @@ jobs:
           # inserted between them — or at a different indent — makes the table
           # read as GONE. Keep prose above this line.
           #   test_analytics_service_settings_and_vault_tick.sql 13
+          #   test_compute_job_fence_errcode.sql              8
           #   test_create_wizard_strategy_for_key.sql         9
           #   test_get_verified_cohort_rank_gate.sql          6
           #   test_ledger_refresh_composite_arm.sql          23
@@ -4691,8 +4700,8 @@ jobs:
           #   test_strategy_shares_rls.sql                    103
           #   test_sync_status_curated_sentence_survives.sql    7
           #   test_sync_status_marked_refresh_protected.sql    23
-          SENTINEL_FLOOR=11  # files declaring a sentinel
-          ARMS_FLOOR=229     # 13 + 9 + 6 + 23 + 26 + 8 + 7 + 4 + 103 + 7 + 23
+          SENTINEL_FLOOR=12  # files declaring a sentinel
+          ARMS_FLOOR=237     # 13 + 8 + 9 + 6 + 23 + 26 + 8 + 7 + 4 + 103 + 7 + 23
           # RAISING these as arms are added is expected and cheap — and it is not
           # optional: src/__tests__/contracts/ci-anti-skip-gate.contract.test.ts
           # re-derives the table above from the corpus and goes red when a count,
@@ -4799,7 +4808,7 @@ jobs:
       contents: read
       pull-requests: write
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           fetch-depth: 0
           # retro-PR179-M-persist-chain: actions/checkout defaults
@@ -4854,7 +4863,7 @@ jobs:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
           fetch-depth: 0   # the gate diffs against the base branch
@@ -4875,7 +4884,7 @@ jobs:
     # checked-out tree; the no-progress flag keeps CI logs quiet.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           # retro-PR179-M-persist-chain: drop the default persisted
           # GITHUB_TOKEN cred from .git/config. lychee-action only
@@ -5009,7 +5018,7 @@ jobs:
       run:
         working-directory: analytics-service
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           # retro-PR179-M-persist-chain: drop the default persisted
           # GITHUB_TOKEN cred from .git/config. The python/pytest job
@@ -5459,7 +5468,7 @@ jobs:
       - python
       - changed-paths
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           # retro-PR179-M-persist-chain: drop the default persisted
           # GITHUB_TOKEN cred from .git/config. The test-db-drift job
@@ -5622,7 +5631,7 @@ jobs:
       - frontend-typecheck
       - changed-paths
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           # retro-PR179-M-persist-chain: drop the default persisted
           # GITHUB_TOKEN cred from .git/config. No subsequent step in
@@ -6030,7 +6039,7 @@ jobs:
       - frontend-typecheck
       - changed-paths
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           # retro-PR179-M-persist-chain: drop the default persisted
           # GITHUB_TOKEN cred from .git/config (same rationale as the e2e
@@ -6074,6 +6083,24 @@ jobs:
           else
             npx playwright install --with-deps chromium
           fi
+      # Phase 169.1.1 (169.1.1-REVIEW iteration 2, WR-01): the proof that the
+      # hydration guard (`e2e/helpers/hydration-guard.ts`) bites. It moved here
+      # from the `e2e` job's smoke step, whose `continue-on-error: true` and
+      # absence from the `frontend` aggregator meant a red self-test WOULD
+      # SURFACE in the run log and WOULD NOT stop a merge. Here it is its own
+      # step with no `if:` and no `continue-on-error`, in a job the `frontend`
+      # aggregator both needs and judges, so a guard that has gone blind
+      # reddens the required check. It needs no app server and no seeded data
+      # (`page.setContent` only), so it runs before the lane boots. `--retries 0`
+      # because its `test.fail()` cases make retries pure noise; `list` so a red
+      # result reads in this step's log (this job uploads no report).
+      # ⚠️ What this does NOT buy: this job's own `if:` skips it on fork PRs and
+      # docs-only PRs, and the aggregator tolerates that skip. On those events
+      # the self-test does not run at all. On a push or a same-repo PR it
+      # blocks. `src/__tests__/e2e-seeded-hydration-guard.test.ts` pins every
+      # invocation of the self-test to a placement like this one.
+      - name: Hydration guard self-test (proof the guard bites; blocking)
+        run: npx playwright test e2e/hydration-guard.self-test.spec.ts --retries 0 --reporter=list
       # ── THE LOCAL-STACK LANE (Phase 164.9.4 CIOFFMUTEX, D-03) ─────────────────
       # The seed, the build and the seeded specs run against a Supabase CLI stack
       # private to this runner, booted from the committed baseline, instead of the
@@ -6606,7 +6633,7 @@ jobs:
       - frontend-typecheck
       - changed-paths
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0

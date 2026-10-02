@@ -1,3 +1,4 @@
+import { metricsBasisSeries } from "@/lib/factsheet/compute";
 import type { ComparatorBlock, FactsheetPayload } from "@/lib/factsheet/types";
 
 /**
@@ -81,6 +82,16 @@ export type ChartConfig = {
    *  on the rolling vol/sharpe/sortino charts so the viewer can see at a glance
    *  whether the current value is above or below the strategy's average. */
   showStratAverage?: boolean;
+  /** Phase 169.1 (D-38 as narrowed by D-84): join the STRATEGY line across the
+   *  days the payload's day basis excluded. Under `dayBasis: "active"` the rolling
+   *  Sharpe is null on every excluded (zero-return) day, exactly as the engine's
+   *  (D-27), and the line would otherwise break at each one. Only those nulls are
+   *  bridged: the leading warm-up and any no-dispersion window (founder D7, null
+   *  since Phase 166.2) stay a gap, because no Sharpe exists there. The values are
+   *  never rewritten; only the drawn path changes. Never applied to a comparator
+   *  line (Phase 169.5 plan 02 relies on it breaking past `through`). Set on the
+   *  `rollingSharpe` entry only. */
+  bridgeBasisExcludedDays?: boolean;
 };
 
 export const CHART_CONFIGS: ChartConfig[] = [
@@ -167,6 +178,7 @@ export const CHART_CONFIGS: ChartConfig[] = [
     stratField: "strategyRollingSharpe",
     comparatorField: "rollingSharpe",
     showStratAverage: true,
+    bridgeBasisExcludedDays: true,
   },
   {
     key: "rollingSortino",
@@ -233,6 +245,10 @@ export type ResolvedSeries = {
   width: number;
   opacity: number;
   fill?: boolean;
+  /** Per-index: true where the day basis excluded the day, so `buildPath` joins
+   *  a null there instead of breaking the line (D-38, D-84). Strategy series of an
+   *  opted-in config only; absent everywhere else. Index-aligned with `values`. */
+  bridgeAt?: ReadonlyArray<boolean>;
 };
 
 export function resolveSeries(
@@ -269,6 +285,16 @@ export function resolveSeries(
       width: cfg.stratWidth ?? (cfg.fill ? 1.0 : 1.6),
       opacity: 1.0,
       fill: cfg.fill,
+      // D-84: the mask comes from the same helper that made the exclusion, so
+      // there is no second rule. On the calendar basis it excludes no day and
+      // the mask is all false (the line draws exactly as before).
+      ...(cfg.bridgeBasisExcludedDays
+        ? {
+            bridgeAt: metricsBasisSeries(payload.strategyReturns, payload.dates, {
+              dayBasis: payload.dayBasis,
+            }).positions.map((pos) => pos === null),
+          }
+        : {}),
     });
   }
   if (cfg.comparatorField) {

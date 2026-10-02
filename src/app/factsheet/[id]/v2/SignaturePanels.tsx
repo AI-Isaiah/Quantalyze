@@ -4,6 +4,7 @@ import { useMemo } from "react";
 import { usePayload } from "./factsheet-context";
 import { BaseLeverageNote } from "./basis-context";
 import type { EventSignature, EventSignaturesSet, FactsheetPayload } from "@/lib/factsheet/types";
+import { niceStepValues } from "@/lib/chart-ticks";
 import { ResponsiveChartFrame } from "@/components/ResponsiveChartFrame";
 import { useBreakpoint } from "@/hooks/useBreakpoint";
 
@@ -385,22 +386,7 @@ function areaPath(lower: number[], upper: number[], X: (i: number) => number, Y:
 
 function niceTicks(lo: number, hi: number, count: number): { value: number; label: string }[] {
   if (!(hi > lo)) return [];
-  const span = hi - lo;
-  const rough = span / count;
-  const mag = Math.pow(10, Math.floor(Math.log10(Math.abs(rough)) || 0));
-  const norm = rough / mag;
-  let nice: number;
-  if (norm < 1.5) nice = 1;
-  else if (norm < 3) nice = 2;
-  else if (norm < 7) nice = 5;
-  else nice = 10;
-  const step = nice * mag;
-  const start = Math.ceil(lo / step) * step;
-  const out: { value: number; label: string }[] = [];
-  for (let v = start; v <= hi + step * 0.001 && out.length < 8; v += step) {
-    out.push({ value: v, label: formatPct(v) });
-  }
-  return out;
+  return niceStepValues(lo, hi, count, 8, 0).map((v) => ({ value: v, label: formatPct(v) }));
 }
 
 /**

@@ -4803,7 +4803,7 @@ describe("IN-02 — no INVISIBLE characters in the Phase 164.3 gate scripts", ()
 });
 
 describe("OPS-08-F9 — the anti-skip floors are already raised (verify and record, do NOT change)", () => {
-  it("ci.yml still declares SENTINEL_FLOOR=11 and ARMS_FLOOR=229 at HEAD", () => {
+  it("ci.yml still declares SENTINEL_FLOOR=12 and ARMS_FLOOR=237 at HEAD", () => {
     // VERIFIED CORRECTION 3: the TODOS entry prescribes a 7->8 / 63->68 raise
     // that is ALREADY DONE (and ARMS is far past it). This pins the measured
     // values so a silent REDUCTION is caught; it is not a raise.
@@ -4888,9 +4888,17 @@ describe("OPS-08-F9 — the anti-skip floors are already raised (verify and reco
     // T, U, V1, V2 and W in each), read off each file's own first `ALL N ARMS
     // EXECUTED` sentinel. The runner's own ARMS_FLOOR moved 428 -> 445, +17: the
     // same fourteen plus the new file's three twins, which carry no sentinel.
+    //
+    // MOVED 2026-10-01 (Phase 164.9.3.2 DEFER40001, plan 06), 11/229 -> 12/237.
+    // SENTINEL_FLOOR moves: the NEW gate file test_compute_job_fence_errcode.sql
+    // declares `ALL 8 ARMS EXECUTED`, so the sentinel-bearing FILE SET grows by one,
+    // and ARMS_FLOOR moves by its EIGHT arms (D1, D1L, M1, M1L, M2, M2L, F1, F1L),
+    // read off each gate file's own first sentinel on the tree merged with
+    // origin/main. The runner's own ARMS_FLOOR moved 545 -> 553, also +8: each new
+    // arm got both a sentinel and a biting twin.
     const res = spawnSync(
       "grep",
-      ["-ac", "SENTINEL_FLOOR=11", ".github/workflows/ci.yml"],
+      ["-ac", "SENTINEL_FLOOR=12", ".github/workflows/ci.yml"],
       {
         cwd: process.cwd(),
         encoding: "utf8",
@@ -4901,7 +4909,7 @@ describe("OPS-08-F9 — the anti-skip floors are already raised (verify and reco
 
     const arms = spawnSync(
       "grep",
-      ["-ac", "ARMS_FLOOR=229", ".github/workflows/ci.yml"],
+      ["-ac", "ARMS_FLOOR=237", ".github/workflows/ci.yml"],
       {
         cwd: process.cwd(),
         encoding: "utf8",
