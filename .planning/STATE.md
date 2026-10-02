@@ -2,13 +2,13 @@
 gsd_state_version: "1.0"
 milestone: v1.20
 milestone_name: Backlog Burndown (Phases 158+)
-current_phase: 164.9.3.2.1
-current_phase_name: ENQ40001
+current_phase: 169.1.1
+current_phase_name: HYDRATIONTICKS
 status: planning
-stopped_at: Phase 164.9.3.2 complete (PR #919, v0.118.0.0), next Phase 164.9.3.2.1 (founder 2026-10-02)
+stopped_at: Phase 169.1.1 inserted (urgent); runs before Phase 164.9.3.2.1 (founder 2026-10-02)
 last_updated: "2026-10-02T08:25:37.248Z"
 last_activity: 2026-10-02
-last_activity_desc: Phase 164.9.3.2 complete; next Phase 164.9.3.2.1
+last_activity_desc: Phase 169.1.1 HYDRATIONTICKS inserted; next 169.1.1 then 164.9.3.2.1
 state_head: d566878a2f7b690212d0bb8c53c951c5f0be72be
 progress:
   total_phases: 84
@@ -180,7 +180,8 @@ no VERIFICATION.md exists for this phase yet, and this repo's own rule is that p
 is decided by verification status, never by plan counts.**
 
 Phase: 164.9.3.2 (DEFER40001) — COMPLETE 2026-10-02 (verification passed; PR #919 merged, v0.118.0.0; migration applied to TEST and PROD by Supabase Migrate run 36981647441)
-Phase: 164.9.3.2.1 (ENQ40001) — NEXT (founder 2026-10-02)
+Phase: 169.1.1 (HYDRATIONTICKS) — NEXT, urgent insert (founder 2026-10-02)
+Phase: 164.9.3.2.1 (ENQ40001) — after 169.1.1 (founder 2026-10-02)
 Phase: 166.4 (BENCHALIGN) — COMPLETE 2026-09-27 (verification passed; PR #892 merged, v0.108.0.0)
 Phase: 170 (LAYOUT — page layout reads clean and holds on every page) — COMPLETE 2026-10-01
 Plan: Not started
@@ -499,7 +500,7 @@ so every "Next is plan NN" below has been discharged:
       NON-ZERO exit is a regression. Next is plan 06 (closure: the false-reading
       `lane-probe: … class is STALE` sentence, the `lane-blocked:` line's own
       prose, [REDUNDER-LANEBLOCKED-BLIND], and the ubuntu measurement).
-Status: Phase 164.9.3.2 complete; next Phase 164.9.3.2.1
+Status: Ready to plan Phase 169.1.1; then Phase 164.9.3.2.1
       ⚠️ RETAINED — this was the `Status:` line until the 2026-09-06 reconciliation, kept as
       lineage: *"164-family re-partition SHIPPED — PR #745 (chore/164-family-repartition,
       v0.77.13.1). Phase 164.4.1 COMPLETE — PR #744 squash-merged as `e01cc2e6` (v0.77.13.0),
@@ -515,7 +516,7 @@ Status: Phase 164.9.3.2 complete; next Phase 164.9.3.2.1
       closed by PR #743 `3ed6919e`) and 164.4.1 annotated all five remaining files —
       `lane-blocked: 0`, `pending: 0` at `files 44/71`. Read `FILES_FLOOR` / `ARMS_FLOOR` off
       `scripts/mutation-runner/run.mjs`, never off a number restated here.
-Last activity: 2026-10-02 — Phase 164.9.3.2 complete; next Phase 164.9.3.2.1
+Last activity: 2026-10-02 — Phase 169.1.1 HYDRATIONTICKS inserted (urgent); next 169.1.1 then 164.9.3.2.1
       ⚠️ RETAINED — this was the `Last activity:` line until 2026-09-06:
       *"2026-09-04 — Phase 164.4.1 execution started"*
       all twinned and proven on real pg-lanes with **ZERO waivers** (cumulative 0 across all eight
@@ -1263,6 +1264,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ### Roadmap Evolution
 
+- Phase 169.1.1 HYDRATIONTICKS **inserted 2026-10-02 after Phase 169.1 (URGENT, hand-edited)**: factsheet chart ticks differ between server and browser (`Math.pow(10,n)` engine rounding), React #418 rebuilds the tree and replaces the Overview EquityChart; flakes `e2e/target-size.spec.ts` and turned main CI red. Founder (AskUserQuestion "New phase, first"): runs before 164.9.3.2.1.
 - Phase 166.3.1 NAVBREACH **inserted 2026-10-01 after Phase 166.3 (URGENT, hand-edited)**: the Deribit composite's `native_nav` inception reconciliation breach, which failed Phase 166.3's R5 recompute on PROD. Founder 2026-10-01: record R5 as a residual and route the breach to a named phase.
 - Phase 170.2 PROBEFIXES **inserted 2026-10-01 after Phase 170 (URGENT, hand-edited)**: three user-facing defects from the post-170 browser pass (Holdings sideways scroll, BTC refresh fallback, /compare equity overlay). Founder: one inserted phase with three plans; 169, 169.2 and 170 are closed and get nothing added. `phase.insert`'s ROADMAP blank-line collateral and its `state.json` rewrite were reverted from byte backups.
 - Phase 164.6.5 MT5VALIDATEWEDGE **per-criterion outcome recorded 2026-09-26 (plan 08, hand-edited)**: C3, C5, C6, C7 MET. C1 OPEN (D-03 path, `MT5-SWITCH-WEDGE-CAUSE-01`, Phase 164.6.6). C2 OPEN on its live half (`.planning/WINDOWS.md` entry 68, widened to name the first live `Mt5Client.session_snapshot` read beside the terminate step; founder, post-deploy). C4 OPEN on its calibration half: D-10 answered by scheduled prod-prober run 36134914962 (head `01dcf1cc`) onward; D-11 booked as `TODOS.md` `MT5-PROBER-WEDGE-CALIBRATION-01`, owned by Phase 164.6.6, trigger the next live `-10005` captured before the heal recycles it. Inherited criteria 7 and 8 OPEN (founder UAT). The phase is NOT transitioned to complete: verification is `gaps_found`. ⛔ Scope fence: the eviction is Phase 164.6.6; `[MT5-VERDICT-SINK-01]` stays deferred under its own owner.
@@ -2491,7 +2493,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 ## Session
 
 **Last Date:** 2026-09-27T22:52:00.000Z
-**Stopped At:** Phase 164.9.3.2 complete, next Phase 164.9.3.2.1
+**Stopped At:** Phase 169.1.1 inserted; next 169.1.1 then 164.9.3.2.1
 **Resume File:** None
 
 **Last Date:** 2026-09-24T06:17:00.000Z
