@@ -1,5 +1,6 @@
 import { createAdminClient } from "@/lib/supabase/admin";
 import { extractAnalytics } from "@/lib/queries";
+import { isRankableAnalyticsRow } from "@/lib/closed-sets";
 import { formatCurrency, formatPercent, formatNumber } from "@/lib/utils";
 import { Disclaimer } from "@/components/ui/Disclaimer";
 import { adaptPortfolioAnalytics } from "@/lib/portfolio-analytics-adapter";
@@ -75,7 +76,10 @@ export default async function PortfolioPdfPage({
     admin
       .from("portfolio_strategies")
       .select(
-        `*, strategies (id, name, strategy_analytics (cagr, sharpe, max_drawdown, volatility))`,
+        // STALE-01: `computation_status` joins the per-constituent embed. It is
+        // the only column that separates a finished run's KPIs from the ones a
+        // failed run left behind — see the row gate below.
+        `*, strategies (id, name, strategy_analytics (cagr, sharpe, max_drawdown, volatility, computation_status))`,
       )
       .eq("portfolio_id", id)
       .order("added_at", { ascending: false }),
@@ -111,9 +115,26 @@ export default async function PortfolioPdfPage({
 
   const rows: StrategyRow[] = strategyList.map((ps) => {
     const s = ps.strategies;
-    const a = s
+    const raw = s
       ? (extractAnalytics(s.strategy_analytics) as StrategyAnalytics | null)
       : null;
+    // STALE-01 — a portfolio mixes OTHER managers' published strategies, and
+    // this document leaves the platform: it is rendered behind an HMAC render
+    // token, printed to PDF and emailed on. A number that is wrong here is
+    // wrong in a file the recipient keeps, with no page to correct it on.
+    //
+    // The constituent's TWR / Sharpe / Max DD are read straight off its
+    // `strategy_analytics` row, so a `failed` run's leftovers were printed
+    // beside a confident "Data as of …" vintage line. Withhold them through the
+    // SHARED terminal-success predicate; each of the three cells already
+    // renders `formatPercent`/`formatNumber`'s em-dash on a null, and the row
+    // keeps its NAME, its WEIGHT and its persisted CONTRIBUTION — none of which
+    // are products of the strategy's own analytics job.
+    //
+    // The portfolio-level KPI strip above comes from `portfolio_analytics`, a
+    // DIFFERENT table with its own status vocabulary already handled by
+    // `adaptPortfolioAnalytics`. Untouched here.
+    const a = isRankableAnalyticsRow(raw) ? raw : null;
     const attr = attribution?.find((x) => x.strategy_id === ps.strategy_id);
     // Persisted attribution rows expose contribution + allocation_effect.
     // Weight comes from portfolio_strategies, TWR from the strategy's own analytics.

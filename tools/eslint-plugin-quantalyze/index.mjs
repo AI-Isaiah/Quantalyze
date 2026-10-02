@@ -11,6 +11,15 @@
  *   - B14 no-raw-staleness-derivation     (LANDED — bans raw last_sync_at vs cutoff; route via deriveSyncFreshness)
  *   - DS-04 no-raw-font-px                (LANDED — bans raw px font-size; route to fluid --text-* tiers)
  *   - DS-04 no-rem-less-clamp             (LANDED — bans a rem-less clamp() preferred term in CSS strings)
+ *   - SEAM-01 no-raw-analytics-fetch      (LANDED — Phase 140; bans a raw fetch of the
+ *                                          analytics base URL outside resilientFetch)
+ *   - SEAMRIM-11 no-unchecked-supabase-read (LANDED — Phase 140.4; bans an awaited
+ *                                          PostgREST read destructured for data/count
+ *                                          without binding `error`, in BOTH the object
+ *                                          and Promise.all array forms. SCOPED, not
+ *                                          repo-wide: the baseline is dirty — see the
+ *                                          eslint.config.mjs block for the predicate
+ *                                          and the ratchet)
  *   - B17 labeled-metric-consumption      (after B17 ships its runtime half)
  *
  * See .planning/audit-2026-05-07/B25-PLAN.md for the honesty-gate inventory
@@ -24,6 +33,8 @@ import noPassthroughOnIpc from "./rules/no-passthrough-on-ipc.mjs";
 import noRawStalenessDerivation from "./rules/no-raw-staleness-derivation.mjs";
 import noRawFontPx from "./rules/no-raw-font-px.mjs";
 import noRemLessClamp from "./rules/no-rem-less-clamp.mjs";
+import noRawAnalyticsFetch from "./rules/no-raw-analytics-fetch.mjs";
+import noUncheckedSupabaseRead from "./rules/no-unchecked-supabase-read.mjs";
 
 const plugin = {
   meta: { name: "eslint-plugin-quantalyze", version: "0.1.0" },
@@ -36,6 +47,8 @@ const plugin = {
     "no-raw-staleness-derivation": noRawStalenessDerivation,
     "no-raw-font-px": noRawFontPx,
     "no-rem-less-clamp": noRemLessClamp,
+    "no-raw-analytics-fetch": noRawAnalyticsFetch,
+    "no-unchecked-supabase-read": noUncheckedSupabaseRead,
   },
 };
 

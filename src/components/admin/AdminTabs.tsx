@@ -74,7 +74,7 @@ export interface PendingStrategyRow {
   strategy_types: string[];
   created_at: string;
   user_id: string;
-  profiles: { display_name: string } | null;
+  profiles: { display_name: string | null; email: string | null } | null;
   strategy_analytics: Array<{
     cagr: number | null;
     sharpe: number | null;
@@ -214,7 +214,7 @@ function IntroRequestsTab({ requests }: { requests: IntroRequestRow[] }) {
       {/* Summary counts */}
       <div className="flex gap-4 text-caption">
         <span className="text-badge-market-neutral font-medium">{counts.pending} pending</span>
-        <span className="text-accent font-medium">{counts.intro_made} in progress</span>
+        <span className="text-accent font-medium">{counts.intro_made} intro made</span>
         <span className="text-positive font-medium">{counts.completed} completed</span>
         {counts.declined > 0 && <span className="text-negative font-medium">{counts.declined} declined</span>}
       </div>
@@ -345,6 +345,33 @@ function IntroRequestsTab({ requests }: { requests: IntroRequestRow[] }) {
   );
 }
 
+function StrategyOwnerLine({
+  profile,
+  recency,
+}: {
+  profile: PendingStrategyRow["profiles"];
+  recency: string;
+}) {
+  const name = profile?.display_name?.trim() || null;
+  const email = profile?.email?.trim() || null;
+  const emailNode = email ? (
+    <span className="text-text-muted [overflow-wrap:anywhere]">{email}</span>
+  ) : null;
+  return (
+    <p className="mt-0.5 text-caption text-text-muted">
+      {name && emailNode ? (
+        <>by {name} · {emailNode} · Computed {recency}</>
+      ) : emailNode ? (
+        <>by {emailNode} · Computed {recency}</>
+      ) : name ? (
+        <>by {name} · Computed {recency}</>
+      ) : (
+        <>by Unknown · Computed {recency}</>
+      )}
+    </p>
+  );
+}
+
 function formatRecency(iso: string | null | undefined): string {
   if (!iso) return "—";
   return formatRelativeTime(iso, Date.now());
@@ -464,10 +491,10 @@ function StrategyReviewTab({ strategies }: { strategies: PendingStrategyRow[] })
                       {sourceBadgeLabel(source)}
                     </span>
                   </div>
-                  <p className="mt-0.5 text-caption text-text-muted">
-                    by {profile?.display_name ?? "Unknown"} ·{" "}
-                    Synced {formatRecency(analytics?.computed_at ?? null)}
-                  </p>
+                  <StrategyOwnerLine
+                    profile={profile}
+                    recency={formatRecency(analytics?.computed_at ?? null)}
+                  />
 
                   <div className="mt-3 grid grid-cols-3 gap-3 border-t border-border pt-3">
                     <MetricCell label="CAGR" value={formatPercent(analytics?.cagr, 1)} />

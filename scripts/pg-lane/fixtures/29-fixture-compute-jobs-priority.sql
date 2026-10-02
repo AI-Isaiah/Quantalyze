@@ -1,0 +1,35 @@
+-- Additive stand-in for `compute_jobs.priority`, which no fixture carries and
+-- which the real migration that adds it CANNOT be applied on a lane.
+--
+-- Production declares the column in
+-- 20260428120836_compute_jobs_priority.sql:53-55 as
+-- `TEXT NOT NULL DEFAULT 'normal' CHECK (priority IN ('low','normal','high'))`,
+-- reproduced verbatim below.
+--
+-- ⛔ WHY THE REAL MIGRATION IS NOT APPLIED INSTEAD. Migration 086 does two
+-- things in one file: it adds this column AND it creates the FIRST,
+-- two-argument `claim_compute_jobs_with_priority(INTEGER, TEXT)`. Every later
+-- claim migration from 20260510173005 onward defines a THREE-argument overload
+-- (`p_unified_backbone_active BOOLEAN DEFAULT NULL`) with
+-- `CREATE OR REPLACE`, which creates a SECOND function rather than replacing
+-- the first, and NO migration in the repo ever drops the two-argument form
+-- (MEASURED 2026-09-05: `grep -an 'claim_compute_jobs_with_priority(INTEGER, TEXT)'
+-- supabase/migrations/*.sql` -> 0 hits). With both overloads present, the bare
+-- `COMMENT ON FUNCTION claim_compute_jobs_with_priority IS ...` at
+-- 20260515114555_compute_jobs_claim_token_fencing.sql:348 aborts the apply with
+-- `42725: function name "claim_compute_jobs_with_priority" is not unique`
+-- (MEASURED on the lane 2026-09-05). 20260515114555 is not optional for
+-- test_strategy_analytics_stuck_computing_reaper.sql: it is the sole source of
+-- `compute_jobs.claim_token` (:96), which Parts 4 and 5 seed and pass to
+-- mark_compute_job_done / mark_compute_job_failed. So the two files cannot both
+-- be in one apply list, and the column has to come from a stand-in.
+--
+-- ⚠️ STAND-IN, NOT THE SCHEMA. The type, the NOT NULL, the DEFAULT and the CHECK
+-- are production's; nothing else about the column is asserted structurally, and
+-- no gate arm reads it. `test_strategy_analytics_stuck_computing_reaper.sql`
+-- only NAMES it in the four compute_jobs INSERTs its Parts 2/4/5 seed. Apply
+-- AFTER a compute_jobs base (20260411144407 or 03-fixture-compute-jobs.sql).
+-- Never a second base.
+ALTER TABLE public.compute_jobs
+  ADD COLUMN IF NOT EXISTS priority TEXT NOT NULL DEFAULT 'normal'
+    CHECK (priority IN ('low', 'normal', 'high'));

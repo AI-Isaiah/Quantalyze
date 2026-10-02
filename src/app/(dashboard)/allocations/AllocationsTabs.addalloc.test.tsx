@@ -57,7 +57,15 @@ const localStorageMock = {
   },
   key: vi.fn(() => null),
 };
-vi.stubGlobal("localStorage", localStorageMock);
+// Phase 140.5-01 / SEAMPROSE-04 — installed PER TEST, not at module scope.
+// `vitest.config.ts` sets `unstubGlobals: true`, which restores stubbed globals
+// before every test, so a stub applied once at import time is gone by the time
+// the first test runs. Re-applying it here also removes a real leak: a stub set
+// at module scope is never undone, so it reaches every later file in the same
+// worker (DEF-16-1).
+beforeEach(() => {
+  vi.stubGlobal("localStorage", localStorageMock);
+});
 
 // --- Shared capture state for the ScenarioComposer stub (Task 2 host wiring) -
 // vi.hoisted so the hoisted vi.mock factory can reference it safely.
@@ -234,6 +242,10 @@ const STUB_PROPS: MyAllocationDashboardPayload & {
   hasSyncing: false,
   equityDailyPoints: [],
   equityCurveSource: "legacy",
+  // Phase 167.1.2 / D-02: the producer emits "rebuilding" for every allocator.
+  equityHistoryState: "rebuilding",
+  equityDailyReturns: [],
+  equityHistoryRebuildReason: null,
   derivedCurveComputedAt: null,
   minHistoryDepthMonths: null,
   equityBaselineUnknown: false,
@@ -273,6 +285,11 @@ const STUB_PROPS: MyAllocationDashboardPayload & {
   perKeyReturnsByApiKeyId: {},
   perKeyDailiesGateSatisfied: false,
   eligibleApiKeyIds: [],
+  // Phase 151 / AUM-04 — the split book-entry gate. No eligible keys here, so
+  // no key can be allocator-side and none can contribute.
+  allocatorEligibleApiKeyIds: [],
+  contributingApiKeyIds: [],
+  bookEntryGateSatisfied: false,
   apiKeysCount: 1,
   mandateIsSet: false,
 };

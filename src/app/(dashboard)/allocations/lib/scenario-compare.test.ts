@@ -7,6 +7,7 @@ import { coverageSpanOf, defaultWindowFor } from "@/lib/scenario-window";
 // to assert the suppression.
 vi.mock("@/lib/sentry-capture", () => ({ captureToSentry: vi.fn() }));
 import { captureToSentry } from "@/lib/sentry-capture";
+import { MAX_LEVERAGE } from "@/lib/leverage";
 import type { ScenarioDraft, AddedStrategy } from "./scenario-state";
 import {
   buildAddedOnlySet,
@@ -450,16 +451,33 @@ describe("computeMetricsForDraft", () => {
   it("LOW-1 — a corrupt persisted leverage (999) is clamped but emits NO Sentry warning on the compare path (quota-safe)", () => {
     vi.mocked(captureToSentry).mockClear();
     const dates = buildDates("2024-01-02", 80);
+    // 151 UAT — the returns are scaled down (0.1%/0.08% instead of 1%/0.8%)
+    // because MAX_LEVERAGE moved 10 → 200. At 200× the original series RUINS
+    // (a −0.8% day becomes −160%, so cumulative wealth goes negative and the
+    // engine honestly returns null metrics), which would make the
+    // "still computes honestly" non-vacuity assertion below fail for a reason
+    // that has nothing to do with what this test is about. A gentler series
+    // keeps the clamp observable AND the projection real.
     const inputs = perKeyLiveInputs(
-      { "key-A": altReturns(dates, 0.01, -0.008) },
+      { "key-A": altReturns(dates, 0.001, -0.0008) },
       { "key-A": 5000 },
     );
-    // 999 → clamped to 10 at read; the metrics still compute honestly.
+    // 999 → clamped to MAX_LEVERAGE at read; the metrics still compute honestly.
     const m = computeMetricsForDraft(
       draft({ memberKeyIds: ["key-A"], leverageOverrides: { "key-A": 999 } }),
       inputs,
     );
     expect(m.twr).not.toBeNull();
+    // The clamp really happened: 999 projects identically to the ceiling, and
+    // NOT identically to an unclamped 999 (which would ruin → null metrics).
+    const atCeiling = computeMetricsForDraft(
+      draft({
+        memberKeyIds: ["key-A"],
+        leverageOverrides: { "key-A": MAX_LEVERAGE },
+      }),
+      inputs,
+    );
+    expect(m.twr).toBe(atCeiling.twr);
     // …but the coercion signal is suppressed on this read-twice compare path.
     expect(captureToSentry).not.toHaveBeenCalled();
   });
@@ -763,6 +781,51 @@ describe("MEMBER-02 membership selector (F5 closure)", () => {
     expect(m.member_ids).toEqual(["key-A"]);
   });
 
+  // -----------------------------------------------------------------------
+  // SP-W2 (151 specialist) — the compute-time intersection must use the
+  // ROLE-AWARE contributing set, not the role-blind eligible set.
+  //
+  // WR-07 repointed the two membership DERIVATIONS onto contributingApiKeyIds
+  // but left this intersection on eligibleApiKeyIds. The population it bites:
+  // an owner-MANAGER whose keys all carry a per-key series (so the pre-151
+  // all-or-nothing gate was TRUE) and who saved a book scenario before the
+  // phase — its persisted memberKeyIds is the whole role-blind eligible set,
+  // manager keys included. Post-151 the composer reopens it blending only the
+  // contributing keys while this panel, on the SAME screen, blends the manager
+  // keys too: two projections of one portfolio.
+  //
+  // Here "key-B" stands for the MANAGER-side key (eligible, has a series, but
+  // feeds a live strategy → excluded from the allocator's own book).
+  // -----------------------------------------------------------------------
+  it("SP-W2: a pre-151 saved draft whose membership includes a MANAGER-side key blends only the CONTRIBUTING keys", () => {
+    const m = computeMetricsForDraft(
+      // The persisted membership a pre-split save produced: the whole
+      // role-blind eligible set.
+      draft({ memberKeyIds: ["key-A", "key-B"] }),
+      {
+        ...perKeyInputs(["key-A", "key-B"]),
+        // The role-aware basis: "key-B" is manager-side, so the composer's
+        // engine does not blend it.
+        contributingApiKeyIds: ["key-A"],
+      },
+    );
+    // Compare now names the SAME constituent set the composer projects.
+    expect(m.member_count).toBe(1);
+    expect(m.member_ids).toEqual(["key-A"]);
+    // Non-vacuous: the surviving allocator key really computed.
+    expect(m.twr).not.toBeNull();
+  });
+
+  it("SP-W2 control: a caller that supplies NO contributing set keeps the role-blind eligible behaviour (back-compat)", () => {
+    const m = computeMetricsForDraft(
+      draft({ memberKeyIds: ["key-A", "key-B"] }),
+      // contributingApiKeyIds ABSENT — the narrow-payload / pre-split caller.
+      perKeyInputs(["key-A", "key-B"]),
+    );
+    expect(m.member_count).toBe(2);
+    expect(m.member_ids).toEqual(expect.arrayContaining(["key-A", "key-B"]));
+  });
+
   it("golden: the Atlas-class book-only 40-day blend is preserved for an upgraded/derived-membership column", () => {
     // The upgraded-book column the panel models by deriving membership = all
     // eligible ids. Its RETURN-space metrics (twr, member set, bounds) must equal
@@ -909,7 +972,7 @@ describe("computeMetricsForDraft — blend-basis annualization (BLEND-01)", () =
     // Reference: the SAME per-key engine set (raw equity weights, all selected)
     // at each basis. The helper's plain-draft per-key path reproduces exactly
     // this set + state (single eligible member, no toggle/weight overrides).
-    const set = buildPerKeyStrategyForBuilderSet({ "key-A": S }, { "key-A": 5000 });
+    const set = buildPerKeyStrategyForBuilderSet({ "key-A": S }, { "key-A": 5000 }, new Map());
     const refState = { ...set.state, window: win };
     const cache = buildDateMapCache(set.strategies);
     const ref365 = computeScenario(set.strategies, refState, cache, 365);
@@ -962,14 +1025,19 @@ describe("computeMetricsForDraft — blend-basis annualization (BLEND-01)", () =
     expect(crypto.volatility).not.toBe(ref252.volatility);
   });
 
-  it("an added-only all-null draft is BYTE-IDENTICAL to the plain default-252 engine path (cagr destructured out)", () => {
-    // The default pin: an all-unknown blend derives blendPeriodsPerYear → 252,
-    // the engine's own default, so the helper's output must deep-equal a direct
-    // computeScenario call with NO periodsPerYear arg over the SAME added-only
-    // engine set. Explicit window + weights make the reference deterministic
-    // (no default-window ambiguity). cagr is stripped from BOTH sides (84-06
-    // will move it to the calendar clock; it is out of scope for this default
-    // pin, which asserts the RISK fields are byte-identical).
+  it("an added-only EXPLICITLY-TRADITIONAL draft is BYTE-IDENTICAL to the plain default-252 engine path (cagr destructured out)", () => {
+    // The default pin: a blend whose legs all carry an explicit 'traditional'
+    // class derives blendPeriodsPerYear → 252, the engine's own default, so the
+    // helper's output must deep-equal a direct computeScenario call with NO
+    // periodsPerYear arg over the SAME added-only engine set. Explicit window +
+    // weights make the reference deterministic (no default-window ambiguity).
+    // cagr is stripped from BOTH sides (84-06 moved it to the calendar clock,
+    // where it is basis-invariant; this pin asserts the RISK fields).
+    //
+    // RANK-06 (2026-08-21): this pin previously used all-NULL legs. Null legs
+    // are now the 365 (unknown → crypto) case, so the 252 byte-identity pin
+    // moved to legs that STATE they are traditional — which is the only shape
+    // that ever honestly meant 252. The null case is pinned at 365 below.
     const dates = buildDates("2024-01-02", 80);
     const seriesA = altReturns(dates, 0.01, -0.008);
     const seriesB = altReturns(dates, 0.012, -0.009);
@@ -980,7 +1048,10 @@ describe("computeMetricsForDraft — blend-basis annualization (BLEND-01)", () =
       weightOverrides: { [SA]: 0.5, [SB]: 0.5 },
       window: win,
     });
-    const inputs = addedInputs({ [SA]: seriesA, [SB]: seriesB }); // both null → 252
+    const inputs = addedInputs(
+      { [SA]: seriesA, [SB]: seriesB },
+      { [SA]: "traditional", [SB]: "traditional" }, // both stated → 252
+    );
 
     const m = computeMetricsForDraft(d, inputs);
 
@@ -1008,6 +1079,100 @@ describe("computeMetricsForDraft — blend-basis annualization (BLEND-01)", () =
     const { cagr: _mCagr, ...mRest } = m;
     const { cagr: _rCagr, ...rRest } = ref;
     expect(mRest).toEqual(rRest);
+  });
+
+  // =======================================================================
+  // RANK-06 — the WIRING pin. The helper fix (closed-sets.ts) is worthless if
+  // a production call site stops consulting it, so these two drive
+  // computeMetricsForDraft (the real compare path, which calls
+  // blendPeriodsPerYear at scenario-compare.ts:349) rather than the helper.
+  //
+  // ORACLE DISCIPLINE (house law: money-math pins ride ECONOMIC invariants):
+  // the expected value is NOT a blendPeriodsPerYear() call inside the test and
+  // NOT the engine re-run at a hand-passed 365. It is the ratio between the two
+  // clocks the SAME fixture series produces through the SAME production path —
+  // √(365/252), a market-structure constant. If the call site regresses to 252
+  // for an unknown leg, the ratio collapses to 1 and this goes RED.
+  // =======================================================================
+  it("RANK-06 wiring: an added-only draft whose sole leg OMITS asset_class annualizes RISK on the 365 clock — vol/sharpe/sortino are exactly √(365/252) / (365/252)× the explicitly-traditional run of the SAME series", () => {
+    const dates = buildDates("2024-01-02", 80);
+    const series = altReturns(dates, 0.01, -0.008);
+    const win = { start: dates[5], end: dates[70] };
+    const d = draft({
+      addedStrategies: [addedStrat(SA, "A")],
+      toggleByScopeRef: { [SA]: true },
+      weightOverrides: { [SA]: 1 },
+      window: win,
+    });
+
+    // The projection-gap shape: the metadata entry carries NO asset_class at
+    // all (not null — ABSENT), exactly what a select list that dropped the
+    // column produces. Built by hand because `addedInputs` always writes the key.
+    const gapInputs: ScenarioCompareInputs = {
+      addedStrategyReturnsLookup: { [SA]: series },
+      addedStrategyMetadataLookup: {
+        [SA]: { disclosure_tier: "public", cagr: null, sharpe: null },
+      } as ScenarioCompareInputs["addedStrategyMetadataLookup"],
+    };
+    // The control: the SAME series, but the leg STATES it is traditional.
+    const statedInputs = addedInputs({ [SA]: series }, { [SA]: "traditional" });
+
+    const gap = computeMetricsForDraft(d, gapInputs);
+    const stated = computeMetricsForDraft(d, statedInputs);
+
+    // Non-vacuous: both runs produced real numbers over the same n.
+    expect(gap.n).toBeGreaterThanOrEqual(10);
+    expect(gap.n).toBe(stated.n);
+    expect(gap.volatility).toBeGreaterThan(0);
+    expect(stated.volatility).toBeGreaterThan(0);
+
+    // ECONOMICS. Annualized vol scales with √periods; Sharpe and Sortino scale
+    // with periods/√periods = √periods too. The engine rounds (vol toFixed(5),
+    // ratios toFixed(3)), so the comparison budget is 1e-3 relative, not exact.
+    const CLOCK_RATIO = Math.sqrt(365 / 252); // ≈ 1.2035
+    expect(gap.volatility! / stated.volatility!).toBeCloseTo(CLOCK_RATIO, 3);
+    expect(gap.sharpe! / stated.sharpe!).toBeCloseTo(CLOCK_RATIO, 3);
+    expect(gap.sortino! / stated.sortino!).toBeCloseTo(CLOCK_RATIO, 3);
+    // The pre-fix state is ratio === 1 — assert the gap is materially open.
+    expect(gap.volatility! / stated.volatility!).toBeGreaterThan(1.2);
+
+    // #597 SCOPE: the fix moves RISK only. RETURN-space outputs ride the
+    // calendar clock and must be BYTE-IDENTICAL across the two clocks.
+    expect(gap.twr).toBe(stated.twr);
+    expect(gap.cagr).toBe(stated.cagr);
+    expect(gap.max_drawdown).toBe(stated.max_drawdown);
+  });
+
+  it("RANK-06 wiring control: a null asset_class behaves identically to an ABSENT one at the call site (both are the same projection gap)", () => {
+    const dates = buildDates("2024-01-02", 80);
+    const series = altReturns(dates, 0.01, -0.008);
+    const win = { start: dates[5], end: dates[70] };
+    const d = draft({
+      addedStrategies: [addedStrat(SA, "A")],
+      toggleByScopeRef: { [SA]: true },
+      weightOverrides: { [SA]: 1 },
+      window: win,
+    });
+
+    // `addedInputs` with no class map writes asset_class: null.
+    const nullClass = computeMetricsForDraft(d, addedInputs({ [SA]: series }));
+    const cryptoClass = computeMetricsForDraft(
+      d,
+      addedInputs({ [SA]: series }, { [SA]: "crypto" }),
+    );
+    const traditional = computeMetricsForDraft(
+      d,
+      addedInputs({ [SA]: series }, { [SA]: "traditional" }),
+    );
+
+    expect(nullClass.n).toBeGreaterThanOrEqual(10); // non-vacuous
+    // A null-class leg now rides the SAME clock as a stated-crypto leg…
+    const { cagr: _nC, ...nullRest } = nullClass;
+    const { cagr: _cC, ...cryptoRest } = cryptoClass;
+    expect(nullRest).toEqual(cryptoRest);
+    // …and is genuinely LOUDER than the traditional clock (basis load-bearing).
+    expect(nullClass.volatility).not.toBe(traditional.volatility);
+    expect(nullClass.volatility!).toBeGreaterThan(traditional.volatility!);
   });
 
   it("a toggled-OFF crypto leg does NOT flip a tradfi selection to √365 (SELECTED-only basis)", () => {
@@ -1046,5 +1211,51 @@ describe("computeMetricsForDraft — blend-basis annualization (BLEND-01)", () =
     const { cagr: _c2, ...nullRest } = nullOff;
     // The excluded crypto leg's asset_class is irrelevant to the basis → identical.
     expect(cryptoRest).toEqual(nullRest);
+  });
+});
+
+// Phase 167.1.2 SC-4 caller walk: a saved book draft whose member keys all carry
+// 0 equity (the per-key weight) has no weight mass. The compare column must get
+// the engine's honest empty shape (em-dash cells), never a flat 0% blend.
+describe("computeMetricsForDraft — [167.1.2 SC-4] zero weight mass", () => {
+  it("a book draft whose member keys all have 0 equity → n 0, null metrics, empty curve (today: a flat 0% blend over every date)", () => {
+    const dates = buildDates("2024-01-02", 40);
+    const inputs = perKeyLiveInputs(
+      {
+        "key-A": altReturns(dates, 0.01, -0.008),
+        "key-B": altReturns(dates, 0.012, -0.009),
+      },
+      { "key-A": 0, "key-B": 0 },
+    );
+    const m = computeMetricsForDraft(
+      draft({ memberKeyIds: ["key-A", "key-B"] }),
+      inputs,
+    );
+    expect(m.n).toBe(0);
+    expect(m.equity_curve).toEqual([]);
+    expect(m.twr).toBeNull();
+    expect(m.sharpe).toBeNull();
+    expect(m.max_drawdown).toBeNull();
+    expect(m.volatility).toBeNull();
+    expect(m.member_count).toBe(2);
+  });
+
+  it("the live-book column ({ liveBook: true }) over an all-zero-equity book is the same honest empty shape", () => {
+    const dates = buildDates("2024-01-02", 40);
+    const eligible = ["key-A", "key-B"];
+    const inputs = perKeyLiveInputs(
+      {
+        "key-A": altReturns(dates, 0.01, -0.008),
+        "key-B": altReturns(dates, 0.012, -0.009),
+      },
+      { "key-A": 0, "key-B": 0 },
+      eligible,
+    );
+    const m = computeMetricsForDraft(buildLiveBookDraft(true, eligible), inputs, {
+      liveBook: true,
+    });
+    expect(m.n).toBe(0);
+    expect(m.equity_curve).toEqual([]);
+    expect(m.twr).toBeNull();
   });
 });

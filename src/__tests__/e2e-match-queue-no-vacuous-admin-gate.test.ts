@@ -50,6 +50,24 @@ function stripComments(src: string): string {
     .replace(/^\s*\/\/.*$/gm, "");
 }
 
+/**
+ * ⚠️ These two literals are DELIBERATELY retained — do not "scrub" them.
+ *
+ * They are the needle this guard searches for: the assertions below prove the
+ * credential is ABSENT from `e2e/match-queue.spec.ts`, and an absence assertion
+ * cannot be written without naming the thing that must be absent. Replacing
+ * them with a placeholder would make every assertion below pass unconditionally
+ * — a guard that cannot fail, which is worse than no guard (H-1050 / M-0876).
+ *
+ * 158-REVIEW CR-03 reviewed this file and confirmed the exception. The honest
+ * accounting: this repository is PUBLIC, so this pair IS published — but it was
+ * already published the moment it was first committed, and it remains in git
+ * history regardless of any text change made now. Deleting it here would cost a
+ * working guard and remediate nothing. The ONLY real remediation is to
+ * disable/rotate the `matratzentester24@gmail.com` account on every project it
+ * exists in; that is a human action, tracked in TODOS, and NOT done by this
+ * change. Once rotated, these become inert strings and the guard keeps working.
+ */
 const HARDCODED_CRED = "matratzentester24@gmail.com";
 const HARDCODED_PW = "Test12";
 

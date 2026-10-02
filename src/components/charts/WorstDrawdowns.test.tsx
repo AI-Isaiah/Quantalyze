@@ -26,6 +26,7 @@ function makeAnalytics(
     id: "a1",
     strategy_id: "s1",
     computed_at: new Date().toISOString(),
+    computing_started_at: null,
     computation_status: "complete",
     computation_error: null,
     benchmark: null,

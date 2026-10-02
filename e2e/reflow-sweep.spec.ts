@@ -3,23 +3,20 @@ import { assertNoReflow } from "./helpers/reflow";
 
 /**
  * Phase 46-04 / REFLOW-01 + REFLOW-02 — parametrized PUBLIC reflow sweep
- * (WCAG 1.4.10 Reflow) at the 320px CSS reflow width.
+ * (WCAG 1.4.10 Reflow) at the 390px floor.
  *
  * Extends the single-route e2e/reflow.spec.ts (/security) into a curated
  * sweep over the public surface so EVERY public route is proven to have no
- * horizontal PAGE overflow at 320px — the phase-46 verification backbone for
+ * horizontal PAGE overflow at 390px — the phase-46 verification backbone for
  * the public half. Each route is anchored on a VISIBLE content element (never
  * generic chrome) so a blank/404/unhydrated page fails LOUD via assertNoReflow
  * rather than false-greening (the W-02 lesson; Pitfall 5).
  *
- * WCAG 1.4.10 / 1.4.4 note (REFLOW-02): the 320px CSS reflow width IS the
- * spec-defined equivalent of 400% zoom on a 1280px viewport (1280 / 4 = 320).
- * Proving no horizontal overflow at 320px CSS px is therefore the same proof
- * as "usable at 400% zoom with no two-axis scroll" — there is no separate
- * browser-zoom mechanism in Playwright; the phase-44 reflow harness expresses
- * the zoom case via the 320px viewport (matching reflow.spec.ts /
- * target-size.spec.ts), and this sweep does the same. The representative
- * 400%-equivalent assertion is the 320px assertNoReflow pass below.
+ * Founder decision 2026-09-27: 390px (iPhone 12) is the narrowest supported
+ * width; 320px and 400% zoom are deliberately not required. /browse and /demo
+ * render DashboardChrome, so the corrected helper measures `#main-content`
+ * there, and a 320px run would demand 320-only fixes nobody asked for.
+ * WCAG 1.4.4 text-resize is unchanged and does not depend on this width.
  *
  * UNSEEDED spec — runs against the placeholder-env build on PUBLIC routes,
  * carrying NO seed-env self-skip guard at all (matching reflow.spec.ts). It is
@@ -50,21 +47,19 @@ const PUBLIC_ROUTES: { path: string; anchor: string }[] = [
   { path: "/for-quants", anchor: "main h1" },
   // Browse — <main> (browse/layout.tsx) wraps the page <h1>.
   { path: "/browse", anchor: "main h1" },
-  // Demo — no <h1>; EditorialHero renders <h1 id="editorial-hero-headline">
-  // (the headline tuned for 24/32 reflow at 320px). Anchor on that visible
-  // headline so the demo body — not the sticky banner chrome — is what gates.
+  // Demo — no <h1>; EditorialHero renders <h1 id="editorial-hero-headline">.
+  // Anchor on that visible headline so the demo body — not the sticky banner
+  // chrome — is what gates.
   { path: "/demo", anchor: "#editorial-hero-headline" },
 ];
 
-test.describe("reflow sweep (WCAG 1.4.10 / 1.4.4) @ 320px — public", () => {
+test.describe("reflow sweep (WCAG 1.4.10 / 1.4.4) @ 390px — public", () => {
   for (const r of PUBLIC_ROUTES) {
-    test(`${r.path} no horizontal overflow at 320px (= 400% zoom on 1280)`, async ({
+    test(`${r.path} no horizontal overflow at 390px`, async ({
       page,
     }) => {
-      // 320px CSS width = the WCAG-mandated reflow width = 400% zoom on a
-      // 1280px viewport. No horizontal page overflow here proves both
-      // REFLOW-01 (no overflow @320px) and REFLOW-02 (usable @400% zoom).
-      await page.setViewportSize({ width: 320, height: 800 });
+      // Founder decision 2026-09-27: 390px floor, not 320px (= 400% zoom).
+      await page.setViewportSize({ width: 390, height: 800 });
       const res = await page.goto(r.path);
       // Surface an outright 4xx/5xx early with a clear message; the
       // visible-anchor check in assertNoReflow is the real fail-loud guard.
@@ -83,7 +78,7 @@ test.describe("reflow sweep (WCAG 1.4.10 / 1.4.4) @ 320px — public", () => {
 
 /**
  * Phase 54-06 / VERIFY-01 — the PUBLIC half of the app-wide 2560px ultra-wide
- * reflow sweep. The 320px describe above proves the WCAG 1.4.10 Reflow LOWER
+ * reflow sweep. The 390px describe above proves the WCAG 1.4.10 Reflow LOWER
  * bound; this parallel describe proves the v1.4 "layouts hold to ULTRA-WIDE"
  * requirement at the UPPER bound (no horizontal overflow when the viewport is
  * 2560px) across the SAME curated public route floor — so an ultra-wide overflow

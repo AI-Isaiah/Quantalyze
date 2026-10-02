@@ -44,7 +44,7 @@ interface TrustTierLabelProps {
  * Phase 17 / DESIGN-01 — three-variant outline pill driven by
  * `TRUST_TIER_TOKENS`. The call signature is byte-identical to the
  * Phase 15 v0 (15-CONTEXT.md "Trust-Tier Placeholder Display") —
- * callers (StrategyHeader, StrategyGrid, future admin row) do NOT
+ * callers (StrategyGrid, future admin row) do NOT
  * refactor.
  *
  * Variants:

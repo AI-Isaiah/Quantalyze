@@ -63,6 +63,82 @@ log = structlog.get_logger("quantalyze.analytics.long_fetch")
 _LEDGER_BACKED_SOURCES: frozenset[str] = frozenset({"deribit", "sfox", "mt5"})
 
 
+def _retract_refresh_marker_on_reuse(
+    supabase: Any, job_id: Any, *, correlation_id: Any
+) -> None:
+    """Phase 161.1 / REUSE-01 — a user's resync may not INHERIT the D-15 refresh
+    protection from a job row the enqueue dedup handed it.
+
+    ``process_key_long`` is enqueued from exactly two places, both HTTP request
+    handlers (``routers/process_key.py``), so its tail is ALWAYS a request a user
+    is waiting on. If that tail enqueue deduped onto a recurring ledger refresh,
+    the marker on the row has stopped describing reality and must be retracted.
+
+    ⛔ WHY THE RETRACTION IS A WRITE TO ``metadata->>'source'`` AND NOT A NEW KEY.
+    Two independent consumers read that exact expression and only that one: the
+    Python guard in ``services/job_worker.py`` and, in SQL, the ``is_protected``
+    predicate of ``sync_strategy_analytics_status``
+    (mig 20260825150000). The SQL end cannot be taught about a new key from here,
+    and it is the end that decides the publish state on every path where NO
+    Python stamp runs at all — a preflight refusal, a circuit breaker, a wedged
+    venue gateway, a budget timeout. Retracting the marker itself is what stands
+    BOTH ends down with one write. The old value is preserved under
+    ``refresh_marker_retracted`` so the row still reads as what it was, and the
+    ``correlation_id`` the dedup discarded is restored so operators can join this
+    job to the request it is actually serving.
+    ⚠️ Both are provenance only — nothing keys on either, deliberately: a second
+    thing to keep in sync with the first is the drift this phase keeps paying for.
+
+    ⛔ The UNION of markers, not the single-key one, and here that is the SAFE
+    direction rather than the F5/F7 one. Those notes narrow a PROTECTION to the
+    arm that owns it; retraction is the LOUD direction, so widening it can only
+    make more failures visible. A ``stitch_composite`` marker cannot reach this
+    site today (``process_key_long``'s tails are ``derive_broker_dailies`` and
+    ``sync_trades``), and if a future arm changes that it should be retracted too.
+
+    ⚠️ RESIDUAL, stated rather than hidden: this is a read-modify-write, and the
+    claim RPC additively writes ``unified_backbone_at_claim`` into the same
+    column. A claim committing between the read and the write loses that key.
+    It is re-derivable and nothing re-reads it from the row — the drain check at
+    :81 takes it from the claim's own returned metadata — so the cost of the
+    window is a telemetry key, against a funded account rendering a stale
+    factsheet over a silently-failed resync if the write is skipped. The real
+    closure is a merge arm in ``enqueue_compute_job``; that RPC is on every
+    enqueue path in the system and needs its own review.
+
+    Best-effort by design: the caller's ``try:`` already contains an enqueue blip
+    for the reason its own comment gives, and this is the same class of failure.
+    """
+    if not job_id:
+        return
+    from services.job_worker import LEDGER_REFRESH_JOB_SOURCES
+
+    res = (
+        supabase.table("compute_jobs")
+        .select("metadata")
+        .eq("id", job_id)
+        .maybe_single()
+        .execute()
+    )
+    row = getattr(res, "data", None)
+    metadata = row.get("metadata") if isinstance(row, dict) else None
+    marker = metadata.get("source") if isinstance(metadata, dict) else None
+    if not isinstance(metadata, dict) or marker not in LEDGER_REFRESH_JOB_SOURCES:
+        return
+
+    retracted = {key: value for key, value in metadata.items() if key != "source"}
+    retracted["refresh_marker_retracted"] = marker
+    retracted["correlation_id"] = correlation_id
+    supabase.table("compute_jobs").update({"metadata": retracted}).eq(
+        "id", job_id
+    ).execute()
+    log.warning(
+        "process_key_long.refresh_marker_retracted",
+        job_id=str(job_id),
+        marker=marker,
+    )
+
+
 async def run_process_key_long_job(job: dict[str, Any]) -> "DispatchResult":
     """Phase 19 / BACKBONE-09 — long-fetch worker handler.
 
@@ -388,14 +464,54 @@ async def run_process_key_long_job(job: dict[str, Any]) -> "DispatchResult":
         # adapter itself sets VALIDATION_UNEXPECTED (unexpected exception during
         # validate), the failure MAY be transient (e.g. ccxt.ExchangeNotAvailable
         # not in the typed exception hierarchy) and must remain retryable.
+        #
+        # PYAPIFIX2-02 (Phase 140.1.2): this local set is STRUCTURALLY
+        # UNCOMPLETABLE and must not be grown code-by-code. csv_adapter.py mints
+        # error_code from a pandera rule name (`first_rule.upper()`) — an open
+        # code space no enumeration can close — and MT5 mints MT5_WRONG_SERVER /
+        # MT5_MASTER_PASSWORD, neither of which any list here remembered. Both
+        # are unfixable-by-retry, so both were classified transient and retried
+        # 3x, each attempt serialising through the single MT5 gateway lock.
+        # The correct channel is PROVENANCE: the adapter that minted the code
+        # states `ValidationResult.permanent`, consulted FIRST below. The set
+        # stays byte-unchanged as the fallback for adapters that state no
+        # verdict (permanent=None) — in particular MISSING_SCOPE stays OMITTED,
+        # the deliberate divergence from PERMANENT_VALIDATION_ERROR_CODES
+        # recorded at services/exchange.py (re-pointing it is a production
+        # behaviour change named in no requirement).
         permanent_codes = {
             "AUTH_FAILED", "PERMISSION_DENIED",
             "TRADE_SCOPE", "WITHDRAW_SCOPE",
         }
-        _is_permanent = (
-            _reject_code in permanent_codes
-            or (_reject_code == "VALIDATION_UNEXPECTED" and _is_unexpected_fallback)
-        )
+        if val.permanent is not None:
+            # The adapter that MINTED the code is the only component that knows
+            # whether it can clear, so a STATED verdict is authoritative in BOTH
+            # directions — that is what makes the field tri-state rather than an
+            # extra way to spell "add me to the list".
+            #
+            # An explicit False therefore SUPPRESSES the list, which is the
+            # fail-safe direction: it can only move a rejection permanent ->
+            # transient (retry next attempt), never transient -> permanent
+            # (failed_final, a user locked out of a key that works). That is the
+            # same omission polarity cron.py's CREDENTIAL_REJECTION_CODES has and
+            # the one this programme unifies toward. Cost of a wrong False is
+            # bounded by max_attempts; cost of a wrong permanent is a support
+            # ticket.
+            #
+            # `is not None` (identity, not truthiness) so None — "no verdict",
+            # every adapter but MT5 today — still falls through to the list logic
+            # below completely unchanged. No adapter states False at HEAD, so
+            # this branch is behaviour-identical to `val.permanent is True` for
+            # every code path in production today.
+            _is_permanent = val.permanent
+        else:
+            _is_permanent = (
+                _reject_code in permanent_codes
+                or (
+                    _reject_code == "VALIDATION_UNEXPECTED"
+                    and _is_unexpected_fallback
+                )
+            )
         return DispatchResult(
             outcome=DispatchOutcome.FAILED,
             error_message=f"validate failed: {_reject_code}",
@@ -497,13 +613,12 @@ async def run_process_key_long_job(job: dict[str, Any]) -> "DispatchResult":
         },
     ).execute()
 
-    # 5. reconstruct_positions (BACKBONE-09 wiring) — runs after report_queued
-    # because positions are a derived view; trades are the SoT. Skipped for a
-    # ledger-backed source: there are no reconstructed fills to derive from.
-    if not is_ledger_backed:
-        # Invariant: trades is non-None on the fill path (see above).
-        assert trades is not None
-        await adapter.reconstruct_positions(trades)
+    # 5. (removed 2026-09-24) This step used to await
+    # adapter.reconstruct_positions(trades) and discard the result. Nothing
+    # persisted it, and each call logged "equity understated" for every open
+    # position without a mark price, which misreported a diagnostic as a data
+    # defect. Positions are derived where they are used (the equity curve and
+    # services/position_reconstruction.py), not here.
 
     # Final transition
     supabase.rpc(
@@ -540,26 +655,56 @@ async def run_process_key_long_job(job: dict[str, Any]) -> "DispatchResult":
     # here to avoid changing the published/fingerprint behavior other code reads.
     analytics_strategy_id = context.get("strategy_id") or job.get("strategy_id")
     if source != "csv" and analytics_strategy_id:
-        tail_kind = "derive_broker_dailies" if is_ledger_backed else "sync_trades"
         # Best-effort, mirroring run_sync_trades_job's follow-on compute_analytics
         # enqueue (which is also wrapped). The verification is already 'published',
         # so a worker retry short-circuits on that status (idempotency check above)
         # and would NOT re-run this tail — therefore we must NOT let an enqueue
         # blip crash the handler. Log loudly instead; strategy_analytics can be
         # recomputed via a manual re-sync if this rare path is hit.
+        #
+        # D-15: the topology read and the unpack live INSIDE this try:, not above
+        # it. They are the same class of failure as an enqueue blip — a future
+        # edit that widens the chain entry (a third tail) would otherwise raise
+        # ValueError out of the handler, and because the verification is already
+        # 'published' the retry short-circuits and NEVER re-reaches this block:
+        # the strategy stays published with no analytics chain and no recorded
+        # failure. Pinned by tests/test_long_fetch_follow_on_guard.py.
+        tail_kind: str | None = None
         try:
-            supabase.rpc(
+            # JOB-03: read the canonical chain topology instead of inline
+            # literals, so the reaper-threshold oracle can never be pinned to a
+            # stale copy of these edges. Late import mirrors the DispatchResult
+            # import above — services.job_worker imports services.ingestion when
+            # it dispatches, so a module-level import here would close the cycle.
+            from services.job_worker import JOB_CHAIN_FOLLOW_ON
+
+            # Tuple order is (ledger-backed tail, trade-backed tail).
+            ledger_tail, trade_tail = JOB_CHAIN_FOLLOW_ON["process_key_long"]
+            tail_kind = ledger_tail if is_ledger_backed else trade_tail
+            tail_job_id = supabase.rpc(
                 "enqueue_compute_job",
                 {
                     "p_strategy_id": analytics_strategy_id,
                     "p_kind": tail_kind,
                     "p_metadata": {"correlation_id": correlation_id},
                 },
-            ).execute()
+            ).execute().data
             log.info(
                 "process_key_long.enqueued_tail",
                 tail_kind=tail_kind,
                 strategy_id=analytics_strategy_id,
+            )
+            # ⛔ Phase 161.1 / REUSE-01. THIS ENQUEUE MAY NOT HAVE CREATED A JOB.
+            # `_enqueue_compute_job_internal` dedupes on (target, kind) over the
+            # in-flight statuses and RETURNS the existing id — `p_metadata` is
+            # discarded, there is no merge arm (mig 20260716090000:229-262,
+            # MEASURED against that body). If a recurring ledger refresh already
+            # holds the tail's (strategy, kind), this user resync is now SERVED BY
+            # A JOB CARRYING THE D-15 REFRESH MARKER — a protection that exists
+            # for background work nobody is watching, silently inherited by a
+            # request someone is watching. Retract it.
+            _retract_refresh_marker_on_reuse(
+                supabase, tail_job_id, correlation_id=correlation_id
             )
         except Exception as exc:  # noqa: BLE001
             log.error(

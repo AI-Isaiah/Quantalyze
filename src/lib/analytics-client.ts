@@ -5,22 +5,107 @@ import {
   PortfolioAnalyticsResponseSchema,
   PortfolioOptimizerResponseSchema,
   RecomputeMatchResponseSchema,
+  BenchmarkRefreshResponseSchema,
   BridgeResponseSchema,
   OptimizeWeightsResponseSchema,
   type OptimizeWeightsResponse,
 } from "./analytics-schemas";
 import { SimulatorResponseSchema } from "./api/simulatorSchema";
+import {
+  resilientFetch,
+  SeamConfigError,
+  SEAM_BUDGETS,
+  type SeamBudgetKey,
+  type SeamResponse,
+} from "./resilient-fetch";
+// 161-06 / WIZERR-05 — the ONE `Retry-After` parser (B20), enforced repo-wide
+// by the `no-raw-retry-after-parse` lint rule. It is imported HERE for the same
+// reason `seam-discriminator` is: a second extractor for one fact is the drift
+// class this programme exists to close.
+import { parseRetryAfterSeconds } from "./retry/retry-after";
+// 140.3-01 / TS-05 — the ONE seam-envelope discriminator (140.2-06). Never
+// hand-roll a second extractor: a second implementation of this predicate is
+// the drift class this programme exists to close.
+import {
+  seamDependencyName,
+  seamErrorCode,
+  seamHumanMessage,
+} from "@/lib/seam-discriminator";
+// 153.1-02 / 153.4-02 — the venue CAPABILITY predicate. `budgetKeyFor` below
+// reads `VENUE_CAPABILITIES.serialized` through it and never a venue name, so a
+// second serialized venue is covered by editing that record alone.
+import { venueIsSerialized } from "./closed-sets";
+import { CircuitOpenError, SeamBodyReadError } from "./seam-errors";
+import { scrubSeamString } from "./seam-redaction";
+import { mintTenantClaim, type TenantIdentity } from "./tenant-claim";
+// Phase 141 / SEAM-05+06 — the retry-safety registry. The analytics seam is
+// keyed by `budgetKey`, which is 1:1 with the wrapper function, so the budget key
+// IS the seam-function identity. A VALUE import of a dependency-free leaf (see
+// its header); it survives the wholesale seam mocks.
+import { RETRY_SAFE_ANALYTICS } from "./seam-retry-registry";
 
-const ANALYTICS_URL = process.env.ANALYTICS_SERVICE_URL ?? "http://localhost:8002";
 const SERVICE_KEY = process.env.ANALYTICS_SERVICE_KEY ?? "";
 
 /** Client-side API contract version. Sent as X-Api-Version on every request. */
 export const ANALYTICS_API_VERSION = "1";
 
-const DEFAULT_TIMEOUT_MS = 30_000;
+/**
+ * Phase 140 / SEAM-01 — back-compat convenience re-export ONLY.
+ *
+ * ⚠️ The canonical import path for `CircuitOpenError` is `@/lib/seam-errors`,
+ * the dependency-free leaf. Nothing may rely on picking the class up through
+ * THIS module: EVERY ROUTE TEST THAT MOCKS A SEAM CLIENT WHOLESALE does
+ * `vi.mock("@/lib/analytics-client")`, and most of the seam-mocking files use a
+ * FULL factory with no `importActual`. Through those mocks this re-export is
+ * `undefined`, and
+ * `err instanceof undefined` throws `TypeError` from inside a catch block —
+ * turning a clean 503 into a crash. Production code, route handlers, wizard
+ * error classification and tests all import from the leaf.
+ */
+export { CircuitOpenError };
+
+/**
+ * 140.5-02 / SEAMPROSE-03 (B-02) — THE MACHINE MARKER FOR A FAILURE OF **OUR
+ * OWN HOP**, as opposed to something an upstream said.
+ *
+ * WHY IT EXISTS. `classifyKeyValidationError` used to reach these two failures
+ * by sniffing `err.message` for `"timeout"` — and the message this module
+ * produces says **"timed out"**. `"timed out"` does not contain `"timeout"`, so
+ * every deadline miss and every dead connection answered `UNKNOWN`/500 ("we
+ * could not classify this failure"), with no retry affordance, for what is the
+ * commonest Railway outage. Confirmed OPEN by execution, not by reading.
+ *
+ * WHY A MARKER RATHER THAN A WIDER NEEDLE. A substring branch is simultaneously
+ * too narrow — the next reword silently re-opens the hole — and too broad, and
+ * in a cascade it loses to whichever earlier branch the message collides with,
+ * because ORDERING decides, not specificity. The same argument the venue-code
+ * table is built on.
+ *
+ * ⚠️ WHY IT IS A SECOND FIELD AND NOT `seamCode`, which would otherwise be the
+ * obvious reuse. `seamCode` carries what the UPSTREAM'S BODY declared. This
+ * carries what OUR TRANSPORT OBSERVED, on a path where there is no body at all.
+ * Folding them into one field would let an upstream put `"UPSTREAM_TIMEOUT"` in
+ * its envelope and be handed our transport verdict — the same reasoning that
+ * keeps the breaker's own verdict above everything an upstream can set. The
+ * IDIOM is copied exactly (a plain own data property, read with `typeof`, never
+ * `instanceof`, resolved through an EXPLICIT table); only the fact differs.
+ *
+ * The values are the seam's EXISTING wire codes for these two facts, so the
+ * consumer resolves them through the one shared wire→wizard table rather than a
+ * second private vocabulary.
+ */
+const TRANSPORT_TIMEOUT_CODE = "UPSTREAM_TIMEOUT";
+const TRANSPORT_NETWORK_CODE = "UPSTREAM_NETWORK_ERROR";
 
 /** Thrown when the analytics service does not respond within the timeout. */
 export class AnalyticsTimeoutError extends Error {
+  /**
+   * See `TRANSPORT_TIMEOUT_CODE` above. Assigned in the constructor exactly as
+   * `AnalyticsUpstreamError.seamCode` is, so the read survives every mock shape
+   * — route tests that replace this module wholesale would make an
+   * `instanceof` throw from inside a catch block.
+   */
+  readonly seamTransportCode: string = TRANSPORT_TIMEOUT_CODE;
   constructor(path: string, timeoutMs: number) {
     super(`Analytics service timed out after ${timeoutMs}ms on ${path}`);
     this.name = "AnalyticsTimeoutError";
@@ -35,7 +120,84 @@ export class AnalyticsTimeoutError extends Error {
  */
 export class AnalyticsUpstreamError extends Error {
   readonly status: number;
-  constructor(message: string, status: number) {
+  /**
+   * 140.3-01 / TS-05 — the stable MACHINE code from the seam envelope, or
+   * `null` when the body carried none (a transport-shaped failure, a bodyless
+   * 5xx, or a non-contract body).
+   *
+   * Additive and optional: every pre-existing construction site passes two
+   * arguments and keeps `null`. It exists because closing TS-05 with only the
+   * HUMAN half would leave the discriminator's other output unreachable at the
+   * seam chokepoint — and the code, not the sentence, is what the copy plan and
+   * TS-35 branch on. The sentence is for the user; the code is for us.
+   */
+  readonly seamCode: string | null;
+  /**
+   * 140.3-11 / TS-18 — the VENUE the nested envelope named, or `null`.
+   *
+   * Additive and optional on exactly the contract `seamCode` set one plan
+   * earlier: every pre-existing construction site passes two or three arguments
+   * and keeps `null`, and this is the SAME error type rather than a second one
+   * — the seam has one error vocabulary and adding to it is not this plan's to
+   * do. What is new is only that a field the wire already carried stops being
+   * discarded here.
+   *
+   * It has to be carried HERE because this is where the body dies: the route
+   * handlers downstream see only the thrown error, so a `dependency` not read
+   * at this line is unreachable to every consumer. Sniffing it back out of
+   * `message` later would be the substring cascade that correction C-6 caught
+   * rendering a venue WAF block as the user's own IP-allowlist problem.
+   *
+   * `null` on BOTH flat shapes by construction, which is the common case: the
+   * flat `VenueTransientHTTPException` 424 carries no `dependency` key at all.
+   * `null` means "a venue failed and the wire did not say which" — never
+   * "no venue failed", and never a name to invent.
+   */
+  readonly dependency: string | null;
+  /**
+   * 161-06 / WIZERR-05 — the wait the UPSTREAM advertised, in SECONDS, or
+   * `null` when it advertised none.
+   *
+   * Additive and optional, exactly like its two siblings above: every
+   * pre-existing construction site passes two, three or four arguments and
+   * keeps `null`. The new parameter is a `number | null` following two
+   * `string | null`s, so a transposition is a `tsc` error rather than a silent
+   * swap — which is why this is an add-alongside rather than the
+   * trailing-options-object refactor a FIFTH optional field (or a SECOND
+   * `number | null` one) would make mandatory.
+   *
+   * ⚠️ IT IS READ HERE BECAUSE THIS IS THE LAST LINE AT WHICH IT EXISTS. The
+   * route handlers downstream see only the thrown error — the `Response` and
+   * its headers are gone by then. Before this field the value simply died at
+   * the construction sites below: the wizard's renderer
+   * (`WizardErrorContext.retryAfterSeconds` → the envelope's
+   * `retry_after_seconds`) already existed and had nothing to render.
+   *
+   * SECONDS AT EVERY HOP, and it is fed from ONE place: the response's own
+   * `Retry-After` header, through `parseRetryAfterSeconds` — never
+   * `Number(header)` (an HTTP-date form yields `NaN` through `Number`, and B20's
+   * lint rule bans the shape repo-wide). The nested envelope
+   * (`service_error_body`) carries key set `{code, dependency, retryable,
+   * detail}` and NO wait leaf, measured at HEAD, so for a 503 the header is not
+   * merely the preferred source — it is the only one on the wire. Reading a
+   * body field as a second source would be the two-extraction-paths shape
+   * `process-key-client.ts`'s relay docblock already refused in prose.
+   *
+   * `null` means "no wait was advertised". It NEVER means zero: `0` is an
+   * instruction to retry immediately, which is a duration nobody sent, and
+   * fabricating one turns a vague error into a specific lie (TRAP-3). It is
+   * `null` by construction on the two UNUSABLE_RESPONSE_STATUS arms, whose
+   * status this module SYNTHESIZES (502) rather than forwards — attaching the
+   * upstream's advice to a verdict of our own would misattribute it.
+   */
+  readonly retryAfterSeconds: number | null;
+  constructor(
+    message: string,
+    status: number,
+    seamCode: string | null = null,
+    dependency: string | null = null,
+    retryAfterSeconds: number | null = null,
+  ) {
     super(message);
     this.name = "AnalyticsUpstreamError";
     // H-1144: the documented contract is "preserve the UPSTREAM status so route
@@ -51,49 +213,377 @@ export class AnalyticsUpstreamError extends Error {
       );
     }
     this.status = status;
+    this.seamCode = seamCode;
+    this.dependency = dependency;
+    this.retryAfterSeconds = retryAfterSeconds;
   }
+}
+
+/**
+ * The "connection never completed" copy, extracted so the transport arm and the
+ * body-read arm below cannot drift apart. Byte-identical to what this module
+ * has always thrown — plan 140.2-05 authors NO new user-facing copy; 140.3 owns
+ * the client-facing surface.
+ */
+const NOT_REACHABLE_MESSAGE =
+  "Analytics service is not reachable. Please ensure it is running.";
+
+/**
+ * 140.5-02 / SEAMPROSE-03 (B-02) — the not-reachable throw, MARKED.
+ *
+ * ⚠️ IT STAYS A PLAIN `Error`, DELIBERATELY. `mapBodyReadFailure`'s docblock
+ * below fixes the taxonomy the nine wrapper consumers branch on
+ * (`AnalyticsTimeoutError`, `AnalyticsUpstreamError`, `CircuitOpenError`, and
+ * this generic `Error`) and refuses a new type escaping here, because a new
+ * type reaches every caller with no arm for it. A marker is data, not a type,
+ * so it adds the machine-readability without widening the taxonomy — which is
+ * the whole reason the consumer reads an own property rather than a class.
+ *
+ * A factory rather than two `Object.assign` call sites: the transport arm and
+ * the body-read arm both throw this, and an unmarked second thrower is exactly
+ * the drift that made B-02 possible in the first place.
+ */
+function notReachableError(): Error {
+  return Object.assign(new Error(NOT_REACHABLE_MESSAGE), {
+    seamTransportCode: TRANSPORT_NETWORK_CODE,
+  });
+}
+
+/**
+ * Phase 140.2-11 / SEAMCORE-11 (A-27) — THE ONE DEFINED OUTCOME for an
+ * ambiguous transport. Stated identically here and in
+ * `src/lib/process-key-client.ts` so the next reader does not have to diff the
+ * two files to find out what the seam does with a 204.
+ *
+ * WHAT IS AMBIGUOUS
+ *   1. A 2xx whose content-type is not JSON. The modal case is a Railway edge
+ *      or maintenance page served as `200 text/html`: the transport succeeded,
+ *      the breaker (correctly) counts nothing, and what came back is not the
+ *      service.
+ *   2. The three NULL-BODY statuses 204 / 205 / 304, which carry no body at
+ *      all and cannot carry one.
+ *
+ * THE OUTCOME, in both clients
+ *   A typed upstream error carrying the OBSERVED status and content-type, in a
+ *   static operator-facing message that names the SEAM. Here it is THROWN as
+ *   `AnalyticsUpstreamError`; in `process-key-client` the identical message is
+ *   logged and the outcome is RETURNED as an `{ ok: false, response }` 502
+ *   envelope, because that function is declared never to throw at its five
+ *   caller routes.
+ *
+ * WHY THE THREE STATUSES ARE DECIDED ON THE STATUS, BEFORE ANY RESPONSE IS
+ * CONSTRUCTED. Verified by execution on Node v25.8.1:
+ * `Response.json(body, { status: 204 | 205 | 304 })` throws
+ * `TypeError: Response constructor: Invalid response status code`. That is
+ * WHATWG-spec behaviour, not a runtime quirk, so CI's Node 22 and local Node 25
+ * agree. The construction ITSELF is the fault, so no arm may reach it.
+ *
+ * WHY THE MESSAGE — AND NOT THE `status` FIELD — CARRIES THE OBSERVED STATUS.
+ * `AnalyticsUpstreamError.status` is contractually the code route handlers
+ * FORWARD (`simulator/route.ts` forwards 4xx verbatim). Forwarding 204 or 304
+ * would move this exact crash into the route's own `NextResponse.json`, and
+ * forwarding 200 would ship an error payload under a success code. So the
+ * routable status is 502 — the gateway answered, unusably — and the observed
+ * status lives in the message, where an operator reads it.
+ *
+ * The BREAKER VERDICT IS UNCHANGED by all of this (SEAMCORE-01): a 2xx is not a
+ * service fault and a 304 is not either. This is what the CLIENTS do with the
+ * response, not what the core counts.
+ */
+const NULL_BODY_STATUSES: ReadonlySet<number> = new Set([204, 205, 304]);
+
+/** The routable status for the outcome above: the gateway answered, unusably. */
+const UNUSABLE_RESPONSE_STATUS = 502;
+
+/**
+ * The operator-facing message for the outcome above.
+ *
+ * DUPLICATED, byte-for-byte, in `src/lib/process-key-client.ts`, and guarded by
+ * a comment-stripped drift check in `analytics-client.test.ts`. It is duplicated
+ * rather than shared because neither client may import from the other (EVERY
+ * ROUTE TEST THAT MOCKS A SEAM CLIENT WHOLESALE replaces one or the other with a
+ * full factory, under which a cross-client import evaluates to `undefined`), and
+ * it cannot move to the dependency-free error leaf either — that leaf's exported
+ * surface is pinned to a two-member hand-typed set.
+ *
+ * ⚠️ 140.5-02 / SEAMPROSE-04 — the bare integer that stood in both places above
+ * is GONE, not corrected: the same population measures 26 / 23 / 15 / 16 / 19
+ * under five different predicates, so ANY single integer here is defensible
+ * under exactly one of them. Name the predicate, never the count.
+ *
+ * Only the MEDIA TYPE is echoed, lower-cased and length-capped: the raw header
+ * is upstream-controlled and its parameters carry nothing an operator needs.
+ */
+function unusableSeamResponseMessage(
+  status: number,
+  contentType: string | null,
+): string {
+  const mediaType =
+    ((contentType ?? "").split(";")[0] ?? "").trim().toLowerCase().slice(0, 64) ||
+    "absent";
+  return `Analytics seam returned an unusable response (HTTP ${status}, content-type ${mediaType}). The upstream did not answer with the JSON contract.`;
+}
+
+/**
+ * Map a `SeamBodyReadError` onto the taxonomy this module ALREADY has.
+ *
+ * The core records the breaker failure and throws this class from inside its
+ * classification window; the nine wrapper consumers must keep seeing only
+ * `AnalyticsTimeoutError`, `AnalyticsUpstreamError`, `CircuitOpenError` and the
+ * generic not-reachable `Error` — a new type escaping here would reach every
+ * caller with no arm for it. `deadlineExceeded` is the only discriminator, and
+ * it means exactly what the transport arm's own name test means, because the
+ * core derives both from one definition.
+ *
+ * Anything that is NOT a body-read failure is rethrown untouched: this helper
+ * classifies, it does not swallow.
+ */
+function mapBodyReadFailure(err: unknown, path: string, timeoutMs: number): never {
+  if (err instanceof SeamBodyReadError) {
+    if (err.deadlineExceeded) {
+      throw new AnalyticsTimeoutError(path, timeoutMs);
+    }
+    throw notReachableError();
+  }
+  throw err;
 }
 
 /**
  * Core fetch wrapper for the Python analytics service.
  *
+ * Phase 140 / SEAM-01: the transport itself now lives in `resilient-fetch.ts`
+ * — the ONE place that owns the base URL, the wall-clock budget, and the
+ * `breaker:railway` circuit. This function keeps everything that is genuinely
+ * analytics-client policy: header construction, the API-version drift warning,
+ * and the `!ok` → `AnalyticsUpstreamError` translation the core deliberately
+ * does not perform (only the caller knows whether a 404 is an error).
+ *
  * @param path    - URL path (e.g. "/api/compute-analytics")
  * @param body    - JSON body to POST
- * @param options - Optional overrides. `timeoutMs` defaults to 30s.
- *                  `method` defaults to "POST".
+ * @param options - `budgetKey` is REQUIRED: it names this call site's row in
+ *                  `SEAM_BUDGETS`, which is the single owner of its deadline.
+ *                  `tenantId` is REQUIRED: it is the server-derived identity the
+ *                  `X-Tenant-Claim` is minted over (see below).
+ *                  `timeoutMs` overrides the table for one call — TESTS ONLY
+ *                  since 140-05 removed the last production override (the
+ *                  optimizer route's legacy constant). `method` defaults to
+ *                  "POST".
  */
 async function analyticsRequest(
   path: string,
   body: Record<string, unknown> | null,
-  options?: { timeoutMs?: number; method?: string; correlationId?: string },
+  options: {
+    budgetKey: SeamBudgetKey;
+    /**
+     * Phase 140.2-09 / TS-04 — REQUIRED, and required ON PURPOSE.
+     *
+     * Every one of the nine wrappers must decide what its tenant payload is.
+     * Making this optional would let a tenth wrapper be added with no identity
+     * and land silently in a platform-wide bucket — the instance-not-class
+     * defect this programme exists to close, and one that no test which only
+     * checks the wrappers it knows about could ever see.
+     *
+     * MUST be server-derived (`user.id` from the authenticated session). It
+     * reaches the Python limiter's key as `<scope>:t:<tenantId>` VERBATIM, so a
+     * caller who controls it controls which window they spend.
+     */
+    tenantId: string;
+    timeoutMs?: number;
+    method?: string;
+    correlationId?: string;
+  },
 ) {
-  const timeoutMs = options?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  const method = options?.method ?? "POST";
+  // Resolved locally as well as inside the core, because AnalyticsTimeoutError's
+  // message quotes the deadline that actually fired.
+  const timeoutMs = options.timeoutMs ?? SEAM_BUDGETS[options.budgetKey].timeoutMs;
+  const method = options.method ?? "POST";
   // Phase 16 / OBSERV-01: stamp X-Correlation-Id on every outbound fetch.
   // Wrappers (validateKey, encryptKey, ...) intentionally do NOT thread
   // this option through in this plan — Plan 7 wires the SSE endpoint to pass
   // it explicitly. Until then, every request still carries a UUID v4 so the
   // FastAPI side has a stable join key.
-  const correlationId = options?.correlationId ?? crypto.randomUUID();
+  const correlationId = options.correlationId ?? crypto.randomUUID();
 
-  let res: Response;
+  /**
+   * Phase 140.2-09 / TS-04 / ROADMAP SC7 — the signed tenant identity the
+   * Python rate limiter buckets on.
+   *
+   * Until this landed, `tenant_or_platform_key` saw no claim on any call from
+   * this client and returned `platform:<path>` — a platform-WIDE window per
+   * route. The sharpest is `/api/optimize-weights` at 20/minute, where two
+   * allocators running Scenario Composer could 429 each other.
+   *
+   * ⚠️ READ AT CALL TIME, NOT AT MODULE SCOPE. `SERVICE_KEY` above is captured
+   * at module scope, which is the env-before-import ordering hazard
+   * `resilient-fetch.wiring.test.ts` documents in its header: a test that sets
+   * the env after a static import gets an empty string. Here the failure mode is
+   * strictly worse — an empty secret still produces a SYNTACTICALLY VALID claim
+   * that simply fails `compare_digest`, so every route silently falls back to
+   * `platform:<path>` with no error anywhere and SC7 no-ops in production while
+   * the whole suite stays green. `mintTenantClaim` refuses instead.
+   *
+   * ⚠️ MINTED BEFORE THE `try`, DELIBERATELY. Inside it, a `TenantClaimError`
+   * would be caught by the arms below and rewritten as "Analytics service is not
+   * reachable" — a configuration fault on our side reported as a dead upstream,
+   * which is the exact silent degradation the refusal exists to prevent.
+   *
+   * ⚠️ THE CLAIM IS INERT ON THREE PATHS AND THAT IS FINE. `/api/match/recompute`
+   * and `/api/match/eval` have NO Python limiter at all (TS-21, owned by Phase
+   * 146) and `/api/simulator` is the tenth, still-IP-keyed route (TS-30,
+   * quarantined). Sending a claim there is harmless and forward-compatible — the
+   * moment those routes gain a `tenant_or_platform_key` limiter they are
+   * per-tenant with zero TS work. Do NOT "optimise" it away by special-casing
+   * them: eight of nine is how this defect class comes back.
+   *
+   * No `X-User-Id` is added anywhere. It is unsigned client input, and
+   * `verify_tenant_claim` exists precisely because it cannot be trusted to
+   * select a bucket.
+   */
+  // ⚠️ THE IDENTITY IS WRAPPED, NOT PASSED BARE, and it is the argument ORDER
+  // this defends. `mintTenantClaim`'s first parameter is a `TenantIdentity`, so
+  // `mintTenantClaim(process.env.INTERNAL_API_TOKEN ?? "", options.tenantId)` —
+  // which used to compile and would have put the platform secret into
+  // `X-Tenant-Claim` on all nine routes this wrapper reaches — is now a type
+  // error. See that function's docblock for why the object, not a brand.
+  const tenantClaim = mintTenantClaim(
+    { userId: options.tenantId },
+    process.env.INTERNAL_API_TOKEN ?? "",
+  );
+
+  /**
+   * 164.1-02 / PYAPI-06 (D-09) — REFUSE rather than send an unauthenticated
+   * guarded request.
+   *
+   * ⚠️ THROWN ABOVE THE `try`, DELIBERATELY, for the same reason the tenant
+   * claim is minted above it (see the block at lines 415-441). Inside the try,
+   * this throw would be caught by the arms below and — even though arm 1b
+   * rethrows a `SeamConfigError` unwrapped — the reasoning would then depend on
+   * an arm ORDER that a future edit can reshuffle. Above the try it cannot be
+   * rewritten as "the analytics service is not reachable" by construction,
+   * which is exactly the misreport T-164.1-09 names: a deploy fault on OUR side
+   * pointing ops at Railway.
+   *
+   * ⚠️ CALL TIME, NOT MODULE LOAD. There is deliberately NO module-scope
+   * assertion on `ANALYTICS_SERVICE_KEY`: local dev and any build step that
+   * merely IMPORTS this module without the secret must keep working (CONTEXT
+   * D-09 rejects the module-load assertion by name). The refusal fires only
+   * when a guarded request is actually about to leave the process.
+   *
+   * ⛔ THE MESSAGE NAMES THE ENV VAR AND NEVER ITS VALUE (T-164.1-06). Do not
+   * interpolate `SERVICE_KEY`, its length, or a prefix of it — the whole point
+   * of `seam-redaction.ts` listing `ANALYTICS_SERVICE_KEY` is that this secret
+   * never reaches a log line, and a message is a log line.
+   *
+   * WHAT THIS CLOSES (TODOS 0.04). The header below used to be a conditional
+   * spread: with the key absent the request went out ANONYMOUSLY, the service
+   * answered 401, a 401 never trips the 140.2 breaker, and the seam was down
+   * with /health green and zero alerts for seven days. An empty key is now
+   * impossible to send.
+   */
+  if (!SERVICE_KEY) {
+    throw new SeamConfigError(
+      "[analytics-client] ANALYTICS_SERVICE_KEY is not set — refusing to send " +
+        "an unauthenticated request to a guarded analytics route. This is a " +
+        "deployment misconfiguration on our side, NOT an analytics-service " +
+        "failure: set ANALYTICS_SERVICE_KEY to the analytics service's own " +
+        "SERVICE_KEY (Railway is the source of truth) and redeploy.",
+    );
+  }
+
+  // SEAMCORE-02: the core returns a `SeamResponse`, whose `json()` / `text()`
+  // run inside its classification window. The surface is the closed set this
+  // function already used (`ok`, `status`, `statusText`, `headers.get`, `json`,
+  // `text`); nothing here reaches for a `Response`-only member.
+  let res: SeamResponse;
   try {
-    res = await fetch(`${ANALYTICS_URL}${path}`, {
+    // Headers are built HERE and passed through the core byte-for-byte. A
+    // dropped X-Service-Key silently unauthenticates every analytics call.
+    res = await resilientFetch(options.budgetKey, path, {
       method,
       headers: {
         "Content-Type": "application/json",
         "X-Api-Version": ANALYTICS_API_VERSION,
         "X-Correlation-Id": correlationId,
-        ...(SERVICE_KEY && { "X-Service-Key": SERVICE_KEY }),
+        // 164.1-02 / PYAPI-06 (D-09) — UNCONDITIONAL. This entry used to
+        // be a conditional spread guarded on the key's own truthiness, so
+        // the header vanished SILENTLY when the secret was absent and the
+        // request went out anonymously (TODOS 0.04). The refusal above
+        // makes the empty case unreachable, so the guard has no remaining
+        // job and its only effect was to hide the fault.
+        "X-Service-Key": SERVICE_KEY,
+        // TS-04 / SC7 — minted above; see the tenantClaim block.
+        "X-Tenant-Claim": tenantClaim,
       },
       ...(body !== null && { body: JSON.stringify(body) }),
-      signal: AbortSignal.timeout(timeoutMs),
+      ...(options.timeoutMs !== undefined && {
+        timeoutMsOverride: options.timeoutMs,
+      }),
+      // Phase 141 / SEAM-06 — the retry gate, decided at the ONE chokepoint all
+      // nine wrappers (and any tenth) inherit, exactly like the tenantId minting
+      // above. Per-wrapper consultation would be the instance-not-class defect
+      // this centralization exists to close. The EXPLICIT `?? 0` means a wrapper
+      // absent from the registry gets no retry from the client side — bridge,
+      // simulator, portfolio-optimizer, optimize-weights are the four allowlisted;
+      // everything else (validate-key, encrypt-key, match-*, portfolio-analytics)
+      // resolves to 0 by absence.
+      retriesOverride: RETRY_SAFE_ANALYTICS[options.budgetKey]?.retries ?? 0,
     });
   } catch (err) {
-    if (err instanceof DOMException && err.name === "TimeoutError") {
+    // ORDER IS LOAD-BEARING.
+    //
+    // 1. CircuitOpenError rethrown UNWRAPPED and FIRST. Route handlers branch
+    //    on it to emit the SEAM-04 503 + Retry-After envelope; if the generic
+    //    arm below swallowed it, every breaker trip would surface to the user
+    //    as "the analytics service is not reachable" and the entire circuit
+    //    feature would be invisible.
+    if (err instanceof CircuitOpenError) {
+      throw err;
+    }
+    // 1b. ME-01 — a CONFIG fault on OUR side, rethrown UNWRAPPED and named.
+    //
+    // `SeamConfigError` exists "to separate" a deployment/caller fault from a
+    // dead upstream, and the BREAKER half of that separation already worked:
+    // the fault is raised above the classification window and records nothing.
+    // But the separation stopped at the core's boundary — no client branched on
+    // it, so a malformed `ANALYTICS_SERVICE_URL` or an invalid
+    // `timeoutMsOverride` took arm 3 below and reached the user as "the
+    // analytics service is not reachable", pointing ops at Railway for our own
+    // typo. That is verbatim the silent degradation `tenant-claim.ts` cites to
+    // justify a named class — and `TenantClaimError` IS handled at both call
+    // sites, while this one was handled nowhere.
+    //
+    // Rethrowing UNWRAPPED puts it in the callers' generic arms (a 500 "we
+    // failed", not a 502 "they are down"). Giving it its own ENVELOPE and copy
+    // is 140.3's fence, not this phase's.
+    if (err instanceof SeamConfigError) {
+      console.error(
+        `[analytics-client] CONFIG fault on ${path} — not an upstream failure, and NOT a reason to blame Railway:`,
+        scrubSeamString(err.message),
+      );
+      throw err;
+    }
+    // 2. Deadline exceeded. STRICTLY BROADER than the pre-140 check
+    //    (`err instanceof DOMException && name === "TimeoutError"`): a plain
+    //    Error named "AbortError" is the shape a client-side abort produces,
+    //    and it used to be misreported as a dead service rather than a slow
+    //    one.
+    //
+    //    ⚠️ The shape guard must accept BOTH `Error` and `DOMException`, not
+    //    `Error` alone. Node's DOMException extends Error (production), but
+    //    jsdom's does NOT — and the core's timeout signal rejects with a
+    //    DOMException. An `instanceof Error`-only guard therefore looks
+    //    correct in production while silently reclassifying every timeout as
+    //    "not reachable" in the vitest environment. Pinned by the
+    //    "timeout (DOMException) throws AnalyticsTimeoutError" regression
+    //    test in analytics-client.test.ts.
+    if (
+      (err instanceof Error || err instanceof DOMException) &&
+      (err.name === "AbortError" || err.name === "TimeoutError")
+    ) {
       throw new AnalyticsTimeoutError(path, timeoutMs);
     }
-    throw new Error("Analytics service is not reachable. Please ensure it is running.");
+    // 3. Everything else: the connection never completed.
+    throw notReachableError();
   }
 
   // Warn on API version mismatch (don't fail — just surface contract drift).
@@ -104,29 +594,117 @@ async function analyticsRequest(
     );
   }
 
-  if (!res.ok) {
-    const contentType = res.headers.get("content-type") ?? "";
-    if (contentType.includes("application/json")) {
-      const error = await res.json().catch(() => ({ detail: res.statusText }));
-      throw new AnalyticsUpstreamError(
-        error.detail ?? "Analytics service error",
-        res.status,
-      );
-    }
-    // Non-JSON error (FastAPI unhandled exception returns text/plain)
-    const text = await res.text().catch(() => res.statusText);
+  // SEAMCORE-11 / A-27 — decided on the STATUS, and decided BEFORE the `!ok`
+  // fork. 204 and 205 are `ok` while 304 is not, so a check placed inside
+  // either arm would give the three null-body statuses two different answers —
+  // the very divergence this closes, reproduced inside one file. Before this,
+  // 204/205 fell through to the local-dev port message below and 304 became an
+  // AnalyticsUpstreamError carrying 304 as a forwardable status.
+  if (NULL_BODY_STATUSES.has(res.status)) {
     throw new AnalyticsUpstreamError(
-      text || `Analytics service error (${res.status})`,
-      res.status,
+      unusableSeamResponseMessage(res.status, res.headers.get("content-type")),
+      UNUSABLE_RESPONSE_STATUS,
     );
   }
 
-  const contentType = res.headers.get("content-type") ?? "";
-  if (!contentType.includes("application/json")) {
-    throw new Error("Analytics service returned an unexpected response. Is it running on the correct port?");
+  if (!res.ok) {
+    const contentType = res.headers.get("content-type") ?? "";
+    if (contentType.includes("application/json")) {
+      // TWO CASES, conflated before SEAMCORE-02. A body that is genuinely
+      // absent or unparseable KEEPS the fallback — a 500 whose body is not the
+      // JSON its content-type promised is real, and `{ detail: statusText }` is
+      // the right answer for it. An ABORT is not: the core has already recorded
+      // that failure against the breaker, so converting it into a fabricated
+      // body would report a dying Railway as a well-formed upstream error.
+      const error = await res.json().catch((err: unknown) => {
+        if (err instanceof SeamBodyReadError) {
+          mapBodyReadFailure(err, path, timeoutMs);
+        }
+        return { detail: res.statusText };
+      });
+      // 140.3-01 / TS-05 — read BOTH halves through the ONE discriminator.
+      //
+      // ONE LINE, TWO WIRE CONTRACTS (STATUS_CONTRACT.md §2 / §2.1). A
+      // deliberate 4xx/5xx from `service_error()` nests the whole envelope at
+      // `body.detail` — `{code, dependency, retryable, detail}` — so the
+      // previous `error.detail ??` read handed an OBJECT to the constructor and
+      // the message coerced to "[object Object]" (obligation O-5). The two
+      // APP-GLOBAL handlers (422, 429) emit a SCALAR `detail` with the code at
+      // the top level, and that path was already correct — TS-07 is an
+      // explicitly NEGATIVE obligation and it must not be "fixed". The leaf
+      // branches on the TYPE of `body.detail`, which is the only thing a
+      // consumer can decide without knowing which route answered.
+      //
+      // The `??` fallback stays: `seamHumanMessage` returns null for a body
+      // carrying no readable human string, and the static sentence is the
+      // pre-plan answer for that case.
+      //
+      // 140.3-11 / TS-18 adds the THIRD half read through the same leaf. The
+      // nested envelope is the only shape carrying `dependency`, and this is
+      // the last line at which it exists — the route handlers downstream see
+      // only the thrown error. `seamDependencyName` returns null for both flat
+      // shapes and for any name inside OUR closed service set.
+      //
+      // 161-06 / WIZERR-05 adds the FOURTH half, and it does NOT come through
+      // the leaf — it comes off the HEADERS, because that is where it is. The
+      // nested envelope's key set is `{code, dependency, retryable, detail}`;
+      // the wait rides on `Retry-After`, which `error_contract` REQUIRES on
+      // every 503 and which dies with the `Response` one line from here.
+      throw new AnalyticsUpstreamError(
+        seamHumanMessage(error) ?? "Analytics service error",
+        res.status,
+        seamErrorCode(error),
+        seamDependencyName(error),
+        parseRetryAfterSeconds(res.headers),
+      );
+    }
+    // Non-JSON error (FastAPI unhandled exception returns text/plain).
+    // Same distinction as above: an unreadable text/plain body falls back to
+    // the status text, an abort does not.
+    const text = await res.text().catch((err: unknown) => {
+      if (err instanceof SeamBodyReadError) {
+        mapBodyReadFailure(err, path, timeoutMs);
+      }
+      return res.statusText;
+    });
+    // 161-06 / WIZERR-05 — the wait is read on THIS arm too. A `text/plain` 5xx
+    // is a real upstream error forwarding a real upstream status, and its
+    // headers are as authoritative as the JSON arm's. Feeding only the
+    // contract-envelope arm would make the field's own docblock ("null means no
+    // wait was advertised") a false sentence at one of the two arms that can
+    // reach it — the class this phase exists to close.
+    throw new AnalyticsUpstreamError(
+      text || `Analytics service error (${res.status})`,
+      res.status,
+      null,
+      null,
+      parseRetryAfterSeconds(res.headers),
+    );
   }
 
-  return res.json();
+  // SEAMCORE-11 / A-27, second half. This threw a GENERIC, untyped Error whose
+  // message asked whether the service was "running on the correct port" — a
+  // local-dev question, put to an operator mid-incident while a Railway edge
+  // page was being served as `200 text/html`. It is now the same typed outcome
+  // the null-body statuses take above.
+  const contentType = res.headers.get("content-type");
+  if (!(contentType ?? "").includes("application/json")) {
+    throw new AnalyticsUpstreamError(
+      unusableSeamResponseMessage(res.status, contentType),
+      UNUSABLE_RESPONSE_STATUS,
+    );
+  }
+
+  // THE SUCCESS ARM HAD NO CATCH AT ALL. This is SC1's downstream half: the
+  // deadline can fire while the body streams, long after the transport `try`
+  // above has closed, so the raw rejection escaped `analyticsRequest` past
+  // every `instanceof` arm at the top of this function and surfaced to nine
+  // wrappers as an unclassified crash.
+  try {
+    return await res.json();
+  } catch (err) {
+    mapBodyReadFailure(err, path, timeoutMs);
+  }
 }
 
 /**
@@ -142,13 +720,30 @@ function parseResponse<T>(
 ): T {
   const result = schema.safeParse(data);
   if (!result.success) {
+    // SEAMCORE-06 — a zod issue array is error-DERIVED and can echo
+    // request-derived values back into the line (a `received` field on a
+    // credential-shaped input, an unexpected key carrying a token). Rendered to
+    // a string first so the scrub can see it: passing the array straight to
+    // `console.error` hands the runtime an object the leaf never inspected.
     console.error(
       `[analytics-client] Contract validation failed for ${endpoint}:`,
-      result.error.issues,
+      scrubSeamString(JSON.stringify(result.error.issues)),
     );
     // Throw so callers get a clear error rather than silently wrong data.
+    //
+    // 140.4-09 / SEAMRIM-06 — SCRUBBED, for the reason stated four lines above.
+    // The rule was written for the log and applied only there; this THROW is
+    // reached from 8 of the 9 wrappers, and its message is caught and logged
+    // again by every one of their callers. The channel is the issue PATH rather
+    // than its message — a zod `invalid_type` message renders type NAMES only,
+    // but a `z.record` key is response-controlled and becomes a path segment.
+    //
+    // ⚠️ NO STRUCTURAL GUARD WATCHES THIS LINE. `seam-log-coverage.test.ts` is
+    // scoped to `console.*`, and a thrown sink is invisible to a console-scoped
+    // predicate — there is no scan that can fail when this is re-opened. The
+    // cases in `analytics-client.test.ts` are the only thing holding it.
     throw new Error(
-      `Analytics response contract violation on ${endpoint}: ${result.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}`,
+      `Analytics response contract violation on ${endpoint}: ${scrubSeamString(result.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; "))}`,
     );
   }
   return result.data;
@@ -169,23 +764,111 @@ function trimCredential(value: string): string {
   return value.trim();
 }
 
-export async function validateKey(exchange: string, apiKey: string, apiSecret: string, passphrase?: string) {
-  const data = await analyticsRequest("/api/validate-key", {
-    exchange,
-    api_key: trimCredential(apiKey),
-    api_secret: trimCredential(apiSecret),
-    passphrase: passphrase ?? null,
-  });
+/**
+ * Which `SEAM_BUDGETS` row does validating a key at THIS venue spend?
+ *
+ * Phase 153.4-02 / WIZFORM-05 / D-01. A venue whose probe is SERIALIZED behind
+ * one shared lease gets the long row (`validate-key-serialized`, 120 000 ms):
+ * the wait is a queue, and the honest verdict must land inside the client's
+ * deadline or the request is abandoned before the answer exists. Every other
+ * venue keeps the incumbent 30 000 ms row, byte-identical to pre-153.4
+ * behaviour.
+ *
+ * ⚠️ TWO DELIBERATE DIVERGENCES FROM `process-key-client.ts`'s `budgetKeyFor`.
+ * They are written down because both look like bugs to a reader who knows the
+ * analog, and "fixing" either one re-introduces a defect this repo has paid for.
+ *
+ *  1. **IT NEVER THROWS.** The analog closes with `const _exhaustive: never =
+ *     flowType; throw …` because `FlowType` is a CLOSED union owned by this
+ *     codebase, so an unhandled member really is a programming error. `exchange`
+ *     here is a caller-supplied `string` that arrives in a wizard form body. An
+ *     unrecognised, empty or absent value is NORMAL INPUT, not a programmer
+ *     mistake, and the fallback is the DEFAULT row — byte-identical to today's
+ *     behaviour for every venue that is not serialized. Throwing would turn a
+ *     typo in a form field into a 500.
+ *
+ *  2. **IT READS THE CAPABILITY, NEVER A VENUE NAME.** No `switch` over venue
+ *     strings, no `if (exchange === …)`. `VENUE_CAPABILITIES.serialized` is the
+ *     single fact, and a SECOND serialized venue is covered by editing that
+ *     record — never this function. An `===` against one venue code would be the
+ *     instance-not-class defect the P140 campaign paid 37 scrapped commits for,
+ *     and `analytics-client.test.ts` scans this function's own body for venue
+ *     literals so it cannot come back silently.
+ *
+ * ⛔ T-140-01 — THE RETURN VALUE IS ONE OF TWO MODULE-CONSTANT LITERALS, and it
+ * reaches `breakerKeysFor(budgetKey)` inside the core. NEVER build it by
+ * interpolating the argument into a template literal (the forbidden shape is
+ * `validate-key-<exchange>`; the prohibition is deliberately written WITHOUT the
+ * template syntax so a grep for an interpolated budget key in this file cannot
+ * be satisfied by this very sentence). A user-influenced breaker key is a
+ * trivial cross-tenant denial of service — one caller could shard the breaker so
+ * it
+ * never trips at all, or mint a key that trips for a whole cohort. The argument
+ * is consulted only as a boolean predicate; it never becomes part of the string.
+ */
+export function budgetKeyFor(
+  exchange: string | null | undefined,
+): SeamBudgetKey {
+  return venueIsSerialized(exchange)
+    ? "validate-key-serialized"
+    : "validate-key";
+}
+
+/**
+ * Phase 140.2-09 / TS-04 — `tenant` is REQUIRED and must be server-derived.
+ *
+ * It is an object rather than a fifth bare `string` because a bare string would
+ * sit directly beside `passphrase`, and a transposition would compile cleanly
+ * while minting the tenant claim over a USER-CHOSEN SECRET — a credential in an
+ * outbound header, and every caller collapsed into one bucket keyed on it.
+ * Threat T-140.2-09-02, made a type error instead of a leak.
+ *
+ * All three callers (`strategies/create-with-key`, `strategies/composite/add-key`,
+ * `keys/validate-and-encrypt`) are `withAuth(async (req, user) => …)` and pass
+ * `user.id` from the authenticated server session.
+ */
+export async function validateKey(
+  exchange: string,
+  apiKey: string,
+  apiSecret: string,
+  passphrase: string | undefined,
+  tenant: TenantIdentity,
+) {
+  const data = await analyticsRequest(
+    "/api/validate-key",
+    {
+      exchange,
+      api_key: trimCredential(apiKey),
+      api_secret: trimCredential(apiSecret),
+      passphrase: passphrase ?? null,
+    },
+    // 153.4-02 / D-01 — THE ONE LITERAL that made the venue-aware budget inert.
+    // ⛔ Do NOT add a `timeoutMs` option here: the override is TESTS ONLY since
+    // 140-05 and is invisible to `seam-budgets.invariant.test.ts`'s SC-4b
+    // arithmetic, so it would grant a budget no invariant checks.
+    { budgetKey: budgetKeyFor(exchange), tenantId: tenant.userId },
+  );
   return parseResponse(ValidateKeyResponseSchema, data, "/api/validate-key");
 }
 
-export async function encryptKey(exchange: string, apiKey: string, apiSecret: string, passphrase?: string) {
-  const data = await analyticsRequest("/api/encrypt-key", {
-    exchange,
-    api_key: trimCredential(apiKey),
-    api_secret: trimCredential(apiSecret),
-    passphrase: passphrase ?? null,
-  });
+/** See `validateKey` for why `tenant` is an object and where it comes from. */
+export async function encryptKey(
+  exchange: string,
+  apiKey: string,
+  apiSecret: string,
+  passphrase: string | undefined,
+  tenant: TenantIdentity,
+) {
+  const data = await analyticsRequest(
+    "/api/encrypt-key",
+    {
+      exchange,
+      api_key: trimCredential(apiKey),
+      api_secret: trimCredential(apiSecret),
+      passphrase: passphrase ?? null,
+    },
+    { budgetKey: "encrypt-key", tenantId: tenant.userId },
+  );
   return parseResponse(EncryptKeyResponseSchema, data, "/api/encrypt-key");
 }
 
@@ -196,12 +879,25 @@ export async function encryptKey(exchange: string, apiKey: string, apiSecret: st
  * caller's own series. Returns `weights: null` on a degenerate / under-sampled
  * input (the UI renders the honest empty state) — never a fabricated vector.
  * The weights are fit IN-SAMPLE (`in_sample: true`); the UI discloses that.
+ *
+ * Phase 140.2-09 / TS-04 — `tenant` is REQUIRED and server-derived
+ * (`scenario/optimize` passes `user.id`). This is the SHARPEST of the five live
+ * flips: `/api/optimize-weights` is limited at 20/minute, which was a PLATFORM
+ * ceiling until the claim appeared — two allocators running Scenario Composer
+ * concurrently could 429 each other. (The per-tenant VALUE may now be wrong in
+ * the other direction; auditing limits after the flip rather than before is
+ * TS-22, owned by Phase 146.)
  */
 export async function optimizeScenarioWeights(
   series: Record<string, Array<{ date: string; value: number }>>,
   objective: "min_vol" | "max_sharpe",
+  tenant: TenantIdentity,
 ): Promise<OptimizeWeightsResponse> {
-  const data = await analyticsRequest("/api/optimize-weights", { series, objective });
+  const data = await analyticsRequest(
+    "/api/optimize-weights",
+    { series, objective },
+    { budgetKey: "optimize-weights", tenantId: tenant.userId },
+  );
   return parseResponse(OptimizeWeightsResponseSchema, data, "/api/optimize-weights");
 }
 
@@ -225,22 +921,31 @@ export async function computePortfolioAnalytics(
   portfolioId: string,
   actorId: string,
 ) {
-  const data = await analyticsRequest("/api/portfolio-analytics", {
-    portfolio_id: portfolioId,
-    user_id: actorId,
-  });
+  const data = await analyticsRequest(
+    "/api/portfolio-analytics",
+    {
+      portfolio_id: portfolioId,
+      user_id: actorId,
+    },
+    // TS-04: `actorId` is already the server-derived authenticated user id, so
+    // this wrapper needed no signature change — it just had to stop being the
+    // one member of the class that did not mint.
+    { budgetKey: "portfolio-analytics", tenantId: actorId },
+  );
   return parseResponse(PortfolioAnalyticsResponseSchema, data, "/api/portfolio-analytics");
 }
 
-export async function runPortfolioOptimizer(
-  portfolioId: string,
-  actorId: string,
-  timeoutMs?: number,
-) {
+export async function runPortfolioOptimizer(portfolioId: string, actorId: string) {
   const data = await analyticsRequest(
     "/api/portfolio-optimizer",
     { portfolio_id: portfolioId, user_id: actorId },
-    timeoutMs ? { timeoutMs } : undefined,
+    // Phase 140 / SEAM-02: no timeout override. This wrapper carried an
+    // optional `timeoutMs` third parameter purely so the route could keep
+    // passing its legacy `OPTIMIZER_TIMEOUT_MS = 15_000`; 140-05 deleted that
+    // route-local constant (the only caller), so the parameter went with it.
+    // The deadline now has exactly ONE owner: the row below.
+    // TS-04: `actorId` already carries the server-derived identity.
+    { budgetKey: "portfolio-optimizer", tenantId: actorId },
   );
   return parseResponse(PortfolioOptimizerResponseSchema, data, "/api/portfolio-optimizer");
 }
@@ -257,7 +962,8 @@ export async function findReplacementCandidates(
       underperformer_strategy_id: underperformerStrategyId,
       user_id: userId,
     },
-    { timeoutMs: 15_000 },
+    // TS-04: `userId` already carries the server-derived identity.
+    { budgetKey: "bridge", tenantId: userId },
   );
   return parseResponse(BridgeResponseSchema, data, "/api/portfolio-bridge");
 }
@@ -265,8 +971,8 @@ export async function findReplacementCandidates(
 /**
  * Sprint 6 Task 6.4 — portfolio impact simulator (ADD scenario).
  *
- * Calls the Python `/api/simulator` endpoint with a 15s timeout (matching
- * the Bridge and mirroring the 15s budget the Next.js route enforces).
+ * Calls the Python `/api/simulator` endpoint under the `simulator` budget
+ * (SEAM_BUDGETS owns the value; it was a 15s literal here before Phase 140).
  * Response is validated against SimulatorResponseSchema — parse failures
  * throw so contract drift is loud.
  */
@@ -282,7 +988,13 @@ export async function simulateAddCandidate(
       candidate_strategy_id: candidateStrategyId,
       user_id: userId,
     },
-    { timeoutMs: 15_000 },
+    // TS-04: the claim is LIVE here. ⚠️ CORRECTED 2026-08-26 (phase 163 review):
+    // this said the claim was INERT because /api/simulator was still IP-keyed
+    // under the TS-30 quarantine. SEC-05 lifted that quarantine and pointed the
+    // decorator at tenant_or_platform_key, so this claim now selects the
+    // per-tenant bucket on real traffic — tenant isolation for this route is a
+    // production property, not a future one.
+    { budgetKey: "simulator", tenantId: userId },
   );
   return parseResponse(
     SimulatorResponseSchema,
@@ -311,25 +1023,79 @@ export async function recomputeMatch(
   // during the production rollout. Once every call site is TS-side
   // (post-this-PR rollout), the Python field can be promoted to
   // required in a follow-up PR.
-  const data = await analyticsRequest("/api/match/recompute", {
-    allocator_id: allocatorId,
-    force,
-    actor_id: actorId,
-  });
+  const data = await analyticsRequest(
+    "/api/match/recompute",
+    {
+      allocator_id: allocatorId,
+      force,
+      actor_id: actorId,
+    },
+    // TS-04 → 146-02: LIVE — /api/match/recompute now carries a slowapi
+    // 30/minute limit keyed on this claim (scope ``match_recompute``, RATE-03);
+    // the tenantId sent here is consumed by tenant_or_platform_key.
+    { budgetKey: "match-recompute", tenantId: actorId },
+  );
   return parseResponse(RecomputeMatchResponseSchema, data, "/api/match/recompute");
 }
 
-export async function evalMatch(params: {
-  lookback_days: string;
-  partner_tag?: string;
-}) {
+/**
+ * Phase 140.2-09 / TS-04 → 146-02: the claim is now LIVE — `/api/match/eval`
+ * carries a slowapi 30/minute limit keyed on it (scope ``match_eval``,
+ * RATE-03 / TS-21 closed).
+ *
+ * This is the ONE wrapper that had no identity of any kind, and it is exactly
+ * the member a "thread it into the three that need it" reading would have left
+ * behind — after which `analyticsRequest` could not have required `tenantId`,
+ * and a tenth wrapper could have been added with no identity at all. The caller
+ * (`/api/admin/match/eval`) is admin-gated and already holds `user.id`.
+ */
+export async function evalMatch(
+  params: {
+    lookback_days: string;
+    partner_tag?: string;
+  },
+  tenant: TenantIdentity,
+) {
   const qs = new URLSearchParams({ lookback_days: params.lookback_days });
   if (params.partner_tag) qs.set("partner_tag", params.partner_tag);
   // evalMatch has no fixed schema — it returns variable evaluation data.
   // Validation can be added when the eval response shape stabilizes.
   return analyticsRequest(`/api/match/eval?${qs.toString()}`, null, {
+    budgetKey: "match-eval",
     method: "GET",
+    tenantId: tenant.userId,
   });
+}
+
+/**
+ * Phase 169.2 / plan 02 (SC3, D-08) — refresh the cached BTC benchmark.
+ *
+ * The ONE TypeScript caller of the service's `POST /api/benchmark-refresh`,
+ * reached only from the daily cron route `src/app/api/cron/refresh-benchmark`.
+ * The service does the work through its existing fetcher; there is no second
+ * fetcher in TypeScript. It throws on any non-2xx (a failed or stale refresh is
+ * a 500 there), so the route can answer non-2xx and Vercel Cron alarms.
+ *
+ * THE TENANT IS A FIXED SERVER LITERAL. `analyticsRequest` requires a
+ * server-derived `tenantId`, and this call has no user: it is a scheduled job.
+ * No non-user convention exists in this file, so the literal below names the
+ * one caller. It is dot-free (the claim mint refuses a dot), it comes from OUR
+ * source and never from the wire, and it must NOT be `"public"`, which is the
+ * anonymous teaser's bucket. The endpoint carries no Python limiter today, so
+ * the claim is inert and forward-compatible, like the ones the tenantClaim
+ * block describes.
+ */
+export async function refreshBenchmark() {
+  const data = await analyticsRequest(
+    "/api/benchmark-refresh",
+    {},
+    { budgetKey: "benchmark-refresh", tenantId: "cron-refresh-benchmark" },
+  );
+  return parseResponse(
+    BenchmarkRefreshResponseSchema,
+    data,
+    "/api/benchmark-refresh",
+  );
 }
 
 // @internal — exposed for Phase 16 / OBSERV-01 unit tests only. Public

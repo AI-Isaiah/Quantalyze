@@ -74,6 +74,13 @@ def _make_supabase_mock(rows: list[dict]) -> MagicMock:
     range_chain = MagicMock()
     range_chain.execute.return_value = MagicMock(data=rows)
     order_chain.range.return_value = range_chain
+    # C3 topic H: _load_series is now KEYSET (.eq().order().limit() for the
+    # first page, .eq().gt().order().limit() after it, empty here), so the same
+    # rows are served on the limit chain and the follow-up page is empty.
+    order_chain.limit.return_value = range_chain
+    eq_chain.gt.return_value.order.return_value.limit.return_value.execute.return_value = (
+        MagicMock(data=[])
+    )
 
     # .rpc(...).execute() — used by the sibling_kinds batch upsert path.
     sb.rpc.return_value = MagicMock(execute=MagicMock())
@@ -400,8 +407,13 @@ async def test_csv_analytics_unrecoverable_stamps_csv_source_flag() -> None:
 async def test_csv_analytics_paginated_truncation_writes_specific_error() -> None:
     """WR-03 (19.1-REVIEW). When paginated_select raises
     PaginatedSelectTruncated during _load_series, the runner must:
-      1. Persist a specific computation_error mentioning the row cap
-         and the truncation hint (operator triage signal).
+      1. Persist a specific computation_error mentioning the row cap —
+         and NOT the truncation hint. Phase 164.2 made this sentence
+         durable (the bridge no longer overwrites a stamped sentence),
+         so it renders to the account holder; `hint` is a log-triage
+         string that on this path is "csv_daily_returns strategy_id=
+         <uuid>", i.e. an internal table name and a raw id. It stays on
+         the runner's logger.error (the operator channel).
       2. Stamp data_quality_flags.csv_source=True so the provenance
          pill survives the failure (mirrors WR-05).
       3. Re-raise the typed exception so the worker dispatcher's
@@ -460,6 +472,15 @@ async def test_csv_analytics_paginated_truncation_writes_specific_error() -> Non
     payload = failed[0].args[0]
     assert "1,000,000" in payload["computation_error"] or "1000000" in payload["computation_error"], (
         f"computation_error must cite the row cap; got: "
+        f"{payload['computation_error']!r}"
+    )
+    assert "csv_daily_returns" not in payload["computation_error"], (
+        "the user-visible sentence must not name an internal table; the "
+        f"truncation hint belongs on the log line. Got: "
+        f"{payload['computation_error']!r}"
+    )
+    assert "trunc-strategy-uuid" not in payload["computation_error"], (
+        "the user-visible sentence must not carry a raw strategy id. Got: "
         f"{payload['computation_error']!r}"
     )
     assert payload["data_quality_flags"] == {"csv_source": True}, (
@@ -743,7 +764,14 @@ class TestNaNAccountHonestEndToEnd:
         combine = MagicMock(
             return_value=(
                 self._nan_bearing_returns(),
-                {"used_heuristic_capital": False, "negative_nav_guard": True},
+                {
+                    "used_heuristic_capital": False,
+                    "negative_nav_guard": True,
+                    # MT5-12: the derive persist seam refuses a series whose meta
+                    # lacks a recognised verdict, so this ccxt stand-in carries the
+                    # one combine_realized_and_funding really stamps.
+                    "series_completeness": "fill_derived_unproven",
+                },
             )
         )
         job = {"id": "j", "kind": "derive_broker_dailies", "strategy_id": "strat-e2e"}
@@ -885,6 +913,13 @@ def _make_broker_supabase_mock(
             order_chain = eq_chain.order.return_value
             order_chain.range.return_value.execute.return_value = MagicMock(
                 data=daily_rows
+            )
+            # C3 topic H: keyset series load (first page, then an empty page).
+            order_chain.limit.return_value.execute.return_value = MagicMock(
+                data=daily_rows
+            )
+            eq_chain.gt.return_value.order.return_value.limit.return_value.execute.return_value = (
+                MagicMock(data=[])
             )
             order_chain.execute.return_value = MagicMock(data=daily_rows)
         elif name == "strategy_analytics":
@@ -1481,6 +1516,13 @@ def _make_recording_supabase_mock(
             eq_chain = tbl.select.return_value.eq.return_value
             eq_chain.order.return_value.range.return_value.execute.return_value = MagicMock(
                 data=daily_rows
+            )
+            # C3 topic H: keyset series load (first page, then an empty page).
+            eq_chain.order.return_value.limit.return_value.execute.return_value = MagicMock(
+                data=daily_rows
+            )
+            eq_chain.gt.return_value.order.return_value.limit.return_value.execute.return_value = (
+                MagicMock(data=[])
             )
             eq_chain.order.return_value.execute.return_value = MagicMock(data=daily_rows)
         elif name == "strategy_analytics":

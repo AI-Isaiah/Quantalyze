@@ -1,0 +1,492 @@
+# 164.5 plan 06 — pg-lane proof log for the DRIFT-04 removal migration
+
+Dated 2026-09-07. Subject:
+`supabase/migrations/20260908120000_drop_create_allocator_connected_strategy.sql`.
+
+Substrate: `scripts/pg-lane/run.sh` — a throwaway local PostgreSQL cluster that
+`initdb`s fresh, listens on 127.0.0.1 only, and is destroyed by its own EXIT
+trap. **Never shared TEST. Never PROD.** Nothing in this log touched a hosted
+database, and no `supabase db push`, `db reset`, `--project-ref` or `--db-url`
+was run.
+
+Exit codes: **0, 3, 3, 3, 0**.
+
+⭐ **A THIRD ROUND WAS APPENDED 2026-09-07 — proofs F, F2a and F2b, exit codes
+3, 0, 0.** It is at the END of this file, under its own heading. It exists
+because the review found that the migration header's sentence at its lines 78-81
+("without it, a dependent aborts the apply and names itself") had NO lane proof
+(MED-4), and that the pre-flight's assertion (b) claimed a completeness pg_depend
+cannot give (MED-1). Everything between here and that heading is the dated record
+of rounds one and two and was NOT re-run; the counts and exit codes in this
+paragraph and the next are theirs, not the file's total.
+
+⚠️ **This log is the SECOND round.** A first round of proofs A–D was taken
+against the migration *before* the review pass added its `BEGIN;` /
+`SET lock_timeout` / `COMMIT;` wrapper, and read 0, 3, 3, 3. It is superseded by
+what follows: proof E exists only because that wrapper was added, and the
+`rtrim()` in check 2's message is visible in proof C's output here (`argument
+counts: 2.`) where the earlier round printed a trailing space.
+
+## What the five proofs establish
+
+| Proof | Setup | Expected | Observed |
+|---|---|---|---|
+| **A** | a stand-in at the exact 11-argument signature, SECURITY DEFINER, with BOTH the `authenticated` and `service_role` grants | migration applies, zero overloads survive | `GATE PASSED`, exit **0** |
+| **B** | no stand-in — the function is simply not there | STEP 1 ERRORS, because it carries no existence-tolerant modifier | `ERROR: 42883: function … does not exist`, exit **3** |
+| **C** | stand-in PLUS a second overload of a different arity that STEP 1 does not name | check 2 of the verify block RAISEs and names the surviving arity | `P0001: … 1 overload(s) … survive … at argument counts: 2.`, exit **3** |
+| **D** | a MUTANT copy of the migration whose STEP 1 is given the existence-tolerant modifier AND a wrong 3-type signature | STEP 1 silently no-ops; check 1 of the verify block RAISEs | `NOTICE: … does not exist, skipping` then `P0001: … still has 1 overload(s) at 11 arguments after STEP 1`, exit **3** |
+| **E** | the same setup as C, but the REAL file is run through `\i` with `ON_ERROR_STOP` relaxed so the session survives the RAISE and can look at the database afterwards | the transaction wrapper ROLLS STEP 1 BACK, so the 11-argument overload is still there | `BEGIN / SET / DROP FUNCTION / ERROR P0001 / ROLLBACK` then `ATOMICITY PROVEN … (count=1)`, exit **0** |
+
+**Proof D is load-bearing.** It reproduces, on a real cluster, the exact vacuous
+pass the plan's D-01 refuses: the removal statement runs, PostgreSQL prints
+`does not exist, skipping`, the migration would have reported success — and the
+inverted `DO $verify$` block catches it. That is the falsification that makes
+the verify block a test rather than a decoration.
+
+**Proof B is the second.** It is the direct measurement that STEP 1 is NOT
+existence-tolerant: aimed at a signature the database does not hold, it errors
+and names the function rather than succeeding over nothing.
+
+**Proof E is the third**, and it exists because a review finding created the
+claim it checks. Adding `BEGIN;` / `COMMIT;` asserts that a RAISE in STEP 2
+leaves nothing behind. Asserting it is not measuring it — so E runs the real,
+unmodified file and then LOOKS: the removal is rolled back and the overload is
+still present. Without the wrapper this proof fails, which is what makes it a
+test of the wrapper rather than of PostgreSQL.
+
+The real migration file was never edited to produce D. The mutant is a `sed`
+rewrite into a temporary copy; the `diff` between them is printed in the run
+output below and is exactly two lines.
+
+## Driver and fixtures (verbatim)
+
+```bash
+#!/usr/bin/env bash
+# Lane proofs for supabase/migrations/20260908120000_drop_create_allocator_connected_strategy.sql
+# Substrate: scripts/pg-lane/run.sh — a throwaway local cluster. Never TEST, never PROD.
+# Run from the repository root.
+set -u
+
+MIG="supabase/migrations/20260908120000_drop_create_allocator_connected_strategy.sql"
+F="$(mktemp -d)"
+echo "fixtures: $F"
+echo
+
+cat > "$F/standin-one.sql" <<'SQL'
+-- Stand-in reproducing PROD's object as the pre-flight measures it: the exact
+-- 11-argument signature, SECURITY DEFINER, and BOTH grants. Body is trivial —
+-- the migration asserts SHAPE, not behaviour.
+DO $roles$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN CREATE ROLE authenticated NOLOGIN; END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'service_role')  THEN CREATE ROLE service_role  NOLOGIN; END IF;
+END $roles$;
+CREATE OR REPLACE FUNCTION public.create_allocator_connected_strategy(
+  p_user_id uuid, p_portfolio_id uuid, p_exchange text, p_label text,
+  p_strategy_name text, p_api_key_encrypted text, p_api_secret_encrypted text,
+  p_passphrase_encrypted text, p_dek_encrypted text, p_nonce text,
+  p_kek_version integer
+) RETURNS TABLE(strategy_id uuid, api_key_id uuid)
+  LANGUAGE plpgsql SECURITY DEFINER
+  SET search_path TO 'public', 'pg_catalog'
+  AS $standin$ BEGIN RETURN; END; $standin$;
+REVOKE ALL ON FUNCTION public.create_allocator_connected_strategy(uuid, uuid, text, text, text, text, text, text, text, text, integer) FROM PUBLIC;
+GRANT ALL ON FUNCTION public.create_allocator_connected_strategy(uuid, uuid, text, text, text, text, text, text, text, text, integer) TO authenticated;
+GRANT ALL ON FUNCTION public.create_allocator_connected_strategy(uuid, uuid, text, text, text, text, text, text, text, text, integer) TO service_role;
+SQL
+
+cat > "$F/standin-extra-overload.sql" <<'SQL'
+-- A SECOND overload of a DIFFERENT arity, which STEP 1 does not name.
+CREATE OR REPLACE FUNCTION public.create_allocator_connected_strategy(p_a uuid, p_b text)
+  RETURNS void LANGUAGE plpgsql SECURITY DEFINER AS $standin2$ BEGIN END; $standin2$;
+SQL
+
+cat > "$F/gate-absent.sql" <<'SQL'
+DO $gate$
+DECLARE v_n INTEGER;
+BEGIN
+  SELECT count(*) INTO v_n FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+   WHERE n.nspname='public' AND p.proname='create_allocator_connected_strategy';
+  IF v_n <> 0 THEN
+    RAISE EXCEPTION 'GATE FAILED: % overload(s) of create_allocator_connected_strategy survive', v_n;
+  END IF;
+  RAISE NOTICE 'GATE PASSED: zero overloads named create_allocator_connected_strategy remain';
+END;
+$gate$;
+SQL
+
+# Proof D's mutant: STEP 1 given the existence-tolerant modifier AND a wrong
+# signature, so the removal matches nothing and silently succeeds. Built by
+# rewriting the real file into a COPY; the real file is never edited.
+sed -e 's/^DROP FUNCTION public\.create_allocator_connected_strategy($/DROP FUNCTION IF EXISTS public.create_allocator_connected_strategy(/' \
+    -e 's/^  uuid, uuid, text, text, text, text, text, text, text, text, integer$/  uuid, uuid, text/' \
+    "$MIG" > "$F/mutant.sql"
+
+# Proof E runs the REAL, UNMODIFIED migration through psql's \i with
+# ON_ERROR_STOP relaxed, so the run SURVIVES the RAISE and can then look at the
+# database. That is the only way to observe what STEP 2's failure LEAVES BEHIND.
+MIG_ABS="$PWD/$MIG"
+cat > "$F/proof-e.sql" <<SQL
+\\set ON_ERROR_STOP 0
+\\i $MIG_ABS
+\\set ON_ERROR_STOP 1
+DO \$probe\$
+DECLARE v_n INTEGER;
+BEGIN
+  SELECT count(*) INTO v_n FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+   WHERE n.nspname='public' AND p.proname='create_allocator_connected_strategy' AND p.pronargs = 11;
+  IF v_n <> 1 THEN
+    RAISE EXCEPTION 'ATOMICITY FAILED: STEP 2 raised, but the 11-argument overload did NOT come back (count=%). STEP 1 committed behind a failed migration', v_n;
+  END IF;
+  RAISE NOTICE 'ATOMICITY PROVEN: STEP 2 raised and STEP 1 was ROLLED BACK — the 11-argument overload is still present (count=%)', v_n;
+END;
+\$probe\$;
+SQL
+
+echo "MUTANT diff (proof D) — the two lines the mutation changed:"
+diff "$MIG" "$F/mutant.sql"
+echo
+
+run() {
+  local label="$1"; shift
+  local wd; wd="$(mktemp -d)"
+  echo "================================================================"
+  echo "$label"
+  echo "================================================================"
+  bash scripts/pg-lane/run.sh --workdir "$wd" "$@" 2>&1 | tail -n 18
+  local rc=${PIPESTATUS[0]}
+  echo "LANE EXIT=$rc"
+  echo
+  rm -rf "$wd"
+}
+
+run "PROOF A (GREEN) — stand-in present, real migration applies, gate finds zero overloads" \
+    --apply "$F/standin-one.sql" "$MIG" --gate "$F/gate-absent.sql"
+
+run "PROOF B (RED) — NO stand-in: STEP 1 must ERROR because it carries no existence-tolerant modifier" \
+    --apply "$MIG" --gate "$F/gate-absent.sql"
+
+run "PROOF C (RED) — a second overload of a different arity survives STEP 1; check 2 of the verify block must RAISE" \
+    --apply "$F/standin-one.sql" "$F/standin-extra-overload.sql" "$MIG" --gate "$F/gate-absent.sql"
+
+run "PROOF D (RED) — MUTANT with the existence-tolerant modifier and a wrong signature: STEP 1 no-ops, check 1 of the verify block must RAISE" \
+    --apply "$F/standin-one.sql" "$F/mutant.sql" --gate "$F/gate-absent.sql"
+
+run "PROOF E (ATOMICITY) — a second overload makes STEP 2 RAISE; the transaction wrapper must ROLL STEP 1 BACK, leaving the 11-argument overload present" \
+    --apply "$F/standin-one.sql" "$F/standin-extra-overload.sql" --gate "$F/proof-e.sql"
+
+rm -rf "$F"
+```
+
+## Run output
+
+⚠️ **ONE REDACTION, marked.** Proof E resolves the migration to an ABSOLUTE path
+so psql's `\i` can find it, and psql echoes that path in its error line. This
+repository is PUBLIC and `scripts/check-planning-hygiene`'s ABSOLUTE-HOME-PATH
+and LOCAL-USERNAME rules refuse a checked-out home directory in a tracked file —
+they caught it here. The one occurrence is rewritten to `<repo>/`. Nothing else
+is altered; the `/var/folders/…` scratch paths are `mktemp -d` output and carry
+no username segment.
+
+```
+fixtures: /var/folders/3y/kf3qlnbx58v3jnwys2pc89_r0000gn/T/tmp.hGjdTYp0vp
+
+MUTANT diff (proof D) — the two lines the mutation changed:
+151,152c151,152
+< DROP FUNCTION public.create_allocator_connected_strategy(
+<   uuid, uuid, text, text, text, text, text, text, text, text, integer
+---
+> DROP FUNCTION IF EXISTS public.create_allocator_connected_strategy(
+>   uuid, uuid, text
+
+================================================================
+PROOF A (GREEN) — stand-in present, real migration applies, gate finds zero overloads
+================================================================
+psql:/var/folders/3y/kf3qlnbx58v3jnwys2pc89_r0000gn/T/tmp.hGjdTYp0vp/gate-absent.sql:11: NOTICE:  00000: GATE PASSED: zero overloads named create_allocator_connected_strategy remain
+LOCATION:  exec_stmt_raise, pl_exec.c:3911
+DO
+LANE EXIT=0
+
+================================================================
+PROOF B (RED) — NO stand-in: STEP 1 must ERROR because it carries no existence-tolerant modifier
+================================================================
+psql:supabase/migrations/20260908120000_drop_create_allocator_connected_strategy.sql:153: ERROR:  42883: function public.create_allocator_connected_strategy(uuid, uuid, text, text, text, text, text, text, text, text, integer) does not exist
+LOCATION:  LookupFuncWithArgs, parse_func.c:2446
+LANE EXIT=3
+
+================================================================
+PROOF C (RED) — a second overload of a different arity survives STEP 1; check 2 of the verify block must RAISE
+================================================================
+psql:supabase/migrations/20260908120000_drop_create_allocator_connected_strategy.sql:228: ERROR:  P0001: Migration 20260908120000: the 11-argument overload is gone but 1 overload(s) named create_allocator_connected_strategy survive in schema public, at argument counts: 2. Disposition each one under review — they carry the same reachability the removed overload did
+CONTEXT:  PL/pgSQL function inline_code_block line 47 at RAISE
+LOCATION:  exec_stmt_raise, pl_exec.c:3911
+LANE EXIT=3
+
+================================================================
+PROOF D (RED) — MUTANT with the existence-tolerant modifier and a wrong signature: STEP 1 no-ops, check 1 of the verify block must RAISE
+================================================================
+psql:/var/folders/3y/kf3qlnbx58v3jnwys2pc89_r0000gn/T/tmp.hGjdTYp0vp/mutant.sql:153: NOTICE:  00000: function public.create_allocator_connected_strategy(uuid,uuid,text) does not exist, skipping
+LOCATION:  does_not_exist_skipping, dropcmds.c:528
+psql:/var/folders/3y/kf3qlnbx58v3jnwys2pc89_r0000gn/T/tmp.hGjdTYp0vp/mutant.sql:228: ERROR:  P0001: Migration 20260908120000: public.create_allocator_connected_strategy still has 1 overload(s) at 11 arguments after STEP 1. STEP 1 either did not run or did not match — and a removal that matched nothing is the exact vacuous pass the existence-tolerant modifier produces, which is why STEP 1 refuses it
+CONTEXT:  PL/pgSQL function inline_code_block line 19 at RAISE
+LOCATION:  exec_stmt_raise, pl_exec.c:3911
+LANE EXIT=3
+
+================================================================
+PROOF E (ATOMICITY) — a second overload makes STEP 2 RAISE; the transaction wrapper must ROLL STEP 1 BACK, leaving the 11-argument overload present
+================================================================
+BEGIN
+SET
+DROP FUNCTION
+psql:<repo>/supabase/migrations/20260908120000_drop_create_allocator_connected_strategy.sql:228: ERROR:  P0001: Migration 20260908120000: the 11-argument overload is gone but 1 overload(s) named create_allocator_connected_strategy survive in schema public, at argument counts: 2. Disposition each one under review — they carry the same reachability the removed overload did
+CONTEXT:  PL/pgSQL function inline_code_block line 47 at RAISE
+LOCATION:  exec_stmt_raise, pl_exec.c:3911
+ROLLBACK
+psql:/var/folders/3y/kf3qlnbx58v3jnwys2pc89_r0000gn/T/tmp.hGjdTYp0vp/proof-e.sql:14: NOTICE:  00000: ATOMICITY PROVEN: STEP 2 raised and STEP 1 was ROLLED BACK — the 11-argument overload is still present (count=1)
+LOCATION:  exec_stmt_raise, pl_exec.c:3911
+DO
+LANE EXIT=0
+```
+
+## Stated limits of this log
+
+1. Proof A's stand-in has the real **signature** and the real **grants**, and a
+   trivial **body**. The migration asserts shape, not behaviour, so the body is
+   not load-bearing here — but this log is therefore not evidence about the real
+   function's behaviour, and does not claim to be.
+2. The lane is PostgreSQL, not the hosted project. It does not carry PROD's
+   roles, RLS or extensions beyond what the `--apply` list installs, and it says
+   nothing about whether anything in production CALLS the function. That is
+   assertion (c) of `scripts/preflight-drop-allocator-fn.sh`, which has **not**
+   been run against PROD — see the SUMMARY.
+3. Proof B is also the measured confirmation of the migration header's item 4:
+   this file is **not usable in a SQL gate's apply list**, because on a fresh
+   cluster there is nothing for STEP 1 to remove. That is DRIFT-04 restated, not
+   a defect in the migration.
+4. Proof E proves the wrapper rolls back a RAISE inside **one psql session**. It
+   does not prove what `supabase db push` does on top of that — the CLI's own
+   per-file handling is a second layer this lane cannot reach. The explicit
+   `BEGIN;`/`COMMIT;` is what makes the file correct independently of that
+   layer, which is the reason for adding it rather than relying on the CLI.
+5. `lock_timeout = '5s'` is **not exercised** by any proof here: producing a
+   contended removal needs a concurrent in-flight call, which the lane's
+   single-session apply cannot stage. It is carried as the repo's convention
+   plus a stated rationale, not as a measured behaviour.
+
+---
+
+# THIRD ROUND — proofs F, F2a and F2b (added 2026-09-07, review MED-4 and MED-1)
+
+Everything above stays as the dated record of rounds one and two. This section is
+an **appendix**, not a replacement: no proof above was re-run, none of their exit
+codes changed, and the subject migration is byte-identical to the file they used.
+
+Exit codes, this round: **3, 0, 0**.
+
+## Why this round exists
+
+**MED-4.** The migration header asserts, at its lines 78-81, that without the
+dependent-removing modifier *"a dependent aborts the apply and names itself"*.
+Rounds one and two proved four other claims and **left that one unmeasured**.
+Asserting is not measuring — the same standard proof E was added under, applied
+to the one remaining unmeasured sentence in the header.
+
+**MED-1.** The pre-flight's assertion (b) read `pg_depend` and printed
+*"ZERO — nothing in the catalogue depends on this overload"*. That is a
+completeness claim `pg_depend` cannot support: a plpgsql body that CALLS a
+function records **no** `pg_depend` row — the call is resolved out of the body
+text at execution time. F2a and F2b measure that hole on a real cluster, which is
+what makes the new `(b.2)` `prosrc` reader in
+`scripts/preflight-drop-allocator-fn.sh` load-bearing rather than belt-and-braces.
+
+## What the three proofs establish
+
+| Proof | Setup | Expected | Observed |
+|---|---|---|---|
+| **F** | the same stand-in as A/C/E, PLUS a **view** whose definition calls the function — a real `pg_depend` dependent | STEP 1 ABORTS and NAMES the dependent, because it carries no dependent-removing modifier | `ERROR: 2BP01: cannot drop function … because other objects depend on it` / `DETAIL: view v_alloc_dependent depends on function …`, exit **3** |
+| **F2a** | the stand-in PLUS a plpgsql function whose body calls it. **No migration is applied.** | `pg_depend` reports **0** while `prosrc` reports **1** — the blindness itself, measured before anything is removed | `BLINDNESS MEASURED: pg_depend rows = 0 while prosrc naming bodies = 1`, exit **0** |
+| **F2b** | the same setup, then the REAL migration | the bare removal **SUCCEEDS** (nothing aborts it), and calling the surviving caller raises `42883` | `RUNTIME BREAK MEASURED: … raises 42883 undefined_function` then `BLINDSPOT PROVEN: …`, exit **0** |
+
+**Proof F closes MED-4 directly.** It is the measurement behind the header
+sentence at lines 78-81. PostgreSQL's own `DETAIL:` line names the dependent
+(`view v_alloc_dependent`), so "names itself" is observed, not inferred — and its
+`HINT:` names the dependent-removing modifier the file deliberately refuses,
+which is the clearest possible statement of what refusing it buys.
+
+**Proofs F2a and F2b are the MED-1 pair, and F2b's exit 0 is the point.**
+Every other RED proof in this log exits 3. F2b exits **0** because the removal
+*worked* — there was nothing in the catalogue to stop it. That is the hole:
+
+* `pg_depend` reports zero (F2a measures this on the pre-removal database, so the
+  zero cannot be an artefact of the function having gone away);
+* the bare removal therefore succeeds, silently, on the auto-apply-to-PROD route;
+* `public.calls_the_allocator_fn()` then raises `42883` when called — **measured
+  by calling it**, inside an `EXCEPTION WHEN undefined_function` arm that RAISEs
+  if the call unexpectedly succeeds, so the gate cannot pass vacuously.
+
+⛔ **F2b is a proof of a GAP, not of a guard.** It shows what the migration does
+NOT catch. The thing that catches it is `(b.2)` of the pre-flight, whose own red
+arms are in that script's `--self-test`. Nothing in the migration was changed in
+response — adding the dependent-removing modifier would make F's abort disappear,
+which is the opposite of what is wanted.
+
+## Driver (verbatim, new parts only)
+
+The `standin-one.sql` fixture, the `gate-absent.sql` fixture and the `run()`
+helper are **byte-identical** to round two's, reproduced above; only the new
+fixtures, the new gates and the three `run` invocations follow.
+
+```bash
+# A REAL catalogue dependent: a view whose definition calls the function. This is
+# the class pg_depend DOES record, i.e. exactly what the pre-flight's (b.1)
+# measures and what the header claims will abort the apply.
+cat > "$F/dependent-view.sql" <<'SQL'
+CREATE VIEW public.v_alloc_dependent AS
+  SELECT strategy_id, api_key_id
+    FROM public.create_allocator_connected_strategy(
+      NULL::uuid, NULL::uuid, NULL::text, NULL::text, NULL::text, NULL::text,
+      NULL::text, NULL::text, NULL::text, NULL::text, NULL::integer);
+SQL
+
+# F2's contrast fixture: a plpgsql CALLER, which records NO pg_depend row.
+cat > "$F/plpgsql-caller.sql" <<'SQL'
+CREATE FUNCTION public.calls_the_allocator_fn() RETURNS void
+  LANGUAGE plpgsql AS $caller$
+BEGIN
+  PERFORM * FROM public.create_allocator_connected_strategy(
+    NULL::uuid, NULL::uuid, NULL::text, NULL::text, NULL::text, NULL::text,
+    NULL::text, NULL::text, NULL::text, NULL::text, NULL::integer);
+END;
+$caller$;
+SQL
+
+# F2a's gate, run on the PRE-removal database, so the zero below is not an
+# artefact of the function having gone away.
+cat > "$F/gate-predrop-depend-zero.sql" <<'SQL'
+DO $gate$
+DECLARE v_dep INTEGER; v_src INTEGER;
+BEGIN
+  SELECT count(*) INTO v_dep FROM pg_depend d
+   WHERE d.refclassid = 'pg_proc'::regclass
+     AND d.refobjid = (SELECT p.oid FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+                        WHERE n.nspname='public' AND p.proname='create_allocator_connected_strategy')
+     AND d.deptype <> 'i' AND d.classid <> 0;
+  SELECT count(*) INTO v_src FROM pg_proc p
+   WHERE p.prosrc ILIKE '%create_allocator_connected_strategy%'
+     AND p.proname <> 'create_allocator_connected_strategy';
+  IF v_dep <> 0 THEN
+    RAISE EXCEPTION 'MEASUREMENT FAILED: pg_depend reported % rows for a plpgsql caller; the blindness this proof asserts does not exist', v_dep;
+  END IF;
+  IF v_src <> 1 THEN
+    RAISE EXCEPTION 'MEASUREMENT FAILED: prosrc reported % naming bodies, expected 1', v_src;
+  END IF;
+  RAISE NOTICE 'BLINDNESS MEASURED: pg_depend rows = % while prosrc naming bodies = %. A plpgsql caller is INVISIBLE to (b.1).', v_dep, v_src;
+END;
+$gate$;
+SQL
+
+# F2b's gate: the removal has run. Assert it SUCCEEDED (that is the hole), then
+# MEASURE the runtime break by calling the survivor.
+cat > "$F/gate-plpgsql-blindspot.sql" <<'SQL'
+DO $gate$
+DECLARE
+  v_dep      INTEGER;
+  v_src      INTEGER;
+  v_survivor INTEGER;
+BEGIN
+  SELECT count(*) INTO v_src FROM pg_proc p
+   WHERE p.prosrc ILIKE '%create_allocator_connected_strategy%'
+     AND p.proname <> 'create_allocator_connected_strategy';
+  IF v_src <> 1 THEN
+    RAISE EXCEPTION 'SETUP FAILED: expected exactly 1 plpgsql body naming the function, found %', v_src;
+  END IF;
+
+  SELECT count(*) INTO v_survivor FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+   WHERE n.nspname='public' AND p.proname='create_allocator_connected_strategy';
+  IF v_survivor <> 0 THEN
+    RAISE EXCEPTION 'BLINDSPOT NOT REPRODUCED: the removal did not succeed (% overload(s) survive)', v_survivor;
+  END IF;
+
+  -- ⛔ The runtime break is MEASURED, not asserted. Calling the surviving caller
+  --    must raise 42883 (undefined_function). A gate that merely stated "the
+  --    caller is now broken" would be a claim, not a test.
+  BEGIN
+    PERFORM public.calls_the_allocator_fn();
+    RAISE EXCEPTION 'BLINDSPOT NOT PROVEN: the caller still RAN after the removal. The runtime break this proof asserts did not happen';
+  EXCEPTION
+    WHEN undefined_function THEN
+      RAISE NOTICE 'RUNTIME BREAK MEASURED: calling public.calls_the_allocator_fn() after the removal raises 42883 undefined_function';
+  END;
+
+  RAISE NOTICE 'BLINDSPOT PROVEN: pg_depend recorded NOTHING for the plpgsql caller, the bare removal SUCCEEDED, and public.calls_the_allocator_fn() now raises 42883 when called. prosrc still names the function in % body/bodies. This is the class (b.2) of the pre-flight measures and pg_depend cannot.', v_src;
+END;
+$gate$;
+SQL
+
+run "PROOF F (RED) — a CATALOGUE dependent (a view over the function) must ABORT the apply and NAME ITSELF" \
+    --apply "$F/standin-one.sql" "$F/dependent-view.sql" "$MIG" --gate "$F/gate-absent.sql"
+
+run "PROOF F2a (MEASUREMENT) — a plpgsql caller records ZERO pg_depend rows while prosrc names it: the blindness itself" \
+    --apply "$F/standin-one.sql" "$F/plpgsql-caller.sql" --gate "$F/gate-predrop-depend-zero.sql"
+
+run "PROOF F2b (THE HOLE) — with only a plpgsql caller, the bare removal SUCCEEDS and the caller breaks at runtime" \
+    --apply "$F/standin-one.sql" "$F/plpgsql-caller.sql" "$MIG" --gate "$F/gate-plpgsql-blindspot.sql"
+```
+
+## Run output
+
+No redaction was needed this round: proof E's absolute-path echo has no analogue
+here, and the `/var/folders/…` scratch paths are `mktemp -d` output carrying no
+username segment.
+
+```
+fixtures: /var/folders/3y/kf3qlnbx58v3jnwys2pc89_r0000gn/T/tmp.CznuafQpht
+
+================================================================
+PROOF F (RED) — a CATALOGUE dependent (a view over the function) must ABORT the apply and NAME ITSELF
+================================================================
+psql:supabase/migrations/20260908120000_drop_create_allocator_connected_strategy.sql:153: ERROR:  2BP01: cannot drop function create_allocator_connected_strategy(uuid,uuid,text,text,text,text,text,text,text,text,integer) because other objects depend on it
+DETAIL:  view v_alloc_dependent depends on function create_allocator_connected_strategy(uuid,uuid,text,text,text,text,text,text,text,text,integer)
+HINT:  Use DROP ... CASCADE to drop the dependent objects too.
+LOCATION:  reportDependentObjects, dependency.c:1210
+LANE EXIT=3
+
+================================================================
+PROOF F2a (MEASUREMENT) — a plpgsql caller records ZERO pg_depend rows while prosrc names it: the blindness itself
+================================================================
+psql:/var/folders/3y/kf3qlnbx58v3jnwys2pc89_r0000gn/T/tmp.CznuafQpht/gate-predrop-depend-zero.sql:20: NOTICE:  00000: BLINDNESS MEASURED: pg_depend rows = 0 while prosrc naming bodies = 1. A plpgsql caller is INVISIBLE to (b.1).
+LOCATION:  exec_stmt_raise, pl_exec.c:3911
+DO
+LANE EXIT=0
+
+================================================================
+PROOF F2b (THE HOLE) — with only a plpgsql caller, the bare removal SUCCEEDS and the caller breaks at runtime
+================================================================
+psql:/var/folders/3y/kf3qlnbx58v3jnwys2pc89_r0000gn/T/tmp.CznuafQpht/gate-plpgsql-blindspot.sql:33: NOTICE:  00000: RUNTIME BREAK MEASURED: calling public.calls_the_allocator_fn() after the removal raises 42883 undefined_function
+LOCATION:  exec_stmt_raise, pl_exec.c:3911
+psql:/var/folders/3y/kf3qlnbx58v3jnwys2pc89_r0000gn/T/tmp.CznuafQpht/gate-plpgsql-blindspot.sql:33: NOTICE:  00000: BLINDSPOT PROVEN: pg_depend recorded NOTHING for the plpgsql caller, the bare removal SUCCEEDED, and public.calls_the_allocator_fn() now raises 42883 when called. prosrc still names the function in 1 body/bodies. This is the class (b.2) of the pre-flight measures and pg_depend cannot.
+LOCATION:  exec_stmt_raise, pl_exec.c:3911
+DO
+LANE EXIT=0
+```
+
+## Stated limits of this round
+
+1. **Proof F's dependent is a VIEW.** Other `pg_depend`-recording dependents
+   exist — a default expression, a generated column, another function's
+   `RETURNS TABLE`. F proves the ABORT MECHANISM fires and names the object; it
+   does not enumerate every dependent kind, and does not claim to. The mechanism
+   is PostgreSQL's, not this file's, so one instance is sufficient to falsify the
+   header's sentence had it been wrong.
+2. **F2b proves a GAP, not a guard.** Nothing in the migration changed because of
+   it. The countermeasure lives in the pre-flight's `(b.2)`, and a pre-flight is
+   only run when an operator runs it — so this remains a HUMAN control, not an
+   automated one. The migration still reaches PROD by merge with no gate in front
+   of it that reads `prosrc`.
+3. **The `prosrc` scan is a TEXT scan** and inherits both its error directions:
+   it flags the name inside a comment or a string literal, and it misses a caller
+   that builds the name dynamically. F2a measures the *blindness of pg_depend*,
+   not the *completeness of prosrc*.
+4. Round two's limits 1, 2, 4 and 5 are unchanged and still apply: the stand-in
+   has a trivial body, the lane is not the hosted project, `supabase db push`'s
+   own per-file handling is a layer this lane cannot reach, and `lock_timeout`
+   is still not exercised by any proof.

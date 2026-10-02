@@ -2,7 +2,23 @@
 -- Canonical current body of this function, replayed from supabase/migrations/**.
 -- Regenerate with `npm run schema:functions`. See tech-debt #2.
 
--- source migration: 20260516104201_compute_jobs_audit_2026_05_07_residual.sql
+-- source migration: 20260826140000_compute_jobs_error_kind_orphaned.sql
+-- --------------------------------------------------------------------------
+-- STEP 3: the twin — get_user_compute_jobs.user_message
+-- --------------------------------------------------------------------------
+-- The same conflation ships here (20260516104201:784-786): `failed_final` +
+-- 'permanent' selects "we can't retry automatically", and every reaped orphan
+-- landed on it. This migration is what makes the two classes distinguishable, so
+-- it closes BOTH readers rather than leaving the older one to be found again.
+--
+-- ⛔ ARM ORDER IS LOAD-BEARING. The new arm goes BEFORE the bare
+-- `WHEN cj.status = 'failed_final'` fallback. Placed after it, an orphan would
+-- match the fallback's "Tried multiple times without success" — which is ALSO
+-- false (the job was never retried; its worker died), just less obviously so.
+--
+-- Re-based on 20260516104201 (LATEST body). Everything else is preserved
+-- verbatim: the auth.uid() early return, the last_error redaction, the M-0783
+-- COALESCE join contract, the ORDER BY and the LIMIT clamp.
 CREATE OR REPLACE FUNCTION get_user_compute_jobs(
   p_strategy_id UUID DEFAULT NULL,
   p_limit       INTEGER DEFAULT 100
@@ -49,8 +65,14 @@ BEGIN
     NULL::TEXT AS last_error,   -- redacted; see mig 032 STEP 16 comment
     cj.error_kind, cj.idempotency_key, cj.exchange, cj.trade_count,
     cj.created_at, cj.updated_at, cj.metadata,
-    -- mig 111 P11: synthetic user-facing message (preserved verbatim).
+    -- mig 111 P11: synthetic user-facing message.
     CASE
+      -- F-3 (mig 20260826140000). FIRST, ahead of both failed_final arms: a
+      -- reaped orphan is retryable, and it is the only failed_final class that
+      -- is. Below the bare fallback it would read "Tried multiple times without
+      -- success", which is false in a second way — it was never retried.
+      WHEN cj.status = 'failed_final' AND cj.error_kind = 'orphaned' THEN
+        'This run stopped before it finished because the process running it went away. Please try again.'
       WHEN cj.status = 'failed_final' AND cj.error_kind = 'permanent' THEN
         'We hit a problem we can''t retry automatically. Please contact support.'
       WHEN cj.status = 'failed_final' THEN

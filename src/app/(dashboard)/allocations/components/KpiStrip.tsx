@@ -109,6 +109,12 @@ interface KpiStripProps {
    * primary still renders.
    */
   liveMetrics?: ComputedMetrics | null;
+  /**
+   * Phase 170 / SC1-LAYERS. Passed through to KpiPanel. Omitted keeps the
+   * panel's own default ("cards"), so every existing caller stays
+   * byte-identical. The scenario composer passes "panel".
+   */
+  variant?: "cards" | "panel";
 }
 
 interface Cell {
@@ -157,6 +163,30 @@ const STALE_SUB = "Last sync stale — awaiting next update";
 const AVG_RHO_HONEST_NULL_SUB =
   "Requires per-holding correlation data (pending)";
 const AVG_RHO_LOADED_SUB = "average pairwise correlation across holdings";
+
+/**
+ * Phase 166.2 round 2 (SFH-R2-M3): how many off-diagonal pairs an engine
+ * correlation matrix measured, out of how many exist. Under founder decision D7
+ * a pair with no correlation (a leg with no dispersion) has no cell and is left
+ * out of `avg_pairwise_correlation`, so the average covers `measured` pairs, not
+ * `total`. Counts cells exactly as `CorrelationHeatmap`'s caption does; it never
+ * computes the average. Null when there is no matrix or fewer than 2 members.
+ */
+function pairCoverage(
+  matrix: ComputedMetrics["correlation_matrix"] | undefined,
+): { measured: number; total: number } | null {
+  if (!matrix) return null;
+  const ids = Object.keys(matrix);
+  if (ids.length < 2) return null;
+  let measured = 0;
+  for (let i = 0; i < ids.length; i++) {
+    for (let j = i + 1; j < ids.length; j++) {
+      const v = matrix[ids[i]]?.[ids[j]];
+      if (v != null && Number.isFinite(v)) measured++;
+    }
+  }
+  return { measured, total: (ids.length * (ids.length - 1)) / 2 };
+}
 
 /** Color-token className for the value text — green/red for signed metrics.
  * Uses DESIGN.md tokens (text-positive / text-negative) so the strip stays
@@ -284,6 +314,7 @@ export function KpiStrip({
   mode = "live",
   scenarioMetrics = null,
   liveMetrics = null,
+  variant,
 }: KpiStripProps) {
   // Phase 07 / 07-03 — the warm-up helper line renders for each null KPI
   // cell when the allocator is still backfilling AND not globally stale.
@@ -319,6 +350,31 @@ export function KpiStrip({
   const avgRhoValue: number | null =
     analytics?.avg_correlation ?? metrics?.avg_pairwise_correlation ?? null;
 
+  // Phase 10 / 10-04 — scenario-mode rendering gate. Active ONLY when:
+  //   - mode === "scenario"
+  //   - !warmingUp  (Phase 07 D-09 invariant — warmup branch always wins)
+  //   - !allKeysStale  (stale state suppresses scenario primary too — the
+  //     stale data underlying the scenario projection makes the projected
+  //     numbers untrustworthy)
+  //   - scenarioMetrics != null
+  // When this gate is closed, the cell renders the live path verbatim
+  // (zero behavior change for existing call sites that pass no `mode`).
+  const scenarioActive =
+    mode === "scenario" &&
+    !warmingUp &&
+    !allKeysStale &&
+    scenarioMetrics != null;
+
+  // SFH-R2-M3: the pair coverage of the Avg |ρ| the cell DISPLAYS — the
+  // scenario engine's matrix when the scenario primary shows, else the live
+  // metrics' matrix when the live value came from it (analytics carries no
+  // matrix, so its average has no coverage to state).
+  const avgRhoCoverage = scenarioActive
+    ? pairCoverage(scenarioMetrics?.correlation_matrix)
+    : analytics?.avg_correlation != null
+      ? null
+      : pairCoverage(metrics?.correlation_matrix);
+
   /**
    * Resolve the sub-copy for a single cell with the documented precedence:
    *   1. allKeysStale → STALE_SUB (every cell)
@@ -351,6 +407,11 @@ export function KpiStrip({
     if (allKeysStale) return STALE_SUB;
     if (warmupHelper && raw == null) return warmupHelper;
     if (raw == null) return AVG_RHO_HONEST_NULL_SUB;
+    // An average over fewer than all pairs says so, in the heatmap caption's
+    // words, so the KPI never reads as covering pairs it left out.
+    if (avgRhoCoverage && avgRhoCoverage.measured < avgRhoCoverage.total) {
+      return `${AVG_RHO_LOADED_SUB} · ${avgRhoCoverage.measured} of ${avgRhoCoverage.total} pairs measured`;
+    }
     return AVG_RHO_LOADED_SUB;
   }
 
@@ -396,21 +457,6 @@ export function KpiStrip({
       metricKey: "avg_pairwise_correlation",
     },
   ];
-
-  // Phase 10 / 10-04 — scenario-mode rendering gate. Active ONLY when:
-  //   - mode === "scenario"
-  //   - !warmingUp  (Phase 07 D-09 invariant — warmup branch always wins)
-  //   - !allKeysStale  (stale state suppresses scenario primary too — the
-  //     stale data underlying the scenario projection makes the projected
-  //     numbers untrustworthy)
-  //   - scenarioMetrics != null
-  // When this gate is closed, the cell renders the live path verbatim
-  // (zero behavior change for existing call sites that pass no `mode`).
-  const scenarioActive =
-    mode === "scenario" &&
-    !warmingUp &&
-    !allKeysStale &&
-    scenarioMetrics != null;
 
   // Phase 100 / 100-03 (PI-06) — resolve each cell to a KpiPanel descriptor.
   // ALL warmup / stale / scenario / delta logic stays HERE; the shared
@@ -488,5 +534,7 @@ export function KpiStrip({
     },
   );
 
-  return <KpiPanel cells={panelCells} ariaLabel="Portfolio KPIs" />;
+  return (
+    <KpiPanel cells={panelCells} ariaLabel="Portfolio KPIs" variant={variant} />
+  );
 }

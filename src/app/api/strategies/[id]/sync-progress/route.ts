@@ -5,6 +5,24 @@
  * The single owner-scoped, SECRETLESS read the composite wizard polls (95-04)
  * to render per-member stitch progress and a stall banner.
  *
+ * Phase 154 / plan 154-04 — STALE-01a: the job selection is widened from
+ * "latest stitch_composite" to "latest stitch_composite, else latest job of ANY
+ * kind". Purely additive — the fallback is reached only where the route used to
+ * answer IDLE — and it makes `jobStatus` available to SINGLE-KEY strategies,
+ * which produce no stitch job and were therefore told nothing was in flight
+ * while their `process_key_long` was running. `stalled` and `memberProgress`
+ * stay stitch-derived (see the stall block for the false-positive hazard).
+ *
+ * Phase 167.2 / KCS-20 — the fallback is narrowed from "latest job of ANY kind"
+ * to "latest FACTSHEET-CHAIN job" (`FACTSHEET_CHAIN_KINDS` in
+ * `@/lib/compute-state`, which now owns the selection for this route and every
+ * compute-state surface). A deliberate behaviour change on an internal route: a
+ * newer recurring cron row (`reconcile_strategy`, `sync_funding`) can no longer
+ * answer for the factsheet and hide a failed chain job. `jobStatus: null` now
+ * means "no factsheet-chain job is visible for this strategy" (rows of other
+ * kinds may exist). The wizard's SyncPreviewStep reads the same field; a new
+ * strategy only has chain rows, so for it null still reads as nothing enqueued.
+ *
  * Why a projection route, not a direct table read (95-VALIDATION decision 1,
  * LOCKED as Option A):
  *   `compute_jobs` is RLS deny-all + REVOKE FROM authenticated. The sanctioned
@@ -51,12 +69,26 @@ import { NO_STORE_HEADERS } from "@/lib/api/headers";
 import { syncProgressLimiter, checkLimit } from "@/lib/ratelimit";
 import { isUuid } from "@/lib/utils";
 import {
-  coerceMemberProgressStatus,
-  STALL_THRESHOLD_MS,
+  type DegradedReason,
   type MemberProgressEntry,
   type StitchJobStatus,
   type SyncProgressResponse,
 } from "@/lib/sync-progress";
+import {
+  isComputeJobStatus,
+  isStitchStalled,
+  isNonFactsheetJobInFlight,
+  memberProgressOf,
+  selectFactsheetJob,
+} from "@/lib/compute-state";
+import { readOwnerComputeJobs } from "@/lib/compute-jobs-read";
+import {
+  compositeHistoryOf,
+  countCompositeMembers,
+  shouldPreferStitch,
+} from "@/lib/strategy-shape";
+import { captureToSentry } from "@/lib/sentry-capture";
+import type { SupabaseClient } from "@supabase/supabase-js";
 
 // AGENTS.md: pin the Node.js runtime — the route touches the supabase server
 // client (cookie store), which the Edge runtime would break.
@@ -64,7 +96,13 @@ export const runtime = "nodejs";
 
 type RouteCtx = { params: Promise<{ id: string }> };
 
-/** The idle response — no visible stitch_composite job for this strategy. */
+/**
+ * The idle response — no factsheet-chain job (stitch_composite or a
+ * FACTSHEET_CHAIN_KINDS row) is visible for this strategy (167.2 KCS-20). Rows of
+ * other kinds (recurring cron jobs) may exist; they do not describe the
+ * factsheet. Before 154-04 this also covered "has jobs, none of them a stitch",
+ * which is every single-key strategy that ever ran.
+ */
 const IDLE: SyncProgressResponse = {
   jobStatus: null,
   stalled: false,
@@ -84,18 +122,6 @@ const DEGRADED: SyncProgressResponse = {
   memberProgress: [],
   degraded: true,
 };
-
-/** Minimal shape we read off a `get_user_compute_jobs` row. */
-interface ComputeJobRow {
-  kind?: string;
-  status?: string;
-  claimed_at?: string | null;
-  created_at?: string;
-  metadata?: {
-    member_progress?: unknown;
-    member_progress_at?: string | null;
-  } | null;
-}
 
 export async function GET(
   req: NextRequest,
@@ -138,7 +164,7 @@ export async function GET(
       // below is ALSO auth.uid()-scoped, so this is defense-in-depth.
       const { data: strategy } = await supabase
         .from("strategies")
-        .select("id, user_id")
+        .select("id, user_id, api_key_id")
         .eq("id", id)
         .eq("user_id", user.id)
         .single();
@@ -150,87 +176,128 @@ export async function GET(
       }
 
       // Sanctioned owner-scoped read (Don't-Hand-Roll table): the SECURITY
-      // DEFINER RPC resolves auth.uid() server-side from the session JWT.
-      const { data: rows, error: rpcError } = await supabase.rpc(
-        "get_user_compute_jobs",
-        { p_strategy_id: id, p_limit: 20 },
-      );
-
-      if (rpcError) {
-        // A progress read must NEVER hard-fail the wizard poll — it is cosmetic
-        // (the analytics poll remains the authoritative one). Degrade to an
-        // idle 200 and log server-side (never forward the raw error).
+      // DEFINER RPC resolves auth.uid() server-side from the session JWT
+      // (`withAuth` has resolved the user, the precondition
+      // `readOwnerComputeJobs` documents). 167.2-REVIEW-SFH M-5: a full first
+      // window with no chain row is re-asked once at the RPC cap there.
+      // 167.2-REVIEW-SFH M-4 — every "could not tell" answer is DEGRADED,
+      // never IDLE. The key card reads IDLE's `jobStatus: null` as "no chain
+      // job in flight" (its KCS-18 success gate and its pre-attempt gate), so
+      // an IDLE here for a read that answered nothing would admit a mid-chain
+      // success or start a second job. Three cases, each logged and captured
+      // (no raw error is forwarded to the client):
+      //   - the RPC errored, answered no rows array, or threw (SF-3's branch,
+      //     widened: the non-array answer used to fall through to IDLE);
+      //   - the window is still full at the RPC cap with no chain row
+      //     (`deriveComputeState` calls that `unreadable`; this route used to
+      //     call it IDLE, breaking its own module's rule);
+      //   - the selected job's status is outside the six-value domain.
+      // 167.2-REVIEW-R2 IN-04 / SFH-R2 R2-L1: a DETERMINISTIC cause names
+      // itself (`degradedReason`), so the key card's gate does not promise
+      // that trying again "in a moment" will help.
+      const degrade = (
+        stage: string,
+        message: string,
+        reason?: DegradedReason,
+      ): NextResponse => {
         console.error(
-          `[api/strategies/sync-progress] get_user_compute_jobs failed for ${id}:`,
-          rpcError,
+          `[api/strategies/sync-progress] ${stage} for ${id}: ${message}`,
         );
-        // SF-3: degrade to a 200 the poll never hard-fails on, but flag it
-        // `degraded:true` so the client keeps its last-known progress rather
-        // than treating a couldn't-read blip as a real idle (empty panel /
-        // stalled:false). Distinct from the real-idle IDLE below.
-        return NextResponse.json(DEGRADED, {
+        captureToSentry(new Error(message), {
+          tags: { route: "api/strategies/sync-progress", stage },
+        });
+        // SF-3: a 200 the poll never hard-fails on, flagged `degraded:true` so
+        // the client keeps its last-known progress rather than treating a
+        // couldn't-read as a real idle (empty panel / stalled:false).
+        return NextResponse.json(reason ? { ...DEGRADED, degradedReason: reason } : DEGRADED, {
           status: 200,
           headers: NO_STORE_HEADERS,
         });
+      };
+
+      let read: Awaited<ReturnType<typeof readOwnerComputeJobs>>;
+      // 167.2-REVIEW IN-03: stitch preference only while the strategy HAS
+      // members. A strategy converted from a composite to a single key before
+      // KCS-23 keeps its old stitch rows, and a stale `done` stitch answered for
+      // the single-key chain running now, so the key card's KCS-18 gate read it
+      // as settled mid-chain. A count that cannot be read keeps the old rule
+      // (never fail toward dropping a live composite's member progress).
+      let memberCount: Awaited<ReturnType<typeof countCompositeMembers>>;
+      try {
+        [read, memberCount] = await Promise.all([
+          readOwnerComputeJobs(supabase as unknown as SupabaseClient, id),
+          countCompositeMembers(supabase as unknown as SupabaseClient, id),
+        ]);
+      } catch (err) {
+        return degrade(
+          "compute-jobs-read",
+          err instanceof Error ? err.message : String(err),
+        );
       }
 
-      // Filter to stitch_composite and pick the LATEST by created_at. The RPC
-      // already orders created_at DESC, but reduce explicitly so the contract
-      // does not silently depend on RPC ordering.
-      const jobRows: ComputeJobRow[] = Array.isArray(rows)
-        ? (rows as unknown as ComputeJobRow[])
-        : [];
-      let latest: ComputeJobRow | null = null;
-      for (const row of jobRows) {
-        if (row?.kind !== "stitch_composite") continue;
-        if (
-          latest === null ||
-          Date.parse(row.created_at ?? "") > Date.parse(latest.created_at ?? "")
-        ) {
-          latest = row;
-        }
+      if (!read.ok) return degrade("compute-jobs-read", read.message);
+      if (read.windowFull) {
+        return degrade(
+          "compute-jobs-window-full",
+          "the compute job window is full at the RPC cap with no factsheet-chain job in it",
+          "window_full",
+        );
       }
+
+      // KCS-07 / KCS-20 (167.2) — the selection, the member projection and the
+      // stall rule live in `@/lib/compute-state`, written once and shared with
+      // every surface that states a strategy's compute state. The selection is
+      // stitch-PREFERRING, as since 154-04 (the stitch row is the only row that
+      // can carry member progress or a heartbeat, so composite responses stay
+      // byte-identical: PIN-COMPOSITE-BYTES / PIN-COMPOSITE-WINS). The fallback
+      // is the latest FACTSHEET-CHAIN job, no longer the latest of any kind: a
+      // newer recurring cron row (`reconcile_strategy`, `sync_funding`) must not
+      // hide a failed chain job behind its own `done`.
+      // 167.2-REVIEW-R2 IN-05: a zero count drops stitch preference only for
+      // a PROVEN single-key strategy (a linked key, or no stitch in the rows
+      // at hand); a regressed `strategy_keys_owner` policy that counts a live
+      // composite as 0 must not let a member chain row answer for it. The
+      // history here is the rows this route already read (no extra RPC on the
+      // poll path): with no stitch in them, the preference changes nothing.
+      // Round-2 review: `nowMs` lets the selection skip a chain row older than
+      // `CHAIN_JOB_LIVE_WINDOW_MS`, as the resync guard does (see
+      // `computeJobDeadReason`).
+      const nowMs = Date.now();
+      const latest = selectFactsheetJob(read.rows, {
+        nowMs,
+        preferStitch: shouldPreferStitch({
+          apiKeyId: (strategy as { api_key_id?: string | null }).api_key_id,
+          memberCount,
+          compositeHistory: compositeHistoryOf(read),
+        }),
+      });
 
       if (latest === null) {
         return NextResponse.json(IDLE, { status: 200, headers: NO_STORE_HEADERS });
       }
 
-      // Field-by-field member projection — NEVER spread the worker's entry, and
-      // touch ONLY member_progress (never last_error / user_message / source /
-      // correlation_id / ciphertext).
-      const rawEntries = Array.isArray(latest.metadata?.member_progress)
-        ? (latest.metadata!.member_progress as unknown[])
-        : [];
-      const memberProgress: MemberProgressEntry[] = rawEntries.map((e) => {
-        const entry = (e ?? {}) as Record<string, unknown>;
-        return {
-          seq: Number(entry.seq),
-          // Security L1 — harden exchange/label symmetrically with seq/status: a
-          // non-string value (object, number) in these positions projects to
-          // null rather than passing through verbatim. Only the trusted worker
-          // writes member_progress, so this is defense-in-depth, but the
-          // projection must be UNIFORMLY defensive (never a bare ?? coalesce
-          // that lets a truthy non-string through).
-          exchange: typeof entry.exchange === "string" ? entry.exchange : null,
-          label: typeof entry.label === "string" ? entry.label : null,
-          status: coerceMemberProgressStatus(entry.status),
-        };
-      });
+      // Member progress and the stall flag are stitch-derived inside the helpers
+      // (only the stitch worker writes member_progress / member_progress_at), so
+      // a non-stitch fallback row projects [] and is never stalled. See the
+      // "STALL IS STITCH-ONLY" note on `isStitchStalled` for why a non-stitch
+      // job must never read as stalled.
+      if (!isComputeJobStatus(latest.status)) {
+        return degrade(
+          "compute-jobs-bad-status",
+          "the selected compute job's status is outside the compute_jobs status domain",
+          "bad_status",
+        );
+      }
+      const memberProgress: MemberProgressEntry[] = memberProgressOf(latest);
+      const jobStatus: StitchJobStatus = latest.status;
+      const stalled = isStitchStalled(latest, Date.now());
 
-      // PROG-03 stall (server clock only): heartbeat = member_progress_at ??
-      // claimed_at; stalled only when running AND the heartbeat is older than
-      // the threshold. Date.parse of a missing/garbage value → NaN, and
-      // `NaN > threshold` is false, so an unparseable heartbeat never cries
-      // stall. RT-1: NO analytics-table read anywhere in this route.
-      const jobStatus = (latest.status ?? null) as StitchJobStatus | null;
-      const heartbeat =
-        latest.metadata?.member_progress_at ?? latest.claimed_at ?? null;
-      const stalled =
-        jobStatus === "running" &&
-        heartbeat != null &&
-        Date.now() - Date.parse(heartbeat) > STALL_THRESHOLD_MS;
-
-      const body: SyncProgressResponse = { jobStatus, stalled, memberProgress };
+      // LOW-8 — say when a non-factsheet job (a recurring kind) is still in
+      // flight: the SQL status bridge holds `computing` for it too. Added only
+      // when true, so every other body is byte-identical.
+      const body: SyncProgressResponse = isNonFactsheetJobInFlight(read.rows, nowMs)
+        ? { jobStatus, stalled, memberProgress, otherJobInFlight: true }
+        : { jobStatus, stalled, memberProgress };
       return NextResponse.json(body, { status: 200, headers: NO_STORE_HEADERS });
     },
   )(req);

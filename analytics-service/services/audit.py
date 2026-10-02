@@ -126,8 +126,9 @@ _SQLSTATE_INSUFFICIENT_PRIVILEGE_CLASS = "42"  # Class 42 — Syntax Error or Ac
 # src/lib/audit.ts and asserts the two vocabularies match, so a one-sided edit
 # (add to TS, forget Python, or vice versa) fails the suite.
 #
-# There is no mypy gate on this file in CI, so the annotations alone have no
-# runtime teeth — the sync test is what makes the contract enforceable: it
+# This file IS under the CI mypy step (the `python` job's type gate covers
+# services/), but annotations are static and have no runtime
+# teeth — the sync test is what makes the contract enforceable: it
 # fails loudly the moment the canonical TS list and this list diverge.
 AuditAction = Literal[
     # --- 7.1a pilot ---------------------------------------------------------
@@ -180,7 +181,36 @@ AuditAction = Literal[
     "strategy.delete",
     "strategy.approve",
     "strategy.reject",
+    # --- Phase 150 / OWN-03: owner-declared strategy state (TS-only call
+    # sites -- the capital-ownership mark and the owner rename are both
+    # Next.js route writes). Kept here so the TS<->Python AuditAction parity
+    # test test_action_literal_matches_ts_union stays green.
+    "strategy.ownership_mark",
+    "strategy.rename",
+    # --- Phase 164 / SHARE-01 + SHARE-03: the strategy share capability
+    # (TS-only call sites -- the mint and revoke routes are Next.js writes and
+    # the worker never touches strategy_shares). Kept here so the TS<->Python
+    # AuditAction parity test test_action_literal_matches_ts_union stays green.
+    "strategy.share.mint",
+    "strategy.share.revoke",
+    # --- Phase 146.2 / T-146.2-12: the CSV finalize commit (TS-only call
+    # site -- the fold is invoked from the Next.js csv-finalize route). Kept
+    # here so the TS<->Python AuditAction parity test
+    # test_action_literal_matches_ts_union stays green.
+    "strategy.csv_finalize",
     "api_key.revoke",
+    # --- Phase 164.5.3 / MT5CREDS D-04+D-05: the owner corrected an MT5
+    # key's stored password in place (TS-only call site -- the rotate-secret
+    # route is a Next.js write). Kept here so the TS<->Python AuditAction
+    # parity test test_action_literal_matches_ts_union stays green.
+    "api_key.rotate_secret",
+    # --- Phase 167.1.2 / D-01 + D-11: the daily poll's identity stamper
+    # marked this key as reading the same exchange account as a live key of
+    # the same owner (Python-only call site: services.account_identity).
+    # entity_id = the marked api_keys.id; metadata = venue and the holder's key
+    # id, never the account id. Emitted once per transition into 'duplicate'.
+    # Kept in the TS union too (test_action_literal_matches_ts_union).
+    "api_key.account_duplicate_detected",
     "trades.upload",
     "admin.partner_import",
     # --- /review follow-up (T4-C1 + T4-M6) ----------------------------------
@@ -228,6 +258,12 @@ AuditAction = Literal[
     "allocator.equity.refresh_failed",
     "allocator.equity.sibling_lookup_failed",
     "allocator.equity.perp_upnl_missing",
+    # --- Phase 167.1.2 plan 12 / review SFH-R2-01: the daily refresh held a
+    # zero-snapshot book's FIRST row while a reconstruct of one of its keys was
+    # in flight (Python-only call site: services.equity_reconstruction).
+    # Metadata carries counts only. Kept in the TS union too
+    # (test_action_literal_matches_ts_union).
+    "allocator.equity.refresh_held_for_reconstruct",
     # --- Phase 16 / OBSERV-07: admin-gated diagnostic SSE endpoint ----------
     "debug_key_flow.invoke",
     # --- audit-2026-05-07 P700: break-glass ADMIN_EMAIL fallback grant ------

@@ -7,7 +7,12 @@ import {
   AnalyticsUpstreamError,
   AnalyticsTimeoutError,
 } from "@/lib/analytics-client";
+import { CircuitOpenError } from "@/lib/seam-errors";
+import { CIRCUIT_OPEN_COPY } from "@/lib/seam-copy";
 import { captureToSentry } from "@/lib/sentry-capture";
+// 140.4-08 / SEAMRIM-06 — `captureToSentry` scrubs at its own chokepoint;
+// `console.*` has none, so the log site below wraps the caught value here.
+import { scrubSeamError } from "@/lib/seam-redaction";
 import {
   simulatorLimiter,
   checkLimit,
@@ -41,6 +46,21 @@ import { NO_STORE_HEADERS } from "@/lib/api/headers";
  * the expensive simulateAddCandidate Python round-trip is exactly what the
  * universal-approval gate exists to deny to pending-approval users.
  */
+
+/**
+ * Phase 140 / SEAM-02 — pinned for clarity; declared counterpart of this
+ * route's `SEAM_ROUTE_BUDGETS` row in `src/lib/resilient-fetch.ts`.
+ *
+ * 300 is the project's VERIFIED effective Vercel default
+ * (`defaultResourceConfig.functionDefaultTimeout: 300`, read from the live
+ * project settings on 2026-07-25), so declaring it here cannot RAISE this
+ * route's worst-case lambda hold (threat T-140-29). It exists so the SC-4b
+ * headroom invariant has an in-repo source of truth instead of a
+ * dashboard-changeable assumption: this route spends one `simulator` budget
+ * (15s), i.e. 20× headroom.
+ */
+export const maxDuration = 300;
+
 export async function POST(req: NextRequest) {
   const csrfError = assertSameOrigin(req);
   if (csrfError) return csrfError;
@@ -52,7 +72,7 @@ export async function POST(req: NextRequest) {
 
   if (!user) {
     return NextResponse.json(
-      { error: "Unauthorized" },
+      { error: "Unauthorized", code: "UNAUTHENTICATED" },
       { status: 401, headers: NO_STORE_HEADERS },
     );
   }
@@ -69,7 +89,7 @@ export async function POST(req: NextRequest) {
     rawBody = await req.json();
   } catch {
     return NextResponse.json(
-      { error: "Invalid JSON" },
+      { error: "Invalid JSON", code: "VALIDATION_FAILED" },
       { status: 400, headers: NO_STORE_HEADERS },
     );
   }
@@ -80,6 +100,7 @@ export async function POST(req: NextRequest) {
       {
         error:
           "portfolio_id and candidate_strategy_id are required and must be valid UUIDs",
+        code: "VALIDATION_FAILED",
       },
       { status: 400, headers: NO_STORE_HEADERS },
     );
@@ -95,7 +116,7 @@ export async function POST(req: NextRequest) {
     // user-side throttling.
     if (isRateLimitMisconfigured(rl)) {
       return NextResponse.json(
-        { error: "Rate limiter unavailable" },
+        { error: "Rate limiter unavailable", code: "SEAM_MISCONFIGURED" },
         {
           status: 503,
           headers: { ...NO_STORE_HEADERS, "Retry-After": String(rl.retryAfter) },
@@ -109,6 +130,7 @@ export async function POST(req: NextRequest) {
       {
         error:
           "Too many simulations. The portfolio impact simulator is capped at 20 runs per hour.",
+        code: "RATE_LIMITED",
         retryAfter: rl.retryAfter,
       },
       {
@@ -133,7 +155,7 @@ export async function POST(req: NextRequest) {
 
   if (!portfolio) {
     return NextResponse.json(
-      { error: "Portfolio not found" },
+      { error: "Portfolio not found", code: "PORTFOLIO_NOT_FOUND" },
       { status: 404, headers: NO_STORE_HEADERS },
     );
   }
@@ -146,20 +168,54 @@ export async function POST(req: NextRequest) {
     );
     return NextResponse.json(result, { headers: NO_STORE_HEADERS });
   } catch (err) {
+    // Phase 140 / SEAM-04 — the breaker arm, FIRST among the typed arms.
+    //
+    // An open circuit means no request was issued: 503 + a cooldown, not the
+    // generic 500 this used to fall through to (which invites an immediate
+    // retry against a service already known to be down).
+    //
+    // ⚠️ Placement: INSIDE the handler, after the 401 + approval gates above
+    // (threat T-140-20) — a breaker-aware branch hoisted above them would turn
+    // "is Railway degraded right now?" into an unauthenticated oracle.
+    //
+    // ⚠️ `CircuitOpenError` comes from the dependency-free leaf
+    // `@/lib/seam-errors`, never through `@/lib/analytics-client`: this route's
+    // test mocks that module wholesale, and a class read through a mocked
+    // module is `undefined` — `err instanceof undefined` throws a TypeError
+    // from inside this very catch block (threat T-140-30).
+    if (err instanceof CircuitOpenError) {
+      console.error(
+        `[simulator] circuit open — short-circuited, retry in ${err.retryAfterS}s`,
+      );
+      return NextResponse.json(
+        { error: CIRCUIT_OPEN_COPY, code: "CIRCUIT_OPEN" },
+        {
+          status: 503,
+          headers: {
+            ...NO_STORE_HEADERS,
+            // Same pairing as this route's own 429/503 limiter arms above.
+            "Retry-After": String(err.retryAfterS),
+          },
+        },
+      );
+    }
     // Forward 4xx semantics from the Python service (e.g. 400 "already in
     // portfolio", 404 "portfolio not found") instead of flattening every
     // upstream error to 500. AnalyticsUpstreamError.message carries the Python
     // `detail` (operator-curated copy) — safe to forward on the 4xx path.
     if (err instanceof AnalyticsUpstreamError && err.status >= 400 && err.status < 500) {
+      // SEAMUX-03 — preserve the UPSTREAM'S own machine code
+      // (`AnalyticsUpstreamError.seamCode`); UNKNOWN only when the body carried
+      // none. Message and status forwarding are unchanged.
       return NextResponse.json(
-        { error: err.message },
+        { error: err.message, code: err.seamCode ?? "UNKNOWN" },
         { status: err.status, headers: NO_STORE_HEADERS },
       );
     }
     // M-0959/M-0963/L-0055: a timed-out Python round-trip is a gateway timeout.
     if (err instanceof AnalyticsTimeoutError) {
       return NextResponse.json(
-        { error: "The simulator is taking longer than expected. Please try again." },
+        { error: "The simulator is taking longer than expected. Please try again.", code: "UPSTREAM_TIMEOUT" },
         { status: 504, headers: NO_STORE_HEADERS },
       );
     }
@@ -168,12 +224,34 @@ export async function POST(req: NextRequest) {
     // violation string (Python schema field names) and FastAPI 5xx detail to
     // authenticated allocators — the byte-identical defect F5 closed in the
     // sister /api/bridge route. Keep the detail server-side only.
-    console.error("[simulator] Simulation failed:", err);
+    console.error("[simulator] Simulation failed:", scrubSeamError(err));
     captureToSentry(err, {
       tags: { route: "api/simulator", op: "simulateAddCandidate" },
     });
+    // 161-08 / WIZERR-06 — THE CODE CROSSES; THE MESSAGE STILL DOES NOT.
+    //
+    // The paragraph above is unchanged and still governs `error`: a 5xx
+    // `message` carries the `parseResponse()` contract-violation string, FastAPI
+    // detail and this service's base URL, and none of it may cross. What moves
+    // is only `code` — a machine token from the seam's own closed vocabulary,
+    // already forwarded by the 4xx arm above. Collapsing it here meant a
+    // classified 500 (`SIMULATION_FAILED`, the `portfolio_simulator` residue)
+    // arrived indistinguishable from a transport failure we could not name.
+    //
+    // ⛔ `typeof`, NOT `instanceof AnalyticsUpstreamError`: this arm is also
+    // reached by transport failures and untyped throws, and a suite that mocks
+    // `@/lib/analytics-client` wholesale makes the class `undefined`, where
+    // `x instanceof undefined` throws from inside this very catch. The empty
+    // string is excluded because `"" ?? "UNKNOWN"` is `""`.
+    const rawSeamCode = (err as { seamCode?: unknown } | null | undefined)
+      ?.seamCode;
+    const seamCode =
+      typeof rawSeamCode === "string" && rawSeamCode !== "" ? rawSeamCode : null;
     return NextResponse.json(
-      { error: "Portfolio impact simulation failed." },
+      {
+        error: "Portfolio impact simulation failed.",
+        code: seamCode ?? "UNKNOWN",
+      },
       { status: 500, headers: NO_STORE_HEADERS },
     );
   }

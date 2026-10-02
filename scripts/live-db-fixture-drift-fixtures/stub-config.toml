@@ -1,0 +1,8 @@
+# Stub config.toml for scripts/live-db-fixture-drift-census.mjs's --self-test. Same shape as
+# supabase/config.toml's [api] block; not a real Supabase project config.
+
+[api]
+enabled = true
+port = 54421
+schemas = ["public", "graphql_public"]
+extra_search_path = ["public", "extensions"]

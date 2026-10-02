@@ -1,13 +1,15 @@
 import asyncio
 import logging
 import os
+import time
+from dataclasses import dataclass
+from functools import partial
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Final
+import ccxt
 from fastapi import APIRouter, HTTPException, Request
-from slowapi import Limiter
-from slowapi.util import get_remote_address
 from models.schemas import ValidateKeyRequest, FetchTradesRequest
-from services.exchange import aclose_exchange, create_exchange, validate_key_permissions, fetch_all_trades, parse_since_ms, fetch_usdt_balance, AUTH_FAILED_DETAIL, RATE_LIMITED_DETAIL, NETWORK_ERROR_DETAIL
+from services.exchange import aclose_exchange, create_exchange, validate_key_permissions, fetch_all_trades, parse_since_ms, fetch_usdt_balance, AUTH_FAILED_DETAIL, RATE_LIMITED_DETAIL, NETWORK_ERROR_DETAIL, SIGN_IN_FAILED_DETAIL, PERMANENT_VALIDATION_ERROR_CODES
 from services.encryption import encrypt_credentials, decrypt_credentials, get_kek, get_kek_version
 from services.sfox_client import SfoxApiError, SFOX_PROD_BASE_URL
 from services.sfox_factory import make_sfox_client
@@ -23,28 +25,150 @@ from services.mt5_client import (
     Mt5Client,
     Mt5ClientError,
     Mt5AccountMismatchError,
-    MT5_REQUEST_TIMEOUT_S,
+    Mt5SessionAbandoned,
+    MT5_VALIDATE_REQUEST_TIMEOUT_S,
+    emit_mt5_stage_event,
+)
+# D-29 — the ONE terminal-lock registry, imported (never re-declared) exactly as the
+# three job call sites import it. `_MT5_LEASE_WAIT_S` is re-bound here as a module
+# global so this path's bound is monkeypatchable/tunable independently of the batch's
+# (which passes wait_s=None and keeps unbounded patient queueing).
+from services.mt5_concurrency import (
+    _MT5_LEASE_WAIT_S,
+    Mt5TerminalBusyError,
+    mt5_terminal_lease,
 )
 from services.mt5_validation import (
+    ACCOUNT_CHANGE_ALGO_DISABLE_OPTION,
     Mt5ValidationError,
     classify_mt5_login_error,
-    is_trade_capable,
-    mt5_probe_request,
+    classify_trade_capability,
+    is_ipc_transport_fault,
+    is_mt5_login_refusal,
     parse_mt5_credentials,
+    terminal_trade_permission_off,
 )
+# 153.6 / PARITY-01 — the ONE login+read+probe body, shared with
+# `services/ingestion/mt5.py`. This router used to carry its own hand-written
+# copy; the three fixes 153.3 landed on that copy never reached the worker's.
+# Importing it is the whole remedy: there is now one body, so a fix cannot land
+# on one path only. `services/mt5_probe.py` is a LEAF over mt5_client +
+# mt5_validation and must never import back into `routers.*` (D-07).
+from services.mt5_probe import mt5_gateway_misconfigured_detail, run_probe
 from services.db import get_supabase, db_execute, one, rows
+# PYAPI-05 — the status-attributability contract. Every deliberate 5xx/424 in
+# this file goes through service_error so the four classes cannot drift apart
+# site-by-site. Contract: analytics-service/docs/STATUS_CONTRACT.md.
+from services.error_contract import RETRY_AFTER_SECONDS, service_error
+# PYAPIFIX2-01 — the FLAT venue-transient shape for the SEVEN classified-upstream
+# sites on /api/validate-key. Deliberately NOT service_error: see the C1 raise
+# block below and the class's own docstring for why an object at body.detail
+# regresses three working wizard codes to UNKNOWN/500 on this seam.
+from services.error_contract import VenueTransientHTTPException
+# PYAPI-03 — the canonical process-wide Limiter. This module used to declare its
+# own ``Limiter(key_func=get_remote_address)``, which (a) keyed on the Railway
+# EDGE ip so both 100/hour budgets were platform-wide (G-10/G-11) and (b) got its
+# own isolated ``memory://`` storage (G-3), so its counters were invisible to
+# ``app.state.limiter``. Same repair, same reasoning as the Phase-19/API-5 fix
+# documented in services/rate_limit.py's own docstring.
+from services.rate_limit import limiter, tenant_or_platform_key
 from pydantic import BaseModel
 
 router = APIRouter(prefix="/api", tags=["exchange"])
 logger = logging.getLogger("quantalyze.analytics")
-limiter = Limiter(key_func=get_remote_address)
 
-# The event-loop bound for the SYNCHRONOUS Mt5Client probe (login+read+order_check
-# run off the loop via asyncio.to_thread). A margin above the client's own rpyc
-# sync_request_timeout so a hung terminal fails its round-trip first and this outer
-# wait_for is the last-resort ceiling — a hung RPyC pipe must NEVER wedge the
-# event loop / healthz (the v1.11 WEDGE-01 failure class, T-135-12).
-_MT5_PROBE_TIMEOUT_S = MT5_REQUEST_TIMEOUT_S + 5.0
+# --------------------------------------------------------------------------- #
+# THE MT5 VALIDATE TIMEOUT CHAIN (153.3 / D-02 + D-03). Nested, and the NESTING is
+# the property — each layer must fire strictly before the layer outside it, so a
+# failure is diagnosed at the innermost layer that can name a cause:
+#
+#   initialize / login IPC   45 000 ms   (MT5's own pipe timeout — a real MT5 code)
+#   rpyc round-trip          55 000 ms   MT5_VALIDATE_REQUEST_TIMEOUT_S
+#   per-stage ceiling        60 000 ms   _MT5_VALIDATE_STAGE_TIMEOUT_S
+#   end-to-end deadline      75 000 ms   _MT5_VALIDATE_DEADLINE_S
+#   + release (OUTSIDE it)   10 000 ms   _MT5_RELEASE_TIMEOUT_S
+#
+# Server worst case = 75 + 10 = 85s; plan 153.3-04 adds a bounded 20s lease wait
+# for 105s total, inside D-26's 120 000ms client ceiling with 15s of margin. The
+# ordering is ASSERTED by tests/test_mt5_validate.py, not assumed.
+# --------------------------------------------------------------------------- #
+
+# The per-call MT5 IPC ceilings for the INTERACTIVE validate chain (D-25). Named
+# constants, not inline literals, so the whole chain is readable in one place and
+# pinnable by the ordering test.
+_MT5_VALIDATE_INITIALIZE_TIMEOUT_MS: Final[int] = int(
+    os.getenv("MT5_VALIDATE_INITIALIZE_TIMEOUT_MS", "45000")
+)
+_MT5_VALIDATE_LOGIN_TIMEOUT_MS: Final[int] = int(
+    os.getenv("MT5_VALIDATE_LOGIN_TIMEOUT_MS", "45000")
+)
+
+# The event-loop bound for ONE stage of the SYNCHRONOUS Mt5Client probe (connect,
+# then login+read+order_check — all run off the loop via asyncio.to_thread). A
+# margin above the client's own rpyc sync_request_timeout so a hung terminal fails
+# its round-trip first and this outer bound is the last-resort ceiling — a hung
+# RPyC pipe must NEVER wedge the event loop / healthz (the v1.11 WEDGE-01 failure
+# class, T-135-12).
+#
+# D-02 — what the `+ 5.0` IS: a DIAGNOSTIC ORDERING MARGIN over the inner rpyc
+# sync_request_timeout, sized only so the inner client timeout fires FIRST and the
+# caller gets a real MT5 error with venue detail instead of a bare
+# asyncio.TimeoutError that names nothing. It is NOT a budget, and it must never be
+# treated as one: the request's budget is the end-to-end deadline below. Widening
+# this margin buys no time and only degrades the diagnosis.
+_MT5_VALIDATE_STAGE_TIMEOUT_S: Final[float] = MT5_VALIDATE_REQUEST_TIMEOUT_S + 5.0
+
+# D-03 — the ONE end-to-end deadline for the whole validate probe. Before 153.3 the
+# stage ceiling was applied SEPARATELY to connect, probe and close, so the honest
+# worst case was ~3x it (~105s) before any terminal contention — a number no client
+# budget was ever set against. One deadline now governs connect + probe together.
+#
+# Arithmetic: it must EXCEED the stage ceiling (60s), so that in the ordinary hung-
+# terminal case a stage fires first and carries venue detail, and this fires only
+# when the stages themselves are somehow outlived. Together with the release bound
+# below (10s) and the bounded lease wait plan 153.3-04 adds (20s), the server worst
+# case is 105s — inside D-26's 120 000ms client ceiling with 15s of margin. D-26 and
+# its seam-budget gate are Phase 153.4's; this file must stay under that ceiling.
+# Env-overridable following the mt5_concurrency.py derived-constant convention, so
+# Phase 155 can retune from measurement without a deploy of new code.
+_MT5_VALIDATE_DEADLINE_S: Final[float] = float(os.getenv("MT5_VALIDATE_DEADLINE_S", "75.0"))
+
+# The bound on releasing our own transport — deliberately SMALL and deliberately
+# OUTSIDE the end-to-end deadline (see the finally block). Mirrors the magnitude of
+# services/exchange.py's _ACLOSE_TIMEOUT_S (EXCHANGE_CLOSE_TIMEOUT_S, 10s): giving
+# up a socket is not a venue round-trip and must never be given a venue-sized
+# budget.
+_MT5_RELEASE_TIMEOUT_S: Final[float] = float(os.getenv("MT5_RELEASE_TIMEOUT_S", "10.0"))
+
+# ⭐ D-24's construction-time ORDERING guard (services/mt5_client.py's __init__)
+# raises a plain ``ValueError`` when ANY MT5 IPC ceiling in ``MT5_IPC_TIMEOUTS_MS``
+# is not strictly below the rpyc request timeout. That inversion is an OPERATOR
+# fault — e.g. someone sets ``MT5_VALIDATE_REQUEST_TIMEOUT_S=40`` while
+# ``MT5_VALIDATE_INITIALIZE_TIMEOUT_MS`` stays at its 45 000 default — and it stays
+# broken until an operator edits an env var. It is therefore SERVICE-PERMANENT
+# (R-1: 500, retryable:false), exactly like the unset-env and malformed-port arms
+# below, and NOT the transient bridge fault its raise SITE makes it look like: it
+# fires inside the connect ``to_thread``, so by TYPE it is indistinguishable there
+# from a refused socket. It is discriminated instead by the guard's own invariant
+# SENTENCE.
+#
+# ⛔ Matching the SENTENCE rather than ``ValueError`` the class is the whole point.
+# An unrelated construction ValueError must keep its EXISTING transient
+# classification rather than being silently re-labelled a permanent operator fault
+# — this arm may only narrow what reaches the 503, never widen what reaches the
+# 500. The coupling to that wording is not assumed on trust: the S-13 test drives
+# the REAL ``Mt5Client`` guard end to end through this router, so a reworded
+# message turns that test RED instead of silently restoring the self-sustaining
+# 503 (A-08/A-25: the breaker trips, expires, re-probes and re-trips forever on a
+# fault no retry can ever clear).
+_MT5_IPC_ORDERING_SENTINEL: Final[str] = "IPC timeout must be strictly below the rpyc"
+
+
+def _is_ipc_timeout_ordering_inversion(exc: BaseException) -> bool:
+    """True iff ``exc`` is D-24's construction-time IPC/rpyc timeout-ordering
+    ``ValueError`` — see ``_MT5_IPC_ORDERING_SENTINEL`` for why the discriminator
+    is the guard's sentence and not the exception class."""
+    return isinstance(exc, ValueError) and _MT5_IPC_ORDERING_SENTINEL in str(exc)
 
 
 class EncryptKeyRequest(BaseModel):
@@ -101,11 +225,23 @@ async def _validate_sfox_key(api_key: str) -> dict[str, Any]:
         # (WORKER_EGRESS_PROXY_URL malformed) — NOT the user's key. It was thrown
         # OUTSIDE the get_balances try below, so it used to escape as an unhandled
         # 500 + Sentry traceback (and pre-fix carried the proxy token in the
-        # message). Fail as a clean 503 — never a 500, never a misleading
-        # AUTH_FAILED that blames the user's credentials. The factory's ValueError
-        # is already secret-free (sfox_factory.py), but do not log it here either.
+        # message). Never a misleading AUTH_FAILED that blames the user's
+        # credentials. The factory's ValueError is already secret-free
+        # (sfox_factory.py), but do not log it here either.
+        #
+        # S-01 / PYAPI-05: this is SERVICE-PERMANENT, not transient. A malformed
+        # env var stays malformed until an operator edits it, so no retry can
+        # ever clear it — the previous 503 made the platform breaker trip,
+        # expire, re-probe and re-trip forever (A-08/A-25). R-1: 500,
+        # retryable:false. See docs/STATUS_CONTRACT.md.
         logger.error("validate_key: sFOX client construction failed (egress proxy misconfig)")
-        raise HTTPException(status_code=503, detail=NETWORK_ERROR_DETAIL)
+        raise service_error(
+            500,
+            "EGRESS_PROXY_MISCONFIGURED",
+            dependency="egress-proxy",
+            retryable=False,
+            detail="The service's outbound proxy is misconfigured. This needs an operator, not a retry.",
+        )
     try:
         await client.get_balances()
         return {"valid": True, "read_only": True}
@@ -120,14 +256,61 @@ async def _validate_sfox_key(api_key: str) -> dict[str, Any]:
             # misleading "check your credentials"). Fails CLOSED (never valid:true);
             # logged at WARNING (not exception) since a throttle is not Sentry-grade.
             logger.warning("validate_key: sFOX rate-limited (status=429)")
-            raise HTTPException(status_code=400, detail=RATE_LIMITED_DETAIL)
+            # PYAPIFIX2-01 (C1). Flat shape, NOT service_error: this reply is
+            # classified by a SUBSTRING CASCADE over body.detail
+            # (wizardErrors.ts:936-1035, reached via analytics-client.ts's
+            # `error.detail ?? …`), so nesting an envelope under `detail` would
+            # stringify to "[object Object]" and regress RATE_LIMITED,
+            # PROBE_FAILED and DDOS_PROTECTION to UNKNOWN/500. Same reasoning,
+            # same shape as main.py's app-global 429 (PYAPI-08): scalar `detail`
+            # byte-unchanged so the TS side needs ZERO change (TS-07 is the
+            # negative obligation confirming it), machine `code` beside it so
+            # 140.3 can retire the cascade. DO NOT "unify" these seven sites onto
+            # service_error.
+            #
+            # ⚠️ STATUS IS 424, REMAPPED FROM 400 BY 140.3-06 (ledger row TS-32).
+            # 424 is CALLER'S EXCHANGE in STATUS_CONTRACT.md §5: the third party
+            # THE CALLER NAMED is at fault. A 400 here said the caller's request
+            # was malformed, which is a false accusation on every one of these
+            # seven arms — the venue failed, not the user.
+            #
+            # The row's stated `BLOCKED-BY: TS-05` named the WRONG row. The remap
+            # is BODY-NEUTRAL: main.py's handler serialises {detail, code,
+            # recoverable} from `verdict.status_code` independent of status, and
+            # the class guard already admits any 400 <= status < 500, so nothing
+            # about the body moves and "[object Object]" is structurally
+            # impossible. The real blocker was TS-35 — `classifyKeyValidationError`
+            # deriving everything from the message string — and it landed in
+            # 140.3-05, which made the wizard read `body.code` first.
+            #
+            # Breaker-safe by construction: 424 is a 4xx, and
+            # src/lib/seam-discriminator.ts classifies it `caller-exchange` /
+            # `counts:false` / `breakerKey:null`, so a Binance outage cannot open
+            # OUR breaker. This flat shape carries no `dependency` — unlike the
+            # nested `service_error(424, …)` form, whose `_validate` arm REQUIRES
+            # a venue slug there — so the two 424 shapes cannot be confused and
+            # the venue vocabulary never collides with SERVICE_DEPENDENCIES.
+            raise VenueTransientHTTPException(
+                status_code=424,
+                code="RATE_LIMITED",
+                detail=RATE_LIMITED_DETAIL,
+                recoverable=True,
+            )
         # 5xx (exchange down) or status==0 (transport/shape blip): an UPSTREAM /
         # transport problem, never the user's key. Same shared NETWORK_ERROR_DETAIL
         # the ccxt NetworkError arm emits so the TS classifier maps it identically.
         # Still fails CLOSED; WARNING-level (mirrors the ccxt transient arms) so a
         # transient blip no longer spams Sentry via logger.exception.
         logger.warning("validate_key: sFOX transient upstream failure (status=%s)", e.status)
-        raise HTTPException(status_code=400, detail=NETWORK_ERROR_DETAIL)
+        # PYAPIFIX2-01 (C2) — see the C1 block above for the shape rationale. The
+        # code matches what the copy already says; vocabulary reused, never
+        # re-minted.
+        raise VenueTransientHTTPException(
+            status_code=424,
+            code="NETWORK_UNAVAILABLE",
+            detail=NETWORK_ERROR_DETAIL,
+            recoverable=True,
+        )
     except ValueError:
         # F5: a token with an embedded control char (\n / \r survive
         # trimCredential, which strips only LEADING/TRAILING whitespace) makes
@@ -145,8 +328,68 @@ async def _validate_sfox_key(api_key: str) -> dict[str, Any]:
         await client.aclose()
 
 
+@dataclass
+class _Mt5ValidateTrace:
+    """The categorical result of ONE validate, carried out to the terminal event.
+
+    153.3 / D-32. Every arm of ``_validate_mt5_key_probe`` writes its verdict
+    here on the way past, and the wrapper below emits it exactly once. A dataclass
+    rather than a ``nonlocal`` because ``_connect_and_probe`` is a nested
+    coroutine and three of the ten categories are produced inside it.
+
+    ``outcome`` deliberately starts at ``"unknown"``: an arm that forgets to set
+    it produces a VISIBLE ``outcome="unknown"`` in the telemetry rather than
+    silently borrowing a neighbouring category and corrupting the counts a
+    Phase-155 histogram is built from.
+    """
+
+    outcome: str = "unknown"
+    terminal_key: str | None = None
+
+
 async def _validate_mt5_key(
     api_key: str, api_secret: str, passphrase: str | None
+) -> dict[str, Any]:
+    """Time the WHOLE validate and emit exactly ONE categorical outcome event.
+
+    153.3 / D-32 + D-27. This is a thin bracket over ``_validate_mt5_key_probe``
+    (which holds the contract — read its docstring). It exists as a separate
+    frame for one structural reason: the "emits on EVERY path" property is then
+    inherited from a ``finally`` at the function boundary rather than re-derived
+    at fifteen raise sites.
+
+    ⚠️ The obvious alternative — hanging the emission off the release's
+    ``finally`` — measures the wrong population. That block lives INSIDE the
+    terminal lease, so it never runs for the two categories that never reach the
+    terminal at all: ``lease_busy`` (refused at the acquisition bound) and
+    ``gateway_unconfigured`` (refused before any client is built). Those are
+    exactly the outcomes an operator most needs counted.
+
+    The event carries the categorical ``outcome`` and ``duration_ms`` only —
+    Phase 155 groups by the former to get a p50/p95 per verdict, which is what
+    turns the PROVISIONAL 45 000/55/60/75/20/10 chain into a measured one.
+    ⛔ No login, password or broker server: see ``emit_mt5_stage_event``'s closed
+    allow-list (T-153.3-23).
+    """
+    trace = _Mt5ValidateTrace()
+    started_at = time.perf_counter()
+    try:
+        return await _validate_mt5_key_probe(api_key, api_secret, passphrase, trace)
+    finally:
+        emit_mt5_stage_event(
+            "validate",
+            started_at,
+            # `ok` is the SUCCESS predicate, not "no exception": every other
+            # category below raises, and a master-password rejection is a correct
+            # verdict but not a successful validation.
+            ok=trace.outcome == "read_only",
+            terminal_key=trace.terminal_key,
+            outcome=trace.outcome,
+        )
+
+
+async def _validate_mt5_key_probe(
+    api_key: str, api_secret: str, passphrase: str | None, trace: _Mt5ValidateTrace
 ) -> dict[str, Any]:
     """Validate an MT5 investor login via the Phase-134 read-only ``Mt5Client``
     (RPyC facade) — the MT5SRC-02 worker half.
@@ -200,80 +443,287 @@ async def _validate_mt5_key(
         # ccxt key emits (-> KEY_AUTH_FAILED, zero TS edits). Both fail CLOSED with
         # a 400, never a 500, never {"valid": true}.
         if e.kind == "wrong_server":
+            trace.outcome = "wrong_server"
             raise HTTPException(status_code=400, detail=MT5_WRONG_SERVER_DETAIL)
+        trace.outcome = "auth"
         raise HTTPException(status_code=400, detail=AUTH_FAILED_DETAIL)
 
     # Gateway config: a missing/malformed MT5_GATEWAY_HOST / MT5_GATEWAY_PORT is a
     # SERVER misconfig, NEVER the user's key — mirror the sfox construction-time
-    # 503 posture. Log secret-free (no login/pw/server values) and fail as a clean
-    # 503, never a 500, never a misleading AUTH_FAILED. (Phase 139 sets these live;
-    # unset now = the server-misconfig path.)
+    # posture. Log secret-free (no login/pw/server values), never a misleading
+    # AUTH_FAILED. (Phase 139 sets these live; unset now = the server-misconfig
+    # path.)
+    #
+    # S-02 / S-03 / PYAPI-05: SERVICE-PERMANENT. Unset env is deterministic — it
+    # is exactly half of A-01, where the 503 tripped the ONE global breaker key
+    # and denied every Deribit user over an MT5 config gap. R-1: 500,
+    # retryable:false. The genuinely transient MT5 arms are S-04/S-05 below.
     host = os.getenv("MT5_GATEWAY_HOST")
     port_raw = os.getenv("MT5_GATEWAY_PORT")
     if not host or not port_raw:
         logger.error("validate_key: MT5 gateway not configured (server misconfig)")
-        raise HTTPException(status_code=503, detail=NETWORK_ERROR_DETAIL)
+        trace.outcome = "gateway_unconfigured"
+        raise service_error(
+            500,
+            "MT5_GATEWAY_UNCONFIGURED",
+            dependency="mt5-gateway",
+            retryable=False,
+            detail="The MetaTrader gateway is not configured. This needs an operator, not a retry.",
+        )
     try:
         port = int(port_raw)
     except ValueError:
         logger.error("validate_key: MT5 gateway port malformed (server misconfig)")
-        raise HTTPException(status_code=503, detail=NETWORK_ERROR_DETAIL)
-
-    # RED-TEAM: Mt5Client.__init__ opens the RPyC socket SYNCHRONOUSLY (a blocking
-    # connect). Run construction — and the close in the finally — OFF the event
-    # loop under a wait_for ceiling; a hung/unreachable gateway connect on the loop
-    # would wedge FastAPI / healthz (the v1.11 WEDGE-01 class), exactly what the
-    # probe body already guards. A connect failure is a server/bridge fault, never
-    # the user's key → 503 (mirrors the missing-config 503 above), never a 500.
-    try:
-        client = await asyncio.wait_for(
-            asyncio.to_thread(lambda: Mt5Client(host, port)),
-            timeout=_MT5_PROBE_TIMEOUT_S,
+        trace.outcome = "gateway_unconfigured"
+        raise service_error(
+            500,
+            "MT5_GATEWAY_UNCONFIGURED",
+            dependency="mt5-gateway",
+            retryable=False,
+            detail="The MetaTrader gateway is not configured. This needs an operator, not a retry.",
         )
-    except asyncio.TimeoutError:
-        logger.warning("validate_key: MT5 gateway connect timed out (bridge hung)")
-        raise HTTPException(status_code=503, detail=NETWORK_ERROR_DETAIL)
-    except Exception:  # noqa: BLE001 — connect failure is server/bridge, not the key
-        logger.warning("validate_key: MT5 gateway connect failed (server/bridge)")
-        raise HTTPException(status_code=503, detail=NETWORK_ERROR_DETAIL)
 
-    try:
+    # D-03 — the probe is ONE bounded unit. Connect and probe were previously timed
+    # SEPARATELY at the same ceiling (and so was the close), so the honest worst case
+    # was ~3x it before any terminal contention — a number no client budget was ever
+    # set against. They now share a single end-to-end deadline; each keeps its own
+    # inner stage ceiling so the inner-fires-first ordering (D-02) survives and a
+    # timeout is still attributable to a STAGE.
+    #
+    # `client` is assigned from inside this coroutine so the finally below can
+    # release it even when the END-TO-END deadline fires mid-probe. Keeping that
+    # release outside the deadline is load-bearing — see the finally's own comment.
+    client: Mt5Client | None = None
+
+    async def _connect_and_probe() -> tuple[
+        dict[str, Any], dict[str, Any], dict[str, Any] | None
+    ]:
+        nonlocal client
+
+        # STAGE 1 — connect.
+        #
+        # RED-TEAM: Mt5Client.__init__ opens the RPyC socket SYNCHRONOUSLY (a
+        # blocking connect). Run construction — and the release in the finally — OFF
+        # the event loop under a ceiling; a hung/unreachable gateway connect on the
+        # loop would wedge FastAPI / healthz (the v1.11 WEDGE-01 class), exactly what
+        # the probe body already guards. A connect failure is a server/bridge fault,
+        # never the user's key.
+        #
+        # D-25: the INTERACTIVE chain is passed per-instance. Raising the module
+        # constants instead would lengthen the SEQUENTIAL worker's chain too and
+        # reopen WEDGE-01 for every job; the worker keeps 30s / 20 000ms.
+        #
+        # S-04 / S-05 / PYAPI-05: these two are the GENUINELY transient MT5 arms —
+        # the gateway restarts on every deploy — so they stay 503. What they gain is
+        # the dependency name (so 140.2 keys the breaker on `mt5-gateway` instead of
+        # the single global `breaker:railway` that made A-01 a platform outage) and
+        # an honest Retry-After from the ONE literal table in
+        # services/error_contract.py.
+        try:
+            connected = await asyncio.wait_for(
+                asyncio.to_thread(
+                    lambda: Mt5Client(
+                        host,
+                        port,
+                        request_timeout_s=MT5_VALIDATE_REQUEST_TIMEOUT_S,
+                        initialize_timeout_ms=_MT5_VALIDATE_INITIALIZE_TIMEOUT_MS,
+                        login_timeout_ms=_MT5_VALIDATE_LOGIN_TIMEOUT_MS,
+                    )
+                ),
+                timeout=_MT5_VALIDATE_STAGE_TIMEOUT_S,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("validate_key: MT5 gateway connect timed out (bridge hung)")
+            trace.outcome = "gateway_unreachable"
+            raise service_error(
+                503,
+                "MT5_GATEWAY_UNREACHABLE",
+                dependency="mt5-gateway",
+                retryable=True,
+                retry_after=RETRY_AFTER_SECONDS["mt5-gateway"],
+                detail="The MetaTrader gateway is not responding. Try again shortly.",
+            )
+        except Mt5SessionAbandoned:
+            # ⭐ WIZFORM-ABANDON / 153.6 B2 (D-15). `Mt5SessionAbandoned` is a
+            # PLAIN `Exception` by design (D-42, so no credential-classify arm can
+            # absorb an operator-side refusal into a user verdict) — which means
+            # it matches NONE of the arms around it and is caught by the broad
+            # `except Exception as connect_err:` below. THE CONSTRUCTION FENCE
+            # RAISES IT FROM INSIDE THIS `to_thread` (D-36 AMENDED (ii): the
+            # lease-occupancy ContextVar, checked pre- AND post-connect), so this
+            # is a live arrival and not a theoretical one.
+            #
+            # ⚠️ THIS IS NOT ARM-REORDERING. The dedicated D-40 arm already in
+            # this file sits on the STAGE-2 probe `try`, a different block
+            # entirely; the connect stage had no arm of its own at all.
+            #
+            # ⛔ WHY 424 AND NEVER THE 503 BELOW — the whole of B2. A 503 carrying
+            # `dependency="mt5-gateway"` is not merely a status: it is one of
+            # exactly THREE sites that COUNT toward `breaker:mt5-gateway`
+            # (`src/lib/resilient-fetch.ts`), where a 424 counts nowhere. An
+            # abandoned construction is OUR OWN zombie thread outliving its lease
+            # — it says nothing whatever about the gateway's health, and the very
+            # next request clears it by taking a fresh lease. Answered 503 it
+            # casts votes to trip the breaker against a healthy gateway, and every
+            # user's MT5 validate is then told "the gateway is not responding, try
+            # again shortly" for a fault no retry of theirs caused.
+            #
+            # ⚠️ NOBODY REACHES THIS ON THE GENUINELY ABANDONED PATH. There the
+            # caller has already unwound, so asyncio discards the zombie's raise
+            # (D-39 — which is why the fence LOGS as well as raising). This arm
+            # exists for the FALSE-POSITIVE path: a legitimate caller that trips
+            # the fence must be told "transient, retry".
+            #
+            # Disposition is byte-mirrored from the stage-2 D-40 arm: the route's
+            # EXISTING transient shape, minting no new user-facing code (153.1
+            # owns that table), `trace.outcome` staying inside the existing
+            # category set — the same discipline the `_is_ipc_timeout_ordering_
+            # inversion` branch below follows. WARNING (not exception) — a fence
+            # refusal is a designed outcome, not a Sentry-grade fault — and it
+            # names the DECISION only: no host, port, terminal key, generation
+            # number or credential (S2 / WIZFORM-03 / T-134-01).
+            logger.warning(
+                "validate_key: MT5 session was abandoned by its own lease "
+                "during connect — classified transient (WIZFORM-ABANDON / B2)"
+            )
+            trace.outcome = "transient"
+            raise VenueTransientHTTPException(
+                status_code=424,
+                code="NETWORK_UNAVAILABLE",
+                detail=NETWORK_ERROR_DETAIL,
+                recoverable=True,
+            )
+        except Exception as connect_err:  # noqa: BLE001 — connect failure is server/bridge, not the key
+            # ⭐ NOT every construction failure is a bridge fault. D-24's ordering
+            # guard fires INSIDE this to_thread, and answering it 503 reports a
+            # PERMANENT misconfiguration as a transient outage: every MT5 validate
+            # then says "the gateway is not responding, try again shortly" while
+            # keying the `mt5-gateway` breaker, which trips, expires, re-probes and
+            # re-trips forever because no retry can edit an env var
+            # (A-08/A-25/C-17). This file already documents the correct treatment
+            # for exactly this class at the sFOX construction arm and at the
+            # unset-env / malformed-port arms above: 500, retryable:false, the same
+            # "needs an operator, not a retry" copy. The guard fires CORRECTLY —
+            # only its translation on the way out was wrong.
+            #
+            # Code and dependency are REUSED, never re-minted (153.1 owns the
+            # user-facing code table), and `outcome` stays inside the existing
+            # category set: an inverted timeout chain IS a gateway that is not
+            # correctly configured, refused before any client exists.
+            if _is_ipc_timeout_ordering_inversion(connect_err):
+                # Names the fault class only — no timeout values, no login,
+                # password or broker server (T-153.3-15).
+                logger.error(
+                    "validate_key: MT5 IPC/rpyc timeout ordering inverted "
+                    "(server misconfig) — permanent, not a bridge outage"
+                )
+                trace.outcome = "gateway_unconfigured"
+                raise service_error(
+                    500,
+                    "MT5_GATEWAY_UNCONFIGURED",
+                    dependency="mt5-gateway",
+                    retryable=False,
+                    detail="The MetaTrader gateway is not configured. This needs an operator, not a retry.",
+                )
+            logger.warning("validate_key: MT5 gateway connect failed (server/bridge)")
+            trace.outcome = "gateway_unreachable"
+            raise service_error(
+                503,
+                "MT5_GATEWAY_UNREACHABLE",
+                dependency="mt5-gateway",
+                retryable=True,
+                retry_after=RETRY_AFTER_SECONDS["mt5-gateway"],
+                detail="The MetaTrader gateway is not responding. Try again shortly.",
+            )
+        # Publish the client to the enclosing scope IMMEDIATELY: from this line on a
+        # fired deadline must still find something to release.
+        client = connected
+
+        # STAGE 2 — login + read + probe.
+        #
         # Mt5Client is SYNCHRONOUS blocking RPyC. Run the login+read+probe body off
-        # the event loop and bound it with a wait_for ceiling so a hung terminal
+        # the event loop and bound it with its own stage ceiling so a hung terminal
         # can never wedge the loop / healthz (WEDGE-01, T-135-12).
-        def _assert_expected_login(info: dict[str, Any]) -> None:
-            # RED-TEAM login bracket, cloned from the worker derive arm (MT5CONC-02):
-            # FastAPI serves validates CONCURRENTLY against the ONE shared terminal,
-            # so a second request's login(...) can switch the terminal onto another
-            # account mid-probe. Without this bracket is_trade_capable() could be
-            # judged against the WRONG account — a master password wrongly accepted
-            # as read-only (the EoP gate T-135-09 defeated), or an investor login
-            # wrongly rejected. STRICT equality on the parsed login; a missing "login"
-            # field FAILS LOUD, never default-matches. A mismatch → the transient
-            # fail-closed arm below (Mt5AccountMismatchError is NOT an Mt5ClientError,
-            # so the classify arm can never absorb it into a verdict).
-            _actual = info.get("login")
-            if _actual != login:
-                raise Mt5AccountMismatchError(login, _actual)
-
-        def _probe() -> tuple[dict[str, Any], dict[str, Any]]:
-            client.login(login, investor_pw, server)  # falsy -> Mt5ClientError
-            info = client.account_info()  # proves auth + read
-            _assert_expected_login(info)  # PRE-probe bracket
-            probe = client.order_check(mt5_probe_request())  # PROBE ONLY
-            _assert_expected_login(client.account_info())  # POST-probe bracket
-            return info, probe
+        # ⭐ 153.6 / PARITY-01. The login+read+probe MECHANICS live in ONE module,
+        # `services/mt5_probe.py`, which `services/ingestion/mt5.py` calls too.
+        # Until this extraction each path carried its own hand-written copy of the
+        # three bodies below, and 153.3 landed three fixes here that never reached
+        # the worker (A1 the terminal short-circuit, A2 the class-only broad arm,
+        # A3 the operator-fault refusal). A fix can no longer land once.
+        #
+        # ⛔ ONLY the mechanics moved. Every DISPOSITION stays here — the
+        # service_error / VenueTransientHTTPException / HTTPException arms below,
+        # and `trace.outcome` — because they are this path's HTTP contract and the
+        # adapter's are deliberately different. So does the bounded lease
+        # (`_MT5_LEASE_WAIT_S`, the interactive bound) and this path's own stage
+        # timeout: both DIVERGE from the worker's on purpose (D-03/D-26) and their
+        # rationale is written at the sites.
+        def _probe() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any] | None]:
+            return run_probe(
+                connected,
+                login=login,
+                investor_pw=investor_pw,
+                server=server,
+                log_prefix="validate_key",
+            )
 
         try:
-            info, probe = await asyncio.wait_for(
-                asyncio.to_thread(_probe), timeout=_MT5_PROBE_TIMEOUT_S
+            return await asyncio.wait_for(
+                asyncio.to_thread(_probe), timeout=_MT5_VALIDATE_STAGE_TIMEOUT_S
             )
         except asyncio.TimeoutError:
             # A hung upstream bridge — transient, not the user's key. Fail CLOSED
             # with the shared NETWORK detail (mirrors the sfox transient arm);
             # WARNING (not exception) so a blip does not spam Sentry.
             logger.warning("validate_key: MT5 probe timed out (upstream bridge hung)")
-            raise HTTPException(status_code=400, detail=NETWORK_ERROR_DETAIL)
+            trace.outcome = "transient"
+            # PYAPIFIX2-01 (C3) — see the C1 block for the shape rationale. This
+            # arm and the two below were found by the BEHAVIOURAL predicate, not
+            # by the consumer list: `_validate_mt5_key` never calls
+            # `validate_key_permissions`, so a call-graph enumeration misses all
+            # three even though they are structurally identical to C2.
+            raise VenueTransientHTTPException(
+                status_code=424,
+                code="NETWORK_UNAVAILABLE",
+                detail=NETWORK_ERROR_DETAIL,
+                recoverable=True,
+            )
+        except Mt5SessionAbandoned:
+            # ⭐ WIZFORM-ABANDON / D-40. `Mt5SessionAbandoned` is a PLAIN
+            # `Exception` by design (D-42, so no credential-classify arm can
+            # absorb an operator fault into a user verdict) — which means it
+            # matches NONE of the arms around it and none of the outer handlers
+            # either. Without this arm it left as an unhandled bodyless 500, and
+            # under STATUS_CONTRACT R-1 a 500 says SERVICE-PERMANENT, "do not
+            # retry". That is the exact inverse of the truth: an abandoned
+            # session is the most retryable condition in this subsystem, because
+            # the next request simply gets a fresh lease.
+            #
+            # ⚠️ NOBODY REACHES THIS ON THE GENUINELY ABANDONED PATH. There the
+            # caller has already unwound, so asyncio discards the zombie's raise
+            # (`_copy_future_state` returns early on a cancelled destination) —
+            # which is why the sink LOGS as well as raising (D-39). This arm
+            # exists for the FALSE-POSITIVE path: a legitimate caller that trips
+            # the fence must be told "transient, retry", never "your key or your
+            # broker server is wrong" and never "permanent".
+            #
+            # Disposition is byte-mirrored from the stage-timeout arm above: the
+            # route's EXISTING transient shape, minting no new user-facing code
+            # (153.1 owns that table). WARNING (not exception) — a fence refusal
+            # is a designed outcome, not a Sentry-grade fault — and it names the
+            # decision only: no host, port, terminal key, generation number or
+            # credential (WIZFORM-03 / T-134-01).
+            logger.warning(
+                "validate_key: MT5 session was abandoned by its own lease "
+                "mid-probe — classified transient (WIZFORM-ABANDON / D-40)"
+            )
+            trace.outcome = "transient"
+            raise VenueTransientHTTPException(
+                status_code=424,
+                code="NETWORK_UNAVAILABLE",
+                detail=NETWORK_ERROR_DETAIL,
+                recoverable=True,
+            )
         except Mt5AccountMismatchError:
             # RED-TEAM: a concurrent validate re-logged the shared terminal onto
             # another account mid-probe — an INFRA/concurrency fault, never the
@@ -283,57 +733,465 @@ async def _validate_mt5_key(
                 "validate_key: MT5 terminal account mismatch mid-probe "
                 "(concurrent validate) — failing closed transient"
             )
-            raise HTTPException(status_code=400, detail=NETWORK_ERROR_DETAIL)
+            trace.outcome = "transient"
+            # PYAPIFIX2-01 (C4) — see the C1 block for the shape rationale.
+            raise VenueTransientHTTPException(
+                status_code=424,
+                code="NETWORK_UNAVAILABLE",
+                detail=NETWORK_ERROR_DETAIL,
+                recoverable=True,
+            )
         except Mt5ClientError as e:
             # Classify via the ONE mt5_validation seam. NEVER log the interpolated
             # remote text (it can carry the scrubbed code only) and never
             # login/pw/server values.
             kind = classify_mt5_login_error(e)
             if kind == "auth":
+                trace.outcome = "auth"
                 raise HTTPException(status_code=400, detail=AUTH_FAILED_DETAIL)
             if kind == "wrong_server":
+                trace.outcome = "wrong_server"
                 raise HTTPException(status_code=400, detail=MT5_WRONG_SERVER_DETAIL)
-            # transient -> fail CLOSED with the shared NETWORK detail (sfox F4
-            # posture: never auth-failed, never valid). WARNING with the scrubbed
-            # code only.
+            # transient. 167-CREDTRUST (D-05, D-07) narrows this tail, and only
+            # this tail, out of the file's nine `NETWORK_UNAVAILABLE` sites. The
+            # other eight (stage timeout, the abandoned-session fence, the
+            # account-mismatch bracket, and the sFOX/ccxt/portfolio arms) are
+            # transport, lease or concurrency faults where no sign-in is
+            # implicated. Their `code=` stays byte-unchanged.
+            #
+            # ⭐ WR-01 — and even here, ONLY A LOGIN-STAGE REFUSAL is a sign-in
+            # failure. `run_probe` runs login → account_info → terminal_info →
+            # order_check → account_info inside this one `try`, so a post-login
+            # read failing (an IPC timeout on `order_check`, say) arrives here
+            # AFTER the credential was accepted. `is_mt5_login_refusal` is the
+            # ONE predicate the holdings poll applies to the same boundary: the
+            # terminal answered `login()` itself falsy AND the code is not one
+            # of the -10000…-10004 IPC-infrastructure codes or the success code
+            # 1. Every other transient keeps the pre-167 answer,
+            # NETWORK_UNAVAILABLE with `recoverable=True`.
+            #
+            # ⭐ D-17 — a login-stage -10005 IS a sign-in refusal and reaches
+            # SIGN_IN_FAILED. D-08 names it as the measured wrong-password
+            # mechanism (a modal login dialog blocking IPC). The classifier call
+            # above cannot pre-empt it: its code-gate answers "transient" for
+            # -10005, which is this tail, and only then does the predicate split
+            # it. The marker is raised only after `initialize()` attached, so a
+            # terminal that is already wedged fails at `initialize()` as a plain
+            # `Mt5ClientError` and keeps NETWORK_UNAVAILABLE.
+            # ⚠️ MERGE NOTE 2026-09-23 (164.6.5 MT5VALIDATEWEDGE integrated): that
+            # already-wedged terminal now answers MT5_TERMINAL_UNRESPONSIVE (500,
+            # not retryable) when its code is -10004/-10005, via the 164.6.5 arm
+            # inside the not-a-refusal branch below. It is still NOT a sign-in
+            # failure, which is what D-17 decides; and it no longer offers the
+            # Retry that D-08 names as the harmful action against a wedged
+            # terminal. Every non-IPC transient keeps NETWORK_UNAVAILABLE.
+            #
+            # WARNING with the scrubbed code only.
+            trace.outcome = "transient"
+            if not is_mt5_login_refusal(e):
+                # 164.6.5 / criterion 5 (D-12/D-13) — an IPC transport fault: OUR OWN
+                # terminal bridge, never the caller's key. `classify_mt5_login_error`
+                # code-gates -10004/-10005 into its "transient" bucket (164.5.4 /
+                # D-02: its three-way contract is pinned and must not grow a fourth
+                # class), so this arm asks the narrower question directly, on the
+                # SAME code tuple, BEFORE the generic transient tail below.
+                #
+                # MEASURED 2026-09-21: a wedged gateway terminal answered -10005
+                # across two retries 45s and 55s apart — one with CORRECT
+                # credentials — and stayed wedged 1h39m. The generic transient copy
+                # below says "try again in a moment", which was false both times: no
+                # retry from the wizard could ever have cleared this. 500,
+                # retryable=False, dependency named — an operator, not a retry,
+                # clears it, following the gateway-unconfigured arm's shape above.
+                # Fails CLOSED and reaches no persistence, like every other arm of
+                # this function.
+                #
+                # ⚠️ MERGE NOTE 2026-09-23 — 164.6.5 integrated with Phase 167
+                # CREDTRUST (shipped first, live in PROD). This arm now sits INSIDE
+                # 167's not-a-login-refusal branch, so a login-stage refusal —
+                # including a login-stage -10005, which 167 D-17 routes to
+                # SIGN_IN_FAILED — never reaches it. It decides only the IPC-coded
+                # faults 167 left on the transport answer: an `initialize()`
+                # failure (where an already-wedged terminal answers, which is what
+                # the measured retries above hit), a login-stage -10004, and a
+                # post-login read timing out. The login-stage -10005 overlap is
+                # recorded in the merge commit body for a founder decision.
+                if is_ipc_transport_fault(e):
+                    # 164.6.5 review round 1 / SFH-08 + WR-06 — LOGGED AT ERROR,
+                    # on the D-15 arm's reasoning below: this is THE SHARED
+                    # TERMINAL SERVING EVERY CLIENT, not one user's refusal, and
+                    # the user's card says "tell us". At WARNING it was no Sentry
+                    # event, and this path does not trigger the heal, so nothing
+                    # reached an operator. The Next-side key routes also page it
+                    # (`OUR_DEFECT_KEY_ERROR_CODES`). Codes only, as before.
+                    # ⛔ CORRECTED 2026-09-25 (164.6.5 review round 2 / R2-SFH-10):
+                    # the sentence above was true for two of the three routes —
+                    # `keys/[id]/rotate-secret` only logged it — and is true for
+                    # all three now that that route captures the same set. So one
+                    # wedged validate is TWO Sentry events (this line and the Next
+                    # capture). Recorded as noise and kept: this one carries the
+                    # IPC code, the Next one the key route the user was on.
+                    logger.error(
+                        "validate_key: MT5 terminal IPC transport fault (code=%s)",
+                        e.code,
+                    )
+                    trace.outcome = "terminal_unresponsive"
+                    # ⛔ CORRECTED 2026-09-25 (164.6.5 review round 1 / WR-05): the
+                    # detail said "This needs an operator, not a retry", which
+                    # asserted permanence. -10004 (bridge not attached) clears on a
+                    # gateway redeploy, -10005 is what this phase's heal recycles,
+                    # and the recycle's own relaunch window answers both. The detail
+                    # now matches the wizard copy: NOT NOW and OURS, and a later
+                    # attempt can succeed. `retryable=False` stands — it describes
+                    # an IMMEDIATE retry, which is the harmful action (167 D-08).
+                    raise service_error(
+                        500,
+                        "MT5_TERMINAL_UNRESPONSIVE",
+                        dependency="mt5-gateway",
+                        retryable=False,
+                        detail=(
+                            "The MetaTrader terminal we use to check this key "
+                            "stopped answering. This is ours to fix: an immediate "
+                            "retry will not help, but a later attempt can succeed."
+                        ),
+                    )
+                logger.warning(
+                    "validate_key: MT5 transient upstream failure, not a "
+                    "login-stage refusal (code=%s)",
+                    e.code,
+                )
+                # PYAPIFIX2-01 (C5, post-login / transport half) — the pre-167
+                # answer, byte-for-byte.
+                raise VenueTransientHTTPException(
+                    status_code=424,
+                    code="NETWORK_UNAVAILABLE",
+                    detail=NETWORK_ERROR_DETAIL,
+                    recoverable=True,
+                )
             logger.warning(
-                "validate_key: MT5 transient upstream failure (code=%s)", e.code
+                "validate_key: MT5 sign-in refused at the login stage (code=%s)",
+                e.code,
             )
-            raise HTTPException(status_code=400, detail=NETWORK_ERROR_DETAIL)
+            # PYAPIFIX2-01 (C5) — see the C1 block for the shape rationale.
+            # ⚠️ `recoverable=False` DIVERGES from the sibling MT5 arms' hardcoded
+            # `recoverable=True` above — deliberately. 167-PATTERNS Pattern
+            # Assignment 5 names the hazard that the wire `recoverable` flag and
+            # the TypeScript-derived Retry (`buildEnvelope`, src/lib/envelope.ts)
+            # can disagree invisibly; here they are made to AGREE. Only a
+            # login-stage refusal reaches this raise: the terminal received the
+            # credential and answered `login()` falsy, either with a sign-in
+            # code (0, -6, …) or with -10005, the modal login dialog a wrong
+            # password raises (D-08, D-17). A retry re-runs the SAME credential
+            # against that terminal, which either refuses it again or puts the
+            # dialog back up, and repeated validate attempts against that one
+            # shared terminal are the operation implicated in wedging and account
+            # eviction (164.6.5 / 164.6.6) — so offering one would be the harmful
+            # action, not merely a useless one (D-08).
+            raise VenueTransientHTTPException(
+                status_code=424,
+                code="SIGN_IN_FAILED",
+                detail=SIGN_IN_FAILED_DETAIL,
+                recoverable=False,
+            )
 
-        if is_trade_capable(info, probe):
-            # Master (trade-capable) login REJECTED — never persisted (the TS
-            # caller only encrypts after valid:true). The EoP gate (T-135-09).
-            raise HTTPException(
-                status_code=400, detail=MT5_MASTER_PASSWORD_DETAIL
+    # ⭐ D-29 — TAKE THE LEASE. Until this line `routers/exchange.py` acquired the
+    # per-terminal lock ZERO times while `job_worker.py` (x2) and
+    # `allocator_positions.py` all took it — the wizard's validate path was the ONE
+    # caller that skipped it. Two concurrent submissions therefore both called
+    # login(...) on the ONE shared Wine terminal and made each OTHER fail via the
+    # mismatch bracket below, instead of queueing (153-EVIDENCE §4).
+    #
+    # ⭐ PLACEMENT IS THE WHOLE POINT. The acquisition wait sits OUTSIDE the
+    # end-to-end deadline: `_MT5_VALIDATE_DEADLINE_S` must start counting when we
+    # HOLD the terminal, not when we start queueing for it, or the two budgets
+    # silently share one number and a queued caller gets a truncated probe. The
+    # release stays INSIDE the lease — the terminal is held until our transport is
+    # given up (the finally's Pitfall-6 block still runs inside this `async with`).
+    #
+    # ⛔ What is capped here is CONCURRENCY, and nothing else — there is no limit on
+    # how many accounts exist. MT5 binds one account per terminal AT A TIME — a
+    # serialization constraint, not a capacity one — so one terminal cycles through
+    # hundreds of accounts across a day (D-29, REVISED 2026-08-08).
+    #
+    # The key MUST be byte-identical to `Mt5Client.terminal_key` (`f"{host}:{port}"`,
+    # mt5_client.py's `terminal_key` property), because that is what the three job
+    # sites key on: a divergent format yields a DIFFERENT Lock object and serializes
+    # nothing (MT5CONC-02 / Pitfall 2). It is derived from the same host/port
+    # resolved above, and BEFORE construction — construction opens the rpyc socket
+    # that races, so the lease must already be held when it happens.
+    terminal_key = f"{host}:{port}"
+    trace.terminal_key = terminal_key
+    # ⭐ D-32 — TIME THE QUEUE WAIT SEPARATELY FROM THE TERMINAL WORK. This is the
+    # measurement nothing in this system has ever had, and the separation is the
+    # whole value: a budget sized off a COMBINED number is wrong for the second
+    # concurrent user by construction (EVIDENCE §4 "Consequence for budgeting") —
+    # user #1's total is a terminal read, user #2's is a terminal read plus user
+    # #1's read, and only a split measurement can tell those apart after the fact.
+    # Emitted on BOTH outcomes: a refusal at the bound is the longest wait there
+    # is, so an acquired-only instrument reports a distribution truncated at
+    # exactly the interesting end.
+    lease_started_at = time.perf_counter()
+    try:
+        async with mt5_terminal_lease(terminal_key, wait_s=_MT5_LEASE_WAIT_S):
+            emit_mt5_stage_event(
+                "lease_wait", lease_started_at, ok=True, terminal_key=terminal_key
             )
+            try:
+                # ⭐ THE ONE END-TO-END DEADLINE (D-03). It bounds connect + probe TOGETHER;
+                # the release in the finally is deliberately NOT inside it (see below).
+                try:
+                    info, probe, terminal = await asyncio.wait_for(
+                        _connect_and_probe(), timeout=_MT5_VALIDATE_DEADLINE_S
+                    )
+                except asyncio.TimeoutError:
+                    # The end-to-end deadline fired — the stages themselves were outlived, so
+                    # no stage can name a cause. Same verdict as a probe-stage timeout (a hung
+                    # terminal, transient, never the user's key) but a DISTINCT warning, so
+                    # the two are separable in Railway logs: a stage timeout means one
+                    # round-trip hung, this means the whole probe did. Names a stage and a
+                    # bound only — no login, password or broker server (T-153.3-15).
+                    logger.warning(
+                        "validate_key: MT5 validate exceeded the end-to-end deadline "
+                        "(%.0fs, connect+probe) — hung terminal",
+                        _MT5_VALIDATE_DEADLINE_S,
+                    )
+                    trace.outcome = "deadline_exceeded"
+                    raise VenueTransientHTTPException(
+                        status_code=424,
+                        code="NETWORK_UNAVAILABLE",
+                        detail=NETWORK_ERROR_DETAIL,
+                        recoverable=True,
+                    )
 
-        # Investor (read-only) login. read_only=True is STRUCTURAL (Mt5Client
-        # exposes no trade surface — the sFOX A1 posture), PLUS the behavioral
-        # investor-vs-master probe above that sfox lacks.
-        return {"valid": True, "read_only": True}
-    finally:
-        # RED-TEAM: bounded, off-loop close. client.close() is blocking RPyC (a hung
-        # Wine shutdown on the loop would wedge FastAPI); mirror aclose_exchange's
-        # mt5 arm. close() swallows its own teardown errors; the wait_for is the
-        # last-resort ceiling. Runs on EVERY path (success, master-reject, auth/
-        # server fail, mismatch, transient/timeout) so the session never leaks.
-        try:
-            await asyncio.wait_for(
-                asyncio.to_thread(client.close), timeout=_MT5_PROBE_TIMEOUT_S
-            )
-        except asyncio.TimeoutError:
-            logger.warning(
-                "validate_key: MT5 client.close() timed out — abandoning session"
-            )
-        except Exception:  # noqa: BLE001 — close must never mask the probe verdict
-            logger.warning(
-                "validate_key: MT5 client.close() failed — abandoning session"
-            )
+                verdict = classify_trade_capability(info, probe, terminal)
+
+                if verdict == "trade_capable":
+                    # Master (trade-capable) login REJECTED — never persisted (the TS
+                    # caller only encrypts after valid:true). The EoP gate (T-135-09).
+                    trace.outcome = "master_rejected"
+                    raise HTTPException(
+                        status_code=400, detail=MT5_MASTER_PASSWORD_DETAIL
+                    )
+
+                if verdict == "undetermined":
+                    # D-31: we CANNOT distinguish investor from master, so we refuse
+                    # rather than stamp read-only. Routed BY CAUSE off the SAME terminal
+                    # dict that produced the verdict (never a re-probe), using only arms
+                    # that already exist — 153.1 owns the user-facing code table.
+                    operator_fault = terminal_trade_permission_off(terminal)
+                    if operator_fault:
+                        # A setting in OUR gateway terminal. No retry can clear it;
+                        # the remedy is an operator changing that setting
+                        # (docs/runbooks/mt5-go-live.md). PERMANENT operator fault.
+                        #
+                        # ⚠️ 161-02: WHICH setting is derived from the terminal
+                        # flags, not assumed. Founder-measured live 2026-08-13, the
+                        # cause is the Expert-Advisors "Allow algorithmic trading"
+                        # option (`Enabled` in [Experts]); MetaQuotes' separate
+                        # default-ON "Disable automatic trading through the external
+                        # Python API" (`Api`, reported as `tradeapi_disabled`) was
+                        # measured OFF at the same moment, and the old copy named it
+                        # to the operator regardless.
+                        # ⛔ CORRECTED 2026-09-25 (164.6.5-06): this comment said
+                        # the gateway re-sets that option off on every account
+                        # change. Only while ACCOUNT_CHANGE_ALGO_DISABLE_OPTION is
+                        # ticked — founder-read UNCHECKED 2026-09-24.
+                        #
+                        # ⭐ 164.6.5 / D-15 — LOGGED AT ERROR, above an ordinary
+                        # verdict (WARNING) and level with the unset-env-var arms
+                        # above. This line means THE SHARED TERMINAL SERVING EVERY
+                        # CLIENT HAS LOST ALGO PERMISSION, and one likely cause is
+                        # validation itself: every validate is an account change,
+                        # so a ticked ACCOUNT_CHANGE_ALGO_DISABLE_OPTION is tripped
+                        # by the very call that observed it. Logging that below a
+                        # missing env var is the severity inversion mt5_relogin's
+                        # WR-01 already corrected for its own verdicts. The setting
+                        # cannot be read directly (it reaches disk only on a clean
+                        # exit), so this consequence IS the check — and it is
+                        # one-way: nothing here writes a terminal option.
+                        # Only the LEVEL and the line changed; the raised fault
+                        # below is byte-for-byte what it was.
+                        logger.error(
+                            "validate_key: MT5 capability undetermined — the shared "
+                            "gateway terminal reports its own trade permission OFF "
+                            "('Allow algorithmic trading' is not in force) for every "
+                            "client. Validation is an account change: if '%s' is "
+                            "ticked, every validate switches algo trading off again. "
+                            "Refusing rather than stamping read-only; needs an "
+                            "operator (docs/runbooks/mt5-go-live.md)",
+                            ACCOUNT_CHANGE_ALGO_DISABLE_OPTION,
+                        )
+                        # Distinct from the env-gap `gateway_unconfigured` above even
+                        # though both answer the same code: this one means the terminal
+                        # ran and refused to classify, which is the D-31 signal Phase
+                        # 155 needs counted on its own.
+                        trace.outcome = "undetermined"
+                        raise service_error(
+                            500,
+                            "MT5_GATEWAY_UNCONFIGURED",
+                            dependency="mt5-gateway",
+                            retryable=False,
+                            # 161-02 / WIZERR-01 — the CAUSE, from the SAME
+                            # terminal dict the verdict was taken from, through
+                            # the ONE builder the worker's raise site also uses.
+                            # The env-gap arms above keep their own sentence:
+                            # they hold no terminal dict, so they have no cause
+                            # to name and saying one would be a guess.
+                            detail=mt5_gateway_misconfigured_detail(terminal),
+                        )
+                    if not operator_fault:
+                        # Terminal unreadable or detached from the trade server — our
+                        # bridge blipping, and it clears on retry. TRANSIENT.
+                        logger.warning(
+                            "validate_key: MT5 capability undetermined (terminal signal "
+                            "unavailable) — refusing rather than stamping read-only"
+                        )
+                        trace.outcome = "transient"
+                        raise VenueTransientHTTPException(
+                            status_code=424,
+                            code="NETWORK_UNAVAILABLE",
+                            detail=NETWORK_ERROR_DETAIL,
+                            recoverable=True,
+                        )
+
+                # Investor (read-only) login — reachable ONLY when the terminal itself
+                # reported connected AND trade-permitting, so the account's refusal is
+                # attributable to the ACCOUNT. read_only=True is STRUCTURAL (Mt5Client
+                # exposes no trade surface — the sFOX A1 posture), PLUS the behavioral
+                # investor-vs-master probe above that sfox lacks.
+                trace.outcome = "read_only"
+                return {"valid": True, "read_only": True}
+            finally:
+                # RED-TEAM: bounded, off-loop RELEASE. Blocking RPyC (a hung teardown on the
+                # loop would wedge FastAPI), so off-loop under its own small ceiling.
+                #
+                # ⭐ D-30 — this RELEASES our transport and does NOT call shutdown().
+                # `mt5linux` serves every rpyc connection from ONE ThreadedServer process
+                # over ONE shared MetaTrader5 instance holding ONE IPC pipe (153-EVIDENCE
+                # §A2 / Correction C-1), so the close() this used to call destroyed that pipe
+                # for every CONCURRENT caller, who then observed `-10004 No IPC connection`.
+                # A per-request shutdown of a shared session is a denial of service against
+                # ourselves. Attach once; release the lease, never the pipe.
+                #
+                # ⛔ Pitfall 6 — this is LEXICALLY OUTSIDE the end-to-end wait_for above, and
+                # must stay there. Wrapping it inside means a deadline fired during the probe
+                # abandons the RPyC session unreleased — the session leak this block exists to
+                # prevent, and a WEDGE-01-class regression. Its bound is therefore the small
+                # release ceiling, never the stage ceiling and never the deadline.
+                #
+                # Runs on EVERY path (success, master-reject, undetermined, auth/server fail,
+                # mismatch, transient/timeout, END-TO-END DEADLINE) so the session never
+                # leaks. `client is None` means the connect stage never produced one — there
+                # is nothing to release, and the same is true of every pre-construction guard
+                # above, which return before this block is ever entered.
+                #
+                # ⭐ RE-CUT 2026-08-11 (153.5 / WIZFORM-ABANDON, finding #6a). The sentence
+                # above stays TRUE and its consequence has changed. `client` is assigned from
+                # INSIDE `_connect_and_probe`, so on a CONNECT-STAGE timeout the assignment
+                # never happens and this block genuinely releases nothing — while the
+                # abandoned `to_thread` kept running and went on to construct an rpyc session
+                # against the gateway's ONE `ThreadedServer` that no path here would ever
+                # close. That was a leak: one orphaned socket per timed-out validate, on
+                # exactly the path that runs when the gateway is already unhealthy.
+                #
+                # It is no longer one. `Mt5Client.__init__` now reads the lease-occupancy
+                # token `asyncio.to_thread` froze into the zombie's thread (D-36 AMENDED (ii))
+                # and refuses a construction whose spawning lease has already released —
+                # PRE-connect (opening nothing at all) or POST-connect, in which case it
+                # disposes the socket it just opened BEFORE raising. So the orphaned
+                # construction now SELF-disposes at the sink, and "the finally releases
+                # nothing" describes a path where there is correctly nothing left to release
+                # rather than a session going unreleased. Pinned end-to-end by
+                # `tests/test_mt5_validate.py::test_a_connect_stage_timeout_leaves_no_rpyc_socket_open`,
+                # whose oracle is the open/close BALANCE (which arm the zombie takes depends
+                # on where its thread was when the bump landed).
+                #
+                # ⛔ THIS BLOCK STILL MUST NOT BE FENCED. `release`/`close`/
+                # `_teardown_transport` are D-41-EXEMPT from the epoch guard precisely so a
+                # stale client can still give up its OWN socket; guarding them would strand
+                # it and reintroduce the very leak this block exists to prevent — the fix
+                # causing the bug it is fixing.
+                #
+                # ⚠️ One window is narrowed, not closed (D-43): a construction that COMPLETES
+                # between the `wait_for` firing and the lease's bump passes both checks and
+                # still has no recipient. No sink-side mechanism can do better without the
+                # caller-side holder RESEARCH §Open Q-1 ruled out.
+                #
+                # ✅ CLOSED by wave 6 / D-35 (2026-08-09). This block once carried a
+                # present-tense residual saying the WORKER path "still reaches" shutdown()
+                # via services/exchange.py's `aclose_exchange` mt5 arm and
+                # services/ingestion/mt5.py. That is no longer true: D-35 deleted the
+                # teardown at the SINK — `Mt5Client.close()` no longer calls
+                # `mt5.shutdown()` — which fixed all three callers with zero call-site
+                # edits. Exactly ONE shutdown() call node now survives, inside
+                # `Mt5Client.restart`, and it is lease-held.
+                # ⚠️ Corrected after 153.3 verification found this comment still asserting
+                # the old state while TODOS.md already recorded it RESOLVED: `a7e88c7d`
+                # updated three sibling sites and missed this one. Behaviour was right,
+                # the record was wrong — which is the more dangerous of the two.
+                if client is not None:
+                    try:
+                        await asyncio.wait_for(
+                            asyncio.to_thread(client.release),
+                            timeout=_MT5_RELEASE_TIMEOUT_S,
+                        )
+                    except asyncio.TimeoutError:
+                        logger.warning(
+                            "validate_key: MT5 client.release() timed out — abandoning session"
+                        )
+                    except Exception:  # noqa: BLE001 — release must never mask the probe verdict
+                        logger.warning(
+                            "validate_key: MT5 client.release() failed — abandoning session"
+                        )
+    except Mt5TerminalBusyError:
+        # The terminal was still held when the INTERACTIVE acquisition bound
+        # expired. We never touched it, so nothing is known about this key — routed
+        # to the EXISTING transient arm, by cause, minting no new code (153.1 owns
+        # the user-facing code table).
+        #
+        # WHY this arm: it is genuinely RECOVERABLE — the terminal frees up — so
+        # "try again" is honest advice rather than a shrug, which is what
+        # WIZFORM-04's "copy names an action" requires of the server leg. And it
+        # leaks NO infrastructure (WIZFORM-03): no terminal key, host, port, queue
+        # depth or wait value reaches the body; the WARNING below names the bound
+        # only, and it is DISTINCT from the deadline/probe warnings so queueing is
+        # separable from hanging in Railway logs.
+        #
+        # 📌 A distinct USER-VISIBLE "waiting for the connection" state — different
+        # from "validating" — plus the long-wait card and `Stop waiting` are
+        # **Phase 153.4's** (D-05 / D-29's UI clause). 153.4 may re-map this arm
+        # onto 153.1's honest `serialized` code once that lands. ⛔ Nothing here
+        # depends on it.
+        logger.warning(
+            "validate_key: MT5 terminal busy — gave up queueing at the %.0fs "
+            "acquisition bound (serialized, not hung; D-29)",
+            _MT5_LEASE_WAIT_S,
+        )
+        # D-32: the refusal is the LONGEST queue wait there is, and it is the one
+        # a bound-tuning decision turns on. Emitted here rather than inside the
+        # `async with` because `Mt5TerminalBusyError` is raised by the lease's
+        # __aenter__ — the body, and therefore the acquired-path emission above,
+        # never runs on this path.
+        emit_mt5_stage_event(
+            "lease_wait",
+            lease_started_at,
+            ok=False,
+            terminal_key=terminal_key,
+            error_class="Mt5TerminalBusyError",
+        )
+        trace.outcome = "lease_busy"
+        raise VenueTransientHTTPException(
+            status_code=424,
+            code="NETWORK_UNAVAILABLE",
+            detail=NETWORK_ERROR_DETAIL,
+            recoverable=True,
+        )
 
 
 @router.post("/validate-key")
-@limiter.limit("100/hour")
+@limiter.limit(
+    "100/hour", key_func=partial(tenant_or_platform_key, scope="validate_key")
+)
 async def validate_key(request: Request, req: ValidateKeyRequest) -> dict[str, Any]:
     """Validate that an API key is read-only and functional.
 
@@ -390,10 +1248,50 @@ async def validate_key(request: Request, req: ValidateKeyRequest) -> dict[str, A
             type(e).__name__,
             e,
         )
-        raise HTTPException(status_code=400, detail="Failed to initialize exchange connection")
+        # B2 / PYAPIFIX-03 (H-2). create_exchange is EXCHANGE_CLASSES.get(), a
+        # dict build, cls(config) and two attribute sets — ZERO network I/O — so
+        # nothing has been sent to the venue when this fires. A non-ValueError
+        # escape is a ccxt signature change, an ImportError on a missing extra or
+        # an OOM: OURS. The shipped 400 told the user their REQUEST was malformed
+        # — a lie they cannot act on — and being a 4xx it meant a plain bug in our
+        # code counted against nothing and paged nobody.
+        #
+        # SERVICE-PERMANENT (R-1): 500, retryable:false, no dependency (140.2 keys
+        # its breaker on that field — SEAMCORE-01), no Retry-After. The same code
+        # and the same copy as B1 (routers/internal.py) and B3
+        # (routers/portfolio.py): one class, one verdict, no drift. The raw
+        # exception stays in the logger.exception above, never in the body.
+        raise service_error(
+            500,
+            "ADAPTER_INIT_FAILED",
+            retryable=False,
+            detail="Something went wrong on our side while opening this connection. Nothing is wrong with your key.",
+        )
 
     try:
         result = await validate_key_permissions(exchange)
+    # S-06 / PYAPI-05 — the SPLIT. services/exchange.py:982-1021 already
+    # classifies every known ccxt error into a stable `error_code`, so a ccxt
+    # exception ESCAPING to here is by definition unclassified — but a `ccxt.*`
+    # escape is still attributable to the VENUE, not to us. Answer 424 (CALLER'S
+    # EXCHANGE): a 4xx, therefore breaker-inert by construction, carrying the
+    # venue name so the UI can say which venue. A 5xx here is C-12 verbatim —
+    # five keys on one dashboard render during a Binance maintenance window
+    # becomes five 5xx and a platform-wide trip. This arm MUST stay above the
+    # generic one.
+    except ccxt.BaseError as e:
+        logger.warning(
+            "validate_key: venue-attributable ccxt escape on %s — %s",
+            req.exchange,
+            type(e).__name__,
+        )
+        raise service_error(
+            424,
+            "EXCHANGE_PROBE_FAILED",
+            dependency=req.exchange,
+            retryable=True,
+            detail="Your exchange did not complete the permission check. This is a problem at the venue — try again shortly.",
+        )
     except Exception as e:  # noqa: BLE001
         logger.exception(
             "validate_key: validate_key_permissions raised on %s — %s: %s",
@@ -401,7 +1299,17 @@ async def validate_key(request: Request, req: ValidateKeyRequest) -> dict[str, A
             type(e).__name__,
             e,
         )
-        raise HTTPException(status_code=500, detail="Key validation failed. Please check your credentials.")
+        # C-16: the shipped copy here was "Key validation failed. Please check
+        # your credentials." — an accusation aimed at the user for OUR
+        # unclassified bug, and one they cannot act on. A non-ccxt escape is
+        # SERVICE-PERMANENT: 500, retryable:false, and copy that names no
+        # credential. The raw exception stays in the log above, never in the body.
+        raise service_error(
+            500,
+            "INTERNAL",
+            retryable=False,
+            detail="Something went wrong on our side while checking this key. Nothing is wrong with your key.",
+        )
     finally:
         try:
             await aclose_exchange(exchange)
@@ -409,19 +1317,69 @@ async def validate_key(request: Request, req: ValidateKeyRequest) -> dict[str, A
             pass
 
     if result["error"]:
-        raise HTTPException(status_code=400, detail=result["error"])
+        # PYAPIFIX2-01 (C6) — the LIVE key-connect collapse, and the site the
+        # whole class is named after. `validate_key_permissions` computes a
+        # stable `error_code` discriminator and this raise used to DISCARD it,
+        # leaving the human sentence as the only carrier. See the C1 block for
+        # why the shape is flat and why service_error is forbidden here.
+        #
+        # The code is carried VERBATIM — no fallback, no route-minted default.
+        # A default here would hand the wizard a fabricated code and hide a real
+        # service-layer bug behind a plausible-looking envelope (CLAUDE.md
+        # Rule 12: fail loud). It is safe because the producer's invariant holds:
+        # every branch of `validate_key_permissions` that sets `error` also sets
+        # `error_code` in the same branch — verified branch-by-branch, and
+        # mechanised as a test so a future branch that breaks it reddens at the
+        # PRODUCER rather than raising here. If it is ever broken anyway, the
+        # exception class's own guard raises a loud ValueError.
+        #
+        # `recoverable` derives from PERMANENT_VALIDATION_ERROR_CODES, which is
+        # an ALLOW-LIST OF PERMANENT: non-membership means "not known to be
+        # permanent", which that constant's contract defines as retryable. So an
+        # unrecognised future code fails SAFE (offers a retry). The code rides
+        # for EVERY verdict here, permanent ones included — that is closing the
+        # site, not absorbing the separate permanent-only gap.
+        raise VenueTransientHTTPException(
+            status_code=424,
+            code=result["error_code"],
+            detail=result["error"],
+            recoverable=result["error_code"] not in PERMANENT_VALIDATION_ERROR_CODES,
+        )
 
-    return {"valid": result["valid"], "read_only": result["read_only"]}
+    # Phase 167.1.2 (D-01): the ccxt success path also carries the venue
+    # account id (None when the venue returned none), so the connect routes can
+    # stamp `api_keys.venue_account_id`. `.get`, never `[...]`: a missing key
+    # is None, never a 500. This is the ONLY place the id leaves the service;
+    # the failure paths above and the sFOX / MT5 returns never carry it.
+    return {
+        "valid": result["valid"],
+        "read_only": result["read_only"],
+        "venue_account_id": result.get("account_id"),
+    }
 
 
 @router.post("/encrypt-key")
-@limiter.limit("100/hour")
+@limiter.limit(
+    "100/hour", key_func=partial(tenant_or_platform_key, scope="encrypt_key")
+)
 async def encrypt_key(request: Request, req: EncryptKeyRequest) -> dict[str, Any]:
     """Encrypt exchange credentials for storage. Returns encrypted fields to store in Supabase."""
     try:
         kek = get_kek()
     except RuntimeError:
-        raise HTTPException(status_code=503, detail="Encryption not configured")
+        # S-07 / PYAPI-05 — C-17 verbatim. A missing or rotated KEK is permanent
+        # until an operator acts, and /api/encrypt-key is the busiest seam
+        # endpoint, so the previous 503 was the self-sustaining-outage shape at
+        # its worst: trip, expire, re-probe, re-trip, forever. R-1: 500,
+        # retryable:false, so it can never feed the breaker.
+        logger.error("encrypt_key: KEK unavailable (encryption not configured)")
+        raise service_error(
+            500,
+            "KEK_UNAVAILABLE",
+            dependency="kek",
+            retryable=False,
+            detail="Credential encryption is not configured. This needs an operator, not a retry.",
+        )
 
     # ==============================================================================
     # MT5 CREDENTIAL-SLOT MAPPING (MT5SRC-02, CONTEXT-locked) — THE ONE CHOKEPOINT
@@ -444,7 +1402,9 @@ async def encrypt_key(request: Request, req: EncryptKeyRequest) -> dict[str, Any
 
 
 @router.post("/fetch-trades")
-@limiter.limit("10/hour")
+@limiter.limit(
+    "10/hour", key_func=partial(tenant_or_platform_key, scope="fetch_trades")
+)
 async def fetch_trades(request: Request, req: FetchTradesRequest) -> dict[str, Any]:
     """Fetch trades from exchange for a strategy using stored encrypted API key."""
     try:

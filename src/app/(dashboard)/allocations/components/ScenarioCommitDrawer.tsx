@@ -123,6 +123,20 @@ export interface ScenarioCommitDrawerProps {
    * back to the prior behaviour; the production composer always supplies it.
    */
   initHoldingsFingerprint?: string | null;
+  /**
+   * Phase 151 AUM-01 — the allocator's MANUALLY-ENTERED portfolio AUM, or
+   * undefined when they never set one. The composer passes its
+   * `sanitizedManualAum`, deliberately NOT `scenarioAum`: a book-mode commit
+   * that never touched the field must omit the key so its audit row stays on
+   * the server-recomputed path (NEW-C18-04) instead of being re-labelled a
+   * client assertion carrying the live-holdings sum.
+   *
+   * Sent as `manual_aum_usd` so a blank-slate commit (no allocator_holdings
+   * rows on the server) can still size its audit row. The value is
+   * CLIENT-ASSERTED: the route bounds it, labels it `client_manual_aum`, and
+   * never lets it outrank a server-verified figure.
+   */
+  manualAumUsd?: number;
 }
 
 interface SubmitResponse {
@@ -178,6 +192,7 @@ export function ScenarioCommitDrawer({
   onSubmitSuccess,
   scenarioAum = 0,
   initHoldingsFingerprint = null,
+  manualAumUsd,
 }: ScenarioCommitDrawerProps) {
   const [state, setState] = useState<SubmitState>({ kind: "idle" });
   // M-0095: keyed by diffKey(d) (stable diff identity), NOT array index, so a
@@ -536,6 +551,15 @@ export function ScenarioCommitDrawer({
           ...(initHoldingsFingerprint !== null && {
             init_holdings_fingerprint: initHoldingsFingerprint,
           }),
+          // Phase 151 AUM-01 — same conditional-spread discipline as the
+          // fingerprint above, for the same reason: adding a key
+          // UNCONDITIONALLY changes the body bytes, and therefore the
+          // idempotency request_hash, for every caller that never sets it
+          // (T-151-21). Absent prop ⇒ absent key ⇒ pre-151 request shape.
+          // The value is a CLIENT-ASSERTED sidecar; the route labels it
+          // `client_manual_aum` in the audit trail and never lets it outrank
+          // the server-recomputed size (NEW-C18-04).
+          ...(manualAumUsd != null && { manual_aum_usd: manualAumUsd }),
         }),
         signal: controller.signal,
       });

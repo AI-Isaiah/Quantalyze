@@ -1,17 +1,55 @@
-import { test, expect } from "@playwright/test";
+import { test, expect, type Page, type Locator } from "./helpers/hydration-guard";
 
 /**
  * Audit 2026-05-07 C-0309: credentials are read from env vars at test
  * time, never committed to the repo. Local devs source from the macOS
  * Keychain via `security find-generic-password -s quantalyze-test -a
- * <role>@quantalyze.test -w`; CI injects them through the existing
- * E2E_TEST_EMAIL / E2E_TEST_PASSWORD pipeline. When the env is not
- * present the authenticated/admin describes skip rather than
- * authenticating with stale committed credentials.
+ * <role>@quantalyze.test -w`. When the env is not present the
+ * authenticated/admin describes skip rather than authenticating with
+ * stale committed credentials.
+ *
+ * 158-05 correction (2026-08-20): the original comment claimed "CI injects
+ * them through the existing E2E_TEST_EMAIL / E2E_TEST_PASSWORD pipeline" —
+ * no such pipeline ever existed in .github/workflows. See the
+ * skipped-by-design decision on the describes below.
  */
 const E2E_EMAIL = process.env.E2E_TEST_EMAIL;
 const E2E_PASSWORD = process.env.E2E_TEST_PASSWORD;
 const HAS_E2E_CREDS = !!E2E_EMAIL && !!E2E_PASSWORD;
+
+/**
+ * Does the browse/discovery table actually have a strategy row?
+ *
+ * ⛔ `isVisible()` does NOT retry — it is a point-in-time sample — while every
+ * call these tests make after it (`getAttribute`, `click`) DOES auto-wait. That
+ * asymmetry is the bug this helper exists to remove.
+ *
+ * MEASURED 2026-09-15, CI run 34968717071 (`e2e-seeded`, 1 of 157 failed, all
+ * three attempts): the browse table rendered, an upstream fetch aborted
+ * (`ECONNRESET`), the table re-rendered EMPTY, and the retrying
+ * `getAttribute()` then burned the test's whole 60 s budget waiting for a row
+ * that `isVisible()` had seen a moment earlier. ⚠️ The
+ * `INTERNAL_API_TOKEN is not configured` proxy warning beside it is NOT the
+ * cause: it appears twice in the GREEN main run at `f901e4da` as well.
+ *
+ * Settling on one of the page's two terminal states first — a row, or the
+ * documented "No strategies" empty state, the same pair the "browse category
+ * page shows strategies without auth" test asserts — makes the branch decision
+ * deterministic. ⛔ It deliberately does NOT weaken the branch it guards: once a
+ * row is reported present, a row that then genuinely vanishes still fails the
+ * caller, because that is real page instability and not a sampling artefact.
+ */
+async function hasStrategyRow(page: Page, firstLink: Locator): Promise<boolean> {
+  await Promise.race([
+    firstLink.waitFor({ state: "visible", timeout: 15_000 }).catch(() => {}),
+    page
+      .locator("text=No strategies")
+      .first()
+      .waitFor({ state: "visible", timeout: 15_000 })
+      .catch(() => {}),
+  ]);
+  return firstLink.isVisible().catch(() => false);
+}
 
 test.describe("Public browsing flow", () => {
   test("landing page links to /browse", async ({ page }) => {
@@ -47,28 +85,78 @@ test.describe("Public browsing flow", () => {
     // First browse to find a strategy ID
     await page.goto("/browse/crypto-sma");
     const firstLink = page.locator("table tbody tr a").first();
-    const hasStrategies = await firstLink.isVisible().catch(() => false);
+    const hasStrategies = await hasStrategyRow(page, firstLink);
 
     if (hasStrategies) {
       const href = await firstLink.getAttribute("href");
       const strategyId = href?.split("/").pop();
+      // Captured BEFORE navigating — this locator is on the browse page and
+      // goes stale the moment we leave it.
+      const rowName = (await firstLink.textContent())?.trim();
       if (strategyId) {
         const response = await page.goto(`/factsheet/${strategyId}`);
         expect(response?.status()).toBeLessThan(400);
-        await expect(page.locator("text=Verified by Quantalyze")).toBeVisible();
+        // 158-05 (OPS-03 orphan repair, 2026-08-20): this test previously
+        // asserted `text=Verified by Quantalyze`, which only renders once a
+        // strategy's analytics are COMPLETE. The first row of the shared,
+        // polluted test DB is whatever sorts first — often a still-computing
+        // seed — so that assertion was a global-DB-state bet (the PR #654
+        // lesson: assert what THIS test itself established). What this test
+        // establishes is only "the id I clicked resolves to a factsheet
+        // page", so assert the factsheet shell that renders in BOTH the
+        // computing and complete states: the "Institutional Factsheet"
+        // masthead and a non-empty strategy h1.
+        await expect(
+          page.locator("text=Institutional Factsheet").first(),
+        ).toBeVisible();
+
+        // 158-REVIEW WR-12: the masthead check above is fine; the h1 check was
+        // not. `not.toBeEmpty()` passes for ANY non-empty text node — a
+        // skeleton placeholder, an em-dash, a generic page title — so it could
+        // not fail for a realistic regression of "the factsheet resolved the
+        // strategy I clicked", which is the only thing this test establishes.
+        //
+        // Assert that identity instead. It is falsifiable and still free of the
+        // global-DB-state bet the old `Verified by Quantalyze` assertion made:
+        // the browse row's link TEXT is the strategy name verbatim
+        // (StrategyTable renders `{s.name}` as the anchor body) and the
+        // factsheet masthead h1 renders `payload.strategyName`, so the two are
+        // directly comparable for whichever row happened to sort first.
+        expect(
+          rowName,
+          "the browse row link had no text, so the factsheet's identity cannot be asserted — if StrategyTable stopped rendering the strategy name as its anchor body, fix this test's capture rather than dropping the assertion",
+        ).toBeTruthy();
+        await expect(
+          page.locator("h1").first(),
+          `factsheet h1 does not name the strategy this test navigated to ("${rowName}") — the id resolved to a page, but not to THAT strategy`,
+        ).toContainText(rowName!);
       }
     }
   });
 });
 
+/**
+ * SKIPPED BY DESIGN — recorded decision, phase 158 / OPS-03 (2026-08-20).
+ *
+ * E2E_TEST_EMAIL / E2E_TEST_PASSWORD exist NOWHERE in .github/workflows —
+ * the "CI: injected via GitHub Actions secrets" claim below was never true
+ * at HEAD, and 158-05 deliberately does NOT provision them: the in-repo
+ * pattern for authenticated e2e is the seedTestAllocator helper
+ * (e2e/helpers/seed-test-project.ts), which mints a throwaway user per run
+ * instead of depending on a long-lived shared credential. This describe
+ * (and "Admin flows" below) therefore self-skips VISIBLY everywhere; the
+ * anon "Public browsing flow" above is this spec's executable coverage.
+ * Authenticated coverage of the same surfaces lives in the seeded specs
+ * (wizard-resume, my-strategies, csv-upload-flow, …).
+ */
 test.describe("Authenticated flows", () => {
   test.beforeEach(async ({ page }) => {
     test.skip(
       !HAS_E2E_CREDS,
-      "set E2E_TEST_EMAIL and E2E_TEST_PASSWORD before running this spec " +
-        "(local: source from macOS Keychain `security find-generic-password " +
-        "-s quantalyze-test -a <role>@quantalyze.test -w`; CI: injected via " +
-        "GitHub Actions secrets)",
+      "skipped-by-design (158/OPS-03, 2026-08-20): E2E_TEST_EMAIL / " +
+        "E2E_TEST_PASSWORD are not provisioned in CI and never will be for " +
+        "this spec — authed e2e coverage uses the seedTestAllocator pattern " +
+        "instead. Set both env vars locally only for a manual run.",
     );
 
     // Login with test account — credentials sourced from env, never
@@ -102,7 +190,7 @@ test.describe("Authenticated flows", () => {
   test("strategy detail shows hero metrics", async ({ page }) => {
     await page.goto("/discovery/crypto-sma");
     const firstLink = page.locator("table tbody tr a").first();
-    const hasStrategies = await firstLink.isVisible().catch(() => false);
+    const hasStrategies = await hasStrategyRow(page, firstLink);
 
     if (hasStrategies) {
       await firstLink.click();
@@ -129,14 +217,19 @@ test.describe("Authenticated flows", () => {
   });
 });
 
+// SKIPPED BY DESIGN — same recorded decision as "Authenticated flows" above
+// (phase 158 / OPS-03, 2026-08-20): no E2E_TEST_* secrets exist in CI and
+// none are provisioned; admin-authed coverage uses seedTestAllocator with
+// `isAdmin: true` (see e2e/sfox-badge.spec.ts) when a spec needs it.
 test.describe("Admin flows", () => {
   test.beforeEach(async ({ page }) => {
     test.skip(
       !HAS_E2E_CREDS,
-      "set E2E_TEST_EMAIL and E2E_TEST_PASSWORD before running this spec " +
-        "(local: source from macOS Keychain `security find-generic-password " +
-        "-s quantalyze-test -a <role>@quantalyze.test -w`; CI: injected via " +
-        "GitHub Actions secrets)",
+      "skipped-by-design (158/OPS-03, 2026-08-20): E2E_TEST_EMAIL / " +
+        "E2E_TEST_PASSWORD are not provisioned in CI and never will be for " +
+        "this spec — admin-authed e2e coverage uses seedTestAllocator({ " +
+        "isAdmin: true }) instead. Set both env vars locally only for a " +
+        "manual run.",
     );
 
     // Login with test account — credentials sourced from env, never

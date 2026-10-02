@@ -1,0 +1,7 @@
+{
+  "_comment": "RED — cron-no-observation. The job IS scheduled (jobCount 1) and produced no run at all in three hours. An hourly job with three empty hours is the failure, not a quiet success.",
+  "now": "2026-09-05T12:00:00Z",
+  "ttl": "6 hours",
+  "jobCount": 1,
+  "rows": []
+}

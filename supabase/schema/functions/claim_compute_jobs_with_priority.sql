@@ -2,9 +2,9 @@
 -- Canonical current body of this function, replayed from supabase/migrations/**.
 -- Regenerate with `npm run schema:functions`. See tech-debt #2.
 
--- source migration: 20260428190907_claim_dedupe_partition_keys.sql
+-- source migration: 20260927120000_claim_pair_pre_rank_exclusion.sql
 -- --------------------------------------------------------------------------
--- STEP 2: claim_compute_jobs_with_priority with partition-key dedupe
+-- claim_compute_jobs_with_priority, 2-arg, re-based from 20260428190907 STEP 2
 -- --------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION claim_compute_jobs_with_priority(
   p_batch_size INTEGER,
@@ -39,6 +39,42 @@ BEGIN
     FROM compute_jobs
    WHERE priority IN ('normal','high')
      AND status IN ('pending', 'failed_retry')
+     -- CLAIMPAIR PROBE EXCLUSION BEGIN (D-08, D-04 amendment)
+     -- Phase 164.9.3 review round 1 (WR-01): a failed_retry row that the
+     -- pre-rank block below holds back (its (kind, partition) holds a
+     -- pending row) is not claimable this tick, so it must not trip the
+     -- throttle either. Counted, it held back a `low` pending twin and every
+     -- other due `low` job while never being claimed itself: a silent,
+     -- permanent wedge. Review round 3 (founder decision D-11): the same
+     -- holds for a failed_retry the C39 guard in `deduped` holds back beside
+     -- a running or done_pending_children row of the same (kind, partition),
+     -- so every sibling test also names those two statuses. Four partitions,
+     -- one negated disjunction. The intro carve-out gates the pending sibling
+     -- only, as in the pre-rank block; C39's strategy clause has none, so a
+     -- running or done_pending_children sibling holds an intro retry too.
+     AND NOT (status = 'failed_retry' AND (
+           (portfolio_id IS NOT NULL AND EXISTS (
+             SELECT 1 FROM compute_jobs p
+              WHERE p.kind         = compute_jobs.kind
+                AND p.portfolio_id = compute_jobs.portfolio_id
+                AND p.status       IN ('pending', 'running', 'done_pending_children')))
+        OR (strategy_id IS NOT NULL AND EXISTS (
+             SELECT 1 FROM compute_jobs p
+              WHERE p.kind        = compute_jobs.kind
+                AND p.strategy_id = compute_jobs.strategy_id
+                AND (p.status IN ('running', 'done_pending_children')
+                     OR (p.status = 'pending' AND compute_jobs.kind <> 'compute_intro_snapshot'))))
+        OR (allocator_id IS NOT NULL AND EXISTS (
+             SELECT 1 FROM compute_jobs p
+              WHERE p.kind         = compute_jobs.kind
+                AND p.allocator_id = compute_jobs.allocator_id
+                AND p.status       IN ('pending', 'running', 'done_pending_children')))
+        OR (api_key_id IS NOT NULL AND EXISTS (
+             SELECT 1 FROM compute_jobs p
+              WHERE p.kind       = compute_jobs.kind
+                AND p.api_key_id = compute_jobs.api_key_id
+                AND p.status     IN ('pending', 'running', 'done_pending_children')))))
+     -- CLAIMPAIR PROBE EXCLUSION END
      AND next_attempt_at <= now();
 
   -- Atomic claim with priority precedence + throttle guard + partition dedupe.
@@ -74,6 +110,35 @@ BEGIN
     WHERE status IN ('pending', 'failed_retry')
       AND next_attempt_at <= now()
       AND (v_high_pending = 0 OR priority IN ('normal','high'))
+      -- CLAIMPAIR PRE-RANK EXCLUSION BEGIN (D-08)
+      -- Phase 164.9.3: a failed_retry row whose (kind, partition) already
+      -- holds a pending row is not a candidate. Applied here, BEFORE
+      -- row_number(), never in `deduped`: excluded after ranking, the retry
+      -- would still rank first and take its pending twin down with it (a
+      -- silent, permanent partition wedge). One clause per partition, each
+      -- matching its compute_jobs_one_inflight_per_kind_* index predicate;
+      -- that strategy index excludes compute_intro_snapshot, so this does too.
+      AND (portfolio_id IS NULL OR status <> 'failed_retry' OR NOT EXISTS (
+        SELECT 1 FROM compute_jobs x
+         WHERE x.kind         = compute_jobs.kind
+           AND x.portfolio_id = compute_jobs.portfolio_id
+           AND x.status       = 'pending'))
+      AND (strategy_id IS NULL OR status <> 'failed_retry' OR kind = 'compute_intro_snapshot' OR NOT EXISTS (
+        SELECT 1 FROM compute_jobs x
+         WHERE x.kind        = compute_jobs.kind
+           AND x.strategy_id = compute_jobs.strategy_id
+           AND x.status      = 'pending'))
+      AND (allocator_id IS NULL OR status <> 'failed_retry' OR NOT EXISTS (
+        SELECT 1 FROM compute_jobs x
+         WHERE x.kind         = compute_jobs.kind
+           AND x.allocator_id = compute_jobs.allocator_id
+           AND x.status       = 'pending'))
+      AND (api_key_id IS NULL OR status <> 'failed_retry' OR NOT EXISTS (
+        SELECT 1 FROM compute_jobs x
+         WHERE x.kind       = compute_jobs.kind
+           AND x.api_key_id = compute_jobs.api_key_id
+           AND x.status     = 'pending'))
+      -- CLAIMPAIR PRE-RANK EXCLUSION END
   ),
   deduped AS (
     SELECT id FROM ranked
@@ -81,6 +146,32 @@ BEGIN
       AND (strategy_id  IS NULL OR rn_s = 1)
       AND (allocator_id IS NULL OR rn_a = 1)
       AND (api_key_id   IS NULL OR rn_k = 1)
+      -- CLAIMPAIR C39 PORT BEGIN (from claim_compute_jobs)
+      AND (portfolio_id IS NULL OR NOT EXISTS (
+        SELECT 1 FROM compute_jobs x
+         WHERE x.kind         = ranked.kind
+           AND x.portfolio_id = ranked.portfolio_id
+           AND x.status IN ('running', 'done_pending_children')
+      ))
+      AND (strategy_id IS NULL OR NOT EXISTS (
+        SELECT 1 FROM compute_jobs x
+         WHERE x.kind        = ranked.kind
+           AND x.strategy_id = ranked.strategy_id
+           AND x.status IN ('running', 'done_pending_children')
+      ))
+      AND (allocator_id IS NULL OR NOT EXISTS (
+        SELECT 1 FROM compute_jobs x
+         WHERE x.kind         = ranked.kind
+           AND x.allocator_id = ranked.allocator_id
+           AND x.status IN ('running', 'done_pending_children')
+      ))
+      AND (api_key_id IS NULL OR NOT EXISTS (
+        SELECT 1 FROM compute_jobs x
+         WHERE x.kind       = ranked.kind
+           AND x.api_key_id = ranked.api_key_id
+           AND x.status IN ('running', 'done_pending_children')
+      ))
+      -- CLAIMPAIR C39 PORT END
   )
   UPDATE compute_jobs
      SET status     = 'running',
@@ -100,8 +191,11 @@ BEGIN
 END;
 $$;
 
--- source migration: 20260719073701_claim_kind_filter.sql
-CREATE FUNCTION claim_compute_jobs_with_priority(
+-- source migration: 20260927120000_claim_pair_pre_rank_exclusion.sql
+-- --------------------------------------------------------------------------
+-- claim_compute_jobs_with_priority, 5-arg, re-based from 20260719073701
+-- --------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION claim_compute_jobs_with_priority(
   p_batch_size INTEGER,
   p_worker_id  TEXT,
   p_unified_backbone_active BOOLEAN DEFAULT NULL,
@@ -146,6 +240,42 @@ BEGIN
       FROM compute_jobs
      WHERE priority IN ('normal','high')
        AND status IN ('pending', 'failed_retry')
+       -- CLAIMPAIR PROBE EXCLUSION BEGIN (D-08, D-04 amendment)
+       -- Phase 164.9.3 review round 1 (WR-01): a failed_retry row that the
+       -- pre-rank block below holds back (its (kind, partition) holds a
+       -- pending row) is not claimable this tick, so it must not trip the
+       -- throttle either. Counted, it held back a `low` pending twin and every
+       -- other due `low` job while never being claimed itself: a silent,
+       -- permanent wedge. Review round 3 (founder decision D-11): the same
+       -- holds for a failed_retry the C39 guard in `deduped` holds back beside
+       -- a running or done_pending_children row of the same (kind, partition),
+       -- so every sibling test also names those two statuses. Four partitions,
+       -- one negated disjunction. The intro carve-out gates the pending sibling
+       -- only, as in the pre-rank block; C39's strategy clause has none, so a
+       -- running or done_pending_children sibling holds an intro retry too.
+       AND NOT (status = 'failed_retry' AND (
+             (portfolio_id IS NOT NULL AND EXISTS (
+               SELECT 1 FROM compute_jobs p
+                WHERE p.kind         = compute_jobs.kind
+                  AND p.portfolio_id = compute_jobs.portfolio_id
+                  AND p.status       IN ('pending', 'running', 'done_pending_children')))
+          OR (strategy_id IS NOT NULL AND EXISTS (
+               SELECT 1 FROM compute_jobs p
+                WHERE p.kind        = compute_jobs.kind
+                  AND p.strategy_id = compute_jobs.strategy_id
+                  AND (p.status IN ('running', 'done_pending_children')
+                       OR (p.status = 'pending' AND compute_jobs.kind <> 'compute_intro_snapshot'))))
+          OR (allocator_id IS NOT NULL AND EXISTS (
+               SELECT 1 FROM compute_jobs p
+                WHERE p.kind         = compute_jobs.kind
+                  AND p.allocator_id = compute_jobs.allocator_id
+                  AND p.status       IN ('pending', 'running', 'done_pending_children')))
+          OR (api_key_id IS NOT NULL AND EXISTS (
+               SELECT 1 FROM compute_jobs p
+                WHERE p.kind       = compute_jobs.kind
+                  AND p.api_key_id = compute_jobs.api_key_id
+                  AND p.status     IN ('pending', 'running', 'done_pending_children')))))
+       -- CLAIMPAIR PROBE EXCLUSION END
        AND next_attempt_at <= now()
        AND (p_kind_include IS NULL OR kind = ANY(p_kind_include))
        AND (p_kind_exclude IS NULL OR NOT (kind = ANY(p_kind_exclude)))
@@ -192,6 +322,35 @@ BEGIN
       -- FLIPRETRY-02: kind filter. NULL/NULL => byte-identical to prod today.
       AND (p_kind_include IS NULL OR kind = ANY(p_kind_include))
       AND (p_kind_exclude IS NULL OR NOT (kind = ANY(p_kind_exclude)))
+      -- CLAIMPAIR PRE-RANK EXCLUSION BEGIN (D-08)
+      -- Phase 164.9.3: a failed_retry row whose (kind, partition) already
+      -- holds a pending row is not a candidate. Applied here, BEFORE
+      -- row_number(), never in `deduped`: excluded after ranking, the retry
+      -- would still rank first and take its pending twin down with it (a
+      -- silent, permanent partition wedge). One clause per partition, each
+      -- matching its compute_jobs_one_inflight_per_kind_* index predicate;
+      -- that strategy index excludes compute_intro_snapshot, so this does too.
+      AND (portfolio_id IS NULL OR status <> 'failed_retry' OR NOT EXISTS (
+        SELECT 1 FROM compute_jobs x
+         WHERE x.kind         = compute_jobs.kind
+           AND x.portfolio_id = compute_jobs.portfolio_id
+           AND x.status       = 'pending'))
+      AND (strategy_id IS NULL OR status <> 'failed_retry' OR kind = 'compute_intro_snapshot' OR NOT EXISTS (
+        SELECT 1 FROM compute_jobs x
+         WHERE x.kind        = compute_jobs.kind
+           AND x.strategy_id = compute_jobs.strategy_id
+           AND x.status      = 'pending'))
+      AND (allocator_id IS NULL OR status <> 'failed_retry' OR NOT EXISTS (
+        SELECT 1 FROM compute_jobs x
+         WHERE x.kind         = compute_jobs.kind
+           AND x.allocator_id = compute_jobs.allocator_id
+           AND x.status       = 'pending'))
+      AND (api_key_id IS NULL OR status <> 'failed_retry' OR NOT EXISTS (
+        SELECT 1 FROM compute_jobs x
+         WHERE x.kind       = compute_jobs.kind
+           AND x.api_key_id = compute_jobs.api_key_id
+           AND x.status     = 'pending'))
+      -- CLAIMPAIR PRE-RANK EXCLUSION END
   ),
   deduped AS (
     SELECT id FROM ranked

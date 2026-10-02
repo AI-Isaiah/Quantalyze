@@ -36,6 +36,19 @@ export interface ErrorEnvelope {
   debug_context: string[];
   correlation_id: string;
   recoverable: boolean;
+  /**
+   * 140.3-09 / SEAMUX-06 — the advertised wait in SECONDS, when the failure
+   * carried one (an upstream `Retry-After`, or a breaker's cooldown TTL).
+   *
+   * Added under the same additive-optional contract as `cause` above: older
+   * callers and consumers that predate this field continue to work unchanged —
+   * the renderer skips it when absent. Absence means "no wait was advertised",
+   * never "zero", so a surface can never name a duration it did not receive
+   * (TRAP-3). Snake_case matches every other multi-word field on this envelope;
+   * the wizard-side context field it is sourced from is camelCase, matching its
+   * six siblings there.
+   */
+  retry_after_seconds?: number;
 }
 
 const RECOVERABLE_ACTIONS: ReadonlySet<WizardErrorAction> = new Set([
@@ -51,6 +64,10 @@ const RECOVERABLE_ACTIONS: ReadonlySet<WizardErrorAction> = new Set([
  *   cause → cause          (Phase 21 — was being silently dropped)
  *   fix[] → debug_context
  *   recoverable = any action in RECOVERABLE_ACTIONS
+ *   context.retryAfterSeconds → retry_after_seconds   (140.3-09 — SECONDS, and
+ *     carried verbatim: no clamp, no default, no unit change. A caller that
+ *     supplies nothing gets an envelope with no wait, which is what every
+ *     pre-140.3-09 caller supplies.)
  *
  * formatKeyError() falls through to the UNKNOWN entry when the code is
  * missing or invalid, so this function never returns null/undefined.
@@ -69,5 +86,6 @@ export function buildEnvelope(
     debug_context: copy.fix,
     correlation_id,
     recoverable: copy.actions.some((a) => RECOVERABLE_ACTIONS.has(a)),
+    retry_after_seconds: context?.retryAfterSeconds,
   };
 }

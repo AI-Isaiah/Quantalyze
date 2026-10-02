@@ -17,7 +17,7 @@
  *          n<10 / constant / non-finite series) → var/cvar null.
  *       2. A numerically-CONSTANT series with n>=60 (float-residue variance
  *          ~1e-37 that an exact `=== 0` would miss) → var/cvar null, detected
- *          via the SAME relative-scale guard `scenario-benchmark.ts` uses.
+ *          via the SAME shared floor (`@/lib/return-stats`) `scenario-benchmark.ts` uses.
  *     VaR/CVaR are computed on `portfolioDaily.map(d => d.value)` with NO
  *     leverage multiplier — leverage is ALREADY baked into
  *     `portfolio_daily_returns` via `w·L·r` in `computeScenario` (re-applying
@@ -25,12 +25,13 @@
  *     linearly, so 2x uniform leverage ~doubles VaR/CVaR automatically.
  *
  *   - β-propagated shock (STRESS-01) — `projectedImpact = β_portfolio · shock`,
- *     where `β_portfolio = computeScenarioBenchmark(portfolioDaily, btcDaily).beta`
- *     over the BTC inner-join INTERSECTION (never a zero-filled union). We reuse
- *     `computeScenarioBenchmark` directly so we inherit its relative-scale
- *     degeneracy guard — we do NOT call `computeAlphaBeta` directly (it
- *     fabricates a finite β ~2 on a numerically-constant benchmark via float
- *     residue passing its `varB > 0` branch). A null β ⇒ null impact ⇒ "—". A
+ *     where `β_portfolio = computeScenarioBenchmark(portfolioDaily, btcCloses).beta`
+ *     over the pairs of the ONE Scenario pairing function, `pairScenarioWithBtc`
+ *     (Phase 169.4 D-68: the engine's rule on BTC's 7-day calendar, never a
+ *     zero-filled union). We reuse `computeScenarioBenchmark` directly so the
+ *     pairing and the beta have ONE site (its `computeAlphaBeta` answers a constant benchmark with a null
+ *     β since Phase 166.2's D7; it used to answer β = 0). A null β ⇒ null
+ *     impact ⇒ "—". A
  *     near-market-neutral book (cov ≈ 0 ⇒ β ≈ 0) ⇒ |impact| ≈ 0, NOT the full
  *     shock — the load-bearing success-criterion behavior.
  *
@@ -39,19 +40,20 @@
  * Never flip the sign.
  *
  * The two-N trap: `varN` (the VaR window = the scenario overlap,
- * `portfolioDaily.length`) and `betaN` (the β-shock window = the BTC inner-join
+ * `portfolioDaily.length`) and `betaN` (the β-shock window = the BTC paired
  * overlap, which can be STRICTLY smaller) are tracked as two distinct fields.
  * Conflating them is a misrepresentation bug.
  */
 
 import { computeVaR, computeExpectedShortfall } from "@/lib/portfolio-stats";
-import { mean, type DailyPoint } from "@/lib/portfolio-math-utils";
-import { computeScenarioBenchmark } from "./scenario-benchmark";
+import type { DailyPoint } from "@/lib/portfolio-math-utils";
+import { dispersion } from "@/lib/return-stats";
+import { computeScenarioBenchmark, type BtcCloses } from "./scenario-benchmark";
 
 export interface ScenarioStress {
   /** VaR window overlap (the scenario N = `portfolioDaily.length`). */
   varN: number;
-  /** β-shock window overlap (the BTC inner-join N; can be strictly smaller). */
+  /** β-shock window overlap (the BTC paired N; can be strictly smaller). */
   betaN: number;
   /** CAPM β cov(p,b)/var(b) over the BTC overlap. `null` on degeneracy. */
   beta: number | null;
@@ -80,7 +82,7 @@ export const VAR_CONFIDENCE_LABEL = `${Math.round(VAR_CONFIDENCE * 100)}%`;
 
 /**
  * Compute the stress / VaR result over the already-leveraged scenario daily
- * returns + the BTC factor series.
+ * returns + the BTC factor closes.
  *
  * Each field is null-safe, so this can run unconditionally; the section gates
  * RENDER on `evaluateSampleFloor(varN / betaN, SAMPLE_FLOOR_OVERLAPPING_DAYS)`
@@ -89,7 +91,8 @@ export const VAR_CONFIDENCE_LABEL = `${Math.round(VAR_CONFIDENCE * 100)}%`;
  *
  * @param portfolioDaily  Already-leveraged `portfolio_daily_returns` (`[]` when
  *                        the engine suppresses a degenerate scenario).
- * @param btcDaily        The BTC factor daily-return series (the shock factor).
+ * @param btcCloses       The BTC factor closes from `/api/benchmark/btc/prices`
+ *                        (the shock factor), or null when unavailable.
  * @param opts.shock      Factor shock magnitude (default −0.30 — "BTC −30%").
  *
  * VaR/CVaR confidence is NOT an opt: it is locked to `VAR_CONFIDENCE` (0.95) so
@@ -99,7 +102,7 @@ export const VAR_CONFIDENCE_LABEL = `${Math.round(VAR_CONFIDENCE * 100)}%`;
  */
 export function computeScenarioStress(
   portfolioDaily: DailyPoint[],
-  btcDaily: DailyPoint[],
+  btcCloses: Pick<BtcCloses, "prices" | "dropped"> | null,
   opts?: { shock?: number },
 ): ScenarioStress {
   const shock = opts?.shock ?? -0.3;
@@ -112,30 +115,31 @@ export function computeScenarioStress(
   const { var: var_, cvar } = computeVarPath(portfolioDaily);
 
   // ── β-shock path (STRESS-01) — REUSE the β source, never re-derive ──
-  // computeScenarioBenchmark already inner-joins, computes cov/var via the
-  // golden-tested computeAlphaBeta, AND null-guards the constant-benchmark
-  // degeneracy via its relative-scale test. Call it ONCE and read both fields
-  // off the single result: `.n` IS the inner-join overlap (the BTC-overlap N =
-  // betaN) and `.beta` is the CAPM β. (Previously this also called
-  // innerJoinByDate separately just to count the overlap — a second, redundant
-  // inner-join over the same two series. betaN === bench.n by construction:
-  // computeScenarioBenchmark sets n = innerJoinByDate(...).p.length.)
-  const bench = computeScenarioBenchmark(portfolioDaily, btcDaily);
+  // computeScenarioBenchmark already pairs (through `pairScenarioWithBtc`, the
+  // one Scenario pairing function, Phase 169.4 D-68) and computes cov/var via the
+  // golden-tested computeAlphaBeta, which answers the constant-benchmark
+  // degeneracy (the shared floor) with a null beta. Call it ONCE and read both fields
+  // off the single result: `.n` IS the paired overlap (the BTC-overlap N =
+  // betaN) and `.beta` is the CAPM β. betaN === bench.n by construction:
+  // computeScenarioBenchmark sets n = pairScenarioWithBtc(...).p.length.
+  const bench = computeScenarioBenchmark(portfolioDaily, btcCloses);
   const betaN = bench.n;
   // Finite-aware short-circuit on the β path — mirror computeVarPath's guard for
-  // the SECOND (factor) axis. A NaN/Infinity injected through btcDaily defeats
-  // computeScenarioBenchmark's relative-scale degeneracy test (the float-residue
-  // guard short-circuits on a tiny std, not on NaN: Math.sqrt(NaN) <= x is
-  // false), so it falls through to computeAlphaBeta, whose `varB > 0 ? : 0`
-  // branch returns a FABRICATED finite β = 0 (not NaN, not null) for a
-  // contaminated factor series → a fabricated projectedImpact = 0, the exact
-  // false-confidence the "fully null-safe" contract forbids. A non-finite
-  // contaminant anywhere in the factor feed makes it untrustworthy, so surface
-  // null β ⇒ null impact ("—"). Checked on the raw btcDaily values (no second
-  // inner-join — the dedupe keeps computeScenarioBenchmark the sole join site).
-  const btcIsFinite = btcDaily.every((d) => Number.isFinite(d.value));
+  // the SECOND (factor) axis. Before Phase 166.2's review round 1 (D7), a
+  // NaN/Infinity injected through the BTC input reached computeAlphaBeta, which
+  // answered the shared beta's null with a FABRICATED finite β = 0 → a
+  // fabricated projectedImpact = 0. The shared beta and computeAlphaBeta now
+  // answer a non-finite leg inside the overlap with null themselves; this check
+  // stays because it is broader: a non-finite contaminant ANYWHERE in the
+  // factor feed, inside the overlap or not, makes it untrustworthy, so surface
+  // null β ⇒ null impact ("—"). Checked on the raw closes (no second pairing:
+  // computeScenarioBenchmark stays the sole pairing site). The closes route and
+  // `parseBtcCloses` already refuse a non-finite close; this guard keeps the
+  // lib honest for a caller that bypasses them.
+  const btcIsFinite =
+    btcCloses !== null && btcCloses.prices.every((p) => Number.isFinite(p.close));
   const beta = btcIsFinite ? bench.beta : null;
-  // null β (degenerate / constant BTC / below n<2 overlap / non-finite factor)
+  // null β (no BTC / degenerate / constant BTC / below n<2 overlap / non-finite factor)
   // ⇒ null impact ⇒ "—".
   const projectedImpact = beta === null ? null : beta * shock;
 
@@ -159,23 +163,27 @@ function computeVarPath(
   // 1b. Finite-aware short-circuit — honor the "fully null-safe" contract for a
   // NaN/Infinity injected DIRECTLY through this public signature, independent of
   // the upstream `computeScenario` producer. A non-finite contaminant defeats the
-  // relative-scale guard below (NaN <= NaN is false, so it would NOT short-circuit)
+  // shared-floor guard below (NaN <= NaN is false, so it would NOT short-circuit)
   // and reaches `computeVaR`, whose `sort((a,b) => a - b)` returns NaN for any pair
   // involving the contaminant → an undefined ordering / corrupted (possibly
   // non-NaN-but-wrong) quantile that the section would render as a confident,
   // fabricated number. Surface null instead so no fabricated value can escape.
   if (!values.every(Number.isFinite)) return NULL_VAR;
 
-  // 2. Relative-scale degeneracy guard (the relative-scale degeneracy guard in scenario-benchmark.ts).
-  // A numerically-constant n>=60 window leaves a float-residue variance (~1e-37)
-  // that an exact `=== 0` would miss, letting computeVaR return a meaningless
-  // (constant) quantile that the section would render as a fabricated number.
-  // The honest test is: the series' own spread (std) is negligible relative to
-  // its level → surface null so the UI renders "—".
-  const meanSeries = mean(values);
-  const varSeries = mean(values.map((x) => (x - meanSeries) ** 2));
-  const seriesIsDegenerate =
-    Math.sqrt(varSeries) <= 1e-12 * (Math.abs(meanSeries) + 1e-12);
+  // 2. Degeneracy guard: the shared floor of `@/lib/return-stats` (Phase 166.1
+  // D-17), the same one scenario-benchmark.ts uses.
+  // A numerically-constant n>=60 window leaves a float-residue variance (~1e-37),
+  // and a compounding-NAV constant yield a spread of about 1e-16, that an exact
+  // `=== 0` would miss, letting computeVaR return a meaningless (constant)
+  // quantile that the section would render as a fabricated number. The honest
+  // test is: the series' own spread (std) is float residue,
+  // `std <= 1e-12 * max(1, |mean|)` → surface null so the UI renders "—".
+  // `max(1, |mean|)` matters: the residue of a compounding NAV is about 1e-16
+  // ABSOLUTE whatever the yield, and the floor this file carried before scaled
+  // with `|mean|` alone, so it missed daily 1e-5, daily 1e-4 and APYs up to 3%
+  // (measured 2026-09-26).
+  // The shared `dispersion` (SFH-M7) reports a residue sd as exactly 0.
+  const seriesIsDegenerate = dispersion(values, 0).sd === 0;
   if (seriesIsDegenerate) return NULL_VAR;
 
   // 3. Non-empty, non-constant series → the floor-quantile VaR + tail-mean CVaR.

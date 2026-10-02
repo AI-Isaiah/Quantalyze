@@ -1,5 +1,6 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import {
+  ValidateKeyResponseSchema,
   EnqueueComputeJobResponseSchema,
   EncryptKeyResponseSchema,
   GetUserComputeJobsRowSchema,
@@ -7,6 +8,8 @@ import {
   TickJobsResponseSchema,
   BridgeFitLabelSchema,
   BridgeResponseSchema,
+  LivePermissionsSchema,
+  KeyPermissionsPayloadSchema,
 } from "./analytics-schemas";
 
 /**
@@ -206,7 +209,7 @@ describe("EncryptKeyResponseSchema (envelope-encryption contract)", () => {
  *  - .strict() rejects unknown fields (added column = schema bump)
  *  - last_error is z.null() (redaction-layer regression trips parse)
  *  - status enum is fixed at 6 values (drift = parse failure)
- *  - error_kind enum is transient/permanent/unknown (or null)
+ *  - error_kind enum is transient/permanent/unknown/orphaned (or null)
  *  - exchange enum is binance/okx/bybit (or null)
  *  - attempts non-negative, max_attempts positive, trade_count non-negative
  */
@@ -323,9 +326,10 @@ describe("GetUserComputeJobsRowSchema", () => {
   });
 
   it("rejects unknown error_kind", () => {
-    // The RPC's error_kind is constrained to transient/permanent/unknown.
-    // A future write path emitting "timeout" would slip past untyped
-    // consumers; the schema flags it.
+    // The RPC's error_kind is constrained to transient/permanent/unknown/
+    // orphaned ('orphaned' added by mig 20260826140000, and pinned against the
+    // SQL CHECK by check-zod-db-check-parity.test.ts). A future write path
+    // emitting "timeout" would slip past untyped consumers; the schema flags it.
     const result = GetUserComputeJobsRowSchema.safeParse({
       ...valid,
       error_kind: "timeout",
@@ -474,6 +478,18 @@ describe("BridgeResponseSchema", () => {
     expect(result.success).toBe(false);
   });
 
+  // 166.1 D7 (founder 2026-09-26) / round-1 SFH HIGH-2: the Python bridge
+  // emits None for a delta whose either side does not exist (a leg whose
+  // returns do not vary). It must parse as null, not fail the whole response.
+  it("accepts a null sharpe_delta, dd_delta and corr_delta", () => {
+    const parsed = BridgeResponseSchema.parse({
+      candidates: [{ ...VALID_CANDIDATE, sharpe_delta: null, dd_delta: null, corr_delta: null }],
+    });
+    expect(parsed.candidates[0].sharpe_delta).toBeNull();
+    expect(parsed.candidates[0].dd_delta).toBeNull();
+    expect(parsed.candidates[0].corr_delta).toBeNull();
+  });
+
   it("rejects when sharpe_delta is a string (no numeric coercion)", () => {
     // Python returning "0.1" instead of 0.1 must fail loud, not coerce.
     const result = BridgeResponseSchema.safeParse({
@@ -506,5 +522,200 @@ describe("BridgeResponseSchema", () => {
     expect(parsed.status).toBe("ok");
     expect(parsed.portfolio_id).toBe("pf-1");
     expect(parsed.underperformer_strategy_id).toBe("strat-z");
+  });
+});
+
+/**
+ * [140.3-03 / SEAMUX-07] LivePermissionsSchema — the PUBLISH GATE's contract.
+ *
+ * This schema is not a display contract. Two call sites turn this body into a
+ * decision about whether a money-bearing key may be published as
+ * read-only-verified, and both used to read it through an unchecked `as` cast
+ * that rejected only on an explicit `=== true`. A 2xx `{}` therefore left every
+ * scope `undefined`, every gate passed, and the draft finalised.
+ *
+ * So the assertions below are about ABSENCE and MISTYPING, not about the happy
+ * path: `read` / `trade` / `withdraw` must be UNPARSEABLE when missing, because
+ * absence is exactly the drift that publishes a write-capable key. Every fixture
+ * is hand-typed here; nothing is imported from a call site.
+ */
+describe("[140.3-03 / SEAMUX-07] LivePermissionsSchema", () => {
+  const WELL_FORMED_READ_ONLY = {
+    read: true,
+    trade: false,
+    withdraw: false,
+    probe_error: false,
+  };
+
+  it("accepts the well-formed read-only triple — the case that must still PUBLISH", () => {
+    const parsed = LivePermissionsSchema.parse(WELL_FORMED_READ_ONLY);
+    expect(parsed.read).toBe(true);
+    expect(parsed.trade).toBe(false);
+    expect(parsed.withdraw).toBe(false);
+    expect(parsed.probe_error).toBe(false);
+  });
+
+  it("accepts a body with probe_error OMITTED — its absence already means 'no probe error'", () => {
+    const parsed = LivePermissionsSchema.parse({
+      read: true,
+      trade: false,
+      withdraw: false,
+    });
+    expect(parsed.probe_error).toBeUndefined();
+  });
+
+  it("REJECTS an empty 2xx object — the shape that published a write-capable key", () => {
+    expect(LivePermissionsSchema.safeParse({}).success).toBe(false);
+  });
+
+  it.each([["read"], ["trade"], ["withdraw"]])(
+    "REJECTS a body missing %s — absence must never read as 'not granted'",
+    (field) => {
+      const body: Record<string, unknown> = { ...WELL_FORMED_READ_ONLY };
+      delete body[field];
+      const result = LivePermissionsSchema.safeParse(body);
+      expect(
+        result.success,
+        `A missing \`${field}\` must fail the parse. If it parses, the gate ` +
+          `reads \`undefined\`, \`undefined === true\` is false, and a key ` +
+          `holding that scope publishes as read-only-verified.`,
+      ).toBe(false);
+    },
+  );
+
+  it("REJECTS a renamed scope field (trade → can_trade) rather than defaulting it", () => {
+    const result = LivePermissionsSchema.safeParse({
+      read: true,
+      can_trade: true,
+      withdraw: false,
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it.each([["true"], [1], [null], [{}]])(
+    "REJECTS a non-boolean trade (%p) — no coercion at a security boundary",
+    (value) => {
+      const result = LivePermissionsSchema.safeParse({
+        ...WELL_FORMED_READ_ONLY,
+        trade: value,
+      });
+      expect(result.success).toBe(false);
+    },
+  );
+
+  it("STRIPS unknown extra fields instead of passing them through", () => {
+    const parsed = LivePermissionsSchema.parse({
+      ...WELL_FORMED_READ_ONLY,
+      detected_at: "2026-07-27T00:00:00Z",
+      future_field: "whatever",
+    }) as Record<string, unknown>;
+    expect(parsed.future_field).toBeUndefined();
+    expect(parsed.detected_at).toBeUndefined();
+  });
+});
+
+describe("[140.3-03 / SEAMUX-07] KeyPermissionsPayloadSchema", () => {
+  const WELL_FORMED = {
+    read: true,
+    trade: false,
+    withdraw: false,
+    probe_error: false,
+    detected_at: "2026-07-27T00:00:00Z",
+  };
+
+  it("accepts the badge payload and FORWARDS detected_at", () => {
+    const parsed = KeyPermissionsPayloadSchema.parse(WELL_FORMED);
+    expect(parsed.detected_at).toBe("2026-07-27T00:00:00Z");
+    expect(parsed.read).toBe(true);
+  });
+
+  it("inherits the scope requirement — a body missing `trade` is REJECTED here too", () => {
+    const { trade: _omit, ...withoutTrade } = WELL_FORMED;
+    expect(KeyPermissionsPayloadSchema.safeParse(withoutTrade).success).toBe(
+      false,
+    );
+  });
+
+  it("REJECTS an empty 2xx object", () => {
+    expect(KeyPermissionsPayloadSchema.safeParse({}).success).toBe(false);
+  });
+
+  it("REJECTS a body without detected_at — every emitter arm sets it, so its absence is drift", () => {
+    const { detected_at: _omit, ...withoutStamp } = WELL_FORMED;
+    expect(KeyPermissionsPayloadSchema.safeParse(withoutStamp).success).toBe(
+      false,
+    );
+  });
+});
+
+/**
+ * 167.1.2 REVIEW IN-02 / SF-M6 — `venue_account_id` FAILS SOFT.
+ *
+ * WHY THIS MATTERS. The id is an optional enrichment of a successful
+ * validation: the service's contract is "a missing id is None and never fails
+ * validation". The field used to refuse a blank or over-128-character id by
+ * throwing, which failed the whole parse and so the whole connect, for a key
+ * that had just validated. Now an id the field cannot accept becomes null (the
+ * key connects unstamped, as for a venue that reports no id), the rest of the
+ * response is kept, and a warning names the issue code, never the value. A
+ * blank must still never be stored: it is non-NULL to the venue-identity
+ * unique index and would collapse two accounts into one, so blank becomes
+ * null, not "".
+ */
+describe("ValidateKeyResponseSchema.venue_account_id fails soft", () => {
+  const base = { valid: true, read_only: true };
+
+  // 167.1.2 REVIEW-R2 SF2-M1 — a refused id is a CONTRACT BREAK with the
+  // service (its `_normalise` never sends blank, over-long or non-string), and
+  // the key connects without its duplicate-account identity. So it is reported
+  // at `console.error`, the level the seam's other contract break
+  // (`parseResponse` in analytics-client.ts) uses, never at `warn`. The
+  // `warn` spy stays so a revert to `warn` reds here. The line carries the zod
+  // issue codes only: the value is
+  // an account identifier, and a number or an over-long string must not reach
+  // the log in any form.
+  it.each([
+    ["129 characters", "9".repeat(129)],
+    ["whitespace only", "   "],
+    ["empty", ""],
+    ["a number", 100000001],
+  ])("an id that is %s becomes null, the validation still parses, and the break is logged at error", (_name, id) => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const parsed = ValidateKeyResponseSchema.parse({ ...base, venue_account_id: id });
+      expect(parsed.valid).toBe(true);
+      expect(parsed.read_only).toBe(true);
+      expect(parsed.venue_account_id).toBeNull();
+      expect(error).toHaveBeenCalledTimes(1);
+      expect(warn).not.toHaveBeenCalled();
+      const logged = JSON.stringify(error.mock.calls);
+      expect(logged).toContain("venue_account_id");
+      if (String(id).trim() !== "") {
+        expect(logged).not.toContain(String(id));
+      }
+    } finally {
+      warn.mockRestore();
+      error.mockRestore();
+    }
+  });
+
+  it("keeps a well-formed id, trimmed, and logs nothing", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      expect(
+        ValidateKeyResponseSchema.parse({ ...base, venue_account_id: " 100000001 " })
+          .venue_account_id,
+      ).toBe("100000001");
+      expect(ValidateKeyResponseSchema.parse({ ...base, venue_account_id: null }).venue_account_id)
+        .toBeNull();
+      expect(ValidateKeyResponseSchema.parse(base).venue_account_id).toBeUndefined();
+      expect(warn).not.toHaveBeenCalled();
+      expect(error).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+      error.mockRestore();
+    }
   });
 });

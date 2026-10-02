@@ -96,7 +96,41 @@ const eslintConfig = defineConfig([
       //     without failing CI.
       "quantalyze/no-rem-less-clamp": "error",
       "quantalyze/no-raw-font-px": "error",
+      // SEAM-01 (Phase 140) — ban a raw fetch() of the analytics service base
+      // URL outside src/lib/resilient-fetch.ts. The core owns the per-call-site
+      // timeout budget and the shared breaker:railway circuit breaker; a raw
+      // fetch has neither, so it can hold a function slot to the ceiling and
+      // keep hammering a deployment the breaker has already judged down.
+      //
+      // Clean baseline, PROVEN rather than assumed: after waves 1-3 the
+      // whole-repo scan for the env var returns comment-only hits plus the four
+      // allowlisted files below, so "error" costs nothing today and fails CI by
+      // construction on a tenth seam. This is the ONLY mechanism that keeps
+      // SEAM-01 true after the merge — the third seam existed for months
+      // because routing through the client was a convention, not a mechanism.
+      "quantalyze/no-raw-analytics-fetch": "error",
     },
+  },
+  // SEAM-01 allowlist — the CLOSED set of files that may legitimately hold the
+  // analytics base URL and fetch it directly. FOUR paths, and adding a fifth is
+  // the wrong fix for a lint failure: a new violation means a new seam call
+  // site, which belongs in the core (threat T-140-26). Every entry corresponds
+  // to the core itself or to a documented SEAM_EXCLUSIONS row in
+  // src/lib/resilient-fetch.ts, which carries the per-file reasoning.
+  {
+    files: [
+      // The core itself — the only legal home for the base URL.
+      "src/lib/resilient-fetch.ts",
+      // Bespoke SSE/heartbeat route with client-abort propagation the core does
+      // not model. Pins its own maxDuration.
+      "src/app/api/debug-key-flow/**",
+      // Health warmers. These must NOT consume breaker failure budget (a cold
+      // /health probe failing IS the normal case) and must NOT be blocked by an
+      // open breaker, because a successful /health is the recovery signal.
+      "src/app/api/cron/warm-analytics/**",
+      "src/lib/warmup-analytics.ts",
+    ],
+    rules: { "quantalyze/no-raw-analytics-fetch": "off" },
   },
   // DS-04 hard gate on the proven-clean new token/primitive surface. The
   // design-tokens dir has ZERO `text-[NNpx]` / `fontSize:'NNpx'` sites today
@@ -105,6 +139,64 @@ const eslintConfig = defineConfig([
   {
     files: ["src/lib/design-tokens/**"],
     rules: { "quantalyze/no-raw-font-px": "error" },
+  },
+  // SEAMRIM-11 (Phase 140.4) — ban an awaited PostgREST read destructured for
+  // `data`/`count` without binding `error`. supabase-js resolves a failed read
+  // AS A VALUE, so an unchecked destructure is indistinguishable from a
+  // genuinely empty table; coerced through `?? 0` / `?? []` it becomes a
+  // measurement the product never took (C-3).
+  //
+  // SCOPED, NOT big-bang — the same register as no-raw-font-px above, and for
+  // the same reason. The repo-wide baseline is DIRTY, and the population is
+  // DEFINITION-DEPENDENT: four honest measurements disagree because they
+  // measured different things, so the number is meaningless without its
+  // predicate.
+  //   -  32 — the review/synthesis: object-destructure, `src/app/api/**` ONLY.
+  //   -  73 — the pattern-mapper: object-destructure that never reads `.error`,
+  //           repo-wide (minus 2 verified false positives).
+  //   - 139 — the researcher: 372 total read sites − 233 checked
+  //           (125 reads + 14 silent writes).
+  //   - 155 sites / 75 files — THIS RULE's own predicate, measured at the
+  //           140.4 tree over `src/**/*.{ts,tsx}`: an AWAITED PostgREST call
+  //           (`.from()`/`.rpc()`, storage excluded) destructured for a `data`
+  //           or `count` KEY with no `error` KEY, in EITHER the object form or
+  //           the `Promise.all` ARRAY form, not terminated by `.throwOnError()`.
+  //           Higher than the mapper's 73 chiefly because it also sees the
+  //           array form and counts each unchecked member separately.
+  // A repo-wide `error` would red-CI the whole tree on a class Phase 140.4 is
+  // not scoped to close. So: `error` on the surface a plan has actually PROVEN
+  // clean, RATCHETED outward as later phases convert files.
+  //
+  // The glob is ONE file today, and which file was decided by measurement, not
+  // by assumption. Plans 140.4-01 and 140.4-02 each converted one file:
+  //   - 140.4-01 → src/app/api/admin/strategy-review/route.ts — the rule
+  //     reports 0 sites. Its six-member Promise.all binds `error` on every
+  //     member, so the ratchet is real teeth on a real array-form surface.
+  //   - 140.4-02 → SyncPreviewStep.tsx — ADMITTED (140.4-16 / WR-02). It was
+  //     held out on a measurement that this phase's OWN later plan falsified,
+  //     and the paragraph recording the hold-out outlived the reason for it.
+  //     The text here used to read: "the rule reports 1 site (:521, `const {
+  //     data: existing } = await supabase.from("strategy_analytics")…`) … it
+  //     joins the glob when that read is converted." Plan 140.4-12 converted
+  //     exactly that read, in this same phase (`SyncPreviewStep.tsx` now binds
+  //     `error` there), and nobody came back to advance the ratchet — the same
+  //     plan-12/plan-13 hand-off hole that left `SEAM_MISCONFIGURED`
+  //     unreachable, occurring a second time. Re-measured at HEAD before
+  //     widening:
+  //
+  //       $ npx eslint --rule '{"quantalyze/no-unchecked-supabase-read":"error"}' \
+  //           "src/app/(dashboard)/strategies/new/wizard/steps/SyncPreviewStep.tsx"
+  //       (no output — 0 violations, exit 0)
+  //
+  //     ⚠️ THE MEASUREMENT IS THE ENTRY CRITERION, NOT THE COMMENT. Re-run the
+  //     command above before adding a file here; a paragraph asserting a count
+  //     is exactly what went stale last time.
+  {
+    files: [
+      "src/app/api/admin/strategy-review/route.ts",
+      "src/app/(dashboard)/strategies/new/wizard/steps/SyncPreviewStep.tsx",
+    ],
+    rules: { "quantalyze/no-unchecked-supabase-read": "error" },
   },
   // Phase 52 (v1.4) strangler ratchet — per-surface / per-file no-raw-font-px
   // ERROR for the allocator-journey surfaces 52-02..06 migrated to the fluid

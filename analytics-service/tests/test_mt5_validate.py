@@ -29,9 +29,16 @@ Regression gates — WHY each case matters (Rule 9):
   - fail-CLOSED + HONEST on transient/timeout (F4): a hung bridge or an
     unrecognized error maps to the shared NETWORK_ERROR_DETAIL — a 400 that fails
     CLOSED (never {"valid": true}) and never blames the credentials.
-  - server-misconfig is a 503, never the user's key: missing MT5_GATEWAY_HOST/PORT
-    is OUR fault, logged secret-free.
-  - close() on EVERY path after construction: the terminal session must never leak.
+  - server-misconfig is OUR fault, never the user's key: missing
+    MT5_GATEWAY_HOST/PORT answers a PERMANENT 500 (PYAPI-05 R-1 — a config gap no
+    retry can clear must never feed the breaker; see docs/STATUS_CONTRACT.md
+    S-02/S-03), logged secret-free.
+  - release() on EVERY path after construction: the terminal session must never
+    leak — INCLUDING when the end-to-end deadline fires (RESEARCH Pitfall 6). And
+    it must be release(), never close() (153.3 / D-30): close() calls
+    mt5.shutdown(), which on the shared single-process mt5linux gateway destroys
+    the IPC pipe for every CONCURRENT caller (`-10004`) — a per-request denial of
+    service against ourselves.
   - ccxt path untouched: a binance request must still flow through create_exchange
     -> validate_key_permissions — pinned so branch placement can't perturb ccxt.
   - grep-gate invariant: `order_send(` must never appear in the router source (the
@@ -39,21 +46,58 @@ Regression gates — WHY each case matters (Rule 9):
 """
 from __future__ import annotations
 
+import ast
 import asyncio
+import io
+import json
+import logging
 import pathlib
+import re
 import sys
+import threading
+import time
+import tokenize
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import HTTPException
+from structlog.testing import capture_logs
 
 from services.closed_sets import (
     MT5_DISABLED_DETAIL,
     MT5_MASTER_PASSWORD_DETAIL,
     MT5_WRONG_SERVER_DETAIL,
 )
-from services.exchange import AUTH_FAILED_DETAIL, NETWORK_ERROR_DETAIL
-from services.mt5_client import Mt5ClientError
+from services.exchange import AUTH_FAILED_DETAIL, NETWORK_ERROR_DETAIL, SIGN_IN_FAILED_DETAIL
+from services.mt5_client import (
+    MT5_REQUEST_TIMEOUT_S,
+    MT5_VALIDATE_REQUEST_TIMEOUT_S,
+    Mt5ClientError,
+    Mt5LoginRefusedError,
+)
+from services import mt5_concurrency
+from services.mt5_validation import _IPC_TRANSPORT_CODES
+from tests.limiter_stub import evict_module, patch_shared_limiter
+
+
+@pytest.fixture(autouse=True)
+def _reset_mt5_terminal_locks():
+    """153.3-04: the validate path now takes the process-wide terminal lease, so a
+    Lock minted here must never leak into another test — including the concurrency
+    and derive suites, which share this ONE registry when pytest runs all of them.
+
+    Load-bearing beyond hygiene: an ``asyncio.Lock`` binds to the event loop on its
+    first CONTENDED use, and pytest-asyncio gives each test a fresh loop — a lock
+    carried over from a contended case would raise "bound to a different event
+    loop" in the next one.
+
+    Since WIZFORM-ABANDON / D-36 it also clears the per-terminal EPOCH registry,
+    via the ONE shared helper (RESEARCH Pitfall 8: a leaked epoch fences a client
+    another test builds for the same key — a sixth flake mechanism)."""
+    mt5_concurrency.reset_terminal_state_for_tests()
+    yield
+    mt5_concurrency.reset_terminal_state_for_tests()
 
 
 @pytest.fixture()
@@ -80,33 +124,64 @@ def exchange_router(monkeypatch):
     monkeypatch.setitem(sys.modules, "slowapi", slowapi_stub)
     monkeypatch.setitem(sys.modules, "slowapi.util", slowapi_util_stub)
 
+    # PYAPI-03: the routers no longer CONSTRUCT a Limiter, they import the
+    # singleton from services.rate_limit — so rebinding `slowapi.Limiter` above
+    # no longer reaches them and the REAL slowapi wrapper would reject the
+    # MagicMock request this suite passes. Stub the INSTANCE too; must run
+    # before the router is re-imported below. See tests/limiter_stub.py.
+    patch_shared_limiter(monkeypatch)
+
     monkeypatch.setenv("MT5_ENABLED", "true")
     monkeypatch.setenv("MT5_GATEWAY_HOST", "mt5-gw.internal")
     monkeypatch.setenv("MT5_GATEWAY_PORT", "18812")
 
-    sys.modules.pop("routers.exchange", None)
+    evict_module("routers.exchange")
     from routers import exchange as exchange_router
 
     yield exchange_router
 
-    sys.modules.pop("routers.exchange", None)
+    evict_module("routers.exchange")
 
 
-def _make_client(*, login_raises=None, account=None, order_check=None):
-    """A mock Mt5Client instance: sync login/account_info/order_check/close.
+def _make_client(
+    *, login_raises=None, account=None, order_check=None, order_check_raises=None,
+    terminal=None,
+):
+    """A mock Mt5Client instance: sync login/account_info/terminal_info/
+    order_check/release/close.
+
+    BOTH teardown verbs are stubbed deliberately (153.3 / D-30): the validate path
+    must call `release` on every path and must call `close` on NO path, and only a
+    double that offers both can assert the second half.
 
     `login_raises` makes login() raise (bad creds / wrong server / transient).
-    `account` / `order_check` are the native dicts the read methods return
-    (is_trade_capable reads .get('trade_allowed') / .get('retcode'))."""
+    `account` / `order_check` / `terminal` are the native dicts the read methods
+    return (classify_trade_capability reads account.get('trade_allowed'),
+    order_check.get('retcode') and terminal's connected/trade_allowed pair).
+    `terminal=None` means terminal_info() RAISES — the unreadable-terminal case,
+    which must never be mistaken for a terminal that answered "no"."""
     client = MagicMock(name="Mt5Client-instance")
     if login_raises is not None:
         client.login = MagicMock(side_effect=login_raises)
     else:
         client.login = MagicMock(return_value=None)
     client.account_info = MagicMock(return_value=account if account is not None else {})
-    client.order_check = MagicMock(
-        return_value=order_check if order_check is not None else {}
-    )
+    if order_check_raises is not None:
+        # The real client raises here when MT5 returns None and last_error() is
+        # read (`_raise_last`) — which is what a terminal that refuses the probe
+        # produces.
+        client.order_check = MagicMock(side_effect=order_check_raises)
+    else:
+        client.order_check = MagicMock(
+            return_value=order_check if order_check is not None else {}
+        )
+    if terminal is None:
+        client.terminal_info = MagicMock(
+            side_effect=Mt5ClientError(-10004, "No IPC connection")
+        )
+    else:
+        client.terminal_info = MagicMock(return_value=terminal)
+    client.release = MagicMock()
     client.close = MagicMock()
     return client
 
@@ -116,6 +191,27 @@ def _install_mt5_client(router, client):
     factory spy so a test can assert construction args / that it never ran.
     (Mirrors the sfox suite's make_sfox_client injection, Rule 11.)"""
     factory = MagicMock(return_value=client)
+    router.Mt5Client = factory
+    return factory
+
+
+def _install_real_mt5_client(router, transport):
+    """Patch the router's constructor to build the **REAL** ``Mt5Client`` over an
+    injected transport double; return the factory spy.
+
+    ⭐ The real class, deliberately. The two cases that use this helper are about
+    behaviour that lives OUTSIDE the router — D-24's construction-time ordering
+    guard, and ``terminal_info``'s materialize step running outside
+    ``_guarded_read`` — so a ``MagicMock`` client would FABRICATE the very thing
+    under test and the guard could not fail. ``_connect`` is the same injection
+    seam ``test_mt5_client_contract.py`` uses, so no socket is opened.
+    """
+    from services.mt5_client import Mt5Client as _RealMt5Client
+
+    def _build(*args, **kwargs):
+        return _RealMt5Client(*args, _connect=lambda **_ignored: transport, **kwargs)
+
+    factory = MagicMock(side_effect=_build)
     router.Mt5Client = factory
     return factory
 
@@ -141,8 +237,464 @@ async def _call(router, req):
 # RED-TEAM login bracket (account_info().login == expected, pre+post the read) passes
 # on the happy path — the fake terminal IS on the connected account.
 _INVESTOR_ACCOUNT = {"trade_allowed": False, "balance": 1000.0, "login": 123456}
-# An investor order_check is rejected (retcode != TRADE_RETCODE_DONE 10009).
-_INVESTOR_ORDER_CHECK = {"retcode": 10027, "comment": "AutoTrading disabled"}
+# An investor order_check is rejected with the DOCUMENTED investor code
+# TRADE_RETCODE_TRADE_DISABLED (10017) — [DOC] enum_trade_return_codes.
+#
+# D-31 HISTORY: this fixture used to be `{"retcode": 10027}` with NO terminal read
+# at all, and that combination WAS the fail-open scenario — under MetaQuotes'
+# default-ON "Disable automatic trading through the external Python API" a MASTER
+# password produces exactly those two negatives, and the old two-signal rule
+# stamped it read_only. That combination now classifies "undetermined" (see the
+# security regression below) and is no longer a success fixture anywhere.
+_INVESTOR_ORDER_CHECK = {"retcode": 10017, "comment": "Trade disabled"}
+# The terminal ITSELF permits trading and is attached to a trade server, so an
+# account-level refusal is attributable to the ACCOUNT. Required for any
+# read_only verdict (D-31).
+_HEALTHY_TERMINAL_INFO = {"connected": True, "trade_allowed": True, "build": 4410}
+
+
+# --------------------------------------------------------------------------- #
+# classify_trade_capability — the tri-state seam (D-31), tested directly
+#
+# Every expected value below is a LITERAL typed here, never imported from
+# services.mt5_validation: an oracle that reads its expectation out of the thing
+# under test cannot fail (programme non-negotiable #3).
+# --------------------------------------------------------------------------- #
+
+
+_HEALTHY_TERMINAL = {"connected": True, "trade_allowed": True}
+
+
+def test_capability_account_trade_allowed_is_trade_capable():
+    """A POSITIVE account signal is conclusive and wins before any terminal
+    reasoning — the pre-D-31 master-reject behaviour is preserved exactly, even
+    when the terminal is healthy."""
+    from services.mt5_validation import classify_trade_capability
+
+    verdict = classify_trade_capability(
+        {"trade_allowed": True}, {"retcode": 10027}, dict(_HEALTHY_TERMINAL)
+    )
+    assert verdict == "trade_capable"
+
+
+def test_capability_order_check_done_retcode_is_trade_capable():
+    """An order_check the server WOULD accept (TRADE_RETCODE_DONE 10009) rejects
+    the login on its own, even with trade_allowed false and a healthy terminal."""
+    from services.mt5_validation import classify_trade_capability
+
+    verdict = classify_trade_capability(
+        {"trade_allowed": False}, {"retcode": 10009}, dict(_HEALTHY_TERMINAL)
+    )
+    assert verdict == "trade_capable"
+
+
+def test_capability_terminal_trade_disabled_is_undetermined():
+    """⭐ D-31 SECURITY REGRESSION — the fail-OPEN this whole plan exists to close.
+
+    The terminal is connected but its own trade permission is OFF, which is what
+    MetaQuotes' DEFAULT-ON "Disable automatic trading through the external Python
+    API" produces. Under that setting a **MASTER** password yields exactly these
+    two negatives (trade_allowed false + a rejected order_check) — identical to an
+    investor password. Concluding "read_only" here is how a trade-capable
+    credential got stored stamped read-only.
+
+    Reddens the moment the terminal trade-permission guard (branch 5) is removed.
+    """
+    from services.mt5_validation import classify_trade_capability
+
+    verdict = classify_trade_capability(
+        {"trade_allowed": False},
+        {"retcode": 10027},
+        {"connected": True, "trade_allowed": False},
+    )
+    assert verdict == "undetermined"
+    assert verdict != "read_only"
+
+
+def test_capability_terminal_disconnected_is_undetermined():
+    """[DOC] MQL5 "Trade permission" lists "no connection to the trade server" as a
+    SIBLING cause of the account-level refusal, so a detached terminal makes the
+    account negative unattributable to investor mode."""
+    from services.mt5_validation import classify_trade_capability
+
+    verdict = classify_trade_capability(
+        {"trade_allowed": False},
+        {"retcode": 10027},
+        {"connected": False, "trade_allowed": True},
+    )
+    assert verdict == "undetermined"
+
+
+def test_capability_no_terminal_read_is_undetermined():
+    """No terminal signal at all -> refuse. The two negatives prove nothing when
+    we cannot rule out that our OWN terminal caused them."""
+    from services.mt5_validation import classify_trade_capability
+
+    verdict = classify_trade_capability(
+        {"trade_allowed": False}, {"retcode": 10027}, None
+    )
+    assert verdict == "undetermined"
+
+
+@pytest.mark.parametrize(
+    "terminal",
+    [
+        {"connected": True},  # trade_allowed field absent
+        {"trade_allowed": True},  # connected field absent
+        {},  # both absent
+    ],
+)
+def test_capability_partial_terminal_shape_is_undetermined(terminal):
+    """A terminal dict MISSING either load-bearing field is not a negative signal
+    — it is an unreadable one. `.get()` would silently render an absent field as
+    False and let a shape change masquerade as a verdict; the membership test
+    refuses instead."""
+    from services.mt5_validation import classify_trade_capability
+
+    verdict = classify_trade_capability(
+        {"trade_allowed": False}, {"retcode": 10027}, terminal
+    )
+    assert verdict == "undetermined"
+
+
+def test_capability_investor_retcode_10017_with_healthy_terminal_is_read_only():
+    """⭐ The DOCUMENTED investor path, untested until D-31.
+
+    TRADE_RETCODE_TRADE_DISABLED = 10017 is the retcode an investor session
+    should produce ([DOC] enum_trade_return_codes). With the terminal reporting
+    connected AND trade-permitting, the refusal is attributable to the ACCOUNT —
+    the only combination under which read_only is honest.
+    """
+    from services.mt5_validation import classify_trade_capability
+
+    verdict = classify_trade_capability(
+        {"trade_allowed": False}, {"retcode": 10017}, dict(_HEALTHY_TERMINAL)
+    )
+    assert verdict == "read_only"
+
+
+def test_capability_two_signal_fail_open_form_no_longer_exists():
+    """The fail-OPEN form must be UNREACHABLE, not merely unused: a two-argument
+    rule that can conclude read_only from two negatives is the defect itself, and
+    leaving a wrapper/alias behind re-ships it at the next call site (D-31; the
+    instance-vs-class lesson this repo has already paid for)."""
+    import services.mt5_validation as mt5_validation
+
+    assert not hasattr(mt5_validation, "is_trade_capable")
+
+
+# --------------------------------------------------------------------------- #
+# classify_mt5_login_error — the IPC-transport code-gate, tested directly
+#
+# Same oracle discipline as the block above: every code and every expected
+# verdict is a LITERAL typed here, never read out of services.mt5_validation.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    ("code", "detail"),
+    [
+        (-10004, "No IPC connection"),
+        (-10005, "IPC timeout"),
+    ],
+)
+def test_ipc_transport_codes_are_transient_never_wrong_server(code, detail):
+    """⭐ An IPC-transport failure is OUR outage and must NEVER be stamped as the
+    user's input.
+
+    Both codes mean the gateway's terminal bridge is unreachable — -10004 because
+    it was never attached, -10005 because it stopped answering. Both texts contain
+    "ipc", which the pre-164.5.4 wrong-server table matched as a bare token, so
+    without the code-gate they classified as ``wrong_server`` — the PERMANENT arm.
+    That is not a cosmetic mislabel: the wizard then shows "We could not find that
+    broker server." and the caller stops retrying, so a VALID key is rejected for
+    good because OUR infrastructure blipped. THAT is why the code-gate runs first,
+    and it is what this case pins.
+
+    ⚠️ 164.5.4: ``_WRONG_SERVER_PHRASES`` is anchored on the broker-server lookup
+    and carries no "ipc" member, so the TEXT alone would now degrade to
+    ``transient`` by the refusal rule. ⛔ The hazard is NARROWER, not gone, and
+    this gate does not weaken: a transport verdict must never depend on
+    broker-supplied text, which any future phrase could start matching. The
+    code-gate stays FIRST and keeps its own arm.
+
+    -10005 was the live case (2026-08-12): a wedged gateway terminal returned
+    ``(-10005, 'IPC timeout')`` and the founder's byte-for-byte CORRECT broker
+    server was blamed. It was NOT covered by the original single-code carve-out —
+    hence the parametrize, which keeps the gate from regressing to either code
+    alone.
+    """
+    from services.mt5_validation import classify_mt5_login_error
+
+    assert classify_mt5_login_error(Mt5ClientError(code, detail)) == "transient"
+
+
+# --------------------------------------------------------------------------- #
+# is_mt5_login_refusal — THE code set, tested directly (Phase 167 D-17)
+#
+# Same oracle discipline: every code and verdict is a LITERAL typed here, never
+# read out of services.mt5_validation. The two surfaces that tell a user "we
+# could not sign in" (the wizard's SIGN_IN_FAILED and the holdings poll's
+# sign_in_failed) both branch on this predicate, so a wrong member here is a
+# wrong claim on both at once.
+# --------------------------------------------------------------------------- #
+
+# The MetaQuotes RES_E_INTERNAL_FAIL family minus -10005, plus RES_S_OK. Each
+# says our bridge failed to carry the call (or reported success), so none of
+# them is a verdict on the credential, even when login() itself returned falsy.
+_LOGIN_STAGE_CODES_THAT_ARE_NOT_A_REFUSAL = [
+    pytest.param(-10000, "internal fail", id="-10000-internal-fail"),
+    pytest.param(-10001, "internal fail send", id="-10001-send"),
+    pytest.param(-10002, "internal fail receive", id="-10002-receive"),
+    pytest.param(-10003, "internal fail init", id="-10003-init"),
+    pytest.param(-10004, "No IPC connection", id="-10004-connect"),
+    pytest.param(1, "Success", id="1-res-s-ok"),
+]
+
+# MERGE 2026-09-23 (164.6.5 integrated with 167) — the subset of the list above
+# that 164.6.5's IPC arm does NOT claim. Derived from the SHIPPED tuple, never
+# re-typed, so a change to `_IPC_TRANSPORT_CODES` moves this split with it.
+_LOGIN_STAGE_CODES_NOT_A_REFUSAL_AND_NOT_IPC_TRANSPORT = [
+    p
+    for p in _LOGIN_STAGE_CODES_THAT_ARE_NOT_A_REFUSAL
+    if p.values[0] not in _IPC_TRANSPORT_CODES
+]
+
+# -10005 is the modal login dialog D-08 measured for a wrong MT5 password; 0 and
+# -6 (RES_E_AUTH_FAILED) are the terminal answering the sign-in with no. The
+# texts are deliberately ones the classifier does NOT recognise, so these
+# reach the `transient` tail on the wizard rather than its confident 400.
+_LOGIN_STAGE_CODES_THAT_ARE_A_REFUSAL = [
+    pytest.param(-10005, "IPC timeout", id="-10005-modal-login-dialog"),
+    pytest.param(0, "authorization failed", id="0-no-answer-code"),
+    pytest.param(-6, "Authorization failed", id="-6-res-e-auth-failed"),
+]
+
+
+@pytest.mark.parametrize(("code", "detail"), _LOGIN_STAGE_CODES_THAT_ARE_NOT_A_REFUSAL)
+def test_login_stage_ipc_infrastructure_or_success_code_is_not_a_refusal(
+    code, detail
+):
+    """167 WR-01 / D-17 — a login-stage answer carrying -10000…-10004 or 1 is
+    NOT a sign-in refusal. Before D-17 only -10004/-10005 were excluded, so
+    -10000…-10003 and 1 were reported as a refused sign-in: a failing IPC pipe
+    became a permanent `sign_in_failed` and a Retry-less `SIGN_IN_FAILED`."""
+    from services.mt5_validation import is_mt5_login_refusal
+
+    assert is_mt5_login_refusal(Mt5LoginRefusedError(code, detail)) is False
+
+
+@pytest.mark.parametrize(("code", "detail"), _LOGIN_STAGE_CODES_THAT_ARE_A_REFUSAL)
+def test_login_stage_sign_in_answer_is_a_refusal(code, detail):
+    """167 CR-01 / D-17 — a login-stage -10005 IS a refusal. D-08 names it as
+    the measured wrong-password mechanism, so excluding it would send the
+    phase's headline MT5 case back to the pre-phase answer (a transport note, a
+    retry promise and a Retry control).
+
+    The CONTROL half: the same code on a PLAIN `Mt5ClientError` (an
+    `initialize()` failure, a transport drop, a post-login read) is never a
+    refusal. The stage decides first; the code only splits the login stage."""
+    from services.mt5_validation import is_mt5_login_refusal
+
+    assert is_mt5_login_refusal(Mt5LoginRefusedError(code, detail)) is True
+    assert is_mt5_login_refusal(Mt5ClientError(code, detail)) is False
+
+
+# --------------------------------------------------------------------------- #
+# 164.5.4 / D-02 — THE REFUSAL RULE, THE FAIL-CLOSED PRECEDENCE AND THE WRAPPER
+#
+# WHY these matter (Rule 9). Of the three classes the seam can return, TWO —
+# `auth` and `wrong_server` — become a PERMANENT, USER-ATTRIBUTED verdict at every
+# call site (HTTP 400 / a `failed` analytics stamp). Only `transient` carries no
+# blame. So the question "what does the classifier do with a message it does not
+# recognise?" is not a taste question: the wrong answer sends the founder to
+# change a credential that was fine while the real cause goes uninvestigated.
+#
+# Same oracle discipline as the blocks above: every expected verdict is a LITERAL
+# typed here, never read out of services.mt5_validation.
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    ("code", "detail"),
+    [
+        # The ROADMAP's own observed rejection. Matched BOTH "invalid" and
+        # "account" in the pre-164.5.4 bare-token table, so it could never reach
+        # the default arm — a working key stamped permanently auth-failed.
+        (0, "Invalid account"),
+        # An unattended-login TIMEOUT: ours, and a retry clears it. Matched the
+        # bare token "login".
+        (10001, "unattended login timed out"),
+        # OUR bridge dying. Matched the bare token "terminal" and came back as
+        # "your broker server is wrong" — the 2026-08-12 wedged-gateway incident
+        # reached by a second route the -10004/-10005 code-gate cannot cover.
+        (5, "terminal pipe broke"),
+        # A message that resembles nothing in either table. The refusal rule must
+        # hold for the OPEN set, not only for the three regressions above — an
+        # unmeasured broker string is the normal case, not the exception.
+        (0, "kabelverbindung gestoert (0x8007274d)"),
+    ],
+)
+def test_an_unrecognised_login_rejection_refuses_rather_than_blaming(code, detail):
+    """⭐ D-02 THE REFUSAL RULE — an unrecognised or ambiguous login rejection
+    degrades to ``transient`` and can NEVER produce a user-attributed permanent
+    stamp.
+
+    The classifier reads BROKER-SUPPLIED free text and turns it into an
+    accusation. There is no authoritative MT5 error-text table to match against
+    (Pitfall 5), so the honest posture is to refuse to guess: a missed message
+    costs one retry, while a wrong guess permanently blames a credential that
+    works. Every string below returned a PERMANENT class before this rule landed.
+    """
+    from services.mt5_validation import classify_mt5_login_error
+
+    verdict = classify_mt5_login_error(Mt5ClientError(code, detail))
+    # pre-fix returned "auth" for the first two rows and "wrong_server" for the
+    # third; the fourth was already transient and pins the OPEN set.
+    assert verdict == "transient", (
+        f"{detail!r} classified {verdict!r} — a PERMANENT, user-blamed verdict on "
+        "a message the classifier does not actually recognise"
+    )
+
+
+def test_a_message_matching_both_tables_is_wrong_server_not_auth():
+    """⭐ D-02 THE FAIL-CLOSED PRECEDENCE, held by an EXECUTING test rather than by
+    the comment that used to carry it.
+
+    Both permanent classes blame the user, but they blame different things. A
+    server/bridge signal beating an auth signal is the whole reason the ordering
+    exists: telling someone their broker server string is wrong is recoverable
+    reading, while telling them their password is wrong sends them to rotate a
+    working credential. A comment cannot hold an ordering — reorder the two `if`s
+    and a comment stays green.
+    """
+    from services.mt5_validation import (
+        _AUTH_PHRASES,
+        _WRONG_SERVER_PHRASES,
+        classify_mt5_login_error,
+    )
+
+    detail = "trade server not found; invalid account or password"
+    # ⛔ ANTI-VACUITY: prove the message really does match BOTH tables. If a phrase
+    # is later reworded, this pin must go RED rather than quietly testing a
+    # single-table message and "passing".
+    assert any(p in detail for p in _WRONG_SERVER_PHRASES), (
+        "the precedence pin no longer matches the wrong-server table — it is "
+        "measuring nothing"
+    )
+    assert any(p in detail for p in _AUTH_PHRASES), (
+        "the precedence pin no longer matches the auth table — it is measuring "
+        "nothing"
+    )
+
+    assert classify_mt5_login_error(Mt5ClientError(0, detail)) == "wrong_server"
+
+
+def test_the_error_wrapper_itself_matches_no_phrase_in_either_table():
+    """⭐ The WRAPPER neutrality pin. ``Mt5ClientError`` renders as
+    ``MT5 client error (code=N): <detail>`` and the classifier lowercases THAT
+    whole string, so the envelope's own words are matched on every call.
+
+    With an EMPTY detail the subject IS the envelope and nothing else. If a future
+    phrase is ever chosen that collides with it — "client error", say — then EVERY
+    MT5 error classifies the same way regardless of what the broker said, and the
+    classifier silently stops classifying. Nothing else in the suite would catch
+    that: every other case supplies a detail that dominates the verdict.
+    """
+    from services.mt5_validation import classify_mt5_login_error
+
+    err = Mt5ClientError(0, "")
+    assert "mt5 client error" in str(err).lower(), (
+        "the wrapper no longer renders the envelope this pin is about"
+    )
+    assert classify_mt5_login_error(err) == "transient"
+
+
+# --------------------------------------------------------------------------- #
+# 164.5.4 — THE LIVE-SPIKE HAND-OFF
+#
+# The phrase tables are [ASSUMED]: no authoritative MT5 error-text table exists,
+# so the only way to retire an [ASSUMED] marker is a MEASURED (code, text) pair
+# from a real login rejection. ⛔ The spike is FOUNDER-ONLY — no agent enters,
+# reads, decrypts, logs or echoes a credential — so this phase ships the
+# TRANSPORT and blocks on nothing. Partial sets land; each pair retires one
+# marker independently.
+# --------------------------------------------------------------------------- #
+
+_LIVE_SPIKE_FIXTURE = (
+    pathlib.Path(__file__).parent / "fixtures" / "mt5_login_rejection_observations.json"
+)
+
+_LIVE_SPIKE_PROTOCOL_CLAUSES = (
+    "founder_enters_credentials_no_agent_ever_does",
+    "capture_code_and_text_from_login_rejections_only",
+    "never_an_account_identifier",
+    "never_a_broker_server_name",
+    "never_a_password",
+    "accounts_are_synthetic_labels_substituted_before_writing",
+    "partial_sets_land_each_pair_retires_one_assumed_marker",
+    "nothing_in_this_phase_blocks_on_it",
+)
+
+
+def _load_live_spike_fixture() -> list[dict[str, Any]]:
+    """The fixture is a JSON array whose FIRST element is the `_protocol` header
+    (JSON carries no comments) and whose remaining elements are observations."""
+    with _LIVE_SPIKE_FIXTURE.open(encoding="utf-8") as fh:
+        return cast("list[dict[str, Any]]", json.load(fh))
+
+
+def _live_spike_observations() -> list[dict[str, Any]]:
+    try:
+        entries = _load_live_spike_fixture()
+    except (OSError, ValueError):
+        # A missing/broken fixture is the META-TEST's finding, not a collection
+        # error that would take the whole module down with it.
+        return []
+    return [e for e in entries if "_protocol" not in e]
+
+
+def test_the_live_spike_fixture_exists_and_carries_its_capture_protocol():
+    """⛔ UNCONDITIONAL, and that is the whole point.
+
+    The parametrize below collects ZERO cases today, because zero pairs have been
+    measured. A zero-case parametrize "passes" by collecting nothing — so the
+    fixture could be deleted, emptied or stripped of its protocol header and the
+    suite would stay green while the hand-off silently ceased to exist. This case
+    is what makes the fixture a real artifact rather than a file nobody checks.
+
+    It asserts the CONTRACT, not the contents: the file parses, the header is
+    present, and every safety clause the founder must honour while capturing is
+    still written down beside the data it governs.
+    """
+    assert _LIVE_SPIKE_FIXTURE.is_file(), (
+        f"the live-spike hand-off fixture is missing: {_LIVE_SPIKE_FIXTURE.name}"
+    )
+    entries = _load_live_spike_fixture()
+    assert isinstance(entries, list) and entries, "the fixture must carry its header"
+    header = entries[0]
+    assert "_protocol" in header, "the first element must be the _protocol header"
+    clauses = header["_protocol"]
+    for clause in _LIVE_SPIKE_PROTOCOL_CLAUSES:
+        assert clause in clauses, (
+            f"the capture protocol lost its {clause!r} clause — the repo is PUBLIC "
+            "and this fixture is tracked source"
+        )
+
+
+@pytest.mark.parametrize(
+    "observation",
+    _live_spike_observations(),
+    ids=lambda o: str(o.get("account", "?")),
+)
+def test_each_measured_login_rejection_classifies_as_recorded(observation):
+    """Each MEASURED (code, text) pair must classify to the verdict recorded
+    beside it. Zero cases today; one pair appended here retires one [ASSUMED]
+    marker without any other change to this file."""
+    from services.mt5_validation import classify_mt5_login_error
+
+    err = Mt5ClientError(int(observation["code"]), str(observation["text"]))
+    assert classify_mt5_login_error(err) == observation["expected"]
 
 
 # --------------------------------------------------------------------------- #
@@ -190,9 +742,13 @@ async def test_mt5_stays_fail_closed_for_non_exact_flag(exchange_router, monkeyp
 
 async def test_mt5_investor_returns_valid_readonly_and_never_ccxt(exchange_router):
     """mt5 + investor creds -> {valid:true, read_only:true}; ccxt create_exchange
-    is NEVER called for mt5; close() runs on the success path."""
+    is NEVER called for mt5; release() runs on the success path."""
     router = exchange_router
-    client = _make_client(account=_INVESTOR_ACCOUNT, order_check=_INVESTOR_ORDER_CHECK)
+    client = _make_client(
+        account=_INVESTOR_ACCOUNT,
+        order_check=_INVESTOR_ORDER_CHECK,
+        terminal=_HEALTHY_TERMINAL_INFO,
+    )
     _install_mt5_client(router, client)
 
     create_exchange_spy = MagicMock(side_effect=AssertionError("create_exchange must not be called for mt5"))
@@ -206,7 +762,7 @@ async def test_mt5_investor_returns_valid_readonly_and_never_ccxt(exchange_route
     # terminal account PRE (before order_check) and POST (after) the probe.
     assert client.account_info.call_count == 2
     client.order_check.assert_called_once()
-    client.close.assert_called_once()
+    client.release.assert_called_once()
     create_exchange_spy.assert_not_called()
 
 
@@ -218,11 +774,12 @@ async def test_mt5_investor_returns_valid_readonly_and_never_ccxt(exchange_route
 async def test_mt5_master_via_trade_allowed_rejected(exchange_router):
     """T-135-09: a master (trade_allowed) login is REJECTED with the byte-exact
     MT5_MASTER_PASSWORD_DETAIL and is NEVER persisted (the branch never returns
-    valid:true, so the TS caller never reaches /encrypt-key). close() still runs."""
+    valid:true, so the TS caller never reaches /encrypt-key). release() still runs."""
     router = exchange_router
     client = _make_client(
         account={"trade_allowed": True, "login": 123456},
         order_check=_INVESTOR_ORDER_CHECK,
+        terminal=_HEALTHY_TERMINAL_INFO,
     )
     _install_mt5_client(router, client)
 
@@ -231,7 +788,7 @@ async def test_mt5_master_via_trade_allowed_rejected(exchange_router):
 
     assert ei.value.status_code == 400
     assert ei.value.detail == MT5_MASTER_PASSWORD_DETAIL
-    client.close.assert_called_once()
+    client.release.assert_called_once()
 
 
 async def test_mt5_master_via_order_check_retcode_rejected(exchange_router):
@@ -242,6 +799,7 @@ async def test_mt5_master_via_order_check_retcode_rejected(exchange_router):
     client = _make_client(
         account={"trade_allowed": False, "login": 123456},
         order_check={"retcode": 10009, "comment": "Done"},
+        terminal=_HEALTHY_TERMINAL_INFO,
     )
     _install_mt5_client(router, client)
 
@@ -250,7 +808,234 @@ async def test_mt5_master_via_order_check_retcode_rejected(exchange_router):
 
     assert ei.value.status_code == 400
     assert ei.value.detail == MT5_MASTER_PASSWORD_DETAIL
-    client.close.assert_called_once()
+    client.release.assert_called_once()
+
+
+# --------------------------------------------------------------------------- #
+# D-31 — the read-only fail-OPEN, closed at the ROUTER call site
+# --------------------------------------------------------------------------- #
+
+
+async def test_mt5_terminal_trade_disabled_never_returns_readonly(exchange_router):
+    """⭐ D-31 SECURITY REGRESSION at the ROUTER seam.
+
+    The defect: MetaQuotes ships "Disable automatic trading through the external
+    Python API" ON by default. Under it a **MASTER** password produces the exact
+    two negatives an investor password produces (account trade_allowed false +
+    a rejected order_check), and the old two-signal rule answered
+    {"valid": true, "read_only": true} — so a trade-capable credential was
+    encrypted and persisted under a read-only claim we could not prove.
+
+    The verdict is now "undetermined" and the router REFUSES. The cause is our
+    OWN gateway terminal's setting, which no retry can clear, so it takes the
+    PERMANENT operator arm — retryable false, no Retry-After, and nothing
+    resembling a read_only success anywhere in the response.
+    """
+    router = exchange_router
+    client = _make_client(
+        account=_INVESTOR_ACCOUNT,
+        order_check=_INVESTOR_ORDER_CHECK,
+        # Connected, so this is NOT a bridge blip — the terminal itself refuses
+        # to permit trading, which is what the default Python-API option does.
+        terminal={"connected": True, "trade_allowed": False},
+    )
+    _install_mt5_client(router, client)
+
+    with pytest.raises(HTTPException) as ei:
+        await _call(router, _make_req())
+
+    detail = ei.value.detail
+    # NEVER a success shape. Asserted structurally, not just by status: the whole
+    # defect was a 200 carrying read_only true.
+    assert not isinstance(detail, dict) or detail.get("read_only") is None
+    assert "read_only" not in repr(detail)
+    # PERMANENT operator fault — a setting in our terminal, not the user's key.
+    assert ei.value.status_code == 500
+    assert detail["code"] == "MT5_GATEWAY_UNCONFIGURED"
+    assert detail["retryable"] is False
+    assert not (ei.value.headers or {}).get("Retry-After")
+    # Never blames the credentials.
+    assert detail["detail"] != AUTH_FAILED_DETAIL
+    assert detail["detail"] != MT5_MASTER_PASSWORD_DETAIL
+    client.release.assert_called_once()
+
+
+async def test_a_conclusive_terminal_verdict_is_not_pre_empted_by_an_erroring_probe(
+    exchange_router,
+):
+    """⭐ D-31's refusal must not be pre-empted by the probe it no longer needs, on
+    the exact configuration D-31 was written for.
+
+    Once the terminal has reported ``trade_allowed: false``, the verdict is already
+    ``undetermined`` — branch 5 of ``classify_trade_capability`` looks at no probe
+    result at all. Running ``order_check`` anyway was not free: under MetaQuotes'
+    default-ON *"Disable automatic trading through the external Python API"* — the
+    setting that MAKES ``trade_allowed`` false — the probe is refused, and its
+    error takes an ENTIRELY DIFFERENT route out. ``classify_mt5_login_error``'s
+    wrong-server table carried the bare word "terminal", so the refusal below
+    classified ``wrong_server`` and the user was told **their broker server is
+    wrong** — a 400 accusation against the user, for a checkbox in OUR gateway
+    terminal, which silently replaced the 500 that would have paged the operator
+    who can actually fix it.
+
+    ⚠️ 164.5.4 narrowed that: ``_WRONG_SERVER_PHRASES`` is anchored on the
+    broker-server lookup, so this particular refusal text now degrades to
+    ``transient`` by the refusal rule instead of becoming an accusation. ⛔ NOT a
+    reason to let the probe run. The refusal still has to be classified by
+    SOMETHING, the phrase tables are [ASSUMED] pending the live spike, and the only
+    reliable way not to mis-read a message is not to provoke it.
+
+    ⚠️ THE ERRORING PROBE IS THE POINT. A version of this test whose ``order_check``
+    SUCCEEDS never reaches the bug: a successful probe returns a retcode the
+    classifier already ignores under branch 5, so the verdict is unchanged and the
+    guard cannot fail.
+
+    ⛔ Narrowing only. Skipping the probe cannot widen what is classified
+    ``read_only``: branch 5 reaches ``undetermined`` for EVERY probe value, and the
+    single verdict the probe could still have changed — ``trade_capable`` via
+    retcode 10009 — is itself a refusal, and is unobtainable anyway from a terminal
+    that refuses Python probes. The POSITIVE master signal survives untouched: it
+    comes from ``account_info().trade_allowed``, which is read BEFORE the terminal
+    and is asserted by the master-reject tests above.
+    """
+    router = exchange_router
+    client = _make_client(
+        account=_INVESTOR_ACCOUNT,
+        # What a terminal with the Python-API option ON answers: None from
+        # order_check, then last_error() -> a "Terminal:" message. Note the text
+        # contains "terminal", which WAS a bare member of the wrong-server table
+        # until 164.5.4 — the substring that turned OUR checkbox into the user's
+        # broker server. It matches no anchored phrase now and would degrade to
+        # `transient`; the probe must still not run (see the docstring).
+        order_check_raises=Mt5ClientError(
+            -8, "Terminal: AutoTrading disabled by the client terminal"
+        ),
+        # Connected, so this is not a bridge blip — the terminal itself refuses.
+        terminal={"connected": True, "trade_allowed": False},
+    )
+    _install_mt5_client(router, client)
+
+    with pytest.raises(HTTPException) as ei:
+        await _call(router, _make_req())
+
+    # D-31's PERMANENT operator refusal wins. Literals hand-typed. Asserted
+    # BEFORE the mechanism below, because the verdict is what the user and the
+    # operator actually get; "the probe did not run" is only how.
+    assert ei.value.status_code == 500
+    assert ei.value.detail["code"] == "MT5_GATEWAY_UNCONFIGURED"
+    assert ei.value.detail["retryable"] is False
+    assert not (ei.value.headers or {}).get("Retry-After")
+    # ⛔ Never the accusation against the user that the probe's error produced.
+    assert ei.value.detail["detail"] != MT5_WRONG_SERVER_DETAIL
+    assert ei.value.detail["detail"] != AUTH_FAILED_DETAIL
+    assert "read_only" not in repr(ei.value.detail)
+    # And the mechanism: the probe never ran, because the terminal signal was
+    # already conclusive.
+    client.order_check.assert_not_called()
+    client.release.assert_called_once()
+
+
+async def test_mt5_unreadable_terminal_is_transient_never_readonly(exchange_router):
+    """An UNREADABLE terminal yields no capability signal, so the two account
+    negatives prove nothing — refuse. This is our bridge blipping and it clears
+    on retry, so it takes the TRANSIENT arm, NOT the operator arm, and NOT the
+    wrong-server arm: classify_mt5_login_error's wrong-server table carried
+    "ipc"/"terminal"/"connect" as BARE WORDS and would have blamed the user's
+    broker server for our gateway's condition, which is why the terminal read is
+    caught at its own call site.
+
+    ⚠️ 164.5.4 anchored those phrases and added the refusal rule, so such text
+    degrades to `transient` at the classifier too. ⛔ NARROWER, not gone: the
+    catch-at-the-call-site is what this case pins and it must stay, because the
+    [ASSUMED] tables gain members as the live spike measures pairs."""
+    router = exchange_router
+    # terminal=None -> terminal_info() raises Mt5ClientError(-10004).
+    client = _make_client(
+        account=_INVESTOR_ACCOUNT, order_check=_INVESTOR_ORDER_CHECK, terminal=None
+    )
+    _install_mt5_client(router, client)
+
+    with pytest.raises(HTTPException) as ei:
+        await _call(router, _make_req())
+
+    assert ei.value.status_code == 424
+    assert ei.value.detail == NETWORK_ERROR_DETAIL
+    assert ei.value.detail != MT5_WRONG_SERVER_DETAIL
+    assert ei.value.detail != AUTH_FAILED_DETAIL
+    client.release.assert_called_once()
+
+
+async def test_mt5_disconnected_terminal_is_transient_never_readonly(exchange_router):
+    """A terminal detached from the trade server is a documented SIBLING cause of
+    the account-level refusal ([DOC] MQL5 "Trade permission"), so investor mode is
+    not attributable — refuse, transiently."""
+    router = exchange_router
+    client = _make_client(
+        account=_INVESTOR_ACCOUNT,
+        order_check=_INVESTOR_ORDER_CHECK,
+        terminal={"connected": False, "trade_allowed": True},
+    )
+    _install_mt5_client(router, client)
+
+    with pytest.raises(HTTPException) as ei:
+        await _call(router, _make_req())
+
+    assert ei.value.status_code == 424
+    assert ei.value.detail == NETWORK_ERROR_DETAIL
+    client.release.assert_called_once()
+
+
+async def test_mt5_capability_refusal_logs_carry_no_credentials(
+    exchange_router, monkeypatch
+):
+    """The two NEW capability WARNING lines must name a STAGE only — no login, no
+    password, no broker server may reach any log call (same sweep the gateway
+    misconfig case runs).
+
+    153.3 / D-32 — EXTENDED over the structlog stream (T-153.3-23). The stdlib
+    `logger` sweep below cannot see the new `mt5.stage` events at all: they go to
+    structlog, a second and entirely separate egress. A sweep that checked only
+    the mock logger would have stayed green while every stage event carried the
+    interpolated remote source line.
+    """
+    router = exchange_router
+    client = _make_client(
+        account={"trade_allowed": False, "login": 123456},
+        order_check=_INVESTOR_ORDER_CHECK,
+        terminal={"connected": True, "trade_allowed": False},
+    )
+    _install_mt5_client(router, client)
+    mock_logger = MagicMock()
+    monkeypatch.setattr(router, "logger", mock_logger)
+
+    with capture_logs() as captured:
+        with pytest.raises(HTTPException):
+            await _call(
+                router,
+                _make_req(
+                    api_key="123456", api_secret="s3cr3t-pw", passphrase="MyBroker-Live"
+                ),
+            )
+
+    secrets = ("123456", "s3cr3t-pw", "MyBroker-Live")
+    for meth in ("exception", "error", "warning", "info", "debug"):
+        for call in getattr(mock_logger, meth).call_args_list:
+            rendered = repr(call)
+            for secret in secrets:
+                assert secret not in rendered
+    # At least one line was emitted, so the sweep above is not vacuous. ⚠️
+    # 164.6.5-06: this fixture is the OPERATOR arm, which now logs at ERROR (D-15),
+    # so the non-vacuity check reads that level rather than WARNING.
+    assert mock_logger.error.call_args_list
+
+    # The SECOND egress: every structured event emitted during this request.
+    events = [e for e in captured if e.get("event") == "mt5.stage"]
+    assert events, "the structlog half of the sweep is vacuous — no event captured"
+    rendered_events = repr(events)
+    for secret in secrets:
+        assert secret not in rendered_events, (
+            f"a credential reached the mt5.stage telemetry: {secret!r}"
+        )
 
 
 async def test_mt5_terminal_account_mismatch_fails_closed(exchange_router):
@@ -258,8 +1043,8 @@ async def test_mt5_terminal_account_mismatch_fails_closed(exchange_router):
     (account_info().login != the connected login — e.g. a concurrent validate
     re-logged it mid-probe), the verdict must FAIL CLOSED transient
     (NETWORK_ERROR_DETAIL), NEVER {valid:true}, and order_check must NOT even run
-    (the PRE bracket refuses before the probe). close() still runs. Without the
-    bracket, is_trade_capable() would be judged against the wrong account — a
+    (the PRE bracket refuses before the probe). release() still runs. Without the
+    bracket, the capability verdict would be judged against the wrong account — a
     master password could be wrongly accepted as read-only. Reddens if removed."""
     router = exchange_router
     # The connected login is 123456 (from _make_req) but the terminal reports 999999.
@@ -272,12 +1057,17 @@ async def test_mt5_terminal_account_mismatch_fails_closed(exchange_router):
     with pytest.raises(HTTPException) as ei:
         await _call(router, _make_req())
 
-    assert ei.value.status_code == 400
+    # 424 = CALLER'S EXCHANGE (STATUS_CONTRACT.md §5), remapped from 400 by
+    # 140.3-06 at all seven VenueTransientHTTPException sites (C4 here). This arm
+    # is an INFRA/concurrency fault the router's own comment calls "never the
+    # user's key" — so a 400, which accuses the caller's request, was exactly the
+    # mislabelling the `detail` assertion below already guards in the body.
+    assert ei.value.status_code == 424
     assert ei.value.detail == NETWORK_ERROR_DETAIL
     assert ei.value.status_code != 500
     # PRE bracket fires right after the first account_info, before the probe.
     client.order_check.assert_not_called()
-    client.close.assert_called_once()
+    client.release.assert_called_once()
 
 
 # --------------------------------------------------------------------------- #
@@ -287,7 +1077,7 @@ async def test_mt5_terminal_account_mismatch_fails_closed(exchange_router):
 
 async def test_mt5_bad_creds_maps_to_exact_auth_string(exchange_router):
     """Bad creds (login raises an Mt5ClientError classified 'auth') -> 400 with the
-    byte-identical AUTH_FAILED string (KEY_AUTH_FAILED). close() runs."""
+    byte-identical AUTH_FAILED string (KEY_AUTH_FAILED). release() runs."""
     router = exchange_router
     err = Mt5ClientError(134, "invalid account or password")
     client = _make_client(login_raises=err)
@@ -299,7 +1089,7 @@ async def test_mt5_bad_creds_maps_to_exact_auth_string(exchange_router):
     assert ei.value.status_code == 400
     assert ei.value.detail == AUTH_FAILED_DETAIL
     assert "authentication failed" in ei.value.detail.lower()
-    client.close.assert_called_once()
+    client.release.assert_called_once()
 
 
 async def test_mt5_wrong_server_maps_to_wrong_server_detail(exchange_router):
@@ -318,13 +1108,305 @@ async def test_mt5_wrong_server_maps_to_wrong_server_detail(exchange_router):
     assert ei.value.detail == MT5_WRONG_SERVER_DETAIL
     # distinguishable from the bad-password path
     assert ei.value.detail != AUTH_FAILED_DETAIL
-    client.close.assert_called_once()
+    client.release.assert_called_once()
 
 
-async def test_mt5_transient_maps_to_network_detail_not_credentials(exchange_router):
-    """F4: an unrecognized (transient) login error must fail CLOSED with the SHARED
-    NETWORK_ERROR_DETAIL — never {"valid": true}, never 'authentication failed'
-    (a transient bridge blip is not the user's key). close() runs."""
+async def test_mt5_transient_maps_to_sign_in_failed_detail_not_credentials(
+    exchange_router,
+):
+    """F4, NARROWED by 167-CREDTRUST plan 01 (D-05, D-07, S-27): an unrecognized
+    (transient) login error must fail CLOSED with SIGN_IN_FAILED_DETAIL — never
+    {"valid": true}, never 'authentication failed' (an ambiguous sign-in is not a
+    confirmed bad key). release() runs.
+
+    ⚠️ THIS CASE'S EXPECTATION MOVED. Until this phase it asserted the SHARED
+    NETWORK_ERROR_DETAIL, like every other MT5 transient arm — but a login WAS
+    attempted here (`classify_mt5_login_error` classified it `transient`, not
+    `auth`/`wrong_server`), which is exactly the claim SIGN_IN_FAILED_DETAIL makes
+    and the shared network detail does not. `recoverable=False` on the raise
+    diverges from the sibling MT5 arms' hardcoded `True` (D-08) — this test only
+    reaches `HTTPException.detail`/`.status_code`, so that flag is asserted at the
+    wire-body layer (`test_validate_key_venue_transient.py::test_c5_...`).
+
+    ⭐ 167 CR-01 / WR-01 — the error is now the LOGIN-STAGE marker
+    (`Mt5LoginRefusedError`, what the real `Mt5Client.login` raises when the
+    terminal answers the sign-in falsy). The same code-0 text from a POST-login
+    stage is NOT a sign-in failure; see
+    `test_mt5_post_login_or_ipc_transient_keeps_the_network_detail`."""
+    router = exchange_router
+    # 167 SFH-LOW-3 — a NEUTRAL login answer the classifier does not recognise.
+    # This used to be "timeout waiting for response", which pinned
+    # timeout-worded text as a sign-in failure: a reader would take it that a
+    # timeout IS a sign-in refusal. What makes this a refusal is the stage
+    # (the marker type) and the code, not the wording.
+    err = Mt5LoginRefusedError(0, "authorization failed")
+    client = _make_client(login_raises=err)
+    _install_mt5_client(router, client)
+
+    with pytest.raises(HTTPException) as ei:
+        await _call(router, _make_req())
+
+    # 424 = CALLER'S EXCHANGE (C5; see the account-mismatch case for the full
+    # rationale). An ambiguous sign-in is neither a confirmed bad key nor a
+    # malformed request.
+    assert ei.value.status_code == 424
+    assert ei.value.detail == SIGN_IN_FAILED_DETAIL
+    assert ei.value.status_code != 500
+    assert "authentication failed" not in ei.value.detail.lower()
+    client.release.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    "client_kwargs, reached_order_check",
+    [
+        # The SAME code-0 text as the login-stage case above, but raised by the
+        # probe AFTER `login()` and `account_info()` succeeded: the credential
+        # was accepted, so this is not a sign-in failure.
+        pytest.param(
+            {
+                "account": _INVESTOR_ACCOUNT,
+                "terminal": {"connected": True, "trade_allowed": True},
+                "order_check_raises": Mt5ClientError(0, "authorization failed"),
+            },
+            True,
+            id="post-login-order_check-code-0",
+        ),
+        # ⚠️ MERGE 2026-09-23 (164.6.5 integrated) — the post-login IPC -10005
+        # param that stood here moved to
+        # `test_mt5_post_login_ipc_fault_answers_terminal_unresponsive` below:
+        # an IPC-coded fault that is not a login-stage refusal now answers
+        # 164.6.5's MT5_TERMINAL_UNRESPONSIVE, still never SIGN_IN_FAILED.
+        # The login-stage IPC-infrastructure codes and the success code are
+        # driven by `test_mt5_login_stage_ipc_or_success_code_keeps_the_network_detail`
+        # below; a login-stage -10005 is a refusal (D-17) and is driven by
+        # `test_mt5_login_stage_refusal_code_answers_sign_in_failed`.
+    ],
+)
+async def test_mt5_post_login_or_ipc_transient_keeps_the_network_detail(
+    exchange_router, client_kwargs, reached_order_check
+):
+    """167 WR-01 — `SIGN_IN_FAILED` is answered ONLY for a login-stage refusal
+    (`is_mt5_login_refusal`). A post-login read failure keeps the pre-167
+    answer, `424` with the shared network detail, so the user is not told a
+    working sign-in failed and keeps the Retry (`recoverable=True` is asserted at
+    the wire layer in `test_validate_key_venue_transient.py`)."""
+    router = exchange_router
+    client = _make_client(**client_kwargs)
+    _install_mt5_client(router, client)
+
+    with pytest.raises(HTTPException) as ei:
+        await _call(router, _make_req())
+
+    assert ei.value.status_code == 424
+    assert ei.value.detail != SIGN_IN_FAILED_DETAIL, (
+        "a fault that is not a login-stage refusal was answered SIGN_IN_FAILED "
+        "— the user is told a sign-in failed and loses the Retry"
+    )
+    assert ei.value.detail == NETWORK_ERROR_DETAIL
+    client.login.assert_called_once()
+    assert client.order_check.called is reached_order_check
+    client.release.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    ("code", "detail"), _LOGIN_STAGE_CODES_NOT_A_REFUSAL_AND_NOT_IPC_TRANSPORT
+)
+async def test_mt5_login_stage_ipc_or_success_code_keeps_the_network_detail(
+    exchange_router, code, detail
+):
+    """167 WR-01 / D-17, end to end through `_validate_mt5_key_probe` — a
+    login-stage answer carrying -10000…-10004 or 1 is our bridge failing to
+    carry the call, not a sign-in verdict. It keeps the pre-167 answer:
+    `NETWORK_UNAVAILABLE`, the shared network detail and `recoverable=True`, so
+    the Retry survives and the user is not told a sign-in failed.
+
+    ⚠️ MERGE 2026-09-23 (164.6.5 integrated) — -10004 is driven by
+    `test_mt5_login_stage_ipc_transport_code_answers_terminal_unresponsive`
+    instead: it is in `_IPC_TRANSPORT_CODES`, so 164.6.5's arm answers it
+    MT5_TERMINAL_UNRESPONSIVE. Still never SIGN_IN_FAILED (D-17 holds)."""
+    router = exchange_router
+    client = _make_client(login_raises=Mt5LoginRefusedError(code, detail))
+    _install_mt5_client(router, client)
+
+    with pytest.raises(HTTPException) as ei:
+        await _call(router, _make_req())
+
+    assert ei.value.status_code == 424
+    assert ei.value.detail == NETWORK_ERROR_DETAIL, (
+        f"login-stage code {code} is an IPC-infrastructure (or success) code, "
+        "yet the wizard answered a sign-in failure with no Retry"
+    )
+    assert getattr(ei.value, "code", None) == "NETWORK_UNAVAILABLE"
+    assert getattr(ei.value, "recoverable", None) is True
+    client.login.assert_called_once()
+    client.order_check.assert_not_called()
+    client.release.assert_called_once()
+
+
+@pytest.mark.parametrize(("code", "detail"), _LOGIN_STAGE_CODES_THAT_ARE_A_REFUSAL)
+async def test_mt5_login_stage_refusal_code_answers_sign_in_failed(
+    exchange_router, code, detail
+):
+    """167 CR-01 / D-17, end to end through `_validate_mt5_key_probe` — a
+    login-stage -10005, 0 or -6 is a refused sign-in: `424 SIGN_IN_FAILED`,
+    `recoverable=False`. The -10005 case is the one D-08 is written about (the
+    modal login dialog a wrong password raises), and the classifier's own
+    -10005 code-gate must not pre-empt it into `NETWORK_UNAVAILABLE`: it answers
+    `transient`, which is the tail the predicate splits."""
+    router = exchange_router
+    client = _make_client(login_raises=Mt5LoginRefusedError(code, detail))
+    _install_mt5_client(router, client)
+
+    with pytest.raises(HTTPException) as ei:
+        await _call(router, _make_req())
+
+    assert ei.value.status_code == 424
+    assert ei.value.detail == SIGN_IN_FAILED_DETAIL, (
+        f"a login-stage refusal with code {code} was not answered SIGN_IN_FAILED"
+    )
+    assert getattr(ei.value, "code", None) == "SIGN_IN_FAILED"
+    assert getattr(ei.value, "recoverable", None) is False, (
+        "a refused sign-in must not offer a Retry: it re-sends the same "
+        "credential to the one shared terminal (D-08)"
+    )
+    client.login.assert_called_once()
+    client.order_check.assert_not_called()
+    client.release.assert_called_once()
+
+
+# --------------------------------------------------------------------------- #
+# MERGE 2026-09-23 — 164.6.5 (MT5VALIDATEWEDGE) integrated with 167 (CREDTRUST).
+# The router consults 167's `is_mt5_login_refusal` FIRST and 164.6.5's
+# `is_ipc_transport_fault` SECOND. These two cases pin the IPC-coded faults that
+# are NOT a login-stage refusal: 167 D-17 decides they are not a sign-in failure,
+# and 164.6.5 D-12/D-13 decides they answer MT5_TERMINAL_UNRESPONSIVE rather
+# than a Retry against a wedged terminal. The login-stage -10005 overlap stays
+# 167's SIGN_IN_FAILED (`test_mt5_login_stage_refusal_code_answers_sign_in_failed`).
+# --------------------------------------------------------------------------- #
+
+
+async def test_mt5_post_login_ipc_fault_answers_terminal_unresponsive(
+    exchange_router,
+):
+    """A post-login read (`order_check`) timing out on IPC arrives AFTER the
+    credential was accepted, so it is never a sign-in failure (167 WR-01). Its
+    code is in `_IPC_TRANSPORT_CODES`, so it answers 164.6.5's honest,
+    non-retryable 500 — not the Retry the pre-merge transport answer offered."""
+    router = exchange_router
+    client = _make_client(
+        account=_INVESTOR_ACCOUNT,
+        terminal={"connected": True, "trade_allowed": True},
+        order_check_raises=Mt5ClientError(-10005, "IPC timeout"),
+    )
+    _install_mt5_client(router, client)
+
+    with pytest.raises(HTTPException) as ei:
+        await _call(router, _make_req())
+
+    assert ei.value.status_code == 500
+    body = ei.value.detail
+    assert body["code"] == "MT5_TERMINAL_UNRESPONSIVE"
+    assert body["retryable"] is False
+    assert body["detail"] != SIGN_IN_FAILED_DETAIL, (
+        "a post-login fault was answered as a refused sign-in"
+    )
+    client.login.assert_called_once()
+    assert client.order_check.called is True
+    client.release.assert_called_once()
+
+
+async def test_mt5_login_stage_ipc_transport_code_answers_terminal_unresponsive(
+    exchange_router,
+):
+    """A login-stage -10004 is NOT a refusal (167 D-17: our bridge failed to
+    carry the call) and IS an IPC transport code (164.6.5), so it answers
+    MT5_TERMINAL_UNRESPONSIVE — never SIGN_IN_FAILED, never a Retry."""
+    router = exchange_router
+    client = _make_client(
+        login_raises=Mt5LoginRefusedError(-10004, "No IPC connection")
+    )
+    _install_mt5_client(router, client)
+
+    with pytest.raises(HTTPException) as ei:
+        await _call(router, _make_req())
+
+    assert ei.value.status_code == 500
+    body = ei.value.detail
+    assert body["code"] == "MT5_TERMINAL_UNRESPONSIVE"
+    assert body["retryable"] is False
+    assert body["detail"] != SIGN_IN_FAILED_DETAIL
+    client.order_check.assert_not_called()
+    client.release.assert_called_once()
+
+
+# --------------------------------------------------------------------------- #
+# 164.6.5 / criterion 5 (D-12/D-13) — the IPC-transport arm: OUR terminal, not
+# the user's key, and never a retry instruction that cannot work
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    ("code", "detail"),
+    [
+        (-10004, "No IPC connection"),
+        (-10005, "IPC timeout"),
+    ],
+)
+async def test_mt5_ipc_transport_fault_maps_to_terminal_unresponsive(
+    exchange_router, code, detail
+):
+    """164.6.5 / criterion 5 — BOTH IPC transport codes now raise a distinct,
+    honest, non-retryable 500 instead of falling through to the generic "try
+    again in a moment" transient copy. MEASURED 2026-09-21: -10005 stayed
+    wedged 1h39m across two retries, one with CORRECT credentials, and no
+    retry from the wizard could ever have cleared it — the same instruction
+    the 424/transient tail below still gives for every OTHER unrecognised
+    login error, honestly, because those really can clear on a retry.
+
+    release() runs — the session is torn down like every other arm. Raising
+    (never returning {"valid": true}) is this function's fail-CLOSED posture;
+    nothing is persisted on any arm of it, this one included."""
+    router = exchange_router
+    err = Mt5ClientError(code, detail)
+    client = _make_client(login_raises=err)
+    _install_mt5_client(router, client)
+
+    with pytest.raises(HTTPException) as ei:
+        await _call(router, _make_req())
+
+    assert ei.value.status_code == 500
+    assert ei.value.status_code != 424, (
+        "an IPC transport fault must not fall through to the generic "
+        "transient/424 tail — that copy asks the user to retry a terminal "
+        "that will not answer again"
+    )
+    body = ei.value.detail
+    assert body["code"] == "MT5_TERMINAL_UNRESPONSIVE"
+    assert body["dependency"] == "mt5-gateway"
+    assert body["retryable"] is False
+    # R-1: a permanent fault never advertises a wait.
+    assert not (ei.value.headers or {}).get("Retry-After")
+    # Never the dishonest transient copy, and never a credential-blame copy.
+    assert body["detail"] != NETWORK_ERROR_DETAIL
+    assert body["detail"] != AUTH_FAILED_DETAIL
+    assert body["detail"] != MT5_WRONG_SERVER_DETAIL
+    assert "read_only" not in repr(body)
+    # 164.6.5 review round 1 / WR-05 — not now, but not never. The detail used
+    # to say "This needs an operator, not a retry", a permanence claim that is
+    # false for -10004 (a redeploy clears it) and for the heal's own relaunch
+    # window, which answers both codes.
+    assert "a later attempt can succeed" in body["detail"]
+    assert "needs an operator" not in body["detail"]
+    client.release.assert_called_once()
+
+
+async def test_mt5_non_ipc_client_error_is_unchanged_the_d12_fence(exchange_router):
+    """⭐ D-12 as an EXECUTING assertion — the honest transport arm must be
+    PROVEN intact, not merely left alone. A login error carrying a code
+    OUTSIDE `_IPC_TRANSPORT_CODES` must still classify exactly as it did
+    before this plan: the generic 424/transient tail, never the new 500.
+    `KEY_NETWORK_TIMEOUT` (the TypeScript sibling of this Python-side copy)
+    is neither deleted nor widened."""
     router = exchange_router
     err = Mt5ClientError(0, "timeout waiting for response")
     client = _make_client(login_raises=err)
@@ -333,46 +1415,704 @@ async def test_mt5_transient_maps_to_network_detail_not_credentials(exchange_rou
     with pytest.raises(HTTPException) as ei:
         await _call(router, _make_req())
 
-    assert ei.value.status_code == 400
+    assert ei.value.status_code == 424
+    assert ei.value.status_code != 500, (
+        "D-12: the honest transport arm must not be widened into the new "
+        "IPC-specific 500 — a non-IPC code stays on its EXISTING disposition"
+    )
     assert ei.value.detail == NETWORK_ERROR_DETAIL
-    assert ei.value.status_code != 500
-    assert "authentication failed" not in ei.value.detail.lower()
-    client.close.assert_called_once()
+    client.release.assert_called_once()
 
 
-async def test_mt5_probe_timeout_maps_to_network_detail_and_closes(exchange_router, monkeypatch):
-    """T-135-12 (WEDGE-01): a hung RPyC probe is bounded by the wait_for ceiling —
-    a TimeoutError maps to the shared NETWORK_ERROR_DETAIL (transient), never a
-    500, never valid. The client is constructed, so close() must still run."""
+async def test_mt5_ipc_transport_fault_emits_its_own_outcome_category(
+    exchange_router,
+):
+    """The stage event's recorded outcome is a NEW category, distinct from the
+    existing "transient" bucket — the parity histogram this field feeds
+    groups by it, and folding this operator-actionable state into the
+    transient bucket would corrupt the counts."""
     router = exchange_router
-    client = _make_client(account=_INVESTOR_ACCOUNT, order_check=_INVESTOR_ORDER_CHECK)
+    err = Mt5ClientError(-10005, "IPC timeout")
+    client = _make_client(login_raises=err)
     _install_mt5_client(router, client)
 
-    # There are now THREE wait_for sites (RED-TEAM): (1) the off-loop ctor, (2) the
-    # probe, (3) the off-loop close. Time out only the PROBE (call #2) so the client
-    # is still constructed (ctor passes) and the finally close still runs — the exact
-    # "hung probe, bounded, closes" scenario. Calls #1 and #3 run for real.
-    _wf_calls = {"n": 0}
+    with capture_logs() as captured:
+        with pytest.raises(HTTPException):
+            await _call(router, _make_req())
 
-    async def _timeout_on_probe(aw, timeout=None):
-        _wf_calls["n"] += 1
-        if _wf_calls["n"] == 2:
-            # Close the underlying to_thread coroutine so it never runs (no thread,
-            # no "coroutine was never awaited" warning), then simulate the ceiling.
-            if hasattr(aw, "close"):
-                aw.close()
-            raise asyncio.TimeoutError
-        return await aw
+    validate = _mt5_events(captured, "validate")
+    assert len(validate) == 1
+    assert validate[0]["outcome"] == "terminal_unresponsive"
+    assert validate[0]["outcome"] != "transient", (
+        "folding this into the existing transient category would corrupt "
+        "the parity histogram this field is built from"
+    )
+    assert validate[0]["ok"] is False
 
-    monkeypatch.setattr(router.asyncio, "wait_for", _timeout_on_probe)
+
+async def test_mt5_ipc_transport_fault_logs_scrubbed_code_no_credentials(
+    exchange_router, monkeypatch
+):
+    """The line for this arm carries the SCRUBBED code only — never the
+    interpolated remote text, never a login, password, or broker server
+    value. Asserted as a PROPERTY of what was logged (secrets absent), never
+    by constructing a credential-shaped literal as the thing searched for
+    (this repo's own dated proof-of-absence rule)."""
+    router = exchange_router
+    err = Mt5ClientError(-10005, "IPC timeout")
+    client = _make_client(login_raises=err)
+    _install_mt5_client(router, client)
+    mock_logger = MagicMock()
+    monkeypatch.setattr(router, "logger", mock_logger)
+
+    with capture_logs() as captured:
+        with pytest.raises(HTTPException):
+            await _call(
+                router,
+                _make_req(
+                    api_key="123456", api_secret="s3cr3t-pw", passphrase="MyBroker-Live"
+                ),
+            )
+
+    secrets = ("123456", "s3cr3t-pw", "MyBroker-Live")
+    for meth in ("exception", "error", "warning", "info", "debug"):
+        for call in getattr(mock_logger, meth).call_args_list:
+            rendered = repr(call)
+            for secret in secrets:
+                assert secret not in rendered
+    # 164.6.5 review round 1 / SFH-08 — the arm now logs at ERROR, so the
+    # non-vacuity check reads the ERROR calls (the level itself is pinned by
+    # `test_ipc_transport_fault_logs_at_error_like_the_d15_arm`).
+    assert mock_logger.error.call_args_list, (
+        "the sweep above is vacuous unless at least one ERROR was captured"
+    )
+
+    events = [e for e in captured if e.get("event") == "mt5.stage"]
+    assert events, "the structlog half of the sweep is vacuous"
+    rendered_events = repr(events)
+    for secret in secrets:
+        assert secret not in rendered_events
+
+
+async def test_mt5_probe_timeout_maps_to_network_detail_and_releases(
+    exchange_router, monkeypatch
+):
+    """T-135-12 (WEDGE-01): a hung RPyC probe is bounded by the PER-STAGE ceiling —
+    a TimeoutError maps to the shared NETWORK_ERROR_DETAIL (transient), never a
+    500, never valid. The client is constructed, so release() must still run.
+
+    RE-CUT for 153.3-03 (D-03). This case used to fire the ceiling by counting
+    `wait_for` calls and timing out call #2 — an ordinal that is only valid for one
+    exact topology. Collapsing connect+probe under ONE end-to-end deadline made call
+    #2 the connect stage, so the old form would have silently started testing the
+    503 arm while still passing its 424 assertion... it would not, in fact, have
+    passed — but a future stage insertion could shift the ordinal into an arm whose
+    assertions happen to match, and that is a rot mode a test must not have. It now
+    fires the ceiling the way the constants make possible: monkeypatch the STAGE
+    constant to a hair and let a genuinely slow login run into it. No ordinal, so
+    adding or reordering a stage cannot silently re-point this test.
+    """
+    router = exchange_router
+    client = _make_client(account=_INVESTOR_ACCOUNT, order_check=_INVESTOR_ORDER_CHECK)
+    # The probe hangs; the (mocked) construction does not, so the connect stage
+    # passes under the same tiny ceiling and only the PROBE stage fires.
+    client.login = MagicMock(side_effect=lambda *a, **k: time.sleep(0.3))
+    _install_mt5_client(router, client)
+    monkeypatch.setattr(router, "_MT5_VALIDATE_STAGE_TIMEOUT_S", 0.05)
 
     with pytest.raises(HTTPException) as ei:
         await _call(router, _make_req())
 
-    assert ei.value.status_code == 400
+    # 424 = CALLER'S EXCHANGE (C3; see the account-mismatch case for the full
+    # rationale). A hung upstream bridge is not a malformed caller request.
+    assert ei.value.status_code == 424
     assert ei.value.detail == NETWORK_ERROR_DETAIL
     assert ei.value.status_code != 500
-    client.close.assert_called_once()
+    client.release.assert_called_once()
+    client.close.assert_not_called()
+
+
+async def test_mt5_end_to_end_deadline_still_releases_the_session(
+    exchange_router, monkeypatch
+):
+    """⭐ THE WAVE-0 GAP — RESEARCH Pitfall 6.
+
+    The failure this prevents: putting the `finally` release INSIDE the end-to-end
+    `wait_for`. Then a deadline that fires mid-probe cancels the release along with
+    the probe, and the RPyC session is abandoned UNRELEASED — the session leak the
+    finally block exists to prevent, and a WEDGE-01-class regression that no other
+    case in this file can see, because every other case reaches the finally through
+    a normal raise/return rather than through a cancellation.
+
+    Fires the deadline by monkeypatching the constant (NOT a `wait_for` ordinal), so
+    the case survives a stage being added. The per-stage ceiling is left at its real
+    value, so the DEADLINE is provably the bound that fired: a stage timeout would
+    have produced the same 424 but would not have exercised the cancellation path.
+    """
+    router = exchange_router
+    client = _make_client(account=_INVESTOR_ACCOUNT, order_check=_INVESTOR_ORDER_CHECK)
+    client.login = MagicMock(side_effect=lambda *a, **k: time.sleep(0.3))
+    _install_mt5_client(router, client)
+    monkeypatch.setattr(router, "_MT5_VALIDATE_DEADLINE_S", 0.05)
+
+    with pytest.raises(HTTPException) as ei:
+        await _call(router, _make_req())
+
+    assert ei.value.status_code == 424
+    assert ei.value.detail == NETWORK_ERROR_DETAIL
+    client.release.assert_called_once()
+    client.close.assert_not_called()
+
+
+# --------------------------------------------------------------------------- #
+# THE TERMINAL LEASE (153.3-04 / D-29) — this path used to be the ONE caller that
+# skipped it.
+#
+# `job_worker.py` (x2) and `allocator_positions.py` all take
+# `_mt5_terminal_lock_for`; `routers/exchange.py` took it ZERO times. Two wizard
+# submissions therefore both called login(...) on the ONE shared Wine terminal and
+# made each OTHER fail through the mismatch bracket, instead of queueing.
+#
+# ⚠️ The oracle is BLOCKING/ORDERING, never "a lease object was entered": a lease
+# built on a second registry, or on a differently-formatted key, enters and exits
+# perfectly happily while serializing nothing.
+# --------------------------------------------------------------------------- #
+
+
+def _expected_terminal_key(host: str, port: int) -> str:
+    """The key Mt5Client itself would produce — computed by CALLING the shipped
+    property, never by retyping its format here. The three job sites key on
+    `Mt5Client.terminal_key`, so if the router formats the key differently the two
+    resolve to DIFFERENT Lock objects and serialize nothing (MT5CONC-02 /
+    151-RESEARCH Pitfall 2) while every lock still "works"."""
+    from types import SimpleNamespace
+
+    from services.mt5_client import Mt5Client
+
+    return Mt5Client.terminal_key.fget(SimpleNamespace(_host=host, _port=port))
+
+
+async def test_two_concurrent_validates_are_serialized_on_the_terminal(
+    exchange_router,
+):
+    """⭐ THE POINT OF PLAN 153.3-04 (D-29, T-153.3-17).
+
+    The failure this prevents: two wizard submissions interleaving `login()` on the
+    ONE shared Wine terminal. MT5 binds one account per terminal AT A TIME, so the
+    second login re-points the terminal under the first caller — today they make
+    each OTHER fail via the mismatch bracket rather than queueing
+    (153-EVIDENCE §4). Under the lease the second caller WAITS.
+
+    Asserted as ORDERING, not as "both succeeded": both succeed under the defect too
+    whenever the interleave happens to miss. `login` sleeps inside the worker thread
+    precisely so an unserialized second caller WOULD overlap it.
+    """
+    router = exchange_router
+    events: list[str] = []
+
+    client = _make_client(
+        account=_INVESTOR_ACCOUNT,
+        order_check=_INVESTOR_ORDER_CHECK,
+        terminal=_HEALTHY_TERMINAL_INFO,
+    )
+
+    def _slow_login(*_a, **_k):
+        events.append("login-start")
+        time.sleep(0.1)
+        events.append("login-end")
+
+    client.login = MagicMock(side_effect=_slow_login)
+    client.release = MagicMock(side_effect=lambda: events.append("release"))
+    _install_mt5_client(router, client)
+
+    results = await asyncio.gather(
+        _call(router, _make_req()), _call(router, _make_req())
+    )
+
+    assert results == [{"valid": True, "read_only": True}] * 2
+    assert events == ["login-start", "login-end", "release"] * 2, (
+        "the second validate's login started before the first released the "
+        "terminal — the lease is not being taken (or is keyed differently from "
+        f"Mt5Client.terminal_key). Observed: {events}"
+    )
+
+
+async def test_mt5_terminal_busy_refuses_transiently_and_never_constructs_a_client(
+    exchange_router, monkeypatch
+):
+    """⭐ THE BOUNDED ACQUISITION (D-29). An interactive validate must be able to
+    give up waiting for the terminal WITHOUT waiting for the terminal — its own
+    operation deadline never starts until it HOLDS the terminal, so an unbounded
+    queue wait would blow the client budget (D-26) with no verdict at all.
+
+    Three things asserted, each with its own failure mode:
+      * 424 + NETWORK_ERROR_DETAIL — the EXISTING transient arm, honestly
+        recoverable ("try again" is real advice: the terminal frees up). NEVER
+        valid:true (fail CLOSED) and NEVER the auth arm — a busy terminal is OUR
+        infrastructure, not the user's key.
+      * `Mt5Client` was never CONSTRUCTED — waiting for the terminal must not also
+        burn a socket, and construction is the very thing that races.
+      * the body leaks no infrastructure (WIZFORM-03 / T-153.3-20): no terminal
+        key, host or port.
+    """
+    router = exchange_router
+    client = _make_client(
+        account=_INVESTOR_ACCOUNT,
+        order_check=_INVESTOR_ORDER_CHECK,
+        terminal=_HEALTHY_TERMINAL_INFO,
+    )
+    factory = _install_mt5_client(router, client)
+
+    # Somebody else holds the terminal for longer than the interactive bound.
+    held = mt5_concurrency._mt5_terminal_lock_for(
+        _expected_terminal_key("mt5-gw.internal", 18812)
+    )
+    await held.acquire()
+    monkeypatch.setattr(router, "_MT5_LEASE_WAIT_S", 0.05)
+
+    with pytest.raises(HTTPException) as ei:
+        await _call(router, _make_req())
+
+    assert ei.value.status_code == 424
+    assert ei.value.detail == NETWORK_ERROR_DETAIL
+    assert ei.value.status_code != 500
+    assert ei.value.detail != AUTH_FAILED_DETAIL
+    assert "authentication failed" not in ei.value.detail.lower()
+
+    factory.assert_not_called()
+    client.release.assert_not_called()
+    client.close.assert_not_called()
+
+    body = ei.value.detail.lower()
+    for leak in ("mt5-gw.internal", "18812", "terminal", "lease", "queue", "lock"):
+        assert leak not in body, f"the busy refusal leaked infrastructure: {leak!r}"
+
+    # The real holder still holds it — a refused waiter released nothing.
+    assert held.locked()
+    held.release()
+
+
+async def test_the_lease_wait_does_not_consume_the_operation_deadline(
+    exchange_router, monkeypatch
+):
+    """⭐ PLACEMENT — the acquisition wait must sit OUTSIDE the end-to-end deadline.
+
+    The failure this prevents: wrapping the lease acquisition INSIDE
+    `_MT5_VALIDATE_DEADLINE_S`. Then the two budgets silently share one number and a
+    caller that queued behind another submission gets a TRUNCATED probe — or, as
+    here, no probe at all: it would answer 424 "hung terminal" having never touched
+    the terminal, while the honest verdict was 0.2s away.
+
+    The terminal is held for 0.5s; the OPERATION deadline is 0.3s. Correct placement
+    ⇒ the deadline starts when we HOLD the terminal and the (mocked, instant) probe
+    finishes well inside it. Inverted placement ⇒ the deadline fires while still
+    queueing and this reds with the transient 424."""
+    router = exchange_router
+    client = _make_client(
+        account=_INVESTOR_ACCOUNT,
+        order_check=_INVESTOR_ORDER_CHECK,
+        terminal=_HEALTHY_TERMINAL_INFO,
+    )
+    _install_mt5_client(router, client)
+
+    held = mt5_concurrency._mt5_terminal_lock_for(
+        _expected_terminal_key("mt5-gw.internal", 18812)
+    )
+    await held.acquire()
+
+    async def _release_later():
+        await asyncio.sleep(0.5)
+        held.release()
+
+    releaser = asyncio.create_task(_release_later())
+    # Far LONGER than the operation deadline, so the two cannot be confused.
+    monkeypatch.setattr(router, "_MT5_LEASE_WAIT_S", 5.0)
+    monkeypatch.setattr(router, "_MT5_VALIDATE_DEADLINE_S", 0.3)
+
+    result = await _call(router, _make_req())
+
+    await releaser
+    assert result == {"valid": True, "read_only": True}, (
+        "the queue wait was charged to the operation deadline — a caller that "
+        "waited its turn is given a truncated probe (or none at all)"
+    )
+    client.release.assert_called_once()
+
+
+async def test_validate_leases_the_key_mt5client_itself_would_produce(exchange_router):
+    """⭐ The key-format assertion. The router must hold the lease BEFORE
+    constructing the client (construction opens the racing rpyc socket), so it
+    cannot ask `Mt5Client.terminal_key` for the key — it re-derives it from the same
+    host/port. A divergent format ("mt5-gw.internal-18812", or a lowercased host)
+    yields a DIFFERENT Lock object from the one the three job sites take, and the
+    wizard would serialize only against ITSELF while still racing every worker job.
+
+    Also asserts the lock is genuinely HELD during the probe — a lease that acquired
+    a Lock nobody else uses would satisfy the key assertion alone."""
+    router = exchange_router
+    expected_key = _expected_terminal_key("mt5-gw.internal", 18812)
+    observed: list[bool] = []
+
+    client = _make_client(
+        account=_INVESTOR_ACCOUNT,
+        order_check=_INVESTOR_ORDER_CHECK,
+        terminal=_HEALTHY_TERMINAL_INFO,
+    )
+    # Runs INSIDE the probe thread, i.e. while the lease is held.
+    client.login = MagicMock(
+        side_effect=lambda *a, **k: observed.append(
+            mt5_concurrency._MT5_TERMINAL_LOCKS.get(expected_key) is not None
+            and mt5_concurrency._MT5_TERMINAL_LOCKS[expected_key].locked()
+        )
+    )
+    _install_mt5_client(router, client)
+
+    assert await _call(router, _make_req()) == {"valid": True, "read_only": True}
+
+    assert list(mt5_concurrency._MT5_TERMINAL_LOCKS) == [expected_key], (
+        "the router leased a key the job sites do not use — two Lock objects for "
+        "the ONE terminal, and zero serialization against the worker"
+    )
+    assert observed == [True], (
+        "the terminal lock was not held while the probe ran — the lease is not "
+        "wrapping the probe"
+    )
+    # Released on the way out: a stranded lock wedges every future caller.
+    assert not mt5_concurrency._MT5_TERMINAL_LOCKS[expected_key].locked()
+
+
+async def test_mt5_validate_never_calls_close_on_the_success_path(exchange_router):
+    """⭐ D-30, stated POSITIVELY: the validate path calls release() and calls
+    close() on NO path.
+
+    close() calls mt5.shutdown(), and mt5linux serves every rpyc connection from ONE
+    ThreadedServer process over ONE shared MetaTrader5 instance holding ONE IPC pipe
+    (153-EVIDENCE §A2 / C-1) — so a per-request close() tears that pipe down for
+    every CONCURRENT caller, who then observe `-10004 No IPC connection`. This is
+    the assertion an "also call close() for safety" regression reddens."""
+    router = exchange_router
+    client = _make_client(
+        account=_INVESTOR_ACCOUNT,
+        order_check=_INVESTOR_ORDER_CHECK,
+        terminal=_HEALTHY_TERMINAL_INFO,
+    )
+    _install_mt5_client(router, client)
+
+    result = await _call(router, _make_req())
+
+    assert result == {"valid": True, "read_only": True}
+    client.release.assert_called_once()
+    client.close.assert_not_called()
+
+
+# --------------------------------------------------------------------------- #
+# THE CHAIN (153.3 / D-02) — the nesting IS the property
+#
+# Each layer must fire strictly before the layer outside it, so a failure is
+# diagnosed at the innermost layer that can name a cause. Every expected value is a
+# HAND-TYPED literal or a strict inequality over the shipped constants — never a
+# recomputation of the source's own formula, which could not fail.
+# --------------------------------------------------------------------------- #
+
+
+def test_mt5_validate_timeout_chain_is_strictly_nested(exchange_router):
+    """LOGIN_MS < REQUEST_S < STAGE_S < DEADLINE_S, in milliseconds throughout.
+
+    WHY each link matters (Rule 9):
+      * IPC < rpyc — MT5 must fail its own pipe first, or rpyc censors the verdict
+        with a bare abort that names no MT5 code (the D-24 defect, 9/9 production
+        logins).
+      * rpyc < stage — the rpyc client timeout must fire before the event-loop
+        ceiling, or a hung terminal yields a bare asyncio.TimeoutError with no venue
+        detail instead of a real MT5 error. This is what the `+ 5.0` diagnostic
+        ordering margin buys (D-02); it is NOT a budget.
+      * stage < deadline — a stage must fire before the end-to-end deadline, or the
+        deadline pre-empts every diagnosable failure and every timeout becomes
+        "the whole probe hung", attributable to nothing.
+    Raise any inner ceiling above its parent and this reds.
+    """
+    router = exchange_router
+    initialize_ms = router._MT5_VALIDATE_INITIALIZE_TIMEOUT_MS
+    login_ms = router._MT5_VALIDATE_LOGIN_TIMEOUT_MS
+    request_ms = MT5_VALIDATE_REQUEST_TIMEOUT_S * 1000
+    stage_ms = router._MT5_VALIDATE_STAGE_TIMEOUT_S * 1000
+    deadline_ms = router._MT5_VALIDATE_DEADLINE_S * 1000
+
+    # The shipped numbers, hand-typed — the chain moving is a deliberate act.
+    assert initialize_ms == 45_000
+    assert login_ms == 45_000
+    assert request_ms == 55_000
+    assert stage_ms == 60_000
+    assert deadline_ms == 75_000
+
+    assert initialize_ms < request_ms, "MT5 initialize() IPC must fail before rpyc"
+    assert login_ms < request_ms, "MT5 login() IPC must fail before rpyc"
+    assert request_ms < stage_ms, (
+        "the rpyc round-trip must fire before the event-loop stage ceiling, or a "
+        "timeout carries no venue detail (D-02)"
+    )
+    assert stage_ms < deadline_ms, (
+        "a STAGE must fire before the end-to-end deadline, or every timeout becomes "
+        "un-attributable (D-03)"
+    )
+
+
+def test_mt5_validate_worst_case_stays_inside_the_client_budget(exchange_router):
+    """D-26: the server's worst case must stay inside the CLIENT's ceiling, or the
+    browser gives up first and the user sees a generic network failure instead of
+    the honest verdict the server was about to produce.
+
+    120_000 is HAND-TYPED, not imported: the TS-side budget is Phase 153.4's to own
+    (`seam-budgets.invariant.test.ts`), and a Python test that imported it would
+    move silently with it.
+
+    EXTENDED by plan 153.3-04: the lease wait is now part of the TRUE end-to-end
+    worst case and is included here. D-04's shape — the lock-queue wait sits INSIDE
+    the client's budget, because the browser is waiting through it exactly as it
+    waits through the probe. 20 (lease) + 75 (deadline) + 10 (release) = 105s, 15s
+    inside the ceiling. Spending that headroom twice is what this test refuses."""
+    router = exchange_router
+    worst_case_ms = (
+        router._MT5_LEASE_WAIT_S
+        + router._MT5_VALIDATE_DEADLINE_S
+        + router._MT5_RELEASE_TIMEOUT_S
+    ) * 1000
+    assert worst_case_ms == 105_000
+    assert worst_case_ms < 120_000
+    # The lease wait is a REAL term, not a rounding allowance: it must be the
+    # interactive bound, and it must not have quietly become unbounded/zero.
+    assert router._MT5_LEASE_WAIT_S == 20.0
+    assert mt5_concurrency._MT5_LEASE_WAIT_S == router._MT5_LEASE_WAIT_S
+
+
+def test_worker_request_timeout_is_unmoved_by_the_validate_chain():
+    """⛔ D-25: MT5_REQUEST_TIMEOUT_S is the SEQUENTIAL worker's contract and must
+    stay at 30s. The validate path got its headroom per-instance precisely so this
+    constant would not move; "harmonising" the two reopens the v1.11 WEDGE-01 wedge
+    class (a hung terminal held past the ~90s healthz budget) for every job. The
+    literal is hand-typed so the pin cannot move with the source."""
+    assert MT5_REQUEST_TIMEOUT_S == 30.0
+    assert MT5_VALIDATE_REQUEST_TIMEOUT_S == 55.0
+    assert MT5_VALIDATE_REQUEST_TIMEOUT_S > MT5_REQUEST_TIMEOUT_S
+
+
+async def test_mt5_validate_constructs_the_client_with_the_validate_chain(
+    exchange_router,
+):
+    """D-25 wiring: the router must PASS the longer chain to Mt5Client, not merely
+    define it. Asserted against the recorded construction kwargs (test-the-wiring),
+    so a chain that is declared and then not plumbed through reds here."""
+    router = exchange_router
+    client = _make_client(
+        account=_INVESTOR_ACCOUNT,
+        order_check=_INVESTOR_ORDER_CHECK,
+        terminal=_HEALTHY_TERMINAL_INFO,
+    )
+    factory = _install_mt5_client(router, client)
+
+    await _call(router, _make_req())
+
+    factory.assert_called_once()
+    kwargs = factory.call_args.kwargs
+    assert kwargs["request_timeout_s"] == MT5_VALIDATE_REQUEST_TIMEOUT_S
+    assert kwargs["initialize_timeout_ms"] == router._MT5_VALIDATE_INITIALIZE_TIMEOUT_MS
+    assert kwargs["login_timeout_ms"] == router._MT5_VALIDATE_LOGIN_TIMEOUT_MS
+
+
+# --------------------------------------------------------------------------- #
+# D-31's fail-closed guard — the MATERIALIZATION hole
+# --------------------------------------------------------------------------- #
+
+
+class _Netref:
+    """A namedtuple-shaped stand-in for the rpyc netref MT5 returns.
+
+    ``Mt5Client._materialize`` accepts anything exposing ``_asdict()``; this is the
+    healthy shape, used for the reads that are NOT under test here."""
+
+    def __init__(self, **fields):
+        self._fields = fields
+
+    def _asdict(self):
+        return dict(self._fields)
+
+
+class _NetrefDeadOnAttributeFetch:
+    """A netref whose ATTRIBUTE FETCH is itself a remote round-trip, and the
+    connection is already gone when ``_materialize`` reaches for ``_asdict``."""
+
+    def __getattr__(self, name):
+        raise EOFError("stream has been closed")
+
+
+class _NetrefDeadOnAsdictCall:
+    """A netref that answers the ``_asdict`` fetch and then dies on the CALL — the
+    other half of the same materialization window."""
+
+    def _asdict(self):
+        raise EOFError("stream has been closed")
+
+
+@pytest.mark.parametrize(
+    "dead_netref",
+    [_NetrefDeadOnAttributeFetch, _NetrefDeadOnAsdictCall],
+    ids=["dies-on-attribute-fetch", "dies-on-asdict-call"],
+)
+async def test_terminal_transport_failure_at_materialization_still_refuses(
+    exchange_router, dead_netref
+):
+    """⭐ D-31 must fail CLOSED through the MATERIALIZATION window too.
+
+    ``_read_terminal`` narrowed its fail-closed catch to ``Mt5ClientError``, but
+    ``Mt5Client.terminal_info`` materializes the rpyc netref OUTSIDE
+    ``_guarded_read`` — that is the ONE step of the read whose failure is not
+    converted to a typed error. So a transport failure in that window escaped the
+    refusal entirely, on a guard whose entire purpose is that an unreadable
+    terminal yields NO signal.
+
+    ⚠️ THE WINDOW IS THE POINT. ``terminal_info()`` is CALLED successfully here and
+    RETURNS a netref — ``_guarded_read`` has already handed control back — and only
+    the subsequent materialization dies. A test that made the CALL raise never
+    reaches this bug at all: that path is already an ``Mt5ClientError`` and is
+    already caught (see the unreadable-terminal case above). The doubles below
+    cannot raise at call time by construction; their bodies only return.
+
+    The correct outcome is the one D-31 exists to produce: no terminal signal ->
+    "undetermined" -> refusal. Never a read_only success built on two account
+    negatives we cannot attribute, and never an accusation against the user's
+    broker server — ``classify_mt5_login_error``'s wrong-server table carried
+    "terminal", "ipc" and "connect" as BARE WORDS, so any transport fault of ours
+    that reached it came back as the user's broker server being wrong.
+
+    ⚠️ 164.5.4 replaced those with anchored phrases (``_WRONG_SERVER_PHRASES``) and
+    added the refusal rule, so a transport fault that DID reach the classifier
+    would now degrade to ``transient``. ⛔ NARROWER, not gone: `transient` is still
+    the wrong verdict for a fault that no retry can clear, and the refusal rule
+    governs only messages the tables do not recognise. OUR gateway's transport
+    fault must still never be allowed to reach the classifier at all.
+    """
+    router = exchange_router
+    calls = []
+    transport = MagicMock(name="mt5-transport")
+    transport.account_info = MagicMock(return_value=_Netref(**_INVESTOR_ACCOUNT))
+    transport.order_check = MagicMock(return_value=_Netref(**_INVESTOR_ORDER_CHECK))
+
+    def _terminal_info():
+        # Records entry, then RETURNS a netref. There is no raise on this path —
+        # the round-trip succeeded and the guarded region is already over.
+        calls.append("returned-a-netref")
+        return dead_netref()
+
+    transport.terminal_info = _terminal_info
+    _install_real_mt5_client(router, transport)
+
+    with pytest.raises(HTTPException) as ei:
+        await _call(router, _make_req())
+
+    # The call itself succeeded — the failure was strictly at materialization.
+    assert calls == ["returned-a-netref"]
+    # Refusal, fail-CLOSED and transient (our bridge blipped; it clears on retry).
+    assert ei.value.status_code == 424
+    assert ei.value.detail == NETWORK_ERROR_DETAIL
+    # ⛔ Never the two mistranslations. A wrong-server verdict here blames the user
+    # for a fault in our gateway; an auth verdict blames their credentials.
+    assert ei.value.detail != MT5_WRONG_SERVER_DETAIL
+    assert ei.value.detail != AUTH_FAILED_DETAIL
+    # ⛔ And never a permissive verdict: an unreadable terminal yields NO signal.
+    assert "read_only" not in repr(ei.value.detail)
+
+
+# --------------------------------------------------------------------------- #
+# D-24's ordering guard — a PERMANENT operator fault, never a gateway outage
+# --------------------------------------------------------------------------- #
+
+
+async def test_inverted_ipc_timeout_chain_is_a_permanent_operator_fault(
+    exchange_router, monkeypatch
+):
+    """⭐ D-24's ordering guard fires CORRECTLY and was MISTRANSLATED on the way out.
+
+    The scenario is a real operator action, not a synthetic one: set
+    ``MT5_VALIDATE_REQUEST_TIMEOUT_S=40`` and leave
+    ``MT5_VALIDATE_INITIALIZE_TIMEOUT_MS`` at its 45 000 default. The ceiling
+    ordering inverts and ``Mt5Client.__init__`` refuses to construct — and because
+    it refuses INSIDE the connect ``to_thread``, the broad "connect failure is
+    server/bridge, not the key" arm answered **503 MT5_GATEWAY_UNREACHABLE,
+    retryable, with a Retry-After**.
+
+    WHY THAT IS THE BUG (Rule 9 — the economics, not the implementation's own
+    formula): the misconfiguration is PERMANENT. Every MT5 validate then says "the
+    gateway is not responding, try again shortly" — advice nobody can act on for a
+    fault only an operator can clear — and every one of those 503s keys the
+    ``mt5-gateway`` breaker, which trips, expires, re-probes and re-trips forever
+    (A-08/A-25/C-17). A 500 is SERVICE-PERMANENT and therefore breaker-INERT:
+    ``src/lib/seam-discriminator.ts`` classifies it ``counts:false`` /
+    ``breakerKey:null``, where a 503 yields ``counts:true`` and a key. That is why
+    the assertions below are on the RESPONSE SHAPE and not merely on "an error was
+    raised" — the status IS the breaker decision.
+
+    The REAL ``Mt5Client`` runs here, so this also pins the router's discriminator
+    to the guard's ACTUAL message: reword the guard and this test reds, rather than
+    the router silently falling back to the 503.
+    """
+    router = exchange_router
+    transport = MagicMock(name="mt5-transport")
+    factory = _install_real_mt5_client(router, transport)
+    # 40.0s -> 40 000ms, BELOW the 45 000ms initialize ceiling: inverted.
+    monkeypatch.setattr(router, "MT5_VALIDATE_REQUEST_TIMEOUT_S", 40.0)
+
+    with pytest.raises(HTTPException) as ei:
+        await _call(router, _make_req())
+
+    # Every literal hand-typed (programme non-negotiable #3).
+    assert ei.value.status_code == 500
+    assert ei.value.status_code != 503, (
+        "a 503 keys the mt5-gateway breaker on a fault no retry can ever clear — "
+        "the self-sustaining trip/expire/re-probe loop A-08/A-25 records"
+    )
+    body = ei.value.detail
+    assert body["code"] == "MT5_GATEWAY_UNCONFIGURED"
+    assert body["dependency"] == "mt5-gateway"
+    assert body["retryable"] is False
+    # R-1: a permanent fault never advertises a wait.
+    assert not (ei.value.headers or {}).get("Retry-After")
+    # And never the transient copy, which asks the user to do the one thing that
+    # cannot possibly work.
+    assert (
+        body["detail"]
+        != "The MetaTrader gateway is not responding. Try again shortly."
+    )
+    assert "read_only" not in repr(body)
+    # The guard refused BEFORE any transport was opened — construction is where the
+    # effective values meet, and nothing reached the wire.
+    factory.assert_called_once()
+    transport.initialize.assert_not_called()
+    transport.login.assert_not_called()
+
+
+async def test_an_unrelated_construction_valueerror_stays_transient(exchange_router):
+    """⛔ The permanent arm may only NARROW what reaches the 503 — never widen what
+    reaches the 500.
+
+    A construction ``ValueError`` that is NOT D-24's ordering guard is, from this
+    router's vantage point, indistinguishable from a transport fault, so it keeps
+    its existing transient classification. This is the negative obligation on the
+    fix: a router that reclassified EVERY ValueError would answer "this needs an
+    operator, not a retry" for faults that clear on their own, and — because a 500
+    is breaker-inert — a genuinely failing dependency would stop being counted at
+    all. Catching the class instead of the specific failure reds here.
+    """
+    router = exchange_router
+    router.Mt5Client = MagicMock(side_effect=ValueError("something else entirely"))
+
+    with pytest.raises(HTTPException) as ei:
+        await _call(router, _make_req())
+
+    assert ei.value.status_code == 503
+    assert ei.value.detail["code"] == "MT5_GATEWAY_UNREACHABLE"
+    assert ei.value.detail["dependency"] == "mt5-gateway"
+    assert ei.value.detail["retryable"] is True
+    assert (ei.value.headers or {}).get("Retry-After") == "30"
 
 
 # --------------------------------------------------------------------------- #
@@ -428,14 +2168,29 @@ async def test_mt5_blank_investor_password_fails_auth_without_client(exchange_ro
 
 
 # --------------------------------------------------------------------------- #
-# Server misconfig — a 503, never the user's key, logged secret-free
+# Server misconfig — a PERMANENT 500, never the user's key, logged secret-free
 # --------------------------------------------------------------------------- #
 
 
-async def test_mt5_missing_gateway_env_is_503_and_secret_free(exchange_router, monkeypatch):
-    """Missing MT5_GATEWAY_HOST/PORT is a SERVER misconfig -> 503
-    NETWORK_ERROR_DETAIL (never a 500, never AUTH_FAILED that blames the user), and
-    the log line carries NO credential values."""
+async def test_mt5_missing_gateway_env_is_permanent_500_and_secret_free(
+    exchange_router, monkeypatch
+):
+    """Missing MT5_GATEWAY_HOST/PORT is a SERVER misconfig, never AUTH_FAILED that
+    blames the user, and the log line carries NO credential values.
+
+    REWRITTEN 2026-07-26 (Phase 140.1 plan 03, S-02 / TRAP-9). This test used to
+    pin `503 == NETWORK_ERROR_DETAIL`. The PYAPI-05 status contract
+    (docs/STATUS_CONTRACT.md) reclassifies it: unset env is deterministic, so no
+    retry can ever clear it, and answering 503 made the platform breaker trip,
+    expire, re-probe and re-trip forever over a config gap (A-01 / A-08 / A-25).
+    R-1 says a permanent fault is 500 with retryable:false so it never counts.
+
+    The status/code below are LITERALS typed here, never imported from
+    services.error_contract — an oracle that reads its expectation out of the
+    thing under test cannot fail (programme non-negotiable #3). The
+    no-credential-in-logs assertions are orthogonal to the status change and are
+    preserved verbatim.
+    """
     router = exchange_router
     monkeypatch.delenv("MT5_GATEWAY_HOST", raising=False)
     monkeypatch.delenv("MT5_GATEWAY_PORT", raising=False)
@@ -449,8 +2204,25 @@ async def test_mt5_missing_gateway_env_is_503_and_secret_free(exchange_router, m
     with pytest.raises(HTTPException) as ei:
         await _call(router, _make_req(api_key="123456", api_secret="s3cr3t-pw", passphrase="MyBroker-Live"))
 
-    assert ei.value.status_code == 503
-    assert ei.value.detail == NETWORK_ERROR_DETAIL
+    assert ei.value.status_code == 500
+    assert ei.value.detail["code"] == "MT5_GATEWAY_UNCONFIGURED"
+    assert ei.value.detail["dependency"] == "mt5-gateway"
+    assert ei.value.detail["retryable"] is False
+    # R-1: a permanent fault never advertises a wait.
+    assert not (ei.value.headers or {}).get("Retry-After")
+    # Survivor #12: an INEQUALITY against a DIFFERENT constant is not an oracle —
+    # junk copy, an empty string and a stack trace all satisfy `!= AUTH_FAILED_DETAIL`,
+    # so replacing the human sentence shipped green. The copy IS the contract on this
+    # arm (140.3 renders it verbatim and it is the only thing telling the operator
+    # that no retry can clear this), so it is pinned as a string LITERAL typed here
+    # — never imported from routers.exchange, which would make the oracle read its
+    # expectation out of the thing under test.
+    assert ei.value.detail["detail"] == (
+        "The MetaTrader gateway is not configured. This needs an operator, not a retry."
+    )
+    # Kept as a second guard: the copy must also never become the credential
+    # accusation, whatever else it says.
+    assert ei.value.detail["detail"] != AUTH_FAILED_DETAIL
     factory.assert_not_called()
     # No credential value may reach ANY log line.
     for meth in ("exception", "error", "warning", "info", "debug"):
@@ -486,7 +2258,9 @@ async def test_ccxt_exchange_still_uses_create_exchange_path(exchange_router):
         router, _make_req(exchange="binance", api_key="k", api_secret="s")
     )
 
-    assert result == {"valid": True, "read_only": True}
+    # Phase 167.1.2 (D-01): the ccxt success path also carries the venue
+    # account id; None here because the stubbed verdict carries none.
+    assert result == {"valid": True, "read_only": True, "venue_account_id": None}
     create_exchange_spy.assert_called_once()
     assert create_exchange_spy.call_args.args[0] == "binance"
     mt5_factory.assert_not_called()
@@ -524,3 +2298,875 @@ def test_mt5_detail_strings_are_distinct_contract_literals():
     assert "master password" in MT5_MASTER_PASSWORD_DETAIL.lower()
     assert "broker server" in MT5_WRONG_SERVER_DETAIL.lower()
     assert "authentication failed" in AUTH_FAILED_DETAIL.lower()
+
+
+# --------------------------------------------------------------------------- #
+# 153.3 / D-32 — THE QUEUE WAIT AND THE VERDICT, MEASURED SEPARATELY
+#
+# WHY (Rule 9). Two things this path could never answer before:
+#   1. "how long did the terminal read take" vs "how long did we QUEUE for the
+#      terminal". EVIDENCE §4: a budget derived from a single-user total is wrong
+#      for user #2 BY CONSTRUCTION, because user #2's total contains user #1's
+#      read. Only a split measurement separates them after the fact.
+#   2. "how long does a validate take, by VERDICT". An instrument that fires only
+#      on success measures a population that excludes exactly the failures the
+#      45 000/55/60/75/20/10 chain was guessed against (D-27) — and every one of
+#      the nine production observations we have is a failure.
+#
+# The event name and the outcome vocabulary are HAND-TYPED here: they are the
+# aggregation keys Phase 155 groups by, so an oracle that imported them from
+# `routers/exchange.py` could not fail a rename or a re-categorisation.
+# --------------------------------------------------------------------------- #
+
+_STAGE_EVENT_NAME = "mt5.stage"
+
+
+def _mt5_events(captured, stage):
+    """The captured `mt5.stage` events for one stage."""
+    return [
+        e
+        for e in captured
+        if e.get("event") == _STAGE_EVENT_NAME and e.get("stage") == stage
+    ]
+
+
+async def test_the_happy_path_emits_a_lease_wait_and_a_read_only_outcome(
+    exchange_router,
+):
+    """The success path emits BOTH events: the (uncontended) queue wait and one
+    terminal outcome carrying `outcome="read_only"`.
+
+    `duration_ms` is asserted to be an int, not merely present — a field that is
+    always `None`, or a float of seconds mislabelled as milliseconds, satisfies
+    "the event has a duration" and is worthless to the phase that consumes it.
+    """
+    router = exchange_router
+    client = _make_client(
+        account=_INVESTOR_ACCOUNT,
+        order_check=_INVESTOR_ORDER_CHECK,
+        terminal=_HEALTHY_TERMINAL_INFO,
+    )
+    _install_mt5_client(router, client)
+
+    with capture_logs() as captured:
+        assert await _call(router, _make_req()) == {"valid": True, "read_only": True}
+
+    lease = _mt5_events(captured, "lease_wait")
+    assert len(lease) == 1, f"no lease_wait event was emitted: {captured}"
+    assert lease[0]["ok"] is True
+    assert isinstance(lease[0]["duration_ms"], int)
+    assert lease[0]["terminal_key"] == _expected_terminal_key("mt5-gw.internal", 18812)
+
+    validate = _mt5_events(captured, "validate")
+    assert len(validate) == 1, "a validate must terminate in EXACTLY one outcome event"
+    assert validate[0]["outcome"] == "read_only"
+    assert validate[0]["ok"] is True
+    assert isinstance(validate[0]["duration_ms"], int)
+
+
+async def test_a_busy_terminal_emits_a_measured_lease_wait_and_a_lease_busy_outcome(
+    exchange_router, monkeypatch
+):
+    """⭐ The refusal path. A validate given up at the acquisition bound is the
+    LONGEST queue wait there is, and it is the single observation a decision to
+    move `_MT5_LEASE_WAIT_S` turns on.
+
+    The bound is 0.2s and the wait is asserted `>= 100`ms, so the event carries a
+    REAL measurement of the queue wait. An instrument that emitted `0` here — or
+    that emitted nothing, because the emission sat inside the lease body the
+    refusal never enters — would report that nobody ever waits.
+    """
+    router = exchange_router
+    client = _make_client(
+        account=_INVESTOR_ACCOUNT,
+        order_check=_INVESTOR_ORDER_CHECK,
+        terminal=_HEALTHY_TERMINAL_INFO,
+    )
+    _install_mt5_client(router, client)
+
+    held = mt5_concurrency._mt5_terminal_lock_for(
+        _expected_terminal_key("mt5-gw.internal", 18812)
+    )
+    await held.acquire()
+    monkeypatch.setattr(router, "_MT5_LEASE_WAIT_S", 0.2)
+
+    with capture_logs() as captured:
+        with pytest.raises(HTTPException) as ei:
+            await _call(router, _make_req())
+
+    assert ei.value.status_code == 424
+    held.release()
+
+    lease = _mt5_events(captured, "lease_wait")
+    assert len(lease) == 1, f"the REFUSED wait emitted no lease_wait event: {captured}"
+    assert lease[0]["ok"] is False
+    assert lease[0]["duration_ms"] >= 100, (
+        "the refused queue wait was not measured — reported "
+        f"{lease[0]['duration_ms']}ms for a wait that ran to a 200ms bound"
+    )
+
+    validate = _mt5_events(captured, "validate")
+    assert len(validate) == 1
+    assert validate[0]["outcome"] == "lease_busy"
+    assert validate[0]["ok"] is False
+
+
+async def test_the_end_to_end_deadline_still_emits_its_terminal_outcome_event(
+    exchange_router, monkeypatch
+):
+    """⭐ The category that MUST NOT be missing. A deadline expiry is the failure
+    mode the whole 153.3 sub-phase exists to explain, and it is reached through a
+    CANCELLATION rather than through a normal raise — the one path an emission
+    bolted onto the return statement would silently skip.
+
+    An instrumentation that only fires on the paths that return normally
+    measures a population that excludes exactly the failures we are trying to
+    explain, which is the same defect as the pre-153.3 censored logs.
+    """
+    router = exchange_router
+    client = _make_client(account=_INVESTOR_ACCOUNT, order_check=_INVESTOR_ORDER_CHECK)
+    client.login = MagicMock(side_effect=lambda *a, **k: time.sleep(0.3))
+    _install_mt5_client(router, client)
+    monkeypatch.setattr(router, "_MT5_VALIDATE_DEADLINE_S", 0.05)
+
+    with capture_logs() as captured:
+        with pytest.raises(HTTPException) as ei:
+            await _call(router, _make_req())
+
+    assert ei.value.status_code == 424
+    validate = _mt5_events(captured, "validate")
+    assert len(validate) == 1, (
+        "the end-to-end deadline path emitted no terminal outcome event — the "
+        f"telemetry is blind to the failure it exists to explain: {captured}"
+    )
+    assert validate[0]["outcome"] == "deadline_exceeded"
+    assert validate[0]["ok"] is False
+    # The queue wait was uncontended and still measured: the two are independent.
+    assert len(_mt5_events(captured, "lease_wait")) == 1
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "expected_outcome"),
+    [
+        ({"api_key": ""}, "auth"),
+        ({"passphrase": ""}, "wrong_server"),
+    ],
+)
+async def test_pre_probe_refusals_carry_their_own_outcome_category(
+    exchange_router, kwargs, expected_outcome
+):
+    """The two offline credential-shape refusals still terminate in an outcome
+    event, and in DISTINCT categories.
+
+    These never touch the terminal, so they can never appear in a measurement
+    hung off the release block — yet they are the fastest verdicts the endpoint
+    produces, and lumping them in with the terminal reads would drag the p50 of
+    every other category down.
+    """
+    router = exchange_router
+    _install_mt5_client(router, _make_client())
+
+    with capture_logs() as captured:
+        with pytest.raises(HTTPException):
+            await _call(router, _make_req(**kwargs))
+
+    validate = _mt5_events(captured, "validate")
+    assert len(validate) == 1
+    assert validate[0]["outcome"] == expected_outcome
+    assert validate[0]["ok"] is False
+    # No terminal was involved, so no lease was taken and none is reported.
+    assert _mt5_events(captured, "lease_wait") == []
+
+
+# --------------------------------------------------------------------------- #
+# WIZFORM-ABANDON — FINDING #6a: the ROUTER connect-stage leak, end to end
+#
+# WHY this matters (Rule 9). `client: Mt5Client | None = None` is assigned from
+# INSIDE `_connect_and_probe`, and the Pitfall-6 release block below it is guarded
+# by `if client is not None:`. On a connect-stage timeout that assignment never
+# happens, so the `finally` releases NOTHING — while the abandoned `to_thread`
+# keeps going and constructs an rpyc session against the gateway's ONE
+# `ThreadedServer` that no code path will ever close. Not a slow bleed: one
+# orphaned socket per timed-out validate, on exactly the path that runs when the
+# gateway is already unhealthy.
+# --------------------------------------------------------------------------- #
+
+
+async def test_a_connect_stage_timeout_leaves_no_rpyc_socket_open(
+    exchange_router, monkeypatch
+):
+    """⭐ FINDING #6a at the PATH level — the sink's construction fence, observed
+    through the route that actually produces the zombie.
+
+    ⚠️ THE ORACLE IS THE OPEN/CLOSE BALANCE, not "the post-connect arm fired".
+    Which arm the zombie takes depends on where its thread was when the lease's
+    bump landed: if it enters `__init__` AFTER the release, the PRE-connect check
+    refuses and no socket is ever opened, and an arm-specific close-count assertion
+    would red on a run where the leak property genuinely HELD. Balance is the
+    property; the arm is an implementation detail of the race.
+
+    ⚠️ CI-HANG DISCIPLINE. pytest-asyncio's loop teardown joins the default
+    executor for `THREAD_JOIN_TIMEOUT = 300`s, so an unbounded park here would
+    stall the suite for five minutes instead of redding. Every wait is bounded, the
+    gate is set in a `finally`, and the zombie is joined on a signal IT sets —
+    never a sleep.
+    """
+    router = exchange_router
+    gate = threading.Event()
+    finished = threading.Event()
+    conns: list = []
+    outcomes: list[BaseException] = []
+
+    class _CountedConn:
+        def __init__(self) -> None:
+            self.close_calls = 0
+            self._config: dict = {}
+
+        def close(self):
+            self.close_calls += 1
+
+    class _CountedTransport:
+        """Only the transport-close seam mt5linux 0.1.9 exposes — this case never
+        gets as far as a session call."""
+
+        def __init__(self) -> None:
+            # Single leading underscore ⇒ NOT re-mangled here; byte-identical to
+            # the attribute mt5linux 0.1.9 sets.
+            self._MetaTrader5__conn = _CountedConn()
+
+    def _blocking_connect(**_ignored):
+        # The gateway connect that outlives its bound. BOUNDED (0.25s), so a gate
+        # the test somehow fails to set reds this case rather than hanging CI.
+        gate.wait(0.25)
+        transport = _CountedTransport()
+        conns.append(transport)
+        return transport
+
+    from services.mt5_client import Mt5Client as _RealMt5Client
+    from services.mt5_client import Mt5SessionAbandoned
+
+    def _build(*args, **kwargs):
+        # The REAL class, deliberately: the behaviour under test is the sink's
+        # construction fence, and a MagicMock client would FABRICATE it.
+        try:
+            return _RealMt5Client(*args, _connect=_blocking_connect, **kwargs)
+        except BaseException as exc:  # noqa: BLE001 — recorded, then re-raised
+            outcomes.append(exc)
+            raise
+        finally:
+            finished.set()
+
+    router.Mt5Client = MagicMock(side_effect=_build)
+    # §Q6 patch-target table: this constant is READ by `routers.exchange`, so it is
+    # patched on the module object the fixture yields. Patching it anywhere else is
+    # a SILENT no-op (the E2 trap) and the real ceiling would stay in force.
+    monkeypatch.setattr(router, "_MT5_VALIDATE_STAGE_TIMEOUT_S", 0.05)
+
+    try:
+        with pytest.raises(HTTPException) as ei:
+            await _call(router, _make_req())
+        # The route's own existing connect-timeout envelope, unchanged by the fence.
+        assert ei.value.status_code == 503
+        assert ei.value.detail["code"] == "MT5_GATEWAY_UNREACHABLE"
+    finally:
+        gate.set()  # ⛔ never leave the zombie parked
+
+    assert finished.wait(5.0), "the abandoned construction never finished"
+
+    open_conns = [c for c in conns if c._MetaTrader5__conn.close_calls == 0]
+    assert open_conns == [], (
+        "the abandoned connect-stage thread left an rpyc session open against the "
+        "gateway's ThreadedServer — this route's Pitfall-6 finally sees "
+        "`client is None` and releases nothing, so nothing ever will (finding #6a)"
+    )
+    # Non-vacuity: the zombie really ran and really was refused, so the balance
+    # above is a fence result rather than a thread that never happened.
+    assert outcomes and isinstance(outcomes[0], Mt5SessionAbandoned), (
+        f"the zombie construction was not fenced at all: {outcomes}"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# WIZFORM-ABANDON / D-40 — the refusal's CLASSIFICATION on this route
+#
+# WHY this matters (Rule 9). `Mt5SessionAbandoned` is a PLAIN `Exception` (D-42,
+# deliberately, so no credential-classify arm can absorb it into a user verdict).
+# The consequence on THIS route is that it matches none of the three `except`
+# arms around the probe and none of the outer handlers either — so before the arm
+# below existed it left as an UNHANDLED BODYLESS 500. Under STATUS_CONTRACT R-1 a
+# 500 means SERVICE-PERMANENT, "do not retry", which is the exact opposite of the
+# truth: an abandoned session is the single most retryable condition in this
+# subsystem, because the next request simply gets a fresh lease.
+#
+# ⚠️ PERSPECTIVE. On the GENUINELY abandoned path nobody is awaiting the probe, so
+# this arm never runs — asyncio discards a fenced zombie's raise (D-39, which is
+# why the sink LOGS as well as raising). The arm exists for the FALSE-POSITIVE
+# path: a legitimate caller that trips the fence must be told "transient, retry",
+# never "your key or your broker server is wrong" and never "permanent".
+# --------------------------------------------------------------------------- #
+
+
+async def test_an_abandoned_session_refusal_is_transient_never_a_bodyless_500(
+    exchange_router,
+):
+    """⭐ The D-40 arm, driven by the SHIPPED fence rather than by an injected
+    exception object.
+
+    The terminal generation is advanced from inside the transport's `login()` —
+    which is exactly what a lease release does — so the NEXT session touch
+    (`account_info`) is refused by the production `_assert_live`, not by a
+    hand-thrown stand-in. That matters: an injected `Mt5SessionAbandoned` would
+    still prove the arm catches the type, but not that the type can actually
+    ARRIVE here from the sink.
+
+    The oracles are the RESPONSE (status + code + recoverable + the emitted
+    outcome category) and the EFFECT (`account_info` never reached the transport).
+    """
+    from services.mt5_client import bump_mt5_terminal_epoch
+
+    router = exchange_router
+    key = _expected_terminal_key("mt5-gw.internal", 18812)
+
+    transport = MagicMock(name="mt5-transport")
+    transport.account_info = MagicMock(return_value=_Netref(**_INVESTOR_ACCOUNT))
+    transport.terminal_info = MagicMock(return_value=_Netref(**_HEALTHY_TERMINAL_INFO))
+    transport.order_check = MagicMock(return_value=_Netref(**_INVESTOR_ORDER_CHECK))
+
+    def _login(*_args, **_kwargs):
+        # The lease this session began under releases while the probe thread is
+        # still inside its round-trip. `bump_mt5_terminal_epoch` is the SHIPPED
+        # release hook — the same call `mt5_terminal_lease`'s finally makes.
+        bump_mt5_terminal_epoch(key)
+        return True
+
+    transport.login = _login
+    _install_real_mt5_client(router, transport)
+
+    with capture_logs() as captured:
+        with pytest.raises(HTTPException) as ei:
+            await _call(router, _make_req())
+
+    # THE EFFECT ORACLE, asserted first: the fence really fired, so the read never
+    # reached the terminal. Without it the response assertions below could be
+    # satisfied by some unrelated transient arm.
+    transport.account_info.assert_not_called()
+
+    # 424 = CALLER'S EXCHANGE, the route's EXISTING transient disposition — the
+    # same one the probe-timeout and account-mismatch arms take. No new code is
+    # minted here (153.1 owns the user-facing code table).
+    assert ei.value.status_code == 424
+    assert ei.value.detail == NETWORK_ERROR_DETAIL
+    assert ei.value.code == "NETWORK_UNAVAILABLE"
+    assert ei.value.recoverable is True
+    # ⛔ The three forbidden translations of an OPERATOR-side refusal.
+    assert ei.value.status_code != 500, (
+        "an abandoned-session refusal fell through to an unhandled bodyless 500 — "
+        "under R-1 that tells the caller the service is PERMANENTLY broken and "
+        "must not be retried, which is the opposite of the truth (D-40)"
+    )
+    assert ei.value.detail != MT5_WRONG_SERVER_DETAIL
+    assert ei.value.detail != AUTH_FAILED_DETAIL
+
+    validate = _mt5_events(captured, "validate")
+    assert len(validate) == 1
+    assert validate[0]["outcome"] == "transient"
+    assert validate[0]["ok"] is False
+
+
+async def test_an_abandoned_read_terminal_escapes_the_broad_arm_unabsorbed(
+    exchange_router, caplog
+):
+    """⭐ 153.6 / B1 — the broad `except Exception` must NOT swallow the fence.
+
+    The sibling case above fences at `account_info`, which is OUTSIDE any broad
+    handler. This one fences at `terminal_info` — the one read wrapped in a
+    deliberately fail-CLOSED `except Exception` — by advancing the terminal
+    generation from inside the transport's `account_info()`, so the PRE bracket
+    succeeds and the very next session touch is refused by the production
+    `_assert_live`.
+
+    ⚠️ THE STATUS IS NOT THE ORACLE, AND THAT IS THE WHOLE DIFFICULTY. Absorbed,
+    the refusal becomes a `None` terminal read -> "undetermined" -> the
+    terminal-signal-unavailable arm, which answers 424/NETWORK_UNAVAILABLE too —
+    the SAME response D-40 produces. A test that asserted only the status could
+    not tell the two apart and would stay green with the bug restored.
+
+    The DISTINGUISHING oracle is what an operator reads in Railway. Absorbed, the
+    broad arm logs `terminal_info failed to materialize (error_class=...)`: a
+    gateway MATERIALIZATION fault that never happened, on a session that was
+    simply fenced — and the probe then continues on a "terminal unreadable"
+    premise that is false. Unabsorbed, that line is never written and the D-40
+    line names the real cause.
+
+    Reds against `services/mt5_probe.read_terminal` with its
+    `except Mt5SessionAbandoned: raise` arm removed or moved below the broad arm.
+    """
+    from services.mt5_client import bump_mt5_terminal_epoch
+
+    router = exchange_router
+    key = _expected_terminal_key("mt5-gw.internal", 18812)
+
+    transport = MagicMock(name="mt5-transport")
+    transport.login = MagicMock(return_value=True)
+    transport.terminal_info = MagicMock(return_value=_Netref(**_HEALTHY_TERMINAL_INFO))
+    transport.order_check = MagicMock(return_value=_Netref(**_INVESTOR_ORDER_CHECK))
+
+    def _account_info():
+        # The lease this session began under releases while the probe thread is
+        # between its PRE bracket and the terminal read. `bump_mt5_terminal_epoch`
+        # is the SHIPPED release hook — the same call `mt5_terminal_lease`'s
+        # `finally` makes — so the refusal below is the production fence, not a
+        # hand-thrown stand-in.
+        bump_mt5_terminal_epoch(key)
+        return _Netref(**_INVESTOR_ACCOUNT)
+
+    transport.account_info = _account_info
+    _install_real_mt5_client(router, transport)
+
+    with caplog.at_level(logging.WARNING, logger="quantalyze.analytics"):
+        with pytest.raises(HTTPException) as ei:
+            await _call(router, _make_req())
+
+    # THE EFFECT ORACLE: the fence really fired at the terminal read, so the
+    # transport was never asked for the terminal snapshot.
+    transport.terminal_info.assert_not_called()
+    transport.order_check.assert_not_called()
+
+    # ⭐ THE DISTINGUISHING ORACLE. The broad arm never claimed a materialization
+    # fault, because the fence type reached its own arm first.
+    assert "failed to materialize" not in caplog.text, (
+        "the broad `except Exception` in read_terminal absorbed the fence refusal "
+        "and reported it as a gateway netref-materialization failure that never "
+        "happened — an operator triaging this reads a fabricated cause, and the "
+        "probe continues on a false 'terminal unreadable' premise (B1)"
+    )
+    assert "capability undetermined" not in caplog.text, (
+        "an absorbed fence refusal degraded into a capability verdict — the exact "
+        "translation D-42 makes structurally impossible at the classify arms and "
+        "B1 reintroduced upstream of them"
+    )
+    # ...and the D-40 line names the real cause.
+    assert "abandoned by its own lease" in caplog.text
+
+    # The disposition is D-40's, unchanged: transient, retryable, never a 500,
+    # never a verdict against the user's key or their broker server.
+    assert ei.value.status_code == 424
+    assert ei.value.code == "NETWORK_UNAVAILABLE"
+    assert ei.value.recoverable is True
+    assert ei.value.detail == NETWORK_ERROR_DETAIL
+    assert ei.value.detail != MT5_WRONG_SERVER_DETAIL
+    assert ei.value.detail != AUTH_FAILED_DETAIL
+
+
+# --------------------------------------------------------------------------- #
+# 153.6 / B2 — the CONNECT-STAGE abandon, and why the status is the whole point
+#
+# WHY this matters (Rule 9 — the economics, not the arm's own shape). The
+# construction fence (D-36 AMENDED (ii)) raises `Mt5SessionAbandoned("connect")`
+# from INSIDE `Mt5Client.__init__`, i.e. inside the stage-1 connect `to_thread`.
+# The stage-2 probe try has carried a dedicated D-40 arm since 153.5; the stage-1
+# try never did, so the fence landed in `except Exception as connect_err:` and was
+# answered **503 MT5_GATEWAY_UNREACHABLE with dependency="mt5-gateway"**.
+#
+# ⛔ THAT STATUS IS A BREAKER VOTE, not just a number. `src/lib/resilient-fetch.ts`
+# names this exact arm as one of only three sites that COUNT toward
+# `breaker:mt5-gateway`; a 424 counts nowhere. So an abandoned thread OF OUR OWN —
+# a fault that says nothing at all about the gateway's health, and that the very
+# next request clears by taking a fresh lease — was casting votes to trip the
+# breaker against a perfectly healthy gateway, and every user's MT5 validate was
+# told "the gateway is not responding, try again shortly" for it.
+#
+# ⚠️ D-15: this is NOT arm-reordering. The dedicated arm at the top of this file's
+# comment sits on a DIFFERENT `try` (stage 2, the probe). Stage 1 needed its own.
+#
+# ⚠️ The SIBLING obligations, pinned elsewhere in this file and deliberately not
+# duplicated here: an `asyncio.TimeoutError` on the same try still takes its own
+# arm (`test_a_connect_stage_timeout_leaves_no_rpyc_socket_open`), and an
+# unrelated construction failure still answers the transient 503
+# (`test_an_unrelated_construction_valueerror_stays_transient`). The new arm may
+# only NARROW what reaches the 503.
+# --------------------------------------------------------------------------- #
+
+
+async def test_a_connect_stage_abandon_is_transient_and_never_the_counting_503(
+    exchange_router,
+):
+    """⭐ 153.6 / B2, driven by the SHIPPED construction fence rather than by an
+    injected exception object.
+
+    The REAL `Mt5Client` runs over an injected `_connect` seam that bumps the
+    terminal generation as its side effect — which is exactly "the caller's
+    `wait_for` fired and its lease released while this blocking connect was on the
+    wire" (finding #6's shape). The occupancy token the fence compares against is
+    the one the router's own `mt5_terminal_lease` published, carried into the
+    connect thread by `asyncio.to_thread`'s context copy. Nothing here hand-throws
+    the type, so this also proves it can ARRIVE at the stage-1 `try` at all.
+
+    THE ORACLE IS THE STATUS, and unusually for this suite that is the strong
+    oracle rather than the weak one: 503-with-`dependency="mt5-gateway"` IS the
+    breaker vote, so the difference between the two dispositions is the difference
+    between a self-inflicted platform outage and a retry that works.
+    """
+    from services.mt5_client import Mt5Client as _RealMt5Client
+    from services.mt5_client import bump_mt5_terminal_epoch
+
+    router = exchange_router
+    key = _expected_terminal_key("mt5-gw.internal", 18812)
+    transport = MagicMock(name="mt5-transport")
+    connects: list[int] = []
+
+    def _connect(**_ignored):
+        # ⭐ THE ABANDONMENT: the lease this construction was spawned under
+        # releases while the blocking connect is still in flight. The POST-connect
+        # arm of the construction fence then disposes the socket and refuses.
+        connects.append(1)
+        bump_mt5_terminal_epoch(key)
+        return transport
+
+    factory = MagicMock(
+        side_effect=lambda *a, **kw: _RealMt5Client(*a, _connect=_connect, **kw)
+    )
+    router.Mt5Client = factory
+
+    with capture_logs() as captured:
+        with pytest.raises(HTTPException) as ei:
+            await _call(router, _make_req())
+
+    # NON-VACUITY, asserted first: the seam really ran, so the refusal below is the
+    # production fence firing POST-connect and not some earlier guard.
+    assert connects == [1], (
+        "the connect seam never ran — this case would be proving nothing about the "
+        "construction fence"
+    )
+    transport.login.assert_not_called()
+
+    # ⭐ THE DISPOSITION. 424 = CALLER'S EXCHANGE, the route's EXISTING transient
+    # shape, byte-mirrored from the stage-2 D-40 arm. No new user-facing code is
+    # minted (153.1 owns that table).
+    assert ei.value.status_code == 424
+    assert ei.value.code == "NETWORK_UNAVAILABLE"
+    assert ei.value.recoverable is True
+    assert ei.value.detail == NETWORK_ERROR_DETAIL
+
+    # ⛔ THE OTHER HALF, and the one B2 is about. A 503 here is a vote to trip
+    # `breaker:mt5-gateway` — cast by our own abandoned thread, against a gateway
+    # that answered the connect perfectly well.
+    assert ei.value.status_code != 503, (
+        "an abandoned CONNECT was answered 503 MT5_GATEWAY_UNREACHABLE — one of "
+        "exactly three sites that count toward breaker:mt5-gateway "
+        "(src/lib/resilient-fetch.ts). The fault is our own zombie thread, not "
+        "gateway health, and the next request clears it by taking a fresh lease "
+        "(B2)"
+    )
+    assert "mt5-gateway" not in repr(ei.value.detail), (
+        "the refusal still carries the gateway dependency name — the breaker-keyed "
+        "body shape, on a fault that is not the gateway's"
+    )
+    assert not (ei.value.headers or {}).get("Retry-After"), (
+        "the transient MT5 arms do not advertise a gateway Retry-After; only the "
+        "breaker-counting 503 does"
+    )
+    # ...and never a verdict against the user's key or their broker server.
+    assert ei.value.detail != MT5_WRONG_SERVER_DETAIL
+    assert ei.value.detail != AUTH_FAILED_DETAIL
+
+    # The emitted outcome moves with the disposition: `transient`, never the
+    # `gateway_unreachable` category the 503 arms stamp.
+    validate = _mt5_events(captured, "validate")
+    assert len(validate) == 1, f"expected one validate outcome event: {captured}"
+    assert validate[0]["outcome"] == "transient"
+    assert validate[0]["outcome"] != "gateway_unreachable"
+    assert validate[0]["ok"] is False
+
+
+# --------------------------------------------------------------------------- #
+# 164.6.5 / criterion 7 / D-15 — THE SETTINGS LANDMINE IS PINNED, NOT TICKED.
+#
+# The gateway terminal's Expert-Advisors tab carries "Disable algorithmic trading
+# when the account has been changed". Validation LOGS THE SHARED TERMINAL IN, so
+# every validation is an account change: ticking that box would silently disable
+# algo trading for every client. The box itself cannot be read (it reaches disk
+# only on a clean terminal exit), so the CONSEQUENCE is the check — a connected
+# terminal reporting its own trade permission off — and it must be LOUD. These
+# gates keep it loud, keep it from false-alarming, and keep this repo from ever
+# gaining a path that writes a terminal option.
+#
+# ⛔ The label below is HAND-TYPED from the on-screen label the founder read over
+# VNC on 2026-09-24, never imported from the module under test.
+# --------------------------------------------------------------------------- #
+
+_ACCOUNT_CHANGE_OPTION_LABEL = (
+    "Disable algorithmic trading when the account has been changed"
+)
+_ANALYTICS_LOGGER = "quantalyze.analytics"
+
+
+def _landmine_client():
+    """A connected terminal whose OWN trade permission is off — the observable
+    consequence of the landmine, and the only one."""
+    return _make_client(
+        account=_INVESTOR_ACCOUNT,
+        order_check=_INVESTOR_ORDER_CHECK,
+        terminal={"connected": True, "trade_allowed": False},
+    )
+
+
+def _operator_arm_records(caplog):
+    return [
+        r
+        for r in caplog.records
+        if r.name == _ANALYTICS_LOGGER and "capability undetermined" in r.getMessage()
+    ]
+
+
+async def test_d15_lost_terminal_permission_logs_above_an_ordinary_verdict(
+    exchange_router, caplog, monkeypatch
+):
+    """The shared terminal serving EVERY client has lost algo permission. Logged at
+    WARNING it sat below a merely-unset `MT5_GATEWAY_HOST`, which this same router
+    logs at ERROR — a severity inversion that hides the one outage that takes every
+    MT5 client down at once. It must be ABOVE an ordinary verdict and NEVER below
+    the unset-env arm."""
+    router = exchange_router
+    _install_mt5_client(router, _landmine_client())
+    with caplog.at_level(logging.DEBUG, logger=_ANALYTICS_LOGGER):
+        with pytest.raises(HTTPException):
+            await _call(router, _make_req())
+    records = _operator_arm_records(caplog)
+    assert len(records) == 1, f"expected ONE operator-arm line, got {records!r}"
+    level = records[0].levelno
+    assert level > logging.WARNING, (
+        f"the lost-terminal-permission line logged at {records[0].levelname}: a "
+        "shared terminal refusing algo trading for EVERY client reads like one "
+        "user's routine refusal, and nobody is paged until clients report it"
+    )
+
+    # ...and never below the unset-env arm, measured from the SAME router.
+    caplog.clear()
+    monkeypatch.delenv("MT5_GATEWAY_HOST", raising=False)
+    monkeypatch.delenv("MT5_GATEWAY_PORT", raising=False)
+    with caplog.at_level(logging.DEBUG, logger=_ANALYTICS_LOGGER):
+        with pytest.raises(HTTPException):
+            await _call(router, _make_req())
+    env_levels = [
+        r.levelno
+        for r in caplog.records
+        if r.name == _ANALYTICS_LOGGER and "not configured" in r.getMessage()
+    ]
+    assert env_levels, "the unset-env comparison is vacuous — its line was not seen"
+    assert level >= max(env_levels), (
+        "the lost-terminal-permission line logs BELOW an unset env var — the "
+        "severity inversion mt5_relogin's WR-01 already corrected for its own verdicts"
+    )
+
+
+async def test_d15_the_line_names_the_setting_and_why_validation_trips_it(
+    exchange_router, caplog
+):
+    """One line must tell an operator BOTH the what and the why: which setting,
+    and that validation is itself an account change. Asserted on what the line
+    SAYS — a gate that only checked a word was absent would pass a reword that
+    dropped the cause."""
+    router = exchange_router
+    _install_mt5_client(router, _landmine_client())
+    with caplog.at_level(logging.DEBUG, logger=_ANALYTICS_LOGGER):
+        with pytest.raises(HTTPException):
+            await _call(router, _make_req())
+    records = _operator_arm_records(caplog)
+    assert len(records) == 1, f"expected ONE operator-arm line, got {records!r}"
+    line = records[0].getMessage()
+    assert _ACCOUNT_CHANGE_OPTION_LABEL in line, (
+        f"the line does not name the landmine setting: {line!r}"
+    )
+    assert "Validation is an account change" in line, (
+        f"the line does not say why a validation trips the setting: {line!r}"
+    )
+    assert "Allow algorithmic trading" in line, (
+        f"the line does not name the permission that is off: {line!r}"
+    )
+    assert "every" in line and "client" in line, (
+        f"the line does not say the terminal is SHARED by every client: {line!r}"
+    )
+
+
+@pytest.mark.parametrize("code", sorted(_IPC_TRANSPORT_CODES))
+async def test_ipc_transport_fault_logs_at_error_like_the_d15_arm(
+    exchange_router, caplog, code
+):
+    """164.6.5 review round 1 / SFH-08 + WR-06. An IPC-wedged gateway terminal is
+    the SAME reach as the D-15 arm above: the one shared terminal serving every
+    MT5 client. The card tells the user "tell us", so the fault must reach an
+    operator. At WARNING it never became a Sentry event, and the validate path
+    does not trigger the heal, so a user hitting it produced log lines only.
+
+    Asserted on level AND content: the line must carry the scrubbed code, and
+    nothing else from the error (no credential, no broker server)."""
+    router = exchange_router
+    client = _make_client(login_raises=Mt5ClientError(code, "IPC fault"))
+    _install_mt5_client(router, client)
+    with caplog.at_level(logging.DEBUG, logger=_ANALYTICS_LOGGER):
+        with pytest.raises(HTTPException) as ei:
+            await _call(router, _make_req())
+    assert ei.value.detail["code"] == "MT5_TERMINAL_UNRESPONSIVE"
+    records = [
+        r
+        for r in caplog.records
+        if r.name == _ANALYTICS_LOGGER and "IPC transport fault" in r.getMessage()
+    ]
+    assert len(records) == 1, f"expected ONE IPC-arm line, got {records!r}"
+    assert records[0].levelno >= logging.ERROR, (
+        f"the wedged-terminal line logged at {records[0].levelname}: below ERROR it "
+        "is no Sentry event, and the user's card promised that someone was told"
+    )
+    assert f"code={code}" in records[0].getMessage()
+
+
+@pytest.mark.parametrize(
+    "terminal, why",
+    [
+        (None, "unreadable — terminal_info() raised"),
+        ({"connected": False, "trade_allowed": False}, "disconnected AND permission off"),
+        ({"connected": False, "trade_allowed": True}, "disconnected"),
+        ({"trade_allowed": False}, "malformed — no connected field"),
+        ({"connected": True}, "malformed — no trade_allowed field"),
+    ],
+)
+async def test_d15_the_loud_check_never_false_alarms_on_a_bridge_blip(
+    exchange_router, caplog, terminal, why
+):
+    """⭐ The assertion that stops the loud check becoming a false-alarm generator.
+    An unreadable, malformed or disconnected terminal proves NOTHING about the
+    landmine — it is our bridge blipping and it clears on retry. It must route
+    TRANSIENT and emit NOTHING above WARNING; paging an operator about a setting
+    for a network blip is how a real alarm gets ignored."""
+    router = exchange_router
+    client = _make_client(
+        account=_INVESTOR_ACCOUNT, order_check=_INVESTOR_ORDER_CHECK, terminal=terminal
+    )
+    _install_mt5_client(router, client)
+    with caplog.at_level(logging.DEBUG, logger=_ANALYTICS_LOGGER):
+        with pytest.raises(HTTPException) as ei:
+            await _call(router, _make_req())
+    assert ei.value.status_code == 424, f"{why}: not the transient arm"
+    assert ei.value.detail == NETWORK_ERROR_DETAIL, f"{why}: not the transient arm"
+    loud = [
+        r for r in caplog.records
+        if r.name == _ANALYTICS_LOGGER and r.levelno > logging.WARNING
+    ]
+    assert not loud, f"{why}: a bridge blip raised a loud line {loud!r}"
+    assert all(
+        _ACCOUNT_CHANGE_OPTION_LABEL not in r.getMessage() for r in caplog.records
+    ), f"{why}: a bridge blip blamed the account-change setting"
+
+
+async def test_d15_the_raised_fault_is_unchanged_only_the_log_got_louder(
+    exchange_router,
+):
+    """The change is how LOUDLY the condition is reported, never what the caller
+    is told. Status, machine code, dependency and retryable flag are typed here as
+    the literals they were before 164.6.5-06 — a drift in any one changes the
+    wizard's rendering and the breaker's accounting."""
+    router = exchange_router
+    _install_mt5_client(router, _landmine_client())
+    with pytest.raises(HTTPException) as ei:
+        await _call(router, _make_req())
+    assert ei.value.status_code == 500
+    assert ei.value.detail["code"] == "MT5_GATEWAY_UNCONFIGURED"
+    assert ei.value.detail["dependency"] == "mt5-gateway"
+    assert ei.value.detail["retryable"] is False
+    assert set(ei.value.detail) == {"code", "dependency", "retryable", "detail"}
+    assert not (ei.value.headers or {}).get("Retry-After")
+
+
+# The markers a terminal-option WRITE would have to carry in code: the terminal's
+# config files, the `[Experts]` section (as a header or as a configparser key),
+# or one of its option keys assigned a value.
+_TERMINAL_OPTION_WRITE_MARKERS = re.compile(
+    r"(?i)\b(?:terminal|common|origin)\.ini\b"
+    r"|\[Experts\]"
+    r"|^['\"]Experts['\"]$"
+    r"|\b(?:Account|Profile|Enabled|Api|AllowLiveTrading|AllowDllImport)\s*=\s*[01]\b"
+)
+
+
+def _code_tokens_without_comments_or_docstrings(src: str):
+    """Yield (line, token text) for every token that is CODE — comments and
+    docstrings are dropped, so prose describing the landmine can neither satisfy
+    nor defeat the scan."""
+    tree = ast.parse(src)
+    docstring_lines = set()
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+            and node.body
+            and isinstance(node.body[0], ast.Expr)
+            and isinstance(node.body[0].value, ast.Constant)
+            and isinstance(node.body[0].value.value, str)
+        ):
+            docstring_lines.add(node.body[0].lineno)
+    for tok in tokenize.generate_tokens(io.StringIO(src).readline):
+        if tok.type == tokenize.COMMENT:
+            continue
+        if tok.type == tokenize.STRING and tok.start[0] in docstring_lines:
+            continue
+        yield tok.start[0], tok.string
+
+
+def _analytics_service_source_files():
+    root = pathlib.Path(__file__).resolve().parent.parent
+    return sorted(
+        p
+        for p in root.rglob("*.py")
+        if not ({".venv", "tests", "__pycache__"} & set(p.relative_to(root).parts))
+    )
+
+
+def test_d15_no_analytics_service_path_writes_a_terminal_option():
+    """⛔ D-15 is one-way in the dangerous direction: nothing in this service may
+    ever write a terminal option — not to "fix" algo trading, not to tick the box.
+    Scanned over CODE only, and the failure names the offending file and line."""
+    files = _analytics_service_source_files()
+    # Not vacuous: the service's own source tree, not an empty glob.
+    assert len(files) > 50, f"scan found only {len(files)} files — wrong root?"
+    offenders = []
+    for path in files:
+        for line, text in _code_tokens_without_comments_or_docstrings(
+            path.read_text(encoding="utf-8")
+        ):
+            if _TERMINAL_OPTION_WRITE_MARKERS.search(text):
+                offenders.append(f"{path.name}:{line}: {text[:80]}")
+    assert not offenders, (
+        "a code path names a terminal option store — D-15 forbids any write to the "
+        "gateway terminal's options (ticking the account-change box silently "
+        f"disables algo trading for every client): {offenders}"
+    )
+
+
+def test_d15_the_write_scan_ignores_prose_and_catches_code():
+    """The scan's two halves, proven on synthetic source: a COMMENT or DOCSTRING
+    naming the landmine is ignored (prose must not make the gate self-invalidating),
+    and a CODE line naming a terminal option store is caught."""
+    prose = (
+        '"""Mentions [Experts] Account=1 in terminal.ini."""\n'
+        "# [Experts] Account=1 lives in terminal.ini\n"
+        "x = 1\n"
+    )
+    assert not [
+        t for _, t in _code_tokens_without_comments_or_docstrings(prose)
+        if _TERMINAL_OPTION_WRITE_MARKERS.search(t)
+    ]
+    for code in (
+        'path = "Config/terminal.ini"\n',
+        'cfg["Experts"]["Account"] = "0"\n',
+        'line = "Account=0"\n',
+    ):
+        assert [
+            t for _, t in _code_tokens_without_comments_or_docstrings(code)
+            if _TERMINAL_OPTION_WRITE_MARKERS.search(t)
+        ], f"the scan missed a code-shaped option write: {code!r}"
+    # And the real corpus DOES carry the landmine in prose, so the stripping above
+    # is load-bearing rather than decorative.
+    raw = "".join(
+        p.read_text(encoding="utf-8") for p in _analytics_service_source_files()
+    )
+    assert "[Experts]" in raw

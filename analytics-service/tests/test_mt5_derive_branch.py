@@ -70,6 +70,16 @@ from services.ingestion.long_fetch import (
 )
 from services.metrics import periods_per_year_for_asset_class
 from services.mt5_client import Mt5Client, Mt5ClientError, Mt5Session
+# ⚠️ Imported from the module that OWNS it (`services.mt5_client`), never through a
+# re-export — a name reached through a re-export is a DIFFERENT binding and an
+# assertion on it is a silent no-op (the 151 review-E2 rule). `job_worker`
+# deliberately does not re-export the epoch registry at all.
+from services.mt5_client import _mt5_epoch_for, bump_mt5_terminal_epoch
+# 151 review E2 — the restart bound is READ from this leaf module, not from
+# `job_worker` (Phase 151 moved the MT5 concurrency symbols out; job_worker only
+# re-exports `_MT5_RESTART_TIMEOUT_S`). A monkeypatch aimed at `jw` is a SILENT
+# no-op, so the bound must be patched HERE or the test that names it is vacuous.
+import services.mt5_concurrency as mt5_conc
 
 
 # ---------------------------------------------------------------------------
@@ -84,6 +94,36 @@ class _NT:
     def _asdict(self) -> dict:
         return dict(self._d)
 
+
+
+class _FakeRpycConn:
+    """The name-mangled `_MetaTrader5__conn` seam mt5linux 0.1.9 exposes — and since
+    153.3-06 / **D-35** the ONLY thing `Mt5Client.close()`/`release()` touch.
+
+    Present so these doubles EXERCISE the real transport teardown instead of falling
+    through to the "no rpyc transport close reachable" WARNING branch, which would
+    mean the close paths here were silently walking a route production never takes.
+    """
+
+    def __init__(self, calls: list) -> None:
+        self._calls = calls
+        self.close_calls = 0
+        # rpyc classic's remote-namespace seam (MT5DEAL-01). `history_deals_get`
+        # materializes deals on the FAR side of the wire, because doing it here
+        # costs one round-trip per deal per field — MEASURED 60ms/deal live, 29.9s
+        # for 493 deals against a 40s bound. `execute()` really execs, so these
+        # doubles run the REAL remote source instead of a stand-in that could drift.
+        self.namespace: dict = {}
+        self.execute_calls = 0
+
+    def execute(self, src: str) -> None:
+        self.execute_calls += 1
+        self._calls.append("execute")
+        exec(src, self.namespace)  # noqa: S102 — running the real source is the point
+
+    def close(self):
+        self.close_calls += 1
+        self._calls.append("transport_close")
 
 class _FakeMt5Transport:
     """Records every call so a "zero live read while disabled" assertion is
@@ -126,8 +166,10 @@ class _FakeMt5Transport:
         self._post_read_exc = post_read_exc
         self._account_info_calls = 0
         self.calls: list[str] = []
+        self._MetaTrader5__conn = _FakeRpycConn(self.calls)
 
-    def initialize(self):
+    def initialize(self, **kwargs):
+        # **kwargs: initialize() carries its own `timeout=` ms ceiling (153.3 / D-24).
         # Real login() attaches the terminal IPC via initialize() before login().
         self.calls.append("initialize")
         return True
@@ -328,10 +370,18 @@ def _dq_flags(capture: dict) -> dict:
 def _reset_mt5_terminal_locks():
     """MT5CONC-02: clear the module-level per-terminal asyncio.Lock registry between
     tests so a Lock created by one test (e.g. the concurrent-serialization test) can
-    never leak into another and mask a regression."""
-    jw._MT5_TERMINAL_LOCKS.clear()
+    never leak into another and mask a regression.
+
+    Since WIZFORM-ABANDON / D-36 it also clears the per-terminal EPOCH registry,
+    via the ONE shared helper (RESEARCH Pitfall 8: a leaked epoch fences a client
+    another test builds for the same key — a sixth flake mechanism). Routed
+    through `mt5_concurrency` rather than `jw`: `jw._MT5_TERMINAL_LOCKS` is the
+    very same dict object (Phase 151 moved it into the leaf and job_worker re-binds
+    it), so nothing is lost — and the epoch registry is deliberately NOT re-exported
+    into `jw`, so there is no `jw` name to reach it by."""
+    mt5_conc.reset_terminal_state_for_tests()
     yield
-    jw._MT5_TERMINAL_LOCKS.clear()
+    mt5_conc.reset_terminal_state_for_tests()
 
 
 # ---------------------------------------------------------------------------
@@ -381,6 +431,9 @@ async def test_mt5_routes_one_backbone(monkeypatch) -> None:
         "login",
         "account_info",
         "history_deals_get",
+        # MT5DEAL-01: deals materialize on the FAR side of the wire, so the
+        # source crossing is a real round-trip and is recorded as one.
+        "execute",
         "account_info",
     ]
 
@@ -483,13 +536,21 @@ async def test_read_error_fails_whole_job(monkeypatch) -> None:
 
 @pytest.mark.asyncio
 async def test_wrong_server_at_derive_is_transient_not_permanent(monkeypatch) -> None:
-    """RED-TEAM: at DERIVE the key ALREADY validated, so a connection/bridge error —
-    which classify_mt5_login_error folds into 'wrong_server' via its 'connect'/
-    'network'/'terminal' tokens — must be TRANSIENT (retry, NO user-blame stamp),
-    NOT a permanent 'bad credentials or wrong broker server' failure. A routine
-    gateway redeploy mid-derive must never permanently kill a valid strategy and
-    blame the user's creds. Reddens against the old `_kind in ('auth','wrong_server')
-    -> permanent` classification."""
+    """RED-TEAM: at DERIVE the key ALREADY validated, so a connection/bridge error
+    must be TRANSIENT (retry, NO user-blame stamp), NOT a permanent 'bad
+    credentials or wrong broker server' failure. A routine gateway redeploy
+    mid-derive must never permanently kill a valid strategy and blame the user's
+    creds. Reddens against the old `_kind in ('auth','wrong_server') -> permanent`
+    classification.
+
+    ⚠️ 164.5.4: the classifier itself used to MANUFACTURE the 'wrong_server' this
+    arm has to absorb — its table carried the bare tokens 'connect', 'network' and
+    'terminal', so any bridge error matched. `_WRONG_SERVER_PHRASES` is anchored
+    now and such text degrades to 'transient' by the refusal rule. ⛔ The ROUTING
+    is still what this case pins and it must not be relaxed: the derive arm must
+    absorb a 'wrong_server' verdict whatever text produced it, because a genuine
+    broker-server rejection at derive time is still OUR problem to retry, not the
+    user's to be blamed for."""
     monkeypatch.setenv("MT5_ENABLED", "true")
     transport = _FakeMt5Transport(
         account={"equity": 110_500.0, "balance": 110_500.0, "login": 123456},
@@ -839,11 +900,21 @@ async def test_mt5_restart_itself_bounded(monkeypatch) -> None:
     tiny restart bound. The job must STILL return transient PROMPTLY (bounded wall-
     clock, well under the summed genuine hang durations) — the never-nested-wedge
     proof. Without the to_thread + wait_for bound on the restart, the hung shutdown
-    would wedge the sequential worker exactly as the original read hang would."""
+    would wedge the sequential worker exactly as the original read hang would.
+
+    151 review E2 — THE TWO PATCH TARGETS ARE DIFFERENT MODULES, ON PURPOSE.
+    `job_worker` READS `_MT5_DERIVE_READ_TIMEOUT_S` at its own call sites, so
+    patching `jw` binds it. It does NOT read `_MT5_RESTART_TIMEOUT_S` — it only
+    re-exports the name; `_mt5_bounded_restart` reads it from
+    `services.mt5_concurrency`, where Phase 151 moved it. Patching `jw` for that
+    one is a SILENT no-op: the real ~10s bound stays in force and the assertion
+    passes on the shutdown hang alone, which is exactly the bound the test is
+    supposed to prove fires. Re-point either patch at the wrong module and this
+    test stops testing what its name claims WITHOUT going red."""
     monkeypatch.setenv("MT5_ENABLED", "true")
     monkeypatch.setattr(jw, "_MT5_DERIVE_READ_TIMEOUT_S", 0.1)
-    monkeypatch.setattr(jw, "_MT5_RESTART_TIMEOUT_S", 0.05)
-    read_hang, shutdown_hang = 0.3, 0.5  # genuine hangs the bounds must cut short
+    monkeypatch.setattr(mt5_conc, "_MT5_RESTART_TIMEOUT_S", 0.05)
+    read_hang, shutdown_hang = 0.3, 1.0  # genuine hangs the bounds must cut short
     transport = _FakeMt5Transport(
         account={"equity": 110_500.0, "balance": 110_500.0, "login": 123456},
         deals=_canonical_deals(),
@@ -859,11 +930,23 @@ async def test_mt5_restart_itself_bounded(monkeypatch) -> None:
 
     assert result.outcome == DispatchOutcome.FAILED
     assert result.error_kind == "transient"
-    # Both bounds fired: wall-clock is far under the summed genuine hangs (0.8s), so
-    # neither the read hang nor the restart-shutdown hang ran to completion inline.
-    assert elapsed < (read_hang + shutdown_hang), (
-        f"the bounded read + bounded restart must return well under the summed "
-        f"genuine hang durations; elapsed={elapsed:.3f}s"
+    # 151 review E2 — THE BAR IS `shutdown_hang` ALONE, NOT THE SUM.
+    #
+    # The old bar (`read_hang + shutdown_hang`) could not distinguish a restart
+    # bound that fired from one that did not: with the read bound at 0.1s an
+    # UNBOUNDED restart returns at ~0.1 + shutdown_hang, which sat comfortably
+    # under the summed bar and passed. So the assertion held even while the
+    # `_MT5_RESTART_TIMEOUT_S` patch was aimed at the wrong module and the real
+    # ~10s bound was in force — the test was green on the shutdown hang running
+    # to completion, i.e. on the very failure it exists to catch.
+    #
+    # Below `shutdown_hang` there is only one way to arrive: the restart's own
+    # wait_for cut the hung teardown short. Bounded ⇒ ~0.15s (0.1 read + 0.05
+    # restart); unbounded ⇒ ≥ 0.1 + shutdown_hang, which EXCEEDS this bar by
+    # construction, so the failure mode is deterministic rather than timing-lucky.
+    assert elapsed < shutdown_hang, (
+        f"the bounded restart must return before the hung shutdown "
+        f"({shutdown_hang}s) could even have completed; elapsed={elapsed:.3f}s"
     )
 
 
@@ -941,10 +1024,62 @@ async def _run_two_concurrent_mt5(neuter_lock: bool) -> list:
     if neuter_lock:
         # A FRESH Lock per call serializes NOTHING — this is exactly what a
         # Session-attached lock (fresh session per job) would do.
+        #
+        # ⚠️ 151 review E2, RE-POINTED by WIZFORM-ABANDON / plan 153.5-03. The
+        # target used to be `services.job_worker._mt5_terminal_lock_for`, which
+        # bound because job_worker READ that name at its own `async with`. It no
+        # longer does: the acquisition goes through `mt5_terminal_lease`, which
+        # resolves `_mt5_terminal_lock_for` from `services.mt5_concurrency`'s OWN
+        # globals. A patch left aimed at `job_worker` is now a SILENT NO-OP.
+        #
+        # ⭐ This one is self-detecting rather than silent, which is why it is safe
+        # to rely on: with the patch mis-aimed the real registry serializes the two
+        # jobs and the interleave assertion below reddens with the fully-contiguous
+        # order log [('A','enter'),('A','exit'),('B','enter'),('B','exit')] —
+        # OBSERVED during 153.5-03 before the re-point. Green here therefore means
+        # the patch genuinely bound.
         patchers.append(
             patch(
-                "services.job_worker._mt5_terminal_lock_for",
+                "services.mt5_concurrency._mt5_terminal_lock_for",
                 new=lambda _k: asyncio.Lock(),
+            )
+        )
+        # ⭐ ONE CONTROL, ONE VARIABLE (WIZFORM-ABANDON / plan 153.5-03). This arm
+        # isolates the **LOCK**; the abandoned-session **FENCE** is a DIFFERENT
+        # variable and must be held still, or the control stops measuring what it
+        # names.
+        #
+        # Why it must be held still here specifically: with the lock neutered, A
+        # and B genuinely interleave against a LIVE epoch registry. Both clients
+        # bind epoch 0 at login; B's lease release bumps it to 1 while A is still
+        # mid-read, so A's POST-read `account_info()` legitimately raises
+        # `Mt5SessionAbandoned`. `run_derive_broker_dailies_job` has no arm for it
+        # (the D-40 classification arms are plan 153.5-04's), so it escapes the job
+        # and fails the bare `asyncio.gather` below INSTEAD of the interleave
+        # assertion this test exists to make.
+        #
+        # OBSERVED, not predicted: 2 failures in 10 consecutive local runs before
+        # this patch was added, each
+        #   `services.mt5_client.Mt5SessionAbandoned: MT5 session abandoned: the
+        #    lease under which it operated has ended`  (mt5_client.py:688)
+        # — i.e. a genuinely timing-ordered flake, the exact kind D-37 forbids
+        # adding to this suite.
+        #
+        # ⛔ Do NOT "fix" this by catching `Mt5SessionAbandoned` in the harness. A
+        # harness that swallows a refusal stays green when a future change makes
+        # the fence fire on a path it should not — the same blindness the E2
+        # re-point above just removed.
+        #
+        # ⚠️ The target is `services.mt5_concurrency`, NOT `services.mt5_client`
+        # that DEFINES the function: `mt5_terminal_lease` binds the name into
+        # mt5_concurrency's globals at import, so that is the reader (E2). MEASURED
+        # in-session — patching `services.mt5_client.bump_mt5_terminal_epoch` leaves
+        # the observed per-lease epoch delta at 1 (a silent no-op); patching
+        # `services.mt5_concurrency.bump_mt5_terminal_epoch` takes it to 0.
+        patchers.append(
+            patch(
+                "services.mt5_concurrency.bump_mt5_terminal_epoch",
+                new=lambda _k: 0,
             )
         )
 
@@ -995,6 +1130,57 @@ async def test_mt5_concurrent_syncs_serialized(monkeypatch) -> None:
     assert n_other_enter < n_first_exit, (
         f"with the lock neutered the concurrent syncs MUST interleave (else the "
         f"positive assertion is vacuous); got {neutered!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 11b — WIZFORM-ABANDON / D-36 / ABANDON-05: the derive job's terminal RELEASE
+# advances the epoch. This is the precondition for the whole fence: the derive
+# read is finding #5's OWN path, and at HEAD it acquired the raw Lock, which has
+# no release hook. A bump that lived only in `mt5_terminal_lease` would have left
+# this path bumping NOTHING — with every existing test green.
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_derive_release_bumps_the_terminal_epoch_exactly_once(
+    monkeypatch,
+) -> None:
+    """EXACT delta, hand-typed, not "changed" and not `len(holds)`.
+
+    A healthy derive job takes the terminal lease exactly ONCE (one
+    `async with mt5_terminal_lease(...)` around the whole IPC region — the
+    post-read combine/persist is deliberately outside it), so the epoch must
+    advance by exactly 1. A "non-zero / it changed" assertion would pass for a
+    DOUBLE bump too, and a double bump is not harmless: the extra generation
+    fences a successor that legitimately holds the terminal (the F8 failure mode
+    plan 01 already had to design against).
+    """
+    monkeypatch.setenv("MT5_ENABLED", "true")
+    transport = _FakeMt5Transport(
+        account={"equity": 110_500.0, "balance": 110_500.0, "login": 123456},
+        deals=_canonical_deals(),
+    )
+    ctx, capture = _build_ctx(transport)
+    # ⭐ The SHIPPED property, never a retyped "host:port" — a hand-typed key that
+    # drifts from `Mt5Client.terminal_key` would measure an unrelated registry slot
+    # and read 0 → 0 forever, i.e. pass by measuring nothing.
+    key = ctx.exchange.client.terminal_key
+    before = _mt5_epoch_for(key)
+
+    with _apply(_patches(ctx)):
+        result = await run_derive_broker_dailies_job(_job())
+
+    # The read really happened (otherwise a fails-closed job would "prove" the
+    # bump by never taking the lease at all).
+    assert result.outcome == DispatchOutcome.DONE, result.error_message
+    assert any(u[0] == "csv_daily_returns" for u in capture["upserts"])
+    assert "history_deals_get" in transport.calls
+
+    assert _mt5_epoch_for(key) - before == 1, (
+        f"the derive job's terminal release must advance the epoch by EXACTLY 1 "
+        f"(one lease hold); got {_mt5_epoch_for(key) - before} for key={key!r}. "
+        f"0 means the acquisition bypassed `mt5_terminal_lease` and released "
+        f"through the raw Lock, which has no release hook — every downstream "
+        f"abandoned-session fence is disarmed on THE path finding #5 runs on."
     )
 
 
@@ -1071,11 +1257,14 @@ async def test_mt5_login_bracket_post_hijack(monkeypatch) -> None:
     # The deal read DID run (PRE passed), then the POST bracket re-read and rejected
     # — the first four terminal calls are the full read sequence (a trailing
     # "shutdown" from the bounded restart follows).
-    assert transport.calls[:5] == [
+    assert transport.calls[:6] == [
         "initialize",
         "login",
         "account_info",
         "history_deals_get",
+        # MT5DEAL-01: deals materialize on the FAR side of the wire, so the
+        # source crossing is a real round-trip and is recorded as one.
+        "execute",
         "account_info",
     ]
     assert "shutdown" in transport.calls  # the bounded restart fired
@@ -1121,10 +1310,17 @@ async def test_mt5_login_field_missing_fails_loud(monkeypatch) -> None:
 async def test_mt5_post_read_transient_blip_is_not_permanent(monkeypatch) -> None:
     """The PRE bracket + login + deal fetch all succeed on the CORRECT account; the
     POST re-read then hits a transient transport blip ("connection reset ...") that
-    ``classify_mt5_login_error`` would read as ``wrong_server`` (the "connect" token)
-    → PERMANENT + user-blame stamp under the old shared-arm routing. IN-01 reroutes
-    it: a failure to RE-CONFIRM the already-verified account is a retry-worthy
-    verification gap, so the job is TRANSIENT with NOTHING stamped.
+    ``classify_mt5_login_error`` read as ``wrong_server`` while its table carried
+    the bare "connect" token → PERMANENT + user-blame stamp under the old
+    shared-arm routing. IN-01 reroutes it: a failure to RE-CONFIRM the
+    already-verified account is a retry-worthy verification gap, so the job is
+    TRANSIENT with NOTHING stamped.
+
+    ⚠️ 164.5.4 narrowed the OTHER half: `_WRONG_SERVER_PHRASES` is anchored on the
+    broker-server lookup, so this blip's text now degrades to ``transient`` at the
+    classifier too. ⛔ That is belt AND braces, not a reason to drop the reroute —
+    the reroute must hold for a message that genuinely IS recognised, and the
+    refusal rule governs only the ones that are not.
 
     Reds against the pre-fix code (error_kind == "permanent" and a strategy_analytics
     'failed' stamp present). Trust is untouched: a genuine wrong-account POST read
@@ -1156,6 +1352,9 @@ async def test_mt5_post_read_transient_blip_is_not_permanent(monkeypatch) -> Non
         "login",
         "account_info",
         "history_deals_get",
+        # MT5DEAL-01: deals materialize on the FAR side of the wire, so the
+        # source crossing is a real round-trip and is recorded as one.
+        "execute",
         "account_info",
     ]
     # NO permanent user-blame stamp and NO partial series (the economic read
@@ -1192,11 +1391,184 @@ def test_deal_fetch_margin_covers_server_utc_offset_bound() -> None:
 def test_classify_no_ipc_connection_is_transient_not_wrong_server():
     """Regression (red-team FABLE, 2026-07-25): -10004 'No IPC connection' means the
     terminal bridge isn't attached (gateway down / mid-redeploy) — a TRANSIENT infra
-    fault, NOT a wrong broker server. Its 'ipc' text matches _WRONG_SERVER_TOKENS, so
-    without the code-gate it classified as 'wrong_server' → a PERMANENT user-blame
-    rejection of a VALID key during a gateway outage (more likely now that login()
-    calls initialize() first, making -10004 the canonical first-touch bridge error)."""
+    fault, NOT a wrong broker server. Its 'ipc' text matched the pre-164.5.4
+    wrong-server table, which carried the bare token 'ipc', so without the
+    code-gate it classified as 'wrong_server' → a PERMANENT user-blame rejection of
+    a VALID key during a gateway outage (more likely now that login() calls
+    initialize() first, making -10004 the canonical first-touch bridge error).
+
+    ⚠️ 164.5.4: `_WRONG_SERVER_PHRASES` is anchored now ('trade server not found')
+    and carries no 'ipc' member, so the TEXT alone would already degrade to
+    'transient' by the refusal rule. The code-gate is still what this case pins,
+    and it still runs FIRST: a transport verdict must not depend on broker-supplied
+    text, which a future phrase could always start matching."""
     from services.mt5_validation import classify_mt5_login_error
 
     err = Mt5ClientError(-10004, "No IPC connection")
     assert classify_mt5_login_error(err) == "transient"  # pre-fix returned "wrong_server"
+
+
+# ---------------------------------------------------------------------------
+# WIZFORM-ABANDON / D-40 — the refusal's CLASSIFICATION on the DERIVE path
+#
+# WHY this matters (Rule 9). `Mt5SessionAbandoned` is a plain `Exception` (D-42),
+# so it matches NONE of this branch's four existing `except` arms. Before the arm
+# under test it escaped `run_derive_broker_dailies_job` entirely — measured, not
+# theorised: plan 153.5-03 observed it escape into a bare `asyncio.gather` on 2 of
+# 10 consecutive runs of `_run_two_concurrent_mt5(neuter_lock=True)`.
+#
+# Three properties, and each is a different way of getting the blame wrong:
+#   * transient, so the DB backoff retries instead of burning to failed_final;
+#   * NO `_stamp_strategy_analytics_failed` — an operator-side refusal must never
+#     write a user-attributed 'failed' analytics row;
+#   * NO `_mt5_bounded_restart` — a fence refusal means the terminal belongs to
+#     SOMEONE ELSE now, so restarting it would do to them precisely what this
+#     phase exists to stop.
+# ---------------------------------------------------------------------------
+
+
+class _EpochBumpingTransport(_FakeMt5Transport):
+    """The ONE shared Wine terminal, whose `login()` advances the terminal
+    generation — i.e. the lease this session began under releases mid-read.
+
+    Bumping from INSIDE the transport is what makes the next session touch be
+    refused by the SHIPPED `_assert_live` rather than by a hand-thrown stand-in,
+    so the test proves the refusal can actually ARRIVE at this arm.
+    """
+
+    def __init__(self, *, terminal_key: str, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._terminal_key = terminal_key
+
+    def login(self, login, password=None, server=None, timeout=None):  # noqa: ANN001
+        out = super().login(login, password=password, server=server, timeout=timeout)
+        # The SHIPPED release hook — the same call `mt5_terminal_lease`'s finally
+        # makes. Never a hand-poked registry entry.
+        bump_mt5_terminal_epoch(self._terminal_key)
+        return out
+
+
+@pytest.mark.asyncio
+async def test_mt5_abandoned_session_is_transient_with_no_stamp_and_no_restart(
+    monkeypatch,
+) -> None:
+    """⭐ The D-40 derive arm, driven by the SHIPPED fence.
+
+    ⚠️ PERSPECTIVE. On the genuinely-abandoned path nobody awaits the read, so
+    this arm never runs — asyncio discards the zombie's raise (D-39). It exists
+    for the FALSE-POSITIVE path: a legitimate read that trips the fence must be
+    retried, never blamed on the strategy owner and never answered by seizing a
+    terminal that now belongs to someone else.
+    """
+    monkeypatch.setenv("MT5_ENABLED", "true")
+    restarts: list[object] = []
+
+    async def _spy_restart(client):
+        restarts.append(client)
+
+    # §Q6 patch-target table: `_mt5_bounded_restart` is one of the four names
+    # `job_worker` itself READS, so it is patched on `jw`. (`_MT5_RESTART_TIMEOUT_S`
+    # would be a silent no-op here — see the module header's E2 map.)
+    monkeypatch.setattr(jw, "_mt5_bounded_restart", _spy_restart)
+
+    transport = _EpochBumpingTransport(
+        terminal_key="h:1",  # matches `_session`'s Mt5Client("h", 1, ...)
+        account={"equity": 110_500.0, "balance": 110_500.0, "login": 123456},
+        deals=_canonical_deals(),
+    )
+    ctx, capture = _build_ctx(transport)
+    # The key is DERIVED from the shipped property, so a drifted literal above
+    # cannot silently bump an unrelated registry slot and make the case vacuous.
+    assert ctx.exchange.client.terminal_key == "h:1"
+
+    with _apply(_patches(ctx)):
+        result = await run_derive_broker_dailies_job(_job())
+
+    # The fence really fired: login ran, and the PRE-read `account_info` never
+    # reached the terminal.
+    assert transport.calls == ["initialize", "login"], (
+        f"the fence did not refuse the PRE-read account_info; calls={transport.calls!r}"
+    )
+
+    assert result.outcome == DispatchOutcome.FAILED
+    assert result.error_kind == "transient", (
+        "an abandoned-session refusal is the most retryable condition there is; "
+        "anything permanent here burns a valid strategy to failed_final"
+    )
+    # ⛔ No user-blame analytics row and no partial series (the effect-based form
+    # of "the strategy-analytics failure stamp was not invoked" — the helper is a
+    # closure inside the job, and its ONLY observable is the upsert it makes).
+    _persisted_nothing(capture)
+    # ⛔ And no self-harm: the terminal now belongs to the next holder.
+    assert restarts == [], (
+        "the refusal arm restarted the terminal — but a fence refusal MEANS the "
+        "terminal was handed on, so this restart lands on SOMEONE ELSE's session, "
+        "which is exactly the -10004 cross-holder outage this phase closes"
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_abandoned_derive_error_message_carries_no_classifier_token(
+    monkeypatch,
+) -> None:
+    """⭐ T-153.5-13 — the text that lands in `compute_jobs.error_message`.
+
+    That text is operator-visible AND re-classifiable, so it must come back
+    BLAME-FREE from `classify_mt5_login_error`. Before 164.5.4 the tables were
+    substring-matched bare words and the ones an author would naturally reach for
+    here — "terminal", "session", "connect", "login" — were literally members.
+    The documented incident is `routers/exchange.py:678-684`, where an
+    operator-side refusal became a 400 telling the user their BROKER SERVER was
+    wrong. The tables are anchored phrases now, so the hazard is NARROWER — a
+    message must name the broker-server lookup or the credential outright — but it
+    is not gone, and an unrecognised message degrades to `transient` by the
+    refusal rule rather than to a guess.
+
+    ⚠️ The verdict comes from the LIVE seam in `services/mt5_validation.py`,
+    deliberately. The invariant is safety against whatever the classifier does
+    TODAY; a hand-copied table would go stale and stay green while the real
+    classifier changed. It is not self-referential — the seam lives in a DIFFERENT
+    module from the one under test.
+
+    ⭐ 164.5.4 — the assertion moved from substring-absence to the classifier
+    itself. The old loop had teeth only because the members were short common
+    words; anchored phrases would have left it trivially green while measuring
+    nothing.
+    """
+    from services.mt5_client import Mt5ClientError
+    from services.mt5_validation import (
+        _AUTH_PHRASES,
+        _WRONG_SERVER_PHRASES,
+        classify_mt5_login_error,
+    )
+
+    monkeypatch.setenv("MT5_ENABLED", "true")
+
+    async def _spy_restart(client):
+        raise AssertionError("the refusal arm must not restart the terminal")
+
+    monkeypatch.setattr(jw, "_mt5_bounded_restart", _spy_restart)
+    transport = _EpochBumpingTransport(
+        terminal_key="h:1",
+        account={"equity": 110_500.0, "balance": 110_500.0, "login": 123456},
+        deals=_canonical_deals(),
+    )
+    ctx, _capture = _build_ctx(transport)
+
+    with _apply(_patches(ctx)):
+        result = await run_derive_broker_dailies_job(_job())
+
+    assert result.error_kind == "transient"
+    message = result.error_message or ""
+    assert message, "the transient arm wrote no error_message at all"
+    # Non-empty tables, or a "transient" verdict proves only that the classifier
+    # had nothing to match on.
+    assert _WRONG_SERVER_PHRASES and _AUTH_PHRASES
+    # Code 0 so `_IPC_TRANSPORT_CODES` cannot answer for the text.
+    verdict = classify_mt5_login_error(Mt5ClientError(0, message))
+    assert verdict == "transient", (
+        f"the derive arm's error_message classifies {verdict!r} — this text is "
+        "operator-visible in compute_jobs and, when it is fed to "
+        "classify_mt5_login_error, a working key gets blamed for our own "
+        "abandoned thread (D-42)"
+    )

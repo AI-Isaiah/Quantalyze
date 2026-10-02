@@ -91,7 +91,8 @@ async def _run_worker_happy_path(monkeypatch, mock_supabase, api_key_row_factory
         "raw_payload": {"symbol": "BTCUSDT"},
     }
 
-    async def _fake_fetch(_venue, _exchange):
+    # Phase 151 / AUM-02: the chokepoint gained an optional api_key_id kwarg.
+    async def _fake_fetch(_venue, _exchange, api_key_id=None):
         return ([spot_row, deriv_row], None)
 
     async def _fake_persist(_supa, rows, _allocator_id, _api_key_id, _asof):

@@ -18,7 +18,7 @@
 
 ## Pre-call prep (15 min)
 
-**1. Re-read the plan's North Star** (`/Users/helios-mammut/.claude/plans/rosy-cuddling-teacup.md` §2):
+**1. Re-read the plan's North Star** (`<home>/.claude/plans/rosy-cuddling-teacup.md` §2):
 > By end of week 6, one real allocator from the founder's existing Telegram network has completed the full flow on production... and recorded a 90-second video testimonial.
 
 **2. Re-read the plan's audience priority table** (§3) — internalize that the cap-intro partner is now the *closing meeting* (P1), not the *proof artifact* (which is the testimonial, P0).
@@ -135,7 +135,7 @@ After the writeup, walk through the plan's §5 sprint table and ask yourself:
 
 Then either:
 - **PROCEED:** Mark Pre-Sprint 0 complete in TODOS.md. Move to Sprint 1 T1.0 (fix send-intro email dispatch — the highest-priority eng task).
-- **PIVOT:** Edit `/Users/helios-mammut/.claude/plans/rosy-cuddling-teacup.md` directly to reshape Sprints 1-8 around the partner's actual criteria. Re-run /autoplan if the changes are large.
+- **PIVOT:** Edit `<home>/.claude/plans/rosy-cuddling-teacup.md` directly to reshape Sprints 1-8 around the partner's actual criteria. Re-run /autoplan if the changes are large.
 - **REWRITE:** Stop. Start a new plan around LP outbound. The 8-week build can wait until you have 2-3 signed LPs.
 
 ---

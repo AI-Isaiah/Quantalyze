@@ -6,7 +6,7 @@
  * PUT /api/watchlist/[strategyId] route.
  *
  * AUDIT-2026-05-07 (cluster C) hardening:
- *  - Replaces the hardcoded `matratzentester24@gmail.com / Test12` shared
+ *  - Replaces the previously committed hardcoded shared demo
  *    account with a per-run seeded allocator via `seedTestAllocator()`.
  *    Spec is `test.skip`'d when `TEST_SUPABASE_*` env is missing (matches
  *    sister `discovery-hide-examples-default.spec.ts`). The shared account
@@ -412,9 +412,10 @@ test.describe("DISCO-01 watchlist", () => {
       page.waitForSelector("text=/no strategies/i", { timeout: 15000 }),
     ]);
 
-    // Per WatchlistTabs.tsx:69-91 the "My Watchlist" tab is ALWAYS
-    // rendered; only the count badge span (lines 86-90) is conditional
-    // on `count > 0`. So user-B (zero favorites) sees the tab present
+    // Per `WatchlistTabs` (src/components/strategy/WatchlistTabs.tsx) the
+    // "My Watchlist" `TabsTrigger` is ALWAYS rendered; only the
+    // `data-testid="watchlist-count-badge"` span nested inside it is
+    // conditional on `count > 0`. So user-B (zero favorites) sees the tab present
     // with no digit in its text; the plain text is literally
     // "My Watchlist". A leaked count would surface as a digit anywhere
     // in the tab text.

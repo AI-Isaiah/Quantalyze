@@ -1,0 +1,644 @@
+# The analytics-service status-attributability contract (PYAPI-05)
+
+**Status:** binding. **Established:** 2026-07-26 (Phase 140.1, plan 03).
+**Executable half:** `analytics-service/services/error_contract.py`.
+**Primary consumer:** Phase 140.2 `SEAMCORE-01` — the TypeScript error discriminator.
+
+---
+
+## 0. What the status code means here
+
+> **The status code answers exactly one question: _should this response count
+> against the analytics service's own health?_**
+
+Everything else — user copy, remedy, retry affordance — is carried in the body and is
+Phase 140.3's concern. Conflating *"is our service degraded?"* with *"whose fault is
+this?"* is the documented root cause of A-01 (one MT5 gateway outage denies every
+Deribit user) and C-12 (a Binance maintenance window trips a platform-wide breaker).
+
+**The status line ALONE must be decidable.** A consumer must never need to read the
+body to classify a response. This is not a stylistic preference: an unhandled
+exception is a bodyless `500 text/plain` (Starlette `ServerErrorMiddleware` →
+`PlainTextResponse("Internal Server Error", status_code=500)`, TRAP-2), so any
+classifier that requires a body is undefined on the single most common 5xx.
+
+---
+
+## 1. The five classes
+
+Every error-capable site is assignable to exactly one class **at the site**, with no
+downstream inference.
+
+| Class | Decision question | Status | `Retry-After` | `dependency` | `retryable` | 140.2 obligation |
+|---|---|---|---|---|---|---|
+| **CALLER** | Is the caller's request, credentials, or authorization at fault? | `400` `401` `403` `404` `422` | **never** | `null` | `false` | **never counts** |
+| **CALLER, THROTTLED** | Is the caller over a rate limit *we* imposed? | **`429`** | **required** | `null` (forbidden) | **`true`** | **never counts** |
+| **CALLER'S EXCHANGE** | Is the third party *the caller named* at fault (venue down, throttling us, key revoked at the venue, IP-allowlist change)? | **`424`** | optional | venue slug | `true` | **never counts**, and renders as **recoverable** |
+| **SERVICE-TRANSIENT** | Is one of *our* dependencies temporarily unavailable such that an identical retry could succeed? | `503` | **required** | one of ours | `true` | **counts — keyed on the named `dependency`, never globally** |
+| **SERVICE-PERMANENT** | Is this a misconfiguration or a bug that an identical retry cannot fix? | `500` | **never** | one of ours, or `null` | `false` | **never counts** |
+
+#### Why `429` is `retryable: true` (Phase 140.1.1, plan 01)
+
+`429` sat inside the CALLER row until 140.1.1, which made a `429` carrying `Retry-After`
+**unconstructable**: `error_contract._validate` requires `retryable=true` for any
+`retry_after`, while the generic CALLER arm raises on `retryable=true`. Both fired.
+
+The row is split rather than exempting `429` from the `retry_after`⇒`retryable` rule,
+because that alternative emits `retryable:false` in the body while sending a
+`Retry-After` header on the wire — a response that contradicts itself, which is the
+failure R-1 exists to stop. `429` is the one CALLER fault where an identical retry
+**does** succeed, after the advertised wait. It is still breaker-inert by construction
+(4xx) and still names no `dependency`. The `424` row is the in-file precedent for a
+retryable 4xx, so this is consistent with the existing structure, not a special case.
+
+### R-1 — `500` means "do not retry"
+
+Today `500` is used for both bugs and transient failures, which is why A-02's
+undecryptable key can re-trip the breaker forever. Splitting `500` (permanent) from
+`503` (transient) makes the breaker's input set decidable **without body parsing** —
+which matters precisely because of TRAP-2 above.
+
+Corollary, and it is the whole point: **a deterministic fault can only be cleared by an
+operator, so counting it guarantees a self-sustaining outage.** A permanent `503`
+flaps: trip → expire → re-probe → trip, forever, with no operator signal (A-08/A-25).
+
+### R-2 — every deliberate 5xx body carries `{code, dependency, retryable}`
+
+- `code` — the stable machine discriminator (PYAPI-10's `code`, generalising the
+  `error_code` vocabulary already proven at `services/exchange.py:978-1021`).
+- `dependency` — names **which** dependency failed, so 140.2 can key a breaker
+  per-dependency instead of the single global `breaker:railway` that A-01 shows is
+  false. Always present; `null` when nothing of ours failed.
+- `retryable` — the boolean R-1 encodes. Redundant with the status by construction;
+  carried anyway so a body-reading consumer cannot disagree with a status-reading one.
+
+An unhandled `500` has **no body**. That absence is itself the signal that the fault is
+unclassified, and R-1 is what makes that safe.
+
+---
+
+## 2. Where the envelope lives
+
+**At `body.detail`, with exactly two documented exceptions — both FLAT, both
+named in §2.1.** One location, one rule, and the rule includes its exceptions
+rather than leaving a consumer to discover them at runtime.
+
+```jsonc
+// A deliberate 503 from an HTTPException raise site
+{
+  "detail": {
+    "code": "MT5_GATEWAY_UNREACHABLE",
+    "dependency": "mt5-gateway",
+    "retryable": true,
+    "detail": "The MetaTrader gateway is not responding. Try again shortly."
+  }
+}
+```
+
+`body.detail.detail` is **always a scalar string** — the human copy. It is never a list,
+never a dict, never `null`.
+
+`correlation_id` is present as a fifth key when the raise site had one.
+
+FastAPI's default `HTTPException` handler serialises to `{"detail": <detail>}`, so
+`service_error()` puts the whole envelope in `detail`. Middleware sites that must
+**return** a `JSONResponse` rather than raise (see §6) use
+`service_error_response()`, which nests identically — so a consumer never has to know
+which mechanism produced the response.
+
+**Precedent, not invention:** `routers/simulator.py:466` at HEAD (S-18 — §7's row records
+that site's PRE-migration coordinate `:460`, which is a bare `)` today) already raised
+`HTTPException(500, detail={"error": ..., "correlation_id": ...})` before this contract
+existed. The envelope is a superset of that shape, so aligning that site in plan 04 was
+a rename of `error` → `detail` plus the machine keys — its `correlation_id` is
+unchanged.
+
+## 2.1 The two FLAT exceptions — and the one discriminator that reads both
+
+Two shapes put the machine `code` at the **top level** and a **scalar string** at
+`body.detail`. Both exist for the *same* reason and it is not stylistic: the
+TypeScript seams that consume them do `err.detail ?? "…"` and hand the result to a
+**substring cascade over the resulting message**
+(`src/lib/wizardErrors.ts` `classifyKeyValidationError`). A nested object at
+`body.detail` stringifies to `"[object Object]"` there, misses every branch, and
+regresses codes that classify correctly today to `UNKNOWN`/500. So on these seams the
+nested envelope is not merely unhelpful — it is a **regression**, and it is refused at
+construction time.
+
+| Shape | Emitted by | Body | Consumer reads |
+|---|---|---|---|
+| **App-global handlers** (§7: `RequestValidationError` 422, `RateLimitExceeded` 429) | `main.py` handlers | `{ok, code, human_message, detail (scalar str), correlation_id, recoverable[, retry_after_seconds]}` | `body.code` |
+| **`VenueTransientHTTPException`** (PYAPIFIX2-01) | `services/error_contract.py:345`, rendered by `main.py:574` | `{detail (scalar str), code, recoverable}` — **exactly three keys, nothing else** | `body.code` |
+
+`VenueTransientHTTPException`'s seven raise sites at HEAD:
+`routers/exchange.py:163` (sFOX 429), `:178` (sFOX 5xx/transport), `:371` (MT5 probe
+timeout), `:387` (MT5 account mismatch), `:409` (MT5 transient client error), `:598`
+(the ccxt verdict collapse) — all on **`POST /api/validate-key`**
+(`routers/exchange.py:447`), the live key-connect path — plus `routers/portfolio.py:2354`
+on **`POST /api/verify-strategy`** (`routers/portfolio.py:2201`), which has no
+TypeScript caller and is closed on class-integrity grounds only. (Re-derive these by
+`grep -n "raise VenueTransientHTTPException"` before trusting them — they move whenever
+anything above them in either router does.)
+
+⚠️ **The enumeration above is STALE and is kept as lineage** (167 review IN-01): measured
+2026-09-22, `grep -c "raise VenueTransientHTTPException"` finds 11 in `routers/exchange.py`
+on `main` and 12 at the 167 head — not six. Re-derive by grep; never trust a count here.
+
+**A second raise in the MT5 transient-client-error arm (167-CREDTRUST plan 01, S-27), cited
+BY SYMBOL rather than by line number** — it SPLITS that existing arm (the MT5
+transient-client-error entry in the stale enumeration above) rather than adding a new
+failure: `routers/exchange.py`'s
+`_validate_mt5_key_probe()`, the narrowed transient tail of its
+`except Mt5ClientError` arm — code `SIGN_IN_FAILED`, `recoverable=False`. Reached from
+the SAME `POST /api/validate-key` path AND from `/internal/keys/{id}/rotate-secret`
+(`routers/internal.py`'s `rotate_key_secret`, whose `_validate_mt5_key` call is a thin
+bracket over the same probe function) — the first site in this class to be reachable from
+two endpoints. The arm's other raise keeps the pre-167 `NETWORK_UNAVAILABLE`,
+`recoverable=True` answer for every fault that is not a login-stage refusal (167 WR-01).
+
+The class is a **CALLER-class 4xx by construction** and refuses anything outside
+`400 <= status < 500`: it carries no `dependency`, no `Retry-After` and no
+`correlation_id`, so a 5xx in this shape would violate R-2 and mis-key 140.2's
+per-dependency breaker. **Anything needing a `dependency` must use `service_error`.**
+
+### The discriminator 140.2 must build (SEAMCORE-01)
+
+Reading `body.detail.code` unconditionally yields `undefined` on both flat shapes and
+falls through to `UNKNOWN` — which is the exact dead end PYAPIFIX2-01 exists to kill,
+reintroduced at the layer that was supposed to consume the fix. Branch on the **type of
+`body.detail`**, which is decidable without knowing which route answered:
+
+```ts
+// `detail` is an OBJECT  => the nested service_error envelope (§2)
+// `detail` is a STRING   => one of the two flat shapes (§2.1)
+const code =
+  body?.detail !== null && typeof body?.detail === "object"
+    ? body.detail.code          // nested: also has dependency + retryable
+    : body?.code;               // flat:   also has recoverable (or ok/human_message)
+
+const human =
+  typeof body?.detail === "string" ? body.detail : body?.detail?.detail;
+```
+
+`code` is the single stable discriminator in both branches; `dependency` exists **only**
+in the nested branch (the flat shapes are 4xx and name none), and that asymmetry is the
+contract, not an omission.
+
+### ⚠️ Obligation this creates for 140.2 (mandatory)
+
+`body.detail` is an **object** on every deliberate error, so the three TypeScript Class-5
+sites that read it will render `"[object Object]"` — or discard the body entirely — until
+they read `body.detail.detail`. This is a **known, deliberate, recorded** consequence —
+not an oversight. It is invisible to users before the fix lands because the branch
+`feat/v1.16-production-resilience` is never merged mid-programme.
+
+> ⚠️ **CORRECTED IN PLACE ON 2026-07-27 BY PLAN `140.3-01` — this paragraph named the
+> WRONG THIRD SITE and offered the WORST member of the class as the template.** Both
+> claims were verified false first-hand at the 140.3 planning gate (corrections **C-2**
+> and **C-3**). They are corrected here rather than forked into a second note, because
+> this is the document every downstream phase is told to read instead of re-deriving.
+> **The class is still 3; it is a DIFFERENT 3.** The behavioural predicate is *"does this
+> site read a SEAM response body?"* — **not** *"does this site contain the characters
+> `detail ??`"*. The syntax grep is what produced both errors.
+
+**The three Class-5 sites, located by code text** (line numbers are deliberately omitted —
+two of these three files moved during 140.2):
+
+| # | Site | Read |
+|---|---|---|
+| 1 | `src/lib/analytics-client.ts` | `error.detail ?? "Analytics service error"` |
+| 2 | `src/app/api/keys/[id]/permissions/route.ts` | ``err.detail ?? `Upstream ${res.status}` `` |
+| 3 | `src/components/portfolio/PortfolioImpactPanel.tsx` | the body emptied by `const body = parsedError.success ? parsedError.data : {};` |
+
+**NOT a member — `src/app/(dashboard)/allocations/components/ScenarioCommitDrawer.tsx`**
+(this paragraph previously named it, at a path that does not exist). Its `body.detail ??`
+read is gated on `res.status === 409` **AND** `code === "portfolio_fingerprint_stale"`, and
+`src/app/api/allocator/scenario/commit/route.ts` **imports no seam module at all** — it is
+not one of the 15 seam routes. The `detail` it reads is a hand-written scalar that route
+emits itself, and the nested envelope is structurally unreachable there: the branch requires
+`code` at the **top level**, and the nested envelope puts it at `body.detail.code`.
+
+**`src/components/portfolio/PortfolioImpactPanel.tsx` is member 3, and it is the OPPOSITE
+of a template** (this paragraph previously called it *"already type-checks and is the
+fix-shape template"*). It fetches `/api/simulator`, a real seam route.
+`ErrorResponseSchema.safeParse(raw)` runs **two lines above** its
+`typeof body.detail === "string"` check, and `src/lib/api/errorSchema.ts` declares
+`detail: z.string().optional()` — so a nested `service_error` body **fails the parse**,
+collapses to `{}` through `parsedError.success ? parsedError.data : {}`, and `error`,
+`retryAfter` **and** `detail` are all discarded before the `typeof` check is ever reached.
+On the exact envelope this section describes, it threw the whole error body away and
+rendered `HTTP 500`. **Copying its shape propagates the defect.**
+
+**The fix shape is the LEAF, not any in-tree site:** `seamHumanMessage(body)` for the human
+string and `seamErrorCode(body)` for the machine code, from `src/lib/seam-discriminator.ts`,
+applied to the **RAW parsed JSON before any narrowing schema**. ✅ All three landed that way
+in plan `140.3-01` (2026-07-27); `src/lib/api/errorSchema.ts` was deliberately not widened.
+
+Note the distinction from PYAPI-07/PYAPI-08: the **422 and 429** handlers emit a
+**scalar** `detail` at the top level, which is why those need no TypeScript change.
+Deliberate 4xx/5xx from `service_error()` are the object-detail case.
+
+**Added to the object-detail set by PYAPIFIX2-03 (Phase 140.1.2):**
+`routers/internal.py:246` — the `/internal/keys/{key_id}/permissions` per-key throttle
+— now raises `service_error(429, "RATE_LIMITED", …)` where it previously answered a
+bare `{"detail": "<scalar str>"}`. Its consumer
+`src/app/api/keys/[id]/permissions/route.ts:147` does
+`throw new Error(err.detail ?? …)`, so from this change until 140.3 lands, a throttled
+probe logs `Error: [object Object]` at `route.ts:275` instead of the human sentence.
+
+**Diagnostics only, verified end to end:** the downstream classifier at
+`route.ts:254-268` keys on message substrings (`INTERNAL_API_TOKEN`, `Upstream 5`,
+`ECONNREFUSED`, `not configured`, `aborted`, `timeout`), and the *old* sentence matched
+none of them either — the reply is `PROBE_FAILED` / 502 both before and after. It is
+listed here so 140.3 knows this
+429 joined the object-detail set rather than discovering it from a log. Fixing it is a
+TypeScript edit on the same three-site `err.detail ?? …` pattern already owed above,
+so it is owed **with** them, not separately.
+
+> ✅ **CLOSED 2026-07-27 by plan `140.3-01`** — noted here rather than left reading
+> present-tense. That route's `!res.ok` arm now reads through `seamHumanMessage` /
+> `seamErrorCode`, so the throttled probe logs the human sentence and the machine code,
+> not `Error: [object Object]`. The reply is still `PROBE_FAILED` / 502 and the
+> `Retry-After` is still discarded — answering **429 not 502** and forwarding the header
+> is **TS-34**, deliberately left to 140.3's response-shape plan, because two changes to
+> one block in one pass is TRAP-8.
+
+---
+
+## 3. `Retry-After`
+
+Per-dependency **integer literals declared in exactly one table**:
+`RETRY_AFTER_SECONDS` in `services/error_contract.py`. A **`503`** raise site reads
+`RETRY_AFTER_SECONDS["<dependency>"]`; it never inlines a number (OPEN-2 /
+Cluster-D lesson). Since Phase 140.1.1 that is **enforced, not merely stated**:
+`_validate` refuses a `503` whose `retry_after` disagrees with the table entry for its
+`dependency`, and refuses one naming a dependency with no entry at all.
+
+**A `429`'s wait is NOT in this table and must not be.** It is a limiter *window*,
+computed per request from the rate-limit configuration — not a property of any
+dependency. Two sites mint one directly and deliberately bypass the helper:
+`routers/internal.py:227` (`str(int(_RATE_LIMIT_WINDOW_S))`) and the app-global
+`RateLimitExceeded` handler at `main.py:526`. This table's scope is **per-dependency
+`503` waits only**.
+
+| Dependency | Seconds | Why |
+|---|---|---|
+| `mt5-gateway` | 30 | A Railway redeploy of the gateway settles well inside 30s |
+| `supabase` | 15 | PostgREST blips are seconds, not minutes |
+
+`kek` and `egress-proxy` are **deliberately absent**: every fault of theirs in the
+current site set is a permanent misconfiguration (`500`, `retryable:false`).
+Advertising a wait for them would invite exactly the retry loop R-1 exists to stop. Add
+a key only when a genuinely transient arm for that dependency exists.
+
+---
+
+## 4. Dependency vocabulary
+
+**Service dependencies** — the closed set that may appear on a `500`/`503`, and the only
+values that are legitimate breaker keys:
+
+| Value | What it names |
+|---|---|
+| `mt5-gateway` | the RPyC MetaTrader terminal bridge |
+| `kek` | the key-encryption key / envelope-encryption config |
+| `supabase` | PostgREST / the database |
+| `egress-proxy` | the static-IP worker egress proxy |
+
+**On a `424`, `dependency` names the CALLER'S VENUE instead** — `binance`, `deribit`,
+`bybit`, … . This is how Q2.2's "the venue name in the body" is satisfied without adding
+a key to the envelope. `error_contract._validate` refuses a `424` whose `dependency` is
+one of ours, so the two vocabularies cannot be confused.
+
+**A `424`'s `dependency` MUST NOT be used as a breaker key** — `424` never counts at all
+(§5). It exists so 140.3 can say *"Binance is not responding right now"* instead of
+*"an exchange is not responding"*.
+
+---
+
+## 5. Why an exchange fault is `424`, not `502` and not `400`
+
+> *A 502 for "the user's exchange is down" must not trip our breaker, but it is
+> genuinely not the user's fault either. What status does it get, and why?*
+
+**`424 Failed Dependency`**, with a `code` of `EXCHANGE_PROBE_FAILED` and the venue
+named in `dependency`.
+
+> ⚠️ This section answers *"the user's exchange is down"*. It does **not** license
+> attributing an arm to the venue merely because a venue name is in scope. Phase
+> 140.1.1 (PYAPIFIX-03) retired `EXCHANGE_INIT_FAILED` for exactly that misuse: the
+> callee performed no network I/O, so the venue could not have failed. **The test is
+> whether we actually spoke to the venue on that path** — if we did not, the fault is
+> ours and §7's S-11 note applies instead.
+
+The reasoning, in the order it must survive review:
+
+1. **It cannot be 5xx.** The status is the breaker's input (R-1), and the analytics
+   service is provably healthy in this scenario — it successfully reached the venue and
+   received a refusal. Emitting 5xx makes C-12 true: one dashboard render with five keys
+   during a Binance outage is five 502s, hence a global trip that denies Deribit users,
+   the optimizer, admin match and CSV finalize.
+2. **It should not be `400`.** `400` already means "your request was malformed" across
+   `routers/exchange.py:96,114,123,130,143,203,204,385,393,412`. Overloading it destroys
+   the distinction between *"fix your input"* and *"wait for your venue"* — which is the
+   single most important thing to tell this user.
+3. **`424` is exact and free.** A registered IANA status (RFC 4918 §11.4); a 4xx, so it
+   is **breaker-inert by construction**; and distinguishable **from the status line
+   alone**, which matters because TRAP-2 means the body may be absent.
+4. **"Not the user's fault" is a copy problem, not a status problem.** The 4xx/5xx axis
+   answers *"is our service degraded?"*, not *"who is to blame?"*. 140.3 renders `424` as
+   *"Binance is not responding right now — your key is fine, try again shortly"*, which
+   is neither an accusation nor a false claim about our uptime.
+
+---
+
+## 6. Obligations for Phase 140.2 (SEAMCORE)
+
+These are the contract's downstream half. Each one is a way the emit-side fix is
+nullified if 140.2 gets it wrong.
+
+| # | Obligation | Failure shape if missed |
+|---|---|---|
+| **O-1** | **`424` is recoverable AND non-counting.** It must NOT be collapsed into "caller error, not recoverable" with the rest of the 4xx. | The B-01/B-22 shape: an outage the user can only wait out renders as an un-retryable dead end. |
+| **O-2** | **The breaker keys on the named `dependency`, never globally.** A `503` with `dependency:"mt5-gateway"` may only gate MT5 traffic. | A-01: the single global `breaker:railway` key means one MT5 gateway restart denies every Deribit user, the optimizer and CSV finalize. |
+| **O-3** | **`retryable:false` NEVER counts toward the breaker**, and a `500` never counts either. | A-02/A-12/C-17: a deterministic fault (undecryptable key, unset KEK) re-trips the breaker forever; the breaker then blocks its own recovery probe. |
+| **O-4** | **A bodyless `500` must classify safely.** The discriminator must reach a terminal, non-counting verdict from the status line with `Content-Type: text/plain` and no JSON at all. | TRAP-2 / A-03: the discriminator throws on `JSON.parse`, and the most common 5xx becomes unhandled. |
+| **O-5** | **Read the human string from `body.detail.detail`, the code from `body.detail.code`.** Do not `??` the object (§2). | `"[object Object]"` in the UI — the C-14 render, reintroduced. |
+| **O-6** | **`503` carries `Retry-After`; honour it** instead of inventing a wait. | B-11: 140.3 cannot "name the real wait" and falls back to a guess. |
+| **O-7** | **Do not route the `/health` warmer through the seam core.** `/health`'s `503` (S-24) is correct and deliberately unchanged. | A-12/D-14: a cold `/health` probe feeds `recordSeamFailure`, the breaker trips, and it then blocks its own recovery probe. Zero tests red. |
+| **O-8** | **`admin/match/*` currently flattens all upstream 4xx to a generic 500** (B-12). A `424` from `/api/match/*` would render "please try again" with no venue named. | OPEN-1: the venue name is lost exactly where it is most useful. |
+| **O-9** | **`services/job_worker.py:_HTTP_TRANSIENT_4XX` does not know `424`.** No worker path reaches these router sites today, but if one ever proxies them, `424` classifies as `permanent`. | A venue blip permanently fails a job instead of retrying it. |
+
+---
+
+## 7. The full S-01…S-28 site map
+
+The authoritative enumeration of every 5xx-capable site reachable from the seam.
+`140.2` can diff its assumptions against this table.
+
+⚠️ **S-27 is the first row that is never 5xx** — `VenueTransientHTTPException`'s
+CALLER-class construction guard refuses anything outside `4xx` (§2.1), so it is a
+424-only site. Recorded here rather than silently widening the header above: §8's
+"add the row to §7" instruction makes no 5xx-only exception, and this table is the
+one place a reader diffs assumptions against, so a 3b site earns a row on the same
+footing as a 3a one even though the table's own opening sentence predates that case.
+
+**Legend.** *Plan* is the Phase 140.1 plan that owns the edit, except where a
+later phase is named. `✅` = implemented. All **25 explicit sites are ✅**; the
+three remaining rows (S-21, S-22, S-24) are `n/a` by construction, not pending.
+
+⛔ **The `routers/match.py` rows cite by SYMBOL, not by `file:line`.** They read
+`:1655`/`:1689` until 2026-09-16, by which point the real raise sites had moved
+61 lines down — the `[164.7-CITATION-DRIFT-01]` class, whose recorded remedy is
+to cite the symbol rather than re-number prose that will drift again. A stale
+anchor in THIS table is worse than in most prose: it is the document a future
+reviewer diffs their assumptions against.
+
+| # | Site | Endpoint | Today | Trigger | Class | Target | Plan | Done |
+|---|---|---|---|---|---|---|---|---|
+| S-01 | `routers/exchange.py:108` | `/api/validate-key` | 503 | sFOX client ctor `ValueError` — malformed `WORKER_EGRESS_PROXY_URL` | SERVICE-PERMANENT | **500** `EGRESS_PROXY_MISCONFIGURED`, `retryable:false`, `dependency:egress-proxy` | 03 | ✅ |
+| S-02 | `routers/exchange.py:215` | `/api/validate-key` | 503 | `MT5_GATEWAY_HOST`/`PORT` unset | SERVICE-PERMANENT | **500** `MT5_GATEWAY_UNCONFIGURED`, `dependency:mt5-gateway` | 03 | ✅ |
+| S-03 | `routers/exchange.py:220` | `/api/validate-key` | 503 | `MT5_GATEWAY_PORT` not an int | SERVICE-PERMANENT | **500** `MT5_GATEWAY_UNCONFIGURED`, `dependency:mt5-gateway` | 03 | ✅ |
+| S-04 | `routers/exchange.py:235` | `/api/validate-key` | 503 | MT5 gateway connect **timed out** | SERVICE-TRANSIENT | **503** `MT5_GATEWAY_UNREACHABLE`, `dependency:mt5-gateway`, `Retry-After` | 03 | ✅ |
+| S-05 | `routers/exchange.py:238` | `/api/validate-key` | 503 | MT5 gateway connect **failed** | SERVICE-TRANSIENT | **503** `MT5_GATEWAY_UNREACHABLE`, `dependency:mt5-gateway`, `Retry-After` | 03 | ✅ |
+| S-06 | `routers/exchange.py:404` | `/api/validate-key` | 500 | bare `except` around `validate_key_permissions` | **SPLIT** | `ccxt.BaseError` → **424** `EXCHANGE_PROBE_FAILED`; else **500** `INTERNAL` with copy that does not blame credentials | 03 | ✅ |
+| S-07 | `routers/exchange.py:424` | `/api/encrypt-key` | 503 | `get_kek()` raises | SERVICE-PERMANENT | **500** `KEK_UNAVAILABLE`, `retryable:false`, `dependency:kek` | 03 | ✅ |
+| S-08 | `routers/internal.py:208` | `/internal/keys/{id}/permissions` | 503 | `get_kek()` raises | SERVICE-PERMANENT | **500** `KEK_UNAVAILABLE`, `dependency:kek` + rate-limited Sentry capture | 03 | ✅ |
+| S-09 | `routers/internal.py:214` | `/internal/keys/{id}/permissions` | 500 | `decrypt_credentials` raises | SERVICE-PERMANENT | **500** `KEY_UNDECRYPTABLE`, `retryable:false`, `dependency:kek` | 03 | ✅ |
+| S-10 | `routers/internal.py:218` | `/internal/keys/{id}/permissions` | **502** | `api_keys.exchange` NULL/empty | **CALLER** | **422** `KEY_MISSING_EXCHANGE` | 03 | ✅ |
+| S-11 | `routers/internal.py:442` (`except Exception:`), raise at `:471` | `/internal/keys/{id}/permissions` | 502 → 424 | `create_exchange` raised non-`ValueError` | **SERVICE-PERMANENT** (was CALLER'S EXCHANGE — **deliberately reversed**, see below) | **500** `ADAPTER_INIT_FAILED`, `retryable:false`, **`dependency: null`**, no `Retry-After` | 03, **re-classed 140.1.1-04** | ✅ |
+| S-12 | `routers/internal.py:339` | `/internal/keys/{id}/permissions` | 502 | any exception from `detect_permissions` | CALLER'S EXCHANGE | **424** `EXCHANGE_PROBE_FAILED` | 03 | ✅ |
+| S-13 | `routers/match.py` `recompute()`, the `_is_admin_profile is None` arm | `/api/match/recompute` | 503 | `_is_admin_profile` returned `None` | SERVICE-TRANSIENT | **503** `ADMIN_CHECK_UNAVAILABLE`, `dependency:supabase` + `Retry-After` | 04 | ✅ |
+| S-14 | `routers/match.py` `recompute()`, the `_role_check is None` arm | `/api/match/recompute` | 503 | `_is_allocator_profile` returned `None` | SERVICE-TRANSIENT | **503** `ROLE_CHECK_UNAVAILABLE`, `dependency:supabase` + `Retry-After` | 04 | ✅ |
+| S-15 | `routers/match.py` `recompute()`, `except` around `_score_one_allocator` | `/api/match/recompute` | 500 `f"Scoring failed: {err}"` | `_score_one_allocator` raised | SERVICE-PERMANENT | **500** `SCORING_FAILED`, **`{err}` stripped** → server log + `correlation_id` | 04 | ✅ |
+| S-16 | `routers/match.py` `eval_endpoint`, `except PaginatedSelectTruncated` | `/api/match/eval` | 503 | `PaginatedSelectTruncated` — caller's `lookback_days` too large | **CALLER** | **400** `EVAL_WINDOW_TOO_LARGE` | 04 | ✅ |
+| S-17 | `routers/match.py` `eval_endpoint`, terminal `except Exception` | `/api/match/eval` | 500 `f"Eval failed: {err}"` | any exception | SERVICE-PERMANENT | **500** `EVAL_FAILED`, **`{err}` stripped** → server log + `correlation_id` | 04 | ✅ |
+| S-18 | `routers/simulator.py:460` | `/api/simulator` | 500 `{error, correlation_id}` | any exception in the sim body | SERVICE-PERMANENT | **500** `SIMULATION_FAILED` (keeps `correlation_id`) | 04 | ✅ |
+| S-19 | `routers/portfolio.py:661` | `/api/portfolio-analytics` | 500 | insert returned no row | SERVICE-TRANSIENT | **503** `ANALYTICS_ROW_NOT_CREATED`, `dependency:supabase` + `Retry-After` | 04 | ✅ |
+| S-20 | `routers/portfolio.py:1181` | `/api/portfolio-analytics` | 500 | compute raised | SERVICE-PERMANENT | **500** `PORTFOLIO_ANALYTICS_FAILED` | 04 | ✅ |
+| S-21 | *(implicit)* every seam endpoint | all 11 | **500 `text/plain`** | any unhandled exception | UNCLASSIFIED | **500**, no body — safe by R-1 | — | n/a |
+| S-22 | *(implicit)* `/process-key` | `/process-key` | **500 `text/plain`** | any unhandled exception | UNCLASSIFIED | **500**, no body. `routers/process_key.py` contains ZERO explicit 5xx sites | — | n/a |
+| S-23 | `main.py:246` | all except `/health`, `/internal/*`, `/process-key` | 503 | `SERVICE_KEY` env unset | SERVICE-PERMANENT | **500** `SERVICE_KEY_UNCONFIGURED`. ⚠️ a `JSONResponse` **literal**, not an `HTTPException` — it does NOT appear in a `status_code=5` `HTTPException` grep, and it must stay **returned**, never raised | 04 | ✅ |
+| S-24 | `main.py:299` | `/health` | 503 `{status:"stale"}` | worker heartbeat stale | SERVICE-TRANSIENT | **unchanged** — `/health` is outside the seam; see O-7 | — | n/a |
+| S-25 | `routers/match.py` `recompute()`, the `_kill_switch_state == KILL_SWITCH_UNAVAILABLE` arm | `/api/match/recompute` | — (new) | the kill-switch read exhausted `db_read_with_retry` — the engine stops FAIL-CLOSED rather than guessing | SERVICE-TRANSIENT | **503** `KILL_SWITCH_UNAVAILABLE`, `dependency:supabase` + `Retry-After` | **164.5.1** | ✅ |
+| S-26 | `routers/match.py` `cron_recompute()`, the `except` around `_read_cron_cursor()` | `/api/match/cron-recompute` | **500 `text/plain`** (unhandled) | the batching-cursor read exhausted `db_read_with_retry` | SERVICE-TRANSIENT | **503** `CURSOR_UNAVAILABLE`, `dependency:supabase` + `Retry-After` | **164.5.1** | ✅ |
+| S-27 | `routers/exchange.py` `_validate_mt5_key_probe()`, the `except Mt5ClientError` transient tail (also reached via `rotate_key_secret`'s `_validate_mt5_key` call) | `/api/validate-key`, `/internal/keys/{id}/rotate-secret` | 424 `NETWORK_UNAVAILABLE` | `classify_mt5_login_error` classified the caught `Mt5ClientError` `transient` AND `is_mt5_login_refusal` holds — the terminal answered the sign-in itself falsy with a code outside `_LOGIN_STAGE_NOT_A_REFUSAL_CODES` (the `-10000`…`-10004` IPC-infrastructure family and the success code `1`), and never told us why. A login-stage `-10005` IS such a refusal (D-17: the modal login dialog D-08 measured for a wrong password). **167 WR-01 / D-17:** a post-login read failure, an `initialize()` failure, or a login-stage `-10000`…`-10004` / `1` reaching the same arm keeps the pre-167 424 `NETWORK_UNAVAILABLE`, `recoverable:true` | CALLER'S EXCHANGE (3b FLAT — §2.1) | **424** `SIGN_IN_FAILED`, **`recoverable:false`** — DIVERGES from this class's `recoverable:true` default: a retry re-sends the same credential to a terminal that refused it, or that a wrong password put behind a modal login dialog (D-08, D-17) | **167-CREDTRUST plan 01** | ✅ |
+| S-28 | `routers/cron.py` `benchmark_refresh()` and `_benchmark_refresh_once()`, all six failure arms | `/api/benchmark-refresh` | raw `500` `{detail:"<string>"}` (Phase 169.2 as first shipped) | the BTC refresh returned no series, a stale or empty series, or raised; the stored-date read-back raised or is older than yesterday (UTC); or the 80 s `_BENCHMARK_REFRESH_DEADLINE_S` expired | SERVICE-PERMANENT (W2: never 503, so a stale benchmark cannot trip the shared breaker) | **500** `BENCHMARK_REFRESH_FAILED`, `retryable:false`, no `dependency` | **169.2** | ✅ |
+
+**Tally:** 28 rows = **25 explicit editable sites** (S-01…S-20 plus S-25/S-26
+`HTTPException` raises, plus S-28 the six `benchmark-refresh` arms counted as one site because they share one code, plus S-23 the `JSONResponse` literal, plus S-27 the
+`VenueTransientHTTPException` `SIGN_IN_FAILED` raise Phase 167 split out of the existing
+MT5 transient-client-error arm — a new raise, not a new failure) + 2 implicit
+unhandled-500s (S-21, S-22, no edit possible or needed) + 1 deliberately unchanged
+(S-24). A `raise HTTPException` grep sweep over these rows finds **22** of the 24, not
+24: it misses S-23, which is not an `HTTPException` at all, and S-27, whose raise is
+spelled `raise VenueTransientHTTPException`. That sweep predates S-28 and is not re-measured here; S-28's arms are spelled
+`raise service_error(`.
+
+**S-25 and S-26 were added by Phase 164.5.1**, and both are the same shape: a
+Supabase read that has already exhausted `db_read_with_retry`'s gateway-timeout
+retries, on a path whose only safe answer is to STOP. S-25 (`KILL_SWITCH_UNAVAILABLE`)
+shipped its raise site in 164.5.1 with no row here and no wire test — it was the
+only one of `recompute()`'s three `503` arms with neither, while its two siblings
+S-13/S-14 had both. S-26 (`CURSOR_UNAVAILABLE`) is a *conversion*, not a new failure:
+the batching-cursor read already propagated out of `cron_recompute()` and FastAPI
+answered a bare `500 text/plain`, which R-1 classifies as "do not retry" — exactly
+backwards for a gateway blip, and a violation of `routers/match.py`'s own header rule
+that every deliberate error in a seam-reachable arm goes through `service_error`.
+⚠️ Neither is reachable from a browser through a 4xx path, but S-25 **does** reach
+one: `src/app/api/admin/match/recompute/route.ts` forwards `code: err.seamCode` on
+5xx as well as 4xx (its `161-08 / WIZERR-06` comment says so explicitly), and its
+consumer is the founder-facing `AllocatorMatchQueue`. That component renders
+`errBody.error` and never reads `code`, which is the real reason it needs no
+`wizardErrors.ts` verdict row.
+
+### ⚠️ S-11 was re-classed by Phase 140.1.1 (PYAPIFIX-03 / H-2) — this is deliberate
+
+S-11 is the one row in this table whose class was **reversed** after it shipped. Plan
+140.1-03 assigned it CALLER'S EXCHANGE (`424 EXCHANGE_INIT_FAILED`, venue named) by
+analogy with S-12, which sits 18 lines below it in the same handler. The analogy is
+false, and the reason is mechanical rather than a matter of judgement:
+
+> `services/exchange.py` `create_exchange` is `EXCHANGE_CLASSES.get()`, a dict build,
+> `cls(config)` and two attribute sets. **It performs no network I/O.**
+
+Nothing has been sent to the venue when that arm fires, so a non-`ValueError` escape is
+a `TypeError` / `AttributeError` / `ImportError` / OOM in **our** adapter construction.
+S-12 is genuinely the venue (`detect_permissions` does talk to it); S-11 never was.
+
+The 424 was wrong in the direction that **hides** the fault: a 424 is breaker-inert
+*and* a 4xx, so a plain bug in our own code counted nowhere and paged nobody, while the
+body told the user their exchange was down. Under R-1 it is SERVICE-PERMANENT: `500`,
+`retryable:false`, no `Retry-After` (only a deploy can clear it).
+
+**`ADAPTER_INIT_FAILED`, registered here for 140.2's discriminator map.** The code names
+*our adapter construction*, not the venue. `EXCHANGE_INIT_FAILED` is **retired** — it
+appears at zero raise sites — because a code that names the exchange contradicts a
+SERVICE-PERMANENT attribution in the one field 140.2 discriminates on.
+
+**`dependency` is `null` and must stay `null`.** 140.2 keys its breaker on that field
+(SEAMCORE-01, O-2), so a venue name on a `500` would mint a per-dependency breaker key
+for something that is not ours. Phase 140.1.1 plan 01's membership guard in
+`_validate` now **refuses it at construction** — the old shape is unconstructable, not
+merely discouraged.
+
+#### S-11 was one of THREE, and the table's completeness claim depends on the other two
+
+`ADAPTER_INIT_FAILED` is raised at **three** sites, not one. The review named only S-11;
+these two answered `400` before Phase 140.1.1 and were therefore **correctly absent from
+a table of 5xx-capable sites** — the remap is what makes them belong here. They are not
+numbered into `S-nn` because neither is a *remap of an existing S-row*:
+
+| Site | Endpoint | Trigger | Class | Emits |
+|---|---|---|---|---|
+| `routers/exchange.py:454` (`validate_key`) | `/api/validate-key` | `create_exchange` raised non-`ValueError` | SERVICE-PERMANENT | **500** `ADAPTER_INIT_FAILED`, `retryable:false`, `dependency: null` — was `400 "Failed to initialize exchange connection"` |
+| `routers/portfolio.py:2277` (`verify_strategy`) | `/api/verify-strategy` | `create_exchange` raised non-`ValueError` | SERVICE-PERMANENT | **500** `ADAPTER_INIT_FAILED`, `retryable:false`, `dependency: null` — was `400 "Failed to initiali**s**e exchange connection"` |
+
+The second row was named by **nobody** — not the code review, not RESEARCH, not CONTEXT.
+It differs from the first only in the **British spelling** of "initialise", which is
+exactly what defeats a `grep "Failed to initialize"` sweep. Record this: the enumeration
+predicate for this class is *"an `except` arm around a callee that performs no network
+I/O"*, **not** a copy string.
+
+The in-repo proof the class was real: `verify_strategy` calls `create_exchange`
+**twice**, ~50 lines apart, and the second call's handler already answered
+`500 "Strategy verification failed"`. One function, one callee, two verdicts. That arm
+was already correct and is deliberately unchanged.
+
+`ValueError` → `400` is preserved at all three sites: an exchange name absent from
+`EXCHANGE_CLASSES` genuinely IS caller input.
+
+**Consequence for TypeScript, deliberate and recorded.** Both sites now emit an
+**object** `body.detail` where they previously emitted a scalar, so per §2's obligation
+the seam-reachable one (`/api/validate-key`) renders as the generic dead end via
+`src/lib/analytics-client.ts` until 140.2 reads `body.detail.detail` (O-5). For a
+SERVICE-PERMANENT fault that is the CORRECT render — there is no user remedy and no wait
+worth advertising. This is the opposite of the venue-transient case, where a generic
+dead end would hide a real "try again shortly". (`/api/verify-strategy`'s own 5xx sites
+are on the not-seam-reachable list above; the envelope change there is for log/operator
+consistency, not for a TS renderer.)
+
+**Not seam-reachable, deliberately excluded** (listed so the enumeration is provably
+complete, not because they were missed): the six deliberate error arms inside the
+`fetch_trades` handler — `routers/exchange.py:660` (503 `get_kek` unavailable), `:670`
+(400 no connected key), `:685` (404 key not found), `:689` (403 key/owner mismatch),
+`:698` (500 decrypt failed), `:760` (500 venue fetch failed) — (`/api/fetch-trades`, no
+TS caller); `routers/csv.py:95`; `routers/portfolio.py:2242,2446`
+(Python `/api/verify-strategy`, no TS caller); `routers/cron.py:613,631`;
+`routers/debug_key_flow.py:56,100`; `services/analytics_runner.py:1725`.
+
+**Added by PYAPI-04 (plan 06), and deliberately NOT numbered into the S-table**
+because neither is a *remap* of an existing site — both are new refusals in
+`main.py:_gate_process_key`, the middleware bearer gate on `/process-key`:
+
+| Site | Endpoint | Trigger | Class | Emits |
+|---|---|---|---|---|
+| `main.py:_gate_process_key` | `/process-key` | `INTERNAL_API_TOKEN` unset SERVER-side | SERVICE-PERMANENT | **500** `INTERNAL_TOKEN_UNCONFIGURED`, `retryable:false` — the twin of S-23, and checked BEFORE any compare so an empty bearer can never match an empty secret |
+| `main.py:_gate_process_key` | `/process-key` | bearer absent or mismatched | CALLER | **401** `UNAUTHENTICATED` |
+
+Both use `service_error_response` (never `service_error`) for the §6 never-raise
+reason. **`/process-key` unauthenticated is now `401` at the middleware,
+superseding the handler's 403-first behaviour**; `_verify_internal_token`'s `403`
+stays in the handler as defence-in-depth but is unreachable through the full app.
+S-22 (any *unhandled* exception on `/process-key` → bodyless `500`) is unchanged.
+
+**Added by PYAPI-07 / PYAPI-08 (plan 08) and PYAPIFIX2-01 (plan 140.1.2), and
+likewise NOT numbered into the S-table** — the S-table enumerates 5xx-capable
+sites, and all three of these are 4xx. All three are `app.add_exception_handler`
+registrations in `main.py`, so **every** route inherits them:
+
+| Handler | Registered | Status | Body | `Retry-After` |
+|---|---|---|---|---|
+| `RequestValidationError` | `main.py:424` | **422** | `{ok:false, code:"VALIDATION_FAILED", human_message, detail, correlation_id, recoverable:false}` — `detail` is a **scalar string** built from the pydantic error's `type` + `loc` ONLY | never |
+| `RateLimitExceeded` | `main.py:533` | **429** | `{ok:false, code:"RATE_LIMITED", human_message, detail, correlation_id, recoverable:true, retry_after_seconds}` — `detail` is a **scalar string** | **always** |
+| `VenueTransientHTTPException` | `main.py:608` | **400** (class admits any 4xx) | `{detail, code, recoverable}` and **nothing else** — `detail` is a **scalar string**, byte-identical to the copy the site emitted before the machine fields existed | never |
+
+All three are the §2.1 SCALAR-`detail` case, not the object-`detail` case. That
+is deliberate and is why they need **zero** TypeScript change: the three
+`err.detail ?? "..."` sites (Class 5) render the human string correctly as-is.
+Do not "unify" them onto the `service_error()` object envelope without
+re-reading §2 and §2.1 — doing so would reintroduce the `"[object Object]"`
+render on the two most common error statuses in the service, and on
+`/api/validate-key` it would additionally regress `RATE_LIMITED`,
+`PROBE_FAILED` and `DDOS_PROTECTION` from correct classification to
+`UNKNOWN`/500. The `VenueTransientHTTPException` constructor
+(`services/error_contract.py:399`) refuses a non-scalar `detail`, an empty
+`code`, a non-`bool` `recoverable` and a non-4xx status, so three of those four
+mistakes cannot reach the wire at all.
+
+The third handler differs from the first two in one way worth stating: it is
+keyed on an `HTTPException` **subclass**, so Starlette's `type(exc).__mro__`
+lookup routes to it *instead of* FastAPI's default `HTTPException` handler. It
+therefore forwards `exc.headers` itself — a shadowing handler that dropped them
+would be silently lossy.
+
+The 422 handler **deliberately drops** pydantic's `input`, `ctx`, `msg` and
+`url`. `input` is the credential carrier (C-13: `context.api_secret` reached an
+anonymous browser verbatim); `ctx.error` and `msg` re-embed the validator's own
+message, which for our founder-flag validators names server-side feature flags.
+`ResponseValidationError` is **not** handled here on purpose — a response that
+fails its own `response_model` is OUR bug, so it correctly remains an
+unclassified bodyless `500` (S-21, safe by R-1).
+
+**Added by PYAPI-06 (plan 08):** `/health` gains `config_ok` and
+`config_degraded_secrets` (secret NAMES only). The **status is unchanged** —
+S-24's stale-heartbeat `503` is still the only way `/health` goes red, because
+Railway's `healthcheckPath` restarts the pod on a red probe and an unset env var
+must not become a crash-loop.
+
+**Hygiene flag (no code change):** `services/analytics_runner.py:1725` raises
+`HTTPException(500)` from `run_csv_strategy_analytics`, whose only caller is
+`services/job_worker.py:1947` — the **worker**. An `HTTPException` raised outside an HTTP
+request is a category error that can never render. Recorded, not fixed.
+
+---
+
+## 8. How to add a new error site
+
+1. Decide the class from §1's decision questions. If more than one seems to fit, the
+   tie-break is R-1: *could an identical retry succeed?*
+2. `from services.error_contract import service_error` (or `RETRY_AFTER_SECONDS`).
+3. Emit the shape the **seam** can read. There are two, and choosing wrongly is a
+   user-visible regression, not a style slip:
+
+   **3a — the default, and what almost every site wants.**
+   `raise service_error(<status>, "<CODE>", dependency=…, retryable=…, detail="…")`.
+   The helper refuses contradictory combinations with a `ValueError` at construction.
+   The envelope lands at `body.detail` (§2).
+
+   **3b — the FLAT shape, and ONLY when both of these hold.** The site is a **4xx**
+   that names no `dependency`, **and** its consumer is a seam that classifies by
+   SUBSTRING over `err.detail` — today that means `POST /api/validate-key` through
+   `src/lib/analytics-client.ts:179` → `classifyKeyValidationError`. There, a
+   `service_error` envelope makes `err.detail` an object, the message becomes
+   `"[object Object]"`, and codes that classify correctly today regress to
+   `UNKNOWN`/500. Then:
+
+   ```python
+   from services.error_contract import VenueTransientHTTPException
+
+   raise VenueTransientHTTPException(
+       status_code=400,          # 4xx only; the class refuses 5xx
+       code=result["error_code"],  # the PRODUCER's code, verbatim, no fallback
+       detail=result["error"],     # the scalar string, BYTE-IDENTICAL to before
+       recoverable=result["error_code"] not in PERMANENT_VALIDATION_ERROR_CODES,
+   )
+   ```
+
+   Three rules that are not negotiable at a 3b site: `detail` must be **byte-identical**
+   to the copy the site already emitted (it is the classifier's live input — a reword
+   changes behaviour), `code` is carried **verbatim from the producer with no
+   route-minted default** (a fabricated code hides a real service-layer bug behind a
+   plausible envelope), and the site names **no `dependency`** (it has nowhere to put
+   one, and 140.2's breaker must not be keyed off a caller-class fault).
+
+   If the site is a 5xx, or needs a `dependency`, or needs a `Retry-After`, it is **3a**.
+   There is no third option.
+4. Write the test with **literal** expected values — never import the expected status or
+   code from `error_contract`. An oracle that reads its expectation out of the thing
+   under test cannot fail (programme non-negotiable #3: 10 simultaneous semantic
+   mutations once produced a byte-identical `8859 passed`). For a 3b site also assert
+   the **exact key set** of the wire body: a `set(body) == {"detail","code","recoverable"}`
+   assertion is what catches a fall-through to the default `HTTPException` handler,
+   which would otherwise render a plausible-looking `{"detail": …}` and pass.
+5. Add the row to §7 — and for a 3b site, to §2.1's raise-site list as well.

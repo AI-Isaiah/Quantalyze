@@ -207,6 +207,22 @@ class TestMigration086ComputeJobsPriority:
             # mirrors normal worker behavior post-flag-flip; the
             # priority-throttle assertion below is invariant under the
             # third arg.
+            #
+            # ⚠️ LATENT, NOT LIVE — this claim is UNSCOPED and would be starved
+            # by the same shared-TEST-DB backlog that `_claim_one` was fixed
+            # for (see test_compute_jobs_fencing.py
+            # `test_claim_one_survives_a_full_batch_of_foreign_backlog_offline`).
+            # With foreign `normal` rows sorting ahead, a batch of 5 fills with
+            # them and `priorities.count("normal") == 3` reads 5.
+            # It has never fired because this whole module skips: `pytestmark`
+            # above needs `TEST_SUPABASE_DB_URL`, which `.github/workflows/
+            # ci.yml` does not set, so it runs NOWHERE today.
+            # ⛔ DELIBERATELY NOT "FIXED" HERE: adding `p_kind_include` means
+            # moving to the 4-arg overload with a TEXT[] bind, and there is no
+            # environment in which that change could be executed to prove it
+            # works. An unverifiable edit to a never-run test is worse than a
+            # documented exposure. Whoever wires `TEST_SUPABASE_DB_URL` owns
+            # scoping this call to `kind = 'analytics'` in the same change.
             cur.execute(
                 "SELECT * FROM claim_compute_jobs_with_priority(%s, %s, %s)",
                 (5, "test-worker-phase-16", True),

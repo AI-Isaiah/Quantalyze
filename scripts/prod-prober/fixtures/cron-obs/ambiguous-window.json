@@ -1,0 +1,11 @@
+{
+  "_comment": "RED for the WR-01 attribution fence. Run 901003 has TWO net._http_response rows inside its [start, start+90s] window: a foreign 200 and our own request. The join is time-only (net._http_response has no jobid), so this arm cannot tell them apart. Judging either one would be a verdict it did not measure. Every value here is synthetic.",
+  "now": "2026-09-05T12:00:00Z",
+  "ttl": "6 hours",
+  "jobCount": 1,
+  "rows": [
+    ["901003", "2026-09-05T11:30:00Z", "70003", "200", "f", "", "2026-09-05T11:30:04Z", "{\"ok\":true}"],
+    ["901003", "2026-09-05T11:30:00Z", "70004", "500", "f", "", "2026-09-05T11:30:41Z", "{\"err\":true}"],
+    ["901002", "2026-09-05T10:30:00Z", "70002", "200", "f", "", "2026-09-05T10:30:05Z", "{\"ok\":true}"]
+  ]
+}

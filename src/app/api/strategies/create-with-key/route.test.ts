@@ -18,6 +18,43 @@ import { NextRequest } from "next/server";
 
 vi.mock("server-only", () => ({}));
 
+// ─────────────────────────────────────────────────────────────────────────────
+// 140.3-13b / SEAMUX-08 — the Sentry capture, tested through the REAL helper.
+//
+// ⚠️ `@sentry/nextjs` is mocked here and `@/lib/sentry-capture` is DELIBERATELY
+// NOT. Mocking the helper would answer "did the call site fire" while making
+// every payload assertion VACUOUS about scrubbing — the scrub lives INSIDE the
+// helper (SEAMCORE-06), so a mocked helper never runs it and "no secret in the
+// payload" would pass with the scrubber deleted. Inherited from `140.3-13a`.
+//
+// ⚠️ THIS IS ONE OF THE TWO SECRET-BEARING ROUTES. The request body carries the
+// caller's RAW exchange `api_key` / `api_secret` / `passphrase`, none of which
+// any module-level env list can know. `140.3-13a`'s M78b showed the failure
+// mode precisely: with `secrets` omitted, the env-derived token still redacted
+// — so an assertion written only against it stayed GREEN — while the raw
+// per-request credential went to the third party verbatim. The cases below
+// therefore assert against the BODY values, not against an env token.
+// ─────────────────────────────────────────────────────────────────────────────
+const sentryState = vi.hoisted(() => ({
+  captured: [] as Array<{
+    err: unknown;
+    options: {
+      tags?: Record<string, string>;
+      extra?: Record<string, unknown>;
+      level?: string;
+    };
+  }>,
+}));
+
+vi.mock("@sentry/nextjs", () => ({
+  captureException: (err: unknown, options: Record<string, unknown>) => {
+    sentryState.captured.push({
+      err,
+      options: options as (typeof sentryState.captured)[number]["options"],
+    });
+  },
+}));
+
 const MOCK_USER = { id: "00000000-0000-0000-0000-aaaaaaaaaaaa" } as unknown as
   import("@supabase/supabase-js").User;
 
@@ -28,10 +65,30 @@ vi.mock("@/lib/api/withAuth", () => ({
       h(req, MOCK_USER),
 }));
 
-vi.mock("@/lib/ratelimit", () => ({
-  userActionLimiter: {},
-  checkLimit: vi.fn(async () => ({ success: true })),
+/**
+ * 140.4-13 / SEAMRIM-05 — the limiter verdict this file drives the route with.
+ * Hoisted so the factory closes over it; default is the ALLOW every pre-existing
+ * test was written against, and the SEAMRIM-05 describe restores it.
+ */
+const limiter = vi.hoisted(() => ({
+  result: { success: true } as
+    | { success: true }
+    | { success: false; retryAfter: number; reason?: "ratelimit_misconfigured" },
 }));
+
+// ⚠️ EXTENDED, NOT REPLACED. The pure helpers come from `importActual` so this
+// mock cannot drift from the real 503-vs-429 decision — a hand-written double
+// that always answered 429 would make this file green on the exact bug the
+// plan closes.
+vi.mock("@/lib/ratelimit", async (importActual) => {
+  const actual = await importActual<typeof import("@/lib/ratelimit")>();
+  return {
+    userActionLimiter: {},
+    checkLimit: vi.fn(async () => limiter.result),
+    rateLimitDenyJson: actual.rateLimitDenyJson,
+    isRateLimitMisconfigured: actual.isRateLimitMisconfigured,
+  };
+});
 
 const validateKeyMock = vi.fn();
 const encryptKeyMock = vi.fn();
@@ -41,6 +98,51 @@ vi.mock("@/lib/analytics-client", () => ({
 }));
 
 const rpcMock = vi.fn();
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ⭐ PHASE 156 / CONNECT-02 — WHICH CLIENT REACHED THE RPC, RECORDED PER CALL.
+//
+// `create_wizard_strategy` becomes a SERVICE-ROLE writer: `authenticated` loses
+// EXECUTE and the route must reach it through `createAdminClient()`. `rpcMock`
+// alone cannot see that change — it answers the same verdict whichever client
+// dialled it, so "the route still uses the user-scoped client" and "the route
+// was rewired" are INDISTINGUISHABLE through it and every argument assertion
+// below would pass either way. `rpcCallSites` is the discriminator: each `.rpc`
+// double stamps its own name before delegating to the shared verdict mock.
+//
+// ⚠️ WHY `userScopedRpc` DELEGATES BY DEFAULT INSTEAD OF THROWING ON SIGHT.
+// A user-scoped `rpc` that threw unconditionally would red ~40 pre-existing
+// cases for the width of the RED window (this file lands red on purpose between
+// plan 02 and plan 04) — noise that hides the five assertions the window exists
+// to observe, which is G11's failure mode pointed the other way. The throw is
+// therefore ARMED by the one case whose subject it is (`userScopedRpcIsFatal`),
+// and every other case keeps failing or passing for its own original reason.
+// The discrimination does not depend on the throw: `rpcCallSites` records the
+// wrong client whether or not the arm is live.
+// ─────────────────────────────────────────────────────────────────────────────
+const rpcCallSites: Array<"admin" | "user-scoped"> = [];
+const userScopedRpcIsFatal = { value: false };
+
+/** The USER-SCOPED `.rpc` — the client Phase 156 forbids for this write. */
+function userScopedRpc(...args: unknown[]) {
+  rpcCallSites.push("user-scoped");
+  if (userScopedRpcIsFatal.value) {
+    throw new Error(
+      "Phase 156 / CONNECT-02: create_wizard_strategy was reached through the " +
+        "USER-SCOPED supabase client (@/lib/supabase/server). It is a " +
+        "service-role writer and must be reached through createAdminClient() " +
+        "(@/lib/supabase/admin) only.",
+    );
+  }
+  return rpcMock(...args);
+}
+
+/** The SERVICE-ROLE `.rpc` — the only sanctioned writer after Phase 156. */
+function adminRpc(...args: unknown[]) {
+  rpcCallSites.push("admin");
+  return rpcMock(...args);
+}
+
 // F6 pre-Railway idempotency fence: the route does
 // `from("strategies").select(...).eq("user_id").eq("wizard_session_id").maybeSingle()`
 // BEFORE validate/encrypt. Default to "no existing draft" so the existing
@@ -58,20 +160,373 @@ const draftLookupMock = vi.fn(async () => ({ data: null, error: null }) as {
 const assetClassUpdateMock = vi.fn((..._args: unknown[]) => ({
   eq: () => ({ eq: async () => ({ error: null }) }),
 }));
+
+/**
+ * 154-06 / WIZCONT-02 — the venue-identity fence's two reads.
+ *
+ * `venueKeyLookupMock` answers the ADMIN read of `api_keys` by
+ * (user_id, exchange, venue_account_id) WHERE disconnected_at IS NULL;
+ * `venueStrategyLookupMock` answers the user-scoped `strategies` read by
+ * `api_key_id`. Both default to "nothing there", so every pre-existing test
+ * keeps exercising the full Railway + RPC flow unchanged.
+ */
+const venueKeyLookupMock = vi.fn(async () => ({ data: null, error: null }) as {
+  data: { id: string } | null;
+  error: { code?: string; message?: string } | null;
+});
+const venueStrategyLookupMock = vi.fn(async () => ({ data: null, error: null }) as {
+  data: { id: string } | null;
+  error: { code?: string; message?: string } | null;
+});
+/**
+ * 154.1 / WIZCONT-02 review CR — the resolver's SECOND `strategies` read.
+ *
+ * `venueStrategyLookupMock` above now answers the DRAFT-SCOPED read
+ * (`source='wizard'` + `status='draft'`); this one answers the follow-up that
+ * runs only when that read found nothing, and whose whole job is to tell "no
+ * strategy at all" apart from "a strategy that has left the draft state holds
+ * this account".
+ *
+ * ⚠️ IT DEFAULTS TO NOTHING, which is what keeps every pre-existing case in this
+ * file byte-identical: a fence that found no draft still falls through to the
+ * RPC exactly as it did before, and the new refusal arm is reachable only from a
+ * test that seeds this mock deliberately.
+ */
+const venueOwnerLookupMock = vi.fn(async () => ({ data: null, error: null }) as {
+  data: { id: string; name?: unknown } | null;
+  error: { code?: string; message?: string } | null;
+});
+
+/**
+ * 167.1.2 REVIEW WR-04 — the one OTHER holder of a live key, read only when
+ * both `strategies` reads came back empty (the would-be orphan). A key linked
+ * to a composite through `strategy_keys` has no `strategies.api_key_id` row and
+ * is NOT an orphan; KEY_ORPHANED ("no strategy uses it") is false for it.
+ *
+ * ⛔ 167.1.2 REVIEW-R2 CR-01 — there is no `allocator_holdings` mock any more,
+ * because the route no longer reads that table: the daily poll writes it for
+ * every live key, so a row there does not tell an orphan from a held key. The
+ * read-set pin in the race-arm describe holds that line.
+ *
+ * ⚠️ Routed by TABLE in `makeSelectBuilder`. Before this branch every unknown
+ * table fell to `draftLookupMock`, so a new read would have been answered with
+ * the session fence's canned row. It DEFAULTS TO NOTHING, which keeps every
+ * pre-existing orphan pin on its orphan.
+ */
+type HolderReadResult = {
+  data: { api_key_id: string } | null;
+  error: { code?: string; message?: string } | null;
+};
+const keyMembershipLookupMock = vi.fn(
+  async (): Promise<HolderReadResult> => ({ data: null, error: null }),
+);
+
+/**
+ * 164.2-04 / criterion 5 — the reuse arm's POST-23505 read of the draft it
+ * actually collided with.
+ *
+ * The route asks `strategies` for `api_key_id` by (user_id, wizard_session_id,
+ * source='wizard') after the RPC raises a unique violation, and answers
+ * `DRAFT_ALREADY_EXISTS` only when that key is the one the caller picked.
+ *
+ * ⭐ ROUTED ON THE `source` FILTER, and the coupling is deliberate in exactly
+ * the way the `status` routing above is. The F6 session fence keys on
+ * (user_id, wizard_session_id) with NO `source`, so without this the two reads
+ * are indistinguishable here and `draftLookupMock`'s canned row would answer a
+ * question it was never written for. Delete `.eq("source", "wizard")` from the
+ * route — which would read a CSV-path row and compare the wrong draft against
+ * the wrong key — and this mock stops being reached, so the split cases red
+ * instead of quietly re-labelling themselves.
+ *
+ * ⚠️ IT DEFAULTS TO "NOTHING THERE", which is the READ-FAULT case, so a test
+ * that wants the same-key branch has to seed it deliberately.
+ */
+const collidingDraftLookupMock = vi.fn(async () => ({ data: null, error: null }) as {
+  data: { api_key_id: string | null } | null;
+  error: { code?: string; message?: string } | null;
+});
+
+/** Every `.eq()`/`.is()` filter the route applied, per builder. */
+type CapturedFilters = Record<string, unknown>;
+const capturedSelects: Array<{
+  table: string;
+  /** 162-05 — WHICH client issued the read. See `reuseKeyAdminLookupMock`. */
+  client: "admin" | "user-scoped";
+  filters: CapturedFilters;
+}> = [];
+
+/**
+ * 162-05 / D-162-3 — EVERY WRITE ATTEMPT, BY TABLE, ON EITHER CLIENT.
+ *
+ * The one property the use-existing-key arm exists to hold is that it NEVER
+ * writes `api_keys` — re-INSERTing there is what created the orphan in the
+ * first place (T-162-05-B). "The api_keys row count is unchanged" has no
+ * meaning against a doubled client, so the assertion this file CAN make, and
+ * the one that actually pins the property, is that no write verb is ever
+ * dialled against that table. Recording every verb rather than only `insert`
+ * matters because an `update`/`upsert`/`delete` on `api_keys` would be just as
+ * much a violation of "this arm does not touch stored credentials".
+ */
+const writeAttempts: Array<{
+  client: "admin" | "user-scoped";
+  table: string;
+  op: string;
+}> = [];
+
+function recordWrite(
+  client: "admin" | "user-scoped",
+  table: string,
+  op: string,
+) {
+  writeAttempts.push({ client, table, op });
+}
+
+/** Write verbs that must never be reachable on `api_keys` from this route. */
+function makeWriteVerbs(client: "admin" | "user-scoped", table: string) {
+  const thenable = {
+    eq: () => thenable,
+    is: () => thenable,
+    select: () => thenable,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    then: (resolve: any) => resolve({ data: null, error: null }),
+  };
+  return {
+    insert: () => {
+      recordWrite(client, table, "insert");
+      return thenable;
+    },
+    upsert: () => {
+      recordWrite(client, table, "upsert");
+      return thenable;
+    },
+    delete: () => {
+      recordWrite(client, table, "delete");
+      return thenable;
+    },
+  };
+}
+
+/**
+ * 162-05 — THE REUSE ARM'S TWO `api_keys` READS, DOUBLED FAITHFULLY.
+ *
+ * ⭐ THE TWO DOUBLES ARE NOT THE SAME, AND THE DIFFERENCE IS THE WHOLE POINT.
+ *   · `reuseKeyAdminLookupMock` stands in for `createAdminClient()`, which
+ *     BYPASSES RLS. The only thing narrowing that read is the set of filters
+ *     the ROUTE chose to apply, so this double evaluates `filters` and answers
+ *     the seeded row only when they match it. Delete `.eq("user_id", …)` from
+ *     the route and this double stops filtering on ownership — exactly as
+ *     Postgres would. A canned-answer double could not model that at all, and
+ *     every ownership assertion written against one would be vacuous.
+ *   · `reuseKeyUserScopedLookupMock` stands in for the RLS-scoped client, where
+ *     `api_keys_owner` compares `user_id` to `auth.uid()` INSIDE the database.
+ *     It therefore refuses a row belonging to anyone but `MOCK_USER` REGARDLESS
+ *     of which filters the route applied, because that is what RLS does.
+ *
+ * ⚠️ THE CONSEQUENCE, STATED SO NOBODY MISREADS THE RED WITNESS BELOW: with
+ * both layers modelled honestly, neutering the admin `.eq("user_id", …)` alone
+ * does NOT flip the cross-tenant OUTCOME — layer 2 still refuses. That is what
+ * defence in depth means, and it is why the single-line witness for that filter
+ * is the STRUCTURAL assertion (`the admin re-select carries the session uid`)
+ * rather than the outcome one. Both are present, and the outcome test is not
+ * vacuous either: it reds when BOTH layers go. Recorded rather than papered
+ * over, because a reader who expects one neuter to redden every test would
+ * otherwise conclude the outcome test was broken.
+ */
+const reuseKeyRow = {
+  value: null as
+    | { id: string; user_id: string; disconnected_at: string | null }
+    | null,
+};
+
+type KeyReadResult = {
+  data: { id: string } | null;
+  error: { code?: string; message?: string } | null;
+};
+
+const reuseKeyAdminReadFault = { value: null as { code: string } | null };
+const reuseKeyUserScopedReadFault = { value: null as { code: string } | null };
+
+const reuseKeyAdminLookupMock = vi.fn((filters: CapturedFilters): KeyReadResult => {
+  if (reuseKeyAdminReadFault.value) {
+    return { data: null, error: reuseKeyAdminReadFault.value };
+  }
+  const row = reuseKeyRow.value;
+  if (!row) return { data: null, error: null };
+  // Postgres applies exactly the predicates the query carried — no more.
+  if ("id" in filters && filters.id !== row.id) return { data: null, error: null };
+  if ("user_id" in filters && filters.user_id !== row.user_id) {
+    return { data: null, error: null };
+  }
+  if ("disconnected_at" in filters && filters.disconnected_at === null) {
+    if (row.disconnected_at !== null) return { data: null, error: null };
+  }
+  return { data: { id: row.id }, error: null };
+});
+
+const reuseKeyUserScopedLookupMock = vi.fn(
+  (filters: CapturedFilters): KeyReadResult => {
+    if (reuseKeyUserScopedReadFault.value) {
+      return { data: null, error: reuseKeyUserScopedReadFault.value };
+    }
+    const row = reuseKeyRow.value;
+    if (!row) return { data: null, error: null };
+    // ⛔ RLS FIRST, AND IT IS NOT A FILTER THE ROUTE CAN DROP.
+    if (row.user_id !== MOCK_USER.id) return { data: null, error: null };
+    if ("id" in filters && filters.id !== row.id) return { data: null, error: null };
+    if ("user_id" in filters && filters.user_id !== row.user_id) {
+      return { data: null, error: null };
+    }
+    if ("disconnected_at" in filters && filters.disconnected_at === null) {
+      if (row.disconnected_at !== null) return { data: null, error: null };
+    }
+    return { data: { id: row.id }, error: null };
+  },
+);
+
+/**
+ * ⭐ THE CLIENT DOUBLE IS TABLE- AND FILTER-AWARE, and it has to be.
+ *
+ * The route now issues THREE distinct `select().…maybeSingle()` reads, two of
+ * them against `strategies`. A double that ignored the table and the filters —
+ * the shape this file used before 154-06 — would answer the session fence's
+ * canned row to the venue fence's question, which is precisely the
+ * wrong-row-resolution defect these tests exist to catch. Routing on the
+ * filters the route ACTUALLY applied is what makes the assertions non-vacuous.
+ */
+function makeSelectBuilder(
+  table: string,
+  client: "admin" | "user-scoped" = "user-scoped",
+) {
+  const filters: CapturedFilters = {};
+  capturedSelects.push({ table, client, filters });
+  const node = {
+    eq: (col: string, val: unknown) => {
+      filters[col] = val;
+      return node;
+    },
+    is: (col: string, val: unknown) => {
+      filters[col] = val;
+      return node;
+    },
+    order: () => node,
+    limit: () => node,
+    maybeSingle: () => {
+      if (table === "strategy_keys") return keyMembershipLookupMock();
+      if (table === "api_keys") {
+        // ⭐ 162-05 — `api_keys` IS NOW READ BY TWO DIFFERENT QUESTIONS, and the
+        // `id` filter is what tells them apart. The venue-identity fence asks
+        // "(exchange, venue_account_id)"; the reuse arm asks "this exact id",
+        // twice — once through the admin client and once user-scoped. Routing on
+        // the filter AND on the client is what keeps the two ownership layers
+        // separately observable; collapsing them would make the layer-2
+        // assertions answer layer 1's question.
+        if ("id" in filters) {
+          return client === "admin"
+            ? reuseKeyAdminLookupMock(filters)
+            : reuseKeyUserScopedLookupMock(filters);
+        }
+        return venueKeyLookupMock();
+      }
+      // `strategies` is read THREE times: the F6 session fence keys on
+      // wizard_session_id, and the venue fence issues two reads on api_key_id.
+      //
+      // ⭐ 154.1 — THE TWO VENUE READS ARE ROUTED BY THE `status` FILTER, which
+      // is the very filter this plan added. That coupling is deliberate: delete
+      // `.eq("status","draft")` from the route and the draft-scoped read stops
+      // being distinguishable here, so the seeded NON-draft row is answered to
+      // the question that resolves a resumable draft — and the wedge pin below
+      // reds instead of quietly re-labelling itself.
+      if ("api_key_id" in filters) {
+        return "status" in filters
+          ? venueStrategyLookupMock()
+          : venueOwnerLookupMock();
+      }
+      // 164.2-04 — the reuse arm's post-23505 read. See
+      // `collidingDraftLookupMock` for why `source` is the discriminator.
+      // ⚠️ BOTH columns, not `source` alone: the venue fence's draft-scoped
+      // read carries `source` too (route.ts:308). It is caught by the
+      // `api_key_id` branch above, so this is belt-and-braces rather than
+      // load-bearing — and it stays because the day that branch is reordered
+      // the failure would be a canned row answering the wrong question.
+      if ("source" in filters && "wizard_session_id" in filters) {
+        return collidingDraftLookupMock();
+      }
+      return draftLookupMock();
+    },
+  };
+  return node;
+}
+
 vi.mock("@/lib/supabase/server", () => ({
   createClient: async () => ({
-    rpc: (...args: unknown[]) => rpcMock(...args),
-    from: () => ({
-      select: () => ({
-        eq: () => ({
-          eq: () => ({
-            maybeSingle: () => draftLookupMock(),
-          }),
-        }),
-      }),
-      update: (...args: unknown[]) => assetClassUpdateMock(...args),
+    // ⛔ PHASE 156 / CONNECT-02 — this `.rpc` is the WRONG DOOR and exists only
+    // to be caught using it. `create_wizard_strategy` is a service-role writer;
+    // reaching it from here is the user-scoped fallback the phase closes. See
+    // the `rpcCallSites` docblock above for why the throw is armed per-case.
+    rpc: (...args: unknown[]) => userScopedRpc(...args),
+    from: (table: string) => ({
+      select: () => makeSelectBuilder(table, "user-scoped"),
+      update: (...args: unknown[]) => {
+        recordWrite("user-scoped", table, "update");
+        return assetClassUpdateMock(...args);
+      },
+      ...makeWriteVerbs("user-scoped", table),
     }),
   }),
+}));
+
+/**
+ * 154-06 — the service-role client the venue fence needs.
+ *
+ * `api_keys.venue_account_id` is NOT on the column-SELECT allowlist
+ * (20260410225608 + its three extensions), and Postgres requires SELECT
+ * privilege on every column a query REFERENCES — a WHERE filter included — so
+ * the user-scoped client structurally cannot perform this read. Same reason
+ * `finalize-wizard/route.ts:1223` reads the sibling `attested_venue` through
+ * the admin client.
+ *
+ * `adminClientThrows` drives the missing-SUPABASE_SERVICE_ROLE_KEY case. ⚠️ FOR
+ * THE VENUE-IDENTITY FENCE, and only for it, that must degrade to a dark fence
+ * and never to a failed submit — the DB's unique index is still the backstop,
+ * so a missing credential is not a reason to fail a submit that would otherwise
+ * succeed. That sentence is unchanged and the fence behaviour it describes is
+ * still tested (`resolveByVenueIdentity`'s catch arm, route.ts:195-205).
+ *
+ * ⛔ AND IT IS THE OPPOSITE FOR THE RPC (Phase 156 / CONNECT-03). This mock now
+ * serves TWO consumers: the fence's `from(...).select(...)` AND the wizard
+ * RPC, because `create_wizard_strategy` becomes a service-role writer that
+ * `authenticated` may not call at all. When the service key is absent the RPC
+ * cannot be dialled by any client, so the honest answer is 503
+ * SEAM_MISCONFIGURED with NOTHING submitted — never a silent fallback onto the
+ * user-scoped client, which is precisely the door this phase closes and would
+ * make every gate in it pass vacuously.
+ *
+ * ⚠️ NOT `importActual`-EXTENDED, deliberately, and it is the one place in this
+ * file that departs from the extend-don't-replace convention at :83-91. The
+ * real `@/lib/supabase/admin` exports exactly one symbol, `createAdminClient`,
+ * whose whole body is "read two env vars and open a live service-role
+ * connection". There is no pure helper to preserve and nothing to drift
+ * against — importActual here would either throw on the missing env or open a
+ * real client against a real project from a unit test.
+ */
+const adminClientThrows = { value: false };
+vi.mock("@/lib/supabase/admin", () => ({
+  createAdminClient: () => {
+    if (adminClientThrows.value) {
+      throw new Error("Missing SUPABASE_SERVICE_ROLE_KEY for admin operations");
+    }
+    return {
+      rpc: (...args: unknown[]) => adminRpc(...args),
+      from: (table: string) => ({
+        select: () => makeSelectBuilder(table, "admin"),
+        update: () => {
+          recordWrite("admin", table, "update");
+          return { eq: () => ({ eq: async () => ({ error: null }) }) };
+        },
+        ...makeWriteVerbs("admin", table),
+      }),
+    };
+  },
 }));
 
 // Pull POST after mocks so module-init reads the mocked deps.
@@ -103,6 +558,136 @@ function makeReq(body: unknown): NextRequest {
     body: JSON.stringify(body),
   });
 }
+
+/**
+ * 140.4-13 / SEAMRIM-05 — the SHARPEST site in the class.
+ *
+ * ⚠️ Before this plan a limiter MISCONFIGURATION answered 429 with
+ * `code: "KEY_RATE_LIMIT"`, whose copy reads *"a transient, exchange-side
+ * throttle and not a problem with your key"*. While Upstash is down that is
+ * false for EVERY user on their FIRST click — our outage, blamed on the user's
+ * exchange, on the step where they hand us a credential.
+ *
+ * The 429 half is the anti-regression: the deny arm still answers the same wire
+ * SHAPE it answered before, key order included.
+ *
+ * ⚠️ 164.2-04 / criterion 4b — THE WORDS "a REAL throttle" USED TO STAND HERE
+ * AND WERE FALSE. There is no throttle on this path in either direction:
+ * `userActionLimiter` is our own per-USER bucket keyed
+ * `strategies-create-with-key:<uid>`, and no exchange is consulted before it
+ * denies. So the 429 was misattributed for exactly the same reason the 503 was
+ * — one blamed the venue for our limiter being DOWN, the other blamed the venue
+ * for our limiter being ENFORCED — and only the first half was fixed in 140.4.
+ * Both arms now name the party that actually refused.
+ */
+describe("[140.4-13 / SEAMRIM-05] POST /api/strategies/create-with-key — the limiter deny arm", () => {
+  afterEach(() => {
+    limiter.result = { success: true };
+    vi.restoreAllMocks();
+  });
+
+  it("ratelimit_misconfigured → 503 and NOT the exchange-blaming KEY_RATE_LIMIT", async () => {
+    limiter.result = {
+      success: false,
+      retryAfter: 60,
+      reason: "ratelimit_misconfigured",
+    };
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(503);
+    const body = await res.json();
+    expect(
+      body.code,
+      "Our own limiter's store being unreachable must not render as the " +
+        "user's exchange throttling their key.",
+    ).not.toBe("KEY_RATE_LIMIT");
+    // ⚠️ 164.2-04 — THE LINE ABOVE WENT VACUOUS ON THIS ROUTE and is kept only
+    // as the historical pin. Criterion 4b took `KEY_RATE_LIMIT` off both of
+    // this route's limiter arms, so "not KEY_RATE_LIMIT" is now satisfied by a
+    // code the route can no longer emit from its own source at all. The claim
+    // the case was written to defend — a misconfiguration must not render as a
+    // rate limit — is carried by THIS assertion from here on, and it names the
+    // code the throttled arm actually answers now.
+    expect(
+      body.code,
+      "Our own limiter's store being unreachable must not render as the user " +
+        "having hit our cap either: nothing was counted, nothing was denied on " +
+        "a quota, and 'wait, then run the same action again' is a remedy that " +
+        "cannot clear a store that is down.",
+    ).not.toBe("RATE_LIMITED");
+    expect(body.code).toBe("SEAM_MISCONFIGURED");
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+    expect(res.headers.get("Retry-After")).toBe("60");
+    expect(validateKeyMock).not.toHaveBeenCalled();
+    expect(encryptKeyMock).not.toHaveBeenCalled();
+  });
+
+  it("a genuine throttle → 429 with a BYTE-IDENTICAL body and headers", async () => {
+    limiter.result = { success: false, retryAfter: 42 };
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(429);
+    // Hand-typed from the pre-adoption source: `{code, error}` in THAT key
+    // order, NO_STORE_HEADERS + Retry-After.
+    // 140.4-16 / WR-03 — byte-wise, because `toEqual` on parsed JSON does NOT
+    // compare key order (measured: a swap left all four receipts green). See
+    // the note in `keys/sync/route.test.ts`.
+    //
+    // ⛔ THIS CASE'S CODE WAS INVERTED BY 164.2-04 (criterion 4b), and the
+    // inversion is deliberate. It used to pin `KEY_RATE_LIMIT` and its own
+    // describe called that "the anti-regression: a REAL throttle still answers
+    // exactly what it answered before". THAT PREMISE WAS WRONG, and the class
+    // fix is the reason: `userActionLimiter` is not a throttle at all, real or
+    // otherwise — it is OUR per-USER bucket, keyed
+    // `strategies-create-with-key:<uid>`. No exchange is consulted on this
+    // path, so the code whose copy says "a transient, exchange-side throttle"
+    // and whose second fix line offers "try a different exchange account" was
+    // describing a party that had not been involved and naming a remedy that
+    // cannot clear a bucket keyed on the user. `RATE_LIMITED` already carried
+    // the honest sentence ("the cap is ours, not your exchange's").
+    //
+    // ⭐ WHAT THE CASE STILL PINS IS UNCHANGED AND IS THE POINT: the body is
+    // `{code, error}` in THAT key order, byte-wise, with NO_STORE_HEADERS and
+    // Retry-After. Only the code token moved; the wire SHAPE is still fenced.
+    expect(await res.clone().text()).toBe(
+      '{"code":"RATE_LIMITED","error":"Too many requests"}',
+    );
+    const throttledBody = await res.json();
+    expect(throttledBody).toEqual({
+      code: "RATE_LIMITED",
+      error: "Too many requests",
+    });
+    expect(
+      throttledBody.code,
+      "The per-user cap must not render as the user's exchange throttling " +
+        "their key. KEY_RATE_LIMIT stays reachable on this route only through " +
+        "classifyKeyValidationError, where the throttle really is the venue's.",
+    ).not.toBe("KEY_RATE_LIMIT");
+    expect(res.headers.get("Retry-After")).toBe("42");
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+    expect(validateKeyMock).not.toHaveBeenCalled();
+  });
+
+  it("success → the deny arm does not fire", async () => {
+    limiter.result = { success: true };
+    validateKeyMock.mockResolvedValue({
+      valid: true,
+      read_only: true,
+      permissions: ["read"],
+    });
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).not.toBe(429);
+    expect(res.status).not.toBe(503);
+    expect(validateKeyMock).toHaveBeenCalled();
+  });
+});
 
 describe("POST /api/strategies/create-with-key — envelope-encryption shape", () => {
   beforeEach(() => {
@@ -478,8 +1063,8 @@ describe("POST /api/strategies/create-with-key — sfox api_secret carve-out (SF
     // Proves 119-01's SUPPORTED_EXCHANGES wiring (not just the constant): had the
     // :47 gate rejected sfox we'd see 400 "Unsupported exchange" here. The absent
     // secret is normalized to "" and passed through the SAME funnel the ccxt path uses.
-    expect(validateKeyMock).toHaveBeenCalledWith("sfox", SFOX_TOKEN, "", undefined);
-    expect(encryptKeyMock).toHaveBeenCalledWith("sfox", SFOX_TOKEN, "", undefined);
+    expect(validateKeyMock).toHaveBeenCalledWith("sfox", SFOX_TOKEN, "", undefined, { userId: MOCK_USER.id });
+    expect(encryptKeyMock).toHaveBeenCalledWith("sfox", SFOX_TOKEN, "", undefined, { userId: MOCK_USER.id });
   });
 
   it.each([
@@ -494,7 +1079,7 @@ describe("POST /api/strategies/create-with-key — sfox api_secret carve-out (SF
     const res = await POST(makeReq(body));
 
     expect(res.status).toBe(200);
-    expect(validateKeyMock).toHaveBeenCalledWith("sfox", SFOX_TOKEN, "", undefined);
+    expect(validateKeyMock).toHaveBeenCalledWith("sfox", SFOX_TOKEN, "", undefined, { userId: MOCK_USER.id });
   });
 
   // WR-01: mixed-case sfox is handled IDENTICALLY to the validate-and-encrypt
@@ -507,8 +1092,8 @@ describe("POST /api/strategies/create-with-key — sfox api_secret carve-out (SF
       const res = await POST(makeReq({ ...SFOX_BODY, exchange }));
 
       expect(res.status).toBe(200);
-      expect(validateKeyMock).toHaveBeenCalledWith("sfox", SFOX_TOKEN, "", undefined);
-      expect(encryptKeyMock).toHaveBeenCalledWith("sfox", SFOX_TOKEN, "", undefined);
+      expect(validateKeyMock).toHaveBeenCalledWith("sfox", SFOX_TOKEN, "", undefined, { userId: MOCK_USER.id });
+      expect(encryptKeyMock).toHaveBeenCalledWith("sfox", SFOX_TOKEN, "", undefined, { userId: MOCK_USER.id });
       const [, rpcArgs] = rpcMock.mock.calls[0];
       expect((rpcArgs as Record<string, unknown>).p_exchange).toBe("sfox");
     },
@@ -529,7 +1114,9 @@ describe("POST /api/strategies/create-with-key — sfox api_secret carve-out (SF
     const res = await POST(makeReq({ ...SFOX_BODY, api_secret: "s".repeat(513) }));
 
     expect(res.status).toBe(400);
-    expect((await res.json()).code).toBe("KEY_INVALID_FORMAT");
+    // 142.2-07 / MT5-04: the CAP is byte-unchanged; only the code it answers
+    // moved off the format bucket. A length cap is not a format failure.
+    expect((await res.json()).code).toBe("KEY_INPUT_TOO_LONG");
     expect(validateKeyMock).not.toHaveBeenCalled();
   });
 
@@ -632,7 +1219,7 @@ describe("POST /api/strategies/create-with-key — sfox server gate (F2, SFOX_EN
 
       expect(res.status).toBe(400);
       const json = await res.json();
-      expect(json.code).toBe("KEY_INVALID_FORMAT");
+      expect(json.code).toBe("KEY_VENUE_NOT_ENABLED");
       expect(json.error).toBe("sFOX integration is not yet available.");
       expect(validateKeyMock).not.toHaveBeenCalled();
       expect(encryptKeyMock).not.toHaveBeenCalled();
@@ -718,6 +1305,7 @@ describe("POST /api/strategies/create-with-key — mt5 acceptance (MT5SRC-03)", 
       "500123456",
       "investor-password-123",
       "MetaQuotes-Demo",
+      { userId: MOCK_USER.id },
     );
     const [rpcName, rpcArgs] = rpcMock.mock.calls[0];
     expect(rpcName).toBe("create_wizard_strategy");
@@ -755,7 +1343,10 @@ describe("POST /api/strategies/create-with-key — mt5 acceptance (MT5SRC-03)", 
 
     expect(res.status).toBe(400);
     const json = await res.json();
-    expect(json.code).toBe("KEY_INVALID_FORMAT");
+    // 142.2-07 / MT5-04: an ABSENT investor password is a missing field, not a
+    // malformed one. The ccxt `<8` arm below keeps KEY_INVALID_FORMAT because
+    // that one really is a format judgement.
+    expect(json.code).toBe("KEY_MISSING_REQUIRED_FIELD");
     expect(json.error).toBe("api_secret is required");
     expect(validateKeyMock).not.toHaveBeenCalled();
   });
@@ -772,6 +1363,7 @@ describe("POST /api/strategies/create-with-key — mt5 acceptance (MT5SRC-03)", 
       "500123",
       "investor-password-123",
       "MetaQuotes-Demo",
+      { userId: MOCK_USER.id },
     );
   });
 
@@ -781,7 +1373,7 @@ describe("POST /api/strategies/create-with-key — mt5 acceptance (MT5SRC-03)", 
 
     expect(res.status).toBe(400);
     const json = await res.json();
-    expect(json.code).toBe("KEY_INVALID_FORMAT");
+    expect(json.code).toBe("KEY_MISSING_REQUIRED_FIELD");
     expect(validateKeyMock).not.toHaveBeenCalled();
   });
 
@@ -791,7 +1383,7 @@ describe("POST /api/strategies/create-with-key — mt5 acceptance (MT5SRC-03)", 
 
     expect(res.status).toBe(400);
     const json = await res.json();
-    expect(json.code).toBe("KEY_INVALID_FORMAT");
+    expect(json.code).toBe("KEY_UNSUPPORTED_VENUE");
     expect(json.error).toBe("Unsupported exchange");
     expect(validateKeyMock).not.toHaveBeenCalled();
   });
@@ -845,7 +1437,7 @@ describe("POST /api/strategies/create-with-key — mt5 server gate (MT5_ENABLED 
 
       expect(res.status).toBe(400);
       const json = await res.json();
-      expect(json.code).toBe("KEY_INVALID_FORMAT");
+      expect(json.code).toBe("KEY_VENUE_NOT_ENABLED");
       expect(json.error).toBe("MT5 integration is not yet available.");
       expect(validateKeyMock).not.toHaveBeenCalled();
       expect(encryptKeyMock).not.toHaveBeenCalled();
@@ -960,6 +1552,1488 @@ describe("POST /api/strategies/create-with-key — idempotency fence (F6 H-0304/
 });
 
 /**
+ * ═══════════════════════════════════════════════════════════════════════════
+ * 154-06 / WIZCONT-02 — ONE FENCE, TWO KEYS.
+ *
+ * THE DEFECT. The F6 fence above keys on `wizard_session_id`, a localStorage
+ * token. Re-connecting the SAME credentials from a context that LOST that token
+ * — a different browser, cleared storage, a fresh session — arrives with a NEW
+ * session id, misses the fence entirely, and mints a second strategy plus a
+ * second encrypted `api_keys` row for credentials we already hold. The block
+ * above proves the first key works; every case here is about the second.
+ *
+ * ⭐ THE ORACLES ARE INVARIANTS, NOT THE IMPLEMENTATION'S OWN VALUES. The
+ * expected ids are the ones the FIXTURE put in the database double, hand-typed
+ * constants — never a value read back out of the route's response and compared
+ * to itself. The "no writes" assertions are call-count assertions on the write
+ * doubles, which fail if the dedup path ever learns to write.
+ * ═══════════════════════════════════════════════════════════════════════════
+ */
+describe("[154-06 / WIZCONT-02] create-with-key — the venue-identity fence", () => {
+  /** The row that is ALREADY in the database when the user re-connects. */
+  const EXISTING_KEY_ID = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+  const EXISTING_STRATEGY_ID = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+  /** A DIFFERENT wizard session — the whole point: the token is gone. */
+  const OTHER_SESSION_ID = "99999999-8888-4777-8666-555555555555";
+  const MT5_LOGIN = "500123456";
+
+  const MT5_RECONNECT_BODY = {
+    exchange: "mt5",
+    api_key: MT5_LOGIN,
+    api_secret: "investor-password-123",
+    passphrase: "MetaQuotes-Demo",
+    label: "mt5 key",
+    wizard_session_id: OTHER_SESSION_ID,
+  };
+
+  beforeEach(() => {
+    process.env.MT5_ENABLED = "true";
+    adminClientThrows.value = false;
+    capturedSelects.length = 0;
+    sentryState.captured.length = 0;
+    validateKeyMock.mockReset();
+    encryptKeyMock.mockReset();
+    rpcMock.mockReset();
+    draftLookupMock.mockReset();
+    venueKeyLookupMock.mockReset();
+    venueStrategyLookupMock.mockReset();
+    venueOwnerLookupMock.mockReset();
+    keyMembershipLookupMock.mockReset();
+    assetClassUpdateMock.mockClear();
+
+    // No draft for THIS session — the token-less re-entry the fence must catch.
+    draftLookupMock.mockResolvedValue({ data: null, error: null });
+    // Nothing found by venue identity unless a test says otherwise.
+    venueKeyLookupMock.mockResolvedValue({ data: null, error: null });
+    venueStrategyLookupMock.mockResolvedValue({ data: null, error: null });
+    venueOwnerLookupMock.mockResolvedValue({ data: null, error: null });
+    keyMembershipLookupMock.mockResolvedValue({ data: null, error: null });
+
+    validateKeyMock.mockResolvedValue({
+      valid: true,
+      read_only: true,
+      permissions: ["read"],
+    });
+    encryptKeyMock.mockResolvedValue({
+      api_key_encrypted: "encrypted-blob-base64",
+      api_secret_encrypted: null,
+      passphrase_encrypted: null,
+      dek_encrypted: null,
+      nonce: null,
+      kek_version: 1,
+    });
+    rpcMock.mockResolvedValue({
+      data: [{ strategy_id: STRATEGY_ID, api_key_id: API_KEY_ID }],
+      error: null,
+    });
+  });
+
+  afterEach(() => {
+    delete process.env.MT5_ENABLED;
+    vi.restoreAllMocks();
+  });
+
+  /** The database already holds a LIVE mt5 key for this login, with a strategy. */
+  function seedExistingVenueRow() {
+    venueKeyLookupMock.mockResolvedValue({
+      data: { id: EXISTING_KEY_ID },
+      error: null,
+    });
+    venueStrategyLookupMock.mockResolvedValue({
+      data: { id: EXISTING_STRATEGY_ID },
+      error: null,
+    });
+  }
+
+  it("THE BUG: same MT5 login + a DIFFERENT wizard_session_id resolves to the EXISTING row, not a second draft", async () => {
+    seedExistingVenueRow();
+
+    const POST = await importPost();
+    const res = await POST(makeReq(MT5_RECONNECT_BODY));
+
+    expect(res.status).toBe(200);
+    // The ids are the SEEDED ones — the row that was already there.
+    expect(await res.json()).toEqual({
+      ok: true,
+      strategy_id: EXISTING_STRATEGY_ID,
+      api_key_id: EXISTING_KEY_ID,
+      deduped: true,
+    });
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+  });
+
+  it("FAILS TOWARD THE EXISTING ROW: the dedup path issues ZERO writes and never re-encrypts", async () => {
+    // ⭐ THE INVARIANT THAT MATTERS MOST. The existing api_keys row carries
+    // strategy_keys membership and synced history other strategies depend on,
+    // so "resolving" the collision by overwriting it would orphan all of that.
+    // Overwriting is also the cheap, plausible implementation — which is
+    // exactly why it is pinned by call count rather than by reading the row.
+    seedExistingVenueRow();
+
+    const POST = await importPost();
+    await POST(makeReq(MT5_RECONNECT_BODY));
+
+    expect(rpcMock).not.toHaveBeenCalled();
+    expect(assetClassUpdateMock).not.toHaveBeenCalled();
+    // And the fence short-circuits BEFORE the charged seam calls, like the F6
+    // fence does — a re-connect must not burn a Railway probe or the venue's
+    // validate quota.
+    expect(validateKeyMock).not.toHaveBeenCalled();
+    expect(encryptKeyMock).not.toHaveBeenCalled();
+  });
+
+  it("reads the LIVE row only — the fence filters disconnected_at IS NULL, mirroring the index predicate", async () => {
+    // A predicate blind to the lifecycle would hand back a SOFT-DISCONNECTED
+    // key, which every cron dispatcher deliberately skips — a strategy that
+    // silently never syncs, worse than the duplicate this fence prevents.
+    seedExistingVenueRow();
+
+    const POST = await importPost();
+    await POST(makeReq(MT5_RECONNECT_BODY));
+
+    const keyRead = capturedSelects.find((s) => s.table === "api_keys");
+    expect(keyRead, "the fence must read api_keys").toBeTruthy();
+    expect(keyRead!.filters).toEqual({
+      user_id: MOCK_USER.id,
+      exchange: "mt5",
+      venue_account_id: MT5_LOGIN,
+      disconnected_at: null,
+    });
+  });
+
+  it("trims the login so a stray space cannot make the dedup MISS (agrees with the RPC's NULLIF(btrim(…)))", async () => {
+    seedExistingVenueRow();
+
+    const POST = await importPost();
+    await POST(makeReq({ ...MT5_RECONNECT_BODY, api_key: `  ${MT5_LOGIN}  ` }));
+
+    const keyRead = capturedSelects.find((s) => s.table === "api_keys");
+    expect(keyRead!.filters.venue_account_id).toBe(MT5_LOGIN);
+  });
+
+  it("threads p_venue_account_id into the RPC when the fence finds nothing (first connect)", async () => {
+    const POST = await importPost();
+    const res = await POST(makeReq(MT5_RECONNECT_BODY));
+
+    expect(res.status).toBe(200);
+    const [, rpcArgs] = rpcMock.mock.calls[0];
+    expect((rpcArgs as Record<string, unknown>).p_venue_account_id).toBe(
+      MT5_LOGIN,
+    );
+  });
+
+  it("a first connect is NOT reported as deduped", async () => {
+    const POST = await importPost();
+    const res = await POST(makeReq(MT5_RECONNECT_BODY));
+
+    // The vacuity fence for every `deduped: true` assertion above: the marker
+    // must be ABSENT on the ordinary path, or those assertions prove nothing.
+    expect(await res.json()).toEqual({
+      ok: true,
+      strategy_id: STRATEGY_ID,
+      api_key_id: API_KEY_ID,
+    });
+  });
+
+  it("an ORPHANED key (no strategy hangs off it) falls through to the RPC rather than inventing a pair", async () => {
+    venueKeyLookupMock.mockResolvedValue({
+      data: { id: EXISTING_KEY_ID },
+      error: null,
+    });
+    venueStrategyLookupMock.mockResolvedValue({ data: null, error: null });
+
+    const POST = await importPost();
+    const res = await POST(makeReq(MT5_RECONNECT_BODY));
+
+    expect(res.status).toBe(200);
+    expect(rpcMock).toHaveBeenCalledTimes(1);
+    const json = await res.json();
+    expect(json.deduped).toBeUndefined();
+    // ⛔ And it must never pair the orphaned key with an unrelated strategy.
+    expect(json.api_key_id).toBe(API_KEY_ID);
+  });
+
+  it("a fence READ FAULT falls through to the RPC and never 500s (the DB index still dedups)", async () => {
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+    venueKeyLookupMock.mockResolvedValue({
+      data: null,
+      error: { code: "42501", message: "permission denied for table api_keys" },
+    });
+
+    const POST = await importPost();
+    const res = await POST(makeReq(MT5_RECONNECT_BODY));
+
+    expect(res.status).toBe(200);
+    expect(rpcMock).toHaveBeenCalledTimes(1);
+    expect(consoleErr).toHaveBeenCalled();
+  });
+
+  it("the SECOND read faulting degrades the same way — a live key with an unreadable strategy still submits", async () => {
+    // The fence issues TWO reads and only the FIRST one's fault arm was pinned.
+    // This is the other one: `api_keys` answered a live row, then the
+    // user-scoped `strategies` resolve failed (an RLS blip, a PostgREST 503).
+    // The dangerous implementations are both plausible — 500 the submit, or
+    // treat the error-as-value's `data: null` as "no strategy" and hand back a
+    // half-resolved pair — so the assertions pin the honest third option: log,
+    // fall through, let the DB index be the backstop. `deduped` must be ABSENT,
+    // because nothing was actually resolved.
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+    venueKeyLookupMock.mockResolvedValue({
+      data: { id: EXISTING_KEY_ID },
+      error: null,
+    });
+    venueStrategyLookupMock.mockResolvedValue({
+      data: null,
+      error: { code: "42501", message: "permission denied for table strategies" },
+    });
+
+    const POST = await importPost();
+    const res = await POST(makeReq(MT5_RECONNECT_BODY));
+
+    expect(res.status).toBe(200);
+    expect(rpcMock).toHaveBeenCalledTimes(1);
+    const json = await res.json();
+    expect(json.deduped).toBeUndefined();
+    expect(json.strategy_id).toBe(STRATEGY_ID);
+    expect(json.api_key_id).toBe(API_KEY_ID);
+    // Rule 12 — a dark fence that says nothing is indistinguishable from a
+    // fence that found nothing, and only one of those is a bug worth paging on.
+    expect(consoleErr).toHaveBeenCalled();
+  });
+
+  it("[156 / CONNECT-03] a MISSING service-role credential fails CLOSED on the MT5 path too — 503, nothing submitted", async () => {
+    // ⛔ THIS CASE'S EXPECTATION WAS INVERTED BY PHASE 156, and the inversion is
+    // the reason plan 02 lands before plan 04. It previously read "degrades to a
+    // dark fence, never to a failed submit" and asserted 200 + one RPC call.
+    // That was correct while the RPC rode the USER-SCOPED client: the fence
+    // needed the service key, the write did not, so a missing key cost only the
+    // fence. After 156 the write needs it too — `authenticated` has no EXECUTE —
+    // so there is no client left to submit with. Leaving this case as it stood
+    // would have made the file GREEN on a route that kept a user-scoped
+    // fallback, i.e. green on the bug (Pitfall 5).
+    //
+    // ⭐ The fence's OWN dark-degradation is unchanged and still tested — by the
+    // READ-FAULT cases above (`a fence READ FAULT falls through to the RPC`),
+    // which reach the fence with a healthy admin client and a failing SELECT.
+    // That is the arm that still describes the fence; this one never did.
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+    adminClientThrows.value = true;
+
+    const POST = await importPost();
+    const res = await POST(makeReq(MT5_RECONNECT_BODY));
+
+    expect(res.status).toBe(503);
+    expect((await res.json()).code).toBe("SEAM_MISCONFIGURED");
+    expect(rpcMock).not.toHaveBeenCalled();
+    expect(consoleErr).toHaveBeenCalled();
+  });
+
+  it("NON-MT5 venues leave the arm INERT: no api_keys read, no p_venue_account_id on the wire", async () => {
+    // A ccxt validation that carried no `venue_account_id` has nothing to
+    // stamp, so the whole arm must be a no-op for it. (167.1.2: a ccxt
+    // validation that DOES carry one is pinned in the [167.1.2 / D-01] block.)
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(200);
+    expect(capturedSelects.some((s) => s.table === "api_keys")).toBe(false);
+    expect(venueKeyLookupMock).not.toHaveBeenCalled();
+    const [, rpcArgs] = rpcMock.mock.calls[0];
+    expect(rpcArgs as Record<string, unknown>).not.toHaveProperty(
+      "p_venue_account_id",
+    );
+    expect((await res.json()).deduped).toBeUndefined();
+  });
+
+  it("⛔ NO ARM EVER ECHOES THE LOGIN BACK TO THE BROWSER", async () => {
+    // T-154-06-C. Asserted across the arms that can carry a body on the MT5
+    // path, by stringifying the WHOLE response — a field added later is caught
+    // without anyone remembering to extend this test.
+    seedExistingVenueRow();
+    const POST = await importPost();
+    const deduped = await POST(makeReq(MT5_RECONNECT_BODY));
+    expect(await deduped.text()).not.toContain(MT5_LOGIN);
+
+    venueKeyLookupMock.mockResolvedValue({ data: null, error: null });
+    const created = await POST(makeReq(MT5_RECONNECT_BODY));
+    expect(await created.text()).not.toContain(MT5_LOGIN);
+
+    rpcMock.mockResolvedValue({
+      data: null,
+      error: {
+        code: "23505",
+        message:
+          'duplicate key value violates unique constraint "api_keys_user_exchange_venue_account_uniq"',
+        details: `Key (user_id, exchange, venue_account_id)=(x, mt5, ${MT5_LOGIN}) already exists.`,
+      },
+    });
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const conflicted = await POST(makeReq(MT5_RECONNECT_BODY));
+    expect(await conflicted.text()).not.toContain(MT5_LOGIN);
+  });
+
+  /**
+   * 154.1 / WIZCONT-02 REVIEW CR — THE FENCE MUST NOT RESUME A FINISHED
+   * STRATEGY.
+   *
+   * ⚠️ WHY NOTHING ABOVE CAUGHT THIS. Every case in the parent describe seeds a
+   * DRAFT-shaped row: `seedExistingVenueRow` answers the strategy read with an
+   * id and says nothing about `source` or `status`, so a resolver reading
+   * `strategies` with NO draft filters and a resolver reading it WITH them are
+   * indistinguishable to all of them. The shipped resolver had none — it carried
+   * only `user_id` + `api_key_id`, ordered OLDEST FIRST — while every sibling
+   * reader of a wizard draft carries `source='wizard'` AND `status='draft'`
+   * (`strategies/draft/[id]/route.ts` applies both on its preflight and AGAIN on
+   * its DELETE, precisely so a status flip cannot clobber a promoted strategy).
+   *
+   * WHAT THAT COST, END TO END, on the exact flow WIZCONT-02 exists for:
+   *   1. connect MT5 login X, finish the wizard → the strategy is
+   *      `pending_review` and the key is live with `venue_account_id = X`;
+   *   2. re-connect the same account from a context that lost the token;
+   *   3. the fence answers `{ok:true, deduped:true}` pointing at the FINALIZED
+   *      strategy, and the wizard resumes onto a non-draft;
+   *   4. the overlay path then calls `finalize_wizard_strategy`, which RAISES
+   *      `invalid_parameter_value` on its `v_current_status <> 'draft'` check →
+   *      409, and a refresh re-runs the same dedup, so the user is wedged with
+   *      no way forward;
+   *   5. the manager path has no draft guard at all → 200, with the metadata the
+   *      user just typed silently discarded.
+   *
+   * Both halves come from ONE missing pair of filters, which is why the pins
+   * below are written against the FILTERS and against the arm's OUTCOME rather
+   * than against either downstream symptom.
+   */
+  describe("[154.1] a FINALIZED strategy is not a draft to resume", () => {
+    /** The name the user gave the strategy that already holds this account. */
+    const EXISTING_STRATEGY_NAME = "Helios Momentum";
+
+    /**
+     * The database state the bug needs: a LIVE key for this login, NO wizard
+     * draft hanging off it, and a strategy that has moved past `draft`.
+     *
+     * ⭐ The two strategy reads are seeded SEPARATELY on purpose. The
+     * draft-scoped read finding nothing while the unscoped one finds a row IS
+     * the situation — seeding one row for both questions would be exactly the
+     * conflation that hid the defect.
+     */
+    function seedFinalizedOwner(name: unknown = EXISTING_STRATEGY_NAME) {
+      venueKeyLookupMock.mockResolvedValue({
+        data: { id: EXISTING_KEY_ID },
+        error: null,
+      });
+      // `source='wizard' AND status='draft'` matches nothing: the row promoted.
+      venueStrategyLookupMock.mockResolvedValue({ data: null, error: null });
+      venueOwnerLookupMock.mockResolvedValue({
+        data: { id: EXISTING_STRATEGY_ID, name },
+        error: null,
+      });
+    }
+
+    it("THE WEDGE PIN: a pending_review strategy on the live key is NOT returned as deduped", async () => {
+      // ⭐ THE ASSERTION THAT MUST RED IF EITHER FILTER IS DELETED. Without
+      // `.eq("source","wizard")` / `.eq("status","draft")` the oldest-first read
+      // resolves onto this very row and the route answers 200 + `deduped:true`,
+      // handing the wizard a non-draft to finalize.
+      seedFinalizedOwner();
+
+      const POST = await importPost();
+      const res = await POST(makeReq(MT5_RECONNECT_BODY));
+
+      const body = await res.clone().json();
+      expect(
+        body.deduped,
+        "the fence resumed a strategy that has LEFT the draft state — " +
+          "finalize then refuses it with a 409 a refresh reproduces exactly",
+      ).toBeUndefined();
+      expect(body.strategy_id).toBeUndefined();
+      expect(res.status).not.toBe(200);
+    });
+
+    it("the draft-scoped read carries BOTH filters every sibling draft reader carries", async () => {
+      seedFinalizedOwner();
+
+      const POST = await importPost();
+      await POST(makeReq(MT5_RECONNECT_BODY));
+
+      const draftScoped = capturedSelects.find(
+        (s) => s.table === "strategies" && "status" in s.filters,
+      );
+      expect(
+        draftScoped,
+        "no draft-scoped `strategies` read was issued at all — the resolver is " +
+          "back to asking 'any strategy on this key?'",
+      ).toBeTruthy();
+      expect(draftScoped!.filters).toEqual({
+        user_id: MOCK_USER.id,
+        api_key_id: EXISTING_KEY_ID,
+        source: "wizard",
+        status: "draft",
+      });
+    });
+
+    it("answers the HONEST code — never DRAFT_ALREADY_EXISTS, whose every clause is false here", async () => {
+      seedFinalizedOwner();
+
+      const POST = await importPost();
+      const res = await POST(makeReq(MT5_RECONNECT_BODY));
+
+      expect(res.status).toBe(409);
+      const body = await res.json();
+      expect(
+        body.code,
+        '"A wizard session with this key is already in progress" sends the ' +
+          "user hunting for a draft that does not exist, and offers to delete " +
+          "one that is not there.",
+      ).not.toBe("DRAFT_ALREADY_EXISTS");
+      expect(body.code).toBe("VENUE_ALREADY_CONNECTED");
+      expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+    });
+
+    it("names the strategy that is in the way — the user's OWN row, read through RLS", async () => {
+      seedFinalizedOwner();
+
+      const POST = await importPost();
+      const res = await POST(makeReq(MT5_RECONNECT_BODY));
+
+      // Byte-wise: `toEqual` on parsed JSON does not compare key order, and this
+      // body is what `ConnectKeyStep`'s reader and the copy table are pinned
+      // against.
+      expect(await res.text()).toBe(
+        '{"code":"VENUE_ALREADY_CONNECTED","error":"This account is already connected to an existing strategy.","strategy_name":"Helios Momentum"}',
+      );
+    });
+
+    it("⛔ never echoes the login back, on the refusal arm too", async () => {
+      // T-154-06-C extended to the arm this plan adds. Stringify the WHOLE
+      // response so a field added later is caught without anyone remembering.
+      seedFinalizedOwner();
+
+      const POST = await importPost();
+      const res = await POST(makeReq(MT5_RECONNECT_BODY));
+
+      expect(await res.text()).not.toContain(MT5_LOGIN);
+    });
+
+    it("a non-string name degrades to NO name rather than a stringified surprise", async () => {
+      // `strategies.name` is NOT NULL at the database, so this is about the
+      // SHAPE we were handed: a read that drifted must not put `[object Object]`
+      // into a sentence the user reads.
+      seedFinalizedOwner({ unexpected: "shape" });
+
+      const POST = await importPost();
+      const res = await POST(makeReq(MT5_RECONNECT_BODY));
+
+      expect(res.status).toBe(409);
+      // OMITTED, not nulled: the wire then carries exactly what a pre-154.1
+      // error body carried, and the client's "absence means we were not told"
+      // rule is a property of the request rather than of a serializer.
+      expect(await res.text()).toBe(
+        '{"code":"VENUE_ALREADY_CONNECTED","error":"This account is already connected to an existing strategy."}',
+      );
+    });
+
+    it("GROUNDS THE COPY'S SERVER-STATE CLAIM: the refusal writes nothing and spends no seam budget", async () => {
+      // `VENUE_ALREADY_CONNECTED`'s copy says "Nothing new was created and the
+      // existing strategy was left exactly as it was". The copy-honesty guard in
+      // `wizardErrors.test.ts` admits a server-state claim only when it is
+      // OBSERVABLE, and this is the observation: the arm returns before the RPC,
+      // before both charged Railway calls, and before the asset-class write.
+      seedFinalizedOwner();
+
+      const POST = await importPost();
+      await POST(makeReq(MT5_RECONNECT_BODY));
+
+      expect(rpcMock).not.toHaveBeenCalled();
+      expect(assetClassUpdateMock).not.toHaveBeenCalled();
+      expect(validateKeyMock).not.toHaveBeenCalled();
+      expect(encryptKeyMock).not.toHaveBeenCalled();
+    });
+
+    it("ANTI-REGRESSION: a real DRAFT on the same key still dedups — the fence was narrowed, not disabled", async () => {
+      // The vacuity fence for the whole block above. If the filters were added
+      // in a way that made the draft read match nothing, every assertion here
+      // would still pass while WIZCONT-02 itself silently stopped working.
+      seedExistingVenueRow();
+
+      const POST = await importPost();
+      const res = await POST(makeReq(MT5_RECONNECT_BODY));
+
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({
+        ok: true,
+        strategy_id: EXISTING_STRATEGY_ID,
+        api_key_id: EXISTING_KEY_ID,
+        deduped: true,
+      });
+      // And the second read is never even issued: a resumable draft answers the
+      // question outright.
+      expect(venueOwnerLookupMock).not.toHaveBeenCalled();
+    });
+
+    it("an ORPHANED key is still an orphan — 'no strategy at all' must not become a refusal", async () => {
+      // The other side of the discrimination this plan adds. Both reads find
+      // nothing, so we claim nothing: fall through and let the DB index be the
+      // backstop, exactly as before.
+      venueKeyLookupMock.mockResolvedValue({
+        data: { id: EXISTING_KEY_ID },
+        error: null,
+      });
+      venueStrategyLookupMock.mockResolvedValue({ data: null, error: null });
+      venueOwnerLookupMock.mockResolvedValue({ data: null, error: null });
+
+      const POST = await importPost();
+      const res = await POST(makeReq(MT5_RECONNECT_BODY));
+
+      expect(res.status).toBe(200);
+      expect(rpcMock).toHaveBeenCalledTimes(1);
+      expect((await res.json()).deduped).toBeUndefined();
+    });
+
+    it("the OWNER read faulting falls through to the RPC — a refusal is never invented from an error", async () => {
+      // Rule 12 applied to the new read: an unreadable `strategies` table means
+      // we cannot tell an orphan from a finished owner, and refusing on that
+      // would 409 a submit that should have succeeded.
+      const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+      venueKeyLookupMock.mockResolvedValue({
+        data: { id: EXISTING_KEY_ID },
+        error: null,
+      });
+      venueStrategyLookupMock.mockResolvedValue({ data: null, error: null });
+      venueOwnerLookupMock.mockResolvedValue({
+        data: null,
+        error: { code: "42501", message: "permission denied for table strategies" },
+      });
+
+      const POST = await importPost();
+      const res = await POST(makeReq(MT5_RECONNECT_BODY));
+
+      expect(res.status).toBe(200);
+      expect(rpcMock).toHaveBeenCalledTimes(1);
+      expect((await res.json()).deduped).toBeUndefined();
+      expect(consoleErr).toHaveBeenCalled();
+    });
+
+    it("THE RACE ARM ANSWERS THE SAME FACT: 23505 + a finalized owner is not DRAFT_ALREADY_EXISTS either", async () => {
+      // The 23505 arm re-runs the SAME resolver, so it inherits the
+      // discrimination — but "inherits" is a claim about wiring, and wiring is
+      // what this pins. Before the fix this path answered the draft-shaped 409
+      // for a user whose account is held by a finished strategy.
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      rpcMock.mockResolvedValue({
+        data: null,
+        error: {
+          code: "23505",
+          message:
+            'duplicate key value violates unique constraint "api_keys_user_exchange_venue_account_uniq"',
+        },
+      });
+      // The pre-RPC fence sees nothing (the row appeared during the request);
+      // the re-read after the collision sees the finished owner.
+      venueKeyLookupMock
+        .mockResolvedValueOnce({ data: null, error: null })
+        .mockResolvedValue({ data: { id: EXISTING_KEY_ID }, error: null });
+      venueStrategyLookupMock.mockResolvedValue({ data: null, error: null });
+      venueOwnerLookupMock.mockResolvedValue({
+        data: { id: EXISTING_STRATEGY_ID, name: EXISTING_STRATEGY_NAME },
+        error: null,
+      });
+
+      const POST = await importPost();
+      const res = await POST(makeReq(MT5_RECONNECT_BODY));
+
+      expect(res.status).toBe(409);
+      const body = await res.json();
+      expect(body.code).toBe("VENUE_ALREADY_CONNECTED");
+      expect(body.strategy_name).toBe(EXISTING_STRATEGY_NAME);
+    });
+  });
+
+  describe("the 23505 arm discriminates (TWIN-8)", () => {
+    beforeEach(() => {
+      vi.spyOn(console, "error").mockImplementation(() => {});
+    });
+
+    it("venue-identity constraint + resolvable → 200 deduped with the EXISTING ids", async () => {
+      // The race the app fence cannot win: the row appeared between the fence
+      // read and the RPC. The DB caught it; we resolve toward the existing row.
+      rpcMock.mockResolvedValue({
+        data: null,
+        error: {
+          code: "23505",
+          message:
+            'duplicate key value violates unique constraint "api_keys_user_exchange_venue_account_uniq"',
+        },
+      });
+      venueKeyLookupMock
+        .mockResolvedValueOnce({ data: null, error: null })
+        .mockResolvedValue({ data: { id: EXISTING_KEY_ID }, error: null });
+      venueStrategyLookupMock.mockResolvedValue({
+        data: { id: EXISTING_STRATEGY_ID },
+        error: null,
+      });
+
+      const POST = await importPost();
+      const res = await POST(makeReq(MT5_RECONNECT_BODY));
+
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({
+        ok: true,
+        strategy_id: EXISTING_STRATEGY_ID,
+        api_key_id: EXISTING_KEY_ID,
+        deduped: true,
+      });
+    });
+
+    it("venue-identity constraint + UNRESOLVABLE → the existing 409, not a new code", async () => {
+      rpcMock.mockResolvedValue({
+        data: null,
+        error: {
+          code: "23505",
+          message:
+            'duplicate key value violates unique constraint "api_keys_user_exchange_venue_account_uniq"',
+        },
+      });
+      // Nothing resolvable on the re-read: NO LIVE KEY AT ALL, i.e. the dark
+      // fence. ⚠️ 161-05 — this comment used to read "(orphan / dark fence)",
+      // and it named an arm this fixture does not exercise: with
+      // `venueKeyLookupMock` empty the resolver returns at `!liveKeyId` and
+      // never reaches the orphan discrimination. The orphan has its own
+      // describe below, seeded with a key that IS found.
+      venueKeyLookupMock.mockResolvedValue({ data: null, error: null });
+
+      const POST = await importPost();
+      const res = await POST(makeReq(MT5_RECONNECT_BODY));
+
+      expect(res.status).toBe(409);
+      expect(await res.json()).toEqual({
+        code: "DRAFT_ALREADY_EXISTS",
+        error: "A wizard session with this key is already in progress.",
+      });
+    });
+
+    it("the wizard-session constraint keeps a BYTE-IDENTICAL 409 body", async () => {
+      rpcMock.mockResolvedValue({
+        data: null,
+        error: {
+          code: "23505",
+          message:
+            'duplicate key value violates unique constraint "strategies_user_wizard_session_source_uniq"',
+        },
+      });
+
+      const POST = await importPost();
+      const res = await POST(makeReq(VALID_BODY));
+
+      expect(res.status).toBe(409);
+      // Byte-wise: `toEqual` on parsed JSON does not compare key order, and the
+      // pre-154 body is what the wizard's copy table is pinned against.
+      expect(await res.text()).toBe(
+        '{"code":"DRAFT_ALREADY_EXISTS","error":"A wizard session with this key is already in progress."}',
+      );
+    });
+
+    it("a 23505 naming NO constraint keeps the pre-154 409 (absence is not a value)", async () => {
+      rpcMock.mockResolvedValue({
+        data: null,
+        error: { code: "23505", message: "dup" },
+      });
+
+      const POST = await importPost();
+      const res = await POST(makeReq(VALID_BODY));
+
+      expect(res.status).toBe(409);
+      expect(await res.text()).toBe(
+        '{"code":"DRAFT_ALREADY_EXISTS","error":"A wizard session with this key is already in progress."}',
+      );
+    });
+
+    it("an UNRECOGNISED constraint fails LOUD — 500 + Sentry naming it, never the wrong 409", async () => {
+      rpcMock.mockResolvedValue({
+        data: null,
+        error: {
+          code: "23505",
+          message:
+            'duplicate key value violates unique constraint "api_keys_some_future_uniq"',
+        },
+      });
+
+      const POST = await importPost();
+      const res = await POST(makeReq(VALID_BODY));
+
+      expect(res.status).toBe(500);
+      expect((await res.json()).code).toBe("UNKNOWN");
+      // `captureToSentry` fires through a lazy `import(...).then(...)` chain,
+      // so the capture lands a tick later — same wait the SEAMUX-08 block uses.
+      await vi.waitFor(() =>
+        expect(sentryState.captured.length).toBeGreaterThan(0),
+      );
+      const capture = sentryState.captured.at(-1);
+      expect(capture?.options.tags?.step).toBe("draft-rpc-unknown-constraint");
+      expect(capture?.options.extra?.constraint).toBe(
+        "api_keys_some_future_uniq",
+      );
+    });
+  });
+
+  /**
+   * [161-05 / WIZERR-03] THE ORPHAN — a live key with NOTHING behind it.
+   *
+   * Until this plan the 23505 arm answered it with the byte-pinned
+   * `DRAFT_ALREADY_EXISTS` 409, a sentence the resolver had already disproved
+   * two reads earlier: it reaches this state only because the
+   * `source='wizard'` / `status='draft'` read came back EMPTY. So the user was
+   * sent to find a wizard session that provably does not exist, and offered
+   * `resume_draft` / `start_fresh` to act on it.
+   *
+   * ⭐ THE FIXTURE IS THE WHOLE ARGUMENT, AND IT IS DELIBERATELY NOT THE ONE
+   * THE `UNRESOLVABLE` CASE ABOVE USES. That case leaves `venueKeyLookupMock`
+   * empty, so the resolver returns at `!liveKeyId` and the orphan branch is
+   * never reached — a pin written on that fixture would have gone green against
+   * BOTH the old and the new route and proved nothing. Here the key IS found
+   * and both strategy reads succeed EMPTY, which is the only shape that
+   * produces `kind:"orphaned"`.
+   *
+   * ⛔ AND THE NEGATIVE CONTROLS ARE THE LOAD-BEARING HALF. The risk this change
+   * introduces is not "the orphan keeps the old code" — it is the opposite:
+   * collapsing "we could not tell" into "nothing holds it". A read that FAULTED
+   * has observed nothing, and answering `KEY_ORPHANED` from it would be the same
+   * unearned claim in the other direction. Both fault directions are pinned.
+   */
+  describe("[161-05 / WIZERR-03] the orphan answers KEY_ORPHANED, and only the orphan does", () => {
+    beforeEach(() => {
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      rpcMock.mockResolvedValue({
+        data: null,
+        error: {
+          code: "23505",
+          message:
+            'duplicate key value violates unique constraint "api_keys_user_exchange_venue_account_uniq"',
+        },
+      });
+    });
+
+    /**
+     * A LIVE key for this login, and NOTHING hanging off it — the state a
+     * deleted draft leaves behind. Both `strategies` reads keep the describe's
+     * default (empty) and succeed; only the `api_keys` read is seeded.
+     */
+    function seedOrphanedKey() {
+      venueKeyLookupMock.mockResolvedValue({
+        data: { id: EXISTING_KEY_ID },
+        error: null,
+      });
+    }
+
+    it("a live key with no strategy behind it answers 409 KEY_ORPHANED — never the false fence sentence", async () => {
+      seedOrphanedKey();
+
+      const POST = await importPost();
+      const res = await POST(makeReq(MT5_RECONNECT_BODY));
+
+      expect(res.status).toBe(409);
+      // Byte-wise, and `code` FIRST: `toEqual` on parsed JSON does not compare
+      // key order, and the key order is what the invariant scanner reads.
+      expect(await res.text()).toBe(
+        '{"code":"KEY_ORPHANED","error":"This key is already stored, but no strategy uses it."}',
+      );
+      expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+    });
+
+    it("NEGATIVE CONTROL — the OWNER read faulting keeps the fence 409 byte-identical", async () => {
+      // "We could not tell" is not "nothing holds it". This is the read whose
+      // emptiness the orphan answer is DERIVED from, so a fault here must fall
+      // back to the incumbent behaviour rather than assert the conclusion the
+      // failed read did not support.
+      seedOrphanedKey();
+      venueOwnerLookupMock.mockResolvedValue({
+        data: null,
+        error: { code: "PGRST301", message: "owner read failed" },
+      });
+
+      const POST = await importPost();
+      const res = await POST(makeReq(MT5_RECONNECT_BODY));
+
+      expect(res.status).toBe(409);
+      expect(await res.text()).toBe(
+        '{"code":"DRAFT_ALREADY_EXISTS","error":"A wizard session with this key is already in progress."}',
+      );
+    });
+
+    it("NEGATIVE CONTROL — the DRAFT read faulting keeps the fence 409 byte-identical", async () => {
+      // The earlier of the two reads. A fault here returns `unresolved` before
+      // the owner read is ever issued, so the orphan branch must stay unreached.
+      seedOrphanedKey();
+      venueStrategyLookupMock.mockResolvedValue({
+        data: null,
+        error: { code: "PGRST301", message: "draft read failed" },
+      });
+
+      const POST = await importPost();
+      const res = await POST(makeReq(MT5_RECONNECT_BODY));
+
+      expect(res.status).toBe(409);
+      expect(await res.text()).toBe(
+        '{"code":"DRAFT_ALREADY_EXISTS","error":"A wizard session with this key is already in progress."}',
+      );
+      // And the owner read was never reached — the fault short-circuits.
+      expect(venueOwnerLookupMock).not.toHaveBeenCalled();
+    });
+
+    it("NEGATIVE CONTROL — the wizard-session constraint still answers the fence 409, orphan state or not", async () => {
+      // ⭐ THE DISCRIMINATION KEYS ON THE CONSTRAINT, NOT ON THE DATABASE.
+      // Distinct from the byte-identical pin in the block above: that one runs
+      // with an EMPTY venue fixture, so it would stay green even if the new
+      // branch had been written to fire on DB state. This one seeds the exact
+      // orphan shape and still demands the fence sentence, because the
+      // constraint Postgres named is the wizard-session one.
+      seedOrphanedKey();
+      rpcMock.mockResolvedValue({
+        data: null,
+        error: {
+          code: "23505",
+          message:
+            'duplicate key value violates unique constraint "strategies_user_wizard_session_source_uniq"',
+        },
+      });
+
+      const POST = await importPost();
+      const res = await POST(makeReq(MT5_RECONNECT_BODY));
+
+      expect(res.status).toBe(409);
+      expect(await res.text()).toBe(
+        '{"code":"DRAFT_ALREADY_EXISTS","error":"A wizard session with this key is already in progress."}',
+      );
+    });
+
+    it("the PRE-RPC fence lets the orphan through to validate — the credentials speak first", async () => {
+      // 161-05 recorded this ordering as a decision at the fence, so it is
+      // pinned rather than left to be re-derived. The two other refusable
+      // resolutions (`draft`, `connected`) short-circuit before the charged seam
+      // calls; the orphan does NOT, because the credentials in THIS request are
+      // still unauthenticated and a wrong secret is the user's real first
+      // problem. Refusing early would hand them the orphan to chase while a bad
+      // secret sat unmentioned.
+      seedOrphanedKey();
+
+      const POST = await importPost();
+      await POST(makeReq(MT5_RECONNECT_BODY));
+
+      expect(validateKeyMock).toHaveBeenCalled();
+      expect(rpcMock).toHaveBeenCalled();
+    });
+  });
+
+  /**
+   * 167.1.2 (D-01) — a ccxt venue now has an identity too, read by the
+   * validator from THIS credential and returned as `venue_account_id`. It is
+   * what lets the venue-identity index refuse a second live key on one
+   * exchange account in the wizard, the same way the MT5 login does. No new
+   * code: the collision resolves through the existing race arm, and each of
+   * its three outcomes is pinned here for a ccxt venue. "100000001" is a
+   * synthetic OKX uid; it must appear in no response body.
+   */
+  describe("[167.1.2 / D-01] a ccxt (okx) key stamps its account id, and a collision resolves through the race arm", () => {
+    const OKX_UID = "100000001";
+    const OKX_RECONNECT_BODY = { ...VALID_BODY, wizard_session_id: OTHER_SESSION_ID };
+
+    beforeEach(() => {
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      validateKeyMock.mockResolvedValue({
+        valid: true,
+        read_only: true,
+        venue_account_id: OKX_UID,
+      });
+    });
+
+    function collideOnVenueIdentity() {
+      rpcMock.mockResolvedValue({
+        data: null,
+        error: {
+          code: "23505",
+          message:
+            'duplicate key value violates unique constraint "api_keys_user_exchange_venue_account_uniq"',
+          details: `Key (user_id, exchange, venue_account_id)=(x, okx, ${OKX_UID}) already exists.`,
+        },
+      });
+    }
+
+    it("threads the validator's id into the RPC as p_venue_account_id", async () => {
+      const POST = await importPost();
+      const res = await POST(makeReq(OKX_RECONNECT_BODY));
+
+      expect(res.status).toBe(200);
+      const [, rpcArgs] = rpcMock.mock.calls[0];
+      expect((rpcArgs as Record<string, unknown>).p_venue_account_id).toBe(OKX_UID);
+      // The ccxt id is only known AFTER validation, so there is no pre-RPC
+      // fence read for it: the index is the refusal, the race arm the answer.
+      expect(venueKeyLookupMock).not.toHaveBeenCalled();
+      expect(await res.text()).not.toContain(OKX_UID);
+    });
+
+    it("an own DRAFT on the same account → 200 deduped with the EXISTING ids", async () => {
+      collideOnVenueIdentity();
+      venueKeyLookupMock.mockResolvedValue({ data: { id: EXISTING_KEY_ID }, error: null });
+      venueStrategyLookupMock.mockResolvedValue({ data: { id: EXISTING_STRATEGY_ID }, error: null });
+
+      const POST = await importPost();
+      const res = await POST(makeReq(OKX_RECONNECT_BODY));
+
+      expect(res.status).toBe(200);
+      const text = await res.text();
+      expect(JSON.parse(text)).toEqual({
+        ok: true,
+        strategy_id: EXISTING_STRATEGY_ID,
+        api_key_id: EXISTING_KEY_ID,
+        deduped: true,
+      });
+      expect(text).not.toContain(OKX_UID);
+      // The re-read is keyed on the ccxt venue and the validator's id.
+      const keyRead = capturedSelects.find((c) => c.table === "api_keys");
+      expect(keyRead?.filters).toMatchObject({ exchange: "okx", venue_account_id: OKX_UID });
+    });
+
+    it("a CONNECTED strategy on the same account → 409 VENUE_ALREADY_CONNECTED", async () => {
+      collideOnVenueIdentity();
+      venueKeyLookupMock.mockResolvedValue({ data: { id: EXISTING_KEY_ID }, error: null });
+      venueStrategyLookupMock.mockResolvedValue({ data: null, error: null });
+      venueOwnerLookupMock.mockResolvedValue({
+        data: { id: EXISTING_STRATEGY_ID, name: "Existing Strategy" },
+        error: null,
+      });
+
+      const POST = await importPost();
+      const res = await POST(makeReq(OKX_RECONNECT_BODY));
+
+      expect(res.status).toBe(409);
+      const text = await res.text();
+      expect(JSON.parse(text).code).toBe("VENUE_ALREADY_CONNECTED");
+      expect(text).not.toContain(OKX_UID);
+    });
+
+    it("an ORPHANED key on the same account → 409 KEY_ORPHANED", async () => {
+      collideOnVenueIdentity();
+      venueKeyLookupMock.mockResolvedValue({ data: { id: EXISTING_KEY_ID }, error: null });
+
+      const POST = await importPost();
+      const res = await POST(makeReq(OKX_RECONNECT_BODY));
+
+      expect(res.status).toBe(409);
+      const text = await res.text();
+      expect(JSON.parse(text).code).toBe("KEY_ORPHANED");
+      expect(text).not.toContain(OKX_UID);
+    });
+
+    /**
+     * 167.1.2 REVIEW-R2 CR-01 — NO POLL-WRITTEN TABLE MAY TURN AN ORPHAN INTO
+     * `held`. Round 1 read `allocator_holdings` here and answered `held` on any
+     * row. That table is written by the daily allocator poll, which polls EVERY
+     * live key of the user (no role filter, no strategy filter) and stamps
+     * `allocator_id` with the key's owner. So a true orphan (a manager-card key,
+     * or one left behind by a failed draft delete) read as `held` from its first
+     * poll on, and lost the one refusal that names the "Finish setup" remedy.
+     *
+     * The pin is on the READ SET, not only the code: a live key with no
+     * `strategies` row and no `strategy_keys` row answers KEY_ORPHANED, and the
+     * orphan path reads nothing but `api_keys`, `strategies` and
+     * `strategy_keys`. A future read of any other table on this path has to
+     * change this allowlist, which is the moment to ask whether that table
+     * measures "the key is used" or only "a job ran".
+     */
+    it("a live key with no strategy and no composite membership answers KEY_ORPHANED, and no poll-written table is read", async () => {
+      collideOnVenueIdentity();
+      venueKeyLookupMock.mockResolvedValue({ data: { id: EXISTING_KEY_ID }, error: null });
+
+      const POST = await importPost();
+      const res = await POST(makeReq(OKX_RECONNECT_BODY));
+
+      expect(res.status).toBe(409);
+      expect(JSON.parse(await res.text()).code).toBe("KEY_ORPHANED");
+      const tablesRead = [...new Set(capturedSelects.map((c) => c.table))].sort();
+      expect(tablesRead).toEqual(["api_keys", "strategies", "strategy_keys"]);
+    });
+
+    /**
+     * 167.1.2 REVIEW WR-04 — a live key with no `strategies` row is not
+     * necessarily an orphan. Before this PR only MT5 reached this arm; now
+     * every ccxt venue does, and a manager whose own composite member already
+     * reads the account would have been told KEY_ORPHANED, which is false,
+     * and pointed at a "Finish setup" path built for orphans. Such a key
+     * answers the venue-neutral KEY_VENUE_ALREADY_CONNECTED instead, whose copy
+     * is true for it: another connected key of yours already reads this
+     * account, and the new key was not saved (the INSERT was refused and
+     * rolled back). Composite membership is the only such signal (REVIEW-R2
+     * CR-01, pinned by the read-set case above).
+     */
+    it("a COMPOSITE-MEMBER key on the same account (strategy_keys) → 409 KEY_VENUE_ALREADY_CONNECTED, not KEY_ORPHANED", async () => {
+      collideOnVenueIdentity();
+      venueKeyLookupMock.mockResolvedValue({ data: { id: EXISTING_KEY_ID }, error: null });
+      keyMembershipLookupMock.mockResolvedValue({
+        data: { api_key_id: EXISTING_KEY_ID },
+        error: null,
+      });
+
+      const POST = await importPost();
+      const res = await POST(makeReq(OKX_RECONNECT_BODY));
+
+      expect(res.status).toBe(409);
+      const text = await res.text();
+      expect(JSON.parse(text).code).toBe("KEY_VENUE_ALREADY_CONNECTED");
+      expect(text).not.toContain(OKX_UID);
+      expect(text).not.toContain(EXISTING_KEY_ID);
+      // The membership read is the caller's own, through RLS, keyed on the
+      // colliding key and the session uid.
+      const membershipRead = capturedSelects.find((c) => c.table === "strategy_keys");
+      expect(membershipRead?.client).toBe("user-scoped");
+      expect(membershipRead?.filters).toMatchObject({
+        owner_id: MOCK_USER.id,
+        api_key_id: EXISTING_KEY_ID,
+      });
+    });
+
+    // NEGATIVE CONTROLS (Rule 12): a membership read that FAULTED has observed
+    // nothing, so it establishes neither "a composite holds it" nor "nothing
+    // does". Neither refusal that asserts one of those may fire.
+    //
+    // 167.1.2 REVIEW-R2 IN-01 / SF2-L2 — AND WHAT IT DOES ANSWER IS PINNED, as
+    // is the log line. `unresolved` falls through to the byte-identical
+    // DRAFT_ALREADY_EXISTS 409, the accepted 154.1 posture for a dark read,
+    // recorded rather than fixed. Asserting only what the answer is NOT let a
+    // future 500, or any other code, pass unnoticed; and a fault that answers
+    // the fall-through without its `console.error` is a dark read nobody sees.
+    // Moving either is now a deliberate edit to this case.
+    it("a faulted strategy_keys read falls through to DRAFT_ALREADY_EXISTS and logs the fault", async () => {
+      collideOnVenueIdentity();
+      venueKeyLookupMock.mockResolvedValue({ data: { id: EXISTING_KEY_ID }, error: null });
+      keyMembershipLookupMock.mockResolvedValue({
+        data: null,
+        error: { code: "PGRST301", message: "holder read failed" },
+      });
+      const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      const POST = await importPost();
+      const res = await POST(makeReq(OKX_RECONNECT_BODY));
+
+      expect(res.status).toBe(409);
+      const code = JSON.parse(await res.text()).code;
+      expect(code).toBe("DRAFT_ALREADY_EXISTS");
+      // The route also logs "RPC error" on this request, so find the line by
+      // its label rather than by call index.
+      const faultLine = consoleErr.mock.calls.find(
+        (call) =>
+          call[0] ===
+          "[strategies/create-with-key] venue-identity strategy_keys resolve failed:",
+      );
+      expect(faultLine, "the faulted strategy_keys read was not logged").toBeDefined();
+      expect(faultLine?.[2]).toBe("PGRST301");
+      expect(JSON.stringify(consoleErr.mock.calls)).not.toContain(OKX_UID);
+    });
+
+    it("the RPC error line is scrubbed of the uid Postgres echoes in its DETAIL", async () => {
+      collideOnVenueIdentity();
+      venueKeyLookupMock.mockResolvedValue({ data: { id: EXISTING_KEY_ID }, error: null });
+      const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      const POST = await importPost();
+      await POST(makeReq(OKX_RECONNECT_BODY));
+
+      const logged = JSON.stringify(consoleErr.mock.calls);
+      expect(logged).toContain("RPC error");
+      expect(logged).not.toContain(OKX_UID);
+    });
+
+    it("a ccxt validation WITHOUT an id omits p_venue_account_id and the create still succeeds", async () => {
+      validateKeyMock.mockResolvedValue({ valid: true, read_only: true });
+      const POST = await importPost();
+      const res = await POST(makeReq(OKX_RECONNECT_BODY));
+
+      expect(res.status).toBe(200);
+      const [, rpcArgs] = rpcMock.mock.calls[0];
+      expect(rpcArgs as Record<string, unknown>).not.toHaveProperty("p_venue_account_id");
+    });
+
+    // 167.1.2 REVIEW IN-05: the terminal catch wraps encryptKey, which runs
+    // AFTER the validator's id is known. Every other sink in the route scrubs
+    // venueAccountId; a throw that echoes it must not carry it into the log.
+    it("the outer catch's log line is scrubbed of the account id a thrown error echoes", async () => {
+      encryptKeyMock.mockRejectedValueOnce(
+        new Error(`encrypt failed for account ${OKX_UID} on okx`),
+      );
+      const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      const POST = await importPost();
+      await POST(makeReq(OKX_RECONNECT_BODY));
+
+      const logged = JSON.stringify(consoleErr.mock.calls);
+      expect(logged).toContain("caught exception");
+      expect(logged).not.toContain(OKX_UID);
+    });
+  });
+});
+
+/**
+ * Phase 140 / SEAM-04 SC-5b — a circuit-breaker trip during key-connect.
+ *
+ * When the Vercel→Railway breaker is OPEN, the shared resilience core throws
+ * `CircuitOpenError` WITHOUT issuing a request. Before this phase that error
+ * matched none of `classifyKeyValidationError`'s substring branches and fell
+ * through to `{code:"UNKNOWN", status:500}` — the wizard rendered "something
+ * went wrong, our team has been notified" during an infra outage, with no retry
+ * affordance. These tests pin the honest 503 instead.
+ *
+ * The class is imported from `@/lib/seam-errors` (the dependency-free leaf) via
+ * a DYNAMIC import taken from the same module registry as `importPost()`. The
+ * `@/lib/analytics-client` mock above is a BARE factory — the class is not on
+ * it, so routing `instanceof` through that module would compare against
+ * `undefined` and throw from inside the route's catch block. The dynamic form
+ * additionally survives the `vi.resetModules()` in the describe below, which
+ * would otherwise leave a static import bound to a stale class object.
+ */
+describe("POST /api/strategies/create-with-key — circuit-breaker trip (SEAM-04 SC-5b)", () => {
+  beforeEach(() => {
+    validateKeyMock.mockReset();
+    encryptKeyMock.mockReset();
+    rpcMock.mockReset();
+    assetClassUpdateMock.mockClear();
+
+    validateKeyMock.mockResolvedValue({
+      valid: true,
+      read_only: true,
+      permissions: ["read"],
+    });
+    encryptKeyMock.mockResolvedValue({
+      api_key_encrypted: "encrypted-blob-base64",
+      api_secret_encrypted: null,
+      passphrase_encrypted: null,
+      dek_encrypted: null,
+      nonce: null,
+      kek_version: 1,
+    });
+    rpcMock.mockResolvedValue({
+      data: [{ strategy_id: STRATEGY_ID, api_key_id: API_KEY_ID }],
+      error: null,
+    });
+  });
+
+  it("validateKey tripping the breaker → 503 SERVICE_UNAVAILABLE_RETRY, never UNKNOWN/500", async () => {
+    const { CircuitOpenError } = await import("@/lib/seam-errors");
+    validateKeyMock.mockRejectedValue(new CircuitOpenError(42));
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(503);
+    expect(res.status).not.toBe(500);
+    const json = await res.json();
+    expect(json.code).toBe("SERVICE_UNAVAILABLE_RETRY");
+    expect(json.code).not.toBe("UNKNOWN");
+    // H-0305 posture is unchanged: uniform { code } body, no raw message.
+    expect(Object.keys(json)).toEqual(["code"]);
+    // The breaker cooldown is the ONE dynamic value the class exposes, and it is
+    // the same class of information rateLimitDenyJson already publishes.
+    expect(res.headers.get("Retry-After")).toBe("42");
+    // Short-circuit means nothing downstream ran and nothing was stored.
+    expect(encryptKeyMock).not.toHaveBeenCalled();
+    expect(rpcMock).not.toHaveBeenCalled();
+    consoleErr.mockRestore();
+  });
+
+  it("encryptKey tripping the breaker → the same 503 envelope (both seam calls covered)", async () => {
+    const { CircuitOpenError } = await import("@/lib/seam-errors");
+    encryptKeyMock.mockRejectedValue(new CircuitOpenError(7));
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(503);
+    expect((await res.json()).code).toBe("SERVICE_UNAVAILABLE_RETRY");
+    expect(res.headers.get("Retry-After")).toBe("7");
+    // The key was validated but never persisted — the RPC never ran.
+    expect(rpcMock).not.toHaveBeenCalled();
+    consoleErr.mockRestore();
+  });
+
+  it("HI-02: the catch scrubs THIS ROUTE's per-request exchange credentials", async () => {
+    // ⚠️ THE WIRING, NOT THE ROSTER. `seam-log-coverage.test.ts` proves this
+    // file is now scanned; this proves the catch actually redacts. Both are
+    // needed: the scan is a source predicate and cannot see runtime bytes.
+    //
+    // This catch wraps validateKey/encryptKey, whose request bodies carry the
+    // raw exchange credentials and whose outgoing headers carry X-Service-Key.
+    // undici embeds those headers in `err.message`. Until HI-02 this site
+    // logged `err.message` raw; the exposure was narrow only because a
+    // DIFFERENT file (analytics-client) happens to replace the undici message
+    // first — a property of that file's catch ordering, not of this route.
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+    validateKeyMock.mockRejectedValue(
+      new Error(
+        `fetch failed: connect ECONNREFUSED 10.0.0.1:8002 ` +
+          `(x-service-key: svc, body: {"api_secret":"${VALID_BODY.api_secret}",` +
+          `"passphrase":"${VALID_BODY.passphrase}"})`,
+      ),
+    );
+
+    const POST = await importPost();
+    await POST(makeReq(VALID_BODY));
+
+    const logged = consoleErr.mock.calls
+      .map((args) => args.map((a) => String(a)).join(" "))
+      .join("\n");
+    expect(logged).toContain("caught exception");
+    expect(logged).not.toContain(VALID_BODY.api_secret);
+    expect(logged).not.toContain(VALID_BODY.passphrase);
+    // The A-10 half: redacting must not answer by dropping the error. The
+    // syscall token is the most valuable thing in this line.
+    expect(logged).toContain("ECONNREFUSED");
+    consoleErr.mockRestore();
+  });
+
+  it("still classifies non-breaker errors by message (the substring cascade is intact)", async () => {
+    // Negative control. If the route ever stopped threading the error object
+    // and started passing something else, the first two tests could pass while
+    // every message-classified path silently collapsed to UNKNOWN.
+    validateKeyMock.mockRejectedValue(new Error("connect ETIMEDOUT 10.0.0.1:443"));
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(502);
+    expect((await res.json()).code).toBe("KEY_NETWORK_TIMEOUT");
+    // Retry-After is breaker-specific — it must NOT appear on other 5xx paths.
+    expect(res.headers.get("Retry-After")).toBeNull();
+    consoleErr.mockRestore();
+  });
+});
+
+/**
+ * ⭐ PHASE 156 / CONNECT-REFACTOR — the post-156 contract of the wizard write,
+ * written down BEFORE the route implements it (plan 04 owns the route).
+ *
+ * ⛔ EVERY CASE BELOW IS EXPECTED TO FAIL UNTIL PLAN 04 LANDS. That is the
+ * point: `route.test.ts:229-238`'s docblock previously asserted that a missing
+ * service key "must degrade to a dark fence and never to a failed submit" — a
+ * sentence that is true of the venue fence and becomes FALSE of the RPC. A test
+ * suite written after the route would have passed on a route that kept a
+ * user-scoped fallback, which is the bug (Pitfall 5).
+ *
+ * ⚠️ WHAT "FAILS FOR THE RIGHT REASON" MEANS HERE, case by case. The route
+ * ALREADY passes `p_user_id: user.id` and the already-normalised
+ * `exchangeNormalized`, so CONNECT-02's and CONNECT-03b's argument claims are
+ * true today and CANNOT red on their own account — the plan says so ("no new
+ * plumbing is needed for the identity — only a new assertion"). What is false
+ * today is WHICH CLIENT carries those arguments, so each case asserts the
+ * client FIRST, with a named message, and the argument claims behind it. In the
+ * red window they red on the client; in the green window every assertion runs.
+ *
+ * ⚠️ Every name carries the literal token `156` so the intended failures can be
+ * grepped out of a failure list rather than inferred from an exit code — a
+ * `node_modules`-less worktree exits 1 exactly as a failing test does.
+ */
+describe("[156 / CONNECT-02 + CONNECT-03] create-with-key — the service-role writer contract", () => {
+  /** A uid the CALLER supplies. It must reach nothing. */
+  const ATTACKER_UID = "beefbeef-beef-4eef-8eef-beefbeefbeef";
+
+  /**
+   * ⚠️ `binance`, spelled out, and it is load-bearing. See the literal-anchor
+   * assertion below for why a body that agrees with itself is not enough.
+   */
+  const BINANCE_BODY = {
+    exchange: "binance",
+    api_key: "binance-key-with-enough-chars",
+    api_secret: "binance-secret-with-enough-chars",
+    label: "156 contract key",
+    wizard_session_id: WIZARD_SESSION_ID,
+  };
+
+  beforeEach(() => {
+    adminClientThrows.value = false;
+    userScopedRpcIsFatal.value = false;
+    rpcCallSites.length = 0;
+    capturedSelects.length = 0;
+    sentryState.captured.length = 0;
+    validateKeyMock.mockReset();
+    encryptKeyMock.mockReset();
+    rpcMock.mockReset();
+    draftLookupMock.mockReset();
+    assetClassUpdateMock.mockClear();
+
+    draftLookupMock.mockResolvedValue({ data: null, error: null });
+    validateKeyMock.mockResolvedValue({
+      valid: true,
+      read_only: true,
+      permissions: ["read"],
+    });
+    encryptKeyMock.mockResolvedValue({
+      api_key_encrypted: "encrypted-blob-base64",
+      api_secret_encrypted: null,
+      passphrase_encrypted: null,
+      dek_encrypted: null,
+      nonce: null,
+      kek_version: 1,
+    });
+    rpcMock.mockResolvedValue({
+      data: [{ strategy_id: STRATEGY_ID, api_key_id: API_KEY_ID }],
+      error: null,
+    });
+  });
+
+  afterEach(() => {
+    adminClientThrows.value = false;
+    userScopedRpcIsFatal.value = false;
+    vi.restoreAllMocks();
+  });
+
+  it("156 — create_wizard_strategy is reached through the ADMIN (service-role) client", async () => {
+    const POST = await importPost();
+    const res = await POST(makeReq(BINANCE_BODY));
+
+    expect(res.status).toBe(200);
+    expect(
+      rpcCallSites,
+      "CONNECT-02: after Phase 156 `authenticated` holds no EXECUTE on " +
+        "create_wizard_strategy, so the ONLY client that can perform this " +
+        "write is createAdminClient(). Recorded call sites:",
+    ).toEqual(["admin"]);
+    const [rpcName] = rpcMock.mock.calls[0];
+    expect(rpcName).toBe("create_wizard_strategy");
+  });
+
+  it("156 — the USER-SCOPED client is never the one that reaches it (armed, not inferred)", async () => {
+    // ⭐ THE ANTI-VACUITY HALF OF THE CASE ABOVE. Arming the user-scoped double
+    // makes the wrong client FATAL rather than merely unrecorded, so a route
+    // that kept the fallback cannot answer 200 by accident and be read as
+    // rewired. This is `156-VALIDATION.md` SC2 Mutation A's oracle: re-point the
+    // `.rpc` receiver at the user-scoped binding and this case reds.
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+    userScopedRpcIsFatal.value = true;
+
+    const POST = await importPost();
+    const res = await POST(makeReq(BINANCE_BODY));
+
+    expect(
+      rpcCallSites.filter((s) => s === "user-scoped"),
+      "CONNECT-02: the user-scoped supabase client must never carry this " +
+        "write. Every entry below is a call that went through the wrong door.",
+    ).toEqual([]);
+    expect(res.status).toBe(200);
+    consoleErr.mockRestore();
+  });
+
+  it('156 — the venue WRITTEN is the venue VALIDATED: three-way identity, anchored on the literal "binance"', async () => {
+    const POST = await importPost();
+    const res = await POST(makeReq(BINANCE_BODY));
+
+    expect(res.status).toBe(200);
+    expect(
+      rpcCallSites,
+      "CONNECT-02: the venue coupling is only a guarantee if the writer is " +
+        "the service-role client — a user-scoped call carries the same three " +
+        "values and proves nothing about the door they went through.",
+    ).toEqual(["admin"]);
+
+    const [, rpcArgs] = rpcMock.mock.calls[0];
+    const pExchange = (rpcArgs as Record<string, unknown>).p_exchange;
+    const validatedVenue = validateKeyMock.mock.calls[0][0];
+    const encryptedVenue = encryptKeyMock.mock.calls[0][0];
+
+    // (a) IDENTITY — the right oracle for the COUPLING claim, because it holds
+    // for every venue and does not have to be re-typed when one is added.
+    expect(
+      pExchange,
+      "CONNECT-02: the value written as p_exchange must be the SAME value the " +
+        "server successfully authenticated against.",
+    ).toBe(validatedVenue);
+    expect(pExchange).toBe(encryptedVenue);
+
+    // (b) LITERAL ANCHOR — ⛔ KEEP BOTH. Identity alone is satisfied by ANY
+    // value so long as all three agree, so a normalisation defect that
+    // corrupted `exchangeNormalized` BEFORE all three consumers would keep (a)
+    // green forever (`156-VALIDATION.md` SC2, Mutation C, which is exactly that
+    // mutation). The literal alone would re-introduce the per-venue brittleness
+    // (a) exists to avoid. Neither half can see what the other sees.
+    expect(
+      pExchange,
+      "CONNECT-02: the body said binance; a shared corruption that agreed with " +
+        "itself would satisfy the identity assertion above and still write the " +
+        "wrong venue.",
+    ).toBe("binance");
+    expect(validatedVenue).toBe("binance");
+  });
+
+  it("156 — p_user_id is withAuth's user.id, and NO request-body field can reach it", async () => {
+    // ⭐ THIS IS NOW THE SOLE OWNERSHIP BINDING. Phase 156 deletes `auth.uid()`
+    // from both RPC bodies (`156-MEASUREMENTS.md` A2: it is NULL under a
+    // service-role client, so any surviving check is a permanent silent no-op),
+    // and the DB therefore stops comparing p_user_id to anything. What used to
+    // be defence-in-depth at the route is the whole control after this phase —
+    // see `156-PATTERNS.md` Finding B, whose re-cut of the composite fence's
+    // Part 3b points at this very case.
+    const POST = await importPost();
+    const res = await POST(
+      makeReq({
+        ...BINANCE_BODY,
+        user_id: ATTACKER_UID,
+        p_user_id: ATTACKER_UID,
+      }),
+    );
+
+    expect(res.status).toBe(200);
+    expect(
+      rpcCallSites,
+      "CONNECT-03b: the ownership binding is only meaningful on the writer " +
+        "that actually holds EXECUTE.",
+    ).toEqual(["admin"]);
+
+    const [, rpcArgs] = rpcMock.mock.calls[0];
+    const args = rpcArgs as Record<string, unknown>;
+    expect(
+      args.p_user_id,
+      "CONNECT-03b: p_user_id must come from withAuth's verified session.",
+    ).toBe(MOCK_USER.id);
+    // ⛔ And the caller's value must not have landed ANYWHERE on the wire — not
+    // in a differently-named parameter, not smuggled into the label. Asserted
+    // over the whole argument object so a parameter added later is covered
+    // without anyone remembering to extend this test.
+    expect(
+      JSON.stringify(args),
+      "CONNECT-03b: a body-supplied uid reached the service-role writer, " +
+        "which has BYPASSRLS — this is the elevation T-156-05 names.",
+    ).not.toContain(ATTACKER_UID);
+  });
+
+  it("156 — a MISSING SUPABASE_SERVICE_ROLE_KEY answers 503 SEAM_MISCONFIGURED and submits NOTHING", async () => {
+    // ⛔ NOT a 200, NOT a 500, and NOT a success by any other path. `binance`
+    // is deliberate: it exercises a venue with NO identity fence, so the only
+    // thing the service key is needed for here is the WRITE. A 200 means a
+    // user-scoped fallback survived somewhere.
+    //
+    // 503 + SEAM_MISCONFIGURED is the code the two wizard routes ALREADY emit
+    // for a server-side misconfiguration (route.ts:504-511, wizardErrors.ts:430
+    // and :2166-2183, ratelimit.ts:325-326). ⛔ No new member is minted into the
+    // wizard code union — `EXPECTED_TABLE_SIZE` pins it and PARITY-05's ledger
+    // polices it.
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+    adminClientThrows.value = true;
+
+    const POST = await importPost();
+    const res = await POST(makeReq(BINANCE_BODY));
+
+    expect(res.status).toBe(503);
+    const body = await res.json();
+    expect(body.code).toBe("SEAM_MISCONFIGURED");
+    expect(
+      rpcMock,
+      "T-156-07: the copy for SEAM_MISCONFIGURED promises 'nothing was " +
+        "submitted and nothing was changed'. That must be literally true.",
+    ).not.toHaveBeenCalled();
+    expect(rpcCallSites).toEqual([]);
+    consoleErr.mockRestore();
+  });
+});
+
+/**
  * H-0306 — auth boundary. The describe blocks above mock @/lib/api/withAuth
  * to bypass auth entirely, so the unauthed branch was never executed in CI.
  * Per Rule 9 the auth boundary is the single most important invariant on a
@@ -1008,6 +3082,1705 @@ describe("POST /api/strategies/create-with-key — unmocked withAuth boundary (H
     // The handler body never executed: no validation, no encryption, no RPC.
     expect(validateKeyMock).not.toHaveBeenCalled();
     expect(encryptKeyMock).not.toHaveBeenCalled();
+    expect(rpcMock).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * 140.3-13b / SEAMUX-08 — this route captures to Sentry, under the ONE policy
+ * written out in `src/app/api/admin/match/eval/route.ts`.
+ *
+ * ⚠️ THE BASELINE WAS ZERO, measured on the untouched tree:
+ * `grep -vE '^\s*(//|\*)' route.ts | grep -c captureToSentry` read **0** here.
+ * CONTEXT named this route and `composite/add-key` as the two that "do not
+ * import Sentry"; the real class was **9 of 15**. `140.3-13a` closed four,
+ * this plan closes five, and these two — the ones everybody knew about — were
+ * deliberately left to the second half so the pair everyone names would not be
+ * the only pair delivered.
+ *
+ * ⚠️ WHAT MUST NOT MOVE. This route's breaker cell is "the best in the audit"
+ * (CONTEXT) and is a TEMPLATE, not a fix target. Its three properties — the
+ * caught VALUE reaching the shared classifier, the status derived from the
+ * classifier, and the conditional `Retry-After` — are re-pinned by the negative
+ * case below, so an observability edit that disturbed any of them would redden
+ * here as well as in the SEAM-04 block above.
+ */
+describe("[140.3-13b / SEAMUX-08] POST /api/strategies/create-with-key — Sentry capture policy", () => {
+  let consoleErr: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    // ⚠️ THE H-0306 BLOCK ABOVE LEAKS. It registers `vi.doMock` for
+    // `@/lib/api/withAuth` (the REAL one) and for `@/lib/supabase/server` (a
+    // client with NO authenticated user), and a `doMock` registration OUTLIVES
+    // the `vi.resetModules()` in its own afterEach — reset clears the module
+    // registry, not the mock registry. Every case below re-imports `./route`,
+    // so without re-registering the file-top factories here they would all
+    // answer 401 and each "NEGATIVE: … is never captured" case would pass
+    // VACUOUSLY: no capture, because the handler never ran at all. Found by
+    // measuring, not by reasoning — the first run was 10 × 401.
+    vi.resetModules();
+    vi.doMock("@/lib/api/withAuth", () => ({
+      withAuth:
+        (h: (req: NextRequest, user: typeof MOCK_USER) => unknown) =>
+        (req: NextRequest) =>
+          h(req, MOCK_USER),
+    }));
+    vi.doMock("@/lib/supabase/server", () => ({
+      createClient: async () => ({
+        rpc: (...args: unknown[]) => rpcMock(...args),
+        from: () => ({
+          select: () => ({
+            eq: () => ({ eq: () => ({ maybeSingle: () => draftLookupMock() }) }),
+          }),
+          update: (...args: unknown[]) => assetClassUpdateMock(...args),
+        }),
+      }),
+    }));
+
+    validateKeyMock.mockReset();
+    encryptKeyMock.mockReset();
+    rpcMock.mockReset();
+    assetClassUpdateMock.mockClear();
+    draftLookupMock.mockClear();
+    sentryState.captured.length = 0;
+    consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    validateKeyMock.mockResolvedValue({
+      valid: true,
+      read_only: true,
+      permissions: ["read"],
+    });
+    encryptKeyMock.mockResolvedValue({
+      api_key_encrypted: "encrypted-blob-base64",
+      api_secret_encrypted: null,
+      passphrase_encrypted: null,
+      dek_encrypted: null,
+      nonce: null,
+      kek_version: 1,
+    });
+    rpcMock.mockResolvedValue({
+      data: [{ strategy_id: STRATEGY_ID, api_key_id: API_KEY_ID }],
+      error: null,
+    });
+  });
+
+  afterEach(() => {
+    consoleErr.mockRestore();
+  });
+
+  /** Wait for `captureToSentry`'s lazy `import(...).then(...)` chain. */
+  async function nextCapture() {
+    await vi.waitFor(() =>
+      expect(
+        sentryState.captured.length,
+        "nothing was captured — OUR_DEFECT_KEY_ERROR_CODES is the whole population this route reports, and it is the only place an our-defect key-connect failure is ever reported",
+      ).toBeGreaterThan(0),
+    );
+    return sentryState.captured[sentryState.captured.length - 1];
+  }
+
+  /** Assert no capture happened, allowing the lazy chain time to have fired. */
+  async function expectNoCapture() {
+    await new Promise((r) => setTimeout(r, 0));
+    expect(sentryState.captured).toEqual([]);
+  }
+
+  it("POSITIVE: an UNCLASSIFIED throw IS captured, with this route's tags", async () => {
+    // A message matching NO branch of classifyKeyValidationError's cascade —
+    // the terminal `{code:"UNKNOWN", status:500}` verdict.
+    validateKeyMock.mockRejectedValue(new Error("connect ECONNREFUSED 10.0.0.5:8002"));
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+    expect(res.status).toBe(500);
+    expect((await res.json()).code).toBe("UNKNOWN");
+
+    const { err, options } = await nextCapture();
+    expect(options.tags?.surface).toBe("strategies-create-with-key");
+    expect(options.tags?.step).toBe("unclassified-key-error");
+    // The Error TYPE survives — `captureToSentry` rebuilds an Error rather than
+    // stringifying, so Sentry keeps its grouping and stack.
+    expect(err).toBeInstanceOf(Error);
+    expect(options.extra?.exchange).toBe("okx");
+  });
+
+  it("M78b GUARD: the RAW per-request api_key / api_secret / passphrase never reach Sentry — and ECONNREFUSED survives", async () => {
+    // ⚠️ THE ASSERTION IS AGAINST THE BODY VALUES, NOT AN ENV TOKEN. That is
+    // the whole lesson of 140.3-13a's M78b: dropping `secrets` leaves the
+    // env-derived redaction working, so a test written against
+    // INTERNAL_API_TOKEN stays GREEN while the caller's live exchange
+    // credentials ship verbatim to a third party.
+    validateKeyMock.mockRejectedValue(
+      new Error(
+        `connect ECONNREFUSED 10.0.0.5:8002 ` +
+          `(sent api_key=${VALID_BODY.api_key} api_secret=${VALID_BODY.api_secret} ` +
+          `passphrase=${VALID_BODY.passphrase})`,
+      ),
+    );
+
+    const POST = await importPost();
+    await POST(makeReq(VALID_BODY));
+
+    const message = ((await nextCapture()).err as Error).message;
+    expect(
+      message,
+      "the caller's RAW exchange api_key was dispatched to Sentry — undici inlines request material into err.message (TRAP-1)",
+    ).not.toContain(VALID_BODY.api_key);
+    expect(
+      message,
+      "the caller's RAW exchange api_secret was dispatched to Sentry (TRAP-1)",
+    ).not.toContain(VALID_BODY.api_secret);
+    expect(
+      message,
+      "the caller's RAW exchange passphrase was dispatched to Sentry (TRAP-1)",
+    ).not.toContain(VALID_BODY.passphrase);
+    // OVER-redaction: destroying the syscall token replaces one incident with
+    // two, and a one-sided test ships that state green.
+    expect(
+      message,
+      "the syscall token was eaten by the redactor — ECONNREFUSED is the most valuable thing in a transport line",
+    ).toContain("ECONNREFUSED");
+  });
+
+  it("POSITIVE: an encrypt 2xx with no api_key_encrypted IS captured as a CONTRACT violation", async () => {
+    encryptKeyMock.mockResolvedValue({
+      api_secret_encrypted: null,
+      passphrase_encrypted: null,
+      kek_version: 1,
+    });
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+    expect(res.status).toBe(502);
+
+    const { err, options } = await nextCapture();
+    expect(options.tags?.step).toBe("encrypt-contract");
+    // Only the KEY NAMES of the ciphertext payload — never its values.
+    expect(options.extra?.returned_keys).toEqual([
+      "api_secret_encrypted",
+      "passphrase_encrypted",
+      "kek_version",
+    ]);
+    expect((err as Error).message).toContain("api_key_encrypted");
+    // The RPC never ran, so nothing was persisted on a broken contract.
+    expect(rpcMock).not.toHaveBeenCalled();
+  });
+
+  it("POSITIVE: an UNRECOGNISED RPC failure IS captured (23505 / 42501 are recognised and are not)", async () => {
+    rpcMock.mockResolvedValue({
+      data: null,
+      error: { code: "57014", message: "canceling statement due to statement timeout" },
+    });
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+    expect(res.status).toBe(500);
+
+    const { options } = await nextCapture();
+    expect(options.tags?.step).toBe("draft-rpc-error");
+    expect(options.extra?.pg_code).toBe("57014");
+  });
+
+  it("POSITIVE: an RPC that SUCCEEDS with no usable row IS captured as a CONTRACT violation", async () => {
+    rpcMock.mockResolvedValue({ data: [], error: null });
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+    expect(res.status).toBe(500);
+
+    const { options } = await nextCapture();
+    expect(options.tags?.step).toBe("draft-rpc-contract");
+    expect(options.extra?.row_present).toBe(false);
+  });
+
+  it("NEGATIVE: a breaker short-circuit is NEVER captured — and the breaker cell is UNDISTURBED", async () => {
+    const { CircuitOpenError } = await import("@/lib/seam-errors");
+    validateKeyMock.mockRejectedValue(new CircuitOpenError(42));
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    // ⚠️ THE POSITIVE HALF re-pins all THREE properties of the breaker cell the
+    // plan forbids disturbing: the caught VALUE reached the shared classifier
+    // (only a type check can yield SERVICE_UNAVAILABLE_RETRY — a stringified
+    // error would land on UNKNOWN/500), the STATUS came from the classifier,
+    // and the conditional `Retry-After` carries the breaker's own TTL.
+    expect(res.status).toBe(503);
+    expect((await res.json()).code).toBe("SERVICE_UNAVAILABLE_RETRY");
+    expect(res.headers.get("Retry-After")).toBe("42");
+    await expectNoCapture();
+  });
+
+  it("NEGATIVE: a classified CALLER FAULT is never captured (a wrong secret is not our defect)", async () => {
+    validateKeyMock.mockRejectedValue(new Error("Invalid signature for request"));
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe("KEY_INVALID_SIGNATURE");
+    await expectNoCapture();
+  });
+
+  it("NEGATIVE: a classified upstream TIMEOUT is never captured (60s cold starts are documented as normal)", async () => {
+    validateKeyMock.mockRejectedValue(new Error("request timeout reaching analytics"));
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+    expect(res.status).toBe(502);
+    expect((await res.json()).code).toBe("KEY_NETWORK_TIMEOUT");
+    await expectNoCapture();
+  });
+
+  it("NEGATIVE: a duplicate-draft 409 and a permission-denied 403 are recognised RPC outcomes, not faults", async () => {
+    rpcMock.mockResolvedValue({ data: null, error: { code: "23505", message: "dup" } });
+    const POST = await importPost();
+    const dup = await POST(makeReq(VALID_BODY));
+    expect(dup.status).toBe(409);
+    await expectNoCapture();
+
+    rpcMock.mockResolvedValue({ data: null, error: { code: "42501", message: "denied" } });
+    const denied = await POST(makeReq(VALID_BODY));
+    expect(denied.status).toBe(403);
+    await expectNoCapture();
+  });
+
+  it("NEGATIVE: a 400 input rejection is never captured, and never reaches the seam at all", async () => {
+    const POST = await importPost();
+    const res = await POST(makeReq({ ...VALID_BODY, api_key: "short" }));
+    expect(res.status).toBe(400);
+    expect(validateKeyMock).not.toHaveBeenCalled();
+    await expectNoCapture();
+  });
+
+  /**
+   * [153.7-03 / WIZFORM-02-CLASS] the mt5-gateway family, ON THIS ROUTE.
+   *
+   * ⚠️ WHY A ROUTE-LOCAL TEST FOR A FIX THAT IS NOT ROUTE-LOCAL. The verdict
+   * lives in ONE row of `VENUE_WIRE_CODE_TO_VERDICT` in shared
+   * `wizardErrors.ts`, so it reached this route and `composite/add-key` in the
+   * same commit — there was never a one-route half-fix to catch. What CAN
+   * still happen is a future route-local change that quietly re-opens the path:
+   * the add-key catch's own comment names the live example, pre-stringifying
+   * the caught value before classification, which sends a breaker trip to the
+   * terminal UNKNOWN/500 instead of the retryable 503. A shared-table test
+   * cannot see that; only a test that runs THIS handler can. Fixing one path
+   * of a byte-identical pair is this milestone's single most repeated mistake,
+   * so both routes carry the alarm and the twin case is deliberately written
+   * to the same shape.
+   *
+   * The mock reproduces what the seam really throws: the wire code on
+   * `seamCode` and the emitter's own `detail=` sentence as the message, both
+   * read from `_connect_and_probe` in the exchange router.
+   */
+  it("[153.7-03] MT5_GATEWAY_UNREACHABLE renders SERVICE_UNREACHABLE/503, and is NOT captured as unclassified", async () => {
+    validateKeyMock.mockRejectedValue(
+      Object.assign(
+        new Error("The MetaTrader gateway is not responding. Try again shortly."),
+        {
+          name: "AnalyticsUpstreamError",
+          status: 503,
+          seamCode: "MT5_GATEWAY_UNREACHABLE",
+          dependency: "mt5-gateway",
+        },
+      ),
+    );
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(503);
+    const json = await res.json();
+    expect(json.code).toBe("SERVICE_UNREACHABLE");
+    // The whole point, stated as its own assertion so the failure names it.
+    expect(json.code).not.toBe("UNKNOWN");
+    // ⛔ NOT `SERVICE_UNAVAILABLE_RETRY`. Its copy says nothing was submitted —
+    // knowable for a breaker that DECLINED to send, false-by-construction for a
+    // socket connect that WAS attempted and never answered. That trap is
+    // written into the shared table beside the row this asserts.
+    expect(json.code).not.toBe("SERVICE_UNAVAILABLE_RETRY");
+    // Fail-closed: classified before any encryption or DB insert.
+    expect(encryptKeyMock).not.toHaveBeenCalled();
+    expect(rpcMock).not.toHaveBeenCalled();
+    // A classified verdict that is NOT our defect must not fire the capture, or
+    // the noise this route was quiet about comes back for a failure we now
+    // answer precisely. ⚠️ "Classified" is no longer the predicate — see the
+    // OUR-DEFECT case below, which is the other half of this pair.
+    await expectNoCapture();
+  });
+
+  /**
+   * ⭐ 153.7 review WR-02 — CLASSIFYING A FAULT BETTER IS NOT A REASON TO STOP
+   * HEARING ABOUT IT.
+   *
+   * Until 153.7-02, a seam throw carrying `seamCode: "INTERNAL"` fell off the
+   * classifier's cascade to `UNKNOWN` and PAGED. That plan gave it a verdict row
+   * resolving to `SEAM_INTERNAL_FAULT` — an unambiguous improvement for the user
+   * — and, as a side effect nobody wrote down, moved it out of the
+   * `code === "UNKNOWN"` capture arm. `INTERNAL` is `validate_key_permissions`'
+   * bare `except Exception` escape: the single most page-worthy thing this seam
+   * can answer, and it went silent on the Next side in a commit whose test
+   * asserted the silence.
+   *
+   * ⛔ THE ASSERTION IS THE CAPTURE, NOT THE CODE. The verdict half is already
+   * covered by the shared-table replay in `wizardErrors.test.ts`; what only a
+   * route test can see is whether THIS handler still reports it. Both are
+   * asserted here so a future re-narrowing of the predicate reds by name rather
+   * than by an absence nobody is looking at.
+   */
+  it("[WR-02] an INTERNAL seam fault renders SEAM_INTERNAL_FAULT/500 AND IS STILL captured — it is our defect", async () => {
+    validateKeyMock.mockRejectedValue(
+      Object.assign(
+        new Error(
+          "Something went wrong on our side while checking this key. Nothing is wrong with your key.",
+        ),
+        {
+          name: "AnalyticsUpstreamError",
+          status: 500,
+          seamCode: "INTERNAL",
+        },
+      ),
+    );
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(500);
+    const json = await res.json();
+    // The user still gets the honest card, not "we could not classify this".
+    expect(json.code).toBe("SEAM_INTERNAL_FAULT");
+    expect(json.code).not.toBe("UNKNOWN");
+    // Fail-closed: no key was stored, which is what the card promises.
+    expect(encryptKeyMock).not.toHaveBeenCalled();
+    expect(rpcMock).not.toHaveBeenCalled();
+
+    // ⭐ THE HALF THAT REGRESSED. A recognised OUR-DEFECT verdict must still
+    // reach Sentry with this route's tags.
+    const { err, options } = await nextCapture();
+    expect(options.tags?.surface).toBe("strategies-create-with-key");
+    expect(options.tags?.step).toBe("unclassified-key-error");
+    expect(options.extra?.exchange).toBe("okx");
+    expect(err).toBeInstanceOf(Error);
+  });
+  /**
+   * 164.6.5 review round 1 / WR-06 + SFH-08. A wedged gateway terminal is the
+   * SHARED terminal every MT5 client validates against, and its card tells the
+   * user "tell us" — so it must reach an operator. Before this row the
+   * recognised verdict was outside `OUR_DEFECT_KEY_ERROR_CODES` and this route
+   * paged nobody, the same silence WR-02 above removed for `INTERNAL`.
+   * The mock carries what the seam throws: the wire code on `seamCode`.
+   */
+  it("[164.6.5 WR-06] a wedged MT5 terminal renders KEY_MT5_TERMINAL_UNRESPONSIVE/500 AND IS captured — it is our terminal", async () => {
+    validateKeyMock.mockRejectedValue(
+      Object.assign(
+        new Error("The MetaTrader terminal we use to check this key is not answering."),
+        {
+          name: "AnalyticsUpstreamError",
+          status: 500,
+          seamCode: "MT5_TERMINAL_UNRESPONSIVE",
+          dependency: "mt5-gateway",
+        },
+      ),
+    );
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(500);
+    const json = await res.json();
+    expect(json.code).toBe("KEY_MT5_TERMINAL_UNRESPONSIVE");
+    expect(encryptKeyMock).not.toHaveBeenCalled();
+    expect(rpcMock).not.toHaveBeenCalled();
+
+    const { options } = await nextCapture();
+    expect(options.tags?.surface).toBe("strategies-create-with-key");
+    expect(options.tags?.step).toBe("unclassified-key-error");
+  });
+});
+
+/**
+ * Phase 142.2-07 / MT5-04 (D-05) — EVERY REJECTION SITE, ONE HONEST CODE EACH.
+ *
+ * ⚠️ WHAT THIS REPLACES, AND WHY IT IS A TABLE. This route answered
+ * `KEY_INVALID_FORMAT` at ALL TWELVE input-validation guards. Eleven of them
+ * were not format failures — a malformed body, an unsupported venue, a missing
+ * login, two venue switches, a missing investor password, a missing OKX
+ * passphrase, a missing session id and three length caps — and every one
+ * rendered "This does not look like a valid API key for the selected exchange"
+ * with Binance hex-length advice. A founder who submitted a COMPLETE MT5 form
+ * was told their key format was wrong.
+ *
+ * ⚠️ THE ARM THE FOUNDER HIT IS NOW UNREACHABLE. MT5-01 set the server-side
+ * switch, so the mt5 arm can no longer fire in production. It is covered here
+ * anyway, and the row says so: a fix aimed only at the instance would have
+ * repaired a line that cannot fire while eleven siblings kept lying. The CLASS
+ * is the subject, not the instance.
+ *
+ * THE COUNT IS 12, NOT 14. `grep -c KEY_INVALID_FORMAT` on the route returned 14
+ * before the split; `grep -c 'code: "KEY_INVALID_FORMAT"'` returned 12. The
+ * delta is two COMMENT mentions of the code. The table below is the emitting
+ * population, one row per guard, and the same 12 is pinned from disk in
+ * `wizardErrors.invariant.test.ts`.
+ *
+ * The `error` string on every row is the one that shipped BEFORE this plan and
+ * is asserted verbatim: only the `code` literal was allowed to move. A row whose
+ * error string changed would mean the guard itself was edited, which is exactly
+ * what this plan is not allowed to do (V5 — changing validation posture under
+ * cover of a copy fix).
+ */
+describe("[142.2-07 / MT5-04] create-with-key — all 12 rejection sites, honest codes", () => {
+  const LONG = "x".repeat(513);
+
+  beforeEach(() => {
+    validateKeyMock.mockReset();
+    encryptKeyMock.mockReset();
+    rpcMock.mockReset();
+    draftLookupMock.mockReset();
+    draftLookupMock.mockResolvedValue({ data: null, error: null });
+    delete process.env.SFOX_ENABLED;
+    delete process.env.MT5_ENABLED;
+  });
+
+  afterEach(() => {
+    delete process.env.SFOX_ENABLED;
+    delete process.env.MT5_ENABLED;
+  });
+
+  /**
+   * HAND-TYPED, one row per emitting guard, in source order. Deliberately NOT
+   * generated from the route: an expectation derived from its own subject
+   * cannot fail when the subject changes.
+   */
+  const SITES: ReadonlyArray<{
+    guard: string;
+    body: unknown;
+    env?: Record<string, string>;
+    code: string;
+    error: string;
+  }> = [
+    {
+      guard: "body is not an object",
+      body: null,
+      code: "KEY_MISSING_REQUIRED_FIELD",
+      error: "Invalid request body",
+    },
+    {
+      guard: "exchange is not one we support",
+      body: { ...VALID_BODY, exchange: "notanexchange" },
+      code: "KEY_UNSUPPORTED_VENUE",
+      error: "Unsupported exchange",
+    },
+    {
+      guard: "api_key absent",
+      body: {
+        exchange: "binance",
+        api_secret: "ccxt-secret-enough",
+        wizard_session_id: WIZARD_SESSION_ID,
+      },
+      code: "KEY_MISSING_REQUIRED_FIELD",
+      error: "api_key is required",
+    },
+    {
+      guard: "sfox venue switch is off",
+      body: {
+        exchange: "sfox",
+        api_key: "sfox-bearer-token-value",
+        wizard_session_id: WIZARD_SESSION_ID,
+      },
+      code: "KEY_VENUE_NOT_ENABLED",
+      error: "sFOX integration is not yet available.",
+    },
+    {
+      // UNREACHABLE IN PRODUCTION since MT5-01 set the server switch. Covered
+      // because the CLASS is the subject: this is the arm the founder hit, and
+      // a split that skipped it would leave the class open at the very site
+      // that proved it was broken.
+      guard: "mt5 venue switch is off (unreachable post-MT5-01)",
+      body: {
+        exchange: "mt5",
+        api_key: "500123456",
+        api_secret: "investor-password-123",
+        passphrase: "MetaQuotes-Demo",
+        wizard_session_id: WIZARD_SESSION_ID,
+      },
+      code: "KEY_VENUE_NOT_ENABLED",
+      error: "MT5 integration is not yet available.",
+    },
+    {
+      guard: "mt5 investor password absent",
+      body: {
+        exchange: "mt5",
+        api_key: "500123456",
+        passphrase: "MetaQuotes-Demo",
+        wizard_session_id: WIZARD_SESSION_ID,
+      },
+      env: { MT5_ENABLED: "true" },
+      code: "KEY_MISSING_REQUIRED_FIELD",
+      error: "api_secret is required",
+    },
+    {
+      // ⭐ THE ONE GENUINE FORMAT FAILURE. The only guard of the twelve that
+      // judges the SHAPE of a value, and the reason KEY_INVALID_FORMAT's copy
+      // (Binance secrets are 64 hex characters, etc.) is true again now that
+      // the other eleven have moved off it.
+      guard: "ccxt api_secret shorter than 8 — THE format failure",
+      body: {
+        exchange: "binance",
+        api_key: "ccxt-key-with-enough-chars",
+        api_secret: "short77",
+        wizard_session_id: WIZARD_SESSION_ID,
+      },
+      code: "KEY_INVALID_FORMAT",
+      error: "api_secret is required",
+    },
+    {
+      guard: "OKX passphrase absent",
+      body: {
+        exchange: "okx",
+        api_key: "okx-key-with-enough-chars",
+        api_secret: "okx-secret-with-enough-chars",
+        wizard_session_id: WIZARD_SESSION_ID,
+      },
+      code: "KEY_MISSING_REQUIRED_FIELD",
+      error: "OKX requires a passphrase",
+    },
+    {
+      guard: "wizard_session_id is not a uuid",
+      body: { ...VALID_BODY, wizard_session_id: "not-a-uuid" },
+      code: "KEY_MISSING_REQUIRED_FIELD",
+      error: "wizard_session_id required",
+    },
+    {
+      guard: "api_secret over the 512 cap",
+      body: { ...VALID_BODY, api_secret: LONG },
+      code: "KEY_INPUT_TOO_LONG",
+      error: "Key or secret too long",
+    },
+    {
+      guard: "passphrase over the 512 cap",
+      body: { ...VALID_BODY, passphrase: LONG },
+      code: "KEY_INPUT_TOO_LONG",
+      error: "Passphrase too long",
+    },
+    {
+      guard: "label over the 100 cap",
+      body: { ...VALID_BODY, label: "L".repeat(101) },
+      code: "KEY_INPUT_TOO_LONG",
+      error: "Label too long",
+    },
+  ];
+
+  it("the table covers every emitting guard — hand-typed count, not a derivation", () => {
+    // Pinned as the LITERAL 12. Comparing `SITES.length` to itself is an
+    // expectation that reads its own subject and can never fail, and 14 would
+    // pin the raw-grep fiction that counted two comment mentions as emitters.
+    expect(SITES.length).toBe(12);
+  });
+
+  it.each(SITES)("$guard -> 400 $code", async ({ body, env, code, error }) => {
+    for (const [k, v] of Object.entries(env ?? {})) process.env[k] = v;
+
+    const POST = await importPost();
+    const res = await POST(makeReq(body));
+
+    expect(res.status).toBe(400);
+    const json = await res.json();
+    expect(json.code).toBe(code);
+    // The error string is the PRE-SPLIT one, verbatim. Only the code moved.
+    expect(json.error).toBe(error);
+    // Every one of these rejects BEFORE the live probe, which is what makes the
+    // new copy's "nothing was sent to the exchange" claim observable rather
+    // than asserted.
+    expect(validateKeyMock).not.toHaveBeenCalled();
+    expect(encryptKeyMock).not.toHaveBeenCalled();
+    expect(rpcMock).not.toHaveBeenCalled();
+  });
+
+  it("KEY_INVALID_FORMAT is left on exactly ONE guard — the negative pin", () => {
+    const formatRows = SITES.filter((s) => s.code === "KEY_INVALID_FORMAT");
+    expect(formatRows.map((s) => s.guard)).toEqual([
+      "ccxt api_secret shorter than 8 — THE format failure",
+    ]);
+  });
+
+  it("the split is real — five distinct codes where there used to be one", () => {
+    // The defect in one line: before the split this set had exactly ONE member
+    // for twelve distinct causes. A regression that re-merged any pair shrinks
+    // it, and the failure names which code disappeared.
+    const distinct = new Set(SITES.map((s) => s.code));
+    expect([...distinct].sort()).toEqual([
+      "KEY_INPUT_TOO_LONG",
+      "KEY_INVALID_FORMAT",
+      "KEY_MISSING_REQUIRED_FIELD",
+      "KEY_UNSUPPORTED_VENUE",
+      "KEY_VENUE_NOT_ENABLED",
+    ]);
+  });
+});
+
+/**
+ * ⭐ 161-06 / WIZERR-05 — THE KEY ROUTE RELAYS THE SERVER'S OWN WAIT.
+ *
+ * The wait is born in `RETRY_AFTER_SECONDS` on the Python side, rides a
+ * `Retry-After` header to the seam, and — since 161-06 — survives it on
+ * `AnalyticsUpstreamError.retryAfterSeconds`. This catch is the last hop before
+ * the browser. Until this plan it dropped the value on the floor: the ternary
+ * below stamped a header for a `CircuitOpenError` and for nothing else, so a
+ * gateway restart that told us exactly how long to wait reached the user as a
+ * bare "try again shortly" with no duration and no machine-readable wait.
+ *
+ * ⚠️ DUCK-TYPED ON PURPOSE, AND THE TESTS MUST MATCH. Every route test that
+ * mocks the seam client wholesale does `vi.mock("@/lib/analytics-client", …)`
+ * with a factory exporting only `validateKey`/`encryptKey`, so
+ * `AnalyticsUpstreamError` is `undefined` inside this suite and an `instanceof`
+ * in the route would THROW from inside a catch block. `wizardErrors.ts` records
+ * that reasoning for `seamCode` at length; `retryAfterSeconds` is read the same
+ * way, with `typeof`, and these mocks reproduce the real thrown shape.
+ *
+ * ⛔ TRAP-3, PINNED THREE WAYS. Absence must reach the browser as ABSENCE. The
+ * `null` case asserts the header is not merely empty but MISSING, and the `0`
+ * case exists because zero is the specific lie: it is not "no wait", it is an
+ * instruction to retry immediately — a duration nobody advertised and the
+ * thundering-herd shape B20 exists to stop.
+ *
+ * Each title names its route. The requirement says BOTH key-route catches, and
+ * `composite/add-key` carries the mirror image of this block; an aggregate
+ * assertion over the pair would let either one regress in silence.
+ */
+describe("[161-06 / WIZERR-05] create-with-key — the Retry-After relay", () => {
+  beforeEach(() => {
+    validateKeyMock.mockReset();
+    encryptKeyMock.mockReset();
+    rpcMock.mockReset();
+    assetClassUpdateMock.mockClear();
+
+    validateKeyMock.mockResolvedValue({
+      valid: true,
+      read_only: true,
+      permissions: ["read"],
+    });
+    encryptKeyMock.mockResolvedValue({
+      api_key_encrypted: "encrypted-blob-base64",
+      api_secret_encrypted: null,
+      passphrase_encrypted: null,
+      dek_encrypted: null,
+      nonce: null,
+      kek_version: 1,
+    });
+    rpcMock.mockResolvedValue({
+      data: [{ strategy_id: STRATEGY_ID, api_key_id: API_KEY_ID }],
+      error: null,
+    });
+  });
+
+  /** The real MT5 503 as the seam now throws it, wait included. */
+  function seamUnreachable(retryAfterSeconds: number | null) {
+    return Object.assign(
+      new Error("The MetaTrader gateway is not responding. Try again shortly."),
+      {
+        name: "AnalyticsUpstreamError",
+        status: 503,
+        seamCode: "MT5_GATEWAY_UNREACHABLE",
+        dependency: "mt5-gateway",
+        retryAfterSeconds,
+      },
+    );
+  }
+
+  it("[create-with-key] a seam 503 carrying a wait relays that exact value", async () => {
+    validateKeyMock.mockRejectedValue(seamUnreachable(30));
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    // ⚠️ ARM PROOF FIRST. Asserting the header without this would go green
+    // against a fixture that never reached the catch at all.
+    expect(res.status).toBe(503);
+    expect((await res.json()).code).toBe("SERVICE_UNREACHABLE");
+
+    expect(
+      res.headers.get("Retry-After"),
+      "The server told us how long to wait and this route is the last hop " +
+        "that can pass it on. 30 is RETRY_AFTER_SECONDS['mt5-gateway'] — not " +
+        "a number this route may choose, round, or clamp.",
+    ).toBe("30");
+    consoleErr.mockRestore();
+  });
+
+  it("[create-with-key] a seam 503 with NO advertised wait sends NO header (TRAP-3)", async () => {
+    validateKeyMock.mockRejectedValue(seamUnreachable(null));
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    // Same arm, same verdict — the ONLY difference between this case and the
+    // one above is what the upstream advertised.
+    expect(res.status).toBe(503);
+    expect((await res.json()).code).toBe("SERVICE_UNREACHABLE");
+
+    expect(
+      res.headers.get("Retry-After"),
+      "ABSENT, not empty and not zero. `Headers.get` answers null only when " +
+        "the header was never set; an empty-string stamp would satisfy a " +
+        "falsy check and still put a header on the wire the upstream never " +
+        "authorised.",
+    ).toBeNull();
+    expect(res.headers.get("Retry-After")).not.toBe("0");
+    expect(res.headers.get("Retry-After")).not.toBe("");
+    consoleErr.mockRestore();
+  });
+
+  it("[create-with-key] a zero wait is not a wait — it is omitted, never stamped", async () => {
+    // Zero cannot reach here from our own seam (`parseRetryAfterSeconds`
+    // returns strictly positive or null, and `error_contract._validate` rejects
+    // a non-positive `retry_after` at the raise site). The guard is against the
+    // OTHER producers of this shape — a future caller, a test double, a
+    // rewritten header from an intervening proxy — because "cannot happen" is
+    // not a property this catch can verify about the value it was handed.
+    validateKeyMock.mockRejectedValue(seamUnreachable(0));
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(503);
+    expect(res.headers.get("Retry-After")).toBeNull();
+    consoleErr.mockRestore();
+  });
+
+  /**
+   * ⭐ 161-REVIEW / WR-01 — A FRACTION IS NOT A `delta-seconds`.
+   *
+   * `parseRetryAfterSeconds` returns `Number(raw)` for the delta-seconds form,
+   * so a `Retry-After: 0.5` written by ANY hop on the path — a proxy, a CDN, a
+   * misconfigured gateway — crossed the seam as `0.5` and was relayed verbatim
+   * onto OUR OWN response. `Number.isFinite` admits it; RFC-9110 does not, and
+   * the wizard rendered it as "Try again in 0.5s".
+   *
+   * ⚠️ THE VALUE'S PROVENANCE IS THE ARGUMENT. This is not a defensive check
+   * against our own service: it is a check on an UPSTREAM RESPONSE HEADER,
+   * which is a value we do not author. `CircuitOpenError` has carried
+   * `Number.isInteger` at its constructor since 140.2-11 for exactly this
+   * reason — "it is forwarded as a `Retry-After` HEADER by both seam clients" —
+   * and 161-06 created the second wire-forwarded value without inheriting it.
+   */
+  it("[create-with-key] a FRACTIONAL wait is not a delta-seconds — it is omitted, never relayed", async () => {
+    validateKeyMock.mockRejectedValue(seamUnreachable(0.5));
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    // ⚠️ ARM PROOF FIRST — otherwise a fixture that returned before the catch
+    // would satisfy the null assertion below while proving nothing.
+    expect(res.status).toBe(503);
+    expect((await res.json()).code).toBe("SERVICE_UNREACHABLE");
+
+    expect(
+      res.headers.get("Retry-After"),
+      "0.5 is not an RFC-9110 delta-seconds. Relaying it puts a malformed " +
+        "header on our own wire and renders to the user as 'Try again in " +
+        "0.5s' — a duration we invented by forwarding one nobody may send.",
+    ).toBeNull();
+    // …and specifically NOT the two shapes a partial fix would produce: the
+    // raw fraction, or a silent round to a number the upstream never sent.
+    expect(res.headers.get("Retry-After")).not.toBe("0.5");
+    expect(res.headers.get("Retry-After")).not.toBe("1");
+    consoleErr.mockRestore();
+  });
+
+  /**
+   * ⭐ 161-REVIEW / WR-01, the BREAKER half. TRAP-3's absence rule is stated for
+   * BOTH sources, and until this the breaker branch stamped
+   * `String(err.retryAfterS)` unconditionally — INHERITING the rule from
+   * `CircuitOpenError`'s constructor rather than applying it. That constructor
+   * rejects `retryAfterS < 0` and therefore ACCEPTS `0`, so a zero cooldown
+   * reached the wire as `Retry-After: 0` — "retry immediately", the ~0 ms
+   * hot-retry B20's parser exists to make unreachable.
+   */
+  it("[create-with-key] a ZERO breaker cooldown sends NO header — the absence rule binds both branches", async () => {
+    const { CircuitOpenError } = await import("@/lib/seam-errors");
+    // Constructed, not hand-shaped: `new CircuitOpenError(0)` is a value the
+    // class genuinely permits, which is what makes this a reachable state
+    // rather than a test-only fiction.
+    const tripped = new CircuitOpenError(0);
+    expect(tripped.retryAfterS).toBe(0);
+
+    validateKeyMock.mockRejectedValue(tripped);
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect((await res.json()).code).toBe("SERVICE_UNAVAILABLE_RETRY");
+    expect(
+      res.headers.get("Retry-After"),
+      "The breaker branch must ENFORCE TRAP-3, not inherit it. `0` is not a " +
+        "wait — it is an instruction to retry immediately.",
+    ).toBeNull();
+    expect(res.headers.get("Retry-After")).not.toBe("0");
+    consoleErr.mockRestore();
+  });
+
+  it("[create-with-key] ANTI-CONTROL: a real positive breaker cooldown still stamps", async () => {
+    // Without this, "the breaker branch omits zero" is satisfied by a branch
+    // that never stamps at all — which would delete the relay the cases above
+    // exist to protect. The pre-existing breaker cases in this file assert the
+    // same property from their own arms; this one sits beside the new guard so
+    // the pair is readable as a matched set.
+    const { CircuitOpenError } = await import("@/lib/seam-errors");
+    validateKeyMock.mockRejectedValue(new CircuitOpenError(42));
+    const consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect((await res.json()).code).toBe("SERVICE_UNAVAILABLE_RETRY");
+    expect(res.headers.get("Retry-After")).toBe("42");
+    consoleErr.mockRestore();
+  });
+});
+
+/**
+ * ═════════════════════════════════════════════════════════════════════════════
+ * [162-05 / D-162-3] THE USE-EXISTING-KEY ARM
+ *
+ * WHAT IT CLOSES. `my-strategies` renders an orphaned key as a "No strategy
+ * yet" row whose only control is "Finish setup →", which reopens this wizard
+ * and lands on `KEY_ORPHANED` — a refusal whose own copy has to tell the user
+ * that releasing the stored key is not something any surface we ship lets them
+ * do. That loop is measured (the `KEY_ORPHANED` docblock in wizardErrors.ts)
+ * and this arm is the write that ends it.
+ *
+ * ⭐ THE HIGH-SEVERITY THREAT IS T-162-05-A — cross-tenant reuse of an
+ * `api_keys` row the caller does not own. The route mitigates it in three
+ * layers (session-uid filter on the RLS-bypassing admin re-select, a user-scoped
+ * RLS re-read, and the RPC's own in-body ownership assertion), and the
+ * mitigation is asserted here two ways on purpose:
+ *   · STRUCTURALLY — "the ADMIN re-select carries the session uid". This is the
+ *     single-line witness: delete that one `.eq("user_id", …)` and this test
+ *     reds. It was OBSERVED red against the neutered filter, not assumed.
+ *   · BEHAVIOURALLY — a foreign key id is refused with no write. This one reds
+ *     when the ownership property is lost ACROSS BOTH client layers, because
+ *     the doubles model both honestly (see `reuseKeyAdminLookupMock`). It is
+ *     not vacuous; it is the outcome test for a LAYERED control, and saying so
+ *     is more honest than pretending one neuter should flip it.
+ *
+ * ⛔ AND THE SECOND PROPERTY, T-162-05-B: this arm NEVER writes `api_keys`.
+ * `writeAttempts` records every write verb dialled against either client, and
+ * the cases below assert `api_keys` appears in none of them.
+ * ═════════════════════════════════════════════════════════════════════════════
+ */
+describe("[162-05 / D-162-3] create-with-key — the use-existing-key arm", () => {
+  const REUSE_KEY_ID = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+  const FOREIGN_USER_ID = "00000000-0000-0000-0000-bbbbbbbbbbbb";
+  const REUSE_STRATEGY_ID = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+
+  /** The request the client sends: selection intent, and NO credentials. */
+  const REUSE_BODY = {
+    wizard_session_id: WIZARD_SESSION_ID,
+    reuse_api_key_id: REUSE_KEY_ID,
+  };
+
+  /** The `api_keys` row as it exists in the database for these cases. */
+  function seedKey(userId: string, disconnectedAt: string | null = null) {
+    reuseKeyRow.value = {
+      id: REUSE_KEY_ID,
+      user_id: userId,
+      disconnected_at: disconnectedAt,
+    };
+  }
+
+  /** Every write verb dialled against `api_keys` during the case. */
+  function apiKeyWrites() {
+    return writeAttempts.filter((w) => w.table === "api_keys");
+  }
+
+  /** The admin client's `api_keys`-by-id read, as the route actually issued it. */
+  function adminKeyRead() {
+    return capturedSelects.find(
+      (s) => s.table === "api_keys" && s.client === "admin" && "id" in s.filters,
+    );
+  }
+
+  function userScopedKeyRead() {
+    return capturedSelects.find(
+      (s) =>
+        s.table === "api_keys" && s.client === "user-scoped" && "id" in s.filters,
+    );
+  }
+
+  let consoleErr: ReturnType<typeof vi.spyOn>;
+  /** 164.2-04 — the 23505 split logs which branch it took, at warn level. */
+  let consoleWarn: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    // ⚠️ THE SEAMUX-08 BLOCK ABOVE LEAKS, and its own docblock says so: a
+    // `vi.doMock` registration OUTLIVES the `vi.resetModules()` in its afterEach
+    // — reset clears the MODULE registry, not the MOCK registry. Its
+    // `@/lib/supabase/server` double is a stripped-down `eq → eq →
+    // maybeSingle` chain with no `.is()`, written for the F6 session fence
+    // alone. MEASURED, not reasoned: without these re-registrations every case
+    // below died on `…eq(…).eq(…).is is not a function` at the reuse arm's
+    // ownership re-read, i.e. before any assertion it exists to make. Same
+    // failure shape that block records finding as "the first run was 10 × 401",
+    // and the same remedy.
+    vi.resetModules();
+    vi.doMock("@/lib/api/withAuth", () => ({
+      withAuth:
+        (h: (req: NextRequest, user: typeof MOCK_USER) => unknown) =>
+        (req: NextRequest) =>
+          h(req, MOCK_USER),
+    }));
+    vi.doMock("@/lib/supabase/server", () => ({
+      createClient: async () => ({
+        rpc: (...args: unknown[]) => userScopedRpc(...args),
+        from: (table: string) => ({
+          select: () => makeSelectBuilder(table, "user-scoped"),
+          update: (...args: unknown[]) => {
+            recordWrite("user-scoped", table, "update");
+            return assetClassUpdateMock(...args);
+          },
+          ...makeWriteVerbs("user-scoped", table),
+        }),
+      }),
+    }));
+    vi.doMock("@/lib/supabase/admin", () => ({
+      createAdminClient: () => {
+        if (adminClientThrows.value) {
+          throw new Error("Missing SUPABASE_SERVICE_ROLE_KEY for admin operations");
+        }
+        return {
+          rpc: (...args: unknown[]) => adminRpc(...args),
+          from: (table: string) => ({
+            select: () => makeSelectBuilder(table, "admin"),
+            update: () => {
+              recordWrite("admin", table, "update");
+              return { eq: () => ({ eq: async () => ({ error: null }) }) };
+            },
+            ...makeWriteVerbs("admin", table),
+          }),
+        };
+      },
+    }));
+
+    reuseKeyRow.value = null;
+    reuseKeyAdminReadFault.value = null;
+    reuseKeyUserScopedReadFault.value = null;
+    reuseKeyAdminLookupMock.mockClear();
+    reuseKeyUserScopedLookupMock.mockClear();
+    writeAttempts.length = 0;
+    capturedSelects.length = 0;
+    rpcCallSites.length = 0;
+    rpcMock.mockReset();
+    validateKeyMock.mockReset();
+    encryptKeyMock.mockReset();
+    venueStrategyLookupMock.mockResolvedValue({ data: null, error: null });
+    venueOwnerLookupMock.mockResolvedValue({ data: null, error: null });
+    collidingDraftLookupMock.mockClear();
+    collidingDraftLookupMock.mockResolvedValue({ data: null, error: null });
+    adminClientThrows.value = false;
+    limiter.result = { success: true };
+    consoleErr = vi.spyOn(console, "error").mockImplementation(() => {});
+    consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    consoleErr.mockRestore();
+    consoleWarn.mockRestore();
+    reuseKeyRow.value = null;
+    venueStrategyLookupMock.mockResolvedValue({ data: null, error: null });
+    venueOwnerLookupMock.mockResolvedValue({ data: null, error: null });
+    collidingDraftLookupMock.mockResolvedValue({ data: null, error: null });
+    vi.restoreAllMocks();
+  });
+
+  // ───────────────────────────── the happy path ─────────────────────────────
+
+  it("an OWNER'S ORPHANED key becomes a draft — 200 draft envelope, and api_keys is never written", async () => {
+    seedKey(MOCK_USER.id);
+    rpcMock.mockResolvedValue({
+      data: [{ strategy_id: REUSE_STRATEGY_ID, api_key_id: REUSE_KEY_ID }],
+      error: null,
+    });
+
+    const POST = await importPost();
+    const res = await POST(makeReq(REUSE_BODY));
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      ok: true,
+      strategy_id: REUSE_STRATEGY_ID,
+      api_key_id: REUSE_KEY_ID,
+    });
+
+    // ⭐ T-162-05-B. Re-INSERTing api_keys is the defect that CREATED the orphan
+    // population this arm exists to serve.
+    expect(apiKeyWrites()).toEqual([]);
+
+    // The write went through the SERVICE-ROLE client and the NEW function —
+    // never the user-scoped client, never the credential writer.
+    expect(rpcCallSites).toEqual(["admin"]);
+    expect(rpcMock).toHaveBeenCalledTimes(1);
+    expect(rpcMock.mock.calls[0][0]).toBe("create_wizard_strategy_for_key");
+    expect(rpcMock.mock.calls[0][1]).toEqual({
+      p_user_id: MOCK_USER.id,
+      p_api_key_id: REUSE_KEY_ID,
+      p_placeholder_name: expect.any(String),
+      p_wizard_session_id: WIZARD_SESSION_ID,
+    });
+
+    // Nothing reached the exchange and nothing was encrypted.
+    expect(validateKeyMock).not.toHaveBeenCalled();
+    expect(encryptKeyMock).not.toHaveBeenCalled();
+  });
+
+  it("the uid in EVERY filter and in the RPC comes from the SESSION, never from the body", async () => {
+    seedKey(MOCK_USER.id);
+    rpcMock.mockResolvedValue({
+      data: [{ strategy_id: REUSE_STRATEGY_ID, api_key_id: REUSE_KEY_ID }],
+      error: null,
+    });
+
+    const POST = await importPost();
+    const res = await POST(
+      makeReq({ ...REUSE_BODY, user_id: FOREIGN_USER_ID, p_user_id: FOREIGN_USER_ID }),
+    );
+
+    expect(res.status).toBe(200);
+    expect(adminKeyRead()!.filters.user_id).toBe(MOCK_USER.id);
+    expect(userScopedKeyRead()!.filters.user_id).toBe(MOCK_USER.id);
+    expect(rpcMock.mock.calls[0][1].p_user_id).toBe(MOCK_USER.id);
+    expect(JSON.stringify(rpcMock.mock.calls[0][1])).not.toContain(FOREIGN_USER_ID);
+  });
+
+  // ────────────────────── the tenant boundary (T-162-05-A) ──────────────────
+
+  /**
+   * ⭐ THE SINGLE-LINE RED WITNESS. Delete `.eq("user_id", user.id)` from the
+   * route's ADMIN re-select and THIS assertion is the one that reds — observed
+   * on 2026-08-26 by neutering that exact line, running this file, restoring it
+   * from a byte copy verified with `shasum -a 256`, and re-running. The admin
+   * client BYPASSES RLS, so that filter is the tenant boundary on that read and
+   * nothing else is; a test that only checked the refusal OUTCOME stays green on
+   * the neuter because the user-scoped layer still refuses, which is precisely
+   * why this structural assertion has to exist beside the outcome one.
+   */
+  it("the ADMIN re-select carries the session-uid filter — the one line that IS the tenant boundary", async () => {
+    seedKey(MOCK_USER.id);
+    rpcMock.mockResolvedValue({
+      data: [{ strategy_id: REUSE_STRATEGY_ID, api_key_id: REUSE_KEY_ID }],
+      error: null,
+    });
+
+    const POST = await importPost();
+    await POST(makeReq(REUSE_BODY));
+
+    const read = adminKeyRead();
+    expect(
+      read,
+      "The reuse arm did not re-select the key through the ADMIN client at " +
+        "all. Every ownership assertion in this describe is then about a read " +
+        "that no longer happens.",
+    ).toBeDefined();
+    expect(
+      read!.filters.user_id,
+      "The admin client BYPASSES RLS, so tenant scoping on this read IS this " +
+        "filter and nothing else — and its value must come from withAuth's " +
+        "server-side session, never from the request body.",
+    ).toBe(MOCK_USER.id);
+    expect(read!.filters.id).toBe(REUSE_KEY_ID);
+    expect(
+      read!.filters.disconnected_at,
+      "A soft-disconnected key is skipped by every cron dispatcher, so a draft " +
+        "minted over one would silently never sync.",
+    ).toBeNull();
+  });
+
+  it("the USER-SCOPED RLS re-read happens too, and is not a dead read", async () => {
+    seedKey(MOCK_USER.id);
+    rpcMock.mockResolvedValue({
+      data: [{ strategy_id: REUSE_STRATEGY_ID, api_key_id: REUSE_KEY_ID }],
+      error: null,
+    });
+
+    const POST = await importPost();
+    await POST(makeReq(REUSE_BODY));
+
+    const read = userScopedKeyRead();
+    expect(
+      read,
+      "The defence-in-depth layer is claimed in the route's docblock. `id`, " +
+        "`user_id` and `disconnected_at` are ALL on the api_keys column-SELECT " +
+        "allowlist (20260410225608 + 20260422101911), so this read genuinely " +
+        "runs — verified at HEAD. A claimed layer that never issues a query is " +
+        "a dead read dressed as defence in depth.",
+    ).toBeDefined();
+    expect(read!.filters.id).toBe(REUSE_KEY_ID);
+    expect(read!.filters.user_id).toBe(MOCK_USER.id);
+    expect(read!.filters.disconnected_at).toBeNull();
+    expect(reuseKeyUserScopedLookupMock).toHaveBeenCalled();
+  });
+
+  it("a key id the caller does NOT own is refused — no RPC, no write of any kind", async () => {
+    seedKey(FOREIGN_USER_ID);
+
+    const POST = await importPost();
+    const res = await POST(makeReq(REUSE_BODY));
+
+    expect(res.status).toBe(409);
+    expect(await res.clone().text()).toBe(
+      '{"code":"KEY_REUSE_UNAVAILABLE","error":"That stored key is not available to reuse."}',
+    );
+    expect(
+      rpcMock,
+      "Reaching the writer at all on a foreign key id is the IDOR this arm's " +
+        "three layers exist to prevent (T-162-05-A).",
+    ).not.toHaveBeenCalled();
+    expect(writeAttempts).toEqual([]);
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+  });
+
+  it("a DISCONNECTED key of the caller's own is refused — same answer, no write", async () => {
+    seedKey(MOCK_USER.id, "2026-08-01T00:00:00Z");
+
+    const POST = await importPost();
+    const res = await POST(makeReq(REUSE_BODY));
+
+    expect(res.status).toBe(409);
+    expect((await res.json()).code).toBe("KEY_REUSE_UNAVAILABLE");
+    expect(rpcMock).not.toHaveBeenCalled();
+    expect(writeAttempts).toEqual([]);
+  });
+
+  it("a key id that matches NOTHING is refused with the same answer — no ownership oracle", async () => {
+    // ⛔ "not yours", "gone" and "disconnected" must be INDISTINGUISHABLE on the
+    // wire. Three different sentences would let a caller enumerate which key ids
+    // exist and who holds them.
+    reuseKeyRow.value = null;
+
+    const POST = await importPost();
+    const res = await POST(makeReq(REUSE_BODY));
+
+    expect(res.status).toBe(409);
+    expect(await res.clone().text()).toBe(
+      '{"code":"KEY_REUSE_UNAVAILABLE","error":"That stored key is not available to reuse."}',
+    );
+    expect(rpcMock).not.toHaveBeenCalled();
+  });
+
+  // ───────────────────────────── the refusals ───────────────────────────────
+
+  it("a CONNECTED key answers VENUE_ALREADY_CONNECTED with the strategy name — never a new code", async () => {
+    seedKey(MOCK_USER.id);
+    venueStrategyLookupMock.mockResolvedValue({ data: null, error: null });
+    venueOwnerLookupMock.mockResolvedValue({
+      data: { id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", name: "Delta Neutral" },
+      error: null,
+    });
+
+    const POST = await importPost();
+    const res = await POST(makeReq(REUSE_BODY));
+
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({
+      code: "VENUE_ALREADY_CONNECTED",
+      error: "This account is already connected to an existing strategy.",
+      strategy_name: "Delta Neutral",
+    });
+    expect(rpcMock).not.toHaveBeenCalled();
+    expect(writeAttempts).toEqual([]);
+  });
+
+  it("an EXISTING draft over the key is handed back — deduped, and the writer is never dialled", async () => {
+    seedKey(MOCK_USER.id);
+    venueStrategyLookupMock.mockResolvedValue({
+      data: { id: REUSE_STRATEGY_ID },
+      error: null,
+    });
+
+    const POST = await importPost();
+    const res = await POST(makeReq(REUSE_BODY));
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      ok: true,
+      strategy_id: REUSE_STRATEGY_ID,
+      api_key_id: REUSE_KEY_ID,
+      deduped: true,
+    });
+    expect(rpcMock).not.toHaveBeenCalled();
+  });
+
+  it("IDEMPOTENCY: a repeat POST converges on the SAME draft, by BOTH routes to it", async () => {
+    seedKey(MOCK_USER.id);
+    rpcMock.mockResolvedValue({
+      data: [{ strategy_id: REUSE_STRATEGY_ID, api_key_id: REUSE_KEY_ID }],
+      error: null,
+    });
+
+    const POST = await importPost();
+    const first = await POST(makeReq(REUSE_BODY));
+    expect((await first.json()).strategy_id).toBe(REUSE_STRATEGY_ID);
+
+    // (a) the pre-RPC read now sees the draft the first call minted.
+    venueStrategyLookupMock.mockResolvedValue({
+      data: { id: REUSE_STRATEGY_ID },
+      error: null,
+    });
+    const second = await POST(makeReq(REUSE_BODY));
+    expect(second.status).toBe(200);
+    expect((await second.json()).strategy_id).toBe(REUSE_STRATEGY_ID);
+
+    // (b) and if that read were dark, the FUNCTION's own advisory-lock +
+    // select-existing fence returns the same id rather than minting a second
+    // draft — which is why the RPC carries a fence at all, and why the route's
+    // read is not the only thing between a retry and a duplicate.
+    venueStrategyLookupMock.mockResolvedValue({ data: null, error: null });
+    const third = await POST(makeReq(REUSE_BODY));
+    expect((await third.json()).strategy_id).toBe(REUSE_STRATEGY_ID);
+  });
+
+  // ─────────────────────── request shape / short-circuits ───────────────────
+
+  it("a malformed reuse_api_key_id is refused on OUR request shape — never a verdict about their key", async () => {
+    const POST = await importPost();
+    const res = await POST(
+      makeReq({ ...REUSE_BODY, reuse_api_key_id: "not-a-uuid" }),
+    );
+
+    expect(res.status).toBe(400);
+    // ⛔ THIS CASE'S CODE WAS INVERTED BY 164.2-04 (criterion 4), and the
+    // inversion is what closes the defect the case's own TITLE already named.
+    // It used to pin `KEY_MISSING_REQUIRED_FIELD` while asserting the refusal is
+    // "on OUR request shape — never a verdict about their key". Those two
+    // sentences contradicted each other: that code's title is "One of the
+    // required fields is empty." and its cause says "one of the credential
+    // fields was blank", rendered on the saved-key summary — a screen with no
+    // fields on it and a body carrying two ids the reader never typed. The
+    // route's own guard comment said so too ("it may not wear a `KEY_*` verdict
+    // that blames a credential") and it wore one for two phases.
+    //
+    // ⭐ 162-06 review reached for `fixRequires` and split the BULLETS by
+    // surface; that entry's docblock records why that was only half a fix —
+    // `fixRequires` gates `fix[]` and nothing else, so the title and the cause
+    // kept lying — and names the emitter as the owner of the rest. This is it.
+    // `KEY_MISSING_REQUIRED_FIELD` is untouched on the credential arm's five
+    // guards (the 12-site table above), where a field really did arrive empty.
+    expect((await res.json()).code).toBe("PRESELECT_REQUEST_INVALID");
+    expect(
+      reuseKeyAdminLookupMock,
+      'A non-uuid must never reach a `.eq("id", …)` filter — Postgres answers ' +
+        "22P02 and the raw driver error is what would then have to be mapped.",
+    ).not.toHaveBeenCalled();
+    expect(rpcMock).not.toHaveBeenCalled();
+  });
+
+  it("a missing wizard_session_id is refused on the same guard", async () => {
+    const POST = await importPost();
+    const res = await POST(makeReq({ reuse_api_key_id: REUSE_KEY_ID }));
+
+    expect(res.status).toBe(400);
+    // Inverted by 164.2-04 (criterion 4) on the same terms as the case above —
+    // ONE guard covers both fields, so both cases move together or the guard
+    // has been split behind our backs.
+    expect((await res.json()).code).toBe("PRESELECT_REQUEST_INVALID");
+    expect(rpcMock).not.toHaveBeenCalled();
+  });
+
+  // ───────────────── 164.2-04 / criterion 5 — the 23505 split ────────────────
+  /**
+   * ⭐ ONE SQLSTATE, TWO DIFFERENT FAILURES, AND ONE SENTENCE THAT WAS TRUE OF
+   * ONLY ONE OF THEM.
+   *
+   * The RPC raises 23505 off `strategies_user_wizard_session_source_uniq`
+   * (20260728120000:167) — a UNIQUE over (user_id, wizard_session_id, source).
+   * That index says NOTHING about which API key the colliding row holds, but
+   * the route answered `DRAFT_ALREADY_EXISTS`, whose cause is "A draft strategy
+   * with the SAME API key is already in progress". `wizard/localStorage.ts`
+   * restores one wizard-session token across sources and drafts, so the row we
+   * collide with is routinely a draft over a DIFFERENT key of the caller's —
+   * and the reader was then sent to find a draft of the key they had just
+   * picked, which does not exist.
+   *
+   * So the arm now READS which key the colliding draft holds and picks the
+   * sentence that is true. Three cases, because there are three answers that
+   * read can give, and each is asserted on its own: a neuter that skips the
+   * read entirely must red on more than one of them.
+   *
+   * ⛔ STILL 409 ON EVERY BRANCH. This is the COPY half. Phase 164.2.1
+   * SESSIONID-FENCE owns the functional fix (a fresh session id, or resolving
+   * onto the draft this read just found), so a case asserting 200 here would be
+   * asserting work that has not been done.
+   */
+  describe("[164.2-04] the wizard-session 23505 names the collision it actually hit", () => {
+    /** A live key of the caller's, and an RPC that raises the fence. */
+    function seedCollision() {
+      seedKey(MOCK_USER.id);
+      rpcMock.mockResolvedValue({
+        data: null,
+        error: { code: "23505", message: "duplicate key value" },
+      });
+    }
+
+    it("SAME key → DRAFT_ALREADY_EXISTS, byte-identical to what it always answered", async () => {
+      seedCollision();
+      // The colliding draft holds the very key the caller preselected, so "with
+      // the same API key" is established rather than assumed.
+      collidingDraftLookupMock.mockResolvedValue({
+        data: { api_key_id: REUSE_KEY_ID },
+        error: null,
+      });
+
+      const POST = await importPost();
+      const res = await POST(makeReq(REUSE_BODY));
+
+      expect(res.status).toBe(409);
+      // BYTE-WISE: `toEqual` on parsed JSON does not compare key order, and
+      // this body is the one the pre-164.2 arm shipped. The whole claim of this
+      // case is that the incumbent answer survives untouched on its own arm.
+      expect(await res.clone().text()).toBe(
+        '{"code":"DRAFT_ALREADY_EXISTS","error":"A wizard session with this key is already in progress."}',
+      );
+      expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+      // ⛔ THE READ MUST HAVE HAPPENED. Without this the case passes on a route
+      // that never reads and always answers DRAFT_ALREADY_EXISTS — i.e. green
+      // on the exact bug (Pitfall 5).
+      expect(
+        collidingDraftLookupMock,
+        "The arm answered the same-key sentence without reading which key the " +
+          "colliding draft holds, so it is asserting a fact it never checked.",
+      ).toHaveBeenCalled();
+    });
+
+    it("DIFFERENT key → DRAFT_SESSION_COLLISION, and the response names no key", async () => {
+      seedCollision();
+      // A draft of the caller's own, over a DIFFERENT key — the stale-session
+      // case `localStorage.ts`'s one shared token produces.
+      const OTHER_KEY_ID = "ffffffff-ffff-4fff-8fff-ffffffffffff";
+      collidingDraftLookupMock.mockResolvedValue({
+        data: { api_key_id: OTHER_KEY_ID },
+        error: null,
+      });
+
+      const POST = await importPost();
+      const res = await POST(makeReq(REUSE_BODY));
+
+      expect(res.status).toBe(409);
+      const text = await res.clone().text();
+      expect(text).toBe(
+        '{"code":"DRAFT_SESSION_COLLISION","error":"A draft from an earlier wizard session is still open."}',
+      );
+      expect(
+        (await res.json()).code,
+        "'A draft strategy with the same API key is already in progress' is " +
+          "false here: the draft we collided with is over a different key, and " +
+          "the reader would be sent to look for a draft that does not exist.",
+      ).not.toBe("DRAFT_ALREADY_EXISTS");
+      // T-164.2-06 — the read exists to compare, never to disclose. Neither the
+      // colliding key id nor the caller's own may reach the wire.
+      expect(
+        text.includes(OTHER_KEY_ID) || text.includes(REUSE_KEY_ID),
+        "The refusal body carries a key id. The post-23505 read selects " +
+          "api_key_id ALONE and it is compared, never rendered.",
+      ).toBe(false);
+      expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+    });
+
+    it("the read FAULTS → DRAFT_SESSION_COLLISION, because that is the claim the fence establishes on its own", async () => {
+      seedCollision();
+      // A dark read. ⭐ THE FAIL-SAFE DIRECTION IS THE WHOLE POINT: the session
+      // collision is the constraint that DID fire, so that sentence holds with
+      // or without this read. "the same API key" is the claim that NEEDS the
+      // read, so it is the one that may not be made without it.
+      collidingDraftLookupMock.mockResolvedValue({
+        data: null,
+        error: { code: "XX000", message: "read failed" },
+      });
+
+      const POST = await importPost();
+      const res = await POST(makeReq(REUSE_BODY));
+      // Taken BEFORE the body is consumed below — a disturbed Response cannot
+      // be cloned.
+      const bodyText = await res.clone().text();
+
+      expect(res.status).toBe(409);
+      expect((await res.clone().json()).code).toBe("DRAFT_SESSION_COLLISION");
+      expect(
+        (await res.json()).code,
+        "A dark read must never be resolved INTO the stronger claim. Falling " +
+          "back to DRAFT_ALREADY_EXISTS would assert 'the same API key' on " +
+          "exactly the evidence we failed to obtain.",
+      ).not.toBe("DRAFT_ALREADY_EXISTS");
+
+      // ⭐ 164.2 review B1 — THE COPY DECISION IS ONE BIT; THE OPERATOR NEEDS
+      // THE CAUSE. "an UNREADABLE key" names the outcome and never the fault,
+      // so an RLS refusal, a transient PostgREST 5xx and a genuinely absent row
+      // were indistinguishable in the logs. A real fault is now logged at
+      // `console.error` (not `warn`) carrying the PostgREST code that produced
+      // it.
+      const faultLine = (consoleErr.mock.calls as unknown[][]).find((call) =>
+        String(call[0]).includes("colliding-draft"),
+      );
+      expect(
+        faultLine,
+        "the colliding-draft read faulted and nothing reached console.error. " +
+          "The only trace is a warn naming the OUTCOME, which cannot tell an " +
+          "RLS refusal from a transient 5xx from an absent row.",
+      ).toBeDefined();
+      // ⚠️ THE FIRST ARGUMENT SPECIFICALLY, not the whole call. The scrubbed
+      // error object passed alongside it also carries the SQLSTATE, so a
+      // `JSON.stringify(call)` assertion would stay green with the REASON — the
+      // half this finding is about — thrown away. (Measured: it did.)
+      expect(
+        String(faultLine![0]),
+        "the fault line does not name the PostgREST code that caused it. The " +
+          "reason is exactly what the boolean discards, and it must be " +
+          "recorded, not just implied by an attached object.",
+      ).toContain("XX000");
+      expect(
+        faultLine!.length,
+        "the fault reached console.error with no scrubbed error beside the " +
+          "reason — the message is the other half of the cause.",
+      ).toBeGreaterThan(1);
+
+      // ⛔ T-164.2-06 STAYS CLOSED: the cause is for the log ONLY. Neither the
+      // SQLSTATE nor the upstream message may appear in the 409 body.
+      expect(bodyText).not.toContain("XX000");
+      expect(bodyText).not.toContain("read failed");
+    });
+
+    it("the read is TENANT-SCOPED and asks for nothing but the key id", async () => {
+      seedCollision();
+      collidingDraftLookupMock.mockResolvedValue({
+        data: { api_key_id: REUSE_KEY_ID },
+        error: null,
+      });
+
+      const POST = await importPost();
+      await POST(makeReq(REUSE_BODY));
+
+      // Read off the filters the route ACTUALLY applied, not off the mock.
+      //
+      // ⚠️ `source` ALONE DOES NOT IDENTIFY THIS READ — the venue-identity
+      // fence's draft-scoped read (route.ts:308) also carries it, and it runs
+      // FIRST, so a find on `source` returns the wrong select and this case
+      // would assert the wrong query's filters. The session id is what makes
+      // the pair unique. (Measured: the first draft of this case did exactly
+      // that and reported `wizard_session_id: undefined`.)
+      const read = capturedSelects.find(
+        (s) =>
+          s.table === "strategies" &&
+          "source" in s.filters &&
+          "wizard_session_id" in s.filters,
+      );
+      expect(
+        read,
+        "The post-23505 read did not carry both `.eq(\"wizard_session_id\", …)` " +
+          "and `.eq(\"source\", …)`. Without `source` the query matches the " +
+          "CSV-path row for the same session and compares the wrong draft " +
+          "against the caller's key.",
+      ).toBeDefined();
+      expect(
+        read!.filters.user_id,
+        "T-164.2-06: the read must be scoped by the caller's own uid, so it " +
+          "can never see another tenant's draft.",
+      ).toBe(MOCK_USER.id);
+      expect(read!.filters.wizard_session_id).toBe(WIZARD_SESSION_ID);
+      expect(
+        read!.filters.source,
+        "create_wizard_strategy_for_key INSERTs source='wizard' " +
+          "(20260826130000:241) and `source` is the third column of the index.",
+      ).toBe("wizard");
+      expect(
+        read!.client,
+        "The user-scoped client cannot be trusted to see a draft the RLS " +
+          "policies may hide; the arm already holds the admin client it used " +
+          "for the write.",
+      ).toBe("admin");
+    });
+  });
+
+  it("CREDENTIAL FIELDS ARE IGNORED — nothing is validated, encrypted, or sent to a venue", async () => {
+    seedKey(MOCK_USER.id);
+    rpcMock.mockResolvedValue({
+      data: [{ strategy_id: REUSE_STRATEGY_ID, api_key_id: REUSE_KEY_ID }],
+      error: null,
+    });
+
+    const POST = await importPost();
+    // Credentials the credential arm would reject outright (unsupported venue,
+    // too-short key). If this arm read them at all the answer would be a 400
+    // about the key rather than a 200 draft.
+    const res = await POST(
+      makeReq({
+        ...REUSE_BODY,
+        exchange: "not-a-venue",
+        api_key: "x",
+        api_secret: "y",
+      }),
+    );
+
+    expect(res.status).toBe(200);
+    expect(validateKeyMock).not.toHaveBeenCalled();
+    expect(encryptKeyMock).not.toHaveBeenCalled();
+    expect(apiKeyWrites()).toEqual([]);
+  });
+
+  it("NEGATIVE CONTROL: without reuse_api_key_id the credential path is untouched", async () => {
+    // The arm is opt-in on the presence of ONE field. This pin says so; every
+    // pre-existing case in this file is the fuller version of it.
+    validateKeyMock.mockResolvedValue({ valid: true, read_only: true });
+    encryptKeyMock.mockResolvedValue({ api_key_encrypted: "enc" });
+    rpcMock.mockResolvedValue({
+      data: [{ strategy_id: STRATEGY_ID, api_key_id: API_KEY_ID }],
+      error: null,
+    });
+
+    const POST = await importPost();
+    const res = await POST(makeReq(VALID_BODY));
+
+    expect(res.status).toBe(200);
+    expect(rpcMock.mock.calls[0][0]).toBe("create_wizard_strategy");
+    expect(reuseKeyAdminLookupMock).not.toHaveBeenCalled();
+  });
+
+  // ──────────────────────── fail-closed / error mapping ─────────────────────
+
+  it("no service-role credential → 503 SEAM_MISCONFIGURED, and NOTHING is written", async () => {
+    seedKey(MOCK_USER.id);
+    adminClientThrows.value = true;
+
+    const POST = await importPost();
+    const res = await POST(makeReq(REUSE_BODY));
+
+    expect(res.status).toBe(503);
+    expect((await res.json()).code).toBe("SEAM_MISCONFIGURED");
+    expect(
+      rpcCallSites,
+      "⛔ Falling back to the user-scoped client is the door Phase 156 closed. " +
+        "There is no backstop for an ownership decision, so the honest answer " +
+        "is a refusal with nothing written.",
+    ).toEqual([]);
+    expect(writeAttempts).toEqual([]);
+  });
+
+  it("the USER-SCOPED ownership read faulting FAILS CLOSED — a layer that cannot run is not silently dropped", async () => {
+    seedKey(MOCK_USER.id);
+    reuseKeyUserScopedReadFault.value = { code: "42501" };
+
+    const POST = await importPost();
+    const res = await POST(makeReq(REUSE_BODY));
+
+    expect(res.status).toBe(500);
+    expect(
+      rpcMock,
+      "If the defence-in-depth layer cannot answer we have TWO layers rather " +
+        "than three and no way to know it. Proceeding would ship that read as " +
+        "decoration.",
+    ).not.toHaveBeenCalled();
+    expect(writeAttempts).toEqual([]);
+  });
+
+  it("a dark strategies read refuses rather than writing on an UNMEASURED orphan claim", async () => {
+    seedKey(MOCK_USER.id);
+    // `orphaned` is honest only when BOTH reads succeeded and both were empty.
+    // A read fault is the absence of a measurement, and this arm is about to
+    // WRITE on it — unlike the venue fence, which may fall through because the
+    // DB index still dedups.
+    venueStrategyLookupMock.mockResolvedValue({
+      data: null,
+      error: { code: "57014", message: "canceling statement" },
+    });
+
+    const POST = await importPost();
+    const res = await POST(makeReq(REUSE_BODY));
+
+    expect(res.status).toBe(500);
+    expect(rpcMock).not.toHaveBeenCalled();
+    expect(writeAttempts).toEqual([]);
+  });
+
+  it("the RPC's own ownership raise (no_data_found) maps to the same refusal — the TOCTOU window", async () => {
+    seedKey(MOCK_USER.id);
+    rpcMock.mockResolvedValue({
+      data: null,
+      error: { code: "P0002", message: "no live api_keys row for this owner" },
+    });
+
+    const POST = await importPost();
+    const res = await POST(makeReq(REUSE_BODY));
+
+    expect(res.status).toBe(409);
+    expect((await res.json()).code).toBe("KEY_REUSE_UNAVAILABLE");
+  });
+
+  it("the RPC's connected raise (object_in_use) maps to VENUE_ALREADY_CONNECTED", async () => {
+    seedKey(MOCK_USER.id);
+    // Reachable two ways: a race, or a COMPOSITE member key — which the route's
+    // two-read resolver structurally cannot see, because a composite links
+    // through `strategy_keys` while `strategies.api_key_id` stays NULL.
+    rpcMock.mockResolvedValue({
+      data: null,
+      error: { code: "55006", message: "already held by a strategy" },
+    });
+
+    const POST = await importPost();
+    const res = await POST(makeReq(REUSE_BODY));
+
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({
+      code: "VENUE_ALREADY_CONNECTED",
+      error: "This account is already connected to an existing strategy.",
+    });
+  });
+
+  it("an unrecognised RPC fault is a 500 with a STATIC envelope — never a raw driver error", async () => {
+    seedKey(MOCK_USER.id);
+    rpcMock.mockResolvedValue({
+      data: null,
+      error: {
+        code: "XX000",
+        message: 'relation "api_keys" does not exist at character 42',
+        details: "internal detail",
+      },
+    });
+
+    const POST = await importPost();
+    const res = await POST(makeReq(REUSE_BODY));
+
+    expect(res.status).toBe(500);
+    const text = await res.text();
+    expect(text).toBe('{"code":"UNKNOWN","error":"Could not create draft strategy"}');
+    expect(text).not.toContain("at character");
+    expect(text).not.toContain("internal detail");
+  });
+
+  it("a SUCCESSFUL rpc that returns no usable row is a contract violation, not a 200", async () => {
+    seedKey(MOCK_USER.id);
+    rpcMock.mockResolvedValue({ data: [], error: null });
+
+    const POST = await importPost();
+    const res = await POST(makeReq(REUSE_BODY));
+
+    expect(res.status).toBe(500);
+    expect((await res.json()).code).toBe("UNKNOWN");
+  });
+
+  it("the limiter is consumed AFTER shape validation, and a misconfiguration answers 503", async () => {
+    limiter.result = {
+      success: false,
+      retryAfter: 60,
+      reason: "ratelimit_misconfigured",
+    };
+    seedKey(MOCK_USER.id);
+
+    const POST = await importPost();
+    const res = await POST(makeReq(REUSE_BODY));
+
+    expect(res.status).toBe(503);
+    expect((await res.json()).code).toBe("SEAM_MISCONFIGURED");
     expect(rpcMock).not.toHaveBeenCalled();
   });
 });

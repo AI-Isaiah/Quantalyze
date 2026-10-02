@@ -1,4 +1,4 @@
-<!-- /autoplan restore point: /Users/helios-mammut/.gstack/projects/AI-Isaiah-Quantalyze/main-autoplan-restore-20260409-082817.md -->
+<!-- /autoplan restore point: <home>/.gstack/projects/AI-Isaiah-Quantalyze/main-autoplan-restore-20260409-082817.md -->
 
 # Plan: Portfolio Management System — Cap-Intro Demo Hero
 

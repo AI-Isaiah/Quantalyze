@@ -37,21 +37,129 @@ import os
 import signal
 import socket
 import time
+from collections.abc import Callable
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Final, TypedDict, cast
 
 from dotenv import load_dotenv
 
-# Load analytics-service/.env for local dev. In prod (Railway), env vars are
-# injected directly and no .env file exists, so load_dotenv() is a no-op.
+# JOB-04 (Phase 143) — imported as a MODULE (not `from sentry_sdk import
+# capture_message`) so the reconcile-sweep capture in dispatch_tick() resolves
+# through `main_worker.sentry_sdk` and can be spied on in tests. This mirrors
+# the discipline already recorded at main.py:16-20; a from-import makes the
+# emission untestable with the repo's existing
+# `monkeypatch.setattr(module, "sentry_sdk", spy)` idiom. Importing the module
+# has no side effects — `init_sentry()` in main() is what configures it.
+import sentry_sdk
+
+# Load env for local dev — TEST first (.env.qa-local), then .env, so the TEST
+# project wins locally (load_dotenv never overrides already-set keys). In prod
+# (Railway) env vars are injected directly and neither file exists, so both
+# calls are no-ops. See assert_worker_not_aimed_at_prod_off_platform() below
+# for the hard guard behind this soft default.
+load_dotenv(Path(__file__).parent / ".env.qa-local")
 load_dotenv()
 
+# ---------------------------------------------------------------------------
+# OPS-05 (Phase 163) — redaction is installed HERE, first, and unconditionally.
+# ---------------------------------------------------------------------------
+# ⚠️ SCOPE — read this BEFORE the leak description below. PRODUCTION DOES NOT
+# RUN THIS ENTRYPOINT. There is no separate worker service and has not been
+# since April 2026; the dispatch/watchdog/enqueue loops were merged into the
+# FastAPI process, which has called configure_logging() since Phase 16. See the
+# JOB-04 note in main() (~line 1224 below) for the 2026-08-17 verification, and
+# main.py:297, which logs "Worker starting as %s (merged into API)" — Plan 02
+# measured that line on PROD. So this change closes the STANDALONE and re-split
+# paths. It is PREVENTIVE there, not corrective, and the "unconditional leak"
+# below is a property of the standalone worker path, NOT of production logs.
+#
+# ⛔ Do not scope a credential-disclosure incident off the paragraph below. It
+# does not say production logs were unredacted before 2026-08-26, because they
+# were not; a key rotation for every connected venue key and a log-drain purge
+# would be scoped on a misreading. This block and the JOB-04 note must keep
+# saying the same thing (WR-08, Phase 163 review — they did not).
+#
+# Until 2026-08-26 this module contained ZERO references to configure_logging or
+# structlog, so a process started via `python -m main_worker` — the standalone
+# form of the one that runs ccxt long-fetch and MT5 sync — emitted every line
+# through structlog's DEFAULT chain and never installed the stdlib
+# `setLogRecordFactory` bridge. That is not a theoretical frozen-proxy risk; on
+# that path it is an unconditional leak of every line the worker writes:
+#
+#   * no `_redact_processor`, so `log.info(..., api_key=...)` renders the value
+#     verbatim (MEASURED 2026-08-26 — see tests/test_structlog_frozen_proxy.py
+#     ::TestModeBLeakMechanism::test_a_line_emitted_before_configure_leaks);
+#   * no LogRecord factory, so the exact leak that factory exists to stop —
+#     `logger.warning("ccxt: %s", str(exc))` carrying the HMAC signature
+#     embedded in a ccxt exception (services/logging_config.py) — was unguarded;
+#   * `mt5linux` f-string-interpolates the MT5 password into remotely-eval'd
+#     source, so MT5 exception TEXT is itself a credential surface
+#     (services/mt5_client.py, T-134-01 / T-153.3-23).
+#
+# Placed at MODULE scope, ABOVE every first-party import below, rather than
+# inside main(): a first-party module that logs at import time would otherwise
+# emit before any main()-time call could run, and `python -m main_worker`
+# executes this module top-down before main() exists. The ordering is a gate —
+# tests/test_structlog_frozen_proxy.py::TestEntrypointOrdering fails if this
+# call ever sinks below the imports again. Idempotent (services/logging_config.py
+# install-state gate), so a later call from a test or a re-entry is harmless.
+from services.logging_config import configure_logging
+
+configure_logging()
+
 import main_worker_healthz  # top-level module (not in services/); stdlib-only, no cycle
-from services.db import db_execute, get_supabase
+from sentry_init import init_sentry
+from services.db import db_execute, db_read_with_retry, get_supabase
 from services.encryption import validate_kek_on_startup
-from services.job_worker import DispatchOutcome, JobStatus, Priority, dispatch
+from services.job_worker import DispatchOutcome, ErrorKind, JobStatus, Priority, dispatch
 
 logger = logging.getLogger("quantalyze.analytics.worker")
+
+
+# ---------------------------------------------------------------------------
+# Local worker must never drive PROD (incident 2026-08-20)
+# ---------------------------------------------------------------------------
+# The PROD Supabase project ref (khslejtfbuezsmvmtsdn.supabase.co). Already
+# public knowledge — it appears in .github/workflows/ — named here so the guard
+# below can refuse to run worker loops against it off-platform.
+_PROD_SUPABASE_REF: Final = "khslejtfbuezsmvmtsdn"
+
+
+def assert_worker_not_aimed_at_prod_off_platform() -> None:
+    """Fail loud instead of silently becoming a prod worker on a laptop.
+
+    2026-08-20: a locally-started ``uvicorn main:app`` claimed real PROD
+    compute jobs within seconds, because analytics-service/.env pointed at the
+    prod Supabase project and main.py's lifespan starts the worker loops. A
+    claimed job whose worker then dies becomes an orphaned ``running`` row —
+    the exact failure class the Phase 143/144 sweeps exist to clean up.
+
+    Railway is the only sanctioned prod runtime; it injects
+    RAILWAY_ENVIRONMENT_NAME, and no local shell does. For a deliberate,
+    sanctioned emergency run against prod, set
+    ALLOW_PROD_WORKER_OFF_PLATFORM=1 — the refusal message says so, so the
+    escape hatch is discoverable exactly when it is needed.
+    """
+    if _PROD_SUPABASE_REF not in os.getenv("SUPABASE_URL", ""):
+        return
+    if os.getenv("RAILWAY_ENVIRONMENT_NAME"):
+        return
+    if os.getenv("ALLOW_PROD_WORKER_OFF_PLATFORM") == "1":
+        logger.warning(
+            "Worker aimed at PROD off-platform — explicitly allowed via "
+            "ALLOW_PROD_WORKER_OFF_PLATFORM=1"
+        )
+        return
+    raise RuntimeError(
+        "Refusing to start worker loops: SUPABASE_URL points at the PROD "
+        f"Supabase project ({_PROD_SUPABASE_REF}) but this process is not "
+        "running on Railway. A local worker claims real prod compute_jobs and "
+        "strands them as orphaned 'running' rows on exit. Point SUPABASE_URL "
+        "at the TEST project — analytics-service/.env.qa-local is auto-loaded "
+        "first when present, so create it (or fix its SUPABASE_URL) — or set "
+        "ALLOW_PROD_WORKER_OFF_PLATFORM=1 for a deliberate emergency run."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -86,6 +194,20 @@ class _ClaimedJobOptional(TypedDict, total=False):
     claim_token: str | None
     metadata: dict[str, Any] | None
     exchange: str | None
+    # `attempts INTEGER NOT NULL DEFAULT 0` (20260411144407:121); the claim RPC
+    # does `attempts = attempts + 1` before returning the row
+    # (20260719073701:185), so a freshly-claimed row carries 1.
+    #
+    # ⚠️ NOT a heal counter, and nothing in this module may treat it as one.
+    # The reconcile-sweep alert de-dupe read it (`attempts <= 1`) and LOST the
+    # alert: `reset_stalled_compute_jobs` — the watchdog this worker calls —
+    # resets a stalled row to 'pending' WITHOUT decrementing attempts
+    # (20260516104201:657-670, :681-694), so a heal whose first claim crashed
+    # returns at attempts=2 and was silently never reported. The de-dupe is now
+    # keyed on the heal identity instead (see _reconcile_heal_key). Declared
+    # here because it is part of the claimed-row contract, not because the
+    # alert path consumes it.
+    attempts: int
 
 
 class ClaimedJob(_ClaimedJobOptional):
@@ -245,32 +367,42 @@ WATCHDOG_PER_KIND_OVERRIDES: dict[str, str] = {
 # ---------------------------------------------------------------------------
 # Late-mark detection (audit-2026-05-07 P97 / G12.A.2 — claim-token fence)
 # ---------------------------------------------------------------------------
-# Migration 117 raises `serialization_failure` (PostgreSQL SQLSTATE 40001)
-# from mark_compute_job_done / mark_compute_job_failed when the caller's
-# p_claim_token doesn't match the row's current claim_token. This means
-# the watchdog reclaimed the row and a second worker has taken over —
-# the late mark is expected behavior, not a failure. Detect by:
+# mark_compute_job_done / mark_compute_job_failed raise SQLSTATE 55006
+# (object_in_use) when the caller's p_claim_token doesn't match the row's
+# current claim_token. This means the watchdog reclaimed the row and a
+# second worker has taken over — the late mark is expected behavior, not a
+# failure. Detect by:
 #   (a) sniffing the PostgREST APIError `.code` attribute for the
-#       SQLSTATE '40001', OR
+#       SQLSTATE '55006', OR
 #   (b) for transports that don't surface .code cleanly, checking for our
 #       specific RAISE message literal 'preempted by watchdog reclaim'
-#       (set in migration 117 STEP 4 + STEP 5).
+#       (set in migration 117 STEP 4 + STEP 5, kept byte-identical since).
+#
+# Phase 164.9.3.2: migration 117 raised these as serialization_failure
+# (40001). PostgREST 14 re-runs a transaction that raised 40001 without
+# bound, so a stale-token mark never returned to the worker at all; the
+# fence now raises 55006 instead. The literal branch (b) covers ONE deploy
+# order: migration first, old worker. The body answers a 55006 once, and an
+# old classifier (which checks code '40001') matches it by the literal. The
+# reverse order (new worker, old body) is NOT covered: the body still raises
+# 40001, PostgREST 14 re-runs it without bound, and no response ever reaches
+# this classifier. That is the pre-fix hang, unchanged, until the migration
+# applies.
 #
 # PR #149 review I4 (maintainability conf 8 + security conf 6): the
 # previous version also matched the bare strings '40001' and
 # 'serialization_failure' anywhere in the message. That collides with
 # any OTHER source of a serialization conflict (manual SERIALIZABLE
 # isolation, advisory-lock contention surfacing as 40001, third-party
-# library messages embedding '40001' for unrelated reasons). Tighten to:
-# either .code == '40001' OR our specific message literal. This makes
-# the detection P97-specific and prevents silent swallowing of unrelated
-# 40001s.
+# library messages embedding '40001' for unrelated reasons). Tightened to
+# a code match OR our specific message literal; since 164.9.3.2 the code
+# is 55006, so a bare 40001 without the literal is never swallowed.
 _PREEMPTED_MESSAGE_LITERAL = "preempted by watchdog reclaim"
 
 
 def _is_serialization_failure(exc: BaseException) -> bool:
     code = getattr(exc, "code", None)
-    if code == "40001":
+    if code == "55006":
         return True
     msg = str(exc) if exc is not None else ""
     return _PREEMPTED_MESSAGE_LITERAL in msg
@@ -316,6 +448,68 @@ _FALLBACK_CLAIM_RPC: bool = False
 _FALLBACK_REPROBE_INTERVAL_S: float = 300.0  # re-probe the priority RPC every 5 min
 _FALLBACK_LATCHED_AT: float = 0.0
 
+# --------------------------------------------------------------------------
+# JOB-04 / SC#1 — reconcile-sweep alert de-dupe, keyed on the HEAL
+# --------------------------------------------------------------------------
+# The alert must fire ONCE PER HEAL, not once per CLAIM. The marker is not
+# consumed: it lives in compute_jobs.metadata for the row's whole lifetime and
+# claim_compute_jobs_with_priority MERGES metadata
+# (`metadata = COALESCE(metadata,'{}') || jsonb_build_object(...)`,
+# 20260719073701:190-198), so it survives every re-claim. Unconditional
+# emission would report ONE healed strategy as N events and turn a flapping job
+# into an alert storm on a warning-level channel.
+#
+# ⚠️ THIS MUST NOT BE KEYED ON `attempts`. It was, as `attempts <= 1`, and that
+# LOST the alert outright in the case an operator most needs paged on.
+# MEASURED 2026-08-17: the watchdog this worker actually calls is
+# reset_stalled_compute_jobs (watchdog_tick below), whose two UPDATEs set
+# status='pending' and DO NOT touch attempts (20260516104201:657-670, :681-694)
+# — unlike its sibling reclaim_stuck_compute_jobs, which decrements
+# (`attempts = GREATEST(attempts - 1, 0)`, :596). failed_retry re-claim keeps
+# the incremented count too. So: sweep heals -> the first claim dies before it
+# reaches the emission below (OOM, SIGKILL, host loss) -> the watchdog resets
+# the row -> re-claim carries attempts=2 -> `2 <= 1` is False -> the heal is
+# NEVER reported. A dropped enqueue healed after a worker crash is exactly the
+# incident SC#1 exists to surface, and `attempts` silently excluded it.
+#
+# The key is therefore the HEAL IDENTITY — the job id plus the sweep's own
+# `detected_at` stamp — which is stable across every re-claim of the same heal
+# and distinct for a genuinely new one. Re-claim of the SAME heal is
+# suppressed; a heal whose first claim never emitted is still reported.
+#
+# The entry is recorded only AFTER a successful emission (see the call site),
+# so this stays FAIL-OPEN in the same direction the rest of this path chose:
+# a crashed or raising emission leaves no entry and the next claim re-alerts.
+# Over-alerting is recoverable; a silent heal is the defect class being closed.
+#
+# Bounded FIFO, because a worker process is long-lived and this must not grow
+# without limit. Eviction can at worst cost ONE duplicate alert for a job
+# re-claimed after 4096 intervening heals — the recoverable direction again.
+# In-process (not persisted) is deliberate and sufficient: a worker restart
+# loses the set, which can only ever cause a re-alert, never a lost one.
+_RECONCILE_ALERT_DEDUPE_MAX: Final[int] = 4096
+_RECONCILE_ALERTED: dict[str, None] = {}
+
+
+def _reconcile_heal_key(job: ClaimedJob, meta: dict[str, Any]) -> str:
+    """Stable identity for ONE heal: the job row plus the sweep's detected_at.
+
+    Never includes `attempts` or any other value a re-claim mutates.
+    """
+    return f"{job.get('id')}|{meta.get('detected_at')}"
+
+
+def _reconcile_alert_already_sent(key: str) -> bool:
+    return key in _RECONCILE_ALERTED
+
+
+def _record_reconcile_alert(key: str) -> None:
+    """Record that SC#1's alert HAS been emitted for this heal (bounded FIFO)."""
+    _RECONCILE_ALERTED[key] = None
+    while len(_RECONCILE_ALERTED) > _RECONCILE_ALERT_DEDUPE_MAX:
+        # dicts preserve insertion order (3.7+), so this evicts oldest-first.
+        _RECONCILE_ALERTED.pop(next(iter(_RECONCILE_ALERTED)))
+
 
 def _is_undefined_function(exc: BaseException) -> bool:
     """Return True iff `exc` looks like a PostgREST APIError signaling SQLSTATE
@@ -357,7 +551,8 @@ def _is_undefined_function_structured(exc: BaseException) -> bool:
 # Safe mark wrapper (DRY for the 3 try/except blocks in dispatch_tick)
 # ---------------------------------------------------------------------------
 # PR #149 review I5 (maintainability conf 9) + I6 (red-team conf 8):
-# extract the "call mark RPC, swallow 40001, log LATE_MARK_IGNORED, re-
+# extract the "call mark RPC, swallow a fence preemption (SQLSTATE 55006,
+# see `_is_serialization_failure`), log LATE_MARK_IGNORED, re-
 # raise anything else" pattern that was repeated 3 times in dispatch_tick.
 # Single source of truth = single place to fix any future bug in the
 # late-mark detection / logging contract.
@@ -368,14 +563,15 @@ def _is_undefined_function_structured(exc: BaseException) -> bool:
 #
 # `outer_exc` is set when called from the outer-catch fallback path
 # (I6): the original dispatch exception that triggered the
-# `_mark_failed_fallback`. If `_safe_mark` itself swallows a 40001 in
-# that path, the LATE_MARK_IGNORED log line carries
+# `_mark_failed_fallback`. If `_safe_mark` itself swallows a fence
+# preemption in that path, the LATE_MARK_IGNORED log line carries
 # `event_type="preempted_after_dispatch_error"` and includes the outer
 # exception context — so the late-mark line subsumes the original
 # error log instead of triplicating it.
 #
-# Returns: True iff `_safe_mark` swallowed a 40001 (LATE_MARK_IGNORED
-# fired). False iff the mark succeeded normally. Re-raises any other
+# Returns: True iff `_safe_mark` swallowed a fence preemption that
+# `_is_serialization_failure` classifies (LATE_MARK_IGNORED fired).
+# False iff the mark succeeded normally. Re-raises any other
 # exception. PR #149 second-pass review fix #4 (HIGH conf 8): callers
 # in the outer-catch fallback path use the return value to decide
 # whether to log the original `dispatch_tick: unhandled error` line —
@@ -385,7 +581,7 @@ def _is_undefined_function_structured(exc: BaseException) -> bool:
 # triplicate the same conceptual event for Sentry's severity-based
 # alert pipeline.
 async def _safe_mark(
-    invoke_rpc,
+    invoke_rpc: Callable[[], object],
     *,
     job_id: str,
     claim_token: str | None,
@@ -465,7 +661,7 @@ async def dispatch_tick(worker_id: str) -> None:
     # the metadata stamp are byte-identical to prod's steady state.
     flag_active = True
 
-    def _claim_priority():
+    def _claim_priority() -> Any:
         params: dict[str, Any] = {
             "p_batch_size": 5,
             "p_worker_id": worker_id,
@@ -475,7 +671,7 @@ async def dispatch_tick(worker_id: str) -> None:
         params.update(_claim_kind_args(WORKER_CLAIM_ROLE))
         return supabase.rpc("claim_compute_jobs_with_priority", params).execute()
 
-    def _claim_legacy():
+    def _claim_legacy() -> Any:
         # Pre-migration-086 signature: 2 args, no priority/throttle.
         # Used only as the fallback path when migration 086 has not been
         # applied to this Supabase project (audit-2026-05-07 C-0190).
@@ -560,7 +756,11 @@ async def dispatch_tick(worker_id: str) -> None:
             )
             _FALLBACK_CLAIM_RPC = False
         try:
-            claim_result = await db_execute(_claim_priority)
+            # [164.5.1-GATEWAY-CEILING-INVERSION]: the Supabase API gateway
+            # cuts off and answers 504 before Postgres reports anything, so a
+            # transient gateway timeout on this claim read is retried rather
+            # than costing the worker a whole tick.
+            claim_result = await db_read_with_retry(_claim_priority)
         except Exception as exc:  # noqa: BLE001
             if _is_undefined_function(exc):
                 # Only a STRUCTURED SQLSTATE 42883 latches; a message-only
@@ -581,6 +781,11 @@ async def dispatch_tick(worker_id: str) -> None:
                         "latched": structured,
                     },
                 )
+                # This fallback is the LAST resort of an already-failed tick
+                # (the priority RPC just raised); it deliberately stays on
+                # the fail-fast db_execute seam, not db_read_with_retry, so
+                # it does not spend a second retry budget on top of the one
+                # the priority claim already spent.
                 claim_result = await db_execute(_claim_legacy)
             else:
                 raise
@@ -619,10 +824,91 @@ async def dispatch_tick(worker_id: str) -> None:
         # The claim RPC stamps a fresh UUID into compute_jobs.claim_token at
         # claim time; we read it from the row here and pass it through to the
         # mark RPCs. If the watchdog reclaims this row mid-handler and a
-        # second worker takes over, our late mark RPC raises
-        # serialization_failure — that's the expected late-mark-ignored path,
-        # not a failure. INVEST-P97 §Recommendation point 2.
+        # second worker takes over, our late mark RPC raises SQLSTATE 55006
+        # (object_in_use) carrying the 'preempted by watchdog reclaim'
+        # literal — that's the expected late-mark-ignored path, not a
+        # failure. INVEST-P97 §Recommendation point 2.
         claim_token = job.get("claim_token")
+
+        # JOB-04 (Phase 143): a job carrying the reconcile-sweep marker means an
+        # enqueue was DROPPED and the hourly sweep healed it by absence — the
+        # csv-finalize `after()` callback never ran, so neither the
+        # enqueue_compute_job error branch nor the failed-analytics placeholder
+        # ever executed and nothing in the request path could have reported it.
+        # Alerting HERE, on claim, is the whole alert: there is no cron->Sentry
+        # bridge in this repo (20260802120000 header) and pg_net is
+        # fire-and-forget, so a failed POST from the cron body would itself be
+        # silent.
+        #
+        # LATENCY, honestly: sweep tick -> next worker claim, so this is not
+        # instant paging. A fully-down worker emits nothing at all — that case
+        # is independently alarmed by healthz, so this adds no new blind spot,
+        # but do not read this event as a liveness signal.
+        #
+        # The event carries strategy_id (a UUID) and detected_at ONLY. No email,
+        # no CSV content, nothing user-supplied (T-143-06); init_sentry() also
+        # sets send_default_pii=False and a before_send redactor.
+        #
+        # The read is placed before the `try:` below on purpose: that try owns
+        # the _heartbeat task's try/finally, and the marker read has no business
+        # inside the heartbeat's error handling. Its own try/except is therefore
+        # load-bearing — an unwrapped raise here escapes dispatch_tick entirely
+        # and takes every remaining job in the claimed batch with it (T-143-11).
+        # Telemetry must never fail the work it observes (main.py:186-188).
+        try:
+            _meta = job.get("metadata") or {}
+            # Fire once per HEAL, not once per CLAIM — de-duped on the heal's
+            # own identity (job id + the sweep's detected_at), never on
+            # `attempts`. See _reconcile_heal_key above for the full rationale
+            # and for the MEASURED reason `attempts <= 1` was wrong: the
+            # watchdog this worker calls does not decrement attempts, so a heal
+            # whose first claim crashed came back at attempts=2 and was silently
+            # never reported.
+            #
+            # The record is written only AFTER capture_message returns, so this
+            # is FAIL-OPEN: if the emission raises (the except below logs it) or
+            # the process dies mid-emission, no entry is recorded and the next
+            # claim of the same heal re-alerts. A silent heal is the defect
+            # class being closed; a duplicate alert is recoverable.
+            _heal_key = _reconcile_heal_key(job, _meta)
+            if _meta.get("source") == "reconcile-sweep" and not _reconcile_alert_already_sent(_heal_key):
+                with sentry_sdk.new_scope() as scope:
+                    scope.set_tag("surface", "reconcile-sweep")
+                    scope.set_tag("job_kind", job.get("kind"))
+                    scope.set_extra("strategy_id", job.get("strategy_id"))
+                    scope.set_extra("detected_at", _meta.get("detected_at"))
+                    sentry_sdk.capture_message(
+                        "Dropped compute-job enqueue healed by reconciliation sweep",
+                        level="warning",
+                    )
+                _record_reconcile_alert(_heal_key)
+        except Exception as exc:  # noqa: BLE001
+            # LOUD, not silent (143 review WR-02). The swallow itself stays --
+            # telemetry must never fail the work it observes, and the paragraph
+            # above explains why an unwrapped raise here would take the whole
+            # claimed batch down. What must NOT stay is the silence: a swallow
+            # with no log reproduces exactly the silently-failing-alert defect
+            # class this phase REJECTED the pg_net -> Sentry bridge for, one
+            # layer in. If the emission itself ever breaks (an SDK API change
+            # removing new_scope(), a scope misuse, a metadata shape the .get()
+            # chain trips on) the alert dies and nothing anywhere says so.
+            #
+            # No unit test can observe that: every test injects a fake
+            # sentry_sdk in place of the real module, so the real emission path
+            # is never exercised. This log line is the ONLY signal that SC#1's
+            # alert did not fire for a job the sweep healed. Every other broad
+            # except in this module logs (_safe_mark, the claim-RPC fallbacks,
+            # _daily_enqueue_already_ran_today, the three loop wrappers); this
+            # one was the outlier.
+            logger.warning(
+                "reconcile-sweep Sentry emission FAILED for job %s (strategy %s): "
+                "%s. The heal itself still proceeds and the job dispatches "
+                "normally, but SC#1's alert did NOT fire for this job -- a "
+                "dropped compute-job enqueue was healed SILENTLY.",
+                job.get("id"), job.get("strategy_id"), exc,
+                extra={"event_type": "reconcile_sweep_alert_emit_failed"},
+            )
+
         try:
             # FLIPRETRY-04: keep healthz HONEST during ONE long-but-alive
             # dispatch. A single backfill crawl can legitimately exceed
@@ -663,7 +949,7 @@ async def dispatch_tick(worker_id: str) -> None:
                     pass
 
             if result.outcome == DispatchOutcome.DONE:
-                def _mark_done(jid=job["id"], tok=claim_token):
+                def _mark_done(jid: str = job["id"], tok: str | None = claim_token) -> None:
                     supabase.rpc(
                         "mark_compute_job_done",
                         {"p_job_id": jid, "p_claim_token": tok},
@@ -680,11 +966,11 @@ async def dispatch_tick(worker_id: str) -> None:
 
             elif result.outcome == DispatchOutcome.FAILED:
                 def _mark_failed(
-                    jid=job["id"],
-                    err=result.error_message,
-                    kind=result.error_kind,
-                    tok=claim_token,
-                ):
+                    jid: str = job["id"],
+                    err: str | None = result.error_message,
+                    kind: ErrorKind | None = result.error_kind,
+                    tok: str | None = claim_token,
+                ) -> None:
                     supabase.rpc(
                         "mark_compute_job_failed",
                         {
@@ -718,7 +1004,8 @@ async def dispatch_tick(worker_id: str) -> None:
             #
             # PR #149 second-pass review fix #4 (HIGH conf 8): defer the
             # "dispatch_tick: unhandled error" log line until AFTER the
-            # fallback mark resolves. If the mark swallows a 40001
+            # fallback mark resolves. If the mark swallows a fence
+            # preemption that `_is_serialization_failure` classifies
             # (LATE_MARK_IGNORED with event_type="preempted_after_
             # dispatch_error"), the late-mark line already carries the
             # outer_exc context via its `extra` dict — logging the
@@ -729,8 +1016,8 @@ async def dispatch_tick(worker_id: str) -> None:
             # critical dispatch failure.
             try:
                 def _mark_failed_fallback(
-                    jid=job["id"], err=str(exc)[:500], tok=claim_token,
-                ):
+                    jid: str = job["id"], err: str = str(exc)[:500], tok: str | None = claim_token,
+                ) -> None:
                     supabase.rpc(
                         "mark_compute_job_failed",
                         {
@@ -765,7 +1052,8 @@ async def dispatch_tick(worker_id: str) -> None:
                 # outer exc context lives in that record's `extra`
                 # dict. Don't double-log.
             except Exception as mark_exc:  # noqa: BLE001
-                # `_safe_mark` only re-raises NON-40001 exceptions, so we
+                # `_safe_mark` only re-raises exceptions that
+                # `_is_serialization_failure` does not classify, so we
                 # reach this branch when the fallback mark itself failed
                 # for a reason unrelated to the P97 fence. The original
                 # dispatch error is also unattributed — log BOTH so the
@@ -788,10 +1076,21 @@ async def watchdog_tick() -> None:
     """Call reset_stalled_compute_jobs with per-kind thresholds."""
     supabase = get_supabase()
 
+    # `reset_stalled_compute_jobs` is a WRITE: it flips stalled `running`
+    # rows back to `pending`. It is nonetheless SAFE to retry, because its
+    # WHERE clause only matches rows that are still `status='running'` past
+    # the staleness threshold — a second attempt after a first one already
+    # committed matches nothing and is a no-op. What a retry CANNOT recover
+    # is the COUNT: the committed rows are gone from the filter, so the
+    # returned number under-states what was actually reset (WR-10).
+    attempts = 0
+
     # Pass the overrides dict directly; PostgREST coerces a JSON object to
     # JSONB. json.dumps() would send a JSON string, which becomes a JSONB
     # scalar and trips jsonb_object_keys() with "cannot call ... on a scalar".
-    def _reset():
+    def _reset() -> Any:
+        nonlocal attempts
+        attempts += 1
         return supabase.rpc(
             "reset_stalled_compute_jobs",
             {
@@ -800,9 +1099,27 @@ async def watchdog_tick() -> None:
             },
         ).execute()
 
-    result = await db_execute(_reset)
+    # [164.5.1-GATEWAY-CEILING-INVERSION]: retry a transient Supabase gateway
+    # timeout on this watchdog write rather than losing a whole tick. The
+    # seam is named for reads; this call site is idempotent-by-filter (see
+    # above), which is what makes consuming it legitimate here.
+    result = await db_read_with_retry(_reset)
     reset_count = result.data or 0
-    if reset_count:
+    if attempts > 1:
+        # A 504 delivered AFTER the server committed is indistinguishable
+        # here from one delivered before it, so `reset_count` is a LOWER
+        # BOUND, not a measurement. Log unconditionally at WARNING — a
+        # silent zero would make "reclaimed nothing" and "reclaimed, then
+        # lost the receipt to a post-commit gateway timeout" look identical.
+        logger.warning(
+            "Watchdog reclaimed at least %d stalled jobs (count is a LOWER "
+            "BOUND: the reset RPC was retried across %d attempts after a "
+            "gateway timeout, and an attempt that committed before timing "
+            "out no longer matches the staleness filter)",
+            reset_count,
+            attempts,
+        )
+    elif reset_count:
         logger.warning("Watchdog reclaimed %d stalled jobs", reset_count)
 
 
@@ -810,7 +1127,7 @@ async def daily_enqueue_tick() -> None:
     """Call enqueue_poll_positions_for_all_strategies and log the count."""
     supabase = get_supabase()
 
-    def _enqueue():
+    def _enqueue() -> Any:
         return supabase.rpc(
             "enqueue_poll_positions_for_all_strategies", {}
         ).execute()
@@ -844,7 +1161,7 @@ async def _daily_enqueue_already_ran_today() -> bool:
     try:
         supabase = get_supabase()
 
-        def _query():
+        def _query() -> Any:
             return (
                 supabase.table("compute_jobs")
                 .select("created_at")
@@ -921,6 +1238,17 @@ async def watchdog_loop(interval: float = 60.0) -> None:
 
 async def daily_enqueue_loop(interval: float = 86400.0) -> None:
     """Daily enqueue loop: once per day, seed poll_positions jobs."""
+    # A `backfill` worker runs NEXT TO the API's merged worker (FLIP runbook
+    # Step 1), which already seeds the daily poll. Seeding here too would give
+    # every strategy a second poll_positions job per day (the in-flight dedup
+    # does not cover completed rows), doubling exchange calls.
+    if WORKER_CLAIM_ROLE == "backfill":
+        logger.info(
+            "daily_enqueue: disabled for WORKER_CLAIM_ROLE=backfill — the "
+            "interactive/merged worker owns the daily poll seed.",
+            extra={"event_type": "daily_enqueue_disabled_backfill_role"},
+        )
+        return
     # Run on startup ONLY if the daily enqueue hasn't already run today.
     # redteam-2026-05 W1 (LOW9): without this gate, every Railway
     # redeploy/crash within one day re-ran the full enqueue, inflating the
@@ -964,6 +1292,38 @@ async def main() -> None:
         level=logging.INFO,
         format="%(asctime)s %(name)s %(levelname)s %(message)s",
     )
+
+    # JOB-04 (Phase 143): main_worker.py carried zero Sentry references, so this
+    # module had no Sentry client when run STANDALONE (`python -m main_worker`,
+    # `npm run worker:dev`). That gap is silent by construction:
+    # sentry_sdk.capture_*() with no initialized client is a NO-OP that raises
+    # nothing and logs nothing, so the reconcile-sweep alert in dispatch_tick()
+    # would emit into the void while every unit test (which spies on the SDK)
+    # stayed green. An alerting channel that fails silently is the defect class
+    # this milestone has already closed twice, and the reason the pg_net->Sentry
+    # bridge was rejected.
+    #
+    # ⚠️ DO NOT read this as "production was unalerted before Phase 143" — it was
+    # NOT. Verified 2026-08-17 (Phase 143 Plan 04): PRODUCTION DOES NOT RUN THIS
+    # ENTRYPOINT. There is no separate worker service and has not been since
+    # April — the loops were merged into the FastAPI process (main.py:80-86,
+    # after the 2026-04-20 -> 04-22 "jobs queued but never processed" incident),
+    # dispatch_loop runs as an asyncio task in the app lifespan (main.py:271),
+    # and that process has called init_sentry() at import since Phase 16
+    # (main.py:69) with SENTRY_DSN set on its Railway service.
+    # So the init below closes the STANDALONE path only. It is not dead code —
+    # it is what makes a re-split, or a local `python -m main_worker` run,
+    # observable — but it is not the production path.
+    #
+    # Placed AFTER logging.basicConfig (so logging is wired before any sentry
+    # import side effects, matching main.py:60-69) and BEFORE the KEK check, so
+    # a KEK failure at boot is itself reportable. No-ops when SENTRY_DSN is
+    # unset (sentry_init.py:347-350), which keeps local dev and CI unchanged.
+    init_sentry()
+
+    # Hard stop BEFORE any loop can claim a job (see docstring for the
+    # 2026-08-20 incident this guards against).
+    assert_worker_not_aimed_at_prod_off_platform()
 
     logger.info("Worker starting as %s", WORKER_ID)
 

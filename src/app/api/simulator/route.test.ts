@@ -1,5 +1,13 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { NextRequest, NextResponse } from "next/server";
+// Phase 140 / SEAM-04: the REAL breaker error, taken from the dependency-free
+// leaf. It must NEVER be picked up through `@/lib/analytics-client` — this file
+// mocks that module wholesale (a full factory, no importActual), so the class
+// read through it would be `undefined` and `err instanceof undefined` throws a
+// TypeError from inside the route's own catch block (threat T-140-30). Nothing
+// mocks the leaf, and this file never calls vi.resetModules(), so a static
+// import here is the same class object the route narrows against.
+import { CircuitOpenError } from "@/lib/seam-errors";
 
 /**
  * Tests for POST /api/simulator (G15-002).
@@ -97,10 +105,36 @@ vi.mock("@/lib/ratelimit", () => ({
 vi.mock("@/lib/analytics-client", async () => {
   class AnalyticsUpstreamError extends Error {
     readonly status: number;
-    constructor(message: string, status: number) {
+    // 140.3-G5 / SEAMUX-03 — additive third arg mirroring the real class
+    // (`analytics-client.ts:119`, `seamCode: string | null = null`), so the
+    // 4xx-forward arm's `err.seamCode ?? "UNKNOWN"` is falsifiable here.
+    // Every pre-existing 2-arg construction keeps `seamCode = null`.
+    readonly seamCode: string | null;
+    // 161-06 / WIZERR-05 — the 4th and 5th, mirroring the real class
+    // (`analytics-client.ts`) parameter-for-parameter. `dependency` was added
+    // there by 140.3-11 and this double never picked it up; `retryAfterSeconds`
+    // is 161-06's. Both are additive and optional, so every pre-existing
+    // construction in this file keeps passing fewer args and keeps defaulting.
+    // ⚠️ ORDER IS THE POINT, not just presence: with `dependency` missing, a
+    // 4th positional argument would be the WAIT here and the DEPENDENCY NAME in
+    // production. `analytics-upstream-error.parity.invariant.test.ts` is what
+    // makes that a failure instead of a convention — it is why this block can
+    // no longer drift in silence.
+    readonly dependency: string | null;
+    readonly retryAfterSeconds: number | null;
+    constructor(
+      message: string,
+      status: number,
+      seamCode: string | null = null,
+      dependency: string | null = null,
+      retryAfterSeconds: number | null = null,
+    ) {
       super(message);
       this.name = "AnalyticsUpstreamError";
       this.status = status;
+      this.seamCode = seamCode;
+      this.dependency = dependency;
+      this.retryAfterSeconds = retryAfterSeconds;
     }
   }
   class AnalyticsTimeoutError extends Error {
@@ -476,6 +510,40 @@ describe("POST /api/simulator", () => {
     expect(body.error).toMatch(/taking longer/i);
   });
 
+  // Phase 140 / SEAM-04 (SC-5c): a tripped Railway breaker means the simulator
+  // never issued a request at all. Before this arm it fell through to the
+  // generic 500, which tells the client to retry immediately against a service
+  // already known to be down — and carries no cooldown hint.
+  it("TC11 — CircuitOpenError → 503 + Retry-After carrying the breaker's own TTL (SC-5c)", async () => {
+    // 11, deliberately NOT the 30s breaker default (which is simultaneously
+    // BREAKER_COOLDOWN_S and DEFAULT_RETRY_AFTER_S): a hardcoded "30" in the
+    // route would pass a 30-second fixture but fails this one.
+    STATE.simulateImpl = async () => {
+      throw new CircuitOpenError(11);
+    };
+    const { POST } = await import("./route");
+    const res = await POST(
+      makeRequest({
+        portfolio_id: PORTFOLIO_ID,
+        candidate_strategy_id: CANDIDATE_ID,
+      }),
+    );
+    expect(res.status).toBe(503);
+    expect(res.headers.get("Retry-After")).toBe("11");
+    // M-0957: the breaker arm is a response like any other — no-store holds.
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+    const body = await res.json();
+    expect(body.error).toBe(
+      "The analytics service is temporarily unavailable. Please try again in a moment.",
+    );
+    // T-140-17: the client-facing copy names no infrastructure.
+    expect(body.error).not.toMatch(/circuit|breaker|upstash|railway|http/i);
+    // A breaker trip is a shared infrastructure state, not a per-request
+    // defect: capturing it would emit one Sentry event per request for the
+    // whole cooldown window. The console.error line is the operator signal.
+    expect(captureSpy).not.toHaveBeenCalled();
+  });
+
   it("TC10 — 404 when portfolio ownership check fails", async () => {
     STATE.portfolioFound = false;
     const { POST } = await import("./route");
@@ -488,5 +556,239 @@ describe("POST /api/simulator", () => {
     expect(res.status).toBe(404);
     const body = await res.json();
     expect(body.error).toBe("Portfolio not found");
+  });
+});
+
+/**
+ * 140.3-G5 / SEAMUX-03 — a machine `code` on EVERY error arm this route itself
+ * emits, so a client discriminates the fault on a stable token rather than
+ * sniffing the human sentence. Baseline was ZERO coded arms here.
+ *
+ * OUT OF SCOPE (helper-emitted, not the route's own arm): the approval-gate
+ * 403 (`assertProfileApproved`) — the same class the verifier accepted keys/sync
+ * as complete without touching (withAuth's 401). Its body is the helper's to
+ * code, not this plan's. Every arm below is emitted inline by route.ts — INCLUDING
+ * the 429 and the limiter-misconfigured 503, which this route builds by hand.
+ */
+describe("[140.3-G5 / SEAMUX-03] POST /api/simulator — a machine code on every arm", () => {
+  const req = () =>
+    makeRequest({
+      portfolio_id: PORTFOLIO_ID,
+      candidate_strategy_id: CANDIDATE_ID,
+    });
+
+  it("401 (no session) → UNAUTHENTICATED", async () => {
+    STATE.authUser = null;
+    const { POST } = await import("./route");
+    const res = await POST(req());
+    expect(res.status).toBe(401);
+    expect((await res.json()).code).toBe("UNAUTHENTICATED");
+  });
+
+  it("400 invalid JSON → VALIDATION_FAILED", async () => {
+    const { POST } = await import("./route");
+    const res = await POST(makeRequest(null, { rawBody: "{not json" }));
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe("VALIDATION_FAILED");
+  });
+
+  it("400 schema parse failure → VALIDATION_FAILED", async () => {
+    const { POST } = await import("./route");
+    const res = await POST(makeRequest({ portfolio_id: PORTFOLIO_ID }));
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe("VALIDATION_FAILED");
+  });
+
+  it("503 limiter-misconfigured → SEAM_MISCONFIGURED, Retry-After kept", async () => {
+    STATE.checkLimitResult = {
+      success: false,
+      retryAfter: 60,
+      reason: "ratelimit_misconfigured",
+    };
+    const { POST } = await import("./route");
+    const res = await POST(req());
+    expect(res.status).toBe(503);
+    expect(res.headers.get("Retry-After")).toBe("60");
+    expect((await res.json()).code).toBe("SEAM_MISCONFIGURED");
+  });
+
+  it("429 genuine throttle → RATE_LIMITED, retryAfter body field byte-unchanged", async () => {
+    STATE.checkLimitResult = { success: false, retryAfter: 42 };
+    const { POST } = await import("./route");
+    const res = await POST(req());
+    expect(res.status).toBe(429);
+    const body = await res.json();
+    expect(body.code).toBe("RATE_LIMITED");
+    // The retryAfter body field the client disables its button on is untouched.
+    expect(body.retryAfter).toBe(42);
+    expect(res.headers.get("Retry-After")).toBe("42");
+  });
+
+  it("404 portfolio not found → PORTFOLIO_NOT_FOUND", async () => {
+    STATE.portfolioFound = false;
+    const { POST } = await import("./route");
+    const res = await POST(req());
+    expect(res.status).toBe(404);
+    expect((await res.json()).code).toBe("PORTFOLIO_NOT_FOUND");
+  });
+
+  it("503 breaker → CIRCUIT_OPEN, sentence + Retry-After byte-unchanged", async () => {
+    STATE.simulateImpl = async () => {
+      throw new CircuitOpenError(11);
+    };
+    const { POST } = await import("./route");
+    const res = await POST(req());
+    expect(res.status).toBe(503);
+    expect(res.headers.get("Retry-After")).toBe("11");
+    const body = await res.json();
+    expect(body.code).toBe("CIRCUIT_OPEN");
+    expect(body.error).toBe(
+      "The analytics service is temporarily unavailable. Please try again in a moment.",
+    );
+  });
+
+  it("4xx forward preserves err.seamCode VERBATIM", async () => {
+    STATE.simulateImpl = async () => {
+      const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+      throw new AnalyticsUpstreamError("already in portfolio", 400, "ALREADY_IN_PORTFOLIO");
+    };
+    const { POST } = await import("./route");
+    const res = await POST(req());
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    // The forwarded message is unchanged and the upstream's code survives.
+    expect(body.error).toBe("already in portfolio");
+    expect(body.code).toBe("ALREADY_IN_PORTFOLIO");
+  });
+
+  it("4xx forward with a null seamCode → UNKNOWN fallback", async () => {
+    STATE.simulateImpl = async () => {
+      const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+      throw new AnalyticsUpstreamError("bad request upstream", 422);
+    };
+    const { POST } = await import("./route");
+    const res = await POST(req());
+    expect(res.status).toBe(422);
+    expect((await res.json()).code).toBe("UNKNOWN");
+  });
+
+  it("504 timeout → UPSTREAM_TIMEOUT", async () => {
+    STATE.simulateImpl = async () => {
+      const { AnalyticsTimeoutError } = await import("@/lib/analytics-client");
+      throw new AnalyticsTimeoutError("/api/simulator", 15000);
+    };
+    const { POST } = await import("./route");
+    const res = await POST(req());
+    expect(res.status).toBe(504);
+    expect((await res.json()).code).toBe("UPSTREAM_TIMEOUT");
+  });
+
+  it("500 terminal (5xx upstream) → UNKNOWN", async () => {
+    STATE.simulateImpl = async () => {
+      const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+      throw new AnalyticsUpstreamError("upstream traceback", 502);
+    };
+    const { POST } = await import("./route");
+    const res = await POST(req());
+    expect(res.status).toBe(500);
+    expect((await res.json()).code).toBe("UNKNOWN");
+  });
+
+  it("500 terminal (generic throw) → UNKNOWN", async () => {
+    STATE.simulateImpl = async () => {
+      throw new Error("contract drift");
+    };
+    const { POST } = await import("./route");
+    const res = await POST(req());
+    expect(res.status).toBe(500);
+    expect((await res.json()).code).toBe("UNKNOWN");
+  });
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // 161-08 / WIZERR-06 — the terminal arm forwards the CODE and still refuses
+  // the MESSAGE. Same four cases, same shape, as the sister /api/bridge route.
+  //
+  // ⚠️ ORACLE INDEPENDENCE. The static sentence is HAND-TRANSCRIBED, never
+  // imported from the route.
+  // ───────────────────────────────────────────────────────────────────────────
+
+  /** Transcribed by hand from the route's terminal arm. Do NOT import it. */
+  const SIMULATOR_TERMINAL_SENTENCE = "Portfolio impact simulation failed.";
+
+  /**
+   * Shaped like what M-0959/M-0963 keeps off the wire: the `parseResponse()`
+   * contract-violation string with Python schema field names, and a base URL.
+   */
+  const LEAKY_5XX_MESSAGE =
+    "ContractViolation: candidates.0.sharpe_ratio Required from portfolio_simulator at simulator.py:441 — base http://analytics.invalid:8000";
+
+  it("WIZERR-06 (a) — a 5xx seam error carrying a code forwards THAT code, sentence unchanged", async () => {
+    STATE.simulateImpl = async () => {
+      const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+      // The real 500 `portfolio_simulator` emits in simulator.py.
+      throw new AnalyticsUpstreamError(
+        "Portfolio impact simulation failed",
+        500,
+        "SIMULATION_FAILED",
+      );
+    };
+    const { POST } = await import("./route");
+    const res = await POST(req());
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(body.code).toBe("SIMULATION_FAILED");
+    expect(body.error).toBe(SIMULATOR_TERMINAL_SENTENCE);
+  });
+
+  it("WIZERR-06 (b) — a 5xx seam error with a NULL code still answers UNKNOWN, sentence unchanged", async () => {
+    STATE.simulateImpl = async () => {
+      const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+      throw new AnalyticsUpstreamError("upstream traceback", 503);
+    };
+    const { POST } = await import("./route");
+    const res = await POST(req());
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(body.code).toBe("UNKNOWN");
+    expect(body.error).toBe(SIMULATOR_TERMINAL_SENTENCE);
+  });
+
+  it("WIZERR-06 (c) — a NON-SEAM throwable answers UNKNOWN, sentence unchanged", async () => {
+    STATE.simulateImpl = async () => {
+      throw new Error("ENOTFOUND analytics");
+    };
+    const { POST } = await import("./route");
+    const res = await POST(req());
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(body.code).toBe("UNKNOWN");
+    expect(body.error).toBe(SIMULATOR_TERMINAL_SENTENCE);
+  });
+
+  it("WIZERR-06 (d) — NEGATIVE CONTROL: no substring of the thrown message reaches the body", async () => {
+    STATE.simulateImpl = async () => {
+      const { AnalyticsUpstreamError } = await import("@/lib/analytics-client");
+      throw new AnalyticsUpstreamError(LEAKY_5XX_MESSAGE, 500, "SIMULATION_FAILED");
+    };
+    const { POST } = await import("./route");
+    const res = await POST(req());
+    const serialized = JSON.stringify(await res.json());
+
+    // ⚠️ VACUITY GUARD, FIRST — `"anything".includes("")` is `true`.
+    expect(LEAKY_5XX_MESSAGE.trim().length).toBeGreaterThan(40);
+    const tokens = LEAKY_5XX_MESSAGE.split(/\s+/).filter((t) => t.length >= 4);
+    expect(
+      tokens.length,
+      "the leak corpus produced too few usable tokens to be a real control",
+    ).toBeGreaterThan(5);
+
+    for (const token of tokens) {
+      expect(
+        serialized,
+        `the 5xx body leaked "${token}" out of err.message`,
+      ).not.toContain(token);
+    }
+    expect(serialized).not.toContain(LEAKY_5XX_MESSAGE);
+    expect(serialized).toContain("SIMULATION_FAILED");
   });
 });

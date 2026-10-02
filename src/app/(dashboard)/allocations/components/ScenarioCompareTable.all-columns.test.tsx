@@ -25,8 +25,23 @@ import { ScenarioCompareTable, type ScenarioColumn } from "./ScenarioCompareTabl
  *     per-label assertion goes RED.
  *   Both restored to green.
  *
- * Anchored on the verbatim `data-testid="scenario-col-{name}"` (ScenarioCompare
- * Table.tsx:195) + the six METRICS labels — NOT on column ordering or styling.
+ * Anchored on the verbatim `data-testid="scenario-col-{name}"` — grep that literal
+ * in `ScenarioCompareTable.tsx`, it is emitted on the per-scenario `<th>` inside
+ * the `<thead>` row — plus the six METRICS labels. NOT on column ordering or styling.
+ *
+ * (140.5-04) This sentence used to carry a line coordinate into the component
+ * file, and prettier had WRAPPED that coordinate across the comment's line break,
+ * splitting the component's name in two. A line-based scanner therefore read only
+ * the tail fragment as the target, resolved it by basename to the shared table
+ * primitive under `src/components/ui/`, and reported a past-EOF against a file
+ * this test has nothing to do with. Two defects in one coordinate: the line number
+ * had ALSO drifted inside the file it actually meant. Both die with the coordinate.
+ * A symbol survives a reflow AND a line-wrap.
+ *
+ * ⚠️ Deliberately phrased WITHOUT reproducing the old coordinate: the first
+ * attempt at this note quoted it verbatim and the census re-reported the very
+ * past-EOF row the note was documenting as fixed. A correction's own prose is
+ * scanner input (DEF-16-2).
  */
 
 /** A fully-populated (healthy) ComputedMetrics for a given window n. */

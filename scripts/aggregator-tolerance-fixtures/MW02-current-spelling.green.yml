@@ -1,0 +1,128 @@
+# MW02 GREEN FIXTURE — the `frontend` aggregator's result loop AS IT IS SPELLED
+# TODAY. Phase 164.3.1 plan 08, [MUT-W02].
+#
+# PROVENANCE. Quoted from `.github/workflows/ci.yml`, the `frontend` job's
+# "Verify all frontend-* jobs succeeded" step, on 2026-09-01 at 420b8fcb and
+# RE-QUOTED 2026-09-13 (Phase 164.6.3 wave 2) after wave 1 added the uniform
+# docs-only arm. Every `if`/`elif` CONDITION line is byte-faithful to the real
+# file, including indentation; only the `echo` bodies are trimmed, because a
+# fixture carrying six paragraphs of error prose rots for reasons that have
+# nothing to do with what it pins.
+#
+# WHAT IT PINS. Parsing this file must yield EXACTLY the same classification —
+# the same job arms, the same tolerance-bearing set, the same guard variables —
+# as parsing the real `ci.yml`, AND executing it must yield exactly the same
+# tolerance posture in BOTH halves of the docs-only partition. That is the
+# fixture-fidelity check: it proves the red fixtures are being compared against
+# a faithful model of today's workflow rather than against a strawman.
+#
+# ⚠️ IF YOU EDIT THE AGGREGATOR'S RESULT LOOP, UPDATE THIS FILE. The fidelity
+# arm in `src/__tests__/lint-sql-gates.test.ts` will red until you do. That is
+# the intended coupling: a tolerance posture that changes in `ci.yml` and not
+# here is a change nobody wrote down.
+#
+# ⛔ DATED CORRECTION, 2026-09-13 — THAT COUPLING SILENTLY DISENGAGED ONCE, AND
+# THE SENTENCE ABOVE WAS FALSE FOR THE LENGTH OF ONE WAVE. Phase 164.6.3 wave 1
+# edited the result loop — a new uniform arm, eleven rows newly filterable — and
+# the fidelity arm stayed GREEN. Cause: both sides were executed through a slice
+# that started at `for r in \`, so the two prologue assignments the new arm
+# reads were outside what ran, on the fixture side and the real side alike. Two
+# programs that were equally wrong compared equal. Booked as
+# `[164.6.3-MW02-DOCSONLY-BLIND]`; the repair is `extractResultLoopScript`, which
+# slices from `fail=0`, plus an unset-variable check that turns the next such
+# omission into a named abort.
+#
+# ⛔ A RULE THIS HEADER USED TO CARRY IS NOW RETIRED (2026-09-13). It said rows
+# of the `for r in` list that carry no per-job arm may be trimmed, "because the
+# parser reads CONDITIONS". That stopped being true when the uniform arm landed:
+# a row's behaviour now depends on its membership of `ALWAYS_ON`, so a TRIMMED
+# ROW IS A BEHAVIOUR THE FIXTURE STOPS MODELLING. Every row the real loop
+# iterates is carried here, and the fidelity arm compares every one of them.
+#
+# RE-QUOTED 2026-09-23 (Phase 164.4.2, DECISION B). The real loop gained a
+# `test-db-drift` row, and the fork-PR / workflow_dispatch tolerance arm moved
+# from `sql-tests` to `test-db-drift` WITH its reason: `sql-tests` now runs on a
+# database private to its own runner and consumes no secret, so it has no event
+# it may legitimately skip on and falls to the strict default arm; the VAC-08
+# drift check that still needs shared TEST is the job that can be skipped. The
+# arm's CONDITION lines are unchanged apart from the row name, which is what the
+# fidelity arms compare.
+#
+# Pair member: MW02-alternate-spelling.red.yml
+# House contract (`scripts/lint-sql-gates.mjs:33-40`): a rule without a firing
+# fixture does not merge.
+
+      - name: Verify all frontend-* jobs succeeded
+        run: |
+          fail=0
+          # ── Phase 164.6.3 / CI-DOCSPATH-01 — the ONE uniform docs-only arm ──
+          # ⛔ NOT a per-row tolerance. One predicate, one detector output,
+          # applied to every row EXCEPT those named in ALWAYS_ON. It is FIRST in
+          # the chain on purpose: appended after the existing arms it would be
+          # unreachable on exactly the PRs it exists to speed up.
+          docs_only='${{ needs.changed-paths.outputs.docs_only }}'
+          ALWAYS_ON="plan-anchor-verify frontend-lint"
+          echo "docs-only filter: docs_only='${docs_only}' always_on='${ALWAYS_ON}'"
+          for r in \
+            "frontend-typecheck=${{ needs.frontend-typecheck.result }}" \
+            "frontend-lint=${{ needs.frontend-lint.result }}" \
+            "frontend-test=${{ needs.frontend-test.result }}" \
+            "frontend-coverage=${{ needs.frontend-coverage.result }}" \
+            "frontend-seam-redis=${{ needs.frontend-seam-redis.result }}" \
+            "frontend-local-stack=${{ needs.frontend-local-stack.result }}" \
+            "frontend-live-db-lane=${{ needs.frontend-live-db-lane.result }}" \
+            "frontend-policy=${{ needs.frontend-policy.result }}" \
+            "frontend-build=${{ needs.frontend-build.result }}" \
+            "e2e-seeded=${{ needs.e2e-seeded.result }}" \
+            "sql-tests=${{ needs.sql-tests.result }}" \
+            "test-db-drift=${{ needs.test-db-drift.result }}" \
+            "sql-gate-lint=${{ needs.sql-gate-lint.result }}" \
+            "sql-mutation=${{ needs.sql-mutation.result }}" \
+            "plan-anchor-verify=${{ needs.plan-anchor-verify.result }}"; do
+            name="${r%=*}"; result="${r#*=}"
+            echo "$name: $result"
+            case " $ALWAYS_ON " in *" $name "*) filterable=false;; *) filterable=true;; esac
+            if [ "$docs_only" = "true" ] && [ "$filterable" = "true" ] && [ "$result" = "skipped" ]; then
+              echo "$name: skipped by the docs-only path filter; tolerated UNIFORMLY, not per-row."
+            elif [ "$name" = "e2e-seeded" ]; then
+              is_fork_pr='${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}'
+              if [ "$result" = "success" ]; then
+                :
+              elif [ "$result" = "skipped" ] && [ "$is_fork_pr" = "true" ]; then
+                echo "e2e-seeded skipped (fork PR — no test-DB access); tolerated for this row only."
+              else
+                echo "::error::e2e-seeded result=$result on a TRUSTED event."
+                fail=1
+              fi
+            elif [ "$name" = "test-db-drift" ]; then
+              is_fork_pr='${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}'
+              is_dispatch='${{ github.event_name == 'workflow_dispatch' }}'
+              if [ "$result" = "success" ]; then
+                :
+              elif [ "$result" = "skipped" ] && { [ "$is_fork_pr" = "true" ] || [ "$is_dispatch" = "true" ]; }; then
+                echo "test-db-drift skipped (fork PR / workflow_dispatch); tolerated for this row only."
+              else
+                if [ "$result" = "skipped" ]; then
+                  echo "::error::test-db-drift result=skipped on a TRUSTED event."
+                else
+                  echo "::error::test-db-drift result=$result."
+                fi
+                fail=1
+              fi
+            elif [ "$name" = "plan-anchor-verify" ]; then
+              is_pr='${{ github.event_name == 'pull_request' }}'
+              if [ "$result" = "success" ]; then
+                :
+              elif [ "$result" = "skipped" ] && [ "$is_pr" != "true" ]; then
+                echo "plan-anchor-verify skipped (event is not pull_request); tolerated for this row only."
+              else
+                echo "::error::plan-anchor-verify result=$result on a pull_request."
+                fail=1
+              fi
+            elif [ "$result" != "success" ]; then
+              fail=1
+            fi
+          done
+          if [ "$fail" = "1" ]; then
+            exit 1
+          fi

@@ -1,0 +1,127 @@
+Phase 164.7 plan 05 — NEUTER EVIDENCE for the app-GUC lineage exemption
+=======================================================================
+
+⛔ `git checkout --` APPEARS NOWHERE IN THIS HARNESS. Every restore is a `cp`
+from a byte backup taken in the session scratchpad (never in the repo), and every
+restore is verified by sha256 equality against the pre-neuter hash. A blanket
+working-tree restore would have silently destroyed the uncommitted work of the
+other two tasks.
+
+Subject      the two-edit, count-pinned exemption plan 164.7-05 grants five
+             applied migrations: a dated `-- APP-GUC-LINEAGE:` header in the
+             file AND an agreeing entry in `LINEAGE_ALLOWLIST`.
+Why          "an exemption any comment could satisfy" is this milestone's named
+             defect. An exemption that cannot be observed FAILING is exactly
+             that, whatever its prose says.
+Host         Darwin 25.6.0 arm64, 2026-09-07
+Byte backups /private/tmp/.../scratchpad/p05/bak/{heartbeat,lint}.bak
+
+CONTROL, before anything was broken
+-----------------------------------
+    app-guc: files scanned 291
+    app-guc: annotated (lineage) 5 — supabase/migrations/20260407164606_perfect_match.sql, supabase/migrations/20260408113029_cron_heartbeat.sql, supabase/migrations/20260408215026_schedule_match_cron_hourly.sql, supabase/migrations/20260825130000_ledger_refresh_fanout_dormant.sql, supabase/migrations/20260825140000_ledger_refresh_composite_arm.sql
+    app-guc: findings 0
+    exit=0
+    npx vitest run src/__tests__/lint-app-guc.test.ts -> 28 passed (28)
+
+BEFORE sha256 supabase/migrations/20260408113029_cron_heartbeat.sql
+  = ceab7d1b1e9958af7bcd45bf42e7b4f95ec4ecda1a55a914f221079fd2686063
+BEFORE sha256 scripts/lint-app-guc.mjs
+  = 3cd07996f463d9bef582cf6b1658ff8eb4a6be48307a9da245966de8f37bdbd5
+
+
+N1 — THE HEADER'S COUNT MOVED BY ONE (5 -> 6); the allowlist untouched
+----------------------------------------------------------------------
+This is the neuter the plan asks for by name: "change one count by 1 and observe
+the gate go RED".
+
+    ::error file=supabase/migrations/20260408113029_cron_heartbeat.sql,line=1::header-count-mismatch — lineage header pins occurrences: 6 but 5 app-GUC read(s) are present. The annotation is STALE — lower the count to lock in the repair (this ratchet only tightens).
+    ::error file=supabase/migrations/20260408113029_cron_heartbeat.sql,line=1::header-not-allowlisted — the LINEAGE_ALLOWLIST entry for supabase/migrations/20260408113029_cron_heartbeat.sql disagrees with its header: entry pins occurrences 5 / successor "20260907120000_analytics_service_settings_and_vault_tick.sql", the header says occurrences 6 / successor "20260907120000_analytics_service_settings_and_vault_tick.sql". Two independent edits must agree, or the exemption is not the one that was reviewed.
+    app-guc: findings 2
+    exit=1
+
+TWO findings, not one — which is the point of the two-edit design: moving one
+edit alone breaks BOTH the measured-count check and the two-edits-must-agree
+check. RESTORE sha256 = ceab7d1b…6063 (EQUAL).
+
+
+N2 — THE ALLOWLIST'S COUNT MOVED BY ONE (5 -> 6); the header untouched
+-----------------------------------------------------------------------
+The mirror image of N1, proving the pin bites from the OTHER side too.
+
+    ::error file=supabase/migrations/20260408113029_cron_heartbeat.sql,line=1::header-not-allowlisted — the LINEAGE_ALLOWLIST entry for supabase/migrations/20260408113029_cron_heartbeat.sql disagrees with its header: entry pins occurrences 6 / successor "…", the header says occurrences 5 / successor "…". Two independent edits must agree, or the exemption is not the one that was reviewed.
+    app-guc: findings 1
+    exit=1
+
+RESTORE sha256 = 3cd07996…bdbd5 (EQUAL).
+
+
+N3 — ONE MORE APP-GUC READ APPENDED to an annotated file
+---------------------------------------------------------
+The regression the exemption exists to still catch: a NEW reader smuggled into a
+file that is already excused.
+
+    ::error file=supabase/migrations/20260408113029_cron_heartbeat.sql,line=1::header-count-mismatch — lineage header pins occurrences: 5 but 6 app-GUC read(s) are present. A NEW read was added to an annotated file — fix it, do not raise the count.
+    app-guc: findings 1
+    exit=1
+
+Note the message: the gate tells the next reader to FIX IT, not to raise the
+count. RESTORE sha256 = ceab7d1b…6063 (EQUAL).
+
+
+N4 — THE ALLOWLIST ENTRY DELETED, the header left in place
+-----------------------------------------------------------
+Threat T-164.7-01: a header ALONE must exempt nothing, or a new migration could
+exempt itself.
+
+    allowlist entries before = 5
+    allowlist entries after  = 4
+    ::error file=supabase/migrations/20260408113029_cron_heartbeat.sql,line=1::header-not-allowlisted — carries a lineage header but LINEAGE_ALLOWLIST does not pin supabase/migrations/20260408113029_cron_heartbeat.sql. A header alone exempts nothing — otherwise a new migration could exempt itself. Add an entry with the same occurrences and successor, in the same commit, where a reviewer sees it.
+    app-guc: findings 1
+    exit=1
+
+RESTORE sha256 = 3cd07996…bdbd5 (EQUAL); allowlist entries restored = 5.
+
+⚠️ N4 ABORTED ON ITS FIRST ATTEMPT and the abort is recorded rather than edited
+out. Its guard was `grep -q '20260408113029_cron_heartbeat' scripts/lint-app-guc.mjs`,
+which still matched because the script's own doc comment names that migration
+twice — so the guard reported "MUTATION DID NOT APPLY" for a mutation that HAD
+applied. The harness restored from the byte backup and exited 1 rather than
+running an unguarded assertion. The guard was re-cut to count ALLOWLIST ENTRIES
+(`^    file: \`\${MIGRATIONS_DIR}/`) and re-run, which is the reading above. A
+guard that matches prose is the same class of defect as an assertion that matches
+prose.
+
+
+N5 — THE VITEST HALF: is the committed test coupled to the real bytes?
+------------------------------------------------------------------------
+N1-N4 prove the SCRIPT fires. N5 asks whether `src/__tests__/lint-app-guc.test.ts`
+would notice, or whether its "0 findings / 5 annotated" census is a number typed
+beside itself. One more app-GUC read appended to the real annotated file:
+
+    × reports ZERO findings, exactly the five annotated files BY NAME, and every allowlist count equals the file's measured count
+      AssertionError: the annotated tree must be clean — and it must be clean by ANNOTATION, never by loosening the rule: expected [ Array(1) ] to deeply equal []
+    × a header ALONE exempts nothing: dropping one allowlist entry fires exactly one header-not-allowlisted
+      AssertionError: expected [ 'header-count-mismatch', …(1) ] to deeply equal [ 'header-not-allowlisted' ]
+    × counts the COMMENTED site too (D-05) — the secret-hygiene comment in cron_heartbeat
+      AssertionError: the file's five sites (D-05 counts the comment): expected 6 to be 5
+    Tests  3 failed | 25 passed (28)
+
+THREE arms fell, including the anti-vacuity half of the census arm (which
+re-measures each allowlist count with `countReads()` over the real file) and the
+D-05 comment arm. RESTORE sha256 = ceab7d1b…6063 (EQUAL); header intact after
+restore; control re-run 28 passed (28).
+
+
+CLOSING STATE
+--------------
+AFTER sha256 supabase/migrations/20260408113029_cron_heartbeat.sql
+  = ceab7d1b1e9958af7bcd45bf42e7b4f95ec4ecda1a55a914f221079fd2686063  (EQUAL)
+AFTER sha256 scripts/lint-app-guc.mjs
+  = 3cd07996f463d9bef582cf6b1658ff8eb4a6be48307a9da245966de8f37bdbd5  (EQUAL)
+
+RESTORE VERIFIED: sha256 equal x2 across five neuters and five `cp` restores.
+Final control: `node scripts/lint-app-guc.mjs` -> app-guc: findings 0, five files
+named, exit 0; `--self-test` -> "lint-app-guc self-test OK: 4 finding kinds,
+red+green each (5 red, 2 green fixtures; 2 kind(s) vitest-covered by
+declaration)."; `git status --porcelain` carries only this plan's intended edits.

@@ -97,8 +97,37 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     `strategies-composite-set-members:${user.id}`,
   );
   if (!rl.success) {
+    // ⭐ 164.2-05 / criterion 4 — `RATE_LIMITED`, and this route is where the
+    // exchange-blaming code was LEAST defensible of the four.
+    //
+    // The body used to carry `KEY_RATE_LIMIT`, whose copy says *"The exchange
+    // asked us to slow down … a transient, exchange-side throttle"* and whose
+    // second fix line offers *"try a different exchange account"*. This
+    // endpoint PERSISTS DATE WINDOWS. It never calls
+    // `classifyKeyValidationError`, never reaches a venue on any path, and the
+    // bucket that denied one line above is `userActionLimiter` keyed
+    // `strategies-composite-set-members:<uid>` — ours, per USER. The sentence
+    // named a party provably not involved, and its remedy could not clear the
+    // bucket. `MultiKeyConnectStep`'s own catch arm records the identical
+    // finding for this route's transport failure ("it never touches an exchange
+    // on any path"); this is the same fact on the deny arm.
+    //
+    // `RATE_LIMITED` needed no new copy — it already said *"the cap is ours,
+    // not your exchange's"*. Wiring, not authoring.
+    //
+    // ⚠️ THE OLDER SHAPE IS DELIBERATELY KEPT. This is a bare
+    // `NextResponse.json` rather than `rateLimitDenyJson`, so — unlike its
+    // three siblings — a limiter MISCONFIGURATION still answers 429 here
+    // instead of 503. That is a POSTURE defect with its own owner
+    // (`seam-ratelimit-posture.invariant.test.ts` records which routes route
+    // their deny); converting it is not a copy fix and is out of this plan's
+    // scope. ⚠️ One live consequence, measured rather than assumed: because the
+    // code sits inside a `NextResponse.json` literal beside `status: 429`, THIS
+    // route's 429 is the only one of the four visible to the derived scanner in
+    // `wizardErrors.invariant.test.ts` — pinned there so nobody "simplifies"
+    // the other three onto a derivation that sees nothing.
     return NextResponse.json(
-      { code: "KEY_RATE_LIMIT", error: "Too many requests" },
+      { code: "RATE_LIMITED", error: "Too many requests" },
       {
         status: 429,
         headers: { ...NO_STORE_HEADERS, "Retry-After": String(rl.retryAfter) },

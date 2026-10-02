@@ -41,7 +41,11 @@ import {
 } from "@/lib/scenario";
 import { blendPeriodsPerYear } from "@/lib/closed-sets";
 import { coverageSpanOf, defaultWindowFor } from "@/lib/scenario-window";
-import { normalizeDailyReturns } from "@/lib/portfolio-math-utils";
+// The LEAF specifier (Phase 147). This module is documented PURE and is read by
+// the phase-63 series-space source scan, so its import graph must stay free of
+// network / Next modules — importing the resolver from
+// factsheet/allocator-portfolio-payload would drag build-payload in here.
+import { resolveDailyReturnSeries } from "@/lib/factsheet/resolve-series";
 import { sanitizeLeverageMap } from "@/lib/leverage";
 
 /** One `get_shared_scenario` series row (RPC `series` jsonb element). */
@@ -155,10 +159,25 @@ export function resolveSharedScenario(
    * Phase 84 (BLEND-01) — strategy id → asset_class, sourced by the SSR caller
    * (page.tsx) from a published-rows-only `strategies` read of the RPC series
    * ids (a zero-DDL sibling read; the phase-29 exit gate forbids widening the
-   * get_shared_scenario RPC/migration). Absent id / undefined lookup → null, the
-   * conservative √252 leg, byte-identical to the pre-84 default.
+   * get_shared_scenario RPC/migration). Absent id / undefined lookup → null,
+   * which RANK-06 (159-04) resolves to the conservative √365 clock: a null class
+   * is a projection gap, not a stated-traditional leg. Only a stated
+   * 'traditional' leg keeps √252.
    */
   assetClassById?: Record<string, string | null>,
+  /**
+   * Phase 147 (SCEN-01) — strategy id → raw `strategy_analytics.returns_series`
+   * (the analytics-service's cumprod WEALTH index), sourced by the SSR caller
+   * (page.tsx) from a sibling read bounded to the RPC's own series ids. It
+   * arrives caller-side for the same reason `assetClassById` does: the phase-29
+   * frozen-spine gate (FORBIDDEN_MIGRATION_RE = /scenario|share/i) forbids
+   * widening the `get_shared_scenario` RPC, whose `series` jsonb carries only
+   * the `daily_returns` column — which CSV ingest alone populates, so an
+   * analytics-only strategy arrives null and projected EMPTY. Absent id /
+   * undefined lookup → the resolver falls back to `s.daily_returns` alone,
+   * byte-identical to the pre-147 behavior.
+   */
+  returnsSeriesById?: Record<string, unknown>,
 ): ResolvedSharedScenario {
   // The codec's `decode` takes a raw STRING (localStorage shape). The RPC hands
   // us a parsed jsonb object, so re-serialize it to drive the same trichotomy.
@@ -181,7 +200,15 @@ export function resolveSharedScenario(
   // in `series` and are intentionally never resolved here (live-book boundary).
   const seriesById = new Map<string, DailyPoint[]>();
   for (const s of row.series ?? []) {
-    seriesById.set(s.strategy_id, normalizeDailyReturns(s.daily_returns));
+    // Phase 147 (SCEN-01) — the ONE series-resolution mechanism: the direct
+    // `daily_returns` column first (CSV ingest), else DIFFERENCE the caller's
+    // `returns_series` cumprod wealth index into returns. Forwarding that index
+    // raw would read its 1.0 base as a +100% day; the resolver owns the
+    // conversion so this page can never diverge from the owner's composer.
+    seriesById.set(
+      s.strategy_id,
+      resolveDailyReturnSeries(s.daily_returns, returnsSeriesById?.[s.strategy_id]),
+    );
   }
 
   const strategies: StrategyForBuilder[] = [];
@@ -208,7 +235,9 @@ export function resolveSharedScenario(
       volatility: null,
       max_drawdown: null,
       // Phase 84 (BLEND-01): the leg's asset_class from the caller's published-
-      // only lookup (absent → null, the √252 leg). Feeds the blend basis below.
+      // only lookup. Absent → null, and RANK-06 (159-04) reads that null as a
+      // PROJECTION GAP → the conservative √365 clock, not √252. Feeds the blend
+      // basis below.
       asset_class: assetClassById?.[id] ?? null,
     });
     // An added strategy is "selected" when its ref is toggled on (default true
@@ -333,8 +362,10 @@ export function resolveSharedScenario(
   // Phase 84 (BLEND-01) — the blend annualizes √365 if ANY SELECTED leg is
   // crypto, else √252 (blendPeriodsPerYear). SELECTED-only (the engine's
   // activeStrategies gate) — a toggled-off crypto leg must not flip a tradfi
-  // blend. All-unknown / empty lookup → 252, byte-identical to the pre-84
-  // default (the whole no-lookup suite is that regression pin).
+  // blend. RANK-06 (159-04): a leg missing from `assetClassById` arrives here
+  // with asset_class null (:237, `?? null`) — a PROJECTION GAP of the
+  // published-rows read, not a traditional leg — and now derives √365, the
+  // conservative RISK clock. Only a stated-traditional blend keeps √252.
   const basis = blendPeriodsPerYear(strategies.filter((s) => selected[s.id]));
   const metrics = computeScenario(strategies, state, dateMapCache, basis);
 

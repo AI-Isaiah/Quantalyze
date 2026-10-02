@@ -430,4 +430,178 @@ describe("ErrorEnvelope (DESIGN-02)", () => {
     expect(screen.getByLabelText("Retry")).toBeInTheDocument();
     expect(screen.getByLabelText("Cancel and return")).toBeInTheDocument();
   });
+
+  // -------------------------------------------------------------------------
+  // 140.3-09 / SEAMUX-06 — rendering the advertised wait.
+  //
+  // Two gates, tested independently so a regression in one cannot hide behind
+  // the other: the wait must be PRESENT, and the error must be retryable.
+  // -------------------------------------------------------------------------
+  describe("[140.3-09 / SEAMUX-06] the advertised wait", () => {
+    it("renders the wait, in seconds, when one is present and the error is retryable", () => {
+      render(
+        <ErrorEnvelope
+          envelope={makeEnvelope({ retry_after_seconds: 90 })}
+          onRetry={() => {}}
+        />,
+      );
+      const wait = screen.getByTestId("error-envelope-wait");
+      expect(wait).toBeInTheDocument();
+      expect(wait.textContent).toBe("Try again in 90s.");
+      // The figure uses the same tabular-numerals idiom as the correlation_id
+      // line — a counting figure that reflows on every tick is a visual defect.
+      const figure = wait.querySelector("code");
+      expect(figure).not.toBeNull();
+      expect(figure!.className).toContain("font-metric");
+      expect(figure!.className).toContain("tabular-nums");
+    });
+
+    it("renders a LONG wait verbatim — the value is advisory and unclamped", () => {
+      // 2520s = 42 minutes. The in-file B20 note argues an unclamped display
+      // deliberately: a 42-minute server wait must read as 42 minutes, not be
+      // capped to a friendlier-looking number the server never said.
+      render(
+        <ErrorEnvelope
+          envelope={makeEnvelope({ retry_after_seconds: 2520 })}
+          onRetry={() => {}}
+        />,
+      );
+      expect(screen.getByTestId("error-envelope-wait").textContent).toBe(
+        "Try again in 2520s.",
+      );
+    });
+
+    it("TRAP-3: renders NO wait line at all when the envelope carries none", () => {
+      // The whole surface must behave exactly as it did before this plan when
+      // no wait arrived. Naming a duration nobody sent turns a vague error into
+      // a specific lie, so absence renders nothing — not "0s", not "shortly".
+      render(<ErrorEnvelope envelope={makeEnvelope()} onRetry={() => {}} />);
+      expect(screen.queryByTestId("error-envelope-wait")).toBeNull();
+      expect(screen.getByRole("alert").textContent).not.toContain("Try again in");
+      // The Retry control is unaffected — the additive-safety property.
+      expect(screen.getByLabelText("Retry")).toBeInTheDocument();
+    });
+
+    it("renders no wait for a zero or negative value — absence, not 'retry now'", () => {
+      // The ONE parser never emits 0 or a negative, so either reaching here
+      // means the value came around it. Rendering "Try again in 0s." beside a
+      // control the user just clicked is worse than rendering nothing.
+      render(
+        <ErrorEnvelope
+          envelope={makeEnvelope({ retry_after_seconds: 0 })}
+          onRetry={() => {}}
+        />,
+      );
+      expect(screen.queryByTestId("error-envelope-wait")).toBeNull();
+      render(
+        <ErrorEnvelope
+          envelope={makeEnvelope({ retry_after_seconds: -5 })}
+          onRetry={() => {}}
+        />,
+      );
+      expect(screen.queryByTestId("error-envelope-wait")).toBeNull();
+    });
+
+    it("FALSE AFFORDANCE: renders no wait beside a NON-recoverable error", () => {
+      // A countdown promises that waiting changes the outcome. For a
+      // non-recoverable code it does not, and there is no Retry control to
+      // count down to.
+      render(
+        <ErrorEnvelope
+          envelope={makeEnvelope({
+            recoverable: false,
+            retry_after_seconds: 90,
+          })}
+          onRetry={() => {}}
+        />,
+      );
+      expect(screen.queryByTestId("error-envelope-wait")).toBeNull();
+      expect(screen.queryByLabelText("Retry")).toBeNull();
+    });
+
+    it("FALSE AFFORDANCE: renders no wait when the surface passed no onRetry handler", () => {
+      // Independent of `recoverable`: a recoverable error with nowhere to retry
+      // to still has no control for the countdown to govern. Tested separately
+      // from the case above so a regression that collapsed the two conditions
+      // into one reddens here.
+      render(
+        <ErrorEnvelope
+          envelope={makeEnvelope({
+            recoverable: true,
+            retry_after_seconds: 90,
+          })}
+        />,
+      );
+      expect(screen.queryByTestId("error-envelope-wait")).toBeNull();
+    });
+  });
+
+  describe("[161 REVIEW / IN-02] the Diagnostics block is UNCONDITIONAL, by design", () => {
+    /**
+     * IN-02 observed that `wizardErrors.ts` argues Copy Principle 4 ("no
+     * correlation id on an actionable arm") holds because `expand_log` is
+     * present only on terminal members — while this renderer emits the
+     * `<details> Diagnostics` block with no reference to `actions` at all.
+     *
+     * ⭐ THE RENDERER IS RIGHT AND THE ARGUMENT IS WRONG. Measured at HEAD:
+     *
+     *   1. `actions` DOES NOT CROSS THE ENVELOPE BOUNDARY. The `ErrorEnvelope`
+     *      data shape (`src/lib/envelope.ts`) has no `actions` field;
+     *      `buildEnvelope` collapses the whole action list into the single
+     *      boolean `recoverable` via `RECOVERABLE_ACTIONS`, and `expand_log` is
+     *      not a member of that set — so it survives nowhere this component can
+     *      read. Gating on it is not a tweak, it is a contract change.
+     *   2. THIS COMPONENT IS NOT WIZARD-ONLY. Envelopes are hand-built as
+     *      object literals by surfaces that never touch `WIZARD_ERROR_COPY` at
+     *      all (`api/strategies/csv-validate/route.ts`,
+     *      `api/strategies/finalize-wizard/route.ts`, and the CSV / factsheet /
+     *      admin-status surfaces named in this file's header). Those envelopes
+     *      have no `actions` to consult in ANY form, so a gate would have to
+     *      pick a default for them — and either default is a guess.
+     *   3. A correlation id is the support handle for a failure the user is
+     *      looking at. Hiding it on the arms where they are most likely to ask
+     *      for help is the wrong direction for a diagnostic identifier that is
+     *      already behind a collapsed `<details>` and already pii-scrubbed on
+     *      the clipboard path.
+     *
+     * So the honest correction is to the PROSE that claims a mechanism, not to
+     * this renderer. These two cases exist so that unconditionality is a
+     * RECORDED DECISION rather than an accident nobody pinned — which was
+     * IN-02's actual complaint.
+     */
+
+    it("renders code + correlation_id on an ACTIONABLE arm (one that shows a Retry control)", () => {
+      render(
+        <ErrorEnvelope
+          envelope={makeEnvelope({ recoverable: true })}
+          onRetry={() => {}}
+        />,
+      );
+
+      // ⚠️ PROVE THE ARM IS REACHED FIRST. Asserting a Diagnostics block on a
+      // fixture that cannot render the actionable state would be green against
+      // every implementation, including a gated one. The Retry control IS the
+      // actionable state as far as this component can observe it.
+      expect(screen.getByLabelText("Retry")).toBeInTheDocument();
+
+      const env = makeEnvelope();
+      expect(screen.getByText("Diagnostics")).toBeInTheDocument();
+      expect(screen.getByText(env.correlation_id)).toBeInTheDocument();
+      expect(screen.getByText(env.code)).toBeInTheDocument();
+    });
+
+    it("renders code + correlation_id on a TERMINAL arm (no Retry control) too", () => {
+      // The other side of the gate that does not exist. Both cases must be
+      // present: a pin that only covered the terminal arm would stay green
+      // under exactly the gate IN-02 proposed.
+      render(<ErrorEnvelope envelope={makeEnvelope({ recoverable: false })} />);
+
+      expect(screen.queryByLabelText("Retry")).toBeNull();
+
+      const env = makeEnvelope();
+      expect(screen.getByText("Diagnostics")).toBeInTheDocument();
+      expect(screen.getByText(env.correlation_id)).toBeInTheDocument();
+      expect(screen.getByText(env.code)).toBeInTheDocument();
+    });
+  });
 });

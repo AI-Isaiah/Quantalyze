@@ -1,12 +1,22 @@
 "use client";
 
-import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import Link from "next/link";
 import { Input } from "@/components/ui/Input";
 import { Button } from "@/components/ui/Button";
-import { type WizardErrorCode } from "@/lib/wizardErrors";
+import {
+  formatKeyError,
+  recogniseSeamErrorCode,
+  type WizardErrorCode,
+} from "@/lib/wizardErrors";
 import { buildEnvelope } from "@/lib/envelope";
 import { WizardErrorEnvelope } from "../WizardErrorEnvelope";
+import { ValidateWaitCard } from "../ValidateWaitCard";
+import {
+  WAIT_CARD_MOUNT_DELAY_MS,
+  connectAbortDeadlineMsFor,
+  validateBudgetSecondsFor,
+} from "@/lib/wizard/validate-budget";
 import { trackForQuantsEventClient } from "@/lib/for-quants-analytics";
 import type { SupportedExchange } from "@/lib/utils";
 import { SFOX_UI_ENABLED, MT5_UI_ENABLED } from "@/lib/utils";
@@ -14,6 +24,18 @@ import {
   getWizardCorrelationId,
   wizardFetch,
 } from "@/lib/wizard/wizard-correlation";
+import { seamErrorCode } from "@/lib/seam-discriminator";
+// 140.5-03 / SEAMPROSE-02 — the ONE `Retry-After` parser. A raw
+// `Number(res.headers.get(...))` here is a repo-wide ESLint error by design
+// (`quantalyze/no-raw-retry-after-parse`), because `Number("")` is 0 and
+// `Number("Wed, 21 Oct…")` is NaN, and either fed to a wait is the
+// thundering-herd shape this leaf exists to make unrepresentable.
+import { parseRetryAfterSeconds } from "@/lib/retry/retry-after";
+import {
+  readCredentialInput,
+  CREDENTIAL_KEY_INPUT_PROPS,
+  CREDENTIAL_SECRET_INPUT_PROPS,
+} from "@/lib/credential-input";
 
 /**
  * ConnectKeyStep renders the exchange selector, the inline permission
@@ -54,6 +76,16 @@ interface ExchangeOption {
   passphraseLabel?: string;
   passphrasePlaceholder?: string;
   passphraseHelper?: string;
+  // Whether the passphrase slot holds a genuine SECRET that must render masked.
+  // Absent → true, which is OKX's behaviour, so every existing and future venue
+  // that omits the key renders byte-identically to today (D-03: the OKX
+  // passphrase is a real API credential and a GLOBAL unmask was rejected). MT5
+  // sets false: the slot carries a broker SERVER NAME, not a credential, and the
+  // founder must be able to read what they typed against the helper copy that
+  // says "copy the server name exactly as it appears in your MT5 terminal".
+  // Display-only — the value still rides the `passphrase` payload key into
+  // encrypt_credentials and stays encrypted at rest.
+  passphraseSecret?: boolean;
   // Optional muted helper rendered directly under the secret input. Absent →
   // nothing renders (byte-neutral). MT5 uses it for the up-front
   // investor-vs-master-password steer.
@@ -129,6 +161,7 @@ const EXCHANGES: ExchangeOption[] = [
             secret: "Your read-only investor password",
           },
           passphraseLabel: "Broker server",
+          passphraseSecret: false,
           passphrasePlaceholder: "Exactly as shown in your MT5 terminal",
           passphraseHelper:
             "Open your MT5 terminal's login window and copy the server name exactly as it appears there — it is broker-specific and often carries a region or Demo/Live suffix.",
@@ -172,10 +205,490 @@ const TRUST_ATOMS: { title: string; body: string }[] = [
   },
 ];
 
+/**
+ * 140.3-13a / SEAMUX-08 — every `WizardErrorCode` that
+ * `POST /api/strategies/create-with-key` can actually put on the wire.
+ *
+ * WHY A SET AND NOT A CAST. This replaces a bare `as WizardErrorCode` cast of
+ * `data.code` — widened with an optional and then defaulted to `"UNKNOWN"` — a
+ * raw cast of NETWORK DATA into a closed union with no membership check at all.
+ * (The removed line is described rather than quoted verbatim: this plan's
+ * acceptance grep for that exact token sequence is a raw repo scan with no
+ * comment exclusion, so a pasted citation would keep reporting the class open.)
+ * A cast is a compile-time assertion; `data.code` is whatever an upstream, a
+ * proxy or an edge/WAF layer happened to put in a JSON body. Before this, any
+ * string at all became a "typed" `WizardErrorCode`, was handed to
+ * `buildEnvelope`, and rendered as `WIZARD_ERROR_COPY[code]` — `undefined` —
+ * while the funnel recorded a code that is not in our vocabulary. The shape
+ * copied here is `SubmitStep.tsx`'s `KNOWN_FINALIZE_CODES`, which is the
+ * CORRECT form of the same problem and is deliberately left where it is.
+ *
+ * WHY IT IS HAND-WRITTEN PER ROUTE, NOT A TOTALITY CHECK OVER THE UNION. A step
+ * should admit the codes ITS route emits, not every code in the vocabulary: a
+ * `CSV_NAV_ZERO` arriving here is drift, not a key-connect failure, and reading
+ * it as one would render CSV copy on the exchange form. That is also why this
+ * set is not shared with `MultiKeyConnectStep` — its two routes emit different
+ * sets, and one shared set would silently admit each route's codes at the other.
+ *
+ * ⚠️ THERE IS NOW A WIRE→WIZARD TRANSLATION STEP, AND THIS PARAGRAPH USED TO
+ * ARGUE THERE COULD NEVER BE ONE. Until `140.4-13` the argument held: the route
+ * routed every caught value through the shared `classifyKeyValidationError`
+ * (which maps `CircuitOpenError` to `SERVICE_UNAVAILABLE_RETRY`, a member
+ * below) before answering, so `grep -c 'CIRCUIT_OPEN\|UPSTREAM_TIMEOUT\|
+ * UPSTREAM_NETWORK_ERROR'` on `create-with-key/route.ts` was 0 and a hop would
+ * have been machinery no reachable path could exercise. It then closed with
+ * *"if that route ever starts emitting a wire code, it falls to `UNKNOWN` here
+ * — which is the safe direction"*. **`140.4-13` made the route start emitting
+ * one, and `UNKNOWN` turned out not to be the safe direction.** Its 503
+ * misconfiguration arm now answers `SEAM_MISCONFIGURED` (a WIRE code, from
+ * `rateLimitDenyJson`'s `misconfiguredBody`), replacing the 429 `KEY_RATE_LIMIT`
+ * that told the user our own limiter outage was "a transient, exchange-side
+ * throttle and not a problem with your key". Landing on `UNKNOWN` renders
+ * *"Try the last action again."* — **with a Retry control** — for a fault whose
+ * own copy says *"Retrying will not clear it: the setting stays wrong until we
+ * fix it and redeploy."* The comment above is kept rather than deleted because
+ * the reasoning it records is exactly what went stale, and how.
+ *
+ * THE HOP IS THE ONE SHARED TABLE, NOT A NEW ROSTER MEMBER. Adding
+ * `SEAM_MISCONFIGURED` to the set below would be a hand-typed allow-list edit
+ * (coverage-law row 2) owed again at every surface the next wire code reaches;
+ * `SEAM_CODE_TO_WIZARD_CODE` (in `wizardErrors.ts`, read through
+ * `recogniseSeamErrorCode`) is the single artefact (row 1) and already carried
+ * the entry. This mirrors `SyncPreviewStep.tsx`'s kickoff arm exactly.
+ *
+ * ORDER IS THE WHOLE CHANGE, AND IT IS SAFE BY MEASUREMENT — NOW ASSERTED, NOT
+ * NARRATED (140.4-16 / WR-11). `seam-ratelimit-posture.invariant.test.ts`
+ * derives both vocabularies from disk and fails when a code they SHARE gets
+ * different answers. That is the necessary condition; disjointness below is a
+ * sufficient one that happens to hold HERE and does NOT hold at every surface
+ * (`KNOWN_KICKOFF_CODES` shares `RATE_LIMITED`). The table's key set
+ * (`VALIDATION_FAILED`, `RATE_LIMITED`, `CIRCUIT_OPEN`, `UPSTREAM_TIMEOUT`,
+ * `UPSTREAM_NETWORK_ERROR`, `SEAM_MISCONFIGURED`) and this set intersect in
+ * NOTHING, so translating first cannot change what any existing member renders.
+ * NEITHER LIST GAINED A MEMBER. The fallback is not weakened either — a wire
+ * code with no table entry (`SEAM_DEGRADED`, the venue codes) still leaves the
+ * translation at `UNKNOWN`, misses the set, and lands on `UNKNOWN`, which is
+ * what the unrecognised-code case pins.
+ *
+ * ⚠️ 164.2-04 — "INTERSECT IN NOTHING" IS NO LONGER TRUE, AND THE PARAGRAPH IS
+ * CORRECTED RATHER THAN DELETED, for the same reason the stale one above it was
+ * kept. This roster gained `RATE_LIMITED` (criterion 4b), which IS a key of
+ * `SEAM_CODE_TO_WIZARD_CODE`. MEASURED, not assumed: that table (in
+ * `wizardErrors.ts`) maps it to ITSELF, so `recogniseCreateWithKeyCode` translating
+ * first still answers `RATE_LIMITED` and the rendered outcome is identical
+ * either way — which is precisely the condition the disjointness argument was
+ * standing in for. The agreement guard
+ * (`seam-ratelimit-posture.invariant.test.ts`, and the overlap oracle in
+ * `seam-wire-vocabulary.invariant.test.ts` that now carries this row by hand)
+ * is what keeps that true; if the mapping ever became a real alias, this row is
+ * where it has to be re-decided. ⛔ So the row below is the ROUTE-MINTED
+ * vocabulary written down, not the active path — the same reading
+ * `KNOWN_FINALIZE_CODES.VALIDATION_FAILED` is listed under, and the same reason:
+ * leaning on the wire table to carry a code we mint ourselves is the implicit
+ * coupling 140.4-12 spent a plan removing.
+ *
+ * The members, enumerated from the route rather than remembered:
+ *   · emitted directly by `create-with-key/route.ts`
+ *   · returned by the shared `classifyKeyValidationError` at its catch arm
+ */
+const KNOWN_CREATE_WITH_KEY_CODES: ReadonlySet<WizardErrorCode> =
+  new Set<WizardErrorCode>([
+    // Emitted directly by the route's own guards.
+    "KEY_INVALID_FORMAT",
+    // 142.2 / MT5-04 (D-05) — the four codes `KEY_INVALID_FORMAT` was split
+    // into. `create-with-key/route.ts` emits all four from its own guards, so
+    // all four belong HERE and not only in the union: a code absent from this
+    // roster is rejected as unrecognised and renders UNKNOWN, which would have
+    // replaced one wrong sentence with a worse one. `KEY_INVALID_FORMAT` stays
+    // because the route still emits it at its one genuine format guard.
+    "KEY_MISSING_REQUIRED_FIELD",
+    "KEY_UNSUPPORTED_VENUE",
+    "KEY_VENUE_NOT_ENABLED",
+    "KEY_INPUT_TOO_LONG",
+    "KEY_NOT_READ_ONLY",
+    "KEY_HAS_TRADING_PERMS",
+    "KEY_HAS_WITHDRAW_PERMS",
+    "DRAFT_ALREADY_EXISTS",
+    // 154.1 / WIZCONT-02 review CR — the venue fence's REFUSAL half, admitted
+    // HERE IN THE SAME COMMIT the route starts emitting it. Omit this line and
+    // the code fails the membership check below, falls through to `UNKNOWN` —
+    // whose copy IS recoverable — so the user gets "Try the last action again."
+    // with a Retry control for a submit that is refused identically every time,
+    // and the honest sentence naming their existing strategy ships invisible
+    // while every route-side test stays green. That is the trap `SubmitStep.tsx`
+    // records three times over; it is written out again rather than cited
+    // because this roster is the one the next author will be editing.
+    "VENUE_ALREADY_CONNECTED",
+    // 161-05 / WIZERR-03 — the venue fence's THIRD refusal (a live key with
+    // nothing behind it), admitted HERE IN THE SAME COMMIT the route starts
+    // emitting it, for the reason the line above states.
+    //
+    // ⚠️ AND THIS ROW IS OWED BY HAND, WHICH IS WORTH SAYING OUT LOUD. The
+    // coverage law in `wizardErrors.invariant.test.ts` derives this route's
+    // emitters with a `statusRe` fragment of "400"; `KEY_ORPHANED` answers 409,
+    // so THAT law is structurally blind to it — exactly as it is to
+    // `DRAFT_ALREADY_EXISTS` and `VENUE_ALREADY_CONNECTED` above. Omitting this
+    // line would leave the code missing the membership check below, falling
+    // through to `UNKNOWN` — whose copy IS recoverable — so the user would get
+    // "Try the last action again." with a Retry for a submit the DB index
+    // refuses identically, while the honest refusal shipped invisible.
+    // ⭐ 161-05 CLOSED THAT BLINDNESS rather than relying on the warning: the
+    // `[161-05 / WIZERR-03] create-with-key's 409 refusals clear ConnectKeyStep's
+    // roster too` describe in the same invariant file derives the 409 emitters
+    // as their own population and reds when this row is missing (observed).
+    "KEY_ORPHANED",
+    // 167.1.2 REVIEW WR-04 — the race arm's answer when the live key on this
+    // account has no strategy row but a composite (`strategy_keys`) uses it,
+    // where `KEY_ORPHANED`'s "no strategy uses it" is false. Composite
+    // membership only (REVIEW-R2 CR-01). Admitted HERE IN THE SAME
+    // COMMIT the route starts emitting it, for the reason the rows above state;
+    // the 409 describe in `wizardErrors.invariant.test.ts` gained it too.
+    "KEY_VENUE_ALREADY_CONNECTED",
+    // 162-05 / D-162-3 — the use-existing-key arm's refusal when no LIVE key of
+    // the caller's matches the `reuse_api_key_id` it was sent. Admitted HERE IN
+    // THE SAME COMMIT the route starts emitting it, for the reason the two rows
+    // above state. ⚠️ It answers 409 from both of its emitters, so the coverage
+    // law derived on "400" is structurally blind to it — the guard that DOES see
+    // it is the `[161-05 / WIZERR-03]` 409 describe in
+    // `wizardErrors.invariant.test.ts`, whose hand-typed set gained this member
+    // in the same commit.
+    "KEY_REUSE_UNAVAILABLE",
+    // 164.2-04 / criterion 5 — the SECOND half of the wizard-session fence,
+    // admitted HERE IN THE SAME COMMIT the route starts emitting it, for the
+    // reason the three rows above state. The reuse arm's 23505 now reads which
+    // key the colliding draft holds and answers `DRAFT_ALREADY_EXISTS` only
+    // when that is this key; every other outcome (a different key of the
+    // caller's, or a read that faulted) answers this code, whose cause names
+    // the wizard session instead of claiming a key it did not establish.
+    // ⚠️ It answers 409, so the coverage law derived on "400" is structurally
+    // blind to it — the guard that DOES see it is the `[161-05 / WIZERR-03]`
+    // 409 describe in `wizardErrors.invariant.test.ts`, whose hand-typed set
+    // gained this member in the same commit.
+    "DRAFT_SESSION_COLLISION",
+    // 164.2-04 / criterion 4 — the reuse arm's request-SHAPE refusal, which
+    // used to wear `KEY_MISSING_REQUIRED_FIELD` and tell a reader with no
+    // fields on screen that one of their fields was empty. `KEY_MISSING_
+    // REQUIRED_FIELD` STAYS above: the credential arm emits it from five guards
+    // where a field really did arrive blank.
+    // ⚠️ This one answers 400, so unlike its two neighbours it IS inside the
+    // coverage law's derived population — and it moved `EXPECTED_SPLIT_CODES`
+    // (5 → 6) in the same commit as a result.
+    "PRESELECT_REQUEST_INVALID",
+    "KEY_RATE_LIMIT",
+    // 164.2-04 / criterion 4b — OUR OWN per-user cap, which both
+    // `userActionLimiter` deny arms on this route now answer instead of
+    // `KEY_RATE_LIMIT`. That code stays directly above and is still reached
+    // here through `classifyKeyValidationError`, where the throttle really is
+    // the venue's; what changed is that a bucket keyed
+    // `strategies-create-with-key:<uid>` no longer renders as the user's
+    // exchange throttling their key, with a fix line telling them to try a
+    // different exchange account.
+    // ⛔ AND THIS ROW IS OWED BY HAND TWICE OVER. 429 is invisible to the
+    // coverage law (`statusRe` "400") AND to the 409 describe — and the code
+    // does not even ride a `NextResponse.json` literal, it rides
+    // `throttledBody` inside `rateLimitDenyJson`, which no source scan in
+    // `wizardErrors.invariant.test.ts` reads. The `[164.2-04]` describe in that
+    // file is a HAND-TYPED guard written for exactly this row.
+    //
+    // ⚠️ AND UNLIKE ITS NEIGHBOURS, OMITTING THIS LINE WOULD NOT RENDER
+    // `UNKNOWN` TODAY — MEASURED, and said out loud so nobody repeats the
+    // three rows above it as if it were. `RATE_LIMITED` is a key of
+    // `SEAM_CODE_TO_WIZARD_CODE` mapped to ITSELF, and
+    // `recogniseCreateWithKeyCode` translates BEFORE it consults this set, so
+    // the hop answers and the copy is unchanged with or without this row. It is
+    // here anyway, deliberately: this set is the vocabulary THIS ROUTE mints,
+    // and letting the shared wire table silently carry one of our own codes is
+    // the implicit coupling 140.4-12 spent a plan removing — it also means a
+    // future edit to that table (or a `recognise…` that stops translating
+    // first) turns a rendered-copy change into a caught one.
+    "RATE_LIMITED",
+    "UNKNOWN",
+    // Returned by `classifyKeyValidationError` (src/lib/wizardErrors.ts) — the
+    // SHARED classifier this route and composite/add-key both call, so this
+    // half of the set is identical at both key-entry steps by construction.
+    "SERVICE_UNAVAILABLE_RETRY",
+    "KEY_INVALID_SIGNATURE",
+    "KEY_AUTH_FAILED",
+    "KEY_MT5_MASTER_PASSWORD",
+    "KEY_MT5_WRONG_SERVER",
+    // 164.6.5 / criterion 5 — admitted HERE IN THE SAME COMMIT the shared
+    // classifier starts returning it. `VENUE_WIRE_CODE_TO_VERDICT` now answers
+    // for `MT5_TERMINAL_UNRESPONSIVE` (an IPC transport fault raised inside
+    // `_validate_mt5_key_probe`) with this code; omit this line and the
+    // membership check rejects the honest code, the step renders `UNKNOWN` —
+    // whose copy IS recoverable — and the user gets a Retry control for a fault
+    // the service marked `retryable=False`. Same trap the notes above record.
+    "KEY_MT5_TERMINAL_UNRESPONSIVE",
+    "KEY_IP_ALLOWLIST",
+    "KEY_NETWORK_TIMEOUT",
+    "KEY_PROBE_FAILED",
+    "KEY_EXCHANGE_UNAVAILABLE",
+    "KEY_VENUE_TRANSIENT",
+    // ⚠️ STOPGAP (hotfix 2026-08-06, incident 2026-08-05): the server
+    // classified a validate-key failure as `SERVICE_UNREACHABLE`, but this
+    // roster did not carry it, so the membership check rejected the honest
+    // code and the wizard rendered UNKNOWN ("Try the last action again", with
+    // a Retry control) for a fault whose own copy says the request never got
+    // an answer. The two scope codes travel with it: the verify-key seam maps
+    // MISSING_SCOPE / PERMISSION_DENIED onto them and both routes can put
+    // them on the wire the same way. All three have copy in
+    // `WIZARD_ERROR_COPY` (verified: SERVICE_UNREACHABLE,
+    // KEY_MISSING_READ_SCOPE, KEY_PERMISSION_DENIED entries exist in
+    // `wizardErrors.ts`). This is exactly the hand-typed allow-list edit the
+    // docblock above warns about.
+    //
+    // ⭐ THE CLASS FIX HAS AN OWNER AGAIN — `ROSTER-DERIVE-01` in `TODOS.md`
+    // (153.7 verification W-153.7-2). This line used to read *"the CLASS fix …
+    // stays with Phase 153 / WIZFORM-02; do not grow this list further, derive
+    // it there"*, and BOTH halves of that sentence had expired: WIZFORM-02 is
+    // ticked COMPLETE in `REQUIREMENTS.md`, so the pointer named a closed
+    // requirement, and 153.7 grew this list anyway (`SEAM_INTERNAL_FAULT`,
+    // below) without deriving it. A pointer at a closed requirement is how a
+    // class fix becomes nobody's.
+    //
+    // ⚠️ AND THE INSTRUCTION IT CARRIED IS NOW WRONG AS WRITTEN. "Do not grow
+    // this list" cannot be obeyed: every new classifier verdict MUST be admitted
+    // here in the same commit, or the step rejects the honest code and renders
+    // UNKNOWN with a Retry control. What changed is that growing it is no longer
+    // SILENT — `[153.7 review W-153.7-1]` in `wizardErrors.invariant.test.ts`
+    // derives the classifier-reachable population (the cascade's literals plus
+    // the LIVE `VENUE_WIRE_CODE_TO_VERDICT`) and reds BY NAME when this roster
+    // does not admit a member of it. That guard exists because deleting one line
+    // from this set was MEASURED at 153.7 to leave 312 tests green while
+    // re-creating the 2026-08-05 incident.
+    //
+    // So: grow it when the classifier does, in the same commit, and read
+    // `ROSTER-DERIVE-01` before deciding the duplication is acceptable forever.
+    "SERVICE_UNREACHABLE",
+    "KEY_MISSING_READ_SCOPE",
+    "KEY_PERMISSION_DENIED",
+    // 153.7-02 / WIZFORM-02-CLASS — admitted HERE IN THE SAME COMMIT the shared
+    // classifier starts returning it. `VENUE_WIRE_CODE_TO_VERDICT` now answers
+    // for `MT5_GATEWAY_UNCONFIGURED`, `ADAPTER_INIT_FAILED` and `INTERNAL` with
+    // `SEAM_INTERNAL_FAULT`; omit this line and the membership check rejects the
+    // honest code, the step renders `UNKNOWN` — whose copy IS recoverable — and
+    // the user gets "Try the last action again." with a Retry control for three
+    // faults the service marked `retryable=False`. That is the same trap the
+    // `VENUE_ALREADY_CONNECTED` note above records, and the same one the 2026-08-05
+    // `SERVICE_UNREACHABLE` incident below it records.
+    //
+    // ⚠️ ITS FOUR SIBLING VERDICTS COST NOTHING HERE, and the asymmetry is worth
+    // stating rather than leaving to be rediscovered: `SERVICE_UNREACHABLE` and
+    // `KEY_PROBE_FAILED` are already members, and `SEAM_MISCONFIGURED` — which
+    // that same batch maps `EGRESS_PROXY_MISCONFIGURED`, `SERVICE_KEY_UNCONFIGURED`
+    // and `KEK_UNAVAILABLE` onto — is resolved by the TRANSLATE-FIRST hop through
+    // `SEAM_CODE_TO_WIZARD_CODE` and never reaches this set, exactly as the
+    // docblock above says. `SEAM_INTERNAL_FAULT` is deliberately absent from that
+    // table (we mint it; no service puts it on the wire), so this roster is the
+    // only thing standing for it.
+    "SEAM_INTERNAL_FAULT",
+    // 164.5.4-02 / D-03 — admitted HERE IN THE SAME COMMIT the shared
+    // classifier starts returning it. `VENUE_WIRE_CODE_TO_VERDICT` now answers
+    // for the wire code a decrypt failure raises with
+    // `KEY_MUST_BE_RECONNECTED`; omit this line and the membership check
+    // rejects the honest code, the step renders `UNKNOWN` — whose copy IS
+    // recoverable — and the user gets a Retry control for a fault the service
+    // marked `retryable=False`. That is the same trap the three notes above
+    // record, and `[153.7 review W-153.7-1]` in
+    // `wizardErrors.invariant.test.ts` reds BY NAME when this row is missing
+    // (observed, not assumed: it named this member before the row was added).
+    //
+    // ⚠️ WHETHER THIS ROUTE'S OWN SEAM CAN RAISE THAT WIRE CODE IS NOT WHAT
+    // THIS ROSTER TURNS ON, and saying so here stops the next reader deleting
+    // the line after measuring that it cannot. The set's contract is "every
+    // verdict `classifyKeyValidationError` can RETURN", because the membership
+    // check runs on whatever the classifier hands back — same one-directional
+    // reasoning `DASHBOARD_WRITE_FAILED` is kept on in the dashboard rosters:
+    // admitting a code the route does not currently emit costs nothing;
+    // omitting one it does emit renders UNKNOWN.
+    "KEY_MUST_BE_RECONNECTED",
+    // 167-CREDTRUST / D-05, D-07 — admitted HERE IN THE SAME COMMIT the
+    // shared classifier starts returning it. `VENUE_WIRE_CODE_TO_VERDICT` now
+    // answers for the wire code the narrowed MT5 `except Mt5ClientError`
+    // transient tail raises with `KEY_SIGN_IN_FAILED`; omit this line and the
+    // membership check rejects the honest code, the step renders `UNKNOWN` —
+    // whose copy IS recoverable — and the user gets a Retry control for a
+    // fault the service marked `recoverable=False`. Same trap the notes above
+    // record; `[153.7 review W-153.7-1]` in `wizardErrors.invariant.test.ts`
+    // reds BY NAME when this row is missing.
+    "KEY_SIGN_IN_FAILED",
+  ]);
+
+/**
+ * 162-06 — THE ONE TRANSLATION OF A `create-with-key` FAILURE BODY INTO A
+ * `WizardErrorCode`, extracted so its two callers cannot drift.
+ *
+ * It had a single caller (the credential submit) until the reuse arm arrived;
+ * a second hand-written copy of a translation whose ORDER is the whole safety
+ * property is the pair 162-05 refused to create server-side for the same
+ * reason. Extracted, not copied — behaviour is byte-identical for the
+ * credential caller.
+ *
+ * 140.3-13a / SEAMUX-08 — membership-checked, never cast. See
+ * KNOWN_CREATE_WITH_KEY_CODES above for why the check exists and why
+ * the set is this route's own rather than the whole union.
+ *
+ * 140.4-15 / SEAMRIM-08 — TRANSLATE FIRST, THEN MEMBERSHIP-CHECK, the
+ * same order `SyncPreviewStep`'s kickoff arm adopted in 140.4-12.
+ * `SEAM_CODE_TO_WIZARD_CODE` answers for the seam's WIRE vocabulary
+ * (this route's 503 arm emits `SEAM_MISCONFIGURED`); the set below
+ * answers for the wizard codes the route itself mints.
+ *
+ * ⚠️ 140.5-03 / SEAMPROSE-03 — CORRECTION. This paragraph used to end
+ * "the two vocabularies are disjoint, so neither hop can shadow the
+ * other". THE SENTENCE IS THE WRONG REASON FOR A TRUE CONCLUSION, and
+ * it contradicts this file's own header (search `ORDER IS THE WHOLE
+ * CHANGE`), which already qualifies disjointness as holding HERE and
+ * NOT at every surface.
+ *
+ * THE NECESSARY PROPERTY IS AGREEMENT; DISJOINTNESS IS ONLY SUFFICIENT.
+ * Where the two vocabularies overlap, the table wins by the order
+ * above — harmless precisely because both sides answer the SAME code,
+ * not because they never meet.
+ *
+ * Measured at 140.5-03, predicate stated because a line-based grep gets
+ * this wrong: intersect the KEY SETS (a roster's members / a `Record`'s
+ * keys against `SEAM_CODE_TO_WIZARD_CODE`'s keys), never the values —
+ * `MISSING_STRATEGY_ID: "VALIDATION_FAILED"` is a VALUE and a grep
+ * counts it as a third overlap that does not exist. Under that
+ * predicate: `KNOWN_KICKOFF_CODES` ∩ = {RATE_LIMITED},
+ * `KNOWN_FINALIZE_CODES` ∩ = {SEAM_MISCONFIGURED}, and THIS set,
+ * `KNOWN_ADD_KEY_CODES` and `KNOWN_SET_MEMBERS_CODES` all intersect in
+ * NOTHING. Both real overlaps AGREE at HEAD.
+ *
+ * `seam-ratelimit-posture.invariant.test.ts` derives both sides from
+ * disk and reddens when a shared code gets DIFFERENT answers, so the
+ * property is asserted rather than narrated. Do not restore the
+ * disjointness sentence as the REASON: an empty intersection here is a
+ * fact about today's rosters, and the safety does not depend on it.
+ * 140.4-16 / WR-09 — READ THROUGH THE LEAF, not off the top level.
+ * The commit that added this hop claimed it "mirrors
+ * `SyncPreviewStep`'s kickoff arm exactly". It did not: that arm and
+ * `SubmitStep` both read `seamErrorCode(body)`, which handles the
+ * nested `service_error` shape (`body.detail.code`), while this one
+ * read `data.code` and saw only the flat shape. Harmless today —
+ * this route funnels every caught value through
+ * `classifyKeyValidationError` and never forwards a nested
+ * envelope — but an undisclosed divergence under a comment
+ * asserting equivalence is how the next reader inherits a wrong
+ * premise. The leaf exists precisely so a nested envelope is never
+ * read as "a body carrying no code".
+ */
+function recogniseCreateWithKeyCode(data: { code?: string }): WizardErrorCode {
+  const translated = recogniseSeamErrorCode(seamErrorCode(data));
+  return translated !== "UNKNOWN"
+    ? translated
+    : data.code && KNOWN_CREATE_WITH_KEY_CODES.has(data.code as WizardErrorCode)
+      ? (data.code as WizardErrorCode)
+      : "UNKNOWN";
+}
+
+/**
+ * 162 review / A-6 — the sentinel that tells "the body was `{}`" apart from
+ * "the body was not JSON at all".
+ *
+ * ⚠️ BOTH ARMS USED TO COLLAPSE THE SECOND INTO THE FIRST. `res.json().catch(()
+ * => ({}))` turns a proxy's HTML error page, a truncated body or a gzip fault
+ * into an empty object; `recogniseCreateWithKeyCode({})` then answers `UNKNOWN`
+ * and NOTHING anywhere records that a parse was attempted and failed.
+ * `UNKNOWN` is an honest thing to SHOW — we genuinely do not know the code —
+ * so this is a debuggability loss rather than a false claim, and the fix is
+ * scoped to match: the screen is byte-unchanged, and the console gains the
+ * response's own metadata to correlate against the proxy/CDN logs.
+ *
+ * ⛔ WHAT IS LOGGED IS THE RESPONSE'S OWN METADATA AND NOTHING ELSE — `status`
+ * and `statusText`, never the body. An unparseable body is arbitrary bytes from
+ * an intermediary we did not write; echoing it into the console is how an
+ * internal host or a proxy banner ends up in a user-submitted screenshot. Same
+ * rule the sibling surface states beside its own copy of this shape
+ * (`KeyPermissionBadge.tsx`), and the same reason `scrubSeamError` exists on
+ * the server side of this seam.
+ */
+const PARSE_FAILED = Symbol("parse-failed");
+
+/**
+ * Read a `create-with-key` response body, keeping "unparseable" DISTINGUISHABLE
+ * from "empty". Returns the parsed object, and logs — once, with the HTTP
+ * status the sibling surface formats the same way — when there was no JSON to
+ * parse at all.
+ *
+ * ⚠️ IT STILL RETURNS `{}` ON FAILURE, deliberately. The caller's next move is
+ * `recogniseCreateWithKeyCode`, and `UNKNOWN` is the truthful answer for a body
+ * we could not read. Changing the RENDERED outcome would be inventing a code
+ * from a transport fault; the only thing this adds is the record that it
+ * happened.
+ */
+async function readCreateWithKeyBody<T extends object>(
+  res: Response,
+  arm: "credential" | "reuse",
+): Promise<Partial<T>> {
+  const parsed = (await res.json().catch(() => PARSE_FAILED)) as
+    | Partial<T>
+    | typeof PARSE_FAILED;
+  if (parsed === PARSE_FAILED) {
+    console.error(
+      `[wizard:ConnectKeyStep] ${arm} arm: response body was not JSON — ` +
+        `HTTP ${res.status} (${res.statusText || "no body"})`,
+    );
+    return {};
+  }
+  return parsed;
+}
+
 export interface ConnectKeySuccess {
   strategyId: string;
   apiKeyId: string;
   exchange: ExchangeId;
+  /**
+   * 154-06 / WIZCONT-02. Present and `true` ONLY when the server resolved this
+   * submit onto a strategy the user already had — a re-connect of credentials
+   * we already hold, from a context that lost the `wizard_session_id` token.
+   * Absent on every other arm, including the ordinary first connect and the F6
+   * session-fence replay (that one is a double-click; it needs no explaining).
+   *
+   * ⭐ IT IS REPORTED UPWARD RATHER THAN RENDERED HERE, AND THAT IS THE WHOLE
+   * REASON THIS FIELD EXISTS. `onSuccess` is `WizardClient`'s step advance: it
+   * calls `setStep("sync_preview")`, so this component UNMOUNTS in the same
+   * commit. A notice rendered inside `ConnectKeyStep` on this path would be
+   * dead markup — it could never paint for a single frame. The strip therefore
+   * lives in `WizardClient`'s chrome, beside the session-expired strip it is
+   * cloned from (UI-SPEC names that strip as its visual donor).
+   *
+   * ⛔ NEVER carries the credential or the venue account id — the server does
+   * not send it and this type must not grow a field for it.
+   */
+  deduped?: boolean;
+}
+
+/**
+ * 162-06 / HONEST-06 / D-162-3 — a key the owner ALREADY has, chosen before the
+ * wizard opened.
+ *
+ * Minted by the /my-strategies host from the placeholder row the owner clicked
+ * ("Finish setup →"), threaded through `ContributionWizardOverlay` and
+ * `WizardClient`, and rendered by this step as the saved-key summary
+ * (162-UI-SPEC § C-5) INSTEAD of the credential form.
+ *
+ * ⛔ IT CARRIES NO CREDENTIAL AND NEVER WILL. Preselect means REUSE of the
+ * stored `api_keys` row — the row's secret is not readable by the web tier at
+ * all. A "prefilled" credential form was the measured unwinnable loop: it still
+ * re-POSTs credentials, still collides on the venue-identity index, and still
+ * lands on the same refusal the click was trying to escape.
+ *
+ * ⚠️ `exchange` is the venue ID (the closed `SupportedExchange` union), and
+ * `exchangeLabel` is the SERVER-formatted display string for the same fact. Both
+ * travel because they answer different questions: the label is what the row the
+ * owner clicked showed them (so the summary shows the same words), while the id
+ * is what the funnel event and the error envelope's venue-capability lookup
+ * need. Neither is derived from the other on the client — deriving the display
+ * name here is exactly the "client owns exchange naming" drift the server-side
+ * formatting in the my-strategies page exists to prevent.
+ */
+export interface PreselectedKey {
+  id: string;
+  exchange: ExchangeId;
+  exchangeLabel: string;
+  keyLabel: string;
 }
 
 /**
@@ -210,21 +723,267 @@ export interface ConnectKeyStepProps {
    * the standalone single-key wizard → no behavior change.
    */
   onDraftChange?: (draft: ConnectKeyDraft) => void;
+  /**
+   * 162-06 / HONEST-06 — render the SAVED-KEY SUMMARY (162-UI-SPEC § C-5)
+   * instead of the credential form, for the key the owner already chose.
+   *
+   * Absent (the default) is the credential wizard, byte-identically.
+   */
+  preselectKey?: PreselectedKey | null;
+  /**
+   * 162-06 — the summary's "Use a different key" affordance.
+   *
+   * ⚠️ IT IS NOT HANDLED HERE, DELIBERATELY. Dropping the preselect is the
+   * OVERLAY's decision because the overlay owns the remount key the preselected
+   * id is part of: handling it locally would flip a boolean inside a component
+   * whose own `useState` initializers (starting with `exchange`, seeded from the
+   * preselect) already read that key once. The user would get a form seeded from
+   * the key they just rejected. Going up to the overlay tears this component
+   * down and builds a pristine one.
+   */
+  onUseDifferentKey?: () => void;
 }
 
-export function ConnectKeyStep({ wizardSessionId, onSuccess, footerSlot, onDraftChange }: ConnectKeyStepProps) {
-  const [exchange, setExchange] = useState<ExchangeId>("binance");
+export function ConnectKeyStep({
+  wizardSessionId,
+  onSuccess,
+  footerSlot,
+  onDraftChange,
+  preselectKey = null,
+  onUseDifferentKey,
+}: ConnectKeyStepProps) {
+  // 162-06 — seeded from the preselect when there is one. The credential form is
+  // not rendered in that state, so this is not a form default: it is the venue
+  // the funnel event and the error envelope's venue-capability lookup must name.
+  // ⚠️ A remount (which is what "Use a different key" performs) is what returns
+  // it to the default — this initializer runs once.
+  const [exchange, setExchange] = useState<ExchangeId>(
+    preselectKey?.exchange ?? "binance",
+  );
   const [nickname, setNickname] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [apiSecret, setApiSecret] = useState("");
   const [showSecret, setShowSecret] = useState(false);
   const [passphrase, setPassphrase] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  /**
+   * 162-06 — the saved-key summary's own in-flight flag.
+   *
+   * SEPARATE from `submitting` rather than shared: `submitting` is the
+   * credential attempt, and everything hanging off it (the validate budget, the
+   * 300 ms wait-card gate, the client deadline, the abort controller) describes a
+   * request that spends most of its life inside a VENUE probe. The reuse arm
+   * carries no credentials and probes no venue — it is three owner-scoped reads
+   * and one RPC — so borrowing that state would arm a two-minute escalation
+   * ladder for a request that has no venue leg to be slow in.
+   */
+  const [continuing, setContinuing] = useState(false);
+  /**
+   * 162-06 review / B-1 — "the server refused the SHAPE OF THE REQUEST WE
+   * BUILT", derived from the reuse response's STATUS, not from a list of codes.
+   *
+   * ⭐ WHY THE STATUS AND NOT THE CODE. The reuse POST's body is two ids taken
+   * from a prop and from wizard state; the saved-key summary paints no control
+   * that edits either. A 400 on that arm is therefore DETERMINISTIC in inputs
+   * this screen cannot change — pressing a Retry wired to "send the same thing
+   * again" re-sends the identical two ids and is refused identically, forever.
+   * Every other status the arm answers (409 state, 429 throttle, 5xx seam) turns
+   * on something OUTSIDE the request, so re-sending can genuinely win.
+   *
+   * ⚠️ MEASURED, not assumed: `handleReuseExistingKey` has exactly one 400 arm
+   * (`!isUuid(wizardSessionId) || !isUuid(reuseKeyId)`) plus the POST-level
+   * "body is not an object" guard ahead of it, and both are rejections of what
+   * WE sent. A future 400 added to that arm is a rejection of our request by
+   * construction, so the rule covers it without being edited — which is the
+   * whole reason it is not a hand-typed code roster.
+   *
+   * PER-FAILURE state, cleared on every fresh attempt alongside `errorCode`
+   * (TRAP-3): a verdict about attempt 1's body must never suppress attempt 2's
+   * Retry.
+   */
+  const [reuseRequestShapeRefused, setReuseRequestShapeRefused] =
+    useState(false);
   const [errorCode, setErrorCode] = useState<WizardErrorCode | null>(null);
-  // UX-02: the wizard session correlation id — the SAME id wizardFetch sends
-  // on every request below, so the id shown in an error envelope matches the
-  // failing request's server logs / Sentry tag / compute_jobs.metadata.
+  /**
+   * 140.5-03 / SEAMPROSE-02 — the wait the failing response ADVERTISED, in
+   * seconds, or `null` when it advertised none.
+   *
+   * `/api/strategies/create-with-key` stamps `Retry-After` on its 429 (its own
+   * `rateLimitDenyJson`), and since the choke-point relay it also carries the
+   * ANALYTICS SERVICE's own 429 wait through `postProcessKey`. Before this the
+   * value arrived at the browser and was dropped on the floor.
+   *
+   * PER-FAILURE state, cleared on every fresh attempt alongside `errorCode`
+   * (TRAP-3): a wait left over from attempt 1 rendered against attempt 2's
+   * failure names a duration nobody advertised, which is worse than naming
+   * none — it turns a vague error into a specific lie.
+   */
+  const [retryAfterSeconds, setRetryAfterSeconds] = useState<number | null>(
+    null,
+  );
+  /**
+   * 154.1 / WIZCONT-02 review CR — the name of the strategy that ALREADY holds
+   * the account this attempt tried to connect, or `null` when the response
+   * named none.
+   *
+   * PER-FAILURE state on exactly the same terms as `retryAfterSeconds` above and
+   * for the same reason (TRAP-3): a name left over from attempt 1, rendered
+   * against attempt 2's failure, points the user at a strategy that has nothing
+   * to do with what just happened — a specific lie in place of a vague one. Both
+   * are set from the SAME response as `errorCode`, so a code and a name can
+   * never describe different failures.
+   */
+  const [existingStrategyName, setExistingStrategyName] = useState<
+    string | null
+  >(null);
+  // UX-02: the wizard page-load correlation id — the fallback for the brief
+  // window before any request has been made. See `requestCorrelationId`
+  // below for the id an envelope actually prefers.
   const [correlationId] = useState<string>(() => getWizardCorrelationId());
+  /**
+   * 164.6.5-07 / D-14 — the id of THIS attempt, captured off whichever
+   * wizardFetch call is in flight (task 1's `onCorrelationId`). This step has
+   * TWO request paths that can each fail (the credential submit and the
+   * preselected-key reuse), and both share this ONE piece of state because
+   * they also share ONE `errorCode` / envelope — only one of the two can be
+   * in flight for a given render of this step.
+   *
+   * MEASURED in production: two retries 45s and 55s apart rendered the
+   * IDENTICAL id, because the fallback used to be the page-load
+   * `correlationId` alone. Preferred over it below, so a second failed
+   * attempt renders a DIFFERENT id than the first.
+   */
+  const [requestCorrelationId, setRequestCorrelationId] = useState<
+    string | null
+  >(null);
+
+  /**
+   * 153.4-04 / D-05 / WIZFORM-05 — THE HONEST LONG WAIT.
+   *
+   * 153.4-01/02 granted a serialized venue (MT5) a 120 000 ms validate budget.
+   * Without the state below, that budget buys a two-minute disabled button
+   * reading `Validating...` and nothing else — which D-05 states plainly is a
+   * worse product than the fast wrong answer it replaced.
+   *
+   * All of it is LOCAL to this step. Nothing is threaded through `WizardClient`:
+   * the wait belongs to the request this component made, and `MultiKeyConnectStep`
+   * owns its own per-panel copy of the same shape (plan 153.4-05).
+   */
+  /** When the in-flight validate left the browser, or `null` when none is. */
+  const [waitStartedAt, setWaitStartedAt] = useState<number | null>(null);
+  /**
+   * 153.4 review WR-04 — the SAME stamp, readable synchronously.
+   *
+   * The 300 ms render gate below is a `setTimeout`, i.e. a macrotask; the thing
+   * that used to be its only OFF switch was the timer effect's cleanup, which
+   * React commits on its own schedule. For a validate answering at ~250 ms on a
+   * loaded main thread the order `finally → setShowWaitCard(false)` … `gate →
+   * setShowWaitCard(true)` is reachable, and nothing after it ever turns the card
+   * off again: a ghost card over a finished request, frozen at `0s`, whose
+   * `Stop waiting` (past the 40 % rung) calls `abort()` on a ref the `finally`
+   * already nulled — a control that does nothing.
+   *
+   * ⭐ The gate self-guards on this ref instead of trusting cleanup ordering.
+   * Written beside every `setWaitStartedAt`, and only there, so the two cannot
+   * describe different attempts.
+   *
+   * ⛔ NOT MIRRORED INTO `MultiKeyConnectStep`. That surface is immune BY
+   * CONSTRUCTION — its gate is `p.status === "validating" && p.waitElapsedMs >=
+   * WAIT_CARD_MOUNT_DELAY_MS`, a derivation of render-time state with no timer to
+   * fire late — and adding a ref there would be machinery guarding nothing.
+   */
+  const waitStartedAtRef = useRef<number | null>(null);
+  /** Milliseconds since `waitStartedAt`, ticked once per second (never faster). */
+  const [elapsedMs, setElapsedMs] = useState(0);
+  /**
+   * The 300 ms render gate (UI-SPEC Surface 1). A separate boolean rather than a
+   * comparison in the JSX, because the gate must be a TIMER: a sub-300 ms answer
+   * has to complete before this ever flips, so no card can flash.
+   */
+  const [showWaitCard, setShowWaitCard] = useState(false);
+  /**
+   * The user pressed `Stop waiting`. NOT an error — see the neutral line rendered
+   * below the form. Cleared on the next submit and the moment any field changes.
+   */
+  const [cancelled, setCancelled] = useState(false);
+  /**
+   * The venue of the CURRENT attempt, frozen at submit. The exchange cards stay
+   * clickable while a validate is in flight, and every duration this component
+   * states — the card's promise, the ladder's rungs, the client deadline, and the
+   * `budgetSeconds` the deadline envelope names — must describe the request that
+   * is actually on the wire. Reading live `exchange` would let a mid-flight card
+   * click re-time the deadline and advertise a budget nobody granted (T-153.4-12).
+   */
+  const [attemptExchange, setAttemptExchange] = useState<ExchangeId | null>(null);
+  /** The in-flight validate's controller — the only thing `Stop waiting` touches. */
+  const abortRef = useRef<AbortController | null>(null);
+  /**
+   * WHO aborted. An `AbortError` is indistinguishable at the catch: a user cancel
+   * and a spent budget both arrive as the same rejection, and they are opposite
+   * outcomes — one is a choice that must not be recorded as a failure, the other
+   * is a failure that must be.
+   */
+  const abortReasonRef = useRef<"user" | "deadline" | null>(null);
+  /**
+   * The submit row, so a cancel can put focus back on the submit button
+   * (UI-SPEC Surface 1 §Cancel affordance).
+   *
+   * ⚠️ THE ROW, NOT THE BUTTON, and that is a conflict surfaced rather than
+   * blended (Rule 7). The shared `ui/Button.tsx` is a plain function component
+   * whose props are `ButtonHTMLAttributes` — which carries no `ref` — so
+   * passing a `ref` to `<Button>` is a compile error (TS2322: "Property 'ref'
+   * does not exist"), and this phase's UI-SPEC ⛔ forbids
+   * editing `Button.tsx` (`AllocateDialog.test.tsx` carves it out BY IDENTITY).
+   * Adding a `ref` prop there is the right fix and is logged in TODOS.md; until
+   * then the row holds the ref and the query below finds the one submit control
+   * inside it.
+   */
+  const submitRowRef = useRef<HTMLDivElement | null>(null);
+  /**
+   * 162-06 / DESIGN-05 — the saved-key summary's CTA row, so focus can land on
+   * its primary control when the step mounts preselected.
+   *
+   * THE ROW, NOT THE BUTTON, for the reason spelled out on `submitRowRef` above:
+   * the shared `ui/Button` takes `ButtonHTMLAttributes`, which carries no `ref`.
+   */
+  const preselectCtaRowRef = useRef<HTMLDivElement | null>(null);
+  /**
+   * 153.4 review CR-04 — is this component still on screen?
+   *
+   * Read by the SUCCESS arm before it calls `onSuccess`. `onSuccess` is threaded
+   * straight through to `WizardClient` and ADVANCES THE WIZARD, so a dead closure
+   * calling it navigates a user who is no longer looking at this form.
+   */
+  const mountedRef = useRef(true);
+
+  /**
+   * 153.4 review CR-04 — UNMOUNTING IS NOT A VERDICT, AND IT MUST NOT PRODUCE ONE.
+   *
+   * The reachable path, in the composite wizard: the user selects MT5, submits (a
+   * 120 s wait), and clicks "+ Add another key window" — which is not disabled
+   * while a validate is in flight. `enterMulti` flips to State B, THIS component
+   * unmounts, and the timer effect's cleanup clears the client deadline with it,
+   * so the request runs on with no controller holding it and no deadline. Up to
+   * two minutes later the still-live closure called
+   * `onSuccess({strategyId, apiKeyId, exchange})`, advancing the wizard past
+   * `connect_key` with a SINGLE-KEY strategy and discarding the member panels the
+   * user had been filling in ever since.
+   *
+   * Two independent stops, deliberately: abort the request (nothing should stay
+   * on the wire for a surface the user has left), and gate the outcome arm on
+   * `mountedRef` so a response that beat the abort still cannot navigate.
+   *
+   * ⚠️ The reason is `"user"` because leaving IS a user action: recording it as a
+   * deadline would put a seam failure in the funnel for a healthy request.
+   */
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      abortReasonRef.current = "user";
+      abortRef.current?.abort();
+    };
+  }, []);
 
   // UAT/F-4: report the in-progress draft up so a switch to multi-key mode can
   // carry it into the first panel instead of discarding it. No-op (single-key
@@ -232,6 +991,131 @@ export function ConnectKeyStep({ wizardSessionId, onSuccess, footerSlot, onDraft
   useEffect(() => {
     onDraftChange?.({ exchange, nickname, apiKey, apiSecret, passphrase });
   }, [onDraftChange, exchange, nickname, apiKey, apiSecret, passphrase]);
+
+  /**
+   * 153.4-04 — the wait's THREE timers, armed together and torn down together.
+   *
+   * Both deps are frozen at submit, so this effect runs exactly once per attempt:
+   * a re-render cannot re-arm the deadline and buy the request another budget.
+   */
+  useEffect(() => {
+    if (waitStartedAt === null) return;
+
+    // 1. The clock. ⛔ Never faster than 1 s — the card renders whole seconds and
+    //    a faster tick buys nothing but renders.
+    const tick = setInterval(() => {
+      setElapsedMs(Date.now() - waitStartedAt);
+    }, 1_000);
+
+    // 2. The render gate. A validate that answers inside 300 ms clears this
+    //    timeout in its `finally` before it can fire, so no card flashes.
+    //
+    //    ⚠️ AND IT SELF-GUARDS (153.4 review WR-04), because "clears it in its
+    //    `finally`" is not something this timer can rely on: the clear happens in
+    //    THIS effect's cleanup, which React commits at its own priority, while the
+    //    timeout is a macrotask that can beat it. If the wait this gate was armed
+    //    for is already over, mounting the card now would leave it mounted — no
+    //    later code turns `showWaitCard` off until the next submit.
+    const mountGate = setTimeout(() => {
+      if (waitStartedAtRef.current !== waitStartedAt) return;
+      setShowWaitCard(true);
+    }, WAIT_CARD_MOUNT_DELAY_MS);
+
+    // 3. The client deadline backstop.
+    //
+    //    ⚠️ IT COVERS THE ROUTE, NOT THE VALIDATE LEG (153.4 review CR-01). The
+    //    thing being aborted is `POST /api/strategies/create-with-key`, which
+    //    spends `validateKey` THEN `encryptKey` THEN the create RPC — and which
+    //    does not read `request.signal`, so this abort has no server-side effect
+    //    whatsoever. A deadline sized on the validate budget alone fired almost
+    //    exclusively in the window where validate had already SUCCEEDED and the
+    //    route was storing the key, and then told the user nothing was saved.
+    //    `connectAbortDeadlineMsFor` covers validate + encrypt + the
+    //    FAILING-state store worst case + the grace, so this verdict is only
+    //    reachable once the server has genuinely stopped answering.
+    //
+    //    ⛔ THE FAILING COLUMN, NOT THE CLOSED ONE (153.6 / PARITY-03). The
+    //    first version of this deadline covered both legs plus the grace and
+    //    was compared against the route's CLOSED-breaker worst case — a figure
+    //    that describes a healthy seam, which is never the seam that keeps a
+    //    browser waiting this long. The breaker's own store costs three
+    //    commands per seam call in the failing state instead of one, and that
+    //    difference is what the deadline was short by, on BOTH venue arms.
+    //
+    //    WHY A GRACE ON TOP. The seam deadlines fire INSIDE our own route and the
+    //    browser→route hop is not free, so giving up at exactly the route's budget
+    //    could cut off a verdict already on the wire and re-create the silent
+    //    UNKNOWN this whole phase exists to end. The browser gives up LAST — but
+    //    it does give up, so no request can hold this tab open forever
+    //    (T-153.4-16).
+    //
+    //    ⚠️ The figure the copy advertises stays the validate BUDGET (what we
+    //    grant the broker), never this one: the deadline is our margin over the
+    //    promise, not an extension of the promise.
+    const deadline = setTimeout(() => {
+      abortReasonRef.current = "deadline";
+      abortRef.current?.abort();
+    }, connectAbortDeadlineMsFor(attemptExchange));
+
+    return () => {
+      clearInterval(tick);
+      clearTimeout(mountGate);
+      clearTimeout(deadline);
+    };
+  }, [waitStartedAt, attemptExchange]);
+
+  /**
+   * 153.4-04 — a stale cancelled line must never sit under a fresh attempt.
+   *
+   * The same discipline the 140.5-03 comment applies to `retryAfterSeconds`: the
+   * sentence says "your key details are still on this page", and once the user
+   * starts editing those details it is describing an attempt that no longer
+   * matches what they are looking at. Held here rather than in five `onChange`
+   * handlers so a sixth field cannot be added without it.
+   */
+  useEffect(() => {
+    setCancelled(false);
+  }, [exchange, nickname, apiKey, apiSecret, passphrase]);
+
+  /**
+   * 153.4-04 — move focus to the submit button after a cancel (UI-SPEC Surface 1).
+   *
+   * ⚠️ NOT in the click handler. `Stop waiting` lives inside a card that unmounts
+   * on the same interaction, and at the instant of the click the submit button is
+   * still `disabled` — `focus()` on a disabled control is a no-op, so focus would
+   * fall to `<body>` and a keyboard user would lose their place entirely. The
+   * abort resolves a tick later; by the time `cancelled` is true and `submitting`
+   * is false the button is enabled and focusable.
+   */
+  useEffect(() => {
+    if (!cancelled || submitting) return;
+    submitRowRef.current
+      ?.querySelector<HTMLButtonElement>('button[type="submit"]')
+      ?.focus();
+  }, [cancelled, submitting]);
+
+  /**
+   * 162-06 / DESIGN-05 focus rule — when this step mounts PRESELECTED, focus
+   * moves to the first interactive control of the step: "Continue with this key".
+   *
+   * The overlay parks focus on its panel on open, which is correct for the
+   * credential form (the first Tab lands on a real control). With the summary
+   * there is no form to walk: the whole step is two controls, and leaving focus
+   * on the panel makes a keyboard user Tab past the header chrome to reach the
+   * one button the screen is asking about.
+   *
+   * Mount-only (`[]`): re-running it would steal focus back from "Use a
+   * different key" on any later render.
+   */
+  useEffect(() => {
+    if (!preselectKey) return;
+    preselectCtaRowRef.current
+      ?.querySelector<HTMLButtonElement>(
+        'button[data-testid="wizard-preselect-continue"]',
+      )
+      ?.focus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const activeExchange = EXCHANGES.find((e) => e.id === exchange);
   // WR-01: the per-exchange "setup guide" SubAnchors for the flag-gated venues
@@ -280,6 +1164,10 @@ export function ConnectKeyStep({ wizardSessionId, onSuccess, footerSlot, onDraft
   const passphraseHelper =
     activeExchange?.passphraseHelper ??
     "OKX requires a passphrase in addition to key and secret. You set this when you created the API key on OKX.";
+  // MT5-03 / D-03: whether the passphrase slot is masked. Defaults to TRUE —
+  // the default IS the byte-identity mechanism, so the OKX config entry is not
+  // edited and OKX keeps today's Show/Hide-toggled password render exactly.
+  const passphraseSecret = activeExchange?.passphraseSecret ?? true;
   // Optional muted helper under the secret input (MT5's investor-vs-master
   // steer). Absent → render nothing.
   const secretHelper = activeExchange?.secretHelper;
@@ -289,15 +1177,75 @@ export function ConnectKeyStep({ wizardSessionId, onSuccess, footerSlot, onDraft
     setErrorCode(null);
   }, []);
 
+  /**
+   * 153.4-04 — abandon the wait, keep everything else.
+   *
+   * ⛔ NO CONFIRMATION DIALOG. Pressing this costs the user nothing they can act
+   * on: the request is going to finish or fail on its own either way, and a
+   * confirmation step on the one control whose entire purpose is escaping a stall
+   * is the opposite of the affordance.
+   *
+   * ⚠️ ABORTING STOPS THE BROWSER LISTENING; IT DOES NOT STOP THE SERVER WORKING,
+   * AND THE SERVER'S WORK IS NOT ONLY A PROBE. This comment used to close with
+   * "nothing is written on this path — which is exactly why the cancelled copy
+   * can truthfully say nothing was saved". THAT WAS A FACT ABOUT `validate-key`
+   * ASSERTED ABOUT THE ROUTE (153.4 review CR-02). What the user aborts is
+   * `POST /api/strategies/create-with-key`, which runs `validateKey` →
+   * `encryptKey` → `create_wizard_strategy`; the invocation does not read
+   * `request.signal`, so on any run where validate subsequently succeeds the
+   * credential IS encrypted and the `api_keys` + `strategies` rows ARE written,
+   * seconds after we told the user nothing was saved.
+   *
+   * ⛔ The cancelled line below therefore states only what THIS BROWSER knows.
+   */
+  const handleStopWaiting = useCallback(() => {
+    abortReasonRef.current = "user";
+    abortRef.current?.abort();
+  }, []);
+
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     if (submitting) return;
     setErrorCode(null);
+    // 140.5-03 — cleared WITH the code it belongs to. This is the half a
+    // copy-paste of the SyncPreviewStep thread drops (TRAP-3).
+    setRetryAfterSeconds(null);
+    // 154.1 — the same clearing rule, for the same reason. See the state's own
+    // docblock: a stale name is a specific lie about which strategy is in the
+    // way.
+    setExistingStrategyName(null);
+    // 164.6.5-07 / D-14 — cleared with the code it belongs to, for the same
+    // reason: a retry rendering the previous attempt's id is the defect D-14
+    // closes.
+    setRequestCorrelationId(null);
+    // 153.4-04 — a fresh attempt clears the previous one's cancelled line for the
+    // same reason, and starts the wait: the venue is frozen, the clock is stamped
+    // from ONE `Date.now()` the tick then measures against, and the controller is
+    // in place BEFORE the request leaves.
+    setCancelled(false);
+    setAttemptExchange(exchange);
+    setElapsedMs(0);
+    setShowWaitCard(false);
+    // ONE stamp into both the state the effect keys on and the ref the render
+    // gate self-guards against (153.4 review WR-04). Two `Date.now()` calls here
+    // would make the guard compare two different attempts' clocks.
+    const started = Date.now();
+    waitStartedAtRef.current = started;
+    setWaitStartedAt(started);
+    const controller = new AbortController();
+    abortRef.current = controller;
+    abortReasonRef.current = null;
     setSubmitting(true);
+    // Set on the SUCCESS arm only. The `finally` below reads it to decide whether
+    // to re-enable the button — see the comment there.
+    let succeeded = false;
 
     try {
       const res = await wizardFetch("/api/strategies/create-with-key", {
         method: "POST",
+        // `wizardFetch` spreads `init` and overrides only `headers`, so the
+        // signal reaches `fetch` unchanged — no change to that module is needed.
+        signal: controller.signal,
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           exchange,
@@ -310,18 +1258,50 @@ export function ConnectKeyStep({ wizardSessionId, onSuccess, footerSlot, onDraft
           label: nickname.trim() || `${exchange} key`,
           wizard_session_id: wizardSessionId,
         }),
+      }, {
+        // 164.6.5-07 / D-14 — capture the id THIS request put on the wire.
+        onCorrelationId: setRequestCorrelationId,
       });
 
-      const data = (await res.json().catch(() => ({}))) as {
+      // 162 review / A-6 — reads the body, and RECORDS a parse failure rather
+      // than laundering it into an empty object. See `readCreateWithKeyBody`.
+      const data = await readCreateWithKeyBody<{
         strategy_id?: string;
         api_key_id?: string;
+        // 154-06 / WIZCONT-02 — the venue-identity dedup marker. Read as a
+        // strict `=== true` below: a truthy-but-not-true value would be the
+        // route drifting, and this is a screen decision, not a coercion.
+        deduped?: boolean;
+        // 154.1 / WIZCONT-02 review CR — present ONLY on the route's
+        // `VENUE_ALREADY_CONNECTED` refusal, and only when the route could read
+        // the name off the caller's own row. Typed as optional and read through
+        // a `typeof` check below: absence is "we were not told", never a blank.
+        strategy_name?: string;
         code?: string;
         error?: string;
-      };
+      }>(res, "credential");
 
       if (!res.ok || !data.strategy_id || !data.api_key_id) {
-        const code = (data.code as WizardErrorCode | undefined) ?? "UNKNOWN";
+        // The membership-checked translation, shared with the reuse arm. Its
+        // reasoning lives on `recogniseCreateWithKeyCode` above.
+        const code = recogniseCreateWithKeyCode(data);
         setErrorCode(code);
+        // 140.5-03 / SEAMPROSE-02 — the wait rides the HEADER, read through the
+        // ONE parser. Set from the SAME response as the code above, so a wait
+        // and a code can never describe different failures. An absent header
+        // yields `null`, which the envelope renders as no wait at all rather
+        // than as a zero we were never told (TRAP-3).
+        setRetryAfterSeconds(parseRetryAfterSeconds(res.headers));
+        // 154.1 — from the SAME response as the code above, on the same terms:
+        // a name only ever describes the failure it arrived with. A non-string
+        // or a blank is treated as "not told" rather than coerced, so the
+        // envelope renders the unnamed sentence instead of empty quotes.
+        setExistingStrategyName(
+          typeof data.strategy_name === "string" &&
+            data.strategy_name.trim().length > 0
+            ? data.strategy_name
+            : null,
+        );
         trackForQuantsEventClient("wizard_error", {
           wizard_session_id: wizardSessionId,
           step: "connect_key",
@@ -331,26 +1311,471 @@ export function ConnectKeyStep({ wizardSessionId, onSuccess, footerSlot, onDraft
         return;
       }
 
+      // 153.4 review CR-04 — ⛔ NEVER ADVANCE A WIZARD THE USER HAS LEFT. Belt
+      // and braces with the unmount abort above: a response that arrived before
+      // the abort landed still reaches this line from a dead closure, and
+      // `onSuccess` is `WizardClient`'s step advance. The key IS stored on this
+      // path — the composite step's own draft carry-over and its member panels
+      // are what must not be discarded by it.
+      if (!mountedRef.current) return;
+      succeeded = true;
       onSuccess({
         strategyId: data.strategy_id,
         apiKeyId: data.api_key_id,
         exchange,
+        // Spread rather than `deduped: data.deduped === true`, so the payload
+        // every OTHER path emits is byte-identical to the pre-154 one. The
+        // ordinary connect gets no new field and no new UI.
+        ...(data.deduped === true ? { deduped: true } : {}),
       });
     } catch (err) {
-      setErrorCode("KEY_NETWORK_TIMEOUT");
+      /**
+       * 153.4-04 — AN ABORT IS NOT A TRANSPORT FAILURE, AND THE TWO ABORTS ARE
+       * NOT THE SAME OUTCOME. Branch FIRST, before anything below can classify a
+       * cancel as an outage.
+       *
+       * ⚠️ TRAP-1, re-checked at this edit now that an `AbortSignal` rides the
+       * request: an `AbortError` is a `DOMException` with a fixed name and
+       * message and carries no request, no headers and no body, so it embeds no
+       * credential either — the measurement in the `SERVICE_UNREACHABLE` arm
+       * below still holds unchanged.
+       */
+      if (abortRef.current?.signal.aborted) {
+        if (abortReasonRef.current === "user") {
+          // The user chose this. ⛔ No `errorCode`, ⛔ no `console.error`, and
+          // ⛔ no `wizard_error` event: recording a deliberate cancel as an error
+          // tells an operator the seam is failing when it is not, and it is the
+          // funnel they would use to decide MT5 is broken (T-153.4-15).
+          setCancelled(true);
+          setSubmitting(false);
+          return;
+        }
+        if (abortReasonRef.current === "deadline") {
+          // A real failure, and the funnel must agree with the screen (the
+          // 140.5-03 rule). The envelope names the budget we granted — see the
+          // `budgetSeconds` context below.
+          setErrorCode("SEAM_DEADLINE_EXCEEDED");
+          trackForQuantsEventClient("wizard_error", {
+            wizard_session_id: wizardSessionId,
+            step: "connect_key",
+            code: "SEAM_DEADLINE_EXCEEDED",
+          });
+          setSubmitting(false);
+          return;
+        }
+      }
+      // 140.5-03 / SEAMPROSE-03 — OUR HOP, NOT THE EXCHANGE'S.
+      //
+      // This catch fires when the request to `/api/strategies/create-with-key`
+      // never completed — our own route, one hop from the browser. The
+      // exchange was very possibly never contacted at all.
+      // `KEY_NETWORK_TIMEOUT` stood here and its copy says "We could not reach
+      // the exchange", which asserts a VENUE fault for a fault on our own hop:
+      // `wizardErrors.ts` states that rule by name beside the entry, and this
+      // site was one of the five breaking it. `SERVICE_UNREACHABLE` says what
+      // is actually known — we sent it, no answer came back, and because none
+      // came back we cannot tell whether it was processed.
+      //
+      // ⚠️ BOTH OCCURRENCES, and the telemetry one is not decoration: a funnel
+      // still reporting the venue-fault code is the same false attribution in
+      // machine-readable form, and it is what an operator would use to
+      // conclude the exchanges are flaky when the fault is ours.
+      //
+      // ⚠️ Do NOT reach for `SERVICE_UNAVAILABLE_RETRY` here. Its "Nothing was
+      // submitted" is knowable for a breaker that DECLINED to send and false
+      // for a request that timed out. The two entries are one apart in the
+      // table and 140.3-12 already separated them once.
+      setErrorCode("SERVICE_UNREACHABLE");
       trackForQuantsEventClient("wizard_error", {
         wizard_session_id: wizardSessionId,
         step: "connect_key",
-        code: "KEY_NETWORK_TIMEOUT",
+        code: "SERVICE_UNREACHABLE",
       });
+      // TRAP-1, restated as a PROPERTY and re-checked at this edit: a caught
+      // transport error must not be logged in a form that can carry credential
+      // material. `wizardFetch` sets exactly one header (`X-Correlation-Id`)
+      // and this route authenticates by COOKIE, so no credential value is on
+      // the request for a rejection to embed. The credentials the USER typed
+      // live in React state and are never part of `err`. Nothing to scrub —
+      // which is a measurement, not an assumption, and it is what must be
+      // re-checked if this call ever starts sending an Authorization header.
       console.error("[wizard:ConnectKeyStep] submit threw:", err);
       setSubmitting(false);
+    } finally {
+      // 153.4-04 — EVERY outcome ends the wait: success, failure, cancel and
+      // deadline alike. A card left mounted over a finished request is the
+      // indefinite spinner in a new costume, so the clock, the render gate and
+      // the controller are cleared here rather than in four arms.
+      //
+      // ⚠️ `setSubmitting(false)` is deliberately NOT unconditional. The success
+      // arm has always left the button disabled while the parent advances the
+      // step — re-enabling it here would open a double-submit window on a key
+      // that has already been stored. Each failing arm clears it itself; this is
+      // the backstop for any arm that ever forgets.
+      // ⚠️ The ref is nulled BESIDE the state, not instead of it: it is what the
+      // render gate reads to discover — synchronously, without waiting for this
+      // update to commit — that the wait it was armed for is over (WR-04).
+      waitStartedAtRef.current = null;
+      setWaitStartedAt(null);
+      setShowWaitCard(false);
+      abortRef.current = null;
+      if (!succeeded) setSubmitting(false);
     }
   }
 
+  /**
+   * 162-06 / HONEST-06 / D-162-3 — "Continue with this key".
+   *
+   * ⛔ IT SENDS NO CREDENTIALS, AND THAT IS THE ENTIRE POINT. The measured loop
+   * this closes was: an owner clicks "Finish setup →" on a stored-but-unused key,
+   * the wizard opens its credential form, they paste the same key's credentials,
+   * and the venue-identity index refuses them with `KEY_ORPHANED` — a refusal
+   * whose own copy had to admit the remedy was out of reach. Re-POSTing
+   * credentials for a key we already hold cannot escape that loop; asking the
+   * server to BUILD ON the stored row is the only thing that can.
+   *
+   * ⭐ ONE CALL SERVES BOTH LIVE POPULATIONS. The reuse arm (plan 162-05) answers
+   * the resolver's draft envelope either way: if a draft already hangs off this
+   * key it hands that one back, otherwise it mints one. So there is no
+   * "does a draft exist?" branch here to get wrong — the server owns that
+   * question, holding the advisory lock while it answers.
+   *
+   * ⛔ `deduped` IS DELIBERATELY NOT FORWARDED. It is `true` on the arm that
+   * resolved onto an existing draft, and `WizardClient`'s strip for it reads
+   * "These credentials are already connected." — a sentence about credentials
+   * this arm never received, shown to a user who typed none. It is also not a
+   * surprise that needs explaining: the user asked for THIS key and got this
+   * key's draft. Adding a second copy variant for a notice nobody needs would be
+   * the fabrication, not the omission.
+   */
+  async function handleContinueWithKey() {
+    if (!preselectKey || continuing) return;
+    // Cleared together, for the reason each state's own docblock gives: a code,
+    // a wait and a strategy name from a previous attempt must never be rendered
+    // against this one.
+    setErrorCode(null);
+    setRetryAfterSeconds(null);
+    setExistingStrategyName(null);
+    setReuseRequestShapeRefused(false);
+    // 164.6.5-07 / D-14 — same reset rule as the credential arm above; both
+    // arms share this one piece of state (see its docblock).
+    setRequestCorrelationId(null);
+    setContinuing(true);
+
+    try {
+      const res = await wizardFetch(
+        "/api/strategies/create-with-key",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          // The pinned reuse contract: the session token and the key id, and
+          // nothing else. No `exchange` — the server reads the venue off the
+          // `api_keys` row, so the wire carries no venue claim of ours to be
+          // wrong about.
+          body: JSON.stringify({
+            wizard_session_id: wizardSessionId,
+            reuse_api_key_id: preselectKey.id,
+          }),
+        },
+        {
+          // 164.6.5-07 / D-14 — capture the id THIS request put on the wire.
+          onCorrelationId: setRequestCorrelationId,
+        },
+      );
+
+      // 162 review / A-6 — same reader as the credential arm, for the same
+      // reason: a proxy's HTML error page must not read as "the route answered
+      // with an empty body". See `readCreateWithKeyBody`.
+      const data = await readCreateWithKeyBody<{
+        strategy_id?: string;
+        api_key_id?: string;
+        strategy_name?: string;
+        code?: string;
+        error?: string;
+      }>(res, "reuse");
+
+      if (!res.ok || !data.strategy_id || !data.api_key_id) {
+        const code = recogniseCreateWithKeyCode(data);
+        setErrorCode(code);
+        // 162-06 review / B-1 — see the state's docblock. A 400 on THIS arm is a
+        // refusal of the body we built out of a prop and wizard state, neither
+        // of which this screen can edit, so "send it again" is not a remedy and
+        // no control may promise that it is.
+        setReuseRequestShapeRefused(res.status === 400);
+        setRetryAfterSeconds(parseRetryAfterSeconds(res.headers));
+        setExistingStrategyName(
+          typeof data.strategy_name === "string" &&
+            data.strategy_name.trim().length > 0
+            ? data.strategy_name
+            : null,
+        );
+        trackForQuantsEventClient("wizard_error", {
+          wizard_session_id: wizardSessionId,
+          step: "connect_key",
+          code,
+        });
+        setContinuing(false);
+        return;
+      }
+
+      // Same rule as the credential arm: never advance a wizard the user has
+      // left. `onSuccess` IS the step advance.
+      if (!mountedRef.current) return;
+      onSuccess({
+        strategyId: data.strategy_id,
+        apiKeyId: data.api_key_id,
+        // The venue the OWNER'S OWN page told us this key is on. The response
+        // carries none, and inventing one from the display label would be the
+        // client owning exchange naming.
+        exchange: preselectKey.exchange,
+      });
+      // ⛔ No `setContinuing(false)` on success: `onSuccess` unmounts this step,
+      // and re-enabling the button first opens a double-submit window on a draft
+      // that already exists.
+    } catch (err) {
+      // OUR HOP, NOT THE EXCHANGE'S — and on this arm the exchange was provably
+      // never contacted, because the route's reuse branch returns before any
+      // venue call exists. `SERVICE_UNREACHABLE` states what is known: we sent
+      // it, no answer came back, and we cannot tell whether it was processed.
+      setErrorCode("SERVICE_UNREACHABLE");
+      trackForQuantsEventClient("wizard_error", {
+        wizard_session_id: wizardSessionId,
+        step: "connect_key",
+        code: "SERVICE_UNREACHABLE",
+      });
+      // Nothing to scrub, and it is a measurement rather than an assumption:
+      // this request body is two uuids, and the route authenticates by COOKIE.
+      console.error("[wizard:ConnectKeyStep] reuse submit threw:", err);
+      setContinuing(false);
+    }
+  }
+
+  // 164.6.5-07 / D-14 — `requestCorrelationId` (captured off whichever
+  // wizardFetch call is in flight) wins whenever this step actually sent a
+  // request; the page-load `correlationId` remains the fallback only for the
+  // brief window before any request has been made. See that state's docblock.
   const errorEnvelope = errorCode
-    ? buildEnvelope(errorCode, correlationId)
+    ? buildEnvelope(errorCode, requestCorrelationId ?? correlationId, {
+        // 140.3-10's rule, inherited: `?? undefined` because ABSENCE IS NOT
+        // ZERO. `null` would be carried into the envelope slot and a `0` there
+        // is a wait we were never told about.
+        retryAfterSeconds: retryAfterSeconds ?? undefined,
+        // 153.4-04 / UI-SPEC Gate A — the budget WE granted, in seconds, and
+        // ONLY for the code that names one. The same rule one line up: the
+        // expression yields `undefined`, never `null` and never `0` — a `0`
+        // here is a budget we never granted, which turns a vague failure into a
+        // specific lie (TRAP-3). It reads the FROZEN attempt venue, so the
+        // figure describes the request that actually ran out of time.
+        budgetSeconds:
+          errorCode === "SEAM_DEADLINE_EXCEEDED"
+            ? validateBudgetSecondsFor(attemptExchange)
+            : undefined,
+        // 153.4-04 / UI-SPEC Gate B — WITHOUT THIS, `SEAM_DEADLINE_EXCEEDED`'s
+        // "Your key details are still on this page." is silently withheld:
+        // that bullet declares `REQUIRES_CONNECT_SURFACE` and absence
+        // SUPPRESSES. A user who waited two minutes and is then told nothing
+        // about the credentials they typed is the worst outcome this phase can
+        // produce, which is why 153.1-04 bound the obligation to the commit
+        // that starts EMITTING the code — this one.
+        //
+        // ⭐ 162-06 review / B-2 (class) — AND IT NAMES WHICH OF THIS STEP'S TWO
+        // RENDERS IS ON SCREEN. `preselectKey` is the discriminator the branch
+        // at the bottom of this component already returns on, so the surface is
+        // read off the SAME value rather than re-derived — the two cannot say
+        // different things about the same render.
+        //
+        // ⛔ THE DEFECT THIS CLOSES: `"connect"` was true of both renders, so a
+        // remedy naming the credential form was ungateable and shipped onto the
+        // one screen that paints no form. `"preselect"` is what lets the copy
+        // table refuse a bullet on the screen that disproves it (see
+        // `NOT_ON_PRESELECT_SURFACE` / `REQUIRES_PRESELECT_SURFACE` in
+        // `wizardErrors.ts`). Byte-neutral for the credential render, and
+        // `SEAM_DEADLINE_EXCEEDED`'s gated bullet — the only user of
+        // `REQUIRES_CONNECT_SURFACE` — is not reachable on the reuse arm at all
+        // (verified against `handleReuseExistingKey`), so nothing it promises is
+        // withheld by this.
+        surface: preselectKey ? "preselect" : "connect",
+        // 153.1-03 / D-17 — the venue, as a lookup key into the closed
+        // capability record (never interpolated into copy). Absence renders the
+        // substitutable remedy unconditionally, so an MT5 user reads "switch to
+        // a different exchange" for a venue that IS their account. Mandated by
+        // this phase's UI-SPEC at the call sites it owns; byte-neutral for every
+        // ccxt venue, where the predicate already answers `true`.
+        venue: attemptExchange ?? exchange,
+        // 154.1 / WIZCONT-02 review CR — WITHOUT THIS, `VENUE_ALREADY_CONNECTED`
+        // renders its unnamed sentence and the user is told an account of theirs
+        // is already connected without being told to WHAT — on a page where the
+        // whole remedy is to go and open that strategy. `?? undefined` for the
+        // same reason the two lines above use it: absence must reach the copy as
+        // "we were not told", never as an empty string it would print.
+        strategyName: existingStrategyName ?? undefined,
+      })
     : null;
+
+  /**
+   * 162-06 review / B-2 — "can re-sending THE SAME request succeed?", answered
+   * by the copy table rather than by a list kept here.
+   *
+   * `clear_and_retry` is the table's word for "send the same thing again", and
+   * it is what tells a transient hop failure (`SERVICE_UNREACHABLE`) apart from
+   * a refusal of the stored key itself (`KEY_REUSE_UNAVAILABLE`,
+   * `VENUE_ALREADY_CONNECTED`), which no amount of re-sending changes. The
+   * preselect branch's Retry reads it to decide whether Retry means "again" or
+   * "another key" — see the call site below.
+   *
+   * ⚠️ READ THROUGH `formatKeyError`, NOT off `WIZARD_ERROR_COPY` directly:
+   * that is the one accessor allowed to know about context-gated bullets, and
+   * reading around it is how a surface ends up disagreeing with what it renders.
+   */
+  const retryCanResend =
+    errorCode !== null &&
+    formatKeyError(errorCode).actions.includes("clear_and_retry");
+
+  // ── 162-06 / HONEST-06 — the SAVED-KEY SUMMARY (162-UI-SPEC § C-5) ──────────
+  //
+  // A SUB-STATE of this step, not a new component family: the owner already
+  // chose a key, so the credential form has nothing to ask for.
+  //
+  // ⛔ NO MASKED FIELDS, NO ROWS OF DOTS. A masked credential here would be
+  // fabricated data — the web tier cannot decrypt a stored secret at all, so any
+  // dots rendered would be a picture of a value nobody read. The two facts shown
+  // are the two facts the row the owner clicked showed them.
+  //
+  // ⛔ The trust atoms ("What we store", "What we reject", …) do NOT render here.
+  // They exist to inform someone about to PASTE a credential; on this path
+  // nothing is pasted, stored or scope-checked, so their claims describe a
+  // transaction that is not happening.
+  if (preselectKey) {
+    return (
+      <section aria-labelledby="wizard-connect-key-heading">
+        <h2
+          id="wizard-connect-key-heading"
+          className="font-sans text-h3 font-semibold text-text-primary"
+        >
+          Connect your exchange
+        </h2>
+
+        {/* DATA PANEL, not a card: square (no radius), flat (no shadow), one
+            hairline border — DESIGN.md § Cards-vs-Data-panels. This is a region
+            of a document stating a fact, not a thing to click. */}
+        <div
+          className="mt-6 border border-border bg-page px-4 py-3"
+          data-testid="wizard-preselect-summary"
+        >
+          {/* Eyebrow: the factsheet annotation voice — Geist Mono, uppercase,
+              eyebrow-std tracking, muted. Colorless by contract: this is a
+              neutral fact, not an error, a warning or a success. */}
+          <span className="text-micro font-mono uppercase tracking-[0.18em] text-text-muted">
+            SAVED KEY
+          </span>
+          {/* Identity line. `truncate` + `title` carry the REAL value on
+              overflow — never a fabricated placeholder. The label is the
+              SERVER-formatted exchange name the placeholder row displayed, so
+              what the owner clicked is what they read back here. */}
+          <p
+            className="mt-1 truncate text-small text-text-primary"
+            title={`${preselectKey.exchangeLabel} — ${preselectKey.keyLabel}`}
+            data-testid="wizard-preselect-identity"
+          >
+            {preselectKey.exchangeLabel} — {preselectKey.keyLabel}
+          </p>
+        </div>
+
+        {errorEnvelope && (
+          <div className="mt-4">
+            {/* 162-06 review / B-2 — WHERE RETRY GOES, DECIDED FROM THE SAME
+                TABLE THE COPY COMES FROM.
+                ⛔ `() => setErrorCode(null)` ALONE WAS THE UNWINNABLE LOOP ONE
+                SCREEN LATER. This branch returns BEFORE the credential form, so
+                on a refusal OF THIS STORED KEY — `KEY_REUSE_UNAVAILABLE`, the
+                row is gone — blanking the banner left the identical screen: the
+                same panel, the same "Continue with this key" refused
+                identically, and no form. That code carries `try_another_key`
+                and NOT `clear_and_retry`, and `try_another_key` means exactly
+                what it says, so Retry is routed to the control that delivers
+                another key.
+                ⚠️ CORRECTION (162-06 review / B-2b). The sentence that stood
+                here named `VENUE_ALREADY_CONNECTED` alongside
+                `KEY_REUSE_UNAVAILABLE` as a code this routing covers, and said
+                both "carry `try_another_key`". Read at HEAD, that entry's
+                `actions` are `["request_call", "expand_log"]` — NEITHER member
+                of `RECOVERABLE_ACTIONS` — so `buildEnvelope` derives
+                `recoverable: false`, `ErrorEnvelope` renders no Retry at all,
+                and this handler is never reached for it. The routing was
+                claiming a code it cannot apply to, which is how a reader
+                concludes that screen is covered when it is not. What that code
+                actually got instead is a preselect-gated bullet naming the
+                painted escape hatch (see `VENUE_ALREADY_CONNECTED` in
+                `wizardErrors.ts`); the remedy is in the copy because there is
+                no control here to route.
+                ⛔ AND IT IS NOT ROUTED FOR EVERY CODE, WHICH IS THE OTHER HALF.
+                `SERVICE_UNREACHABLE` is reachable here too — the reuse arm's
+                catch sets it when OUR OWN hop fails — and it carries
+                `clear_and_retry`: re-sending the same request is precisely its
+                remedy, and its own copy says "try the same action again".
+                Dropping the preselect there would take the key out from under
+                a user whose only problem was a transient network fault. So the
+                branch is `clear_and_retry`-shaped rather than a hand-typed code
+                list: the table already answers "can re-sending this succeed?",
+                and a second answer here is a second thing to drift.
+                ⛔ AND THE TABLE'S ANSWER IS OVERRIDDEN IN EXACTLY ONE
+                DIRECTION — 162-06 review / B-1. `clear_and_retry` is a property
+                of a CODE; "re-sending can win" is a property of THIS ATTEMPT.
+                They part company when the server refused the shape of the body
+                we built (a 400 on this arm — see `reuseRequestShapeRefused`):
+                the two ids go back out unchanged, so the identical refusal
+                comes back. Withholding `onRetry` there is what suppresses the
+                control (`ErrorEnvelope`: `recoverable && Boolean(onRetry)`) —
+                ⭐ never a copy-table edit, which would take the honest Retry
+                away from the credential form where filling the blank field IS
+                the remedy. The override is one-way BY CONSTRUCTION: it can only
+                remove a Retry, never add one to a non-recoverable code.
+                ⚠️ The code is cleared FIRST and unconditionally. The real host
+                tears this step down by remount, but a host that only re-renders
+                must not be left showing a banner about a key the user has moved
+                on from — and on the `clear_and_retry` arm the clear IS the
+                whole action, unchanged from pre-B-2. */}
+            <WizardErrorEnvelope
+              envelope={errorEnvelope}
+              onRetry={
+                reuseRequestShapeRefused && retryCanResend
+                  ? undefined
+                  : () => {
+                      setErrorCode(null);
+                      if (!retryCanResend) onUseDifferentKey?.();
+                    }
+              }
+            />
+          </div>
+        )}
+
+        <div
+          className="mt-6 flex items-center gap-4"
+          ref={preselectCtaRowRef}
+        >
+          <Button
+            type="button"
+            onClick={handleContinueWithKey}
+            disabled={continuing}
+            data-testid="wizard-preselect-continue"
+          >
+            {continuing ? "Continuing..." : "Continue with this key"}
+          </Button>
+          {/* Text button, matching the "Finish setup →" link treatment the
+              owner just clicked. ⛔ NOT destructive and needs no confirmation:
+              it changes a selection, and nothing has been created yet. */}
+          <button
+            type="button"
+            onClick={onUseDifferentKey}
+            className="text-small text-accent underline underline-offset-2"
+            data-testid="wizard-preselect-different"
+          >
+            Use a different key
+          </button>
+        </div>
+      </section>
+    );
+  }
 
   return (
     <section aria-labelledby="wizard-connect-key-heading">
@@ -380,7 +1805,14 @@ export function ConnectKeyStep({ wizardSessionId, onSuccess, footerSlot, onDraft
         </dl>
       </div>
 
-      <form onSubmit={handleSubmit} className="mt-8 space-y-5">
+      {/* 153.4-04 / UI-SPEC Surface 1 — `aria-busy` while a validate is in
+          flight, absent otherwise (never `"false"`: the attribute's absence and
+          its false value are the same state, and one of the two is noise). */}
+      <form
+        onSubmit={handleSubmit}
+        className="mt-8 space-y-5"
+        aria-busy={submitting ? "true" : undefined}
+      >
         {/* Exchange cards */}
         <fieldset>
           <legend className="text-caption font-medium text-text-primary">
@@ -424,9 +1856,9 @@ export function ConnectKeyStep({ wizardSessionId, onSuccess, footerSlot, onDraft
         <Input
           label={keyLabel}
           value={apiKey}
-          onChange={(e) => setApiKey(e.target.value)}
+          onChange={(e) => setApiKey(readCredentialInput(e))}
           placeholder={keyPlaceholder}
-          autoComplete="off"
+          {...CREDENTIAL_KEY_INPUT_PROPS}
           required
         />
 
@@ -455,9 +1887,9 @@ export function ConnectKeyStep({ wizardSessionId, onSuccess, footerSlot, onDraft
               id="wizard-api-secret"
               type={showSecret ? "text" : "password"}
               value={apiSecret}
-              onChange={(e) => setApiSecret(e.target.value)}
+              onChange={(e) => setApiSecret(readCredentialInput(e))}
               placeholder={secretPlaceholder}
-              autoComplete="off"
+              {...CREDENTIAL_SECRET_INPUT_PROPS}
               required
               className="mt-1 w-full rounded-md border border-border bg-white px-3 py-2 text-body text-text-primary placeholder:text-text-muted focus:border-accent focus:outline-none"
             />
@@ -474,11 +1906,13 @@ export function ConnectKeyStep({ wizardSessionId, onSuccess, footerSlot, onDraft
           <div>
             <Input
               label={passphraseLabel}
-              type={showSecret ? "text" : "password"}
+              type={passphraseSecret && !showSecret ? "password" : "text"}
               value={passphrase}
               onChange={(e) => setPassphrase(e.target.value)}
               placeholder={passphrasePlaceholder}
-              autoComplete="off"
+              {...(passphraseSecret
+                ? CREDENTIAL_SECRET_INPUT_PROPS
+                : CREDENTIAL_KEY_INPUT_PROPS)}
               required
             />
             <p className="mt-1 text-micro text-text-muted">{passphraseHelper}</p>
@@ -505,13 +1939,51 @@ export function ConnectKeyStep({ wizardSessionId, onSuccess, footerSlot, onDraft
           />
         )}
 
+        {/* 153.4-04 / D-05 — the long wait, made legible. Mounted 300 ms after
+            submit and torn down on every outcome; it renders ABOVE the submit
+            row so the escalation and the `Stop waiting` control sit next to the
+            button they describe. The card is PURE — this step owns the clock,
+            the controller and the mount gate. */}
+        {showWaitCard && (
+          <ValidateWaitCard
+            exchange={attemptExchange ?? exchange}
+            elapsedMs={elapsedMs}
+            onStopWaiting={handleStopWaiting}
+          />
+        )}
+
+        {/* The cancelled state. ⛔ NOT a `WizardErrorEnvelope` and ⛔ never
+            `text-negative`: the user chose this and nothing failed. DESIGN.md
+            §Semantic-color gates — red asserts a permanent failure, and there is
+            no failure here to assert.
+
+            ⛔ NO "NOTHING WAS SAVED" CLAIM (153.4 review CR-02). Aborting stops
+            this browser listening; the route runs on past validate into
+            `encryptKey` and the create RPC, so the key may well be stored — a
+            user who cancels at 48 s of a 120 s MT5 validate was told nothing was
+            saved while their credential was being written. The sentence states
+            the two facts this browser actually knows, plus the one thing that
+            makes the next submit safe: `create-with-key`'s idempotency fence is
+            keyed on `wizard_session_id`, so a re-submit resolves to the draft the
+            abandoned request created instead of minting a second one. */}
+        {cancelled && !submitting && (
+          <p
+            className="text-caption text-text-secondary"
+            data-testid="wizard-connect-wait-cancelled"
+          >
+            We stopped waiting for your broker. Your key details are still on
+            this page — the check may still be finishing on our side, and
+            connecting again picks up that key rather than storing a second one.
+          </p>
+        )}
+
         {/* UAT/F-5: the "+ Add another key window" affordance (footerSlot) sits
             ABOVE the primary CTA — you decide to go multi-key BEFORE validating a
             single key, so the add-window action must precede "Validate key and
             continue". Absent for the single-key wizard → renders nothing. */}
         {footerSlot}
 
-        <div className="flex gap-3">
+        <div className="flex gap-3" ref={submitRowRef}>
           <Button
             type="submit"
             disabled={submitting || !apiKey || (requiresSecret && !apiSecret) || (requiresPassphrase && !passphrase)}

@@ -271,6 +271,67 @@ describe("addStrategyBrowse", () => {
     expect(second.lastEditedAt).toBe(first.lastEditedAt);
   });
 
+  // -------------------------------------------------------------------------
+  // Phase 152 review WR-01 — the dedupe branch's ONE exception: an `isOwn`
+  // backfill.
+  //
+  // Why this class of bug was invisible: the composer's chip comment PROMISED
+  // that an un-marked row "goes un-marked until the next browse/add refreshes
+  // them", and the dedupe branch returned the draft untouched, so the promised
+  // refresh did not exist. Every allocator carrying a pre-152 draft
+  // (localStorage or a saved scenario — neither has the field) saw no "Yours"
+  // chip on their own strategies permanently, and clicking Add again in Browse
+  // did nothing observable.
+  //
+  // The three tests below pin the WHOLE contract, because the dangerous fix is
+  // the over-broad one: reconciling more than `isOwn` would resurrect the bug
+  // M9 fixed (a second Add re-running the 1/(n+1) rescale), and bumping
+  // `lastEditedAt` would make an autosave-only backfill look like a user edit
+  // and inflate `diffCount` — un-blocking Commit on a change nobody made.
+  // -------------------------------------------------------------------------
+  it("WR-01: re-adding an existing row BACKFILLS a newly-known isOwn (the refresh path the chip comment promised)", () => {
+    const initial = defaultDraftFromHoldings(HOLDINGS_2);
+    // A pre-152 draft: the row carries no `isOwn` at all.
+    const pre152 = addStrategyBrowse(initial, STRAT_A);
+    expect(pre152.addedStrategies[0].isOwn).toBeUndefined();
+
+    // The allocator hits Add again in Browse, where the post-152 wire now says
+    // the strategy is theirs.
+    const refreshed = addStrategyBrowse(pre152, { ...STRAT_A, isOwn: true });
+
+    expect(refreshed.addedStrategies[0].isOwn).toBe(true);
+    // Still ONE row — the backfill is not a second add.
+    expect(refreshed.addedStrategies.map((s) => s.id)).toEqual(
+      pre152.addedStrategies.map((s) => s.id),
+    );
+    // M9 still holds in every other respect: no rescale, no toggle churn.
+    expect(refreshed.weightOverrides).toEqual(pre152.weightOverrides);
+    expect(refreshed.toggleByScopeRef).toEqual(pre152.toggleByScopeRef);
+    // A metadata backfill is NOT a user edit — `lastEditedAt` must not move, or
+    // the draft reads as dirty and `diffCount` inflates.
+    expect(refreshed.lastEditedAt).toBe(pre152.lastEditedAt);
+  });
+
+  it("WR-01: an ABSENT isOwn on the incoming payload never ERASES a known bit (absence = unknown, not 'not yours')", () => {
+    const initial = defaultDraftFromHoldings(HOLDINGS_2);
+    const known = addStrategyBrowse(initial, { ...STRAT_A, isOwn: true });
+    expect(known.addedStrategies[0].isOwn).toBe(true);
+
+    // A Bridge-shaped / pre-152 payload for the same id: the wire said nothing.
+    const afterSilentPayload = addStrategyBrowse(known, STRAT_A);
+
+    expect(afterSilentPayload.addedStrategies[0].isOwn).toBe(true);
+    // …and it is a true no-op, reference identity included.
+    expect(afterSilentPayload).toBe(known);
+  });
+
+  it("WR-01: an UNCHANGED isOwn stays a reference-identity no-op (no gratuitous re-render / autosave churn)", () => {
+    const initial = defaultDraftFromHoldings(HOLDINGS_2);
+    const known = addStrategyBrowse(initial, { ...STRAT_A, isOwn: false });
+    const again = addStrategyBrowse(known, { ...STRAT_A, isOwn: false });
+    expect(again).toBe(known);
+  });
+
   it("T1.4_R1 addStrategyBrowse preserves disabled-row weights (regression — review-pass P2)", () => {
     // Setup: two holdings, BTC at 0.6, ETH at 0.4. Toggle ETH OFF — its
     // 0.4 weight is preserved in weightOverrides (toggleHolding stores the
@@ -1035,6 +1096,190 @@ describe("LEV-02 leverageOverrides", () => {
     // No field in → no field out (never fabricates an empty leverage map).
     expect(removed.leverageOverrides).toBeUndefined();
     expect("leverageOverrides" in removed).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 151 / AUM-01 — the manual portfolio-AUM draft field.
+//
+// The whole point of these four behaviours is the DRAFT-DELETING RESET hazard
+// (Phase-59 Pitfall 1): `scenarioDraftSchema` is safeParsed on EVERY codec
+// decode branch, so any way this field can fail safeParse is a way to silently
+// DELETE the user's entire saved scenario over one bad number. Hence: optional,
+// additive, no schema_version bump, no range refine, and `null` (what
+// `JSON.stringify` writes for a NaN) tolerated. Range is enforced on READ via
+// isValidDollar at the composer, never here.
+// ---------------------------------------------------------------------------
+describe("AUM-01 manualAumUsd (Phase 151)", () => {
+  const codec = scenarioDraftCodec(defaultDraftFromHoldings(HOLDINGS_2));
+
+  const v4Draft = (): ScenarioDraft => ({
+    schema_version: SCENARIO_SCHEMA_VERSION,
+    init_holdings_fingerprint: "fp",
+    toggleByScopeRef: { "holding:binance:BTC:spot": true },
+    addedStrategies: [],
+    weightOverrides: { "holding:binance:BTC:spot": 1 },
+    memberKeyIds: [],
+    lastEditedAt: "2026-08-07T00:00:00.000Z",
+  });
+
+  it("Test 1 (backward decode) — a v4 blob WITHOUT manualAumUsd decodes ok, never reset", () => {
+    const legacy = v4Draft();
+    expect("manualAumUsd" in legacy).toBe(false);
+    const r = codec.decode(JSON.stringify(legacy));
+    // The falsifier: a REQUIRED field (or a refine) here would return "reset"
+    // and hand back defaultDraft — every pre-151 draft deleted on first read.
+    expect(r.outcome).toBe("ok");
+    expect(r.value.manualAumUsd).toBeUndefined();
+    expect(r.value.weightOverrides).toEqual(legacy.weightOverrides);
+  });
+
+  it("Test 2 (round-trip) — manualAumUsd 500000 survives encode → decode exactly", () => {
+    const withAum: ScenarioDraft = { ...v4Draft(), manualAumUsd: 500_000 };
+    const r = codec.decode(codec.encode(withAum));
+    expect(r.outcome).toBe("ok");
+    expect(r.value.manualAumUsd).toBe(500_000);
+  });
+
+  it("Test 3 (no refine) — out-of-range (-5, 1e13) and NaN-as-null still DECODE ok; sanitizing is the reader's job", () => {
+    // -5: a client typo. 1e13: above the isValidDollar ceiling (1e12).
+    for (const bad of [-5, 1e13]) {
+      const r = codec.decode(
+        JSON.stringify({ ...v4Draft(), manualAumUsd: bad }),
+      );
+      expect(r.outcome).toBe("ok");
+      expect(r.value.manualAumUsd).toBe(bad);
+    }
+    // NaN is not representable in JSON — `JSON.stringify` emits `null`. A bare
+    // `z.number()` REJECTS null → safeParse fails → the codec's schema_invalid
+    // reset → the whole scenario is deleted. It must decode ok instead.
+    const raw = JSON.stringify({ ...v4Draft(), manualAumUsd: NaN });
+    expect(raw).toContain('"manualAumUsd":null');
+    const r = codec.decode(raw);
+    expect(r.outcome).toBe("ok");
+    expect(r.value.addedStrategies).toEqual([]);
+  });
+
+  it("Test 4 (strip-guard) — the whole-draft z.object parse RETAINS manualAumUsd (declared, not stripped)", () => {
+    // z.object STRIPS unknown keys and the save route persists `parsed.data.draft`,
+    // so an UNDECLARED field means a POSTed manual AUM is silently dropped on the
+    // way to the DB. This is the seam that proves the declaration exists.
+    const parsed = scenarioDraftSchema.safeParse({
+      ...v4Draft(),
+      manualAumUsd: 250_000,
+    });
+    expect(parsed.success).toBe(true);
+    if (!parsed.success) return;
+    expect(parsed.data.manualAumUsd).toBe(250_000);
+    // And through the SAVE-boundary schema the two save routes use.
+    const saved = scenarioDraftSaveSchema.safeParse({
+      ...v4Draft(),
+      manualAumUsd: 250_000,
+    });
+    expect(saved.success).toBe(true);
+    if (!saved.success) return;
+    expect(saved.data.manualAumUsd).toBe(250_000);
+  });
+
+  it("Test 5 (version discipline) — SCENARIO_SCHEMA_VERSION is still 4 (optional + additive = no bump)", () => {
+    expect(SCENARIO_SCHEMA_VERSION).toBe(4);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 152 / SCEN-02 — the `isOwn` ownership bit on an ADDED strategy.
+//
+// Same draft-deleting-reset hazard as AUM-01 above (Phase-59 Pitfall 1), plus a
+// second one that is specific to a NESTED field: `addedStrategySchema` is a
+// `z.object`, so an UNDECLARED `isOwn` is silently STRIPPED on every codec
+// decode AND on every save POST (saved/route.ts persists `parsed.data.draft`) —
+// the chip works in dev and vanishes on the first refresh. Hence: declared on
+// the NESTED schema, `.nullish()`, no schema_version bump, no refine.
+// ---------------------------------------------------------------------------
+describe("SCEN-02 isOwn (Phase 152)", () => {
+  const codec = scenarioDraftCodec(defaultDraftFromHoldings(HOLDINGS_2));
+
+  /**
+   * ⚠️ POPULATED on purpose. The AUM-01 `v4Draft()` fixture above (:1059) has
+   * `addedStrategies: []`, which is correct for a TOP-LEVEL field but makes any
+   * assertion about a NESTED added-strategy field VACUOUS — a strip guard over
+   * an empty array parses green whether or not the field is declared, so it can
+   * never go RED and proves nothing. Every test below therefore reads
+   * `addedStrategies[0]`, which requires a real entry.
+   */
+  const v4DraftWithAdded = (): ScenarioDraft => ({
+    schema_version: SCENARIO_SCHEMA_VERSION,
+    init_holdings_fingerprint: "fp",
+    toggleByScopeRef: { "holding:binance:BTC:spot": true, "uuid-1": true },
+    addedStrategies: [STRAT_A],
+    weightOverrides: { "holding:binance:BTC:spot": 0.5, "uuid-1": 0.5 },
+    // Defined (not undefined) so the same fixture also satisfies
+    // scenarioDraftSaveSchema's `schema_version >= 4` memberKeyIds superRefine.
+    memberKeyIds: [],
+    lastEditedAt: "2026-08-07T00:00:00.000Z",
+  });
+
+  it("Test 1 (backward decode) — a v4 blob whose addedStrategies[0] has NO isOwn decodes ok, never reset", () => {
+    const legacy = v4DraftWithAdded();
+    expect("isOwn" in legacy.addedStrategies[0]).toBe(false);
+    const r = codec.decode(JSON.stringify(legacy));
+    // The falsifier: a REQUIRED nested field (or a refine) would return "reset"
+    // and hand back defaultDraft — every pre-152 draft deleted on first read.
+    expect(r.outcome).toBe("ok");
+    expect(r.value.weightOverrides).toEqual(legacy.weightOverrides);
+    expect(r.value.addedStrategies).toHaveLength(1);
+    expect(r.value.addedStrategies[0].id).toBe(STRAT_A.id);
+  });
+
+  it("Test 2 (null tolerance) — isOwn: null decodes ok AND survives as null (never schema_invalid, never reset)", () => {
+    // `JSON.stringify` writes `null` for values it cannot represent, and a bare
+    // `z.boolean()` REJECTS null → safeParse fails → the codec's schema_invalid
+    // reset → the user's whole scenario deleted. `.nullish()` is what keeps the
+    // null flowing through instead of exploding.
+    const raw = JSON.stringify({
+      ...v4DraftWithAdded(),
+      addedStrategies: [{ ...STRAT_A, isOwn: null }],
+    });
+    expect(raw).toContain('"isOwn":null');
+    const r = codec.decode(raw);
+    expect(r.outcome).toBe("ok");
+    expect(r.value.addedStrategies).toHaveLength(1);
+    expect(r.value.addedStrategies[0].isOwn).toBeNull();
+  });
+
+  it("Test 3 (strip-guard) — addedStrategies[0].isOwn is RETAINED by BOTH the draft and the SAVE schema", () => {
+    // This is the phase's key seam. `z.object` STRIPS unknown keys, so without
+    // the declaration on the NESTED addedStrategySchema the ownership bit is
+    // dropped on every localStorage round-trip and on the way to the DB.
+    const withOwn = {
+      ...v4DraftWithAdded(),
+      addedStrategies: [
+        {
+          id: "uuid-1",
+          name: "Strat A",
+          markets: ["binance"],
+          strategy_types: ["momentum"],
+          isOwn: true,
+        },
+      ],
+    };
+
+    const parsed = scenarioDraftSchema.safeParse(withOwn);
+    expect(parsed.success).toBe(true);
+    if (!parsed.success) return;
+    expect(parsed.data.addedStrategies[0].isOwn).toBe(true);
+
+    // And through the SAVE-boundary schema the two save routes use — the
+    // superRefine needs memberKeyIds defined at schema_version >= 4, which the
+    // fixture supplies.
+    const saved = scenarioDraftSaveSchema.safeParse(withOwn);
+    expect(saved.success).toBe(true);
+    if (!saved.success) return;
+    expect(saved.data.addedStrategies[0].isOwn).toBe(true);
+  });
+
+  it("Test 4 (version discipline) — SCENARIO_SCHEMA_VERSION is still 4 (optional + additive = no bump)", () => {
+    expect(SCENARIO_SCHEMA_VERSION).toBe(4);
   });
 });
 

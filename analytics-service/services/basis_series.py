@@ -174,8 +174,11 @@ class BasisSeriesResult:
     insufficient_window:
         Pass-through of the `MetricsResult.insufficient_window` DQ flag (NOT
         persisted). Exposed so the composite/single-key runners can duck-swap onto
-        this helper without losing the annualization-window annotation (Plans 04/05,
-        consumed at job_worker.py:4586 / analytics_runner.py:2399).
+        this helper without losing the annualization-window annotation (Plans 04/05).
+        Consumed by the two `HARD-04` lifts — `job_worker.run_stitch_composite_job`
+        (`_cash_basis_result.insufficient_window` → `merged_flags`) and
+        `analytics_runner.run_csv_strategy_analytics`
+        (`metrics_result.insufficient_window` → `data_quality_flags`).
     """
 
     metrics_json: dict[str, Any]

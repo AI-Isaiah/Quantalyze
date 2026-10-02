@@ -1,0 +1,221 @@
+Phase 164.7 / plan 02 — NEUTER EVIDENCE
+=======================================
+File under proof: supabase/tests/test_analytics_service_settings_and_vault_tick.sql
+Migration it guards: supabase/migrations/20260907120000_analytics_service_settings_and_vault_tick.sql
+Measured: 2026-09-07, worktree agent-a61937fa47566befa, base c37acda2.
+Host: macOS 25.6.0 / PostgreSQL 16 (PGBIN=/opt/homebrew/opt/postgresql@16/bin,
+pg_cron preloaded by scripts/pg-lane/run.sh — the lane refuses to boot without it).
+
+RESTORE DISCIPLINE. Every neuter below was restored from a BYTE BACKUP taken
+immediately before the edit and compared by sha256, never by a git-index restore
+form: a checkout-style restore reverts to HEAD, which would silently discard any
+uncommitted work in the same file and would also "prove" equality against the
+wrong reference. The backups live in the session scratchpad
+(.../scratchpad/p02-backup/). `git status --porcelain <gate>` was empty after
+each restore, which is the second, independent check.
+
+
+=======================================================================
+PART A — THE PROOF RUN (the state that is committed)
+=======================================================================
+
+  node scripts/mutation-runner/run.mjs --parse-only
+    coverage: files 46/73
+    0 MEASURE_FAIL, 0 parity, 0 occurrence-mismatch, 0 identity-rewrite
+
+  node scripts/mutation-runner/run.mjs --file supabase/tests/test_analytics_service_settings_and_vault_tick.sql
+    baseline  ... exit 0 (0.9s)
+    arm 0                        exit   3  RED (identity ok)  (1.0s)
+    arm V1                       exit   3  RED (identity ok)  (1.0s)
+    arm U1                       exit   3  RED (identity ok)  (0.9s)
+    arm C1                       exit   3  RED (identity ok)  (0.9s)
+    arm R1                       exit   3  RED (identity ok)  (1.0s)
+    arm R2                       exit   3  RED (identity ok)  (1.0s)
+    arm R3                       exit   3  RED (identity ok)  (1.0s)
+    restore   ... exit 0 (1.0s)
+    arms: 7/7/0   biting: 7   lane-invocations: 7   (the two tallies AGREE)
+    No defects in the narrowed scope.
+
+  node scripts/lint-sql-gates.mjs  ->  73 file(s), 0 findings, 0 measure-fails.
+
+RED (identity ok) count: 7 of 7. Every arm was the FIRST failure under its own
+twin, on a real throwaway cluster, BEFORE this file was committed as GREEN.
+
+
+=======================================================================
+PART B — TWO PLANNED TWINS WERE MEASURED UNFALSIFIABLE AND REPLACED
+=======================================================================
+
+Both replacements are DEVIATIONS from 164.7-02-PLAN.md Task 2, and neither was
+argued into place: each was run first, and the runner's own verdict is quoted.
+The plan's rule is "fix at the arm, not at the twin"; here the ARM is the claim
+worth keeping and the TWIN was the thing that could not express it, so the fix
+is at the twin and the reasoning is recorded in the gate file beside each arm.
+
+--- B1. arm C1, planned twin: rename the VAULT key lookup ---------------
+Planned:  find "WHERE name = 'analytics_service_key'"
+          replace "WHERE name = 'analytics_service_key_never'"
+OBSERVED (run.mjs --file, log .../scratchpad/p02-arms/counterfactual.log):
+
+    arm C1                       exit   3  WRONG-ARM(U1)  (1.1s)
+    wrong-first-failure   C1
+        first failure was "U1", not "C1" — red-anywhere is not success
+
+WHY: arm U1 runs BEFORE C1 and asks for the URL raise. Renaming the vault key
+makes the KEY guard fire for every caller, so U1 sees the key message where it
+expected the url message and fails first. Red-anywhere is not success.
+REPLACED WITH: the symmetric edit on the SETTINGS lookup —
+    find "WHERE s.key = 'analytics_service_url'"
+    replace "WHERE s.key = 'analytics_service_url_never'"
+which leaves V1 and U1 green (both are ASKING for a raise, and both still get
+the one they ask for) and reddens C1 alone. It also survives the migration's own
+STEP 3 body check, because "analytics_service_url_never" still contains
+"analytics_service_url" — verified by the arm going RED rather than the apply
+aborting.
+
+--- B2. arm R3, planned twin: DROP POLICY system_settings_service_all ---
+OBSERVED (same run):
+
+    arm R3                       exit   0  NO-RED  (1.0s)
+    no-red                R3
+        the mutation applied (occurrence count verified) but the gate still
+        passed — this arm cannot fail
+
+WHY: `service_role` is created BYPASSRLS — on the pg-lane
+(scripts/pg-lane/run.sh: `CREATE ROLE service_role NOLOGIN BYPASSRLS`) and on
+Supabase itself. Row-level security is not consulted for that role at all, so
+its `*_service_all` policy is belt-and-braces and removing it changes nothing
+observable. ⚠️ This is a property of every `*_service_all` policy in this
+repository, not of this table; a twin of this shape on any of them would be
+equally unfalsifiable.
+REPLACED WITH: an over-broadening of the migration's OWN anon hardening —
+    find "REVOKE ALL ON TABLE public.system_settings FROM anon;"
+    replace "REVOKE ALL ON TABLE public.system_settings FROM anon, service_role;"
+which fails at the GRANT layer, before RLS is consulted, and is the realistic
+regression: a later hardening pass widening a REVOKE it did not re-read. R1 and
+R2 stay green under it (anon is still revoked, authenticated is untouched), so
+R3 is the first failure.
+
+
+=======================================================================
+PART C — NEUTER N1: an arm made unable to fail is CAUGHT
+=======================================================================
+WHAT: arm V1's message-assertion raise head was changed from
+      `RAISE EXCEPTION 'TEST FAILED (V1): the callable did raise …` to
+      `RAISE NOTICE 'TEST FAILED (V1): the callable did raise …`.
+      That is the minimal neuter: the identity text is untouched, only the
+      severity changes, so the arm can no longer fail while still PRINTING the
+      string the detector reads. It is deliberately the harder case.
+
+BEFORE sha256: e65528c4080a94b503937f8bfb83fefd8cbed1e5e8519af479aa107816abca1b
+
+OBSERVED (node scripts/mutation-runner/run.mjs --file <gate>, exit 1):
+
+    arm V1                       exit   0  SYNTHESISED(V1)  (1.0s)
+    biting: 6        (was 7)
+    ❌ 1 defect(s):
+    KIND                  ARM
+    synthesised-identity  V1
+        MEASURE_FAIL: the lane emitted TEST FAILED (V1), which this runner's
+        gate file did not raise. WHY IT IS NOT ATTRIBUTABLE: severity is NOTICE,
+        not ERROR — a NOTICE/WARNING cannot fail an arm. … The mutation
+        satisfied the DETECTOR instead of the arm. This arm is NOT counted as
+        biting. Mutate the code under test, never the failure output.
+
+DEFECT KIND PRINTED: synthesised-identity (a MEASURE_FAIL), and the biting count
+fell 7 -> 6. Both halves matter: the kind names WHY, and the count is what
+ARMS_FLOOR bounds, so the same neuter reaching main would trip the ratchet in CI
+even if a reader ignored the defect table.
+
+Restored from the byte backup .../scratchpad/p02-backup/gate.n1.before.sql.
+AFTER sha256: e65528c4080a94b503937f8bfb83fefd8cbed1e5e8519af479aa107816abca1b
+`git status --porcelain <gate>` -> empty (0 lines).
+
+
+=======================================================================
+PART D — NEUTER N2: a section left without a twin is CAUGHT
+=======================================================================
+WHAT: line 376, the entire `-- RED-UNDER-M:` twin of arm R3, was deleted. The
+      prose `-- RED-UNDER:` above it was left in place, which is exactly the
+      shape a half-finished backfill produces: the human claim survives, the
+      executable one does not.
+
+BEFORE sha256: e65528c4080a94b503937f8bfb83fefd8cbed1e5e8519af479aa107816abca1b
+
+OBSERVED (node scripts/mutation-runner/run.mjs --parse-only, exit 1):
+
+    supabase/tests/test_analytics_service_settings_and_vault_tick.sql:
+        7 prose / 6 twin(s) / 0 waiver(s)
+    ❌ 1 static defect(s):
+    parity                -    supabase/tests/test_analytics_service_settings_and_vault_tick.sql
+        7 prose RED-UNDER marker(s) vs 6 RED-UNDER-M twin(s)
+
+DEFECT KIND PRINTED: parity. It fires in --parse-only, i.e. with no database at
+all, which is what makes it cheap enough to run on every push.
+
+Restored from the byte backup .../scratchpad/p02-backup/gate.n2.before.sql.
+AFTER sha256: e65528c4080a94b503937f8bfb83fefd8cbed1e5e8519af479aa107816abca1b
+`git status --porcelain <gate>` -> empty (0 lines).
+
+
+=======================================================================
+EXPECTED RED ON SHARED TEST
+=======================================================================
+Named here BEFORE any PR exists, so that a red in CI's `sql-tests` job is read
+as the missing apply it is and not as a coupling regression (164.7-RESEARCH
+Pitfall 4; the same shape 164.2 booked as [164.2-TEST-APPLY-PROVENANCE]).
+
+1. supabase/tests/test_analytics_service_settings_and_vault_tick.sql
+   -> TEST FAILED (0)
+   CAUSE: NO workflow applies migrations to TEST (TODOS SKIP-01, CI-MIGRATE-01;
+   `sql-tests` has no apply step and the migrate workflow is PROD-only). Until
+   20260907120000_analytics_service_settings_and_vault_tick.sql is hand-applied
+   to TEST by the founder — which-database marker first, then
+   `psql "$TEST_SUPABASE_DB_URL" -v ON_ERROR_STOP=1 -f <migration>`, never
+   `db push`, because TEST is SHARED — neither public.match_engine_cron_tick()
+   nor public.system_settings exists there and arm 0 fires. Exactly once, and
+   only in this file: no other gate in the corpus reads either object.
+
+2. VAC-08 (`scripts/test-ledger-drift-check.sh`, step "VAC-08 — repo-vs-TEST
+   ledger and function body drift" in `sql-tests`)
+   -> `::error:: … NOT baselined` for 20260907120000
+   CAUSE: the same missing apply. `scripts/vac08-ledger-baseline.txt` may only
+   SHRINK, so the new migration is not added to it; the red clears when the
+   migration reaches TEST's ledger. ⚠️ Do not "fix" this by widening the
+   baseline.
+
+3. UNKNOWN-UNTIL-FIRST-RUN — the vault question on shared TEST.
+   Once (1) is resolved, the next arm that can fire is V1-SETUP:
+   -> TEST FAILED (V1-SETUP), carrying the SQLSTATE and message it observed
+   CAUSE, if it fires: on the pg-lane `vault.decrypted_secrets` is the stand-in
+   TABLE from scripts/pg-lane/fixtures/32-fixture-vault-stand-in.sql; on TEST it
+   is the real `supabase_vault` VIEW. Whether the CI role may SELECT it, and
+   whether a DELETE against a view with computed columns is permitted, has NEVER
+   been measured on that project — 164.7-RESEARCH Q1 records it as UNKNOWN and
+   Open Question 3 asks for it. Two SQLSTATEs are plausible and this file cannot
+   choose between them from here: 42501 insufficient_privilege (the role cannot
+   touch the vault at all) or 55000/0A000-class refusals on the view. If the
+   `vault` schema is absent from TEST entirely, the shape changes again: arm 0
+   still passes (it probes only public.*), and the FIRST failure becomes
+   V1-SETUP carrying 3F000 `schema "vault" does not exist`.
+   ⛔ WHAT TO DO WITH IT: read the actual SQLSTATE off the first `sql-tests` log
+   and write it down (plan 06 owns that read). Do NOT convert V1-SETUP to a
+   skip, and do NOT delete the guard — without it V1 would pass on TEST for a
+   reason V1 never asked about, which is the vacuity this whole apparatus
+   exists to refuse.
+
+
+=======================================================================
+WHAT THIS LOG DOES NOT CLAIM
+=======================================================================
+- No arm here has run against a Supabase project. Everything above is the
+  pg-lane, whose fixtures are the fixture author's MODEL of the schema
+  (scripts/pg-lane/run.sh:69-77). What is proven is that the migration applies,
+  that its self-verification bites, and that all seven arms pass and CAN FAIL.
+- Nothing here measures whether a SECURITY DEFINER function owned by `postgres`
+  may read the real encrypted `vault.decrypted_secrets` on a hosted project.
+  That is 164.7-RESEARCH assumption A1, still `[ASSUMED]`, and it is the one
+  thing standing between this callable and the live job row that Phase 164.5
+  item (7) will point at it.
+- The ubuntu SHA-bound confirmation for a 46-file / 376-arm corpus has NOT been
+  taken. Every number above is this macOS box, this date.

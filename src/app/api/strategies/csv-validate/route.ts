@@ -1,10 +1,40 @@
 import { NextRequest, NextResponse } from "next/server";
 import type { User } from "@supabase/supabase-js";
 import { withAuth } from "@/lib/api/withAuth";
-import { csvValidateLimiter, checkLimit } from "@/lib/ratelimit";
+import { csvValidateLimiter, checkLimit, rateLimitDenyJson } from "@/lib/ratelimit";
 import { isUuid } from "@/lib/utils";
 import { postProcessKey } from "@/lib/process-key-client";
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
+// 140.3-13b / SEAMUX-08 — the ONE lazy-Sentry helper, applied under the SINGLE
+// capture policy written out IN FULL in `src/app/api/admin/match/eval/route.ts`
+// by `140.3-13a`. Cited, never restated. The caught value is passed UNMODIFIED:
+// `captureToSentry` scrubs at the chokepoint (SEAMCORE-06).
+//
+// PER-REQUEST SECRETS AT THIS ROUTE: none. The one credential the outgoing
+// request carries is `INTERNAL_API_TOKEN`, which is already on
+// `seam-redaction.ts`'s env-name list; no end-user JWT is forwarded from here
+// and no exchange material exists on the CSV path. The uploaded BYTES are not a
+// credential, and they are never put in a capture payload — only `fmt` and a
+// size are. Stated rather than assumed (M78b).
+import { captureToSentry } from "@/lib/sentry-capture";
+// 140.4-09 / SEAMRIM-06 — the seam's ONE redaction leaf (SEAMCORE-06), for the
+// terminal catch's console line.
+//
+// ⚠️ THE ABSENCE OF THIS IMPORT WAS RECORDED AS EVIDENCE OF A CREDENTIAL LEAK,
+// AND THAT READING IS REFUTED. `grep -c scrubSeamError` returned 0 on this file
+// and was reported by five independent registers as C-1 CRITICAL. It is a FALSE
+// SIGNAL: the credential this route's outgoing request carries is
+// `INTERNAL_API_TOKEN`, which is already on `seam-redaction.ts`'s env-name list
+// and is therefore scrubbed unconditionally inside `captureToSentry` — the
+// chokepoint — and no real transport failure inlines it into `err.message`
+// anyway (ECONNREFUSED / ECONNRESET / DNS / timeout / parse all produce a
+// constant `fetch failed`). What was actually wrong here was HYGIENE, and it is
+// what this import fixes: an unscrubbed console line. Do not re-derive the
+// stronger claim from the fact that this import is new.
+import { scrubSeamError } from "@/lib/seam-redaction";
+// CR-02: the terminal arm renders this code's OWN authored title rather than a
+// second sentence about the user's file. One table, one sentence.
+import { WIZARD_ERROR_COPY } from "@/lib/wizardErrors";
 
 /**
  * POST /api/strategies/csv-validate — Phase 15 / CSV-01..CSV-02.
@@ -30,7 +60,45 @@ import { NO_STORE_HEADERS } from "@/lib/api/headers";
  * breaking the contract.
  */
 
+/**
+ * Phase 140 / SEAM-02 — pinned for clarity; asserted against
+ * SEAM_ROUTE_BUDGETS by seam-budgets.invariant.test.
+ *
+ * 300 is the project's VERIFIED effective Vercel default
+ * (`defaultResourceConfig.functionDefaultTimeout: 300`, read from the live
+ * project settings on 2026-07-25), so declaring it here cannot raise this
+ * route's worst-case lambda hold. It exists so the SC-4b headroom invariant
+ * has an in-repo source of truth instead of a dashboard-changeable
+ * assumption: this route spends one `process-key-sync` budget (60s — the CSV
+ * flow runs the full pipeline INLINE), 5× headroom.
+ */
+export const maxDuration = 300;
+
 const MAX_BYTES = 10 * 1024 * 1024;
+
+/**
+ * M-14: the CSV v0 envelope BODY — `ok: false`, code, human_message,
+ * debug_context, correlation_id, in that order.
+ *
+ * 140.4-13 / SEAMRIM-05 split this out of `csvErrorEnvelope` below so the deny
+ * arm can hand the SAME body to `rateLimitDenyJson` without re-typing the five
+ * fields. Re-typing them would have made this route the one place where the
+ * envelope has a second definition — the exact opposite of M-14's stated reason
+ * for existing, and the shape a future `correlation_id` thread would miss.
+ */
+function csvErrorBody(
+  code: string,
+  human_message: string,
+  debug_context: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    ok: false,
+    code,
+    human_message,
+    debug_context,
+    correlation_id: null,
+  };
+}
 
 /**
  * M-14: shared error-envelope builder for the CSV routes. Every error path
@@ -46,13 +114,7 @@ function csvErrorEnvelope(
   init: ResponseInit = {},
 ): NextResponse {
   return NextResponse.json(
-    {
-      ok: false,
-      code,
-      human_message,
-      debug_context,
-      correlation_id: null,
-    },
+    csvErrorBody(code, human_message, debug_context),
     // NO_STORE_HEADERS is the base so every error envelope is private,no-store;
     // caller headers (e.g. the 429's Retry-After) merge ON TOP without
     // clobbering Cache-Control. Spread order matters: a flat `...init` last
@@ -141,13 +203,38 @@ export const POST = withAuth(async (req: NextRequest, user: User) => {
     `strategies-csv-validate:${user.id}`,
   );
   if (!rl.success) {
-    return csvErrorEnvelope(
-      "CSV_RATE_LIMIT",
-      "Too many requests. Wait a minute and try again.",
-      {},
-      429,
-      { headers: { "Retry-After": String(rl.retryAfter) } },
-    );
+    // 140.4-13 / SEAMRIM-05 — deny through the chokepoint so a limiter
+    // misconfiguration answers 503.
+    //
+    // ⚠️ WHICH OF THE TWO ALLOWED SHAPES THIS ROUTE USES, AND WHY. The plan
+    // permitted either passing the envelope as a body override or keeping
+    // `csvErrorEnvelope` and branching on `isRateLimitMisconfigured` locally.
+    // Neither verbatim: the body comes from `csvErrorBody` — the SAME builder
+    // `csvErrorEnvelope` uses — so the five v0 fields keep one definition, and
+    // the STATUS comes from `rateLimitDenyJson`, so the 503-vs-429 decision
+    // lives in the artefact rather than in a twelfth inlined copy. Re-typing
+    // the envelope here would have been the "simplification" that gave this
+    // route a second envelope definition to drift.
+    return rateLimitDenyJson(rl, {
+      headers: NO_STORE_HEADERS,
+      throttledBody: csvErrorBody(
+        "CSV_RATE_LIMIT",
+        "Too many requests. Wait a minute and try again.",
+      ),
+      misconfiguredBody: csvErrorBody(
+        "SEAM_MISCONFIGURED",
+        // 140.4-16 / WR-07 — "Nothing was uploaded" WAS FALSE HERE, and the
+        // ordering is why. `req.formData()` runs ~50 lines above this
+        // deny, so the multipart body — the whole file, up to 10 MB — has
+        // already been received and buffered by the time the limiter is
+        // consulted. `SEAM_MISCONFIGURED`'s own entry EARNS its "Nothing
+        // was submitted" clause because `SeamConfigError` is raised before
+        // any I/O and says so explicitly; here the ordering is the other
+        // way round. What IS true is that nothing was saved and nothing was
+        // validated — same reassurance, and checkable.
+        "Our rate limiter is unavailable, so we stopped before checking your file. This is a fault on our side, not your data. Nothing was saved and nothing was validated — try again in a minute.",
+      ),
+    });
   }
 
   // Phase 106 Stage B (D2): the unified backbone is the sole validate path.
@@ -182,6 +269,24 @@ async function unifiedCsvValidateHandler(args: {
   // is still used for the actual POST so the per-route fetch boilerplate is
   // gone.
   if (!process.env.INTERNAL_API_TOKEN) {
+    // 140.3-13b / SEAMUX-08 — a PERMANENT CONFIG FAULT, captured `fatal`. The
+    // isomorph of `verify-strategy`'s admin-client-config arm, which
+    // `140.3-13a` captured for the same reason: a misconfigured deployment
+    // takes the whole CSV upload path down for every user, it can never
+    // self-heal, and nothing else reports it — a `console.error` on a serverless
+    // function is not an alert. It is NOT an upstream condition, so it is not
+    // excluded by the policy's breaker / timeout / forwarded-4xx list.
+    //
+    // A SYNTHETIC Error, deliberately: there is no caught value here, and the
+    // ENV VALUE must never be near a capture payload. Only the name is stated,
+    // and it is absent by definition on this arm.
+    captureToSentry(
+      new Error("csv-validate: INTERNAL_API_TOKEN is not configured"),
+      {
+        tags: { surface: "strategies-csv-validate", step: "config-missing" },
+        level: "fatal",
+      },
+    );
     console.error("[strategies/csv-validate] INTERNAL_API_TOKEN not configured");
     return csvErrorEnvelope("CSV_UPSTREAM_FAIL", "Service unavailable.", {}, 503);
   }
@@ -204,11 +309,72 @@ async function unifiedCsvValidateHandler(args: {
       // CT-4 (army2) — forward tenant id for cross-tenant rate-limit isolation.
       userId: args.userId,
     });
+    // 140.3-13b / SEAMUX-08 — DELIBERATELY NOT CAPTURED. `postProcessKey`
+    // returns an ALREADY-CLASSIFIED envelope here: this is where the breaker's
+    // forwarded 503 lives, alongside the client's own transport codes and any
+    // upstream refusal. Capturing it would alert on every short-circuit during
+    // the exact correlated incident Sentry exists to surface — the policy's
+    // named exclusion — and would double-report anything the client itself
+    // already answers for. Same reading `140.3-13a` applied to
+    // `verify-strategy`'s `!result.ok`.
     if (!result.ok) return result.response;
     return NextResponse.json(result.body, { headers: NO_STORE_HEADERS });
   } catch (err) {
-    const message = err instanceof Error ? err.message : "CSV validation failed";
-    console.error("[strategies/csv-validate] unified path threw:", message);
-    return csvErrorEnvelope("CSV_UPSTREAM_FAIL", message, {}, 502);
+    // 140.3-13b / SEAMUX-08 — THE TERMINAL ARM. `postProcessKey` classifies
+    // every outcome it can into the `!result.ok` envelope above, so a THROW
+    // reaching here is by construction the unclassified residue: a transport
+    // failure, a missing-config throw from the client, a contract-drift parse
+    // throw, or any untyped throw. The caught VALUE is passed, so Sentry keeps
+    // the Error type, its grouping and its stack.
+    captureToSentry(err, {
+      tags: { surface: "strategies-csv-validate", step: "unified-path-threw" },
+      extra: { fmt: args.fmt, size_bytes: args.file.size },
+    });
+    // 140.4-09 / SEAMRIM-06 — H-1062, the rule `src/app/api/bridge/route.ts`
+    // states verbatim at its own terminal arm: a genuine 5xx / unexpected
+    // exception returns a STATIC message and THE DETAIL STAYS SERVER-SIDE.
+    // Echoing `err.message` there leaked Python contract-drift strings (the
+    // multi-line Zod issue list `parseResponse()` throws) and FastAPI 5xx
+    // detail to authenticated allocators. Here it was worse-placed: this body's
+    // `human_message` is rendered by `CsvUploadStep` → `CsvValidationEnvelope`
+    // as the wizard panel's TITLE and SUBTITLE — the one surface whose job is
+    // "the upload failed, send this to support".
+    //
+    // The operator loses nothing. The caught value goes to Sentry above with
+    // its type and its stack, and the line below carries the rendered detail
+    // SCRUBBED. Answering this by dropping `err` from the log instead would be
+    // the A-10 defect — the syscall token is the most valuable thing in a
+    // transport line.
+    console.error(
+      "[strategies/csv-validate] unified path threw:",
+      scrubSeamError(err),
+    );
+    return csvErrorEnvelope(
+      "CSV_UPSTREAM_FAIL",
+      // ⚠️ 140.4-16 / CR-02 — READ THE ARM'S OWN DEFINITION BEFORE CHANGING
+      // THIS SENTENCE. Everything reaching here is, by construction, the
+      // UNCLASSIFIED RESIDUE: a transport failure, a missing-config throw, a
+      // contract-drift parse throw. `postProcessKey` classifies every other
+      // outcome into the `!result.ok` envelope above. None of those is the
+      // user's data.
+      //
+      // 140.4-09 replaced a leaky `err.message` echo with a static sentence —
+      // correct — and picked "CSV validation failed. Try again shortly.",
+      // which tells a user whose file is perfectly valid that their file is
+      // not. That is the milestone's signature defect, authored by the phase
+      // that exists to remove it, on the wizard's highest-traffic error
+      // surface, and it WIDENED the misattribution: before, that sentence
+      // applied only to the non-Error throw branch. A live QA pass reproduced
+      // it in a browser (qa-report-localhost-2026-07-29, ISSUE-003).
+      //
+      // The code already OWNS an honest sentence. Read it from the ONE copy
+      // table rather than restating it here: a second copy of a sentence is a
+      // second thing to drift. `csv-validate-route.test.ts` hand-types the
+      // expected literal, so the table and the assertion are independent
+      // oracles.
+      WIZARD_ERROR_COPY.CSV_UPSTREAM_FAIL.title,
+      {},
+      502,
+    );
   }
 }

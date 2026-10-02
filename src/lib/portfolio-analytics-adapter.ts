@@ -123,10 +123,14 @@ function parseRiskDecompositionRow(v: Json): RiskDecompositionRow | null {
   return {
     strategy_id,
     strategy_name: asString(v.strategy_name) ?? strategy_id,
-    marginal_risk_pct: asNumber(v.marginal_risk_pct) ?? 0,
+    // 166.1 D7: a risk share that does not exist (a portfolio with no risk)
+    // stays null; `?? 0` read it as "carries none of the risk".
+    marginal_risk_pct: asNumber(v.marginal_risk_pct),
     standalone_vol: asNumber(v.standalone_vol) ?? 0,
-    component_var: asNumber(v.component_var) ?? 0,
-    weight_pct: asNumber(v.weight_pct) ?? 0,
+    component_var: asNumber(v.component_var),
+    // 169 review round 1 SFH M-5 (2026-09-29): a missing weight stays null
+    // for the same reason; `?? 0` made every row with a share "overweight".
+    weight_pct: asNumber(v.weight_pct),
   };
 }
 
@@ -150,8 +154,11 @@ function parseOptimizerSuggestionRow(v: Json): OptimizerSuggestionRow | null {
   return {
     strategy_id,
     strategy_name: asString(v.strategy_name) ?? strategy_id,
-    corr_with_portfolio: asNumber(v.corr_with_portfolio) ?? 0,
-    sharpe_lift: asNumber(v.sharpe_lift) ?? 0,
+    // 166.1 D7 (founder 2026-09-26): a statistic that does not exist stays
+    // null end to end. A `?? 0` here turned the optimizer's undefined
+    // correlation into "reduce average correlation toward 0.00" on the card.
+    corr_with_portfolio: asNumber(v.corr_with_portfolio),
+    sharpe_lift: asNumber(v.sharpe_lift),
     dd_improvement: asNumber(v.dd_improvement) ?? 0,
     score: asNumber(v.score) ?? 0,
   };

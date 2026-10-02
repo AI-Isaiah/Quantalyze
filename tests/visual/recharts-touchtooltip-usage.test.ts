@@ -8,10 +8,18 @@ import { join } from "node:path";
  *
  * The CHART-01b deliverable replaced the raw recharts `<Tooltip>` (hover-only —
  * invisible to a touch user) with the breakpoint-gated `<TouchTooltip>` shim
- * (`src/components/charts/TouchTooltip.tsx`) across all 18 tooltip-bearing
- * charts, so a tap shows/pins the value on a phone while desktop stays
+ * (`src/components/charts/TouchTooltip.tsx`) across every tooltip-bearing
+ * chart, so a tap shows/pins the value on a phone while desktop stays
  * `trigger="hover"` byte-identical. `TouchTooltip` is therefore the ONLY file
  * allowed to import the raw `Tooltip` from `"recharts"`.
+ *
+ * ⚠️ NO CHART COUNT IS STATED HERE, and none should be reintroduced
+ * (140.3-G2 / GC-4). This docblock previously named one. Read what the
+ * assertion below actually does: it compares the DERIVED importer list against
+ * an allow-list holding a single entry (`toEqual([ALLOWED])`). It never reads,
+ * and never has read, how many charts exist — so the count in this docblock was
+ * never enforced by anything, drifted, and had no oracle that could notice.
+ * The allow-list is the contract; the population size is not.
  *
  * Source-level grep covers the contract in one place: a chart that reverts to a
  * bare recharts `<Tooltip>` — or a NEW chart added with one — would silently

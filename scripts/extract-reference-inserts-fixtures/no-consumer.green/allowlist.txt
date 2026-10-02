@@ -1,0 +1,2 @@
+# fixture allowlist — no-consumer.green
+20260101000000_fx_a.sql	public.fx_ref	1	# consumer: fx_child.ref_id FK

@@ -16,7 +16,13 @@ title = "Quantalyze gitleaks config"
 [extend]
 useDefault = true
 
-[allowlist]
+# NOTE (158-REVIEW CR-03): this is `[[allowlists]]` (array form), not the
+# singular `[allowlist]` it used to be. gitleaks >= 8.30 REFUSES to load a
+# config that mixes the two ("[allowlist] is deprecated, it cannot be used
+# alongside [[allowlists]]"), and the rule-scoped blocks at the bottom of this
+# file require the array form. Behaviour of this block is unchanged: with no
+# `targetRules`, it still applies to every rule.
+[[allowlists]]
 description = "Known test fixtures and placeholder env samples"
 
 # File-path allowlist — fixtures and sample files that contain
@@ -24,6 +30,12 @@ description = "Known test fixtures and placeholder env samples"
 #
 # - .env.example: documented placeholder values only (your-anon-key,
 #   your-service-role-key, etc.). Contributors need this file.
+# - src/app/api/verify-strategy/route.seam.test.ts: the seam breaker suite's
+#   RAW_API_KEY fixture ("AK_LIVE_..."), a synthetic exchange key used to
+#   assert that scrubSeamError REDACTS per-request secrets from undici error
+#   messages. 146.1 / B2 promoted it from carried-in-fixture to ASSERTED when
+#   the live user JWT stopped being forwarded, so it must stay key-SHAPED to
+#   be falsifiable. The identical fixture in route.test.ts is already covered.
 # - src/lib/admin/pii-scrub.test.ts: unit test for the PII scrubber;
 #   contains a canonical JWT fixture
 #   (eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NSJ9.SflKxwRJSMe...) used to
@@ -40,12 +52,12 @@ description = "Known test fixtures and placeholder env samples"
 #   Not a real token.
 # - package-lock.json: integrity hashes trip gitleaks generic
 #   high-entropy detection; this is well-known noise to ignore.
-# - .planning/: gstack planning artifacts (plan markdowns, summaries,
-#   review reports). Pure prose with technical terms ("mid-Phase-14b",
-#   migration filenames, RPC names) that the generic-api-key entropy
-#   detector mistakes for secrets. These files ship documentation, not
-#   credentials. The directory is force-added per the project's planning
-#   workflow.
+# - .planning/: MOVED OUT of this blanket path list — see the scoped
+#   [[allowlists]] block at the bottom of this file (158-REVIEW CR-03).
+#   Summary: it is now allowlisted for the ENTROPY rule only, not for
+#   every rule, because a whole-path exemption made the secret-scan gate
+#   structurally incapable of ever flagging a real credential in the
+#   largest cluster of tracked files in the repo.
 # - src/app/api/webhooks/resend/route.test.ts: Phase 16 OBSERV-03 webhook
 #   verification test. Defines a synthetic Svix secret prefixed `whsec_`
 #   (base64("test-secret-phase-16-observ-03")) used by the test signing helper
@@ -75,8 +87,8 @@ paths = [
   '''(^|/)analytics-service/tests/test_encryption\.py$''',
   '''(^|/)analytics-service/tests/test_c19_portfolio_fixes\.py$''',
   '''(^|/)package-lock\.json$''',
-  '''(^|/)\.planning/''',
   '''(^|/)src/app/api/webhooks/resend/route\.test\.ts$''',
+  '''(^|/)src/app/api/verify-strategy/route\.seam\.test\.ts$''',
   '''(^|/)analytics-service/tests/cassettes/''',
   # fix-list.md was historically copied to the repo root by audit-fix
   # automation. It contains audit prose describing high-entropy
@@ -117,4 +129,315 @@ paths = [
   # generic-api-key entropy detector flags the literals on the full scan.
   '''(^|/)analytics-service/tests/test_verify_strategy_redaction\.py$''',
   '''(^|/)analytics-service/tests/test_portfolio_router_audit_2026_05_07\.py$''',
+  # Phase 140.1 (PYAPI-06 / PYAPI-10b) no-echo canary fixtures. Both files
+  # define deliberately WORDLESS, high-entropy literals whose entire purpose is
+  # to be searched for and proven ABSENT from a response body, a Sentry capture,
+  # stdout/stderr and the stdlib log stream:
+  #   - test_secret_misconfig_signal.py:46,47,51 — `_SERVICE_KEY_CANARY`,
+  #     `_INTERNAL_TOKEN_CANARY` and `_WRONG_SERVICE_KEY`. The oracle scans every
+  #     contiguous 6-gram of all four values across four output streams, so the
+  #     literals MUST be wordless (a dictionary word would make the 6-gram scan
+  #     match unrelated prose and the test vacuous). That property is exactly
+  #     what trips the generic-api-key entropy detector.
+  #   - test_process_key_200_discriminator.py:501 — `_CANARY_SECRET`, asserted
+  #     absent from the PYAPI-10b 403 rejection envelope.
+  # Not real credentials, and none is ever read from or written to an env var:
+  # the whole point of both suites is that these values get suppressed.
+  '''(^|/)analytics-service/tests/test_secret_misconfig_signal\.py$''',
+  '''(^|/)analytics-service/tests/test_process_key_200_discriminator\.py$''',
+  # v1.17 Phase 151 (AUM) E1 money-basis oracle. The suite names its api_key
+  # fixtures after the ROLE each key plays in the notional-vs-equity proof —
+  # `E1_KEY_DERIV = "e1-key-deriv"`, `E1_KEY_SPOT`, `E1_KEY_DORMANT` — so
+  # generic-api-key matches the `KEY` in the identifier and scores the hyphenated
+  # literal at entropy ~3.52. The values are plain lowercase slugs used as map
+  # keys in an in-memory fixture; no credential material exists in this file.
+  # Same push-to-main-only asymmetry as the entries above (the PR-diff scan
+  # passed; the squash-commit scan on main flagged it).
+  '''(^|/)src/app/\(dashboard\)/allocations/components/ScenarioComposer\.test\.tsx$''',
 ]
+
+# ---------------------------------------------------------------------------
+# Rule-SCOPED allowlists (158-REVIEW CR-03)
+# ---------------------------------------------------------------------------
+#
+# The `[allowlist].paths` list above is a BLANKET exemption: a file listed
+# there is invisible to every rule in the ruleset. That is correct for a
+# handful of small fixture files whose entire content is synthetic. It was NOT
+# correct for `.planning/`, which is the largest cluster of tracked files in
+# the repo (~56 MB of plan markdowns, review reports and summaries, all
+# world-readable — this repository is PUBLIC). Exempting that whole tree from
+# every rule meant the secret-scan gate was STRUCTURALLY incapable of flagging
+# a real credential pasted into a plan document. It is a blocking CI gate that
+# could not fail over most of its own repository.
+#
+# The actual problem the exemption solved is narrow: planning prose is full of
+# migration filenames, RPC names and hyphenated identifiers that the
+# generic-api-key ENTROPY detector scores as secrets. So the exemption is now
+# scoped to that one rule. Measured on the working tree at the time of the
+# change: 12 findings under `.planning/` with no exemption at all — 11
+# generic-api-key (entropy noise, suppressed below) and 1 `jwt`.
+[[allowlists]]
+description = "planning artifacts: entropy false-positives only, NOT a blanket exemption"
+targetRules = ["generic-api-key"]
+paths = ['''(^|/)\.planning/''']
+
+# The single non-entropy hit in `.planning/` is the canonical jwt.io tutorial
+# JWT — the same fixture already allowlisted by path for four test files near
+# the top of this file. Suppressed by VALUE rather than by path, so it stays
+# suppressed wherever it is quoted while ANY OTHER JWT appearing in a planning
+# document still trips the gate. That is the distinction a path exemption
+# cannot make, and the reason this block exists rather than a broader one.
+#
+# ⚠️ `condition = "AND"` is load-bearing. gitleaks defaults an allowlist to OR,
+# which would suppress the `jwt` rule for this literal EVERYWHERE it appears —
+# and that breaks the H-0017 meta-test (`src/__tests__/gitleaks-allowlist.test.ts`),
+# which deliberately plants this exact fixture at a NON-allowlisted path and
+# asserts the `jwt` rule fires on it. Observed while making this change: with
+# the default OR, that test failed with `expected 'generic-api-key' to be
+# 'jwt'` — i.e. a broad allowlist had silently degraded a falsifiability guard.
+# AND means "this literal, and only inside .planning/".
+# Phase 164 (SHARE-01) share-token test fixtures. Four suites type a 43-char
+# base64url literal BY HAND — the exact width `deriveShareToken` emits — because
+# each one asserts the token is ABSENT from a scrubbed output (Sentry event,
+# Plausible URL, factsheet analytics payload). Deriving the fixture instead would
+# make the oracle self-referential: a broken deriver would produce a broken
+# expectation and the test could never fail. `generic-api-key` scores the
+# hand-typed literal on entropy alone.
+#
+# These cannot be live capabilities. A real share token is
+# HMAC(SHARE_TOKEN_SECRET, "qz.strategy-share.v1.<id>.<nonce>.<generation>") —
+# a hand-typed string matches no strategy, and the lane 410s on a miss.
+#
+# ⛔ RULE-SCOPED, NOT A PATH EXEMPTION, per the CR-03 lesson above: a blanket
+# `paths` entry would make these four files invisible to EVERY rule, including
+# `jwt` and `private-key`. Only the entropy detector is wrong here, so only the
+# entropy detector is suppressed.
+#
+# Same push-to-main-only asymmetry as the entries above: the PR-diff scan passed
+# on #720 and the squash-commit scan on main flagged all five. Reproduced
+# locally with `gitleaks detect -c .gitleaks.toml --log-opts=-1`.
+[[allowlists]]
+description = "Phase 164 share-token fixtures: entropy false-positives only"
+targetRules = ["generic-api-key"]
+paths = [
+  '''(^|/)src/lib/scrub-share-path\.test\.ts$''',
+  '''(^|/)src/instrumentation\.test\.ts$''',
+  '''(^|/)src/app/PlausibleScript\.test\.tsx$''',
+  '''(^|/)src/app/factsheet/\[id\]/v2/factsheet-analytics\.test\.ts$''',
+]
+
+[[allowlists]]
+description = "canonical jwt.io tutorial JWT fixture (HS256, sub=12345) — not a real token"
+targetRules = ["jwt"]
+condition = "AND"
+paths = ['''(^|/)\.planning/''']
+regexes = ['''eyJhbGciOiJIUzI1NiJ9\.eyJzdWIiOiIxMjM0NSJ9\.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c''']
+
+[[allowlists]]
+description = """
+Phase 164.1 prod-prober: defect-kind identifiers, a self-test sentinel, and the
+deliberately secret-SHAPED hygiene fixtures. The cron-drift arm ships ten
+secret-hygiene rules and every one carries a RED fixture row proving it fires — a
+rule with no failing fixture is the defect this milestone exists to remove, so
+these strings MUST look like credentials. The JWT here is a HEADER SEGMENT ONLY
+and decodes to {"alg":"HS256","typ":"FAKE"}; every host in these fixtures is
+`.invalid`.
+NOT a path exemption: a real credential committed under scripts/prod-prober/ still
+fails the gate. MEASURED both directions on 2026-09-06 — an unaffiliated
+high-entropy value planted in that directory was still reported.
+⭐ The `regexes` list is the load-bearing key, and that is measured, not assumed:
+deleting `regexes` while KEEPING `paths` turns this into a real path exemption and
+the guard arm goes RED ("expected 0 to be greater than 0"). `condition = "AND"` is
+kept as belt-and-braces but is NOT independently demonstrable here — flipping it to
+"OR" changed no observed behaviour in gitleaks 8.30.1, so do not rely on it alone
+and do not cite it as the reason this is scoped.
+⛔ Never widen this to `paths` alone. Pinned by src/__tests__/gitleaks-allowlist.test.ts.
+"""
+targetRules = ["generic-api-key"]
+condition = "AND"
+paths = ['''(^|/)scripts/prod-prober/''']
+regexes = [
+  '''pyapi06-[a-z0-9-]+''',
+  '''SENTINEL-KEY-[0-9a-f]{4,}''',
+  '''eyJhbGciOiJIUzI1NiIsInR5cCI6IkZBS0UifQ''',
+]
+
+[[allowlists]]
+description = """
+Phase 164.8.5 prod-prober: the SPLIT-literal hygiene fixtures. 164.8.5 made the
+cron-drift rules length-test the DERIVED value, so its red fixtures spell a key
+out in pieces — `'FAKE-key-' || '0123456789ab'`, `concat('FAKE-key-','…')`,
+`format('%s%s','FAKE-key-','…')`. That shape is, by construction, the exact
+`<keyword><delimiter><secret>` form `generic-api-key` looks for: MEASURED
+2026-09-11 with gitleaks 8.30.1, the split form is reported (secret
+`0123456789ab`, entropy 3.585) while the SAME key written whole
+(`'FAKE-key-0123456789ab'`) is not. A fixture proving the arm catches a split
+credential cannot avoid looking like a split credential.
+
+⛔ THIS IS WHY LOWERING FIXTURE ENTROPY DOES NOT CLOSE IT, though it was tried
+first per RESEARCH Q4. Three of the five reported sites
+(`fixtures/cron-drift/hygiene-red.json:60,65,70`) exist only in ALREADY-COMMITTED
+history; PRs are scanned with `fetch-depth: 0`, so no edit to the working tree
+can clear them. Suppression has to be stated, not rewritten.
+
+⭐ `regexTarget = "match"` is load-bearing HERE and nowhere else in this file.
+The finding's SECRET is the bare tail `0123456789ab`, which carries no marker of
+its own — keying on it would suppress any 12-hex token in this directory. The
+MATCH carries the `FAKE-key-` marker, so that is what this keys on, the same way
+`SENTINEL-KEY-` and `pyapi06-` key the block above.
+
+NOT a path exemption, and separate from that block so its guard arm keeps
+measuring what it measures: a real credential under `scripts/prod-prober/` does
+not contain `FAKE-key-` and is still reported. MEASURED both directions
+2026-09-11.
+"""
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "match"
+paths = ['''(^|/)scripts/prod-prober/''']
+regexes = ['''FAKE-key-''']
+
+[[allowlists]]
+description = """
+Phase 164.1.1 prod-prober cadence alert: ONE historical canary literal.
+`analytics-service/tests/test_prober_cadence_alert.py` asserts the service key
+never reaches a log record or a Sentry escalation, so it needs a canary value
+that would be VISIBLE if it leaked. It was first written as a wordless 32-char
+string, which `generic-api-key` scores at entropy 5.0.
+
+The working-tree literal has since been replaced with an unmistakably synthetic
+one, so this block does NOT protect current code — the file is clean at HEAD.
+It exists because the original literal is in the branch's committed history and
+PRs are scanned with `fetch-depth: 0`, the same asymmetry the 164.8.5 block
+above records: no edit to the working tree can clear an already-committed site.
+Suppression has to be stated, not rewritten.
+
+⭐ Keyed on the LITERAL VALUE, not on the path. Any other high-entropy string in
+this file — including a real credential pasted in later — is still reported.
+MEASURED both directions 2026-09-18 with gitleaks 8.30.1: with this block the
+range scan over origin/main..HEAD reports 0 leaks; with an unaffiliated
+high-entropy value planted in the same file it still reports.
+⛔ Never widen this to `paths` alone.
+"""
+targetRules = ["generic-api-key"]
+condition = "AND"
+paths = ['''(^|/)analytics-service/tests/test_prober_cadence_alert\.py$''']
+regexes = ['''X9vQ2mNb7RtL4kZp1YcW6HsD3Jf8Ug5A''']
+
+[[allowlists]]
+description = """
+Phase 164.5.3 (MT5CREDS) rotate-secret fixtures: entropy false-positives only,
+NOT a blanket path exemption.
+
+The credential-update route and its dialog are tested by asserting that a
+synthetic password is NEVER echoed — into a response body, a log line, or an
+error envelope. To be falsifiable those fixtures must stay SECRET-SHAPED: an
+assertion that a short, low-entropy token is absent proves very little, and
+the dialog's probe in particular is deliberately long so that an accidental
+substring match would be unmistakable. Being secret-shaped is the point, and
+it is exactly what trips `generic-api-key`.
+
+⛔ The `regexes` list is the load-bearing key, exactly as in the two
+scripts/prod-prober/ blocks above. `paths` alone would make these two files
+invisible to EVERY rule — including a genuinely leaked credential pasted into
+one of them later — which is the failure mode 158-REVIEW CR-03 removed for
+.planning/. Keep both keys, and keep the regexes anchored to the three known
+literals rather than to a general shape.
+
+⚠️ Range scans are why this is config rather than a source edit. gitleaks walks
+every commit in the PR range, so rewriting the literals at HEAD would not clear
+a finding already baked into an earlier commit on the branch.
+
+The three literals, all synthetic and all named SYNTHETIC_* at their use sites:
+one rotated-secret fixture, one leak-probe fixture, and the dialog's
+network-failure probe.
+
+⭐ CALIBRATED 2026-09-20, measured and not assumed. A probe SHAPED like a real
+finding (a *_SECRET assignment with a high-entropy value) but matching none of
+the regexes below was appended to route.test.ts:
+
+  original config -> 4 findings (the 3 fixtures + the probe)  <- the probe APPLIES
+  this config     -> 1 finding  (the probe ALONE)             <- fixtures exempt,
+                                                                 probe still caught
+
+Then restored byte-identical under cmp. ⚠️ The FIRST probe attempted was inert —
+generic-api-key never matched it, so the file read 3/3 either way and would have
+"proven" whatever was wanted. A calibration that does not APPLY reads as a pass;
+check that it fires before trusting what it says.
+"""
+targetRules = ["generic-api-key"]
+condition = "AND"
+paths = [
+  '''(^|/)src/app/api/keys/\[id\]/rotate-secret/route\.test\.ts$''',
+  '''(^|/)src/components/strategy/UpdateMt5SecretDialog\.test\.tsx$''',
+]
+regexes = [
+  '''synthetic-rotated-secret-''',
+  '''synthetic-leaky-secret-''',
+  '''sYnTh3tic-N3tw0rk-F41lure-Pr0be-''',
+]
+
+[[allowlists]]
+description = """
+Phase 167 (CREDTRUST) test helper name, entropy false-positive only. Four review-fix
+commits in analytics-service/tests/test_allocator_positions.py call a fetch stub as
+`key_row, fetch=_raise_sign_in_failed`; generic-api-key reads `key…fetch=` as a key
+assignment and captures `fetch=_raise_sign_in_failed` as the secret and scores it on entropy. It is a
+function identifier, not a literal, and carries no credential material.
+Scoped to that one rule, that one file AND that one identifier (condition = "AND"),
+following the prod-prober precedent above — NOT a path exemption: MEASURED both
+directions on 2026-09-22 with gitleaks 8.30.1, the four hits clear while a planted
+high-entropy api-key literal in the same file is still reported.
+"""
+targetRules = ["generic-api-key"]
+condition = "AND"
+paths = ['''(^|/)analytics-service/tests/test_allocator_positions\.py$''']
+regexes = ['''^fetch=_raise_sign_in_failed$''']
+
+[[allowlists]]
+description = """
+Phase 167.1.2 plan 07 (PR C2) test fixture, entropy false-positive only. PK9 and
+PK10 in scenario-adapter.test.ts use a fixed UUID as a synthetic api_key_id
+(`const KEY = "0f1e2d3c-…"`) to assert that a Scenario unit is named by its label
+and never by that id. generic-api-key reads `KEY = "<uuid>"` as a key assignment.
+It is a row id in a unit test, not credential material. Config rather than a
+source edit because the PR scan walks every branch commit (commit d8cb58d06).
+Scoped to that one rule, that one file AND that one literal (condition = "AND"),
+as in the blocks above. MEASURED 2026-09-29 with gitleaks 8.30.1: the two hits
+clear, while a planted high-entropy api-key literal in the same file is still
+reported.
+"""
+targetRules = ["generic-api-key"]
+condition = "AND"
+paths = ['''(^|/)src/app/\(dashboard\)/allocations/lib/scenario-adapter\.test\.ts$''']
+regexes = ['''0f1e2d3c-4b5a-4968-8778-695a4b3c2d1e''']
+
+# ── Phase 164.9.5 WR-03: two rules the default set lacks ──────────────────────
+# The automated baseline re-dump (`scripts/baseline-redump.mjs --gate-dump`) runs
+# gitleaks over the PROD dump with THIS config before a bot branch is pushed to a
+# PUBLIC repository, and the default rules did not match either class (measured
+# with gitleaks 8.30.1: exit 0, no finding). Both are RULES, not allowlist entries,
+# and neither widens any allowlist. Measured on 2026-09-26 over this working tree:
+# 0 findings from either rule.
+
+# Supabase's current secret-key format, which is not a JWT.
+[[rules]]
+id = "supabase-secret-key"
+description = "Supabase secret API key (sb_secret_ prefix)"
+regex = '''sb_secret_[A-Za-z0-9_-]{16,}'''
+keywords = ["sb_secret_"]
+
+# A password in a CREDENTIAL form, any case: a quoted string after it (`password '…'`
+# in CREATE USER MAPPING … OPTIONS, `password := '…'`, `PASSWORD E'…'`), a JSON member
+# (`"password": "…"`), or a libpq keyword with no space (`password=…` in a CREATE
+# SUBSCRIPTION … CONNECTION string), including a quoted value as pg_dump doubles it
+# inside a literal (`password=''…''`, WR-10). Ordinary SQL such as `WHERE password = x` or
+# `password = ANY(…)` is not a hit (WR-08). PATH-SCOPED to a file named baseline.sql, the dump's name in redump-dump:
+# repo-wide, the same text appears in prose and tests dozens of times. The regex is
+# the same alternation as the script's SECRET_SCAN_PATTERN class.
+[[rules]]
+id = "baseline-dump-password"
+description = "Password in a connection string or OPTIONS list inside a schema dump"
+path = '''(^|/)baseline\.sql$'''
+regex = '''(^|[^_A-Za-z])[Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd]("? *(:=|=| ) *[Ee]?[^ -&(-~][!-&(-~]|"? *: *"[!#-~]|=[!-&(-~]|=[^ -&(-~]{2}[!-&(-~])'''
+keywords = ["password"]

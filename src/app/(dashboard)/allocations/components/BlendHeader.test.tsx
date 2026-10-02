@@ -106,3 +106,26 @@ describe("BlendHeader (COVERAGE-03)", () => {
     expect(container.querySelector('[role="alert"]')).toBeNull();
   });
 });
+
+// Phase 167.1.2 SC-4: the engine returns its zero-weight-mass empty shape with
+// the member set named (member_count ≥ 1) and NO effective window. Before this
+// branch the header read "Mean of 2 strategies · –": a blend claimed over an
+// empty window.
+describe("BlendHeader — [167.1.2 SC-4] members with no weight", () => {
+  it.each([1, 2])(
+    "N=%i with no effective window → 'No weight on the selected strategies — not a blend', never 'Mean of'",
+    (n) => {
+      const metrics: ComputedMetrics = { ...EMPTY_METRICS, member_count: n };
+      render(
+        <BlendHeader
+          metrics={metrics}
+          unionSpan={{ start: "2023-01-01", end: "2024-12-31" }}
+        />,
+      );
+      const header = screen.getByTestId("scenario-blend-header");
+      expect(header.textContent).toBe(
+        "No weight on the selected strategies — not a blend",
+      );
+    },
+  );
+});

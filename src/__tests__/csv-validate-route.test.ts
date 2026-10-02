@@ -10,10 +10,18 @@
  *   - csv-validate proxy: validateCsv() (analytics-client) is mocked
  *   - csv-finalize proxy: supabase rpc() is mocked
  *
- * Cross-AI revision 2026-04-30: the validateCsv-throws path asserts that
- * the original throw message ("ANALYTICS_SERVICE_URL not configured")
- * surfaces verbatim in the human_message field. The csv-finalize route
- * tests cover strategy_name validation BEFORE the RPC is called.
+ * 140.4-09 / SEAMRIM-06 — SUPERSEDES the Cross-AI revision 2026-04-30, which
+ * asserted that the original throw message ("ANALYTICS_SERVICE_URL not
+ * configured") surfaces VERBATIM in human_message. It does not, and must not:
+ * that assertion pinned the leak green. The 502's human_message is now a STATIC
+ * sentence and the thrown text stays server-side, under the H-1062 rule
+ * `src/app/api/bridge/route.ts:190-193` states verbatim. The two cases below
+ * assert the absence in BOTH directions — the original string, and a
+ * distinctive synthetic one, because an assertion naming a single string is
+ * satisfied by a route that echoes everything except that string.
+ *
+ * The csv-finalize route tests cover strategy_name validation BEFORE the RPC
+ * is called.
  *
  * **Vitest environment override** — these tests must run under the `node`
  * environment, NOT jsdom. jsdom's Request.formData() does not parse
@@ -25,9 +33,44 @@
 
 // @vitest-environment node
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 vi.mock("server-only", () => ({}));
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 140.3-13b / SEAMUX-08 — the Sentry capture, tested through the REAL helper.
+//
+// ⚠️ `@sentry/nextjs` is mocked here and `@/lib/sentry-capture` is DELIBERATELY
+// NOT. Mocking the helper would answer "did the call site fire" while making
+// every payload assertion VACUOUS about scrubbing — the scrub lives INSIDE the
+// helper (SEAMCORE-06), so a mocked helper never runs it and "no secret in the
+// payload" would pass with the scrubber deleted. Inherited from `140.3-13a`.
+//
+// ⚠️ THIS FILE IS WHY THE PLAN'S VERIFY COMMAND NAMES `src/__tests__/`.
+// `csv-validate`'s tests do NOT live beside its route —
+// `src/app/api/strategies/csv-validate/` contains `route.ts` only — so a verify
+// scoped to `src/app/api/` reaches this route's PRODUCTION file and none of its
+// cases. That is exactly how a nine-route obligation silently ships as eight.
+// ─────────────────────────────────────────────────────────────────────────────
+const sentryState = vi.hoisted(() => ({
+  captured: [] as Array<{
+    err: unknown;
+    options: {
+      tags?: Record<string, string>;
+      extra?: Record<string, unknown>;
+      level?: string;
+    };
+  }>,
+}));
+
+vi.mock("@sentry/nextjs", () => ({
+  captureException: (err: unknown, options: Record<string, unknown>) => {
+    sentryState.captured.push({
+      err,
+      options: options as (typeof sentryState.captured)[number]["options"],
+    });
+  },
+}));
 
 // ---------------------------------------------------------------------
 // Module mocks — withAuth + ratelimit + analytics-client + supabase server
@@ -42,14 +85,34 @@ vi.mock("@/lib/api/withAuth", () => ({
 }));
 
 const checkLimitMock = vi.hoisted(() =>
-  vi.fn(async () => ({ success: true, retryAfter: 0 })),
+  // 140.4-13 / SEAMRIM-05 — `reason` is the THIRD outcome: absent is a genuine
+  // throttle (429), "ratelimit_misconfigured" is OUR store being unreachable
+  // and must answer 503.
+  vi.fn(
+    async (): Promise<{
+      success: boolean;
+      retryAfter: number;
+      reason?: "ratelimit_misconfigured";
+    }> => ({ success: true, retryAfter: 0 }),
+  ),
 );
 
-vi.mock("@/lib/ratelimit", () => ({
-  userActionLimiter: {},
-  csvValidateLimiter: {},
-  checkLimit: checkLimitMock,
-}));
+// ⚠️ EXTENDED, NOT REPLACED (140.4-13 / SEAMRIM-05). The route's deny arm now
+// routes its status decision through `rateLimitDenyJson`; an omitted export is
+// `undefined` at call time. The pure helpers come from `importActual` rather
+// than a hand-written double SO THE MOCK CANNOT DRIFT FROM THE REAL 503-vs-429
+// DECISION — a double that always answered 429 would make this file green on
+// exactly the bug the plan closes.
+vi.mock("@/lib/ratelimit", async (importActual) => {
+  const actual = await importActual<typeof import("@/lib/ratelimit")>();
+  return {
+    userActionLimiter: {},
+    csvValidateLimiter: {},
+    checkLimit: checkLimitMock,
+    rateLimitDenyJson: actual.rateLimitDenyJson,
+    isRateLimitMisconfigured: actual.isRateLimitMisconfigured,
+  };
+});
 
 const validateCsvMock = vi.hoisted(() => vi.fn());
 
@@ -81,16 +144,43 @@ vi.mock("@/lib/supabase/server", () => ({
     rpc: (name: string, args: Record<string, unknown>) => rpcMock(name, args),
     from: (table: string) => ({
       update: (payload: Record<string, unknown>) => {
+        // 159-06 / RANK-07 — the metadata UPDATE grew a compare-and-set tail:
+        // `.is("category_id", null).select("id")`. SCAFFOLD ONLY. `updateMock`
+        // is still called exactly once with the same table/payload/eq-filters,
+        // so every assertion in this file is untouched. Non-empty `data` means
+        // the CAS matched — the state every case here models, since these are
+        // fresh creates and the fold's INSERT never writes `category_id`. The
+        // race semantics themselves are pinned in
+        // csv-finalize-cross-submission-merge.test.ts, not here.
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const casTail: any = {
+          is: () => casTail,
+          select: () =>
+            Promise.resolve({ data: [{ id: "cas-matched" }], error: null }),
+        };
         const eqChain = {
           eq: (col1: string, val1: unknown) => ({
             eq: (col2: string, val2: unknown) => {
               updateMock(table, payload, { [col1]: val1, [col2]: val2 });
-              return Promise.resolve({ error: null });
+              return casTail;
             },
           }),
         };
         return eqChain;
       },
+      // CR-01: csv-finalize now probes `csv_daily_returns` for rows OUTSIDE the
+      // incoming payload's date range before persisting (the cross-submission
+      // merge fence). This double reports "nothing already stored", which is
+      // the first-submit state every csv-finalize case in this file models.
+      // The fence's own behaviour is guarded in
+      // csv-finalize-cross-submission-merge.test.ts, not here.
+      select: (_cols: string) => ({
+        eq: (_col: string, _val: string) => ({
+          or: (_filter: string) => ({
+            limit: async (_n: number) => ({ data: [], error: null }),
+          }),
+        }),
+      }),
     }),
   }),
 }));
@@ -201,7 +291,10 @@ async function flushAfter(): Promise<void> {
 // Helpers
 // ---------------------------------------------------------------------
 
-import { NextRequest } from "next/server";
+// `NextResponse` is used by the 140.3-13b capture cases to build the
+// already-classified envelope `postProcessKey` forwards on `!result.ok` — the
+// arm the capture policy deliberately does NOT capture.
+import { NextRequest, NextResponse } from "next/server";
 
 function makeMultipartRequest(
   file: File | null,
@@ -341,7 +434,15 @@ describe("/api/strategies/csv-validate", () => {
     expect(validateCsvMock).not.toHaveBeenCalled();
   });
 
-  it("unified validate throws → 502 CSV_UPSTREAM_FAIL with original message in human_message", async () => {
+  it("unified validate throws → 502 CSV_UPSTREAM_FAIL with a STATIC human_message, not the thrown text", async () => {
+    // 140.4-09 / SEAMRIM-06. This case previously asserted
+    // `toContain("ANALYTICS_SERVICE_URL not configured")` — it PINNED THE LEAK
+    // GREEN. The thrown text is internal prose (a config fault, a Python
+    // contract-drift string, a FastAPI 5xx detail) and it is rendered by
+    // `CsvUploadStep` → `CsvValidationEnvelope` as the wizard panel's title and
+    // subtitle. H-1062, stated verbatim at `src/app/api/bridge/route.ts:190-193`:
+    // genuine 5xx / unexpected exceptions return a STATIC message and the detail
+    // stays server-side.
     process.env.INTERNAL_API_TOKEN = "test-token";
     postProcessKeyMock.mockRejectedValue(
       new Error("ANALYTICS_SERVICE_URL not configured"),
@@ -353,9 +454,158 @@ describe("/api/strategies/csv-validate", () => {
     expect(res.status).toBe(502);
     const json = await res.json();
     expect(json.code).toBe("CSV_UPSTREAM_FAIL");
-    // Cross-AI revision 2026-04-30: throw message surfaces verbatim.
-    expect(json.human_message).toContain("ANALYTICS_SERVICE_URL not configured");
+    // THE NEGATIVE FIRST, deliberately: it is the assertion that replaced the
+    // pin, so it is the one that must be seen reddening on the untouched tree.
+    // Ordering it after the sentence pin would let `toBe` short-circuit and the
+    // replacement would never be observed failing.
+    //
+    // The WHOLE serialised body, not just human_message: `debug_context` is a
+    // second channel into the same panel and a human_message-only assertion
+    // would not see a move from one field to the other.
+    expect(
+      JSON.stringify(json),
+      "the thrown text reached the wizard error panel — H-1062 requires a static sentence here",
+    ).not.toContain("ANALYTICS_SERVICE_URL");
+    // Hand-typed literal, never read off the route — the sentence is the oracle.
+    //
+    // 140.4-16 / CR-02 — THE LITERAL MOVED, AND IT MOVED BECAUSE IT WAS WRONG.
+    // This case guards the NO-ECHO property and still does. What changed is the
+    // sentence it pins: "CSV validation failed" blamed the user's file on an
+    // arm that is the unclassified residue by construction. Two `toBe`
+    // assertions were holding that misattribution in place, which is why the
+    // correction has to land here as well as in the route.
+    //
+    // 140.5-02 / SEAMPROSE-03 — THE LITERAL MOVED AGAIN, and again because the
+    // sentence it pinned was replaced rather than because this guard weakened.
+    // The route reads `WIZARD_ERROR_COPY.CSV_UPSTREAM_FAIL.title`, and that
+    // entry now carries the FOUNDER-AUTHORED §4a copy: one message for every
+    // non-2xx from the CSV validator that is not row-level validation failure,
+    // on the founder's stated reasoning that a user cannot act differently on a
+    // 403 than on a 404. The NO-ECHO property this case exists for is
+    // untouched — only the static sentence it must equal has changed.
+    expect(json.human_message).toBe("We couldn't check your file just now.");
     expect(json.correlation_id).toBeNull();
+  });
+
+  it("GENERALISED: no thrown text reaches the 502 body, whatever it says — and the operator still gets it", async () => {
+    // ⚠️ THE CASE ABOVE IS SATISFIABLE BY SPECIAL-CASING ONE STRING. A route
+    // that echoed `err.message` and stripped the literal
+    // "ANALYTICS_SERVICE_URL" would pass it. This drives a DISTINCTIVE
+    // synthetic message that no production code can know about, so only a route
+    // that echoes NOTHING passes.
+    //
+    // The second half is the A-10 anti-regression: answering the finding by
+    // DROPPING the value from the log replaces one defect with another. The
+    // operator must still receive the detail, scrubbed, server-side. Both
+    // directions are asserted here because a one-sided test ships either state
+    // green.
+    const SYNTHETIC =
+      "zq7f4e-marker: relation \"strategy_verifications\" does not exist";
+    process.env.INTERNAL_API_TOKEN = "test-token";
+    postProcessKeyMock.mockRejectedValue(new Error(SYNTHETIC));
+    // DEF-16-1: vi.spyOn + restore, never vi.stubGlobal.
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const file = new File(["x"], "x.csv", { type: "text/csv" });
+      const req = makeMultipartRequest(file, "daily_returns");
+      const { POST } = await import("@/app/api/strategies/csv-validate/route");
+      const res = await POST(req);
+      expect(res.status).toBe(502);
+      const json = await res.json();
+      expect(json.code).toBe("CSV_UPSTREAM_FAIL");
+      expect(
+        JSON.stringify(json),
+        "an arbitrary thrown message reached the wizard error panel — the 502 is echoing, not answering statically",
+      ).not.toContain("zq7f4e-marker");
+      // 140.4-16 / CR-02, re-pointed at 140.5-02 — see the note at the sibling
+      // case above.
+      expect(json.human_message).toBe("We couldn't check your file just now.");
+
+      const logged = errorSpy.mock.calls
+        .map((call) => call.map((arg) => String(arg)).join(" "))
+        .join("\n");
+      expect(
+        logged,
+        "the detail was DROPPED from the log instead of being scrubbed — that is the A-10 defect, and it leaves the operator able to see THAT the seam failed and never WHY",
+      ).toContain("zq7f4e-marker");
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  it("[140.4-16 / CR-02] the 502 arm does not blame the user's FILE for our own outage", async () => {
+    // ⚠️ WHAT THIS ARM IS, BY CONSTRUCTION. `postProcessKey` classifies every
+    // outcome it can into the `!result.ok` envelope, so a THROW reaching the
+    // catch is the unclassified residue — a transport failure, a missing-config
+    // throw, a contract-drift parse throw. The route's own docblock says so.
+    // NONE of those is the user's data. 140.4-09 correctly replaced a leaky
+    // `err.message` echo with a static sentence and then chose the wrong
+    // sentence: "CSV validation failed." — which is the milestone's signature
+    // defect (our fault presented as someone else's) authored by the phase that
+    // exists to remove it, on the wizard's highest-traffic error surface.
+    //
+    // ⚠️ CORROBORATED FROM A REAL BROWSER, not only from reading the code. A QA
+    // pass on localhost drove a well-formed 5-row CSV into an upstream failure
+    // and read back "Validation failed. See per-row breakdown below." with no
+    // breakdown beneath it (qa-report-localhost-2026-07-29, ISSUE-003).
+    //
+    // The oracle is HAND-TYPED here and READ FROM THE TABLE in the route. That
+    // asymmetry is the point: if the route ever drifts back to authoring its
+    // own sentence, this literal is what disagrees with it.
+    process.env.INTERNAL_API_TOKEN = "test-token";
+    postProcessKeyMock.mockRejectedValue(new Error("fetch failed"));
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const file = new File(["x"], "x.csv", { type: "text/csv" });
+      const req = makeMultipartRequest(file, "daily_returns");
+      const { POST } = await import("@/app/api/strategies/csv-validate/route");
+      const res = await POST(req);
+      expect(res.status).toBe(502);
+      const json = await res.json();
+      expect(json.code).toBe("CSV_UPSTREAM_FAIL");
+      expect(
+        json.human_message,
+        "the terminal arm is telling the user their CSV failed validation for " +
+          "a fault that is ours by construction — the code's own authored copy " +
+          "already says the true thing and is being shadowed",
+      ).toBe("We couldn't check your file just now.");
+      // The class, not the instance: no sentence on this arm may name the
+      // user's data as THE THING THAT FAILED.
+      //
+      // ⚠️ 140.5-02 — THE NEEDLE WAS NARROWED, DELIBERATELY, AND HERE IS THE
+      // ARGUMENT. It used to be `/validation failed|your (csv|file|data)/i`,
+      // which bans the mere MENTION of the user's file. The founder-authored
+      // §4a sentence mentions it — "We couldn't check your file just now." —
+      // while asserting the exact opposite of blame, and the entry's cause line
+      // goes on to say "This is on our side, not your data." A needle that
+      // rejects that sentence is measuring the wrong property: the defect is
+      // ATTRIBUTION, not vocabulary. The narrowed form requires the user's
+      // artefact to be the SUBJECT OF A FAILURE VERB.
+      //
+      // Because a narrowed needle is a weakened needle, BOTH POLARITIES are
+      // asserted below, and the negative half is the load-bearing one — a rule
+      // relaxed until it catches nothing would otherwise pass silently.
+      const blamesTheUser = (s: string) =>
+        /validation failed|your (csv|file|data)\b[^.]*\b(failed|invalid|rejected|wrong|bad|broken)\b/i.test(
+          s,
+        );
+      expect(
+        blamesTheUser(json.human_message),
+        "a user-blaming phrase is back on the arm defined as NOT-the-user's-data",
+      ).toBe(false);
+      // POSITIVE CONTROL — the needle still fires on the two real sentences
+      // this guard was written against, so the narrowing did not gut it.
+      expect(blamesTheUser("CSV validation failed.")).toBe(true);
+      expect(
+        blamesTheUser("Validation failed. See per-row breakdown below."),
+      ).toBe(true);
+      expect(blamesTheUser("Your file failed our checks.")).toBe(true);
+      // NEGATIVE CONTROL — a sentence that merely mentions the file without
+      // blaming it must pass, which is the whole point of the narrowing.
+      expect(blamesTheUser("We couldn't check your file just now.")).toBe(false);
+    } finally {
+      errorSpy.mockRestore();
+    }
   });
 
   // Phase 15 / WR-03: defense-in-depth UUID gate. The Python router
@@ -399,6 +649,249 @@ describe("/api/strategies/csv-validate", () => {
     const json = await res.json();
     expect(json.code).toBe("CSV_RATE_LIMIT");
     expect(json.correlation_id).toBeNull();
+    // 140.4-13 / SEAMRIM-05 — ALL FIVE v0 fields survive the chokepoint
+    // adoption. The deny arm now calls `rateLimitDenyJson` with a body from
+    // `csvErrorBody` — the same builder `csvErrorEnvelope` uses — so this
+    // envelope has ONE definition, not two. Hand-typed here, not read back.
+    expect(json).toEqual({
+      ok: false,
+      code: "CSV_RATE_LIMIT",
+      human_message: "Too many requests. Wait a minute and try again.",
+      debug_context: {},
+      correlation_id: null,
+    });
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+  });
+
+  it("[140.4-13 / SEAMRIM-05] ratelimit_misconfigured → 503 in the SAME v0 envelope", async () => {
+    checkLimitMock.mockResolvedValueOnce({
+      success: false,
+      retryAfter: 60,
+      reason: "ratelimit_misconfigured",
+    });
+    const file = new File(["x"], "x.csv", { type: "text/csv" });
+    const req = makeMultipartRequest(file, "daily_returns");
+    const { POST } = await import("@/app/api/strategies/csv-validate/route");
+    const res = await POST(req);
+
+    expect(
+      res.status,
+      "Our limiter's store being unreachable is not the user uploading too " +
+        "fast. 429 says it is, and hides the outage from the canary.",
+    ).toBe(503);
+    const json = await res.json();
+    // The envelope SHAPE is preserved so `CsvUploadStep` still renders a
+    // sentence off `human_message` and reports `code` to the wizard_error
+    // funnel; `SEAM_MISCONFIGURED` is an EXISTING WizardErrorCode, not a newly
+    // minted one.
+    expect(Object.keys(json).sort()).toEqual([
+      "code",
+      "correlation_id",
+      "debug_context",
+      "human_message",
+      "ok",
+    ]);
+    expect(json.ok).toBe(false);
+    expect(json.code).toBe("SEAM_MISCONFIGURED");
+    expect(json.code).not.toBe("CSV_RATE_LIMIT");
+    expect(json.human_message).toContain("fault on our side");
+    expect(res.headers.get("Retry-After")).toBe("60");
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+    expect(validateCsvMock).not.toHaveBeenCalled();
+  });
+
+  it("[140.4-13 / SEAMRIM-05] success → the deny arm does not fire", async () => {
+    checkLimitMock.mockResolvedValueOnce({ success: true, retryAfter: 0 });
+    const file = new File(["x"], "x.csv", { type: "text/csv" });
+    const req = makeMultipartRequest(file, "daily_returns");
+    const { POST } = await import("@/app/api/strategies/csv-validate/route");
+    const res = await POST(req);
+
+    // ⚠️ NOT a status-only oracle. This suite leaves the unified path throwing
+    // a seeded DB error, so the route legitimately answers its OWN 5xx here —
+    // asserting `not.toBe(503)` would pin the wrong fact and have to be
+    // weakened later. The limiter's deny arm is identified by the `Retry-After`
+    // it stamps and by its two codes; neither is present.
+    expect(res.status).not.toBe(429);
+    expect(res.headers.get("Retry-After")).toBeNull();
+    const json = await res.json();
+    expect(json.code).not.toBe("CSV_RATE_LIMIT");
+    expect(json.code).not.toBe("SEAM_MISCONFIGURED");
+  });
+});
+
+/**
+ * 140.3-13b / SEAMUX-08 — `/api/strategies/csv-validate` captures to Sentry,
+ * under the ONE policy written out in `src/app/api/admin/match/eval/route.ts`.
+ *
+ * ⚠️ THE BASELINE WAS ZERO, measured on the untouched tree:
+ * `grep -vE '^\s*(//|\*)' route.ts | grep -c captureToSentry` read **0** here
+ * and at eight sibling seam routes, while `wizardErrors.ts` copy told users
+ * "our team has been notified". `140.3-12` removed the claim; `140.3-13a`
+ * (4 routes) and `140.3-13b` (5) make it true — 4 + 5 = 9 of 9.
+ *
+ * ⚠️ THIS BLOCK IS THE ONE THAT ONLY RUNS IF THE VERIFY COMMAND REACHES
+ * `src/__tests__/`. See the mock header at the top of this file.
+ */
+describe("[140.3-13b / SEAMUX-08] /api/strategies/csv-validate — Sentry capture policy", () => {
+  /** A 40-char internal token, the shape INTERNAL_API_TOKEN actually carries. */
+  const INTERNAL_TOKEN = "int_9f3a1c7e5b2d84a6f0c1e3d5b7a9f2c48e6d0b1a";
+  let errorSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    checkLimitMock.mockResolvedValue({ success: true, retryAfter: 0 });
+    sentryState.captured.length = 0;
+    errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    process.env.INTERNAL_API_TOKEN = INTERNAL_TOKEN;
+  });
+
+  afterEach(() => {
+    errorSpy.mockRestore();
+    process.env.INTERNAL_API_TOKEN = "test-token";
+  });
+
+  /** Wait for `captureToSentry`'s lazy `import(...).then(...)` chain. */
+  async function nextCapture() {
+    await vi.waitFor(() =>
+      expect(
+        sentryState.captured.length,
+        "nothing was captured — the terminal throw arm is the only place an unclassified CSV seam failure is ever reported",
+      ).toBeGreaterThan(0),
+    );
+    return sentryState.captured[sentryState.captured.length - 1];
+  }
+
+  /** Assert no capture happened, allowing the lazy chain time to have fired. */
+  async function expectNoCapture() {
+    await new Promise((r) => setTimeout(r, 0));
+    expect(sentryState.captured).toEqual([]);
+  }
+
+  function validateRequest() {
+    return makeMultipartRequest(
+      new File(["x"], "x.csv", { type: "text/csv" }),
+      "daily_returns",
+    );
+  }
+
+  it("POSITIVE: an unclassified throw from the unified path IS captured, with this route's tags", async () => {
+    postProcessKeyMock.mockRejectedValue(
+      new Error(
+        `connect ECONNREFUSED 10.0.0.5:8002 (X-Internal-Token: ${INTERNAL_TOKEN})`,
+      ),
+    );
+    const { POST } = await import("@/app/api/strategies/csv-validate/route");
+    const res = await POST(validateRequest());
+    expect(res.status).toBe(502);
+
+    const { err, options } = await nextCapture();
+    expect(options.tags?.surface).toBe("strategies-csv-validate");
+    expect(options.tags?.step).toBe("unified-path-threw");
+    // The Error TYPE survives — `captureToSentry` rebuilds an Error rather than
+    // stringifying, so Sentry keeps its grouping and stack. The route logs
+    // `err.message`; the CAPTURE takes the value.
+    expect(err).toBeInstanceOf(Error);
+    expect(options.extra?.fmt).toBe("daily_returns");
+  });
+
+  it("TRAP-1 BOTH DIRECTIONS: the captured payload loses the secret and KEEPS the syscall token", async () => {
+    postProcessKeyMock.mockRejectedValue(
+      new Error(
+        `getaddrinfo ENOTFOUND analytics.internal (X-Internal-Token: ${INTERNAL_TOKEN})`,
+      ),
+    );
+    const { POST } = await import("@/app/api/strategies/csv-validate/route");
+    await POST(validateRequest());
+
+    const message = ((await nextCapture()).err as Error).message;
+    // UNDER-redaction: a credential leaving our infrastructure for a third
+    // party is the whole of T-140.3-13-01.
+    expect(
+      message,
+      "a live INTERNAL_API_TOKEN was dispatched to Sentry — undici inlines outgoing headers into err.message (TRAP-1)",
+    ).not.toContain(INTERNAL_TOKEN);
+    // OVER-redaction: destroying the syscall token replaces one incident with
+    // two, and a one-sided test ships that state green.
+    expect(
+      message,
+      "the syscall token was eaten by the redactor — ENOTFOUND is the most valuable thing in a transport line",
+    ).toContain("ENOTFOUND");
+  });
+
+  it("POSITIVE: a missing INTERNAL_API_TOKEN is captured FATAL, and the env VALUE is not in the payload", async () => {
+    delete process.env.INTERNAL_API_TOKEN;
+    const { POST } = await import("@/app/api/strategies/csv-validate/route");
+    const res = await POST(validateRequest());
+    // The arm's own contract is unchanged: the CSV-shaped 503 envelope, not the
+    // generic one.
+    expect(res.status).toBe(503);
+    expect((await res.json()).code).toBe("CSV_UPSTREAM_FAIL");
+
+    const { err, options } = await nextCapture();
+    expect(options.tags?.step).toBe("config-missing");
+    // A permanent config fault that takes the whole CSV path down for every
+    // user is the one thing on this route worth waking someone for.
+    expect(options.level).toBe("fatal");
+    // The NAME may be stated; the VALUE must never be near a capture payload.
+    expect((err as Error).message).toContain("INTERNAL_API_TOKEN");
+    expect((err as Error).message).not.toContain(INTERNAL_TOKEN);
+    // The upstream was never called — this is a pre-flight gate.
+    expect(postProcessKeyMock).not.toHaveBeenCalled();
+  });
+
+  it("NEGATIVE: an already-classified `!result.ok` envelope is NEVER captured (this is where the breaker's 503 lives)", async () => {
+    const forwarded = NextResponse.json(
+      { ok: false, code: "CIRCUIT_OPEN", human_message: "..." },
+      { status: 503 },
+    );
+    postProcessKeyMock.mockResolvedValue({ ok: false, response: forwarded });
+    const { POST } = await import("@/app/api/strategies/csv-validate/route");
+    const res = await POST(validateRequest());
+    // The POSITIVE half: the arm really ran and forwarded the client's own
+    // envelope, so the zero below is about the policy and not about the request
+    // never reaching that branch.
+    expect(res.status).toBe(503);
+    expect((await res.json()).code).toBe("CIRCUIT_OPEN");
+    await expectNoCapture();
+  });
+
+  it("NEGATIVE: a caller-fault 400 is NEVER captured, and never reaches the seam at all", async () => {
+    const req = makeMultipartRequest(
+      new File(["x"], "x.csv", { type: "text/csv" }),
+      "not_a_format",
+    );
+    const { POST } = await import("@/app/api/strategies/csv-validate/route");
+    const res = await POST(req);
+    expect(res.status).toBe(400);
+    expect(postProcessKeyMock).not.toHaveBeenCalled();
+    await expectNoCapture();
+  });
+
+  it("NEGATIVE: our own rate-limit rejection is NEVER captured (the limiter working is not a fault)", async () => {
+    checkLimitMock.mockResolvedValueOnce({ success: false, retryAfter: 30 });
+    const { POST } = await import("@/app/api/strategies/csv-validate/route");
+    const res = await POST(validateRequest());
+    expect(res.status).toBe(429);
+    expect(res.headers.get("Retry-After")).toBe("30");
+    await expectNoCapture();
+  });
+
+  it("NEGATIVE: a soft-fail validation result (ok:true, errors populated) is NEVER captured", async () => {
+    postProcessKeyMock.mockResolvedValue({
+      ok: true,
+      body: {
+        ok: false,
+        preview: null,
+        errors: [{ rule: "monotonic_dates", row: 2, message: "..." }],
+        correlation_id: null,
+      },
+    });
+    const { POST } = await import("@/app/api/strategies/csv-validate/route");
+    const res = await POST(validateRequest());
+    // A user's CSV failing row-schema validation is the route WORKING.
+    expect(res.status).toBe(200);
+    await expectNoCapture();
   });
 });
 
@@ -415,9 +908,12 @@ describe("/api/strategies/csv-finalize — strategy_name validation", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     checkLimitMock.mockResolvedValue({ success: true, retryAfter: 0 });
-    // Phase 106 Stage B: the unified path runs the SHARED
-    // persist_csv_daily_returns RPC; default it to success so the success-path
-    // metadata tests reach the UPDATE. Validation (400) tests never hit it.
+    // The unified path runs the SINGLE folded RPC
+    // (`finalize_csv_strategy_with_returns`); default it to success so the
+    // success-path metadata tests reach the UPDATE. Validation (400) tests
+    // never hit it. (Was "Phase 106 Stage B ... the SHARED
+    // persist_csv_daily_returns RPC" — migration 20260819120000:350 DROPped
+    // that function; there is one RPC on this path now, not two.)
     rpcMock.mockResolvedValue({ data: 0, error: null });
   });
 
@@ -466,17 +962,16 @@ describe("/api/strategies/csv-finalize — strategy_name validation", () => {
     expect(rpcMock).not.toHaveBeenCalled();
   });
 
-  it("valid strategy_name + valid fmt + valid uuid → delegates to unified with the trimmed strategy_name in context", async () => {
-    // Phase 106 Stage B: finalize_csv_strategy now runs server-side inside the
-    // unified backbone; the route forwards the trimmed strategy_name in the
-    // /process-key context and returns the upstream strategy_id.
+  it("valid strategy_name + valid fmt + valid uuid → calls the fold with the trimmed strategy_name", async () => {
+    // Phase 145 (D-06 i-b): the route calls finalize_csv_strategy_with_returns
+    // directly with the trimmed strategy_name and returns the fold's
+    // strategy_id — no /process-key dispatch.
     process.env.INTERNAL_API_TOKEN = "test-token";
-    postProcessKeyMock.mockResolvedValue({
-      ok: true,
-      body: {
-        strategy_id: "11111111-1111-4111-8111-111111111111",
-        status: "pending_review",
-      },
+    rpcMock.mockImplementation(async (name: string) => {
+      if (name === "finalize_csv_strategy_with_returns") {
+        return { data: "11111111-1111-4111-8111-111111111111", error: null };
+      }
+      return { data: null, error: null };
     });
     const req = makeJsonRequest({
       wizard_session_id: VALID_SESSION,
@@ -499,16 +994,18 @@ describe("/api/strategies/csv-finalize — strategy_name validation", () => {
     expect(json.strategy_id).toBe("11111111-1111-4111-8111-111111111111");
     expect(json.status).toBe("pending_review");
 
-    // Unified delegation: postProcessKey received the trimmed strategy_name in
-    // the forwarded context (finalize_csv_strategy runs upstream, not here).
-    const call = postProcessKeyMock.mock.calls[0][0] as {
-      context: { strategy_name?: string; wizard_session_id?: string; fmt?: string };
-    };
-    expect(call.context.strategy_name).toBe("Aurora Capital — BTC vol carry");
-    expect(call.context.wizard_session_id).toBe(VALID_SESSION);
-    expect(call.context.fmt).toBe("daily_returns");
+    // No /process-key dispatch (the deleted Python branch's tripwire).
+    expect(postProcessKeyMock).not.toHaveBeenCalled();
+    const foldCall = rpcMock.mock.calls.find(
+      ([name]) => name === "finalize_csv_strategy_with_returns",
+    );
+    expect(foldCall).toBeDefined();
+    const [, foldArgs] = foldCall!;
+    expect(foldArgs.p_strategy_name).toBe("Aurora Capital — BTC vol carry");
+    expect(foldArgs.p_wizard_session_id).toBe(VALID_SESSION);
+    expect(foldArgs.p_fmt).toBe("daily_returns");
     // Trimmed name forwarded verbatim (no leading/trailing whitespace).
-    expect(call.context.strategy_name).not.toMatch(/^\s|\s$/);
+    expect(foldArgs.p_strategy_name).not.toMatch(/^\s|\s$/);
   });
 
   // QA report 2026-05-21 ISSUE-010: classification metadata is now
@@ -519,9 +1016,11 @@ describe("/api/strategies/csv-finalize — strategy_name validation", () => {
   describe("ISSUE-010 — csv_metadata UPDATE after RPC returns", () => {
     it("metadata in body → UPDATE strategies with the projected payload", async () => {
       process.env.INTERNAL_API_TOKEN = "test-token";
-      postProcessKeyMock.mockResolvedValue({
-        ok: true,
-        body: { strategy_id: "22222222-2222-4222-8222-222222222222", status: "pending_review" },
+      rpcMock.mockImplementation(async (name: string) => {
+        if (name === "finalize_csv_strategy_with_returns") {
+          return { data: "22222222-2222-4222-8222-222222222222", error: null };
+        }
+        return { data: null, error: null };
       });
       const req = makeJsonRequest({
         wizard_session_id: VALID_SESSION,
@@ -572,9 +1071,11 @@ describe("/api/strategies/csv-finalize — strategy_name validation", () => {
 
     it("no metadata in body → RPC runs, no UPDATE (back-compat)", async () => {
       process.env.INTERNAL_API_TOKEN = "test-token";
-      postProcessKeyMock.mockResolvedValue({
-        ok: true,
-        body: { strategy_id: "33333333-3333-4333-8333-333333333333", status: "pending_review" },
+      rpcMock.mockImplementation(async (name: string) => {
+        if (name === "finalize_csv_strategy_with_returns") {
+          return { data: "33333333-3333-4333-8333-333333333333", error: null };
+        }
+        return { data: null, error: null };
       });
       const req = makeJsonRequest({
         wizard_session_id: VALID_SESSION,
@@ -600,9 +1101,11 @@ describe("/api/strategies/csv-finalize — strategy_name validation", () => {
       // names so a future PUT-shaped client can't write arbitrary
       // columns through this route.
       process.env.INTERNAL_API_TOKEN = "test-token";
-      postProcessKeyMock.mockResolvedValue({
-        ok: true,
-        body: { strategy_id: "44444444-4444-4444-8444-444444444444", status: "pending_review" },
+      rpcMock.mockImplementation(async (name: string) => {
+        if (name === "finalize_csv_strategy_with_returns") {
+          return { data: "44444444-4444-4444-8444-444444444444", error: null };
+        }
+        return { data: null, error: null };
       });
       const req = makeJsonRequest({
         wizard_session_id: VALID_SESSION,
@@ -616,6 +1119,12 @@ describe("/api/strategies/csv-finalize — strategy_name validation", () => {
         ],
         metadata: {
           description: "ok",
+          // 146.2 gap closure: required on any non-empty blob. It is a KNOWN
+          // field, so it must survive the projection alongside `description` —
+          // which sharpens this test rather than weakening it: the projection
+          // now has to carry two known fields through while still dropping all
+          // four hostile ones below.
+          category_id: "ccccccc1-1111-4111-8111-111111111111",
           // Hostile / unknown fields — must NOT reach the UPDATE.
           status: "published",
           source: "api",
@@ -627,7 +1136,10 @@ describe("/api/strategies/csv-finalize — strategy_name validation", () => {
       const res = await POST(req);
       expect(res.status).toBe(200);
       const [, payload] = updateMock.mock.calls[0];
-      expect(payload).toEqual({ description: "ok" });
+      expect(payload).toEqual({
+        description: "ok",
+        category_id: "ccccccc1-1111-4111-8111-111111111111",
+      });
       expect(payload).not.toHaveProperty("status");
       expect(payload).not.toHaveProperty("source");
       expect(payload).not.toHaveProperty("user_id");
@@ -647,10 +1159,14 @@ describe("/api/strategies/csv-finalize — strategy_name validation", () => {
 //   4.  Finite numeric daily_return — NaN / Infinity → 400.
 //   5.  Duplicate-date guard (T-19.1-04, PR #274) — repeated date → 400
 //       BEFORE the persist RPC has a chance to throw 23505.
-//   6.  Legacy path persist — persist_csv_daily_returns RPC called with
-//       the new strategy id + parsed rows.
-//   7.  Persist failure → 500 CSV_PERSIST_FAIL with strategy id in
-//       debug_context.
+//   6.  The FOLD receives the parsed rows as p_rows — strategy row and
+//       dailies land in ONE transaction. (Was: "persist_csv_daily_returns
+//       RPC called with the new strategy id"; migration 20260819120000:350
+//       DROPped that function along with finalize_csv_strategy, and Test 6
+//       has pinned the fold since.)
+//   7.  Fold RPC failure → 500 CSV_FINALIZE_FAIL. (Was CSV_PERSIST_FAIL,
+//       which no test in this file pins — the two-RPC split it named no
+//       longer exists.)
 //   8.  Unified path explicit param — runtime + strict source-shape +
 //       arity-lock checks make closure capture detectable as a
 //       regression (T-19.1-10).
@@ -667,23 +1183,22 @@ describe("/api/strategies/csv-finalize — daily_returns_series (Phase 19.1)", (
   beforeEach(() => {
     vi.clearAllMocks();
     checkLimitMock.mockResolvedValue({ success: true, retryAfter: 0 });
-    // Phase 106 Stage B: the route delegates unconditionally to the unified
-    // backbone. postProcessKey returns NEW_STRATEGY_ID (finalize_csv_strategy
-    // runs upstream); the SHARED persist + enqueue + placeholder helpers then
-    // run on the unified path. INTERNAL_API_TOKEN is required (503 otherwise).
+    // Phase 145 (D-06 i-b): the route calls the folded
+    // finalize_csv_strategy_with_returns RPC directly on the SSR client —
+    // strategy + verification + dailies in ONE transaction. postProcessKey
+    // is never dispatched by csv-finalize any more; its mock is kept as a
+    // tripwire (a re-introduced dispatch would route these tests away from
+    // the fold and red their fold-call expectations).
     process.env.INTERNAL_API_TOKEN = "test-token";
     postProcessKeyMock.mockResolvedValue({
       ok: true,
-      body: { strategy_id: NEW_STRATEGY_ID, status: "pending_review" },
+      body: { ok: true, strategy_id: NEW_STRATEGY_ID, status: "pending_review" },
     });
-    // Default behaviour: any rpcMock call resolves successfully.
+    // Default behaviour: the fold resolves successfully.
     // Tests that need per-RPC behaviour override via mockImplementation.
     rpcMock.mockImplementation(async (name: string) => {
-      if (name === "finalize_csv_strategy") {
+      if (name === "finalize_csv_strategy_with_returns") {
         return { data: NEW_STRATEGY_ID, error: null };
-      }
-      if (name === "persist_csv_daily_returns") {
-        return { data: 0, error: null };
       }
       return { data: null, error: null };
     });
@@ -862,9 +1377,9 @@ describe("/api/strategies/csv-finalize — daily_returns_series (Phase 19.1)", (
     expect(rpcMock).not.toHaveBeenCalled();
   });
 
-  // ---- 6. persist call on legacy path ---------------------------------------
+  // ---- 6. dailies ride the fold call (Phase 145: one transaction, D-07) ----
 
-  it("Test 6: legacy path calls persist_csv_daily_returns with strategy id + rows", async () => {
+  it("Test 6: the fold receives the parsed rows as p_rows (dailies in the SAME transaction)", async () => {
     const series = [
       { date: "2024-01-01", daily_return: 0.01 },
       { date: "2024-01-02", daily_return: -0.005 },
@@ -872,60 +1387,73 @@ describe("/api/strategies/csv-finalize — daily_returns_series (Phase 19.1)", (
     const req = makeJsonRequest({
       wizard_session_id: VALID_SESSION,
       fmt: "daily_returns",
-      strategy_name: "Legacy persist",
+      strategy_name: "Fold persist",
       daily_returns_series: series,
     });
     const { POST } = await import("@/app/api/strategies/csv-finalize/route");
     const res = await POST(req);
     expect(res.status).toBe(200);
-    const persistCall = rpcMock.mock.calls.find(
-      ([name]) => name === "persist_csv_daily_returns",
+    const foldCall = rpcMock.mock.calls.find(
+      ([name]) => name === "finalize_csv_strategy_with_returns",
     );
-    expect(persistCall).toBeDefined();
-    const [, args] = persistCall!;
+    expect(foldCall).toBeDefined();
+    const [, args] = foldCall!;
     expect(args).toMatchObject({
       p_user_id: "00000000-0000-0000-0000-000000000abc",
-      p_strategy_id: NEW_STRATEGY_ID,
+      p_wizard_session_id: VALID_SESSION,
       p_rows: series,
+      p_terminal_status: "pending_review",
     });
   });
 
-  // ---- 7. persist failure → 500 CSV_PERSIST_FAIL ---------------------------
+  // ---- 7. fold failure → single 5xx arm, honest copy (Phase 145 D-11) ------
 
-  it("Test 7: persist RPC failure → 500 CSV_PERSIST_FAIL with strategy id in debug_context", async () => {
+  it("Test 7: fold RPC failure → 500 CSV_FINALIZE_FAIL stating nothing was saved (the rollback is total)", async () => {
     rpcMock.mockImplementation(async (name: string) => {
-      if (name === "finalize_csv_strategy") {
-        return { data: NEW_STRATEGY_ID, error: null };
-      }
-      if (name === "persist_csv_daily_returns") {
+      if (name === "finalize_csv_strategy_with_returns") {
         return { data: null, error: { code: "42501", message: "not accessible" } };
       }
       return { data: null, error: null };
     });
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const req = makeJsonRequest({
       wizard_session_id: VALID_SESSION,
       fmt: "daily_returns",
-      strategy_name: "Persist failure",
+      strategy_name: "Fold failure",
       daily_returns_series: [{ date: "2024-01-01", daily_return: 0.01 }],
     });
     const { POST } = await import("@/app/api/strategies/csv-finalize/route");
     const res = await POST(req);
     expect(res.status).toBe(500);
     const json = await res.json();
-    expect(json.code).toBe("CSV_PERSIST_FAIL");
+    expect(json.code).toBe("CSV_FINALIZE_FAIL");
+    // D-11: the copy asserts the transaction's TRUE outcome — the fold
+    // commits nothing on failure, so the retry invitation is honest.
+    expect(json.human_message).toMatch(/Nothing was saved/);
     expect(json.human_message).toMatch(/support@quantalyze\.com/i);
-    expect(json.debug_context).toMatchObject({ strategy_id: NEW_STRATEGY_ID });
+    // 146.1-05 / A3 — a 5-character SQLSTATE means PostgREST returned a BODY:
+    // the fold ran and RAISEd, and with no handler clause the whole
+    // transaction rolled back. This class keeps its claim, and the class is
+    // now named in the envelope so the copy and the diagnosis cannot drift.
+    expect(json.debug_context).toMatchObject({
+      rpc_error_code: "42501",
+      outcome_class: "rolled-back",
+    });
+    // No metadata write after a failed fold (Pitfall 6 ordering).
+    expect(updateMock).not.toHaveBeenCalled();
+    errSpy.mockRestore();
   });
 
-  // ---- 8. unified-backbone path receives dailyReturnsSeries via explicit param
+  // ---- 8. handler receives dailyReturnsSeries via explicit param ------------
 
-  it("Test 8a (runtime): unified path forwards dailyReturnsSeries via explicit args.dailyReturnsSeries", async () => {
-    const unifiedStrategyId = "66666666-6666-4666-8666-666666666666";
-    postProcessKeyMock.mockResolvedValue({
-      ok: true,
-      body: { strategy_id: unifiedStrategyId, status: "pending_review" },
+  it("Test 8a (runtime): the handler forwards dailyReturnsSeries via explicit args.dailyReturnsSeries into p_rows", async () => {
+    const foldStrategyId = "66666666-6666-4666-8666-666666666666";
+    rpcMock.mockImplementation(async (name: string) => {
+      if (name === "finalize_csv_strategy_with_returns") {
+        return { data: foldStrategyId, error: null };
+      }
+      return { data: null, error: null };
     });
-    // Default rpcMock impl returns success for persist_csv_daily_returns.
     process.env.INTERNAL_API_TOKEN = "test-token";
 
     const series = [
@@ -935,22 +1463,21 @@ describe("/api/strategies/csv-finalize — daily_returns_series (Phase 19.1)", (
     const req = makeJsonRequest({
       wizard_session_id: VALID_SESSION,
       fmt: "daily_returns",
-      strategy_name: "Unified path mirror",
+      strategy_name: "Explicit param mirror",
       daily_returns_series: series,
     });
     const { POST } = await import("@/app/api/strategies/csv-finalize/route");
     const res = await POST(req);
     expect(res.status).toBe(200);
 
-    // The persist RPC fires on the unified path with the explicit series.
-    const persistCall = rpcMock.mock.calls.find(
-      ([name]) => name === "persist_csv_daily_returns",
+    // The fold receives the explicit series (T-19.1-10: param, not closure).
+    const foldCall = rpcMock.mock.calls.find(
+      ([name]) => name === "finalize_csv_strategy_with_returns",
     );
-    expect(persistCall).toBeDefined();
-    const [, args] = persistCall!;
+    expect(foldCall).toBeDefined();
+    const [, args] = foldCall!;
     expect(args).toMatchObject({
       p_user_id: "00000000-0000-0000-0000-000000000abc",
-      p_strategy_id: unifiedStrategyId,
       p_rows: series,
     });
 
@@ -1200,76 +1727,587 @@ describe("/api/strategies/csv-finalize — daily_returns_series (Phase 19.1)", (
     warnSpy.mockRestore();
   });
 
-  // ---- 13. unified backbone returns missing strategy_id → 502 (API H-1)
+  // ---- 13. fold returns no usable id → 500 (API H-1, re-pointed by 145) ----
 
-  it("Test 13: unified backbone 200 with missing strategy_id → 502 CSV_FINALIZE_FAIL (API H-1)", async () => {
-    // Phase 19.1 red-team (2026-05-22): if the upstream `/process-key`
-    // csv-finalize branch returns 200 with no strategy_id (Python
-    // regression, API drift, shape change), the route MUST NOT emit
-    // ok:true with a missing id — the wizard's SyncProgress poller
-    // would hit `if (!data) return` early-out forever because no
-    // strategy_analytics row exists for it to find.
-    postProcessKeyMock.mockResolvedValue({
-      ok: true,
-      status: 200,
-      body: { status: "pending_review" }, // ← strategy_id missing
+  it("Test 13: fold resolves with neither error nor a strategy_id → 500 CSV_FINALIZE_FAIL (API H-1)", async () => {
+    // If the fold's return shape drifts (a migration regression returning
+    // NULL), the route MUST NOT emit ok:true with a missing id — the
+    // wizard's SyncProgress poller would hit `if (!data) return` early-out
+    // forever because no strategy_analytics row exists for it to find.
+    rpcMock.mockImplementation(async (name: string) => {
+      if (name === "finalize_csv_strategy_with_returns") {
+        return { data: null, error: null }; // ← strategy_id missing
+      }
+      return { data: null, error: null };
     });
     process.env.INTERNAL_API_TOKEN = "test-token";
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
     const req = makeJsonRequest({
       wizard_session_id: VALID_SESSION,
       fmt: "daily_returns",
-      strategy_name: "Missing strategy_id in upstream",
+      strategy_name: "Missing strategy_id from fold",
       daily_returns_series: [{ date: "2024-08-01", daily_return: 0.001 }],
     });
     const { POST } = await import("@/app/api/strategies/csv-finalize/route");
     const res = await POST(req);
-    expect(res.status).toBe(502);
+    expect(res.status).toBe(500);
     const json = await res.json();
     expect(json.ok).toBe(false);
     expect(json.code).toBe("CSV_FINALIZE_FAIL");
-    expect(json.human_message).toMatch(/unexpected response/i);
-    expect(json.debug_context).toMatchObject({
-      missing_strategy_id: true,
-    });
     expect(typeof json.correlation_id).toBe("string");
     expect(json.correlation_id.length).toBeGreaterThan(0);
-    // Critically: NO persist call, NO enqueue, NO metadata update —
-    // the half-baked upstream is treated as a hard failure.
-    const persistCalls = rpcMock.mock.calls.filter(
-      ([name]) => name === "persist_csv_daily_returns",
-    );
-    expect(persistCalls).toHaveLength(0);
+    // Critically: NO enqueue, NO metadata update — the driftful outcome is
+    // treated as a hard failure (nothing was persisted; the fold either
+    // committed with an id or rolled back).
+    expect(updateMock).not.toHaveBeenCalled();
 
     delete process.env.INTERNAL_API_TOKEN;
+    errSpy.mockRestore();
   });
 
-  it("Test 13b: unified backbone 200 with non-UUID strategy_id → 502 CSV_FINALIZE_FAIL", async () => {
+  it("Test 13b: fold returns a non-UUID strategy_id → 500 CSV_FINALIZE_FAIL", async () => {
     // Defense in depth: empty string and obvious garbage must also be
-    // rejected, not just `undefined`. A typo in the Python router that
-    // returns `strategy_id: ""` or `strategy_id: "TBD"` would otherwise
-    // slip through the old typeof-string-and-truthy check (the empty
-    // string was already gated, but anything else passed).
-    postProcessKeyMock.mockResolvedValue({
-      ok: true,
-      status: 200,
-      body: { strategy_id: "not-a-uuid", status: "pending_review" },
+    // rejected, not just `null`. A drifted SQL return shape that yields
+    // `strategy_id: "TBD"` must not slip through.
+    rpcMock.mockImplementation(async (name: string) => {
+      if (name === "finalize_csv_strategy_with_returns") {
+        return { data: "not-a-uuid", error: null };
+      }
+      return { data: null, error: null };
     });
     process.env.INTERNAL_API_TOKEN = "test-token";
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
     const req = makeJsonRequest({
       wizard_session_id: VALID_SESSION,
       fmt: "daily_returns",
-      strategy_name: "Garbage strategy_id in upstream",
+      strategy_name: "Garbage strategy_id from fold",
       daily_returns_series: [{ date: "2024-09-01", daily_return: 0.002 }],
     });
     const { POST } = await import("@/app/api/strategies/csv-finalize/route");
     const res = await POST(req);
-    expect(res.status).toBe(502);
+    expect(res.status).toBe(500);
     const json = await res.json();
     expect(json.code).toBe("CSV_FINALIZE_FAIL");
-    expect(json.debug_context).toMatchObject({ missing_strategy_id: true });
+    expect(json.debug_context).toMatchObject({ rpc_error_code: null });
 
     delete process.env.INTERNAL_API_TOKEN;
+    errSpy.mockRestore();
+  });
+});
+
+// ---------------------------------------------------------------------
+// 140.3-G7 / SEAMUX-03 — arm-agnostic fences for /api/strategies/csv-validate.
+//
+// ⚠️ THESE TWO FENCES ARE NEW; EVERYTHING ABOVE STAYS UNTOUCHED. The per-arm
+// `json.code` assertions (CSV_FILE_TOO_LARGE :395, CSV_INVALID_FORMAT
+// :406/:418/:608/:621, CSV_UPSTREAM_FAIL :442/:501/:551, CSV_RATE_LIMIT :636,
+// SEAM_MISCONFIGURED :681) and the whole-serialised-body static-message guard
+// (:454/:503/:552) already exist and already pin the arms that ship TODAY. This
+// block adds only what they cannot express:
+//
+//   1. an ARM-AGNOSTIC sweep — the fence that reddens when a FUTURE arm ships a
+//      bare `{ ok:false }` with no top-level `code`, which no per-arm case pins;
+//   2. a planted-SENTINEL PII guard — the ISSUE-005 leak class, extending the
+//      file's existing whole-body discipline from "no thrown text" to "no
+//      planted cell value" across three arms.
+//
+// WHY THIS MATTERS (Rule 9), stated so a future reader cannot mistake either for
+// cosmetic: a codeless arm is a CLIENT-DISCRIMINATION regression — CsvUploadStep
+// and the PostHog `wizard_error` funnel branch on `code`, so a missing one
+// collapses distinct failures into one undiscriminable bucket. A cell-value echo
+// is the ISSUE-005 leak class — this route is the Vercel seam, and its OWN error
+// arms must never be the place a raw uploaded cell crosses to the wire.
+//
+// MEASUREMENT NOTE: the receipt is the PARSED response body, never a grep for
+// the `code:"` spelling. This route carries `code` positionally through
+// `csvErrorBody`, which the 140.3-VERIFICATION receipt command
+// (`grep -cE 'code:\s*"'`) reads as 0 on this file — a false negative. This
+// block is the correct receipt for the route's per-arm code coverage.
+// ---------------------------------------------------------------------
+
+describe("[140.3-G7 / SEAMUX-03] csv-validate — arm-agnostic fences", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    checkLimitMock.mockResolvedValue({ success: true, retryAfter: 0 });
+    postProcessKeyMock.mockResolvedValue({ ok: true, body: { ok: true } });
+    process.env.INTERNAL_API_TOKEN = "test-token";
+  });
+
+  const validReq = () =>
+    makeMultipartRequest(
+      new File(["x"], "x.csv", { type: "text/csv" }),
+      "daily_returns",
+    );
+
+  it("EVERY reachable error arm carries a non-empty top-level json.code on the wire", async () => {
+    // The arm-agnostic fence. Per-arm cases above pin the codes that exist now;
+    // this drives every reachable error arm and asserts only the arm-agnostic
+    // invariant — a non-2xx response MUST carry a non-empty string `code`. A
+    // future arm returning a bare `{ ok:false }` reddens HERE even though no
+    // per-arm case names it.
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { POST } = await import("@/app/api/strategies/csv-validate/route");
+    try {
+      const scenarios: Array<{
+        arm: string;
+        arrange: () => void;
+        request: () => NextRequest;
+      }> = [
+        {
+          arm: "missing file → CSV_INVALID_FORMAT",
+          arrange: () => {},
+          request: () => makeMultipartRequest(null, "daily_returns"),
+        },
+        {
+          arm: "bad fmt → CSV_INVALID_FORMAT",
+          arrange: () => {},
+          request: () =>
+            makeMultipartRequest(
+              new File(["x"], "x.csv", { type: "text/csv" }),
+              "not_a_format",
+            ),
+        },
+        {
+          arm: "missing wizard_session_id → CSV_INVALID_FORMAT",
+          arrange: () => {},
+          request: () =>
+            makeMultipartRequest(
+              new File(["x"], "x.csv", { type: "text/csv" }),
+              "daily_returns",
+              null,
+            ),
+        },
+        {
+          arm: "oversize file → CSV_FILE_TOO_LARGE",
+          arrange: () => {},
+          request: () =>
+            makeMultipartRequest(
+              new File([new Uint8Array(11 * 1024 * 1024)], "x.csv", {
+                type: "text/csv",
+              }),
+              "daily_returns",
+            ),
+        },
+        {
+          arm: "rate-limit throttle → CSV_RATE_LIMIT",
+          arrange: () =>
+            checkLimitMock.mockResolvedValueOnce({
+              success: false,
+              retryAfter: 30,
+            }),
+          request: validReq,
+        },
+        {
+          arm: "rate-limit misconfigured → SEAM_MISCONFIGURED",
+          arrange: () =>
+            checkLimitMock.mockResolvedValueOnce({
+              success: false,
+              retryAfter: 60,
+              reason: "ratelimit_misconfigured",
+            }),
+          request: validReq,
+        },
+        {
+          arm: "INTERNAL_API_TOKEN missing → CSV_UPSTREAM_FAIL 503",
+          arrange: () => {
+            delete process.env.INTERNAL_API_TOKEN;
+          },
+          request: validReq,
+        },
+        {
+          arm: "terminal throw → CSV_UPSTREAM_FAIL 502",
+          arrange: () =>
+            postProcessKeyMock.mockRejectedValueOnce(new Error("fetch failed")),
+          request: validReq,
+        },
+        {
+          arm: "already-classified passthrough → upstream-supplied code",
+          arrange: () =>
+            postProcessKeyMock.mockResolvedValueOnce({
+              ok: false,
+              response: NextResponse.json(
+                { ok: false, code: "CIRCUIT_OPEN", human_message: "..." },
+                { status: 503 },
+              ),
+            }),
+          request: validReq,
+        },
+      ];
+
+      for (const { arm, arrange, request } of scenarios) {
+        // Fresh world each iteration; `arrange` applies the single override that
+        // steers this scenario to its error arm.
+        checkLimitMock.mockReset();
+        checkLimitMock.mockResolvedValue({ success: true, retryAfter: 0 });
+        postProcessKeyMock.mockReset();
+        postProcessKeyMock.mockResolvedValue({ ok: true, body: { ok: true } });
+        process.env.INTERNAL_API_TOKEN = "test-token";
+        arrange();
+
+        const res = await POST(request());
+        // The sweep must actually REACH an error arm, or it proves nothing.
+        expect(
+          res.status,
+          `arm "${arm}" did not reach an error arm (answered ${res.status})`,
+        ).toBeGreaterThanOrEqual(400);
+        const json = await res.json();
+        expect(
+          typeof json.code === "string" && json.code.length > 0,
+          `arm "${arm}" answered ${res.status} with no non-empty top-level string code — the client cannot discriminate this failure`,
+        ).toBe(true);
+      }
+    } finally {
+      errorSpy.mockRestore();
+      process.env.INTERNAL_API_TOKEN = "test-token";
+    }
+  });
+
+  it("ISSUE-005 sentinel: no raw uploaded cell value appears in any route-emitted error body", async () => {
+    // The planted-sentinel PII guard. An uploaded CSV carries a sentinel cell
+    // value; the route's OWN error bodies (whole serialised) must not echo it.
+    // Three arms — the too-large 400, the bad-fmt 400, and the terminal-throw
+    // 502 — because ISSUE-005 is a CLASS, not one endpoint. debug_context on
+    // these arms carries only metadata (content_length / size_bytes /
+    // fmt_received), never a cell.
+    const SENTINEL_PII = "SENTINEL_PII_9241";
+    const sentinelCsv = () =>
+      new File(
+        [`date,daily_return\n2026-01-01,${SENTINEL_PII}`],
+        "x.csv",
+        { type: "text/csv" },
+      );
+
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { POST } = await import("@/app/api/strategies/csv-validate/route");
+    try {
+      // Arm 1 — oversize. The sentinel rides in a >10 MB upload so the size arm
+      // fires with the sentinel present in the received bytes.
+      {
+        const padding = "a".repeat(11 * 1024 * 1024);
+        const big = new File(
+          [`date,daily_return\n2026-01-01,${SENTINEL_PII}\n${padding}`],
+          "x.csv",
+          { type: "text/csv" },
+        );
+        const res = await POST(makeMultipartRequest(big, "daily_returns"));
+        expect(res.status).toBe(400);
+        expect(
+          JSON.stringify(await res.json()),
+          "a raw uploaded cell value reached the too-large error body (ISSUE-005 leak class)",
+        ).not.toContain(SENTINEL_PII);
+      }
+      // Arm 2 — bad fmt. The uploaded file carries the sentinel; the 400 body
+      // (debug_context.fmt_received is the fmt, not a cell) must not.
+      {
+        const res = await POST(makeMultipartRequest(sentinelCsv(), "not_a_format"));
+        expect(res.status).toBe(400);
+        expect(
+          JSON.stringify(await res.json()),
+          "a raw uploaded cell value reached the bad-fmt error body (ISSUE-005 leak class)",
+        ).not.toContain(SENTINEL_PII);
+      }
+      // Arm 3 — terminal throw. postProcessKey throws AFTER the bytes are read;
+      // the 502 body is static and must not echo the sentinel.
+      {
+        postProcessKeyMock.mockReset();
+        postProcessKeyMock.mockRejectedValueOnce(new Error("fetch failed"));
+        const res = await POST(makeMultipartRequest(sentinelCsv(), "daily_returns"));
+        expect(res.status).toBe(502);
+        expect(
+          JSON.stringify(await res.json()),
+          "a raw uploaded cell value reached the terminal-throw error body (ISSUE-005 leak class)",
+        ).not.toContain(SENTINEL_PII);
+      }
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 146.1-05 / A3 — THE FOLD-FAILURE ARM SAYS ONLY WHAT IT OBSERVED
+// ---------------------------------------------------------------------------
+
+/**
+ * One arm, three outcome classes, and until 146.1-05 one sentence for all
+ * three: "Nothing was saved — the submission rolled back completely."
+ *
+ * That is an observation, and the route made it in exactly one of the three
+ * cases:
+ *
+ *   CLASS 1 — a SQLSTATE-bearing RPC error. PostgREST returned a body with a
+ *   5-character `code`, so the fold ran and RAISEd; it has no EXCEPTION
+ *   handler clause, so the raise aborts and every write in its single
+ *   transaction rolls back. TRUE. Kept verbatim.
+ *
+ *   CLASS 2 — a TRANSPORT failure. postgrest-js RESOLVES rather than rejects
+ *   on a fetch fault, handing the caller `{ error: { code: "" }, status: 0 }`,
+ *   and `RETRYABLE_METHODS` excludes POST — so the ONE POST we sent may have
+ *   reached PostgREST and committed before the connection died. Unknowable.
+ *
+ *   CLASS 3 — a 2xx whose id did not survive (TS-13). A 2xx from PostgREST
+ *   means the transaction COMMITTED; only the id was lost. "Nothing was
+ *   saved" is not merely unsupported here — it is the wrong way round.
+ *
+ * ⛔ `code: ""` IS FALSY. The single most likely wrong implementation is
+ * `if (error?.code)`, which merges classes 2 and 3 and then answers both with
+ * whichever branch the other one holds. The class-2 fixture below exists to
+ * catch precisely that.
+ *
+ * ⭐ THE CLASS-2/3 ASSERTIONS ARE ON ABSENCE. A presence-only check ("does it
+ * contain the new sentence?") is satisfied by CONCATENATING the new sentence
+ * onto the old over-claiming one — the same satisfiable-by-addition hole as
+ * the `%5000%` substring gate. And class 1 is asserted on PRESENCE, because
+ * "make everything vague" is the failure mode on the other side.
+ *
+ * Precedent: `wizardErrors.ts:1971-1985` (SEAMUX-04) already deleted "your
+ * data is unchanged" from `CSV_SUBMIT_FAILED` for this exact reason. The
+ * route's sentence was the older, unreasoned side of that contradiction.
+ */
+
+/** Claims this arm cannot make when it did not observe the transaction end. */
+const ROLLBACK_CLAIM_PHRASES: RegExp[] = [
+  /nothing was saved/i,
+  /rolled back/i,
+  /\bsafe to try again\b/i,
+];
+
+describe("[146.1-05 / A3] the fold-failure arm's copy is commit-agnostic where the commit is", () => {
+  const A3_SESSION = "00000000-0000-0000-0000-0000000000a3";
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    checkLimitMock.mockResolvedValue({ success: true, retryAfter: 0 });
+    process.env.INTERNAL_API_TOKEN = "test-token";
+    adminRpcMock.mockResolvedValue({ data: null, error: null });
+    adminUpsertMock.mockReturnValue({ error: null });
+    adminSelectMaybeSingleMock.mockResolvedValue({ data: null, error: null });
+    sentryState.captured.length = 0;
+    STATE.runAfterCallback = false;
+    STATE.afterPromise = undefined;
+  });
+
+  /** Drive the fold to an ARBITRARY resolved shape and POST one submission. */
+  async function postFold(
+    result: { data: unknown; error: { code?: string; message?: string } | null },
+    name: string,
+  ) {
+    rpcMock.mockImplementation(async (fn: string) => {
+      if (fn === "finalize_csv_strategy_with_returns") return result;
+      return { data: null, error: null };
+    });
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { POST } = await import("@/app/api/strategies/csv-finalize/route");
+    const res = await POST(
+      makeJsonRequest({
+        wizard_session_id: A3_SESSION,
+        fmt: "daily_returns",
+        strategy_name: name,
+        daily_returns_series: [{ date: "2024-01-01", daily_return: 0.01 }],
+        // 146.2 gap closure: parseCsvMetadata now requires a `category_id` on any
+        // NON-EMPTY metadata blob, so that a committed NULL category_id is real
+        // proof the UPDATE never ran (the FILL discriminator rests on it). These
+        // A3 arms are about FOLD-FAILURE COPY, not metadata — the fold rejects
+        // before any UPDATE — so the id below is inert scaffolding that keeps the
+        // request past the parse boundary and the arm under test unchanged.
+        metadata: {
+          description: "a3 oracle marker",
+          category_id: "ccccccc1-1111-4111-8111-111111111111",
+        },
+      }),
+    );
+    const json = await res.json();
+    errSpy.mockRestore();
+    return { res, json };
+  }
+
+  /**
+   * The EXACT shape postgrest-js resolves with on a transport fault
+   * (PostgrestBuilder.ts:443-454). The empty-string `code` is the whole point.
+   */
+  const TRANSPORT_FAULT = {
+    data: null,
+    error: {
+      code: "",
+      message: "FetchError: request to http://db/rest/v1/rpc failed, reason: socket hang up",
+    },
+  };
+
+  it("CLASS 1 (PRESENCE): a 5-char SQLSTATE keeps the rollback claim VERBATIM", async () => {
+    // The other-side failure mode. Without this arm, "make every class vague"
+    // ships green — and the one case where the database DID tell us it rolled
+    // back is the one case the user can act on with confidence.
+    const { res, json } = await postFold(
+      { data: null, error: { code: "22023", message: "p_rows must not be empty" } },
+      "A3 class 1",
+    );
+
+    expect(res.status).toBe(500);
+    expect(json.code).toBe("CSV_FINALIZE_FAIL");
+    expect(json.human_message).toBe(
+      "Your strategy could not be saved. Nothing was saved — the submission rolled back completely, so it is safe to try again. Contact support@quantalyze.com if it persists.",
+    );
+    expect(json.debug_context).toMatchObject({
+      rpc_error_code: "22023",
+      outcome_class: "rolled-back",
+    });
+  });
+
+  it("RED CLASS 2 (ABSENCE): a TRANSPORT failure claims no rollback — the POST never retried, so the commit is unknowable", async () => {
+    const { res, json } = await postFold(TRANSPORT_FAULT, "A3 class 2");
+
+    expect(res.status).toBe(500);
+    expect(json.code).toBe("CSV_FINALIZE_FAIL");
+    const msg = String(json.human_message ?? "");
+    for (const phrase of ROLLBACK_CLAIM_PHRASES) {
+      expect(
+        msg,
+        `the envelope asserts ${phrase} after a TRANSPORT failure. ` +
+          "postgrest-js resolves rather than rejects on a fetch fault, and " +
+          "RETRYABLE_METHODS excludes POST — so exactly one POST was sent and " +
+          "it may have reached PostgREST and committed before the connection " +
+          "died. The server did not observe a rollback; it observed that it " +
+          "stopped being able to see.",
+      ).not.toMatch(phrase);
+    }
+    // And it says something USEFUL instead — the non-destructive check first.
+    expect(msg).toMatch(/could not confirm/i);
+    expect(msg).toMatch(/another tab/i);
+    expect(json.debug_context).toMatchObject({
+      rpc_error_code: "",
+      outcome_class: "transport-unknown",
+    });
+  });
+
+  it("RED CLASS 3 (ABSENCE): a 2xx with a lost id claims no rollback — a 2xx means it COMMITTED", async () => {
+    const { res, json } = await postFold(
+      { data: "not-a-uuid", error: null },
+      "A3 class 3",
+    );
+
+    expect(res.status).toBe(500);
+    const msg = String(json.human_message ?? "");
+    for (const phrase of ROLLBACK_CLAIM_PHRASES) {
+      expect(
+        msg,
+        `the envelope asserts ${phrase} after a 2xx from PostgREST. A 2xx ` +
+          "means the transaction COMMITTED and only the strategy id failed to " +
+          "reach us — the claim is not merely unsupported here, it is the " +
+          "wrong way round, and it steers the user away from the strategy " +
+          "they now own.",
+      ).not.toMatch(phrase);
+    }
+    expect(msg).toMatch(/could not confirm/i);
+    expect(json.debug_context).toMatchObject({
+      rpc_error_code: null,
+      outcome_class: "committed-lost-id",
+    });
+  });
+
+  it("RED TRUTHINESS TRAP: class 2 is NOT answered with class 1's copy — `code: \"\"` is falsy", async () => {
+    // This is the same fixture as class 2, asserted from the other side: an
+    // `if (error?.code)` discriminator sends the empty-string code down the
+    // no-error branch, which is class 3's. Both would then be commit-agnostic
+    // and this file would pass — so the discriminating assertion is that the
+    // two classes are told APART in debug_context and in the Sentry extra.
+    const { json } = await postFold(TRANSPORT_FAULT, "A3 truthiness");
+
+    expect(
+      json.debug_context?.outcome_class,
+      "a transport failure was classified as a lost-id 2xx — the " +
+        "discriminator collapsed on the empty-string SQLSTATE, which is the " +
+        "single most likely wrong implementation of this branch",
+    ).toBe("transport-unknown");
+  });
+
+  it("RED A PostgREST-LEVEL code (non-empty, NOT 5 chars) is commit-agnostic, not a rollback claim", async () => {
+    // ⭐ THE FIXTURE THAT DISCRIMINATES THE LENGTH CHECK FROM TRUTHINESS.
+    //
+    // The class-2 fixture alone does NOT: this arm's second branch tests
+    // `error` PRESENCE, not `error.code`, so swapping the length check for
+    // `error?.code` still routes the empty-string code to `transport-unknown`.
+    // Measured, not assumed — the A3-TRUTHY neuter ran GREEN against the
+    // class-2 fixture and this case was added because of it.
+    //
+    // A NON-EMPTY, NON-5-CHARACTER code is the arrival that tells the two
+    // implementations apart. PostgREST emits its OWN codes — `PGRST301`
+    // (expired JWT), `PGRST116`, `PGRST002` — and they are not SQLSTATEs: they
+    // mean PostgREST itself refused or failed, so we have NOT been told the
+    // fold ran and raised. Under truthiness they would be answered "nothing
+    // was saved — the submission rolled back completely", which is the same
+    // fabricated observation A3 exists to delete. Only a length test says
+    // "PostgREST handed us a SQLSTATE" rather than "PostgREST handed us
+    // something".
+    const { json } = await postFold(
+      {
+        data: null,
+        error: { code: "PGRST301", message: "JWT expired" },
+      },
+      "A3 pgrst code",
+    );
+
+    const msg = String(json.human_message ?? "");
+    for (const phrase of ROLLBACK_CLAIM_PHRASES) {
+      expect(
+        msg,
+        `the envelope asserts ${phrase} for a PostgREST-level code. ` +
+          "`PGRST301` is not a SQLSTATE — it means PostgREST refused or " +
+          "failed, not that the fold ran and raised, so the transaction's " +
+          "fate was never reported to us.",
+      ).not.toMatch(phrase);
+    }
+    expect(
+      json.debug_context?.outcome_class,
+      "a non-SQLSTATE code was classified as an observed rollback — the " +
+        "discriminator is testing whether a code EXISTS instead of whether " +
+        "it is a SQLSTATE",
+    ).toBe("transport-unknown");
+  });
+
+  it("the two commit-agnostic classes carry their OWN Sentry step tag", async () => {
+    // Merged into `finalize-fold-fail`, the honest arm's firing rate is
+    // unmeasurable and nobody can tell a real transport problem from the
+    // deferred 42501 question.
+    await postFold(TRANSPORT_FAULT, "A3 sentry tag");
+    await vi.waitFor(() =>
+      expect(sentryState.captured.length).toBeGreaterThan(0),
+    );
+    const steps = sentryState.captured.map((c) => c.options.tags?.step);
+    expect(steps).toContain("finalize-fold-outcome-unknown");
+    expect(steps).not.toContain("finalize-fold-fail");
+  });
+
+  it("class 1 KEEPS the original Sentry step tag — the existing bucket does not move", async () => {
+    await postFold(
+      { data: null, error: { code: "42501", message: "not accessible" } },
+      "A3 sentry tag class 1",
+    );
+    await vi.waitFor(() =>
+      expect(sentryState.captured.length).toBeGreaterThan(0),
+    );
+    const steps = sentryState.captured.map((c) => c.options.tags?.step);
+    expect(steps).toContain("finalize-fold-fail");
+  });
+
+  it("ALL THREE classes keep one code, 500, no-store and zero metadata writes", async () => {
+    // The envelope invariants are shared. A copy branch must not become a
+    // status branch, a code branch, or a caching change — and a failed fold
+    // must still write nothing (Pitfall 6 ordering).
+    for (const [label, result] of [
+      ["class 1", { data: null, error: { code: "22023", message: "x" } }],
+      ["class 2", TRANSPORT_FAULT],
+      ["class 3", { data: null, error: null }],
+    ] as const) {
+      updateMock.mockClear();
+      const { res, json } = await postFold(result, `A3 invariants ${label}`);
+      expect(res.status, label).toBe(500);
+      expect(json.code, label).toBe("CSV_FINALIZE_FAIL");
+      expect(json.ok, label).toBe(false);
+      expect(res.headers.get("cache-control"), label).toContain("no-store");
+      expect(typeof json.correlation_id, label).toBe("string");
+      expect(updateMock, label).not.toHaveBeenCalled();
+    }
   });
 });

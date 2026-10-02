@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, fireEvent, within } from "@testing-library/react";
 import type { DailyPoint } from "@/lib/portfolio-math-utils";
 import type { FactsheetPayload } from "@/lib/factsheet/types";
@@ -18,8 +18,9 @@ import { pctSigned } from "./format";
  *      `@`-prefixed variants (NOT `lg:grid-cols-9`), with the `@container` HOST
  *      on a SEPARATE ancestor (the enclosing `<section>`) — an element never
  *      queries its OWN container size, so a same-element host+variant would
- *      never reflow — and the `grid-cols-3` mobile fallback kept as the
- *      container-narrow base.
+ *      never reflow — and a container-narrow base below it. Phase 170 (j)
+ *      replaced the 52-06 `grid-cols-3` base with `grid-cols-2 @md:grid-cols-3`
+ *      (see Test 1).
  *   2. Every KPI metric VALUE cell keeps `font-mono tabular-nums` (alignment
  *      preserved under the fluid tier); the KPI LABEL keeps its
  *      `text-ellipsis whitespace-nowrap` bounded-label affordance (the
@@ -48,7 +49,15 @@ const localStorageMock = {
   key: vi.fn(() => null),
   length: 0,
 };
-vi.stubGlobal("localStorage", localStorageMock);
+// Phase 140.5-01 / SEAMPROSE-04 — installed PER TEST, not at module scope.
+// `vitest.config.ts` sets `unstubGlobals: true`, which restores stubbed globals
+// before every test, so a stub applied once at import time is gone by the time
+// the first test runs. Re-applying it here also removes a real leak: a stub set
+// at module scope is never undone, so it reaches every later file in the same
+// worker (DEF-16-1).
+beforeEach(() => {
+  vi.stubGlobal("localStorage", localStorageMock);
+});
 Object.defineProperty(window, "localStorage", {
   value: localStorageMock,
   configurable: true,
@@ -113,8 +122,16 @@ describe("FactsheetView KPI strip — @container + fluid-type migration (52-06 /
     // The viewport breakpoint must be gone — column count now keys off the
     // CONTAINER width (the StrategyTable @container idiom), not the window.
     expect(kpiGrid!.className).not.toMatch(/\blg:grid-cols-9\b/);
-    // The narrow mobile fallback is preserved as a container-narrow base.
-    expect(kpiGrid!.className).toMatch(/\bgrid-cols-3\b/);
+    // Phase 170 (j), 2026-09-30 — supersedes the Phase 52-06 three-column
+    // fallback. The 2026-09-27 PROD measurement found three columns too narrow
+    // at 390 px and in the ~326 px composer mount: values broke mid-number and
+    // labels ellipsised ("SOR…", "CAL…", "MAX…"). The container ladder is now
+    // 2 columns, 3 from `@md` (28rem), and the full row from `@5xl`.
+    expect(kpiGrid!.className).toMatch(/\bgrid-cols-2\b/);
+    expect(kpiGrid!.className).toContain("@md:grid-cols-3");
+    // No bare three-column base. `\b` would also match `@md:grid-cols-3`
+    // (`:` is a non-word character), so the arm is whitespace-anchored.
+    expect(kpiGrid!.className).not.toMatch(/(^|\s)grid-cols-3(\s|$)/);
     // Size containment would collapse the strip's block size to 0 (Pitfall 1) —
     // the bare inline-size `@container` is deliberate.
     expect(host!.className).not.toContain("@container-size");

@@ -1,0 +1,20 @@
+[
+  {
+    "jobid": 1,
+    "jobname": "match_engine_cron",
+    "schedule": "0 * * * *",
+    "active": true,
+    "database": "postgres",
+    "username": "postgres",
+    "command": "DO $$ DECLARE k text; u text; BEGIN SELECT decrypted_secret INTO k FROM vault.decrypted_secrets WHERE name = 'analytics_service_key'; SELECT decrypted_secret INTO u FROM vault.decrypted_secrets WHERE name = 'analytics_base_url'; PERFORM net.http_post(url := u || '/api/match/cron-recompute', headers := jsonb_build_object('Content-Type', 'application/json', 'X-Service-Key', k), body := '{}'::jsonb, timeout_milliseconds := 60000); END $$"
+  },
+  {
+    "jobid": 2,
+    "jobname": "retention_compute_jobs_orphaned_running",
+    "schedule": "*/10 * * * *",
+    "active": true,
+    "database": "postgres",
+    "username": "postgres",
+    "command": "-- CANARY_1648X_PROSE_ONLY: part 1 of this command is a comment and part 2 is the reaper. Under ws-collapse-v1 the newline below was folded to a space and this line swallowed the body.\nDO $sweep$ BEGIN UPDATE public.compute_jobs SET status = 'failed_final', error_kind = 'orphaned' WHERE status = 'running' AND claimed_at < now() - interval '4 hours'; END $sweep$;"
+  }
+]

@@ -1,0 +1,2 @@
+# fixture allowlist — bad-schema.red
+20260101000000_fx_a.sql	storage.buckets	1	# consumer: the extractor self-test

@@ -18,6 +18,7 @@
  */
 
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+import { PROD_PROJECT_REFS } from "@/lib/test-safety";
 
 export const LIVE_DB_URL = process.env.NEXT_PUBLIC_SUPABASE_URL;
 export const LIVE_DB_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -179,14 +180,30 @@ export async function cleanupLiveDbRow(
  * project ref in SUPABASE_PROJECT_REF.
  */
 export const SUPABASE_ACCESS_TOKEN = process.env.SUPABASE_ACCESS_TOKEN;
-export const SUPABASE_PROJECT_REF =
-  process.env.SUPABASE_PROJECT_REF ??
-  (process.env.NEXT_PUBLIC_SUPABASE_URL
-    ? process.env.NEXT_PUBLIC_SUPABASE_URL.replace(
-        /^https:\/\/([^.]+).*/,
-        "$1",
-      )
-    : undefined);
+
+/**
+ * The project ref the Management API is called with, or undefined.
+ *
+ * Only a well-formed hosted ref counts, and never a production one. A
+ * loopback lane URL (`http://127.0.0.1:54421`) used to fall through the
+ * `https://` regex unchanged, so a shell holding a real access token sent
+ * that token to `api.supabase.com/v1/projects/http://127.0.0.1:54421/...`
+ * (measured 2026-10-01, ~49 requests, all 404). And a developer env whose
+ * URL or SUPABASE_PROJECT_REF names production would have run the
+ * introspection SQL against production, which no other guard covers.
+ */
+function resolveIntrospectionRef(): string | undefined {
+  const explicit = process.env.SUPABASE_PROJECT_REF;
+  const fromUrl = process.env.NEXT_PUBLIC_SUPABASE_URL?.match(
+    /^https:\/\/([a-z0-9]{20})\.supabase\.co(?:\/|$)/,
+  )?.[1];
+  const ref = explicit ?? fromUrl;
+  if (!ref || !/^[a-z0-9]{20}$/.test(ref)) return undefined;
+  if ((PROD_PROJECT_REFS as readonly string[]).includes(ref)) return undefined;
+  return ref;
+}
+
+export const SUPABASE_PROJECT_REF = resolveIntrospectionRef();
 export const HAS_INTROSPECTION =
   Boolean(SUPABASE_ACCESS_TOKEN) && Boolean(SUPABASE_PROJECT_REF);
 

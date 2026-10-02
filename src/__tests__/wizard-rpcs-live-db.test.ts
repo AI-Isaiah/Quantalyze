@@ -24,6 +24,46 @@
  * Gate: requires NEXT_PUBLIC_SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY.
  * Skips gracefully when those are absent (standard CI without live DB).
  *
+ * ⛔ THIS FILE IS NOT A GATE. Every case is `it.skipIf(!HAS_LIVE_DB)` and CI
+ * supplies neither variable, so **none of it has ever run in CI** and none of
+ * it may be counted toward any success criterion. It is a local-only probe.
+ * The gates for these RPCs are the SQL self-tests under `supabase/tests/` and
+ * the route unit tests under `src/app/api/strategies/**`.
+ *
+ * ⚠️ PHASE 156 / CONNECT-02 — WHAT CHANGED UNDER THIS FILE, AND WHAT IS ABOUT
+ *    TO. Read before trusting a local run.
+ *
+ *   As of Migration A (`supabase/migrations/20260813150106_wizard_rpcs_service_role_writer.sql`)
+ *   the two wizard WRITE RPCs — `create_wizard_strategy` and its composite twin
+ *   `add_wizard_composite_key` — accept a **`service_role`** caller: the body
+ *   branches on the JWT role, and a `service_role` call skips the
+ *   `auth.uid() = p_user_id` ownership check (there is no `auth.uid()` to
+ *   check) while an `authenticated` call still enforces it exactly as before.
+ *   Both routes now call through `createAdminClient()`, so PRODUCTION no longer
+ *   reaches these RPCs as `authenticated` at all.
+ *
+ *   The cases below still call as **`authenticated`** (via `ownerClient`, a
+ *   JWT-bearing client). That is deliberately left standing and it still
+ *   passes — Migration A keeps `authenticated`'s EXECUTE grant, precisely so
+ *   the old deploy stays alive across the merge window.
+ *
+ *   ⛔ THAT ENDS WITH THE FOLLOW-UP MIGRATION:
+ *   `supabase/migrations/20260814120000_wizard_rpcs_revoke_authenticated.sql`
+ *   (Migration B, phase 156 plan 07) withdraws `authenticated` EXECUTE from
+ *   BOTH wizard write RPCs. Once it has been applied to the database you are
+ *   pointed at, every `ownerClient.rpc("create_wizard_strategy", …)` call in
+ *   this file fails with `42501` — but as **permission denied for function**,
+ *   not as the ownership refusal the case is asserting. Concretely:
+ *     • the happy-path and seeding calls start failing, and their failure means
+ *       "the grant is gone", NOT "the RPC regressed";
+ *     • "rejects calls where p_user_id does not match auth.uid" keeps its
+ *       expected `42501` **for the wrong reason** — a false green. Re-point it
+ *       at a `service_role` client, or delete it in favour of the SQL gate,
+ *       when you next touch this file post-Migration-B.
+ *   `finalize_wizard_strategy` is NOT in Migration B's scope and keeps its
+ *   `authenticated` grant, so the finalize assertions themselves are unaffected
+ *   — only the create-RPC seeding step ahead of them is.
+ *
  * Run locally:
  *   export NEXT_PUBLIC_SUPABASE_URL=...
  *   export SUPABASE_SERVICE_ROLE_KEY=...
@@ -153,8 +193,13 @@ async function pickCategoryId(): Promise<string | null> {
 // ---------------------------------------------------------------------------
 
 describe("create_wizard_strategy RPC (Migration 031 / P474)", () => {
+  // ⚠️ Phase 156: both cases below call as `authenticated`. Migration A keeps
+  // that grant, so they still pass; the follow-up
+  // `20260814120000_wizard_rpcs_revoke_authenticated.sql` removes it and both
+  // start answering 42501 "permission denied for function". Production stopped
+  // taking this path entirely when the routes moved to createAdminClient().
   it.skipIf(!HAS_LIVE_DB)(
-    "happy path: inserts api_keys + strategies (source=wizard, status=draft) atomically",
+    "happy path (as `authenticated` — grant withdrawn by 20260814120000): inserts api_keys + strategies (source=wizard, status=draft) atomically",
     async () => {
       if (!ownerClient || !ownerId) return;
 
@@ -208,8 +253,14 @@ describe("create_wizard_strategy RPC (Migration 031 / P474)", () => {
     30_000,
   );
 
+  // ⛔ Phase 156 TRAP, stated so it is not rediscovered as a mystery: after
+  // `20260814120000_wizard_rpcs_revoke_authenticated.sql` this case still
+  // passes, but for the WRONG reason — the 42501 becomes "permission denied for
+  // function" (no EXECUTE) rather than the ownership refusal it is asserting.
+  // A green here post-Migration-B proves nothing about the ownership guard.
+  // The ownership guard's real gate is the SQL self-test in `supabase/tests/`.
   it.skipIf(!HAS_LIVE_DB)(
-    "rejects calls where p_user_id does not match auth.uid (SQLSTATE 42501)",
+    "rejects calls where p_user_id does not match auth.uid (SQLSTATE 42501) — ⚠️ becomes a false green after 20260814120000",
     async () => {
       if (!ownerClient || !strangerId) return;
       const { data, error } = await ownerClient.rpc("create_wizard_strategy", {
@@ -239,6 +290,11 @@ describe("create_wizard_strategy RPC (Migration 031 / P474)", () => {
 // ---------------------------------------------------------------------------
 
 describe("finalize_wizard_strategy RPC (Migration 031 / P474)", () => {
+  // ⚠️ Phase 156: `finalize_wizard_strategy` itself is OUT of Migration B's
+  // scope and keeps its `authenticated` grant — but every case here SEEDS its
+  // draft through `create_wizard_strategy` as `authenticated`, which does not.
+  // Post-`20260814120000_wizard_rpcs_revoke_authenticated.sql` these fail at
+  // the seeding step, before the assertion under test is ever reached.
   it.skipIf(!HAS_LIVE_DB)(
     "happy path: flips draft (source=wizard, status=draft) to status=pending_review",
     async () => {
@@ -370,6 +426,11 @@ describe("finalize_wizard_strategy RPC (Migration 031 / P474)", () => {
 // ---------------------------------------------------------------------------
 
 describe("guard_wizard_draft_updates trigger (Migration 031 / P474 + Migration 126 / Issue 1 + Migration 127 / Finding 1)", () => {
+  // ⚠️ Phase 156: the trigger under test is unchanged, but all three cases seed
+  // through `create_wizard_strategy` as `authenticated` and therefore stop
+  // reaching their assertions once
+  // `20260814120000_wizard_rpcs_revoke_authenticated.sql` withdraws that grant.
+  // Re-seed via a `service_role` client when that happens.
   it.skipIf(!HAS_LIVE_DB)(
     "blocks a direct authenticated UPDATE that would flip wizard draft status",
     async () => {

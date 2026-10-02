@@ -83,12 +83,11 @@ function RiskDecompositionInner({ data }: { data: RiskWidgetData } & BaseWidgetP
         );
         if (dr.length === 0) continue;
 
-        const name = (
-          s?.alias ??
-          s?.strategy?.codename ??
-          s?.strategy?.name ??
-          "?"
-        ).slice(0, 12);
+        // Phase 169.4 D-75: the FULL label, never cut in code. A cut collapsed
+        // two keys on one exchange into one name; the Y axis width is the only
+        // visual limit now (SVG text does not take a CSS ellipsis).
+        const name =
+          s?.alias ?? s?.strategy?.codename ?? s?.strategy?.name ?? "?";
         const weight = s?.current_weight ?? 0;
         const dateMap = new Map<string, number>();
         for (const d of dr) dateMap.set(d.date, d.value);

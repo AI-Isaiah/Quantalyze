@@ -60,7 +60,14 @@ const rpcMock = vi.fn();
 // fence to "no existing draft" — the full flow then proceeds as before.
 vi.mock("@/lib/supabase/server", () => ({
   createClient: async () => ({
-    rpc: (...args: unknown[]) => rpcMock(...args),
+    // ⛔ PHASE 156 / CONNECT-02 — NO `rpc` HERE, DELIBERATELY. `create_wizard_strategy`
+    // is a service-role writer; the user-scoped client is the wrong door and this
+    // file must not hand a route that used it a working one. Omitting the method
+    // means a regression that re-points the call at `supabase` throws
+    // "supabase.rpc is not a function" and REDS these cases, instead of passing
+    // them vacuously. The contract itself — WHICH client carried the write — is
+    // asserted in `route.test.ts`'s `[156 / CONNECT-02 + CONNECT-03]` block; this
+    // file only needs the write to reach `rpcMock` at all.
     from: () => ({
       select: () => ({
         eq: () => ({
@@ -73,6 +80,27 @@ vi.mock("@/lib/supabase/server", () => ({
       // via .update().eq().eq() after the RPC. Stub a clean resolving chain.
       update: () => ({ eq: () => ({ eq: async () => ({ error: null }) }) }),
     }),
+  }),
+}));
+
+/**
+ * ⭐ PHASE 156 / G11 — THE ADMIN MOCK THIS FILE HAS NEVER NEEDED, AND NOW DOES.
+ *
+ * Nothing here mocked `@/lib/supabase/admin` before, because on a `binance` body
+ * the only admin consumer was `resolveByVenueIdentity` — MT5-only, so never
+ * reached — and it fail-SOFTs anyway. Phase 156 makes the RPC itself ride
+ * `createAdminClient()` and fail HARD, so without this mock the REAL factory
+ * runs, finds no `SUPABASE_SERVICE_ROLE_KEY` in a unit-test process, throws, and
+ * every case in this file answers 503 for a reason that has nothing to do with
+ * the H-0305/H-0308 payload-forwarding claims they exist to make.
+ *
+ * `.rpc` delegates to the SAME `rpcMock` the cases already assert against, so
+ * every existing expectation reads the same call it always did — only the door
+ * changed.
+ */
+vi.mock("@/lib/supabase/admin", () => ({
+  createAdminClient: () => ({
+    rpc: (...args: unknown[]) => rpcMock(...args),
   }),
 }));
 

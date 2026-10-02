@@ -1,0 +1,1328 @@
+- generic [active] [ref=f1e1]:
+  - generic [ref=f1e2]:
+    - link "Skip to main content" [ref=f1e3] [cursor=pointer]:
+      - /url: "#main-content"
+    - complementary [ref=f1e4]:
+      - link "Quantalyze" [ref=f1e6] [cursor=pointer]:
+        - /url: /
+      - navigation "Primary" [ref=f1e7]:
+        - generic [ref=f1e8]:
+          - paragraph [ref=f1e9]: MY WORKSPACE
+          - list [ref=f1e10]:
+            - listitem [ref=f1e11]:
+              - link "My Allocation" [ref=f1e12] [cursor=pointer]:
+                - /url: /allocations
+                - img [ref=f1e13]
+                - generic [ref=f1e16]: My Allocation
+            - listitem [ref=f1e17]:
+              - link "Recommendations" [ref=f1e18] [cursor=pointer]:
+                - /url: /recommendations
+                - img [ref=f1e19]
+                - generic [ref=f1e21]: Recommendations
+            - listitem [ref=f1e22]:
+              - link "Compare" [ref=f1e23] [cursor=pointer]:
+                - /url: /compare
+                - img [ref=f1e24]
+                - generic [ref=f1e27]: Compare
+            - listitem [ref=f1e28]:
+              - link "Decks" [ref=f1e29] [cursor=pointer]:
+                - /url: /decks
+                - img [ref=f1e30]
+                - generic [ref=f1e33]: Decks
+        - generic [ref=f1e34]:
+          - paragraph [ref=f1e35]: DISCOVERY
+          - generic [ref=f1e36]:
+            - paragraph [ref=f1e37]: Digital Assets
+            - list [ref=f1e38]:
+              - listitem [ref=f1e39]:
+                - link "Crypto SMA" [ref=f1e40] [cursor=pointer]:
+                  - /url: /discovery/crypto-sma
+                  - img [ref=f1e41]
+                  - generic [ref=f1e44]: Crypto SMA
+              - listitem [ref=f1e45]:
+                - link "Emerging Crypto" [ref=f1e46] [cursor=pointer]:
+                  - /url: /discovery/emerging-crypto
+                  - img [ref=f1e47]
+                  - generic [ref=f1e50]: Emerging Crypto
+              - listitem [ref=f1e51]:
+                - link "Crypto Decks" [ref=f1e52] [cursor=pointer]:
+                  - /url: /discovery/crypto-decks
+                  - img [ref=f1e53]
+                  - generic [ref=f1e56]: Crypto Decks
+          - generic [ref=f1e57]:
+            - paragraph [ref=f1e58]: TradFi
+            - list [ref=f1e59]:
+              - listitem [ref=f1e60]:
+                - link "TradFi Decks" [ref=f1e61] [cursor=pointer]:
+                  - /url: /discovery/tradfi-decks
+                  - img [ref=f1e62]
+                  - generic [ref=f1e65]: TradFi Decks
+        - generic [ref=f1e66]:
+          - paragraph [ref=f1e67]: ACCOUNT
+          - list [ref=f1e68]:
+            - listitem [ref=f1e69]:
+              - link "Profile" [ref=f1e70] [cursor=pointer]:
+                - /url: /profile
+                - img [ref=f1e71]
+                - generic [ref=f1e74]: Profile
+            - listitem [ref=f1e75]:
+              - link "Referral" [ref=f1e76] [cursor=pointer]:
+                - /url: /referral
+                - img [ref=f1e77]
+                - generic [ref=f1e81]: Referral
+    - main "Dashboard content" [ref=f1e82]:
+      - generic [ref=f1e83]:
+        - generic [ref=f1e95]:
+          - generic [ref=f1e96]:
+            - generic [ref=f1e97]:
+              - paragraph [ref=f1e98]: Active Allocation
+              - heading "My Allocation" [level=1] [ref=f1e99]
+            - generic [ref=f1e100]:
+              - tablist "Allocation surfaces" [ref=f1e101]:
+                - tab "Overview" [ref=f1e102]
+                - tab "Holdings" [ref=f1e103]:
+                  - text: Holdings
+                  - generic [ref=f1e104]: "5"
+                - tab "Outcomes" [ref=f1e105]:
+                  - text: Outcomes
+                  - generic [ref=f1e106]: "7"
+                - tab "Mandate" [ref=f1e107]
+                - tab "Risk" [ref=f1e108]
+                - tab "Scenario" [selected] [ref=f1e109]
+              - button "Export" [ref=f1e111]:
+                - img [ref=f1e112]
+                - generic [ref=f1e114]: Export
+              - button "Add allocation — open Scenario tab" [ref=f1e115]: + Allocation
+          - status [ref=f1e116]
+          - tabpanel "Scenario" [ref=f1e1851]:
+            - generic [ref=f1e1852]:
+              - generic [ref=f1e1853]:
+                - generic [ref=f1e1854]:
+                  - heading "Portfolio" [level=2] [ref=f1e1855]
+                  - generic [ref=f1e1856]: PROJECTED — hypothetical, not your live book
+                  - radiogroup "Composition entry mode" [ref=f1e1857]:
+                    - radio "From my book" [checked] [ref=f1e1858]
+                    - radio "Blank slate" [ref=f1e1859]
+                  - button "Save portfolio" [ref=f1e1861]
+                - paragraph [ref=f1e1862]: Compose a draft portfolio and project KPI / equity / drawdown impact vs your live baseline.
+                - paragraph [ref=f1e1863]: "Historical realized · 100 overlapping days · not a forecast. Shortest history: key a6f2b712-f96a-42eb-9b03-8c4b88124eea."
+                - group [ref=f1e1865]:
+                  - generic "Data sources Toggle a source off to model the book without it. Resets on reload. Hide" [ref=f1e1866] [cursor=pointer]:
+                    - generic [ref=f1e1867]:
+                      - heading "Data sources" [level=2] [ref=f1e1869]
+                      - generic [ref=f1e1870]: Toggle a source off to model the book without it. Resets on reload.
+                    - generic [ref=f1e1871]: Hide
+                  - group "Data sources" [ref=f1e1873]:
+                    - generic [ref=f1e1874]:
+                      - switch "Include OKX — Read-key (live verify OKX regression) in projection" [checked] [ref=f1e1875]: Included
+                      - generic [ref=f1e1876]: OKX — Read-key (live verify OKX regression)
+                    - generic [ref=f1e1877]:
+                      - switch "Include Bybit — MWF-Read (live verify v0.21.0.3) in projection" [checked] [ref=f1e1878]: Included
+                      - generic [ref=f1e1879]: Bybit — MWF-Read (live verify v0.21.0.3)
+                    - generic [ref=f1e1880]:
+                      - switch "Include OKX — EC in projection" [checked] [ref=f1e1881]: Included
+                      - generic [ref=f1e1882]: OKX — EC
+                    - generic [ref=f1e1883]:
+                      - switch "Include OKX — EC in projection" [checked] [ref=f1e1884]: Included
+                      - generic [ref=f1e1885]: OKX — EC
+                - status [ref=f1e5049]:
+                  - paragraph [ref=f1e5050]:
+                    - text: Now showing the common period where all 4 overlap ·
+                    - button "Show full range" [ref=f1e5051]
+                  - button "Dismiss" [ref=f1e5052]: ×
+                - status [ref=f1e1891]:
+                  - generic [ref=f1e1892]: Mean of 4 strategies · 2026-02-28–2026-06-07 · window truncated from full range
+                - generic [ref=f1e1893]:
+                  - generic [ref=f1e1894]: Coverage window
+                  - generic [ref=f1e1895]: 2026-02-28 → 2026-06-07
+                  - generic [ref=f1e1896]:
+                    - button "Common period (all in)" [ref=f1e1897]
+                    - button "Full range (some drop out)" [ref=f1e1898]
+                    - button "Set coverage window" [ref=f1e1899]: Set window
+                - group [ref=f1e1901]:
+                  - generic "Coverage timeline Hide" [ref=f1e3455] [cursor=pointer]:
+                    - heading "Coverage timeline" [level=2] [ref=f1e1905]
+                    - generic [ref=f1e1906]: Hide
+                  - generic [ref=f1e3457]:
+                    - list [ref=f1e3458]:
+                      - listitem [ref=f1e3459]:
+                        - generic "key 2427aa46-e43a-470d-9959-0d4313c37cdf" [ref=f1e3460]
+                        - 'img "key 2427aa46-e43a-470d-9959-0d4313c37cdf: covers 2026-01-22–2026-06-25, in blend" [ref=f1e3463]'
+                      - listitem [ref=f1e3464]:
+                        - generic "key a6f2b712-f96a-42eb-9b03-8c4b88124eea" [ref=f1e3465]
+                        - 'img "key a6f2b712-f96a-42eb-9b03-8c4b88124eea: covers 2026-02-28–2026-06-07, in blend" [ref=f1e5053]'
+                      - listitem [ref=f1e3469]:
+                        - generic "key afd6224b-360e-48d5-8758-4127ae7b7b7f" [ref=f1e3470]
+                        - 'img "key afd6224b-360e-48d5-8758-4127ae7b7b7f: covers 2026-02-28–2026-06-07, in blend" [ref=f1e5054]'
+                      - listitem [ref=f1e3474]:
+                        - generic "key 1b116e2e-a102-4e5f-9f91-1f2d90df323a" [ref=f1e3475]
+                        - 'img "key 1b116e2e-a102-4e5f-9f91-1f2d90df323a: covers 2026-02-28–2026-06-07, in blend" [ref=f1e5055]'
+                    - generic [ref=f1e3480]:
+                      - generic [ref=f1e3481]: 2026-01-22
+                      - generic [ref=f1e3482]: 2026-06-25
+                - group "Portfolio KPIs" [ref=f1e1909]:
+                  - generic [ref=f1e1910]:
+                    - generic [ref=f1e1911]: AUM
+                    - generic [ref=f1e1912]: $751.4K
+                    - generic [ref=f1e1913]: Projected — sum of enabled holdings
+                  - generic [ref=f1e1914]:
+                    - generic [ref=f1e1915]: YTD TWR
+                    - generic [ref=f1e1916]: +18.13%
+                    - 'generic "YTD TWR delta: +2.8% (improved)" [ref=f1e5056]': +2.8%
+                    - generic [ref=f1e1918]: year-to-date time-weighted return
+                  - generic [ref=f1e1919]:
+                    - generic [ref=f1e1920]: Sharpe
+                    - generic [ref=f1e1921]: "1.74"
+                    - 'generic "Sharpe delta: +0.63 (improved)" [ref=f1e5057]': "+0.63"
+                    - generic [ref=f1e1923]: risk-adjusted return (selected period)
+                  - generic [ref=f1e1924]:
+                    - generic [ref=f1e1925]: Max DD 12m
+                    - generic [ref=f1e1926]: "-14.53%"
+                    - 'generic "Max DD 12m delta: +0.1% (no change)" [ref=f1e5058]': +0.1%
+                    - generic [ref=f1e1928]: worst peak-to-trough in last 12 months
+                  - generic [ref=f1e1929]:
+                    - generic [ref=f1e1930]: Avg |ρ|
+                    - generic [ref=f1e1931]: "0.52"
+                    - 'generic "Avg |ρ| delta: +0.00 (no change)" [ref=f1e5059]': "+0.00"
+                    - generic [ref=f1e1933]: average pairwise correlation across holdings
+                - generic [ref=f1e1934]:
+                  - article [ref=f1e1935]:
+                    - tablist "Period" [ref=f1e1937]:
+                      - tab "3M" [ref=f1e1938]
+                      - tab "6M" [ref=f1e1939]
+                      - tab "12M" [ref=f1e1940]
+                      - tab "ALL" [ref=f1e1941]
+                    - generic [ref=f1e1942]:
+                      - generic [ref=f1e1943]:
+                        - generic [ref=f1e1944]:
+                          - paragraph [ref=f1e1945]: Cum. Return
+                          - paragraph [ref=f1e1946]: +18.1%
+                        - generic [ref=f1e1947]:
+                          - paragraph [ref=f1e1948]: CAGR
+                          - paragraph [ref=f1e1949]: +84.9%
+                        - generic [ref=f1e1950]:
+                          - paragraph [ref=f1e1951]: Sharpe
+                          - paragraph [ref=f1e1952]: "1.75"
+                        - generic [ref=f1e1953]:
+                          - paragraph [ref=f1e1954]: Sortino
+                          - paragraph [ref=f1e1955]: "2.34"
+                        - generic [ref=f1e1956]:
+                          - paragraph [ref=f1e1957]: Calmar
+                          - paragraph [ref=f1e1958]: "5.84"
+                        - generic [ref=f1e1959]:
+                          - paragraph [ref=f1e1960]: Max DD
+                          - paragraph [ref=f1e1961]: "-14.5%"
+                        - generic [ref=f1e1962]:
+                          - paragraph [ref=f1e1963]: Ann. Vol
+                          - paragraph [ref=f1e1964]: 26.0%
+                      - paragraph [ref=f1e1965]: ⚠ Only 100 observations — annualized metrics (CAGR, Sharpe, Sortino, Calmar, Ann. Vol) may not be statistically significant.
+                    - navigation "Factsheet sections" [ref=f1e1966]:
+                      - list [ref=f1e1967]:
+                        - listitem [ref=f1e1968]:
+                          - link "Performance" [ref=f1e1969] [cursor=pointer]:
+                            - /url: "#factsheet-perf"
+                        - listitem [ref=f1e1970]:
+                          - link "Distribution" [ref=f1e1971] [cursor=pointer]:
+                            - /url: "#factsheet-dist"
+                        - listitem [ref=f1e1972]:
+                          - link "Heatmaps" [ref=f1e1973] [cursor=pointer]:
+                            - /url: "#factsheet-heatmaps"
+                        - listitem [ref=f1e1974]:
+                          - link "Stress" [ref=f1e1975] [cursor=pointer]:
+                            - /url: "#factsheet-stress"
+                        - listitem [ref=f1e1976]:
+                          - link "Streaks" [ref=f1e1977] [cursor=pointer]:
+                            - /url: "#factsheet-streak"
+                        - listitem [ref=f1e1978]:
+                          - link "Metrics" [ref=f1e1979] [cursor=pointer]:
+                            - /url: "#factsheet-metrics"
+                    - generic [ref=f1e1980]:
+                      - group [ref=f1e1981]:
+                        - generic "Display" [ref=f1e1982] [cursor=pointer]
+                      - button "Reset view" [ref=f1e1983]
+                      - group "Comparator" [ref=f1e1984]:
+                        - generic [ref=f1e1985]: Compare to
+                        - button "BTC" [ref=f1e1986]
+                        - button "SPX" [ref=f1e1987]
+                    - generic [ref=f1e1988]:
+                      - generic [ref=f1e1989]:
+                        - region "Master timeline brush" [ref=f1e1990]:
+                          - generic [ref=f1e1991]:
+                            - generic [ref=f1e1992]: Timeline
+                            - generic [ref=f1e1993]: 2026-02-28 → —
+                          - img "Master brush — full timeline equity overview" [ref=f1e1994]:
+                            - generic [ref=f1e5061]: "2026"
+                        - group [ref=f1e2004]:
+                          - generic "Performance Hide" [ref=f1e2005] [cursor=pointer]:
+                            - heading "Performance" [level=2] [ref=f1e2008]
+                            - generic [ref=f1e2009]: Hide
+                          - generic [ref=f1e2010]:
+                            - figure [ref=f1e2011]:
+                              - generic [ref=f1e2012]: Arrow keys pan the timeline. Plus and minus zoom around the center. Home or zero resets the view. Mouse wheel zooms toward the cursor. Drag inside the plot to pan; drag the left axis to scale Y; drag the bottom axis to scale X.
+                              - generic [ref=f1e2013]:
+                                - generic [ref=f1e2014]:
+                                  - heading "Cumulative Returns" [level=3] [ref=f1e2015]
+                                  - paragraph [ref=f1e2016]: vs None
+                                - generic [ref=f1e2017]:
+                                  - tablist "Y-axis scale" [ref=f1e2018]:
+                                    - tab "log" [selected] [ref=f1e2019]
+                                    - tab "linear" [ref=f1e2020]
+                                  - group [ref=f1e2021]:
+                                    - generic "Export" [ref=f1e2022] [cursor=pointer]
+                              - button "Scenario" [pressed] [ref=f1e2024] [cursor=pointer]:
+                                - generic [ref=f1e2026]: Scenario
+                              - 'img "Cumulative Returns: Scenario" [ref=f1e2027]':
+                                - generic [ref=f1e5063]: "-10.0%"
+                                - generic [ref=f1e5065]: "-5.0%"
+                                - generic [ref=f1e2033]: +0.0%
+                                - generic [ref=f1e5067]: +5.0%
+                                - generic [ref=f1e5069]: +10.0%
+                                - generic [ref=f1e5071]: +15.0%
+                                - generic [ref=f1e5073]: +20.0%
+                                - generic [ref=f1e5075]: Feb
+                                - generic [ref=f1e5077]: Mar
+                                - generic [ref=f1e5079]: Apr
+                                - generic [ref=f1e5081]: May
+                                - generic [ref=f1e5083]: Jun
+                            - figure [ref=f1e2054]:
+                              - generic [ref=f1e2055]: Arrow keys pan the timeline. Plus and minus zoom around the center. Home or zero resets the view. Mouse wheel zooms toward the cursor. Drag inside the plot to pan; drag the left axis to scale Y; drag the bottom axis to scale X.
+                              - generic [ref=f1e2056]:
+                                - generic [ref=f1e2057]:
+                                  - heading "Daily Returns" [level=3] [ref=f1e2058]
+                                  - paragraph [ref=f1e2059]: vs None
+                                - group [ref=f1e2061]:
+                                  - generic "Export" [ref=f1e2062] [cursor=pointer]
+                              - button "Scenario" [pressed] [ref=f1e2064] [cursor=pointer]:
+                                - generic [ref=f1e2066]: Scenario
+                              - 'img "Daily Returns: Scenario" [ref=f1e2067]':
+                                - generic [ref=f1e5085]: "-10.0%"
+                                - generic [ref=f1e5087]: "-5.0%"
+                                - generic [ref=f1e4197]: +0.0%
+                                - generic [ref=f1e5089]: +5.0%
+                                - generic [ref=f1e5091]: Feb
+                                - generic [ref=f1e5093]: Mar
+                                - generic [ref=f1e5095]: Apr
+                                - generic [ref=f1e5097]: May
+                                - generic [ref=f1e5099]: Jun
+                            - figure [ref=f1e5198]:
+                              - generic [ref=f1e5199]: Arrow keys pan the timeline. Plus and minus zoom around the center. Home or zero resets the view. Mouse wheel zooms toward the cursor. Drag inside the plot to pan; drag the left axis to scale Y; drag the bottom axis to scale X.
+                              - generic [ref=f1e5200]:
+                                - generic [ref=f1e5201]:
+                                  - heading "Rolling Volatility (30d)" [level=3] [ref=f1e5202]
+                                  - paragraph [ref=f1e5203]: vs None
+                                - group [ref=f1e5205]:
+                                  - generic "Export" [ref=f1e5206] [cursor=pointer]
+                              - button "Scenario" [pressed] [ref=f1e5208] [cursor=pointer]:
+                                - generic [ref=f1e5210]: Scenario
+                              - 'img "Rolling Volatility (30d): Scenario" [ref=f1e5211]':
+                                - generic:
+                                  - generic: N<30 — noisy
+                                - generic [ref=f1e5213]: +15.0%
+                                - generic [ref=f1e5215]: +20.0%
+                                - generic [ref=f1e5217]: +25.0%
+                                - generic [ref=f1e5219]: +30.0%
+                                - generic [ref=f1e5221]: +35.0%
+                                - generic [ref=f1e5223]: +40.0%
+                                - generic [ref=f1e5225]: Feb
+                                - generic [ref=f1e5227]: Mar
+                                - generic [ref=f1e5229]: Apr
+                                - generic [ref=f1e5231]: May
+                                - generic [ref=f1e5233]: Jun
+                                - generic:
+                                  - generic: avg 26.7%
+                            - figure [ref=f1e5236]:
+                              - generic [ref=f1e5237]: Arrow keys pan the timeline. Plus and minus zoom around the center. Home or zero resets the view. Mouse wheel zooms toward the cursor. Drag inside the plot to pan; drag the left axis to scale Y; drag the bottom axis to scale X.
+                              - generic [ref=f1e5238]:
+                                - generic [ref=f1e5239]:
+                                  - heading "Rolling Sharpe (30d)" [level=3] [ref=f1e5240]
+                                  - paragraph [ref=f1e5241]: vs None
+                                - group [ref=f1e5243]:
+                                  - generic "Export" [ref=f1e5244] [cursor=pointer]
+                              - button "Scenario" [pressed] [ref=f1e5246] [cursor=pointer]:
+                                - generic [ref=f1e5248]: Scenario
+                              - 'img "Rolling Sharpe (30d): Scenario" [ref=f1e5249]':
+                                - generic:
+                                  - generic: N<30 — noisy
+                                - generic [ref=f1e5251]: "-2.00"
+                                - generic [ref=f1e5253]: "+0.00"
+                                - generic [ref=f1e5255]: "+2.00"
+                                - generic [ref=f1e5257]: "+4.00"
+                                - generic [ref=f1e5259]: "+6.00"
+                                - generic [ref=f1e5261]: Feb
+                                - generic [ref=f1e5263]: Mar
+                                - generic [ref=f1e5265]: Apr
+                                - generic [ref=f1e5267]: May
+                                - generic [ref=f1e5269]: Jun
+                                - generic:
+                                  - generic: avg 2.37
+                            - figure [ref=f1e5272]:
+                              - generic [ref=f1e5273]: Arrow keys pan the timeline. Plus and minus zoom around the center. Home or zero resets the view. Mouse wheel zooms toward the cursor. Drag inside the plot to pan; drag the left axis to scale Y; drag the bottom axis to scale X.
+                              - generic [ref=f1e5274]:
+                                - generic [ref=f1e5275]:
+                                  - heading "Rolling Sortino (30d)" [level=3] [ref=f1e5276]
+                                  - paragraph [ref=f1e5277]: vs None
+                                - group [ref=f1e5279]:
+                                  - generic "Export" [ref=f1e5280] [cursor=pointer]
+                              - button "Scenario" [pressed] [ref=f1e5282] [cursor=pointer]:
+                                - generic [ref=f1e5284]: Scenario
+                              - 'img "Rolling Sortino (30d): Scenario" [ref=f1e5285]':
+                                - generic:
+                                  - generic: N<30 — noisy
+                                - generic [ref=f1e5287]: "+0.00"
+                                - generic [ref=f1e5289]: "+5.00"
+                                - generic [ref=f1e5291]: "+10.00"
+                                - generic [ref=f1e5293]: "+15.00"
+                                - generic [ref=f1e5295]: Feb
+                                - generic [ref=f1e5297]: Mar
+                                - generic [ref=f1e5299]: Apr
+                                - generic [ref=f1e5301]: May
+                                - generic [ref=f1e5303]: Jun
+                                - generic:
+                                  - generic: avg 4.79
+                            - figure [ref=f1e2294]:
+                              - generic [ref=f1e2295]: Arrow keys pan the timeline. Plus and minus zoom around the center. Home or zero resets the view. Mouse wheel zooms toward the cursor. Drag inside the plot to pan; drag the left axis to scale Y; drag the bottom axis to scale X.
+                              - generic [ref=f1e2296]:
+                                - generic [ref=f1e2297]:
+                                  - heading "Worst 10 Drawdown Periods" [level=3] [ref=f1e2298]
+                                  - paragraph [ref=f1e2299]: strategy equity · shaded bands mark the deepest 10 drawdowns
+                                - generic [ref=f1e2300]:
+                                  - tablist "Y-axis scale" [ref=f1e2301]:
+                                    - tab "log" [selected] [ref=f1e2302]
+                                    - tab "linear" [ref=f1e2303]
+                                  - group [ref=f1e2304]:
+                                    - generic "Export" [ref=f1e2305] [cursor=pointer]
+                              - button "Scenario" [pressed] [ref=f1e2307] [cursor=pointer]:
+                                - generic [ref=f1e2309]: Scenario
+                              - 'img "Worst 10 Drawdown Periods: Scenario" [ref=f1e2310]':
+                                - generic [ref=f1e5307]: "-10.0%"
+                                - generic [ref=f1e5309]: "-5.0%"
+                                - generic [ref=f1e2316]: +0.0%
+                                - generic [ref=f1e5311]: +5.0%
+                                - generic [ref=f1e5313]: +10.0%
+                                - generic [ref=f1e5315]: +15.0%
+                                - generic [ref=f1e5317]: +20.0%
+                                - generic [ref=f1e5319]: Feb
+                                - generic [ref=f1e5321]: Mar
+                                - generic [ref=f1e5323]: Apr
+                                - generic [ref=f1e5325]: May
+                                - generic [ref=f1e5327]: Jun
+                                - generic:
+                                  - generic: "#1 -14.5%"
+                                - generic:
+                                  - generic: "#2 -3.7%"
+                                - generic:
+                                  - generic: "#3 -3.1%"
+                                - generic:
+                                  - generic: "#4 -2.8%"
+                                - generic:
+                                  - generic: "#5 -1.3%"
+                                - generic:
+                                  - generic: "#6 -1.2%"
+                                - generic:
+                                  - generic: "#7 -1.2%"
+                                - generic:
+                                  - generic: "#8 -0.8%"
+                                - generic:
+                                  - generic: "#9 -0.6%"
+                                - generic:
+                                  - generic: "#10 -0.5%"
+                            - figure [ref=f1e2337]:
+                              - generic [ref=f1e2338]: Arrow keys pan the timeline. Plus and minus zoom around the center. Home or zero resets the view. Mouse wheel zooms toward the cursor. Drag inside the plot to pan; drag the left axis to scale Y; drag the bottom axis to scale X.
+                              - generic [ref=f1e2339]:
+                                - generic [ref=f1e2340]:
+                                  - heading "Underwater Chart for Accumulated Capital" [level=3] [ref=f1e2341]
+                                  - paragraph [ref=f1e2342]: drawdown from running peak
+                                - group [ref=f1e2344]:
+                                  - generic "Export" [ref=f1e2345] [cursor=pointer]
+                              - button "Drawdown" [pressed] [ref=f1e2347] [cursor=pointer]:
+                                - generic [ref=f1e2349]: Drawdown
+                              - 'img "Underwater Chart for Accumulated Capital: Scenario" [ref=f1e2350]':
+                                - generic [ref=f1e5329]: "-15.0%"
+                                - generic [ref=f1e5331]: "-10.0%"
+                                - generic [ref=f1e5333]: "-5.0%"
+                                - generic [ref=f1e5335]: "-0.0%"
+                                - generic [ref=f1e5337]: Feb
+                                - generic [ref=f1e5339]: Mar
+                                - generic [ref=f1e5341]: Apr
+                                - generic [ref=f1e5343]: May
+                                - generic [ref=f1e5345]: Jun
+                        - group [ref=f1e2373]:
+                          - generic "Distribution Hide" [ref=f1e2374] [cursor=pointer]:
+                            - heading "Distribution" [level=2] [ref=f1e2377]
+                            - generic [ref=f1e2378]: Hide
+                          - generic [ref=f1e2379]:
+                            - figure [ref=f1e2380]:
+                              - generic [ref=f1e2382]:
+                                - heading "Distribution of Daily Returns" [level=3] [ref=f1e2383]
+                                - paragraph [ref=f1e2384]: 100 samples in visible window
+                              - generic [ref=f1e2385]:
+                                - generic [ref=f1e2388]: Scenario
+                                - generic [ref=f1e2389]: Wheel to zoom · double-click to reset
+                              - 'img "Distribution of daily returns: Scenario" [ref=f1e2390]':
+                                - generic [ref=f1e5347]: "-11%"
+                                - generic [ref=f1e2394]: 0%
+                                - generic [ref=f1e5349]: +11%
+                            - figure [ref=f1e2413]:
+                              - generic [ref=f1e2414]:
+                                - heading "Daily-Return Quantile Box" [level=3] [ref=f1e2415]
+                                - paragraph [ref=f1e2416]: 5-number summary · whiskers at min/max · box P25–P75 · median accent line
+                              - img "Quantile box plot for the strategy's daily return distribution" [ref=f1e2417]:
+                                - generic [ref=f1e2420]: P5 -1.6%
+                                - generic [ref=f1e2421]: P95 +2.5%
+                                - generic [ref=f1e2425]: +0.0%
+                                - generic [ref=f1e5367]: "-7.7%"
+                                - generic [ref=f1e4865]: 0%
+                                - generic [ref=f1e5369]: +4.6%
+                              - generic [ref=f1e2428]:
+                                - generic [ref=f1e2429]:
+                                  - paragraph [ref=f1e2430]: P5
+                                  - paragraph [ref=f1e2431]: "-1.6%"
+                                - generic [ref=f1e2432]:
+                                  - paragraph [ref=f1e2433]: P25
+                                  - paragraph [ref=f1e2434]: "-0.4%"
+                                - generic [ref=f1e2435]:
+                                  - paragraph [ref=f1e2436]: Median
+                                  - paragraph [ref=f1e2437]: +0.1%
+                                - generic [ref=f1e2438]:
+                                  - paragraph [ref=f1e2439]: P75
+                                  - paragraph [ref=f1e2440]: +1.0%
+                                - generic [ref=f1e2441]:
+                                  - paragraph [ref=f1e2442]: P95
+                                  - paragraph [ref=f1e2443]: +2.5%
+                            - figure [ref=f1e5370]:
+                              - generic [ref=f1e5371]:
+                                - heading "End-of-Year Returns" [level=3] [ref=f1e5372]
+                                - paragraph [ref=f1e5373]: compounded annual returns · scale ±18%
+                              - img "End-of-year returns by calendar year" [ref=f1e5374]:
+                                - generic [ref=f1e5377]: Scenario
+                                - generic [ref=f1e5378]:
+                                  - generic [ref=f1e5379]: "2026"
+                                  - generic [ref=f1e5381]: +18.1%
+                        - group [ref=f1e2456]:
+                          - generic "Heatmaps Hide" [ref=f1e2457] [cursor=pointer]:
+                            - heading "Heatmaps" [level=2] [ref=f1e2460]
+                            - generic [ref=f1e2461]: Hide
+                          - generic [ref=f1e2462]:
+                            - figure [ref=f1e5382]:
+                              - generic [ref=f1e5383]:
+                                - heading "Monthly Returns" [level=3] [ref=f1e5384]
+                                - paragraph [ref=f1e5385]: compounded monthly returns · YTD on the right · color scale clamped to ±13%
+                              - 'region "Monthly returns: table scrolls horizontally. Swipe or use arrow keys to see more columns." [ref=f1e5386]':
+                                - table [ref=f1e5387]:
+                                  - rowgroup [ref=f1e5403]:
+                                    - row "Year Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec YTD" [ref=f1e5404]:
+                                      - columnheader "Year" [ref=f1e5405]
+                                      - columnheader "Jan" [ref=f1e5406]
+                                      - columnheader "Feb" [ref=f1e5407]
+                                      - columnheader "Mar" [ref=f1e5408]
+                                      - columnheader "Apr" [ref=f1e5409]
+                                      - columnheader "May" [ref=f1e5410]
+                                      - columnheader "Jun" [ref=f1e5411]
+                                      - columnheader "Jul" [ref=f1e5412]
+                                      - columnheader "Aug" [ref=f1e5413]
+                                      - columnheader "Sep" [ref=f1e5414]
+                                      - columnheader "Oct" [ref=f1e5415]
+                                      - columnheader "Nov" [ref=f1e5416]
+                                      - columnheader "Dec" [ref=f1e5417]
+                                      - columnheader "YTD" [ref=f1e5418]
+                                  - rowgroup [ref=f1e5419]:
+                                    - row "2026 · −1.4 +2.5 +0.4 +13 +3.1 · · · · · · +18.1%" [ref=f1e5420]:
+                                      - cell "2026" [ref=f1e5421]
+                                      - cell "·" [ref=f1e5422]
+                                      - cell "−1.4" [ref=f1e5423]
+                                      - cell "+2.5" [ref=f1e5424]
+                                      - cell "+0.4" [ref=f1e5425]
+                                      - cell "+13" [ref=f1e5426]
+                                      - cell "+3.1" [ref=f1e5427]
+                                      - cell "·" [ref=f1e5428]
+                                      - cell "·" [ref=f1e5429]
+                                      - cell "·" [ref=f1e5430]
+                                      - cell "·" [ref=f1e5431]
+                                      - cell "·" [ref=f1e5432]
+                                      - cell "·" [ref=f1e5433]
+                                      - cell "+18.1%" [ref=f1e5434]
+                            - figure [ref=f1e5435]:
+                              - generic [ref=f1e5436]:
+                                - heading "Daily Returns Calendar" [level=3] [ref=f1e5437]
+                                - paragraph [ref=f1e5438]: one cell per trading day · color scale clamped to ±3.5% · hover or tap any cell for value
+                              - 'region "Daily returns calendar: scrolls horizontally. Swipe or use arrow keys to see more days." [ref=f1e5439]':
+                                - generic [ref=f1e5440]:
+                                  - generic [ref=f1e5441]: "2026"
+                                  - img "Daily-return calendar for 2026" [ref=f1e5442]:
+                                    - img:
+                                      - generic: Jan
+                                      - generic: Feb
+                                      - generic: Mar
+                                      - generic: Apr
+                                      - generic: May
+                                      - generic: Jun
+                                      - generic: Jul
+                                      - generic: Aug
+                                      - generic: Sep
+                                      - generic: Oct
+                                      - generic: Nov
+                                      - generic: Dec
+                                      - generic: Jan
+                                      - generic: M
+                                      - generic: W
+                                      - generic: F
+                              - generic [ref=f1e5444]:
+                                - generic [ref=f1e5445]: "-3.5%"
+                                - generic [ref=f1e5454]: +3.5%
+                        - group [ref=f1e2536]:
+                          - generic "Stress Windows Hide" [ref=f1e2537] [cursor=pointer]:
+                            - heading "Stress Windows" [level=2] [ref=f1e2540]
+                            - generic [ref=f1e2541]: Hide
+                          - figure [ref=f1e5455]:
+                            - generic [ref=f1e5456]:
+                              - heading "Stress Windows" [level=3] [ref=f1e5457]
+                              - paragraph [ref=f1e5458]: All 10catalogued stress windows for this asset class occurred outside this strategy's observation period — none can be evaluated.
+                        - group [ref=f1e2547]:
+                          - generic "Streaks Hide" [ref=f1e2548] [cursor=pointer]:
+                            - heading "Streaks" [level=2] [ref=f1e2551]
+                            - generic [ref=f1e2552]: Hide
+                          - figure [ref=f1e2554]:
+                            - generic [ref=f1e2555]:
+                              - heading "Consecutive-Day Streak Distribution" [level=3] [ref=f1e2556]
+                              - paragraph [ref=f1e2557]: 23 winning streaks · 23 losing streaks · max win streak 5d · max loss streak 5d
+                            - generic [ref=f1e2558]:
+                              - generic [ref=f1e2559]:
+                                - paragraph [ref=f1e2560]: Wins
+                                - img "Wins streak-length distribution" [ref=f1e2561]:
+                                  - generic [ref=f1e2563]: "0"
+                                  - generic [ref=f1e5460]: "2"
+                                  - generic [ref=f1e5462]: "4"
+                                  - generic [ref=f1e5464]: "6"
+                                  - generic [ref=f1e5466]: "8"
+                                  - generic [ref=f1e5468]: "10"
+                                  - 'generic "Length 1: 10 streaks" [ref=f1e5469]'
+                                  - 'generic "Length 2: 3 streaks" [ref=f1e5470]'
+                                  - 'generic "Length 3: 5 streaks" [ref=f1e5471]'
+                                  - 'generic "Length 4: 2 streaks" [ref=f1e5472]'
+                                  - 'generic "Length 5: 3 streaks" [ref=f1e5473]'
+                                  - generic [ref=f1e5475]: "1"
+                                  - generic [ref=f1e5477]: "3"
+                                  - generic [ref=f1e5479]: "5"
+                                  - generic [ref=f1e5481]: "7"
+                                  - generic [ref=f1e5483]: "9"
+                                  - generic [ref=f1e5485]: "11"
+                                  - generic [ref=f1e5487]: "13"
+                                  - generic [ref=f1e5489]: 14+
+                              - generic [ref=f1e2595]:
+                                - paragraph [ref=f1e2596]: Losses
+                                - img "Losses streak-length distribution" [ref=f1e2597]:
+                                  - generic [ref=f1e2599]: "0"
+                                  - generic [ref=f1e5491]: "5"
+                                  - generic [ref=f1e5493]: "10"
+                                  - generic [ref=f1e5495]: "15"
+                                  - 'generic "Length 1: 12 streaks" [ref=f1e5496]'
+                                  - 'generic "Length 2: 7 streaks" [ref=f1e5497]'
+                                  - 'generic "Length 5: 4 streaks" [ref=f1e5498]'
+                                  - generic [ref=f1e5500]: "1"
+                                  - generic [ref=f1e5502]: "3"
+                                  - generic [ref=f1e5504]: "5"
+                                  - generic [ref=f1e5506]: "7"
+                                  - generic [ref=f1e5508]: "9"
+                                  - generic [ref=f1e5510]: "11"
+                                  - generic [ref=f1e5512]: "13"
+                                  - generic [ref=f1e5514]: 14+
+                      - complementary [ref=f1e2625]:
+                        - generic [ref=f1e2626]:
+                          - heading "Strategy Thesis" [level=3] [ref=f1e2628]
+                          - paragraph [ref=f1e2629]:
+                            - emphasis [ref=f1e2630]: Scenario
+                            - text: is a systematic strategy. Performance is computed from the strategy's daily-return series over the 2026 observation window (100 trading days, 0.27 years). Comparator analytics are aligned to the same calendar with each benchmark forward-filled.
+                          - paragraph [ref=f1e2631]: A full thesis (objective, edge, capacity, risk regime) is provided by the strategy author. The summary above is derived only from the strategy's observed return series.
+                        - generic [ref=f1e2632]:
+                          - generic [ref=f1e2634]:
+                            - generic [ref=f1e2635]: §I
+                            - heading "Performance" [level=2] [ref=f1e2636]
+                          - generic [ref=f1e2637]:
+                            - heading "Compound Performance" [level=3] [ref=f1e2639]
+                            - table [ref=f1e2640]:
+                              - rowgroup [ref=f1e2641]:
+                                - row "Start Date Feb 28, 2026" [ref=f1e5515]:
+                                  - cell "Start Date" [ref=f1e2643]
+                                  - cell "Feb 28, 2026" [ref=f1e5516]
+                                  - cell [ref=f1e2645]
+                                - row "End Date Jun 7, 2026" [ref=f1e5517]:
+                                  - cell "End Date" [ref=f1e2647]
+                                  - cell "Jun 7, 2026" [ref=f1e5518]
+                                  - cell [ref=f1e2649]
+                                - row "Years Observed 0.27" [ref=f1e5519]:
+                                  - cell "Years Observed" [ref=f1e2651]
+                                  - cell "0.27" [ref=f1e5520]
+                                  - cell [ref=f1e2653]
+                          - generic [ref=f1e2654]:
+                            - heading "Main Metrics" [level=3] [ref=f1e2656]
+                            - paragraph [ref=f1e2657]: ⚠ Only 100 observations (0.40y) — Sharpe / Sortino / Calmar below have wide statistical confidence intervals. Conventional reliability threshold is ≥ 252 trading days (1 year).
+                            - table [ref=f1e2658]:
+                              - rowgroup [ref=f1e2659]:
+                                - row "Cumulative Return +18.13% —" [ref=f1e5521]:
+                                  - cell "Cumulative Return" [ref=f1e2661]
+                                  - cell "+18.13%" [ref=f1e5522]
+                                  - cell "—" [ref=f1e2663]
+                                - row "CAGR +84.88% —" [ref=f1e5523]:
+                                  - cell "CAGR" [ref=f1e2665]
+                                  - cell "+84.88%" [ref=f1e5524]
+                                  - cell "—" [ref=f1e2667]
+                                - row "Ann. Volatility 26.05% —" [ref=f1e5525]:
+                                  - cell "Ann. Volatility" [ref=f1e2669]
+                                  - cell "26.05%" [ref=f1e5526]
+                                  - cell "—" [ref=f1e2671]
+                                - row "Sharpe 1.75 —" [ref=f1e5527]:
+                                  - cell "Sharpe" [ref=f1e2673]
+                                  - cell "1.75" [ref=f1e5528]
+                                  - cell "—" [ref=f1e2675]
+                                - row "Sortino 2.34 —" [ref=f1e5529]:
+                                  - cell "Sortino" [ref=f1e2677]
+                                  - cell "2.34" [ref=f1e5530]
+                                  - cell "—" [ref=f1e2679]
+                                - row "Calmar 5.84 —" [ref=f1e5531]:
+                                  - cell "Calmar" [ref=f1e2681]
+                                  - cell "5.84" [ref=f1e5532]
+                                  - cell "—" [ref=f1e2683]
+                                - row "Skew -2.14" [ref=f1e5533]:
+                                  - cell "Skew" [ref=f1e2685]
+                                  - cell "-2.14" [ref=f1e5534]
+                                  - cell [ref=f1e2687]
+                                - row "Kurtosis 14.18" [ref=f1e5535]:
+                                  - cell "Kurtosis" [ref=f1e2689]
+                                  - cell "14.18" [ref=f1e5536]
+                                  - cell [ref=f1e2691]
+                          - generic [ref=f1e2692]:
+                            - heading "Returns" [level=3] [ref=f1e2694]
+                            - table [ref=f1e2695]:
+                              - rowgroup [ref=f1e2696]:
+                                - row "Month-to-date +3.13% —" [ref=f1e5537]:
+                                  - cell "Month-to-date" [ref=f1e2698]
+                                  - cell "+3.13%" [ref=f1e5538]
+                                  - cell "—" [ref=f1e2700]
+                                - row "Year-to-date +18.13% —" [ref=f1e5539]:
+                                  - cell "Year-to-date" [ref=f1e2702]
+                                  - cell "+18.13%" [ref=f1e5540]
+                                  - cell "—" [ref=f1e2704]
+                                - row "3 Month +19.37% —" [ref=f1e5541]:
+                                  - cell "3 Month" [ref=f1e2706]
+                                  - cell "+19.37%" [ref=f1e5542]
+                                  - cell "—" [ref=f1e2708]
+                                - row "6 Month +18.13% —" [ref=f1e5543]:
+                                  - cell "6 Month" [ref=f1e2710]
+                                  - cell "+18.13%" [ref=f1e5544]
+                                  - cell "—" [ref=f1e2712]
+                                - row "1 Year +18.13% —" [ref=f1e5545]:
+                                  - cell "1 Year" [ref=f1e2714]
+                                  - cell "+18.13%" [ref=f1e5546]
+                                  - cell "—" [ref=f1e2716]
+                                - row "Win Rate (days) 54.00% —" [ref=f1e5547]:
+                                  - cell "Win Rate (days)" [ref=f1e2718]
+                                  - cell "54.00%" [ref=f1e5548]
+                                  - cell "—" [ref=f1e2720]
+                                - row "Profit Factor 1.42 —" [ref=f1e5549]:
+                                  - cell "Profit Factor" [ref=f1e2722]
+                                  - cell "1.42" [ref=f1e5550]
+                                  - cell "—" [ref=f1e2724]
+                          - generic [ref=f1e5551]:
+                            - heading "EOY Returns" [level=3] [ref=f1e5553]
+                            - table [ref=f1e5554]:
+                              - rowgroup [ref=f1e5555]:
+                                - row "Year Strategy" [ref=f1e5556]:
+                                  - columnheader "Year" [ref=f1e5557]
+                                  - columnheader "Strategy" [ref=f1e5558]
+                              - rowgroup [ref=f1e5559]:
+                                - row "2026 +18.13%" [ref=f1e5560]:
+                                  - cell "2026" [ref=f1e5561]
+                                  - cell "+18.13%" [ref=f1e5562]
+                          - generic [ref=f1e2737]:
+                            - heading "Rolling Metrics (30d)" [level=3] [ref=f1e5563]
+                            - table [ref=f1e2740]:
+                              - rowgroup [ref=f1e2741]:
+                                - row "Metric Now Avg Min Max" [ref=f1e2742]:
+                                  - columnheader "Metric" [ref=f1e2743]
+                                  - columnheader "Now" [ref=f1e2744]
+                                  - columnheader "Avg" [ref=f1e2745]
+                                  - columnheader "Min" [ref=f1e2746]
+                                  - columnheader "Max" [ref=f1e2747]
+                              - rowgroup [ref=f1e2748]:
+                                - row "Volatility 15.5% 26.7% 12.9% 41.2%" [ref=f1e5564]:
+                                  - cell "Volatility" [ref=f1e2750]
+                                  - cell "15.5%" [ref=f1e5565]
+                                  - cell "26.7%" [ref=f1e5566]
+                                  - cell "12.9%" [ref=f1e5567]
+                                  - cell "41.2%" [ref=f1e5568]
+                                - row "Sharpe 6.39 2.37 -2.10 7.04" [ref=f1e5569]:
+                                  - cell "Sharpe" [ref=f1e2756]
+                                  - cell "6.39" [ref=f1e5570]
+                                  - cell "2.37" [ref=f1e5571]
+                                  - cell "-2.10" [ref=f1e5572]
+                                  - cell "7.04" [ref=f1e5573]
+                                - row "Sortino 14.95 4.79 -2.28 17.97" [ref=f1e5574]:
+                                  - cell "Sortino" [ref=f1e2762]
+                                  - cell "14.95" [ref=f1e5575]
+                                  - cell "4.79" [ref=f1e5576]
+                                  - cell "-2.28" [ref=f1e5577]
+                                  - cell "17.97" [ref=f1e5578]
+                          - generic [ref=f1e2767]:
+                            - heading "Cumulative Return Metrics" [level=3] [ref=f1e2769]
+                            - table [ref=f1e2770]:
+                              - rowgroup [ref=f1e2771]:
+                                - row "Month-to-date +3.13%" [ref=f1e5579]:
+                                  - cell "Month-to-date" [ref=f1e2773]
+                                  - cell "+3.13%" [ref=f1e5580]
+                                  - cell [ref=f1e2775]
+                                - row "3 Month +19.37%" [ref=f1e5581]:
+                                  - cell "3 Month" [ref=f1e2777]
+                                  - cell "+19.37%" [ref=f1e5582]
+                                  - cell [ref=f1e2779]
+                                - row "6 Month +18.13%" [ref=f1e5583]:
+                                  - cell "6 Month" [ref=f1e2781]
+                                  - cell "+18.13%" [ref=f1e5584]
+                                  - cell [ref=f1e2783]
+                                - row "Year-to-date +18.13%" [ref=f1e5585]:
+                                  - cell "Year-to-date" [ref=f1e2785]
+                                  - cell "+18.13%" [ref=f1e5586]
+                                  - cell [ref=f1e2787]
+                                - row "1 Year +18.13%" [ref=f1e5587]:
+                                  - cell "1 Year" [ref=f1e2789]
+                                  - cell "+18.13%" [ref=f1e5588]
+                                  - cell [ref=f1e2791]
+                                - row "3 Year +19.80%" [ref=f1e5589]:
+                                  - cell "3 Year" [ref=f1e2793]
+                                  - cell "+19.80%" [ref=f1e5590]
+                                  - cell [ref=f1e2795]
+                                - row "5 Year +19.80%" [ref=f1e5591]:
+                                  - cell "5 Year" [ref=f1e2797]
+                                  - cell "+19.80%" [ref=f1e5592]
+                                  - cell [ref=f1e2799]
+                                - row "Since Inception +18.13%" [ref=f1e5593]:
+                                  - cell "Since Inception" [ref=f1e2801]
+                                  - cell "+18.13%" [ref=f1e5594]
+                                  - cell [ref=f1e2803]
+                                - row "CAGR +84.88%" [ref=f1e5595]:
+                                  - cell "CAGR" [ref=f1e2805]
+                                  - cell "+84.88%" [ref=f1e5596]
+                                  - cell [ref=f1e2807]
+                        - generic [ref=f1e2808]:
+                          - generic [ref=f1e2810]:
+                            - generic [ref=f1e2811]: §II
+                            - heading "Risk" [level=2] [ref=f1e2812]
+                          - generic [ref=f1e2813]:
+                            - heading "Max Drawdown" [level=3] [ref=f1e2815]
+                            - table [ref=f1e2816]:
+                              - rowgroup [ref=f1e2817]:
+                                - row "Max Drawdown -14.53% —" [ref=f1e5597]:
+                                  - cell "Max Drawdown" [ref=f1e2819]
+                                  - cell "-14.53%" [ref=f1e5598]
+                                  - cell "—" [ref=f1e2821]
+                                - row "Longest DD (days) 31 —" [ref=f1e5599]:
+                                  - cell "Longest DD (days)" [ref=f1e2823]
+                                  - cell "31" [ref=f1e5600]
+                                  - cell "—" [ref=f1e2825]
+                                - row "VaR 95% -1.57%" [ref=f1e5601]:
+                                  - cell "VaR 95%" [ref=f1e2827]
+                                  - cell "-1.57%" [ref=f1e5602]
+                                  - cell [ref=f1e2829]
+                                - row "CVaR 95% -4.01%" [ref=f1e5603]:
+                                  - cell "CVaR 95%" [ref=f1e2831]
+                                  - cell "-4.01%" [ref=f1e5604]
+                                  - cell [ref=f1e2833]
+                                - row "Avg Win +1.13%" [ref=f1e5605]:
+                                  - cell "Avg Win" [ref=f1e2835]
+                                  - cell "+1.13%" [ref=f1e5606]
+                                  - cell [ref=f1e2837]
+                                - row "Avg Loss -0.94%" [ref=f1e5607]:
+                                  - cell "Avg Loss" [ref=f1e2839]
+                                  - cell "-0.94%" [ref=f1e5608]
+                                  - cell [ref=f1e2841]
+                          - generic [ref=f1e2842]:
+                            - heading "Bootstrap 95% Confidence" [level=3] [ref=f1e2844]
+                            - paragraph [ref=f1e2845]: ⚠ Bootstrap resamples are drawn from 100 observations. CI width is wide and may understate true uncertainty below 252 days (1 year).
+                            - table [ref=f1e2846]:
+                              - rowgroup [ref=f1e2847]:
+                                - row "Metric Point 95% CI" [ref=f1e2848]:
+                                  - columnheader "Metric" [ref=f1e2849]
+                                  - columnheader "Point" [ref=f1e2850]
+                                  - columnheader "95% CI" [ref=f1e2851]
+                              - rowgroup [ref=f1e2852]:
+                                - row "Sharpe 1.75 [-1.06, 5.87]" [ref=f1e5609]:
+                                  - cell "Sharpe" [ref=f1e2854]
+                                  - cell "1.75" [ref=f1e5610]
+                                  - cell "[-1.06, 5.87]" [ref=f1e5611]
+                                - row "Sortino 2.34 [-1.26, 12.60]" [ref=f1e5612]:
+                                  - cell "Sortino" [ref=f1e2858]
+                                  - cell "2.34" [ref=f1e5613]
+                                  - cell "[-1.26, 12.60]" [ref=f1e5614]
+                                - row "Max Drawdown -14.53% [-26.93%, -3.77%]" [ref=f1e5615]:
+                                  - cell "Max Drawdown" [ref=f1e2862]
+                                  - cell "-14.53%" [ref=f1e5616]
+                                  - cell "[-26.93%, -3.77%]" [ref=f1e5617]
+                            - generic [ref=f1e2865]:
+                              - generic [ref=f1e2866]:
+                                - generic [ref=f1e2867]:
+                                  - generic [ref=f1e2868]: Sharpe
+                                  - generic [ref=f1e2869]: "-1.06 · 1.75 · 5.87"
+                                - img "Sharpe bootstrap distribution" [ref=f1e5618]
+                              - generic [ref=f1e2909]:
+                                - generic [ref=f1e2910]:
+                                  - generic [ref=f1e2911]: Sortino
+                                  - generic [ref=f1e2912]: "-1.26 · 2.34 · 12.60"
+                                - img "Sortino bootstrap distribution" [ref=f1e5657]
+                              - generic [ref=f1e2946]:
+                                - generic [ref=f1e2947]:
+                                  - generic [ref=f1e2948]: Max DD
+                                  - generic [ref=f1e2949]: "-26.9% · -14.5% · -3.8%"
+                                - img "Max DD bootstrap distribution" [ref=f1e5690]
+                            - paragraph [ref=f1e2988]: 2,000 stationary block-bootstrap resamples · 5-day block length · 95% CI
+                          - generic [ref=f1e2989]:
+                            - heading "Best / Worst Period" [level=3] [ref=f1e2991]
+                            - table [ref=f1e2992]:
+                              - rowgroup [ref=f1e2993]:
+                                - row "Scale Best Worst" [ref=f1e2994]:
+                                  - columnheader "Scale" [ref=f1e2995]
+                                  - columnheader "Best" [ref=f1e2996]
+                                  - columnheader "Worst" [ref=f1e2997]
+                              - rowgroup [ref=f1e2998]:
+                                - row "Day +4.56% -10.10%" [ref=f1e5728]:
+                                  - cell "Day" [ref=f1e3000]
+                                  - cell "+4.56%" [ref=f1e5729]
+                                  - cell "-10.10%" [ref=f1e5730]
+                                - row "Week +4.91% -6.53%" [ref=f1e5731]:
+                                  - cell "Week" [ref=f1e3004]
+                                  - cell "+4.91%" [ref=f1e5732]
+                                  - cell "-6.53%" [ref=f1e5733]
+                                - row "Month +12.88% -1.40%" [ref=f1e5734]:
+                                  - cell "Month" [ref=f1e3008]
+                                  - cell "+12.88%" [ref=f1e5735]
+                                  - cell "-1.40%" [ref=f1e5736]
+                                - row "Quarter +16.93% +1.02%" [ref=f1e5737]:
+                                  - cell "Quarter" [ref=f1e3012]
+                                  - cell "+16.93%" [ref=f1e5738]
+                                  - cell "+1.02%" [ref=f1e5739]
+                                - row "Year +18.13% +18.13%" [ref=f1e5740]:
+                                  - cell "Year" [ref=f1e3016]
+                                  - cell "+18.13%" [ref=f1e5741]
+                                  - cell "+18.13%" [ref=f1e5742]
+                          - generic [ref=f1e5743]:
+                            - heading "Calmar by Year" [level=3] [ref=f1e5745]
+                            - table [ref=f1e5746]:
+                              - rowgroup [ref=f1e5747]:
+                                - row "Year Return Max DD Calmar Days" [ref=f1e5748]:
+                                  - columnheader "Year" [ref=f1e5749]
+                                  - columnheader "Return" [ref=f1e5750]
+                                  - columnheader "Max DD" [ref=f1e5751]
+                                  - columnheader "Calmar" [ref=f1e5752]
+                                  - columnheader "Days" [ref=f1e5753]
+                              - rowgroup [ref=f1e5754]:
+                                - row "2026⚠ +18.13% -14.53% 1.25 100" [ref=f1e5755]:
+                                  - cell "2026⚠" [ref=f1e5756]
+                                  - cell "+18.13%" [ref=f1e5757]
+                                  - cell "-14.53%" [ref=f1e5758]
+                                  - cell "1.25" [ref=f1e5759]
+                                  - cell "100" [ref=f1e5760]
+                            - paragraph [ref=f1e5761]: ⚠ Years with < 200 trading days are partial — Calmar values are not comparable to full-year rows.
+                          - generic [ref=f1e5762]:
+                            - heading "Worst 10 Drawdowns" [level=3] [ref=f1e5764]
+                            - 'region "Worst 10 drawdowns: Table scrolls horizontally. Swipe or use arrow keys to see more columns." [ref=f1e5765]':
+                              - table [ref=f1e5766]:
+                                - rowgroup [ref=f1e5767]:
+                                  - row "# Peak Trough Recov. Depth DD d Rec d Total" [ref=f1e5768]:
+                                    - columnheader "#" [ref=f1e5769]
+                                    - columnheader "Peak" [ref=f1e5770]
+                                    - columnheader "Trough" [ref=f1e5771]
+                                    - columnheader "Recov." [ref=f1e5772]
+                                    - columnheader "Depth" [ref=f1e5773]
+                                    - columnheader "DD d" [ref=f1e5774]
+                                    - columnheader "Rec d" [ref=f1e5775]
+                                    - columnheader "Total" [ref=f1e5776]
+                                - rowgroup [ref=f1e5777]:
+                                  - row "#1 2026-04-04 2026-04-09 2026-05-06 -14.53% 5d 27d 32" [ref=f1e5778]:
+                                    - cell "#1" [ref=f1e5779]
+                                    - cell "2026-04-04" [ref=f1e5780]
+                                    - cell "2026-04-09" [ref=f1e5781]
+                                    - cell "2026-05-06" [ref=f1e5782]
+                                    - cell "-14.53%" [ref=f1e5783]
+                                    - cell "5d" [ref=f1e5784]
+                                    - cell "27d" [ref=f1e5785]
+                                    - cell "32" [ref=f1e5786]
+                                  - row "#2 2026-05-13 2026-05-18 2026-05-22 -3.69% 5d 4d 9" [ref=f1e5787]:
+                                    - cell "#2" [ref=f1e5788]
+                                    - cell "2026-05-13" [ref=f1e5789]
+                                    - cell "2026-05-18" [ref=f1e5790]
+                                    - cell "2026-05-22" [ref=f1e5791]
+                                    - cell "-3.69%" [ref=f1e5792]
+                                    - cell "5d" [ref=f1e5793]
+                                    - cell "4d" [ref=f1e5794]
+                                    - cell "9" [ref=f1e5795]
+                                  - row "#3 2026-03-11 2026-03-16 2026-03-19 -3.08% 5d 3d 8" [ref=f1e5796]:
+                                    - cell "#3" [ref=f1e5797]
+                                    - cell "2026-03-11" [ref=f1e5798]
+                                    - cell "2026-03-16" [ref=f1e5799]
+                                    - cell "2026-03-19" [ref=f1e5800]
+                                    - cell "-3.08%" [ref=f1e5801]
+                                    - cell "5d" [ref=f1e5802]
+                                    - cell "3d" [ref=f1e5803]
+                                    - cell "8" [ref=f1e5804]
+                                  - row "#4 2026-03-22 2026-03-27 2026-04-01 -2.83% 5d 5d 10" [ref=f1e5805]:
+                                    - cell "#4" [ref=f1e5806]
+                                    - cell "2026-03-22" [ref=f1e5807]
+                                    - cell "2026-03-27" [ref=f1e5808]
+                                    - cell "2026-04-01" [ref=f1e5809]
+                                    - cell "-2.83%" [ref=f1e5810]
+                                    - cell "5d" [ref=f1e5811]
+                                    - cell "5d" [ref=f1e5812]
+                                    - cell "10" [ref=f1e5813]
+                                  - row "#5 2026-03-19 2026-03-21 2026-03-22 -1.34% 2d 1d 3" [ref=f1e5814]:
+                                    - cell "#5" [ref=f1e5815]
+                                    - cell "2026-03-19" [ref=f1e5816]
+                                    - cell "2026-03-21" [ref=f1e5817]
+                                    - cell "2026-03-22" [ref=f1e5818]
+                                    - cell "-1.34%" [ref=f1e5819]
+                                    - cell "2d" [ref=f1e5820]
+                                    - cell "1d" [ref=f1e5821]
+                                    - cell "3" [ref=f1e5822]
+                                  - row "#6 2026-02-28 2026-03-01 2026-03-03 -1.19% 1d 2d 3" [ref=f1e5823]:
+                                    - cell "#6" [ref=f1e5824]
+                                    - cell "2026-02-28" [ref=f1e5825]
+                                    - cell "2026-03-01" [ref=f1e5826]
+                                    - cell "2026-03-03" [ref=f1e5827]
+                                    - cell "-1.19%" [ref=f1e5828]
+                                    - cell "1d" [ref=f1e5829]
+                                    - cell "2d" [ref=f1e5830]
+                                    - cell "3" [ref=f1e5831]
+                                  - row "#7 2026-06-01 2026-06-02 2026-06-07 -1.15% 1d 5d 6" [ref=f1e5832]:
+                                    - cell "#7" [ref=f1e5833]
+                                    - cell "2026-06-01" [ref=f1e5834]
+                                    - cell "2026-06-02" [ref=f1e5835]
+                                    - cell "2026-06-07" [ref=f1e5836]
+                                    - cell "-1.15%" [ref=f1e5837]
+                                    - cell "1d" [ref=f1e5838]
+                                    - cell "5d" [ref=f1e5839]
+                                    - cell "6" [ref=f1e5840]
+                                  - row "#8 2026-05-06 2026-05-08 2026-05-11 -0.76% 2d 3d 5" [ref=f1e5841]:
+                                    - cell "#8" [ref=f1e5842]
+                                    - cell "2026-05-06" [ref=f1e5843]
+                                    - cell "2026-05-08" [ref=f1e5844]
+                                    - cell "2026-05-11" [ref=f1e5845]
+                                    - cell "-0.76%" [ref=f1e5846]
+                                    - cell "2d" [ref=f1e5847]
+                                    - cell "3d" [ref=f1e5848]
+                                    - cell "5" [ref=f1e5849]
+                                  - row "#9 2026-05-25 2026-05-27 2026-05-28 -0.60% 2d 1d 3" [ref=f1e5850]:
+                                    - cell "#9" [ref=f1e5851]
+                                    - cell "2026-05-25" [ref=f1e5852]
+                                    - cell "2026-05-27" [ref=f1e5853]
+                                    - cell "2026-05-28" [ref=f1e5854]
+                                    - cell "-0.60%" [ref=f1e5855]
+                                    - cell "2d" [ref=f1e5856]
+                                    - cell "1d" [ref=f1e5857]
+                                    - cell "3" [ref=f1e5858]
+                                  - row "#10 2026-03-05 2026-03-08 2026-03-11 -0.51% 3d 3d 6" [ref=f1e5859]:
+                                    - cell "#10" [ref=f1e5860]
+                                    - cell "2026-03-05" [ref=f1e5861]
+                                    - cell "2026-03-08" [ref=f1e5862]
+                                    - cell "2026-03-11" [ref=f1e5863]
+                                    - cell "-0.51%" [ref=f1e5864]
+                                    - cell "3d" [ref=f1e5865]
+                                    - cell "3d" [ref=f1e5866]
+                                    - cell "6" [ref=f1e5867]
+                          - generic [ref=f1e3144]:
+                            - heading "Extended Metrics" [level=3] [ref=f1e3146]
+                            - table [ref=f1e3147]:
+                              - rowgroup [ref=f1e3148]:
+                                - row "Skew -2.14" [ref=f1e5868]:
+                                  - cell "Skew" [ref=f1e3150]
+                                  - cell "-2.14" [ref=f1e5869]
+                                  - cell [ref=f1e3152]
+                                - row "Kurtosis (excess) 14.18" [ref=f1e5870]:
+                                  - cell "Kurtosis (excess)" [ref=f1e3154]
+                                  - cell "14.18" [ref=f1e5871]
+                                  - cell [ref=f1e3156]
+                                - row "VaR 95% -1.57%" [ref=f1e5872]:
+                                  - cell "VaR 95%" [ref=f1e3158]
+                                  - cell "-1.57%" [ref=f1e5873]
+                                  - cell [ref=f1e3160]
+                                - row "CVaR 95% -4.01%" [ref=f1e5874]:
+                                  - cell "CVaR 95%" [ref=f1e3162]
+                                  - cell "-4.01%" [ref=f1e5875]
+                                  - cell [ref=f1e3164]
+                                - row "P5 (daily) -1.57%" [ref=f1e5876]:
+                                  - cell "P5 (daily)" [ref=f1e3166]
+                                  - cell "-1.57%" [ref=f1e5877]
+                                  - cell [ref=f1e3168]
+                                - row "P95 (daily) +2.52%" [ref=f1e5878]:
+                                  - cell "P95 (daily)" [ref=f1e3170]
+                                  - cell "+2.52%" [ref=f1e5879]
+                                  - cell [ref=f1e3172]
+                                - row "Median (daily) +0.12%" [ref=f1e5880]:
+                                  - cell "Median (daily)" [ref=f1e3174]
+                                  - cell "+0.12%" [ref=f1e5881]
+                                  - cell [ref=f1e3176]
+                                - row "Profit Factor 1.42" [ref=f1e5882]:
+                                  - cell "Profit Factor" [ref=f1e3178]
+                                  - cell "1.42" [ref=f1e5883]
+                                  - cell [ref=f1e3180]
+                                - row "Omega (θ=0) 1.42" [ref=f1e5884]:
+                                  - cell "Omega (θ=0)" [ref=f1e3182]
+                                  - cell "1.42" [ref=f1e5885]
+                                  - cell [ref=f1e3184]
+                                - row "Tail Ratio (P95/|P5|) 1.74" [ref=f1e5886]:
+                                  - cell "Tail Ratio (P95/|P5|)" [ref=f1e3186]
+                                  - cell "1.74" [ref=f1e5887]
+                                  - cell [ref=f1e3188]
+                                - row "Common-sense Ratio 2.47" [ref=f1e5888]:
+                                  - cell "Common-sense Ratio" [ref=f1e3190]
+                                  - cell "2.47" [ref=f1e5889]
+                                  - cell [ref=f1e3192]
+                                - row "Recovery Factor 1.25" [ref=f1e5890]:
+                                  - cell "Recovery Factor" [ref=f1e3194]
+                                  - cell "1.25" [ref=f1e5891]
+                                  - cell [ref=f1e3196]
+                                - row "Pain Index 1.86%" [ref=f1e5892]:
+                                  - cell "Pain Index" [ref=f1e3198]
+                                  - cell "1.86%" [ref=f1e5893]
+                                  - cell [ref=f1e3200]
+                                - row "Ulcer Index 3.21%" [ref=f1e5894]:
+                                  - cell "Ulcer Index" [ref=f1e3202]
+                                  - cell "3.21%" [ref=f1e5895]
+                                  - cell [ref=f1e3204]
+                                - row "Avg Win / Avg Loss 1.21×" [ref=f1e5896]:
+                                  - cell "Avg Win / Avg Loss" [ref=f1e3206]
+                                  - cell "1.21×" [ref=f1e5897]
+                                  - cell [ref=f1e3208]
+                        - generic [ref=f1e3209]:
+                          - generic [ref=f1e3211]:
+                            - generic [ref=f1e3212]: §III
+                            - heading "Style" [level=2] [ref=f1e3213]
+                          - generic [ref=f1e3214]:
+                            - heading "vs Your Book" [level=3] [ref=f1e3216]
+                            - table [ref=f1e3217]:
+                              - rowgroup [ref=f1e3218]:
+                                - row "Sharpe −0.67" [ref=f1e5898]:
+                                  - cell "Sharpe" [ref=f1e3220]
+                                  - cell "−0.67" [ref=f1e5899]
+                                - row "Sortino −3.75" [ref=f1e5900]:
+                                  - cell "Sortino" [ref=f1e3223]
+                                  - cell "−3.75" [ref=f1e5901]
+                                - row "Max DD (blend vs book) +41.8pp" [ref=f1e5902]:
+                                  - cell "Max DD (blend vs book)" [ref=f1e3226]
+                                  - cell "+41.8pp" [ref=f1e5903]
+                            - paragraph [ref=f1e3228]: Delta = blend minus your live book · sample/252 basis · over each series’ own window (100 obs blend · 82 obs book)
+                        - generic [ref=f1e3229]:
+                          - generic [ref=f1e3231]:
+                            - generic [ref=f1e3232]: §V
+                            - heading "Terms" [level=2] [ref=f1e3233]
+                          - generic [ref=f1e3234]:
+                            - heading "Mandate" [level=3] [ref=f1e3236]
+                            - paragraph [ref=f1e3237]: No mandate metadata available for this blend's constituents.
+                          - generic [ref=f1e3238]:
+                            - heading "Terms" [level=3] [ref=f1e3240]
+                            - generic [ref=f1e3241]:
+                              - term [ref=f1e3242]: Data source
+                              - definition [ref=f1e3243]: —
+                              - term [ref=f1e3244]: Observation start
+                              - definition [ref=f1e3245]: 2026-02-28
+                              - term [ref=f1e3246]: Observation end
+                              - definition [ref=f1e3247]: 2026-06-07
+                              - term [ref=f1e3248]: Sample size
+                              - definition [ref=f1e3249]: 100 days · 0.27y
+                              - term [ref=f1e3250]: Risk-free rate
+                              - definition [ref=f1e3251]: 0% (factsheet convention)
+                              - term [ref=f1e3252]: Bench frequency
+                              - definition [ref=f1e3253]: Daily close, forward-filled to strategy calendar
+                              - term [ref=f1e3254]: Factsheet computed
+                              - definition [ref=f1e3255]: —
+                              - term [ref=f1e3256]: Currency basis
+                              - definition [ref=f1e3257]: Returns reported in decimal · compounded
+                            - heading "Fees & Subscription" [level=4] [ref=f1e3258]
+                            - generic [ref=f1e3259]:
+                              - term [ref=f1e3260]: Management fee
+                              - definition [ref=f1e3261]: — on request
+                              - term [ref=f1e3262]: Performance fee
+                              - definition [ref=f1e3263]: — on request
+                              - term [ref=f1e3264]: High-water mark
+                              - definition [ref=f1e3265]: — on request
+                              - term [ref=f1e3266]: Lockup
+                              - definition [ref=f1e3267]: — on request
+                              - term [ref=f1e3268]: Subscription
+                              - definition [ref=f1e3269]: — on request
+                              - term [ref=f1e3270]: Redemption
+                              - definition [ref=f1e3271]: — on request
+                              - term [ref=f1e3272]: Notice period
+                              - definition [ref=f1e3273]: — on request
+                            - paragraph [ref=f1e3274]: Commercial terms not yet wired through from the strategy registry. Allocators should request the full fund offering memorandum directly from the manager before subscribing.
+                    - generic [ref=f1e3275]:
+                      - paragraph [ref=f1e3276]: Returns computed from the strategy's daily series. Benchmarks are daily closes (forward-filled to the strategy's observation dates). Risk-free rate set to 0%. Past performance is not indicative of future results. Demo cohorts and demo portfolios are flagged inline; production replaces them with platform data.
+                      - paragraph [ref=f1e3278]: QSF · SCENARIO · —
+                  - generic [ref=f1e3279]:
+                    - checkbox "BTC Benchmark" [checked] [ref=f1e3280]
+                    - text: BTC Benchmark
+                - generic [ref=f1e5904]:
+                  - heading "vs BTC over 67 overlapping days" [level=3] [ref=f1e5905]
+                  - generic [ref=f1e5906]:
+                    - generic [ref=f1e5907]:
+                      - generic [ref=f1e5908]: Tracking Error
+                      - generic [ref=f1e5909]: +49.15%
+                    - generic [ref=f1e5910]:
+                      - generic [ref=f1e5911]: Information Ratio
+                      - generic [ref=f1e5912]: "-1.26"
+                    - generic [ref=f1e5913]:
+                      - generic [ref=f1e5914]: Alpha
+                      - generic [ref=f1e5915]: +30.97%
+                    - generic [ref=f1e5916]:
+                      - generic [ref=f1e5917]: Beta
+                      - generic [ref=f1e5918]: "-0.11"
+                  - paragraph [ref=f1e5919]: Historical realized · 67 overlapping days · not a forecast. Metrics are 252-day annualized active returns.
+                - generic [ref=f1e5920]:
+                  - heading "BTC shock & downside risk over 100 overlapping days" [level=3] [ref=f1e5921]
+                  - group "BTC shock" [ref=f1e5923]:
+                    - button "−10%" [ref=f1e5924]
+                    - button "−20%" [ref=f1e5925]
+                    - button "−30%" [pressed] [ref=f1e5926]
+                  - generic [ref=f1e5927]:
+                    - generic [ref=f1e5928]:
+                      - generic [ref=f1e5929]: Projected portfolio impact
+                      - generic [ref=f1e5930]: +3.45%
+                    - generic [ref=f1e5931]:
+                      - generic [ref=f1e5932]: Value at Risk (95%)
+                      - generic [ref=f1e5933]: "-1.57%"
+                    - generic [ref=f1e5934]:
+                      - generic [ref=f1e5935]: Expected Shortfall (CVaR, 95%)
+                      - generic [ref=f1e5936]: "-3.60%"
+                  - paragraph [ref=f1e5937]: Historical realized · 100 overlapping days · not a forecast. 95% confidence.
+                  - paragraph [ref=f1e5938]: Historical realized · 67 overlapping days · not a forecast. Single-factor (BTC), linear β propagation, point-in-time.
+                - generic [ref=f1e5939]:
+                  - heading "Forward uncertainty over the next 252 trading days" [level=3] [ref=f1e6314]
+                  - img "Forward confidence bands over 252 trading days. Median terminal return +56.73%, with a 5 to 95 percent interval of -41.03% to +152.51%." [ref=f1e6316]:
+                    - generic [ref=f1e6320]: "-41.21%"
+                    - generic [ref=f1e6321]: +0.00%
+                    - generic [ref=f1e6322]: +152.51%
+                    - generic [ref=f1e6323]: Today
+                    - generic [ref=f1e6324]: 252d
+                  - generic [ref=f1e6325]:
+                    - generic [ref=f1e6326]: Median terminal return · 5–95% interval
+                    - generic [ref=f1e6327]: +56.73% · -41.03% to +152.51%
+                  - paragraph [ref=f1e6328]: Block bootstrap of realized daily returns · 1000 paths · block 5d · Historical realized · 100 overlapping days · not a forecast. Not a Normal model.
+                - generic [ref=f1e3337]:
+                  - heading "Suggested weights" [level=3] [ref=f1e3338]
+                  - paragraph [ref=f1e3339]:
+                    - text: A long-only allocation for the objective below, computed from the strategies' overlapping history. Suggestions are
+                    - strong [ref=f1e3340]: in-sample
+                    - text: (fit to the past, not a forecast) and write to your draft only — nothing is saved until you Save the scenario.
+                  - generic [ref=f1e3341]:
+                    - group "Optimization objective" [ref=f1e3342]:
+                      - button "Min volatility" [pressed] [ref=f1e3343]
+                      - button "Max Sharpe" [ref=f1e3344]
+                    - button "Suggest weights" [ref=f1e3345]
+                - group [ref=f1e3347]:
+                  - generic "Diversification Correlation does not shift with per-strategy leverage Hide" [ref=f1e3348] [cursor=pointer]:
+                    - generic [ref=f1e3349]:
+                      - heading "Diversification" [level=2] [ref=f1e3351]
+                      - generic [ref=f1e3352]: Correlation does not shift with per-strategy leverage
+                    - generic [ref=f1e3353]: Hide
+                  - generic [ref=f1e3354]:
+                    - generic [ref=f1e5956]: 3 pairs above the 0.85 similarity threshold
+                    - generic [ref=f1e5957]:
+                      - generic [ref=f1e5958]:
+                        - figure "Pairwise correlation heatmap, 4 strategies. Teal indicates negative correlation (diversifying), burnt orange indicates positive correlation (concentration risk)." [ref=f1e5959]:
+                          - generic [ref=f1e5960]:
+                            - generic [ref=f1e5962]: key 2427aa46-e43a-470d-9959-0d4313c37cdf
+                            - generic [ref=f1e5963]: key 1b116e2e-a102-4e5f-9f91-1f2d90df323a
+                            - generic [ref=f1e5964]: key a6f2b712-f96a-42eb-9b03-8c4b88124eea
+                            - generic [ref=f1e5965]: key afd6224b-360e-48d5-8758-4127ae7b7b7f
+                            - generic [ref=f1e5966]: key 2427aa46-e43a-470d-9959-0d4313c37cdf
+                            - 'img "key 2427aa46-e43a-470d-9959-0d4313c37cdf and key 2427aa46-e43a-470d-9959-0d4313c37cdf: 1.00 correlation" [ref=f1e5967]': "1.00"
+                            - 'img "key 2427aa46-e43a-470d-9959-0d4313c37cdf and key 1b116e2e-a102-4e5f-9f91-1f2d90df323a: -0.04 correlation" [ref=f1e5968]': "-0.04"
+                            - 'img "key 2427aa46-e43a-470d-9959-0d4313c37cdf and key a6f2b712-f96a-42eb-9b03-8c4b88124eea: -0.04 correlation" [ref=f1e5969]': "-0.04"
+                            - 'img "key 2427aa46-e43a-470d-9959-0d4313c37cdf and key afd6224b-360e-48d5-8758-4127ae7b7b7f: -0.04 correlation" [ref=f1e5970]': "-0.04"
+                            - generic [ref=f1e5971]: key 1b116e2e-a102-4e5f-9f91-1f2d90df323a
+                            - 'img "key 1b116e2e-a102-4e5f-9f91-1f2d90df323a and key 2427aa46-e43a-470d-9959-0d4313c37cdf: -0.04 correlation" [ref=f1e5972]': "-0.04"
+                            - 'img "key 1b116e2e-a102-4e5f-9f91-1f2d90df323a and key 1b116e2e-a102-4e5f-9f91-1f2d90df323a: 1.00 correlation" [ref=f1e5973]': "1.00"
+                            - 'img "key 1b116e2e-a102-4e5f-9f91-1f2d90df323a and key a6f2b712-f96a-42eb-9b03-8c4b88124eea: 1.00 correlation" [ref=f1e5974]': "1.00"
+                            - 'img "key 1b116e2e-a102-4e5f-9f91-1f2d90df323a and key afd6224b-360e-48d5-8758-4127ae7b7b7f: 1.00 correlation" [ref=f1e5975]': "1.00"
+                            - generic [ref=f1e5976]: key a6f2b712-f96a-42eb-9b03-8c4b88124eea
+                            - 'img "key a6f2b712-f96a-42eb-9b03-8c4b88124eea and key 2427aa46-e43a-470d-9959-0d4313c37cdf: -0.04 correlation" [ref=f1e5977]': "-0.04"
+                            - 'img "key a6f2b712-f96a-42eb-9b03-8c4b88124eea and key 1b116e2e-a102-4e5f-9f91-1f2d90df323a: 1.00 correlation" [ref=f1e5978]': "1.00"
+                            - 'img "key a6f2b712-f96a-42eb-9b03-8c4b88124eea and key a6f2b712-f96a-42eb-9b03-8c4b88124eea: 1.00 correlation" [ref=f1e5979]': "1.00"
+                            - 'img "key a6f2b712-f96a-42eb-9b03-8c4b88124eea and key afd6224b-360e-48d5-8758-4127ae7b7b7f: 1.00 correlation" [ref=f1e5980]': "1.00"
+                            - generic [ref=f1e5981]: key afd6224b-360e-48d5-8758-4127ae7b7b7f
+                            - 'img "key afd6224b-360e-48d5-8758-4127ae7b7b7f and key 2427aa46-e43a-470d-9959-0d4313c37cdf: -0.04 correlation" [ref=f1e5982]': "-0.04"
+                            - 'img "key afd6224b-360e-48d5-8758-4127ae7b7b7f and key 1b116e2e-a102-4e5f-9f91-1f2d90df323a: 1.00 correlation" [ref=f1e5983]': "1.00"
+                            - 'img "key afd6224b-360e-48d5-8758-4127ae7b7b7f and key a6f2b712-f96a-42eb-9b03-8c4b88124eea: 1.00 correlation" [ref=f1e5984]': "1.00"
+                            - 'img "key afd6224b-360e-48d5-8758-4127ae7b7b7f and key afd6224b-360e-48d5-8758-4127ae7b7b7f: 1.00 correlation" [ref=f1e5985]': "1.00"
+                        - generic [ref=f1e5986]: Avg |ρ| 0.52
+                      - paragraph [ref=f1e5987]: Burnt orange = positive correlation (concentration risk). Pairs ≥ 0.85 are flagged above.
+                    - generic [ref=f1e5988]:
+                      - generic [ref=f1e5989]:
+                        - generic [ref=f1e5990]: Diversification Ratio
+                        - generic [ref=f1e5991]: "1.11"
+                      - generic [ref=f1e5992]:
+                        - generic [ref=f1e5993]: Effective Bets
+                        - generic [ref=f1e5994]: "1.0"
+                        - generic [ref=f1e5995]: ENB = 1 / Σ PCRᵢ²
+                        - generic [ref=f1e5996]: 1.0 effective bet across 4 constituents
+                    - generic [ref=f1e5997]:
+                      - paragraph [ref=f1e5998]: Risk contribution per constituent (% of total)
+                      - list [ref=f1e5999]:
+                        - listitem [ref=f1e6000]:
+                          - generic "key 2427aa46-e43a-470d-9959-0d4313c37cdf" [ref=f1e6001]
+                          - generic [ref=f1e6004]: 99.3%
+                        - listitem [ref=f1e6005]:
+                          - generic "key 1b116e2e-a102-4e5f-9f91-1f2d90df323a" [ref=f1e6006]
+                          - generic [ref=f1e6009]: 0.7%
+                        - listitem [ref=f1e6010]:
+                          - generic "key a6f2b712-f96a-42eb-9b03-8c4b88124eea" [ref=f1e6011]
+                          - generic [ref=f1e6013]: 0.0%
+                        - listitem [ref=f1e6014]:
+                          - generic "key afd6224b-360e-48d5-8758-4127ae7b7b7f" [ref=f1e6015]
+                          - generic [ref=f1e6017]: 0.0%
+                - generic "Returns distribution" [ref=f1e3418]:
+                  - heading "Returns distribution" [level=2] [ref=f1e3420]
+                  - status [ref=f1e4617]:
+                    - paragraph [ref=f1e4618]: Awaiting more data
+                    - paragraph [ref=f1e4619]: This portfolio needs at least 10 overlapping daily returns to chart its distribution.
+                - generic "Rolling metrics" [ref=f1e3424]:
+                  - generic [ref=f1e3425]:
+                    - heading "Rolling metrics" [level=2] [ref=f1e3426]
+                    - group "Rolling window" [ref=f1e3427]:
+                      - button "3M" [ref=f1e3428]
+                      - button "6M" [disabled] [ref=f1e3429]
+                      - button "12M" [disabled] [ref=f1e3430]
+                  - status [ref=f1e4620]:
+                    - paragraph [ref=f1e4621]: Awaiting more data
+                    - paragraph [ref=f1e4622]: This portfolio needs at least 126 overlapping daily returns for the 6M rolling window.
+                - group [ref=f1e3434]:
+                  - generic "Strategies & weights Show" [ref=f1e3435] [cursor=pointer]:
+                    - heading "Strategies & weights" [level=2] [ref=f1e3438]
+                    - generic [ref=f1e3439]: Show
+                - generic [ref=f1e3440]:
+                  - generic [ref=f1e3441]: Add more strategies
+                  - paragraph [ref=f1e3442]: Browse the verified-strategies catalog to add candidates outside the Bridge recommendations.
+                  - button "Browse strategies" [ref=f1e3443]
+                - region "Scenario draft summary and actions" [ref=f1e3444]:
+                  - generic [ref=f1e3445]: 2 changes
+                  - generic [ref=f1e3446]: +0.63 Sharpe · +2.8% TWR
+                  - generic [ref=f1e3447]:
+                    - button "Reset scenario draft" [ref=f1e3448]: Reset
+                    - button "Commit scenario" [ref=f1e3449]
+              - region "Saved portfolios" [ref=f1e3450]:
+                - heading "Saved portfolios" [level=2] [ref=f1e3451]
+                - generic [ref=f1e3452]:
+                  - generic [ref=f1e3453]: No saved portfolios yet
+                  - generic [ref=f1e3454]: Compose a draft above, then choose "Save portfolio" to keep it here. Saved portfolios reopen into the composer and can be compared side-by-side.
+          - button "Toggle tweaks panel" [ref=f1e1846] [cursor=pointer]:
+            - img [ref=f1e1847]
+            - generic [ref=f1e1850]: Tweaks
+        - paragraph [ref=f1e85]: Not financial advice. Past performance does not guarantee future results. Cryptocurrency trading involves substantial risk of loss.
+      - generic [ref=f1e87]:
+        - paragraph [ref=f1e88]: © 2026 Quantalyze. All rights reserved.
+        - navigation "Legal" [ref=f1e89]:
+          - link "Security" [ref=f1e90] [cursor=pointer]:
+            - /url: /security
+          - link "Privacy" [ref=f1e91] [cursor=pointer]:
+            - /url: /legal/privacy
+          - link "Terms" [ref=f1e92] [cursor=pointer]:
+            - /url: /legal/terms
+          - link "Risk Disclaimer" [ref=f1e93] [cursor=pointer]:
+            - /url: /legal/disclaimer
+  - alert [ref=f1e94]
+  - generic [ref=f1e4166]: "0.00"

@@ -25,7 +25,7 @@
  * What this test does NOT cover
  * -----------------------------
  * Whether a real secret slips past gitleaks — that is gitleaks' own
- * responsibility, exercised by the `gitleaks-action@v2` step in CI
+ * responsibility, exercised by the `gitleaks-action@v3.0.0` step in CI
  * (`.github/workflows/ci.yml`). The runtime behavior is verified by
  * the CI itself; this test guards the config that CI reads.
  */
@@ -345,6 +345,110 @@ describe(".gitleaks.toml — real scanner behavior (H-0017)", () => {
     60_000,
   );
 
+  it.skipIf(!HAS_GITLEAKS)(
+    "Phase 164.1: prod-prober fixture shapes are suppressed, but a REAL secret in the SAME directory is still caught",
+    () => {
+      // The cron-drift arm's ten secret-hygiene rules each ship a RED
+      // fixture proving the rule fires, so those fixtures MUST look like
+      // credentials. What keeps that allowlist from becoming a blanket
+      // path exemption is its `regexes` list — MEASURED 2026-09-06:
+      // deleting `regexes` while keeping `paths` makes this arm RED
+      // ("expected 0 to be greater than 0"). Flipping condition
+      // "AND"->"OR" changed nothing in gitleaks 8.30.1, so `condition`
+      // is belt-and-braces, NOT the mechanism. This arm pins the
+      // mechanism that is actually load-bearing.
+      //
+      // ⚠️ The obvious probe is WRONG: AKIAIOSFODNN7EXAMPLE and its
+      // partner are AWS's own documentation examples and are suppressed
+      // by gitleaks' DEFAULT ruleset, so planting them proves nothing
+      // about this repo's config. Measured 2026-09-06 — the first
+      // calibration attempt returned "no leaks found" for exactly that
+      // reason. Use an unaffiliated high-entropy value instead.
+      const scratch = mkdtempSync(join(tmpdir(), "gitleaks-prober-"));
+      const proberDir = join(scratch, "scripts", "prod-prober");
+      mkdirSync(join(proberDir, "fixtures", "cron-drift"), { recursive: true });
+
+      // Allowlisted BY SHAPE: a defect-kind identifier, the self-test
+      // sentinel, and the FAKE-typ JWT header segment.
+      writeFileSync(
+        join(proberDir, "run.mjs"),
+        'const KINDS = ["pyapi06-wrong-key-accepted"];\n' +
+          'const SENTINEL_KEY = "SENTINEL-KEY-9f3a";\n',
+      );
+      writeFileSync(
+        join(proberDir, "fixtures", "cron-drift", "hygiene-red.json"),
+        '{ "command": "...token=eyJhbGciOiJIUzI1NiIsInR5cCI6IkZBS0UifQ\'" }\n',
+      );
+      // NOT allowlisted: same directory, but a shape no regex covers.
+      writeFileSync(
+        join(proberDir, "leaky.json"),
+        '{ "api_key": "a3f9c2e81b74d05f6a9e3c7b2d18f40e5c6a7b98" }\n',
+      );
+
+      const findings = runGitleaks(scratch);
+
+      // THE LOAD-BEARING ASSERTION: the allowlist is scoped by shape, not
+      // by path. A real credential under scripts/prod-prober/ still fails.
+      expect(findings.filter((f) => f.File.endsWith("leaky.json")).length)
+        .toBeGreaterThan(0);
+
+      // And the fixture shapes that made the gate red on PR #746 are quiet.
+      expect(findings.filter((f) => f.File.endsWith("run.mjs"))).toEqual([]);
+      expect(findings.filter((f) => f.File.endsWith("hygiene-red.json"))).toEqual([]);
+    },
+    60_000,
+  );
+
+  it.skipIf(!HAS_GITLEAKS)(
+    "Phase 164.8.5: the SPLIT-literal fixture shape is suppressed, and its suppression is keyed on the MARKER, not the directory",
+    () => {
+      // 164.8.5 made the hygiene rules length-test the DERIVED value, so its
+      // red fixtures spell a key out in pieces. That shape IS the
+      // `<keyword><delimiter><secret>` form generic-api-key looks for —
+      // MEASURED 2026-09-11: the split form is reported (secret
+      // `0123456789ab`, entropy 3.585) while the same key written whole is
+      // not. The 164.8.5 allowlist block suppresses it via
+      // `regexTarget = "match"` on `FAKE-key-`, because the finding's SECRET
+      // is the bare tail and carries no marker of its own.
+      //
+      // ⛔ THIS ARM EXISTS TO PROVE THE SUPPRESSION IS NARROW. Widening the
+      // block to `paths` alone, or keying it on the bare tail, makes the
+      // `leaky.json` assertion below RED — which is the whole point: a
+      // suppression nobody can prove is scoped is the defect, not the fix.
+      const scratch = mkdtempSync(join(tmpdir(), "gitleaks-prober-split-"));
+      const proberDir = join(scratch, "scripts", "prod-prober");
+      mkdirSync(join(proberDir, "fixtures", "cron-drift"), { recursive: true });
+
+      // Allowlisted BY MARKER: the three split spellings 164.8.5 ships.
+      writeFileSync(
+        join(proberDir, "fixtures", "cron-drift", "hygiene-red.json"),
+        '{ "a": "jsonb_build_object(\'X-Service-Key\', \'FAKE-key-\' || \'0123456789ab\')",\n' +
+          '  "b": "jsonb_build_object(\'X-Service-Key\', concat(\'FAKE-key-\',\'0123456789ab\'))",\n' +
+          '  "c": "jsonb_build_object(\'X-Service-Key\', format(\'%s%s\',\'FAKE-key-\',\'0123456789ab\'))" }\n',
+      );
+      // NOT allowlisted: the SAME split shape in the SAME directory, without
+      // the `FAKE-key-` marker. If this were suppressed, the block would be
+      // keying on the directory or on the tail rather than on the marker.
+      writeFileSync(
+        join(proberDir, "leaky.json"),
+        '{ "a": "jsonb_build_object(\'X-Service-Key\', \'live-key-\' || \'8f3a1c7e9b24\')" }\n',
+      );
+
+      const findings = runGitleaks(scratch);
+
+      // THE LOAD-BEARING ASSERTION.
+      expect(
+        findings.filter((f) => f.File.endsWith("leaky.json")).length,
+        "an UNMARKED split credential in the same directory must still be reported",
+      ).toBeGreaterThan(0);
+      expect(
+        findings.filter((f) => f.File.endsWith("hygiene-red.json")),
+        "the marked 164.8.5 fixture spellings are quiet",
+      ).toEqual([]);
+    },
+    60_000,
+  );
+
   it.skipIf(HAS_GITLEAKS)(
     "advertises skip reason when the gitleaks binary is unavailable",
     () => {
@@ -356,4 +460,139 @@ describe(".gitleaks.toml — real scanner behavior (H-0017)", () => {
       expect(HAS_GITLEAKS).toBe(false);
     },
   );
+});
+
+/**
+ * The CI scanner must be new enough to READ this config.
+ *
+ * PR #705 root cause. `gitleaks-action` resolves its scanner from the
+ * GITLEAKS_VERSION env var, falling back to "8.24.3" when unset, and 8.24.3
+ * SILENTLY IGNORES the top-level `[[allowlists]]` array-of-tables form that
+ * this repo's `.gitleaks.toml` uses (converted to array form by
+ * 158-REVIEW CR-03). There is no parse error and no warning — the
+ * allowlist is simply dropped and the scan proceeds on default rules.
+ *
+ * ⚠️ Do not rewrite that fallback as a literal `process` `.env.NAME` member
+ * expression in this file. `env-manifest.test.ts` scans src/ for exactly that
+ * shape and requires the name be documented in `.env.example`. GITLEAKS_VERSION
+ * is CI-runner config, not app config, so it does not belong there — describe
+ * it in prose. (Cost one red CI shard to learn.)
+ *
+ * The failure mode is therefore invisible from the config side: the file
+ * looks correct, `gitleaks-allowlist.test.ts` passes, a modern local
+ * gitleaks reports "no leaks found", and CI red-lights PRs over fixtures
+ * this file has exempted since the v1.12 CI-green commit.
+ *
+ * Measured on PR #705 (same config, same commit range):
+ *   8.24.3 + [[allowlists]]  -> leaks found: 2   (== what CI reported)
+ *   8.24.3 + [allowlist]     -> no leaks found
+ *   8.30.1 + [[allowlists]]  -> no leaks found
+ *
+ * So the pin is load-bearing, not hygiene: drop it and every allowlist
+ * entry in this repo stops working, silently. This test fails if someone
+ * removes `GITLEAKS_VERSION` from ci.yml, downgrades it to a version that
+ * predates array-form support, while `.gitleaks.toml` still uses that form.
+ */
+describe("CI scanner version can read this config's allowlist form", () => {
+  // MEASURED, not assumed. gitleaks' ViperConfig gained the top-level
+  // `Allowlists []*viperGlobalAllowlist` field in 8.25.0; 8.24.3 has only the
+  // singular `Allowlist`, so a top-level `[[allowlists]]` has nothing to bind
+  // to and is dropped without a parse error. Confirmed against both binaries
+  // over this repo's own config, and 8.24.3 is the last 8.24.x release — so
+  // this is the true release boundary, not an untested interval:
+  //   8.24.3 + [[allowlists]] -> leaks found   (allowlist dropped)
+  //   8.25.0 + [[allowlists]] -> no leaks      (allowlist honored)
+  const MIN_ARRAY_FORM_VERSION = [8, 25, 0] as const;
+  const CI_YML = join(REPO_ROOT, ".github", "workflows", "ci.yml");
+
+  /**
+   * Slice out ONLY the `gitleaks/gitleaks-action` step's own YAML block.
+   *
+   * Scoping matters more than it looks. A whole-file search for the pin stays
+   * GREEN under two mutations that both re-break the gate: moving the env line
+   * to a different job (where the gitleaks step would not inherit it), and
+   * deleting the gitleaks step outright. A guard that survives deletion of the
+   * thing it guards is not a guard. Returns null when the step is absent, which
+   * the assertions below treat as failure.
+   *
+   * Done by indentation rather than a YAML parser deliberately: `yaml` is a
+   * transitive dependency here, not a declared one, and knip gates undeclared
+   * imports in CI.
+   */
+  function gitleaksStepBlock(ci: string): string | null {
+    const lines = ci.split("\n");
+    const start = lines.findIndex((l) =>
+      /^\s*-\s+uses:\s*gitleaks\/gitleaks-action@/.test(l),
+    );
+    if (start === -1) return null;
+    const stepIndent = /^(\s*)/.exec(lines[start])![1].length;
+    const block = [lines[start]];
+    for (let i = start + 1; i < lines.length; i++) {
+      const line = lines[i];
+      if (line.trim() === "") continue;
+      // Dedent to the step's own level or shallower = next step, or out of
+      // this job entirely. Either way the step's block has ended.
+      if (/^(\s*)/.exec(line)![1].length <= stepIndent) break;
+      block.push(line);
+    }
+    return block.join("\n");
+  }
+
+  function parseVersion(v: string): [number, number, number] {
+    const m = /^(\d+)\.(\d+)\.(\d+)$/.exec(v.trim());
+    if (!m) throw new Error(`unparseable gitleaks version: ${JSON.stringify(v)}`);
+    return [Number(m[1]), Number(m[2]), Number(m[3])];
+  }
+
+  function gte(a: readonly number[], b: readonly number[]): boolean {
+    for (let i = 0; i < 3; i++) {
+      if (a[i] !== b[i]) return a[i] > b[i];
+    }
+    return true;
+  }
+
+  it("pins GITLEAKS_VERSION on the gitleaks step whenever .gitleaks.toml uses [[allowlists]]", () => {
+    const toml = readFileSync(GITLEAKS_TOML, "utf8");
+    const usesArrayForm = /^\s*\[\[allowlists\]\]/m.test(toml);
+
+    // Pin the premise. If the config is ever migrated to the singular
+    // [allowlist] form this test must be UPDATED, not silently pass vacuously.
+    expect(
+      usesArrayForm,
+      "Expected .gitleaks.toml to use [[allowlists]]. If it was migrated to " +
+        "the singular [allowlist] form, update this test — do not delete it.",
+    ).toBe(true);
+
+    expect(existsSync(CI_YML), `${CI_YML} must exist`).toBe(true);
+    const block = gitleaksStepBlock(readFileSync(CI_YML, "utf8"));
+
+    expect(
+      block,
+      "No `uses: gitleaks/gitleaks-action@...` step found in ci.yml. If the " +
+        "secret-scan gate was intentionally removed, delete this test with it; " +
+        "otherwise the gate is gone and nothing is scanning for secrets.",
+    ).not.toBeNull();
+
+    // Trailing comments after the value are legal YAML and must not read as
+    // "no pin found" — that would send the next reader after a phantom deletion.
+    const pin = /^\s*GITLEAKS_VERSION:\s*["']?([0-9]+\.[0-9]+\.[0-9]+)["']?\s*(?:#.*)?$/m.exec(
+      block!,
+    );
+    expect(
+      pin,
+      "The gitleaks step does not pin GITLEAKS_VERSION. gitleaks-action " +
+        "defaults to 8.24.3, which SILENTLY ignores [[allowlists]] — every " +
+        "allowlist entry in .gitleaks.toml would stop working, with no error. " +
+        "A pin elsewhere in ci.yml does NOT count: the step only inherits env " +
+        "from its own job. See PR #705.",
+    ).not.toBeNull();
+
+    const pinned = parseVersion(pin![1]);
+    expect(
+      gte(pinned, MIN_ARRAY_FORM_VERSION),
+      `The gitleaks step pins ${pin![1]}, which predates ${MIN_ARRAY_FORM_VERSION.join(".")} ` +
+        "— the first release honoring top-level [[allowlists]]. The allowlist " +
+        "would be silently dropped and the gate would scan on default rules.",
+    ).toBe(true);
+  });
 });

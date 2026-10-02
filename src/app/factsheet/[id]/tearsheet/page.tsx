@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { getFactsheetDetail, getPercentiles } from "@/lib/queries";
+import { isRankableAnalyticsRow } from "@/lib/closed-sets";
 import { displayStrategyName } from "@/lib/strategy-display";
 import { formatPercent, formatNumber } from "@/lib/utils";
 import { Sparkline } from "@/components/charts/Sparkline";
@@ -188,11 +189,28 @@ export default async function TearSheetPage({
           </p>
         </div>
         <div className="shrink-0 text-right">
-          <FreshnessBadge
-            computedAt={analytics.computed_at}
-            label="Data"
-            variant="pill"
-          />
+          {/* STALE-01 — the badge is a claim about WHEN these numbers were
+              produced, and a row that is not a terminal success has no such
+              moment to name. `getFactsheetDetail` already substitutes the dead
+              KPIs server-side, but that substitution CANNOT reach this badge:
+              FreshnessBadge does not early-return on a blank `computed_at`, it
+              routes it through `computeFreshness` (unparseable → "stale") and
+              renders "Data: Stale" — a confident age statement standing over a
+              grid of em-dashes. Withhold it instead. Same decision, same
+              reason, as the SyncBadge gate on the ranked list: no new UI, one
+              fewer claim.
+
+              Gated on the SHARED terminal-success predicate, reading the
+              `computation_status` the shaper deliberately preserves — never on
+              `computed_at` itself, which is falsy for an absent row and
+              non-empty for a live job, i.e. wrong in both directions. */}
+          {isRankableAnalyticsRow(analytics) && (
+            <FreshnessBadge
+              computedAt={analytics.computed_at}
+              label="Data"
+              variant="pill"
+            />
+          )}
           <p className="mt-1 text-fixed-10 text-text-muted">
             Generated{" "}
             {new Date().toLocaleDateString("en-US", {

@@ -26,6 +26,8 @@ from __future__ import annotations
 import os
 import sys
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -52,12 +54,29 @@ from fastapi.testclient import TestClient
 # once from `from slowapi import Limiter` — cached as that no-op for the rest of the
 # session, which would make test_process_key_shares_main_limiter_instance pass
 # vacuously (noop-is-noop). The real class is never swapped (it lives at
-# `slowapi.extension.Limiter`), so restore the re-export from it and re-pop our own
-# router + service singletons so they rebind to a real Limiter — WITHOUT touching
+# `slowapi.extension.Limiter`), so restore the re-export from it — WITHOUT touching
 # fastapi/slowapi module identity.
 slowapi.Limiter = slowapi.extension.Limiter  # type: ignore[attr-defined]
-for _stale in ("services.rate_limit", "routers.process_key"):
-    sys.modules.pop(_stale, None)
+
+# PYAPI-03 (140.1-07) — `services.rate_limit` is NO LONGER re-popped here.
+#
+# It used to be, alongside `routers.process_key`, to rebuild the singleton from a
+# real Limiter after the sibling poisoning described above. Two things changed:
+#
+#   1. Those siblings now import `services.rate_limit` BEFORE they swap
+#      `slowapi.Limiter`, so the canonical singleton is never built from the shim
+#      and there is nothing to rebuild.
+#   2. Popping it became actively HARMFUL. Since PYAPI-03, exchange.py, csv.py,
+#      portfolio.py and optimizer.py all bind the singleton with
+#      `from services.rate_limit import limiter` at THEIR import time. Re-popping
+#      mints a SECOND `services.rate_limit` module with a SECOND Limiter, so every
+#      router imported before this file keeps the first one while `app.state.limiter`
+#      gets the second — silently breaking the API-5 shared-storage invariant that
+#      `test_process_key_shares_main_limiter_instance` and
+#      `test_simulator_router.py::TestG15_004_LimiterIsCanonicalSingleton` exist to
+#      protect. Same class of harm as the fastapi purge in the paragraph above:
+#      re-importing a module to fix one identity problem creates another.
+sys.modules.pop("routers.process_key", None)
 
 import routers.process_key as process_key_router  # noqa: E402
 
@@ -99,6 +118,12 @@ def client(app):
 # for it to round-trip into the response envelope.
 _TEST_CID = "11111111-1111-4111-8111-111111111111"
 
+# Phase 140.1 Plan 02 defaults for the two tables `/process-key` gained a read
+# on. The default `strategies` row makes the caller the OWNER of the fixture
+# strategy (PYAPI-01e's gate passes); pass `owner_row=None` to make them not.
+_DEFAULT_OWNER_ROW = {"id": "s1"}
+_DEFAULT_JOB_ROW = {"status": "pending"}
+
 
 def _auth_headers() -> dict[str, str]:
     """Bearer header that matches the fixture-set INTERNAL_API_TOKEN."""
@@ -111,6 +136,8 @@ def _build_supabase_mock(
     insert_id: str = "ver-1",
     insert_raises: Exception | None = None,
     insert_raises_then_existing=None,
+    owner_row=_DEFAULT_OWNER_ROW,
+    job_row=_DEFAULT_JOB_ROW,
 ):
     """Construct a chained-MagicMock supabase client for the tests below.
 
@@ -120,6 +147,18 @@ def _build_supabase_mock(
       - `.select(...).eq(...).maybe_single().execute()` → ValidationResult
       - `.insert(...).execute()` → row with id
       - `.rpc(...).execute()` → empty success
+
+    Phase 140.1 Plan 02: `/process-key` now reads THREE tables, and two of them
+    must not share the strategy_verifications response script — the ownership
+    gate (`strategies`, PYAPI-01e) and the duplicate path's job-state read
+    (`compute_jobs`, PYAPI-09) would otherwise consume the SV `side_effect`
+    queue and desynchronise the pre-check/race-winner sequence. `.table()`
+    therefore routes by name. `return_value` is deliberately left pointing at
+    the strategy_verifications mock so the existing
+    `fake.table.return_value.insert.call_args_list` assertions keep working.
+
+    `owner_row=None` makes the caller a non-owner (403); `job_row` sets the
+    compute_jobs status the duplicate reply's `job_state` is derived from.
     """
     fake = MagicMock()
 
@@ -136,6 +175,12 @@ def _build_supabase_mock(
     else:
         select_chain.execute.return_value = MagicMock(data=existing_row)
     eq_chain = MagicMock()
+    # Self-chaining: both strategy_verifications reads are now
+    # `.eq("strategy_id", …).eq("wizard_session_id", …)` (PYAPI-01d). Without
+    # this, the SECOND .eq() returns a fresh auto-mock whose .execute().data is
+    # a MagicMock — `one()` narrows that to None and every idempotent-hit test
+    # silently falls through to the insert path instead of asserting anything.
+    eq_chain.eq.return_value = eq_chain
     eq_chain.maybe_single.return_value = select_chain
     eq_chain.single.return_value = select_chain  # legacy; race now uses maybe_single
     select_obj = MagicMock()
@@ -161,6 +206,34 @@ def _build_supabase_mock(
     table.update.return_value = update_chain
 
     fake.table.return_value = table
+
+    # `strategies` — the PYAPI-01e ownership gate
+    # (`.select("id").eq("id",…).eq("user_id",…).maybe_single()`), plus the
+    # incidental `asset_class` read and the fingerprint UPDATE.
+    strategies_table = MagicMock()
+    strategies_select = MagicMock()
+    strategies_eq = MagicMock()
+    strategies_eq.eq.return_value = strategies_eq
+    strategies_eq.maybe_single.return_value = MagicMock(
+        execute=MagicMock(return_value=MagicMock(data=owner_row))
+    )
+    strategies_select.eq.return_value = strategies_eq
+    strategies_table.select.return_value = strategies_select
+    strategies_table.update.return_value = update_chain
+
+    # `compute_jobs` — the PYAPI-09 job-state read-back on the duplicate path.
+    jobs_table = MagicMock()
+    jobs_select = MagicMock()
+    jobs_eq = MagicMock()
+    jobs_eq.eq.return_value = jobs_eq
+    jobs_eq.maybe_single.return_value = MagicMock(
+        execute=MagicMock(return_value=MagicMock(data=job_row))
+    )
+    jobs_select.eq.return_value = jobs_eq
+    jobs_table.select.return_value = jobs_select
+
+    _by_name = {"strategies": strategies_table, "compute_jobs": jobs_table}
+    fake.table.side_effect = lambda name, *a, **k: _by_name.get(name, table)
 
     # RPC path (transition_strategy_verification, enqueue_compute_job, log_audit_event)
     rpc_chain = MagicMock()
@@ -191,8 +264,90 @@ def _csv_validate_body() -> dict:
     }
 
 
-def test_process_key_auth_missing_token(client, monkeypatch):
-    """Missing INTERNAL_API_TOKEN env → 403 'Internal API not configured'."""
+@pytest.fixture
+def middleware_client(monkeypatch):
+    """The FULL main.app stack (so `verify_service_key` runs), as a TestClient.
+
+    The module-level `client` fixture mounts routers/process_key.py in a BARE
+    FastAPI app on purpose — it unit-tests the handler in isolation. That is the
+    right harness for the handler's own defence-in-depth arm, but it CANNOT see
+    the PYAPI-04 middleware gate, which is where `/process-key`'s auth contract
+    now lives. This fixture is the harness for the shipped contract.
+    """
+    monkeypatch.setenv("INTERNAL_API_TOKEN", "a" * 64)
+    import main
+
+    return TestClient(main.app, raise_server_exceptions=False)
+
+
+def test_process_key_auth_missing_token(middleware_client, monkeypatch):
+    """PYAPI-04d — INTERNAL_API_TOKEN UNSET server-side ⇒ 500 INTERNAL_TOKEN_UNCONFIGURED.
+
+    REWRITTEN, not extended (TRAP-9). The pre-140.1 assertion was
+    `403 + "Internal API not configured"`, and it is broken twice over:
+
+    1. The gate moved. `main.verify_service_key` now answers before the handler
+       ever runs, so the handler's 403 arm is unreachable through the full app.
+    2. The status was wrong. An unset platform secret is OUR misconfiguration —
+       SERVICE-PERMANENT per STATUS_CONTRACT.md R-1, i.e. 500 `retryable:false`.
+       403 blamed the caller for an operator-only fault, and 140.2's
+       discriminator would have classified it as "fix your credentials".
+
+    The handler-level 403 arm is still pinned, explicitly as such, by
+    `test_process_key_handler_level_auth_missing_token_403` below.
+    """
+    monkeypatch.delenv("INTERNAL_API_TOKEN", raising=False)
+    r = middleware_client.post(
+        "/process-key",
+        json=_csv_validate_body(),
+        headers={"Authorization": "Bearer whatever"},
+    )
+    assert r.status_code == 500
+    assert r.json() == {
+        "detail": {
+            "code": "INTERNAL_TOKEN_UNCONFIGURED",
+            "dependency": None,
+            "retryable": False,
+            "detail": "Service not configured",
+        }
+    }
+
+
+def test_process_key_auth_wrong_token(middleware_client):
+    """PYAPI-04 — a mismatched bearer ⇒ 401 UNAUTHENTICATED at the middleware.
+
+    REWRITTEN, not extended (TRAP-9). The pre-140.1 assertion was
+    `403 + "Forbidden"` from the handler; the middleware now answers first, and
+    it answers 401 because "we do not know who you are" is authentication, not
+    authorization. The handler's 403 survives as defence-in-depth and is pinned
+    by `test_process_key_handler_level_auth_wrong_token_403` below.
+    """
+    r = middleware_client.post(
+        "/process-key",
+        json=_csv_validate_body(),
+        headers={"Authorization": "Bearer wrong"},
+    )
+    assert r.status_code == 401
+    assert r.json() == {
+        "detail": {
+            "code": "UNAUTHENTICATED",
+            "dependency": None,
+            "retryable": False,
+            "detail": "Unauthorized",
+        }
+    }
+
+
+def test_process_key_handler_level_auth_missing_token_403(client, monkeypatch):
+    """HANDLER-LEVEL (defence-in-depth): the ORIGINAL 403 assertion, verbatim.
+
+    `_verify_internal_token` is deliberately KEPT as the first statement of the
+    handler body — the PYAPI-04 middleware gate is additive, not a move. If the
+    router is ever mounted on an app without `verify_service_key` (as the
+    `client` fixture does), this arm is the only thing standing. Explicitly
+    marked handler-level so nobody reads it as the shipped wire contract, which
+    is 500 / 401 (see the two tests above).
+    """
     monkeypatch.delenv("INTERNAL_API_TOKEN", raising=False)
     r = client.post(
         "/process-key",
@@ -203,8 +358,12 @@ def test_process_key_auth_missing_token(client, monkeypatch):
     assert "Internal API not configured" in r.text
 
 
-def test_process_key_auth_wrong_token(client):
-    """Wrong bearer → 403 'Forbidden' (constant-time compare path)."""
+def test_process_key_handler_level_auth_wrong_token_403(client):
+    """HANDLER-LEVEL (defence-in-depth): the ORIGINAL 403 assertion, verbatim.
+
+    See the sibling above for why this is kept and why it is not the wire
+    contract.
+    """
     r = client.post(
         "/process-key",
         json=_csv_validate_body(),
@@ -454,6 +613,7 @@ def test_process_key_idempotent_double_submit(client):
             "source": "csv",
             "context": {
                 "strategy_id": "s1",
+                "user_id": "u1",
                 "wizard_session_id": "wiz-1",
                 "fmt": "trades",
                 "raw_bytes_base64": "Y29sCjE=",
@@ -494,6 +654,7 @@ def test_process_key_unique_violation_returns_existing(client):
             "source": "csv",
             "context": {
                 "strategy_id": "s1",
+                "user_id": "u1",
                 "wizard_session_id": "wiz-race",
                 "fmt": "trades",
                 "raw_bytes_base64": "Y29sCjE=",
@@ -530,6 +691,7 @@ def test_process_key_race_catch_zero_rows_reraises_original(client):
             "source": "csv",
             "context": {
                 "strategy_id": "s1",
+                "user_id": "u1",
                 "wizard_session_id": "wiz-race-gone",
                 "fmt": "trades",
                 "raw_bytes_base64": "Y29sCjE=",
@@ -595,6 +757,7 @@ def test_process_key_csv_sync_path(client):
             "source": "csv",
             "context": {
                 "strategy_id": "s1",
+                "user_id": "u1",
                 "wizard_session_id": "wiz-csv-1",
                 "fmt": "trades",
                 "raw_bytes_base64": "Y29sCjE=",
@@ -675,6 +838,7 @@ def test_process_key_new_upload_maybe_single_none_does_not_500(client):
             "source": "csv",
             "context": {
                 "strategy_id": "s1",
+                "user_id": "u1",
                 "wizard_session_id": "wiz-fresh-1",
                 "fmt": "trades",
                 "raw_bytes_base64": "Y29sCjE=",
@@ -701,6 +865,7 @@ def test_process_key_onboard_queues(client):
                 "source": "okx",
                 "context": {
                     "strategy_id": "s1",
+                    "user_id": "u1",
                     "wizard_session_id": "wiz-onb-1",
                     "api_key": "k",
                     "api_secret": "s",
@@ -820,7 +985,12 @@ def test_process_key_validate_failure_returns_envelope(client):
             },
             headers=_auth_headers(),
         )
-    assert r.status_code == 200  # envelope returns 200 with ok=False per DESIGN-05.
+    # PYAPI-10b (Phase 140.1 plan 05) — this arm is the SAME return site as the
+    # write-capable-key rejection: `_scope_rejected` is one gate covering
+    # `not val.valid` as well as the two scope arms. That verdict is no longer
+    # delivered under a success status, so this now answers 403. The envelope
+    # itself is unchanged — every assertion below the status is verbatim.
+    assert r.status_code == 403, r.text
     body = r.json()
     assert body["ok"] is False
     assert body["code"] == "AUTH_FAILED"
@@ -1206,6 +1376,10 @@ def test_process_key_teaser_injects_anchor_when_strategy_id_missing(client):
     body = r.json()
     assert body["verification_id"] == "ver-teaser-x5"
     assert body["status"] == "published"
+    # 2026-09-24: the synchronous pipeline no longer runs a position
+    # reconstruction whose result it discards (see the long_fetch pin in
+    # tests/test_long_fetch.py for the why).
+    okx_adapter.reconstruct_positions.assert_not_awaited()
 
     # The strategy_verifications INSERT received the sentinel anchor as
     # strategy_id. Walk the recorded .table('strategy_verifications')
@@ -1353,6 +1527,9 @@ def _run_sync_pipeline(
     }
     if strategy_id is not None:
         context["strategy_id"] = strategy_id
+        # PYAPI-01e: a non-teaser flow carrying a strategy_id must also carry
+        # the owner's user_id, or the ownership gate refuses it (403).
+        context["user_id"] = "u1"
 
     with patch(
         "routers.process_key.get_supabase",
@@ -1624,6 +1801,7 @@ def test_process_key_sfox_onboard_draft_carries_trust_tier_api_verified(client, 
                 "source": "sfox",
                 "context": {
                     "strategy_id": "s1",
+                    "user_id": "u1",
                     "wizard_session_id": "wiz-sfox-1",
                     "api_key": "k",
                     "api_secret": "s",
@@ -1745,6 +1923,7 @@ def test_process_key_mt5_onboard_draft_carries_trust_tier_api_verified(
                 "source": "mt5",
                 "context": {
                     "strategy_id": "s1",
+                    "user_id": "u1",
                     "wizard_session_id": "wiz-mt5-1",
                     "api_key": "1234567",
                     "api_secret": "pw",
@@ -1779,7 +1958,7 @@ def test_process_key_mt5_resync_draft_carries_trust_tier_api_verified(
             json={
                 "flow_type": "resync",
                 "source": "mt5",
-                "context": {"strategy_id": "s1"},
+                "context": {"strategy_id": "s1", "user_id": "u1"},
             },
             headers=_auth_headers(),
         )
@@ -1987,32 +2166,26 @@ def test_teaser_persists_no_series_row(client):
     )
 
 
-def test_process_key_csv_finalize_calls_finalize_csv_strategy_rpc(client):
-    """API-3 regression: flow_type='csv', step='finalize' lands here without
-    a strategy_id (the strategies row hasn't been created yet). Pre-fix this
-    returned 422 MISSING_STRATEGY_ID; post-fix it delegates to
-    finalize_csv_strategy RPC which atomically creates the strategies +
-    strategy_verifications rows.
+def test_process_key_csv_finalize_branch_is_dead_answers_422(client):
+    """Phase 145 (D-06 option i-b, obligation 2) — THE BRANCH IS DELETED.
+
+    The csv-finalize branch (API-3 / Phase 19.1 token forwarding / the
+    SEAMRIM-03 23505 resolve arm) was removed from this router: the Next.js
+    route now calls the folded SECURITY DEFINER
+    finalize_csv_strategy_with_returns RPC directly on its SSR user-scoped
+    client (migration 20260819120000; 145-DECISION.md). Leaving the branch
+    live would be a SECOND WRITER to strategies/csv_daily_returns — the
+    drift bomb the decision names.
+
+    This pin is the deletion's regression test: a flow_type='csv'
+    step='finalize' request — even one carrying a valid
+    X-User-Access-Token — must fall through to the API-6 422
+    MISSING_STRATEGY_ID refusal and must not write anything. If someone
+    re-adds a finalize arm here, this test goes RED before the second
+    writer ships.
     """
     fake = _build_supabase_mock(existing_row=None)
-    new_sid = "11111111-1111-1111-1111-111111111111"
-    # Phase 19.1 (2026-05-27): finalize_csv_strategy is SECURITY DEFINER and
-    # enforces auth.uid() = p_user_id, so it runs on a USER-scoped client built
-    # from the forwarded X-User-Access-Token — never the service-role client.
-    finalize_call = MagicMock()
-    finalize_call.execute.return_value = MagicMock(data=new_sid)
-    user_sb = MagicMock()
-    user_sb.rpc.return_value = finalize_call
-    # Benign default for any incidental service-role rpc (audit etc.).
-    fake.rpc.return_value = MagicMock(execute=MagicMock(return_value=MagicMock(data={})))
-
-    with patch(
-        "routers.process_key.get_supabase",
-        return_value=fake,
-    ), patch(
-        "routers.process_key.get_user_scoped_supabase",
-        return_value=user_sb,
-    ) as mock_user_client:
+    with patch("routers.process_key.get_supabase", return_value=fake):
         r = client.post(
             "/process-key",
             json={
@@ -2029,48 +2202,57 @@ def test_process_key_csv_finalize_calls_finalize_csv_strategy_rpc(client):
             headers={**_auth_headers(), "X-User-Access-Token": "user-jwt-abc"},
         )
 
-    assert r.status_code == 200, r.text
+    assert r.status_code == 422, (
+        "the deleted csv-finalize branch answered something other than the "
+        f"API-6 422 refusal — a second writer may have been re-added: {r.text}"
+    )
     body = r.json()
-    assert body["ok"] is True
-    assert body["strategy_id"] == new_sid
-    assert body["status"] == "pending_review"
-    assert body["step"] == "finalize"
-
-    # The user-scoped client was built from the forwarded token...
-    mock_user_client.assert_called_once_with("user-jwt-abc")
-    # ...and finalize_csv_strategy ran on THAT client (the auth.uid() path).
-    user_finalize = [
-        c for c in user_sb.rpc.call_args_list
-        if c.args and c.args[0] == "finalize_csv_strategy"
+    assert body.get("code") == "MISSING_STRATEGY_ID", body
+    # No finalize RPC of any name ran on the service-role client.
+    finalize_calls = [
+        c
+        for c in fake.rpc.call_args_list
+        if c.args and "finalize" in str(c.args[0])
     ]
-    assert len(user_finalize) == 1, "finalize_csv_strategy must run on the user-scoped client"
-    payload = user_finalize[0].args[1]
-    assert payload["p_user_id"] == "33333333-3333-3333-3333-333333333333"
-    assert payload["p_wizard_session_id"] == "22222222-2222-2222-2222-222222222222"
-    assert payload["p_fmt"] == "trades"
-    assert payload["p_strategy_name"] == "Test Strategy"
-    # The service-role client must NOT be used for the user-auth finalize RPC.
-    svc_finalize = [
-        c for c in fake.rpc.call_args_list
-        if c.args and c.args[0] == "finalize_csv_strategy"
-    ]
-    assert svc_finalize == [], "finalize_csv_strategy must NOT use the service-role client"
+    assert finalize_calls == [], (
+        f"the router dispatched a finalize RPC on the csv step='finalize' "
+        f"path after the Phase 145 deletion: {finalize_calls!r}"
+    )
+    # The user-scoped client wiring is GONE from this router, not just gated:
+    # the import itself was removed with the branch (D-06 obligation 2).
+    import routers.process_key as process_key_module
+
+    assert not hasattr(process_key_module, "get_user_scoped_supabase"), (
+        "routers.process_key re-imported get_user_scoped_supabase — the "
+        "deleted csv-finalize branch (or a second writer) may be back"
+    )
 
 
-def test_process_key_csv_finalize_without_user_token_returns_401(client):
-    """Phase 19.1 (2026-05-27) guard: finalize_csv_strategy is user-auth
-    (auth.uid() = p_user_id). If the Next.js route forwards no
-    X-User-Access-Token, fail with a clean 401 rather than letting the upstream
-    RPC raise 42501 'called without an auth session'. We must not even attempt
-    to build a user client or run the RPC unauthenticated.
+# The verbatim sentence every NON-csv-finalize caller has received since Phase
+# 17. It is duplicated here on purpose: a test that re-derived it from the
+# router could not tell a deliberate rewrite from an accidental one.
+_DEFAULT_MISSING_SID_MESSAGE = (
+    "context.strategy_id is required for this flow_type. "
+    "Validate-only flows must set context.step='validate'."
+)
+
+
+def test_csv_finalize_tombstone_message_says_finalize_moved(client):
+    """Phase 146.1-07 (C4) — the refusal states its ACTUAL reason.
+
+    The fall-through to MISSING_STRATEGY_ID is deliberate (pinned above), but
+    the message told a stale or external CSV finalize caller to supply
+    ``context.strategy_id`` — which is not why it was refused and would not
+    help if they did. This service stopped being a writer for that flow when
+    the fold shipped in migration 20260819120000.
+
+    ⛔ The CODE must stay MISSING_STRATEGY_ID. Minting CSV_FINALIZE_MOVED would
+    enter a NEW code into the WIZFORM-02 coverage-law population, and that
+    class is recorded OPEN — server-classified codes still render as
+    ``code: UNKNOWN`` at the wizard.
     """
     fake = _build_supabase_mock(existing_row=None)
-    with patch(
-        "routers.process_key.get_supabase",
-        return_value=fake,
-    ), patch(
-        "routers.process_key.get_user_scoped_supabase",
-    ) as mock_user_client:
+    with patch("routers.process_key.get_supabase", return_value=fake):
         r = client.post(
             "/process-key",
             json={
@@ -2084,12 +2266,87 @@ def test_process_key_csv_finalize_without_user_token_returns_401(client):
                     "step": "finalize",
                 },
             },
-            headers=_auth_headers(),  # no X-User-Access-Token
+            headers=_auth_headers(),
         )
 
-    assert r.status_code == 401, r.text
-    assert r.json().get("code") == "CSV_FINALIZE_FAILED"
-    mock_user_client.assert_not_called()
+    assert r.status_code == 422, r.text
+    body = r.json()
+    assert body["code"] == "MISSING_STRATEGY_ID", (
+        "a new error code was minted for the tombstone arm — WIZFORM-02 is "
+        f"OPEN and a new code ships into a known-broken renderer: {body}"
+    )
+    message = body["human_message"]
+    assert "moved" in message.lower(), message
+    assert "20260819120000" in message, message
+    # ABSENCE: the misdirecting default sentence must not survive anywhere in
+    # this arm's message — a presence-only check is satisfied by concatenating
+    # the new sentence onto the old one, which would leave the misdirection in
+    # place while the test went green.
+    assert _DEFAULT_MISSING_SID_MESSAGE not in message, message
+    assert "context.strategy_id is required" not in message, message
+
+
+def test_non_csv_missing_strategy_id_message_is_byte_identical(client):
+    """The anti-bleed control for the tombstone message above.
+
+    A copy change that leaks into unrelated 422s is a regression dressed as
+    copy. Every caller that is NOT flow_type='csv' + step='finalize' must read
+    exactly the sentence it read before Phase 146.1-07.
+    """
+    fake = _build_supabase_mock(existing_row=None)
+    with patch("routers.process_key.get_supabase", return_value=fake):
+        r = client.post(
+            "/process-key",
+            json={
+                "flow_type": "onboard",
+                "source": "okx",
+                "context": {
+                    "wizard_session_id": "wiz-no-sid-bleed",
+                    "user_id": "u1",
+                    "api_key": "k",
+                    "api_secret": "s",
+                },
+            },
+            headers=_auth_headers(),
+        )
+
+    assert r.status_code == 422, r.text
+    body = r.json()
+    assert body["code"] == "MISSING_STRATEGY_ID", body
+    assert body["human_message"] == _DEFAULT_MISSING_SID_MESSAGE, (
+        "the tombstone copy leaked into an unrelated 422: "
+        f"{body['human_message']!r}"
+    )
+
+
+def test_csv_non_finalize_step_keeps_the_default_message(client):
+    """The branch discriminates on BOTH fields, not just flow_type.
+
+    A csv-flow request that is missing strategy_id for some OTHER reason (no
+    step, or a step that is neither 'validate' nor 'finalize') has not hit the
+    moved-writer case, so it must keep the default sentence. Without this arm
+    the branch could be written on flow_type alone and still look correct.
+    """
+    fake = _build_supabase_mock(existing_row=None)
+    with patch("routers.process_key.get_supabase", return_value=fake):
+        r = client.post(
+            "/process-key",
+            json={
+                "flow_type": "csv",
+                "source": "csv",
+                "context": {
+                    "wizard_session_id": "wiz-no-sid-csv-nostep",
+                    "user_id": "u1",
+                    "fmt": "trades",
+                    "raw_bytes_base64": "Y29sCjE=",
+                },
+            },
+            headers=_auth_headers(),
+        )
+
+    assert r.status_code == 422, r.text
+    body = r.json()
+    assert body["human_message"] == _DEFAULT_MISSING_SID_MESSAGE, body
 
 
 def test_process_key_audit_uses_wizard_session_id_when_no_strategy_id(client):
@@ -2193,6 +2450,7 @@ def test_process_key_writes_audit_row(client):
                 "source": "csv",
                 "context": {
                     "strategy_id": "s1-audit",
+                    "user_id": "u1",
                     "wizard_session_id": "wiz-audit-1",
                     "fmt": "trades",
                     "raw_bytes_base64": "Y29sCjE=",
@@ -2320,8 +2578,10 @@ def test_process_key_sync_pipeline_rejects_write_capable_key(
             headers=_auth_headers(),
         )
 
-    # Envelope returns 200 with ok=False per DESIGN-05 — but the key must be rejected.
-    assert r.status_code == 200, r.text
+    # PYAPI-10b (Phase 140.1 plan 05): the verdict answers 403. It used to be a
+    # 200 with ok=False — a security decision under a success status, which a
+    # consumer branching on the status line alone reads as "key accepted".
+    assert r.status_code == 403, r.text
     body = r.json()
     assert body["ok"] is False
     assert body["code"] == error_code
@@ -2387,7 +2647,9 @@ def test_process_key_sync_scope_rejection_uses_validation_unexpected_fallback(cl
             headers=_auth_headers(),
         )
 
-    assert r.status_code == 200, r.text
+    # PYAPI-10b (Phase 140.1 plan 05): 403, not 200. SF-2's subject — WHICH code
+    # the envelope carries — is unchanged and asserted verbatim below.
+    assert r.status_code == 403, r.text
     body = r.json()
     assert body["ok"] is False
     # SF-2: code in the envelope must be the registered fallback, not the bare
@@ -2447,8 +2709,10 @@ def test_process_key_sync_scope_rejection_survives_rpc_failure(client):
         )
 
     # SF-3: even with a failing RPC the endpoint must return the security-
-    # correct envelope error, not an unhandled 500.
-    assert r.status_code == 200, r.text
+    # correct envelope error, not an unhandled 500. PYAPI-10b (plan 05) moved
+    # that envelope from 200 to 403; SF-3's subject — that a Supabase blip does
+    # not turn the verdict into a 500 — is what the literal 403 now pins.
+    assert r.status_code == 403, r.text
     body = r.json()
     assert body["ok"] is False
     assert body["code"] == "TRADE_SCOPE"
@@ -2497,6 +2761,7 @@ def test_process_key_csv_read_only_none_not_rejected_sync(client):
                 "source": "csv",
                 "context": {
                     "strategy_id": "s-csv-none",
+                    "user_id": "u1",
                     "wizard_session_id": "wiz-csv-none",
                     "fmt": "trades",
                     "raw_bytes_base64": "Y29sCjE=",
@@ -2539,73 +2804,550 @@ def test_process_key_shares_main_limiter_instance():
     )
 
 
-def test_process_key_rate_limit_key_func_uses_token_only():
-    """PR #241 red-team — the limiter key must vary by Authorization
-    token ONLY. The earlier shape composed (token, X-User-Id) so each
-    tenant got isolated buckets — but X-User-Id is unsigned
-    client-controlled input, so a caller holding the bearer token
-    could set ``X-User-Id: <random-uuid-per-request>`` and allocate a
-    new bucket per request, bypassing the limiter entirely. Until a
-    signed identity surface lands (mTLS / JWT body bound to the
-    token), per-token bucketing is the strongest guarantee available.
-    Two requests from the same bearer token land in the SAME bucket
-    regardless of the X-User-Id value.
+# ===========================================================================
+# PYAPI-02 — the tenant-claim limiter oracle suite (RESEARCH Q1.2 / Q1.3)
+#
+# `test_process_key_rate_limit_key_func_uses_token_only` USED TO LIVE HERE.
+# It has been DELETED AND REPLACED, deliberately (TRAP-9), because it pinned
+# the behaviour being replaced: "the limiter key must vary by Authorization
+# token ONLY". That contract was correct only for as long as no forgery-
+# resistant identity existed — its own docstring said so ("Until a signed
+# identity surface lands ... per-token bucketing is the strongest guarantee
+# available"). X-Tenant-Claim IS that surface, so the assertion is now false
+# by design rather than by regression.
+#
+# Its three orthogonal assertions are KEPT VERBATIM and re-homed onto the
+# unverified-fallback path, which is the arm that still behaves token-only:
+#   * same token  -> same key
+#   * other token -> different key
+#   * the raw bearer NEVER appears in plaintext (the key lands in slowapi's
+#     error logs)
+# See test_key_func_unverified_fallback_is_token_keyed below.
+#
+# ORACLE DISCIPLINE: every expected bucket string below is a LITERAL. Nothing
+# is re-derived from services.rate_limit (programme non-negotiable #3).
+# ===========================================================================
+
+# The bearer the fixtures set as INTERNAL_API_TOKEN, and therefore the HMAC key.
+_CLAIM_SECRET = "a" * 64
+
+
+def _mint_claim(payload, *, secret=_CLAIM_SECRET, exp=None):
+    """Mint an X-Tenant-Claim the way the TS client does.
+
+    Computed here from the stdlib, NOT by importing the production verifier —
+    an oracle that asks the code under test what it expects cannot fail.
     """
+    import hashlib
+    import hmac
+    import time as _time
+
+    exp = int(_time.time()) + 300 if exp is None else exp
+    signed = f"{payload}.{exp}"
+    mac = hmac.new(
+        secret.encode("utf-8"), signed.encode("utf-8"), hashlib.sha256
+    ).hexdigest()
+    return f"{signed}.{mac}"
+
+
+def _req(headers):
     from unittest.mock import MagicMock
 
+    r = MagicMock()
+    r.headers = headers
+    return r
+
+
+@pytest.fixture
+def claim_secret(monkeypatch):
+    """INTERNAL_API_TOKEN is the HMAC key (RESEARCH G-15 — no new secret)."""
+    monkeypatch.setenv("INTERNAL_API_TOKEN", _CLAIM_SECRET)
+
+
+def test_key_func_two_tenants_get_distinct_buckets(claim_secret):
+    """A valid claim buckets on the tenant: literal "process_key:t:<user_id>".
+
+    This is the whole point of PYAPI-02 — one 100/hour bucket keyed on the
+    SHARED internal token served the entire platform, so any one caller could
+    starve every other (C-09/X-3).
+    """
     key_func = process_key_router._process_key_rate_limit_key
 
-    req_a = MagicMock()
-    req_a.headers = {"Authorization": "Bearer aaa", "X-User-Id": "user-a"}
-    req_b = MagicMock()
-    req_b.headers = {"Authorization": "Bearer aaa", "X-User-Id": "user-b"}
-    req_c = MagicMock()
-    req_c.headers = {"Authorization": "Bearer bbb", "X-User-Id": "user-a"}
+    ka = key_func(
+        _req(
+            {
+                "Authorization": f"Bearer {_CLAIM_SECRET}",
+                "X-Tenant-Claim": _mint_claim("tenant-a"),
+            }
+        )
+    )
+    kb = key_func(
+        _req(
+            {
+                "Authorization": f"Bearer {_CLAIM_SECRET}",
+                "X-Tenant-Claim": _mint_claim("tenant-b"),
+            }
+        )
+    )
 
-    ka = key_func(req_a)
-    kb = key_func(req_b)
-    kc = key_func(req_c)
+    assert ka == "process_key:t:tenant-a"
+    assert kb == "process_key:t:tenant-b"
+    assert ka != kb
 
-    # PR #241 red-team contract: same token → same key regardless of
-    # X-User-Id (closes the per-request-uuid bypass).
+
+def test_key_func_forged_claim_falls_to_unverified(claim_secret):
+    """T-140.1-16 — a TAMPERED claim must NOT buy tenant-level allowance.
+
+    Same user_id, one HMAC character flipped. The attacker must land in the
+    unverified bucket, NOT in "process_key:t:victim". If this ever passes with
+    the tenant bucket, the claim is decorative and anyone can pick a victim's
+    window (or mint themselves a fresh one per request, the PR#241 bypass).
+    """
+    key_func = process_key_router._process_key_rate_limit_key
+
+    honest = _mint_claim("victim")
+    # Flip the last hex character of the MAC — same payload, same exp.
+    tampered = honest[:-1] + ("0" if honest[-1] != "0" else "1")
+    assert tampered != honest
+
+    forged_key = key_func(
+        _req({"Authorization": "Bearer attacker-token", "X-Tenant-Claim": tampered})
+    )
+
+    assert not forged_key.startswith("process_key:t:"), (
+        "T-140.1-16: a forged claim was admitted to a TENANT bucket — the HMAC "
+        f"is not being verified. Got {forged_key!r}."
+    )
+    assert forged_key != "process_key:t:victim"
+    assert forged_key != "process_key:anon"
+    assert forged_key.startswith("process_key:unverified:")
+
+
+def test_key_func_garbage_secret_cannot_forge_tenant_bucket(claim_secret):
+    """The claim is unforgeable WITHOUT INTERNAL_API_TOKEN.
+
+    A well-formed claim minted with the WRONG secret is structurally perfect —
+    right shape, unexpired, plausible user_id — and must still fall to
+    unverified. Separates "we checked the shape" from "we checked the MAC".
+    """
+    key_func = process_key_router._process_key_rate_limit_key
+
+    forged = _mint_claim("victim", secret="b" * 64)
+    key = key_func(
+        _req({"Authorization": "Bearer attacker-token", "X-Tenant-Claim": forged})
+    )
+
+    assert key.startswith("process_key:unverified:")
+    assert key != "process_key:t:victim"
+
+
+def test_key_func_expired_claim_falls_to_unverified(claim_secret):
+    """An EXPIRED claim is not a valid claim.
+
+    Without the expiry check a claim captured once from a log or a proxy is a
+    permanent tenant-bucket credential.
+    """
+    key_func = process_key_router._process_key_rate_limit_key
+    import time as _time
+
+    stale = _mint_claim("tenant-a", exp=int(_time.time()) - 1)
+    key = key_func(
+        _req({"Authorization": f"Bearer {_CLAIM_SECRET}", "X-Tenant-Claim": stale})
+    )
+
+    assert key.startswith("process_key:unverified:")
+    assert key != "process_key:t:tenant-a"
+
+
+def test_key_func_ignores_unsigned_x_user_id(claim_secret):
+    """PR #241, pinned permanently: X-User-Id ALONE can never select a bucket.
+
+    `X-User-Id` is unsigned client-controlled input. A caller that sets
+    `X-User-Id: <random-uuid-per-request>` would allocate a fresh bucket per
+    request and bypass the limiter entirely; one that sets a victim's uuid
+    would drain the victim's window. Only the HMAC'd claim selects a tenant.
+    """
+    key_func = process_key_router._process_key_rate_limit_key
+
+    key = key_func(
+        _req({"Authorization": f"Bearer {_CLAIM_SECRET}", "X-User-Id": "victim"})
+    )
+
+    assert key != "process_key:t:victim"
+    assert not key.startswith("process_key:t:")
+    assert key.startswith("process_key:unverified:")
+
+    # And an X-User-Id must not be able to OVERRIDE a valid claim either.
+    keyed = key_func(
+        _req(
+            {
+                "Authorization": f"Bearer {_CLAIM_SECRET}",
+                "X-Tenant-Claim": _mint_claim("tenant-a"),
+                "X-User-Id": "victim",
+            }
+        )
+    )
+    assert keyed == "process_key:t:tenant-a"
+
+
+def test_teaser_claim_buckets_to_anon(claim_secret):
+    """C-09 gate — the whole public teaser shares ONE literal bucket.
+
+    Vercel caps the teaser at 10 req/60s per IP, i.e. 600/hour, so a single
+    anonymous IP could drain a 100/hour platform bucket in ~10 minutes (G-16 /
+    X-3). "process_key:anon" is where that traffic is confined.
+    """
+    key_func = process_key_router._process_key_rate_limit_key
+
+    key = key_func(
+        _req(
+            {
+                "Authorization": f"Bearer {_CLAIM_SECRET}",
+                "X-Tenant-Claim": _mint_claim("public"),
+            }
+        )
+    )
+
+    assert key == "process_key:anon"
+    assert key != "process_key:t:public"
+
+
+def test_key_func_unverified_fallback_is_token_keyed(claim_secret):
+    """The REPLACEMENT for test_process_key_rate_limit_key_func_uses_token_only.
+
+    Its three orthogonal assertions, kept verbatim, now pinned on the arm they
+    still describe: with NO claim header the key degrades to today's token-hash
+    behaviour, so a caller that stops sending the header keeps working (and is
+    WARN-visible) rather than raising — RESEARCH G-8: a raising key_func escapes
+    slowapi and becomes an unhandled 500 text/plain.
+    """
+    key_func = process_key_router._process_key_rate_limit_key
+
+    ka = key_func(_req({"Authorization": "Bearer aaa", "X-User-Id": "user-a"}))
+    kb = key_func(_req({"Authorization": "Bearer aaa", "X-User-Id": "user-b"}))
+    kc = key_func(_req({"Authorization": "Bearer bbb", "X-User-Id": "user-a"}))
+
     assert ka == kb, "Same token must produce same key, regardless of X-User-Id"
     assert ka != kc, "Different token must produce different keys"
-    # Bearer token must NEVER appear in plaintext (it shows up in slowapi
-    # error logs).
     assert "aaa" not in ka and "bbb" not in kc
-    # Stable: same input → same key.
-    assert key_func(req_a) == ka
+    assert key_func(_req({"Authorization": "Bearer aaa", "X-User-Id": "user-a"})) == ka
+
+    # NEW: the literal prefix, so the fallback is identifiable in slowapi logs.
+    assert ka.startswith("process_key:unverified:")
 
 
-def test_process_key_skipped_by_verify_service_key_middleware(monkeypatch):
-    """API-1 regression: main.verify_service_key middleware must skip
-    /process-key the same way it skips /internal/*.
+@pytest.mark.parametrize(
+    "claim",
+    [
+        None,
+        "",
+        "a.b",
+        b"\xff\xfe not utf-8",
+        "x" * 65536,  # 64 KB header
+        "tenant-a.not-a-number.deadbeef",
+    ],
+    ids=["none", "empty", "two-parts", "non-utf8-bytes", "64kb", "non-numeric-exp"],
+)
+def test_key_func_never_raises(claim_secret, claim):
+    """RESEARCH G-8 — a raising key_func is an unhandled 500 text/plain.
 
-    Pre-fix, every Vercel→FastAPI POST returned 401 'Unauthorized' BEFORE
-    the route's own _verify_internal_token ran, because the middleware
-    only whitelisted /health and /internal/*. This test imports the
-    real `verify_service_key` from main.py via inspect.getsource and
-    re-evaluates it (the actual function is bound to the global FastAPI
-    app instance which we can't reuse here without booting the entire
-    lifespan). We assert that the on-disk source explicitly contains
-    `/process-key` in its skip-list — a regression that drops the skip
-    would surface as a string-match failure here.
+    slowapi re-raises anything the key function throws out of
+    `_check_request_limit` (swallow_errors is False), so it escapes to
+    ServerErrorMiddleware: a bodyless 500 that 140.2's discriminator then has to
+    classify with no JSON at all. Converting a throttling concern into that is
+    the exact defect class this programme exists to close, reintroduced one
+    layer down.
+    """
+    key_func = process_key_router._process_key_rate_limit_key
+    ceiling_func = process_key_router._process_key_ceiling_key
+
+    headers = {"Authorization": f"Bearer {_CLAIM_SECRET}"}
+    if claim is not None:
+        headers["X-Tenant-Claim"] = claim
+
+    key = key_func(_req(headers))
+    ceiling = ceiling_func(_req(headers))
+
+    assert isinstance(key, str) and key
+    assert isinstance(ceiling, str) and ceiling
+    # Nothing malformed may be promoted to a tenant bucket.
+    assert not key.startswith("process_key:t:")
+
+
+def test_key_func_never_raises_on_hostile_authorization(claim_secret):
+    """Same G-8 guarantee when the AUTHORIZATION header is the hostile input.
+
+    The claim is not the only attacker-reachable header the key function reads.
+    """
+    key_func = process_key_router._process_key_rate_limit_key
+    ceiling_func = process_key_router._process_key_ceiling_key
+
+    for auth in (None, "", b"\xff\xfe", "x" * 65536, 12345):
+        headers = {} if auth is None else {"Authorization": auth}
+        assert isinstance(key_func(_req(headers)), str)
+        assert isinstance(ceiling_func(_req(headers)), str)
+
+
+def test_process_key_limit_key_func_is_not_get_remote_address():
+    """PYAPI-03 identity assertion — /process-key must never be IP-keyed.
+
+    Behind Railway's edge, uvicorn runs with the default
+    `forwarded_allow_ips="127.0.0.1"`, so ProxyHeadersMiddleware refuses to
+    rewrite `client.host` for a non-loopback peer and `get_remote_address`
+    collapses to the EDGE proxy IP — one platform-wide bucket wearing a
+    per-client disguise (G-10 + G-11). Mirrors
+    tests/test_simulator_router.py's identity assertion.
+    """
+    from slowapi.util import get_remote_address
+
+    assert process_key_router._process_key_rate_limit_key is not get_remote_address
+    assert process_key_router._process_key_ceiling_key is not get_remote_address
+    assert (
+        process_key_router._process_key_rate_limit_key
+        is not process_key_router._process_key_ceiling_key
+    )
+
+
+def test_process_key_limit_sizing_literals():
+    """The three bucket sizes, as LITERALS (founder-retunable).
+
+    tenant 100/hour  — unchanged from the pre-fix single bucket
+    anon    30/hour  — deliberately BELOW a tenant bucket (OPEN-3): the public
+                       teaser is the untrusted half and must not be able to
+                       consume a paying tenant's worth of platform capacity
+    ceiling 500/hour — the stacked backstop; post-PYAPI-04 every admitted
+                       caller presents the SAME INTERNAL_API_TOKEN, so this is
+                       one platform-wide bucket by construction, and 5x the
+                       100/hour the whole platform shared before this phase
+    """
+    limit_for = process_key_router._process_key_limit_for
+    ceiling_for = process_key_router._process_key_ceiling_limit_for
+
+    assert limit_for("process_key:t:tenant-a") == "100/hour"
+    assert limit_for("process_key:unverified:abc123") == "100/hour"
+    assert limit_for("process_key:anon") == "30/hour"
+    assert ceiling_for("process_key:ceiling:abc123") == "500/hour"
+    assert ceiling_for("process_key:anon") == "500/hour"
+
+
+def test_process_key_route_registers_both_limits():
+    """Two stacked limits must be REGISTERED on the endpoint, not one.
+
+    Complements the live-traffic proof below: this catches a decorator being
+    dropped in a refactor even when the remaining one would mask it at runtime.
+    """
+    from services import rate_limit as _rl
+
+    name = "routers.process_key.process_key"
+    groups = _rl.limiter._dynamic_route_limits.get(name, [])
+    assert len(groups) == 2, (
+        "PYAPI-02: /process-key must carry BOTH the per-identity limit and the "
+        f"stacked platform ceiling. Registered groups: {len(groups)}."
+    )
+
+
+def test_cross_language_claim_from_ts_client_buckets_to_tenant(monkeypatch):
+    """The TS mint and the Python verifier agree — proven by a shared LITERAL.
+
+    This exact string is COPY-PASTED from
+    src/lib/process-key-client.test.ts::"CROSS-LANGUAGE FIXTURE", where a vitest
+    proves `node:crypto` produces it for
+    (secret="internal-test-token", payload="cross-lang-user", exp=2524608300).
+    Copy-paste, never import: the two halves are in different languages and the
+    only thing that can prove they agree is a value neither side derived from
+    the other.
+
+    Without this, "the TS mints a claim" and "the Python verifies a claim" can
+    both be green while the two disagree on the signed message, the digest
+    encoding, or the separator — and every real caller silently lands in the
+    unverified bucket with PYAPI-02 declared closed.
+
+    exp is in 2050 so the expiry check is not a time bomb.
+    """
+    monkeypatch.setenv("INTERNAL_API_TOKEN", "internal-test-token")
+
+    ts_minted_claim = (
+        "cross-lang-user.2524608300."
+        "1c6f1e147d8c58605c1196ac7e2a70220f21ff999208701224de6afbd03a296c"
+    )
+
+    key = process_key_router._process_key_rate_limit_key(
+        _req(
+            {
+                "Authorization": "Bearer internal-test-token",
+                "X-Tenant-Claim": ts_minted_claim,
+            }
+        )
+    )
+
+    assert key == "process_key:t:cross-lang-user", (
+        "the TS-minted claim did not verify server-side — the two halves of "
+        f"PYAPI-02 disagree. Got {key!r}."
+    )
+
+
+@pytest.fixture
+def throttled_client(monkeypatch):
+    """A TestClient with the 429 handler registered and limiter storage reset.
+
+    The module-level `app` fixture deliberately omits the RateLimitExceeded
+    handler because rate limiting is not exercised there. These tests DO
+    exercise it, so they need their own app — and they need the module-global
+    `memory://` storage wiped either side, since it is process-wide (G-3).
+    """
+    from slowapi import _rate_limit_exceeded_handler
+    from slowapi.errors import RateLimitExceeded
+
+    monkeypatch.setenv("INTERNAL_API_TOKEN", _CLAIM_SECRET)
+
+    app = FastAPI()
+    app.state.limiter = process_key_router.limiter
+    app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+    app.include_router(process_key_router.router)
+
+    process_key_router.limiter.reset()
+    # raise_server_exceptions=False: an ADMITTED request runs the real handler
+    # and fails downstream (no DB in unit tests). We only care whether the
+    # limiter admitted it, so any non-429 counts as admitted.
+    yield TestClient(app, raise_server_exceptions=False)
+    process_key_router.limiter.reset()
+
+
+def _post(client, claim):
+    return client.post(
+        "/process-key",
+        json=_csv_validate_body(),
+        headers={
+            "Authorization": f"Bearer {_CLAIM_SECRET}",
+            "X-Correlation-Id": _TEST_CID,
+            "X-Tenant-Claim": claim,
+        },
+    )
+
+
+def test_anon_bucket_exhausts_at_30_without_touching_a_tenant(throttled_client):
+    """C-09, end to end on the REAL route: 31 anonymous calls, tenant unharmed.
+
+    Proves three things at once against live traffic: the dynamic limit provider
+    is wired (anon gets 30, not 100), the anon bucket is separate, and an
+    exhausted teaser cannot deny a paying tenant. Under the pre-fix single
+    token-keyed bucket the tenant call at the end would have been the 32nd hit
+    on the SAME window.
+    """
+    anon = _mint_claim("public")
+
+    for i in range(30):
+        resp = _post(throttled_client, anon)
+        assert resp.status_code != 429, f"anon call {i + 1} of 30 was throttled early"
+
+    assert _post(throttled_client, anon).status_code == 429, (
+        "the 31st anonymous call must be throttled — the anon bucket is 30/hour"
+    )
+
+    assert _post(throttled_client, _mint_claim("tenant-a")).status_code != 429, (
+        "C-09: an exhausted anonymous teaser must NOT deny a tenant."
+    )
+
+
+def test_two_stacked_limits_both_evaluated(throttled_client, monkeypatch):
+    """ASSUMPTION-1 closure — slowapi evaluates BOTH stacked decorators.
+
+    RESEARCH read slowapi 0.1.9; production pins 0.1.10. If the patch bump
+    changed decorator stacking, one of the two limits would simply never
+    evaluate and NOTHING else in this suite would notice. So: exercise both
+    against a live TestClient on the real route.
+
+    The ceiling is shrunk to 3/hour for this test ONLY — 500 requests is not a
+    test. The oracle is not the number: it is that tenant-b, whose OWN 100/hour
+    bucket is untouched, is nevertheless throttled because tenant-a exhausted
+    the SHARED outer limit. That can only happen if the second decorator ran.
+    The 500/hour literal is pinned separately in
+    test_process_key_limit_sizing_literals.
+    """
+    monkeypatch.setattr(process_key_router, "_PROCESS_KEY_CEILING_LIMIT", "3/hour")
+
+    a = _mint_claim("tenant-a")
+    b = _mint_claim("tenant-b")
+
+    for i in range(3):
+        assert _post(throttled_client, a).status_code != 429, f"call {i + 1} of 3"
+
+    # Inner limit: tenant-a has spent 3 of ITS 100 — so this 429 is the ceiling.
+    assert _post(throttled_client, a).status_code == 429
+
+    # The proof: a DIFFERENT tenant with a virgin per-tenant bucket is throttled
+    # anyway. Only the stacked ceiling can produce that.
+    assert _post(throttled_client, b).status_code == 429, (
+        "ASSUMPTION-1: the stacked platform ceiling never evaluated — tenant-b "
+        "has an untouched 100/hour bucket and should have been refused by the "
+        "500/hour (here 3/hour) outer limit."
+    )
+
+
+def test_inner_tenant_limit_evaluates_independently_of_the_ceiling(
+    throttled_client, monkeypatch
+):
+    """The other half of the stack: the PER-TENANT limit must also fire.
+
+    Shrink the tenant limit and leave the ceiling wide. tenant-a is refused
+    while tenant-b sails through — impossible if only the ceiling were live.
+    """
+    monkeypatch.setattr(process_key_router, "_PROCESS_KEY_TENANT_LIMIT", "2/hour")
+
+    a = _mint_claim("tenant-a")
+    b = _mint_claim("tenant-b")
+
+    assert _post(throttled_client, a).status_code != 429
+    assert _post(throttled_client, a).status_code != 429
+    assert _post(throttled_client, a).status_code == 429, (
+        "the per-tenant limit never evaluated"
+    )
+    assert _post(throttled_client, b).status_code != 429, (
+        "PYAPI-02: tenant-a's exhaustion must not touch tenant-b."
+    )
+
+
+def test_process_key_exempt_from_x_service_key_in_middleware(monkeypatch):
+    """API-1 regression: main.verify_service_key must NOT demand X-Service-Key
+    on /process-key.
+
+    Pre-API-1, every Vercel→FastAPI POST returned 401 'Unauthorized' because the
+    middleware only whitelisted /health and /internal/*. The carve-out fixed it.
+
+    RENAMED + RESTATED at Phase 140.1 / PYAPI-04 (TRAP-9): the carve-out is no
+    longer a SKIP. It is now a GATE that authenticates the same rotateable
+    INTERNAL_API_TOKEN bearer the handler checks, one layer earlier — so the
+    old name and docstring ("must skip /process-key") describe a contract that
+    no longer exists, while the assertion below still passes. A test whose prose
+    is wrong is worse than no test.
+
+    What survives unchanged is the API-1 invariant itself: /process-key is
+    exempt from the X-SERVICE-KEY branch. This file mounts the router bare so it
+    cannot execute the middleware; the behavioural proof lives at
+    tests/test_process_key_auth_order.py::test_valid_bearer_passes_without_x_service_key.
     """
     import inspect
     from main import verify_service_key
 
     src = inspect.getsource(verify_service_key)
-    # API-1 invariant: the middleware MUST whitelist /process-key the same
-    # way it whitelists /internal/*. If a future refactor drops this
-    # branch, every Vercel→FastAPI call regresses to 401.
+    # API-1 invariant: /process-key must be handled by its OWN branch, which
+    # returns before the X-Service-Key compare below it. A refactor that drops
+    # the branch sends every Vercel→FastAPI call back to 401.
     assert "/process-key" in src, (
-        "API-1: main.verify_service_key must explicitly skip /process-key. "
-        "Without this, the middleware rejects every Vercel→FastAPI call "
-        "with 401 BEFORE the route's bearer-token gate runs.\n"
+        "API-1: main.verify_service_key must handle /process-key in its own "
+        "branch, ahead of the X-Service-Key compare. Without it the middleware "
+        "rejects every Vercel→FastAPI call with 401.\n"
         f"Source:\n{src}"
     )
     assert "/internal/" in src, (
         "Sanity: middleware must still skip /internal/* (existing contract)."
+    )
+    # PYAPI-04: the branch must DELEGATE to the bearer gate, not fall through.
+    assert "_gate_process_key" in src, (
+        "PYAPI-04: the /process-key branch must call _gate_process_key so auth "
+        "precedes pydantic validation and slowapi. A bare `return await "
+        "call_next(request)` here restores the 422 → 429 → 403 order that let "
+        "anonymous callers enumerate SFOX_ENABLED/MT5_ENABLED."
     )
 
 
@@ -2674,3 +3416,1488 @@ def test_ct4_logs_warning_when_x_user_id_missing_on_non_teaser():
         "CT-4: the X-User-Id missing warning must skip flow_type='teaser' "
         "(the public landing form is authentic-anonymous)."
     )
+
+
+# ---------------------------------------------------------------------------
+# Phase 140.1 Plan 02 — PYAPI-01 (cross-tenant leak) and PYAPI-09 (idempotency
+# completion). See .planning/phases/140.1-*/140.1-RESEARCH.md Q3 + Q4.
+#
+# The leak class has TWO read sites and TWO return sites, not one:
+#   site 1 — the WIZARD_DUPLICATE pre-check
+#   site 2 — the 23505 race-winner re-fetch
+# Both run on the RLS-bypassing service-role client, so a fix that closes only
+# site 1 leaves the MORE reachable one open: once the unique index is
+# tenant-scoped (Plan 140.1-01), site 2 is the arm that fires on a foreign
+# collision. There is a separate oracle per site so a single-site fix cannot
+# pass (this is mutation M2's detector).
+#
+# The fake below RECORDS the filter set the router actually issued, and the
+# assertions compare it to inline literals. Nothing here reads its expected
+# value back out of the code under test.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class RecordedQuery:
+    """One PostgREST statement, exactly as /process-key issued it."""
+
+    table: str
+    op: str
+    filters: dict
+    payload: object = None
+
+
+class _RecordingBuilder:
+    """Self-chaining PostgREST query builder that records its filter set.
+
+    `_build_supabase_mock`'s MagicMock chain cannot express this: its `.eq()`
+    returns a fresh auto-mock on the second call, and it collapses every table
+    onto one object, so "which columns did site 2 filter on" is unanswerable.
+    """
+
+    def __init__(self, table_name, client):
+        self._table = table_name
+        self._client = client
+        self._op = "select"
+        self._filters = {}
+        self._gte = {}
+        self._in = {}
+        self._payload = None
+
+    def select(self, *_args, **_kwargs):
+        self._op = "select"
+        return self
+
+    def insert(self, payload, *_args, **_kwargs):
+        self._op = "insert"
+        self._payload = payload
+        return self
+
+    def update(self, payload, *_args, **_kwargs):
+        self._op = "update"
+        self._payload = payload
+        return self
+
+    def eq(self, column, value):
+        self._filters[column] = value
+        return self
+
+    def gte(self, column, value):
+        """Recorded SEPARATELY from `.eq()` (OPS-09, Phase 163).
+
+        The resync pre-check gained `.gte("created_at", <cutoff>)`. Folding it
+        into `self._filters` would make it show up in the equality-pinned filter
+        shapes the assertions below compare against inline literals — and those
+        pins exist to catch a filter DISAPPEARING, so widening them to absorb a
+        new one would be the wrong repair. Recorded in its own dict so a future
+        assertion can pin the bound without loosening the equality pins.
+        """
+        self._gte[column] = value
+        return self
+
+    def in_(self, column, values):
+        """Recorded SEPARATELY from `.eq()`, for the same reason as `.gte()`:
+        the resync chain-in-flight guard (2026-09-24) filters compute_jobs by
+        kind and status with IN lists, and folding those into `self._filters`
+        would widen the equality-pinned shapes below."""
+        self._in[column] = list(values)
+        return self
+
+    def maybe_single(self):
+        return self
+
+    def single(self):
+        return self
+
+    def limit(self, *_args, **_kwargs):
+        return self
+
+    def order(self, *_args, **_kwargs):
+        return self
+
+    def execute(self):
+        return self._client._execute(
+            RecordedQuery(self._table, self._op, dict(self._filters), self._payload)
+        )
+
+
+class _RecordingSupabase:
+    """Supabase client fake that records every executed statement + RPC.
+
+    `responses` maps `(table, op)` -> list of `.data` values consumed in call
+    order (the last entry repeats). `rpc_responses` maps an RPC name the same
+    way. An `Exception` instance in either sequence is raised instead of
+    returned, which is how the 23505 race is driven.
+    """
+
+    _DEFAULT_DATA = {
+        "insert": [{"id": "ver-1"}],
+        "select": None,
+        "update": [{"id": "s1"}],
+    }
+
+    def __init__(self, *, responses=None, rpc_responses=None):
+        self.queries = []
+        self.rpc_calls = []
+        self._responses = {k: list(v) for k, v in (responses or {}).items()}
+        self._rpc_responses = {k: list(v) for k, v in (rpc_responses or {}).items()}
+
+    @staticmethod
+    def _next(store, key, default):
+        seq = store.get(key)
+        if not seq:
+            return default
+        return seq.pop(0) if len(seq) > 1 else seq[0]
+
+    def selects(self, table):
+        return [q for q in self.queries if q.table == table and q.op == "select"]
+
+    def rpc_named(self, name):
+        return [params for called, params in self.rpc_calls if called == name]
+
+    def table(self, name):
+        return _RecordingBuilder(name, self)
+
+    def rpc(self, name, params=None):
+        outer = self
+
+        class _RpcChain:
+            def execute(self):
+                outer.rpc_calls.append((name, params))
+                value = outer._next(outer._rpc_responses, name, None)
+                if isinstance(value, Exception):
+                    raise value
+                return MagicMock(data=value)
+
+        return _RpcChain()
+
+    def _execute(self, record):
+        self.queries.append(record)
+        value = self._next(
+            self._responses,
+            (record.table, record.op),
+            self._DEFAULT_DATA.get(record.op),
+        )
+        if isinstance(value, Exception):
+            raise value
+        return MagicMock(data=value)
+
+
+# Fixture identities. Written as literals in the assertions too — an oracle
+# that compares a recorded value to a constant the router also reads would be
+# self-referential.
+_OWNER_ID = "11111111-aaaa-4aaa-8aaa-000000000001"
+_OWNED_STRATEGY_ID = "22222222-bbbb-4bbb-8bbb-000000000002"
+_SESSION_ID = "33333333-cccc-4ccc-8ccc-000000000003"
+_ATTACKER_ID = "99999999-dddd-4ddd-8ddd-000000000009"
+
+
+def _scoped_csv_body(**context_overrides):
+    """csv/csv body carrying a concrete strategy_id — the shape that reaches
+    the duplicate pre-check after the Plan 02 move."""
+    context = {
+        "strategy_id": _OWNED_STRATEGY_ID,
+        "user_id": _OWNER_ID,
+        "wizard_session_id": _SESSION_ID,
+        "fmt": "trades",
+        "raw_bytes_base64": "Y29sCjE=",
+    }
+    context.update(context_overrides)
+    return {"flow_type": "csv", "source": "csv", "context": context}
+
+
+def test_pyapi_01d_precheck_read_is_tenant_scoped(client):
+    """PYAPI-01d, site 1/2 — the duplicate pre-check filters on strategy_id.
+
+    Economic statement: the pre-check's read key must equal the uniqueness key
+    the DB enforces. Plan 140.1-01 made that key
+    `(strategy_id, wizard_session_id)`; a read filtered on wizard_session_id
+    alone can therefore return a row belonging to a DIFFERENT strategy — i.e.
+    another tenant's verification_id / status / trust_tier.
+
+    Also the positive control for PYAPI-01e: the legitimate owner, replaying
+    their own session, still gets the idempotent reply.
+    """
+    sb = _RecordingSupabase(
+        responses={
+            ("strategies", "select"): [{"id": _OWNED_STRATEGY_ID}],
+            ("strategy_verifications", "select"): [
+                {
+                    "id": "ver-existing",
+                    "status": "published",
+                    "trust_tier": "csv_uploaded",
+                }
+            ],
+        }
+    )
+    with patch("routers.process_key.get_supabase", return_value=sb):
+        r = client.post(
+            "/process-key", json=_scoped_csv_body(), headers=_auth_headers()
+        )
+
+    assert r.status_code == 200, r.text
+    payload = r.json()
+    assert payload["code"] == "WIZARD_DUPLICATE"
+    assert payload["verification_id"] == "ver-existing"
+
+    sv_selects = sb.selects("strategy_verifications")
+    assert len(sv_selects) == 1, (
+        "the pre-check must issue exactly one strategy_verifications read; "
+        f"recorded {[q.filters for q in sv_selects]}"
+    )
+    assert sv_selects[0].filters == {
+        "strategy_id": "22222222-bbbb-4bbb-8bbb-000000000002",
+        "wizard_session_id": "33333333-cccc-4ccc-8ccc-000000000003",
+    }, (
+        "PYAPI-01d: the pre-check read must be scoped to the caller's strategy, "
+        "not to the caller-supplied wizard_session_id alone"
+    )
+
+
+def test_pyapi_01d_race_winner_read_is_tenant_scoped(client):
+    """PYAPI-01d, site 2/2 — the 23505 race-winner re-fetch filters on
+    strategy_id (mutation M2's detector).
+
+    This is the site finding C-08 never named and the one that becomes MORE
+    reachable after Plan 140.1-01: with a tenant-scoped unique index, a foreign
+    wizard_session_id no longer collides at all, but any genuine collision that
+    does reach the 23505 arm must re-fetch the caller's OWN row.
+    """
+    sb = _RecordingSupabase(
+        responses={
+            ("strategies", "select"): [{"id": _OWNED_STRATEGY_ID}],
+            ("strategy_verifications", "select"): [
+                None,  # pre-check misses — the row is written by the racer
+                {
+                    "id": "ver-raced",
+                    "status": "validated",
+                    "trust_tier": "csv_uploaded",
+                },
+            ],
+            ("strategy_verifications", "insert"): [
+                Exception(
+                    "duplicate key value violates unique constraint "
+                    "(SQLSTATE 23505)"
+                )
+            ],
+        }
+    )
+    with patch("routers.process_key.get_supabase", return_value=sb):
+        r = client.post(
+            "/process-key", json=_scoped_csv_body(), headers=_auth_headers()
+        )
+
+    assert r.status_code == 200, r.text
+    payload = r.json()
+    assert payload["code"] == "WIZARD_DUPLICATE"
+    assert payload["verification_id"] == "ver-raced"
+
+    sv_selects = sb.selects("strategy_verifications")
+    assert len(sv_selects) == 2, (
+        "expected pre-check + race re-fetch; recorded "
+        f"{[q.filters for q in sv_selects]}"
+    )
+    assert sv_selects[1].filters == {
+        "strategy_id": "22222222-bbbb-4bbb-8bbb-000000000002",
+        "wizard_session_id": "33333333-cccc-4ccc-8ccc-000000000003",
+    }, (
+        "PYAPI-01d: the 23505 race-winner re-fetch must be scoped to the "
+        "caller's strategy. Closing only the pre-check leaves this site leaking."
+    )
+
+
+def test_pyapi_01e_non_owner_gets_403_and_no_verification_read(client):
+    """PYAPI-01e — `strategy_id` is caller-supplied, so scoping the read by it
+    is necessary but NOT sufficient: a caller that supplies a FOREIGN
+    strategy_id gets a consistently-foreign read.
+
+    Ownership is asserted first, and the refusal happens BEFORE any
+    strategy_verifications row is read — so the leak cannot happen even in the
+    reply-construction code.
+    """
+    sb = _RecordingSupabase(
+        responses={
+            ("strategies", "select"): [None],  # attacker does not own it
+            ("strategy_verifications", "select"): [
+                {
+                    "id": "ver-victim",
+                    "status": "published",
+                    "trust_tier": "api_verified",
+                }
+            ],
+        }
+    )
+    with patch("routers.process_key.get_supabase", return_value=sb):
+        r = client.post(
+            "/process-key",
+            json=_scoped_csv_body(user_id=_ATTACKER_ID),
+            headers=_auth_headers(),
+        )
+
+    assert r.status_code == 403, r.text
+    payload = r.json()
+    assert payload["ok"] is False
+    assert payload["code"] == "STRATEGY_NOT_OWNED"
+    assert "ver-victim" not in r.text, "the victim's verification id must not leak"
+
+    assert sb.selects("strategy_verifications") == [], (
+        "PYAPI-01e: a non-owner must not cause ANY strategy_verifications read"
+    )
+    owner_lookups = sb.selects("strategies")
+    assert len(owner_lookups) == 1
+    assert owner_lookups[0].filters == {
+        "id": "22222222-bbbb-4bbb-8bbb-000000000002",
+        "user_id": "99999999-dddd-4ddd-8ddd-000000000009",
+    }, "ownership must be asserted on id AND user_id, never id alone"
+
+
+def test_pyapi_01e_missing_user_id_fails_closed(client):
+    """PYAPI-01e, fail-closed arm — a non-teaser flow that carries no
+    `context.user_id` cannot have its ownership asserted, so it is refused.
+
+    A row cannot be owned by nobody: treating "no user_id" as a skip would make
+    the whole ownership gate opt-out by omission. Every non-teaser production
+    caller forwards user_id (keys/sync/route.ts:417,
+    finalize-wizard/route.ts:1310, keys/validate-and-encrypt/route.ts:210,
+    csv-finalize/route.ts:1183), so this refuses only a misconfigured caller —
+    exactly the state the I-SEC2 warning already flags.
+    """
+    body = _scoped_csv_body()
+    body["context"].pop("user_id")
+    sb = _RecordingSupabase(
+        responses={
+            ("strategy_verifications", "select"): [
+                {"id": "ver-victim", "status": "published", "trust_tier": "api_verified"}
+            ]
+        }
+    )
+    with patch("routers.process_key.get_supabase", return_value=sb):
+        r = client.post("/process-key", json=body, headers=_auth_headers())
+
+    assert r.status_code == 403, r.text
+    assert r.json()["code"] == "STRATEGY_NOT_OWNED"
+    assert sb.selects("strategy_verifications") == []
+
+
+# ---------------------------------------------------------------------------
+# PYAPI-09 — idempotency completion (findings C-19 / C-20 / C-21).
+#
+# The draft strategy_verifications INSERT commits ~170 lines BEFORE
+# enqueue_compute_job, and they are two independent PostgREST round trips (no
+# client-side transaction). Dying in between — or simply double-submitting —
+# left the session in `WIZARD_DUPLICATE, queued:false` FOREVER: the duplicate
+# path returned before ever reaching the enqueue, so no retry could recover it,
+# and keys/sync/route.ts:438 rendered that dead end to the user as success.
+#
+# `queued` is redefined here from "this call enqueued a job" (unobservable to
+# the caller, and false by construction on the duplicate path) to "a
+# non-terminal compute_job exists for this verification at the moment of
+# reply", with `job_state` naming the three cases the old `queued:false`
+# collapsed. The reply is made TRUE rather than merely asserted, which is why
+# every oracle below checks the enqueue RPC, not just the reply field.
+# ---------------------------------------------------------------------------
+
+
+def _scoped_onboard_body(**context_overrides):
+    """onboard/okx body — a long-fetch flow, so the duplicate path has a job."""
+    context = {
+        "strategy_id": _OWNED_STRATEGY_ID,
+        "user_id": _OWNER_ID,
+        "wizard_session_id": _SESSION_ID,
+        "api_key": "k",
+        "api_secret": "s",
+    }
+    context.update(context_overrides)
+    return {"flow_type": "onboard", "source": "okx", "context": context}
+
+
+def test_pyapi_09a_wedged_session_replay_enqueues_and_reports_queued(client):
+    """PYAPI-09a (economic) — the wedge is recoverable by replay.
+
+    State: the SV row exists and is still `draft`, and NO compute_job was ever
+    written (the process died between the two round trips). Replaying the same
+    session must leave a job behind and say so.
+
+    The load-bearing assertion is the recorded enqueue_compute_job RPC, NOT the
+    `queued` field: mutation M6 (hardcode `queued: True` and skip the enqueue)
+    satisfies the field and still leaves the user wedged forever.
+    """
+    sb = _RecordingSupabase(
+        responses={
+            ("strategies", "select"): [{"id": _OWNED_STRATEGY_ID}],
+            ("strategy_verifications", "select"): [
+                {
+                    "id": "ver-wedged",
+                    "status": "draft",
+                    "trust_tier": "api_verified",
+                }
+            ],
+            # The job this call is about to create, read back for its state.
+            ("compute_jobs", "select"): [{"status": "pending"}],
+        },
+        rpc_responses={"enqueue_compute_job": ["job-created-1"]},
+    )
+    with patch("routers.process_key.get_supabase", return_value=sb):
+        r = client.post(
+            "/process-key", json=_scoped_onboard_body(), headers=_auth_headers()
+        )
+
+    assert r.status_code == 200, r.text
+    payload = r.json()
+    assert payload["code"] == "WIZARD_DUPLICATE"
+    assert payload["verification_id"] == "ver-wedged"
+    assert payload["queued"] is True
+    assert payload["job_state"] == "enqueued"
+
+    enqueues = sb.rpc_named("enqueue_compute_job")
+    assert len(enqueues) == 1, (
+        "the duplicate path must actually enqueue — a `queued:true` that no job "
+        "backs is the C-19 wedge with nicer wording"
+    )
+    assert enqueues[0]["p_strategy_id"] == "22222222-bbbb-4bbb-8bbb-000000000002"
+    assert enqueues[0]["p_kind"] == "process_key_long"
+    assert enqueues[0]["p_metadata"]["verification_id"] == "ver-wedged"
+
+
+def test_pyapi_09_duplicate_with_live_job_reports_running(client):
+    """Duplicate whose job is already in flight ⇒ queued:true, job_state
+    "running". The RPC is still called (it dedupes on
+    `(target, kind)` over non-terminal statuses and returns the existing id),
+    so this asserts the reply distinguishes "already working" from "just
+    started" instead of collapsing both into the old `queued:false`."""
+    sb = _RecordingSupabase(
+        responses={
+            ("strategies", "select"): [{"id": _OWNED_STRATEGY_ID}],
+            ("strategy_verifications", "select"): [
+                {"id": "ver-live", "status": "draft", "trust_tier": "api_verified"}
+            ],
+            ("compute_jobs", "select"): [{"status": "running"}],
+        },
+        rpc_responses={"enqueue_compute_job": ["job-existing-1"]},
+    )
+    with patch("routers.process_key.get_supabase", return_value=sb):
+        r = client.post(
+            "/process-key", json=_scoped_onboard_body(), headers=_auth_headers()
+        )
+
+    payload = r.json()
+    assert payload["queued"] is True
+    assert payload["job_state"] == "running"
+    assert len(sb.rpc_named("enqueue_compute_job")) == 1
+
+
+def test_pyapi_09_duplicate_on_finished_session_does_not_resync(client):
+    """A session that already reached a terminal status must NOT be silently
+    re-synced by a stray replay.
+
+    `_enqueue_compute_job_internal` dedupes only over NON-terminal job statuses,
+    so an unguarded re-enqueue on a finished verification would mint a brand new
+    job every time the user refreshed. The gate is the SV row's own status.
+    """
+    sb = _RecordingSupabase(
+        responses={
+            ("strategies", "select"): [{"id": _OWNED_STRATEGY_ID}],
+            ("strategy_verifications", "select"): [
+                {
+                    "id": "ver-finished",
+                    "status": "published",
+                    "trust_tier": "api_verified",
+                }
+            ],
+        },
+    )
+    with patch("routers.process_key.get_supabase", return_value=sb):
+        r = client.post(
+            "/process-key", json=_scoped_onboard_body(), headers=_auth_headers()
+        )
+
+    payload = r.json()
+    assert payload["status"] == "published"
+    assert payload["queued"] is False
+    assert payload["job_state"] == "not_applicable"
+    assert sb.rpc_named("enqueue_compute_job") == [], (
+        "a completed verification must not be re-enqueued"
+    )
+
+
+def test_pyapi_09_synchronous_duplicate_is_not_applicable(client):
+    """Emitter 1/2 — the PRE-CHECK emitter, on a synchronous flow.
+
+    csv/teaser/internal_report run the pipeline inline, so no background job
+    ever applies to them. `queued:false` was already correct here; what was
+    missing is the caller's ability to tell this apart from the wedge — hence
+    the literal `job_state`.
+    """
+    sb = _RecordingSupabase(
+        responses={
+            ("strategies", "select"): [{"id": _OWNED_STRATEGY_ID}],
+            ("strategy_verifications", "select"): [
+                {
+                    "id": "ver-existing",
+                    "status": "published",
+                    "trust_tier": "csv_uploaded",
+                }
+            ],
+        }
+    )
+    with patch("routers.process_key.get_supabase", return_value=sb):
+        r = client.post(
+            "/process-key", json=_scoped_csv_body(), headers=_auth_headers()
+        )
+
+    payload = r.json()
+    assert payload["code"] == "WIZARD_DUPLICATE"
+    assert payload["queued"] is False
+    assert payload["job_state"] == "not_applicable"
+    assert sb.rpc_named("enqueue_compute_job") == []
+
+
+def test_pyapi_09_race_winner_duplicate_carries_job_state(client):
+    """Emitter 2/2 — the 23505 RACE-WINNER emitter.
+
+    Both WIZARD_DUPLICATE emitters must carry the new contract; a fix applied to
+    the pre-check alone leaves the race arm emitting the old lying shape. This
+    fixture reaches ONLY the race arm (the pre-check misses, the insert 23505s),
+    which is what makes it a distinct member-of-class detector rather than a
+    grep.
+    """
+    sb = _RecordingSupabase(
+        responses={
+            ("strategies", "select"): [{"id": _OWNED_STRATEGY_ID}],
+            ("strategy_verifications", "select"): [
+                None,  # pre-check misses
+                {"id": "ver-raced", "status": "draft", "trust_tier": "api_verified"},
+            ],
+            ("strategy_verifications", "insert"): [
+                Exception(
+                    "duplicate key value violates unique constraint "
+                    "(SQLSTATE 23505)"
+                )
+            ],
+            ("compute_jobs", "select"): [{"status": "running"}],
+        },
+        rpc_responses={"enqueue_compute_job": ["job-raced-1"]},
+    )
+    with patch("routers.process_key.get_supabase", return_value=sb):
+        r = client.post(
+            "/process-key", json=_scoped_onboard_body(), headers=_auth_headers()
+        )
+
+    assert r.status_code == 200, r.text
+    payload = r.json()
+    assert payload["code"] == "WIZARD_DUPLICATE"
+    assert payload["verification_id"] == "ver-raced"
+    assert payload["queued"] is True
+    assert payload["job_state"] == "running"
+    assert len(sb.rpc_named("enqueue_compute_job")) == 1
+
+
+# ==========================================================================
+# Phase 140.4 / SEAMRIM-03 → Phase 145: the csv-finalize 23505 arm LEFT this
+# router. The block that lived here (test_pyapi_09c control-flow pin,
+# _csv_finalize_dup_key_error/_csv_finalize_post helpers, and the six
+# SEAMRIM-03/CR-01 arm tests) exercised the deleted csv-finalize branch and
+# was retired with it (D-06 obligation 2). The guarantees moved, not died:
+#   · the double-submit 23505 + all-or-nothing rollback → the fold itself
+#     (supabase/tests/test_csv_finalize_double_submit.sql, CI);
+#   · the 23505 resolve arm + CR-01 name/range identity checks + the
+#     no-PG-text-leak discipline → csv-finalize/route.ts
+#     (resolveExistingStrategyOrRefuse), pinned by
+#     src/__tests__/csv-finalize-cross-submission-merge.test.ts;
+#   · "this router never finalizes CSV again" →
+#     test_process_key_csv_finalize_branch_is_dead_answers_422 above.
+# ==========================================================================
+
+
+def test_seam06_resync_dedups_on_strategy_scoped_draft_key(client):
+    """SEAM-06 (Phase 141) SUPERSEDES PYAPI-09d (C-21) for resync.
+
+    Phase 140.1's PYAPI-09d asserted resync issued NO strategy_verifications
+    read and could NEVER emit WIZARD_DUPLICATE — because idempotency-by-SESSION
+    has no meaning for a server-minted session id. Phase 141 added a bounded seam
+    retry and allowlisted resync for it on the strength of this pre-check.
+
+    ⚠️ That justification was WITHDRAWN. 141.1 re-derived the claim and found it
+    false; 141.2 / D-03 moved the TypeScript seam registry's resync verdict to NO,
+    so no resync retry is issued and this pre-check is defense-in-depth against a
+    DUPLICATE SUBMIT, not an idempotency key for a retry class. (Corrected here by
+    Phase 163 / OPS-09 — the sentence outlived the withdrawal.) What resync does
+    consult is unchanged, and so is the security core PYAPI-09d protected,
+    preserved and tightened here: the read is scoped by the strategy-owned draft key
+    (strategy_id + flow_type='resync' + status='draft'), NEVER by a
+    caller-supplied wizard_session_id (which could echo a foreign tenant's row).
+
+    This pins the FRESH path (no prior draft → misses → queues, no code) and the
+    exact filter shape. The retry HIT path (existing draft → WIZARD_DUPLICATE) is
+    pinned in tests/test_resync_draft_dedup.py.
+    """
+    sb = _RecordingSupabase(
+        responses={
+            ("strategies", "select"): [{"id": _OWNED_STRATEGY_ID}],
+            # Fresh resync: no existing draft, so the pre-check MISSES and the
+            # flow falls through to a normal queued insert.
+            ("strategy_verifications", "select"): [None],
+            ("strategy_verifications", "insert"): [[{"id": "ver-resync"}]],
+            # No chain job in flight, so the chain-in-flight guard misses too.
+            ("compute_jobs", "select"): [[]],
+        },
+        rpc_responses={"enqueue_compute_job": ["job-resync-1"]},
+    )
+    with patch("routers.process_key.get_supabase", return_value=sb):
+        r = client.post(
+            "/process-key",
+            json={
+                "flow_type": "resync",
+                "source": "okx",
+                "context": {
+                    "strategy_id": _OWNED_STRATEGY_ID,
+                    "user_id": _OWNER_ID,
+                },
+            },
+            headers=_auth_headers(),
+        )
+
+    assert r.status_code == 200, r.text
+    payload = r.json()
+    assert "code" not in payload, (
+        "a FRESH resync (no prior draft) must not be told it is a duplicate; "
+        f"got {payload}"
+    )
+    assert payload["queued"] is True
+    assert payload["verification_id"] == "ver-resync"
+
+    sv_selects = sb.selects("strategy_verifications")
+    assert len(sv_selects) == 1, (
+        "resync issues EXACTLY ONE strategy_verifications read — the Phase-141 "
+        f"strategy-scoped draft dedup pre-check; got {len(sv_selects)}"
+    )
+    assert sv_selects[0].filters == {
+        "strategy_id": _OWNED_STRATEGY_ID,
+        "flow_type": "resync",
+        "status": "draft",
+    }, (
+        "the resync dedup read MUST key on the strategy-owned draft window and "
+        "NEVER on a caller-supplied wizard_session_id (PYAPI-01d / the security "
+        f"core PYAPI-09d protected); got filters {sv_selects[0].filters}"
+    )
+    assert "wizard_session_id" not in sv_selects[0].filters
+
+
+# ---------------------------------------------------------------------------
+# SEAM-06 / D-14c (Phase 141.1) — the `status='draft'` half of the resync dedup
+# key needs a BEHAVIOUR pin, not just the filter-SHAPE pin above.
+#
+# `test_seam06_resync_dedups_on_strategy_scoped_draft_key` asserts the pre-check
+# SELECTs with `status='draft'` among its filters. That is a shape assertion
+# against a scripted double: it proves the filter is SENT, not that it MATTERS.
+# Delete `.eq("status", "draft")` from routers/process_key.py and the shape pin
+# is the only thing that reddens — meanwhile the real user-facing behaviour
+# silently inverts: ANY historical resync verification (`completed`, `failed`,
+# …) starts matching the pre-check, so every genuinely new resync of a strategy
+# that has ever synced once is answered WIZARD_DUPLICATE and never queues.
+#
+# The two tests below are a controlled experiment on that one filter. They are
+# byte-identical except for the seeded row's `status`, and they run through the
+# FULL `main.app` stack against the STATEFUL supabase double from
+# `tests/test_resync_draft_dedup.py` (imported, never re-implemented) — a double
+# that really honours `.eq()`, so the filter is exercised rather than recorded.
+# ---------------------------------------------------------------------------
+
+from tests.test_resync_draft_dedup import (  # noqa: E402
+    _STRATEGY_A as _SEAM06_STRATEGY,
+    _StatefulSupabase,
+    _post as _seam06_post,
+    _resync_body as _seam06_resync_body,
+    full_stack_client,  # noqa: F401  (pytest fixture, resolved by module name)
+    make_supabase as _seam06_make_supabase,
+)
+
+
+def _seed_prior_resync_verification(
+    sb: _StatefulSupabase, strategy_id: str, status: str
+) -> dict[str, Any]:
+    """Put ONE pre-existing resync strategy_verifications row in the store.
+
+    Every column is hand-typed here rather than produced by the route, so the
+    seed is an independent oracle. `status` is the ONLY parameter: the two tests
+    below differ in nothing else, which is what makes them a controlled
+    experiment on `.eq("status", "draft")` alone.
+
+    `created_at` is stamped at NOW (OPS-09, Phase 163) so the row sits well
+    inside `_RESYNC_DRAFT_RESUME_WINDOW` and the experiment stays a
+    single-variable one — an age-dependent seed would confound `status` with the
+    bound. It is present at all because the real column is NOT NULL
+    (`supabase/migrations/20260501055202_strategy_verifications.sql:97`) and the
+    stateful double now fails loud on a row it is asked to compare without one.
+    """
+    row: dict[str, Any] = {
+        "id": f"ver-prior-{status}",
+        "strategy_id": strategy_id,
+        "wizard_session_id": "cccccccc-0000-4000-8000-00000000000c",
+        "status": status,
+        "trust_tier": "api_verified",
+        "flow_type": "resync",
+        "source": "binance",
+        "correlation_id": "22222222-2222-4222-8222-222222222222",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    sb.store["strategy_verifications"].append(row)
+    return row
+
+
+def _sv_rows(sb: _StatefulSupabase, strategy_id: str) -> list[dict[str, Any]]:
+    return [
+        r
+        for r in sb.store["strategy_verifications"]
+        if r.get("strategy_id") == strategy_id
+    ]
+
+
+def test_resync_completed_prior_verification_does_not_block_new_resync(
+    full_stack_client,
+):
+    """SC-P / D-14c: a prior resync verification that has FINISHED must not make
+    the next resync a duplicate.
+
+    MUTATION THIS TEST EXISTS TO CATCH: dropping `.eq("status", "draft")` from
+    the resync dedup pre-check (routers/process_key.py, the `flow_type ==
+    "resync"` block). Without that filter the pre-check matches on
+    (strategy_id + flow_type) alone, so the `completed` row seeded below is
+    treated as an in-flight retry: the caller is answered WIZARD_DUPLICATE,
+    handed the id of a verification that finished long ago, and — because a
+    `completed` row is not in `_RESUMABLE_VERIFICATION_STATUSES` — is not even
+    re-enqueued (`queued: false`). The user's resync silently never runs. The
+    draft window is precisely what separates "this is a seam retry of the sync
+    I just asked for" from "this strategy has synced before".
+    """
+    sb = _seam06_make_supabase(_SEAM06_STRATEGY)
+    prior = _seed_prior_resync_verification(sb, _SEAM06_STRATEGY, "completed")
+
+    with patch("routers.process_key.get_supabase", return_value=sb):
+        r = _seam06_post(full_stack_client, _seam06_resync_body(_SEAM06_STRATEGY))
+
+    assert r.status_code == 200, r.text
+    payload = r.json()
+    assert payload.get("code") != "WIZARD_DUPLICATE", (
+        "a resync whose ONLY prior verification is status='completed' is a "
+        "genuinely NEW sync, not a seam retry — it must queue, not be refused "
+        f"as a duplicate; got {payload}"
+    )
+    assert payload["queued"] is True, (
+        f"the new resync must actually be enqueued; got {payload}"
+    )
+
+    rows = _sv_rows(sb, _SEAM06_STRATEGY)
+    assert len(rows) == 2, (
+        "the seeded completed row plus ONE newly minted draft = 2 "
+        f"strategy_verifications rows for {_SEAM06_STRATEGY}; got {len(rows)}: "
+        f"{[(x['id'], x['status']) for x in rows]}"
+    )
+    drafts = [x for x in rows if x["status"] == "draft" and x["flow_type"] == "resync"]
+    assert len(drafts) == 1, (
+        f"expected exactly 1 new draft resync row; got {len(drafts)}"
+    )
+    assert payload["verification_id"] == drafts[0]["id"], (
+        "the reply must identify the NEW draft verification, not the finished "
+        f"one ({prior['id']}); got verification_id={payload['verification_id']!r}"
+    )
+    assert prior["status"] == "completed", (
+        "the seeded finished verification must be left untouched"
+    )
+
+
+def test_resync_draft_prior_verification_does_block_new_resync(full_stack_client):
+    """Positive control for the test above — identical in every respect except
+    the seeded row's `status`, which is `draft` here.
+
+    Without this, the `completed` test could pass VACUOUSLY: a seed row the
+    pre-check never sees at all (wrong column name, wrong table, a patch that
+    did not take) would also produce "not a duplicate". Here the same seeding
+    path DOES short-circuit the request, which proves the seeded row is visible
+    to the pre-check and that the difference in the test above is attributable
+    to `status` and nothing else.
+    """
+    sb = _seam06_make_supabase(_SEAM06_STRATEGY)
+    prior = _seed_prior_resync_verification(sb, _SEAM06_STRATEGY, "draft")
+
+    with patch("routers.process_key.get_supabase", return_value=sb):
+        r = _seam06_post(full_stack_client, _seam06_resync_body(_SEAM06_STRATEGY))
+
+    assert r.status_code == 200, r.text
+    payload = r.json()
+    assert payload.get("code") == "WIZARD_DUPLICATE", (
+        "a seeded status='draft' resync row IS an in-flight session — the "
+        f"pre-check must short-circuit on it; got {payload}"
+    )
+    assert payload["verification_id"] == prior["id"], (
+        "the duplicate reply must hand back the seeded draft's id, proving the "
+        f"pre-check really read the seeded row; got {payload['verification_id']!r}"
+    )
+    assert len(_sv_rows(sb, _SEAM06_STRATEGY)) == 1, (
+        "the duplicate path must mint NO second draft row; got "
+        f"{[(x['id'], x['status']) for x in _sv_rows(sb, _SEAM06_STRATEGY)]}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# PYAPIFIX-02 (Phase 140.1.1) — H-1: a fault at the CALLER'S VENUE answers 424
+# recoverable, not 403 terminal.
+#
+# Pre-fix the unified `_scope_rejected` gate routed every rejection to one 403
+# return. But services/exchange.py derives `read_only=False` from the
+# fail-CLOSED {read:T, trade:T, withdraw:T} default whenever the permission
+# probe hit a network/WAF failure (DOGFOOD-3) — that is NOT scope evidence. A
+# caller whose exchange blipped was told their credentials were unfixably
+# wrong, under a status whose whole meaning is "an identical retry cannot
+# succeed", while the body carried the copy "Try again in a moment."
+#
+# The fix is an ALLOW-LIST of PERMANENT codes defaulting to transient
+# (services/exchange.py::PERMANENT_VALIDATION_ERROR_CODES), never a denylist of
+# transient ones — a denylist fails UNSAFE and is the shape of this very
+# defect. The negative-control parametrisation below is the load-bearing half:
+# it proves the fix did not over-reach into genuine caller faults.
+# ---------------------------------------------------------------------------
+
+
+# The five venue-transient probe codes, with the `valid` flag each one really
+# carries out of services/exchange.py::validate_key_permissions. PROBE_FAILED is
+# set at :1207, AFTER fetch_balance succeeded (valid=True) — it enters the gate
+# through the `read_only is False` arm. The four ccxt classification arms
+# (:1112/:1123/:1135/:1145) return early with valid still False.
+@pytest.mark.parametrize(
+    "error_code,valid",
+    [
+        ("PROBE_FAILED", True),
+        ("DDOS_PROTECTION", False),
+        ("RATE_LIMITED", False),
+        ("EXCHANGE_UNAVAILABLE", False),
+        ("NETWORK_UNAVAILABLE", False),
+    ],
+    ids=[
+        "probe_failed",
+        "ddos_protection",
+        "rate_limited",
+        "exchange_unavailable",
+        "network_unavailable",
+    ],
+)
+def test_process_key_sync_venue_transient_answers_424_recoverable(
+    client, error_code: str, valid: bool
+):
+    """H-1 regression: a venue-transient probe code answers 424 + recoverable.
+
+    424 FAILED_DEPENDENCY is the UPSTREAM-TRANSIENT class (STATUS_CONTRACT
+    R-1): the fault is at a dependency, not with the caller, and a retry can
+    succeed. It is still 4xx, so it stays breaker-inert.
+    """
+    from services.ingestion.adapter import ValidationResult
+
+    fake = _build_supabase_mock(existing_row=None, insert_id="ver-transient")
+
+    transient_adapter = MagicMock()
+    transient_adapter.validate = AsyncMock(
+        return_value=ValidationResult(
+            valid=valid,
+            read_only=False,
+            error_code=error_code,
+            human_message="Exchange is currently unavailable. Try again in a few minutes.",
+            debug_context={},
+        )
+    )
+
+    with patch(
+        "routers.process_key.get_supabase",
+        return_value=fake,
+    ), patch(
+        "routers.process_key.get_adapter",
+        return_value=transient_adapter,
+    ):
+        r = client.post(
+            "/process-key",
+            json={
+                "flow_type": "teaser",
+                "source": "okx",
+                "context": {
+                    "strategy_id": "s1",
+                    "wizard_session_id": f"wiz-transient-{error_code}",
+                    "api_key": "k",
+                    "api_secret": "s",
+                },
+            },
+            headers=_auth_headers(),
+        )
+
+    assert r.status_code == 424, r.text
+    body = r.json()
+    assert body["ok"] is False
+    assert body["code"] == error_code
+    assert body["recoverable"] is True, (
+        f"{error_code} is a fault at the caller's venue — telling them the "
+        f"failure is unrecoverable sends them to rotate credentials that were "
+        f"never broken"
+    )
+    # No broker round-trip on a rejection, transient or not.
+    transient_adapter.fetch_raw.assert_not_called()
+
+
+# The five genuine caller faults. THIS IS THE NEGATIVE CONTROL: the fix widens
+# the transient class by DEFAULT, so without this parametrisation an
+# over-broad pre-gate would silently turn "your key has withdrawal
+# permissions" into "retry in a moment" and loop forever. MISSING_SCOPE is the
+# load-bearing member — it is absent from long_fetch's local `permanent_codes`,
+# so a fix that reused that set would drop it into the retryable default.
+@pytest.mark.parametrize(
+    "error_code,valid",
+    [
+        ("AUTH_FAILED", False),
+        ("PERMISSION_DENIED", False),
+        ("TRADE_SCOPE", True),
+        ("WITHDRAW_SCOPE", True),
+        ("MISSING_SCOPE", False),
+    ],
+    ids=[
+        "auth_failed",
+        "permission_denied",
+        "trade_scope",
+        "withdraw_scope",
+        "missing_scope",
+    ],
+)
+def test_process_key_sync_caller_fault_stays_403_terminal(
+    client, error_code: str, valid: bool
+):
+    """H-1 negative control: a genuine caller fault still answers 403."""
+    from services.ingestion.adapter import ValidationResult
+
+    fake = _build_supabase_mock(existing_row=None, insert_id="ver-permanent")
+
+    permanent_adapter = MagicMock()
+    permanent_adapter.validate = AsyncMock(
+        return_value=ValidationResult(
+            valid=valid,
+            read_only=False,
+            error_code=error_code,
+            human_message="Key has trading permissions. Please use a read-only key.",
+            debug_context={},
+        )
+    )
+
+    with patch(
+        "routers.process_key.get_supabase",
+        return_value=fake,
+    ), patch(
+        "routers.process_key.get_adapter",
+        return_value=permanent_adapter,
+    ):
+        r = client.post(
+            "/process-key",
+            json={
+                "flow_type": "teaser",
+                "source": "okx",
+                "context": {
+                    "strategy_id": "s1",
+                    "wizard_session_id": f"wiz-permanent-{error_code}",
+                    "api_key": "k",
+                    "api_secret": "s",
+                },
+            },
+            headers=_auth_headers(),
+        )
+
+    assert r.status_code == 403, r.text
+    body = r.json()
+    assert body["ok"] is False
+    assert body["code"] == error_code
+    assert body["recoverable"] is False, (
+        f"{error_code} names something wrong with the submitted credentials; "
+        f"an identical retry cannot succeed"
+    )
+    permanent_adapter.fetch_raw.assert_not_called()
+
+
+def test_process_key_sync_probe_failed_body_does_not_contradict_itself(client):
+    """The self-contradiction, pinned in ONE case.
+
+    services/exchange.py:1203-1206 emits the copy "Try again in a moment." for
+    PROBE_FAILED. Pre-fix that copy shipped beside `recoverable: false` under a
+    403 — three signals, two of them saying the opposite of the third. The
+    human copy is quoted here as a LITERAL, not imported from the module that
+    produces it: an oracle that read the string back out of exchange.py could
+    not fail if the copy and the flag drifted apart again.
+    """
+    from services.ingestion.adapter import ValidationResult
+
+    fake = _build_supabase_mock(existing_row=None, insert_id="ver-probe")
+
+    probe_adapter = MagicMock()
+    probe_adapter.validate = AsyncMock(
+        return_value=ValidationResult(
+            valid=True,
+            read_only=False,
+            error_code="PROBE_FAILED",
+            human_message=(
+                "Could not verify the key's permission scopes — the permission "
+                "probe failed. Try again in a moment."
+            ),
+            debug_context={"probe_error": True},
+        )
+    )
+
+    with patch(
+        "routers.process_key.get_supabase",
+        return_value=fake,
+    ), patch(
+        "routers.process_key.get_adapter",
+        return_value=probe_adapter,
+    ):
+        r = client.post(
+            "/process-key",
+            json={
+                "flow_type": "teaser",
+                "source": "okx",
+                "context": {
+                    "strategy_id": "s1",
+                    "wizard_session_id": "wiz-probe-contradiction",
+                    "api_key": "k",
+                    "api_secret": "s",
+                },
+            },
+            headers=_auth_headers(),
+        )
+
+    body = r.json()
+    assert "Try again in a moment." in body["human_message"]
+    assert body["recoverable"] is True, (
+        "the body told the caller to try again while flagging the failure "
+        "unrecoverable — the two halves of one reply must agree"
+    )
+    assert r.status_code == 424, (
+        "and the status line must agree with both: 403 promises that an "
+        "identical retry cannot succeed, which contradicts the copy"
+    )
+
+
+def test_process_key_sync_our_own_validation_unexpected_fallback_stays_403(client):
+    """The fallback carve-out: OUR OWN VALIDATION_UNEXPECTED is permanent.
+
+    When the adapter sets NO error_code, `_reject_code` falls back to
+    VALIDATION_UNEXPECTED — which means a write-capable key was confirmed with
+    no scope code to name it. That is a caller fault and must NOT escape to the
+    424 arm. long_fetch's `_is_unexpected_fallback` carries the same
+    distinction; the route mirrors it with `val.error_code is not None`.
+
+    This is the positive statement of what fence test
+    `test_process_key_sync_scope_rejection_uses_validation_unexpected_fallback`
+    pins from the code side — kept separate so that test stays byte-unedited.
+    """
+    from services.ingestion.adapter import ValidationResult
+
+    fake = _build_supabase_mock(existing_row=None, insert_id="ver-fallback")
+
+    fallback_adapter = MagicMock()
+    fallback_adapter.validate = AsyncMock(
+        return_value=ValidationResult(
+            valid=True,
+            read_only=False,
+            error_code=None,
+            human_message="Key validation failed.",
+            debug_context={},
+        )
+    )
+
+    with patch(
+        "routers.process_key.get_supabase",
+        return_value=fake,
+    ), patch(
+        "routers.process_key.get_adapter",
+        return_value=fallback_adapter,
+    ):
+        r = client.post(
+            "/process-key",
+            json={
+                "flow_type": "teaser",
+                "source": "okx",
+                "context": {
+                    "strategy_id": "s1",
+                    "wizard_session_id": "wiz-fallback-permanent",
+                    "api_key": "k",
+                    "api_secret": "s",
+                },
+            },
+            headers=_auth_headers(),
+        )
+
+    assert r.status_code == 403, r.text
+    body = r.json()
+    assert body["code"] == "VALIDATION_UNEXPECTED"
+    assert body["recoverable"] is False
+
+
+# ---------------------------------------------------------------------------
+# WIZFORM-ABANDON / D-40 — the two `adapter.validate` call sites this router had
+# left with NO enclosing try at all (ast-verified in 153.5 research).
+#
+# WHY this matters (Rule 9). `Mt5SessionAbandoned` is a plain `Exception` by
+# design (D-42, so no credential-classify arm anywhere can absorb an operator
+# fault into a user verdict). The consequence HERE was that an adapter raising it
+# produced an unhandled BODYLESS 500 on the wizard's own validate leg — and under
+# STATUS_CONTRACT R-1 a 500 means SERVICE-PERMANENT, "do not retry", which is the
+# exact inverse of the truth. It is also the ONE status this route documents as
+# unreadable to its callers ("a consumer that branches on the status line alone —
+# which TRAP-2 says it may have to, since an unhandled fault is a bodyless 500").
+#
+# ⚠️ PERSPECTIVE. On the genuinely abandoned path nobody awaits the validate, so
+# these arms never run (D-39 — the sink's WARNING is the signal). They exist for
+# the FALSE-POSITIVE path: a legitimate submission that trips the fence must be
+# told "transient, retry", never "your credentials are wrong" and never
+# "permanent".
+#
+# ⚠️ HONEST SCOPE NOTE on the second case. `mt5` is admitted to `onboard`/`resync`
+# only (MT5RECON-01) and both are long-fetch, so `:1586` — the SYNCHRONOUS
+# pipeline's validate — is not reachable by an mt5 body TODAY. It is covered
+# anyway, with the adapter registry stubbed, because the class here is "an
+# unguarded `adapter.validate` call site" and not "the mt5 one": an instance fix
+# at the first site alone leaves this one open the day any lease-taking adapter is
+# admitted to a sync flow. The 153.5 falsifiability ledger picks THIS site,
+# deliberately, as its second-member-of-the-class mutation.
+# ---------------------------------------------------------------------------
+
+
+def test_validate_only_abandoned_session_is_a_coded_transient_never_a_500(
+    client, monkeypatch
+):
+    """Site 1 — `_run_validate_only`, the wizard's validate-and-encrypt leg."""
+    from services.mt5_client import Mt5SessionAbandoned
+
+    monkeypatch.setenv("MT5_ENABLED", "true")
+    fake = _build_supabase_mock(existing_row=None)
+
+    mt5_adapter = MagicMock()
+    mt5_adapter.validate = AsyncMock(side_effect=Mt5SessionAbandoned("account_info"))
+
+    with patch(
+        "routers.process_key.get_supabase",
+        return_value=fake,
+    ), patch(
+        "routers.process_key.get_adapter",
+        return_value=mt5_adapter,
+    ):
+        r = client.post(
+            "/process-key",
+            json={
+                "flow_type": "onboard",
+                "source": "mt5",
+                "context": {
+                    "wizard_session_id": "wiz-abandoned-validate-only",
+                    "user_id": "u1",
+                    "api_key": "123456",
+                    "api_secret": "investor-pw",
+                    "passphrase": "Broker-Demo",
+                    "step": "validate",
+                },
+            },
+            headers=_auth_headers(),
+        )
+
+    assert r.status_code == 424, r.text
+    assert r.status_code != 500, (
+        "an abandoned-session refusal fell through to an unhandled bodyless 500 "
+        "on the wizard's validate leg — under R-1 that tells the caller the "
+        "service is PERMANENTLY broken and must not be retried (D-40)"
+    )
+    body = r.json()
+    # ⭐ The BODY, not merely the status integer: a bodyless 500 and a coded
+    # envelope are distinguishable only here, and `code` is what the wizard
+    # renders on.
+    assert body["ok"] is False
+    assert body["code"] == "NETWORK_UNAVAILABLE"
+    assert body["recoverable"] is True
+    assert body["correlation_id"] == _TEST_CID
+    # ⛔ Never a credential accusation. The permanent allow-list is imported LIVE
+    # rather than hand-copied — the invariant is disjointness from whatever the
+    # route treats as caller-fault TODAY.
+    from services import exchange as exchange_svc
+
+    assert body["code"] not in exchange_svc.PERMANENT_VALIDATION_ERROR_CODES
+
+
+def test_sync_pipeline_abandoned_session_is_a_coded_transient_never_a_500(client):
+    """Site 2 — the synchronous pipeline's validate (`:1586` at plan time).
+
+    Same contract, driven through the OTHER route. This is the second member of
+    the class; a fix that covered only `_run_validate_only` leaves it open.
+    """
+    from services.mt5_client import Mt5SessionAbandoned
+
+    fake = _build_supabase_mock(existing_row=None, insert_id="ver-abandoned")
+
+    abandoning_adapter = MagicMock()
+    abandoning_adapter.validate = AsyncMock(
+        side_effect=Mt5SessionAbandoned("account_info")
+    )
+
+    with patch(
+        "routers.process_key.get_supabase",
+        return_value=fake,
+    ), patch(
+        "routers.process_key.get_adapter",
+        return_value=abandoning_adapter,
+    ):
+        r = client.post(
+            "/process-key",
+            json={
+                "flow_type": "teaser",
+                "source": "okx",
+                "context": {
+                    "strategy_id": "s1",
+                    "wizard_session_id": "wiz-abandoned-sync",
+                    "api_key": "k",
+                    "api_secret": "s",
+                },
+            },
+            headers=_auth_headers(),
+        )
+
+    assert r.status_code == 424, r.text
+    assert r.status_code != 500
+    body = r.json()
+    assert body["ok"] is False
+    assert body["code"] == "NETWORK_UNAVAILABLE"
+    assert body["recoverable"] is True
+    assert body["correlation_id"] == _TEST_CID
+    # This site HAS a verification row, so the envelope carries it — the same key
+    # set every other arm at this site returns.
+    assert body["debug_context"]["verification_id"] == "ver-abandoned"
+
+    from services import exchange as exchange_svc
+
+    assert body["code"] not in exchange_svc.PERMANENT_VALIDATION_ERROR_CODES
+
+
+# ---------------------------------------------------------------------------
+# 161-03 / WIZERR-13 — the SUBMIT path forwards the per-row DATA half.
+#
+# The wizard's CSV panel (`CsvValidationEnvelope.tsx`) has always read
+# `debug_context.pandera_errors`, and on this route that key never existed:
+# `_envelope_error` rebuilt `debug_context` from the verification id alone and
+# never looked at `val.debug_context`, where the CSV adapter puts its per-row
+# list under `violations`. The panel therefore rendered a headline with no
+# breakdown beneath it on every submit-path validation failure.
+#
+# ⛔ THE FORWARD IS A PROJECTION, NOT A PASSTHROUGH. Only {rule, row, message}
+# crosses. `failure_case` — the raw failing cell, untrusted CSV content that
+# can carry PII, and this envelope is persisted into strategy_verifications
+# metadata — must be unable to reach the wire even if an upstream producer
+# started including it. T-161-07 / T-161-08.
+# ---------------------------------------------------------------------------
+
+_PII_MARKER = "ZZ-PII-acct-4411-Jane-Doe"
+
+
+def _csv_validation_result(violations, debug_extra=None):
+    """A CSV `ValidationResult` shaped exactly like csv_adapter.validate()'s
+    rejection return: error_code from the first rule, the full list under
+    `debug_context["violations"]`."""
+    from services.ingestion.adapter import ValidationResult
+
+    debug_context = {"violations": violations}
+    if debug_extra:
+        debug_context.update(debug_extra)
+    return ValidationResult(
+        valid=False,
+        read_only=None,
+        error_code="COLUMN_IN_DATAFRAME",
+        human_message="Failed rule 'column_in_dataframe' at row 0.",
+        debug_context=debug_context,
+    )
+
+
+def _post_validate_only(client, fake, adapter):
+    with patch(
+        "routers.process_key.get_supabase",
+        return_value=fake,
+    ), patch(
+        "routers.process_key.get_adapter",
+        return_value=adapter,
+    ):
+        return client.post(
+            "/process-key",
+            json={
+                "flow_type": "csv",
+                "source": "csv",
+                "context": {
+                    "wizard_session_id": "wiz-csv-rows",
+                    "user_id": "u1",
+                    "fmt": "daily_returns",
+                    "raw_bytes_base64": "Y29sMSxjb2wyCjEsMg==",
+                    "step": "validate",
+                },
+            },
+            headers=_auth_headers(),
+        )
+
+
+def test_validate_only_forwards_the_per_row_breakdown(client):
+    """WIZERR-13 — the rows the panel reads actually arrive."""
+    fake = _build_supabase_mock(existing_row=None)
+    adapter = MagicMock()
+    adapter.validate = AsyncMock(
+        return_value=_csv_validation_result([
+            {
+                "rule": "column_in_dataframe",
+                "row": 0,
+                "message": "Failed rule 'column_in_dataframe' at row 0.",
+            },
+            {
+                "rule": "daily_return_lower_bound",
+                "row": 4,
+                "message": (
+                    "Column 'daily_return' failed rule "
+                    "'daily_return_lower_bound' at row 4."
+                ),
+            },
+        ])
+    )
+
+    r = _post_validate_only(client, fake, adapter)
+
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ok"] is False
+    rows = body["debug_context"]["pandera_errors"]
+    assert rows == [
+        {
+            "rule": "column_in_dataframe",
+            "row": 0,
+            "message": "Failed rule 'column_in_dataframe' at row 0.",
+        },
+        {
+            "rule": "daily_return_lower_bound",
+            "row": 4,
+            "message": (
+                "Column 'daily_return' failed rule "
+                "'daily_return_lower_bound' at row 4."
+            ),
+        },
+    ], rows
+
+
+def test_forwarded_rows_carry_no_key_beyond_rule_row_message(client):
+    """T-161-07 — an upstream row that grew a `failure_case` key must not be
+    able to carry it onto the wire, or into strategy_verifications metadata."""
+    fake = _build_supabase_mock(existing_row=None)
+    adapter = MagicMock()
+    adapter.validate = AsyncMock(
+        return_value=_csv_validation_result(
+            [
+                {
+                    "rule": "currency_usd_or_blank",
+                    "row": 3,
+                    "message": (
+                        "Column 'currency' failed rule "
+                        "'currency_usd_or_blank' at row 3."
+                    ),
+                    # The key this route must never learn to forward.
+                    "failure_case": _PII_MARKER,
+                }
+            ],
+            # …and a sibling debug key that is not the breakdown.
+            debug_extra={"raw_sample": _PII_MARKER},
+        )
+    )
+
+    r = _post_validate_only(client, fake, adapter)
+
+    body = r.json()
+    rows = body["debug_context"]["pandera_errors"]
+    assert len(rows) == 1
+    assert set(rows[0].keys()) == {"rule", "row", "message"}, sorted(rows[0])
+    # The needle is real, not blank — a blanked marker would make the
+    # `not in` below pass while checking nothing.
+    assert len(_PII_MARKER) > 10
+    assert _PII_MARKER not in r.text, r.text
+
+
+def test_no_violations_means_the_key_is_absent_not_an_empty_list(client):
+    """Mirror what the panel treats as absent: `pandera_errors ?? []`. An empty
+    list would be indistinguishable in the client but would tell a reader of
+    the persisted envelope that a breakdown was produced and was empty."""
+    fake = _build_supabase_mock(existing_row=None)
+    from services.ingestion.adapter import ValidationResult
+
+    adapter = MagicMock()
+    adapter.validate = AsyncMock(
+        return_value=ValidationResult(
+            valid=False,
+            read_only=None,
+            error_code="AUTH_FAILED",
+            human_message="Invalid credentials",
+            debug_context={},
+        )
+    )
+
+    r = _post_validate_only(client, fake, adapter)
+
+    body = r.json()
+    assert body["code"] == "AUTH_FAILED"
+    assert "pandera_errors" not in body["debug_context"], body["debug_context"]
+
+
+def test_sync_pipeline_rejection_also_forwards_the_breakdown(client):
+    """THE SECOND SITE. `_run_validate_only` is not the only arm a CSV
+    rejection can leave by — the synchronous pipeline's unified rejection gate
+    is the other, and a fix at one site only would leave the panel empty on
+    whichever arm the caller happens to hit."""
+    fake = _build_supabase_mock(existing_row=None, insert_id="ver-csv-rows")
+    adapter = MagicMock()
+    adapter.validate = AsyncMock(
+        return_value=_csv_validation_result([
+            {
+                "rule": "monotonic_dates",
+                "row": 5,
+                "message": (
+                    "Column 'date' failed rule 'monotonic_dates' at row 5."
+                ),
+                "failure_case": _PII_MARKER,
+            }
+        ])
+    )
+
+    with patch(
+        "routers.process_key.get_supabase",
+        return_value=fake,
+    ), patch(
+        "routers.process_key.get_adapter",
+        return_value=adapter,
+    ):
+        r = client.post(
+            "/process-key",
+            json={
+                "flow_type": "csv",
+                "source": "csv",
+                "context": {
+                    "strategy_id": "s1",
+                    "user_id": "u1",
+                    "wizard_session_id": "wiz-csv-sync-rows",
+                    "fmt": "daily_returns",
+                    "raw_bytes_base64": "Y29sMSxjb2wyCjEsMg==",
+                },
+            },
+            headers=_auth_headers(),
+        )
+
+    assert r.status_code in (403, 424), r.text
+    body = r.json()
+    assert body["ok"] is False
+    rows = body["debug_context"]["pandera_errors"]
+    assert rows == [
+        {
+            "rule": "monotonic_dates",
+            "row": 5,
+            "message": "Column 'date' failed rule 'monotonic_dates' at row 5.",
+        }
+    ], rows
+    # The verification id keeps its slot — the forward is additive.
+    assert body["debug_context"]["verification_id"] == "ver-csv-rows"
+    assert len(_PII_MARKER) > 10
+    assert _PII_MARKER not in r.text, r.text
