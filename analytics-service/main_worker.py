@@ -381,10 +381,13 @@ WATCHDOG_PER_KIND_OVERRIDES: dict[str, str] = {
 # Phase 164.9.3.2: migration 117 raised these as serialization_failure
 # (40001). PostgREST 14 re-runs a transaction that raised 40001 without
 # bound, so a stale-token mark never returned to the worker at all; the
-# fence now raises 55006 instead. The literal branch (b) carries the
-# deploy window in both directions: a body still raising 40001 carries the
-# same literal, so a preempted mark classifies whichever of the migration
-# apply and the worker deploy lands first.
+# fence now raises 55006 instead. The literal branch (b) covers ONE deploy
+# order: migration first, old worker. The body answers a 55006 once, and an
+# old classifier (which checks code '40001') matches it by the literal. The
+# reverse order (new worker, old body) is NOT covered: the body still raises
+# 40001, PostgREST 14 re-runs it without bound, and no response ever reaches
+# this classifier. That is the pre-fix hang, unchanged, until the migration
+# applies.
 #
 # PR #149 review I4 (maintainability conf 8 + security conf 6): the
 # previous version also matched the bare strings '40001' and

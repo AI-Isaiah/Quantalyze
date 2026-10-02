@@ -927,10 +927,12 @@ def _defer_lost_ownership(exc: Exception) -> bool:
 
     Phase 164.9.3.2: the fence raised serialization_failure (40001) before,
     and PostgREST 14 re-runs a 40001 without bound, so the defer never
-    returned. The message literals are the deploy-window fallback: a body
-    still raising 40001 carries the same text, so lost ownership classifies
-    whichever of the migration apply and the worker deploy lands first. A
-    bare 40001 without either literal is an unrelated serialization
+    returned. The message literals cover ONE deploy order: migration first,
+    old worker. The body answers a 55006 once, and an old classifier matches
+    it by the literal. The reverse order (new worker, old body) is NOT
+    covered: the body still raises 40001, PostgREST 14 re-runs it without
+    bound, and no response ever reaches this classifier. That is the pre-fix
+    hang, unchanged, until the migration applies. A bare 40001 without either literal is an unrelated serialization
     conflict and is NOT classified (PR #149 I4 narrowing). Kept local to
     avoid a circular import with main_worker (which imports this module)."""
     if getattr(exc, "code", None) == "55006":  # object_in_use: the claim-token fence

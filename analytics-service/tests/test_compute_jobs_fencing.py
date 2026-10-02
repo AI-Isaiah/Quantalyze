@@ -181,9 +181,12 @@ class TestSerializationFailureDetector:
     Phase 164.9.3.2: the fence raises moved from SQLSTATE 40001 to 55006
     because PostgREST 14 re-runs a transaction that raised 40001 without
     bound, so a stale-token mark never returned to the worker at all. The
-    literal branch is the deploy-window guarantee: an old body (40001)
-    still carries the literal, so a preempted mark is classified whichever
-    of the migration apply and the worker deploy lands first.
+    literal branch covers ONE deploy order: migration first, old worker.
+    The body answers a 55006 once, and an old classifier matches it by the
+    literal. The reverse order (new worker, old body) is NOT covered: the
+    body still raises 40001, PostgREST 14 re-runs it without bound, and no
+    response ever reaches the classifier. That is the pre-fix hang,
+    unchanged, until the migration applies.
 
     PR #149 review I4 (maintainability conf 8 + security conf 6):
     tightened from the previous fuzzy detection that ALSO matched
@@ -210,9 +213,13 @@ class TestSerializationFailureDetector:
         assert _is_serialization_failure(exc) is True
 
     def test_deploy_window_old_code_40001_with_literal_detected(self) -> None:
-        """Deploy window: a worker carrying this classifier meets a body that
-        still raises 40001 (migration not yet applied). The literal fallback
-        must classify it as a preempted mark."""
+        """A 40001 that carries the literal and DOES reach the classifier is
+        still classified as a preempted mark. Through PostgREST 14 this never
+        happens: an old body's 40001 is re-run without bound and no response
+        returns, so the new-worker/old-body deploy order keeps the pre-fix
+        hang until the migration applies. The case this pins is a transport
+        that answers a 40001 once: a non-PostgREST caller, or a PostgREST
+        >= 16."""
         exc = APIError({
             "code": "40001",
             "message": "mark_compute_job_done: job X preempted by watchdog reclaim "
