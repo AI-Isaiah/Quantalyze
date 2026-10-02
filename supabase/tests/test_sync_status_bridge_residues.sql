@@ -58,6 +58,16 @@
 --                 both bodies by design; only its twin (protected failures let
 --                 into the id array) proves it can fail.
 --
+-- Arms R* ([164.6.7-RETRY-PLAIN-COMPLETE], the D-05 keep). Every R arm starts
+-- from a PLAIN 'complete' row with computation_warned FALSE and no provenance,
+-- so the membership arms above never fire and every R arm reaches branch (a).
+-- "Marked" means the job carries an in-scope refresh marker (ledger-refresh;
+-- the composite arm uses ledger-refresh-composite on stitch_composite).
+--   R1            a MARKED in-scope derive_broker_dailies job, failed
+--                 transiently (left failed_retry): the row must still read
+--                 complete. Pre-fix it is rewritten to computing.
+--   R1-COMPOSITE  the same retry on stitch_composite. Folded into section R1.
+--
 -- ⚠️ W1 alone is green under D-04 as first written (branch (b) only, keyed on
 -- the latest failure). W2 is the arm that tells D-04 and D-04b apart, and
 -- W3..W5 exist because a gate that marks X with nothing else in flight never
@@ -606,6 +616,108 @@ BEGIN
   -- RED-UNDER-M: {"arm":"W7","apply":[{"kind":"edit","file":"supabase/migrations/20261003120000_sync_status_bridge_residues.sql","find":"    array_agg(id) FILTER (WHERE NOT is_protected)\n    INTO v_failed_count","replace":"    array_agg(id)\n    INTO v_failed_count","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261003120000_sync_status_bridge_residues.sql","find":"IF NOT v_unprotected_agg_anchored THEN","replace":"IF FALSE AND NOT v_unprotected_agg_anchored THEN","occurrences":1}]}
   IF v_status IS DISTINCT FROM 'complete_with_warnings' OR v_warned IS DISTINCT FROM TRUE THEN
     RAISE EXCEPTION 'TEST FAILED (W7): a PROTECTED refresh failure (marker never retracted, row healthy) changed the published state to % with computation_warned = %. Only an UNPROTECTED failure may enter the membership array; a protected one must leave the row exactly as the honour path left it.', COALESCE(v_status, 'NULL'), COALESCE(v_warned::text, 'NULL');
+  END IF;
+END $$;
+
+-- ===== ARM R1 — a marked in-scope retry keeps a plain complete row ========
+-- [164.6.7-RETRY-PLAIN-COMPLETE]. The row is a plain published 'complete'
+-- (warning cleared, no provenance), and its only in-flight job is the
+-- recurring refresh arm's own derive_broker_dailies job, which fails
+-- TRANSIENTLY and lands on failed_retry. Nothing is broken and nothing a user
+-- started is running, so the published factsheet must stay published. Before
+-- 20261003120000 branch (a) rewrote it to 'computing' on every marked retry,
+-- and the wizard poller then read a published strategy as a running job.
+-- Asserts status ONLY: R5 owns the reaper stamp.
+DO $$
+DECLARE
+  uid        UUID := gen_random_uuid();
+  k          UUID;
+  s          UUID;
+  j          UUID;
+  tok        UUID;
+  v_status   TEXT;
+  v_jobstat  TEXT;
+  v_jobsrc   TEXT;
+BEGIN
+  INSERT INTO auth.users (id, instance_id, email, created_at, updated_at)
+  VALUES (uid, '00000000-0000-0000-0000-000000000000',
+          'bres-' || uid::text || '@quantalyze.test', now(), now());
+  INSERT INTO profiles (id, display_name, email, role)
+  VALUES (uid, 'bres', 'bres-' || uid::text || '@quantalyze.test', 'manager')
+  ON CONFLICT (id) DO UPDATE SET role = EXCLUDED.role;
+  INSERT INTO api_keys (user_id, exchange, label, api_key_encrypted, is_active)
+  VALUES (uid, 'mt5', 'bres mt5', 'x', TRUE) RETURNING id INTO k;
+  INSERT INTO strategies (user_id, api_key_id, name) VALUES (uid, k, 'bres R1') RETURNING id INTO s;
+
+  INSERT INTO strategy_analytics (strategy_id, computation_status, computation_warned)
+  VALUES (s, 'complete', FALSE);
+
+  tok := gen_random_uuid();
+  INSERT INTO compute_jobs (strategy_id, kind, status, claim_token, attempts, max_attempts, metadata)
+  VALUES (s, 'derive_broker_dailies', 'running', tok, 0, 3,
+          jsonb_build_object('source', 'ledger-refresh', 'enqueued_at', now()))
+  RETURNING id INTO j;
+
+  PERFORM mark_compute_job_failed(j, 'venue returned 503, retry scheduled', 'transient', tok);
+
+  SELECT status, metadata ->> 'source' INTO v_jobstat, v_jobsrc FROM compute_jobs WHERE id = j;
+  IF v_jobstat IS DISTINCT FROM 'failed_retry' OR v_jobsrc IS DISTINCT FROM 'ledger-refresh' THEN
+    RAISE EXCEPTION 'TEST FAILED (R1-SETUP): the refresh job is % with source %, not a MARKED failed_retry, so the bridge never decided a marked in-scope retry and the assertion below would pass vacuously.', v_jobstat, COALESCE(v_jobsrc, 'NULL');
+  END IF;
+
+  SELECT computation_status INTO v_status FROM strategy_analytics WHERE strategy_id = s;
+  -- RED-UNDER: delete branch (a)'s status keep arm, so a plain complete row falls
+  --            through to the ELSE and is rewritten to computing (the pre-fix
+  --            behaviour). ⚠️ LAYERED: the keep-arm count anchor is re-baselined.
+  -- RED-UNDER-M: {"arm":"R1","apply":[{"kind":"edit","file":"supabase/migrations/20261003120000_sync_status_bridge_residues.sql","find":"             WHEN v_refresh_keep AND strategy_analytics.computation_status = 'complete'\n             THEN 'complete'\n","replace":"","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261003120000_sync_status_bridge_residues.sql","find":"IF v_keep_arms <> 1 THEN","replace":"IF v_keep_arms <> 0 THEN","occurrences":1}]}
+  IF v_status IS DISTINCT FROM 'complete' THEN
+    RAISE EXCEPTION 'TEST FAILED (R1): a plain complete row whose only in-flight job is a MARKED in-scope refresh retry now reads %. The recurring refresh arm retrying a transient venue error is not new work a user started; rewriting the published factsheet to computing on every such retry is [164.6.7-RETRY-PLAIN-COMPLETE].', COALESCE(v_status, 'NULL');
+  END IF;
+END $$;
+
+-- ===== ARM R1-COMPOSITE — the same retry on stitch_composite ==============
+-- The composite fan-out enqueues stitch_composite with the
+-- ledger-refresh-composite marker. Folded into section R1 by the runner.
+DO $$
+DECLARE
+  uid        UUID := gen_random_uuid();
+  k          UUID;
+  s          UUID;
+  j          UUID;
+  tok        UUID;
+  v_status   TEXT;
+  v_jobstat  TEXT;
+  v_jobsrc   TEXT;
+BEGIN
+  INSERT INTO auth.users (id, instance_id, email, created_at, updated_at)
+  VALUES (uid, '00000000-0000-0000-0000-000000000000',
+          'bres-' || uid::text || '@quantalyze.test', now(), now());
+  INSERT INTO profiles (id, display_name, email, role)
+  VALUES (uid, 'bres', 'bres-' || uid::text || '@quantalyze.test', 'manager')
+  ON CONFLICT (id) DO UPDATE SET role = EXCLUDED.role;
+  INSERT INTO api_keys (user_id, exchange, label, api_key_encrypted, is_active)
+  VALUES (uid, 'mt5', 'bres mt5', 'x', TRUE) RETURNING id INTO k;
+  INSERT INTO strategies (user_id, api_key_id, name) VALUES (uid, k, 'bres R1C') RETURNING id INTO s;
+
+  INSERT INTO strategy_analytics (strategy_id, computation_status, computation_warned)
+  VALUES (s, 'complete', FALSE);
+
+  tok := gen_random_uuid();
+  INSERT INTO compute_jobs (strategy_id, kind, status, claim_token, attempts, max_attempts, metadata)
+  VALUES (s, 'stitch_composite', 'running', tok, 0, 3,
+          jsonb_build_object('source', 'ledger-refresh-composite', 'enqueued_at', now()))
+  RETURNING id INTO j;
+
+  PERFORM mark_compute_job_failed(j, 'composite leg not ready, retry scheduled', 'transient', tok);
+
+  SELECT status, metadata ->> 'source' INTO v_jobstat, v_jobsrc FROM compute_jobs WHERE id = j;
+  IF v_jobstat IS DISTINCT FROM 'failed_retry' OR v_jobsrc IS DISTINCT FROM 'ledger-refresh-composite' THEN
+    RAISE EXCEPTION 'TEST FAILED (R1-SETUP): the composite refresh job is % with source %, not a MARKED failed_retry, so the bridge never decided a marked in-scope retry.', v_jobstat, COALESCE(v_jobsrc, 'NULL');
+  END IF;
+
+  SELECT computation_status INTO v_status FROM strategy_analytics WHERE strategy_id = s;
+  IF v_status IS DISTINCT FROM 'complete' THEN
+    RAISE EXCEPTION 'TEST FAILED (R1-COMPOSITE): a plain complete composite row whose only in-flight job is a MARKED stitch_composite retry now reads %. The composite refresh arm is a different enqueue path from the single-key one, and the residue holds on both ([164.6.7-RETRY-PLAIN-COMPLETE]).', COALESCE(v_status, 'NULL');
   END IF;
 END $$;
 

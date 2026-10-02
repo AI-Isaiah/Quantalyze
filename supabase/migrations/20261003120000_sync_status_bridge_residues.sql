@@ -16,8 +16,8 @@
 --   (measured on both `derive_broker_dailies` and `stitch_composite`).
 --   This file clears the flag exactly when the row's writer-provenance job is
 --   among the UNPROTECTED live failures of this call (see THE DELTA).
---   Plan 02 of this phase appends [164.6.7-RETRY-PLAIN-COMPLETE] to this same
---   file, and plan 03 appends the in-bridge per-strategy lock.
+--   [164.6.7-RETRY-PLAIN-COMPLETE] (see RETRY-PLAIN-COMPLETE below) is closed
+--   in this same file, and plan 03 appends the in-bridge per-strategy lock.
 --
 -- D-04 -> D-04b (the shape actually shipped). D-04 as first written cleared the
 -- flag in branch (b) only, keyed on the single latest unprotected failure.
@@ -61,6 +61,33 @@
 -- With no unprotected live failure the array is NULL, membership in NULL is
 -- NULL, and every new arm falls through to the pre-change behaviour. A NULL
 -- provenance job id never matches (plain equality, never the NULL-safe form).
+--
+-- RETRY-PLAIN-COMPLETE (D-05). [164.6.7-RETRY-PLAIN-COMPLETE]: the 164.6.7
+-- transient retry protected only a warned row. A plain `complete` row whose
+-- only in-flight job was the recurring refresh arm's own retry (an in-scope
+-- kind carrying a refresh marker, left on failed_retry by a transient mark)
+-- took branch (a) and was rewritten to computing on every such retry. Measured
+-- on the pg-lane before this file: `complete` -> `computing` for both
+-- derive_broker_dailies and stitch_composite. Latent today (0 plain `complete`
+-- rows in the live ledger cohort), so this is a correctness fix ahead of use.
+--   1. Read 1 also counts the in-flight jobs that do NOT carry an in-scope
+--      refresh marker, in the SAME statement (same snapshot), as a FILTERed
+--      second count. Its marker list and kind list are copies of the
+--      protection predicate's, and a NULL marker or kind counts as unmarked.
+--   2. A keep flag is TRUE only when the published row is healthy, that
+--      unmarked count is zero, AND no unprotected live failure exists. Both
+--      counts default to 1 when unknown, so an unknown resolves to today's
+--      behaviour (the conservative reading of research assumption A2).
+--   3. Branch (a)'s status CASE gains an arm, after the warned arm, that
+--      keeps `complete` when the flag holds and the row already reads
+--      `complete`; the reaper-stamp CASE gains the matching arm that clears
+--      the stamp (a kept row is not computing, so it must carry no stamp).
+-- It never widens protection: an unmarked job in flight, an out-of-scope kind
+-- carrying a marker, a retracted marker, a live unprotected failure, or a row
+-- that is not already published all still move the row to computing. A
+-- `failed` row with a marked retry still goes computing (the health read is
+-- FALSE for it). `complete_with_warnings` is untouched: its own arm precedes
+-- the keep arm.
 --
 -- WHAT IT DOES NOT CLOSE (D-18, FOUNDER-OWNED, ACCEPTED 2026-09-27, default (a)).
 -- The PRE corner: a SIBLING's bridge call lands while X is still `running`,
@@ -150,6 +177,8 @@ DECLARE
   v_publish_healthy    BOOLEAN;
   v_protect_hold       BOOLEAN;
   v_unprotected_job_ids UUID[];
+  v_nonterminal_unmarked_count INTEGER;
+  v_refresh_keep       BOOLEAN;
 BEGIN
   IF p_strategy_id IS NULL THEN
     RAISE EXCEPTION 'sync_strategy_analytics_status: p_strategy_id is required'
@@ -228,7 +257,14 @@ BEGIN
   -- positions_atomic_rebuild and sync_trades already take. Those RPCs are
   -- defined in other migrations, so it is deliberately NOT attempted here — a
   -- half-applied lock discipline is worse than a documented window.
-  SELECT count(*) INTO v_nonterminal_count
+  SELECT count(*),
+         count(*) FILTER (WHERE NOT COALESCE(
+           (metadata ->> 'source') IN ('ledger-refresh', 'ledger-refresh-composite')
+           AND kind IN ('derive_broker_dailies',
+                        'compute_analytics_from_csv',
+                        'stitch_composite'),
+           FALSE))
+    INTO v_nonterminal_count, v_nonterminal_unmarked_count
     FROM compute_jobs
    WHERE strategy_id = p_strategy_id
      AND status IN ('pending', 'running', 'done_pending_children', 'failed_retry');
@@ -545,6 +581,10 @@ BEGIN
                     AND COALESCE(v_failed_count, 1) = 0
                     AND COALESCE(v_unresolved_count, 0) > 0;
 
+  v_refresh_keep := v_publish_healthy
+                    AND COALESCE(v_nonterminal_unmarked_count, 1) = 0
+                    AND COALESCE(v_failed_count, 1) = 0;
+
   -- (a) any non-terminal row → 'computing', UNLESS the runner has already
   -- written 'complete_with_warnings' OR set its runner-owned computation_warned
   -- marker. That warning is a runner-owned terminal sub-state the compute_jobs
@@ -605,6 +645,8 @@ BEGIN
              WHEN strategy_analytics.computation_status = 'complete_with_warnings'
                   OR strategy_analytics.computation_warned
              THEN 'complete_with_warnings'
+             WHEN v_refresh_keep AND strategy_analytics.computation_status = 'complete'
+             THEN 'complete'
              ELSE 'computing'
            END,
            computation_warned = CASE WHEN strategy_analytics.computation_error_source = 'writer' AND strategy_analytics.computation_error_job_id = ANY (v_unprotected_job_ids) THEN FALSE ELSE strategy_analytics.computation_warned END,
@@ -846,6 +888,11 @@ DECLARE
   v_membership_sites           INTEGER;
   v_warned_case_sites          INTEGER;
   v_a_status_first_anchored    BOOLEAN;
+  v_read1_fold_anchored        BOOLEAN;
+  v_unmarked_filter_anchored   BOOLEAN;
+  v_kind_lists                 INTEGER;
+  v_refresh_keep_anchored      BOOLEAN;
+  v_keep_arms                  INTEGER;
 BEGIN
   -- ======================================================================
   -- (P0) THE COLUMN SHAPE. Type, nullability and defaultlessness are ASSERTED,
@@ -1413,6 +1460,44 @@ BEGIN
   -- the same bound the carried b-prime negatives use.
   IF v_body ~* 'SET\s+computation_error\s*=\s*CASE(?:(?!WHERE\s+strategy_id)(?:.|\n))*?computation_warned\s*=' THEN
     RAISE EXCEPTION 'bridge-residue: branch (b-prime) writes computation_warned. A protected refresh failure over a healthy published row must leave the publish state, including the runner-owned warning flag, untouched.';
+  END IF;
+
+  -- (vii) [164.6.7-RETRY-PLAIN-COMPLETE]: the unmarked non-terminal count is
+  -- read in the SAME statement as the non-terminal count (same snapshot, so
+  -- the carried READ ORDER pin above still sees read 1 ahead of the partition).
+  v_read1_fold_anchored := v_body ~ 'INTO\s+v_nonterminal_count\s*,\s*v_nonterminal_unmarked_count';
+  IF NOT v_read1_fold_anchored THEN
+    RAISE EXCEPTION 'bridge-residue: the unmarked non-terminal count is not read INTO v_nonterminal_unmarked_count by the same statement as v_nonterminal_count. Read in its own statement it takes its own snapshot, and a job crossing between the two reads is counted marked by one and absent from the other, so a plain complete row can be kept over unmarked work in flight.';
+  END IF;
+
+  -- (viii) the count excludes ONLY a job carrying an in-scope refresh marker:
+  -- the marker test and the kind test sit inside one COALESCE, so a NULL
+  -- marker or kind counts as UNMARKED (fail toward today's behaviour).
+  v_unmarked_filter_anchored := v_body ~ 'count\s*\(\s*\*\s*\)\s*FILTER\s*\(\s*WHERE\s+NOT\s+COALESCE\s*\(\s*\(\s*metadata\s*->>\s*''source''\s*\)\s*IN\s*\(\s*''ledger-refresh''\s*,\s*''ledger-refresh-composite''\s*\)\s*AND\s+kind\s+IN\s*\([^)]*\)\s*,\s*FALSE\s*\)\s*\)';
+  IF NOT v_unmarked_filter_anchored THEN
+    RAISE EXCEPTION 'bridge-residue: the unmarked non-terminal FILTER is not NOT COALESCE(<marker in the two refresh markers> AND <kind in scope>, FALSE). Without the marker test an unmarked user-started job is treated as a refresh retry; without the kind test a request-derived process_key_long source keeps a published row; without the COALESCE a NULL marker drops the job from the count. Each keeps a plain complete row over work a user is waiting on.';
+  END IF;
+
+  -- (ix) every kind list in the body spells the SAME scope (whitespace
+  -- normalised): the protection predicate and the unmarked FILTER must agree.
+  SELECT count(DISTINCT regexp_replace(m[1], '\s+', '', 'g')) INTO v_kind_lists
+    FROM regexp_matches(v_body, '\mkind\s+IN\s*\(([^)]*)\)', 'g') AS m;
+  IF v_kind_lists <> 1 THEN
+    RAISE EXCEPTION 'bridge-residue: the body spells % distinct refresh kind scopes, not 1. The protection predicate and the unmarked non-terminal FILTER must name the same kinds, or a kind protected at its failure bounces the row to computing on its retry (or the reverse).', v_kind_lists;
+  END IF;
+
+  -- (x) the keep flag, with both counts defaulting to the NOT-keep side.
+  v_refresh_keep_anchored := v_body ~ 'v_refresh_keep\s*:=\s*v_publish_healthy\s+AND\s+COALESCE\s*\(\s*v_nonterminal_unmarked_count\s*,\s*1\s*\)\s*=\s*0\s+AND\s+COALESCE\s*\(\s*v_failed_count\s*,\s*1\s*\)\s*=\s*0';
+  IF NOT v_refresh_keep_anchored THEN
+    RAISE EXCEPTION 'bridge-residue: v_refresh_keep is not v_publish_healthy AND COALESCE(<unmarked count>, 1) = 0 AND COALESCE(<failed count>, 1) = 0. Dropping a conjunct keeps a plain complete row while unmarked work is in flight, while an unprotected failure is live, or on a row that is not published; a 0 default would keep it on an unknown count.';
+  END IF;
+
+  -- (xi) the keep arms in branch (a): a COUNT, so a lost arm cannot hide
+  -- behind a surviving one.
+  SELECT count(*) INTO v_keep_arms
+    FROM regexp_matches(v_body, 'WHEN\s+v_refresh_keep\s+AND\s+strategy_analytics\.computation_status\s*=\s*''complete''', 'g');
+  IF v_keep_arms <> 1 THEN
+    RAISE EXCEPTION 'bridge-residue: branch (a) carries % refresh keep arm(s), not 1. Without the status keep arm a plain complete row is rewritten to computing on every marked in-scope refresh retry ([164.6.7-RETRY-PLAIN-COMPLETE]).', v_keep_arms;
   END IF;
 
   RAISE NOTICE 'Migration 20261003120000: sync_strategy_analytics_status re-based on 20260906120000 (BRIDGERESIDUE, Phase 164.5.2.1); every carried 20260906120000 anchor passed on the new body, and this file''s own comment-stripped anchors passed after them.';
