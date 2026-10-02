@@ -9278,7 +9278,10 @@ backs ~9 surfaces — the remedy for any of its flows is a NEW named limiter, ne
   a docs-only PR that touches one of them still runs `frontend-test`. (Round 3, CR-01, same day:
   `config.json` was added after a whole-tree derivation found `critical-regressions.test.ts` reading
   it; the earlier "six" was measured from two named test files only. The founder confirmed the list
-  may grow beyond the original three.) Both halves above therefore
+  may grow beyond the original three.) A docs-only push also takes the short path only when Railway's
+  own gate would pass on its predecessor: every GitHub Actions check run on `before`, all workflows
+  and events, non-red (`docs/runbooks/railway-worker.md`, Recovery step 2). So a docs merge can no
+  longer turn `main` green over a red predecessor either. Both halves above therefore
   still hold for those files. The paragraph above is kept as lineage.
   ⛔ **TWO REMEDIES WERE CONSIDERED AND BOTH REFUSED, recorded so neither is re-proposed as new.**
   (1) Widen the always-on set to include `frontend-test` — REFUSED: that job is most of the saving

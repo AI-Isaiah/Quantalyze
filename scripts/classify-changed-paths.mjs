@@ -256,21 +256,23 @@ export function changedFilesAgainstBase({ baseRefName = process.env.GITHUB_BASE_
  * code CI had rejected, and Railway (which deploys on a docs-only push, gated on
  * that push's own suite) shipped it. Red, cancelled, pending, absent, or a
  * lookup that failed: full corpus, with the reason printed.
- * (Review 164.9.4 round 3, WR-01 + SFH LOW-04: "proven" now means `before`'s
- * whole CI WORKFLOW RUN concluded `success`, not only its `frontend` check run.
- * Railway gates on the workflow run, and `e2e` and `lighthouse-mobile` are
- * docs-filtered jobs outside the aggregator: CI run `36892795002` concluded
- * `failure` while its `frontend` concluded `success`.)
+ * (Review 164.9.4 round 3, WR-01 + SFH LOW-04: "proven" now mirrors Railway's
+ * own gate, which `docs/runbooks/railway-worker.md` (Recovery, step 2) records as
+ * the CHECK-RUNS of the commit, every workflow's: every GitHub Actions check run
+ * on `before` must be non-red. The `frontend` check alone was not enough: `e2e`
+ * and `lighthouse-mobile` are docs-filtered jobs outside the aggregator, and CI
+ * run `36892795002` concluded `failure` while its `frontend` concluded
+ * `success`. See `predecessorVerdict`.)
  *
- * @param {{before?: string, forced?: string|boolean, cwd?: string, fetchWorkflowRuns?: (sha: string) => any}} opts —
+ * @param {{before?: string, forced?: string|boolean, cwd?: string, fetchCheckRuns?: (sha: string) => any}} opts —
  *   `before` and `forced` come from `github.event.before` / `.forced`, passed in
  *   through the step's `env:`. `cwd` exists for the self-test's scratch repos.
- *   `fetchWorkflowRuns` is the predecessor-verdict seam: production reads it
- *   through `gh api` (`readWorkflowRuns`); the self-test injects canned
+ *   `fetchCheckRuns` is the predecessor-verdict seam: production reads it
+ *   through `gh api` (`readCheckRuns`); the self-test injects canned
  *   responses, offline.
  * @returns {{docsOnly: boolean, reason: string}}
  */
-export function classifyPushRange({ before, forced, cwd, fetchWorkflowRuns = defaultFetchWorkflowRuns } = {}) {
+export function classifyPushRange({ before, forced, cwd, fetchCheckRuns = defaultFetchCheckRuns } = {}) {
   const fullCorpus = (reason) => ({ docsOnly: false, reason: `${reason} — classified as code, full corpus` });
   const code = (reason) => fullCorpus(`push range undeterminable (${reason})`);
   const sha = String(before ?? "").trim();
@@ -307,48 +309,49 @@ export function classifyPushRange({ before, forced, cwd, fetchWorkflowRuns = def
   if (read.length > 0) return fullCorpus(`the pushed range changes ${read.length} planning file(s) a frontend-test assertion reads: ${read.join(", ")}`);
   // Review 164.9.4 round 2, SFH-04 (round 3, WR-01). A docs-only range proves
   // nothing about the CODE under it, which is exactly `before`'s code. The short
-  // path is taken only when `before`'s own CI workflow run(s) concluded
-  // `success`; see `predecessorVerdict`. Consulted LAST, so a code push never
-  // calls the API.
-  const verdict = predecessorVerdict(sha, fetchWorkflowRuns);
-  if (!verdict.ok) return fullCorpus(`predecessor ${sha.slice(0, 12)} has no successful CI run (${verdict.why})`);
+  // path is taken only when every GitHub Actions check run on `before` is
+  // non-red, Railway's own gate; see `predecessorVerdict`. Consulted LAST, so a
+  // code push never calls the API.
+  const verdict = predecessorVerdict(sha, fetchCheckRuns);
+  if (!verdict.ok) return fullCorpus(`predecessor ${sha.slice(0, 12)} is not proven green (${verdict.why})`);
   return { docsOnly: true, reason: `${range}; predecessor ${sha.slice(0, 12)} ${verdict.why}` };
 }
 
 /**
- * The predecessor's verdict is its CI WORKFLOW RUN, the same verdict Railway
- * gates on (review 164.9.4 round 3, WR-01 + SFH LOW-04). The `frontend`
- * aggregator's check run is NOT enough: `e2e` and `lighthouse-mobile` are
- * docs-filtered jobs outside the aggregator that can fail the run while
- * `frontend` stays green (measured: CI run `36892795002`).
+ * The predecessor's verdict mirrors RAILWAY'S OWN GATE (review 164.9.4 round 3,
+ * WR-01 + SFH LOW-04, orchestrator decision 2026-10-02).
+ * `docs/runbooks/railway-worker.md` (Recovery, step 2) records that Railway
+ * gates on the CHECK-RUNS of a commit, not the combined status, "so every
+ * workflow's check on it must be non-red". So the predicate reads every check
+ * run GitHub Actions created on `before` (app slug `github-actions`), across
+ * every workflow and every event, `workflow_dispatch` included because Railway
+ * counts those too. Non-Actions check runs (Vercel's, for one) are ignored.
  *
- * `PREDECESSOR_WORKFLOW_FILE` is `ci.yml`'s file name, which the lookup is
- * scoped to; `PREDECESSOR_WORKFLOW_NAME` is its `name:`, re-checked on every
- * returned run. Only `push` and `workflow_dispatch` runs count: those are the
- * runs `main` records for a SHA. Each run in the list carries its LATEST attempt.
+ * Per check NAME the latest run (highest id) is the verdict, and it must be
+ * `completed` with a conclusion in `PREDECESSOR_OK_CONCLUSIONS`. At least one
+ * Actions check run must exist.
  */
-export const PREDECESSOR_WORKFLOW_FILE = "ci.yml";
-export const PREDECESSOR_WORKFLOW_NAME = "CI";
-const PREDECESSOR_EVENTS = new Set(["push", "workflow_dispatch"]);
+export const PREDECESSOR_APP_SLUG = "github-actions";
+export const PREDECESSOR_OK_CONCLUSIONS = new Set(["success", "skipped", "neutral"]);
 
-/** The `gh api` path for `before`'s CI workflow runs. One page of 100 is far above any real count. */
-export function workflowRunsPath(repo, sha) {
-  return `repos/${repo}/actions/workflows/${PREDECESSOR_WORKFLOW_FILE}/runs?head_sha=${sha}&per_page=100`;
+/** The `gh api` path for `before`'s check runs. A truncated page is refused, never trusted. */
+export function checkRunsPath(repo, sha) {
+  return `repos/${repo}/commits/${sha}/check-runs?filter=latest&per_page=100`;
 }
 
 /**
- * PRODUCTION reader for `before`'s CI workflow runs, through `gh api` with the
- * job's `GH_TOKEN` (`actions: read`). `GITHUB_REPOSITORY` is set on every
- * Actions runner. THROWS on anything it cannot read; `predecessorVerdict` turns
- * a throw into a code verdict.
+ * PRODUCTION reader for `before`'s check runs, through `gh api` with the job's
+ * `GH_TOKEN` (`checks: read`). `GITHUB_REPOSITORY` is set on every Actions
+ * runner. THROWS on anything it cannot read; `predecessorVerdict` turns a throw
+ * into a code verdict.
  */
-export function readWorkflowRuns(sha, repo = process.env.GITHUB_REPOSITORY) {
+export function readCheckRuns(sha, repo = process.env.GITHUB_REPOSITORY) {
   if (!/^[\w.-]+\/[\w.-]+$/.test(String(repo ?? ""))) {
     throw new Error(`GITHUB_REPOSITORY is ${repo ? "not an owner/name pair" : "absent"}`);
   }
   // argv elements, never a shell string; a bounded wait, since the job has five
   // minutes in total.
-  const raw = execFileSync("gh", ["api", workflowRunsPath(repo, sha)], {
+  const raw = execFileSync("gh", ["api", checkRunsPath(repo, sha)], {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
     timeout: 60_000,
@@ -364,7 +367,7 @@ export function readWorkflowRuns(sha, repo = process.env.GITHUB_REPOSITORY) {
  * would not be a red: `predecessorVerdict` turns it into a code verdict, which
  * is what most of those rows expect anyway.
  */
-let defaultFetchWorkflowRuns = readWorkflowRuns;
+let defaultFetchCheckRuns = readCheckRuns;
 
 /**
  * Review 164.9.4 round 2, LOW-03: git's own reason for a fail-safe arm, as
@@ -387,39 +390,43 @@ function firstLine(e) {
 }
 
 /**
- * PURE apart from the injected `fetchWorkflowRuns(sha)`: did `before`'s CI
- * workflow run(s) conclude SUCCESS? Anything else (red, cancelled, pending,
- * absent, an unreadable or truncated response, a run for another commit, or a
- * lookup that threw) is `ok: false` with the reason, and the caller runs the
- * full corpus.
+ * PURE apart from the injected `fetchCheckRuns(sha)`: would Railway's gate pass
+ * on `before`? Anything else (a red, cancelled, timed-out, action-required or
+ * stale check, a pending one, no Actions check at all, a truncated or malformed
+ * response, a run for another commit, or a lookup that threw) is `ok: false`
+ * with the reason, and the caller runs the full corpus.
  *
- * ⛔ FAIL SAFE TO CODE. Every `CI` push or dispatch run on the commit must have
- * completed with `success`; one pending or red run is enough to refuse, so a
- * green dispatch cannot hide a red push or the reverse.
+ * ⛔ FAIL SAFE TO CODE.
  *
  * @returns {{ok: boolean, why: string}}
  */
-export function predecessorVerdict(sha, fetchWorkflowRuns = defaultFetchWorkflowRuns) {
+export function predecessorVerdict(sha, fetchCheckRuns = defaultFetchCheckRuns) {
   let body;
   try {
-    body = fetchWorkflowRuns(sha);
+    body = fetchCheckRuns(sha);
   } catch (e) {
-    return { ok: false, why: `the workflow-run lookup failed: ${firstLine(e)}` };
+    return { ok: false, why: `the check-run lookup failed: ${firstLine(e)}` };
   }
-  if (!Array.isArray(body?.workflow_runs)) return { ok: false, why: "the workflow-run lookup returned no workflow_runs array" };
-  const all = body.workflow_runs;
+  if (!Array.isArray(body?.check_runs)) return { ok: false, why: "the check-run lookup returned no check_runs array" };
+  const all = body.check_runs;
   if (typeof body.total_count !== "number" || body.total_count > all.length) {
-    return { ok: false, why: `the lookup returned ${all.length} of ${body.total_count} run(s), so the rest are unread` };
+    return { ok: false, why: `the lookup returned ${all.length} of ${body.total_count} check run(s), so the rest are unread` };
   }
   const foreign = all.find((r) => r?.head_sha !== sha);
-  if (foreign) return { ok: false, why: `the lookup returned a run for another commit (${String(foreign?.head_sha).slice(0, 12)})` };
-  const runs = all.filter((r) => r?.name === PREDECESSOR_WORKFLOW_NAME && PREDECESSOR_EVENTS.has(r?.event));
-  if (runs.length === 0) return { ok: false, why: "absent: no CI push or dispatch run on that commit" };
+  if (foreign) return { ok: false, why: `the lookup returned a check run for another commit (${String(foreign?.head_sha).slice(0, 12)})` };
+  const latest = new Map();
+  for (const r of all) {
+    if (r?.app?.slug !== PREDECESSOR_APP_SLUG) continue;
+    const prev = latest.get(r.name);
+    if (!prev || Number(r.id) > Number(prev.id)) latest.set(r.name, r);
+  }
+  const runs = [...latest.values()];
+  if (runs.length === 0) return { ok: false, why: "absent: no GitHub Actions check run on that commit" };
   const pending = runs.find((r) => r.status !== "completed");
-  if (pending) return { ok: false, why: `pending: CI ${pending.event} run ${pending.id} status ${pending.status}` };
-  const bad = runs.find((r) => r.conclusion !== "success");
-  if (bad) return { ok: false, why: `CI ${bad.event} run ${bad.id} concluded ${bad.conclusion}` };
-  return { ok: true, why: `CI concluded success (${runs.length} run(s))` };
+  if (pending) return { ok: false, why: `pending: check '${pending.name}' status ${pending.status}` };
+  const bad = runs.find((r) => !PREDECESSOR_OK_CONCLUSIONS.has(r.conclusion));
+  if (bad) return { ok: false, why: `check '${bad.name}' concluded ${bad.conclusion}` };
+  return { ok: true, why: `all ${runs.length} GitHub Actions check(s) non-red` };
 }
 
 /**
@@ -469,14 +476,14 @@ function runMainOnPush(cwd, env, { gh = "fail" } = {}) {
   // ⭐ OFFLINE BY CONSTRUCTION (SFH-04). A fake `gh` goes FIRST on the child's
   // PATH, so the production reader runs its real argv and never reaches the
   // network. It records the argv it was given and answers with the canned
-  // workflow-run body for `gh` ("success" | "failure"), or exits 1 for "fail". The
+  // check-run body for `gh` ("success" | "failure"), or exits 1 for "fail". The
   // default is "fail": a row that reaches the lookup without asking for a
   // verdict reads as code, the safe direction.
   const bin = mkdtempSync(join(tmpdir(), "gsd-classify-gh-"));
   const argvFile = join(bin, "argv");
   const body = JSON.stringify({
     total_count: 1,
-    workflow_runs: [{ id: 1, name: PREDECESSOR_WORKFLOW_NAME, event: "push", head_sha: env.PUSH_BEFORE_SHA ?? "", status: "completed", conclusion: gh }],
+    check_runs: [{ id: 1, name: "frontend", app: { slug: PREDECESSOR_APP_SLUG }, head_sha: env.PUSH_BEFORE_SHA ?? "", status: "completed", conclusion: gh }],
   });
   const script =
     gh === "fail"
@@ -511,12 +518,17 @@ function runMainOnPush(cwd, env, { gh = "fail" } = {}) {
   }
 }
 
-/** Canned workflow-run bodies for the in-process predecessor rows: CI push runs on the asked SHA unless a row overrides a field. */
-const ciRuns = (...runs) => (sha) => ({
+/**
+ * Canned check-run bodies for the in-process predecessor rows: GitHub Actions
+ * check runs on the asked SHA, named `frontend` and numbered in order, unless a
+ * row overrides a field.
+ */
+const checkRuns = (...runs) => (sha) => ({
   total_count: runs.length,
-  workflow_runs: runs.map((r, i) => ({ id: i + 1, name: PREDECESSOR_WORKFLOW_NAME, event: "push", head_sha: sha, ...r })),
+  check_runs: runs.map((r, i) => ({ id: i + 1, name: "frontend", app: { slug: PREDECESSOR_APP_SLUG }, head_sha: sha, ...r })),
 });
-const GREEN = ciRuns({ status: "completed", conclusion: "success" });
+const GREEN = checkRuns({ status: "completed", conclusion: "success" });
+const done = (name, conclusion, extra = {}) => ({ name, status: "completed", conclusion, ...extra });
 
 /**
  * The fixture table. Every row carries its own claim and fires on its own
@@ -715,7 +727,7 @@ const CASES = [
         const before = r.commit({ "src/a.ts": "export {};\n" });
         r.commit({ ".planning/STATE.md": "# s\n" });
         let pass = ok(
-          classifyPushRange({ before, cwd: r.dir, fetchWorkflowRuns: GREEN }).docsOnly === true,
+          classifyPushRange({ before, cwd: r.dir, fetchCheckRuns: GREEN }).docsOnly === true,
           "classifyPushRange says docs-only for a .planning/-only pushed range on a green predecessor",
         );
         const e2e = runMainOnPush(r.dir, { PUSH_BEFORE_SHA: before }, { gh: "success" });
@@ -769,7 +781,7 @@ const CASES = [
         );
         // CALIBRATION: the same repo says docs-only for its real range, so a
         // `false` below is caused by the bad input and not by the fixture.
-        pass = ok(classifyPushRange({ before: base, cwd: r.dir, fetchWorkflowRuns: GREEN }).docsOnly === true, "CALIBRATION: the real pushed range is docs-only") && pass;
+        pass = ok(classifyPushRange({ before: base, cwd: r.dir, fetchCheckRuns: GREEN }).docsOnly === true, "CALIBRATION: the real pushed range is docs-only") && pass;
         const undeterminable = [
           ["a non-ancestor (force-pushed-over) before-SHA", { before: sibling }],
           ["a forced push flag (string, as GitHub's expression renders it)", { before: base, forced: "true" }],
@@ -798,7 +810,7 @@ const CASES = [
     },
   },
   {
-    claim: "SFH-04 / WR-01 r3: a docs-only push on an UNPROVEN predecessor runs the full corpus; only a green CI workflow run on `before` earns the short path",
+    claim: "SFH-04 / WR-01 r3: a docs-only push on an UNPROVEN predecessor runs the full corpus; only Railway's gate (every Actions check run on `before` non-red) earns the short path",
     run: (ok) => {
       // RED against the round-1 code, which judged the pushed range alone: every
       // row below then said docs_only=true over a red or unfinished code commit.
@@ -809,27 +821,43 @@ const CASES = [
         const sha12 = before.slice(0, 12);
         // CALIBRATION: with a green predecessor this exact range IS docs-only,
         // so each `false` below is caused by the verdict and not by the range.
-        let pass = ok(classifyPushRange({ before, cwd: r.dir, fetchWorkflowRuns: GREEN }).docsOnly === true, "CALIBRATION: green predecessor, docs-only range → docs_only=true");
-        const unproven = [
-          ["a RED predecessor (CI run concluded failure)", ciRuns({ status: "completed", conclusion: "failure" }), "concluded failure"],
-          // Review round 3 WR-01: CI run 36892795002's shape. Its `frontend` check
-          // concluded success; a non-aggregated job reddened the RUN. Only the run counts.
-          ["a RED CI run whose frontend check was green (run 36892795002's shape)", ciRuns({ status: "completed", conclusion: "failure", frontend: "success" }), "concluded failure"],
-          ["a CANCELLED predecessor", ciRuns({ status: "completed", conclusion: "cancelled" }), "concluded cancelled"],
-          ["a PENDING predecessor (its CI still running)", ciRuns({ status: "in_progress", conclusion: null }), "status in_progress"],
-          ["a MISSING predecessor verdict (no CI run)", () => ({ total_count: 0, workflow_runs: [] }), "absent"],
-          ["a green push run beside a red dispatch run on the same commit", ciRuns({ status: "completed", conclusion: "success" }, { event: "workflow_dispatch", status: "completed", conclusion: "failure" }), "workflow_dispatch run 2 concluded failure"],
-          ["an API ERROR during the lookup", () => { const e = new Error("Command failed: gh api"); e.stderr = "gh: HTTP 502: Bad Gateway\n"; throw e; }, "gh: HTTP 502: Bad Gateway"],
-          ["a malformed API body", () => ({ message: "Not Found" }), "no workflow_runs array"],
-          ["a TRUNCATED lookup (more runs than one page)", (sha) => ({ ...GREEN(sha), total_count: 150 }), "the rest are unread"],
-          ["a run for ANOTHER commit in the response", ciRuns({ status: "completed", conclusion: "success", head_sha: "f".repeat(40) }), "another commit"],
-          ["only a pull_request CI run (not a main verdict)", ciRuns({ event: "pull_request", status: "completed", conclusion: "success" }), "absent"],
+        let pass = ok(classifyPushRange({ before, cwd: r.dir, fetchCheckRuns: GREEN }).docsOnly === true, "CALIBRATION: green predecessor, docs-only range → docs_only=true");
+        // Rows that MUST take the short path: each pins one half of the rule, so
+        // a predicate that refused everything could not pass this table.
+        const proven = [
+          ["every Actions check green, one SKIPPED and one NEUTRAL", checkRuns(done("frontend", "success"), done("e2e", "skipped"), done("lighthouse-mobile", "neutral"))],
+          ["a FAILED non-Actions check (a Vercel deployment) is ignored", checkRuns(done("frontend", "success"), done("Vercel", "failure", { app: { slug: "vercel" } }))],
+          ["an older RED run superseded by a newer GREEN run of the same check", checkRuns(done("e2e", "failure"), done("e2e", "success"), done("frontend", "success"))],
         ];
-        for (const [label, fetchWorkflowRuns, why] of unproven) {
-          const v = classifyPushRange({ before, cwd: r.dir, fetchWorkflowRuns });
+        for (const [label, fetchCheckRuns] of proven) {
+          const v = classifyPushRange({ before, cwd: r.dir, fetchCheckRuns });
+          pass = ok(v.docsOnly === true, `${label} → docs_only=true (${v.reason})`) && pass;
+        }
+        const unproven = [
+          ["a RED predecessor (frontend concluded failure)", checkRuns(done("frontend", "failure")), "concluded failure"],
+          // Review round 3 WR-01: CI run 36892795002's shape. Its `frontend` check
+          // concluded success while a job outside the aggregator reddened the run.
+          ["a RED non-aggregated check beside a green frontend (run 36892795002's shape)", checkRuns(done("frontend", "success"), done("e2e", "failure")), "'e2e' concluded failure"],
+          ["a RED check from ANOTHER workflow on the same commit", checkRuns(done("frontend", "success"), done("apply-test", "failure")), "'apply-test' concluded failure"],
+          ["a RED dispatch-run check (Railway counts dispatch runs too)", checkRuns(done("frontend", "success"), done("secret-scan", "failure")), "'secret-scan' concluded failure"],
+          ["an older GREEN run superseded by a newer RED run of the same check", checkRuns(done("e2e", "success"), done("e2e", "failure")), "'e2e' concluded failure"],
+          ["a CANCELLED predecessor", checkRuns(done("frontend", "cancelled")), "concluded cancelled"],
+          ["a TIMED-OUT check", checkRuns(done("frontend", "timed_out")), "concluded timed_out"],
+          ["an ACTION_REQUIRED check", checkRuns(done("frontend", "action_required")), "concluded action_required"],
+          ["a STALE check", checkRuns(done("frontend", "stale")), "concluded stale"],
+          ["a PENDING predecessor (its CI still running)", checkRuns({ name: "frontend", status: "in_progress", conclusion: null }), "status in_progress"],
+          ["a MISSING predecessor verdict (no check run)", () => ({ total_count: 0, check_runs: [] }), "absent"],
+          ["only non-Actions check runs (no Actions verdict at all)", checkRuns(done("Vercel", "success", { app: { slug: "vercel" } })), "absent"],
+          ["an API ERROR during the lookup", () => { const e = new Error("Command failed: gh api"); e.stderr = "gh: HTTP 502: Bad Gateway\n"; throw e; }, "gh: HTTP 502: Bad Gateway"],
+          ["a malformed API body", () => ({ message: "Not Found" }), "no check_runs array"],
+          ["a TRUNCATED lookup (more check runs than one page)", (sha) => ({ ...GREEN(sha), total_count: 150 }), "the rest are unread"],
+          ["a check run for ANOTHER commit in the response", checkRuns(done("frontend", "success", { head_sha: "f".repeat(40) })), "another commit"],
+        ];
+        for (const [label, fetchCheckRuns, why] of unproven) {
+          const v = classifyPushRange({ before, cwd: r.dir, fetchCheckRuns });
           pass =
             ok(
-              v.docsOnly === false && v.reason.startsWith(`predecessor ${sha12} has no successful CI run`) && v.reason.includes(why),
+              v.docsOnly === false && v.reason.startsWith(`predecessor ${sha12} is not proven green`) && v.reason.includes(why),
               `${label} classifies as code, naming why (${v.reason})`,
             ) && pass;
         }
@@ -839,7 +867,7 @@ const CASES = [
           called = true;
           return GREEN(sha);
         };
-        const zero = classifyPushRange({ before: "0".repeat(40), cwd: r.dir, fetchWorkflowRuns: spy });
+        const zero = classifyPushRange({ before: "0".repeat(40), cwd: r.dir, fetchCheckRuns: spy });
         pass = ok(zero.docsOnly === false && !called, `a zero before-SHA is code without consulting the predecessor (${zero.reason})`) && pass;
         // End to end through main() and the production `gh api` reader, offline:
         // the fake gh records its argv, so the endpoint itself is pinned.
@@ -847,8 +875,8 @@ const CASES = [
         pass = ok(red.code === 0 && red.docsOnly === "false", `main() on a red predecessor writes docs_only=false and exits 0, never red (got exit ${red.code}, docs_only=${red.docsOnly})`) && pass;
         pass =
           ok(
-            JSON.stringify(red.ghArgv) === JSON.stringify(["api", `repos/self-test/repo/actions/workflows/ci.yml/runs?head_sha=${before}&per_page=100`]),
-            `the production reader asks gh for exactly before's CI workflow runs (got ${JSON.stringify(red.ghArgv)})`,
+            JSON.stringify(red.ghArgv) === JSON.stringify(["api", `repos/self-test/repo/commits/${before}/check-runs?filter=latest&per_page=100`]),
+            `the production reader asks gh for exactly before's latest check runs (got ${JSON.stringify(red.ghArgv)})`,
           ) && pass;
         const broken = runMainOnPush(r.dir, { PUSH_BEFORE_SHA: before }, { gh: "fail" });
         pass = ok(broken.code === 0 && broken.docsOnly === "false" && /gh: self-test lookup failure/.test(broken.out), `main() on a failing gh writes docs_only=false, exits 0 and prints gh's reason (got exit ${broken.code}, docs_only=${broken.docsOnly})`) && pass;
@@ -857,7 +885,7 @@ const CASES = [
         // A CODE range never calls the API either: the lookup is consulted last.
         r.commit({ "src/b.ts": "export {};\n" });
         called = false;
-        const codeRange = classifyPushRange({ before, cwd: r.dir, fetchWorkflowRuns: spy });
+        const codeRange = classifyPushRange({ before, cwd: r.dir, fetchCheckRuns: spy });
         pass = ok(codeRange.docsOnly === false && !called, `a code-touching range is code without consulting the predecessor (${codeRange.reason})`) && pass;
         return pass;
       } finally {
@@ -878,17 +906,17 @@ const CASES = [
         // CALIBRATION: a planning file NOT on the list still takes the short path.
         let before = head;
         head = r.commit({ ".planning/STATE.md": "# s\n" });
-        pass = ok(classifyPushRange({ before, cwd: r.dir, fetchWorkflowRuns: GREEN }).docsOnly === true, "CALIBRATION: a STATE.md-only push on a green predecessor stays docs-only") && pass;
+        pass = ok(classifyPushRange({ before, cwd: r.dir, fetchCheckRuns: GREEN }).docsOnly === true, "CALIBRATION: a STATE.md-only push on a green predecessor stays docs-only") && pass;
         for (const f of TEST_READ_PLANNING_PATHS) {
           before = head;
           head = r.commit({ [f]: `# ${f}\n` });
-          const v = classifyPushRange({ before, cwd: r.dir, fetchWorkflowRuns: GREEN });
+          const v = classifyPushRange({ before, cwd: r.dir, fetchCheckRuns: GREEN });
           pass = ok(v.docsOnly === false && v.reason.includes(f), `${f} alone classifies as code (${v.reason})`) && pass;
         }
         // Mixed with an unlisted planning file it is still code.
         before = head;
         head = r.commit({ ".planning/ROADMAP.md": "# r2\n", ".planning/STATE.md": "# s2\n" });
-        pass = ok(classifyPushRange({ before, cwd: r.dir, fetchWorkflowRuns: GREEN }).docsOnly === false, "ROADMAP.md beside STATE.md classifies as code") && pass;
+        pass = ok(classifyPushRange({ before, cwd: r.dir, fetchCheckRuns: GREEN }).docsOnly === false, "ROADMAP.md beside STATE.md classifies as code") && pass;
         const e2e = runMainOnPush(r.dir, { PUSH_BEFORE_SHA: before }, { gh: "success" });
         pass = ok(e2e.code === 0 && e2e.docsOnly === "false", `main() writes docs_only=false for it and exits 0 (got exit ${e2e.code}, docs_only=${e2e.docsOnly})`) && pass;
         // The PR path is unchanged by decision: judge() still says docs-only.
@@ -928,7 +956,7 @@ function selfTest() {
   // `runMainOnPush` rows run in a child process with a fake `gh` and are unaffected.
   const STRAY = "self-test row reached the predecessor lookup without a seam";
   let stray = false;
-  defaultFetchWorkflowRuns = () => {
+  defaultFetchCheckRuns = () => {
     stray = true;
     throw new Error(STRAY);
   };
@@ -937,10 +965,10 @@ function selfTest() {
       console.log(`=== SELF-TEST ${i + 1}/${CASES.length}: ${c.claim}`);
       stray = false;
       pass = c.run(ok) && pass;
-      if (stray) pass = ok(false, `${STRAY} (row ${i + 1}); inject fetchWorkflowRuns, never the real gh`) && pass;
+      if (stray) pass = ok(false, `${STRAY} (row ${i + 1}); inject fetchCheckRuns, never the real gh`) && pass;
     });
   } finally {
-    defaultFetchWorkflowRuns = readWorkflowRuns;
+    defaultFetchCheckRuns = readCheckRuns;
   }
 
   console.log("");

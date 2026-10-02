@@ -751,21 +751,22 @@ describe("[164.6.3 / CI-DOCSPATH-01] the PARTITION, pinned as an exact set in BO
   });
 
   // ── review 164.9.4 round 2, SFH-04 (round 3, WR-01): the predecessor lookup's credentials ─
-  it("`changed-paths` declares exactly `contents: read` + `actions: read`, and only `classify` gets GH_TOKEN", () => {
+  it("`changed-paths` declares exactly `contents: read` + `checks: read`, and only `classify` gets GH_TOKEN", () => {
     const block = jobBlockLines(DETECTOR);
     const at = block.findIndex((l) => /^ {4}permissions:\s*$/.test(l));
     expect(
       at,
       "`changed-paths` has no job-level `permissions:` block. The push classifier reads `before`'s " +
-        "CI workflow runs and needs `actions: read`; without it every lookup fails and every " +
+        "GitHub Actions check runs and needs `checks: read`; without it every lookup fails and every " +
         "docs-only push silently loses its short path (safe, but the founder's routing stops working).",
     ).toBeGreaterThan(-1);
     const perms: string[] = [];
     for (let i = at + 1; i < block.length && /^ {6}\S/.test(block[i]); i += 1) perms.push(block[i].trim());
     // A job-level block REPLACES the workflow-level one: `contents: read` must
     // be restated, and nothing broader may ride in beside the one uplift.
-    // `checks: read` is gone since round 3 WR-01: nothing reads a check run any more.
-    expect(perms.sort()).toEqual(["actions: read", "contents: read"]);
+    // Round 3 WR-01: the classifier reads every Actions check run on `before`
+    // (Railway's gate), which `checks: read` covers; nothing needs `actions: read`.
+    expect(perms.sort()).toEqual(["checks: read", "contents: read"]);
     const tokenLines = block.filter((l) => /^\s+GH_TOKEN:/.test(l));
     expect(tokenLines, "GH_TOKEN must reach exactly one step, the classify step").toHaveLength(1);
     const classifyAt = block.findIndex((l) => /^ {6}- id: classify\s*$/.test(l));
@@ -1255,8 +1256,9 @@ describe("[164.6.3 / CI-DOCSPATH-01] CALIBRATION — the classifier's self-test 
     const { code, out } = selfTest(mutated);
     expect(code, `a classifier that ignores a red predecessor must EXIT NON-ZERO.\n${out}`).not.toBe(0);
     expect(out).toContain(FAILED_BANNER);
-    expect(out).toContain("FAIL — a RED predecessor (CI run concluded failure) classifies as code");
-    expect(out).toContain("FAIL — a RED CI run whose frontend check was green (run 36892795002's shape) classifies as code");
+    expect(out).toContain("FAIL — a RED predecessor (frontend concluded failure) classifies as code");
+    expect(out).toContain("FAIL — a RED non-aggregated check beside a green frontend (run 36892795002's shape) classifies as code");
+    expect(out).toContain("FAIL — a RED check from ANOTHER workflow on the same commit classifies as code");
     expect(out).toContain("FAIL — a PENDING predecessor (its CI still running) classifies as code");
     expect(out).toContain("FAIL — an API ERROR during the lookup classifies as code");
   });

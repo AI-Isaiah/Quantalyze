@@ -161,12 +161,14 @@ jobs:
     # it concluded `success`. A job-level block REPLACES the workflow-level one,
     # so `contents: read` is restated, not inherited. No new action SHA. The
     # sentence above is kept as lineage.)
-    # (⚠️ CORRECTED 2026-10-02, review round 3, WR-01 + SFH LOW-04: the block is
-    # now `contents: read` plus `actions: read`, and `checks: read` is gone. The
-    # classifier reads `before`'s CI WORKFLOW RUN(s), the verdict Railway gates
-    # on, because `e2e` and `lighthouse-mobile` sit outside the `frontend`
-    # aggregator and CI run `36892795002` concluded failure while its `frontend`
-    # concluded success. The paragraph above is kept as lineage.)
+    # (⚠️ CORRECTED 2026-10-02, review round 3, WR-01 + SFH LOW-04: the block
+    # stays `contents: read` plus `checks: read`, but the classifier now reads
+    # EVERY GitHub Actions check run on `before`, all workflows and all events,
+    # not only `frontend`. That mirrors Railway's own gate, which
+    # docs/runbooks/railway-worker.md records as the commit's check-runs, every
+    # workflow's non-red. `e2e` and `lighthouse-mobile` sit outside the
+    # `frontend` aggregator, and CI run `36892795002` concluded failure while its
+    # `frontend` concluded success. The paragraph above is kept as lineage.)
     #
     # ⭐ Phase 164.4.2 / DECISION D — this job ALSO publishes the SQL gate
     # SUBSET that `sql-mutation` narrows to on a pull request:
@@ -187,7 +189,7 @@ jobs:
     timeout-minutes: 5
     permissions:
       contents: read
-      actions: read
+      checks: read
     outputs:
       docs_only: ${{ steps.classify.outputs.docs_only }}
       sql_gate_mode: ${{ steps.sql_gate_subset.outputs.sql_gate_mode }}
@@ -212,12 +214,13 @@ jobs:
       # fields reach it through `env:`, never interpolated into `run:`. Both are
       # empty on a pull_request and a workflow_dispatch, which never read them.
       # (2026-10-02, review round 2 SFH-04; round 3 WR-01) A docs-only push
-      # range takes the short path ONLY when `before`'s CI workflow run(s)
-      # (`push` and `workflow_dispatch`, latest attempt) concluded `success`;
-      # red, cancelled, pending, absent, a truncated or malformed response, or
-      # an API error runs the full corpus with the reason printed. `GH_TOKEN` is
-      # this job's `actions: read` token, scoped to this step alone.
-      # `GITHUB_REPOSITORY` is a runner default.
+      # range takes the short path ONLY when Railway's own gate would pass on
+      # `before`: every GitHub Actions check run on it (latest per check name,
+      # all workflows and events) completed as success, skipped or neutral.
+      # Red, cancelled, timed out, pending, absent, a truncated or malformed
+      # response, or an API error runs the full corpus with the reason printed.
+      # `GH_TOKEN` is this job's `checks: read` token, scoped to this step
+      # alone. `GITHUB_REPOSITORY` is a runner default.
       - id: classify
         run: node scripts/classify-changed-paths.mjs
         env:
