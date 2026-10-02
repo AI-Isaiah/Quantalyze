@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.118.1.2] - 2026-10-02 — GATECRONNAME: a SQL gate names the derive cron by jobname, not TEST's jobid
+
+### Fixed
+- `supabase/tests/test_reconcile_dropped_enqueue_sweep.sql` (comment only) called the derive cron "cron jobid 9" as if the id were universal. `9` is its id on the shared TEST project; on PROD the job is absent — unscheduled by hand at the v1.11 recovery and never re-registered (measured 2026-10-02 by read-only SELECT on `cron.job` / `cron.job_run_details`, see the derive-cron diagnosis). The refusal now names it by jobname, as every `cron.unschedule` in the repo does.
+
+### Notes
+- This is deliberately a gate-file-only change (no migration, runner, lane or `ci.yml` change): it is the first such PR since Phase 164.4.2 SUBSETSPLIT merged, and its `sql-mutation` run is the CI observation that closes 164.4.2's open post-merge item (the SUBSET path, previously verified only on a local pg-lane).
+
 ## [0.118.1.1] - 2026-10-02 — BACKFILLDAILY: a backfill-role worker no longer seeds the daily position poll
 
 ### Fixed
