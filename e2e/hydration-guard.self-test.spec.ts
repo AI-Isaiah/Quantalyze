@@ -11,10 +11,12 @@
  * instead of counting as the expected failure. The recorded hit is then cleared
  * so teardown passes.
  *
- * One case keeps `test.fail()`, the only way to cover the teardown assertion
- * itself: it leaves its hit in place, and its body first asserts the hit was
- * recorded, so the expected failure can only come from teardown. If teardown
- * stops throwing, the case PASSES and Playwright reports that as a failure.
+ * Two cases keep `test.fail()`, the only way to cover teardown itself. One
+ * leaves a recorded hit in place, and its body first asserts the hit was
+ * recorded, so the expected failure can only come from teardown's assertion.
+ * The other releases a late #418 only after its body has returned, so the
+ * expected failure needs teardown's drain as well. If teardown stops throwing or stops
+ * draining, the case PASSES and Playwright reports that as a failure.
  * It runs in CI's unseeded e2e list.
  *
  * Each case awaits the `weberror` event together with the `reportError` call,
@@ -35,6 +37,27 @@ async function reportPageError(page: Page, context: BrowserContext, message: str
 }
 
 const REACT_418 = "Minified React error #418; visit https://react.dev/errors/418?args[]=text";
+
+/**
+ * Open a page that reports #418 on its load event, with load held back by a
+ * script the caller releases. This stands in for slow chunks that keep React
+ * from hydrating before a spec ends. The error cannot arrive before release(),
+ * and no sleep is involved.
+ */
+async function openPageWithHeldLoad(page: Page): Promise<() => void> {
+  let release!: () => void;
+  const held = new Promise<void>((r) => (release = r));
+  await page.route("http://hydration-guard.test/held.js", async (route) => {
+    await held;
+    await route.fulfill({ contentType: "text/javascript", body: "" });
+  });
+  await page.setContent(
+    `<script>addEventListener("load", () => reportError(new Error(${JSON.stringify(REACT_418)})));</script>` +
+      `<script src="http://hydration-guard.test/held.js" async></script><p>probe</p>`,
+    { waitUntil: "domcontentloaded" },
+  );
+  return release;
+}
 const DEV_HYDRATION = "Hydration failed because the server rendered text didn't match the client.";
 
 test.describe("hydration guard self-test", () => {
@@ -65,25 +88,12 @@ test.describe("hydration guard self-test", () => {
     expect(hydrationHits).toEqual([]);
   });
 
-  test("a #418 reported after the test body is caught by the teardown drain", async ({
+  test("settleOpenPages catches a #418 reported after the test body", async ({
     page,
-    context,
     hydrationHits,
+    context,
   }) => {
-    // A subresource held open by the test keeps the page's load event pending,
-    // the way slow chunks keep React from hydrating before a spec ends. The
-    // page reports #418 on load, so the error cannot arrive before release().
-    let release!: () => void;
-    const held = new Promise<void>((r) => (release = r));
-    await page.route("http://hydration-guard.test/held.js", async (route) => {
-      await held;
-      await route.fulfill({ contentType: "text/javascript", body: "" });
-    });
-    await page.setContent(
-      `<script>addEventListener("load", () => reportError(new Error(${JSON.stringify(REACT_418)})));</script>` +
-        `<script src="http://hydration-guard.test/held.js" async></script><p>probe</p>`,
-      { waitUntil: "domcontentloaded" },
-    );
+    const release = await openPageWithHeldLoad(page);
     // Where the test body would end: nothing has been reported yet.
     expect(hydrationHits).toEqual([]);
     release();
@@ -91,6 +101,24 @@ test.describe("hydration guard self-test", () => {
     expect(hydrationHits).toHaveLength(1);
     expect(hydrationHits[0]).toContain("Minified React error #418");
     hydrationHits.length = 0; // expected hit: let teardown pass
+  });
+
+  test("teardown drains a #418 reported after the test body and fails the test", async ({
+    page,
+    hydrationHits,
+  }) => {
+    // Proves teardown itself runs the drain: the body ends with the error not
+    // yet reported and does not drain. Only teardown's drain can record it,
+    // and only teardown's assertion can then fail the test. If teardown stops
+    // draining, it asserts an empty list, the case passes, and Playwright
+    // reports the unexpected pass as a failure.
+    test.fail();
+    const release = await openPageWithHeldLoad(page);
+    expect(hydrationHits).toEqual([]);
+    // Released only after the body has returned, so load (and the #418) comes
+    // well after teardown would assert if it did not drain. The drain waits on
+    // the load EVENT, not on this delay, so the delay cannot make it pass.
+    setTimeout(release, 1_500);
   });
 
   test("a recorded hit left in place fails the test in teardown", async ({
