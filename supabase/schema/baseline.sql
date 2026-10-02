@@ -3584,7 +3584,7 @@ BEGIN
   IF NOT FOUND THEN
     -- Distinguish a token mismatch on a still-running row (W1 lost the race
     -- to W2's watchdog re-claim) from a genuine not-found / not-running,
-    -- mirroring mark_compute_job_done's P97 serialization_failure branch.
+    -- mirroring mark_compute_job_done's P97 preempted branch (SQLSTATE 55006).
     SELECT status, claim_token
       INTO v_current_status, v_current_token
       FROM compute_jobs
@@ -3596,7 +3596,7 @@ BEGIN
        AND v_current_token IS DISTINCT FROM p_claim_token THEN
       RAISE EXCEPTION 'defer_compute_job: job % preempted by watchdog reclaim (caller token=%, current token=%)',
         p_job_id, p_claim_token, v_current_token
-        USING ERRCODE = 'serialization_failure';
+        USING ERRCODE = '55006';
     END IF;
 
     RAISE EXCEPTION 'defer_compute_job: job % not found or not running', p_job_id
@@ -3626,7 +3626,7 @@ $$;
 ALTER FUNCTION "public"."defer_compute_job"("p_job_id" "uuid", "p_defer_seconds" integer, "p_reason" "text", "p_claim_token" "uuid") OWNER TO "postgres";
 
 
-COMMENT ON FUNCTION "public"."defer_compute_job"("p_job_id" "uuid", "p_defer_seconds" integer, "p_reason" "text", "p_claim_token" "uuid") IS 'Defers a running job back to pending for circuit-breaker cooldowns. Decrements attempts by 1 to cancel claim_compute_jobs increment so the defer does not burn a retry. NEW-C12-06 (CL10): p_claim_token fences the running-row read (back-compat NULL arm for the deploy window) and a token mismatch on a still-running row raises serialization_failure; the deferred row has claim_token NULLed so it drops the stale fence token. Worker is sole caller (services/job_worker._check_circuit_breaker). See migrations 033 + 117.';
+COMMENT ON FUNCTION "public"."defer_compute_job"("p_job_id" "uuid", "p_defer_seconds" integer, "p_reason" "text", "p_claim_token" "uuid") IS 'Defers a running job back to pending for circuit-breaker cooldowns. Decrements attempts by 1 to cancel claim_compute_jobs increment so the defer does not burn a retry. NEW-C12-06 (CL10): p_claim_token fences the running-row read (back-compat NULL arm for the deploy window) and a token mismatch on a still-running row raises SQLSTATE 55006 (object_in_use), which PostgREST answers once; the deferred row has claim_token NULLed so it drops the stale fence token. Worker is sole caller (services/job_worker._check_circuit_breaker). See migrations 033 + 117.';
 
 
 
@@ -7290,7 +7290,7 @@ BEGIN
       END IF;
       RAISE EXCEPTION 'mark_compute_job_done: job % preempted by watchdog reclaim (late mark on already-done row, caller token=%, current token=%)',
         p_job_id, p_claim_token, v_current_token
-        USING ERRCODE = 'serialization_failure';
+        USING ERRCODE = '55006';
     END IF;
 
     -- mig 117 P97: token mismatch on a still-running row.
@@ -7298,7 +7298,7 @@ BEGIN
        AND v_current_token IS DISTINCT FROM p_claim_token THEN
       RAISE EXCEPTION 'mark_compute_job_done: job % preempted by watchdog reclaim (caller token=%, current token=%)',
         p_job_id, p_claim_token, v_current_token
-        USING ERRCODE = 'serialization_failure';
+        USING ERRCODE = '55006';
     END IF;
 
     -- Row in some other state (failed_retry, failed_final, pending,
@@ -7342,7 +7342,7 @@ $$;
 ALTER FUNCTION "public"."mark_compute_job_done"("p_job_id" "uuid", "p_claim_token" "uuid") OWNER TO "postgres";
 
 
-COMMENT ON FUNCTION "public"."mark_compute_job_done"("p_job_id" "uuid", "p_claim_token" "uuid") IS 'Terminal success transition. Migration 117 P97 fence + B5 strict-token gate (20260528183100): p_claim_token MUST be non-NULL (NULL raises 22023); mismatch raises serialization_failure. THIS migration (G23-187-mig-01/03): re-applies the GIN-supported set-based `parent_job_ids @> ARRAY[p_job_id]` fan-in advance (the strict-token rewrite had reverted it to a `= ANY(...)` FOR-loop). Preserves the mig 099 Phase-18 atomic UI status bridge.';
+COMMENT ON FUNCTION "public"."mark_compute_job_done"("p_job_id" "uuid", "p_claim_token" "uuid") IS 'Terminal success transition. Migration 117 P97 fence + B5 strict-token gate (20260528183100): p_claim_token MUST be non-NULL (NULL raises 22023); mismatch raises SQLSTATE 55006 (object_in_use), which PostgREST answers once. THIS migration (G23-187-mig-01/03): re-applies the GIN-supported set-based `parent_job_ids @> ARRAY[p_job_id]` fan-in advance (the strict-token rewrite had reverted it to a `= ANY(...)` FOR-loop). Preserves the mig 099 Phase-18 atomic UI status bridge.';
 
 
 
@@ -7395,7 +7395,7 @@ BEGIN
        AND v_current_token IS DISTINCT FROM p_claim_token THEN
       RAISE EXCEPTION 'mark_compute_job_failed: job % preempted by watchdog reclaim (caller token=%, current token=%)',
         p_job_id, p_claim_token, v_current_token
-        USING ERRCODE = 'serialization_failure';
+        USING ERRCODE = '55006';
     END IF;
 
     RAISE EXCEPTION 'mark_compute_job_failed: job % not running (status=%)', p_job_id, v_current_status
@@ -7442,7 +7442,7 @@ $$;
 ALTER FUNCTION "public"."mark_compute_job_failed"("p_job_id" "uuid", "p_error" "text", "p_error_kind" "text", "p_claim_token" "uuid") OWNER TO "postgres";
 
 
-COMMENT ON FUNCTION "public"."mark_compute_job_failed"("p_job_id" "uuid", "p_error" "text", "p_error_kind" "text", "p_claim_token" "uuid") IS 'Terminal failure transition. Mig 117 / P97 fence + B5 strict-token follow-up: p_claim_token MUST be non-NULL (NULL raises 22023 invalid_parameter_value); mismatch raises serialization_failure. Backoff schedule preserved verbatim from mig 109 P4. HOTFIX 20260529180000: writes error_kind (not the non-existent last_error_kind that mig 20260528183100 typo-introduced, which 42703-errored every failed mark).';
+COMMENT ON FUNCTION "public"."mark_compute_job_failed"("p_job_id" "uuid", "p_error" "text", "p_error_kind" "text", "p_claim_token" "uuid") IS 'Terminal failure transition. Mig 117 / P97 fence + B5 strict-token follow-up: p_claim_token MUST be non-NULL (NULL raises 22023 invalid_parameter_value); mismatch raises SQLSTATE 55006 (object_in_use), which PostgREST answers once. Backoff schedule preserved verbatim from mig 109 P4. HOTFIX 20260529180000: writes error_kind (not the non-existent last_error_kind that mig 20260528183100 typo-introduced, which 42703-errored every failed mark).';
 
 
 
