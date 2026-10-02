@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.118.1.4] - 2026-10-02 — deps: actions/setup-python 6.3.0 → 7.0.0 (#627)
+
+### Changed
+- `actions/setup-python` moves from v6.3.0 to v7.0.0 (pinned by SHA `5fda3b95…`) at both of its steps: `ci.yml`'s `python` job and `cassette-refresh.yml`. v7 migrates the action to ESM, removes the `pip-install` input (not used here), and retries the Python-versions manifest fetch instead of failing silently. No input this repo passes changed.
+- Two merges of `origin/main` bring the Dependabot branch current; no setup-python step was added on main since the PR opened, so the two pins Dependabot moved are all of them.
+
 ## [0.118.1.3] - 2026-10-02 — deps: Python pip-minor-patch group (#898), with requirements.in reconciled to pandas 3.0.3
 
 ### Changed
