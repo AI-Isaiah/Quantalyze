@@ -949,18 +949,33 @@ describe("[164.6.3 / CI-DOCSPATH-01] the PARTITION, pinned as an exact set in BO
 //   - the classifier: it holds the list itself, so scanning it would derive the
 //     list from the list and hide a stale entry;
 //   - whole-tree WALKERS, which read every planning file by enumeration rather
-//     than by name, and whose own always-on job already re-runs them on every
-//     event: `check-planning-hygiene` (test and script, run by the always-on
-//     `frontend-lint`) and `verify-plan-anchors.mjs`'s `--pending` corpus scan
-//     (run unfiltered by `plan-anchor-verify`).
+//     than by name, so a named-file list cannot express them. Each is covered
+//     elsewhere, and EXACTLY how is in its reason below (review 164.9.4 round 4,
+//     WR-02 + SFH LOW-09; the earlier "re-runs them on every event" was false):
+//     `check-planning-hygiene.ts` runs in the always-on `frontend-lint` on every
+//     event, but its TEST's encoded-identity arm runs nowhere on a docs-only
+//     push; `verify-plan-anchors.mjs --pending` runs in `plan-anchor-verify`,
+//     which is `pull_request` ONLY, so a push is covered only because every
+//     commit it brings is a PR merge, and `classifyPushRange` CHECKS that.
 // ---------------------------------------------------------------------------
 describe("[164.9.4 WR-01 / CR-01] TEST_READ_PLANNING_PATHS matches the planning files the tests read, derived from the whole tree", () => {
   const NOT_SCANNED = new Map<string, string>([
     ["src/__tests__/contracts/ci-docs-path-filter.contract.test.ts", "this file: its .planning literals are judge() fixtures"],
     ["scripts/classify-changed-paths.mjs", "the list's own home: scanning it would derive the list from itself"],
-    ["src/__tests__/check-planning-hygiene.test.ts", "whole-tree walker; the always-on frontend-lint runs the same hygiene script"],
+    [
+      "src/__tests__/check-planning-hygiene.test.ts",
+      "whole-tree walker; the always-on frontend-lint runs the same hygiene script on every event, EXCEPT this " +
+        "test's encoded-identity arm (base64/hex of the machine identity), which the script does not carry. Its loss " +
+        "on a docs-only push is ACCEPTED: on CI that arm searches the runner's identity, which a developer commit " +
+        "never encodes, so moving it into the always-on script would add no protection for the identity that matters",
+    ],
     ["scripts/check-planning-hygiene.ts", "whole-tree walker; the always-on frontend-lint runs it on every event"],
-    ["scripts/verify-plan-anchors.mjs", "whole-corpus --pending walker; plan-anchor-verify runs it unfiltered"],
+    [
+      "scripts/verify-plan-anchors.mjs",
+      "whole-corpus --pending walker; plan-anchor-verify runs it on every PR, NOT on push. A push is covered only " +
+        "because every commit it brings is a PR merge whose PR run checked it, and classifyPushRange CHECKS that " +
+        "(isPrMergeCommit): a range carrying any other commit runs the full corpus (review 164.9.4 round 4, WR-02)",
+    ],
   ]);
   // A literal that resolves to a real repo file but is only ever written into a
   // TEMP fixture tree, never read from the real one. verify-plan-anchors.test.ts
@@ -1286,6 +1301,17 @@ describe("[164.6.3 / CI-DOCSPATH-01] CALIBRATION — the classifier's self-test 
     expect(code, `a classifier blind to a queued workflow run must EXIT NON-ZERO.\n${out}`).not.toBe(0);
     expect(out).toContain(FAILED_BANNER);
     expect(out).toContain("FAIL — a QUEUED Actions suite with no check runs beside a green CI classifies as code");
+  });
+
+  // ── neuter leg 9: the PR-merge rule (review 164.9.4 round 4, WR-02) ──────
+  it("CALIBRATION — dropping the PR-merge rule turns the self-test RED (WR-02)", () => {
+    // Without it, a direct push to main takes the short path although
+    // plan-anchor-verify (pull_request only) never ran on it.
+    const mutated = mutate("  if (direct) {", "  if (false) {", "pr-merge-rule");
+    const { code, out } = selfTest(mutated);
+    expect(code, `a classifier that shortens a direct push must EXIT NON-ZERO.\n${out}`).not.toBe(0);
+    expect(out).toContain(FAILED_BANNER);
+    expect(out).toContain("FAIL — a direct-push docs commit in the range classifies as code without consulting the predecessor");
   });
 
   // ── neuter leg 6: the test-read planning rule (review 164.9.4 round 2, WR-01)

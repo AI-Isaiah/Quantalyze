@@ -116,6 +116,9 @@ export const DOCS_ONLY_PREFIXES = [".planning/"];
  * The whole-corpus `--pending` scans in `verify-plan-anchors.test.ts` are NOT
  * listed: `plan-anchor-verify` runs the same scan, unfiltered, on every PR,
  * docs-only PRs included, so the PR board already carries that backstop.
+ * A PUSH is covered by that only because every commit it brings is a PR merge;
+ * since review 164.9.4 round 4 (WR-02) `classifyPushRange` CHECKS that, through
+ * `isPrMergeCommit`, rather than assuming it.
  *
  * ⛔ PUSH ONLY. The PR path is unchanged: the PR board is green by the
  * accepted `[CI-DOCSPATH-01]` trade, and this list is what makes the merge
@@ -315,6 +318,30 @@ export function classifyPushRange({ before, forced, cwd, fetchPredecessor = defa
   // merge-push backstop. See `TEST_READ_PLANNING_PATHS`.
   const read = files.filter((f) => TEST_READ_PLANNING_PATHS.includes(f));
   if (read.length > 0) return fullCorpus(`the pushed range changes ${read.length} planning file(s) a frontend-test assertion reads: ${read.join(", ")}`);
+  // Review 164.9.4 round 4, WR-02: `plan-anchor-verify` runs ONLY on
+  // `pull_request`, so on a push the `--pending` plan-anchor corpus is covered
+  // only by the PR run that preceded the merge. That holds only when every
+  // commit the push brings is a PR merge; a direct push to `main` was never
+  // checked by it. The assumption is CHECKED here, not merely stated: any
+  // first-parent commit in the range that is not a GitHub PR merge runs the full
+  // corpus. See `isPrMergeCommit`.
+  let commits;
+  try {
+    commits = git(["log", "--first-parent", "--format=%H%x1f%ce%x1f%s%x1e", `${sha}..HEAD`], cwd)
+      .split("\x1e")
+      .map((c) => c.trim())
+      .filter(Boolean)
+      .map((c) => c.split("\x1f"));
+  } catch (e) {
+    return fullCorpus(`the pushed range's commit log could not be read${gitWhy(e)}`);
+  }
+  if (commits.length === 0) return fullCorpus("the pushed range lists no first-parent commit");
+  const direct = commits.find(([, email, subject]) => !isPrMergeCommit(email, subject));
+  if (direct) {
+    return fullCorpus(
+      `commit ${String(direct[0]).slice(0, 12)} in the pushed range is not a GitHub PR merge, so plan-anchor-verify (pull_request only) never ran on it`,
+    );
+  }
   // Review 164.9.4 round 2, SFH-04 (rounds 3 and 4). A docs-only range proves
   // nothing about the CODE under it, which is exactly `before`'s code. The short
   // path is taken only when CI provably ran and finished green on `before`; see
@@ -322,6 +349,22 @@ export function classifyPushRange({ before, forced, cwd, fetchPredecessor = defa
   const verdict = predecessorVerdict(sha, fetchPredecessor);
   if (!verdict.ok) return fullCorpus(`predecessor ${sha.slice(0, 12)} is not proven green (${verdict.why})`);
   return { docsOnly: true, reason: `${range}; predecessor ${sha.slice(0, 12)} ${verdict.why}` };
+}
+
+/**
+ * Is this first-parent `main` commit a GitHub PR merge? (Review 164.9.4 round
+ * 4, WR-02.) GitHub commits every web merge as `noreply@github.com`, with a
+ * squash subject ending `(#N)` or a merge subject `Merge pull request #N from …`.
+ * Measured on first-parent `main` since 2026-06-01: 460 commits had that shape
+ * (431 squash, 29 merge) and 11 did not, every one a direct push by a
+ * developer. A rebase merge (original subjects) and a locally squashed `(#N)`
+ * commit pushed by hand both read as NOT a PR merge, the safe direction.
+ * ⚠️ This is a guard against ACCIDENT, not an adversary: a committer address and
+ * a subject are both settable by whoever can push to `main`.
+ */
+export function isPrMergeCommit(committerEmail, subject) {
+  if (committerEmail !== "noreply@github.com") return false;
+  return /\(#\d+\)$/.test(String(subject)) || /^Merge pull request #\d+ from /.test(String(subject));
 }
 
 /**
@@ -528,13 +571,16 @@ function scratchRepo(label) {
       stdio: ["ignore", "pipe", "pipe"],
     }).trim();
   g(["init", "-q"]);
-  const commit = (files) => {
+  // Every commit is PR-merge-shaped by default (GitHub's committer address and a
+  // `(#N)` squash subject), so the push rows reach the predecessor gate; `pr:
+  // false` makes a direct-push commit for the WR-02 rows.
+  const commit = (files, { pr = true } = {}) => {
     for (const [rel, body] of Object.entries(files)) {
       mkdirSync(join(dir, rel, ".."), { recursive: true });
       writeFileSync(join(dir, rel), body);
     }
     g(["add", "-A"]);
-    g(["commit", "-q", "-m", "c"]);
+    g(["-c", `user.email=${pr ? "noreply@github.com" : "self-test@invalid"}`, "commit", "-q", "-m", pr ? "c (#1)" : "c"]);
     return g(["rev-parse", "HEAD"]);
   };
   return { dir, g, commit, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
@@ -1016,6 +1062,38 @@ const CASES = [
         called = false;
         const codeRange = classifyPushRange({ before, cwd: r.dir, fetchPredecessor: spy });
         pass = ok(codeRange.docsOnly === false && !called, `a code-touching range is code without consulting the predecessor (${codeRange.reason})`) && pass;
+        return pass;
+      } finally {
+        r.cleanup();
+      }
+    },
+  },
+  {
+    claim: "WR-02 r4: a docs-only push range carrying a commit that is NOT a GitHub PR merge runs the FULL corpus (plan-anchor-verify never saw it)",
+    run: (ok) => {
+      // RED against the round-4 code, which trusted, unchecked, that every main
+      // commit is a PR merge. A direct push skips plan-anchor-verify entirely.
+      const r = scratchRepo("push-direct");
+      try {
+        let pass = ok(isPrMergeCommit("noreply@github.com", "fix(x): y (#123)"), "CALIBRATION: a GitHub squash merge is a PR merge");
+        pass = ok(isPrMergeCommit("noreply@github.com", "Merge pull request #656 from owner/branch"), "CALIBRATION: a GitHub merge commit is a PR merge") && pass;
+        pass = ok(!isPrMergeCommit("dev@example.invalid", "fix(x): y (#123)"), "a (#N) subject committed by a developer (a local squash pushed by hand) is NOT a PR merge") && pass;
+        pass = ok(!isPrMergeCommit("noreply@github.com", "docs(146): close Phase 146"), "a GitHub-committed commit without a PR subject is NOT a PR merge") && pass;
+        const before = r.commit({ "src/a.ts": "export {};\n" });
+        r.commit({ ".planning/STATE.md": "# s\n" });
+        // CALIBRATION: the same shape with a PR-merge commit IS docs-only.
+        pass = ok(classifyPushRange({ before, cwd: r.dir, fetchPredecessor: GREEN }).docsOnly === true, "CALIBRATION: a PR-merge docs-only push on a green predecessor is docs-only") && pass;
+        const mid = r.g(["rev-parse", "HEAD"]);
+        r.commit({ ".planning/STATE.md": "# s2\n" }, { pr: false });
+        let called = false;
+        const spy = (sha) => {
+          called = true;
+          return GREEN(sha);
+        };
+        const v = classifyPushRange({ before, cwd: r.dir, fetchPredecessor: spy });
+        pass = ok(v.docsOnly === false && v.reason.includes("is not a GitHub PR merge") && !called, `a direct-push docs commit in the range classifies as code without consulting the predecessor (${v.reason})`) && pass;
+        const only = classifyPushRange({ before: mid, cwd: r.dir, fetchPredecessor: GREEN });
+        pass = ok(only.docsOnly === false && only.reason.includes("is not a GitHub PR merge"), `a direct push alone classifies as code (${only.reason})`) && pass;
         return pass;
       } finally {
         r.cleanup();
