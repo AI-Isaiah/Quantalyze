@@ -848,6 +848,10 @@ describe("EquityChart — H-0167/M-1059 projection memoized across hover", () =>
   it("does not re-run the y-tick walker (pow10) on repeated hover", () => {
     const series = makeSeries(60);
     const powSpy = vi.mocked(pow10);
+    // Earlier describes in this file render EquityChart through the same
+    // module-level spy, so it starts this test already counting (measured: 210).
+    // Clear it first, or the mount sanity pin below cannot fail.
+    powSpy.mockClear();
     try {
       const { container } = render(
         <EquityChart equityDailyPoints={series} initialPeriod="ALL" />,
@@ -876,6 +880,10 @@ describe("EquityChart — H-0167/M-1059 projection memoized across hover", () =>
   it("recomputes the projection when the period (data window) actually changes", () => {
     const series = makeSeries(200);
     const powSpy = vi.mocked(pow10);
+    // Earlier describes in this file render EquityChart through the same
+    // module-level spy, so it starts this test already counting (measured: 210).
+    // Clear it first, or the mount sanity pin below cannot fail.
+    powSpy.mockClear();
     try {
       const { getByRole, container } = render(
         <EquityChart equityDailyPoints={series} initialPeriod="ALL" />,
