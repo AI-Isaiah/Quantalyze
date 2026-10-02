@@ -82,6 +82,10 @@
 --   INVARIANT     (named, NOT counted, no twin) a failed row with a marked
 --                 retry goes computing: the keep holds a published row only.
 --
+-- The completion sentinel at the foot of the file counts the thirteen sections
+-- W1..W7 and R1..R6, and ci.yml's sql-tests roster credits this file with the
+-- same number.
+--
 -- ⚠️ W1 alone is green under D-04 as first written (branch (b) only, keyed on
 -- the latest failure). W2 is the arm that tells D-04 and D-04b apart, and
 -- W3..W5 exist because a gate that marks X with nothing else in flight never
@@ -1069,6 +1073,15 @@ BEGIN
   IF v_status IS DISTINCT FROM 'computing' THEN
     RAISE EXCEPTION 'INVARIANT (failed row with a marked retry): a failed row with a marked in-scope retry reads % instead of computing. The keep must only ever hold a published row; a failed row kept, or bounced to anything but computing, hides the retry from the poller.', COALESCE(v_status, 'NULL');
   END IF;
+END $$;
+
+-- ===== COMPLETION SENTINEL ==================================================
+-- Reached only if every arm above passed. Counts the thirteen sections the
+-- mutation runner counts: the -COMPOSITE and -SETUP sub-arms fold into their
+-- parent section, and the INVARIANT is outside the roster by design.
+DO $$
+BEGIN
+  RAISE NOTICE 'ALL 13 ARMS EXECUTED (W1, W2, W3, W4, W5, W6, W7, R1, R2, R3, R4, R5, R6): [164.6.7-COMPOSITE-REREAD-RESIDUE] the bridge clears computation_warned and never publishes complete_with_warnings once the row''s writer-provenance job is an unprotected live failure, on both loud branches and on both refresh arms (W1..W5), while SI-02 and the protected honour path stay untouched (W6, W7); [164.6.7-RETRY-PLAIN-COMPLETE] a plain complete row keeps complete with no reaper stamp over a marked in-scope refresh retry (R1, R5), and an unmarked sibling, an out-of-scope marked kind, an unmarked retry or a live unprotected failure still moves it to computing (R2, R3, R4, R6). Phase 164.5.2.1, mig 20261003120000.';
 END $$;
 
 ROLLBACK;
