@@ -49,7 +49,7 @@
  * (place 1). "Proven to execute in CI (passed, not skipped) when
  * vars.E2E_TEST_DB_CONFIGURED == 'true'" is the explicit post-push must_have.
  */
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./helpers/hydration-guard";
 import { seedTestAllocator } from "./helpers/seed-test-project";
 import { assertNoReflow } from "./helpers/reflow";
 

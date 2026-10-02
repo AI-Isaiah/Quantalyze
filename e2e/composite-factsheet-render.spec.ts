@@ -55,7 +55,7 @@
  * PUBLISHED factsheet is publicly navigable, so no login is needed. Both
  * fixtures below are seeded `published`.
  */
-import { test, expect, type Page } from "@playwright/test";
+import { test, expect, type Page } from "./helpers/hydration-guard";
 import { buildAxe } from "./helpers/axe";
 import {
   seedCompositeStrategy,

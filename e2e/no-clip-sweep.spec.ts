@@ -29,7 +29,7 @@
  *   place 2 (this spec): the HAS_SEED_ENV const + the test.skip on the seeded
  *     describe below. Without either place the gate silently never runs.
  */
-import { test, expect, type Page } from "@playwright/test";
+import { test, expect, type Page } from "./helpers/hydration-guard";
 import { seedTestAllocator } from "./helpers/seed-test-project";
 
 // Routes × viewports — desktop, mobile, and the v1.4 ultra-wide 2560px bound.

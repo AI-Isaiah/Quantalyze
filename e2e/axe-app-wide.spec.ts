@@ -45,7 +45,7 @@
  * Re-enabling the authed/mobile rows needs a hermetic per-spec seeded DB (TODO),
  * NOT the shared MA-8 invocation. The describes below are retained for that.
  */
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./helpers/hydration-guard";
 import { buildAxe } from "./helpers/axe";
 import {
   seedTestAllocator,
