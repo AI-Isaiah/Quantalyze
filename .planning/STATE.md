@@ -185,7 +185,7 @@ Phase: 169.1.1 (HYDRATIONTICKS) — COMPLETE 2026-10-02 (verification passed; PR
 Phase: 164.9.3.2.1 (ENQ40001) — NEXT, after the 164.4.2 gate-only close (founder 2026-10-02)
 Phase: 166.4 (BENCHALIGN) — COMPLETE 2026-09-27 (verification passed; PR #892 merged, v0.108.0.0)
 Phase: 170 (LAYOUT — page layout reads clean and holds on every page) — COMPLETE 2026-10-01
-Plan: 2 of 3
+Plan: 3 of 3
 Phase: 164.9.5 (AUTOREDUMP) — EXECUTING
 Plan: 9 of 9 DONE; VERIFICATION human_needed (4/6 verified, 2 live-only), SECURITY SECURED 37/37; shipped as a PR, not merged
 Phase: 166.2 (COMPUTEONCE) — EXECUTING

@@ -3341,7 +3341,7 @@ Plans:
 - [x] 164.9.3.2.1-01-PLAN.md — measure the race-loss raise on the local-stack lane (psql proof, PostgREST K=1/K=3, negative control) and record the D-02 branch
 
 **Wave 2** *(blocked on Wave 1 completion)*
-- [ ] 164.9.3.2.1-02-PLAN.md — converge branch: gate `test_enqueue_race_loss_40001.sql` (R1/R2 + twins, both lanes) and the D-04 comment corrections
+- [x] 164.9.3.2.1-02-PLAN.md — converge branch: gate `test_enqueue_race_loss_40001.sql` (R1/R2 + twins, both lanes) and the D-04 comment corrections
 
 **Wave 3** *(blocked on Wave 2 completion)*
 - [ ] 164.9.3.2.1-03-PLAN.md — census moves on the merged tree and the release commit
