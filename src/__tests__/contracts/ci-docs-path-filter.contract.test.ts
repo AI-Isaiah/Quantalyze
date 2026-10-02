@@ -1221,6 +1221,9 @@ describe("[164.6.3 / CI-DOCSPATH-01] CALIBRATION — the classifier's self-test 
     expect(code, `a classifier that trusts a non-ancestor before-SHA must EXIT NON-ZERO.\n${out}`).not.toBe(0);
     expect(out).toContain(FAILED_BANNER);
     expect(out).toContain("FAIL — a non-ancestor (force-pushed-over) before-SHA classifies as code");
+    // SFH LOW-05: without the guard that row reaches the predecessor lookup. It
+    // must hit the self-test's sentinel seam, a named red, never the real gh.
+    expect(out).toContain("FAIL — self-test row reached the predecessor lookup without a seam");
   });
 
   // ── neuter leg 5: the predecessor-verdict gate (review 164.9.4 round 2, SFH-04)

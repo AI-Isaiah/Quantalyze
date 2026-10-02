@@ -270,7 +270,7 @@ export function changedFilesAgainstBase({ baseRefName = process.env.GITHUB_BASE_
  *   responses, offline.
  * @returns {{docsOnly: boolean, reason: string}}
  */
-export function classifyPushRange({ before, forced, cwd, fetchWorkflowRuns = readWorkflowRuns } = {}) {
+export function classifyPushRange({ before, forced, cwd, fetchWorkflowRuns = defaultFetchWorkflowRuns } = {}) {
   const fullCorpus = (reason) => ({ docsOnly: false, reason: `${reason} — classified as code, full corpus` });
   const code = (reason) => fullCorpus(`push range undeterminable (${reason})`);
   const sha = String(before ?? "").trim();
@@ -357,6 +357,16 @@ export function readWorkflowRuns(sha, repo = process.env.GITHUB_REPOSITORY) {
 }
 
 /**
+ * The seam a caller gets when it passes none. Production: the real `gh` reader.
+ * `selfTest()` rebinds it to a sentinel that records the hit and throws (review
+ * 164.9.4 round 3, SFH LOW-05), so an in-process row that reaches the lookup
+ * without injecting a seam is a NAMED red, never a network call. The throw alone
+ * would not be a red: `predecessorVerdict` turns it into a code verdict, which
+ * is what most of those rows expect anyway.
+ */
+let defaultFetchWorkflowRuns = readWorkflowRuns;
+
+/**
  * Review 164.9.4 round 2, LOW-03: git's own reason for a fail-safe arm, as
  * `: <first stderr line>`, so a recurring cause is named in the log rather than
  * quietly costing every docs-only push a full run. Empty when git printed
@@ -387,7 +397,7 @@ function firstLine(e) {
  *
  * @returns {{ok: boolean, why: string}}
  */
-export function predecessorVerdict(sha, fetchWorkflowRuns = readWorkflowRuns) {
+export function predecessorVerdict(sha, fetchWorkflowRuns = defaultFetchWorkflowRuns) {
   let body;
   try {
     body = fetchWorkflowRuns(sha);
@@ -912,10 +922,24 @@ function selfTest() {
     return 1;
   }
 
-  CASES.forEach((c, i) => {
-    console.log(`=== SELF-TEST ${i + 1}/${CASES.length}: ${c.claim}`);
-    pass = c.run(ok) && pass;
-  });
+  // SFH LOW-05: the in-process rows never fall back to the production reader.
+  // `runMainOnPush` rows run in a child process with a fake `gh` and are unaffected.
+  const STRAY = "self-test row reached the predecessor lookup without a seam";
+  let stray = false;
+  defaultFetchWorkflowRuns = () => {
+    stray = true;
+    throw new Error(STRAY);
+  };
+  try {
+    CASES.forEach((c, i) => {
+      console.log(`=== SELF-TEST ${i + 1}/${CASES.length}: ${c.claim}`);
+      stray = false;
+      pass = c.run(ok) && pass;
+      if (stray) pass = ok(false, `${STRAY} (row ${i + 1}); inject fetchWorkflowRuns, never the real gh`) && pass;
+    });
+  } finally {
+    defaultFetchWorkflowRuns = readWorkflowRuns;
+  }
 
   console.log("");
   if (!pass) {
