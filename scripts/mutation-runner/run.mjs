@@ -1114,7 +1114,37 @@ const PROBE_AVAILABLE_OUTPUT = `ERROR:  ${LANE_PROBE_AVAILABLE}`;
 //                naming `FILES_FLOOR regression: 55 annotated file(s) < floor
 //                56`. Each separation edit was restored from a byte backup and
 //                proved with cmp. WAIVED_CEILING stays 0.
-export const FILES_FLOOR = 55;
+//
+// ⭐ RE-DERIVED 2026-10-02 (Phase 164.9.3.2.1 ENQ40001, plan 03), 55 -> 56: the
+//                NEW gate supabase/tests/test_enqueue_race_loss_40001.sql (the
+//                enqueue race-loss raise of _enqueue_compute_job_internal, latest
+//                definition migration 20260924230827: R1 the induced race raises
+//                SQLSTATE 40001 with the race-lost message, R2 the re-run
+//                enqueues a fresh pending job once the winner is done; 2 arms).
+//                The denominator moves 82 -> 83. MEASURED on the tree MERGED
+//                with origin/main (f18b49f8a, already the branch's merge base, so
+//                the merge was a no-op) via ONE full lane run with no file edited
+//                during it, constants still at 55 / 553 (the stale-low direction
+//                the runner cannot see), `node scripts/mutation-runner/run.mjs`:
+//                `scope: FULL 56/56 annotated files`, `coverage: files 56/83`,
+//                `arms: 555/555/0`, `biting: 555`, `lane-invocations: 555 … plus
+//                56 baseline / 56 restore leg(s)` (the two independent tallies
+//                AGREE), `lane-blocked: 0`, `lane-probe: pg_cron AVAILABLE`,
+//                `unreachable: 27`, `per-arm lane time: mean 1.1s over 555 arm
+//                run(s)`, `✅ No defects. Every annotated arm bit its own arm
+//                first.`, exit 0, wall clock 761 s. Per-file line:
+//                `test_enqueue_race_loss_40001.sql: sections 2 / judged 2 /
+//                annotated 2 / waived 0 / biting 2`; every other per-file row is
+//                unchanged. Stale-low direction OBSERVED at 55:
+//                src/__tests__/mutation-runner-floors.test.ts FAILS with
+//                `RATCHET STALE: 56 of 83 gate files are now annotated but
+//                FILES_FLOOR is still 55. Raise FILES_FLOOR in
+//                scripts/mutation-runner/run.mjs to 56.` Too-high direction
+//                OBSERVED at 57 (with ARMS_FLOOR 556): a full lane run exits 1
+//                with exactly two defects, one naming `FILES_FLOOR regression: 56
+//                annotated file(s) < floor 57`. Each separation edit was restored
+//                from a byte backup and proved with cmp. WAIVED_CEILING stays 0.
+export const FILES_FLOOR = 56;
 
 // ARMS_FLOOR — PINNED 2026-08-29 BY MEASUREMENT (plan 164.3-08), not chosen.
 //
@@ -2739,7 +2769,27 @@ export const FILES_FLOOR = 55;
 //    FILES_FLOOR 56): a full lane run exits 1 naming `ARMS_FLOOR regression:
 //    553 biting arm(s) < floor 554`; restored from a byte backup and proved
 //    with cmp. WAIVED_CEILING stays 0 — no waiver was added.
-export const ARMS_FLOOR = 553;
+// ⭐ RE-DERIVED 2026-10-02 (Phase 164.9.3.2.1 ENQ40001, plan 03): 553 -> 555.
+//    TWO arms (R1, R2), both in the NEW gate
+//    supabase/tests/test_enqueue_race_loss_40001.sql (which also moves
+//    FILES_FLOOR 55 -> 56), against _enqueue_compute_job_internal as migration
+//    20260924230827 defines it (no migration in this phase). MEASURED on the
+//    tree MERGED with origin/main (f18b49f8a) via ONE full lane run, no file
+//    edited during it, constants still at 55 / 553: `scope: FULL 56/56
+//    annotated files`, `coverage: files 56/83`, `arms: 555/555/0`, `biting:
+//    555`, `lane-invocations: 555` (plus 56 baseline / 56 restore legs),
+//    `lane-blocked: 0 file(s)`, `lane-probe: pg_cron AVAILABLE`, `unreachable:
+//    27 file(s)`, `per-arm lane time: mean 1.1s over 555 arm run(s)`, `✅ No
+//    defects. Every annotated arm bit its own arm first.`, exit 0. Per-file
+//    line: `test_enqueue_race_loss_40001.sql: sections 2 / judged 2 /
+//    annotated 2 / waived 0 / biting 2`. Stale-low direction OBSERVED at 553:
+//    src/__tests__/mutation-runner-floors.test.ts FAILS with `The corpus
+//    declares 555 twin(s) of which 0 are waivers, so a green run bites 555.
+//    ARMS_FLOOR is 553.` Too-high direction OBSERVED at 556 (with
+//    FILES_FLOOR 57): a full lane run exits 1 naming `ARMS_FLOOR regression:
+//    555 biting arm(s) < floor 556`; restored from a byte backup and proved
+//    with cmp. WAIVED_CEILING stays 0 — no waiver was added.
+export const ARMS_FLOOR = 555;
 
 // WAIVED_CEILING — PINNED 2026-09-02 BY MEASUREMENT (164.3.1 red team), not
 // chosen. A CEILING, not a floor: it fails when the corpus carries MORE waivers
