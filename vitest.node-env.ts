@@ -50,6 +50,7 @@ export const NODE_ENV_TEST_FILES: string[] = [
   "src/__tests__/bridge-outcome-cron.test.ts",
   "src/__tests__/bridge-outcomes-rls.test.ts",
   "src/__tests__/bridge-outcomes-voluntary-schema.test.ts",
+  "src/__tests__/chart-ticks-class-guard.test.ts",
   "src/__tests__/check-admin-route-manifest.test.ts",
   "src/__tests__/check-banned-packages.test.ts",
   "src/__tests__/check-route-contract.test.ts",
