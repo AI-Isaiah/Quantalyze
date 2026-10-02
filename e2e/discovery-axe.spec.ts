@@ -17,7 +17,7 @@
  * heading check will fail loudly rather than silently pass axe on an
  * empty <main>.
  */
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./helpers/hydration-guard";
 import { buildAxe } from "./helpers/axe";
 import { seedTestAllocator } from "./helpers/seed-test-project";
 

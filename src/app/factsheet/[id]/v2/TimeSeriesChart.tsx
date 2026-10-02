@@ -7,6 +7,7 @@ import { useBasisSeriesView, useRangeGesture } from "./basis-context";
 import { resolveSeries, type ChartConfig, type ChartValueFormat, type ResolvedSeries } from "./chart-configs";
 import { trackFactsheetEvent } from "./factsheet-analytics";
 import { ResponsiveChartFrame } from "@/components/ResponsiveChartFrame";
+import { niceStepValues, pow10, tickTolerance } from "@/lib/chart-ticks";
 
 const VB_W = 880;
 const PAD = { top: 20, right: 30, bottom: 24, left: 50 };
@@ -420,9 +421,10 @@ function TimeSeriesChartInner({ config }: { config: ChartConfig }) {
   ]);
 
   const yTicks = useMemo(
-    () => makeYTicks(yDomain, config.scalable && scale === "log", config.valueFormat),
-    [yDomain, scale, config.scalable, config.valueFormat],
+    () => makeYTicks(yDomain, config.scalable && scale === "log", config.valueFormat, config.baseline),
+    [yDomain, scale, config.scalable, config.valueFormat, config.baseline],
   );
+  const yTickTol = useMemo(() => tickTolerance(yTicks.map(t => t.value)), [yTicks]);
   const xTicks = useMemo(
     () => makeXTicks(view.dates, xStart, xEnd),
     [view.dates, xStart, xEnd],
@@ -872,7 +874,7 @@ function TimeSeriesChartInner({ config }: { config: ChartConfig }) {
           // line in the muted text colour rather than the lighter border
           // hue, so the viewer can see at a glance whether the strategy is
           // above or below zero/par without squinting.
-          const isBaseline = t.value === config.baseline;
+          const isBaseline = config.baseline != null && Math.abs(t.value - config.baseline) <= yTickTol;
           return (
             <g key={`y-${t.value}`}>
               <line
@@ -1473,7 +1475,7 @@ function closePathToBaseline(
  * units) but the chart's Y-domain is in log space, so we keep `value` in
  * display space — the Y() projection takes log() on the way in.
  */
-function makeYTicks(domain: [number, number], log: boolean, format: ChartValueFormat) {
+function makeYTicks(domain: [number, number], log: boolean, format: ChartValueFormat, baseline?: number) {
   const [lo, hi] = domain;
   if (log) {
     const candidates: number[] = [];
@@ -1484,7 +1486,7 @@ function makeYTicks(domain: [number, number], log: boolean, format: ChartValueFo
     const mantissa = [1, 1.5, 2, 3, 5, 7];
     for (let d = decadeLo; d <= decadeHi; d++) {
       for (const m of mantissa) {
-        const v = m * Math.pow(10, d);
+        const v = m * pow10(d);
         if (v >= eLo * 0.95 && v <= eHi * 1.05) candidates.push(v);
       }
     }
@@ -1493,30 +1495,20 @@ function makeYTicks(domain: [number, number], log: boolean, format: ChartValueFo
       return candidates.slice(0, 10).map(v => ({ value: v, label: formatValue(v, format) }));
     }
     // Too few log ticks — fall through to nice-step linear in display space.
-    return niceLinearTicks(eLo, eHi, format);
+    return niceLinearTicks(eLo, eHi, format, baseline ?? 0);
   }
-  return niceLinearTicks(lo, hi, format);
+  return niceLinearTicks(lo, hi, format, baseline ?? 0);
 }
 
-/** Compute ~5 nicely-rounded ticks across [lo, hi]. */
-function niceLinearTicks(lo: number, hi: number, format: ChartValueFormat): { value: number; label: string }[] {
+/**
+ * Compute ~5 nicely-rounded ticks across [lo, hi]. The values come from the
+ * engine-independent shared helper so the server and the browser agree; a tick
+ * within a millionth of a step of `anchor` (the chart's baseline) is exactly
+ * the anchor.
+ */
+function niceLinearTicks(lo: number, hi: number, format: ChartValueFormat, anchor: number): { value: number; label: string }[] {
   if (!(hi > lo)) return [{ value: lo, label: formatValue(lo, format) }];
-  const span = hi - lo;
-  const rough = span / 5;
-  const magnitude = Math.pow(10, Math.floor(Math.log10(Math.abs(rough)) || 0));
-  const normalized = rough / magnitude;
-  let nice: number;
-  if (normalized < 1.5) nice = 1;
-  else if (normalized < 3) nice = 2;
-  else if (normalized < 7) nice = 5;
-  else nice = 10;
-  const step = nice * magnitude;
-  const start = Math.ceil(lo / step) * step;
-  const out: { value: number; label: string }[] = [];
-  for (let v = start; v <= hi + step * 0.001 && out.length < 12; v += step) {
-    out.push({ value: v, label: formatValue(v, format) });
-  }
-  return out;
+  return niceStepValues(lo, hi, 5, 12, anchor).map(value => ({ value, label: formatValue(value, format) }));
 }
 
 function makeXTicks(dates: string[], xStart: number, xEnd: number) {

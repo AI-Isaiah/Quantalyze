@@ -40,7 +40,7 @@
  * Each assertion is gated behind a fail-loud visible anchor so a 404 / login
  * / unseeded chrome fails LOUD rather than false-greening (the W-02 lesson).
  */
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./helpers/hydration-guard";
 import { seedTestAllocator } from "./helpers/seed-test-project";
 import { assertNoReflow, assertTargetSizes } from "./helpers/reflow";
 
