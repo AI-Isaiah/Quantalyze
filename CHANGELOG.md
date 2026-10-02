@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.118.1.3] - 2026-10-02 — deps: Python pip-minor-patch group (#898), with requirements.in reconciled to pandas 3.0.3
+
+### Changed
+- Dependabot's pip-minor-patch group (12 updates): fastapi 0.139.0 → 0.141.1, uvicorn 0.51.0 → 0.54.0, ccxt 4.5.64 → 4.5.84, numpy 2.5.1 → 2.5.3, pydantic 2.13.4 → 2.13.5, python-dotenv 1.2.2 → 1.2.3, pandera 0.32.1 → 0.33.1, psycopg 3.3.4 → 3.3.6, sentry-sdk 2.64.0 → 2.70.0 in `analytics-service/requirements.in`, and mypy 2.2.0 → 2.3.1 in `requirements-dev.txt`. Transitives that move with them include cryptography 50.0.1 and typing-extensions 4.16.0.
+- `analytics-service/requirements.txt` is regenerated with the canonical `make lock` (`uv pip compile --universal`), as `.github/dependabot.yml` prescribes, not shipped in Dependabot's format. The lock now carries environment markers and lists extras' packages without the extra suffix; on the Linux CPython 3.12 image that Railway and CI install, the installed set is the resolved graph.
+- ccxt 4.5.84 no longer depends on aiodns, so `aiodns` and `pycares` leave the lock (nothing in `analytics-service/` imports aiodns; aiohttp falls back to its threaded DNS resolver). ccxt now brings `aiohttp-fast-zlib`, `orjson` and `zlib-ng`.
+- A merge of `origin/main` brings the Dependabot branch current before the reconciliation.
+
+### Root cause
+- Dependabot's lock downgraded pandas 3.0.3 → 2.3.3. `requirements.in` still pinned `pandas==2.2.3` while the lock had carried 3.0.3 since #604, which bumped the lock in place and never touched the manifest; Dependabot regenerates from the manifest. The manifest now pins `pandas==3.0.3`, the version prod and CI already run, and the two comments that still named 2.2.3 are corrected. This is the same disagreement that took the Python group out of the 0.117.0.1 batch.
+
+### Tests
+- Local, Python 3.12 venv on the regenerated lock: `pytest` from `analytics-service/` 7584 passed, 90 skipped; strict `mypy` 2.3.1 clean on the 102-file service surface.
+
 ## [0.118.1.2] - 2026-10-02 — GATECRONNAME: a SQL gate names the derive cron by jobname, not TEST's jobid
 
 ### Fixed
