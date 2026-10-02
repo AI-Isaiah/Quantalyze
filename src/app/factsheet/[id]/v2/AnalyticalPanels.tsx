@@ -5,6 +5,7 @@ import { useBasisSeriesView, useWindowedView } from "./basis-context";
 import { ResponsiveChartFrame } from "@/components/ResponsiveChartFrame";
 import { useBreakpoint } from "@/hooks/useBreakpoint";
 import { useTapPin } from "@/hooks/useTapPin";
+import { decimalExponent, pow10 } from "@/lib/chart-ticks";
 
 /**
  * Three analytical panels rounding out the v2 page:
@@ -246,7 +247,7 @@ function StreakHist({ title, data, color, maxLen }: { title: string; data: numbe
 function niceCountTicks(lo: number, hi: number, count: number): { value: number; label: string }[] {
   if (hi <= lo) return [{ value: 0, label: "0" }];
   const rough = (hi - lo) / count;
-  const mag = Math.pow(10, Math.floor(Math.log10(Math.abs(rough)) || 0));
+  const mag = pow10(decimalExponent(rough));
   const norm = rough / mag;
   let nice: number;
   if (norm < 1.5) nice = 1;
