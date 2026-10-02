@@ -61,6 +61,18 @@ function parseSeededSpecs(workflow: string): string[] {
 
 const GUARD_SELF_TEST = "e2e/hydration-guard.self-test.spec.ts";
 
+/**
+ * The one command the self-test step may run, verbatim. `--retries 0` because
+ * its `test.fail()` cases make retries noise; `list` so a red result reads in
+ * the step log. Anything else on the `run:` line can disarm the step.
+ */
+const SELF_TEST_COMMAND = `npx playwright test ${GUARD_SELF_TEST} --retries 0 --reporter=list`;
+
+const NOT_EXACT_RUN =
+  "its step's `run:` is not exactly the self-test command on one line " +
+  "(a shell wrapper, an extra flag, an echo or a block scalar can each disarm it)";
+const STEP_COE = "its step has a `continue-on-error:` key (any value)";
+
 /** The merge-gating aggregator job of `.github/workflows/ci.yml`. */
 const AGGREGATOR_JOB = "frontend";
 
@@ -103,8 +115,9 @@ function workflowJobs(workflow: string): Map<string, string[]> {
 /**
  * Every place the workflow runs the guard's self-test, and for each one why it
  * would NOT stop a merge. That spec is the only proof the guard bites, so it
- * must run where a red result fails the required check: in a step with no
- * `continue-on-error` and no `if:`, in a job with no `continue-on-error`, which
+ * must run where a red result fails the required check: in a step whose `run:`
+ * is exactly SELF_TEST_COMMAND, with no `continue-on-error` key (whatever its
+ * value) and no `if:`, in a job with no `continue-on-error` key, which
  * the `frontend` aggregator both `needs:` and judges in its result loop
  * (`needs:` alone only makes the aggregator wait). The invocation is matched on
  * one line; a reflow onto continuation lines finds no placement and fails loudly.
@@ -112,6 +125,11 @@ function workflowJobs(workflow: string): Map<string, string[]> {
 function selfTestPlacements(workflow: string): SelfTestPlacement[] {
   const invocation = new RegExp(
     `npx playwright test\\b.*\\s${GUARD_SELF_TEST.replace(/\./g, "\\.")}(\\s|$)`,
+  );
+  // The step's `run:` must be SELF_TEST_COMMAND alone on its key's line. A
+  // match on `invocation` only proves the path is named, not that it runs.
+  const exactRun = new RegExp(
+    `^ {6}(?:- | {2})run:[ \\t]+${SELF_TEST_COMMAND.replace(/[.]/g, "\\.")}[ \\t]*$`,
   );
   const jobs = workflowJobs(workflow);
   const aggregatorText = (jobs.get(AGGREGATOR_JOB) ?? []).join("\n");
@@ -132,14 +150,17 @@ function selfTestPlacements(workflow: string): SelfTestPlacement[] {
       while (end < lines.length && !/^ {6}- /.test(lines[end])) end++;
       const step = lines.slice(start, end);
       const advisoryBecause: string[] = [];
-      if (step.some((l) => /^ {6}(?:- | {2})continue-on-error:\s*true\b/.test(l))) {
-        advisoryBecause.push("its step has `continue-on-error: true`");
+      if (!step.some((l) => exactRun.test(l))) {
+        advisoryBecause.push(NOT_EXACT_RUN);
+      }
+      if (step.some((l) => /^ {6}(?:- | {2})continue-on-error:/.test(l))) {
+        advisoryBecause.push(STEP_COE);
       }
       if (step.some((l) => /^ {6}(?:- | {2})if:/.test(l))) {
         advisoryBecause.push("its step has an `if:` that can skip it");
       }
-      if (lines.some((l) => /^ {4}continue-on-error:\s*true\b/.test(l))) {
-        advisoryBecause.push(`job \`${job}\` has \`continue-on-error: true\``);
+      if (lines.some((l) => /^ {4}continue-on-error:/.test(l))) {
+        advisoryBecause.push(`job \`${job}\` has a \`continue-on-error:\` key (any value)`);
       }
       if (!needs.has(job)) {
         advisoryBecause.push(`job \`${job}\` is not in the \`${AGGREGATOR_JOB}\` aggregator's needs:`);
@@ -286,7 +307,7 @@ describe("seeded e2e specs run under the hydration guard (Phase 169.1.1 SC-4)", 
     }
     const blockingStep = [
       "      - name: Hydration guard self-test",
-      `        run: npx playwright test ${GUARD_SELF_TEST} --retries 0`,
+      `        run: ${SELF_TEST_COMMAND}`,
     ];
 
     it("passes a self-test in its own step of a job the aggregator needs and judges", () => {
@@ -301,12 +322,36 @@ describe("seeded e2e specs run under the hydration guard (Phase 169.1.1 SC-4)", 
           gatedStep: [
             "      - name: Hydration guard self-test",
             "        continue-on-error: true",
-            "        run: |",
-            `          npx playwright test e2e/auth.spec.ts ${GUARD_SELF_TEST}`,
+            `        run: ${SELF_TEST_COMMAND}`,
           ],
         }),
       );
-      expect(p.advisoryBecause).toEqual(["its step has `continue-on-error: true`"]);
+      expect(p.advisoryBecause).toEqual([STEP_COE]);
+    });
+
+    it("passes only the exact command on the step's `run:` line", () => {
+      for (const run of [
+        `      - run: ${SELF_TEST_COMMAND}`,
+        `        run: ${SELF_TEST_COMMAND}  `,
+      ]) {
+        const gatedStep = run.startsWith("      - ")
+          ? [run]
+          : ["      - name: Hydration guard self-test", run];
+        expect(selfTestPlacements(workflow({ gatedStep }))).toEqual([
+          { job: "gated", advisoryBecause: [] },
+        ]);
+      }
+    });
+
+    it("flags the command reflowed into a block scalar, or run without its flags", () => {
+      for (const gatedStep of [
+        ["      - name: S", "        run: |", `          ${SELF_TEST_COMMAND}`],
+        ["      - name: S", `        run: npx playwright test ${GUARD_SELF_TEST}`],
+        ["      - name: S", `        run: npx playwright test e2e/auth.spec.ts ${GUARD_SELF_TEST}`],
+      ]) {
+        const [p] = selfTestPlacements(workflow({ gatedStep }));
+        expect(p.advisoryBecause).toEqual([NOT_EXACT_RUN]);
+      }
     });
 
     it("flags a self-test step with an if:", () => {
@@ -315,18 +360,21 @@ describe("seeded e2e specs run under the hydration guard (Phase 169.1.1 SC-4)", 
           gatedStep: [
             "      - name: Hydration guard self-test",
             "        if: github.event_name == 'push'",
-            `        run: npx playwright test ${GUARD_SELF_TEST}`,
+            `        run: ${SELF_TEST_COMMAND}`,
           ],
         }),
       );
       expect(p.advisoryBecause).toEqual(["its step has an `if:` that can skip it"]);
     });
 
-    it("flags a job-level continue-on-error", () => {
-      const [p] = selfTestPlacements(
-        workflow({ gatedStep: blockingStep, gatedJobExtra: ["    continue-on-error: true"] }),
-      );
-      expect(p.advisoryBecause).toEqual(["job `gated` has `continue-on-error: true`"]);
+    it("flags a job-level continue-on-error, literal or expression-valued", () => {
+      for (const coe of [
+        "    continue-on-error: true",
+        "    continue-on-error: ${{ github.event_name == 'pull_request' }}",
+      ]) {
+        const [p] = selfTestPlacements(workflow({ gatedStep: blockingStep, gatedJobExtra: [coe] }));
+        expect(p.advisoryBecause).toEqual(["job `gated` has a `continue-on-error:` key (any value)"]);
+      }
     });
 
     it("flags a job the aggregator does not need", () => {
@@ -359,7 +407,9 @@ describe("seeded e2e specs run under the hydration guard (Phase 169.1.1 SC-4)", 
       );
     });
 
-    it("finds no placement when the self-test is dropped, commented out or only echoed", () => {
+    // An echoed `npx playwright test <spec>` IS a placement, flagged by the
+    // real-ci.yml case "flags an echoed command" below.
+    it("finds no placement when the self-test is dropped, commented out, or its path is echoed without the command", () => {
       for (const gatedStep of [
         ["      - name: S", "        run: npx playwright test e2e/auth.spec.ts"],
         ["      - name: S", "        run: |", `          # npx playwright test ${GUARD_SELF_TEST}`],
@@ -367,6 +417,48 @@ describe("seeded e2e specs run under the hydration guard (Phase 169.1.1 SC-4)", 
       ]) {
         expect(selfTestPlacements(workflow({ gatedStep }))).toEqual([]);
       }
+    });
+
+    describe("edits to the real ci.yml that disarm the self-test step are flagged", () => {
+      const real = readRepoFile(CI_WORKFLOW);
+      const runLine = `        run: ${SELF_TEST_COMMAND}`;
+
+      it("the real step's run: line is present exactly once (else every case below is vacuous)", () => {
+        expect(real.split(runLine).length - 1).toBe(1);
+      });
+
+      const disarms: Array<[string, string, string]> = [
+        ["|| true", `${runLine} || true`, NOT_EXACT_RUN],
+        [
+          "an expression-valued continue-on-error",
+          `        continue-on-error: \${{ github.event_name == 'pull_request' }}\n${runLine}`,
+          STEP_COE,
+        ],
+        ["--list", `${runLine} --list`, NOT_EXACT_RUN],
+        [
+          "--grep NOMATCH --pass-with-no-tests",
+          `${runLine} --grep NOMATCH --pass-with-no-tests`,
+          NOT_EXACT_RUN,
+        ],
+        [
+          "a shell if false wrapper",
+          `        run: if false; then ${SELF_TEST_COMMAND}; fi`,
+          NOT_EXACT_RUN,
+        ],
+        [
+          "an echoed command",
+          `        run: echo npx playwright test ${GUARD_SELF_TEST} --retries 0`,
+          NOT_EXACT_RUN,
+        ],
+      ];
+
+      it.each(disarms)("flags %s", (_label, replacement, reason) => {
+        const mutated = real.replace(runLine, replacement);
+        expect(mutated).not.toBe(real);
+        const placements = selfTestPlacements(mutated);
+        expect(placements.length).toBeGreaterThan(0);
+        expect(placements.flatMap((p) => p.advisoryBecause)).toContain(reason);
+      });
     });
 
     it("reports a plain Playwright import", () => {
