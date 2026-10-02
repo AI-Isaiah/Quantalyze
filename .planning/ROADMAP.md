@@ -252,7 +252,7 @@ Plans:
 
 **Wave 6** *(gap closure, 2026-08-23 — from 160-VERIFICATION.md; the STALE_CLIENT retirement itself already landed at `2fe28b89`)*
 
-- [ ] 160-07-PLAN.md — Gap closure: independent gsd-verifier re-adjudication of the retired-legacy-arm must_have at HEAD + human PROD smoke of the persist arm (the writer's first real exercise) + honest record and TODOS hygiene (RANK-03) [Wave 6]
+- [x] 160-07-PLAN.md — Gap closure: independent gsd-verifier re-adjudication of the retired-legacy-arm must_have at HEAD + human PROD smoke of the persist arm (the writer's first real exercise) + honest record and TODOS hygiene (RANK-03) [Wave 6]
 
 **Research note:** ARCHITECTURE confidence is LOW without B-M1 — the census is this phase's first task, not a nicety.
 
@@ -670,7 +670,8 @@ Plans:
 - [x] 164.3-04-PLAN.md — VAC-07 SPIKE: 263-migration replay measured + local-stack lane with trapped teardown (D-15) [wave 1]
 - [x] 164.3-05-PLAN.md — Mutation runner core: RED-UNDER-M grammar + parser + first-failure identity + both exit-1 modes + aggregation (VAC-01, OPS-08-F8) [wave 2]
 - [x] 164.3-06-PLAN.md — Static vacuity linter, mechanisms 1/2/4 + narrow 3, red fixtures per rule, NO mechanism-5 rule (VAC-03, D-16) [wave 2]
-- [ ] 164.3-07-PLAN.md — Phase 159 closure spec: two concurrent csv-finalize POSTs, one 2xx + one honest 409, winner holds (VAC-07, D-08) [wave 2]
+- [x] 164.3-07-PLAN.md — Phase 159 closure spec: two concurrent csv-finalize POSTs, one 2xx + one honest 409, winner holds (VAC-07, D-08) [wave 2]
+  ⭐ **164.3-07 SUPERSEDED 2026-10-02:** VAC-07 was delivered and scored by Phase 164.5 plan 07 (`src/__tests__/csv-finalize-concurrent-never-classified.test.ts`, run by `frontend-local-stack`); see 164.3-07-SUMMARY.md.
 - [x] 164.3-08-PLAN.md — Corpus annotation backfill (30 arm-anchored markers, measured), full run green, ARMS_FLOOR pinned, sql-mutation CI job + aggregator row (VAC-01) [wave 3]
 - [x] 164.3-09-PLAN.md — Plan-anchor verifier: range + quote re-resolution over pending plans, CI seam + execute-time convention (VAC-05, D-06 own wave) [wave 4]
 - [x] 164.3-10-PLAN.md — All five mechanisms re-introduced and demonstrated caught, durable via vitest pin + every-push runner (VAC-06) [wave 5]
@@ -4096,7 +4097,9 @@ Plans:
 - [x] 168-02-PLAN.md — per-site pins for every option-book reader (incl. mark_to_market and smoothed_mtm end to end, and the acceptance script's eligibility check), refusal whitelist gains `commission`/`position`, prose sweep, full suite
 
 **Wave 3** *(post-land; founder-owned, non-autonomous)*
-- [ ] 168-03-PLAN.md — after deploy the founder retries the options strategy that failed on 2026-09-23 and reports terminal status, return-point count and any refusal class, by type only. ⭐ D-09 note (2026-09-26): the retry also exercises the expiry close, but ONLY when the smoothed pass runs, which is gated on `SMOOTHED_MTM_ENABLED` (production value not measured here); a D-09 refusal reports as an `expiry`-shape or `exercise` class
+- [x] 168-03-PLAN.md — after deploy the founder retries the options strategy that failed on 2026-09-23 and reports terminal status, return-point count and any refusal class, by type only. ⭐ D-09 note (2026-09-26): the retry also exercises the expiry close, but ONLY when the smoothed pass runs, which is gated on `SMOOTHED_MTM_ENABLED` (production value not measured here); a D-09 refusal reports as an `expiry`-shape or `exercise` class
+
+⛔ **168 OVERRIDE 2026-10-02:** plan 03's post-deploy observation was read from PROD by the orchestrator (read-only SELECTs, marker first) under the founder's 2026-10-01 rule, after the founder confirmed the re-created strategy (2026-09-27, three-account Deribit composite): stitch `done` twice, 272 return points, no assignment refusal, no other error. Also in 168-CONTEXT.md. Assignment-row presence and whether the smoothed pass ran were not measured.
 
 ### Phase 169: FACTSHEETTRUTH — a factsheet's headline, benchmark, windows and record length agree with the stored record and with every other page
 

@@ -859,7 +859,8 @@ items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **
 
       ⛔ **Shape B is REJECTED, not deferred.** (Auto-deploy off + a repo-owned `serviceInstanceDeploy(commitSha:)` gated on the analytics-covering checks.) It was the ONLY shape compliant with the constraint that Railway cannot narrow its own wait — `DeploymentTrigger.checkSuites` is a `Boolean` on the object and on both input types, introspected, a present type-system fact, with no CLI verb and no config-as-code key. It would have cost production writes, a second deploy path to own forever, and rested on an UNSETTLED question: **whether an API-triggered deploy even bypasses `checkSuites`. If it does not, Shape B does not work at all.** ⛔ Do not revive it without answering that question first, on a throwaway service.
 
-- [ ] **`[DERIBIT-ASSIGNMENT-UNCLASSIFIED]` Deribit's `assignment` transaction-log type is in
+- [x] **`[DERIBIT-ASSIGNMENT-UNCLASSIFIED]` Deribit's `assignment` transaction-log type is in
+   ✅ **CLOSED 2026-10-02 (Phase 168, PR #867 v0.97.0.0; observed by 168-03):** a three-account Deribit options composite re-created after the deploy stitched `done` twice with 272 return points and no assignment refusal. ⚠️ Caveat: whether its ledger actually held an `assignment` row was not measured, so this proves the account ingests, not that a real `assignment` row was classified.
    neither `CASH_BEARING_TYPES` nor `INFORMATIONAL_TYPES`, so every options account carrying one
    FAILS ingestion — and the classification cannot be decided without evidence nobody has yet.**
    ⛔ MEASURED IN PRODUCTION 2026-09-12, not hypothetical. A real Deribit Iron Condor produced:
