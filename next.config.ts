@@ -231,8 +231,8 @@ const nextConfig: NextConfig = {
             // CSP in only one environment. This is the Phase-25-class prod-only
             // CSP failure mode, closed pre-emptively. Adding `worker-src` only
             // relaxes the worker source list; it cannot weaken script execution.
-            // Phase 164.9.4 (D-14, 2026-09-26, orchestrator decision pending
-            // founder ratification): `headers()` passes this value through
+            // Phase 164.9.4 (D-14, orchestrator decision 2026-09-26, ratified
+            // by the founder 2026-09-27): `headers()` passes this value through
             // `withConfiguredSupabaseOrigin`, which appends the origin of the
             // configured NEXT_PUBLIC_SUPABASE_URL and its ws:/wss: twin to
             // `connect-src` ONLY when no source below already matches it. A

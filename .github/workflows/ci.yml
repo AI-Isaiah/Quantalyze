@@ -3648,7 +3648,12 @@ jobs:
               # Phase 126 / FACTSHEET-02 + RT-01 canary: e2e-seeded is BLOCKING
               # (the sfox-badge legs are the go-live gate). It legitimately
               # self-skips ONLY on a FORK PR — a different head repo has no
-              # access to the test-DB variable. On a push to main OR a same-repo
+              # access to the test-DB variable. (2026-10-02, review 164.9.4
+              # round 2 LOW-02: since Phase 164.9.4 the job reads no secret and
+              # touches no shared database, so the fork exclusion in its `if:` is
+              # an inherited gate, not an access requirement; the echo below says
+              # so. Dropping the exclusion is a separate decision, not taken here.)
+              # On a push to main OR a same-repo
               # PR, a `skipped` result means E2E_TEST_DB_CONFIGURED was LOST
               # (which ALSO silently disables test-db-drift, and with it VAC-08), so a skip there is NOT
               # tolerated: the gate must redden rather than green-wash an
@@ -3657,7 +3662,7 @@ jobs:
               if [ "$result" = "success" ]; then
                 :
               elif [ "$result" = "skipped" ] && [ "$is_fork_pr" = "true" ]; then
-                echo "e2e-seeded skipped (fork PR — no test-DB access); tolerated for this row only."
+                echo "e2e-seeded skipped (fork PR — the job's if: excludes fork PRs; it reads no test-DB secret since Phase 164.9.4); tolerated for this row only."
               else
                 echo "::error::e2e-seeded result=$result on a TRUSTED event (push/same-repo). The go-live badge gate MUST run here — E2E_TEST_DB_CONFIGURED may be unset (this also disables test-db-drift, and with it VAC-08). A skip is not tolerated."
                 fail=1
@@ -6122,8 +6127,9 @@ jobs:
       # (`page.setContent` only), so it runs before the lane boots. `--retries 0`
       # because its `test.fail()` cases make retries pure noise; `list` so a red
       # result reads in this step's log (this job uploads no report).
-      # ⚠️ What this does NOT buy: this job's own `if:` skips it on fork PRs and
-      # docs-only PRs, and the aggregator tolerates that skip. On those events
+      # ⚠️ What this does NOT buy: this job's own `if:` skips it on fork PRs,
+      # docs-only PRs and (since review 164.9.4 WR-01) docs-only pushes, and the
+      # aggregator tolerates that skip. On those events
       # the self-test does not run at all. On a push or a same-repo PR it
       # blocks. `src/__tests__/e2e-seeded-hydration-guard.test.ts` pins every
       # invocation of the self-test to a placement like this one.
@@ -6326,6 +6332,10 @@ jobs:
       # PR CI build is the measurement. A false red there is a D-05 root-cause
       # fix (tighten the pattern to the inlined-URL shape), never the removal of
       # the arm.
+      # (2026-10-02, review 164.9.4 round 2 IN-02: MEASURED. The first reading is
+      # CI run `37039941530` at `d69f43c6b`: on a real lane build arm (iii)
+      # matched nothing and the step exited 0. The D-05 instruction above still
+      # governs any future false red. The sentence above is kept as lineage.)
       # No URL or host is printed on any path: this log is public. Every grep
       # sends its output to /dev/null, and every error line is fixed text.
       # (2026-10-01, Phase 164.9.4 review SFH-01: (ii) and (iii) are NEGATIVE
