@@ -266,13 +266,13 @@ export function classifyPushRange({ before, forced, cwd, fetchCheckRuns = readCh
   if (String(forced ?? "").trim() === "true" || forced === true) return code("a forced push");
   try {
     git(["cat-file", "-e", `${sha}^{commit}`], cwd);
-  } catch {
-    return code("before-SHA is not a commit in this clone");
+  } catch (e) {
+    return code(`before-SHA is not a commit in this clone${gitWhy(e)}`);
   }
   try {
     git(["merge-base", "--is-ancestor", sha, "HEAD"], cwd);
-  } catch {
-    return code("before-SHA is not an ancestor of HEAD");
+  } catch (e) {
+    return code(`before-SHA is not an ancestor of HEAD${gitWhy(e)}`);
   }
   let files;
   try {
@@ -281,8 +281,8 @@ export function classifyPushRange({ before, forced, cwd, fetchCheckRuns = readCh
     files = git(["diff", "--name-only", "--no-renames", "-z", sha, "HEAD"], cwd)
       .split("\0")
       .filter(Boolean);
-  } catch {
-    return code("git diff over the range failed");
+  } catch (e) {
+    return code(`git diff over the range failed${gitWhy(e)}`);
   }
   if (files.length === 0) return code("the range changed no files");
   const range = `${files.length} changed file(s) in the pushed range ${sha.slice(0, 12)}..HEAD`;
@@ -327,6 +327,19 @@ export function readCheckRuns(sha, repo = process.env.GITHUB_REPOSITORY) {
     timeout: 60_000,
   });
   return JSON.parse(raw);
+}
+
+/**
+ * Review 164.9.4 round 2, LOW-03: git's own reason for a fail-safe arm, as
+ * `: <first stderr line>`, so a recurring cause is named in the log rather than
+ * quietly costing every docs-only push a full run. Empty when git printed
+ * nothing: `cat-file -e` on a missing object and `merge-base --is-ancestor` on a
+ * non-ancestor both exit 1 with no stderr, and an empty reason is honest there.
+ * git's `fatal:` line names refs and paths, never a secret.
+ */
+function gitWhy(e) {
+  const line = String(e?.stderr ?? "").trim().split("\n")[0];
+  return line ? `: ${line}` : "";
 }
 
 /** The first line of a failed child's stderr, or the error message. */
@@ -717,6 +730,10 @@ const CASES = [
           const v = classifyPushRange({ ...input, cwd: r.dir });
           pass = ok(v.docsOnly === false && v.reason.startsWith("push range undeterminable"), `${label} classifies as code (${v.reason})`) && pass;
         }
+        // LOW-03: a fail-safe arm keeps git's own reason. Measured: `cat-file -e`
+        // on an absent `<sha>^{commit}` prints `fatal: Not a valid object name …`.
+        const absent = classifyPushRange({ before: "1".repeat(40), cwd: r.dir });
+        pass = ok(/: fatal: /.test(absent.reason), `the not-in-clone reason carries git's stderr line (${absent.reason})`) && pass;
         const e2e = runMainOnPush(r.dir, { PUSH_BEFORE_SHA: "0".repeat(40) });
         pass = ok(e2e.code === 0 && e2e.docsOnly === "false", `main() exits 0 with docs_only=false on an undeterminable range, never red (got exit ${e2e.code}, docs_only=${e2e.docsOnly})`) && pass;
         const dispatch = runMainOnPush(r.dir, { GITHUB_EVENT_NAME: "workflow_dispatch", PUSH_BEFORE_SHA: base });
