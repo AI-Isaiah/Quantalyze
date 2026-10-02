@@ -4226,6 +4226,8 @@ Plans:
 **Wave 4** *(blocked on Wave 3 completion)*
 - [x] 169.1.1-04-PLAN.md — full gate + `chore(release)` HYDRATIONTICKS
 
+⚖️ **Founder override 2026-10-02 ("Draft PR, then verify"):** shipped as a draft PR so CI can produce the `human_needed` reads (seeded #418 guard, blocking self-test step, composite axe, unseeded `/demo`); VERIFICATION flips to `passed` on those SHA-bound reads before ready/merge. Recorded in `169.1.1-CONTEXT.md`.
+
 ### Phase 169.2: BENCHFRESH — the BTC benchmark is refreshed daily and read in full (INSERTED)
 
 **Goal:** The BTC benchmark every page compares against is current: a daily cron route refreshes it through the analytics service's existing fetcher, a failed or stale refresh answers non-2xx, and the one reader of `benchmark_prices` pages it in full.
