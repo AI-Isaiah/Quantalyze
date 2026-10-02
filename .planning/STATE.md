@@ -2,13 +2,13 @@
 gsd_state_version: "1.0"
 milestone: v1.20
 milestone_name: Backlog Burndown (Phases 158+)
-current_phase: 164.9.3.2.1
-current_phase_name: ENQ40001
+current_phase: 164.9.4
+current_phase_name: CIOFFMUTEX
 status: executing
-stopped_at: Phase 164.9.3.2.1 ENQ40001 planned (3 plans, checker passed); next execute plan 01
+stopped_at: Phase 164.9.3.2.1 landed (PR #929, v0.118.1.5); 160-07, 168-03, 164.3-07 closed; next 164.9.4 verify and ship
 last_updated: "2026-10-02T16:45:17.840Z"
 last_activity: 2026-10-02
-last_activity_desc: Phase 164.9.3.2.1 execution started
+last_activity_desc: Phase 164.9.3.2.1 complete (PR #929); leftover plans 160-07, 168-03, 164.3-07 closed
 state_head: e0323dfdb1950d836d520a6138180bf3872496ac
 progress:
   total_phases: 85
@@ -179,10 +179,11 @@ both checkboxes updated to match. Not yet marked `completed_phases` in the front
 no VERIFICATION.md exists for this phase yet, and this repo's own rule is that phase completion
 is decided by verification status, never by plan counts.**
 
-Phase: 164.9.3.2.1 (ENQ40001) — EXECUTING
+Phase: 164.9.4 (CIOFFMUTEX) — VERIFYING (review loop closed by the founder after round 6)
+Phase: 164.9.3.2.1 (ENQ40001) — COMPLETE 2026-10-02 (verification passed; PR #929 merged, v0.118.1.5; no migration)
+Phase: 160 / 168 / 164.3 leftover plans — CLOSED 2026-10-02 (160-07 PROD smoke 2/3 surfaces; 168-03 observed on the re-created composite; 164.3-07 superseded by 164.5-07)
 Phase: 164.9.3.2 (DEFER40001) — COMPLETE 2026-10-02 (verification passed; PR #919 merged, v0.118.0.0; migration applied to TEST and PROD by Supabase Migrate run 36981647441)
 Phase: 169.1.1 (HYDRATIONTICKS) — COMPLETE 2026-10-02 (verification passed; PR #925 merged, v0.118.1.0)
-Phase: 164.9.3.2.1 (ENQ40001) — NEXT, after the 164.4.2 gate-only close (founder 2026-10-02)
 Phase: 166.4 (BENCHALIGN) — COMPLETE 2026-09-27 (verification passed; PR #892 merged, v0.108.0.0)
 Phase: 170 (LAYOUT — page layout reads clean and holds on every page) — COMPLETE 2026-10-01
 Plan: 3 of 3

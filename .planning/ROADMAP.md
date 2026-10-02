@@ -144,7 +144,7 @@ phases below carry the corrections, not the bullets.
 - [ ] **Phase 167.1.2: ACCOUNTTRUTH — one exchange account is counted once, and the allocator equity curve shows only what the data supports** (INSERTED) — not yet verified
 - [ ] **Phase 167.2: KEYCARDSYNC — the key card never shows one key's sync result as another key's** (INSERTED) — verification: human_needed
 - [ ] **Phase 167.2.1: FACTSHEETBUILDABLE — a strategy is called computed only when its factsheet can actually build** (INSERTED) — verification: human_needed
-- [ ] **Phase 168: DRBOPTIONS — a Deribit options account ingests end to end** — verification: human_needed
+- [x] **Phase 168: DRBOPTIONS — a Deribit options account ingests end to end** — verification: passed (completed 2026-10-02)
 - [ ] **Phase 169: PAGETRUTH — every number agrees across pages and with its own record length** — not yet verified
 - [ ] **Phase 169.3: SMALLFIXES — admin compute jobs, recommendations, profile exchanges and the one mandate rule show true numbers** (INSERTED) — not yet verified (plan 01 shipped in #868)
 - [x] **Phase 170: LAYOUT — page layout reads clean and holds on every page** — verification: passed (completed 2026-10-01; post-deploy defects routed to 170.2)
@@ -3333,7 +3333,7 @@ Plans:
 **Goal:** The enqueue race-loss raise (SQLSTATE 40001 in `_enqueue_compute_job_internal`) is measured deterministically, in psql and through the lane's PostgREST, and the binding D-02 rule acts on the outcome. If it converges, 40001 is kept, a both-lanes gate pins the converging behaviour, and the app-side retry comments say why the helper stays. If it hangs, the phase is replanned for the 55006 fence remedy.
 **Requirements**: TBD
 **Depends on:** Phase 164.9.3.2
-**Plans:** 3 plans
+**Plans:** 3/3 plans complete
 
 Booked 2026-10-01 by founder decision ENQ-SCOPE = `enq-sibling` (164.9.3.2 plan 01). Evidence carried from `164.9.3.2-01-SUMMARY.md`: the two-target shape (A2) is REFUTED (rejected up front with 22023), and the conflict-wait path converges through PostgREST (answered in 2–4 s). The race-loss RAISE itself never fired in five attempts, so its PostgREST behaviour is UNMEASURED; that it converges on retry is reasoned, not measured.
 
@@ -4086,7 +4086,7 @@ Plans:
 **Requirements**: TODOS entry `[DERIBIT-ASSIGNMENT-UNCLASSIFIED]` — read it before planning; it carries the dated measurements and the forbidden remedies. Do not re-derive them. ⭐ **THE WAITING DEPENDENCY IS MET — MEASURED 2026-09-23 (founder-approved edit), read-only from the production analytics log.** A three-account Deribit composite created 2026-09-23 failed its first stitch job (`run_stitch_composite_job`) permanently at 06:50 UTC on exactly this refusal: one `assignment` row, currency BTC, change `-1.5e-5`, instrument a BTC put expiring 28 Aug 2026, side `close buy`. The refusal's own same-instrument census for that batch read **`delivery=0 settlement=0 trade=1`**. For this occurrence that answers the deciding question: Deribit emitted NO separate `delivery` or `settlement` row for the assigned instrument, so there is no second cash row the `assignment` change could be double-counted against. ⚠️ One occurrence, one instrument — the plan decides whether n=1 is enough to classify, and must say so. **Consequence:** the strategy's analytics were stamped terminal (composite member reconstruction failed structurally), and its owner factsheet and share link still read "still computing" (that copy defect is Phase 167.2's). Phase 159 UAT #2 (render a composite on the public factsheet) now has a real composite waiting on THIS phase.
 **Depends on:** PR #783 merged (the evidence channel), and ONE observed occurrence carrying the census. ⚠️ The second is a WAITING dependency, not a code one — nothing in the repo produces it; a deribit options account must hit the refusal again.
 ⭐ **SCOPE AMENDMENT 2026-09-26 — founder decision D6 (AskUserQuestion: "Fix inside 168"), recorded as D-09 in `168-CONTEXT.md`.** The round-1 review's INFO-3 measured that the smoothed option-book replay ignored Deribit's `type=expiry`, so an out-of-the-money short stayed open past expiry and any later option activity raised the daily-MTM hole, losing the smoothed basis for the account. It is fixed inside this phase, not split: the replay closes an option at a zero-cash `expiry` row and refuses an `expiry` carrying cash or a nonzero position, and any `exercise` row (unmeasured shapes). Neither type becomes cash-bearing, so both twins are unchanged. The same decision gives the new `mtm_option_row_field_missing` degrade reason its own factsheet copy. This overrides the phase-size rule for this one item.
-**Plans:** 3 plans
+**Plans:** 3/3 plans complete
 
 Plans:
 
@@ -4588,7 +4588,7 @@ kept verbatim.
 |-------|----------------|--------|-----------|
 | 158. OPS-CI merge=deploy | 6/6 | Complete    | 2026-08-21 |
 | 159. RANK ranking integrity | 7/7 | Complete — plan 01 shipped its deliverable (`159-CENSUS.md` is on disk). ⭐ 159-01 SUMMARY written retrospectively 2026-09-30 by founder decision; overrides the #790 'no retro-fit' note for this plan (the cell said "its SUMMARY was never written" until then). `159-VERIFICATION.md` closed 2026-09-12 (`status: passed`): its one open item, the concurrent same-session CAS race, is discharged by `src/__tests__/csv-finalize-concurrent-never-classified.test.ts` on the blocking `frontend-local-stack` lane — green in main run 34712535912 at `733a55f5` | v0.70.0.0 |
-| 160. PROVENANCE venue/annualization | 6/7 | Complete — verification passed (closed with the v1.20 open items in #790); plan 07 was its `gap_closure` verification plan | v0.77.39.0 · #790 |
+| 160. PROVENANCE venue/annualization | 7/7 | Complete — verification passed (closed with the v1.20 open items in #790); plan 07 was its `gap_closure` verification plan | v0.77.39.0 · #790 |
 | 161. WIZERR honest errors | 10/10 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed | v0.72.0.0 |
 | 161.1 LEDGER-REFRESH (shipped dormant) | 5/5 | Complete | v0.73.0.0 |
 | 162. HONEST visible truth | 9/9 | Complete — plan 10 WITHDRAWN in `3fa26831` ("its premise was false, credentials ARE trimmed"), so the denominator is 9, not 10 | v0.74.0.0 |
@@ -4658,7 +4658,7 @@ kept verbatim.
 | 167.1.2.1 RECONMARKER | 0/? | Queued — data integrity; after 167.1.2 PR C | - |
 | 167.2 KEYCARDSYNC | 10/10 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed | v0.88.0.0 · #851 |
 | 167.2.1 FACTSHEETBUILDABLE | 4/4 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed | #866 |
-| 168. DRBOPTIONS (a Deribit options account ingests end to end) | 2/3 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed; plan 03 is the founder's live retry | v0.97.0.0 · #867 |
+| 168. DRBOPTIONS (a Deribit options account ingests end to end) | 3/3 | Complete    | 2026-10-02 |
 | 169. FACTSHEETTRUTH (split from PAGETRUTH 2026-09-26) | 7 plans on `feat/169-pagetruth`, not on main | Queued — feature; comparator plans split to 169.5 on 2026-09-27 (D-61); waits for 167.1.2 PR C | - |
 | 169.1 ZOOMKPIS | 9/9 | Complete    | 2026-10-01 |
 | 169.1.1 HYDRATIONTICKS | 4/4 | Complete — PR #925, v0.118.1.0 | 2026-10-02 |
