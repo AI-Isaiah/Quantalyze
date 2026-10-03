@@ -708,6 +708,18 @@ const LANE_ONLY_SITES: readonly { file: string; object: string; fixture: string;
       "version of this gate made to run there would issue genuine outbound HTTP from shared CI " +
       "infrastructure on every run: accommodation is unsafe, not merely inconvenient.",
   },
+  {
+    file: "test_sync_status_bridge_lock.sql",
+    object: "dblink",
+    fixture: "scripts/pg-lane/fixtures/36-fixture-dblink.sql",
+    why:
+      "Every arm opens two dblink sessions back into the database it runs in, to hold one " +
+      "uncommitted call on a strategy while a direct sync_strategy_analytics_status call waits " +
+      "on the bridge's own per-strategy advisory lock. That needs COMMITTED seed rows and a " +
+      "trust-auth superuser loopback connection, which the local Supabase stack behind sql-tests " +
+      "does not give without a password in a committed file, and the dblink extension is not in " +
+      "the schema of record (Phase 164.5.2.1).",
+  },
 ];
 
 /**

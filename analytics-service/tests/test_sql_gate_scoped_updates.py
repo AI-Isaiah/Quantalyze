@@ -122,6 +122,10 @@ _SCOPED_RE = re.compile(
 #     block-local seeded strategy_id. It was only this anti-vacuity pin that was
 #     red, and it stayed red across three plans — which is the cost of recording
 #     it late, stated here rather than quietly corrected.
+#   * Phase 164.5.2.1 added supabase/tests/test_sync_status_bridge_residues.sql
+#     with FIVE scoped driver UPDATEs and again shipped it without this key; the
+#     164.5.2.1 review-fix round found the pin red at its own base commit and
+#     recorded it                                  -> (absent) -> 5
 #
 # ⚠️ A count of ZERO is expressed by ABSENCE, not by an explicit `: 0` entry.
 # `actual` below is built with a truthiness filter, so a file with no matches
@@ -134,6 +138,7 @@ _EXPECTED_MATCH_COUNTS: dict[str, int] = {
     "test_ledger_refresh_staleness.sql": 2,
     "test_metrics_by_basis_write.sql": 4,
     "test_strategy_analytics_stuck_computing_reaper.sql": 3,
+    "test_sync_status_bridge_residues.sql": 5,
     "test_sync_status_curated_sentence_survives.sql": 3,
     "test_sync_status_marked_refresh_protected.sql": 8,
     "test_wizard_composite_members.sql": 2,

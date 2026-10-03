@@ -95,6 +95,15 @@
 -- ABSENT: it has never been applied on the lane, it redefines both claim RPCs
 -- with an explicit BEGIN/COMMIT, and the lock migration re-bases the full mark
 -- bodies, so the lane does not need it.
+-- ⚠️ 2026-10-03 (Phase 164.5.2.1 BRIDGERESIDUE): this setup is deliberately
+-- NOT extended with 20261003120000_sync_status_bridge_residues.sql. That
+-- migration makes the bridge take the same per-strategy lock itself, so with it
+-- applied, deleting one mark RPC's lock line no longer changes what the second
+-- mark waits on and this file's L1/L2 twins stop biting (measured
+-- `lockgate-L1twin-p3 rc=0`, 164.5.2.1 RESEARCH Q4). This gate keeps proving
+-- the RPC locks against the 20260906120000 bridge, which is what its twins
+-- claim; the bridge's own lock is proven in
+-- supabase/tests/test_sync_status_bridge_lock.sql.
 -- LANE-ONLY: {"object":"dblink","fixture":"scripts/pg-lane/fixtures/36-fixture-dblink.sql","job":"sql-mutation","reason":"Every arm drives two dblink sessions back into the database it runs in; that needs committed seed rows and a trust-auth superuser loopback connection, which the local Supabase stack behind sql-tests does not give without a password in a committed file, and the dblink extension is not in the schema of record. The arms execute and are mutation-checked twin-by-twin on the pg-lane under sql-mutation."}
 -- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","scripts/pg-lane/fixtures/27-fixture-strategy-analytics-computation-error.sql","scripts/pg-lane/fixtures/36-fixture-dblink.sql","supabase/migrations/20260411144407_compute_jobs_queue.sql","scripts/pg-lane/fixtures/04-fixture-compute-jobs-targets.sql","supabase/migrations/20260510175507_process_key_long_compute_job_kinds_repair.sql","supabase/migrations/20260515114555_compute_jobs_claim_token_fencing.sql","supabase/migrations/20260522111858_compute_analytics_from_csv_kind.sql","supabase/migrations/20260614120000_derive_broker_dailies_kind.sql","supabase/migrations/20260708120000_sync_status_failed_final_bounce.sql","supabase/migrations/20260710120000_strategy_keys.sql","supabase/migrations/20260710130000_stitch_composite_kind.sql","supabase/migrations/20260825150000_sync_status_protect_marked_refresh.sql","supabase/migrations/20260826120000_computation_error_curated_copy.sql","supabase/migrations/20260906120000_computation_error_provenance.sql","supabase/migrations/20260926120000_mark_compute_job_bridge_advisory_lock.sql"]}
 

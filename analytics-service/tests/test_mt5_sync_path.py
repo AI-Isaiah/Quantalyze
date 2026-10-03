@@ -141,6 +141,7 @@ def _session(transport: _FakeMt5Transport) -> Mt5Session:
         login=EXPECTED_LOGIN,
         investor_password="pw",
         server="Broker-Live",
+        venue_account_id=str(EXPECTED_LOGIN),
     )
 
 

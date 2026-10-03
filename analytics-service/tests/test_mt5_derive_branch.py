@@ -227,7 +227,8 @@ def _session(
 
     client = Mt5Client("h", 1, _connect=_connect)
     return Mt5Session(
-        client=client, login=123456, investor_password="pw", server="Broker-Live"
+        client=client, login=123456, investor_password="pw", server="Broker-Live",
+        venue_account_id="123456",
     )
 
 

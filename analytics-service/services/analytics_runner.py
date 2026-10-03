@@ -1374,12 +1374,19 @@ async def run_csv_strategy_analytics(
     #      with this job already `pending`. A pending job is non-terminal, so the
     #      bridge's branch (a) fires — and its CASE preserves
     #      'complete_with_warnings' but rewrites EVERYTHING ELSE to 'computing'.
-    #      A strategy at plain 'complete' is therefore already at 'computing'
-    #      before this function is entered at all.
+    #      A strategy at plain 'complete' was therefore already at 'computing'
+    #      before this function was entered at all.
+    #      ⚠️ Since migration 20261003120000 (Phase 164.5.2.1) branch (a) ALSO
+    #      keeps a plain 'complete' row when every in-flight job carries an
+    #      in-scope refresh marker and no unprotected failure is live; any other
+    #      plain-'complete' row still goes to 'computing'. So what this hop would
+    #      read now depends on the in-flight jobs' markers — which is still not
+    #      an oracle for the publish state at hop 1's entry, so the argument
+    #      below is unchanged.
     #
-    # So a read here — at ANY point, above or below `_mark_computing` — answers
-    # 'computing' for every plain-'complete' row, the snapshot is None, and every
-    # hop-2 failure takes the LOUD path: publish state downgraded to 'failed',
+    # So a read here — at ANY point, above or below `_mark_computing` — answered
+    # 'computing' for every plain-'complete' row, the snapshot was None, and every
+    # hop-2 failure took the LOUD path: publish state downgraded to 'failed',
     # data_quality_flags rebuilt wholesale, persisted cash series DELETEd. The
     # production cohort survived only because all 5 rows are
     # 'complete_with_warnings', which branch (a) happens to preserve — i.e. the
