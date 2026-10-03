@@ -6,6 +6,21 @@
  * mutation runner may run only the gate files whose content changed against the
  * PR's merge base; on every other event the FULL corpus is owed. This script
  * answers "which gate files, or FULL", and `run.mjs --subset-from` consumes it.
+ * ⛔ CORRECTED 2026-10-03 (Phase 164.9.6): "on every other event the FULL corpus
+ * is owed" stopped being true for ONE event; the sentence is kept as lineage.
+ *
+ * ── 2026-10-03 (Phase 164.9.6, D-01/D-02) — A PUSH TO MAIN IS JUDGED TOO ────
+ * A `push` to `refs/heads/main` is now judged by its PUSHED RANGE,
+ * `github.event.before..HEAD`, read through the SHARED push-range lister
+ * (`pushRangeFiles` / `firstParentCommits` in `classify-changed-paths.mjs`),
+ * the same lister the docs classifier's push path calls. Any doubt is FULL with
+ * the reason printed: a ref other than main, a before-SHA that is absent,
+ * malformed or all zeros, a forced push, a before-SHA missing from the clone or
+ * not an ancestor of HEAD, a git error, a range that is not exactly ONE
+ * first-parent GitHub PR merge commit, and an empty range. `workflow_dispatch`,
+ * `schedule` and an unset event stay FULL (D-02). ⛔ The push path NEVER exits
+ * non-zero: a red `changed-paths` would skip every dependent job and red `main`,
+ * so every git, read or parse error there becomes FULL with its reason instead.
  *
  * ── ONE DIFF, TWO CALLERS ───────────────────────────────────────────────────
  * The merge-base diff is IMPORTED from `scripts/classify-changed-paths.mjs`
@@ -43,11 +58,13 @@
  *   node scripts/sql-gate-subset.mjs --self-test   # prove every verdict fires
  *   node scripts/sql-gate-subset.mjs               # the derivation (CI, or locally)
  */
-import { appendFileSync, existsSync, realpathSync } from "node:fs";
+import { appendFileSync, existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { changedFilesAgainstBase } from "./classify-changed-paths.mjs";
+import { changedFilesAgainstBase, firstParentCommits, isPrMergeCommit, pushRangeFiles, scratchRepo } from "./classify-changed-paths.mjs";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -89,13 +106,20 @@ export const MACHINERY_PREFIXES = [
  * in the checkout) is computed by `main()` with `existsSync`, so the
  * deleted-or-moved row is table-driven like every other row.
  *
- * @param {{event: string|undefined, changedFiles: string[], presentFiles: Set<string>|string[]}} input
+ * On a `push` the inputs are `ref` (GITHUB_REF), `pushRange` (the shared
+ * lister's `{ok, sha, files}` or `{ok: false, reason}`) and `commits` (the
+ * range's first-parent `[hash, email, subject]` triples, or the Error the read
+ * threw); `changedFiles` is unused there. See `judgePush`.
+ *
+ * @param {{event: string|undefined, changedFiles?: string[], presentFiles: Set<string>|string[], ref?: string,
+ *   pushRange?: {ok: boolean, sha?: string, files?: string[], reason?: string}, commits?: string[][]|Error|null}} input
  * @returns {{mode: "full"|"subset", files: string[], reason: string}}
  */
-export function judge({ event, changedFiles, presentFiles }) {
+export function judge({ event, changedFiles, presentFiles, ref, pushRange, commits }) {
   const full = (reason) => ({ mode: "full", files: [], reason });
+  if (event === "push") return judgePush({ ref, pushRange, commits, presentFiles });
   if (event !== "pull_request") {
-    return full(`event is '${event ?? "(unset)"}', not pull_request — the full corpus is owed`);
+    return full(`event is '${event ?? "(unset)"}', neither pull_request nor push — the full corpus is owed`);
   }
   // Order-stable and duplicate-free, whatever order the diff printed.
   const changed = [...new Set(changedFiles)].sort();
@@ -125,8 +149,82 @@ export function judge({ event, changedFiles, presentFiles }) {
 }
 
 /**
- * One always-on human line; the two `$GITHUB_OUTPUT` values only when the
- * variable is present — `classify-changed-paths.mjs`'s `emit()` shape.
+ * PURE: the push-to-main verdict (Phase 164.9.6, D-01). Every shape this cannot
+ * positively identify as ONE GitHub PR squash on `main` is FULL with a named
+ * reason; the gate-file rules after that are the pull_request arm's own.
+ */
+function judgePush({ ref, pushRange, commits, presentFiles }) {
+  const full = (reason) => ({ mode: "full", files: [], reason });
+  if (ref !== "refs/heads/main") {
+    return full(`push to '${ref ?? "(unset)"}', not refs/heads/main — the full corpus is owed`);
+  }
+  if (!pushRange || pushRange.ok !== true) {
+    return full(`push range undeterminable (${pushRange?.reason ?? "no range was read"})`);
+  }
+  if (commits instanceof Error) {
+    return full(`the pushed range's commit log could not be read (${commits.message})`);
+  }
+  if (!Array.isArray(commits) || commits.length !== 1) {
+    const n = Array.isArray(commits) ? commits.length : 0;
+    return full(`the pushed range holds ${n} first-parent commit(s), not exactly one PR squash`);
+  }
+  const [hash, email, subject] = commits[0];
+  const head12 = String(hash).slice(0, 12);
+  if (!isPrMergeCommit(email, subject)) {
+    return full(`commit ${head12} in the pushed range is not a GitHub PR merge`);
+  }
+  const changed = [...new Set(pushRange.files ?? [])].sort();
+  if (changed.length === 0) return full("push range undeterminable (the range changed no files)");
+  const where = `${String(pushRange.sha).slice(0, 12)}..HEAD (PR merge ${head12})`;
+  const present = new Set(presentFiles);
+
+  const machinery = changed.filter((p) => MACHINERY_PREFIXES.some((m) => p.startsWith(m)));
+  if (machinery.length > 0) {
+    return full(`the mutation machinery or a lane input changed in ${where}: ${machinery.join(" ")}`);
+  }
+  const underGateDir = changed.filter((p) => p.startsWith(GATE_DIR_PREFIX));
+  const nonConforming = underGateDir.filter((p) => !GATE_FILE_RE.test(p));
+  if (nonConforming.length > 0) {
+    return full(`changed path(s) under ${GATE_DIR_PREFIX} fail the strict gate-file pattern: ${nonConforming.join(" ")}`);
+  }
+  if (underGateDir.length === 0) {
+    return full(`0 of ${changed.length} changed file(s) in ${where} are gate files`);
+  }
+  const absent = underGateDir.filter((p) => !present.has(p));
+  if (absent.length > 0) {
+    return full(`changed gate file(s) absent from the checkout (deleted or moved): ${absent.join(" ")}`);
+  }
+  return {
+    mode: "subset",
+    files: underGateDir,
+    reason: `${underGateDir.length} of ${changed.length} changed file(s) in ${where} are gate files`,
+  };
+}
+
+/** The cap `oneLineReason` truncates to, before its suffix. */
+export const REASON_MAX_CHARS = 1000;
+
+/**
+ * PURE: a reason made safe for ONE `$GITHUB_OUTPUT` line (T-164.9.6-01). A fork
+ * PR chooses filenames and a filename can carry a newline, and a raw newline in
+ * `$GITHUB_OUTPUT` starts a NEW key, so every character outside printable ASCII
+ * (0x20-0x7E) becomes `?`. The two typographic characters this module's own
+ * reasons use are spelled in ASCII first, so the line stays readable. Capped at
+ * `REASON_MAX_CHARS`, with an ASCII suffix when cut.
+ */
+export function oneLineReason(text) {
+  const ascii = String(text ?? "")
+    .replace(/\u2014/g, "-")
+    .replace(/\u2026/g, "...")
+    .replace(/[^\x20-\x7e]/g, "?");
+  return ascii.length > REASON_MAX_CHARS ? `${ascii.slice(0, REASON_MAX_CHARS)} ...(truncated)` : ascii;
+}
+
+/**
+ * One always-on human line; the three `$GITHUB_OUTPUT` values only when the
+ * variable is present — `classify-changed-paths.mjs`'s `emit()` shape. The
+ * third, `sql_gate_reason` (Phase 164.9.6), carries the reason into
+ * `sql-mutation` for its `scope-reason:` line, sanitised by `oneLineReason`.
  */
 function emit(verdict) {
   const list = verdict.files.join(" ");
@@ -134,7 +232,10 @@ function emit(verdict) {
     `sql_gate_mode=${verdict.mode} — ${verdict.reason}${verdict.mode === "subset" ? `: ${list}` : ""}`,
   );
   if (process.env.GITHUB_OUTPUT) {
-    appendFileSync(process.env.GITHUB_OUTPUT, `sql_gate_mode=${verdict.mode}\nsql_gate_files=${list}\n`);
+    appendFileSync(
+      process.env.GITHUB_OUTPUT,
+      `sql_gate_mode=${verdict.mode}\nsql_gate_files=${list}\nsql_gate_reason=${oneLineReason(verdict.reason)}\n`,
+    );
   }
 }
 
@@ -143,21 +244,114 @@ function emit(verdict) {
 // ---------------------------------------------------------------------------
 
 /** Declared up front; a self-test that shrinks and still says PASSED is the defect. */
-export const EXPECTED_ASSERTIONS = 22;
+export const EXPECTED_ASSERTIONS = 33;
 
 const PR = "pull_request";
 const G1 = "supabase/tests/test_alpha_gate.sql";
 const G2 = "supabase/tests/test_beta_gate.sql";
 
+const MAIN = "refs/heads/main";
+const BEFORE = "b".repeat(40);
+/** A first-parent commit shaped like a GitHub squash merge. */
+const PR_MERGE = ["a".repeat(40), "noreply@github.com", "feat: x (#1)"];
+const range = (files) => ({ ok: true, sha: BEFORE, files });
+
+/**
+ * Run THIS script's `main()` end to end as CI does, in `cwd`, on a push to
+ * main. Every input is set explicitly so a parent CI environment (a
+ * pull_request's values) cannot leak into the child. Returns the exit code and
+ * every `key=value` it appended to GITHUB_OUTPUT.
+ */
+function runMainOnPush(cwd, env) {
+  const dir = mkdtempSync(join(tmpdir(), "gsd-sql-gate-subset-out-"));
+  const outFile = join(dir, "github-output");
+  writeFileSync(outFile, "");
+  try {
+    const res = spawnSync(process.execPath, [fileURLToPath(import.meta.url)], {
+      cwd,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        GITHUB_EVENT_NAME: "push",
+        GITHUB_REF: MAIN,
+        GITHUB_OUTPUT: outFile,
+        PUSH_BEFORE_SHA: "",
+        PUSH_FORCED: "false",
+        ...env,
+      },
+    });
+    const outputs = {};
+    for (const line of readFileSync(outFile, "utf8").split("\n")) {
+      const at = line.indexOf("=");
+      if (at > 0) outputs[line.slice(0, at)] = line.slice(at + 1);
+    }
+    return { code: res.status, outputs, out: `${res.stdout ?? ""}${res.stderr ?? ""}` };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 const CASES = [
   {
-    claim: "a non-pull_request event asks for the FULL corpus, naming the event",
+    claim: "an event that is neither pull_request nor push asks for the FULL corpus, naming the event (D-02)",
     run: (ok) => {
-      const v = judge({ event: "push", changedFiles: [G1], presentFiles: [G1] });
-      let pass = ok(v.mode === "full" && v.files.length === 0, "a push is FULL even with a gate file in the list");
-      pass = ok(/'push'/.test(v.reason), `the reason names the event (got ${JSON.stringify(v.reason)})`) && pass;
+      let pass = true;
+      for (const event of ["workflow_dispatch", "schedule"]) {
+        const v = judge({ event, changedFiles: [G1], presentFiles: [G1] });
+        pass = ok(v.mode === "full" && v.files.length === 0 && v.reason.includes(`'${event}'`), `${event} is FULL even with a gate file, named (got ${v.mode}: ${JSON.stringify(v.reason)})`) && pass;
+      }
       const u = judge({ event: undefined, changedFiles: [G1], presentFiles: [G1] });
       return ok(u.mode === "full" && /\(unset\)/.test(u.reason), "an UNSET event is FULL, never a PR by default") && pass;
+    },
+  },
+  {
+    claim: "a push to main that is ONE PR squash changing one gate file -> SUBSET naming it and the range",
+    run: (ok) => {
+      const v = judge({ event: "push", ref: MAIN, pushRange: range([G1, "README.md"]), commits: [PR_MERGE], presentFiles: [G1] });
+      let pass = ok(v.mode === "subset" && JSON.stringify(v.files) === JSON.stringify([G1]), `subset of exactly G1 (got ${v.mode}: ${JSON.stringify(v.files)} ${v.reason})`);
+      pass = ok(v.reason.includes(PR_MERGE[0].slice(0, 12)) && v.reason.includes(BEFORE.slice(0, 12)), `the reason names the PR merge and the before-SHA (got ${JSON.stringify(v.reason)})`) && pass;
+      return ok(v.reason.startsWith("1 of 2 changed file(s)"), `the reason carries k of n (got ${JSON.stringify(v.reason)})`) && pass;
+    },
+  },
+  {
+    claim: "oneLineReason keeps a reason to ONE printable-ASCII line, capped (T-164.9.6-01)",
+    run: (ok) => {
+      const r = oneLineReason("a\nsql_gate_mode=subset\0b");
+      let pass = ok(r === "a?sql_gate_mode=subset?b", `a newline and a NUL both become '?' (got ${JSON.stringify(r)})`);
+      const long = oneLineReason("x".repeat(2000));
+      pass = ok(long.length <= REASON_MAX_CHARS + " ...(truncated)".length && long.endsWith("...(truncated)"), `a 2000-char reason is capped (got length ${long.length})`) && pass;
+      return ok(/^[\x20-\x7e]*$/.test(oneLineReason("a \u2014 b \u2026 c \u00e9")), "every output character is printable ASCII") && pass;
+    },
+  },
+  {
+    claim: "END TO END: a real scratch-repo PR-squash push changing one gate file writes subset + a reason to GITHUB_OUTPUT, exit 0",
+    run: (ok) => {
+      const repo = scratchRepo("subset-push");
+      try {
+        const base = repo.commit({ [G1]: "-- base\n", "README.md": "x\n" });
+        repo.commit({ [G1]: "-- changed\n" });
+        const r = runMainOnPush(repo.dir, { PUSH_BEFORE_SHA: base, PUSH_FORCED: "false" });
+        let pass = ok(r.code === 0, `exit 0 (got ${r.code}: ${r.out})`);
+        pass = ok(r.outputs.sql_gate_mode === "subset" && r.outputs.sql_gate_files === G1, `subset of G1 written (got ${JSON.stringify(r.outputs)})`) && pass;
+        return ok(Boolean(r.outputs.sql_gate_reason), `a non-empty sql_gate_reason written (got ${JSON.stringify(r.outputs.sql_gate_reason)})`) && pass;
+      } finally {
+        repo.cleanup();
+      }
+    },
+  },
+  {
+    claim: "END TO END: the same scratch-repo push marked forced writes full, quoting the forced push, exit 0",
+    run: (ok) => {
+      const repo = scratchRepo("subset-forced");
+      try {
+        const base = repo.commit({ [G1]: "-- base\n" });
+        repo.commit({ [G1]: "-- changed\n" });
+        const r = runMainOnPush(repo.dir, { PUSH_BEFORE_SHA: base, PUSH_FORCED: "true" });
+        let pass = ok(r.code === 0, `exit 0 (got ${r.code}: ${r.out})`);
+        return ok(r.outputs.sql_gate_mode === "full" && /a forced push/.test(r.outputs.sql_gate_reason ?? ""), `full, quoting the forced push (got ${JSON.stringify(r.outputs)})`) && pass;
+      } finally {
+        repo.cleanup();
+      }
     },
   },
   {
@@ -282,9 +476,44 @@ function selfTest() {
   return 0;
 }
 
+/**
+ * The push-to-main derivation's I/O half (Phase 164.9.6). Reads the repository
+ * at `cwd` (CI: the checkout; the self-test: a scratch repo). ⛔ NEVER THROWS:
+ * any error becomes a FULL verdict carrying its reason.
+ */
+function derivePush(env, cwd) {
+  try {
+    const ref = env.GITHUB_REF;
+    if (ref !== "refs/heads/main") return judge({ event: "push", ref, presentFiles: [] });
+    const pushRange = pushRangeFiles({ before: env.PUSH_BEFORE_SHA, forced: env.PUSH_FORCED, cwd });
+    let commits = null;
+    if (pushRange.ok) {
+      try {
+        commits = firstParentCommits(pushRange.sha, cwd);
+      } catch (e) {
+        commits = new Error(firstLineOf(e));
+      }
+    }
+    const files = pushRange.ok ? pushRange.files : [];
+    const presentFiles = files.filter((p) => GATE_FILE_RE.test(p) && existsSync(join(cwd, p)));
+    return judge({ event: "push", ref, pushRange, commits, presentFiles });
+  } catch (e) {
+    return { mode: "full", files: [], reason: `the push derivation failed (${firstLineOf(e)}) — the full corpus is owed` };
+  }
+}
+
+/** The first line of a failed child's stderr, or the error message. */
+function firstLineOf(e) {
+  return (String(e?.stderr ?? "").trim().split("\n")[0] || String(e?.message ?? e)).trim();
+}
+
 function main() {
   if (process.argv.includes("--self-test")) return selfTest();
   const event = process.env.GITHUB_EVENT_NAME;
+  if (event === "push") {
+    emit(derivePush(process.env, process.cwd()));
+    return 0;
+  }
   if (event !== "pull_request") {
     emit(judge({ event, changedFiles: [], presentFiles: [] }));
     return 0;
