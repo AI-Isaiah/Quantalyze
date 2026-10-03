@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.119.0.3] - 2026-10-03 — @testing-library/jest-dom 7.0.1
+
+### Changed
+- **`@testing-library/jest-dom` moves from 6.9.1 to 7.0.1** (dev dependency, Dependabot #645, which proposed 7.0.0; the branch takes the 7.0.1 patch on current `main`). It supplies the DOM matchers (`toBeInTheDocument`, `toHaveTextContent` and the rest) the vitest jsdom suite uses; no runtime or production bundle code depends on it. The lockfile drops the transitive packages 7.x no longer needs; `package.json` and the lockfile's root manifest agree.
+
+## [0.119.0.2] - 2026-10-03 — supabase/setup-cli 3.0.1 on every workflow
+
+### Changed
+- **`supabase/setup-cli` moves from v2.1.1 to v3.0.1 on every pin** (Dependabot #612, which proposed 3.0.0; the branch pins the 3.0.1 patch), SHA-pinned (`45a513f…`). Covers `ci.yml`, `migration-drift-check.yml`, `migration-policy.yml`, `prod-prober.yml`, `supabase-migrate.yml` and `test-restore-from-baseline.yml`, plus the two `ci.yml` lane steps that landed on `main` after the branch was cut (they carry "the SAME pin `frontend-local-stack` uses", so all pins stay one answer). Measured after the change: 0 references to the v2.1.1 SHA, 13 to v3.0.1. Every step keeps its explicit `version:` input, so the Supabase CLI version each job installs does not change, only the action that installs it.
+
+## [0.119.0.1] - 2026-10-03 — actions/setup-node 7.0.0 on every workflow
+
+### Changed
+- **`actions/setup-node` moves from v6.4.0 to v7.0.0 on every pin** (Dependabot #626), SHA-pinned as before (`8207627…`). Dependabot bumped the first pins; the 14 remaining pins across `ci.yml`, `contracts.yml`, `migration-drift-check.yml`, `nightly.yml`, `prod-prober.yml`, `sql-function-snapshot.yml`, `supabase-migrate.yml` and `test-restore-from-baseline.yml` follow in one commit, and the one `ci.yml` pin that landed on `main` after the branch was cut (the local-stack lane step) is moved too. Measured after the change: 0 references to the v6.4.0 SHA, 31 to v7.0.0. Every step keeps `node-version: 22`, so the Node runtime CI runs on does not change.
+
 ## [0.119.0.0] - 2026-10-03 — CIOFFMUTEX: `python` and `e2e-seeded` run on a database private to their runner and no longer queue on the shared-TEST lock
 
 ### Changed

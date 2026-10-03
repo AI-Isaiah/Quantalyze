@@ -71,7 +71,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
           node-version: 22
           cache: npm
@@ -212,7 +212,7 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0   # the classifier diffs against the base branch
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
           node-version: 22
       # The red path first: a gate whose failure modes have never been observed
@@ -289,7 +289,7 @@ jobs:
           # this job pushes back to the repo; the cred is pure attack
           # surface for any third-party action that lands later.
           persist-credentials: false
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
           node-version: 22
           cache: npm
@@ -356,7 +356,7 @@ jobs:
           # this job pushes back to the repo; the cred is pure attack
           # surface for any third-party action that lands later.
           persist-credentials: false
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
           node-version: 22
           cache: npm
@@ -445,7 +445,7 @@ jobs:
           # this job pushes back to the repo; the cred is pure attack
           # surface for any third-party action that lands later.
           persist-credentials: false
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
           node-version: 22
           cache: npm
@@ -552,7 +552,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
           node-version: 22
           cache: npm
@@ -658,7 +658,7 @@ jobs:
           # No fetch-depth: 0 — the phase-29/30 frozen-spine guards resolve a
           # merge-base and run in the SHARDS, not here.
           persist-credentials: false
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
           node-version: 22
           cache: npm
@@ -816,7 +816,7 @@ jobs:
           # spawns one. So the default shallow clone is enough, and full history was
           # dropped. `local-stack-lane-wiring.test.ts` pins that the lane's gate reads
           # no git history, which is what keeps a shallow clone safe here.
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
           node-version: 22
           cache: npm
@@ -853,7 +853,7 @@ jobs:
             echo "npm ci attempt $n failed (transient?); retrying in $((n*5))s"
             sleep $((n*5))
           done
-      - uses: supabase/setup-cli@3c2f5e2ae34c34e428e8e206e2c4d21fa2d20fbf  # v2.1.1
+      - uses: supabase/setup-cli@45a513f8c64c0bc8e0e3dfe572b5c95be85f6359  # v3.0.1
         with:
           # ⚠️ SKEW, STATED RATHER THAN HIDDEN. This is the SAME pin every other
           # workflow here uses (migration-drift-check, supabase-migrate and
@@ -1160,7 +1160,7 @@ jobs:
           # migrations THIS job's lane is about to replay on top of the dump, which is
           # a per-job printout: a reader of this job's log should not have to open
           # another job to learn what schema its 49 specs ran against.
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
           node-version: 22
           cache: npm
@@ -1192,7 +1192,7 @@ jobs:
         # only by order of the job's preamble — the seam itself runs `node` with
         # built-ins and needs neither node_modules nor git history.
         run: bash scripts/local-stack/run.sh --check-currency
-      - uses: supabase/setup-cli@3c2f5e2ae34c34e428e8e206e2c4d21fa2d20fbf  # v2.1.1
+      - uses: supabase/setup-cli@45a513f8c64c0bc8e0e3dfe572b5c95be85f6359  # v3.0.1
         with:
           # The SAME pin `frontend-local-stack` uses, so this file keeps ONE answer to
           # "which CLI". ⛔ The fourth workflow that shares this pin is deliberately
@@ -1337,7 +1337,7 @@ jobs:
           # this job pushes back to the repo; the cred is pure attack
           # surface for any third-party action that lands later.
           persist-credentials: false
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
           node-version: 22
           cache: npm
@@ -1436,7 +1436,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
           node-version: 22
           cache: npm
@@ -1508,7 +1508,7 @@ jobs:
           # this job pushes back to the repo; the cred is pure attack
           # surface for any third-party action that lands later.
           persist-credentials: false
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
           node-version: 22
           cache: npm
@@ -1633,7 +1633,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
           node-version: 22
           cache: npm
@@ -2347,7 +2347,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
           # No `cache: npm` on purpose — see the job header above: this job runs
           # no `npm ci` and no `npx`, so a restored `~/.npm` is a cache nothing
@@ -3386,7 +3386,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
           node-version: 22
           cache: npm
@@ -4074,7 +4074,7 @@ jobs:
           # step here runs `git`, and neither `run.sh` (with the currency gate and the
           # reference-data extractor it calls) nor the capability probe spawns one.
           # The default shallow clone is enough; full history was dropped.
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
           node-version: 22
           # ⚠️ NO `cache: npm`, and NO node_modules restore / `npm ci`, unlike the
@@ -4093,7 +4093,7 @@ jobs:
         # and FAILS LOUD when it cannot. Needs node built-ins only — no
         # node_modules, no git history.
         run: bash scripts/local-stack/run.sh --check-currency
-      - uses: supabase/setup-cli@3c2f5e2ae34c34e428e8e206e2c4d21fa2d20fbf  # v2.1.1
+      - uses: supabase/setup-cli@45a513f8c64c0bc8e0e3dfe572b5c95be85f6359  # v3.0.1
         with:
           # The SAME pin `frontend-local-stack` uses — the repo keeps ONE answer to
           # "which CLI". The skew note on that job's setup-cli step applies here
@@ -5090,7 +5090,7 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0   # the gate diffs against the base branch
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
           node-version: 22
       # The red path first: a gate whose failure modes have never been observed
@@ -5322,7 +5322,7 @@ jobs:
       # reads it), so every lane `run:` step carries a workspace-rooted
       # `working-directory:`; a bare relative `scripts/…` path from
       # analytics-service exits 127. `uses:` steps take none.
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
           node-version: 22
           # ⚠️ NO `cache: npm`, and NO node_modules restore / `npm ci`, the same
@@ -5337,7 +5337,7 @@ jobs:
         # container starts, and it FAILS LOUD when the set cannot be determined.
         working-directory: ${{ github.workspace }}
         run: bash scripts/local-stack/run.sh --check-currency
-      - uses: supabase/setup-cli@3c2f5e2ae34c34e428e8e206e2c4d21fa2d20fbf  # v2.1.1
+      - uses: supabase/setup-cli@45a513f8c64c0bc8e0e3dfe572b5c95be85f6359  # v3.0.1
         with:
           # The SAME pin `frontend-local-stack` uses — the repo keeps ONE answer to
           # "which CLI". The skew note on that job's setup-cli step applies here
@@ -5805,7 +5805,7 @@ jobs:
       # Measured 2026-08-28: the ledger re-stamps `version` at apply time, so a
       # version-join reported 12 of 12 recent migrations missing when all 12
       # were present. That check would itself have been a vacuous control.
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
           node-version: 22
       - name: VAC-08 - repo-vs-TEST ledger and function body drift
@@ -5872,7 +5872,7 @@ jobs:
           # this job pushes back to the repo; the cred is pure attack
           # surface for any third-party action that lands later.
           persist-credentials: false
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
           node-version: 22
           cache: npm
@@ -6279,7 +6279,7 @@ jobs:
           # GITHUB_TOKEN cred from .git/config (same rationale as the e2e
           # smoke job above).
           persist-credentials: false
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
           node-version: 22
           cache: npm
@@ -6352,7 +6352,7 @@ jobs:
         # run: the replay set gets its own `baseline-replay:` line before any
         # container starts, and it FAILS LOUD when the set cannot be determined.
         run: bash scripts/local-stack/run.sh --check-currency
-      - uses: supabase/setup-cli@3c2f5e2ae34c34e428e8e206e2c4d21fa2d20fbf  # v2.1.1
+      - uses: supabase/setup-cli@45a513f8c64c0bc8e0e3dfe572b5c95be85f6359  # v3.0.1
         with:
           # The SAME pin `frontend-local-stack` uses — the repo keeps ONE answer to
           # "which CLI". The skew note on that job's setup-cli step applies here
@@ -6886,7 +6886,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
           node-version: 22
           cache: npm
