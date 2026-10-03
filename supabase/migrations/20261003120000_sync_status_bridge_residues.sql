@@ -157,9 +157,18 @@
 --                  transaction: no new wait), then the strategy_analytics row.
 --   DEFERRED path: nothing held, then the advisory lock here, then the
 --                  strategy_analytics row.
--- Both paths take the advisory lock before the strategy_analytics row, and no
--- transaction holds that row (or a job row) while waiting on the advisory lock,
--- so there is no cycle. The worst case is a direct call waiting out one mark
+-- The mark path DOES wait on the advisory lock while it holds job rows (its
+-- own, and for done the fan-in children, which can belong to OTHER
+-- strategies). There is still no cycle, because of the converse invariant:
+--   ⛔ WHOEVER HOLDS THE ADVISORY LOCK NEVER WAITS ON A compute_jobs ROW LOCK.
+-- This function only READS compute_jobs (plain SELECTs, no FOR UPDATE) and then
+-- writes strategy_analytics; the DEFERRED path holds nothing else; and no
+-- transaction holds the strategy_analytics row while waiting on the advisory
+-- lock. That invariant is the property every future edit INSIDE the lock must
+-- preserve: a compute_jobs UPDATE or SELECT ... FOR UPDATE added to this
+-- function, or after the lock line in a mark RPC, can wait on a job row a
+-- second mark holds while that mark waits on this lock, which is a 40P01
+-- deadlock (swallowed as a warning on the DEFERRED side). The worst case is a direct call waiting out one mark
 -- transaction on the same strategy. No production transaction takes the lock
 -- for two strategies. The verify block pins the placement on the
 -- comment-stripped body; the two-backend proof (a direct call waits on THIS
