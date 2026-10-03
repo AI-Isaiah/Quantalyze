@@ -3013,16 +3013,17 @@ describe("164.9.6 D-04 — the mutate step takes the SUBSET branch only on a pul
       };
       const childEnv: Record<string, string | undefined> = { ...process.env };
       childEnv.PATH = `${bin}:${childEnv.PATH ?? ""}`;
+      const spawnEnv: Record<string, string | undefined> = {
+        ...childEnv,
+        RUNNER_TEMP: runnerTemp,
+        RUNNER_LOG: join(runnerTemp, "mutation-runner.log"),
+        ...paths,
+        ...env,
+      };
       const res = spawnSync("bash", [script], {
         cwd: dir,
         encoding: "utf8",
-        env: {
-          ...childEnv,
-          RUNNER_TEMP: runnerTemp,
-          RUNNER_LOG: join(runnerTemp, "mutation-runner.log"),
-          ...paths,
-          ...env,
-        },
+        env: spawnEnv as NodeJS.ProcessEnv,
       });
       const read = (p: string) => {
         try {
