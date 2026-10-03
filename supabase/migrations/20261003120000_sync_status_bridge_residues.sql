@@ -199,7 +199,41 @@
 -- ══════════════════════════════════════════════════════════════════════════
 -- VAC-04 ACKNOWLEDGEMENT — the PROD body this CREATE OR REPLACE overwrites
 -- ══════════════════════════════════════════════════════════════════════════
--- (Filled by plan 04 of this phase, once the body is final.)
+-- The gate compares the COMMITTED SNAPSHOT (supabase/schema/functions/) against
+-- PROD's live body. On a function-changing migration PR the two necessarily
+-- disagree: `snapshot-drift` requires the snapshot to carry the body the
+-- MIGRATIONS produce (the new one), while VAC-04 requires it to match what PROD
+-- has TODAY (the 20260906120000 body). The pragma means "I read PROD's body and
+-- intend to overwrite it". This migration changes ONE function, so it carries
+-- ONE pragma.
+--
+-- MEASURED 2026-10-03 UTC, reproduced LOCALLY with the gate's own normalizer,
+-- aiming its `live` argument at origin/main's snapshot rather than at PROD
+-- (origin/main = 2614c4b67c5cea41e76c1b57458161ef523757e9; that snapshot was
+-- last written by 05994f1d2, the 20260906120000 body):
+--
+--   git show origin/main:supabase/schema/functions/sync_strategy_analytics_status.sql > <scratch>
+--   node scripts/sql-body-normalize.mjs --diff-bodies \
+--     supabase/schema/functions/sync_strategy_analytics_status.sql <scratch>
+--
+-- ⭐ THE ACKED HASH IS THE `live` COLUMN OF --diff-bodies FOR THE DRIFT ROW, NOT
+-- `--hash` OF THE SNAPSHOT FILE (a whole-file digest no gate ever greps). The
+-- row reported 67 differing hunks: the D-04b membership arms, the D-05 keep,
+-- the in-bridge lock and the founder's hold CASEs.
+--
+-- sync_strategy_analytics_status (1 arg), the DRIFT row's `live` column:
+-- prod-body-ack: 67a36c4e2d85832676adbb9c09faf971795a830548d8857b37dacc74c709eee1
+--
+-- ⚠️ THE ACK IS OF origin/main, WHICH STANDS IN FOR PROD. It is EARNED only if
+-- VAC-04 on the PR reports that SAME hash for PROD. If it reports a different
+-- one, PROD drifted OUT OF BAND and the correct action is to FOLD the
+-- difference into this migration and re-derive — never to edit the pragma to
+-- match a gate log. It is EARNED, not pasted.
+-- ⚠️ VAC-08 (repo-vs-TEST body pairing, in `test-db-drift`) goes RED on the PR
+-- by construction: one DRIFT row, sync_strategy_analytics_status/1, whose TEST
+-- hash is the pre-change hash above, until apply-on-merge brings TEST forward.
+-- ⚠️ `baseline-content-drift` carries the same one DRIFT row until the
+-- post-apply re-dump of supabase/schema/baseline.sql. Neither is allowlisted.
 --
 -- VERIFY SCOPE. The DO block below asserts only this function's catalog entry
 -- and its body. It never asserts anything about the bodies of the two mark
