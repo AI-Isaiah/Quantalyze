@@ -2952,6 +2952,9 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
       const r = runCountRecheck(without, env);
       expect(r.status, r.out).toBe(1);
       expect(r.out).toContain("MEASURE_FAIL: the run printed NO 'lane-concurrency: <N>' line");
+      // The absence is reported by its OWN branch and stops there; the not-one check
+      // below it must never be what catches a missing line.
+      expect(r.out).not.toContain("printed 0 'lane-concurrency:' lines");
     }
   });
 
