@@ -667,6 +667,139 @@ describe("DOGFOOD credential trim — validateKey/encryptKey strip pasted whites
   });
 });
 
+// D-08 (Phase 164.6.6, founder routing 2026-09-30) — an MT5 investor password is
+// user-CHOSEN, like the OKX passphrase, and may carry a leading or trailing space
+// that is part of it. The DOGFOOD trim above stripped it on the wizard path while
+// the rotate path never did, so the connect wizard stored a password the user
+// never chose and the broker refused every later login. The exemption rides the
+// `secretVerbatim` venue capability, read through one module-private helper used
+// by both validateKey and encryptKey, so validated still equals stored. The MT5
+// login (api_key) is still trimmed. All values below are fabricated.
+describe("D-08 — MT5 password is never trimmed on the validate/encrypt chokepoint", () => {
+  const MT5_PASSWORD = " Inv Pw 7 "; // fabricated
+  const MT5_PADDED_LOGIN = " 5550001 "; // fabricated
+  const MT5_SERVER = "Example-Demo"; // fabricated
+
+  beforeEach(() => {
+    // Same plumbing as the DOGFOOD block: the tenant-claim mint and the
+    // service-key refusal both need these before the client is imported.
+    process.env.INTERNAL_API_TOKEN = INTERNAL_TOKEN_FOR_TESTS;
+    process.env.ANALYTICS_SERVICE_KEY = SERVICE_KEY_FOR_TESTS;
+  });
+  afterEach(() => vi.restoreAllMocks());
+
+  async function okFetch(json: Record<string, unknown>) {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify(json), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      fetchMock as unknown as typeof globalThis.fetch,
+    );
+    return fetchMock;
+  }
+
+  function sentBody(fetchMock: ReturnType<typeof vi.fn>) {
+    const init = fetchMock.mock.calls[0][1] as RequestInit;
+    return JSON.parse(init.body as string) as Record<string, unknown>;
+  }
+
+  const ENCRYPT_OK = {
+    api_key_encrypted: "ct",
+    api_secret_encrypted: null,
+    passphrase_encrypted: null,
+    dek_encrypted: "dek",
+    nonce: null,
+    kek_version: 1,
+  };
+
+  it("validateKey sends an MT5 password byte-equal to what the user entered, and still trims the login", async () => {
+    const fetchMock = await okFetch({ valid: true, read_only: true });
+    const mod = await import("./analytics-client");
+    await mod.validateKey("mt5", MT5_PADDED_LOGIN, MT5_PASSWORD, MT5_SERVER, TENANT);
+    const body = sentBody(fetchMock);
+    expect(
+      body.api_secret,
+      "the broker compares the investor password byte-for-byte; a trimmed " +
+        "password validates a credential the user never chose (D-08)",
+    ).toBe(MT5_PASSWORD);
+    expect(
+      body.api_key,
+      "the MT5 login is a numeric account id, not a chosen secret, so the " +
+        "DOGFOOD trim still applies to it",
+    ).toBe("5550001");
+  });
+
+  it("encryptKey stores the SAME MT5 password bytes validateKey sent, so validated equals stored", async () => {
+    const validateFetch = await okFetch({ valid: true, read_only: true });
+    const mod = await import("./analytics-client");
+    await mod.validateKey("mt5", MT5_PADDED_LOGIN, MT5_PASSWORD, MT5_SERVER, TENANT);
+    const validated = sentBody(validateFetch);
+    vi.restoreAllMocks();
+
+    const encryptFetch = await okFetch(ENCRYPT_OK);
+    await mod.encryptKey("mt5", MT5_PADDED_LOGIN, MT5_PASSWORD, MT5_SERVER, TENANT);
+    const stored = sentBody(encryptFetch);
+    expect(
+      stored.api_secret,
+      "a trimmed stored password fails every later sync against the broker, " +
+        "even though the wizard just validated the untrimmed one (D-08)",
+    ).toBe(MT5_PASSWORD);
+    expect(
+      stored.api_secret,
+      "validate and encrypt must normalise identically: the ciphertext is the " +
+        "credential that was validated",
+    ).toBe(validated.api_secret);
+    expect(stored.api_key, "the MT5 login is still trimmed at encrypt").toBe("5550001");
+  });
+
+  it("a mixed-case venue (\"MT5\", the canonical display form) keeps the password verbatim too", async () => {
+    const fetchMock = await okFetch({ valid: true, read_only: true });
+    const mod = await import("./analytics-client");
+    await mod.validateKey("MT5", MT5_PADDED_LOGIN, MT5_PASSWORD, MT5_SERVER, TENANT);
+    expect(
+      sentBody(fetchMock).api_secret,
+      "the capability lookup lowercases; a case-sensitive read would silently " +
+        "fall back to trimming the password",
+    ).toBe(MT5_PASSWORD);
+  });
+
+  /**
+   * Cloned from the `budgetKeyFor` body scan. The exemption must ride the
+   * `secretVerbatim` capability, so a second verbatim-secret venue is one
+   * record edit in `closed-sets.ts`, never a branch in the helper. Bounded from
+   * the line-initial signature (a docblock mention above cannot move the
+   * start) to the first line-initial closing brace.
+   */
+  it("secretForVenue carries NO venue-name literal in its own body", () => {
+    const src = readFileSync(
+      join(process.cwd(), "src/lib/analytics-client.ts"),
+      "utf8",
+    );
+    const sigIdx = src.indexOf("\nfunction secretForVenue(");
+    expect(
+      sigIdx,
+      "secretForVenue is no longer declared as a top-level function in " +
+        "analytics-client.ts, so this scan has nothing to bound. Do not delete " +
+        "this assertion — re-point it.",
+    ).toBeGreaterThan(-1);
+    const closeIdx = src.indexOf("\n}\n", sigIdx);
+    expect(closeIdx).toBeGreaterThan(sigIdx);
+    const body = src.slice(sigIdx, closeIdx);
+
+    const VENUE_LITERALS = /mt5|binance|okx|bybit|deribit|sfox/gi;
+    expect(
+      body.match(VENUE_LITERALS) ?? [],
+      "secretForVenue's BODY names a venue. It must read the CAPABILITY " +
+        "(venueSecretIsVerbatim -> VENUE_CAPABILITIES.secretVerbatim) and " +
+        "nothing else, so a second verbatim-secret venue is a record edit, " +
+        "never a branch here.",
+    ).toEqual([]);
+  });
+});
+
 /**
  * Phase 140 / SEAM-01 — analyticsRequest now delegates to the ONE resilience
  * core (`resilient-fetch.ts`). Three properties of the retrofit are pinned

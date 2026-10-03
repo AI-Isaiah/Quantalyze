@@ -529,6 +529,23 @@ describe("PATCH /api/keys/[id]/rotate-secret — the happy path end-to-end", () 
     expect(sent).not.toHaveProperty("venue_account_id");
     expect(sent).not.toHaveProperty("broker_server");
   });
+
+  it("D-08: forwards a space-bearing new password to the seam byte-equal, never trimmed", async () => {
+    const padded = " Synth Rot Pw "; // fabricated
+    await PATCH(makeReq({ new_secret: padded }), makeCtx());
+    expect(mockResilientFetch).toHaveBeenCalledTimes(1);
+    const [, , init] = mockResilientFetch.mock.calls[0];
+    const sent = JSON.parse(String((init as { body: string }).body)) as Record<
+      string,
+      unknown
+    >;
+    expect(
+      sent.new_secret,
+      "the broker compares the investor password byte-for-byte, so a trim here " +
+        "would store a password the user never chose; D-08 (Phase 164.6.6) says " +
+        "no path trims it, and the wizard path now agrees with this one",
+    ).toBe(padded);
+  });
 });
 
 describe("PATCH /api/keys/[id]/rotate-secret — seam registration (D-04)", () => {

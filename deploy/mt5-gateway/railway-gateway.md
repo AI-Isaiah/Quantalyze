@@ -102,6 +102,54 @@ gateway).**
 - **`/gsd-secure-phase` must run before Phase 164.6.5 closes.** That is part of what
   ratifying Option 2 ratified.
 
+## T-134-03 (Phase 164.6.6, D-07 part 1) — private-host check on the dialling side
+
+**What is now CHECKED.** The analytics service refuses to dial an MT5 gateway at any host
+that is not a private-network name. `services/mt5_client.py::is_private_gateway_host` is
+the one predicate. It is checked at the top of `_default_connect`, the only production
+transport factory, before `mt5linux` is imported, so no connection is ever built toward a
+refused host. Both endpoint readers in `services/mt5_relogin.py` apply it as well, so a
+refused validation host takes the existing misconfiguration path: the wizard's 500
+`MT5_GATEWAY_UNCONFIGURED` and the worker's `RuntimeError`, each with the D-05 alert. A
+refused job host makes the heal and the session monitor skip with a log-once line that
+names the env var, never its value. A test pins that no other production file imports
+`mt5linux` or opens an rpyc connection.
+
+**The allowlist, in words.**
+- A name whose last label is `internal`, `test` or `localhost`. Railway's private DNS
+  lives under `.internal`.
+- A single-label name, which resolves only through the container's own search domain.
+- An IP literal inside loopback, RFC 1918, 100.64.0.0/10 (the Tailscale fallback in
+  `docker-compose.yml`) or IPv6 unique-local.
+
+Everything else is refused: a Railway public domain, a TCP-proxy host, any other public
+name and any public IP, including the numeric forms the resolver accepts. The stdlib's
+private-address flag is not used, because it admits documentation ranges.
+
+**Why authentication was not taken.** D-07 asked for "authentication OR network
+isolation". Authentication would need the server to cooperate:
+- `mt5linux` 0.1.9 hardwires `rpyc.classic.connect(host, port)` on the client.
+- The server is the package's own `server.py` inside the prebuilt image, which this repo
+  does not build. Phase 164.6.5 rejected owning that image (see "Why Option 2 beat the
+  other two" above).
+
+An rpyc authenticator, SSL or a TLS sidecar all require changing that image. Network
+isolation is the branch this repo can deliver.
+
+**What the code does NOT prove.** The check proves what the analytics service DIALS. It
+does not prove that a gateway has no public listener. That half stays a founder-read
+infrastructure fact: reading N-01 (no public domain and no TCP proxy on either gateway
+service) and live check L-H3.
+
+**The boundary, and its residual.** The check isolates the channel from the PUBLIC
+internet only. Inside the Railway environment's private network the rpyc port is still
+unauthenticated, so every service on that network can reach both terminals. N-01 counted
+six services there, all this product's own: the analytics service, the backfill worker,
+the two gateways and two idle function services. That was already true before this
+phase. The founder's answer is CONTEXT's `H3-CHANNEL-RESIDUAL: accepted` (2026-10-03).
+Closing the residual would need rpyc authentication in the gateway image, or the gateways
+in their own environment, which is future infrastructure work.
+
 ## Service source
 
 Deploy from a prebuilt Docker image (Railway → New Service → **Deploy from Docker
@@ -215,6 +263,191 @@ MT5_GATEWAY_HOST = gateway.railway.internal
 MT5_GATEWAY_PORT = 8001
 MT5_ENABLED      = true
 ```
+
+## Validation gateway (Phase 164.6.6, D-02)
+
+**What this is.** A SECOND gateway service that serves ONLY the two validate sites
+(`routers/exchange.py::_validate_mt5_key_probe` and
+`services/ingestion/mt5.py::Mt5Adapter.validate`). Every other MT5 caller keeps using the
+job gateway described above. The founder chose this on 2026-09-27 (D-02, option (b)), so
+that a client's key validation logs in on a terminal the jobs never use and cannot
+displace the account the job terminal is serving.
+
+⛔ **Every step below is a FOUNDER act.** No agent creates, restarts, redeploys, ssh'es
+into or configures either gateway. No agent logs into a broker, or enters or reads a
+credential. **The job gateway is READ-ONLY throughout this section:** its memory reading,
+its networking settings and its VNC reachability are read, and nothing on it is changed,
+restarted or deleted.
+
+**Placeholders.** `<validation-gateway>` is the new service, `<job-gateway>` is the
+existing one and `<analytics-service>` is the analytics service. Never write a real service
+name, host, digest, account number, broker server or password into this file or into a
+reading you paste back. A service name is also its `.railway.internal` host prefix.
+
+Each step says what to RECORD. The readings are labelled S-01, S-07, S-08 and N-01, and
+they go into the phase record (`164.6.6-CONTEXT.md`, `## Stand-up findings`).
+
+1. **Stand-up (D-02).** Create `<validation-gateway>` in the SAME Railway project and
+   environment as the analytics service.
+   - **Image.** Use the same `gmag11/metatrader5_vnc:2.3` image, pinned to the same
+     digest the job gateway is pinned to (see `## Service source`). Do not pin a freshly
+     resolved digest; the two gateways run the same base.
+   - **Volume.** Give it its OWN named volume at `/config` (see `## Persistent volume`).
+     ⛔ Never mount the job terminal's volume: one volume per service, and two
+     deployments on one volume is Pitfall 6.
+   - **Env keys.** Set the same gateway keys as `## Environment variables (gateway
+     service)`: `CUSTOM_USER`, `PASSWORD`, `mt5server_port` and `PIP_CONSTRAINT`. Use a
+     VNC password of its own, stored in the Railway secret store and never in git.
+   - **Pins.** Follow `## ⚠️ PIP_CONSTRAINT — the bridge does NOT work without it
+     (Pitfall 5 — false-green)` in full on the new volume. Copy
+     `deploy/mt5-gateway/mt5linux-constraint.txt` to `/config/mt5linux-constraint.txt`,
+     and run the one-time Wine `numpy<2` fix against `<validation-gateway>`.
+   - **Dual-stack.** `## ⚠️ DUAL-STACK ENVIRONMENT REQUIREMENT (Pitfall 1 — the
+     load-bearing gotcha)` applies unchanged. The bridge binds IPv4-only, so the new
+     service must sit in the analytics service's post-2025-10-16 dual-stack environment,
+     or step 5 cannot reach it.
+   - **Record:** that the digest matches the job gateway's (yes/no). Do not paste the
+     digest itself.
+
+2. **Private networking only (T-134-03, D-07 part 1).** The new rpyc port is the same
+   unauthenticated arbitrary-remote-code channel as the job gateway's (see the `HARD
+   CONSTRAINT` block at the top of this file). It must be reachable ONLY at
+   `<validation-gateway>.railway.internal`.
+   - ⛔ Never attach a public domain to `<validation-gateway>`.
+   - ⛔ Never add a TCP proxy to `<validation-gateway>`.
+   - Step 8 reads this back on BOTH gateways.
+
+3. **Sizing (S-01 sizing, RESEARCH open question 4).**
+   - **BEFORE the install,** read two figures from `<job-gateway>`, read-only: its
+     configured memory limit, and its peak memory over the longest window the Railway
+     service metrics show.
+   - Set the new service's memory limit to AT LEAST the job gateway's limit.
+   - **AFTER the install** (step 5 done), read the new service's own peak.
+   - **Record:** the job gateway's limit and peak, the new service's limit and peak, and
+     the metrics window. A new-service peak within 10% of its limit is recorded as a
+     FINDING, not waved through. The 10% is a planner heuristic the founder may adjust.
+
+4. **One-time VNC install.** Reach noVNC `:3000` on `<validation-gateway>` once, under the
+   same rules as `## One-time VNC install access (torn down afterward)`.
+   - Install the terminal.
+   - Do step 4a in this same session, BEFORE adding the house account.
+   - Add the house account with its INVESTOR password and enable "save account /
+     auto-login".
+   - Tear VNC down: remove the port-forward, or the temporary public domain if one was
+     used.
+
+4a. **Expert Advisors options (without them the new terminal refuses every key).**
+   `docs/runbooks/mt5-go-live.md` `## Step 2 — ONE-TIME VNC INSTALL + INVESTOR LOGIN
+   (MT5GW-01)` item 4 applies here word for word. Read it there rather than from a copy.
+   - **Why it bites harder here.** The validation terminal changes account on EVERY
+     validation. With the external-Python-API trade disable on, which is how MetaQuotes
+     ships it, every validation is refused as undetermined (D-31).
+   - **In *Tools, Options, Expert Advisors*,** the founder sets these four options and
+     records each one yes/no as it reads on screen:
+     - "Allow algorithmic trading": TICKED.
+     - "Disable automatic trading through the external Python API": UNTICKED.
+     - The option named by `services/mt5_validation.py::ACCOUNT_CHANGE_ALGO_DISABLE_OPTION`:
+       UNTICKED. That symbol's comment explains why every validation counts as an account
+       change.
+     - "Disable algorithmic trading when the profile has been changed": UNTICKED. This is
+       the second box named in `scripts/mt5-diag.sh`'s "Reading the result" note.
+   - ⛔ **No repo path writes a terminal option** (164.6.5 criterion 7). This is a founder
+     act at the console. The repo only records what was read.
+
+5. **S-01: the new terminal reaches `authorized` over the private network.** Run this
+   AFTER the house login, WHILE `<job-gateway>` is also logged into the house account.
+   - **The reading.** Run `scripts/mt5-diag.sh` (it uses `railway ssh`, so the FOUNDER
+     runs it) from the analytics service's side, so the dial crosses the private network:
+
+     ```
+     MT5_DIAG_SERVICE=<analytics-service> \
+     MT5_DIAG_HOST=<validation-gateway>.railway.internal \
+     MT5_DIAG_PORT=<its mt5server_port> \
+     ./scripts/mt5-diag.sh
+     ```
+
+     The analytics image carries the `mt5linux` client (`analytics-service/Dockerfile`),
+     so this runs the read-only `initialize()` + `terminal_info()` across
+     `*.railway.internal`, the same path the validate sites will dial.
+   - **Fallback.** `MT5_DIAG_SERVICE=<validation-gateway>` with the default host dials
+     loopback INSIDE the new container. It reads the terminal's flags, but it does NOT
+     prove private-network reachability. If you use it, record S-01's reachability half as
+     not measured.
+   - **Record:**
+     - `initialize()` true/false, and `last_error` if it is false.
+     - Whether the new terminal shows `authorized` for the house account (yes/no), and the
+       time from login to `authorized`.
+     - Whether `<job-gateway>` stayed authorized on the house account through the reading
+       (yes/no). Read this without logging it in or out.
+     - The `terminal_info()` read-back the script prints: `connected`, `trade_allowed` and
+       `tradeapi_disabled`, each true/false.
+   - **Pass** is `connected` true, `trade_allowed` true and `tradeapi_disabled` false. That
+     is the go-live runbook's own Step 2 Verify line and its `## Step 5 — GATE-CHECK` row
+     `TERM`. ⚠️ For this gateway all three flags are the bar. Do not read the diag note's
+     remark about `tradeapi_disabled` as a waiver.
+   - **What the read-back covers, and no more.** The three flags are the terminal's live
+     state. The account-change option cannot be read directly (see its symbol's comment).
+     `trade_allowed` still true after the house login is the only consequence reading
+     available before deploy. The on-screen reading in step 4a is the primary record.
+   - **Any other read-back blocks plan 04 Task 3** (setting the routing env vars). The
+     founder fixes the option over VNC (step 4a) and re-reads.
+
+6. **S-07: directory layout.** Record the directory layout observed on the new volume
+   under `/config`, plus whether the terminal runs in portable mode (`/portable`). See the
+   portable-mode caveat in the T-134-03 posture section above: the data directory moves.
+   - Record directory NAMES only. Replace any user name with `<user>`.
+   - This is the layout the Phase 164.6.6.1 scrub will target.
+
+7. **S-08 (live check L6): VNC reachability on BOTH gateways.** For each of
+   `<job-gateway>` and `<validation-gateway>`, record whether VNC port 3000 is reachable
+   today, and by whom. The answer is one of: reachable publicly, torn down, or reachable
+   only through a port-forward. The job gateway is read, not changed.
+
+8. **N-01 (H3 part 1, D-07): no public exposure on EITHER gateway.**
+   - **Record per gateway,** from each gateway service's Settings, Networking:
+     - Public domain present (yes/no).
+     - TCP proxy present (yes/no).
+   - **Any "yes" is a finding that blocks plan 04's deploy** until it is removed. If you
+     remove one, record both the before and the after.
+   - **The lateral-reachability residual.** From the Railway project canvas for the
+     environment the gateways run in, record every service on that environment's private
+     network: the COUNT, and each one's ROLE in words, for example "the analytics service",
+     "the job gateway", "the validation gateway" or "a database proxy". ⛔ Never write a
+     service name, which is its `.railway.internal` host prefix, and never write a host.
+     The rpyc port stays unauthenticated to every service on that list. That is the D-07
+     part 1 residual, and plan 02 Task 2 puts it to the founder.
+   - This is the gateway-side half of D-07 part 1. The analytics side's refusal to dial
+     anything but a private-network host is enforced in code (plan 05). That proves what
+     the service DIALS, not that a gateway has no public listener.
+
+9. **Analytics-side env names (set by plan 04 Task 3, not at stand-up).** On the analytics
+   service:
+
+   ```
+   MT5_VALIDATION_GATEWAY_HOST = <validation-gateway>.railway.internal
+   MT5_VALIDATION_GATEWAY_PORT = <its mt5server_port>
+   ```
+
+   These sit beside the job pair (`MT5_GATEWAY_HOST` / `MT5_GATEWAY_PORT`), which keeps its
+   names. ⚠️ **D-05 fails loud.** Once plan 04's routing change deploys, every validation
+   is refused with `MT5_GATEWAY_UNCONFIGURED` and an alert fires until BOTH are set. There
+   is NO fallback to the job terminal, because a fallback would silently bring the
+   eviction back.
+
+10. **The house credentials stay on the analytics service.** They are the names read by
+    `services/mt5_relogin.py::read_env_mt5_credentials`. They never go on either gateway.
+    The house account is added on the new terminal only through the step 4 VNC login.
+
+11. ⛔ **What this section does NOT do.** It runs no scrub, deletes no account data and
+    relaunches nothing.
+    - The scrub spike belongs to Phase 164.6.6.1 (plan 164.6.6.1-01) and runs on this
+      gateway later.
+    - Until then, the validation terminal accumulates every client account validated on it
+      (the "interim residue" in `164.6.6-CONTEXT.md`).
+    - Known gap, routed by D-06 to Phase 164.6.8 (`MT5-VALIDATION-TERMINAL-COVERAGE-01`):
+      the session monitor, boot heal, `ipc_fault` recycle and prod-prober MT5 arm all read
+      only the job pair. That leaves this terminal dark to all four. A wedged or logged-out
+      validation terminal is noticed only when a validation fails.
 
 ## One-time VNC install access (torn down afterward)
 

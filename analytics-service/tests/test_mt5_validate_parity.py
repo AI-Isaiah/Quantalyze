@@ -194,6 +194,10 @@ def test_blank_password_rejected_offline_on_both_paths(
     # the (now-hoisted) offline password guard — not a missing-env short-circuit.
     monkeypatch.setenv("MT5_GATEWAY_HOST", "mt5-gw.internal")
     monkeypatch.setenv("MT5_GATEWAY_PORT", "18812")
+    # Phase 164.6.6 D-02 — the wizard reads the VALIDATION pair, set BESIDE the
+    # job pair (never instead of it) so this keeps reaching the verdict it pins.
+    monkeypatch.setenv("MT5_VALIDATION_GATEWAY_HOST", "mt5-validate-gw.internal")
+    monkeypatch.setenv("MT5_VALIDATION_GATEWAY_PORT", "18813")
 
     router_detail = _router_detail(
         exchange_module, api_key="123456", api_secret="   ", passphrase="Broker-Demo"
@@ -285,6 +289,10 @@ def _drive_both_paths(exchange_module, monkeypatch, make_client):
     """
     monkeypatch.setenv("MT5_GATEWAY_HOST", "mt5-gw.internal")
     monkeypatch.setenv("MT5_GATEWAY_PORT", "18812")
+    # Phase 164.6.6 D-02 — the wizard reads the VALIDATION pair, set BESIDE the
+    # job pair (never instead of it) so this keeps reaching the verdict it pins.
+    monkeypatch.setenv("MT5_VALIDATION_GATEWAY_HOST", "mt5-validate-gw.internal")
+    monkeypatch.setenv("MT5_VALIDATION_GATEWAY_PORT", "18813")
 
     router_client = make_client()
     exchange_module.Mt5Client = MagicMock(return_value=router_client)

@@ -163,6 +163,33 @@ item, not a knob. Two gateways would need two accounts and a routing rule as wel
 2. In the terminal: install → add the broker account with the **INVESTOR (read-only)
    password** → enable "save account / auto-login". The saved login persists in
    `/config`.
+   - **FRESH VOLUME ONLY, BEFORE the install: check that the Wine prefix is whole**
+     (Phase 164.6.6 stand-up, 2026-10-03). A first boot on a new volume can leave a
+     half-built prefix with an empty `syswow64`. The bridge then fails with "could not
+     load kernel32.dll". Count the folder's entries:
+     ```bash
+     railway ssh --service <gateway> "s6-setuidgid abc bash -lc \
+       'ls /config/.wine/drive_c/windows/syswow64 | wc -l'"
+     ```
+     A non-zero count means the prefix is whole, so go on. Only on `0`, rebuild the prefix
+     with the mscoree and mshtml DLL overrides disabled. At the 2026-10-03 stand-up, the
+     image's start script then installed the terminal headlessly on the rebuilt prefix. If
+     it does not start on its own, a service restart re-runs that script; that restart is a
+     suggestion, not part of the recorded fix:
+     ```bash
+     railway ssh --service <gateway> "s6-setuidgid abc bash -lc \
+       'export WINEPREFIX=/config/.wine WINEDEBUG=-all WINEDLLOVERRIDES=\"mscoree,mshtml=\"; wineboot -u'"
+     ```
+     ⛔ **Never on a working gateway.** A gateway that already serves holds its saved login
+     in this prefix. 164.6.5 D-07 and `deploy/mt5-gateway/railway-gateway.md` say the Wine
+     prefix and `/config` are never touched there. This check is for an empty new volume
+     only.
+   - **Add the broker's server BEFORE the first login.** A fresh terminal points its Login
+     dialog at the MetaQuotes demo server and answers "Invalid account" for a real
+     account until the broker's server is added. So the first action, before adding any
+     account: *File → Open an Account*, then search for the broker. Then add the account as
+     above. That path is what was recorded at the 2026-10-03 stand-up. The dialog's later
+     screens were not recorded, so this runbook does not describe them.
 3. Verify the VNC-displayed **server clock** against UTC to confirm the
    broker-server-time offset — this closes the Phase-134 leg-4 `[ASSUMED]` estimate and
    feeds `MT5_SOAK_SERVER_OFFSET_MIN` (139-01) / the 136 UTC-normalization seam.
@@ -186,6 +213,12 @@ item, not a knob. Two gateways would need two accounts and a routing rule as wel
      `trade_allowed: true`**. Both, not either — a detached terminal is a documented
      SIBLING cause of the same refusal, so `connected: false` makes the signal
      unattributable and the service refuses on that too.
+   - **The tab shows FIVE boxes.** `deploy/mt5-gateway/railway-gateway.md` step 4a names
+     four of them and the state each must have. The fifth is "disable algorithmic trading
+     when the chart's symbol or period has been changed". It read UNTICKED on the
+     validation terminal on 2026-10-03 (Phase 164.6.6 S-01). No required state for it has
+     been measured. Record what it reads (ticked yes/no); do not change it on the
+     strength of this line.
    - **Failure signature if you miss this:** a **permanent** `MT5_GATEWAY_UNCONFIGURED`
      refusal with `retryable: false` — never an accusation of the user's credentials, and
      never a `read_only: true` success. If a tester reports "my investor password is
@@ -445,6 +478,257 @@ So the hourly re-raise guarantees events, not a notification. Before relying on 
 No alert rule lives in this repo. This paragraph does not say whether one exists. That is a
 read-only check of the live Sentry configuration (164.6.5 review round 2, R2-SFH-05), and its
 result belongs in the phase record, not here.
+
+## Step 2c — terminal isolation, live checks (Phase 164.6.6)
+
+Phase 164.6.6 moved key VALIDATION off the terminal that serves jobs and onto a second,
+validation-only gateway (D-02). It also made the validation path refuse, with an alert, when
+that gateway is unset (D-05), recorded every job-terminal account switch (plan 01), and made
+the analytics service refuse to dial a gateway that is not a private-network host (D-07
+part 1). Under `H3-MASTER-PASSWORD-MODE: park-after-login` it parks the validation terminal
+back on the house account after a validation (D-07 part 2). None of that can be proven
+offline. This step is how the founder proves it live, after deploy.
+
+⛔ **Every check here is a FOUNDER act after deploy.** No agent touches either gateway,
+Railway, a broker, Sentry or the database for these checks.
+⛔ **Paste counts, kinds, yes/no and timings only.** Never an account number, a broker
+server, a host or service name, a key id, a password or a user name. The results go into
+`164.6.6-CONTEXT.md` as `## Live verification <date>`, one bullet per check.
+
+**Precondition.** Plans 01, 04, 05 and 06 are merged and deployed, and the Railway deploy's
+commit matches the merge. `MT5_VALIDATION_GATEWAY_HOST` and `MT5_VALIDATION_GATEWAY_PORT`
+are set on the analytics service (plan 04 Task 3).
+
+**Placeholders**, as in `deploy/mt5-gateway/railway-gateway.md`: `<job-gateway>`,
+`<validation-gateway>` and `<analytics-service>`.
+
+**Suggested order.** L3, then L1, then L7, all in ONE VNC session on `<job-gateway>`. Then L6
+after that session is torn down. Then L-H3, L-H3b and L-H3c. L-D05 last, because it costs two
+redeploys.
+
+### Two readings several checks share
+
+**Reading A, a handover row (PRODUCTION, read-only).** In the PRODUCTION Supabase project's
+dashboard Table Editor, open `cron_runs`, filter `cron_name = mt5_terminal_handover`, and sort
+by `started_at`, newest first. This is a read, not a write, so the which-database marker
+query is not required. Do not read the TEST project: its tables hold only CI rows. Each row's
+`metadata` holds exactly:
+- `previous_holder` and `incoming_holder`: each an api key id, or one of the literals `house`,
+  `validation`, `unknown` and `unattributed` (`services/mt5_client.py`'s `HOLDER_*` constants);
+- `site`: one of `services/mt5_handover.py`'s `SITE_*` values. `validate_wizard` and
+  `validate_worker` are the validate sites. `derive_broker_dailies`, `sync_trades_balance`,
+  `allocator_holdings`, `equity_backfill` and `session_heal` are job-terminal sites;
+- `records_account_number`: always `false`, plus `schema_version` and `attribution_limit`.
+
+Paste a holder's KIND only ("a key id", "the literal `house`"), never the id itself.
+
+**Reading B, which account a terminal is on.** Read-only: `initialize()` plus
+`account_info()`, never `login()`. It runs from the analytics service, so the dial crosses
+the private network, and it prints only yes/no:
+
+```bash
+railway ssh --service <analytics-service> "python3 -c 'import os; \
+  from mt5linux import MetaTrader5; \
+  m=MetaTrader5(host=os.environ[\"MT5_VALIDATION_GATEWAY_HOST\"], port=int(os.environ[\"MT5_VALIDATION_GATEWAY_PORT\"])); \
+  ok=m.initialize(); a=m.account_info(); \
+  print(\"initialize:\", bool(ok), \"authorized:\", a is not None, \
+        \"house:\", \"yes\" if a is not None and str(a.login) == os.environ.get(\"MT5_LOGIN\", \"\").strip() else \"no\")'"
+```
+
+For the JOB terminal, replace the two variable names with `MT5_GATEWAY_HOST` and
+`MT5_GATEWAY_PORT`. The comparison is done as strings inside the container, so neither the
+house login nor the terminal's login is ever printed. If it prints a traceback instead, paste
+"read failed", not the traceback. ⚠️ This read takes no lease. Run it only when no validation
+is in flight on that terminal. On the job terminal, run it only in a quiet window (L7's
+precondition).
+
+### L1 — a validation no longer switches the job terminal (criterion 1, as narrowed by D-01)
+
+⚠️ **Criterion 1 is narrowed by D-01.** It means that a VALIDATION no longer switches the job
+terminal. Normal job switches between onboarded keys STAY, and each one is RECORDED against
+the holder it displaced. Do not read criterion 1 as "the job terminal never switches".
+
+1. With the job terminal's Journal tab open in the VNC session, note the UTC time.
+2. Run ONE wizard validation with a client account (an investor key you control).
+3. **Job terminal:** its Journal shows NO account login or authorization line in the minute
+   of the validation.
+4. **Validation terminal:** a Reading A row with `site = validate_wizard` at that time. After
+   plan 04, a validate-site row can only concern the validation terminal. If no row appears
+   (the same key validated twice in a row writes none), the fallback reading is the
+   validation terminal's own Journal.
+5. **A normal job switch is recorded.** Read one Reading A row whose `site` is a job-terminal
+   site. Pass when `previous_holder` is a key id or a literal, and `records_account_number`
+   is `false`.
+
+- **Pass:** steps 3, 4 and 5 all hold.
+- **Fail:** any account line in the job terminal's Journal at the validation's time. A
+  job-site row at that same second can explain a coincident job switch. Without one, this is
+  a criterion-1 FAIL, routed as a finding.
+
+### L2 — validation-terminal scrub reading
+
+L2 is moved to Phase 164.6.6.1 with the validation-terminal scrub. Not run here.
+
+### L3 — how many job-terminal accounts have a saved password (read-only)
+
+Do this on the job terminal, in the SAME VNC session as L7 and BEFORE L7's clean-up. For each
+account the Navigator lists, open its login dialog from the Navigator. Read whether the
+password field is pre-filled with "Save password" ticked, then press **Cancel**.
+
+⛔ **Never press OK, and never double-click an account.** Either one logs the job terminal into
+that account. That is exactly the switch this phase removes, and a VNC login is invisible to
+the handover record.
+
+- **Record:** how many accounts are listed, and how many of them have a saved password. Counts
+  only. This settles RESEARCH A2 in part, and it is the scope input for Phase 164.6.6.1's
+  scrub.
+
+### L4 — first live job-terminal scrub
+
+L4 is moved to Phase 164.6.6.1 with the job-terminal scrub. It was also the first live
+terminate over the channel for `.planning/WINDOWS.md` entry 68, which moves with it. Not run
+here.
+
+### L5 — second-instance spike
+
+Not applicable: D-02 did not choose option (d). The row stays so the id sequence is whole.
+
+### L6 — VNC port 3000 on BOTH gateways
+
+Plan 03 already took this reading: `164.6.6-CONTEXT.md` `## Stand-up findings`, item S-08.
+Both gateways were not publicly reachable on 2026-10-03. Re-read a gateway only if VNC was
+opened on it since. L7 opens it on `<job-gateway>`, so L6's final reading for the job gateway
+is taken AFTER L7's teardown. The validation gateway needs a re-read only if VNC was opened
+on it (for example, for L1's Journal fallback).
+
+- **Record per gateway:** reachable publicly, torn down, or reachable only through a
+  port-forward.
+- **Pass:** neither gateway is publicly reachable.
+
+### L7 — one-time clean-up of the accounts the job terminal already lists
+
+**Authority, reconciled with D-03.** L7 is the founder's own one-time Navigator clean-up, the
+one `164.6.6-CONTEXT.md`'s domain paragraph names, done by hand at the VNC console. It is NOT
+a service-path deletion: D-03's "Nothing in THIS phase deletes anything" governs code and
+service paths, and no code in this phase deletes terminal data.
+
+**Precondition: a quiet window, so that no job holds the job terminal.** Read it without any
+agent database command:
+- in the PRODUCTION Supabase project's dashboard Table Editor (a read, no write, so the
+  which-database marker query is not required), `compute_jobs` filtered to `status = running`
+  shows zero rows. Any running job counts, to be conservative. Do not read the TEST project:
+  its tables hold only CI rows and would show a false quiet window;
+- the analytics service's Railway logs in the production environment show no MT5 lease
+  activity in the last few minutes.
+
+If either shows activity, wait and re-read. Never delete while a job may be mid-login.
+
+**The clean-up.**
+1. Over VNC, in the job terminal's Navigator, remove every client account: right-click it,
+   then Delete. Keep the house account.
+2. If the account the terminal is currently connected to is a client account, delete it LAST.
+3. Read the Navigator: **it lists only the house account.** That is the pass reading, taken
+   right after the clean-up.
+4. Tear VNC down: remove the port-forward, or the temporary domain if one was used. Then take
+   L6's reading.
+
+**Post-check.** After the teardown, the NEXT MT5 job read succeeds: either a completed sync for
+an MT5 key, or a Reading A row with a job-terminal `site` written after L7. A failed next read
+is a FAIL, routed as a finding. Onboarded keys' accounts reappear in the Navigator as jobs log
+in, because D-01 keeps those switches. That is expected, and it is why the pass reading is
+taken right after the clean-up.
+
+**Pass criterion, stated so it cannot be over-read.** After L7 the Navigator lists only the
+house account. A Navigator Delete removes the account ENTRY only. The per-account `Bases`
+trade caches and the Journal `Logs` that name those accounts STAY on the job terminal until
+Phase 164.6.6.1. The jobs terminal's `Logs` stay even then, by D-03, as Phase 164.6.8's wedge
+evidence. L7 passes on the Navigator reading. Record the on-disk remainder as a named
+residue owned by Phase 164.6.6.1, not as a failure and not as closed.
+
+### L-D05 — an unset validation endpoint is refused, WITH an alert a human sees (D-05)
+
+⚠️ **The cost, stated plainly.** Unsetting and then restoring a Railway variable means TWO
+redeploys of the analytics service. Each one restarts its worker, so a job in flight is
+interrupted and reclaimed. Validations are refused between the first and the second redeploy.
+Run this in a quiet window (L7's precondition). Each restart also resets the in-process alert
+window, so the first refusal after each redeploy is captured.
+
+1. On the ANALYTICS service, unset `MT5_VALIDATION_GATEWAY_HOST` (first redeploy).
+2. Run one wizard validation, then observe all three:
+   - (a) the wizard shows the error "The MetaTrader gateway is not configured";
+   - (b) the analytics logs carry an ERROR line from
+     `services/mt5_relogin.py::alert_mt5_validation_gateway_unconfigured` ("mt5 validation
+     refused at site=…");
+   - (c) the Sentry alert tagged `mt5_validation_gateway_unconfigured` REACHES you (by email,
+     or whatever the Sentry project's alert rule delivers) without you opening Sentry to look.
+3. Restore the variable (second redeploy), and run one validation that passes.
+
+- **Pass needs (c).** A Sentry event that exists but notified nobody is a FAIL, routed as a
+  finding. Step 2b's `### ⚠️ The hourly ERROR re-raise reaches a human only through a Sentry
+  ALERT RULE` explains why an event alone proves nothing.
+- **Afterwards, so the test cannot swallow the next real alert:**
+  1. Record which Sentry alert-rule type delivered (c). For example: "a new issue is
+     created", "an issue changes state from resolved to unresolved", or a per-event rule.
+  2. RESOLVE the Sentry issue the test created. Sentry groups every later occurrence of the
+     same message into that issue. While it stays unresolved, a new-issue rule never fires
+     for it again. Once it is resolved, the next real occurrence counts as a regression.
+  3. If the recorded rule type is new-issue only, with no regression trigger, that is a FAIL
+     routed as a finding: a real second occurrence would notify nobody.
+
+### L-H3 — no public path to either gateway, and the private-host check refused nothing real (D-07 part 1)
+
+After deploy:
+1. On BOTH gateway services, Settings → Networking still shows no public domain and no TCP
+   proxy. This is N-01 re-read.
+2. The analytics logs since deploy contain no "not a private-network host" line. The phrase
+   appears in all three refusals that `services/mt5_client.py::is_private_gateway_host`
+   drives: the two endpoint readers in `services/mt5_relogin.py`, and the transport factory's
+   `Mt5GatewayHostNotPrivate` ("MT5 gateway refused: …"). One search covers all three.
+3. At least one MT5 job read has succeeded since deploy: a Reading A row with a job-terminal
+   `site`, or a sync that completed. That proves the check did not refuse the real hosts.
+
+- **Pass:** all three hold. Record each gateway's two yes/no readings.
+
+### L-H3b — the validation terminal is back on the house account after a validation (D-07 part 2)
+
+Applies because `164.6.6-CONTEXT.md` records `H3-MASTER-PASSWORD-MODE: park-after-login`. If
+that line ever reads another mode, write "not applicable, mode is <mode>" instead.
+
+1. Run one wizard validation whose probe returned a verdict. Two kinds of validation are NOT
+   samples:
+   - a hung-terminal validation, which by design exits without a park;
+   - one that raised the `mt5_validation_park_failed` alert with cause `budget_exhausted`,
+     which is plan 06's floor skip.
+2. Take Reading B against the validation terminal.
+
+- **Pass:** `house: yes`. Answer "house: yes/no"; never paste the number.
+
+### L-H3c — the park premise: a park while the JOB terminal is on the house account (D-07 part 2, plan 02)
+
+⚠️ **The premise is NOT MEASURED.** The founder accepted `park-after-login` knowing that
+"the house account logged in on both terminals at the same time" had never been observed
+(`164.6.6-CONTEXT.md`, `### D-07 part 2`). This check is plan 02's open live item. It is
+recorded as NOT MEASURED until a sample is observed, and never as passed on a guess.
+
+**The check:** observe a park while the job terminal is on the house account. Both terminals
+stay authorized as the house account, and the job terminal is not logged out.
+
+1. Take Reading B against the JOB terminal, in a quiet window. Go on only if it reads
+   `authorized: True` and `house: yes`. Otherwise record "no sample: the job terminal was not
+   on the house account" and stop. ⛔ No agent switches the job terminal. Logging it into the
+   house account just to create a sample is the founder's own decision, and is not part of
+   this check.
+2. Run one wizard validation whose park ran: no `mt5_validation_park_failed` alert or ERROR
+   at that time.
+3. Straight after, take Reading B against BOTH terminals.
+
+- **Pass:** both read `authorized: True` and `house: yes`.
+- **Fail:** the job terminal reads `authorized: False` after the park, which means it was
+  logged out. Route it as a finding. If it reads `authorized: True` with `house: no`, look for
+  a Reading A row with a job-terminal `site` in that window. If there is one, a job switched
+  it, so the sample is void: record "no sample" and do not count it as a pass. If there is
+  none, it is a FAIL routed as a finding.
+- **Record:** "sample observed: yes/no", then each terminal's two yes/no readings.
 
 ## Step 3 — CREDENTIAL ISOLATION + BROKER ALLOWLISTING (MT5GOLIVE-01)
 

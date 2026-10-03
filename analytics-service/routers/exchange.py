@@ -1,11 +1,12 @@
 import asyncio
 import logging
 import os
+import threading
 import time
 from dataclasses import dataclass
 from functools import partial
 from datetime import datetime, timezone
-from typing import Any, Final
+from typing import Any, Callable, Final
 import ccxt
 from fastapi import APIRouter, HTTPException, Request
 from models.schemas import ValidateKeyRequest, FetchTradesRequest
@@ -28,6 +29,7 @@ from services.mt5_client import (
     Mt5SessionAbandoned,
     MT5_VALIDATE_REQUEST_TIMEOUT_S,
     emit_mt5_stage_event,
+    mt5_terminal_key,
 )
 # D-29 — the ONE terminal-lock registry, imported (never re-declared) exactly as the
 # three job call sites import it. `_MT5_LEASE_WAIT_S` is re-bound here as a module
@@ -37,6 +39,14 @@ from services.mt5_concurrency import (
     _MT5_LEASE_WAIT_S,
     Mt5TerminalBusyError,
     mt5_terminal_lease,
+)
+from services.mt5_handover import HOLDER_VALIDATION, SITE_VALIDATE_WIZARD
+# Phase 164.6.6 D-02 / D-05 — the ONE reader of the validation terminal's endpoint
+# and the alert this site fires when it is absent. Never the job pair.
+from services.mt5_relogin import (
+    alert_mt5_validation_gateway_unconfigured,
+    read_env_mt5_credentials,
+    read_env_validation_gateway_endpoint,
 )
 from services.mt5_validation import (
     ACCOUNT_CHANGE_ALGO_DISABLE_OPTION,
@@ -54,7 +64,13 @@ from services.mt5_validation import (
 # Importing it is the whole remedy: there is now one body, so a fix cannot land
 # on one path only. `services/mt5_probe.py` is a LEAF over mt5_client +
 # mt5_validation and must never import back into `routers.*` (D-07).
-from services.mt5_probe import mt5_gateway_misconfigured_detail, run_probe
+from services.mt5_probe import (
+    is_bridge_glitch,
+    mt5_gateway_misconfigured_detail,
+    park_on_house_account,
+    report_park_skipped,
+    run_probe,
+)
 from services.db import get_supabase, db_execute, one, rows
 # PYAPI-05 — the status-attributability contract. Every deliberate 5xx/424 in
 # this file goes through service_error so the four classes cannot drift apart
@@ -139,6 +155,30 @@ _MT5_VALIDATE_DEADLINE_S: Final[float] = float(os.getenv("MT5_VALIDATE_DEADLINE_
 # up a socket is not a venue round-trip and must never be given a venue-sized
 # budget.
 _MT5_RELEASE_TIMEOUT_S: Final[float] = float(os.getenv("MT5_RELEASE_TIMEOUT_S", "10.0"))
+
+# Phase 164.6.6 D-07 part 2 (`H3-MASTER-PASSWORD-MODE: park-after-login`) — the
+# least UNSPENT end-to-end deadline a park may start with, and the park's own
+# ceiling. DERIVED, never a second hand-set number: an alias of the stage bound
+# above, the codebase's own outer bound for ONE stage on this client, sized
+# (D-02) as a margin over the client's rpyc `MT5_VALIDATE_REQUEST_TIMEOUT_S` so
+# the inner bound fires first and the park thread returns before this does. A
+# park started with less could have its ceiling fire with the park still on the
+# wire after release: two callers on one MT5 pipe, the W-1 class.
+# Cost, stated: at the defaults (75 s deadline, 60 s floor) a validation whose
+# connect and probe took longer than 15 s skips the park and alerts
+# `budget_exhausted`; that alert rate is the observable, and the founder may move
+# the floor. ⚠️ Residual the floor cannot remove: `Mt5Client.login` makes two
+# bounded round-trips (`initialize`, then `login`), so the ceiling can still fire
+# when both are slow but each inside its own bound, or on a hang outside a bounded
+# round-trip; that exit alerts `ceiling`. It is the same assumption this stage
+# bound already makes for every probe stage.
+# ⛔ The park runs only inside the UNSPENT deadline, so it adds no term to the
+# 105 s worst case above.
+_MT5_PARK_MIN_BUDGET_S: Final[float] = _MT5_VALIDATE_STAGE_TIMEOUT_S
+
+# The clock the park's budget is read from. A seam, so a test can drive the floor
+# boundary exactly without patching the process-wide `time.monotonic`.
+_park_clock: Callable[[], float] = time.monotonic
 
 # ⭐ D-24's construction-time ORDERING guard (services/mt5_client.py's __init__)
 # raises a plain ``ValueError`` when ANY MT5 IPC ceiling in ``MT5_IPC_TIMEOUTS_MS``
@@ -448,20 +488,29 @@ async def _validate_mt5_key_probe(
         trace.outcome = "auth"
         raise HTTPException(status_code=400, detail=AUTH_FAILED_DETAIL)
 
-    # Gateway config: a missing/malformed MT5_GATEWAY_HOST / MT5_GATEWAY_PORT is a
-    # SERVER misconfig, NEVER the user's key — mirror the sfox construction-time
-    # posture. Log secret-free (no login/pw/server values), never a misleading
-    # AUTH_FAILED. (Phase 139 sets these live; unset now = the server-misconfig
-    # path.)
+    # Gateway config: a missing/malformed MT5_VALIDATION_GATEWAY_HOST /
+    # MT5_VALIDATION_GATEWAY_PORT is a SERVER misconfig, NEVER the user's key —
+    # mirror the sfox construction-time posture. Log secret-free (no login/pw/server
+    # values), never a misleading AUTH_FAILED.
+    #
+    # ⭐ Phase 164.6.6 D-02 — a validation leases the VALIDATION terminal, read
+    # through `read_env_validation_gateway_endpoint`, so an onboarding login can no
+    # longer switch the terminal that serves live jobs. ⛔ D-05: with the validation
+    # endpoint absent this REFUSES and alerts; it never falls back to
+    # MT5_GATEWAY_HOST / MT5_GATEWAY_PORT, which would silently restore the eviction.
     #
     # S-02 / S-03 / PYAPI-05: SERVICE-PERMANENT. Unset env is deterministic — it
     # is exactly half of A-01, where the 503 tripped the ONE global breaker key
     # and denied every Deribit user over an MT5 config gap. R-1: 500,
     # retryable:false. The genuinely transient MT5 arms are S-04/S-05 below.
-    host = os.getenv("MT5_GATEWAY_HOST")
-    port_raw = os.getenv("MT5_GATEWAY_PORT")
-    if not host or not port_raw:
-        logger.error("validate_key: MT5 gateway not configured (server misconfig)")
+    endpoint = read_env_validation_gateway_endpoint()
+    if endpoint is None:
+        # D-05's ALERT, fired BEFORE the refusal; it never raises.
+        alert_mt5_validation_gateway_unconfigured(site=SITE_VALIDATE_WIZARD)
+        logger.error(
+            "validate_key: MT5 validation gateway not configured or port malformed "
+            "(server misconfig)"
+        )
         trace.outcome = "gateway_unconfigured"
         raise service_error(
             500,
@@ -470,18 +519,7 @@ async def _validate_mt5_key_probe(
             retryable=False,
             detail="The MetaTrader gateway is not configured. This needs an operator, not a retry.",
         )
-    try:
-        port = int(port_raw)
-    except ValueError:
-        logger.error("validate_key: MT5 gateway port malformed (server misconfig)")
-        trace.outcome = "gateway_unconfigured"
-        raise service_error(
-            500,
-            "MT5_GATEWAY_UNCONFIGURED",
-            dependency="mt5-gateway",
-            retryable=False,
-            detail="The MetaTrader gateway is not configured. This needs an operator, not a retry.",
-        )
+    host, port = endpoint
 
     # D-03 — the probe is ONE bounded unit. Connect and probe were previously timed
     # SEPARATELY at the same ceiling (and so was the close), so the honest worst case
@@ -494,11 +532,22 @@ async def _validate_mt5_key_probe(
     # release it even when the END-TO-END deadline fires mid-probe. Keeping that
     # release outside the deadline is load-bearing — see the finally's own comment.
     client: Mt5Client | None = None
+    # ⭐ Phase 164.6.6 D-07 part 2 — the park gate's three facts, published from
+    # inside `_connect_and_probe` the same way `client` is (see the park in the
+    # finally below). `probe_thread_done` is set by the probe THREAD itself, so it
+    # measures "in flight" directly rather than by which exception arrived.
+    login_attempted = False
+    probe_thread_done = threading.Event()
+    probe_disqualified: str | None = None
+    # How the validation ended, for the park's alert level (founder decision,
+    # CONTEXT D-07 part 2 "Park alert level"): True only on the two arms where
+    # the validation itself hit a bridge glitch (C5 and D-15 below).
+    validation_hit_glitch = False
 
     async def _connect_and_probe() -> tuple[
         dict[str, Any], dict[str, Any], dict[str, Any] | None
     ]:
-        nonlocal client
+        nonlocal client, login_attempted, probe_disqualified, validation_hit_glitch
 
         # STAGE 1 — connect.
         #
@@ -659,14 +708,21 @@ async def _validate_mt5_key_probe(
         # timeout: both DIVERGE from the worker's on purpose (D-03/D-26) and their
         # rationale is written at the sites.
         def _probe() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any] | None]:
-            return run_probe(
-                connected,
-                login=login,
-                investor_pw=investor_pw,
-                server=server,
-                log_prefix="validate_key",
-            )
+            try:
+                return run_probe(
+                    connected,
+                    login=login,
+                    investor_pw=investor_pw,
+                    server=server,
+                    log_prefix="validate_key",
+                )
+            finally:
+                # Set by THIS thread when `run_probe` exits, however it exits.
+                probe_thread_done.set()
 
+        # `run_probe`'s first step is the login, so from here on a terminal may
+        # hold the user's session.
+        login_attempted = True
         try:
             return await asyncio.wait_for(
                 asyncio.to_thread(_probe), timeout=_MT5_VALIDATE_STAGE_TIMEOUT_S
@@ -689,6 +745,8 @@ async def _validate_mt5_key_probe(
                 recoverable=True,
             )
         except Mt5SessionAbandoned:
+            # D-07 part 2: the lease fence fired on this session. No park.
+            probe_disqualified = "probe_session_abandoned"
             # ⭐ WIZFORM-ABANDON / D-40. `Mt5SessionAbandoned` is a PLAIN
             # `Exception` by design (D-42, so no credential-classify arm can
             # absorb an operator fault into a user verdict) — which means it
@@ -725,6 +783,8 @@ async def _validate_mt5_key_probe(
                 recoverable=True,
             )
         except Mt5AccountMismatchError:
+            # D-07 part 2: another actor switched the terminal mid-probe. No park.
+            probe_disqualified = "probe_account_mismatch"
             # RED-TEAM: a concurrent validate re-logged the shared terminal onto
             # another account mid-probe — an INFRA/concurrency fault, never the
             # user's key. Fail CLOSED transient (never valid, never auth-failed,
@@ -860,6 +920,9 @@ async def _validate_mt5_key_probe(
                     "login-stage refusal (code=%s)",
                     e.code,
                 )
+                # The C5 arm: the validation ended on a bridge glitch. Decided by
+                # the same predicate the park applies to its own error.
+                validation_hit_glitch = is_bridge_glitch(e)
                 # PYAPIFIX2-01 (C5, post-login / transport half) — the pre-167
                 # answer, byte-for-byte.
                 raise VenueTransientHTTPException(
@@ -913,13 +976,13 @@ async def _validate_mt5_key_probe(
     # serialization constraint, not a capacity one — so one terminal cycles through
     # hundreds of accounts across a day (D-29, REVISED 2026-08-08).
     #
-    # The key MUST be byte-identical to `Mt5Client.terminal_key` (`f"{host}:{port}"`,
-    # mt5_client.py's `terminal_key` property), because that is what the three job
-    # sites key on: a divergent format yields a DIFFERENT Lock object and serializes
-    # nothing (MT5CONC-02 / Pitfall 2). It is derived from the same host/port
+    # The key MUST be byte-identical to `Mt5Client.terminal_key` (both spelled by
+    # `mt5_client.mt5_terminal_key`, never a hand-typed f-string), because that is
+    # what the job sites key on: a divergent format yields a DIFFERENT Lock object
+    # and serializes nothing (MT5CONC-02 / Pitfall 2). It is derived from the same host/port
     # resolved above, and BEFORE construction — construction opens the rpyc socket
     # that races, so the lease must already be held when it happens.
-    terminal_key = f"{host}:{port}"
+    terminal_key = mt5_terminal_key(host, port)
     trace.terminal_key = terminal_key
     # ⭐ D-32 — TIME THE QUEUE WAIT SEPARATELY FROM THE TERMINAL WORK. This is the
     # measurement nothing in this system has ever had, and the separation is the
@@ -932,10 +995,21 @@ async def _validate_mt5_key_probe(
     # exactly the interesting end.
     lease_started_at = time.perf_counter()
     try:
-        async with mt5_terminal_lease(terminal_key, wait_s=_MT5_LEASE_WAIT_S):
+        # ⭐ Phase 164.6.6 criterion 1 — a validation has no `api_key_id` yet, so
+        # the lease is held for the `validation` literal; a login it makes over
+        # a job key's session is recorded against the key it displaced.
+        async with mt5_terminal_lease(
+            terminal_key,
+            wait_s=_MT5_LEASE_WAIT_S,
+            holder=HOLDER_VALIDATION,
+            site=SITE_VALIDATE_WIZARD,
+        ):
             emit_mt5_stage_event(
                 "lease_wait", lease_started_at, ok=True, terminal_key=terminal_key
             )
+            # D-07 part 2 — where the deadline starts, so the park can read how much
+            # of it is still unspent.
+            deadline_started_at = _park_clock()
             try:
                 # ⭐ THE ONE END-TO-END DEADLINE (D-03). It bounds connect + probe TOGETHER;
                 # the release in the finally is deliberately NOT inside it (see below).
@@ -1046,6 +1120,10 @@ async def _validate_mt5_key_probe(
                             "validate_key: MT5 capability undetermined (terminal signal "
                             "unavailable) — refusing rather than stamping read-only"
                         )
+                        # The D-15 bridge blip, glitch by decision (CONTEXT D-07 part 2):
+                        # "a validation that ends on a bridge blip then parks over the
+                        # same failing bridge".
+                        validation_hit_glitch = True
                         trace.outcome = "transient"
                         raise VenueTransientHTTPException(
                             status_code=424,
@@ -1129,20 +1207,80 @@ async def _validate_mt5_key_probe(
                 # the old state while TODOS.md already recorded it RESOLVED: `a7e88c7d`
                 # updated three sibling sites and missed this one. Behaviour was right,
                 # the record was wrong — which is the more dangerous of the two.
-                if client is not None:
-                    try:
-                        await asyncio.wait_for(
-                            asyncio.to_thread(client.release),
-                            timeout=_MT5_RELEASE_TIMEOUT_S,
-                        )
-                    except asyncio.TimeoutError:
-                        logger.warning(
-                            "validate_key: MT5 client.release() timed out — abandoning session"
-                        )
-                    except Exception:  # noqa: BLE001 — release must never mask the probe verdict
-                        logger.warning(
-                            "validate_key: MT5 client.release() failed — abandoning session"
-                        )
+                # ⭐ Phase 164.6.6 D-07 part 2, as the founder amended it
+                # (`H3-MASTER-PASSWORD-MODE: park-after-login`): a master-password
+                # session must not outlive its probe, so the validation terminal is
+                # logged back into the house account HERE, inside the lease and
+                # before the release; never by a second caller on a pipe the probe
+                # thread may still hold (the W-1 class), and never with less budget
+                # than the park needs to finish. The saved password on disk is Phase
+                # 164.6.6.1's scrub. DEFAULT-DENY: the park runs only when every fact
+                # below is positively true; every other post-login exit alerts with
+                # a named cause and parks nothing. Decided ONCE, never retried.
+                try:
+                    if login_attempted and client is not None:
+                        park_skip: str | None = None
+                        if not probe_thread_done.is_set():
+                            # The stage ceiling or the end-to-end deadline fired
+                            # with the probe thread still on the wire.
+                            park_skip = "probe_in_flight"
+                        elif probe_disqualified is not None:
+                            park_skip = probe_disqualified
+                        elif (
+                            _MT5_VALIDATE_DEADLINE_S
+                            - (_park_clock() - deadline_started_at)
+                        ) < _MT5_PARK_MIN_BUDGET_S:
+                            park_skip = "budget_exhausted"
+                        if park_skip is not None:
+                            report_park_skipped(park_skip, site=SITE_VALIDATE_WIZARD)
+                        else:
+                            try:
+                                await asyncio.wait_for(
+                                    asyncio.to_thread(
+                                        park_on_house_account,
+                                        client,
+                                        house=read_env_mt5_credentials(),
+                                        site=SITE_VALIDATE_WIZARD,
+                                        validation_hit_glitch=validation_hit_glitch,
+                                    ),
+                                    timeout=_MT5_PARK_MIN_BUDGET_S,
+                                )
+                            except asyncio.TimeoutError:
+                                # The park thread may still be on the wire; the
+                                # only thing that touches the client from here is
+                                # the bounded release below, exactly as before.
+                                report_park_skipped("ceiling", site=SITE_VALIDATE_WIZARD)
+                            except asyncio.CancelledError:
+                                # Per the founder decision (CONTEXT D-07 part 2 "Park
+                                # alert level"), every other skip or failure still
+                                # pages, and a cancelled park is one; cancellation
+                                # keeps propagating.
+                                report_park_skipped("park_cancelled", site=SITE_VALIDATE_WIZARD)
+                                raise
+                except Exception as park_exc:  # noqa: BLE001 — the park must never replace the verdict
+                    logger.error(
+                        "validate_key: the D-07 park failed unexpectedly "
+                        "(error_class=%s)",
+                        type(park_exc).__name__,
+                    )
+                    # T-164.6.6-07: the park did not run, so this pages through
+                    # the closed cause set. `report_park_skipped` never raises.
+                    report_park_skipped("unrecognised_cause", site=SITE_VALIDATE_WIZARD)
+                finally:
+                    if client is not None:
+                        try:
+                            await asyncio.wait_for(
+                                asyncio.to_thread(client.release),
+                                timeout=_MT5_RELEASE_TIMEOUT_S,
+                            )
+                        except asyncio.TimeoutError:
+                            logger.warning(
+                                "validate_key: MT5 client.release() timed out — abandoning session"
+                            )
+                        except Exception:  # noqa: BLE001 — release must never mask the probe verdict
+                            logger.warning(
+                                "validate_key: MT5 client.release() failed — abandoning session"
+                            )
     except Mt5TerminalBusyError:
         # The terminal was still held when the INTERACTIVE acquisition bound
         # expired. We never touched it, so nothing is known about this key — routed

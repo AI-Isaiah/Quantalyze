@@ -36,6 +36,9 @@ import {
   CREDENTIAL_KEY_INPUT_PROPS,
   CREDENTIAL_SECRET_INPUT_PROPS,
 } from "@/lib/credential-input";
+// D-08 (Phase 164.6.6) — the secret slot reads the venue CAPABILITY, never a
+// venue name, to decide whether a paste keeps its edge whitespace.
+import { venueSecretIsVerbatim } from "@/lib/closed-sets";
 
 /**
  * ConnectKeyStep renders the exchange selector, the inline permission
@@ -1887,7 +1890,15 @@ export function ConnectKeyStep({
               id="wizard-api-secret"
               type={showSecret ? "text" : "password"}
               value={apiSecret}
-              onChange={(e) => setApiSecret(readCredentialInput(e))}
+              // D-08 / 169.3 D-76: the server stores a verbatim-secret venue's
+              // password as sent, so the paste-strip must not be the only trim.
+              onChange={(e) =>
+                setApiSecret(
+                  venueSecretIsVerbatim(exchange)
+                    ? e.target.value
+                    : readCredentialInput(e),
+                )
+              }
               placeholder={secretPlaceholder}
               {...CREDENTIAL_SECRET_INPUT_PROPS}
               required

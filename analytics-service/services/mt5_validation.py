@@ -180,9 +180,10 @@ def parse_mt5_credentials(
       * blank investor password -> ``"auth"``
 
     The password is returned VERBATIM (never trimmed — MT5 passwords may be
-    space-significant; the wizard client trims at submit); only its blank-ness is
-    tested via ``.strip()``. Login and server ARE trimmed (the v1.11
-    credential-trim convention)."""
+    space-significant, and no path trims them: the TS validate/encrypt chokepoint
+    exempts the MT5 secret since Phase 164.6.6 D-08, and the rotate path never
+    trimmed it); only its blank-ness is tested via ``.strip()``. Login and server
+    ARE trimmed (the v1.11 credential-trim convention)."""
     server = (passphrase or "").strip()
     if not server:
         raise Mt5ValidationError("wrong_server")

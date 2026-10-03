@@ -110,6 +110,7 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 164.6.4: MT5KEEPALIVE — nothing TRIGGERS a recovery, so the terminal sits dark for hours while recovery itself takes minutes** (INSERTED)
 - [ ] **Phase 164.6.5: MT5VALIDATEWEDGE — MT5 key validation stops destroying the shared terminal, and the terminal self-heals** (INSERTED) — verification: human_needed
 - [ ] **Phase 164.6.6: MT5TERMINALISOLATION — one client's MT5 validation cannot evict, disturb or expose another client's broker session** (INSERTED) — not yet verified
+- [ ] **Phase 164.6.6.1: MT5SCRUB — the MT5 terminals are wiped of saved accounts after use without ever leaving the jobs terminal logged out** (INSERTED) — not yet planned (waits for the founder's live scrub spike)
 - [ ] **Phase 164.6.7: COMPOSITECLAIMSNAPSHOT — the composite run reads the live job marker, not its claim-time snapshot** (INSERTED) — verification: human_needed (shipped; founder/post-deploy checks pending)
 - [ ] **Phase 164.6.8: OUTAGEALERT — a shared-terminal MT5 outage reaches a human without one clicking a button** (INSERTED) — not yet verified
 - [x] **Phase 164.7: APPSETTINGS — every app.* GUC reader moves to a mechanism this platform actually grants, because ALTER DATABASE and ALTER ROLE both return 42501 here** (INSERTED)
@@ -2686,8 +2687,9 @@ the former 4 is renumbered 3 below, text unchanged.
 any restart or heal, which is 164.6.8's evidence, so both `**Owns**` lines now live under Phase
 164.6.8, carried verbatim. This phase owns neither.
 **⭐ ROUTED IN 2026-09-30 (from 169.3-06 planning; founder AskUserQuestion "164.6.6 TERMINALISOLATION"; data-integrity; 169.3 D-76):** an MT5 investor password is stored differently depending on the path that saved it. The connect wizard trims it (create-with-key → `validateKey` → `trimCredential` in `src/lib/analytics-client.ts`); the password-update dialog stores it exactly as typed (`src/app/api/keys/[id]/rotate-secret/route.ts` :221, :227, :312 → `analytics-service/routers/internal.py` :739, :762). A password with a leading or trailing space is therefore saved correctly on rotate but wrongly through the wizard, which then fails to log in. Success: an MT5 password is never trimmed on any path (wizard, rotate, validate), pinned by a test that fails under the old trim; API key and secret trimming for other venues is unchanged. 169.3-06 deliberately leaves both server paths alone and only stops the client from stripping the MT5 password.
+⚠️ **Measured 2026-10-03 (plan-check revision 1), recorded as `164.6.6-CONTEXT.md` D-08 and delivered by plan 07:** the sentence before this one is false for the wizard secret slot. 169.3-06 exempted only the Update-password dialog, and `ConnectKeyStep` / `MultiKeyConnectStep` still strip a pasted MT5 password (169.3 D-76). Plan 07 therefore exempts the MT5 secret in both `validateKey` and `encryptKey` (one shared helper, so validate and encrypt stay identical) AND in both wizard secret inputs, through a venue capability. Non-MT5 trimming and the MT5 login trim are unchanged. The rotate path is already verbatim and is not edited. The sentence above is kept as lineage.
 
-**Plans:** 0 plans
+**Plans:** 8 plans (01-08 as listed below; re-planned after the 2026-09-27 split; plan 07 added 2026-10-03 for the routed MT5-password item)
 
 ⛔ **SAME INCIDENT AS 164.6.5, DIFFERENT DEFECT.** 164.6.5 makes validation stop breaking the
 terminal; this phase makes the terminal stop being a shared mutable resource. 164.6.5 is
@@ -2709,9 +2711,112 @@ independently shippable; this is the architecture.
    pooled terminals) vs serialize-and-restore on one terminal. Both have real cost; record the
    reasoning wherever this repo tracks decisions.
 
+⭐ **Founder decision 2026-09-27 (AskUserQuestion), recorded in full in `164.6.6-CONTEXT.md`.**
+- **D-01, eviction scope = VALIDATION switches only.** Criterion 1 is narrowed accordingly: a key
+  validation no longer switches the job terminal. Normal job switches between onboarded keys stay,
+  and each one is recorded against the holder it displaced (the handover record, `cron_runs`, no
+  migration: founder accepted). Criterion 1's original text above is kept as lineage.
+- **D-02, option (b)+(f):** a separate validation-only gateway, wiped after every use, plus
+  recording on the jobs terminal. Serialize-and-restore (c) REJECTED. Criterion 3 is closed by this
+  record.
+- D-03 reverses 164.6.5 D-07 for saved accounts and history only, and the jobs terminal KEEPS its `Logs` (164.6.8's wedge evidence); founder decision, deviation recorded here and in `164.6.6-CONTEXT.md`. The deletions themselves ship in Phase 164.6.6.1, not here.
+- **D-05, fail loud:** with `MT5_VALIDATION_GATEWAY_*` unset, the validation is refused with a clear
+  error and an alert; it never falls back to the jobs terminal.
+- **D-06, routed to Phase 164.6.8 OUTAGEALERT** (frozen; it waits there): the validation terminal's
+  monitoring gap and the reader of skipped-cleanup rows (`TODOS.md`
+  `MT5-VALIDATION-TERMINAL-COVERAGE-01`).
+- **D-07, H3 is HIGH and fixed IN this phase:** authentication or network isolation on the rpyc
+  channel, and master passwords rejected before any login, each with a failing-first test.
+- **SPLIT:** the wipe/scrub work (the scrub spike, the scrub verb, the validation-terminal scrub, the
+  job-terminal scrub, D-04 scrub cadence, and the must-fix W-1/W-2) moved to **Phase 164.6.6.1
+  MT5SCRUB**, re-planned after the founder's live spike. The founder judged it HIGH-risk if shipped
+  as planned (W-2: jobs terminal left logged out after a failed relaunch; W-1: a lock-up).
+  ⚠️ Criterion 2 is therefore met only in part by this phase: the job terminal stops receiving
+  un-onboarded accounts, and the founder's one-time Navigator clean-up removes the list it holds;
+  wiping either terminal after use is 164.6.6.1's. The validation-gateway STAND-UP stays in this
+  phase, because this phase's routing refuses every validation until that gateway exists.
+- D-07 part 2 amended 2026-10-03 by founder decision (`164.6.6-CONTEXT.md`): "reject master passwords before any login" is not achievable with the MT5 Python API (every signal that tells a master password from an investor one needs a logged-in session), so it is replaced by `park-after-login`: containment after login, where every validation that reached its login ends, inside the same lease, with the validation terminal logged back into the house account, and every exit where no park can run alerts with a named cause. Deviation from a recorded decision, recorded here and in CONTEXT. ⚠️ Its premise, the house account logged in on both terminals at once, is NOT MEASURED (the job terminal is on a client account today) and was accepted by the founder with that caveat; it stays an open live check for verification.
+- D-07 part 1 residual 2026-10-03, founder decision (`164.6.6-CONTEXT.md`): accepted. Network isolation closes the rpyc channel to the public internet only; inside the Railway private network the port stays unauthenticated and reachable by all 6 services there, all of them this product's own, as before this phase.
+
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 164.6.6 to break down)
+- [ ] 164.6.6-01-PLAN.md — handover record: every job-terminal switch recorded against the displaced holder (wave 1; builds on the founder's locked D-01/D-02 record of 2026-09-27, which its precondition reads)
+- [ ] 164.6.6-02-PLAN.md — FOUNDER decisions D-01..D-07 (eviction scope, isolation option, 164.6.5 D-07 reversal, scrub cadence, H3) recorded in CONTEXT.md and here (wave 2, after plan 03: both append to `164.6.6-CONTEXT.md`)
+- [ ] 164.6.6-03-PLAN.md — validation-gateway stand-up runbook + FOUNDER stand-up and readings S-01, S-07, S-08, N-01 (wave 1)
+  - ⚠️ **Deviation 2026-10-03 (founder override, "I authorize you to use mcp and action as many of those steps as possible"):** the orchestrator, not the founder, stood the validation gateway up over Railway MCP/CLI and `railway ssh` (service and volume, VNC credentials, removal of the job gateway's public domain, the temporary VNC domain, a Wine prefix rebuild, the `[Experts]` options in `common.ini` later confirmed on screen by the founder, and one house login from the analytics container's own env); recorded in full in `164.6.6-CONTEXT.md` `## Stand-up findings 2026-10-03`.
+- [ ] 164.6.6-04-PLAN.md — both validate sites routed to the validation terminal, fail loud when unset (wave 2, after plans 01 and 03)
+  - ⚠️ **Deviation 2026-10-03 (same founder override):** Task 3's "FOUNDER ACT. No agent sets Railway variables" was done by the orchestrator: both validation-endpoint variables set on the analytics service with `--skip-deploys` (no redeploy), both read back present, and the existing job host measured by shape as a `.railway.internal` name (yes), never printed. Ship precondition MET; recorded in `164.6.6-CONTEXT.md` too.
+- [ ] 164.6.6-05-PLAN.md — H3 part 1: the analytics service refuses to dial a non-private gateway host (wave 3)
+- [ ] 164.6.6-06-PLAN.md — H3 part 2: the master-password park, per the founder's `H3-MASTER-PASSWORD-MODE` (wave 3)
+  - ⭐ **Founder decision 2026-10-03 (AskUserQuestion "Warn on glitch, page else"):** a park that fails for the same bridge-blip reason the validation hit logs WARNING only (D-15 holds); every other park skip or failure still logs ERROR and alerts. Recorded in `164.6.6-CONTEXT.md` under D-07 part 2.
+- [ ] 164.6.6-07-PLAN.md — D-08: an MT5 password is never trimmed on any path; validate and encrypt send the same bytes; other venues unchanged (wave 1)
+- [ ] 164.6.6-08-PLAN.md — live-check runbook + FOUNDER post-deploy verification L1..L7 (wave 4)
+- [ ] 164.6.6-09-PLAN.md — GAP CLOSURE (VERIFICATION gaps_found + SECURITY T-164.6.6-07): the park warns on a bridge glitch only when the validation hit one too; the outer park handler and a cancelled park alert (wave 4; plan 08's live park checks run after it ships)
+- ⛔ MOVED 2026-09-27 to Phase 164.6.6.1 MT5SCRUB (founder split): 164.6.6-03 (scrub spike; its gateway stand-up half stays here, re-planned), 164.6.6-05, 164.6.6-06, 164.6.6-07. Re-planning this phase (narrowed scope + a new H3 plan) rewrites this list.
+  - ⚠️ **Plan ids reused (noted 2026-10-03):** the ids moved out above were reused for NEW plans in this list, which the re-plan wrote. 03 is the gateway stand-up, 05 is H3 part 1, 06 is the H3 part 2 park (split out of 05 at checker round 3), and 07 is the D-08 MT5-password plan (added at plan-check revision 1, 2026-10-03). The moved plans live on as 164.6.6.1-01..-04 (see that phase's list: "was 164.6.6-03/05/06/07"). Read `164.6.6-07` in this list as the D-08 plan, never as the moved job-terminal scrub.
+
+### Phase 164.6.6.3: UATFIXES — the defects the 2026-10-03 production UAT pass found are fixed (INSERTED)
+
+Founder decision 2026-10-03 (AskUserQuestion "One fix phase, after 164.6.6"): runs right after 164.6.6, before 164.6.6.2 BTCNATIVE and 164.6.6.1 MT5SCRUB. Source: the 2026-10-03 production UAT pass over 17 human_needed phases (browser checks on the deployed app, Vercel production at `7276aa9a`). The phases those checks came from close with each defect routed here. **Defects, in priority order:**
+1. **Rename risk.** The strategy edit page's Strategy Name picker preselects "Alpha Centauri" instead of the strategy's own name (seen on MM-2x and AI-FX-35), so saving that form would likely rename it.
+2. **Composite factsheet contradicts itself (from 169 #1).** Quantum Drift (a 3-key Deribit composite) shows CUM. RETURN +0.0%, CAGR +0.0%, SHARPE 8.10, CALMAR 0.00 in its headline, while the same page shows YTD +2283266.93%, EOY 2025 +9159.64%, 6 Month +8926742.64% and Recovery Factor 2701034.63, plus "Track record under 90 days" on 253 observations; /my-strategies repeats the bad headline.
+3. **A flat series still shows numbers (from 166.2 #1).** MM-2x (a constant zero series) shows Beta 0.00, Information Ratio 0.30 ("IR VS BTC 0.30"), Up/Down Capture 0.00 and Alpha +0.00% where the no-dispersion rule calls for "—"; its two-sample KS test reads "D = 0.000, p = 0.000 — distributions differ" on identical distributions. Note 166.2 #4 says a flat leg's beta reads 0 (HI-01), so the factsheet rule needs settling first.
+4. **OG share card (from 169.4.1 #1).** Fibonacci Ghost's card shows Sharpe "—" where its factsheet shows 0.12; every card draws "—" in red, which DESIGN.md forbids.
+5. **Unbuildable factsheet note (from 167.2.1 #2).** A computed-but-unbuildable strategy (Eclipse) pairs "could not be built from its results" with the generic "not available yet" share note instead of the D-02 line.
+6. **Small ones:** the /recommendations disclaimer renders twice and its "Batch: Fresh" chip carries no date (169.3); an empty scenario's P5/P95/Median read "+0.00%" with 0 observations; the "My Allocation" bottom-nav label clips at 320px; "α VS BTC" uppercases to "Α VS BTC"; edit pages flash "No API keys connected." for about 20 s while loading; /strategies offers "Get private link" where the factsheet says a private link is live.
+Re-measure each at plan time; the observations are from a browser pass, not a code reading.
+
+**Goal:** [Urgent work - to be planned]
+**Requirements**: TBD
+**Depends on:** Phase 164.6.6
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 164.6.6.3 to break down)
+
+### Phase 164.6.6.2: BTCNATIVE — an MT5 account denominated in BTC (or any non-USD currency) reports its returns in its own unit, not as a dust-guarded USD series (INSERTED)
+
+Founder request 2026-10-03 (chat, a factsheet screenshot of MM-2x, then "ok, after 164.6.6.1", corrected the same evening to "sorry, it should be after 164.6.6"): runs right AFTER 164.6.6 and BEFORE 164.6.6.1. Both it and 164.6.6.1 change the MT5 ingestion files, so they run one after the other, never in parallel. **Measured read-only on PROD 2026-10-03 (marker query first):** MM-2x's `strategy_analytics` row is `complete_with_warnings` with `cumulative_return`, `volatility` and `max_drawdown` all 0.0 and `data_quality_flags` `{dust_nav_guard: true, insufficient_window: true, csv_source: true}`. **Root cause, from a code reading (re-measure at plan time):** the MT5 path assumes a USD account, so a BTC-sized balance is read as dollars, falls under `nav_twr.py` `DUST_NAV_FLOOR` ($1000), and the dust guard flattens every metric. The positions panel already states the gap: `allocator_positions.py` "MT5 account currency is {ccy} — USD conversion isn't supported yet". **Reuse candidate:** the v1.8/v1.9 native-unit NAV + TWR machinery built for Deribit coin-margined accounts (`services/native_nav.py`, the native-unit adapter in `deribit_ingest.py`). **Scope:** (1) read the MT5 account currency (`account_info().currency`) and carry it with the account; (2) rebuild NAV and TWR from the deal ledger in that native unit, with a per-currency dust floor instead of the USD one; (3) the factsheet shows returns as growth in the native unit ("more BTC") and labels the unit; (4) OPEN for discuss-phase: whether a USD view (native NAV converted at the benchmark BTC price the factsheet already reads) is in scope. Never invent data: an uncomputable metric stays null.
+
+**Goal:** [Urgent work - to be planned]
+**Requirements**: TBD
+**Depends on:** Phase 164.6.6
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 164.6.6.2 to break down)
+
+### Phase 164.6.6.1: MT5SCRUB — the MT5 terminals are wiped of saved accounts after use without ever leaving the jobs terminal logged out (INSERTED)
+
+**Goal:** The validation terminal is wiped of every validated account after each use, and the jobs
+terminal's saved client accounts and history are removed, without ever leaving the jobs terminal
+logged out and without a lock-up.
+**Requirements**: TBD
+**Depends on:** Phase 164.6.6 (the validation gateway, the routing and the handover record), AND the
+founder's live scrub spike on the validation terminal (run from the moved spike plan). ⛔ Not
+plan-checked or executed before the spike; re-planned after it.
+**Split 2026-09-27 from Phase 164.6.6 by founder decision.** The founder judged the wipe work HIGH if
+shipped as planned: W-2 would leave the jobs terminal logged out after a failed relaunch, and W-1
+risks a lock-up. Both are MUST-FIX here, carried verbatim in `164.6.6.1-CONTEXT.md`. It inherits
+164.6.6 D-03 (164.6.5 D-07 reversed for saved accounts and history only; the jobs terminal keeps its
+`Logs`) and owns D-04 (scrub cadence), OPEN until the founder answers at re-plan.
+**Plans:** 4 plans (moved from 164.6.6, NOT re-planned; they predate the spike and the must-fix items)
+
+**Success criteria (to be derived properly at planning):**
+
+1. After every validation, the validation terminal lists no client account and holds none of that
+   account's saved data (scope of `Logs` there: founder answers at re-plan).
+2. The jobs terminal's saved client accounts and history are removed on the cadence the founder sets
+   (D-04), and its Journal `Logs` are kept (164.6.6 D-03).
+3. No scrub path can leave the jobs terminal logged out (W-2) or lock the terminal or a lease (W-1);
+   each is proven by a failing-first test and by the spike's measured relaunch timing.
+
+Plans:
+
+- [ ] 164.6.6.1-01-PLAN.md — (was 164.6.6-03) validation-gateway runbook + FOUNDER scrub spike; its stand-up half is now delivered by 164.6.6
+- [ ] 164.6.6.1-02-PLAN.md — (was 164.6.6-05) narrow terminate-and-scrub verb over rpyc
+- [ ] 164.6.6.1-03-PLAN.md — (was 164.6.6-06) validation terminal scrubbed inside the lease after every validation
+- [ ] 164.6.6.1-04-PLAN.md — (was 164.6.6-07) job terminal scrubbed on every ipc_fault recovery, credentialed relaunch within budget
 
 ### Phase 164.6.8: OUTAGEALERT — a shared-terminal MT5 outage reaches a human without one clicking a button (INSERTED)
 
@@ -2742,6 +2847,15 @@ then both `**Owns**` lines move here, both `TODOS.md` `Owner:` lines point at Ph
 name 164.6.8, and the two `**Owns**` lines #863 wrote under Phase 164.6.6 are carried here verbatim:
 - *(as #863 wrote it, 2026-09-26, from 164.6.5 plan 08)* `TODOS.md` `MT5-PROBER-WEDGE-CALIBRATION-01` — Phase 164.6.5 D-11, OPEN: the prod-prober's `-10005` classification (`mt5-ipc-timeout`) has never been calibrated against a REAL wedge; its fixture was constructed, not captured. Trigger: the next live `-10005`, captured BEFORE the heal recycles the terminal (a founder-supervised induced wedge also qualifies). Gate: a scrubbed real-wedge transcript committed under `scripts/prod-prober/fixtures/mt5/`, registered for the kind it actually produced, self-test and wiring suite green. ⛔ A hand-written fixture is not a close. ⚠️ 164.6.5's own heal can recycle a wedge before a scheduled prober run reads it.
 - *(as #863 wrote it, 2026-09-25, from 164.6.5 plan 01)* `TODOS.md` `MT5-SWITCH-WEDGE-CAUSE-01` — why some account switches on the shared terminal wedge it (`-10005`, Journal silent after `disconnected`) and others do not. Verdicts so far: same-vs-different account REJECTED, terminal self-update and same-vs-different broker server UNDECIDED. Closes only on evidence captured at the next wedge BEFORE any restart; a restart clearing the symptom is not a close.
+
+**Owns (routed 2026-09-27 from Phase 164.6.6 D-06, founder decision):** `TODOS.md`
+`MT5-VALIDATION-TERMINAL-COVERAGE-01` — (a) the validation terminal's MONITORING GAP: the session
+monitor, boot heal, `ipc_fault` recycle and the prod-prober MT5 arm all read the single
+`MT5_GATEWAY_HOST` / `MT5_GATEWAY_PORT` pair, so the second (validation-only) gateway Phase 164.6.6
+stands up is dark to all four; (b) the READER of skipped-cleanup rows: every non-`scrubbed`
+`mt5_terminal_scrub` row Phase 164.6.6.1 writes (skipped for budget, refused, partial, failed,
+relaunch failed) is recorded and read by nothing. This phase is frozen; the item waits here. Until it
+lands, a wedged or logged-out validation terminal is noticed only when a validation fails.
 
 **Plans:** 0 plans
 
@@ -4826,6 +4940,7 @@ kept verbatim.
 | 164.6.4 MT5KEEPALIVE | 5/5 | Complete | #800 |
 | 164.6.5 MT5VALIDATEWEDGE | 8/8 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed | v0.96.0.0 · #863 |
 | 164.6.6 MT5TERMINALISOLATION | 0/? | Queued — data-integrity tier: moved up 2026-09-27 (founder), planning beside 166.4; live MT5 verification joins the founder queue | - |
+| 164.6.6.1 MT5SCRUB | 0/4 (moved, not re-planned) | Waiting — split from 164.6.6 on 2026-09-27 (founder); re-planned only after the founder's live scrub spike | - |
 | 164.6.7 COMPOSITECLAIMSNAPSHOT | 3/3 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed | v0.105.0.0 · #869 |
 | 164.6.8 OUTAGEALERT | 0/? | Queued — MT5 build, verify later (founder 2026-09-27) | - |
 | 164.7 APPSETTINGS (every `app.*` GUC reader moves off ALTER DATABASE/ROLE — both 42501 on PROD) | 7/7 | Complete — finalized v0.77.32.1; its 33 stranded artifacts restored to main by PR #785. Row said `0/? Queued 2nd` until 2026-09-12 | v0.77.32.1 |

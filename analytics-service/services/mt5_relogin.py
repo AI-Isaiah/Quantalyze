@@ -60,6 +60,8 @@ import os
 import time
 from typing import Callable, Final
 
+import sentry_sdk
+
 from services.closed_sets import mt5_enabled_server
 from services.mt5_client import MT5_REQUEST_TIMEOUT_S as _MT5_REQUEST_TIMEOUT_S
 from services.mt5_client import (
@@ -67,10 +69,12 @@ from services.mt5_client import (
     Mt5ClientError,
     Mt5SessionAbandoned,
     _redact_credential_values,
+    is_private_gateway_host,
     mt5_terminal_answer_count,
     mt5_terminal_key,
 )
 from services.mt5_concurrency import Mt5TerminalBusyError, mt5_terminal_lease
+from services.mt5_handover import HOLDER_HOUSE, SITE_HEAL
 from services.mt5_session_episodes import (
     KIND_ALREADY_AUTHORIZED,
     KIND_BUDGET_ABANDONED,
@@ -181,6 +185,17 @@ _MT5_CREDENTIAL_ENV_NAMES: Final[tuple[str, str, str]] = (
 _MT5_GATEWAY_ENV_NAMES: Final[tuple[str, str]] = (
     "MT5_GATEWAY_HOST",
     "MT5_GATEWAY_PORT",
+)
+
+# ⭐ Phase 164.6.6 D-02 — the VALIDATION terminal's endpoint, a second pair beside
+# the job pair above and read by exactly two sites: the wizard's
+# `routers.exchange._validate_mt5_key_probe` and the worker's
+# `services.ingestion.mt5.Mt5Adapter.validate`. ⛔ Never a fallback to the job pair
+# (D-05): a validation that lands on the job terminal is the eviction this phase
+# exists to remove. NAMES ONLY ever reach a log line (T-164.6.2-12).
+_MT5_VALIDATION_GATEWAY_ENV_NAMES: Final[tuple[str, str]] = (
+    "MT5_VALIDATION_GATEWAY_HOST",
+    "MT5_VALIDATION_GATEWAY_PORT",
 )
 
 # The kill switch's variable NAME, so the disabled-return log line can name it
@@ -834,7 +849,138 @@ def read_env_gateway_endpoint() -> tuple[str, int] | None:
             _MT5_GATEWAY_ENV_NAMES[1],
         )
         return None
+    if not is_private_gateway_host(raw_host):
+        # Phase 164.6.6 D-07 part 1 (T-134-03): the rpyc bridge is dialled only
+        # over a private network. `_default_connect` refuses such a host too;
+        # refusing HERE keeps it a named, logged misconfiguration on the session
+        # path instead of a construction error. NAME only, never the value.
+        _log_configuration_fault_once(
+            "mt5_gateway_host_not_private",
+            "mt5 session path: skipped — %s is not a private-network host "
+            "(T-134-03). This is a SERVER misconfiguration, never a credential "
+            "failure.",
+            _MT5_GATEWAY_ENV_NAMES[0],
+        )
+        return None
     return raw_host, port
+
+
+def read_env_validation_gateway_endpoint() -> tuple[str, int] | None:
+    """The ``(host, port)`` of the VALIDATION terminal's gateway, or ``None``.
+
+    Phase 164.6.6 D-02: a key validation leases the validation terminal's
+    ``terminal_key``, never the job terminal's, so an onboarding login can no
+    longer switch the terminal that serves live jobs. A sibling of
+    ``read_env_gateway_endpoint`` with the same per-call read, strip, int-parse,
+    log-once and never-raise posture, over ``MT5_VALIDATION_GATEWAY_HOST`` /
+    ``MT5_VALIDATION_GATEWAY_PORT``.
+
+    ⛔ D-05 — ``None`` means REFUSE. Both callers fail loud and fire
+    ``alert_mt5_validation_gateway_unconfigured``; neither may read the job pair
+    instead. The routing pin in ``tests/test_mt5_concurrency.py`` reds if any
+    other production function calls this reader.
+
+    The log-once reasons are this reader's OWN keys, so an unset job pair can
+    never silence the validation pair's line or the reverse.
+    """
+    raw_host = (os.getenv("MT5_VALIDATION_GATEWAY_HOST") or "").strip()
+    raw_port = (os.getenv("MT5_VALIDATION_GATEWAY_PORT") or "").strip()
+    missing = [
+        name
+        for name, value in zip(
+            _MT5_VALIDATION_GATEWAY_ENV_NAMES, (raw_host, raw_port)
+        )
+        if not value
+    ]
+    if missing:
+        _log_configuration_fault_once(
+            "mt5_validation_gateway_absent",
+            "mt5 validation path: refused — the validation gateway endpoint is not "
+            "configured: %s. This is a SERVER misconfiguration, never a credential "
+            "failure, and the job terminal is never used instead (D-05).",
+            ", ".join(missing),
+        )
+        return None
+    try:
+        port = int(raw_port)
+    except ValueError:
+        _log_configuration_fault_once(
+            "mt5_validation_gateway_port_not_numeric",
+            "mt5 validation path: refused — %s is set but is not an integer port. "
+            "This is a SERVER misconfiguration, never a credential failure.",
+            _MT5_VALIDATION_GATEWAY_ENV_NAMES[1],
+        )
+        return None
+    if not is_private_gateway_host(raw_host):
+        # Phase 164.6.6 D-07 part 1 (T-134-03): refused HERE, as None, so both
+        # callers take their D-05 misconfiguration path (500 + alert / the
+        # RuntimeError + alert). Left to `_default_connect`, the refusal would
+        # surface inside the wizard's broad connect arm as a 503 that votes on
+        # `breaker:mt5-gateway`. NAME only, never the value.
+        _log_configuration_fault_once(
+            "mt5_validation_gateway_host_not_private",
+            "mt5 validation path: refused — %s is not a private-network host "
+            "(T-134-03). This is a SERVER misconfiguration, never a credential "
+            "failure, and the job terminal is never used instead (D-05).",
+            _MT5_VALIDATION_GATEWAY_ENV_NAMES[0],
+        )
+        return None
+    return raw_host, port
+
+
+# Phase 164.6.6 D-05 — the alert window, the prober-cadence window
+# (`routers.cron._escalate_prober_cadence_gap`): at most one Sentry capture per
+# site per hour, an ERROR line on every refusal.
+_MT5_VALIDATION_ALERT_WINDOW_S: Final[float] = 3600.0
+# Keyed PER SITE (the `routers.cron._last_prober_cadence_alert_at` WR-02 shape),
+# so the worker's alert can never silence the wizard's inside one window.
+_last_mt5_validation_alert_at: dict[str, float] = {}
+
+
+def _reset_mt5_validation_alert() -> None:
+    """Test-only: clear the per-site alert window. ⛔ Production never calls it."""
+    _last_mt5_validation_alert_at.clear()
+
+
+def alert_mt5_validation_gateway_unconfigured(*, site: str) -> None:
+    """D-05's ALERT: a validation was refused because the validation endpoint is
+    unset or malformed. Called by both validate sites BEFORE they raise.
+
+    Cloned from ``routers.internal._alert_kek_unavailable``: an ERROR line on
+    EVERY call (the rate is itself the operator's evidence), then at most one
+    ``sentry_sdk.set_tag`` + ``sentry_sdk.capture_message(level="error")`` per
+    ``_MT5_VALIDATION_ALERT_WINDOW_S`` PER SITE, the capture wrapped so a Sentry
+    failure can never mask or alter the refusal it reports. It NEVER raises.
+
+    ⛔ Names the two env var NAMES and the site only — never a host, port,
+    terminal key or credential (T-164.6.6-20).
+
+    ⚠️ CAVEAT THAT MUST STAY ATTACHED (carried from ``routers.cron``): delivery
+    to a human depends on ``SENTRY_DSN`` staying set on the analytics service,
+    whose presence was founder-confirmed on 2026-09-18 (never its value); if it
+    is ever unset this alert silently degrades to the ERROR log line alone.
+    """
+    names = " / ".join(_MT5_VALIDATION_GATEWAY_ENV_NAMES)
+    logger.error(
+        "mt5 validation refused at site=%s: %s is unset or malformed. The job "
+        "terminal is never used instead (D-05); this needs an operator.",
+        site,
+        names,
+    )
+    now = time.monotonic()
+    last_at = _last_mt5_validation_alert_at.get(site)
+    if last_at is not None and (now - last_at) < _MT5_VALIDATION_ALERT_WINDOW_S:
+        return
+    _last_mt5_validation_alert_at[site] = now
+    try:
+        sentry_sdk.set_tag("mt5_validation_gateway_unconfigured", site)
+        sentry_sdk.capture_message(
+            f"MT5 validation gateway unconfigured at site={site}: {names} is unset "
+            "or malformed; every key validation on this path is refused (D-05)",
+            level="error",
+        )
+    except Exception:
+        pass  # never mask the refusal via a Sentry failure
 
 
 def _not_healed(
@@ -2044,8 +2190,14 @@ async def heal_mt5_terminal_session(
         # requires the outer guard to carry exactly ONE handler, and narrowing or
         # multiplying it is the escape route that reaches `_crash_handler`.
         try:
+            # ⭐ Phase 164.6.6 criterion 1 — held for the HOUSE account, so a
+            # heal that re-logs it records a handover from whoever held the
+            # terminal before; a tick that only reads records nothing.
             async with mt5_terminal_lease(
-                mt5_terminal_key(host, port), wait_s=_relogin_lease_wait_s()
+                mt5_terminal_key(host, port),
+                wait_s=_relogin_lease_wait_s(),
+                holder=HOLDER_HOUSE,
+                site=SITE_HEAL,
             ):
                 outcome = await asyncio.wait_for(
                     asyncio.to_thread(

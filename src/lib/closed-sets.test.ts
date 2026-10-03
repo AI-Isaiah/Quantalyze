@@ -24,6 +24,7 @@ import {
   venueSupportsScopeProbe,
   venueIsSubstitutable,
   venueIsSerialized,
+  venueSecretIsVerbatim,
   annualizationPeriods,
   blendPeriodsPerYear,
   calendarYears,
@@ -421,6 +422,43 @@ describe("closed-sets registry", () => {
       expect(venueSupportsScopeProbe("sfox")).toBe(true);
       expect(venueIsSubstitutable("sfox")).toBe(true);
       expect(venueIsSerialized("sfox")).toBe(false);
+      // D-08 (Phase 164.6.6): sFOX's secret slot is a bearer token, so its key
+      // stays ABSENT and the DOGFOOD trim keeps applying to it.
+      expect(
+        "secretVerbatim" in VENUE_CAPABILITIES.sfox,
+        "sFOX carries a whitespace-free token, not a user-chosen password; its " +
+          "secret must keep the DOGFOOD trim by inheriting the default",
+      ).toBe(false);
+      expect(venueSecretIsVerbatim("sfox")).toBe(false);
+    });
+
+    it("EXACTLY ONE venue keeps its secret verbatim (untrimmed), and it is mt5 (D-08)", () => {
+      // Read the RECORD, not the predicate, so a predicate bug cannot hide a
+      // second opted-out row.
+      const verbatim = Object.entries(
+        VENUE_CAPABILITIES as Record<string, { secretVerbatim?: boolean }>,
+      )
+        .filter(([, caps]) => caps.secretVerbatim === true)
+        .map(([venue]) => venue);
+      expect(
+        verbatim,
+        "Dropping the trim is safe only for a slot that carries a user-chosen " +
+          "password (the MT5 investor password). A second opt-out must be a " +
+          "reviewed edit to this test, never a silent widening of the DOGFOOD " +
+          "exemption to a ccxt key, where a pasted space makes a correct key fail auth.",
+      ).toEqual(["mt5"]);
+    });
+
+    it("an UNRESOLVED venue keeps its secret TRIMMED (D-08)", () => {
+      const reason =
+        "never drop a trim we cannot justify for a venue we could not resolve; " +
+        "for a resolved non-MT5 venue the trim is the DOGFOOD fix";
+      expect(venueSecretIsVerbatim(null), reason).toBe(false);
+      expect(venueSecretIsVerbatim(undefined), reason).toBe(false);
+      expect(venueSecretIsVerbatim(""), reason).toBe(false);
+      expect(venueSecretIsVerbatim("kraken"), reason).toBe(false);
+      expect(venueSecretIsVerbatim("deribit"), reason).toBe(false);
+      expect(venueSecretIsVerbatim("mt5")).toBe(true);
     });
 
     it("EXACTLY ONE venue opts out of the scope probe, and it is mt5", () => {
@@ -506,6 +544,7 @@ describe("closed-sets registry", () => {
       expect(venueIsSubstitutable("Mt5")).toBe(false);
       expect(venueSupportsScopeProbe("MT5")).toBe(false);
       expect(venueIsSerialized("MT5")).toBe(true);
+      expect(venueSecretIsVerbatim("MT5")).toBe(true);
     });
   });
 
