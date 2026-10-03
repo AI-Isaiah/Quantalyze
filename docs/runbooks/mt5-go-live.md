@@ -172,8 +172,10 @@ item, not a knob. Two gateways would need two accounts and a routing rule as wel
        'ls /config/.wine/drive_c/windows/syswow64 | wc -l'"
      ```
      A non-zero count means the prefix is whole, so go on. Only on `0`, rebuild the prefix
-     with the mscoree and mshtml DLL overrides disabled, then restart the service so the
-     image's start script installs the terminal on the rebuilt prefix:
+     with the mscoree and mshtml DLL overrides disabled. At the 2026-10-03 stand-up, the
+     image's start script then installed the terminal headlessly on the rebuilt prefix. If
+     it does not start on its own, a service restart re-runs that script; that restart is a
+     suggestion, not part of the recorded fix:
      ```bash
      railway ssh --service <gateway> "s6-setuidgid abc bash -lc \
        'export WINEPREFIX=/config/.wine WINEDEBUG=-all WINEDLLOVERRIDES=\"mscoree,mshtml=\"; wineboot -u'"
@@ -185,8 +187,9 @@ item, not a knob. Two gateways would need two accounts and a routing rule as wel
    - **Add the broker's server BEFORE the first login.** A fresh terminal points its Login
      dialog at the MetaQuotes demo server and answers "Invalid account" for a real
      account until the broker's server is added. So the first action, before adding any
-     account: *File → Open an Account*, search for the broker, select its server, and
-     cancel out of the demo-account offer. Then add the account as above.
+     account: *File → Open an Account*, then search for the broker. Then add the account as
+     above. That path is what was recorded at the 2026-10-03 stand-up. The dialog's later
+     screens were not recorded, so this runbook does not describe them.
 3. Verify the VNC-displayed **server clock** against UTC to confirm the
    broker-server-time offset — this closes the Phase-134 leg-4 `[ASSUMED]` estimate and
    feeds `MT5_SOAK_SERVER_OFFSET_MIN` (139-01) / the 136 UTC-normalization seam.
@@ -677,9 +680,10 @@ window, so the first refusal after each redeploy is captured.
 After deploy:
 1. On BOTH gateway services, Settings → Networking still shows no public domain and no TCP
    proxy. This is N-01 re-read.
-2. The analytics logs since deploy contain no "not a private-network host" line. That line is
-   what `services/mt5_relogin.py`'s two endpoint readers log when
-   `services/mt5_client.py::is_private_gateway_host` refuses a configured host.
+2. The analytics logs since deploy contain no "not a private-network host" line. The phrase
+   appears in all three refusals that `services/mt5_client.py::is_private_gateway_host`
+   drives: the two endpoint readers in `services/mt5_relogin.py`, and the transport factory's
+   `Mt5GatewayHostNotPrivate` ("MT5 gateway refused: …"). One search covers all three.
 3. At least one MT5 job read has succeeded since deploy: a Reading A row with a job-terminal
    `site`, or a sync that completed. That proves the check did not refuse the real hosts.
 
