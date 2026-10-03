@@ -2321,6 +2321,13 @@ jobs:
     # shared resource, so it keeps the aggregator's STRICT default arm with no
     # tolerance of its own, and a `skipped` under a CODE classification is still
     # always a real fault.
+    # ⚠️ CORRECTED 2026-10-03, Phase 164.9.6 D-09. The job still has exactly ONE
+    # job-level `if:` (the docs-only one above), and its strict aggregator row is
+    # unchanged: it reports `success` or `failure`, never `skipped`. What changed is
+    # one level down. Its STEPS now carry one uniform step-level condition,
+    # `steps.scope.outputs.skip_lane != 'true'`, which skips only the lane and only
+    # on a verified `none` on a push to main (see the scope step below). "No `if:`"
+    # above is therefore true of the JOB and no longer true of its steps.
     needs: [changed-paths]
     if: needs.changed-paths.outputs.docs_only != 'true'
     runs-on: ubuntu-latest
@@ -2337,7 +2344,64 @@ jobs:
           # is measured against.
           node-version: 22
 
+      # ── D-09 SCOPE STEP (2026-10-03, Phase 164.9.6) ──────────────────────────
+      # FOUNDER OVERRIDE, push-to-main only. When `changed-paths` derives
+      # `sql_gate_mode=none` on a push to refs/heads/main (a single-PR range that
+      # changed no gate file, no migration and no mutation machinery), the lane
+      # is not booted: this step prints `scope: NONE` and its reason and the job
+      # ends green. FULL coverage of that tree is the nightly run's. Pull
+      # requests keep the vacuity fence unchanged: a `none` on any other event or
+      # ref is refused here with a warning, the lane boots, and the mutate step's
+      # own guard runs the full corpus with a refusal-prefixed reason.
+      # ⛔ FAIL-SAFE DIRECTION. Every later step carries
+      # `if: steps.scope.outputs.skip_lane != 'true'`, never `== 'false'`: an
+      # absent, empty or garbled output therefore BOOTS the lane. Only the one
+      # literal value `true`, written on the one verified path, skips it.
+      # ⛔ WHY STEP-LEVEL AND NOT A JOB-LEVEL `if:`. A skipped JOB reads as
+      # `skipped` to the strict `frontend` aggregator row this job takes, and a
+      # skipped job prints nothing, while D-12 requires every run to say what it
+      # covered and why. A step-level skip keeps the job `success` and keeps the
+      # two printed lines in its log.
+      # A `none` that cannot say why (blank reason) or that names files is not
+      # the D-09 verdict, and is a MEASURE_FAIL rather than a skip.
+      - name: Scope - print what this run covers and why; a push to main that changed no mutation input skips the lane (D-09)
+        id: scope
+        env:
+          SQL_GATE_MODE: ${{ needs.changed-paths.outputs.sql_gate_mode }}
+          SQL_GATE_REASON: ${{ needs.changed-paths.outputs.sql_gate_reason }}
+          SQL_GATE_FILES: ${{ needs.changed-paths.outputs.sql_gate_files }}
+        run: |
+          set -euo pipefail
+          mode="${SQL_GATE_MODE:-}"
+          event="${GITHUB_EVENT_NAME:-}"
+          ref="${GITHUB_REF:-}"
+          reason="${SQL_GATE_REASON:-}"
+          reason_stripped="$(printf '%s' "$reason" | tr -d '[:space:]')"
+          files_stripped="$(printf '%s' "${SQL_GATE_FILES:-}" | tr -d '[:space:]')"
+          if [ "$mode" = "none" ]; then
+            if [ "$event" = "push" ] && [ "$ref" = "refs/heads/main" ]; then
+              if [ -z "$reason_stripped" ]; then
+                echo "::error::MEASURE_FAIL: changed-paths said sql_gate_mode=none on a push to main with a BLANK sql_gate_reason. A verdict that cannot say why is not the D-09 verdict, so the lane is neither skipped nor booted on it."
+                echo "skip_lane=false" >> "$GITHUB_OUTPUT"
+                exit 1
+              fi
+              if [ -n "$files_stripped" ]; then
+                echo "::error::MEASURE_FAIL: changed-paths said sql_gate_mode=none on a push to main but sql_gate_files is NOT empty (${SQL_GATE_FILES:-}). A none verdict that names gate files is self-contradictory, so the lane is neither skipped nor booted on it."
+                echo "skip_lane=false" >> "$GITHUB_OUTPUT"
+                exit 1
+              fi
+              echo "scope: NONE 0 gate files — no mutation input changed"
+              echo "scope-reason: ${reason}"
+              echo "skip_lane=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "::warning::changed-paths said sql_gate_mode=none on a '${event}' event (${ref}). D-09 honours it only on a push to refs/heads/main, so the lane boots and the full corpus runs."
+          fi
+          echo "scope verdict from changed-paths: sql_gate_mode=${mode}; the lane boots."
+          echo "skip_lane=false" >> "$GITHUB_OUTPUT"
+
       - name: Provision pg_cron for the lane's PostgreSQL (Phase 164.4.1)
+        if: steps.scope.outputs.skip_lane != 'true'
         # ⚠️ THIS STEP'S FIRST RUN IS THE MEASUREMENT. 164.4.1-RESEARCH assumption
         # A1 ("`apt-get install postgresql-16-cron` succeeds on ubuntu-latest and
         # yields a PG16-loadable .so") was INSPECTED, never executed — there was
@@ -2443,6 +2507,7 @@ jobs:
           ls -l "$("$pgbin/pg_config" --sharedir)/extension/pg_cron.control"
 
       - name: Probe - dblink contrib is present for the lane's PostgreSQL (Phase 164.5.2)
+        if: steps.scope.outputs.skip_lane != 'true'
         # ⚠️ THIS STEP'S FIRST PR RUN IS THE MEASUREMENT. 164.5.2-RESEARCH
         # assumption A1 ("ubuntu's PostgreSQL server package carries contrib,
         # so dblink is loadable on this runner") was INSPECTED, never executed:
@@ -2488,6 +2553,7 @@ jobs:
           fi
 
       - name: Probe - the runner image's PostgreSQL server binaries resolve
+        if: steps.scope.outputs.skip_lane != 'true'
         # 164.3-RESEARCH assumption A1 ("ubuntu-latest ships PostgreSQL server
         # binaries under /usr/lib/postgresql/<major>/bin") has NEVER been
         # executed — the lane and the runner were built and measured on macOS
@@ -2531,9 +2597,11 @@ jobs:
       # before the long mutation run so a broken drill reds in seconds rather
       # than after ten minutes of arms.
       - name: Dead-holder drill - kill a real holder and require the verdict to bite
+        if: steps.scope.outputs.skip_lane != 'true'
         run: bash scripts/pg-lane/mutex-dead-holder-lane.sh
 
       - name: Preflight - reject psql meta-commands in every file the runner executes
+        if: steps.scope.outputs.skip_lane != 'true'
         # SAME REFUSAL AS `sql-tests`' Finding 6 preflight, WIDENED TO THE FILE
         # SET THIS JOB ACTUALLY EXECUTES. That job scans only
         # `supabase/tests/test_*.sql`; this one applies fixtures and MIGRATIONS
@@ -2616,6 +2684,7 @@ jobs:
           echo "Preflight clean: ${#files[@]} file(s) free of refused meta-commands."
 
       - name: Runner self-test - every defect kind still fires
+        if: steps.scope.outputs.skip_lane != 'true'
         # ⛔ SP-C02. This step was MISSING, and its absence was the largest hole
         # in this job. Verified by repo-wide grep at the time: `run.mjs
         # --self-test` was invoked by NOTHING, while the two sibling jobs both
@@ -2651,6 +2720,7 @@ jobs:
         run: node scripts/mutation-runner/run.mjs --self-test
 
       - name: Mutate every annotated RED-UNDER arm and require it to bite
+        if: steps.scope.outputs.skip_lane != 'true'
         # ⛔ MODE IDENTITY (164.3-RESEARCH Pitfall 2,
         # `reference_gstack_evidence_wrapper_reddens_suite`). The command below
         # is byte-identical to the one in the script's own header and to what a
@@ -2743,6 +2813,7 @@ jobs:
           exit $status
 
       - name: Assert the run PRINTED its coverage and cleared both floors
+        if: steps.scope.outputs.skip_lane != 'true'
         # D-01's print, made LOAD-BEARING. The runner prints coverage and arm
         # counts on every run; without this step a build of the runner that
         # silently stopped printing them would pass unnoticed, and the coverage
