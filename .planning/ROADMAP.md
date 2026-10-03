@@ -100,7 +100,7 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 164.5.1.3: SYNCADMIT — admit the owner-only status to the trade-sync constant, or prove it must not be: 5 of 5 private keys are never synced and their trades are never stored** (INSERTED)
 - [x] **Phase 164.5.1.4: SYNCCURSOR — the sync cursor is per-KEY while stores are per-STRATEGY, so a partial fan-out permanently strands the failed strategies trade window** (INSERTED)
 - [x] **Phase 164.5.2: BRIDGELOCK — the per-strategy advisory lock 161.1-D1 asked for, in its own phase as DEC-4 required** (INSERTED)
-- [ ] **Phase 164.5.2.1: BRIDGERESIDUE — the two 164.6.7 bridge residues in sync_strategy_analytics_status** (INSERTED) — planned (5 plans, 5 waves), not yet executed
+- [x] **Phase 164.5.2.1: BRIDGERESIDUE — the two 164.6.7 bridge residues in sync_strategy_analytics_status** (INSERTED) — 5 plans, shipped PR #937 v0.121.0.0 (completed 2026-10-03)
 - [ ] **Phase 164.5.3: MT5CREDS — show the MT5 account number on the key card and add a credential-update path** (INSERTED) — verification: human_needed
 - [x] **Phase 164.5.4: MT5RECON-GAP — the MT5 backfill path and the login-error classifier both fail silently** (INSERTED)
 - [x] **Phase 164.6: GATE-HYGIENE — every gate-hygiene item that left 164.1: the OPS-08 residue, the composite-stamp twin, the reviewer execution-status rule, the RED-UNDER convention's discoverability and the audit allowlist** (INSERTED)
@@ -129,7 +129,7 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 164.9.3.2.1: ENQ40001 — the enqueue race-loss raise (SQLSTATE 40001 in `_enqueue_compute_job_internal`) answers a PostgREST caller instead of re-running the call** (INSERTED) — verification: passed (completed 2026-10-02, PR #929, v0.118.1.5)
 - [x] **Phase 164.9.4: CIOFFMUTEX — `python` and `e2e-seeded` no longer queue on the shared-TEST advisory lock; each runs against a database private to its runner** (INSERTED) — verification: passed (completed 2026-10-03, PR #880, v0.119.0.0)
 - [x] **Phase 164.9.5: AUTOREDUMP — after a migration applies to PROD, the committed baseline is re-dumped and proposed automatically** (INSERTED) — verification: passed (completed 2026-10-02, PR #875, v0.106.0.0; first bot re-dump PR #920)
-- [ ] **Phase 164.9.6: SUBSETMAIN — a push to main runs only its PR's changed SQL gates; a nightly job runs the full corpus and enforces the floors** (INSERTED 2026-10-03) — planned 2026-10-03, 5 plans in 4 waves
+- [x] **Phase 164.9.6: SUBSETMAIN — a push to main runs only its PR's changed SQL gates; a nightly job runs the full corpus and enforces the floors** (INSERTED 2026-10-03) — planned 2026-10-03, 5 plans in 4 waves (completed 2026-10-03)
 - [ ] **Phase 164.9.7: TRUNCATEREVOKE — anon and authenticated no longer hold TRUNCATE on public tables** (INSERTED 2026-10-03) — not yet planned
 - [x] **Phase 165: DEPS — The 9-PR dependabot campaign** - pandas `requirements.in` prerequisite commit FIRST, then one PR at a time in the research-verified order, full suite between each; #614 and #606 CLOSED with reasons — ⛔ RETIRED 2026-09-27 by founder decision ("Land as maintenance, retire the phases"): closed WITHOUT delivery as a phase; the dependabot PRs land one at a time as maintenance under the green rule.
 - [x] **Phase 165.1: PIPDEPS — the pip dependabot work lands with production pandas never downgraded** (INSERTED) — ⛔ RETIRED 2026-09-27 by founder decision ("Land as maintenance, retire the phases"): closed WITHOUT delivery as a phase; the dependabot PRs land one at a time as maintenance under the green rule.
@@ -2262,29 +2262,29 @@ Plans:
 
 **Requirements**: TODOS entries `[164.6.7-COMPOSITE-REREAD-RESIDUE]`, `[164.6.7-RETRY-PLAIN-COMPLETE]` (both booked on `feat/164.6.7`; they reach `main` when Phase 164.6.7 lands)
 **Depends on:** Phase 164.5.2 (migration ordering and the shared gate census), Phase 164.6.7 (its TODOS entries and its Python ends of both residues)
-**Plans:** 5 plans
+**Plans:** 5/5 plans complete
 
 Plans:
 
 **Wave 1**
 
-- [ ] 164.5.2.1-01-PLAN.md — COMPOSITE-REREAD: the migration re-based on the latest bridge, the D-04b membership clear in branches (b) and (a), residue gate arms W1..W7 RED-first
+- [x] 164.5.2.1-01-PLAN.md — COMPOSITE-REREAD: the migration re-based on the latest bridge, the D-04b membership clear in branches (b) and (a), residue gate arms W1..W7 RED-first
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 164.5.2.1-02-PLAN.md — RETRY-PLAIN-COMPLETE: read-1 fold, `v_refresh_keep`, keep arms, arms R1..R6 + INVARIANT, sentinel and sql-tests roster
+- [x] 164.5.2.1-02-PLAN.md — RETRY-PLAIN-COMPLETE: read-1 fold, `v_refresh_keep`, keep arms, arms R1..R6 + INVARIANT, sentinel and sql-tests roster
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
-- [ ] 164.5.2.1-03-PLAN.md — the in-bridge per-strategy lock (D-06 TAKE), D-07 comment correction, new LANE-ONLY dblink gate B1/B2
+- [x] 164.5.2.1-03-PLAN.md — the in-bridge per-strategy lock (D-06 TAKE), D-07 comment correction, new LANE-ONLY dblink gate B1/B2
 
 **Wave 4** *(blocked on Wave 3 completion)*
 
-- [ ] 164.5.2.1-04-PLAN.md — curated/protected twins re-pointed, snapshot + VAC-04 ack, local-stack D-11 set, kind-scope drift test by scan
+- [x] 164.5.2.1-04-PLAN.md — curated/protected twins re-pointed, snapshot + VAC-04 ack, local-stack D-11 set, kind-scope drift test by scan
 
 **Wave 5** *(blocked on Wave 4 completion)*
 
-- [ ] 164.5.2.1-05-PLAN.md — census on the merged tree, TODOS + runbook item 7 closeout (D-18 PRE corner accepted and surfaced), release commit
+- [x] 164.5.2.1-05-PLAN.md — census on the merged tree, TODOS + runbook item 7 closeout (D-18 PRE corner accepted and surfaced), release commit
 
 **⭐ ROUTED IN 2026-09-26 (founder; found by the 164.5.2 round-1 review IN-01 and the migration reviewer):** the deployed comment in `sync_strategy_analytics_status` (latest definition `20260906120000`, also in the baseline) still says neither mark RPC takes a per-strategy lock. Since 164.5.2 that is false for mark against mark. Correct it when this phase re-bases the function.
 
@@ -3147,7 +3147,7 @@ Plans:
 **Goal:** A push to `main` mutates only the SQL gate files its PR changed, plus the gates whose `RED-UNDER-SETUP` loads a changed migration. A push that changes no mutation input does not mutate at all. A new nightly workflow runs the full corpus under its own 45-minute cap and is where the floors are enforced. Every run prints what it covered and why. The push job's 20-minute `timeout-minutes` stays a ceiling and is never raised.
 **Requirements**: SUBSETMAIN-01, SUBSETMAIN-02, SUBSETMAIN-03, SUBSETMAIN-04, SUBSETMAIN-05, SUBSETMAIN-06
 **Depends on:** Phase 164.9
-**Plans:** 5 plans (planned 2026-10-03; 4 waves: W1 01 ‖ 02 · W2 03 · W3 04 · W4 05)
+**Plans:** 5/5 plans complete (planned 2026-10-03; 4 waves: W1 01 ‖ 02 · W2 03 · W3 04 · W4 05)
 
 *The requirement IDs are phase-local, derived from CONTEXT D-01 … D-12. No REQUIREMENTS.md IDs are assigned to this phase. Each ID is defined by the Success Criterion of the same number below.*
 
@@ -3164,11 +3164,21 @@ Plans:
 6. **SUBSETMAIN-06 (D-05, D-06, D-11).** `.github/workflows/sql-mutation-nightly.yml` runs the full corpus on a schedule and on dispatch, with job `timeout-minutes: 45`, and prints its wall time. A red run fails the workflow AND opens a GitHub issue deduplicated by label, or comments on the open one, carrying the failing reading and the Railway-redeploy coupling D-11 accepts. Its steps are pinned byte-equal to `ci.yml`'s `sql-mutation` `run:` blocks. It holds no shared-TEST key.
 
 Plans:
-- [ ] 164.9.6-01-PLAN.md — push-range derivation: a shared push-range lister, and the push arm of `sql-gate-subset.mjs` (none / SUBSET / FULL with reason, migration loaders, `ci.yml` section compare)
-- [ ] 164.9.6-02-PLAN.md — move the three floor constants, verbatim with their lineage, to `scripts/mutation-floors.mjs` and re-point every reader (D-10)
-- [ ] 164.9.6-03-PLAN.md — CI wiring: push-on-main SUBSET through `changed-paths` → mutate → assert, plus the mandatory `scope-reason:` line (D-04, D-12)
-- [ ] 164.9.6-04-PLAN.md — the D-09 scope step: `no mutation input changed` skips the lane on push-to-main only, fail-safe to booting it
-- [ ] 164.9.6-05-PLAN.md — `sql-mutation-nightly.yml` (45 min, wall time, red + deduped issue), its byte-equality parity pin, and CLAUDE.md
+- [x] 164.9.6-01-PLAN.md — push-range derivation: a shared push-range lister, and the push arm of `sql-gate-subset.mjs` (none / SUBSET / FULL with reason, migration loaders, `ci.yml` section compare)
+- [x] 164.9.6-02-PLAN.md — move the three floor constants, verbatim with their lineage, to `scripts/mutation-floors.mjs` and re-point every reader (D-10)
+- [x] 164.9.6-03-PLAN.md — CI wiring: push-on-main SUBSET through `changed-paths` → mutate → assert, plus the mandatory `scope-reason:` line (D-04, D-12)
+- [x] 164.9.6-04-PLAN.md — the D-09 scope step: `no mutation input changed` skips the lane on push-to-main only, fail-safe to booting it
+- [x] 164.9.6-05-PLAN.md — `sql-mutation-nightly.yml` (45 min, wall time, red + deduped issue), its byte-equality parity pin, and CLAUDE.md
+
+### Phase 164.9.6.1: SUBSETSHARD — a FULL sql-mutation run fits well under its 20-minute cap again, and a stale-baseline-drift red no longer forces one. Founder decision 2026-10-03 (AskUserQuestion "Book it, run after 164.6.6"): queued to run AFTER 164.6.6. Measured: full runs took 18m40s on the #937 PR, 16m on the #939 PR, and timed out at 20m on the main push after #939 merge 9c1dc3137 (job cancelled; 574 arms, up from 556 at 13m). Cascade: every migration merge leaves main red with the tolerated baseline-content-drift until the bot re-dump lands; the 164.9.6 green-predecessor rule (D-13/WR-03) then forces FULL on the next push, which can time out, keeping main red and making Railway skip analytics deploys. Scope: (1) split the full corpus into parallel shards (PRs, main FULL pushes, nightly) so a full run takes about 10 min, with one floor/ratchet verdict over the merged shard results; (2) predecessorVerdict treats a red whose ONLY failing checks are the founder-tolerated stale-baseline class (sql-gate-lint baseline-content-drift and the frontend aggregator it reds) as green, fail-loud on anything else. The 20-minute cap is NOT raised. (INSERTED)
+
+**Goal:** [Urgent work - to be planned]
+**Requirements**: TBD
+**Depends on:** Phase 164.9.6
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 164.9.6.1 to break down)
 
 ### Phase 164.9.1: JOBRPCTRUTH — the compute-job RPC surface does what its own comments say (INSERTED)
 
@@ -4789,7 +4799,7 @@ kept verbatim.
 | 164.5.1.3 SYNCADMIT | 1/1 | Complete | v0.82.0.0 · #830 |
 | 164.5.1.4 SYNCCURSOR | 4/4 | Complete | v0.81.0.0 · #829 |
 | 164.5.2 BRIDGELOCK (the per-strategy advisory lock 161.1-D1 asked for) | 3/3 | Complete | v0.104.0.0 · #873 |
-| 164.5.2.1 BRIDGERESIDUE | 0/? | Queued — blocker, after 164.9.3.1 (ratified order 2026-09-27) | - |
+| 164.5.2.1 BRIDGERESIDUE | 5/5 | Complete    | 2026-10-03 |
 | 164.5.3 MT5CREDS | 5/5 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed | v0.82.1.0 · #831/#832 |
 | 164.5.4 MT5RECON-GAP | 6/6 | Complete | #835 |
 | 164.6 GATE-HYGIENE | 5/5 | Complete | v0.90.0.0 · #854 |
@@ -4818,7 +4828,7 @@ kept verbatim.
 | 164.9.3.2.1 ENQ40001 | 3/3 | Complete    | 2026-10-02 |
 | 164.9.4 CIOFFMUTEX | 12/12 | Complete    | 2026-10-03 |
 | 164.9.5 AUTOREDUMP | 9/9 | Complete — verification passed 2026-10-02 | v0.106.0.0 · #875 |
-| 164.9.6 SUBSETMAIN | 0/5 | Planned 2026-10-03 — infra, ahead of 164.6.6 and 164.5.2.1's PR | - |
+| 164.9.6 SUBSETMAIN | 5/5 | Complete    | 2026-10-03 |
 | 164.9.7 TRUNCATEREVOKE | 0/? | Queued — security, booked 2026-10-03 | - |
 | 164.10 BODYDRIFT | - | Closed by decision (c): the drift is real, measured and deliberately left | v0.79.1.1 · #824 |
 | 165. DEPS dependabot campaign | - | ⛔ RETIRED 2026-09-27 (founder) — not delivered as a phase; dependabot PRs land as maintenance | - |
