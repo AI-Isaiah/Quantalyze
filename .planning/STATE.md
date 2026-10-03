@@ -6,16 +6,16 @@ current_phase: 164.5.2.1
 current_phase_name: BRIDGERESIDUE
 status: executing
 stopped_at: "Phase 164.9.4 landed (PR #880, v0.119.0.0); 164.5.2.1 executing (plan 3 of 5); close-out of 160, 164.3, 168"
-last_updated: "2026-10-03T06:00:00.000Z"
+last_updated: "2026-10-03T07:54:23.348Z"
 last_activity: 2026-10-03
 last_activity_desc: 169.1 and 169.1.1 closed (ROADMAP rows, phase complete); 164.9.4 live push-gate item resolved
-state_head: e0323dfdb1950d836d520a6138180bf3872496ac
+state_head: 98f04db16a7a8718596bc871fdbc4ab60e828bc2
 progress:
-  total_phases: 85
+  total_phases: 93
   completed_phases: 51
   total_plans: 465
   completed_plans: 460
-  percent: 60
+  percent: 55
 ---
 
 ## ⭐ STATE lineage
@@ -1429,6 +1429,14 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 167.1.1 edited: routed in: D-13 /compare per-holding metrics need a flow-neutral per-holding source (from 167.1.2 PR C2, 2026-09-29)
 - Phase 167.1.2.1 edited: routed in: 8 C2 writer-side residuals from review rounds 1-3 (SFH-05 writer half, single failing key dilution, SFH-R3-02, SFH-R3-07, SFH-08, SFH-09, R2-CR-02 residual, R3-WR-02) (from 167.1.2 PR C2, 2026-09-29)
 - Phase 164.9.3.2.1 inserted after Phase 164.9.3.2: ENQ40001: enqueue race-loss 40001 raise, booked by ENQ-SCOPE=enq-sibling
+- Phase 164.9.6 inserted after Phase 164.9: SUBSETMAIN (founder 2026-10-03) (URGENT)
+- Phase 164.9.7 inserted after Phase 164.9: TRUNCATEREVOKE (founder 2026-10-03) (URGENT)
+- Phase 170.3 inserted after Phase 170: OGPUBLIC (founder 2026-10-03) (URGENT)
+- Phase 170.4 inserted after Phase 170: ALLOCHOLDINGS (founder 2026-10-03) (URGENT)
+- Phase 170.5 inserted after Phase 170: FACTSHEETV2PANELS (founder 2026-10-03) (URGENT)
+- Phase 170.6 inserted after Phase 170: DISPLAYPOLISH (founder 2026-10-03) (URGENT)
+- Phase 166.5 inserted after Phase 166: COMPUTEDATSTAMP (founder 2026-10-03) (URGENT)
+- Phase 170.7 inserted after Phase 170: MYSTRATTABLE (founder 2026-10-02) (URGENT)
 
 ### Decisions
 
