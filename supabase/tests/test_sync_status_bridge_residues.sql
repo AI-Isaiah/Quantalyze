@@ -374,7 +374,7 @@ BEGIN
 
   SELECT status, created_at INTO v_jobstat, v_x_at FROM compute_jobs WHERE id = j;
   SELECT created_at, kind, metadata ->> 'source' INTO v_y_at, v_y_kind, v_y_src FROM compute_jobs WHERE id = j_y;
-  IF v_jobstat IS DISTINCT FROM 'failed_final' OR NOT (v_y_at > v_x_at)
+  IF v_jobstat IS DISTINCT FROM 'failed_final' OR (v_y_at > v_x_at) IS NOT TRUE
      OR v_y_kind = 'derive_broker_dailies' OR v_y_src IS NOT NULL THEN
     RAISE EXCEPTION 'TEST FAILED (W2-SETUP): X is % (created %), Y is % (created %, source %), so this is not the A4 corner (X failed_final, Y an unmarked failure of ANOTHER kind created strictly after X) and the assertions below would measure something else.', v_jobstat, v_x_at, v_y_kind, v_y_at, COALESCE(v_y_src, 'NULL');
   END IF;
@@ -399,7 +399,7 @@ BEGIN
   VALUES (s, 'compute_analytics_from_csv', 'done', now() - INTERVAL '30 minutes')
   RETURNING id INTO j_done;
   SELECT created_at INTO v_done_at FROM compute_jobs WHERE id = j_done;
-  IF NOT (v_done_at > v_y_at) THEN
+  IF (v_done_at > v_y_at) IS NOT TRUE THEN
     RAISE EXCEPTION 'TEST FAILED (W2-SETUP): the superseding done (created %) is not strictly later than Y (created %), so Y is not superseded and the later call below is not the post-supersession state.', v_done_at, v_y_at;
   END IF;
 
@@ -1035,7 +1035,7 @@ BEGIN
   SELECT status, metadata ->> 'source' INTO v_f_stat, v_f_src FROM compute_jobs WHERE id = j_f;
   SELECT count(*) INTO v_later FROM compute_jobs
    WHERE strategy_id = s AND kind = 'compute_analytics_from_csv' AND status = 'done';
-  IF v_f_stat IS DISTINCT FROM 'failed_final' OR v_f_src IS NOT NULL OR v_later <> 0 THEN
+  IF v_f_stat IS DISTINCT FROM 'failed_final' OR v_f_src IS NOT NULL OR v_later IS DISTINCT FROM 0 THEN
     RAISE EXCEPTION 'TEST FAILED (R6-SETUP): the sibling failure is % with source % and % done job(s) of its kind, so it is not a live UNPROTECTED failure and this arm does not measure the failed-count conjunct.', v_f_stat, COALESCE(v_f_src, 'NULL'), v_later;
   END IF;
 
