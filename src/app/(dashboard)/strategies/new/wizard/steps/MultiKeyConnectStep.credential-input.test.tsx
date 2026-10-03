@@ -161,4 +161,43 @@ describe("MultiKeyConnectStep panel credential inputs: pasted whitespace is stri
     await user.paste("  pass phrase  ");
     expect(passphrase.value).toBe("  pass phrase  ");
   });
+
+  /** MT5 enabled, two panels, MT5 selected on panel 1. */
+  async function renderPanel1OnMt5() {
+    vi.stubEnv("NEXT_PUBLIC_MT5_ENABLED", "true");
+    vi.resetModules();
+    const { MultiKeyConnectStep: Fresh } = await import("./MultiKeyConnectStep");
+    render(<Fresh wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    fireEvent.click(screen.getByTestId("multi-add-key"));
+    const panel1 = screen.getByTestId("key-panel-1");
+    fireEvent.click(within(panel1).getByTestId("key-1-exchange-mt5"));
+    return panel1;
+  }
+
+  it("with MT5 selected in a panel, a pasted investor password is kept exactly as pasted (D-08), because the server now stores it verbatim and a client strip would be the only trim left", async () => {
+    const panel1 = await renderPanel1OnMt5();
+    const user = userEvent.setup();
+    const secret = within(panel1).getByTestId("key-1-api-secret") as HTMLInputElement;
+    await user.click(secret);
+    await user.paste(" Inv Pw 7 "); // fabricated
+    expect(
+      secret.value,
+      "since D-08 the server stores the MT5 password exactly as sent, so stripping " +
+        "the paste here would store a password other than the one the user chose " +
+        "(169.3 D-76's own exclusion rule, as for UpdateMt5SecretDialog)",
+    ).toBe(" Inv Pw 7 ");
+  });
+
+  it("with MT5 selected in a panel, a pasted login is still stripped (D-08 exempts the password only)", async () => {
+    const panel1 = await renderPanel1OnMt5();
+    const user = userEvent.setup();
+    const login = within(panel1).getByTestId("key-1-api-key") as HTMLInputElement;
+    await user.click(login);
+    await user.paste(" 5550001 "); // fabricated
+    expect(
+      login.value,
+      "the MT5 login is a numeric account id; widening the verbatim exemption to " +
+        "the key slot would let a pasted space reach the broker as part of it",
+    ).toBe("5550001");
+  });
 });
