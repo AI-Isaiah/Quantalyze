@@ -10,6 +10,10 @@
 #      Unit: *the shared TEST database*. Every DB-touching job takes it, and
 #      contenders BLOCK on it. It is a working mechanism proven end to end by
 #      .github/workflows/mutex-probe.yml.
+#      (2026-09-26, Phase 164.9.4: "Every DB-touching job takes it" is
+#      lineage. No ci.yml job takes it now; the takers are supabase-migrate.yml
+#      `apply-test`, test-restore-from-baseline.yml `restore` and the
+#      mutex-probe.yml drill.)
 #
 #   2. THE SCHEMA-APPLY-IN-FLIGHT FLAG (defined below, and new).
 #      Unit: *"a schema apply against this project is in flight"*.

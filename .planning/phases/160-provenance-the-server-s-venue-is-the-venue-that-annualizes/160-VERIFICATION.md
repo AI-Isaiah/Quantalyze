@@ -3,9 +3,17 @@ phase: 160-provenance-the-server-s-venue-is-the-venue-that-annualizes
 verified: 2026-08-23T00:00:00Z
 re_verified: "2026-08-23T19:58:08Z @ 939165aa2ce13acf900c4667d7494bf54497d9e5"
 status: passed
-score: 31.5/32 — the arm's TRUTH is verified; the prescribed 3-surface method is 1/3 executed
+score: 31.5/32 — the arm's TRUTH is verified; the prescribed 3-surface method is 2/3 executed (ApiKeyManager 2026-08-25, AllocatorExchangeManager 2026-10-02; StrategyForm not smoked). Numeric score NOT re-cut by 160-07 Task 3 — re-scoring belongs to the verifier.
 behavior_unverified: 1
-overrides_applied: 0
+overrides_applied: 1  # 2026-10-02 founder decision: the StrategyForm smoke stays untested ("leave it as not tested"); passed stands with behavior_unverified: 1
+verified_at_sha: 939165aa2ce13acf900c4667d7494bf54497d9e5
+drift_subjects:
+  - src/app/api/keys/validate-and-encrypt/route.ts
+  - src/app/api/strategies/finalize-wizard/route.ts
+  - src/components/exchanges/AllocatorExchangeManager.tsx
+  - src/components/strategy/ApiKeyManager.tsx
+  - src/components/strategy/StrategyForm.tsx
+  - supabase/tests/test_api_keys_insert_not_client_writable.sql
 re_verification:
   previous_status: gaps_found
   previous_score: 30/32
@@ -32,17 +40,26 @@ re_verification:
 # remains is per-surface payload risk, which is smaller but real and not measured. The third
 # surface cannot be smoked at all until something mounts it — that is itself worth a decision
 # (mount it, or drop it from this truth's surface list and say so).
+#
+# ── 2026-10-02 CORRECTION + SECOND SURFACE (plan 160-07 Task 3; lines above kept as lineage) ──
+#   AllocatorExchangeManager ✅ smoked on PROD 2026-10-02 (founder; DevTools trace + row check).
+#   ⛔ The "CURRENTLY UNREACHABLE" line above was WRONG: its grep covered `src/app` only. The
+#   component is mounted by `src/components/exchanges/ExchangesTabContent.tsx:61`, which
+#   `src/components/auth/ProfileTabs.tsx` renders under the `exchanges` tab (allocatorOnly) at
+#   /profile?tab=exchanges. The "mount it or drop it" decision is therefore MOOT.
+#   Tally now 2/3. Remaining: StrategyForm ONLY — see behavior_unverified_items and the
+#   "Part A — 2026-10-02" subsection of the PROD smoke record.
 behavior_unverified_items:
   - truth: "The soak checkpoint confirms PR-1 merged + deployed + prod-smoked (plan 160-05 truth 1, 'prod-smoked' clause) — the production persist arm mints an attested api_keys row on a real connect"
-    test: "On PROD (quantalyze.xyz), connect one API key through each converted surface — ApiKeyManager (strategy edit page), StrategyForm, AllocatorExchangeManager — with DevTools Network showing the POST to /api/keys/validate-and-encrypt"
-    expected: "Connect succeeds; the new api_keys row carries attested_venue = exchange (non-NULL); the response to the browser contains api_key_id and no ciphertext fields; the strategy link updates"
+    test: "NARROWED 2026-10-02 to the one remaining surface — StrategyForm. On PROD (quantalyze.xyz), signed in as a MANAGER (or both-role) account, connect one read-only API key through StrategyForm's Data Source → Connect Key modal on /strategies/<id>/edit for a strategy with NO key attached, with DevTools Network showing the POST to /api/keys/validate-and-encrypt. (ApiKeyManager smoked 2026-08-25; AllocatorExchangeManager smoked 2026-10-02 — both recorded in the PROD smoke record.)"
+    expected: "Connect succeeds; the new api_keys row carries attested_venue = exchange (non-NULL); the response to the browser contains api_key_id and no ciphertext fields; the strategy link updates (strategies.api_key_id set, no link-error toast)"
     why_human: "The four prod smoke flows in plan 160-05 Task 1 were NOT performed. Zero keys were connected during the 47-minute soak, so the soak measured only the ABSENCE of un-attested inflow. The writer has never handled a real production connect; code+test presence cannot substitute for the first live exercise of the now-ONLY writer of api_keys."
-    result: "PARTIALLY DISCHARGED 2026-08-28 — the load-bearing clause is now MET; the per-surface sweep is not. The truth this item asserts is that the production persist arm mints an attested api_keys row on a real connect, and that is now measured. The predicted row EXISTS and the predicted count landed exactly. `public.api_keys` on PROD now holds 33 rows (the item predicted 32 -> 33), and the newest is labelled **`160 gate smoke`** — created 2026-08-25 21:38:12Z, exchange `okx`, `attested_venue` = `okx` = exchange, `is_active` true. So the smoke WAS performed on production; it was never written back here. Fleet-wide: `attested_venue` is NON-NULL on 33 of 33 rows and equals `exchange` on 33 of 33 — ZERO un-attested rows. ⭐ THE WRITER IS IDENTIFIED BY ELIMINATION, not inferred from the row existing (an effect never names its writer): (1) `attested_venue` survived, so the BEFORE INSERT trigger `api_keys_scrub_attested_venue` did not scrub it, which by its own body means `current_user IN (postgres, service_role, supabase_admin)` — a privileged writer, NOT a browser-session client INSERT (the ApiKeyManager/StrategyForm client paths are scrubbed to NULL by design, 20260811210000:543). (2) Of the privileged writers, the Phase-156 create-with-key wizard RPC is EXCLUDED: it mints a strategy and a key in one call, and `public.strategies` has ZERO rows created in the +/-15min window around the insert. (3) The analytics worker does not create keys. What remains is a service-role route, i.e. `/api/keys/validate-and-encrypt` — the arm this item exists to exercise, and the one the item warned the wizard path would bypass. ⭐ STRONGER THAN THE ASKED-FOR CHECK: the key has been syncing successfully ever since (`sync_status=complete`, `last_sync_at` 2026-08-28), which proves the stored ciphertext round-trips under a real decrypt — a fact the DevTools response-shape check could not have established. ⛔ WHAT REMAINS: exactly ONE connect happened, so the arm is proven exercised end-to-end on production once — the claim `the writer has never handled a real production connect` is now FALSE — but the item also asked for one connect through EACH of the three converted surfaces (ApiKeyManager, StrategyForm, AllocatorExchangeManager). Two of three remain un-exercised live, and they share the single validate-and-encrypt writer that is now proven, so what is left un-tested is the three call SITES, not the arm. Founder-gated: it needs real read-only exchange credentials, which I do not supply."
+    result: "PARTIALLY DISCHARGED 2026-08-28 — the load-bearing clause is now MET; the per-surface sweep is not. The truth this item asserts is that the production persist arm mints an attested api_keys row on a real connect, and that is now measured. The predicted row EXISTS and the predicted count landed exactly. `public.api_keys` on PROD now holds 33 rows (the item predicted 32 -> 33), and the newest is labelled **`160 gate smoke`** — created 2026-08-25 21:38:12Z, exchange `okx`, `attested_venue` = `okx` = exchange, `is_active` true. So the smoke WAS performed on production; it was never written back here. Fleet-wide: `attested_venue` is NON-NULL on 33 of 33 rows and equals `exchange` on 33 of 33 — ZERO un-attested rows. ⭐ THE WRITER IS IDENTIFIED BY ELIMINATION, not inferred from the row existing (an effect never names its writer): (1) `attested_venue` survived, so the BEFORE INSERT trigger `api_keys_scrub_attested_venue` did not scrub it, which by its own body means `current_user IN (postgres, service_role, supabase_admin)` — a privileged writer, NOT a browser-session client INSERT (the ApiKeyManager/StrategyForm client paths are scrubbed to NULL by design, 20260811210000:543). (2) Of the privileged writers, the Phase-156 create-with-key wizard RPC is EXCLUDED: it mints a strategy and a key in one call, and `public.strategies` has ZERO rows created in the +/-15min window around the insert. (3) The analytics worker does not create keys. What remains is a service-role route, i.e. `/api/keys/validate-and-encrypt` — the arm this item exists to exercise, and the one the item warned the wizard path would bypass. ⭐ STRONGER THAN THE ASKED-FOR CHECK: the key has been syncing successfully ever since (`sync_status=complete`, `last_sync_at` 2026-08-28), which proves the stored ciphertext round-trips under a real decrypt — a fact the DevTools response-shape check could not have established. ⛔ WHAT REMAINS: exactly ONE connect happened, so the arm is proven exercised end-to-end on production once — the claim `the writer has never handled a real production connect` is now FALSE — but the item also asked for one connect through EACH of the three converted surfaces (ApiKeyManager, StrategyForm, AllocatorExchangeManager). Two of three remain un-exercised live, and they share the single validate-and-encrypt writer that is now proven, so what is left un-tested is the three call SITES, not the arm. Founder-gated: it needs real read-only exchange credentials, which I do not supply. ⭐ UPDATE 2026-10-02 (plan 160-07 Task 3): the second surface is now smoked — AllocatorExchangeManager on PROD, founder-observed DevTools response `{ api_key_id, valid: true, read_only: true }` plus a measured okx row with attested_venue = exchange (see the PROD smoke record, Part A — 2026-10-02). ONE surface remains: StrategyForm, NOT exercised because its route tree is manager-only (`src/app/(dashboard)/strategies/layout.tsx` requireRolePage(..., \"manager\")) and the founder's session is allocator-only. This item stays OPEN, narrowed to StrategyForm; it is not absorbed by the two smoked surfaces."
 human_verification:
   - test: "PROD persist smoke (plan 160-07 Task 2 Part A) — one real read-only key connect through a surface that POSTs /api/keys/validate-and-encrypt, DevTools trace + row check"
     expected: "HTTP 200 with api_key_id/valid/read_only and none of the five ciphertext key names; newest api_keys row has non-NULL attested_venue = exchange = the connected venue; count +1 vs the CURRENT baseline of 32 rows (the post-REVOKE baseline was 31; a wizard-path connect on 2026-08-23 took it to 32 WITHOUT exercising this arm — see the PROD smoke record). Expect 32 -> 33. ⛔ Must go through ApiKeyManager / StrategyForm / AllocatorExchangeManager — the new-strategy wizard rides the Phase-156 create-with-key RPC and does NOT exercise this arm."
     why_human: "Needs real exchange credentials on the production site plus read-only PROD DB access; carried forward unchanged from the initial verification — code-level evidence cannot substitute"
-    result: "SUBSTANTIALLY DISCHARGED 2026-08-28 by read-only PROD measurement. The predicted row EXISTS and the predicted count landed exactly. `public.api_keys` on PROD now holds 33 rows (the item predicted 32 -> 33), and the newest is labelled **`160 gate smoke`** — created 2026-08-25 21:38:12Z, exchange `okx`, `attested_venue` = `okx` = exchange, `is_active` true. So the smoke WAS performed on production; it was never written back here. Fleet-wide: `attested_venue` is NON-NULL on 33 of 33 rows and equals `exchange` on 33 of 33 — ZERO un-attested rows. ⭐ THE WRITER IS IDENTIFIED BY ELIMINATION, not inferred from the row existing (an effect never names its writer): (1) `attested_venue` survived, so the BEFORE INSERT trigger `api_keys_scrub_attested_venue` did not scrub it, which by its own body means `current_user IN (postgres, service_role, supabase_admin)` — a privileged writer, NOT a browser-session client INSERT (the ApiKeyManager/StrategyForm client paths are scrubbed to NULL by design, 20260811210000:543). (2) Of the privileged writers, the Phase-156 create-with-key wizard RPC is EXCLUDED: it mints a strategy and a key in one call, and `public.strategies` has ZERO rows created in the +/-15min window around the insert. (3) The analytics worker does not create keys. What remains is a service-role route, i.e. `/api/keys/validate-and-encrypt` — the arm this item exists to exercise, and the one the item warned the wizard path would bypass. ⭐ STRONGER THAN THE ASKED-FOR CHECK: the key has been syncing successfully ever since (`sync_status=complete`, `last_sync_at` 2026-08-28), which proves the stored ciphertext round-trips under a real decrypt — a fact the DevTools response-shape check could not have established. ⚠️ NOT DISCHARGED, and not retroactively dischargeable: the DevTools trace itself (that the browser response carried api_key_id/valid/read_only and none of the five ciphertext key names). That is an observation, not a persisted fact, and the connect happened three days before this reading. The no-ciphertext-in-response property remains pinned at code level. The substantive risk this item guards — an un-attested row reaching api_keys — is measured at 0 of 33."
+    result: "SUBSTANTIALLY DISCHARGED 2026-08-28 by read-only PROD measurement. The predicted row EXISTS and the predicted count landed exactly. `public.api_keys` on PROD now holds 33 rows (the item predicted 32 -> 33), and the newest is labelled **`160 gate smoke`** — created 2026-08-25 21:38:12Z, exchange `okx`, `attested_venue` = `okx` = exchange, `is_active` true. So the smoke WAS performed on production; it was never written back here. Fleet-wide: `attested_venue` is NON-NULL on 33 of 33 rows and equals `exchange` on 33 of 33 — ZERO un-attested rows. ⭐ THE WRITER IS IDENTIFIED BY ELIMINATION, not inferred from the row existing (an effect never names its writer): (1) `attested_venue` survived, so the BEFORE INSERT trigger `api_keys_scrub_attested_venue` did not scrub it, which by its own body means `current_user IN (postgres, service_role, supabase_admin)` — a privileged writer, NOT a browser-session client INSERT (the ApiKeyManager/StrategyForm client paths are scrubbed to NULL by design, 20260811210000:543). (2) Of the privileged writers, the Phase-156 create-with-key wizard RPC is EXCLUDED: it mints a strategy and a key in one call, and `public.strategies` has ZERO rows created in the +/-15min window around the insert. (3) The analytics worker does not create keys. What remains is a service-role route, i.e. `/api/keys/validate-and-encrypt` — the arm this item exists to exercise, and the one the item warned the wizard path would bypass. ⭐ STRONGER THAN THE ASKED-FOR CHECK: the key has been syncing successfully ever since (`sync_status=complete`, `last_sync_at` 2026-08-28), which proves the stored ciphertext round-trips under a real decrypt — a fact the DevTools response-shape check could not have established. ⚠️ NOT DISCHARGED, and not retroactively dischargeable: the DevTools trace itself (that the browser response carried api_key_id/valid/read_only and none of the five ciphertext key names). That is an observation, not a persisted fact, and the connect happened three days before this reading. The no-ciphertext-in-response property remains pinned at code level. The substantive risk this item guards — an un-attested row reaching api_keys — is measured at 0 of 33. ⭐ ADDENDUM 2026-10-02 (plan 160-07 Task 3) — the DevTools half is now DISCHARGED by a NEW connect, not retroactively: the founder connected a real read-only OKX key through AllocatorExchangeManager on PROD with DevTools Network open, and the observed POST /api/keys/validate-and-encrypt response body was exactly `{ api_key_id, valid: true, read_only: true }` — three keys, none of the five ciphertext key names. This is the first OBSERVED browser-side response of the persist arm on PROD, and this time the writer is identified directly by the Network trace rather than by elimination. Row side measured read-only by the orchestrator: the new row has attested_venue = exchange = okx. Full transcription in the PROD smoke record, Part A — 2026-10-02."
   - test: "✅ CLOSED 2026-08-23 — PROD refusal gate (plan 160-07 Task 2 Part B), measured after PR #705 merged (squash 1cb975c1) and its production deployment read READY"
     expected: "HTTP 409; code STALE_CLIENT; copy names a reload; no ciphertext key names in the body"
     result: "PASS — 409, code=STALE_CLIENT, body is exactly {code,error}, Cache-Control private/no-store. Beyond the written gate: persist:\"true\" (string) also refuses 409, and prod logs show the refusal's own signal with no venue probe. Gate is not an unauthenticated oracle (401 without session, 403 without Origin). See the PROD smoke record below."
@@ -141,6 +158,12 @@ Status of the initial pass's 32 scored truths at `939165aa`:
 ## Known Gaps (explicit)
 
 ### Gap 1 — Production persist arm never exercised (behavior-unverified, human item) — CARRIED FORWARD UNCHANGED
+
+> ⭐ **SUPERSEDED IN PART, 2026-10-02 (plan 160-07 Task 3).** The paragraph below is the 2026-08-23
+> reading, kept as lineage. Since then the arm HAS been exercised on PROD through two of the three
+> surfaces — ApiKeyManager (2026-08-25, row-measured) and AllocatorExchangeManager (2026-10-02,
+> DevTools response observed + row-measured). The gap is narrowed to the **StrategyForm** surface
+> only. See the PROD smoke record, *Part A — 2026-10-02*.
 The four PROD smoke flows in plan 160-05 Task 1 were not performed; zero keys were connected during the 47-minute soak. The soak therefore proved only that no un-attested rows appeared — a claim about absence, not about the writer working. After the REVOKE, the persist arm is the ONLY door into `api_keys` for the non-wizard surfaces; if it has a production-only fault (env, service credential, CORS/origin, rate limit), connect-a-key is broken for every tenant and nothing in this phase's evidence would have caught it. **Human action (plan 160-07 Task 2 Part A):** one real read-only key connect on PROD through a surface whose DevTools trace shows the POST to `/api/keys/validate-and-encrypt` (the wizard-proper rides the Phase-156 RPC path and does NOT answer for this arm), then the row check. Until then this clause stays unverified, not failed. This re-verification did not touch, weaken, or absorb this item.
 
 ### Gap 2 — Legacy ciphertext arm — CLOSED AT HEAD (re-measured by the independent 160-07 Task-1 pass); ordering clause VIOLATED; PROD measurement pending deploy
@@ -154,6 +177,12 @@ No code gaps remain at HEAD. The phase goal is achieved in the code and, for the
 
 **Task 3 transcription. Status after this entry: Part A OPEN, Part B OPEN. `behavior_unverified`
 stays 1; phase status stays `human_needed`. Nothing below closes a gate.**
+
+> ⭐ **2026-10-02 pointer.** The status line above is the 2026-08-23 reading. Part B closed the same
+> day (below). Part A's minimum bar — one real connect through a surface that POSTs the route — was
+> met on 2026-08-25 (ApiKeyManager) and again, with the DevTools trace, on 2026-10-02
+> (AllocatorExchangeManager). `behavior_unverified` stays **1**, narrowed to StrategyForm. See
+> *Part A — 2026-10-02* at the end of this record.
 
 ### Part A — PROD persist smoke: ATTEMPTED, DID NOT EXERCISE THE ARM
 
@@ -222,6 +251,79 @@ header returns `403` from the CSRF guard — both ahead of the refusal.
 
 **This closes the pending-deploy gate. "Closed on PROD" may now be claimed for the refusal.**
 Part A remains open and is the only thing between this phase and completion.
+
+### Part A — 2026-10-02: AllocatorExchangeManager smoked on PROD (second of three surfaces)
+
+Transcribed from the founder's human-verify answer to plan 160-07 Task 2 and the orchestrator's
+read-only PROD measurement (the `which_database` marker answered PRODUCTION before any query).
+Counts, dates, venue names only; no key material, labels, emails or user ids.
+
+**Surface exercised:** AllocatorExchangeManager — Profile → Exchanges tab → "+ Connect exchange",
+on `/profile?tab=exchanges` with an allocator session.
+
+⛔ **Correction to this record.** The 2026-08-25 frontmatter note called this surface "CURRENTLY
+UNREACHABLE — no page mounts it". That was wrong: its grep covered `src/app` only. The component
+is mounted by `src/components/exchanges/ExchangesTabContent.tsx:61`, and
+`src/components/auth/ProfileTabs.tsx` renders that panel under the `exchanges` tab
+(`allocatorOnly: true`). The "mount it or drop it" decision it raised is moot.
+
+**Observed response (DevTools Network, founder screenshot):**
+
+| Assertion (plan 160-07 Task 2 step 4) | Result |
+|---|---|
+| POST `/api/keys/validate-and-encrypt` present in the trace | yes |
+| body key names | exactly `api_key_id`, `valid`, `read_only` — three keys |
+| `valid` / `read_only` | `true` / `true` |
+| any of `api_key_encrypted`, `api_secret_encrypted`, `passphrase_encrypted`, `dek_encrypted`, `nonce` | **none** |
+
+The writer is identified **directly** by the Network trace this time, not by elimination as on
+2026-08-25.
+
+**Measured row (read-only, PROD, orchestrator):**
+
+| Check | Result |
+|---|---|
+| new row | created 2026-10-02 20:59:39Z, exchange `okx`, `attested_venue` = `okx` = exchange, `is_active` true. Row uuid not transcribed (not supplied with the evidence) — identified by its `created_at`, which is after the ~20:52Z baseline reading |
+| follow-on jobs | `reconstruct_allocator_history` and `poll_allocator_positions` both claimed 21:00:10Z, both `done` |
+| sync | `sync_status` complete, `last_sync_at` 21:00:22Z, no sync error — the stored ciphertext round-trips under a real decrypt |
+| fleet, after | `attested_venue` NULL on **0** rows; `attested_venue` ≠ `exchange` on **0** rows; **42** rows total |
+
+**Count delta: NOT +1 — 42 before (~20:52Z), 42 after.** Plan step 6 predicts +1, and that did not
+happen. The explanation, from the founder: the same OKX account was already connected, so it was
+disconnected first, with "delete the data" chosen in the disconnect dialog, and then reconnected.
+That is −1 then +1 by design, not a defect. The new row is identified by its creation time, not by
+the count.
+
+**Cleanup (step 8):** the key was **kept**. It is the founder's real account, not a throwaway smoke
+key, so the delete-via-UI step was not run.
+
+**What this does and does not establish.** It establishes the persist arm working end-to-end on
+PROD through a second converted surface, with the browser-side response shape now OBSERVED, not
+just pinned in code. It says nothing about StrategyForm's own call site.
+
+#### Still behavior-unverified: StrategyForm (the third surface)
+
+NOT exercised. The route tree that mounts it is manager-only:
+`src/app/(dashboard)/strategies/layout.tsx` calls `requireRolePage(supabase, user, "manager")`, and
+the founder's session is allocator-only, so it is bounced to `/allocations`. StrategyForm is mounted
+only on the edit page (`src/app/(dashboard)/strategies/[id]/edit/page.tsx:137`, `mode="edit"`). The
+plan's `/strategies/new` pointer is stale for this purpose: `strategies/new/page.tsx` redirects to
+the 4-step wizard, which rides the Phase-156 RPC path.
+
+Exact steps to close it:
+
+1. Sign in on `https://quantalyze.xyz` as a **manager** or both-role account.
+2. Open DevTools → Network, filter `validate-and-encrypt`.
+3. Open `/strategies/<id>/edit` for a strategy you own that has **no** API key attached.
+4. In the form's **Data Source** card, click **Connect API Key**. Then, in the modal, pick a ccxt venue
+   (okx / binance / bybit / deribit; not mt5). Paste a read-only key and secret, plus a passphrase
+   if the venue needs one, and click **Connect Key**.
+5. Assert the POST response: HTTP 200, body `{ api_key_id, valid: true, read_only: true }`, none of
+   the five ciphertext key names. Assert that the UI shows the key connected with no link-error
+   toast.
+6. Read-only PROD row check (marker query first): the newest `api_keys` row has
+   `attested_venue` = `exchange` = the venue just connected, the count moves +1 against the reading
+   taken just before, and that strategy's `strategies.api_key_id` equals the new row's id.
 
 ---
 
