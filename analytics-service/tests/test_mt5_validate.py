@@ -3066,13 +3066,22 @@ async def test_ipc_transport_fault_logs_at_error_like_the_d15_arm(
     ],
 )
 async def test_d15_the_loud_check_never_false_alarms_on_a_bridge_blip(
-    exchange_router, caplog, terminal, why
+    exchange_router, caplog, monkeypatch, terminal, why
 ):
     """⭐ The assertion that stops the loud check becoming a false-alarm generator.
     An unreadable, malformed or disconnected terminal proves NOTHING about the
     landmine — it is our bridge blipping and it clears on retry. It must route
     TRANSIENT and emit NOTHING above WARNING; paging an operator about a setting
-    for a network blip is how a real alarm gets ignored."""
+    for a network blip is how a real alarm gets ignored.
+
+    Phase 164.6.6 D-07 part 2: every validation that reached its login now ends
+    with a park onto the house account. The house credentials are SET here
+    (fabricated), as in production, so this test measures the blip path and not
+    the unset-credentials path, which pages by design (founder decision
+    2026-10-03, "Warn on glitch, page else")."""
+    monkeypatch.setenv("MT5_LOGIN", "700001")
+    monkeypatch.setenv("MT5_PASSWORD", "house-pw-FABRICATED-7x")
+    monkeypatch.setenv("MT5_SERVER", "House-Fabricated-Demo")
     router = exchange_router
     client = _make_client(
         account=_INVESTOR_ACCOUNT, order_check=_INVESTOR_ORDER_CHECK, terminal=terminal
