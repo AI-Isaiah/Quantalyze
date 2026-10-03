@@ -54,6 +54,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { LOCAL_STACK_LANE_FILES } from "../../vitest.local-stack-files";
+import { laneEnvFile } from "../../scripts/local-stack/capability-probe.mjs";
 
 const REPO_ROOT = fileURLToPath(new URL("../../", import.meta.url));
 const read = (rel: string) => readFileSync(REPO_ROOT + rel, "utf8");
@@ -1066,7 +1067,13 @@ describe("VAC-07 — the local-stack lane is wired end to end (this pin runs in 
   // is that the lane's gate reads no git history, so that is what the history half
   // now pins. The seam half covers all three jobs, since each now names its own
   // replay set before its boot.
-  it("the lane's currency gate reads no git history (so a shallow clone cannot vacate it), and all three lane-booting CI jobs run the currency seam before the boot", () => {
+  // Retitled 2026-09-26, Phase 164.9.4 (D-03 / D-06): `python` and `e2e-seeded` boot
+  // the lane too now, so the seam list gains their rows and the title stops counting.
+  // Lineage title: "the lane's currency gate reads no git history (so a shallow clone
+  // cannot vacate it), and all three lane-booting CI jobs run the currency seam
+  // before the boot". The list is hand-kept, not detected: a NEW lane-booting job
+  // must add its own row here.
+  it("the lane's currency gate reads no git history (so a shallow clone cannot vacate it), and every lane-booting CI job runs the currency seam before the boot", () => {
     // (1) History. The lane calls the gate in --replay-set mode, and that mode's
     // body never reaches the epoch reader — the only git consumer in the gate. If
     // either half moves, a shallow-cloned lane job would compare two identical
@@ -1104,6 +1111,8 @@ describe("VAC-07 — the local-stack lane is wired end to end (this pin runs in 
       [LANE_JOB, "frontend-live-db-lane"],
       ["frontend-live-db-lane", "frontend-policy"],
       ["sql-tests", "secret-scan"],
+      ["python", "test-db-drift"],
+      ["e2e-seeded", "lighthouse-mobile"],
     ] as const) {
       const lines = jobBlock(job, next);
       const seam = lines.findIndex(
@@ -1170,6 +1179,8 @@ describe("the lane's loopback-DSN gates all use capability-probe's parse-based r
     for (const [where, body] of [
       ["load_baseline", liveLines(bashFunctionBody(lane, "load_baseline"))],
       ["probe_function_denial_survives", liveLines(bashFunctionBody(lane, "probe_function_denial_survives"))],
+      // Phase 164.9.4 D-04: the handoff seam is a DSN gate too, so the same rule binds it.
+      ["assert_local_handoff", liveLines(bashFunctionBody(lane, "assert_local_handoff"))],
       ["sql-tests", liveLines(CI.slice(start, end))],
     ] as const) {
       expect(
@@ -1180,6 +1191,152 @@ describe("the lane's loopback-DSN gates all use capability-probe's parse-based r
         body.some((l) => l.includes("capability-probe.mjs") && l.includes("--refuse-nonlocal-dsn")),
         `${where} does not call capability-probe.mjs --refuse-nonlocal-dsn`,
       ).toBe(true);
+    }
+  });
+
+  // Phase 164.9.4 D-04: the `python` and `e2e-seeded` jobs consume the lane handoff
+  // and must assert it is loopback BEFORE they export anything. `assert_local` is
+  // internal to run.sh and the probe above accepts only postgres URLs, so the seam
+  // `--assert-local-handoff` is how a CI step reuses BOTH guards instead of carrying
+  // a third. EXECUTED here: a refusal that is only grepped for can be dead code.
+  it("run.sh --assert-local-handoff refuses a non-loopback handoff and never echoes it (Phase 164.9.4 D-04)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "lane-handoff-"));
+    try {
+      const LOOPBACK_DB = "postgresql://nonecho_marker_user@127.0.0.1:54422/postgres";
+      const assertHandoff = (name: string, lines: string[] | null) => {
+        // ABSOLUTE path: run.sh resolves everything from its own location.
+        const p = join(dir, `${name}.env`);
+        if (lines !== null) writeFileSync(p, lines.join("\n") + "\n");
+        const r = spawnSync("bash", [RUN_SH, "--assert-local-handoff", p], {
+          cwd: REPO_ROOT,
+          encoding: "utf8",
+        });
+        return { status: r.status, out: `${r.stdout}${r.stderr}` };
+      };
+      const noEcho = (name: string, out: string) => {
+        expect(out, `${name}: the handoff's userinfo marker was echoed`).not.toContain("nonecho_marker_user");
+        expect(out, `${name}: the handoff's API host marker was echoed`).not.toContain("nonecho-marker");
+        expect(out, `${name}: a remote host was echoed`).not.toContain("example.invalid");
+        expect(out, `${name}: a port from the handoff was echoed`).not.toContain("54421");
+      };
+
+      // A remote API_URL is refused by assert_local, and the refusal names no value.
+      const remoteApi = assertHandoff("remote-api", [
+        'API_URL="https://nonecho-marker.example.invalid"',
+        `DB_URL="${LOOPBACK_DB}"`,
+      ]);
+      expect(remoteApi.status, `a remote API_URL was accepted:\n${remoteApi.out}`).toBe(1);
+      expect(remoteApi.out, "AIM: a refusal was printed, so the no-echo checks read real output").toContain("FATAL");
+      noEcho("remote-api", remoteApi.out);
+
+      // A loopback handoff passes, and the success line prints no value either.
+      const local = assertHandoff("local", ['API_URL="http://127.0.0.1:54421"', `DB_URL="${LOOPBACK_DB}"`]);
+      expect(local.status, `a loopback handoff was refused:\n${local.out}`).toBe(0);
+      expect(local.out).toContain("handoff is loopback (API_URL and DB_URL), values not printed");
+      noEcho("local", local.out);
+
+      // Every other refusal shape: exit 1, a FATAL printed, and no value in the output.
+      const refused: Array<[string, string[] | null]> = [
+        ["missing file", null],
+        ["no API_URL line", [`DB_URL="${LOOPBACK_DB}"`]],
+        ["no DB_URL line", ['API_URL="http://127.0.0.1:54421"']],
+        // The DB half is judged by the WR-08 probe, never by assert_local's http glob.
+        ["remote DB_URL", ['API_URL="http://127.0.0.1:54421"', 'DB_URL="postgresql://nonecho_marker_user@db.example.invalid:5432/postgres"']],
+        // libpq honours ?host=, re-pointing a loopback-looking DSN at a remote host.
+        ["?host= DB_URL override", ['API_URL="http://127.0.0.1:54421"', 'DB_URL="postgresql://nonecho_marker_user@127.0.0.1:54422/postgres?host=db.example.invalid"']],
+        // A host that only LOOKS loopback: assert_local's glob needs `http://127.0.0.1:`.
+        ["loopback-prefixed API host", ['API_URL="http://127.0.0.1.nonecho-marker.example.invalid:54421"', `DB_URL="${LOOPBACK_DB}"`]],
+        // Review 164.9.4 round 2, SFH-02 (reproduced): the loopback host and port
+        // as the USERINFO, an external host as the real host. The old prefix glob
+        // accepted it. Built from parts, so no literal smuggling URL is tracked.
+        ["userinfo-smuggled API host", [`API_URL="${["http://", "127.0.0.1:54421", "@", "nonecho-marker.example.invalid"].join("")}"`, `DB_URL="${LOOPBACK_DB}"`]],
+      ];
+      for (const [name, lines] of refused) {
+        const r = assertHandoff(name.replace(/[^a-z]+/gi, "-"), lines);
+        expect(r.status, `${name}: accepted, or refused with the wrong status:\n${r.out}`).toBe(1);
+        expect(r.out, `AIM (${name}): a refusal was printed, so the no-echo checks read real output`).toContain("FATAL");
+        noEcho(name, r.out);
+      }
+
+      // `localhost` is the other spelling assert_local accepts; the seam must not narrow it.
+      const localhost = assertHandoff("localhost", ['API_URL="http://localhost:54421"', `DB_URL="${LOOPBACK_DB}"`]);
+      expect(localhost.status, `a localhost API_URL was refused:\n${localhost.out}`).toBe(0);
+      noEcho("localhost", localhost.out);
+
+      // REUSE, not a copy (D-04), checked AFTER the executed cases so a neutered call
+      // reds them first: the API half is the lane's own `assert_local`, so a
+      // later widening or narrowing of that one guard moves this seam with it.
+      const seam = liveLines(bashFunctionBody(read(RUN_SH), "assert_local_handoff"));
+      expect(
+        seam.some((l) => l === 'assert_local "$api_url"'),
+        "assert_local_handoff no longer calls assert_local on API_URL",
+      ).toBe(true);
+      expect(
+        seam.some((l) => l.includes("http://")),
+        "assert_local_handoff carries its own URL pattern instead of reusing assert_local",
+      ).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // Phase 164.9.4 D-04 (SC-2), 2026-09-27. The `it` above proves the seam REFUSES a
+  // non-loopback handoff; this one proves each consuming CI job CALLS it at the
+  // right moment. A seam that runs after the first `$GITHUB_ENV` write has already
+  // handed a misrouted URL to every later step, and one that runs after the first
+  // DB-touching step guards nothing. Per job, on the live lines of its block: the
+  // boot, then the seam, then the first line naming `GITHUB_ENV`, then the first
+  // DB-touching step. One `expect` per condition, so a failure names which broke.
+  it("each CI job that exports the lane handoff asserts loopback first: boot, then --assert-local-handoff, then the first GITHUB_ENV write, then the first DB-touching step (Phase 164.9.4 D-04)", () => {
+    const rows = [
+      ["python", "test-db-drift", "pytest --cov=services"],
+      ["e2e-seeded", "lighthouse-mobile", "SEED_CONFIRM_STAGING=true npx tsx scripts/seed-demo-data.ts"],
+    ] as const;
+    // Anti-vacuity: a shortened row list would pass every check below for the
+    // job it dropped. Both jobs that consume the handoff are rows.
+    expect(rows.length, "AIM: the handoff-order pin no longer covers both handoff-consuming jobs").toBeGreaterThanOrEqual(2);
+    for (const [job, nextJob, firstDbStep] of rows) {
+      const start = CI.indexOf(`\n  ${job}:\n`);
+      expect(start, `the ${job} job is gone from ci.yml`).toBeGreaterThan(-1);
+      const end = CI.indexOf(`\n  ${nextJob}:\n`, start);
+      expect(end, `could not find the end of the ${job} block (next job ${nextJob})`).toBeGreaterThan(start);
+      const lines = liveLines(CI.slice(start, end));
+      const boot = lines.findIndex((l) => l === "run: bash scripts/local-stack/run.sh up");
+      const seam = lines.findIndex((l) => l.includes("bash scripts/local-stack/run.sh --assert-local-handoff"));
+      const firstExport = lines.findIndex((l) => l.includes("GITHUB_ENV"));
+      const firstDb = lines.findIndex((l) => l.includes(firstDbStep));
+      expect(boot, `${job} no longer boots the lane with run.sh up (D-04)`).toBeGreaterThan(-1);
+      expect(seam, `${job} no longer calls run.sh --assert-local-handoff (D-04)`).toBeGreaterThan(-1);
+      expect(firstExport, `${job} no longer writes the lane handoff to GITHUB_ENV (D-04)`).toBeGreaterThan(-1);
+      expect(firstDb, `${job} no longer runs its first DB-touching step \`${firstDbStep}\` (D-04)`).toBeGreaterThan(-1);
+      expect(boot < seam, `${job} asserts the handoff BEFORE the lane boots, so it reads no handoff (D-04)`).toBe(true);
+      // Review 164.9.4 round 2, SFH-03: the guard asserts the SAME file the export
+      // reads. Called with no argument it read run.sh's default path, which matched
+      // LANE_ENV_FILE only by coincidence; a divergence would assert one file and
+      // export another, unasserted one.
+      const assign = lines.findIndex((l) => l.startsWith("lane_env_file="));
+      expect(assign, `${job} no longer names the handoff file in lane_env_file (SFH-03)`).toBeGreaterThan(-1);
+      expect(assign < seam, `${job} calls the guard before lane_env_file is set, so it cannot pass the export's file (SFH-03)`).toBe(true);
+      expect(
+        lines[seam],
+        `${job} calls the guard without the export's file, so it asserts run.sh's default path instead (SFH-03)`,
+      ).toBe('bash scripts/local-stack/run.sh --assert-local-handoff "${lane_env_file}"');
+      expect(
+        lines.filter((l) => l.includes('"${lane_env_file}"') && l.startsWith("api_url=")).length,
+        `${job}: the export no longer reads API_URL from \${lane_env_file}, so the guard and the export could name different files (SFH-03)`,
+      ).toBe(1);
+      expect(
+        seam < firstExport,
+        `${job} writes to GITHUB_ENV BEFORE run.sh --assert-local-handoff, so a misrouted URL reaches every later step before the loopback check (D-04)`,
+      ).toBe(true);
+      expect(
+        firstExport < firstDb,
+        `${job} runs \`${firstDbStep}\` BEFORE the lane handoff is exported, so it reads no lane values (D-04)`,
+      ).toBe(true);
+      expect(
+        lines.some((l) => l.includes("*@127.0.0.1:*")),
+        `${job} carries the '*@127.0.0.1:*' glob, which accepts ?host=/hostaddr= overrides (D-04, WR-08)`,
+      ).toBe(false);
     }
   });
 });
@@ -1293,5 +1450,62 @@ describe("sql-corpus-report.mjs (IN-05, and the WR-08 loopback rule)", () => {
     expect(r.out, "the refusal names the query string it refused").toContain("query string");
     expect(r.out).not.toContain(MARKER);
     expect(r.out).not.toContain("example.invalid");
+  });
+});
+
+// Review 164.9.4 round 4, IN-02 + SFH LOW-10: `run.sh` writes, guards and deletes
+// the handoff at `LANE_ENV_FILE` (default `scripts/local-stack/.stack-env`), and
+// the two Node readers used to read a hard-coded default and a third variable
+// (`STACK_ENV_FILE`). Under an override, `up` then wrote one file while the
+// readers read a stale default copy that `down` never removed (a mode-600 file
+// carrying the service-role key). These arms run the readers, not a grep.
+describe("[164.9.4 IN-02 / LOW-10] every lane reader reads the handoff run.sh writes", () => {
+  const DEFAULT_HANDOFF = join(REPO_ROOT, "scripts/local-stack/.stack-env");
+
+  it("laneEnvFile() mirrors run.sh: the same default, an override, and a relative override resolved from the repo root", () => {
+    expect(
+      read(RUN_SH),
+      "run.sh's handoff assignment moved or changed; laneEnvFile() mirrors it and must move with it",
+    ).toContain('ENV_FILE="${LANE_ENV_FILE:-${LANE_DIR}/.stack-env}"');
+    expect(laneEnvFile({})).toBe(DEFAULT_HANDOFF);
+    // bash's `:-` treats an EMPTY value as unset; so must the readers.
+    expect(laneEnvFile({ LANE_ENV_FILE: "" })).toBe(DEFAULT_HANDOFF);
+    const abs = join(tmpdir(), "lane-handoff-override");
+    expect(laneEnvFile({ LANE_ENV_FILE: abs })).toBe(abs);
+    // run.sh `cd`s to the repo root before it writes, so a relative value names a repo-relative file.
+    expect(laneEnvFile({ LANE_ENV_FILE: "scripts/local-stack/.other-env" })).toBe(join(REPO_ROOT, "scripts/local-stack/.other-env"));
+  });
+
+  it("both readers fail loud NAMING the overridden handoff, and the retired STACK_ENV_FILE is ignored", () => {
+    const dir = mkdtempSync(join(tmpdir(), "lane-env-readers-"));
+    try {
+      const missing = join(dir, "no-such-handoff");
+      // A decoy at the retired variable: a reader still honouring it would read
+      // this file instead of failing on the override.
+      const decoy = join(dir, "decoy-env");
+      writeFileSync(decoy, 'DB_URL="postgresql://127.0.0.1:1/postgres"\n');
+      const env = { ...process.env, LANE_ENV_FILE: missing, STACK_ENV_FILE: decoy };
+      const report = spawnSync(process.execPath, ["scripts/local-stack/sql-corpus-report.mjs"], {
+        cwd: REPO_ROOT,
+        encoding: "utf8",
+        env,
+        timeout: 60_000,
+      });
+      expect(report.error, "sql-corpus-report did not run").toBeUndefined();
+      expect(report.status, `sql-corpus-report must refuse to measure (exit 2)\n${report.stderr}`).toBe(2);
+      expect(report.stderr, "sql-corpus-report did not read LANE_ENV_FILE").toContain("no-such-handoff");
+      const probe = spawnSync(process.execPath, ["scripts/local-stack/capability-probe.mjs"], {
+        cwd: REPO_ROOT,
+        encoding: "utf8",
+        env,
+        timeout: 60_000,
+      });
+      expect(probe.error, "capability-probe did not run").toBeUndefined();
+      expect(probe.status, `capability-probe must MEASURE_FAIL (exit 1)\n${probe.stdout}${probe.stderr}`).toBe(1);
+      expect(probe.stderr, "capability-probe did not read LANE_ENV_FILE").toContain("no-such-handoff");
+      expect(`${probe.stdout}${probe.stderr}`, "capability-probe still reads the retired STACK_ENV_FILE").not.toContain("decoy-env");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

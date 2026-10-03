@@ -76,7 +76,7 @@ phases below carry the corrections, not the bullets.
 
 - [x] **Phase 158: OPS-CI — A merge means a deploy** - External FIFO mutex + `cancelled`-conclusion watcher close the shared-test-db eviction (#616); `sql-tests` gated by an aggregator; orphaned e2e specs run; TEST stale-`pending` drained; MultiKeyConnectStep flake root-caused (completed 2026-08-21)
 - [x] **Phase 159: RANK — Public-ranking integrity** - Failed/stale-computation KPIs out of published percentiles on BOTH engines; anon `(*)` splats become explicit projections; quantstats sign-flip + blend-annualization default closed; FILL-arm CAS; uid shape validated
-- [x] **Phase 160: PROVENANCE — The server's venue is the venue that annualizes** - `api_keys.exchange` server-authoritative at every INSERT; the `asset_class` √365/√252 stamp derives from the attested venue WITH the null-attestation guard; B-M1 PROD census first
+- [x] **Phase 160: PROVENANCE — The server's venue is the venue that annualizes** - `api_keys.exchange` server-authoritative at every INSERT; the `asset_class` √365/√252 stamp derives from the attested venue WITH the null-attestation guard; B-M1 PROD census first — verification: passed (completed 2026-10-02; PRs #703–#706, closed in #790, plan 07 in #930; StrategyForm smoke left untested by founder decision)
 - [ ] **Phase 161: WIZERR — Honest error surfaces** - The recorded WIZFORM-02 class residue: thirteen surfaces stop rendering `UNKNOWN`, false sentences, or unwinnable "try again"
 - [x] **Phase 161.1: LEDGER-REFRESH — Recurring strategy refresh for ledger-backed venues, shipped dormant behind a founder-gated schedule** (INSERTED)
 - [x] **Phase 162: HONEST — What the user sees is true** - No raw Python exceptions as copy, no FRESH badge on a dead series, real equity curves, metrics on drawer rows, the clicked key preselected
@@ -87,7 +87,7 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 164.1.1.1: LANEONLYGATES — sql-tests must not run gates that require a pg-lane-only fixture, and the exclusion must be impossible to grow silently. MEASURED DEFECT shipped in PR #815 and RED ON MAIN (run 35347643700, merge eec8a659): supabase/tests/test_prod_prober_cadence.sql fails under sql-tests with ERROR relation net._lane_posts does not exist at :645. That table is the pg-net stand-in from scripts/pg-lane/fixtures/34-fixture-pg-net-stand-in.sql, whose own header says NEVER APPLIED TO TEST OR PROD — it exists only inside the throwaway pg-lane cluster. But sql-tests globs supabase/tests/test_*.sql unconditionally, so the gate passes on the lane (sql-mutation SUCCESS, mutation-covered there) and CANNOT pass on shared TEST, permanently. NOT hygiene: sql-tests is BLOCKING in the frontend aggregator and ci.yml:2205 records that Railway SKIPS the analytics-service deploy while main CI is red, so this red is what prevents POST /api/prober-cadence-alert (shipped in #815) from reaching production. SAFETY, and it forbids the lazy fix: shared TEST carries the REAL pg_net, so a gate that worked there would make genuine outbound HTTP from shared infrastructure every run — it must be EXCLUDED from that lane, never accommodated into it. LOCKED: do NOT weaken WR-03. sql-tests is built on A PRINTED SKIP IS NOT A PASS and fails the step on a whole-file RAISE NOTICE SKIP bail-out, so the fix must be a FILE-LEVEL EXCLUSION (never executed by this job, coverage asserted by sql-mutation instead), NOT an in-file skip, and that distinction must be argued in the artifact rather than assumed. SCOPE: (1) a machine-readable LANE-ONLY declaration in the gate file naming the fixture it requires; (2) the sql-tests loop honouring it and PRINTING every exclusion on every run, since a silent exclusion is the same defect class as a gate reporting PASS having measured nothing; (3) the excluded SET pinned as SITES NOT A COUNT per the B3 convention in drift-check-scripts.test.ts, re-derived from the corpus by a contract test so a one-for-one swap or a new exclusion cannot land unseen; (4) evidence the excluded file is still mutation-covered. Check whether any OTHER gate references a scripts/pg-lane/fixtures/** object — the vault stand-in vault.decrypted_secrets is the near-miss: it EXISTS on both sides (stand-in table on the lane, real view on TEST) so it is explicitly NOT this class and must not be swept in.** (INSERTED)
 - [x] **Phase 164.2: CURATED-COPY — the curated failure sentence must reach the user** (INSERTED)
 - [x] **Phase 164.2.1: SESSIONID-FENCE — the stale wizardSessionId root cause: a preselect for key B must never inherit an abandoned draft's idempotency token from key A** (INSERTED)
-- [x] **Phase 164.3: VACUITY — a control that cannot fail must be caught by machine, not by red team** (INSERTED)
+- [x] **Phase 164.3: VACUITY — a control that cannot fail must be caught by machine, not by red team** (INSERTED) — verification: passed (completed 2026-09-12, PR #724, v0.77.0.0; plan 07 deferred, delivered by 164.5-07)
 - [x] **Phase 164.3.1: SOUND-PRIMITIVES — all FOUR cycling primitives closed by construction: neuter scan, mutation identity, VAC-04, self-referential oracle** (INSERTED)
 - [x] **Phase 164.4: REDUNDER-BACKFILL — every SQL gate arm gets a RED-UNDER annotation that a machine PROVES bites** (INSERTED)
 - [x] **Phase 164.4.1: PGCRON-LANE — put pg_cron on the throwaway pg-lane and retire the REDUNDER-PGCRON deferral** (INSERTED)
@@ -127,7 +127,7 @@ phases below carry the corrections, not the bullets.
 - [ ] **Phase 164.9.3.1: FANINGRAPH — a fan-in child never strands when its parent fails, a match_decisions delete never raises 23505 through its cascade, and a fan-in diamond never deadlocks on the parent lock** (INSERTED) — not yet verified
 - [x] **Phase 164.9.3.2: DEFER40001 — a compute-job RPC that raises SQLSTATE 40001 never makes PostgREST retry it without end** (INSERTED) — verification: passed (completed 2026-10-02, PR #919, v0.118.0.0)
 - [x] **Phase 164.9.3.2.1: ENQ40001 — the enqueue race-loss raise (SQLSTATE 40001 in `_enqueue_compute_job_internal`) answers a PostgREST caller instead of re-running the call** (INSERTED) — verification: passed (completed 2026-10-02, PR #929, v0.118.1.5)
-- [ ] **Phase 164.9.4: CIOFFMUTEX — `python` and `e2e-seeded` no longer queue on the shared-TEST advisory lock; each runs against a database private to its runner** (INSERTED) — not yet verified
+- [x] **Phase 164.9.4: CIOFFMUTEX — `python` and `e2e-seeded` no longer queue on the shared-TEST advisory lock; each runs against a database private to its runner** (INSERTED) — verification: passed (completed 2026-10-03, PR #880, v0.119.0.0)
 - [x] **Phase 164.9.5: AUTOREDUMP — after a migration applies to PROD, the committed baseline is re-dumped and proposed automatically** (INSERTED) — verification: passed (completed 2026-10-02, PR #875, v0.106.0.0; first bot re-dump PR #920)
 - [x] **Phase 165: DEPS — The 9-PR dependabot campaign** - pandas `requirements.in` prerequisite commit FIRST, then one PR at a time in the research-verified order, full suite between each; #614 and #606 CLOSED with reasons — ⛔ RETIRED 2026-09-27 by founder decision ("Land as maintenance, retire the phases"): closed WITHOUT delivery as a phase; the dependabot PRs land one at a time as maintenance under the green rule.
 - [x] **Phase 165.1: PIPDEPS — the pip dependabot work lands with production pandas never downgraded** (INSERTED) — ⛔ RETIRED 2026-09-27 by founder decision ("Land as maintenance, retire the phases"): closed WITHOUT delivery as a phase; the dependabot PRs land one at a time as maintenance under the green rule.
@@ -145,7 +145,7 @@ phases below carry the corrections, not the bullets.
 - [ ] **Phase 167.1.2: ACCOUNTTRUTH — one exchange account is counted once, and the allocator equity curve shows only what the data supports** (INSERTED) — not yet verified
 - [ ] **Phase 167.2: KEYCARDSYNC — the key card never shows one key's sync result as another key's** (INSERTED) — verification: human_needed
 - [ ] **Phase 167.2.1: FACTSHEETBUILDABLE — a strategy is called computed only when its factsheet can actually build** (INSERTED) — verification: human_needed
-- [x] **Phase 168: DRBOPTIONS — a Deribit options account ingests end to end** — verification: passed (completed 2026-10-02)
+- [x] **Phase 168: DRBOPTIONS — a Deribit options account ingests end to end** — verification: passed (completed 2026-10-02, PR #867)
 - [ ] **Phase 169: PAGETRUTH — every number agrees across pages and with its own record length** — not yet verified
 - [ ] **Phase 169.3: SMALLFIXES — admin compute jobs, recommendations, profile exchanges and the one mandate rule show true numbers** (INSERTED) — not yet verified (plan 01 shipped in #868)
 - [x] **Phase 170: LAYOUT — page layout reads clean and holds on every page** — verification: passed (completed 2026-10-01; post-deploy defects routed to 170.2)
@@ -227,7 +227,7 @@ Plans:
   3. The `asset_class` stamp at `finalize-wizard` derives from the attested venue, and the swap MOVES WITH the null-attestation extension of the `skipAssetClassWrite` guard — a NULL attestation SKIPS; it never stamps `traditional`/√252 onto a crypto strategy (⚠️ TODOS.md's "one-identifier change" framing is measured WRONG; `isCryptoExchange(null) === false` is the trap).
   4. The B-D2 oracle pins the ECONOMICS (a null attestation annualizes on nothing — it skips), never the implementation's own expression; if the census finds affected strategies, their re-annualization gets golden-parity treatment.
 
-**Plans**: 7 plans (6 executed + 1 gap closure)
+**Plans:** 7/7 plans complete (6 executed + 1 gap closure)
 
 Plans:
 **Wave 1**
@@ -661,7 +661,7 @@ ordering is unenforced, wave frontmatter drifting from ROADMAP, and `NYQ-01`. Sa
 system (upstream `gsd-core`, not this repo). Mixing them in makes this unshippable. Book them
 separately.
 
-**Plans:** 9/10 plans executed
+**Plans:** 9/10 plans executed; plan 07 retired as `status: superseded` (GSD #2349 rule, 2026-10-03), DEFERRED 2026-08-29 and delivered by Phase 164.5 plan 07; its box stays unchecked by design
 
 Plans:
 
@@ -671,8 +671,8 @@ Plans:
 - [x] 164.3-04-PLAN.md — VAC-07 SPIKE: 263-migration replay measured + local-stack lane with trapped teardown (D-15) [wave 1]
 - [x] 164.3-05-PLAN.md — Mutation runner core: RED-UNDER-M grammar + parser + first-failure identity + both exit-1 modes + aggregation (VAC-01, OPS-08-F8) [wave 2]
 - [x] 164.3-06-PLAN.md — Static vacuity linter, mechanisms 1/2/4 + narrow 3, red fixtures per rule, NO mechanism-5 rule (VAC-03, D-16) [wave 2]
-- [x] 164.3-07-PLAN.md — Phase 159 closure spec: two concurrent csv-finalize POSTs, one 2xx + one honest 409, winner holds (VAC-07, D-08) [wave 2]
-  ⭐ **164.3-07 SUPERSEDED 2026-10-02:** VAC-07 was delivered and scored by Phase 164.5 plan 07 (`src/__tests__/csv-finalize-concurrent-never-classified.test.ts`, run by `frontend-local-stack`); see 164.3-07-SUMMARY.md.
+- [ ] 164.3-07-PLAN.md — Phase 159 closure spec: two concurrent csv-finalize POSTs, one 2xx + one honest 409, winner holds (VAC-07, D-08) [wave 2]
+  ⭐ **164.3-07 SUPERSEDED 2026-10-02:** VAC-07 was delivered and scored by Phase 164.5 plan 07 (`src/__tests__/csv-finalize-concurrent-never-classified.test.ts`, run by `frontend-local-stack`); no SUMMARY is written for it here: a SUMMARY ends the deferral that `verify-plan-anchors.test.ts` pins by name, and the one added in #930 turned `main` red (removed 2026-10-03 in the 164.9.4 PR); `164.3-07-DEFERRED.md` stays the record.
 - [x] 164.3-08-PLAN.md — Corpus annotation backfill (30 arm-anchored markers, measured), full run green, ARMS_FLOOR pinned, sql-mutation CI job + aggregator row (VAC-01) [wave 3]
 - [x] 164.3-09-PLAN.md — Plan-anchor verifier: range + quote re-resolution over pending plans, CI seam + execute-time convention (VAC-05, D-06 own wave) [wave 4]
 - [x] 164.3-10-PLAN.md — All five mechanisms re-introduced and demonstrated caught, durable via vitest pin + every-push runner (VAC-06) [wave 5]
@@ -3371,7 +3371,9 @@ Plans:
 **Goal:** `python` and `e2e-seeded` no longer queue on the shared-TEST advisory lock; each runs against a database private to its runner.
 **Requirements**: TODOS `[164.9.4-CI-MUTEX-QUEUE]` (owned here)
 **Depends on:** Phase 164.9.1
-**Plans:** 0 plans
+⭐ **Founder override, 2026-10-03 (AskUserQuestion "Ship now, grade on its CI"):** ships with VERIFICATION `human_needed`; the one open item is SC-3's e2e-seeded half, graded on the ship CI run (merge only on passed ≥ 201 and no flaky line). The lane flake behind the 2026-10-02 gap was root-caused and fixed first (option D: `e2e/full-flow.spec.ts` unticks "Hide examples" and fails on an empty table). Recorded in `164.9.4-CONTEXT.md` as well.
+
+**Plans:** 12/12 plans complete (planned 2026-09-26; 4 waves: W1 01–06 · W2 07 · W3 08 · W4 09–12; plan-checked, 3 rounds)
 
 ⭐ **Founder decision, 2026-09-26 (AskUserQuestion).**
 
@@ -3389,6 +3391,13 @@ The wait grows with the number of open PRs, because every one of them contends f
 - Phase 164.4.2 moved `sql-tests` to `scripts/local-stack/run.sh`.
 - Phase 164.4.2.1 took `test-db-drift` off the key.
 
+⭐ **Orchestrator decision, 2026-09-26 (autonomous planning; ✅ RATIFIED by the founder 2026-09-27 via AskUserQuestion, "Ratify D-14") — CONTEXT D-14.**
+The app's CSP `connect-src` in `next.config.ts` refuses a loopback Supabase origin (measured by the
+research), so `e2e-seeded` cannot leave the key without a fix. Taken: derive the configured
+`NEXT_PUBLIC_SUPABASE_URL` origin into `connect-src` only when no existing source already matches it,
+so the production header stays byte-identical. Rejected: `bypassCSP`, which would make the seeded
+suite unable to catch a CSP edit that breaks login.
+
 ⭐ **ROUTED HERE 2026-09-27 (founder, "Pass it, route SC-3 to 164.9.4"; Phase 164.4.2.1 CONTEXT D-11):** Phase 164.4.2.1's SC-3 speed claim measured FAIL on clauses (a) and (c) on five graded merge-push runs (`36228159891`, `36242744753`, `36247495409`, `36251087509`, `36262210635`; run-totals 20m51s–25m42s against 18m50s; `python` + `e2e-seeded` acquire-wait 8m56s–14m00s against 8m25s). `test-db-drift` is off the key and off the critical path; the residual is `e2e-seeded` waiting while `python` holds the key (python's pytest step 9m00s–13m56s). Taking both jobs off the key is this phase's goal, so 164.4.2.1's residual is owned here. Re-grade against `164.4.2.1-MEASUREMENT.md` `## Verdict rule` when this phase lands.
 
 ⭐ **ROUTED 2026-09-27 (founder, AskUserQuestion): the first measurement run's two reds are real defects outside this phase.**
@@ -3400,9 +3409,12 @@ The wait grows with the number of open PRs, because every one of them contends f
 - **Measured 2026-09-27:** five roadmap-only merges to `main` each ran `python` and `e2e-seeded` on push. Runs `36311440078` and `36311239974` (push, `main`) failed with `timed out after 3600s waiting for the shared-test-db advisory lock (key 61616158)`, with 8 and 7 jobs waiting.
 - **Success:**
   - A push to `main` whose diff against its first parent is docs-only takes the short path. It still produces a recorded green CI run that Railway can wait on.
+    - ⛔ **NARROWED 2026-10-02 (review round 2):** the short path now requires BOTH (a) every GitHub Actions check run on `before` is non-red, Railway's own gate (SFH-04; round 3 WR-01 widened it from the `frontend` check run, which a red `e2e` or `lighthouse-mobile` cannot reach), and (b) the pushed range touches none of the seven `TEST_READ_PLANNING_PATHS` (D-16, which include `ROADMAP.md` and `config.json`). Any other docs-only push runs the full corpus. Consequence: a ROADMAP-only merge, the shape measured above, runs the full corpus again, and a close-out merge landing while its predecessor's CI is still running does too. The short path now fires mainly for STATE / state.json / VERIFICATION-only pushes made after the previous push went green. Since this phase that costs runner minutes, not mutex timeouts. ⛔ **CORRECTED 2026-10-02 (review round 4 CR-01 + WR-01 + WR-02):** (a) above is no longer sufficient on its own: the predecessor must also carry a successful `frontend` check run, and every GitHub Actions check suite on it must be completed and non-red; and a pushed range carrying a commit that is not a GitHub PR merge runs the full corpus. See the dated note below and D-16.
   - A push that touches any code path runs the full corpus.
   - A test fails on the old behaviour (a docs-only push classified as code), and a second test proves that a code-touching push is not filtered.
   - The existing rule that `changed-paths` itself carries no `if:` is kept. The job still runs on every event, because a skipped `needs:` job skips its dependents.
+- ⭐ **2026-10-02 (founder, AskUserQuestion "Treat those 3 as code"; review round 2 WR-01): a push that touches a `.planning/` file a `frontend-test` assertion reads is CODE, not docs-only.** The short path above had removed the merge-push backstop `[CI-DOCSPATH-01]` relied on, so a docs merge breaking `lint-sql-gates.test.ts` G3 or a `verify-plan-anchors.test.ts` real-tree pin went green on `main` and reddened the next unrelated code change. ⚠️ The question named three files; the round-2 measurement of the two named test files found SIX (`REQUIREMENTS.md`, `ROADMAP.md`, `159-VERIFICATION.md`, and Phase 164.3's `164.3-07-DEFERRED.md`, `164.3-07-PLAN.md` and absent `164.3-07-SUMMARY.md`). ⛔ **CORRECTED 2026-10-02 (review round 3 CR-01): the set is SEVEN.** `critical-regressions.test.ts` reads `.planning/config.json` (the two `workflow.use_worktrees` guards), and the round-2 derivation never scanned that file. `ci-docs-path-filter.contract.test.ts` now derives the set from EVERY tracked test file (vitest, Playwright, pytest) and the local modules they import or spawn, in both directions, so a third reader can no longer be invisible to it. The founder confirmed on 2026-10-02 that the list may grow beyond the original three ("six files is fine"); the seventh entry follows that rule rather than a separate ruling. Listed in `scripts/classify-changed-paths.mjs` `TEST_READ_PLANNING_PATHS`. PR path unchanged. Recorded as D-16 in `164.9.4-CONTEXT.md`.
+- ⭐ **2026-10-02 (review round 2 SFH-04, fixed):** the push short path is also taken only when `before`'s own `frontend` check run concluded `success`. Red, cancelled, pending, absent or an API error runs the full corpus, so a docs-only push cannot turn `main` green (and release a Railway deploy) over a red or unfinished code commit. ⛔ **CORRECTED 2026-10-02 (review round 3 WR-01 + SFH LOW-04; predicate set by the orchestrator):** the check now mirrors Railway's own gate, which `docs/runbooks/railway-worker.md` records as the commit's check-runs, every workflow's non-red. Every GitHub Actions check run on `before` (all workflows, all events, `workflow_dispatch` included; every run `filter=latest` returns, so only in-suite re-run attempts are collapsed and a newer suite never hides an older red one) must be completed as `success`, `skipped` or `neutral`, and at least one must exist. Non-Actions checks (Vercel) are ignored. Anything else, including a truncated page, runs the full corpus. The `frontend` check alone was not enough: `e2e` and `lighthouse-mobile` are docs-filtered jobs outside the aggregator, and CI run `36892795002` concluded `failure` while its `frontend` concluded `success`. `changed-paths` keeps `contents: read` + `checks: read`. Consequence: a push on top of a dispatched SHA whose dispatch reddened (the full-history gitleaks scan does, by construction) always runs the full corpus. That costs minutes, never a gap, because Railway would refuse that SHA too. ⛔ **CORRECTED 2026-10-02 (review round 4 CR-01 + WR-01 + SFH MEDIUM-01 + LOW-07; design set by the orchestrator):** green checks alone were not proof that CI ran, because scheduled and `workflow_run` workflows attach green checks to `main` SHAs and a workflow run queued at the workflow level has no check runs. The short path now also requires a completed `frontend` check run concluded `success` (CI's `if: always()` aggregator), reads runs with `filter=all` deduplicated by (check suite, name) to the latest in-suite attempt, and requires every GitHub Actions check suite on `before` completed and non-red. Accepted cost (IN-03): a running or red scheduled workflow on `before` also costs the short path. Details in `164.9.4-CONTEXT.md` D-16. Same round, WR-02: `plan-anchor-verify` is `pull_request`-only, so a pushed range carrying a commit that is not a GitHub PR merge (a direct push) now runs the full corpus instead of trusting an unwritten no-direct-push assumption.
 
 ## Success Criteria
 1. Neither job acquires advisory key `61616158`.
@@ -3413,7 +3425,25 @@ The wait grows with the number of open PRs, because every one of them contends f
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 164.9.4 to break down)
+**Wave 1** *(six file-disjoint plans; 04, 05 and 06 share neuter targets, so they run in isolated worktrees or one after another)*
+- [x] 164.9.4-01-PLAN.md — D-11: commit `164.9.4-MEASUREMENT.md` (BEFORE numbers, AFTER protocol) before any `ci.yml` edit
+- [x] 164.9.4-02-PLAN.md — D-14: the CSP `connect-src` adds the configured Supabase origin only when no source matches it; contract test (reversible; founder-ratified 2026-09-27)
+- [x] 164.9.4-03-PLAN.md — D-04: `scripts/local-stack/run.sh --assert-local-handoff` seam that reuses the lane's loopback guards
+- [x] 164.9.4-04-PLAN.md — the dead-holder drill and the Test 3b verdict scan stop depending on `ci.yml`
+- [x] 164.9.4-05-PLAN.md — the `critical-regressions.test.ts` protocol loops are re-pointed to `MUTEX_HOLDERS`, not retired
+- [x] 164.9.4-06-PLAN.md — the six byte-identity `it`s are re-subjected to the two other workflows, each seen RED under a neuter
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [x] 164.9.4-07-PLAN.md — `python` moves to the local-stack lane and off the key; its pins move in the same commit
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- [x] 164.9.4-08-PLAN.md — `e2e-seeded` moves to the lane and off the key, so `ci.yml` holds no key; D-09 build-guard retarget
+
+**Wave 4** *(blocked on Wave 3 completion; file-disjoint)*
+- [x] 164.9.4-09-PLAN.md — new pins the topology allows: per-job "holds and names no key", seam-before-boot rows, D-04 handoff order
+- [x] 164.9.4-10-PLAN.md — `ci.yml` prose outside the two moved jobs
+- [x] 164.9.4-11-PLAN.md — dated doc addenda (runbook, `CLAUDE.md`, `CONTRIBUTING.md`) and the D-15 evidence-only TODOS entry
+- [x] 164.9.4-12-PLAN.md — dated prose notes in script headers and the other two workflows, key counts pinned unchanged
 
 ### Phase 164.9.5: AUTOREDUMP — after a migration applies to PROD, the committed baseline is re-dumped and proposed automatically (INSERTED)
 
@@ -4618,7 +4648,7 @@ kept verbatim.
 | 164.1.1.1 LANEONLYGATES | 2/2 | Complete | #817 |
 | 164.2 CURATED-COPY (+ WIZFORM-02, WR-06-UTC both bucketers, HONEST-08-RESIDUAL, 161-ERRPREFIX) | 10/10 | Complete — PR #749 merged `05994f1d`, main CI green, PROD verified by effect. All 21 artifacts stripped from main by `22a5fe96` | v0.77.16.0 |
 | 164.2.1 SESSIONID-FENCE | 2/2 | Complete | v0.77.17.0 |
-| 164.3 VACUITY (+ SKIP-01, DRIFT-01, OPS-08-F9/F8 routed on, H-0001 routed on) | 9/10 | Complete — plan 07 (VAC-07) DEFERRED to 164.5 by founder decision 2026-08-29, stays unchecked | v0.77.0.0 |
+| 164.3 VACUITY (+ SKIP-01, DRIFT-01, OPS-08-F9/F8 routed on, H-0001 routed on) | 9/10 | Complete — plan 07 (VAC-07) DEFERRED to 164.5 by founder decision 2026-08-29, delivered by 164.5-07, stays unchecked | v0.77.0.0 |
 | 164.3.1 SOUND-PRIMITIVES (four cycling primitives) | 13/13 | Complete | v0.77.1.x |
 | 164.4 REDUNDER-BACKFILL (39 idiom files annotated; 5 pg_cron-blocked files handed to 164.4.1) | 12/12 | Complete — the phase was planned as 13 and replanned to 12 against the Plan 00 spike (`9b83b064`); plan 12 was dropped there, not left undone | v0.77.12.0 |
 | 164.4.1 PGCRON-LANE (pg_cron on the lane; 5 deferred gates annotated; lane-blocked 0; ARMS_FLOOR 361) | 6/6 | Complete — PR #744 merged `e01cc2e6`, ubuntu-measured | v0.77.13.0 |
@@ -4658,7 +4688,7 @@ kept verbatim.
 | 164.9.3.1 FANINGRAPH | 0/? | Queued — blocker, after 164.9.3 | - |
 | 164.9.3.2 DEFER40001 | 8/8 | Complete    | 2026-10-02 |
 | 164.9.3.2.1 ENQ40001 | 3/3 | Complete    | 2026-10-02 |
-| 164.9.4 CIOFFMUTEX | planned, not on main | In progress — draft PR #880 (measurement run) | - |
+| 164.9.4 CIOFFMUTEX | 12/12 | Complete    | 2026-10-03 |
 | 164.9.5 AUTOREDUMP | 9/9 | Complete — verification passed 2026-10-02 | v0.106.0.0 · #875 |
 | 164.10 BODYDRIFT | - | Closed by decision (c): the drift is real, measured and deliberately left | v0.79.1.1 · #824 |
 | 165. DEPS dependabot campaign | - | ⛔ RETIRED 2026-09-27 (founder) — not delivered as a phase; dependabot PRs land as maintenance | - |

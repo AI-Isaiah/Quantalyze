@@ -12,10 +12,10 @@ last_activity_desc: Phase 164.5.2.1 plan 04 complete
 state_head: f9fb8b252dfc58c7b57713ea75af40feff6d9a0e
 progress:
   total_phases: 85
-  completed_phases: 48
-  total_plans: 458
-  completed_plans: 453
-  percent: 56
+  completed_phases: 49
+  total_plans: 465
+  completed_plans: 460
+  percent: 58
 ---
 
 ## ⭐ STATE lineage
@@ -180,7 +180,8 @@ no VERIFICATION.md exists for this phase yet, and this repo's own rule is that p
 is decided by verification status, never by plan counts.**
 
 Phase: 164.5.2.1 (BRIDGERESIDUE) — EXECUTING (plan 5 of 5; plans 01-04 complete 2026-10-03, migration 20261003120000_sync_status_bridge_residues.sql; [164.5.2.1-02-KEPT-ROW-COMPUTED-AT] resolved by founder decision 2026-10-03, implemented in plan 03)
-Phase: 164.9.4 (CIOFFMUTEX) — VERIFYING (review loop closed by the founder after round 6; e2e-seeded flake fix, option D, in progress)
+Phase: 164.9.4 (CIOFFMUTEX) — COMPLETE 2026-10-03 (verification passed on the ship run 37072653692; PR #880 merged, v0.119.0.0)
+Phase: 160 / 164.3 / 168 — close-out 2026-10-03 (SECURITY.md for 160 and 164.3; verification frontmatter to convention; 164.3 plan 07 stays deferred)
 Phase: 164.9.3.2.1 (ENQ40001) — COMPLETE 2026-10-02 (verification passed; PR #929 merged, v0.118.1.5; no migration)
 Phase: 160 / 168 / 164.3 leftover plans — CLOSED 2026-10-02 (160-07 PROD smoke 2/3 surfaces; 168-03 observed on the re-created composite; 164.3-07 superseded by 164.5-07)
 Phase: 164.9.3.2 (DEFER40001) — COMPLETE 2026-10-02 (verification passed; PR #919 merged, v0.118.0.0; migration applied to TEST and PROD by Supabase Migrate run 36981647441)

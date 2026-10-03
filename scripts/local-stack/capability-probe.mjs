@@ -28,7 +28,7 @@
  *   runs on.
  *
  *   SUPPLY comes from the lane: ONE `psql` call against the DSN in the mode-600
- *   handoff `run.sh up` writes (`scripts/local-stack/.stack-env`), with one
+ *   handoff `run.sh up` writes (`LANE_ENV_FILE`, default `scripts/local-stack/.stack-env`), with one
  *   catalogue query per class.
  *
  * VERDICTS AND EXIT CODES
@@ -58,7 +58,10 @@
  * psql's stderr is printed only after the DSN and its password are redacted.
  *
  * Env seams, used so the refusal paths can run without a stack:
- *   STACK_ENV_FILE  the handoff to read (default scripts/local-stack/.stack-env)
+ *   LANE_ENV_FILE   the handoff to read (default scripts/local-stack/.stack-env).
+ *                   The SAME variable and default `run.sh` writes and deletes,
+ *                   so `down` removes the only copy (review 164.9.4 round 4,
+ *                   IN-02 + SFH LOW-10; the old `STACK_ENV_FILE` is retired).
  *   SQL_TESTS_DIR   the corpus directory  (default supabase/tests)
  *
  * The EXACT commands CI runs, and the exact commands a developer runs locally:
@@ -223,6 +226,44 @@ export function refuseNonLocalDsn(dsn) {
 }
 
 /**
+ * PURE: null when `url` is the lane's loopback HTTP API URL. Otherwise a reason.
+ * ⛔ The reason never quotes the URL, its userinfo or its host.
+ *
+ * Review 164.9.4 round 2, SFH-02 (reproduced): `run.sh`'s `assert_local` used
+ * the prefix glob `http://127.0.0.1:*`, which also accepts a URL whose loopback
+ * host and port sit in the USERINFO, before an `@`, with an external host as
+ * the real host. This parses instead, the same way `refuseNonLocalDsn` does for
+ * the DB half, and accepts exactly what the glob was meant to: `http:`, host
+ * 127.0.0.1 or localhost, an explicit port, and nothing in the userinfo.
+ */
+export function refuseNonLocalUrl(url) {
+  const raw = String(url);
+  if (/[\s\x00-\x1f\x7f]/.test(raw)) {
+    return "the API URL carries whitespace or a control character, which a URL parser strips";
+  }
+  // Read the authority as the raw bytes up to the first '/', '?' or '#'. An '@'
+  // or a backslash there is refused outright: parsers disagree on both (the
+  // WHATWG parser splits userinfo at the LAST '@' and reads '\' as '/').
+  const authority = raw.replace(/^[A-Za-z][A-Za-z0-9+.-]*:\/\//, "").split(/[/?#]/)[0];
+  if (authority.includes("@") || authority.includes("\\")) {
+    return "the API URL carries userinfo or a backslash in its authority, so its real host is not the one it appears to name";
+  }
+  let u;
+  try {
+    u = new URL(raw);
+  } catch {
+    return "the API URL is not a parseable URL";
+  }
+  if (u.protocol !== "http:") return "the API URL is not an http:// URL, and the lane always serves plain http on loopback";
+  if (u.username !== "" || u.password !== "") return "the API URL carries userinfo";
+  if (u.hostname !== "127.0.0.1" && u.hostname !== "localhost") {
+    return "the API URL names a host other than 127.0.0.1/localhost. This lane is local-only: TEST is shared and PROD is PROD";
+  }
+  if (u.port === "") return "the API URL carries no port, and the lane always writes one";
+  return null;
+}
+
+/**
  * PURE: demand (from the corpus) x supply (from the lane) -> verdict, named
  * findings, and one row per class for the verdict line.
  * @param {{files: number, demand: Record<string, number|null>, supply: Record<string, number|null>}} facts
@@ -282,6 +323,23 @@ export function verdictLine(corpus, result) {
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(HERE, "..", "..");
 const DEFAULT_STACK_ENV = join(HERE, ".stack-env");
+
+/**
+ * THE lane env-handoff path, for every Node reader (this probe and
+ * `sql-corpus-report.mjs`). It mirrors `run.sh` exactly: `LANE_ENV_FILE` when
+ * set and non-empty (bash's `${LANE_ENV_FILE:-…}`), else the default, with a
+ * relative value resolved against the repo root because `run.sh` `cd`s there
+ * before it writes. Review 164.9.4 round 4 (IN-02 + SFH LOW-10): the two readers
+ * used to read a hard-coded default and a third variable, so a `LANE_ENV_FILE`
+ * override moved `up`'s write and `down`'s delete while they kept reading a
+ * stale default copy.
+ *
+ * @param {Record<string, string | undefined>} [env] the environment to read; defaults to `process.env`
+ * @returns {string} the absolute handoff path
+ */
+export function laneEnvFile(env = process.env) {
+  return env.LANE_ENV_FILE ? resolve(REPO_ROOT, env.LANE_ENV_FILE) : DEFAULT_STACK_ENV;
+}
 const DEFAULT_TESTS_DIR = join(REPO_ROOT, "supabase", "tests");
 const shown = (p) => relative(REPO_ROOT, p) || ".";
 
@@ -372,20 +430,38 @@ function refuseNonLocalDsnCli() {
   return 0;
 }
 
+/**
+ * `--refuse-nonlocal-url` (review 164.9.4 round 2, SFH-02): the parse-based
+ * loopback gate for the lane's HTTP API URL, the sibling of
+ * `--refuse-nonlocal-dsn`. `run.sh`'s `assert_local` calls it. The URL arrives in
+ * `LOOPBACK_URL`, never argv, and is never printed. Exit 0 = loopback, 1 = refused or unset.
+ */
+function refuseNonLocalUrlCli() {
+  const url = process.env.LOOPBACK_URL;
+  const why = url ? refuseNonLocalUrl(url) : "LOOPBACK_URL is unset or empty, so there is no URL to prove local";
+  if (why) {
+    console.error(`::error::refusing a non-local API URL: ${why}`);
+    return 1;
+  }
+  console.log("loopback-url: OK (http, 127.0.0.1/localhost, a port, no userinfo)");
+  return 0;
+}
+
 function main(argv) {
   if (argv.includes("--self-test")) return selfTest();
   if (argv.length === 1 && argv[0] === "--refuse-nonlocal-dsn") return refuseNonLocalDsnCli();
+  if (argv.length === 1 && argv[0] === "--refuse-nonlocal-url") return refuseNonLocalUrlCli();
   // ⛔ A typo'd flag must not fall through to a probe the caller did not ask for.
   if (argv.length > 0) {
     console.error(
-      `::error::unknown argument(s): ${argv.join(" ")}. This probe takes only --self-test, or --refuse-nonlocal-dsn on its own`,
+      `::error::unknown argument(s): ${argv.join(" ")}. This probe takes only --self-test, or --refuse-nonlocal-dsn or --refuse-nonlocal-url on its own`,
     );
     return EXIT.MEASURE_FAIL;
   }
 
   const { texts, error: corpusError } = readCorpus(process.env.SQL_TESTS_DIR || DEFAULT_TESTS_DIR);
   const corpus = deriveDemand(texts);
-  const { supply, error: supplyError } = readSupply(process.env.STACK_ENV_FILE || DEFAULT_STACK_ENV);
+  const { supply, error: supplyError } = readSupply(laneEnvFile());
   const result = judge({ files: corpus.files, demand: corpus.demand, supply });
 
   // Always printed, whatever the verdict, so "clean" and "did not run" never look alike.
@@ -406,9 +482,9 @@ function main(argv) {
  * ⛔ Raise it only together with the arm that adds one; lowering it to make a
  * run green is deleting a proof.
  */
-export const EXPECTED_ASSERTIONS = 55;
+export const EXPECTED_ASSERTIONS = 68;
 
-const SECTIONS = 15;
+const SECTIONS = 16;
 
 /** A supply map where every class is present at exactly its required count. */
 function allPresent() {
@@ -647,6 +723,49 @@ function selfTest() {
         return why.length > 0 && !why.includes(dsn) && !why.includes("s3cret") && !why.includes("example.invalid");
       }),
       "no refusal message carries the DSN, its password or its host",
+    );
+  }
+
+  head("refuseNonLocalUrl: the lane's http API URL, parsed rather than globbed (SFH-02)");
+  {
+    ok(refuseNonLocalUrl("http://127.0.0.1:54421") === null, "127.0.0.1 with a port is accepted");
+    ok(refuseNonLocalUrl("http://localhost:54421") === null, "localhost with a port is accepted");
+    // Built from parts so this tracked file carries no literal smuggling URL:
+    // the loopback host and port as the USERINFO, an external host as the real
+    // host. The old `http://127.0.0.1:*` glob accepted exactly this shape.
+    const loopback = "127.0.0.1:54421";
+    const external = "nonecho-marker.example.invalid";
+    const smuggled = ["http://", loopback, "@", external].join("");
+    const refusals = {
+      smuggled,
+      smuggledPort: ["http://", loopback, "@", external, ":443"].join(""),
+      remote: `http://${external}:54421`,
+      lookalike: `http://127.0.0.1.${external}:54421`,
+      https: "https://127.0.0.1:54421",
+      portless: "http://127.0.0.1",
+      backslash: ["http://", loopback, "\\", "@", external].join(""),
+      whitespace: "http://127.0.0.1:54\t421",
+      unparseable: "not a url",
+    };
+    ok(
+      new URL(smuggled).hostname === external && smuggled.startsWith("http://127.0.0.1:"),
+      "CALIBRATION: the smuggled shape matches the old prefix glob while its real host is external",
+    );
+    ok(typeof refuseNonLocalUrl(refusals.smuggled) === "string", "the loopback host as userinfo before an external host is refused");
+    ok(typeof refuseNonLocalUrl(refusals.smuggledPort) === "string", "the same shape with an explicit external port is refused");
+    ok(typeof refuseNonLocalUrl(refusals.remote) === "string", "a remote host is refused");
+    ok(typeof refuseNonLocalUrl(refusals.lookalike) === "string", "a host that only starts with 127.0.0.1 is refused");
+    ok(typeof refuseNonLocalUrl(refusals.https) === "string", "a non-http scheme is refused, as the glob refused it");
+    ok(typeof refuseNonLocalUrl(refusals.portless) === "string", "a URL with no port is refused, as the glob refused it");
+    ok(typeof refuseNonLocalUrl(refusals.backslash) === "string", "a backslash in the authority is refused");
+    ok(typeof refuseNonLocalUrl(refusals.whitespace) === "string", "whitespace inside the URL is refused");
+    ok(typeof refuseNonLocalUrl(refusals.unparseable) === "string", "an unparseable URL is refused");
+    ok(
+      Object.values(refusals).every((u) => {
+        const why = String(refuseNonLocalUrl(u) ?? "");
+        return why.length > 0 && !why.includes(u) && !why.includes("example.invalid") && !why.includes("54421");
+      }),
+      "no refusal message carries the URL, its host or its port",
     );
   }
 

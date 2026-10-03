@@ -62,6 +62,10 @@
 #                                                      # exactly as `up` does (--replay-set:
 #                                                      # names the migrations it would replay);
 #                                                      # exit = its verdict
+#   scripts/local-stack/run.sh --assert-local-handoff [FILE]
+#                                                      # assert the handoff (default: the
+#                                                      # lane's .stack-env) is loopback:
+#                                                      # API_URL and DB_URL; prints no value
 #
 # Environment seams (defaults = the repo paths; each resolved value is logged):
 #   LANE_MIGRATIONS_DIR     the migrations directory the gate classifies and the replay applies
@@ -81,7 +85,18 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 LANE_DIR="${REPO_ROOT}/scripts/local-stack"
-ENV_FILE="${LANE_DIR}/.stack-env"
+# The env handoff. ONE name for every reader and writer (review 164.9.4 round 3,
+# IN-02): `up` writes it, `--assert-local-handoff` defaults to it, `down` and the
+# failure trap delete it, and the self-test asserts it is gone. Outside this
+# script, `capability-probe.mjs` and `sql-corpus-report.mjs` read it through the
+# same variable and default (`laneEnvFile()`, review 164.9.4 round 4, IN-02 + SFH
+# LOW-10), so `down` deletes the only copy. `LANE_ENV_FILE`,
+# the variable the `python` / `e2e-seeded` / `sql-tests` export steps already read,
+# overrides it HERE, so a diverging value moves the write, the guard and the
+# teardown together instead of leaving the mode-600 file (service-role key
+# included) behind at a path `down` never removes. Unset, it is the gitignored
+# default below, which is what every CI step uses today.
+ENV_FILE="${LANE_ENV_FILE:-${LANE_DIR}/.stack-env}"
 BASELINE_FILE="${REPO_ROOT}/supabase/schema/baseline.sql"
 # Three DECISION F seams (Phase 164.4.2 plan 06). The defaults are the repo paths;
 # the overrides exist so the replay can be driven end to end — synthetic
@@ -224,16 +239,19 @@ arm_teardown() {
 }
 
 # --- local-target assertion ---------------------------------------------------
+# Review 164.9.4 round 2, SFH-02: PARSED, not globbed. The old prefix glob
+# `http://127.0.0.1:*` also accepted a URL whose loopback host and port sit in
+# the userinfo before an `@`, with an external host as the real host (measured:
+# `--assert-local-handoff` passed it). `capability-probe.mjs --refuse-nonlocal-url`
+# is the sibling of the WR-08 DSN gate: http, 127.0.0.1/localhost, a port, no
+# userinfo. The URL travels in the environment, never argv, and is never printed.
 assert_local() {
   local api_url="$1"
-  case "$api_url" in
-    http://127.0.0.1:*|http://localhost:*) ;;
-    *)
-      echo "FATAL: stack reported a non-local API URL. Refusing to continue." >&2
-      echo "       This lane is local-only; TEST is shared and PROD is PROD." >&2
-      exit 1
-      ;;
-  esac
+  if ! LOOPBACK_URL="$api_url" node "${LANE_DIR}/capability-probe.mjs" --refuse-nonlocal-url >/dev/null; then
+    echo "FATAL: stack reported a non-local API URL. Refusing to continue." >&2
+    echo "       This lane is local-only; TEST is shared and PROD is PROD." >&2
+    exit 1
+  fi
 }
 
 # --- env handoff --------------------------------------------------------------
@@ -265,6 +283,36 @@ write_env_handoff() {
   mv "$tmp" "$ENV_FILE"
   chmod 600 "$ENV_FILE"
   log "env handoff written: ${ENV_FILE} (gitignored, mode 600)"
+}
+
+# --- handoff loopback assertion (Phase 164.9.4 D-04) -----------------------------
+# A job that CONSUMES the handoff asserts it is local before it exports anything.
+# ⛔ No guard of its own: API_URL goes through `assert_local` above, DB_URL through
+# the WR-08 parse-based probe, called exactly as `load_baseline` calls it. The probe
+# needs a postgres: scheme, so it cannot judge API_URL; that is why both are reused.
+# ⛔ Prints no URL, DSN or key: its output lands in a public Actions log.
+assert_local_handoff() {
+  local handoff="$1" api_url db_url
+  if [ ! -f "$handoff" ] || [ ! -r "$handoff" ]; then
+    echo "FATAL: lane handoff file missing or unreadable: ${handoff}" >&2
+    exit 1
+  fi
+  api_url="$(sed -n 's/^API_URL="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "$handoff" | head -1)"
+  if [ -z "$api_url" ]; then
+    echo "FATAL: the lane handoff carries no API_URL line: ${handoff}" >&2
+    exit 1
+  fi
+  assert_local "$api_url"
+  db_url="$(sed -n 's/^DB_URL="\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' "$handoff" | head -1)"
+  if [ -z "$db_url" ]; then
+    echo "FATAL: the lane handoff carries no DB_URL line: ${handoff}" >&2
+    exit 1
+  fi
+  if ! LOOPBACK_DSN="$db_url" node "${LANE_DIR}/capability-probe.mjs" --refuse-nonlocal-dsn >/dev/null; then
+    echo "FATAL: the lane handoff names a non-local database. Refusing to continue (value not printed)." >&2
+    exit 1
+  fi
+  log "handoff is loopback (API_URL and DB_URL), values not printed"
 }
 
 # --- schema -------------------------------------------------------------------
@@ -954,5 +1002,12 @@ case "${1:-}" in
   # "unwired". No daemon, no stack — it reads the marker, the dump's sha256 and
   # the migrations directory, and names the replay set (DECISION F).
   --check-currency) check_baseline_currency ;;
+  # Asserts the lane HANDOFF (default: ENV_FILE, i.e. LANE_ENV_FILE or .stack-env) is loopback,
+  # and exits 1 on any other answer. Same argument as the seams above, applied to
+  # D-04 (Phase 164.9.4): the `python` and `e2e-seeded` lane-handoff steps call it
+  # FIRST, before any $GITHUB_ENV write, so they REUSE `assert_local` and the WR-08
+  # probe instead of carrying a third loopback check. No daemon, no stack, no value
+  # printed.
+  --assert-local-handoff) shift; assert_local_handoff "${1:-$ENV_FILE}" ;;
   *)           usage; exit 2 ;;
 esac
