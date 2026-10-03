@@ -3173,7 +3173,7 @@ Plans:
 ### Phase 164.9.6.1: SUBSETSHARD — a FULL sql-mutation run fits well under its 20-minute cap again, and a stale-baseline-drift red no longer forces one. Founder decision 2026-10-03 (AskUserQuestion "Book it, run after 164.6.6"): queued to run AFTER 164.6.6. Measured: full runs took 18m40s on the #937 PR, 16m on the #939 PR, and timed out at 20m on the main push after #939 merge 9c1dc3137 (job cancelled; 574 arms, up from 556 at 13m). Cascade: every migration merge leaves main red with the tolerated baseline-content-drift until the bot re-dump lands; the 164.9.6 green-predecessor rule (D-13/WR-03) then forces FULL on the next push, which can time out, keeping main red and making Railway skip analytics deploys. Scope: (1) split the full corpus into parallel shards (PRs, main FULL pushes, nightly) so a full run takes about 10 min, with one floor/ratchet verdict over the merged shard results; (2) predecessorVerdict treats a red whose ONLY failing checks are the founder-tolerated stale-baseline class (sql-gate-lint baseline-content-drift and the frontend aggregator it reds) as green, fail-loud on anything else. The 20-minute cap is NOT raised. (INSERTED)
 
 **Goal:** [Urgent work - to be planned]
-**Requirements**: TBD
+**Requirements**: SS-1, SS-2, SS-3, SS-4, SS-5, SS-6, SS-7, SS-8
 **Depends on:** Phase 164.9.6
 **Plans:** 3 plans
 
