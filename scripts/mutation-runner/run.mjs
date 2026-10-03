@@ -1144,7 +1144,42 @@ const PROBE_AVAILABLE_OUTPUT = `ERROR:  ${LANE_PROBE_AVAILABLE}`;
 //                with exactly two defects, one naming `FILES_FLOOR regression: 56
 //                annotated file(s) < floor 57`. Each separation edit was restored
 //                from a byte backup and proved with cmp. WAIVED_CEILING stays 0.
-export const FILES_FLOOR = 56;
+//
+// ⭐ RE-DERIVED 2026-10-03 (Phase 164.5.2.1 BRIDGERESIDUE, plan 05), 56 -> 58:
+//                TWO NEW gates, both against the bridge
+//                sync_strategy_analytics_status as migration 20261003120000
+//                defines it: supabase/tests/test_sync_status_bridge_residues.sql
+//                (the COMPOSITE-REREAD and RETRY-PLAIN-COMPLETE residues and the
+//                hold-the-date keep, 16 arms) and the LANE-ONLY two-backend
+//                supabase/tests/test_sync_status_bridge_lock.sql (the in-bridge
+//                per-strategy advisory lock, 2 arms). The denominator moves
+//                83 -> 85. MEASURED on the tree MERGED with origin/main (merge
+//                commit d0e1398a1 over origin/main 32771e783) via ONE full lane
+//                run with no file edited during it, constants still at 56 / 556
+//                (the stale-low direction the runner cannot see),
+//                `node scripts/mutation-runner/run.mjs`: `scope: FULL 58/58
+//                annotated files`, `coverage: files 58/85`, `arms: 574/574/0`,
+//                `biting: 574`, `lane-invocations: 574 … plus 58 baseline / 58
+//                restore leg(s)` (the two independent tallies AGREE),
+//                `lane-blocked: 0`, `lane-probe: pg_cron AVAILABLE`,
+//                `unreachable: 27`, `per-arm lane time: mean 1.1s over 574 arm
+//                run(s)`, `✅ No defects. Every annotated arm bit its own arm
+//                first.`, exit 0, wall clock 790 s. Per-file lines:
+//                `test_sync_status_bridge_lock.sql: sections 2 / judged 2 /
+//                annotated 2 / waived 0 / biting 2` and
+//                `test_sync_status_bridge_residues.sql: sections 16 / judged 16 /
+//                annotated 16 / waived 0 / biting 16`; every other per-file row is
+//                unchanged. Stale-low direction OBSERVED at 56 on the merged tree:
+//                src/__tests__/mutation-runner-floors.test.ts FAILS with
+//                `RATCHET STALE: 58 of 85 gate files are now annotated but
+//                FILES_FLOOR is still 56. Raise FILES_FLOOR in
+//                scripts/mutation-runner/run.mjs to 58.` Too-high direction
+//                OBSERVED at 59 (with ARMS_FLOOR 575): a full lane run exits 1
+//                with exactly two defects, one naming `FILES_FLOOR regression: 58
+//                annotated file(s) < floor 59`. The separation edit was restored
+//                from a byte backup and proved with cmp (exit 0).
+//                WAIVED_CEILING stays 0.
+export const FILES_FLOOR = 58;
 
 // ARMS_FLOOR — PINNED 2026-08-29 BY MEASUREMENT (plan 164.3-08), not chosen.
 //
@@ -2809,7 +2844,32 @@ export const FILES_FLOOR = 56;
 //    declares 556 twin(s) of which 0 are waivers, so a green run bites 556.
 //    ARMS_FLOOR is 555.` Too-high direction NOT re-run for this +1.
 //    WAIVED_CEILING stays 0 — no waiver was added.
-export const ARMS_FLOOR = 556;
+// ⭐ RE-DERIVED 2026-10-03 (Phase 164.5.2.1 BRIDGERESIDUE, plan 05): 556 -> 574.
+//    EIGHTEEN arms in TWO NEW gates (which also move FILES_FLOOR 56 -> 58),
+//    against sync_strategy_analytics_status as migration 20261003120000
+//    defines it: 16 in supabase/tests/test_sync_status_bridge_residues.sql
+//    (W1..W7 and R1..R6 for the two 164.6.7 residues, K1..K3 for the founder's
+//    hold-the-date keep) and 2 in the LANE-ONLY
+//    supabase/tests/test_sync_status_bridge_lock.sql (B1, B2). MEASURED on the
+//    tree MERGED with origin/main (d0e1398a1) via ONE full lane run, no file
+//    edited during it, constants still at 56 / 556: `scope: FULL 58/58
+//    annotated files`, `coverage: files 58/85`, `arms: 574/574/0`, `biting:
+//    574`, `lane-invocations: 574` (plus 58 baseline / 58 restore legs),
+//    `lane-blocked: 0 file(s)`, `lane-probe: pg_cron AVAILABLE`, `unreachable:
+//    27 file(s)`, `per-arm lane time: mean 1.1s over 574 arm run(s)`, `✅ No
+//    defects. Every annotated arm bit its own arm first.`, exit 0. Per-file
+//    lines: `test_sync_status_bridge_lock.sql: sections 2 / judged 2 /
+//    annotated 2 / waived 0 / biting 2` and
+//    `test_sync_status_bridge_residues.sql: sections 16 / judged 16 /
+//    annotated 16 / waived 0 / biting 16`. Stale-low direction OBSERVED at 556:
+//    src/__tests__/mutation-runner-floors.test.ts FAILS with `The corpus
+//    declares 574 twin(s) of which 0 are waivers, so a green run bites 574.
+//    ARMS_FLOOR is 556.` Too-high direction OBSERVED at 575 (with
+//    FILES_FLOOR 59): a full lane run exits 1 with exactly two defects, one
+//    naming `ARMS_FLOOR regression: 574 biting arm(s) < floor 575`; restored
+//    from a byte backup and proved with cmp (exit 0).
+//    WAIVED_CEILING stays 0 — no waiver was added.
+export const ARMS_FLOOR = 574;
 
 // WAIVED_CEILING — PINNED 2026-09-02 BY MEASUREMENT (164.3.1 red team), not
 // chosen. A CEILING, not a floor: it fails when the corpus carries MORE waivers
