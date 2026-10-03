@@ -93,10 +93,11 @@ function runScope(env: Record<string, string>, body: string = scopeStepBody()): 
     const outFile = join(dir, "github-output");
     writeFileSync(script, body);
     writeFileSync(outFile, "");
+    const childEnv: Record<string, string> = { PATH: process.env.PATH ?? "", GITHUB_OUTPUT: outFile, ...env };
     const res = spawnSync("bash", [script], {
       cwd: REPO_ROOT,
       encoding: "utf8",
-      env: { PATH: process.env.PATH ?? "", GITHUB_OUTPUT: outFile, ...env },
+      env: childEnv as NodeJS.ProcessEnv,
     });
     const stdout = res.stdout ?? "";
     return {
@@ -355,16 +356,17 @@ function deriveThenScope(sha: string) {
     }
     const outFile = join(dir, "github-output");
     writeFileSync(outFile, "");
+    const deriveEnv: Record<string, string> = {
+      ...cleanEnv(),
+      ...PUSH_MAIN,
+      PUSH_BEFORE_SHA: before,
+      PUSH_FORCED: "false",
+      GITHUB_OUTPUT: outFile,
+    };
     const derived = spawnSync("node", ["scripts/sql-gate-subset.mjs"], {
       cwd: wt,
       encoding: "utf8",
-      env: {
-        ...cleanEnv(),
-        ...PUSH_MAIN,
-        PUSH_BEFORE_SHA: before,
-        PUSH_FORCED: "false",
-        GITHUB_OUTPUT: outFile,
-      },
+      env: deriveEnv as NodeJS.ProcessEnv,
     });
     expect(derived.status, `${derived.stdout}${derived.stderr}`).toBe(0);
     const outputs = parseOutputs(readFileSync(outFile, "utf8"));
