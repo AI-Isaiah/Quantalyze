@@ -12,3 +12,11 @@
     file belongs to plan 03, and the scope boundary limits each plan to its own changes.
   - **Measured:** apart from this line, the other 117 tsc errors are all in `self-referential-oracle.test.ts` and
     `seam-log-coverage.test.ts`, and come from the shared node_modules TypeScript 7.0.2 environment.
+
+## From plan 05 (found 2026-10-03, out of plan 05's scope)
+
+- **`src/lib/factsheet/compute.conventions.test.ts` fixtures B and C fail locally on a snapshot mismatch** in
+  float output (`pain_index` and nearby fields), in the full `npm test` run. This branch does not touch
+  `src/lib/factsheet` (`git diff --stat <merge-base>..HEAD -- src/lib/factsheet` is empty). Not investigated:
+  it may be the shared node_modules environment or a pre-existing main-branch state. CI's reading on the
+  phase PR decides which.
