@@ -385,6 +385,10 @@ export function classifyPushRange({ before, forced, cwd, fetchPredecessor = defa
   // nothing about the CODE under it, which is exactly `before`'s code. The short
   // path is taken only when CI provably ran and finished green on `before`; see
   // `predecessorVerdict`. Consulted LAST, so a code push never calls the API.
+  // Phase 164.9.6.1 D-04 (founder): this path stays STRICT on purpose. It never
+  // passes `predecessorVerdict(sha, fetchPredecessor, { tolerateBaselineDrift: true })`:
+  // a docs-only push on a drift-red main skips CI, so main would read green over
+  // an unresolved drift. The contract test pins the call to two arguments.
   const verdict = predecessorVerdict(sha, fetchPredecessor);
   if (!verdict.ok) return fullCorpus(`predecessor ${sha.slice(0, 12)} is not proven green (${verdict.why})`);
   return { docsOnly: true, reason: `${range}; predecessor ${sha.slice(0, 12)} ${verdict.why}` };
