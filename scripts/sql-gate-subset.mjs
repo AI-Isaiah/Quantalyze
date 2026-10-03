@@ -46,6 +46,23 @@
  *     fixtures, or a migration a gate's RED-UNDER-SETUP may apply) is FULL: those
  *     inputs feed EVERY gate's verdict, so narrowing to the changed gate files
  *     would leave every other gate's arms unexercised against the new machinery.
+ *     ⚠️ (2026-10-03, Phase 164.9.6) "a migration a gate's RED-UNDER-SETUP may
+ *     apply" is FULL on a PULL REQUEST only. On a push to main the gates whose
+ *     setup list applies a changed migration are SELECTED instead (D-03, see
+ *     `migrationLoaders`), and the setup list is EXACT for what the lane
+ *     observes: the lane applies only a gate's setup list plus the gate file
+ *     (research correction to D-03). On a push, `ci.yml` is machinery only when
+ *     its `changed-paths` or `sql-mutation` job section changed, and the floors
+ *     file is not machinery (D-10, see `PUSH_MACHINERY_PREFIXES`).
+ *
+ * ── THE D-09 EXCEPTION (founder override, 2026-10-03) ───────────────────────
+ * On a push to `refs/heads/main` ONLY, a single-PR-squash range that changes no
+ * gate file, no migration and no push machinery derives the NAMED verdict
+ * `sql_gate_mode=none` ("no mutation input changed: …", with the changed-file
+ * count). It is a recorded, scoped exception to the fence's "an empty change
+ * set is FULL": pull requests keep the fence unchanged, and the nightly full run
+ * is the backstop. A range that changes a migration no gate loads is NOT
+ * covered by it and stays FULL.
  *
  * ⭐ `GATE_FILE_RE` IS A SECURITY CONTROL, not tidiness (T-164.4.2-20). On a fork
  * PR the author chooses filenames, and plan 09 hands this list to a shell step.
@@ -58,13 +75,14 @@
  *   node scripts/sql-gate-subset.mjs --self-test   # prove every verdict fires
  *   node scripts/sql-gate-subset.mjs               # the derivation (CI, or locally)
  */
-import { appendFileSync, existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { spawnSync } from "node:child_process";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { changedFilesAgainstBase, firstParentCommits, isPrMergeCommit, pushRangeFiles, scratchRepo } from "./classify-changed-paths.mjs";
+import { parseAnnotations } from "./mutation-runner/parse.mjs";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -99,7 +117,106 @@ export const MACHINERY_PREFIXES = [
   "scripts/sql-gate-subset.mjs",
   "scripts/classify-changed-paths.mjs",
   ".github/workflows/ci.yml",
+  "scripts/mutation-floors.mjs",
 ];
+
+/** Where migrations live; a changed path under it selects its loaders on a push (D-03). */
+export const MIGRATIONS_DIR_PREFIX = "supabase/migrations/";
+/** The workflow whose two mutation job sections are compared on a push (D-10). */
+export const CI_WORKFLOW = ".github/workflows/ci.yml";
+/** The `ci.yml` jobs whose section change makes `ci.yml` machinery on a push (D-10). */
+export const CI_MUTATION_JOBS = ["changed-paths", "sql-mutation"];
+/** The floors data file (D-10), machinery on a pull request only. */
+export const FLOORS_FILE = "scripts/mutation-floors.mjs";
+
+/**
+ * The machinery list on a PUSH to main (Phase 164.9.6, D-10), DERIVED from
+ * `MACHINERY_PREFIXES` rather than hand-copied, so the two cannot drift. Three
+ * entries are filtered out, each judged differently on a push:
+ *   - `supabase/migrations/`: a changed migration selects the gates whose
+ *     RED-UNDER-SETUP applies it (D-03), instead of forcing FULL;
+ *   - `.github/workflows/ci.yml`: machinery only when its `changed-paths` or
+ *     `sql-mutation` job section changed (`ciMutationSectionsChanged`);
+ *   - `scripts/mutation-floors.mjs`: raising a floor is not a machinery change
+ *     on a push (D-10); FULL runs (the nightly, any fallback) enforce floors.
+ * ⭐ WHY THE FLOORS FILE STAYS IN `MACHINERY_PREFIXES` (planner interpretation,
+ * recorded in CONTEXT.md, no D-number): pull-request behaviour is out of this
+ * phase's scope, and today a PR that raises a floor edits `run.mjs` and runs
+ * FULL, which proves the raised floor bites BEFORE merge. Keeping the floors
+ * file PR machinery preserves exactly that once the floors move out of
+ * `run.mjs`.
+ */
+export const PUSH_MACHINERY_PREFIXES = MACHINERY_PREFIXES.filter(
+  (p) => p !== MIGRATIONS_DIR_PREFIX && p !== CI_WORKFLOW && p !== FLOORS_FILE,
+);
+
+/**
+ * PURE: which of `CI_MUTATION_JOBS` differ between two `ci.yml` texts (D-10).
+ * A job's section runs from its two-space job key line under `jobs:` to the
+ * next two-space key line, the next column-0 key, or the end of the text.
+ * ⛔ FAIL SAFE: a job absent from EITHER text counts as changed. Top-level keys
+ * (`env:`, `concurrency:`) are not compared, by D-10's literal scope
+ * (T-164.9.6-06, accepted; the nightly full run is the backstop).
+ *
+ * @returns {string[]} the changed job names, in `CI_MUTATION_JOBS` order
+ */
+export function ciMutationSectionsChanged(beforeText, afterText) {
+  return CI_MUTATION_JOBS.filter((job) => {
+    const a = jobSection(String(beforeText ?? ""), job);
+    const b = jobSection(String(afterText ?? ""), job);
+    return a === null || b === null || a !== b;
+  });
+}
+
+/** One job's section text, or null when the job (or `jobs:`) is absent. */
+function jobSection(text, job) {
+  const lines = text.split("\n");
+  const jobsAt = lines.findIndex((l) => /^jobs:\s*(#.*)?$/.test(l));
+  if (jobsAt < 0) return null;
+  // `job` is one of the CI_MUTATION_JOBS constants: letters and `-` only, no regex metacharacter.
+  const key = new RegExp(`^  ${job}:\\s*(#.*)?$`);
+  const start = lines.findIndex((l, i) => i > jobsAt && key.test(l));
+  if (start < 0) return null;
+  let end = lines.length;
+  for (let i = start + 1; i < lines.length; i += 1) {
+    if (/^  [^\s#][^:]*:/.test(lines[i]) || /^[^\s#][^:]*:/.test(lines[i])) {
+      end = i;
+      break;
+    }
+  }
+  return lines.slice(start, end).join("\n");
+}
+
+/**
+ * Which gates load each migration (Phase 164.9.6, D-03): every `supabase/tests/`
+ * gate's RED-UNDER-SETUP `apply` list, read by the RUNNER'S OWN parser
+ * (`parseAnnotations`), never a second regex. The lane applies only a gate's
+ * setup list plus the gate file, so this map is EXACT for what the mutation
+ * lane can observe (research correction to D-03).
+ * ⛔ THROWS, naming the file, when any gate's annotations report a parse error:
+ * a setup list that cannot be read cannot be trusted to name its loaders, and
+ * the caller turns the throw into FULL.
+ *
+ * @param {string} root — the checkout to read
+ * @returns {Map<string, string[]>} migration path -> sorted gate paths
+ */
+export function migrationLoaders(root) {
+  const loaders = new Map();
+  for (const name of readdirSync(join(root, GATE_DIR_PREFIX)).sort()) {
+    const rel = `${GATE_DIR_PREFIX}${name}`;
+    if (!GATE_FILE_RE.test(rel)) continue;
+    const parsed = parseAnnotations(readFileSync(join(root, rel), "utf8"), { file: rel });
+    if (parsed.errors.length > 0) {
+      throw new Error(`${rel}: its RED-UNDER annotations do not parse (${parsed.errors[0].message})`);
+    }
+    for (const applied of parsed.setup?.apply ?? []) {
+      if (!applied.startsWith(MIGRATIONS_DIR_PREFIX)) continue;
+      if (!loaders.has(applied)) loaders.set(applied, []);
+      loaders.get(applied).push(rel);
+    }
+  }
+  return loaders;
+}
 
 /**
  * PURE: the verdict. No I/O — `presentFiles` (the changed gate paths that exist
@@ -109,15 +226,19 @@ export const MACHINERY_PREFIXES = [
  * On a `push` the inputs are `ref` (GITHUB_REF), `pushRange` (the shared
  * lister's `{ok, sha, files}` or `{ok: false, reason}`) and `commits` (the
  * range's first-parent `[hash, email, subject]` triples, or the Error the read
- * threw); `changedFiles` is unused there. See `judgePush`.
+ * threw), plus `ciChangedSections` / `ciCompareError` (the D-10 section compare,
+ * when `ci.yml` changed) and `loaders` / `loaderError` (the D-03 map, when a
+ * migration changed); `changedFiles` is unused there. See `judgePush`.
  *
  * @param {{event: string|undefined, changedFiles?: string[], presentFiles: Set<string>|string[], ref?: string,
  *   pushRange?: {ok: boolean, sha?: string, files?: string[], reason?: string}, commits?: string[][]|Error|null}} input
- * @returns {{mode: "full"|"subset", files: string[], reason: string}}
+ * @returns {{mode: "full"|"subset"|"none", files: string[], reason: string}}
  */
-export function judge({ event, changedFiles, presentFiles, ref, pushRange, commits }) {
+export function judge({ event, changedFiles, presentFiles, ref, pushRange, commits, ciChangedSections, ciCompareError, loaders, loaderError }) {
   const full = (reason) => ({ mode: "full", files: [], reason });
-  if (event === "push") return judgePush({ ref, pushRange, commits, presentFiles });
+  if (event === "push") {
+    return judgePush({ ref, pushRange, commits, presentFiles, ciChangedSections, ciCompareError, loaders, loaderError });
+  }
   if (event !== "pull_request") {
     return full(`event is '${event ?? "(unset)"}', neither pull_request nor push — the full corpus is owed`);
   }
@@ -153,7 +274,7 @@ export function judge({ event, changedFiles, presentFiles, ref, pushRange, commi
  * positively identify as ONE GitHub PR squash on `main` is FULL with a named
  * reason; the gate-file rules after that are the pull_request arm's own.
  */
-function judgePush({ ref, pushRange, commits, presentFiles }) {
+function judgePush({ ref, pushRange, commits, presentFiles, ciChangedSections, ciCompareError, loaders, loaderError }) {
   const full = (reason) => ({ mode: "full", files: [], reason });
   if (ref !== "refs/heads/main") {
     return full(`push to '${ref ?? "(unset)"}', not refs/heads/main — the full corpus is owed`);
@@ -178,7 +299,14 @@ function judgePush({ ref, pushRange, commits, presentFiles }) {
   const where = `${String(pushRange.sha).slice(0, 12)}..HEAD (PR merge ${head12})`;
   const present = new Set(presentFiles);
 
-  const machinery = changed.filter((p) => MACHINERY_PREFIXES.some((m) => p.startsWith(m)));
+  // D-10: the push machinery list, plus ci.yml only when a mutation job section
+  // moved. A ci.yml change with NO compare result is machinery: never assumed harmless.
+  const machinery = changed.filter((p) => PUSH_MACHINERY_PREFIXES.some((m) => p.startsWith(m)));
+  if (changed.includes(CI_WORKFLOW)) {
+    if (ciCompareError) machinery.push(`${CI_WORKFLOW} (job section compare failed: ${ciCompareError})`);
+    else if (!Array.isArray(ciChangedSections)) machinery.push(`${CI_WORKFLOW} (job sections were not compared)`);
+    else if (ciChangedSections.length > 0) machinery.push(`${CI_WORKFLOW} (job section(s) changed: ${ciChangedSections.join(" ")})`);
+  }
   if (machinery.length > 0) {
     return full(`the mutation machinery or a lane input changed in ${where}: ${machinery.join(" ")}`);
   }
@@ -187,17 +315,46 @@ function judgePush({ ref, pushRange, commits, presentFiles }) {
   if (nonConforming.length > 0) {
     return full(`changed path(s) under ${GATE_DIR_PREFIX} fail the strict gate-file pattern: ${nonConforming.join(" ")}`);
   }
-  if (underGateDir.length === 0) {
-    return full(`0 of ${changed.length} changed file(s) in ${where} are gate files`);
-  }
   const absent = underGateDir.filter((p) => !present.has(p));
   if (absent.length > 0) {
     return full(`changed gate file(s) absent from the checkout (deleted or moved): ${absent.join(" ")}`);
   }
+  const migrations = changed.filter((p) => p.startsWith(MIGRATIONS_DIR_PREFIX));
+  if (underGateDir.length === 0 && migrations.length === 0) {
+    // D-09 (founder override, push-on-main ONLY): a NAMED verdict, never an
+    // empty scope read as a pass. Reached only after the ref, single-PR-squash
+    // and machinery checks above.
+    return {
+      mode: "none",
+      files: [],
+      reason:
+        `no mutation input changed: 0 gate file(s), 0 migration(s), 0 machinery path(s) among ` +
+        `${changed.length} changed file(s) in ${where}; FULL coverage is the nightly run's`,
+    };
+  }
+  if (loaderError) {
+    return full(`a gate's RED-UNDER-SETUP list could not be read (${loaderError})`);
+  }
+  if (migrations.length > 0 && !(loaders instanceof Map)) {
+    return full("a migration changed but the gate loader map was not read");
+  }
+  const loading = [...new Set(migrations.flatMap((m) => loaders.get(m) ?? []))];
+  const selected = [...new Set([...underGateDir, ...loading])].sort();
+  const unsafe = selected.filter((p) => !GATE_FILE_RE.test(p));
+  if (unsafe.length > 0) {
+    return full(`selected gate path(s) fail the strict gate-file pattern: ${unsafe.join(" ")}`);
+  }
+  if (selected.length === 0) {
+    return full(
+      `changed migration(s) loaded by no gate's RED-UNDER-SETUP: ${migrations.join(" ")}; D-09 covers only a ` +
+        "range with no migration, so the vacuity fence owes the full corpus",
+    );
+  }
+  const migNote = migrations.length > 0 ? `, ${loading.length} gate(s) loading changed migration(s) ${migrations.join(" ")}` : "";
   return {
     mode: "subset",
-    files: underGateDir,
-    reason: `${underGateDir.length} of ${changed.length} changed file(s) in ${where} are gate files`,
+    files: selected,
+    reason: `${underGateDir.length} of ${changed.length} changed file(s) in ${where} are gate files${migNote}`,
   };
 }
 
@@ -244,7 +401,7 @@ function emit(verdict) {
 // ---------------------------------------------------------------------------
 
 /** Declared up front; a self-test that shrinks and still says PASSED is the defect. */
-export const EXPECTED_ASSERTIONS = 33;
+export const EXPECTED_ASSERTIONS = 71;
 
 const PR = "pull_request";
 const G1 = "supabase/tests/test_alpha_gate.sql";
@@ -255,6 +412,28 @@ const BEFORE = "b".repeat(40);
 /** A first-parent commit shaped like a GitHub squash merge. */
 const PR_MERGE = ["a".repeat(40), "noreply@github.com", "feat: x (#1)"];
 const range = (files) => ({ ok: true, sha: BEFORE, files });
+const G3 = "supabase/tests/test_gamma_gate.sql";
+const M = "supabase/migrations/20260101000000_self_test.sql";
+const FLOORS = "scripts/mutation-floors.mjs";
+const CI = ".github/workflows/ci.yml";
+
+/**
+ * A gate fixture `parseAnnotations` accepts with ZERO errors: a setup line
+ * applying `migration`, one prose arm and its structured twin (the shape the
+ * real corpus uses, minimised).
+ */
+const fixtureGate = (migration) =>
+  [
+    `-- RED-UNDER-SETUP: {"apply":["${migration}"]}`,
+    "-- RED-UNDER: drop the second statement from the migration.",
+    `-- RED-UNDER-M: {"arm":"1","apply":[{"kind":"edit","file":"${migration}","find":"SELECT 1;","replace":"SELECT 0;","occurrences":1}]}`,
+    "SELECT 1;",
+    "",
+  ].join("\n");
+
+/** A ci.yml with the two compared jobs plus `sql-tests`, which alone carries `variant`. */
+const ciFixture = (variant) =>
+  `name: CI\njobs:\n  changed-paths:\n    runs-on: ubuntu-latest\n  sql-mutation:\n    runs-on: ubuntu-latest\n  sql-tests:\n    runs-on: ubuntu-${variant}\n`;
 
 /**
  * Run THIS script's `main()` end to end as CI does, in `cwd`, on a push to
@@ -349,6 +528,167 @@ const CASES = [
         const r = runMainOnPush(repo.dir, { PUSH_BEFORE_SHA: base, PUSH_FORCED: "true" });
         let pass = ok(r.code === 0, `exit 0 (got ${r.code}: ${r.out})`);
         return ok(r.outputs.sql_gate_mode === "full" && /a forced push/.test(r.outputs.sql_gate_reason ?? ""), `full, quoting the forced push (got ${JSON.stringify(r.outputs)})`) && pass;
+      } finally {
+        repo.cleanup();
+      }
+    },
+  },
+  {
+    claim: "a push to main FALLS BACK to FULL, named, on every shape it cannot identify as one PR squash on main",
+    run: (ok) => {
+      const at = (over) => judge({ event: "push", ref: MAIN, pushRange: range([G1]), commits: [PR_MERGE], presentFiles: [G1], ...over });
+      const rows = [
+        [{ ref: "refs/heads/feature" }, /refs\/heads\/feature/, "a ref other than main"],
+        [{ ref: undefined }, /\(unset\)/, "an unset ref"],
+        [{ pushRange: { ok: false, reason: "a forced push" } }, /push range undeterminable \(a forced push\)/, "an undeterminable range"],
+        [{ commits: new Error("fatal: bad revision") }, /commit log could not be read \(fatal: bad revision\)/, "a commit-log read error"],
+        [{ commits: [PR_MERGE, PR_MERGE] }, /2 first-parent commit\(s\), not exactly one/, "a two-commit range"],
+        [{ commits: [] }, /0 first-parent commit\(s\)/, "a range with no first-parent commit"],
+        [{ commits: [["c".repeat(40), "dev@invalid", "fix: direct"]] }, /not a GitHub PR merge/, "a direct push, not a PR merge"],
+        [{ pushRange: range([]) }, /changed no files/, "an empty range"],
+      ];
+      let pass = true;
+      for (const [over, want, label] of rows) {
+        const v = at(over);
+        pass = ok(v.mode === "full" && v.files.length === 0 && want.test(v.reason), `${label} is FULL, named (got ${v.mode}: ${JSON.stringify(v.reason)})`) && pass;
+      }
+      return pass;
+    },
+  },
+  {
+    claim: "D-10: on a push the runner, the pg-lane and the two subset scripts stay machinery -> FULL naming them",
+    run: (ok) => {
+      let pass = true;
+      for (const f of ["scripts/mutation-runner/run.mjs", "scripts/pg-lane/x", "scripts/sql-gate-subset.mjs", "scripts/classify-changed-paths.mjs"]) {
+        const v = judge({ event: "push", ref: MAIN, pushRange: range([G1, f]), commits: [PR_MERGE], presentFiles: [G1] });
+        pass = ok(v.mode === "full" && v.reason.includes(f), `${f} forces FULL on a push, named (got ${v.mode}: ${JSON.stringify(v.reason)})`) && pass;
+      }
+      return pass;
+    },
+  },
+  {
+    claim: "D-10: the floors file is NOT machinery on a push, and STAYS machinery on a pull request",
+    run: (ok) => {
+      const v = judge({ event: "push", ref: MAIN, pushRange: range([G1, FLOORS]), commits: [PR_MERGE], presentFiles: [G1] });
+      let pass = ok(v.mode === "subset" && JSON.stringify(v.files) === JSON.stringify([G1]), `a push raising a floor plus G1 is SUBSET [G1] (got ${v.mode}: ${JSON.stringify(v.files)} ${v.reason})`);
+      const p = judge({ event: PR, changedFiles: [G1, FLOORS], presentFiles: [G1] });
+      return ok(p.mode === "full" && p.reason.includes(FLOORS), `a PR raising a floor stays FULL, named (got ${p.mode}: ${JSON.stringify(p.reason)})`) && pass;
+    },
+  },
+  {
+    claim: "D-10: on a push ci.yml is machinery ONLY when its changed-paths or sql-mutation section changed, or the compare failed",
+    run: (ok) => {
+      const at = (over) => judge({ event: "push", ref: MAIN, pushRange: range([G1, CI]), commits: [PR_MERGE], presentFiles: [G1], ...over });
+      const other = at({ ciChangedSections: [] });
+      let pass = ok(other.mode === "subset" && JSON.stringify(other.files) === JSON.stringify([G1]), `only another job moved -> SUBSET [G1] (got ${other.mode}: ${other.reason})`);
+      const sec = at({ ciChangedSections: ["sql-mutation"] });
+      pass = ok(sec.mode === "full" && sec.reason.includes(CI) && sec.reason.includes("sql-mutation"), `the sql-mutation section moved -> FULL naming ci.yml and the section (got ${JSON.stringify(sec.reason)})`) && pass;
+      const err = at({ ciCompareError: "fatal: path not in tree" });
+      pass = ok(err.mode === "full" && err.reason.includes("fatal: path not in tree"), `a failed section compare -> FULL naming the error (got ${JSON.stringify(err.reason)})`) && pass;
+      const none = at({});
+      return ok(none.mode === "full" && none.reason.includes(CI), `a ci.yml change with NO compare result -> FULL, never assumed harmless (got ${JSON.stringify(none.reason)})`) && pass;
+    },
+  },
+  {
+    claim: "ciMutationSectionsChanged slices the two jobs and fails safe on a missing one",
+    run: (ok) => {
+      const yml = (cp, sm, st) => `name: CI\non:\n  push:\njobs:\n  changed-paths:\n    runs-on: ${cp}\n  sql-mutation:\n    runs-on: ${sm}\n  sql-tests:\n    runs-on: ${st}\n`;
+      const a = yml("u", "u", "u");
+      let pass = ok(JSON.stringify(ciMutationSectionsChanged(a, yml("u", "u", "CHANGED"))) === "[]", "a change inside sql-tests only -> []");
+      pass = ok(JSON.stringify(ciMutationSectionsChanged(a, yml("CHANGED", "u", "u"))) === JSON.stringify(["changed-paths"]), "a change inside changed-paths -> [changed-paths]") && pass;
+      const missing = a.replace("  sql-mutation:\n    runs-on: u\n", "");
+      return ok(JSON.stringify(ciMutationSectionsChanged(a, missing)) === JSON.stringify(["sql-mutation"]), `sql-mutation absent on one side -> [sql-mutation] (got ${JSON.stringify(ciMutationSectionsChanged(a, missing))})`) && pass;
+    },
+  },
+  {
+    claim: "D-03: a push changing a migration selects the changed gates PLUS every gate whose setup loads it",
+    run: (ok) => {
+      const at = (files, over) => judge({ event: "push", ref: MAIN, pushRange: range(files), commits: [PR_MERGE], presentFiles: files.filter((f) => GATE_FILE_RE.test(f)), ...over });
+      const v = at([M, G1], { loaders: new Map([[M, [G3, G2]]]) });
+      let pass = ok(v.mode === "subset" && JSON.stringify(v.files) === JSON.stringify([G1, G2, G3]), `subset [G1, G2, G3], sorted and unique (got ${v.mode}: ${JSON.stringify(v.files)} ${v.reason})`);
+      const lone = at([M], { loaders: new Map() });
+      pass = ok(lone.mode === "full" && /loaded by no gate/.test(lone.reason) && lone.reason.includes(M), `a migration no gate loads, no gate changed -> FULL (got ${JSON.stringify(lone.reason)})`) && pass;
+      const bad = at([M, G1], { loaderError: "supabase/tests/test_x.sql: malformed JSON" });
+      return ok(bad.mode === "full" && bad.reason.includes("malformed JSON"), `an unreadable setup list -> FULL naming it (got ${JSON.stringify(bad.reason)})`) && pass;
+    },
+  },
+  {
+    claim: "D-09: a push to main changing no gate, no migration and no machinery is the NAMED verdict none; a PR keeps the fence",
+    run: (ok) => {
+      const v = judge({ event: "push", ref: MAIN, pushRange: range(["README.md", "src/a.ts"]), commits: [PR_MERGE], presentFiles: [] });
+      let pass = ok(v.mode === "none" && v.files.length === 0, `mode none with no files (got ${v.mode}: ${JSON.stringify(v.files)})`);
+      pass = ok(v.reason.startsWith("no mutation input changed:") && v.reason.includes("2 changed file(s)"), `the reason is named and carries the count (got ${JSON.stringify(v.reason)})`) && pass;
+      const p = judge({ event: PR, changedFiles: ["README.md", "src/a.ts"], presentFiles: [] });
+      return ok(p.mode === "full", `the same files on a pull_request stay FULL (got ${p.mode})`) && pass;
+    },
+  },
+  {
+    claim: "migrationLoaders reads the REAL corpus through parseAnnotations, and REFUSES a malformed setup list",
+    run: (ok) => {
+      const real = migrationLoaders(REPO_ROOT);
+      let pass = ok(real instanceof Map && real.size > 0, `a non-empty loader map over the real corpus (got ${real.size})`);
+      const values = [...real.values()].flat();
+      pass = ok(values.length > 0 && values.every((g) => GATE_FILE_RE.test(g)), "every loader passes GATE_FILE_RE") && pass;
+      pass = ok([...real.keys()].every((k) => k.startsWith("supabase/migrations/")), "every key is under supabase/migrations/") && pass;
+      const dir = mkdtempSync(join(tmpdir(), "gsd-sql-gate-loaders-"));
+      try {
+        mkdirSync(join(dir, "supabase/tests"), { recursive: true });
+        writeFileSync(join(dir, G1), "-- RED-UNDER-SETUP: {not json}\n");
+        let threw = null;
+        try {
+          migrationLoaders(dir);
+        } catch (e) {
+          threw = e;
+        }
+        return ok(threw !== null && String(threw.message).includes(G1), `a malformed setup list THROWS naming the file (got ${threw ? threw.message : "no throw"})`) && pass;
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  },
+  {
+    claim: "END TO END (164.5.2.1-shaped): migration + new gate + floors + an unrelated ci.yml job -> subset [G1, G2]",
+    run: (ok) => {
+      const repo = scratchRepo("subset-migration");
+      try {
+        const gate2 = fixtureGate(M);
+        let pass = ok(parseAnnotations(gate2, { file: G2 }).errors.length === 0, "the fixture gate parses with ZERO errors (else a FULL here would point at the wrong cause)");
+        const base = repo.commit({ [G2]: gate2, [M]: "SELECT 1;\n", [FLOORS]: "export const FILES_FLOOR = 1;\n", [CI]: ciFixture("a") });
+        repo.commit({ [M]: "SELECT 1;\nSELECT 2;\n", [G1]: "-- new gate\n", [FLOORS]: "export const FILES_FLOOR = 2;\n", [CI]: ciFixture("b") });
+        const r = runMainOnPush(repo.dir, { PUSH_BEFORE_SHA: base });
+        pass = ok(r.code === 0, `exit 0 (got ${r.code}: ${r.out})`) && pass;
+        return ok(r.outputs.sql_gate_mode === "subset" && r.outputs.sql_gate_files === `${G1} ${G2}`, `subset of G1 and G2 (got ${JSON.stringify(r.outputs)})`) && pass;
+      } finally {
+        repo.cleanup();
+      }
+    },
+  },
+  {
+    claim: "END TO END: a PR-squash push changing only CHANGELOG.md writes none, exit 0 (D-09)",
+    run: (ok) => {
+      const repo = scratchRepo("subset-none");
+      try {
+        const base = repo.commit({ [G1]: "-- base\n", "CHANGELOG.md": "a\n" });
+        repo.commit({ "CHANGELOG.md": "b\n" });
+        const r = runMainOnPush(repo.dir, { PUSH_BEFORE_SHA: base });
+        let pass = ok(r.code === 0, `exit 0 (got ${r.code}: ${r.out})`);
+        return ok(r.outputs.sql_gate_mode === "none" && r.outputs.sql_gate_files === "" && /^no mutation input changed:/.test(r.outputs.sql_gate_reason ?? ""), `none with an empty list and the named reason (got ${JSON.stringify(r.outputs)})`) && pass;
+      } finally {
+        repo.cleanup();
+      }
+    },
+  },
+  {
+    claim: "END TO END: a range of TWO first-parent commits writes full, exit 0",
+    run: (ok) => {
+      const repo = scratchRepo("subset-two");
+      try {
+        const base = repo.commit({ [G1]: "-- base\n" });
+        repo.commit({ [G1]: "-- one\n" });
+        repo.commit({ [G1]: "-- two\n" });
+        const r = runMainOnPush(repo.dir, { PUSH_BEFORE_SHA: base });
+        let pass = ok(r.code === 0, `exit 0 (got ${r.code}: ${r.out})`);
+        return ok(r.outputs.sql_gate_mode === "full" && /2 first-parent commit\(s\)/.test(r.outputs.sql_gate_reason ?? ""), `full, naming the two commits (got ${JSON.stringify(r.outputs)})`) && pass;
       } finally {
         repo.cleanup();
       }
@@ -496,10 +836,33 @@ function derivePush(env, cwd) {
     }
     const files = pushRange.ok ? pushRange.files : [];
     const presentFiles = files.filter((p) => GATE_FILE_RE.test(p) && existsSync(join(cwd, p)));
-    return judge({ event: "push", ref, pushRange, commits, presentFiles });
+    let ciChangedSections;
+    let ciCompareError;
+    if (files.includes(CI_WORKFLOW)) {
+      try {
+        ciChangedSections = ciMutationSectionsChanged(gitShow(`${pushRange.sha}:${CI_WORKFLOW}`, cwd), gitShow(`HEAD:${CI_WORKFLOW}`, cwd));
+      } catch (e) {
+        ciCompareError = firstLineOf(e);
+      }
+    }
+    let loaders;
+    let loaderError;
+    if (files.some((p) => p.startsWith(MIGRATIONS_DIR_PREFIX))) {
+      try {
+        loaders = migrationLoaders(cwd);
+      } catch (e) {
+        loaderError = firstLineOf(e);
+      }
+    }
+    return judge({ event: "push", ref, pushRange, commits, presentFiles, ciChangedSections, ciCompareError, loaders, loaderError });
   } catch (e) {
     return { mode: "full", files: [], reason: `the push derivation failed (${firstLineOf(e)}) — the full corpus is owed` };
   }
+}
+
+/** `git show <rev:path>`, stderr PIPED so a `fatal:` line travels inside the reason. */
+function gitShow(spec, cwd) {
+  return execFileSync("git", ["show", spec], { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], maxBuffer: 64 * 1024 * 1024 });
 }
 
 /** The first line of a failed child's stderr, or the error message. */
