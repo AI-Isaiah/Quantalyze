@@ -5652,3 +5652,27 @@ async def test_orphans_are_closed_EVEN_WHEN_the_newest_row_needs_no_transition(
         "the orphan reached the lifetime dataset as a measured episode"
     )
     assert len(sink.open_rows()) == 1
+
+
+def test_job_gateway_reader_refuses_a_public_host(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Phase 164.6.6 D-07 part 1 (T-134-03): the JOB endpoint reader answers None
+    for a public host, so the heal and the session monitor skip with their
+    log-once line rather than dial an unauthenticated remote-code channel over
+    the internet. The line names the env var, never the (fabricated) value."""
+    monkeypatch.setenv("MT5_GATEWAY_HOST", "mt5-job-kd19.example.com")
+    monkeypatch.setenv("MT5_GATEWAY_PORT", "18812")
+
+    with caplog.at_level(logging.DEBUG, logger=_LOGGER_NAME):
+        assert mt5_relogin.read_env_gateway_endpoint() is None
+        # log-ONCE: a second refusal in the same process adds no line.
+        assert mt5_relogin.read_env_gateway_endpoint() is None
+
+    lines = [
+        r.getMessage() for r in _records(caplog)
+        if "not a private-network host" in r.getMessage()
+    ]
+    assert len(lines) == 1, f"expected one log-once line, saw {lines!r}"
+    assert "MT5_GATEWAY_HOST" in lines[0]
+    assert "kd19" not in "".join(r.getMessage() for r in caplog.records)

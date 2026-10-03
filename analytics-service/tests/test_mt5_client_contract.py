@@ -603,6 +603,151 @@ def test_default_connect_matches_real_mt5linux_0_1_9_ctor(monkeypatch):
     assert client._MetaTrader5__conn._config["sync_request_timeout"] == 42.0
 
 
+# --------------------------------------------------------------------------- #
+# Phase 164.6.6 D-07 part 1 / T-134-03 — the dialling side refuses a public host.
+#
+# The rpyc bridge is an UNAUTHENTICATED arbitrary-remote-code channel, so the one
+# real transport factory must never build a connection toward a host the public
+# internet can answer for. Every host below is FABRICATED (`*.example.com`, the
+# Railway public-domain and TCP-proxy SHAPES) or a well-known public resolver; no
+# test here opens a socket, because each installs a fake `mt5linux` first.
+# --------------------------------------------------------------------------- #
+
+# Each is a host the analytics service must NEVER dial. The two numeric
+# single-label forms are 8.8.8.8 spelled the way the C resolver also accepts
+# (decimal and hex); a "no dot means a private single-label name" rule would
+# admit them, and they would dial a public address.
+_PUBLIC_GATEWAY_HOSTS: tuple[str, ...] = (
+    "gateway.up.railway.app",   # a Railway public domain
+    "shuttle.proxy.rlwy.net",   # a Railway TCP-proxy host
+    "mt5.example.com",          # any other public DNS name
+    "8.8.8.8",                  # a public IPv4 literal
+    "2001:4860:4860::8888",     # a public IPv6 literal (no dot, NOT a label)
+    "[2001:4860:4860::8888]",   # the same, bracketed
+    "134744072",                # 8.8.8.8 as one decimal number
+    "0x8080808",                # 8.8.8.8 in hex
+)
+
+
+def _install_recording_mt5linux(monkeypatch) -> list[tuple[str, int]]:
+    """Install a fake ``mt5linux`` whose 0.1.9-shaped constructor RECORDS every
+    construction, so a test can prove no transport was ever built."""
+    constructed: list[tuple[str, int]] = []
+
+    class _FakeConn:
+        def __init__(self) -> None:
+            self._config: dict = {}
+
+    class _FakeMetaTrader5:
+        def __init__(self, host: str = "localhost", port: int = 18812) -> None:
+            constructed.append((host, port))
+            self._MetaTrader5__conn = _FakeConn()
+
+    fake_module = types.ModuleType("mt5linux")
+    fake_module.MetaTrader5 = _FakeMetaTrader5  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "mt5linux", fake_module)
+    return constructed
+
+
+@pytest.mark.parametrize("host", _PUBLIC_GATEWAY_HOSTS)
+def test_default_connect_refuses_a_public_gateway_host(monkeypatch, host):
+    """T-134-03 / D-07 part 1: ``_default_connect`` refuses a public host BEFORE a
+    transport exists.
+
+    WHY: the bridge executes whatever source the client sends, unauthenticated.
+    Railway private networking is what keeps it off the internet, and until this
+    phase nothing on the dialling side CHECKED that: a public domain or TCP proxy
+    pasted into ``MT5_GATEWAY_HOST`` would have been dialled, carrying broker
+    passwords in the remotely evaluated source. Before the fix the fake below
+    records a construction toward the public host; after it, nothing is built and
+    the refusal names neither host nor port.
+    """
+    constructed = _install_recording_mt5linux(monkeypatch)
+
+    with pytest.raises(mt5_client_mod.Mt5GatewayHostNotPrivate) as ei:
+        mt5_client_mod._default_connect(host=host, port=18812, timeout=30.0)
+
+    assert constructed == [], f"a transport was built toward {constructed!r}"
+    message = str(ei.value)
+    assert host.strip("[]") not in message
+    assert "18812" not in message
+    assert "T-134-03" in message
+
+
+def test_default_connect_still_dials_a_private_gateway_host(monkeypatch):
+    """The guard must not close the private path: a ``.railway.internal`` name
+    reaches the 0.1.9 constructor exactly as before."""
+    constructed = _install_recording_mt5linux(monkeypatch)
+
+    mt5_client_mod._default_connect(
+        host="gateway.railway.internal", port=8001, timeout=30.0
+    )
+
+    assert constructed == [("gateway.railway.internal", 8001)]
+
+
+# (host, allowed). Every existing fixture host the suite dials or reads through an
+# endpoint reader is in the True half, so an over-strict rule fails HERE by name.
+_PRIVATE_GATEWAY_HOST_TABLE: tuple[tuple[str, bool], ...] = (
+    # single-label names: resolvable only through the container's search domain
+    ("h", True),
+    ("localhost", True),
+    ("mt5-gateway", True),
+    # reserved last labels, case-insensitive, one trailing dot ignored
+    ("gateway.railway.internal", True),
+    ("GATEWAY.RAILWAY.INTERNAL", True),
+    ("gateway.railway.internal.", True),
+    ("gw.internal", True),
+    ("mt5-gw.internal", True),
+    ("mt5-validate-gw.internal", True),
+    ("gateway.test", True),
+    ("mt5.localhost", True),
+    # private / loopback / CGNAT (Tailscale) / ULA literals
+    ("127.0.0.1", True),
+    ("::1", True),
+    ("[::1]", True),
+    ("10.0.0.5", True),
+    ("172.16.0.1", True),
+    ("172.31.255.254", True),
+    ("192.168.1.10", True),
+    ("100.64.0.1", True),
+    ("100.127.255.254", True),
+    ("fd12:3456:789a::1", True),
+    # refused
+    ("", False),
+    ("   ", False),
+    ("gateway.up.railway.app", False),
+    ("shuttle.proxy.rlwy.net", False),
+    ("mt5.example.com", False),
+    ("internal.example.com", False),  # `internal` must be the LAST label
+    ("8.8.8.8", False),
+    ("2001:4860:4860::8888", False),
+    ("[2001:4860:4860::8888]", False),
+    ("134744072", False),
+    ("0x8080808", False),
+    ("172.32.0.1", False),            # just outside 172.16.0.0/12
+    ("100.128.0.1", False),           # just outside 100.64.0.0/10
+    ("fe80::1", False),               # link-local is not on the list
+    # A documentation range the stdlib's own private-address flag reports as
+    # private. Refusing it proves the rule is the EXPLICIT network list.
+    ("203.0.113.10", False),
+)
+
+
+@pytest.mark.parametrize(("host", "allowed"), _PRIVATE_GATEWAY_HOST_TABLE)
+def test_private_gateway_host_allowlist(host, allowed):
+    assert mt5_client_mod.is_private_gateway_host(host) is allowed
+
+
+def test_the_table_calibrates_on_a_range_the_stdlib_calls_private():
+    """The 203.0.113.10 row only proves something if the stdlib really does call
+    it private. If a future Python changes that, this fails and the row must be
+    replaced with another such range, never deleted."""
+    import ipaddress
+
+    assert ipaddress.ip_address("203.0.113.10").is_private is True
+
+
 def test_inverting_request_timeout_is_rejected():
     """WR-01: a request_timeout_s that puts the rpyc round-trip ceiling AT OR BELOW
     the MT5 login IPC timeout inverts the load-bearing dual-timeout ordering
@@ -4953,3 +5098,177 @@ def test_SESSION_SNAPSHOT_without_a_transport_fails_loud_and_is_fenced():
     with pytest.raises(Mt5SessionAbandoned):
         fenced.session_snapshot(expected_login=1, expected_server="s")
     assert len(evaluated) == 1, "the abandoned read crossed the wire"
+
+
+# --------------------------------------------------------------------------- #
+# Phase 164.6.6 D-07 part 1 / T-164.6.6-22 — ONE transport factory, so the
+# private-host check cannot be bypassed.
+#
+# `is_private_gateway_host` guards the wire only because every production path
+# reaches it through `_default_connect` (`Mt5Client.__init__` and `.restart` both
+# call the stored factory). A second place that imports `mt5linux` or opens an
+# rpyc connection would dial whatever host it was handed, unchecked. This pin reds
+# on that, naming the file.
+# --------------------------------------------------------------------------- #
+
+_TRANSPORT_FACTORY_FILE = "services/mt5_client.py"
+_TRANSPORT_FACTORY_FUNCTION = "_default_connect"
+_RPYC_CONNECT_CALLS = frozenset(
+    {"rpyc.classic.connect", "rpyc.connect", "rpyc.ssl_connect"}
+)
+_DYNAMIC_IMPORT_CALLS = frozenset({"__import__", "import_module", "importlib.import_module"})
+_TRANSPORT_PACKAGES = ("mt5linux", "rpyc")
+
+
+def _dotted_name(node: ast.AST) -> str | None:
+    parts: list[str] = []
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if isinstance(node, ast.Name):
+        parts.append(node.id)
+        return ".".join(reversed(parts))
+    return None
+
+
+def _is_package(module: str | None, package: str) -> bool:
+    return module is not None and (module == package or module.startswith(package + "."))
+
+
+def _mt5_transport_findings(source: str, rel: str) -> tuple[list[str], int]:
+    """Return ``(violations, sanctioned_imports)`` for one production source.
+
+    Violations: an ``mt5linux`` import anywhere but inside
+    ``services/mt5_client.py::_default_connect``; ANY ``rpyc`` import; a call to
+    ``rpyc.classic.connect`` / ``rpyc.connect`` / ``rpyc.ssl_connect``; a dynamic
+    import of either package by string literal. ``sanctioned_imports`` counts the
+    one allowed ``mt5linux`` import, so the caller can prove the walk saw it.
+    """
+    tree = ast.parse(source)
+    violations: list[str] = []
+    sanctioned = 0
+    stack: list[str] = []
+
+    def visit(node: ast.AST) -> None:
+        nonlocal sanctioned
+        is_func = isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        if is_func:
+            stack.append(node.name)  # type: ignore[union-attr]
+        modules: list[str | None] = []
+        if isinstance(node, ast.Import):
+            modules = [alias.name for alias in node.names]
+        elif isinstance(node, ast.ImportFrom) and node.level == 0:
+            modules = [node.module]
+        for module in modules:
+            if _is_package(module, "rpyc"):
+                violations.append(f"{rel}:{node.lineno} imports {module}")  # type: ignore[attr-defined]
+            elif _is_package(module, "mt5linux"):
+                if rel == _TRANSPORT_FACTORY_FILE and stack == [_TRANSPORT_FACTORY_FUNCTION]:
+                    sanctioned += 1
+                else:
+                    where = ".".join(stack) or "<module>"
+                    violations.append(
+                        f"{rel}:{node.lineno} imports {module} in {where}"  # type: ignore[attr-defined]
+                    )
+        if isinstance(node, ast.Call):
+            name = _dotted_name(node.func)
+            if name in _RPYC_CONNECT_CALLS:
+                violations.append(f"{rel}:{node.lineno} calls {name}")
+            elif (
+                name in _DYNAMIC_IMPORT_CALLS
+                and node.args
+                and isinstance(node.args[0], ast.Constant)
+                and isinstance(node.args[0].value, str)
+                and any(_is_package(node.args[0].value, p) for p in _TRANSPORT_PACKAGES)
+            ):
+                violations.append(
+                    f"{rel}:{node.lineno} dynamically imports {node.args[0].value}"
+                )
+        for child in ast.iter_child_nodes(node):
+            visit(child)
+        if is_func:
+            stack.pop()
+
+    visit(tree)
+    return violations, sanctioned
+
+
+def _transport_pin_files() -> list[pathlib.Path]:
+    from tests.test_mt5_concurrency import _production_python_files
+
+    root = pathlib.Path(__file__).resolve().parents[1]
+    # The shared walk covers services/, routers/ and the entrypoints; the operator
+    # scripts (`scripts/mt5_spike.py`, `scripts/mt5_soak.py`) also build clients,
+    # so they are walked here too.
+    return sorted(set(_production_python_files()) | set((root / "scripts").glob("*.py")))
+
+
+def test_only_default_connect_builds_an_mt5_transport():
+    root = pathlib.Path(__file__).resolve().parents[1]
+    files = _transport_pin_files()
+    rels = {p.relative_to(root).as_posix() for p in files}
+    assert _TRANSPORT_FACTORY_FILE in rels, "the walk lost the transport factory file"
+    assert "scripts/mt5_spike.py" in rels, "the walk lost the operator scripts"
+    assert len(files) >= 100, (
+        f"the walk scanned only {len(files)} files; a pin over a truncated walk "
+        f"passes in silence — fix the walk, never this floor"
+    )
+
+    violations: list[str] = []
+    sanctioned = 0
+    for path in files:
+        found, ok = _mt5_transport_findings(
+            path.read_text(), path.relative_to(root).as_posix()
+        )
+        violations.extend(found)
+        sanctioned += ok
+
+    assert not violations, (
+        "an MT5 transport is built outside services/mt5_client.py::_default_connect, "
+        "which bypasses the private-host check (T-134-03):\n" + "\n".join(violations)
+    )
+    assert sanctioned == 1, (
+        f"expected exactly one sanctioned mt5linux import (inside _default_connect), "
+        f"saw {sanctioned}: the checker or the factory moved"
+    )
+
+
+def test_the_single_transport_pin_reports_each_violation():
+    """Calibration: the checker must report every rule on in-memory sources, or a
+    green pin proves nothing."""
+    cases = {
+        "a module-level mt5linux import elsewhere": (
+            "services/other.py", "import mt5linux\n"
+        ),
+        "an mt5linux import in another function of the factory file": (
+            _TRANSPORT_FACTORY_FILE,
+            "def restart_raw():\n    from mt5linux import MetaTrader5\n",
+        ),
+        "an mt5linux import nested inside the factory": (
+            _TRANSPORT_FACTORY_FILE,
+            "def _default_connect():\n    def inner():\n        import mt5linux\n",
+        ),
+        "an rpyc import": ("services/other.py", "import rpyc.classic\n"),
+        "an rpyc classic connect": (
+            "services/other.py", "def f(h, p):\n    return rpyc.classic.connect(h, p)\n"
+        ),
+        "an rpyc ssl connect": (
+            "scripts/other.py", "rpyc.ssl_connect('h', 1)\n"
+        ),
+        "a dynamic mt5linux import": (
+            "services/other.py", "m = __import__('mt5linux')\n"
+        ),
+        "a dynamic rpyc import": (
+            "routers/other.py", "import importlib\nm = importlib.import_module('rpyc')\n"
+        ),
+    }
+    for label, (rel, source) in cases.items():
+        violations, _ = _mt5_transport_findings(source, rel)
+        assert violations, f"the pin did not report {label}"
+
+    violations, sanctioned = _mt5_transport_findings(
+        "def _default_connect(*, host, port, timeout):\n"
+        "    from mt5linux import MetaTrader5\n",
+        _TRANSPORT_FACTORY_FILE,
+    )
+    assert (violations, sanctioned) == ([], 1), "the sanctioned form must pass"

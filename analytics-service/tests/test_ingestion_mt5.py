@@ -1174,3 +1174,48 @@ def test_unset_validation_endpoint_fires_the_d05_alert_on_the_worker_path(
         and _WORKER_SITE_LITERAL in r.getMessage()
         for r in caplog.records
     )
+
+
+def test_a_public_validation_gateway_host_is_refused_on_the_worker_path(
+    monkeypatch, caplog
+) -> None:
+    """Phase 164.6.6 D-07 part 1 (T-134-03): a PUBLIC validation gateway host is a
+    server misconfiguration on the worker path too — the existing RuntimeError, no
+    lease, no client, and the D-05 alert for the worker site.
+
+    WHY: the rpyc bridge is unauthenticated remote code, dialled only over a
+    private network. The endpoint reader answers None for such a host, so the
+    worker never constructs a client toward it and never treats it as the user's
+    key failing. The host is FABRICATED and public-shaped."""
+    import logging
+
+    from services import mt5_relogin
+
+    def _boom(host, port):
+        raise AssertionError("no client toward a public host")
+
+    monkeypatch.setattr("services.ingestion.mt5._build_client", _boom)
+    spy = MagicMock()
+    monkeypatch.setattr(mt5_relogin, "sentry_sdk", spy)
+    monkeypatch.setenv("MT5_GATEWAY_HOST", "mt5-gw.internal")
+    monkeypatch.setenv("MT5_GATEWAY_PORT", "18812")
+    monkeypatch.setenv("MT5_VALIDATION_GATEWAY_HOST", "mt5-val-wr58.example.com")
+    monkeypatch.setenv("MT5_VALIDATION_GATEWAY_PORT", "18813")
+    seen = _spy_adapter_lease(monkeypatch)
+
+    with caplog.at_level(logging.DEBUG):
+        with pytest.raises(RuntimeError) as ei:
+            asyncio.run(Mt5Adapter().validate(_req()))
+
+    assert "MT5 gateway not configured" in str(ei.value)
+    assert seen == [], f"a lease was taken on a refused validation: {seen!r}"
+    assert spy.capture_message.call_count == 1
+    spy.set_tag.assert_called_once_with(
+        "mt5_validation_gateway_unconfigured", _WORKER_SITE_LITERAL
+    )
+    rendered = (
+        str(ei.value)
+        + "".join(r.getMessage() for r in caplog.records)
+        + repr(spy.mock_calls)
+    )
+    assert "wr58" not in rendered, "the refusal leaked the configured host"

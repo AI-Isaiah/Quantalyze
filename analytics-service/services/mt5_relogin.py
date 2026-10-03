@@ -69,6 +69,7 @@ from services.mt5_client import (
     Mt5ClientError,
     Mt5SessionAbandoned,
     _redact_credential_values,
+    is_private_gateway_host,
     mt5_terminal_answer_count,
     mt5_terminal_key,
 )
@@ -848,6 +849,19 @@ def read_env_gateway_endpoint() -> tuple[str, int] | None:
             _MT5_GATEWAY_ENV_NAMES[1],
         )
         return None
+    if not is_private_gateway_host(raw_host):
+        # Phase 164.6.6 D-07 part 1 (T-134-03): the rpyc bridge is dialled only
+        # over a private network. `_default_connect` refuses such a host too;
+        # refusing HERE keeps it a named, logged misconfiguration on the session
+        # path instead of a construction error. NAME only, never the value.
+        _log_configuration_fault_once(
+            "mt5_gateway_host_not_private",
+            "mt5 session path: skipped — %s is not a private-network host "
+            "(T-134-03). This is a SERVER misconfiguration, never a credential "
+            "failure.",
+            _MT5_GATEWAY_ENV_NAMES[0],
+        )
+        return None
     return raw_host, port
 
 
@@ -895,6 +909,20 @@ def read_env_validation_gateway_endpoint() -> tuple[str, int] | None:
             "mt5 validation path: refused — %s is set but is not an integer port. "
             "This is a SERVER misconfiguration, never a credential failure.",
             _MT5_VALIDATION_GATEWAY_ENV_NAMES[1],
+        )
+        return None
+    if not is_private_gateway_host(raw_host):
+        # Phase 164.6.6 D-07 part 1 (T-134-03): refused HERE, as None, so both
+        # callers take their D-05 misconfiguration path (500 + alert / the
+        # RuntimeError + alert). Left to `_default_connect`, the refusal would
+        # surface inside the wizard's broad connect arm as a 503 that votes on
+        # `breaker:mt5-gateway`. NAME only, never the value.
+        _log_configuration_fault_once(
+            "mt5_validation_gateway_host_not_private",
+            "mt5 validation path: refused — %s is not a private-network host "
+            "(T-134-03). This is a SERVER misconfiguration, never a credential "
+            "failure, and the job terminal is never used instead (D-05).",
+            _MT5_VALIDATION_GATEWAY_ENV_NAMES[0],
         )
         return None
     return raw_host, port
