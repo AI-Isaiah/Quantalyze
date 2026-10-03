@@ -81,6 +81,27 @@ from services.mt5_validation import _IPC_TRANSPORT_CODES
 from tests.limiter_stub import evict_module, patch_shared_limiter
 
 
+# Phase 164.6.6 D-02 — the validation terminal's endpoint as the fixtures set it.
+# Fabricated, and deliberately DIFFERENT from the job pair (`mt5-gw.internal`,
+# 18812) so a mis-routed lease is visible in its key.
+_VAL_HOST = "mt5-validate-gw.internal"
+_VAL_PORT = 18813
+
+
+@pytest.fixture(autouse=True)
+def _reset_mt5_validation_alert_state():
+    """Phase 164.6.6 D-05 — the alert's per-site window and the reader's log-once
+    throttle are module state; a capture or a logged reason from one test must
+    never suppress another's."""
+    from services import mt5_relogin
+
+    mt5_relogin._reset_mt5_validation_alert()
+    mt5_relogin._reset_relogin_log_throttle_for_tests()
+    yield
+    mt5_relogin._reset_mt5_validation_alert()
+    mt5_relogin._reset_relogin_log_throttle_for_tests()
+
+
 @pytest.fixture(autouse=True)
 def _reset_mt5_terminal_locks():
     """153.3-04: the validate path now takes the process-wide terminal lease, so a
@@ -132,8 +153,14 @@ def exchange_router(monkeypatch):
     patch_shared_limiter(monkeypatch)
 
     monkeypatch.setenv("MT5_ENABLED", "true")
+    # Phase 164.6.6 D-02 — the JOB pair stays SET, with values distinct from the
+    # VALIDATION pair, so every lease-key assertion in this file proves the wizard
+    # leased the validation terminal: a router that still read the job pair would
+    # produce a different key and turn them red.
     monkeypatch.setenv("MT5_GATEWAY_HOST", "mt5-gw.internal")
     monkeypatch.setenv("MT5_GATEWAY_PORT", "18812")
+    monkeypatch.setenv("MT5_VALIDATION_GATEWAY_HOST", _VAL_HOST)
+    monkeypatch.setenv("MT5_VALIDATION_GATEWAY_PORT", str(_VAL_PORT))
 
     evict_module("routers.exchange")
     from routers import exchange as exchange_router
@@ -1665,7 +1692,7 @@ async def test_mt5_terminal_busy_refuses_transiently_and_never_constructs_a_clie
 
     # Somebody else holds the terminal for longer than the interactive bound.
     held = mt5_concurrency._mt5_terminal_lock_for(
-        _expected_terminal_key("mt5-gw.internal", 18812)
+        _expected_terminal_key(_VAL_HOST, _VAL_PORT)
     )
     await held.acquire()
     monkeypatch.setattr(router, "_MT5_LEASE_WAIT_S", 0.05)
@@ -1684,7 +1711,10 @@ async def test_mt5_terminal_busy_refuses_transiently_and_never_constructs_a_clie
     client.close.assert_not_called()
 
     body = ei.value.detail.lower()
-    for leak in ("mt5-gw.internal", "18812", "terminal", "lease", "queue", "lock"):
+    for leak in (
+        "mt5-gw.internal", "18812", _VAL_HOST, str(_VAL_PORT),
+        "terminal", "lease", "queue", "lock",
+    ):
         assert leak not in body, f"the busy refusal leaked infrastructure: {leak!r}"
 
     # The real holder still holds it — a refused waiter released nothing.
@@ -1716,7 +1746,7 @@ async def test_the_lease_wait_does_not_consume_the_operation_deadline(
     _install_mt5_client(router, client)
 
     held = mt5_concurrency._mt5_terminal_lock_for(
-        _expected_terminal_key("mt5-gw.internal", 18812)
+        _expected_terminal_key(_VAL_HOST, _VAL_PORT)
     )
     await held.acquire()
 
@@ -1750,7 +1780,7 @@ async def test_validate_leases_the_key_mt5client_itself_would_produce(exchange_r
     Also asserts the lock is genuinely HELD during the probe — a lease that acquired
     a Lock nobody else uses would satisfy the key assertion alone."""
     router = exchange_router
-    expected_key = _expected_terminal_key("mt5-gw.internal", 18812)
+    expected_key = _expected_terminal_key(_VAL_HOST, _VAL_PORT)
     observed: list[bool] = []
 
     client = _make_client(
@@ -2192,8 +2222,10 @@ async def test_mt5_missing_gateway_env_is_permanent_500_and_secret_free(
     preserved verbatim.
     """
     router = exchange_router
-    monkeypatch.delenv("MT5_GATEWAY_HOST", raising=False)
-    monkeypatch.delenv("MT5_GATEWAY_PORT", raising=False)
+    # Phase 164.6.6 D-02 — the wizard reads the VALIDATION pair; the job pair
+    # stays set, so this also proves there is no fallback to it (D-05).
+    monkeypatch.delenv("MT5_VALIDATION_GATEWAY_HOST", raising=False)
+    monkeypatch.delenv("MT5_VALIDATION_GATEWAY_PORT", raising=False)
 
     factory = MagicMock(side_effect=AssertionError("no client when the gateway is unconfigured"))
     router.Mt5Client = factory
@@ -2355,7 +2387,7 @@ async def test_the_happy_path_emits_a_lease_wait_and_a_read_only_outcome(
     assert len(lease) == 1, f"no lease_wait event was emitted: {captured}"
     assert lease[0]["ok"] is True
     assert isinstance(lease[0]["duration_ms"], int)
-    assert lease[0]["terminal_key"] == _expected_terminal_key("mt5-gw.internal", 18812)
+    assert lease[0]["terminal_key"] == _expected_terminal_key(_VAL_HOST, _VAL_PORT)
 
     validate = _mt5_events(captured, "validate")
     assert len(validate) == 1, "a validate must terminate in EXACTLY one outcome event"
@@ -2385,7 +2417,7 @@ async def test_a_busy_terminal_emits_a_measured_lease_wait_and_a_lease_busy_outc
     _install_mt5_client(router, client)
 
     held = mt5_concurrency._mt5_terminal_lock_for(
-        _expected_terminal_key("mt5-gw.internal", 18812)
+        _expected_terminal_key(_VAL_HOST, _VAL_PORT)
     )
     await held.acquire()
     monkeypatch.setattr(router, "_MT5_LEASE_WAIT_S", 0.2)
@@ -2625,7 +2657,7 @@ async def test_an_abandoned_session_refusal_is_transient_never_a_bodyless_500(
     from services.mt5_client import bump_mt5_terminal_epoch
 
     router = exchange_router
-    key = _expected_terminal_key("mt5-gw.internal", 18812)
+    key = _expected_terminal_key(_VAL_HOST, _VAL_PORT)
 
     transport = MagicMock(name="mt5-transport")
     transport.account_info = MagicMock(return_value=_Netref(**_INVESTOR_ACCOUNT))
@@ -2704,7 +2736,7 @@ async def test_an_abandoned_read_terminal_escapes_the_broad_arm_unabsorbed(
     from services.mt5_client import bump_mt5_terminal_epoch
 
     router = exchange_router
-    key = _expected_terminal_key("mt5-gw.internal", 18812)
+    key = _expected_terminal_key(_VAL_HOST, _VAL_PORT)
 
     transport = MagicMock(name="mt5-transport")
     transport.login = MagicMock(return_value=True)
@@ -2811,7 +2843,7 @@ async def test_a_connect_stage_abandon_is_transient_and_never_the_counting_503(
     from services.mt5_client import bump_mt5_terminal_epoch
 
     router = exchange_router
-    key = _expected_terminal_key("mt5-gw.internal", 18812)
+    key = _expected_terminal_key(_VAL_HOST, _VAL_PORT)
     transport = MagicMock(name="mt5-transport")
     connects: list[int] = []
 
@@ -2943,8 +2975,10 @@ async def test_d15_lost_terminal_permission_logs_above_an_ordinary_verdict(
 
     # ...and never below the unset-env arm, measured from the SAME router.
     caplog.clear()
-    monkeypatch.delenv("MT5_GATEWAY_HOST", raising=False)
-    monkeypatch.delenv("MT5_GATEWAY_PORT", raising=False)
+    # Phase 164.6.6 D-02 — the wizard reads the VALIDATION pair; the job pair
+    # stays set, so this also proves there is no fallback to it (D-05).
+    monkeypatch.delenv("MT5_VALIDATION_GATEWAY_HOST", raising=False)
+    monkeypatch.delenv("MT5_VALIDATION_GATEWAY_PORT", raising=False)
     with caplog.at_level(logging.DEBUG, logger=_ANALYTICS_LOGGER):
         with pytest.raises(HTTPException):
             await _call(router, _make_req())
@@ -3032,13 +3066,22 @@ async def test_ipc_transport_fault_logs_at_error_like_the_d15_arm(
     ],
 )
 async def test_d15_the_loud_check_never_false_alarms_on_a_bridge_blip(
-    exchange_router, caplog, terminal, why
+    exchange_router, caplog, monkeypatch, terminal, why
 ):
     """⭐ The assertion that stops the loud check becoming a false-alarm generator.
     An unreadable, malformed or disconnected terminal proves NOTHING about the
     landmine — it is our bridge blipping and it clears on retry. It must route
     TRANSIENT and emit NOTHING above WARNING; paging an operator about a setting
-    for a network blip is how a real alarm gets ignored."""
+    for a network blip is how a real alarm gets ignored.
+
+    Phase 164.6.6 D-07 part 2: every validation that reached its login now ends
+    with a park onto the house account. The house credentials are SET here
+    (fabricated), as in production, so this test measures the blip path and not
+    the unset-credentials path, which pages by design (founder decision
+    2026-10-03, "Warn on glitch, page else")."""
+    monkeypatch.setenv("MT5_LOGIN", "700001")
+    monkeypatch.setenv("MT5_PASSWORD", "house-pw-FABRICATED-7x")
+    monkeypatch.setenv("MT5_SERVER", "House-Fabricated-Demo")
     router = exchange_router
     client = _make_client(
         account=_INVESTOR_ACCOUNT, order_check=_INVESTOR_ORDER_CHECK, terminal=terminal
@@ -3170,3 +3213,347 @@ def test_d15_the_write_scan_ignores_prose_and_catches_code():
         p.read_text(encoding="utf-8") for p in _analytics_service_source_files()
     )
     assert "[Experts]" in raw
+
+
+# --------------------------------------------------------------------------- #
+# Phase 164.6.6 D-02 / D-05 — the wizard validate leases the VALIDATION terminal,
+# and without its endpoint refuses LOUDLY and alerts. Never the job terminal.
+#
+# WHY (Rule 9): a validation is an account change. On the job terminal it logs a
+# client's un-onboarded account into the session serving live jobs and evicts
+# whatever job was mid-read. Falling back to the job pair when the validation
+# pair is unset would silently restore exactly that eviction (D-05). Every
+# expected value below — the site literal, the tag name, the level — is typed
+# here, never imported from the module under test.
+# --------------------------------------------------------------------------- #
+
+_JOB_KEY_LITERAL = "mt5-gw.internal:18812"
+_VAL_KEY_LITERAL = "mt5-validate-gw.internal:18813"
+_WIZARD_SITE_LITERAL = "validate_wizard"
+_WORKER_SITE_LITERAL = "validate_worker"
+
+
+def _spy_router_lease(router, monkeypatch) -> list[str]:
+    """Record every ``terminal_key`` the router leases, then delegate to the REAL
+    lease so the validate still runs end to end."""
+    seen: list[str] = []
+    real = router.mt5_terminal_lease
+
+    def _spy(terminal_key, *args, **kwargs):
+        seen.append(terminal_key)
+        return real(terminal_key, *args, **kwargs)
+
+    monkeypatch.setattr(router, "mt5_terminal_lease", _spy)
+    return seen
+
+
+def _sentry_spy(monkeypatch) -> MagicMock:
+    from services import mt5_relogin
+
+    spy = MagicMock()
+    monkeypatch.setattr(mt5_relogin, "sentry_sdk", spy)
+    return spy
+
+
+class _FakeMonotonic:
+    """A drivable stand-in for the ``time`` module as ``services.mt5_relogin``
+    sees it — only ``monotonic`` is read by the alert window."""
+
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def advance(self, s: float) -> None:
+        self.now += s
+
+
+async def test_the_wizard_leases_the_validation_terminal_never_the_job_terminal(
+    exchange_router, monkeypatch
+):
+    """D-02: with both pairs set, the ONE lease the wizard takes is on the
+    validation terminal's key. The job key appearing at all means a validation
+    can still switch the terminal that serves live jobs."""
+    router = exchange_router
+    seen = _spy_router_lease(router, monkeypatch)
+    _install_mt5_client(
+        router,
+        _make_client(
+            account=_INVESTOR_ACCOUNT,
+            order_check=_INVESTOR_ORDER_CHECK,
+            terminal=_HEALTHY_TERMINAL_INFO,
+        ),
+    )
+
+    assert await _call(router, _make_req()) == {"valid": True, "read_only": True}
+
+    assert seen == [_VAL_KEY_LITERAL], (
+        f"the wizard leased {seen!r}; it must lease only the validation terminal"
+    )
+    assert _JOB_KEY_LITERAL not in seen
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("MT5_VALIDATION_GATEWAY_HOST", None),
+        ("MT5_VALIDATION_GATEWAY_PORT", None),
+        ("MT5_VALIDATION_GATEWAY_PORT", "eighteen-eight-one-three"),
+    ],
+    ids=["host-unset", "port-unset", "port-not-an-int"],
+)
+async def test_an_absent_validation_endpoint_refuses_and_never_falls_back(
+    exchange_router, monkeypatch, name, value
+):
+    """D-05: the job pair is SET here. A reader that fell back to it would take a
+    lease and build a client; the refusal must do neither."""
+    router = exchange_router
+    if value is None:
+        monkeypatch.delenv(name, raising=False)
+    else:
+        monkeypatch.setenv(name, value)
+    seen = _spy_router_lease(router, monkeypatch)
+    factory = MagicMock(side_effect=AssertionError("no client when unconfigured"))
+    router.Mt5Client = factory
+
+    with pytest.raises(HTTPException) as ei:
+        await _call(router, _make_req())
+
+    assert ei.value.status_code == 500
+    assert ei.value.detail["code"] == "MT5_GATEWAY_UNCONFIGURED"
+    assert ei.value.detail["retryable"] is False
+    assert seen == [], f"a lease was taken on a refused validation: {seen!r}"
+    factory.assert_not_called()
+
+
+async def test_unset_validation_endpoint_fires_the_d05_alert_on_the_wizard_path(
+    exchange_router, monkeypatch, caplog
+):
+    """D-05 says "a clear error AND an alert". The 500 is the error; this is the
+    alert — one Sentry capture at level error, tagged for the wizard site, and an
+    ERROR line on EVERY refusal. A second refusal inside the window logs again
+    but does not capture again (a flood gets muted)."""
+    router = exchange_router
+    monkeypatch.delenv("MT5_VALIDATION_GATEWAY_HOST", raising=False)
+    router.Mt5Client = MagicMock(side_effect=AssertionError("no client"))
+    spy = _sentry_spy(monkeypatch)
+
+    with caplog.at_level(logging.ERROR, logger="quantalyze.analytics.mt5_relogin"):
+        for _ in range(2):
+            with pytest.raises(HTTPException) as ei:
+                await _call(router, _make_req())
+            assert ei.value.detail["code"] == "MT5_GATEWAY_UNCONFIGURED"
+
+    assert spy.capture_message.call_count == 1, (
+        "the D-05 alert did not reach Sentry exactly once for two refusals"
+    )
+    assert spy.capture_message.call_args.kwargs.get("level") == "error"
+    spy.set_tag.assert_called_once_with(
+        "mt5_validation_gateway_unconfigured", _WIZARD_SITE_LITERAL
+    )
+    alert_lines = [
+        r for r in caplog.records
+        if r.name == "quantalyze.analytics.mt5_relogin"
+        and r.levelno == logging.ERROR
+        and "mt5 validation refused" in r.getMessage()
+    ]
+    assert len(alert_lines) == 2, (
+        f"the ERROR line must fire on EVERY refusal, saw {len(alert_lines)}"
+    )
+    assert _WIZARD_SITE_LITERAL in alert_lines[0].getMessage()
+
+
+async def test_the_wizard_refusal_names_no_host_port_key_or_credential(
+    exchange_router, monkeypatch, caplog
+):
+    """T-164.6.6-13 / -20: the body, the log lines and the Sentry text name only
+    env var NAMES and the site. Distinctive fabricated values are set on every
+    gateway variable and on the credentials, and none may surface."""
+    router = exchange_router
+    monkeypatch.setenv("MT5_GATEWAY_HOST", "job-host-zq81.internal")
+    monkeypatch.setenv("MT5_GATEWAY_PORT", "47113")
+    monkeypatch.setenv("MT5_VALIDATION_GATEWAY_HOST", "val-host-xk27.internal")
+    monkeypatch.setenv("MT5_VALIDATION_GATEWAY_PORT", "not-a-port-q9")
+    router.Mt5Client = MagicMock(side_effect=AssertionError("no client"))
+    spy = _sentry_spy(monkeypatch)
+
+    with caplog.at_level(logging.DEBUG):
+        with pytest.raises(HTTPException) as ei:
+            await _call(
+                router,
+                _make_req(api_key="918273", api_secret="pw-sekrit-77", passphrase="Brk-Live-5"),
+            )
+
+    rendered = (
+        repr(ei.value.detail)
+        + "".join(r.getMessage() for r in caplog.records)
+        + repr(spy.mock_calls)
+    )
+    for leak in (
+        "job-host-zq81", "47113", "val-host-xk27", "not-a-port-q9",
+        "918273", "pw-sekrit-77", "Brk-Live-5",
+    ):
+        assert leak not in rendered, f"the refusal leaked {leak!r}"
+    assert "MT5_VALIDATION_GATEWAY_HOST" in repr(spy.mock_calls), (
+        "the alert must name the env var NAMES an operator has to set"
+    )
+
+
+async def test_a_raising_sentry_call_does_not_change_the_wizard_refusal(
+    exchange_router, monkeypatch
+):
+    """T-164.6.6-21: the alert may never raise into the refusal path. A Sentry
+    transport failure must leave the caller seeing the same 500."""
+    router = exchange_router
+    monkeypatch.delenv("MT5_VALIDATION_GATEWAY_PORT", raising=False)
+    router.Mt5Client = MagicMock(side_effect=AssertionError("no client"))
+    spy = _sentry_spy(monkeypatch)
+    spy.capture_message.side_effect = RuntimeError("sentry transport down")
+
+    with pytest.raises(HTTPException) as ei:
+        await _call(router, _make_req())
+
+    assert ei.value.status_code == 500
+    assert ei.value.detail["code"] == "MT5_GATEWAY_UNCONFIGURED"
+    assert spy.capture_message.call_count == 1
+
+
+def test_the_d05_alert_captures_once_per_window_per_site(monkeypatch):
+    """The window is PER SITE (the WR-02 lesson): the worker's alert must never
+    silence the wizard's. One site twice inside the window captures once; two
+    sites capture twice; past the window (a LITERAL 3600 s typed here) the signal
+    returns, so the window cannot have been widened into "once per process"."""
+    from services import mt5_relogin
+
+    spy = _sentry_spy(monkeypatch)
+    clock = _FakeMonotonic()
+    monkeypatch.setattr(mt5_relogin, "time", clock)
+
+    mt5_relogin.alert_mt5_validation_gateway_unconfigured(site=_WIZARD_SITE_LITERAL)
+    mt5_relogin.alert_mt5_validation_gateway_unconfigured(site=_WIZARD_SITE_LITERAL)
+    assert spy.capture_message.call_count == 1
+
+    mt5_relogin.alert_mt5_validation_gateway_unconfigured(site=_WORKER_SITE_LITERAL)
+    assert spy.capture_message.call_count == 2, (
+        "the worker's refusal was silenced by the wizard's window"
+    )
+
+    clock.advance(3599.0)
+    mt5_relogin.alert_mt5_validation_gateway_unconfigured(site=_WIZARD_SITE_LITERAL)
+    assert spy.capture_message.call_count == 2
+
+    clock.advance(2.0)
+    mt5_relogin.alert_mt5_validation_gateway_unconfigured(site=_WIZARD_SITE_LITERAL)
+    assert spy.capture_message.call_count == 3, (
+        "the alert must RETURN once the 3600 s window expires"
+    )
+    assert [c.args for c in spy.set_tag.call_args_list] == [
+        ("mt5_validation_gateway_unconfigured", _WIZARD_SITE_LITERAL),
+        ("mt5_validation_gateway_unconfigured", _WORKER_SITE_LITERAL),
+        ("mt5_validation_gateway_unconfigured", _WIZARD_SITE_LITERAL),
+    ]
+
+
+def test_the_d05_alert_logs_error_on_every_call(monkeypatch, caplog):
+    from services import mt5_relogin
+
+    _sentry_spy(monkeypatch)
+    with caplog.at_level(logging.ERROR, logger="quantalyze.analytics.mt5_relogin"):
+        for _ in range(3):
+            mt5_relogin.alert_mt5_validation_gateway_unconfigured(
+                site=_WORKER_SITE_LITERAL
+            )
+    lines = [
+        r for r in caplog.records
+        if r.levelno == logging.ERROR and "mt5 validation refused" in r.getMessage()
+    ]
+    assert len(lines) == 3, "the rate of refusal is itself the operator's evidence"
+
+
+def test_the_d05_alert_swallows_a_raising_capture(monkeypatch):
+    from services import mt5_relogin
+
+    spy = _sentry_spy(monkeypatch)
+    spy.capture_message.side_effect = RuntimeError("sentry transport down")
+    assert (
+        mt5_relogin.alert_mt5_validation_gateway_unconfigured(site=_WIZARD_SITE_LITERAL)
+        is None
+    )
+    spy.set_tag.side_effect = RuntimeError("sentry scope down")
+    mt5_relogin._reset_mt5_validation_alert()
+    mt5_relogin.alert_mt5_validation_gateway_unconfigured(site=_WIZARD_SITE_LITERAL)
+
+
+def test_the_d05_alert_text_carries_no_env_value(monkeypatch, caplog):
+    from services import mt5_relogin
+
+    monkeypatch.setenv("MT5_VALIDATION_GATEWAY_HOST", "fabricated-host-vv31.internal")
+    monkeypatch.setenv("MT5_VALIDATION_GATEWAY_PORT", "59137")
+    monkeypatch.setenv("MT5_GATEWAY_HOST", "fabricated-job-jj44.internal")
+    monkeypatch.setenv("MT5_GATEWAY_PORT", "60248")
+    spy = _sentry_spy(monkeypatch)
+    with caplog.at_level(logging.DEBUG):
+        mt5_relogin.alert_mt5_validation_gateway_unconfigured(site=_WORKER_SITE_LITERAL)
+    rendered = repr(spy.mock_calls) + "".join(r.getMessage() for r in caplog.records)
+    for leak in ("fabricated-host-vv31", "59137", "fabricated-job-jj44", "60248"):
+        assert leak not in rendered, f"the D-05 alert leaked {leak!r}"
+
+
+# --------------------------------------------------------------------------- #
+# Phase 164.6.6 D-07 part 1 / T-134-03 — a PUBLIC validation gateway host is a
+# server misconfiguration, refused at the endpoint reader.
+#
+# WHY at the reader and not only at the transport: `_default_connect` refuses a
+# public host too, but that refusal is raised INSIDE the client construction,
+# which the wizard runs in its broad connect arm. That arm answers 503 and votes on
+# `breaker:mt5-gateway`: a permanent misconfiguration reported as transient, the
+# exact class the arm's own comment describes. The reader answering None keeps the
+# refusal on plan 04's 500 MT5_GATEWAY_UNCONFIGURED + D-05 alert disposition.
+# The host is FABRICATED and public-shaped; nothing here opens a socket.
+# --------------------------------------------------------------------------- #
+
+_PUBLIC_VAL_HOST = "mt5-val-pq73.example.com"
+
+
+async def test_a_public_validation_gateway_host_is_refused_as_misconfiguration(
+    exchange_router, monkeypatch, caplog
+):
+    router = exchange_router
+    # The JOB pair stays an internal name (the fixture), so only the validation
+    # host is wrong and a fallback to the job pair would be visible as a lease.
+    monkeypatch.setenv("MT5_VALIDATION_GATEWAY_HOST", _PUBLIC_VAL_HOST)
+    seen = _spy_router_lease(router, monkeypatch)
+    factory = MagicMock(side_effect=AssertionError("no client toward a public host"))
+    router.Mt5Client = factory
+    spy = _sentry_spy(monkeypatch)
+
+    with caplog.at_level(logging.DEBUG):
+        with pytest.raises(HTTPException) as ei:
+            await _call(router, _make_req())
+
+    assert ei.value.status_code == 500, (
+        f"a public host must be a permanent misconfiguration, got "
+        f"{ei.value.status_code}: a 503 here would vote on the gateway breaker"
+    )
+    assert ei.value.detail["code"] == "MT5_GATEWAY_UNCONFIGURED"
+    assert ei.value.detail["retryable"] is False
+    factory.assert_not_called()
+    assert seen == [], f"a lease was taken on a refused validation: {seen!r}"
+    # D-05: the alert fires once, for the wizard site.
+    assert spy.capture_message.call_count == 1
+    spy.set_tag.assert_called_once_with(
+        "mt5_validation_gateway_unconfigured", _WIZARD_SITE_LITERAL
+    )
+    # The reader's log-once line names the env var, not the value.
+    assert any(
+        "MT5_VALIDATION_GATEWAY_HOST" in r.getMessage()
+        and "not a private-network host" in r.getMessage()
+        for r in caplog.records
+    ), "the reader did not log the refusal by env var name"
+    rendered = (
+        repr(ei.value.detail)
+        + "".join(r.getMessage() for r in caplog.records)
+        + repr(spy.mock_calls)
+    )
+    assert "pq73" not in rendered, "the refusal leaked the configured host"

@@ -97,6 +97,7 @@ from services.mt5_concurrency import (
     _mt5_terminal_lock_for,
     mt5_terminal_lease,
 )
+from services.mt5_handover import SITE_HOLDINGS
 from services.positions import fetch_positions
 from services.sfox_client import (
     SFOX_DEFAULT_RATE_INTERVAL_S,
@@ -798,7 +799,13 @@ async def _fetch_mt5_account_rows(
     # `Mt5TerminalBusyError` is the INTERACTIVE validate path's contract (D-29),
     # never this batch poll's — refusing to wait here would drop an allocator's
     # holdings row whenever the derive job happened to hold the terminal.
-    async with mt5_terminal_lease(session.client.terminal_key):
+    #
+    # ⭐ Phase 164.6.6 criterion 1 — taken in this key's name (`api_key_id`), so
+    # a login that switches the shared terminal to it is recorded against the
+    # holder it displaced.
+    async with mt5_terminal_lease(
+        session.client.terminal_key, holder=api_key_id, site=SITE_HOLDINGS
+    ):
         try:
             info = await asyncio.wait_for(
                 asyncio.to_thread(_mt5_read), timeout=_MT5_DERIVE_READ_TIMEOUT_S

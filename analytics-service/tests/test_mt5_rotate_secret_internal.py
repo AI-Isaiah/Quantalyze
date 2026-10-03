@@ -52,6 +52,8 @@ from services.closed_sets import MT5_MASTER_PASSWORD_DETAIL, MT5_WRONG_SERVER_DE
 _SYNTH_LOGIN = "9999999"
 _SYNTH_OLD_PASSWORD = "synthetic-old-password-placeholder"  # noqa: S105 (test fixture, not a secret)
 _SYNTH_NEW_PASSWORD = "synthetic-new-password-placeholder"  # noqa: S105
+# D-08 (Phase 164.6.6): a synthetic password whose edge spaces are part of it.
+_SYNTH_PADDED_NEW_PASSWORD = " Synth Rot Pw "  # noqa: S105
 _SYNTH_BROKER_SERVER = "Synthetic-Demo-Server"
 
 
@@ -491,3 +493,46 @@ def test_rotate_secret_undecryptable_narrowed_except_lets_unrelated_bug_propagat
             )
 
     mock_validate.assert_not_awaited()
+
+
+def test_rotate_secret_d08_keeps_a_space_bearing_password_verbatim(client):
+    """D-08 (Phase 164.6.6): an MT5 investor password is user-chosen and its edge
+    spaces may be part of it. The rotate handler must hand the EXACT bytes the
+    caller sent to both ``_validate_mt5_key`` and ``encrypt_credentials``, so the
+    password that is validated is the one that is stored, and no trim re-splits
+    the rotate path from the wizard path (which stopped trimming in this phase).
+    """
+    encrypted_fields = {
+        "api_key_encrypted": "ciphertext-blob",
+        "api_secret_encrypted": None,
+        "passphrase_encrypted": None,
+        "dek_encrypted": "ciphertext-dek",
+        "nonce": None,
+        "kek_version": 1,
+    }
+    with patch("routers.internal.get_supabase", return_value=_supabase_with_row(_mt5_row())), \
+         patch("routers.internal.get_kek", return_value=b"kek"), \
+         patch(
+             "routers.internal.decrypt_credentials",
+             return_value=(_SYNTH_LOGIN, _SYNTH_OLD_PASSWORD, _SYNTH_BROKER_SERVER),
+         ), \
+         patch(
+             "routers.internal._validate_mt5_key",
+             new=AsyncMock(return_value={"valid": True, "read_only": True}),
+         ) as mock_validate, \
+         patch(
+             "routers.internal.encrypt_credentials", return_value=dict(encrypted_fields)
+         ) as mock_encrypt:
+        res = client.post(
+            "/internal/keys/key-mt5/rotate-secret",
+            headers=_headers(),
+            json={"new_secret": _SYNTH_PADDED_NEW_PASSWORD},
+        )
+
+    assert res.status_code == 200, res.text
+    mock_validate.assert_awaited_once_with(
+        _SYNTH_LOGIN, _SYNTH_PADDED_NEW_PASSWORD, _SYNTH_BROKER_SERVER
+    )
+    mock_encrypt.assert_called_once_with(
+        _SYNTH_LOGIN, _SYNTH_PADDED_NEW_PASSWORD, _SYNTH_BROKER_SERVER, b"kek"
+    )

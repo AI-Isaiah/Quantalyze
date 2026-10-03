@@ -231,6 +231,10 @@ def app_client(monkeypatch: pytest.MonkeyPatch) -> TestClient:
     monkeypatch.setenv("MT5_ENABLED", "true")
     monkeypatch.setenv("MT5_GATEWAY_HOST", "mt5-gw.internal")
     monkeypatch.setenv("MT5_GATEWAY_PORT", "18812")
+    # Phase 164.6.6 D-02 — the wizard reads the VALIDATION pair, set BESIDE the
+    # job pair (never instead of it) so this keeps reaching the verdict it pins.
+    monkeypatch.setenv("MT5_VALIDATION_GATEWAY_HOST", "mt5-validate-gw.internal")
+    monkeypatch.setenv("MT5_VALIDATION_GATEWAY_PORT", "18813")
 
     import main
 

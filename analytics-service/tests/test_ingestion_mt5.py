@@ -36,6 +36,7 @@ import threading
 import time
 import typing
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -55,6 +56,27 @@ from services.mt5_probe import (
     Mt5GatewayMisconfigured,
 )
 from services.mt5_validation import classify_mt5_login_error
+
+
+# Phase 164.6.6 D-02 — the validation terminal's endpoint as these tests set it.
+# Fabricated, and deliberately DIFFERENT from the job pair (`mt5-gw.internal`,
+# 18812), which every fixture keeps SET: a worker validate that still read the job
+# pair would lease and build against a different key and turn the key tests red.
+_VAL_HOST = "mt5-validate-gw.internal"
+_VAL_PORT = 18813
+
+
+@pytest.fixture(autouse=True)
+def _reset_mt5_validation_alert_state():
+    """Phase 164.6.6 D-05 — the alert's per-site window and the reader's log-once
+    throttle are module state; one test's capture must never suppress another's."""
+    from services import mt5_relogin
+
+    mt5_relogin._reset_mt5_validation_alert()
+    mt5_relogin._reset_relogin_log_throttle_for_tests()
+    yield
+    mt5_relogin._reset_mt5_validation_alert()
+    mt5_relogin._reset_relogin_log_throttle_for_tests()
 
 
 @pytest.fixture(autouse=True)
@@ -192,6 +214,8 @@ def _install_client(monkeypatch, scenario: dict) -> _FakeMt5:
     monkeypatch.setattr("services.ingestion.mt5._build_client", _fake_build)
     monkeypatch.setenv("MT5_GATEWAY_HOST", "mt5-gw.internal")
     monkeypatch.setenv("MT5_GATEWAY_PORT", "18812")
+    monkeypatch.setenv("MT5_VALIDATION_GATEWAY_HOST", _VAL_HOST)
+    monkeypatch.setenv("MT5_VALIDATION_GATEWAY_PORT", str(_VAL_PORT))
     return fake
 
 
@@ -504,6 +528,8 @@ def test_validate_non_numeric_login_fails_closed_without_client(monkeypatch) -> 
     monkeypatch.setattr("services.ingestion.mt5._build_client", _boom)
     monkeypatch.setenv("MT5_GATEWAY_HOST", "h")
     monkeypatch.setenv("MT5_GATEWAY_PORT", "18812")
+    monkeypatch.setenv("MT5_VALIDATION_GATEWAY_HOST", _VAL_HOST)
+    monkeypatch.setenv("MT5_VALIDATION_GATEWAY_PORT", str(_VAL_PORT))
 
     result = asyncio.run(Mt5Adapter().validate(_req(api_key="not-a-login")))
 
@@ -519,6 +545,8 @@ def test_validate_blank_server_is_wrong_server(monkeypatch) -> None:
     monkeypatch.setattr("services.ingestion.mt5._build_client", _boom)
     monkeypatch.setenv("MT5_GATEWAY_HOST", "h")
     monkeypatch.setenv("MT5_GATEWAY_PORT", "18812")
+    monkeypatch.setenv("MT5_VALIDATION_GATEWAY_HOST", _VAL_HOST)
+    monkeypatch.setenv("MT5_VALIDATION_GATEWAY_PORT", str(_VAL_PORT))
 
     result = asyncio.run(Mt5Adapter().validate(_req(passphrase="   ")))
 
@@ -528,10 +556,13 @@ def test_validate_blank_server_is_wrong_server(monkeypatch) -> None:
 
 
 def test_validate_missing_gateway_env_raises_server_misconfig(monkeypatch) -> None:
-    # Missing MT5_GATEWAY_HOST/PORT is a SERVER misconfig, propagated — never
-    # valid, never blames the user's creds.
-    monkeypatch.delenv("MT5_GATEWAY_HOST", raising=False)
-    monkeypatch.delenv("MT5_GATEWAY_PORT", raising=False)
+    # Missing MT5_VALIDATION_GATEWAY_HOST/PORT is a SERVER misconfig, propagated —
+    # never valid, never blames the user's creds. Phase 164.6.6 D-05: the JOB pair
+    # is set here and must not be used instead.
+    monkeypatch.setenv("MT5_GATEWAY_HOST", "mt5-gw.internal")
+    monkeypatch.setenv("MT5_GATEWAY_PORT", "18812")
+    monkeypatch.delenv("MT5_VALIDATION_GATEWAY_HOST", raising=False)
+    monkeypatch.delenv("MT5_VALIDATION_GATEWAY_PORT", raising=False)
     with pytest.raises(RuntimeError, match="MT5 gateway not configured"):
         asyncio.run(Mt5Adapter().validate(_req()))
 
@@ -574,6 +605,8 @@ def test_validate_probe_hang_bounded_by_wait_for_ceiling(monkeypatch) -> None:
     monkeypatch.setattr("services.ingestion.mt5._MT5_PROBE_TIMEOUT_S", 0.1)
     monkeypatch.setenv("MT5_GATEWAY_HOST", "mt5-gw.internal")
     monkeypatch.setenv("MT5_GATEWAY_PORT", "18812")
+    monkeypatch.setenv("MT5_VALIDATION_GATEWAY_HOST", _VAL_HOST)
+    monkeypatch.setenv("MT5_VALIDATION_GATEWAY_PORT", str(_VAL_PORT))
 
     with pytest.raises(asyncio.TimeoutError):
         asyncio.run(Mt5Adapter().validate(_req()))
@@ -673,6 +706,8 @@ def _install_shared_terminal(
     monkeypatch.setattr("services.ingestion.mt5._build_client", _fake_build)
     monkeypatch.setenv("MT5_GATEWAY_HOST", "mt5-gw.internal")
     monkeypatch.setenv("MT5_GATEWAY_PORT", "18812")
+    monkeypatch.setenv("MT5_VALIDATION_GATEWAY_HOST", _VAL_HOST)
+    monkeypatch.setenv("MT5_VALIDATION_GATEWAY_PORT", str(_VAL_PORT))
     return fake
 
 
@@ -724,7 +759,7 @@ async def test_ingestion_validate_waits_on_the_lock_keyed_by_terminal_key(
     _install_shared_terminal(monkeypatch, events, factory_calls)
 
     held = mt5_concurrency._mt5_terminal_lock_for(
-        _expected_terminal_key("mt5-gw.internal", 18812)
+        _expected_terminal_key(_VAL_HOST, _VAL_PORT)
     )
     await held.acquire()
 
@@ -752,7 +787,7 @@ async def test_ingestion_validate_waits_on_the_lock_keyed_by_terminal_key(
     )
     assert events_while_queued == []
     assert (result.valid, result.read_only) == (True, True)
-    assert factory_calls == [("mt5-gw.internal", 18812)]
+    assert factory_calls == [(_VAL_HOST, _VAL_PORT)]
     assert events == ["login-start", "login-end", "close"]
 
 
@@ -890,6 +925,8 @@ async def test_a_connect_stage_timeout_leaves_no_rpyc_socket_open(monkeypatch) -
     monkeypatch.setattr("services.ingestion.mt5._MT5_PROBE_TIMEOUT_S", 0.05)
     monkeypatch.setenv("MT5_GATEWAY_HOST", "mt5-gw.internal")
     monkeypatch.setenv("MT5_GATEWAY_PORT", "18812")
+    monkeypatch.setenv("MT5_VALIDATION_GATEWAY_HOST", _VAL_HOST)
+    monkeypatch.setenv("MT5_VALIDATION_GATEWAY_PORT", str(_VAL_PORT))
 
     try:
         with pytest.raises(asyncio.TimeoutError):
@@ -967,7 +1004,7 @@ def test_an_abandoned_session_refusal_propagates_out_of_validate_unchanged(
     """
     from services.mt5_client import Mt5SessionAbandoned
 
-    key = _expected_terminal_key("mt5-gw.internal", 18812)
+    key = _expected_terminal_key(_VAL_HOST, _VAL_PORT)
     fake = _EpochBumpingMt5(
         {
             "account": _INVESTOR_ACCOUNT,
@@ -986,6 +1023,8 @@ def test_an_abandoned_session_refusal_propagates_out_of_validate_unchanged(
     monkeypatch.setattr("services.ingestion.mt5._build_client", _fake_build)
     monkeypatch.setenv("MT5_GATEWAY_HOST", "mt5-gw.internal")
     monkeypatch.setenv("MT5_GATEWAY_PORT", "18812")
+    monkeypatch.setenv("MT5_VALIDATION_GATEWAY_HOST", _VAL_HOST)
+    monkeypatch.setenv("MT5_VALIDATION_GATEWAY_PORT", str(_VAL_PORT))
 
     with pytest.raises(Mt5SessionAbandoned) as excinfo:
         asyncio.run(Mt5Adapter().validate(_req()))
@@ -1009,3 +1048,174 @@ def test_an_abandoned_session_refusal_propagates_out_of_validate_unchanged(
     # The session never leaks, and the SHARED terminal IPC is never torn down.
     assert fake.close_calls == 1
     assert fake.shutdown_calls == 0
+
+
+# --------------------------------------------------------------------------- #
+# Phase 164.6.6 D-02 / D-05 — the WORKER validate leases the VALIDATION terminal,
+# and without its endpoint raises and alerts. Never the job terminal.
+#
+# WHY (Rule 9): this is the sibling of the wizard's validate. A validation routed
+# to the job terminal logs a client's un-onboarded account into the session that
+# serves live jobs and evicts whatever job was mid-read; falling back to the job
+# pair when the validation pair is unset would silently restore that (D-05).
+# The site literal and tag name are typed here, never imported.
+# --------------------------------------------------------------------------- #
+
+_WORKER_SITE_LITERAL = "validate_worker"
+
+
+def _spy_adapter_lease(monkeypatch) -> list[str]:
+    import services.ingestion.mt5 as adapter_mod
+
+    seen: list[str] = []
+    real = adapter_mod.mt5_terminal_lease
+
+    def _spy(terminal_key, *args, **kwargs):
+        seen.append(terminal_key)
+        return real(terminal_key, *args, **kwargs)
+
+    monkeypatch.setattr(adapter_mod, "mt5_terminal_lease", _spy)
+    return seen
+
+
+def test_the_worker_leases_the_validation_terminal_never_the_job_terminal(
+    monkeypatch,
+) -> None:
+    """D-02: with both pairs set, the worker's ONE lease is on the validation
+    terminal's key — a literal typed here."""
+    _install_client(
+        monkeypatch,
+        {
+            "account": _INVESTOR_ACCOUNT,
+            "order_check": _INVESTOR_ORDER_CHECK,
+            "terminal": _HEALTHY_TERMINAL,
+        },
+    )
+    seen = _spy_adapter_lease(monkeypatch)
+
+    result = asyncio.run(Mt5Adapter().validate(_req()))
+
+    assert (result.valid, result.read_only) == (True, True)
+    assert seen == ["mt5-validate-gw.internal:18813"], (
+        f"the worker leased {seen!r}; it must lease only the validation terminal"
+    )
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("MT5_VALIDATION_GATEWAY_HOST", None),
+        ("MT5_VALIDATION_GATEWAY_PORT", None),
+        ("MT5_VALIDATION_GATEWAY_PORT", "eighteen-eight-one-three"),
+    ],
+    ids=["host-unset", "port-unset", "port-not-an-int"],
+)
+def test_an_absent_validation_endpoint_raises_and_never_falls_back(
+    monkeypatch, name, value
+) -> None:
+    """D-05: the job pair is SET. The worker raises a server-misconfiguration
+    RuntimeError naming the env var NAMES, takes no lease, builds no client."""
+    def _boom(host, port):
+        raise AssertionError("no client when the validation endpoint is unset")
+
+    monkeypatch.setattr("services.ingestion.mt5._build_client", _boom)
+    monkeypatch.setenv("MT5_GATEWAY_HOST", "mt5-gw.internal")
+    monkeypatch.setenv("MT5_GATEWAY_PORT", "18812")
+    monkeypatch.setenv("MT5_VALIDATION_GATEWAY_HOST", "val-host-xk27.internal")
+    monkeypatch.setenv("MT5_VALIDATION_GATEWAY_PORT", "18813")
+    if value is None:
+        monkeypatch.delenv(name, raising=False)
+    else:
+        monkeypatch.setenv(name, value)
+    seen = _spy_adapter_lease(monkeypatch)
+
+    with pytest.raises(RuntimeError) as ei:
+        asyncio.run(Mt5Adapter().validate(_req()))
+
+    msg = str(ei.value)
+    assert "MT5 gateway not configured" in msg
+    assert "MT5_VALIDATION_GATEWAY_HOST" in msg and "MT5_VALIDATION_GATEWAY_PORT" in msg
+    for leak in ("val-host-xk27", "mt5-gw.internal", "18812", "18813", "eighteen"):
+        assert leak not in msg, f"the refusal leaked {leak!r}"
+    assert seen == [], f"a lease was taken on a refused validation: {seen!r}"
+
+
+def test_unset_validation_endpoint_fires_the_d05_alert_on_the_worker_path(
+    monkeypatch, caplog
+) -> None:
+    """D-05 says "a clear error AND an alert". The RuntimeError is the error; this
+    is the alert — one Sentry capture at level error tagged for the WORKER site,
+    fired before the raise, and an ERROR line."""
+    import logging
+
+    from services import mt5_relogin
+
+    spy = MagicMock()
+    monkeypatch.setattr(mt5_relogin, "sentry_sdk", spy)
+    monkeypatch.setenv("MT5_GATEWAY_HOST", "mt5-gw.internal")
+    monkeypatch.setenv("MT5_GATEWAY_PORT", "18812")
+    monkeypatch.delenv("MT5_VALIDATION_GATEWAY_HOST", raising=False)
+    monkeypatch.delenv("MT5_VALIDATION_GATEWAY_PORT", raising=False)
+
+    with caplog.at_level(logging.ERROR, logger="quantalyze.analytics.mt5_relogin"):
+        with pytest.raises(RuntimeError):
+            asyncio.run(Mt5Adapter().validate(_req()))
+
+    assert spy.capture_message.call_count == 1, (
+        "the D-05 alert did not reach Sentry on the worker path"
+    )
+    assert spy.capture_message.call_args.kwargs.get("level") == "error"
+    spy.set_tag.assert_called_once_with(
+        "mt5_validation_gateway_unconfigured", _WORKER_SITE_LITERAL
+    )
+    assert any(
+        r.levelno == logging.ERROR
+        and "mt5 validation refused" in r.getMessage()
+        and _WORKER_SITE_LITERAL in r.getMessage()
+        for r in caplog.records
+    )
+
+
+def test_a_public_validation_gateway_host_is_refused_on_the_worker_path(
+    monkeypatch, caplog
+) -> None:
+    """Phase 164.6.6 D-07 part 1 (T-134-03): a PUBLIC validation gateway host is a
+    server misconfiguration on the worker path too — the existing RuntimeError, no
+    lease, no client, and the D-05 alert for the worker site.
+
+    WHY: the rpyc bridge is unauthenticated remote code, dialled only over a
+    private network. The endpoint reader answers None for such a host, so the
+    worker never constructs a client toward it and never treats it as the user's
+    key failing. The host is FABRICATED and public-shaped."""
+    import logging
+
+    from services import mt5_relogin
+
+    def _boom(host, port):
+        raise AssertionError("no client toward a public host")
+
+    monkeypatch.setattr("services.ingestion.mt5._build_client", _boom)
+    spy = MagicMock()
+    monkeypatch.setattr(mt5_relogin, "sentry_sdk", spy)
+    monkeypatch.setenv("MT5_GATEWAY_HOST", "mt5-gw.internal")
+    monkeypatch.setenv("MT5_GATEWAY_PORT", "18812")
+    monkeypatch.setenv("MT5_VALIDATION_GATEWAY_HOST", "mt5-val-wr58.example.com")
+    monkeypatch.setenv("MT5_VALIDATION_GATEWAY_PORT", "18813")
+    seen = _spy_adapter_lease(monkeypatch)
+
+    with caplog.at_level(logging.DEBUG):
+        with pytest.raises(RuntimeError) as ei:
+            asyncio.run(Mt5Adapter().validate(_req()))
+
+    assert "MT5 gateway not configured" in str(ei.value)
+    assert seen == [], f"a lease was taken on a refused validation: {seen!r}"
+    assert spy.capture_message.call_count == 1
+    spy.set_tag.assert_called_once_with(
+        "mt5_validation_gateway_unconfigured", _WORKER_SITE_LITERAL
+    )
+    rendered = (
+        str(ei.value)
+        + "".join(r.getMessage() for r in caplog.records)
+        + repr(spy.mock_calls)
+    )
+    assert "wr58" not in rendered, "the refusal leaked the configured host"

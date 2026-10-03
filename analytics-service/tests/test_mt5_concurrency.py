@@ -920,13 +920,20 @@ def _lease_sites(source: str, rel: str) -> list[tuple[str, str]]:
     closure is not silently attributed to the enclosing coroutine — the closure is
     a different scope and can hold a different client.
     """
+    return [(rel, name) for _call, name in _lease_calls(source)]
+
+
+def _lease_calls(source: str) -> list[tuple[ast.Call, str]]:
+    """The walk behind `_lease_sites`, returning each lease CALL node beside its
+    dotted enclosing function name — so a second pin (Phase 164.6.6: the holder
+    and site keywords) reads the SAME walk rather than a copy of it."""
     tree = ast.parse(source)
     parents: dict[ast.AST, ast.AST] = {}
     for node in ast.walk(tree):
         for child in ast.iter_child_nodes(node):
             parents[child] = node
 
-    found: list[tuple[str, str]] = []
+    found: list[tuple[ast.Call, str]] = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.AsyncWith):
             continue
@@ -950,7 +957,7 @@ def _lease_sites(source: str, rel: str) -> list[tuple[str, str]]:
                 cur = parents[cur]
                 if isinstance(cur, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     chain.append(cur.name)
-            found.append((rel, ".".join(reversed(chain))))
+            found.append((call, ".".join(reversed(chain))))
     return found
 
 
@@ -1079,6 +1086,237 @@ def test_the_lease_site_scanner_reports_the_reuse_shape_and_ignores_prose() -> N
         "    return None\n"
     )
     assert _lease_sites(in_prose, "synthetic.py") == []
+
+
+# ---------------------------------------------------------------------------
+# Phase 164.6.6 criterion 1 — EVERY lease names its HOLDER and its SITE.
+#
+# The handover record is only as complete as its least-attributed lease: a site
+# that omits `holder=` records every switch it makes as `unattributed`, which is
+# the 2026-09-21 silence with a row attached. The roster above pins WHICH sites
+# exist; this pins that each of them says who it holds the terminal for.
+# ---------------------------------------------------------------------------
+
+_LEASE_ATTRIBUTION_KEYWORDS: tuple[str, ...] = ("holder", "site")
+
+
+def _lease_calls_missing_attribution(
+    source: str, rel: str
+) -> list[tuple[str, str, tuple[str, ...]]]:
+    """Every lease call in ``source`` that omits ``holder=`` or ``site=``, as
+    ``(rel, dotted function, missing keywords)``."""
+    missing: list[tuple[str, str, tuple[str, ...]]] = []
+    for call, name in _lease_calls(source):
+        given = {kw.arg for kw in call.keywords}
+        absent = tuple(k for k in _LEASE_ATTRIBUTION_KEYWORDS if k not in given)
+        if absent:
+            missing.append((rel, name, absent))
+    return missing
+
+
+def test_every_production_lease_site_names_its_holder_and_site() -> None:
+    root = Path(__file__).resolve().parents[1]
+    files = _production_python_files()
+    assert len(files) >= _PRODUCTION_FILE_FLOOR
+
+    seen: list[tuple[str, str]] = []
+    missing: list[tuple[str, str, tuple[str, ...]]] = []
+    for path in files:
+        source = path.read_text()
+        rel = path.relative_to(root).as_posix()
+        seen.extend(_lease_sites(source, rel))
+        missing.extend(_lease_calls_missing_attribution(source, rel))
+
+    # ⛔ Non-vacuous: the walk must have SEEN the whole roster, or "nothing is
+    # missing" would be a statement about an empty walk.
+    assert set(seen) == _PRODUCTION_LEASE_SITES
+    assert missing == [], (
+        f"these production `{_LEASE_VERB}` calls omit `holder=` or `site=`: "
+        f"{missing}. Every switch they make would be recorded as `unattributed` "
+        f"(Phase 164.6.6 criterion 1). Pass the job's `api_key_id` or a holder "
+        f"literal from `services.mt5_handover`, and the site constant."
+    )
+
+
+def test_the_attribution_checker_REDS_on_a_lease_without_its_site() -> None:
+    """⛔ THE CALIBRATION. A checker that never reports is indistinguishable
+    from a clean tree; it must name the call, its function and the keyword."""
+    attributed = (
+        "async def f(k):\n"
+        "    async with mt5_terminal_lease(k, holder=h, site=SITE_DERIVE):\n"
+        "        pass\n"
+    )
+    assert _lease_calls_missing_attribution(attributed, "synthetic.py") == []
+
+    no_site = attributed.replace(", site=SITE_DERIVE", "")
+    assert no_site != attributed
+    assert _lease_calls_missing_attribution(no_site, "synthetic.py") == [
+        ("synthetic.py", "f", ("site",))
+    ]
+
+    neither = (
+        "async def g(k):\n"
+        "    async with mt5_concurrency.mt5_terminal_lease(k, wait_s=None):\n"
+        "        pass\n"
+    )
+    assert _lease_calls_missing_attribution(neither, "synthetic.py") == [
+        ("synthetic.py", "g", ("holder", "site"))
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Phase 164.6.6 D-02 / D-05 — THE ROUTING PIN.
+#
+# The lease roster above proves WHERE leases are taken, never ON WHICH TERMINAL:
+# every site passes a `terminal_key` variable, so a validate site keyed off the
+# job endpoint and a job site keyed off the validation endpoint both look
+# identical to it (PATTERNS "No Analog Found"). This pin reads the ENDPOINT each
+# site resolves instead:
+#   (a) `read_env_validation_gateway_endpoint` is called by exactly the two
+#       validate sites and by no other production function, so no job site can
+#       drift onto the validation terminal;
+#   (b) neither validate site names `MT5_GATEWAY_HOST` / `MT5_GATEWAY_PORT` as a
+#       string constant or calls `read_env_gateway_endpoint`, so a validation
+#       can never fall back to the job terminal (D-05).
+# Names are `(path, dotted function)` in the `_lease_calls` convention: classes
+# are not part of the chain, so `Mt5Adapter.validate` is `validate`.
+# ⚠️ HONEST CEILING: lexical, per function. An endpoint read in a helper and
+# passed in as an argument would escape it; today neither site does that.
+# ---------------------------------------------------------------------------
+
+_VALIDATION_ENDPOINT_READER = "read_env_validation_gateway_endpoint"
+_JOB_ENDPOINT_READER = "read_env_gateway_endpoint"
+_JOB_ENDPOINT_ENV_NAMES: frozenset[str] = frozenset(
+    {"MT5_GATEWAY_HOST", "MT5_GATEWAY_PORT"}
+)
+_VALIDATE_SITES: frozenset[tuple[str, str]] = frozenset(
+    {
+        ("routers/exchange.py", "_validate_mt5_key_probe"),
+        ("services/ingestion/mt5.py", "validate"),
+    }
+)
+
+
+def _called_name(call: ast.Call) -> str | None:
+    func = call.func
+    if isinstance(func, ast.Name):
+        return func.id
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    return None
+
+
+def _enclosing_function(node: ast.AST, parents: dict[ast.AST, ast.AST]) -> str:
+    chain: list[str] = []
+    cur: ast.AST = node
+    while cur in parents:
+        cur = parents[cur]
+        if isinstance(cur, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            chain.append(cur.name)
+    return ".".join(reversed(chain))
+
+
+def _validation_endpoint_routing(
+    source: str, rel: str
+) -> tuple[list[tuple[str, str]], list[tuple[str, str, str]]]:
+    """``(reader_sites, violations)`` for one file.
+
+    ``reader_sites`` is every ``(rel, function)`` calling the validation reader;
+    ``violations`` is every ``(rel, function, why)`` breaking rule (a) or (b)."""
+    tree = ast.parse(source)
+    parents: dict[ast.AST, ast.AST] = {}
+    for node in ast.walk(tree):
+        for child in ast.iter_child_nodes(node):
+            parents[child] = node
+
+    readers: list[tuple[str, str]] = []
+    violations: list[tuple[str, str, str]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            name = _called_name(node)
+            where = (rel, _enclosing_function(node, parents))
+            if name == _VALIDATION_ENDPOINT_READER:
+                readers.append(where)
+                if where not in _VALIDATE_SITES:
+                    violations.append((*where, "reads the validation endpoint"))
+            elif name == _JOB_ENDPOINT_READER and where in _VALIDATE_SITES:
+                violations.append((*where, "calls the job endpoint reader"))
+        elif (
+            isinstance(node, ast.Constant)
+            and node.value in _JOB_ENDPOINT_ENV_NAMES
+            and (rel, _enclosing_function(node, parents)) in _VALIDATE_SITES
+        ):
+            violations.append(
+                (rel, _enclosing_function(node, parents), f"names {node.value}")
+            )
+    return readers, violations
+
+
+def test_only_the_validate_sites_read_the_validation_endpoint() -> None:
+    """⭐ Phase 164.6.6 D-02 / D-05. Reds the moment a job site reads the
+    validation endpoint, or a validate site reads the job endpoint — naming the
+    ``(path, function)`` that did it."""
+    root = Path(__file__).resolve().parents[1]
+    files = _production_python_files()
+    assert len(files) >= _PRODUCTION_FILE_FLOOR
+
+    readers: list[tuple[str, str]] = []
+    violations: list[tuple[str, str, str]] = []
+    for path in files:
+        rel = path.relative_to(root).as_posix()
+        found, bad = _validation_endpoint_routing(path.read_text(), rel)
+        readers.extend(found)
+        violations.extend(bad)
+
+    assert violations == [], (
+        f"MT5 endpoint routing broken: {violations}. Only the two validate sites "
+        f"may read the validation terminal's endpoint, and neither may read the "
+        f"job terminal's (D-02 / D-05: refuse, never fall back)."
+    )
+    assert set(readers) == _VALIDATE_SITES, (
+        f"the validation endpoint is read at {sorted(set(readers))}, expected "
+        f"exactly {sorted(_VALIDATE_SITES)}: a validate site that stopped reading "
+        f"it is leasing some other terminal"
+    )
+
+
+def test_the_routing_checker_REDS_on_each_rule() -> None:
+    """⛔ THE CALIBRATION, on in-memory sources that each break one rule."""
+    clean = (
+        "async def _validate_mt5_key_probe(req):\n"
+        "    endpoint = read_env_validation_gateway_endpoint()\n"
+    )
+    assert _validation_endpoint_routing(clean, "routers/exchange.py") == (
+        [("routers/exchange.py", "_validate_mt5_key_probe")],
+        [],
+    )
+
+    job_site = (
+        "async def _fetch_mt5_account_balance(k):\n"
+        "    ep = mt5_relogin.read_env_validation_gateway_endpoint()\n"
+    )
+    assert _validation_endpoint_routing(job_site, "services/job_worker.py")[1] == [
+        (
+            "services/job_worker.py",
+            "_fetch_mt5_account_balance",
+            "reads the validation endpoint",
+        )
+    ]
+
+    fallback = clean + '    host = os.getenv("MT5_GATEWAY_HOST")\n'
+    assert _validation_endpoint_routing(fallback, "routers/exchange.py")[1] == [
+        ("routers/exchange.py", "_validate_mt5_key_probe", "names MT5_GATEWAY_HOST")
+    ]
+
+    job_reader = (
+        "class Mt5Adapter:\n"
+        "    async def validate(self, req):\n"
+        "        ep = read_env_gateway_endpoint()\n"
+    )
+    assert _validation_endpoint_routing(job_reader, "services/ingestion/mt5.py") == (
+        [],
+        [("services/ingestion/mt5.py", "validate", "calls the job endpoint reader")],
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1598,7 +1836,9 @@ async def test_CRITERION_4_a_monitor_tick_cannot_land_inside_a_live_jobs_termina
         f"{acquisitions!r}. ONE acquisition per function is the shape the lazy "
         f"epoch bind assumes (D-36 AMENDED); a second would be refused."
     )
-    acquired_key, wait_s = acquisitions[0]
+    # Phase 164.6.6 — the counter also records the lease's `holder`/`site`; the
+    # heal's attribution is asserted in `tests/test_mt5_relogin.py`.
+    acquired_key, wait_s, _holder, _site = acquisitions[0]
     assert acquired_key == mt5_terminal_key(_FAKE_HOST, int(_FAKE_PORT)), (
         f"the tick leased {acquired_key!r}. ⛔ The key must come from "
         f"`mt5_terminal_key`, never a second hand-spelled host-and-port string: "

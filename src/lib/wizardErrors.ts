@@ -5855,8 +5855,11 @@ const DASHBOARD_DIALOG_ROUTE_CODES: ReadonlyMap<
       //     vocabularies, two meanings, same duality this table's own
       //     docblock already records for the wire code.
       //   SEAM_INTERNAL_FAULT — wire MT5_GATEWAY_UNCONFIGURED, an operator
-      //     misconfiguration (unset/malformed MT5_GATEWAY_HOST/PORT), never
-      //     the caller's fault.
+      //     misconfiguration, never the caller's fault. For a key validation
+      //     its env cause is the validation endpoint pair,
+      //     unset/malformed MT5_VALIDATION_GATEWAY_HOST/PORT (Phase 164.6.6
+      //     D-05: refused, never routed to the job terminal's
+      //     MT5_GATEWAY_HOST/PORT).
       "KEY_RATE_LIMIT",
       "SEAM_INTERNAL_FAULT",
       // KEK_UNAVAILABLE (wire) already resolves to `SEAM_MISCONFIGURED`

@@ -147,4 +147,40 @@ describe("ConnectKeyStep credential inputs: pasted whitespace is stripped from k
     await user.paste("  pass phrase  ");
     expect(passphrase.value).toBe("  pass phrase  ");
   });
+
+  async function renderOnMt5() {
+    vi.stubEnv("NEXT_PUBLIC_MT5_ENABLED", "true");
+    vi.resetModules();
+    const { ConnectKeyStep: Fresh } = await import("./ConnectKeyStep");
+    const utils = render(<Fresh wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    const user = userEvent.setup();
+    await user.click(screen.getByTestId("wizard-exchange-mt5"));
+    return { ...utils, user };
+  }
+
+  it("with MT5 selected, a pasted investor password is kept exactly as pasted (D-08), because the server now stores it verbatim and a client strip would be the only trim left", async () => {
+    const { container, user } = await renderOnMt5();
+    const secret = secretInput(container);
+    await user.click(secret);
+    await user.paste(" Inv Pw 7 "); // fabricated
+    expect(
+      secret.value,
+      "since D-08 the server stores the MT5 password exactly as sent, so stripping " +
+        "the paste here would store a password other than the one the user chose " +
+        "(169.3 D-76's own exclusion rule, as for UpdateMt5SecretDialog)",
+    ).toBe(" Inv Pw 7 ");
+  });
+
+  it("with MT5 selected, a pasted login is still stripped (D-08 exempts the password only)", async () => {
+    await renderOnMt5();
+    const user = userEvent.setup();
+    const login = screen.getByLabelText("MT5 login") as HTMLInputElement;
+    await user.click(login);
+    await user.paste(" 5550001 "); // fabricated
+    expect(
+      login.value,
+      "the MT5 login is a numeric account id; widening the verbatim exemption to " +
+        "the key slot would let a pasted space reach the broker as part of it",
+    ).toBe("5550001");
+  });
 });

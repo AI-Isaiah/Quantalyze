@@ -34,7 +34,10 @@ import {
 // 153.1-02 / 153.4-02 — the venue CAPABILITY predicate. `budgetKeyFor` below
 // reads `VENUE_CAPABILITIES.serialized` through it and never a venue name, so a
 // second serialized venue is covered by editing that record alone.
-import { venueIsSerialized } from "./closed-sets";
+// D-08 (Phase 164.6.6) — `secretForVenue` below reads
+// `VENUE_CAPABILITIES.secretVerbatim` through `venueSecretIsVerbatim`, never a
+// venue name, for the same reason.
+import { venueIsSerialized, venueSecretIsVerbatim } from "./closed-sets";
 import { CircuitOpenError, SeamBodyReadError } from "./seam-errors";
 import { scrubSeamString } from "./seam-redaction";
 import { mintTenantClaim, type TenantIdentity } from "./tenant-claim";
@@ -760,8 +763,26 @@ function parseResponse<T>(
 // exact trimmed credential we validated, so later syncs authenticate too.
 // Passphrase is NOT trimmed: an OKX passphrase is user-CHOSEN and whitespace
 // there could be significant.
+// D-08 (Phase 164.6.6, 2026-10-03): the MT5 investor password in the secret
+// slot is exempt through the `secretVerbatim` venue capability, because it is
+// user-chosen like the OKX passphrase. The rotate path never trimmed it, and
+// the two paths now agree. See `secretForVenue`.
 function trimCredential(value: string): string {
   return value.trim();
+}
+
+/**
+ * The ONE normalizer for `api_secret`, shared by `validateKey` and `encryptKey`
+ * so the secret that is validated is byte-equal to the secret that is encrypted
+ * and stored, for every venue (D-08, Phase 164.6.6).
+ *
+ * A venue whose capability record sets `secretVerbatim` (the MT5 investor
+ * password) is sent exactly as entered; every other secret keeps the DOGFOOD
+ * trim. It reads the CAPABILITY, never a venue name, like `budgetKeyFor`, and
+ * `analytics-client.test.ts` scans this function's body for venue literals.
+ */
+function secretForVenue(exchange: string, apiSecret: string): string {
+  return venueSecretIsVerbatim(exchange) ? apiSecret : trimCredential(apiSecret);
 }
 
 /**
@@ -839,7 +860,7 @@ export async function validateKey(
     {
       exchange,
       api_key: trimCredential(apiKey),
-      api_secret: trimCredential(apiSecret),
+      api_secret: secretForVenue(exchange, apiSecret),
       passphrase: passphrase ?? null,
     },
     // 153.4-02 / D-01 — THE ONE LITERAL that made the venue-aware budget inert.
@@ -864,7 +885,7 @@ export async function encryptKey(
     {
       exchange,
       api_key: trimCredential(apiKey),
-      api_secret: trimCredential(apiSecret),
+      api_secret: secretForVenue(exchange, apiSecret),
       passphrase: passphrase ?? null,
     },
     { budgetKey: "encrypt-key", tenantId: tenant.userId },

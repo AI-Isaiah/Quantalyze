@@ -43,7 +43,7 @@ from typing import Any, Callable
 
 import pytest
 
-from services import mt5_relogin, mt5_session_episodes, mt5_session_monitor
+from services import mt5_handover, mt5_relogin, mt5_session_episodes, mt5_session_monitor
 from tests.test_mt5_relogin import (
     _FAKE_HOST,
     _FAKE_LOGIN,
@@ -1624,6 +1624,10 @@ def test_the_migration_forbids_FORCE_ROW_LEVEL_SECURITY_and_so_does_this_module(
 _GUARDED_SYMBOLS = (
     mt5_session_episodes.record_mt5_session_reading,
     mt5_session_episodes.record_mt5_heal_outcome,
+    # ⭐ Phase 164.6.6 criterion 1 — awaited in `mt5_terminal_lease`'s `finally`,
+    # so a raise there would REPLACE the lease body's own exception. The same
+    # one predicate, never a copy of it.
+    mt5_handover.record_mt5_terminal_handover,
 )
 
 

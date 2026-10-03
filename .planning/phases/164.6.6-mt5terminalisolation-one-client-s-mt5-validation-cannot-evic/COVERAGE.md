@@ -1,0 +1,1 @@
+No external API integration: re-leases and attributes the existing MT5 gateway (mt5linux/rpyc, since Phase 134), adds a second instance of it, and checks the dialled host; no new API, SDK or service is adopted (the scrub work moved to Phase 164.6.6.1 on 2026-09-27).
