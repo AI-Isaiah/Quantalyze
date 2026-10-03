@@ -9,9 +9,10 @@ over a failed run, so a warned factsheet read `complete_with_warnings` again
 (`[164.6.7-COMPOSITE-REREAD-RESIDUE]`). (2) A marked refresh retry rewrote a published plain
 `complete` row to `computing`, so the retry protected only warned rows
 (`[164.6.7-RETRY-PLAIN-COMPLETE]`). Phase 164.5.2.1 closes both in ONE migration,
-`20261003120000_sync_status_bridge_residues.sql`. It also moves the mark RPCs' per-strategy advisory
-lock inside the bridge. Per a founder decision of 2026-10-03, a row the bridge KEEPS now holds its
-date, sentence and provenance.
+`20261003120000_sync_status_bridge_residues.sql`. It also makes the bridge take the mark RPCs'
+per-strategy advisory lock itself. The RPCs keep their own lock lines and the bridge re-enters the
+same lock (same key, re-entrant), so a direct bridge call serializes behind a mark. Per a founder
+decision of 2026-10-03, a row the bridge KEEPS now holds its date, sentence and provenance.
 
 ⚠️ **A minor bump: the behaviour of a production SQL function changes.** The migration
 **auto-applies to TEST and then PROD on merge, with no human gate**, so the merge IS the apply.
@@ -41,7 +42,8 @@ review can be scheduled after it.
   serializes behind a mark. Measured with `dblink`: a direct call waited on `transactionid` before,
   and on that exact advisory lock (namespace oid, objsubid 2) after. An apply-time anchor pins the
   NULL guard ahead of the lock and checks that the namespace differs from `admin_role_mutate`'s.
-  Lock order is recorded in the migration header. No claim RPC is touched.
+  The migration's verify block also calls the bridge with a NULL strategy and requires
+  `invalid_parameter_value`. Lock order is recorded in the migration header. No claim RPC is touched.
 - **A row the bridge KEEPS holds `computed_at`, `computation_error` and both provenance markers**
   (plan 03, founder decision 2026-10-03, "Hold the date for both"). This applies to the new
   plain-`complete` keep and to the existing `complete_with_warnings` keep, so a branch-(a) keep no
@@ -73,7 +75,7 @@ review can be scheduled after it.
   - K1..K3 cover the hold.
   - Every arm has a layered `RED-UNDER-M` twin that the mutation runner measured biting.
 - **A new LANE-ONLY two-backend gate, `supabase/tests/test_sync_status_bridge_lock.sql`**, with
-  arms B1 (plus a B1-DIRECT probe) and B2, and a behavioural NULL-guard probe. The 164.5.2 lock
+  arms B1 (plus a B1-DIRECT probe) and B2. The 164.5.2 lock
   gate's setup stays pinned at `20260926120000`, because adding the new migration there stops its
   L1/L2 twins biting. Its header records why.
 - **The curated and protected sync-status gates were re-pointed at the new body** (plan 04). Every
