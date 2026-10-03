@@ -71,6 +71,10 @@
 -- on the pg-lane before this file: `complete` -> `computing` for both
 -- derive_broker_dailies and stitch_composite. Latent today (0 plain `complete`
 -- rows in the live ledger cohort), so this is a correctness fix ahead of use.
+-- The keep is keyed on the MARKER, not on the retry: it holds when every
+-- in-flight job carries an in-scope refresh marker, in ANY non-terminal status
+-- (pending, running, done_pending_children or failed_retry), which is what
+-- D-05 asked for. The failed_retry retry above is the case that was measured.
 --   1. Read 1 also counts the in-flight jobs that do NOT carry an in-scope
 --      refresh marker, in the SAME statement (same snapshot), as a FILTERed
 --      second count. Its marker list and kind list are copies of the
@@ -126,6 +130,18 @@
 -- lasts as long as the fan-out. Before the hold that same mark stamped now().
 -- The bridge cannot tell "the runner just recomputed" from "nothing ran"; a
 -- runner-side stamp would, and that is outside this SQL-only phase (D-05b).
+-- ⚠️ STATED LIMIT, THE OTHER DIRECTION (Phase 164.5.2.1 review, WR-01). The
+-- hold is BRANCH (a)'s ONLY, which is all the founder decision covered.
+-- computed_at is therefore NOT guaranteed never to read fresher than the last
+-- real compute. Branch (c) still writes computed_at = now() unconditionally,
+-- deliberately and unchanged here, and it keeps complete_with_warnings. So when
+-- an UNRELATED strategy-scoped job (a cron sync_trades poll, a
+-- process_key_long) is the last in-flight job and finishes with no live failure
+-- left, its mark takes branch (c) and re-stamps computed_at on a published row
+-- nothing recomputed. The two directions together: the date can LAG a real
+-- recompute (above) and can ADVANCE without one (here). Both have one fix, a
+-- runner-side stamp on a real finish with the bridge no longer stamping in
+-- (c); it is booked as Phase 166.5 COMPUTEDATSTAMP and is not in this file.
 --
 -- LOCK ORDER (D-06, Phase 164.5.2.1). The first statement after the
 -- NULL-strategy guard takes the two-integer, transaction-scoped advisory lock
@@ -141,9 +157,18 @@
 --                  transaction: no new wait), then the strategy_analytics row.
 --   DEFERRED path: nothing held, then the advisory lock here, then the
 --                  strategy_analytics row.
--- Both paths take the advisory lock before the strategy_analytics row, and no
--- transaction holds that row (or a job row) while waiting on the advisory lock,
--- so there is no cycle. The worst case is a direct call waiting out one mark
+-- The mark path DOES wait on the advisory lock while it holds job rows (its
+-- own, and for done the fan-in children, which can belong to OTHER
+-- strategies). There is still no cycle, because of the converse invariant:
+--   ⛔ WHOEVER HOLDS THE ADVISORY LOCK NEVER WAITS ON A compute_jobs ROW LOCK.
+-- This function only READS compute_jobs (plain SELECTs, no FOR UPDATE) and then
+-- writes strategy_analytics; the DEFERRED path holds nothing else; and no
+-- transaction holds the strategy_analytics row while waiting on the advisory
+-- lock. That invariant is the property every future edit INSIDE the lock must
+-- preserve: a compute_jobs UPDATE or SELECT ... FOR UPDATE added to this
+-- function, or after the lock line in a mark RPC, can wait on a job row a
+-- second mark holds while that mark waits on this lock, which is a 40P01
+-- deadlock (swallowed as a warning on the DEFERRED side). The worst case is a direct call waiting out one mark
 -- transaction on the same strategy. No production transaction takes the lock
 -- for two strategies. The verify block pins the placement on the
 -- comment-stripped body; the two-backend proof (a direct call waits on THIS
@@ -190,11 +215,15 @@
 -- and edited only at the sites named in THE DELTA, RETRY-PLAIN-COMPLETE, A KEPT
 -- ROW HOLDS ITS DATE and LOCK ORDER above, plus the D-07 comment correction (re-grepped across every file in
 -- supabase/migrations/ at execution: no later CREATE and no ALTER FUNCTION of
--- the bridge exists). The REVOKE is re-issued verbatim. COMMENT ON FUNCTION is
+-- the bridge exists). The REVOKE is re-issued verbatim, and an explicit
+-- service_role EXECUTE GRANT now follows it (see the ACL note). COMMENT ON FUNCTION is
 -- NOT re-issued (D-03): CREATE OR REPLACE keeps the 20260826120000 comment, and
 -- the carried A1 anchor proves it survived. The whole 20260906120000 DO $verify$
--- block is carried byte-for-byte except its closing NOTICE; this file's own
--- anchors follow it inside the same block.
+-- block is carried byte-for-byte except its closing NOTICE, the (P2d) count
+-- moved 2 -> 1 by the hold, and (review fix SFH L-1) a first statement that
+-- REBINDS v_fn to the comment-stripped body, so every carried anchor reads
+-- code only; HONEST-01 (H1), which must see comments, reads v_fn_raw. This
+-- file's own anchors follow inside the same block.
 --
 -- ══════════════════════════════════════════════════════════════════════════
 -- VAC-04 ACKNOWLEDGEMENT — the PROD body this CREATE OR REPLACE overwrites
@@ -241,8 +270,9 @@
 -- mark RPCs of 20260515114555. Whether a mark and this function serialize is
 -- proven behaviourally, by the lane-only two-backend gate
 -- supabase/tests/test_sync_status_bridge_lock.sql, not here.
--- The new anchors run on a COMMENT-STRIPPED copy of the body, so prose can
--- never satisfy them.
+-- Every anchor, carried and new, runs on a COMMENT-STRIPPED copy of the body,
+-- so prose can never satisfy one; the sole exception is HONEST-01 (H1), a ban
+-- that must see comments.
 --
 -- Transaction style: NO explicit BEGIN/COMMIT — Supabase wraps each migration
 -- in an implicit transaction. SET LOCAL lock_timeout applies to that wrap. This
@@ -732,7 +762,8 @@ BEGIN
   -- is among this call's unprotected live failures, the warning sits over a
   -- failed run and is not a warning to preserve. A plain 'complete' row is
   -- kept the same way by the refresh keep arm (D-05) when every in-flight job
-  -- is a marked in-scope refresh retry and no unprotected failure is live.
+  -- carries an in-scope refresh marker (in any non-terminal status, not only
+  -- a retry) and no unprotected failure is live.
   --
   -- ⚠️ v_nonterminal_count is deliberately NOT read here. It is read at the TOP
   -- of this function, BEFORE the failure partition — see the read-order note
@@ -1029,13 +1060,22 @@ BEGIN
 END;
 $$;
 
--- ACL. Carried forward VERBATIM from 20260826120000:909 -- a bare REVOKE with
--- no matching GRANT, because this function is SECURITY DEFINER and owned and
--- its only callers are service-role RPCs (mark_compute_job_failed,
--- mark_compute_job_done) that reach it by in-RPC PERFORM. There is no GRANT to
--- preserve here; the symmetric REVOKE+GRANT pair in that file belongs to
--- computation_error_copy, which this migration does not touch.
+-- ACL. The REVOKE is carried forward VERBATIM from 20260826120000:909. This
+-- function is SECURITY DEFINER and owned, and it has THREE callers: the two
+-- service-role mark RPCs (mark_compute_job_failed, mark_compute_job_done), which
+-- reach it by in-RPC PERFORM under their own definer rights, and the Python
+-- DEFERRED path (analytics-service/services/analytics_status.py), which calls it
+-- DIRECTLY over PostgREST as `service_role`. That third caller needs EXECUTE for
+-- service_role itself, so the GRANT below is load-bearing.
+-- ⚠️ ADDED 2026-10-03 (Phase 164.5.2.1 review, RLS-LOW-01). Before this file
+-- that grant was never declared by any migration: PROD and TEST hold it only
+-- through Supabase's bootstrap default privileges (the PROD baseline dump reads
+-- `GRANT ALL ... TO "service_role"`), and a bare cluster without those defaults
+-- (the pg-lane, measured: proacl {postgres=X/postgres}) has none. On PROD and
+-- TEST the GRANT is a no-op, since EXECUTE is the only privilege a function
+-- carries. The verify block asserts it held.
 REVOKE ALL ON FUNCTION sync_strategy_analytics_status FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.sync_strategy_analytics_status(uuid) TO service_role;
 
 -- --------------------------------------------------------------------------
 -- self-verify: the 20260906120000 block carried verbatim, then this file's own
@@ -1059,7 +1099,8 @@ DECLARE
   v_trg_secdef  BOOLEAN;
   v_trg_config  TEXT;
   -- Phase 164.5.2.1 (BRIDGERESIDUE): this file's own anchors, below the
-  -- carried ones. They run on v_body, a COMMENT-STRIPPED copy of v_fn, so no
+  -- carried ones. They run on v_body, a COMMENT-STRIPPED copy of the body (and
+  -- so, since the rebind at the top of the block, do the carried ones), so no
   -- prose can satisfy them. Each positive anchor has its own boolean and is
   -- tested by exactly one IF, so a mutation twin stands it down with a
   -- one-token edit.
@@ -1076,7 +1117,34 @@ DECLARE
   v_keep_arms                  INTEGER;
   v_bridge_lock_anchored       BOOLEAN;
   v_hold_cases                 INTEGER;
+  -- The comment-BEARING body, kept for the one anchor whose job is to catch a
+  -- comment (HONEST-01 H1). See the rebind as the first statement below.
+  v_fn_raw                     TEXT;
 BEGIN
+  -- ======================================================================
+  -- ⭐ COMMENT-STRIP FIRST (Phase 164.5.2.1 review, SFH L-1). Every anchor in
+  -- this block reads v_fn, so v_fn is REBOUND here to the comment-stripped body
+  -- before any of them runs. A carried anchor that matched on comment-bearing
+  -- text could stay green after its statement was deleted, as long as the same
+  -- text survived in a `--` comment inside the function. Rebinding the variable
+  -- rather than renaming it in each anchor keeps every RED-UNDER-M twin's find
+  -- string valid. HONEST-01 (H1) alone reads v_fn_raw: a comment naming the
+  -- operator column IS the defect it exists to catch.
+  -- Strip BOTH plpgsql comment syntaxes, block first (T-163-16), so an anchor
+  -- can only be satisfied by a STATEMENT. Measured: the body carries no string
+  -- literal containing either comment opener, so the strip removes comments
+  -- only.
+  -- ======================================================================
+  v_fn_raw := v_fn;
+  v_body := regexp_replace(regexp_replace(v_fn_raw, '/\*.*?\*/', '', 'gs'), '--.*', '', 'gn');
+
+  -- ⛔ NULL FAILS OPEN THROUGH EVERY REGEX ARM BELOW (a NULL `!~` is NULL, and
+  -- IF NULL does not raise), carried ones included.
+  IF v_fn_raw IS NULL OR v_body IS NULL THEN
+    RAISE EXCEPTION 'bridge-residue: the body of sync_strategy_analytics_status (or its comment-stripped copy) is NULL, so every anchor below would pass on nothing. Refusing to report compliance on an unread body.';
+  END IF;
+  v_fn := v_body;
+
   -- ======================================================================
   -- (P0) THE COLUMN SHAPE. Type, nullability and defaultlessness are ASSERTED,
   -- not assumed: 20260803150000:92-94 records why -- `ADD COLUMN IF NOT EXISTS`
@@ -1243,6 +1311,8 @@ BEGIN
   -- spells it (the prose at the aggregate says "the four picks", deliberately),
   -- so this count is over code. If a future comment does spell it, this arm goes
   -- RED and the fix is to reword the comment -- never to raise the integer.
+  -- (Since 20261003120000 v_fn is the comment-stripped body, so a comment can
+  -- no longer move this count at all; the integer rule stands.)
   IF (SELECT count(*)
         FROM regexp_matches(v_fn, 'array_agg\s*\([^)]*ORDER\s+BY\s+created_at\s+DESC\s*,\s*id\s+DESC\s*\)', 'g')) <> 4 THEN
     RAISE EXCEPTION 'Criterion 2 verification failed: the live-failure aggregate does not carry `ORDER BY created_at DESC, id DESC` on EXACTLY the four picks (two error_kind, two id). Postgres guarantees no tie-break BETWEEN two aggregates, so with a non-total order the kind can be taken from one job and the id from another -- and the bridge then compares the row''s marker against a job that is not the one whose sentence it is reading, failing on exactly the row it should match. A partial fix (two of four) is indistinguishable from none';
@@ -1564,7 +1634,9 @@ BEGIN
   -- the bridge no longer reads the operator column. That comment IS the
   -- regression this anchor detects, and it will RAISE on apply. Write it in the
   -- file header, which pg_get_functiondef does not return.
-  IF v_fn ~* 'last_error' THEN
+  -- ⚠️ Reads v_fn_raw, the comment-BEARING body (Phase 164.5.2.1 review, L-1):
+  -- this is the one anchor that must see comments.
+  IF v_fn_raw ~* 'last_error' THEN
     RAISE EXCEPTION 'HONEST-01 verification failed: sync_strategy_analytics_status references compute_jobs.last_error. That column is the OPERATOR surface (raw classify_exception output) and this function writes strategy_analytics.computation_error, which renders verbatim to users in the wizard failure envelope and the portfolio stale warning. Derive the copy from error_kind via computation_error_copy(). If this fired on a COMMENT rather than on code, the comment is still the defect: move the prose to the migration file header, which pg_get_functiondef does not return';
   END IF;
 
@@ -1590,16 +1662,10 @@ BEGIN
   END IF;
 
   -- ======================================================================
-  -- Phase 164.5.2.1 (BRIDGERESIDUE) — this file's own anchors.
-  -- Strip BOTH plpgsql comment syntaxes, block first (T-163-16), so an anchor
-  -- can only be satisfied by a STATEMENT.
+  -- Phase 164.5.2.1 (BRIDGERESIDUE) — this file's own anchors. They read
+  -- v_body, the comment-stripped body computed (and NULL-checked) as the first
+  -- statement of this block; v_fn holds the same text since the rebind there.
   -- ======================================================================
-  v_body := regexp_replace(regexp_replace(v_fn, '/\*.*?\*/', '', 'gs'), '--.*', '', 'gn');
-
-  -- ⛔ NULL FAILS OPEN THROUGH EVERY REGEX ARM BELOW.
-  IF v_body IS NULL THEN
-    RAISE EXCEPTION 'bridge-residue: the comment-stripped body of sync_strategy_analytics_status is NULL, so every anchor below would pass on nothing. Refusing to report compliance on an unread body.';
-  END IF;
 
   -- (i) The unprotected-failure id array: an UNORDERED pick over the same
   -- partition, collected in the SAME statement as the existing live-failure
@@ -1689,6 +1755,14 @@ BEGIN
     RAISE EXCEPTION 'bridge-residue: branch (a) carries % refresh keep arm(s), not 2 (the status arm and the stamp arm). Without the status arm a plain complete row is rewritten to computing on every marked in-scope refresh retry ([164.6.7-RETRY-PLAIN-COMPLETE]); without the stamp arm a kept complete row carries a stuck-computing reaper stamp.', v_keep_arms;
   END IF;
 
+  -- (xii) D-06: the per-strategy lock, as the FIRST statement after the NULL
+  -- guard and before the first compute_jobs read. One statement-shaped regex
+  -- pins presence, namespace, key, two-integer form and both placements.
+  v_bridge_lock_anchored := v_body ~ 'END\s+IF\s*;\s*PERFORM\s+pg_advisory_xact_lock\s*\(\s*hashtext\s*\(\s*''mark_compute_job_bridge''\s*\)\s*,\s*hashtext\s*\(\s*p_strategy_id::text\s*\)\s*\)\s*;\s*SELECT\s+count\s*\(\s*\*\s*\)\s+INTO\s+v_job_count';
+  IF NOT v_bridge_lock_anchored THEN
+    RAISE EXCEPTION 'bridge-residue: sync_strategy_analytics_status does not take the two-integer mark_compute_job_bridge advisory lock on the strategy id as its first statement after the NULL-strategy guard. A direct caller (the Python DEFERRED path) then reads compute_jobs while an uncommitted terminal mark on the same strategy is changing it; above the guard, a NULL strategy would make the lock a silent no-op.';
+  END IF;
+
   -- (xiii) FOUNDER DECISION 2026-10-03 ("Hold the date for both"): branch (a)'s
   -- sentence, both provenance markers and computed_at are each assigned by a
   -- CASE whose FIRST arm is the membership predicate (today's write), whose
@@ -1696,18 +1770,21 @@ BEGIN
   -- plain complete row under the refresh keep with no warning to resurface),
   -- and whose ELSE is today's write. One regex per CASE shape, the column
   -- back-referenced into the hold arm, counted: exactly four.
+  -- ⭐ VALUE-PINNED (Phase 164.5.2.1 review, SFH L-3). The ELSE back-reference
+  -- only makes the THEN and the ELSE agree with EACH OTHER; on its own the
+  -- regex accepts any of the three values for any column, so rewriting both
+  -- computed_at arms to NULL still counted 4 and every row going computing
+  -- read "never computed". A match counts only when its (column, value) pair
+  -- is the one that column must write, so that edit, or one column's value
+  -- swapped for another's, counts 3 and raises.
   SELECT count(*) INTO v_hold_cases
-    FROM regexp_matches(v_body, '(computation_error|computation_error_source|computation_error_job_id|computed_at)\s*=\s*CASE\s+WHEN\s+strategy_analytics\.computation_error_source\s*=\s*''writer''\s+AND\s+strategy_analytics\.computation_error_job_id\s*=\s*ANY\s*\(\s*v_unprotected_job_ids\s*\)\s+THEN\s+(EXCLUDED\.computation_error|NULL|now\(\))\s+WHEN\s+strategy_analytics\.computation_status\s*=\s*''complete_with_warnings''\s+OR\s+\(\s*v_refresh_keep\s+AND\s+strategy_analytics\.computation_status\s*=\s*''complete''\s+AND\s+strategy_analytics\.computation_warned\s+IS\s+NOT\s+TRUE\s*\)\s+THEN\s+strategy_analytics\.\1\s+ELSE\s+\2\s+END', 'g');
+    FROM regexp_matches(v_body, '(computation_error|computation_error_source|computation_error_job_id|computed_at)\s*=\s*CASE\s+WHEN\s+strategy_analytics\.computation_error_source\s*=\s*''writer''\s+AND\s+strategy_analytics\.computation_error_job_id\s*=\s*ANY\s*\(\s*v_unprotected_job_ids\s*\)\s+THEN\s+(EXCLUDED\.computation_error|NULL|now\(\))\s+WHEN\s+strategy_analytics\.computation_status\s*=\s*''complete_with_warnings''\s+OR\s+\(\s*v_refresh_keep\s+AND\s+strategy_analytics\.computation_status\s*=\s*''complete''\s+AND\s+strategy_analytics\.computation_warned\s+IS\s+NOT\s+TRUE\s*\)\s+THEN\s+strategy_analytics\.\1\s+ELSE\s+\2\s+END', 'g') AS m
+   WHERE (m[1], m[2]) IN (('computation_error',        'EXCLUDED.computation_error'),
+                          ('computation_error_source', 'NULL'),
+                          ('computation_error_job_id', 'NULL'),
+                          ('computed_at',              'now()'));
   IF v_hold_cases <> 4 THEN
-    RAISE EXCEPTION 'bridge-residue: branch (a) carries % hold CASE(s) of the founder-decided shape, not 4 (computation_error, computation_error_source, computation_error_job_id, computed_at). A missing one re-stamps computed_at on a row nothing recomputed (the FreshnessChip and PDF vintage then read fresher than the last real compute), or splits a held sentence from its provenance markers (founder decision 2026-10-03).', v_hold_cases;
-  END IF;
-
-  -- (xii) D-06: the per-strategy lock, as the FIRST statement after the NULL
-  -- guard and before the first compute_jobs read. One statement-shaped regex
-  -- pins presence, namespace, key, two-integer form and both placements.
-  v_bridge_lock_anchored := v_body ~ 'END\s+IF\s*;\s*PERFORM\s+pg_advisory_xact_lock\s*\(\s*hashtext\s*\(\s*''mark_compute_job_bridge''\s*\)\s*,\s*hashtext\s*\(\s*p_strategy_id::text\s*\)\s*\)\s*;\s*SELECT\s+count\s*\(\s*\*\s*\)\s+INTO\s+v_job_count';
-  IF NOT v_bridge_lock_anchored THEN
-    RAISE EXCEPTION 'bridge-residue: sync_strategy_analytics_status does not take the two-integer mark_compute_job_bridge advisory lock on the strategy id as its first statement after the NULL-strategy guard. A direct caller (the Python DEFERRED path) then reads compute_jobs while an uncommitted terminal mark on the same strategy is changing it; above the guard, a NULL strategy would make the lock a silent no-op.';
+    RAISE EXCEPTION 'bridge-residue: branch (a) carries % hold CASE(s) of the founder-decided shape with the value each column must write, not 4 (computation_error -> EXCLUDED.computation_error, computation_error_source -> NULL, computation_error_job_id -> NULL, computed_at -> now(), in both the membership THEN and the ELSE). A missing one re-stamps computed_at on a row branch (a) keeps although nothing recomputed, or splits a held sentence from its provenance markers (founder decision 2026-10-03); a wrong value writes it on every non-kept transition, e.g. computed_at = NULL reads as never computed.', v_hold_cases;
   END IF;
 
   -- The NULL-strategy refusal is behavioural: a NULL id must raise
@@ -1730,5 +1807,12 @@ BEGIN
     RAISE EXCEPTION 'bridge-residue: hashtext(mark_compute_job_bridge) equals hashtext(admin_role_mutate) on this server, so a bridge call and an admin role mutation on colliding ids would serialize against each other.';
   END IF;
 
-  RAISE NOTICE 'Migration 20261003120000: sync_strategy_analytics_status re-based on 20260906120000 (BRIDGERESIDUE, Phase 164.5.2.1); every carried 20260906120000 anchor passed on the new body, and this file''s own comment-stripped anchors passed after them.';
+  -- (xiv) RLS-LOW-01: the Python DEFERRED path calls this function DIRECTLY
+  -- over PostgREST as service_role, so service_role must hold EXECUTE. The
+  -- carried ACL arms above prove only that anon and authenticated do NOT.
+  IF NOT has_function_privilege('service_role', 'public.sync_strategy_analytics_status(uuid)', 'EXECUTE') THEN
+    RAISE EXCEPTION 'bridge-residue: service_role cannot EXECUTE sync_strategy_analytics_status(uuid). The Python DEFERRED path (analytics-service/services/analytics_status.py) calls it directly over PostgREST as service_role; without the grant that call answers 42501, the caller logs a warning, and strategy_analytics keeps its pre-DEFER status.';
+  END IF;
+
+  RAISE NOTICE 'Migration 20261003120000: sync_strategy_analytics_status re-based on 20260906120000 (BRIDGERESIDUE, Phase 164.5.2.1); every carried 20260906120000 anchor passed on the new comment-stripped body, and this file''s own anchors passed after them.';
 END $verify$;

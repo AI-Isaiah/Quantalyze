@@ -474,7 +474,8 @@ BEGIN
   -- is among this call's unprotected live failures, the warning sits over a
   -- failed run and is not a warning to preserve. A plain 'complete' row is
   -- kept the same way by the refresh keep arm (D-05) when every in-flight job
-  -- is a marked in-scope refresh retry and no unprotected failure is live.
+  -- carries an in-scope refresh marker (in any non-terminal status, not only
+  -- a retry) and no unprotected failure is live.
   --
   -- ⚠️ v_nonterminal_count is deliberately NOT read here. It is read at the TOP
   -- of this function, BEFORE the failure partition — see the read-order note
