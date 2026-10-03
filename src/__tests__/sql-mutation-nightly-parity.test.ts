@@ -137,7 +137,7 @@ function parseSteps(job: string): Step[] {
         run = own[runAt].replace(/^ {8}run: /, "");
       }
     }
-    const usesKey = uses ? `uses:${uses.slice(0, uses.indexOf("@") + 1)}` : null;
+    const usesKey = uses ? `uses:${uses.slice(0, anchorIndex(uses, "@") + 1)}` : null;
     return {
       key: name ?? usesKey ?? `unparsed step ${n}`,
       name,
