@@ -2703,7 +2703,10 @@ jobs:
         # printed as a `::warning::`, and SQL_GATE_REASON is rewritten to say
         # the step refused it before the FULL command runs, so the runner's
         # `scope-reason:` line (D-12) tells the truth about why FULL ran. The
-        # FULL command itself is unchanged, byte for byte.
+        # FULL command itself is unchanged, byte for byte. The 2026-09-23
+        # paragraph's "the push to main always runs the whole corpus" and its
+        # "the derivation already forces `full` for a non-PR event" are kept as
+        # lineage: both stopped being true for a push to main on 2026-10-03.
         env:
           RUNNER_LOG: ${{ runner.temp }}/mutation-runner.log
           SQL_GATE_MODE: ${{ needs.changed-paths.outputs.sql_gate_mode }}
