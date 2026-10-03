@@ -1740,10 +1740,21 @@ BEGIN
   -- plain complete row under the refresh keep with no warning to resurface),
   -- and whose ELSE is today's write. One regex per CASE shape, the column
   -- back-referenced into the hold arm, counted: exactly four.
+  -- ⭐ VALUE-PINNED (Phase 164.5.2.1 review, SFH L-3). The ELSE back-reference
+  -- only makes the THEN and the ELSE agree with EACH OTHER; on its own the
+  -- regex accepts any of the three values for any column, so rewriting both
+  -- computed_at arms to NULL still counted 4 and every row going computing
+  -- read "never computed". A match counts only when its (column, value) pair
+  -- is the one that column must write, so that edit, or one column's value
+  -- swapped for another's, counts 3 and raises.
   SELECT count(*) INTO v_hold_cases
-    FROM regexp_matches(v_body, '(computation_error|computation_error_source|computation_error_job_id|computed_at)\s*=\s*CASE\s+WHEN\s+strategy_analytics\.computation_error_source\s*=\s*''writer''\s+AND\s+strategy_analytics\.computation_error_job_id\s*=\s*ANY\s*\(\s*v_unprotected_job_ids\s*\)\s+THEN\s+(EXCLUDED\.computation_error|NULL|now\(\))\s+WHEN\s+strategy_analytics\.computation_status\s*=\s*''complete_with_warnings''\s+OR\s+\(\s*v_refresh_keep\s+AND\s+strategy_analytics\.computation_status\s*=\s*''complete''\s+AND\s+strategy_analytics\.computation_warned\s+IS\s+NOT\s+TRUE\s*\)\s+THEN\s+strategy_analytics\.\1\s+ELSE\s+\2\s+END', 'g');
+    FROM regexp_matches(v_body, '(computation_error|computation_error_source|computation_error_job_id|computed_at)\s*=\s*CASE\s+WHEN\s+strategy_analytics\.computation_error_source\s*=\s*''writer''\s+AND\s+strategy_analytics\.computation_error_job_id\s*=\s*ANY\s*\(\s*v_unprotected_job_ids\s*\)\s+THEN\s+(EXCLUDED\.computation_error|NULL|now\(\))\s+WHEN\s+strategy_analytics\.computation_status\s*=\s*''complete_with_warnings''\s+OR\s+\(\s*v_refresh_keep\s+AND\s+strategy_analytics\.computation_status\s*=\s*''complete''\s+AND\s+strategy_analytics\.computation_warned\s+IS\s+NOT\s+TRUE\s*\)\s+THEN\s+strategy_analytics\.\1\s+ELSE\s+\2\s+END', 'g') AS m
+   WHERE (m[1], m[2]) IN (('computation_error',        'EXCLUDED.computation_error'),
+                          ('computation_error_source', 'NULL'),
+                          ('computation_error_job_id', 'NULL'),
+                          ('computed_at',              'now()'));
   IF v_hold_cases <> 4 THEN
-    RAISE EXCEPTION 'bridge-residue: branch (a) carries % hold CASE(s) of the founder-decided shape, not 4 (computation_error, computation_error_source, computation_error_job_id, computed_at). A missing one re-stamps computed_at on a row nothing recomputed (the FreshnessChip and PDF vintage then read fresher than the last real compute), or splits a held sentence from its provenance markers (founder decision 2026-10-03).', v_hold_cases;
+    RAISE EXCEPTION 'bridge-residue: branch (a) carries % hold CASE(s) of the founder-decided shape with the value each column must write, not 4 (computation_error -> EXCLUDED.computation_error, computation_error_source -> NULL, computation_error_job_id -> NULL, computed_at -> now(), in both the membership THEN and the ELSE). A missing one re-stamps computed_at on a row branch (a) keeps although nothing recomputed, or splits a held sentence from its provenance markers (founder decision 2026-10-03); a wrong value writes it on every non-kept transition, e.g. computed_at = NULL reads as never computed.', v_hold_cases;
   END IF;
 
   -- The NULL-strategy refusal is behavioural: a NULL id must raise
