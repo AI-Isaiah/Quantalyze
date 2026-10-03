@@ -2845,6 +2845,37 @@ jobs:
             exit 1
           fi
 
+          # Phase 164.9.6 / D-12 (founder, OPEN-4) — WHY DID THIS RUN TAKE ITS
+          # SCOPE? The runner prints exactly one `scope-reason: <why>` line
+          # directly after its `scope:` line on every corpus run. Same arms as
+          # the `scope:` count above: an unreadable log, an absent line, more
+          # than one line, or a blank reason is a MEASURE_FAIL. ⛔ This line is
+          # NEVER parsed for names: the SUBSET name count and the WR-07 set
+          # below read the `scope:` line alone, so a reason that quotes a
+          # migration `.sql` path cannot move either.
+          set +e
+          reason_count=$(grep -a -c -E '^scope-reason: ' "$RUNNER_LOG")
+          rc=$?
+          set -e
+          [ "$rc" -le 1 ] || { echo "::error::MEASURE_FAIL: grep exited $rc counting 'scope-reason:' lines in $RUNNER_LOG — the log could not be read, which is not the same as a log with no scope-reason line."; exit 1; }
+          case "$reason_count" in ''|*[!0-9]*)
+            echo "::error::MEASURE_FAIL: could not count the 'scope-reason:' lines in $RUNNER_LOG (got '$reason_count')."; exit 1;; esac
+          if [ "$reason_count" -eq 0 ]; then
+            echo "::error::MEASURE_FAIL: the run printed NO 'scope-reason:' line — D-12 requires every run to say why it took its scope."
+            exit 1
+          fi
+          if [ "$reason_count" -ne 1 ]; then
+            echo "::error::MEASURE_FAIL: the run printed $reason_count 'scope-reason:' lines. One run of the gate prints exactly one; more than one means this log was not produced by one run."
+            exit 1
+          fi
+          reason_line=$(grep -a -m1 -E '^scope-reason: ' "$RUNNER_LOG" || true)
+          reason_text=$(printf '%s' "${reason_line#scope-reason: }" | tr -d '[:space:]')
+          if [ -z "$reason_text" ]; then
+            echo "::error::MEASURE_FAIL: the run's 'scope-reason:' line carries an EMPTY reason. D-12 requires every run to say why it took its scope; a blank reason says nothing."
+            exit 1
+          fi
+          echo "$reason_line"
+
           floors=$(node -e 'import("./scripts/mutation-floors.mjs").then(m => console.log(m.FILES_FLOOR, m.ARMS_FLOOR, m.WAIVED_CEILING))')
           files_floor=$(echo "$floors" | cut -d" " -f1)
           arms_floor=$(echo "$floors" | cut -d" " -f2)

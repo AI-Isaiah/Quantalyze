@@ -21,6 +21,11 @@
  *   scope: SUBSET <k>/<N> annotated files: <basename> <basename> …
  *   scope: DIAGNOSTIC <file-or-arm>
  *
+ * (2026-10-03, Phase 164.9.6 D-12) Every corpus run ALSO prints exactly one
+ * `scope-reason: <why>` line directly after its `scope:` line, from
+ * SQL_GATE_REASON, the runner's own subset fallback, or else naming a direct
+ * invocation. The argv contract above is unchanged.
+ *
  * Exit codes:
  *   0  full gate run, no defects, floors held, the runner's own counts agree —
  *      OR a SUBSET run (`--subset-from`) with no defects, FILES_FLOOR and
@@ -2170,6 +2175,34 @@ function materialize(slotDir, relPaths) {
 // ---------------------------------------------------------------------------
 
 /**
+ * Phase 164.9.6 / D-12 (founder, OPEN-4): the ONE `scope-reason:` line a corpus
+ * run prints directly after its `scope:` line, saying WHY it took that scope.
+ * A separate line, so the `scope:` line and every parser of it stay untouched.
+ *
+ * Every character below 0x20, and 0x7F, collapses to a space and the result is
+ * trimmed, so a reason can never split the line or start a new one with a
+ * workflow command; it always follows the fixed `scope-reason: ` prefix. No
+ * length cap here: the derivation already caps it (`oneLineReason`).
+ *
+ * Precedence: the runner's own subset fallback (the run widened to FULL on its
+ * own evidence), then a non-blank derivation reason, then a direct invocation.
+ * Never an empty reason.
+ *
+ * @param {{ subsetFallback?: string|null, reason?: string|null }} [opts]
+ * @returns {string}
+ */
+export function scopeReasonLine({ subsetFallback = null, reason = null } = {}) {
+  const clean = (v) => (typeof v === "string" ? v.replace(/[\x00-\x1f\x7f]+/g, " ").trim() : "");
+  const why = clean(reason);
+  const fallback = clean(subsetFallback);
+  if (fallback !== "") {
+    return `scope-reason: the runner fell back to FULL: ${fallback} (derivation: ${why === "" ? "none supplied" : why})`;
+  }
+  if (why !== "") return `scope-reason: ${why}`;
+  return "scope-reason: no derivation reason supplied (a direct invocation)";
+}
+
+/**
  * @param {object} opts
  * @param {string} opts.scopeDir         directory whose *.sql files form the corpus
  * @param {string|null} [opts.onlyFile]  repo-relative gate path to narrow to
@@ -2181,6 +2214,9 @@ function materialize(slotDir, relPaths) {
  *        EVERY listed file is annotated; otherwise the run is FULL with the
  *        fallback reason naming the unannotated ones. Distinct from `narrowed`:
  *        a clean subset run exits 0, a clean diagnostic run still exits 2.
+ * @param {string|null} [opts.scopeReason] 164.9.6 D-12: why this scope was taken
+ *        (the derivation's SQL_GATE_REASON on the CLI path), printed on the
+ *        `scope-reason:` line through `scopeReasonLine`
  * @param {number} [opts.filesFloor]     ratchet; overridable ONLY by --self-test
  * @param {number} [opts.armsFloor]
  * @param {number} [opts.waivedCeiling]  ceiling on waived arms; overridable ONLY by --self-test
@@ -2198,6 +2234,7 @@ export function runCorpus({
   onlyFile = null,
   onlyArm = null,
   subsetFiles = null,
+  scopeReason = null,
   filesFloor = FILES_FLOOR,
   armsFloor = ARMS_FLOOR,
   waivedCeiling = WAIVED_CEILING,
@@ -2291,6 +2328,11 @@ export function runCorpus({
     if (subsetFallback !== null) scopeLine += ` (subset fallback: ${subsetFallback})`;
   }
   log(scopeLine);
+  const reasonLine = scopeReasonLine({
+    subsetFallback,
+    reason: narrowed && !scopeReason ? "a narrowed DIAGNOSTIC run (--file/--arm)" : scopeReason,
+  });
+  log(reasonLine);
 
   // Snapshot the working tree BEFORE any lane run. The invariant is "this run
   // did not touch the checkout", NOT "the developer has no uncommitted work" —
@@ -2846,7 +2888,7 @@ export function runCorpus({
       log("");
       log(
         `ARMS_FLOOR: NOT compared — this SUBSET run covered ${targets.length} of ${corpus.filesAnnotated} ` +
-          `annotated files; ARMS_FLOOR is compared by the full-corpus run (push to main).`,
+          `annotated files; ARMS_FLOOR is compared by the nightly full-corpus run and by every FULL run.`,
       );
       // Review 164.4.2 WR-03: what a subset CAN check at no lane cost. The
       // full corpus's annotated-minus-waived arm total bounds the full run's
@@ -2869,7 +2911,7 @@ export function runCorpus({
           null,
           scopeDir,
           `ARMS_FLOOR regression (static upper bound): ${staticUnwaived} annotated-unwaived arm(s) < floor ${armsFloor} ` +
-            `across all ${corpus.filesAnnotated} annotated files — the full-corpus run on the push to main cannot reach the floor.`,
+            `across all ${corpus.filesAnnotated} annotated files — a full-corpus run cannot reach the floor.`,
         );
       }
     } else if (bitingArms < armsFloor) {
@@ -2938,6 +2980,8 @@ export function runCorpus({
     subset,
     subsetFallback,
     scopeLine,
+    // 164.9.6 D-12: the one `scope-reason:` line, logged directly after `scope:`.
+    scopeReasonLine: reasonLine,
     filesTotal: corpus.filesTotal,
     filesAnnotated: corpus.filesAnnotated,
     armsAnnotated,
@@ -4156,7 +4200,10 @@ function main(argv) {
   }
 
   console.log(`mutation-runner: scope ${relative(REPO_ROOT, scopeDir) || "."}`);
-  return runCorpus({ scopeDir, onlyFile, onlyArm, subsetFiles }).exitCode;
+  // 164.9.6 D-12: the derivation's reason, as `changed-paths` published it and
+  // the mutate step handed it on (rewritten there when the step refused a mode).
+  const scopeReason = process.env.SQL_GATE_REASON ?? null;
+  return runCorpus({ scopeDir, onlyFile, onlyArm, subsetFiles, scopeReason }).exitCode;
 }
 
 if (process.argv[1] && process.argv[1].endsWith("run.mjs")) {
