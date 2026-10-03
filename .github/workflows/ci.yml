@@ -2334,6 +2334,15 @@ jobs:
     # ⭐ 2026-10-03 (Phase 164.9.6 SUBSETMAIN): [REDUNDER-SUBSET-SPLIT] has SHIPPED. A push
     # to main now runs a SUBSET or skips the lane (`none`), and `sql-mutation-nightly.yml`
     # runs the full corpus and enforces the floors. The three mentions above are lineage.
+    # ⭐ 2026-10-03 (Phase 164.9.6.1 SUBSETSHARD): a FULL run's crossing of this ceiling is
+    # now answered by in-job concurrency (D-01): the runner drives up to
+    # `LANE_CONCURRENCY_CAP` gate files at once in this one job (`defaultLaneConcurrency`
+    # in scripts/mutation-runner/run.mjs), prints it as `lane-concurrency:`, and the
+    # assert step MEASURE_FAILs without that line. 20 STAYS the declared ceiling and was
+    # not raised (D-03 adds no wall-time guard). Separately, a predecessor red ONLY with
+    # tolerated baseline-content drift (DRIFT / SNAPSHOT_MISSING rows) no longer forces a
+    # FULL run on the next push (D-02/D-05): `predecessorVerdict`'s opt-in
+    # `tolerateBaselineDrift`, taken by the SQL gate subset alone (D-04).
     # Phase 164.6.3 / CI-DOCSPATH-01 — docs-only path filter: this changes WHEN
     # this job is invoked (not on a `.planning/`-only PR), never WHAT it asserts.
     # ⚠️ CORRECTION to the two paragraphs above, which say this job has "no `if:`" and
@@ -2738,6 +2747,13 @@ jobs:
         #
         # ⛔ MODE IDENTITY: the bare command from the script's own header, no
         # wrapper. Pinned from vitest by src/__tests__/mutation-runner-floors.test.ts.
+        #
+        # ⭐ CURRENCY 2026-10-03 (Phase 164.9.6.1 SUBSETSHARD, D-01): the
+        # `SELF-TEST (concurrency)` family now proves, on REAL lanes, that a
+        # serial run and a four-wide run of the same SUBSET agree on every
+        # tally, the exit code and the ordered defect list, and that the
+        # four-wide run really had more than one lane in flight. The counts
+        # above are lineage; the self-test prints its own.
         run: node scripts/mutation-runner/run.mjs --self-test
 
       - name: Mutate every annotated RED-UNDER arm and require it to bite
@@ -2970,6 +2986,40 @@ jobs:
             exit 1
           fi
           echo "$reason_line"
+
+          # Phase 164.9.6.1 / D-01 (founder, "In-job concurrency") — HOW MANY
+          # GATE FILES DID THIS RUN DRIVE AT ONCE? The runner prints exactly one
+          # `lane-concurrency: <N>   (…)` line directly after `scope-reason:`,
+          # before any lane. Without it, this run's wall time cannot be read
+          # against the serial baseline, and whether its lanes ran side by side
+          # is unknown. Same arms as the two counts above: an unreadable log,
+          # an absent line, more than one line, or an N below 1 is a
+          # MEASURE_FAIL. ⛔ N is NOT compared against a cap: D-03 adds no
+          # guard, and a runner with a different core count is legal.
+          set +e
+          concurrency_count=$(grep -a -c -E '^lane-concurrency: [0-9]+ ' "$RUNNER_LOG")
+          rc=$?
+          set -e
+          [ "$rc" -le 1 ] || { echo "::error::MEASURE_FAIL: grep exited $rc counting 'lane-concurrency:' lines in $RUNNER_LOG — the log could not be read, which is not the same as a log with no lane-concurrency line."; exit 1; }
+          case "$concurrency_count" in ''|*[!0-9]*)
+            echo "::error::MEASURE_FAIL: could not count the 'lane-concurrency:' lines in $RUNNER_LOG (got '$concurrency_count')."; exit 1;; esac
+          if [ "$concurrency_count" -eq 0 ]; then
+            echo "::error::MEASURE_FAIL: the run printed NO 'lane-concurrency: <N>' line, so how many gate files it ran at once is unknown. Its wall time cannot be read against the serial baseline and its lane isolation cannot be judged (D-01)."
+            exit 1
+          fi
+          if [ "$concurrency_count" -ne 1 ]; then
+            echo "::error::MEASURE_FAIL: the run printed $concurrency_count 'lane-concurrency:' lines. One run of the gate prints exactly one; more than one means this log was not produced by one run."
+            exit 1
+          fi
+          concurrency_line=$(grep -a -m1 -E '^lane-concurrency: [0-9]+ ' "$RUNNER_LOG" || true)
+          concurrency_n=$(echo "$concurrency_line" | sed -E 's|^lane-concurrency: ([0-9]+) .*$|\1|')
+          case "$concurrency_n" in ''|*[!0-9]*)
+            echo "::error::MEASURE_FAIL: could not read the concurrency out of '$concurrency_line'."; exit 1;; esac
+          if [ "$concurrency_n" -lt 1 ]; then
+            echo "::error::MEASURE_FAIL: the run's 'lane-concurrency:' line says $concurrency_n gate file(s) at once. A run that executed anything ran at least one; a value below 1 is not a real reading of this run (D-01)."
+            exit 1
+          fi
+          echo "$concurrency_line"
 
           floors=$(node -e 'import("./scripts/mutation-floors.mjs").then(m => console.log(m.FILES_FLOOR, m.ARMS_FLOOR, m.WAIVED_CEILING))')
           files_floor=$(echo "$floors" | cut -d" " -f1)

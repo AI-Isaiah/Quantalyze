@@ -1677,6 +1677,10 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // `scope-reason:` line directly after `scope:` on every corpus run, and the
     // count-recheck step MEASURE_FAILs without it.
     "scope-reason: the mutation machinery or a lane input changed: scripts/mutation-runner/run.mjs",
+    // ⭐ ADDED 2026-10-03 (Phase 164.9.6.1 D-01, SS-5): the runner prints exactly one
+    // `lane-concurrency:` line directly after `scope-reason:`, and the count-recheck step
+    // MEASURE_FAILs without it. Copied verbatim from plan 01's full local lane run.
+    "lane-concurrency: 4   (gate files in flight at once: min(cap 4, availableParallelism 10) unless overridden; at most 4 for this run's 58 target file(s); lanes within a file run in order)",
     "  baseline  supabase/tests/test_strategy_shares_rls.sql — exit 0 (1.8s)",
     "  arm SHAPE 1                  exit   3  RED (identity ok)  (1.7s)",
     "  restore   supabase/tests/test_strategy_shares_rls.sql — exit 0 (1.8s)",
@@ -2665,6 +2669,9 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     "scope: SUBSET 2/58 annotated files: test_allocator_equity_derived_rls.sql test_allocator_equity_pre_terminus_flag.sql",
     // ⭐ ADDED 2026-10-03 (Phase 164.9.6 D-12), directly after `scope:` as the runner prints it.
     "scope-reason: 2 of 5 changed file(s) are gate files",
+    // ⭐ ADDED 2026-10-03 (Phase 164.9.6.1 D-01, SS-5), directly after `scope-reason:` as the
+    // runner prints it; "at most 2" because a SUBSET of 2 files caps the pool at 2.
+    "lane-concurrency: 4   (gate files in flight at once: min(cap 4, availableParallelism 10) unless overridden; at most 2 for this run's 2 target file(s); lanes within a file run in order)",
     "",
     // ⭐ CURRENCY 2026-09-27 (Phase 164.9.3 CLAIMPAIR, plan 05): 52/79 -> 53/80, agreeing with
     // GREEN_LOG's coverage line and the SUBSET scope denominator above.
@@ -2929,6 +2936,48 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     const b = runCountRecheck(blank, PUSH_MAIN);
     expect(b.status, b.out).toBe(1);
     expect(b.out).toContain("'scope-reason:' line carries an EMPTY reason");
+  });
+
+  // ── Phase 164.9.6.1 / D-01 (SS-5): every run says how many gate files it ran at once ──
+  // One `lane-concurrency: <N>` line, asserted present, single and N >= 1. Without it
+  // the run's wall time cannot be read against the serial baseline. N is never compared
+  // against a cap (D-03 adds no guard), so only absence, doubling and N < 1 are RED.
+  it("RED: NO lane-concurrency line is a MEASURE_FAIL, on a FULL and on a SUBSET log (D-01, SS-5)", () => {
+    for (const [log, env] of [
+      [GREEN_LOG, PUSH_MAIN],
+      [SUBSET_LOG, PR],
+    ] as Array<[string, Record<string, string>]>) {
+      const without = log.replace(/^lane-concurrency: .*\n/m, "");
+      expect(without, "the deletion must actually change the log").not.toBe(log);
+      const r = runCountRecheck(without, env);
+      expect(r.status, r.out).toBe(1);
+      expect(r.out).toContain("MEASURE_FAIL: the run printed NO 'lane-concurrency: <N>' line");
+    }
+  });
+
+  it("RED: two lane-concurrency lines are a MEASURE_FAIL (D-01, SS-5)", () => {
+    const doubled = GREEN_LOG.replace(/^(lane-concurrency: .*)$/m, "$1\n$1");
+    expect(doubled).not.toBe(GREEN_LOG);
+    const r = runCountRecheck(doubled, PUSH_MAIN);
+    expect(r.status, r.out).toBe(1);
+    expect(r.out).toContain("printed 2 'lane-concurrency:' lines");
+  });
+
+  it("RED: lane-concurrency 0 is a MEASURE_FAIL, not a reading (D-01, SS-5)", () => {
+    const zero = GREEN_LOG.replace(/^lane-concurrency: 4 /m, "lane-concurrency: 0 ");
+    expect(zero, "the substitution must actually change the log").not.toBe(GREEN_LOG);
+    const r = runCountRecheck(zero, PUSH_MAIN);
+    expect(r.status, r.out).toBe(1);
+    expect(r.out).toContain("'lane-concurrency:' line says 0 gate file(s) at once");
+  });
+
+  it("GREEN: the lane-concurrency line is echoed on a clean log, and a different N is legal (D-01, D-03)", () => {
+    for (const n of ["4", "1", "7"]) {
+      const log = GREEN_LOG.replace(/^lane-concurrency: 4 /m, `lane-concurrency: ${n} `);
+      const r = runCountRecheck(log, PUSH_MAIN);
+      expect(r.status, r.out).toBe(0);
+      expect(r.out).toContain(`lane-concurrency: ${n}   (gate files in flight at once`);
+    }
   });
 
   it("GREEN: a scope-reason that names a migration .sql file moves neither the SUBSET name count nor the WR-07 set (D-12, Research Pattern 2)", () => {
