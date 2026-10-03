@@ -82,6 +82,30 @@ def _reset_fail_loud_traceback_dedupe():
     _reset_fail_loud_traceback_dedupe_for_tests()
 
 
+# Phase 164.6.6 criterion 1: `mt5_terminal_lease` awaits the handover recorder
+# whenever a lease body's login changes the terminal's recorded holder, and a
+# large part of this suite drives the REAL lease over a fake login that
+# SUCCEEDS. Unpatched, every one of those tests would reach the real
+# `get_supabase()`. ⛔ That is a WRITE to a real project whenever `SUPABASE_URL`
+# is set, and `main.py` / `main_worker.py` call `load_dotenv` on the TEST
+# project's local env file at import, so any test that imports `main` sets it
+# for the rest of a local run. The default here is a sink that refuses. The
+# recorder's never-raises contract turns the refusal into one warning, and a
+# test that wants rows patches `mt5_handover.get_supabase` itself (this fixture
+# runs first, so the test's own patch wins).
+@pytest.fixture(autouse=True)
+def _handover_recorder_never_reaches_a_real_project(monkeypatch):
+    from services import mt5_handover
+
+    def _refuse():
+        raise RuntimeError(
+            "unit tests never write a handover row to a real project"
+        )
+
+    monkeypatch.setattr(mt5_handover, "get_supabase", _refuse)
+    yield
+
+
 # Phase 134 (smoothed_mtm kill-switch): the v1.14 smoothed THIRD pass ships DARK
 # behind SMOOTHED_MTM_ENABLED (services.closed_sets.is_smoothed_mtm_enabled),
 # default OFF. The Phase 131-133 tests were written when the pass ran

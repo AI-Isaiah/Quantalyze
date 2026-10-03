@@ -771,3 +771,17 @@ async def test_a_HEAL_that_escalates_to_a_RECYCLE_records_a_handover_to_UNKNOWN(
     assert len(fake._MetaTrader5__conn.recycle_calls) == 1
     assert sink.pairs() == [(_KEY_A, HOLDER_UNKNOWN, SITE_HEAL)]
     assert mt5_terminal_holder(_heal_key()) == HOLDER_UNKNOWN
+
+
+def test_the_suite_default_sink_REFUSES_so_no_unit_test_writes_a_real_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """⛔ With `SUPABASE_URL` set (as `main.py`'s `load_dotenv` does on a local
+    run), an unpatched recorder would insert into a real project from every test
+    that drives the real lease over a succeeding fake login. `tests/conftest.py`
+    makes the default sink refuse; this pins that it does, with the variables
+    set."""
+    monkeypatch.setenv("SUPABASE_URL", "http://127.0.0.1:9")
+    monkeypatch.setenv("SUPABASE_SERVICE_KEY", "not-a-real-key")
+    with pytest.raises(RuntimeError, match="never write a handover row"):
+        mt5_handover.get_supabase()
