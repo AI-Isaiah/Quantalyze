@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync 
 import { execFileSync, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join, posix } from "node:path";
-import { judge, TEST_READ_PLANNING_PATHS } from "../../../scripts/classify-changed-paths.mjs";
+import { DRIFT_STEP_RUN_LINE, judge, TEST_READ_PLANNING_PATHS, TOLERATED_DRIFT_CHECK } from "../../../scripts/classify-changed-paths.mjs";
 
 /**
  * Phase 164.6.3 / CI-DOCSPATH-01 — the pin for the docs-only path filter's
@@ -751,7 +751,7 @@ describe("[164.6.3 / CI-DOCSPATH-01] the PARTITION, pinned as an exact set in BO
   });
 
   // ── review 164.9.4 round 2, SFH-04 (round 3, WR-01): the predecessor lookup's credentials ─
-  it("`changed-paths` declares exactly `contents: read` + `checks: read`, and only `classify` and `sql_gate_subset` get GH_TOKEN", () => {
+  it("`changed-paths` declares exactly `contents: read` + `checks: read` + `actions: read`, and only `classify` and `sql_gate_subset` get GH_TOKEN", () => {
     const block = jobBlockLines(DETECTOR);
     const at = block.findIndex((l) => /^ {4}permissions:\s*$/.test(l));
     expect(
@@ -765,9 +765,12 @@ describe("[164.6.3 / CI-DOCSPATH-01] the PARTITION, pinned as an exact set in BO
     // A job-level block REPLACES the workflow-level one: `contents: read` must
     // be restated, and nothing broader may ride in beside the one uplift.
     // Round 3 WR-01, round 4 CR-01 + WR-01: the classifier reads every check run
-    // and every check suite on `before`, both of which `checks: read` covers;
-    // nothing needs `actions: read`.
-    expect(perms.sort()).toEqual(["checks: read", "contents: read"]);
+    // and every check suite on `before`, both of which `checks: read` covers.
+    // 2026-10-03, Phase 164.9.6.1 D-02: the SQL gate subset's tolerant
+    // predecessor proof reads the `sql-gate-lint` job log through the job-logs
+    // endpoint, which needs `actions: read`; that is the one scope added, and
+    // nothing broader may ride in beside it.
+    expect(perms.sort()).toEqual(["actions: read", "checks: read", "contents: read"]);
     // Review 164.9.6 WR-03: the SQL gate subset derivation reuses the
     // classifier's predecessor proof before a push narrows, so it is the one
     // other step that reads the token. Each token line is pinned to its step,
@@ -782,6 +785,85 @@ describe("[164.6.3 / CI-DOCSPATH-01] the PARTITION, pinned as an exact set in BO
       return [`(no step above block line ${i})`];
     });
     expect(tokenSteps, "GH_TOKEN must reach exactly the classify and sql_gate_subset steps").toEqual(["classify", "sql_gate_subset"]);
+  });
+
+  // ── Phase 164.9.6.1 (D-02, D-04): the tolerant predecessor proof stays alive and stays scoped ─
+  it("the `sql-gate-lint` job's drift step carries exactly the `run:` line the tolerant log parser requires", () => {
+    // The tolerant proof accepts a red predecessor only when the LAST step
+    // header in the `sql-gate-lint` job log is `##[group]Run ` + this exact
+    // line. If the step's `run:` line moves or the job is renamed, the proof
+    // can never match and every drift-red predecessor silently forces FULL
+    // again: safe, but the D-02 routing stops working without anyone seeing it.
+    expect(TOLERATED_DRIFT_CHECK).toBe("sql-gate-lint");
+    expect(
+      JOB_KEYS,
+      `ci.yml has no job keyed \`${TOLERATED_DRIFT_CHECK}:\`. Its check-run name is what TOLERATED_DRIFT_CHECK ` +
+        "matches, so the tolerant predecessor proof could never engage.",
+    ).toContain(TOLERATED_DRIFT_CHECK);
+    const block = jobBlockLines(TOLERATED_DRIFT_CHECK);
+    expect(
+      block.filter((l) => /^ {4}name:/.test(l)),
+      "a job-level `name:` would rename the check run away from the job key TOLERATED_DRIFT_CHECK matches",
+    ).toEqual([]);
+    const runs = block.filter((l) => /^\s+run: /.test(l)).map((l) => l.replace(/^\s+run: /, ""));
+    expect(runs.length, "vacuity fence: the sql-gate-lint job carries no `run:` line at all").toBeGreaterThan(0);
+    expect(
+      runs.filter((r) => r === DRIFT_STEP_RUN_LINE).length,
+      `exactly one step of \`${TOLERATED_DRIFT_CHECK}\` must have \`run: ${DRIFT_STEP_RUN_LINE}\` with nothing after it. ` +
+        "Otherwise the tolerant predecessor proof can never match the drift step's log header, and every " +
+        "drift-red predecessor silently forces a FULL sql-mutation run again (Phase 164.9.6.1 D-02).",
+    ).toBe(1);
+  });
+
+  it("D-04: only `sql-gate-subset.mjs` opts into the tolerance; `classifyPushRange`'s predecessorVerdict call has exactly two arguments", () => {
+    /** Strip block and line comments, so prose explaining the scope cannot turn a pin red. */
+    const stripComments = (src: string): string =>
+      src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:"'`\\])\/\/.*$/gm, "$1");
+    /** The top-level argument list of every `predecessorVerdict(` call in `src`. */
+    const callArgs = (src: string): string[][] => {
+      const out: string[][] = [];
+      let at = src.indexOf("predecessorVerdict(");
+      while (at !== -1) {
+        let depth = 0;
+        let arg = "";
+        const args: string[] = [];
+        for (let i = at + "predecessorVerdict(".length; i < src.length; i += 1) {
+          const c = src[i];
+          if (depth === 0 && c === ")") break;
+          if ("([{".includes(c)) depth += 1;
+          if (")]}".includes(c)) depth -= 1;
+          if (depth === 0 && c === ",") {
+            args.push(arg.trim());
+            arg = "";
+          } else arg += c;
+        }
+        if (arg.trim()) args.push(arg.trim());
+        out.push(args);
+        at = src.indexOf("predecessorVerdict(", at + 1);
+      }
+      return out;
+    };
+    const classifier = readFileSync(CLASSIFIER, "utf8");
+    const start = classifier.indexOf("export function classifyPushRange(");
+    expect(start, "scripts/classify-changed-paths.mjs has no `export function classifyPushRange(`").toBeGreaterThan(-1);
+    const end = classifier.indexOf("\n}\n", start);
+    expect(end, "classifyPushRange's body has no closing brace at column 0").toBeGreaterThan(start);
+    const body = stripComments(classifier.slice(classifier.indexOf("{\n", start), end));
+    const docsCalls = callArgs(body);
+    expect(docsCalls.length, "classifyPushRange must call predecessorVerdict exactly once (vacuity fence)").toBe(1);
+    expect(
+      docsCalls[0],
+      "D-04: the docs-only short path keeps the STRICT predecessor rule. A third argument to its " +
+        "predecessorVerdict call could opt it into the drift tolerance, so a docs-only push on a drift-red " +
+        "main would skip CI while main reads green over an unresolved drift.",
+    ).toEqual(["sha", "fetchPredecessor"]);
+    const subset = stripComments(readFileSync(join(ROOT, "scripts/sql-gate-subset.mjs"), "utf8"));
+    const optIns = callArgs(subset).filter((a) => a.length === 3 && /\btolerateBaselineDrift:\s*true\b/.test(a[2]));
+    expect(
+      optIns.length,
+      "scripts/sql-gate-subset.mjs must call predecessorVerdict with { tolerateBaselineDrift: true } (Phase " +
+        "164.9.6.1 D-02): without it a drift-only red main forces every next push's sql-mutation to FULL again.",
+    ).toBe(1);
   });
 
   // ── the CONDITION FORM: one physical line, fail-closed spelling ──────────
