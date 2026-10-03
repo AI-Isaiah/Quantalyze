@@ -1,5 +1,101 @@
 # Changelog
 
+## [0.122.0.0] - 2026-10-03 — ACCOUNTTRUTH PR C5: MT5 keys are stamped at poll time, and a read-only census measures the book before any recompute
+
+⭐ **What changed for whoever reads this next.** Two MT5 keys created before the `venue_account_id`
+column existed were never stamped, so the one-account-one-holder rule could not see them, and a
+second key on the same MT5 account would count twice. Per the founder's decision of 2026-10-03
+(option B), the worker now stamps an MT5 key at poll time from the login in its decrypted
+credentials. The stamp goes through the same path a ccxt key uses: UPDATE, unique-index refusal,
+holder look-up, duplicate marker, one audit event. Plan 08 also ships the read-only ACCOUNTTRUTH
+census that measures the book on PROD before the recompute, and the ordered recompute runbook.
+
+⚠️ **A minor bump: the analytics worker writes `venue_account_id` on MT5 keys it never wrote
+before.** It deploys with Railway after main CI is green. No migration ships here.
+
+### Added
+- **`scripts/accounttruth-census.mjs`, a read-only census that prints counts only** (plan 08,
+  SC-6). It covers sections (a) to (f): live keys missing a stamp, duplicate and composite
+  markers, allocators missing inputs, equity-curve payloads, ready allocators, and departed keys
+  by D-09 outcome.
+  - It runs in a `default_transaction_read_only=on` session, and the setting is read back.
+  - The marker query runs first. The run refuses unless the answer EQUALS the PROD marker read at
+    run time from `scripts/prod-prober/cron-manifest.json`. NULL, TEST, the fixture marker or a
+    trailing space each exit 1.
+  - A `--print-sql` mode lets the operator submit one statement per call.
+  - RLS cannot shrink a count silently.
+  - An empty section, a missing fixed bucket or `(no rows)` exits 1 and names what is missing.
+  - An id-shaped bucket is refused, never printed.
+- **`167.1.2-RECOMPUTE-RUNBOOK.md`**, the ordered recompute steps and their gates. Nothing is
+  enqueued by hand and nothing is UPDATEd. The only speed-up allowed is the existing
+  `request_allocator_holdings_sync` RPC on the founder's own keys.
+
+### Changed
+- **The poll stamps an MT5 key from its login** (`account_identity.py`, `job_worker.py`). The
+  stamp runs before the fetch, inside a 20 s `wait_for`, so a slow MT5 poll cannot starve it.
+  The DONE path skips MT5.
+  - The value goes through the same `_normalise` helper that rotate uses, so both store the same
+    bytes, capped at 128 characters.
+  - `Mt5Session.venue_account_id` is now a required field (`repr=False`), so a missing id is a
+    loud construction defect and the login never appears in a repr.
+  - Non-MT5 behaviour is unchanged: ccxt keys are still stamped only when the poll completes,
+    sFOX is still skipped, and the ccxt venue list is not widened.
+- **Census section (a) counts a key only if it is unstamped AND unmarked.** It resolves a share
+  marker only through a holder that holds the unique-index slot, on the same exchange, with
+  `disconnected_at IS NULL` (review WR-01, IN-R2-03). An exchange outside the fixed list gets its
+  own lines (L-2).
+
+### Fixed
+- **A poll that never reached the stamp is now loud** (SFH H-1, R2-L1, R2-L4):
+  - A failing MT5 poll still stamps.
+  - An unchecked key escalates at ERROR in a `finally` block.
+  - A session-build failure is an ERROR whatever the key's age.
+  - A deferred poll runs the escalation too.
+  - A key already marked against a holder is not reported as "duplicate check not running".
+- **Census CLI hygiene** (IN-03, M-4):
+  - Stray print arguments are refused, and a bad fixture gives a clean error.
+  - The gate buckets are declared in the script rather than read from `.planning/`.
+  - Section (d)'s gate prints an explicit `0 (absent…)` when its bucket has no row (R2-L2).
+
+### Tests
+- **`src/__tests__/accounttruth-census.test.ts` has 52 tests.** They include:
+  - a write/DDL/function allowlist guard over every statement and over the real `--print-sql`
+    stdout, proven able to fail;
+  - the marker-refusal matrix;
+  - a section that EXECUTES the census SQL on a throwaway local PostgreSQL cluster. The harness
+    cannot orphan a postmaster and ignores the caller's libpq env (M-3, IN-R2-02).
+  - The D-09 replay cannot pass on an emptied fixture (R2-L3).
+- **`test_account_identity_stamper.py` adds red-first MT5 stamp tests, written before the fix.**
+  Neutered back to the ccxt-only venue check, 19 tests went red. They also pin the slow-poll
+  timing so a loaded runner cannot flake it (IN-04).
+- Four MT5 test files gained the now-required `venue_account_id` on their sessions.
+
+### Security
+- **T-167.1.2-37 to -40 are closed** (gsd-security-auditor, ASVS L1). T-38 was first found OPEN:
+  an intermediate, never-pushed debug checkpoint commit carried two PROD api-key id prefixes that
+  a later commit removed. The branch was squashed before its first push, so no commit in this PR
+  introduces them. ⚠️ One of the two 8-character prefixes already appears on `main` in three
+  older REQUIREMENTS files (`.planning/REQUIREMENTS.md:372` and two milestone snapshots, all
+  quoting a `GET /api/keys/<id>-…/permissions` path). This PR neither added nor removed them.
+
+### Notes
+- **The rest of the work happens after deploy, and the verification says so**
+  (`167.1.2-C5-VERIFY.md`, status human_needed, 10/10 pre-merge truths verified):
+  - after one poll cycle, a PROD read-only reading should show 0 unstamped unmarked MT5 keys,
+    with one of the two pre-column MT5 keys marked duplicate;
+  - the census, sections `marker`, `rls` and `a` to `f`, counts only into the 08-SUMMARY;
+  - the duplicate cleanup;
+  - a re-census after the next daily derive;
+  - the Task 3 browser pass.
+- **IN-R2-01 is accepted, not fixed.** The stamp now runs before the fetch, so an MT5 key that
+  never signs in can still become the holder. This is recorded for the founder's ratification.
+- **The pre-fix PROD census readings of 2026-10-02/03 used the old section (a) rule.** Re-read
+  (a).
+- **Print mode has neither the in-script read-only setting nor the marker gate.** Each printed
+  statement is a lone SELECT checked by the tests, and the runbook says so.
+- **TODOS A-3 is not widened.** The poll stores the login alone, so it collides on exactly the
+  keys connect already collides on. A-3 carries a dated note.
+
 ## [0.121.0.0] - 2026-10-03 — BRIDGERESIDUE: the strategy bridge closes the two 164.6.7 residues, takes the per-strategy lock itself, and holds the date on a row it keeps
 
 ⭐ **What changed for whoever reads this next.** `sync_strategy_analytics_status` (the bridge every
