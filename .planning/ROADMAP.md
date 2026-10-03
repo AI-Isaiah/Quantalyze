@@ -2785,6 +2785,18 @@ Plans:
 - [ ] 164.6.6.1-03-PLAN.md — (was 164.6.6-06) validation terminal scrubbed inside the lease after every validation
 - [ ] 164.6.6.1-04-PLAN.md — (was 164.6.6-07) job terminal scrubbed on every ipc_fault recovery, credentialed relaunch within budget
 
+### Phase 164.6.6.1.1: BTCNATIVE — an MT5 account denominated in BTC (or any non-USD currency) reports its returns in its own unit, not as a dust-guarded USD series (INSERTED)
+
+Founder request 2026-10-03 (chat, a factsheet screenshot of MM-2x, then "ok, after 164.6.6.1"): runs AFTER 164.6.6.1, because both change the MT5 ingestion files. **Measured read-only on PROD 2026-10-03 (marker query first):** MM-2x's `strategy_analytics` row is `complete_with_warnings` with `cumulative_return`, `volatility` and `max_drawdown` all 0.0 and `data_quality_flags` `{dust_nav_guard: true, insufficient_window: true, csv_source: true}`. **Root cause, from a code reading (re-measure at plan time):** the MT5 path assumes a USD account, so a BTC-sized balance is read as dollars, falls under `nav_twr.py` `DUST_NAV_FLOOR` ($1000), and the dust guard flattens every metric. The positions panel already states the gap: `allocator_positions.py` "MT5 account currency is {ccy} — USD conversion isn't supported yet". **Reuse candidate:** the v1.8/v1.9 native-unit NAV + TWR machinery built for Deribit coin-margined accounts (`services/native_nav.py`, the native-unit adapter in `deribit_ingest.py`). **Scope:** (1) read the MT5 account currency (`account_info().currency`) and carry it with the account; (2) rebuild NAV and TWR from the deal ledger in that native unit, with a per-currency dust floor instead of the USD one; (3) the factsheet shows returns as growth in the native unit ("more BTC") and labels the unit; (4) OPEN for discuss-phase: whether a USD view (native NAV converted at the benchmark BTC price the factsheet already reads) is in scope. Never invent data: an uncomputable metric stays null.
+
+**Goal:** [Urgent work - to be planned]
+**Requirements**: TBD
+**Depends on:** Phase 164.6.6.1
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 164.6.6.1.1 to break down)
+
 ### Phase 164.6.8: OUTAGEALERT — a shared-terminal MT5 outage reaches a human without one clicking a button (INSERTED)
 
 **Goal:** A shared-terminal outage reaches a human without one clicking a button.
@@ -2814,6 +2826,7 @@ then both `**Owns**` lines move here, both `TODOS.md` `Owner:` lines point at Ph
 name 164.6.8, and the two `**Owns**` lines #863 wrote under Phase 164.6.6 are carried here verbatim:
 - *(as #863 wrote it, 2026-09-26, from 164.6.5 plan 08)* `TODOS.md` `MT5-PROBER-WEDGE-CALIBRATION-01` — Phase 164.6.5 D-11, OPEN: the prod-prober's `-10005` classification (`mt5-ipc-timeout`) has never been calibrated against a REAL wedge; its fixture was constructed, not captured. Trigger: the next live `-10005`, captured BEFORE the heal recycles the terminal (a founder-supervised induced wedge also qualifies). Gate: a scrubbed real-wedge transcript committed under `scripts/prod-prober/fixtures/mt5/`, registered for the kind it actually produced, self-test and wiring suite green. ⛔ A hand-written fixture is not a close. ⚠️ 164.6.5's own heal can recycle a wedge before a scheduled prober run reads it.
 - *(as #863 wrote it, 2026-09-25, from 164.6.5 plan 01)* `TODOS.md` `MT5-SWITCH-WEDGE-CAUSE-01` — why some account switches on the shared terminal wedge it (`-10005`, Journal silent after `disconnected`) and others do not. Verdicts so far: same-vs-different account REJECTED, terminal self-update and same-vs-different broker server UNDECIDED. Closes only on evidence captured at the next wedge BEFORE any restart; a restart clearing the symptom is not a close.
+
 **Owns (routed 2026-09-27 from Phase 164.6.6 D-06, founder decision):** `TODOS.md`
 `MT5-VALIDATION-TERMINAL-COVERAGE-01` — (a) the validation terminal's MONITORING GAP: the session
 monitor, boot heal, `ipc_fault` recycle and the prod-prober MT5 arm all read the single
