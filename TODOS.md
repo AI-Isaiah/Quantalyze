@@ -1556,7 +1556,7 @@ true for 146 and half of 142–145, and **false for 141**.
       - **What happens.** The bridge `sync_strategy_analytics_status` is the ONLY writer of
         `strategy_analytics.computed_at`; the analytics runner never stamps it. Since migration
         `20261003120000`, a row branch (a) KEEPS holds `computed_at` (the founder's hold-the-date
-        decision, so nothing that was not recomputed reads as fresh). The bridge cannot tell "the runner
+        decision, so a keep does not re-stamp a row nothing recomputed). The bridge cannot tell "the runner
         just recomputed" from "nothing ran", so the runner's own done mark over a real recompute is a
         keep while a sibling is in flight, and `computed_at` stays at its PRE-compute value until the
         last in-flight job terminates (branch (c) or (b) then stamps `now()`).
@@ -1564,11 +1564,21 @@ true for 146 and half of 142–145, and **false for 141**.
         done; the new body held the 3-day-old seed at the analytics done and caught up at the sibling's
         done. Readers that lag: the factsheet FreshnessChip and the portfolio PDF vintage. The staleness
         verdict is not affected (it keys on `returns_series` dates).
+      - **The opposite direction: fresh without a compute** (found by the 164.5.2.1 code review,
+        WR-01). The hold lives in branch (a) only. Branch (c) still writes `computed_at = now()`
+        whenever the job finishing last is ANY terminal strategy-scoped job with nothing else in
+        flight, e.g. the cron `sync_trades` poller or a `process_key_long`, and on a
+        `complete_with_warnings` row it keeps the status. So the FreshnessChip and the PDF vintage
+        can move FORWARD with nothing recomputed. The date can therefore be wrong both ways: stale
+        after a real recompute, fresh after none.
       - **Fix.** The analytics runner stamps `computed_at` itself on a real finish, so the bridge's hold
-        no longer stands in for "nothing was recomputed". Outside the SQL-only Phase 164.5.2.1 (D-05b).
+        no longer stands in for "nothing was recomputed". ⚠️ That alone closes only the lag. The fix
+        must ALSO stop the bridge stamping `computed_at` in branch (c) once the runner stamps, or the
+        fresh-without-compute direction stays open. Outside the SQL-only Phase 164.5.2.1 (D-05b).
       - **Owner:** a follow-up phase, to be booked by the orchestrator. **Closed when:** a real recompute
         that ends `complete_with_warnings` beside an in-flight sibling advances `computed_at` at the
-        runner's finish, with a test that fails on today's behaviour.
+        runner's finish, AND a terminal job that recomputed nothing (branch (c)) leaves
+        `computed_at` unchanged, each with a test that fails on today's behaviour.
 - [ ] **`[169-DEAD-ADMIN-JOBS-RPC]` Drop the dead `get_admin_compute_jobs` database function
       (booked 2026-09-25, Phase 169 D-01).**
       It raises "column reference `id` is ambiguous" on every call (its `RETURNS TABLE` declares an

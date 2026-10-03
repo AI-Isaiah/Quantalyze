@@ -44,9 +44,15 @@ review can be scheduled after it.
   Lock order is recorded in the migration header. No claim RPC is touched.
 - **A row the bridge KEEPS holds `computed_at`, `computation_error` and both provenance markers**
   (plan 03, founder decision 2026-10-03, "Hold the date for both"). This applies to the new
-  plain-`complete` keep and to the existing `complete_with_warnings` keep, so the FreshnessChip
-  and the PDF vintage never show a date fresher than the last real compute. ⚠️ This deliberately
-  changes PROD behaviour for the warned cohort. The hold fires on a KEEP only, never on a
+  plain-`complete` keep and to the existing `complete_with_warnings` keep, so a branch-(a) keep no
+  longer re-stamps the date on a row nothing recomputed. ⚠️ **The date is NOT a reliable "last real
+  compute" in either direction.** It can lag: after a real recompute that ends
+  `complete_with_warnings` beside an in-flight sibling, the hold keeps the PRE-compute date until
+  the sibling finishes. It can also run ahead: branch (c) still writes `computed_at = now()` when
+  ANY terminal job finishes last with nothing else in flight (a `sync_trades` poll, say), so the
+  FreshnessChip and the PDF vintage can move forward with nothing recomputed. Both directions are
+  booked as `[164.5.2.1-COMPUTED-AT-RUNNER-STAMP]`. ⚠️ This deliberately changes PROD behaviour
+  for the warned cohort. The hold fires on a KEEP only, never on a
   TRANSITION; guard arm K3 pins that reading.
 - **The bridge's stale in-body comments were corrected** (D-07, plan 03). Read 1's two counts, the
   one warned-clear case, the labels of the stamp CASE's membership and keep arms, and branch (b)'s
