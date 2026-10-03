@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.119.0.3] - 2026-10-03 — @testing-library/jest-dom 7.0.1
+
+### Changed
+- **`@testing-library/jest-dom` moves from 6.9.1 to 7.0.1** (dev dependency, Dependabot #645, which proposed 7.0.0; the branch takes the 7.0.1 patch on current `main`). It supplies the DOM matchers (`toBeInTheDocument`, `toHaveTextContent` and the rest) the vitest jsdom suite uses; no runtime or production bundle code depends on it. The lockfile drops the transitive packages 7.x no longer needs; `package.json` and the lockfile's root manifest agree.
+
 ## [0.119.0.2] - 2026-10-03 — supabase/setup-cli 3.0.1 on every workflow
 
 ### Changed
