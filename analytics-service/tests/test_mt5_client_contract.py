@@ -5098,3 +5098,177 @@ def test_SESSION_SNAPSHOT_without_a_transport_fails_loud_and_is_fenced():
     with pytest.raises(Mt5SessionAbandoned):
         fenced.session_snapshot(expected_login=1, expected_server="s")
     assert len(evaluated) == 1, "the abandoned read crossed the wire"
+
+
+# --------------------------------------------------------------------------- #
+# Phase 164.6.6 D-07 part 1 / T-164.6.6-22 — ONE transport factory, so the
+# private-host check cannot be bypassed.
+#
+# `is_private_gateway_host` guards the wire only because every production path
+# reaches it through `_default_connect` (`Mt5Client.__init__` and `.restart` both
+# call the stored factory). A second place that imports `mt5linux` or opens an
+# rpyc connection would dial whatever host it was handed, unchecked. This pin reds
+# on that, naming the file.
+# --------------------------------------------------------------------------- #
+
+_TRANSPORT_FACTORY_FILE = "services/mt5_client.py"
+_TRANSPORT_FACTORY_FUNCTION = "_default_connect"
+_RPYC_CONNECT_CALLS = frozenset(
+    {"rpyc.classic.connect", "rpyc.connect", "rpyc.ssl_connect"}
+)
+_DYNAMIC_IMPORT_CALLS = frozenset({"__import__", "import_module", "importlib.import_module"})
+_TRANSPORT_PACKAGES = ("mt5linux", "rpyc")
+
+
+def _dotted_name(node: ast.AST) -> str | None:
+    parts: list[str] = []
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if isinstance(node, ast.Name):
+        parts.append(node.id)
+        return ".".join(reversed(parts))
+    return None
+
+
+def _is_package(module: str | None, package: str) -> bool:
+    return module is not None and (module == package or module.startswith(package + "."))
+
+
+def _mt5_transport_findings(source: str, rel: str) -> tuple[list[str], int]:
+    """Return ``(violations, sanctioned_imports)`` for one production source.
+
+    Violations: an ``mt5linux`` import anywhere but inside
+    ``services/mt5_client.py::_default_connect``; ANY ``rpyc`` import; a call to
+    ``rpyc.classic.connect`` / ``rpyc.connect`` / ``rpyc.ssl_connect``; a dynamic
+    import of either package by string literal. ``sanctioned_imports`` counts the
+    one allowed ``mt5linux`` import, so the caller can prove the walk saw it.
+    """
+    tree = ast.parse(source)
+    violations: list[str] = []
+    sanctioned = 0
+    stack: list[str] = []
+
+    def visit(node: ast.AST) -> None:
+        nonlocal sanctioned
+        is_func = isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        if is_func:
+            stack.append(node.name)  # type: ignore[union-attr]
+        modules: list[str | None] = []
+        if isinstance(node, ast.Import):
+            modules = [alias.name for alias in node.names]
+        elif isinstance(node, ast.ImportFrom) and node.level == 0:
+            modules = [node.module]
+        for module in modules:
+            if _is_package(module, "rpyc"):
+                violations.append(f"{rel}:{node.lineno} imports {module}")  # type: ignore[attr-defined]
+            elif _is_package(module, "mt5linux"):
+                if rel == _TRANSPORT_FACTORY_FILE and stack == [_TRANSPORT_FACTORY_FUNCTION]:
+                    sanctioned += 1
+                else:
+                    where = ".".join(stack) or "<module>"
+                    violations.append(
+                        f"{rel}:{node.lineno} imports {module} in {where}"  # type: ignore[attr-defined]
+                    )
+        if isinstance(node, ast.Call):
+            name = _dotted_name(node.func)
+            if name in _RPYC_CONNECT_CALLS:
+                violations.append(f"{rel}:{node.lineno} calls {name}")
+            elif (
+                name in _DYNAMIC_IMPORT_CALLS
+                and node.args
+                and isinstance(node.args[0], ast.Constant)
+                and isinstance(node.args[0].value, str)
+                and any(_is_package(node.args[0].value, p) for p in _TRANSPORT_PACKAGES)
+            ):
+                violations.append(
+                    f"{rel}:{node.lineno} dynamically imports {node.args[0].value}"
+                )
+        for child in ast.iter_child_nodes(node):
+            visit(child)
+        if is_func:
+            stack.pop()
+
+    visit(tree)
+    return violations, sanctioned
+
+
+def _transport_pin_files() -> list[pathlib.Path]:
+    from tests.test_mt5_concurrency import _production_python_files
+
+    root = pathlib.Path(__file__).resolve().parents[1]
+    # The shared walk covers services/, routers/ and the entrypoints; the operator
+    # scripts (`scripts/mt5_spike.py`, `scripts/mt5_soak.py`) also build clients,
+    # so they are walked here too.
+    return sorted(set(_production_python_files()) | set((root / "scripts").glob("*.py")))
+
+
+def test_only_default_connect_builds_an_mt5_transport():
+    root = pathlib.Path(__file__).resolve().parents[1]
+    files = _transport_pin_files()
+    rels = {p.relative_to(root).as_posix() for p in files}
+    assert _TRANSPORT_FACTORY_FILE in rels, "the walk lost the transport factory file"
+    assert "scripts/mt5_spike.py" in rels, "the walk lost the operator scripts"
+    assert len(files) >= 100, (
+        f"the walk scanned only {len(files)} files; a pin over a truncated walk "
+        f"passes in silence — fix the walk, never this floor"
+    )
+
+    violations: list[str] = []
+    sanctioned = 0
+    for path in files:
+        found, ok = _mt5_transport_findings(
+            path.read_text(), path.relative_to(root).as_posix()
+        )
+        violations.extend(found)
+        sanctioned += ok
+
+    assert not violations, (
+        "an MT5 transport is built outside services/mt5_client.py::_default_connect, "
+        "which bypasses the private-host check (T-134-03):\n" + "\n".join(violations)
+    )
+    assert sanctioned == 1, (
+        f"expected exactly one sanctioned mt5linux import (inside _default_connect), "
+        f"saw {sanctioned}: the checker or the factory moved"
+    )
+
+
+def test_the_single_transport_pin_reports_each_violation():
+    """Calibration: the checker must report every rule on in-memory sources, or a
+    green pin proves nothing."""
+    cases = {
+        "a module-level mt5linux import elsewhere": (
+            "services/other.py", "import mt5linux\n"
+        ),
+        "an mt5linux import in another function of the factory file": (
+            _TRANSPORT_FACTORY_FILE,
+            "def restart_raw():\n    from mt5linux import MetaTrader5\n",
+        ),
+        "an mt5linux import nested inside the factory": (
+            _TRANSPORT_FACTORY_FILE,
+            "def _default_connect():\n    def inner():\n        import mt5linux\n",
+        ),
+        "an rpyc import": ("services/other.py", "import rpyc.classic\n"),
+        "an rpyc classic connect": (
+            "services/other.py", "def f(h, p):\n    return rpyc.classic.connect(h, p)\n"
+        ),
+        "an rpyc ssl connect": (
+            "scripts/other.py", "rpyc.ssl_connect('h', 1)\n"
+        ),
+        "a dynamic mt5linux import": (
+            "services/other.py", "m = __import__('mt5linux')\n"
+        ),
+        "a dynamic rpyc import": (
+            "routers/other.py", "import importlib\nm = importlib.import_module('rpyc')\n"
+        ),
+    }
+    for label, (rel, source) in cases.items():
+        violations, _ = _mt5_transport_findings(source, rel)
+        assert violations, f"the pin did not report {label}"
+
+    violations, sanctioned = _mt5_transport_findings(
+        "def _default_connect(*, host, port, timeout):\n"
+        "    from mt5linux import MetaTrader5\n",
+        _TRANSPORT_FACTORY_FILE,
+    )
+    assert (violations, sanctioned) == ([], 1), "the sanctioned form must pass"

@@ -102,6 +102,54 @@ gateway).**
 - **`/gsd-secure-phase` must run before Phase 164.6.5 closes.** That is part of what
   ratifying Option 2 ratified.
 
+## T-134-03 (Phase 164.6.6, D-07 part 1) — private-host check on the dialling side
+
+**What is now CHECKED.** The analytics service refuses to dial an MT5 gateway at any host
+that is not a private-network name. `services/mt5_client.py::is_private_gateway_host` is
+the one predicate. It is checked at the top of `_default_connect`, the only production
+transport factory, before `mt5linux` is imported, so no connection is ever built toward a
+refused host. Both endpoint readers in `services/mt5_relogin.py` apply it as well, so a
+refused validation host takes the existing misconfiguration path: the wizard's 500
+`MT5_GATEWAY_UNCONFIGURED` and the worker's `RuntimeError`, each with the D-05 alert. A
+refused job host makes the heal and the session monitor skip with a log-once line that
+names the env var, never its value. A test pins that no other production file imports
+`mt5linux` or opens an rpyc connection.
+
+**The allowlist, in words.**
+- A name whose last label is `internal`, `test` or `localhost`. Railway's private DNS
+  lives under `.internal`.
+- A single-label name, which resolves only through the container's own search domain.
+- An IP literal inside loopback, RFC 1918, 100.64.0.0/10 (the Tailscale fallback in
+  `docker-compose.yml`) or IPv6 unique-local.
+
+Everything else is refused: a Railway public domain, a TCP-proxy host, any other public
+name and any public IP, including the numeric forms the resolver accepts. The stdlib's
+private-address flag is not used, because it admits documentation ranges.
+
+**Why authentication was not taken.** D-07 asked for "authentication OR network
+isolation". Authentication would need the server to cooperate:
+- `mt5linux` 0.1.9 hardwires `rpyc.classic.connect(host, port)` on the client.
+- The server is the package's own `server.py` inside the prebuilt image, which this repo
+  does not build. Phase 164.6.5 rejected owning that image (see "Why Option 2 beat the
+  other two" above).
+
+An rpyc authenticator, SSL or a TLS sidecar all require changing that image. Network
+isolation is the branch this repo can deliver.
+
+**What the code does NOT prove.** The check proves what the analytics service DIALS. It
+does not prove that a gateway has no public listener. That half stays a founder-read
+infrastructure fact: reading N-01 (no public domain and no TCP proxy on either gateway
+service) and live check L-H3.
+
+**The boundary, and its residual.** The check isolates the channel from the PUBLIC
+internet only. Inside the Railway environment's private network the rpyc port is still
+unauthenticated, so every service on that network can reach both terminals. N-01 counted
+six services there, all this product's own: the analytics service, the backfill worker,
+the two gateways and two idle function services. That was already true before this
+phase. The founder's answer is CONTEXT's `H3-CHANNEL-RESIDUAL: accepted` (2026-10-03).
+Closing the residual would need rpyc authentication in the gateway image, or the gateways
+in their own environment, which is future infrastructure work.
+
 ## Service source
 
 Deploy from a prebuilt Docker image (Railway → New Service → **Deploy from Docker
