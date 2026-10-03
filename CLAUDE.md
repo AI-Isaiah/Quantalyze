@@ -233,7 +233,11 @@ a failure fails the aggregate rather than passing quietly:
   loads a changed migration (D-03), or nothing at all, with the printed verdict
   `no mutation input changed` (D-09). D-09 is a founder-scoped exception to the vacuity fence,
   push-to-main only; pull requests keep the fence. Any doubt about the range runs FULL with the
-  reason printed (D-01), and a `workflow_dispatch` is always FULL (D-02). Every run prints a
+  reason printed (D-01), and a `workflow_dispatch` is always FULL (D-02). ⭐ (review 164.9.6
+  WR-03) A push takes a subset or nothing ONLY when its predecessor, `github.event.before`, is
+  proven green by `predecessorVerdict` in `scripts/classify-changed-paths.mjs`, the same proof the
+  docs-only short path uses. Red, pending, absent, an API error or a truncated response runs FULL
+  with the reason printed, so a red `main` already measured is never masked by the next push. Every run prints a
   `scope:` line and a `scope-reason:` line, and the assert step fails a log without exactly one
   non-blank `scope-reason:` (D-12). The derivation is `judge` in `scripts/sql-gate-subset.mjs`;
   read it by symbol, not from this summary.
@@ -364,7 +368,8 @@ answered by `[REDUNDER-SUBSET-SPLIT]`, never by raising again (`ci.yml` carries 
 `sql-mutation-nightly.yml` under that workflow's own timeout. `sql-mutation`'s 20 stays the
 declared CEILING and is never raised. ⚠️ **The ceiling risk is narrowed, not closed.** Every
 FULL fallback on a push still runs under the 20: a dispatch, a direct or multi-commit push, a
-machinery change, a changed unannotated gate, and a migration no gate loads.
+machinery change, a changed unannotated gate, a migration no gate loads, and a predecessor not
+proven green.
 
 📜 **Dated lineage for Phases 164.3 → 164.7 — every historical arm tally, ubuntu run id and
 superseded CURRENCY paragraph — now lives in `docs/sql-gate-lineage.md`.** It is history; nothing

@@ -22,7 +22,7 @@
  */
 import { describe, expect, it } from "vitest";
 import { execFileSync, spawnSync } from "node:child_process";
-import { copyFileSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -335,8 +335,35 @@ function parseOutputs(text: string): Record<string, string> {
   return out;
 }
 
+/**
+ * Review 164.9.6 WR-03: a push narrows only on a predecessor proven green, so
+ * the derivation now asks `gh api` for `before`'s check runs and suites. This
+ * fake `gh`, first on the child's PATH beside an explicit GITHUB_REPOSITORY,
+ * answers with one GitHub Actions `frontend` run concluding `conclusion` in one
+ * completed, successful suite, so the rows stay OFFLINE and never read a real
+ * repository's checks.
+ */
+function fakeGh(dir: string, before: string, conclusion: "success" | "failure"): string {
+  const bin = join(dir, "bin");
+  mkdirSync(bin);
+  const runs = JSON.stringify({
+    total_count: 1,
+    check_runs: [{ id: 1, name: "frontend", app: { slug: "github-actions" }, check_suite: { id: 1 }, head_sha: before, status: "completed", conclusion }],
+  });
+  const suites = JSON.stringify({
+    total_count: 1,
+    check_suites: [{ id: 1, app: { slug: "github-actions" }, head_sha: before, status: "completed", conclusion: "success", latest_check_runs_count: 1 }],
+  });
+  writeFileSync(
+    join(bin, "gh"),
+    `#!/bin/sh\ncase "$2" in\n  *check-suites*) printf '%s' '${suites}' ;;\n  *) printf '%s' '${runs}' ;;\nesac\n`,
+    { mode: 0o755 },
+  );
+  return bin;
+}
+
 /** Derive the push verdict for `sha` with the checkout's scripts, then run the scope step on it. */
-function deriveThenScope(sha: string) {
+function deriveThenScope(sha: string, predecessor: "success" | "failure" = "success") {
   const present = spawnSync("git", ["cat-file", "-e", `${sha}^{commit}`], { cwd: REPO_ROOT });
   if (present.status !== 0) {
     throw new Error(
@@ -356,9 +383,11 @@ function deriveThenScope(sha: string) {
     }
     const outFile = join(dir, "github-output");
     writeFileSync(outFile, "");
-    const deriveEnv: Record<string, string> = {
+    const deriveEnv: Record<string, string | undefined> = {
       ...cleanEnv(),
       ...PUSH_MAIN,
+      PATH: `${fakeGh(dir, before, predecessor)}:${process.env.PATH ?? ""}`,
+      GITHUB_REPOSITORY: "self-test/repo",
       PUSH_BEFORE_SHA: before,
       PUSH_FORCED: "false",
       GITHUB_OUTPUT: outFile,
@@ -409,6 +438,21 @@ describe("end to end on real history: derivation output -> scope step", { timeou
     expect(scope.output).toBe("skip_lane=false\n");
     expect(scope.stdout).not.toContain("scope: NONE");
     expect(scope.stdout).toContain("scope verdict from changed-paths: sql_gate_mode=subset; the lane boots.");
+  });
+
+  // Review 164.9.6 WR-03: the same two pushes on top of a RED predecessor. Each
+  // would narrow, and each must run FULL instead, or the red that main already
+  // measured is masked by a green `none` or a SUBSET of other gates.
+  it("WR-03: 98f04db16 and fd4d86cdf on a RED predecessor derive full, naming it, and boot the lane", () => {
+    for (const sha of ["98f04db16", "fd4d86cdf"]) {
+      const { outputs, scope } = deriveThenScope(sha, "failure");
+      expect(outputs.sql_gate_mode, `${sha}: ${outputs.sql_gate_reason}`).toBe("full");
+      expect(outputs.sql_gate_files).toBe("");
+      expect(outputs.sql_gate_reason).toMatch(/^predecessor [0-9a-f]{12} is not proven green \(check 'frontend' concluded failure\)/);
+      expect(scope.status, scope.out).toBe(0);
+      expect(scope.output).toBe("skip_lane=false\n");
+      expect(scope.stdout).not.toContain("scope: NONE");
+    }
   });
 
   it("no scratch worktree of this test is left behind", () => {

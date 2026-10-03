@@ -751,7 +751,7 @@ describe("[164.6.3 / CI-DOCSPATH-01] the PARTITION, pinned as an exact set in BO
   });
 
   // ── review 164.9.4 round 2, SFH-04 (round 3, WR-01): the predecessor lookup's credentials ─
-  it("`changed-paths` declares exactly `contents: read` + `checks: read`, and only `classify` gets GH_TOKEN", () => {
+  it("`changed-paths` declares exactly `contents: read` + `checks: read`, and only `classify` and `sql_gate_subset` get GH_TOKEN", () => {
     const block = jobBlockLines(DETECTOR);
     const at = block.findIndex((l) => /^ {4}permissions:\s*$/.test(l));
     expect(
@@ -768,14 +768,20 @@ describe("[164.6.3 / CI-DOCSPATH-01] the PARTITION, pinned as an exact set in BO
     // and every check suite on `before`, both of which `checks: read` covers;
     // nothing needs `actions: read`.
     expect(perms.sort()).toEqual(["checks: read", "contents: read"]);
-    const tokenLines = block.filter((l) => /^\s+GH_TOKEN:/.test(l));
-    expect(tokenLines, "GH_TOKEN must reach exactly one step, the classify step").toHaveLength(1);
-    const classifyAt = block.findIndex((l) => /^ {6}- id: classify\s*$/.test(l));
-    const nextStep = block.findIndex((l, i) => i > classifyAt && /^ {6}- /.test(l));
-    const tokenAt = block.findIndex((l) => /^\s+GH_TOKEN:/.test(l));
-    expect(classifyAt, "the classify step is gone").toBeGreaterThan(-1);
-    expect(tokenAt > classifyAt && (nextStep === -1 || tokenAt < nextStep), "GH_TOKEN is not on the classify step").toBe(true);
-    expect(tokenLines[0].trim()).toBe("GH_TOKEN: ${{ github.token }}");
+    // Review 164.9.6 WR-03: the SQL gate subset derivation reuses the
+    // classifier's predecessor proof before a push narrows, so it is the one
+    // other step that reads the token. Each token line is pinned to its step,
+    // so a third step gaining the token, or the token moving, is red.
+    const tokenSteps = block.flatMap((l, i) => {
+      if (!/^\s+GH_TOKEN:/.test(l)) return [];
+      expect(l.trim(), `GH_TOKEN at block line ${i} must be the job token, read through env:`).toBe("GH_TOKEN: ${{ github.token }}");
+      for (let j = i; j >= 0; j -= 1) {
+        const m = block[j].match(/^ {6}- (?:id: (\S+)|\S)/);
+        if (m) return [m[1] ?? `(an unnamed step above block line ${i})`];
+      }
+      return [`(no step above block line ${i})`];
+    });
+    expect(tokenSteps, "GH_TOKEN must reach exactly the classify and sql_gate_subset steps").toEqual(["classify", "sql_gate_subset"]);
   });
 
   // ── the CONDITION FORM: one physical line, fail-closed spelling ──────────

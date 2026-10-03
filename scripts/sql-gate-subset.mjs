@@ -63,6 +63,10 @@
  * set is FULL": pull requests keep the fence unchanged, and the nightly full run
  * is the backstop. A range that changes a migration no gate loads is NOT
  * covered by it and stays FULL.
+ * ⭐ (review 164.9.6 WR-03) `none`, and a push SUBSET, are returned only when
+ * the before-SHA is proven green by `predecessorVerdict` (imported from
+ * `classify-changed-paths.mjs`, never re-implemented); otherwise FULL. See
+ * `judgePush`.
  *
  * ⭐ `GATE_FILE_RE` IS A SECURITY CONTROL, not tidiness (T-164.4.2-20). On a fork
  * PR the author chooses filenames, and plan 09 hands this list to a shell step.
@@ -81,7 +85,16 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { changedFilesAgainstBase, firstParentCommits, isPrMergeCommit, pushRangeFiles, scratchRepo } from "./classify-changed-paths.mjs";
+import {
+  PREDECESSOR_APP_SLUG,
+  changedFilesAgainstBase,
+  firstParentCommits,
+  isPrMergeCommit,
+  predecessorVerdict,
+  pushRangeFiles,
+  readPredecessor,
+  scratchRepo,
+} from "./classify-changed-paths.mjs";
 import { parseAnnotations } from "./mutation-runner/parse.mjs";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -243,17 +256,20 @@ export function migrationLoaders(root) {
  * range's first-parent `[hash, email, subject]` triples, or the Error the read
  * threw), plus `ciChangedSections` / `ciCompareError` (the D-10 section compare,
  * when `ci.yml` changed) and `loaders` / `loaderError` (the D-03 map, when a
- * migration changed); `changedFiles` is unused there. See `judgePush`.
+ * migration changed), plus `predecessor` (review 164.9.6 WR-03: the
+ * `predecessorVerdict` `{ok, why}` for the before-SHA, read only when the push
+ * would otherwise narrow); `changedFiles` is unused there. See `judgePush`.
  *
  * @param {{event: string|undefined, changedFiles?: string[], presentFiles: Set<string>|string[], ref?: string,
  *   pushRange?: {ok: boolean, sha?: string, files?: string[], reason?: string}, commits?: string[][]|Error|null,
- *   ciChangedSections?: string[], ciCompareError?: string, loaders?: Map<string, string[]>, loaderError?: string}} input
- * @returns {{mode: "full"|"subset"|"none", files: string[], reason: string}}
+ *   ciChangedSections?: string[], ciCompareError?: string, loaders?: Map<string, string[]>, loaderError?: string,
+ *   predecessor?: {ok: boolean, why: string}}} input
+ * @returns {{mode: "full"|"subset"|"none", files: string[], reason: string, predecessorOwed?: true}}
  */
-export function judge({ event, changedFiles, presentFiles, ref, pushRange, commits, ciChangedSections, ciCompareError, loaders, loaderError }) {
+export function judge({ event, changedFiles, presentFiles, ref, pushRange, commits, ciChangedSections, ciCompareError, loaders, loaderError, predecessor }) {
   const full = (reason) => ({ mode: "full", files: [], reason });
   if (event === "push") {
-    return judgePush({ ref, pushRange, commits, presentFiles, ciChangedSections, ciCompareError, loaders, loaderError });
+    return judgePush({ ref, pushRange, commits, presentFiles, ciChangedSections, ciCompareError, loaders, loaderError, predecessor });
   }
   if (event !== "pull_request") {
     return full(`event is '${event ?? "(unset)"}', neither pull_request nor push — the full corpus is owed`);
@@ -289,9 +305,33 @@ export function judge({ event, changedFiles, presentFiles, ref, pushRange, commi
  * PURE: the push-to-main verdict (Phase 164.9.6, D-01). Every shape this cannot
  * positively identify as ONE GitHub PR squash on `main` is FULL with a named
  * reason; the gate-file rules after that are the pull_request arm's own.
+ *
+ * ⭐ REVIEW 164.9.6 WR-03 — A NARROWED PUSH NEEDS A GREEN PREDECESSOR. Judging
+ * only the pushed range let a red that `main` had ALREADY measured disappear: a
+ * SUBSET push goes red, the next push takes `none` (or a SUBSET of other gates),
+ * and `main` HEAD reads green with the red unresolved. So `none` and `subset`
+ * are returned only when `predecessor` (the before-SHA's `predecessorVerdict`,
+ * the SAME proof the docs classifier's short path requires) is `ok`. Anything
+ * else (red, pending, absent, a lookup error, a truncated response, or no
+ * predecessor read at all) is FULL with the reason. The check is LAST, after
+ * every other FULL arm, so a push already owed FULL never reads the API; when
+ * no predecessor was supplied the FULL verdict carries `predecessorOwed: true`,
+ * which tells `derivePush` to read it and judge again.
  */
-function judgePush({ ref, pushRange, commits, presentFiles, ciChangedSections, ciCompareError, loaders, loaderError }) {
+function judgePush({ ref, pushRange, commits, presentFiles, ciChangedSections, ciCompareError, loaders, loaderError, predecessor }) {
   const full = (reason) => ({ mode: "full", files: [], reason });
+  const before12 = String(pushRange?.sha ?? "").slice(0, 12);
+  const narrowed = (verdict) => {
+    if (predecessor === undefined) {
+      return { ...full(`predecessor ${before12} is not proven green (it was not read) — a ${verdict.mode} would trust it`), predecessorOwed: true };
+    }
+    if (predecessor?.ok !== true) {
+      return full(
+        `predecessor ${before12} is not proven green (${predecessor?.why ?? "no verdict"}) — a ${verdict.mode} on top of it could mask a red main already measured, so the full corpus is owed`,
+      );
+    }
+    return { ...verdict, reason: `${verdict.reason}; predecessor ${before12} ${predecessor.why}` };
+  };
   if (ref !== "refs/heads/main") {
     return full(`push to '${ref ?? "(unset)"}', not refs/heads/main — the full corpus is owed`);
   }
@@ -340,13 +380,13 @@ function judgePush({ ref, pushRange, commits, presentFiles, ciChangedSections, c
     // D-09 (founder override, push-on-main ONLY): a NAMED verdict, never an
     // empty scope read as a pass. Reached only after the ref, single-PR-squash
     // and machinery checks above.
-    return {
+    return narrowed({
       mode: "none",
       files: [],
       reason:
         `no mutation input changed: 0 gate file(s), 0 migration(s), 0 machinery path(s) among ` +
         `${changed.length} changed file(s) in ${where}; FULL coverage is the nightly run's`,
-    };
+    });
   }
   if (loaderError) {
     return full(`a gate's RED-UNDER-SETUP list could not be read (${loaderError})`);
@@ -367,11 +407,11 @@ function judgePush({ ref, pushRange, commits, presentFiles, ciChangedSections, c
     );
   }
   const migNote = migrations.length > 0 ? `, ${loading.length} gate(s) loading changed migration(s) ${migrations.join(" ")}` : "";
-  return {
+  return narrowed({
     mode: "subset",
     files: selected,
     reason: `${underGateDir.length} of ${changed.length} changed file(s) in ${where} are gate files${migNote}`,
-  };
+  });
 }
 
 /** The cap `oneLineReason` truncates to, before its suffix. */
@@ -417,7 +457,7 @@ function emit(verdict) {
 // ---------------------------------------------------------------------------
 
 /** Declared up front; a self-test that shrinks and still says PASSED is the defect. */
-export const EXPECTED_ASSERTIONS = 73;
+export const EXPECTED_ASSERTIONS = 92;
 
 const PR = "pull_request";
 const G1 = "supabase/tests/test_alpha_gate.sql";
@@ -428,6 +468,26 @@ const BEFORE = "b".repeat(40);
 /** A first-parent commit shaped like a GitHub squash merge. */
 const PR_MERGE = ["a".repeat(40), "noreply@github.com", "feat: x (#1)"];
 const range = (files) => ({ ok: true, sha: BEFORE, files });
+
+/**
+ * Canned `{ runs, suites }` bodies for the before-SHA (review 164.9.6 WR-03),
+ * shaped as `gh api` returns them: one GitHub Actions `frontend` check run with
+ * the given status and conclusion, in one completed, successful suite. Fed to
+ * the REAL `predecessorVerdict`, never a hand-written `{ok, why}`, so these rows
+ * prove the wiring to the shared proof and not a stand-in for it.
+ */
+const cannedPredecessor = (conclusion, status = "completed") => (sha) => ({
+  runs: {
+    total_count: 1,
+    check_runs: [{ id: 1, name: "frontend", app: { slug: PREDECESSOR_APP_SLUG }, check_suite: { id: 1 }, head_sha: sha, status, conclusion }],
+  },
+  suites: {
+    total_count: 1,
+    check_suites: [{ id: 1, app: { slug: PREDECESSOR_APP_SLUG }, head_sha: sha, status: "completed", conclusion: "success", latest_check_runs_count: 1 }],
+  },
+});
+/** The before-SHA proven green by the shared proof. */
+const GREEN_P = predecessorVerdict(BEFORE, cannedPredecessor("success"));
 const G3 = "supabase/tests/test_gamma_gate.sql";
 const M = "supabase/migrations/20260101000000_self_test.sql";
 const FLOORS = "scripts/mutation-floors.mjs";
@@ -454,19 +514,40 @@ const ciFixture = (variant) =>
 /**
  * Run THIS script's `main()` end to end as CI does, in `cwd`, on a push to
  * main. Every input is set explicitly so a parent CI environment (a
- * pull_request's values) cannot leak into the child. Returns the exit code and
- * every `key=value` it appended to GITHUB_OUTPUT.
+ * pull_request's values) cannot leak into the child. Returns the exit code,
+ * every `key=value` it appended to GITHUB_OUTPUT, and the argv of every `gh`
+ * call (null when `gh` was never invoked).
+ *
+ * ⭐ OFFLINE BY CONSTRUCTION (review 164.9.6 WR-03, the pattern
+ * `classify-changed-paths.mjs`'s own `runMainOnPush` uses). A fake `gh` goes
+ * FIRST on the child's PATH and `GITHUB_REPOSITORY` is set explicitly, so the
+ * production reader runs its real argv and never reaches the network or a
+ * runner's real repository. It records its argv and answers each path with the
+ * canned body for `gh` (the `frontend` run's conclusion), or exits 1 for "fail",
+ * the default: a row that reaches the lookup without asking for a verdict reads
+ * FULL, the safe direction.
  */
-function runMainOnPush(cwd, env) {
+function runMainOnPush(cwd, env, { gh = "fail" } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "gsd-sql-gate-subset-out-"));
   const outFile = join(dir, "github-output");
   writeFileSync(outFile, "");
+  const bin = join(dir, "bin");
+  mkdirSync(bin);
+  const argvFile = join(dir, "gh-argv");
+  const bodies = cannedPredecessor(gh)(env.PUSH_BEFORE_SHA ?? "");
+  const script =
+    gh === "fail"
+      ? `#!/bin/sh\nprintf '%s\\n' "$@" >> '${argvFile}'\necho 'gh: self-test lookup failure' >&2\nexit 1\n`
+      : `#!/bin/sh\nprintf '%s\\n' "$@" >> '${argvFile}'\ncase "$2" in\n  *check-suites*) printf '%s' '${JSON.stringify(bodies.suites)}' ;;\n  *) printf '%s' '${JSON.stringify(bodies.runs)}' ;;\nesac\n`;
+  writeFileSync(join(bin, "gh"), script, { mode: 0o755 });
   try {
     const res = spawnSync(process.execPath, [fileURLToPath(import.meta.url)], {
       cwd,
       encoding: "utf8",
       env: {
         ...process.env,
+        PATH: `${bin}:${process.env.PATH ?? ""}`,
+        GITHUB_REPOSITORY: "self-test/repo",
         GITHUB_EVENT_NAME: "push",
         GITHUB_REF: MAIN,
         GITHUB_OUTPUT: outFile,
@@ -480,7 +561,8 @@ function runMainOnPush(cwd, env) {
       const at = line.indexOf("=");
       if (at > 0) outputs[line.slice(0, at)] = line.slice(at + 1);
     }
-    return { code: res.status, outputs, out: `${res.stdout ?? ""}${res.stderr ?? ""}` };
+    const ghArgv = existsSync(argvFile) ? readFileSync(argvFile, "utf8").split("\n").filter(Boolean) : null;
+    return { code: res.status, outputs, out: `${res.stdout ?? ""}${res.stderr ?? ""}`, ghArgv };
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -502,7 +584,7 @@ const CASES = [
   {
     claim: "a push to main that is ONE PR squash changing one gate file -> SUBSET naming it and the range",
     run: (ok) => {
-      const v = judge({ event: "push", ref: MAIN, pushRange: range([G1, "README.md"]), commits: [PR_MERGE], presentFiles: [G1] });
+      const v = judge({ event: "push", ref: MAIN, pushRange: range([G1, "README.md"]), commits: [PR_MERGE], presentFiles: [G1], predecessor: GREEN_P });
       let pass = ok(v.mode === "subset" && JSON.stringify(v.files) === JSON.stringify([G1]), `subset of exactly G1 (got ${v.mode}: ${JSON.stringify(v.files)} ${v.reason})`);
       pass = ok(v.reason.includes(PR_MERGE[0].slice(0, 12)) && v.reason.includes(BEFORE.slice(0, 12)), `the reason names the PR merge and the before-SHA (got ${JSON.stringify(v.reason)})`) && pass;
       return ok(v.reason.startsWith("1 of 2 changed file(s)"), `the reason carries k of n (got ${JSON.stringify(v.reason)})`) && pass;
@@ -525,7 +607,7 @@ const CASES = [
       try {
         const base = repo.commit({ [G1]: "-- base\n", "README.md": "x\n" });
         repo.commit({ [G1]: "-- changed\n" });
-        const r = runMainOnPush(repo.dir, { PUSH_BEFORE_SHA: base, PUSH_FORCED: "false" });
+        const r = runMainOnPush(repo.dir, { PUSH_BEFORE_SHA: base, PUSH_FORCED: "false" }, { gh: "success" });
         let pass = ok(r.code === 0, `exit 0 (got ${r.code}: ${r.out})`);
         pass = ok(r.outputs.sql_gate_mode === "subset" && r.outputs.sql_gate_files === G1, `subset of G1 written (got ${JSON.stringify(r.outputs)})`) && pass;
         return ok(Boolean(r.outputs.sql_gate_reason), `a non-empty sql_gate_reason written (got ${JSON.stringify(r.outputs.sql_gate_reason)})`) && pass;
@@ -541,9 +623,82 @@ const CASES = [
       try {
         const base = repo.commit({ [G1]: "-- base\n" });
         repo.commit({ [G1]: "-- changed\n" });
-        const r = runMainOnPush(repo.dir, { PUSH_BEFORE_SHA: base, PUSH_FORCED: "true" });
+        const r = runMainOnPush(repo.dir, { PUSH_BEFORE_SHA: base, PUSH_FORCED: "true" }, { gh: "success" });
         let pass = ok(r.code === 0, `exit 0 (got ${r.code}: ${r.out})`);
+        pass = ok(r.ghArgv === null, `WR-03: a push already owed FULL never calls gh, the predecessor is read only to narrow (got ${JSON.stringify(r.ghArgv)})`) && pass;
         return ok(r.outputs.sql_gate_mode === "full" && /a forced push/.test(r.outputs.sql_gate_reason ?? ""), `full, quoting the forced push (got ${JSON.stringify(r.outputs)})`) && pass;
+      } finally {
+        repo.cleanup();
+      }
+    },
+  },
+  {
+    claim: "WR-03: a push narrows (subset or none) when predecessorVerdict proves the before-SHA green",
+    run: (ok) => {
+      let pass = ok(GREEN_P.ok === true, `CALIBRATION: the canned green body passes the shared proof (got ${JSON.stringify(GREEN_P)})`);
+      const s = judge({ event: "push", ref: MAIN, pushRange: range([G1]), commits: [PR_MERGE], presentFiles: [G1], predecessor: GREEN_P });
+      pass = ok(s.mode === "subset" && JSON.stringify(s.files) === JSON.stringify([G1]) && s.reason.includes(`predecessor ${BEFORE.slice(0, 12)} 'frontend' succeeded`), `green -> SUBSET [G1], naming the proof (got ${s.mode}: ${JSON.stringify(s.reason)})`) && pass;
+      const n = judge({ event: "push", ref: MAIN, pushRange: range(["README.md"]), commits: [PR_MERGE], presentFiles: [], predecessor: GREEN_P });
+      return ok(n.mode === "none" && /^no mutation input changed:/.test(n.reason) && n.predecessorOwed === undefined, `green -> none, still the named verdict (got ${n.mode}: ${JSON.stringify(n.reason)})`) && pass;
+    },
+  },
+  {
+    claim: "WR-03: a red, pending, absent, failed, truncated or unread predecessor turns a would-be subset or none into FULL, naming why",
+    run: (ok) => {
+      const at = (files, predecessor) =>
+        judge({ event: "push", ref: MAIN, pushRange: range(files), commits: [PR_MERGE], presentFiles: files.filter((f) => GATE_FILE_RE.test(f)), predecessor });
+      const apiError = () => {
+        const e = new Error("Command failed: gh api");
+        e.stderr = "gh: HTTP 502: Bad Gateway\n";
+        throw e;
+      };
+      const truncated = (sha) => {
+        const b = cannedPredecessor("success")(sha);
+        return { ...b, runs: { ...b.runs, total_count: 150 } };
+      };
+      const empty = () => ({ runs: { total_count: 0, check_runs: [] }, suites: { total_count: 0, check_suites: [] } });
+      const rows = [
+        ["a RED predecessor", cannedPredecessor("failure"), "concluded failure"],
+        ["a PENDING predecessor", cannedPredecessor(null, "in_progress"), "status in_progress"],
+        ["an ABSENT predecessor (no check run)", empty, "absent"],
+        ["an API ERROR", apiError, "gh: HTTP 502: Bad Gateway"],
+        ["a TRUNCATED response", truncated, "so the rest are unread"],
+      ];
+      let pass = true;
+      for (const [label, fetch, why] of rows) {
+        const p = predecessorVerdict(BEFORE, fetch);
+        for (const files of [[G1], ["README.md"]]) {
+          const v = at(files, p);
+          pass =
+            ok(
+              v.mode === "full" && v.files.length === 0 && v.reason.startsWith(`predecessor ${BEFORE.slice(0, 12)} is not proven green`) && v.reason.includes(why) && v.predecessorOwed === undefined,
+              `${label} -> FULL where ${files[0] === G1 ? "subset" : "none"} would be (got ${v.mode}: ${JSON.stringify(v.reason)})`,
+            ) && pass;
+        }
+      }
+      const unread = at([G1], undefined);
+      pass = ok(unread.mode === "full" && unread.predecessorOwed === true && unread.reason.includes("it was not read"), `NO predecessor supplied -> FULL, flagged owed (got ${JSON.stringify(unread)})`) && pass;
+      const early = judge({ event: "push", ref: MAIN, pushRange: range([G1]), commits: [PR_MERGE, PR_MERGE], presentFiles: [G1] });
+      return ok(early.mode === "full" && early.predecessorOwed === undefined && !early.reason.includes("predecessor"), `a push already owed FULL is never flagged owed, so no lookup is made (got ${JSON.stringify(early)})`) && pass;
+    },
+  },
+  {
+    claim: "WR-03 END TO END: gh reporting the before-SHA RED writes full naming it, exit 0, after asking for exactly its check runs and suites",
+    run: (ok) => {
+      const repo = scratchRepo("subset-red-predecessor");
+      try {
+        const base = repo.commit({ [G1]: "-- base\n" });
+        repo.commit({ [G1]: "-- changed\n" });
+        const red = runMainOnPush(repo.dir, { PUSH_BEFORE_SHA: base }, { gh: "failure" });
+        let pass = ok(red.code === 0 && red.outputs.sql_gate_mode === "full" && /predecessor [0-9a-f]{12} is not proven green \(check 'frontend' concluded failure\)/.test(red.outputs.sql_gate_reason ?? ""), `full, naming the red predecessor (got exit ${red.code}: ${JSON.stringify(red.outputs)})`);
+        pass =
+          ok(
+            JSON.stringify(red.ghArgv) ===
+              JSON.stringify(["api", `repos/self-test/repo/commits/${base}/check-runs?filter=all&per_page=100`, "api", `repos/self-test/repo/commits/${base}/check-suites?per_page=100`]),
+            `the production reader asks gh for exactly the before-SHA's check runs and check suites (got ${JSON.stringify(red.ghArgv)})`,
+          ) && pass;
+        const broken = runMainOnPush(repo.dir, { PUSH_BEFORE_SHA: base }, { gh: "fail" });
+        return ok(broken.code === 0 && broken.outputs.sql_gate_mode === "full" && /gh: self-test lookup failure/.test(broken.outputs.sql_gate_reason ?? ""), `a failing gh -> full, exit 0, gh's reason printed (got exit ${broken.code}: ${JSON.stringify(broken.outputs)})`) && pass;
       } finally {
         repo.cleanup();
       }
@@ -552,7 +707,7 @@ const CASES = [
   {
     claim: "a push to main FALLS BACK to FULL, named, on every shape it cannot identify as one PR squash on main",
     run: (ok) => {
-      const at = (over) => judge({ event: "push", ref: MAIN, pushRange: range([G1]), commits: [PR_MERGE], presentFiles: [G1], ...over });
+      const at = (over) => judge({ event: "push", ref: MAIN, pushRange: range([G1]), commits: [PR_MERGE], presentFiles: [G1], predecessor: GREEN_P, ...over });
       const rows = [
         [{ ref: "refs/heads/feature" }, /refs\/heads\/feature/, "a ref other than main"],
         [{ ref: undefined }, /\(unset\)/, "an unset ref"],
@@ -587,7 +742,7 @@ const CASES = [
     run: (ok) => {
       let pass = true;
       for (const f of ["scripts/mutex-dead-holder-verdict.sh", ".github/workflows/supabase-migrate.yml"]) {
-        const v = judge({ event: "push", ref: MAIN, pushRange: range([f]), commits: [PR_MERGE], presentFiles: [] });
+        const v = judge({ event: "push", ref: MAIN, pushRange: range([f]), commits: [PR_MERGE], presentFiles: [], predecessor: GREEN_P });
         pass = ok(v.mode === "full" && v.reason.includes(f), `a push changing only ${f} is FULL, named (got ${v.mode}: ${JSON.stringify(v.reason)})`) && pass;
       }
       return pass;
@@ -596,7 +751,7 @@ const CASES = [
   {
     claim: "D-10: the floors file is NOT machinery on a push, and STAYS machinery on a pull request",
     run: (ok) => {
-      const v = judge({ event: "push", ref: MAIN, pushRange: range([G1, FLOORS]), commits: [PR_MERGE], presentFiles: [G1] });
+      const v = judge({ event: "push", ref: MAIN, pushRange: range([G1, FLOORS]), commits: [PR_MERGE], presentFiles: [G1], predecessor: GREEN_P });
       let pass = ok(v.mode === "subset" && JSON.stringify(v.files) === JSON.stringify([G1]), `a push raising a floor plus G1 is SUBSET [G1] (got ${v.mode}: ${JSON.stringify(v.files)} ${v.reason})`);
       const p = judge({ event: PR, changedFiles: [G1, FLOORS], presentFiles: [G1] });
       return ok(p.mode === "full" && p.reason.includes(FLOORS), `a PR raising a floor stays FULL, named (got ${p.mode}: ${JSON.stringify(p.reason)})`) && pass;
@@ -605,7 +760,7 @@ const CASES = [
   {
     claim: "D-10: on a push ci.yml is machinery ONLY when its changed-paths or sql-mutation section changed, or the compare failed",
     run: (ok) => {
-      const at = (over) => judge({ event: "push", ref: MAIN, pushRange: range([G1, CI]), commits: [PR_MERGE], presentFiles: [G1], ...over });
+      const at = (over) => judge({ event: "push", ref: MAIN, pushRange: range([G1, CI]), commits: [PR_MERGE], presentFiles: [G1], predecessor: GREEN_P, ...over });
       const other = at({ ciChangedSections: [] });
       let pass = ok(other.mode === "subset" && JSON.stringify(other.files) === JSON.stringify([G1]), `only another job moved -> SUBSET [G1] (got ${other.mode}: ${other.reason})`);
       const sec = at({ ciChangedSections: ["sql-mutation"] });
@@ -630,7 +785,7 @@ const CASES = [
   {
     claim: "D-03: a push changing a migration selects the changed gates PLUS every gate whose setup loads it",
     run: (ok) => {
-      const at = (files, over) => judge({ event: "push", ref: MAIN, pushRange: range(files), commits: [PR_MERGE], presentFiles: files.filter((f) => GATE_FILE_RE.test(f)), ...over });
+      const at = (files, over) => judge({ event: "push", ref: MAIN, pushRange: range(files), commits: [PR_MERGE], presentFiles: files.filter((f) => GATE_FILE_RE.test(f)), predecessor: GREEN_P, ...over });
       const v = at([M, G1], { loaders: new Map([[M, [G3, G2]]]) });
       let pass = ok(v.mode === "subset" && JSON.stringify(v.files) === JSON.stringify([G1, G2, G3]), `subset [G1, G2, G3], sorted and unique (got ${v.mode}: ${JSON.stringify(v.files)} ${v.reason})`);
       const lone = at([M], { loaders: new Map() });
@@ -642,7 +797,7 @@ const CASES = [
   {
     claim: "D-09: a push to main changing no gate, no migration and no machinery is the NAMED verdict none; a PR keeps the fence",
     run: (ok) => {
-      const v = judge({ event: "push", ref: MAIN, pushRange: range(["README.md", "src/a.ts"]), commits: [PR_MERGE], presentFiles: [] });
+      const v = judge({ event: "push", ref: MAIN, pushRange: range(["README.md", "src/a.ts"]), commits: [PR_MERGE], presentFiles: [], predecessor: GREEN_P });
       let pass = ok(v.mode === "none" && v.files.length === 0, `mode none with no files (got ${v.mode}: ${JSON.stringify(v.files)})`);
       pass = ok(v.reason.startsWith("no mutation input changed:") && v.reason.includes("2 changed file(s)"), `the reason is named and carries the count (got ${JSON.stringify(v.reason)})`) && pass;
       const p = judge({ event: PR, changedFiles: ["README.md", "src/a.ts"], presentFiles: [] });
@@ -682,7 +837,7 @@ const CASES = [
         let pass = ok(parseAnnotations(gate2, { file: G2 }).errors.length === 0, "the fixture gate parses with ZERO errors (else a FULL here would point at the wrong cause)");
         const base = repo.commit({ [G2]: gate2, [M]: "SELECT 1;\n", [FLOORS]: "export const FILES_FLOOR = 1;\n", [CI]: ciFixture("a") });
         repo.commit({ [M]: "SELECT 1;\nSELECT 2;\n", [G1]: "-- new gate\n", [FLOORS]: "export const FILES_FLOOR = 2;\n", [CI]: ciFixture("b") });
-        const r = runMainOnPush(repo.dir, { PUSH_BEFORE_SHA: base });
+        const r = runMainOnPush(repo.dir, { PUSH_BEFORE_SHA: base }, { gh: "success" });
         pass = ok(r.code === 0, `exit 0 (got ${r.code}: ${r.out})`) && pass;
         return ok(r.outputs.sql_gate_mode === "subset" && r.outputs.sql_gate_files === `${G1} ${G2}`, `subset of G1 and G2 (got ${JSON.stringify(r.outputs)})`) && pass;
       } finally {
@@ -697,7 +852,7 @@ const CASES = [
       try {
         const base = repo.commit({ [G1]: "-- base\n", "CHANGELOG.md": "a\n" });
         repo.commit({ "CHANGELOG.md": "b\n" });
-        const r = runMainOnPush(repo.dir, { PUSH_BEFORE_SHA: base });
+        const r = runMainOnPush(repo.dir, { PUSH_BEFORE_SHA: base }, { gh: "success" });
         let pass = ok(r.code === 0, `exit 0 (got ${r.code}: ${r.out})`);
         return ok(r.outputs.sql_gate_mode === "none" && r.outputs.sql_gate_files === "" && /^no mutation input changed:/.test(r.outputs.sql_gate_reason ?? ""), `none with an empty list and the named reason (got ${JSON.stringify(r.outputs)})`) && pass;
       } finally {
@@ -848,7 +1003,7 @@ function selfTest() {
  * at `cwd` (CI: the checkout; the self-test: a scratch repo). ⛔ NEVER THROWS:
  * any error becomes a FULL verdict carrying its reason.
  */
-function derivePush(env, cwd) {
+function derivePush(env, cwd, fetchPredecessor = readPredecessor) {
   try {
     const ref = env.GITHUB_REF;
     if (ref !== "refs/heads/main") return judge({ event: "push", ref, presentFiles: [] });
@@ -881,7 +1036,13 @@ function derivePush(env, cwd) {
         loaderError = firstLineOf(e);
       }
     }
-    return judge({ event: "push", ref, pushRange, commits, presentFiles, ciChangedSections, ciCompareError, loaders, loaderError });
+    const inputs = { event: "push", ref, pushRange, commits, presentFiles, ciChangedSections, ciCompareError, loaders, loaderError };
+    const first = judge(inputs);
+    if (!first.predecessorOwed) return first;
+    // WR-03: the push would narrow, so prove the before-SHA green first. The
+    // fetcher is passed EXPLICITLY: `predecessorVerdict`'s default is a binding
+    // private to classify-changed-paths.mjs.
+    return judge({ ...inputs, predecessor: predecessorVerdict(pushRange.sha, fetchPredecessor) });
   } catch (e) {
     return { mode: "full", files: [], reason: `the push derivation failed (${firstLineOf(e)}) — the full corpus is owed` };
   }

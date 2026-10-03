@@ -237,7 +237,8 @@ jobs:
       # Red, cancelled, timed out, pending, absent, a truncated or malformed
       # response, or an API error runs the full corpus with the reason printed.
       # `GH_TOKEN` is this job's `checks: read` token, scoped to this step
-      # alone. `GITHUB_REPOSITORY` is a runner default.
+      # and the `sql_gate_subset` step below (review 164.9.6 WR-03), and to no
+      # other. `GITHUB_REPOSITORY` is a runner default.
       - id: classify
         run: node scripts/classify-changed-paths.mjs
         env:
@@ -251,13 +252,20 @@ jobs:
       - run: node scripts/sql-gate-subset.mjs --self-test
       # Phase 164.9.6 D-01: on a push to main the derivation judges the pushed
       # range, so it needs the same two event fields the `classify` step reads,
-      # through `env:` and never interpolated into `run:`. No GH_TOKEN: this
-      # path makes no API call.
+      # through `env:` and never interpolated into `run:`.
+      # (Review 164.9.6 WR-03) A push that would narrow to a subset or to
+      # `none` first proves `before` green with the classifier's own
+      # `predecessorVerdict`, the same proof the docs-only short path uses, so
+      # it needs this job's `checks: read` token, through `env:` only. A push
+      # already owed FULL makes no API call; an unproven predecessor (red,
+      # pending, absent, an API error, a truncated response) runs FULL with the
+      # reason printed. A pull_request never reads the token.
       - id: sql_gate_subset
         run: node scripts/sql-gate-subset.mjs
         env:
           PUSH_BEFORE_SHA: ${{ github.event.before }}
           PUSH_FORCED: ${{ github.event.forced }}
+          GH_TOKEN: ${{ github.token }}
 
   # CI speedup PR-B (v0.22.1.2+): the prior monolithic `frontend` job ran
   # typecheck → lint → test → policy-checks → audit → build serially
