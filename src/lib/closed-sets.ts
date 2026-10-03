@@ -116,6 +116,22 @@ export interface VenueCapabilities {
    * Consumer: Phase 153.4's long-wait copy (D-05).
    */
   serialized?: boolean;
+  /**
+   * Is this venue's SECRET slot sent and stored exactly as the user entered it, with
+   * no edge-whitespace trim? Absent → FALSE: the secret is trimmed, the incumbent
+   * DOGFOOD rule for every ccxt and sFOX key, which are whitespace-free tokens where a
+   * pasted space only makes a correct key fail auth.
+   *
+   * `mt5` sets true: its secret slot carries a user-chosen investor password, and an
+   * edge space may be part of it (D-08, Phase 164.6.6). No path trims it: the rotate
+   * path never did, and the wizard path now agrees.
+   *
+   * ⚠️ Read this through `venueSecretIsVerbatim()`, never by indexing the record.
+   *
+   * Consumers: `analytics-client.ts`'s `secretForVenue` (validate and encrypt) and the
+   * wizard secret inputs in `ConnectKeyStep` and `MultiKeyConnectStep`.
+   */
+  secretVerbatim?: boolean;
 }
 
 /**
@@ -143,7 +159,12 @@ export const VENUE_CAPABILITIES = {
   // is whether the ccxt probe currently SUCCEEDS for sFOX or has been silently failing
   // — and changing sFOX's submit path is outside this phase's requirements.
   sfox: {},
-  mt5: { scopeProbeSupported: false, substitutable: false, serialized: true },
+  mt5: {
+    scopeProbeSupported: false,
+    substitutable: false,
+    serialized: true,
+    secretVerbatim: true,
+  },
 } as const satisfies Record<SupportedExchange, VenueCapabilities>;
 
 /**
@@ -152,7 +173,7 @@ export const VENUE_CAPABILITIES = {
  * canonicalizeExchange hands back the DISPLAY form ("MT5"), so callers legitimately
  * pass mixed case.
  *
- * ⛔ Deliberately NOT exported. Every consumer must go through one of the three
+ * ⛔ Deliberately NOT exported. Every consumer must go through one of the four
  * predicates, because the DEFAULT — what an absent key or an unresolved venue means —
  * is the load-bearing part, and it is different for each capability.
  */
@@ -170,11 +191,11 @@ function venueCapabilities(
   //
   // ⚠️ Today's impact is nil for an ACCIDENTAL reason, which is exactly why
   // this is worth closing: `Object.prototype` carries none of
-  // `scopeProbeSupported` / `substitutable` / `serialized`, so all three
-  // predicates fall to their declared defaults — the safe directions. That
-  // safety is a property of today's three capability NAMES, not of the
-  // lookup. A fourth capability whose safe default is the other polarity
-  // would be silently subverted for those three keys, and
+  // `scopeProbeSupported` / `substitutable` / `serialized` / `secretVerbatim`,
+  // so all four predicates fall to their declared defaults — the safe
+  // directions. That safety is a property of today's four capability NAMES,
+  // not of the lookup. A fifth capability whose safe default is the other
+  // polarity would be silently subverted for those three keys, and
   // `venueSupportsScopeProbe` gates an ASVS V4 control.
   return Object.hasOwn(VENUE_CAPABILITIES, key)
     ? (VENUE_CAPABILITIES as Record<string, VenueCapabilities>)[key]
@@ -220,6 +241,19 @@ export function venueIsSubstitutable(venue: string | null | undefined): boolean 
  */
 export function venueIsSerialized(venue: string | null | undefined): boolean {
   return venueCapabilities(venue)?.serialized ?? false;
+}
+
+/**
+ * Is this venue's secret sent and stored verbatim, never trimmed (D-08, Phase 164.6.6)?
+ *
+ * null / undefined / "" / an unknown venue ⇒ **FALSE**: trim. Never drop a trim we
+ * cannot justify for a venue we could not resolve; for a resolved non-MT5 venue the
+ * trim is the DOGFOOD fix (a pasted space makes a correct key fail auth).
+ */
+export function venueSecretIsVerbatim(
+  venue: string | null | undefined,
+): boolean {
+  return venueCapabilities(venue)?.secretVerbatim ?? false;
 }
 
 /**

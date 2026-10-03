@@ -42,6 +42,9 @@ import {
   CREDENTIAL_KEY_INPUT_PROPS,
   CREDENTIAL_SECRET_INPUT_PROPS,
 } from "@/lib/credential-input";
+// D-08 (Phase 164.6.6) — the panel secret slot reads the venue CAPABILITY,
+// never a venue name, to decide whether a paste keeps its edge whitespace.
+import { venueSecretIsVerbatim } from "@/lib/closed-sets";
 
 /**
  * Phase 88 / ONB-01 — the multi-key ConnectKeyStep.
@@ -2394,8 +2397,15 @@ function KeyPanel({
                     id={secretInputId}
                     type={p.showSecret ? "text" : "password"}
                     value={p.apiSecret}
+                    // D-08 / 169.3 D-76: the server stores a verbatim-secret
+                    // venue's password as sent, so the paste-strip must not be
+                    // the only trim.
                     onChange={(e) =>
-                      onUpdate(index, { apiSecret: readCredentialInput(e) })
+                      onUpdate(index, {
+                        apiSecret: venueSecretIsVerbatim(p.exchange)
+                          ? e.target.value
+                          : readCredentialInput(e),
+                      })
                     }
                     placeholder={secretPlaceholder}
                     {...CREDENTIAL_SECRET_INPUT_PROPS}
