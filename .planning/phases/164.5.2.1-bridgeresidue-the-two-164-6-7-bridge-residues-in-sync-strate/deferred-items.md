@@ -2,7 +2,13 @@
 
 ## [164.5.2.1-02-KEPT-ROW-COMPUTED-AT] PRE-MERGE DECISION (found by plan 02, 2026-10-03)
 
-**Status:** open. This needs a decision before the phase PR merges. The migration auto-applies to TEST
+**Status:** RESOLVED 2026-10-03. Founder decision (AskUserQuestion, answer "Hold the date for both"),
+which is option 3 below as a class-wide fix. Plan 03 implemented it in `20261003120000`: a row branch (a)
+KEEPS holds `computed_at`, `computation_error` and both provenance markers, for the plain keep and the
+warned keep alike. Gate arms K1 and K2 cover it, with guard K3 (a transition holds nothing). The executor's
+reading is recorded in `164.5.2.1-CONTEXT.md`. The text below is the original write-up, kept as lineage.
+
+**Original status:** open. This needs a decision before the phase PR merges. The migration auto-applies to TEST
 and then PROD with no reviewer gate, so deferring it means shipping it.
 
 **What.** Branch (a) of `sync_strategy_analytics_status` still writes `computed_at = now()`
