@@ -8,14 +8,14 @@ status: executing
 stopped_at: "164.9.6 (#936) and 164.5.2.1 (#937) landed and closed; 167.1.2-08 landed (#939, post-deploy census pending); 164.6.6 executing wave 1"
 last_updated: "2026-10-03T14:43:50.465Z"
 last_activity: 2026-10-03
-last_activity_desc: 164.9.6 and 164.5.2.1 closed (phase complete); 164.9.6.1 SUBSETSHARD booked, queued after 164.6.6
-state_head: b2c59c720e1dedcf6178635cf277e875c9fc82ae
+last_activity_desc: 164.9.6.1 SUBSETSHARD landed (#941) and closed; SS-1 measured 5m01s on main run 37151757248
+state_head: 1d0c22583ef7b2a1c905320bbf70da0d4f3fb367
 progress:
   total_phases: 94
-  completed_phases: 54
-  total_plans: 474
-  completed_plans: 470
-  percent: 57
+  completed_phases: 55
+  total_plans: 477
+  completed_plans: 473
+  percent: 58
 ---
 
 ## ⭐ STATE lineage
@@ -975,7 +975,7 @@ Prior-phase 141.1 close-out detail (retained; NOT about 142.1):
         after PYAPIFIX-01" ordering is now **SATISFIED**.
         2 WARNING gaps, no BLOCKER. See `140.1-VERIFICATION.md`. Not transitioned (`--no-transition`).
 
-Progress: [██████░░░░] 57%
+Progress: [██████░░░░] 58%
 
 ### Phase 140.1 close-out — open items (do NOT lose these)
 
