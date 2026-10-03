@@ -5,10 +5,10 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 164.5.2.1
 current_phase_name: BRIDGERESIDUE
 status: executing
-stopped_at: "Completed 164.5.2.1-04-PLAN.md (curated/protected gates re-pointed at 20261003120000, snapshot + one earned prod-body-ack, local-stack D-11 set green, kind-scope drift test resolves the newest bridge definition by scan)"
-last_updated: "2026-10-03T06:45:00.000Z"
+stopped_at: "Completed 164.5.2.1-05-PLAN.md (floors 58/574 off one full lane run on the tree merged with origin/main, census pins moved, both 164.6.7 residues closed on evidence with D-18 accepted, release commit v0.120.0.0, not pushed)"
+last_updated: "2026-10-03T07:55:00.000Z"
 last_activity: 2026-10-03
-last_activity_desc: Phase 164.5.2.1 plan 04 complete
+last_activity_desc: Phase 164.5.2.1 plan 05 complete (all 5 plans done; ready for the pre-merge reviewers and ship)
 state_head: f9fb8b252dfc58c7b57713ea75af40feff6d9a0e
 progress:
   total_phases: 85
@@ -179,7 +179,7 @@ both checkboxes updated to match. Not yet marked `completed_phases` in the front
 no VERIFICATION.md exists for this phase yet, and this repo's own rule is that phase completion
 is decided by verification status, never by plan counts.**
 
-Phase: 164.5.2.1 (BRIDGERESIDUE) — EXECUTING (plan 5 of 5; plans 01-04 complete 2026-10-03, migration 20261003120000_sync_status_bridge_residues.sql; [164.5.2.1-02-KEPT-ROW-COMPUTED-AT] resolved by founder decision 2026-10-03, implemented in plan 03)
+Phase: 164.5.2.1 (BRIDGERESIDUE) — EXECUTED (plans 01-05 complete 2026-10-03, migration 20261003120000_sync_status_bridge_residues.sql; release commit v0.120.0.0 on the branch, not pushed; next: verification, the three pre-merge reviewers, ship)
 Phase: 164.9.4 (CIOFFMUTEX) — COMPLETE 2026-10-03 (verification passed on the ship run 37072653692; PR #880 merged, v0.119.0.0)
 Phase: 160 / 164.3 / 168 — close-out 2026-10-03 (SECURITY.md for 160 and 164.3; verification frontmatter to convention; 164.3 plan 07 stays deferred)
 Phase: 164.9.3.2.1 (ENQ40001) — COMPLETE 2026-10-02 (verification passed; PR #929 merged, v0.118.1.5; no migration)
@@ -520,7 +520,7 @@ Status: Executing Phase 164.5.2.1
       closed by PR #743 `3ed6919e`) and 164.4.1 annotated all five remaining files —
       `lane-blocked: 0`, `pending: 0` at `files 44/71`. Read `FILES_FLOOR` / `ARMS_FLOOR` off
       `scripts/mutation-runner/run.mjs`, never off a number restated here.
-Last activity: 2026-10-03 — Phase 164.5.2.1 plan 04 complete (curated gate 8/8 biting on the new body, protected ALL 23 ARMS EXECUTED, snapshot regenerated with one earned prod-body-ack, local-stack D-11 set rc 0, D-12 drift test by scan with three neuters RED)
+Last activity: 2026-10-03 — Phase 164.5.2.1 plan 05 complete (FILES_FLOOR 58 / ARMS_FLOOR 574, separated both ways; both 164.6.7 residues and runbook item 7 closed once applied; D-18 accepted; [164.5.2.1-COMPUTED-AT-RUNNER-STAMP] booked; v0.120.0.0 release commit)
       ⚠️ RETAINED — this was the `Last activity:` line until 2026-09-06:
       *"2026-09-04 — Phase 164.4.1 execution started"*
       all twinned and proven on real pg-lanes with **ZERO waivers** (cumulative 0 across all eight
@@ -1208,6 +1208,13 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 170 P10 | 13 min | 2 tasks | 9 files |
 
 ## Accumulated Context
+
+### Phase 164.5.2.1 decisions (plan 05)
+
+- Floors read off one full lane run on the tree merged with origin/main: FILES_FLOOR 56 -> 58, ARMS_FLOOR 556 -> 574, WAIVED_CEILING 0; too-high (59/575) exit 1, stale-low RATCHET STALE.
+- TODOS: both 164.6.7 residue entries closed (live once applied to PROD); D-18 PRE corner ACCEPTED 2026-09-27, narrowed 2026-10-03; [164.5.2.1-COMPUTED-AT-RUNNER-STAMP] booked (user-facing, owner a follow-up phase); [DERIBIT-ASSIGNMENT-UNCLASSIFIED] closed with caveat.
+- VERSION 0.120.0.0 per the orchestrator, re-picked from origin/main before the push.
+- Local lint/typecheck and 4 vitest files are red from the environment (shared node_modules has typescript 7.0.2 vs locked 6.0.3; Node v25 vs pinned 22); CI is the instrument.
 
 ### Phase 164.5.2.1 decisions (plan 04)
 
@@ -2524,6 +2531,10 @@ Load-bearing sequencing (real dependencies, do not reorder):
      sits ABOVE the heading. Diagnosed 2026-08-09. -->
 
 ## Session
+
+**Last Date:** 2026-10-03T07:55:00.000Z
+**Stopped At:** Completed 164.5.2.1-05-PLAN.md
+**Resume File:** None
 
 **Last Date:** 2026-10-03T06:45:00.000Z
 **Stopped At:** Completed 164.5.2.1-04-PLAN.md
