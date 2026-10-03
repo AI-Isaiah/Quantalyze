@@ -3192,9 +3192,9 @@ Plans:
 8. **SS-8 (D-04).** The docs-only short path keeps the strict green-predecessor rule.
 
 Plans:
-- [ ] 164.9.6.1-01-PLAN.md — runner concurrency (D-01): async runLane/runCorpus, 4-wide file pool, per-worker ports, ordered output, `lane-concurrency:` line, serial==parallel proofs (wave 1)
-- [ ] 164.9.6.1-02-PLAN.md — drift-tolerant predecessor (D-02/D-04/D-05): opt-in for sql-gate-subset, sql-gate-lint job-log proof, `actions: read`, self-test matrix (wave 1)
-- [ ] 164.9.6.1-03-PLAN.md — `lane-concurrency:` assert in ci.yml + nightly, ROADMAP Goal/SC/supersession, CLAUDE.md addendum, post-merge measurement defined (wave 2)
+- [x] 164.9.6.1-01-PLAN.md — runner concurrency (D-01): async runLane/runCorpus, 4-wide file pool, per-worker ports, ordered output, `lane-concurrency:` line, serial==parallel proofs (wave 1)
+- [x] 164.9.6.1-02-PLAN.md — drift-tolerant predecessor (D-02/D-04/D-05): opt-in for sql-gate-subset, sql-gate-lint job-log proof, `actions: read`, self-test matrix (wave 1)
+- [x] 164.9.6.1-03-PLAN.md — `lane-concurrency:` assert in ci.yml + nightly, ROADMAP Goal/SC/supersession, CLAUDE.md addendum, post-merge measurement defined (wave 2)
 
 ### Phase 164.9.1: JOBRPCTRUTH — the compute-job RPC surface does what its own comments say (INSERTED)
 
