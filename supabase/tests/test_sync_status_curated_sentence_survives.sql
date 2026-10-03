@@ -222,9 +222,9 @@
 -- `IF FALSE AND v_fn !~ …`, which is the smallest edit that leaves the anchor's
 -- text in place so a reader can see exactly which assertion was stood down.
 -- ⚠️ The apply list is byte-identical to
--- test_sync_status_marked_refresh_protected.sql:156, which already ends at
--- 20260906120000 (appended there by plan 06's three-reviewer fix pass, because
--- its own new arms read these columns). 20260510173005 is deliberately ABSENT —
+-- test_sync_status_marked_refresh_protected.sql:156: both carry 20260906120000
+-- (appended there by plan 06's three-reviewer fix pass, because its own new arms
+-- read these columns) and, since 2026-10-03, end at 20261003120000. 20260510173005 is deliberately ABSENT —
 -- it is one of the three booked [REDUNDER-SAVEPOINT] migrations and aborts any
 -- lane; 20260510175507 is the repair migration and registers `process_key_long`
 -- on its own.
