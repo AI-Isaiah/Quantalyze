@@ -2789,17 +2789,17 @@ jobs:
             exit 1
           fi
 
-          floors=$(node -e 'import("./scripts/mutation-runner/run.mjs").then(m => console.log(m.FILES_FLOOR, m.ARMS_FLOOR, m.WAIVED_CEILING))')
+          floors=$(node -e 'import("./scripts/mutation-floors.mjs").then(m => console.log(m.FILES_FLOOR, m.ARMS_FLOOR, m.WAIVED_CEILING))')
           files_floor=$(echo "$floors" | cut -d" " -f1)
           arms_floor=$(echo "$floors" | cut -d" " -f2)
           waived_ceiling=$(echo "$floors" | cut -d" " -f3)
           case "$files_floor" in ''|*[!0-9]*)
-            echo "::error::MEASURE_FAIL: could not read FILES_FLOOR from scripts/mutation-runner/run.mjs (got '$files_floor')."; exit 1;; esac
+            echo "::error::MEASURE_FAIL: could not read FILES_FLOOR from scripts/mutation-floors.mjs (got '$files_floor')."; exit 1;; esac
           case "$arms_floor" in ''|*[!0-9]*)
-            echo "::error::MEASURE_FAIL: could not read ARMS_FLOOR from scripts/mutation-runner/run.mjs (got '$arms_floor')."; exit 1;; esac
+            echo "::error::MEASURE_FAIL: could not read ARMS_FLOOR from scripts/mutation-floors.mjs (got '$arms_floor')."; exit 1;; esac
           case "$waived_ceiling" in ''|*[!0-9]*)
-            echo "::error::MEASURE_FAIL: could not read WAIVED_CEILING from scripts/mutation-runner/run.mjs (got '$waived_ceiling')."; exit 1;; esac
-          echo "floors from run.mjs: FILES_FLOOR=$files_floor ARMS_FLOOR=$arms_floor WAIVED_CEILING=$waived_ceiling"
+            echo "::error::MEASURE_FAIL: could not read WAIVED_CEILING from scripts/mutation-floors.mjs (got '$waived_ceiling')."; exit 1;; esac
+          echo "floors from mutation-floors.mjs: FILES_FLOOR=$files_floor ARMS_FLOOR=$arms_floor WAIVED_CEILING=$waived_ceiling"
 
           coverage_line=$(grep -a -m1 -E '^coverage: files [0-9]+/[0-9]+$' "$RUNNER_LOG" || true)
           if [ -z "$coverage_line" ]; then
@@ -2947,7 +2947,7 @@ jobs:
           case "$arms_waived" in ''|*[!0-9]*)
             echo "::error::MEASURE_FAIL: could not read the waived count out of '$arms_line'."; exit 1;; esac
           if [ "$arms_waived" -gt "$waived_ceiling" ]; then
-            echo "::error::WAIVED_CEILING exceeded: $arms_waived waived arm(s) > ceiling $waived_ceiling. A waiver is an arm this gate will never prove can fail; adding one is a reviewed edit to WAIVED_CEILING in scripts/mutation-runner/run.mjs, never a side effect of annotating."
+            echo "::error::WAIVED_CEILING exceeded: $arms_waived waived arm(s) > ceiling $waived_ceiling. A waiver is an arm this gate will never prove can fail; adding one is a reviewed edit to WAIVED_CEILING in scripts/mutation-floors.mjs, never a side effect of annotating."
             exit 1
           fi
           # IN-05: ARMS_FLOOR bounds BITING arms — executed minus those that did
@@ -3158,7 +3158,7 @@ jobs:
             case "$static_bound" in ''|*[!0-9]*)
               echo "::error::MEASURE_FAIL: could not read the static bound out of '$bound_line'."; exit 1;; esac
             if [ "$static_bound" -lt "$arms_floor" ]; then
-              echo "::error::ARMS_FLOOR regression (static upper bound): $static_bound annotated-unwaived arm(s) < floor $arms_floor. The full-corpus run on the push to main cannot reach the floor: an annotation was deleted or converted to a waiver without lowering the floor in scripts/mutation-runner/run.mjs."
+              echo "::error::ARMS_FLOOR regression (static upper bound): $static_bound annotated-unwaived arm(s) < floor $arms_floor. The full-corpus run on the push to main cannot reach the floor: an annotation was deleted or converted to a waiver without lowering the floor in scripts/mutation-floors.mjs."
               exit 1
             fi
             echo "SUBSET run on a pull_request: FILES_FLOOR and the waiver ceiling hold and the runner's two tallies agree over the $subset_claimed of $subset_total annotated file(s) this pull request changed: files $files_annotated >= $files_floor, biting arms $biting (of $arms_executed executed, $lane_invocations arm lane(s) spawned), waived $arms_waived <= $waived_ceiling. ARMS_FLOOR ($arms_floor) was NOT compared against the subset's biting count — it is compared by the full-corpus run on the push to main — but its static upper bound holds: $static_bound annotated-unwaived >= $arms_floor. This is NOT full-corpus coverage."
@@ -3166,7 +3166,7 @@ jobs:
           fi
 
           if [ "$biting" -lt "$arms_floor" ]; then
-            echo "::error::ARMS_FLOOR regression: $biting biting arm(s) < floor $arms_floor. An annotation stopped biting, was deleted, or was converted to a waiver without lowering the floor in scripts/mutation-runner/run.mjs."
+            echo "::error::ARMS_FLOOR regression: $biting biting arm(s) < floor $arms_floor. An annotation stopped biting, was deleted, or was converted to a waiver without lowering the floor in scripts/mutation-floors.mjs."
             exit 1
           fi
 
