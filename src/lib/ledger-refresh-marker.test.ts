@@ -201,7 +201,12 @@ describe("[161.1-D13] LEDGER_REFRESH_JOB_SOURCES — parity with the SQL publish
     const lists = parseSqlLedgerRefreshSourceLists(SYNC_STATUS_SQL, SYNC_STATUS_PATH);
     // MEASURED 2026-09-24: two lists, `is_protected` and the live-successor
     // exclusion. An exact count, so a parse that silently finds none fails.
-    expect(lists.length, "the snapshot's marker lists were not found; re-point the parse").toBe(2);
+    // MOVED 2026-10-03 (Phase 164.5.2.1 BRIDGERESIDUE), 2 -> 3: migration
+    // 20261003120000 adds a third literal list, read 1's unmarked-job FILTER
+    // (the RETRY-PLAIN-COMPLETE keep, plan 02). MEASURED: `expected 3 to be 2`
+    // after plan 04 regenerated the snapshot; each of the three lists still
+    // equals the TS set, which the loop below asserts.
+    expect(lists.length, "the snapshot's marker lists were not found; re-point the parse").toBe(3);
     for (const list of lists) {
       expect(list).toEqual(new Set(LEDGER_REFRESH_JOB_SOURCES));
     }

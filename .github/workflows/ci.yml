@@ -4919,12 +4919,27 @@ jobs:
           #   A new sentinel-bearing file changes the FILE SET, which is the one
           #   thing the contract test asserts that no floor can see: both floors
           #   move UP here, so neither would have gone red on its own.
+          # Re-measured 2026-10-03 (phase 164.5.2.1 plan 02), ONE move:
+          #   test_sync_status_bridge_residues.sql, NEW, 13 arms (W1..W7, R1..R6) —
+          #   the residue gate for migration 20261003120000 (both 164.6.7 bridge
+          #   residues). Its sub-arms W1-COMPOSITE and R1-COMPOSITE fold into W1/R1
+          #   and its INVARIANT is uncounted, exactly as the runner counts sections.
+          #   A new sentinel-bearing file, so SENTINEL_FLOOR moves 13 -> 14 and
+          #   ARMS_FLOOR moves 240 -> 253, read off the file's own first
+          #   `ALL N ARMS EXECUTED` sentinel.
+          # Re-measured 2026-10-03 (phase 164.5.2.1 plan 03), ONE move:
+          #   test_sync_status_bridge_residues.sql gains K1, K2, K3 (the founder
+          #   decision that a KEPT row holds computed_at, its sentence and both
+          #   provenance markers), so its sentinel reads ALL 16 and ARMS_FLOOR
+          #   moves 253 -> 256. No file joined the sentinel-bearing set, so
+          #   SENTINEL_FLOOR stays 14.
           # Read off each file's own sentinel, never off this table.
           #   test_strategy_shares_rls.sql                    103
+          #   test_sync_status_bridge_residues.sql             16
           #   test_sync_status_curated_sentence_survives.sql    7
           #   test_sync_status_marked_refresh_protected.sql    23
-          SENTINEL_FLOOR=13  # files declaring a sentinel
-          ARMS_FLOOR=240     # 13 + 8 + 9 + 3 + 6 + 23 + 26 + 8 + 7 + 4 + 103 + 7 + 23
+          SENTINEL_FLOOR=14  # files declaring a sentinel
+          ARMS_FLOOR=256     # 13 + 8 + 9 + 3 + 6 + 23 + 26 + 8 + 7 + 4 + 103 + 16 + 7 + 23
           # RAISING these as arms are added is expected and cheap — and it is not
           # optional: src/__tests__/contracts/ci-anti-skip-gate.contract.test.ts
           # re-derives the table above from the corpus and goes red when a count,

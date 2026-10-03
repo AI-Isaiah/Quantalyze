@@ -1016,6 +1016,12 @@ here, but this precondition sits here because this is where a reader would go to
      both ways described above.** The gap is `TODOS.md` `[164.6.7-RETRY-PLAIN-COMPLETE]`, routed
      to Phase 164.5.2 BRIDGELOCK; its fix is a bridge migration. Until that phase ships, do not
      go looking for the fix on the deployed commit.
+     ✅ **CLOSED 2026-10-03 by Phase 164.5.2.1 BRIDGERESIDUE, live once the merge applies it to PROD.**
+     Migration `20261003120000_sync_status_bridge_residues.sql` gives the bridge's branch (a) a keep
+     arm: a published plain `complete` row stays `complete` when every in-flight job carries an
+     in-scope refresh marker and no unprotected failure is live (residue gate arms R1 and R5,
+     RED-then-GREEN). On the deployed commit, confirm that migration is in the PROD ledger before
+     relying on it; until then the flat condition above still holds.
    - **Overclaim: "ends `failed_final` with no terminal stamp from this site" is true of Python
      and says nothing about the bridge.** If the re-read also fails on the FINAL attempt, the job
      ends `failed_final` with `last_error_kind = 'transient'`. Its `last_error` should carry the
@@ -1337,6 +1343,10 @@ here, but this precondition sits here because this is where a reader would go to
    op=_STAMP_OP_MARKER_READ)`, and confirm that a failed read raises `StampIOUnavailable`. The
    routing sentence above also moved: `[164.6.7-RETRY-PLAIN-COMPLETE]` now belongs to Phase
    164.5.2.1 BRIDGERESIDUE, split from 164.5.2 on 2026-09-26.
+   ✅ **CLOSED 2026-10-03 by Phase 164.5.2.1 BRIDGERESIDUE** (the gap named twice in this block):
+   migration `20261003120000_sync_status_bridge_residues.sql` keeps a plain-`complete` row across
+   the retry under the condition in item 2's 2026-10-03 line. It is live only once the merge applies
+   the migration to PROD.
    📜 *Lineage, superseded 2026-09-25:* "**How to check it is met.** Read
    `run_stitch_composite_job`: a live re-read of the row (through `_refresh_marker_still_on_row` or
    an equivalent) must sit before its composite-marker comparison. A test must go RED when that
@@ -1372,6 +1382,17 @@ here, but this precondition sits here because this is where a reader would go to
    phase that already changes the terminal mark RPCs fanning into that bridge. **Accepted** means
    a founder decision recorded here, with its date and reason, before the schedule is
    registered. Neither exists as of 2026-09-25.
+   ✅ **CORRECTED 2026-10-03 — CLOSED ONCE APPLIED, by Phase 164.5.2.1 BRIDGERESIDUE**, the text
+   above kept as lineage. Migration `20261003120000_sync_status_bridge_residues.sql` clears
+   `computation_warned` in branch (b) AND in branch (a) whenever the row's writer job is among the
+   unprotected live failures (decision D-04b, which superseded the branch-(b)-only D-04; residue
+   gate `supabase/tests/test_sync_status_bridge_residues.sql` arms W1..W5 RED-then-GREEN). The item
+   stops blocking only once the merge has applied that migration to PROD: check the PROD migration
+   ledger before registering the schedule. ⛔ **One corner is ACCEPTED, not closed** (founder,
+   default (a), 2026-09-27): the D-18 PRE corner, which needs BOTH a marker-retraction race AND a
+   sibling terminal transition between the Python honour write and X's own mark. Narrowed
+   2026-10-03 (closed on a `complete_with_warnings` row). Details and the founder's remaining exits
+   are in `TODOS.md` `[164.6.7-COMPOSITE-REREAD-RESIDUE]`. Item 6 still blocks independently.
 
 ---
 

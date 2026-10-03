@@ -1,5 +1,149 @@
 # Changelog
 
+## [0.121.0.0] - 2026-10-03 — BRIDGERESIDUE: the strategy bridge closes the two 164.6.7 residues, takes the per-strategy lock itself, and holds the date on a row it keeps
+
+⭐ **What changed for whoever reads this next.** `sync_strategy_analytics_status` (the bridge every
+terminal job mark calls) had two known residues from Phase 164.6.7. (1) A marker retraction landing
+between the Python live re-read and `mark_compute_job_failed` could leave `computation_warned` up
+over a failed run, so a warned factsheet read `complete_with_warnings` again
+(`[164.6.7-COMPOSITE-REREAD-RESIDUE]`). (2) A marked refresh retry rewrote a published plain
+`complete` row to `computing`, so the retry protected only warned rows
+(`[164.6.7-RETRY-PLAIN-COMPLETE]`). Phase 164.5.2.1 closes both in ONE migration,
+`20261003120000_sync_status_bridge_residues.sql`. It also makes the bridge take the mark RPCs'
+per-strategy advisory lock itself. The RPCs keep their own lock lines and the bridge re-enters the
+same lock (same key, re-entrant), so a direct bridge call serializes behind a mark. Per a founder
+decision of 2026-10-03, a row the bridge KEEPS now holds its date, sentence and provenance.
+
+⚠️ **A minor bump: the behaviour of a production SQL function changes.** The migration
+**auto-applies to TEST and then PROD on merge, with no human gate**, so the merge IS the apply.
+The three pre-merge reviewers (migration-reviewer, rls-policy-auditor, silent-failure-hunter) must
+review the migration and both new gates, and every finding must be fixed, BEFORE the merge. No
+review can be scheduled after it.
+
+### Fixed
+- **COMPOSITE-REREAD: the bridge clears `computation_warned` over the writer's unprotected
+  failure** (plan 01). Branch (b) clears the flag, and branch (a) resolves the row to `computing`
+  with a reaper stamp, whenever the row's writer-provenance job is among the UNPROTECTED live
+  failures. One unordered `array_agg(id) FILTER (WHERE NOT <is_protected>)` in the existing
+  live-failure read drives it, in the same snapshot, so no new read-order window opens. With no
+  unprotected failure the array is NULL and every new arm falls through to the old behaviour.
+  Decision D-04 (branch (b) only) was superseded by D-04b (branches (b) AND (a)) after research
+  measured D-04 missing the later-sibling and in-flight corners. The founder ratified it on
+  2026-09-27. One fix covers both honour arms, the composite and the single-key derive.
+- **RETRY-PLAIN-COMPLETE: branch (a) keeps a published plain `complete` row over a marked in-scope
+  retry** (plan 02). It keeps the row when every in-flight job carries an in-scope refresh marker
+  and no unprotected failure is live. The stamp keep arm leaves the reaper stamp NULL. The rule
+  rests on an unmarked-job count folded into read 1, in the same snapshot.
+
+### Changed
+- **The bridge takes the per-strategy advisory lock itself** (plan 03). Its first statement after
+  the NULL guard is the mark RPCs' own two-integer lock
+  (`hashtext('mark_compute_job_bridge')`, `hashtext(<strategy id>)`), so a direct bridge call
+  serializes behind a mark. Measured with `dblink`: a direct call waited on `transactionid` before,
+  and on that exact advisory lock (namespace oid, objsubid 2) after. An apply-time anchor pins the
+  NULL guard ahead of the lock and checks that the namespace differs from `admin_role_mutate`'s.
+  The migration's verify block also calls the bridge with a NULL strategy and requires
+  `invalid_parameter_value`. Lock order is recorded in the migration header. No claim RPC is touched.
+- **A row the bridge KEEPS holds `computed_at`, `computation_error` and both provenance markers**
+  (plan 03, founder decision 2026-10-03, "Hold the date for both"). This applies to the new
+  plain-`complete` keep and to the existing `complete_with_warnings` keep, so a branch-(a) keep no
+  longer re-stamps the date on a row nothing recomputed. ⚠️ **The date is NOT a reliable "last real
+  compute" in either direction.** It can lag: after a real recompute that ends
+  `complete_with_warnings` beside an in-flight sibling, the hold keeps the PRE-compute date until
+  the sibling finishes. It can also run ahead: branch (c) still writes `computed_at = now()` when
+  ANY terminal job finishes last with nothing else in flight (a `sync_trades` poll, say), so the
+  FreshnessChip and the PDF vintage can move forward with nothing recomputed. Both directions are
+  booked as `[164.5.2.1-COMPUTED-AT-RUNNER-STAMP]`. ⚠️ This deliberately changes PROD behaviour
+  for the warned cohort. The hold fires on a KEEP only, never on a
+  TRANSITION; guard arm K3 pins that reading.
+- **The bridge's stale in-body comments were corrected** (D-07, plan 03). Read 1's two counts, the
+  one warned-clear case, the labels of the stamp CASE's membership and keep arms, and branch (b)'s
+  former "does NOT touch computation_warned" are now accurate.
+- **The kind-scope drift test reads the newest bridge definition by scan** (plan 04,
+  `analytics-service/tests/test_ledger_refresh_kind_scope_drift.py`), not the 2026-08-25 file.
+  It cross-checks the resolved file against the function snapshot's `-- source migration:` line.
+- **The function snapshot was regenerated** (plan 04). It carries one `prod-body-ack` read off
+  `--diff-bodies` for VAC-04.
+
+### Security
+- **The migration grants `service_role` EXECUTE on the bridge explicitly** (review RLS-LOW-01), right after the carried `REVOKE ALL … FROM PUBLIC, anon, authenticated`, and its verify block asserts it (anchor xiv). No earlier migration granted it: PROD and TEST hold it through Supabase's bootstrap default privileges, so on PROD the GRANT is a no-op (a function's only privilege is EXECUTE). anon and authenticated stay denied, asserted by the same block. The comment above the REVOKE now names all three callers, including the Python DEFERRED path that calls the bridge over PostgREST as `service_role`.
+
+### Review fixes (two rounds; three migration reviewers re-ran clean on the result)
+- **The verify block reads code, not comments**: it strips comments from the function body once and every carried `20260906120000` anchor reads that copy; only the HONEST-01 ban, which must see comments, reads the raw body. The NULL-body guard now runs before any anchor. Anchor (xiii) pins the value each hold-CASE arm writes, so both `computed_at` arms going NULL raises. Anchors (xii) and (xiii) are in order. The block stays catalog-only.
+- **Comments now say what the code does**: the D-05 keep applies whenever every in-flight job carries an in-scope refresh marker (any non-terminal status, not only a retry); the LOCK ORDER header states the real no-deadlock rule (whoever holds the advisory lock never waits on a `compute_jobs` row lock), since the mark path does hold job rows while it waits. The snapshot was regenerated with them. `analytics_runner.py`'s comment on the snapshot design was brought up to date (comment only).
+
+### Tests
+- **A new both-lanes residue gate, `supabase/tests/test_sync_status_bridge_residues.sql`, with 16
+  arms**, sealed by `ALL 16 ARMS EXECUTED`:
+  - W1..W5 (W1 with a composite sub-arm) went RED on the pre-fix body and GREEN on the fix. Guards
+    W6 (SI-02) and W7 (the protected honour path) are green on both bodies.
+  - R1 (with its composite sub-arm) and R5 went RED first and GREEN on the fix. Guards R2..R4 and
+    R6 keep the keep no wider than D-05.
+  - K1..K3 cover the hold.
+  - Every arm has a layered `RED-UNDER-M` twin that the mutation runner measured biting.
+- **A new LANE-ONLY two-backend gate, `supabase/tests/test_sync_status_bridge_lock.sql`**, with
+  arms B1 (plus a B1-DIRECT probe) and B2. B2 also asserts the lock's per-strategy key (`objid` is the masked `hashtext` of the strategy id), so a constant, global key fails; measured blind before the fix and red after. The 164.5.2 lock
+  gate's setup stays pinned at `20260926120000`, because adding the new migration there stops its
+  L1/L2 twins biting. Its header records why.
+- **The curated and protected sync-status gates were re-pointed at the new body** (plan 04). Every
+  twin still bites. R1 was redesigned for the hold CASEs, which stand down anchor (xiii) from 4 to 2
+  and move D1's P2d re-baseline from 1 to 0. The protected gate's apply list gains the new migration
+  (D-19).
+- **Gate hardening from review:** the residue gate's setup guards fail on a NULL read (`IS NOT TRUE` / `IS DISTINCT FROM`); its header records that arms W5 and R5 can only go red on the pg-lane, because the `20260803120000` stamp trigger produces the same end state elsewhere (adding it to the setup was measured to stop both twins biting on both lanes). The curated gate's wording now calls branch (a)'s clears the ELSE arms of the hold CASEs.
+- **The scoped-UPDATE anti-vacuity pin records the residue gate's five `UPDATE strategy_analytics` statements** (`analytics-service/tests/test_sql_gate_scoped_updates.py`); it was red at the branch's own base because the new file shipped without its key.
+- **The census moved, measured on the tree merged with `origin/main`** (plan 05):
+  - The floors now live in `scripts/mutation-floors.mjs` (Phase 164.9.6 moved them there). `FILES_FLOOR` went from 56 to 58 and `ARMS_FLOOR` from 556 to 574, with `WAIVED_CEILING` still
+    0. One full lane run printed `coverage: files 58/85`, `arms: 574/574/0`, `biting: 574` and
+    `lane-invocations: 574` (the two tallies agree), with `✅ No defects`.
+  - The stale-low direction was observed as `RATCHET STALE`, and the too-high direction as a
+    full-run exit 1.
+  - `KNOWN_THRESHOLD_SITES`, the floors test's GREEN_LOG, the per-file rows and calibrations
+    (offsets kept), and the annotation-parser censuses (twins 556 to 574, file steps and needles
+    615 to 668, files 83 to 85) all moved with it, as did the lint `scanned 85 file(s)` pin.
+  - The `sql-tests` sentinel roster in `ci.yml` and `drift-check-scripts.test.ts` moved in plan 02.
+- **The SQL marker-parity test now counts three marker lists, not two** (plan 05,
+  `src/lib/ledger-refresh-marker.test.ts`). Read 1's unmarked-job FILTER is a third literal
+  `('ledger-refresh', 'ledger-refresh-composite')` list in the bridge snapshot. The full vitest suite
+  caught it (`expected 3 to be 2`). Each list still equals the TypeScript set.
+
+### Notes
+- **D-18, the PRE corner, is ACCEPTED, not closed** (founder-owned, default (a), 2026-09-27). A
+  sibling's bridge call that lands while X is still `running`, between the Python honour write and
+  X's own mark, blanks the provenance. After a marker retraction, X's failure then cannot be tied
+  to its writer. It needs BOTH a retraction race AND a sibling terminal transition inside the same
+  window. ⭐ The hold narrows it: on a `complete_with_warnings` row the sibling's call is now a keep
+  that holds X's provenance, so X's loud mark clears the warning (measured on the pg-lane). Exits
+  (b) (a Python-side item) and (c) (a branch-(a) redesign) remain the founder's.
+- **The hold's measured limit is booked, not fixed.** The bridge is the only writer of
+  `strategy_analytics.computed_at`. A real recompute that ends `complete_with_warnings` while a
+  sibling job is in flight now keeps the old date until the sibling finishes, measured on the
+  pg-lane. That lag reaches the FreshnessChip and the PDF vintage. The staleness verdict is not
+  affected. The fix is a runner-side stamp, outside this SQL-only phase:
+  `TODOS.md` `[164.5.2.1-COMPUTED-AT-RUNNER-STAMP]` (user-facing).
+- **Expected RED until merge, and neither is allowlisted.**
+  - `baseline-content-drift` shows one DRIFT row, `sync_strategy_analytics_status/1`, until the
+    post-apply re-dump. The founder rule of 2026-09-27 counts this class as green.
+  - VAC-08 in `test-db-drift` stays red until apply-on-merge.
+  - VAC-04 goes green only if PROD's body equals the earned `live` hash. A red there is real PROD
+    drift.
+- **Ledger.** In `TODOS.md`:
+  - `[164.6.7-COMPOSITE-REREAD-RESIDUE]` and `[164.6.7-RETRY-PLAIN-COMPLETE]` are closed with dated
+    lines. Both say the fix is live only once the merge applies it to PROD.
+  - `[DERIBIT-ASSIGNMENT-UNCLASSIFIED]` is closed with a caveat (founder, 2026-10-03). Phase 168
+    classified `assignment` and ingested end to end. An `assignment` row is not countable from the
+    database, because PROD stores no Deribit transaction rows.
+  - The 164.3 plan 07 entry carries a note on #930, #880 and #932.
+  - The `161.1-D1` closeout records the in-bridge lock.
+- **Runbook** (`docs/runbooks/ledger-refresh-go-live.md`). Item 7 of
+  `[164.6-COMPOSITE-CLAIMTIME-SNAPSHOT]` is closed once applied, with the PRE corner accepted and
+  dated. Item 6 still blocks the composite schedule. The RETRY-PLAIN-COMPLETE gap lines carry dated
+  closed lines. All lineage text is kept.
+- **Merge to `main`.** Under Phase 164.9.6 this push changes a migration and gates but no mutation machinery, so `sql-mutation` should take a SUBSET (the changed gates plus the gates that load the migration) when the predecessor is green.
+- **Branch housekeeping.** `origin/main` was merged in three times: before execution, before the
+  census, and before ship (the last brought 164.9.6's floors move, resolved by applying this phase's floor raise to `scripts/mutation-floors.mjs`). The planning and record commits cover the context, research and pattern map, the 5-plan /
+  5-wave plan through three plan-check rounds, the founder's ratification of D-04b and D-18(a), the
+  hold-the-date decision record, and each plan's SUMMARY.
+
 ## [0.120.0.0] - 2026-10-03 — SUBSETMAIN: a push to main mutates only what it changed, and a nightly runs the full SQL mutation corpus
 
 ### Added
