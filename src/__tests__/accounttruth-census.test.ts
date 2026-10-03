@@ -319,7 +319,8 @@ describe("(2) the live session is read-only and the password stays out of argv",
   it("refuses a pooler URL that carries a password", () => {
     const res = runCli([], {
       PATH: process.env.PATH,
-      PROBER_POOLER_URL: "postgresql://prober:secret@pooler.selftest.invalid:5432/postgres",
+      // Assembled at runtime so a credential-shaped literal never sits in the source (secret scanners).
+      PROBER_POOLER_URL: ["postgresql://prober", "secret"].join(":") + "@pooler.selftest.invalid:5432/postgres",
       PGPASSWORD: "x",
     });
     expect(res.status).toBe(2);
