@@ -197,11 +197,21 @@ jobs:
     # FULL. On a pull request it is unchanged. The sentence "The derivation
     # hard-codes FULL for every event that is not a pull_request" above is kept
     # as lineage.)
+    # (⭐ 2026-10-03, Phase 164.9.6.1 D-02: the block gains `actions: read`.
+    # The SQL gate subset's tolerant predecessor proof reads the `sql-gate-lint`
+    # job log through the job-logs endpoint
+    # (`repos/<repo>/actions/jobs/<id>/logs`), which needs the Actions read
+    # scope. Without it the read fails and the proof fails SAFE to FULL, so a
+    # predecessor red only with the founder-tolerated baseline drift would
+    # still force a FULL sql-mutation run and the tolerance would never engage.
+    # The paragraphs above that say the block is `contents: read` plus
+    # `checks: read` are kept as lineage.)
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
       contents: read
       checks: read
+      actions: read
     outputs:
       docs_only: ${{ steps.classify.outputs.docs_only }}
       sql_gate_mode: ${{ steps.sql_gate_subset.outputs.sql_gate_mode }}

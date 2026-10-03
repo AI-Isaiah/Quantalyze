@@ -499,6 +499,260 @@ export function readPredecessor(sha, repo = process.env.GITHUB_REPOSITORY) {
 let defaultFetchPredecessor = readPredecessor;
 
 /**
+ * Phase 164.9.6.1 (D-02, D-04, D-05): the ONE check whose red a tolerant
+ * predecessor proof may accept, and the `run:` line of the `ci.yml` step whose
+ * failure it accepts. Every migration merge leaves `main` red with the
+ * founder-tolerated stale-baseline drift until the bot re-dump lands; that red
+ * is printed by this step of the `sql-gate-lint` job. The check-run name IS the
+ * job key (the job sets no `name:`), and the log parser requires the step's
+ * `##[group]Run ` header to equal `DRIFT_STEP_RUN_LINE` byte for byte.
+ * `ci-docs-path-filter.contract.test.ts` pins both against `ci.yml`, so a
+ * rename or a moved `run:` line goes red there rather than silently turning
+ * the tolerance off (which would be safe, every such predecessor reading FULL,
+ * but would stop the D-02 routing without anyone seeing it).
+ */
+export const TOLERATED_DRIFT_CHECK = "sql-gate-lint";
+export const DRIFT_STEP_RUN_LINE = "node scripts/baseline-content-drift-check.mjs";
+
+/**
+ * PRODUCTION reader for one Actions job's log, through `gh api` with the job's
+ * `GH_TOKEN`. The job-logs endpoint needs the Actions read scope, which is why
+ * `ci.yml`'s `changed-paths` job declares `actions: read`. THROWS on anything it
+ * cannot read; `predecessorVerdict` turns a throw into a FULL verdict.
+ *
+ * `--allow-escape-sequences` is REQUIRED: gh 2.97+ refuses to print a response
+ * containing terminal escapes, and job logs contain them (measured on gh
+ * 2.100.0: without the flag gh exits 1 with "the response contains terminal
+ * escape sequences"). The log is parsed in-process and never printed raw.
+ */
+export function readJobLog(jobId, repo = process.env.GITHUB_REPOSITORY) {
+  if (!/^[\w.-]+\/[\w.-]+$/.test(String(repo ?? ""))) {
+    throw new Error(`GITHUB_REPOSITORY is ${repo ? "not an owner/name pair" : "absent"}`);
+  }
+  if (!Number.isSafeInteger(jobId) || jobId <= 0) {
+    throw new Error(`the job id is not a positive integer (got ${JSON.stringify(jobId)})`);
+  }
+  // argv elements, never a shell string; bounded in time and size.
+  return execFileSync("gh", ["api", "--allow-escape-sequences", `repos/${repo}/actions/jobs/${jobId}/logs`], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+    timeout: 60_000,
+    maxBuffer: 16 * 1024 * 1024,
+  });
+}
+
+/**
+ * The job-log seam a caller gets when it passes none, rebound by `selfTest()` to
+ * a recording, throwing sentinel exactly as `defaultFetchPredecessor` is.
+ */
+let defaultFetchJobLog = readJobLog;
+
+/** The exit line GitHub writes when a step's process exits 1. */
+const EXIT_LINE = "##[error]Process completed with exit code 1.";
+const DRIFT_STEP_HEADER = `##[group]Run ${DRIFT_STEP_RUN_LINE}`;
+const TOLERATED_ROW_RE = /^##\[error\]content-drift — (DRIFT|SNAPSHOT_MISSING) (\S*)(?: |$)/;
+const FN_TOKEN_RE = /^[\w.]+\/\d+$/;
+
+/**
+ * PURE: does this `sql-gate-lint` job log prove a red caused ONLY by tolerated
+ * stale-baseline rows (D-02, D-05)? Tolerance rests on POSITIVE evidence, all
+ * required, so an unexpected shape, a truncation or a missing line reads RED:
+ *
+ *   - exactly one `##[error]Process completed with exit code 1.` line, and the
+ *     LAST `##[group]Run ` header before it is the drift step's, exactly (not its
+ *     `--self-test`, whose failure prints no annotation and leaves only the
+ *     exit line);
+ *   - every `##[error]` line in the whole log is a `content-drift — DRIFT` or
+ *     `content-drift — SNAPSHOT_MISSING` row, the one `baseline-content-drift
+ *     FAILED.` line, or the one exit line, and the rows and the FAILED line sit
+ *     inside the drift step;
+ *   - at least one tolerated row, each naming a `name/nargs` token matching
+ *     `FN_TOKEN_RE` (the tokens reach `$GITHUB_OUTPUT`);
+ *   - exactly one `baseline-content-drift: findings N` line inside the drift
+ *     step, with N equal to the tolerated rows (catches a truncated log and any
+ *     finding this parser did not recognise).
+ *
+ * Each line is read with a leading BOM, CRs, the ISO-8601 timestamp prefix and
+ * ANSI CSI sequences stripped. `SNAPSHOT_ONLY`, `UNCOMPARABLE`, `allowlist-*`
+ * and `MEASURE_FAIL` stay RED, named.
+ *
+ * @returns {{ok: true, fns: string[], drift: number, snapshotMissing: number} | {ok: false, why: string}}
+ */
+export function parseBaselineDriftLog(text) {
+  const no = (why) => ({ ok: false, why });
+  if (typeof text !== "string") return no("the log is not text");
+  const lines = text
+    .replace(/^﻿/, "")
+    .replace(/\r/g, "")
+    .split("\n")
+    .map((l) => l.replace(/^\d{4}-\d{2}-\d{2}T[\d:.]+Z /, "").replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, ""));
+  const exits = lines.flatMap((l, i) => (l === EXIT_LINE ? [i] : []));
+  if (exits.length !== 1) return no(`${exits.length} 'Process completed with exit code 1.' line(s), not exactly one`);
+  const exitAt = exits[0];
+  let headerAt = -1;
+  for (let i = exitAt - 1; i >= 0; i -= 1) {
+    if (lines[i].startsWith("##[group]Run ")) {
+      headerAt = i;
+      break;
+    }
+  }
+  if (headerAt === -1) return no("no step header precedes the exit line");
+  if (lines[headerAt] !== DRIFT_STEP_HEADER) {
+    return no(`the step that exited is not the drift step (its header reads '${printable(lines[headerAt])}')`);
+  }
+  const inStep = (i) => i > headerAt && i < exitAt;
+  const fns = [];
+  let drift = 0;
+  let snapshotMissing = 0;
+  let failedLines = 0;
+  for (let i = 0; i < lines.length; i += 1) {
+    const l = lines[i];
+    if (!l.startsWith("##[error]") || i === exitAt) continue;
+    const row = l.match(TOLERATED_ROW_RE);
+    if (row) {
+      if (!FN_TOKEN_RE.test(row[2])) return no(`a ${row[1]} row carries a malformed function token '${printable(row[2])}'`);
+      if (!inStep(i)) return no(`a ${row[1]} row sits outside the drift step`);
+      if (row[1] === "DRIFT") drift += 1;
+      else snapshotMissing += 1;
+      if (!fns.includes(row[2])) fns.push(row[2]);
+      continue;
+    }
+    if (l.startsWith("##[error]baseline-content-drift FAILED.")) {
+      if (!inStep(i)) return no("the FAILED line sits outside the drift step");
+      failedLines += 1;
+      continue;
+    }
+    return no(`a non-tolerated error line: ${errorKind(l)}`);
+  }
+  if (drift + snapshotMissing === 0) return no("no tolerated DRIFT or SNAPSHOT_MISSING row");
+  if (failedLines !== 1) return no(`${failedLines} 'baseline-content-drift FAILED.' line(s), not exactly one`);
+  const findings = lines.flatMap((l, i) => {
+    const m = l.match(/^baseline-content-drift: findings (\d+)$/);
+    return m && inStep(i) ? [Number(m[1])] : [];
+  });
+  if (findings.length !== 1) return no(`${findings.length} 'baseline-content-drift: findings' line(s) in the drift step, not exactly one (a truncated log?)`);
+  if (findings[0] !== drift + snapshotMissing) {
+    return no(`findings ${findings[0]} but ${drift + snapshotMissing} tolerated row(s) (DRIFT ${drift}, SNAPSHOT_MISSING ${snapshotMissing})`);
+  }
+  return { ok: true, fns, drift, snapshotMissing };
+}
+
+/** At most 80 printable-ASCII characters of a log fragment, for a reason. */
+function printable(s) {
+  return String(s).replace(/[^\x20-\x7e]/g, "?").slice(0, 80);
+}
+
+/** The kind of a non-tolerated `##[error]` line, when recognisable, else its first 80 printable characters. */
+function errorKind(line) {
+  const body = line.slice("##[error]".length);
+  const allow = body.match(/^(allowlist-[\w-]+) — /);
+  if (allow) return allow[1];
+  if (body.startsWith("MEASURE_FAIL")) return "MEASURE_FAIL";
+  const status = body.match(/^content-drift — (SNAPSHOT_ONLY|UNCOMPARABLE)\b/);
+  if (status) return status[1];
+  return `'${printable(body)}'`;
+}
+
+/**
+ * The tolerant half of `predecessorVerdict` (D-02, D-04, D-05), reached only
+ * when the caller opted in AND at least one deduped GitHub Actions run is not
+ * OK. Every refusal names the offending check or suite, and every run-level
+ * refusal comes BEFORE the log is read, so a cancelled `sql-mutation` (the
+ * 9c1dc3137 / b2c59c720 pattern) costs no log read.
+ */
+function toleratedDriftVerdict(runs, allSuites, fetchJobLog) {
+  const notOk = runs.filter((r) => !PREDECESSOR_OK_CONCLUSIONS.has(r.conclusion));
+  const untolerated = notOk.find((r) => r.name !== TOLERATED_DRIFT_CHECK && r.name !== PREDECESSOR_REQUIRED_CHECK);
+  if (untolerated) return { ok: false, why: `check '${untolerated.name}' concluded ${untolerated.conclusion}` };
+  const lints = notOk.filter((r) => r.name === TOLERATED_DRIFT_CHECK);
+  // No red `sql-gate-lint` means nothing tolerable: the strict reason, verbatim.
+  if (lints.length === 0) return { ok: false, why: `check '${notOk[0].name}' concluded ${notOk[0].conclusion}` };
+  if (lints.length > 1) {
+    return { ok: false, why: `${lints.length} red '${TOLERATED_DRIFT_CHECK}' runs in different suites, so one log cannot speak for them` };
+  }
+  const lint = lints[0];
+  if (lint.conclusion !== "failure") {
+    return { ok: false, why: `check '${TOLERATED_DRIFT_CHECK}' concluded ${lint.conclusion}, not failure, so its log cannot prove a drift-only red` };
+  }
+  const lintSuite = lint.check_suite.id;
+  const aggregator = runs.find((r) => r.name === PREDECESSOR_REQUIRED_CHECK && r.check_suite.id === lintSuite);
+  if (!aggregator) {
+    return { ok: false, why: `absent: no '${PREDECESSOR_REQUIRED_CHECK}' check run in ${TOLERATED_DRIFT_CHECK}'s suite ${lintSuite}, so CI has not run or not finished on that commit` };
+  }
+  if (aggregator.conclusion !== "failure") {
+    return { ok: false, why: `check '${PREDECESSOR_REQUIRED_CHECK}' concluded ${aggregator.conclusion} in ${TOLERATED_DRIFT_CHECK}'s suite ${lintSuite}, not failure` };
+  }
+  const elsewhere = notOk.find((r) => r.check_suite.id !== lintSuite);
+  if (elsewhere) {
+    return { ok: false, why: `check '${elsewhere.name}' concluded ${elsewhere.conclusion} in suite ${elsewhere.check_suite.id}, outside ${TOLERATED_DRIFT_CHECK}'s suite ${lintSuite}` };
+  }
+  const suites = allSuites.filter((s) => s?.app?.slug === PREDECESSOR_APP_SLUG);
+  const stillOpen = suites.find((s) => s.status !== "completed");
+  if (stillOpen) {
+    return { ok: false, why: `pending: GitHub Actions check suite ${stillOpen.id} status ${stillOpen.status} with ${stillOpen.latest_check_runs_count ?? "an unknown number of"} check run(s) so far` };
+  }
+  if (!suites.some((s) => s.id === lintSuite)) {
+    return { ok: false, why: `${TOLERATED_DRIFT_CHECK}'s check suite ${lintSuite} is absent from the check-suite lookup` };
+  }
+  const otherRed = suites.find((s) => s.id !== lintSuite && !PREDECESSOR_OK_CONCLUSIONS.has(s.conclusion));
+  if (otherRed) {
+    return { ok: false, why: `GitHub Actions check suite ${otherRed.id} concluded ${otherRed.conclusion}, a second red suite beside ${TOLERATED_DRIFT_CHECK}'s suite ${lintSuite}` };
+  }
+  let text;
+  try {
+    text = fetchJobLog(lint.id);
+  } catch (e) {
+    return { ok: false, why: `the ${TOLERATED_DRIFT_CHECK} job log could not be read: ${firstLine(e)}` };
+  }
+  const log = parseBaselineDriftLog(text);
+  if (!log.ok) return { ok: false, why: `the ${TOLERATED_DRIFT_CHECK} job log does not prove a drift-only red: ${log.why}` };
+  return {
+    ok: true,
+    tolerated: true,
+    why:
+      `red only with tolerated baseline drift: ${log.fns.join(", ")} ` +
+      `(${TOLERATED_DRIFT_CHECK} content-drift DRIFT ${log.drift}, SNAPSHOT_MISSING ${log.snapshotMissing}; ` +
+      `${PREDECESSOR_REQUIRED_CHECK} aggregator red with it)`,
+  };
+}
+
+/**
+ * A SYNTHETIC `sql-gate-lint` job log in the measured shape (Phase 164.9.6.1
+ * RESEARCH, jobs 111213703410 and 111219814139): a UTF-8 BOM, ISO-8601
+ * timestamps, `##[group]Run …` step headers, an ANSI escape, the drift step's
+ * tail and the post-job cleanup. ⛔ Never a raw CI log. Exported for both
+ * self-tests; each RED row is a one-line mutation of this GREEN template.
+ * `rows` are `<STATUS> <name>/<nargs>` strings; `findings` defaults to their count.
+ */
+export function syntheticDriftLog(rows = ["DRIFT f_one/1"], { findings = rows.length } = {}) {
+  let n = 0;
+  const ts = () => `2026-10-03T12:00:${String(n++ % 60).padStart(2, "0")}.0000000Z `;
+  const body = [
+    "##[group]Run node scripts/lint-sql-gates.mjs --self-test",
+    "\x1b[36;1mnode scripts/lint-sql-gates.mjs --self-test\x1b[0m",
+    "lint-sql-gates self-test OK: 7 rules, red+green each.",
+    "##[endgroup]",
+    "##[group]Run node scripts/baseline-content-drift-check.mjs --self-test",
+    "baseline-content-drift self-test: PASSED",
+    "##[endgroup]",
+    `##[group]Run ${DRIFT_STEP_RUN_LINE}`,
+    `\x1b[36;1m${DRIFT_STEP_RUN_LINE}\x1b[0m`,
+    "##[endgroup]",
+    ...rows.map((r) => `##[error]content-drift — ${r} snapshot=67a36c4e…eee1 chain=09d94dc5…eb differing-lines=67 — the committed supabase/schema/baseline.sql disagrees with the migration chain for \`${r.split(" ")[1]}\`, and no CONTENT_DRIFT_ALLOWLIST row pins this disagreement.`),
+    "##[error]baseline-content-drift FAILED. Each line above is a function whose committed supabase/schema/baseline.sql body disagrees with the migration chain.",
+    "baseline-content-drift: chain files 123 (supabase/schema/functions/*.sql, sorted)",
+    "baseline-content-drift: functions compared 125 — MATCH 121, DRIFT 4, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0",
+    "baseline-content-drift: allowlisted rows 3 — check_fan_in_ready/1, reject_sentinel_writes/0, retention_delete_guard/0",
+    `baseline-content-drift: findings ${findings}`,
+    "baseline-content-drift: SCOPE — this gate compares FUNCTION BODIES ONLY.",
+    EXIT_LINE,
+    "Post job cleanup.",
+    "Cleaning up orphan processes",
+  ];
+  return `﻿${body.map((l) => `${ts()}${l}`).join("\n")}\n`;
+}
+
+/**
  * Review 164.9.4 round 2, LOW-03: git's own reason for a fail-safe arm, as
  * `: <first stderr line>`, so a recurring cause is named in the log rather than
  * quietly costing every docs-only push a full run. Measured (review 164.9.4
@@ -529,9 +783,18 @@ function firstLine(e) {
  * dedupe, a pending run, a red run, an open or red suite, and requirement (a)
  * last.
  *
- * @returns {{ok: boolean, why: string}}
+ * Phase 164.9.6.1 (D-02, D-04, D-05): `{ tolerateBaselineDrift: true }` is an
+ * OPT-IN that only `scripts/sql-gate-subset.mjs` passes. With it, a predecessor
+ * red ONLY with the founder-tolerated stale-baseline drift (a `sql-gate-lint`
+ * failure whose job log, read through `fetchJobLog`, shows only DRIFT /
+ * SNAPSHOT_MISSING rows, plus the `frontend` aggregator red with it in the same
+ * suite) is `ok: true, tolerated: true`; see `toleratedDriftVerdict`. Without
+ * it (the default, and `classifyPushRange`'s docs-only short path) every
+ * verdict and reason is exactly the strict one.
+ *
+ * @returns {{ok: boolean, why: string, tolerated?: true}}
  */
-export function predecessorVerdict(sha, fetchPredecessor = defaultFetchPredecessor) {
+export function predecessorVerdict(sha, fetchPredecessor = defaultFetchPredecessor, { tolerateBaselineDrift = false, fetchJobLog = defaultFetchJobLog } = {}) {
   let body;
   try {
     body = fetchPredecessor(sha);
@@ -569,6 +832,9 @@ export function predecessorVerdict(sha, fetchPredecessor = defaultFetchPredecess
   const pending = runs.find((r) => r.status !== "completed");
   if (pending) return { ok: false, why: `pending: check '${pending.name}' status ${pending.status}` };
   const bad = runs.find((r) => !PREDECESSOR_OK_CONCLUSIONS.has(r.conclusion));
+  // Phase 164.9.6.1 (D-02, D-04): ONLY an opted-in caller reaches the tolerant
+  // proof, and only past a non-OK run. Every strict verdict below is unchanged.
+  if (bad && tolerateBaselineDrift) return toleratedDriftVerdict(runs, allSuites, fetchJobLog);
   if (bad) return { ok: false, why: `check '${bad.name}' concluded ${bad.conclusion}` };
 
   // (c) Every GitHub Actions check suite completed, and not red.
@@ -1209,15 +1475,27 @@ function selfTest() {
     stray = true;
     throw new Error(STRAY);
   };
+  // Phase 164.9.6.1: the job-log seam gets the same sentinel, so a tolerant row
+  // that reaches the log without injecting `fetchJobLog` is a NAMED red too (its
+  // throw alone would read as FULL, which most refusal rows expect anyway).
+  const STRAY_LOG = "self-test row reached the job-log read without a seam";
+  let strayLog = false;
+  defaultFetchJobLog = () => {
+    strayLog = true;
+    throw new Error(STRAY_LOG);
+  };
   try {
     CASES.forEach((c, i) => {
       console.log(`=== SELF-TEST ${i + 1}/${CASES.length}: ${c.claim}`);
       stray = false;
+      strayLog = false;
       pass = c.run(ok) && pass;
       if (stray) pass = ok(false, `${STRAY} (row ${i + 1}); inject fetchPredecessor, never the real gh`) && pass;
+      if (strayLog) pass = ok(false, `${STRAY_LOG} (row ${i + 1}); inject fetchJobLog, never the real gh`) && pass;
     });
   } finally {
     defaultFetchPredecessor = readPredecessor;
+    defaultFetchJobLog = readJobLog;
   }
 
   console.log("");

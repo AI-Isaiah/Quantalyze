@@ -751,7 +751,7 @@ describe("[164.6.3 / CI-DOCSPATH-01] the PARTITION, pinned as an exact set in BO
   });
 
   // ── review 164.9.4 round 2, SFH-04 (round 3, WR-01): the predecessor lookup's credentials ─
-  it("`changed-paths` declares exactly `contents: read` + `checks: read`, and only `classify` and `sql_gate_subset` get GH_TOKEN", () => {
+  it("`changed-paths` declares exactly `contents: read` + `checks: read` + `actions: read`, and only `classify` and `sql_gate_subset` get GH_TOKEN", () => {
     const block = jobBlockLines(DETECTOR);
     const at = block.findIndex((l) => /^ {4}permissions:\s*$/.test(l));
     expect(
@@ -765,9 +765,12 @@ describe("[164.6.3 / CI-DOCSPATH-01] the PARTITION, pinned as an exact set in BO
     // A job-level block REPLACES the workflow-level one: `contents: read` must
     // be restated, and nothing broader may ride in beside the one uplift.
     // Round 3 WR-01, round 4 CR-01 + WR-01: the classifier reads every check run
-    // and every check suite on `before`, both of which `checks: read` covers;
-    // nothing needs `actions: read`.
-    expect(perms.sort()).toEqual(["checks: read", "contents: read"]);
+    // and every check suite on `before`, both of which `checks: read` covers.
+    // 2026-10-03, Phase 164.9.6.1 D-02: the SQL gate subset's tolerant
+    // predecessor proof reads the `sql-gate-lint` job log through the job-logs
+    // endpoint, which needs `actions: read`; that is the one scope added, and
+    // nothing broader may ride in beside it.
+    expect(perms.sort()).toEqual(["actions: read", "checks: read", "contents: read"]);
     // Review 164.9.6 WR-03: the SQL gate subset derivation reuses the
     // classifier's predecessor proof before a push narrows, so it is the one
     // other step that reads the token. Each token line is pinned to its step,
