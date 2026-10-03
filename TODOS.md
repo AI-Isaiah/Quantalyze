@@ -1368,6 +1368,50 @@ true for 146 and half of 142–145, and **false for 141**.
 
 ## 🟡 FIX MID-TERM
 
+- [ ] **`[164.9.3.2.1-OQ1-DEPARTED-KEY-55006-DEFEATS-RETRY]` `set_departed_key_history_inclusion` turns the
+      enqueue race-loss 40001 into a 55006 "try again", so the user is asked to retry a race PostgREST 14
+      would have absorbed (booked 2026-10-02, Phase 164.9.3.2.1 review WR-02, RESEARCH open question 1).**
+      - **Where.** `supabase/migrations/20260927180000_working_holder_rule_d18.sql`, the
+        `EXCEPTION WHEN serialization_failure THEN RAISE EXCEPTION 'HISTORY_RECOMPOSE_RACED' USING ERRCODE = '55006'`
+        block around its `enqueue_compute_job(p_kind := 'derive_allocator_equity', p_allocator_id := v_uid)`
+        call. Its DETAIL reads "Try again; nothing was changed."
+      - **Why it matters.** Phase 164.9.3.2.1 plan 01 measured the race-loss 40001 converging through
+        PostgREST v14.7: the gateway re-runs the transaction and the re-run enqueues. Catching the 40001
+        inside the function and re-raising 55006 removes the code PostgREST retries, so the gateway
+        returns the error to the user once instead of converging. The mechanism is REASONED, NOT
+        MEASURED: the 20260927180000 comment itself says the lost race "needs a second backend", and
+        this call is on the allocator-target branch, which neither plan 01 nor
+        `supabase/tests/test_enqueue_race_loss_40001.sql` exercises (that gate pins the strategy and
+        api_key branches only).
+      - **Not changed in 164.9.3.2.1:** that phase took the D-02 converge branch, which carries no
+        migration. A fix is a re-based `CREATE OR REPLACE` of the function (latest definition across ALL
+        migrations) with the three pre-merge migration reviewers, because merge auto-applies to PROD.
+      - **Trigger.** A user report of `HISTORY_RECOMPOSE_RACED` / 55006 on the departed-key history
+        toggle, OR the next edit to `set_departed_key_history_inclusion`, OR evidence that PROD's
+        PostgREST is ≥16 (where the 40001 would no longer be retried and the 55006 becomes the
+        better answer, so the decision flips).
+      ⏳ **Destination: AWAITS ROUTING via /gsd-phase (founder freeze 2026-09-27).**
+
+- [ ] **`[164.9.3.2.1-OQ2-PYTHON-ENQUEUE-NO-40001]` The Python enqueue callers have no 40001 handling, so on
+      PostgREST ≥16 a lost enqueue race fails the enqueue instead of converging (booked 2026-10-02, Phase
+      164.9.3.2.1 review WR-02, RESEARCH open question 2).**
+      - **Where.** `supabase.rpc("enqueue_compute_job", …)` call sites in `analytics-service/`, measured
+        2026-10-02 by grep: `routers/process_key.py:947` and `:1896`, `routers/cron.py:1151`,
+        `services/job_worker.py:2117`, `:5722` and `:6684`, `services/ingestion/long_fetch.py:685`.
+        None of those files handles SQLSTATE 40001 around an enqueue (the `40001` hits in
+        `job_worker.py` are the claim-token fence, now 55006).
+      - **Why it matters.** On PostgREST 14.x the gateway re-runs the race-loss 40001 itself and the
+        re-run converges (measured on v14.7, Phase 164.9.3.2.1 plan 01). PostgREST 16.0 stopped retrying
+        and returns the 40001 to the client as HTTP 500 (PostgREST PR #4222), so after an upgrade each
+        of these callers would see a lost race as an enqueue error: a compute job that should have been
+        queued is not. The TS callers already carry a retry-once helper
+        (`src/lib/supabase/retry-serialization-failure.ts`); the Python side has no equivalent.
+      - **Not changed in 164.9.3.2.1:** D-04 limited that phase to comment corrections.
+      - **Trigger.** Any evidence that PROD's PostgREST is ≥16 (D-06 forbade measuring it in
+        164.9.3.2.1; RESEARCH assumed 14.5 from a link cache), OR a PostgREST image bump on the
+        local-stack lane to ≥16, OR a production enqueue failure carrying `40001`.
+      ⏳ **Destination: AWAITS ROUTING via /gsd-phase (founder freeze 2026-09-27).**
+
 - [ ] **`[170.1-READ-ONLY-ONLY-COPY]` The connect-key warning strip reads "READ ONLY ONLY — keys with
       Trade or Withdraw permissions are refused on submission." (seen by the founder on the composite
       wizard, 2026-10-01).**
@@ -1526,8 +1570,12 @@ true for 146 and half of 142–145, and **false for 141**.
       **Closed when:** the compute selects only real columns, derives daily returns from the stored
       series, and a test that fails on today's select pins both.
 
-- [ ] **`[164.9.4-CI-MUTEX-QUEUE]` `python` and `e2e-seeded` spend most of their CI wall clock
+- [x] **`[164.9.4-CI-MUTEX-QUEUE]` `python` and `e2e-seeded` spend most of their CI wall clock
       queued on the shared-TEST advisory lock (booked 2026-09-26, founder decision).**
+      ✅ **CLOSED 2026-10-03 by Phase 164.9.4 CIOFFMUTEX (v0.119.0.0).** `ci.yml` holds the key 0×; both jobs
+      boot a runner-private local-stack lane. Measured on run `37039941530` against tree-matched `37028872024`:
+      `python` 41m33s → 13m06s, `e2e-seeded` 30m19s → 11m14s (`164.9.4-MEASUREMENT.md`). SC-3's e2e-seeded
+      count is graded on the ship run (founder decision 2026-10-03).
       **Measured 2026-09-26 on CI run `36229959820` (PR #864, 52 min wall clock).** `python` took
       50 min: 36 min in "Acquire shared-test-db mutex" and 13 min in pytest. `e2e-seeded` took
       36 min: 28 min on the mutex and 5 min on specs. Every other job took 12 min or less. The wait
@@ -9268,6 +9316,25 @@ backs ~9 surfaces — the remedy for any of its flows is a NEW named limiter, ne
   docs-only PR opening and either of those, and inside it a red arrives LATE, not never. ⛔ Do not
   restate this as "the gate was lost", and do not restate it as "nothing changed" — both halves are
   load-bearing and stating only one of them misroutes whoever picks this up.
+  ⛔ **CORRECTED 2026-10-02 (Phase 164.9.4 review round 2, WR-01): the merge push to `main` is no
+  longer unfiltered.** Since 164.9.4 a `.planning/`-only push is classified by its pushed range
+  (`scripts/classify-changed-paths.mjs` `classifyPushRange`) and takes the short path. To keep the
+  first backstop above, the founder decided on 2026-10-02 that a push range touching a `.planning/`
+  file a `frontend-test` assertion reads is CODE: `TEST_READ_PLANNING_PATHS` lists the seven measured
+  entries (`config.json`, `REQUIREMENTS.md`, `ROADMAP.md`, `159-VERIFICATION.md`, and Phase 164.3's
+  `164.3-07-DEFERRED.md`, `164.3-07-PLAN.md` and absent `164.3-07-SUMMARY.md`), so the merge push of
+  a docs-only PR that touches one of them still runs `frontend-test`. (Round 3, CR-01, same day:
+  `config.json` was added after a whole-tree derivation found `critical-regressions.test.ts` reading
+  it; the earlier "six" was measured from two named test files only. The founder confirmed the list
+  may grow beyond the original three.) A docs-only push also takes the short path only when Railway's
+  own gate would pass on its predecessor: every GitHub Actions check run on `before`, all workflows
+  and events, non-red (`docs/runbooks/railway-worker.md`, Recovery step 2). So a docs merge can no
+  longer turn `main` green over a red predecessor either. Both halves above therefore
+  still hold for those files. The paragraph above is kept as lineage.
+  ⛔ **CORRECTED 2026-10-02 (Phase 164.9.4 review round 4, CR-01):** "every Actions check run
+  non-red" alone was not proof CI ran on the predecessor (a scheduled workflow's green checks
+  passed it). The predecessor must now also carry a successful `frontend` check run, and every
+  GitHub Actions check suite on it must be completed and non-red (D-16 in `164.9.4-CONTEXT.md`).
   ⛔ **TWO REMEDIES WERE CONSIDERED AND BOTH REFUSED, recorded so neither is re-proposed as new.**
   (1) Widen the always-on set to include `frontend-test` — REFUSED: that job is most of the saving
   the filter exists to produce, so buying two deferred assertions back at that price undoes the

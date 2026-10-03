@@ -28,8 +28,14 @@ const WORKFLOW_DIR = ".github/workflows";
 // own "for each of the three workflow files" framing (not a dynamic glob:
 // the corpus this gate polices is exactly these three, per the ROADMAP/
 // CONTEXT record of where the shared-test-db mutex's holders live).
+// 2026-09-27, Phase 164.9.4 CIOFFMUTEX (D-06): the corpus is now TWO files.
+// ci.yml LEFT this list because it has no release step any more: `python` and
+// `e2e-seeded`, its last two holders, run on local-stack lanes private to their
+// runners and take no key. Kept, ci.yml would red Tests 1, 4 and 6 on a file
+// with nothing to pair. A re-acquire in ci.yml is not unguarded: the
+// exactly-empty holder-set pin in critical-regressions.test.ts (driven by
+// measureHolders) fails on it. The "three" framing above is lineage.
 const TARGET_FILES = [
-  `${WORKFLOW_DIR}/ci.yml`,
   `${WORKFLOW_DIR}/supabase-migrate.yml`,
   `${WORKFLOW_DIR}/test-restore-from-baseline.yml`,
 ];
@@ -81,6 +87,48 @@ function jobsWithWorkingDirectory(src: string): Array<{ start: number; end: numb
     if (hasWd) jobs.push({ start, end, name: starts[i].name });
   }
   return jobs;
+}
+
+/**
+ * Test 3b's scan, factored out so it can be calibrated on in-memory workflow
+ * text as well as run over the real files (2026-09-26, Phase 164.9.4).
+ *
+ * For every step named VERDICT_STEP_NAME, take the step's own `run:` line (the
+ * next one before any further `- name:`), find the owning job through
+ * jobsWithWorkingDirectory, and — only when that job pins a working directory —
+ * count it as checked and report a violation unless the trimmed `run:` line is
+ * VERDICT_INVOCATION_ROOTED. A verdict step with no `run:` line at all is a
+ * violation wherever it sits.
+ */
+function scanVerdictSteps(src: string): { checked: number; violations: string[] } {
+  const lines = src.split("\n");
+  const wdJobs = jobsWithWorkingDirectory(src);
+  const stepRe = new RegExp(`^\\s*-\\s*name:\\s*${VERDICT_STEP_NAME}\\s*$`);
+  let checked = 0;
+  const violations: string[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (!stepRe.test(lines[i])) continue;
+    // the run: line belongs to this step — the next one before any further `- name:`
+    let runIdx = -1;
+    for (let j = i + 1; j < lines.length; j++) {
+      if (/^\s*-\s*name:/.test(lines[j])) break;
+      if (/^\s*run:/.test(lines[j])) { runIdx = j; break; }
+    }
+    if (runIdx === -1) {
+      violations.push(`verdict step at line ${i + 1} has no run: line`);
+      continue;
+    }
+    const owner = wdJobs.find((j) => runIdx >= j.start && runIdx < j.end);
+    if (!owner) continue; // job pins no working directory; the bare form resolves
+    checked++;
+    const runLine = lines[runIdx].trim();
+    if (runLine !== VERDICT_INVOCATION_ROOTED) {
+      violations.push(
+        `line ${runIdx + 1}, job "${owner.name}": ${runLine} (expected ${VERDICT_INVOCATION_ROOTED})`,
+      );
+    }
+  }
+  return { checked, violations };
 }
 const NEVER_REDDEN_INVARIANT = "must never redden a job whose real work passed";
 
@@ -147,8 +195,27 @@ describe("mutex-dead-holder-verdict source-shape gate", () => {
   // test-restore-from-baseline.yml 1 — total 4, so the floor has ZERO slack
   // and losing any single witness fails this test. Re-measure the same way
   // before the next move, never restate it by arithmetic.
+  // 2026-09-26, Phase 164.9.4 CIOFFMUTEX D-06: the floor went 4 -> 3 because a
+  // holder LEFT — `python` no longer takes the shared-test-db key (its pytest
+  // runs on a local-stack lane private to its runner), so its release step and
+  // dead-holder annotation went with it. The floor follows the measured
+  // corpus; this is not a relaxation.
+  // Measured per file, 2026-09-26, by `grep -c` on the annotation text:
+  // ci.yml 1 (`e2e-seeded`), supabase-migrate.yml 1,
+  // test-restore-from-baseline.yml 1 — total 3, so the floor has ZERO slack
+  // and losing any single witness fails this test.
+  // 2026-09-27, Phase 164.9.4 CIOFFMUTEX D-06: the floor went 3 -> 2 because
+  // the last ci.yml holder LEFT — `e2e-seeded` no longer takes the
+  // shared-test-db key (it seeds, builds and runs its specs on a local-stack
+  // lane private to its runner), so its release step and dead-holder
+  // annotation went with it, and ci.yml left TARGET_FILES. The floor follows
+  // the measured corpus; this is not a relaxation.
+  // Measured per file, 2026-09-27, by `grep -c` on the annotation text:
+  // supabase-migrate.yml 1, test-restore-from-baseline.yml 1 (and ci.yml 0,
+  // no longer a target) — total 2, so the floor has ZERO slack and losing
+  // either witness fails this test.
   // ─────────────────────────────────────────────────────────────────────
-  it("Test 2: at least 4 dead-holder annotations exist across the three files (anti-vacuity floor)", () => {
+  it("Test 2: at least 2 dead-holder annotations exist across the two files (anti-vacuity floor)", () => {
     let total = 0;
     for (const rel of TARGET_FILES) {
       const src = readText(rel);
@@ -157,9 +224,9 @@ describe("mutex-dead-holder-verdict source-shape gate", () => {
     }
     expect(
       total,
-      `aggregate dead-holder annotation count across the three files is ${total} — expected at least 4. ` +
+      `aggregate dead-holder annotation count across the two files is ${total} — expected at least 2. ` +
         `A corpus that shrank to zero would make Test 1 pass vacuously.`,
-    ).toBeGreaterThanOrEqual(4);
+    ).toBeGreaterThanOrEqual(2);
   });
 
   // ─────────────────────────────────────────────────────────────────────
@@ -201,43 +268,62 @@ describe("mutex-dead-holder-verdict source-shape gate", () => {
   describe("Test 3b: a verdict step inside a working-directory job is workspace-rooted", () => {
     for (const rel of TARGET_FILES) {
       it(`${rel} — no verdict step can exit 127 on a bare relative path`, () => {
-        const src = readText(rel);
-        const lines = src.split("\n");
-        const wdJobs = jobsWithWorkingDirectory(src);
-        let checked = 0;
-        for (let i = 0; i < lines.length; i++) {
-          if (!new RegExp(`^\\s*-\\s*name:\\s*${VERDICT_STEP_NAME}\\s*$`).test(lines[i])) continue;
-          // the run: line belongs to this step — the next one before any further `- name:`
-          let runIdx = -1;
-          for (let j = i + 1; j < lines.length; j++) {
-            if (/^\s*-\s*name:/.test(lines[j])) break;
-            if (/^\s*run:/.test(lines[j])) { runIdx = j; break; }
-          }
-          expect(runIdx, `${rel}: verdict step at line ${i + 1} has no run: line`).toBeGreaterThan(-1);
-          const owner = wdJobs.find((j) => runIdx >= j.start && runIdx < j.end);
-          if (!owner) continue; // job pins no working directory; the bare form resolves
-          checked++;
-          expect(
-            lines[runIdx].trim(),
-            `${rel}: the "${VERDICT_STEP_NAME}" step in job "${owner.name}" uses a BARE relative ` +
-              `script path, but that job pins defaults.run.working-directory — the path resolves ` +
-              `against the working directory, not the repo root, so this step exits 127 ` +
-              `("No such file or directory") on EVERY run instead of ever reporting a dead holder. ` +
-              `Use the workspace-rooted form.`,
-          ).toBe(VERDICT_INVOCATION_ROOTED);
-        }
-        // Anti-vacuity: ci.yml MUST exercise this arm — the `python` job is the
-        // measured case. A zero here means the scan stopped finding the steps,
-        // not that the corpus got safer.
-        if (rel.endsWith("ci.yml")) {
-          expect(
-            checked,
-            "ci.yml: no verdict step was found inside a working-directory job — this arm " +
-              "measured NOTHING. The `python` job is the known case; if it moved, re-aim the scan.",
-          ).toBeGreaterThan(0);
-        }
+        const { violations } = scanVerdictSteps(readText(rel));
+        expect(
+          violations,
+          `${rel}: a "${VERDICT_STEP_NAME}" step inside a job that pins ` +
+            `defaults.run.working-directory uses a BARE relative script path (or has no run: line) — ` +
+            `the path resolves against the working directory, not the repo root, so this step exits 127 ` +
+            `("No such file or directory") on EVERY run instead of ever reporting a dead holder. ` +
+            `Use the workspace-rooted form. Violations:\n${violations.join("\n")}`,
+        ).toEqual([]);
+        // 2026-09-26, Phase 164.9.4 CIOFFMUTEX D-06: the ci.yml anti-vacuity arm
+        // that stood here (ci.yml MUST have a verdict step inside a
+        // working-directory job) was removed because its only subject LEFT:
+        // `python`, the measured 127 case, no longer takes the shared-test-db
+        // key, so no verdict step in any TARGET_FILES entry sits in a
+        // working-directory job. The arm's anti-vacuity is carried by the
+        // in-memory calibration `it` below (added in plan 04), which proves on
+        // in-memory text that this scan flags the bare spelling and accepts the
+        // rooted one.
       });
     }
+
+    // 2026-09-26, Phase 164.9.4: this calibration carries Test 3b's anti-vacuity
+    // once no ci.yml job is a working-directory holder. It is added BEFORE the
+    // ci.yml arm above is removed (plan 07), so the scan is never unmeasured: it
+    // proves on in-memory text, independent of any workflow file, that the scan
+    // flags the bare spelling and accepts the workspace-rooted one.
+    it("Test 3b CALIBRATION: the scan flags a bare verdict run: inside a working-directory job and accepts the rooted form (Phase 164.9.4)", () => {
+      const workflow = (runLine: string) =>
+        [
+          "jobs:",
+          "  calib:",
+          "    runs-on: ubuntu-latest",
+          "    defaults:",
+          "      run:",
+          "        working-directory: analytics-service",
+          "    steps:",
+          `      - name: ${VERDICT_STEP_NAME}`,
+          "        if: always()",
+          `        ${runLine}`,
+          "",
+        ].join("\n");
+
+      const bare = scanVerdictSteps(workflow(VERDICT_INVOCATION));
+      expect(bare.checked, "bare case: the scan did not see the verdict step inside the working-directory job").toBe(1);
+      expect(
+        bare.violations.length,
+        `bare case: the scan accepted "${VERDICT_INVOCATION}" inside a working-directory job — the exact 127 it exists to catch. Violations: ${JSON.stringify(bare.violations)}`,
+      ).toBe(1);
+
+      const rooted = scanVerdictSteps(workflow(VERDICT_INVOCATION_ROOTED));
+      expect(rooted.checked, "rooted case: the scan did not see the verdict step inside the working-directory job").toBe(1);
+      expect(
+        rooted.violations,
+        "rooted case: the scan flagged the workspace-rooted form, which resolves from any working directory",
+      ).toEqual([]);
+    });
   });
 
   // ─────────────────────────────────────────────────────────────────────

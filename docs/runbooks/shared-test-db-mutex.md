@@ -89,6 +89,15 @@ lineage. Current state:
   the prediction, the verdict rule and the AFTER protocol. The AFTER is filled in from
   merge-push runs after the merge. None of those numbers is restated here.
 
+⛔ **CORRECTED 2026-09-26 (Phase 164.9.4 CIOFFMUTEX): `python` AND `e2e-seeded` NO
+LONGER HOLD THE KEY. The 2026-09-25 note above is kept as lineage.** The `ci.yml`
+holders are **none**. Both jobs now boot the local-stack lane private to their own
+runner, and neither reads shared TEST. **TWO holders remain**, and both write to
+shared TEST: `apply-test` (`supabase-migrate.yml`) and `restore`
+(`test-restore-from-baseline.yml`). The measured per-file census is in section 7.2.
+The numbers for this move live in the phase's `164.9.4-MEASUREMENT.md`, under
+`.planning/phases/164.9.4-cioffmutex-python-and-e2e-seeded-no-longer-queue-on-the-shar/`.
+
 - **One holder removed.** `sql-tests` runs the `supabase/tests/test_*.sql` corpus on
   a local Supabase stack private to its own runner, booted by
   `scripts/local-stack/run.sh up`. It uses no secret, no repository variable and no
@@ -136,6 +145,11 @@ the idle hold at 120 s ([158-MUTEX-01], resolved — see §2) — and
 died mid-sleep or mid-lock-wait aborts within ~30 s instead of holding (or
 queueing on) the lock as an immortal orphan ([158-MUTEX-02], resolved — see
 §2).
+⛔ **CORRECTED 2026-09-26 (Phase 164.9.4 CIOFFMUTEX):** the jobs this paragraph and
+its 2026-09-25 note name as `ci.yml` acquirers, `python` and `e2e-seeded`, no longer
+take the key, so no `ci.yml` job acquires it. The jobs that still do are `apply-test`
+and `restore` (section 0). The paragraph and its notes are kept as lineage; the
+mechanism they describe is unchanged for the two remaining holders.
 
 > **What is proven, and what is not.** Mutual exclusion IS measured — the probe
 > in section 5 puts three simultaneous contenders on the lock and asserts their
@@ -172,6 +186,11 @@ queueing on) the lock as an immortal orphan ([158-MUTEX-02], resolved — see
 ⛔ **CORRECTED 2026-09-25 (Phase 164.4.2.1): there are now FOUR.** They are `python`,
 `e2e-seeded`, `apply-test` and `restore`. `test-db-drift` left the key (section 0). The
 heading and every "five" below are kept as lineage.
+⛔ **CORRECTED 2026-09-26 (Phase 164.9.4 CIOFFMUTEX): there are now TWO.** They are
+`apply-test` and `restore`, numbered 4 and 5 below. `python` and `e2e-seeded` left the
+key (section 0), so every "`ci.yml` holder" named in this section, including the
+2026-09-25 note on `pg_stat_activity` below, is lineage. The 2026-09-25 "FOUR" note is
+kept as lineage.
 Two jobs outside `ci.yml` now take key `61616158`, and both write to shared TEST:
 
 4. **`apply-test`** (`.github/workflows/supabase-migrate.yml`) — runs on every push to
@@ -737,6 +756,18 @@ lineage.** Re-measured with `grep -c 61616158` after `test-db-drift` left the ke
 `analytics-deploy-verify.yml` 1. The `ci.yml` jobs carrying
 `Acquire shared-test-db mutex` are `python` and `e2e-seeded`. Regenerate it; don't
 trust it.
+⛔ **CORRECTED 2026-09-26 (Phase 164.9.4 CIOFFMUTEX): the 2026-09-25 reading above is kept as lineage.**
+Re-measured on 2026-09-26 after `python` and `e2e-seeded` left the key, with
+`for f in .github/workflows/*.yml; do printf '%s %s\n' "$f" "$(grep -c 61616158 "$f")"; done`:
+`ci.yml` **0** (`python` 0, `e2e-seeded` 0, `test-db-drift` 0, `sql-tests` 0),
+`test-restore-from-baseline.yml` 8, `supabase-migrate.yml` 7, `mutex-probe.yml` 5,
+`analytics-deploy-verify.yml` 1, and every other workflow file 0. No `ci.yml` job
+carries `Acquire shared-test-db mutex` (`grep -c` prints 0).
+`ci.yml` holds no key: `python` and `e2e-seeded` run on the local-stack lane private
+to their runner. The takers that remain are `supabase-migrate.yml` `apply-test` and
+`test-restore-from-baseline.yml` `restore`, both writers of shared TEST, plus the
+drill probe `mutex-probe.yml` (§5). `analytics-deploy-verify.yml` only names the key
+in issue text; it takes nothing. Regenerate it; don't trust it.
 
 ### 7.3 The ordering wait, and its three outcomes
 
@@ -763,6 +794,14 @@ ordering control" holds on a merge push only. On a `pull_request` run the wait d
 not run, so `test-db-drift` has NO ordering control against `apply-test` or a
 restore at all (section 0 carries the consequence and the triage). The sentence
 above is kept as lineage.
+⛔ **CORRECTED 2026-09-26 (Phase 164.9.4 CIOFFMUTEX):** the wait now runs in
+**`test-db-drift` only**. Measured with
+`grep -n 'wait-for-test-schema-apply.sh' .github/workflows/ci.yml`: the one
+invocation of the script is in `test-db-drift`; the other hits are comments and
+`sql-gate-lint`'s `--self-test`, which exercises the script and waits on nothing.
+`python` and `e2e-seeded` read no shared TEST (they boot the local-stack lane
+private to their runner), so they need no ordering against `apply-test` or a
+restore. Every sentence above that names them as waiters is kept as lineage.
 
 ⛔ **It waits BEFORE taking the key, never while holding it.** A job that waited
 while holding `61616158` would starve every other contender on a database other
