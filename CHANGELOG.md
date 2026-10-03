@@ -1,5 +1,265 @@
 # Changelog
 
+## [0.124.0.0] - 2026-10-04 — MT5TERMINALISOLATION: a client's MT5 key validation runs on its own terminal, so it can no longer evict another client's session on the job terminal
+
+⭐ **What changed for whoever reads this next.** Until now every MT5 key validation logged the ONE
+shared terminal into the account being validated, which is the terminal that serves live jobs. An
+onboarding could switch the job terminal away from another client's account with no error, no
+signal and no record. Phase 164.6.6 moves both validate sites (the wizard and the worker) onto a
+second, validation-only gateway. The validation path refuses, with an alert, when that gateway is
+unset, and never falls back to the job terminal (D-05). Every job-terminal account switch that
+remains is recorded against the holder it displaced (D-01, D-02). The H3 exposure is closed as far
+as this product's tools allow (D-07): the analytics service refuses to dial a gateway that is not a
+private-network host, and after each validation the validation terminal is parked back on the house
+account, so a master password typed into the wizard does not leave a trade-capable session sitting
+there. An MT5 investor password is also never trimmed on any path any more (D-08).
+
+⚠️ **A minor bump: new infrastructure, new required configuration and changed validation routing.**
+No migration and no dependency change ships here. `cron_runs.cron_name` has no CHECK, so the new
+handover row class needs no schema change. The verification is `human_needed`: the live half is the
+founder's post-deploy checks (see Notes).
+
+### Added
+- **Every job-terminal account switch is recorded against the holder it displaced** (plan 01,
+  `services/mt5_handover.py`, `services/mt5_concurrency.py::mt5_terminal_lease`).
+  - When the lease sees the terminal's holder change, it writes one `cron_runs` row with
+    `cron_name = 'mt5_terminal_handover'`. Its metadata holds exactly `schema_version`,
+    `previous_holder`, `incoming_holder`, `site`, `records_account_number` (always `false`) and
+    `attribution_limit`.
+  - A holder is an api key id (canonical UUID, matched by regex, because `uuid.UUID` also accepts 32
+    bare digits, an account-number shape) or one of the literals `house`, `validation`, `unknown`
+    and `unattributed`. A site outside the closed `SITE_*` set is written as `unattributed`.
+  - The holder rides a `ContextVar` into the login thread. An epoch guard refuses a stamp from a
+    session whose lease was already released, and logs one WARNING instead.
+  - The recorder is awaited only after `lock.release()`, never spawned, bounded at 5 s, and never
+    raises. It sits under the shared never-raises gate (`_GUARDED_SYMBOLS`).
+  - All seven production lease sites pass a holder and a site: derive, balance, holdings, backfill,
+    heal and the two validate sites. An AST roster test pins that, with a calibration test.
+- **Both validate sites lease the validation terminal and never the job terminal** (plan 04).
+  - `services/mt5_relogin.py::read_env_validation_gateway_endpoint` is the one reader of
+    `MT5_VALIDATION_GATEWAY_HOST` / `MT5_VALIDATION_GATEWAY_PORT`. It keeps its own log-once reason
+    keys, so the job pair and the validation pair can never silence each other's line.
+  - `routers/exchange.py::_validate_mt5_key_probe` and `services/ingestion/mt5.py::Mt5Adapter.validate`
+    lease `mt5_terminal_key(host, port)` of the validation pair, as a second key in the one lease
+    registry, never a second registry.
+  - **D-05.** When the pair is unset or malformed, the wizard returns its existing 500
+    `MT5_GATEWAY_UNCONFIGURED` and the worker raises. Both call
+    `alert_mt5_validation_gateway_unconfigured(site=...)`: ERROR on every call, and at most one Sentry
+    capture per site per hour, tagged `mt5_validation_gateway_unconfigured`. The alert names only
+    the env var names. It reaches a human only while `SENTRY_DSN` stays set.
+  - `tests/test_mt5_concurrency.py::test_only_the_validate_sites_read_the_validation_endpoint` is an
+    AST pin that no other production function reads the validation endpoint, and that neither
+    validate site names the job pair or calls `read_env_gateway_endpoint`.
+- **The analytics service refuses to dial an MT5 gateway that is not a private-network host** (plan
+  05, D-07 part 1).
+  - `services/mt5_client.py::is_private_gateway_host` is pure, with no DNS lookup. It admits private
+    and loopback IP literals (including the Tailscale range and fc00::/7), names under the
+    `internal`, `test` and `localhost` labels, and single-label names. IP literals are judged first,
+    and numeric IPv4 forms the C resolver accepts (single-decimal, hex, short) are judged as the
+    address they dial. The stdlib private-address flag is not used.
+  - The check runs at the top of `_default_connect`, before `mt5linux` is imported, and raises
+    `Mt5GatewayHostNotPrivate`. Its message is fixed and names neither host nor port. It is not an
+    `Mt5ClientError`, so no credential arm can blame the user's key.
+  - Both endpoint readers answer `None` for a non-private host. A public validation host therefore
+    takes the 500 plus alert path, never a 503 that would vote on the gateway breaker.
+  - `test_only_default_connect_builds_an_mt5_transport` walks 116 production files and scripts (floor
+    100). It allows exactly one `mt5linux` import, inside `_default_connect`, and bans any `rpyc`
+    import, any rpyc connect call and any string-literal dynamic import of either package.
+- **The validation terminal is parked back on the house account after each validation** (plan 06,
+  D-07 part 2, `park-after-login`).
+  - `services/mt5_probe.py::park_on_house_account` logs the house account in inside the same lease,
+    before the client is released, and restamps the holder through the one stamping door.
+  - A default-deny gate parks only when every fact is positively true. It skips, with an alert
+    naming the cause, while the probe thread may still be on the wire (`probe_thread_done`, a
+    `threading.Event` set in the probe thread's own `finally`), on a fenced probe, on a mid-probe
+    account switch, and in the wizard when less than `_MT5_PARK_MIN_BUDGET_S` of the deadline is
+    left. The park itself is bounded (`ceiling`). Unset house credentials skip with an ERROR and an
+    alert, never silently.
+  - Alerts carry only a cause from the closed `_PARK_ALERT_CAUSES` set and the site literal: ERROR
+    every time, at most one Sentry capture per cause per hour, tag `mt5_validation_park_failed`.
+  - The verdict the caller sees is identical with and without the park. Release (wizard) and close
+    (worker) moved into a `finally`, so they still run if the park is cancelled. Nothing was added to
+    the 105 s worst-case client budget.
+
+### Changed
+- **An MT5 investor password is kept exactly as entered on every path** (plan 07, D-08).
+  - `src/lib/closed-sets.ts` gains `VenueCapabilities.secretVerbatim`, set on the `mt5` row only,
+    read through `venueSecretIsVerbatim`, which answers `false` for a null, empty or unknown venue.
+  - `src/lib/analytics-client.ts::secretForVenue` is the one `api_secret` normaliser that both
+    `validateKey` and `encryptKey` use, so the stored password is the one that was validated. The
+    MT5 login, and every other venue's key and secret, stay trimmed.
+  - `ConnectKeyStep` and every `MultiKeyConnectStep` panel take the raw secret for a verbatim venue.
+    Once the server stopped trimming, the 169.3 D-76 paste-strip would have been the only trim left
+    on the wizard path. A dated lineage line under 169.3 D-76 points here.
+  - No data migration is needed: validate and encrypt trimmed identically before, so every stored
+    password was validated in the form it was stored.
+- **Runbooks.**
+  - `deploy/mt5-gateway/railway-gateway.md` gains `## Validation gateway (Phase 164.6.6, D-02)` (the
+    stand-up and the exposure reading for both gateways) and `## T-134-03 (Phase 164.6.6, D-07 part
+    1)` (what the dial check proves, why rpyc authentication was not taken, and the residual).
+  - `docs/runbooks/mt5-go-live.md` gains `## Step 2c — terminal isolation, live checks (Phase
+    164.6.6)` with L1 to L7, L-D05, L-H3, L-H3b and L-H3c. L2 and L4 are marked moved to Phase
+    164.6.6.1, and L5 is not applicable. Step 2 picks up the three stand-up follow-ups: check that a
+    fresh volume's Wine prefix is fully built, add the broker's server before the house login, and
+    name the fifth Expert Advisors box. `railway-gateway.md` step 4a still lists four boxes.
+- `src/lib/wizardErrors.ts` changes a comment only: `SEAM_INTERNAL_FAULT` now names the validation
+  env pair as the env cause for a key validation.
+
+### Fixed
+- **The park alert level now follows the founder's decision as written** (plan 09, closes
+  REVIEW WR-04 and the T-164.6.6-07 blocker). The decision reads: "A park that fails for the same
+  bridge-glitch reason the validation hit logs a WARNING only, which respects D-15. Every other skip
+  or failure still pages." Plan 06 decided the WARNING from the park's own error class alone, so a
+  clean validation that detected a master password, followed by a glitch-class park failure, left
+  the trade-capable session on the validation terminal and paged nobody.
+  - `park_on_house_account` takes `validation_hit_glitch: bool`, keyword-only with no default, so
+    mypy strict rejects a call site that does not decide it. The WARNING needs both a glitch-class
+    park error AND the flag. Without the flag a glitch park pages `bridge_glitch`.
+  - Each site sets the flag in two places: the C5 / worker-transient arm (from the now public
+    `is_bridge_glitch`, not from the whole arm, which also re-raises IPC faults and login-stage
+    refusals) and the D-15 "signal unavailable" arm (glitch by decision).
+  - The flag can only lower the glitch class. Refused, other client errors, fenced and unset
+    credentials page under both values.
+- **An unexpected exception in the park block now pages `unrecognised_cause`, and a cancelled park
+  await pages `park_cancelled` and re-raises**, at both sites (plan 09, REVIEW-SFH M-6). Before, the
+  first logged ERROR with no capture, and a cancellation bypassed every park alert.
+- **Unit tests could write handover rows into shared TEST.** A local `load_dotenv` in `main.py`
+  points the recorder at the TEST project for the rest of a run. An autouse fixture in
+  `tests/conftest.py` now makes the recorder's client refuse by default, and a test that wants rows
+  patches it itself.
+
+### Tests
+- **Failing first, then green, on every behaviour change.** Each new gate has a recorded RED against
+  the real code, then GREEN, and each production neuter was restored from a byte backup and confirmed
+  with `cmp`. Among them:
+  - the epoch guard (an abandoned session's late login was stamped);
+  - the wizard and worker routing (a validation leased the job key), and a fallback-to-job-pair
+    neuter;
+  - the private-host check (a transport was built toward a public host, and the wizard answered 503
+    instead of 500);
+  - the park gate cut to `login_attempted` alone, which reproduced W-1 at both sites;
+  - the park alert flag in both directions, per arm, and a swallow-cancel neuter at each site;
+  - an injected trim on the rotate route, the rotate handler, `parse_mt5_credentials` and
+    `encrypt_key`, each RED with a space-bearing password.
+- **New files:** `test_mt5_handover.py`, `test_mt5_validation_park.py` (57 tests) and
+  `test_mt5_password_verbatim.py`. Existing MT5 fixtures now set the validation pair beside a job pair
+  with different values, so every lease-key assertion also checks routing.
+- **Full analytics suite at the gap-closure head:** 7818 passed, 90 skipped. `mypy --strict` over
+  `services/ routers/ models/` is clean (99 files). The full frontend suite's only failing file was
+  the pre-existing `compute.conventions.test.ts` float snapshot, equal at base and end.
+
+### Security
+- **34 threats registered, 31 closed (27 by mitigation, 4 as accepted risks), 0 open at or above
+  `block_on: high`** (gsd-security-auditor, ASVS L1, re-audit 2026-10-04, verdict SECURED,
+  `threats_open: 0`). T-164.6.6-07 was open and blocking at the first audit and is closed in code by
+  plan 09. Three medium items stay open and non-blocking because they can only run after deploy:
+  T-26 and T-31 (the L-D05 alert reaches a human, and the test issue is resolved so it cannot
+  swallow the next real alert) and T-32 (L7's quiet window).
+- **Accepted residuals.**
+  - AR-01, the founder's `H3-CHANNEL-RESIDUAL: accepted`: the dial check closes the PUBLIC path only.
+    The six services on the private network, all this product's own, can still reach both
+    unauthenticated rpyc ports, as before this phase. Closing it needs rpyc authentication in the
+    gateway image or a separate environment.
+  - AR-02: rejecting a master password BEFORE login is not achievable. Every signal that tells it
+    from an investor password needs a logged-in session, and the MT5 API has no check without a
+    login. So D-07 part 2 is containment after login. On the no-park exits the session lasts until
+    the next login, and each exit alerts with its cause.
+  - AR-03: the park ceiling can fire on two slow but bounded round-trips (WR-03 is an instance).
+    AR-04: the handover record's attribution limit. AR-05: L-D05's cost. AR-06: the unmeasured park
+    premise. AR-07: a persistent glitch park after glitch validations warns forever (M-5).
+- ⚠️ **The job gateway's VNC was publicly reachable through a service domain until 2026-10-03.**
+  That terminal's Navigator lists client accounts. The domain was removed on 2026-10-03. How long it
+  was exposed, and whether anyone reached it, is unknown.
+
+### Notes
+- **Infrastructure, done under a founder override** ("I authorize you to use mcp and action as many
+  of those steps as possible", 2026-10-03), recorded in CONTEXT and the ROADMAP.
+  - **A new validation-only MT5 gateway service** was stood up: the same image digest as the job
+    gateway, its own volume, the same region and environment, private networking only. It reads
+    `authorized` for the house account over the private network, with `connected` and
+    `trade_allowed` true and `tradeapi_disabled` false (S-01). Its peak memory was about 12% of its
+    limit. A half-built Wine prefix on the first boot was rebuilt before the install.
+  - **The job gateway's public VNC domain was removed**, and the validation gateway's temporary
+    install domain was removed the same day. Neither gateway has a public domain or a TCP proxy now
+    (S-08, N-01).
+  - **`MT5_VALIDATION_GATEWAY_HOST` and `MT5_VALIDATION_GATEWAY_PORT` are set on the analytics
+    service**, without a redeploy, and both read back present. The existing job host was checked by
+    shape to be a private-network name, so the dial check does not stop job reads. ⛔ Without this
+    pair every validation is refused (D-05).
+- ⚠️ **The verification is `human_needed`, 9/10 truths verified.** The founder's post-deploy checks
+  in `docs/runbooks/mt5-go-live.md` Step 2c are still to run, in this order: L3, L1 and L7 in one VNC
+  session, then L6, then L-H3, L-H3b and L-H3c, and L-D05 last.
+  - **L1:** a validation does not switch the job terminal, and a normal job switch is recorded.
+  - **L3:** how many job-terminal accounts carry a saved password, read-only, before L7.
+  - **L6:** VNC on both gateways is not publicly reachable, re-read after L7's teardown.
+  - **L7:** the founder's one-time Navigator clean-up of the job terminal's client accounts.
+  - **L-D05:** an unset validation endpoint is refused with an alert that reaches a human. It costs
+    two analytics redeploys.
+  - **L-H3:** no public path to either gateway, and the dial check refused nothing real.
+  - **L-H3b:** the validation terminal reads authorized as the house account after a validation.
+  - **L-H3c:** see the next bullet.
+- ⚠️ **L-H3c, the park premise, is NOT MEASURED.** The park assumes the house account can be logged in
+  on both terminals at once, so a park on the validation terminal does not log the job terminal out.
+  That has never been observed: at every reading the job terminal was on a client account. The
+  founder accepted it as an unmeasured premise. It is never counted as passed, and no test relies on
+  it. L-H3b and L-H3c run only after plan 09 has shipped. Plan 08's `depends_on` still lists 01 to 06,
+  so that ordering is carried by the verification and the 09 SUMMARY, not by the plan graph.
+- **Criterion 2 is met only in part.** The job terminal stops receiving un-onboarded accounts. Until
+  Phase 164.6.6.1 ships, nothing wipes either terminal: the validation terminal accumulates every
+  account validated on it, and the job terminal keeps its `Bases` caches and `Logs` after L7. The
+  validation terminal is also dark to the session monitor, boot heal, `ipc_fault` recycle and
+  prod-prober (D-06, `MT5-VALIDATION-TERMINAL-COVERAGE-01`, owned by Phase 164.6.8).
+- ⚠️ **Known limits, recorded and not fixed.** No HIGH or CRITICAL finding; neither review ran a fixer
+  round.
+  - **WR-01 / M-1:** `Mt5GatewayHostNotPrivate` on the job path is classified `unknown`, so a public
+    `MT5_GATEWAY_HOST` burns 3 retries per job and ends with false "retries exhausted" copy. Latent:
+    the live job host is private.
+  - **WR-02 / M-2:** the worker's D-05 refusal is a bare `RuntimeError`, also `unknown`, so it retries
+    and ends with uncurated copy.
+  - **WR-03:** the worker park's ceiling (35 s) is below two 30 s round-trips, and its comment claims
+    the inner bound fires first. The wizard has the same shape (one 60 s stage against 2 x 55 s) and
+    says so.
+  - **WR-05:** nothing refuses a validation pair that equals or aliases the job pair, which would
+    silently restore the eviction.
+  - **M-3:** a non-private validation host pages as "unset or malformed", and the true cause is
+    logged once per process.
+  - **M-4:** the park's Sentry throttle is keyed by cause only, so one site's capture silences the
+    other's for an hour. The D-05 sibling is keyed by site.
+  - **M-5:** the glitch class is the classifier's catch-all, and a repeated glitch park after glitch
+    validations never escalates. Escalation needs a founder decision.
+  - **M-6, narrowed by plan 09:** the cancel arm wraps only the park `wait_for`. A cancellation during
+    the gate checks before it, or the bounded release after it, still does not page.
+  - **M-7:** a refused login that may drop the previous holder is never recorded, and the attribution
+    limit does not name that case.
+  - **M-8:** on the D-15 arm the password type is undetermined, so a master-password session that
+    meets a glitch park there only warns, and with M-5 never escalates. It follows from the founder's
+    text and is not a gap, but the founder should know about it.
+  - The handover record cannot see VNC console logins, relaunch auto-logins (recorded as `unknown`),
+    other processes, or late logins by abandoned sessions. That limit is written into every row.
+- **Bisect note.** Commit `ec18c9dee` (plan 01 Task 2) carries one red test, a tuple unpack in
+  `test_mt5_concurrency.py`, fixed in the next commit, `1bea84f11`.
+- **Phases booked on this branch.**
+  - **164.6.6.1 MT5SCRUB (moved).** The founder judged the wipe work HIGH-risk as planned, so the
+    scrub spike, the terminate-and-scrub verb and both terminal scrubs moved there on 2026-09-27,
+    git-moved and renumbered 01 to 04, with D-04 open and W-1 and W-2 as must-fix. The
+    validation-gateway stand-up stayed here, because this phase's routing needs it.
+  - **164.6.6.2 BTCNATIVE.** An MT5 account in BTC or another non-USD currency should report returns
+    in its own unit, not as a dust-guarded USD series. First booked as 164.6.6.1.1, then moved the
+    same evening to run right after 164.6.6 and before 164.6.6.1 (founder correction).
+  - **164.6.6.3 UATFIXES.** The defects the 2026-10-03 production UAT pass found. It runs right after
+    164.6.6, before 164.6.6.2 and 164.6.6.1.
+- **Phase record.** CONTEXT carries D-01 to D-08 (D-03 reverses 164.6.5 D-07 for saved accounts and
+  history only, and nothing in this phase deletes anything; D-04 is open in 164.6.6.1), the two D-07
+  answers (`park-after-login` and the accepted channel residual), the park alert-level decision
+  ("Warn on glitch, page else"), the stand-up findings S-01, S-07, S-08 and N-01, and both founder
+  overrides. A dated lineage line under 164.6.5 D-07 points at the reversal. `TODOS.md` gains
+  `MT5-VALIDATION-TERMINAL-COVERAGE-01`, and its Owns line under Phase 164.6.8 landed in a separate
+  commit after the first edit failed. The phase directory holds research, patterns, the re-plan
+  after the split and its check rounds, and plans 01 to 09 with their SUMMARYs (plan 08 has none
+  yet, because its Tasks 2 and 3 are the founder's live checks). It also holds the code review
+  (5 MEDIUM) and the silent-failure review (7 MEDIUM), a first verification (`gaps_found`) and
+  security audit (one blocking threat), gap-closure plan 09, and the re-verification and re-audit.
+
 ## [0.123.0.0] - 2026-10-03 — SUBSETSHARD: a FULL sql-mutation run drives four gate files at once inside its one job, and a drift-only red main no longer forces one
 
 ⭐ **What changed for whoever reads this next.** Full `sql-mutation` runs had outgrown the 20-minute
