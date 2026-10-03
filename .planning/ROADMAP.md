@@ -127,7 +127,7 @@ phases below carry the corrections, not the bullets.
 - [ ] **Phase 164.9.3.1: FANINGRAPH — a fan-in child never strands when its parent fails, a match_decisions delete never raises 23505 through its cascade, and a fan-in diamond never deadlocks on the parent lock** (INSERTED) — not yet verified
 - [x] **Phase 164.9.3.2: DEFER40001 — a compute-job RPC that raises SQLSTATE 40001 never makes PostgREST retry it without end** (INSERTED) — verification: passed (completed 2026-10-02, PR #919, v0.118.0.0)
 - [x] **Phase 164.9.3.2.1: ENQ40001 — the enqueue race-loss raise (SQLSTATE 40001 in `_enqueue_compute_job_internal`) answers a PostgREST caller instead of re-running the call** (INSERTED) — verification: passed (completed 2026-10-02, PR #929, v0.118.1.5)
-- [ ] **Phase 164.9.4: CIOFFMUTEX — `python` and `e2e-seeded` no longer queue on the shared-TEST advisory lock; each runs against a database private to its runner** (INSERTED) — not yet verified
+- [x] **Phase 164.9.4: CIOFFMUTEX — `python` and `e2e-seeded` no longer queue on the shared-TEST advisory lock; each runs against a database private to its runner** (INSERTED) — verification: passed (completed 2026-10-03, PR #880, v0.119.0.0)
 - [x] **Phase 164.9.5: AUTOREDUMP — after a migration applies to PROD, the committed baseline is re-dumped and proposed automatically** (INSERTED) — verification: passed (completed 2026-10-02, PR #875, v0.106.0.0; first bot re-dump PR #920)
 - [x] **Phase 165: DEPS — The 9-PR dependabot campaign** - pandas `requirements.in` prerequisite commit FIRST, then one PR at a time in the research-verified order, full suite between each; #614 and #606 CLOSED with reasons — ⛔ RETIRED 2026-09-27 by founder decision ("Land as maintenance, retire the phases"): closed WITHOUT delivery as a phase; the dependabot PRs land one at a time as maintenance under the green rule.
 - [x] **Phase 165.1: PIPDEPS — the pip dependabot work lands with production pandas never downgraded** (INSERTED) — ⛔ RETIRED 2026-09-27 by founder decision ("Land as maintenance, retire the phases"): closed WITHOUT delivery as a phase; the dependabot PRs land one at a time as maintenance under the green rule.
@@ -3355,7 +3355,7 @@ Plans:
 **Depends on:** Phase 164.9.1
 ⭐ **Founder override, 2026-10-03 (AskUserQuestion "Ship now, grade on its CI"):** ships with VERIFICATION `human_needed`; the one open item is SC-3's e2e-seeded half, graded on the ship CI run (merge only on passed ≥ 201 and no flaky line). The lane flake behind the 2026-10-02 gap was root-caused and fixed first (option D: `e2e/full-flow.spec.ts` unticks "Hide examples" and fails on an empty table). Recorded in `164.9.4-CONTEXT.md` as well.
 
-**Plans:** 12 plans (planned 2026-09-26; 4 waves: W1 01–06 · W2 07 · W3 08 · W4 09–12; plan-checked, 3 rounds)
+**Plans:** 12/12 plans complete (planned 2026-09-26; 4 waves: W1 01–06 · W2 07 · W3 08 · W4 09–12; plan-checked, 3 rounds)
 
 ⭐ **Founder decision, 2026-09-26 (AskUserQuestion).**
 
@@ -4670,7 +4670,7 @@ kept verbatim.
 | 164.9.3.1 FANINGRAPH | 0/? | Queued — blocker, after 164.9.3 | - |
 | 164.9.3.2 DEFER40001 | 8/8 | Complete    | 2026-10-02 |
 | 164.9.3.2.1 ENQ40001 | 3/3 | Complete    | 2026-10-02 |
-| 164.9.4 CIOFFMUTEX | planned, not on main | In progress — draft PR #880 (measurement run) | - |
+| 164.9.4 CIOFFMUTEX | 12/12 | Complete    | 2026-10-03 |
 | 164.9.5 AUTOREDUMP | 9/9 | Complete — verification passed 2026-10-02 | v0.106.0.0 · #875 |
 | 164.10 BODYDRIFT | - | Closed by decision (c): the drift is real, measured and deliberately left | v0.79.1.1 · #824 |
 | 165. DEPS dependabot campaign | - | ⛔ RETIRED 2026-09-27 (founder) — not delivered as a phase; dependabot PRs land as maintenance | - |

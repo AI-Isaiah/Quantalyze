@@ -2,20 +2,20 @@
 gsd_state_version: "1.0"
 milestone: v1.20
 milestone_name: Backlog Burndown (Phases 158+)
-current_phase: 164.9.4
-current_phase_name: CIOFFMUTEX
+current_phase: 164.5.2.1
+current_phase_name: BRIDGERESIDUE
 status: executing
-stopped_at: Phase 164.9.3.2.1 landed (PR #929, v0.118.1.5); 160-07, 168-03, 164.3-07 closed; next 164.9.4 verify and ship
-last_updated: "2026-10-02T16:45:17.840Z"
-last_activity: 2026-10-02
-last_activity_desc: Phase 164.9.3.2.1 complete (PR #929); leftover plans 160-07, 168-03, 164.3-07 closed
+stopped_at: "Phase 164.9.4 landed (PR #880, v0.119.0.0); 164.5.2.1 executing (plan 3 of 5); close-out of 160, 164.3, 168"
+last_updated: "2026-10-03T06:00:00.000Z"
+last_activity: 2026-10-03
+last_activity_desc: Phase 164.9.4 complete (PR #880); 160 and 164.3 SECURITY.md added; 164.5.2.1 executing
 state_head: e0323dfdb1950d836d520a6138180bf3872496ac
 progress:
   total_phases: 85
-  completed_phases: 48
-  total_plans: 453
-  completed_plans: 449
-  percent: 56
+  completed_phases: 49
+  total_plans: 465
+  completed_plans: 460
+  percent: 58
 ---
 
 ## ⭐ STATE lineage
@@ -179,7 +179,9 @@ both checkboxes updated to match. Not yet marked `completed_phases` in the front
 no VERIFICATION.md exists for this phase yet, and this repo's own rule is that phase completion
 is decided by verification status, never by plan counts.**
 
-Phase: 164.9.4 (CIOFFMUTEX) — VERIFYING (review loop closed by the founder after round 6)
+Phase: 164.5.2.1 (BRIDGERESIDUE) — EXECUTING (plan 3 of 5, on feat/164.5.2.1-bridgeresidue)
+Phase: 164.9.4 (CIOFFMUTEX) — COMPLETE 2026-10-03 (verification passed on the ship run 37072653692; PR #880 merged, v0.119.0.0)
+Phase: 160 / 164.3 / 168 — close-out 2026-10-03 (SECURITY.md for 160 and 164.3; verification frontmatter to convention; 164.3 plan 07 stays deferred)
 Phase: 164.9.3.2.1 (ENQ40001) — COMPLETE 2026-10-02 (verification passed; PR #929 merged, v0.118.1.5; no migration)
 Phase: 160 / 168 / 164.3 leftover plans — CLOSED 2026-10-02 (160-07 PROD smoke 2/3 surfaces; 168-03 observed on the re-created composite; 164.3-07 superseded by 164.5-07)
 Phase: 164.9.3.2 (DEFER40001) — COMPLETE 2026-10-02 (verification passed; PR #919 merged, v0.118.0.0; migration applied to TEST and PROD by Supabase Migrate run 36981647441)
@@ -502,7 +504,7 @@ so every "Next is plan NN" below has been discharged:
       NON-ZERO exit is a regression. Next is plan 06 (closure: the false-reading
       `lane-probe: … class is STALE` sentence, the `lane-blocked:` line's own
       prose, [REDUNDER-LANEBLOCKED-BLIND], and the ubuntu measurement).
-Status: Executing Phase 164.9.3.2.1
+Status: Executing Phase 164.5.2.1
       ⚠️ RETAINED — this was the `Status:` line until the 2026-09-06 reconciliation, kept as
       lineage: *"164-family re-partition SHIPPED — PR #745 (chore/164-family-repartition,
       v0.77.13.1). Phase 164.4.1 COMPLETE — PR #744 squash-merged as `e01cc2e6` (v0.77.13.0),
