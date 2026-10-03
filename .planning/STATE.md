@@ -2,20 +2,20 @@
 gsd_state_version: "1.0"
 milestone: v1.20
 milestone_name: Backlog Burndown (Phases 158+)
-current_phase: 164.5.2.1
-current_phase_name: BRIDGERESIDUE
+current_phase: 164.6.6
+current_phase_name: MT5TERMINALISOLATION
 status: executing
-stopped_at: "Phase 164.9.4 landed (PR #880, v0.119.0.0); 164.5.2.1 executing (plan 3 of 5); close-out of 160, 164.3, 168"
-last_updated: "2026-10-03T07:54:23.348Z"
+stopped_at: "164.9.6 (#936) and 164.5.2.1 (#937) landed and closed; 167.1.2-08 landed (#939, post-deploy census pending); 164.6.6 executing wave 1"
+last_updated: "2026-10-03T14:43:50.465Z"
 last_activity: 2026-10-03
-last_activity_desc: 169.1 and 169.1.1 closed (ROADMAP rows, phase complete); 164.9.4 live push-gate item resolved
-state_head: 98f04db16a7a8718596bc871fdbc4ab60e828bc2
+last_activity_desc: 164.9.6 and 164.5.2.1 closed (phase complete); 164.9.6.1 SUBSETSHARD booked, queued after 164.6.6
+state_head: b2c59c720e1dedcf6178635cf277e875c9fc82ae
 progress:
-  total_phases: 93
-  completed_phases: 51
-  total_plans: 465
-  completed_plans: 460
-  percent: 55
+  total_phases: 94
+  completed_phases: 54
+  total_plans: 474
+  completed_plans: 470
+  percent: 57
 ---
 
 ## ⭐ STATE lineage
@@ -179,7 +179,8 @@ both checkboxes updated to match. Not yet marked `completed_phases` in the front
 no VERIFICATION.md exists for this phase yet, and this repo's own rule is that phase completion
 is decided by verification status, never by plan counts.**
 
-Phase: 164.5.2.1 (BRIDGERESIDUE) — EXECUTING (plan 3 of 5, on feat/164.5.2.1-bridgeresidue)
+Phase: 164.6.6 (MT5TERMINALISOLATION) — EXECUTING (wave 1 of 4, on feat/164.6.6-mt5isolation)
+Phase: 164.9.6 (SUBSETMAIN) and 164.5.2.1 (BRIDGERESIDUE) — COMPLETE 2026-10-03 (verification passed; PR #936 v0.120.0.0 and PR #937 v0.121.0.0 merged; migration 20261003120000 applied to TEST and PROD)
 Phase: 164.9.4 (CIOFFMUTEX) — COMPLETE 2026-10-03 (verification passed on the ship run 37072653692; PR #880 merged, v0.119.0.0)
 Phase: 160 / 164.3 / 168 — close-out 2026-10-03 (SECURITY.md for 160 and 164.3; verification frontmatter to convention; 164.3 plan 07 stays deferred)
 Phase: 164.9.3.2.1 (ENQ40001) — COMPLETE 2026-10-02 (verification passed; PR #929 merged, v0.118.1.5; no migration)
@@ -504,7 +505,7 @@ so every "Next is plan NN" below has been discharged:
       NON-ZERO exit is a regression. Next is plan 06 (closure: the false-reading
       `lane-probe: … class is STALE` sentence, the `lane-blocked:` line's own
       prose, [REDUNDER-LANEBLOCKED-BLIND], and the ubuntu measurement).
-Status: Executing Phase 164.5.2.1
+Status: Executing Phase 164.6.6
       ⚠️ RETAINED — this was the `Status:` line until the 2026-09-06 reconciliation, kept as
       lineage: *"164-family re-partition SHIPPED — PR #745 (chore/164-family-repartition,
       v0.77.13.1). Phase 164.4.1 COMPLETE — PR #744 squash-merged as `e01cc2e6` (v0.77.13.0),
@@ -520,7 +521,7 @@ Status: Executing Phase 164.5.2.1
       closed by PR #743 `3ed6919e`) and 164.4.1 annotated all five remaining files —
       `lane-blocked: 0`, `pending: 0` at `files 44/71`. Read `FILES_FLOOR` / `ARMS_FLOOR` off
       `scripts/mutation-runner/run.mjs`, never off a number restated here.
-Last activity: 2026-10-02 — Phase 164.9.3.2.1 execution started
+Last activity: 2026-10-03 — 164.9.6 and 164.5.2.1 closed; 164.6.6 wave 1 executing
       ⚠️ RETAINED — this was the `Last activity:` line until 2026-09-06:
       *"2026-09-04 — Phase 164.4.1 execution started"*
       all twinned and proven on real pg-lanes with **ZERO waivers** (cumulative 0 across all eight
@@ -974,7 +975,7 @@ Prior-phase 141.1 close-out detail (retained; NOT about 142.1):
         after PYAPIFIX-01" ordering is now **SATISFIED**.
         2 WARNING gaps, no BLOCKER. See `140.1-VERIFICATION.md`. Not transitioned (`--no-transition`).
 
-Progress: [██████░░░░] 56%
+Progress: [██████░░░░] 57%
 
 ### Phase 140.1 close-out — open items (do NOT lose these)
 
@@ -1437,6 +1438,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 170.6 inserted after Phase 170: DISPLAYPOLISH (founder 2026-10-03) (URGENT)
 - Phase 166.5 inserted after Phase 166: COMPUTEDATSTAMP (founder 2026-10-03) (URGENT)
 - Phase 170.7 inserted after Phase 170: MYSTRATTABLE (founder 2026-10-02) (URGENT)
+- Phase 164.9.6.1 inserted after Phase 164.9.6: SUBSETSHARD: shard the full sql-mutation corpus under the 20-minute cap and let predecessorVerdict tolerate the stale-baseline drift class; founder 2026-10-03, queued after 164.6.6 (URGENT)
 
 ### Decisions
 
@@ -2505,7 +2507,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 ## Session
 
 **Last Date:** 2026-10-02T09:02:56.666Z
-**Stopped At:** Phase 164.4.2 complete; next 164.9.3.2.1
+**Stopped At:** 164.9.6 and 164.5.2.1 closed; 164.6.6 wave 1 executing; next 164.9.6.1 (after 164.6.6)
 **Resume File:** .planning/phases/169.1.1-hydrationticks-factsheet-chart-ticks-render-the-same-on-serv/169.1.1-UI-SPEC.md
 
 **Last Date:** 2026-09-24T06:17:00.000Z
