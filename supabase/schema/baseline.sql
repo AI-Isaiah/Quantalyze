@@ -9806,11 +9806,16 @@ DECLARE
   v_protected_job_id   UUID;
   v_publish_healthy    BOOLEAN;
   v_protect_hold       BOOLEAN;
+  v_unprotected_job_ids UUID[];
+  v_nonterminal_unmarked_count INTEGER;
+  v_refresh_keep       BOOLEAN;
 BEGIN
   IF p_strategy_id IS NULL THEN
     RAISE EXCEPTION 'sync_strategy_analytics_status: p_strategy_id is required'
       USING ERRCODE = 'invalid_parameter_value';
   END IF;
+
+  PERFORM pg_advisory_xact_lock(hashtext('mark_compute_job_bridge'), hashtext(p_strategy_id::text));
 
   -- (d) no rows → preserve existing strategy_analytics row (unchanged).
   SELECT count(*) INTO v_job_count
@@ -9821,9 +9826,12 @@ BEGIN
     RETURN;
   END IF;
 
-  -- ---- the NON-TERMINAL count — FIRST of this function's two compute_jobs ---
+  -- ---- the NON-TERMINAL counts — FIRST of this function's two compute_jobs --
   -- ---- reads, and the ORDER IS THE CORRECTNESS ------------------------------
-  -- Consumed by branch (a) far below. It is read HERE, and that placement is a
+  -- One statement, one snapshot, two counts: every in-flight job, and the
+  -- in-flight jobs that do NOT carry an in-scope refresh marker (the second
+  -- feeds the keep flag; see RETRY-PLAIN-COMPLETE in the file header).
+  -- Consumed by branch (a) far below. They are read HERE, and that placement is a
   -- data-integrity fix (161.1 migration re-review, HIGH), not tidiness.
   --
   -- ⛔ WHY THE ORDER OF THE TWO compute_jobs READS IS LOAD-BEARING
@@ -9832,13 +9840,23 @@ BEGIN
   -- live_failures CTE below). Nothing runs them atomically. There is no
   -- isolation override anywhere in this repo, so this executes at READ
   -- COMMITTED, where every statement takes its OWN fresh snapshot and a
-  -- concurrent transaction can commit a job's status flip BETWEEN them. Nor are
-  -- the callers serialized per strategy: mark_compute_job_failed takes FOR
-  -- UPDATE on the JOB row only, and neither it nor mark_compute_job_done takes
-  -- pg_advisory_xact_lock(hashtext(strategy_id)) before its PERFORM of this
-  -- function -- unlike positions_atomic_rebuild and sync_trades, which do. Two
-  -- sibling jobs of one live-API strategy, claimed in the same batch, therefore
-  -- run this concurrently as a matter of course.
+  -- concurrent transaction can commit a job's status flip BETWEEN them.
+  --
+  -- The CALLERS of this function are serialized per strategy (Phase 164.5.2
+  -- for the two terminal mark RPCs, Phase 164.5.2.1 for this function itself).
+  -- Both mark RPCs take the two-integer, transaction-scoped advisory lock in the
+  -- mark_compute_job_bridge namespace, keyed on the strategy, before they call
+  -- this function, and this function takes that same lock as its first
+  -- statement after the NULL guard. A mark RPC re-enters the lock it already
+  -- holds; a direct caller (the Python DEFERRED path) waits behind any mark or
+  -- direct call in progress on the same strategy. So no other caller can COMMIT
+  -- a job transition on this strategy while this function is between its reads.
+  -- The NON-caller writers are NOT serialized: the claim RPCs,
+  -- reset_stalled_compute_jobs, the orphan terminalizer, the enqueue inserts,
+  -- the cross-strategy fan-in release and the refresh-marker retraction never
+  -- call this function and take no such lock. A job's status can therefore
+  -- still change between the two reads, and the read order below stays
+  -- load-bearing.
   --
   -- The saving property is that a job's status is MONOTONE TOWARD TERMINAL.
   -- Every write that produces a non-terminal status is itself gated on a
@@ -9879,12 +9897,18 @@ BEGIN
   -- (branch (a) firing on a snapshot in which the marked job had not yet
   -- failed), which the 16-hour reaper of 20260802120000 then resolves. That is
   -- an unpublish that self-heals and is visible, versus a publish-over-failure
-  -- that does neither. The real closure is a per-strategy
-  -- pg_advisory_xact_lock in the two mark RPCs, matching the one
-  -- positions_atomic_rebuild and sync_trades already take. Those RPCs are
-  -- defined in other migrations, so it is deliberately NOT attempted here — a
-  -- half-applied lock discipline is worse than a documented window.
-  SELECT count(*) INTO v_nonterminal_count
+  -- that does neither. The callers' per-strategy lock (above) narrows the
+  -- window to the NON-caller writers named there. Closing it fully would need
+  -- those writers to take the same lock; they are other phases' functions (the
+  -- claim RPCs belong to Phase 164.9.3), so that is not attempted here.
+  SELECT count(*),
+         count(*) FILTER (WHERE NOT COALESCE(
+           (metadata ->> 'source') IN ('ledger-refresh', 'ledger-refresh-composite')
+           AND kind IN ('derive_broker_dailies',
+                        'compute_analytics_from_csv',
+                        'stitch_composite'),
+           FALSE))
+    INTO v_nonterminal_count, v_nonterminal_unmarked_count
     FROM compute_jobs
    WHERE strategy_id = p_strategy_id
      AND status IN ('pending', 'running', 'done_pending_children', 'failed_retry');
@@ -10151,10 +10175,11 @@ BEGIN
     (array_agg(id ORDER BY created_at DESC, id DESC)
        FILTER (WHERE NOT is_protected))[1],
     (array_agg(id ORDER BY created_at DESC, id DESC)
-       FILTER (WHERE is_protected))[1]
+       FILTER (WHERE is_protected))[1],
+    array_agg(id) FILTER (WHERE NOT is_protected)
     INTO v_failed_count, v_protected_count, v_unresolved_count,
          v_latest_kind, v_protected_kind,
-         v_latest_job_id, v_protected_job_id
+         v_latest_job_id, v_protected_job_id, v_unprotected_job_ids
     FROM live_failures;
 
   -- ---- the branch-(a) EXEMPTION (161.1 re-review MEDIUM: idempotence) -------
@@ -10200,6 +10225,10 @@ BEGIN
                     AND COALESCE(v_failed_count, 1) = 0
                     AND COALESCE(v_unresolved_count, 0) > 0;
 
+  v_refresh_keep := v_publish_healthy
+                    AND COALESCE(v_nonterminal_unmarked_count, 1) = 0
+                    AND COALESCE(v_failed_count, 1) = 0;
+
   -- (a) any non-terminal row → 'computing', UNLESS the runner has already
   -- written 'complete_with_warnings' OR set its runner-owned computation_warned
   -- marker. That warning is a runner-owned terminal sub-state the compute_jobs
@@ -10209,9 +10238,15 @@ BEGIN
   -- this job's own row is still 'running'). Writing a bare 'computing' here would
   -- launder the warning, which branch (c) would then resolve to a plain 'complete'
   -- — ordering-dependent, so it leaked on multi-job (live-API) strategies.
-  -- Preserve it. Only the analytics runner clears the warning, via its own
-  -- 'computing' entry-write + clean terminal write when it actually recomputes;
-  -- the bridge must never downgrade it.
+  -- Preserve it. The analytics runner clears the warning, via its own
+  -- 'computing' entry-write + clean terminal write when it actually recomputes.
+  -- The bridge clears it in ONE case only, the membership arm FIRST in each
+  -- CASE below (D-04b, the file header): when the row's writer-provenance job
+  -- is among this call's unprotected live failures, the warning sits over a
+  -- failed run and is not a warning to preserve. A plain 'complete' row is
+  -- kept the same way by the refresh keep arm (D-05) when every in-flight job
+  -- carries an in-scope refresh marker (in any non-terminal status, not only
+  -- a retry) and no unprotected failure is live.
   --
   -- ⚠️ v_nonterminal_count is deliberately NOT read here. It is read at the TOP
   -- of this function, BEFORE the failure partition — see the read-order note
@@ -10255,21 +10290,55 @@ BEGIN
     VALUES (p_strategy_id, 'computing', NULL, now(), NULL, NULL)
     ON CONFLICT (strategy_id) DO UPDATE
        SET computation_status = CASE
+             WHEN strategy_analytics.computation_error_source = 'writer' AND strategy_analytics.computation_error_job_id = ANY (v_unprotected_job_ids)
+             THEN 'computing'
              WHEN strategy_analytics.computation_status = 'complete_with_warnings'
                   OR strategy_analytics.computation_warned
              THEN 'complete_with_warnings'
+             WHEN v_refresh_keep AND strategy_analytics.computation_status = 'complete'
+             THEN 'complete'
              ELSE 'computing'
            END,
-           computation_error  = EXCLUDED.computation_error,
-           -- Phase 164.2 / criterion 2: the sentence on the line above is being
-           -- blanked, so the provenance that described it must go with it. A
-           -- marker left standing over a blanked sentence would make the NEXT
-           -- generic write look like a curated one and freeze it there. This
-           -- branch is also the reason the four TypeScript pre-enqueue writers
-           -- need no marker at all: when a job starts, their sentence is stale
-           -- by construction and superseding it is the correct outcome.
-           computation_error_source = NULL,
-           computation_error_job_id = NULL,
+           computation_warned = CASE WHEN strategy_analytics.computation_error_source = 'writer' AND strategy_analytics.computation_error_job_id = ANY (v_unprotected_job_ids) THEN FALSE ELSE strategy_analytics.computation_warned END,
+           -- FOUNDER DECISION 2026-10-03 ("Hold the date for both"): on a KEEP
+           -- (the row already reads what this branch resolves it to, and the
+           -- membership arm does not fire) the sentence, both provenance markers
+           -- and computed_at are HELD, because nothing was computed. On every
+           -- other path they are written exactly as before. The four CASEs share
+           -- one predicate, so the markers still travel with the sentence.
+           computation_error = CASE
+             WHEN strategy_analytics.computation_error_source = 'writer' AND strategy_analytics.computation_error_job_id = ANY (v_unprotected_job_ids)
+             THEN EXCLUDED.computation_error
+             WHEN strategy_analytics.computation_status = 'complete_with_warnings'
+                  OR (v_refresh_keep AND strategy_analytics.computation_status = 'complete' AND strategy_analytics.computation_warned IS NOT TRUE)
+             THEN strategy_analytics.computation_error
+             ELSE EXCLUDED.computation_error
+           END,
+           -- Phase 164.2 / criterion 2: when the sentence above is blanked, the
+           -- provenance that described it goes with it. A marker left standing
+           -- over a blanked sentence would make the NEXT generic write look like
+           -- a curated one and freeze it there. This branch is also the reason
+           -- the four TypeScript pre-enqueue writers need no marker at all: they
+           -- always write 'failed', so a job starting on their row is a
+           -- TRANSITION (never a keep), their sentence is stale by construction
+           -- and superseding it is the correct outcome. A held sentence keeps
+           -- its markers on the same predicate.
+           computation_error_source = CASE
+             WHEN strategy_analytics.computation_error_source = 'writer' AND strategy_analytics.computation_error_job_id = ANY (v_unprotected_job_ids)
+             THEN NULL
+             WHEN strategy_analytics.computation_status = 'complete_with_warnings'
+                  OR (v_refresh_keep AND strategy_analytics.computation_status = 'complete' AND strategy_analytics.computation_warned IS NOT TRUE)
+             THEN strategy_analytics.computation_error_source
+             ELSE NULL
+           END,
+           computation_error_job_id = CASE
+             WHEN strategy_analytics.computation_error_source = 'writer' AND strategy_analytics.computation_error_job_id = ANY (v_unprotected_job_ids)
+             THEN NULL
+             WHEN strategy_analytics.computation_status = 'complete_with_warnings'
+                  OR (v_refresh_keep AND strategy_analytics.computation_status = 'complete' AND strategy_analytics.computation_warned IS NOT TRUE)
+             THEN strategy_analytics.computation_error_job_id
+             ELSE NULL
+           END,
            -- JOB-01 (Phase 142): stamp on the TRANSITION INTO computing only,
            -- keyed off the RESOLVED status above — never off the branch. This
            -- bridge is PERFORMed in-RPC on EVERY job transition, so an
@@ -10277,10 +10346,18 @@ BEGIN
            -- multi-hop chain and the reaper would never fire (the Phase 106
            -- janitor bug, re-implemented in a new column).
            computing_started_at = CASE
+             -- Membership arm (D-04b): the row is resolving to 'computing' over
+             -- a failed run. Stamp the transition in, keep an existing stamp.
+             WHEN strategy_analytics.computation_error_source = 'writer' AND strategy_analytics.computation_error_job_id = ANY (v_unprotected_job_ids)
+             THEN CASE WHEN strategy_analytics.computation_status IS DISTINCT FROM 'computing' THEN now() ELSE strategy_analytics.computing_started_at END
              -- Arm 1: this branch RESOLVED to complete_with_warnings, i.e. the
              -- row is NOT computing. That is an exit — clear the stamp.
              WHEN strategy_analytics.computation_status = 'complete_with_warnings'
                   OR strategy_analytics.computation_warned
+             THEN NULL
+             -- Refresh keep arm (D-05): the row stays 'complete', i.e. NOT
+             -- computing. Same exit as Arm 1 — no stamp.
+             WHEN v_refresh_keep AND strategy_analytics.computation_status = 'complete'
              THEN NULL
              -- Arm 2: resolved to 'computing' from some OTHER prior status —
              -- a genuine transition in. Stamp it.
@@ -10290,7 +10367,14 @@ BEGIN
              -- bridge call cannot advance it and defer the reap indefinitely.
              ELSE strategy_analytics.computing_started_at
            END,
-           computed_at        = now();
+           computed_at = CASE
+             WHEN strategy_analytics.computation_error_source = 'writer' AND strategy_analytics.computation_error_job_id = ANY (v_unprotected_job_ids)
+             THEN now()
+             WHEN strategy_analytics.computation_status = 'complete_with_warnings'
+                  OR (v_refresh_keep AND strategy_analytics.computation_status = 'complete' AND strategy_analytics.computation_warned IS NOT TRUE)
+             THEN strategy_analytics.computed_at
+             ELSE now()
+           END;
     RETURN;
   END IF;
 
@@ -10303,10 +10387,13 @@ BEGIN
   -- branch (a) rather than here (the idempotence hoist). Reaching this
   -- statement still means every job is terminal: branch (a) returns otherwise,
   -- and its one stand-down condition requires v_failed_count = 0.
-  -- This write does NOT touch computation_warned — the runner-owned marker survives
-  -- the 'failed' bounce in its own column, so branch (c) can recover the warning
-  -- after a sibling failed_final→done recovery WITHOUT an analytics re-run (SI-02,
-  -- closed by mig 20260708120000).
+  -- This write clears computation_warned in ONE case only: when the row's
+  -- writer-provenance job is among this call's unprotected live failures
+  -- (D-04b, the file header), because the warning then sits over a failed run.
+  -- Otherwise the runner-owned marker survives the 'failed' bounce in its own
+  -- column, so branch (c) can recover the warning after a sibling
+  -- failed_final→done recovery WITHOUT an analytics re-run (SI-02, closed by
+  -- mig 20260708120000); a sibling's failure carries no provenance for its id.
   IF v_failed_count > 0 THEN
     -- JOB-01 (Phase 142): SQL exit transition #1 — clear the stamp.
     INSERT INTO strategy_analytics (strategy_id, computation_status, computation_error, computing_started_at, computation_error_source, computation_error_job_id)
@@ -10341,6 +10428,7 @@ BEGIN
            -- own generic as a writer's curated sentence.
            computation_error_source = CASE WHEN strategy_analytics.computation_error_source = 'writer' AND strategy_analytics.computation_error_job_id = v_latest_job_id THEN strategy_analytics.computation_error_source ELSE NULL END,
            computation_error_job_id = CASE WHEN strategy_analytics.computation_error_source = 'writer' AND strategy_analytics.computation_error_job_id = v_latest_job_id THEN strategy_analytics.computation_error_job_id ELSE NULL END,
+           computation_warned = CASE WHEN strategy_analytics.computation_error_source = 'writer' AND strategy_analytics.computation_error_job_id = ANY (v_unprotected_job_ids) THEN FALSE ELSE strategy_analytics.computation_warned END,
            computing_started_at = NULL,
            computed_at        = now();
     RETURN;
