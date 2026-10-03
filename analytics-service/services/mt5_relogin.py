@@ -71,6 +71,7 @@ from services.mt5_client import (
     mt5_terminal_key,
 )
 from services.mt5_concurrency import Mt5TerminalBusyError, mt5_terminal_lease
+from services.mt5_handover import HOLDER_HOUSE, SITE_HEAL
 from services.mt5_session_episodes import (
     KIND_ALREADY_AUTHORIZED,
     KIND_BUDGET_ABANDONED,
@@ -2044,8 +2045,14 @@ async def heal_mt5_terminal_session(
         # requires the outer guard to carry exactly ONE handler, and narrowing or
         # multiplying it is the escape route that reaches `_crash_handler`.
         try:
+            # ⭐ Phase 164.6.6 criterion 1 — held for the HOUSE account, so a
+            # heal that re-logs it records a handover from whoever held the
+            # terminal before; a tick that only reads records nothing.
             async with mt5_terminal_lease(
-                mt5_terminal_key(host, port), wait_s=_relogin_lease_wait_s()
+                mt5_terminal_key(host, port),
+                wait_s=_relogin_lease_wait_s(),
+                holder=HOLDER_HOUSE,
+                site=SITE_HEAL,
             ):
                 outcome = await asyncio.wait_for(
                     asyncio.to_thread(

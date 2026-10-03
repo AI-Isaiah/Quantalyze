@@ -567,3 +567,207 @@ async def test_the_derive_job_records_its_switch_against_its_api_key_id(
     assert seen == [{"holder": _KEY_B, "site": SITE_DERIVE}]
     assert sink.pairs() == [(_KEY_A, _KEY_B, SITE_DERIVE)]
     assert mt5_terminal_holder(key) == _KEY_B
+
+
+# --------------------------------------------------------------------------- #
+# Task 2 — the remaining job sites and the heal.
+#
+# Each job site is driven through its REAL function over a REAL `Mt5Client`
+# (the derive suite's transport double), with the REAL lease wrapped by a spy
+# that records its keywords. The spy proves the kwargs; the row proves the
+# shipped login stamped them.
+# --------------------------------------------------------------------------- #
+
+
+def _derive_session() -> Any:
+    from tests.test_mt5_derive_branch import _FakeMt5Transport, _canonical_deals, _session
+
+    transport = _FakeMt5Transport(
+        account={
+            "equity": 110_500.0,
+            "balance": 110_500.0,
+            "login": 123456,
+            "currency": "USD",
+        },
+        deals=_canonical_deals(),
+    )
+    return _session(transport)
+
+
+def _spy_lease(monkeypatch: pytest.MonkeyPatch, module: Any) -> list[dict]:
+    seen: list[dict] = []
+    real_lease = module.mt5_terminal_lease
+
+    def _spy(terminal_key: str, **kwargs: Any) -> Any:
+        seen.append(kwargs)
+        return real_lease(terminal_key, **kwargs)
+
+    monkeypatch.setattr(module, "mt5_terminal_lease", _spy)
+    return seen
+
+
+async def test_the_BALANCE_site_records_its_switch_against_its_api_key_id(
+    sink: _HandoverSink, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session = _derive_session()
+    key = session.client.terminal_key
+    mt5_client._note_terminal_holder(key, holder=_KEY_A)
+    seen = _spy_lease(monkeypatch, jw)
+
+    await jw._fetch_mt5_account_balance(session, api_key_id=_KEY_B)
+
+    assert seen == [{"holder": _KEY_B, "site": mt5_handover.SITE_BALANCE}]
+    assert sink.pairs() == [(_KEY_A, _KEY_B, mt5_handover.SITE_BALANCE)]
+
+
+async def test_the_sync_job_passes_its_api_key_id_to_the_BALANCE_site(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The one caller: a sync job whose balance read is never attributed is the
+    2026-09-21 silence on a different path."""
+    import inspect
+    import textwrap
+
+    source = textwrap.dedent(inspect.getsource(jw.run_sync_trades_job))
+    assert "_fetch_mt5_account_balance(" in source
+    call = source[source.index("_fetch_mt5_account_balance(") :]
+    call = call[: call.index(")") + 1]
+    assert 'api_key_id=ctx.key_row.get("id")' in call, call
+
+
+async def test_the_HOLDINGS_site_records_its_switch_against_its_api_key_id(
+    sink: _HandoverSink, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from services import allocator_positions
+
+    monkeypatch.setenv("MT5_ENABLED", "true")
+    session = _derive_session()
+    key = session.client.terminal_key
+    mt5_client._note_terminal_holder(key, holder=_KEY_A)
+    seen = _spy_lease(monkeypatch, allocator_positions)
+
+    await allocator_positions._fetch_mt5_account_rows("mt5", session, _KEY_B)
+
+    assert seen == [{"holder": _KEY_B, "site": mt5_handover.SITE_HOLDINGS}]
+    assert sink.pairs() == [(_KEY_A, _KEY_B, mt5_handover.SITE_HOLDINGS)]
+
+
+async def test_the_BACKFILL_site_records_its_switch_against_its_api_key_id(
+    sink: _HandoverSink, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`_mt5_fetch_window` imports the lease LAZILY from `mt5_concurrency`, so
+    that is where the spy goes."""
+    from datetime import date
+
+    from services import equity_reconstruction
+    from services import mt5_concurrency
+
+    monkeypatch.setenv("MT5_ENABLED", "true")
+    session = _derive_session()
+    key = session.client.terminal_key
+    mt5_client._note_terminal_holder(key, holder=_KEY_A)
+    seen = _spy_lease(monkeypatch, mt5_concurrency)
+
+    await equity_reconstruction._mt5_fetch_window(
+        session,
+        allocator_id="1f0e2d3c-0000-4000-8000-0000000000aa",
+        api_key_id=_KEY_B,
+        start_date=date(2025, 6, 1),
+        end_date=date(2025, 6, 6),
+    )
+
+    assert seen == [{"holder": _KEY_B, "site": mt5_handover.SITE_BACKFILL}]
+    assert sink.pairs() == [(_KEY_A, _KEY_B, mt5_handover.SITE_BACKFILL)]
+
+
+@pytest.fixture
+def heal_env(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """The heal's own harness pieces from `tests/test_mt5_relogin.py` — its
+    client double, its env and its fake clock — plus the heal's episode sink
+    replaced by a list so no Supabase client is reached for THAT name."""
+    from services import mt5_relogin, mt5_session_episodes
+    from tests.test_mt5_relogin import _FakeClock, _FakeMt5, _set_full_env
+
+    clock = _FakeClock()
+    monkeypatch.setattr(mt5_relogin, "_clock", clock.monotonic)
+    monkeypatch.setattr(mt5_relogin, "_sleep", clock.sleep)
+    _FakeMt5.clock = clock
+    mt5_relogin._reset_relogin_log_throttle_for_tests()
+    mt5_session_episodes._reset_session_episode_state_for_tests()
+    _set_full_env(monkeypatch)
+    outcomes: list = []
+
+    async def _record(outcome: Any, *, source: str, poll_interval_s: Any) -> None:
+        outcomes.append(outcome)
+
+    monkeypatch.setattr(mt5_relogin, "record_mt5_heal_outcome", _record)
+    yield outcomes
+    _FakeMt5.clock = None
+    mt5_relogin._reset_relogin_log_throttle_for_tests()
+    mt5_session_episodes._reset_session_episode_state_for_tests()
+
+
+def _heal_key() -> str:
+    return mt5_terminal_key(_FAKE_HOST, int(_FAKE_PORT))
+
+
+async def test_a_minus_six_HEAL_records_a_handover_to_HOUSE(
+    sink: _HandoverSink, monkeypatch: pytest.MonkeyPatch, heal_env: list
+) -> None:
+    """The heal re-logs the house account over whoever held the terminal: that
+    is a switch like any other, and the displaced key gets its record."""
+    from services import mt5_relogin
+    from tests.test_mt5_relogin import _install_client
+
+    mt5_client._note_terminal_holder(_heal_key(), holder=_KEY_A)
+    _install_client(
+        monkeypatch,
+        {
+            "initialize": False,
+            "last_error": (-6, "Terminal: Authorization failed"),
+            "initialize_credentialed": True,
+        },
+    )
+
+    assert await mt5_relogin.heal_mt5_terminal_session() is None
+
+    assert sink.pairs() == [(_KEY_A, HOLDER_HOUSE, SITE_HEAL)]
+    assert mt5_terminal_holder(_heal_key()) == HOLDER_HOUSE
+    _assert_no_secret_reached_any_row(sink)
+
+
+async def test_a_HEAL_tick_that_only_reads_records_nothing(
+    sink: _HandoverSink, monkeypatch: pytest.MonkeyPatch, heal_env: list
+) -> None:
+    """A healthy session is the common tick (every ten minutes); it moved
+    nothing and must write nothing."""
+    from services import mt5_relogin
+    from tests.test_mt5_relogin import _install_client
+
+    mt5_client._note_terminal_holder(_heal_key(), holder=_KEY_A)
+    _install_client(monkeypatch, {"initialize": True})
+
+    assert await mt5_relogin.heal_mt5_terminal_session() is None
+
+    assert sink.handovers() == []
+    assert mt5_terminal_holder(_heal_key()) == _KEY_A
+
+
+async def test_a_HEAL_that_escalates_to_a_RECYCLE_records_a_handover_to_UNKNOWN(
+    sink: _HandoverSink, monkeypatch: pytest.MonkeyPatch, heal_env: list
+) -> None:
+    """A recycle relaunches the terminal into whatever account was saved; the
+    record says `unknown` rather than claiming `house`."""
+    from services import mt5_relogin
+    from tests.test_mt5_relogin import _install_client
+
+    mt5_client._note_terminal_holder(_heal_key(), holder=_KEY_A)
+    fake, _c = _install_client(
+        monkeypatch, {"initialize": False, "last_error": (-10005, "IPC timeout")}
+    )
+
+    assert await mt5_relogin.heal_mt5_terminal_session() is None
+
+    assert len(fake._MetaTrader5__conn.recycle_calls) == 1
+    assert sink.pairs() == [(_KEY_A, HOLDER_UNKNOWN, SITE_HEAL)]
+    assert mt5_terminal_holder(_heal_key()) == HOLDER_UNKNOWN

@@ -2979,6 +2979,7 @@ async def _mt5_fetch_window(
         mt5_terminal_lease,
     )
     from services.mt5_deals import Mt5DealClassificationError
+    from services.mt5_handover import SITE_BACKFILL
     from services.mt5_read import read_mt5_deal_ledger
     from services.mt5_validation import classify_mt5_login_error
     from services.nav_twr import NavReconstructionError
@@ -3040,7 +3041,13 @@ async def _mt5_fetch_window(
     # CALLER'S to supply: `read_mt5_deal_ledger` is synchronous, blocking and
     # deliberately unbounded, and plan 04's SUMMARY says in writing that nothing
     # about calling it inherits any of the three.
-    async with mt5_terminal_lease(session.client.terminal_key):
+    #
+    # ⭐ Phase 164.6.6 criterion 1 — taken in this key's name (`api_key_id`), so
+    # a login that switches the shared terminal to it is recorded against the
+    # holder it displaced.
+    async with mt5_terminal_lease(
+        session.client.terminal_key, holder=api_key_id, site=SITE_BACKFILL
+    ):
         try:
             info, deals = await asyncio.wait_for(
                 asyncio.to_thread(read_mt5_deal_ledger, session, now=now),

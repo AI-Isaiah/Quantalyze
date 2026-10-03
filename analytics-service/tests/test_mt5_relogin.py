@@ -59,6 +59,7 @@ from pathlib import Path
 import pytest
 
 from services import mt5_concurrency, mt5_relogin, mt5_session_episodes
+from services.mt5_handover import HOLDER_HOUSE, SITE_HEAL
 from services.mt5_client import Mt5Client, Mt5SessionSnapshot
 from services.mt5_concurrency import Mt5TerminalBusyError
 
@@ -540,16 +541,19 @@ def _install_client(monkeypatch: pytest.MonkeyPatch, scenario: dict):
 
 
 def _install_lease_counter(monkeypatch: pytest.MonkeyPatch) -> list[tuple]:
-    """Wrap — never replace — the REAL lease, recording `(key, wait_s)` per
-    acquisition. The real one still runs, so its release discipline (the epoch
-    bump, the un-stamp, the release) is still exercised."""
+    """Wrap — never replace — the REAL lease, recording
+    `(key, wait_s, holder, site)` per acquisition. The real one still runs, so
+    its release discipline (the epoch bump, the un-stamp, the release) is still
+    exercised. ⭐ Phase 164.6.6: `holder`/`site` are recorded so the heal's
+    house attribution is asserted, not assumed; no `**kwargs`, so a keyword the
+    lease does not take still fails loudly."""
     acquisitions: list[tuple] = []
     real = mt5_relogin.mt5_terminal_lease
 
     @asynccontextmanager
-    async def _counting(terminal_key: str, *, wait_s=None):
-        acquisitions.append((terminal_key, wait_s))
-        async with real(terminal_key, wait_s=wait_s):
+    async def _counting(terminal_key: str, *, wait_s=None, holder=None, site=None):
+        acquisitions.append((terminal_key, wait_s, holder, site))
+        async with real(terminal_key, wait_s=wait_s, holder=holder, site=site):
             yield
 
     monkeypatch.setattr(mt5_relogin, "mt5_terminal_lease", _counting)
@@ -806,9 +810,9 @@ async def test_the_heal_ANNOUNCES_itself_before_it_takes_the_lease(
     real = mt5_relogin.mt5_terminal_lease
 
     @asynccontextmanager
-    async def _recording(terminal_key: str, *, wait_s=None):
+    async def _recording(terminal_key: str, *, wait_s=None, holder=None, site=None):
         seen_at_acquire.append([r.getMessage() for r in _records(caplog)])
-        async with real(terminal_key, wait_s=wait_s):
+        async with real(terminal_key, wait_s=wait_s, holder=holder, site=site):
             yield
 
     monkeypatch.setattr(mt5_relogin, "mt5_terminal_lease", _recording)
@@ -1203,7 +1207,7 @@ async def test_a_hostile_lease_wait_falls_back_to_the_derived_default(
     assert await mt5_relogin.heal_mt5_terminal_session() is None
 
     assert len(acquisitions) == 1
-    _key, wait_s = acquisitions[0]
+    _key, wait_s, _holder, _site = acquisitions[0]
     assert wait_s is not None and math.isfinite(wait_s) and wait_s > 0, (
         f"MT5_RELOGIN_LEASE_WAIT_S={value!r} reached the lease as {wait_s!r}. A "
         "tuning typo must fall back to the derived default (WR-06)."
@@ -3835,7 +3839,7 @@ def _fail_at_credential_read(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def _fail_at_lease(monkeypatch: pytest.MonkeyPatch) -> None:
     @asynccontextmanager
-    async def _busy(terminal_key: str, *, wait_s=None):
+    async def _busy(terminal_key: str, *, wait_s=None, holder=None, site=None):
         raise Mt5TerminalBusyError(
             "the MT5 terminal was still in use when the acquisition bound expired"
         )
@@ -4296,8 +4300,12 @@ async def test_exactly_one_bounded_lease_over_a_client_built_inside_the_thread(
     await mt5_relogin.heal_mt5_terminal_session()
 
     assert len(acquisitions) == 1, f"expected ONE lease acquisition: {acquisitions}"
-    key, wait_s = acquisitions[0]
+    key, wait_s, holder, site = acquisitions[0]
     assert key == f"{_FAKE_HOST}:{_FAKE_PORT}"
+    # ⭐ Phase 164.6.6 criterion 1 — the heal holds the terminal for the HOUSE
+    # account, so a re-login it makes is recorded against the holder it
+    # displaced, under the heal's own site name.
+    assert (holder, site) == (HOLDER_HOUSE, SITE_HEAL)
     assert wait_s is not None and wait_s > 0, (
         "the boot heal took an UNBOUNDED lease acquire — it would queue a "
         "best-effort heal ahead of real work (D-29's bounded arm exists for "
@@ -5287,7 +5295,7 @@ async def test_TRACER_a_reading_that_measured_NOTHING_writes_no_row_and_closes_n
 
     if scenario_name == "busy_skip":
         @asynccontextmanager
-        async def _always_busy(terminal_key: str, *, wait_s=None):
+        async def _always_busy(terminal_key: str, *, wait_s=None, holder=None, site=None):
             raise Mt5TerminalBusyError(terminal_key, wait_s or 0.0)
             yield  # pragma: no cover — unreachable, keeps this a generator
 

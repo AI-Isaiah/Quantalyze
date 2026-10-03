@@ -155,7 +155,7 @@ from services.mt5_concurrency import (
     mt5_terminal_lease,
 )
 # Phase 164.6.6 criterion 1 — the lease-site names the handover record carries.
-from services.mt5_handover import SITE_DERIVE
+from services.mt5_handover import SITE_BALANCE, SITE_DERIVE
 # 153.6 / A3 — the operator-fault type + its curated copy, for the
 # classify_exception arm. worker -> services leaf, the correct direction (D-07):
 # `services/mt5_probe.py` imports only mt5_client + mt5_validation and can never
@@ -357,7 +357,9 @@ _NATIVE_RETURNS_VENUES: Final[frozenset[str]] = frozenset({"deribit", "sfox", "m
 logger = logging.getLogger("quantalyze.analytics.job_worker")
 
 
-async def _fetch_mt5_account_balance(session: Mt5Session) -> float | None:
+async def _fetch_mt5_account_balance(
+    session: Mt5Session, *, api_key_id: str | None = None
+) -> float | None:
     """MT5SYNC-02 (hotfix 2026-08-06) — best-effort account-equity read for
     ``run_sync_trades_job``'s balance-update arm when the key is mt5.
 
@@ -384,6 +386,12 @@ async def _fetch_mt5_account_balance(session: Mt5Session) -> float | None:
     MT5CONC-02 login bracket IS enforced: a mis-routed terminal presenting a
     different account can never stamp the WRONG account's equity onto this
     key.
+
+    ⭐ Phase 164.6.6 criterion 1 — ``api_key_id`` is the key this balance read
+    is for; the lease is taken in its name so a login that switches the shared
+    terminal to it is recorded against the holder it displaced. ``None`` (the
+    default, for direct callers that have no key row) records the holder as
+    ``unattributed`` — never an account number.
     """
     from services.mt5_client import Mt5AccountMismatchError
     from services.redact import scrub_freeform_string
@@ -409,7 +417,9 @@ async def _fetch_mt5_account_balance(session: Mt5Session) -> float | None:
         # `Mt5TerminalBusyError` is the INTERACTIVE validate path's contract
         # (D-29) — a batch worker that refused to wait would drop balance
         # snapshots whenever the derive job happened to hold the terminal.
-        async with mt5_terminal_lease(session.client.terminal_key):
+        async with mt5_terminal_lease(
+            session.client.terminal_key, holder=api_key_id, site=SITE_BALANCE
+        ):
             info = await asyncio.wait_for(
                 asyncio.to_thread(_read), timeout=_MT5_DERIVE_READ_TIMEOUT_S
             )
@@ -1571,7 +1581,9 @@ async def run_sync_trades_job(job: dict[str, Any]) -> DispatchResult:
             # is enqueued — so a healthy MT5 key completes the sync instead
             # of dying with an AttributeError.
             trades: list[dict[str, Any]] = []
-            account_balance = await _fetch_mt5_account_balance(ctx.exchange)
+            account_balance = await _fetch_mt5_account_balance(
+                ctx.exchange, api_key_id=ctx.key_row.get("id")
+            )
         else:
             trades = await fetch_all_trades(ctx.exchange, since_ms=since_ms)
             # Drain BEFORE the next exchange call so daily-PnL flags do not
