@@ -185,6 +185,8 @@ BEGIN
       USING ERRCODE = 'invalid_parameter_value';
   END IF;
 
+  PERFORM pg_advisory_xact_lock(hashtext('mark_compute_job_bridge'), hashtext(p_strategy_id::text));
+
   -- (d) no rows → preserve existing strategy_analytics row (unchanged).
   SELECT count(*) INTO v_job_count
     FROM compute_jobs
@@ -895,6 +897,7 @@ DECLARE
   v_kind_lists                 INTEGER;
   v_refresh_keep_anchored      BOOLEAN;
   v_keep_arms                  INTEGER;
+  v_bridge_lock_anchored       BOOLEAN;
 BEGIN
   -- ======================================================================
   -- (P0) THE COLUMN SHAPE. Type, nullability and defaultlessness are ASSERTED,
@@ -1500,6 +1503,20 @@ BEGIN
     FROM regexp_matches(v_body, 'WHEN\s+v_refresh_keep\s+AND\s+strategy_analytics\.computation_status\s*=\s*''complete''', 'g');
   IF v_keep_arms <> 2 THEN
     RAISE EXCEPTION 'bridge-residue: branch (a) carries % refresh keep arm(s), not 2 (the status arm and the stamp arm). Without the status arm a plain complete row is rewritten to computing on every marked in-scope refresh retry ([164.6.7-RETRY-PLAIN-COMPLETE]); without the stamp arm a kept complete row carries a stuck-computing reaper stamp.', v_keep_arms;
+  END IF;
+
+  -- (xii) D-06: the per-strategy lock, as the FIRST statement after the NULL
+  -- guard and before the first compute_jobs read. One statement-shaped regex
+  -- pins presence, namespace, key, two-integer form and both placements.
+  v_bridge_lock_anchored := v_body ~ 'END\s+IF\s*;\s*PERFORM\s+pg_advisory_xact_lock\s*\(\s*hashtext\s*\(\s*''mark_compute_job_bridge''\s*\)\s*,\s*hashtext\s*\(\s*p_strategy_id::text\s*\)\s*\)\s*;\s*SELECT\s+count\s*\(\s*\*\s*\)\s+INTO\s+v_job_count';
+  IF NOT v_bridge_lock_anchored THEN
+    RAISE EXCEPTION 'bridge-residue: sync_strategy_analytics_status does not take the two-integer mark_compute_job_bridge advisory lock on the strategy id as its first statement after the NULL-strategy guard. A direct caller (the Python DEFERRED path) then reads compute_jobs while an uncommitted terminal mark on the same strategy is changing it; above the guard, a NULL strategy would make the lock a silent no-op.';
+  END IF;
+
+  -- The namespace must not collide with the other two-integer advisory
+  -- namespace in this schema (the same check 20260926120000 makes).
+  IF hashtext('mark_compute_job_bridge') = hashtext('admin_role_mutate') THEN
+    RAISE EXCEPTION 'bridge-residue: hashtext(mark_compute_job_bridge) equals hashtext(admin_role_mutate) on this server, so a bridge call and an admin role mutation on colliding ids would serialize against each other.';
   END IF;
 
   RAISE NOTICE 'Migration 20261003120000: sync_strategy_analytics_status re-based on 20260906120000 (BRIDGERESIDUE, Phase 164.5.2.1); every carried 20260906120000 anchor passed on the new body, and this file''s own comment-stripped anchors passed after them.';
