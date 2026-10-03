@@ -398,3 +398,373 @@ async def test_a_validation_that_never_reached_a_login_neither_parks_nor_alerts(
     assert unparseable.value.status_code == 400
     park_sentry.capture_message.assert_not_called()
     assert _park_error_records(caplog) == []
+
+
+# --------------------------------------------------------------------------- #
+# Task 2 — every wizard exit where a park must NOT run, the floor at its
+# boundary, and the park's own failures.
+# --------------------------------------------------------------------------- #
+
+
+async def _wait_for_thread_event(event: threading.Event, timeout: float = 5.0) -> None:
+    """Wait for a fake's thread-side Event without blocking the loop."""
+    assert await asyncio.to_thread(event.wait, timeout), (
+        "the released probe thread never got past its login"
+    )
+
+
+async def _assert_no_park_after_the_probe_finishes(
+    transport: _RecordingMt5, blocker: threading.Event
+) -> None:
+    """Release the blocked probe, let its thread finish, and prove no park login
+    arrives LATER: the park is decided once and never retried."""
+    blocker.set()
+    await _wait_for_thread_event(transport.client_login_returned)
+    await asyncio.sleep(0.2)  # the zombie probe's remaining steps
+    assert transport.house_logins() == [], (
+        "a park login arrived after the blocked probe was released"
+    )
+
+
+async def test_no_park_while_the_probe_is_in_flight_after_a_stage_timeout(
+    exchange_router, monkeypatch, park_sentry, caplog
+):
+    """⛔ THE COMMON HUNG-TERMINAL EXIT. The stage ceiling fires (424) with the
+    probe thread still blocked inside the client's login. A park login now would
+    be a second caller on the pipe that thread still holds (W-1). None is sent,
+    before or after the probe is released, and the skip alerts
+    `probe_in_flight`."""
+    router = exchange_router
+    blocker = threading.Event()
+    transport = _RecordingMt5(_scenario(), block_client_login=blocker)
+    _install_real_mt5_client(router, transport)
+    monkeypatch.setattr(router, "_MT5_VALIDATE_STAGE_TIMEOUT_S", 0.2)
+    try:
+        with caplog.at_level(logging.DEBUG, logger=_ANALYTICS_LOGGER):
+            with pytest.raises(HTTPException) as ei:
+                await _call(router, _make_req())
+        assert ei.value.status_code == 424
+        assert not blocker.is_set()
+        assert transport.house_logins() == [], (
+            "a park login was sent while the probe thread was still blocked "
+            "(W-1 reproduced)"
+        )
+        _assert_one_alert(park_sentry, caplog, "probe_in_flight", _WIZARD)
+        await _assert_no_park_after_the_probe_finishes(transport, blocker)
+    finally:
+        blocker.set()
+
+
+async def test_no_park_while_the_probe_is_in_flight_after_the_deadline(
+    exchange_router, monkeypatch, park_sentry, caplog
+):
+    """The end-to-end deadline fires first (the stage ceiling stays real). Same
+    rule: the probe thread is still on the wire, so no park, `probe_in_flight`."""
+    router = exchange_router
+    blocker = threading.Event()
+    transport = _RecordingMt5(_scenario(), block_client_login=blocker)
+    _install_real_mt5_client(router, transport)
+    monkeypatch.setattr(router, "_MT5_VALIDATE_DEADLINE_S", 0.2)
+    try:
+        with caplog.at_level(logging.DEBUG, logger=_ANALYTICS_LOGGER):
+            with pytest.raises(HTTPException) as ei:
+                await _call(router, _make_req())
+        assert ei.value.status_code == 424
+        assert transport.house_logins() == [], (
+            "a park login was sent while the probe thread was still blocked"
+        )
+        _assert_one_alert(park_sentry, caplog, "probe_in_flight", _WIZARD)
+        await _assert_no_park_after_the_probe_finishes(transport, blocker)
+    finally:
+        blocker.set()
+
+
+async def test_no_park_after_a_probe_session_abandoned(
+    exchange_router, monkeypatch, park_sentry, caplog
+):
+    """The lease fence fired on the probe's session after its login. The thread
+    has returned (so the Event alone would allow a park); the disqualifier is
+    what refuses it."""
+    router = exchange_router
+    transport = _RecordingMt5(_scenario())
+    _install_real_mt5_client(router, transport)
+
+    def _fenced_probe(client, *, login, investor_pw, server, log_prefix):
+        client.login(login, investor_pw, server)
+        raise Mt5SessionAbandoned("account_info")
+
+    monkeypatch.setattr(router, "run_probe", _fenced_probe)
+    with caplog.at_level(logging.DEBUG, logger=_ANALYTICS_LOGGER):
+        with pytest.raises(HTTPException) as ei:
+            await _call(router, _make_req())
+    assert ei.value.status_code == 424
+    assert transport.house_logins() == []
+    _assert_one_alert(park_sentry, caplog, "probe_session_abandoned", _WIZARD)
+
+
+async def test_no_park_after_a_probe_account_mismatch(
+    exchange_router, park_sentry, caplog
+):
+    """Another actor switched the terminal mid-probe (the login bracket saw a
+    different account). Parking would log over THEIR session: no park,
+    `probe_account_mismatch`."""
+    router = exchange_router
+    other = _FakeNamedTuple(trade_allowed=False, balance=1.0, login=999999)
+    transport = _RecordingMt5(_scenario(other))
+    _install_real_mt5_client(router, transport)
+    with caplog.at_level(logging.DEBUG, logger=_ANALYTICS_LOGGER):
+        with pytest.raises(HTTPException) as ei:
+            await _call(router, _make_req())
+    assert ei.value.status_code == 424
+    assert transport.house_logins() == []
+    _assert_one_alert(park_sentry, caplog, "probe_account_mismatch", _WIZARD)
+
+
+class _ParkClock:
+    """The router's `_park_clock`: the deadline stamp reads `start`, every later
+    read reads `start + elapsed`. Drives the floor boundary exactly."""
+
+    def __init__(self, elapsed: float) -> None:
+        self._start = 1000.0
+        self._elapsed = elapsed
+        self.calls = 0
+
+    def __call__(self) -> float:
+        self.calls += 1
+        return self._start if self.calls == 1 else self._start + self._elapsed
+
+
+async def _run_with_elapsed(router, monkeypatch, elapsed: float) -> _RecordingMt5:
+    clock = _ParkClock(elapsed)
+    monkeypatch.setattr(router, "_park_clock", clock)
+    transport = _RecordingMt5(_scenario())
+    _install_real_mt5_client(router, transport)
+    assert await _call(router, _make_req()) == {"valid": True, "read_only": True}
+    assert clock.calls == 2, f"the park clock was read {clock.calls} times, not 2"
+    return transport
+
+
+async def test_no_park_when_the_deadline_budget_is_spent(
+    exchange_router, monkeypatch, park_sentry, caplog
+):
+    """A probe that used the whole end-to-end deadline leaves no budget for a
+    park to finish in: `budget_exhausted`, no park login."""
+    router = exchange_router
+    with caplog.at_level(logging.DEBUG, logger=_ANALYTICS_LOGGER):
+        transport = await _run_with_elapsed(
+            router, monkeypatch, router._MT5_VALIDATE_DEADLINE_S
+        )
+    assert transport.house_logins() == []
+    _assert_one_alert(park_sentry, caplog, "budget_exhausted", _WIZARD)
+
+
+async def test_no_park_just_under_the_park_budget_floor(
+    exchange_router, monkeypatch, park_sentry, caplog
+):
+    """One millisecond under `_MT5_PARK_MIN_BUDGET_S` of unspent deadline: a park
+    started now could have its ceiling fire with the park still on the wire
+    after release. Skipped as `budget_exhausted`; no park login."""
+    router = exchange_router
+    elapsed = router._MT5_VALIDATE_DEADLINE_S - router._MT5_PARK_MIN_BUDGET_S + 0.001
+    with caplog.at_level(logging.DEBUG, logger=_ANALYTICS_LOGGER):
+        transport = await _run_with_elapsed(router, monkeypatch, elapsed)
+    assert transport.house_logins() == []
+    _assert_one_alert(park_sentry, caplog, "budget_exhausted", _WIZARD)
+
+
+async def test_the_park_runs_with_exactly_the_park_budget_floor_left(
+    exchange_router, monkeypatch, park_sentry
+):
+    """Exactly `_MT5_PARK_MIN_BUDGET_S` left parks (the floor is inclusive). An
+    off-by-one floor fails here."""
+    router = exchange_router
+    elapsed = router._MT5_VALIDATE_DEADLINE_S - router._MT5_PARK_MIN_BUDGET_S
+    transport = await _run_with_elapsed(router, monkeypatch, elapsed)
+    assert len(transport.house_logins()) == 1
+    park_sentry.capture_message.assert_not_called()
+
+
+def test_the_park_floor_is_the_stage_bound_and_fits_inside_the_deadline(
+    exchange_router,
+):
+    """The floor is DERIVED (an alias of the stage bound, whose inner rpyc bound
+    fires first), and the deadline leaves room for it after a fast probe. The
+    105 s client-budget sum is pinned, unchanged, in test_mt5_validate.py."""
+    router = exchange_router
+    assert router._MT5_PARK_MIN_BUDGET_S == router._MT5_VALIDATE_STAGE_TIMEOUT_S
+    assert router._MT5_PARK_MIN_BUDGET_S < router._MT5_VALIDATE_DEADLINE_S
+
+
+async def test_a_refused_park_login_changes_nothing_the_caller_sees(
+    exchange_router, park_sentry, caplog
+):
+    """The terminal answers the house login with no (the real client raises
+    `Mt5LoginRefusedError`): the verdict stands, `login_refused` alerts, and no
+    credential reaches a log line or a capture."""
+    router = exchange_router
+    transport = _RecordingMt5(
+        _scenario(last_error=(-6, "Authorization failed")), house_login_result=False
+    )
+    _install_real_mt5_client(router, transport)
+    with caplog.at_level(logging.DEBUG, logger=_ANALYTICS_LOGGER):
+        result = await _call(router, _make_req())
+    assert result == {"valid": True, "read_only": True}
+    assert len(transport.house_logins()) == 1
+    _assert_one_alert(park_sentry, caplog, "login_refused", _WIZARD)
+    _assert_no_credential_leak(park_sentry, caplog)
+    assert mt5_client.mt5_terminal_holder(_VAL_KEY) != mt5_client.HOLDER_HOUSE
+
+
+async def test_a_raising_park_login_changes_nothing_the_caller_sees(
+    exchange_router, park_sentry, caplog
+):
+    """A transport raise on the house login, carrying the fabricated password in
+    its text: the real client scrubs it into `Mt5ClientError`, the park alerts
+    `client_error`, and the verdict stands."""
+    router = exchange_router
+    transport = _RecordingMt5(
+        _scenario(),
+        house_login_raises=RuntimeError(f"remote boom password={_HOUSE_PASSWORD}"),
+    )
+    _install_real_mt5_client(router, transport)
+    with caplog.at_level(logging.DEBUG, logger=_ANALYTICS_LOGGER):
+        result = await _call(router, _make_req())
+    assert result == {"valid": True, "read_only": True}
+    _assert_one_alert(park_sentry, caplog, "client_error", _WIZARD)
+    _assert_no_credential_leak(park_sentry, caplog)
+
+
+async def test_a_park_whose_ceiling_fires_alerts_and_only_the_release_follows(
+    exchange_router, monkeypatch, park_sentry, caplog
+):
+    """The park's own ceiling fires (both round-trips slow, the named residual).
+    It alerts `ceiling`, the verdict stands, and the ONLY thing that then
+    touches the client is the existing bounded release. When the abandoned park
+    thread finally returns, the epoch guard refuses its `house` stamp: its lease
+    is gone."""
+    router = exchange_router
+    blocker = threading.Event()
+    transport = _RecordingMt5(_scenario(), block_house_login=blocker)
+    _install_real_mt5_client(router, transport)
+    monkeypatch.setattr(router, "_MT5_PARK_MIN_BUDGET_S", 0.2)
+    try:
+        with caplog.at_level(logging.DEBUG, logger=_ANALYTICS_LOGGER):
+            result = await _call(router, _make_req())
+        assert result == {"valid": True, "read_only": True}
+        _assert_one_alert(park_sentry, caplog, "ceiling", _WIZARD)
+        house_at = transport.events.index(transport.house_logins()[0])
+        assert transport.events[house_at + 1:] == [("release",)], (
+            f"after the park ceiling fired the client saw "
+            f"{transport.events[house_at + 1:]!r}; only the release may follow"
+        )
+    finally:
+        blocker.set()
+    await _wait_for_thread_event(transport.house_login_returned)
+    await asyncio.sleep(0.2)
+    assert mt5_client.mt5_terminal_holder(_VAL_KEY) != mt5_client.HOLDER_HOUSE
+
+
+@pytest.mark.parametrize(
+    "raised",
+    [Mt5ClientError(-2, "Invalid params"), RuntimeError("unexpected")],
+    ids=["Mt5ClientError", "any-other-exception"],
+)
+async def test_a_probe_that_raised_after_the_login_still_parks(
+    exchange_router, monkeypatch, raised
+):
+    """The thread returned and no fence fired, so the user's session may be on
+    the terminal: it is parked, whatever the probe raised, and the probe's own
+    outcome still leaves the function."""
+    router = exchange_router
+    transport = _RecordingMt5(_scenario())
+    _install_real_mt5_client(router, transport)
+
+    def _raising_probe(client, *, login, investor_pw, server, log_prefix):
+        client.login(login, investor_pw, server)
+        raise raised
+
+    monkeypatch.setattr(router, "run_probe", _raising_probe)
+    with pytest.raises(Exception) as ei:
+        await _call(router, _make_req())
+    if isinstance(raised, Mt5ClientError):
+        assert isinstance(ei.value, HTTPException) and ei.value.status_code == 424
+    else:
+        assert ei.value is raised
+    assert len(transport.house_logins()) == 1
+    assert transport.events[-1] == ("release",)
+
+
+# --- park_on_house_account, directly: every failure arm returns False, loudly.
+
+
+def _park_client(raises: BaseException | None) -> MagicMock:
+    client = MagicMock(name="Mt5Client")
+    client.terminal_key = _VAL_KEY
+    client.login = MagicMock(side_effect=raises)
+    return client
+
+
+@pytest.mark.parametrize(
+    ("raises", "cause"),
+    [
+        (Mt5LoginRefusedError(-6, "Authorization failed"), "login_refused"),
+        (Mt5ClientError(-10004, "No IPC connection"), "client_error"),
+        (Mt5SessionAbandoned("login"), "session_abandoned"),
+        (ValueError(f"boom {_HOUSE_PASSWORD}"), "client_error"),
+    ],
+    ids=["refused", "client-error", "fenced", "unexpected"],
+)
+def test_park_on_house_account_never_raises_and_alerts_each_failure(
+    park_sentry, caplog, raises, cause
+):
+    client = _park_client(raises)
+    with caplog.at_level(logging.DEBUG, logger=_ANALYTICS_LOGGER):
+        ok = mt5_probe.park_on_house_account(
+            client, house=(_HOUSE_LOGIN, _HOUSE_PASSWORD, _HOUSE_SERVER), site=_WIZARD
+        )
+    assert ok is False
+    client.login.assert_called_once_with(_HOUSE_LOGIN, _HOUSE_PASSWORD, _HOUSE_SERVER)
+    _assert_one_alert(park_sentry, caplog, cause, _WIZARD)
+    _assert_no_credential_leak(park_sentry, caplog)
+
+
+def test_an_unknown_cause_is_never_interpolated(park_sentry, caplog):
+    with caplog.at_level(logging.DEBUG, logger=_ANALYTICS_LOGGER):
+        mt5_probe.report_park_skipped("password=hunter2", site=_WIZARD)
+    rendered = " ".join(r.getMessage() for r in caplog.records)
+    assert "hunter2" not in rendered and "hunter2" not in repr(park_sentry.mock_calls)
+    park_sentry.set_tag.assert_called_once_with(
+        "mt5_validation_park_failed", "unrecognised_cause"
+    )
+
+
+class _FakeParkTime:
+    def __init__(self) -> None:
+        self.now = 5000.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+
+def test_the_park_alert_captures_once_per_cause_per_window_and_logs_every_time(
+    monkeypatch, park_sentry, caplog
+):
+    fake = _FakeParkTime()
+    monkeypatch.setattr(mt5_probe, "time", fake)
+    with caplog.at_level(logging.DEBUG, logger=_ANALYTICS_LOGGER):
+        mt5_probe.report_park_skipped("probe_in_flight", site=_WIZARD)
+        fake.now += 3599.0
+        mt5_probe.report_park_skipped("probe_in_flight", site=_WORKER)
+        mt5_probe.report_park_skipped("budget_exhausted", site=_WIZARD)
+        fake.now += 2.0
+        mt5_probe.report_park_skipped("probe_in_flight", site=_WIZARD)
+    assert len(_park_error_records(caplog)) == 4
+    tags = [c.args[1] for c in park_sentry.set_tag.call_args_list]
+    assert tags == ["probe_in_flight", "budget_exhausted", "probe_in_flight"]
+
+
+def test_a_raising_sentry_never_escapes_the_park_alert(monkeypatch):
+    spy = MagicMock()
+    spy.capture_message.side_effect = RuntimeError("sentry down")
+    monkeypatch.setattr(mt5_probe, "sentry_sdk", spy)
+    mt5_probe.report_park_skipped("ceiling", site=_WIZARD)  # must not raise
