@@ -1,5 +1,42 @@
 # Changelog
 
+## [0.123.0.1] - 2026-10-04 — UATCLOSE: 14 phases closed after the 2026-10-03 production UAT, and one stale runbook sentence corrected
+
+⭐ **What changed for whoever reads this next.** The 2026-10-03 production UAT pass was recorded
+against the deployed build, and 14 phases that sat at `human_needed` are now `passed`: 161,
+164.6.7, 166, 166.1, 166.2, 167.1, 167.2, 167.2.1, 169, 169.2, 169.3, 169.4, 169.4.1 and 169.5.
+No app code, migration or dependency ships here. The bump is the 4th digit because the one
+non-planning change is a runbook note.
+
+### Changed
+- **`docs/runbooks/ledger-refresh-go-live.md` item 3** gets a dated `CORRECTED 2026-10-03` note.
+  The sentence saying PROD composite `computation_warned` is unmeasured was stale. It is measured
+  now: 2 of the 3 live composite rows carry TRUE (read-only, 2026-10-03 21:31Z). The old sentence
+  is kept as lineage.
+- **Each of the 14 VERIFICATION files** carries a `uat_2026_10_03` frontmatter block. Every
+  human-verification item gets a result (PASS, DECIDED, NO-SAMPLE-residual or ROUTED) with its
+  evidence ids and, where the founder decided, the AskUserQuestion answer quoted. `169.5`'s
+  `score:` scalar is quoted so its frontmatter parses. `verified_at_sha` and `drift_subjects`
+  are untouched.
+- **ROADMAP and STATE.** `phase complete` ran for all 14. ROADMAP keeps only their completion
+  marks and gains phase-list lines for 169.2, 169.4, 169.4.1 and 169.5. STATE keeps
+  `current_phase` 164.6.6, and its progress moves 55 → 69 completed phases (73%).
+- VERSION and package.json 0.123.0.0 → 0.123.0.1.
+
+### Notes
+- **NO-SAMPLE is not PASS.** Under the founder's NO-SAMPLE policy, "Close, record as residual
+  (Rec.)", a check with no PROD sample on 2026-10-03 is recorded as a residual covered by tests.
+  Two of them are live-event watch items: 161 #1 (a live MT5 `undetermined` verdict) and
+  164.6.7 #3 (the first scheduled composite fan-out). The evidence names no owning phase for
+  either.
+- **FAIL readings are routed, not waived.** Under "One fix phase, after 164.6.6 (Rec.)" they go to
+  Phase 164.6.6.3 UATFIXES, booked on the 164.6.6 branch, which reaches main with 164.6.6's PR:
+  defect 2 (169 #1, the Quantum Drift composite contradicts itself), defect 3 (166.2 #1, a
+  constant-zero series shows 0.00 ratios and a false KS verdict), defect 4 (169.4.1 #1, an OG
+  card Sharpe dash against a factsheet value), defect 5 (167.2.1 #2, the Eclipse note copy), and
+  the small ones. The PROD recompute goes to Phase 166.3.
+- 164.5.3, 164.6.5 and 164.6.2 are still waiting on the live password change and were not closed.
+
 ## [0.123.0.0] - 2026-10-03 — SUBSETSHARD: a FULL sql-mutation run drives four gate files at once inside its one job, and a drift-only red main no longer forces one
 
 ⭐ **What changed for whoever reads this next.** Full `sql-mutation` runs had outgrown the 20-minute
