@@ -917,6 +917,7 @@ def test_mt5_session_repr_does_not_leak_credentials():
         login=50123456,
         investor_password="s3cr3t-investor-pw",
         server="TopBroker-Live-7",
+        venue_account_id="50123456",
     )
     text = repr(session)
     assert "s3cr3t-investor-pw" not in text

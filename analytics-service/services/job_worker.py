@@ -1136,9 +1136,15 @@ def _make_mt5_session(
     parse is fail-CLOSED OFFLINE via the ONE mt5_validation seam (a structurally
     invalid slot combo raises before any live RPyC probe). A missing
     MT5_GATEWAY_HOST/PORT is a SERVER misconfig (never blames the user's creds),
-    propagated as a RuntimeError exactly like the adapter."""
+    propagated as a RuntimeError exactly like the adapter.
+
+    The session also carries the key's venue account id, built from the RAW
+    login slot by ``mt5_validation.mt5_venue_account_id`` (the helper the rotate
+    route uses), so the poll's identity stamp writes what rotate writes and,
+    for ASCII whitespace, what connect writes (see that helper for the
+    code-point difference), never the int-parsed ``login``."""
     from services.mt5_client import Mt5Client
-    from services.mt5_validation import parse_mt5_credentials
+    from services.mt5_validation import mt5_venue_account_id, parse_mt5_credentials
 
     login, investor_pw, server = parse_mt5_credentials(api_key, api_secret, passphrase)
     host = os.getenv("MT5_GATEWAY_HOST")
@@ -1153,6 +1159,7 @@ def _make_mt5_session(
         login=login,
         investor_password=investor_pw,
         server=server,
+        venue_account_id=mt5_venue_account_id(api_key),
     )
 
 
@@ -1304,6 +1311,11 @@ async def _exchange_preflight(
 # Inherited deferrals" for a future phase.
 
 
+# The allocator poll's handler name, shared by the handler and the preflight's
+# build-failure arm below (167.1.2-08 review, SFH H-1).
+_POLL_ALLOCATOR_HANDLER: Final = "run_poll_allocator_positions_job"
+
+
 async def _allocator_key_preflight(
     job: dict[str, Any], handler_name: str
 ) -> DispatchResult | _ExchangeContext:
@@ -1313,6 +1325,23 @@ async def _allocator_key_preflight(
     directly via job['api_key_id']. Still runs the per-exchange circuit
     breaker (f8 contagion accepted) and decrypts credentials before
     constructing the CCXT exchange.
+
+    167.1.2-08 review, SFH H-1: when the decrypt or the client construction
+    raises for the allocator POLL, an unstamped key gets an identity ERROR
+    (``account_identity.escalate_session_build_failure``, not age-gated: the
+    dispatcher's own record of this failure is a WARNING) and the SAME
+    exception is re-raised unchanged. The poll is
+    where the identity stamp lives, so a key whose session cannot be built
+    would otherwise never say its duplicate check is not running. The other
+    allocator handlers do not stamp and are unaffected, so it is one line per
+    POLL ATTEMPT, never one per handler. That is not one per key per day: the
+    arm fires on every attempt, a dispatcher retry of the FAILED job included
+    (167.1.2-08 review round 2, IN-R2-05). A circuit-breaker DEFERRED for the
+    poll runs the age-gated ``account_identity.escalate_if_unchecked``
+    (``cause=poll_deferred``, SFH R2-L1) and returns the same deferral. Keyed
+    on ``handler_name`` rather than a new
+    parameter so the preflight's call shape, which many test doubles
+    reproduce, is unchanged.
     """
     api_key_id = job.get("api_key_id")
     if not api_key_id:
@@ -1354,12 +1383,28 @@ async def _allocator_key_preflight(
     # next_attempt_at.
     defer_result = await _check_circuit_breaker(supabase, job, key_row)
     if defer_result is not None:
+        if handler_name == _POLL_ALLOCATOR_HANDLER:
+            from services import account_identity
+
+            # 167.1.2-08 review round 2, SFH R2-L1: a deferred poll returns
+            # before the handler's try, so neither the stamp nor its finally
+            # escalation runs. Age-gated and never raises; the deferral is
+            # returned unchanged.
+            account_identity.escalate_if_unchecked(key_row, cause="poll_deferred")
         return defer_result
 
-    api_key, api_secret, passphrase = decrypt_credentials(key_row, kek)
-    exchange = _make_exchange_client(
-        key_row["exchange"], api_key, api_secret, passphrase
-    )
+    try:
+        api_key, api_secret, passphrase = decrypt_credentials(key_row, kek)
+        exchange = _make_exchange_client(
+            key_row["exchange"], api_key, api_secret, passphrase
+        )
+    except Exception as build_exc:
+        if handler_name == _POLL_ALLOCATOR_HANDLER:
+            from services import account_identity
+
+            # Never raises, so it cannot replace the exception re-raised below.
+            account_identity.escalate_session_build_failure(key_row, build_exc)
+        raise
 
     return _ExchangeContext(
         supabase=supabase,
@@ -9178,10 +9223,16 @@ async def run_poll_allocator_positions_job(job: dict[str, Any]) -> DispatchResul
     Phase 167.1.2 plan 04 (D-01 / D-11): after the holdings persist, and while
     the exchange session is still open (the outer ``finally`` closes it after
     the DONE return), ``stamp_account_identity`` stamps a ccxt key's venue
-    account id or marks it as sharing an account with a live sibling. The step
-    never raises, writes no status column and is bounded by what is left of
-    this handler's timeout, so the DispatchResult is the one the poll would
-    return without it (Pitfall 4).
+    account id or marks it as sharing an account with a live sibling. An MT5
+    key is stamped BEFORE the fetch instead, from the login its session
+    carries, so a failing MT5 poll still stamps (167.1.2-08 review, SFH H-1).
+    The step never raises, writes no status column and is bounded by what is
+    left of this handler's timeout, so the DispatchResult is the one the poll
+    would return without it (Pitfall 4). A poll that never called the stamp
+    (a ccxt poll that failed, a poll the circuit breaker deferred, or a session
+    that could not be built) runs an escalation check instead
+    (``account_identity.escalate_if_unchecked``; the deferral and the build
+    failure run theirs inside the preflight).
     """
     from services import account_identity
     from services.allocator_positions import (
@@ -9195,7 +9246,9 @@ async def run_poll_allocator_positions_job(job: dict[str, Any]) -> DispatchResul
     # The handler's own start, for the identity stamp's budget below. The
     # worker's wait_for starts its clock at the same call.
     handler_started = asyncio.get_running_loop().time()
-    ctx = await _allocator_key_preflight(job, "run_poll_allocator_positions_job")
+    # A session that cannot be built (SFH H-1), or a deferred poll (SFH R2-L1),
+    # escalates inside the preflight.
+    ctx = await _allocator_key_preflight(job, _POLL_ALLOCATOR_HANDLER)
     if isinstance(ctx, DispatchResult):
         # f8: DEFERRED passes through unchanged; api_keys.sync_status
         # stays 'syncing' and compute_jobs stays pending.
@@ -9206,7 +9259,35 @@ async def run_poll_allocator_positions_job(job: dict[str, Any]) -> DispatchResul
     venue = ctx.key_row["exchange"]
     today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
+    def _identity_budget_s() -> float:
+        # What is left of this handler's timeout, so the stamp can never run
+        # the poll past its own ceiling.
+        return min(
+            _IDENTITY_STAMP_TIMEOUT_S,
+            TIMEOUT_PER_KIND["poll_allocator_positions"]
+            - (asyncio.get_running_loop().time() - handler_started)
+            - _IDENTITY_STAMP_MARGIN_S,
+        )
+
+    # Whether this poll called the identity stamp. A path that did not (a
+    # ccxt poll that failed before DONE) gets the escalation check in the
+    # ``finally`` instead, so a key whose polls keep failing is not silent.
+    identity_attempted = False
+
     try:
+        if venue == "mt5":
+            # 167.1.2-08 review, SFH H-1 / IN-04. The MT5 stamp reads the login
+            # text the session was built with and makes NO terminal call, so it
+            # runs BEFORE the fetch: whatever the fetch then does (a gateway
+            # wedge, a refused sign-in, a 429, a persist failure), the key is
+            # stamped or marked. It also runs before the terminal has used any
+            # of the handler's time, so a slow poll can no longer starve it.
+            # The step never raises and writes no status column (Pitfall 4).
+            identity_attempted = True
+            await account_identity.stamp_account_identity(
+                ctx.supabase, ctx.key_row, ctx.exchange,
+                timeout_s=_identity_budget_s(),
+            )
         try:
             rows, warning = await fetch_allocator_holdings(
                 venue, ctx.exchange, api_key_id=api_key_id
@@ -9542,19 +9623,25 @@ async def run_poll_allocator_positions_job(job: dict[str, Any]) -> DispatchResul
 
         # Phase 167.1.2 plan 04 — the account identity stamp. Its token is
         # logged by the step itself and read by nothing here: the return below
-        # does not depend on it.
-        identity_budget_s = min(
-            _IDENTITY_STAMP_TIMEOUT_S,
-            TIMEOUT_PER_KIND["poll_allocator_positions"]
-            - (asyncio.get_running_loop().time() - handler_started)
-            - _IDENTITY_STAMP_MARGIN_S,
-        )
-        await account_identity.stamp_account_identity(
-            ctx.supabase, ctx.key_row, ctx.exchange, timeout_s=identity_budget_s
-        )
+        # does not depend on it. A ccxt stamp needs the venue, so it runs on
+        # the DONE path only. MT5 was stamped before the fetch and is NOT
+        # stamped again: ``ctx.key_row`` predates that write, so a second call
+        # would rewrite its marker and audit the same duplicate twice.
+        if not identity_attempted:
+            identity_attempted = True
+            await account_identity.stamp_account_identity(
+                ctx.supabase, ctx.key_row, ctx.exchange,
+                timeout_s=_identity_budget_s(),
+            )
 
         return DispatchResult(outcome=DispatchOutcome.DONE)
     finally:
+        if not identity_attempted:
+            # A ccxt poll that ended before DONE (167.1.2-08 SFH H-1).
+            # Synchronous and never raises, so it cannot mask the outcome.
+            account_identity.escalate_if_unchecked(
+                ctx.key_row, cause="poll_did_not_complete"
+            )
         try:
             await aclose_exchange(ctx.exchange)
         except Exception:  # pragma: no cover - defensive cleanup

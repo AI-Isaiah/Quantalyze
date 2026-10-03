@@ -618,6 +618,7 @@ def _session(transport: _RecordingMt5Transport):
         login=EXPECTED_LOGIN,
         investor_password="pw",
         server="Broker-Live",
+        venue_account_id=str(EXPECTED_LOGIN),
     )
 
 

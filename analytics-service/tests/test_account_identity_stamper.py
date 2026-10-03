@@ -90,6 +90,9 @@ class _Query:
     def limit(self, _n: int) -> _Query:
         return self
 
+    def maybe_single(self) -> _Query:
+        return self
+
     def order(self, *_a: Any, **_k: Any) -> _Query:
         return self
 
@@ -229,10 +232,12 @@ async def test_already_stamped_key_makes_no_venue_call_and_no_write() -> None:
     assert sb.calls == []
 
 
-@pytest.mark.parametrize("venue", ["mt5", "sfox"])
+@pytest.mark.parametrize("venue", ["sfox"])
 async def test_non_ccxt_venues_are_skipped(venue: str) -> None:
-    # MT5's identity is its login (stamped at connect); sFOX has no known
-    # account id (D-10). Neither is ever read or written here.
+    # sFOX has no known account id (D-10), so it is never read or written here.
+    # MT5 used to be listed too; since debug session unstamped-venue-account-id
+    # (founder Option B) the poll stamps an MT5 key from its login, pinned in
+    # the MT5 section at the end of this file.
     sb = FakeSupabase()
     ex = MagicMock()
 
@@ -298,7 +303,13 @@ async def test_the_account_id_value_never_reaches_the_log(
 
 
 def _drive_poll(
-    monkeypatch: pytest.MonkeyPatch, key_row: dict[str, Any], sb: FakeSupabase, exchange: Any
+    monkeypatch: pytest.MonkeyPatch,
+    key_row: dict[str, Any],
+    sb: FakeSupabase,
+    exchange: Any,
+    *,
+    fetch: Callable[..., Any] | None = None,
+    persist: Callable[..., Any] | None = None,
 ) -> Any:
     from services import allocator_positions as ap_mod
     from services import audit as audit_module
@@ -325,8 +336,8 @@ def _drive_poll(
 
     monkeypatch.setattr(jw, "_allocator_key_preflight", _fake_preflight)
     monkeypatch.setattr(jw, "aclose_exchange", _fake_close)
-    monkeypatch.setattr(ap_mod, "fetch_allocator_holdings", _fake_fetch)
-    monkeypatch.setattr(ap_mod, "persist_allocator_holdings", _fake_persist)
+    monkeypatch.setattr(ap_mod, "fetch_allocator_holdings", fetch or _fake_fetch)
+    monkeypatch.setattr(ap_mod, "persist_allocator_holdings", persist or _fake_persist)
     monkeypatch.setattr(audit_module, "log_audit_event", MagicMock())
     sb.rpc = MagicMock()  # type: ignore[attr-defined]
 
@@ -1285,10 +1296,10 @@ async def test_a_zulu_timestamp_is_read_as_utc(caplog: pytest.LogCaptureFixture)
 @pytest.mark.parametrize(
     "row",
     [
-        # sFOX and MT5 are never stamped here (skipped_no_budget is decided
-        # before the venue check), so there is no check to be missing.
+        # sFOX is never stamped here (skipped_no_budget is decided before the
+        # venue check), so there is no check to be missing. MT5 is stamped now
+        # and escalates like a ccxt key (MT5 section, end of file).
         pytest.param({"exchange": "sfox"}, id="not-ccxt"),
-        pytest.param({"exchange": "mt5"}, id="mt5"),
         # A stamped key's duplicate check has run; nothing is missing.
         pytest.param({"venue_account_id": "70000002"}, id="already-stamped"),
         # The column is NOT NULL and the poll loads select("*"), so an absent
@@ -1310,3 +1321,716 @@ async def test_no_escalation_where_no_duplicate_check_is_missing(
 
     assert _escalation_records(caplog) == []
     assert not [r for r in caplog.records if r.levelname == "ERROR"]
+
+
+# ---------------------------------------------------------------------------
+# MT5 — the poll stamps an MT5 key from its login (debug session
+# unstamped-venue-account-id, founder Option B, 2026-10-03)
+# ---------------------------------------------------------------------------
+#
+# Why. An MT5 key connected before migration 20260812083206 (the column) has a
+# NULL venue_account_id, and until this change nothing ever wrote one: the poll
+# stamper skipped MT5 and the connect/rotate routes only stamp on connect or on
+# a password correction. With a NULL id the unique index cannot see two live
+# MT5 keys on one broker account, so the allocator book sums that account
+# twice. MEASURED on PROD 2026-10-03: two such keys behave as one account.
+#
+# The identity is the login exactly as the connect route stores it
+# (validate-and-encrypt: ``api_key.trim()``) and as rotate returns it
+# (routers/internal.py: ``(login or "").strip() or None``): the stripped TEXT
+# of the login slot, never ``str(int(login))``. ``int()`` accepts ``"007"``;
+# ``str(int)`` would write ``"7"`` and a poll-stamped key would never collide
+# with a connect-stamped key on the same account. The collision path is the
+# ccxt one, unchanged: index refusal -> holder look-up -> 'duplicate' marker ->
+# one api_key.account_duplicate_detected audit.
+#
+# ⛔ The broker server is NOT part of the identity (TODOS.md A-3), on purpose:
+# connect stores the login alone, so a server-qualified poll value would never
+# collide with a connect-stamped key. The poll's collision set is exactly
+# connect's, no wider.
+
+# Synthetic login. Never logged, so tests assert its absence.
+MT5_LOGIN = "80000017"
+MT5_SERVER = "Synthetic-Server"
+
+
+def _mt5_session(monkeypatch: pytest.MonkeyPatch, login_slot: str) -> Any:
+    """An Mt5Session built by the REAL preflight constructor, so a test fails if
+    the constructor stops carrying the login text. The RPyC client is a fake
+    (``Mt5Client.__init__`` opens a transport), and it must see no call."""
+    from services import job_worker as jw
+    from services import mt5_client as mt5_client_module
+
+    monkeypatch.setenv("MT5_GATEWAY_HOST", "gateway.invalid")
+    monkeypatch.setenv("MT5_GATEWAY_PORT", "18812")
+    monkeypatch.setattr(
+        mt5_client_module, "Mt5Client", MagicMock(return_value=MagicMock(name="client"))
+    )
+    return jw._make_mt5_session(login_slot, "synthetic-investor-pw", MT5_SERVER)
+
+
+def _mt5_row(**overrides: Any) -> dict[str, Any]:
+    return _key_row(exchange="mt5", **overrides)
+
+
+def _mt5_unique_violation() -> APIError:
+    return APIError({
+        "code": "23505",
+        "message": (
+            "duplicate key value violates unique constraint "
+            '"api_keys_user_exchange_venue_account_uniq"'
+        ),
+        "details": f"Key (user_id, exchange, venue_account_id)=(x, mt5, {MT5_LOGIN}) already exists.",
+        "hint": None,
+    })
+
+
+def _mt5_collision_responder() -> Callable[[_Call], Any]:
+    def _r(call: _Call) -> Any:
+        if call.table == "api_keys" and call.op == "update" and (
+            call.payload or {}
+        ).get("venue_account_id") is not None:
+            return _mt5_unique_violation()
+        if call.table == "api_keys" and call.op == "select":
+            return MagicMock(data=[{"id": HOLDER_ID}])
+        return None
+
+    return _r
+
+
+async def test_mt5_null_identity_key_is_stamped_from_its_login_without_touching_the_terminal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sb = FakeSupabase()
+    session = _mt5_session(monkeypatch, MT5_LOGIN)
+
+    outcome = await _stamp(sb, _mt5_row(), session)
+
+    assert outcome == "stamped"
+    assert sb.updates() == [{
+        "venue_account_id": MT5_LOGIN,
+        "account_shared_with_api_key_id": None,
+        "account_share_kind": None,
+    }]
+    _assert_write_set_is_identity_only(sb)
+    # The login is already in the decrypted session: no login, no account_info,
+    # no terminal lease. A stamp that drove the terminal would contend with the
+    # one shared MT5 terminal for nothing.
+    assert session.client.mock_calls == []
+
+
+@pytest.mark.parametrize(
+    ("login_slot", "expected"),
+    [
+        pytest.param(MT5_LOGIN, MT5_LOGIN, id="bare"),
+        # connect's api_key.trim() and rotate's .strip(): surrounding whitespace
+        # goes, nothing else changes.
+        pytest.param(f"  {MT5_LOGIN}\t", MT5_LOGIN, id="padded"),
+        # int() accepts both; connect stores them verbatim. str(int(...)) would
+        # write "80000017" for each, and never collide with the connect value.
+        pytest.param("0080000017", "0080000017", id="leading-zeros"),
+        pytest.param(" 8000_0017 ", "8000_0017", id="underscore"),
+    ],
+)
+async def test_mt5_identity_is_the_login_text_connect_stores_never_its_int_form(
+    monkeypatch: pytest.MonkeyPatch, login_slot: str, expected: str,
+) -> None:
+    sb = FakeSupabase()
+
+    await _stamp(sb, _mt5_row(), _mt5_session(monkeypatch, login_slot))
+
+    stamped = [u["venue_account_id"] for u in sb.updates() if u.get("venue_account_id")]
+    assert stamped == [expected]
+
+
+async def test_mt5_identity_form_is_the_one_rotate_returns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Poll and rotate must agree byte for byte, so both go through ONE helper.
+    from services import mt5_validation
+
+    session = _mt5_session(monkeypatch, f" 0{MT5_LOGIN}\t")
+
+    assert mt5_validation.mt5_venue_account_id(f" 0{MT5_LOGIN}\t") == f"0{MT5_LOGIN}"
+    assert mt5_validation.mt5_venue_account_id("   ") is None
+    assert mt5_validation.mt5_venue_account_id(None) is None
+    assert session.venue_account_id == f"0{MT5_LOGIN}"
+
+
+async def test_mt5_collision_marks_the_key_duplicate_and_audits_once(
+    monkeypatch: pytest.MonkeyPatch, audit_mock: MagicMock,
+) -> None:
+    sb = FakeSupabase(_mt5_collision_responder())
+
+    outcome = await _stamp(sb, _mt5_row(), _mt5_session(monkeypatch, MT5_LOGIN))
+
+    assert outcome == "marked_duplicate"
+    assert sb.updates()[-1] == {
+        "account_shared_with_api_key_id": HOLDER_ID,
+        "account_share_kind": "duplicate",
+    }
+    _assert_write_set_is_identity_only(sb)
+    (look,) = [c for c in sb.calls if c.table == "api_keys" and c.op == "select"]
+    assert ("eq", "user_id", OWNER_ID) in look.filters
+    assert ("eq", "exchange", "mt5") in look.filters
+    assert ("eq", "venue_account_id", MT5_LOGIN) in look.filters
+    assert ("is", "disconnected_at", "null") in look.filters
+    assert ("neq", "id", KEY_ID) in look.filters
+    audit_mock.assert_called_once()
+    kwargs = audit_mock.call_args.kwargs
+    assert kwargs["action"] == ai.DUPLICATE_DETECTED_AUDIT_ACTION
+    assert kwargs["metadata"] == {"venue": "mt5", "holder_api_key_id": HOLDER_ID}
+
+
+async def test_an_already_stamped_mt5_key_is_left_alone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sb = FakeSupabase()
+
+    outcome = await _stamp(
+        sb, _mt5_row(venue_account_id=MT5_LOGIN), _mt5_session(monkeypatch, MT5_LOGIN)
+    )
+
+    assert outcome == "skipped_already_stamped"
+    assert sb.calls == []
+
+
+async def test_the_mt5_login_never_reaches_the_log(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, audit_mock: MagicMock,
+) -> None:
+    caplog.set_level("DEBUG")
+    sb = FakeSupabase(_mt5_collision_responder())
+
+    outcome = await _stamp(sb, _mt5_row(), _mt5_session(monkeypatch, MT5_LOGIN))
+
+    assert outcome == "marked_duplicate"
+    assert KEY_ID in caplog.text
+    assert MT5_LOGIN not in caplog.text
+
+
+async def test_an_mt5_key_unstamped_for_days_escalates_like_a_ccxt_key(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    # An MT5 key now HAS a duplicate check, so a poll that never leaves time
+    # for it is the same silent gap SF2-M2 escalates for a ccxt key.
+    caplog.set_level("DEBUG")
+
+    await ai.stamp_account_identity(
+        FakeSupabase(),
+        _mt5_row(created_at=_created_days_ago(30)),
+        _mt5_session(monkeypatch, MT5_LOGIN),
+        timeout_s=0.0,
+    )
+
+    assert len(_escalation_records(caplog)) == 1
+
+
+async def test_poll_stamps_an_mt5_key_on_its_done_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    from services import job_worker as jw
+
+    sb = FakeSupabase()
+    session = _mt5_session(monkeypatch, MT5_LOGIN)
+
+    result = await _drive_poll(monkeypatch, _mt5_row(), sb, session)
+
+    assert result.outcome == jw.DispatchOutcome.DONE
+    assert {"venue_account_id": MT5_LOGIN, "account_shared_with_api_key_id": None,
+            "account_share_kind": None} in sb.updates()
+
+
+# ---------------------------------------------------------------------------
+# 167.1.2-08 review, SFH H-1 — a poll that does not reach DONE still runs the
+# duplicate check (MT5) or says it did not (every stamped venue)
+# ---------------------------------------------------------------------------
+#
+# Why. The stamp ran only on the DONE path, after persist. The MT5 gateway is
+# the least reliable venue this service talks to, so a pre-column MT5 key whose
+# polls keep failing (a -10005 wedge, sign_in_failed, a 429, a persist error)
+# was never stamped, and its last-good holdings kept counting twice in the book.
+# The escalation that says "duplicate check not running" lived inside the stamp,
+# so it never fired either: the gap was silent. The MT5 stamp needs no terminal
+# call (it reads the login text the session was built with), so it runs before
+# the fetch, whatever the fetch then does. A ccxt stamp needs the venue, so a
+# failed ccxt poll cannot stamp; it must at least escalate an aged key.
+
+
+def _raises(exc: BaseException) -> Callable[..., Any]:
+    async def _fetch(*_a: Any, **_k: Any) -> Any:
+        raise exc
+
+    return _fetch
+
+
+def _failing_persist() -> Callable[..., Any]:
+    async def _persist(*_a: Any, **_k: Any) -> int:
+        raise RuntimeError("persist failed")
+
+    return _persist
+
+
+def _poll_failure_cases() -> list[Any]:
+    import ccxt
+
+    from services.allocator_positions import (
+        AllocatorHoldingsSignInFailedError,
+        AllocatorHoldingsSyncTransientError,
+    )
+
+    return [
+        pytest.param({"fetch": _raises(AllocatorHoldingsSyncTransientError("terminal busy"))},
+                     id="transient-gateway-wedge"),
+        pytest.param({"fetch": _raises(AllocatorHoldingsSignInFailedError("sign-in refused"))},
+                     id="sign-in-failed"),
+        pytest.param({"fetch": _raises(ccxt.RateLimitExceeded("429"))}, id="rate-limited"),
+        pytest.param({"fetch": _raises(ValueError("unexpected"))}, id="generic-failure"),
+        pytest.param({"persist": _failing_persist()}, id="persist-failure"),
+    ]
+
+
+_MT5_STAMP = {"venue_account_id": MT5_LOGIN, "account_shared_with_api_key_id": None,
+              "account_share_kind": None}
+
+
+@pytest.mark.parametrize("overrides", _poll_failure_cases())
+async def test_an_mt5_poll_that_fails_still_stamps_its_key_and_returns_what_it_would_without(
+    monkeypatch: pytest.MonkeyPatch, overrides: dict[str, Any],
+) -> None:
+    from services import job_worker as jw
+
+    # The no-stamp baseline for the same failure: the stamp must not change
+    # the poll's outcome (Pitfall 4).
+    base_sb = FakeSupabase()
+
+    async def _no_stamp(*_a: Any, **_k: Any) -> str:
+        return "skipped_not_ccxt"
+
+    with monkeypatch.context() as m:
+        m.setattr(ai, "stamp_account_identity", _no_stamp)
+        base_result = await _drive_poll(
+            m, _mt5_row(), base_sb, _mt5_session(m, MT5_LOGIN), **overrides
+        )
+
+    sb = FakeSupabase()
+    session = _mt5_session(monkeypatch, MT5_LOGIN)
+    result = await _drive_poll(monkeypatch, _mt5_row(), sb, session, **overrides)
+
+    assert result.outcome == jw.DispatchOutcome.FAILED
+    assert result == base_result
+    assert _MT5_STAMP in sb.updates()
+    assert _without_timestamps(_status_writes(sb.updates())) == _without_timestamps(
+        _status_writes(base_sb.updates())
+    )
+
+
+async def test_an_mt5_done_poll_on_a_held_account_audits_the_duplicate_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The stamp runs ONCE per poll. A second call on the DONE path would
+    # compare against the key row loaded before the first marked it, rewrite
+    # the marker and announce the same duplicate twice.
+    from services import job_worker as jw
+
+    sb = FakeSupabase(_mt5_collision_responder())
+
+    result = await _drive_poll(monkeypatch, _mt5_row(), sb, _mt5_session(monkeypatch, MT5_LOGIN))
+
+    assert result.outcome == jw.DispatchOutcome.DONE
+    assert [u for u in sb.updates() if "venue_account_id" in u] == [_MT5_STAMP]
+    assert sb.updates().count(
+        {"account_shared_with_api_key_id": HOLDER_ID, "account_share_kind": "duplicate"}
+    ) == 1
+    # _drive_poll installs its own audit double; the stamper reads it lazily.
+    from services import audit as audit_module
+
+    duplicate_audits = [
+        c for c in audit_module.log_audit_event.call_args_list  # type: ignore[attr-defined]
+        if c.kwargs.get("action") == ai.DUPLICATE_DETECTED_AUDIT_ACTION
+    ]
+    assert len(duplicate_audits) == 1
+
+
+@pytest.mark.parametrize(
+    ("days", "escalations"),
+    [pytest.param(0, 0, id="fresh-key"), pytest.param(4, 1, id="aged-key")],
+)
+@pytest.mark.parametrize("overrides", _poll_failure_cases())
+async def test_a_failed_ccxt_poll_escalates_an_aged_unstamped_key(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+    overrides: dict[str, Any], days: int, escalations: int,
+) -> None:
+    caplog.set_level("DEBUG")
+    ex = _okx_exchange()
+
+    await _drive_poll(
+        monkeypatch, _key_row(created_at=_created_days_ago(days)), FakeSupabase(), ex,
+        **overrides,
+    )
+
+    records = _escalation_records(caplog)
+    assert len(records) == escalations
+    assert all(r.levelname == "ERROR" for r in records)
+    assert all(KEY_ID in r.getMessage() and "venue okx" in r.getMessage() for r in records)
+    assert ACCOUNT_ID not in caplog.text
+
+
+async def test_a_done_ccxt_poll_logs_no_poll_level_escalation(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    # The stamp ran and stamped: the duplicate check is running, nothing to say.
+    caplog.set_level("DEBUG")
+
+    await _drive_poll(
+        monkeypatch, _key_row(created_at=_created_days_ago(30)), FakeSupabase(), _okx_exchange()
+    )
+
+    assert _escalation_records(caplog) == []
+
+
+def _drive_real_preflight(
+    monkeypatch: pytest.MonkeyPatch, key_row: dict[str, Any], build_exc: BaseException
+) -> Any:
+    """The REAL ``_allocator_key_preflight``, with the key load faked and the
+    credential decrypt raising ``build_exc``."""
+    from services import job_worker as jw
+
+    def _r(call: _Call) -> Any:
+        if call.table == "api_keys" and call.op == "select":
+            return MagicMock(data=key_row)
+        return None
+
+    sb = FakeSupabase(_r)
+
+    async def _no_breaker(*_a: Any, **_k: Any) -> None:
+        return None
+
+    def _decrypt(*_a: Any, **_k: Any) -> Any:
+        raise build_exc
+
+    monkeypatch.setattr(jw, "get_kek", lambda: b"k")
+    monkeypatch.setattr(jw, "get_supabase", lambda: sb)
+    monkeypatch.setattr(jw, "_check_circuit_breaker", _no_breaker)
+    monkeypatch.setattr(jw, "decrypt_credentials", _decrypt)
+    job = {"id": "job-h1", "kind": "poll_allocator_positions", "api_key_id": key_row["id"]}
+    return jw.run_poll_allocator_positions_job(job)
+
+
+_BUILD_FAILED = "outcome=not_attempted cause=session_build_failed"
+
+
+@pytest.mark.parametrize("days", [pytest.param(0, id="fresh-key"), pytest.param(4, id="aged-key")])
+@pytest.mark.parametrize("venue", ["mt5", "okx"])
+async def test_a_poll_whose_session_cannot_be_built_escalates_and_re_raises(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, venue: str, days: int,
+) -> None:
+    # Not age-gated, unlike a failed fetch: the dispatcher turns the re-raised
+    # exception into a FAILED result that main_worker logs at WARNING only, so
+    # without this ERROR even a fresh key's build failure would never reach
+    # Sentry. A key whose session cannot be built cannot be checked at all.
+    caplog.set_level("DEBUG")
+    boom = RuntimeError("decrypt failed SENTINEL-EXC-TEXT")
+
+    with pytest.raises(RuntimeError) as raised:
+        await _drive_real_preflight(
+            monkeypatch, _key_row(exchange=venue, created_at=_created_days_ago(days)), boom
+        )
+
+    # The poll's own failure is unchanged: the same exception, not a wrapper.
+    assert raised.value is boom
+    (rec,) = [r for r in caplog.records if _BUILD_FAILED in r.getMessage()]
+    assert rec.levelname == "ERROR"
+    assert f"venue {venue}" in rec.getMessage() and KEY_ID in rec.getMessage()
+    assert "class=RuntimeError" in rec.getMessage()
+    assert (_ESCALATION in rec.getMessage()) is (days > 3)
+    # The exception text can carry credential material; only its class is logged.
+    assert "SENTINEL-EXC-TEXT" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        pytest.param({"exchange": "sfox"}, id="never-stamped-venue"),
+        pytest.param({"venue_account_id": ACCOUNT_ID}, id="already-stamped"),
+    ],
+)
+async def test_a_build_failure_where_no_duplicate_check_is_missing_logs_no_identity_line(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, row: dict[str, Any],
+) -> None:
+    caplog.set_level("DEBUG")
+
+    with pytest.raises(RuntimeError):
+        await _drive_real_preflight(monkeypatch, _key_row(**row), RuntimeError("boom"))
+
+    assert not [r for r in caplog.records if "account_identity:" in r.getMessage()]
+
+
+# ---------------------------------------------------------------------------
+# 167.1.2-08 review round 2, SFH R2-L1 — a DEFERRED poll still escalates
+# ---------------------------------------------------------------------------
+#
+# Why. A circuit-breaker DEFERRED returns from the preflight before the poll's
+# try, so neither the stamp nor the finally escalation runs. A venue whose
+# breaker keeps re-tripping across every daily window would leave an
+# unstamped key silent until a human reads census (a). The deferral runs the
+# same age-gated check, so a fresh key adds no noise.
+
+
+async def _drive_deferred_preflight(
+    monkeypatch: pytest.MonkeyPatch, key_row: dict[str, Any], handler_name: str
+) -> tuple[Any, Any]:
+    """The REAL ``_allocator_key_preflight``, with the breaker deferring."""
+    from services import job_worker as jw
+
+    def _r(call: _Call) -> Any:
+        if call.table == "api_keys" and call.op == "select":
+            return MagicMock(data=key_row)
+        return None
+
+    deferred = jw.DispatchResult(outcome=jw.DispatchOutcome.DEFERRED)
+
+    async def _breaker(*_a: Any, **_k: Any) -> Any:
+        return deferred
+
+    monkeypatch.setattr(jw, "get_kek", lambda: b"k")
+    monkeypatch.setattr(jw, "get_supabase", lambda: FakeSupabase(_r))
+    monkeypatch.setattr(jw, "_check_circuit_breaker", _breaker)
+    job = {"id": "job-l1", "kind": "poll_allocator_positions", "api_key_id": key_row["id"]}
+    return await jw._allocator_key_preflight(job, handler_name), deferred
+
+
+_DEFERRED = "outcome=not_attempted cause=poll_deferred"
+
+
+@pytest.mark.parametrize(
+    ("days", "handler", "escalations"),
+    [
+        pytest.param(0, "run_poll_allocator_positions_job", 0, id="fresh-key"),
+        pytest.param(4, "run_poll_allocator_positions_job", 1, id="aged-key"),
+        pytest.param(4, "run_some_other_allocator_job", 0, id="other-handler"),
+    ],
+)
+async def test_a_deferred_poll_runs_the_age_gated_escalation_and_returns_the_deferral(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+    days: int, handler: str, escalations: int,
+) -> None:
+    caplog.set_level("DEBUG")
+
+    result, deferred = await _drive_deferred_preflight(
+        monkeypatch, _key_row(created_at=_created_days_ago(days)), handler
+    )
+
+    assert result is deferred
+    records = [r for r in caplog.records if _DEFERRED in r.getMessage()]
+    assert len(records) == escalations
+    assert all(r.levelname == "ERROR" and _ESCALATION in r.getMessage() for r in records)
+
+
+# ---------------------------------------------------------------------------
+# 167.1.2-08 review round 2, SFH R2-L4 — a marked key's check DID run
+# ---------------------------------------------------------------------------
+#
+# Why. A key the stamper marked as sharing an account keeps venue_account_id
+# NULL by design (the identity index refuses its id). That is most of the NULL
+# keys on PROD. Treating it as "duplicate check not running" fires a false
+# ERROR whenever such a key's polls fail for a few days, and a false alarm
+# erodes trust in the real ones. The census counts a key marked against a live
+# same-owner holder as RESOLVED; the key row alone cannot see the holder, so a
+# marked key counts as resolved here (the conservative half of that rule).
+
+_MARKED = {"account_shared_with_api_key_id": HOLDER_ID, "account_share_kind": "duplicate"}
+
+
+@pytest.mark.parametrize(
+    ("marker", "escalations"),
+    [pytest.param({}, 1, id="unmarked-control"), pytest.param(_MARKED, 0, id="marked")],
+)
+@pytest.mark.parametrize("overrides", _poll_failure_cases())
+async def test_a_failed_poll_on_an_aged_marked_key_does_not_claim_the_check_is_missing(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+    overrides: dict[str, Any], marker: dict[str, Any], escalations: int,
+) -> None:
+    caplog.set_level("DEBUG")
+
+    await _drive_poll(
+        monkeypatch, _key_row(created_at=_created_days_ago(30), **marker), FakeSupabase(),
+        _okx_exchange(), **overrides,
+    )
+
+    assert len(_escalation_records(caplog)) == escalations
+
+
+@pytest.mark.parametrize(
+    ("marker", "level"),
+    [pytest.param({}, "ERROR", id="unmarked-control"), pytest.param(_MARKED, "WARNING", id="marked")],
+)
+async def test_a_retryable_stamp_failure_on_an_aged_marked_key_stays_a_warning(
+    caplog: pytest.LogCaptureFixture, marker: dict[str, Any], level: str,
+) -> None:
+    import ccxt
+
+    caplog.set_level("DEBUG")
+    ex = _read_raises(ccxt.NetworkError("okx timed out"))
+
+    outcome = await _stamp(
+        FakeSupabase(), _key_row(created_at=_created_days_ago(30), **marker), ex
+    )
+
+    assert outcome == "error"
+    assert _stamp_failure_record(caplog).levelname == level
+
+
+@pytest.mark.parametrize("days", [pytest.param(0, id="fresh-key"), pytest.param(30, id="aged-key")])
+async def test_a_build_failure_on_a_marked_key_is_still_an_error_but_names_the_marker(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, days: int,
+) -> None:
+    # The build-failure ERROR stays for a marked key: the dispatcher records the
+    # failure at WARNING only, so this line is the one Sentry sees for a
+    # credential that no longer decrypts. Its text no longer claims the
+    # duplicate check is not running; it says the marker is not re-checked.
+    caplog.set_level("DEBUG")
+
+    with pytest.raises(RuntimeError):
+        await _drive_real_preflight(
+            monkeypatch, _key_row(created_at=_created_days_ago(days), **_MARKED),
+            RuntimeError("boom"),
+        )
+
+    (rec,) = [r for r in caplog.records if _BUILD_FAILED in r.getMessage()]
+    assert rec.levelname == "ERROR"
+    assert "duplicate check not running" not in rec.getMessage()
+    assert "marker is not re-checked" in rec.getMessage()
+
+
+# ---------------------------------------------------------------------------
+# 167.1.2-08 review, SFH M-1 — an MT5 no_id is a construction defect, said so
+# ---------------------------------------------------------------------------
+#
+# Why. ``parse_mt5_credentials`` refuses a blank login, so an MT5 session
+# without ``venue_account_id`` can only come from a constructor that omitted
+# it. That used to be a WARNING saying "the venue answered without an account
+# id (schema drift?)": wrong cause, never in Sentry, every day, while the key's
+# duplicate check never ran. The field is now required at construction, and a
+# no_id on MT5 is an ERROR naming the real cause. A ccxt no_id that recurs past
+# the escalation threshold is the same "duplicate check not running" state as a
+# retryable failure, so it escalates too.
+
+
+def test_an_mt5_session_cannot_be_built_without_its_venue_account_id() -> None:
+    from services.mt5_client import Mt5Session
+
+    with pytest.raises(TypeError, match="venue_account_id"):
+        Mt5Session(  # type: ignore[call-arg]
+            client=MagicMock(), login=1, investor_password="pw", server="s"
+        )
+
+
+async def test_an_mt5_session_without_a_login_is_no_id_at_error_naming_the_cause(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    import dataclasses
+
+    caplog.set_level("DEBUG")
+    session = dataclasses.replace(_mt5_session(monkeypatch, MT5_LOGIN), venue_account_id=None)
+    sb = FakeSupabase()
+
+    outcome = await _stamp(sb, _mt5_row(), session)
+
+    assert outcome == "no_id"
+    assert sb.calls == []
+    (rec,) = [r for r in caplog.records if "outcome=no_id" in r.getMessage()]
+    assert rec.levelname == "ERROR"
+    assert "venue mt5" in rec.getMessage()
+    assert "construction defect" in rec.getMessage()
+    assert "schema drift" not in rec.getMessage()
+
+
+@pytest.mark.parametrize(
+    ("days", "level"),
+    [pytest.param(2, "WARNING", id="2-days-below"), pytest.param(4, "ERROR", id="4-days-above")],
+)
+async def test_a_ccxt_no_id_on_an_aged_unstamped_key_escalates(
+    days: int, level: str, caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level("DEBUG")
+
+    outcome = await _stamp(
+        FakeSupabase(), _key_row(created_at=_created_days_ago(days)), _okx_exchange(uid=None)
+    )
+
+    assert outcome == "no_id"
+    (rec,) = [r for r in caplog.records if "outcome=no_id" in r.getMessage()]
+    assert rec.levelname == level
+    assert (_ESCALATION in rec.getMessage()) is (level == "ERROR")
+
+
+# ---------------------------------------------------------------------------
+# 167.1.2-08 review, IN-01 / SFH L-3 — the MT5 value obeys the same 128 cap
+# ---------------------------------------------------------------------------
+#
+# Why. The connect seam's zod schema refuses a venue_account_id over 128
+# characters, and the ccxt path enforces the same cap (_normalise). int()
+# accepts a digit string of any length, so without the cap an absurd login
+# would be stamped where connect would have refused it.
+
+
+@pytest.mark.parametrize(
+    ("length", "expected"),
+    [pytest.param(128, "stamped", id="at-cap"), pytest.param(129, "no_id", id="over-cap")],
+)
+async def test_an_mt5_login_obeys_the_ccxt_length_cap(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+    length: int, expected: str,
+) -> None:
+    caplog.set_level("DEBUG")
+    login = "8" * length
+    sb = FakeSupabase()
+
+    outcome = await _stamp(sb, _mt5_row(), _mt5_session(monkeypatch, login))
+
+    assert outcome == expected
+    stamped = [u for u in sb.updates() if u.get("venue_account_id")]
+    assert stamped == ([{"venue_account_id": login, "account_shared_with_api_key_id": None,
+                         "account_share_kind": None}] if expected == "stamped" else [])
+    if expected == "no_id":
+        assert any(
+            "over 128" in r.getMessage() and "venue mt5" in r.getMessage()
+            and r.levelname == "WARNING"
+            for r in caplog.records
+        )
+    assert login not in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# 167.1.2-08 review, IN-04 — a slow MT5 poll cannot starve the MT5 stamp
+# ---------------------------------------------------------------------------
+#
+# Why. The stamp's budget is what is left of the handler's timeout. MT5 polls
+# hold the one shared terminal and can use most of it, and the MT5 stamp needs
+# no terminal time at all, so a stamp placed after the fetch could be skipped
+# (and escalate daily) for want of time it never needed. It runs before the
+# fetch, so the terminal's time is not yet spent. A ccxt stamp needs the venue
+# and stays after it (test_a_poll_near_its_timeout_skips_the_stamp).
+
+
+async def test_a_slow_mt5_poll_still_stamps_its_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    import asyncio
+
+    from services import job_worker as jw
+
+    # 2 s of budget beyond the margin (wide enough that a loaded runner's
+    # thread hop cannot time the stamp out); the fetch then takes 2.5 s, so a
+    # stamp measured after the fetch would see a budget below zero.
+    monkeypatch.setitem(
+        jw.TIMEOUT_PER_KIND, "poll_allocator_positions", jw._IDENTITY_STAMP_MARGIN_S + 2.0
+    )
+
+    async def _slow_fetch(*_a: Any, **_k: Any) -> Any:
+        await asyncio.sleep(2.5)
+        return ([], None)
+
+    sb = FakeSupabase()
+    result = await _drive_poll(
+        monkeypatch, _mt5_row(), sb, _mt5_session(monkeypatch, MT5_LOGIN), fetch=_slow_fetch
+    )
+
+    assert result.outcome == jw.DispatchOutcome.DONE
+    assert _MT5_STAMP in sb.updates()
