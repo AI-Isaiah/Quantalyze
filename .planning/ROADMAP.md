@@ -2740,6 +2740,7 @@ Plans:
 - [ ] 164.6.6-01-PLAN.md — handover record: every job-terminal switch recorded against the displaced holder (wave 1; builds on the founder's locked D-01/D-02 record of 2026-09-27, which its precondition reads)
 - [ ] 164.6.6-02-PLAN.md — FOUNDER decisions D-01..D-07 (eviction scope, isolation option, 164.6.5 D-07 reversal, scrub cadence, H3) recorded in CONTEXT.md and here (wave 2, after plan 03: both append to `164.6.6-CONTEXT.md`)
 - [ ] 164.6.6-03-PLAN.md — validation-gateway stand-up runbook + FOUNDER stand-up and readings S-01, S-07, S-08, N-01 (wave 1)
+  - ⚠️ **Deviation 2026-10-03 (founder override, "I authorize you to use mcp and action as many of those steps as possible"):** the orchestrator, not the founder, stood the validation gateway up over Railway MCP/CLI and `railway ssh` (service and volume, VNC credentials, removal of the job gateway's public domain, the temporary VNC domain, a Wine prefix rebuild, the `[Experts]` options in `common.ini` later confirmed on screen by the founder, and one house login from the analytics container's own env); recorded in full in `164.6.6-CONTEXT.md` `## Stand-up findings 2026-10-03`.
 - [ ] 164.6.6-04-PLAN.md — both validate sites routed to the validation terminal, fail loud when unset (wave 2, after plans 01 and 03)
 - [ ] 164.6.6-05-PLAN.md — H3 part 1: the analytics service refuses to dial a non-private gateway host (wave 3)
 - [ ] 164.6.6-06-PLAN.md — H3 part 2: the master-password park, per the founder's `H3-MASTER-PASSWORD-MODE` (wave 3)
