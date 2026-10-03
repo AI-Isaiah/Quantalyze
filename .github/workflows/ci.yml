@@ -185,6 +185,18 @@ jobs:
     # changed; `sql-mutation` refuses the subset on a non-PR event independently.
     # ⛔ Adding these two outputs changes nothing about `docs_only` and adds no
     # `if:` — the no-`if:` paragraph above binds this derivation too.
+    # (⚠️ CORRECTED 2026-10-03, Phase 164.9.6 D-01/D-03/D-09/D-10: on a push to
+    # `refs/heads/main` the derivation no longer hard-codes FULL. It judges the
+    # PUSHED range through `pushRangeFiles`, the lister it shares with the docs
+    # classifier, and emits `subset` (the changed gates plus every gate whose
+    # RED-UNDER-SETUP loads a changed migration), `none` (the range changed no
+    # gate, no migration and no mutation machinery) or `full`, each with a
+    # reason. Every doubt about the range reads FULL. The job now publishes a
+    # THIRD output, `sql_gate_reason`, one printable line saying why. A
+    # workflow_dispatch, a schedule and a push to any other ref still read
+    # FULL. On a pull request it is unchanged. The sentence "The derivation
+    # hard-codes FULL for every event that is not a pull_request" above is kept
+    # as lineage.)
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -194,6 +206,7 @@ jobs:
       docs_only: ${{ steps.classify.outputs.docs_only }}
       sql_gate_mode: ${{ steps.sql_gate_subset.outputs.sql_gate_mode }}
       sql_gate_files: ${{ steps.sql_gate_subset.outputs.sql_gate_files }}
+      sql_gate_reason: ${{ steps.sql_gate_subset.outputs.sql_gate_reason }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -236,8 +249,15 @@ jobs:
       # a MEASURE_FAIL and never an empty change set) before the real run. A
       # wrong `subset` would leave gate files unmutated on a pull request.
       - run: node scripts/sql-gate-subset.mjs --self-test
+      # Phase 164.9.6 D-01: on a push to main the derivation judges the pushed
+      # range, so it needs the same two event fields the `classify` step reads,
+      # through `env:` and never interpolated into `run:`. No GH_TOKEN: this
+      # path makes no API call.
       - id: sql_gate_subset
         run: node scripts/sql-gate-subset.mjs
+        env:
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+          PUSH_FORCED: ${{ github.event.forced }}
 
   # CI speedup PR-B (v0.22.1.2+): the prior monolithic `frontend` job ran
   # typecheck → lint → test → policy-checks → audit → build serially
@@ -2671,14 +2691,28 @@ jobs:
         # against the same strict pattern the derivation emitted it under.
         # Whichever branch ran, the runner prints exactly one `scope:` line,
         # and the assert step below judges it.
+        #
+        # ⭐ MODE IDENTITY, EXTENDED 2026-10-03 (Phase 164.9.6 / D-04). A push
+        # to `refs/heads/main` may now take the SUBSET branch too: the
+        # derivation judges the pushed range and `changed-paths` hands its list
+        # over exactly as on a pull request. That is the ONE event the refusal
+        # was widened by, never removed: a push to any other ref, a
+        # workflow_dispatch, a schedule or an unset event still runs FULL here,
+        # whatever the derivation said. Any non-`full` mode this step does not
+        # honour (a `subset` on another event, a `none` that reached it) is
+        # printed as a `::warning::`, and SQL_GATE_REASON is rewritten to say
+        # the step refused it before the FULL command runs, so the runner's
+        # `scope-reason:` line (D-12) tells the truth about why FULL ran. The
+        # FULL command itself is unchanged, byte for byte.
         env:
           RUNNER_LOG: ${{ runner.temp }}/mutation-runner.log
           SQL_GATE_MODE: ${{ needs.changed-paths.outputs.sql_gate_mode }}
           SQL_GATE_FILES: ${{ needs.changed-paths.outputs.sql_gate_files }}
+          SQL_GATE_REASON: ${{ needs.changed-paths.outputs.sql_gate_reason }}
         run: |
           set -uo pipefail
           if [ "${SQL_GATE_MODE:-}" = "subset" ]; then
-            if [ "${GITHUB_EVENT_NAME:-}" = "pull_request" ]; then
+            if [ "${GITHUB_EVENT_NAME:-}" = "pull_request" ] || { [ "${GITHUB_EVENT_NAME:-}" = "push" ] && [ "${GITHUB_REF:-}" = "refs/heads/main" ]; }; then
               subset_list="$RUNNER_TEMP/sql-gate-subset.txt"
               read -r -a subset_names <<< "${SQL_GATE_FILES:-}"
               if [ "${#subset_names[@]}" -gt 0 ]; then
@@ -2686,13 +2720,19 @@ jobs:
               else
                 : > "$subset_list"
               fi
-              echo "SUBSET requested by changed-paths on a pull_request: ${#subset_names[@]} gate file(s) -> $subset_list"
+              echo "SUBSET requested by changed-paths on a '${GITHUB_EVENT_NAME:-unset}' event (${GITHUB_REF:-unset ref}): ${#subset_names[@]} gate file(s) -> $subset_list"
               node scripts/mutation-runner/run.mjs --subset-from "$subset_list" > "$RUNNER_LOG" 2>&1
               status=$?
               cat "$RUNNER_LOG"
               exit $status
             fi
-            echo "::warning::changed-paths said sql_gate_mode=subset on a '${GITHUB_EVENT_NAME:-unset}' event. A SUBSET is taken only on a pull_request, so this step REFUSES it and runs the full corpus."
+          fi
+          # Phase 164.9.6 D-04: reaching this line with a non-`full` mode means
+          # this step did NOT honour it (the honoured SUBSET branch exits above).
+          if [ -n "${SQL_GATE_MODE:-}" ] && [ "${SQL_GATE_MODE:-}" != "full" ]; then
+            echo "::warning::changed-paths said sql_gate_mode=${SQL_GATE_MODE:-} on a '${GITHUB_EVENT_NAME:-unset}' event (${GITHUB_REF:-unset ref}). A SUBSET is taken only on a pull_request or a push to refs/heads/main, so this step REFUSES that mode and runs the full corpus."
+            SQL_GATE_REASON="the mutate step refused sql_gate_mode=${SQL_GATE_MODE:-} on a ${GITHUB_EVENT_NAME:-unset} event (${GITHUB_REF:-unset ref}); the full corpus runs. Derivation said: ${SQL_GATE_REASON:-none supplied}"
+            export SQL_GATE_REASON
           fi
           node scripts/mutation-runner/run.mjs > "$RUNNER_LOG" 2>&1
           status=$?
@@ -2754,6 +2794,15 @@ jobs:
           #   (2) SUBSET on an event that is not a pull_request -> MEASURE_FAIL.
           #       A merge is the moment the full picture is owed; a narrowed run
           #       on a push is a job failure, not a quiet optimisation.
+          #       (⚠️ CORRECTED 2026-10-03, Phase 164.9.6 D-04: a SUBSET is now
+          #       permitted on a pull_request AND on a push to refs/heads/main,
+          #       whose derivation judges the pushed range. Every other event —
+          #       a push to another ref, a workflow_dispatch, a schedule, an
+          #       unset event — still MEASURE_FAILs, and the message names the
+          #       event AND the ref. The full picture is owed by the nightly
+          #       full-corpus run and by every FULL fallback. Every SUBSET-only
+          #       check below applies unchanged on a push. The sentence above is
+          #       kept as lineage.)
           # Arms (3) and (4) — the SUBSET claim-versus-names check, the narrowed
           # row count, and the ARMS_FLOOR that is NOT compared — sit beside the
           # assertions they change, below. (5) FULL, fallback form included, is
@@ -2776,6 +2825,7 @@ jobs:
           scope_line=$(grep -a -m1 -E '^scope: ' "$RUNNER_LOG" || true)
           echo "$scope_line"
           event_name="${GITHUB_EVENT_NAME:-}"
+          ref_name="${GITHUB_REF:-}"
           if echo "$scope_line" | grep -a -q -E '^scope: FULL [0-9]+/[0-9]+ annotated files( \(subset fallback: .+\))?$'; then
             scope_mode=full
           elif echo "$scope_line" | grep -a -q -E '^scope: SUBSET [0-9]+/[0-9]+ annotated files: '; then
@@ -2784,8 +2834,14 @@ jobs:
             echo "::error::MEASURE_FAIL: the scope line '$scope_line' is neither the FULL nor the SUBSET form. A DIAGNOSTIC (--file/--arm) run, or a form this step does not know, is not this gate."
             exit 1
           fi
-          if [ "$scope_mode" = "subset" ] && [ "$event_name" != "pull_request" ]; then
-            echo "::error::MEASURE_FAIL: the run narrowed to a SUBSET ('$scope_line') on a '${event_name:-unset}' event. A SUBSET is permitted only on a pull_request; every other event owes the FULL corpus and every floor, so a narrowed run here is a job failure, not an optimisation."
+          subset_allowed=false
+          if [ "$event_name" = "pull_request" ]; then
+            subset_allowed=true
+          elif [ "$event_name" = "push" ] && [ "$ref_name" = "refs/heads/main" ]; then
+            subset_allowed=true
+          fi
+          if [ "$scope_mode" = "subset" ] && [ "$subset_allowed" != "true" ]; then
+            echo "::error::MEASURE_FAIL: the run narrowed to a SUBSET ('$scope_line') on a '${event_name:-unset}' event (ref '${ref_name:-unset}'). A SUBSET is permitted only on a pull_request or a push to refs/heads/main; every other event owes the FULL corpus and every floor, so a narrowed run here is a job failure, not an optimisation."
             exit 1
           fi
 
@@ -3158,10 +3214,10 @@ jobs:
             case "$static_bound" in ''|*[!0-9]*)
               echo "::error::MEASURE_FAIL: could not read the static bound out of '$bound_line'."; exit 1;; esac
             if [ "$static_bound" -lt "$arms_floor" ]; then
-              echo "::error::ARMS_FLOOR regression (static upper bound): $static_bound annotated-unwaived arm(s) < floor $arms_floor. The full-corpus run on the push to main cannot reach the floor: an annotation was deleted or converted to a waiver without lowering the floor in scripts/mutation-floors.mjs."
+              echo "::error::ARMS_FLOOR regression (static upper bound): $static_bound annotated-unwaived arm(s) < floor $arms_floor. A full-corpus run cannot reach the floor: an annotation was deleted or converted to a waiver without lowering the floor in scripts/mutation-floors.mjs."
               exit 1
             fi
-            echo "SUBSET run on a pull_request: FILES_FLOOR and the waiver ceiling hold and the runner's two tallies agree over the $subset_claimed of $subset_total annotated file(s) this pull request changed: files $files_annotated >= $files_floor, biting arms $biting (of $arms_executed executed, $lane_invocations arm lane(s) spawned), waived $arms_waived <= $waived_ceiling. ARMS_FLOOR ($arms_floor) was NOT compared against the subset's biting count — it is compared by the full-corpus run on the push to main — but its static upper bound holds: $static_bound annotated-unwaived >= $arms_floor. This is NOT full-corpus coverage."
+            echo "SUBSET run on a '$event_name' event (${ref_name:-unset ref}): FILES_FLOOR and the waiver ceiling hold and the runner's two tallies agree over the $subset_claimed of $subset_total annotated file(s) this $event_name selected: files $files_annotated >= $files_floor, biting arms $biting (of $arms_executed executed, $lane_invocations arm lane(s) spawned), waived $arms_waived <= $waived_ceiling. ARMS_FLOOR ($arms_floor) was NOT compared against the subset's biting count — it is compared by the nightly full-corpus run and by every FULL run — but its static upper bound holds: $static_bound annotated-unwaived >= $arms_floor. This is NOT full-corpus coverage."
             exit 0
           fi
 

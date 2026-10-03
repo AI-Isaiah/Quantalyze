@@ -2677,13 +2677,24 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
   // exactly the two files SUBSET_LOG names.
   const SUBSET_FILES =
     "supabase/tests/test_allocator_equity_derived_rls.sql supabase/tests/test_allocator_equity_pre_terminus_flag.sql";
-  const PR = { GITHUB_EVENT_NAME: "pull_request", SQL_GATE_FILES: SUBSET_FILES };
-  const PUSH = { GITHUB_EVENT_NAME: "push" };
+  // ⭐ Phase 164.9.6 D-04 (2026-10-03): a SUBSET is now legal on a pull_request
+  // AND on a push to refs/heads/main, so the step reads GITHUB_REF too. Pitfall
+  // 7: every env below carries BOTH the event and the ref explicitly. vitest in
+  // CI inherits the real ones (`push` + `refs/heads/main` on main, a merge ref on
+  // a PR), so an inherited value would let one arm pass on a PR and fail on main.
+  // `PUSH` became `PUSH_MAIN` (now SUBSET-legal) and `PUSH_OTHER` (still refused).
+  const PR = { GITHUB_EVENT_NAME: "pull_request", GITHUB_REF: "refs/pull/1/merge", SQL_GATE_FILES: SUBSET_FILES };
+  const PUSH_MAIN = { GITHUB_EVENT_NAME: "push", GITHUB_REF: "refs/heads/main", SQL_GATE_FILES: SUBSET_FILES };
+  const PUSH_OTHER = { GITHUB_EVENT_NAME: "push", GITHUB_REF: "refs/heads/feature-x", SQL_GATE_FILES: SUBSET_FILES };
+  const DISPATCH = { GITHUB_EVENT_NAME: "workflow_dispatch", GITHUB_REF: "refs/heads/main", SQL_GATE_FILES: SUBSET_FILES };
+  const SCHEDULE = { GITHUB_EVENT_NAME: "schedule", GITHUB_REF: "refs/heads/main", SQL_GATE_FILES: SUBSET_FILES };
+  const UNSET = { GITHUB_EVENT_NAME: "", GITHUB_REF: "", SQL_GATE_FILES: SUBSET_FILES };
+  const ALL_EVENTS = [PR, PUSH_MAIN, PUSH_OTHER, DISPATCH, SCHEDULE, UNSET];
 
-  it("GREEN: a FULL log passes on a push AND on a pull request — every existing arm, ARMS_FLOOR included", () => {
-    for (const env of [PUSH, PR]) {
+  it("GREEN: a FULL log passes on every event and ref — every existing arm, ARMS_FLOOR included (D-07)", () => {
+    for (const env of ALL_EVENTS) {
       const r = runCountRecheck(GREEN_LOG, env);
-      expect(r.status, `${env.GITHUB_EVENT_NAME}\n${r.out}`).toBe(0);
+      expect(r.status, `${env.GITHUB_EVENT_NAME} ${env.GITHUB_REF}\n${r.out}`).toBe(0);
       // ⭐ CURRENCY 2026-09-27 (Phase 164.9.3 CLAIMPAIR, plan 05): 52/52 -> 53/53.
       // ⭐ CURRENCY 2026-09-29 (Phase 167.1.2 PR C2, review fix B, WR-04): 53/53 -> 54/54.
       // ⭐ CURRENCY 2026-10-01 (Phase 164.9.3.2 DEFER40001, plan 06): 54/54 -> 55/55.
@@ -2712,21 +2723,26 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     }
   });
 
-  it("GREEN: a SUBSET log on a pull_request passes and SAYS ARMS_FLOOR was not compared, and where it is", () => {
-    const r = runCountRecheck(SUBSET_LOG, PR);
-    expect(r.status, r.out).toBe(0);
-    expect(r.out).toContain(`ARMS_FLOOR (${ARMS_FLOOR}) was NOT compared`);
-    expect(r.out).toContain("compared by the full-corpus run on the push to main");
-    expect(r.out).toContain("This is NOT full-corpus coverage.");
-    // ⛔ It must never print the sentence claiming both floors held.
-    expect(r.out).not.toContain("both floors");
-    expect(r.out).not.toContain("MEASURE_FAIL");
+  it("GREEN: a SUBSET log on a pull_request AND on a push to main passes and SAYS ARMS_FLOOR was not compared, and where it is", () => {
+    for (const env of [PR, PUSH_MAIN]) {
+      const r = runCountRecheck(SUBSET_LOG, env);
+      expect(r.status, `${env.GITHUB_EVENT_NAME} ${env.GITHUB_REF}\n${r.out}`).toBe(0);
+      expect(r.out).toContain(`ARMS_FLOOR (${ARMS_FLOOR}) was NOT compared`);
+      // ⭐ 2026-10-03 (Phase 164.9.6 D-04): the push to main may itself be a
+      // SUBSET now, so the floor's home is the nightly run and every FULL run.
+      expect(r.out).toContain("compared by the nightly full-corpus run and by every FULL run");
+      expect(r.out).toContain(`SUBSET run on a '${env.GITHUB_EVENT_NAME}' event (${env.GITHUB_REF})`);
+      expect(r.out).toContain("This is NOT full-corpus coverage.");
+      // ⛔ It must never print the sentence claiming both floors held.
+      expect(r.out).not.toContain("both floors");
+      expect(r.out).not.toContain("MEASURE_FAIL");
+    }
   });
 
   it("RED: NO scope line is a MEASURE_FAIL — an absent line is never read as a FULL run", () => {
     const without = GREEN_LOG.replace(/^scope: .*\n/m, "");
     expect(without, "the deletion must actually change the log").not.toBe(GREEN_LOG);
-    for (const env of [PUSH, PR]) {
+    for (const env of [PUSH_MAIN, PR]) {
       const r = runCountRecheck(without, env);
       expect(r.status, r.out).toBe(1);
       expect(r.out).toContain("MEASURE_FAIL: the run printed NO 'scope:' line");
@@ -2734,15 +2750,21 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     }
   });
 
-  it("RED: a SUBSET log on a push fails, naming both the scope and the event", () => {
-    const r = runCountRecheck(SUBSET_LOG, PUSH);
-    expect(r.status, r.out).toBe(1);
-    expect(r.out).toContain("MEASURE_FAIL: the run narrowed to a SUBSET");
-    expect(r.out).toContain("on a 'push' event");
-    // An unset event is not a pull_request either.
-    const unset = runCountRecheck(SUBSET_LOG, { GITHUB_EVENT_NAME: "" });
-    expect(unset.status, unset.out).toBe(1);
-    expect(unset.out).toContain("on a 'unset' event");
+  it("RED: a SUBSET log on any event but a pull_request or a push to main fails, naming the scope, the event AND the ref (D-04)", () => {
+    const refused: Array<[Record<string, string>, string]> = [
+      [PUSH_OTHER, "on a 'push' event (ref 'refs/heads/feature-x')"],
+      [DISPATCH, "on a 'workflow_dispatch' event (ref 'refs/heads/main')"],
+      [SCHEDULE, "on a 'schedule' event (ref 'refs/heads/main')"],
+      // An unset event is neither of the two legal ones either.
+      [UNSET, "on a 'unset' event (ref 'unset')"],
+    ];
+    for (const [env, needle] of refused) {
+      const r = runCountRecheck(SUBSET_LOG, env);
+      expect(r.status, `${env.GITHUB_EVENT_NAME} ${env.GITHUB_REF}\n${r.out}`).toBe(1);
+      expect(r.out).toContain("MEASURE_FAIL: the run narrowed to a SUBSET");
+      expect(r.out).toContain(needle);
+      expect(r.out).not.toContain("This is NOT full-corpus coverage.");
+    }
   });
 
   it("RED: a SUBSET count that disagrees with the names it prints fails, quoting both", () => {
@@ -2859,13 +2881,203 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-01 (Phase 164.9.3.2 DEFER40001, plan 06): the NEEDLE follows GREEN_LOG's scope line 54/54 -> 55/55, or both replaces below become no-ops.
     // ⭐ CURRENCY 2026-10-02 (Phase 164.9.3.2.1 ENQ40001, plan 03): the NEEDLE follows GREEN_LOG's scope line 55/55 -> 56/56, or both replaces below become no-ops.
     const twice = GREEN_LOG.replace("scope: FULL 56/56 annotated files", "scope: FULL 56/56 annotated files\nscope: FULL 56/56 annotated files");
-    const t = runCountRecheck(twice, PUSH);
+    const t = runCountRecheck(twice, PUSH_MAIN);
     expect(t.status, t.out).toBe(1);
     expect(t.out).toContain("printed 2 'scope:' lines");
     const diag = GREEN_LOG.replace("scope: FULL 56/56 annotated files", "scope: DIAGNOSTIC supabase/tests/test_x.sql");
-    const d = runCountRecheck(diag, PUSH);
+    const d = runCountRecheck(diag, PUSH_MAIN);
     expect(d.status, d.out).toBe(1);
     expect(d.out).toContain("is neither the FULL nor the SUBSET form");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 164.9.6 / D-04 — the MUTATE step's own event guard, EXECUTED.
+//
+// The assert step above is the second control on a SUBSET's event; the mutate
+// step is the first, because the derivation that says `subset` is a script
+// this job does not own. A text pin cannot tell a guard that reads the ref
+// from one that does not, so the step's real `run:` body is extracted from
+// ci.yml and run under bash with a FAKE `node` first on PATH. The fake records
+// the argv it was handed, the SQL_GATE_REASON it saw and the list file it was
+// pointed at, prints one line and exits with a chosen status. No lane boots.
+// ---------------------------------------------------------------------------
+describe("164.9.6 D-04 — the mutate step takes the SUBSET branch only on a pull_request or a push to main, executed", () => {
+  const CI_TEXT = readFileSync(CI_PATH, "utf8");
+  const MUTATE_STEP = "- name: Mutate every annotated RED-UNDER arm and require it to bite";
+  const WIDENED =
+    'if [ "${GITHUB_EVENT_NAME:-}" = "pull_request" ] || { [ "${GITHUB_EVENT_NAME:-}" = "push" ] && [ "${GITHUB_REF:-}" = "refs/heads/main" ]; }; then';
+  const PR_ONLY = 'if [ "${GITHUB_EVENT_NAME:-}" = "pull_request" ]; then';
+  const FULL_ARGV = ["scripts/mutation-runner/run.mjs"];
+  const FILES =
+    "supabase/tests/test_allocator_equity_derived_rls.sql supabase/tests/test_allocator_equity_pre_terminus_flag.sql";
+  const DERIVED = "1 of 4 changed file(s) are gate files";
+
+  /** A step's `run: |` body, dedented. Every anchor miss THROWS, and the search
+   *  for `run: |` is bounded by the NEXT step, so a step that lost its block
+   *  cannot silently borrow its successor's body. */
+  function stepRunBody(text: string, stepName: string): string {
+    const stepAt = anchorIndex(text, stepName);
+    const nextStep = anchorIndex(text, "\n      - name:", stepAt + stepName.length);
+    const runAt = anchorIndex(text, "\n        run: |\n", stepAt);
+    if (runAt > nextStep) {
+      throw new Error(`ANCHOR MISSING: ${JSON.stringify(stepName)} carries no \`run: |\` block before the next step.`);
+    }
+    const out: string[] = [];
+    for (const line of text.slice(runAt + "\n        run: |\n".length, nextStep).split("\n")) {
+      if (line.trim() !== "" && !line.startsWith("          ")) break;
+      out.push(line.slice(10));
+    }
+    return out.join("\n");
+  }
+
+  const FAKE_NODE = [
+    "#!/bin/bash",
+    'printf \'%s\\n\' "$@" > "$FAKE_NODE_ARGV"',
+    'printf \'%s\' "${SQL_GATE_REASON-<unset>}" > "$FAKE_NODE_REASON"',
+    'if [ "${2:-}" = "--subset-from" ]; then cp "$3" "$FAKE_NODE_LIST"; fi',
+    'echo "fake-node-ran"',
+    'exit "${FAKE_NODE_EXIT:-0}"',
+    "",
+  ].join("\n");
+
+  function runMutate(env: Record<string, string>, body: string = stepRunBody(CI_TEXT, MUTATE_STEP)) {
+    const dir = mkdtempSync(join(tmpdir(), "mutate-step-"));
+    try {
+      const bin = join(dir, "bin");
+      const runnerTemp = join(dir, "runner-temp");
+      mkdirSync(bin);
+      mkdirSync(runnerTemp);
+      writeFileSync(join(bin, "node"), FAKE_NODE);
+      chmodSync(join(bin, "node"), 0o755);
+      const script = join(dir, "mutate.sh");
+      writeFileSync(script, body);
+      const paths = {
+        FAKE_NODE_ARGV: join(dir, "argv.txt"),
+        FAKE_NODE_REASON: join(dir, "reason.txt"),
+        FAKE_NODE_LIST: join(dir, "list.txt"),
+      };
+      const childEnv: Record<string, string | undefined> = { ...process.env };
+      childEnv.PATH = `${bin}:${childEnv.PATH ?? ""}`;
+      const res = spawnSync("bash", [script], {
+        cwd: dir,
+        encoding: "utf8",
+        env: {
+          ...childEnv,
+          RUNNER_TEMP: runnerTemp,
+          RUNNER_LOG: join(runnerTemp, "mutation-runner.log"),
+          ...paths,
+          ...env,
+        },
+      });
+      const read = (p: string) => {
+        try {
+          return readFileSync(p, "utf8");
+        } catch {
+          return null;
+        }
+      };
+      const argvText = read(paths.FAKE_NODE_ARGV);
+      return {
+        status: res.status,
+        out: `${res.stdout ?? ""}${res.stderr ?? ""}`,
+        argv: argvText === null ? null : argvText.replace(/\n$/, "").split("\n"),
+        reason: read(paths.FAKE_NODE_REASON),
+        list: read(paths.FAKE_NODE_LIST),
+        listPath: join(runnerTemp, "sql-gate-subset.txt"),
+      };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  // Pitfall 7: every row names the event AND the ref, and every SQL_GATE_* key.
+  const envFor = (event: string, ref: string, mode: string) => ({
+    GITHUB_EVENT_NAME: event,
+    GITHUB_REF: ref,
+    SQL_GATE_MODE: mode,
+    SQL_GATE_FILES: mode === "subset" ? FILES : "",
+    SQL_GATE_REASON: DERIVED,
+  });
+
+  it("the extracted body carries the widened condition exactly once, and the FULL command byte-identical to the runner header", () => {
+    const body = stepRunBody(CI_TEXT, MUTATE_STEP);
+    expect(body.split(WIDENED).length - 1, "the widened condition, once").toBe(1);
+    expect(body).toContain('node scripts/mutation-runner/run.mjs > "$RUNNER_LOG" 2>&1\nstatus=$?\ncat "$RUNNER_LOG"\nexit $status');
+  });
+
+  it("GREEN: subset on a push to main AND on a pull_request passes --subset-from, the list holds exactly the derived paths, and no warning", () => {
+    for (const [event, ref] of [
+      ["push", "refs/heads/main"],
+      ["pull_request", "refs/pull/1/merge"],
+    ]) {
+      const r = runMutate(envFor(event, ref, "subset"));
+      expect(r.status, `${event} ${ref}\n${r.out}`).toBe(0);
+      expect(r.argv).toEqual(["scripts/mutation-runner/run.mjs", "--subset-from", r.listPath]);
+      expect(r.list).toBe(`${FILES.split(" ").join("\n")}\n`);
+      expect(r.out).toContain(`SUBSET requested by changed-paths on a '${event}' event (${ref}): 2 gate file(s)`);
+      expect(r.out).not.toContain("::warning::");
+      // The derivation's reason reaches the runner untouched.
+      expect(r.reason).toBe(DERIVED);
+      // The log was cat back into the step's output.
+      expect(r.out).toContain("fake-node-ran");
+    }
+  });
+
+  it("RED: subset on a feature-branch push, a dispatch, a schedule or an unset event runs the bare FULL command with a warning and a refusal-prefixed reason", () => {
+    for (const [event, ref] of [
+      ["push", "refs/heads/feature-x"],
+      ["workflow_dispatch", "refs/heads/main"],
+      ["schedule", "refs/heads/main"],
+      ["", ""],
+    ]) {
+      const r = runMutate(envFor(event, ref, "subset"));
+      expect(r.status, `${event} ${ref}\n${r.out}`).toBe(0);
+      expect(r.argv, `${event} ${ref}: the bare FULL invocation`).toEqual(FULL_ARGV);
+      expect(r.list, "no list was handed to the runner").toBeNull();
+      expect(r.out).toContain(`::warning::changed-paths said sql_gate_mode=subset on a '${event || "unset"}' event (${ref || "unset ref"})`);
+      expect(r.reason).toBe(
+        `the mutate step refused sql_gate_mode=subset on a ${event || "unset"} event (${ref || "unset ref"}); the full corpus runs. Derivation said: ${DERIVED}`,
+      );
+    }
+  });
+
+  it("RED: a `none` that reaches the step on a pull_request runs FULL with a warning, and the runner sees the refusal prefix", () => {
+    const r = runMutate(envFor("pull_request", "refs/pull/1/merge", "none"));
+    expect(r.status, r.out).toBe(0);
+    expect(r.argv).toEqual(FULL_ARGV);
+    expect(r.out).toContain("::warning::changed-paths said sql_gate_mode=none on a 'pull_request' event");
+    expect(r.reason?.startsWith("the mutate step refused sql_gate_mode=none on a pull_request event (refs/pull/1/merge); the full corpus runs."), r.reason ?? "<no reason>").toBe(true);
+  });
+
+  it("GREEN: full mode runs the bare FULL command, no warning, the reason untouched", () => {
+    const r = runMutate(envFor("push", "refs/heads/main", "full"));
+    expect(r.status, r.out).toBe(0);
+    expect(r.argv).toEqual(FULL_ARGV);
+    expect(r.out).not.toContain("::warning::");
+    expect(r.reason).toBe(DERIVED);
+  });
+
+  it("the runner's exit status is the step's exit status on both branches", () => {
+    const sub = runMutate({ ...envFor("push", "refs/heads/main", "subset"), FAKE_NODE_EXIT: "3" });
+    expect(sub.argv?.[1]).toBe("--subset-from");
+    expect(sub.status, sub.out).toBe(3);
+    const full = runMutate({ ...envFor("push", "refs/heads/main", "full"), FAKE_NODE_EXIT: "3" });
+    expect(full.argv).toEqual(FULL_ARGV);
+    expect(full.status, full.out).toBe(3);
+  });
+
+  it("CALIBRATION: with the condition reverted to pull_request-only, the push-to-main row goes RED — the arm reads the condition", () => {
+    const body = stepRunBody(CI_TEXT, MUTATE_STEP);
+    const reverted = body.replace(WIDENED, PR_ONLY);
+    expect(reverted, "the revert must actually change the body").not.toBe(body);
+    expect(reverted.includes(WIDENED), "the widened condition must be gone").toBe(false);
+    const r = runMutate(envFor("push", "refs/heads/main", "subset"), reverted);
+    expect(r.argv, "the reverted step refuses the push to main").toEqual(FULL_ARGV);
+    expect(r.out).toContain("::warning::");
+    // Control: the PR row is unaffected by the revert.
+    const pr = runMutate(envFor("pull_request", "refs/pull/1/merge", "subset"), reverted);
+    expect(pr.argv?.[1]).toBe("--subset-from");
   });
 });
 
