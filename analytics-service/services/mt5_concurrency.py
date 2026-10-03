@@ -26,7 +26,16 @@ in-tree imports are from ``services.mt5_client`` — itself a leaf over
     the rpyc bound it is derived from instead of being re-hardcoded here;
   * ``bump_mt5_terminal_epoch`` / ``begin_mt5_lease_occupancy`` /
     ``end_mt5_lease_occupancy`` (WIZFORM-ABANDON / D-36), the two fencing
-    primitives the lease drives on release.
+    primitives the lease drives on release;
+  * ``begin_mt5_lease_holder`` / ``end_mt5_lease_holder`` /
+    ``mt5_terminal_holder`` (Phase 164.6.6), the holder stamp and the
+    prior-holder read the lease diffs across each hold.
+
+⭐ ONE further in-tree import since Phase 164.6.6: ``services.mt5_handover``,
+whose recorder the lease awaits after release when the holder changed. It
+imports only ``services.db`` (itself free of in-tree imports) and the holder
+literals from ``services.mt5_client``, so the leaf invariant below still holds:
+nothing here reaches ``services.job_worker``.
 
 ⛔ The DIRECTION is unchanged and must stay so. The epoch registry and the
 occupancy ContextVar live in ``mt5_client`` and are imported HERE, never the
@@ -46,11 +55,17 @@ from typing import TYPE_CHECKING, Final
 
 from services.mt5_client import MT5_REQUEST_TIMEOUT_S as _MT5_REQUEST_TIMEOUT_S
 from services.mt5_client import (
+    HOLDER_UNATTRIBUTED,
+    HOLDER_UNKNOWN,
     _reset_mt5_epochs_for_tests,
+    begin_mt5_lease_holder,
     begin_mt5_lease_occupancy,
     bump_mt5_terminal_epoch,
+    end_mt5_lease_holder,
     end_mt5_lease_occupancy,
+    mt5_terminal_holder,
 )
+from services.mt5_handover import record_mt5_terminal_handover
 
 if TYPE_CHECKING:  # annotation only — deliberately NOT a runtime import
     from services.mt5_client import Mt5Client
@@ -284,7 +299,11 @@ class Mt5TerminalBusyError(Exception):
 
 @asynccontextmanager
 async def mt5_terminal_lease(
-    terminal_key: str, *, wait_s: float | None = None
+    terminal_key: str,
+    *,
+    wait_s: float | None = None,
+    holder: str | None = None,
+    site: str | None = None,
 ) -> AsyncIterator[None]:
     """D-29 — hold the ONE shared Wine terminal for the duration of the body.
 
@@ -328,6 +347,15 @@ async def mt5_terminal_lease(
       * on EVERY exit path — normal return, a raising body, a cancelled holder —
         the ``finally`` bumps the terminal's generation, which fences every
         subsequent session touch made by work this holder abandoned (D-36 (i)).
+
+    ⭐ Phase 164.6.6 criterion 1 — the lease is also where a HANDOVER is seen.
+    ``holder`` (an ``api_key_id`` or a closed literal from ``services.mt5_client``)
+    is stamped into the context beside the occupancy, so a successful login in
+    the body records it as the terminal's holder. The registry is read on
+    acquisition and again right after release; when it changed, ONE handover
+    row naming the displaced and the incoming holder is written, tagged with
+    ``site`` (``services.mt5_handover``). A caller that never held the terminal
+    (the busy raise) records nothing.
     """
     lock = _mt5_terminal_lock_for(terminal_key)
     queued_at = time.monotonic()
@@ -354,6 +382,8 @@ async def mt5_terminal_lease(
     # (the bounded arm's expiry raises rather than falling through), so the stamp
     # covers both arms without a second, drift-prone copy of it.
     token = begin_mt5_lease_occupancy(terminal_key)
+    holder_token = begin_mt5_lease_holder(holder)
+    before = mt5_terminal_holder(terminal_key)
 
     waited_s = time.monotonic() - queued_at
     try:
@@ -376,11 +406,31 @@ async def mt5_terminal_lease(
         #     already stale. Releasing first opens a window — narrow, and no test
         #     schedules a successor inside it, so this ordering is guaranteed by
         #     construction and by this comment, not by a red test.
-        #  2. Un-stamp SECOND, so the stamp is live for the whole hold.
+        #  2. Un-stamp SECOND, so the stamp is live for the whole hold (the
+        #     holder stamp with it — Phase 164.6.6).
         #  3. Release LAST.
+        #  4. Phase 164.6.6 — only AFTER the release, the handover diff. The
+        #     read follows the release with NO `await` between them, so no
+        #     successor can have run yet and the read still sees THIS hold's
+        #     final holder. The record is AWAITED here, deliberately not spawned
+        #     as a background task: a raising background task reaches
+        #     `main.lifespan`'s crash handler, which stops dispatch. Awaited
+        #     after the release, it never lengthens the terminal hold.
+        #     ⛔ It is the recorder's NEVER-RAISES contract (pinned by the shared
+        #     predicate in `tests/test_mt5_session_episodes.py`) that keeps the
+        #     body's own exception intact through this `finally`: a raise here
+        #     would replace it.
         bump_mt5_terminal_epoch(terminal_key)
+        end_mt5_lease_holder(holder_token)
         end_mt5_lease_occupancy(token)
         lock.release()
+        after = mt5_terminal_holder(terminal_key)
+        if after is not None and after != before:
+            await record_mt5_terminal_handover(
+                previous_holder=before or HOLDER_UNKNOWN,
+                incoming_holder=after,
+                site=site or HOLDER_UNATTRIBUTED,
+            )
 
 
 class _Mt5PostReadVerificationError(Exception):

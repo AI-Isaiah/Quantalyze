@@ -154,6 +154,8 @@ from services.mt5_concurrency import (
     _Mt5PostReadVerificationError,
     mt5_terminal_lease,
 )
+# Phase 164.6.6 criterion 1 — the lease-site names the handover record carries.
+from services.mt5_handover import SITE_DERIVE
 # 153.6 / A3 — the operator-fault type + its curated copy, for the
 # classify_exception arm. worker -> services leaf, the correct direction (D-07):
 # `services/mt5_probe.py` imports only mt5_client + mt5_validation and can never
@@ -4927,7 +4929,16 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             # acquire, byte-equivalent to the raw `await lock.acquire()` this
             # replaced): ⛔ the bounded arm's `Mt5TerminalBusyError` is the
             # INTERACTIVE validate path's contract (D-29), never the worker's.
-            async with mt5_terminal_lease(_mt5_session.client.terminal_key):
+            #
+            # ⭐ Phase 164.6.6 criterion 1 — `holder=` is this job's api_key_id
+            # (`ctx.key_row["id"]`, present in BOTH strategy- and key-mode), so a
+            # login that switches the shared terminal to this key is recorded
+            # against the holder it displaced. Never the MT5 account number.
+            async with mt5_terminal_lease(
+                _mt5_session.client.terminal_key,
+                holder=ctx.key_row.get("id"),
+                site=SITE_DERIVE,
+            ):
                 try:
                     _mt5_info, _mt5_deals = await asyncio.wait_for(
                         asyncio.to_thread(

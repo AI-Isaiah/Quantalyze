@@ -596,9 +596,14 @@ def _reset_mt5_epochs_for_tests() -> None:
 
     ⭐ It also clears the answered-count registry above (164.6.5 review round 1):
     that IS the third registry, and this is the one home it was promised.
+
+    ⭐ And the prior-holder registry below (Phase 164.6.6, the fourth): a holder
+    leaked out of one test would make the next test's first lease report a
+    handover it never caused.
     """
     _MT5_TERMINAL_EPOCHS.clear()
     _MT5_TERMINAL_ANSWERS.clear()
+    _MT5_TERMINAL_HOLDERS.clear()
 
 
 # --------------------------------------------------------------------------- #
@@ -649,6 +654,129 @@ def end_mt5_lease_occupancy(token: Token[tuple[str, int] | None]) -> None:
     rather than flattening it — the same discipline `logging_config.py:43` uses.
     """
     _MT5_LEASE_OCCUPANCY.reset(token)
+
+
+# --------------------------------------------------------------------------- #
+# ⭐ Phase 164.6.6 (MT5TERMINALISOLATION) criterion 1 — WHO THE TERMINAL IS
+# LOGGED INTO, as far as THIS process made it so.
+#
+# WHY IT EXISTS. On 2026-09-21 the shared terminal was switched from one
+# account to another in about a second; the displaced account was serving a
+# live session and got no error, no signal and no record. Nothing could record
+# it: the process kept no memory of who it had last logged the terminal into,
+# so a handover had no "previous" side. This registry is that memory, and
+# `services.mt5_concurrency.mt5_terminal_lease` diffs it across each hold to
+# decide whether a handover happened (the row is written by
+# `services.mt5_handover.record_mt5_terminal_handover`).
+#
+# ⛔ WHAT A HOLDER IS: an `api_key_id` (a UUID) or one of the four literals
+# below. NEVER an account number, login, broker server, host, port or terminal
+# key. The value comes from the lease's caller (`holder=`), never from the
+# terminal: the displaced account is NOT learned by reading the terminal's own
+# account record (the `ATTRIBUTION_LIMIT` reasoning in `mt5_session_episodes`:
+# an extra read, and an account number in memory and in logs).
+#
+# ⛔ LOCK-FREE, like `_MT5_TERMINAL_ANSWERS` above and for the same reason: the
+# writers are serialized by the terminal lease (every production stamp happens
+# under it), and the one reader that matters (the lease's own diff) runs on the
+# event loop with no `await` between its read and the release. Do NOT add a
+# `threading.Lock`.
+#
+# ⛔ It lives in THIS leaf for the one-way-import reason the epoch registry
+# does: `mt5_concurrency` imports FROM `mt5_client`, never the reverse. The
+# holder literals are defined here for the same reason and re-exported by
+# `services.mt5_handover`, which may not be imported from this module because
+# it imports `services.db`.
+# --------------------------------------------------------------------------- #
+
+#: The house (environment) account — what the heal re-logs.
+HOLDER_HOUSE: Final[str] = "house"
+#: An interactive or queued key VALIDATION, which has no `api_key_id` yet
+#: (`KeySubmissionRequest` carries none).
+HOLDER_VALIDATION: Final[str] = "validation"
+#: The process does not know: nothing has logged in since boot, or a recycle
+#: relaunched the terminal and it auto-logged into whatever was saved last.
+HOLDER_UNKNOWN: Final[str] = "unknown"
+#: A login happened but nothing named who it was for (a lease with no
+#: `holder=`, or a login outside any lease).
+HOLDER_UNATTRIBUTED: Final[str] = "unattributed"
+
+_MT5_TERMINAL_HOLDERS: dict[str, str] = {}
+
+#: Who the CURRENT lease is held for. ⛔ Immutable default `None`, never a
+#: mutable container (the `_MT5_LEASE_OCCUPANCY` trap above). `asyncio.to_thread`
+#: copies the context at spawn, so the thread running `Mt5Client.login` sees the
+#: lease's holder without any argument threading through the read helpers.
+_MT5_LEASE_HOLDER: ContextVar[str | None] = ContextVar(
+    "mt5_lease_holder", default=None
+)
+
+
+def begin_mt5_lease_holder(holder: str | None) -> Token[str | None]:
+    """Stamp the current context with the holder the lease is taken for."""
+    return _MT5_LEASE_HOLDER.set(holder)
+
+
+def end_mt5_lease_holder(token: Token[str | None]) -> None:
+    """Un-stamp via the Token (`Token.reset`, so a nested lease restores the
+    outer holder rather than flattening it — the occupancy pair's discipline)."""
+    _MT5_LEASE_HOLDER.reset(token)
+
+
+def _note_terminal_holder(
+    terminal_key: str, holder: str | None = None, *, stage: str = "login"
+) -> None:
+    """THE ONE STAMPING DOOR for the prior-holder registry.
+
+    Called ONLY after a login-class call SUCCEEDED (``Mt5Client.login``,
+    ``Mt5Client.initialize_with_credentials``) and by
+    ``Mt5Client.recycle_terminal_process`` with ``holder=HOLDER_UNKNOWN``. A
+    raising or falsy login never reaches it, so it never changes the record.
+
+    ``holder`` given → stamp it. Otherwise the CURRENT lease's holder from the
+    context, or ``HOLDER_UNATTRIBUTED`` when the lease named none.
+
+    ⭐ THE EPOCH GUARD (the D-36/D-43 abandoned-session class). A ``to_thread``
+    login that outlives its ``wait_for`` completes AFTER its lease released and
+    bumped the terminal's generation — possibly while the NEXT lease holds the
+    terminal. Stamped, it would be attributed to that next lease's diff: the
+    next holder's handover row would name the abandoned session's holder. So
+    when the context's occupancy (frozen into the thread at spawn) is not
+    exactly ``(terminal_key, current generation)``, the session's lease is gone
+    and this stamps NOTHING, with one WARNING carrying the stage and the two
+    generation integers only (``_assert_live``'s shape; no host, port, key or
+    account). The terminal may well have moved; that limit is written into
+    every handover row (``HANDOVER_ATTRIBUTION_LIMIT``).
+
+    Occupancy UNSET (a login outside any lease, which no production site does:
+    the lease roster pins all seven) → stamp what was asked, defaulting to
+    ``HOLDER_UNATTRIBUTED``: the terminal did move, and the next lease's diff
+    then shows it as the displaced holder.
+    """
+    occupancy = _MT5_LEASE_OCCUPANCY.get()
+    if occupancy is not None:
+        current = _mt5_epoch_for(terminal_key)
+        if occupancy != (terminal_key, current):
+            logger.warning(
+                "Mt5Client: not recording the terminal holder after the %s "
+                "round-trip — this session's lease was on terminal generation %d "
+                "and the terminal is now on generation %d, so the lease has "
+                "already been released and another holder may own the terminal "
+                "(WIZFORM-ABANDON / D-36; Phase 164.6.6).",
+                stage,
+                occupancy[1],
+                current,
+            )
+            return
+    if holder is None:
+        holder = _MT5_LEASE_HOLDER.get() or HOLDER_UNATTRIBUTED
+    _MT5_TERMINAL_HOLDERS[terminal_key] = holder
+
+
+def mt5_terminal_holder(terminal_key: str) -> str | None:
+    """Who this process last logged the terminal into, or ``None`` when it has
+    recorded nothing for it. A READ never mints an entry (``.get``)."""
+    return _MT5_TERMINAL_HOLDERS.get(terminal_key)
 
 
 class Mt5ClientError(RuntimeError):
@@ -1893,6 +2021,11 @@ class Mt5Client:
                 credentials=(login, password, server),
                 answered_type=Mt5LoginRefusedError,
             )
+        # ⭐ Phase 164.6.6 criterion 1 — reached ONLY when the login succeeded
+        # (every failure arm above raises), so a refused or raising login never
+        # changes who the terminal is recorded as held by. The holder is the
+        # lease's, from the context; never this method's `login` argument.
+        _note_terminal_holder(self.terminal_key, stage="login")
 
     def assert_session_authorized(self) -> None:
         """Assert that the terminal currently HAS an authorized broker account —
@@ -2065,6 +2198,10 @@ class Mt5Client:
             #     catch entirely makes that structural more cheaply than the narrow arm
             #     did — there is nothing left that could absorb it.
             self._raise_last(credentials=(login, password, server))
+        # ⭐ Phase 164.6.6 criterion 1 — the credentialed initialize logged the
+        # terminal into an account, so it is a login for the holder record.
+        # Reached only on a truthy return (the falsy arm above raises).
+        _note_terminal_holder(self.terminal_key, stage="initialize_credentialed")
 
     def account_info(self) -> dict[str, Any]:
         """Current account snapshot as a native dict. None (error) -> typed raise."""
@@ -2693,6 +2830,15 @@ class Mt5Client:
             diagnostics["file_versions"],
             diagnostics["file_version_errors"],
             diagnostics["file_version_exc"],
+        )
+        # ⭐ Phase 164.6.6 criterion 1 — the terminate crossed, so whoever the
+        # terminal was held by, it is not any more: the relaunch below auto-logs
+        # into whatever account was saved last, which this process cannot see.
+        # Stamped HERE, ahead of the relaunch probe, so a relaunch that raises
+        # (`Mt5SessionAbandoned`) cannot skip it. Through the one door, so the
+        # epoch guard applies to it as to every other stamp.
+        _note_terminal_holder(
+            self.terminal_key, holder=HOLDER_UNKNOWN, stage="terminal_recycle"
         )
         authorized = True
         relaunch_code: int | None = None
