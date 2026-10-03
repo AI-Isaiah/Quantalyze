@@ -19,6 +19,7 @@ import { describe, expect, it } from "vitest";
 import { spawnSync } from "node:child_process";
 import {
   chmodSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -35,11 +36,13 @@ import {
   DEFECT_KINDS,
   absurdityViolations,
   gateSectionCount,
+  lanePortCollision,
   laneSpawnFailure,
   runCorpus,
   scopeDirForFile,
   scopeReasonLine,
   sectionOfIdentity,
+  spawnAsync,
 } from "../../scripts/mutation-runner/run.mjs";
 import { parseFile, scanCorpus } from "../../scripts/mutation-runner/parse.mjs";
 
@@ -1334,7 +1337,7 @@ describe("164.3.1-10 — the runner's absurdity floor (D-09): two INDEPENDENT ta
     };
 
     // ── The gate path. ──
-    const runCorpusBody = fnBody("export function runCorpus({");
+    const runCorpusBody = fnBody("export async function runCorpus({");
     expect(runCorpusBody).toMatch(/absurdityViolations\(\{[\s\S]{0,200}perFile: fileRows/);
     expect(runCorpusBody).toMatch(/logPerFileRows\(fileRows, log\)/);
 
@@ -1377,7 +1380,7 @@ describe("164.3.1-10 — the runner's absurdity floor (D-09): two INDEPENDENT ta
       return src.slice(at, end + 2);
     };
     const runLaneBody = fnBody("function runLane(");
-    const runCorpusBody = fnBody("export function runCorpus(");
+    const runCorpusBody = fnBody("export async function runCorpus(");
 
     expect(runLaneBody).toMatch(/laneTally\[leg\] \+= 1/);
     expect(runLaneBody).not.toMatch(/armsExecuted/);
@@ -1418,7 +1421,7 @@ describe("164.3.1-10 — the runner's absurdity floor (D-09): two INDEPENDENT ta
       return src.slice(at, end + 2);
     };
     const runLaneBody = fnBody("function runLane(");
-    const runCorpusBody = fnBody("export function runCorpus(");
+    const runCorpusBody = fnBody("export async function runCorpus(");
     const perFileRowsBody = fnBody("function perFileRows(");
 
     // The lane side KEEPS the per-gate count, beside the per-leg one.
@@ -1450,13 +1453,13 @@ describe("164.3.1-10 — the runner's absurdity floor (D-09): two INDEPENDENT ta
   const severedLane = ({ leg }: { leg: string }) =>
     leg === "probe" ? PROBE_ABSENT : { status: 0, output: "", seconds: 0, measureFail: null, invoked: true };
 
-  it("FIRES through runCorpus's real verdict loop: a lane runner that never spawns → exit 1 with `absurdity` naming executed=N lane-invocations=0", () => {
+  it("FIRES through runCorpus's real verdict loop: a lane runner that never spawns → exit 1 with `absurdity` naming executed=N lane-invocations=0", async () => {
     // Until 2026-09-02 this direction was pinned only by a one-off byte-backed
     // neuter of `laneTally[leg] += 1` recorded in 164.3.1-10-SUMMARY.md. The
     // stub above reaches the same severed shape through the injectable
     // `laneRunner`, so the loop → addDefect("absurdity") → exitCode 1 wiring
     // is driven on every vitest run, with no cluster.
-    const r = runCorpus({
+    const r = await runCorpus({
       scopeDir: SELFTEST_DIR,
       onlyFile: "nonbiting-gate.sql",
       armsFloor: 0,
@@ -1499,7 +1502,7 @@ describe("164.3.1-10 — the runner's absurdity floor (D-09): two INDEPENDENT ta
     expect(laneSpawnFailure({ status: 3, signal: null })).toBeNull();
   });
 
-  it("through the wiring: an arm lane that never STARTED (ENOENT) is a `lane-unrunnable` MEASURE_FAIL — not wrong-first-failure, not executed, not biting", () => {
+  it("through the wiring: an arm lane that never STARTED (ENOENT) is a `lane-unrunnable` MEASURE_FAIL — not wrong-first-failure, not executed, not biting", async () => {
     // Pre-fix `status: null` fell through `!== 0`, the empty output carried
     // no identity, and the arm was reported as `wrong-first-failure` — an
     // instrument failure wearing a corpus defect's name.
@@ -1509,7 +1512,7 @@ describe("164.3.1-10 — the runner's absurdity floor (D-09): two INDEPENDENT ta
       if (leg === "probe") return PROBE_ABSENT;
       return { status: 0, output: "", seconds: 0, measureFail: null, invoked: true };
     };
-    const r = runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "nonbiting-gate.sql", armsFloor: 0, laneRunner: dead, log: () => {} });
+    const r = await runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "nonbiting-gate.sql", armsFloor: 0, laneRunner: dead, log: () => {} });
     expect(r.exitCode).toBe(1);
     const mine = r.defects.filter((d: { kind: string; arm: string | null }) => d.kind === "lane-unrunnable" && d.arm === "NONBITE 1");
     expect(mine).toHaveLength(1);
@@ -1529,14 +1532,14 @@ describe("164.3.1-10 — the runner's absurdity floor (D-09): two INDEPENDENT ta
     expect(r.defects.map((d: { kind: string }) => d.kind)).not.toContain("absurdity");
   });
 
-  it("through the wiring: an arm lane that STARTED and was signalled counts as executed but never as biting", () => {
+  it("through the wiring: an arm lane that STARTED and was signalled counts as executed but never as biting", async () => {
     const killed = ({ leg }: { leg: string }) => {
       if (leg === "arm")
         return { status: null, output: "", seconds: 0, measureFail: "lane could not run: SIGKILL", invoked: true };
       if (leg === "probe") return PROBE_ABSENT;
       return { status: 0, output: "", seconds: 0, measureFail: null, invoked: true };
     };
-    const r = runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "nonbiting-gate.sql", armsFloor: 0, laneRunner: killed, log: () => {} });
+    const r = await runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "nonbiting-gate.sql", armsFloor: 0, laneRunner: killed, log: () => {} });
     expect(r.exitCode).toBe(1);
     expect(r.defects.some((d: { kind: string }) => d.kind === "lane-unrunnable")).toBe(true);
     expect(noProbeMeasureFail(r.defects), "the stub must have ANSWERED the probe leg").toBe(true);
@@ -1547,8 +1550,94 @@ describe("164.3.1-10 — the runner's absurdity floor (D-09): two INDEPENDENT ta
     // also fires here — that is the stub's shape, not this arm's subject.)
   });
 
+  // ── SFH-03 — a lane whose output never ends must SETTLE, not hang the pool ──
+  // run.sh's shape: bash with TERM/EXIT traps and a FOREGROUND child holding
+  // the pipes (`; :` stops bash exec-ing into it, so the flooder is a
+  // grandchild, as `psql` is). Before the fix `spawnAsync` SIGKILLed bash alone
+  // and waited for `close`, which the grandchild never allowed: this row hung
+  // until the race below fired. The flooder is killed by its token either way.
+  const floodLane = async (script: string, graceMs: number) => {
+    const token = `vitest-flood-${process.pid}-${Date.now()}`;
+    const dir = mkdtempSync(join(tmpdir(), "vitest-flood-"));
+    const marker = join(dir, "trap-ran");
+    let watchdog: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const proc = await Promise.race([
+        spawnAsync("bash", ["-c", script, "_", marker, token], { env: process.env, maxBuffer: 1 << 20, graceMs }),
+        new Promise<null>((res) => {
+          watchdog = setTimeout(() => res(null), 10_000);
+        }),
+      ]);
+      return { proc, trapRan: existsSync(marker) };
+    } finally {
+      clearTimeout(watchdog);
+      spawnSync("pkill", ["-f", token]);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+
+  it("SFH-03: an endlessly flooding lane settles as ENOBUFS, and the kill was a SIGTERM its EXIT trap could run on", { timeout: 20_000 }, async () => {
+    const r = await floodLane(`trap 'echo t > "$1"' EXIT; trap 'exit 143' TERM; yes "$2"; :`, 5000);
+    expect(r.proc, "still running at the 10 s watchdog: the overflow kill did not end the lane").not.toBeNull();
+    expect(laneSpawnFailure(r.proc!)).toBe("lane could not run: ENOBUFS");
+    // run.sh's EXIT trap is what stops the lane cluster; SIGKILL would skip it
+    // and orphan the postmaster on the worker's fixed port (SFH-01).
+    expect(r.trapRan, "the EXIT trap did not run: the lane was not stopped with a trappable signal").toBe(true);
+  });
+
+  it("SFH-03: a flooding lane whose whole group ignores SIGTERM is SIGKILLed after the grace and still settles as ENOBUFS", { timeout: 20_000 }, async () => {
+    const r = await floodLane(`trap '' TERM; yes "$2"; :`, 500);
+    expect(r.proc, "still running at the 10 s watchdog: no SIGKILL escalation reached the group").not.toBeNull();
+    expect(laneSpawnFailure(r.proc!)).toBe("lane could not run: ENOBUFS");
+  });
+
+  it("SFH-03: a lane that ends normally still settles on `close` with its whole output and its own status", async () => {
+    const r = await spawnAsync("bash", ["-c", "printf out; printf err >&2; exit 3"], { env: process.env, maxBuffer: 1 << 20 });
+    expect(r).toMatchObject({ status: 3, signal: null, error: undefined, stdout: "out", stderr: "err" });
+    expect(laneSpawnFailure(r)).toBeNull();
+  });
+
+  // ── SFH-01 / WR-02 — run.sh's port-collision refusal is an INSTRUMENT fault ──
+  // Each pool worker reuses one port, so a taken port (an orphaned postmaster)
+  // used to turn every later lane on that worker into a corpus defect. The
+  // real-lane proof is `SELF-TEST (port collision) 1/1`; these pin the
+  // classifier, its wiring, and that run.sh still prints what it matches.
+  const refusal = (line: string) =>
+    `ERROR: ${line}.\nThis lane would DROP SCHEMA public CASCADE on it. Refusing.\nPick a free port (or unset PORT to auto-allocate):\n`;
+  it("SFH-01: lanePortCollision names run.sh's exit-2 refusal, in both port_occupied spellings", () => {
+    expect(
+      lanePortCollision({ status: 2, stderr: refusal("something is already listening on 127.0.0.1:55001 (measured by trying to bind it)") }),
+    ).toBe("lane could not run: port 127.0.0.1:55001 was already taken (run.sh's collision guard refused, exit 2)");
+    expect(lanePortCollision({ status: 2, stderr: refusal("a PostgreSQL server on 127.0.0.1:55002 is accepting connections") })).toMatch(
+      /^lane could not run: port 127\.0\.0\.1:55002 was already taken/,
+    );
+  });
+
+  it("SFH-01: lanePortCollision needs BOTH the exit 2 and run.sh's own lines — a lost psql connection (exit 2) is still a gate outcome", () => {
+    const text = refusal("something is already listening on 127.0.0.1:55001 (measured by trying to bind it)");
+    // psql exits 2 when the server connection is lost: a real lane result.
+    expect(lanePortCollision({ status: 2, stderr: "psql: error: server closed the connection unexpectedly\n" })).toBeNull();
+    expect(lanePortCollision({ status: 3, stderr: text })).toBeNull();
+    expect(lanePortCollision({ status: 0, stderr: text })).toBeNull();
+    // The text inside a psql diagnostic is not run.sh speaking.
+    expect(lanePortCollision({ status: 2, stderr: `psql:gate.sql:3: ${text}` })).toBeNull();
+    // The ERROR line without the refusal line is not the guard's message.
+    expect(lanePortCollision({ status: 2, stderr: "ERROR: something is already listening on 127.0.0.1:55001.\n" })).toBeNull();
+  });
+
+  it("SFH-01: runLane classifies with it after laneSpawnFailure, and run.sh still prints the lines it matches", () => {
+    const runner = readFileSync(RUNNER_PATH, "utf8");
+    expect(runner).toContain("const measureFail = laneSpawnFailure(proc) ?? lanePortCollision(proc);");
+    const lane = readFileSync(join(REPO_ROOT, "scripts", "pg-lane", "run.sh"), "utf8");
+    expect(lane).toContain('port_occupied="something is already listening on 127.0.0.1:$PORT (measured by trying to bind it)"');
+    expect(lane).toContain('port_occupied="a PostgreSQL server on 127.0.0.1:$PORT is accepting connections"');
+    expect(lane).toContain('echo "ERROR: ${port_occupied}." >&2');
+    expect(lane).toContain('echo "This lane would DROP SCHEMA public CASCADE on it. Refusing." >&2');
+    expect(lane).toMatch(/Refusing\." >&2\n(?:.*\n){0,3}\s*exit 2\n/);
+  });
+
   // ── PRINT CONTRACT — the wiring that prints, not a string constant ──────
-  it("the runner PRINTS the lane tally beside coverage/arms/biting — driven through runCorpus's real summary block", () => {
+  it("the runner PRINTS the lane tally beside coverage/arms/biting — driven through runCorpus's real summary block", async () => {
     // A narrowed run whose --file matches no gate in the selftest corpus: no
     // lane is spawned, so no cluster is needed here, and the REAL summary
     // block still runs and prints. What this pins is the wiring — the line
@@ -1557,7 +1646,7 @@ describe("164.3.1-10 — the runner's absurdity floor (D-09): two INDEPENDENT ta
     // lanes is asserted by `--self-test` scenario 6 (2 arms, 2 lanes), which
     // the sql-mutation job runs with a cluster.
     const lines: string[] = [];
-    const r = runCorpus({
+    const r = await runCorpus({
       scopeDir: SELFTEST_DIR,
       onlyFile: "no-such-gate.sql",
       onlyArm: null,
@@ -1677,6 +1766,10 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // `scope-reason:` line directly after `scope:` on every corpus run, and the
     // count-recheck step MEASURE_FAILs without it.
     "scope-reason: the mutation machinery or a lane input changed: scripts/mutation-runner/run.mjs",
+    // ⭐ ADDED 2026-10-03 (Phase 164.9.6.1 D-01, SS-5): the runner prints exactly one
+    // `lane-concurrency:` line directly after `scope-reason:`, and the count-recheck step
+    // MEASURE_FAILs without it. Copied verbatim from plan 01's full local lane run.
+    "lane-concurrency: 4   (gate files in flight at once: min(cap 4, availableParallelism 10) unless overridden; at most 4 for this run's 58 target file(s); lanes within a file run in order)",
     "  baseline  supabase/tests/test_strategy_shares_rls.sql — exit 0 (1.8s)",
     "  arm SHAPE 1                  exit   3  RED (identity ok)  (1.7s)",
     "  restore   supabase/tests/test_strategy_shares_rls.sql — exit 0 (1.8s)",
@@ -2665,6 +2758,9 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     "scope: SUBSET 2/58 annotated files: test_allocator_equity_derived_rls.sql test_allocator_equity_pre_terminus_flag.sql",
     // ⭐ ADDED 2026-10-03 (Phase 164.9.6 D-12), directly after `scope:` as the runner prints it.
     "scope-reason: 2 of 5 changed file(s) are gate files",
+    // ⭐ ADDED 2026-10-03 (Phase 164.9.6.1 D-01, SS-5), directly after `scope-reason:` as the
+    // runner prints it; "at most 2" because a SUBSET of 2 files caps the pool at 2.
+    "lane-concurrency: 4   (gate files in flight at once: min(cap 4, availableParallelism 10) unless overridden; at most 2 for this run's 2 target file(s); lanes within a file run in order)",
     "",
     // ⭐ CURRENCY 2026-09-27 (Phase 164.9.3 CLAIMPAIR, plan 05): 52/79 -> 53/80, agreeing with
     // GREEN_LOG's coverage line and the SUBSET scope denominator above.
@@ -2929,6 +3025,51 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     const b = runCountRecheck(blank, PUSH_MAIN);
     expect(b.status, b.out).toBe(1);
     expect(b.out).toContain("'scope-reason:' line carries an EMPTY reason");
+  });
+
+  // ── Phase 164.9.6.1 / D-01 (SS-5): every run says how many gate files it ran at once ──
+  // One `lane-concurrency: <N>` line, asserted present, single and N >= 1. Without it
+  // the run's wall time cannot be read against the serial baseline. N is never compared
+  // against a cap (D-03 adds no guard), so only absence, doubling and N < 1 are RED.
+  it("RED: NO lane-concurrency line is a MEASURE_FAIL, on a FULL and on a SUBSET log (D-01, SS-5)", () => {
+    for (const [log, env] of [
+      [GREEN_LOG, PUSH_MAIN],
+      [SUBSET_LOG, PR],
+    ] as Array<[string, Record<string, string>]>) {
+      const without = log.replace(/^lane-concurrency: .*\n/m, "");
+      expect(without, "the deletion must actually change the log").not.toBe(log);
+      const r = runCountRecheck(without, env);
+      expect(r.status, r.out).toBe(1);
+      expect(r.out).toContain("MEASURE_FAIL: the run printed NO 'lane-concurrency: <N>' line");
+      // The absence is reported by its OWN branch and stops there; the not-one check
+      // below it must never be what catches a missing line.
+      expect(r.out).not.toContain("printed 0 'lane-concurrency:' lines");
+    }
+  });
+
+  it("RED: two lane-concurrency lines are a MEASURE_FAIL (D-01, SS-5)", () => {
+    const doubled = GREEN_LOG.replace(/^(lane-concurrency: .*)$/m, "$1\n$1");
+    expect(doubled).not.toBe(GREEN_LOG);
+    const r = runCountRecheck(doubled, PUSH_MAIN);
+    expect(r.status, r.out).toBe(1);
+    expect(r.out).toContain("printed 2 'lane-concurrency:' lines");
+  });
+
+  it("RED: lane-concurrency 0 is a MEASURE_FAIL, not a reading (D-01, SS-5)", () => {
+    const zero = GREEN_LOG.replace(/^lane-concurrency: 4 /m, "lane-concurrency: 0 ");
+    expect(zero, "the substitution must actually change the log").not.toBe(GREEN_LOG);
+    const r = runCountRecheck(zero, PUSH_MAIN);
+    expect(r.status, r.out).toBe(1);
+    expect(r.out).toContain("'lane-concurrency:' line says 0 gate file(s) at once");
+  });
+
+  it("GREEN: the lane-concurrency line is echoed on a clean log, and a different N is legal (D-01, D-03)", () => {
+    for (const n of ["4", "1", "7"]) {
+      const log = GREEN_LOG.replace(/^lane-concurrency: 4 /m, `lane-concurrency: ${n} `);
+      const r = runCountRecheck(log, PUSH_MAIN);
+      expect(r.status, r.out).toBe(0);
+      expect(r.out).toContain(`lane-concurrency: ${n}   (gate files in flight at once`);
+    }
   });
 
   it("GREEN: a scope-reason that names a migration .sql file moves neither the SUBSET name count nor the WR-07 set (D-12, Research Pattern 2)", () => {
@@ -3196,7 +3337,7 @@ describe("164.9.6 D-12 — scopeReasonLine says why the run took its scope, on o
 
   it("SOURCE PIN: in runCorpus the scope-reason line is logged directly after `log(scopeLine);`, no other log call between", () => {
     const code = maskJsComments(readFileSync(RUNNER_PATH, "utf8"));
-    const fnAt = anchorIndex(code, "export function runCorpus({");
+    const fnAt = anchorIndex(code, "export async function runCorpus({");
     const fnEnd = anchorIndex(code, "\n}\n", fnAt);
     const body = code.slice(fnAt, fnEnd);
     const scopeAt = anchorIndex(body, "log(scopeLine);");
@@ -3420,9 +3561,9 @@ describe("164.4.2-07 (D-D) — a SUBSET run never compares a narrowed tally agai
     leg === "probe" ? PROBE_ABSENT : { status: 0, output: "", seconds: 0, measureFail: null, invoked: true };
   type Defect = { kind: string; detail: string };
   const floorDefects = (defects: Defect[], re: RegExp) => defects.filter((d) => d.kind === "floor" && re.test(d.detail));
-  const drive = (opts: Record<string, unknown>) => {
+  const drive = async (opts: Record<string, unknown>) => {
     const lines: string[] = [];
-    const r = runCorpus({ scopeDir: FIXTURE_DIR, laneRunner: stubLane, log: (s: string) => lines.push(s), ...opts });
+    const r = await runCorpus({ scopeDir: FIXTURE_DIR, laneRunner: stubLane, log: (s: string) => lines.push(s), ...opts });
     return { r, lines };
   };
 
@@ -3435,8 +3576,8 @@ describe("164.4.2-07 (D-D) — a SUBSET run never compares a narrowed tally agai
     expect(waivers).toHaveLength(1);
   });
 
-  it("a SUBSET run raises NO biting-count ARMS_FLOOR defect though its biting count is far below ARMS_FLOOR — and SAYS the floor was not compared", () => {
-    const { r, lines } = drive({ subsetFiles: ["mini-gate.sql"], filesFloor: 1, armsFloor: ARMS_FLOOR, waivedCeiling: 1 });
+  it("a SUBSET run raises NO biting-count ARMS_FLOOR defect though its biting count is far below ARMS_FLOOR — and SAYS the floor was not compared", async () => {
+    const { r, lines } = await drive({ subsetFiles: ["mini-gate.sql"], filesFloor: 1, armsFloor: ARMS_FLOOR, waivedCeiling: 1 });
     expect(r.subset, "the run must actually have been a SUBSET run").toBe(true);
     expect(r.bitingArms, "AIM: the biting count must sit below the real constant, or the absence proves nothing").toBeLessThan(ARMS_FLOOR);
     // The subset's BITING count is never compared to ARMS_FLOOR…
@@ -3451,29 +3592,29 @@ describe("164.4.2-07 (D-D) — a SUBSET run never compares a narrowed tally agai
     expect(lines.filter((l) => l.startsWith("scope: "))).toEqual(["scope: SUBSET 1/1 annotated files: mini-gate.sql"]);
   });
 
-  it("CONTROL: a FULL run over the SAME fixture with the SAME floor still raises the ARMS_FLOOR regression", () => {
-    const { r, lines } = drive({ filesFloor: 1, armsFloor: ARMS_FLOOR, waivedCeiling: 1 });
+  it("CONTROL: a FULL run over the SAME fixture with the SAME floor still raises the ARMS_FLOOR regression", async () => {
+    const { r, lines } = await drive({ filesFloor: 1, armsFloor: ARMS_FLOOR, waivedCeiling: 1 });
     expect(r.subset).toBe(false);
     expect(floorDefects(r.defects, /^ARMS_FLOOR regression: \d+ biting arm\(s\) < floor /)).toHaveLength(1);
     expect(lines.filter((l) => l.startsWith("scope: "))).toEqual(["scope: FULL 1/1 annotated files"]);
     expect(r.exitCode).toBe(1);
   });
 
-  it("FILES_FLOOR still FIRES on a subset run when violated", () => {
-    const { r } = drive({ subsetFiles: ["mini-gate.sql"], filesFloor: 99, armsFloor: 0, waivedCeiling: 1 });
+  it("FILES_FLOOR still FIRES on a subset run when violated", async () => {
+    const { r } = await drive({ subsetFiles: ["mini-gate.sql"], filesFloor: 99, armsFloor: 0, waivedCeiling: 1 });
     expect(r.subset).toBe(true);
     expect(floorDefects(r.defects, /^FILES_FLOOR regression: 1 annotated file\(s\) < floor 99$/)).toHaveLength(1);
     expect(r.exitCode).toBe(1);
   });
 
-  it("WAIVED_CEILING still FIRES on a subset run when violated", () => {
-    const { r } = drive({ subsetFiles: ["mini-gate.sql"], filesFloor: 1, armsFloor: 0, waivedCeiling: 0 });
+  it("WAIVED_CEILING still FIRES on a subset run when violated", async () => {
+    const { r } = await drive({ subsetFiles: ["mini-gate.sql"], filesFloor: 1, armsFloor: 0, waivedCeiling: 0 });
     expect(r.subset).toBe(true);
     expect(floorDefects(r.defects, /^WAIVED_CEILING exceeded: 1 waived arm\(s\) > ceiling 0\./)).toHaveLength(1);
     expect(r.exitCode).toBe(1);
   });
 
-  it("FILES_FLOOR's numerator on a subset run is the FULL scan's, never the narrowed count — both directions", () => {
+  it("FILES_FLOOR's numerator on a subset run is the FULL scan's, never the narrowed count — both directions", async () => {
     // The self-test corpus has many annotated files; narrowing to ONE makes a
     // renormalised numerator (1) distinguishable from the full one (N).
     const full = scanCorpus(SELFTEST_DIR).filesAnnotated;
@@ -3488,15 +3629,15 @@ describe("164.4.2-07 (D-D) — a SUBSET run never compares a narrowed tally agai
         laneRunner: stubLane,
         log: () => {},
       });
-    const holds = at(full);
+    const holds = await at(full);
     expect(holds.subset).toBe(true);
     expect(holds.filesAnnotated).toBe(full);
     expect(floorDefects(holds.defects, /FILES_FLOOR/), "a floor equal to the FULL count must hold on a subset run").toEqual([]);
-    const fires = at(full + 1);
+    const fires = await at(full + 1);
     expect(floorDefects(fires.defects, /FILES_FLOOR regression/), "one above the FULL count must fire on a subset run").toHaveLength(1);
   });
 
-  it("164.9.6 D-12: every corpus run logs ONE scope-reason line directly after its scope line, and returns it", () => {
+  it("164.9.6 D-12: every corpus run logs ONE scope-reason line directly after its scope line, and returns it", async () => {
     const cases: Array<[Record<string, unknown>, string]> = [
       [{ subsetFiles: ["mini-gate.sql"], scopeReason: "1 of 3 changed file(s) are gate files" }, "scope-reason: 1 of 3 changed file(s) are gate files"],
       [{ subsetFiles: ["mini-migration.sql"], scopeReason: "r" }, "scope-reason: the runner fell back to FULL: no listed file is annotated: mini-migration.sql (derivation: r)"],
@@ -3504,7 +3645,7 @@ describe("164.4.2-07 (D-D) — a SUBSET run never compares a narrowed tally agai
       [{ onlyFile: "mini-gate.sql" }, "scope-reason: a narrowed DIAGNOSTIC run (--file/--arm)"],
     ];
     for (const [opts, want] of cases) {
-      const { r, lines } = drive({ filesFloor: 0, armsFloor: 0, waivedCeiling: 9, ...opts });
+      const { r, lines } = await drive({ filesFloor: 0, armsFloor: 0, waivedCeiling: 9, ...opts });
       const scopeAt = lines.findIndex((l) => l.startsWith("scope: "));
       expect(scopeAt, JSON.stringify(opts)).toBeGreaterThan(-1);
       expect(lines[scopeAt + 1], JSON.stringify(opts)).toBe(want);
@@ -3515,7 +3656,7 @@ describe("164.4.2-07 (D-D) — a SUBSET run never compares a narrowed tally agai
 
   it("the CLI can never hand a subset run a lowered floor: main's runCorpus call passes no floor, ceiling or lane runner", () => {
     const code = maskJsComments(readFileSync(RUNNER_PATH, "utf8"));
-    const at = code.indexOf("\nfunction main(argv) {");
+    const at = code.indexOf("\nasync function main(argv) {");
     expect(at, "main(argv) not found in the masked source").toBeGreaterThan(-1);
     const end = code.indexOf("\n}\n", at);
     expect(end).toBeGreaterThan(at);
@@ -3524,5 +3665,171 @@ describe("164.4.2-07 (D-D) — a SUBSET run never compares a narrowed tally agai
     // ⭐ 2026-10-03 (Phase 164.9.6 D-12): `scopeReason` joined the call — a
     // string the runner prints, never a floor, a ceiling or a lane runner.
     expect(calls).toEqual(["runCorpus({ scopeDir, onlyFile, onlyArm, subsetFiles, scopeReason })"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 164.9.6.1 (D-01) — LANE CONCURRENCY. `runCorpus` runs up to N gate files at
+// once inside ONE process. These arms drive the real pool, verdict loop and
+// summary block through an ASYNC stub lane runner, so no cluster is needed.
+// The corpus is the self-test directory because it carries 12 annotated files:
+// the fixture corpus carries ONE, and a file-level pool over one file can
+// never have more than one lane in flight, so it could not tell 1 from 4.
+// ⛔ Every serial-vs-parallel pair is awaited ONE AFTER THE OTHER, never under
+// `Promise.all`: `laneTally` is module-level and read as a snapshot delta, so
+// two overlapping runs would count each other's lanes (RESEARCH Pitfall 9).
+// ---------------------------------------------------------------------------
+describe("lane concurrency (164.9.6.1 D-01)", () => {
+  const PROBE_ABSENT = { status: 0, output: "NOTICE:  LANE-PROBE: pg_cron absent", seconds: 0, measureFail: null, invoked: true };
+  const FILES = scanCorpus(SELFTEST_DIR).annotatedFiles as string[];
+  type Call = { leg: string; gateAbs: string; port?: number };
+  type Defect = { kind: string; arm: string | null; file: string | null; detail: string };
+
+  /**
+   * An async stub lane whose delay DECREASES with the file's corpus index, so
+   * LATER files finish FIRST — the adversarial completion order. It records
+   * how many lanes are in flight and which ports they hold.
+   */
+  const makeStub = ({ rejectFile = null as string | null } = {}) => {
+    const state = { inFlight: 0, maxInFlight: 0, calls: 0, ports: [] as unknown[], sharedPort: false, held: new Set<number>() };
+    const lane = async ({ leg, gateAbs, port }: Call) => {
+      state.calls += 1;
+      state.ports.push(port);
+      state.inFlight += 1;
+      state.maxInFlight = Math.max(state.maxInFlight, state.inFlight);
+      if (typeof port === "number") {
+        if (state.held.has(port)) state.sharedPort = true;
+        state.held.add(port);
+      }
+      try {
+        if (leg === "probe") return PROBE_ABSENT;
+        const name = gateAbs.split("/").pop() as string;
+        const idx = FILES.indexOf(name);
+        if (rejectFile !== null && name === rejectFile) throw new Error(`stub lane rejected for ${name}`);
+        await new Promise((res) => setTimeout(res, (FILES.length - idx) * 4));
+        return { status: 0, output: "", seconds: 0, measureFail: null, invoked: true };
+      } finally {
+        state.inFlight -= 1;
+        if (typeof port === "number") state.held.delete(port);
+      }
+    };
+    return { lane, state };
+  };
+
+  // Paths into the run's mkdtemp root and slot numbers differ between any two
+  // runs (and slots are claimed in a different order under concurrency), and
+  // `lane-concurrency:` differs by construction — Test F asserts it alone.
+  const normalise = (s: string) =>
+    s.replace(/mutation-runner-[^/\s]+\/slot-\d+/g, "<slot>").replace(/\d+(\.\d+)?s\b/g, "<t>");
+  const comparable = (lines: string[]) =>
+    lines.filter((l) => !l.startsWith("per-arm lane time") && !l.startsWith("lane-concurrency: ")).map(normalise);
+  const defectKeys = (ds: Defect[]) => ds.map((d) => `${d.kind}|${d.arm}|${d.file}|${normalise(d.detail)}`);
+
+  const drive = async (concurrency: number, opts: { rejectFile?: string | null } = {}) => {
+    const { lane, state } = makeStub(opts);
+    const lines: string[] = [];
+    const r = await runCorpus({
+      scopeDir: SELFTEST_DIR,
+      filesFloor: 0,
+      armsFloor: 0,
+      waivedCeiling: 99,
+      laneRunner: lane,
+      concurrency,
+      log: (s: string) => lines.push(s),
+    });
+    return { r, lines, state };
+  };
+
+  it("AIM: the corpus carries at least 4 annotated files, so a 4-wide pool CAN have 4 in flight", () => {
+    expect(FILES.length).toBeGreaterThanOrEqual(4);
+  });
+
+  it("Test A (SS-3): output and the defect list are in CORPUS order at concurrency 4 even when later files finish first", async () => {
+    // WHY: every ci.yml parse of the runner log and every per-file attribution
+    // reads the lines in corpus order; a later file printing first would
+    // misattribute its arms to the file above it.
+    const serial = await drive(1);
+    const parallel = await drive(4);
+    expect(serial.r.defects.length, "AIM: the defect list must be non-empty, or its ORDER proves nothing").toBeGreaterThan(1);
+    expect(new Set(serial.r.defects.map((d: Defect) => d.file)).size, "AIM: defects from several files").toBeGreaterThan(1);
+    expect(comparable(parallel.lines)).toEqual(comparable(serial.lines));
+    expect(defectKeys(parallel.r.defects)).toEqual(defectKeys(serial.r.defects));
+  });
+
+  it("Test B (SS-2): the two independent tallies and the biting count are equal at concurrency 1 and 4", async () => {
+    // WHY: a tally that differs between serial and parallel runs is the
+    // `absurdity` defect — arms claimed without a lane, or lanes no verdict
+    // accounts for.
+    const serial = await drive(1);
+    const parallel = await drive(4);
+    for (const field of ["armsExecuted", "laneInvocations", "bitingArms", "exitCode"] as const) {
+      expect(parallel.r[field], field).toBe(serial.r[field]);
+    }
+    expect(parallel.r.laneLegs).toEqual(serial.r.laneLegs);
+    expect(serial.r.armsExecuted, "AIM: the stub must have been driven for real arms").toBeGreaterThan(0);
+  });
+
+  it("Test C (D-01 pool bound): at concurrency 4 more than one and at most four lanes are in flight; at concurrency 1 exactly one", async () => {
+    // WHY: concurrency is the whole speed-up (D-01); more than the cap would
+    // oversubscribe a 4-vCPU runner and slow every lane.
+    const serial = await drive(1);
+    const parallel = await drive(4);
+    expect(serial.state.maxInFlight).toBe(1);
+    expect(parallel.state.maxInFlight).toBeGreaterThan(1);
+    expect(parallel.state.maxInFlight).toBeLessThanOrEqual(4);
+  });
+
+  it("Test D (SS-4): every lane is handed a numeric port, and no two lanes in flight at once share one", async () => {
+    // WHY: two lanes on one port is the measured TOCTOU flake class (RESEARCH
+    // Pitfall 1) — an instrument collision reported as a corpus defect.
+    const { state } = await drive(4);
+    expect(state.calls).toBeGreaterThan(FILES.length);
+    expect(state.ports.every((p) => Number.isInteger(p) && (p as number) > 0)).toBe(true);
+    expect(state.sharedPort, "two in-flight lanes held the same port").toBe(false);
+    expect(new Set(state.ports).size, "AIM: several workers, so several ports").toBeGreaterThan(1);
+  });
+
+  it("Test E (Pitfall 8): when one file's lane rejects, runCorpus rejects only after every other in-flight lane has settled", async () => {
+    // WHY: the `finally` that removes the scratch root runs on that rejection;
+    // reaching it with sibling lanes still running deletes their workdirs
+    // mid-lane.
+    const { lane, state } = makeStub({ rejectFile: FILES[0] });
+    let inFlightAtRejection = -1;
+    await expect(
+      runCorpus({
+        scopeDir: SELFTEST_DIR,
+        filesFloor: 0,
+        armsFloor: 0,
+        waivedCeiling: 99,
+        laneRunner: lane,
+        concurrency: 4,
+        log: () => {},
+      }).catch((err: unknown) => {
+        inFlightAtRejection = state.inFlight;
+        throw err;
+      }),
+    ).rejects.toThrow(/stub lane rejected/);
+    expect(state.maxInFlight, "AIM: siblings must have been in flight when the rejection happened").toBeGreaterThan(1);
+    expect(inFlightAtRejection, "lanes still in flight when runCorpus rejected").toBe(0);
+  });
+
+  it("Test F (SS-5): exactly one lane-concurrency line, directly after scope-reason, naming the concurrency passed", async () => {
+    // WHY: the line is the run's only statement of how it was scheduled; a
+    // missing or duplicated line would leave a CI log unable to say so.
+    for (const n of [1, 4]) {
+      const { lines } = await drive(n);
+      const at = lines.findIndex((l) => l.startsWith("lane-concurrency: "));
+      expect(lines.filter((l) => l.startsWith("lane-concurrency: "))).toHaveLength(1);
+      expect(lines[at - 1].startsWith("scope-reason: "), lines[at - 1]).toBe(true);
+      expect(Number(/^lane-concurrency: (\d+)/.exec(lines[at])?.[1])).toBe(n);
+    }
+  });
+
+  it("refuses a concurrency that is not a positive integer — a usage error, never a run of zero files", async () => {
+    for (const bad of [0, -1, 1.5, Number.NaN]) {
+      await expect(
+        runCorpus({ scopeDir: SELFTEST_DIR, laneRunner: makeStub().lane, concurrency: bad, log: () => {} }),
+      ).rejects.toThrow(/concurrency must be an integer >= 1/);
+    }
   });
 });

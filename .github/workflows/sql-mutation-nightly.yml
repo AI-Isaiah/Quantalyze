@@ -366,6 +366,40 @@ jobs:
           fi
           echo "$reason_line"
 
+          # Phase 164.9.6.1 / D-01 (founder, "In-job concurrency") — HOW MANY
+          # GATE FILES DID THIS RUN DRIVE AT ONCE? The runner prints exactly one
+          # `lane-concurrency: <N>   (…)` line directly after `scope-reason:`,
+          # before any lane. Without it, this run's wall time cannot be read
+          # against the serial baseline, and whether its lanes ran side by side
+          # is unknown. Same arms as the two counts above: an unreadable log,
+          # an absent line, more than one line, or an N below 1 is a
+          # MEASURE_FAIL. ⛔ N is NOT compared against a cap: D-03 adds no
+          # guard, and a runner with a different core count is legal.
+          set +e
+          concurrency_count=$(grep -a -c -E '^lane-concurrency: [0-9]+ ' "$RUNNER_LOG")
+          rc=$?
+          set -e
+          [ "$rc" -le 1 ] || { echo "::error::MEASURE_FAIL: grep exited $rc counting 'lane-concurrency:' lines in $RUNNER_LOG — the log could not be read, which is not the same as a log with no lane-concurrency line."; exit 1; }
+          case "$concurrency_count" in ''|*[!0-9]*)
+            echo "::error::MEASURE_FAIL: could not count the 'lane-concurrency:' lines in $RUNNER_LOG (got '$concurrency_count')."; exit 1;; esac
+          if [ "$concurrency_count" -eq 0 ]; then
+            echo "::error::MEASURE_FAIL: the run printed NO 'lane-concurrency: <N>' line, so how many gate files it ran at once is unknown. Its wall time cannot be read against the serial baseline and its lane isolation cannot be judged (D-01)."
+            exit 1
+          fi
+          if [ "$concurrency_count" -ne 1 ]; then
+            echo "::error::MEASURE_FAIL: the run printed $concurrency_count 'lane-concurrency:' lines. One run of the gate prints exactly one; more than one means this log was not produced by one run."
+            exit 1
+          fi
+          concurrency_line=$(grep -a -m1 -E '^lane-concurrency: [0-9]+ ' "$RUNNER_LOG" || true)
+          concurrency_n=$(echo "$concurrency_line" | sed -E 's|^lane-concurrency: ([0-9]+) .*$|\1|')
+          case "$concurrency_n" in ''|*[!0-9]*)
+            echo "::error::MEASURE_FAIL: could not read the concurrency out of '$concurrency_line'."; exit 1;; esac
+          if [ "$concurrency_n" -lt 1 ]; then
+            echo "::error::MEASURE_FAIL: the run's 'lane-concurrency:' line says $concurrency_n gate file(s) at once. A run that executed anything ran at least one; a value below 1 is not a real reading of this run (D-01)."
+            exit 1
+          fi
+          echo "$concurrency_line"
+
           floors=$(node -e 'import("./scripts/mutation-floors.mjs").then(m => console.log(m.FILES_FLOOR, m.ARMS_FLOOR, m.WAIVED_CEILING))')
           files_floor=$(echo "$floors" | cut -d" " -f1)
           arms_floor=$(echo "$floors" | cut -d" " -f2)
