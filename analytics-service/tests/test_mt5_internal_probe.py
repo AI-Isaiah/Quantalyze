@@ -48,6 +48,11 @@ def client(monkeypatch):
     # silently with a hidden RPyC dependency.
     monkeypatch.delenv("MT5_GATEWAY_HOST", raising=False)
     monkeypatch.delenv("MT5_GATEWAY_PORT", raising=False)
+    # Phase 164.6.6 D-02 — there are now TWO endpoints a round-trip could be grown
+    # through: the job terminal above and the validation terminal below. Both are
+    # unset, so a live round-trip through EITHER must trip this wire.
+    monkeypatch.delenv("MT5_VALIDATION_GATEWAY_HOST", raising=False)
+    monkeypatch.delenv("MT5_VALIDATION_GATEWAY_PORT", raising=False)
     _reset_rate_limit()
     app = FastAPI()
     app.include_router(router)
