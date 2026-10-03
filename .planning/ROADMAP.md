@@ -147,6 +147,8 @@ phases below carry the corrections, not the bullets.
 - [ ] **Phase 167.2.1: FACTSHEETBUILDABLE — a strategy is called computed only when its factsheet can actually build** (INSERTED) — verification: human_needed
 - [x] **Phase 168: DRBOPTIONS — a Deribit options account ingests end to end** — verification: passed (completed 2026-10-02, PR #867)
 - [ ] **Phase 169: PAGETRUTH — every number agrees across pages and with its own record length** — not yet verified
+- [x] **Phase 169.1: ZOOMKPIS — the KPI strip and metrics rail follow the zoom window, and every windowed figure follows the engine's conventions** (INSERTED) — verification: passed (completed 2026-10-01, PR #913, v0.117.0.0)
+- [x] **Phase 169.1.1: HYDRATIONTICKS — factsheet chart ticks render the same on server and client, so hydration never fails** (INSERTED) — verification: passed (completed 2026-10-02, PR #925, v0.118.1.0)
 - [ ] **Phase 169.3: SMALLFIXES — admin compute jobs, recommendations, profile exchanges and the one mandate rule show true numbers** (INSERTED) — not yet verified (plan 01 shipped in #868)
 - [x] **Phase 170: LAYOUT — page layout reads clean and holds on every page** — verification: passed (completed 2026-10-01; post-deploy defects routed to 170.2)
 - [ ] **Phase 170.1: COPY — page copy reads clean on every page** (INSERTED) — not yet verified
@@ -4208,7 +4210,7 @@ Plans:
 
 *(Moved from Phase 169 on 2026-09-26, verbatim with their original numbers, D-37.)*
 
-**Plans:** 9 plans in 6 waves, one PR (split 2026-09-26, D-37; 169.1-09 added the same day, D-38 to D-40): W1 169.1-01 DISCOVERYONEPATH, 169.1-02 ZOOMKPIS; W2 169.1-03 ZOOMKPIS-COMPOUNDING; W3 169.1-04 SINGLEKEY-METHOD, 169.1-05 ARITHMETIC-BUCKETS; W4 169.1-06 DAYBASIS-DENSITY; W5 169.1-07 HEADLINE-NEIGHBOURS, 169.1-09 ROLLINGLINE; W6 169.1-08 integration run + post-deploy browser re-check. Decisions carried in `169.1-CONTEXT.md`; no migration.
+**Plans:** 9/9 plans complete in 6 waves, one PR (split 2026-09-26, D-37; 169.1-09 added the same day, D-38 to D-40): W1 169.1-01 DISCOVERYONEPATH, 169.1-02 ZOOMKPIS; W2 169.1-03 ZOOMKPIS-COMPOUNDING; W3 169.1-04 SINGLEKEY-METHOD, 169.1-05 ARITHMETIC-BUCKETS; W4 169.1-06 DAYBASIS-DENSITY; W5 169.1-07 HEADLINE-NEIGHBOURS, 169.1-09 ROLLINGLINE; W6 169.1-08 integration run + post-deploy browser re-check. Decisions carried in `169.1-CONTEXT.md`; no migration.
 **Founder decision, 2026-09-26 (AskUserQuestion, 169 D-27 as amended):** "Fix it in plan 14 (Recommended)". The zoom window's compounding limit (a composite stored with arithmetic compounding showed geometric windowed CAGR and cumulative return beside an arithmetic chart) is fixed, not recorded: the payload carries the stored method and the one shared function returns the arithmetic figures. Packaged as plan 14's second half, **169-14b** (it edits `build-payload.ts` after plan 13 and plan 14's shared builder), as D-18 split plan 05.
 **Orchestrator decisions, 2026-09-26 (169 D-28 to D-31, under the founder's standing "no clients, take decisions"):** the 14b split is accepted as honouring the founder's decision, and the arithmetic logic lives in `compute()` (D-28); the Scenario tab's withheld window figures are accepted, and its `periodsPerYear` is booked to Phase 167.1.2 as `[169-SCENARIO-WINDOW-ANNUALIZATION]` in `TODOS.md` (D-29); the day basis (measured: frozen only in the persisted series `conventions` echo) is carried and applied in 14b (D-30); two pre-existing number-truth defects become **169-14c** (a single-key simple-compounding strategy drew geometric curves) and **169-14d** (MTD, YTD, trailing windows, buckets and the monthly heatmap were compounded on arithmetic series) (D-31).
 **Reversal, 2026-09-30 (169.1 D-82, measured):** the D-29 sentence above is kept as lineage and no longer governs. Phase 167.1.2 plan 07 gave the Scenario payload its `periodsPerYear` and hid the leverage control under `scenarioMode`, so the Scenario tab shows window figures annualized on its own basis (169.1-02); the withheld form stays only as the fail-closed guard for a payload with no `periodsPerYear`, and it withholds every follow-list field, on the strip and on the rail (plan-check round 1 W1). 169.1-08 ticks `[169-SCENARIO-WINDOW-ANNUALIZATION]`.
@@ -4220,15 +4222,15 @@ Plans:
 
 Plans:
 
-- [ ] 169.1-01-PLAN.md — discovery detail page builds through the one shared path (SC3, SC4, D-23) (was 169-13)
-- [ ] 169.1-02-PLAN.md — KPI strip and metrics rail follow the zoom window (SC10, D-27) (was 169-14)
-- [ ] 169.1-03-PLAN.md — the zoom window keeps the stored compounding method and day basis (SC10, D-27 as amended, D-28, D-30) (was 169-14b)
-- [ ] 169.1-04-PLAN.md — a single-key strategy's curves follow its stored compounding method (SC4, D-31) (was 169-14c)
-- [ ] 169.1-05-PLAN.md — calendar windows, buckets and the monthly heatmap sum on arithmetic series (SC4, D-31) (was 169-14d)
-- [ ] 169.1-06-PLAN.md — a gapped composite's risk figures over the zero-filled series; the rolling Sharpe on the headline's day basis; rolling vol and Sortino on the zero-filled series of a calendar composite (SC10, SC4, D-32, D-33, D-39) (was 169-14e)
-- [ ] 169.1-07-PLAN.md — the bootstrap CI and the stress windows follow the headline's method and day basis (SC10, SC4, D-34) (was 169-14f)
-- [ ] 169.1-09-PLAN.md — the rolling Sharpe line stays continuous across the days the day basis excluded; the warm-up and no-dispersion (D7) windows stay gaps (SC10, SC9, D-38, D-40, D-84)
-- [ ] 169.1-08-PLAN.md — integration run + post-deploy browser re-check (SC9; this phase's items from old 12, verbatim) (was 169-12, narrowed)
+- [x] 169.1-01-PLAN.md — discovery detail page builds through the one shared path (SC3, SC4, D-23) (was 169-13)
+- [x] 169.1-02-PLAN.md — KPI strip and metrics rail follow the zoom window (SC10, D-27) (was 169-14)
+- [x] 169.1-03-PLAN.md — the zoom window keeps the stored compounding method and day basis (SC10, D-27 as amended, D-28, D-30) (was 169-14b)
+- [x] 169.1-04-PLAN.md — a single-key strategy's curves follow its stored compounding method (SC4, D-31) (was 169-14c)
+- [x] 169.1-05-PLAN.md — calendar windows, buckets and the monthly heatmap sum on arithmetic series (SC4, D-31) (was 169-14d)
+- [x] 169.1-06-PLAN.md — a gapped composite's risk figures over the zero-filled series; the rolling Sharpe on the headline's day basis; rolling vol and Sortino on the zero-filled series of a calendar composite (SC10, SC4, D-32, D-33, D-39) (was 169-14e)
+- [x] 169.1-07-PLAN.md — the bootstrap CI and the stress windows follow the headline's method and day basis (SC10, SC4, D-34) (was 169-14f)
+- [x] 169.1-09-PLAN.md — the rolling Sharpe line stays continuous across the days the day basis excluded; the warm-up and no-dispersion (D7) windows stay gaps (SC10, SC9, D-38, D-40, D-84)
+- [x] 169.1-08-PLAN.md — integration run + post-deploy browser re-check (SC9; this phase's items from old 12, verbatim) (was 169-12, narrowed)
 
 ### Phase 169.1.1: HYDRATIONTICKS — factsheet chart ticks render the same on server and client, so hydration never fails (INSERTED)
 
