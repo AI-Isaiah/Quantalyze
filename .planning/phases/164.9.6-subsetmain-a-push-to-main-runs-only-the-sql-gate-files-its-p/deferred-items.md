@@ -20,3 +20,8 @@
   `src/lib/factsheet` (`git diff --stat <merge-base>..HEAD -- src/lib/factsheet` is empty). Not investigated:
   it may be the shared node_modules environment or a pre-existing main-branch state. CI's reading on the
   phase PR decides which.
+
+- **ci.yml `sql-mutation` header comments still call `[REDUNDER-SUBSET-SPLIT]` the future remedy** (three
+  comment mentions; `grep -n 'REDUNDER-SUBSET-SPLIT' .github/workflows/ci.yml`). CLAUDE.md now records it as answered
+  by Phase 164.9.6. ci.yml is outside plan 05's `files_modified`; a dated CORRECTED note beside those comments
+  belongs to the phase close. `docs/sql-gate-lineage.md` carries the same sentence as lineage and needs nothing.

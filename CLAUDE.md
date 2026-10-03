@@ -245,9 +245,11 @@ a failure fails the aggregate rather than passing quietly:
   When it is red it stays red AND files or comments on the one open issue labelled
   `nightly-canary-failure:sql-mutation`, carrying the run's reading (D-06). ⚠️ While red it
   attaches a failing check to main's head SHA, so it can block a Railway redeploy of that SHA.
-  The founder accepted that coupling (D-11). Its steps are copies of `sql-mutation`'s, pinned
-  byte-equal by `src/__tests__/sql-mutation-nightly-parity.test.ts`. Edit a `sql-mutation` step
-  and the pin goes red until the nightly's copy matches.
+  The founder accepted that coupling (D-11). Its steps are copies of `sql-mutation`'s.
+  `src/__tests__/sql-mutation-nightly-parity.test.ts` pins every copied step's `run:` block
+  byte-equal, the step set, and the checkout/setup-node SHAs. Edit a `sql-mutation` step's `run:`
+  and the pin goes red until the nightly's copy matches. ⚠️ It does NOT compare `with:` or `env:`,
+  so a `node-version` bump or a new `env:` key on a lane step must be copied by hand.
   ⛔ **What it can NOT catch (the D-03 correction).** The nightly applies the same
   `RED-UNDER-SETUP` lists as every other run, so it cannot see a migration that no gate lists. Its
   backstop value is runner-host drift (a new image, PostgreSQL minor or pg_cron package) and
