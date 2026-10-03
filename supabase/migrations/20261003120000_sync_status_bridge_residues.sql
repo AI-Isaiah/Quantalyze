@@ -17,7 +17,8 @@
 --   This file clears the flag exactly when the row's writer-provenance job is
 --   among the UNPROTECTED live failures of this call (see THE DELTA).
 --   [164.6.7-RETRY-PLAIN-COMPLETE] (see RETRY-PLAIN-COMPLETE below) is closed
---   in this same file, and plan 03 appends the in-bridge per-strategy lock.
+--   in this same file, and so is the last unserialized CALLER of this function
+--   (see LOCK ORDER below).
 --
 -- D-04 -> D-04b (the shape actually shipped). D-04 as first written cleared the
 -- flag in branch (b) only, keyed on the single latest unprotected failure.
@@ -89,7 +90,38 @@
 -- FALSE for it). `complete_with_warnings` is untouched: its own arm precedes
 -- the keep arm.
 --
--- WHAT IT DOES NOT CLOSE (D-18, FOUNDER-OWNED, ACCEPTED 2026-09-27, default (a)).
+-- LOCK ORDER (D-06, Phase 164.5.2.1). The first statement after the
+-- NULL-strategy guard takes the two-integer, transaction-scoped advisory lock
+-- in the namespace Phase 164.5.2 gave the two terminal mark RPCs
+-- (`mark_compute_job_bridge`), keyed on the strategy, before every read. The
+-- guard precedes it on purpose: the lock function is STRICT, so a NULL key
+-- would make it a silent no-op. Measured caller census at execution: the two
+-- mark RPCs (one strategy each) and one direct caller, the Python DEFERRED path
+-- (`services/analytics_status.py`, a single-statement PostgREST RPC). Order of
+-- acquisition:
+--   mark path:     the job row (and, for done, the fan-in children), then the
+--                  advisory lock inside the RPC, RE-ENTERED here (same tag, same
+--                  transaction: no new wait), then the strategy_analytics row.
+--   DEFERRED path: nothing held, then the advisory lock here, then the
+--                  strategy_analytics row.
+-- Both paths take the advisory lock before the strategy_analytics row, and no
+-- transaction holds that row (or a job row) while waiting on the advisory lock,
+-- so there is no cycle. The worst case is a direct call waiting out one mark
+-- transaction on the same strategy. No production transaction takes the lock
+-- for two strategies. The verify block pins the placement on the
+-- comment-stripped body; the two-backend proof (a direct call waits on THIS
+-- lock behind a mark, and in the RPCs' namespace) is the lane-only gate
+-- supabase/tests/test_sync_status_bridge_lock.sql.
+--
+-- WHAT IT DOES NOT CLOSE.
+-- (1) The NON-caller writers of compute_jobs stay unserialized: the claim RPCs,
+-- reset_stalled_compute_jobs, the orphan terminalizer, the enqueue inserts, the
+-- cross-strategy fan-in release and the refresh-marker retraction never call
+-- this function and take no per-strategy lock. A job can still change status
+-- between this function's two compute_jobs reads, so the carried READ ORDER pin
+-- stays load-bearing. Those writers are other phases' functions (the claim RPCs
+-- are Phase 164.9.3's), and none is edited here.
+-- (2) D-18, FOUNDER-OWNED, ACCEPTED 2026-09-27, default (a).
 -- The PRE corner: a SIBLING's bridge call lands while X is still `running`,
 -- after the Python honour write and before X's own mark. That call takes branch
 -- (a), which blanks the provenance while X is not yet a failure (Phase 164.2's
@@ -107,7 +139,8 @@
 --
 -- RE-BASE (D-01). The CREATE OR REPLACE below is the LATEST definition,
 -- 20260906120000_computation_error_provenance.sql STEP 2, copied byte-for-byte
--- and edited only at the four sites above (re-grepped across every file in
+-- and edited only at the sites named in THE DELTA, RETRY-PLAIN-COMPLETE and
+-- LOCK ORDER above, plus the D-07 comment correction (re-grepped across every file in
 -- supabase/migrations/ at execution: no later CREATE and no ALTER FUNCTION of
 -- the bridge exists). The REVOKE is re-issued verbatim. COMMENT ON FUNCTION is
 -- NOT re-issued (D-03): CREATE OR REPLACE keeps the 20260826120000 comment, and
@@ -124,14 +157,16 @@
 -- and its body. It never asserts anything about the bodies of the two mark
 -- RPCs, because several gate lanes apply this migration on top of the pre-lock
 -- mark RPCs of 20260515114555. Whether a mark and this function serialize is
--- proven behaviourally, by a lane-only two-backend gate (plan 03), not here.
+-- proven behaviourally, by the lane-only two-backend gate
+-- supabase/tests/test_sync_status_bridge_lock.sql, not here.
 -- The new anchors run on a COMMENT-STRIPPED copy of the body, so prose can
 -- never satisfy them.
 --
 -- Transaction style: NO explicit BEGIN/COMMIT — Supabase wraps each migration
 -- in an implicit transaction. SET LOCAL lock_timeout applies to that wrap. This
 -- migration writes ZERO table data and validates no existing rows; its DO block
--- reads catalogs and one behavioural probe of a pure function only
+-- reads catalogs and runs two behavioural probes that read no table data (a
+-- pure function, and this function's refusal of a NULL strategy)
 -- ([164.8-DATA-DEPENDENT-MIGRATION-ESCAPE]). Every RAISE format string below is
 -- a SINGLE literal (Phase 85 invariant #21 — no '||' concatenation inside a
 -- RAISE format slot).
@@ -196,9 +231,12 @@ BEGIN
     RETURN;
   END IF;
 
-  -- ---- the NON-TERMINAL count — FIRST of this function's two compute_jobs ---
+  -- ---- the NON-TERMINAL counts — FIRST of this function's two compute_jobs --
   -- ---- reads, and the ORDER IS THE CORRECTNESS ------------------------------
-  -- Consumed by branch (a) far below. It is read HERE, and that placement is a
+  -- One statement, one snapshot, two counts: every in-flight job, and the
+  -- in-flight jobs that do NOT carry an in-scope refresh marker (the second
+  -- feeds the keep flag; see RETRY-PLAIN-COMPLETE in the file header).
+  -- Consumed by branch (a) far below. They are read HERE, and that placement is a
   -- data-integrity fix (161.1 migration re-review, HIGH), not tidiness.
   --
   -- ⛔ WHY THE ORDER OF THE TWO compute_jobs READS IS LOAD-BEARING
@@ -207,13 +245,23 @@ BEGIN
   -- live_failures CTE below). Nothing runs them atomically. There is no
   -- isolation override anywhere in this repo, so this executes at READ
   -- COMMITTED, where every statement takes its OWN fresh snapshot and a
-  -- concurrent transaction can commit a job's status flip BETWEEN them. Nor are
-  -- the callers serialized per strategy: mark_compute_job_failed takes FOR
-  -- UPDATE on the JOB row only, and neither it nor mark_compute_job_done takes
-  -- pg_advisory_xact_lock(hashtext(strategy_id)) before its PERFORM of this
-  -- function -- unlike positions_atomic_rebuild and sync_trades, which do. Two
-  -- sibling jobs of one live-API strategy, claimed in the same batch, therefore
-  -- run this concurrently as a matter of course.
+  -- concurrent transaction can commit a job's status flip BETWEEN them.
+  --
+  -- The CALLERS of this function are serialized per strategy (Phase 164.5.2
+  -- for the two terminal mark RPCs, Phase 164.5.2.1 for this function itself).
+  -- Both mark RPCs take the two-integer, transaction-scoped advisory lock in the
+  -- mark_compute_job_bridge namespace, keyed on the strategy, before they call
+  -- this function, and this function takes that same lock as its first
+  -- statement after the NULL guard. A mark RPC re-enters the lock it already
+  -- holds; a direct caller (the Python DEFERRED path) waits behind any mark or
+  -- direct call in progress on the same strategy. So no other caller can COMMIT
+  -- a job transition on this strategy while this function is between its reads.
+  -- The NON-caller writers are NOT serialized: the claim RPCs,
+  -- reset_stalled_compute_jobs, the orphan terminalizer, the enqueue inserts,
+  -- the cross-strategy fan-in release and the refresh-marker retraction never
+  -- call this function and take no such lock. A job's status can therefore
+  -- still change between the two reads, and the read order below stays
+  -- load-bearing.
   --
   -- The saving property is that a job's status is MONOTONE TOWARD TERMINAL.
   -- Every write that produces a non-terminal status is itself gated on a
@@ -254,11 +302,10 @@ BEGIN
   -- (branch (a) firing on a snapshot in which the marked job had not yet
   -- failed), which the 16-hour reaper of 20260802120000 then resolves. That is
   -- an unpublish that self-heals and is visible, versus a publish-over-failure
-  -- that does neither. The real closure is a per-strategy
-  -- pg_advisory_xact_lock in the two mark RPCs, matching the one
-  -- positions_atomic_rebuild and sync_trades already take. Those RPCs are
-  -- defined in other migrations, so it is deliberately NOT attempted here — a
-  -- half-applied lock discipline is worse than a documented window.
+  -- that does neither. The callers' per-strategy lock (above) narrows the
+  -- window to the NON-caller writers named there. Closing it fully would need
+  -- those writers to take the same lock; they are other phases' functions (the
+  -- claim RPCs belong to Phase 164.9.3), so that is not attempted here.
   SELECT count(*),
          count(*) FILTER (WHERE NOT COALESCE(
            (metadata ->> 'source') IN ('ledger-refresh', 'ledger-refresh-composite')
@@ -596,9 +643,14 @@ BEGIN
   -- this job's own row is still 'running'). Writing a bare 'computing' here would
   -- launder the warning, which branch (c) would then resolve to a plain 'complete'
   -- — ordering-dependent, so it leaked on multi-job (live-API) strategies.
-  -- Preserve it. Only the analytics runner clears the warning, via its own
-  -- 'computing' entry-write + clean terminal write when it actually recomputes;
-  -- the bridge must never downgrade it.
+  -- Preserve it. The analytics runner clears the warning, via its own
+  -- 'computing' entry-write + clean terminal write when it actually recomputes.
+  -- The bridge clears it in ONE case only, the membership arm FIRST in each
+  -- CASE below (D-04b, the file header): when the row's writer-provenance job
+  -- is among this call's unprotected live failures, the warning sits over a
+  -- failed run and is not a warning to preserve. A plain 'complete' row is
+  -- kept the same way by the refresh keep arm (D-05) when every in-flight job
+  -- is a marked in-scope refresh retry and no unprotected failure is live.
   --
   -- ⚠️ v_nonterminal_count is deliberately NOT read here. It is read at the TOP
   -- of this function, BEFORE the failure partition — see the read-order note
@@ -669,6 +721,8 @@ BEGIN
            -- multi-hop chain and the reaper would never fire (the Phase 106
            -- janitor bug, re-implemented in a new column).
            computing_started_at = CASE
+             -- Membership arm (D-04b): the row is resolving to 'computing' over
+             -- a failed run. Stamp the transition in, keep an existing stamp.
              WHEN strategy_analytics.computation_error_source = 'writer' AND strategy_analytics.computation_error_job_id = ANY (v_unprotected_job_ids)
              THEN CASE WHEN strategy_analytics.computation_status IS DISTINCT FROM 'computing' THEN now() ELSE strategy_analytics.computing_started_at END
              -- Arm 1: this branch RESOLVED to complete_with_warnings, i.e. the
@@ -676,6 +730,8 @@ BEGIN
              WHEN strategy_analytics.computation_status = 'complete_with_warnings'
                   OR strategy_analytics.computation_warned
              THEN NULL
+             -- Refresh keep arm (D-05): the row stays 'complete', i.e. NOT
+             -- computing. Same exit as Arm 1 — no stamp.
              WHEN v_refresh_keep AND strategy_analytics.computation_status = 'complete'
              THEN NULL
              -- Arm 2: resolved to 'computing' from some OTHER prior status —
@@ -699,10 +755,13 @@ BEGIN
   -- branch (a) rather than here (the idempotence hoist). Reaching this
   -- statement still means every job is terminal: branch (a) returns otherwise,
   -- and its one stand-down condition requires v_failed_count = 0.
-  -- This write does NOT touch computation_warned — the runner-owned marker survives
-  -- the 'failed' bounce in its own column, so branch (c) can recover the warning
-  -- after a sibling failed_final→done recovery WITHOUT an analytics re-run (SI-02,
-  -- closed by mig 20260708120000).
+  -- This write clears computation_warned in ONE case only: when the row's
+  -- writer-provenance job is among this call's unprotected live failures
+  -- (D-04b, the file header), because the warning then sits over a failed run.
+  -- Otherwise the runner-owned marker survives the 'failed' bounce in its own
+  -- column, so branch (c) can recover the warning after a sibling
+  -- failed_final→done recovery WITHOUT an analytics re-run (SI-02, closed by
+  -- mig 20260708120000); a sibling's failure carries no provenance for its id.
   IF v_failed_count > 0 THEN
     -- JOB-01 (Phase 142): SQL exit transition #1 — clear the stamp.
     INSERT INTO strategy_analytics (strategy_id, computation_status, computation_error, computing_started_at, computation_error_source, computation_error_job_id)
@@ -1328,7 +1387,7 @@ BEGIN
      OR position('INTO v_failed_count' IN v_fn) = 0
      OR position('INTO v_nonterminal_count' IN v_fn)
         > position('INTO v_failed_count' IN v_fn) THEN
-    RAISE EXCEPTION 'CR-01 verification failed: the two compute_jobs reads are in the WRONG ORDER -- the failed_final partition is evaluated before the non-terminal count. At READ COMMITTED, with no per-strategy advisory lock in mark_compute_job_done/failed, a job committing running -> failed_final between the two reads is then invisible to BOTH: branch (a) sees no in-flight job, branches (b)/(b-prime) see no failure, and branch (c) publishes computation_status = complete with computed_at = now() over a live non-superseded permanent failure';
+    RAISE EXCEPTION 'CR-01 verification failed: the two compute_jobs reads are in the WRONG ORDER -- the failed_final partition is evaluated before the non-terminal count. At READ COMMITTED, with the non-caller writers (claims, the stalled-job reset, the orphan terminalizer, the marker retraction) taking no per-strategy lock, a job committing running -> failed_final between the two reads is then invisible to BOTH: branch (a) sees no in-flight job, branches (b)/(b-prime) see no failure, and branch (c) publishes computation_status = complete with computed_at = now() over a live non-superseded permanent failure';
   END IF;
 
   -- CR-01: branch (b-prime) exists and its guard gates the UPDATE.
@@ -1512,6 +1571,20 @@ BEGIN
   IF NOT v_bridge_lock_anchored THEN
     RAISE EXCEPTION 'bridge-residue: sync_strategy_analytics_status does not take the two-integer mark_compute_job_bridge advisory lock on the strategy id as its first statement after the NULL-strategy guard. A direct caller (the Python DEFERRED path) then reads compute_jobs while an uncommitted terminal mark on the same strategy is changing it; above the guard, a NULL strategy would make the lock a silent no-op.';
   END IF;
+
+  -- The NULL-strategy refusal is behavioural: a NULL id must raise
+  -- invalid_parameter_value, the guard the lock line sits after. It reads no
+  -- table (the raise is the function's first statement). On its own it does
+  -- not prove the ORDER (the STRICT lock is a no-op on NULL either way); the
+  -- placement anchor above does.
+  BEGIN
+    PERFORM sync_strategy_analytics_status(NULL);
+    RAISE EXCEPTION 'bridge-residue: sync_strategy_analytics_status(NULL) returned without raising. The NULL-strategy guard is gone, so a NULL id reaches the per-strategy lock (a silent no-op on NULL) and every read below it.'
+      USING ERRCODE = 'P0001';
+  EXCEPTION
+    WHEN invalid_parameter_value THEN
+      NULL;
+  END;
 
   -- The namespace must not collide with the other two-integer advisory
   -- namespace in this schema (the same check 20260926120000 makes).

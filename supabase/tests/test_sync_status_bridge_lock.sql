@@ -47,7 +47,8 @@
 -- raise inside a dblink session would score NO-IDENTITY under the runner's
 -- source-location attribution (GRAMMAR rule 3c).
 --
--- SETUP identities (`Bn-SETUP`, folded into their arm by the runner) check
+-- SETUP identities (`Bn-SETUP`, folded into their arm by the runner; the
+-- B1-DIRECT block raises `B1-SETUP`, because a two-suffix id would not fold) check
 -- only prerequisites no twin touches: the seeded rows exist and are visible
 -- from backend b, b waited on something at all, and after a commits both calls
 -- actually completed. ⛔ No SETUP check inspects the function body for the
@@ -60,6 +61,17 @@
 --   B1  a = uncommitted mark_compute_job_done on S, b = direct bridge call on
 --       S: b waits on an ADVISORY lock. Twin: delete the bridge's lock line.
 --       Measured: b then waits on `transactionid`.
+--   B1-DIRECT  (sub-arm of B1, covered by B1's twin) a = an uncommitted DIRECT
+--       bridge call on S, b = a direct call on S: b waits on an ADVISORY lock.
+--   B2  in B1's pairing, b's ungranted advisory row carries the namespace's
+--       masked OID as classid and objsubid 2. Twin: change the bridge lock's
+--       namespace literal. a then holds the RPC's lock and the bridge's
+--       other-namespace lock, b waits on the latter: B1 stays green, B2 is
+--       first. This is the behavioural proof that the bridge RE-ENTERS the
+--       RPC's lock (same tag) instead of taking a second one; the migration's
+--       verify block cannot assert the mark RPC bodies (see its VERIFY SCOPE).
+--   The file order B1, B1-DIRECT, B2 is what makes each twin's FIRST failure
+--   its own arm.
 --
 -- WHY THIS FILE EXISTS INSTEAD OF EXTENDING THE 164.5.2 GATE. Adding this
 -- migration to the setup of supabase/tests/test_mark_rpc_bridge_advisory_lock.sql
@@ -118,7 +130,7 @@ BEGIN
   INSERT INTO api_keys (user_id, exchange, label, api_key_encrypted, is_active)
   VALUES (uid, 'mt5', 'brl mt5', 'x', TRUE) RETURNING id INTO k;
 
-  FOREACH arm IN ARRAY ARRAY['B1'] LOOP
+  FOREACH arm IN ARRAY ARRAY['B1', 'B1-DIRECT', 'B2'] LOOP
     INSERT INTO strategies (user_id, api_key_id, name)
     VALUES (uid, k, 'brl ' || arm) RETURNING id INTO s;
 
@@ -201,6 +213,134 @@ BEGIN
   SELECT computation_status INTO sa_st FROM strategy_analytics WHERE strategy_id = s;
   IF st1 IS DISTINCT FROM 'done' OR sa_st IS NULL THEN
     RAISE EXCEPTION 'TEST FAILED (B1-SETUP): after a committed, the marked job reads % and the strategy_analytics status reads %, so the mark and the direct call did not both complete and the lock observation above was not of two real bridge runs.', COALESCE(st1, 'NULL'), COALESCE(sa_st, 'NULL');
+  END IF;
+END
+$$;
+
+-- ===== ARM B1-DIRECT — two direct bridge calls serialize on the ADVISORY lock =
+-- Sub-arm of B1 (the runner folds `B1-DIRECT` into section B1, so B1's twin
+-- covers it): a = an uncommitted DIRECT bridge call on S, b = a direct call on
+-- S. Without the bridge's lock b waits on transactionid (measured, RESEARCH
+-- Q4 X2), because no mark RPC is in the pair to take the lock for it.
+DO $$
+DECLARE
+  cs     TEXT := format('host=127.0.0.1 port=%s dbname=%s user=%s',
+                        current_setting('port'), current_database(), current_user);
+  s      UUID;
+  b_pid  INT;
+  n_vis  INT;
+  i      INT;
+  sa_st  TEXT;
+BEGIN
+  SELECT strategy_id INTO s FROM bridge_residue_lock_seed WHERE arm = 'B1-DIRECT' AND slot = 1;
+  IF s IS NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (B1-SETUP): the committed seed for arm B1-DIRECT is missing, so no call below would run and every assertion would read nothing.';
+  END IF;
+
+  PERFORM dblink_connect('brl_a', cs);
+  PERFORM dblink_connect('brl_b', cs);
+
+  SELECT n INTO n_vis
+    FROM dblink('brl_b', format('SELECT count(*)::int FROM compute_jobs WHERE strategy_id = %L AND status = %L',
+                                s, 'running')) AS x(n int);
+  IF n_vis IS DISTINCT FROM 2 THEN
+    RAISE EXCEPTION 'TEST FAILED (B1-SETUP): backend b sees % of the 2 seeded running jobs, so the seed is not committed or not visible and neither direct call would reach its write.', COALESCE(n_vis, 0);
+  END IF;
+
+  PERFORM dblink_exec('brl_a', 'BEGIN');
+  PERFORM * FROM dblink('brl_a', format('SELECT sync_strategy_analytics_status(%L)::text', s)) AS x(v text);
+  SELECT pid INTO b_pid FROM dblink('brl_b', 'SELECT pg_backend_pid()') AS x(pid int);
+  PERFORM dblink_send_query('brl_b', format('SELECT sync_strategy_analytics_status(%L)::text', s));
+
+  FOR i IN 1..200 LOOP
+    EXIT WHEN EXISTS (SELECT 1 FROM pg_locks WHERE pid = b_pid AND NOT granted);
+    PERFORM pg_sleep(0.05);
+  END LOOP;
+
+  IF NOT EXISTS (SELECT 1 FROM pg_locks WHERE pid = b_pid AND NOT granted) THEN
+    RAISE EXCEPTION 'TEST FAILED (B1-SETUP): backend b''s direct bridge call never waited on anything while a held an uncommitted direct call on the same strategy, so the two did not overlap and nothing below could be observed.';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_locks WHERE pid = b_pid AND NOT granted AND locktype = 'advisory') THEN
+    RAISE EXCEPTION 'TEST FAILED (B1-DIRECT): two direct sync_strategy_analytics_status calls on one strategy are not serialized on an advisory lock (b waits on: %). Two DEFERRED calls, or a DEFERRED call and a mark, then interleave on the bridge''s READ COMMITTED reads.', (SELECT string_agg(DISTINCT locktype, ', ') FROM pg_locks WHERE pid = b_pid AND NOT granted);
+  END IF;
+
+  PERFORM dblink_exec('brl_a', 'COMMIT');
+  PERFORM * FROM dblink_get_result('brl_b') AS x(v text);
+  PERFORM dblink_disconnect('brl_a');
+  PERFORM dblink_disconnect('brl_b');
+
+  SELECT computation_status INTO sa_st FROM strategy_analytics WHERE strategy_id = s;
+  IF sa_st IS DISTINCT FROM 'computing' THEN
+    RAISE EXCEPTION 'TEST FAILED (B1-SETUP): after both direct calls the strategy_analytics status reads %, not computing (two running jobs are in flight), so the calls did not both run branch (a) and the observation above was not of two real bridge writes.', COALESCE(sa_st, 'NULL');
+  END IF;
+END
+$$;
+
+-- ===== ARM B2 — the bridge waits in the RPCs' namespace, two-integer form =====
+-- RED-UNDER: change the namespace literal of the bridge's lock in
+--            20261003120000 to a different string. In B1's pairing a then
+--            holds the RPC's lock AND the bridge's other-namespace lock, so b
+--            still waits on an advisory lock (B1 and B1-DIRECT stay green)
+--            but in the wrong namespace, which is what proves the bridge
+--            RE-ENTERS the RPC's lock rather than taking a second one.
+--            ⚠️ LAYERED: the placement anchor is stood down in the same
+--            mutation.
+-- RED-UNDER-M: {"arm":"B2","apply":[{"kind":"edit","file":"supabase/migrations/20261003120000_sync_status_bridge_residues.sql","find":"hashtext('mark_compute_job_bridge'), hashtext(p_strategy_id::text)","replace":"hashtext('bridge_residue_twin_ns'), hashtext(p_strategy_id::text)","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261003120000_sync_status_bridge_residues.sql","find":"IF NOT v_bridge_lock_anchored THEN","replace":"IF FALSE AND NOT v_bridge_lock_anchored THEN","occurrences":1}]}
+DO $$
+DECLARE
+  cs     TEXT := format('host=127.0.0.1 port=%s dbname=%s user=%s',
+                        current_setting('port'), current_database(), current_user);
+  v_ns   OID  := (hashtext('mark_compute_job_bridge')::bigint & 4294967295)::oid;
+  s      UUID;
+  j1     UUID;
+  t1     UUID;
+  b_pid  INT;
+  n_vis  INT;
+  i      INT;
+  st1    TEXT;
+BEGIN
+  SELECT strategy_id, job_id, claim_token INTO s, j1, t1 FROM bridge_residue_lock_seed WHERE arm = 'B2' AND slot = 1;
+  IF s IS NULL OR j1 IS NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (B2-SETUP): the committed seed for arm B2 is missing, so no call below would run and every assertion would read nothing.';
+  END IF;
+
+  PERFORM dblink_connect('brl_a', cs);
+  PERFORM dblink_connect('brl_b', cs);
+
+  SELECT n INTO n_vis
+    FROM dblink('brl_b', format('SELECT count(*)::int FROM compute_jobs WHERE strategy_id = %L AND status = %L',
+                                s, 'running')) AS x(n int);
+  IF n_vis IS DISTINCT FROM 2 THEN
+    RAISE EXCEPTION 'TEST FAILED (B2-SETUP): backend b sees % of the 2 seeded running jobs, so the seed is not committed or not visible and b''s bridge call would not reach its write.', COALESCE(n_vis, 0);
+  END IF;
+
+  PERFORM dblink_exec('brl_a', 'BEGIN');
+  PERFORM * FROM dblink('brl_a', format('SELECT mark_compute_job_done(%L, %L)::text', j1, t1)) AS x(v text);
+  SELECT pid INTO b_pid FROM dblink('brl_b', 'SELECT pg_backend_pid()') AS x(pid int);
+  PERFORM dblink_send_query('brl_b', format('SELECT sync_strategy_analytics_status(%L)::text', s));
+
+  FOR i IN 1..200 LOOP
+    EXIT WHEN EXISTS (SELECT 1 FROM pg_locks WHERE pid = b_pid AND NOT granted);
+    PERFORM pg_sleep(0.05);
+  END LOOP;
+
+  IF NOT EXISTS (SELECT 1 FROM pg_locks WHERE pid = b_pid AND NOT granted) THEN
+    RAISE EXCEPTION 'TEST FAILED (B2-SETUP): backend b''s direct bridge call never waited on anything while a held an uncommitted done mark on the same strategy, so nothing below could be observed.';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_locks
+                  WHERE pid = b_pid AND NOT granted AND locktype = 'advisory'
+                    AND classid = v_ns AND objsubid = 2) THEN
+    RAISE EXCEPTION 'TEST FAILED (B2): the direct bridge call is not waiting on the TWO-INTEGER advisory lock in the mark_compute_job_bridge namespace (classid = the namespace''s masked OID, objsubid = 2). The bridge takes a lock the mark RPCs do not hold, so a mark and a direct call do not share one lock: each RPC now holds two per-strategy locks, and the bridge''s lock no longer orders a direct call against the mark''s own pre-bridge work.';
+  END IF;
+
+  PERFORM dblink_exec('brl_a', 'COMMIT');
+  PERFORM * FROM dblink_get_result('brl_b') AS x(v text);
+  PERFORM dblink_disconnect('brl_a');
+  PERFORM dblink_disconnect('brl_b');
+
+  SELECT status INTO st1 FROM compute_jobs WHERE id = j1;
+  IF st1 IS DISTINCT FROM 'done' THEN
+    RAISE EXCEPTION 'TEST FAILED (B2-SETUP): after a committed, the marked job reads %, not done, so the observation above was not of a real terminal mark.', COALESCE(st1, 'NULL');
   END IF;
 END
 $$;
