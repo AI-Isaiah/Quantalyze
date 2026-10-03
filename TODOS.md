@@ -1575,7 +1575,8 @@ true for 146 and half of 142–145, and **false for 141**.
         no longer stands in for "nothing was recomputed". ⚠️ That alone closes only the lag. The fix
         must ALSO stop the bridge stamping `computed_at` in branch (c) once the runner stamps, or the
         fresh-without-compute direction stays open. Outside the SQL-only Phase 164.5.2.1 (D-05b).
-      - **Owner:** a follow-up phase, to be booked by the orchestrator. **Closed when:** a real recompute
+      - **Owner:** Phase 166.5 COMPUTEDATSTAMP (inserted 2026-10-03; booked in `.planning/ROADMAP.md`
+        on `main`), which owns both directions above. **Closed when:** a real recompute
         that ends `complete_with_warnings` beside an in-flight sibling advances `computed_at` at the
         runner's finish, AND a terminal job that recomputed nothing (branch (c)) leaves
         `computed_at` unchanged, each with a test that fails on today's behaviour.
