@@ -2668,8 +2668,9 @@ the former 4 is renumbered 3 below, text unchanged.
 any restart or heal, which is 164.6.8's evidence, so both `**Owns**` lines now live under Phase
 164.6.8, carried verbatim. This phase owns neither.
 **⭐ ROUTED IN 2026-09-30 (from 169.3-06 planning; founder AskUserQuestion "164.6.6 TERMINALISOLATION"; data-integrity; 169.3 D-76):** an MT5 investor password is stored differently depending on the path that saved it. The connect wizard trims it (create-with-key → `validateKey` → `trimCredential` in `src/lib/analytics-client.ts`); the password-update dialog stores it exactly as typed (`src/app/api/keys/[id]/rotate-secret/route.ts` :221, :227, :312 → `analytics-service/routers/internal.py` :739, :762). A password with a leading or trailing space is therefore saved correctly on rotate but wrongly through the wizard, which then fails to log in. Success: an MT5 password is never trimmed on any path (wizard, rotate, validate), pinned by a test that fails under the old trim; API key and secret trimming for other venues is unchanged. 169.3-06 deliberately leaves both server paths alone and only stops the client from stripping the MT5 password.
+⚠️ **Measured 2026-10-03 (plan-check revision 1), recorded as `164.6.6-CONTEXT.md` D-08 and delivered by plan 07:** the sentence before this one is false for the wizard secret slot. 169.3-06 exempted only the Update-password dialog, and `ConnectKeyStep` / `MultiKeyConnectStep` still strip a pasted MT5 password (169.3 D-76). Plan 07 therefore exempts the MT5 secret in both `validateKey` and `encryptKey` (one shared helper, so validate and encrypt stay identical) AND in both wizard secret inputs, through a venue capability. Non-MT5 trimming and the MT5 login trim are unchanged. The rotate path is already verbatim and is not edited. The sentence above is kept as lineage.
 
-**Plans:** 4 plans (re-plan pending; was 8 before the 2026-09-27 split)
+**Plans:** 8 plans (01-08 as listed below; re-planned after the 2026-09-27 split; plan 07 added 2026-10-03 for the routed MT5-password item)
 
 ⛔ **SAME INCIDENT AS 164.6.5, DIFFERENT DEFECT.** 164.6.5 makes validation stop breaking the
 terminal; this phase makes the terminal stop being a shared mutable resource. 164.6.5 is
@@ -2718,11 +2719,16 @@ independently shippable; this is the architecture.
 
 Plans:
 
-- [ ] 164.6.6-01-PLAN.md — handover record: every job-terminal switch recorded against the displaced holder (wave 2, after the founder decision in plan 02)
-- [ ] 164.6.6-02-PLAN.md — FOUNDER decisions D-01..D-07 (eviction scope, isolation option, 164.6.5 D-07 reversal, scrub cadence, H3) recorded in CONTEXT.md and here (wave 1, gates every other plan)
-- [ ] 164.6.6-04-PLAN.md — both validate sites routed to the validation terminal, fail loud when unset
-- [ ] 164.6.6-08-PLAN.md — live-check runbook + FOUNDER post-deploy verification L1..L7
+- [ ] 164.6.6-01-PLAN.md — handover record: every job-terminal switch recorded against the displaced holder (wave 1; builds on the founder's locked D-01/D-02 record of 2026-09-27, which its precondition reads)
+- [ ] 164.6.6-02-PLAN.md — FOUNDER decisions D-01..D-07 (eviction scope, isolation option, 164.6.5 D-07 reversal, scrub cadence, H3) recorded in CONTEXT.md and here (wave 2, after plan 03: both append to `164.6.6-CONTEXT.md`)
+- [ ] 164.6.6-03-PLAN.md — validation-gateway stand-up runbook + FOUNDER stand-up and readings S-01, S-07, S-08, N-01 (wave 1)
+- [ ] 164.6.6-04-PLAN.md — both validate sites routed to the validation terminal, fail loud when unset (wave 2, after plans 01 and 03)
+- [ ] 164.6.6-05-PLAN.md — H3 part 1: the analytics service refuses to dial a non-private gateway host (wave 3)
+- [ ] 164.6.6-06-PLAN.md — H3 part 2: the master-password park, per the founder's `H3-MASTER-PASSWORD-MODE` (wave 3)
+- [ ] 164.6.6-07-PLAN.md — D-08: an MT5 password is never trimmed on any path; validate and encrypt send the same bytes; other venues unchanged (wave 1)
+- [ ] 164.6.6-08-PLAN.md — live-check runbook + FOUNDER post-deploy verification L1..L7 (wave 4)
 - ⛔ MOVED 2026-09-27 to Phase 164.6.6.1 MT5SCRUB (founder split): 164.6.6-03 (scrub spike; its gateway stand-up half stays here, re-planned), 164.6.6-05, 164.6.6-06, 164.6.6-07. Re-planning this phase (narrowed scope + a new H3 plan) rewrites this list.
+  - ⚠️ **Plan ids reused (noted 2026-10-03):** the ids moved out above were reused for NEW plans in this list, which the re-plan wrote. 03 is the gateway stand-up, 05 is H3 part 1, 06 is the H3 part 2 park (split out of 05 at checker round 3), and 07 is the D-08 MT5-password plan (added at plan-check revision 1, 2026-10-03). The moved plans live on as 164.6.6.1-01..-04 (see that phase's list: "was 164.6.6-03/05/06/07"). Read `164.6.6-07` in this list as the D-08 plan, never as the moved job-terminal scrub.
 
 ### Phase 164.6.6.1: MT5SCRUB — the MT5 terminals are wiped of saved accounts after use without ever leaving the jobs terminal logged out (INSERTED)
 
