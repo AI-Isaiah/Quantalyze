@@ -503,6 +503,8 @@ _PARK_ALERT_CAUSES: Final[frozenset[str]] = frozenset(
         "session_abandoned",
         "ceiling",
         _PARK_BRIDGE_GLITCH_CAUSE,
+        # The park await was cancelled: the terminal may still hold the probe's session.
+        "park_cancelled",
         # The call-site gate refused to attempt it.
         "probe_in_flight",
         "probe_session_abandoned",

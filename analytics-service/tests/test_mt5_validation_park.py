@@ -1243,3 +1243,109 @@ async def test_the_worker_glitch_park_after_an_ipc_fault_validation_pages(
     assert len(transport.house_logins()) == 1, "the park was never attempted"
     _assert_one_alert(park_sentry, caplog, "bridge_glitch", _WORKER)
     _assert_no_credential_leak(park_sentry, caplog)
+
+
+# --------------------------------------------------------------------------- #
+# Plan 09 Task 3 — the two other T-164.6.6-07 alert paths, at both sites: an
+# unexpected exception in the park block, and a cancelled park await. Per the
+# founder decision (CONTEXT D-07 part 2, "Park alert level"), every skip or
+# failure other than the one glitch case pages.
+# --------------------------------------------------------------------------- #
+
+
+def _raising_house_reader():
+    raise RuntimeError(f"house reader broke password={_HOUSE_PASSWORD}")
+
+
+async def test_an_unexpected_park_error_alerts_at_the_wizard(
+    exchange_router, monkeypatch, park_sentry, caplog
+):
+    """Something in the park block raised outside `park_on_house_account`'s own
+    arms. The park did not run, so the user's session may stay on the
+    validation terminal: it pages `unrecognised_cause`. The verdict stands, the
+    release is still the last thing the client sees, and the exception text
+    (which carries the fabricated password) reaches no log line or capture."""
+    router = exchange_router
+    transport = _RecordingMt5(_scenario())
+    _install_real_mt5_client(router, transport)
+    monkeypatch.setattr(router, "read_env_mt5_credentials", _raising_house_reader)
+    with caplog.at_level(logging.DEBUG, logger=_ANALYTICS_LOGGER):
+        result = await _call(router, _make_req())
+    assert result == {"valid": True, "read_only": True}
+    assert transport.house_logins() == []
+    assert transport.events[-1] == ("release",)
+    _assert_one_alert(park_sentry, caplog, "unrecognised_cause", _WIZARD)
+    _assert_no_credential_leak(park_sentry, caplog)
+
+
+async def test_an_unexpected_park_error_alerts_at_the_worker(
+    monkeypatch, park_sentry, caplog
+):
+    """The same at the worker validate: `unrecognised_cause`, the result
+    unchanged, and close still runs."""
+    transport = _RecordingMt5(_scenario())
+    _install_worker_transport(monkeypatch, transport)
+    monkeypatch.setattr(
+        "services.ingestion.mt5.read_env_mt5_credentials", _raising_house_reader
+    )
+    with caplog.at_level(logging.DEBUG, logger=_ANALYTICS_LOGGER):
+        result = await _worker_validate()
+    assert result.valid is True and result.read_only is True
+    assert transport.house_logins() == []
+    assert transport.events[-1] == ("release",)
+    _assert_one_alert(park_sentry, caplog, "unrecognised_cause", _WORKER)
+    _assert_no_credential_leak(park_sentry, caplog)
+
+
+async def _cancel_during_the_park(make_call, transport: _RecordingMt5) -> None:
+    """Run the validate as a task, wait (bounded) until the park login is on the
+    wire and blocked, cancel the task, and require the cancellation to keep
+    propagating."""
+    task = asyncio.create_task(make_call())
+    for _ in range(200):
+        if transport.house_logins():
+            break
+        await asyncio.sleep(0.025)
+    assert transport.house_logins(), "the park login never started"
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+async def test_a_cancelled_park_alerts_and_re_raises_at_the_wizard(
+    exchange_router, park_sentry, caplog
+):
+    """The request is cancelled while the park await is in flight. The park
+    did not finish, so the session may still be on the terminal: it pages
+    `park_cancelled`, the cancellation keeps propagating, and the release still
+    runs."""
+    router = exchange_router
+    blocker = threading.Event()
+    transport = _RecordingMt5(_scenario(), block_house_login=blocker)
+    _install_real_mt5_client(router, transport)
+    try:
+        with caplog.at_level(logging.DEBUG, logger=_ANALYTICS_LOGGER):
+            await _cancel_during_the_park(lambda: _call(router, _make_req()), transport)
+        _assert_one_alert(park_sentry, caplog, "park_cancelled", _WIZARD)
+        assert ("release",) in transport.events, "the release did not run"
+    finally:
+        blocker.set()
+    await _wait_for_thread_event(transport.house_login_returned)
+
+
+async def test_a_cancelled_park_alerts_and_re_raises_at_the_worker(
+    monkeypatch, park_sentry, caplog
+):
+    """The same at the worker validate: `park_cancelled`, re-raised, and close
+    still runs."""
+    blocker = threading.Event()
+    transport = _RecordingMt5(_scenario(), block_house_login=blocker)
+    _install_worker_transport(monkeypatch, transport)
+    try:
+        with caplog.at_level(logging.DEBUG, logger=_ANALYTICS_LOGGER):
+            await _cancel_during_the_park(_worker_validate, transport)
+        _assert_one_alert(park_sentry, caplog, "park_cancelled", _WORKER)
+        assert ("release",) in transport.events, "close did not run"
+    finally:
+        blocker.set()
+    await _wait_for_thread_event(transport.house_login_returned)

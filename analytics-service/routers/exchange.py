@@ -1250,12 +1250,22 @@ async def _validate_mt5_key_probe(
                                 # only thing that touches the client from here is
                                 # the bounded release below, exactly as before.
                                 report_park_skipped("ceiling", site=SITE_VALIDATE_WIZARD)
+                            except asyncio.CancelledError:
+                                # Per the founder decision (CONTEXT D-07 part 2 "Park
+                                # alert level"), every other skip or failure still
+                                # pages, and a cancelled park is one; cancellation
+                                # keeps propagating.
+                                report_park_skipped("park_cancelled", site=SITE_VALIDATE_WIZARD)
+                                raise
                 except Exception as park_exc:  # noqa: BLE001 — the park must never replace the verdict
                     logger.error(
                         "validate_key: the D-07 park failed unexpectedly "
                         "(error_class=%s)",
                         type(park_exc).__name__,
                     )
+                    # T-164.6.6-07: the park did not run, so this pages through
+                    # the closed cause set. `report_park_skipped` never raises.
+                    report_park_skipped("unrecognised_cause", site=SITE_VALIDATE_WIZARD)
                 finally:
                     if client is not None:
                         try:

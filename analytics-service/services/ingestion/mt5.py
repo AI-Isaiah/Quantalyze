@@ -516,12 +516,22 @@ class Mt5Adapter:
                                 )
                             except asyncio.TimeoutError:
                                 report_park_skipped("ceiling", site=SITE_VALIDATE_WORKER)
+                            except asyncio.CancelledError:
+                                # Per the founder decision (CONTEXT D-07 part 2 "Park
+                                # alert level"), every other skip or failure still
+                                # pages, and a cancelled park is one; cancellation
+                                # keeps propagating.
+                                report_park_skipped("park_cancelled", site=SITE_VALIDATE_WORKER)
+                                raise
                 except Exception as park_exc:  # noqa: BLE001 — the park must never replace the verdict
                     logger.error(
                         "mt5.validate: the D-07 park failed unexpectedly "
                         "(error_class=%s)",
                         type(park_exc).__name__,
                     )
+                    # T-164.6.6-07: the park did not run, so this pages through
+                    # the closed cause set. `report_park_skipped` never raises.
+                    report_park_skipped("unrecognised_cause", site=SITE_VALIDATE_WORKER)
                 finally:
                     try:
                         await asyncio.wait_for(
