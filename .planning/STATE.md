@@ -5,16 +5,16 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 164.5.2.1
 current_phase_name: BRIDGERESIDUE
 status: executing
-stopped_at: "Completed 164.5.2.1-03-PLAN.md (in-bridge per-strategy lock + LANE-ONLY gate; founder decision 2026-10-03 resolved [164.5.2.1-02-KEPT-ROW-COMPUTED-AT]: a kept row holds computed_at, sentence and markers)"
-last_updated: "2026-10-03T06:20:00.000Z"
+stopped_at: "Completed 164.5.2.1-04-PLAN.md (curated/protected gates re-pointed at 20261003120000, snapshot + one earned prod-body-ack, local-stack D-11 set green, kind-scope drift test resolves the newest bridge definition by scan)"
+last_updated: "2026-10-03T06:45:00.000Z"
 last_activity: 2026-10-03
-last_activity_desc: Phase 164.5.2.1 plan 03 complete
+last_activity_desc: Phase 164.5.2.1 plan 04 complete
 state_head: f9fb8b252dfc58c7b57713ea75af40feff6d9a0e
 progress:
   total_phases: 85
   completed_phases: 48
   total_plans: 458
-  completed_plans: 452
+  completed_plans: 453
   percent: 56
 ---
 
@@ -179,7 +179,7 @@ both checkboxes updated to match. Not yet marked `completed_phases` in the front
 no VERIFICATION.md exists for this phase yet, and this repo's own rule is that phase completion
 is decided by verification status, never by plan counts.**
 
-Phase: 164.5.2.1 (BRIDGERESIDUE) — EXECUTING (plan 4 of 5; plans 01-03 complete 2026-10-03, migration 20261003120000_sync_status_bridge_residues.sql; [164.5.2.1-02-KEPT-ROW-COMPUTED-AT] resolved by founder decision 2026-10-03, implemented in plan 03)
+Phase: 164.5.2.1 (BRIDGERESIDUE) — EXECUTING (plan 5 of 5; plans 01-04 complete 2026-10-03, migration 20261003120000_sync_status_bridge_residues.sql; [164.5.2.1-02-KEPT-ROW-COMPUTED-AT] resolved by founder decision 2026-10-03, implemented in plan 03)
 Phase: 164.9.4 (CIOFFMUTEX) — VERIFYING (review loop closed by the founder after round 6; e2e-seeded flake fix, option D, in progress)
 Phase: 164.9.3.2.1 (ENQ40001) — COMPLETE 2026-10-02 (verification passed; PR #929 merged, v0.118.1.5; no migration)
 Phase: 160 / 168 / 164.3 leftover plans — CLOSED 2026-10-02 (160-07 PROD smoke 2/3 surfaces; 168-03 observed on the re-created composite; 164.3-07 superseded by 164.5-07)
@@ -519,7 +519,7 @@ Status: Executing Phase 164.5.2.1
       closed by PR #743 `3ed6919e`) and 164.4.1 annotated all five remaining files —
       `lane-blocked: 0`, `pending: 0` at `files 44/71`. Read `FILES_FLOOR` / `ARMS_FLOOR` off
       `scripts/mutation-runner/run.mjs`, never off a number restated here.
-Last activity: 2026-10-03 — Phase 164.5.2.1 plan 03 complete (in-bridge lock proven by LANE-ONLY gate B1/B2; founder hold-the-date decision shipped as K1..K3, residue gate at ALL 16 ARMS EXECUTED)
+Last activity: 2026-10-03 — Phase 164.5.2.1 plan 04 complete (curated gate 8/8 biting on the new body, protected ALL 23 ARMS EXECUTED, snapshot regenerated with one earned prod-body-ack, local-stack D-11 set rc 0, D-12 drift test by scan with three neuters RED)
       ⚠️ RETAINED — this was the `Last activity:` line until 2026-09-06:
       *"2026-09-04 — Phase 164.4.1 execution started"*
       all twinned and proven on real pg-lanes with **ZERO waivers** (cumulative 0 across all eight
@@ -1207,6 +1207,14 @@ Load-bearing sequencing (real dependencies, do not reorder):
 | Phase 170 P10 | 13 min | 2 tasks | 9 files |
 
 ## Accumulated Context
+
+### Phase 164.5.2.1 decisions (plan 04)
+
+- D-09: curated gate's 16 twin steps edit 20261003120000; R1 redesigned for the hold CASEs (keeps the marker in branch (a)'s ELSE arms, re-baselines (xiii) 4 -> 2); D1 re-baselines (P2d) 1 -> 0.
+- D-13: prod-body-ack 67a36c4e... is the `live` column of --diff-bodies against origin/main 2614c4b67; earned only if VAC-04 reports the same PROD hash. VAC-08 and baseline-content-drift red by construction, not allowlisted.
+- D-12: the kind-scope drift test resolves the newest line-start CREATE by scan and cross-checks the snapshot's source line; >= 2 body kind lists must agree.
+- Founder decision 2026-10-03 ("Keep the hold, book the fix"): computed_at lag after a real recompute accepted for this phase; the runner-side stamp is booked by plan 05 / the orchestrator.
+- Plan 05 owns the census pins now red: files 83 -> 85, twins 556 -> 574, needles 615 -> 668, lint `scanned 83` -> 85, FILES_FLOOR/ARMS_FLOOR ratchets.
 
 ### Phase 164.5.2.1 decisions (plan 03)
 
@@ -2515,6 +2523,10 @@ Load-bearing sequencing (real dependencies, do not reorder):
      sits ABOVE the heading. Diagnosed 2026-08-09. -->
 
 ## Session
+
+**Last Date:** 2026-10-03T06:45:00.000Z
+**Stopped At:** Completed 164.5.2.1-04-PLAN.md
+**Resume File:** .planning/phases/164.5.2.1-bridgeresidue-the-two-164-6-7-bridge-residues-in-sync-strate/164.5.2.1-05-PLAN.md
 
 **Last Date:** 2026-10-03T06:20:00.000Z
 **Stopped At:** Completed 164.5.2.1-03-PLAN.md
