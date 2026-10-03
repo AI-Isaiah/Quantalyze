@@ -65,6 +65,7 @@ from services.mt5_validation import (
 # on one path only. `services/mt5_probe.py` is a LEAF over mt5_client +
 # mt5_validation and must never import back into `routers.*` (D-07).
 from services.mt5_probe import (
+    is_bridge_glitch,
     mt5_gateway_misconfigured_detail,
     park_on_house_account,
     report_park_skipped,
@@ -538,11 +539,15 @@ async def _validate_mt5_key_probe(
     login_attempted = False
     probe_thread_done = threading.Event()
     probe_disqualified: str | None = None
+    # How the validation ended, for the park's alert level (founder decision,
+    # CONTEXT D-07 part 2 "Park alert level"): True only on the two arms where
+    # the validation itself hit a bridge glitch (C5 and D-15 below).
+    validation_hit_glitch = False
 
     async def _connect_and_probe() -> tuple[
         dict[str, Any], dict[str, Any], dict[str, Any] | None
     ]:
-        nonlocal client, login_attempted, probe_disqualified
+        nonlocal client, login_attempted, probe_disqualified, validation_hit_glitch
 
         # STAGE 1 — connect.
         #
@@ -915,6 +920,9 @@ async def _validate_mt5_key_probe(
                     "login-stage refusal (code=%s)",
                     e.code,
                 )
+                # The C5 arm: the validation ended on a bridge glitch. Decided by
+                # the same predicate the park applies to its own error.
+                validation_hit_glitch = is_bridge_glitch(e)
                 # PYAPIFIX2-01 (C5, post-login / transport half) — the pre-167
                 # answer, byte-for-byte.
                 raise VenueTransientHTTPException(
@@ -1112,6 +1120,10 @@ async def _validate_mt5_key_probe(
                             "validate_key: MT5 capability undetermined (terminal signal "
                             "unavailable) — refusing rather than stamping read-only"
                         )
+                        # The D-15 bridge blip, glitch by decision (CONTEXT D-07 part 2):
+                        # "a validation that ends on a bridge blip then parks over the
+                        # same failing bridge".
+                        validation_hit_glitch = True
                         trace.outcome = "transient"
                         raise VenueTransientHTTPException(
                             status_code=424,
@@ -1229,6 +1241,7 @@ async def _validate_mt5_key_probe(
                                         client,
                                         house=read_env_mt5_credentials(),
                                         site=SITE_VALIDATE_WIZARD,
+                                        validation_hit_glitch=validation_hit_glitch,
                                     ),
                                     timeout=_MT5_PARK_MIN_BUDGET_S,
                                 )

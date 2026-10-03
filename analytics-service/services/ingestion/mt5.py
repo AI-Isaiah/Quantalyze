@@ -78,6 +78,7 @@ from services.mt5_relogin import (
 # adapter must NEVER import `routers.*`.
 from services.mt5_probe import (
     Mt5GatewayMisconfigured,
+    is_bridge_glitch,
     mt5_gateway_misconfigured_detail,
     park_on_house_account,
     report_park_skipped,
@@ -249,6 +250,10 @@ class Mt5Adapter:
             login_attempted = False
             probe_thread_done = threading.Event()
             probe_disqualified: str | None = None
+            # How the validation ended, for the park's alert level (founder
+            # decision, CONTEXT D-07 part 2 "Park alert level"): True only when
+            # the validation itself hit a bridge glitch.
+            validation_hit_glitch = False
             try:
                 # Mt5Client is SYNCHRONOUS blocking RPyC — run the login+read+probe body
                 # off the event loop (asyncio.to_thread). Blocking the loop on a hung
@@ -345,6 +350,9 @@ class Mt5Adapter:
                         return _wrong_server()
                     # transient -> PROPAGATE untouched (sFOX F4 posture: never
                     # auth-failed, never valid; the caller classifies it honestly).
+                    # The predicate, NOT the whole arm: this arm also re-raises IPC
+                    # transport faults and login-stage refusals, which must page.
+                    validation_hit_glitch = is_bridge_glitch(e)
                     raise
 
                 verdict = classify_trade_capability(info, probe, terminal)
@@ -420,6 +428,9 @@ class Mt5Adapter:
                             "permission signal unavailable) — refusing rather than "
                             "stamping read-only"
                         )
+                        # The worker's D-15 bridge blip, glitch by decision (CONTEXT
+                        # D-07 part 2): the validation ended on a bridge blip.
+                        validation_hit_glitch = True
                         raise Mt5ClientError(
                             0,
                             "MT5 capability undetermined: the gateway trade-"
@@ -499,6 +510,7 @@ class Mt5Adapter:
                                         client,
                                         house=read_env_mt5_credentials(),
                                         site=SITE_VALIDATE_WORKER,
+                                        validation_hit_glitch=validation_hit_glitch,
                                     ),
                                     timeout=_MT5_PROBE_TIMEOUT_S,
                                 )

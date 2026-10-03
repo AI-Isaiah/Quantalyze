@@ -479,9 +479,13 @@ def run_probe(
 #: `services/mt5_relogin.py`).
 _PARK_ALERT_WINDOW_S: Final[float] = 3600.0
 
-#: FOUNDER DECISION 2026-10-03 ("Warn on glitch, page else"): a park login that
-#: failed for the reason a validation would answer at WARNING. Logged at
-#: WARNING, never captured; see `_is_park_bridge_glitch`.
+#: FOUNDER DECISION 2026-10-03 ("Warn on glitch, page else"; CONTEXT D-07 part 2,
+#: "Park alert level"): "A park that fails for the same bridge-glitch reason the
+#: validation hit logs a WARNING only, which respects D-15." So this cause is
+#: logged at WARNING with no capture ONLY when the park's own error is a bridge
+#: glitch (`is_bridge_glitch`) AND the validation it follows ended on one (the
+#: caller's `validation_hit_glitch`). A glitch-class park after any other
+#: validation pages under this same cause, through `_alert_park_failed`.
 _PARK_BRIDGE_GLITCH_CAUSE: Final[str] = "bridge_glitch"
 
 #: The member an unknown cause is mapped to, so no caller-supplied string is ever
@@ -554,8 +558,8 @@ def _alert_park_failed(cause: str, *, site: str) -> None:
         pass
 
 
-def _is_park_bridge_glitch(err: Mt5ClientError) -> bool:
-    """True when a failed park login is the bridge glitch D-15 treats as a blip.
+def is_bridge_glitch(err: Mt5ClientError) -> bool:
+    """True when ``err`` is the bridge glitch D-15 treats as a blip.
 
     ⛔ NOT a new classification. It is the exact chain
     `routers/exchange.py::_validate_mt5_key_probe` runs on a probe's
@@ -563,8 +567,14 @@ def _is_park_bridge_glitch(err: Mt5ClientError) -> bool:
     arm: `classify_mt5_login_error` answers ``"transient"``, the error is not a
     sign-in the terminal refused (`is_mt5_login_refusal`), and it is not an IPC
     transport fault (`is_ipc_transport_fault`, which that site logs at ERROR
-    because it means the terminal itself stopped answering). So a park failure
-    is exactly as loud as the same failure on the validation it follows.
+    because it means the terminal itself stopped answering).
+
+    It decides the park's own error class in `park_on_house_account`, and the
+    validation's error at the two call sites' C5 and worker-transient arms. The
+    call sites' D-15 "capability undetermined, signal unavailable" arms are a
+    bridge glitch BY DECISION (CONTEXT D-07 part 2's rationale: "a validation
+    that ends on a bridge blip then parks over the same failing bridge"), not by
+    this predicate.
     """
     return (
         classify_mt5_login_error(err) == "transient"
@@ -574,15 +584,16 @@ def _is_park_bridge_glitch(err: Mt5ClientError) -> bool:
 
 
 def _warn_park_bridge_glitch(*, site: str) -> None:
-    """FOUNDER DECISION 2026-10-03 ("Warn on glitch, page else"). One WARNING
-    naming the cause and the site, and NO Sentry capture: the validate site
-    answers the same glitch at WARNING with no capture, and D-15 forbids paging
-    an operator for a blip. Never silent, never a page."""
+    """FOUNDER DECISION 2026-10-03 ("Warn on glitch, page else"; CONTEXT D-07
+    part 2, "Park alert level"). Called ONLY when the park failed for the same
+    bridge-glitch reason the validation hit. One WARNING naming the cause and the
+    site, and NO Sentry capture, because D-15 forbids paging an operator for a
+    blip. Never silent, never a page. Every other park failure pages."""
     logger.warning(
         "mt5 validation park: the validation terminal was NOT logged back into "
-        "the house account (cause=%s, site=%s) — a transient bridge glitch, the "
-        "same class a validation answers at WARNING; it stays on its current "
-        "session until its next login (Phase 164.6.6 D-07 part 2)",
+        "the house account (cause=%s, site=%s) — the park failed on the same "
+        "bridge glitch the validation hit; it stays on its current session until "
+        "its next login (Phase 164.6.6 D-07 part 2)",
         _PARK_BRIDGE_GLITCH_CAUSE,
         site,
     )
@@ -597,7 +608,11 @@ def report_park_skipped(cause: str, *, site: str) -> None:
 
 
 def park_on_house_account(
-    client: Mt5Client, *, house: tuple[int, str, str] | None, site: str
+    client: Mt5Client,
+    *,
+    house: tuple[int, str, str] | None,
+    site: str,
+    validation_hit_glitch: bool,
 ) -> bool:
     """Log the validation terminal back into the HOUSE account. True on success.
 
@@ -619,6 +634,16 @@ def park_on_house_account(
 
     ⚠️ ``Mt5Client.login`` returns None and RAISES on every failure, so a refusal
     is the ``Mt5LoginRefusedError`` arm, never a falsy return value.
+
+    ALERT LEVEL, per the founder decision (CONTEXT D-07 part 2, "Park alert
+    level", 2026-10-03): "A park that fails for the same bridge-glitch reason the
+    validation hit logs a WARNING only, which respects D-15. Every other skip or
+    failure still pages: house credentials unset, the account refused, the stage
+    or deadline exits, a fenced probe." ``validation_hit_glitch`` is the call
+    site's own record of how the validation ended. It is keyword-only with NO
+    default, so a call site that does not decide it fails mypy strict. It only
+    ever lowers a park whose own error is a bridge glitch (`is_bridge_glitch`); it
+    never lowers a refused, fenced, unset-credentials or other failure.
     """
     if house is None:
         _alert_park_failed("house_credentials_unset", site=site)
@@ -629,10 +654,14 @@ def park_on_house_account(
         _alert_park_failed("session_abandoned", site=site)
         return False
     except Mt5ClientError as err:
-        # FOUNDER DECISION 2026-10-03 ("Warn on glitch, page else"): the glitch
-        # class warns; a refused sign-in and every other client error page.
-        if _is_park_bridge_glitch(err):
+        # FOUNDER DECISION 2026-10-03 (CONTEXT D-07 part 2, "Park alert level"):
+        # WARNING only when the park failed for the same bridge-glitch reason the
+        # validation hit. A glitch park after any other validation pages
+        # `bridge_glitch`; a refused sign-in and every other client error page.
+        if is_bridge_glitch(err) and validation_hit_glitch:
             _warn_park_bridge_glitch(site=site)
+        elif is_bridge_glitch(err):
+            _alert_park_failed(_PARK_BRIDGE_GLITCH_CAUSE, site=site)
         elif isinstance(err, Mt5LoginRefusedError):
             _alert_park_failed("login_refused", site=site)
         else:

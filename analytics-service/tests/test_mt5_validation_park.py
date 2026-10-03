@@ -622,47 +622,107 @@ def _loud_records(caplog) -> list[logging.LogRecord]:
     ]
 
 
-@pytest.mark.parametrize(
-    "transport_kwargs",
-    [
-        # A transport raise mid-login, carrying the fabricated password: the real
-        # client scrubs it into a plain `Mt5ClientError` (code 0, unrecognised
-        # text), which the validate site answers as a transient at WARNING.
-        {"house_login_raises": RuntimeError(f"remote boom password={_HOUSE_PASSWORD}")},
-        # A falsy login carrying an IPC-infrastructure code that is NOT a sign-in
-        # refusal (`is_mt5_login_refusal` False) and not an IPC transport fault.
-        {"house_login_result": False, "scenario_extra": {"last_error": (-10001, "send failed")}},
-    ],
-    ids=["transport-raise", "falsy-not-a-refusal"],
-)
-async def test_a_park_login_failing_on_a_bridge_glitch_logs_nothing_above_warning(
-    exchange_router, park_sentry, caplog, transport_kwargs
-):
-    """FOUNDER DECISION 2026-10-03 ("Warn on glitch, page else"). A park that
-    fails for the same bridge-glitch reason a validation would answer at WARNING
-    logs a WARNING naming `bridge_glitch` and pages nobody: paging an operator
-    for a blip is the noise D-15 forbids. The verdict stands and no credential
-    leaks."""
-    router = exchange_router
-    kwargs = dict(transport_kwargs)
-    extra = kwargs.pop("scenario_extra", {})
-    transport = _RecordingMt5(_scenario(**extra), **kwargs)
-    _install_real_mt5_client(router, transport)
-    with caplog.at_level(logging.DEBUG, logger=_ANALYTICS_LOGGER):
-        result = await _call(router, _make_req())
-    assert result == {"valid": True, "read_only": True}
-    assert len(transport.house_logins()) == 1, "the park was never attempted"
+# The two park-glitch kinds: each makes the HOUSE login fail with an error that
+# satisfies `mt5_probe.is_bridge_glitch`.
+_PARK_GLITCH_KINDS = [
+    # A transport raise mid-login, carrying the fabricated password: the real
+    # client scrubs it into a plain `Mt5ClientError` (code 0, unrecognised text).
+    {"house_login_raises": RuntimeError(f"remote boom password={_HOUSE_PASSWORD}")},
+    # A falsy login carrying an IPC-infrastructure code that is NOT a sign-in
+    # refusal (`is_mt5_login_refusal` False) and not an IPC transport fault.
+    {"house_login_result": False, "scenario_extra": {"last_error": (-10001, "send failed")}},
+]
+_PARK_GLITCH_IDS = ["transport-raise", "falsy-not-a-refusal"]
+
+# A post-login validation error that lands on the wizard's C5 arm ("transient
+# upstream failure, not a login-stage refusal"): a code outside
+# `_IPC_TRANSPORT_CODES` and text that matches no classifier phrase. Fabricated.
+_GLITCH_VALIDATION_ERROR = (-10001, "send failed")
+
+
+def _glitch_park_transport(scenario: dict[str, Any], kind: dict[str, Any]) -> _RecordingMt5:
+    kwargs = dict(kind)
+    scenario = {**scenario, **kwargs.pop("scenario_extra", {})}
+    return _RecordingMt5(scenario, **kwargs)
+
+
+def _assert_glitch_warning_only(park_sentry: MagicMock, caplog, site: str) -> None:
+    """The founder's one WARNING case: a WARNING naming `bridge_glitch` and the
+    site, nothing above WARNING, and no capture."""
     assert _loud_records(caplog) == [], (
-        f"a bridge-glitch park failure logged above WARNING: "
-        f"{[r.getMessage() for r in _loud_records(caplog)]!r}"
+        f"a bridge-glitch park after a bridge-glitch validation logged above "
+        f"WARNING: {[r.getMessage() for r in _loud_records(caplog)]!r}"
     )
     assert any(
         r.levelno == logging.WARNING
         and "cause=bridge_glitch" in r.getMessage()
-        and f"site={_WIZARD}" in r.getMessage()
+        and f"site={site}" in r.getMessage()
         for r in caplog.records
-    ), "the glitch skip must still be named at WARNING, never silent"
+    ), "the glitch park must still be named at WARNING, never silent"
     park_sentry.capture_message.assert_not_called()
+
+
+@pytest.mark.parametrize("kind", _PARK_GLITCH_KINDS, ids=_PARK_GLITCH_IDS)
+@pytest.mark.parametrize(
+    "verdict", ["read_only", "trade_capable"], ids=["read_only", "trade_capable"]
+)
+async def test_a_glitch_park_after_a_clean_validation_pages(
+    exchange_router, park_sentry, caplog, kind, verdict
+):
+    """FOUNDER DECISION 2026-10-03, CONTEXT D-07 part 2 "Park alert level": "A
+    park that fails for the same bridge-glitch reason the validation hit logs a
+    WARNING only, which respects D-15. Every other skip or failure still pages."
+    A CLEAN validation hit no bridge glitch, so a glitch-class park failure after
+    it pages. The trade_capable case is the one that matters most: a detected
+    master password whose session stays on the validation terminal must reach a
+    human. The verdict stands and no credential leaks."""
+    router = exchange_router
+    account = _MASTER_ACCOUNT if verdict == "trade_capable" else _INVESTOR_ACCOUNT
+    transport = _glitch_park_transport(_scenario(account), kind)
+    _install_real_mt5_client(router, transport)
+    with caplog.at_level(logging.DEBUG, logger=_ANALYTICS_LOGGER):
+        if verdict == "trade_capable":
+            with pytest.raises(HTTPException) as ei:
+                await _call(router, _make_req())
+            assert ei.value.status_code == 400
+            assert ei.value.detail == MT5_MASTER_PASSWORD_DETAIL
+        else:
+            assert await _call(router, _make_req()) == {"valid": True, "read_only": True}
+    assert len(transport.house_logins()) == 1, "the park was never attempted"
+    _assert_one_alert(park_sentry, caplog, "bridge_glitch", _WIZARD)
+    _assert_no_credential_leak(park_sentry, caplog)
+
+
+@pytest.mark.parametrize("kind", _PARK_GLITCH_KINDS, ids=_PARK_GLITCH_IDS)
+async def test_a_glitch_park_after_a_glitch_validation_logs_only_a_warning(
+    exchange_router, monkeypatch, park_sentry, caplog, kind
+):
+    """The founder's one WARNING case, through the wizard's C5 arm: the
+    validation itself ended on a bridge glitch (a post-login transient that is
+    neither a sign-in refusal nor an IPC transport fault), and the park then
+    failed over the same failing bridge. WARNING `bridge_glitch`, no page:
+    paging for a blip is the noise D-15 forbids. The 424 stands."""
+    router = exchange_router
+    validation_error = Mt5ClientError(*_GLITCH_VALIDATION_ERROR)
+    assert mt5_probe.is_bridge_glitch(validation_error), (
+        "the fabricated validation error must itself be glitch-class, or this "
+        "test proves nothing about the founder's rule"
+    )
+    transport = _glitch_park_transport(_scenario(), kind)
+    _install_real_mt5_client(router, transport)
+
+    def _glitching_probe(client, *, login, investor_pw, server, log_prefix):
+        client.login(login, investor_pw, server)
+        raise Mt5ClientError(*_GLITCH_VALIDATION_ERROR)
+
+    monkeypatch.setattr(router, "run_probe", _glitching_probe)
+    with caplog.at_level(logging.DEBUG, logger=_ANALYTICS_LOGGER):
+        with pytest.raises(HTTPException) as ei:
+            await _call(router, _make_req())
+    assert ei.value.status_code == 424
+    assert getattr(ei.value, "code", None) == "NETWORK_UNAVAILABLE"
+    assert len(transport.house_logins()) == 1, "the park was never attempted"
+    _assert_glitch_warning_only(park_sentry, caplog, _WIZARD)
     _assert_no_credential_leak(park_sentry, caplog)
 
 
@@ -779,17 +839,71 @@ def _park_client(raises: BaseException | None) -> MagicMock:
     ],
     ids=["refused", "client-error", "fenced", "unexpected"],
 )
+@pytest.mark.parametrize(
+    "validation_hit_glitch", [True, False], ids=["after-glitch", "after-clean"]
+)
 def test_park_on_house_account_never_raises_and_alerts_each_failure(
-    park_sentry, caplog, raises, cause
+    park_sentry, caplog, raises, cause, validation_hit_glitch
 ):
+    """None of these park errors is a bridge glitch, so each pages with the SAME
+    cause whatever the validation hit: the founder's "every other skip or failure
+    still pages". The flag may only ever lower a glitch-class park error."""
     client = _park_client(raises)
     with caplog.at_level(logging.DEBUG, logger=_ANALYTICS_LOGGER):
         ok = mt5_probe.park_on_house_account(
-            client, house=(_HOUSE_LOGIN, _HOUSE_PASSWORD, _HOUSE_SERVER), site=_WIZARD
+            client,
+            house=(_HOUSE_LOGIN, _HOUSE_PASSWORD, _HOUSE_SERVER),
+            site=_WIZARD,
+            validation_hit_glitch=validation_hit_glitch,
         )
     assert ok is False
     client.login.assert_called_once_with(_HOUSE_LOGIN, _HOUSE_PASSWORD, _HOUSE_SERVER)
     _assert_one_alert(park_sentry, caplog, cause, _WIZARD)
+    _assert_no_credential_leak(park_sentry, caplog)
+
+
+@pytest.mark.parametrize(
+    "validation_hit_glitch", [True, False], ids=["after-glitch", "after-clean"]
+)
+def test_park_on_house_account_with_unset_house_credentials_pages_whatever_the_validation_hit(
+    park_sentry, caplog, validation_hit_glitch
+):
+    """Unset house credentials are a configuration fault, never a blip: the
+    founder names them first among the failures that still page."""
+    client = _park_client(None)
+    with caplog.at_level(logging.DEBUG, logger=_ANALYTICS_LOGGER):
+        ok = mt5_probe.park_on_house_account(
+            client, house=None, site=_WIZARD, validation_hit_glitch=validation_hit_glitch
+        )
+    assert ok is False
+    client.login.assert_not_called()
+    _assert_one_alert(park_sentry, caplog, "house_credentials_unset", _WIZARD)
+
+
+@pytest.mark.parametrize(
+    "validation_hit_glitch", [True, False], ids=["after-glitch", "after-clean"]
+)
+def test_park_on_house_account_warns_on_a_glitch_only_when_the_validation_hit_one(
+    park_sentry, caplog, validation_hit_glitch
+):
+    """The founder's rule at its seam: a glitch-class park error (code 0,
+    unrecognised text) is a WARNING with no capture only when the validation hit
+    a bridge glitch too; after a clean validation it pages `bridge_glitch`."""
+    glitch = Mt5ClientError(0, "remote call dropped")
+    assert mt5_probe.is_bridge_glitch(glitch)
+    client = _park_client(glitch)
+    with caplog.at_level(logging.DEBUG, logger=_ANALYTICS_LOGGER):
+        ok = mt5_probe.park_on_house_account(
+            client,
+            house=(_HOUSE_LOGIN, _HOUSE_PASSWORD, _HOUSE_SERVER),
+            site=_WIZARD,
+            validation_hit_glitch=validation_hit_glitch,
+        )
+    assert ok is False
+    if validation_hit_glitch:
+        _assert_glitch_warning_only(park_sentry, caplog, _WIZARD)
+    else:
+        _assert_one_alert(park_sentry, caplog, "bridge_glitch", _WIZARD)
     _assert_no_credential_leak(park_sentry, caplog)
 
 
