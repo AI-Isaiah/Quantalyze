@@ -726,6 +726,94 @@ async def test_a_glitch_park_after_a_glitch_validation_logs_only_a_warning(
     _assert_no_credential_leak(park_sentry, caplog)
 
 
+# A D-15 bridge-blip terminal: disconnected from the trade server but not an
+# operator fault (trade permission reads on), so the validation ends on the
+# "capability undetermined (terminal signal unavailable)" arm.
+_D15_BLIP_TERMINAL = {"connected": False, "trade_allowed": True}
+
+# A fabricated post-login IPC transport fault (a code in `_IPC_TRANSPORT_CODES`).
+_IPC_FAULT_VALIDATION_ERROR = (-10004, "No IPC connection")
+
+
+def _logging_in_then_raising(error: tuple[int, str]):
+    def _probe(client, *, login, investor_pw, server, log_prefix):
+        client.login(login, investor_pw, server)
+        raise Mt5ClientError(*error)
+
+    return _probe
+
+
+async def test_a_glitch_park_after_a_d15_bridge_blip_logs_only_a_warning(
+    exchange_router, park_sentry, caplog
+):
+    """The D-15 arm is the bridge blip the founder's rationale names: "a
+    validation that ends on a bridge blip then parks over the same failing
+    bridge". A glitch park after it is the one WARNING case; the 424 stands."""
+    router = exchange_router
+    transport = _glitch_park_transport(
+        _scenario(terminal=_D15_BLIP_TERMINAL), _PARK_GLITCH_KINDS[0]
+    )
+    _install_real_mt5_client(router, transport)
+    with caplog.at_level(logging.DEBUG, logger=_ANALYTICS_LOGGER):
+        with pytest.raises(HTTPException) as ei:
+            await _call(router, _make_req())
+    assert ei.value.status_code == 424
+    assert any(
+        "capability undetermined (terminal signal unavailable)" in r.getMessage()
+        for r in caplog.records
+    ), "the validation did not end on the D-15 bridge-blip arm"
+    assert len(transport.house_logins()) == 1, "the park was never attempted"
+    _assert_glitch_warning_only(park_sentry, caplog, _WIZARD)
+    _assert_no_credential_leak(park_sentry, caplog)
+
+
+async def test_a_refused_park_after_a_glitch_validation_still_pages(
+    exchange_router, monkeypatch, park_sentry, caplog
+):
+    """The validation hit a bridge glitch, but the park failed for a DIFFERENT
+    reason: the terminal answered the house sign-in and refused it. That is not
+    the same bridge-glitch reason, so it pages `login_refused`. The flag never
+    lowers a non-glitch park failure."""
+    router = exchange_router
+    transport = _RecordingMt5(
+        _scenario(last_error=(-6, "Authorization failed")), house_login_result=False
+    )
+    _install_real_mt5_client(router, transport)
+    monkeypatch.setattr(
+        router, "run_probe", _logging_in_then_raising(_GLITCH_VALIDATION_ERROR)
+    )
+    with caplog.at_level(logging.DEBUG, logger=_ANALYTICS_LOGGER):
+        with pytest.raises(HTTPException) as ei:
+            await _call(router, _make_req())
+    assert ei.value.status_code == 424
+    assert len(transport.house_logins()) == 1, "the park was never attempted"
+    _assert_one_alert(park_sentry, caplog, "login_refused", _WIZARD)
+    _assert_no_credential_leak(park_sentry, caplog)
+
+
+async def test_a_glitch_park_after_an_ipc_fault_validation_pages(
+    exchange_router, monkeypatch, park_sentry, caplog
+):
+    """An IPC transport fault is not a bridge glitch at the validate site (it
+    answers 500 MT5_TERMINAL_UNRESPONSIVE at ERROR), so the validation did not
+    hit a glitch and a glitch park after it pages `bridge_glitch`."""
+    router = exchange_router
+    assert not mt5_probe.is_bridge_glitch(Mt5ClientError(*_IPC_FAULT_VALIDATION_ERROR))
+    transport = _glitch_park_transport(_scenario(), _PARK_GLITCH_KINDS[0])
+    _install_real_mt5_client(router, transport)
+    monkeypatch.setattr(
+        router, "run_probe", _logging_in_then_raising(_IPC_FAULT_VALIDATION_ERROR)
+    )
+    with caplog.at_level(logging.DEBUG, logger=_ANALYTICS_LOGGER):
+        with pytest.raises(HTTPException) as ei:
+            await _call(router, _make_req())
+    assert ei.value.status_code == 500
+    assert ei.value.detail["code"] == "MT5_TERMINAL_UNRESPONSIVE"
+    assert len(transport.house_logins()) == 1, "the park was never attempted"
+    _assert_one_alert(park_sentry, caplog, "bridge_glitch", _WIZARD)
+    _assert_no_credential_leak(park_sentry, caplog)
+
+
 async def test_a_refused_park_login_still_logs_error(
     exchange_router, park_sentry, caplog
 ):
@@ -1074,3 +1162,84 @@ async def test_the_worker_does_not_park_after_a_probe_account_mismatch(
             await _worker_validate()
     assert transport.house_logins() == []
     _assert_one_alert(park_sentry, caplog, "probe_account_mismatch", _WORKER)
+
+
+# --- the worker validate and the founder's park alert level.
+
+
+async def test_the_worker_glitch_park_after_a_clean_validation_pages(
+    monkeypatch, park_sentry, caplog
+):
+    """The worker carries the same rule: a clean (read_only) validation hit no
+    bridge glitch, so a glitch-class park failure after it pages
+    `bridge_glitch`, naming the worker site. The result is unchanged."""
+    transport = _glitch_park_transport(_scenario(), _PARK_GLITCH_KINDS[0])
+    _install_worker_transport(monkeypatch, transport)
+    with caplog.at_level(logging.DEBUG, logger=_ANALYTICS_LOGGER):
+        result = await _worker_validate()
+    assert result.valid is True and result.read_only is True
+    assert len(transport.house_logins()) == 1, "the park was never attempted"
+    _assert_one_alert(park_sentry, caplog, "bridge_glitch", _WORKER)
+    _assert_no_credential_leak(park_sentry, caplog)
+
+
+async def test_the_worker_glitch_park_after_a_glitch_validation_logs_only_a_warning(
+    monkeypatch, park_sentry, caplog
+):
+    """The worker's transient arm re-raises the probe's bridge glitch; the park
+    then failed over the same bridge. WARNING only, and the error still
+    propagates."""
+    transport = _glitch_park_transport(_scenario(), _PARK_GLITCH_KINDS[0])
+    _install_worker_transport(monkeypatch, transport)
+    monkeypatch.setattr(
+        "services.ingestion.mt5.run_probe",
+        _logging_in_then_raising(_GLITCH_VALIDATION_ERROR),
+    )
+    with caplog.at_level(logging.DEBUG, logger=_ANALYTICS_LOGGER):
+        with pytest.raises(Mt5ClientError) as ei:
+            await _worker_validate()
+    assert ei.value.code == _GLITCH_VALIDATION_ERROR[0]
+    assert len(transport.house_logins()) == 1, "the park was never attempted"
+    _assert_glitch_warning_only(park_sentry, caplog, _WORKER)
+    _assert_no_credential_leak(park_sentry, caplog)
+
+
+async def test_the_worker_glitch_park_after_a_d15_bridge_blip_logs_only_a_warning(
+    monkeypatch, park_sentry, caplog
+):
+    """The worker's D-15 arm raises a synthetic transient the codebase already
+    treats as the glitch class; a glitch park after it is the one WARNING
+    case."""
+    transport = _glitch_park_transport(
+        _scenario(terminal=_D15_BLIP_TERMINAL), _PARK_GLITCH_KINDS[0]
+    )
+    _install_worker_transport(monkeypatch, transport)
+    with caplog.at_level(logging.DEBUG, logger=_ANALYTICS_LOGGER):
+        with pytest.raises(Mt5ClientError) as ei:
+            await _worker_validate()
+    assert "capability undetermined" in str(ei.value), "not the worker's D-15 arm"
+    assert mt5_probe.is_bridge_glitch(ei.value)
+    assert len(transport.house_logins()) == 1, "the park was never attempted"
+    _assert_glitch_warning_only(park_sentry, caplog, _WORKER)
+    _assert_no_credential_leak(park_sentry, caplog)
+
+
+async def test_the_worker_glitch_park_after_an_ipc_fault_validation_pages(
+    monkeypatch, park_sentry, caplog
+):
+    """The behavioural pin that the worker records the flag from the PREDICATE,
+    not from its whole transient arm: that arm also re-raises an IPC transport
+    fault, which is not a bridge glitch, so the glitch park after it pages."""
+    transport = _glitch_park_transport(_scenario(), _PARK_GLITCH_KINDS[0])
+    _install_worker_transport(monkeypatch, transport)
+    monkeypatch.setattr(
+        "services.ingestion.mt5.run_probe",
+        _logging_in_then_raising(_IPC_FAULT_VALIDATION_ERROR),
+    )
+    with caplog.at_level(logging.DEBUG, logger=_ANALYTICS_LOGGER):
+        with pytest.raises(Mt5ClientError) as ei:
+            await _worker_validate()
+    assert ei.value.code == _IPC_FAULT_VALIDATION_ERROR[0]
+    assert len(transport.house_logins()) == 1, "the park was never attempted"
+    _assert_one_alert(park_sentry, caplog, "bridge_glitch", _WORKER)
+    _assert_no_credential_leak(park_sentry, caplog)
