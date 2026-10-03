@@ -7,15 +7,15 @@ current_phase_name: MT5TERMINALISOLATION
 status: executing
 stopped_at: "164.9.6 (#936) and 164.5.2.1 (#937) landed and closed; 167.1.2-08 landed (#939, post-deploy census pending); 164.6.6 executing wave 1"
 last_updated: "2026-10-03T14:43:50.465Z"
-last_activity: 2026-10-03
-last_activity_desc: 164.9.6.1 SUBSETSHARD landed (#941) and closed; SS-1 measured 5m01s on main run 37151757248
+last_activity: 2026-10-04
+last_activity_desc: 14 phases closed after the 2026-10-03 production UAT (161, 164.6.7, 166, 166.1, 166.2, 167.1, 167.2, 167.2.1, 169, 169.2, 169.3, 169.4, 169.4.1, 169.5); defects routed to 164.6.6.3 UATFIXES
 state_head: 1d0c22583ef7b2a1c905320bbf70da0d4f3fb367
 progress:
   total_phases: 94
-  completed_phases: 55
+  completed_phases: 69
   total_plans: 477
   completed_plans: 473
-  percent: 58
+  percent: 73
 ---
 
 ## ⭐ STATE lineage
@@ -521,7 +521,7 @@ Status: Executing Phase 164.6.6
       closed by PR #743 `3ed6919e`) and 164.4.1 annotated all five remaining files —
       `lane-blocked: 0`, `pending: 0` at `files 44/71`. Read `FILES_FLOOR` / `ARMS_FLOOR` off
       `scripts/mutation-runner/run.mjs`, never off a number restated here.
-Last activity: 2026-10-03 — 164.9.6 and 164.5.2.1 closed; 164.6.6 wave 1 executing
+Last activity: 2026-10-04 — 14 phases closed after the 2026-10-03 production UAT; 164.6.6 wave 1 executing
       ⚠️ RETAINED — this was the `Last activity:` line until 2026-09-06:
       *"2026-09-04 — Phase 164.4.1 execution started"*
       all twinned and proven on real pg-lanes with **ZERO waivers** (cumulative 0 across all eight
@@ -975,7 +975,7 @@ Prior-phase 141.1 close-out detail (retained; NOT about 142.1):
         after PYAPIFIX-01" ordering is now **SATISFIED**.
         2 WARNING gaps, no BLOCKER. See `140.1-VERIFICATION.md`. Not transitioned (`--no-transition`).
 
-Progress: [██████░░░░] 58%
+Progress: [███████░░░] 73%
 
 ### Phase 140.1 close-out — open items (do NOT lose these)
 

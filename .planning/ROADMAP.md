@@ -77,7 +77,7 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 158: OPS-CI — A merge means a deploy** - External FIFO mutex + `cancelled`-conclusion watcher close the shared-test-db eviction (#616); `sql-tests` gated by an aggregator; orphaned e2e specs run; TEST stale-`pending` drained; MultiKeyConnectStep flake root-caused (completed 2026-08-21)
 - [x] **Phase 159: RANK — Public-ranking integrity** - Failed/stale-computation KPIs out of published percentiles on BOTH engines; anon `(*)` splats become explicit projections; quantstats sign-flip + blend-annualization default closed; FILL-arm CAS; uid shape validated
 - [x] **Phase 160: PROVENANCE — The server's venue is the venue that annualizes** - `api_keys.exchange` server-authoritative at every INSERT; the `asset_class` √365/√252 stamp derives from the attested venue WITH the null-attestation guard; B-M1 PROD census first — verification: passed (completed 2026-10-02; PRs #703–#706, closed in #790, plan 07 in #930; StrategyForm smoke left untested by founder decision)
-- [ ] **Phase 161: WIZERR — Honest error surfaces** - The recorded WIZFORM-02 class residue: thirteen surfaces stop rendering `UNKNOWN`, false sentences, or unwinnable "try again"
+- [x] **Phase 161: WIZERR — Honest error surfaces** - The recorded WIZFORM-02 class residue: thirteen surfaces stop rendering `UNKNOWN`, false sentences, or unwinnable "try again" (completed 2026-10-04)
 - [x] **Phase 161.1: LEDGER-REFRESH — Recurring strategy refresh for ledger-backed venues, shipped dormant behind a founder-gated schedule** (INSERTED)
 - [x] **Phase 162: HONEST — What the user sees is true** - No raw Python exceptions as copy, no FRESH badge on a dead series, real equity curves, metrics on drawer rows, the clicked key preselected
 - [x] **Phase 163: HARDEN — Fail safe, closed, and loud** - structlog redaction closed at BOTH failure modes, post-commit `createAdminClient` 500 class, flag-monitor honesty, deterministic worker plumbing, password policy, `.planning` username scrub, RPC audit gate, `bridgeComputeLimiter`
@@ -110,7 +110,7 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 164.6.4: MT5KEEPALIVE — nothing TRIGGERS a recovery, so the terminal sits dark for hours while recovery itself takes minutes** (INSERTED)
 - [ ] **Phase 164.6.5: MT5VALIDATEWEDGE — MT5 key validation stops destroying the shared terminal, and the terminal self-heals** (INSERTED) — verification: human_needed
 - [ ] **Phase 164.6.6: MT5TERMINALISOLATION — one client's MT5 validation cannot evict, disturb or expose another client's broker session** (INSERTED) — not yet verified
-- [ ] **Phase 164.6.7: COMPOSITECLAIMSNAPSHOT — the composite run reads the live job marker, not its claim-time snapshot** (INSERTED) — verification: human_needed (shipped; founder/post-deploy checks pending)
+- [x] **Phase 164.6.7: COMPOSITECLAIMSNAPSHOT — the composite run reads the live job marker, not its claim-time snapshot** (INSERTED) — verification: human_needed (shipped; founder/post-deploy checks pending) (completed 2026-10-04)
 - [ ] **Phase 164.6.8: OUTAGEALERT — a shared-terminal MT5 outage reaches a human without one clicking a button** (INSERTED) — not yet verified
 - [x] **Phase 164.7: APPSETTINGS — every app.* GUC reader moves to a mechanism this platform actually grants, because ALTER DATABASE and ALTER ROLE both return 42501 here** (INSERTED)
 - [x] **Phase 164.8: TESTPREPROD — TEST becomes a real pre-prod: every migration is proven on a real Postgres before it reaches a customer** (INSERTED)
@@ -135,25 +135,29 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 165: DEPS — The 9-PR dependabot campaign** - pandas `requirements.in` prerequisite commit FIRST, then one PR at a time in the research-verified order, full suite between each; #614 and #606 CLOSED with reasons — ⛔ RETIRED 2026-09-27 by founder decision ("Land as maintenance, retire the phases"): closed WITHOUT delivery as a phase; the dependabot PRs land one at a time as maintenance under the green rule.
 - [x] **Phase 165.1: PIPDEPS — the pip dependabot work lands with production pandas never downgraded** (INSERTED) — ⛔ RETIRED 2026-09-27 by founder decision ("Land as maintenance, retire the phases"): closed WITHOUT delivery as a phase; the dependabot PRs land one at a time as maintenance under the green rule.
 - [x] **Phase 165.2: NPMDEPS — the npm dependabot work lands and the nightly audit goes green** (INSERTED) — ⛔ RETIRED 2026-09-27 by founder decision ("Land as maintenance, retire the phases"): closed WITHOUT delivery as a phase; the dependabot PRs land one at a time as maintenance under the green rule.
-- [ ] **Phase 166: QSTATS-TRUTH — every quantstats-derived number reflects the returns it was given** — verification: human_needed
-- [ ] **Phase 166.1: QSTATSRECOMPUTE — PROD rows computed before Phase 166 are recomputed, and the last exact-zero dispersion guards go** (INSERTED) — verification: human_needed (shipped; founder/post-deploy checks pending)
+- [x] **Phase 166: QSTATS-TRUTH — every quantstats-derived number reflects the returns it was given** — verification: human_needed (completed 2026-10-04)
+- [x] **Phase 166.1: QSTATSRECOMPUTE — PROD rows computed before Phase 166 are recomputed, and the last exact-zero dispersion guards go** (INSERTED) — verification: human_needed (shipped; founder/post-deploy checks pending) (completed 2026-10-04)
 - [ ] **Phase 166.1.1: DDSIGN — a drawdown improvement is positive when the drawdown gets shallower, in the simulator, the optimizer and the match engine** (INSERTED) — not yet verified
-- [ ] **Phase 166.2: COMPUTEONCE — the TypeScript side computes Sharpe/Pearson/beta once and every page reads it** (INSERTED) — verification: human_needed (shipped; founder/post-deploy checks pending)
+- [x] **Phase 166.2: COMPUTEONCE — the TypeScript side computes Sharpe/Pearson/beta once and every page reads it** (INSERTED) — verification: human_needed (shipped; founder/post-deploy checks pending) (completed 2026-10-04)
 - [ ] **Phase 166.3: RECOMPUTE — PROD rows computed before Phase 166 are recomputed through the normal job path** (INSERTED) — complete with routed residuals 2026-10-01 (halted 2026-09-27, resumed after 166.4); verification pending
 - [ ] **Phase 166.3.1: NAVBREACH — the Deribit composite's member ledger reconciles at inception, so its stitch_composite recompute succeeds** (INSERTED) — not planned; inserted 2026-10-01 (founder); 166.3's R5 recompute waits on it
 - [x] **Phase 166.4: BENCHALIGN — a strategy with a sparser calendar than BTC is compared to BTC over the same holding interval, in every benchmark-relative metric** (INSERTED) — planned 2026-09-27, 4 plans in 4 waves; data integrity, ahead of features
 - [ ] **Phase 166.5: COMPUTEDATSTAMP — the analytics runner stamps computed_at on a real finish** (INSERTED 2026-10-03) — not yet planned
 - [x] **Phase 167: CREDTRUST — an invalid venue credential is named to the customer as the reason their factsheet stopped updating, instead of going quietly stale behind a transient-sounding error**
-- [ ] **Phase 167.1: AUMTRUST — the headline AUM says when it includes holdings from keys needing attention** (INSERTED) — verification: human_needed
+- [x] **Phase 167.1: AUMTRUST — the headline AUM says when it includes holdings from keys needing attention** (INSERTED) — verification: human_needed (completed 2026-10-04)
 - [ ] **Phase 167.1.1: HOLDINGKEYSCOPE — two accounts on one venue holding the same asset never merge into one holding** (INSERTED) — not yet verified
 - [ ] **Phase 167.1.2: ACCOUNTTRUTH — one exchange account is counted once, and the allocator equity curve shows only what the data supports** (INSERTED) — not yet verified
-- [ ] **Phase 167.2: KEYCARDSYNC — the key card never shows one key's sync result as another key's** (INSERTED) — verification: human_needed
-- [ ] **Phase 167.2.1: FACTSHEETBUILDABLE — a strategy is called computed only when its factsheet can actually build** (INSERTED) — verification: human_needed
+- [x] **Phase 167.2: KEYCARDSYNC — the key card never shows one key's sync result as another key's** (INSERTED) — verification: human_needed (completed 2026-10-04)
+- [x] **Phase 167.2.1: FACTSHEETBUILDABLE — a strategy is called computed only when its factsheet can actually build** (INSERTED) — verification: human_needed (completed 2026-10-04)
 - [x] **Phase 168: DRBOPTIONS — a Deribit options account ingests end to end** — verification: passed (completed 2026-10-02, PR #867)
-- [ ] **Phase 169: PAGETRUTH — every number agrees across pages and with its own record length** — not yet verified
+- [x] **Phase 169: PAGETRUTH — every number agrees across pages and with its own record length** — not yet verified (completed 2026-10-04)
 - [x] **Phase 169.1: ZOOMKPIS — the KPI strip and metrics rail follow the zoom window, and every windowed figure follows the engine's conventions** (INSERTED) — verification: passed (completed 2026-10-01, PR #913, v0.117.0.0)
 - [x] **Phase 169.1.1: HYDRATIONTICKS — factsheet chart ticks render the same on server and client, so hydration never fails** (INSERTED) — verification: passed (completed 2026-10-02, PR #925, v0.118.1.0)
-- [ ] **Phase 169.3: SMALLFIXES — admin compute jobs, recommendations, profile exchanges and the one mandate rule show true numbers** (INSERTED) — not yet verified (plan 01 shipped in #868)
+- [x] **Phase 169.2: BENCHFRESH — the BTC benchmark is refreshed daily and read in full** (INSERTED) — verification: passed (completed 2026-10-04, PR #879)
+- [x] **Phase 169.3: SMALLFIXES — admin compute jobs, recommendations, profile exchanges and the one mandate rule show true numbers** (INSERTED) — not yet verified (plan 01 shipped in #868) (completed 2026-10-04)
+- [x] **Phase 169.4: ALLOCTRUTH — the Allocations Risk tab and alpha/beta read the book series and the live BTC feed** (INSERTED) — verification: passed (completed 2026-10-04, PR #911)
+- [x] **Phase 169.4.1: OGSHARPE — the OG share card's Sharpe reads the one shared sharpe() (166.2)** (INSERTED) — verification: passed (completed 2026-10-04, PR #907)
+- [x] **Phase 169.5: BENCHCOMPARE — a factsheet's BTC comparator is read from the database through 169.2's reader, paired over the same interval as the strategy** (INSERTED) — verification: passed (completed 2026-10-04, PR #908)
 - [x] **Phase 170: LAYOUT — page layout reads clean and holds on every page** — verification: passed (completed 2026-10-01; post-deploy defects routed to 170.2)
 - [ ] **Phase 170.1: COPY — page copy reads clean on every page** (INSERTED) — not yet verified
 - [ ] **Phase 170.3: OGPUBLIC — share-preview images load signed-out, and the OG card equals the factsheet** (INSERTED 2026-10-03) — not yet planned
@@ -280,7 +284,7 @@ Plans:
   3. The coverage law reaches every surface the class regrew on: the `keys/[id]/permissions` private `PROBE_*` cascade gets a derived-population coverage law (and `KEY_UNDECRYPTABLE`'s remedy says "reconnect the key", not "try again"); `AllocateDialog`, `RenameStrategyDialog`, and `MarkOwnershipDialog` stop minting `code: UNKNOWN`; the five 5xx→`UNKNOWN` terminal arms (admin match/eval, simulator) forward recognized `seamCode`s; `MT5_GATEWAY_UNREACHABLE`'s server-advertised `Retry-After` threads end-to-end through both key-route catches.
   4. CSV verdicts tell the truth: the 7-row floor is evaluated on the wizard composite arm AND `INSUFFICIENT_CSV_HISTORY` renders its own copy (landed together or not at all); examined-but-refused verdicts render a truthful fourth outcome replacing the false "only 0 trade(s)" sentence (D-15's oracle re-cut deliberately, the TOCTOU re-check wording following); the csv-finalize A2 409 sentence describes the actual case (same track record, different flow); and the per-row CSV breakdown renders its data half without leaking `'nan'` or echoing untrusted cell contents.
 
-**Plans**: 10/10 plans executed
+**Plans**: 10/10 plans complete
 **UI hint**: yes
 
 Plans:
@@ -2445,13 +2449,13 @@ Plans:
 **Success criteria:** (1) the harm is shown on the local lane first (claim, then retract, then observe the run's decision), or the phase shrinks; (2) the composite guard and `is_protected` reach the same verdict for a marker retracted after the claim, proven by execution; (3) a regression test observed RED when the fix is neutered; (4) the runbook precondition is removed or restated to match.
 **Requirements**: TBD
 **Depends on:** Phase 164.6
-**Plans:** 3 plans
+**Plans:** 3/3 plans complete
 
 Plans:
 
-- [ ] 164.6.7-01-PLAN.md — harm probe on the local lane, pre-fix (criterion 1, D-01/D-02)
-- [ ] 164.6.7-02-PLAN.md — composite live re-read fix, regression observed RED under neuter, post-fix probe (criteria 2-3, D-05)
-- [ ] 164.6.7-03-PLAN.md — runbook precondition restated and TODOS.md residue entry (criterion 4, D-03/D-07)
+- [x] 164.6.7-01-PLAN.md — harm probe on the local lane, pre-fix (criterion 1, D-01/D-02)
+- [x] 164.6.7-02-PLAN.md — composite live re-read fix, regression observed RED under neuter, post-fix probe (criteria 2-3, D-05)
+- [x] 164.6.7-03-PLAN.md — runbook precondition restated and TODOS.md residue entry (criterion 4, D-03/D-07)
 
 ### Phase 164.6.5: MT5VALIDATEWEDGE — MT5 key validation stops destroying the shared terminal, and the terminal self-heals (INSERTED)
 
@@ -3661,37 +3665,37 @@ hand-copy is added, and derive `PERCENTILE_ANALYTICS_COLUMNS` + csv-finalize's
 `CLOCK_SAFETY_KPI_COLUMNS` from one exported KPI array. TODOS 0f explicitly says to do this extraction
 as part of the scalars closure, not before.
 
-**Plans:** 10 plans (planned 2026-09-24; decisions in `166-CONTEXT.md` D-01…D-19)
+**Plans:** 10/10 plans complete (planned 2026-09-24; decisions in `166-CONTEXT.md` D-01…D-19)
 
 Plans:
 
 **Wave 1**
-- [ ] 166-01-PLAN.md — D-04: extract the shared money-math primitives from `compute_all_metrics`, byte-neutral (zero golden movement)
-- [ ] 166-02-PLAN.md — D-12/D-18: byte-pin, then derive `PERCENTILE_ANALYTICS_COLUMNS` and `CLOCK_SAFETY_KPI_COLUMNS` from `PERCENTILE_METRICS` (TS, file-disjoint from 01)
+- [x] 166-01-PLAN.md — D-04: extract the shared money-math primitives from `compute_all_metrics`, byte-neutral (zero golden movement)
+- [x] 166-02-PLAN.md — D-12/D-18: byte-pin, then derive `PERCENTILE_ANALYTICS_COLUMNS` and `CLOCK_SAFETY_KPI_COLUMNS` from `PERCENTILE_METRICS` (TS, file-disjoint from 01)
 
 **Wave 2** *(blocked on Wave 1 completion)*
-- [ ] 166-03-PLAN.md — drawdown-family scalar mirrors (recovery_factor, ulcer_index, ulcer_performance_index, serenity_index) and the dispatch table retyped off `getattr(qs.stats, …)`
+- [x] 166-03-PLAN.md — drawdown-family scalar mirrors (recovery_factor, ulcer_index, ulcer_performance_index, serenity_index) and the dispatch table retyped off `getattr(qs.stats, …)`
 
 **Wave 3** *(blocked on Wave 2 completion)*
-- [ ] 166-04-PLAN.md — kelly_criterion, probabilistic_ratio, common_sense_ratio, cpc_index mirrors; D-16 PSR kurtosis fix (golden PSR moves, disclosed)
+- [x] 166-04-PLAN.md — kelly_criterion, probabilistic_ratio, common_sense_ratio, cpc_index mirrors; D-16 PSR kurtosis fix (golden PSR moves, disclosed)
 
 **Wave 4** *(blocked on Wave 3 completion)*
-- [ ] 166-05-PLAN.md — r_squared and scalar greeks on the benchmark leg (D-05); D-15 NaN-greeks: complete pairs, None never 0.0
+- [x] 166-05-PLAN.md — r_squared and scalar greeks on the benchmark leg (D-05); D-15 NaN-greeks: complete pairs, None never 0.0
 
 **Wave 5** *(blocked on Wave 4 completion)*
-- [ ] 166-06-PLAN.md — rolling greeks on both legs (D-06); D-17 windowed rolling alpha (golden rolling_alpha moves, disclosed)
+- [x] 166-06-PLAN.md — rolling greeks on both legs (D-06); D-17 windowed rolling alpha (golden rolling_alpha moves, disclosed)
 
 **Wave 6** *(blocked on Wave 5 completion)*
-- [ ] 166-07-PLAN.md — D-14 AST gate over every production quantstats importer, printed census; the line gate deleted
+- [x] 166-07-PLAN.md — D-14 AST gate over every production quantstats importer, printed census; the line gate deleted
 
 **Wave 7** *(blocked on Wave 6 completion)*
-- [ ] 166-08-PLAN.md — per-shape red/green needles, behavioural kwarg pins with calibration rows, neuter drills on the real module
+- [x] 166-08-PLAN.md — per-shape red/green needles, behavioural kwarg pins with calibration rows, neuter drills on the real module
 
 **Wave 8** *(blocked on Wave 7 completion)*
-- [ ] 166-09-PLAN.md — D-10 measured before/after table, D-11 read-only census SQL, closes WINDOWS 5 and 9 and TODOS 0f
+- [x] 166-09-PLAN.md — D-10 measured before/after table, D-11 read-only census SQL, closes WINDOWS 5 and 9 and TODOS 0f
 
 **Wave 9** *(blocked on Wave 8 completion)*
-- [ ] 166-10-PLAN.md — full gate sweep, the one release commit, OPEN-2 recorded as a founder `checkpoint:decision` (no production write)
+- [x] 166-10-PLAN.md — full gate sweep, the one release commit, OPEN-2 recorded as a founder `checkpoint:decision` (no production write)
 
 **Cross-cutting constraints:**
 
@@ -3712,7 +3716,7 @@ Plans:
 **Goal:** Every Python site outside `services/metrics.py` that divides by a standard deviation (the exact-zero guards S1-S8) or correlates a leg (C1-C8) reads Phase 166's relative dispersion floor from ONE module, `services/dispersion.py`, so a compounding-NAV constant yield produces exactly what an all-zero series produces at that site, each proven by a red test; one release commit ships it.
 **Requirements**: success criterion 3 for the Python sites. Phase 166 OPEN-2 (founder answer 2026-09-24: "Recompute affected rows after merge", AskUserQuestion) is now Phase 166.3's. The round-2 fixer measured the non-quantstats sites.
 **Depends on:** Phase 166
-**Plans:** 4 plans
+**Plans:** 4/4 plans complete
 
 ⭐ **2026-09-26 SPLIT (FOUNDER DECISION, 166.1-CONTEXT D-23: the phase was too large to review as one PR after five plan-check rounds).** Until the split this phase was **QSTATSRECOMPUTE — PROD rows computed before Phase 166 are recomputed, and the last exact-zero dispersion guards go**. It keeps the Python half: plans 01, 01b and 03, plus a NEW release plan 09 (the Python gate sweep and the release commit, modelled on the old plan 08). The TypeScript half (old plans 04, 05a, 05b, 06a, 06b, 07, 08) moved to **Phase 166.2 COMPUTEONCE** as 166.2-01..07; the PROD recompute (old plan 02) moved to **Phase 166.3 RECOMPUTE** as 166.3-01. Criterion numbers are kept, so every plan's `requirements:` tag still resolves. The dated notes under criterion 3 are kept as lineage, each tagged with where its part now lives.
 
@@ -3753,7 +3757,7 @@ Plans:
 **Goal:** The TypeScript side computes Sharpe, Pearson and beta ONCE and every page reads it (founder direction, 166.1-CONTEXT D-17, verbatim: "Why don't you calculate Sharpe once and the 20 places all read it from there?"). One floored module, `src/lib/return-stats.ts`, pinned to the Python floor constant, serves every Tier-2 site T1-T20; dead copies are deleted; a source-scan gate fails CI when a private copy of the formula returns; one release commit ships it.
 **Requirements**: success criterion 3 as extended to TypeScript by 166.1-CONTEXT D-15 and D-17 (numbering carried from Phase 166.1 at the 2026-09-26 split)
 **Depends on:** Phase 166. NOT on Phase 166.1: plan 166.2-01's cross-language pin reads the Python constant as text and holds both before and after 166.1-01 lands (166.1-CONTEXT D-21 Info 4, D-23), so this phase may merge first or second.
-**Plans:** 7 plans
+**Plans:** 7/7 plans complete
 
 ⭐ **2026-09-26 SPLIT (FOUNDER DECISION, 166.1-CONTEXT D-23: the phase was too large to review as one PR after five plan-check rounds).** Split out of Phase 166.1 with its seven TypeScript plans MOVED, not re-planned: old 04, 05a, 05b, 06a, 06b, 07 and 08 are 166.2-01..07 in the same order. Old 07 (now 166.2-06) no longer depends on the Python plans; old 08 (now 166.2-07) is scoped to the TS half (its Python sweep and recompute / SQN CHANGELOG notes went to 166.1-09). Decisions carried verbatim in `166.2-CONTEXT.md`.
 
@@ -3996,7 +4000,7 @@ Plans:
 **Depends on:** Phase 167
 **Founder decisions 2026-09-24:** D-06 answered (b) — the composer says what it excludes from keys needing attention; D-18 REOPENED — the marker shows whenever the on-screen figure includes untrusted dollars, including a live total ≤ 0 (review WR-04) and a manual value equal to the live total (review IN-06). Both land in plan 05. Recorded in `167.1-CONTEXT.md`.
   ⭐ **2026-09-24: plan 05 implemented both** (`943e72d9f`). The composer's one marker now says "excludes $Y from keys needing attention" when the modelled-book narrowing leaves untrusted holdings out, and it shows in state 6 (State A) and state 4 (State C, in the "Required to size and commit." hint). The total is unchanged (D-03).
-**Plans:** 6 plans
+**Plans:** 6/6 plans complete
 
 Plans:
 **Wave 1**
@@ -4166,7 +4170,7 @@ Plans:
 **Requirements**: TBD. Source: Phase 167 plan 06 residuals, recorded in `167-CONTEXT.md` D-18 (2026-09-22). (1) The post-add sync bypasses the component's one tracked sync slot. ⭐ NARROWED 2026-09-22 (167 plan-06 fix round, D-18): `handleAddKey` no longer moves `lastAttemptedKeyId` while a tracked attempt is live, so the mislabel and the "success beside Sign-in failed" variant are closed; what remains is that a post-add sync FAILURE during another key's live attempt reaches only the console. Closing it routes the post-add sync through the tracked slot, which changes the add flow the `SEAMUX-05` tests pin. (3) A poll that lands AFTER the enqueue returns but BEFORE the worker marks the job `computing` can still end an attempt with the previous run's result — ⚠️ NOT narrow: the analytics row flips to `computing` only when a job handler runs, so this is likely on MOST resyncs of a strategy with a prior terminal row (a stale "Up to date", or a false "Sync failed" after a prior failure). Pre-existing, not worse after 167. Real fix: accept a terminal only once this attempt has seen `computing`, or when the row's `computed_at` differs from the value read before the enqueue (no client/server clock comparison); the poller already selects `computed_at` but does not pass it on. (4) An enqueue that never returns spins until the sync route's `maxDuration = 300` ends the request: since the plan-06 fix round the poller does not run before the enqueue answers (it polls only in `computing`), and the link update ahead of it has no bound of its own. (2) A change made in another tab can surface a withheld success through a re-read (the load-error Retry or the terminal-success re-read); closing it means retiring the success at the moment of withholding, a redesign of 167-06's R2.
 **Depends on:** Phase 167
 **Deviation 2026-09-24 (review round 1, WR-05; rule replaced in review round 2, WR-02):** KCS-23's "`Delete` behaves as before" was amended. Rule: delete allowed after a named warning (founder decision 2026-09-24). The `Delete` confirm names every composite the key belongs to and says what deleting does. The owner can still confirm. If the membership read fails, the confirm says it could not check, and it does not block. Recorded in `167.2-CONTEXT.md` KCS-23.
-**Plans:** 10 plans (6 waves: W1 01, 02 · W2 03, 07, 08, 09 · W3 10 · W4 04 · W5 05 · W6 06)
+**Plans:** 10/10 plans complete (6 waves: W1 01, 02 · W2 03, 07, 08, 09 · W3 10 · W4 04 · W5 05 · W6 06)
 
 Plans:
 **Wave 1**
@@ -4206,14 +4210,14 @@ Plans:
 **Requirements**: TBD
 **Depends on:** Phase 167.2
 **Note 2026-09-25 (planning, 167.2.1-CONTEXT.md D-01):** criterion 5's "(a migration)" is superseded. The guard is a server route, `GET /api/keys/[id]/memberships`, which checks ownership with an explicit equality and reads on the service role. It needs no migration, so criterion 4 is vacuous. The SECURITY DEFINER RPC in `167.2.1-RESEARCH.md` stays the recorded fallback. Reversible.
-**Plans:** 4 plans
+**Plans:** 4/4 plans complete
 
 Plans:
 
-- [ ] 167.2.1-01-PLAN.md — BUILDPROBE: reproduce on the local lane, split resolve from build, export hasBuildableSeries + probeFactsheetBuildable with a parity table (wave 1)
-- [ ] 167.2.1-02-PLAN.md — MEMBERSGUARD: GET /api/keys/[id]/memberships on the service role after an explicit owner check; the key card fails closed to KCS-DELETE-UNCHECKED (wave 1)
-- [ ] 167.2.1-03-PLAN.md — LISTTRUTH: /strategies probes computed rows and shows the D-02 unbuildable note, RED first (wave 2)
-- [ ] 167.2.1-04-PLAN.md — OWNERNOTE: the owner factsheet's S7 note uses the same derivation, and the D-03 TODOS entry (wave 3)
+- [x] 167.2.1-01-PLAN.md — BUILDPROBE: reproduce on the local lane, split resolve from build, export hasBuildableSeries + probeFactsheetBuildable with a parity table (wave 1)
+- [x] 167.2.1-02-PLAN.md — MEMBERSGUARD: GET /api/keys/[id]/memberships on the service role after an explicit owner check; the key card fails closed to KCS-DELETE-UNCHECKED (wave 1)
+- [x] 167.2.1-03-PLAN.md — LISTTRUTH: /strategies probes computed rows and shows the D-02 unbuildable note, RED first (wave 2)
+- [x] 167.2.1-04-PLAN.md — OWNERNOTE: the owner factsheet's S7 note uses the same derivation, and the D-03 TODOS entry (wave 3)
 
 **Founder decision 2026-09-27 (recorded via `/gsd-phase --edit`):** the narrowest supported viewport is 390 px (iPhone 12) plus desktop at 200% zoom, so this phase's "320px" verification check is replaced by a 390 px + desktop 200% zoom check, run by the orchestrator in the logged-in browser (full decision under Phase 170 LAYOUT).
 
@@ -4793,7 +4797,7 @@ kept verbatim.
 | 158. OPS-CI merge=deploy | 6/6 | Complete    | 2026-08-21 |
 | 159. RANK ranking integrity | 7/7 | Complete — plan 01 shipped its deliverable (`159-CENSUS.md` is on disk). ⭐ 159-01 SUMMARY written retrospectively 2026-09-30 by founder decision; overrides the #790 'no retro-fit' note for this plan (the cell said "its SUMMARY was never written" until then). `159-VERIFICATION.md` closed 2026-09-12 (`status: passed`): its one open item, the concurrent same-session CAS race, is discharged by `src/__tests__/csv-finalize-concurrent-never-classified.test.ts` on the blocking `frontend-local-stack` lane — green in main run 34712535912 at `733a55f5` | v0.70.0.0 |
 | 160. PROVENANCE venue/annualization | 7/7 | Complete — verification passed (closed with the v1.20 open items in #790); plan 07 was its `gap_closure` verification plan | v0.77.39.0 · #790 |
-| 161. WIZERR honest errors | 10/10 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed | v0.72.0.0 |
+| 161. WIZERR honest errors | 10/10 | Complete    | 2026-10-04 |
 | 161.1 LEDGER-REFRESH (shipped dormant) | 5/5 | Complete | v0.73.0.0 |
 | 162. HONEST visible truth | 9/9 | Complete — plan 10 WITHDRAWN in `3fa26831` ("its premise was false, credentials ARE trimmed"), so the denominator is 9, not 10 | v0.74.0.0 |
 | 163. HARDEN reliability + security | 9/9 | Complete | v0.75.0.0 |
@@ -4826,7 +4830,7 @@ kept verbatim.
 | 164.6.4 MT5KEEPALIVE | 5/5 | Complete | #800 |
 | 164.6.5 MT5VALIDATEWEDGE | 8/8 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed | v0.96.0.0 · #863 |
 | 164.6.6 MT5TERMINALISOLATION | 0/? | Queued — data-integrity tier: moved up 2026-09-27 (founder), planning beside 166.4; live MT5 verification joins the founder queue | - |
-| 164.6.7 COMPOSITECLAIMSNAPSHOT | 3/3 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed | v0.105.0.0 · #869 |
+| 164.6.7 COMPOSITECLAIMSNAPSHOT | 3/3 | Complete    | 2026-10-04 |
 | 164.6.8 OUTAGEALERT | 0/? | Queued — MT5 build, verify later (founder 2026-09-27) | - |
 | 164.7 APPSETTINGS (every `app.*` GUC reader moves off ALTER DATABASE/ROLE — both 42501 on PROD) | 7/7 | Complete — finalized v0.77.32.1; its 33 stranded artifacts restored to main by PR #785. Row said `0/? Queued 2nd` until 2026-09-12 | v0.77.32.1 |
 | 164.8 TESTPREPROD (TEST becomes a real pre-prod: apply on merge to TEST before PROD) | 6/6 | Complete. Row said `3/6 Queued 5th` until 2026-09-12 | v0.77.31.2 |
@@ -4852,30 +4856,30 @@ kept verbatim.
 | 165. DEPS dependabot campaign | - | ⛔ RETIRED 2026-09-27 (founder) — not delivered as a phase; dependabot PRs land as maintenance | - |
 | 165.1 PIPDEPS | - | ⛔ RETIRED 2026-09-27 (founder), as 165 | - |
 | 165.2 NPMDEPS | - | ⛔ RETIRED 2026-09-27 (founder), as 165 | - |
-| 166. QSTATS-TRUTH | 10/10 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed | v0.91.0.0 · #858 |
-| 166.1 ENGINEFLOOR | 4/4 on main | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed | v0.100.0.0 · #872 |
+| 166. QSTATS-TRUTH | 10/10 | Complete    | 2026-10-04 |
+| 166.1 ENGINEFLOOR | 4/4 | Complete    | 2026-10-04 |
 | 166.1.1 DDSIGN | 0/? | Queued — feature | - |
-| 166.2 COMPUTEONCE | 7/7 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed | v0.102.0.0 · #874 |
+| 166.2 COMPUTEONCE | 7/7 | Complete    | 2026-10-04 |
 | 166.3 RECOMPUTE | 0/1 | HALTED 2026-09-27 at Task 3 — resumes after 166.4 ships | - |
 | 166.4 BENCHALIGN | 4/4 | Complete (verification passed 7/7) | v0.108.0.0 · #892 |
 | 166.5 COMPUTEDATSTAMP | 0/? | Queued — user-facing, booked 2026-10-03 | - |
 | 166.4.1 PORTFOLIOANALYTICS | 0/? | Queued — data integrity | - |
 | 167. CREDTRUST (an invalid venue credential is named to the customer) | 6/6 | Complete | v0.86.0.0 · #841 |
-| 167.1 AUMTRUST | 6/6 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed | v0.89.0.0 · #852 |
+| 167.1 AUMTRUST | 6/6 | Complete    | 2026-10-04 |
 | 167.1.1 HOLDINGKEYSCOPE | 0/? | Queued — feature | - |
 | 167.1.2 ACCOUNTTRUTH | PR A + PR B shipped | In progress — PR A v0.92.0.0 (#859), PR B v0.103.0.0 (#870); PR C executing | - |
 | 167.1.2.1 RECONMARKER | 0/? | Queued — data integrity; after 167.1.2 PR C | - |
-| 167.2 KEYCARDSYNC | 10/10 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed | v0.88.0.0 · #851 |
-| 167.2.1 FACTSHEETBUILDABLE | 4/4 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed | #866 |
+| 167.2 KEYCARDSYNC | 10/10 | Complete    | 2026-10-04 |
+| 167.2.1 FACTSHEETBUILDABLE | 4/4 | Complete    | 2026-10-04 |
 | 168. DRBOPTIONS (a Deribit options account ingests end to end) | 3/3 | Complete    | 2026-10-02 |
-| 169. FACTSHEETTRUTH (split from PAGETRUTH 2026-09-26) | 7 plans on `feat/169-pagetruth`, not on main | Queued — feature; comparator plans split to 169.5 on 2026-09-27 (D-61); waits for 167.1.2 PR C | - |
+| 169. FACTSHEETTRUTH (split from PAGETRUTH 2026-09-26) | 7/7 | Complete    | 2026-10-04 |
 | 169.1 ZOOMKPIS | 9/9 | Complete    | 2026-10-01 |
 | 169.1.1 HYDRATIONTICKS | 4/4 | Complete — PR #925, v0.118.1.0 | 2026-10-02 |
-| 169.2 BENCHFRESH | 3/3 | Shipped — verification `human_needed` (14/16, 2 routed to human checks): post-deploy checks pending, not closed | v0.107.0.0 · #879 |
-| 169.3 SMALLFIXES | 1/5 (plan 01 on main; 02–05 on `feat/169-pagetruth`) | In progress — plan 01 shipped (v0.97.0.1, #868); plans 02–05 next, 03/04 gated on 167.1.2 PR C | - |
-| 169.4 ALLOCTRUTH | 3 plans on `feat/169-pagetruth`, not on main | Queued — feature; after 169, 169.5, 169.2 and 167.1.2 PR C | - |
-| 169.4.1 OGSHARPE | 2 plans on `feat/169-pagetruth`, not on main | Queued — feature; after 166.2 and 169 | - |
-| 169.5 BENCHCOMPARE (split from 169 2026-09-27) | 5 plans on `feat/169-pagetruth`, not on main | Queued — data integrity; after 169, before 169.4 and 169.1 | - |
+| 169.2 BENCHFRESH | 3/3 | Complete    | 2026-10-04 |
+| 169.3 SMALLFIXES | 6/6 | Complete    | 2026-10-04 |
+| 169.4 ALLOCTRUTH | 8/8 | Complete    | 2026-10-04 |
+| 169.4.1 OGSHARPE | 2/2 | Complete    | 2026-10-04 |
+| 169.5 BENCHCOMPARE (split from 169 2026-09-27) | 5/5 | Complete    | 2026-10-04 |
 | 170. LAYOUT | 5/14 | In Progress | - |
 | 170.1 COPY | 0/? | Queued — feature, after 170 | - |
 | 170.3 OGPUBLIC | 0/? | Queued — user-facing, booked 2026-10-03 | - |

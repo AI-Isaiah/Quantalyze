@@ -3,7 +3,7 @@ phase: 161-wizerr-honest-error-surfaces
 verified: 2026-08-24T23:24:35Z
 head: 294ae79b
 verified_at_sha: 294ae79b4e5ec69c0c7002b87c1e9973db2708c2
-status: human_needed
+status: passed
 score: 4/4 success criteria verified · 13/13 requirements satisfied
 behavior_unverified: 0
 overrides_applied: 0
@@ -36,6 +36,22 @@ human_verification:
     blocked: "BLOCKED ON A RENDERED VIEWPORT, established 2026-08-28. The item needs an INTERACTIVE sequence — walk to a gate refusal, click `Try another key`, reload, reopen — and two of those four steps are clicks. This environment's Chrome reports `innerWidth/innerHeight = 0`, `document.scrollHeight = 0`, every element measures 0x0, and extension screenshots fail at the binding layer, so nothing is painted and no click can be aimed. Server-side probing cannot substitute here: the property under test is that a DRAFT SURVIVES A RELOAD, which is only meaningful when the reload is driven through the same client that made the draft. ⚠️ Reaching the gate refusal at all also needs an API key that FAILS the capability gate, and I do not supply exchange credentials — so even with a display this is at least partly founder-gated. ⭐ CLOSING RECIPE: this is a Playwright case, not a hand-click — seed a draft, stub the validate response to the refusal shape, assert the draft and every stored member survive `page.reload()`. That makes it repeatable instead of a one-off look, and it belongs with the e2e work 164.3 is standing up."
     result: "STILL OPEN 2026-09-24, no existing evidence. Searched: e2e/ has no spec that reaches a gate refusal, clicks `Try another key` and reloads. `e2e/wizard-resume.spec.ts` resumes a draft from the overlay but never passes through a gate refusal. `161-UAT.md` test 3 is `blocked` (2026-09-05), and `.planning/FOUNDER-UAT-v1.20.md` section 2 lists it as founder-owned. That UAT reading supersedes the viewport blocker above: the display works now. What remains is a MANAGER account plus an API key that FAILS the capability gate. Owner: the founder in the browser, or a Playwright case (seed a draft, stub the validate response to the refusal shape, assert the draft and every stored member survive `page.reload()`)."
     resolved: false
+uat_2026_10_03:
+  run: "Production UAT pass, 2026-10-03. Vercel production 7276aa9a at browser time (VERSION 0.123.0.0); analytics /health 32af2bddae1b = Vercel production 6833324580 at the non-browser pass; CI 37155111609 + Contracts 37155111659 green on it. Browser: the founder's logged-in session on the production Vercel host. Viewports emulated: 606px window + body zoom (1.894 ≈ 320px, 1.554 ≈ 390px); '200%' = 1440px + zoom 2; media queries saw 606px (< 640px breakpoint, mobile layout applied)."
+  verdict: "Closed: status set to passed on 2026-10-03. Every human_verification item below carries a result (PASS / DECIDED / NO-SAMPLE-residual / ROUTED) bound to the 2026-10-03 UAT evidence. FAIL readings are ROUTED to their fix phase, not waived."
+  no_sample_policy: "Founder decision (AskUserQuestion, 2026-10-03), NO-SAMPLE policy: \"Close, record as residual (Rec.)\". A NO-SAMPLE check is recorded as 'no PROD sample on 2026-10-03, covered by tests'; a live-event check becomes a watch item owned by the phase that would see it."
+  items:
+    - item: 1
+      result: "NO-SAMPLE-residual"
+      evidence: "161 #1: no live `undetermined` verdict on PROD (compute_jobs / strategy_analytics / api_keys error-text counts all 0); Railway logs 2026-09-27..10-03: 2 validate stage events, both read_only; Sentry none. TODOS MT5-VERDICT-SINK-01 still open."
+      watch_item: true
+      watch_owner: "not named in the 2026-10-03 UAT evidence"
+    - item: 2
+      result: "NO-SAMPLE-residual"
+      evidence: "161 #2: every key decrypts (already accepted 2026-09-24); the badge reads 'Read-only key confirmed — trading and withdrawals are blocked.'"
+    - item: 3
+      result: "NO-SAMPLE-residual"
+      evidence: "161 #3: needs a key that fails the gate plus a submit; none on 2026-10-03."
 ---
 
 # Phase 161: WIZERR — Honest Error Surfaces — Verification Report

@@ -1,7 +1,7 @@
 ---
 phase: 169-pagetruth
 verified: 2026-09-29T22:40:00Z
-status: human_needed
+status: passed
 score: 13/13 must-haves verified
 verified_at_sha: efaaf92afb38a4438b0c9f32670a36ef6ce36ea9
 # re-verified 2026-09-29: the one gap (release entry) closed by 1db0b5d3c; first verdict gaps_found at 48ee02a13972619c0b2b1a548ecede908cadebf2
@@ -61,6 +61,23 @@ human_verification:
   - test: "Accept or revise the rules the fixers marked 'requires human verification': H-1 caveat copy and its presence gate (headlineCoversFrom must be present, cash basis only, Calmar named); H-2 a single-key 'simple' config draws the arithmetic curve; M-2 the leverage what-if withheld on a returns-convention override or chain-broken row; WR-04 chip and discovery badge bucket the series age on whole days; WR-R2-01 the weekday calendar is read off the series (MT5 weekday strategies with a weekend bar lose the tolerance; population unmeasured)"
     expected: "Each rule is the product decision the founder wants; tests pin the chosen rule, not its rightness"
     why_human: "Each is a judgment on a public number or copy; a test cannot prove the rule is the right one"
+uat_2026_10_03:
+  run: "Production UAT pass, 2026-10-03. Vercel production 7276aa9a at browser time (VERSION 0.123.0.0); analytics /health 32af2bddae1b = Vercel production 6833324580 at the non-browser pass; CI 37155111609 + Contracts 37155111659 green on it. Browser: the founder's logged-in session on the production Vercel host. Viewports emulated: 606px window + body zoom (1.894 ≈ 320px, 1.554 ≈ 390px); '200%' = 1440px + zoom 2; media queries saw 606px (< 640px breakpoint, mobile layout applied)."
+  verdict: "Closed: status set to passed on 2026-10-03. Every human_verification item below carries a result (PASS / DECIDED / NO-SAMPLE-residual / ROUTED) bound to the 2026-10-03 UAT evidence. FAIL readings are ROUTED to their fix phase, not waived."
+  no_sample_policy: "Founder decision (AskUserQuestion, 2026-10-03), NO-SAMPLE policy: \"Close, record as residual (Rec.)\". A NO-SAMPLE check is recorded as 'no PROD sample on 2026-10-03, covered by tests'; a live-event check becomes a watch item owned by the phase that would see it."
+  routing_policy: "Founder decision (AskUserQuestion, 2026-10-03), defects: \"One fix phase, after 164.6.6 (Rec.)\"."
+  items:
+    - item: 1
+      result: "ROUTED"
+      evidence: "169 #1: FAIL: Quantum Drift composite contradicts itself (headline +0.0% / Sharpe 8.10 vs YTD +2283266.93%). AI-FX-35 is consistent across pages (CAGR +742.0%, Sharpe 2.62); Momentum Sphinx discovery +56.28% / 1.47 = factsheet."
+      routed_to: "Phase 164.6.6.3 UATFIXES (booked on branch feat/164.6.6-mt5isolation; it reaches main with Phase 164.6.6's PR), defect 2"
+    - item: 2
+      result: "PASS"
+      evidence: "169 #2: PR #904 head f64eb2d178 contains ab12aff26; CI 36635446824 + Contracts 36635446685; job 109635338092 'factsheet-buildable-live-db.test.ts (7 tests)', ledger OK 7/7."
+    - item: 3
+      result: "DECIDED"
+      evidence: "169 #3: all five rules accepted."
+      decision: "Founder (AskUserQuestion, 2026-10-03), 169 #3 five rules (H-1, H-2, M-2, WR-04, WR-R2-01): \"Accept all five (Rec.)\"."
 ---
 
 # Phase 169: FACTSHEETTRUTH Verification Report

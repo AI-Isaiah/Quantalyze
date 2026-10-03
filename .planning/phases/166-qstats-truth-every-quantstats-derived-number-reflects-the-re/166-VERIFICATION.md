@@ -1,7 +1,7 @@
 ---
 phase: 166-qstats-truth-every-quantstats-derived-number-reflects-the-re
 verified: 2026-09-25T01:25:00Z
-status: human_needed
+status: passed
 score: 5/5 roadmap success criteria verified (plus D-15, D-16, D-17, D-11, D-12, D-13 and TODOS 0f verified)
 verified_at_sha: 36c528b9788d512092247b1f7ab1ee27fe87fc0e
 drift_subjects:
@@ -26,6 +26,32 @@ human_verification:
   - test: "After a benchmarked strategy is recomputed on the merged code, open its factsheet and look at the rolling alpha / beta chart (RollingAlphaBetaChart) and the Benchmark greeks table."
     expected: "Rolling alpha is the windowed intercept (D-17). It is no longer a linear transform of rolling beta, and it stays unannualized. Rolling beta is unchanged for a strategy whose benchmark never tripped the guess. A strategy whose persisted alpha and beta were a fabricated 0.000 / 0.000 now shows the pairwise-complete values, or an em-dash where beta is undefined (D-15)."
     why_human: "Rendered chart and table values on real PRODUCTION rows exist only after the recompute. The tests pin the series the code writes, but not the pixels the chart draws from those rows."
+uat_2026_10_03:
+  run: "Production UAT pass, 2026-10-03. Vercel production 7276aa9a at browser time (VERSION 0.123.0.0); analytics /health 32af2bddae1b = Vercel production 6833324580 at the non-browser pass; CI 37155111609 + Contracts 37155111659 green on it. Browser: the founder's logged-in session on the production Vercel host. Viewports emulated: 606px window + body zoom (1.894 ≈ 320px, 1.554 ≈ 390px); '200%' = 1440px + zoom 2; media queries saw 606px (< 640px breakpoint, mobile layout applied)."
+  verdict: "Closed: status set to passed on 2026-10-03. Every human_verification item below carries a result (PASS / DECIDED / NO-SAMPLE-residual / ROUTED) bound to the 2026-10-03 UAT evidence. FAIL readings are ROUTED to their fix phase, not waived."
+  no_sample_policy: "Founder decision (AskUserQuestion, 2026-10-03), NO-SAMPLE policy: \"Close, record as residual (Rec.)\". A NO-SAMPLE check is recorded as 'no PROD sample on 2026-10-03, covered by tests'; a live-event check becomes a watch item owned by the phase that would see it."
+  routing_policy: "Founder decision (AskUserQuestion, 2026-10-03), defects: \"One fix phase, after 164.6.6 (Rec.)\"."
+  items:
+    - item: 1
+      result: "ROUTED"
+      routed_to: "Phase 166.3 RECOMPUTE"
+      parts:
+        - part: "census (five read-only SELECTs)"
+          result: "PASS"
+          evidence: "166 #1: census run read-only, 2026-10-03 21:31Z, 43 rows: guess-trigger strategies 0; top BTC daily returns 0.1219 / 0.1188 / 0.1030 / 0.1026 / 0.0953 (none >= 1); alpha = beta = 0 rows 1; non-empty rolling_alpha 17; PSR key 24 (numeric 22)."
+        - part: "recompute of the affected PROD rows"
+          result: "ROUTED"
+          routed_to: "Phase 166.3 RECOMPUTE"
+          evidence: "166 #1: recompute ROUTED to Phase 166.3."
+    - item: 2
+      result: "NO-SAMPLE-residual"
+      parts:
+        - part: "rolling alpha / beta chart"
+          result: "NO-SAMPLE-residual"
+          evidence: "166 #2: no rolling alpha/beta chart text found."
+        - part: "Benchmark greeks table"
+          result: "PASS"
+          evidence: "166 #2: Benchmark greeks render (Momentum Sphinx α +59.61%, β 0.38, ρ 0.40)."
 ---
 
 # Phase 166: QSTATS-TRUTH Verification Report
