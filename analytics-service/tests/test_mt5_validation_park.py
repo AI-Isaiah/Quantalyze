@@ -615,23 +615,88 @@ async def test_a_refused_park_login_changes_nothing_the_caller_sees(
     assert mt5_client.mt5_terminal_holder(_VAL_KEY) != mt5_client.HOLDER_HOUSE
 
 
-async def test_a_raising_park_login_changes_nothing_the_caller_sees(
-    exchange_router, park_sentry, caplog
+def _loud_records(caplog) -> list[logging.LogRecord]:
+    return [
+        r for r in caplog.records
+        if r.name.startswith(_ANALYTICS_LOGGER) and r.levelno > logging.WARNING
+    ]
+
+
+@pytest.mark.parametrize(
+    "transport_kwargs",
+    [
+        # A transport raise mid-login, carrying the fabricated password: the real
+        # client scrubs it into a plain `Mt5ClientError` (code 0, unrecognised
+        # text), which the validate site answers as a transient at WARNING.
+        {"house_login_raises": RuntimeError(f"remote boom password={_HOUSE_PASSWORD}")},
+        # A falsy login carrying an IPC-infrastructure code that is NOT a sign-in
+        # refusal (`is_mt5_login_refusal` False) and not an IPC transport fault.
+        {"house_login_result": False, "scenario_extra": {"last_error": (-10001, "send failed")}},
+    ],
+    ids=["transport-raise", "falsy-not-a-refusal"],
+)
+async def test_a_park_login_failing_on_a_bridge_glitch_logs_nothing_above_warning(
+    exchange_router, park_sentry, caplog, transport_kwargs
 ):
-    """A transport raise on the house login, carrying the fabricated password in
-    its text: the real client scrubs it into `Mt5ClientError`, the park alerts
-    `client_error`, and the verdict stands."""
+    """FOUNDER DECISION 2026-10-03 ("Warn on glitch, page else"). A park that
+    fails for the same bridge-glitch reason a validation would answer at WARNING
+    logs a WARNING naming `bridge_glitch` and pages nobody: paging an operator
+    for a blip is the noise D-15 forbids. The verdict stands and no credential
+    leaks."""
     router = exchange_router
-    transport = _RecordingMt5(
-        _scenario(),
-        house_login_raises=RuntimeError(f"remote boom password={_HOUSE_PASSWORD}"),
-    )
+    kwargs = dict(transport_kwargs)
+    extra = kwargs.pop("scenario_extra", {})
+    transport = _RecordingMt5(_scenario(**extra), **kwargs)
     _install_real_mt5_client(router, transport)
     with caplog.at_level(logging.DEBUG, logger=_ANALYTICS_LOGGER):
         result = await _call(router, _make_req())
     assert result == {"valid": True, "read_only": True}
-    _assert_one_alert(park_sentry, caplog, "client_error", _WIZARD)
+    assert len(transport.house_logins()) == 1, "the park was never attempted"
+    assert _loud_records(caplog) == [], (
+        f"a bridge-glitch park failure logged above WARNING: "
+        f"{[r.getMessage() for r in _loud_records(caplog)]!r}"
+    )
+    assert any(
+        r.levelno == logging.WARNING
+        and "cause=bridge_glitch" in r.getMessage()
+        and f"site={_WIZARD}" in r.getMessage()
+        for r in caplog.records
+    ), "the glitch skip must still be named at WARNING, never silent"
+    park_sentry.capture_message.assert_not_called()
     _assert_no_credential_leak(park_sentry, caplog)
+
+
+async def test_a_refused_park_login_still_logs_error(
+    exchange_router, park_sentry, caplog
+):
+    """The founder's "page else": a sign-in the terminal answered and refused
+    is NOT a glitch. ERROR plus a capture."""
+    router = exchange_router
+    transport = _RecordingMt5(
+        _scenario(last_error=(-6, "Authorization failed")), house_login_result=False
+    )
+    _install_real_mt5_client(router, transport)
+    with caplog.at_level(logging.DEBUG, logger=_ANALYTICS_LOGGER):
+        await _call(router, _make_req())
+    assert _loud_records(caplog), "a refused park login must log above WARNING"
+    _assert_one_alert(park_sentry, caplog, "login_refused", _WIZARD)
+
+
+async def test_unset_house_credentials_still_log_error(
+    exchange_router, monkeypatch, park_sentry, caplog
+):
+    """The founder's "page else": unset credentials are a configuration fault,
+    never a blip. ERROR plus a capture, on the same success path as the glitch
+    test."""
+    router = exchange_router
+    monkeypatch.delenv("MT5_LOGIN")
+    transport = _RecordingMt5(_scenario())
+    _install_real_mt5_client(router, transport)
+    with caplog.at_level(logging.DEBUG, logger=_ANALYTICS_LOGGER):
+        await _call(router, _make_req())
+    assert transport.house_logins() == []
+    assert _loud_records(caplog), "unset house credentials must log above WARNING"
+    _assert_one_alert(park_sentry, caplog, "house_credentials_unset", _WIZARD)
 
 
 async def test_a_park_whose_ceiling_fires_alerts_and_only_the_release_follows(

@@ -61,7 +61,10 @@ from services.mt5_client import (
     _note_terminal_holder,
 )
 from services.mt5_validation import (
+    classify_mt5_login_error,
     classify_trade_capability,
+    is_ipc_transport_fault,
+    is_mt5_login_refusal,
     mt5_probe_request,
     terminal_trade_permission_off,
 )
@@ -476,6 +479,11 @@ def run_probe(
 #: `services/mt5_relogin.py`).
 _PARK_ALERT_WINDOW_S: Final[float] = 3600.0
 
+#: FOUNDER DECISION 2026-10-03 ("Warn on glitch, page else"): a park login that
+#: failed for the reason a validation would answer at WARNING. Logged at
+#: WARNING, never captured; see `_is_park_bridge_glitch`.
+_PARK_BRIDGE_GLITCH_CAUSE: Final[str] = "bridge_glitch"
+
 #: The member an unknown cause is mapped to, so no caller-supplied string is ever
 #: interpolated into alert text.
 _PARK_ALERT_UNRECOGNISED_CAUSE: Final[str] = "unrecognised_cause"
@@ -490,6 +498,7 @@ _PARK_ALERT_CAUSES: Final[frozenset[str]] = frozenset(
         "client_error",
         "session_abandoned",
         "ceiling",
+        _PARK_BRIDGE_GLITCH_CAUSE,
         # The call-site gate refused to attempt it.
         "probe_in_flight",
         "probe_session_abandoned",
@@ -545,6 +554,40 @@ def _alert_park_failed(cause: str, *, site: str) -> None:
         pass
 
 
+def _is_park_bridge_glitch(err: Mt5ClientError) -> bool:
+    """True when a failed park login is the bridge glitch D-15 treats as a blip.
+
+    ⛔ NOT a new classification. It is the exact chain
+    `routers/exchange.py::_validate_mt5_key_probe` runs on a probe's
+    `Mt5ClientError` to reach its WARNING-level "transient upstream failure"
+    arm: `classify_mt5_login_error` answers ``"transient"``, the error is not a
+    sign-in the terminal refused (`is_mt5_login_refusal`), and it is not an IPC
+    transport fault (`is_ipc_transport_fault`, which that site logs at ERROR
+    because it means the terminal itself stopped answering). So a park failure
+    is exactly as loud as the same failure on the validation it follows.
+    """
+    return (
+        classify_mt5_login_error(err) == "transient"
+        and not is_mt5_login_refusal(err)
+        and not is_ipc_transport_fault(err)
+    )
+
+
+def _warn_park_bridge_glitch(*, site: str) -> None:
+    """FOUNDER DECISION 2026-10-03 ("Warn on glitch, page else"). One WARNING
+    naming the cause and the site, and NO Sentry capture: the validate site
+    answers the same glitch at WARNING with no capture, and D-15 forbids paging
+    an operator for a blip. Never silent, never a page."""
+    logger.warning(
+        "mt5 validation park: the validation terminal was NOT logged back into "
+        "the house account (cause=%s, site=%s) — a transient bridge glitch, the "
+        "same class a validation answers at WARNING; it stays on its current "
+        "session until its next login (Phase 164.6.6 D-07 part 2)",
+        _PARK_BRIDGE_GLITCH_CAUSE,
+        site,
+    )
+
+
 def report_park_skipped(cause: str, *, site: str) -> None:
     """A call-site gate refused to park (``probe_in_flight``,
     ``probe_session_abandoned``, ``probe_account_mismatch``,
@@ -585,11 +628,15 @@ def park_on_house_account(
     except Mt5SessionAbandoned:
         _alert_park_failed("session_abandoned", site=site)
         return False
-    except Mt5LoginRefusedError:
-        _alert_park_failed("login_refused", site=site)
-        return False
-    except Mt5ClientError:
-        _alert_park_failed("client_error", site=site)
+    except Mt5ClientError as err:
+        # FOUNDER DECISION 2026-10-03 ("Warn on glitch, page else"): the glitch
+        # class warns; a refused sign-in and every other client error page.
+        if _is_park_bridge_glitch(err):
+            _warn_park_bridge_glitch(site=site)
+        elif isinstance(err, Mt5LoginRefusedError):
+            _alert_park_failed("login_refused", site=site)
+        else:
+            _alert_park_failed("client_error", site=site)
         return False
     except Exception as exc:  # noqa: BLE001 — see the docstring
         # The exception CLASS only, never its text: `mt5linux` interpolates the
