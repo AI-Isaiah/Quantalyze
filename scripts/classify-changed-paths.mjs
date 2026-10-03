@@ -586,7 +586,7 @@ export function parseBaselineDriftLog(text) {
   const no = (why) => ({ ok: false, why });
   if (typeof text !== "string") return no("the log is not text");
   const lines = text
-    .replace(/^﻿/, "")
+    .replace(/^\uFEFF/, "")
     .replace(/\r/g, "")
     .split("\n")
     .map((l) => l.replace(/^\d{4}-\d{2}-\d{2}T[\d:.]+Z /, "").replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, ""));
@@ -753,7 +753,7 @@ export function syntheticDriftLog(rows = ["DRIFT f_one/1"], { findings = rows.le
     "Post job cleanup.",
     "Cleaning up orphan processes",
   ];
-  return `﻿${body.map((l) => `${ts()}${l}`).join("\n")}\n`;
+  return `\uFEFF${body.map((l) => `${ts()}${l}`).join("\n")}\n`;
 }
 
 /**
@@ -1499,10 +1499,10 @@ const CASES = [
     run: (ok) => {
       const g = parseBaselineDriftLog(DRIFT_LOG);
       let pass = ok(g.ok === true && JSON.stringify(g.fns) === '["f_one/1"]' && g.drift === 1 && g.snapshotMissing === 0, `the GREEN template is a tolerated drift-only log (got ${JSON.stringify(g)})`);
-      pass = ok(DRIFT_LOG.startsWith("﻿") && DRIFT_LOG.includes("\x1b[36;1m"), "CALIBRATION: the template carries a BOM and an ANSI escape, so the stripping below is exercised") && pass;
+      pass = ok(DRIFT_LOG.startsWith("\uFEFF") && DRIFT_LOG.includes("\x1b[36;1m"), "CALIBRATION: the template carries a BOM and an ANSI escape, so the stripping below is exercised") && pass;
       const crlf = parseBaselineDriftLog(DRIFT_LOG.replace(/\n/g, "\r\n"));
       pass = ok(crlf.ok === true, `CRLF line endings parse the same (got ${JSON.stringify(crlf)})`) && pass;
-      const bare = DRIFT_LOG.replace(/^﻿/, "").split("\n").map((l) => l.replace(/^\S+Z /, "")).join("\n");
+      const bare = DRIFT_LOG.replace(/^\uFEFF/, "").split("\n").map((l) => l.replace(/^\S+Z /, "")).join("\n");
       pass = ok(!/\d{4}-\d{2}-\d{2}T/.test(bare) && parseBaselineDriftLog(bare).ok === true, "with NO timestamp prefix and no BOM it parses the same") && pass;
       const ansiHeader = logLines((l) => {
         const i = driftHeaderIndex(l);
