@@ -980,6 +980,54 @@ const GREEN = checkRuns({ status: "completed", conclusion: "success" });
 const done = (name, conclusion, extra = {}) => ({ name, status: "completed", conclusion, ...extra });
 
 /**
+ * Phase 164.9.6.1 (D-02, D-05) fixtures. `driftBefore(edit)` is the 26b041ce2
+ * shape as `gh api` returns it: in ONE failed CI suite 7, `sql-gate-lint`
+ * failure (listed FIRST, so the strict reason names it), `python` and
+ * `sql-mutation` success, `frontend` failure. `edit({ runs, suites })` mutates
+ * the arrays for a refusal row. `logSeam(text | Error)` is a recording
+ * `fetchJobLog`. `DRIFT_LOG` is the GREEN log template; every RED log row is a
+ * one-line mutation of it (`logLines`).
+ */
+const DRIFT_LINT_ID = 501;
+const driftBefore = (edit = () => {}) => (sha) => {
+  const run = (id, name, conclusion, suite = 7) => ({ id, name, app: { slug: PREDECESSOR_APP_SLUG }, check_suite: { id: suite }, head_sha: sha, status: "completed", conclusion });
+  const runs = [run(DRIFT_LINT_ID, "sql-gate-lint", "failure"), run(502, "python", "success"), run(503, "sql-mutation", "success"), run(504, "frontend", "failure")];
+  const suites = [{ id: 7, app: { slug: PREDECESSOR_APP_SLUG }, head_sha: sha, status: "completed", conclusion: "failure", latest_check_runs_count: 4 }];
+  edit({ runs, suites, run });
+  return { runs: { total_count: runs.length, check_runs: runs }, suites: { total_count: suites.length, check_suites: suites } };
+};
+const logSeam = (answer) => {
+  const seam = (id) => {
+    seam.calls.push(id);
+    if (answer instanceof Error) throw answer;
+    return answer;
+  };
+  seam.calls = [];
+  return seam;
+};
+const DRIFT_LOG = syntheticDriftLog();
+/** Apply `edit(lines)` to the GREEN template's lines; `stamp(text)` gives a line the template's timestamp shape. */
+const logLines = (edit) => {
+  const lines = DRIFT_LOG.split("\n");
+  edit(lines);
+  return lines.join("\n");
+};
+const stamp = (text) => `2026-10-03T12:00:59.0000000Z ${text}`;
+const lineIndex = (lines, needle) => {
+  const i = lines.findIndex((l) => l.includes(needle));
+  if (i === -1) throw new Error(`fixture: the GREEN log template carries no line with ${JSON.stringify(needle)}`);
+  return i;
+};
+/** The drift step's own header line (exact: its `--self-test` sibling shares the prefix). */
+const driftHeaderIndex = (lines) => {
+  const i = lines.findIndex((l) => l.endsWith(`Z ##[group]Run ${DRIFT_STEP_RUN_LINE}`));
+  if (i === -1) throw new Error("fixture: the GREEN log template carries no drift step header");
+  return i;
+};
+const SHA_T = "d".repeat(40);
+const tolerant = (fetchJobLog) => ({ tolerateBaselineDrift: true, fetchJobLog });
+
+/**
  * The fixture table. Every row carries its own claim and fires on its own
  * input; the terminal count is DERIVED from this array's length rather than
  * hand-typed, so a row added without a banner cannot drift.
@@ -1440,6 +1488,139 @@ const CASES = [
       } finally {
         r.cleanup();
       }
+    },
+  },
+  {
+    claim: "164.9.6.1 parseBaselineDriftLog: the GREEN template parses, with BOM, CRLF, ANSI and the timestamp prefix stripped, present or absent",
+    run: (ok) => {
+      const g = parseBaselineDriftLog(DRIFT_LOG);
+      let pass = ok(g.ok === true && JSON.stringify(g.fns) === '["f_one/1"]' && g.drift === 1 && g.snapshotMissing === 0, `the GREEN template is a tolerated drift-only log (got ${JSON.stringify(g)})`);
+      pass = ok(DRIFT_LOG.startsWith("﻿") && DRIFT_LOG.includes("\x1b[36;1m"), "CALIBRATION: the template carries a BOM and an ANSI escape, so the stripping below is exercised") && pass;
+      const crlf = parseBaselineDriftLog(DRIFT_LOG.replace(/\n/g, "\r\n"));
+      pass = ok(crlf.ok === true, `CRLF line endings parse the same (got ${JSON.stringify(crlf)})`) && pass;
+      const bare = DRIFT_LOG.replace(/^﻿/, "").split("\n").map((l) => l.replace(/^\S+Z /, "")).join("\n");
+      pass = ok(!/\d{4}-\d{2}-\d{2}T/.test(bare) && parseBaselineDriftLog(bare).ok === true, "with NO timestamp prefix and no BOM it parses the same") && pass;
+      const ansiHeader = logLines((l) => {
+        const i = driftHeaderIndex(l);
+        l[i] = l[i].replace("##[group]", "\x1b[0m##[group]");
+      });
+      pass = ok(parseBaselineDriftLog(ansiHeader).ok === true, "an ANSI sequence in front of the drift step header is stripped before the exact comparison") && pass;
+      return ok(parseBaselineDriftLog(undefined).ok === false && parseBaselineDriftLog(Buffer.from(DRIFT_LOG)).ok === false, "a non-string answer is never a proof") && pass;
+    },
+  },
+  {
+    claim: "164.9.6.1 D-02 / D-05: a predecessor red ONLY with tolerated DRIFT / SNAPSHOT_MISSING rows is proven (tolerated), reading the sql-gate-lint log by its check-run id",
+    run: (ok) => {
+      const rows = [
+        ["one DRIFT row", syntheticDriftLog(["DRIFT f_one/1"]), ["f_one/1"], 1, 0],
+        ["one SNAPSHOT_MISSING row (D-05)", syntheticDriftLog(["SNAPSHOT_MISSING g_new/0"]), ["g_new/0"], 0, 1],
+        ["one DRIFT plus one SNAPSHOT_MISSING row", syntheticDriftLog(["DRIFT f_one/1", "SNAPSHOT_MISSING g_new/0"]), ["f_one/1", "g_new/0"], 1, 1],
+      ];
+      let pass = true;
+      for (const [label, log, fns, d, sm] of rows) {
+        const seam = logSeam(log);
+        const v = predecessorVerdict(SHA_T, driftBefore(), tolerant(seam));
+        pass =
+          ok(
+            v.ok === true && v.tolerated === true && v.why.startsWith(`red only with tolerated baseline drift: ${fns.join(", ")} `) && v.why.includes(`DRIFT ${d}, SNAPSHOT_MISSING ${sm}`),
+            `${label} narrows, naming ${fns.join(" and ")} (got ${JSON.stringify(v)})`,
+          ) && pass;
+        pass = ok(JSON.stringify(seam.calls) === JSON.stringify([DRIFT_LINT_ID]), `${label}: the log was read once, by the sql-gate-lint check-run id (got ${JSON.stringify(seam.calls)})`) && pass;
+      }
+      return pass;
+    },
+  },
+  {
+    claim: "164.9.6.1 D-02: every RUN-LEVEL refusal reads FULL with the check or suite named, BEFORE the job log is read",
+    run: (ok) => {
+      const rows = [
+        ["sql-mutation CANCELLED beside the tolerated pair (the 9c1dc3137 / b2c59c720 pattern)", ({ runs }) => { runs[2].conclusion = "cancelled"; }, "check 'sql-mutation' concluded cancelled"],
+        ["python FAILURE beside the tolerated pair", ({ runs }) => { runs[1].conclusion = "failure"; }, "check 'python' concluded failure"],
+        ["frontend failure ALONE, sql-gate-lint success", ({ runs }) => { runs[0].conclusion = "success"; }, "check 'frontend' concluded failure"],
+        ["sql-gate-lint failure with NO frontend run", ({ runs }) => { runs.pop(); }, "absent: no 'frontend' check run in sql-gate-lint's suite 7"],
+        ["frontend CANCELLED rather than failure", ({ runs }) => { runs[3].conclusion = "cancelled"; }, "check 'frontend' concluded cancelled in sql-gate-lint's suite 7, not failure"],
+        ["sql-gate-lint CANCELLED", ({ runs }) => { runs[0].conclusion = "cancelled"; }, "check 'sql-gate-lint' concluded cancelled, not failure"],
+        ["sql-gate-lint TIMED_OUT", ({ runs }) => { runs[0].conclusion = "timed_out"; }, "check 'sql-gate-lint' concluded timed_out, not failure"],
+        [
+          "frontend in a DIFFERENT suite from sql-gate-lint",
+          ({ runs, suites }) => {
+            runs[3].check_suite = { id: 8 };
+            suites.push({ ...suites[0], id: 8 });
+          },
+          "absent: no 'frontend' check run in sql-gate-lint's suite 7",
+        ],
+        ["a SECOND red GitHub Actions suite", ({ suites }) => { suites.push({ ...suites[0], id: 9, conclusion: "failure", latest_check_runs_count: 0 }); }, "check suite 9 concluded failure, a second red suite"],
+        ["an OPEN GitHub Actions suite", ({ suites }) => { suites.push({ ...suites[0], id: 9, status: "queued", conclusion: null, latest_check_runs_count: 0 }); }, "pending: GitHub Actions check suite 9 status queued"],
+      ];
+      let pass = true;
+      for (const [label, edit, why] of rows) {
+        const seam = logSeam(DRIFT_LOG);
+        const v = predecessorVerdict(SHA_T, driftBefore(edit), tolerant(seam));
+        pass = ok(v.ok === false && v.tolerated === undefined && v.why.includes(why), `${label} -> FULL, named (got ${JSON.stringify(v)})`) && pass;
+        pass = ok(seam.calls.length === 0, `${label}: the job log was NOT read (got ${JSON.stringify(seam.calls)})`) && pass;
+      }
+      return pass;
+    },
+  },
+  {
+    claim: "164.9.6.1 D-02 / D-05: every LOG-LEVEL refusal reads FULL with the reason named; each RED log is a one-line mutation of the GREEN template",
+    run: (ok) => {
+      const httpErr = new Error("Command failed: gh api");
+      httpErr.stderr = "gh: HTTP 403: Resource not accessible by integration\n";
+      const insertAfterRow = (text) => logLines((l) => l.splice(lineIndex(l, "content-drift — DRIFT f_one/1") + 1, 0, stamp(text)));
+      const rows = [
+        ["a DRIFT row plus an allowlist-stale finding, findings 2", logLines((l) => {
+          l.splice(lineIndex(l, "content-drift — DRIFT f_one/1") + 1, 0, stamp("##[error]allowlist-stale — `x`/0 is pinned as DRIFT but the corpus reports no such disagreement."));
+          l[lineIndex(l, "baseline-content-drift: findings")] = stamp("baseline-content-drift: findings 2");
+        }), "a non-tolerated error line: allowlist-stale"],
+        ["a SNAPSHOT_ONLY row", syntheticDriftLog(["DRIFT f_one/1", "SNAPSHOT_ONLY g_old/0"]), "a non-tolerated error line: SNAPSHOT_ONLY"],
+        ["a MEASURE_FAIL line", insertAfterRow("##[error]MEASURE_FAIL — sql-body-normalize refused an identifier at line 3."), "a non-tolerated error line: MEASURE_FAIL"],
+        ["an UNRECOGNISED ##[error] line", insertAfterRow("##[error]The runner has received a shutdown signal."), "a non-tolerated error line: 'The runner has received a shutdown signal.'"],
+        ["the drift step's --self-test exited, with only the exit line", logLines((l) => {
+          const at = lineIndex(l, `Run ${DRIFT_STEP_RUN_LINE} --self-test`);
+          l.splice(at + 1, l.length, stamp("SELF-TEST FAIL: arm 3"), stamp("##[error]Process completed with exit code 1."), "");
+        }), "the step that exited is not the drift step"],
+        ["drift-shaped rows printed by a DIFFERENT step that exited (its header is not the drift step's)", logLines((l) => {
+          const at = driftHeaderIndex(l);
+          l[at] = l[at].replace(`Run ${DRIFT_STEP_RUN_LINE}`, "Run node scripts/some-other-check.mjs");
+        }), "the step that exited is not the drift step (its header reads '##[group]Run node scripts/some-other-check.mjs')"],
+        ["NO findings line (a truncated log)", logLines((l) => l.splice(lineIndex(l, "baseline-content-drift: findings"), 1)), "0 'baseline-content-drift: findings' line(s)"],
+        ["2 DRIFT rows with findings 3", syntheticDriftLog(["DRIFT f_one/1", "DRIFT f_two/2"], { findings: 3 }), "findings 3 but 2 tolerated row(s)"],
+        ["NO exit line", logLines((l) => l.splice(lineIndex(l, "Process completed with exit code 1."), 1)), "0 'Process completed with exit code 1.' line(s)"],
+        ["ZERO tolerated rows", syntheticDriftLog([], { findings: 0 }), "no tolerated DRIFT or SNAPSHOT_MISSING row"],
+        ["a function token with a SPACE in it", syntheticDriftLog(["DRIFT f one/1"]), "a DRIFT row carries a malformed function token 'f'"],
+        ["a function token with a NEWLINE in it", syntheticDriftLog(["DRIFT f\none/1"]), "a DRIFT row carries a malformed function token 'f'"],
+        ["fetchJobLog THROWING gh: HTTP 403", httpErr, "the sql-gate-lint job log could not be read: gh: HTTP 403"],
+      ];
+      let pass = true;
+      for (const [label, answer, why] of rows) {
+        pass = ok(answer instanceof Error || answer !== DRIFT_LOG, `CALIBRATION: ${label} differs from the GREEN template`) && pass;
+        const seam = logSeam(answer);
+        const v = predecessorVerdict(SHA_T, driftBefore(), tolerant(seam));
+        pass = ok(v.ok === false && v.tolerated === undefined && v.why.includes(why), `${label} -> FULL, named (got ${JSON.stringify(v)})`) && pass;
+        pass = ok(seam.calls.length === 1, `${label}: the refusal came from the log, read once (got ${JSON.stringify(seam.calls)})`) && pass;
+      }
+      return pass;
+    },
+  },
+  {
+    claim: "164.9.6.1 D-04: the tolerance is OPT-IN; the 26b041ce2 pattern is still NOT proven green by default, and the docs-only short path stays strict",
+    run: (ok) => {
+      const strict = predecessorVerdict(SHA_T, driftBefore());
+      let pass = ok(strict.ok === false && strict.why === "check 'sql-gate-lint' concluded failure" && strict.tolerated === undefined, `predecessorVerdict with NO options names sql-gate-lint, byte-identical to the strict reason (got ${JSON.stringify(strict)})`);
+      const off = predecessorVerdict(SHA_T, driftBefore(), { fetchJobLog: logSeam(DRIFT_LOG) });
+      pass = ok(off.ok === false && off.why === strict.why, `a fetchJobLog without tolerateBaselineDrift changes nothing (got ${JSON.stringify(off)})`) && pass;
+      const r = scratchRepo("push-drift-strict");
+      try {
+        const before = r.commit({ "src/a.ts": "export {};\n" });
+        r.commit({ ".planning/STATE.md": "# s\n" });
+        pass = ok(classifyPushRange({ before, cwd: r.dir, fetchPredecessor: GREEN }).docsOnly === true, "CALIBRATION: the same docs-only push on a GREEN predecessor takes the short path") && pass;
+        const v = classifyPushRange({ before, cwd: r.dir, fetchPredecessor: driftBefore() });
+        pass = ok(v.docsOnly === false && v.reason.includes("is not proven green (check 'sql-gate-lint' concluded failure)"), `the docs-only path does NOT take the short path on a drift-only red predecessor (${v.reason})`) && pass;
+      } finally {
+        r.cleanup();
+      }
+      return pass;
     },
   },
 ];
