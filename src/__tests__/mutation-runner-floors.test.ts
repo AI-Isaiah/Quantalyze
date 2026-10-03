@@ -30,11 +30,9 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { ARMS_FLOOR, FILES_FLOOR, WAIVED_CEILING } from "../../scripts/mutation-floors.mjs";
 import {
-  ARMS_FLOOR,
   DEFECT_KINDS,
-  FILES_FLOOR,
-  WAIVED_CEILING,
   absurdityViolations,
   gateSectionCount,
   laneSpawnFailure,
@@ -720,7 +718,7 @@ describe("FILES_FLOOR ratchet", () => {
       annotated.length,
       annotated.length < FILES_FLOOR
         ? `REGRESSION: ${annotated.length} of ${filesTotal} gate files are annotated, below the pinned floor of ${FILES_FLOOR}. Annotations were removed.`
-        : `RATCHET STALE: ${annotated.length} of ${filesTotal} gate files are now annotated but FILES_FLOOR is still ${FILES_FLOOR}. Raise FILES_FLOOR in scripts/mutation-runner/run.mjs to ${annotated.length}.`,
+        : `RATCHET STALE: ${annotated.length} of ${filesTotal} gate files are now annotated but FILES_FLOOR is still ${FILES_FLOOR}. Raise FILES_FLOOR in scripts/mutation-floors.mjs to ${annotated.length}.`,
     ).toBe(FILES_FLOOR);
   });
 
@@ -778,7 +776,7 @@ describe("ARMS_FLOOR ratchet", () => {
     if (twins === 0) return;
     expect(
       ARMS_FLOOR,
-      `The corpus declares ${twins} twin(s) of which ${waivers} are waivers, so a green run bites ${twins - waivers}. ARMS_FLOOR is ${ARMS_FLOOR}. Update the floor in scripts/mutation-runner/run.mjs from a MEASURED run, never from this number.`,
+      `The corpus declares ${twins} twin(s) of which ${waivers} are waivers, so a green run bites ${twins - waivers}. ARMS_FLOOR is ${ARMS_FLOOR}. Update the floor in scripts/mutation-floors.mjs from a MEASURED run, never from this number.`,
     ).toBe(twins - waivers);
   });
 });
@@ -803,7 +801,7 @@ describe("WAIVED_CEILING — the waiver count is bounded from ABOVE, in lockstep
     expect(
       WAIVED_CEILING,
       waivers > WAIVED_CEILING
-        ? `WAIVER CREEP: the corpus declares ${waivers} waiver(s), above the pinned ceiling of ${WAIVED_CEILING}. Each waiver is an arm the runner will never prove can fail — raising WAIVED_CEILING in scripts/mutation-runner/run.mjs is a reviewed edit, never a side effect.`
+        ? `WAIVER CREEP: the corpus declares ${waivers} waiver(s), above the pinned ceiling of ${WAIVED_CEILING}. Each waiver is an arm the runner will never prove can fail — raising WAIVED_CEILING in scripts/mutation-floors.mjs is a reviewed edit, never a side effect.`
         : `CEILING STALE: the corpus declares ${waivers} waiver(s) but WAIVED_CEILING is ${WAIVED_CEILING}. Lower it to ${waivers} so a re-added waiver is caught.`,
     ).toBe(waivers);
   });
