@@ -71,7 +71,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
           node-version: 22
           cache: npm
@@ -185,6 +185,18 @@ jobs:
     # changed; `sql-mutation` refuses the subset on a non-PR event independently.
     # ⛔ Adding these two outputs changes nothing about `docs_only` and adds no
     # `if:` — the no-`if:` paragraph above binds this derivation too.
+    # (⚠️ CORRECTED 2026-10-03, Phase 164.9.6 D-01/D-03/D-09/D-10: on a push to
+    # `refs/heads/main` the derivation no longer hard-codes FULL. It judges the
+    # PUSHED range through `pushRangeFiles`, the lister it shares with the docs
+    # classifier, and emits `subset` (the changed gates plus every gate whose
+    # RED-UNDER-SETUP loads a changed migration), `none` (the range changed no
+    # gate, no migration and no mutation machinery) or `full`, each with a
+    # reason. Every doubt about the range reads FULL. The job now publishes a
+    # THIRD output, `sql_gate_reason`, one printable line saying why. A
+    # workflow_dispatch, a schedule and a push to any other ref still read
+    # FULL. On a pull request it is unchanged. The sentence "The derivation
+    # hard-codes FULL for every event that is not a pull_request" above is kept
+    # as lineage.)
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -194,12 +206,13 @@ jobs:
       docs_only: ${{ steps.classify.outputs.docs_only }}
       sql_gate_mode: ${{ steps.sql_gate_subset.outputs.sql_gate_mode }}
       sql_gate_files: ${{ steps.sql_gate_subset.outputs.sql_gate_files }}
+      sql_gate_reason: ${{ steps.sql_gate_subset.outputs.sql_gate_reason }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
           fetch-depth: 0   # the classifier diffs against the base branch
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
           node-version: 22
       # The red path first: a gate whose failure modes have never been observed
@@ -224,7 +237,8 @@ jobs:
       # Red, cancelled, timed out, pending, absent, a truncated or malformed
       # response, or an API error runs the full corpus with the reason printed.
       # `GH_TOKEN` is this job's `checks: read` token, scoped to this step
-      # alone. `GITHUB_REPOSITORY` is a runner default.
+      # and the `sql_gate_subset` step below (review 164.9.6 WR-03), and to no
+      # other. `GITHUB_REPOSITORY` is a runner default.
       - id: classify
         run: node scripts/classify-changed-paths.mjs
         env:
@@ -236,8 +250,22 @@ jobs:
       # a MEASURE_FAIL and never an empty change set) before the real run. A
       # wrong `subset` would leave gate files unmutated on a pull request.
       - run: node scripts/sql-gate-subset.mjs --self-test
+      # Phase 164.9.6 D-01: on a push to main the derivation judges the pushed
+      # range, so it needs the same two event fields the `classify` step reads,
+      # through `env:` and never interpolated into `run:`.
+      # (Review 164.9.6 WR-03) A push that would narrow to a subset or to
+      # `none` first proves `before` green with the classifier's own
+      # `predecessorVerdict`, the same proof the docs-only short path uses, so
+      # it needs this job's `checks: read` token, through `env:` only. A push
+      # already owed FULL makes no API call; an unproven predecessor (red,
+      # pending, absent, an API error, a truncated response) runs FULL with the
+      # reason printed. A pull_request never reads the token.
       - id: sql_gate_subset
         run: node scripts/sql-gate-subset.mjs
+        env:
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+          PUSH_FORCED: ${{ github.event.forced }}
+          GH_TOKEN: ${{ github.token }}
 
   # CI speedup PR-B (v0.22.1.2+): the prior monolithic `frontend` job ran
   # typecheck → lint → test → policy-checks → audit → build serially
@@ -261,7 +289,7 @@ jobs:
           # this job pushes back to the repo; the cred is pure attack
           # surface for any third-party action that lands later.
           persist-credentials: false
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
           node-version: 22
           cache: npm
@@ -328,7 +356,7 @@ jobs:
           # this job pushes back to the repo; the cred is pure attack
           # surface for any third-party action that lands later.
           persist-credentials: false
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
           node-version: 22
           cache: npm
@@ -417,7 +445,7 @@ jobs:
           # this job pushes back to the repo; the cred is pure attack
           # surface for any third-party action that lands later.
           persist-credentials: false
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
           node-version: 22
           cache: npm
@@ -524,7 +552,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
           node-version: 22
           cache: npm
@@ -630,7 +658,7 @@ jobs:
           # No fetch-depth: 0 — the phase-29/30 frozen-spine guards resolve a
           # merge-base and run in the SHARDS, not here.
           persist-credentials: false
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
           node-version: 22
           cache: npm
@@ -788,7 +816,7 @@ jobs:
           # spawns one. So the default shallow clone is enough, and full history was
           # dropped. `local-stack-lane-wiring.test.ts` pins that the lane's gate reads
           # no git history, which is what keeps a shallow clone safe here.
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
           node-version: 22
           cache: npm
@@ -825,7 +853,7 @@ jobs:
             echo "npm ci attempt $n failed (transient?); retrying in $((n*5))s"
             sleep $((n*5))
           done
-      - uses: supabase/setup-cli@3c2f5e2ae34c34e428e8e206e2c4d21fa2d20fbf  # v2.1.1
+      - uses: supabase/setup-cli@45a513f8c64c0bc8e0e3dfe572b5c95be85f6359  # v3.0.1
         with:
           # ⚠️ SKEW, STATED RATHER THAN HIDDEN. This is the SAME pin every other
           # workflow here uses (migration-drift-check, supabase-migrate and
@@ -1132,7 +1160,7 @@ jobs:
           # migrations THIS job's lane is about to replay on top of the dump, which is
           # a per-job printout: a reader of this job's log should not have to open
           # another job to learn what schema its 49 specs ran against.
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
           node-version: 22
           cache: npm
@@ -1164,7 +1192,7 @@ jobs:
         # only by order of the job's preamble — the seam itself runs `node` with
         # built-ins and needs neither node_modules nor git history.
         run: bash scripts/local-stack/run.sh --check-currency
-      - uses: supabase/setup-cli@3c2f5e2ae34c34e428e8e206e2c4d21fa2d20fbf  # v2.1.1
+      - uses: supabase/setup-cli@45a513f8c64c0bc8e0e3dfe572b5c95be85f6359  # v3.0.1
         with:
           # The SAME pin `frontend-local-stack` uses, so this file keeps ONE answer to
           # "which CLI". ⛔ The fourth workflow that shares this pin is deliberately
@@ -1309,7 +1337,7 @@ jobs:
           # this job pushes back to the repo; the cred is pure attack
           # surface for any third-party action that lands later.
           persist-credentials: false
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
           node-version: 22
           cache: npm
@@ -1408,7 +1436,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
           node-version: 22
           cache: npm
@@ -1480,7 +1508,7 @@ jobs:
           # this job pushes back to the repo; the cred is pure attack
           # surface for any third-party action that lands later.
           persist-credentials: false
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
           node-version: 22
           cache: npm
@@ -1605,7 +1633,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
           node-version: 22
           cache: npm
@@ -2293,6 +2321,9 @@ jobs:
     # MEASURED ubuntu run, not a local projection. If the NEXT arms move pushes
     # a measured ubuntu run over 20, the recorded answer is
     # [REDUNDER-SUBSET-SPLIT], never a third raise.
+    # ⭐ 2026-10-03 (Phase 164.9.6 SUBSETMAIN): [REDUNDER-SUBSET-SPLIT] has SHIPPED. A push
+    # to main now runs a SUBSET or skips the lane (`none`), and `sql-mutation-nightly.yml`
+    # runs the full corpus and enforces the floors. The three mentions above are lineage.
     # Phase 164.6.3 / CI-DOCSPATH-01 — docs-only path filter: this changes WHEN
     # this job is invoked (not on a `.planning/`-only PR), never WHAT it asserts.
     # ⚠️ CORRECTION to the two paragraphs above, which say this job has "no `if:`" and
@@ -2301,6 +2332,13 @@ jobs:
     # shared resource, so it keeps the aggregator's STRICT default arm with no
     # tolerance of its own, and a `skipped` under a CODE classification is still
     # always a real fault.
+    # ⚠️ CORRECTED 2026-10-03, Phase 164.9.6 D-09. The job still has exactly ONE
+    # job-level `if:` (the docs-only one above), and its strict aggregator row is
+    # unchanged: it reports `success` or `failure`, never `skipped`. What changed is
+    # one level down. Its STEPS now carry one uniform step-level condition,
+    # `steps.scope.outputs.skip_lane != 'true'`, which skips only the lane and only
+    # on a verified `none` on a push to main (see the scope step below). "No `if:`"
+    # above is therefore true of the JOB and no longer true of its steps.
     needs: [changed-paths]
     if: needs.changed-paths.outputs.docs_only != 'true'
     runs-on: ubuntu-latest
@@ -2309,7 +2347,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
           # No `cache: npm` on purpose — see the job header above: this job runs
           # no `npm ci` and no `npx`, so a restored `~/.npm` is a cache nothing
@@ -2317,7 +2355,64 @@ jobs:
           # is measured against.
           node-version: 22
 
+      # ── D-09 SCOPE STEP (2026-10-03, Phase 164.9.6) ──────────────────────────
+      # FOUNDER OVERRIDE, push-to-main only. When `changed-paths` derives
+      # `sql_gate_mode=none` on a push to refs/heads/main (a single-PR range that
+      # changed no gate file, no migration and no mutation machinery), the lane
+      # is not booted: this step prints `scope: NONE` and its reason and the job
+      # ends green. FULL coverage of that tree is the nightly run's. Pull
+      # requests keep the vacuity fence unchanged: a `none` on any other event or
+      # ref is refused here with a warning, the lane boots, and the mutate step's
+      # own guard runs the full corpus with a refusal-prefixed reason.
+      # ⛔ FAIL-SAFE DIRECTION. Every later step carries
+      # `if: steps.scope.outputs.skip_lane != 'true'`, never `== 'false'`: an
+      # absent, empty or garbled output therefore BOOTS the lane. Only the one
+      # literal value `true`, written on the one verified path, skips it.
+      # ⛔ WHY STEP-LEVEL AND NOT A JOB-LEVEL `if:`. A skipped JOB reads as
+      # `skipped` to the strict `frontend` aggregator row this job takes, and a
+      # skipped job prints nothing, while D-12 requires every run to say what it
+      # covered and why. A step-level skip keeps the job `success` and keeps the
+      # two printed lines in its log.
+      # A `none` that cannot say why (blank reason) or that names files is not
+      # the D-09 verdict, and is a MEASURE_FAIL rather than a skip.
+      - name: Scope - print what this run covers and why; a push to main that changed no mutation input skips the lane (D-09)
+        id: scope
+        env:
+          SQL_GATE_MODE: ${{ needs.changed-paths.outputs.sql_gate_mode }}
+          SQL_GATE_REASON: ${{ needs.changed-paths.outputs.sql_gate_reason }}
+          SQL_GATE_FILES: ${{ needs.changed-paths.outputs.sql_gate_files }}
+        run: |
+          set -euo pipefail
+          mode="${SQL_GATE_MODE:-}"
+          event="${GITHUB_EVENT_NAME:-}"
+          ref="${GITHUB_REF:-}"
+          reason="${SQL_GATE_REASON:-}"
+          reason_stripped="$(printf '%s' "$reason" | tr -d '[:space:]')"
+          files_stripped="$(printf '%s' "${SQL_GATE_FILES:-}" | tr -d '[:space:]')"
+          if [ "$mode" = "none" ]; then
+            if [ "$event" = "push" ] && [ "$ref" = "refs/heads/main" ]; then
+              if [ -z "$reason_stripped" ]; then
+                echo "::error::MEASURE_FAIL: changed-paths said sql_gate_mode=none on a push to main with a BLANK sql_gate_reason. A verdict that cannot say why is not the D-09 verdict, so the lane is neither skipped nor booted on it."
+                echo "skip_lane=false" >> "$GITHUB_OUTPUT"
+                exit 1
+              fi
+              if [ -n "$files_stripped" ]; then
+                echo "::error::MEASURE_FAIL: changed-paths said sql_gate_mode=none on a push to main but sql_gate_files is NOT empty (${SQL_GATE_FILES:-}). A none verdict that names gate files is self-contradictory, so the lane is neither skipped nor booted on it."
+                echo "skip_lane=false" >> "$GITHUB_OUTPUT"
+                exit 1
+              fi
+              echo "scope: NONE 0 gate files — no mutation input changed"
+              echo "scope-reason: ${reason}"
+              echo "skip_lane=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "::warning::changed-paths said sql_gate_mode=none on a '${event}' event (${ref}). D-09 honours it only on a push to refs/heads/main, so the lane boots and the full corpus runs."
+          fi
+          echo "scope verdict from changed-paths: sql_gate_mode=${mode}; the lane boots."
+          echo "skip_lane=false" >> "$GITHUB_OUTPUT"
+
       - name: Provision pg_cron for the lane's PostgreSQL (Phase 164.4.1)
+        if: steps.scope.outputs.skip_lane != 'true'
         # ⚠️ THIS STEP'S FIRST RUN IS THE MEASUREMENT. 164.4.1-RESEARCH assumption
         # A1 ("`apt-get install postgresql-16-cron` succeeds on ubuntu-latest and
         # yields a PG16-loadable .so") was INSPECTED, never executed — there was
@@ -2423,6 +2518,7 @@ jobs:
           ls -l "$("$pgbin/pg_config" --sharedir)/extension/pg_cron.control"
 
       - name: Probe - dblink contrib is present for the lane's PostgreSQL (Phase 164.5.2)
+        if: steps.scope.outputs.skip_lane != 'true'
         # ⚠️ THIS STEP'S FIRST PR RUN IS THE MEASUREMENT. 164.5.2-RESEARCH
         # assumption A1 ("ubuntu's PostgreSQL server package carries contrib,
         # so dblink is loadable on this runner") was INSPECTED, never executed:
@@ -2468,6 +2564,7 @@ jobs:
           fi
 
       - name: Probe - the runner image's PostgreSQL server binaries resolve
+        if: steps.scope.outputs.skip_lane != 'true'
         # 164.3-RESEARCH assumption A1 ("ubuntu-latest ships PostgreSQL server
         # binaries under /usr/lib/postgresql/<major>/bin") has NEVER been
         # executed — the lane and the runner were built and measured on macOS
@@ -2511,9 +2608,11 @@ jobs:
       # before the long mutation run so a broken drill reds in seconds rather
       # than after ten minutes of arms.
       - name: Dead-holder drill - kill a real holder and require the verdict to bite
+        if: steps.scope.outputs.skip_lane != 'true'
         run: bash scripts/pg-lane/mutex-dead-holder-lane.sh
 
       - name: Preflight - reject psql meta-commands in every file the runner executes
+        if: steps.scope.outputs.skip_lane != 'true'
         # SAME REFUSAL AS `sql-tests`' Finding 6 preflight, WIDENED TO THE FILE
         # SET THIS JOB ACTUALLY EXECUTES. That job scans only
         # `supabase/tests/test_*.sql`; this one applies fixtures and MIGRATIONS
@@ -2596,6 +2695,7 @@ jobs:
           echo "Preflight clean: ${#files[@]} file(s) free of refused meta-commands."
 
       - name: Runner self-test - every defect kind still fires
+        if: steps.scope.outputs.skip_lane != 'true'
         # ⛔ SP-C02. This step was MISSING, and its absence was the largest hole
         # in this job. Verified by repo-wide grep at the time: `run.mjs
         # --self-test` was invoked by NOTHING, while the two sibling jobs both
@@ -2631,6 +2731,7 @@ jobs:
         run: node scripts/mutation-runner/run.mjs --self-test
 
       - name: Mutate every annotated RED-UNDER arm and require it to bite
+        if: steps.scope.outputs.skip_lane != 'true'
         # ⛔ MODE IDENTITY (164.3-RESEARCH Pitfall 2,
         # `reference_gstack_evidence_wrapper_reddens_suite`). The command below
         # is byte-identical to the one in the script's own header and to what a
@@ -2671,14 +2772,31 @@ jobs:
         # against the same strict pattern the derivation emitted it under.
         # Whichever branch ran, the runner prints exactly one `scope:` line,
         # and the assert step below judges it.
+        #
+        # ⭐ MODE IDENTITY, EXTENDED 2026-10-03 (Phase 164.9.6 / D-04). A push
+        # to `refs/heads/main` may now take the SUBSET branch too: the
+        # derivation judges the pushed range and `changed-paths` hands its list
+        # over exactly as on a pull request. That is the ONE event the refusal
+        # was widened by, never removed: a push to any other ref, a
+        # workflow_dispatch, a schedule or an unset event still runs FULL here,
+        # whatever the derivation said. Any non-`full` mode this step does not
+        # honour (a `subset` on another event, a `none` that reached it) is
+        # printed as a `::warning::`, and SQL_GATE_REASON is rewritten to say
+        # the step refused it before the FULL command runs, so the runner's
+        # `scope-reason:` line (D-12) tells the truth about why FULL ran. The
+        # FULL command itself is unchanged, byte for byte. The 2026-09-23
+        # paragraph's "the push to main always runs the whole corpus" and its
+        # "the derivation already forces `full` for a non-PR event" are kept as
+        # lineage: both stopped being true for a push to main on 2026-10-03.
         env:
           RUNNER_LOG: ${{ runner.temp }}/mutation-runner.log
           SQL_GATE_MODE: ${{ needs.changed-paths.outputs.sql_gate_mode }}
           SQL_GATE_FILES: ${{ needs.changed-paths.outputs.sql_gate_files }}
+          SQL_GATE_REASON: ${{ needs.changed-paths.outputs.sql_gate_reason }}
         run: |
           set -uo pipefail
           if [ "${SQL_GATE_MODE:-}" = "subset" ]; then
-            if [ "${GITHUB_EVENT_NAME:-}" = "pull_request" ]; then
+            if [ "${GITHUB_EVENT_NAME:-}" = "pull_request" ] || { [ "${GITHUB_EVENT_NAME:-}" = "push" ] && [ "${GITHUB_REF:-}" = "refs/heads/main" ]; }; then
               subset_list="$RUNNER_TEMP/sql-gate-subset.txt"
               read -r -a subset_names <<< "${SQL_GATE_FILES:-}"
               if [ "${#subset_names[@]}" -gt 0 ]; then
@@ -2686,13 +2804,19 @@ jobs:
               else
                 : > "$subset_list"
               fi
-              echo "SUBSET requested by changed-paths on a pull_request: ${#subset_names[@]} gate file(s) -> $subset_list"
+              echo "SUBSET requested by changed-paths on a '${GITHUB_EVENT_NAME:-unset}' event (${GITHUB_REF:-unset ref}): ${#subset_names[@]} gate file(s) -> $subset_list"
               node scripts/mutation-runner/run.mjs --subset-from "$subset_list" > "$RUNNER_LOG" 2>&1
               status=$?
               cat "$RUNNER_LOG"
               exit $status
             fi
-            echo "::warning::changed-paths said sql_gate_mode=subset on a '${GITHUB_EVENT_NAME:-unset}' event. A SUBSET is taken only on a pull_request, so this step REFUSES it and runs the full corpus."
+          fi
+          # Phase 164.9.6 D-04: reaching this line with a non-`full` mode means
+          # this step did NOT honour it (the honoured SUBSET branch exits above).
+          if [ -n "${SQL_GATE_MODE:-}" ] && [ "${SQL_GATE_MODE:-}" != "full" ]; then
+            echo "::warning::changed-paths said sql_gate_mode=${SQL_GATE_MODE:-} on a '${GITHUB_EVENT_NAME:-unset}' event (${GITHUB_REF:-unset ref}). A SUBSET is taken only on a pull_request or a push to refs/heads/main, so this step REFUSES that mode and runs the full corpus."
+            SQL_GATE_REASON="the mutate step refused sql_gate_mode=${SQL_GATE_MODE:-} on a ${GITHUB_EVENT_NAME:-unset} event (${GITHUB_REF:-unset ref}); the full corpus runs. Derivation said: ${SQL_GATE_REASON:-none supplied}"
+            export SQL_GATE_REASON
           fi
           node scripts/mutation-runner/run.mjs > "$RUNNER_LOG" 2>&1
           status=$?
@@ -2700,6 +2824,7 @@ jobs:
           exit $status
 
       - name: Assert the run PRINTED its coverage and cleared both floors
+        if: steps.scope.outputs.skip_lane != 'true'
         # D-01's print, made LOAD-BEARING. The runner prints coverage and arm
         # counts on every run; without this step a build of the runner that
         # silently stopped printing them would pass unnoticed, and the coverage
@@ -2754,6 +2879,15 @@ jobs:
           #   (2) SUBSET on an event that is not a pull_request -> MEASURE_FAIL.
           #       A merge is the moment the full picture is owed; a narrowed run
           #       on a push is a job failure, not a quiet optimisation.
+          #       (⚠️ CORRECTED 2026-10-03, Phase 164.9.6 D-04: a SUBSET is now
+          #       permitted on a pull_request AND on a push to refs/heads/main,
+          #       whose derivation judges the pushed range. Every other event —
+          #       a push to another ref, a workflow_dispatch, a schedule, an
+          #       unset event — still MEASURE_FAILs, and the message names the
+          #       event AND the ref. The full picture is owed by the nightly
+          #       full-corpus run and by every FULL fallback. Every SUBSET-only
+          #       check below applies unchanged on a push. The sentence above is
+          #       kept as lineage.)
           # Arms (3) and (4) — the SUBSET claim-versus-names check, the narrowed
           # row count, and the ARMS_FLOOR that is NOT compared — sit beside the
           # assertions they change, below. (5) FULL, fallback form included, is
@@ -2776,6 +2910,7 @@ jobs:
           scope_line=$(grep -a -m1 -E '^scope: ' "$RUNNER_LOG" || true)
           echo "$scope_line"
           event_name="${GITHUB_EVENT_NAME:-}"
+          ref_name="${GITHUB_REF:-}"
           if echo "$scope_line" | grep -a -q -E '^scope: FULL [0-9]+/[0-9]+ annotated files( \(subset fallback: .+\))?$'; then
             scope_mode=full
           elif echo "$scope_line" | grep -a -q -E '^scope: SUBSET [0-9]+/[0-9]+ annotated files: '; then
@@ -2784,22 +2919,59 @@ jobs:
             echo "::error::MEASURE_FAIL: the scope line '$scope_line' is neither the FULL nor the SUBSET form. A DIAGNOSTIC (--file/--arm) run, or a form this step does not know, is not this gate."
             exit 1
           fi
-          if [ "$scope_mode" = "subset" ] && [ "$event_name" != "pull_request" ]; then
-            echo "::error::MEASURE_FAIL: the run narrowed to a SUBSET ('$scope_line') on a '${event_name:-unset}' event. A SUBSET is permitted only on a pull_request; every other event owes the FULL corpus and every floor, so a narrowed run here is a job failure, not an optimisation."
+          subset_allowed=false
+          if [ "$event_name" = "pull_request" ]; then
+            subset_allowed=true
+          elif [ "$event_name" = "push" ] && [ "$ref_name" = "refs/heads/main" ]; then
+            subset_allowed=true
+          fi
+          if [ "$scope_mode" = "subset" ] && [ "$subset_allowed" != "true" ]; then
+            echo "::error::MEASURE_FAIL: the run narrowed to a SUBSET ('$scope_line') on a '${event_name:-unset}' event (ref '${ref_name:-unset}'). A SUBSET is permitted only on a pull_request or a push to refs/heads/main; every other event owes the FULL corpus and every floor, so a narrowed run here is a job failure, not an optimisation."
             exit 1
           fi
 
-          floors=$(node -e 'import("./scripts/mutation-runner/run.mjs").then(m => console.log(m.FILES_FLOOR, m.ARMS_FLOOR, m.WAIVED_CEILING))')
+          # Phase 164.9.6 / D-12 (founder, OPEN-4) — WHY DID THIS RUN TAKE ITS
+          # SCOPE? The runner prints exactly one `scope-reason: <why>` line
+          # directly after its `scope:` line on every corpus run. Same arms as
+          # the `scope:` count above: an unreadable log, an absent line, more
+          # than one line, or a blank reason is a MEASURE_FAIL. ⛔ This line is
+          # NEVER parsed for names: the SUBSET name count and the WR-07 set
+          # below read the `scope:` line alone, so a reason that quotes a
+          # migration `.sql` path cannot move either.
+          set +e
+          reason_count=$(grep -a -c -E '^scope-reason: ' "$RUNNER_LOG")
+          rc=$?
+          set -e
+          [ "$rc" -le 1 ] || { echo "::error::MEASURE_FAIL: grep exited $rc counting 'scope-reason:' lines in $RUNNER_LOG — the log could not be read, which is not the same as a log with no scope-reason line."; exit 1; }
+          case "$reason_count" in ''|*[!0-9]*)
+            echo "::error::MEASURE_FAIL: could not count the 'scope-reason:' lines in $RUNNER_LOG (got '$reason_count')."; exit 1;; esac
+          if [ "$reason_count" -eq 0 ]; then
+            echo "::error::MEASURE_FAIL: the run printed NO 'scope-reason:' line — D-12 requires every run to say why it took its scope."
+            exit 1
+          fi
+          if [ "$reason_count" -ne 1 ]; then
+            echo "::error::MEASURE_FAIL: the run printed $reason_count 'scope-reason:' lines. One run of the gate prints exactly one; more than one means this log was not produced by one run."
+            exit 1
+          fi
+          reason_line=$(grep -a -m1 -E '^scope-reason: ' "$RUNNER_LOG" || true)
+          reason_text=$(printf '%s' "${reason_line#scope-reason: }" | tr -d '[:space:]')
+          if [ -z "$reason_text" ]; then
+            echo "::error::MEASURE_FAIL: the run's 'scope-reason:' line carries an EMPTY reason. D-12 requires every run to say why it took its scope; a blank reason says nothing."
+            exit 1
+          fi
+          echo "$reason_line"
+
+          floors=$(node -e 'import("./scripts/mutation-floors.mjs").then(m => console.log(m.FILES_FLOOR, m.ARMS_FLOOR, m.WAIVED_CEILING))')
           files_floor=$(echo "$floors" | cut -d" " -f1)
           arms_floor=$(echo "$floors" | cut -d" " -f2)
           waived_ceiling=$(echo "$floors" | cut -d" " -f3)
           case "$files_floor" in ''|*[!0-9]*)
-            echo "::error::MEASURE_FAIL: could not read FILES_FLOOR from scripts/mutation-runner/run.mjs (got '$files_floor')."; exit 1;; esac
+            echo "::error::MEASURE_FAIL: could not read FILES_FLOOR from scripts/mutation-floors.mjs (got '$files_floor')."; exit 1;; esac
           case "$arms_floor" in ''|*[!0-9]*)
-            echo "::error::MEASURE_FAIL: could not read ARMS_FLOOR from scripts/mutation-runner/run.mjs (got '$arms_floor')."; exit 1;; esac
+            echo "::error::MEASURE_FAIL: could not read ARMS_FLOOR from scripts/mutation-floors.mjs (got '$arms_floor')."; exit 1;; esac
           case "$waived_ceiling" in ''|*[!0-9]*)
-            echo "::error::MEASURE_FAIL: could not read WAIVED_CEILING from scripts/mutation-runner/run.mjs (got '$waived_ceiling')."; exit 1;; esac
-          echo "floors from run.mjs: FILES_FLOOR=$files_floor ARMS_FLOOR=$arms_floor WAIVED_CEILING=$waived_ceiling"
+            echo "::error::MEASURE_FAIL: could not read WAIVED_CEILING from scripts/mutation-floors.mjs (got '$waived_ceiling')."; exit 1;; esac
+          echo "floors from mutation-floors.mjs: FILES_FLOOR=$files_floor ARMS_FLOOR=$arms_floor WAIVED_CEILING=$waived_ceiling"
 
           coverage_line=$(grep -a -m1 -E '^coverage: files [0-9]+/[0-9]+$' "$RUNNER_LOG" || true)
           if [ -z "$coverage_line" ]; then
@@ -2947,7 +3119,7 @@ jobs:
           case "$arms_waived" in ''|*[!0-9]*)
             echo "::error::MEASURE_FAIL: could not read the waived count out of '$arms_line'."; exit 1;; esac
           if [ "$arms_waived" -gt "$waived_ceiling" ]; then
-            echo "::error::WAIVED_CEILING exceeded: $arms_waived waived arm(s) > ceiling $waived_ceiling. A waiver is an arm this gate will never prove can fail; adding one is a reviewed edit to WAIVED_CEILING in scripts/mutation-runner/run.mjs, never a side effect of annotating."
+            echo "::error::WAIVED_CEILING exceeded: $arms_waived waived arm(s) > ceiling $waived_ceiling. A waiver is an arm this gate will never prove can fail; adding one is a reviewed edit to WAIVED_CEILING in scripts/mutation-floors.mjs, never a side effect of annotating."
             exit 1
           fi
           # IN-05: ARMS_FLOOR bounds BITING arms — executed minus those that did
@@ -3158,15 +3330,15 @@ jobs:
             case "$static_bound" in ''|*[!0-9]*)
               echo "::error::MEASURE_FAIL: could not read the static bound out of '$bound_line'."; exit 1;; esac
             if [ "$static_bound" -lt "$arms_floor" ]; then
-              echo "::error::ARMS_FLOOR regression (static upper bound): $static_bound annotated-unwaived arm(s) < floor $arms_floor. The full-corpus run on the push to main cannot reach the floor: an annotation was deleted or converted to a waiver without lowering the floor in scripts/mutation-runner/run.mjs."
+              echo "::error::ARMS_FLOOR regression (static upper bound): $static_bound annotated-unwaived arm(s) < floor $arms_floor. A full-corpus run cannot reach the floor: an annotation was deleted or converted to a waiver without lowering the floor in scripts/mutation-floors.mjs."
               exit 1
             fi
-            echo "SUBSET run on a pull_request: FILES_FLOOR and the waiver ceiling hold and the runner's two tallies agree over the $subset_claimed of $subset_total annotated file(s) this pull request changed: files $files_annotated >= $files_floor, biting arms $biting (of $arms_executed executed, $lane_invocations arm lane(s) spawned), waived $arms_waived <= $waived_ceiling. ARMS_FLOOR ($arms_floor) was NOT compared against the subset's biting count — it is compared by the full-corpus run on the push to main — but its static upper bound holds: $static_bound annotated-unwaived >= $arms_floor. This is NOT full-corpus coverage."
+            echo "SUBSET run on a '$event_name' event (${ref_name:-unset ref}): FILES_FLOOR and the waiver ceiling hold and the runner's two tallies agree over the $subset_claimed of $subset_total annotated file(s) this $event_name selected: files $files_annotated >= $files_floor, biting arms $biting (of $arms_executed executed, $lane_invocations arm lane(s) spawned), waived $arms_waived <= $waived_ceiling. ARMS_FLOOR ($arms_floor) was NOT compared against the subset's biting count — it is compared by the nightly full-corpus run and by every FULL run — but its static upper bound holds: $static_bound annotated-unwaived >= $arms_floor. This is NOT full-corpus coverage."
             exit 0
           fi
 
           if [ "$biting" -lt "$arms_floor" ]; then
-            echo "::error::ARMS_FLOOR regression: $biting biting arm(s) < floor $arms_floor. An annotation stopped biting, was deleted, or was converted to a waiver without lowering the floor in scripts/mutation-runner/run.mjs."
+            echo "::error::ARMS_FLOOR regression: $biting biting arm(s) < floor $arms_floor. An annotation stopped biting, was deleted, or was converted to a waiver without lowering the floor in scripts/mutation-floors.mjs."
             exit 1
           fi
 
@@ -3214,7 +3386,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
           node-version: 22
           cache: npm
@@ -3902,7 +4074,7 @@ jobs:
           # step here runs `git`, and neither `run.sh` (with the currency gate and the
           # reference-data extractor it calls) nor the capability probe spawns one.
           # The default shallow clone is enough; full history was dropped.
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
           node-version: 22
           # ⚠️ NO `cache: npm`, and NO node_modules restore / `npm ci`, unlike the
@@ -3921,7 +4093,7 @@ jobs:
         # and FAILS LOUD when it cannot. Needs node built-ins only — no
         # node_modules, no git history.
         run: bash scripts/local-stack/run.sh --check-currency
-      - uses: supabase/setup-cli@3c2f5e2ae34c34e428e8e206e2c4d21fa2d20fbf  # v2.1.1
+      - uses: supabase/setup-cli@45a513f8c64c0bc8e0e3dfe572b5c95be85f6359  # v3.0.1
         with:
           # The SAME pin `frontend-local-stack` uses — the repo keeps ONE answer to
           # "which CLI". The skew note on that job's setup-cli step applies here
@@ -4933,7 +5105,7 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0   # the gate diffs against the base branch
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
           node-version: 22
       # The red path first: a gate whose failure modes have never been observed
@@ -5165,7 +5337,7 @@ jobs:
       # reads it), so every lane `run:` step carries a workspace-rooted
       # `working-directory:`; a bare relative `scripts/…` path from
       # analytics-service exits 127. `uses:` steps take none.
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
           node-version: 22
           # ⚠️ NO `cache: npm`, and NO node_modules restore / `npm ci`, the same
@@ -5180,7 +5352,7 @@ jobs:
         # container starts, and it FAILS LOUD when the set cannot be determined.
         working-directory: ${{ github.workspace }}
         run: bash scripts/local-stack/run.sh --check-currency
-      - uses: supabase/setup-cli@3c2f5e2ae34c34e428e8e206e2c4d21fa2d20fbf  # v2.1.1
+      - uses: supabase/setup-cli@45a513f8c64c0bc8e0e3dfe572b5c95be85f6359  # v3.0.1
         with:
           # The SAME pin `frontend-local-stack` uses — the repo keeps ONE answer to
           # "which CLI". The skew note on that job's setup-cli step applies here
@@ -5648,7 +5820,7 @@ jobs:
       # Measured 2026-08-28: the ledger re-stamps `version` at apply time, so a
       # version-join reported 12 of 12 recent migrations missing when all 12
       # were present. That check would itself have been a vacuous control.
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
           node-version: 22
       - name: VAC-08 - repo-vs-TEST ledger and function body drift
@@ -5715,7 +5887,7 @@ jobs:
           # this job pushes back to the repo; the cred is pure attack
           # surface for any third-party action that lands later.
           persist-credentials: false
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
           node-version: 22
           cache: npm
@@ -6122,7 +6294,7 @@ jobs:
           # GITHUB_TOKEN cred from .git/config (same rationale as the e2e
           # smoke job above).
           persist-credentials: false
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
           node-version: 22
           cache: npm
@@ -6195,7 +6367,7 @@ jobs:
         # run: the replay set gets its own `baseline-replay:` line before any
         # container starts, and it FAILS LOUD when the set cannot be determined.
         run: bash scripts/local-stack/run.sh --check-currency
-      - uses: supabase/setup-cli@3c2f5e2ae34c34e428e8e206e2c4d21fa2d20fbf  # v2.1.1
+      - uses: supabase/setup-cli@45a513f8c64c0bc8e0e3dfe572b5c95be85f6359  # v3.0.1
         with:
           # The SAME pin `frontend-local-stack` uses — the repo keeps ONE answer to
           # "which CLI". The skew note on that job's setup-cli step applies here
@@ -6729,7 +6901,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
           node-version: 22
           cache: npm

@@ -5,17 +5,17 @@ milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 164.5.2.1
 current_phase_name: BRIDGERESIDUE
 status: executing
-stopped_at: "Completed 164.5.2.1-05-PLAN.md (floors 58/574 off one full lane run on the tree merged with origin/main, census pins moved, both 164.6.7 residues closed on evidence with D-18 accepted, release commit v0.120.0.0, not pushed)"
-last_updated: "2026-10-03T07:55:00.000Z"
+stopped_at: "Phase 164.9.4 landed (PR #880, v0.119.0.0); 164.5.2.1 executing (plan 3 of 5); close-out of 160, 164.3, 168"
+last_updated: "2026-10-03T07:54:23.348Z"
 last_activity: 2026-10-03
-last_activity_desc: Phase 164.5.2.1 plan 05 complete (all 5 plans done; ready for the pre-merge reviewers and ship)
-state_head: f9fb8b252dfc58c7b57713ea75af40feff6d9a0e
+last_activity_desc: 169.1 and 169.1.1 closed (ROADMAP rows, phase complete); 164.9.4 live push-gate item resolved
+state_head: 98f04db16a7a8718596bc871fdbc4ab60e828bc2
 progress:
-  total_phases: 85
-  completed_phases: 49
+  total_phases: 93
+  completed_phases: 51
   total_plans: 465
   completed_plans: 460
-  percent: 58
+  percent: 55
 ---
 
 ## ⭐ STATE lineage
@@ -179,7 +179,7 @@ both checkboxes updated to match. Not yet marked `completed_phases` in the front
 no VERIFICATION.md exists for this phase yet, and this repo's own rule is that phase completion
 is decided by verification status, never by plan counts.**
 
-Phase: 164.5.2.1 (BRIDGERESIDUE) — EXECUTED (plans 01-05 complete 2026-10-03, migration 20261003120000_sync_status_bridge_residues.sql; release commit v0.120.0.0 on the branch, not pushed; next: verification, the three pre-merge reviewers, ship)
+Phase: 164.5.2.1 (BRIDGERESIDUE) — EXECUTING (plan 3 of 5, on feat/164.5.2.1-bridgeresidue)
 Phase: 164.9.4 (CIOFFMUTEX) — COMPLETE 2026-10-03 (verification passed on the ship run 37072653692; PR #880 merged, v0.119.0.0)
 Phase: 160 / 164.3 / 168 — close-out 2026-10-03 (SECURITY.md for 160 and 164.3; verification frontmatter to convention; 164.3 plan 07 stays deferred)
 Phase: 164.9.3.2.1 (ENQ40001) — COMPLETE 2026-10-02 (verification passed; PR #929 merged, v0.118.1.5; no migration)
@@ -520,7 +520,7 @@ Status: Executing Phase 164.5.2.1
       closed by PR #743 `3ed6919e`) and 164.4.1 annotated all five remaining files —
       `lane-blocked: 0`, `pending: 0` at `files 44/71`. Read `FILES_FLOOR` / `ARMS_FLOOR` off
       `scripts/mutation-runner/run.mjs`, never off a number restated here.
-Last activity: 2026-10-03 — Phase 164.5.2.1 plan 05 complete (FILES_FLOOR 58 / ARMS_FLOOR 574, separated both ways; both 164.6.7 residues and runbook item 7 closed once applied; D-18 accepted; [164.5.2.1-COMPUTED-AT-RUNNER-STAMP] booked; v0.120.0.0 release commit)
+Last activity: 2026-10-02 — Phase 164.9.3.2.1 execution started
       ⚠️ RETAINED — this was the `Last activity:` line until 2026-09-06:
       *"2026-09-04 — Phase 164.4.1 execution started"*
       all twinned and proven on real pg-lanes with **ZERO waivers** (cumulative 0 across all eight
@@ -1209,42 +1209,6 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ## Accumulated Context
 
-### Phase 164.5.2.1 decisions (plan 05)
-
-- Floors read off one full lane run on the tree merged with origin/main: FILES_FLOOR 56 -> 58, ARMS_FLOOR 556 -> 574, WAIVED_CEILING 0; too-high (59/575) exit 1, stale-low RATCHET STALE.
-- TODOS: both 164.6.7 residue entries closed (live once applied to PROD); D-18 PRE corner ACCEPTED 2026-09-27, narrowed 2026-10-03; [164.5.2.1-COMPUTED-AT-RUNNER-STAMP] booked (user-facing, owner a follow-up phase); [DERIBIT-ASSIGNMENT-UNCLASSIFIED] closed with caveat.
-- VERSION 0.120.0.0 per the orchestrator, re-picked from origin/main before the push.
-- Local lint/typecheck and 4 vitest files are red from the environment (shared node_modules has typescript 7.0.2 vs locked 6.0.3; Node v25 vs pinned 22); CI is the instrument.
-
-### Phase 164.5.2.1 decisions (plan 04)
-
-- D-09: curated gate's 16 twin steps edit 20261003120000; R1 redesigned for the hold CASEs (keeps the marker in branch (a)'s ELSE arms, re-baselines (xiii) 4 -> 2); D1 re-baselines (P2d) 1 -> 0.
-- D-13: prod-body-ack 67a36c4e... is the `live` column of --diff-bodies against origin/main 2614c4b67; earned only if VAC-04 reports the same PROD hash. VAC-08 and baseline-content-drift red by construction, not allowlisted.
-- D-12: the kind-scope drift test resolves the newest line-start CREATE by scan and cross-checks the snapshot's source line; >= 2 body kind lists must agree.
-- Founder decision 2026-10-03 ("Keep the hold, book the fix"): computed_at lag after a real recompute accepted for this phase; the runner-side stamp is booked by plan 05 / the orchestrator.
-- Plan 05 owns the census pins now red: files 83 -> 85, twins 556 -> 574, needles 615 -> 668, lint `scanned 83` -> 85, FILES_FLOOR/ARMS_FLOOR ratchets.
-
-### Phase 164.5.2.1 decisions (plan 03)
-
-- D-06 shipped: the bridge takes the two-integer mark_compute_job_bridge lock on the strategy as its first statement after the NULL guard; proven by the LANE-ONLY gate test_sync_status_bridge_lock.sql (B1, B1-DIRECT, B2), registered in LANE_ONLY_SITES; the 164.5.2 gate's setup stays pinned (L1..L4 still bite).
-- FOUNDER DECISION 2026-10-03 ("Hold the date for both"): a row branch (a) KEEPS (complete_with_warnings, or plain complete under the refresh keep) holds computed_at, computation_error and both markers; a transition holds nothing (guard K3). Changes PROD behaviour for the warned cohort, deliberately.
-- Measured side effect: D-18's PRE corner is closed on a complete_with_warnings row (plan 05's closeout should cite it).
-- Residue gate sentinel N = 16; ci.yml ARMS_FLOOR 256, SENTINEL_FLOOR stays 14; plan 04 must re-point the curated R1/D1 twins against branch (a)'s new hold CASEs (carried P2d count is now 1).
-
-### Phase 164.5.2.1 decisions (plan 02)
-
-- D-05 shipped: read 1 folds an unmarked non-terminal count (same statement); v_refresh_keep = healthy AND unmarked = 0 AND failed = 0 (both COALESCE 1); keep arms in branch (a)'s status and stamp CASEs.
-- Residue gate sentinel N = 13 (W1..W7, R1..R6); ci.yml sql-tests SENTINEL_FLOOR 14, ARMS_FLOOR 253, drift pin moved in the same commit.
-- R6 (assumption A2) measured: green on plan 01's body and on the fix, RED under its twin.
-- PRE-MERGE: a kept row still gets computed_at = now() from branch (a) (inherited from the warned keep arm); recorded as [164.5.2.1-02-KEPT-ROW-COMPUTED-AT] in the phase's deferred-items.md for an orchestrator/founder decision.
-
-### Phase 164.5.2.1 decisions (plan 01)
-
-- Migration timestamp is 20261003120000, not the planned 20260927140000: origin/main now carries 20261001120000. Plans 02-05 must use 20261003120000_sync_status_bridge_residues.sql.
-- D-04b shipped: one unordered array_agg(id) FILTER (WHERE NOT is_protected) pick feeds a membership predicate in four sites (branch (b) warned; branch (a) status, warned, stamp).
-- W7 successor is seeded failed_retry, not pending: the in-flight partial unique index forbids a same-kind pending row beside a running X.
-- D-18 PRE corner: default (a) accepted 2026-09-27, recorded in the migration header; surfaced for the founder.
-
 ### Phase 170 decisions (plan 02)
 
 - Contract-first geometry spec stays RED at HEAD; assertions are not weakened to pass today.
@@ -1465,6 +1429,14 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 167.1.1 edited: routed in: D-13 /compare per-holding metrics need a flow-neutral per-holding source (from 167.1.2 PR C2, 2026-09-29)
 - Phase 167.1.2.1 edited: routed in: 8 C2 writer-side residuals from review rounds 1-3 (SFH-05 writer half, single failing key dilution, SFH-R3-02, SFH-R3-07, SFH-08, SFH-09, R2-CR-02 residual, R3-WR-02) (from 167.1.2 PR C2, 2026-09-29)
 - Phase 164.9.3.2.1 inserted after Phase 164.9.3.2: ENQ40001: enqueue race-loss 40001 raise, booked by ENQ-SCOPE=enq-sibling
+- Phase 164.9.6 inserted after Phase 164.9: SUBSETMAIN (founder 2026-10-03) (URGENT)
+- Phase 164.9.7 inserted after Phase 164.9: TRUNCATEREVOKE (founder 2026-10-03) (URGENT)
+- Phase 170.3 inserted after Phase 170: OGPUBLIC (founder 2026-10-03) (URGENT)
+- Phase 170.4 inserted after Phase 170: ALLOCHOLDINGS (founder 2026-10-03) (URGENT)
+- Phase 170.5 inserted after Phase 170: FACTSHEETV2PANELS (founder 2026-10-03) (URGENT)
+- Phase 170.6 inserted after Phase 170: DISPLAYPOLISH (founder 2026-10-03) (URGENT)
+- Phase 166.5 inserted after Phase 166: COMPUTEDATSTAMP (founder 2026-10-03) (URGENT)
+- Phase 170.7 inserted after Phase 170: MYSTRATTABLE (founder 2026-10-02) (URGENT)
 
 ### Decisions
 
@@ -2531,26 +2503,6 @@ Load-bearing sequencing (real dependencies, do not reorder):
      sits ABOVE the heading. Diagnosed 2026-08-09. -->
 
 ## Session
-
-**Last Date:** 2026-10-03T07:55:00.000Z
-**Stopped At:** Completed 164.5.2.1-05-PLAN.md
-**Resume File:** None
-
-**Last Date:** 2026-10-03T06:45:00.000Z
-**Stopped At:** Completed 164.5.2.1-04-PLAN.md
-**Resume File:** .planning/phases/164.5.2.1-bridgeresidue-the-two-164-6-7-bridge-residues-in-sync-strate/164.5.2.1-05-PLAN.md
-
-**Last Date:** 2026-10-03T06:20:00.000Z
-**Stopped At:** Completed 164.5.2.1-03-PLAN.md
-**Resume File:** .planning/phases/164.5.2.1-bridgeresidue-the-two-164-6-7-bridge-residues-in-sync-strate/164.5.2.1-04-PLAN.md
-
-**Last Date:** 2026-10-02T22:45:00.000Z
-**Stopped At:** Completed 164.5.2.1-02-PLAN.md
-**Resume File:** .planning/phases/164.5.2.1-bridgeresidue-the-two-164-6-7-bridge-residues-in-sync-strate/164.5.2.1-03-PLAN.md
-
-**Last Date:** 2026-10-02T22:17:50.000Z
-**Stopped At:** Completed 164.5.2.1-01-PLAN.md
-**Resume File:** .planning/phases/164.5.2.1-bridgeresidue-the-two-164-6-7-bridge-residues-in-sync-strate/164.5.2.1-02-PLAN.md
 
 **Last Date:** 2026-10-02T09:02:56.666Z
 **Stopped At:** Phase 164.4.2 complete; next 164.9.3.2.1
