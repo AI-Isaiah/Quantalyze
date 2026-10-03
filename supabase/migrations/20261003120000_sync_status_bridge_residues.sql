@@ -190,7 +190,8 @@
 -- and edited only at the sites named in THE DELTA, RETRY-PLAIN-COMPLETE, A KEPT
 -- ROW HOLDS ITS DATE and LOCK ORDER above, plus the D-07 comment correction (re-grepped across every file in
 -- supabase/migrations/ at execution: no later CREATE and no ALTER FUNCTION of
--- the bridge exists). The REVOKE is re-issued verbatim. COMMENT ON FUNCTION is
+-- the bridge exists). The REVOKE is re-issued verbatim, and an explicit
+-- service_role EXECUTE GRANT now follows it (see the ACL note). COMMENT ON FUNCTION is
 -- NOT re-issued (D-03): CREATE OR REPLACE keeps the 20260826120000 comment, and
 -- the carried A1 anchor proves it survived. The whole 20260906120000 DO $verify$
 -- block is carried byte-for-byte except its closing NOTICE; this file's own
@@ -1029,13 +1030,22 @@ BEGIN
 END;
 $$;
 
--- ACL. Carried forward VERBATIM from 20260826120000:909 -- a bare REVOKE with
--- no matching GRANT, because this function is SECURITY DEFINER and owned and
--- its only callers are service-role RPCs (mark_compute_job_failed,
--- mark_compute_job_done) that reach it by in-RPC PERFORM. There is no GRANT to
--- preserve here; the symmetric REVOKE+GRANT pair in that file belongs to
--- computation_error_copy, which this migration does not touch.
+-- ACL. The REVOKE is carried forward VERBATIM from 20260826120000:909. This
+-- function is SECURITY DEFINER and owned, and it has THREE callers: the two
+-- service-role mark RPCs (mark_compute_job_failed, mark_compute_job_done), which
+-- reach it by in-RPC PERFORM under their own definer rights, and the Python
+-- DEFERRED path (analytics-service/services/analytics_status.py), which calls it
+-- DIRECTLY over PostgREST as `service_role`. That third caller needs EXECUTE for
+-- service_role itself, so the GRANT below is load-bearing.
+-- ⚠️ ADDED 2026-10-03 (Phase 164.5.2.1 review, RLS-LOW-01). Before this file
+-- that grant was never declared by any migration: PROD and TEST hold it only
+-- through Supabase's bootstrap default privileges (the PROD baseline dump reads
+-- `GRANT ALL ... TO "service_role"`), and a bare cluster without those defaults
+-- (the pg-lane, measured: proacl {postgres=X/postgres}) has none. On PROD and
+-- TEST the GRANT is a no-op, since EXECUTE is the only privilege a function
+-- carries. The verify block asserts it held.
 REVOKE ALL ON FUNCTION sync_strategy_analytics_status FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.sync_strategy_analytics_status(uuid) TO service_role;
 
 -- --------------------------------------------------------------------------
 -- self-verify: the 20260906120000 block carried verbatim, then this file's own
@@ -1728,6 +1738,13 @@ BEGIN
   -- namespace in this schema (the same check 20260926120000 makes).
   IF hashtext('mark_compute_job_bridge') = hashtext('admin_role_mutate') THEN
     RAISE EXCEPTION 'bridge-residue: hashtext(mark_compute_job_bridge) equals hashtext(admin_role_mutate) on this server, so a bridge call and an admin role mutation on colliding ids would serialize against each other.';
+  END IF;
+
+  -- (xiv) RLS-LOW-01: the Python DEFERRED path calls this function DIRECTLY
+  -- over PostgREST as service_role, so service_role must hold EXECUTE. The
+  -- carried ACL arms above prove only that anon and authenticated do NOT.
+  IF NOT has_function_privilege('service_role', 'public.sync_strategy_analytics_status(uuid)', 'EXECUTE') THEN
+    RAISE EXCEPTION 'bridge-residue: service_role cannot EXECUTE sync_strategy_analytics_status(uuid). The Python DEFERRED path (analytics-service/services/analytics_status.py) calls it directly over PostgREST as service_role; without the grant that call answers 42501, the caller logs a warning, and strategy_analytics keeps its pre-DEFER status.';
   END IF;
 
   RAISE NOTICE 'Migration 20261003120000: sync_strategy_analytics_status re-based on 20260906120000 (BRIDGERESIDUE, Phase 164.5.2.1); every carried 20260906120000 anchor passed on the new body, and this file''s own comment-stripped anchors passed after them.';
