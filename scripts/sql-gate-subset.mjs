@@ -231,7 +231,8 @@ export function migrationLoaders(root) {
  * migration changed); `changedFiles` is unused there. See `judgePush`.
  *
  * @param {{event: string|undefined, changedFiles?: string[], presentFiles: Set<string>|string[], ref?: string,
- *   pushRange?: {ok: boolean, sha?: string, files?: string[], reason?: string}, commits?: string[][]|Error|null}} input
+ *   pushRange?: {ok: boolean, sha?: string, files?: string[], reason?: string}, commits?: string[][]|Error|null,
+ *   ciChangedSections?: string[], ciCompareError?: string, loaders?: Map<string, string[]>, loaderError?: string}} input
  * @returns {{mode: "full"|"subset"|"none", files: string[], reason: string}}
  */
 export function judge({ event, changedFiles, presentFiles, ref, pushRange, commits, ciChangedSections, ciCompareError, loaders, loaderError }) {
