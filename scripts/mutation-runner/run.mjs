@@ -1587,18 +1587,58 @@ export function laneSpawnFailure(proc) {
  * already classifies. `runLane` passes the same value the synchronous spawn
  * used, so the bound is unchanged.
  *
+ * ⛔ SFH-03 (164.9.6.1 review, 2026-10-03) — THE OVERFLOW KILL REACHES THE
+ * WHOLE LANE, AND THE PROMISE SETTLES ON `exit`. The first version sent
+ * SIGKILL to `bash` alone and settled only on `close`. `close` waits for every
+ * holder of the pipes, and the foreground `psql` (a grandchild) inherited them
+ * while the drain kept it from ever blocking, so a lane whose output never
+ * ended NEVER SETTLED: the worker stopped claiming files, `Promise.allSettled`
+ * waited forever and the job died at its 20-minute cancel with no lane named.
+ * SIGKILL also skipped `run.sh`'s EXIT trap, orphaning the cluster on the
+ * worker's fixed port (SFH-01). Now, on overflow:
+ *   1. the lane runs in its OWN process group (`detached: true`), and the
+ *      GROUP gets SIGTERM — `psql` dies, so bash's deferred `trap 'exit 143'
+ *      TERM` fires and the EXIT trap stops the cluster, as `spawnSync`'s
+ *      default `killSignal` let it;
+ *   2. the pipes keep being DRAINED (and discarded) until bash exits, because
+ *      the trap's own WARNING lines go to stderr and a closed read end would
+ *      SIGPIPE bash in the middle of its teardown;
+ *   3. a group that ignores SIGTERM gets SIGKILL after `graceMs`;
+ *   4. the promise settles on bash's `exit` and then destroys both pipes, so a
+ *      straggler still holding them takes SIGPIPE instead of holding the run.
+ * The normal path still settles on `close`, so no trailing output is lost.
+ * The result shape — `error.code === "ENOBUFS"`, `status`/`signal` null — is
+ * unchanged, so `laneSpawnFailure` and `runLane`'s `invoked` rule classify it
+ * exactly as before.
+ *
+ * ⚠️ `detached` also takes the lane out of the runner's terminal process
+ * group, so a Ctrl-C or a job cancel aimed at the runner would no longer reach
+ * it. `liveLaneGroups` + `forwardSignalsToLaneGroups` hand the signal on.
+ *
+ * Exported for the SFH-03 self-test and vitest rows only; `runLane` is its one
+ * production caller.
+ *
  * @returns {Promise<{status:number|null, signal:string|null, error:object|undefined, stdout:string, stderr:string}>}
  */
-function spawnAsync(cmd, args, { env, maxBuffer }) {
+export function spawnAsync(cmd, args, { env, maxBuffer, graceMs = 5000 }) {
+  forwardSignalsToLaneGroups();
   return new Promise((resolve) => {
     const out = [];
     const err = [];
     let bytes = 0;
     let error;
+    let overflowed = false;
+    let escalation = null;
     let settled = false;
     const settle = (status, signal) => {
       if (settled) return;
       settled = true;
+      if (escalation) clearTimeout(escalation);
+      liveLaneGroups.delete(child.pid);
+      if (overflowed) {
+        child.stdout.destroy();
+        child.stderr.destroy();
+      }
       resolve({
         status: error ? null : status,
         signal: error ? null : signal,
@@ -1607,13 +1647,17 @@ function spawnAsync(cmd, args, { env, maxBuffer }) {
         stderr: Buffer.concat(err).toString("utf8"),
       });
     };
-    const child = spawn(cmd, args, { env, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(cmd, args, { env, stdio: ["ignore", "pipe", "pipe"], detached: true });
+    if (child.pid !== undefined) liveLaneGroups.add(child.pid);
     const collect = (sink) => (chunk) => {
       if (error) return;
       bytes += chunk.length;
       if (bytes > maxBuffer) {
         error = { code: "ENOBUFS", message: `lane output exceeded ${maxBuffer} bytes` };
-        child.kill("SIGKILL");
+        overflowed = true;
+        killLaneGroup(child.pid, "SIGTERM");
+        escalation = setTimeout(() => killLaneGroup(child.pid, "SIGKILL"), graceMs);
+        escalation.unref();
         return;
       }
       sink.push(chunk);
@@ -1625,8 +1669,46 @@ function spawnAsync(cmd, args, { env, maxBuffer }) {
       // Never started: no `close` is owed by a process that never existed.
       if (child.pid === undefined) settle(null, null);
     });
+    // Only an overflowed lane settles on `exit`: its pipes may still be held
+    // by a straggler. Every other lane waits for `close`, so its output is whole.
+    child.on("exit", (status, signal) => {
+      if (overflowed) settle(status, signal);
+    });
     child.on("close", (status, signal) => settle(status, signal));
   });
+}
+
+/** Process-group ids of lanes `spawnAsync` started and has not yet settled. */
+const liveLaneGroups = new Set();
+
+/** Signal a lane's whole process group; a group that is already gone (ESRCH) is not an error. */
+function killLaneGroup(pid, signal) {
+  if (pid === undefined) return;
+  try {
+    process.kill(-pid, signal);
+  } catch (e) {
+    if (e.code !== "ESRCH") throw e;
+  }
+}
+
+/**
+ * SFH-03's `detached: true` puts every lane in its own process group, so the
+ * SIGINT a terminal sends on Ctrl-C (or the SIGTERM a job cancel sends to the
+ * runner) no longer reaches `run.sh`, whose INT/TERM traps are what stop its
+ * cluster. Installed once, on the first spawn: each listener hands the signal
+ * to every live lane group, then re-raises it on this process with the
+ * listener gone, so the runner still dies of it as before.
+ */
+let laneSignalForwarding = false;
+function forwardSignalsToLaneGroups() {
+  if (laneSignalForwarding) return;
+  laneSignalForwarding = true;
+  for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"]) {
+    process.once(sig, () => {
+      for (const pid of liveLaneGroups) killLaneGroup(pid, sig);
+      process.kill(process.pid, sig);
+    });
+  }
 }
 
 /**
@@ -4411,6 +4493,59 @@ async function selfTest() {
       concMaxInFlight > 1,
       `the concurrency-4 run of row 1/2 had more than one real lane in flight (max in flight ${concMaxInFlight})`,
     ) && pass;
+
+  // ── 164.9.6.1 SFH-03 — a lane whose output never ends must SETTLE ─────────
+  // Its own family, so no `N/17` or `(concurrency) N/2` header is renumbered.
+  // The stub has run.sh's shape: bash with TERM/EXIT traps and a FOREGROUND
+  // child that holds the pipes and floods them without end — `; :` keeps bash
+  // from exec-ing into it, so the flooder is a grandchild, as `psql` is. The
+  // pre-fix `spawnAsync` never settled on this; the watchdog turns that hang
+  // into a named failure instead of a self-test that never returns, and the
+  // flooder is killed by its unique token whatever the outcome.
+  const floodRow = async (script, graceMs) => {
+    const token = `mutation-runner-flood-${process.pid}-${Date.now()}`;
+    const dir = mkdtempSync(join(tmpdir(), "mutation-runner-flood-"));
+    const marker = join(dir, "trap-ran");
+    const started = Date.now();
+    let watchdog;
+    try {
+      const proc = await Promise.race([
+        spawnAsync("bash", ["-c", script, "_", marker, token], { env: process.env, maxBuffer: 1 << 20, graceMs }),
+        new Promise((res) => {
+          watchdog = setTimeout(() => res(null), 15_000);
+        }),
+      ]);
+      return { proc, ms: Date.now() - started, trapRan: existsSync(marker) };
+    } finally {
+      clearTimeout(watchdog);
+      spawnSync("pkill", ["-f", token]);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+  console.log(
+    "=== SELF-TEST (lane lifecycle) 1/2: an endlessly flooding lane settles as ENOBUFS within 15s, and its EXIT trap ran (SIGTERM reached the group) ===",
+  );
+  const flood = await floodRow(`trap 'echo t > "$1"' EXIT; trap 'exit 143' TERM; yes "$2"; :`, 5000);
+  pass =
+    expect(flood.proc !== null, `the flooding lane settled (after ${flood.ms} ms; null = still running at the 15 s watchdog)`) &&
+    expect(
+      flood.proc !== null && laneSpawnFailure(flood.proc) === "lane could not run: ENOBUFS",
+      `it is classified as "lane could not run: ENOBUFS" (got ${JSON.stringify(flood.proc && laneSpawnFailure(flood.proc))})`,
+    ) &&
+    expect(flood.trapRan, "the lane's EXIT trap ran — the kill was a SIGTERM run.sh can trap, not a SIGKILL") &&
+    pass;
+
+  console.log(
+    "=== SELF-TEST (lane lifecycle) 2/2: a flooding lane whose whole group IGNORES SIGTERM is SIGKILLed after the grace and still settles as ENOBUFS ===",
+  );
+  const deaf = await floodRow(`trap '' TERM; yes "$2"; :`, 500);
+  pass =
+    expect(deaf.proc !== null, `the TERM-deaf lane settled (after ${deaf.ms} ms; null = still running at the 15 s watchdog)`) &&
+    expect(
+      deaf.proc !== null && laneSpawnFailure(deaf.proc) === "lane could not run: ENOBUFS",
+      `it is classified as "lane could not run: ENOBUFS" (got ${JSON.stringify(deaf.proc && laneSpawnFailure(deaf.proc))})`,
+    ) &&
+    pass;
 
   console.log("");
   if (pass) {

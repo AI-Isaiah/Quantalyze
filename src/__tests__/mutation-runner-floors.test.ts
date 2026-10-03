@@ -19,6 +19,7 @@ import { describe, expect, it } from "vitest";
 import { spawnSync } from "node:child_process";
 import {
   chmodSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -40,6 +41,7 @@ import {
   scopeDirForFile,
   scopeReasonLine,
   sectionOfIdentity,
+  spawnAsync,
 } from "../../scripts/mutation-runner/run.mjs";
 import { parseFile, scanCorpus } from "../../scripts/mutation-runner/parse.mjs";
 
@@ -1545,6 +1547,53 @@ describe("164.3.1-10 — the runner's absurdity floor (D-09): two INDEPENDENT ta
     expect(r.bitingArms).toBe(0);
     // (The stub never touches `laneTally`, so the severed-tally absurdity
     // also fires here — that is the stub's shape, not this arm's subject.)
+  });
+
+  // ── SFH-03 — a lane whose output never ends must SETTLE, not hang the pool ──
+  // run.sh's shape: bash with TERM/EXIT traps and a FOREGROUND child holding
+  // the pipes (`; :` stops bash exec-ing into it, so the flooder is a
+  // grandchild, as `psql` is). Before the fix `spawnAsync` SIGKILLed bash alone
+  // and waited for `close`, which the grandchild never allowed: this row hung
+  // until the race below fired. The flooder is killed by its token either way.
+  const floodLane = async (script: string, graceMs: number) => {
+    const token = `vitest-flood-${process.pid}-${Date.now()}`;
+    const dir = mkdtempSync(join(tmpdir(), "vitest-flood-"));
+    const marker = join(dir, "trap-ran");
+    let watchdog: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const proc = await Promise.race([
+        spawnAsync("bash", ["-c", script, "_", marker, token], { env: process.env, maxBuffer: 1 << 20, graceMs }),
+        new Promise<null>((res) => {
+          watchdog = setTimeout(() => res(null), 10_000);
+        }),
+      ]);
+      return { proc, trapRan: existsSync(marker) };
+    } finally {
+      clearTimeout(watchdog);
+      spawnSync("pkill", ["-f", token]);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+
+  it("SFH-03: an endlessly flooding lane settles as ENOBUFS, and the kill was a SIGTERM its EXIT trap could run on", { timeout: 20_000 }, async () => {
+    const r = await floodLane(`trap 'echo t > "$1"' EXIT; trap 'exit 143' TERM; yes "$2"; :`, 5000);
+    expect(r.proc, "still running at the 10 s watchdog: the overflow kill did not end the lane").not.toBeNull();
+    expect(laneSpawnFailure(r.proc!)).toBe("lane could not run: ENOBUFS");
+    // run.sh's EXIT trap is what stops the lane cluster; SIGKILL would skip it
+    // and orphan the postmaster on the worker's fixed port (SFH-01).
+    expect(r.trapRan, "the EXIT trap did not run: the lane was not stopped with a trappable signal").toBe(true);
+  });
+
+  it("SFH-03: a flooding lane whose whole group ignores SIGTERM is SIGKILLed after the grace and still settles as ENOBUFS", { timeout: 20_000 }, async () => {
+    const r = await floodLane(`trap '' TERM; yes "$2"; :`, 500);
+    expect(r.proc, "still running at the 10 s watchdog: no SIGKILL escalation reached the group").not.toBeNull();
+    expect(laneSpawnFailure(r.proc!)).toBe("lane could not run: ENOBUFS");
+  });
+
+  it("SFH-03: a lane that ends normally still settles on `close` with its whole output and its own status", async () => {
+    const r = await spawnAsync("bash", ["-c", "printf out; printf err >&2; exit 3"], { env: process.env, maxBuffer: 1 << 20 });
+    expect(r).toMatchObject({ status: 3, signal: null, error: undefined, stdout: "out", stderr: "err" });
+    expect(laneSpawnFailure(r)).toBeNull();
   });
 
   // ── PRINT CONTRACT — the wiring that prints, not a string constant ──────
