@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 from typing import Any
 
 from services.closed_sets import (
@@ -67,6 +68,7 @@ from services.mt5_handover import HOLDER_VALIDATION, SITE_VALIDATE_WORKER
 # and the alert this site fires when it is absent. Never the job pair.
 from services.mt5_relogin import (
     alert_mt5_validation_gateway_unconfigured,
+    read_env_mt5_credentials,
     read_env_validation_gateway_endpoint,
 )
 # 153.6 / PARITY-01 — the ONE login+read+probe body, shared with the FastAPI
@@ -77,6 +79,8 @@ from services.mt5_relogin import (
 from services.mt5_probe import (
     Mt5GatewayMisconfigured,
     mt5_gateway_misconfigured_detail,
+    park_on_house_account,
+    report_park_skipped,
     run_probe,
 )
 from services.mt5_validation import (
@@ -239,6 +243,12 @@ class Mt5Adapter:
                 asyncio.to_thread(lambda: _build_client(host, port)),
                 timeout=_MT5_PROBE_TIMEOUT_S,
             )
+            # ⭐ Phase 164.6.6 D-07 part 2 — the park gate's three facts (see the
+            # park in the finally below). `probe_thread_done` is set by the probe
+            # THREAD itself, so it measures "in flight" directly.
+            login_attempted = False
+            probe_thread_done = threading.Event()
+            probe_disqualified: str | None = None
             try:
                 # Mt5Client is SYNCHRONOUS blocking RPyC — run the login+read+probe body
                 # off the event loop (asyncio.to_thread). Blocking the loop on a hung
@@ -261,14 +271,22 @@ class Mt5Adapter:
                 def _probe() -> tuple[
                     dict[str, Any], dict[str, Any], dict[str, Any] | None
                 ]:
-                    return run_probe(
-                        client,
-                        login=login,
-                        investor_pw=investor_pw,
-                        server=server,
-                        log_prefix="mt5.validate",
-                    )
+                    try:
+                        return run_probe(
+                            client,
+                            login=login,
+                            investor_pw=investor_pw,
+                            server=server,
+                            log_prefix="mt5.validate",
+                        )
+                    finally:
+                        # Set by THIS thread when `run_probe` exits, however it
+                        # exits.
+                        probe_thread_done.set()
 
+                # `run_probe`'s first step is the login, so from here on the
+                # terminal may hold the user's session.
+                login_attempted = True
                 try:
                     # LAST-RESORT event-loop ceiling (WR-02): to_thread already keeps
                     # the loop free, but with no wait_for a hang OUTSIDE a bounded rpyc
@@ -279,6 +297,8 @@ class Mt5Adapter:
                         asyncio.to_thread(_probe), timeout=_MT5_PROBE_TIMEOUT_S
                     )
                 except Mt5SessionAbandoned:
+                    # D-07 part 2: the lease fence fired on this session. No park.
+                    probe_disqualified = "probe_session_abandoned"
                     # ⭐ WIZFORM-ABANDON / D-40. PROPAGATE untouched — which is
                     # already what would happen without this arm, and that is
                     # exactly why the arm is written down. Propagation IS this
@@ -310,6 +330,8 @@ class Mt5Adapter:
                     # the finally below, so the terminal session never leaks.
                     raise
                 except Mt5AccountMismatchError:
+                    # D-07 part 2: another actor switched the terminal. No park.
+                    probe_disqualified = "probe_account_mismatch"
                     # RED-TEAM: a concurrent actor re-logged the shared terminal onto
                     # another account mid-probe — an INFRA/concurrency fault, never the
                     # user's key. PROPAGATE untouched (transient disposition: never valid,
@@ -447,12 +469,54 @@ class Mt5Adapter:
                 # concurrent caller (`-10004`). ⛔ The bound STAYS regardless — a
                 # blocking socket close is still blocking. Nothing here was edited to
                 # achieve that: the fix landed at the SINK, in `Mt5Client.close()`.
+                # ⭐ Phase 164.6.6 D-07 part 2, as the founder amended it
+                # (`H3-MASTER-PASSWORD-MODE: park-after-login`): a master-password
+                # session must not outlive its probe, so the validation terminal
+                # is logged back into the house account HERE, inside the lease and
+                # before the close; never by a second caller on a pipe the probe
+                # thread may still hold (the W-1 class), and never with less budget
+                # than the park needs to finish. The saved password on disk is
+                # Phase 164.6.6.1's scrub. DEFAULT-DENY, decided ONCE.
+                # The sequential worker has no client budget, so no floor applies
+                # here: the park is bounded by `_MT5_PROBE_TIMEOUT_S`, which already
+                # has the inner-rpyc-bound-fires-first ordering.
                 try:
-                    await asyncio.wait_for(
-                        asyncio.to_thread(client.close), timeout=_MT5_PROBE_TIMEOUT_S
+                    if login_attempted:
+                        park_skip: str | None = None
+                        if not probe_thread_done.is_set():
+                            # `_MT5_PROBE_TIMEOUT_S` fired with the probe thread
+                            # still on the wire.
+                            park_skip = "probe_in_flight"
+                        elif probe_disqualified is not None:
+                            park_skip = probe_disqualified
+                        if park_skip is not None:
+                            report_park_skipped(park_skip, site=SITE_VALIDATE_WORKER)
+                        else:
+                            try:
+                                await asyncio.wait_for(
+                                    asyncio.to_thread(
+                                        park_on_house_account,
+                                        client,
+                                        house=read_env_mt5_credentials(),
+                                        site=SITE_VALIDATE_WORKER,
+                                    ),
+                                    timeout=_MT5_PROBE_TIMEOUT_S,
+                                )
+                            except asyncio.TimeoutError:
+                                report_park_skipped("ceiling", site=SITE_VALIDATE_WORKER)
+                except Exception as park_exc:  # noqa: BLE001 — the park must never replace the verdict
+                    logger.error(
+                        "mt5.validate: the D-07 park failed unexpectedly "
+                        "(error_class=%s)",
+                        type(park_exc).__name__,
                     )
-                except Exception:  # noqa: BLE001 — close must never mask the verdict
-                    pass
+                finally:
+                    try:
+                        await asyncio.wait_for(
+                            asyncio.to_thread(client.close), timeout=_MT5_PROBE_TIMEOUT_S
+                        )
+                    except Exception:  # noqa: BLE001 — close must never mask the verdict
+                        pass
 
     async def fetch_raw(self, creds_or_file: dict[str, Any]) -> list[Trade]:
         # FAIL LOUD — no synchronous flow routes mt5 to a fill-based Trade list.

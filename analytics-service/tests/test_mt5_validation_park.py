@@ -768,3 +768,130 @@ def test_a_raising_sentry_never_escapes_the_park_alert(monkeypatch):
     spy.capture_message.side_effect = RuntimeError("sentry down")
     monkeypatch.setattr(mt5_probe, "sentry_sdk", spy)
     mt5_probe.report_park_skipped("ceiling", site=_WIZARD)  # must not raise
+
+
+# --------------------------------------------------------------------------- #
+# Task 3 — the worker validate (`Mt5Adapter.validate`): the same gate, bounded
+# by the worker's own probe ceiling.
+# --------------------------------------------------------------------------- #
+
+
+def _install_worker_transport(monkeypatch, transport: _RecordingMt5) -> None:
+    """The REAL `Mt5Client` over the recording transport, built by the adapter's
+    own factory seam, with the endpoint env set (private-shaped hosts only)."""
+    from services.mt5_client import Mt5Client
+
+    def _build(host: str, port: int) -> Mt5Client:
+        return Mt5Client(host, port, _connect=lambda **_ignored: transport)
+
+    monkeypatch.setattr("services.ingestion.mt5._build_client", _build)
+    monkeypatch.setenv("MT5_GATEWAY_HOST", "mt5-gw.internal")
+    monkeypatch.setenv("MT5_GATEWAY_PORT", "18812")
+    monkeypatch.setenv("MT5_VALIDATION_GATEWAY_HOST", _VAL_HOST)
+    monkeypatch.setenv("MT5_VALIDATION_GATEWAY_PORT", str(_VAL_PORT))
+
+
+async def _worker_validate() -> Any:
+    from services.ingestion.adapter import KeySubmissionRequest
+    from services.ingestion.mt5 import Mt5Adapter
+
+    return await Mt5Adapter().validate(
+        KeySubmissionRequest(
+            flow_type="onboard",
+            source="mt5",
+            context={
+                "api_key": str(_CLIENT_LOGIN),
+                "api_secret": "investor-pw",
+                "passphrase": "Broker-Demo",
+            },
+        )
+    )
+
+
+async def test_the_worker_validate_parks_on_the_house_account_inside_the_lease(
+    monkeypatch,
+):
+    """The worker's validate ends with the house triple as the terminal's last
+    login, issued while its lease was held and before `close`, and returns the
+    same `ValidationResult` it returns without the park."""
+    transport = _RecordingMt5(_scenario(_MASTER_ACCOUNT))
+    _install_worker_transport(monkeypatch, transport)
+
+    result = await _worker_validate()
+
+    assert result.valid is False and result.error_code == "MT5_MASTER_PASSWORD"
+    logins = transport.logins()
+    assert [e[1] for e in logins] == [_CLIENT_LOGIN, _HOUSE_LOGIN], (
+        f"the terminal's logins were {[e[1] for e in logins]!r}: the master "
+        "session must be followed by the house login (the park)"
+    )
+    last = logins[-1]
+    assert (last[1], last[2], last[3]) == (_HOUSE_LOGIN, _HOUSE_PASSWORD, _HOUSE_SERVER)
+    assert last[4] is True, "the park login ran without this lease held"
+    assert last[5] is False, "the park login ran after the client was closed"
+    assert transport.events[-1] == ("release",)
+    assert mt5_client.mt5_terminal_holder(_VAL_KEY) == mt5_client.HOLDER_HOUSE
+
+    mt5_concurrency.reset_terminal_state_for_tests()
+    monkeypatch.delenv("MT5_LOGIN")
+    unparked = _RecordingMt5(_scenario(_MASTER_ACCOUNT))
+    _install_worker_transport(monkeypatch, unparked)
+    assert await _worker_validate() == result
+    assert unparked.house_logins() == []
+
+
+async def test_the_worker_does_not_park_while_the_probe_is_in_flight(
+    monkeypatch, park_sentry, caplog
+):
+    """`_MT5_PROBE_TIMEOUT_S` fires with the probe thread blocked in the client's
+    login: no park login, before or after release, and `probe_in_flight`."""
+    blocker = threading.Event()
+    transport = _RecordingMt5(_scenario(), block_client_login=blocker)
+    _install_worker_transport(monkeypatch, transport)
+    monkeypatch.setattr("services.ingestion.mt5._MT5_PROBE_TIMEOUT_S", 0.2)
+    try:
+        with caplog.at_level(logging.DEBUG, logger=_ANALYTICS_LOGGER):
+            with pytest.raises(asyncio.TimeoutError):
+                await _worker_validate()
+        assert not blocker.is_set()
+        assert transport.house_logins() == [], (
+            "a park login was sent while the probe thread was still blocked "
+            "(W-1 reproduced)"
+        )
+        _assert_one_alert(park_sentry, caplog, "probe_in_flight", _WORKER)
+        await _assert_no_park_after_the_probe_finishes(transport, blocker)
+    finally:
+        blocker.set()
+
+
+async def test_the_worker_does_not_park_after_a_probe_session_abandoned(
+    monkeypatch, park_sentry, caplog
+):
+    transport = _RecordingMt5(_scenario())
+    _install_worker_transport(monkeypatch, transport)
+
+    def _fenced_probe(client, *, login, investor_pw, server, log_prefix):
+        client.login(login, investor_pw, server)
+        raise Mt5SessionAbandoned("account_info")
+
+    monkeypatch.setattr("services.ingestion.mt5.run_probe", _fenced_probe)
+    with caplog.at_level(logging.DEBUG, logger=_ANALYTICS_LOGGER):
+        with pytest.raises(Mt5SessionAbandoned):
+            await _worker_validate()
+    assert transport.house_logins() == []
+    _assert_one_alert(park_sentry, caplog, "probe_session_abandoned", _WORKER)
+
+
+async def test_the_worker_does_not_park_after_a_probe_account_mismatch(
+    monkeypatch, park_sentry, caplog
+):
+    from services.mt5_client import Mt5AccountMismatchError
+
+    other = _FakeNamedTuple(trade_allowed=False, balance=1.0, login=999999)
+    transport = _RecordingMt5(_scenario(other))
+    _install_worker_transport(monkeypatch, transport)
+    with caplog.at_level(logging.DEBUG, logger=_ANALYTICS_LOGGER):
+        with pytest.raises(Mt5AccountMismatchError):
+            await _worker_validate()
+    assert transport.house_logins() == []
+    _assert_one_alert(park_sentry, caplog, "probe_account_mismatch", _WORKER)
