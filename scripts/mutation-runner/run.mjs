@@ -1572,6 +1572,37 @@ export function laneSpawnFailure(proc) {
 }
 
 /**
+ * PURE. SFH-01 / WR-02 (164.9.6.1 review, 2026-10-03) — `run.sh` refused the
+ * lane because its port was already taken, or null.
+ *
+ * ⛔ Since D-01 each pool worker keeps ONE runner-allocated port for its whole
+ * share of the corpus. A postmaster left on it (a `pg_ctl stop` that failed,
+ * an orphan from a killed lane) or any other listener makes `run.sh`'s
+ * collision guard exit 2 before a single statement runs — an INTEGER status,
+ * so `laneSpawnFailure` returns null and the verdict loop used to read it as
+ * a gate result: a `baseline` defect, an arm `wrong-first-failure`, a
+ * `restore` defect, for every later file on that worker. A corpus defect
+ * named for an instrument failure is the class `laneSpawnFailure` exists to
+ * prevent; a refused lane ran nothing and is a MEASURE_FAIL.
+ *
+ * BOTH signals are required. Exit 2 alone is not enough: `psql` exits 2 when
+ * its connection to the server is lost, which is a real lane outcome. The
+ * text alone is not enough either: it is matched anchored at line start, as
+ * `run.sh`'s own `echo "ERROR: ${port_occupied}."` and its `Refusing.` line
+ * print it, never as a `psql:` diagnostic. Both `port_occupied` spellings
+ * (the bind test and the pg_isready fallback) are recognised.
+ *
+ * @returns {string|null}
+ */
+export function lanePortCollision(proc) {
+  if (proc.status !== 2) return null;
+  const stderr = proc.stderr ?? "";
+  const m = /^ERROR: (?:something is already listening on|a PostgreSQL server on) 127\.0\.0\.1:(\d+)\b/m.exec(stderr);
+  if (!m || !/^This lane would DROP SCHEMA public CASCADE on it\. Refusing\.$/m.test(stderr)) return null;
+  return `lane could not run: port 127.0.0.1:${m[1]} was already taken (run.sh's collision guard refused, exit 2)`;
+}
+
+/**
  * 164.9.6.1 (D-01) — `spawnSync`'s result shape, produced asynchronously, so
  * several lanes can run at once and the UNCHANGED exported `laneSpawnFailure`
  * still classifies the result.
@@ -1782,7 +1813,9 @@ async function runLane({ workdir, applyAbs, postApplyAbs, gateAbs, leg, gateKey 
   // exported, which every concurrent lane would otherwise inherit and collide on.
   const env = port === null ? process.env : { ...process.env, PORT: String(port) };
   const proc = await spawnAsync("bash", args, { env, maxBuffer: 128 * 1024 * 1024 });
-  const measureFail = laneSpawnFailure(proc);
+  // A port-collision refusal (SFH-01) STARTED a process, so it stays `invoked`
+  // below and both tallies count it, exactly as a signalled lane is counted.
+  const measureFail = laneSpawnFailure(proc) ?? lanePortCollision(proc);
   // Counted at the spawn, after it returned: a lane is an invocation only if
   // the process was actually started, never because this function was entered
   // — and a spawn that FAILED (`proc.error`: ENOENT, ENOBUFS) started nothing,
@@ -4544,6 +4577,46 @@ async function selfTest() {
     expect(
       deaf.proc !== null && laneSpawnFailure(deaf.proc) === "lane could not run: ENOBUFS",
       `it is classified as "lane could not run: ENOBUFS" (got ${JSON.stringify(deaf.proc && laneSpawnFailure(deaf.proc))})`,
+    ) &&
+    pass;
+
+  // ── 164.9.6.1 SFH-01 / WR-02 — a taken worker port is an INSTRUMENT fault ──
+  // A REAL `runLane` through `runCorpus`'s real verdict loop: a stub lane
+  // runner would bypass the classification this row exists to prove. The
+  // listener stands in for an orphaned postmaster on the worker's fixed port.
+  // The probe leg keeps its own port so the only refused lane is the gate's.
+  console.log(
+    "=== SELF-TEST (port collision) 1/1: a lane whose port is already taken is `lane-unrunnable` MEASURE_FAIL, never a `baseline` corpus defect ===",
+  );
+  const squatter = createServer();
+  await new Promise((res, rej) => {
+    squatter.once("error", rej);
+    squatter.listen(0, "127.0.0.1", res);
+  });
+  const squatPort = squatter.address().port;
+  let collided;
+  try {
+    collided = await runCorpus({
+      scopeDir: SELFTEST_DIR,
+      onlyFile: "nonbiting-gate.sql",
+      armsFloor: 0,
+      laneRunner: (opts) => runLane(opts.leg === "probe" ? opts : { ...opts, port: squatPort }),
+      log: quiet,
+    });
+  } finally {
+    await new Promise((res) => squatter.close(() => res()));
+  }
+  pass =
+    expect(collided.exitCode === 1, `exit code is 1 (got ${collided.exitCode})`) &&
+    expect(
+      collided.defects.some(
+        (x) => x.kind === "lane-unrunnable" && x.detail.includes(`port 127.0.0.1:${squatPort} was already taken`),
+      ),
+      `a lane-unrunnable defect names port ${squatPort} as already taken (got ${JSON.stringify(collided.defects.map((x) => `${x.kind}: ${x.detail}`))})`,
+    ) &&
+    expect(
+      noDefectOfKind(collided.defects, ["baseline", "wrong-first-failure", "restore"]),
+      "no baseline / wrong-first-failure / restore defect — the refused lane is not reported as the corpus failing",
     ) &&
     pass;
 

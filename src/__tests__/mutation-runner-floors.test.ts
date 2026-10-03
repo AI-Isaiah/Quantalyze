@@ -36,6 +36,7 @@ import {
   DEFECT_KINDS,
   absurdityViolations,
   gateSectionCount,
+  lanePortCollision,
   laneSpawnFailure,
   runCorpus,
   scopeDirForFile,
@@ -1594,6 +1595,45 @@ describe("164.3.1-10 — the runner's absurdity floor (D-09): two INDEPENDENT ta
     const r = await spawnAsync("bash", ["-c", "printf out; printf err >&2; exit 3"], { env: process.env, maxBuffer: 1 << 20 });
     expect(r).toMatchObject({ status: 3, signal: null, error: undefined, stdout: "out", stderr: "err" });
     expect(laneSpawnFailure(r)).toBeNull();
+  });
+
+  // ── SFH-01 / WR-02 — run.sh's port-collision refusal is an INSTRUMENT fault ──
+  // Each pool worker reuses one port, so a taken port (an orphaned postmaster)
+  // used to turn every later lane on that worker into a corpus defect. The
+  // real-lane proof is `SELF-TEST (port collision) 1/1`; these pin the
+  // classifier, its wiring, and that run.sh still prints what it matches.
+  const refusal = (line: string) =>
+    `ERROR: ${line}.\nThis lane would DROP SCHEMA public CASCADE on it. Refusing.\nPick a free port (or unset PORT to auto-allocate):\n`;
+  it("SFH-01: lanePortCollision names run.sh's exit-2 refusal, in both port_occupied spellings", () => {
+    expect(
+      lanePortCollision({ status: 2, stderr: refusal("something is already listening on 127.0.0.1:55001 (measured by trying to bind it)") }),
+    ).toBe("lane could not run: port 127.0.0.1:55001 was already taken (run.sh's collision guard refused, exit 2)");
+    expect(lanePortCollision({ status: 2, stderr: refusal("a PostgreSQL server on 127.0.0.1:55002 is accepting connections") })).toMatch(
+      /^lane could not run: port 127\.0\.0\.1:55002 was already taken/,
+    );
+  });
+
+  it("SFH-01: lanePortCollision needs BOTH the exit 2 and run.sh's own lines — a lost psql connection (exit 2) is still a gate outcome", () => {
+    const text = refusal("something is already listening on 127.0.0.1:55001 (measured by trying to bind it)");
+    // psql exits 2 when the server connection is lost: a real lane result.
+    expect(lanePortCollision({ status: 2, stderr: "psql: error: server closed the connection unexpectedly\n" })).toBeNull();
+    expect(lanePortCollision({ status: 3, stderr: text })).toBeNull();
+    expect(lanePortCollision({ status: 0, stderr: text })).toBeNull();
+    // The text inside a psql diagnostic is not run.sh speaking.
+    expect(lanePortCollision({ status: 2, stderr: `psql:gate.sql:3: ${text}` })).toBeNull();
+    // The ERROR line without the refusal line is not the guard's message.
+    expect(lanePortCollision({ status: 2, stderr: "ERROR: something is already listening on 127.0.0.1:55001.\n" })).toBeNull();
+  });
+
+  it("SFH-01: runLane classifies with it after laneSpawnFailure, and run.sh still prints the lines it matches", () => {
+    const runner = readFileSync(RUNNER_PATH, "utf8");
+    expect(runner).toContain("const measureFail = laneSpawnFailure(proc) ?? lanePortCollision(proc);");
+    const lane = readFileSync(join(REPO_ROOT, "scripts", "pg-lane", "run.sh"), "utf8");
+    expect(lane).toContain('port_occupied="something is already listening on 127.0.0.1:$PORT (measured by trying to bind it)"');
+    expect(lane).toContain('port_occupied="a PostgreSQL server on 127.0.0.1:$PORT is accepting connections"');
+    expect(lane).toContain('echo "ERROR: ${port_occupied}." >&2');
+    expect(lane).toContain('echo "This lane would DROP SCHEMA public CASCADE on it. Refusing." >&2');
+    expect(lane).toMatch(/Refusing\." >&2\n(?:.*\n){0,3}\s*exit 2\n/);
   });
 
   // ── PRINT CONTRACT — the wiring that prints, not a string constant ──────
