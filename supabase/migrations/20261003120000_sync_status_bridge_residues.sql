@@ -219,8 +219,11 @@
 -- service_role EXECUTE GRANT now follows it (see the ACL note). COMMENT ON FUNCTION is
 -- NOT re-issued (D-03): CREATE OR REPLACE keeps the 20260826120000 comment, and
 -- the carried A1 anchor proves it survived. The whole 20260906120000 DO $verify$
--- block is carried byte-for-byte except its closing NOTICE; this file's own
--- anchors follow it inside the same block.
+-- block is carried byte-for-byte except its closing NOTICE, the (P2d) count
+-- moved 2 -> 1 by the hold, and (review fix SFH L-1) a first statement that
+-- REBINDS v_fn to the comment-stripped body, so every carried anchor reads
+-- code only; HONEST-01 (H1), which must see comments, reads v_fn_raw. This
+-- file's own anchors follow inside the same block.
 --
 -- ══════════════════════════════════════════════════════════════════════════
 -- VAC-04 ACKNOWLEDGEMENT — the PROD body this CREATE OR REPLACE overwrites
@@ -267,8 +270,9 @@
 -- mark RPCs of 20260515114555. Whether a mark and this function serialize is
 -- proven behaviourally, by the lane-only two-backend gate
 -- supabase/tests/test_sync_status_bridge_lock.sql, not here.
--- The new anchors run on a COMMENT-STRIPPED copy of the body, so prose can
--- never satisfy them.
+-- Every anchor, carried and new, runs on a COMMENT-STRIPPED copy of the body,
+-- so prose can never satisfy one; the sole exception is HONEST-01 (H1), a ban
+-- that must see comments.
 --
 -- Transaction style: NO explicit BEGIN/COMMIT — Supabase wraps each migration
 -- in an implicit transaction. SET LOCAL lock_timeout applies to that wrap. This
@@ -1095,7 +1099,8 @@ DECLARE
   v_trg_secdef  BOOLEAN;
   v_trg_config  TEXT;
   -- Phase 164.5.2.1 (BRIDGERESIDUE): this file's own anchors, below the
-  -- carried ones. They run on v_body, a COMMENT-STRIPPED copy of v_fn, so no
+  -- carried ones. They run on v_body, a COMMENT-STRIPPED copy of the body (and
+  -- so, since the rebind at the top of the block, do the carried ones), so no
   -- prose can satisfy them. Each positive anchor has its own boolean and is
   -- tested by exactly one IF, so a mutation twin stands it down with a
   -- one-token edit.
@@ -1112,7 +1117,34 @@ DECLARE
   v_keep_arms                  INTEGER;
   v_bridge_lock_anchored       BOOLEAN;
   v_hold_cases                 INTEGER;
+  -- The comment-BEARING body, kept for the one anchor whose job is to catch a
+  -- comment (HONEST-01 H1). See the rebind as the first statement below.
+  v_fn_raw                     TEXT;
 BEGIN
+  -- ======================================================================
+  -- ⭐ COMMENT-STRIP FIRST (Phase 164.5.2.1 review, SFH L-1). Every anchor in
+  -- this block reads v_fn, so v_fn is REBOUND here to the comment-stripped body
+  -- before any of them runs. A carried anchor that matched on comment-bearing
+  -- text could stay green after its statement was deleted, as long as the same
+  -- text survived in a `--` comment inside the function. Rebinding the variable
+  -- rather than renaming it in each anchor keeps every RED-UNDER-M twin's find
+  -- string valid. HONEST-01 (H1) alone reads v_fn_raw: a comment naming the
+  -- operator column IS the defect it exists to catch.
+  -- Strip BOTH plpgsql comment syntaxes, block first (T-163-16), so an anchor
+  -- can only be satisfied by a STATEMENT. Measured: the body carries no string
+  -- literal containing either comment opener, so the strip removes comments
+  -- only.
+  -- ======================================================================
+  v_fn_raw := v_fn;
+  v_body := regexp_replace(regexp_replace(v_fn_raw, '/\*.*?\*/', '', 'gs'), '--.*', '', 'gn');
+
+  -- ⛔ NULL FAILS OPEN THROUGH EVERY REGEX ARM BELOW (a NULL `!~` is NULL, and
+  -- IF NULL does not raise), carried ones included.
+  IF v_fn_raw IS NULL OR v_body IS NULL THEN
+    RAISE EXCEPTION 'bridge-residue: the body of sync_strategy_analytics_status (or its comment-stripped copy) is NULL, so every anchor below would pass on nothing. Refusing to report compliance on an unread body.';
+  END IF;
+  v_fn := v_body;
+
   -- ======================================================================
   -- (P0) THE COLUMN SHAPE. Type, nullability and defaultlessness are ASSERTED,
   -- not assumed: 20260803150000:92-94 records why -- `ADD COLUMN IF NOT EXISTS`
@@ -1279,6 +1311,8 @@ BEGIN
   -- spells it (the prose at the aggregate says "the four picks", deliberately),
   -- so this count is over code. If a future comment does spell it, this arm goes
   -- RED and the fix is to reword the comment -- never to raise the integer.
+  -- (Since 20261003120000 v_fn is the comment-stripped body, so a comment can
+  -- no longer move this count at all; the integer rule stands.)
   IF (SELECT count(*)
         FROM regexp_matches(v_fn, 'array_agg\s*\([^)]*ORDER\s+BY\s+created_at\s+DESC\s*,\s*id\s+DESC\s*\)', 'g')) <> 4 THEN
     RAISE EXCEPTION 'Criterion 2 verification failed: the live-failure aggregate does not carry `ORDER BY created_at DESC, id DESC` on EXACTLY the four picks (two error_kind, two id). Postgres guarantees no tie-break BETWEEN two aggregates, so with a non-total order the kind can be taken from one job and the id from another -- and the bridge then compares the row''s marker against a job that is not the one whose sentence it is reading, failing on exactly the row it should match. A partial fix (two of four) is indistinguishable from none';
@@ -1600,7 +1634,9 @@ BEGIN
   -- the bridge no longer reads the operator column. That comment IS the
   -- regression this anchor detects, and it will RAISE on apply. Write it in the
   -- file header, which pg_get_functiondef does not return.
-  IF v_fn ~* 'last_error' THEN
+  -- ⚠️ Reads v_fn_raw, the comment-BEARING body (Phase 164.5.2.1 review, L-1):
+  -- this is the one anchor that must see comments.
+  IF v_fn_raw ~* 'last_error' THEN
     RAISE EXCEPTION 'HONEST-01 verification failed: sync_strategy_analytics_status references compute_jobs.last_error. That column is the OPERATOR surface (raw classify_exception output) and this function writes strategy_analytics.computation_error, which renders verbatim to users in the wizard failure envelope and the portfolio stale warning. Derive the copy from error_kind via computation_error_copy(). If this fired on a COMMENT rather than on code, the comment is still the defect: move the prose to the migration file header, which pg_get_functiondef does not return';
   END IF;
 
@@ -1626,16 +1662,10 @@ BEGIN
   END IF;
 
   -- ======================================================================
-  -- Phase 164.5.2.1 (BRIDGERESIDUE) — this file's own anchors.
-  -- Strip BOTH plpgsql comment syntaxes, block first (T-163-16), so an anchor
-  -- can only be satisfied by a STATEMENT.
+  -- Phase 164.5.2.1 (BRIDGERESIDUE) — this file's own anchors. They read
+  -- v_body, the comment-stripped body computed (and NULL-checked) as the first
+  -- statement of this block; v_fn holds the same text since the rebind there.
   -- ======================================================================
-  v_body := regexp_replace(regexp_replace(v_fn, '/\*.*?\*/', '', 'gs'), '--.*', '', 'gn');
-
-  -- ⛔ NULL FAILS OPEN THROUGH EVERY REGEX ARM BELOW.
-  IF v_body IS NULL THEN
-    RAISE EXCEPTION 'bridge-residue: the comment-stripped body of sync_strategy_analytics_status is NULL, so every anchor below would pass on nothing. Refusing to report compliance on an unread body.';
-  END IF;
 
   -- (i) The unprotected-failure id array: an UNORDERED pick over the same
   -- partition, collected in the SAME statement as the existing live-failure
@@ -1784,5 +1814,5 @@ BEGIN
     RAISE EXCEPTION 'bridge-residue: service_role cannot EXECUTE sync_strategy_analytics_status(uuid). The Python DEFERRED path (analytics-service/services/analytics_status.py) calls it directly over PostgREST as service_role; without the grant that call answers 42501, the caller logs a warning, and strategy_analytics keeps its pre-DEFER status.';
   END IF;
 
-  RAISE NOTICE 'Migration 20261003120000: sync_strategy_analytics_status re-based on 20260906120000 (BRIDGERESIDUE, Phase 164.5.2.1); every carried 20260906120000 anchor passed on the new body, and this file''s own comment-stripped anchors passed after them.';
+  RAISE NOTICE 'Migration 20261003120000: sync_strategy_analytics_status re-based on 20260906120000 (BRIDGERESIDUE, Phase 164.5.2.1); every carried 20260906120000 anchor passed on the new comment-stripped body, and this file''s own anchors passed after them.';
 END $verify$;
