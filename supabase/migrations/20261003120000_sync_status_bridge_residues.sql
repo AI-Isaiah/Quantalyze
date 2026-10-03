@@ -90,6 +90,33 @@
 -- FALSE for it). `complete_with_warnings` is untouched: its own arm precedes
 -- the keep arm.
 --
+-- A KEPT ROW HOLDS ITS DATE (FOUNDER DECISION 2026-10-03, AskUserQuestion,
+-- answer "Hold the date for both", resolving [164.5.2.1-02-KEPT-ROW-COMPUTED-AT]).
+-- When branch (a) KEEPS a row, nothing was computed, so it must not look as if
+-- something was. Before this decision branch (a) wrote computed_at = now() and
+-- blanked computation_error and both provenance markers on EVERY call, keep or
+-- not, so the factsheet FreshnessChip and the portfolio PDF vintage (readers of
+-- computed_at) showed a date fresher than the last real compute on a row whose
+-- refresh kept failing transiently. Now those four columns are each assigned by
+-- a CASE: the membership arm first (today's write), then a HOLD arm, then
+-- today's write. The hold fires on a keep, which is exactly:
+--   * a `complete_with_warnings` row (branch (a)'s warned arm keeps it), or
+--   * a plain `complete` row under the refresh keep above, with no warning to
+--     resurface (the warned arm would otherwise move it to
+--     complete_with_warnings, a transition).
+-- It deliberately does NOT fire on a TRANSITION, even one into
+-- complete_with_warnings: a `failed` row that still carries computation_warned
+-- (the SI-02 bounce state) is moved to complete_with_warnings by the warned arm,
+-- and holding there would carry its curated FAILURE sentence onto a published
+-- factsheet. The founder's answer named the two keep arms; this reading (hold
+-- on a keep, never on a transition) is recorded with it in the phase CONTEXT.
+-- ⚠️ This deliberately CHANGES PROD BEHAVIOUR for the warned cohort (every
+-- strategy in the live ledger cohort reads complete_with_warnings): a sibling
+-- job's bridge call no longer advances computed_at or clears the sentence on
+-- those rows. The staleness verdict is not affected (it keys on the
+-- returns_series dates, never on computed_at). The provenance trigger of
+-- 20260906120000 does not fire on a hold (the sentence is unchanged).
+--
 -- LOCK ORDER (D-06, Phase 164.5.2.1). The first statement after the
 -- NULL-strategy guard takes the two-integer, transaction-scoped advisory lock
 -- in the namespace Phase 164.5.2 gave the two terminal mark RPCs
@@ -121,7 +148,18 @@
 -- between this function's two compute_jobs reads, so the carried READ ORDER pin
 -- stays load-bearing. Those writers are other phases' functions (the claim RPCs
 -- are Phase 164.9.3's), and none is edited here.
--- (2) D-18, FOUNDER-OWNED, ACCEPTED 2026-09-27, default (a).
+-- (2) D-18, FOUNDER-OWNED, ACCEPTED 2026-09-27, default (a). ⚠️ NARROWED
+-- 2026-10-03 by the hold above, measured on the pg-lane (scratch probe, this
+-- file before and after the hold): on a complete_with_warnings row, the
+-- sibling's call in the PRE window is now a KEEP, so it HOLDS the honour
+-- sentence and X's provenance, and X's later loud mark then clears the warning
+-- (before: provenance blanked, row ended failed with computation_warned TRUE;
+-- after: failed with computation_warned FALSE). The paragraph below is kept as
+-- the 2026-09-27 lineage. What stays open is a row the sibling's call does NOT
+-- keep, i.e. a published row moved to computing (a plain complete row with
+-- unmarked work in flight, where no warning is up to strand) or a plain
+-- complete row that already carries computation_warned (not a state the
+-- writers are known to produce; unmeasured).
 -- The PRE corner: a SIBLING's bridge call lands while X is still `running`,
 -- after the Python honour write and before X's own mark. That call takes branch
 -- (a), which blanks the provenance while X is not yet a failure (Phase 164.2's
@@ -139,8 +177,8 @@
 --
 -- RE-BASE (D-01). The CREATE OR REPLACE below is the LATEST definition,
 -- 20260906120000_computation_error_provenance.sql STEP 2, copied byte-for-byte
--- and edited only at the sites named in THE DELTA, RETRY-PLAIN-COMPLETE and
--- LOCK ORDER above, plus the D-07 comment correction (re-grepped across every file in
+-- and edited only at the sites named in THE DELTA, RETRY-PLAIN-COMPLETE, A KEPT
+-- ROW HOLDS ITS DATE and LOCK ORDER above, plus the D-07 comment correction (re-grepped across every file in
 -- supabase/migrations/ at execution: no later CREATE and no ALTER FUNCTION of
 -- the bridge exists). The REVOKE is re-issued verbatim. COMMENT ON FUNCTION is
 -- NOT re-issued (D-03): CREATE OR REPLACE keeps the 20260826120000 comment, and
@@ -704,16 +742,44 @@ BEGIN
              ELSE 'computing'
            END,
            computation_warned = CASE WHEN strategy_analytics.computation_error_source = 'writer' AND strategy_analytics.computation_error_job_id = ANY (v_unprotected_job_ids) THEN FALSE ELSE strategy_analytics.computation_warned END,
-           computation_error  = EXCLUDED.computation_error,
-           -- Phase 164.2 / criterion 2: the sentence on the line above is being
-           -- blanked, so the provenance that described it must go with it. A
-           -- marker left standing over a blanked sentence would make the NEXT
-           -- generic write look like a curated one and freeze it there. This
-           -- branch is also the reason the four TypeScript pre-enqueue writers
-           -- need no marker at all: when a job starts, their sentence is stale
-           -- by construction and superseding it is the correct outcome.
-           computation_error_source = NULL,
-           computation_error_job_id = NULL,
+           -- FOUNDER DECISION 2026-10-03 ("Hold the date for both"): on a KEEP
+           -- (the row already reads what this branch resolves it to, and the
+           -- membership arm does not fire) the sentence, both provenance markers
+           -- and computed_at are HELD, because nothing was computed. On every
+           -- other path they are written exactly as before. The four CASEs share
+           -- one predicate, so the markers still travel with the sentence.
+           computation_error = CASE
+             WHEN strategy_analytics.computation_error_source = 'writer' AND strategy_analytics.computation_error_job_id = ANY (v_unprotected_job_ids)
+             THEN EXCLUDED.computation_error
+             WHEN strategy_analytics.computation_status = 'complete_with_warnings'
+                  OR (v_refresh_keep AND strategy_analytics.computation_status = 'complete' AND strategy_analytics.computation_warned IS NOT TRUE)
+             THEN strategy_analytics.computation_error
+             ELSE EXCLUDED.computation_error
+           END,
+           -- Phase 164.2 / criterion 2: when the sentence above is blanked, the
+           -- provenance that described it goes with it. A marker left standing
+           -- over a blanked sentence would make the NEXT generic write look like
+           -- a curated one and freeze it there. This branch is also the reason
+           -- the four TypeScript pre-enqueue writers need no marker at all: when
+           -- a job starts, their sentence is stale by construction and
+           -- superseding it is the correct outcome. A held sentence keeps its
+           -- markers on the same predicate.
+           computation_error_source = CASE
+             WHEN strategy_analytics.computation_error_source = 'writer' AND strategy_analytics.computation_error_job_id = ANY (v_unprotected_job_ids)
+             THEN NULL
+             WHEN strategy_analytics.computation_status = 'complete_with_warnings'
+                  OR (v_refresh_keep AND strategy_analytics.computation_status = 'complete' AND strategy_analytics.computation_warned IS NOT TRUE)
+             THEN strategy_analytics.computation_error_source
+             ELSE NULL
+           END,
+           computation_error_job_id = CASE
+             WHEN strategy_analytics.computation_error_source = 'writer' AND strategy_analytics.computation_error_job_id = ANY (v_unprotected_job_ids)
+             THEN NULL
+             WHEN strategy_analytics.computation_status = 'complete_with_warnings'
+                  OR (v_refresh_keep AND strategy_analytics.computation_status = 'complete' AND strategy_analytics.computation_warned IS NOT TRUE)
+             THEN strategy_analytics.computation_error_job_id
+             ELSE NULL
+           END,
            -- JOB-01 (Phase 142): stamp on the TRANSITION INTO computing only,
            -- keyed off the RESOLVED status above — never off the branch. This
            -- bridge is PERFORMed in-RPC on EVERY job transition, so an
@@ -742,7 +808,14 @@ BEGIN
              -- bridge call cannot advance it and defer the reap indefinitely.
              ELSE strategy_analytics.computing_started_at
            END,
-           computed_at        = now();
+           computed_at = CASE
+             WHEN strategy_analytics.computation_error_source = 'writer' AND strategy_analytics.computation_error_job_id = ANY (v_unprotected_job_ids)
+             THEN now()
+             WHEN strategy_analytics.computation_status = 'complete_with_warnings'
+                  OR (v_refresh_keep AND strategy_analytics.computation_status = 'complete' AND strategy_analytics.computation_warned IS NOT TRUE)
+             THEN strategy_analytics.computed_at
+             ELSE now()
+           END;
     RETURN;
   END IF;
 
@@ -957,6 +1030,7 @@ DECLARE
   v_refresh_keep_anchored      BOOLEAN;
   v_keep_arms                  INTEGER;
   v_bridge_lock_anchored       BOOLEAN;
+  v_hold_cases                 INTEGER;
 BEGIN
   -- ======================================================================
   -- (P0) THE COLUMN SHAPE. Type, nullability and defaultlessness are ASSERTED,
@@ -1195,13 +1269,18 @@ BEGIN
   -- ⚠️ If a future re-base legitimately changes how many unconditional clears
   -- exist, update the integer AND say which branch changed -- do not relax this
   -- to a presence test, which is what makes an anchor like this vacuous.
+  -- ⚠️ CHANGED 2026-10-03 (Phase 164.5.2.1, FOUNDER DECISION "Hold the date for
+  -- both"): 2 -> 1. Branch (a)'s clear is no longer unconditional: on a KEEP it
+  -- holds the sentence and both markers together, and clears both otherwise
+  -- (the hold CASEs, anchored as a count at (xiii) below). Branch (c)'s copy is
+  -- the one unconditional clear left, and this count still pins it.
   IF (SELECT count(*)
-        FROM regexp_matches(v_fn, 'computation_error_source\s*=\s*NULL', 'g')) <> 2 THEN
-    RAISE EXCEPTION 'Criterion 2 verification failed: the UNCONDITIONAL source-marker clear must appear in EXACTLY the two branches that blank computation_error -- (a) the computing entry-write and (c) the all-done success write. Losing (a)''s copy leaves a stale writer claim over the NULL a starting job wrote, so the reaper''s later sentence and the next failure''s generic are both judged against it; losing (c)''s leaves one over a resolved strategy, where the next failure''s generic is frozen out by a job that no longer has a failure';
+        FROM regexp_matches(v_fn, 'computation_error_source\s*=\s*NULL', 'g')) <> 1 THEN
+    RAISE EXCEPTION 'Criterion 2 verification failed: the UNCONDITIONAL source-marker clear must appear in EXACTLY one branch -- (c) the all-done success write (branch (a) clears conditionally since 2026-10-03, anchored at (xiii)). Losing (c)''s copy leaves a stale writer claim over a resolved strategy, where the next failure''s generic is frozen out by a job that no longer has a failure';
   END IF;
   IF (SELECT count(*)
-        FROM regexp_matches(v_fn, 'computation_error_job_id\s*=\s*NULL', 'g')) <> 2 THEN
-    RAISE EXCEPTION 'Criterion 2 verification failed: the UNCONDITIONAL job-id-marker clear must appear in EXACTLY the two branches that blank computation_error -- (a) and (c). A job id left standing over a blanked sentence is a claim about text that no longer exists, and the next equality test will honour it';
+        FROM regexp_matches(v_fn, 'computation_error_job_id\s*=\s*NULL', 'g')) <> 1 THEN
+    RAISE EXCEPTION 'Criterion 2 verification failed: the UNCONDITIONAL job-id-marker clear must appear in EXACTLY one branch -- (c) (branch (a) clears conditionally since 2026-10-03, anchored at (xiii)). A job id left standing over a blanked sentence is a claim about text that no longer exists, and the next equality test will honour it';
   END IF;
 
   -- ======================================================================
@@ -1493,14 +1572,15 @@ BEGIN
     RAISE EXCEPTION 'bridge-residue: branch (b) does not clear computation_warned when the row''s writer-provenance job is among the unprotected live failures. A marker retraction between the Python live re-read and the permanent mark then leaves the warning flag up over a failed run ([164.6.7-COMPOSITE-REREAD-RESIDUE]).';
   END IF;
 
-  -- (iii) The membership predicate appears in EXACTLY four places: branch (a)'s
-  -- status arm, branch (a)'s warned assignment, branch (a)'s stamp arm, and
-  -- branch (b)'s warned assignment. A COUNT, not a presence test: any one
-  -- survivor would satisfy a presence test.
+  -- (iii) The membership predicate appears in EXACTLY eight places: branch
+  -- (a)'s status arm, warned assignment and stamp arm, branch (b)'s warned
+  -- assignment, and (founder decision 2026-10-03) the first arm of branch (a)'s
+  -- four hold CASEs (sentence, both markers, computed_at). A COUNT, not a
+  -- presence test: any one survivor would satisfy a presence test.
   SELECT count(*) INTO v_membership_sites
     FROM regexp_matches(v_body, 'strategy_analytics\.computation_error_source\s*=\s*''writer''\s+AND\s+strategy_analytics\.computation_error_job_id\s*=\s*ANY\s*\(\s*v_unprotected_job_ids\s*\)', 'g');
-  IF v_membership_sites <> 4 THEN
-    RAISE EXCEPTION 'bridge-residue: the writer-provenance membership predicate appears % time(s) in the body, not 4. Each of the four sites (branch (a) status, warned and stamp arms; branch (b) warned) closes a distinct corner of [164.6.7-COMPOSITE-REREAD-RESIDUE]: losing a branch-(a) site publishes complete_with_warnings over a failed run whenever a sibling is in flight at the mark, or leaves the row computing with no reaper stamp.', v_membership_sites;
+  IF v_membership_sites <> 8 THEN
+    RAISE EXCEPTION 'bridge-residue: the writer-provenance membership predicate appears % time(s) in the body, not 8. Each of the first four sites (branch (a) status, warned and stamp arms; branch (b) warned) closes a distinct corner of [164.6.7-COMPOSITE-REREAD-RESIDUE]: losing a branch-(a) site publishes complete_with_warnings over a failed run whenever a sibling is in flight at the mark, or leaves the row computing with no reaper stamp. The other four lead branch (a)''s hold CASEs: losing one holds a failure sentence, its markers or the old computed_at on a row going computing over a failed run.', v_membership_sites;
   END IF;
 
   -- (iv) computation_warned is assigned by a CASE in exactly two places
@@ -1562,6 +1642,19 @@ BEGIN
     FROM regexp_matches(v_body, 'WHEN\s+v_refresh_keep\s+AND\s+strategy_analytics\.computation_status\s*=\s*''complete''', 'g');
   IF v_keep_arms <> 2 THEN
     RAISE EXCEPTION 'bridge-residue: branch (a) carries % refresh keep arm(s), not 2 (the status arm and the stamp arm). Without the status arm a plain complete row is rewritten to computing on every marked in-scope refresh retry ([164.6.7-RETRY-PLAIN-COMPLETE]); without the stamp arm a kept complete row carries a stuck-computing reaper stamp.', v_keep_arms;
+  END IF;
+
+  -- (xiii) FOUNDER DECISION 2026-10-03 ("Hold the date for both"): branch (a)'s
+  -- sentence, both provenance markers and computed_at are each assigned by a
+  -- CASE whose FIRST arm is the membership predicate (today's write), whose
+  -- second arm HOLDS the column on a keep (a complete_with_warnings row, or a
+  -- plain complete row under the refresh keep with no warning to resurface),
+  -- and whose ELSE is today's write. One regex per CASE shape, the column
+  -- back-referenced into the hold arm, counted: exactly four.
+  SELECT count(*) INTO v_hold_cases
+    FROM regexp_matches(v_body, '(computation_error|computation_error_source|computation_error_job_id|computed_at)\s*=\s*CASE\s+WHEN\s+strategy_analytics\.computation_error_source\s*=\s*''writer''\s+AND\s+strategy_analytics\.computation_error_job_id\s*=\s*ANY\s*\(\s*v_unprotected_job_ids\s*\)\s+THEN\s+(EXCLUDED\.computation_error|NULL|now\(\))\s+WHEN\s+strategy_analytics\.computation_status\s*=\s*''complete_with_warnings''\s+OR\s+\(\s*v_refresh_keep\s+AND\s+strategy_analytics\.computation_status\s*=\s*''complete''\s+AND\s+strategy_analytics\.computation_warned\s+IS\s+NOT\s+TRUE\s*\)\s+THEN\s+strategy_analytics\.\1\s+ELSE\s+\2\s+END', 'g');
+  IF v_hold_cases <> 4 THEN
+    RAISE EXCEPTION 'bridge-residue: branch (a) carries % hold CASE(s) of the founder-decided shape, not 4 (computation_error, computation_error_source, computation_error_job_id, computed_at). A missing one re-stamps computed_at on a row nothing recomputed (the FreshnessChip and PDF vintage then read fresher than the last real compute), or splits a held sentence from its provenance markers (founder decision 2026-10-03).', v_hold_cases;
   END IF;
 
   -- (xii) D-06: the per-strategy lock, as the FIRST statement after the NULL
