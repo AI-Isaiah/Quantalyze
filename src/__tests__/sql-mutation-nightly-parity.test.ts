@@ -51,7 +51,12 @@ const FULL_TAIL_FIRST_LINE = 'node scripts/mutation-runner/run.mjs > "$RUNNER_LO
  * The nightly's own steps, which have no ci.yml counterpart. Exactly this set:
  * an unlisted extra step is red, and a listed step that went missing is red.
  */
-const NIGHTLY_ONLY_STEPS = ["Record the nightly start time"];
+const ALWAYS_STEPS = ["Print the nightly wall time", "Capture the reading", "Upload the reading"];
+const NIGHTLY_ONLY_STEPS = ["Record the nightly start time", ...ALWAYS_STEPS];
+
+const REPORT_JOB = "report";
+const REPORT_IF = "always() && needs.sql-mutation-full.result != 'success'";
+const DEDUP_LABEL = "nightly-canary-failure:sql-mutation";
 
 const CHECKOUT = "actions/checkout@";
 const SETUP_NODE = "actions/setup-node@";
@@ -268,6 +273,40 @@ function shapeViolations(nightlyText: string): string[] {
   return out;
 }
 
+/**
+ * D-06 / D-11 reporter defects: the `report` job's trigger and scope, the
+ * single write permission, the dedupe label, the Railway sentence, and the
+ * `always()` steps that feed it.
+ */
+function reportViolations(nightlyText: string): string[] {
+  const out: string[] = [];
+  const report = jobSlice(nightlyText, REPORT_JOB);
+  const job = jobSlice(nightlyText, NIGHTLY_JOB);
+  if (!/^ {4}needs: \[sql-mutation-full\]$/m.test(report)) out.push("report: needs: is not [sql-mutation-full]");
+  const ifLine = /^ {4}if: (.*)$/m.exec(report);
+  if (!ifLine || ifLine[1] !== REPORT_IF) out.push(`report: if: is ${ifLine ? ifLine[1] : "absent"}, not ${REPORT_IF}`);
+  if (!/^ {4}permissions:\n {6}contents: read\n {6}issues: write\n/m.test(report)) {
+    out.push("report: job-level permissions: is not exactly contents: read + issues: write");
+  }
+  const writes = nightlyText.match(/issues: write/g) ?? [];
+  if (writes.length !== 1 || !report.includes("issues: write")) {
+    out.push(`issues: write appears ${writes.length} time(s); it must appear once, in the report job only`);
+  }
+  if (/^ {4}permissions:/m.test(job)) out.push(`${NIGHTLY_JOB} carries a job-level permissions: block`);
+  if (!report.includes(`const dedupLabel = "${DEDUP_LABEL}";`)) out.push("report: the dedupe label literal is missing");
+  if (!report.includes("block a later Railway redeploy")) out.push("report: the D-11 Railway sentence is missing");
+  if (/actions\/checkout@/.test(report)) out.push("report: checks out repo code; it must run only github-script over the reading");
+  const steps = parseSteps(job);
+  for (const name of ALWAYS_STEPS) {
+    const s = stepByKey(steps, name);
+    if (!s) out.push(`step "${name}" is missing`);
+    else if (s.ifExpr !== "always()") out.push(`step "${name}" carries if: ${s.ifExpr ?? "none"}, not always()`);
+  }
+  const start = stepByKey(steps, "Record the nightly start time");
+  if (start && start.ifExpr !== null) out.push(`step "Record the nightly start time" carries if: ${start.ifExpr}`);
+  return out;
+}
+
 /** Remove one whole step (from its `- name:` line to the next step) by name. */
 function deleteStep(text: string, name: string): string {
   const at = anchorIndex(text, `      - name: ${name}\n`);
@@ -284,7 +323,7 @@ describe("sql-mutation-nightly.yml: copied steps stay byte-equal to ci.yml sql-m
     expect(nightly.map((s) => s.key)).not.toContain(SCOPE_STEP_NAME);
     // Every copied block is non-trivial, so "equal" is not "both empty".
     for (const s of nightly) {
-      if (s.name && s.name !== "Record the nightly start time") expect(s.run, s.key).toBeTruthy();
+      if (s.name && s.uses === null) expect(s.run, s.key).toBeTruthy();
     }
     expect(stepByKey(nightly, ASSERT_STEP_NAME)?.run).toContain("scope-reason:");
   });
@@ -301,7 +340,28 @@ describe("sql-mutation-nightly.yml: copied steps stay byte-equal to ci.yml sql-m
     expect(shapeViolations(NIGHTLY_TEXT)).toEqual([]);
   });
 
+  it("reporter: always() steps, the report job's if/needs/permissions, one write scope, label and D-11 sentence", () => {
+    expect(reportViolations(NIGHTLY_TEXT)).toEqual([]);
+  });
+
   describe("calibration: each copy through the SAME predicate goes red and names the step", () => {
+    it("the report if: changed to failure(), and issues: write lent to the mutation job", () => {
+      const failureOnly = replaceOnce(NIGHTLY_TEXT, `    if: ${REPORT_IF}\n`, "    if: failure()\n");
+      expect(reportViolations(failureOnly)).toEqual([`report: if: is failure(), not ${REPORT_IF}`]);
+      const lent = replaceOnce(
+        NIGHTLY_TEXT,
+        "    timeout-minutes: 45\n",
+        "    timeout-minutes: 45\n    permissions:\n      contents: read\n      issues: write\n",
+      );
+      expect(reportViolations(lent)).toEqual([
+        "issues: write appears 2 time(s); it must appear once, in the report job only",
+        `${NIGHTLY_JOB} carries a job-level permissions: block`,
+      ]);
+      const captureAt = anchorIndex(NIGHTLY_TEXT, "      - name: Capture the reading\n");
+      const ungated = replaceOnce(NIGHTLY_TEXT, "        if: always()\n", "        if: success()\n", captureAt);
+      expect(reportViolations(ungated)).toEqual(['step "Capture the reading" carries if: success(), not always()']);
+    });
+
     it("one character changed inside the copied assert block", () => {
       const assertAt = anchorIndex(NIGHTLY_TEXT, `      - name: ${ASSERT_STEP_NAME}\n`);
       const bad = replaceOnce(NIGHTLY_TEXT, "is missing or empty.", "is missing or emptY.", assertAt);

@@ -748,3 +748,152 @@ jobs:
           fi
 
           echo "Coverage print is present, both floors and the waiver ceiling hold and the runner's two tallies agree: files $files_annotated >= $files_floor, biting arms $biting >= $arms_floor (of $arms_executed executed, $lane_invocations arm lane(s) spawned), waived $arms_waived <= $waived_ceiling."
+      - name: Print the nightly wall time
+        # D-05: how much of this job's 45 minutes the full corpus used, printed
+        # on every run (red, timed out or green), with a warning at 80% (2160s)
+        # so growth toward the cap is visible before it becomes a timeout.
+        if: always()
+        run: |
+          set -uo pipefail
+          if [ -z "${NIGHTLY_START:-}" ]; then
+            line="wall time not measured: the start step did not run"
+          else
+            elapsed=$(( $(date +%s) - NIGHTLY_START ))
+            line="sql-mutation nightly wall time: ${elapsed}s of 45 min (2700s)"
+            if [ "$elapsed" -ge 2160 ]; then
+              echo "::warning::sql-mutation nightly used ${elapsed}s, at least 80% of its 45-minute cap (2160s of 2700s). The full corpus is growing toward the timeout."
+            fi
+          fi
+          echo "$line"
+          echo "$line" > "$RUNNER_TEMP/wall-time.txt"
+      - name: Capture the reading
+        # D-06: the text the `report` job files. Runner summary lines, floor
+        # lines, ::error:: lines, the wall time, the job status and a bounded
+        # tail of the runner log. Never an env dump (T-164.9.6-17). Not echoed
+        # back into this log, so its ::error:: lines are not annotated twice.
+        if: always()
+        env:
+          RUNNER_LOG: ${{ runner.temp }}/mutation-runner.log
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          set -uo pipefail
+          reading="$RUNNER_TEMP/reading.txt"
+          {
+            if [ -s "$RUNNER_LOG" ]; then
+              echo "--- runner summary lines ---"
+              grep -aE '^(scope|scope-reason|coverage|arms|biting|lane-invocations):' "$RUNNER_LOG" || echo "(no summary line found in the runner log)"
+              echo "--- floor lines ---"
+              grep -aE 'ARMS_FLOOR|FILES_FLOOR|WAIVED_CEILING' "$RUNNER_LOG" || echo "(no floor line found in the runner log)"
+              echo "--- ::error:: lines ---"
+              grep -a '::error::' "$RUNNER_LOG" || echo "(no ::error:: line in the runner log)"
+            else
+              echo "no runner log: the corpus run did not start or was cancelled before writing"
+            fi
+            echo "--- wall time ---"
+            cat "$RUNNER_TEMP/wall-time.txt" 2>/dev/null || echo "wall time not recorded"
+            echo "job status: $JOB_STATUS"
+            if [ -s "$RUNNER_LOG" ]; then
+              echo "--- last 60 lines of the runner log ---"
+              tail -n 60 "$RUNNER_LOG"
+            fi
+          } > "$reading"
+          echo "reading captured: $(wc -l < "$reading") line(s) in $reading"
+      - name: Upload the reading
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: sql-mutation-nightly-reading
+          path: |
+            ${{ runner.temp }}/reading.txt
+            ${{ runner.temp }}/wall-time.txt
+          retention-days: 14
+          if-no-files-found: warn
+
+  # D-06 / D-11: files, or comments on, ONE deduplicated issue whenever the
+  # mutation job did not succeed. `!= 'success'` covers failure, timeout and
+  # cancel. This job never masks the red: the workflow is already red because
+  # sql-mutation-full failed; this job fails only if filing the issue fails.
+  # It is the ONLY job holding a write scope, and it checks out no repo code.
+  report:
+    needs: [sql-mutation-full]
+    if: always() && needs.sql-mutation-full.result != 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Download the reading
+        # A cancel before the upload legitimately leaves no artifact; the
+        # script below then says so in the issue instead of failing here.
+        continue-on-error: true
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: sql-mutation-nightly-reading
+          path: ${{ runner.temp }}/reading
+      - name: Open or update the nightly sql-mutation issue
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3  # v9.0.0
+        env:
+          RUN_ID: ${{ github.run_id }}
+          REPO_NAME: ${{ github.repository }}
+          JOB_RESULT: ${{ needs.sql-mutation-full.result }}
+          READING_PATH: ${{ runner.temp }}/reading/reading.txt
+        with:
+          script: |
+            const fs = require("node:fs");
+            const { RUN_ID, REPO_NAME, JOB_RESULT, READING_PATH } = process.env;
+            const today = new Date().toISOString().slice(0, 10);
+            const dedupLabel = "nightly-canary-failure:sql-mutation";
+            const runUrl = `https://github.com/${REPO_NAME}/actions/runs/${RUN_ID}`;
+            let reading = "";
+            try {
+              reading = fs.readFileSync(READING_PATH, "utf8");
+            } catch {
+              reading = "";
+            }
+            if (reading.trim() === "") {
+              reading = `no reading captured: the mutation job concluded ${JOB_RESULT}`;
+            }
+            const MAX = 60000;
+            if (reading.length > MAX) {
+              reading = reading.slice(0, MAX) + "\n(truncated at 60,000 characters; read the run log)";
+            }
+            const coupling =
+              "A red nightly attaches a failing check to main's head SHA; Railway gates on every workflow's check runs for a commit, so it can block a later Railway redeploy of that same SHA until this is fixed or re-run green. The founder accepted this coupling (Phase 164.9.6 D-11).";
+            const body = [
+              `The nightly full-corpus SQL mutation run did not succeed (job result: ${JOB_RESULT}).`,
+              "",
+              `Workflow run: ${runUrl}`,
+              "",
+              "Reading:",
+              "```",
+              reading.replace(/```/g, "'''"),
+              "```",
+              "",
+              coupling,
+              "",
+              "Auto-filed by .github/workflows/sql-mutation-nightly.yml. This issue is deduplicated by the `" + dedupLabel + "` label; later failures comment here until it is closed.",
+            ].join("\n");
+            const { data: existing } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: "open",
+              labels: dedupLabel,
+              per_page: 1,
+            });
+            if (existing.length > 0) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existing[0].number,
+                body: `Failed again on ${today}.\n\n${body}`,
+              });
+              return;
+            }
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `Nightly full SQL mutation run failed on ${today}`,
+              body,
+              labels: ["nightly-probe", dedupLabel],
+            });
