@@ -603,6 +603,151 @@ def test_default_connect_matches_real_mt5linux_0_1_9_ctor(monkeypatch):
     assert client._MetaTrader5__conn._config["sync_request_timeout"] == 42.0
 
 
+# --------------------------------------------------------------------------- #
+# Phase 164.6.6 D-07 part 1 / T-134-03 — the dialling side refuses a public host.
+#
+# The rpyc bridge is an UNAUTHENTICATED arbitrary-remote-code channel, so the one
+# real transport factory must never build a connection toward a host the public
+# internet can answer for. Every host below is FABRICATED (`*.example.com`, the
+# Railway public-domain and TCP-proxy SHAPES) or a well-known public resolver; no
+# test here opens a socket, because each installs a fake `mt5linux` first.
+# --------------------------------------------------------------------------- #
+
+# Each is a host the analytics service must NEVER dial. The two numeric
+# single-label forms are 8.8.8.8 spelled the way the C resolver also accepts
+# (decimal and hex); a "no dot means a private single-label name" rule would
+# admit them, and they would dial a public address.
+_PUBLIC_GATEWAY_HOSTS: tuple[str, ...] = (
+    "gateway.up.railway.app",   # a Railway public domain
+    "shuttle.proxy.rlwy.net",   # a Railway TCP-proxy host
+    "mt5.example.com",          # any other public DNS name
+    "8.8.8.8",                  # a public IPv4 literal
+    "2001:4860:4860::8888",     # a public IPv6 literal (no dot, NOT a label)
+    "[2001:4860:4860::8888]",   # the same, bracketed
+    "134744072",                # 8.8.8.8 as one decimal number
+    "0x8080808",                # 8.8.8.8 in hex
+)
+
+
+def _install_recording_mt5linux(monkeypatch) -> list[tuple[str, int]]:
+    """Install a fake ``mt5linux`` whose 0.1.9-shaped constructor RECORDS every
+    construction, so a test can prove no transport was ever built."""
+    constructed: list[tuple[str, int]] = []
+
+    class _FakeConn:
+        def __init__(self) -> None:
+            self._config: dict = {}
+
+    class _FakeMetaTrader5:
+        def __init__(self, host: str = "localhost", port: int = 18812) -> None:
+            constructed.append((host, port))
+            self._MetaTrader5__conn = _FakeConn()
+
+    fake_module = types.ModuleType("mt5linux")
+    fake_module.MetaTrader5 = _FakeMetaTrader5  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "mt5linux", fake_module)
+    return constructed
+
+
+@pytest.mark.parametrize("host", _PUBLIC_GATEWAY_HOSTS)
+def test_default_connect_refuses_a_public_gateway_host(monkeypatch, host):
+    """T-134-03 / D-07 part 1: ``_default_connect`` refuses a public host BEFORE a
+    transport exists.
+
+    WHY: the bridge executes whatever source the client sends, unauthenticated.
+    Railway private networking is what keeps it off the internet, and until this
+    phase nothing on the dialling side CHECKED that: a public domain or TCP proxy
+    pasted into ``MT5_GATEWAY_HOST`` would have been dialled, carrying broker
+    passwords in the remotely evaluated source. Before the fix the fake below
+    records a construction toward the public host; after it, nothing is built and
+    the refusal names neither host nor port.
+    """
+    constructed = _install_recording_mt5linux(monkeypatch)
+
+    with pytest.raises(mt5_client_mod.Mt5GatewayHostNotPrivate) as ei:
+        mt5_client_mod._default_connect(host=host, port=18812, timeout=30.0)
+
+    assert constructed == [], f"a transport was built toward {constructed!r}"
+    message = str(ei.value)
+    assert host.strip("[]") not in message
+    assert "18812" not in message
+    assert "T-134-03" in message
+
+
+def test_default_connect_still_dials_a_private_gateway_host(monkeypatch):
+    """The guard must not close the private path: a ``.railway.internal`` name
+    reaches the 0.1.9 constructor exactly as before."""
+    constructed = _install_recording_mt5linux(monkeypatch)
+
+    mt5_client_mod._default_connect(
+        host="gateway.railway.internal", port=8001, timeout=30.0
+    )
+
+    assert constructed == [("gateway.railway.internal", 8001)]
+
+
+# (host, allowed). Every existing fixture host the suite dials or reads through an
+# endpoint reader is in the True half, so an over-strict rule fails HERE by name.
+_PRIVATE_GATEWAY_HOST_TABLE: tuple[tuple[str, bool], ...] = (
+    # single-label names: resolvable only through the container's search domain
+    ("h", True),
+    ("localhost", True),
+    ("mt5-gateway", True),
+    # reserved last labels, case-insensitive, one trailing dot ignored
+    ("gateway.railway.internal", True),
+    ("GATEWAY.RAILWAY.INTERNAL", True),
+    ("gateway.railway.internal.", True),
+    ("gw.internal", True),
+    ("mt5-gw.internal", True),
+    ("mt5-validate-gw.internal", True),
+    ("gateway.test", True),
+    ("mt5.localhost", True),
+    # private / loopback / CGNAT (Tailscale) / ULA literals
+    ("127.0.0.1", True),
+    ("::1", True),
+    ("[::1]", True),
+    ("10.0.0.5", True),
+    ("172.16.0.1", True),
+    ("172.31.255.254", True),
+    ("192.168.1.10", True),
+    ("100.64.0.1", True),
+    ("100.127.255.254", True),
+    ("fd12:3456:789a::1", True),
+    # refused
+    ("", False),
+    ("   ", False),
+    ("gateway.up.railway.app", False),
+    ("shuttle.proxy.rlwy.net", False),
+    ("mt5.example.com", False),
+    ("internal.example.com", False),  # `internal` must be the LAST label
+    ("8.8.8.8", False),
+    ("2001:4860:4860::8888", False),
+    ("[2001:4860:4860::8888]", False),
+    ("134744072", False),
+    ("0x8080808", False),
+    ("172.32.0.1", False),            # just outside 172.16.0.0/12
+    ("100.128.0.1", False),           # just outside 100.64.0.0/10
+    ("fe80::1", False),               # link-local is not on the list
+    # A documentation range the stdlib's own private-address flag reports as
+    # private. Refusing it proves the rule is the EXPLICIT network list.
+    ("203.0.113.10", False),
+)
+
+
+@pytest.mark.parametrize(("host", "allowed"), _PRIVATE_GATEWAY_HOST_TABLE)
+def test_private_gateway_host_allowlist(host, allowed):
+    assert mt5_client_mod.is_private_gateway_host(host) is allowed
+
+
+def test_the_table_calibrates_on_a_range_the_stdlib_calls_private():
+    """The 203.0.113.10 row only proves something if the stdlib really does call
+    it private. If a future Python changes that, this fails and the row must be
+    replaced with another such range, never deleted."""
+    import ipaddress
+
+    assert ipaddress.ip_address("203.0.113.10").is_private is True
+
+
 def test_inverting_request_timeout_is_rejected():
     """WR-01: a request_timeout_s that puts the rpyc round-trip ceiling AT OR BELOW
     the MT5 login IPC timeout inverts the load-bearing dual-timeout ordering

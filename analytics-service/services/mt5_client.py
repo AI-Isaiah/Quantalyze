@@ -109,14 +109,19 @@ Contract:
     139) — `mt5linux` speaks rpyc classic / SlaveService, an UNAUTHENTICATED
     arbitrary-remote-code channel. The bridge MUST only ever be reachable over a
     PRIVATE network (Railway internal / WireGuard / SSH tunnel), NEVER a public
-    port.
+    port. ⭐ Phase 164.6.6 D-07 part 1: the dialling side now CHECKS this —
+    `_default_connect` refuses any host `is_private_gateway_host` rejects, before a
+    transport exists. That the gateway has no public listener stays an
+    infrastructure fact the founder reads (N-01), not something this code proves.
 """
 from __future__ import annotations
 
+import ipaddress
 import json
 import logging
 import os
 import re
+import socket
 import time
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
@@ -896,6 +901,109 @@ class Mt5SessionAbandoned(Exception):
         super().__init__(_MT5_SESSION_ABANDONED_MESSAGE)
 
 
+# Phase 164.6.6 D-07 part 1 / T-134-03 — the networks a gateway IP literal may sit
+# in. An EXPLICIT list, never the stdlib's own private-address flag: that flag also
+# admits documentation and benchmarking ranges (203.0.113.0/24 among them), which
+# are not private networks this service could ever be routed over.
+_PRIVATE_GATEWAY_NETWORKS: Final[
+    tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...]
+] = (
+    ipaddress.ip_network("127.0.0.0/8"),     # IPv4 loopback
+    ipaddress.ip_network("::1/128"),         # IPv6 loopback
+    ipaddress.ip_network("10.0.0.0/8"),      # RFC 1918
+    ipaddress.ip_network("172.16.0.0/12"),   # RFC 1918
+    ipaddress.ip_network("192.168.0.0/16"),  # RFC 1918
+    ipaddress.ip_network("100.64.0.0/10"),   # CGNAT: the Tailscale fallback
+    ipaddress.ip_network("fc00::/7"),        # IPv6 unique-local (Railway's private net)
+)
+
+# The last DNS labels that can never resolve on the public internet.
+_PRIVATE_GATEWAY_TLDS: Final[frozenset[str]] = frozenset(
+    {"internal", "test", "localhost"}
+)
+
+_MT5_GATEWAY_HOST_NOT_PRIVATE_MESSAGE: Final[str] = (
+    "MT5 gateway refused: the configured gateway host is not a private-network "
+    "host. The rpyc bridge is unauthenticated remote code and is dialled only "
+    "over a private network (T-134-03)."
+)
+
+
+def _private_ip_literal(host: str) -> bool | None:
+    """``True``/``False`` when ``host`` is an IP literal, ``None`` when it is not.
+
+    ⛔ Numeric forms the C resolver accepts but ``ipaddress`` does not — ``8.8``,
+    a single decimal ``134744072``, hex ``0x8080808`` — are IPv4 addresses too, and
+    they contain no dot or a misleading one. ``socket.inet_aton`` parses exactly
+    those forms without touching the network, so they are judged as the address
+    they dial, never as a single-label name.
+    """
+    candidate = host[1:-1] if host.startswith("[") and host.endswith("]") else host
+    addr: ipaddress.IPv4Address | ipaddress.IPv6Address
+    try:
+        addr = ipaddress.ip_address(candidate)
+    except ValueError:
+        try:
+            addr = ipaddress.IPv4Address(socket.inet_aton(candidate))
+        except (OSError, ValueError):
+            return None
+    return any(addr in net for net in _PRIVATE_GATEWAY_NETWORKS)
+
+
+def is_private_gateway_host(host: str) -> bool:
+    """True iff ``host`` names a gateway the analytics service may dial.
+
+    Phase 164.6.6 D-07 part 1 (T-134-03): the rpyc bridge is an unauthenticated
+    arbitrary-remote-code channel, so it is only ever dialled over a private
+    network. This is the CHECK on the dialling side. The rules, and why each one:
+
+    * An IP literal (IPv6 optionally in brackets) is allowed only inside
+      ``_PRIVATE_GATEWAY_NETWORKS``: loopback, RFC 1918, 100.64.0.0/10 (the
+      Tailscale fallback ``deploy/mt5-gateway/docker-compose.yml`` documents) and
+      IPv6 unique-local. IP literals are judged FIRST, so a public IPv6 (no dot)
+      can never pass as a single-label name. The stdlib's own private-address flag
+      is deliberately NOT used: it admits documentation ranges.
+    * A name whose last label is ``internal`` (reserved for private use; Railway's
+      private DNS lives under it), ``test`` or ``localhost`` (reserved, never
+      publicly resolvable). Case-insensitive, one trailing dot ignored.
+    * A single-label name (no dot): it resolves only through the container's own
+      search domain, never through public DNS.
+
+    Anything else — a Railway public domain, a TCP-proxy host, any other public
+    name, any public IP, an empty string — is False. Pure: no DNS lookup, no
+    socket.
+    """
+    name = host.strip()
+    if not name:
+        return False
+    ip_verdict = _private_ip_literal(name)
+    if ip_verdict is not None:
+        return ip_verdict
+    if name.endswith("."):
+        name = name[:-1]
+    if not name:
+        return False
+    labels = name.lower().split(".")
+    if len(labels) == 1:
+        return True
+    return labels[-1] in _PRIVATE_GATEWAY_TLDS
+
+
+class Mt5GatewayHostNotPrivate(ValueError):
+    """``_default_connect`` refused a gateway host that is not a private-network
+    host (Phase 164.6.6 D-07 part 1, T-134-03).
+
+    The message is FIXED: it names the refusal and the threat id, never the host
+    or the port, because both are our infrastructure and a construction error can
+    reach a log line. It is a ``ValueError`` (a configuration value is wrong) and
+    deliberately NOT an ``Mt5ClientError``: the credential classify arms match on
+    that class, and a server misconfiguration must never blame a user's key.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(_MT5_GATEWAY_HOST_NOT_PRIVATE_MESSAGE)
+
+
 def _default_connect(*, host: str, port: int, timeout: float) -> Any:
     """Construct the real `mt5linux.MetaTrader5` transport.
 
@@ -914,7 +1022,16 @@ def _default_connect(*, host: str, port: int, timeout: float) -> Any:
     rpyc ``sync_request_timeout`` directly on the private connection — the only knob
     0.1.9 exposes — so ``MT5_REQUEST_TIMEOUT_S`` actually governs the wire (its own
     default is 30s, NOT 300s).
+
+    ⛔ Phase 164.6.6 D-07 part 1 (T-134-03): the host is checked FIRST, before the
+    lazy import, so no transport is ever built toward a host
+    ``is_private_gateway_host`` rejects. Every caller reaches the wire through this
+    factory, including ``Mt5Client.restart`` (it reuses the stored factory), and
+    ``tests/test_mt5_client_contract.py`` pins that no other production code
+    imports ``mt5linux`` or opens an rpyc connection.
     """
+    if not is_private_gateway_host(host):
+        raise Mt5GatewayHostNotPrivate()
     from mt5linux import MetaTrader5  # type: ignore[import-not-found]  # noqa: PLC0415 — intentional lazy transport import
 
     mt5 = MetaTrader5(host, port)

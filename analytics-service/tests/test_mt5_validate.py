@@ -3489,3 +3489,62 @@ def test_the_d05_alert_text_carries_no_env_value(monkeypatch, caplog):
     rendered = repr(spy.mock_calls) + "".join(r.getMessage() for r in caplog.records)
     for leak in ("fabricated-host-vv31", "59137", "fabricated-job-jj44", "60248"):
         assert leak not in rendered, f"the D-05 alert leaked {leak!r}"
+
+
+# --------------------------------------------------------------------------- #
+# Phase 164.6.6 D-07 part 1 / T-134-03 — a PUBLIC validation gateway host is a
+# server misconfiguration, refused at the endpoint reader.
+#
+# WHY at the reader and not only at the transport: `_default_connect` refuses a
+# public host too, but that refusal is raised INSIDE the client construction,
+# which the wizard runs in its broad connect arm. That arm answers 503 and votes on
+# `breaker:mt5-gateway`: a permanent misconfiguration reported as transient, the
+# exact class the arm's own comment describes. The reader answering None keeps the
+# refusal on plan 04's 500 MT5_GATEWAY_UNCONFIGURED + D-05 alert disposition.
+# The host is FABRICATED and public-shaped; nothing here opens a socket.
+# --------------------------------------------------------------------------- #
+
+_PUBLIC_VAL_HOST = "mt5-val-pq73.example.com"
+
+
+async def test_a_public_validation_gateway_host_is_refused_as_misconfiguration(
+    exchange_router, monkeypatch, caplog
+):
+    router = exchange_router
+    # The JOB pair stays an internal name (the fixture), so only the validation
+    # host is wrong and a fallback to the job pair would be visible as a lease.
+    monkeypatch.setenv("MT5_VALIDATION_GATEWAY_HOST", _PUBLIC_VAL_HOST)
+    seen = _spy_router_lease(router, monkeypatch)
+    factory = MagicMock(side_effect=AssertionError("no client toward a public host"))
+    router.Mt5Client = factory
+    spy = _sentry_spy(monkeypatch)
+
+    with caplog.at_level(logging.DEBUG):
+        with pytest.raises(HTTPException) as ei:
+            await _call(router, _make_req())
+
+    assert ei.value.status_code == 500, (
+        f"a public host must be a permanent misconfiguration, got "
+        f"{ei.value.status_code}: a 503 here would vote on the gateway breaker"
+    )
+    assert ei.value.detail["code"] == "MT5_GATEWAY_UNCONFIGURED"
+    assert ei.value.detail["retryable"] is False
+    factory.assert_not_called()
+    assert seen == [], f"a lease was taken on a refused validation: {seen!r}"
+    # D-05: the alert fires once, for the wizard site.
+    assert spy.capture_message.call_count == 1
+    spy.set_tag.assert_called_once_with(
+        "mt5_validation_gateway_unconfigured", _WIZARD_SITE_LITERAL
+    )
+    # The reader's log-once line names the env var, not the value.
+    assert any(
+        "MT5_VALIDATION_GATEWAY_HOST" in r.getMessage()
+        and "not a private-network host" in r.getMessage()
+        for r in caplog.records
+    ), "the reader did not log the refusal by env var name"
+    rendered = (
+        repr(ei.value.detail)
+        + "".join(r.getMessage() for r in caplog.records)
+        + repr(spy.mock_calls)
+    )
+    assert "pq73" not in rendered, "the refusal leaked the configured host"
