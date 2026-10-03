@@ -45,14 +45,20 @@ their call sites and moving them would delete the rationale.
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Mapping
 from typing import Any, Final
 
+import sentry_sdk
+
 from services.mt5_client import (
+    HOLDER_HOUSE,
     Mt5AccountMismatchError,
     Mt5Client,
     Mt5ClientError,
+    Mt5LoginRefusedError,
     Mt5SessionAbandoned,
+    _note_terminal_holder,
 )
 from services.mt5_validation import (
     classify_trade_capability,
@@ -443,3 +449,161 @@ def run_probe(
     probe = client.order_check(mt5_probe_request())  # PROBE ONLY
     assert_expected_login(client.account_info(), login=login)  # POST-probe bracket
     return info, probe, terminal
+
+
+# --------------------------------------------------------------------------- #
+# Phase 164.6.6 D-07 part 2 — THE PARK (`H3-MASTER-PASSWORD-MODE:
+# park-after-login`, 164.6.6-CONTEXT.md).
+#
+# Rejecting a master (trading) password BEFORE any login is not reachable with
+# the MT5 API: every trade-capability signal belongs to a logged-in session
+# (plan 02's finding). The founder's answer is containment AFTER the login: the
+# validate sites log the validation terminal back into the HOUSE account inside
+# the same lease, so a user's session never outlives the probe that needed it.
+#
+# What lives here is the MECHANICS only, for the leaf reason this module exists:
+# the house triple and the site are PARAMETERS (this module still imports nothing
+# in-tree beyond `services.mt5_client` and `services.mt5_validation`). The GATE,
+# the decision whether a park may run at all, stays at the two call sites,
+# because it reads their timeout chains and exception arms.
+#
+# ⚠️ The park PREMISE (the house account logged in on BOTH terminals at once) is
+# NOT MEASURED; the founder accepted it with that caveat (CONTEXT D-07 part 2).
+# --------------------------------------------------------------------------- #
+
+#: At most one Sentry capture per cause per window. ERROR is logged on EVERY
+#: occurrence; only the capture is rate-limited (the D-05 alert's shape in
+#: `services/mt5_relogin.py`).
+_PARK_ALERT_WINDOW_S: Final[float] = 3600.0
+
+#: The member an unknown cause is mapped to, so no caller-supplied string is ever
+#: interpolated into alert text.
+_PARK_ALERT_UNRECOGNISED_CAUSE: Final[str] = "unrecognised_cause"
+
+#: ⛔ CLOSED. Park-attempt causes first, then the skip causes the call-site gates
+#: report, then the fallback above.
+_PARK_ALERT_CAUSES: Final[frozenset[str]] = frozenset(
+    {
+        # The park was attempted (or would have been) and did not finish.
+        "house_credentials_unset",
+        "login_refused",
+        "client_error",
+        "session_abandoned",
+        "ceiling",
+        # The call-site gate refused to attempt it.
+        "probe_in_flight",
+        "probe_session_abandoned",
+        "probe_account_mismatch",
+        "budget_exhausted",
+        _PARK_ALERT_UNRECOGNISED_CAUSE,
+    }
+)
+
+_park_last_alert_at: dict[str, float] = {}
+
+
+def _reset_park_alerts_for_tests() -> None:
+    """Test-only: forget the per-cause capture window."""
+    _park_last_alert_at.clear()
+
+
+def _alert_park_failed(cause: str, *, site: str) -> None:
+    """The ONE home of the park alert. Never raises.
+
+    One ``logger.error`` on every occurrence naming the cause and the site, then
+    at most one Sentry capture per cause per ``_PARK_ALERT_WINDOW_S``. The cause
+    is checked against the closed set and the site is one of the two closed
+    validate-site literals the callers pass. ⛔ No login number, password, broker
+    server or host is ever in the text.
+
+    ⚠️ A capture reaches an operator only when ``SENTRY_DSN`` is set on the
+    service (the caveat `routers/cron.py` and `services/mt5_relogin.py` carry);
+    the ERROR line is the floor that always exists.
+    """
+    if cause not in _PARK_ALERT_CAUSES:
+        cause = _PARK_ALERT_UNRECOGNISED_CAUSE
+    logger.error(
+        "mt5 validation park: the validation terminal was NOT logged back into "
+        "the house account (cause=%s, site=%s). A master-password session can "
+        "stay on the validation terminal until its next login (Phase 164.6.6 "
+        "D-07 part 2)",
+        cause,
+        site,
+    )
+    now = time.monotonic()
+    last = _park_last_alert_at.get(cause)
+    if last is not None and now - last < _PARK_ALERT_WINDOW_S:
+        return
+    _park_last_alert_at[cause] = now
+    try:
+        sentry_sdk.set_tag("mt5_validation_park_failed", cause)
+        sentry_sdk.capture_message(
+            f"mt5 validation park failed: cause={cause} site={site}",
+            level="error",
+        )
+    except Exception:  # noqa: BLE001 — an alert must never replace the verdict
+        pass
+
+
+def report_park_skipped(cause: str, *, site: str) -> None:
+    """A call-site gate refused to park (``probe_in_flight``,
+    ``probe_session_abandoned``, ``probe_account_mismatch``,
+    ``budget_exhausted``) or the park's own ceiling fired (``ceiling``). Loud,
+    never silent; never raises."""
+    _alert_park_failed(cause, site=site)
+
+
+def park_on_house_account(
+    client: Mt5Client, *, house: tuple[int, str, str] | None, site: str
+) -> bool:
+    """Log the validation terminal back into the HOUSE account. True on success.
+
+    SYNCHRONOUS blocking RPyC: the call sites run it off the loop under their
+    own ceiling, inside their lease, and only after their default-deny gate held
+    (the probe thread has returned, no fence or account switch, enough budget).
+
+    On success the holder is restamped ``house`` through the one stamping door,
+    ``_note_terminal_holder`` (the login itself stamped the lease's
+    ``validation`` holder). That door's epoch guard refuses the stamp when this
+    thread outlived its lease, so a park its ceiling abandoned can never be
+    attributed to the next holder.
+
+    Returns False after a loud alert when the house credentials are unset, the
+    login is refused (``Mt5LoginRefusedError``), the client raises
+    (``Mt5ClientError`` or anything else) or the fence refuses the session
+    (``Mt5SessionAbandoned``). ⛔ It never raises ``Exception``: the park must
+    never alter which response or exception leaves the validate.
+
+    ⚠️ ``Mt5Client.login`` returns None and RAISES on every failure, so a refusal
+    is the ``Mt5LoginRefusedError`` arm, never a falsy return value.
+    """
+    if house is None:
+        _alert_park_failed("house_credentials_unset", site=site)
+        return False
+    try:
+        client.login(*house)
+    except Mt5SessionAbandoned:
+        _alert_park_failed("session_abandoned", site=site)
+        return False
+    except Mt5LoginRefusedError:
+        _alert_park_failed("login_refused", site=site)
+        return False
+    except Mt5ClientError:
+        _alert_park_failed("client_error", site=site)
+        return False
+    except Exception as exc:  # noqa: BLE001 — see the docstring
+        # The exception CLASS only, never its text: `mt5linux` interpolates the
+        # password into the source it evaluates remotely (T-134-01).
+        logger.warning(
+            "mt5 validation park: the house login raised (error_class=%s)",
+            type(exc).__name__,
+        )
+        _alert_park_failed("client_error", site=site)
+        return False
+    _note_terminal_holder(client.terminal_key, holder=HOLDER_HOUSE, stage="park")
+    logger.info(
+        "mt5 validation park: the validation terminal is back on the house "
+        "account (site=%s)",
+        site,
+    )
+    return True
