@@ -38,7 +38,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 from typing import Any
 
 from services.closed_sets import (
@@ -60,9 +59,16 @@ from services.mt5_client import (
     Mt5Client,
     Mt5ClientError,
     Mt5SessionAbandoned,
+    mt5_terminal_key,
 )
 from services.mt5_concurrency import mt5_terminal_lease
 from services.mt5_handover import HOLDER_VALIDATION, SITE_VALIDATE_WORKER
+# Phase 164.6.6 D-02 / D-05 — the ONE reader of the validation terminal's endpoint
+# and the alert this site fires when it is absent. Never the job pair.
+from services.mt5_relogin import (
+    alert_mt5_validation_gateway_unconfigured,
+    read_env_validation_gateway_endpoint,
+)
 # 153.6 / PARITY-01 — the ONE login+read+probe body, shared with the FastAPI
 # `_validate_mt5_key_probe` branch. This adapter used to carry its own divergent
 # copy; the three fixes 153.3 landed on the router's never reached it. The import
@@ -164,17 +170,24 @@ class Mt5Adapter:
                 return _wrong_server()
             return _auth_failed()
 
-        host = os.getenv("MT5_GATEWAY_HOST")
-        port_raw = os.getenv("MT5_GATEWAY_PORT")
-        if not host or not port_raw:
+        # ⭐ Phase 164.6.6 D-02 — a validation leases the VALIDATION terminal, so an
+        # onboarding login can no longer switch the terminal that serves live jobs.
+        # ⛔ D-05: without its endpoint this RAISES; it never falls back to
+        # MT5_GATEWAY_HOST / MT5_GATEWAY_PORT, which would silently restore the
+        # eviction.
+        endpoint = read_env_validation_gateway_endpoint()
+        if endpoint is None:
+            # D-05's ALERT, fired BEFORE the raise; it never raises itself.
+            alert_mt5_validation_gateway_unconfigured(site=SITE_VALIDATE_WORKER)
             # A SERVER misconfig, propagated — never valid, never blames the user's
             # creds (mirrors sFOX's construction-time posture: a missing egress
             # config is our fault, not the key's).
             raise RuntimeError(
-                "MT5 gateway not configured: MT5_GATEWAY_HOST / MT5_GATEWAY_PORT "
-                "are unset. This is a server misconfiguration, never a credential "
-                "failure."
+                "MT5 gateway not configured: MT5_VALIDATION_GATEWAY_HOST / "
+                "MT5_VALIDATION_GATEWAY_PORT are unset or malformed. This is a "
+                "server misconfiguration, never a credential failure."
             )
+        host, port = endpoint
         # ⭐ D-29 (153.3 review) — TAKE THE TERMINAL LEASE.
         #
         # This is the SIBLING validate path. It logs into the SAME process-global
@@ -199,14 +212,14 @@ class Mt5Adapter:
         # `_MT5_LEASE_WAIT_S` belongs to the INTERACTIVE path alone, where a human
         # is inside the client budget (D-26).
         #
-        # ⚠️ The key MUST be byte-identical to `Mt5Client.terminal_key`
-        # (`f"{host}:{port}"` over the SAME int port handed to the constructor), or
+        # ⚠️ The key MUST be byte-identical to `Mt5Client.terminal_key` (both
+        # spelled by `mt5_client.mt5_terminal_key` over the SAME int port handed
+        # to the constructor), or
         # this resolves to a DIFFERENT Lock object and the fix is cosmetic — every
         # lock still "works" while serializing nothing. Derived BEFORE construction
         # because construction opens the rpyc socket that races, so the lease must
         # already be held when it happens.
-        port = int(port_raw)
-        terminal_key = f"{host}:{port}"
+        terminal_key = mt5_terminal_key(host, port)
         # ⭐ Phase 164.6.6 criterion 1 — `KeySubmissionRequest` carries no
         # `api_key_id`, so the lease is held for the `validation` literal.
         async with mt5_terminal_lease(
