@@ -95,7 +95,7 @@
  * Reads files with node:fs, never shell grep (grep is silently NUL-blind here).
  * The annotation schema is documented in GRAMMAR.md.
  */
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import {
   copyFileSync,
   existsSync,
@@ -105,7 +105,8 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
+import { createServer } from "node:net";
+import { availableParallelism, tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -1505,7 +1506,7 @@ const LANE_LEGS = ["baseline", "arm", "restore", "probe"];
  * 164.3.1-10 — THE LANE RUNNER'S OWN TALLY, one counter per leg.
  *
  * ⭐ INDEPENDENCE IS THE CONTROL (SP-C05). This is incremented in exactly one
- * place — inside `runLane`, beside the `spawnSync` that actually starts a
+ * place — inside `runLane`, beside the spawn that actually starts a
  * lane — and read by `runCorpus` only as a snapshot delta. The verdict loop's
  * `armsExecuted` is a DIFFERENT variable in a DIFFERENT function. The two can
  * agree only if the loop really drove a lane for every arm it counted; one
@@ -1531,7 +1532,7 @@ const laneTally = { baseline: 0, arm: 0, restore: 0, probe: 0 };
  * lane side.
  *
  * Incremented in exactly one place — inside `runLane`, beside `laneTally`, at
- * the `spawnSync` that actually starts an arm lane — and keyed by the gate's
+ * the spawn that actually starts an arm lane — and keyed by the gate's
  * REPO-RELATIVE path, which the verdict loop hands in as `gateKey`. `runCorpus`
  * reads it only as a snapshot delta and `perFileRows` derives `executed`,
  * `judged` and `biting` from it. The per-file columns and the aggregate
@@ -1570,7 +1571,118 @@ export function laneSpawnFailure(proc) {
   return null;
 }
 
-function runLane({ workdir, applyAbs, postApplyAbs, gateAbs, leg, gateKey = null }) {
+/**
+ * 164.9.6.1 (D-01) — `spawnSync`'s result shape, produced asynchronously, so
+ * several lanes can run at once and the UNCHANGED exported `laneSpawnFailure`
+ * still classifies the result.
+ *
+ * Resolves exactly once: on the child's `close`, or — when the binary could not
+ * be started at all (ENOENT: no pid was ever assigned) — on `error`. Each
+ * stream is decoded once from its concatenated Buffers, so a multibyte
+ * character split across two chunks is never corrupted.
+ *
+ * `maxBuffer` emulates `spawnSync`'s option of the same name, which async
+ * `spawn` lacks: bytes are counted across BOTH streams and, on overflow, the
+ * child is killed and `error.code` is `ENOBUFS` — the case `laneSpawnFailure`
+ * already classifies. `runLane` passes the same value the synchronous spawn
+ * used, so the bound is unchanged.
+ *
+ * @returns {Promise<{status:number|null, signal:string|null, error:object|undefined, stdout:string, stderr:string}>}
+ */
+function spawnAsync(cmd, args, { env, maxBuffer }) {
+  return new Promise((resolve) => {
+    const out = [];
+    const err = [];
+    let bytes = 0;
+    let error;
+    let settled = false;
+    const settle = (status, signal) => {
+      if (settled) return;
+      settled = true;
+      resolve({
+        status: error ? null : status,
+        signal: error ? null : signal,
+        error,
+        stdout: Buffer.concat(out).toString("utf8"),
+        stderr: Buffer.concat(err).toString("utf8"),
+      });
+    };
+    const child = spawn(cmd, args, { env, stdio: ["ignore", "pipe", "pipe"] });
+    const collect = (sink) => (chunk) => {
+      if (error) return;
+      bytes += chunk.length;
+      if (bytes > maxBuffer) {
+        error = { code: "ENOBUFS", message: `lane output exceeded ${maxBuffer} bytes` };
+        child.kill("SIGKILL");
+        return;
+      }
+      sink.push(chunk);
+    };
+    child.stdout.on("data", collect(out));
+    child.stderr.on("data", collect(err));
+    child.on("error", (e) => {
+      if (!error) error = e;
+      // Never started: no `close` is owed by a process that never existed.
+      if (child.pid === undefined) settle(null, null);
+    });
+    child.on("close", (status, signal) => settle(status, signal));
+  });
+}
+
+/**
+ * 164.9.6.1 (D-01) — how many gate FILES `runCorpus` runs at once by default.
+ *
+ * MEASURED 2026-10-03 (phase 164.9.6.1 RESEARCH, M1): a public repo's
+ * ubuntu-latest runner has 4 vCPUs; a four-file run at four in flight took
+ * 15.4 s against 45.2 s serial (2.94x) on a 10-core box with identical
+ * verdicts, and the per-arm lane time rose from about 1.0 s to 1.2-1.4 s under
+ * contention. Four is therefore the runner's CPU count, not a tuned figure.
+ * ⛔ Do not raise it without a CI measurement of the `sql-mutation` mutate step.
+ *
+ * It is a SCHEDULING parameter, and it decides no verdict: every tally, floor
+ * and defect is identical at 1 and at 4 (proven by `SELF-TEST (concurrency)`
+ * and by mutation-runner-floors.test.ts). That is why it carries no
+ * FLOOR/MIN/CEILING/MAX/LIMIT token — it is not a threshold anything is
+ * compared against.
+ */
+export const LANE_CONCURRENCY_CAP = 4;
+
+/** The default concurrency: the cap, or fewer when the host has fewer CPUs. Never below 1. */
+export function defaultLaneConcurrency() {
+  return Math.max(1, Math.min(LANE_CONCURRENCY_CAP, availableParallelism()));
+}
+
+/**
+ * 164.9.6.1 (D-01, RESEARCH Pattern 3) — `n` DISTINCT loopback ports, handed
+ * out by the runner so concurrent lanes never race each other inside
+ * `run.sh`'s own `alloc_port` (bind 0, close, then initdb before the
+ * postmaster binds: a sibling can be handed the same port in that window).
+ * All `n` listeners are open AT ONCE before any is closed, so the kernel
+ * cannot hand one port out twice. `run.sh`'s bind-test collision guard still
+ * runs on the port it is given.
+ *
+ * @returns {Promise<number[]>}
+ */
+async function allocateLanePorts(n) {
+  const servers = [];
+  try {
+    for (let i = 0; i < n; i += 1) {
+      const srv = createServer();
+      servers.push(srv);
+      await new Promise((res, rej) => {
+        srv.once("error", rej);
+        srv.listen(0, "127.0.0.1", res);
+      });
+    }
+    const ports = servers.map((s) => s.address().port);
+    if (new Set(ports).size !== n) throw new Error(`allocateLanePorts: ${n} listeners returned non-distinct ports ${ports.join(",")}`);
+    return ports;
+  } finally {
+    await Promise.all(servers.map((s) => new Promise((res) => (s.listening ? s.close(() => res()) : res()))));
+  }
+}
+
+async function runLane({ workdir, applyAbs, postApplyAbs, gateAbs, leg, gateKey = null, port = null }) {
   // Refuse to guess which leg this is: an untagged lane would be an
   // unaccounted invocation, and the cross-check treats that as absurd.
   if (!LANE_LEGS.includes(leg)) throw new Error(`runLane: unknown leg ${JSON.stringify(leg)}`);
@@ -1584,7 +1696,10 @@ function runLane({ workdir, applyAbs, postApplyAbs, gateAbs, leg, gateKey = null
   if (postApplyAbs) args.push("--post-apply", postApplyAbs);
   args.push("--gate", gateAbs);
   const started = Date.now();
-  const proc = spawnSync("bash", args, { encoding: "utf8", maxBuffer: 128 * 1024 * 1024 });
+  // 164.9.6.1: a runner-allocated PORT overrides any `PORT` a developer
+  // exported, which every concurrent lane would otherwise inherit and collide on.
+  const env = port === null ? process.env : { ...process.env, PORT: String(port) };
+  const proc = await spawnAsync("bash", args, { env, maxBuffer: 128 * 1024 * 1024 });
   const measureFail = laneSpawnFailure(proc);
   // Counted at the spawn, after it returned: a lane is an invocation only if
   // the process was actually started, never because this function was entered
@@ -2227,9 +2342,14 @@ export function scopeReasonLine({ subsetFallback = null, reason = null } = {}) {
  *        block without a cluster (a stub that never touches `laneTally`
  *        produces executed=N / lane-invocations=0 by construction). ⚠️ Only
  *        `--self-test` and vitest pass it; the CLI never does.
+ * @param {number} [opts.concurrency] 164.9.6.1 (D-01): gate files run at once,
+ *        default `defaultLaneConcurrency()`. The CLI never passes it, so the CI
+ *        mutate line and the nightly's byte-equal copy never change; the
+ *        self-test and vitest pass 1 or 4 to prove the two agree. A lane runner
+ *        may return its result or a Promise of it; each call is awaited.
  * @param {(s:string)=>void} [opts.log]
  */
-export function runCorpus({
+export async function runCorpus({
   scopeDir,
   onlyFile = null,
   onlyArm = null,
@@ -2239,8 +2359,14 @@ export function runCorpus({
   armsFloor = ARMS_FLOOR,
   waivedCeiling = WAIVED_CEILING,
   laneRunner = runLane,
+  concurrency = defaultLaneConcurrency(),
   log = (s) => console.log(s),
 }) {
+  // 164.9.6.1 (D-01): a usage error, like the subset conflict below — a
+  // concurrency that is not a positive integer would run no file at all.
+  if (!Number.isInteger(concurrency) || concurrency < 1) {
+    throw new Error(`runCorpus: concurrency must be an integer >= 1 (got ${JSON.stringify(concurrency)})`);
+  }
   const narrowed = Boolean(onlyFile || onlyArm);
   if (subsetFiles !== null && narrowed) {
     // A usage error, not a defect: the two modes carry opposite exit-0 contracts.
@@ -2333,6 +2459,15 @@ export function runCorpus({
     reason: narrowed && !scopeReason ? "a narrowed DIAGNOSTIC run (--file/--arm)" : scopeReason,
   });
   log(reasonLine);
+  // 164.9.6.1 (D-01, SS-5): exactly one line naming how many gate files run at
+  // once, printed before any lane. `concurrency` is always >= 1, so a presence
+  // assert never trips on a small run.
+  log(
+    `lane-concurrency: ${concurrency}   (gate files in flight at once: min(cap ${LANE_CONCURRENCY_CAP}, ` +
+      `availableParallelism ${availableParallelism()}) unless overridden; at most ` +
+      `${Math.min(concurrency, targets.length)} for this run's ${targets.length} target file(s); ` +
+      `lanes within a file run in order)`,
+  );
 
   // Snapshot the working tree BEFORE any lane run. The invariant is "this run
   // did not touch the checkout", NOT "the developer has no uncommitted work" —
@@ -2353,6 +2488,16 @@ export function runCorpus({
       mkdirSync(dir, { recursive: true });
       return dir;
     };
+
+    // 164.9.6.1 (D-01, SS-4): one DISTINCT port per worker, allocated before
+    // any lane starts. Worker k runs its lanes one after another on ports[k],
+    // so a port is reused only after the previous lane's cluster stopped, and
+    // no two lanes in flight ever share one. The probe borrows ports[0] before
+    // the pool starts. Allocated only when a lane will run, so cluster-free
+    // runs stay free of any network call.
+    const workerCount = Math.min(concurrency, targets.length);
+    const lanesWillRun = targets.length > 0 || corpus.laneBlockedFiles.length > 0;
+    const ports = lanesWillRun ? await allocateLanePorts(Math.max(1, workerCount)) : [];
 
     // -------------------------------------------------------------------
     // THE LANE PROBE (164.4-03, threat T-164.4-11). The `lane-blocked:` class
@@ -2375,14 +2520,17 @@ export function runCorpus({
     // throwaway cluster purely to probe would make cluster-free modes — the
     // print-contract pins in mutation-runner-floors.test.ts among them — depend
     // on a PostgreSQL install. `--parse-only` never reaches this function.
-    if (targets.length > 0 || corpus.laneBlockedFiles.length > 0) {
+    // ⚠️ AWAITED before the file pool starts: its result gates the
+    // `lane-blocked-stale` defect below, and its defects precede every file's.
+    if (lanesWillRun) {
       const probeSlot = nextSlot();
-      const probe = laneRunner({
+      const probe = await laneRunner({
         workdir: join(probeSlot, "lane"),
         applyAbs: [LANE_PROBE_APPLY],
         postApplyAbs: null,
         gateAbs: LANE_PROBE_GATE,
         leg: "probe",
+        port: ports[0],
       });
       // The MARKER, not the exit status: the probe gate RAISEs on AVAILABLE (so
       // the lane exits non-zero) and NOTICEs on absent (exit 0). Reading the
@@ -2414,7 +2562,41 @@ export function runCorpus({
       }
     }
 
-    for (const name of targets) {
+    // -------------------------------------------------------------------
+    // 164.9.6.1 (D-01) — THE FILE POOL. One gate file is the unit of
+    // concurrency: inside a file the lanes still run baseline, then arms,
+    // then restore, in order, because an arm may only be judged against a
+    // GREEN baseline. Speculative arm lanes would be counted by `laneTally`
+    // and never by `armsExecuted`, which is exactly the `absurdity` shape.
+    //
+    // `runFile` sits TEXTUALLY inside runCorpus, so `armsExecuted += 1` and
+    // every other accumulator stay in this function's scope: the verdict
+    // loop's count is still a different variable in a different function from
+    // `laneTally`, which stays inside `runLane`. JavaScript is single-threaded
+    // and the accumulators are commutative sums, so the totals are identical
+    // at any concurrency.
+    //
+    // OUTPUT ORDER (SS-3). Each file writes its lines and defects into its own
+    // sink; `flush` prints a file only once every earlier file has printed, so
+    // the log and the defect list are in corpus order whatever order the files
+    // FINISH in. `perFileTallies` is filled by index for the same reason.
+    // `waivers` is pushed before the file's first `await`, and files are
+    // claimed in index order, so it is in corpus order too.
+    // -------------------------------------------------------------------
+    const fileSink = () => {
+      const sink = { lines: [], defects: [] };
+      sink.log = (line) => sink.lines.push(line);
+      sink.addDefect = (kind, arm, file, detail) => {
+        if (!DEFECT_KINDS.includes(kind)) throw new Error(`unknown defect kind ${kind}`);
+        sink.defects.push({ kind, arm, file, detail });
+      };
+      return sink;
+    };
+    const runFile = async (index, name, port, sink) => {
+      // Shadowed on purpose: the per-file body below keeps calling `log(...)`
+      // and `addDefect(...)` unchanged, and both land in this file's sink.
+      const log = sink.log;
+      const addDefect = sink.addDefect;
       const gateAbsRepo = join(scopeDir, name);
       const gateRel = relative(REPO_ROOT, gateAbsRepo);
       // Read ONCE and threaded into both readers, rather than `parseFile`
@@ -2425,7 +2607,7 @@ export function runCorpus({
       // an arm still gets a printed row saying so — and seeded at 0/0 for the
       // reason `newPerFileTally` documents.
       const tally = newPerFileTally({ name, gateRel, gateText, annotated: 0, waived: 0 });
-      perFileTallies.push(tally);
+      perFileTallies[index] = tally;
 
       for (const err of parsed.errors) addDefect("parse", null, gateRel, err.message);
       if (!parsed.parity.ok) {
@@ -2438,7 +2620,7 @@ export function runCorpus({
       }
       if (!parsed.setup) {
         addDefect("parse", null, gateRel, "no RED-UNDER-SETUP line — the runner refuses to guess a corpus");
-        continue;
+        return;
       }
 
       const corpusRels = [...parsed.setup.apply, gateRel];
@@ -2478,12 +2660,13 @@ export function runCorpus({
       // -------------------------------------------------------------------
       const baseSlot = nextSlot();
       const baseMap = materialize(baseSlot, corpusRels);
-      const baseline = laneRunner({
+      const baseline = await laneRunner({
         workdir: join(baseSlot, "lane"),
         applyAbs: parsed.setup.apply.map((r) => baseMap.get(r)),
         postApplyAbs: null,
         gateAbs: baseMap.get(gateRel),
         leg: "baseline",
+        port,
       });
       log(`  baseline  ${gateRel} — exit ${baseline.status} (${baseline.seconds.toFixed(1)}s)`);
       if (baseline.measureFail !== null) {
@@ -2494,7 +2677,7 @@ export function runCorpus({
           `MEASURE_FAIL: ${baseline.measureFail} — the runner could not execute the baseline lane, so ` +
             `the pristine corpus was NOT measured and no arm of this gate was judged`,
         );
-        continue;
+        return;
       }
       if (baseline.status !== 0) {
         addDefect(
@@ -2511,7 +2694,7 @@ export function runCorpus({
             baseline.output.match(identityRe())?.[1] ?? "none"
           }`,
         );
-        continue; // arms cannot be judged against a red baseline
+        return; // arms cannot be judged against a red baseline
       }
 
       // -------------------------------------------------------------------
@@ -2586,7 +2769,7 @@ export function runCorpus({
         }
 
         const gateAbs = armMap.get(gateRel);
-        const run = laneRunner({
+        const run = await laneRunner({
           workdir: join(armSlot, "lane"),
           applyAbs: parsed.setup.apply.map((r) => armMap.get(r)),
           postApplyAbs,
@@ -2596,6 +2779,7 @@ export function runCorpus({
           // points into this arm's throwaway slot and changes every arm, so the
           // stable repo-relative path is what the column has to be keyed by.
           gateKey: gateRel,
+          port,
         });
         // ── the lane could not be RUN: MEASURE_FAIL, the arm was NOT judged ──
         // Handled the way `attribution.measureFail` is below: its own name,
@@ -2755,12 +2939,13 @@ export function runCorpus({
       // -------------------------------------------------------------------
       const restoreSlot = nextSlot();
       const restoreMap = materialize(restoreSlot, corpusRels);
-      const restore = laneRunner({
+      const restore = await laneRunner({
         workdir: join(restoreSlot, "lane"),
         applyAbs: parsed.setup.apply.map((r) => restoreMap.get(r)),
         postApplyAbs: null,
         gateAbs: restoreMap.get(gateRel),
         leg: "restore",
+        port,
       });
       log(`  restore   ${gateRel} — exit ${restore.status} (${restore.seconds.toFixed(1)}s)`);
       if (restore.measureFail !== null) {
@@ -2774,7 +2959,42 @@ export function runCorpus({
       } else if (restore.status !== 0) {
         addDefect("restore", null, gateRel, `pristine corpus did not go GREEN after the arm runs (exit ${restore.status})`);
       }
-    }
+    };
+
+    const results = new Array(targets.length);
+    let next = 0;
+    let flushed = 0;
+    // Set on the first rejection so an idle worker claims no new file; the
+    // workers already mid-file run that file to its end (RESEARCH Pitfall 8).
+    let stop = false;
+    let firstError;
+    const flush = () => {
+      while (flushed < targets.length && results[flushed] !== undefined) {
+        for (const line of results[flushed].lines) log(line);
+        for (const d of results[flushed].defects) defects.push(d);
+        flushed += 1;
+      }
+    };
+    const worker = async (k) => {
+      while (!stop && next < targets.length) {
+        const i = next++; // a synchronous claim: no two workers ever take one file
+        const sink = fileSink();
+        try {
+          await runFile(i, targets[i], ports[k], sink);
+        } catch (err) {
+          stop = true;
+          if (firstError === undefined) firstError = err;
+          return;
+        }
+        results[i] = sink;
+        flush();
+      }
+    };
+    // DRAIN BEFORE CLEANUP (RESEARCH Pitfall 8): every worker settles before
+    // the `finally` below removes `scratchRoot`, so a failing file can never
+    // delete a sibling's workdir while that sibling's lane is still running.
+    await Promise.allSettled(Array.from({ length: workerCount }, (_, k) => worker(k)));
+    if (firstError !== undefined) throw firstError;
   } finally {
     rmSync(scratchRoot, { recursive: true, force: true });
   }
@@ -3308,7 +3528,7 @@ function noDefectOfKind(defects, kinds, where = () => true) {
   return !defects.some((x) => kinds.includes(x.kind) && where(x));
 }
 
-function selfTest() {
+async function selfTest() {
   const quiet = () => {};
   let pass = true;
 
@@ -3330,7 +3550,7 @@ function selfTest() {
   // `armsFloor` and `waivedCeiling`; a self-test that moves when a production
   // floor moves is measuring the constant, not the mechanism.
   console.log("=== SELF-TEST 1/17: a non-biting annotation must exit 1 with `no-red` ===");
-  const a = runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "nonbiting-gate.sql", armsFloor: 0, log: quiet });
+  const a = await runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "nonbiting-gate.sql", armsFloor: 0, log: quiet });
   pass =
     expect(a.exitCode === 1, `exit code is 1 (got ${a.exitCode})`) &&
     expect(
@@ -3344,7 +3564,7 @@ function selfTest() {
   // scenario states `waivedCeiling: 1` — its own measured number — exactly as
   // it states its own armsFloor. Scenario 5 is where the ceiling is proven to
   // FIRE, by stating 0 against that same corpus.
-  const b = runCorpus({ scopeDir: FIXTURE_CORPUS, filesFloor: 99, armsFloor: 0, waivedCeiling: 1, log: quiet });
+  const b = await runCorpus({ scopeDir: FIXTURE_CORPUS, filesFloor: 99, armsFloor: 0, waivedCeiling: 1, log: quiet });
   pass =
     expect(b.exitCode === 1, `exit code is 1 (got ${b.exitCode})`) &&
     expect(
@@ -3354,7 +3574,7 @@ function selfTest() {
     pass;
 
   console.log("=== SELF-TEST 3/17: reddening the WRONG arm must exit 1 with `wrong-first-failure` ===");
-  const c = runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "wrong-identity-gate.sql", armsFloor: 0, log: quiet });
+  const c = await runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "wrong-identity-gate.sql", armsFloor: 0, log: quiet });
   pass =
     expect(c.exitCode === 1, `exit code is 1 (got ${c.exitCode})`) &&
     expect(
@@ -3366,7 +3586,7 @@ function selfTest() {
     pass;
 
   console.log("=== SELF-TEST 4/17: a wrong `occurrences` must exit 1 with MEASURE_FAIL, NOT `no-red` ===");
-  const d = runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "occurrence-mismatch-gate.sql", armsFloor: 0, log: quiet });
+  const d = await runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "occurrence-mismatch-gate.sql", armsFloor: 0, log: quiet });
   pass =
     expect(d.exitCode === 1, `exit code is 1 (got ${d.exitCode})`) &&
     expect(
@@ -3390,7 +3610,7 @@ function selfTest() {
   // waivedCeiling 0 against a corpus carrying 1 waiver: the ceiling's FIRE
   // direction, in the same run as the ARMS_FLOOR one. Both are `floor` defects
   // and each must be distinguishable BY NAME from the other two.
-  const f = runCorpus({ scopeDir: FIXTURE_CORPUS, filesFloor: 1, armsFloor: 99, waivedCeiling: 0, log: quiet });
+  const f = await runCorpus({ scopeDir: FIXTURE_CORPUS, filesFloor: 1, armsFloor: 99, waivedCeiling: 0, log: quiet });
   pass =
     expect(f.exitCode === 1, `exit code is 1 (got ${f.exitCode})`) &&
     expect(
@@ -3408,7 +3628,7 @@ function selfTest() {
     pass;
 
   console.log("=== SELF-TEST 6/17: the green fixture corpus must exit 0 ===");
-  const e = runCorpus({ scopeDir: FIXTURE_CORPUS, filesFloor: 1, armsFloor: 2, waivedCeiling: 1, log: quiet });
+  const e = await runCorpus({ scopeDir: FIXTURE_CORPUS, filesFloor: 1, armsFloor: 2, waivedCeiling: 1, log: quiet });
   pass =
     expect(e.exitCode === 0, `exit code is 0 (got ${e.exitCode}; defects: ${JSON.stringify(e.defects)})`) &&
     expect(e.armsExecuted === 2, `2 arms executed (got ${e.armsExecuted})`) &&
@@ -3430,7 +3650,7 @@ function selfTest() {
   // needle or its replacement, so this check can only pass on the CONTENT
   // invariant (`identityRewriteDetail`) and not on the spelling rule.
   console.log("=== SELF-TEST 7/17: rewriting an arm IDENTITY must exit 1 with `identity-rewrite` ===");
-  const g = runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "identity-rewrite-gate.sql", armsFloor: 0, log: quiet });
+  const g = await runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "identity-rewrite-gate.sql", armsFloor: 0, log: quiet });
   pass =
     expect(g.exitCode === 1, `exit code is 1 (got ${g.exitCode})`) &&
     expect(
@@ -3449,7 +3669,7 @@ function selfTest() {
 
   console.log("");
   console.log("=== SELF-TEST 8/17: SYNTHESISING an identity must exit 1 with `synthesised-identity` ===");
-  const h = runCorpus({
+  const h = await runCorpus({
     scopeDir: SELFTEST_DIR,
     onlyFile: "synthesised-identity-gate.sql",
     armsFloor: 0,
@@ -3486,7 +3706,7 @@ function selfTest() {
   // here: a narrowed (onlyFile) run enforces NO floor (see `narrowed` above),
   // so the control's survival is asserted DIRECTLY on bitingArms below, never
   // through the floor.
-  const i = runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "compound-head-gate.sql", armsFloor: 1, log: quiet });
+  const i = await runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "compound-head-gate.sql", armsFloor: 1, log: quiet });
   const compoundRefusal = i.defects.find((x) => x.kind === "neuter-missed" && x.arm === "BEHIND HEAD");
   pass =
     expect(i.exitCode === 1, `exit code is 1 (got ${i.exitCode})`) &&
@@ -3526,7 +3746,7 @@ function selfTest() {
   // must never be mistakable for a passing gate). 2 with an empty defect table
   // is therefore the GREEN shape for this scenario; 0 here would mean the
   // narrowed guard itself had been lost.
-  const j = runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "comment-parity-gate.sql", armsFloor: 2, log: quiet });
+  const j = await runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "comment-parity-gate.sql", armsFloor: 2, log: quiet });
   pass =
     expect(
       j.exitCode === 2 && j.defects.length === 0,
@@ -3562,7 +3782,7 @@ function selfTest() {
   );
   // armsFloor 1 states the corpus's own number: only the genuine control can
   // bite. INERT in a narrowed run — the control is asserted on bitingArms.
-  const k = runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "current-query-forge-gate.sql", armsFloor: 1, log: quiet });
+  const k = await runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "current-query-forge-gate.sql", armsFloor: 1, log: quiet });
   const cqForge = k.defects.find((x) => x.kind === "synthesised-identity" && x.arm === "FORGE 1");
   pass =
     expect(k.exitCode === 1, `exit code is 1 (got ${k.exitCode})`) &&
@@ -3590,7 +3810,7 @@ function selfTest() {
   );
   // armsFloor 1: as in the current_query() re-raise scenario — stated,
   // inert here, asserted on bitingArms.
-  const l = runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "nested-execute-forge-gate.sql", armsFloor: 1, log: quiet });
+  const l = await runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "nested-execute-forge-gate.sql", armsFloor: 1, log: quiet });
   const forge2 = l.defects.find((x) => x.kind === "synthesised-identity" && x.arm === "FORGE 2");
   const forge3 = l.defects.find((x) => x.kind === "synthesised-identity" && x.arm === "FORGE 3");
   // THE AIM, read off the FIXTURE'S OWN BYTES rather than off the refusal
@@ -3652,7 +3872,7 @@ function selfTest() {
   );
   // armsFloor 1: as in the current_query() re-raise scenario — stated,
   // inert here, asserted on bitingArms.
-  const m = runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "message-embedded-forge-gate.sql", armsFloor: 1, log: quiet });
+  const m = await runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "message-embedded-forge-gate.sql", armsFloor: 1, log: quiet });
   const forge4 = m.defects.find((x) => x.kind === "synthesised-identity" && x.arm === "FORGE 4");
   const forge4Record = gateAttributionRecords(
     readFileSync(join(SELFTEST_DIR, "message-embedded-forge-gate.sql"), "utf8"),
@@ -3704,7 +3924,7 @@ function selfTest() {
     leg === "probe"
       ? { status: 0, output: PROBE_ABSENT_OUTPUT, seconds: 0, measureFail: null, invoked: true }
       : { status: 0, output: "", seconds: 0, measureFail: null, invoked: true };
-  const n = runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "nonbiting-gate.sql", armsFloor: 0, laneRunner: stubLane, log: quiet });
+  const n = await runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "nonbiting-gate.sql", armsFloor: 0, laneRunner: stubLane, log: quiet });
   const absurd = n.defects.find((x) => x.kind === "absurdity");
   pass =
     expect(n.exitCode === 1, `exit code is 1 (got ${n.exitCode})`) &&
@@ -3740,7 +3960,7 @@ function selfTest() {
       return { status: 0, output: PROBE_ABSENT_OUTPUT, seconds: 0, measureFail: null, invoked: true };
     return { status: 0, output: "", seconds: 0, measureFail: null, invoked: true };
   };
-  const o = runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "nonbiting-gate.sql", armsFloor: 0, laneRunner: deadLane, log: quiet });
+  const o = await runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "nonbiting-gate.sql", armsFloor: 0, laneRunner: deadLane, log: quiet });
   const dead = o.defects.find((x) => x.kind === "lane-unrunnable" && x.arm === "NONBITE 1");
   pass =
     expect(o.exitCode === 1, `exit code is 1 (got ${o.exitCode})`) &&
@@ -3772,7 +3992,7 @@ function selfTest() {
   console.log(
     "=== SELF-TEST 16/17: a twin targeting a pg-lane STAND-IN FIXTURE must be refused at parse time with `parse` naming the stand-in — never `no-red`, never `bad-file-ref` ===",
   );
-  const q = runCorpus({
+  const q = await runCorpus({
     scopeDir: SELFTEST_DIR,
     onlyFile: "fixture-target-gate.sql",
     armsFloor: 0,
@@ -3836,14 +4056,14 @@ function selfTest() {
   // filesFloor 0: this corpus is DELIBERATELY all-unannotated (the pair exists
   // to be classified, not executed), so the real FILES_FLOOR would add a
   // spurious `floor` defect and mask the one defect under test.
-  const stale = runCorpus({
+  const stale = await runCorpus({
     scopeDir: LANE_BLOCKED_DIR,
     filesFloor: 0,
     armsFloor: 0,
     laneRunner: probeLane(true),
     log: quiet,
   });
-  const current = runCorpus({
+  const current = await runCorpus({
     scopeDir: LANE_BLOCKED_DIR,
     filesFloor: 0,
     armsFloor: 0,
@@ -3888,7 +4108,7 @@ function selfTest() {
   // the subset pass by making the diagnostic mode pass too, or the reverse.
   console.log("");
   console.log("=== SELF-TEST (subset) 1/7: a clean SUBSET run exits 0 AND a clean --file run over the SAME gate still exits 2 ===");
-  const sClean = runCorpus({
+  const sClean = await runCorpus({
     scopeDir: FIXTURE_CORPUS,
     subsetFiles: ["mini-gate.sql"],
     filesFloor: 1,
@@ -3896,7 +4116,7 @@ function selfTest() {
     waivedCeiling: 1,
     log: quiet,
   });
-  const dClean = runCorpus({ scopeDir: FIXTURE_CORPUS, onlyFile: "mini-gate.sql", filesFloor: 1, armsFloor: 2, waivedCeiling: 1, log: quiet });
+  const dClean = await runCorpus({ scopeDir: FIXTURE_CORPUS, onlyFile: "mini-gate.sql", filesFloor: 1, armsFloor: 2, waivedCeiling: 1, log: quiet });
   pass =
     expect(
       sClean.exitCode === 0 && sClean.subset === true && sClean.defects.length === 0,
@@ -3917,7 +4137,7 @@ function selfTest() {
     pass;
 
   console.log("=== SELF-TEST (subset) 2/7: a SUBSET run with a defect exits 1 ===");
-  const sBad = runCorpus({
+  const sBad = await runCorpus({
     scopeDir: SELFTEST_DIR,
     subsetFiles: ["nonbiting-gate.sql"],
     filesFloor: 1,
@@ -3986,7 +4206,7 @@ function selfTest() {
     leg === "probe"
       ? { status: 0, output: PROBE_ABSENT_OUTPUT, seconds: 0, measureFail: null, invoked: true }
       : { status: 0, output: "", seconds: 0, measureFail: null, invoked: true };
-  const none = runCorpus({
+  const none = await runCorpus({
     scopeDir: FIXTURE_CORPUS,
     subsetFiles: ["mini-migration.sql"],
     filesFloor: 1,
@@ -4008,7 +4228,7 @@ function selfTest() {
     pass;
 
   console.log("=== SELF-TEST (subset) 5/7: a list MIXING annotated and unannotated files runs FULL too — never a subset that silently drops one ===");
-  const mixed = runCorpus({
+  const mixed = await runCorpus({
     scopeDir: FIXTURE_CORPUS,
     subsetFiles: ["mini-gate.sql", "mini-migration.sql"],
     filesFloor: 1,
@@ -4048,7 +4268,7 @@ function selfTest() {
     ) && pass;
   let threwOnPair = false;
   try {
-    runCorpus({ scopeDir: FIXTURE_CORPUS, subsetFiles: ["mini-gate.sql"], onlyFile: "mini-gate.sql", log: quiet });
+    await runCorpus({ scopeDir: FIXTURE_CORPUS, subsetFiles: ["mini-gate.sql"], onlyFile: "mini-gate.sql", log: quiet });
   } catch {
     threwOnPair = true;
   }
@@ -4062,7 +4282,7 @@ function selfTest() {
   // one a waiver: bound 2. Lanes stubbed — only the floor verdict is read.
   console.log("=== SELF-TEST (subset) 7/7: a SUBSET run whose corpus-wide annotated-unwaived bound is under ARMS_FLOOR exits 1 with a static-bound floor defect ===");
   const boundLines = [];
-  const under = runCorpus({
+  const under = await runCorpus({
     scopeDir: FIXTURE_CORPUS,
     subsetFiles: ["mini-gate.sql"],
     filesFloor: 1,
@@ -4071,7 +4291,7 @@ function selfTest() {
     laneRunner: subsetStub,
     log: (l) => boundLines.push(l),
   });
-  const atBound = runCorpus({
+  const atBound = await runCorpus({
     scopeDir: FIXTURE_CORPUS,
     subsetFiles: ["mini-gate.sql"],
     filesFloor: 1,
@@ -4118,7 +4338,7 @@ function selfTest() {
 // CLI
 // ---------------------------------------------------------------------------
 
-function main(argv) {
+async function main(argv) {
   let scopeDir = DEFAULT_CORPUS;
   let onlyFile = null;
   let onlyArm = null;
@@ -4128,7 +4348,7 @@ function main(argv) {
 
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
-    if (arg === "--self-test") return selfTest();
+    if (arg === "--self-test") return await selfTest();
     else if (arg === "--parse-only") parseOnly = true;
     else if (arg === "--fixture-corpus") {
       scopeDir = FIXTURE_CORPUS;
@@ -4203,9 +4423,9 @@ function main(argv) {
   // 164.9.6 D-12: the derivation's reason, as `changed-paths` published it and
   // the mutate step handed it on (rewritten there when the step refused a mode).
   const scopeReason = process.env.SQL_GATE_REASON ?? null;
-  return runCorpus({ scopeDir, onlyFile, onlyArm, subsetFiles, scopeReason }).exitCode;
+  return (await runCorpus({ scopeDir, onlyFile, onlyArm, subsetFiles, scopeReason })).exitCode;
 }
 
 if (process.argv[1] && process.argv[1].endsWith("run.mjs")) {
-  process.exit(main(process.argv.slice(2)));
+  process.exit(await main(process.argv.slice(2)));
 }

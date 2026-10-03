@@ -1334,7 +1334,7 @@ describe("164.3.1-10 — the runner's absurdity floor (D-09): two INDEPENDENT ta
     };
 
     // ── The gate path. ──
-    const runCorpusBody = fnBody("export function runCorpus({");
+    const runCorpusBody = fnBody("export async function runCorpus({");
     expect(runCorpusBody).toMatch(/absurdityViolations\(\{[\s\S]{0,200}perFile: fileRows/);
     expect(runCorpusBody).toMatch(/logPerFileRows\(fileRows, log\)/);
 
@@ -1377,7 +1377,7 @@ describe("164.3.1-10 — the runner's absurdity floor (D-09): two INDEPENDENT ta
       return src.slice(at, end + 2);
     };
     const runLaneBody = fnBody("function runLane(");
-    const runCorpusBody = fnBody("export function runCorpus(");
+    const runCorpusBody = fnBody("export async function runCorpus(");
 
     expect(runLaneBody).toMatch(/laneTally\[leg\] \+= 1/);
     expect(runLaneBody).not.toMatch(/armsExecuted/);
@@ -1418,7 +1418,7 @@ describe("164.3.1-10 — the runner's absurdity floor (D-09): two INDEPENDENT ta
       return src.slice(at, end + 2);
     };
     const runLaneBody = fnBody("function runLane(");
-    const runCorpusBody = fnBody("export function runCorpus(");
+    const runCorpusBody = fnBody("export async function runCorpus(");
     const perFileRowsBody = fnBody("function perFileRows(");
 
     // The lane side KEEPS the per-gate count, beside the per-leg one.
@@ -1450,13 +1450,13 @@ describe("164.3.1-10 — the runner's absurdity floor (D-09): two INDEPENDENT ta
   const severedLane = ({ leg }: { leg: string }) =>
     leg === "probe" ? PROBE_ABSENT : { status: 0, output: "", seconds: 0, measureFail: null, invoked: true };
 
-  it("FIRES through runCorpus's real verdict loop: a lane runner that never spawns → exit 1 with `absurdity` naming executed=N lane-invocations=0", () => {
+  it("FIRES through runCorpus's real verdict loop: a lane runner that never spawns → exit 1 with `absurdity` naming executed=N lane-invocations=0", async () => {
     // Until 2026-09-02 this direction was pinned only by a one-off byte-backed
     // neuter of `laneTally[leg] += 1` recorded in 164.3.1-10-SUMMARY.md. The
     // stub above reaches the same severed shape through the injectable
     // `laneRunner`, so the loop → addDefect("absurdity") → exitCode 1 wiring
     // is driven on every vitest run, with no cluster.
-    const r = runCorpus({
+    const r = await runCorpus({
       scopeDir: SELFTEST_DIR,
       onlyFile: "nonbiting-gate.sql",
       armsFloor: 0,
@@ -1499,7 +1499,7 @@ describe("164.3.1-10 — the runner's absurdity floor (D-09): two INDEPENDENT ta
     expect(laneSpawnFailure({ status: 3, signal: null })).toBeNull();
   });
 
-  it("through the wiring: an arm lane that never STARTED (ENOENT) is a `lane-unrunnable` MEASURE_FAIL — not wrong-first-failure, not executed, not biting", () => {
+  it("through the wiring: an arm lane that never STARTED (ENOENT) is a `lane-unrunnable` MEASURE_FAIL — not wrong-first-failure, not executed, not biting", async () => {
     // Pre-fix `status: null` fell through `!== 0`, the empty output carried
     // no identity, and the arm was reported as `wrong-first-failure` — an
     // instrument failure wearing a corpus defect's name.
@@ -1509,7 +1509,7 @@ describe("164.3.1-10 — the runner's absurdity floor (D-09): two INDEPENDENT ta
       if (leg === "probe") return PROBE_ABSENT;
       return { status: 0, output: "", seconds: 0, measureFail: null, invoked: true };
     };
-    const r = runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "nonbiting-gate.sql", armsFloor: 0, laneRunner: dead, log: () => {} });
+    const r = await runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "nonbiting-gate.sql", armsFloor: 0, laneRunner: dead, log: () => {} });
     expect(r.exitCode).toBe(1);
     const mine = r.defects.filter((d: { kind: string; arm: string | null }) => d.kind === "lane-unrunnable" && d.arm === "NONBITE 1");
     expect(mine).toHaveLength(1);
@@ -1529,14 +1529,14 @@ describe("164.3.1-10 — the runner's absurdity floor (D-09): two INDEPENDENT ta
     expect(r.defects.map((d: { kind: string }) => d.kind)).not.toContain("absurdity");
   });
 
-  it("through the wiring: an arm lane that STARTED and was signalled counts as executed but never as biting", () => {
+  it("through the wiring: an arm lane that STARTED and was signalled counts as executed but never as biting", async () => {
     const killed = ({ leg }: { leg: string }) => {
       if (leg === "arm")
         return { status: null, output: "", seconds: 0, measureFail: "lane could not run: SIGKILL", invoked: true };
       if (leg === "probe") return PROBE_ABSENT;
       return { status: 0, output: "", seconds: 0, measureFail: null, invoked: true };
     };
-    const r = runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "nonbiting-gate.sql", armsFloor: 0, laneRunner: killed, log: () => {} });
+    const r = await runCorpus({ scopeDir: SELFTEST_DIR, onlyFile: "nonbiting-gate.sql", armsFloor: 0, laneRunner: killed, log: () => {} });
     expect(r.exitCode).toBe(1);
     expect(r.defects.some((d: { kind: string }) => d.kind === "lane-unrunnable")).toBe(true);
     expect(noProbeMeasureFail(r.defects), "the stub must have ANSWERED the probe leg").toBe(true);
@@ -1548,7 +1548,7 @@ describe("164.3.1-10 — the runner's absurdity floor (D-09): two INDEPENDENT ta
   });
 
   // ── PRINT CONTRACT — the wiring that prints, not a string constant ──────
-  it("the runner PRINTS the lane tally beside coverage/arms/biting — driven through runCorpus's real summary block", () => {
+  it("the runner PRINTS the lane tally beside coverage/arms/biting — driven through runCorpus's real summary block", async () => {
     // A narrowed run whose --file matches no gate in the selftest corpus: no
     // lane is spawned, so no cluster is needed here, and the REAL summary
     // block still runs and prints. What this pins is the wiring — the line
@@ -1557,7 +1557,7 @@ describe("164.3.1-10 — the runner's absurdity floor (D-09): two INDEPENDENT ta
     // lanes is asserted by `--self-test` scenario 6 (2 arms, 2 lanes), which
     // the sql-mutation job runs with a cluster.
     const lines: string[] = [];
-    const r = runCorpus({
+    const r = await runCorpus({
       scopeDir: SELFTEST_DIR,
       onlyFile: "no-such-gate.sql",
       onlyArm: null,
@@ -3196,7 +3196,7 @@ describe("164.9.6 D-12 — scopeReasonLine says why the run took its scope, on o
 
   it("SOURCE PIN: in runCorpus the scope-reason line is logged directly after `log(scopeLine);`, no other log call between", () => {
     const code = maskJsComments(readFileSync(RUNNER_PATH, "utf8"));
-    const fnAt = anchorIndex(code, "export function runCorpus({");
+    const fnAt = anchorIndex(code, "export async function runCorpus({");
     const fnEnd = anchorIndex(code, "\n}\n", fnAt);
     const body = code.slice(fnAt, fnEnd);
     const scopeAt = anchorIndex(body, "log(scopeLine);");
@@ -3420,9 +3420,9 @@ describe("164.4.2-07 (D-D) — a SUBSET run never compares a narrowed tally agai
     leg === "probe" ? PROBE_ABSENT : { status: 0, output: "", seconds: 0, measureFail: null, invoked: true };
   type Defect = { kind: string; detail: string };
   const floorDefects = (defects: Defect[], re: RegExp) => defects.filter((d) => d.kind === "floor" && re.test(d.detail));
-  const drive = (opts: Record<string, unknown>) => {
+  const drive = async (opts: Record<string, unknown>) => {
     const lines: string[] = [];
-    const r = runCorpus({ scopeDir: FIXTURE_DIR, laneRunner: stubLane, log: (s: string) => lines.push(s), ...opts });
+    const r = await runCorpus({ scopeDir: FIXTURE_DIR, laneRunner: stubLane, log: (s: string) => lines.push(s), ...opts });
     return { r, lines };
   };
 
@@ -3435,8 +3435,8 @@ describe("164.4.2-07 (D-D) — a SUBSET run never compares a narrowed tally agai
     expect(waivers).toHaveLength(1);
   });
 
-  it("a SUBSET run raises NO biting-count ARMS_FLOOR defect though its biting count is far below ARMS_FLOOR — and SAYS the floor was not compared", () => {
-    const { r, lines } = drive({ subsetFiles: ["mini-gate.sql"], filesFloor: 1, armsFloor: ARMS_FLOOR, waivedCeiling: 1 });
+  it("a SUBSET run raises NO biting-count ARMS_FLOOR defect though its biting count is far below ARMS_FLOOR — and SAYS the floor was not compared", async () => {
+    const { r, lines } = await drive({ subsetFiles: ["mini-gate.sql"], filesFloor: 1, armsFloor: ARMS_FLOOR, waivedCeiling: 1 });
     expect(r.subset, "the run must actually have been a SUBSET run").toBe(true);
     expect(r.bitingArms, "AIM: the biting count must sit below the real constant, or the absence proves nothing").toBeLessThan(ARMS_FLOOR);
     // The subset's BITING count is never compared to ARMS_FLOOR…
@@ -3451,29 +3451,29 @@ describe("164.4.2-07 (D-D) — a SUBSET run never compares a narrowed tally agai
     expect(lines.filter((l) => l.startsWith("scope: "))).toEqual(["scope: SUBSET 1/1 annotated files: mini-gate.sql"]);
   });
 
-  it("CONTROL: a FULL run over the SAME fixture with the SAME floor still raises the ARMS_FLOOR regression", () => {
-    const { r, lines } = drive({ filesFloor: 1, armsFloor: ARMS_FLOOR, waivedCeiling: 1 });
+  it("CONTROL: a FULL run over the SAME fixture with the SAME floor still raises the ARMS_FLOOR regression", async () => {
+    const { r, lines } = await drive({ filesFloor: 1, armsFloor: ARMS_FLOOR, waivedCeiling: 1 });
     expect(r.subset).toBe(false);
     expect(floorDefects(r.defects, /^ARMS_FLOOR regression: \d+ biting arm\(s\) < floor /)).toHaveLength(1);
     expect(lines.filter((l) => l.startsWith("scope: "))).toEqual(["scope: FULL 1/1 annotated files"]);
     expect(r.exitCode).toBe(1);
   });
 
-  it("FILES_FLOOR still FIRES on a subset run when violated", () => {
-    const { r } = drive({ subsetFiles: ["mini-gate.sql"], filesFloor: 99, armsFloor: 0, waivedCeiling: 1 });
+  it("FILES_FLOOR still FIRES on a subset run when violated", async () => {
+    const { r } = await drive({ subsetFiles: ["mini-gate.sql"], filesFloor: 99, armsFloor: 0, waivedCeiling: 1 });
     expect(r.subset).toBe(true);
     expect(floorDefects(r.defects, /^FILES_FLOOR regression: 1 annotated file\(s\) < floor 99$/)).toHaveLength(1);
     expect(r.exitCode).toBe(1);
   });
 
-  it("WAIVED_CEILING still FIRES on a subset run when violated", () => {
-    const { r } = drive({ subsetFiles: ["mini-gate.sql"], filesFloor: 1, armsFloor: 0, waivedCeiling: 0 });
+  it("WAIVED_CEILING still FIRES on a subset run when violated", async () => {
+    const { r } = await drive({ subsetFiles: ["mini-gate.sql"], filesFloor: 1, armsFloor: 0, waivedCeiling: 0 });
     expect(r.subset).toBe(true);
     expect(floorDefects(r.defects, /^WAIVED_CEILING exceeded: 1 waived arm\(s\) > ceiling 0\./)).toHaveLength(1);
     expect(r.exitCode).toBe(1);
   });
 
-  it("FILES_FLOOR's numerator on a subset run is the FULL scan's, never the narrowed count — both directions", () => {
+  it("FILES_FLOOR's numerator on a subset run is the FULL scan's, never the narrowed count — both directions", async () => {
     // The self-test corpus has many annotated files; narrowing to ONE makes a
     // renormalised numerator (1) distinguishable from the full one (N).
     const full = scanCorpus(SELFTEST_DIR).filesAnnotated;
@@ -3488,15 +3488,15 @@ describe("164.4.2-07 (D-D) — a SUBSET run never compares a narrowed tally agai
         laneRunner: stubLane,
         log: () => {},
       });
-    const holds = at(full);
+    const holds = await at(full);
     expect(holds.subset).toBe(true);
     expect(holds.filesAnnotated).toBe(full);
     expect(floorDefects(holds.defects, /FILES_FLOOR/), "a floor equal to the FULL count must hold on a subset run").toEqual([]);
-    const fires = at(full + 1);
+    const fires = await at(full + 1);
     expect(floorDefects(fires.defects, /FILES_FLOOR regression/), "one above the FULL count must fire on a subset run").toHaveLength(1);
   });
 
-  it("164.9.6 D-12: every corpus run logs ONE scope-reason line directly after its scope line, and returns it", () => {
+  it("164.9.6 D-12: every corpus run logs ONE scope-reason line directly after its scope line, and returns it", async () => {
     const cases: Array<[Record<string, unknown>, string]> = [
       [{ subsetFiles: ["mini-gate.sql"], scopeReason: "1 of 3 changed file(s) are gate files" }, "scope-reason: 1 of 3 changed file(s) are gate files"],
       [{ subsetFiles: ["mini-migration.sql"], scopeReason: "r" }, "scope-reason: the runner fell back to FULL: no listed file is annotated: mini-migration.sql (derivation: r)"],
@@ -3504,7 +3504,7 @@ describe("164.4.2-07 (D-D) — a SUBSET run never compares a narrowed tally agai
       [{ onlyFile: "mini-gate.sql" }, "scope-reason: a narrowed DIAGNOSTIC run (--file/--arm)"],
     ];
     for (const [opts, want] of cases) {
-      const { r, lines } = drive({ filesFloor: 0, armsFloor: 0, waivedCeiling: 9, ...opts });
+      const { r, lines } = await drive({ filesFloor: 0, armsFloor: 0, waivedCeiling: 9, ...opts });
       const scopeAt = lines.findIndex((l) => l.startsWith("scope: "));
       expect(scopeAt, JSON.stringify(opts)).toBeGreaterThan(-1);
       expect(lines[scopeAt + 1], JSON.stringify(opts)).toBe(want);
@@ -3515,7 +3515,7 @@ describe("164.4.2-07 (D-D) — a SUBSET run never compares a narrowed tally agai
 
   it("the CLI can never hand a subset run a lowered floor: main's runCorpus call passes no floor, ceiling or lane runner", () => {
     const code = maskJsComments(readFileSync(RUNNER_PATH, "utf8"));
-    const at = code.indexOf("\nfunction main(argv) {");
+    const at = code.indexOf("\nasync function main(argv) {");
     expect(at, "main(argv) not found in the masked source").toBeGreaterThan(-1);
     const end = code.indexOf("\n}\n", at);
     expect(end).toBeGreaterThan(at);
