@@ -3526,3 +3526,169 @@ describe("164.4.2-07 (D-D) — a SUBSET run never compares a narrowed tally agai
     expect(calls).toEqual(["runCorpus({ scopeDir, onlyFile, onlyArm, subsetFiles, scopeReason })"]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// 164.9.6.1 (D-01) — LANE CONCURRENCY. `runCorpus` runs up to N gate files at
+// once inside ONE process. These arms drive the real pool, verdict loop and
+// summary block through an ASYNC stub lane runner, so no cluster is needed.
+// The corpus is the self-test directory because it carries 12 annotated files:
+// the fixture corpus carries ONE, and a file-level pool over one file can
+// never have more than one lane in flight, so it could not tell 1 from 4.
+// ⛔ Every serial-vs-parallel pair is awaited ONE AFTER THE OTHER, never under
+// `Promise.all`: `laneTally` is module-level and read as a snapshot delta, so
+// two overlapping runs would count each other's lanes (RESEARCH Pitfall 9).
+// ---------------------------------------------------------------------------
+describe("lane concurrency (164.9.6.1 D-01)", () => {
+  const PROBE_ABSENT = { status: 0, output: "NOTICE:  LANE-PROBE: pg_cron absent", seconds: 0, measureFail: null, invoked: true };
+  const FILES = scanCorpus(SELFTEST_DIR).annotatedFiles as string[];
+  type Call = { leg: string; gateAbs: string; port?: number };
+  type Defect = { kind: string; arm: string | null; file: string | null; detail: string };
+
+  /**
+   * An async stub lane whose delay DECREASES with the file's corpus index, so
+   * LATER files finish FIRST — the adversarial completion order. It records
+   * how many lanes are in flight and which ports they hold.
+   */
+  const makeStub = ({ rejectFile = null as string | null } = {}) => {
+    const state = { inFlight: 0, maxInFlight: 0, calls: 0, ports: [] as unknown[], sharedPort: false, held: new Set<number>() };
+    const lane = async ({ leg, gateAbs, port }: Call) => {
+      state.calls += 1;
+      state.ports.push(port);
+      state.inFlight += 1;
+      state.maxInFlight = Math.max(state.maxInFlight, state.inFlight);
+      if (typeof port === "number") {
+        if (state.held.has(port)) state.sharedPort = true;
+        state.held.add(port);
+      }
+      try {
+        if (leg === "probe") return PROBE_ABSENT;
+        const name = gateAbs.split("/").pop() as string;
+        const idx = FILES.indexOf(name);
+        if (rejectFile !== null && name === rejectFile) throw new Error(`stub lane rejected for ${name}`);
+        await new Promise((res) => setTimeout(res, (FILES.length - idx) * 4));
+        return { status: 0, output: "", seconds: 0, measureFail: null, invoked: true };
+      } finally {
+        state.inFlight -= 1;
+        if (typeof port === "number") state.held.delete(port);
+      }
+    };
+    return { lane, state };
+  };
+
+  // Paths into the run's mkdtemp root and slot numbers differ between any two
+  // runs (and slots are claimed in a different order under concurrency), and
+  // `lane-concurrency:` differs by construction — Test F asserts it alone.
+  const normalise = (s: string) =>
+    s.replace(/mutation-runner-[^/\s]+\/slot-\d+/g, "<slot>").replace(/\d+(\.\d+)?s\b/g, "<t>");
+  const comparable = (lines: string[]) =>
+    lines.filter((l) => !l.startsWith("per-arm lane time") && !l.startsWith("lane-concurrency: ")).map(normalise);
+  const defectKeys = (ds: Defect[]) => ds.map((d) => `${d.kind}|${d.arm}|${d.file}|${normalise(d.detail)}`);
+
+  const drive = async (concurrency: number, opts: { rejectFile?: string | null } = {}) => {
+    const { lane, state } = makeStub(opts);
+    const lines: string[] = [];
+    const r = await runCorpus({
+      scopeDir: SELFTEST_DIR,
+      filesFloor: 0,
+      armsFloor: 0,
+      waivedCeiling: 99,
+      laneRunner: lane,
+      concurrency,
+      log: (s: string) => lines.push(s),
+    });
+    return { r, lines, state };
+  };
+
+  it("AIM: the corpus carries at least 4 annotated files, so a 4-wide pool CAN have 4 in flight", () => {
+    expect(FILES.length).toBeGreaterThanOrEqual(4);
+  });
+
+  it("Test A (SS-3): output and the defect list are in CORPUS order at concurrency 4 even when later files finish first", async () => {
+    // WHY: every ci.yml parse of the runner log and every per-file attribution
+    // reads the lines in corpus order; a later file printing first would
+    // misattribute its arms to the file above it.
+    const serial = await drive(1);
+    const parallel = await drive(4);
+    expect(serial.r.defects.length, "AIM: the defect list must be non-empty, or its ORDER proves nothing").toBeGreaterThan(1);
+    expect(new Set(serial.r.defects.map((d: Defect) => d.file)).size, "AIM: defects from several files").toBeGreaterThan(1);
+    expect(comparable(parallel.lines)).toEqual(comparable(serial.lines));
+    expect(defectKeys(parallel.r.defects)).toEqual(defectKeys(serial.r.defects));
+  });
+
+  it("Test B (SS-2): the two independent tallies and the biting count are equal at concurrency 1 and 4", async () => {
+    // WHY: a tally that differs between serial and parallel runs is the
+    // `absurdity` defect — arms claimed without a lane, or lanes no verdict
+    // accounts for.
+    const serial = await drive(1);
+    const parallel = await drive(4);
+    for (const field of ["armsExecuted", "laneInvocations", "bitingArms", "exitCode"] as const) {
+      expect(parallel.r[field], field).toBe(serial.r[field]);
+    }
+    expect(parallel.r.laneLegs).toEqual(serial.r.laneLegs);
+    expect(serial.r.armsExecuted, "AIM: the stub must have been driven for real arms").toBeGreaterThan(0);
+  });
+
+  it("Test C (D-01 pool bound): at concurrency 4 more than one and at most four lanes are in flight; at concurrency 1 exactly one", async () => {
+    // WHY: concurrency is the whole speed-up (D-01); more than the cap would
+    // oversubscribe a 4-vCPU runner and slow every lane.
+    const serial = await drive(1);
+    const parallel = await drive(4);
+    expect(serial.state.maxInFlight).toBe(1);
+    expect(parallel.state.maxInFlight).toBeGreaterThan(1);
+    expect(parallel.state.maxInFlight).toBeLessThanOrEqual(4);
+  });
+
+  it("Test D (SS-4): every lane is handed a numeric port, and no two lanes in flight at once share one", async () => {
+    // WHY: two lanes on one port is the measured TOCTOU flake class (RESEARCH
+    // Pitfall 1) — an instrument collision reported as a corpus defect.
+    const { state } = await drive(4);
+    expect(state.calls).toBeGreaterThan(FILES.length);
+    expect(state.ports.every((p) => Number.isInteger(p) && (p as number) > 0)).toBe(true);
+    expect(state.sharedPort, "two in-flight lanes held the same port").toBe(false);
+    expect(new Set(state.ports).size, "AIM: several workers, so several ports").toBeGreaterThan(1);
+  });
+
+  it("Test E (Pitfall 8): when one file's lane rejects, runCorpus rejects only after every other in-flight lane has settled", async () => {
+    // WHY: the `finally` that removes the scratch root runs on that rejection;
+    // reaching it with sibling lanes still running deletes their workdirs
+    // mid-lane.
+    const { lane, state } = makeStub({ rejectFile: FILES[0] });
+    let inFlightAtRejection = -1;
+    await expect(
+      runCorpus({
+        scopeDir: SELFTEST_DIR,
+        filesFloor: 0,
+        armsFloor: 0,
+        waivedCeiling: 99,
+        laneRunner: lane,
+        concurrency: 4,
+        log: () => {},
+      }).catch((err: unknown) => {
+        inFlightAtRejection = state.inFlight;
+        throw err;
+      }),
+    ).rejects.toThrow(/stub lane rejected/);
+    expect(state.maxInFlight, "AIM: siblings must have been in flight when the rejection happened").toBeGreaterThan(1);
+    expect(inFlightAtRejection, "lanes still in flight when runCorpus rejected").toBe(0);
+  });
+
+  it("Test F (SS-5): exactly one lane-concurrency line, directly after scope-reason, naming the concurrency passed", async () => {
+    // WHY: the line is the run's only statement of how it was scheduled; a
+    // missing or duplicated line would leave a CI log unable to say so.
+    for (const n of [1, 4]) {
+      const { lines } = await drive(n);
+      const at = lines.findIndex((l) => l.startsWith("lane-concurrency: "));
+      expect(lines.filter((l) => l.startsWith("lane-concurrency: "))).toHaveLength(1);
+      expect(lines[at - 1].startsWith("scope-reason: "), lines[at - 1]).toBe(true);
+      expect(Number(/^lane-concurrency: (\d+)/.exec(lines[at])?.[1])).toBe(n);
+    }
+  });
+
+  it("refuses a concurrency that is not a positive integer — a usage error, never a run of zero files", async () => {
+    for (const bad of [0, -1, 1.5, Number.NaN]) {
+      await expect(
+        runCorpus({ scopeDir: SELFTEST_DIR, laneRunner: makeStub().lane, concurrency: bad, log: () => {} }),
+      ).rejects.toThrow(/concurrency must be an integer >= 1/);
+    }
+  });
+});

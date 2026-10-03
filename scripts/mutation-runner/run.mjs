@@ -2984,7 +2984,7 @@ export async function runCorpus({
         } catch (err) {
           stop = true;
           if (firstError === undefined) firstError = err;
-          return;
+          throw err; // settles THIS worker; `allSettled` below still waits for the rest
         }
         results[i] = sink;
         flush();
