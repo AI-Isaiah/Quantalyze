@@ -4323,10 +4323,99 @@ async function selfTest() {
     ) &&
     pass;
 
+  // ── 164.9.6.1 (D-01) — the file pool on REAL lanes ─────────────────────
+  // A separate family, so no existing `N/17` header is renumbered (other
+  // tests quote those headers). The corpus is FOUR one-arm gates from the
+  // self-test directory, run as a SUBSET: the fixture corpus carries a single
+  // annotated file, and a file-level pool over one file can never have two
+  // lanes in flight, so it could not tell concurrency 1 from 4. These four
+  // were chosen for the fewest lanes (this runs inside the same capped job as
+  // the corpus) and because each ends in a DIFFERENT defect, so the defect
+  // list has an order worth comparing.
+  // ⛔ The two runs are awaited one after the other, never overlapping:
+  // `laneTally` is module-level and read as a snapshot delta (RESEARCH
+  // Pitfall 9).
+  console.log(
+    "=== SELF-TEST (concurrency) 1/2: the fixture corpus at concurrency 1 and 4 on real lanes returns equal tallies, exit code and an identically ordered defect list ===",
+  );
+  const concFiles = ["identity-rewrite-gate.sql", "nonbiting-gate.sql", "occurrence-mismatch-gate.sql", "wrong-identity-gate.sql"];
+  const concRun = async (concurrency, laneRunner = runLane) => {
+    const lines = [];
+    const r = await runCorpus({
+      scopeDir: SELFTEST_DIR,
+      subsetFiles: concFiles,
+      filesFloor: 0,
+      armsFloor: 0,
+      waivedCeiling: 0,
+      laneRunner,
+      concurrency,
+      log: (line) => lines.push(line),
+    });
+    return { r, lines };
+  };
+  // Paths into the run's mkdtemp root, slot numbers and timings differ between
+  // any two runs; `lane-concurrency:` differs by construction.
+  const concNormalise = (line) =>
+    line.replace(/mutation-runner-[^/\s]+\/slot-\d+/g, "<slot>").replace(/\d+(\.\d+)?s\b/g, "<t>");
+  const concComparable = (lines) =>
+    lines.filter((l) => !l.startsWith("per-arm lane time") && !l.startsWith("lane-concurrency: ")).map(concNormalise);
+  const concDefects = (r) => r.defects.map((x) => `${x.kind}|${x.arm}|${x.file}`);
+  let concInFlight = 0;
+  let concMaxInFlight = 0;
+  // Counts only: the lane tally is still incremented inside `runLane`.
+  const countingLane = async (opts) => {
+    concInFlight += 1;
+    concMaxInFlight = Math.max(concMaxInFlight, concInFlight);
+    try {
+      return await runLane(opts);
+    } finally {
+      concInFlight -= 1;
+    }
+  };
+  const concSerial = await concRun(1);
+  const concParallel = await concRun(4, countingLane);
+  const concDiffer = [];
+  for (const field of ["exitCode", "armsExecuted", "laneInvocations", "bitingArms"]) {
+    if (concSerial.r[field] !== concParallel.r[field]) {
+      concDiffer.push(`${field} ${concSerial.r[field]} vs ${concParallel.r[field]}`);
+    }
+  }
+  if (JSON.stringify(concSerial.r.laneLegs) !== JSON.stringify(concParallel.r.laneLegs)) {
+    concDiffer.push(`laneLegs ${JSON.stringify(concSerial.r.laneLegs)} vs ${JSON.stringify(concParallel.r.laneLegs)}`);
+  }
+  if (JSON.stringify(concDefects(concSerial.r)) !== JSON.stringify(concDefects(concParallel.r))) {
+    concDiffer.push(`defects ${JSON.stringify(concDefects(concSerial.r))} vs ${JSON.stringify(concDefects(concParallel.r))}`);
+  }
+  const concA = concComparable(concSerial.lines);
+  const concB = concComparable(concParallel.lines);
+  const concLineAt = concA.findIndex((l, idx) => l !== concB[idx]);
+  if (concA.length !== concB.length || concLineAt !== -1) {
+    concDiffer.push(`log line ${concLineAt}: ${JSON.stringify(concA[concLineAt])} vs ${JSON.stringify(concB[concLineAt])}`);
+  }
+  pass =
+    expect(
+      concSerial.r.subset === true && concSerial.r.armsExecuted > 0 && concSerial.r.defects.length > 1,
+      `AIM: a SUBSET run over ${concFiles.length} files that executed arms and raised several defects (subset ` +
+        `${concSerial.r.subset}, executed ${concSerial.r.armsExecuted}, defects ${concSerial.r.defects.length})`,
+    ) &&
+    expect(
+      concDiffer.length === 0,
+      `concurrency 1 and 4 agree on exitCode, armsExecuted, laneInvocations, bitingArms, laneLegs, the defect ` +
+        `sequence and the normalised log${concDiffer.length ? ` — DIFFER: ${concDiffer.join("; ")}` : ""}`,
+    ) &&
+    pass;
+
+  console.log("=== SELF-TEST (concurrency) 2/2: at concurrency 4 more than one real lane was in flight at once ===");
+  pass =
+    expect(
+      concMaxInFlight > 1,
+      `the concurrency-4 run of row 1/2 had more than one real lane in flight (max in flight ${concMaxInFlight})`,
+    ) && pass;
+
   console.log("");
   if (pass) {
     console.log(
-      "=== SELF-TEST PASSED: both floor modes, the waiver ceiling, the wrong-identity mode, MEASURE_FAIL, the absurdity floor, the stand-in target refusal, the stale-deferral probe, the 164.3.1-11 regression corpus and the 164.4.2 subset mode all fire ===",
+      "=== SELF-TEST PASSED: both floor modes, the waiver ceiling, the wrong-identity mode, MEASURE_FAIL, the absurdity floor, the stand-in target refusal, the stale-deferral probe, the 164.3.1-11 regression corpus, the 164.4.2 subset mode and the 164.9.6.1 file pool all fire ===",
     );
     return 0;
   }
