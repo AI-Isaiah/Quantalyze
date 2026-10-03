@@ -2747,6 +2747,7 @@ Plans:
   - ⚠️ **Deviation 2026-10-03 (same founder override):** Task 3's "FOUNDER ACT. No agent sets Railway variables" was done by the orchestrator: both validation-endpoint variables set on the analytics service with `--skip-deploys` (no redeploy), both read back present, and the existing job host measured by shape as a `.railway.internal` name (yes), never printed. Ship precondition MET; recorded in `164.6.6-CONTEXT.md` too.
 - [ ] 164.6.6-05-PLAN.md — H3 part 1: the analytics service refuses to dial a non-private gateway host (wave 3)
 - [ ] 164.6.6-06-PLAN.md — H3 part 2: the master-password park, per the founder's `H3-MASTER-PASSWORD-MODE` (wave 3)
+  - ⭐ **Founder decision 2026-10-03 (AskUserQuestion "Warn on glitch, page else"):** a park that fails for the same bridge-blip reason the validation hit logs WARNING only (D-15 holds); every other park skip or failure still logs ERROR and alerts. Recorded in `164.6.6-CONTEXT.md` under D-07 part 2.
 - [ ] 164.6.6-07-PLAN.md — D-08: an MT5 password is never trimmed on any path; validate and encrypt send the same bytes; other venues unchanged (wave 1)
 - [ ] 164.6.6-08-PLAN.md — live-check runbook + FOUNDER post-deploy verification L1..L7 (wave 4)
 - ⛔ MOVED 2026-09-27 to Phase 164.6.6.1 MT5SCRUB (founder split): 164.6.6-03 (scrub spike; its gateway stand-up half stays here, re-planned), 164.6.6-05, 164.6.6-06, 164.6.6-07. Re-planning this phase (narrowed scope + a new H3 plan) rewrites this list.
