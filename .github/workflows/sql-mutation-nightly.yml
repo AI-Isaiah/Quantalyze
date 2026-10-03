@@ -1,0 +1,750 @@
+name: SQL mutation nightly (full corpus)
+
+# Phase 164.9.6 SUBSETMAIN, decisions D-05 / D-06 / D-07 / D-11 (2026-10-03).
+#
+# WHAT THIS IS. A push to `main` now mutates only the SQL gate files its range
+# needs, or nothing at all (ci.yml `sql-mutation`, D-03 / D-09). This workflow
+# is the run that still mutates the FULL corpus, every day and on dispatch, so
+# every floor in scripts/mutation-floors.mjs is compared against a real biting
+# count (D-07) and runner-host drift (a new ubuntu image, a new PostgreSQL
+# minor, a pg_cron package change) shows up within a day.
+#
+# WHY ITS OWN 45 MINUTES (D-05). `sql-mutation`'s `timeout-minutes: 20` in
+# ci.yml is a declared CEILING that is never raised. This job is not bound by
+# it: the full corpus gets room here, and the wall-time step prints how much of
+# the 45 it used, with a warning at 80%, so growth is visible before a timeout.
+#
+# WHY IT FAILS RED AND FILES AN ISSUE (D-06 / D-11). A red run here is a real
+# finding, so the job's own failure keeps the workflow red, and the `report`
+# job files (or comments on) one deduplicated issue carrying the reading. A red
+# nightly attaches a failing check to main's head SHA, and Railway gates on
+# every workflow's check runs for a commit, so it can block a later Railway
+# redeploy of that SHA until it is fixed or re-run green. The founder accepted
+# that coupling (D-11).
+#
+# WHY A SEPARATE FILE. `nightly.yml`'s `preflight` job is red by standing,
+# accepted decision (tech-debt #12), so a red inside that workflow would read
+# as the usual red and nobody would look (T-164.9.6-19).
+#
+# WHY COPIED STEPS AND NOT A REUSABLE WORKFLOW. Vitest slices `ci.yml`'s
+# `sql-mutation` job text and EXECUTES its step bodies; moving the steps into a
+# reusable workflow would break every one of those pins. So the steps below are
+# copies, and src/__tests__/sql-mutation-nightly-parity.test.ts pins every
+# copied `run:` block byte-equal to the same-named step in ci.yml.
+#
+# WHY NO SHARED-TEST MUTEX. The lane is a throwaway PostgreSQL cluster on this
+# runner (scripts/pg-lane/run.sh); nothing here reaches shared TEST or PROD,
+# so this workflow takes no shared-TEST advisory lock and reads no credential.
+
+on:
+  schedule:
+    # 03:00 UTC, distinct from nightly.yml's 08:00 so the two never contend
+    # for runners at the same minute.
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sql-mutation-nightly
+  cancel-in-progress: false
+
+jobs:
+  sql-mutation-full:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+        with:
+          # No `cache: npm`, as in ci.yml's sql-mutation: no npm ci, no npx.
+          node-version: 22
+      - name: Record the nightly start time
+        run: echo "NIGHTLY_START=$(date +%s)" >> "$GITHUB_ENV"
+      - name: Provision pg_cron for the lane's PostgreSQL (Phase 164.4.1)
+        # Copy of ci.yml sql-mutation's step of the same name (pinned byte-equal).
+        run: |
+          set -euo pipefail
+          # ⭐ ASK THE LANE, do not re-derive. This step used to pick the major
+          # with `ls -d /usr/lib/postgresql/*/bin | sort -n | tail -1` — the
+          # HIGHEST — while scripts/pg-lane/run.sh's resolve_pgbin prefers
+          # `pg_ctl` on PATH and otherwise takes the FIRST glob match (lexical,
+          # the LOWEST). On an image carrying both 16 and 17 the two disagree:
+          # this step would install postgresql-17-cron and then MEASURE_FAIL on
+          # `!= 16`, while the lane would have booted 16 and found no extension.
+          # `--print-pgbin` runs the lane's OWN chain, so whatever it names is
+          # the server the arms actually run against — one selector, not two.
+          # `|| true` is load-bearing, not defensive noise: an empty answer must
+          # reach the MEASURE_FAIL below and NAME itself, rather than dying here
+          # with no `::error::` line — "could not measure" wearing the costume
+          # of a build failure.
+          # stderr goes to a FILE, not to /dev/null. `--print-pgbin` writes the
+          # resolved dir on stdout and its refusal on stderr, so discarding
+          # stderr threw away the only diagnosis this step has. MEASURED
+          # 2026-09-05 with PGBIN=/tmp: run.sh prints `ERROR: PGBIN=/tmp has no
+          # executable pg_ctl` and CI showed none of it, while the MEASURE_FAIL
+          # told the reader to "run it directly" — not an instruction anyone can
+          # follow on a hosted runner that no longer exists.
+          pgbin_err="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/pgbin.err"
+          pgbin=$(bash scripts/pg-lane/run.sh --print-pgbin 2>"$pgbin_err" || true)
+          echo "PGBIN the lane will boot: ${pgbin:-(unresolved)}"
+          if [ -z "$pgbin" ]; then
+            echo "--- scripts/pg-lane/run.sh --print-pgbin said (stderr) ---" >&2
+            cat "$pgbin_err" >&2 || true
+            echo "--- end of the lane's own diagnosis ---" >&2
+            echo "::error::MEASURE_FAIL: scripts/pg-lane/run.sh --print-pgbin could not resolve any PostgreSQL server binaries on this runner, so this step cannot know which major to provision pg_cron for. The lane's own four-step diagnosis is printed on stderr immediately above this line."
+            exit 1
+          fi
+          # Keyed off the resolved binaries' OWN pg_config, not off the path
+          # spelling, so the major and the artifact paths below cannot come from
+          # two different servers.
+          #
+          # ⭐ AN ABSENT pg_config IS ITS OWN DIAGNOSIS, not a wrong major.
+          # scripts/pg-lane/run.sh treats pg_config as OPTIONAL: its pre-start
+          # pg_cron check is `if [ -x "$PGBIN/pg_config" ]` ("layer 1 … runs
+          # only where pg_config can name the two directories; layer 2 covers
+          # the hosts where it cannot"), and `--print-pgbin` requires only
+          # pg_ctl. So a bindir carrying pg_ctl and no pg_config is a host the
+          # LANE runs on and this step cannot — and folding it into the `!= 16`
+          # refusal below MISATTRIBUTED it: measured against exactly such a
+          # bindir, the step emitted `the runner's PostgreSQL major is 'none',
+          # not 16 … A5 … no longer holds`, sending the reader to re-take a
+          # macOS/ubuntu major comparison over a missing PACKAGE. Two causes,
+          # two messages.
+          if [ ! -x "$pgbin/pg_config" ]; then
+            echo "::error::MEASURE_FAIL: $pgbin has an executable pg_ctl but no executable pg_config, so the PostgreSQL major cannot be read off the binaries the lane boots. This is NOT the assumption-A5 major mismatch below and needs no macOS/ubuntu re-measurement: scripts/pg-lane/run.sh treats pg_config as OPTIONAL (its layer-1 pre-start check is skipped and layer 2 covers the host), so the LANE would run here and this step cannot. Provision postgresql-client-<major> so pg_config sits beside pg_ctl, or key this step off the path spelling again."
+            exit 1
+          fi
+          major=$("$pgbin/pg_config" --version | awk '{print $2}' | cut -d. -f1 || true)
+          echo "PostgreSQL major reported by $pgbin/pg_config: ${major:-(none found)}"
+          if [ "${major:-}" != "16" ]; then
+            echo "::error::MEASURE_FAIL: the runner's PostgreSQL major is '${major:-none}', not 16. 164.4.1-RESEARCH assumption A5 (ubuntu-latest => 24.04 => PostgreSQL 16.15) no longer holds, and criterion 1 (CI and the authoring box, which is 16.13, must measure the SAME corpus) is at risk: an extension .so built for another major will not load, and the five pg_cron gate files would be proven on a server the author never ran. Re-take the macOS/ubuntu major comparison before changing this line."
+            exit 1
+          fi
+          sudo apt-get update -y
+          echo "--- apt-cache policy postgresql-${major}-cron (which source wins) ---"
+          apt-cache policy "postgresql-${major}-cron"
+          sudo apt-get install -y --no-install-recommends "postgresql-${major}-cron"
+          echo "--- installed version ---"
+          dpkg -s "postgresql-${major}-cron" | grep -a '^Version'
+          echo "--- the two artifacts the lane needs ---"
+          # `ls` exiting non-zero under `set -e` IS the loud failure: the .so is
+          # what `shared_preload_libraries=pg_cron` loads at postmaster start,
+          # and the .control is what `CREATE EXTENSION pg_cron` reads (PG16 has
+          # no extension_control_path, so it must be in the server's sharedir).
+          # Both paths come from the SAME pg_config the major came from, so this
+          # cannot check a debian-layout path while the lane boots another tree.
+          ls -l "$("$pgbin/pg_config" --pkglibdir)/pg_cron.so"
+          ls -l "$("$pgbin/pg_config" --sharedir)/extension/pg_cron.control"
+      - name: Probe - dblink contrib is present for the lane's PostgreSQL (Phase 164.5.2)
+        # Copy of ci.yml sql-mutation's step of the same name (pinned byte-equal).
+        run: |
+          set -euo pipefail
+          pgbin_err="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/pgbin-dblink.err"
+          pgbin=$(bash scripts/pg-lane/run.sh --print-pgbin 2>"$pgbin_err" || true)
+          echo "PGBIN the lane will boot: ${pgbin:-(unresolved)}"
+          if [ -z "$pgbin" ]; then
+            echo "--- scripts/pg-lane/run.sh --print-pgbin said (stderr) ---" >&2
+            cat "$pgbin_err" >&2 || true
+            echo "--- end of the lane's own diagnosis ---" >&2
+            echo "::error::MEASURE_FAIL: scripts/pg-lane/run.sh --print-pgbin could not resolve any PostgreSQL server binaries on this runner, so this probe cannot say whether dblink is present for the lane's PostgreSQL. The lane's own diagnosis is printed on stderr immediately above this line."
+            exit 1
+          fi
+          dblink_so="$("$pgbin/pg_config" --pkglibdir)/dblink.so"
+          dblink_control="$("$pgbin/pg_config" --sharedir)/extension/dblink.control"
+          echo "--- the two dblink artifacts the lane needs ---"
+          missing=0
+          ls -l "$dblink_so" || missing=1
+          ls -l "$dblink_control" || missing=1
+          if [ "$missing" -ne 0 ]; then
+            major=$("$pgbin/pg_config" --version | awk '{print $2}' | cut -d. -f1 || true)
+            echo "::error::dblink is NOT present for the lane's PostgreSQL (major ${major:-unknown}, bindir $pgbin): expected dblink.so under pg_config --pkglibdir and extension/dblink.control under pg_config --sharedir. The Phase 164.5.2 LANE-ONLY gate supabase/tests/test_mark_rpc_bridge_advisory_lock.sql cannot run without it. Remedy: install the PostgreSQL contrib package for major ${major:-unknown} in this job (assumption A1 did not hold on this runner image)."
+            exit 1
+          fi
+      - name: Probe - the runner image's PostgreSQL server binaries resolve
+        # Copy of ci.yml sql-mutation's step of the same name (pinned byte-equal).
+        run: |
+          set -uo pipefail
+          echo "PATH pg_ctl:      $(command -v pg_ctl || echo '(not on PATH)')"
+          echo "pg_config bindir: $(pg_config --bindir 2>/dev/null || echo '(pg_config absent)')"
+          echo "--- /usr/lib/postgresql glob ---"
+          ls -d /usr/lib/postgresql/*/bin 2>/dev/null || echo "(no /usr/lib/postgresql/*/bin)"
+          echo "--- initdb/pg_ctl under that glob ---"
+          ls -l /usr/lib/postgresql/*/bin/initdb /usr/lib/postgresql/*/bin/pg_ctl 2>/dev/null \
+            || echo "(no initdb/pg_ctl under the glob)"
+      - name: Dead-holder drill - kill a real holder and require the verdict to bite
+        # Copy of ci.yml sql-mutation's step of the same name (pinned byte-equal).
+        run: bash scripts/pg-lane/mutex-dead-holder-lane.sh
+      - name: Preflight - reject psql meta-commands in every file the runner executes
+        # Copy of ci.yml sql-mutation's step of the same name (pinned byte-equal).
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(supabase/tests/test_*.sql scripts/pg-lane/fixtures/*.sql supabase/migrations/*.sql)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "::error::MEASURE_FAIL: the preflight matched ZERO files. The runner executes SQL, so an empty scan set means the glob is wrong, not that the corpus is clean."
+            exit 1
+          fi
+          bad=0
+          # ⛔ SP-L02. Each of these greps used to end `>/dev/null 2>&1`, and
+          # that second redirect discards the ERROR channel: grep exits 0 on a
+          # hit, 1 on none, and >= 2 when it could not read the file at all —
+          # so an unreadable or unstattable file read as CLEAN. The step's own
+          # MEASURE_FAIL covered only a zero-length glob. "Silently declines to
+          # read a file" is the exact shape the NUL note above names, one line
+          # up from where it was happening.
+          #
+          # stdout still goes to /dev/null (the match itself is not wanted);
+          # stderr is NOT suppressed, and any exit >= 2 is a hard failure.
+          scan() {
+            local f="$1" pattern="$2" label="$3" rc
+            set +e
+            grep -anE "$pattern" "$f" >/dev/null
+            rc=$?
+            set -e
+            if [ "$rc" -eq 0 ]; then
+              echo "::error file=$f::contains '$label' — refused by the mutation-lane preflight"
+              bad=1
+            elif [ "$rc" -gt 1 ]; then
+              echo "::error file=$f::MEASURE_FAIL: grep exited $rc scanning for '$label'. The file could not be read, so this preflight has NOT cleared it — that is not the same as clean."
+              bad=1
+            fi
+          }
+          for f in "${files[@]}"; do
+            # IN-06: this read '^\\\!|^\\!| \\\!| \\!'. In ERE both `\\\!` and
+            # `\\!` denote a literal backslash followed by a literal `!`, so
+            # alternatives 1/2 and 3/4 were duplicates — redundancy that reads
+            # as a deliberate distinction which does not exist. Verified
+            # behaviour-identical against a `\!`-at-line-start file, a
+            # `\!`-after-a-space file and a clean file (exit 0/0/1 both ways).
+            #
+            #   \!       shell escape (reads env vars, curls them out)
+            #   \copy    client-side file IO
+            #   \COPY    upper-case form
+            #   \o ...   redirect query output into a file
+            scan "$f" '(^| )\\!'            '\!'
+            scan "$f" '\\copy\b'             '\copy'
+            scan "$f" '\\COPY\b'             '\COPY'
+            scan "$f" '^\\o |^\\o$| \\o '     '\o'
+          done
+          if [ "$bad" = 1 ]; then
+            echo "::error::One or more files the mutation runner executes contain a refused psql meta-command."
+            exit 1
+          fi
+          echo "Preflight clean: ${#files[@]} file(s) free of refused meta-commands."
+      - name: Runner self-test - every defect kind still fires
+        # Copy of ci.yml sql-mutation's step of the same name (pinned byte-equal).
+        run: node scripts/mutation-runner/run.mjs --self-test
+      - name: Mutate every annotated RED-UNDER arm and require it to bite
+        # The FULL tail of ci.yml sql-mutation's step of the same name, and only
+        # that tail: no subset branch, no --subset-from (D-05 / D-07). Pinned.
+        timeout-minutes: 40
+        env:
+          RUNNER_LOG: ${{ runner.temp }}/mutation-runner.log
+          SQL_GATE_REASON: "nightly full corpus (${{ github.event_name }} event, sql-mutation-nightly.yml): the scheduled run that enforces every floor (D-05/D-07)"
+        run: |
+          set -uo pipefail
+          node scripts/mutation-runner/run.mjs > "$RUNNER_LOG" 2>&1
+          status=$?
+          cat "$RUNNER_LOG"
+          exit $status
+      - name: Assert the run PRINTED its coverage and cleared both floors
+        # Copy of ci.yml sql-mutation's step of the same name (pinned byte-equal).
+        # Its SQL_GATE_FILES read is taken only on a SUBSET, and this run is
+        # always FULL, so only RUNNER_LOG is passed.
+        env:
+          RUNNER_LOG: ${{ runner.temp }}/mutation-runner.log
+        run: |
+          set -euo pipefail
+
+          if [ ! -s "$RUNNER_LOG" ]; then
+            echo "::error::MEASURE_FAIL: $RUNNER_LOG is missing or empty. The runner produced no output to check, which is not the same as a clean run."
+            exit 1
+          fi
+
+          # 164.4.2 / DECISION D — WHAT DID THIS RUN COVER? Read FIRST, because a
+          # SUBSET run changes which of the numbers below are comparable. The
+          # runner prints exactly one `scope:` line per corpus run (plan 07):
+          #   scope: FULL <N>/<N> annotated files
+          #   scope: FULL <N>/<N> annotated files (subset fallback: <reason>)
+          #   scope: SUBSET <k>/<N> annotated files: <basename> …
+          #   scope: DIAGNOSTIC <file-or-arm>
+          # Arms, in this step's own discipline:
+          #   (1) the line is ABSENT -> MEASURE_FAIL. A run that did not say what
+          #       it covered is NEVER assumed to have covered everything — this is
+          #       the most load-bearing arm here, because an absent line read as
+          #       FULL is exactly how a narrowed run passes for full coverage.
+          #   (1b) more than one `scope:` line -> MEASURE_FAIL: one run prints one,
+          #       so two means a log spliced from two runs.
+          #   (1c) any form other than FULL/SUBSET (DIAGNOSTIC included, which
+          #       never exits 0 anyway) -> MEASURE_FAIL: it is not this gate.
+          #   (2) SUBSET on an event that is not a pull_request -> MEASURE_FAIL.
+          #       A merge is the moment the full picture is owed; a narrowed run
+          #       on a push is a job failure, not a quiet optimisation.
+          #       (⚠️ CORRECTED 2026-10-03, Phase 164.9.6 D-04: a SUBSET is now
+          #       permitted on a pull_request AND on a push to refs/heads/main,
+          #       whose derivation judges the pushed range. Every other event —
+          #       a push to another ref, a workflow_dispatch, a schedule, an
+          #       unset event — still MEASURE_FAILs, and the message names the
+          #       event AND the ref. The full picture is owed by the nightly
+          #       full-corpus run and by every FULL fallback. Every SUBSET-only
+          #       check below applies unchanged on a push. The sentence above is
+          #       kept as lineage.)
+          # Arms (3) and (4) — the SUBSET claim-versus-names check, the narrowed
+          # row count, and the ARMS_FLOOR that is NOT compared — sit beside the
+          # assertions they change, below. (5) FULL, fallback form included, is
+          # judged by every existing arm unchanged, ARMS_FLOOR included.
+          set +e
+          scope_count=$(grep -a -c -E '^scope: ' "$RUNNER_LOG")
+          rc=$?
+          set -e
+          [ "$rc" -le 1 ] || { echo "::error::MEASURE_FAIL: grep exited $rc counting 'scope:' lines in $RUNNER_LOG — the log could not be read, which is not the same as a log with no scope line."; exit 1; }
+          case "$scope_count" in ''|*[!0-9]*)
+            echo "::error::MEASURE_FAIL: could not count the 'scope:' lines in $RUNNER_LOG (got '$scope_count')."; exit 1;; esac
+          if [ "$scope_count" -eq 0 ]; then
+            echo "::error::MEASURE_FAIL: the run printed NO 'scope:' line, so what it covered is unknown. A run that did not say what it covered is never assumed to have covered everything: an absent scope line is not a FULL run."
+            exit 1
+          fi
+          if [ "$scope_count" -ne 1 ]; then
+            echo "::error::MEASURE_FAIL: the run printed $scope_count 'scope:' lines. One run of the gate prints exactly one; more than one means this log was not produced by one run."
+            exit 1
+          fi
+          scope_line=$(grep -a -m1 -E '^scope: ' "$RUNNER_LOG" || true)
+          echo "$scope_line"
+          event_name="${GITHUB_EVENT_NAME:-}"
+          ref_name="${GITHUB_REF:-}"
+          if echo "$scope_line" | grep -a -q -E '^scope: FULL [0-9]+/[0-9]+ annotated files( \(subset fallback: .+\))?$'; then
+            scope_mode=full
+          elif echo "$scope_line" | grep -a -q -E '^scope: SUBSET [0-9]+/[0-9]+ annotated files: '; then
+            scope_mode=subset
+          else
+            echo "::error::MEASURE_FAIL: the scope line '$scope_line' is neither the FULL nor the SUBSET form. A DIAGNOSTIC (--file/--arm) run, or a form this step does not know, is not this gate."
+            exit 1
+          fi
+          subset_allowed=false
+          if [ "$event_name" = "pull_request" ]; then
+            subset_allowed=true
+          elif [ "$event_name" = "push" ] && [ "$ref_name" = "refs/heads/main" ]; then
+            subset_allowed=true
+          fi
+          if [ "$scope_mode" = "subset" ] && [ "$subset_allowed" != "true" ]; then
+            echo "::error::MEASURE_FAIL: the run narrowed to a SUBSET ('$scope_line') on a '${event_name:-unset}' event (ref '${ref_name:-unset}'). A SUBSET is permitted only on a pull_request or a push to refs/heads/main; every other event owes the FULL corpus and every floor, so a narrowed run here is a job failure, not an optimisation."
+            exit 1
+          fi
+
+          # Phase 164.9.6 / D-12 (founder, OPEN-4) — WHY DID THIS RUN TAKE ITS
+          # SCOPE? The runner prints exactly one `scope-reason: <why>` line
+          # directly after its `scope:` line on every corpus run. Same arms as
+          # the `scope:` count above: an unreadable log, an absent line, more
+          # than one line, or a blank reason is a MEASURE_FAIL. ⛔ This line is
+          # NEVER parsed for names: the SUBSET name count and the WR-07 set
+          # below read the `scope:` line alone, so a reason that quotes a
+          # migration `.sql` path cannot move either.
+          set +e
+          reason_count=$(grep -a -c -E '^scope-reason: ' "$RUNNER_LOG")
+          rc=$?
+          set -e
+          [ "$rc" -le 1 ] || { echo "::error::MEASURE_FAIL: grep exited $rc counting 'scope-reason:' lines in $RUNNER_LOG — the log could not be read, which is not the same as a log with no scope-reason line."; exit 1; }
+          case "$reason_count" in ''|*[!0-9]*)
+            echo "::error::MEASURE_FAIL: could not count the 'scope-reason:' lines in $RUNNER_LOG (got '$reason_count')."; exit 1;; esac
+          if [ "$reason_count" -eq 0 ]; then
+            echo "::error::MEASURE_FAIL: the run printed NO 'scope-reason:' line — D-12 requires every run to say why it took its scope."
+            exit 1
+          fi
+          if [ "$reason_count" -ne 1 ]; then
+            echo "::error::MEASURE_FAIL: the run printed $reason_count 'scope-reason:' lines. One run of the gate prints exactly one; more than one means this log was not produced by one run."
+            exit 1
+          fi
+          reason_line=$(grep -a -m1 -E '^scope-reason: ' "$RUNNER_LOG" || true)
+          reason_text=$(printf '%s' "${reason_line#scope-reason: }" | tr -d '[:space:]')
+          if [ -z "$reason_text" ]; then
+            echo "::error::MEASURE_FAIL: the run's 'scope-reason:' line carries an EMPTY reason. D-12 requires every run to say why it took its scope; a blank reason says nothing."
+            exit 1
+          fi
+          echo "$reason_line"
+
+          floors=$(node -e 'import("./scripts/mutation-floors.mjs").then(m => console.log(m.FILES_FLOOR, m.ARMS_FLOOR, m.WAIVED_CEILING))')
+          files_floor=$(echo "$floors" | cut -d" " -f1)
+          arms_floor=$(echo "$floors" | cut -d" " -f2)
+          waived_ceiling=$(echo "$floors" | cut -d" " -f3)
+          case "$files_floor" in ''|*[!0-9]*)
+            echo "::error::MEASURE_FAIL: could not read FILES_FLOOR from scripts/mutation-floors.mjs (got '$files_floor')."; exit 1;; esac
+          case "$arms_floor" in ''|*[!0-9]*)
+            echo "::error::MEASURE_FAIL: could not read ARMS_FLOOR from scripts/mutation-floors.mjs (got '$arms_floor')."; exit 1;; esac
+          case "$waived_ceiling" in ''|*[!0-9]*)
+            echo "::error::MEASURE_FAIL: could not read WAIVED_CEILING from scripts/mutation-floors.mjs (got '$waived_ceiling')."; exit 1;; esac
+          echo "floors from mutation-floors.mjs: FILES_FLOOR=$files_floor ARMS_FLOOR=$arms_floor WAIVED_CEILING=$waived_ceiling"
+
+          coverage_line=$(grep -a -m1 -E '^coverage: files [0-9]+/[0-9]+$' "$RUNNER_LOG" || true)
+          if [ -z "$coverage_line" ]; then
+            echo "::error::MEASURE_FAIL: the run printed NO 'coverage: files N/M' line. D-01 requires coverage on every run; a runner that stopped printing it has silently retired its own ratchet."
+            exit 1
+          fi
+          echo "$coverage_line"
+          files_annotated=$(echo "$coverage_line" | sed -E 's|^coverage: files ([0-9]+)/[0-9]+$|\1|')
+          case "$files_annotated" in ''|*[!0-9]*)
+            echo "::error::MEASURE_FAIL: could not read the annotated-file count out of '$coverage_line'."; exit 1;; esac
+          if [ "$files_annotated" -lt "$files_floor" ]; then
+            echo "::error::FILES_FLOOR regression: $files_annotated annotated file(s) < floor $files_floor."
+            exit 1
+          fi
+
+          # 164.4-01 — THE EXCLUSION MUST BE NAMED (criterion 1 as amended by the
+          # founder, 2026-09-02). `coverage: files N/71` is a ratio over every
+          # `.sql` in the scope dir, and this phase's end state deliberately
+          # leaves a subset uncovered: files that raise outside the runner's
+          # identity idiom, which it can never attribute an arm in. A reader of
+          # the ratio alone cannot tell that subset from work nobody has done
+          # yet. So the runner derives and PRINTS the excluded set by name, and
+          # a silent exclusion fails HERE exactly as a missing annotation does.
+          #
+          # Two arms, in the discipline every assertion above uses:
+          #   (1) the line is ABSENT -> MEASURE_FAIL with its own message. A
+          #       runner that stopped classifying its corpus has retired the
+          #       amendment, and an absent line is never a zero.
+          #   (2) the count it CLAIMS must equal the number of `*.sql` names it
+          #       PRINTS. Evidence before verdict (SC-7): a count with no names
+          #       is a number nobody can check, and names with a wrong count is
+          #       the shape a hand-maintained list decays into.
+          # No literal count is restated here — the successor phase shrinks this
+          # set and the runner derives it. Both sides come from the run output.
+          unreachable_line=$(grep -a -m1 -E '^unreachable: [0-9]+ file\(s\) ' "$RUNNER_LOG" || true)
+          if [ -z "$unreachable_line" ]; then
+            echo "::error::MEASURE_FAIL: the run printed NO 'unreachable: N file(s) …' line, so which gate files this run deliberately did NOT cover is unknown. Criterion 1 (as amended 2026-09-02) requires the exclusion to be named on every run: a silent exclusion fails this gate exactly as a missing annotation does."
+            exit 1
+          fi
+          echo "$unreachable_line"
+          unreachable_claimed=$(echo "$unreachable_line" | sed -E 's|^unreachable: ([0-9]+) file\(s\) .*|\1|')
+          case "$unreachable_claimed" in ''|*[!0-9]*)
+            echo "::error::MEASURE_FAIL: could not read the excluded-file count out of '$unreachable_line'."; exit 1;; esac
+          # `|| true` matches the `file_rows` line below and is LOAD-BEARING, not
+          # tidiness: the step runs under `set -euo pipefail`, and the empty
+          # excluded set — `unreachable: 0 file(s) … — `, this phase's successor's
+          # stated end state — is exactly the case where `grep -o` matches
+          # nothing and exits 1. Without it, pipefail aborts the step here with
+          # no `::error::` at all and the numeric guard below is dead code that
+          # can never observe the empty value. With it, `wc -l` still prints 0,
+          # the guard stays LIVE, and the `-ne` comparison does the work.
+          unreachable_named=$(echo "$unreachable_line" | grep -a -o -E '[A-Za-z0-9_]+\.sql' | wc -l | tr -d '[:space:]' || true)
+          case "$unreachable_named" in ''|*[!0-9]*)
+            echo "::error::MEASURE_FAIL: could not count the file names on '$unreachable_line'."; exit 1;; esac
+          if [ "$unreachable_claimed" -ne "$unreachable_named" ]; then
+            echo "::error::MEASURE_FAIL: the run CLAIMS $unreachable_claimed excluded file(s) but NAMES $unreachable_named. The count and the names come from the same derivation in one run and cannot disagree; a claim the log's own evidence contradicts is not a measurement."
+            exit 1
+          fi
+
+          # 164.4-03 — THE DEFERRAL MUST BE NAMED TOO (criterion 4; SCOPE
+          # AMENDMENT #2, founder 2026-09-03). Four idiom gate files probe
+          # `pg_extension` for pg_cron, which the pg-lane has none of and
+          # deliberately will not get. Two of them RAISE on its absence (their
+          # baseline can never be GREEN, so no arm of theirs is ever judged) and
+          # two baseline GREEN but withhold whole Parts behind a
+          # pg_cron-conditional NOTICE (those arms are un-falsifiable on the
+          # lane). Criterion 4: an arm that cannot be given a falsifying
+          # mutation is RECORDED with its reason, never silently skipped — and
+          # sitting inside `  pending:` is exactly a silent skip, since at the
+          # phase's end that line reads as unfinished work rather than a
+          # reasoned exclusion.
+          #
+          # Same three arms as the `unreachable_line` block above, for the same
+          # reasons: absent is a MEASURE_FAIL and never a zero; an unreadable
+          # count is a MEASURE_FAIL; and the count CLAIMED must equal the
+          # `*.sql` names PRINTED beside it, because a count with no names is a
+          # number nobody can check. No literal count is restated here — the
+          # runner derives the set and both sides come from the run output, so
+          # the day the four are annotated this block needs no edit.
+          lane_blocked_line=$(grep -a -m1 -E '^lane-blocked: [0-9]+ file\(s\) ' "$RUNNER_LOG" || true)
+          if [ -z "$lane_blocked_line" ]; then
+            echo "::error::MEASURE_FAIL: the run printed NO 'lane-blocked: N file(s) …' line, so which gate files this run DEFERRED, and why, is unknown. Criterion 4 requires an arm that cannot be given a falsifying mutation to be RECORDED with its reason: a deferral absorbed silently into the pending set fails this gate exactly as a missing annotation does."
+            exit 1
+          fi
+          echo "$lane_blocked_line"
+          lane_blocked_claimed=$(echo "$lane_blocked_line" | sed -E 's|^lane-blocked: ([0-9]+) file\(s\) .*|\1|')
+          case "$lane_blocked_claimed" in ''|*[!0-9]*)
+            echo "::error::MEASURE_FAIL: could not read the deferred-file count out of '$lane_blocked_line'."; exit 1;; esac
+          # `|| true` for the reason spelled out on the `unreachable_named`
+          # pipeline above: under `set -euo pipefail` an EMPTY deferred set —
+          # `lane-blocked: 0 file(s) … — `, the state this phase's successor
+          # reaches by fixing [REDUNDER-PGCRON] — makes `grep -o` match nothing
+          # and exit 1, which would abort the step with no `::error::` at all
+          # and leave the numeric guard below unreachable.
+          lane_blocked_named=$(echo "$lane_blocked_line" | grep -a -o -E '[A-Za-z0-9_]+\.sql' | wc -l | tr -d '[:space:]' || true)
+          case "$lane_blocked_named" in ''|*[!0-9]*)
+            echo "::error::MEASURE_FAIL: could not count the file names on '$lane_blocked_line'."; exit 1;; esac
+          if [ "$lane_blocked_claimed" -ne "$lane_blocked_named" ]; then
+            echo "::error::MEASURE_FAIL: the run CLAIMS $lane_blocked_claimed deferred file(s) but NAMES $lane_blocked_named. The count and the names come from the same derivation in one run and cannot disagree; a claim the log's own evidence contradicts is not a measurement."
+            exit 1
+          fi
+
+          # 164.4-03 — AND THE REASON MUST HAVE BEEN MEASURED (threat
+          # T-164.4-11). "which the pg-lane cannot host" is a claim about the
+          # LANE, and the classification above never touches a lane. So the
+          # runner drives one extra lane leg per run asking
+          # `pg_available_extensions` for pg_cron and prints what it got. A
+          # reason that cannot expire is the control-that-cannot-fail this phase
+          # exists to remove: install pg_cron tomorrow and, without this, four
+          # files stay parked behind a line that still reads true.
+          #
+          # ONE arm here, deliberately. An AVAILABLE line is NOT asserted in
+          # this step — the runner already exits 1 on it through the
+          # `lane-blocked-stale` defect and the job fails on the runner's own
+          # exit status, so re-deciding it here would be a second judge of one
+          # question. CI's job is to notice the probe went MISSING, which is the
+          # one failure the runner cannot report about itself. The
+          # `(absent|AVAILABLE)` alternation is what makes the runner's third
+          # form — `lane-probe: UNREADABLE …`, printed when the probe lane
+          # returned no marker — fail here as well as in-process.
+          lane_probe_line=$(grep -a -m1 -E '^lane-probe: pg_cron (absent|AVAILABLE)' "$RUNNER_LOG" || true)
+          if [ -z "$lane_probe_line" ]; then
+            echo "::error::MEASURE_FAIL: the run printed NO 'lane-probe:' line — the lane was not measured for pg_cron, so the lane-blocked class is unverified. The deferral's stated reason is a fact about the LANE; a run that did not ask it is asserting the reason rather than measuring it."
+            exit 1
+          fi
+          echo "$lane_probe_line"
+
+          arms_line=$(grep -a -m1 -E '^arms: [0-9]+/[0-9]+/[0-9]+ ' "$RUNNER_LOG" || true)
+          if [ -z "$arms_line" ]; then
+            echo "::error::MEASURE_FAIL: the run printed NO 'arms: E/A/W' line, so the number of arms actually EXECUTED is unknown. Unknown is not zero and it is not fine."
+            exit 1
+          fi
+          echo "$arms_line"
+          arms_executed=$(echo "$arms_line" | sed -E 's|^arms: ([0-9]+)/[0-9]+/[0-9]+ .*|\1|')
+          if [ "$arms_executed" -eq 0 ]; then
+            echo "::error::MEASURE_FAIL: ZERO arms executed. The gate cannot observe a non-biting annotation without running one. If the step above was changed to --parse-only, that is a static check, not this gate."
+            exit 1
+          fi
+          # WAIVED_CEILING (2026-09-02 red team): a waiver is a counted twin that
+          # never runs a lane, so NEW prose markers with waiver twins raise the
+          # annotated counts and lower nothing — every floor stays green while
+          # coverage is inflated with zero new arms. The W field is bounded from
+          # ABOVE, against the constant read out of run.mjs beside the floors.
+          arms_waived=$(echo "$arms_line" | sed -E 's|^arms: [0-9]+/[0-9]+/([0-9]+) .*|\1|')
+          case "$arms_waived" in ''|*[!0-9]*)
+            echo "::error::MEASURE_FAIL: could not read the waived count out of '$arms_line'."; exit 1;; esac
+          if [ "$arms_waived" -gt "$waived_ceiling" ]; then
+            echo "::error::WAIVED_CEILING exceeded: $arms_waived waived arm(s) > ceiling $waived_ceiling. A waiver is an arm this gate will never prove can fail; adding one is a reviewed edit to WAIVED_CEILING in scripts/mutation-floors.mjs, never a side effect of annotating."
+            exit 1
+          fi
+          # IN-05: ARMS_FLOOR bounds BITING arms — executed minus those that did
+          # not redden or reddened on the wrong arm — not raw executed. This
+          # step used to compare `arms_executed` to the same constant and print
+          # "ARMS_FLOOR regression: N arm(s) executed < floor", naming a
+          # quantity the constant was never measured against. The runner now
+          # prints the real one under its own name and this reads THAT.
+          #
+          # A missing `biting:` line is a MEASURE_FAIL and not a zero: it is
+          # also what a `--parse-only` swap produces, since that mode executes
+          # nothing and deliberately does not print it.
+          biting_line=$(grep -a -m1 -E '^biting: [0-9]+ ' "$RUNNER_LOG" || true)
+          if [ -z "$biting_line" ]; then
+            echo "::error::MEASURE_FAIL: the run printed NO 'biting: N' line, so the quantity ARMS_FLOOR actually bounds is unknown. Either the runner stopped reporting it, or the step above was not the gate (--parse-only executes zero arms and does not print it)."
+            exit 1
+          fi
+          echo "$biting_line"
+          biting=$(echo "$biting_line" | sed -E 's|^biting: ([0-9]+) .*|\1|')
+          case "$biting" in ''|*[!0-9]*)
+            echo "::error::MEASURE_FAIL: could not read the biting count out of '$biting_line'."; exit 1;; esac
+          # ⚠️ R2-I01, STATED SO IT IS NOT MISREAD AS A LIVE CHECK: this arm is
+          # UNREACHABLE for any log the runner produces. `bitingArms` is
+          # `armsExecuted` minus a subset of the defects, so `biting <=
+          # executed` holds by construction (run.mjs, the ARMS_FLOOR block).
+          # It is kept deliberately, and only for what it DOES cover: a log
+          # that was hand-edited, spliced from two runs, or assembled by a
+          # wrapper. This step's whole job is to read numbers out of a text
+          # file it did not produce, so "these two cannot disagree" is worth
+          # asserting about the FILE even though it is trivially true of the
+          # program. It is not evidence that the runner is consistent. (Since
+          # 164.3.1-10 the runner asserts this same relation IN-PROCESS as
+          # part of its absurdity floor — `absurdityViolations` in run.mjs —
+          # so a violation here means the file, not the arithmetic.)
+          if [ "$biting" -gt "$arms_executed" ]; then
+            echo "::error::MEASURE_FAIL: biting ($biting) exceeds executed ($arms_executed). Those two numbers come from the same run and cannot disagree this way, so this log was not produced by one run of the gate."
+            exit 1
+          fi
+          # 164.3.1-10 — THE RUNNER'S ABSURDITY FLOOR, RE-ASSERTED OUT OF PROCESS.
+          # The runner now counts its arm lanes TWICE, independently: once in
+          # its verdict loop (the `arms: E/…` line above) and once INSIDE the
+          # lane runner at the spawn (`lane-invocations: N`). It fails itself
+          # when they disagree. This step re-reads both numbers out of the log
+          # and asserts the same relation, for the same reason every other arm
+          # here exists: a build of the runner that silently stopped printing
+          # the second tally — or a log assembled from something other than one
+          # honest run — must fail HERE rather than pass quietly. A missing line
+          # is a MEASURE_FAIL and never a zero (an empty variable satisfies a
+          # numeric test), checked BEFORE any comparison, like every line above.
+          # The relation is EXACT: the printed count IS the arm-leg count; the
+          # baseline and restore legs are printed in the same line's parenthesis
+          # as evidence and are not compared. No literal is restated here — both
+          # sides come from the run output, and the measured values behind the
+          # rule (30/30/30 at plan 164.3.1-09's re-derivation) live beside the
+          # rule in run.mjs, once.
+          lane_line=$(grep -a -m1 -E '^lane-invocations: [0-9]+ ' "$RUNNER_LOG" || true)
+          if [ -z "$lane_line" ]; then
+            echo "::error::MEASURE_FAIL: the run printed NO 'lane-invocations: N' line, so the runner's second, independent count of arm lanes is unknown and its own cross-check cannot be re-asserted. Either the runner stopped reporting it (164.3.1-10), or the step above was not the gate (--parse-only executes zero arms and prints no lane tally)."
+            exit 1
+          fi
+          echo "$lane_line"
+          lane_invocations=$(echo "$lane_line" | sed -E 's|^lane-invocations: ([0-9]+) .*|\1|')
+          case "$lane_invocations" in ''|*[!0-9]*)
+            echo "::error::MEASURE_FAIL: could not read the lane-invocation count out of '$lane_line'."; exit 1;; esac
+          if [ "$lane_invocations" -ne "$arms_executed" ]; then
+            echo "::error::MEASURE_FAIL — this is the GATE failing, not the corpus: the verdict loop reported $arms_executed executed arm(s) but the lane runner counted $lane_invocations arm lane(s) (executed=$arms_executed lane-invocations=$lane_invocations biting=$biting). Arms were claimed that no lane ran, or lanes ran that no verdict describes. The runner's own in-process floor exits 1 on this; a log reaching this step with these numbers was not produced by one honest run of the gate."
+            exit 1
+          fi
+          # 164.4-01 — THE PER-FILE BREAKDOWN, CROSS-SUMMED (threat T-164.4-05).
+          # `coverage: files N/71` counts a file whose baseline went RED exactly
+          # like one whose 39 arms all bit: the arm loop is `continue`d and the
+          # file still reads as coverage. The runner now prints one row per
+          # annotated file — sections / judged / annotated / waived / biting —
+          # so a half-annotated or never-judged file is visible in the log.
+          #
+          # WHAT THESE ROWS ACTUALLY DEFEND AGAINST, stated precisely so a later
+          # reader does not weaken the arms on a bigger hole than the one that
+          # existed: a RED baseline is ALREADY fatal in-process — run.mjs calls
+          # `addDefect("baseline", …)` and the run exits 1 — so that case was
+          # never "averaged into a green aggregate". The rows are
+          # defense-in-depth over the LOG: this step's whole job is reading
+          # numbers out of a text file it did not produce, and a log that was
+          # spliced from two runs, hand-edited, or assembled by a wrapper can
+          # carry an aggregate its own breakdown does not account for.
+          #
+          # Three arms, same discipline as every assertion above:
+          #   (1) NO rows at all -> MEASURE_FAIL. The runner stopped reporting.
+          #   (2) one row per annotated file, cross-checked against the
+          #       `coverage:` numerator already read. Rows and coverage are two
+          #       readings of the same loop and cannot disagree.
+          #   (3) the rows' `biting` column must SUM to the aggregate `biting:`
+          #       already read. The runner asserts this in-process too
+          #       (`absurdityViolations`); asserting it here is the same
+          #       out-of-process re-read as the lane-invocations arm, for a step
+          #       whose whole job is reading numbers out of a file it did not
+          #       produce. No literal integer is restated — both sides come from
+          #       the run output.
+          file_rows=$(grep -a -E '^  file .+: sections [0-9]+ / judged [0-9]+ / annotated [0-9]+ / waived [0-9]+ / biting [0-9]+$' "$RUNNER_LOG" || true)
+          if [ -z "$file_rows" ]; then
+            echo "::error::MEASURE_FAIL: the run printed NO '  file <name>: sections … / judged … / biting …' row, so which annotated files actually reached a verdict is unknown. A file whose baseline went red counts toward coverage while judging nothing; without the per-file rows that gap is invisible."
+            exit 1
+          fi
+          printf '%s\n' "$file_rows"
+          file_rows_count=$(printf '%s\n' "$file_rows" | wc -l | tr -d '[:space:]')
+          # 164.4.2 / DECISION D, arm (3). On a SUBSET run the coverage numerator
+          # still comes from the FULL scan (FILES_FLOOR above compares it), but
+          # only the listed files were mutated, so the rows describe k files,
+          # not N. The scope line's own claim is checked against its own names
+          # first — the claim-versus-names discipline the `unreachable:` and
+          # `lane-blocked:` arms use — and its denominator against the coverage
+          # numerator, before k replaces N in the row-count comparison.
+          expected_rows="$files_annotated"
+          if [ "$scope_mode" = "subset" ]; then
+            subset_claimed=$(echo "$scope_line" | sed -E 's|^scope: SUBSET ([0-9]+)/[0-9]+ annotated files: .*|\1|')
+            case "$subset_claimed" in ''|*[!0-9]*)
+              echo "::error::MEASURE_FAIL: could not read the subset file count out of '$scope_line'."; exit 1;; esac
+            subset_total=$(echo "$scope_line" | sed -E 's|^scope: SUBSET [0-9]+/([0-9]+) annotated files: .*|\1|')
+            case "$subset_total" in ''|*[!0-9]*)
+              echo "::error::MEASURE_FAIL: could not read the annotated-file total out of '$scope_line'."; exit 1;; esac
+            # `|| true` for the reason spelled out on `unreachable_named` above.
+            subset_named=$(echo "$scope_line" | grep -a -o -E '[A-Za-z0-9_]+\.sql' | wc -l | tr -d '[:space:]' || true)
+            case "$subset_named" in ''|*[!0-9]*)
+              echo "::error::MEASURE_FAIL: could not count the file names on '$scope_line'."; exit 1;; esac
+            if [ "$subset_claimed" -eq 0 ]; then
+              echo "::error::MEASURE_FAIL: the run claims a SUBSET of ZERO files ('$scope_line'). An empty narrowed scope mutates nothing and is never a pass."
+              exit 1
+            fi
+            if [ "$subset_claimed" -ne "$subset_named" ]; then
+              echo "::error::MEASURE_FAIL: the SUBSET scope line CLAIMS $subset_claimed file(s) but NAMES $subset_named. The count and the names come from the same run and cannot disagree; a claim the log's own evidence contradicts is not a measurement."
+              exit 1
+            fi
+            if [ "$subset_total" -ne "$files_annotated" ]; then
+              echo "::error::MEASURE_FAIL: the SUBSET scope line narrows from $subset_total annotated file(s) but the coverage line reports $files_annotated. Both come from the one full scan of the corpus; a disagreement means this log was not produced by one run."
+              exit 1
+            fi
+            if [ "$subset_claimed" -gt "$subset_total" ]; then
+              echo "::error::MEASURE_FAIL: the SUBSET claims $subset_claimed of $subset_total annotated file(s) — more than exist."
+              exit 1
+            fi
+            # Review 164.4.2 WR-07 — the names the run printed must be the SET
+            # changed-paths derived. The count-versus-names arm above cannot see
+            # a same-sized swap; this compares basenames, sorted and de-duplicated
+            # on both sides. The derived list is split with `read -r -a` (no
+            # globbing, no eval), as the runner step splits it.
+            # ⚠️ SQL_GATE_FILES is the SAME list the runner step was handed, so
+            # this proves the runner mutated its INPUT, not that the input is
+            # the right subset (silent-failure-hunter round 2, WR-05). The
+            # derivation is proven where it runs: changed-paths runs
+            # `sql-gate-subset.mjs --self-test` before `sql-gate-subset.mjs`.
+            # It is deliberately not re-derived here — one diff implementation,
+            # never two that can drift apart.
+            if [ -z "${SQL_GATE_FILES:-}" ]; then
+              echo "::error::MEASURE_FAIL: the run says SUBSET but SQL_GATE_FILES (needs.changed-paths.outputs.sql_gate_files) is empty, so what the run SHOULD have mutated is unknown. An unreadable expectation is never a match."
+              exit 1
+            fi
+            read -r -a derived_paths <<< "$SQL_GATE_FILES"
+            derived_set=$(for p in "${derived_paths[@]}"; do printf '%s\n' "${p##*/}"; done | sort -u | tr '\n' ' ')
+            printed_set=$(echo "${scope_line#*annotated files: }" | tr ' ' '\n' | grep -a -v '^$' | sort -u | tr '\n' ' ' || true)
+            if [ "$derived_set" != "$printed_set" ]; then
+              echo "::error::MEASURE_FAIL: the SUBSET the run printed is not the SUBSET changed-paths derived. printed: [ ${printed_set}] derived: [ ${derived_set}]. The runner mutated a different set of files than the list changed-paths handed it."
+              exit 1
+            fi
+            expected_rows="$subset_claimed"
+          fi
+          if [ "$file_rows_count" -ne "$expected_rows" ]; then
+            if [ "$scope_mode" = "subset" ]; then
+              echo "::error::MEASURE_FAIL: the run printed $file_rows_count per-file row(s) but its SUBSET scope line names $expected_rows file(s). A SUBSET run describes exactly the files it mutated; a disagreement means a file was mutated without being described, or described without being mutated."
+            else
+              echo "::error::MEASURE_FAIL: the run printed $file_rows_count per-file row(s) but reported $files_annotated annotated file(s) on its coverage line. Those are two readings of the same loop; a disagreement means a file was counted as coverage without being described, or described without being counted."
+            fi
+            exit 1
+          fi
+          per_file_biting=$(printf '%s\n' "$file_rows" | awk '{ for (i = 1; i <= NF; i++) if ($i == "biting") s += $(i + 1) } END { print s + 0 }')
+          case "$per_file_biting" in ''|*[!0-9]*)
+            echo "::error::MEASURE_FAIL: could not sum the per-file biting column."; exit 1;; esac
+          if [ "$per_file_biting" -ne "$biting" ]; then
+            echo "::error::MEASURE_FAIL: the per-file rows sum to $per_file_biting biting arm(s) but the aggregate 'biting:' line reports $biting. ARMS_FLOOR is compared against the aggregate, so a breakdown that does not add up to it means the floor is bounding a number the report cannot account for."
+            exit 1
+          fi
+
+          # 164.4.2 / DECISION D, arm (4). ARMS_FLOOR bounds the FULL corpus's
+          # biting count. A SUBSET's biting count is over fewer files, so it is
+          # NOT compared — comparing it would always fail, and renormalising the
+          # floor to the narrowed denominator is the floor-laundering the
+          # vacuity fence forbids. The runner states this on its own line; this
+          # step requires that line (the runner knew it ran narrowed) and its
+          # closing sentence says so rather than claiming both floors held.
+          if [ "$scope_mode" = "subset" ]; then
+            arms_floor_note=$(grep -a -m1 -E '^ARMS_FLOOR: NOT compared — this SUBSET run ' "$RUNNER_LOG" || true)
+            if [ -z "$arms_floor_note" ]; then
+              echo "::error::MEASURE_FAIL: the scope line says SUBSET but the run printed NO 'ARMS_FLOOR: NOT compared — this SUBSET run …' line. The runner states the floor it skipped on every SUBSET run; its absence means the scope line and the run that produced the numbers disagree about what ran."
+              exit 1
+            fi
+            echo "$arms_floor_note"
+            # Review 164.4.2 WR-03 — what a SUBSET CAN compare. The full
+            # corpus's annotated-minus-waived arm total is a static UPPER BOUND
+            # on the full run's biting count; the runner prints it on every
+            # SUBSET run and exits 1 when it is under the floor. Re-read here out
+            # of process, against the floor read from run.mjs above, so a PR that
+            # deletes arms below the floor fails before merge, not on main.
+            bound_line=$(grep -a -m1 -E '^ARMS_FLOOR \(static upper bound\): [0-9]+ annotated-unwaived (>=|<) floor [0-9]+$' "$RUNNER_LOG" || true)
+            if [ -z "$bound_line" ]; then
+              echo "::error::MEASURE_FAIL: the scope line says SUBSET but the run printed NO 'ARMS_FLOOR (static upper bound): N annotated-unwaived … floor F' line. The runner compares that bound on every SUBSET run; its absence means the check never ran."
+              exit 1
+            fi
+            echo "$bound_line"
+            static_bound=$(echo "$bound_line" | sed -E 's|^ARMS_FLOOR \(static upper bound\): ([0-9]+) .*|\1|')
+            case "$static_bound" in ''|*[!0-9]*)
+              echo "::error::MEASURE_FAIL: could not read the static bound out of '$bound_line'."; exit 1;; esac
+            if [ "$static_bound" -lt "$arms_floor" ]; then
+              echo "::error::ARMS_FLOOR regression (static upper bound): $static_bound annotated-unwaived arm(s) < floor $arms_floor. A full-corpus run cannot reach the floor: an annotation was deleted or converted to a waiver without lowering the floor in scripts/mutation-floors.mjs."
+              exit 1
+            fi
+            echo "SUBSET run on a '$event_name' event (${ref_name:-unset ref}): FILES_FLOOR and the waiver ceiling hold and the runner's two tallies agree over the $subset_claimed of $subset_total annotated file(s) this $event_name selected: files $files_annotated >= $files_floor, biting arms $biting (of $arms_executed executed, $lane_invocations arm lane(s) spawned), waived $arms_waived <= $waived_ceiling. ARMS_FLOOR ($arms_floor) was NOT compared against the subset's biting count — it is compared by the nightly full-corpus run and by every FULL run — but its static upper bound holds: $static_bound annotated-unwaived >= $arms_floor. This is NOT full-corpus coverage."
+            exit 0
+          fi
+
+          if [ "$biting" -lt "$arms_floor" ]; then
+            echo "::error::ARMS_FLOOR regression: $biting biting arm(s) < floor $arms_floor. An annotation stopped biting, was deleted, or was converted to a waiver without lowering the floor in scripts/mutation-floors.mjs."
+            exit 1
+          fi
+
+          echo "Coverage print is present, both floors and the waiver ceiling hold and the runner's two tallies agree: files $files_annotated >= $files_floor, biting arms $biting >= $arms_floor (of $arms_executed executed, $lane_invocations arm lane(s) spawned), waived $arms_waived <= $waived_ceiling."
