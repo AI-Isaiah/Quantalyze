@@ -188,8 +188,10 @@
 --     dailies-bearing AND leaves a NON-TERMINAL job row behind -- i.e. one that
 --     escaped a rollback -- would feed exactly one permanently-unclaimable
 --     'pending' compute_jobs row into the shared TEST project. That matters
---     because of the 05:30 UTC TEST-DB job backlog: cron jobid 9
---     (derive-allocator-key-dailies) fans out one job per api_key on a project
+--     because of the 05:30 UTC TEST-DB job backlog: the cron job named
+--     derive-allocator-key-dailies (jobid 9 on TEST; jobids differ per project,
+--     and on PROD the job is ABSENT -- unscheduled by hand at the v1.11
+--     recovery, measured 2026-10-02) fans out one job per api_key on a project
 --     that has NO draining worker, and stale 'pending' rows sort AHEAD in
 --     claim_compute_jobs_with_priority -- so one leaked row does not sit
 --     harmlessly, it takes precedence and deepens a backlog that already
@@ -222,8 +224,9 @@
 --         A leaked row is a diagnosable nuisance; a DELETE that races a real
 --         enqueue is silent job loss, and the deferred orphaned-running purge
 --         (DELETE-vs-reset) is unresolved for exactly this reason.
---       * NEVER unschedule cron jobid 9 (derive-allocator-key-dailies), or any
---         cron job other than reconcile_dropped_enqueue_sweep BY NAME.
+--       * NEVER unschedule the derive-allocator-key-dailies cron (by name --
+--         its jobid differs per project), or any cron job other than
+--         reconcile_dropped_enqueue_sweep BY NAME.
 --       * NEVER touch the process_key_unified_backbone flag row.
 --     C3 is document-or-guard, lowest priority. It is documented here. It is
 --     NOT a cleanup migration and must not become one.

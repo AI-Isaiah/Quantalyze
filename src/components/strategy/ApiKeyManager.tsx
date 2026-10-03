@@ -31,6 +31,7 @@ import { captureToSentry } from "@/lib/sentry-capture";
 import { AllocatorSyncStatus } from "@/components/exchanges/AllocatorSyncStatus";
 import type { ApiKey } from "@/lib/types";
 import { API_KEY_USER_COLUMNS } from "@/lib/constants";
+import { accountShareNote } from "@/lib/account-share-note";
 import { isComputedAnalytics, isUntrustedKeySyncStatus } from "@/lib/closed-sets";
 
 interface ApiKeyManagerProps {
@@ -268,6 +269,14 @@ interface KeysReadOutcome {
 // could not confirm. A raw PostgREST message never reaches the page.
 const DELETE_FAILED_COPY =
   "Failed to delete key. Try again, and contact support if it keeps failing.";
+
+// 167.1.2 C4 review SFH-C4-09: this card's Delete is a hard `api_keys` DELETE,
+// and csv_daily_returns_api_key_id_fkey is ON DELETE CASCADE, so the key's
+// per-key daily returns (the allocator's history for this account) go with it.
+// The first sentence of AllocatorExchangeManager's DELETE_REMOVES_HISTORY
+// (plan 09). Its second sentence, "Disconnect instead to keep it.", is left
+// out: this card has no Disconnect (167.1.2 REVIEW WR-01).
+const DELETE_REMOVES_HISTORY = "Deleting also removes this account's history.";
 
 export function ApiKeyManager({
   strategyId,
@@ -666,6 +675,9 @@ export function ApiKeyManager({
     keyShape === "composite"
       ? keys.filter((k) => compositeMemberKeyIds?.includes(k.id) ?? false)
       : keys;
+  // Phase 167.1.2 plan 04 — accountShareNote's holder look-up, over every key
+  // this read returned (see the render).
+  const keysById = new Map(keys.map((k) => [k.id, k]));
 
   const panelSubjectUntrusted = isUntrustedKeySyncStatus(
     keys.find((k) => k.id === lastAttemptedKeyId)?.sync_status,
@@ -1657,6 +1669,21 @@ export function ApiKeyManager({
                     MT5 account {key.venue_account_id ?? "—"}
                   </p>
                 )}
+                {/* Phase 167.1.2 plan 04 (D-01, D-11): the same duplicate
+                    sentence the allocator card shows, from the same source,
+                    beside this card's Delete. The holder is looked up in every
+                    key this read returned, not only the listed ones, so a
+                    composite's filtered list still names it. The verb is
+                    this card's own control, Delete: the manager card has no
+                    Disconnect (167.1.2 REVIEW WR-01). */}
+                {(() => {
+                  const shareNote = accountShareNote(key, keysById, "Delete");
+                  return shareNote ? (
+                    <p role="note" className="text-xs text-warning mt-0.5">
+                      {shareNote}
+                    </p>
+                  ) : null;
+                })()}
               </div>
             </div>
             <div className="flex items-center gap-2">
@@ -1821,6 +1848,16 @@ export function ApiKeyManager({
       >
         <p className="text-sm text-text-secondary mb-4">
           This will permanently remove this API key. Trade data already imported will not be affected.
+        </p>
+        {/* 167.1.2 C4 review SFH-C4-09: unconditional, because this Delete
+            always hard-deletes (see DELETE_REMOVES_HISTORY). Amber (DESIGN.md
+            § Color): it informs the choice and never blocks it. */}
+        <p
+          data-testid="delete-history-warning"
+          role="status"
+          className="text-sm text-warning mb-4"
+        >
+          {DELETE_REMOVES_HISTORY}
         </p>
         {/* 167.2-REVIEW-R2 WR-02 (founder decision 2026-09-24): the composites
             this Delete would shrink, by name, or that they could not be

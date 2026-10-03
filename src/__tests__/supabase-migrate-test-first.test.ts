@@ -46,11 +46,11 @@ import { join } from "node:path";
 
 const ROOT = process.cwd();
 const WF_PATH = ".github/workflows/supabase-migrate.yml";
-const CI_PATH = ".github/workflows/ci.yml";
+// 2026-09-26, Phase 164.9.4: CI_PATH / CI (ci.yml) were removed here. Their only reader
+// was the cross-file mutex trio, whose reference is now RESTORE.
 const RESTORE_PATH = ".github/workflows/test-restore-from-baseline.yml";
 const read = (rel: string): string => readFileSync(join(ROOT, rel), "utf8");
 const WF = read(WF_PATH);
-const CI = read(CI_PATH);
 const RESTORE = read(RESTORE_PATH);
 
 const GUARD_JOB = "dispatch-ref-guard";
@@ -1236,7 +1236,16 @@ describe("164.8-05 — supabase-migrate.yml applies TEST first and gates PROD on
     );
   });
 
-  describe("cross-file: the mutex protocol is ci.yml's, byte for byte, in all THREE workflows", () => {
+  // 2026-09-26, Phase 164.9.4: ci.yml's copies leave with python and e2e-seeded, so the
+  // reference is the restore workflow. Two legs that compared the restore workflow with
+  // ci.yml are dropped rather than re-aimed: with the restore workflow as the reference
+  // they would compare a file with itself. This suite and
+  // test-restore-workflow-wiring.test.ts now make MIRROR comparisons of the same two
+  // files, on purpose. The old titles are kept here as lineage:
+  //   "cross-file: the mutex protocol is ci.yml's, byte for byte, in all THREE workflows"
+  //   "the acquire suffix is identical across ci.yml, the restore workflow and this one"
+  //   "the release step is byte-identical to ci.yml's, if: always() included"
+  describe("cross-file: the mutex protocol is identical between the two remaining takers, byte for byte", () => {
     /**
      * ⛔ IN-03 (164.8-REVIEW, closed 2026-09-09). This used to be
      * `s.slice(s.indexOf(SUFFIX_ANCHOR))`, and `indexOf` returns -1 when the anchor is
@@ -1281,21 +1290,22 @@ describe("164.8-05 — supabase-migrate.yml applies TEST first and gates PROD on
     };
 
     it("CALIBRATION (IN-03): BOTH anchored halves throw on a missing anchor", () => {
-      const ciStep = CI.match(ACQUIRE_RE)?.[0] ?? "";
-      expect(ciStep, "ci.yml's Acquire step could not be extracted").not.toBe(
-        "",
-      );
+      const refStep = RESTORE.match(ACQUIRE_RE)?.[0] ?? "";
+      expect(
+        refStep,
+        `${RESTORE_PATH}'s Acquire step could not be extracted`,
+      ).not.toBe("");
 
       // The mutation is asserted APPLIED before the flip is asserted: a subject that
       // still held the anchor would make the two `toThrow`s vacuous, which is the
       // shape of the very defect being cured.
-      const anchorless = ciStep
+      const anchorless = refStep
         .split(SUFFIX_ANCHOR)
         .join("          if ! command -v RENAMED");
       expect(
         anchorless,
         "CALIBRATION: the anchor-removal mutation changed nothing",
-      ).not.toBe(ciStep);
+      ).not.toBe(refStep);
       expect(
         anchorless.includes(SUFFIX_ANCHOR),
         "CALIBRATION: the anchor SURVIVED the mutation, so the arms below are not measuring an absent anchor",
@@ -1318,31 +1328,27 @@ describe("164.8-05 — supabase-migrate.yml applies TEST first and gates PROD on
 
       // The control, on the real input the pins below use: neither half throws, and
       // neither degenerates into a one-character tail or a step-wide prefix.
-      expect(suffix(ciStep).startsWith(SUFFIX_ANCHOR)).toBe(true);
+      expect(suffix(refStep).startsWith(SUFFIX_ANCHOR)).toBe(true);
       expect(
-        suffix(ciStep).length,
+        suffix(refStep).length,
         "the suffix is a single character — this is the -1 degradation IN-03 names, and it " +
           "is what a passing byte-identity pin looked like before the throw was added",
       ).toBeGreaterThan(1);
       expect(
-        prefix(ciStep).endsWith("\n"),
+        prefix(refStep).endsWith("\n"),
         "the prefix does not end at a line boundary, so it is not the anchor-led split",
       ).toBe(true);
       expect(
-        prefix(ciStep).length + suffix(ciStep).length,
+        prefix(refStep).length + suffix(refStep).length,
         "the two halves do not reconstruct the step",
-      ).toBe(ciStep.length);
+      ).toBe(refStep.length);
     });
 
-    it("the acquire suffix is identical across ci.yml, the restore workflow and this one", () => {
-      const ciStep = CI.match(ACQUIRE_RE)?.[0] ?? "";
-      const restoreStep = RESTORE.match(ACQUIRE_RE)?.[0] ?? "";
+    it("the acquire suffix is identical across the restore workflow and this one", () => {
+      const refStep = RESTORE.match(ACQUIRE_RE)?.[0] ?? "";
       const wfStep = WF.match(ACQUIRE_RE)?.[0] ?? "";
-      expect(ciStep, "ci.yml's Acquire step could not be extracted").not.toBe(
-        "",
-      );
       expect(
-        restoreStep,
+        refStep,
         `${RESTORE_PATH}'s Acquire step could not be extracted`,
       ).not.toBe("");
       expect(
@@ -1351,18 +1357,19 @@ describe("164.8-05 — supabase-migrate.yml applies TEST first and gates PROD on
       ).not.toBe("");
 
       const msg =
-        "the copied mutex protocol has DRIFTED from ci.yml's. Every invariant in that step " +
+        `the copied mutex protocol has DRIFTED from ${RESTORE_PATH}'s. Every invariant in that step ` +
         "(session-mode DSN, libpq keepalives, statement_timeout=0, " +
         "client_connection_check_interval, the 3600s cap, the two-cause error) was reasoned " +
         "about once and is applied everywhere; a one-site drift means this workflow contends " +
-        "for the SAME advisory key under a DIFFERENT protocol than the jobs it shares it with. " +
+        "for the SAME advisory key under a DIFFERENT protocol than the job it shares it with. " +
         "Re-sync the copy — do not edit it here.";
-      expect(suffix(restoreStep), msg).toBe(suffix(ciStep));
-      expect(suffix(wfStep), msg).toBe(suffix(ciStep));
+      expect(suffix(wfStep), msg).toBe(suffix(refStep));
 
       const ourPrefix = prefix(wfStep);
       expect(
         ourPrefix.includes("exit 0"),
+        // 2026-09-26, Phase 164.9.4: "ci.yml's copy" below is lineage; those copies leave
+        // with python and e2e-seeded. The reference is now the restore workflow.
         "the fork-PR early exit SURVIVED in the credential branch. ci.yml's copy may exit 0 " +
           "there because a fork PR legitimately has no secret; this workflow has no " +
           "pull_request trigger, so an absent credential is a FAULT — and exiting 0 would hand " +
@@ -1382,25 +1389,24 @@ describe("164.8-05 — supabase-migrate.yml applies TEST first and gates PROD on
           ),
         (t) => {
           const w = t.match(ACQUIRE_RE)?.[0] ?? "";
-          return w !== "" && suffix(w) === suffix(ciStep);
+          return w !== "" && suffix(w) === suffix(refStep);
         },
       );
     });
 
-    it("the release step is byte-identical to ci.yml's, if: always() included", () => {
-      const ciStep = CI.match(RELEASE_RE)?.[0] ?? "";
+    it("the release step is byte-identical to the restore workflow's, if: always() included", () => {
+      const refStep = RESTORE.match(RELEASE_RE)?.[0] ?? "";
       const wfStep = WF.match(RELEASE_RE)?.[0] ?? "";
-      expect(ciStep).not.toBe("");
+      expect(
+        refStep,
+        `${RESTORE_PATH}'s Release step could not be extracted`,
+      ).not.toBe("");
       expect(
         wfStep,
-        "the release step drifted from ci.yml's. It is the one step in apply-test allowed to " +
-          "end zero-status; that licence is ci.yml's reasoning, and it only transfers while " +
-          "the copy is exact.",
-      ).toBe(ciStep);
-      expect(
-        RESTORE.match(RELEASE_RE)?.[0] ?? "",
-        "the restore workflow's release drifted",
-      ).toBe(ciStep);
+        `the release step drifted from ${RESTORE_PATH}'s. It is the one step in apply-test ` +
+          "allowed to end zero-status; that licence was reasoned once (in ci.yml, where it " +
+          "originated), and it only transfers while the copy is exact.",
+      ).toBe(refStep);
       calibrate(
         "the release byte-identity pin bites",
         (s) =>
@@ -1408,7 +1414,7 @@ describe("164.8-05 — supabase-migrate.yml applies TEST first and gates PROD on
             "      - name: Release shared-test-db mutex (best effort)\n        if: always()\n",
             "      - name: Release shared-test-db mutex (best effort)\n",
           ),
-        (t) => (t.match(RELEASE_RE)?.[0] ?? "") === ciStep,
+        (t) => (t.match(RELEASE_RE)?.[0] ?? "") === refStep,
       );
     });
   });

@@ -2,8 +2,13 @@
 /**
  * STALE-01 part 2 — the OG social card must not recompute a dead run's track.
  *
- * This route does NOT read the stored KPI columns; it recomputes Sharpe / CAGR
- * / Max DD IN-ROUTE from `daily_returns` (or by differencing `returns_series`).
+ * This route did NOT read the stored KPI columns when this file was written; it
+ * recomputed Sharpe / CAGR / Max DD IN-ROUTE from `daily_returns` (or by
+ * differencing `returns_series`). CORRECTED 2026-09-30 (169.4.1-01): for a
+ * computed row the route now passes the stored `cagr` / `sharpe` /
+ * `max_drawdown` to `computeOgHeadline`, and falls back to the computation for
+ * a key the row does not carry, which is why the O4 / O5 controls below (no
+ * scalar keys) still print computed figures.
  * That put it outside `shapeRowAnalytics` entirely, and the SERIES is a job
  * output too — a run that did not finish leaves the PREVIOUS run's track
  * sitting in those columns, with nothing in the array to say which run wrote

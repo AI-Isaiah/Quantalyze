@@ -1368,6 +1368,69 @@ true for 146 and half of 142–145, and **false for 141**.
 
 ## 🟡 FIX MID-TERM
 
+- [ ] **`[164.9.3.2.1-OQ1-DEPARTED-KEY-55006-DEFEATS-RETRY]` `set_departed_key_history_inclusion` turns the
+      enqueue race-loss 40001 into a 55006 "try again", so the user is asked to retry a race PostgREST 14
+      would have absorbed (booked 2026-10-02, Phase 164.9.3.2.1 review WR-02, RESEARCH open question 1).**
+      - **Where.** `supabase/migrations/20260927180000_working_holder_rule_d18.sql`, the
+        `EXCEPTION WHEN serialization_failure THEN RAISE EXCEPTION 'HISTORY_RECOMPOSE_RACED' USING ERRCODE = '55006'`
+        block around its `enqueue_compute_job(p_kind := 'derive_allocator_equity', p_allocator_id := v_uid)`
+        call. Its DETAIL reads "Try again; nothing was changed."
+      - **Why it matters.** Phase 164.9.3.2.1 plan 01 measured the race-loss 40001 converging through
+        PostgREST v14.7: the gateway re-runs the transaction and the re-run enqueues. Catching the 40001
+        inside the function and re-raising 55006 removes the code PostgREST retries, so the gateway
+        returns the error to the user once instead of converging. The mechanism is REASONED, NOT
+        MEASURED: the 20260927180000 comment itself says the lost race "needs a second backend", and
+        this call is on the allocator-target branch, which neither plan 01 nor
+        `supabase/tests/test_enqueue_race_loss_40001.sql` exercises (that gate pins the strategy and
+        api_key branches only).
+      - **Not changed in 164.9.3.2.1:** that phase took the D-02 converge branch, which carries no
+        migration. A fix is a re-based `CREATE OR REPLACE` of the function (latest definition across ALL
+        migrations) with the three pre-merge migration reviewers, because merge auto-applies to PROD.
+      - **Trigger.** A user report of `HISTORY_RECOMPOSE_RACED` / 55006 on the departed-key history
+        toggle, OR the next edit to `set_departed_key_history_inclusion`, OR evidence that PROD's
+        PostgREST is ≥16 (where the 40001 would no longer be retried and the 55006 becomes the
+        better answer, so the decision flips).
+      ⏳ **Destination: AWAITS ROUTING via /gsd-phase (founder freeze 2026-09-27).**
+
+- [ ] **`[164.9.3.2.1-OQ2-PYTHON-ENQUEUE-NO-40001]` The Python enqueue callers have no 40001 handling, so on
+      PostgREST ≥16 a lost enqueue race fails the enqueue instead of converging (booked 2026-10-02, Phase
+      164.9.3.2.1 review WR-02, RESEARCH open question 2).**
+      - **Where.** `supabase.rpc("enqueue_compute_job", …)` call sites in `analytics-service/`, measured
+        2026-10-02 by grep: `routers/process_key.py:947` and `:1896`, `routers/cron.py:1151`,
+        `services/job_worker.py:2117`, `:5722` and `:6684`, `services/ingestion/long_fetch.py:685`.
+        None of those files handles SQLSTATE 40001 around an enqueue (the `40001` hits in
+        `job_worker.py` are the claim-token fence, now 55006).
+      - **Why it matters.** On PostgREST 14.x the gateway re-runs the race-loss 40001 itself and the
+        re-run converges (measured on v14.7, Phase 164.9.3.2.1 plan 01). PostgREST 16.0 stopped retrying
+        and returns the 40001 to the client as HTTP 500 (PostgREST PR #4222), so after an upgrade each
+        of these callers would see a lost race as an enqueue error: a compute job that should have been
+        queued is not. The TS callers already carry a retry-once helper
+        (`src/lib/supabase/retry-serialization-failure.ts`); the Python side has no equivalent.
+      - **Not changed in 164.9.3.2.1:** D-04 limited that phase to comment corrections.
+      - **Trigger.** Any evidence that PROD's PostgREST is ≥16 (D-06 forbade measuring it in
+        164.9.3.2.1; RESEARCH assumed 14.5 from a link cache), OR a PostgREST image bump on the
+        local-stack lane to ≥16, OR a production enqueue failure carrying `40001`.
+      ⏳ **Destination: AWAITS ROUTING via /gsd-phase (founder freeze 2026-09-27).**
+
+- [ ] **`[170.1-READ-ONLY-ONLY-COPY]` The connect-key warning strip reads "READ ONLY ONLY — keys with
+      Trade or Withdraw permissions are refused on submission." (seen by the founder on the composite
+      wizard, 2026-10-01).**
+      - **Where.** `src/app/(dashboard)/strategies/new/wizard/WithdrawalWarningStrip.tsx`; the bold
+        span `READ ONLY` is followed by the text `ONLY — …`, so the page shows the word twice.
+      - ⚠️ **A test pins it:** `WithdrawalWarningStrip.test.tsx`
+        asserts the sentence byte for byte as the "verbatim D-08 sentence". Find the D-08 decision
+        before changing it; if D-08 meant the doubled form, the fix is a decision, not a typo.
+      - **Destination: Phase 170.1 COPY.**
+
+- [ ] **`[169.1-UAT-SCENARIO-COMMIT-BAR-GAP]` On the /allocations Scenario tab at narrow widths, the
+      sticky `No changes yet / Commit scenario` bar floats about 74 px above the bottom nav, and the
+      chart scrolls visibly through the gap (seen in the 169.1 browser pass, 2026-10-01).**
+      - **Measured.** At a 735 px viewport the bar's bottom edge sat at 629 px and the nav's top at
+        703 px. The bar carries `sticky bottom-16 md:bottom-0`; the 64 px offset alone does not explain
+        the 74 px gap, so measure the scroll container's own bottom padding before fixing.
+      - Seen at 500 px and 735 px. Not caused by 169.1.
+      - **Destination: Phase 170.1 COPY** (page-layout pass), or fix-or-drop if 170.1 declines it.
+
 - [ ] **`[164.6.7-RETRY-PLAIN-COMPLETE]` The transient retry keeps a factsheet published only if
       its row was `complete_with_warnings` or warned; a plain `complete` row is not protected across
       the retry (booked 2026-09-26, Phase 164.6.7 round-2 review WR-01 / SFH-R2-03).**
@@ -1466,7 +1529,7 @@ true for 146 and half of 142–145, and **false for 141**.
       ✅ **Destination: Phase 169.4 ALLOCTRUTH**, whose plans read BTC through `readBenchmarkPrices`
       and `mergeWithFixture`. **Closed when:** consumers build the overlay from closes (or levels)
       and the metrics from exactly-one-day returns, with a test for each across a missing day.
-- [ ] **`[169-SCENARIO-WINDOW-ANNUALIZATION]` A selected range on the `/allocations` Scenario tab
+- [x] **`[169-SCENARIO-WINDOW-ANNUALIZATION]` A selected range on the `/allocations` Scenario tab
       shows the withheld form, because the Scenario payload carries no `periodsPerYear`
       (booked 2026-09-26, Phase 169 D-29).**
       Phase 169 plan 14 makes the KPI strip and the rail follow the zoom window on every
@@ -1485,8 +1548,34 @@ true for 146 and half of 142–145, and **false for 141**.
       `FactsheetBody` under a sub-range and asserts figures (not the em-dash) that equal
       `compute()` of the slice; and 167.1.2 records whether the leverage control should appear on
       the Scenario tab.
-- [ ] **`[164.9.4-CI-MUTEX-QUEUE]` `python` and `e2e-seeded` spend most of their CI wall clock
+      ✅ **CLOSED 2026-10-01 by Phase 169.1 ZOOMKPIS (plan 169.1-02, D-82).** The Scenario payload has
+      carried `periodsPerYear` since Phase 167.1.2 plan 07, and the leverage control is hidden in
+      `scenarioMode` (`FactsheetView.tsx`, `!scenarioMode && leverageEligible`). The gate test is
+      `FactsheetView.window-kpis.test.tsx` > "the Scenario mount shows window figures equal to
+      compute() of its slice, keeps its inert comparator blocks, renders no leverage control, and
+      resets exactly (D-82, W2)", commit `c78baf846`.
+
+- [ ] **`[169-PORTFOLIO-ANALYTICS-COLUMNS]` The portfolio analytics compute behind `/portfolios/[id]`
+      may never refresh (booked 2026-09-27, Phase 169 D-53; inferred from source, NOT measured).**
+      `_compute_portfolio_analytics` (`analytics-service/routers/portfolio.py`) selects
+      `strategy_analytics` columns that `supabase/schema/baseline.sql` does not carry, and reads
+      `returns_series` as daily returns while `metrics.py` writes that field as a cumulative series.
+      If so, every portfolio analytics compute fails and the risk decomposition on `/portfolios/[id]`
+      is stale or absent, and `standalone_vol`'s period cannot be confirmed end to end.
+      **Why not fixed in 169:** a Python compute path, not a page-number surface; found by the
+      169 replan research (`169-RESEARCH.md` Open Question 1).
+      **Owner:** THE FOUNDER, to route to a phase (data-integrity). *(Routed 2026-09-27: Phase 166.4.1
+      PORTFOLIOANALYTICS, inserted on main by PR #889.)* **Trigger:** one read of the
+      analytics logs for "Portfolio analytics computation failed" confirms or clears it.
+      **Closed when:** the compute selects only real columns, derives daily returns from the stored
+      series, and a test that fails on today's select pins both.
+
+- [x] **`[164.9.4-CI-MUTEX-QUEUE]` `python` and `e2e-seeded` spend most of their CI wall clock
       queued on the shared-TEST advisory lock (booked 2026-09-26, founder decision).**
+      ✅ **CLOSED 2026-10-03 by Phase 164.9.4 CIOFFMUTEX (v0.119.0.0).** `ci.yml` holds the key 0×; both jobs
+      boot a runner-private local-stack lane. Measured on run `37039941530` against tree-matched `37028872024`:
+      `python` 41m33s → 13m06s, `e2e-seeded` 30m19s → 11m14s (`164.9.4-MEASUREMENT.md`). SC-3's e2e-seeded
+      count is graded on the ship run (founder decision 2026-10-03).
       **Measured 2026-09-26 on CI run `36229959820` (PR #864, 52 min wall clock).** `python` took
       50 min: 36 min in "Acquire shared-test-db mutex" and 13 min in pytest. `e2e-seeded` took
       36 min: 28 min on the mutex and 5 min on specs. Every other job took 12 min or less. The wait
@@ -1495,6 +1584,35 @@ true for 146 and half of 142–145, and **false for 141**.
       ✅ **Destination: Phase 164.9.4 CIOFFMUTEX** — routed there 2026-09-26 via
       `/gsd-phase --insert`. The ROADMAP section holds the success criteria; this entry is the
       evidence.
+
+- [x] **`[164.9.4-DEFER-40001-RETRY-HANG]` A mismatched-token `defer_compute_job` RPC hangs through PostgREST instead of failing (booked 2026-09-26, Phase 164.9.4 D-15, evidence only).**
+      **Measured 2026-09-26 on a private local-stack lane** (no shared TEST, no other load on
+      the database). `defer_compute_job` raises `USING ERRCODE = 'serialization_failure'`
+      (SQLSTATE 40001) on its mismatched-token path, read from the function definition on the
+      lane. A direct PostgREST call with a mismatched token got no response within
+      `--max-time 25` (`http=000 real 25.18`); the same call with the matching token returned
+      `http=200 real 0.36`. The PostgREST log answered the hung request only after the row's
+      state changed (`defer_compute_job: job … not found or not running`). This is the
+      behaviour Supabase documents on its troubleshooting page "High CPU and infinite
+      transaction retries when using custom error codes in RPC functions"
+      (https://supabase.com/docs/guides/troubleshooting/high-cpu-and-infinite-transaction-retries-when-using-custom-error-codes-in-rpc-functions-77326b):
+      PostgREST retries a transaction that raises 40001. Source: `164.9.4-RESEARCH.md`,
+      `## Python on the lane (MEASURED)`.
+      **Consequence.** The skip reasons in `analytics-service/tests/test_compute_jobs_fencing.py`
+      carry a MISATTRIBUTED root cause. `test_defer_compute_job_token_fence` skips at runtime
+      after about 120 s on the idle private lane too, deterministically, so shared-TEST contention
+      is not the cause. The three `@pytest.mark.skip("P1 TODO — flaky httpx.ReadTimeout …")`
+      fence tests (`test_late_mark_done_with_stale_token_raises_serialization_failure`,
+      `test_late_mark_failed_with_stale_token_raises_serialization_failure`,
+      `test_late_mark_done_after_w2_completed_raises_serialization_failure`) blame the same
+      contention. Their functions raise the same SQLSTATE, so the 40001 retry loop is the likely
+      cause there too; that half is UNMEASURED, only `defer_compute_job` was probed. Leaving
+      shared TEST therefore does not un-skip any of them. The job worker
+      (`analytics-service/services/job_worker.py`) calls `defer_compute_job` through the same
+      PostgREST RPC path, so a stale worker may hang instead of failing fast: the compute
+      pipeline may be affected, so this may be data-integrity.
+      ⏳ **Destination: AWAITS ROUTING.** The 2026-09-26 founder freeze forbids new phases; route it with /gsd-phase when the freeze lifts. Not fixed in 164.9.4, and it moves no count there.
+      ✅ CLOSED 2026-10-02 by Phase 164.9.3.2 DEFER40001. Migration `supabase/migrations/20261001120000_compute_job_fence_errcode_55006.sql` moves all four claim-token fence raises (`defer_compute_job`, `mark_compute_job_done` twice, `mark_compute_job_failed`) from SQLSTATE 40001 to `55006` with the message text unchanged, and PostgREST answers that code once. Evidence, plans 01-05: all four raises measured hanging through the lane's PostgREST v14.7 before the fix (no answer at 20 s, the retry loop still running after the client left); the gate `supabase/tests/test_compute_job_fence_errcode.sql` RED without the migration (first failure D1, SQLSTATE 40001) and GREEN with it (`ALL 8 ARMS EXECUTED`), each of its 8 twins observed biting; the four live-DB arms in `src/__tests__/compute-jobs-audit-2026-05-07-g10b.test.ts` aborted at their 10 s bound on the seam lane and answered `55006` once on the fixed lane; in Python, `test_defer_compute_job_token_fence` was SKIPPED after 121.61 s before the fix and PASSED in 0.01 s with no skip after, and the three decorated late-mark tests measured PASSED on the lane (their decorators stay until 164.9.4 moves `python` off shared TEST). ENQ-SCOPE = `enq-sibling` (founder, 2026-10-01): the enqueue race-loss raise in `_enqueue_compute_job_internal` is routed to Phase 164.9.3.2.1 ENQ40001. The fix is live only once this phase's merge applies the migration to PROD. The text above is kept as lineage.
 
 - [x] **`[164.9.5-MANUAL-BASELINE-REDUMP]` Every PROD migration apply leaves `main` red on
       baseline-content-drift until someone runs a manual schema dump (booked 2026-09-26, founder
@@ -1525,12 +1643,13 @@ true for 146 and half of 142–145, and **false for 141**.
       and human-run: dispatch `supabase-migrate.yml` on main and expect a no-op or one bot PR,
       and approve the workflows on the first bot PR.
 
-- [ ] **`[164.9.3-CLAIM-PAIR-23505]` A due `failed_retry` compute job plus a `pending` twin of the
+- [x] **`[164.9.3-CLAIM-PAIR-23505]` A due `failed_retry` compute job plus a `pending` twin of the
       same (kind, allocator) makes every claim entry point raise `23505` (booked 2026-09-26, found
       on the pg-lane by the Phase 167.1.2 PR B fixer).**
       **Repro, measured 2026-09-26.** Seed a `failed_retry` `derive_allocator_equity` row with
       `next_attempt_at` in the past and a `pending` row for the same allocator. Then
-      `claim_compute_jobs_with_priority` (6-arg and 2-arg) and `claim_compute_jobs` all raise
+      `claim_compute_jobs_with_priority` (6-arg and 2-arg; ⛔ CORRECTED 2026-09-27: 5-arg, and the
+      2-arg's pre-fix result is 42725 not 23505, see 164.9.3 CONTEXT) and `claim_compute_jobs` all raise
       `23505` on `compute_jobs_one_inflight_per_kind_allocator`.
       **Why.** The claim's C39 guard skips a candidate only for a `running` or
       `done_pending_children` sibling, not a `pending` one. `_enqueue_compute_job_internal`'s dedup
@@ -1551,6 +1670,37 @@ true for 146 and half of 142–145, and **false for 141**.
       any kind is claimed until the pair clears. The full repro is kept verbatim in the Phase
       164.5.2 ROADMAP section as lineage. **Owner: Phase 164.9.3 CLAIMPAIR**, whose criterion 4
       now covers all four partitions (api_key_id, portfolio, strategy, allocator).
+      ✅ CLOSED 2026-09-27 by Phase 164.9.3 CLAIMPAIR. Migration
+      `20260927120000_claim_pair_pre_rank_exclusion.sql` (D-08): a `failed_retry` candidate whose
+      `(kind, partition)` already holds a `pending` row is dropped from the `ranked` CTE BEFORE
+      `row_number()` in all three claim bodies, `claim_compute_jobs(integer, text)`, the 5-arg
+      and the 2-arg `claim_compute_jobs_with_priority`, with one clause per partition
+      (`api_key_id`, portfolio, strategy, allocator) matching its
+      `compute_jobs_one_inflight_per_kind_*` index predicate (D-02). The 2-arg is re-based, not
+      dropped, and also gains the C39 running / done_pending_children guard. The enqueue side is
+      unchanged. Gate `supabase/tests/test_claim_compute_jobs_failed_retry_pending_pair.sql`,
+      18 arms (12 partition arms, W-LOST, P2-C39, regression arm W-INTRO, W-LOWTWIN from review
+      round 1, and W-C39SIB and W-C39INTRO from review round 3), each with a mutation twin.
+      Red-first census on the pre-fix lane: 14 RED, all 14 with SQLSTATE 23505, W-INTRO GREEN;
+      W-LOWTWIN RED before the probe fix (no error, 0 of 3 rows claimed); W-C39SIB and
+      W-C39INTRO RED before the round-3 widening (no error, the unrelated `low` job and the retry
+      each claimed 0 times). After the fixes: 18 of 18 green on the pg-lane.
+      Residual (i) is CLOSED in review rounds 1 and 3: the priority throttle probe counted a
+      held-back retry, which beside a `low` pending twin claimed neither row and throttled every
+      due `low` job with no error, on every tick. Both priority overloads now skip such a retry
+      in the probe (a marked `CLAIMPAIR PROBE EXCLUSION` block). Round 3 (founder decision D-11)
+      widened the block to the C39 half: a retry the C39 guard holds back beside a `running` or
+      `done_pending_children` sibling is skipped too, with the intro carve-out on the `pending`
+      sibling only. So the far-future-twin hold, the low-twin wedge and the C39-sibling hold are
+      all gone. What stays (review IN-11): the block covers `failed_retry` rows only, so a due
+      `pending` `compute_intro_snapshot` row that C39 drops beside an in-flight intro sibling is
+      still counted; it predates this phase and is latent while no writer sets `low`.
+      ⚠️ Two residuals are recorded in the migration
+      header, not fixed: (ii) a retry waits for a not-yet-due twin to run first (delay, not
+      loss); (iii) a claim racing a concurrent enqueue of the twin can still raise 23505 for one
+      tick (reasoned, not measured). The ROADMAP-booked option (a), adding `pending` to the
+      post-rank C39 list, was measured as a SILENT permanent wedge that also starves
+      `compute_intro_snapshot`, and was rejected.
 
 - [ ] **`[164.9.3.1-FANIN-GRAPH-RESIDUALS]` Four latent or loud defects on the fan-in graph and
       the bridge's decision cascade (booked 2026-09-26; routed 2026-09-25 from the Phase 164.9.1
@@ -3666,7 +3816,7 @@ and `[VAC08-LEDGER-32]`. ⛔ **Every entry below names a PHASE, not just a probl
       script that takes a shared-TEST lock.
       **Owner:** Phase 164.9 TESTISOLATION.
 
-- [ ] **`[167.2.1-DISCOVERY-DETAIL-DOUBLE-ASSEMBLY]` the discovery detail page assembles the
+- [x] **`[167.2.1-DISCOVERY-DETAIL-DOUBLE-ASSEMBLY]` the discovery detail page assembles the
       factsheet builder a second time, beside `fetchAndBuildPayload` (booked 2026-09-25, Phase
       167.2.1 D-03; routed to Phase 169 PAGETRUTH)** — `src/app/(dashboard)/discovery/[slug]/[strategyId]/page.tsx` calls the
       builder's steps itself: `resolveDailyReturnSeries`, `readCompositeFactsheet`,
@@ -3687,6 +3837,9 @@ and `[VAC08-LEDGER-32]`. ⛔ **Every entry below names a PHASE, not just a probl
       **Routing:** Phase 169 PAGETRUTH, which owns factsheet KPI sourcing (its SC4). The ROADMAP
       carries the matching dated note under `### Phase 169`, "Routed in, 2026-09-25 (Phase 167.2.1
       D-03)", written at planning time.
+      **Closed 2026-10-01 by Phase 169.1 plan 169.1-01 (commit `509b0d68c`):** the page builds
+      through `fetchAndBuildPayloadWithReason(strategy.id, withPublishedOnly)` and makes none of
+      the four calls itself; `page.one-path.test.tsx` and the phase-147 source guard pin it.
 
 - [ ] **`[167.2.1-CLIENT-SENTRY-NOOP]` every `captureToSentry` call in browser code is a silent
       no-op, because there is no client `Sentry.init` (booked 2026-09-26, Phase 167.2.1
@@ -8142,6 +8295,12 @@ EXECUTED, §str/None follow-through, §Discovery observation).
       **Closed when:** each item's verdict is written into `167-UAT.md` (verdict and counts only —
       no key id, account number or server name).
 
+## Phase 167.1.2 (ACCOUNTTRUTH) — PR C2 informational items (logged 2026-09-29)
+
+- [ ] **`[167.1.2-C2-R3-IN-05]` A corrupt `key_inputs` row on an older key fails the stitched book permanently (Info, C2 round-3 review IN-05, founder: "It is an informational. Just put it into todos").**
+      - **What happens.** When the derive stitches a failing older key's history onto the working key (C2 round-2 fix SFH-R2-03), one corrupt `key_inputs` row on the older key marks the whole book `shared_account_history_truncated`, so the book stays hidden, while the rebuilding line says the history is recomputed once a day.
+      - **Source.** `.planning/phases/167.1.2-accounttruth-one-exchange-account-is-counted-once-and-the-al/167.1.2-C2-REVIEW-R3.md`, IN-05.
+
 ## Phase 167.1.2 (ACCOUNTTRUTH) — PR B review round 4, routed items (logged 2026-09-26)
 
 - [ ] **`[167.1.2-REUSED-RETRY-ENDS-FAILED-FINAL]` A toggle can report success while the recompose
@@ -9182,6 +9341,25 @@ backs ~9 surfaces — the remedy for any of its flows is a NEW named limiter, ne
   docs-only PR opening and either of those, and inside it a red arrives LATE, not never. ⛔ Do not
   restate this as "the gate was lost", and do not restate it as "nothing changed" — both halves are
   load-bearing and stating only one of them misroutes whoever picks this up.
+  ⛔ **CORRECTED 2026-10-02 (Phase 164.9.4 review round 2, WR-01): the merge push to `main` is no
+  longer unfiltered.** Since 164.9.4 a `.planning/`-only push is classified by its pushed range
+  (`scripts/classify-changed-paths.mjs` `classifyPushRange`) and takes the short path. To keep the
+  first backstop above, the founder decided on 2026-10-02 that a push range touching a `.planning/`
+  file a `frontend-test` assertion reads is CODE: `TEST_READ_PLANNING_PATHS` lists the seven measured
+  entries (`config.json`, `REQUIREMENTS.md`, `ROADMAP.md`, `159-VERIFICATION.md`, and Phase 164.3's
+  `164.3-07-DEFERRED.md`, `164.3-07-PLAN.md` and absent `164.3-07-SUMMARY.md`), so the merge push of
+  a docs-only PR that touches one of them still runs `frontend-test`. (Round 3, CR-01, same day:
+  `config.json` was added after a whole-tree derivation found `critical-regressions.test.ts` reading
+  it; the earlier "six" was measured from two named test files only. The founder confirmed the list
+  may grow beyond the original three.) A docs-only push also takes the short path only when Railway's
+  own gate would pass on its predecessor: every GitHub Actions check run on `before`, all workflows
+  and events, non-red (`docs/runbooks/railway-worker.md`, Recovery step 2). So a docs merge can no
+  longer turn `main` green over a red predecessor either. Both halves above therefore
+  still hold for those files. The paragraph above is kept as lineage.
+  ⛔ **CORRECTED 2026-10-02 (Phase 164.9.4 review round 4, CR-01):** "every Actions check run
+  non-red" alone was not proof CI ran on the predecessor (a scheduled workflow's green checks
+  passed it). The predecessor must now also carry a successful `frontend` check run, and every
+  GitHub Actions check suite on it must be completed and non-red (D-16 in `164.9.4-CONTEXT.md`).
   ⛔ **TWO REMEDIES WERE CONSIDERED AND BOTH REFUSED, recorded so neither is re-proposed as new.**
   (1) Widen the always-on set to include `frontend-test` — REFUSED: that job is most of the saving
   the filter exists to produce, so buying two deferred assertions back at that price undoes the

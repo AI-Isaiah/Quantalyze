@@ -1090,10 +1090,11 @@ def _refuse_mismatched_day_labels(returns: pd.Series, benchmark: pd.Series) -> N
     leg to UTC and drops the zone, so it treats a NAIVE stamp as UTC. That is
     lossless when the aware leg's wall clock IS UTC. It is not when the zone is
     east or west of UTC: a Tokyo midnight becomes 15:00 on the previous UTC day,
-    and ``_align_benchmark_like_qs``' reindex branch then back-fills each
-    strategy midnight from that stamp, pairing every strategy day with the NEXT
-    benchmark day. The result was a silently shifted ``r_squared`` with status
-    ``ok`` (measured on a naive strategy against an Asia/Tokyo benchmark).
+    and ``_benchmark_pair`` would then assign each shifted stamp to the wrong
+    holding interval, pairing each strategy day with the wrong benchmark
+    interval (166.4 D-A). Before 166.4 the same shift produced a silently
+    shifted ``r_squared`` with status ``ok`` (measured on a naive strategy
+    against an Asia/Tokyo benchmark).
 
     The pair is accepted when both legs are naive, both carry the same zone, or
     every aware leg's wall clock equals UTC at every stamp (a naive leg is read
@@ -1118,30 +1119,30 @@ def _refuse_mismatched_day_labels(returns: pd.Series, benchmark: pd.Series) -> N
 
 
 def _align_benchmark_like_qs(benchmark: pd.Series, period: pd.Index) -> pd.Series:
-    """quantstats 0.0.81 ``_utils._prepare_benchmark(benchmark, period, prepare_returns=True)`` MINUS the price guess.
+    """quantstats 0.0.81 ``_utils._prepare_benchmark(benchmark, period, prepare_returns=True)`` MINUS the price guess, on an ALREADY-PAIRED leg.
 
-    0.0.81 BODY (Series benchmark, DatetimeIndex period, rf=0)::
+    quantstats 0.0.81 rebuilds benchmark prices, back-fills them onto the
+    strategy's dates whenever the two date sets differ, and zero-fills the first
+    return; this engine no longer does any of that. What is kept is the
+    equal-index path: tz normalisation, ``dropna()``, and 0.0.81's final
+    ``_prepare_returns`` with the guess removed (``_prepared_returns_no_guess``).
+    On an equal-index pair every value is bit-identical to what this function
+    returned before 166.4.
 
-        if set(period) != set(benchmark.index):
-            benchmark_prices = to_prices(benchmark, base=1)
-            new_index = date_range(start=period[0], end=period[-1], freq="D")
-            benchmark = (benchmark_prices.reindex(new_index, method="bfill")
-                         .reindex(period).pct_change(fill_method=None).fillna(0))
-            benchmark = benchmark[benchmark.index.isin(period)]
-        <tz normalisation>
-        return _prepare_returns(benchmark.dropna(), rf=rf)
-
-    ``to_prices(x, base=1)`` is ``1 + 1 * compsum(x.fillna(0).replace(±inf, NaN))``
-    and ``compsum(x)`` is ``x.add(1).cumprod() - 1``. The final
-    ``_prepare_returns`` becomes ``_prepared_returns_no_guess``: that is the
-    only change, and it is the guess.
-
-    THE REINDEX BRANCH IS KEPT ON PURPOSE (Pitfall 3). ``compute_qstats_scalars``
-    receives the UNALIGNED strategy series and the ~1000-day BTC benchmark, so
-    the set equality is false for every benchmarked strategy and this branch
-    runs for all of them. Aligning on an inner join instead would move
-    ``r_squared`` for everyone. That would be a convention change, not a
-    closure.
+    SUPERSEDED BY 166.4 D-A (founder, 2026-09-27). Phase 166 kept 0.0.81's
+    reindex arm on purpose, arguing that aligning any other way would move
+    ``r_squared`` for everyone and would be a convention change rather than a
+    closure. The founder made that convention change (166.4 D-A; the rationale
+    is rewritten under 166.4 D-01): every benchmark-relative metric now reads
+    the ONE interval pair from ``_benchmark_pair``, and nothing is filled across
+    a benchmark gap. Every caller (``_greeks_no_guess`` from the
+    ``compute_all_metrics`` fan-out, ``_rolling_greeks`` from
+    ``_rolling_alpha_beta``) hands this function an equal-index pair, so a
+    ``period`` whose date set differs from the benchmark's is a caller that
+    skipped the pairing, and it is refused with a ``ValueError`` naming 166.4
+    D-A instead of being filled. INVARIANT: the frame ``fillna(0)`` of
+    ``_rolling_greeks`` can never see an unpaired benchmark value, because an
+    unpaired date never reaches it.
 
     WHY NOT CALL THE PRIVATE SYMBOL: ``_prepare_benchmark(..., prepare_returns=False)``
     would also skip the guess, but it would put a private quantstats symbol into
@@ -1151,25 +1152,238 @@ def _align_benchmark_like_qs(benchmark: pd.Series, period: pd.Index) -> pd.Serie
     """
     # Phase 166 review (SFH LOW-1 / IN-02): the benchmark is tz-normalised
     # FIRST, exactly like the strategy leg every caller normalises before it
-    # builds ``period``. 0.0.81 normalises after the set test, which only works
-    # because it never normalises the strategy leg; with a naive ``period`` and a
-    # tz-aware benchmark the set test is always unequal and the reindex raised
-    # ``TypeError: Cannot compare dtypes datetime64[us, UTC] and datetime64[us]``
-    # (measured on a UTC pair). A naive benchmark is untouched, so every
-    # existing value is bit-identical.
+    # builds ``period``, so a naive ``period`` and a tz-aware benchmark compare
+    # by date. A naive benchmark is untouched, so every existing value is
+    # bit-identical.
     benchmark = _tz_naive_like_qs(benchmark)
     if set(period) != set(benchmark.index):
-        cleaned = benchmark.copy().fillna(0).replace([np.inf, -np.inf], float("NaN"))
-        benchmark_prices = 1 + 1 * (cleaned.add(1).cumprod(axis=0) - 1)
-        new_index = pd.date_range(start=period[0], end=period[-1], freq="D")
-        benchmark = (
-            benchmark_prices.reindex(new_index, method="bfill")
-            .reindex(period)
-            .pct_change(fill_method=None)
-            .fillna(0)
+        raise ValueError(
+            "the benchmark leg does not share the strategy's dates; pair the legs "
+            "with _benchmark_pair first, a benchmark is never filled onto the "
+            "strategy's calendar (166.4 D-A)"
         )
-        benchmark = benchmark[benchmark.index.isin(period)]
     return _prepared_returns_no_guess(benchmark.dropna())
+
+
+# ---------------------------------------------------------------------------
+# Phase 166.4 BENCHALIGN (166.4 D-A): the ONE interval-matched benchmark pair.
+#
+# A strategy return dated t_k is the move over the holding interval
+# (t_{k-1}, t_k]. For a strategy sparser than BTC's 7-day calendar that
+# interval spans several BTC days, so every benchmark-relative metric pairs it
+# with BTC's return over the SAME interval, compounded, and pairs it only when
+# BTC has a close at both endpoints. Nothing is filled across a gap. M1
+# (``d16b2fb4c``) paired a Monday with BTC's Sunday-to-Monday daily move; that
+# convention is superseded (founder decision D-A, 2026-09-27).
+# ---------------------------------------------------------------------------
+
+
+def _interval_matched_benchmark(index: pd.DatetimeIndex, benchmark: pd.Series) -> pd.Series:
+    """For each strategy date t_k, the benchmark return over (t_{k-1}, t_k]; NaN when unpaired (166.4 D-A).
+
+    PAIRING RULE: interval k is paired ONLY when the benchmark has a close
+    dated t_{k-1} AND a close dated t_k. It is the pairing rule of the D-58
+    amendment of Phase 169.5 BENCHCOMPARE, whose TypeScript twin is
+    ``src/lib/factsheet/align.ts``; the two implementations cite each other
+    (166.4 D-A, D-02). They differ in two places. At index 0, 169.5 keeps
+    index 0 = 0 per its D-54 parity convention, while this helper pairs index
+    0 with the benchmark return dated t_0 (166.4 D-05). For k >= 1, this helper
+    also unpairs an interval that is missing a date of the benchmark's own
+    calendar strictly inside it (INTERIOR GAPS below, review WR-01). The
+    TypeScript twin has no such rule; adopting it there is a 169.5 decision.
+
+    VALUE: exactly one benchmark return inside the interval is used VERBATIM
+    (recomputing it as ``(1 + x) - 1`` breaks dense bit-identity at 1e-16); two
+    or more are compounded, ``prod(1 + b) - 1``. When both endpoints are closes
+    and every date of the benchmark's own calendar inside the interval carries
+    a return, this telescopes to ``price[t_k] / price[t_{k-1}] - 1``.
+
+    INTERIOR GAPS (review WR-01): a date of the benchmark's own calendar
+    strictly inside the interval that carries no return UNPAIRS the interval.
+    A missing PRICE row would still telescope (``pct_change`` spans it), but a
+    missing RETURN row drops a move, and compounding past it reads that move
+    as 0, a fill across a gap. This helper receives returns, so it cannot tell
+    the two apart and treats both as a gap. The benchmark's calendar is the
+    set of weekdays it ever carries: seven for BTC, so a weekday strategy's
+    (Friday, Monday] interval needs Saturday and Sunday returns; five for a
+    business-day series, so the same interval needs the Monday return only.
+
+    A CLOSE at date d exists iff d carries a finite benchmark return, or d is
+    the base close (166.4 D-07 below). A NaN or +-inf benchmark return means no
+    close at d, and an interval holding one is unpaired. Unpaired dates are NaN
+    here and are excluded by ``_benchmark_pair``; nothing is ever filled.
+
+    ``index`` must be sorted and free of duplicates (``_benchmark_pair``
+    enforces both); ``np.searchsorted`` requires the sort.
+    """
+    out = pd.Series(np.nan, index=index, dtype="float64")
+    b = (
+        _tz_naive_like_qs(benchmark)
+        .astype("float64")
+        .replace([np.inf, -np.inf], np.nan)
+        .sort_index()
+    )
+    n = len(index)
+    if n == 0 or len(b) == 0:
+        return out
+
+    b_vals = b.to_numpy(dtype="float64")
+    b_finite = ~np.isnan(b_vals)
+
+    # [166.4 D-07, ratified by the founder 2026-09-27] The base close is
+    # ``benchmark.index[0]`` minus one day: the first stored benchmark return is
+    # the move from a close on the day before it (``prices_to_returns`` drops
+    # the first price date). So a strategy date one day before BTC's first
+    # stored return counts as a close, and a dense strategy older than the BTC
+    # window keeps its first in-window pair. This assumes the stored BTC return
+    # series is contiguous at its start (166.4 RESEARCH A1).
+    base_close = b.index[0] - pd.Timedelta(days=1)
+    close_dates = b.index[b_finite].append(pd.DatetimeIndex([base_close]))
+    is_close = np.asarray(index.isin(close_dates), dtype=bool)
+
+    # Interval id per benchmark date: date d falls in (t_{k-1}, t_k] for
+    # k = searchsorted(index, d, side="left"). Dates after the last strategy
+    # date belong to no interval. Both sides are cast to one resolution so the
+    # comparison never depends on how each index was built.
+    k_of = np.searchsorted(
+        np.asarray(index.values, dtype="datetime64[ns]"),
+        np.asarray(b.index.values, dtype="datetime64[ns]"),
+        side="left",
+    )
+    keep = k_of < n
+    frame = pd.DataFrame(
+        {
+            "k": k_of[keep],
+            "v": b_vals[keep],
+            "nan": ~b_finite[keep],
+            "growth": 1.0 + b_vals[keep],
+        }
+    )
+    grouped = frame.groupby("k", sort=True)
+    sizes = grouped.size()
+    ks = sizes.index.to_numpy()
+    count = np.zeros(n, dtype="int64")
+    any_nan = np.zeros(n, dtype=bool)
+    first = np.full(n, np.nan)
+    compounded = np.full(n, np.nan)
+    count[ks] = sizes.to_numpy()
+    any_nan[ks] = grouped["nan"].any().to_numpy()
+    # ``first`` skips NaN; that is safe only because an interval holding a NaN
+    # is excluded below.
+    first[ks] = grouped["v"].first().to_numpy()
+    compounded[ks] = grouped["growth"].prod().to_numpy() - 1.0
+
+    # [166.4 D-A, review WR-01] Every date of the benchmark's OWN calendar
+    # inside (t_{k-1}, t_k] must carry a return. The calendar is the set of
+    # weekdays the benchmark ever carries (all seven for BTC, Monday to Friday
+    # for a business-day series), so a weekend is a gap for BTC and not for a
+    # business-day benchmark. ``expected[k]`` counts those dates in the
+    # interval with a running count over the calendar days from t_0 to t_last;
+    # 1970-01-01 (day 0) is a Thursday, pandas ``dayofweek`` 3.
+    traded = np.zeros(7, dtype=bool)
+    traded[np.unique(np.asarray(b.index.dayofweek))] = True
+    day_num = (
+        np.asarray(index.values, dtype="datetime64[ns]").astype("datetime64[D]").astype("int64")
+    )
+    first_day = int(day_num[0])
+    calendar_days = np.arange(first_day, int(day_num[-1]) + 1, dtype="int64")
+    traded_to_date = np.cumsum(traded[(calendar_days + 3) % 7])
+    at_t = traded_to_date[day_num - first_day]
+    expected = np.zeros(n, dtype="int64")
+    expected[1:] = at_t[1:] - at_t[:-1]
+
+    # [166.4 D-A] k >= 1 is paired iff t_k is a close, no benchmark value in the
+    # interval is non-finite, the interval holds at least one return, and it
+    # holds a return for every date of the benchmark's calendar inside it.
+    paired = is_close & ~any_nan & (count >= 1) & (count == expected)
+    # [166.4 D-04, ratified by the founder 2026-09-27] The t_{k-1} endpoint must
+    # be a close too, WHICHEVER leg is sparser: a daily strategy's Monday
+    # against a business-day benchmark has no close dated Sunday, so it is
+    # unpaired, exactly as a weekday strategy's Monday needs a close dated Friday.
+    paired[1:] &= is_close[:-1]
+    paired[0] = False
+    values = np.where(count == 1, first, compounded)
+    out.iloc[np.flatnonzero(paired)] = values[paired]
+
+    # [166.4 D-05, ratified by the founder 2026-09-27] Index 0 has no previous
+    # strategy date. It is paired with the benchmark return dated t_0 when t_0
+    # carries a finite one (the one-period convention, today's inner-join
+    # value), and is unpaired otherwise. Never a fabricated 0. Benchmark dates
+    # before t_0 fall in interval 0 and are ignored.
+    t0 = index[0]
+    if t0 in b.index:
+        v0 = float(b.loc[t0])
+        if np.isfinite(v0):
+            out.iloc[0] = v0
+    return out
+
+
+def _benchmark_pair(returns: pd.Series, benchmark: pd.Series) -> tuple[pd.Series, pd.Series]:
+    """The ONE (strategy, benchmark) pair every benchmark-relative metric reads (166.4 D-A, SC1).
+
+    Order of operations: the day-label refusal FIRST
+    (``_refuse_mismatched_day_labels``: a shifted day label would pair each
+    strategy day with the wrong benchmark interval), then the strategy's tz
+    normalisation (``_tz_naive_like_qs``), then a sort of the strategy by date.
+    Not every production entry point sorts (``derive_basis_series`` hands a
+    caller's ``scalar_returns`` through as given), and the interval ids come
+    from ``np.searchsorted``, which requires a sorted index.
+
+    DUPLICATE DATES are refused with a ``ValueError`` on either leg: an
+    interval cannot be defined twice, and picking one of two values would be
+    guessing.
+
+    Both legs are restricted to the dates ``_interval_matched_benchmark``
+    pairs. Strategy NaN is RETAINED: each metric keeps its own existing NaN
+    convention (pairwise drop for the scalars, the frame ``fillna(0)`` of
+    ``_rolling_greeks``). An unpaired benchmark date never reaches any metric.
+
+    A strategy +-inf is read as NaN HERE, once (review WR-02), so every
+    benchmark-relative metric drops the same rows: correlation, beta and the
+    rest of the fan-out as well as r_squared. Before, only the two r_squared
+    helpers mapped it, and a strategy with one inf day persisted an ``ok``
+    r_squared beside a None correlation and beta.
+    """
+    _refuse_mismatched_day_labels(returns, benchmark)
+    r = _tz_naive_like_qs(returns).sort_index().replace([np.inf, -np.inf], np.nan)
+    b = _tz_naive_like_qs(benchmark)
+    if r.index.has_duplicates or b.index.has_duplicates:
+        raise ValueError(
+            "the strategy or the benchmark carries a duplicated date; an interval "
+            "cannot be defined twice, so the pair is refused (166.4 D-A)"
+        )
+    paired_benchmark = _interval_matched_benchmark(pd.DatetimeIndex(r.index), b)
+    mask = paired_benchmark.notna().to_numpy()
+    return r[mask], paired_benchmark[mask]
+
+
+def strategy_calendar_is_sparse(index: pd.DatetimeIndex) -> bool:
+    """True iff some two consecutive strategy dates are more than one calendar day apart (166.4 D-03, SC7).
+
+    This is the engine's definition of a "sparse calendar". Against a
+    contiguous benchmark it is exactly the condition under which the 166.4 D-A
+    interval pair (``_benchmark_pair``) differs from a daily inner join: every
+    interval of a non-sparse calendar is one day long. The dates are
+    tz-normalised the way ``_tz_naive_like_qs`` normalises a series, sorted,
+    and de-duplicated first. NaN VALUES do not remove dates, so a broker
+    series with NaN guard days is dense. An index of fewer than two dates is
+    not sparse.
+
+    Broker and composite series are densified before compute, so in production
+    only user CSV series can be sparse (166.4 RESEARCH Q2, Q9). The read-only
+    SQL Phase 166.3 runs applies the same definition: consecutive
+    ``csv_daily_returns.date`` values more than one day apart.
+
+    PUBLIC because Phase 166.3 cites it by name. No metric calls it; it exists
+    for the 166.3 handoff and is pinned by ``tests/test_benchalign.py``.
+    """
+    idx = pd.DatetimeIndex(index)
+    if idx.tz is not None:
+        idx = idx.tz_convert("UTC").tz_localize(None)
+    idx = idx.unique().sort_values()
+    if len(idx) < 2:
+        return False
+    return bool((idx[1:] - idx[:-1]).max() > pd.Timedelta(days=1))
 
 
 def _r_squared(returns: pd.Series, benchmark: pd.Series) -> float:
@@ -1189,30 +1403,40 @@ def _r_squared(returns: pd.Series, benchmark: pd.Series) -> float:
         _, _, r_val, _, _ = linregress(returns, _prepare_benchmark(benchmark, returns.index))
         return r_val ** 2
 
-    The benchmark is prepared TWICE, against the unaligned series, exactly as
-    0.0.81 does, so benign benchmarked strategies stay bit-identical. ``linregress``
-    is the function quantstats imports. ``np.corrcoef`` is algebraically equal
-    but not bit-identical to the golden, so it is not used.
+    166.4 D-A and D-06 (ratified by the founder 2026-09-27): the pair is
+    ``_benchmark_pair``'s, the ONE interval pair every benchmark-relative
+    metric reads, so r_squared is the squared correlation of the same pair the
+    persisted ``correlation`` is computed on. 0.0.81 instead rebuilt benchmark
+    prices, back-filled them onto the strategy's dates and zero-filled the
+    first return; on any pair whose calendars differ, and on every dense pair
+    through its zero-filled first return, r_squared therefore moves by
+    construction. On a same-calendar NaN-free pair (the golden) the pair is
+    the input as given and the value is bit-identical to 0.0.81.
+    ``linregress`` is the function quantstats imports. ``np.corrcoef`` is
+    algebraically equal but not bit-identical to the golden, so it is not used.
 
-    NaN CONVENTION: ``P(r)`` (fillna(0)), plus the tz step of 0.0.81
-    ``_prepare_returns``, because the prepared strategy index is the period the
-    benchmark is aligned to.
+    NaN CONVENTION (166.4 D-06): the strategy's +-inf is read as NaN (the part
+    of ``_prepared_returns_no_guess`` that is not a fill), once, inside
+    ``_benchmark_pair`` (review WR-02), and the regression runs over
+    pairwise-complete rows, the rows the persisted correlation uses.
+    A strategy NaN day is dropped, no longer zero-filled for r_squared only.
 
     A pair whose legs label their days in different time zones is refused
-    (``_refuse_mismatched_day_labels``, review round 2 IN-03).
+    (``_refuse_mismatched_day_labels``, reached first inside ``_benchmark_pair``,
+    review round 2 IN-03).
     """
-    _refuse_mismatched_day_labels(returns, benchmark)
-    p = _tz_naive_like_qs(_prepared_returns_no_guess(returns))
-    b = _align_benchmark_like_qs(benchmark, p.index)
-    _, _, r_val, _, _ = linregress(p, _align_benchmark_like_qs(b, p.index))
+    r, b = _benchmark_pair(returns, benchmark)
+    pair = pd.concat([r, b], axis=1).dropna()
+    _, _, r_val, _, _ = linregress(pair.iloc[:, 0], pair.iloc[:, 1])
     return float(r_val**2)
 
 
 def _r_squared_pair_varies(returns: pd.Series, benchmark: pd.Series) -> bool:
     """True when the pair ``_r_squared`` regresses DEFINES an R^2: >= 3 rows and real dispersion on both legs.
 
-    Built with the same preparation ``_r_squared`` uses, so it describes the
-    exact pair ``linregress`` sees. ``compute_qstats_scalars`` asks it FIRST
+    Built with the same pairing ``_r_squared`` uses (``_benchmark_pair``, then
+    pairwise-complete rows, 166.4 D-A), so it describes the exact pair
+    ``linregress`` sees. ``compute_qstats_scalars`` asks it FIRST
     (review round 2, WR-02): a pair it rejects persists ``r_squared = None``,
     status ``error``, with no log, and only a pair it accepts is regressed. A
     non-finite R^2 on an accepted pair is a broken mirror and is logged (SFH
@@ -1232,9 +1456,9 @@ def _r_squared_pair_varies(returns: pd.Series, benchmark: pd.Series) -> bool:
       250 and 1000). ``_dispersion_is_real`` is False on a NaN ``sd``, so a
       one-row pair reads "does not vary" and never "varies" (SFH R2-LOW-2).
     """
-    _refuse_mismatched_day_labels(returns, benchmark)
-    p = _tz_naive_like_qs(_prepared_returns_no_guess(returns))
-    b = _align_benchmark_like_qs(_align_benchmark_like_qs(benchmark, p.index), p.index)
+    r, b = _benchmark_pair(returns, benchmark)
+    pair = pd.concat([r, b], axis=1).dropna()
+    p, b = pair.iloc[:, 0], pair.iloc[:, 1]
     return bool(
         len(p) >= 3
         and len(b) == len(p)
@@ -2261,31 +2485,31 @@ def compute_all_metrics(
     # Benchmark metrics (alpha + beta from ONE `_greeks_no_guess` call)
     if benchmark_returns is not None and len(benchmark_returns) > 0:
         try:
-            # M1 (red-team 2026-05-27): align ONCE on the inner-join
-            # intersection and feed the SAME (returns, benchmark) pair into
-            # EVERY benchmark-relative metric (alpha/beta via greeks,
-            # correlation, info_ratio, treynor) so they are mutually
-            # consistent — all computed over the exact same dates.
+            # 166.4 D-A (founder, 2026-09-27): build the ONE interval-matched
+            # pair (`_benchmark_pair`) and feed it to EVERY benchmark-relative
+            # metric here (alpha/beta, correlation, info_ratio, treynor,
+            # btc_rolling_correlation_90d), so they are mutually consistent
+            # over the exact same intervals. Each strategy return dated t_k is
+            # paired with the benchmark return over (t_{k-1}, t_k], and only
+            # when the benchmark has a close at both endpoints; nothing is
+            # filled across a gap.
             #
-            # Previously alpha/beta came from `qs.stats.greeks(returns,
-            # benchmark_returns)`, which internally calls quantstats'
-            # `_prepare_benchmark(benchmark, returns.index)` — reindexing the
-            # benchmark onto the strategy's FULL date range with bfill. The
-            # other metrics used `returns.align(benchmark, join="inner")` (the
-            # intersection only). On a calendar mismatch (24/7 crypto strategy
-            # vs a benchmark with weekend/holiday gaps) alpha/beta were over
-            # the gap-filled full range while correlation/info_ratio were over
-            # the shorter intersection — internally inconsistent, and IR's
-            # tracking error was on a silently-truncated sample. Feeding the
-            # single inner-join pair to greeks() too removes that skew. When
-            # the calendars already match (e.g. the golden fixture) the
-            # intersection equals the full range, so the stored values are
-            # unchanged.
-            aligned = returns.align(benchmark_returns, join="inner")
-            aligned_returns, aligned_benchmark = aligned[0], aligned[1]
+            # SUPERSEDED: M1 (`d16b2fb4c`, red-team 2026-05-27) paired the two
+            # legs on their daily inner-join intersection. That kept every
+            # metric on one sample, which this pair keeps too, but it paired a
+            # weekday strategy's Monday return with BTC's Sunday-to-Monday
+            # daily move instead of the Friday-to-Monday move the strategy
+            # actually held, which flipped beta's sign on real data. On a dense
+            # daily strategy against contiguous BTC every interval is one day,
+            # so the pair equals the old intersection bit-for-bit.
+            #
+            # The pair is built INSIDE this `try`: its day-label refusal and
+            # its duplicate-date refusal degrade to the WARNING below instead
+            # of escaping `compute_all_metrics`.
+            aligned_returns, aligned_benchmark = _benchmark_pair(returns, benchmark_returns)
             if len(aligned_returns) > 1:
                 # Phase 166 (D-05, D-15): alpha/beta are the inline mirror
-                # `_greeks_no_guess`, on this same M1 pair. It closes the
+                # `_greeks_no_guess`, on this same pair. It closes the
                 # benchmark leg that `greeks(..., prepare_returns=False)` left
                 # open (the RANK-05 residual), and it drops 0.0.81's trailing
                 # `.fillna(0)`: an undefined beta is None, never a fabricated
@@ -3143,15 +3367,18 @@ def _rolling_alpha_beta(
     on the same DataFrame. This helper computes greeks once and returns both
     projections.
 
-    Audit 2026-05-07 H-0726: scalar greeks computation upstream aligns returns
-    and benchmark via `returns.align(benchmark, join='inner')`; the rolling
-    pair was passing raw un-aligned series, letting the rolling math NaN-pad or
-    shift across mismatched trading calendars. We (1) align the two series
-    before the rolling pass, (2) validate that BOTH the strategy AND the
-    benchmark have at least `window` aligned observations (the old guard only
-    checked `len(returns) < window`, allowing a too-short benchmark to slip
-    through), and (3) log a WARNING and return ``([], [])`` when the rolling
-    pass fails, instead of propagating.
+    Audit 2026-05-07 H-0726, as amended by 166.4 D-A: the rolling leg reads
+    the SAME pair as the scalar fan-out, ``_benchmark_pair`` (each strategy
+    return against the benchmark return over its own holding interval, paired
+    only when the benchmark has a close at both endpoints). Before 166.4 it
+    built a second, independent daily inner join of its own. We (1) pair the
+    two series before the rolling pass, (2) validate that the pair has at least
+    ``window`` PAIRED intervals (the 90-row window is 90 paired intervals,
+    about 126 calendar days for weekday data, the same count convention as
+    before), and (3) log a WARNING and return ``([], [])`` when the pairing or
+    the rolling pass fails, instead of propagating: ``compute_all_metrics``
+    calls this helper with no handler of its own, so a day-label or
+    duplicate-date refusal must degrade here.
 
     Phase 166 (D-06): the rolling pass is the inline ``_rolling_greeks``, closed
     on both legs. The old "missing alpha/beta columns" branch guarded a
@@ -3160,11 +3387,14 @@ def _rolling_alpha_beta(
     """
     if returns is None or benchmark is None:
         return [], []
-    aligned_returns, aligned_benchmark = returns.align(benchmark, join="inner")
-    aligned_n = len(aligned_returns)
-    if aligned_n < window:
-        return [], []
+    # Initialised BEFORE the `try`: when the pairing itself raises, the handler
+    # formats `aligned_n=None` instead of raising UnboundLocalError.
+    aligned_n: int | None = None
     try:
+        aligned_returns, aligned_benchmark = _benchmark_pair(returns, benchmark)
+        aligned_n = len(aligned_returns)
+        if aligned_n < window:
+            return [], []
         greeks = _rolling_greeks(aligned_returns, aligned_benchmark, window)
     except Exception as exc:  # noqa: BLE001
         # H-0726.3: surface rolling_greeks failures explicitly instead of

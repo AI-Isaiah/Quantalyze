@@ -63,12 +63,18 @@
  * (sticky-footer right CTA) but routes the click to the callback prop.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import Link from "next/link";
 import {
   buildDateMapCache,
   computeScenario,
-  computeStrategyCurve,
   type ComputedMetrics,
   type DailyPoint,
   type StrategyForBuilder,
@@ -164,6 +170,11 @@ import {
   type SolveLeverageResult,
 } from "../lib/solve-leverage";
 import { KpiStrip } from "./KpiStrip";
+import {
+  equityHistoryRebuildClass,
+  ExchangesPageLink,
+  type EquityHistoryRebuildClass,
+} from "./EquityHistoryRebuilding";
 // `toWealth` stays (the scenario wealth series builder, imported from
 // ../widgets/performance/EquityChart); EquityChart +
 // DrawdownChart are no longer rendered here — Phase 38-03 swaps the composer's
@@ -181,6 +192,7 @@ import type { CoverageState } from "./CoverageStateChip";
 // the browse drawer's own rows render this same leaf, and two hand-rolled
 // chips for one claim drift.
 import { YoursChip } from "./YoursChip";
+import { ResponsiveTable } from "@/components/ResponsiveTable";
 import { TrustTierLabel } from "@/components/strategy/TrustTierLabel";
 import type { ProvenanceTier } from "@/lib/design-tokens/trust-tier";
 import { deriveProvenance } from "../lib/provenance";
@@ -193,9 +205,18 @@ import { ScenarioFooter } from "./ScenarioFooter";
 import { ScenarioFlaggedHoldingsList } from "../ScenarioFlaggedHoldingsList";
 import { ScenarioBenchmarkSection } from "./ScenarioBenchmarkSection";
 import { StressVarSection } from "./StressVarSection";
+import {
+  btcLevelsFromCloses,
+  parseBtcCloses,
+  type BtcCloses,
+} from "../lib/scenario-benchmark";
 import { MonteCarloSection } from "./MonteCarloSection";
 import { WeightOptimizerSection } from "./WeightOptimizerSection";
 import type { MyAllocationDashboardPayload } from "@/lib/queries";
+import {
+  apiKeyLabelById as buildApiKeyLabelById,
+  dataSourceLabel,
+} from "@/lib/api-key-label";
 import type { AllocatorMandateForFit } from "../lib/mandate-fit";
 
 // ---------------------------------------------------------------------------
@@ -710,6 +731,15 @@ type AddedMetricsState = "pending" | "settled" | "unavailable";
  * dropped dollars whose key the key list does not carry (an unsupported
  * exchange), so they are named ("excludes $Z from keys with an unknown sync
  * status") instead of vanishing.
+ *
+ * Phase 167.1.2 SC-4: it also passes `excludedTrusted`, dropped dollars from a
+ * trusted key with no return series yet, which until then landed in no part
+ * at all ("excludes $X from connected keys with no return history yet").
+ *
+ * Review C2 WR-03: and `excludedNotConnected`, dropped dollars from a key that
+ * is not in the payload's eligible set (disconnected or inactive), which
+ * until then were called connected keys ("excludes $X from keys that are not
+ * connected").
  */
 function buildUntrustedAumClause(summary: LiveHoldingsSummary): string {
   return buildKeyTrustClause(
@@ -722,49 +752,9 @@ function buildUntrustedAumClause(summary: LiveHoldingsSummary): string {
     },
     summary.excludedUntrusted,
     summary.excludedUnknownStatus,
+    summary.excludedTrusted,
+    summary.excludedNotConnected,
   );
-}
-
-/**
- * DSRC-02 — exchange display-name lookup for the Data-sources row labels.
- *
- * Copied locally from the SyncBadge recipe (SyncBadge.tsx:21-35): a lower-cased
- * lookup with `?? exchange` fallback. The shared `EXCHANGE_DISPLAY`
- * (closed-sets.ts) carries identical values but is typed
- * `Record<SupportedExchange, string>` — a CLOSED key union — so it cannot be
- * indexed by the arbitrary `string` exchange code without a cast that defeats
- * its narrowing; the open-keyed `?? fallback` recipe stays local, matching the
- * existing local copies in SyncBadge + VerificationForm + AllocatorSyncStatus
- * rather than introducing a cast or a new shared module (surgical-change rule,
- * PATTERNS §"No Analog Found").
- */
-const EXCHANGE_LABELS: Record<string, string> = {
-  binance: "Binance",
-  okx: "OKX",
-  bybit: "Bybit",
-};
-
-/**
- * DSRC-02 — resolve a connected exchange api_key to its row label
- * `{Exchange} — {nickname}`, falling back to `{Exchange} — ••••{id.slice(-4)}`
- * when the key has no nickname. The masked tail never reveals the full id and
- * never any secret/ciphertext (T-37-03-01). Returns the structured parts so the
- * caller can render the masked tail in font-mono per UI-SPEC.
- */
-function dataSourceLabel(k: { exchange: string; label: string; id: string }): {
-  exchange: string;
-  /** nickname when present, else null (caller renders the masked tail). */
-  nickname: string | null;
-  /** masked id tail (last 4) — only meaningful when nickname is null. */
-  maskedTail: string;
-} {
-  const exchange = EXCHANGE_LABELS[k.exchange.toLowerCase()] ?? k.exchange;
-  const nick = k.label?.trim();
-  return {
-    exchange,
-    nickname: nick ? nick : null,
-    maskedTail: `••••${k.id.slice(-4)}`,
-  };
 }
 
 /** The canonical connection-failure copy — honest for a genuine network drop
@@ -898,6 +888,49 @@ function pruneLeverageToDraftRefs(
 // ScenarioComposer
 // ---------------------------------------------------------------------------
 
+/**
+ * Review C3 SFH-C3-01. The Scenario's one sentence about the withheld own-book
+ * comparison, keyed by the class the Overview's `equityHistoryRebuildClass`
+ * gives the same reason. A failed read says to reload, a key the owner must
+ * fix names the Exchanges page, and only a real wait says "being rebuilt".
+ * Review C3 round 2 WR-02: a hold that no wait heals (`held_back`) says the
+ * history is held back, the meaning of the Overview's "so it is not shown"
+ * lines, and names no wait. The Overview panel carries the per-reason detail.
+ * No sentence promises a date or a day count.
+ */
+const OWN_BOOK_REBUILDING_LINE: Record<EquityHistoryRebuildClass, ReactNode> = {
+  rebuilding: (
+    <>
+      Your book&apos;s own history is being rebuilt, so the comparison with
+      your current book is not shown.
+    </>
+  ),
+  read_failed: (
+    <>
+      We could not load your book&apos;s history just now, so the comparison
+      with your current book is not shown; reload the page to try again.
+    </>
+  ),
+  // "update your keys", not "fix a key": for duplicate_account the owner
+  // disconnects one of two working keys, and nothing is broken to fix.
+  needs_action: (
+    <>
+      Your book&apos;s own history is on hold until you update your keys on
+      the <ExchangesPageLink />, so the comparison with your current book is
+      not shown.
+    </>
+  ),
+  held_back: (
+    <>
+      We are holding back your book&apos;s own history, so the comparison with
+      your current book is not shown.
+    </>
+  ),
+};
+
+/** A stable empty own-book return series (a fresh `[]` would defeat the memo). */
+const NO_OWN_BOOK_RETURNS: MyAllocationDashboardPayload["equityDailyReturns"] = [];
+
 export function ScenarioComposer({
   payload,
   allocatorId,
@@ -918,14 +951,18 @@ export function ScenarioComposer({
     strategies,
     equityDailyPoints,
     snapshotCount,
-    // Phase 167.1.2 review round 2 (WR-02): names the derived source of the
-    // own-book series for the rebuilding disclosure below.
-    equityCurveSource,
     allKeysStale,
     minHistoryDepthMonths,
     activeVenues,
     // Phase 167.1.2 / D-02: read below as fail-closed, matching the Overview.
     equityHistoryState,
+    // Review C3 SFH-C3-01: why the history is withheld, classed by the
+    // Overview's own table so both surfaces give the same kind of answer.
+    equityHistoryRebuildReason = null,
+    // Phase 167.1.2 plan 11 (D-06): the book's persisted flow-neutral returns,
+    // the ONE source of the own-book delta below. A payload without the field
+    // reads as no returns.
+    equityDailyReturns = NO_OWN_BOOK_RETURNS,
   } = payload as MyAllocationDashboardPayload & {
     existingOutcomesByHoldingRef?: Record<string, unknown>;
   };
@@ -1025,9 +1062,10 @@ export function ScenarioComposer({
   // baseline, so blank mode just reproduces that already-handled state.
   //
   // Phase 167.1.2 / D-02 ("Hide it until correct"): the same switch withholds
-  // the own-book series while the equity history is rebuilt, which also leaves
-  // `scenarioOwnBookDelta` undefined (it needs >= 2 levels). The live-book KPIs
-  // (`liveBaselineMetrics`) are a separate field and stay (D-03).
+  // the own-book series and its returns while the equity history is rebuilt,
+  // which also leaves `scenarioOwnBookDelta` undefined (it needs >= 2 returns).
+  // The live-book KPIs (`liveBaselineMetrics`) are a separate field and stay
+  // (D-03).
   const isBlankMode = entryMode === "blank";
   // Fail-closed: ONLY an explicit "ready" may show the own-book series. A
   // missing field, null, "" or any later state all read as rebuilding.
@@ -1036,6 +1074,11 @@ export function ScenarioComposer({
     () => (isBlankMode || isOwnBookRebuilding ? [] : equityDailyPoints),
     [isBlankMode, isOwnBookRebuilding, equityDailyPoints],
   ) as typeof equityDailyPoints;
+  // The same switch gates the returns the own-book delta reads (plan 11).
+  const baselineEquityDailyReturns = useMemo(
+    () => (isBlankMode || isOwnBookRebuilding ? [] : equityDailyReturns),
+    [isBlankMode, isOwnBookRebuilding, equityDailyReturns],
+  );
 
   const scenario = useScenarioState({
     holdingsSummary: holdingsSummary as { symbol: string; venue: string; holding_type: string; value_usd: number }[],
@@ -1304,16 +1347,17 @@ export function ScenarioComposer({
   const [saveError, setSaveError] = useState<string | null>(null);
   const [savePending, setSavePending] = useState(false);
 
-  // BENCH-01 — the BTC benchmark daily-returns series, fetched once from the
-  // shared market-data route. `btcAvailable` is false until a non-empty series
-  // arrives; a failed/empty fetch leaves it false so the benchmark section
+  // BENCH-01 — the BTC benchmark CLOSES, fetched once from the shared
+  // market-data route `/api/benchmark/btc/prices` (Phase 169.4 D-67). `btc` is
+  // null until a body of the closes shape with at least one close arrives; a
+  // failed / empty / wrong-shape fetch leaves it null so the benchmark section
   // renders the honest "unavailable" empty state and the overlay is suppressed
   // (24-RESEARCH Pitfall 5: a transport failure degrades to the empty state,
-  // never a red alert). The series is RAW daily returns — the section consumes
-  // them for the metrics, and the chart overlay derives a cumulative-WEALTH
-  // curve from the SAME series (Pitfall 3).
-  const [btcDaily, setBtcDaily] = useState<DailyPoint[]>([]);
-  const [btcAvailable, setBtcAvailable] = useState(false);
+  // never a red alert). The two sections pair the closes with the portfolio
+  // through the one pairing function (D-68), and the chart overlay is the close
+  // LEVEL (`btcLevelsFromCloses`, D-66) from the SAME closes.
+  const [btc, setBtc] = useState<BtcCloses | null>(null);
+  const btcAvailable = btc !== null;
   // Overlay toggle, default ON per UI-SPEC §Component Inventory.
   const [showBenchmark, setShowBenchmark] = useState(true);
 
@@ -2154,60 +2198,50 @@ export function ScenarioComposer({
     onRegisterOpenBrowseRef.current?.(openBrowse);
   }, []);
 
-  // BENCH-01 — fetch the shared BTC daily-returns series once on mount. The
-  // route returns `[{date,value}]` (raw daily returns) and answers a no-store
-  // 503 on its own read errors (Phase 169.2), so any non-2xx / non-array / empty / thrown result
-  // leaves `btcAvailable=false` → the benchmark section shows the honest empty
-  // state and the overlay is hidden (never a red alert).
+  // BENCH-01 — fetch the shared BTC closes once on mount. The route returns
+  // `{ prices, dropped, through }` (Phase 169.4 D-67) and answers a no-store 503
+  // on its own read errors (Phase 169.2), so any non-2xx / wrong-shape / no-close
+  // / thrown result leaves `btc` null → the benchmark section shows the honest
+  // empty state and the overlay is hidden (never a red alert). `parseBtcCloses`
+  // is the shape guard: the OLD returns body (an array) is null, never misread.
   useEffect(() => {
     let cancelled = false;
-    fetch("/api/benchmark/btc")
+    fetch("/api/benchmark/btc/prices")
       .then((r) => {
         if (!r.ok) {
           // F-08: a persistent non-2xx (500 / CDN / route-contract break) is
           // otherwise invisible — the honest-degrade state hides it. Log so a
           // regression is visible in production console rather than silently
-          // swallowed. Keep the degrade (return [] → btcAvailable=false).
+          // swallowed. Keep the degrade (null → btc stays null).
           console.warn(
-            "[ScenarioComposer] /api/benchmark/btc non-ok response",
+            "[ScenarioComposer] /api/benchmark/btc/prices non-ok response",
             { status: r.status },
           );
-          return [];
+          return null;
         }
         return r.json();
       })
       .then((d) => {
         if (cancelled) return;
-        const series = Array.isArray(d) ? (d as DailyPoint[]) : [];
-        setBtcDaily(series);
-        setBtcAvailable(series.length > 0);
+        const closes = parseBtcCloses(d);
+        if (d !== null && closes === null) {
+          // F-08: a 2xx body of another shape (a stale cached returns array, a
+          // contract break) degrades like a failed fetch; log it so it is seen.
+          console.warn("[ScenarioComposer] /api/benchmark/btc/prices unexpected body shape");
+        }
+        setBtc(closes !== null && closes.prices.length > 0 ? closes : null);
       })
       .catch((err) => {
         if (cancelled) return;
         // F-08: a thrown fetch (network / abort / JSON parse) is also logged
         // so the silent degrade is observable. State stays honest.
-        console.warn("[ScenarioComposer] /api/benchmark/btc fetch failed", err);
-        setBtcDaily([]);
-        setBtcAvailable(false);
+        console.warn("[ScenarioComposer] /api/benchmark/btc/prices fetch failed", err);
+        setBtc(null);
       });
     return () => {
       cancelled = true;
     };
   }, []);
-
-  // BENCH-01 — the chart overlay series. `EquityChart.benchmark` runs
-  // `anchorFromFirstPositive` (divide-by-first), so it expects a CUMULATIVE-
-  // WEALTH curve (~1.0 base), NOT raw daily returns — derive it via
-  // `computeStrategyCurve` from the same BTC daily returns the metrics use
-  // (24-RESEARCH Pitfall 3). Suppressed (undefined) when the toggle is off or
-  // the benchmark is unavailable, which hides the overlay.
-  const btcWealth = useMemo(
-    () =>
-      showBenchmark && btcAvailable
-        ? computeStrategyCurve(btcDaily)
-        : undefined,
-    [showBenchmark, btcAvailable, btcDaily],
-  );
 
   // Validate the trimmed name against the SQL CHECK (1..120) mirrored in the
   // save route. Returns the trimmed name on success, or null after setting the
@@ -2855,6 +2889,23 @@ export function ScenarioComposer({
     return out;
   }, [rawHoldingsSummary]);
 
+  // CF-05 — api_key_id → friendly exchange/account label, built from the SAME
+  // `payload.apiKeys` + `dataSourceLabel` idiom the per-key constituent rows
+  // render (`${Exchange} — ${nickname|••••tail}`). No second label formatter.
+  // Phase 167.1.2 plan 07 (SC-5): moved above `perKeyAdapterOutput` and passed
+  // to buildPerKeyStrategyForBuilderSet as its label map, so each per-key unit
+  // is NAMED by its label at the one place units are built. Every consumer that
+  // reads `s.name` (the CorrelationHeatmap headers via `strategyNames`, the
+  // shortest-history caveat via `coverageShortestName`, the gantt) inherits the
+  // label; before, only the gantt resolved it and the other two showed
+  // `key <api_key_id>`.
+  // Phase 169.4-08 (D-69): the map comes from the shared helper, so the Risk
+  // tab and this composer name a key by one rule.
+  const apiKeyLabelById = useMemo(
+    () => buildApiKeyLabelById(payload.apiKeys ?? []),
+    [payload.apiKeys],
+  );
+
   // Per-key strategy set — wrapped in a useMemo on its inputs. One
   // StrategyForBuilder per api_key_id (id === api_key_id), RAW equity-share
   // weights, default selected=true.
@@ -2883,11 +2934,16 @@ export function ScenarioComposer({
     const eligibleOnly = Object.fromEntries(
       Object.entries(all).filter(([id]) => contributing.has(id)),
     );
-    return buildPerKeyStrategyForBuilderSet(eligibleOnly, equityByApiKeyId);
+    return buildPerKeyStrategyForBuilderSet(
+      eligibleOnly,
+      equityByApiKeyId,
+      apiKeyLabelById,
+    );
   }, [
     payload.perKeyReturnsByApiKeyId,
     payload.contributingApiKeyIds,
     equityByApiKeyId,
+    apiKeyLabelById,
   ]);
 
   // The per-key path is active only in book mode + the book gate satisfied. When
@@ -3616,24 +3672,10 @@ export function ScenarioComposer({
   // a prop and never runs the containment predicate locally, so the gantt bars
   // agree with the row chips and the divisor by construction. Spans come from the
   // shared `selectedSpanById` scan (Rule 2: computed once).
-  // CF-05 — api_key_id → friendly exchange/account label, built from the SAME
-  // `payload.apiKeys` + `dataSourceLabel` idiom the per-key constituent rows
-  // render (`${Exchange} — ${nickname|••••tail}`). A per-key (book-member)
-  // unit carries the PREFIXED `key <uuid>` as its `name` from
-  // buildPerKeyStrategyForBuilderSet (scenario-adapter.ts:146 — the unit's `id`
-  // is the bare api_key_id; its `name` is `key ${apiKeyId}`), so without this
-  // map the gantt would show that raw token. This is the ONE place the
-  // per-key row name is resolved before rows reach CoverageTimeline (which only
-  // renders `row.name` — it never derives labels). No second label formatter.
-  const apiKeyLabelById = useMemo(() => {
-    const m = new Map<string, string>();
-    for (const k of payload.apiKeys ?? []) {
-      const { exchange, nickname, maskedTail } = dataSourceLabel(k);
-      m.set(k.id, `${exchange} — ${nickname ?? maskedTail}`);
-    }
-    return m;
-  }, [payload.apiKeys]);
-
+  // CF-05 — the gantt rows resolve a per-key unit through `apiKeyLabelById`
+  // (declared above `perKeyAdapterOutput`). Since Phase 167.1.2 plan 07 the
+  // unit's own `name` already IS that label, so this lookup is redundant and
+  // harmless; it stays so a strategy row (no apiKeys entry) keeps `s.name`.
   const timelineRows = useMemo(
     () =>
       engineSet.strategies
@@ -3864,6 +3906,25 @@ export function ScenarioComposer({
     () => scenarioMetrics.portfolio_daily_returns ?? [],
     [scenarioMetrics.portfolio_daily_returns],
   );
+  // BENCH-01 — the chart overlay series. `EquityChart.benchmark` runs
+  // `anchorFromFirstPositive` (divide-by-first), so it expects a WEALTH-level
+  // curve (~1.0 base), NOT raw daily returns. Phase 169.4 D-66: it is the close
+  // LEVEL at each stored close (`btcLevelsFromCloses`), never compounded
+  // returns, which would lose the move across a dropped close for good. 169.4
+  // review WR-01: the base is the last close on or before the scenario's first
+  // date, so BTC starts at 1.0 with the portfolio rather than at the served
+  // series' first close (2023-04-26 once the fixture is prepended); the factsheet
+  // chart never re-bases a comparator. Declared here, after `portfolioDaily`,
+  // because it reads the scenario's first date. Suppressed (undefined) when the
+  // toggle is off or the benchmark is unavailable, which hides the overlay.
+  const scenarioFirstDate = portfolioDaily[0]?.date;
+  const btcWealth = useMemo(
+    () =>
+      showBenchmark && btc !== null
+        ? btcLevelsFromCloses(btc.prices, scenarioFirstDate)
+        : undefined,
+    [showBenchmark, btc, scenarioFirstDate],
+  );
   const blendPanels = useMemo(
     // BLEND-01 — the rolling-window blend panels ride the SAME derived blend
     // basis as the headline KPIs (√365 if any selected leg is crypto, else 252).
@@ -3892,27 +3953,31 @@ export function ScenarioComposer({
   // PEER-05 (Phase 42) — the blend-vs-live-book signed delta on the sample basis
   // at the blend's periodsPerYear (like-for-like legs; #597 BLEND-01). The
   // own-book leg recomputes the live book's Sharpe/Sortino/maxDD via
-  // `sampleBasisRatios` on the OWN-BOOK DAILY RETURNS — derived here from
-  // `baselineEquityDailyPoints` (absolute-USD equity LEVELS: value[i]/value[i-1]
-  // − 1), NOT `liveBaselineMetrics` (a different/population basis). BLEND-01: the
-  // book leg is annualized at the SAME `blendBasis` the engine used for the blend
+  // `sampleBasisRatios` on the OWN-BOOK DAILY RETURNS — the payload's persisted
+  // flow-neutral returns (`baselineEquityDailyReturns`, Phase 167.1.2 plan 11,
+  // D-06). They used to be level ratios of the $-curve (value[i]/value[i-1] − 1),
+  // which read a deposit or a withdrawal as a return. NOT `liveBaselineMetrics`
+  // (a different/population basis). BLEND-01: the book leg is annualized at the
+  // SAME `blendBasis` the engine used for the blend
   // leg (`scenarioMetrics`), so the delta stays like-for-like in BASIS at 365 as
   // well as 252 — a crypto book's blend and own-book legs both ride √365. Each
   // delta = blend − book; null when a leg is null. `null` (→ undefined) when
   // there is no live book series (blank mode or a no-book allocator) so the panel
   // is silently absent. Keyed on the engine output + the own-book series + basis.
   const scenarioOwnBookDelta = useMemo<OwnBookDeltaPayload | undefined>(() => {
-    const levels = baselineEquityDailyPoints;
-    // Need ≥ 2 dated levels to derive at least one daily return. No book → absent.
-    if (!levels || levels.length < 2) return undefined;
-    const bookReturns: number[] = [];
-    for (let i = 1; i < levels.length; i++) {
-      const prev = levels[i - 1].value;
-      const cur = levels[i].value;
-      if (prev > 0 && Number.isFinite(prev) && Number.isFinite(cur)) {
-        bookReturns.push(cur / prev - 1);
-      }
+    // The producer only emits finite returns (extractTrustworthyDerivedSeries).
+    // Review C2 SFH-11 (b): if that contract ever breaks, the book leg is
+    // absent and the break is logged. Filtering the bad value out silently
+    // would compute the Sharpe and Sortino on fewer observations with nothing
+    // said. No book → absent.
+    const bookReturns = baselineEquityDailyReturns.map((point) => point.value);
+    if (!bookReturns.every((r) => Number.isFinite(r))) {
+      console.error(
+        "[ScenarioComposer] non-finite own-book return in equityDailyReturns; the own-book comparison is omitted",
+      );
+      return undefined;
     }
+    // One observation is not a Sharpe or Sortino worth showing.
     if (bookReturns.length < 2) return undefined;
     const book = sampleBasisRatios(bookReturns, blendBasis);
     // Blend ratios are the engine's already-rounded sample-basis output at the
@@ -3939,7 +4004,7 @@ export function ScenarioComposer({
       book_n: bookReturns.length,
     };
   }, [
-    baselineEquityDailyPoints,
+    baselineEquityDailyReturns,
     scenarioMetrics.n,
     scenarioMetrics.sharpe,
     scenarioMetrics.sortino,
@@ -4210,6 +4275,9 @@ export function ScenarioComposer({
         contributingApiKeyIds: payload.contributingApiKeyIds ?? [],
         managerSideApiKeyIds,
         statusByKeyId,
+        // Review C2 WR-03: the server-built eligible set, read raw (no
+        // `?? []`): an absent one means "cannot tell", not "none eligible".
+        eligibleApiKeyIds: payload.eligibleApiKeyIds,
       }),
     [
       scenario.draft.toggleByScopeRef,
@@ -4217,6 +4285,7 @@ export function ScenarioComposer({
       payload.contributingApiKeyIds,
       managerSideApiKeyIds,
       statusByKeyId,
+      payload.eligibleApiKeyIds,
     ],
   );
   const liveHoldingsSum = liveHoldingsSummary.total;
@@ -4743,7 +4812,8 @@ export function ScenarioComposer({
   // contribution can be <= 0 and still come from a key whose numbers are not
   // current (D-07). D-06 (b), 2026-09-24: the excluded part (D-20's `$Y`)
   // counts toward the gate too, so an exclusion is never silent. Review round
-  // 3 WR-01, 2026-09-24: so does the excluded unknown-status part.
+  // 3 WR-01, 2026-09-24: so does the excluded unknown-status part. Phase
+  // 167.1.2 SC-4: so does the excluded trusted (no return history) part.
   const fieldShowsLive =
     liveHoldingsSum > 0 &&
     (sanitizedManualAum === undefined || sanitizedManualAum === liveHoldingsSum);
@@ -4758,7 +4828,9 @@ export function ScenarioComposer({
     (liveHoldingsSummary.untrusted.count > 0 ||
       liveHoldingsSummary.unknownStatus.count > 0 ||
       liveHoldingsSummary.excludedUntrusted.count > 0 ||
-      liveHoldingsSummary.excludedUnknownStatus.count > 0) &&
+      liveHoldingsSummary.excludedUnknownStatus.count > 0 ||
+      liveHoldingsSummary.excludedTrusted.count > 0 ||
+      liveHoldingsSummary.excludedNotConnected.count > 0) &&
     (fieldShowsLive || overrideNoteShowsLive || fieldBlankHintShows);
   // Review WR-02 — the note that qualifies the field's value is its accessible
   // description, so a screen-reader user who tabs to PORTFOLIO AUM hears the
@@ -5301,6 +5373,16 @@ export function ScenarioComposer({
         />
       )}
 
+      {/* Phase 170 / SC1-LAYERS (C1-A1 + C1-A2, 2026-09-28) — one square
+          Blend-window data panel. Row 1 header, row 2 window control, row 3
+          timeline, row 4 the scenario KPI strip. Rows 1–3 still mount only
+          when windowBounds is set; with no bounds the panel is row 4 alone
+          and that row has no leading hairline. The eyebrow is the same
+          non-comparative label in every state (frozen 170.1 COPY item (b)). */}
+      <div
+        className="mt-6 border border-border bg-surface"
+        data-testid="scenario-blend-window"
+      >
       {/* Phase 58 (COVERAGE-03) — the honest blend header is the PRIMARY visual
           anchor of this surface (58-UI-SPEC §Interaction): it states the engine's
           member_count · effective window ABOVE the coverage-window control, so
@@ -5310,7 +5392,7 @@ export function ScenarioComposer({
           cross-check reconciles the same axis). Mounts alongside the window
           control (a selected set to describe). */}
       {windowBounds && (
-        <div className="mt-6">
+        <div className="px-4 py-3">
           <BlendHeader metrics={scenarioMetrics} unionSpan={fullRangeWindow} />
         </div>
       )}
@@ -5321,13 +5403,14 @@ export function ScenarioComposer({
           control sits above its graph). Only mounts when the selected set has a
           span to window (windowBounds !== null). A distinct axis from the
           rolling-metrics window / factsheet brush-zoom / startDates (POLISH-01).
-          Presets + DESIGN.md styling land in the Task-2 pass. */}
+          Phase 170 C1-A1 — its own rounded box is gone; it is a hairline row
+          of the Blend-window panel. ref / tabIndex / testid stay (RT-5). */}
       {windowBounds && (
         <div
           // RT-5 — the Include-click focus target (see pendingWindowFocusRef).
           ref={coverageWindowControlRef}
           tabIndex={-1}
-          className="mt-6 flex flex-wrap items-center gap-3 rounded-md border border-border bg-surface px-4 py-3"
+          className="flex flex-wrap items-center gap-3 border-t border-border px-4 py-3"
           data-testid="scenario-coverage-window"
         >
           <span className="text-fixed-11 font-medium uppercase tracking-wide text-text-muted">
@@ -5419,7 +5502,7 @@ export function ScenarioComposer({
           the row chips by construction. Only mounts when there is a windowed set
           to plot. */}
       {windowBounds && (
-        <div className="mt-6">
+        <div className="border-t border-border px-4 py-3">
           <CoverageTimeline
             rows={timelineRows}
             unionWindow={fullRangeWindow}
@@ -5428,9 +5511,14 @@ export function ScenarioComposer({
         </div>
       )}
 
-      <div className="mt-6">
+      {/* Row 4 — the hairline is absent when rows 1–3 did not render. */}
+      <div className={windowBounds ? "border-t border-border" : undefined}>
+        <p className="text-micro font-mono uppercase tracking-[0.18em] text-text-muted px-4 pt-3">
+          Scenario blend
+        </p>
         <KpiStrip
           mode="scenario"
+          variant="panel"
           scenarioMetrics={scenarioMetrics}
           liveMetrics={liveMetricsForKpi}
           metrics={liveMetricsForKpi}
@@ -5440,6 +5528,7 @@ export function ScenarioComposer({
           minHistoryDepthMonths={minHistoryDepthMonths}
           activeVenues={activeVenues}
         />
+      </div>
       </div>
 
       {/* CONSTIT-01 (Pitfall 5) — all-constituents-excluded honest empty,
@@ -5489,7 +5578,7 @@ export function ScenarioComposer({
           (byte-identity preserved). */}
       <div className="relative mt-0">
         {/* BENCH-01 — the BTC overlay rides the synth payload's `benchmark`
-            (cumulative-WEALTH form via `btcWealth`). `btcWealth` is undefined
+            (the close-level form via `btcWealth`, D-66). `btcWealth` is undefined
             when the toggle is off or the benchmark is unavailable, which hides
             the overlay. */}
         <ScenarioFactsheetChart
@@ -5513,24 +5602,26 @@ export function ScenarioComposer({
         {/* Phase 167.1.2 / D-02: the own-book comparison is withheld while the
             equity history is rebuilt; say so rather than leave a silent gap.
             Not in blank mode, where there is no own book to compare with.
-            Review round 1 (SFH-05): the producer sends [] for every allocator,
-            so the series cannot tell "withheld" from "none". Two fields are
-            computed before the history is withheld, and together they can.
-            The candidate series has TWO sources: the trustworthy derived curve,
-            which `equityCurveSource === "derived"` names, and the legacy
-            snapshots, which `snapshotCount > 0` names. With neither there is
-            no own-book history to withhold, and the sentence would explain an
-            absence D-02 did not cause. Review round 2 (WR-02): gating on the
-            legacy count alone hid the disclosure from a derived-only book. */}
-        {isOwnBookRebuilding &&
-          !isBlankMode &&
-          (snapshotCount > 0 || equityCurveSource === "derived") && (
+            Phase 167.1.2 / D-15 (supersedes IN-01): the Overview and the
+            Scenario gate on the same state. The earlier extra condition on the
+            history's size or source is removed, so in book mode a book with no
+            snapshot yet reads here as it does on the Overview's rebuilding
+            panel. Review C3 SFH-C3-04: that parity holds only in book mode. In
+            blank mode, chosen or forced (no live book, or no allocator key
+            with a per-key series yet, so `bookEntryGateSatisfied` is false),
+            no own-book line is drawn and there is no comparison to disclose.
+            That is D-15's blank-mode exception, and the Overview may still
+            show its rebuilding panel for the same book.
+            Review C3 SFH-C3-01: the sentence is picked by the class the
+            Overview gives the same reason (`equityHistoryRebuildClass`). */}
+        {isOwnBookRebuilding && !isBlankMode && (
           <p
             data-testid="scenario-ownbook-rebuilding"
             className="mt-2 text-fixed-11 text-text-muted"
           >
-            Your book&apos;s own history is being rebuilt, so the comparison
-            with your current book is not shown.
+            {OWN_BOOK_REBUILDING_LINE[
+              equityHistoryRebuildClass(equityHistoryRebuildReason)
+            ]}
           </p>
         )}
         {/* Overlay toggle — verbatim "BTC Benchmark" copy + a muted line
@@ -5570,15 +5661,15 @@ export function ScenarioComposer({
 
       {/* BENCH-01 — "vs BTC" active-return section. Reads the active scenario's
           full daily portfolio returns (`scenarioMetrics.portfolio_daily_returns`
-          — OPTIONAL, so `?? []`) + the fetched BTC daily returns, inner-joins
-          by date, and renders TE/IR/alpha/beta over the intersection window OR
-          the honest "unavailable" empty state (below the 30-day floor, no
-          overlap, or a failed fetch via `btcAvailable=false`). */}
+          — OPTIONAL, so `?? []`) + the fetched BTC closes, pairs them through
+          the one pairing function (Phase 169.4 D-68), and renders
+          TE/IR/alpha/beta over the paired window OR the honest "unavailable"
+          empty state (below the 30-day floor, no overlap, or a failed fetch via
+          `btc` null). */}
       <Card className="mt-6">
         <ScenarioBenchmarkSection
           portfolioDaily={scenarioMetrics.portfolio_daily_returns ?? []}
-          btcDaily={btcDaily}
-          benchmarkAvailable={btcAvailable}
+          btc={btc}
           // BLEND-01 — TE/IR/alpha ride the same derived blend basis
           // (√periodsPerYear); the correlation/beta terms are basis-invariant.
           periodsPerYear={blendBasis}
@@ -5588,7 +5679,7 @@ export function ScenarioComposer({
       {/* STRESS-01 / STRESS-02 (Plan 26-02) — the "Stress & VaR" section on the
           own-book scenario surface. A sibling of the benchmark section above:
           props-only over the same already-leveraged portfolio_daily_returns + the
-          fetched BTC factor series, it lets the allocator pick a BTC shock preset
+          fetched BTC factor closes, it lets the allocator pick a BTC shock preset
           and read the β-propagated projected impact + historical VaR(95%)/CVaR with
           a mandatory inline disclosure, OR the honest empty state (degenerate
           scenario / BTC unavailable / below the Phase-22 sample floor). Own-book
@@ -5597,8 +5688,7 @@ export function ScenarioComposer({
       <Card className="mt-6">
         <StressVarSection
           portfolioDaily={scenarioMetrics.portfolio_daily_returns ?? []}
-          btcDaily={btcDaily}
-          btcAvailable={btcAvailable}
+          btc={btc}
           n={scenarioMetrics.n}
           strategyCount={engineSet.strategies.length}
         />
@@ -5862,11 +5952,21 @@ export function ScenarioComposer({
           column / allocator-portfolio payload builder / percentile-rank badge,
           no api-ingest literal (LOCKED honesty invariant — a what-if has no
           verified track record to peer-rank). */}
+      {/* Phase 170 / SC1-LAYERS (C1-A3, 2026-09-28) — the two repeat cards
+          are one closed section. Bodies, disclosures, the 10-point floor, the
+          3M/6M/12M control and both data-panel attributes are unchanged. The
+          card headings are h3 under the section title; size and weight stay. */}
+      <CollapsibleSection
+        id="composer-blend-detail"
+        title="Blend distribution and rolling windows"
+        defaultOpen={false}
+        storageKey="composer-collapse:blend-detail"
+      >
       <Card className="mt-6" data-panel="blend-returns-distribution" aria-label="Returns distribution">
         <div className="mb-3">
-          <h2 className="text-base font-semibold text-text-primary">
+          <h3 className="text-base font-semibold text-text-primary">
             Returns distribution
-          </h2>
+          </h3>
         </div>
         {blendPanels.histogramSeries.length === 0 ? (
           // WR-02 — gate on the ADAPTER's actual degenerate verdict, not a
@@ -5914,9 +6014,9 @@ export function ScenarioComposer({
           never role="alert". */}
       <Card className="mt-6" data-panel="blend-rolling" aria-label="Rolling metrics">
         <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-          <h2 className="text-base font-semibold text-text-primary">
+          <h3 className="text-base font-semibold text-text-primary">
             Rolling metrics
-          </h2>
+          </h3>
           <SegmentedControl
             ariaLabel="Rolling window"
             activeId={String(rollingWindow)}
@@ -5969,6 +6069,7 @@ export function ScenarioComposer({
           </div>
         )}
       </Card>
+      </CollapsibleSection>
 
       {flaggedHoldings.length > 0 && (
         <div className="mt-8 rounded-lg border border-border bg-surface p-4">
@@ -7211,7 +7312,8 @@ function CompositionList({
           here double-labels the same content. No top margin on the card either:
           the list is the sole child inside the collapsible's <details> body, so
           spacing comes from the summary's border + mb-4, not a sibling-era mt-8. */}
-      <ul className="grid gap-2" data-testid="scenario-constituent-list">
+      <ResponsiveTable label="Strategies and weights">
+      <ul className="grid gap-2 min-w-max" data-testid="scenario-constituent-list">
         {/* CONSTIT-01/02/03 — per-key exchange sources as uniform constituent
             rows, interleaved ABOVE the added strategies in the ONE list. Same row
             anatomy as an added row: an include/exclude toggle (the shared
@@ -7976,6 +8078,7 @@ function CompositionList({
           );
         })}
       </ul>
+      </ResponsiveTable>
       {/* WEIGHTS-00 honesty caveat (A1 locked) — leverage scales return, vol and
           max drawdown but the risk-adjusted ratios and correlation are
           leverage-INVARIANT (no borrow cost modeled). Mirrors the

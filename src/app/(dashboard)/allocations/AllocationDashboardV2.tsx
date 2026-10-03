@@ -43,7 +43,6 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
     flaggedHoldings = [],
     equityDailyPoints,
     activeVenues = [],
-    snapshotCount,
     // NEW-C09-04 (B14, audit-2026-05-07): the payload already carries the
     // sync-freshness signal — `allKeysStale` is true when every active
     // api_key's `last_sync_at` is older than 24h, and `lastSyncAt` is the
@@ -73,24 +72,41 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
     // rebuilt the producer withholds the curve, and neither the curve nor any
     // factsheet KPI computed from it renders.
     equityHistoryState,
-    equityCurveSource,
+    // D-06: the factsheet's return series. Empty while rebuilding.
+    equityDailyReturns = [],
+    // Phase 169.4 plan 02 (SC3, D-69): the database BTC closes the Overview's
+    // BTC comparator is built from. Absent reads as null (the fixture path).
+    btcBenchmarkPrices = null,
+    equityHistoryRebuildReason = null,
+    // Review C2 round 2 IN-04: the keys a key_not_syncing reason is about.
+    equityHistoryNotSyncingKeyIds = [],
+    // Review C4 SFH-C4-04: the ready curve left out at least one departed
+    // account's history (its anchor balance is gone). False when absent.
+    departedHistoryUnavailable = false,
+    apiKeys = [],
   } = props;
   // Fail-closed: ONLY an explicit "ready" may show the curve. A missing field,
   // null, "" or any state added later (a destructuring default fires on
   // `undefined` alone) all read as rebuilding.
   const isRebuilding = equityHistoryState !== "ready";
-  // Phase 167.1.2 / IN-01 (founder copy call 2026-09-25): a brand-new book has
-  // no history for D-02 to withhold. Its own-book series has two sources, the
-  // derived curve (`equityCurveSource === "derived"`) and the legacy snapshots
-  // (`snapshotCount > 0`), and this is true only when both are empty. It is the
-  // negation of the Scenario composer's rebuilding-note gate, so the Overview
-  // and the composer read the same book the same way. Such a book gets the
-  // warm-up note instead of the "being rebuilt" panel. An undefined count is
-  // not `=== 0`, so a malformed payload falls through to the panel.
-  const hasNoHistoryYet =
-    snapshotCount === 0 && equityCurveSource !== "derived";
+  // Phase 167.1.2 / D-15 (2026-09-27, supersedes IN-01): the rebuilding copy is
+  // chosen by state alone. The brand-new-book exception that swapped the panel
+  // for the warm-up note on a snapshot count is removed, because under
+  // "rebuilding" no number of days flips the state, so the warm-up timer would
+  // be false. The Scenario composer gates its disclosure on the same state.
 
   const holdingsEmpty = holdingsSummary.length === 0;
+
+  // Review C2 round 2 IN-04: resolve the producer's ids to the owner's own key
+  // rows so the key_not_syncing line can name the key. An id missing from the
+  // list makes the set unknown (null), and the line falls back to its unnamed
+  // form rather than naming a different key.
+  const notSyncingKeys = (() => {
+    if (equityHistoryNotSyncingKeyIds.length === 0) return null;
+    const byId = new Map(apiKeys.map((k) => [k.id, k]));
+    const keys = equityHistoryNotSyncingKeyIds.map((id) => byId.get(id));
+    return keys.every((k) => k !== undefined) ? keys : null;
+  })();
 
   const factsheetPayload = useMemo(
     () =>
@@ -104,10 +120,14 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
             markets: activeVenues,
             startDate: equityDailyPoints[0]?.date ?? null,
             aum: analytics?.total_aum ?? null,
+            dailyReturns: equityDailyReturns,
+            btcBenchmarkPrices,
           }),
     [
       isRebuilding,
       equityDailyPoints,
+      equityDailyReturns,
+      btcBenchmarkPrices,
       props.allocator_id,
       portfolio,
       analytics,
@@ -183,6 +203,11 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
       {equityBaselineUnknown && (
         <BaselineUnknownBanner historyRebuilding={isRebuilding} />
       )}
+      {/* Review C4 SFH-C4-04: the derive leaves such an account out under a
+          benign flag and still marks the curve trustworthy, so without this
+          line a ready book reads as the whole book. Ready only: nothing is
+          drawn while the history is rebuilding. */}
+      {departedHistoryUnavailable && !isRebuilding && <DepartedHistoryNote />}
       <InsightStrip
         analytics={analytics}
         portfolioId={portfolio?.id ?? null}
@@ -193,14 +218,12 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
       {isRebuilding ? (
         // D-02: replaces BOTH the curve slot and the factsheet, and is checked
         // BEFORE the warm-up fallback, so a book whose history is withheld
-        // never sees the "appear once" copy. IN-01: a brand-new book has
-        // nothing withheld, so it gets the warm-up note alone. The curve slot
-        // stays unmounted either way, as D-02 requires.
-        hasNoHistoryYet ? (
-          <FactsheetWarmupNote snapshotCount={snapshotCount} />
-        ) : (
-          <EquityHistoryRebuilding />
-        )
+        // never sees the "appear once" copy. D-15: every such book, a
+        // brand-new one included, gets the panel and its named reason.
+        <EquityHistoryRebuilding
+          reason={equityHistoryRebuildReason}
+          notSyncingKeys={notSyncingKeys}
+        />
       ) : factsheetPayload ? (
         <FactsheetProvider payload={factsheetPayload}>
           <FactsheetBody
@@ -214,7 +237,7 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
       ) : (
         <>
           {equitySlot}
-          <FactsheetWarmupNote snapshotCount={snapshotCount} />
+          <FactsheetWarmupNote curveDays={equityDailyPoints.length} />
         </>
       )}
     </div>
@@ -223,11 +246,31 @@ export function AllocationDashboardV2(props: MyAllocationDashboardPayload) {
 
 /**
  * The Overview's warm-up note, shown when there is too little history to build
- * factsheet panels from. It renders in two places: the "ready" branch before
- * two days have accrued, and (Phase 167.1.2 / IN-01) a brand-new book under
- * D-02 that has no history for the rebuilding panel to describe.
+ * factsheet panels from. It renders in ONE place, the "ready" branch, when the
+ * factsheet builder refuses the book's returns. Phase 167.1.2 / D-15: it never
+ * renders while the history is rebuilding, where no number of days changes the
+ * state.
+ *
+ * Review C3 WR-01: the day count in the copy is derived, not chosen. The
+ * builder needs two returns (`dailyReturns.length < 2` returns null in
+ * `buildAllocatorPortfolioFactsheetPayload`, src/lib/factsheet/
+ * allocator-portfolio-payload.ts; the threshold is an inline literal there,
+ * not an export). The writer emits one return per curve day after the first
+ * (`allocator_equity_compose.py::portfolio_returns`, `range(1, len(union))`),
+ * and "ready" needs at least one return. So in practice the note shows beside
+ * a two-day curve with one return, and the panels need three curve days.
+ * Known limit: a day the writer skips (no weight, or a non-finite value) adds
+ * no return, so the panels can need more than three days. "At least" stays
+ * true then; the promise is a floor, never an early date.
+ * `AllocationDashboardV2.warmup.test.tsx` measures the count against the real
+ * builder, so a change to its threshold fails there.
+ *
+ * Review C3 IN-01: the count line counts the days of the curve drawn above
+ * the note, in the same unit as the threshold. It used to count legacy
+ * `allocator_equity_snapshots` rows, which since plan 11 have no relation to
+ * the derived curve on screen.
  */
-function FactsheetWarmupNote({ snapshotCount }: { snapshotCount: number }) {
+function FactsheetWarmupNote({ curveDays }: { curveDays: number }) {
   return (
     <div
       role="status"
@@ -238,13 +281,14 @@ function FactsheetWarmupNote({ snapshotCount }: { snapshotCount: number }) {
         Portfolio factsheet
       </p>
       <p className="mt-3 text-sm text-text-secondary">
-        Aggregated factsheet panels appear once at least two days of
+        Aggregated factsheet panels appear once at least three days of
         blended equity history are available. The data flows from
         the API keys you connect on the My Allocation page.
       </p>
-      {snapshotCount > 0 && snapshotCount < 2 && (
+      {curveDays > 0 && (
         <p className="mt-2 text-fixed-11 text-text-muted">
-          {snapshotCount} snapshot recorded so far.
+          {curveDays} {curveDays === 1 ? "day" : "days"} of blended equity
+          history so far.
         </p>
       )}
     </div>
@@ -339,6 +383,29 @@ function BaselineUnknownBanner({
           : "Your live holdings and current AUM are accurate, and a full performance history builds up from here as daily snapshots accrue."}
       </span>
     </div>
+  );
+}
+
+/**
+ * Review C4 SFH-C4-04. One line under the Overview's banners when the curve on
+ * screen leaves out at least one disconnected account's history. The derive
+ * leaves a departed key out when the history rule includes it but the balance
+ * its history is measured from is gone (`departed_history_unavailable`); it
+ * does not block the book, which would hold it untrustworthy forever. The
+ * payload flag carries no count, so the line says "at least one". The key's
+ * own card on the profile page's Exchanges tab names which account. Muted, not a warning:
+ * the curve shown is correct for the accounts it covers.
+ */
+function DepartedHistoryNote() {
+  return (
+    <p
+      role="status"
+      data-testid="dashboard-departed-history-note"
+      className="mb-3 px-1 text-sm text-text-secondary"
+    >
+      This curve leaves out the history of at least one disconnected account,
+      because the balance that history is measured from is not available.
+    </p>
   );
 }
 

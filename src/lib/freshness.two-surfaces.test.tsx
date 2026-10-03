@@ -257,3 +257,96 @@ describe("WR-06-UTC — the badge and the factsheet chip answer one row the same
     },
   );
 });
+
+/**
+ * 169 review WR-04 (2026-09-29) — THE FRACTIONAL BOUNDARY, which the matrix
+ * above has no row on.
+ *
+ * `series_end` is a UTC DATE, so its age is whole elapsed days. The chip
+ * printed that floored age but bucketed its tone on the fractional one, and the
+ * badge bucketed the fractional one too. Flooring only the chip made a series
+ * 3.6 days old read `Computed · fresh` on the factsheet while the badge put the
+ * row on the series arm, and made a series 7.6 days old amber on one surface
+ * and red on the other. Both bucketers now floor, in one commit, and these rows
+ * are what makes a one-sided change fail.
+ *
+ * The clock is frozen at 14:24Z (Date only), so a series N calendar days old is
+ * N.6 days old. A third claim, the BAND, is read here, because at 7.6 days the
+ * two surfaces agreed on the subject and disagreed only on the colour. It is
+ * read out of each surface's own render: the badge's dot class, the chip's
+ * eyebrow word. Expectations are hand-typed, as above.
+ */
+type Band = "green" | "amber" | "red" | "other";
+
+function badgeBand(container: HTMLElement): Band {
+  const dot = container.querySelector("span.rounded-full");
+  const cls = dot?.getAttribute("class") ?? "";
+  if (cls.includes("bg-positive")) return "green";
+  if (cls.includes("bg-amber-400")) return "amber";
+  if (cls.includes("bg-negative")) return "red";
+  return "other";
+}
+
+function chipBand(label: string): Band {
+  if (label.endsWith("· fresh")) return "green";
+  if (label.endsWith("· stale")) return "amber";
+  if (label.endsWith("· old")) return "red";
+  return "other";
+}
+
+const FRACTIONAL_ROWS: {
+  what: string;
+  seriesDaysAgo: number;
+  namesTrackRecord: boolean;
+  band: Band;
+}[] = [
+  {
+    what: "a series 3.6 days old under a fresh job: three whole days, still green, the job speaks",
+    seriesDaysAgo: 3,
+    namesTrackRecord: false,
+    band: "green",
+  },
+  {
+    what: "a series 7.6 days old under a fresh job: seven whole days, amber, the track record speaks",
+    seriesDaysAgo: 7,
+    namesTrackRecord: true,
+    band: "amber",
+  },
+];
+
+describe("WR-04 — on a fractional day the badge and the chip still answer one row the same way", () => {
+  const NOW = "2026-09-29T14:24:00Z"; // 0.6 of a UTC day
+
+  it.each(FRACTIONAL_ROWS)("$what", ({ what, seriesDaysAgo, namesTrackRecord, band }) => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date(NOW));
+    try {
+      const seriesEndYmd = ymdInDays(-seriesDaysAgo);
+      const computedAt = isoHoursAgo(1);
+
+      const badgeRender = render(<SyncBadge computedAt={computedAt} seriesEnd={seriesEndYmd} />);
+      const badgeText = badgeRender.container.textContent ?? "";
+      const badge = {
+        namesTrackRecord: /Track record/i.test(badgeText),
+        band: badgeBand(badgeRender.container),
+      };
+      badgeRender.unmount();
+
+      const payload = payloadFor(seriesEndYmd, computedAt);
+      const chipRender = render(
+        <FactsheetProvider payload={payload} persist={false}>
+          <FactsheetBody payload={payload} hideAllocatorSection hideFooter />
+        </FactsheetProvider>,
+      );
+      const label = readChipLabel(chipRender.container);
+      const chip = { namesTrackRecord: label.startsWith("Track record"), band: chipBand(label) };
+      chipRender.unmount();
+
+      expect(badge, `badge, ${what}`).toEqual({ namesTrackRecord, band });
+      expect(chip, `chip, ${what}`).toEqual({ namesTrackRecord, band });
+      expect(badge, `badge and chip disagree about: ${what}`).toEqual(chip);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

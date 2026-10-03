@@ -1,4 +1,4 @@
-import { test, expect, type Page, type Locator } from "@playwright/test";
+import { test, expect, type Page, type Locator } from "./helpers/hydration-guard";
 
 /**
  * Audit 2026-05-07 C-0309: credentials are read from env vars at test
@@ -82,56 +82,80 @@ test.describe("Public browsing flow", () => {
   });
 
   test("factsheet page loads for published strategy", async ({ page }) => {
-    // First browse to find a strategy ID
+    // WHY: an anonymous visitor reaching a published strategy's factsheet from
+    // its browse row is the public funnel. A browse table with no reachable row
+    // must FAIL this test, never pass it with zero assertions.
+    //
+    // Debug session e2e-seeded-lane-flake (2026-10-02): the seeded lane's
+    // crypto-sma category holds only is_example rows. /browse SSRs them, then
+    // the hide_examples=true default hides them on mount. Sampling the first
+    // paint either hung 60 s on a row that vanished, or took the old
+    // `if (hasStrategies)` branch and asserted nothing. So wait for the
+    // hydrated default first (checkbox checked: the same settle signal
+    // discovery-hide-examples-default.spec.ts uses), untick it, then require a
+    // row. Toggling before that settle would race the mount effect again.
     await page.goto("/browse/crypto-sma");
-    const firstLink = page.locator("table tbody tr a").first();
-    const hasStrategies = await hasStrategyRow(page, firstLink);
+    const hideExamples = page
+      .locator('label:has-text("Hide examples")')
+      .first()
+      .locator('input[type="checkbox"]');
+    await expect(
+      hideExamples,
+      "Hide examples must reach its hydrated default (checked) before it is toggled",
+    ).toBeChecked();
+    // Keyboard toggle, as in discovery-hide-examples-default.spec.ts.
+    await hideExamples.focus();
+    await page.keyboard.press(" ");
+    await expect(hideExamples).not.toBeChecked();
 
-    if (hasStrategies) {
-      const href = await firstLink.getAttribute("href");
-      const strategyId = href?.split("/").pop();
-      // Captured BEFORE navigating — this locator is on the browse page and
-      // goes stale the moment we leave it.
-      const rowName = (await firstLink.textContent())?.trim();
-      if (strategyId) {
-        const response = await page.goto(`/factsheet/${strategyId}`);
-        expect(response?.status()).toBeLessThan(400);
-        // 158-05 (OPS-03 orphan repair, 2026-08-20): this test previously
-        // asserted `text=Verified by Quantalyze`, which only renders once a
-        // strategy's analytics are COMPLETE. The first row of the shared,
-        // polluted test DB is whatever sorts first — often a still-computing
-        // seed — so that assertion was a global-DB-state bet (the PR #654
-        // lesson: assert what THIS test itself established). What this test
-        // establishes is only "the id I clicked resolves to a factsheet
-        // page", so assert the factsheet shell that renders in BOTH the
-        // computing and complete states: the "Institutional Factsheet"
-        // masthead and a non-empty strategy h1.
-        await expect(
-          page.locator("text=Institutional Factsheet").first(),
-        ).toBeVisible();
+    const firstLink = page.locator('table tbody tr a[href^="/factsheet/"]').first();
+    await expect(
+      firstLink,
+      "no published strategy row on /browse/crypto-sma with Hide examples off",
+    ).toBeVisible();
+    const href = await firstLink.getAttribute("href");
+    const strategyId = href?.split("/").pop();
+    // Captured BEFORE navigating — this locator is on the browse page and
+    // goes stale the moment we leave it.
+    const rowName = (await firstLink.textContent())?.trim();
+    expect(strategyId, `browse row href "${href}" carries no strategy id`).toBeTruthy();
 
-        // 158-REVIEW WR-12: the masthead check above is fine; the h1 check was
-        // not. `not.toBeEmpty()` passes for ANY non-empty text node — a
-        // skeleton placeholder, an em-dash, a generic page title — so it could
-        // not fail for a realistic regression of "the factsheet resolved the
-        // strategy I clicked", which is the only thing this test establishes.
-        //
-        // Assert that identity instead. It is falsifiable and still free of the
-        // global-DB-state bet the old `Verified by Quantalyze` assertion made:
-        // the browse row's link TEXT is the strategy name verbatim
-        // (StrategyTable renders `{s.name}` as the anchor body) and the
-        // factsheet masthead h1 renders `payload.strategyName`, so the two are
-        // directly comparable for whichever row happened to sort first.
-        expect(
-          rowName,
-          "the browse row link had no text, so the factsheet's identity cannot be asserted — if StrategyTable stopped rendering the strategy name as its anchor body, fix this test's capture rather than dropping the assertion",
-        ).toBeTruthy();
-        await expect(
-          page.locator("h1").first(),
-          `factsheet h1 does not name the strategy this test navigated to ("${rowName}") — the id resolved to a page, but not to THAT strategy`,
-        ).toContainText(rowName!);
-      }
-    }
+    const response = await page.goto(`/factsheet/${strategyId}`);
+    expect(response?.status()).toBeLessThan(400);
+    // 158-05 (OPS-03 orphan repair, 2026-08-20): this test previously
+    // asserted `text=Verified by Quantalyze`, which only renders once a
+    // strategy's analytics are COMPLETE. The first row of the shared,
+    // polluted test DB is whatever sorts first — often a still-computing
+    // seed — so that assertion was a global-DB-state bet (the PR #654
+    // lesson: assert what THIS test itself established). What this test
+    // establishes is only "the id I clicked resolves to a factsheet
+    // page", so assert the factsheet shell that renders in BOTH the
+    // computing and complete states: the "Institutional Factsheet"
+    // masthead and a non-empty strategy h1.
+    await expect(
+      page.locator("text=Institutional Factsheet").first(),
+    ).toBeVisible();
+
+    // 158-REVIEW WR-12: the masthead check above is fine; the h1 check was
+    // not. `not.toBeEmpty()` passes for ANY non-empty text node — a
+    // skeleton placeholder, an em-dash, a generic page title — so it could
+    // not fail for a realistic regression of "the factsheet resolved the
+    // strategy I clicked", which is the only thing this test establishes.
+    //
+    // Assert that identity instead. It is falsifiable and still free of the
+    // global-DB-state bet the old `Verified by Quantalyze` assertion made:
+    // the browse row's link TEXT is the strategy name verbatim
+    // (StrategyTable renders `{s.name}` as the anchor body) and the
+    // factsheet masthead h1 renders `payload.strategyName`, so the two are
+    // directly comparable for whichever row happened to sort first.
+    expect(
+      rowName,
+      "the browse row link had no text, so the factsheet's identity cannot be asserted — if StrategyTable stopped rendering the strategy name as its anchor body, fix this test's capture rather than dropping the assertion",
+    ).toBeTruthy();
+    await expect(
+      page.locator("h1").first(),
+      `factsheet h1 does not name the strategy this test navigated to ("${rowName}") — the id resolved to a page, but not to THAT strategy`,
+    ).toContainText(rowName!);
   });
 });
 

@@ -51,7 +51,7 @@ vi.mock("@/components/strategy/PendingIntros", () => ({
  * page ask the wrong question while this file stayed green.
  */
 const shareProps = vi.hoisted(
-  () => [] as Array<{ strategyId: string; published: boolean }>,
+  () => [] as Array<{ strategyId: string; published: boolean; size?: "sm" | "md" }>,
 );
 vi.mock("@/components/strategy/ShareableLink", async () => {
   const actual = await vi.importActual<
@@ -59,8 +59,16 @@ vi.mock("@/components/strategy/ShareableLink", async () => {
   >("@/components/strategy/ShareableLink");
   return {
     ...actual,
-    ShareableLink: (props: { strategyId: string; published: boolean }) => {
-      shareProps.push({ strategyId: props.strategyId, published: props.published });
+    ShareableLink: (props: {
+      strategyId: string;
+      published: boolean;
+      size?: "sm" | "md";
+    }) => {
+      shareProps.push({
+        strategyId: props.strategyId,
+        published: props.published,
+        size: props.size,
+      });
       return React.createElement(
         "span",
         { "data-testid": `share-${props.strategyId}` },
@@ -263,6 +271,103 @@ describe("StrategiesPage — the share control is always present (SHARE-04)", ()
     await renderPage();
 
     expect(shareProps[0].published).toBe(false);
+  });
+});
+
+describe("StrategiesPage — N-STRAT row layout (170-05)", () => {
+  it("stacks below md, wraps tags whole, and keeps the name link textContent equal to the name", async () => {
+    // WHY: at V390 the private-link control overlapped the name, and a
+    // hyphenated word broke at its hyphen. Each word and each tag stays
+    // whole. textContent must equal the name exactly — noteOf() matches
+    // a.textContent === strategyName (PC-5).
+    // GC-02 (2026-09-30): the stack breakpoint moved from sm to md ON
+    // PURPOSE. At V640 the sm row put the full-width control group beside
+    // the name and left the name block 142 px (CI run 36764778803); stacking
+    // until md keeps it full width (>= 160 px). So the row and the control
+    // group carry md: utilities, and none of the five may come back on sm:.
+    state.strategies = [
+      {
+        ...row("s-layout", "draft"),
+        name: "Alpha Long-Short Beta",
+        strategy_types: ["Long-Short", "Market Neutral"],
+      },
+    ];
+
+    const container = await renderPage();
+    const rowEl = container.querySelector('[data-testid="strategy-row"]')!
+      .firstElementChild as HTMLElement;
+    const rowTokens = rowEl.className.split(/\s+/);
+    expect(rowTokens).toContain("flex-col");
+    for (const token of ["md:flex-row", "md:items-center", "md:justify-between"]) {
+      expect(rowTokens).toContain(token);
+    }
+
+    const link = container.querySelector("a")!;
+    expect(link.textContent).toBe("Alpha Long-Short Beta");
+    // WR-02 (170 review): /strategies does not scroll, so its name words must
+    // be breakable when one is wider than the name block. A nowrap word there
+    // let a 40-character hyphenated name overflow the card at 390 px.
+    for (const word of link.querySelectorAll("span")) {
+      expect(word.className.split(/\s+/)).toContain("inline-block");
+      expect(word.className.split(/\s+/)).not.toContain("whitespace-nowrap");
+    }
+
+    const tagRow = link.nextElementSibling as HTMLElement;
+    expect(tagRow.className).toContain("flex-wrap");
+    expect(tagRow.className).toContain("gap-1");
+    const chips = [...tagRow.querySelectorAll("span")];
+    expect(chips.length).toBeGreaterThanOrEqual(2);
+    for (const chip of chips) {
+      expect(chip.className).toContain("whitespace-nowrap");
+    }
+
+    // CR-01 (170 review, measured 2026-10-01 in Chromium with DM Sans): from
+    // md up the name block keeps a hard 160 px floor and the control group
+    // may shrink and wrap. With `md:shrink-0` the group held its one-line
+    // width (~401 px for a draft row), so at 768 and 800 px (desktop 200%
+    // zoom on 1536/1600 px screens) the name block got 0 px and the name
+    // painted over the controls. The floor and the shrinkable group are the
+    // fix; `md:shrink-0` coming back re-opens the overlap.
+    const nameBlock = link.parentElement as HTMLElement;
+    const nameTokens = nameBlock.className.split(/\s+/);
+    for (const token of ["flex-1", "min-w-0", "md:min-w-[160px]"]) {
+      expect(nameTokens).toContain(token);
+    }
+
+    const group = rowEl.lastElementChild as HTMLElement;
+    const groupTokens = group.className.split(/\s+/);
+    expect(groupTokens).toContain("flex-wrap");
+    for (const token of ["md:ml-4", "md:min-w-0"]) {
+      expect(groupTokens).toContain(token);
+    }
+    expect(groupTokens).not.toContain("md:shrink-0");
+    expect(groupTokens).not.toContain("shrink-0");
+
+    // GC-02: none of the five layout utilities may sit on the sm: prefix.
+    const smLayout = [
+      "sm:flex-row",
+      "sm:items-center",
+      "sm:justify-between",
+      "sm:ml-4",
+      "sm:shrink-0",
+    ];
+    for (const token of [...rowTokens, ...groupTokens]) {
+      expect(smLayout).not.toContain(token);
+    }
+  });
+});
+
+describe("StrategiesPage — private-link control is a small secondary peer (170-05)", () => {
+  it("passes size=sm through to ShareableLink", async () => {
+    // WHY: at V390 the md private-link button overlapped the strategy name.
+    // /strategies asks for the sm peer; the discovery page must not, so this
+    // is the only call site that may pass the prop.
+    state.strategies = [row("s-sm", "draft")];
+
+    await renderPage();
+
+    expect(shareProps).toHaveLength(1);
+    expect(shareProps[0].size).toBe("sm");
   });
 });
 

@@ -280,3 +280,122 @@ describe("ShareableLink — the share predicate (SHARE-04)", () => {
     expect(writeText).not.toHaveBeenCalled();
   });
 });
+
+/**
+ * Phase 170-05 / N-STRAT — ShareableLink size.
+ *
+ * WHY: the private-link control on /strategies has to be a small bordered
+ * secondary peer of StrategyActions, never the accent button, and the
+ * discovery detail page (no size prop) has to stay on the md arm.
+ * `sm` has no min-height of its own, so a coarse pointer still needs 44px.
+ */
+describe("ShareableLink — size (170-05)", () => {
+  const MD_BUTTON =
+    "inline-flex items-center justify-center rounded-md font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 disabled:opacity-50 disabled:pointer-events-none bg-white text-text-primary border border-border hover:bg-page min-h-[44px] px-4 py-2.5 text-body";
+  const SM_BUTTON =
+    "inline-flex items-center justify-center rounded-md font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 disabled:opacity-50 disabled:pointer-events-none bg-white text-text-primary border border-border hover:bg-page px-3 py-1.5 text-caption pointer-coarse:min-h-[44px]";
+
+  function iconClass(button: HTMLElement): string {
+    return button.querySelector("svg")?.getAttribute("class") ?? "";
+  }
+
+  function expectSm(button: HTMLElement): void {
+    expect(button.className).toBe(SM_BUTTON);
+    expect(button.className).not.toContain("bg-accent");
+    expect(iconClass(button)).toContain("h-3.5 w-3.5 mr-1.5");
+    expect(iconClass(button)).not.toContain("h-4");
+  }
+
+  it("with no size prop the button and icon stay on the md arm", () => {
+    render(<ShareableLink strategyId={STRATEGY_ID} published={false} />);
+    const button = screen.getByRole("button");
+    expect(button.className).toBe(MD_BUTTON);
+    expect(iconClass(button)).toBe("h-4 w-4 mr-1.5");
+    expect(button.className).not.toContain("pointer-coarse:min-h-[44px]");
+    expect(button.className).not.toContain("bg-accent");
+  });
+
+  it("size sm is a bordered secondary button with a coarse 44px floor and a smaller icon", () => {
+    render(
+      <ShareableLink strategyId={STRATEGY_ID} published={false} size="sm" />,
+    );
+    expectSm(screen.getByRole("button"));
+    expect(screen.getByRole("button").textContent).toMatch(/Get private link/);
+  });
+
+  it("keeps the sm classes while minting", async () => {
+    vi.stubGlobal("fetch", () => new Promise(() => {}));
+    render(
+      <ShareableLink strategyId={STRATEGY_ID} published={false} size="sm" />,
+    );
+    fireEvent.click(screen.getByRole("button"));
+    await waitFor(() =>
+      expect(screen.getByRole("button").textContent).toMatch(/Creating link/),
+    );
+    expectSm(screen.getByRole("button"));
+    vi.unstubAllGlobals();
+  });
+
+  it("keeps the sm classes on copy success", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    setClipboard({ writeText });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ url: "https://quantalyze.xyz/factsheet-share/tok" }),
+    }));
+    render(
+      <ShareableLink strategyId={STRATEGY_ID} published={false} size="sm" />,
+    );
+    fireEvent.click(screen.getByRole("button"));
+    await waitFor(() =>
+      expect(screen.getByRole("button").textContent).toMatch(/Link copied!/),
+    );
+    expectSm(screen.getByRole("button"));
+    expect(iconClass(screen.getByRole("button"))).toContain("text-positive");
+    vi.unstubAllGlobals();
+  });
+
+  it("keeps the sm classes when the copy fails", async () => {
+    setClipboard({ writeText: vi.fn().mockRejectedValue(new Error("blocked")) });
+    setExecCommand(vi.fn().mockReturnValue(false));
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ url: "https://quantalyze.xyz/factsheet-share/tok" }),
+    }));
+    render(
+      <ShareableLink strategyId={STRATEGY_ID} published={false} size="sm" />,
+    );
+    fireEvent.click(screen.getByRole("button"));
+    await waitFor(() =>
+      expect(screen.getByRole("button").textContent).toMatch(
+        /Copy failed — copy the URL manually/,
+      ),
+    );
+    expectSm(screen.getByRole("button"));
+    expect(iconClass(screen.getByRole("button"))).toContain("text-negative");
+    vi.unstubAllGlobals();
+  });
+
+  it("keeps the sm classes when the mint fails", async () => {
+    setClipboard({ writeText: vi.fn().mockResolvedValue(undefined) });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: false,
+      status: 500,
+      json: async () => ({}),
+    }));
+    render(
+      <ShareableLink strategyId={STRATEGY_ID} published={false} size="sm" />,
+    );
+    fireEvent.click(screen.getByRole("button"));
+    await waitFor(() =>
+      expect(screen.getByRole("button").textContent).toMatch(
+        /Couldn't create the link — try again/,
+      ),
+    );
+    expectSm(screen.getByRole("button"));
+    expect(iconClass(screen.getByRole("button"))).toContain("text-negative");
+    vi.unstubAllGlobals();
+  });
+});

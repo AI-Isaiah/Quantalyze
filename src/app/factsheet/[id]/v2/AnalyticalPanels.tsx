@@ -1,10 +1,11 @@
 "use client";
 
 import { usePayload } from "./factsheet-context";
-import { useBasisSeriesView } from "./basis-context";
+import { useBasisSeriesView, useWindowedView } from "./basis-context";
 import { ResponsiveChartFrame } from "@/components/ResponsiveChartFrame";
 import { useBreakpoint } from "@/hooks/useBreakpoint";
 import { useTapPin } from "@/hooks/useTapPin";
+import { decimalExponent, pow10 } from "@/lib/chart-ticks";
 
 /**
  * Three analytical panels rounding out the v2 page:
@@ -246,7 +247,7 @@ function StreakHist({ title, data, color, maxLen }: { title: string; data: numbe
 function niceCountTicks(lo: number, hi: number, count: number): { value: number; label: string }[] {
   if (hi <= lo) return [{ value: 0, label: "0" }];
   const rough = (hi - lo) / count;
-  const mag = Math.pow(10, Math.floor(Math.log10(Math.abs(rough)) || 0));
+  const mag = pow10(decimalExponent(rough));
   const norm = rough / mag;
   let nice: number;
   if (norm < 1.5) nice = 1;
@@ -262,10 +263,30 @@ function niceCountTicks(lo: number, hi: number, count: number): { value: number;
   return out;
 }
 
+/**
+ * Phase 169.1 (D-27) — the scope note (shared with MetricsColumn, which imports it from here) a full-history panel carries while a range is
+ * selected: per-calendar-year figures and the §III Style section are computed on
+ * the whole record, so beside window figures they say so.
+ */
+export const FULL_HISTORY_NOTE = "Full history";
+
+/** The note's data-eyebrow voice (DESIGN.md: Geist Mono, uppercase, 0.18em, muted). */
+export function ScopeNote({ text }: { text: string }) {
+  return (
+    <span data-testid="scope-note" className="font-mono text-fixed-9 uppercase tracking-[0.18em] text-text-muted">
+      {text}
+    </span>
+  );
+}
+
 export function CalmarByYearPanel() {
   // Phase 103 (MTM-04): per-year Calmar recomputes from the strategy's own daily
   // series → follows the active basis (cash view === payload).
-  const view = useBasisSeriesView(usePayload());
+  const payload = usePayload();
+  const view = useBasisSeriesView(payload);
+  // Phase 169.1 (D-27): per-calendar-year figures stay full history; while a range
+  // is selected the panel says so.
+  const selected = useWindowedView(payload).scope.kind === "selected";
   const rows = view.calmarByYear;
   if (rows.length === 0) return null;
   // Flag any partial-year row — < 200 trading days means Calmar is annualised
@@ -274,7 +295,14 @@ export function CalmarByYearPanel() {
   return (
     <section>
       <header className="mb-2 border-b border-text pb-1">
-        <h3 className="text-small font-semibold uppercase tracking-wider text-text-primary">Calmar by Year</h3>
+        {selected ? (
+          <div className="flex items-baseline gap-2">
+            <h3 className="text-small font-semibold uppercase tracking-wider text-text-primary">Calmar by Year</h3>
+            <ScopeNote text={FULL_HISTORY_NOTE} />
+          </div>
+        ) : (
+          <h3 className="text-small font-semibold uppercase tracking-wider text-text-primary">Calmar by Year</h3>
+        )}
       </header>
       <table className="w-full text-micro">
         <thead>
@@ -328,9 +356,14 @@ export function BootstrapCIPanel() {
   // series length the resamples were drawn from), NOT the cash `strategyMetrics.n`.
   // A genuinely short MTM window (MTM n<252 while cash n≥252) therefore fires the
   // warning instead of silently inheriting the cash count and suppressing it.
-  const view = useBasisSeriesView(usePayload());
+  // Phase 169.1 (D-27): the windowed view, so the CIs describe the selected range
+  // (the active view by reference at full history). A withheld window (W1) carries
+  // NaN figures and no resamples: the figures read "—" and neither the low-N
+  // warning nor the resample footer is shown, since no bootstrap ran.
+  const { view } = useWindowedView(usePayload());
   const b = view.bootstrapCI;
-  const lowN = b.n < 252;
+  const withheld = view.withheld != null;
+  const lowN = !withheld && b.n < 252;
   // A resample with no Sharpe (no dispersion) or no Sortino (no losing day) is
   // dropped, not counted as 0 (founder decision D7). Say how many were used
   // whenever that is fewer than all of them (review round 2, SFH-R2-M2). A
@@ -386,10 +419,12 @@ export function BootstrapCIPanel() {
         <BootHist title="Max DD" hist={b.max_dd.hist} point={b.max_dd.point} ci={[b.max_dd.lo, b.max_dd.hi]} fmt={n => `${(n * 100).toFixed(1)}%`} />
       </div>
 
-      <p className="mt-2 text-micro italic text-text-muted">
-        {b.n_resamples.toLocaleString()} stationary block-bootstrap resamples · {b.block_len}-day block length · 95% CI
-        {droppedNote.map(note => ` · ${note}`).join("")}
-      </p>
+      {!withheld && (
+        <p className="mt-2 text-micro italic text-text-muted">
+          {b.n_resamples.toLocaleString()} stationary block-bootstrap resamples · {b.block_len}-day block length · 95% CI
+          {droppedNote.map(note => ` · ${note}`).join("")}
+        </p>
+      )}
     </section>
   );
 }

@@ -5,6 +5,7 @@ import {
   VAR_CONFIDENCE_LABEL,
   type ScenarioStress,
 } from "./scenario-stress";
+import { btcClosesFromReturns } from "./btc-closes.test-utils";
 
 /**
  * Falsifiable pins for the scenario stress / VaR engine (Plan 26-01,
@@ -18,7 +19,7 @@ import {
  *   - near-market-neutral — cov≈0 book ⇒ |impact| ≈ 0, NOT the full shock
  *                        (a face-value bug yields |impact| ≈ 0.30 and FAILS).
  *   - beta-propagated  — a positive-β book ⇒ impact ≈ β·shock (sign + magnitude).
- *   - intersection     — a divergent value on a non-overlapping date does NOT
+ *   - pairing          — a divergent value on an unpaired date does NOT
  *                        move the impact (a union/zero-fill impl FAILS).
  *   - leverage         — 2× uniform leverage ⇒ ~2× VaR/CVaR; Sharpe unchanged
  *                        (the leverage-invariant contrast); max-drawdown
@@ -28,9 +29,23 @@ import {
  *
  * Every expected number is derived from the math definition IN this file —
  * never read back from the implementation.
+ *
+ * Phase 169.4 plan 169.4-04 (D-66, D-68): `computeScenarioStress` takes BTC
+ * CLOSES and pairs through the one Scenario pairing function. The BTC fixtures
+ * stay written as daily returns and go through `closes` below, which flat-fills
+ * the calendar days `manyDays` skips (Jan 29-31, Feb 29, ...), so every fixture
+ * pairs the same dates with the same values it did under the old join and no
+ * literal moved. Without the fill the 64-date fixtures would pair 62, and the
+ * near-market-neutral book's orthogonality (built over whole period-4 blocks)
+ * would break for a reason that has nothing to do with the test.
  */
 
 type DP = { date: string; value: number };
+
+/** The BTC closes whose daily returns are `r` (see the header note). */
+function closes(r: DP[]) {
+  return btcClosesFromReturns(r, { flatFillGaps: true });
+}
 
 /** ISO day labels d1..dN (copied verbatim from scenario-benchmark.test.ts:34-39).
  *  Capped at 31 (the single-month form the benchmark fixtures use). */
@@ -82,12 +97,12 @@ describe("computeScenarioStress — golden VaR/CVaR oracle (STRESS-02)", () => {
   const btc: DP[] = d.map((date, i) => ({ date, value: (i % 2 === 0 ? 0.01 : -0.008) }));
 
   it("golden VaR — VaR(95%) is the floor-quantile -0.060", () => {
-    const r = computeScenarioStress(port, btc);
+    const r = computeScenarioStress(port, closes(btc));
     expect(r.var).toBeCloseTo(-0.06, 10);
   });
 
   it("golden CVaR — CVaR(95%) = mean of the tail = -0.070, and CVaR <= VaR", () => {
-    const r = computeScenarioStress(port, btc);
+    const r = computeScenarioStress(port, closes(btc));
     expect(r.cvar).toBeCloseTo(-0.07, 10);
     expect(r.cvar!).toBeLessThanOrEqual(r.var!);
   });
@@ -101,7 +116,7 @@ describe("computeScenarioStress — golden VaR/CVaR oracle (STRESS-02)", () => {
     // impls fails the "is an order statistic" assertion below. This is a
     // stronger negative control than a magnitude epsilon (which is coincidentally
     // small for this particular series), because it keys on the model's STRUCTURE.
-    const r = computeScenarioStress(port, btc);
+    const r = computeScenarioStress(port, closes(btc));
     // 1. The result IS exactly an observed return (an order statistic) — to full
     //    float precision, not merely "close". A parametric/interpolated VaR is not.
     expect(SORTED).toContain(r.var);
@@ -151,7 +166,7 @@ describe("computeScenarioStress — β-propagated shock (STRESS-01)", () => {
       date,
       value: i % 4 < 2 ? c : -c,
     }));
-    const r = computeScenarioStress(port, btc, { shock: -0.3 });
+    const r = computeScenarioStress(port, closes(btc), { shock: -0.3 });
     // β ≈ 0 ⇒ |impact| is tiny — strictly NOT the face-value shock 0.30.
     expect(Math.abs(r.projectedImpact!)).toBeLessThan(1e-9);
     // Falsifiable the other direction: a "shock applied at face value" bug
@@ -166,7 +181,7 @@ describe("computeScenarioStress — β-propagated shock (STRESS-01)", () => {
     const d = days(30);
     const btc: DP[] = d.map((date, i) => ({ date, value: i % 2 === 0 ? 0.01 : -0.008 }));
     const port: DP[] = btc.map((x) => ({ ...x, value: x.value * 2 }));
-    const r = computeScenarioStress(port, btc, { shock: -0.3 });
+    const r = computeScenarioStress(port, closes(btc), { shock: -0.3 });
     expect(r.beta).toBeCloseTo(2, 8);
     // impact = β·shock — sign negative, magnitude = β·|shock|.
     expect(r.projectedImpact).toBeCloseTo(r.beta! * -0.3, 10);
@@ -174,40 +189,43 @@ describe("computeScenarioStress — β-propagated shock (STRESS-01)", () => {
     expect(r.projectedImpact!).toBeLessThan(0); // signed downside, never flipped
   });
 
-  it("intersection not union — a divergent value on a non-overlapping date does not move the impact", () => {
-    // Portfolio spans d1..d8; BTC covers only d3..d6 PLUS an extra d9 the
-    // portfolio never has. Overlap is exactly {d3,d4,d5,d6}. A union / zero-fill
-    // / positional-zip impl would absorb the poison values and shift β·shock.
+  it("pairing not union — a divergent value on an unpaired date does not move the impact", () => {
+    // Portfolio spans d1..d8; the BTC closes cover d2 (the base close) .. d6
+    // PLUS an extra close on d9 the portfolio never has. The paired set is
+    // exactly {d3,d4,d5,d6}. A union / zero-fill / positional-zip impl would
+    // absorb the poison values and shift β·shock.
     const d = days(9);
     const portfolio: DP[] = [
-      { date: d[0], value: 999 }, // d1 — non-overlap poison
-      { date: d[1], value: 0.001 }, // d2 — non-overlap
-      { date: d[2], value: 0.01 }, // d3 — overlap
-      { date: d[3], value: -0.005 }, // d4 — overlap
-      { date: d[4], value: 0.02 }, // d5 — overlap
-      { date: d[5], value: 0.0 }, // d6 — overlap
-      { date: d[6], value: 0.003 }, // d7 — non-overlap
-      { date: d[7], value: -0.002 }, // d8 — non-overlap
+      { date: d[0], value: 999 }, // d1 — unpaired poison
+      { date: d[1], value: 0.001 }, // d2 — unpaired
+      { date: d[2], value: 0.01 }, // d3 — paired
+      { date: d[3], value: -0.005 }, // d4 — paired
+      { date: d[4], value: 0.02 }, // d5 — paired
+      { date: d[5], value: 0.0 }, // d6 — paired
+      { date: d[6], value: 0.003 }, // d7 — unpaired
+      { date: d[7], value: -0.002 }, // d8 — unpaired
     ];
-    const benchmark: DP[] = [
+    const paired = btcClosesFromReturns([
       { date: d[2], value: 0.008 }, // d3
       { date: d[3], value: -0.004 }, // d4
       { date: d[4], value: 0.012 }, // d5
       { date: d[5], value: 0.002 }, // d6
-      { date: d[8], value: -888 }, // d9 — non-overlap poison
-    ];
-    const baseline = computeScenarioStress(portfolio, benchmark, { shock: -0.3 });
-    expect(baseline.betaN).toBe(4); // the inner-join overlap, NOT the union length
+    ]);
+    // d9 — a divergent poison close outside the portfolio's range.
+    const withPoison = (close: number) => ({
+      ...paired,
+      prices: [...paired.prices, { date: d[8], close }],
+      through: d[8],
+    });
+    const baseline = computeScenarioStress(portfolio, withPoison(88_800), { shock: -0.3 });
+    expect(baseline.betaN).toBe(4); // the paired overlap, NOT the union length
 
-    // Mutate the poison values on the non-overlapping dates to be even more
-    // extreme. Inner-join ignores them entirely; the impact must not move.
+    // Mutate the poison values on the unpaired dates to be even more extreme.
+    // The pairing ignores them entirely; the impact must not move.
     const portfolio2 = portfolio.map((x) =>
       x.date === d[0] ? { ...x, value: -50000 } : x,
     );
-    const benchmark2 = benchmark.map((x) =>
-      x.date === d[8] ? { ...x, value: 77777 } : x,
-    );
-    const mutated = computeScenarioStress(portfolio2, benchmark2, { shock: -0.3 });
+    const mutated = computeScenarioStress(portfolio2, withPoison(7_777_700), { shock: -0.3 });
     expect(mutated.betaN).toBe(4);
     expect(mutated.projectedImpact).toBeCloseTo(baseline.projectedImpact as number, 12);
     expect(mutated.beta).toBeCloseTo(baseline.beta as number, 12);
@@ -257,8 +275,8 @@ describe("computeScenarioStress — leverage scaling (STRESS-02, Pitfall 3-4)", 
   const btc: DP[] = d.map((date, i) => ({ date, value: i % 2 === 0 ? 0.012 : -0.009 }));
 
   it("leverage scales VaR not Sharpe — 2×L ⇒ ~2× VaR/CVaR; Sharpe unchanged", () => {
-    const r1 = computeScenarioStress(port1x, btc);
-    const r2 = computeScenarioStress(port2x, btc);
+    const r1 = computeScenarioStress(port1x, closes(btc));
+    const r2 = computeScenarioStress(port2x, closes(btc));
     // VaR/CVaR are quantiles/tail-means of the linearly-scaled daily series →
     // scale exactly ~2× (the quantile of 2r is 2× the quantile of r).
     expect(r2.var).toBeCloseTo(2 * r1.var!, 8);
@@ -286,8 +304,8 @@ describe("computeScenarioStress — leverage scaling (STRESS-02, Pitfall 3-4)", 
 // =========================================================================
 
 describe("computeScenarioStress — degenerate null paths (em-dash source)", () => {
-  it("degenerate null — empty portfolioDaily ⇒ every estimate field is null (not 0)", () => {
-    const r: ScenarioStress = computeScenarioStress([], []);
+  it("degenerate null — empty portfolioDaily and no BTC ⇒ every estimate field is null (not 0)", () => {
+    const r: ScenarioStress = computeScenarioStress([], null);
     expect(r.varN).toBe(0);
     expect(r.betaN).toBe(0);
     expect(r.var).toBeNull();
@@ -304,7 +322,7 @@ describe("computeScenarioStress — degenerate null paths (em-dash source)", () 
     const d = manyDays(64);
     const port: DP[] = d.map((date) => ({ date, value: 0.003 }));
     const btc: DP[] = d.map((date, i) => ({ date, value: i % 2 === 0 ? 0.01 : -0.008 }));
-    const r = computeScenarioStress(port, btc);
+    const r = computeScenarioStress(port, closes(btc));
     expect(r.varN).toBe(64);
     expect(r.var).toBeNull();
     expect(r.cvar).toBeNull();
@@ -325,7 +343,7 @@ describe("computeScenarioStress — degenerate null paths (em-dash source)", () 
       value: i === 13 ? NaN : i % 7 === 0 ? -0.05 : 0.01 + (i % 5) * 0.003,
     }));
     const btc: DP[] = d.map((date, i) => ({ date, value: i % 2 === 0 ? 0.01 : -0.008 }));
-    const r = computeScenarioStress(port, btc);
+    const r = computeScenarioStress(port, closes(btc));
     // The window N is still the full length — only the estimate is suppressed.
     expect(r.varN).toBe(64);
     // var/cvar MUST be null, never NaN and never a corrupted finite quantile.
@@ -342,7 +360,7 @@ describe("computeScenarioStress — degenerate null paths (em-dash source)", () 
       value: i === 20 ? Infinity : i % 7 === 0 ? -0.05 : 0.01 + (i % 5) * 0.003,
     }));
     const btc: DP[] = d.map((date, i) => ({ date, value: i % 2 === 0 ? 0.01 : -0.008 }));
-    const r = computeScenarioStress(port, btc);
+    const r = computeScenarioStress(port, closes(btc));
     expect(r.varN).toBe(64);
     expect(r.var).toBeNull();
     expect(r.cvar).toBeNull();
@@ -362,9 +380,9 @@ describe("computeScenarioStress — degenerate null paths (em-dash source)", () 
       // A real non-degenerate downside series (so var is well-defined).
       value: i % 7 === 0 ? -0.05 : 0.01 + (i % 5) * 0.003,
     }));
-    // BTC carries ONLY the FIRST portfolio date — the inner-join overlap is 1.
+    // BTC carries ONLY the FIRST portfolio date — the paired overlap is 1.
     const btc: DP[] = [{ date: d[0], value: 0.012 }];
-    const r = computeScenarioStress(port, btc, { shock: -0.3 });
+    const r = computeScenarioStress(port, closes(btc), { shock: -0.3 });
     expect(r.varN).toBe(64);
     expect(r.betaN).toBe(1); // single overlapping BTC date → 1
     expect(r.beta).toBeNull(); // n<2 overlap → NULL_RESULT
@@ -388,7 +406,7 @@ describe("computeScenarioStress — degenerate null paths (em-dash source)", () 
       value: i === 30 ? -Infinity : i % 7 === 0 ? -0.05 : 0.01 + (i % 5) * 0.003,
     }));
     const btcOk: DP[] = d.map((date, i) => ({ date, value: i % 2 === 0 ? 0.012 : -0.009 }));
-    const rNegInf = computeScenarioStress(portNegInf, btcOk, { shock: -0.3 });
+    const rNegInf = computeScenarioStress(portNegInf, closes(btcOk), { shock: -0.3 });
     expect(rNegInf.varN).toBe(64);
     expect(rNegInf.var).toBeNull();
     expect(rNegInf.cvar).toBeNull();
@@ -402,12 +420,20 @@ describe("computeScenarioStress — degenerate null paths (em-dash source)", () 
       date,
       value: i % 7 === 0 ? -0.05 : 0.01 + (i % 5) * 0.003,
     }));
-    const btcNaN: DP[] = d.map((date, i) => ({
-      date,
-      value: i === 17 ? NaN : i % 2 === 0 ? 0.012 : -0.009,
-    }));
+    // A NaN on the BTC axis is now a non-finite CLOSE (the route and
+    // parseBtcCloses refuse one; the lib guards a caller that bypasses them):
+    // the close dated d[17] is NaN, every other close finite.
+    const btcOkCloses = closes(
+      d.map((date, i) => ({ date, value: i % 2 === 0 ? 0.012 : -0.009 })),
+    );
+    const btcNaN = {
+      ...btcOkCloses,
+      prices: btcOkCloses.prices.map((p) => (p.date === d[17] ? { ...p, close: NaN } : p)),
+    };
     const rNaN = computeScenarioStress(portOk, btcNaN, { shock: -0.3 });
-    expect(rNaN.betaN).toBe(64);
+    // 62, not 64 (moved in 169.4-04): the NaN close acts as a gap, so the
+    // pairing leaves both its own date and the date after it unpaired.
+    expect(rNaN.betaN).toBe(62);
     expect(rNaN.beta).toBeNull(); // a NaN-contaminated factor ⇒ no honest β
     expect(rNaN.projectedImpact).toBeNull();
     // The VaR side is over the clean portfolio series — unaffected by the BTC NaN.
@@ -422,7 +448,7 @@ describe("computeScenarioStress — degenerate null paths (em-dash source)", () 
     const d = manyDays(64);
     const port: DP[] = d.map((date, i) => ({ date, value: i % 2 === 0 ? 0.01 : -0.006 }));
     const btc: DP[] = d.map((date) => ({ date, value: 0.003 })); // constant → var≈0
-    const r = computeScenarioStress(port, btc, { shock: -0.3 });
+    const r = computeScenarioStress(port, closes(btc), { shock: -0.3 });
     expect(r.betaN).toBe(64);
     expect(r.beta).toBeNull();
     expect(r.projectedImpact).toBeNull();
@@ -462,7 +488,7 @@ describe("computeScenarioStress — confidence is locked, label cannot drift (WR
     const btc: DP[] = d.map((date, i) => ({ date, value: i % 2 === 0 ? 0.01 : -0.008 }));
     const idx = Math.floor((1 - VAR_CONFIDENCE) * SORTED.length); // floor(0.05·20)=1
     const expectedVaR = [...SORTED].sort((a, b) => a - b)[idx]; // -0.060
-    const r = computeScenarioStress(port, btc);
+    const r = computeScenarioStress(port, closes(btc));
     expect(r.var).toBeCloseTo(expectedVaR, 12);
     expect(r.var).toBe(-0.06);
   });

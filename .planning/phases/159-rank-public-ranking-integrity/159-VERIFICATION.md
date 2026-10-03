@@ -51,6 +51,7 @@ human_verification:
 **Phase Goal:** Published percentile ranks and anonymous public reads reflect only computed, honestly-annualized analytics — and a resubmit race cannot corrupt a session's classification.
 **Verified:** 2026-08-21 (branch `feat/v1.20-phase-159`, 47 commits over `7430546d`, HEAD `7c578077`)
 **Status:** human_needed (all automated checks pass; 7 human items, none blocking merge mechanics)
+> ⭐ **Note 2026-09-30:** the frontmatter `status: passed` (closed 2026-09-12) is authoritative. This body line and the "Overall: human_needed" line below record the 2026-08-21 verdict and are kept as lineage.
 **Re-verification:** No — initial verification
 
 Verified against the tree at HEAD, not the SUMMARYs. Two anti-vacuity drills re-run independently by this verifier (neuter → RED observed → restore → GREEN, backup-copy method, tree confirmed clean after).
@@ -139,7 +140,7 @@ Orchestrator-run, accepted (spot-re-runs by this verifier agreed everywhere they
 ## Additional Findings (non-blocking)
 
 - **⚠ 159-VALIDATION.md is an unfilled template** (`status: draft`, `nyquist_compliant: false`, placeholder rows). Honest — nothing false in it — but the phase shipped without a completed Nyquist validation contract. The per-task TDD ledgers in the SUMMARYs substantially cover the intent; noting for audit-milestone (§5.5 will read this as NOT-VALIDATED).
-- **159-01 has no SUMMARY** — expected: it stopped at the orchestrator-discharged checkpoint; the census artifact IS the deliverable and exists with real PROD numbers.
+- **159-01 has no SUMMARY** — expected: it stopped at the orchestrator-discharged checkpoint; the census artifact IS the deliverable and exists with real PROD numbers. ⭐ *Superseded 2026-09-30: `159-01-SUMMARY.md` now exists, written retrospectively by founder decision.*
 - **No debt markers** (TBD/FIXME/XXX/HACK/PLACEHOLDER) added by any phase diff to the nine primary modified files.
 - Coincidental-reliance check on the drilled pins: none flagged — both drills red on the exact mechanism the truth names (status predicate; CAS predicate), not on fixture accidents.
 

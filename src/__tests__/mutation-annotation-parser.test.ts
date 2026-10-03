@@ -1034,8 +1034,33 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
     // (449 / 464) this branch added 4 arms / 12 steps (L1-L4) and origin/main added
     // 38 arms / 28 steps (test_api_keys_account_identity.sql and 6f CCXT); the two
     // sides touch disjoint gate files. MEASURED on the merged tree by this file's own run.
-    expect(armsSeen).toBe(491);
-    expect(stepsSeen).toBe(504);
+    // ⭐ CURRENCY 2026-09-27 (Phase 164.9.3 CLAIMPAIR, plan 05): `armsSeen` 491 -> 506
+    // and `stepsSeen` 504 -> 534. FIFTEEN new arms, all in the NEW gate
+    // supabase/tests/test_claim_compute_jobs_failed_retry_pending_pair.sql; each layered
+    // twin carries TWO `find`-bearing steps (the production edit, then the body's
+    // self-verify anchor stood down), so the two pins move by different amounts.
+    // MEASURED: this file's own run read `expected 506 to be 491`, and the needle
+    // census below read `expected 534 to be 504`.
+    // ⭐ CURRENCY 2026-09-27 (Phase 164.9.3 CLAIMPAIR, review round 1, WR-01): `armsSeen`
+    // 506 -> 507 and `stepsSeen` 534 -> 536: ONE new arm, W-LOWTWIN, in the same gate
+    // file, with one layered twin of two `find` steps. MEASURED: this file's own run read
+    // `expected 507 to be 506`, and the needle census below read `expected 536 to be 534`.
+    // ⭐ CURRENCY 2026-09-27 (Phase 164.9.3 CLAIMPAIR, review round 3, WR-01 / D-11): `armsSeen`
+    // 507 -> 509 and `stepsSeen` 536 -> 540: TWO new arms, W-C39SIB and W-C39INTRO, in the
+    // same gate file, each with one layered twin of two `find` steps. MEASURED: this file's own
+    // run read `expected 509 to be 507`, and the needle census below read `expected 540 to be 536`.
+    // ⭐ CURRENCY 2026-09-27 (merge of origin/main into Phase 167.1.2 PR C1): `armsSeen`
+    // 509 -> 513 and `stepsSeen` 540 -> 544, C1's four D-18 arms (one `edit` step each)
+    // joining CLAIMPAIR's count. MEASURED on the merged tree.
+    // ⭐ CURRENCY 2026-09-29 (Phase 167.1.2 PR C2, review fix B, WR-04): `armsSeen` 513 -> 545 and
+    // `stepsSeen` 544 -> 595: plan 12's test_refresh_fanout_zero_snapshot_bootstrap.sql (32 arms,
+    // 51 file steps) reached this branch without its census commits. MEASURED: this file's run
+    // read `expected 545 to be 513`, then `expected 595 to be 544`.
+    // ⭐ CURRENCY 2026-10-01 (Phase 164.9.3.2 DEFER40001, plan 06): `armsSeen` 545 -> 553 and `stepsSeen` 595 -> 611: the NEW gate test_compute_job_fence_errcode.sql (8 arms, each twin carrying two `edit` steps with a `find`, 16 file steps). MEASURED: this file's run read `expected 553 to be 545`, then `expected 611 to be 595`.
+// ⭐ CURRENCY 2026-10-02 (Phase 164.9.3.2.1 ENQ40001, plan 03): `armsSeen` 553 -> 555 and `stepsSeen` 611 -> 614: the NEW gate test_enqueue_race_loss_40001.sql (2 arms; R1's twin carries two `edit` steps with a `find`, R2's one, 3 file steps). MEASURED: this file's run read `expected 555 to be 553`, then `expected 614 to be 611`.
+    // ⭐ CURRENCY 2026-10-02 (Phase 164.9.3.2.1 ENQ40001, review fix WR-01): `armsSeen` 555 -> 556 and `stepsSeen` 614 -> 615: arm R3 in test_enqueue_race_loss_40001.sql, whose twin carries one `edit` step with a `find`. MEASURED: this file's run read `expected 556 to be 555`, then `expected 615 to be 614`.
+    expect(armsSeen).toBe(556);
+    expect(stepsSeen).toBe(615);
     // ⚠️ EXPLICIT TIMEOUT, ADDED 2026-09-11 (phase 164.8.6, plan 05) — and it is
     // the FIRST per-test timeout in this suite, so it is a deliberate new shape
     // rather than a local convention being followed. MEASURED, not guessed:
@@ -1937,7 +1962,21 @@ describe("GRAMMAR rule 3c — an identity is READ only where the RUNNER's gate r
     // 491 -> 492, one new `edit` step, one needle. MEASURED: `expected 492 to be 491`.
     // ⭐ CURRENCY 2026-09-26 (merge of origin/main into Phase 164.5.2 BRIDGELOCK): 504, moving WITH
     // `stepsSeen`: 464 + 12 (this branch) + 28 (origin/main), one needle each.
-    expect(needles.length).toBe(504);
+    // ⭐ CURRENCY 2026-09-27 (Phase 164.9.3 CLAIMPAIR, plan 05): 504 -> 534, moving WITH
+    // `stepsSeen`: thirty new `find`-bearing steps (two per CLAIMPAIR twin), one
+    // needle each. MEASURED: `expected 534 to be 504` at the pre-move pin.
+    // ⭐ CURRENCY 2026-09-27 (Phase 164.9.3 CLAIMPAIR, review round 1, WR-01): 534 -> 536, one
+    // new twin of two steps. MEASURED: `expected 536 to be 534` at the pre-move pin.
+    // ⭐ CURRENCY 2026-09-27 (Phase 164.9.3 CLAIMPAIR, review round 3, WR-01 / D-11): 536 -> 540, two
+    // new twins of two steps each. MEASURED: `expected 540 to be 536` at the pre-move pin.
+    // ⭐ CURRENCY 2026-09-27 (merge into Phase 167.1.2 PR C1): 540 -> 544, moving WITH
+    // `stepsSeen`. MEASURED on the merged tree.
+    // ⭐ CURRENCY 2026-09-29 (Phase 167.1.2 PR C2, review fix B, WR-04): 544 -> 595, moving WITH
+    // `stepsSeen` (the 51 file steps of the plan 12 gate file). MEASURED: `expected 595 to be 544`.
+    // ⭐ CURRENCY 2026-10-01 (Phase 164.9.3.2 DEFER40001, plan 06): 595 -> 611, moving WITH `stepsSeen` (the 16 file steps of the fence-errcode gate). MEASURED: `expected 611 to be 595`.
+    // ⭐ CURRENCY 2026-10-02 (Phase 164.9.3.2.1 ENQ40001, plan 03): 611 -> 614, moving WITH `stepsSeen` (the 3 file steps of the enqueue race-loss gate). MEASURED: `expected 614 to be 611`.
+    // ⭐ CURRENCY 2026-10-02 (Phase 164.9.3.2.1 ENQ40001, review fix WR-01): 614 -> 615, moving WITH `stepsSeen` (R3's one file step). MEASURED: `expected 615 to be 614`.
+    expect(needles.length).toBe(615);
     expect(needles.filter((n) => /TEST\s+FAILED\s*\(/i.test(n))).toEqual([]);
   });
 });
@@ -2509,7 +2548,16 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // ⭐ CURRENCY 2026-09-26 (merge of origin/main into Phase 164.5.2 BRIDGELOCK): 78 -> 79. BOTH new
     // files are in the corpus (test_mark_rpc_bridge_advisory_lock.sql and
     // test_api_keys_account_identity.sql), so 77 + 1 + 1 = 79.
-    expect(corpus.filesTotal).toBe(79);
+    // ⭐ CURRENCY 2026-09-27 (Phase 164.9.3 CLAIMPAIR, plan 05): 79 -> 80. The one
+    // added is supabase/tests/test_claim_compute_jobs_failed_retry_pending_pair.sql, a
+    // NEW file (the gate for migration 20260927120000, fifteen arms), and the five
+    // classes still sum to it: annotated 53 + pending 0 + unreachable 27 + inert 0 +
+    // lane-blocked 0 = 80. MEASURED: this file's own run read `expected 80 to be 79`.
+    // ⭐ CURRENCY 2026-09-29 (Phase 167.1.2 PR C2, review fix B, WR-04): 80 -> 81, the plan 12 gate file.
+    // MEASURED off the full lane run: `coverage: files 54/81`.
+    // ⭐ CURRENCY 2026-10-01 (Phase 164.9.3.2 DEFER40001, plan 06): 81 -> 82, the fence-errcode gate file. MEASURED: this file's run read `expected 82 to be 81`, and the full lane run printed `coverage: files 55/82`.
+    // ⭐ CURRENCY 2026-10-02 (Phase 164.9.3.2.1 ENQ40001, plan 03): 82 -> 83, the enqueue race-loss gate file. MEASURED: this file's run read `expected 83 to be 82`, and the full lane run printed `coverage: files 56/83` (annotated 56 + pending 0 + unreachable 27 + inert 0 + lane-blocked 0 = 83).
+    expect(corpus.filesTotal).toBe(83);
     // ⚠️ CURRENCY 2026-09-05 (plan 164.4.1-03, the SECOND file move): MEASURED
     // `files 42/71`, the other 29 still printed by name (`unreachable:` 27 +
     // `lane-blocked:` 2). The one added is
@@ -2562,7 +2610,15 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // ⭐ CURRENCY 2026-09-26 (merge of origin/main into Phase 164.5.2 BRIDGELOCK): 51 -> 52, with the
     // denominator and the by-name list below, which carries BOTH new files.
     // MEASURED off the full lane run on the merged tree: `coverage: files 52/79`.
-    expect(corpus.filesAnnotated).toBe(52);
+    // ⭐ CURRENCY 2026-09-27 (Phase 164.9.3 CLAIMPAIR, plan 05): 52 -> 53, with the
+    // denominator and the by-name list below. The one added is
+    // supabase/tests/test_claim_compute_jobs_failed_retry_pending_pair.sql. MEASURED
+    // off the full lane run: `coverage: files 53/80`.
+    // ⭐ CURRENCY 2026-09-29 (Phase 167.1.2 PR C2, review fix B, WR-04): 53 -> 54, with the
+    // denominator and the by-name list below (test_refresh_fanout_zero_snapshot_bootstrap.sql).
+    // ⭐ CURRENCY 2026-10-01 (Phase 164.9.3.2 DEFER40001, plan 06): 54 -> 55, with the denominator and the by-name list below (test_compute_job_fence_errcode.sql).
+    // ⭐ CURRENCY 2026-10-02 (Phase 164.9.3.2.1 ENQ40001, plan 03): 55 -> 56, with the denominator and the by-name list below (test_enqueue_race_loss_40001.sql).
+    expect(corpus.filesAnnotated).toBe(56);
     expect(corpus.annotatedFiles).toEqual([
       "test_allocator_equity_derived_rls.sql",
       "test_allocator_equity_pre_terminus_flag.sql",
@@ -2591,6 +2647,11 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
       "test_api_keys_venue_identity_uniq.sql",
       "test_capital_ownership_allocation_guard.sql",
       "test_capital_ownership_column.sql",
+      // ⭐ ADDED 2026-09-27 (Phase 164.9.3 CLAIMPAIR, plan 05) — the FIFTY-THIRD
+      // annotated file: a due failed_retry job beside a pending twin of the same
+      // (kind, partition) never makes a claim entry point raise 23505 (15 arms).
+      "test_claim_compute_jobs_failed_retry_pending_pair.sql",
+      "test_compute_job_fence_errcode.sql",
       "test_compute_jobs_error_kind_copy_parity.sql",
       "test_create_wizard_strategy_for_key.sql",
       // ⭐ ADDED 2026-09-24 (Phase 164.6 review fix round 1) — the FIFTIETH
@@ -2603,6 +2664,7 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
       "test_csv_finalize_double_submit.sql",
       "test_derive_allocator_keys_fanout.sql",
       "test_enqueue_compute_job_dedupe_non_terminal.sql",
+      "test_enqueue_race_loss_40001.sql",
       "test_funding_fees_rls.sql",
       "test_get_published_trust_signals.sql",
       "test_get_verified_cohort_rank_gate.sql",
@@ -2622,6 +2684,7 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
       "test_prod_prober_cadence.sql",
       "test_profiles_privileged_columns_locked.sql",
       "test_reconcile_dropped_enqueue_sweep.sql",
+      "test_refresh_fanout_zero_snapshot_bootstrap.sql",
       "test_resync_retry_single_job.sql",
       "test_retention_orphaned_running.sql",
       "test_scenario_downgrade_sweep.sql",
@@ -3043,7 +3106,17 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // ⭐ CURRENCY 2026-09-26 (merge of origin/main into Phase 164.5.2 BRIDGELOCK): 78 -> 79 and 51 -> 52.
     // BOTH added gate files. MEASURED off the full lane run on the merged tree:
     // annotated 52 + pending 0 + unreachable 27 + inert 0 + lane-blocked 0 = 79.
-    expect(corpus.filesTotal).toBe(79);
+    // ⭐ CURRENCY 2026-09-27 (Phase 164.9.3 CLAIMPAIR, plan 05): 79 -> 80. The one
+    // added is supabase/tests/test_claim_compute_jobs_failed_retry_pending_pair.sql, a
+    // NEW file (the gate for migration 20260927120000, fifteen arms), and the five
+    // classes still sum to it: annotated 53 + pending 0 + unreachable 27 + inert 0 +
+    // lane-blocked 0 = 80. MEASURED: this file's own run read `expected 80 to be 79`.
+    // ⭐ CURRENCY 2026-09-29 (Phase 167.1.2 PR C2, review fix B, WR-04): 80 -> 81, the plan 12 gate file.
+    // MEASURED off the full lane run: annotated 54 + pending 0 + unreachable 27 + inert 0 +
+    // lane-blocked 0 = 81.
+    // ⭐ CURRENCY 2026-10-01 (Phase 164.9.3.2 DEFER40001, plan 06): 81 -> 82, the fence-errcode gate file. MEASURED off the full lane run: annotated 55 + pending 0 + unreachable 27 + inert 0 + lane-blocked 0 = 82.
+    // ⭐ CURRENCY 2026-10-02 (Phase 164.9.3.2.1 ENQ40001, plan 03): 82 -> 83, the enqueue race-loss gate file. MEASURED: this file's run read `expected 83 to be 82`, and the full lane run printed `coverage: files 56/83` (annotated 56 + pending 0 + unreachable 27 + inert 0 + lane-blocked 0 = 83).
+    expect(corpus.filesTotal).toBe(83);
     expect(corpus.laneBlockedFiles).toHaveLength(0);
     // ⛔ A LENGTH beside an AIM, not instead of one. `toHaveLength(0)` on a class
     // that stopped being computed is indistinguishable from `toHaveLength(0)` on
@@ -3056,7 +3129,11 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // ⭐ 50 -> 51 (Phase 164.5.2 BRIDGELOCK plan 03, test_mark_rpc_bridge_advisory_lock.sql).
     // ⭐ 50 -> 51 (Phase 167.1.2 plan 03, test_api_keys_account_identity.sql).
     // ⭐ 51 -> 52 (merge of origin/main into Phase 164.5.2: both new files).
-    expect(corpus.annotatedFiles).toHaveLength(52);
+    // ⭐ 52 -> 53 (Phase 164.9.3 CLAIMPAIR plan 05, test_claim_compute_jobs_failed_retry_pending_pair.sql).
+    // ⭐ 53 -> 54 (Phase 167.1.2 PR C2 review fix B, WR-04: test_refresh_fanout_zero_snapshot_bootstrap.sql).
+    // ⭐ CURRENCY 2026-10-01 (Phase 164.9.3.2 DEFER40001, plan 06): 54 -> 55 (test_compute_job_fence_errcode.sql).
+    // ⭐ CURRENCY 2026-10-02 (Phase 164.9.3.2.1 ENQ40001, plan 03): 55 -> 56 (test_enqueue_race_loss_40001.sql).
+    expect(corpus.annotatedFiles).toHaveLength(56);
   });
 
   it("the five classes PARTITION the corpus, checked against an INDEPENDENT derivation", () => {

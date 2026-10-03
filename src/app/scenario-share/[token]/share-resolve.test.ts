@@ -1100,3 +1100,41 @@ describe("resolveSharedScenario — returns_series resolution (SCEN-01)", () => 
     expect(result.portfolioDaily[0].value).toBeCloseTo(direct[0].value, 10);
   });
 });
+
+// Phase 167.1.2 SC-4 caller walk: a shared draft reads its weights from
+// `weightOverrides` and defaults an absent one to 0, so a draft saved with no
+// weight at all has zero mass. The public page must receive the engine's honest
+// empty shape (the same one an empty-`addedStrategies` draft already carries),
+// never a flat 0% curve an anonymous recipient would read as a real result.
+describe("resolveSharedScenario — [167.1.2 SC-4] zero weight mass", () => {
+  it("a draft whose every weight is 0 → kind 'ok' with n 0, null metrics, empty series (today: a flat 0% curve)", () => {
+    const zeroWeightDraft = {
+      ...okDraft(),
+      weightOverrides: { [STRAT_A]: 0, [STRAT_B]: 0 },
+    };
+    const result = resolveSharedScenario({
+      name: "No weight",
+      draft: zeroWeightDraft,
+      schema_version: 2,
+      series: okSeriesRows(),
+    });
+    expect(result.kind).toBe("ok");
+    if (result.kind !== "ok") return;
+    expect(result.metrics.n).toBe(0);
+    expect(result.metrics.equity_curve).toEqual([]);
+    expect(result.metrics.twr).toBeNull();
+    expect(result.metrics.sharpe).toBeNull();
+    expect(result.portfolioDaily).toEqual([]);
+    // No NaN anywhere in the numeric fields the page renders.
+    for (const v of [
+      result.metrics.twr,
+      result.metrics.cagr,
+      result.metrics.volatility,
+      result.metrics.sharpe,
+      result.metrics.sortino,
+      result.metrics.max_drawdown,
+    ]) {
+      expect(v === null || Number.isFinite(v)).toBe(true);
+    }
+  });
+});

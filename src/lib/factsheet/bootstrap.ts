@@ -1,4 +1,4 @@
-import { cumEq, drawdowns } from "./compute";
+import { arithmeticUnderwater, cumEq, drawdowns } from "./compute";
 import { sharpe as sharpeRatio } from "@/lib/return-stats";
 
 /** Pre-aggregated histogram of the resample distribution — small payload
@@ -49,7 +49,15 @@ export type BootstrapCISummary = {
  */
 export const MIN_SHARPE_RESAMPLES = 40;
 
-export function bootstrapCI(rets: number[], n_resamples = 2000, block_len = 5, seed = 42, periodsPerYear = 252): BootstrapCISummary {
+export function bootstrapCI(
+  rets: number[],
+  n_resamples = 2000,
+  block_len = 5,
+  seed = 42,
+  periodsPerYear = 252,
+  /** Phase 169.1 (D-34): the headline's cumulative method; it moves only the Max DD. Default geometric. */
+  cumulativeMethod: "geometric" | "arithmetic" = "geometric",
+): BootstrapCISummary {
   const n = rets.length;
   // Only resamples that HAVE a Sharpe (founder decision D7, 2026-09-26). A
   // resample with no dispersion (a sparse-trading series can draw all zeros)
@@ -72,13 +80,13 @@ export function bootstrapCI(rets: number[], n_resamples = 2000, block_len = 5, s
       }
       filled += take;
     }
-    const stats = headlineStats(resampled, periodsPerYear);
+    const stats = headlineStats(resampled, periodsPerYear, cumulativeMethod);
     if (Number.isFinite(stats.sharpe)) sharpes.push(stats.sharpe);
     if (Number.isFinite(stats.sortino)) sortinos.push(stats.sortino);
     maxDds[k] = stats.max_dd;
   }
 
-  const point = headlineStats(rets, periodsPerYear);
+  const point = headlineStats(rets, periodsPerYear, cumulativeMethod);
   return {
     sharpe: {
       point: point.sharpe,
@@ -129,7 +137,11 @@ function histogram(xs: number[], bins: number): BootstrapHistogram {
   return { lo, hi, bins: counts };
 }
 
-function headlineStats(rets: number[], periodsPerYear = 252): { sharpe: number; sortino: number; max_dd: number } {
+function headlineStats(
+  rets: number[],
+  periodsPerYear = 252,
+  cumulativeMethod: "geometric" | "arithmetic" = "geometric",
+): { sharpe: number; sortino: number; max_dd: number } {
   const n = rets.length;
   if (n === 0) return { sharpe: NaN, sortino: NaN, max_dd: 0 };
   let sum = 0;
@@ -151,8 +163,11 @@ function headlineStats(rets: number[], periodsPerYear = 252): { sharpe: number; 
   // No losing day means no Sortino: NaN, an absence, as `compute` gives (D7,
   // review round 2 HI-02), never a fabricated 0.
   const sortino = downDev > 0 ? (m * periodsPerYear) / downDev : NaN;
-  const eq = cumEq(rets);
-  const dd = drawdowns(eq);
+  // Phase 169.1 (D-34): the drawdown mirrors the headline's method, so an
+  // arithmetic composite's point Max DD is the running-sum trough its headline
+  // and equity chart show (compute()'s own `arithmeticUnderwater`), not the
+  // geometric one. Sharpe and Sortino above do not depend on the method.
+  const dd = cumulativeMethod === "arithmetic" ? arithmeticUnderwater(rets) : drawdowns(cumEq(rets));
   let maxDd = 0;
   for (let i = 0; i < dd.length; i++) if (dd[i] < maxDd) maxDd = dd[i];
   return { sharpe, sortino, max_dd: maxDd };

@@ -31,6 +31,11 @@ import { seamErrorCode } from "@/lib/seam-discriminator";
 // `Number("Wed, 21 Oct…")` is NaN, and either fed to a wait is the
 // thundering-herd shape this leaf exists to make unrepresentable.
 import { parseRetryAfterSeconds } from "@/lib/retry/retry-after";
+import {
+  readCredentialInput,
+  CREDENTIAL_KEY_INPUT_PROPS,
+  CREDENTIAL_SECRET_INPUT_PROPS,
+} from "@/lib/credential-input";
 
 /**
  * ConnectKeyStep renders the exchange selector, the inline permission
@@ -332,6 +337,13 @@ const KNOWN_CREATE_WITH_KEY_CODES: ReadonlySet<WizardErrorCode> =
     // roster too` describe in the same invariant file derives the 409 emitters
     // as their own population and reds when this row is missing (observed).
     "KEY_ORPHANED",
+    // 167.1.2 REVIEW WR-04 — the race arm's answer when the live key on this
+    // account has no strategy row but a composite (`strategy_keys`) uses it,
+    // where `KEY_ORPHANED`'s "no strategy uses it" is false. Composite
+    // membership only (REVIEW-R2 CR-01). Admitted HERE IN THE SAME
+    // COMMIT the route starts emitting it, for the reason the rows above state;
+    // the 409 describe in `wizardErrors.invariant.test.ts` gained it too.
+    "KEY_VENUE_ALREADY_CONNECTED",
     // 162-05 / D-162-3 — the use-existing-key arm's refusal when no LIVE key of
     // the caller's matches the `reuse_api_key_id` it was sent. Admitted HERE IN
     // THE SAME COMMIT the route starts emitting it, for the reason the two rows
@@ -1844,9 +1856,9 @@ export function ConnectKeyStep({
         <Input
           label={keyLabel}
           value={apiKey}
-          onChange={(e) => setApiKey(e.target.value)}
+          onChange={(e) => setApiKey(readCredentialInput(e))}
           placeholder={keyPlaceholder}
-          autoComplete="off"
+          {...CREDENTIAL_KEY_INPUT_PROPS}
           required
         />
 
@@ -1875,9 +1887,9 @@ export function ConnectKeyStep({
               id="wizard-api-secret"
               type={showSecret ? "text" : "password"}
               value={apiSecret}
-              onChange={(e) => setApiSecret(e.target.value)}
+              onChange={(e) => setApiSecret(readCredentialInput(e))}
               placeholder={secretPlaceholder}
-              autoComplete="off"
+              {...CREDENTIAL_SECRET_INPUT_PROPS}
               required
               className="mt-1 w-full rounded-md border border-border bg-white px-3 py-2 text-body text-text-primary placeholder:text-text-muted focus:border-accent focus:outline-none"
             />
@@ -1898,7 +1910,9 @@ export function ConnectKeyStep({
               value={passphrase}
               onChange={(e) => setPassphrase(e.target.value)}
               placeholder={passphrasePlaceholder}
-              autoComplete="off"
+              {...(passphraseSecret
+                ? CREDENTIAL_SECRET_INPUT_PROPS
+                : CREDENTIAL_KEY_INPUT_PROPS)}
               required
             />
             <p className="mt-1 text-micro text-text-muted">{passphraseHelper}</p>

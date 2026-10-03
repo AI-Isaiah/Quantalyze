@@ -533,3 +533,62 @@ describe("HoldingsTable — note icon column + expandable sub-row (08-04 / MANAG
     expect(icon.getAttribute("aria-expanded")).toBe("false");
   });
 });
+
+/**
+ * Phase 169 D-50 (founder UAT 2026-09-27) — the legacy Holdings table rendered
+ * its entry price through the whole-dollar amount formatter (so $0.42 read "$0")
+ * and its P&L through a private formatter that picked the sign before rounding
+ * to whole dollars (so +$0.37 read "+$0" and -0.0001 read "−$0"). Prices keep
+ * their precision, P&L shows cents with the sign of the rounded value, and
+ * value (an amount) stays whole dollars. Every expected string is a typed
+ * literal.
+ */
+describe("[169 D-50] HoldingsTable money cells", () => {
+  // Column order: Venue / Symbol, Type, Quantity, Entry price, Value (USD),
+  // Unrealized P&L, Notes.
+  const ENTRY = 3;
+  const VALUE = 4;
+  const PNL = 5;
+
+  function rowCells(container: HTMLElement): HTMLTableCellElement[] {
+    return Array.from(
+      container.querySelector("tbody")!.querySelectorAll("tr")[0].querySelectorAll("td"),
+    );
+  }
+
+  function renderOne(overrides: Partial<HoldingRow>) {
+    return render(
+      <HoldingsTable
+        holdings={[makeHolding(overrides)]}
+        showRevoked={true}
+        onShowRevokedChange={() => {}}
+      />,
+    );
+  }
+
+  it("a sub-dollar entry price renders at 4 significant digits; value stays whole-dollar", () => {
+    const { container } = renderOne({ entry_price: 0.4213, value_usd: 1_234.56 });
+    const cells = rowCells(container);
+    expect(cells[ENTRY].textContent).toBe("$0.4213");
+    expect(cells[VALUE].textContent).toBe("$1,235");
+  });
+
+  it("a sub-dollar P&L keeps its cents and its sign, and the cell stays uncoloured", () => {
+    const { container } = renderOne({ unrealized_pnl_usd: 0.37 });
+    const cell = rowCells(container)[PNL];
+    expect(cell.textContent).toBe("+$0.37");
+    expect(cell.getAttribute("style")).toBeNull();
+  });
+
+  it("a P&L that rounds to zero reads $0.00 with no sign — never −$0", () => {
+    const { container } = renderOne({ unrealized_pnl_usd: -0.0001 });
+    expect(rowCells(container)[PNL].textContent).toBe("$0.00");
+  });
+
+  it("a null entry price and a null P&L stay the em-dash", () => {
+    const { container } = renderOne({ entry_price: null, unrealized_pnl_usd: null });
+    const cells = rowCells(container);
+    expect(cells[ENTRY].textContent).toBe("—");
+    expect(cells[PNL].textContent).toBe("—");
+  });
+});

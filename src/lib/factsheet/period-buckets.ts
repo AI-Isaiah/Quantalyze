@@ -1,17 +1,27 @@
 import type { DailyHeatmapYear, MonthlyReturnsRow } from "./types";
 
 /**
- * Aggregate daily returns into a year × month matrix of compounded returns,
- * plus a YTD compounded total per row. Used by the Monthly Returns heatmap.
+ * Aggregate daily returns into a year × month matrix of monthly returns, plus
+ * a YTD total per row. Used by the Monthly Returns heatmap.
  *
  * Returns one row per calendar year present in `dates`, ascending. Months
  * with zero observations are stored as `null` so the heatmap can render a
  * neutral cell instead of fabricating a 0% return.
+ *
+ * `cumulativeMethod` (Phase 169.1 D-31): geometric (the default) compounds each
+ * cell and the YTD; ARITHMETIC sums them, mirroring the summed monthly grid of
+ * `compute_all_metrics`'s `simple` arm, so a year's cells add up to its YTD and
+ * the YTD equals compute()'s summed `yearly` figure.
  */
-export function monthlyReturnsMatrix(rets: number[], dates: string[]): MonthlyReturnsRow[] {
+export function monthlyReturnsMatrix(
+  rets: number[],
+  dates: string[],
+  cumulativeMethod: "geometric" | "arithmetic" = "geometric",
+): MonthlyReturnsRow[] {
   if (rets.length === 0 || dates.length !== rets.length) return [];
+  const arithmetic = cumulativeMethod === "arithmetic";
 
-  // Accumulator: year → 12-slot product accumulator (null = no obs yet).
+  // Accumulator: year → 12-slot accumulator (null = no obs yet).
   const byYear = new Map<string, { byMonth: (number | null)[]; ytd: number | null }>();
   for (let i = 0; i < rets.length; i++) {
     const yr = dates[i].slice(0, 4);
@@ -24,8 +34,13 @@ export function monthlyReturnsMatrix(rets: number[], dates: string[]): MonthlyRe
       byYear.set(yr, row);
     }
     const prev = row.byMonth[mIdx];
-    row.byMonth[mIdx] = prev == null ? r : (1 + prev) * (1 + r) - 1;
-    row.ytd = row.ytd == null ? r : (1 + row.ytd) * (1 + r) - 1;
+    if (arithmetic) {
+      row.byMonth[mIdx] = prev == null ? r : prev + r;
+      row.ytd = row.ytd == null ? r : row.ytd + r;
+    } else {
+      row.byMonth[mIdx] = prev == null ? r : (1 + prev) * (1 + r) - 1;
+      row.ytd = row.ytd == null ? r : (1 + row.ytd) * (1 + r) - 1;
+    }
   }
 
   return Array.from(byYear.entries())

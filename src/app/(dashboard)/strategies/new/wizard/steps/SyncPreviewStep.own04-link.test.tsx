@@ -238,6 +238,42 @@ function compositeAnalyticsRow(): Record<string, unknown> {
   };
 }
 
+/**
+ * 167.1.2 C3 fix F (SFH-C3R2-X1 sweep) — the composite series read is an id
+ * keyset drain now (`drainById`). This fake serves it the way PostgREST does:
+ * ids assigned by seed position, the `id > cursor` filter honoured, rows cut
+ * to `.limit()` AND to a 1000-row server cap (`max_rows`), whatever the
+ * client asked for.
+ */
+const SERVER_MAX_ROWS = 1000;
+function pagedSeries(
+  rows: ReadonlyArray<{ date: string; daily_return: number }>,
+) {
+  const table = rows.map((r, i) => ({ id: i + 1, ...r }));
+  let afterId: number | null = null;
+  let limitN = Number.POSITIVE_INFINITY;
+  const self = {
+    eq: () => self,
+    gt: (_column: string, value: number) => {
+      afterId = value;
+      return self;
+    },
+    order: () => self,
+    limit: (n: number) => {
+      limitN = n;
+      return self;
+    },
+    then: (resolve: (v: { data: unknown[]; error: null }) => void) =>
+      resolve({
+        data: table
+          .filter((r) => afterId === null || r.id > afterId)
+          .slice(0, Math.min(limitN, SERVER_MAX_ROWS)),
+        error: null,
+      }),
+  };
+  return self;
+}
+
 function installCompositeSupabaseMock(pollStatus = "complete_with_warnings") {
   const result = (data: unknown, count = 0) => ({
     eq: () => result(data, count),
@@ -294,8 +330,8 @@ function installCompositeSupabaseMock(pollStatus = "complete_with_warnings") {
         if (table === "strategy_keys" && cols.includes("api_keys(")) {
           return result(DEFAULT_MEMBERS, 0);
         }
-        if (table === "csv_daily_returns" && cols === "date, daily_return") {
-          return result(DEFAULT_SERIES, 0);
+        if (table === "csv_daily_returns" && cols === "id, date, daily_return") {
+          return pagedSeries(DEFAULT_SERIES);
         }
         if (
           table === "strategies" &&
