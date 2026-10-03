@@ -219,7 +219,7 @@ a failure fails the aggregate rather than passing quietly:
 - **`sql-mutation`** — mutates every SQL gate arm carrying a `RED-UNDER` annotation, asserts
   the file goes RED with that arm named, restores, asserts GREEN. Exits 1 on an annotation that
   does not bite, on coverage below a ratchet floor pinned at the measured value, on more waived
-  arms than `WAIVED_CEILING` in `scripts/mutation-runner/run.mjs`, and when the runner's two
+  arms than `WAIVED_CEILING` in `scripts/mutation-floors.mjs`, and when the runner's two
   independent arm tallies (`arms:` vs `lane-invocations:`) disagree. Runs on its own throwaway
   PostgreSQL cluster (`scripts/pg-lane/run.sh`), never against shared TEST — the lane carries
   `shared_preload_libraries=pg_cron` (Phase 164.4.1, +0.009 s/lane), so pg_cron gates run there.
@@ -263,8 +263,10 @@ can red a PR, never turn a real drift green; re-run the check once both writers 
 ⛔ **THE NUMBERS ARE NOT WRITTEN HERE ANY MORE, AND THAT IS THE FIX.** Run this:
 
 ```bash
-grep -nE '^export const (FILES_FLOOR|ARMS_FLOOR|WAIVED_CEILING)' scripts/mutation-runner/run.mjs
+grep -nE '^export const (FILES_FLOOR|ARMS_FLOOR|WAIVED_CEILING)' scripts/mutation-floors.mjs
 ```
+
+⭐ 2026-10-03 (Phase 164.9.6, D-10): the floors moved to scripts/mutation-floors.mjs, outside the runner directory, so raising one is not a mutation-machinery change on a push to main; on a pull request it still is.
 
 **Why the table that stood here was deleted rather than corrected a fourth time.** This section
 carried a `constant | shipped value | line` table, and it went stale FOUR times:
@@ -302,7 +304,7 @@ independent tallies AGREE) · `lane-blocked: 0 file(s)` · `lane-probe: pg_cron 
 run) + 0 pending = 73.
 
 ⛔ **Read `FILES_FLOOR`, `ARMS_FLOOR` and `WAIVED_CEILING` by SYMBOL from
-`scripts/mutation-runner/run.mjs` — never from a number restated in this file.** Prose and
+`scripts/mutation-floors.mjs` — never from a number restated in this file.** Prose and
 constant have diverged here before (`ARMS_FLOOR` prose said 380, shipped value was 384); the
 dated record of that correction is in `docs/sql-gate-lineage.md`.
 
