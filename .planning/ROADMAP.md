@@ -129,7 +129,7 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 164.9.3.2.1: ENQ40001 — the enqueue race-loss raise (SQLSTATE 40001 in `_enqueue_compute_job_internal`) answers a PostgREST caller instead of re-running the call** (INSERTED) — verification: passed (completed 2026-10-02, PR #929, v0.118.1.5)
 - [x] **Phase 164.9.4: CIOFFMUTEX — `python` and `e2e-seeded` no longer queue on the shared-TEST advisory lock; each runs against a database private to its runner** (INSERTED) — verification: passed (completed 2026-10-03, PR #880, v0.119.0.0)
 - [x] **Phase 164.9.5: AUTOREDUMP — after a migration applies to PROD, the committed baseline is re-dumped and proposed automatically** (INSERTED) — verification: passed (completed 2026-10-02, PR #875, v0.106.0.0; first bot re-dump PR #920)
-- [ ] **Phase 164.9.6: SUBSETMAIN — a push to main runs only its PR's changed SQL gates; a nightly job runs the full corpus and enforces the floors** (INSERTED 2026-10-03) — not yet planned
+- [ ] **Phase 164.9.6: SUBSETMAIN — a push to main runs only its PR's changed SQL gates; a nightly job runs the full corpus and enforces the floors** (INSERTED 2026-10-03) — planned 2026-10-03, 5 plans in 4 waves
 - [ ] **Phase 164.9.7: TRUNCATEREVOKE — anon and authenticated no longer hold TRUNCATE on public tables** (INSERTED 2026-10-03) — not yet planned
 - [x] **Phase 165: DEPS — The 9-PR dependabot campaign** - pandas `requirements.in` prerequisite commit FIRST, then one PR at a time in the research-verified order, full suite between each; #614 and #606 CLOSED with reasons — ⛔ RETIRED 2026-09-27 by founder decision ("Land as maintenance, retire the phases"): closed WITHOUT delivery as a phase; the dependabot PRs land one at a time as maintenance under the green rule.
 - [x] **Phase 165.1: PIPDEPS — the pip dependabot work lands with production pandas never downgraded** (INSERTED) — ⛔ RETIRED 2026-09-27 by founder decision ("Land as maintenance, retire the phases"): closed WITHOUT delivery as a phase; the dependabot PRs land one at a time as maintenance under the green rule.
@@ -3126,13 +3126,31 @@ Plans:
 
 ### Phase 164.9.6: SUBSETMAIN — a push to main runs only the SQL gate files its PR changed, and a nightly scheduled job runs the full mutation corpus and enforces FILES_FLOOR / ARMS_FLOOR; the split is printed on every run. Founder decision 2026-10-03 after sql-mutation crossed its 20-minute ceiling on push 98f04db16 (prior main runs 15.2-16.9 min); the timeout is never raised again. (INSERTED)
 
-**Goal:** [Urgent work - to be planned]
-**Requirements**: TBD
+**Goal:** A push to `main` mutates only the SQL gate files its PR changed, plus the gates whose `RED-UNDER-SETUP` loads a changed migration. A push that changes no mutation input does not mutate at all. A new nightly workflow runs the full corpus under its own 45-minute cap and is where the floors are enforced. Every run prints what it covered and why. The push job's 20-minute `timeout-minutes` stays a ceiling and is never raised.
+**Requirements**: SUBSETMAIN-01, SUBSETMAIN-02, SUBSETMAIN-03, SUBSETMAIN-04, SUBSETMAIN-05, SUBSETMAIN-06
 **Depends on:** Phase 164.9
-**Plans:** 0 plans
+**Plans:** 5 plans (planned 2026-10-03; 4 waves: W1 01 ‖ 02 · W2 03 · W3 04 · W4 05)
+
+*The requirement IDs are phase-local, derived from CONTEXT D-01 … D-12. No REQUIREMENTS.md IDs are assigned to this phase. Each ID is defined by the Success Criterion of the same number below.*
+
+⛔ **FOUNDER OVERRIDE, recorded here AND in CONTEXT (D-09, 2026-10-03).** On a `push` to `main` ONLY, a pushed range that changes no gate file, no migration and no mutation machinery gets the named verdict `no mutation input changed`. The job prints it and exits green without booting the lane. This is a scoped exception to the 164.4.2 vacuity fence ("never an empty scope read as a pass"). Pull requests keep the fence unchanged. The nightly full run is the backstop.
+⚠️ **What this phase does NOT close (Research Pitfall 3).** Every FULL fallback on `main` still runs under the 20-minute ceiling: a dispatch, a direct or multi-commit push, a machinery change, a changed unannotated gate file, and a migration-only push that no gate loads (FULL under literal D-09). The phase narrows the set of FULL pushes. It does not remove it.
+⚠️ **D-03 consequence, corrected (research, measured).** The lane applies only a gate's setup list plus the gate. So "gates whose setup loads the migration" is EXACT for what the lane can observe, and the nightly cannot see an unlisted migration either. The nightly's backstop value is runner-host drift and ARMS_FLOOR measured as real biting, not unlisted migrations.
+
+**Success Criteria** (what must be TRUE):
+1. **SUBSETMAIN-01 (D-09).** A single-PR-squash push to `main` whose range holds no gate file, migration or mutation machinery prints `scope: NONE` and a `scope-reason:` naming `no mutation input changed` with the changed-file count. It exits green without booting the lane. Proved by a self-test row, by the recorded range `98f04db16` dry-running to `sql_gate_mode=none`, and by vitest executing the real scope step across event/ref/mode combinations.
+2. **SUBSETMAIN-02 (D-01, D-03, D-04).** A single-PR-squash push that changes gates and/or migrations and no machinery mutates exactly the changed gates plus the gates whose setup loads a changed migration. Any doubt runs FULL with the reason printed: before-SHA absent, zero, forced, not an ancestor, not exactly one PR-merge commit, a git error, or a malformed setup list. The `sql-mutation` subset refusal is widened by exactly push-on-`refs/heads/main`. Proved by self-test rows, by real-history dry runs (`fd4d86cdf` gives a one-gate SUBSET), and by vitest executing the real assert step.
+3. **SUBSETMAIN-03 (D-10).** `FILES_FLOOR`, `ARMS_FLOOR` and `WAIVED_CEILING` live in `scripts/mutation-floors.mjs`. Every reader reads them there: the runner, the `ci.yml` assert step, the vitest ratchet, the threshold registry and CLAUDE.md's grep. On a push, the floors file is not machinery, and `ci.yml` is machinery only when its `sql-mutation` or `changed-paths` job section changed. On a pull request both stay machinery, so PR verdicts are unchanged. A scratch-repo self-test row shaped like 164.5.2.1 (migration + gate + floor raise + a `sql-tests`-only `ci.yml` edit) takes a SUBSET on push.
+4. **SUBSETMAIN-04 (D-02, D-07).** A `workflow_dispatch` always runs FULL. Floors are enforced on every FULL run, push fallback included. A SUBSET keeps its `scope: SUBSET k/N` line.
+5. **SUBSETMAIN-05 (D-08, D-12).** Every corpus run prints exactly one `scope-reason: <why>` line beside its untouched `scope:` line, on PR, push, dispatch and nightly runs alike. The assert step MEASURE_FAILs when the line is absent, duplicated or empty.
+6. **SUBSETMAIN-06 (D-05, D-06, D-11).** `.github/workflows/sql-mutation-nightly.yml` runs the full corpus on a schedule and on dispatch, with job `timeout-minutes: 45`, and prints its wall time. A red run fails the workflow AND opens a GitHub issue deduplicated by label, or comments on the open one, carrying the failing reading and the Railway-redeploy coupling D-11 accepts. Its steps are pinned byte-equal to `ci.yml`'s `sql-mutation` `run:` blocks. It holds no shared-TEST key.
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 164.9.6 to break down)
+- [ ] 164.9.6-01-PLAN.md — push-range derivation: a shared push-range lister, and the push arm of `sql-gate-subset.mjs` (none / SUBSET / FULL with reason, migration loaders, `ci.yml` section compare)
+- [ ] 164.9.6-02-PLAN.md — move the three floor constants, verbatim with their lineage, to `scripts/mutation-floors.mjs` and re-point every reader (D-10)
+- [ ] 164.9.6-03-PLAN.md — CI wiring: push-on-main SUBSET through `changed-paths` → mutate → assert, plus the mandatory `scope-reason:` line (D-04, D-12)
+- [ ] 164.9.6-04-PLAN.md — the D-09 scope step: `no mutation input changed` skips the lane on push-to-main only, fail-safe to booting it
+- [ ] 164.9.6-05-PLAN.md — `sql-mutation-nightly.yml` (45 min, wall time, red + deduped issue), its byte-equality parity pin, and CLAUDE.md
 
 ### Phase 164.9.1: JOBRPCTRUTH — the compute-job RPC surface does what its own comments say (INSERTED)
 
@@ -4782,7 +4800,7 @@ kept verbatim.
 | 164.9.3.2.1 ENQ40001 | 3/3 | Complete    | 2026-10-02 |
 | 164.9.4 CIOFFMUTEX | 12/12 | Complete    | 2026-10-03 |
 | 164.9.5 AUTOREDUMP | 9/9 | Complete — verification passed 2026-10-02 | v0.106.0.0 · #875 |
-| 164.9.6 SUBSETMAIN | 0/? | Queued — infra, ahead of 164.6.6, booked 2026-10-03 | - |
+| 164.9.6 SUBSETMAIN | 0/5 | Planned 2026-10-03 — infra, ahead of 164.6.6 and 164.5.2.1's PR | - |
 | 164.9.7 TRUNCATEREVOKE | 0/? | Queued — security, booked 2026-10-03 | - |
 | 164.10 BODYDRIFT | - | Closed by decision (c): the drift is real, measured and deliberately left | v0.79.1.1 · #824 |
 | 165. DEPS dependabot campaign | - | ⛔ RETIRED 2026-09-27 (founder) — not delivered as a phase; dependabot PRs land as maintenance | - |
