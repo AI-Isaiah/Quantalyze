@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.121.0.1] - 2026-10-03 — BASELINE: automated re-dump after the PROD apply of 26b041ce
+
+### Changed
+- `supabase/schema/baseline.sql` re-dumped from PRODUCTION by Supabase Migrate run `37126803648`, after the PROD apply of merge `26b041ce`: sha256 `a45dcc44…` → `2852a8c6…`.
+- Shape, old → new: tables 63 → 63, policies 155 → 155, function statements 125 → 125, distinct function names 123 → 123, data statements 0 → 0.
+- Migrations the dump newly carries, from the marker diff: `20261003120000_sync_status_bridge_residues.sql`.
+- `supabase/schema/BASELINE.md` gets the new `## Provenance` capture rows and a dated `### Regenerated 2026-10-03` section; `baseline-carried-migrations.txt` is regenerated from the merge tree; VERSION and package.json 0.121.0.0 → 0.121.0.1.
+- The gates on the composed tree, verbatim: `baseline-currency: carried=285 replay=0 marker-sha=match defects=0`, `baseline-content-drift: functions compared 125 — MATCH 122, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`, `baseline-content-drift: findings 0`.
+
+### Notes
+- The dump was taken read-only by the `redump-dump` job after the `apply` job of Supabase Migrate run `37126803648` succeeded, and this entry was composed by the `redump-pr` job. Run `37126803648` is the provenance anchor.
+- The "what it adds" judgment for each newly carried migration is a human one, so it is left to the reviewer. Every figure above is measured.
+
 ## [0.121.0.0] - 2026-10-03 — BRIDGERESIDUE: the strategy bridge closes the two 164.6.7 residues, takes the per-strategy lock itself, and holds the date on a row it keeps
 
 ⭐ **What changed for whoever reads this next.** `sync_strategy_analytics_status` (the bridge every
