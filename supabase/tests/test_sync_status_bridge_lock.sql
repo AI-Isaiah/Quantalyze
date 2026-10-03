@@ -70,6 +70,12 @@
 --       first. This is the behavioural proof that the bridge RE-ENTERS the
 --       RPC's lock (same tag) instead of taking a second one; the migration's
 --       verify block cannot assert the mark RPC bodies (see its VERIFY SCOPE).
+--       B2 also pins objid to the masked hashtext of the strategy id, so a
+--       bridge lock whose second key became a constant (one global bridge
+--       lock: correct, but every strategy queues behind every other) goes RED
+--       on B2. That bite was measured by hand at review-fix time (a constant
+--       second key, placement anchor stood down: B1 and B1-DIRECT green, B2
+--       the first failure). It is not separately twinned.
 --   The file order B1, B1-DIRECT, B2 is what makes each twin's FIRST failure
 --   its own arm.
 --
@@ -329,8 +335,9 @@ BEGIN
   END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_locks
                   WHERE pid = b_pid AND NOT granted AND locktype = 'advisory'
-                    AND classid = v_ns AND objsubid = 2) THEN
-    RAISE EXCEPTION 'TEST FAILED (B2): the direct bridge call is not waiting on the TWO-INTEGER advisory lock in the mark_compute_job_bridge namespace (classid = the namespace''s masked OID, objsubid = 2). The bridge takes a lock the mark RPCs do not hold, so a mark and a direct call do not share one lock: each RPC now holds two per-strategy locks, and the bridge''s lock no longer orders a direct call against the mark''s own pre-bridge work.';
+                    AND classid = v_ns AND objsubid = 2
+                    AND objid = (hashtext(s::text)::bigint & 4294967295)::oid) THEN
+    RAISE EXCEPTION 'TEST FAILED (B2): the direct bridge call is not waiting on the TWO-INTEGER advisory lock in the mark_compute_job_bridge namespace keyed on this strategy (classid = the namespace''s masked OID, objid = the masked hashtext of the strategy id, objsubid = 2). Either the bridge takes a lock the mark RPCs do not hold, or its second key is no longer the strategy id. In the first case a mark and a direct call do not share one lock: each RPC now holds two per-strategy locks, and the bridge''s lock no longer orders a direct call against the mark''s own pre-bridge work. In the second case the lock is no longer per-strategy, and every strategy''s bridge call queues behind every other strategy''s mark. The bridge takes a lock the mark RPCs do not hold, so a mark and a direct call do not share one lock: each RPC now holds two per-strategy locks, and the bridge''s lock no longer orders a direct call against the mark''s own pre-bridge work.';
   END IF;
 
   PERFORM dblink_exec('brl_a', 'COMMIT');
