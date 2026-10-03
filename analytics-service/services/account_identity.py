@@ -33,6 +33,18 @@ Contract of :func:`venue_account_id_from`:
 - ⛔ The value is an account identifier. Callers must never log it or put it in
   error copy. It leaves the service only as the ``venue_account_id`` field of
   the validate response.
+
+MT5 (debug session unstamped-venue-account-id, founder Option B, 2026-10-03).
+The poll stamper also stamps an MT5 key, from its login TEXT, which the poll's
+``Mt5Session`` already carries from the decrypted credentials
+(``Mt5Session.venue_account_id``, built by
+``services.mt5_validation.mt5_venue_account_id``, the helper rotate uses). No
+terminal call is made. An MT5 key connected before the ``venue_account_id``
+column (migration 20260812083206) was otherwise never stamped, so two live MT5
+keys on one broker account were invisible to the unique index and summed
+twice. MT5 is NOT in :data:`VENUES_WITH_ACCOUNT_ID`: that set names the ccxt
+venues whose validator responses carry an id, and other modules read it as
+such. sFOX stays unstamped (D-10).
 """
 
 from __future__ import annotations
@@ -59,6 +71,8 @@ __all__ = [
     "StampOutcome",
     "UNSTAMPED_ESCALATION_DAYS",
     "VENUES_WITH_ACCOUNT_ID",
+    "escalate_if_unchecked",
+    "escalate_session_build_failure",
     "read_venue_account_id",
     "stamp_account_identity",
     "venue_account_id_from",
@@ -70,6 +84,13 @@ logger = logging.getLogger("quantalyze.analytics")
 # on one of these that yields no id is venue schema drift, logged by the
 # validator (venue named, value never). sFOX and MT5 are deliberately absent.
 VENUES_WITH_ACCOUNT_ID: frozenset[str] = frozenset({"okx", "bybit", "binance", "deribit"})
+
+# MT5's identity is its login, read from the poll's own session, not from a
+# venue response, so it is stamped here without being in the set above.
+_MT5: Final = "mt5"
+
+# Every venue the poll stamps (and whose unstamped age escalates).
+_STAMPED_VENUES: Final = VENUES_WITH_ACCOUNT_ID | {_MT5}
 
 
 # The same cap as ``ValidateKeyResponseSchema.venue_account_id`` in
@@ -429,13 +450,29 @@ async def _mark_shared(
 async def _stamp(
     supabase: Any, key_row: Mapping[str, Any], exchange: Any
 ) -> StampOutcome:
+    """Stamp one key, or mark it as sharing an account. May raise; the caller
+    :func:`stamp_account_identity` is the boundary.
+
+    A ccxt key's id comes from ONE venue call (:func:`read_venue_account_id`);
+    an MT5 key's from the login text its poll session carries
+    (:func:`_mt5_account_id`, no terminal call). Both then share the one UPDATE
+    and, on a refusal by the identity index, the one holder look-up ->
+    :func:`_mark_shared` -> audit path. sFOX and any other venue are skipped
+    (``skipped_not_ccxt``, the token name kept for log continuity).
+    """
     venue = key_row["exchange"]
-    if venue not in VENUES_WITH_ACCOUNT_ID:
+    if venue not in _STAMPED_VENUES:
         return "skipped_not_ccxt"
     if key_row.get("venue_account_id") is not None:
         return "skipped_already_stamped"
 
-    account_id = await read_venue_account_id(exchange, venue)
+    if venue == _MT5:
+        # The login text the session was built with; no terminal call. From
+        # here on MT5 shares the ccxt path: the same UPDATE, the same 23505 ->
+        # holder -> marker -> one audit.
+        account_id = _mt5_account_id(exchange)
+    else:
+        account_id = await read_venue_account_id(exchange, venue)
     if account_id is None:
         return "no_id"
 
@@ -470,6 +507,27 @@ async def _stamp(
         # Another writer stamped the key first.
         return "skipped_already_stamped"
     return "stamped"
+
+
+def _mt5_account_id(session: Any) -> str | None:
+    """The venue account id an MT5 poll session carries, or ``None``.
+
+    ``Mt5Session.venue_account_id`` is already stripped by
+    ``mt5_validation.mt5_venue_account_id``; a session without one (or a
+    non-string) yields ``None`` and the stamp reports ``no_id``.
+
+    167.1.2-08 review, IN-01: the value then goes through :func:`_normalise`,
+    so it obeys the same :data:`MAX_VENUE_ACCOUNT_ID_LENGTH` cap as a ccxt id
+    (an over-cap login is ``None``, with the venue-only WARNING). ``int()``
+    accepts a digit string of any length, so the credential parse does not
+    bound it. The ``str`` check comes first: an int must never reach
+    ``_normalise``, whose ``str(int)`` would be the int-parsed form the MT5
+    identity forbids.
+    """
+    value = getattr(session, "venue_account_id", None)
+    if not isinstance(value, str):
+        return None
+    return _normalise(value, _MT5)
 
 
 class _HolderVanished(Exception):
@@ -527,27 +585,57 @@ def _is_retryable(exc: BaseException) -> bool:
 # Review round 2 (SF2-M2): a retryable failure or ``skipped_no_budget`` is a
 # WARNING because the next poll may clear it. When it recurs every day, the key
 # is never stamped and its duplicate check never runs, and a WARNING never
-# reaches Sentry. So once a ccxt key is older than this many days and still
+# reaches Sentry. So once a ccxt or MT5 key is older than this many days and still
 # unstamped, the same line is logged at ERROR instead. Three daily polls is
 # long enough for a transient to have cleared.
 UNSTAMPED_ESCALATION_DAYS: Final = 3
 
 
+def _unstamped(key_row: Mapping[str, Any]) -> bool:
+    """A venue this module stamps, still without a ``venue_account_id``."""
+    return (
+        key_row.get("exchange") in _STAMPED_VENUES
+        and key_row.get("venue_account_id") is None
+    )
+
+
+def _duplicate_check_missing(key_row: Mapping[str, Any]) -> bool:
+    """An unstamped key that the stamper has NOT marked as sharing an account.
+
+    167.1.2-08 review round 2, SFH R2-L4. A key marked against a holder keeps
+    ``venue_account_id`` NULL by design (the identity index refuses its id;
+    :func:`_mark_shared`), so a NULL alone does not mean its duplicate check
+    is missing: the check ran and found the holder. The census
+    (``scripts/accounttruth-census.mjs``, the ``unresolved`` CTE) counts such a
+    key as RESOLVED while its holder, in the same owner's keys, still holds the
+    index slot. The key row cannot see the holder, so this treats every marked
+    key as resolved, the conservative half of that rule.
+
+    The one divergence from the census: a key marked against a holder that has
+    since departed is unresolved there and resolved here. For MT5 it does not
+    last, because the MT5 stamp runs before the fetch on every poll and
+    self-heals once the holder has left. A ccxt key stamps only on a DONE poll,
+    so one whose polls keep failing stays marked and logs no escalation; census
+    (a)'s ``live_keys_unstamped_unmarked`` is the backstop for that case.
+    """
+    return _unstamped(key_row) and key_row.get("account_shared_with_api_key_id") is None
+
+
 def _unstamped_for_too_long(key_row: Mapping[str, Any]) -> bool:
     """Whether ``key_row`` should have been stamped by now and is not.
 
-    Only a venue this module stamps (:data:`VENUES_WITH_ACCOUNT_ID`) and only
-    while ``venue_account_id`` is NULL: for any other key no duplicate check is
-    missing. ``skipped_no_budget`` is decided before the venue check, which is
+    Only a venue this module stamps (a ccxt venue in
+    :data:`VENUES_WITH_ACCOUNT_ID`, or MT5) and only
+    while ``venue_account_id`` is NULL and the key is not marked as sharing an
+    account (:func:`_duplicate_check_missing`): for any other key no duplicate
+    check is missing. ``skipped_no_budget`` is decided before the venue check, which is
     why the venue is checked here. ``created_at`` is ``NOT NULL`` on
     ``api_keys`` and the poll loads the key with ``select("*")``
     (``job_worker._allocator_key_preflight``), so an absent or unparseable
     value is not a production state; it answers ``False``, making no claim.
     A value without an offset is read as UTC.
     """
-    if key_row.get("exchange") not in VENUES_WITH_ACCOUNT_ID:
-        return False
-    if key_row.get("venue_account_id") is not None:
+    if not _duplicate_check_missing(key_row):
         return False
     raw = key_row.get("created_at")
     if not isinstance(raw, str):
@@ -564,6 +652,80 @@ def _unstamped_for_too_long(key_row: Mapping[str, Any]) -> bool:
 _ESCALATION_NOTE: Final = (
     f"key unstamped for >{UNSTAMPED_ESCALATION_DAYS} days; duplicate check not running"
 )
+
+
+def escalate_if_unchecked(key_row: Mapping[str, Any], *, cause: str) -> None:
+    """Log the SF2-M2 escalation for a poll that never reached the stamp.
+
+    167.1.2-08 review, SFH H-1. The escalation lives in
+    :func:`stamp_account_identity`, which runs only when the poll gets far
+    enough to call it. A poll that fails first (a venue error, a sign-in
+    refusal, a 429, a persist failure) skipped it, so a key whose polls kept failing stayed unstamped with no line
+    saying its duplicate check was not running. The poll calls this on every
+    path that did not call the stamp. It applies the same rule
+    (:func:`_unstamped_for_too_long`): a stamped venue, still NULL and unmarked, older than
+    :data:`UNSTAMPED_ESCALATION_DAYS`, logged at ERROR. Below the threshold it
+    logs nothing, because the poll's own failure is already logged. A session
+    that could not be built is :func:`escalate_session_build_failure`.
+
+    ``cause`` is a fixed token chosen by the caller, never exception text.
+    Synchronous and never raises: it runs in the poll's ``finally``, where an
+    exception would mask the real one.
+    """
+    try:
+        if not _unstamped_for_too_long(key_row):
+            return
+        logger.error(
+            "account_identity: api_key %s (venue %s) outcome=not_attempted "
+            "cause=%s — %s",
+            key_row.get("id"), key_row.get("exchange"), cause, _ESCALATION_NOTE,
+        )
+    except Exception:  # noqa: BLE001 — a log line must never mask the poll's outcome
+        logger.exception("account_identity: escalation check itself failed")
+
+
+def escalate_session_build_failure(
+    key_row: Mapping[str, Any], exc: BaseException
+) -> None:
+    """ERROR for an unstamped key whose poll session could not be built.
+
+    167.1.2-08 review, SFH H-1. NOT age-gated, unlike
+    :func:`escalate_if_unchecked`: the preflight re-raises the decrypt or
+    construction error, the dispatcher turns it into a FAILED result, and
+    ``main_worker`` logs that at WARNING only, so without this line even a
+    fresh key would never reach Sentry. A key with no session cannot be
+    checked for a duplicate at all, and the cause (a credential that will not
+    decrypt, a gateway that is not configured) does not clear by itself.
+    Only the exception CLASS is logged: decrypt and parse errors can carry
+    credential material. A key already stamped, or on a venue this module
+    never stamps, logs nothing here. Synchronous and never raises.
+
+    A key already MARKED as sharing an account (SFH R2-L4) still gets the
+    ERROR, because this line is the only Sentry-level record of a session that
+    cannot be built, but its text says the marker is not re-checked rather
+    than that the duplicate check is not running: the check ran and its marker
+    stands (:func:`_duplicate_check_missing`).
+    """
+    try:
+        if not _unstamped(key_row):
+            return
+        if not _duplicate_check_missing(key_row):
+            note = (
+                "the poll session could not be built; the key is marked as "
+                "sharing an account, and that marker is not re-checked while "
+                "this recurs"
+            )
+        elif _unstamped_for_too_long(key_row):
+            note = _ESCALATION_NOTE
+        else:
+            note = "the poll session could not be built; duplicate check not running"
+        logger.error(
+            "account_identity: api_key %s (venue %s) outcome=not_attempted "
+            "cause=session_build_failed class=%s — %s",
+            key_row.get("id"), key_row.get("exchange"), type(exc).__name__, note,
+        )
+    except Exception:  # noqa: BLE001 — a log line must never mask the poll's outcome
+        logger.exception("account_identity: escalation check itself failed")
 
 
 async def stamp_account_identity(
@@ -599,13 +761,18 @@ async def stamp_account_identity(
       scrubbed MESSAGE (:func:`_safe_message`). The DETAIL, which echoes the
       row and the account id, is never read. The line does not claim a retry
       cannot clear it (review round 2, WR-01): unrecognised is not permanent.
-    - ``no_id`` is venue schema drift, as the validator treats it, and
-      ``skipped_no_budget`` means this key's polls leave no time to check it
-      for a duplicate, so both are WARNING. The routine outcomes stay INFO.
-    - Review round 2 (SF2-M2): a retryable failure or ``skipped_no_budget`` on
-      a ccxt key still unstamped more than :data:`UNSTAMPED_ESCALATION_DAYS`
-      after it was created is ERROR ("key unstamped for >N days; duplicate
-      check not running"): a WARNING that recurs daily never reaches Sentry.
+    - ``no_id`` on a ccxt venue is venue schema drift, as the validator treats
+      it, and ``skipped_no_budget`` means this key's polls leave no time to
+      check it for a duplicate, so both are WARNING. The routine outcomes stay
+      INFO.
+    - ``no_id`` on MT5 is ERROR (167.1.2-08 review, SFH M-1): the poll session
+      carries no usable login, which only a constructor defect produces.
+    - Review round 2 (SF2-M2): a retryable failure, ``skipped_no_budget`` or
+      (SFH M-1) a ccxt ``no_id`` on a ccxt or MT5 key still unstamped, and not
+      marked as sharing an account (SFH R2-L4), more than
+      :data:`UNSTAMPED_ESCALATION_DAYS` after it was created is ERROR ("key
+      unstamped for >N days; duplicate check not running"): a WARNING that
+      recurs daily never reaches Sentry.
     """
     key_id = key_row.get("id")
     venue = key_row.get("exchange")
@@ -653,6 +820,26 @@ async def stamp_account_identity(
             "the poll used its handler time, so the key was not checked for a "
             "duplicate",
             key_id, venue, outcome, timeout_s,
+        )
+    elif outcome == "no_id" and venue == _MT5:
+        # 167.1.2-08 review, SFH M-1. parse_mt5_credentials refuses a blank
+        # login, so an MT5 session without an id is a constructor that did not
+        # set it (or a login over the length cap): our defect, not the
+        # venue's, and it recurs every poll. ERROR, never "schema drift".
+        logger.error(
+            "account_identity: api_key %s (venue %s) outcome=%s — the poll "
+            "session carries no usable login (absent, or over %d characters); "
+            "this is a construction defect, and while it recurs the key is not "
+            "checked for a duplicate",
+            key_id, venue, outcome, MAX_VENUE_ACCOUNT_ID_LENGTH,
+        )
+    elif outcome == "no_id" and _unstamped_for_too_long(key_row):
+        # SFH M-1 (a): the same "duplicate check not running" state as a
+        # retryable failure that recurs, so it escalates the same way.
+        logger.error(
+            "account_identity: api_key %s (venue %s) outcome=%s — the venue "
+            "answered without an account id — %s",
+            key_id, venue, outcome, _ESCALATION_NOTE,
         )
     elif outcome == "no_id":
         logger.warning(
