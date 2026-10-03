@@ -5165,7 +5165,7 @@ jobs:
         # container starts, and it FAILS LOUD when the set cannot be determined.
         working-directory: ${{ github.workspace }}
         run: bash scripts/local-stack/run.sh --check-currency
-      - uses: supabase/setup-cli@3c2f5e2ae34c34e428e8e206e2c4d21fa2d20fbf  # v2.1.1
+      - uses: supabase/setup-cli@45a513f8c64c0bc8e0e3dfe572b5c95be85f6359  # v3.0.1
         with:
           # The SAME pin `frontend-local-stack` uses — the repo keeps ONE answer to
           # "which CLI". The skew note on that job's setup-cli step applies here
@@ -6180,7 +6180,7 @@ jobs:
         # run: the replay set gets its own `baseline-replay:` line before any
         # container starts, and it FAILS LOUD when the set cannot be determined.
         run: bash scripts/local-stack/run.sh --check-currency
-      - uses: supabase/setup-cli@3c2f5e2ae34c34e428e8e206e2c4d21fa2d20fbf  # v2.1.1
+      - uses: supabase/setup-cli@45a513f8c64c0bc8e0e3dfe572b5c95be85f6359  # v3.0.1
         with:
           # The SAME pin `frontend-local-stack` uses — the repo keeps ONE answer to
           # "which CLI". The skew note on that job's setup-cli step applies here
