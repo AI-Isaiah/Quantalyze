@@ -1725,6 +1725,14 @@ BEGIN
     RAISE EXCEPTION 'bridge-residue: branch (a) carries % refresh keep arm(s), not 2 (the status arm and the stamp arm). Without the status arm a plain complete row is rewritten to computing on every marked in-scope refresh retry ([164.6.7-RETRY-PLAIN-COMPLETE]); without the stamp arm a kept complete row carries a stuck-computing reaper stamp.', v_keep_arms;
   END IF;
 
+  -- (xii) D-06: the per-strategy lock, as the FIRST statement after the NULL
+  -- guard and before the first compute_jobs read. One statement-shaped regex
+  -- pins presence, namespace, key, two-integer form and both placements.
+  v_bridge_lock_anchored := v_body ~ 'END\s+IF\s*;\s*PERFORM\s+pg_advisory_xact_lock\s*\(\s*hashtext\s*\(\s*''mark_compute_job_bridge''\s*\)\s*,\s*hashtext\s*\(\s*p_strategy_id::text\s*\)\s*\)\s*;\s*SELECT\s+count\s*\(\s*\*\s*\)\s+INTO\s+v_job_count';
+  IF NOT v_bridge_lock_anchored THEN
+    RAISE EXCEPTION 'bridge-residue: sync_strategy_analytics_status does not take the two-integer mark_compute_job_bridge advisory lock on the strategy id as its first statement after the NULL-strategy guard. A direct caller (the Python DEFERRED path) then reads compute_jobs while an uncommitted terminal mark on the same strategy is changing it; above the guard, a NULL strategy would make the lock a silent no-op.';
+  END IF;
+
   -- (xiii) FOUNDER DECISION 2026-10-03 ("Hold the date for both"): branch (a)'s
   -- sentence, both provenance markers and computed_at are each assigned by a
   -- CASE whose FIRST arm is the membership predicate (today's write), whose
@@ -1736,14 +1744,6 @@ BEGIN
     FROM regexp_matches(v_body, '(computation_error|computation_error_source|computation_error_job_id|computed_at)\s*=\s*CASE\s+WHEN\s+strategy_analytics\.computation_error_source\s*=\s*''writer''\s+AND\s+strategy_analytics\.computation_error_job_id\s*=\s*ANY\s*\(\s*v_unprotected_job_ids\s*\)\s+THEN\s+(EXCLUDED\.computation_error|NULL|now\(\))\s+WHEN\s+strategy_analytics\.computation_status\s*=\s*''complete_with_warnings''\s+OR\s+\(\s*v_refresh_keep\s+AND\s+strategy_analytics\.computation_status\s*=\s*''complete''\s+AND\s+strategy_analytics\.computation_warned\s+IS\s+NOT\s+TRUE\s*\)\s+THEN\s+strategy_analytics\.\1\s+ELSE\s+\2\s+END', 'g');
   IF v_hold_cases <> 4 THEN
     RAISE EXCEPTION 'bridge-residue: branch (a) carries % hold CASE(s) of the founder-decided shape, not 4 (computation_error, computation_error_source, computation_error_job_id, computed_at). A missing one re-stamps computed_at on a row nothing recomputed (the FreshnessChip and PDF vintage then read fresher than the last real compute), or splits a held sentence from its provenance markers (founder decision 2026-10-03).', v_hold_cases;
-  END IF;
-
-  -- (xii) D-06: the per-strategy lock, as the FIRST statement after the NULL
-  -- guard and before the first compute_jobs read. One statement-shaped regex
-  -- pins presence, namespace, key, two-integer form and both placements.
-  v_bridge_lock_anchored := v_body ~ 'END\s+IF\s*;\s*PERFORM\s+pg_advisory_xact_lock\s*\(\s*hashtext\s*\(\s*''mark_compute_job_bridge''\s*\)\s*,\s*hashtext\s*\(\s*p_strategy_id::text\s*\)\s*\)\s*;\s*SELECT\s+count\s*\(\s*\*\s*\)\s+INTO\s+v_job_count';
-  IF NOT v_bridge_lock_anchored THEN
-    RAISE EXCEPTION 'bridge-residue: sync_strategy_analytics_status does not take the two-integer mark_compute_job_bridge advisory lock on the strategy id as its first statement after the NULL-strategy guard. A direct caller (the Python DEFERRED path) then reads compute_jobs while an uncommitted terminal mark on the same strategy is changing it; above the guard, a NULL strategy would make the lock a silent no-op.';
   END IF;
 
   -- The NULL-strategy refusal is behavioural: a NULL id must raise
