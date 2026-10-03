@@ -2313,6 +2313,9 @@ jobs:
     # MEASURED ubuntu run, not a local projection. If the NEXT arms move pushes
     # a measured ubuntu run over 20, the recorded answer is
     # [REDUNDER-SUBSET-SPLIT], never a third raise.
+    # ⭐ 2026-10-03 (Phase 164.9.6 SUBSETMAIN): [REDUNDER-SUBSET-SPLIT] has SHIPPED. A push
+    # to main now runs a SUBSET or skips the lane (`none`), and `sql-mutation-nightly.yml`
+    # runs the full corpus and enforces the floors. The three mentions above are lineage.
     # Phase 164.6.3 / CI-DOCSPATH-01 — docs-only path filter: this changes WHEN
     # this job is invoked (not on a `.planning/`-only PR), never WHAT it asserts.
     # ⚠️ CORRECTION to the two paragraphs above, which say this job has "no `if:`" and
