@@ -71,6 +71,10 @@
 -- on the pg-lane before this file: `complete` -> `computing` for both
 -- derive_broker_dailies and stitch_composite. Latent today (0 plain `complete`
 -- rows in the live ledger cohort), so this is a correctness fix ahead of use.
+-- The keep is keyed on the MARKER, not on the retry: it holds when every
+-- in-flight job carries an in-scope refresh marker, in ANY non-terminal status
+-- (pending, running, done_pending_children or failed_retry), which is what
+-- D-05 asked for. The failed_retry retry above is the case that was measured.
 --   1. Read 1 also counts the in-flight jobs that do NOT carry an in-scope
 --      refresh marker, in the SAME statement (same snapshot), as a FILTERed
 --      second count. Its marker list and kind list are copies of the
@@ -733,7 +737,8 @@ BEGIN
   -- is among this call's unprotected live failures, the warning sits over a
   -- failed run and is not a warning to preserve. A plain 'complete' row is
   -- kept the same way by the refresh keep arm (D-05) when every in-flight job
-  -- is a marked in-scope refresh retry and no unprotected failure is live.
+  -- carries an in-scope refresh marker (in any non-terminal status, not only
+  -- a retry) and no unprotected failure is live.
   --
   -- ⚠️ v_nonterminal_count is deliberately NOT read here. It is read at the TOP
   -- of this function, BEFORE the failure partition — see the read-order note
