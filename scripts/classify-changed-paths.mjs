@@ -222,6 +222,68 @@ export function changedFilesAgainstBase({ baseRefName = process.env.GITHUB_BASE_
 }
 
 /**
+ * THE PUSH-RANGE LISTER — Phase 164.9.6 (D-01), extracted from `classifyPushRange`
+ * verbatim so `scripts/sql-gate-subset.mjs` is a second CALLER of one diff, never
+ * a second implementation of it (the `changedFilesAgainstBase` rule, applied to
+ * the push path). Every check and reason string is the one `classifyPushRange`
+ * used inline before the extraction; see that function's header for why each
+ * shape is undeterminable.
+ *
+ * ⛔ NEVER THROWS. An undeterminable range is `{ ok: false, reason }`, and each
+ * caller decides what "undeterminable" costs (the docs classifier: code; the
+ * SQL gate subset: FULL). It stops BEFORE any predecessor lookup, so the subset
+ * path never makes a `gh api` call.
+ *
+ * @param {{before?: string, forced?: string|boolean, cwd?: string}} opts
+ * @returns {{ok: true, sha: string, files: string[]} | {ok: false, reason: string}}
+ */
+export function pushRangeFiles({ before, forced, cwd } = {}) {
+  const fail = (reason) => ({ ok: false, reason });
+  const sha = String(before ?? "").trim();
+  if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(sha)) return fail(`before-SHA ${sha ? "is not an object name" : "is absent"}`);
+  if (/^0+$/.test(sha)) return fail("before-SHA is all zeros, a branch-creating push");
+  if (String(forced ?? "").trim() === "true" || forced === true) return fail("a forced push");
+  try {
+    git(["cat-file", "-e", `${sha}^{commit}`], cwd);
+  } catch (e) {
+    return fail(`before-SHA is not a commit in this clone${gitWhy(e)}`);
+  }
+  try {
+    git(["merge-base", "--is-ancestor", sha, "HEAD"], cwd);
+  } catch (e) {
+    return fail(`before-SHA is not an ancestor of HEAD${gitWhy(e)}`);
+  }
+  try {
+    // Two-dot, `--no-renames` and `-z` for the same reasons the PR diff carries
+    // them (see `changedFilesAgainstBase`).
+    const files = git(["diff", "--name-only", "--no-renames", "-z", sha, "HEAD"], cwd)
+      .split("\0")
+      .filter(Boolean);
+    return { ok: true, sha, files };
+  } catch (e) {
+    return fail(`git diff over the range failed${gitWhy(e)}`);
+  }
+}
+
+/**
+ * The pushed range's first-parent commits, oldest-last as git prints them, each
+ * a `[hash, committerEmail, subject]` triple — Phase 164.9.6 (D-01), extracted
+ * from `classifyPushRange` so both callers read one log. ⛔ THROWS on a git
+ * error; each caller turns that into its own fail-safe verdict.
+ *
+ * @param {string} sha — the before-SHA, already validated by `pushRangeFiles`
+ * @param {string} [cwd]
+ * @returns {string[][]}
+ */
+export function firstParentCommits(sha, cwd) {
+  return git(["log", "--first-parent", "--format=%H%x1f%ce%x1f%s%x1e", `${sha}..HEAD`], cwd)
+    .split("\x1e")
+    .map((c) => c.trim())
+    .filter(Boolean)
+    .map((c) => c.split("\x1f"));
+}
+
+/**
  * THE PUSH PATH — Phase 164.9.4, routed in by the founder on 2026-09-27
  * (ROADMAP `### Phase 164.9.4`, "a docs-only push to `main` runs the full
  * corpus"). It supersedes the Phase 164.6.3 trigger-scope decision that the
@@ -286,30 +348,11 @@ export function changedFilesAgainstBase({ baseRefName = process.env.GITHUB_BASE_
 export function classifyPushRange({ before, forced, cwd, fetchPredecessor = defaultFetchPredecessor } = {}) {
   const fullCorpus = (reason) => ({ docsOnly: false, reason: `${reason} — classified as code, full corpus` });
   const code = (reason) => fullCorpus(`push range undeterminable (${reason})`);
-  const sha = String(before ?? "").trim();
-  if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(sha)) return code(`before-SHA ${sha ? "is not an object name" : "is absent"}`);
-  if (/^0+$/.test(sha)) return code("before-SHA is all zeros, a branch-creating push");
-  if (String(forced ?? "").trim() === "true" || forced === true) return code("a forced push");
-  try {
-    git(["cat-file", "-e", `${sha}^{commit}`], cwd);
-  } catch (e) {
-    return code(`before-SHA is not a commit in this clone${gitWhy(e)}`);
-  }
-  try {
-    git(["merge-base", "--is-ancestor", sha, "HEAD"], cwd);
-  } catch (e) {
-    return code(`before-SHA is not an ancestor of HEAD${gitWhy(e)}`);
-  }
-  let files;
-  try {
-    // Two-dot, `--no-renames` and `-z` for the same reasons the PR diff carries
-    // them (see `changedFilesAgainstBase`).
-    files = git(["diff", "--name-only", "--no-renames", "-z", sha, "HEAD"], cwd)
-      .split("\0")
-      .filter(Boolean);
-  } catch (e) {
-    return code(`git diff over the range failed${gitWhy(e)}`);
-  }
+  // Phase 164.9.6 (D-01): the range checks and the diff live in `pushRangeFiles`,
+  // shared with `scripts/sql-gate-subset.mjs`. Reasons and order are unchanged.
+  const pushed = pushRangeFiles({ before, forced, cwd });
+  if (!pushed.ok) return code(pushed.reason);
+  const { sha, files } = pushed;
   if (files.length === 0) return code("the range changed no files");
   const range = `${files.length} changed file(s) in the pushed range ${sha.slice(0, 12)}..HEAD`;
   if (!judge(files)) return { docsOnly: false, reason: range };
@@ -327,11 +370,7 @@ export function classifyPushRange({ before, forced, cwd, fetchPredecessor = defa
   // corpus. See `isPrMergeCommit`.
   let commits;
   try {
-    commits = git(["log", "--first-parent", "--format=%H%x1f%ce%x1f%s%x1e", `${sha}..HEAD`], cwd)
-      .split("\x1e")
-      .map((c) => c.trim())
-      .filter(Boolean)
-      .map((c) => c.split("\x1f"));
+    commits = firstParentCommits(sha, cwd);
   } catch (e) {
     return fullCorpus(`the pushed range's commit log could not be read${gitWhy(e)}`);
   }
@@ -565,7 +604,7 @@ function emit(value, reason) {
  * A throwaway git repository for the push-range rows. `commit(files)` writes
  * the given paths, commits them and returns the new HEAD sha.
  */
-function scratchRepo(label) {
+export function scratchRepo(label) {
   const dir = mkdtempSync(join(tmpdir(), `gsd-classify-${label}-`));
   const g = (args) =>
     execFileSync("git", ["-c", "user.name=self-test", "-c", "user.email=self-test@invalid", "-c", "commit.gpgsign=false", ...args], {

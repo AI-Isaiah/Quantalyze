@@ -30,16 +30,15 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { ARMS_FLOOR, FILES_FLOOR, WAIVED_CEILING } from "../../scripts/mutation-floors.mjs";
 import {
-  ARMS_FLOOR,
   DEFECT_KINDS,
-  FILES_FLOOR,
-  WAIVED_CEILING,
   absurdityViolations,
   gateSectionCount,
   laneSpawnFailure,
   runCorpus,
   scopeDirForFile,
+  scopeReasonLine,
   sectionOfIdentity,
 } from "../../scripts/mutation-runner/run.mjs";
 import { parseFile, scanCorpus } from "../../scripts/mutation-runner/parse.mjs";
@@ -720,7 +719,7 @@ describe("FILES_FLOOR ratchet", () => {
       annotated.length,
       annotated.length < FILES_FLOOR
         ? `REGRESSION: ${annotated.length} of ${filesTotal} gate files are annotated, below the pinned floor of ${FILES_FLOOR}. Annotations were removed.`
-        : `RATCHET STALE: ${annotated.length} of ${filesTotal} gate files are now annotated but FILES_FLOOR is still ${FILES_FLOOR}. Raise FILES_FLOOR in scripts/mutation-runner/run.mjs to ${annotated.length}.`,
+        : `RATCHET STALE: ${annotated.length} of ${filesTotal} gate files are now annotated but FILES_FLOOR is still ${FILES_FLOOR}. Raise FILES_FLOOR in scripts/mutation-floors.mjs to ${annotated.length}.`,
     ).toBe(FILES_FLOOR);
   });
 
@@ -778,7 +777,7 @@ describe("ARMS_FLOOR ratchet", () => {
     if (twins === 0) return;
     expect(
       ARMS_FLOOR,
-      `The corpus declares ${twins} twin(s) of which ${waivers} are waivers, so a green run bites ${twins - waivers}. ARMS_FLOOR is ${ARMS_FLOOR}. Update the floor in scripts/mutation-runner/run.mjs from a MEASURED run, never from this number.`,
+      `The corpus declares ${twins} twin(s) of which ${waivers} are waivers, so a green run bites ${twins - waivers}. ARMS_FLOOR is ${ARMS_FLOOR}. Update the floor in scripts/mutation-floors.mjs from a MEASURED run, never from this number.`,
     ).toBe(twins - waivers);
   });
 });
@@ -803,7 +802,7 @@ describe("WAIVED_CEILING — the waiver count is bounded from ABOVE, in lockstep
     expect(
       WAIVED_CEILING,
       waivers > WAIVED_CEILING
-        ? `WAIVER CREEP: the corpus declares ${waivers} waiver(s), above the pinned ceiling of ${WAIVED_CEILING}. Each waiver is an arm the runner will never prove can fail — raising WAIVED_CEILING in scripts/mutation-runner/run.mjs is a reviewed edit, never a side effect.`
+        ? `WAIVER CREEP: the corpus declares ${waivers} waiver(s), above the pinned ceiling of ${WAIVED_CEILING}. Each waiver is an arm the runner will never prove can fail — raising WAIVED_CEILING in scripts/mutation-floors.mjs is a reviewed edit, never a side effect.`
         : `CEILING STALE: the corpus declares ${waivers} waiver(s) but WAIVED_CEILING is ${WAIVED_CEILING}. Lower it to ${waivers} so a re-added waiver is caught.`,
     ).toBe(waivers);
   });
@@ -1672,6 +1671,10 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-01 (Phase 164.9.3.2 DEFER40001, plan 06): 54/54 -> 55/55, copied from one full lane run (the fence-errcode gate joined the annotated set).
  // ⭐ CURRENCY 2026-10-02 (Phase 164.9.3.2.1 ENQ40001, plan 03): 55/55 -> 56/56, copied from one full lane run (the enqueue race-loss gate joined the annotated set).
     "scope: FULL 56/56 annotated files",
+    // ⭐ ADDED 2026-10-03 (Phase 164.9.6 D-12): the runner prints exactly one
+    // `scope-reason:` line directly after `scope:` on every corpus run, and the
+    // count-recheck step MEASURE_FAILs without it.
+    "scope-reason: the mutation machinery or a lane input changed: scripts/mutation-runner/run.mjs",
     "  baseline  supabase/tests/test_strategy_shares_rls.sql — exit 0 (1.8s)",
     "  arm SHAPE 1                  exit   3  RED (identity ok)  (1.7s)",
     "  restore   supabase/tests/test_strategy_shares_rls.sql — exit 0 (1.8s)",
@@ -2644,6 +2647,8 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-01 (Phase 164.9.3.2 DEFER40001, plan 06): 2/54 -> 2/55, agreeing with the coverage line below (the recheck MEASURE_FAILs on a disagreement).
     // ⭐ CURRENCY 2026-10-02 (Phase 164.9.3.2.1 ENQ40001, plan 03): 2/55 -> 2/56, agreeing with the coverage line below (the recheck MEASURE_FAILs on a disagreement).
     "scope: SUBSET 2/56 annotated files: test_allocator_equity_derived_rls.sql test_allocator_equity_pre_terminus_flag.sql",
+    // ⭐ ADDED 2026-10-03 (Phase 164.9.6 D-12), directly after `scope:` as the runner prints it.
+    "scope-reason: 2 of 5 changed file(s) are gate files",
     "",
     // ⭐ CURRENCY 2026-09-27 (Phase 164.9.3 CLAIMPAIR, plan 05): 52/79 -> 53/80, agreeing with
     // GREEN_LOG's coverage line and the SUBSET scope denominator above.
@@ -2662,7 +2667,9 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     "  file test_allocator_equity_pre_terminus_flag.sql: sections 2 / judged 2 / annotated 2 / waived 0 / biting 2",
     "per-arm lane time: mean 2.0s over 8 arm run(s)",
     "",
-    "ARMS_FLOOR: NOT compared — this SUBSET run covered 2 of 49 annotated files; ARMS_FLOOR is compared by the full-corpus run (push to main).",
+    // ⭐ 2026-10-03 (Phase 164.9.6 D-04): the tail follows run.mjs — a push to main
+    // may itself be a SUBSET now, so the floor's home is the nightly and every FULL run.
+    "ARMS_FLOOR: NOT compared — this SUBSET run covered 2 of 49 annotated files; ARMS_FLOOR is compared by the nightly full-corpus run and by every FULL run.",
     // Review 164.4.2 WR-03: the static upper bound the runner compares on every
     // SUBSET run — the full corpus's annotated-minus-waived total, at the floor.
     // ⭐ Built from the imported ARMS_FLOOR (round-2 review IN-01), because the
@@ -2679,13 +2686,24 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
   // exactly the two files SUBSET_LOG names.
   const SUBSET_FILES =
     "supabase/tests/test_allocator_equity_derived_rls.sql supabase/tests/test_allocator_equity_pre_terminus_flag.sql";
-  const PR = { GITHUB_EVENT_NAME: "pull_request", SQL_GATE_FILES: SUBSET_FILES };
-  const PUSH = { GITHUB_EVENT_NAME: "push" };
+  // ⭐ Phase 164.9.6 D-04 (2026-10-03): a SUBSET is now legal on a pull_request
+  // AND on a push to refs/heads/main, so the step reads GITHUB_REF too. Pitfall
+  // 7: every env below carries BOTH the event and the ref explicitly. vitest in
+  // CI inherits the real ones (`push` + `refs/heads/main` on main, a merge ref on
+  // a PR), so an inherited value would let one arm pass on a PR and fail on main.
+  // `PUSH` became `PUSH_MAIN` (now SUBSET-legal) and `PUSH_OTHER` (still refused).
+  const PR = { GITHUB_EVENT_NAME: "pull_request", GITHUB_REF: "refs/pull/1/merge", SQL_GATE_FILES: SUBSET_FILES };
+  const PUSH_MAIN = { GITHUB_EVENT_NAME: "push", GITHUB_REF: "refs/heads/main", SQL_GATE_FILES: SUBSET_FILES };
+  const PUSH_OTHER = { GITHUB_EVENT_NAME: "push", GITHUB_REF: "refs/heads/feature-x", SQL_GATE_FILES: SUBSET_FILES };
+  const DISPATCH = { GITHUB_EVENT_NAME: "workflow_dispatch", GITHUB_REF: "refs/heads/main", SQL_GATE_FILES: SUBSET_FILES };
+  const SCHEDULE = { GITHUB_EVENT_NAME: "schedule", GITHUB_REF: "refs/heads/main", SQL_GATE_FILES: SUBSET_FILES };
+  const UNSET = { GITHUB_EVENT_NAME: "", GITHUB_REF: "", SQL_GATE_FILES: SUBSET_FILES };
+  const ALL_EVENTS = [PR, PUSH_MAIN, PUSH_OTHER, DISPATCH, SCHEDULE, UNSET];
 
-  it("GREEN: a FULL log passes on a push AND on a pull request — every existing arm, ARMS_FLOOR included", () => {
-    for (const env of [PUSH, PR]) {
+  it("GREEN: a FULL log passes on every event and ref — every existing arm, ARMS_FLOOR included (D-07)", () => {
+    for (const env of ALL_EVENTS) {
       const r = runCountRecheck(GREEN_LOG, env);
-      expect(r.status, `${env.GITHUB_EVENT_NAME}\n${r.out}`).toBe(0);
+      expect(r.status, `${env.GITHUB_EVENT_NAME} ${env.GITHUB_REF}\n${r.out}`).toBe(0);
       // ⭐ CURRENCY 2026-09-27 (Phase 164.9.3 CLAIMPAIR, plan 05): 52/52 -> 53/53.
       // ⭐ CURRENCY 2026-09-29 (Phase 167.1.2 PR C2, review fix B, WR-04): 53/53 -> 54/54.
       // ⭐ CURRENCY 2026-10-01 (Phase 164.9.3.2 DEFER40001, plan 06): 54/54 -> 55/55.
@@ -2714,21 +2732,26 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     }
   });
 
-  it("GREEN: a SUBSET log on a pull_request passes and SAYS ARMS_FLOOR was not compared, and where it is", () => {
-    const r = runCountRecheck(SUBSET_LOG, PR);
-    expect(r.status, r.out).toBe(0);
-    expect(r.out).toContain(`ARMS_FLOOR (${ARMS_FLOOR}) was NOT compared`);
-    expect(r.out).toContain("compared by the full-corpus run on the push to main");
-    expect(r.out).toContain("This is NOT full-corpus coverage.");
-    // ⛔ It must never print the sentence claiming both floors held.
-    expect(r.out).not.toContain("both floors");
-    expect(r.out).not.toContain("MEASURE_FAIL");
+  it("GREEN: a SUBSET log on a pull_request AND on a push to main passes and SAYS ARMS_FLOOR was not compared, and where it is", () => {
+    for (const env of [PR, PUSH_MAIN]) {
+      const r = runCountRecheck(SUBSET_LOG, env);
+      expect(r.status, `${env.GITHUB_EVENT_NAME} ${env.GITHUB_REF}\n${r.out}`).toBe(0);
+      expect(r.out).toContain(`ARMS_FLOOR (${ARMS_FLOOR}) was NOT compared`);
+      // ⭐ 2026-10-03 (Phase 164.9.6 D-04): the push to main may itself be a
+      // SUBSET now, so the floor's home is the nightly run and every FULL run.
+      expect(r.out).toContain("compared by the nightly full-corpus run and by every FULL run");
+      expect(r.out).toContain(`SUBSET run on a '${env.GITHUB_EVENT_NAME}' event (${env.GITHUB_REF})`);
+      expect(r.out).toContain("This is NOT full-corpus coverage.");
+      // ⛔ It must never print the sentence claiming both floors held.
+      expect(r.out).not.toContain("both floors");
+      expect(r.out).not.toContain("MEASURE_FAIL");
+    }
   });
 
   it("RED: NO scope line is a MEASURE_FAIL — an absent line is never read as a FULL run", () => {
     const without = GREEN_LOG.replace(/^scope: .*\n/m, "");
     expect(without, "the deletion must actually change the log").not.toBe(GREEN_LOG);
-    for (const env of [PUSH, PR]) {
+    for (const env of [PUSH_MAIN, PR]) {
       const r = runCountRecheck(without, env);
       expect(r.status, r.out).toBe(1);
       expect(r.out).toContain("MEASURE_FAIL: the run printed NO 'scope:' line");
@@ -2736,15 +2759,21 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     }
   });
 
-  it("RED: a SUBSET log on a push fails, naming both the scope and the event", () => {
-    const r = runCountRecheck(SUBSET_LOG, PUSH);
-    expect(r.status, r.out).toBe(1);
-    expect(r.out).toContain("MEASURE_FAIL: the run narrowed to a SUBSET");
-    expect(r.out).toContain("on a 'push' event");
-    // An unset event is not a pull_request either.
-    const unset = runCountRecheck(SUBSET_LOG, { GITHUB_EVENT_NAME: "" });
-    expect(unset.status, unset.out).toBe(1);
-    expect(unset.out).toContain("on a 'unset' event");
+  it("RED: a SUBSET log on any event but a pull_request or a push to main fails, naming the scope, the event AND the ref (D-04)", () => {
+    const refused: Array<[Record<string, string>, string]> = [
+      [PUSH_OTHER, "on a 'push' event (ref 'refs/heads/feature-x')"],
+      [DISPATCH, "on a 'workflow_dispatch' event (ref 'refs/heads/main')"],
+      [SCHEDULE, "on a 'schedule' event (ref 'refs/heads/main')"],
+      // An unset event is neither of the two legal ones either.
+      [UNSET, "on a 'unset' event (ref 'unset')"],
+    ];
+    for (const [env, needle] of refused) {
+      const r = runCountRecheck(SUBSET_LOG, env);
+      expect(r.status, `${env.GITHUB_EVENT_NAME} ${env.GITHUB_REF}\n${r.out}`).toBe(1);
+      expect(r.out).toContain("MEASURE_FAIL: the run narrowed to a SUBSET");
+      expect(r.out).toContain(needle);
+      expect(r.out).not.toContain("This is NOT full-corpus coverage.");
+    }
   });
 
   it("RED: a SUBSET count that disagrees with the names it prints fails, quoting both", () => {
@@ -2850,6 +2879,51 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     expect(r.out).toContain("printed 2 per-file row(s) but reported 56 annotated file(s)");
   });
 
+  // ── Phase 164.9.6 / D-12: every run says WHY it took its scope ─────────
+  // One `scope-reason:` line, directly after `scope:`, asserted present, single
+  // and non-blank. It is never parsed for names.
+  it("RED: NO scope-reason line is a MEASURE_FAIL, on a FULL and on a SUBSET log (D-12)", () => {
+    for (const [log, env] of [
+      [GREEN_LOG, PUSH_MAIN],
+      [SUBSET_LOG, PR],
+      [SUBSET_LOG, PUSH_MAIN],
+    ] as Array<[string, Record<string, string>]>) {
+      const without = log.replace(/^scope-reason: .*\n/m, "");
+      expect(without, "the deletion must actually change the log").not.toBe(log);
+      const r = runCountRecheck(without, env);
+      expect(r.status, r.out).toBe(1);
+      expect(r.out).toContain("MEASURE_FAIL: the run printed NO 'scope-reason:' line — D-12 requires every run to say why it took its scope");
+    }
+  });
+
+  it("RED: two scope-reason lines, or one with a blank reason, are MEASURE_FAILs (D-12)", () => {
+    const doubled = GREEN_LOG.replace(/^(scope-reason: .*)$/m, "$1\n$1");
+    expect(doubled).not.toBe(GREEN_LOG);
+    const d = runCountRecheck(doubled, PUSH_MAIN);
+    expect(d.status, d.out).toBe(1);
+    expect(d.out).toContain("printed 2 'scope-reason:' lines");
+    const blank = GREEN_LOG.replace(/^scope-reason: .*$/m, "scope-reason:    ");
+    expect(blank).not.toBe(GREEN_LOG);
+    const b = runCountRecheck(blank, PUSH_MAIN);
+    expect(b.status, b.out).toBe(1);
+    expect(b.out).toContain("'scope-reason:' line carries an EMPTY reason");
+  });
+
+  it("GREEN: a scope-reason that names a migration .sql file moves neither the SUBSET name count nor the WR-07 set (D-12, Research Pattern 2)", () => {
+    const MIGRATION = "supabase/migrations/20260411144407_compute_jobs_queue.sql";
+    const named = SUBSET_LOG.replace(
+      /^scope-reason: .*$/m,
+      `scope-reason: 2 of 5 changed file(s) are gate files, 1 gate(s) loading changed migration(s) ${MIGRATION}`,
+    );
+    expect(named, "the fixture must actually carry the migration name").toContain(`scope-reason: 2 of 5 changed file(s) are gate files, 1 gate(s) loading changed migration(s) ${MIGRATION}`);
+    for (const env of [PR, PUSH_MAIN]) {
+      const r = runCountRecheck(named, env);
+      expect(r.status, `${env.GITHUB_EVENT_NAME} ${env.GITHUB_REF}\n${r.out}`).toBe(0);
+      expect(r.out).toContain(MIGRATION);
+      expect(r.out).not.toContain("MEASURE_FAIL");
+    }
+  });
+
   it("RED: two scope lines, or a DIAGNOSTIC one, are not this gate", () => {
     // ⭐ CURRENCY 2026-09-25 (Phase 167.1.2 ACCOUNTTRUTH, plan 03): the NEEDLE
     // follows GREEN_LOG's scope line 50/50 -> 51/51, or both replaces below
@@ -2861,13 +2935,253 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-01 (Phase 164.9.3.2 DEFER40001, plan 06): the NEEDLE follows GREEN_LOG's scope line 54/54 -> 55/55, or both replaces below become no-ops.
     // ⭐ CURRENCY 2026-10-02 (Phase 164.9.3.2.1 ENQ40001, plan 03): the NEEDLE follows GREEN_LOG's scope line 55/55 -> 56/56, or both replaces below become no-ops.
     const twice = GREEN_LOG.replace("scope: FULL 56/56 annotated files", "scope: FULL 56/56 annotated files\nscope: FULL 56/56 annotated files");
-    const t = runCountRecheck(twice, PUSH);
+    const t = runCountRecheck(twice, PUSH_MAIN);
     expect(t.status, t.out).toBe(1);
     expect(t.out).toContain("printed 2 'scope:' lines");
     const diag = GREEN_LOG.replace("scope: FULL 56/56 annotated files", "scope: DIAGNOSTIC supabase/tests/test_x.sql");
-    const d = runCountRecheck(diag, PUSH);
+    const d = runCountRecheck(diag, PUSH_MAIN);
     expect(d.status, d.out).toBe(1);
     expect(d.out).toContain("is neither the FULL nor the SUBSET form");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 164.9.6 / D-04 — the MUTATE step's own event guard, EXECUTED.
+//
+// The assert step above is the second control on a SUBSET's event; the mutate
+// step is the first, because the derivation that says `subset` is a script
+// this job does not own. A text pin cannot tell a guard that reads the ref
+// from one that does not, so the step's real `run:` body is extracted from
+// ci.yml and run under bash with a FAKE `node` first on PATH. The fake records
+// the argv it was handed, the SQL_GATE_REASON it saw and the list file it was
+// pointed at, prints one line and exits with a chosen status. No lane boots.
+// ---------------------------------------------------------------------------
+describe("164.9.6 D-04 — the mutate step takes the SUBSET branch only on a pull_request or a push to main, executed", () => {
+  const CI_TEXT = readFileSync(CI_PATH, "utf8");
+  const MUTATE_STEP = "- name: Mutate every annotated RED-UNDER arm and require it to bite";
+  const WIDENED =
+    'if [ "${GITHUB_EVENT_NAME:-}" = "pull_request" ] || { [ "${GITHUB_EVENT_NAME:-}" = "push" ] && [ "${GITHUB_REF:-}" = "refs/heads/main" ]; }; then';
+  const PR_ONLY = 'if [ "${GITHUB_EVENT_NAME:-}" = "pull_request" ]; then';
+  const FULL_ARGV = ["scripts/mutation-runner/run.mjs"];
+  const FILES =
+    "supabase/tests/test_allocator_equity_derived_rls.sql supabase/tests/test_allocator_equity_pre_terminus_flag.sql";
+  const DERIVED = "1 of 4 changed file(s) are gate files";
+
+  /** A step's `run: |` body, dedented. Every anchor miss THROWS, and the search
+   *  for `run: |` is bounded by the NEXT step, so a step that lost its block
+   *  cannot silently borrow its successor's body. */
+  function stepRunBody(text: string, stepName: string): string {
+    const stepAt = anchorIndex(text, stepName);
+    const nextStep = anchorIndex(text, "\n      - name:", stepAt + stepName.length);
+    const runAt = anchorIndex(text, "\n        run: |\n", stepAt);
+    if (runAt > nextStep) {
+      throw new Error(`ANCHOR MISSING: ${JSON.stringify(stepName)} carries no \`run: |\` block before the next step.`);
+    }
+    const out: string[] = [];
+    for (const line of text.slice(runAt + "\n        run: |\n".length, nextStep).split("\n")) {
+      if (line.trim() !== "" && !line.startsWith("          ")) break;
+      out.push(line.slice(10));
+    }
+    return out.join("\n");
+  }
+
+  const FAKE_NODE = [
+    "#!/bin/bash",
+    'printf \'%s\\n\' "$@" > "$FAKE_NODE_ARGV"',
+    'printf \'%s\' "${SQL_GATE_REASON-<unset>}" > "$FAKE_NODE_REASON"',
+    'if [ "${2:-}" = "--subset-from" ]; then cp "$3" "$FAKE_NODE_LIST"; fi',
+    'echo "fake-node-ran"',
+    'exit "${FAKE_NODE_EXIT:-0}"',
+    "",
+  ].join("\n");
+
+  function runMutate(env: Record<string, string>, body: string = stepRunBody(CI_TEXT, MUTATE_STEP)) {
+    const dir = mkdtempSync(join(tmpdir(), "mutate-step-"));
+    try {
+      const bin = join(dir, "bin");
+      const runnerTemp = join(dir, "runner-temp");
+      mkdirSync(bin);
+      mkdirSync(runnerTemp);
+      writeFileSync(join(bin, "node"), FAKE_NODE);
+      chmodSync(join(bin, "node"), 0o755);
+      const script = join(dir, "mutate.sh");
+      writeFileSync(script, body);
+      const paths = {
+        FAKE_NODE_ARGV: join(dir, "argv.txt"),
+        FAKE_NODE_REASON: join(dir, "reason.txt"),
+        FAKE_NODE_LIST: join(dir, "list.txt"),
+      };
+      const childEnv: Record<string, string | undefined> = { ...process.env };
+      childEnv.PATH = `${bin}:${childEnv.PATH ?? ""}`;
+      const spawnEnv: Record<string, string | undefined> = {
+        ...childEnv,
+        RUNNER_TEMP: runnerTemp,
+        RUNNER_LOG: join(runnerTemp, "mutation-runner.log"),
+        ...paths,
+        ...env,
+      };
+      const res = spawnSync("bash", [script], {
+        cwd: dir,
+        encoding: "utf8",
+        env: spawnEnv as NodeJS.ProcessEnv,
+      });
+      const read = (p: string) => {
+        try {
+          return readFileSync(p, "utf8");
+        } catch {
+          return null;
+        }
+      };
+      const argvText = read(paths.FAKE_NODE_ARGV);
+      return {
+        status: res.status,
+        out: `${res.stdout ?? ""}${res.stderr ?? ""}`,
+        argv: argvText === null ? null : argvText.replace(/\n$/, "").split("\n"),
+        reason: read(paths.FAKE_NODE_REASON),
+        list: read(paths.FAKE_NODE_LIST),
+        listPath: join(runnerTemp, "sql-gate-subset.txt"),
+      };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  // Pitfall 7: every row names the event AND the ref, and every SQL_GATE_* key.
+  const envFor = (event: string, ref: string, mode: string) => ({
+    GITHUB_EVENT_NAME: event,
+    GITHUB_REF: ref,
+    SQL_GATE_MODE: mode,
+    SQL_GATE_FILES: mode === "subset" ? FILES : "",
+    SQL_GATE_REASON: DERIVED,
+  });
+
+  it("the extracted body carries the widened condition exactly once, and the FULL command byte-identical to the runner header", () => {
+    const body = stepRunBody(CI_TEXT, MUTATE_STEP);
+    expect(body.split(WIDENED).length - 1, "the widened condition, once").toBe(1);
+    expect(body).toContain('node scripts/mutation-runner/run.mjs > "$RUNNER_LOG" 2>&1\nstatus=$?\ncat "$RUNNER_LOG"\nexit $status');
+  });
+
+  it("GREEN: subset on a push to main AND on a pull_request passes --subset-from, the list holds exactly the derived paths, and no warning", () => {
+    for (const [event, ref] of [
+      ["push", "refs/heads/main"],
+      ["pull_request", "refs/pull/1/merge"],
+    ]) {
+      const r = runMutate(envFor(event, ref, "subset"));
+      expect(r.status, `${event} ${ref}\n${r.out}`).toBe(0);
+      expect(r.argv).toEqual(["scripts/mutation-runner/run.mjs", "--subset-from", r.listPath]);
+      expect(r.list).toBe(`${FILES.split(" ").join("\n")}\n`);
+      expect(r.out).toContain(`SUBSET requested by changed-paths on a '${event}' event (${ref}): 2 gate file(s)`);
+      expect(r.out).not.toContain("::warning::");
+      // The derivation's reason reaches the runner untouched.
+      expect(r.reason).toBe(DERIVED);
+      // The log was cat back into the step's output.
+      expect(r.out).toContain("fake-node-ran");
+    }
+  });
+
+  it("RED: subset on a feature-branch push, a dispatch, a schedule or an unset event runs the bare FULL command with a warning and a refusal-prefixed reason", () => {
+    for (const [event, ref] of [
+      ["push", "refs/heads/feature-x"],
+      ["workflow_dispatch", "refs/heads/main"],
+      ["schedule", "refs/heads/main"],
+      ["", ""],
+    ]) {
+      const r = runMutate(envFor(event, ref, "subset"));
+      expect(r.status, `${event} ${ref}\n${r.out}`).toBe(0);
+      expect(r.argv, `${event} ${ref}: the bare FULL invocation`).toEqual(FULL_ARGV);
+      expect(r.list, "no list was handed to the runner").toBeNull();
+      expect(r.out).toContain(`::warning::changed-paths said sql_gate_mode=subset on a '${event || "unset"}' event (${ref || "unset ref"})`);
+      expect(r.reason).toBe(
+        `the mutate step refused sql_gate_mode=subset on a ${event || "unset"} event (${ref || "unset ref"}); the full corpus runs. Derivation said: ${DERIVED}`,
+      );
+    }
+  });
+
+  it("RED: a `none` that reaches the step on a pull_request runs FULL with a warning, and the runner sees the refusal prefix", () => {
+    const r = runMutate(envFor("pull_request", "refs/pull/1/merge", "none"));
+    expect(r.status, r.out).toBe(0);
+    expect(r.argv).toEqual(FULL_ARGV);
+    expect(r.out).toContain("::warning::changed-paths said sql_gate_mode=none on a 'pull_request' event");
+    expect(r.reason?.startsWith("the mutate step refused sql_gate_mode=none on a pull_request event (refs/pull/1/merge); the full corpus runs."), r.reason ?? "<no reason>").toBe(true);
+  });
+
+  it("GREEN: full mode runs the bare FULL command, no warning, the reason untouched", () => {
+    const r = runMutate(envFor("push", "refs/heads/main", "full"));
+    expect(r.status, r.out).toBe(0);
+    expect(r.argv).toEqual(FULL_ARGV);
+    expect(r.out).not.toContain("::warning::");
+    expect(r.reason).toBe(DERIVED);
+  });
+
+  it("the runner's exit status is the step's exit status on both branches", () => {
+    const sub = runMutate({ ...envFor("push", "refs/heads/main", "subset"), FAKE_NODE_EXIT: "3" });
+    expect(sub.argv?.[1]).toBe("--subset-from");
+    expect(sub.status, sub.out).toBe(3);
+    const full = runMutate({ ...envFor("push", "refs/heads/main", "full"), FAKE_NODE_EXIT: "3" });
+    expect(full.argv).toEqual(FULL_ARGV);
+    expect(full.status, full.out).toBe(3);
+  });
+
+  it("CALIBRATION: with the condition reverted to pull_request-only, the push-to-main row goes RED — the arm reads the condition", () => {
+    const body = stepRunBody(CI_TEXT, MUTATE_STEP);
+    const reverted = body.replace(WIDENED, PR_ONLY);
+    expect(reverted, "the revert must actually change the body").not.toBe(body);
+    expect(reverted.includes(WIDENED), "the widened condition must be gone").toBe(false);
+    const r = runMutate(envFor("push", "refs/heads/main", "subset"), reverted);
+    expect(r.argv, "the reverted step refuses the push to main").toEqual(FULL_ARGV);
+    expect(r.out).toContain("::warning::");
+    // Control: the PR row is unaffected by the revert.
+    const pr = runMutate(envFor("pull_request", "refs/pull/1/merge", "subset"), reverted);
+    expect(pr.argv?.[1]).toBe("--subset-from");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 164.9.6 / D-12 — `scopeReasonLine`, the runner's one "why" line.
+// Pure, so it is driven directly. It must never print an empty reason and
+// never let a control character split the line or start a new one.
+// ---------------------------------------------------------------------------
+describe("164.9.6 D-12 — scopeReasonLine says why the run took its scope, on one line", () => {
+  it("a derivation reason is printed after the fixed prefix", () => {
+    expect(scopeReasonLine({ reason: "3 of 9 changed file(s) are gate files" })).toBe(
+      "scope-reason: 3 of 9 changed file(s) are gate files",
+    );
+  });
+
+  it("a runner subset fallback takes precedence and still carries the derivation's reason", () => {
+    const line = scopeReasonLine({ subsetFallback: "no listed file is annotated: x.sql", reason: "r" });
+    expect(line.startsWith("scope-reason: the runner fell back to FULL: no listed file is annotated: x.sql")).toBe(true);
+    expect(line).toContain("(derivation: r)");
+    expect(scopeReasonLine({ subsetFallback: "f" })).toBe("scope-reason: the runner fell back to FULL: f (derivation: none supplied)");
+  });
+
+  it("no reason, or a blank one, names a direct invocation — never an empty reason", () => {
+    const DIRECT = "scope-reason: no derivation reason supplied (a direct invocation)";
+    expect(scopeReasonLine({})).toBe(DIRECT);
+    expect(scopeReasonLine()).toBe(DIRECT);
+    expect(scopeReasonLine({ reason: "   " })).toBe(DIRECT);
+    expect(scopeReasonLine({ reason: "\n\t\x00" })).toBe(DIRECT);
+  });
+
+  it("a newline, CR, NUL or DEL in the reason cannot split the line or start a workflow command", () => {
+    const line = scopeReasonLine({ reason: "a\nb\rc\x00d\x7fe\n::error::forged" });
+    expect(line.startsWith("scope-reason: ")).toBe(true);
+    expect(/[\x00-\x1f\x7f]/.test(line), JSON.stringify(line)).toBe(false);
+    expect(line.split("\n")).toHaveLength(1);
+    expect(line).toBe("scope-reason: a b c d e ::error::forged");
+  });
+
+  it("SOURCE PIN: in runCorpus the scope-reason line is logged directly after `log(scopeLine);`, no other log call between", () => {
+    const code = maskJsComments(readFileSync(RUNNER_PATH, "utf8"));
+    const fnAt = anchorIndex(code, "export function runCorpus({");
+    const fnEnd = anchorIndex(code, "\n}\n", fnAt);
+    const body = code.slice(fnAt, fnEnd);
+    const scopeAt = anchorIndex(body, "log(scopeLine);");
+    expect(body.split("log(scopeLine);").length - 1, "exactly one `log(scopeLine);`").toBe(1);
+    const nextLog = anchorIndex(body, "log(", scopeAt + "log(scopeLine);".length);
+    const between = body.slice(scopeAt + "log(scopeLine);".length, nextLog);
+    expect(between, "the line between the two log calls computes the scope-reason line").toContain("scopeReasonLine(");
+    expect(body.slice(nextLog, nextLog + "log(reasonLine);".length)).toBe("log(reasonLine);");
   });
 });
 
@@ -3159,6 +3473,23 @@ describe("164.4.2-07 (D-D) — a SUBSET run never compares a narrowed tally agai
     expect(floorDefects(fires.defects, /FILES_FLOOR regression/), "one above the FULL count must fire on a subset run").toHaveLength(1);
   });
 
+  it("164.9.6 D-12: every corpus run logs ONE scope-reason line directly after its scope line, and returns it", () => {
+    const cases: Array<[Record<string, unknown>, string]> = [
+      [{ subsetFiles: ["mini-gate.sql"], scopeReason: "1 of 3 changed file(s) are gate files" }, "scope-reason: 1 of 3 changed file(s) are gate files"],
+      [{ subsetFiles: ["mini-migration.sql"], scopeReason: "r" }, "scope-reason: the runner fell back to FULL: no listed file is annotated: mini-migration.sql (derivation: r)"],
+      [{}, "scope-reason: no derivation reason supplied (a direct invocation)"],
+      [{ onlyFile: "mini-gate.sql" }, "scope-reason: a narrowed DIAGNOSTIC run (--file/--arm)"],
+    ];
+    for (const [opts, want] of cases) {
+      const { r, lines } = drive({ filesFloor: 0, armsFloor: 0, waivedCeiling: 9, ...opts });
+      const scopeAt = lines.findIndex((l) => l.startsWith("scope: "));
+      expect(scopeAt, JSON.stringify(opts)).toBeGreaterThan(-1);
+      expect(lines[scopeAt + 1], JSON.stringify(opts)).toBe(want);
+      expect(lines.filter((l) => l.startsWith("scope-reason:")), "exactly one per run").toHaveLength(1);
+      expect((r as { scopeReasonLine?: string }).scopeReasonLine).toBe(want);
+    }
+  });
+
   it("the CLI can never hand a subset run a lowered floor: main's runCorpus call passes no floor, ceiling or lane runner", () => {
     const code = maskJsComments(readFileSync(RUNNER_PATH, "utf8"));
     const at = code.indexOf("\nfunction main(argv) {");
@@ -3167,6 +3498,8 @@ describe("164.4.2-07 (D-D) — a SUBSET run never compares a narrowed tally agai
     expect(end).toBeGreaterThan(at);
     const mainBody = code.slice(at, end);
     const calls = mainBody.match(/runCorpus\(\{[^}]*\}\)/g) ?? [];
-    expect(calls).toEqual(["runCorpus({ scopeDir, onlyFile, onlyArm, subsetFiles })"]);
+    // ⭐ 2026-10-03 (Phase 164.9.6 D-12): `scopeReason` joined the call — a
+    // string the runner prints, never a floor, a ceiling or a lane runner.
+    expect(calls).toEqual(["runCorpus({ scopeDir, onlyFile, onlyArm, subsetFiles, scopeReason })"]);
   });
 });

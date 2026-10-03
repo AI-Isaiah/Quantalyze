@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.120.0.0] - 2026-10-03 — SUBSETMAIN: a push to main mutates only what it changed, and a nightly runs the full SQL mutation corpus
+
+### Added
+- **A push to `main` gets its own SQL gate verdict from the pushed range** (`scripts/sql-gate-subset.mjs`, push arm of `judge`). Three outcomes, each printed:
+  - **`none`** when the single-PR squash changed no gate file, no migration and no mutation machinery: the `sql-mutation` job prints `scope: NONE` and a `scope-reason:` line, and finishes green without booting the lane (D-09).
+  - **SUBSET** when gates and/or migrations changed: exactly the changed gates plus every gate whose `RED-UNDER-SETUP` loads a changed migration, read with the runner's own `parseAnnotations` (D-01, D-03).
+  - **FULL** with the reason for every doubt: a zero, forced, missing or non-ancestor before-SHA, more than one commit or a non-PR-merge commit, a git error, a malformed setup list, a migration no gate loads, a machinery change, or a predecessor not proven green (D-13).
+- **The shortcut needs a green predecessor** (D-13, review WR-03): `none` and SUBSET are taken only when `predecessorVerdict` proves the before-SHA green, the same proof the docs-only short path uses, so a red push can no longer be hidden by the next green `none` push. The `sql_gate_subset` step gets the job's `checks: read` token through `env:` only.
+- **One `scope-reason:` line on every corpus run** (PR, push, dispatch, nightly), beside the unchanged `scope:` line; the assert step fails the run when it is missing, duplicated or blank (D-12).
+- **`.github/workflows/sql-mutation-nightly.yml`**: the full corpus on `0 3 * * *` and on dispatch, its own `timeout-minutes: 45` (mutate step 40), wall time printed, floors enforced. A red night fails the workflow and files one GitHub issue deduplicated by the label `nightly-canary-failure:sql-mutation` (or comments on the open one) with the reading, the run link and the note that a red nightly on main's head can block a Railway redeploy of that SHA (D-05, D-06, D-11). Only the reporter job holds `issues: write`; the workflow takes no shared-TEST key and no secret. Its setup steps use the same pinned action versions as `ci.yml` (setup-node 7.0.0, after #626).
+
+### Changed
+- **The mutation floors moved to `scripts/mutation-floors.mjs`** (D-10), byte-for-byte with their dated measurement record; no value changed. The runner, the `ci.yml` assert step, the vitest ratchet, the threshold registry and CLAUDE.md's grep all read them there. On a push the floors file is not machinery, and `ci.yml` is machinery only when its `sql-mutation` or `changed-paths` section changed; on a pull request both stay machinery, so PR verdicts are unchanged.
+- The `sql-mutation` subset refusal is widened by exactly a push to `refs/heads/main`; every other event still runs FULL. Its `timeout-minutes: 20` ceiling is unchanged. `CLAUDE.md`'s SQL gate section and `ci.yml`'s header now describe the subset / none / nightly split and mark the old `[REDUNDER-SUBSET-SPLIT]` booking as shipped.
+
+### Fixed
+- Review WR-01: a push that changes only the mutex dead-holder drill's inputs (`scripts/mutex-dead-holder-verdict.sh`, `supabase-migrate.yml`) now runs FULL instead of skipping the drill.
+- Two test files typed their child-process env as spread literals, which `tsc` rejects; both now build a typed record.
+
+### Tests
+- `sql-gate-subset --self-test` grows to 28 rows / 92 assertions (none, subset, every FULL reason, the green-predecessor gate end to end with a fake `gh`, the drill inputs). New `sql-mutation-scope-step.test.ts` runs the real scope step body across event/ref/mode with calibrations, a gating pin over all eight lane steps, and real-history rows (`98f04db16` skips the lane on a green predecessor and runs FULL on a red one; `fd4d86cdf` takes a one-gate SUBSET). New `sql-mutation-nightly-parity.test.ts` pins the nightly's `run:` blocks byte-equal to `ci.yml`, with 12 broken-copy calibrations. The floors and contract tests cover the D-12 line and the token wiring.
+
+### Notes
+- **Measured on real history:** of the last 200 main pushes, at most 5 would have taken a SUBSET under the first design; this release adds the `none` verdict that covers the planning-only and code-only pushes. Back-to-back merges, and a predecessor whose CI is still running or red, take FULL by design.
+- **Known limits, recorded and not fixed (review MEDIUMs, founder decision):** a setup input outside migrations and machinery would read `none` (none exist today); the nightly issue does not name an assert-step-only failure; nothing alarms if the nightly stops running. The parity pin compares `run:` blocks, not `with:`/`env:`. The `changed-paths` job's worst case after the predecessor lookup is about 260 s of its 300 s budget. This PR's own merge push changes machinery, so it runs FULL under the 20-minute ceiling.
+- **Verify after merge:** one manual dispatch of the nightly on `main`, the first natural `none` push and the first natural SUBSET push, each read from its log.
+
 ## [0.119.0.3] - 2026-10-03 — @testing-library/jest-dom 7.0.1
 
 ### Changed

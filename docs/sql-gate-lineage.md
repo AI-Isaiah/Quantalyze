@@ -9,7 +9,8 @@ this one is the current reading."*
 
 ⛔ **Every arm count, file count and run id below is a DATED READING, not a live constant.**
 The live values are `export const FILES_FLOOR`, `export const ARMS_FLOOR` and
-`export const WAIVED_CEILING` in `scripts/mutation-runner/run.mjs`. Read them by SYMBOL.
+`export const WAIVED_CEILING` in `scripts/mutation-floors.mjs` (moved there from
+`scripts/mutation-runner/run.mjs` on 2026-10-03, Phase 164.9.6 D-10). Read them by SYMBOL.
 
 The `CORRECTION 2026-09-07` paragraph in here is the worked example of why: the prose said
 `ARMS_FLOOR` 369 → 380 while the shipped constant was 384. The prose and the constant had
