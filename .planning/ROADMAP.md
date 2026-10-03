@@ -2734,6 +2734,8 @@ independently shippable; this is the architecture.
   un-onboarded accounts, and the founder's one-time Navigator clean-up removes the list it holds;
   wiping either terminal after use is 164.6.6.1's. The validation-gateway STAND-UP stays in this
   phase, because this phase's routing refuses every validation until that gateway exists.
+- D-07 part 2 amended 2026-10-03 by founder decision (`164.6.6-CONTEXT.md`): "reject master passwords before any login" is not achievable with the MT5 Python API (every signal that tells a master password from an investor one needs a logged-in session), so it is replaced by `park-after-login`: containment after login, where every validation that reached its login ends, inside the same lease, with the validation terminal logged back into the house account, and every exit where no park can run alerts with a named cause. Deviation from a recorded decision, recorded here and in CONTEXT. ⚠️ Its premise, the house account logged in on both terminals at once, is NOT MEASURED (the job terminal is on a client account today) and was accepted by the founder with that caveat; it stays an open live check for verification.
+- D-07 part 1 residual 2026-10-03, founder decision (`164.6.6-CONTEXT.md`): accepted. Network isolation closes the rpyc channel to the public internet only; inside the Railway private network the port stays unauthenticated and reachable by all 6 services there, all of them this product's own, as before this phase.
 
 Plans:
 
