@@ -1,8 +1,7 @@
 """Drift gate for the KIND SCOPE on the CR-01 refresh-protection predicate.
 
 Phase 161.1, migration re-review (rls-policy-auditor MEDIUM). The protection in
-``supabase/migrations/20260825150000_sync_status_protect_marked_refresh.sql``
-keys on ``compute_jobs.metadata ->> 'source'`` — a key the request path also
+``sync_strategy_analytics_status`` keys on ``compute_jobs.metadata ->> 'source'`` — a key the request path also
 writes (``routers/process_key.py`` puts the caller's ``body.source`` into
 ``p_metadata``). Today the values cannot collide, because the Pydantic ``Source``
 Literal admits venue names only; that is one enum widening from not being true.
@@ -22,6 +21,15 @@ no compiler between them. This module is the compiler:
 ⛔ Every extraction below asserts it found something before it compares. A regex
 that silently matches nothing would make both tests pass against an empty set,
 which is the vacuity mode this phase has now found fifteen times.
+
+⭐ 2026-10-03 (Phase 164.5.2.1, D-12): the SQL side is no longer a hard-coded
+file. It is the NEWEST migration carrying a line-start ``CREATE`` of
+``sync_strategy_analytics_status``, found by scan, so the gate follows every
+re-base on its own. Until this date it read the 2026-08-25 protection migration,
+three re-bases behind the body that ships. The resolved file is cross-checked
+against the function snapshot's ``-- source migration:`` line, which
+``scripts/dump-sql-functions.ts`` derives independently, and every ``kind IN``
+list in the comment-stripped body must agree (there are two since this phase).
 """
 
 from __future__ import annotations
@@ -35,8 +43,25 @@ from services.job_worker import JOB_CHAIN_FOLLOW_ON
 _REPO_ROOT: Final[Path] = Path(__file__).resolve().parents[2]
 _MIGRATIONS: Final[Path] = _REPO_ROOT / "supabase" / "migrations"
 
-_PROTECTION_MIGRATION: Final[Path] = (
-    _MIGRATIONS / "20260825150000_sync_status_protect_marked_refresh.sql"
+_BRIDGE_SNAPSHOT: Final[Path] = (
+    _REPO_ROOT / "supabase" / "schema" / "functions"
+    / "sync_strategy_analytics_status.sql"
+)
+# A STATEMENT, not a mention: anchored at line start, so a header comment that
+# quotes the phrase never counts. Accepts the bare, `public.` and quoted
+# `"public"."..."` spellings of the name.
+_BRIDGE_CREATE_RE: Final[re.Pattern[str]] = re.compile(
+    r'^CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\s+'
+    r'(?:"public"\.|public\.)?"?sync_strategy_analytics_status"?\s*\(',
+    re.MULTILINE | re.IGNORECASE,
+)
+# The dollar-quoted body after the CREATE: `AS $$ ... $$` or `AS $tag$ ... $tag$`.
+_DOLLAR_BODY_RE: Final[re.Pattern[str]] = re.compile(
+    r"\bAS\s+(\$[A-Za-z_]*\$)(.*?)\1", re.DOTALL | re.IGNORECASE
+)
+_SQL_LINE_COMMENT_RE: Final[re.Pattern[str]] = re.compile(r"--[^\n]*")
+_SNAPSHOT_SOURCE_RE: Final[re.Pattern[str]] = re.compile(
+    r"^-- source migration: (\S+)$", re.MULTILINE
 )
 # The two recurring-refresh fan-out arms. Each enqueues one kind carrying a
 # marker; a third arm is exactly the drift this gate exists to catch, so it is
@@ -60,9 +85,11 @@ _PROCESS_KEY_ROUTER: Final[Path] = (
     _REPO_ROOT / "analytics-service" / "routers" / "process_key.py"
 )
 
-# `AND f.kind IN ('a', 'b', 'c')` inside the live_failures CTE.
+# Every `kind IN ('a', 'b', 'c')` (bare or `f.`-qualified) in the body: the
+# live_failures CTE's protection predicate and the non-terminal count's
+# unmarked FILTER.
 _SQL_KIND_SCOPE_RE: Final[re.Pattern[str]] = re.compile(
-    r"AND\s+f\.kind\s+IN\s*\(([^)]*)\)", re.IGNORECASE
+    r"\bkind\s+IN\s*\(([^)]*)\)", re.IGNORECASE
 )
 _SQL_LITERAL_RE: Final[re.Pattern[str]] = re.compile(r"'([a-z_]+)'")
 # `p_kind := 'derive_broker_dailies'` in a fan-out's enqueue_compute_job call.
@@ -86,17 +113,67 @@ def _read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
-def _sql_kind_scope() -> set[str]:
-    body = _read(_PROTECTION_MIGRATION)
-    match = _SQL_KIND_SCOPE_RE.search(body)
-    assert match is not None, (
-        "The CR-01 protection predicate has no `AND f.kind IN (...)` scope. "
-        "Without it the exemption trusts `metadata->>'source'` alone — a key "
-        "routers/process_key.py writes from the request body."
+def _newest_bridge_definition() -> tuple[Path, str]:
+    """The newest migration that CREATEs the bridge, and its comment-stripped body.
+
+    Filename order is apply order. The body is the dollar-quoted block after the
+    LAST such statement in that file, with `--` comments removed, so prose about
+    a kind list can never stand in for one.
+    """
+    migrations = sorted(_MIGRATIONS.glob("*.sql"))
+    assert migrations, f"No migrations found under {_MIGRATIONS}."
+    for path in reversed(migrations):
+        text = path.read_text(encoding="utf-8")
+        creates = list(_BRIDGE_CREATE_RE.finditer(text))
+        if not creates:
+            continue
+        body_match = _DOLLAR_BODY_RE.search(text, creates[-1].end())
+        assert body_match is not None, (
+            f"{path.name} CREATEs sync_strategy_analytics_status but no "
+            "dollar-quoted body follows it. The body extraction has drifted from "
+            "the file, so this gate would be comparing nothing."
+        )
+        body = _SQL_LINE_COMMENT_RE.sub("", body_match.group(2))
+        assert body.strip(), f"The bridge body in {path.name} parsed as empty."
+        return path, body
+    raise AssertionError(
+        "No migration CREATEs sync_strategy_analytics_status at line start. "
+        "Either the statement scan drifted or the function was dropped; in both "
+        "cases this gate is comparing nothing."
     )
-    kinds = set(_SQL_LITERAL_RE.findall(match.group(1)))
-    assert kinds, f"The kind scope parsed as empty from: {match.group(1)!r}"
-    return kinds
+
+
+def _snapshot_source_migration() -> str:
+    """The `-- source migration:` filename the function dumper recorded."""
+    sources = _SNAPSHOT_SOURCE_RE.findall(_read(_BRIDGE_SNAPSHOT))
+    assert len(sources) == 1, (
+        f"{_BRIDGE_SNAPSHOT.name} carries {len(sources)} `-- source migration:` "
+        "line(s), not 1. The bridge has one overload; anything else means the "
+        "snapshot format drifted and the cross-check below would compare nothing."
+    )
+    return sources[0]
+
+
+def _sql_kind_scope() -> set[str]:
+    path, body = _newest_bridge_definition()
+    lists = _SQL_KIND_SCOPE_RE.findall(body)
+    assert len(lists) >= 2, (
+        f"The bridge body in {path.name} carries {len(lists)} `kind IN (...)` "
+        "list(s), not at least 2 (the CR-01 protection predicate and the "
+        "non-terminal count's unmarked FILTER). Without the first the exemption "
+        "trusts `metadata->>'source'` alone, a key routers/process_key.py writes "
+        "from the request body."
+    )
+    scopes = [frozenset(_SQL_LITERAL_RE.findall(raw)) for raw in lists]
+    for raw, kinds in zip(lists, scopes):
+        assert kinds, f"A kind scope in {path.name} parsed as empty from: {raw!r}"
+    assert len(set(scopes)) == 1, (
+        f"KIND LISTS DISAGREE inside {path.name}: "
+        f"{[sorted(k) for k in scopes]}. The protection predicate and the "
+        "unmarked FILTER must admit the same kinds, or a job the bridge protects "
+        "is still counted as an unmarked sibling (or the reverse)."
+    )
+    return set(scopes[0])
 
 
 def _fanout_enqueued_kinds() -> set[str]:
@@ -145,8 +222,9 @@ def test_kind_scope_matches_every_marker_carrying_enqueue() -> None:
     * a kind in the SQL list that nothing can enqueue with a marker is exemption
       surface with no reachable producer, i.e. blast radius bought for nothing.
     """
+    path, _ = _newest_bridge_definition()
     assert _sql_kind_scope() == _marker_carrying_kinds(), (
-        "KIND SCOPE DRIFT: migration 20260825150000's `f.kind IN (...)` is "
+        f"KIND SCOPE DRIFT: {path.name}'s `kind IN (...)` lists read "
         f"{sorted(_sql_kind_scope())} but the kinds that can carry a refresh "
         f"marker are {sorted(_marker_carrying_kinds())} (the two fan-out "
         "migrations' p_kind enqueues plus the JOB_CHAIN_FOLLOW_ON hop out of "
@@ -174,8 +252,27 @@ def test_request_derived_enqueue_kind_is_outside_the_scope() -> None:
     collisions = matches & _sql_kind_scope()
     assert not collisions, (
         f"CONTAINMENT LOST: process_key.py enqueues {sorted(collisions)} with "
-        "the REQUEST's body.source in metadata, and migration 20260825150000 "
-        "protects that kind. The only remaining barrier is the Pydantic Source "
+        "the REQUEST's body.source in metadata, and the newest bridge "
+        f"definition ({_newest_bridge_definition()[0].name}) protects that kind. The only remaining barrier is the Pydantic Source "
         "Literal in services/ingestion/adapter.py — widen that enum and a "
         "caller can keep a permanently-failing strategy published."
+    )
+
+
+def test_newest_bridge_definition_is_the_snapshot_source() -> None:
+    """The scan and the function dumper must name the SAME migration.
+
+    Two independent resolvers: this module's line-start statement scan, and
+    ``scripts/dump-sql-functions.ts``, which replays every migration and records
+    which file the surviving body came from. If they disagree, one of them is
+    reading a body that does not ship, and the kind comparison above would be
+    measuring that body.
+    """
+    path, _ = _newest_bridge_definition()
+    source = _snapshot_source_migration()
+    assert path.name == source, (
+        f"BRIDGE RESOLVER DISAGREEMENT: the statement scan resolves {path.name}, "
+        f"but {_BRIDGE_SNAPSHOT.name} says its body came from {source}. Re-run "
+        "`npm run schema:functions` if the snapshot is stale; otherwise the scan "
+        "regex has drifted."
     )

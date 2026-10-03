@@ -16,6 +16,7 @@
 # step's `if:` is merge-push only), so `test-db-drift`'s VAC-08 has NO ordering
 # against `apply-test` or a dispatched restore. See the note in `wait_for_apply`
 # and section 0 of docs/runbooks/shared-test-db-mutex.md.
+# (2026-09-26, Phase 164.9.4 CIOFFMUTEX: python and e2e-seeded run on a runner-private lane and no longer invoke this wait; its ci.yml invoker is test-db-drift, plus sql-gate-lint's --self-test. The lines above are lineage.)
 #
 # ⭐ WHY A WAIT AND NOT A LOCK. A mutex guarantees that no two holders overlap;
 # it never guarantees WHICH GOES FIRST. On a merge push, ci.yml's reader jobs
@@ -303,6 +304,10 @@ wait_for_apply() {
       # passes or fails on its merits), or fails loudly (the TRUNCATE holding a
       # read past its statement timeout on every retry, or a body fetch racing
       # a COMMIT). It cannot pass on a state that never committed.
+      # (2026-09-26, CIOFFMUTEX: the first note's "the mutex still keeps
+      # `python` and `e2e-seeded` from overlapping a writer" is lineage.
+      # Both jobs now run on a runner-private lane and take no key, and no
+      # ci.yml job holds it. See the header's dated note.)
       # `unknown` is deliberately NOT treated as clear: an unreadable probe
       # cannot rule an apply IN, which is the same reading the exhaustion
       # message already states.

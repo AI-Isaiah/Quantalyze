@@ -859,7 +859,7 @@ items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **
 
       ⛔ **Shape B is REJECTED, not deferred.** (Auto-deploy off + a repo-owned `serviceInstanceDeploy(commitSha:)` gated on the analytics-covering checks.) It was the ONLY shape compliant with the constraint that Railway cannot narrow its own wait — `DeploymentTrigger.checkSuites` is a `Boolean` on the object and on both input types, introspected, a present type-system fact, with no CLI verb and no config-as-code key. It would have cost production writes, a second deploy path to own forever, and rested on an UNSETTLED question: **whether an API-triggered deploy even bypasses `checkSuites`. If it does not, Shape B does not work at all.** ⛔ Do not revive it without answering that question first, on a throwaway service.
 
-- [ ] **`[DERIBIT-ASSIGNMENT-UNCLASSIFIED]` Deribit's `assignment` transaction-log type is in
+- [x] **`[DERIBIT-ASSIGNMENT-UNCLASSIFIED]` Deribit's `assignment` transaction-log type is in
    neither `CASH_BEARING_TYPES` nor `INFORMATIONAL_TYPES`, so every options account carrying one
    FAILS ingestion — and the classification cannot be decided without evidence nobody has yet.**
    ⛔ MEASURED IN PRODUCTION 2026-09-12, not hypothetical. A real Deribit Iron Condor produced:
@@ -903,6 +903,13 @@ items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **
    into 161.1 or 166). That entry carries the deciding question and the forbidden remedies.
    **Close condition:** `assignment` is classified against a captured row census, with a test and a
    fixture, and a deribit options account is observed to ingest end to end.
+   ✅ **CLOSED 2026-10-03 WITH A CAVEAT** (founder 2026-10-03: "count first, then close"). Phase 168
+   DRBOPTIONS classified `assignment` as cash-bearing, with tests and a fixture (plans 01/02), and the
+   Quantum Drift options account ingests end to end (plan 03). ⚠️ **The caveat:** whether an
+   `assignment` row is present is NOT measurable from the database. PROD stores no Deribit
+   transaction rows: `trades` holds 0 Deribit rows (founder's read-only count, 2026-10-03), because
+   the transaction log is fetched live at ingest time. So the close rests on the classification, its
+   tests and the observed ingest, not on a counted row.
 
 0.3. **📋 DISPOSITION (D-COMP / D-01, decided 2026-08-25) — composite ledger strategies, and the
    coverage gap the decision leaves open until the composite arm lands.**
@@ -1431,7 +1438,7 @@ true for 146 and half of 142–145, and **false for 141**.
       - Seen at 500 px and 735 px. Not caused by 169.1.
       - **Destination: Phase 170.1 COPY** (page-layout pass), or fix-or-drop if 170.1 declines it.
 
-- [ ] **`[164.6.7-RETRY-PLAIN-COMPLETE]` The transient retry keeps a factsheet published only if
+- [x] **`[164.6.7-RETRY-PLAIN-COMPLETE]` The transient retry keeps a factsheet published only if
       its row was `complete_with_warnings` or warned; a plain `complete` row is not protected across
       the retry (booked 2026-09-26, Phase 164.6.7 round-2 review WR-01 / SFH-R2-03).**
       - **What happens.** A marked refresh whose marker re-read fails now raises
@@ -1456,8 +1463,21 @@ true for 146 and half of 142–145, and **false for 141**.
         mark RPCs fanning into this bridge (same routing as
         `[164.6.7-COMPOSITE-REREAD-RESIDUE]` below). Dated routing line under `### Phase 164.5.2`
         in `.planning/ROADMAP.md`.
+      - ✅ CLOSED 2026-10-03 by Phase 164.5.2.1 BRIDGERESIDUE. Migration
+        `20261003120000_sync_status_bridge_residues.sql` gives branch (a) of
+        `sync_strategy_analytics_status` a keep arm: a published plain `complete` row stays `complete`,
+        with the reaper stamp NULL, when every in-flight job carries an in-scope refresh marker and no
+        unprotected failure is live. Evidence, per the plan 02 SUMMARY: in the residue gate
+        `supabase/tests/test_sync_status_bridge_residues.sql`, arms R1 (and its composite sub-arm) and R5
+        went RED on the pre-fix bodies and GREEN on the fix; guards R2..R4 and R6 keep the keep no wider
+        than decision D-05; every arm has a layered twin the mutation runner measured biting. Founder
+        decision 2026-10-03 ("Hold the date for both"): a row branch (a) keeps also holds `computed_at`,
+        `computation_error` and both provenance markers (arms K1..K3, plan 03). ⚠️ The fix is live only
+        once the merge applies the migration to PROD; until that apply, PROD behaves as described above.
+        The `computed_at` lag the hold causes after a real recompute is booked as
+        `[164.5.2.1-COMPUTED-AT-RUNNER-STAMP]` below.
 
-- [ ] **`[164.6.7-COMPOSITE-REREAD-RESIDUE]` A marker retraction that lands between the Python live
+- [x] **`[164.6.7-COMPOSITE-REREAD-RESIDUE]` A marker retraction that lands between the Python live
       re-read and `mark_compute_job_failed` still leaves the pre-fix outcome, over a window of
       milliseconds (booked 2026-09-25, Phase 164.6.7 COMPOSITECLAIMSNAPSHOT, decision D-03).**
       - **What remains.** Phase 164.6.7 made the `_stamp_failed` closure of
@@ -1502,6 +1522,64 @@ true for 146 and half of 142–145, and **false for 141**.
           runs after `_stamp_failed` returns; the heartbeat cancel in `main_worker`; and
           `_safe_mark` → `db_execute` for `mark_compute_job_failed`, which can queue behind a
           saturated `_DB_EXECUTOR`. The harm probe's zero-member driver exercises none of them.
+      - ✅ CLOSED 2026-10-03 by Phase 164.5.2.1 BRIDGERESIDUE, with ONE corner ACCEPTED (below).
+        Migration `20261003120000_sync_status_bridge_residues.sql` makes `sync_strategy_analytics_status`
+        clear `computation_warned` in branch (b), and resolve the row to `computing` with a reaper stamp
+        in branch (a), whenever the row's writer-provenance job is among the UNPROTECTED live failures
+        (one `array_agg(id)` pick in the existing live-failure read, same snapshot). Decision D-04
+        (branch (b) only) was SUPERSEDED by D-04b (branches (b) AND (a)) after research measured D-04
+        missing the later-sibling and in-flight corners; founder ratified 2026-09-27. Evidence, per the
+        plan 01 SUMMARY: in the residue gate `supabase/tests/test_sync_status_bridge_residues.sql`, arms
+        W1..W5 (W1 with its composite sub-arm) went RED on the pre-fix body and GREEN on the fix; guards
+        W6 (SI-02) and W7 (the protected honour path) are green on both bodies; every arm has a layered
+        twin the mutation runner measured biting. Plan 03 also put the mark RPCs' per-strategy advisory
+        lock inside the bridge itself (LANE-ONLY gate `supabase/tests/test_sync_status_bridge_lock.sql`,
+        arms B1, B2). Both honour arms (composite and single-key derive) are covered by the one change.
+        ⚠️ The fix is live only once the merge applies the migration to PROD.
+        ⛔ **ACCEPTED, NOT CLOSED: the D-18 PRE corner** (founder-owned, default (a) "accept and record",
+        ACCEPTED 2026-09-27). A SIBLING's bridge call lands while X is still `running`, after the Python
+        honour write and before X's own mark; it takes branch (a) and blanks the provenance, so after a
+        marker retraction X's failure cannot be tied to its writer and the warning stays up until the
+        runner's next success writer. It needs BOTH conditions inside one window: (1) a marker-retraction
+        race AND (2) a sibling terminal transition between the honour write and X's mark. Measured OPEN
+        under every SQL shape considered. ⭐ NARROWED 2026-10-03 by plan 03: on a
+        `complete_with_warnings` row the sibling's call is now a keep that holds X's provenance, so X's
+        loud mark clears the warning (pg-lane probe: before `failed` warned `t`, after `failed` warned
+        `f`); the acceptance stands for what remains. Exits the founder can still take: (b) route a
+        Python-side item (the honour path is the only place that knows X's writer reached the row), or
+        (c) a SQL redesign in which branch (a) preserves sentence and provenance for a still-non-terminal
+        job, which changes Phase 164.2's "branch (a) clears both markers" contract.
+- [ ] **`[164.5.2.1-COMPUTED-AT-RUNNER-STAMP]` After a real recompute that ends
+      `complete_with_warnings` while a sibling job is still in flight, the factsheet keeps its old
+      `computed_at` until the sibling finishes (booked 2026-10-03, Phase 164.5.2.1 BRIDGERESIDUE;
+      USER-FACING; founder 2026-10-03: "Keep the hold, book the fix").**
+      - **What happens.** The bridge `sync_strategy_analytics_status` is the ONLY writer of
+        `strategy_analytics.computed_at`; the analytics runner never stamps it. Since migration
+        `20261003120000`, a row branch (a) KEEPS holds `computed_at` (the founder's hold-the-date
+        decision, so a keep does not re-stamp a row nothing recomputed). The bridge cannot tell "the runner
+        just recomputed" from "nothing ran", so the runner's own done mark over a real recompute is a
+        keep while a sibling is in flight, and `computed_at` stays at its PRE-compute value until the
+        last in-flight job terminates (branch (c) or (b) then stamps `now()`).
+      - **Measured** on the pg-lane by plan 03 (scratch probe): the old body re-stamped at the analytics
+        done; the new body held the 3-day-old seed at the analytics done and caught up at the sibling's
+        done. Readers that lag: the factsheet FreshnessChip and the portfolio PDF vintage. The staleness
+        verdict is not affected (it keys on `returns_series` dates).
+      - **The opposite direction: fresh without a compute** (found by the 164.5.2.1 code review,
+        WR-01). The hold lives in branch (a) only. Branch (c) still writes `computed_at = now()`
+        whenever the job finishing last is ANY terminal strategy-scoped job with nothing else in
+        flight, e.g. the cron `sync_trades` poller or a `process_key_long`, and on a
+        `complete_with_warnings` row it keeps the status. So the FreshnessChip and the PDF vintage
+        can move FORWARD with nothing recomputed. The date can therefore be wrong both ways: stale
+        after a real recompute, fresh after none.
+      - **Fix.** The analytics runner stamps `computed_at` itself on a real finish, so the bridge's hold
+        no longer stands in for "nothing was recomputed". ⚠️ That alone closes only the lag. The fix
+        must ALSO stop the bridge stamping `computed_at` in branch (c) once the runner stamps, or the
+        fresh-without-compute direction stays open. Outside the SQL-only Phase 164.5.2.1 (D-05b).
+      - **Owner:** Phase 166.5 COMPUTEDATSTAMP (inserted 2026-10-03; booked in `.planning/ROADMAP.md`
+        on `main`), which owns both directions above. **Closed when:** a real recompute
+        that ends `complete_with_warnings` beside an in-flight sibling advances `computed_at` at the
+        runner's finish, AND a terminal job that recomputed nothing (branch (c)) leaves
+        `computed_at` unchanged, each with a test that fails on today's behaviour.
 - [ ] **`[169-DEAD-ADMIN-JOBS-RPC]` Drop the dead `get_admin_compute_jobs` database function
       (booked 2026-09-25, Phase 169 D-01).**
       It raises "column reference `id` is ambiguous" on every call (its `RETURNS TABLE` declares an
@@ -1570,8 +1648,12 @@ true for 146 and half of 142–145, and **false for 141**.
       **Closed when:** the compute selects only real columns, derives daily returns from the stored
       series, and a test that fails on today's select pins both.
 
-- [ ] **`[164.9.4-CI-MUTEX-QUEUE]` `python` and `e2e-seeded` spend most of their CI wall clock
+- [x] **`[164.9.4-CI-MUTEX-QUEUE]` `python` and `e2e-seeded` spend most of their CI wall clock
       queued on the shared-TEST advisory lock (booked 2026-09-26, founder decision).**
+      ✅ **CLOSED 2026-10-03 by Phase 164.9.4 CIOFFMUTEX (v0.119.0.0).** `ci.yml` holds the key 0×; both jobs
+      boot a runner-private local-stack lane. Measured on run `37039941530` against tree-matched `37028872024`:
+      `python` 41m33s → 13m06s, `e2e-seeded` 30m19s → 11m14s (`164.9.4-MEASUREMENT.md`). SC-3's e2e-seeded
+      count is graded on the ship run (founder decision 2026-10-03).
       **Measured 2026-09-26 on CI run `36229959820` (PR #864, 52 min wall clock).** `python` took
       50 min: 36 min in "Acquire shared-test-db mutex" and 13 min in pytest. `e2e-seeded` took
       36 min: 28 min on the mutex and 5 min on specs. Every other job took 12 min or less. The wait
@@ -3416,6 +3498,9 @@ true for 146 and half of 142–145, and **false for 141**.
       reads so the exemption is visible rather than silent. ⛔ Do NOT retro-fit a SUMMARY now that
       the requirement is met elsewhere — fabricating one for work nobody did is the exact exit
       that marker file exists to prevent, and it says so in its own body.
+      ⚠️ **NOTE 2026-10-03.** PR #930 added a supersession SUMMARY for plan 07 on 2026-10-02, which
+      turned `main` red; it was removed in #880, and plan 07 is now retired with `status: superseded`
+      frontmatter (#932). The advice above stands, and the frontmatter rule now enforces it.
       ⭐ **OWNER 2026-09-05: the OBSERVATION half is Phase 164.7's**, the first migration-bearing
       phase in the queued order (164.1 → 164.2 → **164.7** → 164.5 → 164.6), rolling forward to
       **Phase 164.5** (DRIFT-04's `DROP FUNCTION`, CRON-DRIFT-01-REPAIR) if 164.7's migration does
@@ -9317,6 +9402,25 @@ backs ~9 surfaces — the remedy for any of its flows is a NEW named limiter, ne
   docs-only PR opening and either of those, and inside it a red arrives LATE, not never. ⛔ Do not
   restate this as "the gate was lost", and do not restate it as "nothing changed" — both halves are
   load-bearing and stating only one of them misroutes whoever picks this up.
+  ⛔ **CORRECTED 2026-10-02 (Phase 164.9.4 review round 2, WR-01): the merge push to `main` is no
+  longer unfiltered.** Since 164.9.4 a `.planning/`-only push is classified by its pushed range
+  (`scripts/classify-changed-paths.mjs` `classifyPushRange`) and takes the short path. To keep the
+  first backstop above, the founder decided on 2026-10-02 that a push range touching a `.planning/`
+  file a `frontend-test` assertion reads is CODE: `TEST_READ_PLANNING_PATHS` lists the seven measured
+  entries (`config.json`, `REQUIREMENTS.md`, `ROADMAP.md`, `159-VERIFICATION.md`, and Phase 164.3's
+  `164.3-07-DEFERRED.md`, `164.3-07-PLAN.md` and absent `164.3-07-SUMMARY.md`), so the merge push of
+  a docs-only PR that touches one of them still runs `frontend-test`. (Round 3, CR-01, same day:
+  `config.json` was added after a whole-tree derivation found `critical-regressions.test.ts` reading
+  it; the earlier "six" was measured from two named test files only. The founder confirmed the list
+  may grow beyond the original three.) A docs-only push also takes the short path only when Railway's
+  own gate would pass on its predecessor: every GitHub Actions check run on `before`, all workflows
+  and events, non-red (`docs/runbooks/railway-worker.md`, Recovery step 2). So a docs merge can no
+  longer turn `main` green over a red predecessor either. Both halves above therefore
+  still hold for those files. The paragraph above is kept as lineage.
+  ⛔ **CORRECTED 2026-10-02 (Phase 164.9.4 review round 4, CR-01):** "every Actions check run
+  non-red" alone was not proof CI ran on the predecessor (a scheduled workflow's green checks
+  passed it). The predecessor must now also carry a successful `frontend` check run, and every
+  GitHub Actions check suite on it must be completed and non-red (D-16 in `164.9.4-CONTEXT.md`).
   ⛔ **TWO REMEDIES WERE CONSIDERED AND BOTH REFUSED, recorded so neither is re-proposed as new.**
   (1) Widen the always-on set to include `frontend-test` — REFUSED: that job is most of the saving
   the filter exists to produce, so buying two deferred assertions back at that price undoes the
@@ -9864,6 +9968,9 @@ follows is what was deliberately left, with the reason.
     a cross-strategy fan-in release, the refresh-marker retraction) stay unserialized, and a lock
     inside the bridge itself is routed to **Phase 164.5.2.1 BRIDGERESIDUE**. The bridge's
     read-order pins stay load-bearing.
+    ⭐ 2026-10-03: the lock inside the bridge is delivered by Phase 164.5.2.1 BRIDGERESIDUE (plan 03,
+    migration `20261003120000`, LANE-ONLY gate `supabase/tests/test_sync_status_bridge_lock.sql`); live
+    once the merge applies it to PROD. The other non-mark writers listed above stay unserialized.
 
 161.1-D2. **⚠️ A systematic enqueue failure in either fan-out is indistinguishable from "nothing
   was stale".** Both `enqueue_ledger_refresh_for_strategies` and `enqueue_ledger_composite_refresh`

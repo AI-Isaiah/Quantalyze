@@ -308,7 +308,7 @@ jobs:
 
           echo "configured=false" >> "$GITHUB_OUTPUT"
           echo "::notice::Supabase Migrate skipped — secrets not configured. Set SUPABASE_PROJECT_REF (var), SUPABASE_ACCESS_TOKEN and SUPABASE_DB_PASSWORD (secrets) to enable auto-migration. (Tolerated for workflow_dispatch only; a push to main fails loud.)"
-      - uses: supabase/setup-cli@3c2f5e2ae34c34e428e8e206e2c4d21fa2d20fbf  # v2.1.1
+      - uses: supabase/setup-cli@45a513f8c64c0bc8e0e3dfe572b5c95be85f6359  # v3.0.1
         if: steps.check.outputs.configured == 'true'
         with:
           # Pinned to match the apply job's CLI version (see comment there).
@@ -459,7 +459,7 @@ jobs:
       # same reason: CLI-version drift must not silently change
       # `db push --include-all` semantics between the stage and the thing it stages
       # for. One tool applies to TEST and to PROD, or the stage proves nothing.
-      - uses: supabase/setup-cli@3c2f5e2ae34c34e428e8e206e2c4d21fa2d20fbf  # v2.1.1
+      - uses: supabase/setup-cli@45a513f8c64c0bc8e0e3dfe572b5c95be85f6359  # v3.0.1
         with:
           version: 2.98.2
 
@@ -1314,7 +1314,7 @@ jobs:
             exit 1
           fi
           echo "::notice::Re-dump credentials present."
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
           node-version: 22
       # D-26: the release tarball is verified against the sha256 hard-coded
@@ -1336,7 +1336,7 @@ jobs:
           echo "${RUNNER_TEMP}/gitleaks-bin" >> "${GITHUB_PATH}"
       - name: baseline-redump self-test (with gitleaks)
         run: node scripts/baseline-redump.mjs --self-test --with-gitleaks
-      - uses: supabase/setup-cli@3c2f5e2ae34c34e428e8e206e2c4d21fa2d20fbf  # v2.1.1
+      - uses: supabase/setup-cli@45a513f8c64c0bc8e0e3dfe572b5c95be85f6359  # v3.0.1
         with:
           # The same pin as `apply` (D-04): the dump is taken by the CLI version
           # the PROD apply ran, and the version is recorded in BASELINE.md.
@@ -1435,7 +1435,7 @@ jobs:
           ref: main
           fetch-depth: 0
           persist-credentials: false
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
           node-version: 22
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
@@ -1494,7 +1494,7 @@ jobs:
           # GITHUB_TOKEN cred from .git/config. The apply job uses
           # SUPABASE_ACCESS_TOKEN; no GITHUB_TOKEN-backed git ops.
           persist-credentials: false
-      - uses: supabase/setup-cli@3c2f5e2ae34c34e428e8e206e2c4d21fa2d20fbf  # v2.1.1
+      - uses: supabase/setup-cli@45a513f8c64c0bc8e0e3dfe572b5c95be85f6359  # v3.0.1
         with:
           # Pinned: avoid `latest` so CLI-version drift cannot silently change
           # `db push --include-all` semantics between plan and apply jobs (or

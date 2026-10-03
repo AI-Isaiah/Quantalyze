@@ -35,13 +35,15 @@
 # server binaries rather than holding a second opinion, and it destroys its
 # cluster and scratch directory from an EXIT trap in every outcome.
 #
+# ⛔ RE-POINTED 2026-09-26 (Phase 164.9.4 CIOFFMUTEX): ci.yml no longer holds the shared-test-db key after this phase, so its release step is gone; the drill reads the byte-identical copy in supabase-migrate.yml (job apply-test), which D-02 leaves untouched. The ci.yml wording above is lineage.
+#
 # Usage: bash scripts/pg-lane/mutex-dead-holder-lane.sh
 set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO=$(cd "$SCRIPT_DIR/../.." && pwd)
 VERDICT_SH="$REPO/scripts/mutex-dead-holder-verdict.sh"
-CI_YML="$REPO/.github/workflows/ci.yml"
+SOURCE_YML="$REPO/.github/workflows/supabase-migrate.yml"
 
 fail() { echo "ERROR: $*" >&2; exit 1; }
 
@@ -54,7 +56,7 @@ if [ "$#" -gt 0 ]; then
 fi
 
 [ -f "$VERDICT_SH" ] || fail "scripts/mutex-dead-holder-verdict.sh not found at $VERDICT_SH"
-[ -f "$CI_YML" ] || fail ".github/workflows/ci.yml not found at $CI_YML — this drill runs the release step's own body and has nothing to run without it."
+[ -f "$SOURCE_YML" ] || fail ".github/workflows/supabase-migrate.yml not found at $SOURCE_YML — this drill runs the release step's own body and has nothing to run without it."
 
 PGBIN=$("$SCRIPT_DIR/run.sh" --print-pgbin) \
   || fail "scripts/pg-lane/run.sh --print-pgbin refused — no PostgreSQL server binaries available. This drill cannot run and reports nothing rather than a green it did not measure."
@@ -105,13 +107,13 @@ pg_isready -h 127.0.0.1 -p "$PORT" -q 2>/dev/null \
 psqlq() { psql -h 127.0.0.1 -p "$PORT" -U postgres -d postgres -X -q -A -t -v ON_ERROR_STOP=1 "$@"; }
 
 # This drill's own RUNNER_TEMP stand-in. Everything the release step reads or
-# writes underneath it is DERIVED FROM ci.yml below — this line only decides
+# writes underneath it is DERIVED FROM supabase-migrate.yml below — this line only decides
 # WHERE the runner's scratch directory is, which is the one thing a runner
 # supplies and a workflow file never states.
 RUNNER_TEMP="$WORKDIR"
 export RUNNER_TEMP
 
-# ── Extract the release step's own `run:` body from ci.yml, verbatim. ─────
+# ── Extract the release step's own `run:` body from supabase-migrate.yml, verbatim. ─
 # The body is the block under `run: |` inside the first
 # `Release shared-test-db mutex (best effort)` step, de-indented by the ten
 # spaces GitHub itself strips. It is EXECUTED below, not re-implemented.
@@ -123,12 +125,12 @@ RELEASE_BODY=$(awk -v want="      - name: ${RELEASE_STEP_NAME}" '
     if ($0 !~ /^          / && $0 !~ /^[[:space:]]*$/) { exit }
     sub(/^          /, ""); print
   }
-' "$CI_YML")
+' "$SOURCE_YML")
 [ -n "${RELEASE_BODY}" ] \
-  || fail "could not extract the \"${RELEASE_STEP_NAME}\" step's run: body from ${CI_YML}. This drill EXECUTES that body rather than restating it, so it has nothing to drive and refuses rather than reporting a green it did not measure."
+  || fail "could not extract the \"${RELEASE_STEP_NAME}\" step's run: body from ${SOURCE_YML}. This drill EXECUTES that body rather than restating it, so it has nothing to drive and refuses rather than reporting a green it did not measure."
 
 # ── Derive the two paths the body itself names, from the body itself. ─────
-# ⛔ Neither is written out here. A ci.yml that stops writing a dead-holder
+# ⛔ Neither is written out here. A source workflow that stops writing a dead-holder
 # marker makes the second derivation find nothing and this drill fail LOUD —
 # which is the whole point of reading the line instead of copying it.
 derive_one() {
@@ -139,7 +141,7 @@ derive_one() {
   case "${n}" in
     1) printf '%s\n' "${lines}" ;;
     *)
-      fail "expected EXACTLY ONE ${label} line in the \"${RELEASE_STEP_NAME}\" step's body in ${CI_YML}, found ${n}. Matching pattern: ${pattern}. ${label} is what this drill drives; zero of them means the release step no longer does the thing the verdict step turns into a job verdict, and this drill must not pass."
+      fail "expected EXACTLY ONE ${label} line in the \"${RELEASE_STEP_NAME}\" step's body in ${SOURCE_YML}, found ${n}. Matching pattern: ${pattern}. ${label} is what this drill drives; zero of them means the release step no longer does the thing the verdict step turns into a job verdict, and this drill must not pass."
       ;;
   esac
 }
@@ -152,7 +154,7 @@ MARKER_LINE=$(derive_one "dead-holder marker write" '^[[:space:]]*: > "\$\{RUNNE
 eval "MARKER=$(printf '%s' "${MARKER_LINE}" | sed -E 's/^[[:space:]]*: > //')"
 
 LOG="$RUNNER_TEMP/mutex-dead-holder-lane-holder.log"
-echo "=== DRILL: derived from ${CI_YML##*/} — pidfile ${PIDFILE##*/}, dead-holder marker ${MARKER##*/} ==="
+echo "=== DRILL: derived from ${SOURCE_YML##*/} — pidfile ${PIDFILE##*/}, dead-holder marker ${MARKER##*/} ==="
 
 # ── Start the holder: a background psql session taking the SAME session
 # advisory lock key (61616158) the shared-test-db mutex uses, then sleeping.
@@ -184,7 +186,7 @@ fi
 echo "=== DRILL: holder pid ${HOLDER_PID} killed — reproducing 'died BEFORE this release step' ==="
 
 # ── RUN THE RELEASE STEP'S OWN BODY. Not a mirror of it — the bytes
-# extracted from ci.yml above, executed in a subshell under the same shell
+# extracted from supabase-migrate.yml above, executed in a subshell under the same shell
 # options GitHub Actions uses for a `run:` block (`-e -o pipefail`, and NOT
 # `-u`). The subshell is what makes the body's own `exit 0` early return
 # land where it would on a runner instead of ending this drill. The secret
@@ -198,9 +200,9 @@ rc_release=$?
 set -e
 sed 's/^/    | /' "$WORKDIR/release-body.out"
 [ "$rc_release" -eq 0 ] \
-  || fail "the release step's own body exited ${rc_release} on this drill's fixture. Its documented invariant is that it NEVER reddens a job, so a non-zero exit here is a regression in ci.yml, not in this drill."
+  || fail "the release step's own body exited ${rc_release} on this drill's fixture. Its documented invariant is that it NEVER reddens a job, so a non-zero exit here is a regression in ${SOURCE_YML##*/}, not in this drill."
 grep -aq 'died BEFORE this release step' "$WORKDIR/release-body.out" \
-  || fail "the release step's own body did not print its dead-holder annotation against an already-dead holder. Either its \`kill\` succeeded (pid reuse — re-run) or the dead-holder branch is gone from ci.yml."
+  || fail "the release step's own body did not print its dead-holder annotation against an already-dead holder. Either its \`kill\` succeeded (pid reuse — re-run) or the dead-holder branch is gone from ${SOURCE_YML##*/}."
 [ -f "${MARKER}" ] \
   || fail "the release step's own body ran its dead-holder branch but no marker exists at ${MARKER}. The verdict step reads a marker file and nothing else, so a release step that stops writing one turns the verdict permanently green — this is exactly the condition this drill exists to catch."
 echo "=== DRILL: the release step's own body wrote the dead-holder marker at ${MARKER} ==="
@@ -222,10 +224,10 @@ grep -aq 'died BEFORE the release step' "$WORKDIR/verdict-red.out" \
 # Nothing else in the repo makes those two literals equal, so a rename on
 # either side would leave both files individually sensible and the verdict
 # permanently green. The verdict names the path it read; assert it is the
-# path ci.yml's own body just wrote.
+# path the source workflow's own body just wrote.
 grep -aqF "Marker: ${MARKER}" "$WORKDIR/verdict-red.out" \
-  || { cat "$WORKDIR/verdict-red.out" >&2; fail "PATH MISMATCH: the release step's body (from ci.yml) wrote its marker at ${MARKER}, but scripts/mutex-dead-holder-verdict.sh reports reading a different path. The two literals have diverged, which silently disarms the verdict."; }
-echo "=== RED OBSERVED: verdict exited ${rc_red}, named the dead-holder condition, and read the SAME marker path ci.yml wrote ==="
+  || { cat "$WORKDIR/verdict-red.out" >&2; fail "PATH MISMATCH: the release step's body (from ${SOURCE_YML##*/}) wrote its marker at ${MARKER}, but scripts/mutex-dead-holder-verdict.sh reports reading a different path. The two literals have diverged, which silently disarms the verdict."; }
+echo "=== RED OBSERVED: verdict exited ${rc_red}, named the dead-holder condition, and read the SAME marker path ${SOURCE_YML##*/} wrote ==="
 
 # ── Observation 2 (GREEN): remove the marker, the verdict must exit 0. ────
 rm -f "${MARKER}"

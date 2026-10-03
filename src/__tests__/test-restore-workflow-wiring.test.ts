@@ -43,10 +43,14 @@ import { join } from "node:path";
 const ROOT = process.cwd();
 const WF_PATH = ".github/workflows/test-restore-from-baseline.yml";
 const CI_PATH = ".github/workflows/ci.yml";
+// Phase 164.9.4: the reference for the cross-file mutex byte-identity trio. It is the
+// other workflow that keeps advisory key 61616158 once ci.yml's copies leave.
+const MIGRATE_PATH = ".github/workflows/supabase-migrate.yml";
 const SCRIPT_PATH = "scripts/restore-test-from-baseline.sh";
 const read = (rel: string): string => readFileSync(join(ROOT, rel), "utf8");
 const WF = read(WF_PATH);
 const CI = read(CI_PATH);
+const MIGRATE = read(MIGRATE_PATH);
 const SCRIPT = read(SCRIPT_PATH);
 // [164.8.4-01] The one shared psql-stderr redaction definition — the UNION of the six
 // expression shapes measured across the eight inline blocks it replaces. Read from disk,
@@ -3802,22 +3806,30 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
     });
   });
 
-  describe("cross-file: the mutex protocol is ci.yml's, byte for byte", () => {
+  // 2026-09-26, Phase 164.9.4: ci.yml's copies leave with python and e2e-seeded; the
+  // reference moved to the other remaining taker. The old titles, kept as lineage, were
+  // "cross-file: the mutex protocol is ci.yml's, byte for byte", "the acquire suffix is
+  // byte-identical to ci.yml's, and our prefix fails loud" and "the release step is
+  // byte-identical to ci.yml's, if: always() included". supabase-migrate-test-first.test.ts
+  // makes the MIRROR comparison (this file's WF as its reference), on purpose: each suite
+  // stays self-contained and each reds on a drift in either file.
+  describe("cross-file: the mutex protocol is supabase-migrate.yml's, byte for byte", () => {
     it("CALIBRATION (IN-03 remainder): BOTH anchored halves throw on a missing anchor", () => {
       // The mutation, asserted APPLIED before the flip is asserted — a subject that
       // still contains the anchor would make both expectations below vacuous, which
       // is the very disease this fix cures.
-      const ciStep = CI.match(ACQUIRE_RE)?.[0] ?? "";
-      expect(ciStep, "ci.yml's Acquire step could not be extracted").not.toBe(
-        "",
-      );
-      const anchorless = ciStep
+      const refStep = MIGRATE.match(ACQUIRE_RE)?.[0] ?? "";
+      expect(
+        refStep,
+        `${MIGRATE_PATH}'s Acquire step could not be extracted`,
+      ).not.toBe("");
+      const anchorless = refStep
         .split(SUFFIX_ANCHOR)
         .join("          if ! command -v RENAMED");
       expect(
         anchorless,
         "CALIBRATION: removing the anchor changed nothing, so the subject is not anchorless",
-      ).not.toBe(ciStep);
+      ).not.toBe(refStep);
       expect(
         anchorless.includes(SUFFIX_ANCHOR),
         "CALIBRATION: the anchor SURVIVED the mutation — the arms below would be measuring the real thing, not an absent anchor",
@@ -3850,7 +3862,7 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
         `${WF_PATH}'s Acquire step could not be extracted`,
       ).not.toBe("");
       for (const [label, step] of [
-        [CI_PATH, ciStep],
+        [MIGRATE_PATH, refStep],
         [WF_PATH, wfStep],
       ] as const) {
         expect(
@@ -3878,12 +3890,13 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
       }
     });
 
-    it("the acquire suffix is byte-identical to ci.yml's, and our prefix fails loud", () => {
-      const ciStep = CI.match(ACQUIRE_RE)?.[0] ?? "";
+    it("the acquire suffix is byte-identical to supabase-migrate.yml's, and our prefix fails loud", () => {
+      const refStep = MIGRATE.match(ACQUIRE_RE)?.[0] ?? "";
       const wfStep = WF.match(ACQUIRE_RE)?.[0] ?? "";
-      expect(ciStep, "ci.yml's Acquire step could not be extracted").not.toBe(
-        "",
-      );
+      expect(
+        refStep,
+        `${MIGRATE_PATH}'s Acquire step could not be extracted`,
+      ).not.toBe("");
       expect(
         wfStep,
         `${WF_PATH}'s Acquire step could not be extracted`,
@@ -3891,12 +3904,15 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
       const suffix = anchoredSuffix;
       expect(
         suffix(wfStep),
-        "the copied mutex protocol has DRIFTED from ci.yml's. Every invariant in that step (session-mode DSN, libpq keepalives, statement_timeout=0, client_connection_check_interval, the 3600s cap, the two-cause error) was reasoned about once and is applied everywhere; a one-site drift means this destructive workflow runs a DIFFERENT protocol than the three CI jobs it shares the lock with. Re-sync the copy — do not edit it here.",
-      ).toBe(suffix(ciStep));
+        `the copied mutex protocol has DRIFTED from ${MIGRATE_PATH}'s. Every invariant in that step (session-mode DSN, libpq keepalives, statement_timeout=0, client_connection_check_interval, the 3600s cap, the two-cause error) was reasoned about once and is applied everywhere; a one-site drift means this destructive workflow runs a DIFFERENT protocol than the other job it shares the lock with. Re-sync the copy — do not edit it here.`,
+      ).toBe(suffix(refStep));
 
       const prefix = anchoredPrefix(wfStep);
       expect(
         prefix.includes("exit 0"),
+        // 2026-09-26, Phase 164.9.4: "ci.yml's copy" below is lineage. ci.yml's copies
+        // leave with python and e2e-seeded; the licence to exit 0 on a fork PR belonged to
+        // them. The reference is now supabase-migrate.yml, whose prefix is compared nowhere.
         "the fork-PR early exit SURVIVED in the credential branch. ci.yml's copy may exit 0 there because a fork PR legitimately has no secret; this workflow has no pull_request trigger, so an absent credential is a FAULT — and exiting 0 would hand a DESTRUCTIVE job an unlocked shared database.",
       ).toBe(false);
       expect(
@@ -3913,7 +3929,7 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
           ),
         (t) => {
           const w = t.match(ACQUIRE_RE)?.[0] ?? "";
-          return w !== "" && suffix(w) === suffix(ciStep);
+          return w !== "" && suffix(w) === suffix(refStep);
         },
       );
       calibrate(
@@ -3930,14 +3946,17 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
       );
     });
 
-    it("the release step is byte-identical to ci.yml's, if: always() included", () => {
-      const ciStep = CI.match(RELEASE_RE)?.[0] ?? "";
+    it("the release step is byte-identical to supabase-migrate.yml's, if: always() included", () => {
+      const refStep = MIGRATE.match(RELEASE_RE)?.[0] ?? "";
       const wfStep = WF.match(RELEASE_RE)?.[0] ?? "";
-      expect(ciStep).not.toBe("");
+      expect(
+        refStep,
+        `${MIGRATE_PATH}'s Release step could not be extracted`,
+      ).not.toBe("");
       expect(
         wfStep,
-        "the release step drifted from ci.yml's. It is the one step here allowed to end zero-status; that licence is ci.yml's reasoning, and it only transfers while the copy is exact.",
-      ).toBe(ciStep);
+        `the release step drifted from ${MIGRATE_PATH}'s. It is the one step here allowed to end zero-status; that licence was reasoned once (in ci.yml, where it originated) and it only transfers while the copy is exact.`,
+      ).toBe(refStep);
       calibrate(
         "the release byte-identity pin bites",
         (s) =>
@@ -3945,7 +3964,7 @@ describe("164.8-03 — test-restore-from-baseline.yml is wired as the plan requi
             "      - name: Release shared-test-db mutex (best effort)\n        if: always()\n",
             "      - name: Release shared-test-db mutex (best effort)\n",
           ),
-        (t) => (t.match(RELEASE_RE)?.[0] ?? "") === ciStep,
+        (t) => (t.match(RELEASE_RE)?.[0] ?? "") === refStep,
       );
     });
   });
@@ -6565,6 +6584,10 @@ describe("[164.8.4-01] every reference to the shared redaction definition is wor
   // `scripts/redact-psql-stderr.sed` reference would not resolve there — and
   // the call site's own trailing `|| true` SWALLOWS that failure, so a
   // relative reference does not error loudly, it redacts NOTHING.
+  // 2026-09-26, Phase 164.9.4: the python job's references (and e2e-seeded's) leave in
+  // plan 07, when those jobs stop taking the shared-TEST mutex. The subject stays
+  // non-empty: sql-tests keeps its references in ci.yml, and this workflow keeps its own.
+  // The cause above stays true of any future job that declares a working-directory.
   const BASENAME = REDACT_SED_PATH.split("/").pop() as string;
   const WORKSPACE_ROOTED_REF = `\${GITHUB_WORKSPACE}/scripts/${BASENAME}`;
   // Both workflow files are scanned together — Plan 02 converts the remaining

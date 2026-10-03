@@ -133,6 +133,19 @@ about the CLI link and the marker.
   schema-apply wait alone" is a MERGE-PUSH statement. The wait does not run on a
   `pull_request`, so a PR-run `test-db-drift` has no ordering against `apply-test` or a
   restore at all.
+  ⛔ **CORRECTED 2026-09-26 (Phase 164.9.4 CIOFFMUTEX) — half (a) a third time; the 2026-09-25 note above is kept as lineage.**
+  **No `ci.yml` job holds the key.** `python` and `e2e-seeded` now boot the local-stack lane
+  private to their runner, behind `scripts/local-stack/run.sh --assert-local-handoff`, and read
+  no shared TEST, so nothing in `ci.yml` contends with `apply-test` for the key any more.
+  `test-db-drift` is the only `ci.yml` job still running the schema-apply wait
+  (`grep -n 'wait-for-test-schema-apply.sh' .github/workflows/ci.yml`: its one invocation is in
+  `test-db-drift`; the rest are comments and `sql-gate-lint`'s `--self-test`). Re-measured
+  2026-09-26 with `grep -c 61616158` per workflow file: **0×** in `ci.yml`, **7×** in
+  `supabase-migrate.yml`, **8×** in `test-restore-from-baseline.yml`, **5×** in
+  `mutex-probe.yml`, **1×** in `analytics-deploy-verify.yml` (issue text only), 0× in every other
+  workflow. The takers left are `apply-test`, `restore` and the drill probe; runbook
+  `docs/runbooks/shared-test-db-mutex.md` §7.2 carries the census. This supersedes the 17×
+  reading above.
   (b) **Narrowed for `sql-tests`** by DECISION F. Its lane replays a PR's own new migration
   on top of the committed dump BEFORE merge (see the D-F note below), so its corpus gates
   run against the PR's schema instead of being red until merge. Nothing else about (b)
@@ -154,6 +167,7 @@ about the CLI link and the marker.
   (`restore-test-from-baseline.sh`) still REFUSES a dump older than the migrations, through
   the gate's default mode. ⚠️ A re-dump must regenerate the marker in the SAME commit
   (`supabase/schema/BASELINE.md`, `## Regenerating`).
+  ⛔ **CORRECTED 2026-09-26 (Phase 164.9.4 CIOFFMUTEX):** the lane jobs are now `sql-tests`, `frontend-local-stack`, `frontend-live-db-lane`, `python` and `e2e-seeded`; the three-job list above is kept as lineage.
 - ⭐ **2026-09-23 (Phase 164.4.2) — the local-stack lane PINS its Postgres image to
   `17.6.1.113`, and the pin is load-bearing.** `LANE_PG_VERSION` in `scripts/local-stack/run.sh`
   is written into the lane's `.temp/postgres-version`, and the boot asserts the running image
@@ -205,7 +219,7 @@ a failure fails the aggregate rather than passing quietly:
 - **`sql-mutation`** — mutates every SQL gate arm carrying a `RED-UNDER` annotation, asserts
   the file goes RED with that arm named, restores, asserts GREEN. Exits 1 on an annotation that
   does not bite, on coverage below a ratchet floor pinned at the measured value, on more waived
-  arms than `WAIVED_CEILING` in `scripts/mutation-runner/run.mjs`, and when the runner's two
+  arms than `WAIVED_CEILING` in `scripts/mutation-floors.mjs`, and when the runner's two
   independent arm tallies (`arms:` vs `lane-invocations:`) disagree. Runs on its own throwaway
   PostgreSQL cluster (`scripts/pg-lane/run.sh`), never against shared TEST — the lane carries
   `shared_preload_libraries=pg_cron` (Phase 164.4.1, +0.009 s/lane), so pg_cron gates run there.
@@ -213,6 +227,37 @@ a failure fails the aggregate rather than passing quietly:
   line measured on the lane itself; pg_cron AVAILABLE with a NON-EMPTY lane-blocked class raises
   `lane-blocked-stale` and exits 1. That tripwire stays live for any future unannotated pg_cron
   gate even though the class is currently empty — it has been observed both firing and clearing.
+  ⭐ **2026-10-03 (Phase 164.9.6 SUBSETMAIN) — "mutates every arm" no longer describes a push to
+  `main`.** The sentences above are kept as lineage. On a push to `main` the job now runs only
+  what the pushed range needs: the changed gate files plus the gates whose `RED-UNDER-SETUP`
+  loads a changed migration (D-03), or nothing at all, with the printed verdict
+  `no mutation input changed` (D-09). D-09 is a founder-scoped exception to the vacuity fence,
+  push-to-main only; pull requests keep the fence. Any doubt about the range runs FULL with the
+  reason printed (D-01), and a `workflow_dispatch` is always FULL (D-02). ⭐ (review 164.9.6
+  WR-03) A push takes a subset or nothing ONLY when its predecessor, `github.event.before`, is
+  proven green by `predecessorVerdict` in `scripts/classify-changed-paths.mjs`, the same proof the
+  docs-only short path uses. Red, pending, absent, an API error or a truncated response runs FULL
+  with the reason printed, so a red `main` already measured is never masked by the next push. Every run prints a
+  `scope:` line and a `scope-reason:` line, and the assert step fails a log without exactly one
+  non-blank `scope-reason:` (D-12). The derivation is `judge` in `scripts/sql-gate-subset.mjs`;
+  read it by symbol, not from this summary.
+- **`sql-mutation-nightly`** ⭐ (2026-10-03, Phase 164.9.6, not in the `frontend` aggregator) —
+  `.github/workflows/sql-mutation-nightly.yml` runs the FULL corpus daily and on dispatch, under
+  its own `timeout-minutes`, which are not `sql-mutation`'s (read them with
+  `grep -n 'timeout-minutes' .github/workflows/sql-mutation-nightly.yml`). Now that a push mutates
+  a subset or nothing, this is the run that compares every floor against a real biting count (D-07).
+  When it is red it stays red AND files or comments on the one open issue labelled
+  `nightly-canary-failure:sql-mutation`, carrying the run's reading (D-06). ⚠️ While red it
+  attaches a failing check to main's head SHA, so it can block a Railway redeploy of that SHA.
+  The founder accepted that coupling (D-11). Its steps are copies of `sql-mutation`'s.
+  `src/__tests__/sql-mutation-nightly-parity.test.ts` pins every copied step's `run:` block
+  byte-equal, the step set, and the checkout/setup-node SHAs. Edit a `sql-mutation` step's `run:`
+  and the pin goes red until the nightly's copy matches. ⚠️ It does NOT compare `with:` or `env:`,
+  so a `node-version` bump or a new `env:` key on a lane step must be copied by hand.
+  ⛔ **What it can NOT catch (the D-03 correction).** The nightly applies the same
+  `RED-UNDER-SETUP` lists as every other run, so it cannot see a migration that no gate lists. Its
+  backstop value is runner-host drift (a new image, PostgreSQL minor or pg_cron package) and
+  ARMS_FLOOR measured as real biting. It does not cover unlisted migrations.
 - **`sql-gate-lint`** — **seven** static rules over `supabase/tests` (`R1-exception-handler-probe`,
   `R2-functiondef-comment-strip`, `R3-additive-diagnostic-narrow`, `R4-tgtype-bitmask-completeness`,
   `R5-fixture-shadows-migration-table`, `R6-fixture-shadows-fixture-table`, `R7-fixture-shadows-policy`),
@@ -249,8 +294,10 @@ can red a PR, never turn a real drift green; re-run the check once both writers 
 ⛔ **THE NUMBERS ARE NOT WRITTEN HERE ANY MORE, AND THAT IS THE FIX.** Run this:
 
 ```bash
-grep -nE '^export const (FILES_FLOOR|ARMS_FLOOR|WAIVED_CEILING)' scripts/mutation-runner/run.mjs
+grep -nE '^export const (FILES_FLOOR|ARMS_FLOOR|WAIVED_CEILING)' scripts/mutation-floors.mjs
 ```
+
+⭐ 2026-10-03 (Phase 164.9.6, D-10): the floors moved to scripts/mutation-floors.mjs, outside the runner directory, so raising one is not a mutation-machinery change on a push to main; on a pull request it still is.
 
 **Why the table that stood here was deleted rather than corrected a fourth time.** This section
 carried a `constant | shipped value | line` table, and it went stale FOUR times:
@@ -288,7 +335,7 @@ independent tallies AGREE) · `lane-blocked: 0 file(s)` · `lane-probe: pg_cron 
 run) + 0 pending = 73.
 
 ⛔ **Read `FILES_FLOOR`, `ARMS_FLOOR` and `WAIVED_CEILING` by SYMBOL from
-`scripts/mutation-runner/run.mjs` — never from a number restated in this file.** Prose and
+`scripts/mutation-floors.mjs` — never from a number restated in this file.** Prose and
 constant have diverged here before (`ARMS_FLOOR` prose said 380, shipped value was 384); the
 dated record of that correction is in `docs/sql-gate-lineage.md`.
 
@@ -316,6 +363,13 @@ the allowlist or relaxing `DETECT_RE`.
 **Timeout.** `sql-mutation`'s `timeout-minutes` is **20** — cited BY SYMBOL, not by line: the `sql-mutation:` job key in `.github/workflows/ci.yml` and its own `timeout-minutes:` entry (`grep -n '^  sql-mutation:' .github/workflows/ci.yml`). ⛔ Do not re-introduce line numbers here: this sentence cited `:1259`/`:1069` until 2026-09-11, by which point the job had moved to `:1196` and the timeout to `:1386` — the `[164.7-CITATION-DRIFT-01]` class, whose recorded remedy is to cite by symbol rather than re-number prose that will drift again. It stays there: the rule's one
 permitted raise was taken on 2026-09-05 and 20 is a declared CEILING. A future crossing is
 answered by `[REDUNDER-SUBSET-SPLIT]`, never by raising again (`ci.yml` carries the derivation).
+⭐ **2026-10-03 (Phase 164.9.6 SUBSETMAIN):** `[REDUNDER-SUBSET-SPLIT]` is now answered by Phase
+164.9.6. A push to `main` mutates a derived subset or nothing, and the full corpus moved to
+`sql-mutation-nightly.yml` under that workflow's own timeout. `sql-mutation`'s 20 stays the
+declared CEILING and is never raised. ⚠️ **The ceiling risk is narrowed, not closed.** Every
+FULL fallback on a push still runs under the 20: a dispatch, a direct or multi-commit push, a
+machinery change, a changed unannotated gate, a migration no gate loads, and a predecessor not
+proven green.
 
 📜 **Dated lineage for Phases 164.3 → 164.7 — every historical arm tally, ubuntu run id and
 superseded CURRENCY paragraph — now lives in `docs/sql-gate-lineage.md`.** It is history; nothing

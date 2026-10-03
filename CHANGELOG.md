@@ -1,5 +1,217 @@
 # Changelog
 
+## [0.121.0.0] - 2026-10-03 — BRIDGERESIDUE: the strategy bridge closes the two 164.6.7 residues, takes the per-strategy lock itself, and holds the date on a row it keeps
+
+⭐ **What changed for whoever reads this next.** `sync_strategy_analytics_status` (the bridge every
+terminal job mark calls) had two known residues from Phase 164.6.7. (1) A marker retraction landing
+between the Python live re-read and `mark_compute_job_failed` could leave `computation_warned` up
+over a failed run, so a warned factsheet read `complete_with_warnings` again
+(`[164.6.7-COMPOSITE-REREAD-RESIDUE]`). (2) A marked refresh retry rewrote a published plain
+`complete` row to `computing`, so the retry protected only warned rows
+(`[164.6.7-RETRY-PLAIN-COMPLETE]`). Phase 164.5.2.1 closes both in ONE migration,
+`20261003120000_sync_status_bridge_residues.sql`. It also makes the bridge take the mark RPCs'
+per-strategy advisory lock itself. The RPCs keep their own lock lines and the bridge re-enters the
+same lock (same key, re-entrant), so a direct bridge call serializes behind a mark. Per a founder
+decision of 2026-10-03, a row the bridge KEEPS now holds its date, sentence and provenance.
+
+⚠️ **A minor bump: the behaviour of a production SQL function changes.** The migration
+**auto-applies to TEST and then PROD on merge, with no human gate**, so the merge IS the apply.
+The three pre-merge reviewers (migration-reviewer, rls-policy-auditor, silent-failure-hunter) must
+review the migration and both new gates, and every finding must be fixed, BEFORE the merge. No
+review can be scheduled after it.
+
+### Fixed
+- **COMPOSITE-REREAD: the bridge clears `computation_warned` over the writer's unprotected
+  failure** (plan 01). Branch (b) clears the flag, and branch (a) resolves the row to `computing`
+  with a reaper stamp, whenever the row's writer-provenance job is among the UNPROTECTED live
+  failures. One unordered `array_agg(id) FILTER (WHERE NOT <is_protected>)` in the existing
+  live-failure read drives it, in the same snapshot, so no new read-order window opens. With no
+  unprotected failure the array is NULL and every new arm falls through to the old behaviour.
+  Decision D-04 (branch (b) only) was superseded by D-04b (branches (b) AND (a)) after research
+  measured D-04 missing the later-sibling and in-flight corners. The founder ratified it on
+  2026-09-27. One fix covers both honour arms, the composite and the single-key derive.
+- **RETRY-PLAIN-COMPLETE: branch (a) keeps a published plain `complete` row over a marked in-scope
+  retry** (plan 02). It keeps the row when every in-flight job carries an in-scope refresh marker
+  and no unprotected failure is live. The stamp keep arm leaves the reaper stamp NULL. The rule
+  rests on an unmarked-job count folded into read 1, in the same snapshot.
+
+### Changed
+- **The bridge takes the per-strategy advisory lock itself** (plan 03). Its first statement after
+  the NULL guard is the mark RPCs' own two-integer lock
+  (`hashtext('mark_compute_job_bridge')`, `hashtext(<strategy id>)`), so a direct bridge call
+  serializes behind a mark. Measured with `dblink`: a direct call waited on `transactionid` before,
+  and on that exact advisory lock (namespace oid, objsubid 2) after. An apply-time anchor pins the
+  NULL guard ahead of the lock and checks that the namespace differs from `admin_role_mutate`'s.
+  The migration's verify block also calls the bridge with a NULL strategy and requires
+  `invalid_parameter_value`. Lock order is recorded in the migration header. No claim RPC is touched.
+- **A row the bridge KEEPS holds `computed_at`, `computation_error` and both provenance markers**
+  (plan 03, founder decision 2026-10-03, "Hold the date for both"). This applies to the new
+  plain-`complete` keep and to the existing `complete_with_warnings` keep, so a branch-(a) keep no
+  longer re-stamps the date on a row nothing recomputed. ⚠️ **The date is NOT a reliable "last real
+  compute" in either direction.** It can lag: after a real recompute that ends
+  `complete_with_warnings` beside an in-flight sibling, the hold keeps the PRE-compute date until
+  the sibling finishes. It can also run ahead: branch (c) still writes `computed_at = now()` when
+  ANY terminal job finishes last with nothing else in flight (a `sync_trades` poll, say), so the
+  FreshnessChip and the PDF vintage can move forward with nothing recomputed. Both directions are
+  booked as `[164.5.2.1-COMPUTED-AT-RUNNER-STAMP]`. ⚠️ This deliberately changes PROD behaviour
+  for the warned cohort. The hold fires on a KEEP only, never on a
+  TRANSITION; guard arm K3 pins that reading.
+- **The bridge's stale in-body comments were corrected** (D-07, plan 03). Read 1's two counts, the
+  one warned-clear case, the labels of the stamp CASE's membership and keep arms, and branch (b)'s
+  former "does NOT touch computation_warned" are now accurate.
+- **The kind-scope drift test reads the newest bridge definition by scan** (plan 04,
+  `analytics-service/tests/test_ledger_refresh_kind_scope_drift.py`), not the 2026-08-25 file.
+  It cross-checks the resolved file against the function snapshot's `-- source migration:` line.
+- **The function snapshot was regenerated** (plan 04). It carries one `prod-body-ack` read off
+  `--diff-bodies` for VAC-04.
+
+### Security
+- **The migration grants `service_role` EXECUTE on the bridge explicitly** (review RLS-LOW-01), right after the carried `REVOKE ALL … FROM PUBLIC, anon, authenticated`, and its verify block asserts it (anchor xiv). No earlier migration granted it: PROD and TEST hold it through Supabase's bootstrap default privileges, so on PROD the GRANT is a no-op (a function's only privilege is EXECUTE). anon and authenticated stay denied, asserted by the same block. The comment above the REVOKE now names all three callers, including the Python DEFERRED path that calls the bridge over PostgREST as `service_role`.
+
+### Review fixes (two rounds; three migration reviewers re-ran clean on the result)
+- **The verify block reads code, not comments**: it strips comments from the function body once and every carried `20260906120000` anchor reads that copy; only the HONEST-01 ban, which must see comments, reads the raw body. The NULL-body guard now runs before any anchor. Anchor (xiii) pins the value each hold-CASE arm writes, so both `computed_at` arms going NULL raises. Anchors (xii) and (xiii) are in order. The block stays catalog-only.
+- **Comments now say what the code does**: the D-05 keep applies whenever every in-flight job carries an in-scope refresh marker (any non-terminal status, not only a retry); the LOCK ORDER header states the real no-deadlock rule (whoever holds the advisory lock never waits on a `compute_jobs` row lock), since the mark path does hold job rows while it waits. The snapshot was regenerated with them. `analytics_runner.py`'s comment on the snapshot design was brought up to date (comment only).
+
+### Tests
+- **A new both-lanes residue gate, `supabase/tests/test_sync_status_bridge_residues.sql`, with 16
+  arms**, sealed by `ALL 16 ARMS EXECUTED`:
+  - W1..W5 (W1 with a composite sub-arm) went RED on the pre-fix body and GREEN on the fix. Guards
+    W6 (SI-02) and W7 (the protected honour path) are green on both bodies.
+  - R1 (with its composite sub-arm) and R5 went RED first and GREEN on the fix. Guards R2..R4 and
+    R6 keep the keep no wider than D-05.
+  - K1..K3 cover the hold.
+  - Every arm has a layered `RED-UNDER-M` twin that the mutation runner measured biting.
+- **A new LANE-ONLY two-backend gate, `supabase/tests/test_sync_status_bridge_lock.sql`**, with
+  arms B1 (plus a B1-DIRECT probe) and B2. B2 also asserts the lock's per-strategy key (`objid` is the masked `hashtext` of the strategy id), so a constant, global key fails; measured blind before the fix and red after. The 164.5.2 lock
+  gate's setup stays pinned at `20260926120000`, because adding the new migration there stops its
+  L1/L2 twins biting. Its header records why.
+- **The curated and protected sync-status gates were re-pointed at the new body** (plan 04). Every
+  twin still bites. R1 was redesigned for the hold CASEs, which stand down anchor (xiii) from 4 to 2
+  and move D1's P2d re-baseline from 1 to 0. The protected gate's apply list gains the new migration
+  (D-19).
+- **Gate hardening from review:** the residue gate's setup guards fail on a NULL read (`IS NOT TRUE` / `IS DISTINCT FROM`); its header records that arms W5 and R5 can only go red on the pg-lane, because the `20260803120000` stamp trigger produces the same end state elsewhere (adding it to the setup was measured to stop both twins biting on both lanes). The curated gate's wording now calls branch (a)'s clears the ELSE arms of the hold CASEs.
+- **The scoped-UPDATE anti-vacuity pin records the residue gate's five `UPDATE strategy_analytics` statements** (`analytics-service/tests/test_sql_gate_scoped_updates.py`); it was red at the branch's own base because the new file shipped without its key.
+- **The census moved, measured on the tree merged with `origin/main`** (plan 05):
+  - The floors now live in `scripts/mutation-floors.mjs` (Phase 164.9.6 moved them there). `FILES_FLOOR` went from 56 to 58 and `ARMS_FLOOR` from 556 to 574, with `WAIVED_CEILING` still
+    0. One full lane run printed `coverage: files 58/85`, `arms: 574/574/0`, `biting: 574` and
+    `lane-invocations: 574` (the two tallies agree), with `✅ No defects`.
+  - The stale-low direction was observed as `RATCHET STALE`, and the too-high direction as a
+    full-run exit 1.
+  - `KNOWN_THRESHOLD_SITES`, the floors test's GREEN_LOG, the per-file rows and calibrations
+    (offsets kept), and the annotation-parser censuses (twins 556 to 574, file steps and needles
+    615 to 668, files 83 to 85) all moved with it, as did the lint `scanned 85 file(s)` pin.
+  - The `sql-tests` sentinel roster in `ci.yml` and `drift-check-scripts.test.ts` moved in plan 02.
+- **The SQL marker-parity test now counts three marker lists, not two** (plan 05,
+  `src/lib/ledger-refresh-marker.test.ts`). Read 1's unmarked-job FILTER is a third literal
+  `('ledger-refresh', 'ledger-refresh-composite')` list in the bridge snapshot. The full vitest suite
+  caught it (`expected 3 to be 2`). Each list still equals the TypeScript set.
+
+### Notes
+- **D-18, the PRE corner, is ACCEPTED, not closed** (founder-owned, default (a), 2026-09-27). A
+  sibling's bridge call that lands while X is still `running`, between the Python honour write and
+  X's own mark, blanks the provenance. After a marker retraction, X's failure then cannot be tied
+  to its writer. It needs BOTH a retraction race AND a sibling terminal transition inside the same
+  window. ⭐ The hold narrows it: on a `complete_with_warnings` row the sibling's call is now a keep
+  that holds X's provenance, so X's loud mark clears the warning (measured on the pg-lane). Exits
+  (b) (a Python-side item) and (c) (a branch-(a) redesign) remain the founder's.
+- **The hold's measured limit is booked, not fixed.** The bridge is the only writer of
+  `strategy_analytics.computed_at`. A real recompute that ends `complete_with_warnings` while a
+  sibling job is in flight now keeps the old date until the sibling finishes, measured on the
+  pg-lane. That lag reaches the FreshnessChip and the PDF vintage. The staleness verdict is not
+  affected. The fix is a runner-side stamp, outside this SQL-only phase:
+  `TODOS.md` `[164.5.2.1-COMPUTED-AT-RUNNER-STAMP]` (user-facing).
+- **Expected RED until merge, and neither is allowlisted.**
+  - `baseline-content-drift` shows one DRIFT row, `sync_strategy_analytics_status/1`, until the
+    post-apply re-dump. The founder rule of 2026-09-27 counts this class as green.
+  - VAC-08 in `test-db-drift` stays red until apply-on-merge.
+  - VAC-04 goes green only if PROD's body equals the earned `live` hash. A red there is real PROD
+    drift.
+- **Ledger.** In `TODOS.md`:
+  - `[164.6.7-COMPOSITE-REREAD-RESIDUE]` and `[164.6.7-RETRY-PLAIN-COMPLETE]` are closed with dated
+    lines. Both say the fix is live only once the merge applies it to PROD.
+  - `[DERIBIT-ASSIGNMENT-UNCLASSIFIED]` is closed with a caveat (founder, 2026-10-03). Phase 168
+    classified `assignment` and ingested end to end. An `assignment` row is not countable from the
+    database, because PROD stores no Deribit transaction rows.
+  - The 164.3 plan 07 entry carries a note on #930, #880 and #932.
+  - The `161.1-D1` closeout records the in-bridge lock.
+- **Runbook** (`docs/runbooks/ledger-refresh-go-live.md`). Item 7 of
+  `[164.6-COMPOSITE-CLAIMTIME-SNAPSHOT]` is closed once applied, with the PRE corner accepted and
+  dated. Item 6 still blocks the composite schedule. The RETRY-PLAIN-COMPLETE gap lines carry dated
+  closed lines. All lineage text is kept.
+- **Merge to `main`.** Under Phase 164.9.6 this push changes a migration and gates but no mutation machinery, so `sql-mutation` should take a SUBSET (the changed gates plus the gates that load the migration) when the predecessor is green.
+- **Branch housekeeping.** `origin/main` was merged in three times: before execution, before the
+  census, and before ship (the last brought 164.9.6's floors move, resolved by applying this phase's floor raise to `scripts/mutation-floors.mjs`). The planning and record commits cover the context, research and pattern map, the 5-plan /
+  5-wave plan through three plan-check rounds, the founder's ratification of D-04b and D-18(a), the
+  hold-the-date decision record, and each plan's SUMMARY.
+
+## [0.120.0.0] - 2026-10-03 — SUBSETMAIN: a push to main mutates only what it changed, and a nightly runs the full SQL mutation corpus
+
+### Added
+- **A push to `main` gets its own SQL gate verdict from the pushed range** (`scripts/sql-gate-subset.mjs`, push arm of `judge`). Three outcomes, each printed:
+  - **`none`** when the single-PR squash changed no gate file, no migration and no mutation machinery: the `sql-mutation` job prints `scope: NONE` and a `scope-reason:` line, and finishes green without booting the lane (D-09).
+  - **SUBSET** when gates and/or migrations changed: exactly the changed gates plus every gate whose `RED-UNDER-SETUP` loads a changed migration, read with the runner's own `parseAnnotations` (D-01, D-03).
+  - **FULL** with the reason for every doubt: a zero, forced, missing or non-ancestor before-SHA, more than one commit or a non-PR-merge commit, a git error, a malformed setup list, a migration no gate loads, a machinery change, or a predecessor not proven green (D-13).
+- **The shortcut needs a green predecessor** (D-13, review WR-03): `none` and SUBSET are taken only when `predecessorVerdict` proves the before-SHA green, the same proof the docs-only short path uses, so a red push can no longer be hidden by the next green `none` push. The `sql_gate_subset` step gets the job's `checks: read` token through `env:` only.
+- **One `scope-reason:` line on every corpus run** (PR, push, dispatch, nightly), beside the unchanged `scope:` line; the assert step fails the run when it is missing, duplicated or blank (D-12).
+- **`.github/workflows/sql-mutation-nightly.yml`**: the full corpus on `0 3 * * *` and on dispatch, its own `timeout-minutes: 45` (mutate step 40), wall time printed, floors enforced. A red night fails the workflow and files one GitHub issue deduplicated by the label `nightly-canary-failure:sql-mutation` (or comments on the open one) with the reading, the run link and the note that a red nightly on main's head can block a Railway redeploy of that SHA (D-05, D-06, D-11). Only the reporter job holds `issues: write`; the workflow takes no shared-TEST key and no secret. Its setup steps use the same pinned action versions as `ci.yml` (setup-node 7.0.0, after #626).
+
+### Changed
+- **The mutation floors moved to `scripts/mutation-floors.mjs`** (D-10), byte-for-byte with their dated measurement record; no value changed. The runner, the `ci.yml` assert step, the vitest ratchet, the threshold registry and CLAUDE.md's grep all read them there. On a push the floors file is not machinery, and `ci.yml` is machinery only when its `sql-mutation` or `changed-paths` section changed; on a pull request both stay machinery, so PR verdicts are unchanged.
+- The `sql-mutation` subset refusal is widened by exactly a push to `refs/heads/main`; every other event still runs FULL. Its `timeout-minutes: 20` ceiling is unchanged. `CLAUDE.md`'s SQL gate section and `ci.yml`'s header now describe the subset / none / nightly split and mark the old `[REDUNDER-SUBSET-SPLIT]` booking as shipped.
+
+### Fixed
+- Review WR-01: a push that changes only the mutex dead-holder drill's inputs (`scripts/mutex-dead-holder-verdict.sh`, `supabase-migrate.yml`) now runs FULL instead of skipping the drill.
+- Two test files typed their child-process env as spread literals, which `tsc` rejects; both now build a typed record.
+
+### Tests
+- `sql-gate-subset --self-test` grows to 28 rows / 92 assertions (none, subset, every FULL reason, the green-predecessor gate end to end with a fake `gh`, the drill inputs). New `sql-mutation-scope-step.test.ts` runs the real scope step body across event/ref/mode with calibrations, a gating pin over all eight lane steps, and real-history rows (`98f04db16` skips the lane on a green predecessor and runs FULL on a red one; `fd4d86cdf` takes a one-gate SUBSET). New `sql-mutation-nightly-parity.test.ts` pins the nightly's `run:` blocks byte-equal to `ci.yml`, with 12 broken-copy calibrations. The floors and contract tests cover the D-12 line and the token wiring.
+
+### Notes
+- **Measured on real history:** of the last 200 main pushes, at most 5 would have taken a SUBSET under the first design; this release adds the `none` verdict that covers the planning-only and code-only pushes. Back-to-back merges, and a predecessor whose CI is still running or red, take FULL by design.
+- **Known limits, recorded and not fixed (review MEDIUMs, founder decision):** a setup input outside migrations and machinery would read `none` (none exist today); the nightly issue does not name an assert-step-only failure; nothing alarms if the nightly stops running. The parity pin compares `run:` blocks, not `with:`/`env:`. The `changed-paths` job's worst case after the predecessor lookup is about 260 s of its 300 s budget. This PR's own merge push changes machinery, so it runs FULL under the 20-minute ceiling.
+- **Verify after merge:** one manual dispatch of the nightly on `main`, the first natural `none` push and the first natural SUBSET push, each read from its log.
+
+## [0.119.0.3] - 2026-10-03 — @testing-library/jest-dom 7.0.1
+
+### Changed
+- **`@testing-library/jest-dom` moves from 6.9.1 to 7.0.1** (dev dependency, Dependabot #645, which proposed 7.0.0; the branch takes the 7.0.1 patch on current `main`). It supplies the DOM matchers (`toBeInTheDocument`, `toHaveTextContent` and the rest) the vitest jsdom suite uses; no runtime or production bundle code depends on it. The lockfile drops the transitive packages 7.x no longer needs; `package.json` and the lockfile's root manifest agree.
+
+## [0.119.0.2] - 2026-10-03 — supabase/setup-cli 3.0.1 on every workflow
+
+### Changed
+- **`supabase/setup-cli` moves from v2.1.1 to v3.0.1 on every pin** (Dependabot #612, which proposed 3.0.0; the branch pins the 3.0.1 patch), SHA-pinned (`45a513f…`). Covers `ci.yml`, `migration-drift-check.yml`, `migration-policy.yml`, `prod-prober.yml`, `supabase-migrate.yml` and `test-restore-from-baseline.yml`, plus the two `ci.yml` lane steps that landed on `main` after the branch was cut (they carry "the SAME pin `frontend-local-stack` uses", so all pins stay one answer). Measured after the change: 0 references to the v2.1.1 SHA, 13 to v3.0.1. Every step keeps its explicit `version:` input, so the Supabase CLI version each job installs does not change, only the action that installs it.
+
+## [0.119.0.1] - 2026-10-03 — actions/setup-node 7.0.0 on every workflow
+
+### Changed
+- **`actions/setup-node` moves from v6.4.0 to v7.0.0 on every pin** (Dependabot #626), SHA-pinned as before (`8207627…`). Dependabot bumped the first pins; the 14 remaining pins across `ci.yml`, `contracts.yml`, `migration-drift-check.yml`, `nightly.yml`, `prod-prober.yml`, `sql-function-snapshot.yml`, `supabase-migrate.yml` and `test-restore-from-baseline.yml` follow in one commit, and the one `ci.yml` pin that landed on `main` after the branch was cut (the local-stack lane step) is moved too. Measured after the change: 0 references to the v6.4.0 SHA, 31 to v7.0.0. Every step keeps `node-version: 22`, so the Node runtime CI runs on does not change.
+
+## [0.119.0.0] - 2026-10-03 — CIOFFMUTEX: `python` and `e2e-seeded` run on a database private to their runner and no longer queue on the shared-TEST lock
+
+### Changed
+- **`python` and `e2e-seeded` boot the runner-private local-stack lane** (`scripts/local-stack/run.sh up`) and read no shared TEST. `ci.yml` now holds the shared-TEST advisory key `61616158` **0×** (was 27×); the remaining takers are `supabase-migrate.yml` `apply-test`, `test-restore-from-baseline.yml` `restore` and the `mutex-probe.yml` drill. Neither job reads a `TEST_SUPABASE_*` secret any more. `test-db-drift` is the only `ci.yml` job still running the schema-apply wait.
+- **A docs-only push to `main` takes the short CI path (D-16), but only when it is safe.** `scripts/classify-changed-paths.mjs` classifies the pushed range (`classifyPushRange`). The short path needs every commit in the range to be a PR merge (`isPrMergeCommit`; a direct push to `main` now runs the full corpus), no `.planning/` file a test reads (`TEST_READ_PLANNING_PATHS`, 7 entries, derived from the whole tree, `config.json` included), and a proven-green predecessor (`predecessorVerdict`): a completed, successful `frontend` check run, every GitHub Actions check run non-red (read with `filter=all`, deduped per suite and name), and every Actions check suite completed and non-red. This mirrors Railway's own all-check-runs gate. Every lookup failure falls back to the full corpus with its reason printed. The `changed-paths` job gains `checks: read`, with `GH_TOKEN` on the classify step only.
+- The build's CSP `connect-src` now carries the configured Supabase origin (`next.config.ts`, D-14), so a build pointed at the lane's loopback API can reach it. The origin is charset-checked, http/https only, reduced to `url.origin`, and `*` or an unparseable URL falls back to the static CSP.
+
+### Added
+- `run.sh --assert-local-handoff`: before any `GITHUB_ENV` write or seed, the lane handoff must name a loopback API URL and DSN. URLs are parsed rather than globbed, and userinfo, `@` and backslash forms are refused (`refuseNonLocalUrl` in `scripts/local-stack/capability-probe.mjs`). Keys are masked before export.
+- The lane's env handoff honours `LANE_ENV_FILE` for write, guard and teardown, and every lane reader reads the file `run.sh` wrote (`STACK_ENV_FILE` retired). `e2e-seeded` gains a three-arm "Verify build inlined" step: the lane host is required, placeholder and hosted shapes are refused, and a grep error fails loud.
+
+### Fixed
+- **The `e2e-seeded` flake of `e2e/full-flow.spec.ts` "factsheet page loads for published strategy" (root-caused, not retried away).** On the lane, the crypto-sma category holds only example rows, `/browse` server-renders them and then hides them on mount for anonymous visitors, and the test sampled for a row once before hydration inside a silent `if (hasStrategies)` branch. A fast runner passed vacuously, a medium one hung 60 s, a slow one raced through. The test now waits for the hydrated "Hide examples" state, unticks it, requires a visible factsheet link, and checks the factsheet heading names the strategy it opened; an empty table fails. Verified on the lane at 1x/4x/8x/16x CPU throttling (70/70 with every assertion executed) and with a negative probe. No timeout raise, no retry, no seed or product change.
+- **`main` red since #930 (2026-10-02), fixed here.** #930 added a supersession `164.3-07-SUMMARY.md`. That ended the 164.3 plan 07 deferral which `verify-plan-anchors.test.ts` pins by name ("exempt and REPORTED", R2-W05), so `frontend-test` failed on the merge push. The PR itself took the docs-only short path and never ran those tests, which is the exact hole this phase's `TEST_READ_PLANNING_PATHS` closes (its contract test flagged the file on this branch). The SUMMARY is removed again; the deferral marker `164.3-07-DEFERRED.md` stays the record, and VAC-07's delivery by Phase 164.5 plan 07 stays recorded in `REQUIREMENTS.md` and `TODOS.md`.
+- Lane teardown skips the stop when the Supabase CLI never installed; the contract test bounds its self-test spawns and names a hang; the push classifier's fail-safe arms keep git's own reason.
+
+### Tests
+- The mutex pins no longer depend on `ci.yml`'s copies: the dead-holder drill and its Test 3b, the cross-file byte-identity pins (`supabase-migrate-test-first.test.ts`, `test-restore-workflow-wiring.test.ts`) and the absolute protocol loops (`MUTEX_HOLDERS` with an anti-vacuity length check in `critical-regressions.test.ts`), with `ci.yml` pinned to an exact-empty holder list.
+- New `csp-connect-src-supabase-origin.contract.test.ts`; `ci-docs-path-filter.contract.test.ts` grows the push-range, predecessor and planning-read cases with neuter legs and a fake `gh`; `local-stack-lane-wiring.test.ts` pins the boot → assert → `GITHUB_ENV` → first DB step order and runs the refusal matrix.
+
+### Notes
+- **Measured** on run `37039941530` against tree-matched `main` run `37028872024`: `python` 41m33s → 13m06s, `e2e-seeded` 30m19s → 11m14s. The comparand spent 28m21s and 18m16s waiting on the key. `python` counts held (7602 passed vs 7601, coverage 92.44% both).
+- **Shipped with one CI-bound verification item (founder decision 2026-10-03):** SC-3's `e2e-seeded` count (≥ 201 passed, no flaky line) is graded on this release's own CI run; the PR merges only on that reading.
+- **Known limits.** The predecessor gate's live GitHub API shape is first exercised by a real push to `main` after merge. The three `test_compute_jobs_fencing.py` skips still cite shared-TEST contention and have no owner. The flash of example rows for anonymous visitors on `/browse` is booked as a follow-up, not fixed here.
+- Docs: `CLAUDE.md`, `CONTRIBUTING.md`, `TODOS.md` and `docs/runbooks/shared-test-db-mutex.md` §7.2/§7.3 carry dated corrections with the key census (0× `ci.yml`, 7× migrate, 8× restore, 5× mutex-probe, 1× deploy-verify). `[164.9.4-CI-MUTEX-QUEUE]` is closed.
+
 ## [0.118.1.5] - 2026-10-02 — ENQ40001: the enqueue race-loss 40001 converges through PostgREST 14, measured and pinned
 
 ### Added
