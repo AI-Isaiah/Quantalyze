@@ -5530,6 +5530,7 @@ def _mt5_session(transport: _FakeMt5Transport) -> Mt5Session:
         login=_MT5_SYNTHETIC_LOGIN,
         investor_password="synthetic-pw",
         server=_MT5_SYNTHETIC_SERVER,
+        venue_account_id=str(_MT5_SYNTHETIC_LOGIN),
     )
     for _method in (
         "fetch_my_trades",

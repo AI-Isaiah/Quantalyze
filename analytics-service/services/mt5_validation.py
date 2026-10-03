@@ -199,6 +199,36 @@ def parse_mt5_credentials(
     return login, investor_pw, server
 
 
+def mt5_venue_account_id(login_slot: str | None) -> str | None:
+    """The ``api_keys.venue_account_id`` an MT5 key carries: its login TEXT.
+
+    The ONE spelling of the MT5 identity form in this service, used by the
+    rotate route (``routers/internal.py``) and by the poll's session
+    constructor (``job_worker._make_mt5_session``), so the poll stamps exactly
+    what rotate returns. It is EQUIVALENT FOR ASCII WHITESPACE to the connect
+    routes' ``api_key.trim()`` (validate-and-encrypt, create-with-key):
+    surrounding whitespace goes, nothing else changes. It is not byte-identical
+    for every code point (167.1.2-08 review, IN-01 / SFH L-3): Python's
+    ``str.strip()`` also removes ``\x1c``-``\x1f`` and ``\x85``, which JS
+    ``trim()`` keeps, and JS removes U+FEFF, which Python keeps. A login
+    carrying one of those at its edge would be stored by connect and stamped by
+    the poll as two different values, so the two would not collide. The
+    normalisation is deliberately left as it is: such a login does not come
+    through the connect wizard, and changing the strip set here would move
+    rotate's value too. Never ``str(int(login))``: ``int()`` accepts
+    ``"007"`` and ``"8000_0017"``, and a converted value would never collide
+    with the text a connect route stored for the same account. A blank slot is
+    ``None``, never ``''`` (the column's nonblank CHECK refuses ``''``).
+
+    ⛔ The broker server is not part of the value (TODOS.md A-3): every writer
+    stores the login alone, so a server-qualified value would never collide
+    with a connect-stamped key.
+
+    ⛔ The value is an account identifier. Never log it.
+    """
+    return (login_slot or "").strip() or None
+
+
 def mt5_probe_request(symbol: str = "EURUSD") -> dict[str, Any]:
     """A minimal market-order-shaped request for ``order_check`` (PROBE ONLY —
     never submitted). ``order_check`` validates margin/funds and does NOT place an

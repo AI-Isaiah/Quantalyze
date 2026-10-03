@@ -2759,3 +2759,15 @@ class Mt5Session:
     login: int = field(repr=False)
     investor_password: str = field(repr=False)
     server: str = field(repr=False)
+    # The key's api_keys.venue_account_id: the login TEXT as the connect and
+    # rotate routes store it (services.mt5_validation.mt5_venue_account_id),
+    # NOT str(login) — `login` above is int-parsed, so "007" would read "7".
+    # Set by job_worker._make_mt5_session; the poll's identity stamp
+    # (services.account_identity) reads it with no terminal call.
+    # repr=False: it is an account identifier.
+    # 167.1.2-08 review, SFH M-1: REQUIRED, no default. With a default, a
+    # constructor that forgot it compiled, passed mypy and left every MT5 key
+    # unstamped behind a misleading WARNING. Omitting it now fails at build
+    # time. ``None`` stays a legal value (the helper returns it for a blank
+    # slot); the stamp logs that at ERROR as a construction defect.
+    venue_account_id: str | None = field(repr=False)

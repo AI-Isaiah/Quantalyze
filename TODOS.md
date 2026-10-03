@@ -8783,6 +8783,11 @@ Raised by the `/ship` pre-landing + adversarial reviews. The four that met the b
   (`<broker_server>:<login>`, already carried as `passphrase`) closes it. ⚠️ NOT a patch: the column
   is live on PROD, so changing what is stored is a migration decision with a backfill question.
   Not declared anywhere before this review.
+  ⚠️ **2026-10-03 (167.1.2 plan 08, founder Option B):** the holdings poll now also stamps MT5 keys
+  connected before the column existed (2026-08-12), from the login alone. So a cross-server login
+  clash between two of one owner's keys surfaces as a `duplicate` marker (a key-card note plus an
+  audit event), not as a connect refusal. Re-score this entry if another path ever creates an MT5
+  key with a NULL `venue_account_id`.
 - [ ] **Orphaned `api_keys` rows from a deleted composite draft are never swept.**
   `cleanup_abandoned_wizard_drafts.sql:19-24,41-49` cannot see them (the draft row is gone, and the
   keys were never in `strategy_keys`). Found while fixing the composite-draft misclassification;

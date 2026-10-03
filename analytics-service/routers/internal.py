@@ -51,6 +51,7 @@ from services.encryption import decrypt_credentials, encrypt_credentials, get_ke
 from services.error_contract import service_error
 from services.exchange import aclose_exchange, create_exchange
 from services.key_permissions import detect_permissions
+from services.mt5_validation import mt5_venue_account_id
 # D-04 (164.5.3 / MT5CREDS) — the SAME live-broker probe /validate-key's MT5
 # branch uses, reused verbatim rather than re-implemented. exchange.py imports
 # nothing from routers.*, so this is not a cycle.
@@ -771,4 +772,7 @@ async def rotate_key_secret(
     # ⛔ The ciphertext is built from the UNTRIMMED `login` on purpose: it
     # must stay byte-identical to what the broker authenticated. Only the
     # returned display/identity value is normalised.
-    return {**encrypted, "venue_account_id": (login or "").strip() or None}
+    # The normalisation is services.mt5_validation.mt5_venue_account_id, the
+    # one helper the poll's MT5 stamp also uses, so rotate and poll write the
+    # same bytes.
+    return {**encrypted, "venue_account_id": mt5_venue_account_id(login)}
