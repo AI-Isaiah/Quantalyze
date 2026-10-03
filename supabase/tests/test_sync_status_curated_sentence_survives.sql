@@ -147,9 +147,12 @@
 -- PostgREST upsert creates a strategy_analytics row, and the pairing CHECK
 -- admits it because both markers are present. On that row the branch writes
 -- computation_error = NULL over a NULL, the trigger's first conjunct is FALSE,
--- and the branch's OWN unconditional clears are the only thing that can remove
--- the markers. That is the claim these two arms pin, and it is the residual the
--- trigger explicitly does not cover.
+-- and the branch's OWN clears are the only thing that can remove the markers:
+-- branch (c)'s unconditional clears for D1, and for R1 branch (a)'s hold-CASE
+-- ELSE arms (since 20261003120000 the clear a non-kept re-entry reaches; a
+-- KEPT row holds its markers by founder decision 2026-10-03). That is the claim
+-- these two arms pin, and it is the residual the trigger explicitly does not
+-- cover.
 --
 -- ⚠️ Each arm's sentence assertion is therefore stated where it can fail, and
 -- NOT stated where it cannot: D1 and R1 assert their branch was reached (the
@@ -592,7 +595,8 @@ BEGIN
   --
   -- ⚠️ FIXTURE IS DELIBERATE, for arm D1's reason: the row is INSERTed with both
   -- markers over a NULL sentence, so the UPDATE-only provenance trigger cannot
-  -- mask branch (a)'s own unconditional clears. With a sentence in the column
+  -- mask branch (a)'s own clears (its hold-CASE ELSE arms, which a non-kept
+  -- re-entry reaches). With a sentence in the column
   -- the trigger would clear the markers and this arm could not fail.
   tok := gen_random_uuid();
   INSERT INTO compute_jobs (strategy_id, kind, status, claim_token, attempts, max_attempts)
@@ -623,10 +627,10 @@ BEGIN
   --            anchor, re-baselined 4 -> 2, since the edited CASEs leave its shape.
   -- RED-UNDER-M: {"arm":"R1","apply":[{"kind":"edit","file":"supabase/migrations/20261003120000_sync_status_bridge_residues.sql","find":"             THEN strategy_analytics.computation_error_source\n             ELSE NULL\n","replace":"             THEN strategy_analytics.computation_error_source\n             ELSE strategy_analytics.computation_error_source\n","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261003120000_sync_status_bridge_residues.sql","find":"             THEN strategy_analytics.computation_error_job_id\n             ELSE NULL\n","replace":"             THEN strategy_analytics.computation_error_job_id\n             ELSE strategy_analytics.computation_error_job_id\n","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261003120000_sync_status_bridge_residues.sql","find":"IF v_hold_cases <> 4 THEN","replace":"IF v_hold_cases <> 2 THEN","occurrences":1}]}
   IF v_src IS NOT NULL OR v_jobid IS NOT NULL THEN
-    RAISE EXCEPTION 'TEST FAILED (R1): branch (a) re-entered the row at ''computing'' and left provenance standing (source %, job %). When a job starts, any sentence on the row is stale by construction and the branch blanks it — a marker left behind then makes the NEXT generic write look writer-curated and freezes it there, and the 16-hour reaper''s own sentence is judged against it too. The provenance trigger cannot cover this row: it is UPDATE-only and the sentence was already NULL, so branch (a)''s own unconditional clears are the only thing standing here.', COALESCE(v_src, 'NULL'), COALESCE(v_jobid::text, 'NULL');
+    RAISE EXCEPTION 'TEST FAILED (R1): branch (a) re-entered the row at ''computing'' and left provenance standing (source %, job %). When a job starts, any sentence on the row is stale by construction and the branch blanks it — a marker left behind then makes the NEXT generic write look writer-curated and freezes it there, and the 16-hour reaper''s own sentence is judged against it too. The provenance trigger cannot cover this row: it is UPDATE-only and the sentence was already NULL, so branch (a)''s hold-CASE ELSE arms (the clear a non-kept re-entry reaches) are the only thing standing here.', COALESCE(v_src, 'NULL'), COALESCE(v_jobid::text, 'NULL');
   END IF;
 
-  RAISE NOTICE 'ALL 7 ARMS EXECUTED (S1, C1, O1, D1, P1, PC1, R1): a writer-curated computation_error sentence SURVIVES the compute_jobs transition that resolves its own job, on BOTH write branches (S1 branch (b), P1 branch (b-prime), each read back out of strategy_analytics after the real RPC and never inspected in the bridge body), and is REPLACED by the per-kind generic on every path where it does not describe that failure — no marker at all (C1 branch (b), PC1 branch (b-prime)) and a marker naming an OLDER still-unresolved failure (O1, the case a presence test cannot decide). Provenance is cleared unconditionally on the two branches that blank the sentence: the all-done success write (D1 branch (c)) and the non-terminal re-entry a RETRYABLE failure produces (R1 branch (a), which is also the DEFERRED Python direct-call path). Phase 164.2 / criteria 1 and 2, mig 20260906120000.';
+  RAISE NOTICE 'ALL 7 ARMS EXECUTED (S1, C1, O1, D1, P1, PC1, R1): a writer-curated computation_error sentence SURVIVES the compute_jobs transition that resolves its own job, on BOTH write branches (S1 branch (b), P1 branch (b-prime), each read back out of strategy_analytics after the real RPC and never inspected in the bridge body), and is REPLACED by the per-kind generic on every path where it does not describe that failure — no marker at all (C1 branch (b), PC1 branch (b-prime)) and a marker naming an OLDER still-unresolved failure (O1, the case a presence test cannot decide). Provenance is cleared on the two branches that blank the sentence: unconditionally on the all-done success write (D1 branch (c)), and by the hold-CASE ELSE arms on the non-terminal re-entry a RETRYABLE failure produces (R1 branch (a), which is also the DEFERRED Python direct-call path). Phase 164.2 / criteria 1 and 2, mig 20260906120000.';
 END $$;
 
 ROLLBACK;
