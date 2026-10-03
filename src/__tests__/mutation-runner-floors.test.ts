@@ -38,6 +38,7 @@ import {
   laneSpawnFailure,
   runCorpus,
   scopeDirForFile,
+  scopeReasonLine,
   sectionOfIdentity,
 } from "../../scripts/mutation-runner/run.mjs";
 import { parseFile, scanCorpus } from "../../scripts/mutation-runner/parse.mjs";
@@ -1670,6 +1671,10 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-01 (Phase 164.9.3.2 DEFER40001, plan 06): 54/54 -> 55/55, copied from one full lane run (the fence-errcode gate joined the annotated set).
  // ⭐ CURRENCY 2026-10-02 (Phase 164.9.3.2.1 ENQ40001, plan 03): 55/55 -> 56/56, copied from one full lane run (the enqueue race-loss gate joined the annotated set).
     "scope: FULL 56/56 annotated files",
+    // ⭐ ADDED 2026-10-03 (Phase 164.9.6 D-12): the runner prints exactly one
+    // `scope-reason:` line directly after `scope:` on every corpus run, and the
+    // count-recheck step MEASURE_FAILs without it.
+    "scope-reason: the mutation machinery or a lane input changed: scripts/mutation-runner/run.mjs",
     "  baseline  supabase/tests/test_strategy_shares_rls.sql — exit 0 (1.8s)",
     "  arm SHAPE 1                  exit   3  RED (identity ok)  (1.7s)",
     "  restore   supabase/tests/test_strategy_shares_rls.sql — exit 0 (1.8s)",
@@ -2642,6 +2647,8 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-01 (Phase 164.9.3.2 DEFER40001, plan 06): 2/54 -> 2/55, agreeing with the coverage line below (the recheck MEASURE_FAILs on a disagreement).
     // ⭐ CURRENCY 2026-10-02 (Phase 164.9.3.2.1 ENQ40001, plan 03): 2/55 -> 2/56, agreeing with the coverage line below (the recheck MEASURE_FAILs on a disagreement).
     "scope: SUBSET 2/56 annotated files: test_allocator_equity_derived_rls.sql test_allocator_equity_pre_terminus_flag.sql",
+    // ⭐ ADDED 2026-10-03 (Phase 164.9.6 D-12), directly after `scope:` as the runner prints it.
+    "scope-reason: 2 of 5 changed file(s) are gate files",
     "",
     // ⭐ CURRENCY 2026-09-27 (Phase 164.9.3 CLAIMPAIR, plan 05): 52/79 -> 53/80, agreeing with
     // GREEN_LOG's coverage line and the SUBSET scope denominator above.
@@ -2660,7 +2667,9 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     "  file test_allocator_equity_pre_terminus_flag.sql: sections 2 / judged 2 / annotated 2 / waived 0 / biting 2",
     "per-arm lane time: mean 2.0s over 8 arm run(s)",
     "",
-    "ARMS_FLOOR: NOT compared — this SUBSET run covered 2 of 49 annotated files; ARMS_FLOOR is compared by the full-corpus run (push to main).",
+    // ⭐ 2026-10-03 (Phase 164.9.6 D-04): the tail follows run.mjs — a push to main
+    // may itself be a SUBSET now, so the floor's home is the nightly and every FULL run.
+    "ARMS_FLOOR: NOT compared — this SUBSET run covered 2 of 49 annotated files; ARMS_FLOOR is compared by the nightly full-corpus run and by every FULL run.",
     // Review 164.4.2 WR-03: the static upper bound the runner compares on every
     // SUBSET run — the full corpus's annotated-minus-waived total, at the floor.
     // ⭐ Built from the imported ARMS_FLOOR (round-2 review IN-01), because the
@@ -2868,6 +2877,51 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-01 (Phase 164.9.3.2 DEFER40001, plan 06): 54 -> 55, from SUBSET_LOG's coverage line, which moved to 55/82 with the new gate file.
     // ⭐ CURRENCY 2026-10-02 (Phase 164.9.3.2.1 ENQ40001, plan 03): 55 -> 56, from SUBSET_LOG's coverage line, which moved to 56/83 with the new gate file.
     expect(r.out).toContain("printed 2 per-file row(s) but reported 56 annotated file(s)");
+  });
+
+  // ── Phase 164.9.6 / D-12: every run says WHY it took its scope ─────────
+  // One `scope-reason:` line, directly after `scope:`, asserted present, single
+  // and non-blank. It is never parsed for names.
+  it("RED: NO scope-reason line is a MEASURE_FAIL, on a FULL and on a SUBSET log (D-12)", () => {
+    for (const [log, env] of [
+      [GREEN_LOG, PUSH_MAIN],
+      [SUBSET_LOG, PR],
+      [SUBSET_LOG, PUSH_MAIN],
+    ] as Array<[string, Record<string, string>]>) {
+      const without = log.replace(/^scope-reason: .*\n/m, "");
+      expect(without, "the deletion must actually change the log").not.toBe(log);
+      const r = runCountRecheck(without, env);
+      expect(r.status, r.out).toBe(1);
+      expect(r.out).toContain("MEASURE_FAIL: the run printed NO 'scope-reason:' line — D-12 requires every run to say why it took its scope");
+    }
+  });
+
+  it("RED: two scope-reason lines, or one with a blank reason, are MEASURE_FAILs (D-12)", () => {
+    const doubled = GREEN_LOG.replace(/^(scope-reason: .*)$/m, "$1\n$1");
+    expect(doubled).not.toBe(GREEN_LOG);
+    const d = runCountRecheck(doubled, PUSH_MAIN);
+    expect(d.status, d.out).toBe(1);
+    expect(d.out).toContain("printed 2 'scope-reason:' lines");
+    const blank = GREEN_LOG.replace(/^scope-reason: .*$/m, "scope-reason:    ");
+    expect(blank).not.toBe(GREEN_LOG);
+    const b = runCountRecheck(blank, PUSH_MAIN);
+    expect(b.status, b.out).toBe(1);
+    expect(b.out).toContain("'scope-reason:' line carries an EMPTY reason");
+  });
+
+  it("GREEN: a scope-reason that names a migration .sql file moves neither the SUBSET name count nor the WR-07 set (D-12, Research Pattern 2)", () => {
+    const MIGRATION = "supabase/migrations/20260411144407_compute_jobs_queue.sql";
+    const named = SUBSET_LOG.replace(
+      /^scope-reason: .*$/m,
+      `scope-reason: 2 of 5 changed file(s) are gate files, 1 gate(s) loading changed migration(s) ${MIGRATION}`,
+    );
+    expect(named, "the fixture must actually carry the migration name").toContain(`scope-reason: 2 of 5 changed file(s) are gate files, 1 gate(s) loading changed migration(s) ${MIGRATION}`);
+    for (const env of [PR, PUSH_MAIN]) {
+      const r = runCountRecheck(named, env);
+      expect(r.status, `${env.GITHUB_EVENT_NAME} ${env.GITHUB_REF}\n${r.out}`).toBe(0);
+      expect(r.out).toContain(MIGRATION);
+      expect(r.out).not.toContain("MEASURE_FAIL");
+    }
   });
 
   it("RED: two scope lines, or a DIAGNOSTIC one, are not this gate", () => {
@@ -3078,6 +3132,55 @@ describe("164.9.6 D-04 — the mutate step takes the SUBSET branch only on a pul
     // Control: the PR row is unaffected by the revert.
     const pr = runMutate(envFor("pull_request", "refs/pull/1/merge", "subset"), reverted);
     expect(pr.argv?.[1]).toBe("--subset-from");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 164.9.6 / D-12 — `scopeReasonLine`, the runner's one "why" line.
+// Pure, so it is driven directly. It must never print an empty reason and
+// never let a control character split the line or start a new one.
+// ---------------------------------------------------------------------------
+describe("164.9.6 D-12 — scopeReasonLine says why the run took its scope, on one line", () => {
+  it("a derivation reason is printed after the fixed prefix", () => {
+    expect(scopeReasonLine({ reason: "3 of 9 changed file(s) are gate files" })).toBe(
+      "scope-reason: 3 of 9 changed file(s) are gate files",
+    );
+  });
+
+  it("a runner subset fallback takes precedence and still carries the derivation's reason", () => {
+    const line = scopeReasonLine({ subsetFallback: "no listed file is annotated: x.sql", reason: "r" });
+    expect(line.startsWith("scope-reason: the runner fell back to FULL: no listed file is annotated: x.sql")).toBe(true);
+    expect(line).toContain("(derivation: r)");
+    expect(scopeReasonLine({ subsetFallback: "f" })).toBe("scope-reason: the runner fell back to FULL: f (derivation: none supplied)");
+  });
+
+  it("no reason, or a blank one, names a direct invocation — never an empty reason", () => {
+    const DIRECT = "scope-reason: no derivation reason supplied (a direct invocation)";
+    expect(scopeReasonLine({})).toBe(DIRECT);
+    expect(scopeReasonLine()).toBe(DIRECT);
+    expect(scopeReasonLine({ reason: "   " })).toBe(DIRECT);
+    expect(scopeReasonLine({ reason: "\n\t\x00" })).toBe(DIRECT);
+  });
+
+  it("a newline, CR, NUL or DEL in the reason cannot split the line or start a workflow command", () => {
+    const line = scopeReasonLine({ reason: "a\nb\rc\x00d\x7fe\n::error::forged" });
+    expect(line.startsWith("scope-reason: ")).toBe(true);
+    expect(/[\x00-\x1f\x7f]/.test(line), JSON.stringify(line)).toBe(false);
+    expect(line.split("\n")).toHaveLength(1);
+    expect(line).toBe("scope-reason: a b c d e ::error::forged");
+  });
+
+  it("SOURCE PIN: in runCorpus the scope-reason line is logged directly after `log(scopeLine);`, no other log call between", () => {
+    const code = maskJsComments(readFileSync(RUNNER_PATH, "utf8"));
+    const fnAt = anchorIndex(code, "export function runCorpus({");
+    const fnEnd = anchorIndex(code, "\n}\n", fnAt);
+    const body = code.slice(fnAt, fnEnd);
+    const scopeAt = anchorIndex(body, "log(scopeLine);");
+    expect(body.split("log(scopeLine);").length - 1, "exactly one `log(scopeLine);`").toBe(1);
+    const nextLog = anchorIndex(body, "log(", scopeAt + "log(scopeLine);".length);
+    const between = body.slice(scopeAt + "log(scopeLine);".length, nextLog);
+    expect(between, "the line between the two log calls computes the scope-reason line").toContain("scopeReasonLine(");
+    expect(body.slice(nextLog, nextLog + "log(reasonLine);".length)).toBe("log(reasonLine);");
   });
 });
 
@@ -3369,6 +3472,23 @@ describe("164.4.2-07 (D-D) — a SUBSET run never compares a narrowed tally agai
     expect(floorDefects(fires.defects, /FILES_FLOOR regression/), "one above the FULL count must fire on a subset run").toHaveLength(1);
   });
 
+  it("164.9.6 D-12: every corpus run logs ONE scope-reason line directly after its scope line, and returns it", () => {
+    const cases: Array<[Record<string, unknown>, string]> = [
+      [{ subsetFiles: ["mini-gate.sql"], scopeReason: "1 of 3 changed file(s) are gate files" }, "scope-reason: 1 of 3 changed file(s) are gate files"],
+      [{ subsetFiles: ["mini-migration.sql"], scopeReason: "r" }, "scope-reason: the runner fell back to FULL: no listed file is annotated: mini-migration.sql (derivation: r)"],
+      [{}, "scope-reason: no derivation reason supplied (a direct invocation)"],
+      [{ onlyFile: "mini-gate.sql" }, "scope-reason: a narrowed DIAGNOSTIC run (--file/--arm)"],
+    ];
+    for (const [opts, want] of cases) {
+      const { r, lines } = drive({ filesFloor: 0, armsFloor: 0, waivedCeiling: 9, ...opts });
+      const scopeAt = lines.findIndex((l) => l.startsWith("scope: "));
+      expect(scopeAt, JSON.stringify(opts)).toBeGreaterThan(-1);
+      expect(lines[scopeAt + 1], JSON.stringify(opts)).toBe(want);
+      expect(lines.filter((l) => l.startsWith("scope-reason:")), "exactly one per run").toHaveLength(1);
+      expect((r as { scopeReasonLine?: string }).scopeReasonLine).toBe(want);
+    }
+  });
+
   it("the CLI can never hand a subset run a lowered floor: main's runCorpus call passes no floor, ceiling or lane runner", () => {
     const code = maskJsComments(readFileSync(RUNNER_PATH, "utf8"));
     const at = code.indexOf("\nfunction main(argv) {");
@@ -3377,6 +3497,8 @@ describe("164.4.2-07 (D-D) — a SUBSET run never compares a narrowed tally agai
     expect(end).toBeGreaterThan(at);
     const mainBody = code.slice(at, end);
     const calls = mainBody.match(/runCorpus\(\{[^}]*\}\)/g) ?? [];
-    expect(calls).toEqual(["runCorpus({ scopeDir, onlyFile, onlyArm, subsetFiles })"]);
+    // ⭐ 2026-10-03 (Phase 164.9.6 D-12): `scopeReason` joined the call — a
+    // string the runner prints, never a floor, a ceiling or a lane runner.
+    expect(calls).toEqual(["runCorpus({ scopeDir, onlyFile, onlyArm, subsetFiles, scopeReason })"]);
   });
 });
