@@ -14,8 +14,8 @@ verified-stale items are excluded by construction.
 
 - [x] **RANK-01** (L818): Published percentile rankings never fold failed/stale-computation KPIs into any strategy's rank. ⚠️ Research corrections are binding: gate on `isComputedAnalytics` semantics (a literal `complete` filter would wrongly drop `complete_with_warnings`); use a separate gate constant, NOT a `computation_status` append to `PERCENTILE_ANALYTICS_COLUMNS` (that falsifies the csv-finalize mirror prose at three sites); fix BOTH the TS side and the `get_verified_cohort_rank` SQL RPC (documented parity-by-construction); measure per-category population counts first (C-M1 — the <5/<20 floors mean a filter can blank a whole category's badges).
 - [x] **RANK-02** (L1143): Anonymous readers receive only the columns the public surface needs — the `strategy_analytics (*)` splats (`queries.ts:218`, `compare/page.tsx:68`) become explicit projections excluding `daily_returns`/`metrics_json`/`data_quality_flags`.
-- [ ] **RANK-03** (L947): `api_keys.exchange` is server-authoritative at every INSERT path — no client-supplied venue can differ from the venue the server validated (extends the Phase-156 service-role-writer pattern).
-- [ ] **RANK-04** (L2522): The `asset_class` annualization stamp (√365 vs √252) derives from the server-validated venue, never from client-supplied `apiKeyExchange` (`finalize-wizard/route.ts:1288-1311`). ⚠️ NOT the "one-identifier change" TODOS claimed: `attested_venue` is NULL for trigger-scrubbed and pre-backfill rows and `isCryptoExchange(null) === false`, so a naive swap stamps `traditional`/√252 onto crypto strategies — the swap moves together with a null-attestation extension of the `skipAssetClassWrite` guard, gated on the B-M1 PROD census.
+- [x] **RANK-03** (L947): `api_keys.exchange` is server-authoritative at every INSERT path — no client-supplied venue can differ from the venue the server validated (extends the Phase-156 service-role-writer pattern).
+- [x] **RANK-04** (L2522): The `asset_class` annualization stamp (√365 vs √252) derives from the server-validated venue, never from client-supplied `apiKeyExchange` (`finalize-wizard/route.ts:1288-1311`). ⚠️ NOT the "one-identifier change" TODOS claimed: `attested_venue` is NULL for trigger-scrubbed and pre-backfill rows and `isCryptoExchange(null) === false`, so a naive swap stamps `traditional`/√252 onto crypto strategies — the swap moves together with a null-attestation extension of the `skipAssetClassWrite` guard, gated on the B-M1 PROD census.
 - [x] **RANK-05** (L855): The quantstats price-detection sign-flip is closed on the strategy-analytics path (all-non-negative returns with a >100% day must not be re-read as prices).
 - [x] **RANK-06** (L858): Blend annualization treats unknown-`asset_class` legs as crypto for RISK, so a sole crypto leg no longer inflates Sharpe via √252.
 - [x] **RANK-07** (L3184): Two concurrent same-session resubmits cannot both take the FILL arm — the FILL UPDATE is compare-and-set (`.is("category_id", null)`).
@@ -163,7 +163,6 @@ discuss ran 2026-08-28 and these are its output.
 - [x] **VAC-07**: Phase 159's two blocked items close on the new lane as ONE spec — two concurrent `csv-finalize` POSTs on one never-classified `wizard_session_id`; exactly one 2xx applied receipt, one honest raced refusal, `category_id` holds the winner. Bounded to one spec, no production code changes. ⭐ **SCORED 2026-09-07 (Phase 164.5 plan 07), and only after the `[VAC-07-DEFER]` fence was satisfied BY OBSERVATION.** `src/__tests__/csv-finalize-concurrent-never-classified.test.ts` drives the two POSTs from two supabase-js clients with SEPARATE access tokens (a single-client `Promise.all` serializes over one pooled connection and cannot open the race — the measured H-0033 / H-0036 lesson). Observed **RED** with the double-submit fence `strategies_user_wizard_session_source_uniq` removed from the lane's schema — `Both outcomes were: A:200:ok, B:200:ok`, i.e. two applied receipts — and **GREEN** with it restored from a byte backup; both runs are pasted verbatim in `164.5-07-SUMMARY.md`. ⛔ **SUBSTRATE IS THE LOCAL-STACK LANE** (`scripts/local-stack/run.sh up`), NOT the pg-lane: the route reaches the database through supabase-js, i.e. PostgREST + GoTrue over HTTP, and a bare Postgres cluster serves neither. It EXECUTES in CI through the `frontend-local-stack` job, wired into the `frontend` aggregator's `needs:` list AND its result loop, and it FAILS rather than skips when the lane is absent (measured: `Tests 2 failed (2)`, exit 1, zero skipped). No production code was changed.
 - [x] **VAC-08**: The repo-vs-TEST drift check (`DRIFT-01` / `SKIP-01`) joins `supabase_migrations.schema_migrations` on **`name`**, not `version`. ⛔ MEASURED 2026-08-28: the ledger re-stamps `version` at apply time while preserving the repo filename in `name`; joining on `version` reports 12 of 12 recent migrations missing when all 12 are present. A check that joins on `version` is itself a vacuous control. Pairs with a body-level assertion — presence in the ledger is not evidence the deployed body matches.
 
-
 ## Future Requirements (deferred, stay in TODOS.md)
 
 All verified-open items NOT listed above remain in TODOS.md untouched — notably the r2 quick-win
@@ -190,8 +189,8 @@ Which phases cover which requirements. Updated during roadmap creation.
 |-------------|-------|--------|
 | RANK-01 | Phase 159 | Complete |
 | RANK-02 | Phase 159 | Complete |
-| RANK-03 | Phase 160 | Pending |
-| RANK-04 | Phase 160 | Pending |
+| RANK-03 | Phase 160 | Complete |
+| RANK-04 | Phase 160 | Complete |
 | RANK-05 | Phase 159 | Complete |
 | RANK-06 | Phase 159 | Complete |
 | RANK-07 | Phase 159 | Complete |
