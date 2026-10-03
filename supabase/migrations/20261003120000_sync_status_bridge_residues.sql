@@ -116,6 +116,16 @@
 -- those rows. The staleness verdict is not affected (it keys on the
 -- returns_series dates, never on computed_at). The provenance trigger of
 -- 20260906120000 does not fire on a hold (the sentence is unchanged).
+-- ⚠️ STATED LIMIT, measured 2026-10-03 (pg-lane scratch probe, this file before
+-- and after the hold). The analytics runner never writes computed_at; this
+-- function is its only writer. So when a REAL recompute ends at
+-- complete_with_warnings (or at a plain complete kept by the refresh keep)
+-- while a sibling job is still in flight, the runner's own done mark is a keep
+-- here and computed_at stays at its PRE-compute value. It catches up when the
+-- last in-flight job terminates (branch (c) or (b) stamps now()), so the lag
+-- lasts as long as the fan-out. Before the hold that same mark stamped now().
+-- The bridge cannot tell "the runner just recomputed" from "nothing ran"; a
+-- runner-side stamp would, and that is outside this SQL-only phase (D-05b).
 --
 -- LOCK ORDER (D-06, Phase 164.5.2.1). The first statement after the
 -- NULL-strategy guard takes the two-integer, transaction-scoped advisory lock
@@ -760,10 +770,11 @@ BEGIN
            -- provenance that described it goes with it. A marker left standing
            -- over a blanked sentence would make the NEXT generic write look like
            -- a curated one and freeze it there. This branch is also the reason
-           -- the four TypeScript pre-enqueue writers need no marker at all: when
-           -- a job starts, their sentence is stale by construction and
-           -- superseding it is the correct outcome. A held sentence keeps its
-           -- markers on the same predicate.
+           -- the four TypeScript pre-enqueue writers need no marker at all: they
+           -- always write 'failed', so a job starting on their row is a
+           -- TRANSITION (never a keep), their sentence is stale by construction
+           -- and superseding it is the correct outcome. A held sentence keeps
+           -- its markers on the same predicate.
            computation_error_source = CASE
              WHEN strategy_analytics.computation_error_source = 'writer' AND strategy_analytics.computation_error_job_id = ANY (v_unprotected_job_ids)
              THEN NULL
