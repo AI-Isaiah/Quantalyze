@@ -661,7 +661,7 @@ ordering is unenforced, wave frontmatter drifting from ROADMAP, and `NYQ-01`. Sa
 system (upstream `gsd-core`, not this repo). Mixing them in makes this unshippable. Book them
 separately.
 
-**Plans:** 9/10 plans executed (plan 07 DEFERRED, delivered by Phase 164.5 plan 07; it stays unchecked by design)
+**Plans:** 9/10 plans executed; plan 07 retired as `status: superseded` (GSD #2349 rule, 2026-10-03), DEFERRED 2026-08-29 and delivered by Phase 164.5 plan 07; its box stays unchecked by design
 
 Plans:
 
