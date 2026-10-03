@@ -130,6 +130,18 @@
 -- lasts as long as the fan-out. Before the hold that same mark stamped now().
 -- The bridge cannot tell "the runner just recomputed" from "nothing ran"; a
 -- runner-side stamp would, and that is outside this SQL-only phase (D-05b).
+-- ⚠️ STATED LIMIT, THE OTHER DIRECTION (Phase 164.5.2.1 review, WR-01). The
+-- hold is BRANCH (a)'s ONLY, which is all the founder decision covered.
+-- computed_at is therefore NOT guaranteed never to read fresher than the last
+-- real compute. Branch (c) still writes computed_at = now() unconditionally,
+-- deliberately and unchanged here, and it keeps complete_with_warnings. So when
+-- an UNRELATED strategy-scoped job (a cron sync_trades poll, a
+-- process_key_long) is the last in-flight job and finishes with no live failure
+-- left, its mark takes branch (c) and re-stamps computed_at on a published row
+-- nothing recomputed. The two directions together: the date can LAG a real
+-- recompute (above) and can ADVANCE without one (here). Both have one fix, a
+-- runner-side stamp on a real finish with the bridge no longer stamping in
+-- (c); it is booked as Phase 166.5 COMPUTEDATSTAMP and is not in this file.
 --
 -- LOCK ORDER (D-06, Phase 164.5.2.1). The first statement after the
 -- NULL-strategy guard takes the two-integer, transaction-scoped advisory lock
