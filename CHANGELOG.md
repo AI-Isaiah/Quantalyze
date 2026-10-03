@@ -1,5 +1,178 @@
 # Changelog
 
+## [0.123.0.0] - 2026-10-03 — SUBSETSHARD: a FULL sql-mutation run drives four gate files at once inside its one job, and a drift-only red main no longer forces one
+
+⭐ **What changed for whoever reads this next.** Full `sql-mutation` runs had outgrown the 20-minute
+cap: 18m40s on the #937 PR, 16m on the #939 PR, and a cancel at 20m on the main push after
+`9c1dc3137` (574 arms, up from 556 at 13m). The cascade made it worse. Every migration merge leaves
+main red with the tolerated baseline-content drift until the bot re-dump lands. The 164.9.6
+green-predecessor rule then forced FULL on the next push, which could time out, kept main red and
+made Railway skip analytics deploys. Phase 164.9.6.1 answers both halves without raising the cap.
+(1) The runner drives up to four gate files at once inside the ONE job: one log, one verdict, no
+matrix (founder D-01, which supersedes the booked shard split). (2) On a push, the SQL gate subset
+accepts a predecessor that is red ONLY with tolerated `DRIFT` / `SNAPSHOT_MISSING` rows, read as
+positive evidence from the `sql-gate-lint` job log (D-02, D-04, D-05).
+
+⚠️ **A minor bump: CI behaviour changes on every FULL run and on every push after a drift-red main.**
+No migration, no app code and no dependency ships here. `timeout-minutes` stays **20**, and no
+wall-time guard was added (D-03).
+
+### Changed
+- **The SQL mutation runner runs gate files concurrently** (`scripts/mutation-runner/run.mjs`,
+  plan 01).
+  - `runLane` is async on a new `spawnAsync`, which returns a `spawnSync`-shaped result and keeps
+    the old 128 MiB output bound.
+  - `runCorpus` runs a file-level pool of `defaultLaneConcurrency()` workers, which is
+    min(`LANE_CONCURRENCY_CAP` 4, `availableParallelism`), floor 1. A non-integer or below-1
+    `concurrency` is a usage error.
+  - Each worker gets its own loopback port from `allocateLanePorts`, which holds all listeners open
+    at once and throws on a duplicate. `run.sh`'s collision guard still runs.
+  - Each file writes to its own sink, and `flush` prints files and defects strictly in corpus order.
+    A `Promise.allSettled` drain holds a failing worker's error until every sibling has settled, and
+    only then is the scratch root removed.
+  - The two independent tallies (`arms:` and `lane-invocations:`) stay inside the lane, under the
+    same `invoked` rule as before. `main`'s `runCorpus` call text is unchanged, so the CI mutate
+    line and the nightly FULL tail are byte-identical.
+  - Measured locally, not on CI: a real-lane tracer over 4 files took 42.1 s serial against 15.0 s
+    four-wide (2.8x). A full corpus run at `bd556868` took 298 s with `arms: 574/574/0`,
+    `biting: 574` and `lane-invocations: 574`. These are run outputs, not floors.
+- **The runner prints one `lane-concurrency: <N>   (…)` line directly after `scope-reason:`**, before
+  any lane (plan 01). The assert step in `ci.yml`'s `sql-mutation` and its byte-equal copy in
+  `sql-mutation-nightly.yml` MEASURE_FAIL on an unreadable log, no line, more than one line, or N
+  below 1 (plan 03). N is never compared against a cap, because D-03 forbids a guard.
+- **The SQL gate subset tolerates a drift-only red predecessor** (`scripts/classify-changed-paths.mjs`,
+  `scripts/sql-gate-subset.mjs`, plan 02).
+  - `predecessorVerdict(sha, fetch, { tolerateBaselineDrift, fetchJobLog })` takes an opt-in options
+    bag. The default path is byte-identical: all 19 earlier classifier rows and 28 earlier subset
+    rows pass unchanged. `derivePush` is the only caller that opts in (D-04), so the docs-only short
+    path keeps the strict rule (SS-8).
+  - Before it reads any log, `toleratedDriftVerdict` refuses: any red other than `sql-gate-lint` or
+    `frontend`; zero or several red `sql-gate-lint` runs; a lint conclusion other than `failure`; no
+    `frontend` failure in the lint's suite; a red in another suite; an open, absent or second red
+    suite.
+  - `readJobLog` fetches the job log through `gh api --allow-escape-sequences` with argv elements,
+    never a shell string, with a 60 s timeout and a 16 MiB buffer. The repo and the job id are
+    validated first.
+  - `parseBaselineDriftLog` requires POSITIVE evidence: exactly one exit line, whose step header is
+    the drift step byte for byte; only `DRIFT` / `SNAPSHOT_MISSING` rows, the one FAILED line and the
+    exit line as `##[error]` lines, all inside that step; every row token matching `^[\w.]+/\d+$`;
+    and exactly one `findings N` with N equal to the row count. Anything else, a read failure
+    included, reads FULL with the reason named.
+  - The tolerated reason reaches `sql_gate_reason`, for example `predecessor <sha12> red only with
+    tolerated baseline drift: <fn/nargs> (sql-gate-lint content-drift DRIFT 1, SNAPSHOT_MISSING 0;
+    frontend aggregator red with it)`.
+  - Measured read-only against real CI: `26b041ce2` is tolerated and names
+    `sync_strategy_analytics_status/1`, while its strict reading stays `check 'frontend' concluded
+    failure`. `9c1dc3137` stays FULL with `check 'sql-mutation' concluded cancelled`, and the log is
+    never read.
+- **`ci.yml`'s `changed-paths` job token gains `actions: read`** (plan 02). The job-logs endpoint
+  needs it. Without it the read fails, the proof fails safe to FULL, and the tolerance never engages.
+  No write scope was added.
+- **`CLAUDE.md`'s `**Timeout.**` paragraph gains a dated 164.9.6.1 addendum** (plan 03). It cites
+  `LANE_CONCURRENCY_CAP`, `defaultLaneConcurrency`, `predecessorVerdict` / `tolerateBaselineDrift`
+  and `scripts/sql-gate-subset.mjs` by symbol, and restates no floor and no line number. `ci.yml`
+  gains two dated currency comments, on the runner self-test step and above `sql-mutation`'s
+  `timeout-minutes`.
+
+### Fixed
+- **`runCorpus`'s `laneRunner` JSDoc still described the old synchronous runner**, so the
+  PR's `frontend-typecheck` and `frontend-build` went red (TS2322) on the async test stubs. It now
+  accepts a result or a Promise of one, with `postApplyAbs` nullable and an optional `port`.
+- **SFH-03 (HIGH): an output overflow in one lane could hang the whole pool until the 20-minute
+  cancel, naming no lane** (`9c04f3481`). The overflow branch sent SIGKILL to the child alone and
+  settled only on `close`, which a grandchild holding the pipes kept away.
+  - Lanes now spawn `detached`, each in its own process group. On overflow the runner sends SIGTERM
+    to the group, so `run.sh`'s trap stops the cluster, then SIGKILL after a 5 s grace. The lane
+    settles on `exit` and still reports `lane could not run: ENOBUFS`.
+  - The pipes keep draining until bash exits, so `run.sh`'s teardown is not cut off by SIGPIPE.
+  - `detached` takes lanes out of the runner's terminal group, so `forwardSignalsToLaneGroups`
+    passes SIGINT, SIGTERM and SIGHUP to every live lane group, then re-raises on the runner.
+- **SFH-01 / WR-02: a taken worker port was reported as a corpus defect** (`d86984b40`). The new pure
+  `lanePortCollision(proc)` recognises `run.sh`'s refusal only when exit 2 AND both of its own anchored
+  lines are present (a lost psql connection also exits 2). The lane becomes a `lane-unrunnable`
+  MEASURE_FAIL naming the port, it still counts in both tallies, and the run still exits 1.
+- **Four literal U+FEFF characters that plan 02 wrote into `scripts/classify-changed-paths.mjs` are
+  spelled as escapes** (`77a3aeaf9`). `drift-check-scripts.test.ts` IN-02 failed on them and would
+  have reddened the PR. Both self-tests and the CALIBRATION block still pass.
+
+### Tests
+- **Runner pool proofs on stub lanes** in `src/__tests__/mutation-runner-floors.test.ts` (plan 01):
+  Test A, corpus order under adversarial completion order; B, serial and four-wide tallies agree;
+  C, the pool bound; D, a distinct port per in-flight lane; E, the `allSettled` drain; F, exactly one
+  `lane-concurrency:` line. A usage-refusal row covers `concurrency` 0, -1, 1.5 and NaN. Four
+  production neuters each went RED and were restored from a byte copy. Five source pins were
+  re-pointed to the async signatures; none was deleted and none changed meaning.
+- **`SELF-TEST (concurrency)` 1/2 and 2/2 on REAL lanes** (plan 01). A serial run and a four-wide run
+  of the same 4-file SUBSET agree on exit code, tallies, lane legs, the ordered defect list and the
+  normalised log, and the four-wide run measured more than one lane in flight (max 4). A lost-file
+  neuter went RED.
+- **The tolerant proof's refusal matrix** (plan 02). The classifier self-test grows 19 → 24 and the
+  subset self-test 28 → 31 rows (92 → 99 assertions). Production neuters on the findings equality,
+  the drift-step header, the same-suite rule, the default opt-in and the ANSI strip each went RED.
+  Contract pins in `ci-docs-path-filter.contract.test.ts` cover the drift step's `run:` line, the
+  three-entry `changed-paths` permissions and the D-04 scope.
+- **Count-recheck rows for the new assert** (plan 03): RED for an absent line (FULL and SUBSET), a
+  doubled line and `lane-concurrency: 0`; GREEN for N = 1, 4 and 7, which proves no cap comparison
+  crept in. The absent-line row requires the absence branch itself to stop the run (`ced2a771d`),
+  because a first neuter stayed GREEN behind the not-one check.
+- **Lane lifecycle and port collision rows** (review fixes): `SELF-TEST (lane lifecycle)` 1/2 (a
+  flooding lane settles, is classed ENOBUFS and its EXIT trap runs) and 2/2 (a TERM-deaf group is
+  SIGKILLed and still settles), `SELF-TEST (port collision)` 1/1 through the real verdict loop, and
+  vitest mirrors of each, including a pin that `run.sh` still prints the exact lines the classifier
+  matches. Each was neutered RED and restored with `cmp`.
+
+### Security
+- **16 of 16 register threats are closed** (gsd-security-auditor, ASVS L1, block_on high, verdict
+  SECURED). The auditor re-ran two neuters itself (T-06's findings equality and T-09's docs-only
+  opt-in), and both went RED. No dependency, manifest or lockfile changed; the only new imports are
+  Node built-ins.
+- **AR-164.9.6.1-01 is accepted** (T-164.9.6.1-10). The `frontend` aggregator's own log is not read,
+  so a `frontend` red from a wrongly skipped job beside a drift-red `sql-gate-lint` would be
+  tolerated. It is bounded: the narrowed push still mutates its derived subset, the predecessor's
+  own `sql-mutation` had to conclude OK, and the nightly FULL run is the backstop.
+- **U-01, unregistered and non-blocking:** the process-group kill and signal forwarding added by
+  the SFH-03 fix carry WR-R2-01 below. Signal forwarding on a GitHub job cancel has no automated
+  test.
+
+### Notes
+- ⚠️ **SS-1 is UNMEASURED until after merge, and the verification is `human_needed` for it.** The
+  first FULL push-to-main `sql-mutation` run must have its mutate step's start and end timestamps
+  quoted, with run id, head SHA and its `lane-concurrency:` line. Expect about half of the serial
+  baseline: 12.85 min on main run `37130225515`, 14.3 min on the #939 PR run. That same run is also
+  the first ubuntu exercise of the SFH-03 and SFH-01/WR-02 fixes, which were measured on macOS only.
+- ⚠️ **The CI job token's `actions: read` is not yet exercised on CI.** The real-data spot-checks used
+  the developer's own `gh` auth. Only the next push on a drift-red main shows the `changed-paths`
+  token reading the job log.
+- ⚠️ **Four MEDIUMs are recorded, not fixed.** No HIGH or CRITICAL remains after round 2.
+  - **WR-01:** the tolerant proof never requires positive evidence that `sql-mutation` ran and
+    succeeded. It is latent today, because `sql-mutation` and `sql-gate-lint` share the same
+    docs-only `if:`, so a skipped `sql-mutation` cannot sit beside a red `sql-gate-lint`.
+  - **SFH-02:** the proof assumes `frontend` is red BECAUSE of the drift, and a skip-caused
+    aggregator failure is invisible to it. The narrowing stays safe; the harm is a misleading reason.
+  - **WR-R2-01:** `killLaneGroup` tolerates only `ESRCH`. On macOS, signalling a group whose only
+    member is an unreaped zombie raises `EPERM`, and the runner crashes on overflow-after-exit or
+    Ctrl-C. Linux returns success for the same call, so CI is unaffected, and the failure is a loud
+    crash, never a false green.
+  - **SFH-R2-01:** a lane whose teardown leaks its cluster is judged normally and its `run.sh`
+    WARNING is discarded. Later lanes on that worker's port then report port-taken `lane-unrunnable`
+    MEASURE_FAILs that do not name the leak as their cause.
+- ⚠️ **Per-worker fixed port.** Each worker reuses one port, allocated once, for its whole share of
+  the corpus. A taken port is now a named `lane-unrunnable` MEASURE_FAIL rather than a corpus
+  defect, but it still affects every later lane on that worker. A fresh port per lane was not taken.
+  Port reuse was measured on darwin only (about 700 lanes, no collision).
+- **RESEARCH Pitfall 7, noted and not fixed:** a `sql-mutation` job killed at the timeout loses its
+  whole runner log, because the mutate step writes to a file and `cat`s it afterwards. A `tee` would
+  change the byte-equal mutate block in both workflows, which D-03 put out of scope.
+- **Phase record.** The booking commit closes 164.9.6 and 164.5.2.1 in the ROADMAP and books
+  164.9.6.1. CONTEXT carries D-01 to D-05, with the founder's answers on D-04 and D-05. The ROADMAP
+  entry now carries a dated `SUPERSEDED` note for the shard split, the Goal, SS-1 to SS-8 in the
+  bold `**Success Criteria**` form (the `##` heading truncated the section for the roadmap parser),
+  and the three plans. Two review rounds (gsd-code-reviewer and silent-failure-hunter each), one
+  fix round, the verification (7/8, SS-1 post-merge) and the security audit are in the phase
+  directory.
+- The `self-referential-oracle` vitest could not load locally (the shared TS 7 deps symlink), so CI
+  is its first real run for this change.
+
 ## [0.122.0.1] - 2026-10-03 — BASELINE: automated re-dump after the PROD apply of 26b041ce
 
 ### Changed

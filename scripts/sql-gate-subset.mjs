@@ -92,8 +92,10 @@ import {
   isPrMergeCommit,
   predecessorVerdict,
   pushRangeFiles,
+  readJobLog,
   readPredecessor,
   scratchRepo,
+  syntheticDriftLog,
 } from "./classify-changed-paths.mjs";
 import { parseAnnotations } from "./mutation-runner/parse.mjs";
 
@@ -457,7 +459,7 @@ function emit(verdict) {
 // ---------------------------------------------------------------------------
 
 /** Declared up front; a self-test that shrinks and still says PASSED is the defect. */
-export const EXPECTED_ASSERTIONS = 92;
+export const EXPECTED_ASSERTIONS = 99;
 
 const PR = "pull_request";
 const G1 = "supabase/tests/test_alpha_gate.sql";
@@ -488,6 +490,33 @@ const cannedPredecessor = (conclusion, status = "completed") => (sha) => ({
 });
 /** The before-SHA proven green by the shared proof. */
 const GREEN_P = predecessorVerdict(BEFORE, cannedPredecessor("success"));
+
+/**
+ * Phase 164.9.6.1 (D-02, D-05): a before-SHA in the 26b041ce2 shape, as `gh api`
+ * returns it. In ONE failed CI suite: `sql-gate-lint` failure, `frontend`
+ * failure, everything else success, with `sql-mutation` concluding `mutation`
+ * (the 9c1dc3137 / b2c59c720 pattern is `cancelled`). `log` is the
+ * `sql-gate-lint` job log the fake gh answers on the logs path; synthetic, in
+ * the measured shape, never a raw CI log.
+ */
+const LINT_JOB_ID = 111213703410;
+const driftScenario = ({ mutation = "success", log = syntheticDriftLog() } = {}) => (sha) => {
+  const run = (id, name, conclusion) => ({ id, name, app: { slug: PREDECESSOR_APP_SLUG }, check_suite: { id: 7 }, head_sha: sha, status: "completed", conclusion });
+  const checkRuns = [run(LINT_JOB_ID, "sql-gate-lint", "failure"), run(LINT_JOB_ID + 1, "python", "success"), run(LINT_JOB_ID + 2, "sql-mutation", mutation), run(LINT_JOB_ID + 3, "frontend", "failure")];
+  return {
+    runs: { total_count: checkRuns.length, check_runs: checkRuns },
+    suites: { total_count: 1, check_suites: [{ id: 7, app: { slug: PREDECESSOR_APP_SLUG }, head_sha: sha, status: "completed", conclusion: "failure", latest_check_runs_count: checkRuns.length }] },
+    log,
+  };
+};
+/** Five tolerated rows with realistically long function names, to test the reason cap. */
+const FIVE_ROWS = [
+  "DRIFT sync_strategy_analytics_status/1",
+  "DRIFT compute_portfolio_allocation_snapshot/3",
+  "DRIFT reject_sentinel_writes_on_strategy_rows/0",
+  "DRIFT retention_delete_guard_for_audit_ledger/2",
+  "SNAPSHOT_MISSING enqueue_exchange_key_reverification_job/1",
+];
 const G3 = "supabase/tests/test_gamma_gate.sql";
 const M = "supabase/migrations/20260101000000_self_test.sql";
 const FLOORS = "scripts/mutation-floors.mjs";
@@ -527,18 +556,30 @@ const ciFixture = (variant) =>
  * the default: a row that reaches the lookup without asking for a verdict reads
  * FULL, the safe direction.
  */
-function runMainOnPush(cwd, env, { gh = "fail" } = {}) {
+function runMainOnPush(cwd, env, { gh = "fail", scenario } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "gsd-sql-gate-subset-out-"));
   const outFile = join(dir, "github-output");
   writeFileSync(outFile, "");
   const bin = join(dir, "bin");
   mkdirSync(bin);
   const argvFile = join(dir, "gh-argv");
-  const bodies = cannedPredecessor(gh)(env.PUSH_BEFORE_SHA ?? "");
+  // Phase 164.9.6.1: a `scenario(sha)` answers `{ runs, suites, log }` (the
+  // tolerant proof's three reads); otherwise `gh` picks the one-run canned body
+  // as before. The bodies are written to FILES and `cat`-ed, never inlined in a
+  // quoted shell string: a job log carries backticks, a BOM and ESC bytes.
+  // Routing is on the JOINED argv (`$*`), because the logs call puts
+  // `--allow-escape-sequences` in `$2`; `*/logs` is matched first.
+  const bodies = scenario ? scenario(env.PUSH_BEFORE_SHA ?? "") : { ...cannedPredecessor(gh)(env.PUSH_BEFORE_SHA ?? ""), log: "" };
+  const runsFile = join(dir, "runs.json");
+  const suitesFile = join(dir, "suites.json");
+  const logFile = join(dir, "job.log");
+  writeFileSync(runsFile, JSON.stringify(bodies.runs));
+  writeFileSync(suitesFile, JSON.stringify(bodies.suites));
+  writeFileSync(logFile, bodies.log ?? "");
   const script =
-    gh === "fail"
+    gh === "fail" && !scenario
       ? `#!/bin/sh\nprintf '%s\\n' "$@" >> '${argvFile}'\necho 'gh: self-test lookup failure' >&2\nexit 1\n`
-      : `#!/bin/sh\nprintf '%s\\n' "$@" >> '${argvFile}'\ncase "$2" in\n  *check-suites*) printf '%s' '${JSON.stringify(bodies.suites)}' ;;\n  *) printf '%s' '${JSON.stringify(bodies.runs)}' ;;\nesac\n`;
+      : `#!/bin/sh\nprintf '%s\\n' "$@" >> '${argvFile}'\ncase "$*" in\n  */logs*) cat '${logFile}' ;;\n  *check-suites*) cat '${suitesFile}' ;;\n  *) cat '${runsFile}' ;;\nesac\n`;
   writeFileSync(join(bin, "gh"), script, { mode: 0o755 });
   try {
     const res = spawnSync(process.execPath, [fileURLToPath(import.meta.url)], {
@@ -699,6 +740,75 @@ const CASES = [
           ) && pass;
         const broken = runMainOnPush(repo.dir, { PUSH_BEFORE_SHA: base }, { gh: "fail" });
         return ok(broken.code === 0 && broken.outputs.sql_gate_mode === "full" && /gh: self-test lookup failure/.test(broken.outputs.sql_gate_reason ?? ""), `a failing gh -> full, exit 0, gh's reason printed (got exit ${broken.code}: ${JSON.stringify(broken.outputs)})`) && pass;
+      } finally {
+        repo.cleanup();
+      }
+    },
+  },
+  {
+    claim: "164.9.6.1 D-02 END TO END (the 26b041ce2 pattern): a before-SHA red ONLY with tolerated baseline drift narrows, naming the function, after reading exactly the sql-gate-lint job log",
+    run: (ok) => {
+      const repo = scratchRepo("subset-tolerated-drift");
+      try {
+        const base = repo.commit({ [G1]: "-- base\n" });
+        repo.commit({ [G1]: "-- changed\n" });
+        const r = runMainOnPush(repo.dir, { PUSH_BEFORE_SHA: base }, { scenario: driftScenario() });
+        let pass = ok(r.code === 0 && r.outputs.sql_gate_mode === "subset" && r.outputs.sql_gate_files === G1, `subset of G1, as on a green predecessor (got exit ${r.code}: ${JSON.stringify(r.outputs)})`);
+        pass = ok((r.outputs.sql_gate_reason ?? "").includes(`predecessor ${base.slice(0, 12)} red only with tolerated baseline drift: f_one/1`), `the reason names the tolerated function (got ${JSON.stringify(r.outputs.sql_gate_reason)})`) && pass;
+        return (
+          ok(
+            JSON.stringify(r.ghArgv) ===
+              JSON.stringify([
+                "api",
+                `repos/self-test/repo/commits/${base}/check-runs?filter=all&per_page=100`,
+                "api",
+                `repos/self-test/repo/commits/${base}/check-suites?per_page=100`,
+                "api",
+                "--allow-escape-sequences",
+                `repos/self-test/repo/actions/jobs/${LINT_JOB_ID}/logs`,
+              ]),
+            `exactly three gh calls: check runs, check suites, then the sql-gate-lint job log by its check-run id (got ${JSON.stringify(r.ghArgv)})`,
+          ) && pass
+        );
+      } finally {
+        repo.cleanup();
+      }
+    },
+  },
+  {
+    claim: "164.9.6.1 D-02 END TO END (the 9c1dc3137 / b2c59c720 pattern): the same drift beside a CANCELLED sql-mutation stays FULL naming sql-mutation, and the log is never read",
+    run: (ok) => {
+      const repo = scratchRepo("subset-drift-cancelled");
+      try {
+        const base = repo.commit({ [G1]: "-- base\n" });
+        repo.commit({ [G1]: "-- changed\n" });
+        const r = runMainOnPush(repo.dir, { PUSH_BEFORE_SHA: base }, { scenario: driftScenario({ mutation: "cancelled" }) });
+        let pass = ok(r.code === 0 && r.outputs.sql_gate_mode === "full" && /is not proven green \(check 'sql-mutation' concluded cancelled\)/.test(r.outputs.sql_gate_reason ?? ""), `full, naming the cancelled sql-mutation (got exit ${r.code}: ${JSON.stringify(r.outputs)})`);
+        return (
+          ok(
+            JSON.stringify(r.ghArgv) ===
+              JSON.stringify(["api", `repos/self-test/repo/commits/${base}/check-runs?filter=all&per_page=100`, "api", `repos/self-test/repo/commits/${base}/check-suites?per_page=100`]),
+            `exactly two gh calls, the job log never read (got ${JSON.stringify(r.ghArgv)})`,
+          ) && pass
+        );
+      } finally {
+        repo.cleanup();
+      }
+    },
+  },
+  {
+    claim: "164.9.6.1 D-02: a tolerated log of FIVE rows (four DRIFT, one SNAPSHOT_MISSING) still names every function in the written sql_gate_reason, after oneLineReason's cap",
+    run: (ok) => {
+      const repo = scratchRepo("subset-drift-five");
+      try {
+        const base = repo.commit({ [G1]: "-- base\n" });
+        repo.commit({ [G1]: "-- changed\n" });
+        const r = runMainOnPush(repo.dir, { PUSH_BEFORE_SHA: base }, { scenario: driftScenario({ log: syntheticDriftLog(FIVE_ROWS) }) });
+        const reason = r.outputs.sql_gate_reason ?? "";
+        let pass = ok(r.code === 0 && r.outputs.sql_gate_mode === "subset" && !reason.endsWith("...(truncated)"), `subset, the reason not truncated (got exit ${r.code}, ${reason.length} chars: ${JSON.stringify(r.outputs)})`);
+        const tokens = FIVE_ROWS.map((row) => row.split(" ")[1]);
+        const missing = tokens.filter((t) => !reason.includes(t));
+        return ok(missing.length === 0, `all five name/nargs tokens reach sql_gate_reason (missing ${JSON.stringify(missing)})`) && pass;
       } finally {
         repo.cleanup();
       }
@@ -1003,7 +1113,7 @@ function selfTest() {
  * at `cwd` (CI: the checkout; the self-test: a scratch repo). ⛔ NEVER THROWS:
  * any error becomes a FULL verdict carrying its reason.
  */
-function derivePush(env, cwd, fetchPredecessor = readPredecessor) {
+function derivePush(env, cwd, fetchPredecessor = readPredecessor, fetchJobLog = readJobLog) {
   try {
     const ref = env.GITHUB_REF;
     if (ref !== "refs/heads/main") return judge({ event: "push", ref, presentFiles: [] });
@@ -1042,7 +1152,13 @@ function derivePush(env, cwd, fetchPredecessor = readPredecessor) {
     // WR-03: the push would narrow, so prove the before-SHA green first. The
     // fetcher is passed EXPLICITLY: `predecessorVerdict`'s default is a binding
     // private to classify-changed-paths.mjs.
-    return judge({ ...inputs, predecessor: predecessorVerdict(pushRange.sha, fetchPredecessor) });
+    // Phase 164.9.6.1 (D-02, D-04, D-05): this is the ONE caller that opts into
+    // the tolerant proof. A before-SHA red ONLY with the founder-tolerated
+    // stale-baseline drift (a `sql-gate-lint` log of DRIFT / SNAPSHOT_MISSING
+    // rows, `frontend` red with it) narrows, and the reason names the tolerated
+    // functions. Every other red still owes the full corpus, named. The
+    // docs-only short path (`classifyPushRange`) stays strict by decision.
+    return judge({ ...inputs, predecessor: predecessorVerdict(pushRange.sha, fetchPredecessor, { tolerateBaselineDrift: true, fetchJobLog }) });
   } catch (e) {
     return { mode: "full", files: [], reason: `the push derivation failed (${firstLineOf(e)}) — the full corpus is owed` };
   }

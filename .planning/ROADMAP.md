@@ -3172,13 +3172,29 @@ Plans:
 
 ### Phase 164.9.6.1: SUBSETSHARD — a FULL sql-mutation run fits well under its 20-minute cap again, and a stale-baseline-drift red no longer forces one. Founder decision 2026-10-03 (AskUserQuestion "Book it, run after 164.6.6"): queued to run AFTER 164.6.6. Measured: full runs took 18m40s on the #937 PR, 16m on the #939 PR, and timed out at 20m on the main push after #939 merge 9c1dc3137 (job cancelled; 574 arms, up from 556 at 13m). Cascade: every migration merge leaves main red with the tolerated baseline-content-drift until the bot re-dump lands; the 164.9.6 green-predecessor rule (D-13/WR-03) then forces FULL on the next push, which can time out, keeping main red and making Railway skip analytics deploys. Scope: (1) split the full corpus into parallel shards (PRs, main FULL pushes, nightly) so a full run takes about 10 min, with one floor/ratchet verdict over the merged shard results; (2) predecessorVerdict treats a red whose ONLY failing checks are the founder-tolerated stale-baseline class (sql-gate-lint baseline-content-drift and the frontend aggregator it reds) as green, fail-loud on anything else. The 20-minute cap is NOT raised. (INSERTED)
 
-**Goal:** [Urgent work - to be planned]
-**Requirements**: TBD
+⛔ **SUPERSEDED 2026-10-03 (founder, D-01, AskUserQuestion "In-job concurrency").** The heading above is kept as lineage. Scope (1)'s "split the full corpus into parallel shards … with one floor/ratchet verdict over the merged shard results" is REPLACED by in-job concurrency: one job, one log, one verdict, no matrix and no artifact merge. A matrix split was considered and not chosen. Scope (2) is refined by D-02 (drift rows only, read as positive evidence from the `sql-gate-lint` job log), D-04 (the tolerance is opt-in for the SQL gate subset only; the docs-only short path keeps the strict rule) and D-05 (`SNAPSHOT_MISSING` rows are tolerated beside `DRIFT`). D-03: no wall-time guard is added. ⚠️ **Scheduling, also superseded the same day:** the heading's "queued to run AFTER 164.6.6" was overtaken when the founder said "Also start 164.9.6.1", so it runs now, in parallel with 164.6.6, as CONTEXT records.
+
+**Goal:** A FULL `sql-mutation` run fits well under its unchanged 20-minute cap by running gate files concurrently inside the one job, and a push on top of a main that is red only with the tolerated stale-baseline drift no longer forces a FULL run.
+**Requirements**: SS-1, SS-2, SS-3, SS-4, SS-5, SS-6, SS-7, SS-8
 **Depends on:** Phase 164.9.6
-**Plans:** 0 plans
+**Plans:** 3 plans
+
+*The requirement IDs are phase-local, derived from CONTEXT D-01 … D-05. No REQUIREMENTS.md IDs are assigned to this phase. Each ID is defined by the Success Criterion of the same number below.*
+
+**Success Criteria** (what must be TRUE):
+1. **SS-1 (D-01, D-03; POST-MERGE).** The first FULL push-to-main `sql-mutation` run after this phase merges has its mutate step's start and end timestamps quoted, with run id and head SHA, and takes about half of the serial baseline (12.85 min on main run 37130225515; 14.3 min on the #939 PR run). `timeout-minutes` stays 20 and no wall-time guard is added. Not executable before merge; the verifier records it as a human-verification item.
+2. **SS-2 (D-01).** Under concurrency, `arms:` executed equals `lane-invocations:` and `biting` counts each arm once. Proven by a serial-versus-four-wide comparison on stub lanes and on real lanes.
+3. **SS-3 (D-01).** Runner output is deterministic and in corpus order at any concurrency, and every existing `ci.yml` parse of the runner log still matches.
+4. **SS-4 (D-01).** No two concurrent lanes share a data directory, port or socket.
+5. **SS-5 (D-01).** The runner prints exactly one `lane-concurrency:` line, and both `ci.yml` and `sql-mutation-nightly.yml` MEASURE_FAIL without it.
+6. **SS-6 (D-02, D-05).** A predecessor red only with tolerated `DRIFT` / `SNAPSHOT_MISSING` rows narrows the SQL gate subset on positive evidence, and the reason names the functions.
+7. **SS-7 (D-02).** The 26b041ce2 pattern narrows and the 9c1dc3137 / b2c59c720 pattern (a cancelled `sql-mutation`) stays FULL, both proven in the self-test. Every other red stays FULL with its reason.
+8. **SS-8 (D-04).** The docs-only short path keeps the strict green-predecessor rule.
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 164.9.6.1 to break down)
+- [x] 164.9.6.1-01-PLAN.md — runner concurrency (D-01): async runLane/runCorpus, 4-wide file pool, per-worker ports, ordered output, `lane-concurrency:` line, serial==parallel proofs (wave 1)
+- [x] 164.9.6.1-02-PLAN.md — drift-tolerant predecessor (D-02/D-04/D-05): opt-in for sql-gate-subset, sql-gate-lint job-log proof, `actions: read`, self-test matrix (wave 1)
+- [x] 164.9.6.1-03-PLAN.md — `lane-concurrency:` assert in ci.yml + nightly, ROADMAP Goal/SC/supersession, CLAUDE.md addendum, post-merge measurement defined (wave 2)
 
 ### Phase 164.9.1: JOBRPCTRUTH — the compute-job RPC surface does what its own comments say (INSERTED)
 

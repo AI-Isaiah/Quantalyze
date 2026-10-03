@@ -370,6 +370,14 @@ declared CEILING and is never raised. ⚠️ **The ceiling risk is narrowed, not
 FULL fallback on a push still runs under the 20: a dispatch, a direct or multi-commit push, a
 machinery change, a changed unannotated gate, a migration no gate loads, and a predecessor not
 proven green.
+⭐ **2026-10-03 (Phase 164.9.6.1 SUBSETSHARD):** a FULL run now drives gate files concurrently
+inside the one job (`LANE_CONCURRENCY_CAP` and `defaultLaneConcurrency` in
+`scripts/mutation-runner/run.mjs`), prints that as one `lane-concurrency:` line, and the assert
+step MEASURE_FAILs without it. The 20 stays the declared CEILING and was not raised; the next
+crossing is answered by measurement, never by raising it. On a push, the SQL gate subset now
+treats a predecessor red ONLY with `baseline-content-drift` `DRIFT` / `SNAPSHOT_MISSING` rows as
+proven (`predecessorVerdict`'s opt-in `tolerateBaselineDrift`, used only by
+`scripts/sql-gate-subset.mjs`). The docs-only path stays strict.
 
 📜 **Dated lineage for Phases 164.3 → 164.7 — every historical arm tally, ubuntu run id and
 superseded CURRENCY paragraph — now lives in `docs/sql-gate-lineage.md`.** It is history; nothing
