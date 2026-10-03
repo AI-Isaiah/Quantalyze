@@ -227,6 +227,31 @@ a failure fails the aggregate rather than passing quietly:
   line measured on the lane itself; pg_cron AVAILABLE with a NON-EMPTY lane-blocked class raises
   `lane-blocked-stale` and exits 1. That tripwire stays live for any future unannotated pg_cron
   gate even though the class is currently empty — it has been observed both firing and clearing.
+  ⭐ **2026-10-03 (Phase 164.9.6 SUBSETMAIN) — "mutates every arm" no longer describes a push to
+  `main`.** The sentences above are kept as lineage. On a push to `main` the job now runs only
+  what the pushed range needs: the changed gate files plus the gates whose `RED-UNDER-SETUP`
+  loads a changed migration (D-03), or nothing at all, with the printed verdict
+  `no mutation input changed` (D-09). D-09 is a founder-scoped exception to the vacuity fence,
+  push-to-main only; pull requests keep the fence. Any doubt about the range runs FULL with the
+  reason printed (D-01), and a `workflow_dispatch` is always FULL (D-02). Every run prints a
+  `scope:` line and a `scope-reason:` line, and the assert step fails a log without exactly one
+  non-blank `scope-reason:` (D-12). The derivation is `judge` in `scripts/sql-gate-subset.mjs`;
+  read it by symbol, not from this summary.
+- **`sql-mutation-nightly`** ⭐ (2026-10-03, Phase 164.9.6, not in the `frontend` aggregator) —
+  `.github/workflows/sql-mutation-nightly.yml` runs the FULL corpus daily and on dispatch, under
+  its own `timeout-minutes`, which are not `sql-mutation`'s (read them with
+  `grep -n 'timeout-minutes' .github/workflows/sql-mutation-nightly.yml`). Now that a push mutates
+  a subset or nothing, this is the run that compares every floor against a real biting count (D-07).
+  When it is red it stays red AND files or comments on the one open issue labelled
+  `nightly-canary-failure:sql-mutation`, carrying the run's reading (D-06). ⚠️ While red it
+  attaches a failing check to main's head SHA, so it can block a Railway redeploy of that SHA.
+  The founder accepted that coupling (D-11). Its steps are copies of `sql-mutation`'s, pinned
+  byte-equal by `src/__tests__/sql-mutation-nightly-parity.test.ts`. Edit a `sql-mutation` step
+  and the pin goes red until the nightly's copy matches.
+  ⛔ **What it can NOT catch (the D-03 correction).** The nightly applies the same
+  `RED-UNDER-SETUP` lists as every other run, so it cannot see a migration that no gate lists. Its
+  backstop value is runner-host drift (a new image, PostgreSQL minor or pg_cron package) and
+  ARMS_FLOOR measured as real biting. It does not cover unlisted migrations.
 - **`sql-gate-lint`** — **seven** static rules over `supabase/tests` (`R1-exception-handler-probe`,
   `R2-functiondef-comment-strip`, `R3-additive-diagnostic-narrow`, `R4-tgtype-bitmask-completeness`,
   `R5-fixture-shadows-migration-table`, `R6-fixture-shadows-fixture-table`, `R7-fixture-shadows-policy`),
@@ -332,6 +357,12 @@ the allowlist or relaxing `DETECT_RE`.
 **Timeout.** `sql-mutation`'s `timeout-minutes` is **20** — cited BY SYMBOL, not by line: the `sql-mutation:` job key in `.github/workflows/ci.yml` and its own `timeout-minutes:` entry (`grep -n '^  sql-mutation:' .github/workflows/ci.yml`). ⛔ Do not re-introduce line numbers here: this sentence cited `:1259`/`:1069` until 2026-09-11, by which point the job had moved to `:1196` and the timeout to `:1386` — the `[164.7-CITATION-DRIFT-01]` class, whose recorded remedy is to cite by symbol rather than re-number prose that will drift again. It stays there: the rule's one
 permitted raise was taken on 2026-09-05 and 20 is a declared CEILING. A future crossing is
 answered by `[REDUNDER-SUBSET-SPLIT]`, never by raising again (`ci.yml` carries the derivation).
+⭐ **2026-10-03 (Phase 164.9.6 SUBSETMAIN):** `[REDUNDER-SUBSET-SPLIT]` is now answered by Phase
+164.9.6. A push to `main` mutates a derived subset or nothing, and the full corpus moved to
+`sql-mutation-nightly.yml` under that workflow's own timeout. `sql-mutation`'s 20 stays the
+declared CEILING and is never raised. ⚠️ **The ceiling risk is narrowed, not closed.** Every
+FULL fallback on a push still runs under the 20: a dispatch, a direct or multi-commit push, a
+machinery change, a changed unannotated gate, and a migration no gate loads.
 
 📜 **Dated lineage for Phases 164.3 → 164.7 — every historical arm tally, ubuntu run id and
 superseded CURRENCY paragraph — now lives in `docs/sql-gate-lineage.md`.** It is history; nothing
