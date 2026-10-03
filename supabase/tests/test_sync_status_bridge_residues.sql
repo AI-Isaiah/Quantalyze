@@ -156,6 +156,25 @@
 -- is deliberately ABSENT, as it is from that list: this gate drives the mark RPC
 -- of 20260515114555, and this migration's DO block asserts nothing about the
 -- mark RPC bodies.
+-- ⚠️ LANE ASYMMETRY — W5 AND R5 CAN ONLY GO RED ON THE PG-LANE (review WR-02).
+-- W5 and R5 measure the bridge's OWN stamp CASE (computing_started_at). The
+-- schema of record also carries 20260803120000's BEFORE UPDATE row trigger
+-- strategy_analytics_stamp_computing_started_trigger (it is in
+-- supabase/schema/baseline.sql, so it is live on the sql-tests local stack and in
+-- PROD). That trigger stamps now() on any update that leaves a computing row
+-- unstamped, and clears the stamp on every row that is not computing. So on
+-- sql-tests it produces W5's and R5's end states whatever the bridge's stamp CASE
+-- writes, and both arms stay GREEN there over a deleted stamp arm. In PROD the
+-- bridge's two stamp arms are defense-in-depth behind the trigger; a regression in
+-- them is caught by sql-mutation on the pg-lane and by nothing on sql-tests.
+-- 20260803120000 is deliberately kept OUT of the setup apply list below, and
+-- adding it is not the fix: MEASURED 2026-10-03 on the pg-lane with only that
+-- migration's trigger function and CREATE TRIGGER layered on via --post-apply
+-- (its pg_cron reaper half is not needed to observe this), W5's twin edits leave
+-- the gate exiting 0 with every arm executed, and so do R5's; without the trigger
+-- each twin's first failure is its own arm. The trigger therefore makes both twins
+-- unbiteable on BOTH lanes, and sql-mutation would score them as defects. Keeping
+-- the trigger off this lane is what lets the two arms prove the bridge's own CASE.
 -- RED-UNDER-SETUP: {"apply":["scripts/pg-lane/fixtures/01-fixture-core.sql","scripts/pg-lane/fixtures/02-fixture-sanitize-tables.sql","scripts/pg-lane/fixtures/03-fixture-compute-jobs.sql","scripts/pg-lane/fixtures/27-fixture-strategy-analytics-computation-error.sql","supabase/migrations/20260411144407_compute_jobs_queue.sql","scripts/pg-lane/fixtures/04-fixture-compute-jobs-targets.sql","supabase/migrations/20260510175507_process_key_long_compute_job_kinds_repair.sql","supabase/migrations/20260515114555_compute_jobs_claim_token_fencing.sql","supabase/migrations/20260522111858_compute_analytics_from_csv_kind.sql","supabase/migrations/20260614120000_derive_broker_dailies_kind.sql","supabase/migrations/20260708120000_sync_status_failed_final_bounce.sql","supabase/migrations/20260710120000_strategy_keys.sql","supabase/migrations/20260710130000_stitch_composite_kind.sql","supabase/migrations/20260825150000_sync_status_protect_marked_refresh.sql","supabase/migrations/20260826120000_computation_error_curated_copy.sql","supabase/migrations/20260906120000_computation_error_provenance.sql","supabase/migrations/20261003120000_sync_status_bridge_residues.sql"]}
 
 BEGIN;
