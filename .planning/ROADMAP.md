@@ -3181,8 +3181,7 @@ Plans:
 
 *The requirement IDs are phase-local, derived from CONTEXT D-01 … D-05. No REQUIREMENTS.md IDs are assigned to this phase. Each ID is defined by the Success Criterion of the same number below.*
 
-## Success Criteria
-
+**Success Criteria** (what must be TRUE):
 1. **SS-1 (D-01, D-03; POST-MERGE).** The first FULL push-to-main `sql-mutation` run after this phase merges has its mutate step's start and end timestamps quoted, with run id and head SHA, and takes about half of the serial baseline (12.85 min on main run 37130225515; 14.3 min on the #939 PR run). `timeout-minutes` stays 20 and no wall-time guard is added. Not executable before merge; the verifier records it as a human-verification item.
 2. **SS-2 (D-01).** Under concurrency, `arms:` executed equals `lane-invocations:` and `biting` counts each arm once. Proven by a serial-versus-four-wide comparison on stub lanes and on real lanes.
 3. **SS-3 (D-01).** Runner output is deterministic and in corpus order at any concurrency, and every existing `ci.yml` parse of the runner log still matches.
