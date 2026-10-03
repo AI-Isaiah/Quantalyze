@@ -2753,6 +2753,18 @@ Plans:
 - ⛔ MOVED 2026-09-27 to Phase 164.6.6.1 MT5SCRUB (founder split): 164.6.6-03 (scrub spike; its gateway stand-up half stays here, re-planned), 164.6.6-05, 164.6.6-06, 164.6.6-07. Re-planning this phase (narrowed scope + a new H3 plan) rewrites this list.
   - ⚠️ **Plan ids reused (noted 2026-10-03):** the ids moved out above were reused for NEW plans in this list, which the re-plan wrote. 03 is the gateway stand-up, 05 is H3 part 1, 06 is the H3 part 2 park (split out of 05 at checker round 3), and 07 is the D-08 MT5-password plan (added at plan-check revision 1, 2026-10-03). The moved plans live on as 164.6.6.1-01..-04 (see that phase's list: "was 164.6.6-03/05/06/07"). Read `164.6.6-07` in this list as the D-08 plan, never as the moved job-terminal scrub.
 
+### Phase 164.6.6.2: BTCNATIVE — an MT5 account denominated in BTC (or any non-USD currency) reports its returns in its own unit, not as a dust-guarded USD series (INSERTED)
+
+Founder request 2026-10-03 (chat, a factsheet screenshot of MM-2x, then "ok, after 164.6.6.1", corrected the same evening to "sorry, it should be after 164.6.6"): runs right AFTER 164.6.6 and BEFORE 164.6.6.1. Both it and 164.6.6.1 change the MT5 ingestion files, so they run one after the other, never in parallel. **Measured read-only on PROD 2026-10-03 (marker query first):** MM-2x's `strategy_analytics` row is `complete_with_warnings` with `cumulative_return`, `volatility` and `max_drawdown` all 0.0 and `data_quality_flags` `{dust_nav_guard: true, insufficient_window: true, csv_source: true}`. **Root cause, from a code reading (re-measure at plan time):** the MT5 path assumes a USD account, so a BTC-sized balance is read as dollars, falls under `nav_twr.py` `DUST_NAV_FLOOR` ($1000), and the dust guard flattens every metric. The positions panel already states the gap: `allocator_positions.py` "MT5 account currency is {ccy} — USD conversion isn't supported yet". **Reuse candidate:** the v1.8/v1.9 native-unit NAV + TWR machinery built for Deribit coin-margined accounts (`services/native_nav.py`, the native-unit adapter in `deribit_ingest.py`). **Scope:** (1) read the MT5 account currency (`account_info().currency`) and carry it with the account; (2) rebuild NAV and TWR from the deal ledger in that native unit, with a per-currency dust floor instead of the USD one; (3) the factsheet shows returns as growth in the native unit ("more BTC") and labels the unit; (4) OPEN for discuss-phase: whether a USD view (native NAV converted at the benchmark BTC price the factsheet already reads) is in scope. Never invent data: an uncomputable metric stays null.
+
+**Goal:** [Urgent work - to be planned]
+**Requirements**: TBD
+**Depends on:** Phase 164.6.6
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 164.6.6.2 to break down)
+
 ### Phase 164.6.6.1: MT5SCRUB — the MT5 terminals are wiped of saved accounts after use without ever leaving the jobs terminal logged out (INSERTED)
 
 **Goal:** The validation terminal is wiped of every validated account after each use, and the jobs
@@ -2784,18 +2796,6 @@ Plans:
 - [ ] 164.6.6.1-02-PLAN.md — (was 164.6.6-05) narrow terminate-and-scrub verb over rpyc
 - [ ] 164.6.6.1-03-PLAN.md — (was 164.6.6-06) validation terminal scrubbed inside the lease after every validation
 - [ ] 164.6.6.1-04-PLAN.md — (was 164.6.6-07) job terminal scrubbed on every ipc_fault recovery, credentialed relaunch within budget
-
-### Phase 164.6.6.1.1: BTCNATIVE — an MT5 account denominated in BTC (or any non-USD currency) reports its returns in its own unit, not as a dust-guarded USD series (INSERTED)
-
-Founder request 2026-10-03 (chat, a factsheet screenshot of MM-2x, then "ok, after 164.6.6.1"): runs AFTER 164.6.6.1, because both change the MT5 ingestion files. **Measured read-only on PROD 2026-10-03 (marker query first):** MM-2x's `strategy_analytics` row is `complete_with_warnings` with `cumulative_return`, `volatility` and `max_drawdown` all 0.0 and `data_quality_flags` `{dust_nav_guard: true, insufficient_window: true, csv_source: true}`. **Root cause, from a code reading (re-measure at plan time):** the MT5 path assumes a USD account, so a BTC-sized balance is read as dollars, falls under `nav_twr.py` `DUST_NAV_FLOOR` ($1000), and the dust guard flattens every metric. The positions panel already states the gap: `allocator_positions.py` "MT5 account currency is {ccy} — USD conversion isn't supported yet". **Reuse candidate:** the v1.8/v1.9 native-unit NAV + TWR machinery built for Deribit coin-margined accounts (`services/native_nav.py`, the native-unit adapter in `deribit_ingest.py`). **Scope:** (1) read the MT5 account currency (`account_info().currency`) and carry it with the account; (2) rebuild NAV and TWR from the deal ledger in that native unit, with a per-currency dust floor instead of the USD one; (3) the factsheet shows returns as growth in the native unit ("more BTC") and labels the unit; (4) OPEN for discuss-phase: whether a USD view (native NAV converted at the benchmark BTC price the factsheet already reads) is in scope. Never invent data: an uncomputable metric stays null.
-
-**Goal:** [Urgent work - to be planned]
-**Requirements**: TBD
-**Depends on:** Phase 164.6.6.1
-**Plans:** 0 plans
-
-Plans:
-- [ ] TBD (run /gsd-plan-phase 164.6.6.1.1 to break down)
 
 ### Phase 164.6.8: OUTAGEALERT — a shared-terminal MT5 outage reaches a human without one clicking a button (INSERTED)
 
