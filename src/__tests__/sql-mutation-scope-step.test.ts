@@ -21,8 +21,8 @@
  * and an inherited value would make a row pass on one event and fail on another.
  */
 import { describe, expect, it } from "vitest";
-import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
+import { copyFileSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -277,5 +277,139 @@ describe("sql-mutation step gating: fail-safe, uniform, and nothing before the s
     expect(v).toHaveLength(1);
     expect(v[0]).toContain('step "Mutate every annotated RED-UNDER arm and require it to bite"');
     expect(v[0]).toContain("skip_lane == 'false'");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// End to end on real history: the derivation's ACTUAL output drives the step
+// ---------------------------------------------------------------------------
+//
+// The two halves CI composes, composed the same way: `scripts/sql-gate-subset.mjs`
+// (the NEW script, copied over the OLD tree in a detached scratch worktree, as
+// CI would run it on that push) writes its three outputs, and those three values
+// are fed into the real scope-step body with the same event and ref.
+//
+// `98f04db16` is the phase trigger: a planning-only squash push that ran the full
+// corpus and crossed the 20-minute ceiling. `fd4d86cdf` changed one gate file.
+// ⛔ A missing sha FAILS, naming the object, and never skips. CI's
+// `frontend-test` job checks out with full history (`fetch-depth: 0`, measured
+// 2026-10-03), so both objects resolve there as they do locally.
+// MEASURED 2026-10-03: `scripts/mutation-runner/parse.mjs`, which the derivation
+// imports, is byte-identical between both shas and HEAD, so copying the two
+// scripts is enough.
+
+const WT_PREFIX = "scope-e2e-";
+// realpath: on macOS tmpdir() is a symlinked /var path while `git worktree list`
+// prints the resolved /private/var path, so an unresolved prefix never matches
+// and a leftover check built on it would pass without checking anything.
+const TMP_REAL = realpathSync(tmpdir());
+
+function git(args: string[], cwd: string = REPO_ROOT): string {
+  return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
+}
+
+function worktreesUnderPrefix(): string[] {
+  return git(["worktree", "list", "--porcelain"])
+    .split("\n")
+    .filter((l) => l.startsWith(`worktree ${join(TMP_REAL, WT_PREFIX)}`));
+}
+
+/** A copy of the vitest env with every event, ref, output and gate key removed. */
+function cleanEnv(): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const [k, v] of Object.entries(process.env)) {
+    if (v === undefined) continue;
+    if (/^(GITHUB_|SQL_GATE_|PUSH_)/.test(k)) continue;
+    env[k] = v;
+  }
+  return env;
+}
+
+function parseOutputs(text: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const line of text.split("\n")) {
+    const eq = line.indexOf("=");
+    if (eq > 0) out[line.slice(0, eq)] = line.slice(eq + 1);
+  }
+  return out;
+}
+
+/** Derive the push verdict for `sha` with the checkout's scripts, then run the scope step on it. */
+function deriveThenScope(sha: string) {
+  const present = spawnSync("git", ["cat-file", "-e", `${sha}^{commit}`], { cwd: REPO_ROOT });
+  if (present.status !== 0) {
+    throw new Error(
+      `MISSING OBJECT: commit ${sha} is not in this clone (a shallow checkout?). The end-to-end ` +
+        `proof needs full history; this is a failure, never a skip.`,
+    );
+  }
+  const before = git(["rev-parse", `${sha}^1`]);
+  const dir = mkdtempSync(join(TMP_REAL, WT_PREFIX));
+  const wt = join(dir, "wt");
+  try {
+    git(["worktree", "add", "--detach", wt, sha]);
+    // Calibration for the leftover check below: the prefix filter SEES a live worktree.
+    expect(worktreesUnderPrefix(), "the leftover filter cannot see a live scratch worktree").toContain(`worktree ${wt}`);
+    for (const f of ["sql-gate-subset.mjs", "classify-changed-paths.mjs"]) {
+      copyFileSync(join(REPO_ROOT, "scripts", f), join(wt, "scripts", f));
+    }
+    const outFile = join(dir, "github-output");
+    writeFileSync(outFile, "");
+    const derived = spawnSync("node", ["scripts/sql-gate-subset.mjs"], {
+      cwd: wt,
+      encoding: "utf8",
+      env: {
+        ...cleanEnv(),
+        ...PUSH_MAIN,
+        PUSH_BEFORE_SHA: before,
+        PUSH_FORCED: "false",
+        GITHUB_OUTPUT: outFile,
+      },
+    });
+    expect(derived.status, `${derived.stdout}${derived.stderr}`).toBe(0);
+    const outputs = parseOutputs(readFileSync(outFile, "utf8"));
+    for (const key of ["sql_gate_mode", "sql_gate_files", "sql_gate_reason"]) {
+      expect(Object.keys(outputs), `the derivation wrote no ${key}`).toContain(key);
+    }
+    const scope = runScope({
+      ...PUSH_MAIN,
+      SQL_GATE_MODE: outputs.sql_gate_mode,
+      SQL_GATE_FILES: outputs.sql_gate_files,
+      SQL_GATE_REASON: outputs.sql_gate_reason,
+    });
+    return { outputs, scope };
+  } finally {
+    spawnSync("git", ["worktree", "remove", "--force", wt], { cwd: REPO_ROOT });
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+describe("end to end on real history: derivation output -> scope step", { timeout: 60_000 }, () => {
+  it("98f04db16 (the phase trigger, planning-only, 3 changed files) derives none and skips the lane with both lines printed", () => {
+    const { outputs, scope } = deriveThenScope("98f04db16");
+    expect(outputs.sql_gate_mode).toBe("none");
+    expect(outputs.sql_gate_files).toBe("");
+    expect(scope.status, scope.out).toBe(0);
+    expect(scope.output).toBe("skip_lane=true\n");
+    expect(scope.stdout).toContain("scope: NONE 0 gate files — no mutation input changed\n");
+    const reasonLine = scope.stdout.split("\n").find((l) => l.startsWith("scope-reason: "));
+    expect(reasonLine, "no scope-reason line was printed").toBeDefined();
+    expect(reasonLine).toMatch(/^scope-reason: no mutation input changed:/);
+    // The measured size of that range: three planning-only files.
+    expect(reasonLine).toContain("among 3 changed file(s)");
+  });
+
+  it("fd4d86cdf (one gate file changed) derives a subset and boots the lane", () => {
+    const { outputs, scope } = deriveThenScope("fd4d86cdf");
+    expect(outputs.sql_gate_mode).toBe("subset");
+    expect(outputs.sql_gate_files).toBe("supabase/tests/test_reconcile_dropped_enqueue_sweep.sql");
+    expect(scope.status, scope.out).toBe(0);
+    expect(scope.output).toBe("skip_lane=false\n");
+    expect(scope.stdout).not.toContain("scope: NONE");
+    expect(scope.stdout).toContain("scope verdict from changed-paths: sql_gate_mode=subset; the lane boots.");
+  });
+
+  it("no scratch worktree of this test is left behind", () => {
+    expect(worktreesUnderPrefix()).toEqual([]);
   });
 });
