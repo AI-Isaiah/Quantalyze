@@ -1570,8 +1570,12 @@ true for 146 and half of 142–145, and **false for 141**.
       **Closed when:** the compute selects only real columns, derives daily returns from the stored
       series, and a test that fails on today's select pins both.
 
-- [ ] **`[164.9.4-CI-MUTEX-QUEUE]` `python` and `e2e-seeded` spend most of their CI wall clock
+- [x] **`[164.9.4-CI-MUTEX-QUEUE]` `python` and `e2e-seeded` spend most of their CI wall clock
       queued on the shared-TEST advisory lock (booked 2026-09-26, founder decision).**
+      ✅ **CLOSED 2026-10-03 by Phase 164.9.4 CIOFFMUTEX (v0.119.0.0).** `ci.yml` holds the key 0×; both jobs
+      boot a runner-private local-stack lane. Measured on run `37039941530` against tree-matched `37028872024`:
+      `python` 41m33s → 13m06s, `e2e-seeded` 30m19s → 11m14s (`164.9.4-MEASUREMENT.md`). SC-3's e2e-seeded
+      count is graded on the ship run (founder decision 2026-10-03).
       **Measured 2026-09-26 on CI run `36229959820` (PR #864, 52 min wall clock).** `python` took
       50 min: 36 min in "Acquire shared-test-db mutex" and 13 min in pytest. `e2e-seeded` took
       36 min: 28 min on the mutex and 5 min on specs. Every other job took 12 min or less. The wait
@@ -9312,6 +9316,25 @@ backs ~9 surfaces — the remedy for any of its flows is a NEW named limiter, ne
   docs-only PR opening and either of those, and inside it a red arrives LATE, not never. ⛔ Do not
   restate this as "the gate was lost", and do not restate it as "nothing changed" — both halves are
   load-bearing and stating only one of them misroutes whoever picks this up.
+  ⛔ **CORRECTED 2026-10-02 (Phase 164.9.4 review round 2, WR-01): the merge push to `main` is no
+  longer unfiltered.** Since 164.9.4 a `.planning/`-only push is classified by its pushed range
+  (`scripts/classify-changed-paths.mjs` `classifyPushRange`) and takes the short path. To keep the
+  first backstop above, the founder decided on 2026-10-02 that a push range touching a `.planning/`
+  file a `frontend-test` assertion reads is CODE: `TEST_READ_PLANNING_PATHS` lists the seven measured
+  entries (`config.json`, `REQUIREMENTS.md`, `ROADMAP.md`, `159-VERIFICATION.md`, and Phase 164.3's
+  `164.3-07-DEFERRED.md`, `164.3-07-PLAN.md` and absent `164.3-07-SUMMARY.md`), so the merge push of
+  a docs-only PR that touches one of them still runs `frontend-test`. (Round 3, CR-01, same day:
+  `config.json` was added after a whole-tree derivation found `critical-regressions.test.ts` reading
+  it; the earlier "six" was measured from two named test files only. The founder confirmed the list
+  may grow beyond the original three.) A docs-only push also takes the short path only when Railway's
+  own gate would pass on its predecessor: every GitHub Actions check run on `before`, all workflows
+  and events, non-red (`docs/runbooks/railway-worker.md`, Recovery step 2). So a docs merge can no
+  longer turn `main` green over a red predecessor either. Both halves above therefore
+  still hold for those files. The paragraph above is kept as lineage.
+  ⛔ **CORRECTED 2026-10-02 (Phase 164.9.4 review round 4, CR-01):** "every Actions check run
+  non-red" alone was not proof CI ran on the predecessor (a scheduled workflow's green checks
+  passed it). The predecessor must now also carry a successful `frontend` check run, and every
+  GitHub Actions check suite on it must be completed and non-red (D-16 in `164.9.4-CONTEXT.md`).
   ⛔ **TWO REMEDIES WERE CONSIDERED AND BOTH REFUSED, recorded so neither is re-proposed as new.**
   (1) Widen the always-on set to include `frontend-test` — REFUSED: that job is most of the saving
   the filter exists to produce, so buying two deferred assertions back at that price undoes the

@@ -3353,7 +3353,9 @@ Plans:
 **Goal:** `python` and `e2e-seeded` no longer queue on the shared-TEST advisory lock; each runs against a database private to its runner.
 **Requirements**: TODOS `[164.9.4-CI-MUTEX-QUEUE]` (owned here)
 **Depends on:** Phase 164.9.1
-**Plans:** 0 plans
+⭐ **Founder override, 2026-10-03 (AskUserQuestion "Ship now, grade on its CI"):** ships with VERIFICATION `human_needed`; the one open item is SC-3's e2e-seeded half, graded on the ship CI run (merge only on passed ≥ 201 and no flaky line). The lane flake behind the 2026-10-02 gap was root-caused and fixed first (option D: `e2e/full-flow.spec.ts` unticks "Hide examples" and fails on an empty table). Recorded in `164.9.4-CONTEXT.md` as well.
+
+**Plans:** 12 plans (planned 2026-09-26; 4 waves: W1 01–06 · W2 07 · W3 08 · W4 09–12; plan-checked, 3 rounds)
 
 ⭐ **Founder decision, 2026-09-26 (AskUserQuestion).**
 
@@ -3371,6 +3373,13 @@ The wait grows with the number of open PRs, because every one of them contends f
 - Phase 164.4.2 moved `sql-tests` to `scripts/local-stack/run.sh`.
 - Phase 164.4.2.1 took `test-db-drift` off the key.
 
+⭐ **Orchestrator decision, 2026-09-26 (autonomous planning; ✅ RATIFIED by the founder 2026-09-27 via AskUserQuestion, "Ratify D-14") — CONTEXT D-14.**
+The app's CSP `connect-src` in `next.config.ts` refuses a loopback Supabase origin (measured by the
+research), so `e2e-seeded` cannot leave the key without a fix. Taken: derive the configured
+`NEXT_PUBLIC_SUPABASE_URL` origin into `connect-src` only when no existing source already matches it,
+so the production header stays byte-identical. Rejected: `bypassCSP`, which would make the seeded
+suite unable to catch a CSP edit that breaks login.
+
 ⭐ **ROUTED HERE 2026-09-27 (founder, "Pass it, route SC-3 to 164.9.4"; Phase 164.4.2.1 CONTEXT D-11):** Phase 164.4.2.1's SC-3 speed claim measured FAIL on clauses (a) and (c) on five graded merge-push runs (`36228159891`, `36242744753`, `36247495409`, `36251087509`, `36262210635`; run-totals 20m51s–25m42s against 18m50s; `python` + `e2e-seeded` acquire-wait 8m56s–14m00s against 8m25s). `test-db-drift` is off the key and off the critical path; the residual is `e2e-seeded` waiting while `python` holds the key (python's pytest step 9m00s–13m56s). Taking both jobs off the key is this phase's goal, so 164.4.2.1's residual is owned here. Re-grade against `164.4.2.1-MEASUREMENT.md` `## Verdict rule` when this phase lands.
 
 ⭐ **ROUTED 2026-09-27 (founder, AskUserQuestion): the first measurement run's two reds are real defects outside this phase.**
@@ -3382,9 +3391,12 @@ The wait grows with the number of open PRs, because every one of them contends f
 - **Measured 2026-09-27:** five roadmap-only merges to `main` each ran `python` and `e2e-seeded` on push. Runs `36311440078` and `36311239974` (push, `main`) failed with `timed out after 3600s waiting for the shared-test-db advisory lock (key 61616158)`, with 8 and 7 jobs waiting.
 - **Success:**
   - A push to `main` whose diff against its first parent is docs-only takes the short path. It still produces a recorded green CI run that Railway can wait on.
+    - ⛔ **NARROWED 2026-10-02 (review round 2):** the short path now requires BOTH (a) every GitHub Actions check run on `before` is non-red, Railway's own gate (SFH-04; round 3 WR-01 widened it from the `frontend` check run, which a red `e2e` or `lighthouse-mobile` cannot reach), and (b) the pushed range touches none of the seven `TEST_READ_PLANNING_PATHS` (D-16, which include `ROADMAP.md` and `config.json`). Any other docs-only push runs the full corpus. Consequence: a ROADMAP-only merge, the shape measured above, runs the full corpus again, and a close-out merge landing while its predecessor's CI is still running does too. The short path now fires mainly for STATE / state.json / VERIFICATION-only pushes made after the previous push went green. Since this phase that costs runner minutes, not mutex timeouts. ⛔ **CORRECTED 2026-10-02 (review round 4 CR-01 + WR-01 + WR-02):** (a) above is no longer sufficient on its own: the predecessor must also carry a successful `frontend` check run, and every GitHub Actions check suite on it must be completed and non-red; and a pushed range carrying a commit that is not a GitHub PR merge runs the full corpus. See the dated note below and D-16.
   - A push that touches any code path runs the full corpus.
   - A test fails on the old behaviour (a docs-only push classified as code), and a second test proves that a code-touching push is not filtered.
   - The existing rule that `changed-paths` itself carries no `if:` is kept. The job still runs on every event, because a skipped `needs:` job skips its dependents.
+- ⭐ **2026-10-02 (founder, AskUserQuestion "Treat those 3 as code"; review round 2 WR-01): a push that touches a `.planning/` file a `frontend-test` assertion reads is CODE, not docs-only.** The short path above had removed the merge-push backstop `[CI-DOCSPATH-01]` relied on, so a docs merge breaking `lint-sql-gates.test.ts` G3 or a `verify-plan-anchors.test.ts` real-tree pin went green on `main` and reddened the next unrelated code change. ⚠️ The question named three files; the round-2 measurement of the two named test files found SIX (`REQUIREMENTS.md`, `ROADMAP.md`, `159-VERIFICATION.md`, and Phase 164.3's `164.3-07-DEFERRED.md`, `164.3-07-PLAN.md` and absent `164.3-07-SUMMARY.md`). ⛔ **CORRECTED 2026-10-02 (review round 3 CR-01): the set is SEVEN.** `critical-regressions.test.ts` reads `.planning/config.json` (the two `workflow.use_worktrees` guards), and the round-2 derivation never scanned that file. `ci-docs-path-filter.contract.test.ts` now derives the set from EVERY tracked test file (vitest, Playwright, pytest) and the local modules they import or spawn, in both directions, so a third reader can no longer be invisible to it. The founder confirmed on 2026-10-02 that the list may grow beyond the original three ("six files is fine"); the seventh entry follows that rule rather than a separate ruling. Listed in `scripts/classify-changed-paths.mjs` `TEST_READ_PLANNING_PATHS`. PR path unchanged. Recorded as D-16 in `164.9.4-CONTEXT.md`.
+- ⭐ **2026-10-02 (review round 2 SFH-04, fixed):** the push short path is also taken only when `before`'s own `frontend` check run concluded `success`. Red, cancelled, pending, absent or an API error runs the full corpus, so a docs-only push cannot turn `main` green (and release a Railway deploy) over a red or unfinished code commit. ⛔ **CORRECTED 2026-10-02 (review round 3 WR-01 + SFH LOW-04; predicate set by the orchestrator):** the check now mirrors Railway's own gate, which `docs/runbooks/railway-worker.md` records as the commit's check-runs, every workflow's non-red. Every GitHub Actions check run on `before` (all workflows, all events, `workflow_dispatch` included; every run `filter=latest` returns, so only in-suite re-run attempts are collapsed and a newer suite never hides an older red one) must be completed as `success`, `skipped` or `neutral`, and at least one must exist. Non-Actions checks (Vercel) are ignored. Anything else, including a truncated page, runs the full corpus. The `frontend` check alone was not enough: `e2e` and `lighthouse-mobile` are docs-filtered jobs outside the aggregator, and CI run `36892795002` concluded `failure` while its `frontend` concluded `success`. `changed-paths` keeps `contents: read` + `checks: read`. Consequence: a push on top of a dispatched SHA whose dispatch reddened (the full-history gitleaks scan does, by construction) always runs the full corpus. That costs minutes, never a gap, because Railway would refuse that SHA too. ⛔ **CORRECTED 2026-10-02 (review round 4 CR-01 + WR-01 + SFH MEDIUM-01 + LOW-07; design set by the orchestrator):** green checks alone were not proof that CI ran, because scheduled and `workflow_run` workflows attach green checks to `main` SHAs and a workflow run queued at the workflow level has no check runs. The short path now also requires a completed `frontend` check run concluded `success` (CI's `if: always()` aggregator), reads runs with `filter=all` deduplicated by (check suite, name) to the latest in-suite attempt, and requires every GitHub Actions check suite on `before` completed and non-red. Accepted cost (IN-03): a running or red scheduled workflow on `before` also costs the short path. Details in `164.9.4-CONTEXT.md` D-16. Same round, WR-02: `plan-anchor-verify` is `pull_request`-only, so a pushed range carrying a commit that is not a GitHub PR merge (a direct push) now runs the full corpus instead of trusting an unwritten no-direct-push assumption.
 
 ## Success Criteria
 1. Neither job acquires advisory key `61616158`.
@@ -3395,7 +3407,25 @@ The wait grows with the number of open PRs, because every one of them contends f
 
 Plans:
 
-- [ ] TBD (run /gsd-plan-phase 164.9.4 to break down)
+**Wave 1** *(six file-disjoint plans; 04, 05 and 06 share neuter targets, so they run in isolated worktrees or one after another)*
+- [x] 164.9.4-01-PLAN.md — D-11: commit `164.9.4-MEASUREMENT.md` (BEFORE numbers, AFTER protocol) before any `ci.yml` edit
+- [x] 164.9.4-02-PLAN.md — D-14: the CSP `connect-src` adds the configured Supabase origin only when no source matches it; contract test (reversible; founder-ratified 2026-09-27)
+- [x] 164.9.4-03-PLAN.md — D-04: `scripts/local-stack/run.sh --assert-local-handoff` seam that reuses the lane's loopback guards
+- [x] 164.9.4-04-PLAN.md — the dead-holder drill and the Test 3b verdict scan stop depending on `ci.yml`
+- [x] 164.9.4-05-PLAN.md — the `critical-regressions.test.ts` protocol loops are re-pointed to `MUTEX_HOLDERS`, not retired
+- [x] 164.9.4-06-PLAN.md — the six byte-identity `it`s are re-subjected to the two other workflows, each seen RED under a neuter
+
+**Wave 2** *(blocked on Wave 1 completion)*
+- [x] 164.9.4-07-PLAN.md — `python` moves to the local-stack lane and off the key; its pins move in the same commit
+
+**Wave 3** *(blocked on Wave 2 completion)*
+- [x] 164.9.4-08-PLAN.md — `e2e-seeded` moves to the lane and off the key, so `ci.yml` holds no key; D-09 build-guard retarget
+
+**Wave 4** *(blocked on Wave 3 completion; file-disjoint)*
+- [x] 164.9.4-09-PLAN.md — new pins the topology allows: per-job "holds and names no key", seam-before-boot rows, D-04 handoff order
+- [x] 164.9.4-10-PLAN.md — `ci.yml` prose outside the two moved jobs
+- [x] 164.9.4-11-PLAN.md — dated doc addenda (runbook, `CLAUDE.md`, `CONTRIBUTING.md`) and the D-15 evidence-only TODOS entry
+- [x] 164.9.4-12-PLAN.md — dated prose notes in script headers and the other two workflows, key counts pinned unchanged
 
 ### Phase 164.9.5: AUTOREDUMP — after a migration applies to PROD, the committed baseline is re-dumped and proposed automatically (INSERTED)
 

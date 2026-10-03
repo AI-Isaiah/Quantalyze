@@ -61,6 +61,13 @@ merge *is* the apply.
   `ci.yml` and
   [`docs/runbooks/shared-test-db-mutex.md`](docs/runbooks/shared-test-db-mutex.md)
   say why.
+  - ⛔ **CORRECTED 2026-09-26 (Phase 164.9.4 CIOFFMUTEX): the bullet above is kept as
+    lineage.** `sql-tests` (since Phase 164.4.2), `python` and `e2e-seeded` (since
+    Phase 164.9.4) run on a local-stack lane private to their runner and take no key,
+    so no `ci.yml` job serializes on `61616158` any more. The remaining takers are
+    the two workflows named in the runbook's §7.2 census, `supabase-migrate.yml`
+    (`apply-test`) and `test-restore-from-baseline.yml` (`restore`). See
+    [`docs/runbooks/shared-test-db-mutex.md`](docs/runbooks/shared-test-db-mutex.md).
 - **⭐ There are TWO shared-TEST advisory keys, and a job adding DB work needs
   both.** (1) The **mutual-exclusion key `61616158`** above — its unit is *the
   shared TEST database*, and contenders BLOCK on it. (2) The
@@ -79,6 +86,9 @@ merge *is* the apply.
   would starve the apply they are waiting for. Its three outcomes
   (`apply-concluded`, `no-apply-run`, `wait-exhausted`) and what to do about
   each are in runbook §7.
+  - ⛔ **CORRECTED 2026-09-26 (Phase 164.9.4 CIOFFMUTEX): the "three reader jobs"
+    sentence above is kept as lineage.** The wait now runs in `test-db-drift` only,
+    and before VAC-08 rather than an acquire step (runbook §7.3).
 - **⛔ A migration that adds a column the frontend already `SELECT`s must be
   applied to prod BEFORE the deployment that reads it.** The auto-apply and the
   Vercel build both fire on the same merge with **no ordering between them**, so
