@@ -3177,7 +3177,7 @@ Plans:
 **Goal:** A FULL `sql-mutation` run fits well under its unchanged 20-minute cap by running gate files concurrently inside the one job, and a push on top of a main that is red only with the tolerated stale-baseline drift no longer forces a FULL run.
 **Requirements**: SS-1, SS-2, SS-3, SS-4, SS-5, SS-6, SS-7, SS-8
 **Depends on:** Phase 164.9.6
-**Plans:** 3 plans
+**Plans:** 3/3 plans complete
 
 *The requirement IDs are phase-local, derived from CONTEXT D-01 … D-05. No REQUIREMENTS.md IDs are assigned to this phase. Each ID is defined by the Success Criterion of the same number below.*
 
