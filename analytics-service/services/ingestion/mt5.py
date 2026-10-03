@@ -62,6 +62,7 @@ from services.mt5_client import (
     Mt5SessionAbandoned,
 )
 from services.mt5_concurrency import mt5_terminal_lease
+from services.mt5_handover import HOLDER_VALIDATION, SITE_VALIDATE_WORKER
 # 153.6 / PARITY-01 — the ONE login+read+probe body, shared with the FastAPI
 # `_validate_mt5_key_probe` branch. This adapter used to carry its own divergent
 # copy; the three fixes 153.3 landed on the router's never reached it. The import
@@ -206,7 +207,14 @@ class Mt5Adapter:
         # already be held when it happens.
         port = int(port_raw)
         terminal_key = f"{host}:{port}"
-        async with mt5_terminal_lease(terminal_key, wait_s=None):
+        # ⭐ Phase 164.6.6 criterion 1 — `KeySubmissionRequest` carries no
+        # `api_key_id`, so the lease is held for the `validation` literal.
+        async with mt5_terminal_lease(
+            terminal_key,
+            wait_s=None,
+            holder=HOLDER_VALIDATION,
+            site=SITE_VALIDATE_WORKER,
+        ):
             # RED-TEAM: _build_client → Mt5Client.__init__ opens the RPyC socket
             # SYNCHRONOUSLY (a blocking connect). Run construction OFF the event loop
             # under a wait_for ceiling; a hung/unreachable gateway connect on the loop

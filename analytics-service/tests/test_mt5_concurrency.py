@@ -920,13 +920,20 @@ def _lease_sites(source: str, rel: str) -> list[tuple[str, str]]:
     closure is not silently attributed to the enclosing coroutine — the closure is
     a different scope and can hold a different client.
     """
+    return [(rel, name) for _call, name in _lease_calls(source)]
+
+
+def _lease_calls(source: str) -> list[tuple[ast.Call, str]]:
+    """The walk behind `_lease_sites`, returning each lease CALL node beside its
+    dotted enclosing function name — so a second pin (Phase 164.6.6: the holder
+    and site keywords) reads the SAME walk rather than a copy of it."""
     tree = ast.parse(source)
     parents: dict[ast.AST, ast.AST] = {}
     for node in ast.walk(tree):
         for child in ast.iter_child_nodes(node):
             parents[child] = node
 
-    found: list[tuple[str, str]] = []
+    found: list[tuple[ast.Call, str]] = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.AsyncWith):
             continue
@@ -950,7 +957,7 @@ def _lease_sites(source: str, rel: str) -> list[tuple[str, str]]:
                 cur = parents[cur]
                 if isinstance(cur, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     chain.append(cur.name)
-            found.append((rel, ".".join(reversed(chain))))
+            found.append((call, ".".join(reversed(chain))))
     return found
 
 
@@ -1079,6 +1086,82 @@ def test_the_lease_site_scanner_reports_the_reuse_shape_and_ignores_prose() -> N
         "    return None\n"
     )
     assert _lease_sites(in_prose, "synthetic.py") == []
+
+
+# ---------------------------------------------------------------------------
+# Phase 164.6.6 criterion 1 — EVERY lease names its HOLDER and its SITE.
+#
+# The handover record is only as complete as its least-attributed lease: a site
+# that omits `holder=` records every switch it makes as `unattributed`, which is
+# the 2026-09-21 silence with a row attached. The roster above pins WHICH sites
+# exist; this pins that each of them says who it holds the terminal for.
+# ---------------------------------------------------------------------------
+
+_LEASE_ATTRIBUTION_KEYWORDS: tuple[str, ...] = ("holder", "site")
+
+
+def _lease_calls_missing_attribution(
+    source: str, rel: str
+) -> list[tuple[str, str, tuple[str, ...]]]:
+    """Every lease call in ``source`` that omits ``holder=`` or ``site=``, as
+    ``(rel, dotted function, missing keywords)``."""
+    missing: list[tuple[str, str, tuple[str, ...]]] = []
+    for call, name in _lease_calls(source):
+        given = {kw.arg for kw in call.keywords}
+        absent = tuple(k for k in _LEASE_ATTRIBUTION_KEYWORDS if k not in given)
+        if absent:
+            missing.append((rel, name, absent))
+    return missing
+
+
+def test_every_production_lease_site_names_its_holder_and_site() -> None:
+    root = Path(__file__).resolve().parents[1]
+    files = _production_python_files()
+    assert len(files) >= _PRODUCTION_FILE_FLOOR
+
+    seen: list[tuple[str, str]] = []
+    missing: list[tuple[str, str, tuple[str, ...]]] = []
+    for path in files:
+        source = path.read_text()
+        rel = path.relative_to(root).as_posix()
+        seen.extend(_lease_sites(source, rel))
+        missing.extend(_lease_calls_missing_attribution(source, rel))
+
+    # ⛔ Non-vacuous: the walk must have SEEN the whole roster, or "nothing is
+    # missing" would be a statement about an empty walk.
+    assert set(seen) == _PRODUCTION_LEASE_SITES
+    assert missing == [], (
+        f"these production `{_LEASE_VERB}` calls omit `holder=` or `site=`: "
+        f"{missing}. Every switch they make would be recorded as `unattributed` "
+        f"(Phase 164.6.6 criterion 1). Pass the job's `api_key_id` or a holder "
+        f"literal from `services.mt5_handover`, and the site constant."
+    )
+
+
+def test_the_attribution_checker_REDS_on_a_lease_without_its_site() -> None:
+    """⛔ THE CALIBRATION. A checker that never reports is indistinguishable
+    from a clean tree; it must name the call, its function and the keyword."""
+    attributed = (
+        "async def f(k):\n"
+        "    async with mt5_terminal_lease(k, holder=h, site=SITE_DERIVE):\n"
+        "        pass\n"
+    )
+    assert _lease_calls_missing_attribution(attributed, "synthetic.py") == []
+
+    no_site = attributed.replace(", site=SITE_DERIVE", "")
+    assert no_site != attributed
+    assert _lease_calls_missing_attribution(no_site, "synthetic.py") == [
+        ("synthetic.py", "f", ("site",))
+    ]
+
+    neither = (
+        "async def g(k):\n"
+        "    async with mt5_concurrency.mt5_terminal_lease(k, wait_s=None):\n"
+        "        pass\n"
+    )
+    assert _lease_calls_missing_attribution(neither, "synthetic.py") == [
+        ("synthetic.py", "g", ("holder", "site"))
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -1598,7 +1681,9 @@ async def test_CRITERION_4_a_monitor_tick_cannot_land_inside_a_live_jobs_termina
         f"{acquisitions!r}. ONE acquisition per function is the shape the lazy "
         f"epoch bind assumes (D-36 AMENDED); a second would be refused."
     )
-    acquired_key, wait_s = acquisitions[0]
+    # Phase 164.6.6 — the counter also records the lease's `holder`/`site`; the
+    # heal's attribution is asserted in `tests/test_mt5_relogin.py`.
+    acquired_key, wait_s, _holder, _site = acquisitions[0]
     assert acquired_key == mt5_terminal_key(_FAKE_HOST, int(_FAKE_PORT)), (
         f"the tick leased {acquired_key!r}. ⛔ The key must come from "
         f"`mt5_terminal_key`, never a second hand-spelled host-and-port string: "

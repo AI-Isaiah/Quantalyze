@@ -38,6 +38,7 @@ from services.mt5_concurrency import (
     Mt5TerminalBusyError,
     mt5_terminal_lease,
 )
+from services.mt5_handover import HOLDER_VALIDATION, SITE_VALIDATE_WIZARD
 from services.mt5_validation import (
     ACCOUNT_CHANGE_ALGO_DISABLE_OPTION,
     Mt5ValidationError,
@@ -932,7 +933,15 @@ async def _validate_mt5_key_probe(
     # exactly the interesting end.
     lease_started_at = time.perf_counter()
     try:
-        async with mt5_terminal_lease(terminal_key, wait_s=_MT5_LEASE_WAIT_S):
+        # ⭐ Phase 164.6.6 criterion 1 — a validation has no `api_key_id` yet, so
+        # the lease is held for the `validation` literal; a login it makes over
+        # a job key's session is recorded against the key it displaced.
+        async with mt5_terminal_lease(
+            terminal_key,
+            wait_s=_MT5_LEASE_WAIT_S,
+            holder=HOLDER_VALIDATION,
+            site=SITE_VALIDATE_WIZARD,
+        ):
             emit_mt5_stage_event(
                 "lease_wait", lease_started_at, ok=True, terminal_key=terminal_key
             )
