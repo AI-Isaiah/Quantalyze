@@ -92,6 +92,11 @@ def exchange_router(monkeypatch):
     monkeypatch.setenv("MT5_ENABLED", "true")
     monkeypatch.setenv("MT5_GATEWAY_HOST", "mt5-gw.internal")
     monkeypatch.setenv("MT5_GATEWAY_PORT", "18812")
+    # Phase 164.6.6 D-02 — the wizard reads the VALIDATION pair. The job pair above
+    # stays SET on purpose: S-02 unsets a validation name with it present, which is
+    # what proves the router never falls back to it (D-05).
+    monkeypatch.setenv("MT5_VALIDATION_GATEWAY_HOST", "mt5-validate-gw.internal")
+    monkeypatch.setenv("MT5_VALIDATION_GATEWAY_PORT", "18813")
 
     evict_module("routers.exchange")
     from routers import exchange as exchange_router
@@ -162,13 +167,21 @@ async def test_s01_sfox_client_construction_failure_is_permanent_500(exchange_ro
 # --- S-02 -------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("missing", ["MT5_GATEWAY_HOST", "MT5_GATEWAY_PORT"])
+@pytest.mark.parametrize(
+    "missing", ["MT5_VALIDATION_GATEWAY_HOST", "MT5_VALIDATION_GATEWAY_PORT"]
+)
 async def test_s02_mt5_gateway_env_unset_is_permanent_500(
     exchange_router, monkeypatch, missing
 ):
-    """S-02 (exchange.py:215) — an unset MT5_GATEWAY_HOST/PORT is a deployment
+    """S-02 — an unset MT5_VALIDATION_GATEWAY_HOST/PORT is a deployment
     misconfiguration, not a blip. Answering 503 is half of A-01: the breaker
-    trips platform-wide on a fault only an operator can clear."""
+    trips platform-wide on a fault only an operator can clear.
+
+    Phase 164.6.6 D-02 / D-05: the wizard reads the validation endpoint through
+    `services.mt5_relogin.read_env_validation_gateway_endpoint`. The JOB pair
+    stays set in the fixture, so a reader that fell back to it would build a
+    client here and `factory.assert_not_called()` turns red — D-05 says refuse,
+    never fall back to the jobs terminal."""
     router = exchange_router
     monkeypatch.delenv(missing, raising=False)
 
@@ -194,10 +207,11 @@ async def test_s02_mt5_gateway_env_unset_is_permanent_500(
 async def test_s03_mt5_gateway_port_not_an_int_is_permanent_500(
     exchange_router, monkeypatch
 ):
-    """S-03 (exchange.py:220) — a non-numeric MT5_GATEWAY_PORT is the same
-    permanent misconfiguration class as S-02 and must classify identically."""
+    """S-03 — a non-numeric MT5_VALIDATION_GATEWAY_PORT is the same permanent
+    misconfiguration class as S-02 and must classify identically (Phase 164.6.6
+    D-02: the wizard reads the validation pair)."""
     router = exchange_router
-    monkeypatch.setenv("MT5_GATEWAY_PORT", "eighteen-eight-one-two")
+    monkeypatch.setenv("MT5_VALIDATION_GATEWAY_PORT", "eighteen-eight-one-three")
 
     factory = MagicMock(side_effect=AssertionError("no client when unconfigured"))
     router.Mt5Client = factory

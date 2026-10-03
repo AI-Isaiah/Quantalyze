@@ -28,6 +28,7 @@ from services.mt5_client import (
     Mt5SessionAbandoned,
     MT5_VALIDATE_REQUEST_TIMEOUT_S,
     emit_mt5_stage_event,
+    mt5_terminal_key,
 )
 # D-29 — the ONE terminal-lock registry, imported (never re-declared) exactly as the
 # three job call sites import it. `_MT5_LEASE_WAIT_S` is re-bound here as a module
@@ -39,6 +40,12 @@ from services.mt5_concurrency import (
     mt5_terminal_lease,
 )
 from services.mt5_handover import HOLDER_VALIDATION, SITE_VALIDATE_WIZARD
+# Phase 164.6.6 D-02 / D-05 — the ONE reader of the validation terminal's endpoint
+# and the alert this site fires when it is absent. Never the job pair.
+from services.mt5_relogin import (
+    alert_mt5_validation_gateway_unconfigured,
+    read_env_validation_gateway_endpoint,
+)
 from services.mt5_validation import (
     ACCOUNT_CHANGE_ALGO_DISABLE_OPTION,
     Mt5ValidationError,
@@ -449,20 +456,29 @@ async def _validate_mt5_key_probe(
         trace.outcome = "auth"
         raise HTTPException(status_code=400, detail=AUTH_FAILED_DETAIL)
 
-    # Gateway config: a missing/malformed MT5_GATEWAY_HOST / MT5_GATEWAY_PORT is a
-    # SERVER misconfig, NEVER the user's key — mirror the sfox construction-time
-    # posture. Log secret-free (no login/pw/server values), never a misleading
-    # AUTH_FAILED. (Phase 139 sets these live; unset now = the server-misconfig
-    # path.)
+    # Gateway config: a missing/malformed MT5_VALIDATION_GATEWAY_HOST /
+    # MT5_VALIDATION_GATEWAY_PORT is a SERVER misconfig, NEVER the user's key —
+    # mirror the sfox construction-time posture. Log secret-free (no login/pw/server
+    # values), never a misleading AUTH_FAILED.
+    #
+    # ⭐ Phase 164.6.6 D-02 — a validation leases the VALIDATION terminal, read
+    # through `read_env_validation_gateway_endpoint`, so an onboarding login can no
+    # longer switch the terminal that serves live jobs. ⛔ D-05: with the validation
+    # endpoint absent this REFUSES and alerts; it never falls back to
+    # MT5_GATEWAY_HOST / MT5_GATEWAY_PORT, which would silently restore the eviction.
     #
     # S-02 / S-03 / PYAPI-05: SERVICE-PERMANENT. Unset env is deterministic — it
     # is exactly half of A-01, where the 503 tripped the ONE global breaker key
     # and denied every Deribit user over an MT5 config gap. R-1: 500,
     # retryable:false. The genuinely transient MT5 arms are S-04/S-05 below.
-    host = os.getenv("MT5_GATEWAY_HOST")
-    port_raw = os.getenv("MT5_GATEWAY_PORT")
-    if not host or not port_raw:
-        logger.error("validate_key: MT5 gateway not configured (server misconfig)")
+    endpoint = read_env_validation_gateway_endpoint()
+    if endpoint is None:
+        # D-05's ALERT, fired BEFORE the refusal; it never raises.
+        alert_mt5_validation_gateway_unconfigured(site=SITE_VALIDATE_WIZARD)
+        logger.error(
+            "validate_key: MT5 validation gateway not configured or port malformed "
+            "(server misconfig)"
+        )
         trace.outcome = "gateway_unconfigured"
         raise service_error(
             500,
@@ -471,18 +487,7 @@ async def _validate_mt5_key_probe(
             retryable=False,
             detail="The MetaTrader gateway is not configured. This needs an operator, not a retry.",
         )
-    try:
-        port = int(port_raw)
-    except ValueError:
-        logger.error("validate_key: MT5 gateway port malformed (server misconfig)")
-        trace.outcome = "gateway_unconfigured"
-        raise service_error(
-            500,
-            "MT5_GATEWAY_UNCONFIGURED",
-            dependency="mt5-gateway",
-            retryable=False,
-            detail="The MetaTrader gateway is not configured. This needs an operator, not a retry.",
-        )
+    host, port = endpoint
 
     # D-03 — the probe is ONE bounded unit. Connect and probe were previously timed
     # SEPARATELY at the same ceiling (and so was the close), so the honest worst case
@@ -914,13 +919,13 @@ async def _validate_mt5_key_probe(
     # serialization constraint, not a capacity one — so one terminal cycles through
     # hundreds of accounts across a day (D-29, REVISED 2026-08-08).
     #
-    # The key MUST be byte-identical to `Mt5Client.terminal_key` (`f"{host}:{port}"`,
-    # mt5_client.py's `terminal_key` property), because that is what the three job
-    # sites key on: a divergent format yields a DIFFERENT Lock object and serializes
-    # nothing (MT5CONC-02 / Pitfall 2). It is derived from the same host/port
+    # The key MUST be byte-identical to `Mt5Client.terminal_key` (both spelled by
+    # `mt5_client.mt5_terminal_key`, never a hand-typed f-string), because that is
+    # what the job sites key on: a divergent format yields a DIFFERENT Lock object
+    # and serializes nothing (MT5CONC-02 / Pitfall 2). It is derived from the same host/port
     # resolved above, and BEFORE construction — construction opens the rpyc socket
     # that races, so the lease must already be held when it happens.
-    terminal_key = f"{host}:{port}"
+    terminal_key = mt5_terminal_key(host, port)
     trace.terminal_key = terminal_key
     # ⭐ D-32 — TIME THE QUEUE WAIT SEPARATELY FROM THE TERMINAL WORK. This is the
     # measurement nothing in this system has ever had, and the separation is the
