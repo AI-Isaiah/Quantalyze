@@ -130,6 +130,18 @@ export const CI_MUTATION_JOBS = ["changed-paths", "sql-mutation"];
 export const FLOORS_FILE = "scripts/mutation-floors.mjs";
 
 /**
+ * Inputs of a `sql-mutation` lane step OTHER than the corpus (review 164.9.6
+ * WR-01): the "Dead-holder drill" step runs `scripts/pg-lane/mutex-dead-holder-lane.sh`,
+ * which executes `scripts/mutex-dead-holder-verdict.sh` and the release-step body
+ * it extracts from `supabase-migrate.yml`. Both lie outside every machinery
+ * directory, so a push changing only one of them read as `none`, skipped the
+ * lane, and with it the drill on `main`. On a push they are machinery (FULL).
+ * Not added to `MACHINERY_PREFIXES`: a pull request never skips the lane, so the
+ * drill already runs there, and the PR arm stays unchanged.
+ */
+export const LANE_STEP_INPUTS = ["scripts/mutex-dead-holder-verdict.sh", ".github/workflows/supabase-migrate.yml"];
+
+/**
  * The machinery list on a PUSH to main (Phase 164.9.6, D-10), DERIVED from
  * `MACHINERY_PREFIXES` rather than hand-copied, so the two cannot drift. Three
  * entries are filtered out, each judged differently on a push:
@@ -145,10 +157,13 @@ export const FLOORS_FILE = "scripts/mutation-floors.mjs";
  * FULL, which proves the raised floor bites BEFORE merge. Keeping the floors
  * file PR machinery preserves exactly that once the floors move out of
  * `run.mjs`.
+ * ⭐ (review 164.9.6 WR-01) `LANE_STEP_INPUTS` are then APPENDED: push-only
+ * machinery, see that constant.
  */
-export const PUSH_MACHINERY_PREFIXES = MACHINERY_PREFIXES.filter(
-  (p) => p !== MIGRATIONS_DIR_PREFIX && p !== CI_WORKFLOW && p !== FLOORS_FILE,
-);
+export const PUSH_MACHINERY_PREFIXES = [
+  ...MACHINERY_PREFIXES.filter((p) => p !== MIGRATIONS_DIR_PREFIX && p !== CI_WORKFLOW && p !== FLOORS_FILE),
+  ...LANE_STEP_INPUTS,
+];
 
 /**
  * PURE: which of `CI_MUTATION_JOBS` differ between two `ci.yml` texts (D-10).
@@ -402,7 +417,7 @@ function emit(verdict) {
 // ---------------------------------------------------------------------------
 
 /** Declared up front; a self-test that shrinks and still says PASSED is the defect. */
-export const EXPECTED_ASSERTIONS = 71;
+export const EXPECTED_ASSERTIONS = 73;
 
 const PR = "pull_request";
 const G1 = "supabase/tests/test_alpha_gate.sql";
@@ -563,6 +578,17 @@ const CASES = [
       for (const f of ["scripts/mutation-runner/run.mjs", "scripts/pg-lane/x", "scripts/sql-gate-subset.mjs", "scripts/classify-changed-paths.mjs"]) {
         const v = judge({ event: "push", ref: MAIN, pushRange: range([G1, f]), commits: [PR_MERGE], presentFiles: [G1] });
         pass = ok(v.mode === "full" && v.reason.includes(f), `${f} forces FULL on a push, named (got ${v.mode}: ${JSON.stringify(v.reason)})`) && pass;
+      }
+      return pass;
+    },
+  },
+  {
+    claim: "WR-01: a push changing ONLY a dead-holder drill input is FULL naming it, never none (the drill would be skipped)",
+    run: (ok) => {
+      let pass = true;
+      for (const f of ["scripts/mutex-dead-holder-verdict.sh", ".github/workflows/supabase-migrate.yml"]) {
+        const v = judge({ event: "push", ref: MAIN, pushRange: range([f]), commits: [PR_MERGE], presentFiles: [] });
+        pass = ok(v.mode === "full" && v.reason.includes(f), `a push changing only ${f} is FULL, named (got ${v.mode}: ${JSON.stringify(v.reason)})`) && pass;
       }
       return pass;
     },
