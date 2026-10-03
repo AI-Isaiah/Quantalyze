@@ -21,7 +21,7 @@ non-planning change is a runbook note.
 - **ROADMAP and STATE.** `phase complete` ran for all 14. ROADMAP keeps only their completion
   marks and gains phase-list lines for 169.2, 169.4, 169.4.1 and 169.5. STATE keeps
   `current_phase` 164.6.6, and its progress moves 55 → 69 completed phases (73%).
-- VERSION and package.json 0.123.0.0 → 0.123.0.1.
+- VERSION and package.json 0.124.0.0 → 0.124.0.1 (re-based onto v0.124.0.0 after #945 merged; first written as 0.123.0.1).
 
 ### Notes
 - **NO-SAMPLE is not PASS.** Under the founder's NO-SAMPLE policy, "Close, record as residual
