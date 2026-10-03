@@ -308,7 +308,7 @@ jobs:
 
           echo "configured=false" >> "$GITHUB_OUTPUT"
           echo "::notice::Supabase Migrate skipped — secrets not configured. Set SUPABASE_PROJECT_REF (var), SUPABASE_ACCESS_TOKEN and SUPABASE_DB_PASSWORD (secrets) to enable auto-migration. (Tolerated for workflow_dispatch only; a push to main fails loud.)"
-      - uses: supabase/setup-cli@3c2f5e2ae34c34e428e8e206e2c4d21fa2d20fbf  # v2.1.1
+      - uses: supabase/setup-cli@45a513f8c64c0bc8e0e3dfe572b5c95be85f6359  # v3.0.1
         if: steps.check.outputs.configured == 'true'
         with:
           # Pinned to match the apply job's CLI version (see comment there).
@@ -459,7 +459,7 @@ jobs:
       # same reason: CLI-version drift must not silently change
       # `db push --include-all` semantics between the stage and the thing it stages
       # for. One tool applies to TEST and to PROD, or the stage proves nothing.
-      - uses: supabase/setup-cli@3c2f5e2ae34c34e428e8e206e2c4d21fa2d20fbf  # v2.1.1
+      - uses: supabase/setup-cli@45a513f8c64c0bc8e0e3dfe572b5c95be85f6359  # v3.0.1
         with:
           version: 2.98.2
 
@@ -1336,7 +1336,7 @@ jobs:
           echo "${RUNNER_TEMP}/gitleaks-bin" >> "${GITHUB_PATH}"
       - name: baseline-redump self-test (with gitleaks)
         run: node scripts/baseline-redump.mjs --self-test --with-gitleaks
-      - uses: supabase/setup-cli@3c2f5e2ae34c34e428e8e206e2c4d21fa2d20fbf  # v2.1.1
+      - uses: supabase/setup-cli@45a513f8c64c0bc8e0e3dfe572b5c95be85f6359  # v3.0.1
         with:
           # The same pin as `apply` (D-04): the dump is taken by the CLI version
           # the PROD apply ran, and the version is recorded in BASELINE.md.
@@ -1494,7 +1494,7 @@ jobs:
           # GITHUB_TOKEN cred from .git/config. The apply job uses
           # SUPABASE_ACCESS_TOKEN; no GITHUB_TOKEN-backed git ops.
           persist-credentials: false
-      - uses: supabase/setup-cli@3c2f5e2ae34c34e428e8e206e2c4d21fa2d20fbf  # v2.1.1
+      - uses: supabase/setup-cli@45a513f8c64c0bc8e0e3dfe572b5c95be85f6359  # v3.0.1
         with:
           # Pinned: avoid `latest` so CLI-version drift cannot silently change
           # `db push --include-all` semantics between plan and apply jobs (or

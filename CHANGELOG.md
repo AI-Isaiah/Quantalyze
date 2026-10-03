@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.119.0.2] - 2026-10-03 — supabase/setup-cli 3.0.1 on every workflow
+
+### Changed
+- **`supabase/setup-cli` moves from v2.1.1 to v3.0.1 on every pin** (Dependabot #612, which proposed 3.0.0; the branch pins the 3.0.1 patch), SHA-pinned (`45a513f…`). Covers `ci.yml`, `migration-drift-check.yml`, `migration-policy.yml`, `prod-prober.yml`, `supabase-migrate.yml` and `test-restore-from-baseline.yml`, plus the two `ci.yml` lane steps that landed on `main` after the branch was cut (they carry "the SAME pin `frontend-local-stack` uses", so all pins stay one answer). Measured after the change: 0 references to the v2.1.1 SHA, 13 to v3.0.1. Every step keeps its explicit `version:` input, so the Supabase CLI version each job installs does not change, only the action that installs it.
+
 ## [0.119.0.1] - 2026-10-03 — actions/setup-node 7.0.0 on every workflow
 
 ### Changed
