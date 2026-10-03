@@ -2450,7 +2450,8 @@ export function scopeReasonLine({ subsetFallback = null, reason = null } = {}) {
  * @param {number} [opts.filesFloor]     ratchet; overridable ONLY by --self-test
  * @param {number} [opts.armsFloor]
  * @param {number} [opts.waivedCeiling]  ceiling on waived arms; overridable ONLY by --self-test
- * @param {(o: {workdir:string, applyAbs:string[], postApplyAbs:string[], gateAbs:string, leg:string}) => {status:number|null, output:string, seconds:number, measureFail:string|null, invoked:boolean}} [opts.laneRunner]
+ * @param {(o: {workdir:string, applyAbs:string[], postApplyAbs:string|null, gateAbs:string, leg:string, gateKey?:string|null, port?:number}) => {status:number|null, output:string, seconds:number, measureFail:string|null, invoked:boolean} | Promise<{status:number|null, output:string, seconds:number, measureFail:string|null, invoked:boolean}>} [opts.laneRunner]
+ *   (may be async since 164.9.6.1 D-01: runCorpus awaits it)
  *        INJECTABLE lane runner, default the real `runLane`. Exists so the
  *        absurdity floor's FIRE direction and the lane-unrunnable MEASURE_FAIL
  *        can be driven through THIS function's real verdict loop and summary

@@ -75,6 +75,9 @@ wall-time guard was added (D-03).
   `timeout-minutes`.
 
 ### Fixed
+- **`runCorpus`'s `laneRunner` JSDoc still described the old synchronous runner**, so the
+  PR's `frontend-typecheck` and `frontend-build` went red (TS2322) on the async test stubs. It now
+  accepts a result or a Promise of one, with `postApplyAbs` nullable and an optional `port`.
 - **SFH-03 (HIGH): an output overflow in one lane could hang the whole pool until the 20-minute
   cancel, naming no lane** (`9c04f3481`). The overflow branch sent SIGKILL to the child alone and
   settled only on `close`, which a grandchild holding the pipes kept away.
