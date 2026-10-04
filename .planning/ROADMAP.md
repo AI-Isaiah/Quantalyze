@@ -133,9 +133,9 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 164.9.6: SUBSETMAIN — a push to main runs only its PR's changed SQL gates; a nightly job runs the full corpus and enforces the floors** (INSERTED 2026-10-03) — planned 2026-10-03, 5 plans in 4 waves (completed 2026-10-03)
 - [x] **Phase 164.9.6.1: SUBSETSHARD — a FULL sql-mutation run fits well under its 20-minute cap again, and a stale-baseline-drift red no longer forces one** (INSERTED 2026-10-03) — verification: passed (completed 2026-10-03, PR #941, v0.123.0.0; SS-1 measured 5m01s on main run 37151757248, closed in #942)
 - [ ] **Phase 164.9.7: TRUNCATEREVOKE — anon and authenticated no longer hold TRUNCATE on public tables** (INSERTED 2026-10-03) — not yet planned
-- [x] **Phase 165: DEPS — The 9-PR dependabot campaign** - pandas `requirements.in` prerequisite commit FIRST, then one PR at a time in the research-verified order, full suite between each; #614 and #606 CLOSED with reasons — ⛔ RETIRED 2026-09-27 by founder decision ("Land as maintenance, retire the phases"): closed WITHOUT delivery as a phase; the dependabot PRs land one at a time as maintenance under the green rule.
-- [x] **Phase 165.1: PIPDEPS — the pip dependabot work lands with production pandas never downgraded** (INSERTED) — ⛔ RETIRED 2026-09-27 by founder decision ("Land as maintenance, retire the phases"): closed WITHOUT delivery as a phase; the dependabot PRs land one at a time as maintenance under the green rule.
-- [x] **Phase 165.2: NPMDEPS — the npm dependabot work lands and the nightly audit goes green** (INSERTED) — ⛔ RETIRED 2026-09-27 by founder decision ("Land as maintenance, retire the phases"): closed WITHOUT delivery as a phase; the dependabot PRs land one at a time as maintenance under the green rule.
+- [x] **~~Phase 165~~: DEPS — The 9-PR dependabot campaign** - pandas `requirements.in` prerequisite commit FIRST, then one PR at a time in the research-verified order, full suite between each; #614 and #606 CLOSED with reasons — ⛔ RETIRED 2026-09-27 by founder decision ("Land as maintenance, retire the phases"): closed WITHOUT delivery as a phase; the dependabot PRs land one at a time as maintenance under the green rule.
+- [x] **~~Phase 165.1~~: PIPDEPS — the pip dependabot work lands with production pandas never downgraded** (INSERTED) — ⛔ RETIRED 2026-09-27 by founder decision ("Land as maintenance, retire the phases"): closed WITHOUT delivery as a phase; the dependabot PRs land one at a time as maintenance under the green rule.
+- [x] **~~Phase 165.2~~: NPMDEPS — the npm dependabot work lands and the nightly audit goes green** (INSERTED) — ⛔ RETIRED 2026-09-27 by founder decision ("Land as maintenance, retire the phases"): closed WITHOUT delivery as a phase; the dependabot PRs land one at a time as maintenance under the green rule.
 - [x] **Phase 166: QSTATS-TRUTH — every quantstats-derived number reflects the returns it was given** — verification: human_needed (completed 2026-10-04)
 - [x] **Phase 166.1: QSTATSRECOMPUTE — PROD rows computed before Phase 166 are recomputed, and the last exact-zero dispersion guards go** (INSERTED) — verification: human_needed (shipped; founder/post-deploy checks pending) (completed 2026-10-04)
 - [ ] **Phase 166.1.1: DDSIGN — a drawdown improvement is positive when the drawdown gets shallower, in the simulator, the optimizer and the match engine** (INSERTED) — not yet verified
@@ -2787,6 +2787,11 @@ Re-measure each at plan time; the observations are from a browser pass, not a co
    `MT5_VALIDATION_GATEWAY_HOST` unset, `/api/validate-key` answered HTTP 500 and the wizard showed
    `SEAM_INTERNAL_FAULT` instead of "The MetaTrader gateway is not configured". The refusal, the
    ERROR line and the Sentry alert all worked.
+8. **164.5.3's visual QA (2026-10-04) found two defects on the strategy edit page's key card
+   (`ApiKeyManager`).** At 1440px the card is cramped: its action labels wrap one word per line
+   ("Use / & / Sync", "Update / password") and the venue line wraps over four lines. The venue is
+   spelled "Mt5", from first-letter capitalisation of the exchange id, where the allocator card
+   says "MT5". 164.5.3 stays open until these ship and a re-read passes (founder, 2026-10-04).
 
 **Goal:** [Urgent work - to be planned]
 **Requirements**: TBD
@@ -4940,25 +4945,25 @@ kept verbatim.
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 158. OPS-CI merge=deploy | 6/6 | Complete    | 2026-08-21 |
-| 159. RANK ranking integrity | 7/7 | Complete — plan 01 shipped its deliverable (`159-CENSUS.md` is on disk). ⭐ 159-01 SUMMARY written retrospectively 2026-09-30 by founder decision; overrides the #790 'no retro-fit' note for this plan (the cell said "its SUMMARY was never written" until then). `159-VERIFICATION.md` closed 2026-09-12 (`status: passed`): its one open item, the concurrent same-session CAS race, is discharged by `src/__tests__/csv-finalize-concurrent-never-classified.test.ts` on the blocking `frontend-local-stack` lane — green in main run 34712535912 at `733a55f5` | v0.70.0.0 |
-| 160. PROVENANCE venue/annualization | 7/7 | Complete — verification passed (closed with the v1.20 open items in #790); plan 07 was its `gap_closure` verification plan | v0.77.39.0 · #790 |
+| 159. RANK ranking integrity | 7/7 | Complete | v0.70.0.0 · plan 01 shipped its deliverable (`159-CENSUS.md` is on disk). ⭐ 159-01 SUMMARY written retrospectively 2026-09-30 by founder decision; overrides the #790 'no retro-fit' note for this plan (the cell said "its SUMMARY was never written" until then). `159-VERIFICATION.md` closed 2026-09-12 (`status: passed`): its one open item, the concurrent same-session CAS race, is discharged by `src/__tests__/csv-finalize-concurrent-never-classified.test.ts` on the blocking `frontend-local-stack` lane — green in main run 34712535912 at `733a55f5` |
+| 160. PROVENANCE venue/annualization | 7/7 | Complete | v0.77.39.0 · #790 · verification passed (closed with the v1.20 open items in #790); plan 07 was its `gap_closure` verification plan |
 | 161. WIZERR honest errors | 10/10 | Complete    | 2026-10-04 |
 | 161.1 LEDGER-REFRESH (shipped dormant) | 5/5 | Complete | v0.73.0.0 |
-| 162. HONEST visible truth | 9/9 | Complete — plan 10 WITHDRAWN in `3fa26831` ("its premise was false, credentials ARE trimmed"), so the denominator is 9, not 10 | v0.74.0.0 |
+| 162. HONEST visible truth | 9/9 | Complete | v0.74.0.0 · plan 10 WITHDRAWN in `3fa26831` ("its premise was false, credentials ARE trimmed"), so the denominator is 9, not 10 |
 | 163. HARDEN reliability + security | 9/9 | Complete | v0.75.0.0 |
 | 164. SHARE revocable links | 7/7 | Complete | v0.76.0.0 |
-| 164.1 PROD-OBSERVABILITY (one prober: PYAPI-06, CRON-OBS-01, CRON-DRIFT-01, MT5-WEDGE-OBS-01) | 6/6 | Complete — PR #746 `42868a9b` + PR #748 `d679f638`; VERIFIED 2026-09-18, `passed` 5/5. ⚠️ The cadence residual is NOT closed: booked `[PROBER-CADENCE-UNDELIVERED-01]`, owner Phase 164.1.1 | v0.77.15.0 · 2026-09-18 |
-| 164.1.1 PROBERCADENCE | 6/6 | Complete — verification passed. ⭐ 2026-09-30: 5/6 → 6/6. Plan 06 ran on PROD on 2026-09-18 (jobid 41, first tick observed, `164.1.1-PROD-SESSION.md`), and its SUMMARY was written retrospectively by founder decision. SECURITY is 35/35 closed. | v0.77.51.0 · #815/#819 |
+| 164.1 PROD-OBSERVABILITY (one prober: PYAPI-06, CRON-OBS-01, CRON-DRIFT-01, MT5-WEDGE-OBS-01) | 6/6 | Complete | v0.77.15.0 · 2026-09-18 · PR #746 `42868a9b` + PR #748 `d679f638`; VERIFIED 2026-09-18, `passed` 5/5. ⚠️ The cadence residual is NOT closed: booked `[PROBER-CADENCE-UNDELIVERED-01]`, owner Phase 164.1.1 |
+| 164.1.1 PROBERCADENCE | 6/6 | Complete | v0.77.51.0 · #815/#819 · verification passed. ⭐ 2026-09-30: 5/6 → 6/6. Plan 06 ran on PROD on 2026-09-18 (jobid 41, first tick observed, `164.1.1-PROD-SESSION.md`), and its SUMMARY was written retrospectively by founder decision. SECURITY is 35/35 closed. |
 | 164.1.1.1 LANEONLYGATES | 2/2 | Complete | #817 |
-| 164.2 CURATED-COPY (+ WIZFORM-02, WR-06-UTC both bucketers, HONEST-08-RESIDUAL, 161-ERRPREFIX) | 10/10 | Complete — PR #749 merged `05994f1d`, main CI green, PROD verified by effect. All 21 artifacts stripped from main by `22a5fe96` | v0.77.16.0 |
+| 164.2 CURATED-COPY (+ WIZFORM-02, WR-06-UTC both bucketers, HONEST-08-RESIDUAL, 161-ERRPREFIX) | 10/10 | Complete | v0.77.16.0 · PR #749 merged `05994f1d`, main CI green, PROD verified by effect. All 21 artifacts stripped from main by `22a5fe96` |
 | 164.2.1 SESSIONID-FENCE | 2/2 | Complete | v0.77.17.0 |
-| 164.3 VACUITY (+ SKIP-01, DRIFT-01, OPS-08-F9/F8 routed on, H-0001 routed on) | 9/10 | Complete — plan 07 (VAC-07) DEFERRED to 164.5 by founder decision 2026-08-29, delivered by 164.5-07, stays unchecked | v0.77.0.0 |
+| 164.3 VACUITY (+ SKIP-01, DRIFT-01, OPS-08-F9/F8 routed on, H-0001 routed on) | 9/10 | Complete | v0.77.0.0 · plan 07 (VAC-07) DEFERRED to 164.5 by founder decision 2026-08-29, delivered by 164.5-07, stays unchecked |
 | 164.3.1 SOUND-PRIMITIVES (four cycling primitives) | 13/13 | Complete | v0.77.1.x |
-| 164.4 REDUNDER-BACKFILL (39 idiom files annotated; 5 pg_cron-blocked files handed to 164.4.1) | 12/12 | Complete — the phase was planned as 13 and replanned to 12 against the Plan 00 spike (`9b83b064`); plan 12 was dropped there, not left undone | v0.77.12.0 |
-| 164.4.1 PGCRON-LANE (pg_cron on the lane; 5 deferred gates annotated; lane-blocked 0; ARMS_FLOOR 361) | 6/6 | Complete — PR #744 merged `e01cc2e6`, ubuntu-measured | v0.77.13.0 |
-| 164.4.2 SUBSETSPLIT | 11/11 | Complete — verification passed 2026-10-02 (SUBSET observed on #927) | v0.87.0.0 · #842 |
-| 164.4.2.1 DRIFTOFFMUTEX | 3/3 | Complete — SC-3 speed claim routed to 164.9.4 (founder 2026-09-27) | v0.93.0.1 · #861 |
-| 164.5 BASELINE-SNAPSHOT (baseline.sql load-bearing, DRIFT-04 drop, DRIFT-05, VAC08-LEDGER, VAC-07) | 7/7 | Complete — DRIFT-04 applied and shipped 2026-09-08 in the two-PR sequence. Plan 08 was LIFTED into new Phase 164.5.2 BRIDGELOCK (`7910f614`), so the denominator is 7 | v0.77.21.0 |
+| 164.4 REDUNDER-BACKFILL (39 idiom files annotated; 5 pg_cron-blocked files handed to 164.4.1) | 12/12 | Complete | v0.77.12.0 · the phase was planned as 13 and replanned to 12 against the Plan 00 spike (`9b83b064`); plan 12 was dropped there, not left undone |
+| 164.4.1 PGCRON-LANE (pg_cron on the lane; 5 deferred gates annotated; lane-blocked 0; ARMS_FLOOR 361) | 6/6 | Complete | v0.77.13.0 · PR #744 merged `e01cc2e6`, ubuntu-measured |
+| 164.4.2 SUBSETSPLIT | 11/11 | Complete | v0.87.0.0 · #842 · verification passed 2026-10-02 (SUBSET observed on #927) |
+| 164.4.2.1 DRIFTOFFMUTEX | 3/3 | Complete | v0.93.0.1 · #861 · SC-3 speed claim routed to 164.9.4 (founder 2026-09-27) |
+| 164.5 BASELINE-SNAPSHOT (baseline.sql load-bearing, DRIFT-04 drop, DRIFT-05, VAC08-LEDGER, VAC-07) | 7/7 | Complete | v0.77.21.0 · DRIFT-04 applied and shipped 2026-09-08 in the two-PR sequence. Plan 08 was LIFTED into new Phase 164.5.2 BRIDGELOCK (`7910f614`), so the denominator is 7 |
 | 164.5.1 CRONREPOINT (the live `match_engine_cron` row repointed; migration-vs-runbook rule settled first) | 9/9 | Complete    | 2026-09-17 |
 | 164.5.1.1 (ledger fan-out admits private) | 4/4 | Complete | #807 · #833 |
 | 164.5.1.2 FANOUTSIBLINGS | 3/3 | Complete | #827 |
@@ -4976,40 +4981,39 @@ kept verbatim.
 | 164.6.5 MT5VALIDATEWEDGE | 8/8 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed | v0.96.0.0 · #863 |
 | 164.6.6 MT5TERMINALISOLATION | 9/9 | Complete    | 2026-10-04 |
 | 164.6.6.1 MT5SCRUB | 0/4 (moved, not re-planned) | Waiting — split from 164.6.6 on 2026-09-27 (founder); re-planned only after the founder's live scrub spike | - |
+| 164.6.6.2 BTCNATIVE | 0/? | Queued — booked 2026-10-03 | - |
+| 164.6.6.3 UATFIXES | 0/? | Queued — the 2026-10-03/04 production UAT defects; item 0 blocks new MT5 onboards | - |
 | 164.6.7 COMPOSITECLAIMSNAPSHOT | 3/3 | Complete    | 2026-10-04 |
 | 164.6.8 OUTAGEALERT | 0/? | Queued — MT5 build, verify later (founder 2026-09-27) | - |
-| 164.7 APPSETTINGS (every `app.*` GUC reader moves off ALTER DATABASE/ROLE — both 42501 on PROD) | 7/7 | Complete — finalized v0.77.32.1; its 33 stranded artifacts restored to main by PR #785. Row said `0/? Queued 2nd` until 2026-09-12 | v0.77.32.1 |
-| 164.8 TESTPREPROD (TEST becomes a real pre-prod: apply on merge to TEST before PROD) | 6/6 | Complete. Row said `3/6 Queued 5th` until 2026-09-12 | v0.77.31.2 |
-| 164.8.1 REFDATA (a schema-only restore destroys migration-seeded reference data) | 4/4 | Complete — PR #767. ⚠️ `164.8.1-04-SUMMARY.md` is still stranded off main; local disk reads 4/3 | - |
-| 164.8.2 GATEHARDENING (the five code-review warnings 164.8 shipped) | 5/5 (+4 FIX) | Complete — four review rounds; residual deferrals routed to 164.8.4 | v0.77.32.0 |
+| 164.7 APPSETTINGS (every `app.*` GUC reader moves off ALTER DATABASE/ROLE — both 42501 on PROD) | 7/7 | Complete | v0.77.32.1 · finalized v0.77.32.1; its 33 stranded artifacts restored to main by PR #785. Row said `0/? Queued 2nd` until 2026-09-12 |
+| 164.8 TESTPREPROD (TEST becomes a real pre-prod: apply on merge to TEST before PROD) | 6/6 | Complete | v0.77.31.2 · . Row said `3/6 Queued 5th` until 2026-09-12 |
+| 164.8.1 REFDATA (a schema-only restore destroys migration-seeded reference data) | 4/4 | Complete | PR #767. ⚠️ `164.8.1-04-SUMMARY.md` is still stranded off main; local disk reads 4/3 |
+| 164.8.2 GATEHARDENING (the five code-review warnings 164.8 shipped) | 5/5 (+4 FIX) | Complete | v0.77.32.0 · four review rounds; residual deferrals routed to 164.8.4 |
 | 164.8.3 PROBERAUTH (MT5 `-6` named as "no authorized account", not the catch-all) | 4/4 | Complete    | 2026-09-13 |
 | 164.8.4 GATERESIDUE | 5/5 | Complete | v0.79.2.0 · #825 |
-| 164.8.5 PROBERPARSE (prober hygiene rules stop being dodgeable; the parser stops dropping rows) | 7/7 (+4 FIX) | Complete — PR #774 | - |
-| 164.8.6 VAULTTICKFIX (the forward migration Phase 164.7 earned) | 8/8 | Complete — PR #778, follow-ups #779/#781/#782. ⛔ Plan 08 WITHDRAWN not shipped (`tokenMeasure` fired the credential rule on credential-free prose); redesign routed to 164.8.4 | v0.77.34.0 |
+| 164.8.5 PROBERPARSE (prober hygiene rules stop being dodgeable; the parser stops dropping rows) | 7/7 (+4 FIX) | Complete | PR #774 |
+| 164.8.6 VAULTTICKFIX (the forward migration Phase 164.7 earned) | 8/8 | Complete | v0.77.34.0 · PR #778, follow-ups #779/#781/#782. ⛔ Plan 08 WITHDRAWN not shipped (`tokenMeasure` fired the credential rule on credential-free prose); redesign routed to 164.8.4 |
 | 164.9 TESTISOLATION | 11/11 | Complete | #837 |
-| 164.9.1 JOBRPCTRUTH | 14/14 | Complete — verification passed 2026-09-27 (last browser check closed) | v0.93.0.0 · #860 |
+| 164.9.1 JOBRPCTRUTH | 14/14 | Complete | v0.93.0.0 · #860 · verification passed 2026-09-27 (last browser check closed) |
 | 164.9.2 REFDATAUPDATES | 5/5 | Complete | v0.93.0.1 · #862 |
 | 164.9.3 CLAIMPAIR | 6/6 | Complete    | 2026-09-27 |
 | 164.9.3.1 FANINGRAPH | 0/? | Queued — blocker, after 164.9.3 | - |
 | 164.9.3.2 DEFER40001 | 8/8 | Complete    | 2026-10-02 |
 | 164.9.3.2.1 ENQ40001 | 3/3 | Complete    | 2026-10-02 |
 | 164.9.4 CIOFFMUTEX | 12/12 | Complete    | 2026-10-03 |
-| 164.9.5 AUTOREDUMP | 9/9 | Complete — verification passed 2026-10-02 | v0.106.0.0 · #875 |
+| 164.9.5 AUTOREDUMP | 9/9 | Complete | v0.106.0.0 · #875 · verification passed 2026-10-02 |
 | 164.9.6 SUBSETMAIN | 5/5 | Complete    | 2026-10-03 |
-| 164.9.6.1 SUBSETSHARD | 3/3 | Complete — verification passed 2026-10-03 | v0.123.0.0 · #941 |
+| 164.9.6.1 SUBSETSHARD | 3/3 | Complete | v0.123.0.0 · #941 · verification passed 2026-10-03 |
 | 164.9.7 TRUNCATEREVOKE | 0/? | Queued — security, booked 2026-10-03 | - |
-| 164.10 BODYDRIFT | - | Closed by decision (c): the drift is real, measured and deliberately left | v0.79.1.1 · #824 |
-| 165. DEPS dependabot campaign | - | ⛔ RETIRED 2026-09-27 (founder) — not delivered as a phase; dependabot PRs land as maintenance | - |
-| 165.1 PIPDEPS | - | ⛔ RETIRED 2026-09-27 (founder), as 165 | - |
-| 165.2 NPMDEPS | - | ⛔ RETIRED 2026-09-27 (founder), as 165 | - |
 | 166. QSTATS-TRUTH | 10/10 | Complete    | 2026-10-04 |
 | 166.1 ENGINEFLOOR | 4/4 | Complete    | 2026-10-04 |
 | 166.1.1 DDSIGN | 0/? | Queued — feature | - |
 | 166.2 COMPUTEONCE | 7/7 | Complete    | 2026-10-04 |
 | 166.3 RECOMPUTE | 0/1 | HALTED 2026-09-27 at Task 3 — resumes after 166.4 ships | - |
-| 166.4 BENCHALIGN | 4/4 | Complete (verification passed 7/7) | v0.108.0.0 · #892 |
-| 166.5 COMPUTEDATSTAMP | 0/? | Queued — user-facing, booked 2026-10-03 | - |
+| 166.3.1 NAVBREACH | 0/? | Queued | - |
+| 166.4 BENCHALIGN | 4/4 | Complete | v0.108.0.0 · #892 · (verification passed 7/7) |
 | 166.4.1 PORTFOLIOANALYTICS | 0/? | Queued — data integrity | - |
+| 166.5 COMPUTEDATSTAMP | 0/? | Queued — user-facing, booked 2026-10-03 | - |
 | 167. CREDTRUST (an invalid venue credential is named to the customer) | 6/6 | Complete | v0.86.0.0 · #841 |
 | 167.1 AUMTRUST | 6/6 | Complete    | 2026-10-04 |
 | 167.1.1 HOLDINGKEYSCOPE | 0/? | Queued — feature | - |
@@ -5020,19 +5024,22 @@ kept verbatim.
 | 168. DRBOPTIONS (a Deribit options account ingests end to end) | 3/3 | Complete    | 2026-10-02 |
 | 169. FACTSHEETTRUTH (split from PAGETRUTH 2026-09-26) | 7/7 | Complete    | 2026-10-04 |
 | 169.1 ZOOMKPIS | 9/9 | Complete    | 2026-10-01 |
-| 169.1.1 HYDRATIONTICKS | 4/4 | Complete — PR #925, v0.118.1.0 | 2026-10-02 |
+| 169.1.1 HYDRATIONTICKS | 4/4 | Complete | 2026-10-02 · PR #925, v0.118.1.0 |
 | 169.2 BENCHFRESH | 3/3 | Complete    | 2026-10-04 |
 | 169.3 SMALLFIXES | 6/6 | Complete    | 2026-10-04 |
 | 169.4 ALLOCTRUTH | 8/8 | Complete    | 2026-10-04 |
 | 169.4.1 OGSHARPE | 2/2 | Complete    | 2026-10-04 |
 | 169.5 BENCHCOMPARE (split from 169 2026-09-27) | 5/5 | Complete    | 2026-10-04 |
-| 170. LAYOUT | 5/14 | In Progress | - |
+| 170. LAYOUT | 20/20 | Complete | verification passed (ROADMAP phase list: completed 2026-10-01; this row read `In Progress` until 2026-10-04) |
 | 170.1 COPY | 0/? | Queued — feature, after 170 | - |
+| 170.2 PROBEFIXES | 0/? | Queued | - |
 | 170.3 OGPUBLIC | 0/? | Queued — user-facing, booked 2026-10-03 | - |
 | 170.4 ALLOCHOLDINGS | 0/? | Queued — user-facing, booked 2026-10-03 | - |
 | 170.5 FACTSHEETV2PANELS | 0/? | Queued — user-facing, booked 2026-10-03 | - |
 | 170.6 DISPLAYPOLISH | 0/? | Queued — user-facing, booked 2026-10-03 | - |
 | 170.7 MYSTRATTABLE | 0/? | Queued — user-facing, booked 2026-10-03 | - |
+
+Not rows of this table, so the progress counters never read them as open work: 164.10 BODYDRIFT, closed by decision (c) (v0.79.1.1 · #824), and 165 / 165.1 / 165.2, RETIRED 2026-09-27 by the founder (dependabot PRs land as maintenance). Their sections below are kept as lineage.
 
 ### Requirement Coverage (v1.20)
 
