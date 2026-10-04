@@ -3024,7 +3024,13 @@ async def test_ESCALATION_WR02_a_relaunch_the_budget_could_not_watch_is_PENDING_
     """When the heal budget runs out before the settle window does (here, every
     crossing at its full rpyc ceiling), the relaunch has NOT been shown to fail.
     The kind is `relaunch_pending` at WARNING — "not yet known" — and the next
-    reading decides; never `still_faulted`, never ERROR."""
+    reading decides; never `still_faulted`, never ERROR.
+
+    ⛔ 164.6.6.1 plan 03 (2026-10-04) — the KIND is unchanged (pending, never
+    `still_faulted`), but the level is now ERROR. The relaunch follows a scrub,
+    so the terminal has no saved login and will not come back unaided; the
+    relaunch debt is kept for the next tick (D-10), and "a relaunch that did
+    not verify logs at ERROR" (this plan's truths, threat T-164.6.6.1-09)."""
     _set_full_env(monkeypatch)
     _install_client(
         monkeypatch,
@@ -3042,7 +3048,7 @@ async def test_ESCALATION_WR02_a_relaunch_the_budget_could_not_watch_is_PENDING_
     line = next(
         r for r in _records(caplog) if "escalated to a terminal" in r.getMessage()
     )
-    assert line.levelno == logging.WARNING
+    assert line.levelno == logging.ERROR
 
 
 async def test_ESCALATION_WR02_still_faulted_only_after_the_WHOLE_settle_window(

@@ -503,6 +503,10 @@ _sleep: Callable[[float], None] = time.sleep
 # terminate AND its own relaunch probe, so this clock starts no earlier than the
 # kill: 90 s from here is always more than the measured 86 s kill-to-authorized.
 # Only a relaunch still not answering after the whole window is `still_faulted`.
+# ⭐ 164.6.6.1 plan 03 — the escalation's verb is now the scrub, which makes NO
+# relaunch probe of its own; the settle clock starts when the scrub returns,
+# which is still after the kill, and every probe in the window is a
+# CREDENTIALED house `initialize` (`_relaunch_as_house`), never a bare one.
 _RELAUNCH_SETTLE_S: Final[float] = 90.0
 
 # The pause between relaunch polls. A not-yet-answering `initialize()` usually
@@ -1902,13 +1906,6 @@ def _escalate_ipc_fault(
     )
     if kind == KIND_IPC_FAULT_RECYCLED:
         level = logging.INFO
-    elif kind == KIND_IPC_FAULT_RECYCLED_RELAUNCH_PENDING:
-        # ⛔ WR-02 — PENDING is "not yet known", never "a human is needed": the
-        # budget ran out before the settle window did. The next reading decides,
-        # and a persisting wedge is then re-raised at ERROR by the persistence
-        # alarm. ⚠️ 164.6.6.1 — the relaunch debt is kept for the next tick to
-        # pay (D-10); the founder accepted this residue as D-11.
-        level = logging.WARNING
     elif (
         kind == KIND_IPC_FAULT_RECYCLE_NOT_LANDED
         and _count(verdict, "matched") == 0
@@ -1927,11 +1924,15 @@ def _escalate_ipc_fault(
         )
     else:
         # Still faulted, the house triple refused, a scrub that did not land, one
-        # whose effect is unknown, or — ⛔ 164.6.6.1 — a relaunch that came back
-        # but did NOT verify the house session (degraded or unverified). The
-        # saved login is gone and the relaunch debt is kept, so these are no
-        # longer the WARNINGs they were when the recycle deleted nothing: a
-        # human is needed.
+        # whose effect is unknown, or — ⛔ 164.6.6.1 — a relaunch that did NOT
+        # verify the house session: degraded, unverified, or pending. The saved
+        # login is gone and the relaunch debt is kept, so these are no longer
+        # the WARNINGs they were when the recycle deleted nothing. ⚠️ PENDING
+        # in particular: 164.6.5 WR-02 called it "not yet known" because the
+        # recycled terminal still had its saved account and would come back
+        # unaided. A scrubbed terminal will NOT come back unaided; only the
+        # next tick's credentialed relaunch (D-10, plan 04) brings it back, so
+        # until it verifies it is an outage, and it is said at ERROR.
         level = logging.ERROR
     exited = _count(verdict, "exited")
     terminated = _count(verdict, "terminated")

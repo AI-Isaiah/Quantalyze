@@ -251,7 +251,10 @@ KIND_SUPERSEDED: Final[str] = "superseded"
 #                                round 1, WR-02 / SFH-02). "Not yet known", never
 #                                "still faulted": a cold relaunch was MEASURED at
 #                                ~86 s kill-to-authorized, and the next reading
-#                                decides.
+#                                decides. ⚠️ 164.6.6.1 plan 03: after a scrub it
+#                                is logged at ERROR, because a terminal with no
+#                                saved login does not come back unaided; the
+#                                relaunch debt is kept for the next tick (D-10).
 #   * recycle_failed          -> the recycle verb itself raised (the channel, the
 #                                seam, the snapshot, or counts it could not read).
 #                                Whether the process was ended is not known from
@@ -259,6 +262,10 @@ KIND_SUPERSEDED: Final[str] = "superseded"
 #                                budget-gated, credential-free reading follows,
 #                                which relaunches a terminal the failed call may
 #                                have ended; the line says whether it answered.
+#                                ⚠️ 164.6.6.1 plan 03: the verb is the SCRUB
+#                                now, and that follow-up is the CREDENTIALED
+#                                house relaunch (with its budget-gated polls),
+#                                never a bare reading.
 #   * recycle_not_landed      -> the verb RAN and reported that it did not end
 #                                every terminal it matched (`terminated <
 #                                matched`), or matched none at all (164.6.5
