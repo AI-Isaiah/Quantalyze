@@ -1,5 +1,36 @@
 # Changelog
 
+## [0.124.0.2] - 2026-10-04 — MT5SCRUB re-plan: Phase 164.6.6.1 planned from the 2026-10-04 scrub spike
+
+⭐ **What changed for whoever reads this next.** Phase 164.6.6.1 MT5SCRUB is re-planned and ready to
+execute. No app code, migration or dependency ships here. The bump is the 4th digit because the
+one non-planning change is a new `TODOS.md` entry.
+
+### Added
+- **`TODOS.md` `MT5-JOB-TERMINAL-TRADES-SCRUB-01`.** It owns deleting the jobs terminal's
+  per-account `trades` caches, which 164.6.6.1 holds back until Phase 164.6.6.3 fixes finding C.
+  Whichever of the two phases merges second flips the constant.
+- **164.6.6.1 planning artifacts.** RESEARCH, PATTERNS, VALIDATION, COVERAGE and 8 plans in 6
+  waves replace the 4 plans moved from 164.6.6. Plan 02, a live cell (S-11) plus a founder cost
+  checkpoint, gates every plan that deletes data. Plan-check ran 3 rounds plus a founder-approved
+  targeted pass and ended with no blockers or warnings.
+
+### Changed
+- **164.6.6.1 CONTEXT and ROADMAP.** The scrub spike on the validation gateway is recorded as
+  S-01..S-10 with the verdict `SCRUB-RELAUNCH-MODE: credentialed`: the bridge's next
+  `initialize()` relaunches a killed terminal, a bare call on an account-less terminal fails
+  -10005 after 24.9 s, and a credentialed house call authorizes in 2.8 s. The founder's answers
+  D-04 (i) and D-08..D-11 and the founder-visible costs of the re-plan are recorded in both files.
+- **STATE.** 164.6.6.1 is `ready_to_execute`.
+- VERSION and package.json 0.124.0.1 → 0.124.0.2.
+
+### Notes
+- **A same-day claim was withdrawn.** An earlier version of the spike record said `initialize()`
+  cannot launch a killed terminal. Research and S-09 disproved it; CONTEXT keeps it as a dated
+  correction.
+- **The spike was run by the orchestrator, not the founder,** at the founder's choice. That
+  deviation from plan 01's founder act is recorded in CONTEXT and the ROADMAP.
+
 ## [0.124.0.1] - 2026-10-04 — UATCLOSE: 14 phases closed after the 2026-10-03 production UAT, and one stale runbook sentence corrected
 
 ⭐ **What changed for whoever reads this next.** The 2026-10-03 production UAT pass was recorded
