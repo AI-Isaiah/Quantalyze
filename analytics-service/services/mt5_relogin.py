@@ -58,7 +58,7 @@ import logging
 import math
 import os
 import time
-from typing import Callable, Final
+from typing import Callable, Final, NamedTuple
 
 import sentry_sdk
 
@@ -69,6 +69,8 @@ from services.mt5_client import (
     Mt5ClientError,
     Mt5SessionAbandoned,
     _redact_credential_values,
+    _scrub_refusal_reason,
+    clear_mt5_relaunch_debt,
     is_private_gateway_host,
     mt5_terminal_answer_count,
     mt5_terminal_key,
@@ -87,11 +89,12 @@ from services.mt5_session_episodes import (
     KIND_IPC_FAULT,
     KIND_IPC_FAULT_RECYCLE_CAPPED,
     KIND_IPC_FAULT_RECYCLE_FAILED,
+    KIND_IPC_FAULT_RECYCLE_NO_HOUSE_CREDENTIALS,
     KIND_IPC_FAULT_RECYCLE_NOT_LANDED,
     KIND_IPC_FAULT_RECYCLE_SKIPPED_BUDGET,
     KIND_IPC_FAULT_RECYCLED,
     KIND_IPC_FAULT_RECYCLED_DEGRADED,
-    KIND_IPC_FAULT_RECYCLED_NO_ACCOUNT,
+    KIND_IPC_FAULT_RECYCLED_HOUSE_REFUSED,
     KIND_IPC_FAULT_RECYCLED_RELAUNCH_PENDING,
     KIND_IPC_FAULT_RECYCLED_STILL_FAULTED,
     KIND_IPC_FAULT_RECYCLED_UNVERIFIED,
@@ -168,6 +171,12 @@ _MT5_IPC_BRIDGE_DETACHED_CODE: Final[int] = -10004
 #: first-statement fence. An `Mt5SessionAbandoned` carrying it was refused before
 #: the recycle crossed the wire (WR-01).
 _RECYCLE_FENCE_STAGE: Final[str] = "terminal_recycle"
+
+#: ⭐ 164.6.6.1 plan 03 — the stage `Mt5Client.scrub_terminal_account_data`
+#: passes to its OWN first-statement fence. An `Mt5SessionAbandoned` carrying it
+#: was refused before the scrub crossed: nothing was ended or deleted, and no
+#: relaunch debt was recorded.
+_SCRUB_FENCE_STAGE: Final[str] = "terminal_scrub"
 
 _RECYCLE_REACHABLE_IPC_CODES: Final[frozenset[int]] = frozenset(
     _IPC_TRANSPORT_CODES
@@ -383,8 +392,68 @@ _MT5_RELOGIN_LEASE_WAIT_ENV: Final[str] = "MT5_RELOGIN_LEASE_WAIT_S"
 # ceiling. The relaunch POLLS stay budget-gated, and each poll reserves a whole
 # detector reading, so a poll that sees the relaunch answer also leaves the
 # check its crossing.
+#
+# ⭐ 164.6.6.1 plan 03 (2026-10-04, D-04 (i)) — THE SCRUB REPLACES THE RECYCLE,
+# AND THE RELAUNCH READING IS CREDENTIALED. The table above is kept as lineage.
+# The escalation no longer calls `recycle_terminal_process` (which relaunches
+# BARE, i.e. from the saved `accounts.dat`, the L7 Login-dialog shape). It calls
+# `scrub_terminal_account_data`, which ends the terminal, deletes the saved
+# accounts and never relaunches, and then sends ONE credentialed house
+# `initialize`. The unconditional path is:
+#
+#   | the first probe: `initialize()` + `last_error()`                 | 2 |
+#   | the capture: `session_snapshot()`                                | 1 |
+#   | the scrub: execute + namespace lookup + call                     | 3 |
+#   | the credentialed relaunch reading, ONE of:                       | 2 |
+#   |   it does not answer: `initialize(login=…)` + `_raise_last`'s     |   |
+#   |     `last_error()`                                                |   |
+#   |   it answers: `initialize(login=…)` + the post-relaunch           |   |
+#   |     `session_snapshot()`                                          |   |
+#
+# The scrub row replaces the recycle row crossing for crossing, and the
+# credentialed reading replaces the verb's bare relaunch probe crossing for
+# crossing, so the derived default is UNCHANGED, and so are
+# `_MT5_RELOGIN_BUDGET_CEILING_S` and `_RELAUNCH_SETTLE_S`. Evidence that the
+# credentialed reading fits ONE crossing: S-09 measured the credentialed call
+# returning True in 2.8 s on a killed, scrubbed terminal (the 36 s kill-to-
+# authorized wall time there included a 24.9 s WASTED bare call, which this path
+# never makes), and S-11 measured the FIRST credentialed call launching the
+# killed, scrubbed validation terminal and authorizing it as house 6.0 s after
+# the kill, with no poll.
+#
+# ⚠️ W-2, A SLOW LAUNCH, STATED. At the ceilings every crossing costs
+# `_MT5_REQUEST_TIMEOUT_S` and the unconditional path spends the whole derived
+# budget, so no credentialed poll is affordable: a launch slower than one
+# crossing is NOT seen inside this heal. It ends
+# `KIND_IPC_FAULT_RECYCLED_RELAUNCH_PENDING`, the relaunch debt the scrub verb
+# recorded is KEPT, and the next tick from any source pays it with a credentialed
+# relaunch (CONTEXT D-10, plan 04). At the MEASURED costs polls ARE affordable:
+# the first probe on `-10005` takes about 25 s (S-10), the capture one snapshot,
+# and the kill plus delete about 2 s (S-05), so the time left when polls start is
+# roughly the budget less about 30 s and less the first credentialed call. A
+# relaunch that authorizes up to `_RELAUNCH_SETTLE_S` after the kill is
+# therefore still seen whenever that first call returns well inside one
+# crossing, which S-09 (2.8 s) and S-11 (6.0 s kill-to-authorized) bound.
+# ⚠️ S-11 measured the VALIDATION terminal. The jobs terminal has more `Bases`
+# and a larger `accounts.dat` and may launch slower; plan 07's L-3 records the
+# jobs path's own kill-to-authorized time from this escalation's
+# `relaunch_elapsed_s`, and that reading, not S-11, is the jobs-path evidence.
+# Shipping on the S-11 proxy is the founder's D-11 (accepted 2026-10-04).
 _DETECTOR_READING_CROSSINGS: Final[int] = 2
-_RECYCLE_CROSSINGS: Final[int] = 3
+#: `Mt5Client.scrub_terminal_account_data`'s `_remote_call`: `conn.execute`, the
+#: `conn.namespace[FN]` netref lookup, and the call.
+_SCRUB_CROSSINGS: Final[int] = 3
+#: A credentialed `initialize` plus EITHER `_raise_last`'s `last_error()` (it
+#: did not answer) OR the one-crossing post-relaunch `session_snapshot` (it
+#: answered).
+_CREDENTIALED_RELAUNCH_READING_CROSSINGS: Final[int] = 2
+#: What a scrub must be able to finish once started: the scrub itself and its
+#: credentialed relaunch reading. No scrub starts unless the time left covers
+#: this (W-2). Public so the validation-terminal scrub (plan 05) gates on the
+#: same number.
+SCRUB_RELAUNCH_RESERVE_CROSSINGS: Final[int] = (
+    _SCRUB_CROSSINGS + _CREDENTIALED_RELAUNCH_READING_CROSSINGS
+)
 #: `Mt5Client.session_snapshot`: one `conn.eval`, whatever it answers.
 #: `test_R2_WR03_RC_a_session_snapshot_is_ONE_crossing_on_every_shape` drives the
 #: REAL client against a netref-shaped double and requires this charge to equal
@@ -392,18 +461,25 @@ _RECYCLE_CROSSINGS: Final[int] = 3
 _SESSION_SNAPSHOT_CROSSINGS: Final[int] = 1
 _MT5_RELOGIN_ROUND_TRIPS: Final[int] = (
     _DETECTOR_READING_CROSSINGS  # the first probe
-    + _SESSION_SNAPSHOT_CROSSINGS  # the pre-recycle evidence capture
-    + _RECYCLE_CROSSINGS
-    + _DETECTOR_READING_CROSSINGS  # the relaunch reading (see the table)
+    + _SESSION_SNAPSHOT_CROSSINGS  # the pre-scrub evidence capture
+    + _SCRUB_CROSSINGS
+    + _CREDENTIALED_RELAUNCH_READING_CROSSINGS  # see the 164.6.6.1 table
 )
 
 #: The crossings the escalation must still make once the capture is done: the
-#: recycle and its relaunch reading, which covers the post-relaunch check (see
-#: the table). The recycle, and the capture before it, are taken only if the
-#: time left covers this (WR-04).
-_ESCALATION_RESERVE_CROSSINGS: Final[int] = (
-    _RECYCLE_CROSSINGS + _DETECTOR_READING_CROSSINGS
-)
+#: scrub and its credentialed relaunch reading, which covers the post-relaunch
+#: check (see the table). The scrub, and the capture before it, are taken only
+#: if the time left covers this (WR-04, W-2).
+_ESCALATION_RESERVE_CROSSINGS: Final[int] = SCRUB_RELAUNCH_RESERVE_CROSSINGS
+
+#: ⭐ 164.6.6.1 plan 03 — the `delete_trades` flag the JOBS terminal's scrub
+#: sends. ⛔ 0, and never flipped in this plan: deleting the per-account `trades`
+#: caches re-opens RESEARCH Finding C (a fresh cache hands back a partial deal
+#: history) until Phase 164.6.6.3's bounded history wait ships (D-03, D-04's
+#: answer, RESEARCH Pitfall 3). The flip to 1 is owned by `TODOS.md`
+#: `MT5-JOB-TERMINAL-TRADES-SCRUB-01`: this phase's plan 08 makes it if
+#: 164.6.6.3's history wait is already on `main`, otherwise Phase 164.6.6.3 does.
+_JOB_TERMINAL_DELETE_TRADES: Final[int] = 0
 
 #: The heal's clock. ⛔ A module attribute, not a bare `time.monotonic` call, only
 #: so the budget-gated paths can be driven against a clock whose every crossing
@@ -427,6 +503,10 @@ _sleep: Callable[[float], None] = time.sleep
 # terminate AND its own relaunch probe, so this clock starts no earlier than the
 # kill: 90 s from here is always more than the measured 86 s kill-to-authorized.
 # Only a relaunch still not answering after the whole window is `still_faulted`.
+# ⭐ 164.6.6.1 plan 03 — the escalation's verb is now the scrub, which makes NO
+# relaunch probe of its own; the settle clock starts when the scrub returns,
+# which is still after the kill, and every probe in the window is a
+# CREDENTIALED house `initialize` (`_relaunch_as_house`), never a bare one.
 _RELAUNCH_SETTLE_S: Final[float] = 90.0
 
 # The pause between relaunch polls. A not-yet-answering `initialize()` usually
@@ -1184,50 +1264,54 @@ def _recycle_landed(verdict: dict[str, object]) -> bool:
     )
 
 
-def _watch_relaunch(
-    client: Mt5Client, verdict: dict[str, object], deadline: float
-) -> bool:
-    """Poll the credential-free detector until the relaunched terminal answers,
-    the settle window has passed, or the heal budget can no longer cover another
-    poll. Updates ``verdict``'s ``authorized`` / ``relaunch_code`` IN PLACE with
-    the LAST reading, records ``relaunch_polls``, and returns whether the WHOLE
-    settle window was watched (WR-02).
+def _relaunch_as_house(
+    client: Mt5Client, house: tuple[int, str, str], deadline: float
+) -> tuple[bool, int | None, int, bool]:
+    """Relaunch an ended (and perhaps scrubbed) terminal with the HOUSE
+    credentials, and keep trying, CREDENTIALED, until it authorizes, the broker
+    refuses the triple (``-6``), the settle window passes, or the heal budget can
+    no longer cover another try. Returns ``(authorized, code, polls, settled)``.
 
-    ⛔ BUDGET-GATED, like every optional read (WR-04): a poll is started only if
-    the pause and one full detector reading still fit before ``deadline``. So
-    this loop can never push the heal past its ``wait_for``; when the budget
-    runs out first the answer is "not yet known", and the caller says so.
+    ⛔ NEVER A BARE ``initialize()`` (164.6.6.1 plan 03). On a terminal whose
+    ``accounts.dat`` was deleted a bare call reads ``-10005`` after about 25 s
+    (CONTEXT S-10) and, on a killed terminal, LAUNCHES it outside this call's
+    control (S-09). So this never calls ``assert_session_authorized``; every try
+    is ``initialize_with_credentials``, which redacts the triple by value on
+    every failure arm (T-134-01). The budget gating is ``_watch_relaunch``'s
+    (164.6.5 WR-02, deleted here): a try is started only if the pause and one
+    whole credentialed reading still fit before ``deadline``.
 
-    ⛔ Credential-free: it is the same bare ``initialize()`` the detector uses.
-    ``Mt5SessionAbandoned`` propagates — the terminate has already crossed, so
-    the attempt stands (WR-01).
+    ``settled`` is whether the whole ``_RELAUNCH_SETTLE_S`` window was watched,
+    counted from this call's start, which is after the kill. ``Mt5SessionAbandoned``
+    propagates: the terminate has already crossed, so the attempt stands.
     """
     started = _clock()
+
+    def _try() -> tuple[bool, int | None]:
+        try:
+            client.initialize_with_credentials(*house)
+        except Mt5SessionAbandoned:
+            raise
+        except Mt5ClientError as exc:
+            return False, exc.code
+        except Exception:  # noqa: BLE001 — the verb wraps transport raises; belt and braces
+            return False, _MT5_UNATTRIBUTED_CODE
+        return True, None
+
+    authorized, code = _try()
     polls = 0
-    try:
-        while not (
-            verdict.get("authorized") is True
-            or verdict.get("relaunch_code") == _MT5_NO_AUTHORIZED_ACCOUNT_CODE
+    while not authorized and code != _MT5_NO_AUTHORIZED_ACCOUNT_CODE:
+        if _clock() - started >= _RELAUNCH_SETTLE_S:
+            return authorized, code, polls, True
+        if not _affordable(
+            deadline - _RELAUNCH_POLL_INTERVAL_S,
+            _CREDENTIALED_RELAUNCH_READING_CROSSINGS,
         ):
-            if _clock() - started >= _RELAUNCH_SETTLE_S:
-                return True
-            if not _affordable(
-                deadline - _RELAUNCH_POLL_INTERVAL_S, _DETECTOR_READING_CROSSINGS
-            ):
-                return False
-            _sleep(_RELAUNCH_POLL_INTERVAL_S)
-            polls += 1
-            try:
-                client.assert_session_authorized()
-            except Mt5ClientError as exc:
-                verdict["authorized"] = False
-                verdict["relaunch_code"] = exc.code
-            else:
-                verdict["authorized"] = True
-                verdict["relaunch_code"] = None
-        return True
-    finally:
-        verdict["relaunch_polls"] = polls
+            return authorized, code, polls, False
+        _sleep(_RELAUNCH_POLL_INTERVAL_S)
+        polls += 1
+        authorized, code = _try()
+    return authorized, code, polls, True
 
 
 #: What the post-relaunch check came to (SFH-07 / SFH-08). ⛔ The order is the
@@ -1340,41 +1424,146 @@ def _read_post_relaunch_state(
     return f"post_relaunch: {connected_part} {account_part}", status
 
 
-def _classify_recycle_verdict(
-    verdict: dict[str, object], *, settled: bool = True
-) -> str:
-    """Map the plan-02 recycle verb's verdict to one escalation kind.
+class ScrubRelaunchResult(NamedTuple):
+    """What ``scrub_and_relaunch_as_house`` did, as structured fields only:
+    counts, codes, class names and durations, never a credential or remote text.
 
-    Read from the verb's STRUCTURED keys, never from any text.
+    ``relaunch_elapsed_s`` is seconds on the heal clock from the verb's return to
+    the authorizing call, or to the last attempt when none authorized; ``None``
+    when no relaunch ran. Plan 07's L-3 reads it as the jobs path's measured
+    relaunch time. ``post_status`` is a ``_POST_RELAUNCH_*`` value, or
+    ``"not_reached"`` when the relaunch did not authorize."""
 
-    ⛔ WR-03 / SFH-01 (164.6.5 review round 1) — THE COUNTS DECIDE FIRST. This
-    read only ``authorized`` / ``relaunch_code``, so a recycle that ENDED NOTHING
-    (``matched=0``: an image-name or case difference under Wine; or ``matched=1
-    terminated=0``: ``OpenProcess`` / ``TerminateProcess`` refused) was labelled
-    ``recycled`` at INFO whenever the relaunch probe happened to attach to the
-    same, still-running terminal and it answered — and ``still_faulted`` ("the
-    recycle ran and did not help") when it did not. Both claim a recycle that
-    never happened, and the second points the operator at the VNC console for a
-    broken VERB. ``terminated < matched`` is ``recycle_not_landed``, whatever the
-    relaunch said.
+    verdict: dict[str, object]
+    verb_exc_class: str | None
+    verb_exc_code: int | None
+    authorized: bool | None
+    relaunch_code: int | None
+    relaunch_polls: int
+    relaunch_elapsed_s: float | None
+    settled: bool
+    post_status: str
+    post_fragment: str
 
-    ``relaunch_code == -6`` is the terminal back up and answering with no account
-    signed in yet: the ordinary heal owns that on the next reading, because the
-    escalation never sends a credential (D-08).
 
-    ``settled`` is whether the whole relaunch settle window was watched
-    (``_watch_relaunch``). A relaunch still not answering is ``still_faulted``
-    only then, and ``relaunch_pending`` otherwise (WR-02).
+#: `ScrubRelaunchResult.post_status` when the post-relaunch check never ran.
+_POST_RELAUNCH_NOT_REACHED: Final[str] = "not_reached"
+
+
+def heal_deadline(budget_s: float) -> float:
+    """The deadline ``budget_s`` from now on the heal's own clock (``_clock``).
+    Public so the validation-terminal scrub (plan 05) budgets on the same clock
+    seam as the jobs-terminal escalation."""
+    return _clock() + budget_s
+
+
+def scrub_and_relaunch_as_house(
+    client: Mt5Client,
+    *,
+    house: tuple[int, str, str],
+    deadline: float,
+    delete_trades: int,
+) -> ScrubRelaunchResult:
+    """End the terminal, delete its saved accounts, and relaunch it with the
+    HOUSE credentials (164.6.6.1 plan 03, CONTEXT D-04 (i)). Public: the
+    validation-terminal scrub (plan 05) reuses it.
+
+    In order, inside the caller's ONE lease and against its ONE ``deadline``:
+
+      1. ``client.scrub_terminal_account_data(delete_trades=...)``. It records
+         the relaunch debt before it crosses and never relaunches.
+      2. Whatever the verb returned OR raised, a credentialed relaunch
+         (``_relaunch_as_house``), if the budget still covers one credentialed
+         reading. ⛔ Keyed on "a terminal may have been ended", never on
+         ``refused``: ``terminated >= 1`` with ``exited < matched`` is refused
+         AND killed, and a verb that raised after crossing may have killed it.
+      3. When it authorized, the house-equality check
+         (``_read_post_relaunch_state``).
+      4. ``clear_mt5_relaunch_debt`` ONLY on a house-VERIFIED session. Degraded,
+         unverified, refused, pending and failed outcomes all keep the debt, so
+         the next tick pays it (D-10, plan 04).
+
+    ⛔ The house triple reaches ``initialize_with_credentials`` and nothing else:
+    not the scrub verb (whose only argument is an int flag), not a log line, not
+    the result. ⛔ It never raises ``Exception``. ``Mt5SessionAbandoned`` (a
+    plain exception on purpose, D-42) propagates from any step.
     """
-    if not _recycle_landed(verdict):
+    verdict: dict[str, object] = {}
+    verb_exc_class: str | None = None
+    verb_exc_code: int | None = None
+    try:
+        verdict = client.scrub_terminal_account_data(delete_trades=delete_trades)
+    except Mt5SessionAbandoned:
+        raise
+    except Exception as exc:  # noqa: BLE001 — the verb's failure is a verdict, never a raise
+        # ⛔ The CLASS and the typed code only — never `str(exc)`, which for a
+        # raw transport raise is remote text.
+        verb_exc_class = type(exc).__name__
+        verb_exc_code = exc.code if isinstance(exc, Mt5ClientError) else None
+    returned_at = _clock()
+    authorized: bool | None = None
+    relaunch_code: int | None = None
+    polls = 0
+    elapsed: float | None = None
+    settled = True
+    post_status = _POST_RELAUNCH_NOT_REACHED
+    post_fragment = ""
+    if _affordable(deadline, _CREDENTIALED_RELAUNCH_READING_CROSSINGS):
+        authorized, relaunch_code, polls, settled = _relaunch_as_house(
+            client, house, deadline
+        )
+        elapsed = _clock() - returned_at
+        if authorized:
+            post_fragment, post_status = _read_post_relaunch_state(
+                client, house[0], house[2], deadline
+            )
+    else:
+        post_fragment = "relaunch=not_read (the heal budget left cannot cover it)"
+    if post_status == _POST_RELAUNCH_VERIFIED:
+        clear_mt5_relaunch_debt(client.terminal_key)
+    return ScrubRelaunchResult(
+        verdict=verdict,
+        verb_exc_class=verb_exc_class,
+        verb_exc_code=verb_exc_code,
+        authorized=authorized,
+        relaunch_code=relaunch_code,
+        relaunch_polls=polls,
+        relaunch_elapsed_s=elapsed,
+        settled=settled,
+        post_status=post_status,
+        post_fragment=post_fragment,
+    )
+
+
+def _classify_scrub_relaunch(result: ScrubRelaunchResult) -> str:
+    """Map a scrub-and-relaunch result to one escalation kind, from its
+    STRUCTURED fields only.
+
+    ⛔ THE COUNTS DECIDE FIRST (164.6.5 WR-03 / SFH-01, kept): a scrub that did
+    not end every terminal it matched, or matched none, is ``recycle_not_landed``
+    whatever the relaunch said. Then the relaunch: authorized is ``recycled`` /
+    ``recycled_degraded`` / ``recycled_unverified`` by what the house-equality
+    check came to; ``-6`` is the broker REFUSING the house triple
+    (``recycled_house_refused``), since the relaunch is credentialed now; a
+    relaunch the budget could not watch through the settle window is
+    ``relaunch_pending`` (WR-02); only a watched-and-failed one is
+    ``still_faulted``."""
+    if result.verb_exc_class is not None:
+        return KIND_IPC_FAULT_RECYCLE_FAILED
+    if not _recycle_landed(result.verdict):
         return KIND_IPC_FAULT_RECYCLE_NOT_LANDED
-    if verdict.get("authorized") is True:
-        return KIND_IPC_FAULT_RECYCLED
-    if verdict.get("relaunch_code") == _MT5_NO_AUTHORIZED_ACCOUNT_CODE:
-        return KIND_IPC_FAULT_RECYCLED_NO_ACCOUNT
-    if not settled:
-        # ⛔ WR-02 — the budget ran out before the settle window did. The relaunch
-        # has NOT been shown to fail, so this is never `still_faulted`.
+    if result.authorized:
+        if result.post_status == _POST_RELAUNCH_VERIFIED:
+            return KIND_IPC_FAULT_RECYCLED
+        if result.post_status == _POST_RELAUNCH_DEGRADED:
+            return KIND_IPC_FAULT_RECYCLED_DEGRADED
+        return KIND_IPC_FAULT_RECYCLED_UNVERIFIED
+    if result.relaunch_code == _MT5_NO_AUTHORIZED_ACCOUNT_CODE:
+        return KIND_IPC_FAULT_RECYCLED_HOUSE_REFUSED
+    if not result.settled or result.authorized is None:
+        # ⛔ WR-02 — the budget ran out before the settle window did, or could
+        # not cover the relaunch at all. Not shown to fail, so never
+        # `still_faulted`.
         return KIND_IPC_FAULT_RECYCLED_RELAUNCH_PENDING
     return KIND_IPC_FAULT_RECYCLED_STILL_FAULTED
 
@@ -1385,6 +1574,7 @@ def _escalate_ipc_fault(
     env_server: str,
     deadline: float | None = None,
     env_login: int | None = None,
+    env_password: str | None = None,
 ) -> str | None:
     """ACT on an ``ipc_fault`` reading by recycling the terminal PROCESS (D-08),
     once per run, and return the escalation kind — or ``None`` when it did not run.
@@ -1394,6 +1584,19 @@ def _escalate_ipc_fault(
     because it cannot drive a terminal whose IPC is dead; re-sending a credential
     goes through exactly the half that is not answering. The recycle verb takes NO
     credential and structurally cannot (plan 02), and nothing here passes one.
+
+    ⭐ AMENDED 2026-10-04 (Phase 164.6.6.1 plan 03, the founder's D-04 (i)). The
+    process is still ENDED FIRST, because a credential alone cannot get through a
+    wedged terminal. But the ending is now ``scrub_terminal_account_data``, which
+    also deletes the saved ``accounts.dat``, and the relaunch that follows is
+    CREDENTIALED with the house triple (``scrub_and_relaunch_as_house``). That
+    reverses 164.6.5 D-08's "the escalation never sends a credential" for the
+    RELAUNCH only: a bare relaunch reads the saved copy, and a stale saved house
+    password there is the 2026-10-04 L7 Login-dialog wedge. The terminate-and-
+    delete verb itself still takes no credential. ``env_password`` is threaded
+    from ``_heal_blocking``'s own parameters; ⛔ ``MT5_PASSWORD`` is never re-read
+    here (that would be a second credential source). Without a house login and
+    password nothing is ended or deleted (``recycle_no_house_credentials``).
 
     ⭐ WHY IT IS CALLED FROM INSIDE ``_heal_blocking`` AND NOT FROM THE ASYNC
     CALLER. The caller's verdict log and episode record run AFTER its
@@ -1550,8 +1753,11 @@ def _escalate_ipc_fault(
     # escalation's first act. An escalation abandoned during the capture used to
     # have spent the run's one attempt already, with no process ended, so every
     # later `-10005` was debounced until a redeploy.
-    if not _affordable(deadline, _ESCALATION_RESERVE_CROSSINGS):
-        # ⛔ WR-04 / SFH-06 — NEVER START A RECYCLE THE BUDGET CANNOT FINISH. Under
+    if not _affordable(deadline, SCRUB_RELAUNCH_RESERVE_CROSSINGS):
+        # ⛔ WR-04 / SFH-06 — NEVER START A RECYCLE THE BUDGET CANNOT FINISH.
+        # ⛔ 164.6.6.1 (W-2) — nor a scrub: the time left must cover the scrub
+        # AND a credentialed relaunch reading, or the terminal could be left
+        # logged out with its saved login deleted. Nothing is deleted here. Under
         # the derived default this cannot happen (the unconditional path is what
         # the default is derived from); it is reachable when `MT5_RELOGIN_BUDGET_S`
         # is set below that default. Killing the shared terminal and then being
@@ -1593,45 +1799,82 @@ def _escalate_ipc_fault(
                 int(_IPC_FAULT_ALARM_INTERVAL_S // 60),
             )
         return KIND_IPC_FAULT_RECYCLE_SKIPPED_BUDGET
+    if env_login is None or env_password is None:
+        # ⛔ 164.6.6.1 plan 03 — NOTHING IS ENDED OR DELETED WITHOUT THE HOUSE
+        # TRIPLE TO RELAUNCH WITH. A scrub deletes the saved login; with no
+        # credential to relaunch on, it would leave the shared terminal logged
+        # out with nothing able to bring it back. No fallback to the bare recycle
+        # either (that is the L7 shape). The attempt is not spent.
+        logger.error(
+            "mt5 session heal: ipc_fault code=%s — the terminal-process recycle "
+            "with a saved-account scrub was NOT attempted: no house login or "
+            "password reached the escalation, so nothing could relaunch the "
+            "terminal as house. Nothing was ended or deleted; an OPERATOR is "
+            "needed (%s).",
+            code,
+            KIND_IPC_FAULT_RECYCLE_NO_HOUSE_CREDENTIALS,
+        )
+        return KIND_IPC_FAULT_RECYCLE_NO_HOUSE_CREDENTIALS
     recent_recycles = claim_ipc_fault_escalation(
         _clock(), _IPC_FAULT_RECYCLE_WINDOW_S
     )
-    verdict: dict[str, object] = {}
-    answered_after_failure = False
     try:
-        verdict = client.recycle_terminal_process()
-        # ⭐ WR-02 — a recycle that landed is WATCHED until it answers or the
-        # settle window passes; one 20 s probe of a relaunch measured at 86 s is
-        # not a verdict. A recycle that did not land relaunched nothing.
-        settled = (
-            _watch_relaunch(client, verdict, deadline)
-            if _recycle_landed(verdict)
-            else True
+        # ⭐ 164.6.6.1 plan 03, D-04 (i) — THE SCRUB REPLACES THE RECYCLE. It ends
+        # the terminal, deletes its saved accounts and relaunches it with the
+        # HOUSE credentials. ⛔ Never recycle-then-scrub: the recycle's own bare
+        # relaunch would bring the terminal back from the stale saved copy (the
+        # L7 shape) and the delete would then run under a live terminal (A4).
+        result = scrub_and_relaunch_as_house(
+            client,
+            house=(env_login, env_password, env_server),
+            deadline=deadline,
+            delete_trades=_JOB_TERMINAL_DELETE_TRADES,
         )
-        kind = _classify_recycle_verdict(verdict, settled=settled)
-        post_relaunch = ""
-        if kind == KIND_IPC_FAULT_RECYCLED:
-            # ⭐ SFH-07 — "authorized" is not "the house account, connected".
-            # ⛔ WR-04 / SFH-08 (164.6.5 review round 2) — and what the check
-            # came to is the KIND, not only the level: every structured consumer
-            # of `escalation_kind` saw a clean recovery before. Only a VERIFIED
-            # house session stays `recycled`.
-            if env_login is None:
-                status = _POST_RELAUNCH_UNVERIFIED
-                post_relaunch = "post_relaunch=not_read (no environment login)"
-            else:
-                post_relaunch, status = _read_post_relaunch_state(
-                    client, env_login, env_server, deadline
-                )
-            if status == _POST_RELAUNCH_DEGRADED:
-                kind = KIND_IPC_FAULT_RECYCLED_DEGRADED
-            elif status == _POST_RELAUNCH_UNVERIFIED:
-                kind = KIND_IPC_FAULT_RECYCLED_UNVERIFIED
+    except Mt5SessionAbandoned as exc:
+        # ⛔ WR-01 — `terminal_scrub` is the verb's OWN first-statement fence: it
+        # refused BEFORE anything crossed, so no process was ended, nothing was
+        # deleted, no debt was recorded and the attempt was not spent. Any other
+        # stage is the relaunch, i.e. AFTER the terminate crossed, and the
+        # attempt stands.
+        #
+        # ⛔ WR-02 (164.6.5 review round 2) — UNDO THE CLAIM, NOTHING MORE. This
+        # refusal runs in the zombie thread after the `wait_for` fired and
+        # measured nothing about the terminal, so the persistence alarm's run
+        # stays exactly as it was.
+        if exc.stage == _SCRUB_FENCE_STAGE:
+            restore_ipc_fault_attempt()
+        raise
+    verdict = result.verdict
+    kind = _classify_scrub_relaunch(result)
+    elapsed_part = (
+        "None"
+        if result.relaunch_elapsed_s is None
+        else str(int(round(result.relaunch_elapsed_s)))
+    )
+    relaunch_part = (
+        f"authorized={result.authorized} relaunch_code={result.relaunch_code} "
+        f"relaunch_polls={result.relaunch_polls} "
+        f"relaunch_elapsed_s={elapsed_part}"
+    )
+    if result.verb_exc_class is not None:
+        # ⛔ The CLASS and the typed code only — never `str(exc)`, which for a
+        # raw transport raise is remote text. ⛔ R2-SFH-04 part 3, kept: the
+        # remote call may already have ended the terminal, so the credentialed
+        # relaunch above ran anyway (budget-gated) and the line says whether it
+        # answered.
+        detail = (
+            f"exc_class={result.verb_exc_class} code={result.verb_exc_code} "
+            f"post_failure_relaunch: {relaunch_part}"
+        )
+    else:
         detail = (
             f"matched={verdict.get('matched')} terminated={verdict.get('terminated')} "
-            f"exited={verdict.get('exited')} authorized={verdict.get('authorized')} "
-            f"relaunch_code={verdict.get('relaunch_code')} "
-            f"relaunch_polls={verdict.get('relaunch_polls', 0)} "
+            f"exited={verdict.get('exited')} refused={verdict.get('refused')} "
+            f"accounts_deleted={verdict.get('accounts_deleted')} "
+            f"accounts_missing={verdict.get('accounts_missing')} "
+            f"trades_deleted={verdict.get('trades_deleted')} "
+            f"profile_accounts_found={verdict.get('profile_accounts_found')} "
+            f"{relaunch_part} "
             # ⭐ 164.6.5 review round 2, Topic B — the verb's diagnostic fields,
             # each an int, a list of Win32 codes, four-int file versions or a
             # bridge-local exception CLASS name (the client admits only a
@@ -1646,94 +1889,23 @@ def _escalate_ipc_fault(
             f"file_versions={verdict.get('file_versions')} "
             f"file_version_errors={verdict.get('file_version_errors')} "
             f"file_version_exc={verdict.get('file_version_exc')}"
-            + (f" {post_relaunch}" if post_relaunch else "")
         )
-    except Mt5SessionAbandoned as exc:
-        # ⛔ WR-01 — `terminal_recycle` is the verb's OWN first-statement fence:
-        # it refused BEFORE anything crossed, so no process was ended and the
-        # attempt was not spent. Any other stage is the relaunch, i.e. AFTER the
-        # terminate crossed, and the attempt stands.
-        #
-        # ⛔ WR-02 (164.6.5 review round 2) — UNDO THE CLAIM, NOTHING MORE. This
-        # refusal runs in the zombie thread after the `wait_for` fired and
-        # measured nothing about the terminal, so the persistence alarm's run
-        # stays exactly as it was.
-        if exc.stage == _RECYCLE_FENCE_STAGE:
-            restore_ipc_fault_attempt()
-        raise
-    except Exception as exc:  # noqa: BLE001 — see the docstring; this is the control
-        kind = KIND_IPC_FAULT_RECYCLE_FAILED
-        # ⛔ The CLASS and the typed code only — never `str(exc)`, which for a
-        # raw transport raise is remote text.
-        detail = (
-            f"exc_class={type(exc).__name__} "
-            f"code={exc.code if isinstance(exc, Mt5ClientError) else None}"
-        )
-        # ⛔ R2-SFH-04 part 3 (164.6.5 review round 2) — ONE CREDENTIAL-FREE
-        # READING AFTER A FAILED RECYCLE. This arm is reached on a transport
-        # failure, a snapshot failure or unreadable counts, i.e. the remote call
-        # may already have ended the terminal while the verb's own relaunch probe
-        # never ran. Nothing relaunched it until some later caller's bare
-        # `initialize()` did (about 4m45s in the D-05 record). The detector's
-        # bare `initialize()` launches a terminal that is not running, so this
-        # reading relaunches one the failed call may have ended, and says
-        # whether it answered. Budget-gated like every optional read (WR-04);
-        # `Mt5SessionAbandoned` propagates, and the attempt stands.
-        if _affordable(deadline, _DETECTOR_READING_CROSSINGS):
-            try:
-                client.assert_session_authorized()
-            except Mt5SessionAbandoned:
-                raise
-            except Mt5ClientError as probe_exc:
-                answered_after_failure = (
-                    probe_exc.code == _MT5_NO_AUTHORIZED_ACCOUNT_CODE
-                )
-                probe_part = f"post_failure_probe=code={probe_exc.code}"
-            except Exception as probe_exc:  # noqa: BLE001 — see this arm's docstring
-                probe_part = (
-                    f"post_failure_probe=failed "
-                    f"({_describe_capture_failure(probe_exc)})"
-                )
-            else:
-                answered_after_failure = True
-                probe_part = "post_failure_probe=authorized"
-        else:
-            probe_part = (
-                "post_failure_probe=not_read (the heal budget left cannot cover it)"
-            )
-        detail = f"{detail} {probe_part}"
-    # ⛔ CR-01 (164.6.5 review round 1) — THE RELAUNCH PROBE IS A READING, AND
-    # WHEN IT MEASURED THE TERMINAL ANSWERING THE RUN IS OVER. The gate used to
-    # be re-armed only by a FIRST-probe reading of a later tick, so a recycle
-    # that WORKED left it disarmed: a client validation that re-wedged the
-    # terminal before the next tick saw it healthy was debounced forever, and
-    # the 1h39m manual outage came back with an INFO line per tick saying the
-    # recovery was withheld. `authorized` and `-6` are both the terminal
-    # answering (the ordinary heal owns `-6` on the next reading), so either
-    # one ends this run and the NEXT wedge earns its own attempt.
+    if result.post_fragment:
+        detail = f"{detail} {result.post_fragment}"
+    # ⛔ CR-01 (164.6.5 review round 1) — THE RELAUNCH IS A READING, AND WHEN IT
+    # MEASURED THE TERMINAL ANSWERING THE RUN IS OVER. `authorized` and `-6` are
+    # both the terminal answering (`-6` is now the broker refusing the house
+    # triple, which a terminal must be up to say), so either one ends this run
+    # and the NEXT wedge earns its own attempt.
     # ⚠️ Decided here and APPLIED after the level ladder (WR-02, round 2): a
     # run that is over must not be stamped with this line's alarm afterwards,
     # or the stale stamp pages the next, unrelated fault on its first reading.
     answered = (
-        answered_after_failure
-        or verdict.get("authorized") is True
-        or verdict.get("relaunch_code") == _MT5_NO_AUTHORIZED_ACCOUNT_CODE
+        result.authorized is True
+        or result.relaunch_code == _MT5_NO_AUTHORIZED_ACCOUNT_CODE
     )
     if kind == KIND_IPC_FAULT_RECYCLED:
         level = logging.INFO
-    elif kind in (
-        KIND_IPC_FAULT_RECYCLED_NO_ACCOUNT,
-        KIND_IPC_FAULT_RECYCLED_RELAUNCH_PENDING,
-        # ⛔ SFH-07 / WR-04 / SFH-08 — back up, but disconnected, on another
-        # account or server, or not checked at all: the house session was NOT
-        # shown restored, and INFO would say it was.
-        KIND_IPC_FAULT_RECYCLED_DEGRADED,
-        KIND_IPC_FAULT_RECYCLED_UNVERIFIED,
-    ):
-        # ⛔ WR-02 — PENDING is "not yet known", never "a human is needed": the
-        # next reading decides, and a persisting wedge is then re-raised at ERROR
-        # by the persistence alarm.
-        level = logging.WARNING
     elif (
         kind == KIND_IPC_FAULT_RECYCLE_NOT_LANDED
         and _count(verdict, "matched") == 0
@@ -1741,8 +1913,8 @@ def _escalate_ipc_fault(
     ):
         # ⭐ IN-02 (164.6.5 review round 2) — `matched=0` with an ANSWERING
         # relaunch is ambiguous, and one reading is a genuine heal: no
-        # `terminal64.exe` was running and the verb's relaunch `initialize()`
-        # LAUNCHED one. The other is an image name that did not match (SFH-01).
+        # `terminal64.exe` was running and the credentialed relaunch LAUNCHED
+        # one. The other is an image name that did not match (SFH-01).
         # WARNING, qualified on the line, until the first live run shows which.
         level = logging.WARNING
         detail = (
@@ -1751,8 +1923,16 @@ def _escalate_ipc_fault(
             "not match; the first live run decides)"
         )
     else:
-        # Still faulted after a recycle, a recycle that did not land, or one
-        # whose effect is unknown: a human is needed.
+        # Still faulted, the house triple refused, a scrub that did not land, one
+        # whose effect is unknown, or — ⛔ 164.6.6.1 — a relaunch that did NOT
+        # verify the house session: degraded, unverified, or pending. The saved
+        # login is gone and the relaunch debt is kept, so these are no longer
+        # the WARNINGs they were when the recycle deleted nothing. ⚠️ PENDING
+        # in particular: 164.6.5 WR-02 called it "not yet known" because the
+        # recycled terminal still had its saved account and would come back
+        # unaided. A scrubbed terminal will NOT come back unaided; only the
+        # next tick's credentialed relaunch (D-10, plan 04) brings it back, so
+        # until it verifies it is an outage, and it is said at ERROR.
         level = logging.ERROR
     exited = _count(verdict, "exited")
     terminated = _count(verdict, "terminated")
@@ -1762,6 +1942,14 @@ def _escalate_ipc_fault(
         # pipe the relaunch attached to.
         level = max(level, logging.WARNING)
         detail = f"{detail} exit_unconfirmed={terminated - exited}"
+    refused = _count(verdict, "refused")
+    if refused is not None and refused != 0:
+        # ⛔ 164.6.6.1 — the scrub ended the terminal but KEPT `accounts.dat`, so
+        # the stale saved copy may still be on disk. On a landed scrub that is
+        # an ERROR whatever the relaunch said.
+        detail = f"{detail} accounts_dat_kept={_scrub_refusal_reason(refused)}"
+        if _recycle_landed(verdict):
+            level = logging.ERROR
     if recent_recycles >= IPC_FAULT_RECYCLE_CAP:
         # ⛔ CR-01 (164.6.5 review round 2) — THE RECURRENCE IS THE SIGNAL. This
         # is the cap'th recycle inside the window: the last one "worked" and the
@@ -1785,7 +1973,8 @@ def _escalate_ipc_fault(
     logger.log(
         level,
         "mt5 session heal: ipc_fault code=%s escalated to a terminal-process "
-        "recycle (no credential sent) — %s (%s)",
+        "recycle with a saved-account scrub and a credentialed house relaunch "
+        "— %s (%s)",
         code,
         kind,
         detail,
@@ -1894,7 +2083,12 @@ def _heal_blocking(
                     # ⭐ D-08 — ACT, don't only report. Decided from the typed
                     # `err.code`, never from `verdict`. See `_escalate_ipc_fault`.
                     escalation_kind=_escalate_ipc_fault(
-                        client, err.code, server, deadline, env_login=login
+                        client,
+                        err.code,
+                        server,
+                        deadline,
+                        env_login=login,
+                        env_password=password,
                     ),
                 )
             # ⭐ THE ONE READING THAT ESTABLISHES DARKNESS. `-6` means the bridge
