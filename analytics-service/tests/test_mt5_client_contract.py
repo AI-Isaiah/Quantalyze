@@ -4258,6 +4258,69 @@ class _FakeWin32:
         finally:
             time.monotonic = real_monotonic
 
+    def run_scrub(
+        self, monkeypatch, tmp_path, *, exit_wait_ms=5000, delete_trades=0
+    ) -> dict:
+        """Phase 164.6.6.1 — execute the COMMITTED scrub body offline against a
+        real `tmp_path` tree, under the same faked Win32 surface as `run`.
+
+        ⭐ HOW IT REACHES `tmp_path` WITH NOTHING INTERPOLATED INTO PRODUCTION
+        (plan 01, Decision 3): the committed literal names the install directory
+        exactly once, as the quoted string `_SCRUB_INSTALL_DIR_LITERAL`. THIS
+        test builds its OWN copy with that one string replaced by the tmp path;
+        the production constant is never transformed. The tree it builds is the
+        S-07 layout plus every target the literal must NEVER name, so a widened
+        delete shows up as a missing file. ``self.tree`` maps a short name to
+        each path for the assertions.
+        """
+        import ctypes
+        import time
+
+        install = tmp_path / "install"
+        appdata = tmp_path / "appdata"
+        self.tree = {
+            "accounts": install / "Config" / "accounts.dat",
+            "common_ini": install / "Config" / "common.ini",
+            "servers_dat": install / "Config" / "servers.dat",
+            "trades_a": install / "Bases" / "srvA" / "trades" / "111" / "x.dat",
+            "trades_b": install / "Bases" / "srvB" / "trades" / "222" / "y.dat",
+            "history": install / "Bases" / "srvA" / "history" / "h.dat",
+            "mail": install / "Bases" / "srvA" / "mail" / "m.dat",
+            "subscriptions": install / "Bases" / "srvA" / "subscriptions" / "s.dat",
+            "journal": install / "logs" / "20261004.log",
+            "profile_accounts": (
+                appdata / "MetaQuotes" / "Terminal" / "HASH" / "config" / "accounts.dat"
+            ),
+        }
+        for path in self.tree.values():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"fixture")
+
+        src = mt5_client_mod._REMOTE_TERMINAL_SCRUB_SRC
+        assert src.count(_SCRUB_INSTALL_DIR_LITERAL) == 1, (
+            "the committed scrub literal must name the install directory exactly "
+            f"once as {_SCRUB_INSTALL_DIR_LITERAL} — the offline run cannot "
+            "redirect it otherwise"
+        )
+        test_copy = src.replace(_SCRUB_INSTALL_DIR_LITERAL, repr(str(install)))
+        assert test_copy != src
+
+        monkeypatch.setenv("APPDATA", str(appdata))
+        monkeypatch.setattr(ctypes, "WinDLL", self._win_dll, raising=False)
+        monkeypatch.setattr(ctypes, "get_last_error", lambda: self.last_error, raising=False)
+        namespace: dict = {}
+        exec(test_copy, namespace)  # noqa: S102 — the TEST-SIDE copy only
+        real_monotonic = time.monotonic
+        base = real_monotonic()
+        time.monotonic = lambda: base + self.elapsed_ms / 1000.0
+        try:
+            return json.loads(namespace[_SCRUB_FN_NAME](exit_wait_ms, delete_trades))
+        finally:
+            time.monotonic = real_monotonic
+
+    def tree_survivors(self) -> dict[str, bool]:
+        return {name: path.exists() for name, path in self.tree.items()}
+
 
 def test_TERMINAL_RECYCLE_a_live_session_sends_the_committed_source_then_relaunches():
     """The whole recycle, in order: the COMMITTED constant crosses once, is called
@@ -4858,6 +4921,131 @@ def test_TERMINAL_RECYCLE_IN01_every_Win32_function_called_has_its_signature_dec
         if fn in non_bool and not hasattr(getattr(dlls[dll], fn), "restype")
     )
     assert not missing_restype, f"non-BOOL return without restype: {missing_restype}"
+
+
+# --------------------------------------------------------------------------- #
+# Phase 164.6.6.1 (MT5SCRUB) — the terminal SCRUB verb
+# (`Mt5Client.scrub_terminal_account_data` + `_REMOTE_TERMINAL_SCRUB_SRC`).
+#
+# 164.6.6 D-03 reversed 164.6.5 D-07 for saved accounts and history, and this
+# verb is the only code that acts on it. It is safe only while: the command is
+# FIXED in the source, it cannot delete under a live terminal (A4), it cannot
+# name the Journal or the two config files the credentialed login needs, it
+# cannot carry a credential, and it cannot end a terminal without recording the
+# relaunch it leaves owed (criterion 3).
+#
+# Every test here carries `TERMINAL_SCRUB` so the CI verify can filter on it.
+# ⛔ The names below are HAND-TYPED, never read from the module.
+# --------------------------------------------------------------------------- #
+
+_SCRUB_FN_NAME = "_qz_scrub_terminal_account_data"
+_SCRUB_STAGE = "terminal_scrub"
+_SCRUB_INSTALL_DIR_LITERAL = '"C:/Program Files/MetaTrader 5"'
+
+
+def _install_scrub_double(conn, *, returns=None, raises=None):
+    """`_install_recycle_double`'s twin for the scrub: the REAL committed source
+    is exec'd (proving it compiles and binds the hand-typed name), then the
+    bound function is swapped for a recording stub."""
+    record: dict = {"sources": [], "calls": []}
+    real_execute = conn.execute
+
+    def _execute(src):
+        record["sources"].append(src)
+        real_execute(src)
+        assert _SCRUB_FN_NAME in conn.namespace, (
+            "the committed scrub source did not bind the hand-typed name "
+            f"{_SCRUB_FN_NAME!r}"
+        )
+
+        def _stub(*args):
+            record["calls"].append(args)
+            if raises is not None:
+                raise raises
+            return returns
+
+        dict.__setitem__(conn.namespace, _SCRUB_FN_NAME, _stub)
+
+    conn.execute = _execute
+    return record
+
+
+def _scrub_client(scenario=None):
+    connect, fake, _rec = _make(scenario or {"initialize": True})
+    client = Mt5Client(_TERMINAL_HOST, _TERMINAL_PORT, _connect=connect)
+    return client, fake
+
+
+def test_TERMINAL_SCRUB_TRACER_the_COMMITTED_body_deletes_accounts_dat_and_reports_counts(
+    monkeypatch, tmp_path
+):
+    """⭐ The tracer: the committed body, EXECUTED offline against a real tree,
+    then its verdict driven back through the REAL verb.
+
+    Why each half matters: the offline run proves the delete lands on exactly
+    `Config/accounts.dat` and nothing the D-03 scope keeps (the Journal,
+    `common.ini`, `servers.dat`, the per-account caches at `delete_trades=0`,
+    and the per-user profile, which is only counted). The verb half proves the
+    client sends the committed constant with two by-value ints, issues NO
+    `initialize()` of any kind afterwards (a bare one hangs on an account-less
+    terminal and LAUNCHES it, S-03/S-09/S-10), and leaves the relaunch debt
+    recorded so the terminal it ended cannot be forgotten."""
+    win32 = _FakeWin32([(11, "terminal64.exe"), (12, "explorer.exe")])
+
+    offline = win32.run_scrub(monkeypatch, tmp_path, delete_trades=0)
+
+    assert win32.terminated == [11]
+    assert {
+        k: offline[k]
+        for k in (
+            "matched", "terminated", "exited", "refused", "accounts_deleted",
+            "accounts_missing", "trades_deleted", "profile_accounts_found",
+        )
+    } == {
+        "matched": 1,
+        "terminated": 1,
+        "exited": 1,
+        "refused": 0,
+        "accounts_deleted": 1,
+        "accounts_missing": 0,
+        "trades_deleted": 0,
+        "profile_accounts_found": 1,
+    }
+    survivors = win32.tree_survivors()
+    assert survivors.pop("accounts") is False, "accounts.dat survived a clean scrub"
+    assert all(survivors.values()), (
+        "the scrub deleted something outside `Config/accounts.dat` at "
+        f"delete_trades=0: {[k for k, v in survivors.items() if not v]}"
+    )
+    assert str(tmp_path) not in json.dumps(offline), "a path left the bridge"
+
+    client, fake = _scrub_client()
+    record = _install_scrub_double(fake._MetaTrader5__conn, returns=json.dumps(offline))
+    initialize_before = list(fake.initialize_kwargs)
+    assert mt5_client_mod.mt5_relaunch_debt(client.terminal_key) is False
+
+    with capture_logs() as captured:
+        verdict = client.scrub_terminal_account_data(delete_trades=0)
+
+    assert (
+        verdict["matched"], verdict["terminated"], verdict["exited"], verdict["refused"]
+    ) == (1, 1, 1, 0)
+    assert verdict["accounts_deleted"] == 1
+    assert verdict["profile_accounts_found"] == 1
+    assert record["calls"] == [(5000, 0)], (
+        "the exit wait and the flag must cross as two by-value ints — never as text"
+    )
+    assert record["sources"] == [mt5_client_mod._REMOTE_TERMINAL_SCRUB_SRC]
+    assert fake.initialize_kwargs == initialize_before, (
+        "the scrub issued an initialize() after the terminate — a bare one hangs "
+        "on the account-less terminal and relaunches it outside the caller's control"
+    )
+    assert fake.login_calls == []
+    assert mt5_client_mod.mt5_relaunch_debt(client.terminal_key) is True, (
+        "the scrub ended the terminal without recording the relaunch it owes"
+    )
+    events = _stage_events(captured, _SCRUB_STAGE)
+    assert len(events) == 1 and events[0]["ok"] is True
 
 
 # --------------------------------------------------------------------------- #
