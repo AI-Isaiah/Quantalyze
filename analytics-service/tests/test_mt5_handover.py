@@ -757,18 +757,29 @@ async def test_a_HEAL_that_escalates_to_a_RECYCLE_records_a_handover_to_UNKNOWN(
     sink: _HandoverSink, monkeypatch: pytest.MonkeyPatch, heal_env: list
 ) -> None:
     """A recycle relaunches the terminal into whatever account was saved; the
-    record says `unknown` rather than claiming `house`."""
+    record says `unknown` rather than claiming `house`.
+
+    ⭐ 164.6.6.1 plan 03 — the escalation's verb is the SCRUB, which ends the
+    terminal and stamps `unknown` the same way. Its relaunch is credentialed
+    with the house triple; here that relaunch does not answer, so nothing has
+    logged the terminal in and the record stays `unknown`."""
     from services import mt5_relogin
-    from tests.test_mt5_relogin import _install_client
+    from tests.test_mt5_relogin import _install_client, _recycle_count
 
     mt5_client._note_terminal_holder(_heal_key(), holder=_KEY_A)
     fake, _c = _install_client(
-        monkeypatch, {"initialize": False, "last_error": (-10005, "IPC timeout")}
+        monkeypatch,
+        {
+            "initialize": False,
+            "last_error": (-10005, "IPC timeout"),
+            "relaunch_credentialed": False,
+        },
     )
 
     assert await mt5_relogin.heal_mt5_terminal_session() is None
 
-    assert len(fake._MetaTrader5__conn.recycle_calls) == 1
+    assert len(fake._MetaTrader5__conn.scrub_calls) == 1
+    assert _recycle_count(fake) == 1
     assert sink.pairs() == [(_KEY_A, HOLDER_UNKNOWN, SITE_HEAL)]
     assert mt5_terminal_holder(_heal_key()) == HOLDER_UNKNOWN
 
