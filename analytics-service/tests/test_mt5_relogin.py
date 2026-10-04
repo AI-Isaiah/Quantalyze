@@ -4187,11 +4187,14 @@ async def test_ESCALATION_no_house_credentials_ends_nothing_deletes_nothing_and_
 #: The ledger entry that owns the job path's `delete_trades` flip.
 _TRADES_SCRUB_TODO_HEADING = "### MT5-JOB-TERMINAL-TRADES-SCRUB-01"
 
-#: A REAL `History wait shipped:` line: line-anchored (an optional list or quote
-#: marker, optional bold) and followed by an actual date. ⛔ The entry quotes
-#: the line's TEMPLATE in backticks with `<date>`, which must never count.
+#: A REAL `History wait shipped:` line: the phrase followed by an actual date,
+#: through optional bold or code markup. ⛔ The entry quotes the line's TEMPLATE
+#: in backticks with `<date>`, which must never count, and it does not, because
+#: `<date>` is not a date. ⛔ Not line-anchored and backticks admitted: the
+#: template SHOWS the line in backticks, so a real line copied in that shape
+#: must count, or the pin stays green on 0 forever.
 _HISTORY_WAIT_SHIPPED_RE = re.compile(
-    r"^[ \t>*-]*\**History wait shipped:\**\s*\d{4}-\d{2}-\d{2}", re.MULTILINE
+    r"History wait shipped:[\s*`]*\d{4}-\d{2}-\d{2}"
 )
 
 
@@ -4238,6 +4241,11 @@ def test_SCRUB_the_trades_ledger_reader_counts_only_a_REAL_History_wait_line() -
         "\n### NEXT-ENTRY", "- **History wait shipped:** 2026-10-09, 0123abcd\n\n### NEXT-ENTRY"
     )
     assert _trades_scrub_entry_dictates(bulleted) == 1
+    # Copied in the shape the template shows it: backticked, but dated.
+    backticked = template_only.replace(
+        "\n### NEXT-ENTRY", "`History wait shipped: 2026-10-09, 0123abcd`\n\n### NEXT-ENTRY"
+    )
+    assert _trades_scrub_entry_dictates(backticked) == 1
     # A real line in ANOTHER entry is not this entry's.
     elsewhere = template_only + "History wait shipped: 2026-10-09, 0123abcd\n"
     assert _trades_scrub_entry_dictates(elsewhere) == 0
