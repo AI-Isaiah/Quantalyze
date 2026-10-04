@@ -2057,6 +2057,13 @@ def _settle_relaunch_debt(
                 escalated if escalated is not None else KIND_RELAUNCH_DEBT_OUTSTANDING
             )
         else:
+            if code == _MT5_NO_AUTHORIZED_ACCOUNT_CODE:
+                # ⛔ CR-01 — `-6` is the terminal ANSWERING (the broker refused
+                # the house triple), so the run of faults is over. A credentialed
+                # call moves no answered-count and a debt tick sends no bare
+                # probe, so nothing else would end it, and a re-wedge would stay
+                # debounced on every later tick.
+                end_ipc_fault_run()
             verdict = _not_healed(
                 f"{KIND_RELAUNCH_DEBT_OUTSTANDING}:code={code}",
                 err,
@@ -2098,8 +2105,11 @@ def _settle_relaunch_debt(
             escalation_kind=KIND_RELAUNCH_DEBT_SETTLED,
         )
     # ⛔ Authorized but NOT the verified house session (degraded or unverified).
-    # There is no client error to hand `_not_healed`, so the same prefix and the
-    # same by-value redaction are applied to the value-free check fragment.
+    # Still the terminal ANSWERING, so the run of faults is over (CR-01, as for
+    # `-6` above); the debt is kept. There is no client error to hand
+    # `_not_healed`, so the same prefix and the same by-value redaction are
+    # applied to the value-free check fragment.
+    end_ipc_fault_run()
     detail = _redact_credential_values(fragment, login, password, server)
     _log_relaunch_debt_outstanding(
         client, f"{KIND_RELAUNCH_DEBT} post_status={status} {detail}"

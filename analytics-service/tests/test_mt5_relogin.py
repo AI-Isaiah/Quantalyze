@@ -7313,3 +7313,54 @@ async def test_RELAUNCH_DEBT_a_code_0_debt_reading_is_ERROR_on_EVERY_tick_and_ke
     _assert_no_credential_value_escaped(_records(caplog))
     _assert_no_secret_reached_any_row(sink)
     assert sink.rows == [], "an unpaid debt tick wrote an episode row"
+
+
+@pytest.mark.parametrize(
+    "answer,rewedge",
+    [
+        pytest.param(
+            {"last_error_after_recycle": (-6, "Terminal: Authorization failed")},
+            {"last_error_after_recycle": (_IPC_TIMEOUT, _IPC_TIMEOUT_TEXT)},
+            id="the-debt-relaunch-is-REFUSED-minus-6",
+        ),
+        pytest.param(
+            # Authorized, but the house check cannot verify it (no snapshot).
+            {"relaunch_credentialed": True},
+            {"initialize_credentialed": False},
+            id="the-debt-relaunch-is-authorized-UNVERIFIED",
+        ),
+    ],
+)
+async def test_RELAUNCH_DEBT_a_debt_relaunch_the_terminal_ANSWERED_ends_the_run_so_the_next_wedge_is_scrubbed(
+    monkeypatch: pytest.MonkeyPatch, answer: dict, rewedge: dict
+) -> None:
+    """⛔ CR-01 (164.6.5 review round 1), applied to the debt tick. An
+    authorized reading or a `-6` is the terminal ANSWERING, so the run of faults
+    is over and the next wedge earns its own escalation. A credentialed
+    `initialize` does not move the terminal's answered-count, and a debt tick
+    never sends a bare probe, so unless the debt path ends the run itself a
+    re-wedge after an answering-but-unverified debt tick stays debounced on
+    every later tick: one ERROR per tick, and the scrub never runs again."""
+    _set_full_env(monkeypatch)
+    scenario = _debt_scenario_after_failed_scrub()
+    fake, _c = _install_client(monkeypatch, scenario)
+    outcomes = _capture_outcomes(monkeypatch)
+
+    await _heal_n_times(1)  # the scrub; its relaunch never answers: debt owed
+    assert _recycle_count(fake) == 1
+    assert mt5_session_episodes.ipc_fault_escalation_armed() is False
+
+    scenario.update(answer)
+    await _heal_n_times(1)  # the debt tick: the terminal answers, not verified
+    assert (
+        outcomes[1].escalation_kind
+        == mt5_session_episodes.KIND_RELAUNCH_DEBT_OUTSTANDING
+    )
+
+    scenario.update(rewedge)
+    await _heal_n_times(1)  # re-wedged: the debt tick reads -10005
+    assert outcomes[2].first_kind == mt5_session_episodes.KIND_RELAUNCH_DEBT
+    assert _recycle_count(fake) == 2, (
+        "a debt relaunch that MEASURED the terminal answering left the "
+        "escalation disarmed, so the re-wedge was debounced instead of scrubbed"
+    )
