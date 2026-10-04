@@ -109,7 +109,7 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 164.6.3: CIDOCSPATH — a docs-only PR stops running the code gates, and a code PR is proven to still run every one of them** (INSERTED)
 - [x] **Phase 164.6.4: MT5KEEPALIVE — nothing TRIGGERS a recovery, so the terminal sits dark for hours while recovery itself takes minutes** (INSERTED)
 - [ ] **Phase 164.6.5: MT5VALIDATEWEDGE — MT5 key validation stops destroying the shared terminal, and the terminal self-heals** (INSERTED) — verification: human_needed
-- [ ] **Phase 164.6.6: MT5TERMINALISOLATION — one client's MT5 validation cannot evict, disturb or expose another client's broker session** (INSERTED) — not yet verified
+- [x] **Phase 164.6.6: MT5TERMINALISOLATION — one client's MT5 validation cannot evict, disturb or expose another client's broker session** (INSERTED) — verified 2026-10-04 (completed 2026-10-04)
 - [ ] **Phase 164.6.6.1: MT5SCRUB — the MT5 terminals are wiped of saved accounts after use without ever leaving the jobs terminal logged out** (INSERTED) — not yet planned (waits for the founder's live scrub spike)
 - [x] **Phase 164.6.7: COMPOSITECLAIMSNAPSHOT — the composite run reads the live job marker, not its claim-time snapshot** (INSERTED) — verification: human_needed (shipped; founder/post-deploy checks pending) (completed 2026-10-04)
 - [ ] **Phase 164.6.8: OUTAGEALERT — a shared-terminal MT5 outage reaches a human without one clicking a button** (INSERTED) — not yet verified
@@ -2693,7 +2693,7 @@ any restart or heal, which is 164.6.8's evidence, so both `**Owns**` lines now l
 **⭐ ROUTED IN 2026-09-30 (from 169.3-06 planning; founder AskUserQuestion "164.6.6 TERMINALISOLATION"; data-integrity; 169.3 D-76):** an MT5 investor password is stored differently depending on the path that saved it. The connect wizard trims it (create-with-key → `validateKey` → `trimCredential` in `src/lib/analytics-client.ts`); the password-update dialog stores it exactly as typed (`src/app/api/keys/[id]/rotate-secret/route.ts` :221, :227, :312 → `analytics-service/routers/internal.py` :739, :762). A password with a leading or trailing space is therefore saved correctly on rotate but wrongly through the wizard, which then fails to log in. Success: an MT5 password is never trimmed on any path (wizard, rotate, validate), pinned by a test that fails under the old trim; API key and secret trimming for other venues is unchanged. 169.3-06 deliberately leaves both server paths alone and only stops the client from stripping the MT5 password.
 ⚠️ **Measured 2026-10-03 (plan-check revision 1), recorded as `164.6.6-CONTEXT.md` D-08 and delivered by plan 07:** the sentence before this one is false for the wizard secret slot. 169.3-06 exempted only the Update-password dialog, and `ConnectKeyStep` / `MultiKeyConnectStep` still strip a pasted MT5 password (169.3 D-76). Plan 07 therefore exempts the MT5 secret in both `validateKey` and `encryptKey` (one shared helper, so validate and encrypt stay identical) AND in both wizard secret inputs, through a venue capability. Non-MT5 trimming and the MT5 login trim are unchanged. The rotate path is already verbatim and is not edited. The sentence above is kept as lineage.
 
-**Plans:** 8 plans (01-08 as listed below; re-planned after the 2026-09-27 split; plan 07 added 2026-10-03 for the routed MT5-password item)
+**Plans:** 9/9 plans complete (01-08 as listed below; re-planned after the 2026-09-27 split; plan 07 added 2026-10-03 for the routed MT5-password item)
 
 ⛔ **SAME INCIDENT AS 164.6.5, DIFFERENT DEFECT.** 164.6.5 makes validation stop breaking the
 terminal; this phase makes the terminal stop being a shared mutable resource. 164.6.5 is
@@ -2744,18 +2744,19 @@ independently shippable; this is the architecture.
 
 Plans:
 
-- [ ] 164.6.6-01-PLAN.md — handover record: every job-terminal switch recorded against the displaced holder (wave 1; builds on the founder's locked D-01/D-02 record of 2026-09-27, which its precondition reads)
-- [ ] 164.6.6-02-PLAN.md — FOUNDER decisions D-01..D-07 (eviction scope, isolation option, 164.6.5 D-07 reversal, scrub cadence, H3) recorded in CONTEXT.md and here (wave 2, after plan 03: both append to `164.6.6-CONTEXT.md`)
-- [ ] 164.6.6-03-PLAN.md — validation-gateway stand-up runbook + FOUNDER stand-up and readings S-01, S-07, S-08, N-01 (wave 1)
+- [x] 164.6.6-01-PLAN.md — handover record: every job-terminal switch recorded against the displaced holder (wave 1; builds on the founder's locked D-01/D-02 record of 2026-09-27, which its precondition reads)
+- [x] 164.6.6-02-PLAN.md — FOUNDER decisions D-01..D-07 (eviction scope, isolation option, 164.6.5 D-07 reversal, scrub cadence, H3) recorded in CONTEXT.md and here (wave 2, after plan 03: both append to `164.6.6-CONTEXT.md`)
+- [x] 164.6.6-03-PLAN.md — validation-gateway stand-up runbook + FOUNDER stand-up and readings S-01, S-07, S-08, N-01 (wave 1)
   - ⚠️ **Deviation 2026-10-03 (founder override, "I authorize you to use mcp and action as many of those steps as possible"):** the orchestrator, not the founder, stood the validation gateway up over Railway MCP/CLI and `railway ssh` (service and volume, VNC credentials, removal of the job gateway's public domain, the temporary VNC domain, a Wine prefix rebuild, the `[Experts]` options in `common.ini` later confirmed on screen by the founder, and one house login from the analytics container's own env); recorded in full in `164.6.6-CONTEXT.md` `## Stand-up findings 2026-10-03`.
-- [ ] 164.6.6-04-PLAN.md — both validate sites routed to the validation terminal, fail loud when unset (wave 2, after plans 01 and 03)
+- [x] 164.6.6-04-PLAN.md — both validate sites routed to the validation terminal, fail loud when unset (wave 2, after plans 01 and 03)
   - ⚠️ **Deviation 2026-10-03 (same founder override):** Task 3's "FOUNDER ACT. No agent sets Railway variables" was done by the orchestrator: both validation-endpoint variables set on the analytics service with `--skip-deploys` (no redeploy), both read back present, and the existing job host measured by shape as a `.railway.internal` name (yes), never printed. Ship precondition MET; recorded in `164.6.6-CONTEXT.md` too.
-- [ ] 164.6.6-05-PLAN.md — H3 part 1: the analytics service refuses to dial a non-private gateway host (wave 3)
-- [ ] 164.6.6-06-PLAN.md — H3 part 2: the master-password park, per the founder's `H3-MASTER-PASSWORD-MODE` (wave 3)
+- [x] 164.6.6-05-PLAN.md — H3 part 1: the analytics service refuses to dial a non-private gateway host (wave 3)
+- [x] 164.6.6-06-PLAN.md — H3 part 2: the master-password park, per the founder's `H3-MASTER-PASSWORD-MODE` (wave 3)
   - ⭐ **Founder decision 2026-10-03 (AskUserQuestion "Warn on glitch, page else"):** a park that fails for the same bridge-blip reason the validation hit logs WARNING only (D-15 holds); every other park skip or failure still logs ERROR and alerts. Recorded in `164.6.6-CONTEXT.md` under D-07 part 2.
-- [ ] 164.6.6-07-PLAN.md — D-08: an MT5 password is never trimmed on any path; validate and encrypt send the same bytes; other venues unchanged (wave 1)
-- [ ] 164.6.6-08-PLAN.md — live-check runbook + FOUNDER post-deploy verification L1..L7 (wave 4)
-- [ ] 164.6.6-09-PLAN.md — GAP CLOSURE (VERIFICATION gaps_found + SECURITY T-164.6.6-07): the park warns on a bridge glitch only when the validation hit one too; the outer park handler and a cancelled park alert (wave 4; plan 08's live park checks run after it ships)
+- [x] 164.6.6-07-PLAN.md — D-08: an MT5 password is never trimmed on any path; validate and encrypt send the same bytes; other venues unchanged (wave 1)
+- [x] 164.6.6-08-PLAN.md — live-check runbook + FOUNDER post-deploy verification L1..L7 (wave 4)
+  - ⚠️ **Deviation 2026-10-04 (founder override, "do as many checks as you can yourself" / "i authorize you"):** the agent, not the founder, ran the PROD reads, Reading B on both terminals, the VNC domain add and removal, the `MT5_VALIDATION_GATEWAY_HOST` unset and restore for L-D05, the Sentry issue resolve, and a Cancel on the job terminal's Login dialog during the L7 outage. The founder ran the wizard validations, the L3 and L7 Navigator work, the house login and the Sentry rule edit. Results in `164.6.6-CONTEXT.md` `## Live verification 2026-10-04`, routed to 164.6.6.1 (the L7 wedge) and 164.6.6.3 (onboarding item 0, L-D05 (a) item 7).
+- [x] 164.6.6-09-PLAN.md — GAP CLOSURE (VERIFICATION gaps_found + SECURITY T-164.6.6-07): the park warns on a bridge glitch only when the validation hit one too; the outer park handler and a cancelled park alert (wave 4; plan 08's live park checks run after it ships)
 - ⛔ MOVED 2026-09-27 to Phase 164.6.6.1 MT5SCRUB (founder split): 164.6.6-03 (scrub spike; its gateway stand-up half stays here, re-planned), 164.6.6-05, 164.6.6-06, 164.6.6-07. Re-planning this phase (narrowed scope + a new H3 plan) rewrites this list.
   - ⚠️ **Plan ids reused (noted 2026-10-03):** the ids moved out above were reused for NEW plans in this list, which the re-plan wrote. 03 is the gateway stand-up, 05 is H3 part 1, 06 is the H3 part 2 park (split out of 05 at checker round 3), and 07 is the D-08 MT5-password plan (added at plan-check revision 1, 2026-10-03). The moved plans live on as 164.6.6.1-01..-04 (see that phase's list: "was 164.6.6-03/05/06/07"). Read `164.6.6-07` in this list as the D-08 plan, never as the moved job-terminal scrub.
 
@@ -2769,6 +2770,23 @@ Founder decision 2026-10-03 (AskUserQuestion "One fix phase, after 164.6.6"): ru
 5. **Unbuildable factsheet note (from 167.2.1 #2).** A computed-but-unbuildable strategy (Eclipse) pairs "could not be built from its results" with the generic "not available yet" share note instead of the D-02 line.
 6. **Small ones:** the /recommendations disclaimer renders twice and its "Batch: Fresh" chip carries no date (169.3); an empty scenario's P5/P95/Median read "+0.00%" with 0 observations; the "My Allocation" bottom-nav label clips at 320px; "α VS BTC" uppercases to "Α VS BTC"; edit pages flash "No API keys connected." for about 20 s while loading; /strategies offers "Get private link" where the factsheet says a private link is live.
 Re-measure each at plan time; the observations are from a browser pass, not a code reading.
+
+**Added 2026-10-04 from 164.6.6 plan 08's live checks (founder, AskUserQuestion; record in
+`164.6.6-CONTEXT.md` `## Live verification 2026-10-04`). Item 0 goes first: it blocks onboarding.**
+0. **MT5 onboarding of an account new to the job terminal fails (a regression caused by 164.6.6).**
+   `services/mt5_read.py::read_mt5_deal_ledger` calls `login()` and then calls
+   `history_deals_get()` straight away. D-01 moved validation to its own terminal, so the derive
+   is now the job terminal's FIRST login of a new account. It reads the deals about one second
+   after authorization, before MT5 has downloaded the history. `derive_broker_dailies` then fails
+   permanently: "material equity but <2 usable daily-return days". The wizard shows
+   `GATE_ANALYTICS_FAILED`. Measured twice on 2026-10-04 (about 62k and 141k USD of equity). An
+   account whose history was already cached produced 194 days. The fix waits, bounded and
+   failing loud, for a fresh login's deal history before reading. A failing-first test reproduces
+   the race. The wizard's "the fault is in our pipeline" text is wrong for this refusal.
+7. **L-D05 (a): an unconfigured validation endpoint shows the generic error.** With
+   `MT5_VALIDATION_GATEWAY_HOST` unset, `/api/validate-key` answered HTTP 500 and the wizard showed
+   `SEAM_INTERNAL_FAULT` instead of "The MetaTrader gateway is not configured". The refusal, the
+   ERROR line and the Sentry alert all worked.
 
 **Goal:** [Urgent work - to be planned]
 **Requirements**: TBD
@@ -2804,6 +2822,16 @@ shipped as planned: W-2 would leave the jobs terminal logged out after a failed 
 risks a lock-up. Both are MUST-FIX here, carried verbatim in `164.6.6.1-CONTEXT.md`. It inherits
 164.6.6 D-03 (164.6.5 D-07 reversed for saved accounts and history only; the jobs terminal keeps its
 `Logs`) and owns D-04 (scrub cadence), OPEN until the founder answers at re-plan.
+**Routed in 2026-10-04 from 164.6.6 plan 08 live check L7 (founder, AskUserQuestion "164.6.6.1
+MT5SCRUB (Recommended)").** Measured on PRODUCTION: once the job terminal's Navigator held only the
+house account, and that entry's SAVED password was stale (the founder had rotated it at the broker
+and in Railway's `MT5_PASSWORD`), the next relaunch opened a Login dialog. The credential-free heal
+(`ipc_fault_recycled_still_faulted`) had no way past it, and MT5 jobs on the job terminal were down
+from about 10:44 to 11:00 UTC until the founder logged the house account in over VNC. The record
+is in `164.6.6-CONTEXT.md` `## Live verification 2026-10-04`. Every scrub path this phase builds
+must leave the house entry able to log in, which means re-saving the house password from
+`MT5_PASSWORD` (or a credentialed relaunch) before any delete. A rotation of `MT5_PASSWORD` must not
+leave the terminal's saved copy silently stale.
 **Plans:** 4 plans (moved from 164.6.6, NOT re-planned; they predate the spike and the must-fix items)
 
 **Success criteria (to be derived properly at planning):**
@@ -2814,6 +2842,9 @@ risks a lock-up. Both are MUST-FIX here, carried verbatim in `164.6.6.1-CONTEXT.
    (D-04), and its Journal `Logs` are kept (164.6.6 D-03).
 3. No scrub path can leave the jobs terminal logged out (W-2) or lock the terminal or a lease (W-1);
    each is proven by a failing-first test and by the spike's measured relaunch timing.
+4. A stale saved house password cannot wedge the jobs terminal. After `MT5_PASSWORD` rotates, or
+   after a scrub that leaves only the house entry, a relaunch reaches `authorized` as the house
+   account with no human at the console. This is the 2026-10-04 L7 outage, reproduced failing-first.
 
 Plans:
 
@@ -4943,7 +4974,7 @@ kept verbatim.
 | 164.6.3 CIDOCSPATH | 5/5 | Complete | v0.77.40.0 · #791 |
 | 164.6.4 MT5KEEPALIVE | 5/5 | Complete | #800 |
 | 164.6.5 MT5VALIDATEWEDGE | 8/8 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed | v0.96.0.0 · #863 |
-| 164.6.6 MT5TERMINALISOLATION | 0/? | Queued — data-integrity tier: moved up 2026-09-27 (founder), planning beside 166.4; live MT5 verification joins the founder queue | - |
+| 164.6.6 MT5TERMINALISOLATION | 9/9 | Complete    | 2026-10-04 |
 | 164.6.6.1 MT5SCRUB | 0/4 (moved, not re-planned) | Waiting — split from 164.6.6 on 2026-09-27 (founder); re-planned only after the founder's live scrub spike | - |
 | 164.6.7 COMPOSITECLAIMSNAPSHOT | 3/3 | Complete    | 2026-10-04 |
 | 164.6.8 OUTAGEALERT | 0/? | Queued — MT5 build, verify later (founder 2026-09-27) | - |
