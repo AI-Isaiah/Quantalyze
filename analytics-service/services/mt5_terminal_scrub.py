@@ -100,6 +100,7 @@ from services.mt5_relogin import (
     ScrubRelaunchResult,
     heal_deadline,
     read_env_mt5_credentials,
+    read_env_validation_gateway_endpoint,
     scrub_and_relaunch_as_house,
 )
 
@@ -113,6 +114,7 @@ __all__ = [
     "SCRUB_KIND_SCRUBBED",
     "SCRUB_KIND_SKIPPED_NO_HOUSE_CREDENTIALS",
     "SCRUB_KIND_SKIPPED_PROBE_IN_FLIGHT",
+    "mark_validation_terminal_owed_at_boot",
     "record_mt5_terminal_scrub",
     "report_scrub_owed_refusal",
     "run_owed_validation_scrub_in_lease",
@@ -612,6 +614,62 @@ def schedule_validation_terminal_scrub(
             )
         except BaseException:  # noqa: BLE001
             pass
+
+
+def mark_validation_terminal_owed_at_boot() -> None:
+    """Mark the VALIDATION terminal scrub-owed at analytics startup. Synchronous,
+    NEVER RAISES, takes no lease, touches no client and starts no task.
+    ``main.lifespan`` calls it once, before the worker loops start.
+
+    WHY IT EXISTS (Phase 164.6.6.1 plan 06, RESEARCH Pitfall 1). The scrub-owed
+    and relaunch-debt marks live in this process, so a restart loses them, and
+    D-09's boot heal reads only the JOB gateway, never this terminal. Without
+    this, an account a validation left on the validation terminal outlives every
+    deploy unnoticed. Every validation login is credentialed, so marking is
+    enough: the first validation after a restart pays the owed scrub (the wizard
+    refuses and schedules it, the worker runs it inline) and the terminal is
+    house-relaunched before any probe.
+
+    ⛔ WHY IT MARKS AND NEVER SCHEDULES. During a Railway deploy overlap the OLD
+    process may still be validating on this terminal, and the lease and the
+    probe-event registry do not cross processes. A scrub started at boot could
+    end the terminal under that in-flight validation. The first validation's
+    scrub carries that residue only when it arrives inside the overlap.
+
+    ⚠️ FOUNDER-VISIBLE COST (CONTEXT, "The first validation after each analytics
+    deploy is refused"): the first wizard validation after each deploy is refused
+    with the recoverable 424 while the scrub runs, and because nothing was
+    pending it pages once (ERROR plus a windowed capture).
+
+    It reads the validation endpoint only to MARK that terminal; it cannot route
+    a job onto it (the routing pin in ``tests/test_mt5_concurrency.py`` names it
+    as a mark-only reader). An unset or malformed endpoint marks nothing: the
+    validate sites already refuse loudly on an unconfigured gateway. ⛔ No host,
+    port or key is logged.
+    """
+    try:
+        endpoint = read_env_validation_gateway_endpoint()
+        if endpoint is None:
+            return
+        host, port = endpoint
+        note_mt5_scrub_owed(mt5_terminal_key(host, port))
+        logger.info(
+            "mt5 validation terminal scrub: the validation terminal is marked "
+            "scrub-owed at boot; the first validation pays the scrub before its "
+            "probe (Phase 164.6.6.1 D-08)"
+        )
+    except Exception as exc:  # noqa: BLE001 — see the docstring; this is the control
+        try:
+            logger.error(
+                "mt5 validation terminal scrub: the boot-time scrub-owed mark "
+                "failed (exc_class=%s); a restart may have forgotten an owed scrub",
+                type(exc).__name__,
+            )
+        except BaseException:  # noqa: BLE001 — see the docstring; this is the control
+            logger.error(
+                "mt5 validation terminal scrub: the boot-time scrub-owed mark "
+                "failed, and the failure could not be described"
+            )
 
 
 async def run_owed_validation_scrub_in_lease(host: str, port: int, *, site: str) -> bool:

@@ -1643,6 +1643,12 @@ _GUARDED_SYMBOLS = (
     mt5_terminal_scrub.scrub_validation_terminal,
     mt5_terminal_scrub.record_mt5_terminal_scrub,
     mt5_terminal_scrub.run_owed_validation_scrub_in_lease,
+    # ⭐ Phase 164.6.6.1 plan 06 — called SYNCHRONOUSLY from `main.lifespan`,
+    # before the worker loops start and outside any `try`: a raise would abort
+    # uvicorn startup and take `/health` and every loop down for an MT5 mark.
+    # The one SYNCHRONOUS member, which is why the shared predicate now admits a
+    # plain `def` (`tests/test_mt5_relogin.py::_heal_guard_defects`).
+    mt5_terminal_scrub.mark_validation_terminal_owed_at_boot,
 )
 
 

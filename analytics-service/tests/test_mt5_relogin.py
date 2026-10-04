@@ -5108,8 +5108,14 @@ def _heal_guard_defects(
     with_the_entry_excised` already makes for the lifespan pin.
     """
     fn = ast.parse(source).body[0]
-    if not isinstance(fn, ast.AsyncFunctionDef):
-        return ["the parsed node is not an async function"]
+    # ⭐ WIDENED 2026-10-04 (Phase 164.6.6.1 plan 06), never copied: a plain `def`
+    # is admitted too, because the never-raises SHAPE is the same property for a
+    # synchronous function. Its first member is
+    # `mt5_terminal_scrub.mark_validation_terminal_owed_at_boot`, which
+    # `main.lifespan` calls synchronously before the worker loops start. A class,
+    # an assignment or anything else that is not a function still reds here.
+    if not isinstance(fn, (ast.AsyncFunctionDef, ast.FunctionDef)):
+        return ["the parsed node is not a function"]
 
     body = [
         node

@@ -116,6 +116,11 @@ logger = logging.getLogger("quantalyze.analytics")
 # Server worst case = 75 + 10 = 85s; plan 153.3-04 adds a bounded 20s lease wait
 # for 105s total, inside D-26's 120 000ms client ceiling with 15s of margin. The
 # ordering is ASSERTED by tests/test_mt5_validate.py, not assumed.
+#
+# 2026-10-04: the Phase 164.6.6.1 scrub of the validation terminal runs AFTER the
+# response, in its own lease (D-08), so it adds no term to the 105s server worst
+# case; an owed scrub REFUSES this request (the recoverable 424) rather than
+# running inside it.
 # --------------------------------------------------------------------------- #
 
 # The per-call MT5 IPC ceilings for the INTERACTIVE validate chain (D-25). Named
