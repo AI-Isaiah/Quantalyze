@@ -605,10 +605,19 @@ def _reset_mt5_epochs_for_tests() -> None:
     ⭐ And the prior-holder registry below (Phase 164.6.6, the fourth): a holder
     leaked out of one test would make the next test's first lease report a
     handover it never caused.
+
+    ⭐ And the relaunch-debt registry below (Phase 164.6.6.1, the fifth): a debt
+    leaked out of one test would make the next test's "no debt recorded"
+    assertion pass or fail on someone else's scrub.
+
+    ⭐ And the scrub-owed registry beside it (Phase 164.6.6.1, the sixth), for
+    the same reason.
     """
     _MT5_TERMINAL_EPOCHS.clear()
     _MT5_TERMINAL_ANSWERS.clear()
     _MT5_TERMINAL_HOLDERS.clear()
+    _MT5_TERMINAL_RELAUNCH_DEBT.clear()
+    _MT5_TERMINAL_SCRUB_OWED.clear()
 
 
 # --------------------------------------------------------------------------- #
@@ -782,6 +791,88 @@ def mt5_terminal_holder(terminal_key: str) -> str | None:
     """Who this process last logged the terminal into, or ``None`` when it has
     recorded nothing for it. A READ never mints an entry (``.get``)."""
     return _MT5_TERMINAL_HOLDERS.get(terminal_key)
+
+
+# --------------------------------------------------------------------------- #
+# ⭐ Phase 164.6.6.1 (MT5SCRUB) — RELAUNCH DEBT: this terminal was ENDED by this
+# process and nobody has yet proven it came back on the house account.
+#
+# WHY IT EXISTS (RESEARCH Pitfall 1, CONTEXT S-03 / S-10). The scrub verb
+# (`Mt5Client.scrub_terminal_account_data`) terminates the terminal and deletes
+# its saved-account database. A terminal relaunched from there has NO account to
+# auto-log into: a bare `initialize()` against it hangs to the rpyc bound or
+# returns -10005, and nothing about the terminal says "I was scrubbed". This
+# registry is that memory. The verb marks the debt IMMEDIATELY BEFORE its
+# terminate crosses, so no caller can end a terminal without the debt being
+# recorded (criterion 3); only a house-verified session snapshot clears it
+# (plan 03), never this module.
+#
+# ⛔ LOCK-FREE, for the `_MT5_TERMINAL_HOLDERS` reason above: every production
+# writer runs under the terminal lease, and a `set` add/discard is atomic under
+# the GIL. Do NOT add a `threading.Lock`.
+#
+# ⛔ IN-PROCESS ONLY: a restart loses it. What covers that gap differs per
+# terminal, and the boot heal covers only ONE of them:
+#   - the JOBS terminal: CONTEXT D-09's boot widening (plan 04), which reads the
+#     job gateway (`MT5_GATEWAY_HOST` / `MT5_GATEWAY_PORT`) only;
+#   - the VALIDATION terminal: the boot-time scrub-owed mark plan 06 adds, so the
+#     first validation after a restart scrubs and house-relaunches it before any
+#     probe. D-09 does not reach that terminal, because the boot heal reads only
+#     the job gateway's host and port.
+# --------------------------------------------------------------------------- #
+_MT5_TERMINAL_RELAUNCH_DEBT: set[str] = set()
+
+
+def note_mt5_relaunch_debt(terminal_key: str) -> None:
+    """Record that this terminal was (or is about to be) ended and owes a
+    house-verified relaunch."""
+    _MT5_TERMINAL_RELAUNCH_DEBT.add(terminal_key)
+
+
+def clear_mt5_relaunch_debt(terminal_key: str) -> None:
+    """Clear the debt. Only a house-verified session snapshot may call this
+    (plan 03). ``discard``, so clearing an unknown key is a no-op."""
+    _MT5_TERMINAL_RELAUNCH_DEBT.discard(terminal_key)
+
+
+def mt5_relaunch_debt(terminal_key: str) -> bool:
+    """Whether the terminal owes a relaunch. A READ never mints an entry."""
+    return terminal_key in _MT5_TERMINAL_RELAUNCH_DEBT
+
+
+# --------------------------------------------------------------------------- #
+# ⭐ Phase 164.6.6.1 (MT5SCRUB, CONTEXT D-08) — SCRUB OWED: a client account's
+# saved data may be on this terminal.
+#
+# A validation login sets it (plans 05 and 06). Only a scrub that DELETED with
+# `refused == 0` and no `accounts_errors`, and that was then followed by a
+# house-verified relaunch, may clear it. The next validation consumes it before
+# its probe (D-08), so a scrub that failed or was skipped after one validation
+# is paid by the next one rather than forgotten.
+#
+# ⛔ LOCK-FREE and IN-PROCESS ONLY, for the relaunch-debt reasons above: a
+# restart loses it. Plan 06 is to cover that by marking the VALIDATION terminal
+# owed at boot (its hook, `mark_validation_terminal_owed_at_boot`), so the first
+# validation after a restart pays the scrub before its probe. Until that hook
+# ships, a restart forgets an owed scrub.
+# --------------------------------------------------------------------------- #
+_MT5_TERMINAL_SCRUB_OWED: set[str] = set()
+
+
+def note_mt5_scrub_owed(terminal_key: str) -> None:
+    """Record that a client account's saved data may be on this terminal."""
+    _MT5_TERMINAL_SCRUB_OWED.add(terminal_key)
+
+
+def clear_mt5_scrub_owed(terminal_key: str) -> None:
+    """Clear the mark: only after a clean scrub AND a house-verified relaunch.
+    ``discard``, so clearing an unknown key is a no-op."""
+    _MT5_TERMINAL_SCRUB_OWED.discard(terminal_key)
+
+
+def mt5_scrub_owed(terminal_key: str) -> bool:
+    """Whether the terminal owes a scrub. A READ never mints an entry."""
+    return terminal_key in _MT5_TERMINAL_SCRUB_OWED
 
 
 class Mt5ClientError(RuntimeError):
@@ -1133,6 +1224,14 @@ def {_REMOTE_MATERIALIZE_FN}(deals):
 # VNC console, which is exactly the 1h39m manual step this phase removes. It takes
 # NO credential and names no account, server or path.
 #
+# ⚠️ AMENDED 2026-10-04 (Phase 164.6.6.1): 164.6.6 D-03 (founder, 2026-09-27)
+# REVERSED D-07 for saved accounts and history ONLY; the jobs terminal keeps its
+# Journal `Logs`. That reversal lives in `_REMOTE_TERMINAL_SCRUB_SRC` ALONE. This
+# recycle constant is unchanged and still never touches the prefix or the volume.
+# Once plan 03 ships, the IPC-fault heal calls the scrub instead of this verb,
+# because this verb's trailing bare relaunch would relaunch a terminal whose
+# stale saved account is still on disk.
+#
 # ⚠️ 164.6.6 CONSTRAINT (recorded 2026-09-25, 164.6.5 review round 1, IN-07): it
 # ends EVERY `terminal64.exe` in the bridge's wineserver. That is correct while
 # v1 runs ONE shared terminal. Under per-client terminals (Phase 164.6.6,
@@ -1479,6 +1578,414 @@ def _parse_recycle_diagnostics(counts: dict[str, Any]) -> dict[str, Any]:
             # Deliberately broad: a diagnostic's shape is unmeasured live, and
             # any surprise here must degrade to the placeholder, never unwind
             # past a terminate that already landed.
+            parsed[key] = _RECYCLE_UNPARSED
+    return parsed
+
+
+# ⭐ Phase 164.6.6.1 (MT5SCRUB) — THE TERMINAL SCRUB. `Mt5Client.scrub_terminal_
+# account_data` pushes this source across the rpyc classic channel and calls it.
+# 164.6.6 D-03 (founder, 2026-09-27) reversed 164.6.5 D-07 for SAVED ACCOUNTS AND
+# HISTORY ONLY, and this literal is the ONLY code that acts on that reversal. The
+# recycle literal above still never touches the prefix or the volume.
+#
+# ⛔ THE SAME DISCIPLINE AS `_REMOTE_TERMINAL_RECYCLE_SRC`: a string executed in
+# the WINE-SIDE Windows Python behind the unauthenticated arbitrary-remote-code
+# channel T-134-03 names. A PLAIN LITERAL, never an f-string, never assembled at
+# run time, with no brace and no percent-format. The function name is written
+# out inside the source, not read from `_REMOTE_TERMINAL_SCRUB_FN`. Its two
+# run-time values (the exit wait and the `delete_trades` flag) cross as by-value
+# INT arguments, never as text. It takes NO credential, and it names no account,
+# server or host. The ONE path it names is the install directory, on its own
+# line, written with forward slashes (Windows Python accepts them, and that
+# keeps a backslash out of the constant).
+#
+# WHAT IT DOES, in order:
+#   1. The process half is the recycle body's, COPIED VERBATIM: the Toolhelp32
+#      walk, `TerminateProcess` on every `terminal64.exe`, the bounded
+#      `WaitForSingleObject`, the per-process file version (the evidence 164.6.8
+#      relies on) and every refusal code. Copied, not shared, because a shared
+#      helper would have to be assembled at run time; the IN-01 signature
+#      obligation is therefore identical and pinned by its own twin test.
+#   2. It decides `refused`, an int: 4 the process walk failed (`enumerate_error`),
+#      1 no terminal matched, 2 not every matched process was terminated, 3 not
+#      every terminated process exited, else 0.
+#   3. ONLY when `refused == 0` it deletes `Config/accounts.dat` and, ONLY when
+#      `delete_trades == 1`, every child of each `Bases/<x>/trades` directory
+#      (the per-account deal caches). Anything else under the install directory
+#      is never named.
+#   4. Whatever `refused` is, it COUNTS files named `accounts.dat` in the per-user
+#      profile directory (reached through `APPDATA` inside the remote, never
+#      interpolated) one and two levels down, deleting nothing there. CONTEXT
+#      S-07 measured that directory holding no account data; the count is the
+#      tripwire if that ever changes.
+#   It returns ints, lists of ints and exception CLASS names. Never a path.
+#
+# ⛔ DECISION 2 — `matched == 0` REFUSES. A4 (CONTEXT S-02): a RUNNING terminal can
+# rewrite `accounts.dat` from memory, so a delete under a live terminal is not a
+# scrub. The live 164.6.5 recycle measured `matched=1`, so the image-name match
+# works today; a future mismatch (a renamed image, a Wine process-name change)
+# would otherwise put the delete under a live terminal. Refusing costs only a
+# missed scrub, which the callers alert on.
+#
+# ⚠️ WHY ENDING EVERY `terminal64.exe` IN THE BRIDGE'S WINESERVER IS STILL SAFE
+# (the IN-07 constraint recorded on the recycle above): the validation terminal
+# is a SEPARATE Railway service with its own wineserver (164.6.6 D-02), so a
+# scrub on one gateway cannot reach the other's terminal.
+#
+# ⚠️ THE ONLY DATA DIRECTORY IS THE INSTALL DIRECTORY (CONTEXT S-07, correcting
+# 164.6.6 S-07): the terminal keeps `Bases`, `Config` and its Journal there,
+# which is portable behaviour; the per-user profile hash directory held only
+# `origin.txt` and `portable.txt`.
+#
+# PER-TARGET RULES (the callers pass the flag; this literal cannot see which
+# gateway it runs on):
+#   - the JOB path passes `delete_trades=0` until Phase 164.6.6.3 ships the
+#     bounded history wait (RESEARCH Finding C / Pitfall 3);
+#   - the VALIDATION path passes `1`;
+#   - the Journal logs, the mail and subscriptions folders, `common.ini` (its
+#     `[Experts]` keys feed trade-capability classification) and `servers.dat`
+#     (what the credentialed relaunch logs in through) are NEVER named in the
+#     literal (D-03, plus the flagged default that the validation terminal keeps
+#     them too until the founder says otherwise). The contract suite pins that.
+#
+# ⛔ IT NEVER RELAUNCHES. Every caller must follow it with a CREDENTIALED relaunch
+# (see the verb's docstring).
+_REMOTE_TERMINAL_SCRUB_FN = "_qz_scrub_terminal_account_data"
+_REMOTE_TERMINAL_SCRUB_SRC = """
+def _qz_scrub_terminal_account_data(exit_wait_ms, delete_trades):
+    import ctypes
+    import json
+    import os
+    import shutil
+    import time
+    from ctypes import wintypes
+
+    root = "C:/Program Files/MetaTrader 5"
+
+    image = "terminal64.exe"
+    th32cs_snapprocess = 0x00000002
+    process_terminate = 0x0001
+    process_query_limited_information = 0x1000
+    synchronize = 0x00100000
+    wait_object_0 = 0x00000000
+
+    class FixedFileInfo(ctypes.Structure):
+        _fields_ = [
+            ("dwSignature", wintypes.DWORD),
+            ("dwStrucVersion", wintypes.DWORD),
+            ("dwFileVersionMS", wintypes.DWORD),
+            ("dwFileVersionLS", wintypes.DWORD),
+        ]
+
+    class ProcessEntry32W(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", wintypes.DWORD),
+            ("cntUsage", wintypes.DWORD),
+            ("th32ProcessID", wintypes.DWORD),
+            ("th32DefaultHeapID", ctypes.c_size_t),
+            ("th32ModuleID", wintypes.DWORD),
+            ("cntThreads", wintypes.DWORD),
+            ("th32ParentProcessID", wintypes.DWORD),
+            ("pcPriClassBase", ctypes.c_long),
+            ("dwFlags", wintypes.DWORD),
+            ("szExeFile", ctypes.c_wchar * 260),
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+    kernel32.Process32FirstW.argtypes = [wintypes.HANDLE, ctypes.c_void_p]
+    kernel32.Process32NextW.argtypes = [wintypes.HANDLE, ctypes.c_void_p]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.TerminateProcess.argtypes = [wintypes.HANDLE, wintypes.UINT]
+    kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    kernel32.WaitForSingleObject.restype = wintypes.DWORD
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.QueryFullProcessImageNameW.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        wintypes.LPWSTR,
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+
+    def file_version(pid):
+        handle = kernel32.OpenProcess(process_query_limited_information, False, pid)
+        if not handle:
+            return None, int(ctypes.get_last_error())
+        try:
+            size = wintypes.DWORD(1024)
+            path = ctypes.create_unicode_buffer(1024)
+            if not kernel32.QueryFullProcessImageNameW(
+                handle, 0, path, ctypes.byref(size)
+            ):
+                return None, int(ctypes.get_last_error())
+        finally:
+            kernel32.CloseHandle(handle)
+        ver = ctypes.WinDLL("version", use_last_error=True)
+        ver.GetFileVersionInfoSizeW.argtypes = [wintypes.LPCWSTR, ctypes.c_void_p]
+        ver.GetFileVersionInfoSizeW.restype = wintypes.DWORD
+        ver.GetFileVersionInfoW.argtypes = [
+            wintypes.LPCWSTR,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            ctypes.c_void_p,
+        ]
+        ver.VerQueryValueW.argtypes = [
+            ctypes.c_void_p,
+            wintypes.LPCWSTR,
+            ctypes.POINTER(ctypes.c_void_p),
+            ctypes.POINTER(wintypes.UINT),
+        ]
+        length = ver.GetFileVersionInfoSizeW(path.value, None)
+        if not length:
+            return None, int(ctypes.get_last_error())
+        data = ctypes.create_string_buffer(length)
+        if not ver.GetFileVersionInfoW(path.value, 0, length, data):
+            return None, int(ctypes.get_last_error())
+        block = ctypes.c_void_p()
+        block_len = wintypes.UINT()
+        if not ver.VerQueryValueW(
+            data, chr(92), ctypes.byref(block), ctypes.byref(block_len)
+        ):
+            return None, int(ctypes.get_last_error())
+        fixed = ctypes.cast(block, ctypes.POINTER(FixedFileInfo)).contents
+        high = int(fixed.dwFileVersionMS)
+        low = int(fixed.dwFileVersionLS)
+        return [high >> 16, high & 0xFFFF, low >> 16, low & 0xFFFF], 0
+
+    def failure_name(exc):
+        return type(exc).__name__
+
+    budget_ms = 3 * exit_wait_ms
+    deadline = time.monotonic() + budget_ms / 1000.0
+
+    def remaining_ms():
+        return max(0, int((deadline - time.monotonic()) * 1000))
+
+    snapshot = kernel32.CreateToolhelp32Snapshot(th32cs_snapprocess, 0)
+    if snapshot is None or snapshot == ctypes.c_void_p(-1).value:
+        raise OSError(ctypes.get_last_error(), "process snapshot failed")
+    pids = []
+    enumerated = 0
+    enumerate_error = 0
+    try:
+        entry = ProcessEntry32W()
+        entry.dwSize = ctypes.sizeof(ProcessEntry32W)
+        more = kernel32.Process32FirstW(snapshot, ctypes.byref(entry))
+        if not more:
+            enumerate_error = int(ctypes.get_last_error())
+        while more:
+            enumerated += 1
+            if entry.szExeFile.lower() == image:
+                pids.append(int(entry.th32ProcessID))
+            more = kernel32.Process32NextW(snapshot, ctypes.byref(entry))
+    finally:
+        kernel32.CloseHandle(snapshot)
+
+    attempted = 0
+    terminated = 0
+    exited = 0
+    unprocessed = 0
+    open_errors = []
+    terminate_errors = []
+    pid_errors = []
+    file_versions = []
+    file_version_errors = []
+    file_version_exc = []
+    handles = []
+    ended = []
+    try:
+        for index, pid in enumerate(pids):
+            if remaining_ms() <= 0:
+                unprocessed = len(pids) - index
+                break
+            try:
+                version, version_error = file_version(pid)
+                version_exc = None
+            except Exception as exc:
+                version, version_error, version_exc = None, -1, failure_name(exc)
+            file_versions.append(version)
+            file_version_errors.append(version_error)
+            file_version_exc.append(version_exc)
+            try:
+                handle = kernel32.OpenProcess(
+                    process_terminate | synchronize, False, pid
+                )
+                if not handle:
+                    open_errors.append(int(ctypes.get_last_error()))
+                    continue
+                handles.append(handle)
+                attempted += 1
+                if kernel32.TerminateProcess(handle, 1):
+                    terminated += 1
+                    ended.append(handle)
+                else:
+                    terminate_errors.append(int(ctypes.get_last_error()))
+            except Exception as exc:
+                pid_errors.append(failure_name(exc))
+        for handle in ended:
+            try:
+                wait_ms = min(exit_wait_ms, remaining_ms())
+                if kernel32.WaitForSingleObject(handle, wait_ms) == wait_object_0:
+                    exited += 1
+            except Exception as exc:
+                pid_errors.append(failure_name(exc))
+    finally:
+        for handle in handles:
+            try:
+                kernel32.CloseHandle(handle)
+            except Exception as exc:
+                pid_errors.append(failure_name(exc))
+
+    if enumerate_error != 0:
+        refused = 4
+    elif len(pids) == 0:
+        refused = 1
+    elif terminated != len(pids):
+        refused = 2
+    elif exited != len(pids):
+        refused = 3
+    else:
+        refused = 0
+
+    accounts_deleted = 0
+    accounts_missing = 0
+    accounts_errors = []
+    trades_deleted = 0
+    trades_errors = []
+    if refused == 0:
+        try:
+            os.remove(os.path.join(root, "Config", "accounts.dat"))
+            accounts_deleted = 1
+        except FileNotFoundError:
+            accounts_missing = 1
+        except Exception as exc:
+            accounts_errors.append(failure_name(exc))
+        if delete_trades == 1:
+            bases = os.path.join(root, "Bases")
+            try:
+                base_names = sorted(os.listdir(bases))
+            except FileNotFoundError:
+                base_names = []
+            except Exception as exc:
+                base_names = []
+                trades_errors.append(failure_name(exc))
+            for base_name in base_names:
+                cache = os.path.join(bases, base_name, "trades")
+                if not os.path.isdir(cache):
+                    continue
+                try:
+                    children = sorted(os.listdir(cache))
+                except Exception as exc:
+                    trades_errors.append(failure_name(exc))
+                    continue
+                for child in children:
+                    target = os.path.join(cache, child)
+                    try:
+                        if os.path.isdir(target) and not os.path.islink(target):
+                            shutil.rmtree(target)
+                        else:
+                            os.remove(target)
+                        trades_deleted += 1
+                    except Exception as exc:
+                        trades_errors.append(failure_name(exc))
+
+    profile_accounts_found = 0
+    profile_errors = []
+    appdata = os.environ.get("APPDATA") or ""
+    if appdata:
+        profile_root = os.path.join(appdata, "MetaQuotes", "Terminal")
+        try:
+            hashes = sorted(os.listdir(profile_root))
+        except FileNotFoundError:
+            hashes = []
+        except Exception as exc:
+            hashes = []
+            profile_errors.append(failure_name(exc))
+        for name in hashes:
+            level_one = os.path.join(profile_root, name)
+            if not os.path.isdir(level_one):
+                continue
+            try:
+                names = os.listdir(level_one)
+            except Exception as exc:
+                profile_errors.append(failure_name(exc))
+                continue
+            for child in names:
+                if child == "accounts.dat":
+                    profile_accounts_found += 1
+                elif child == "config" or child == "Config":
+                    try:
+                        deeper = os.listdir(os.path.join(level_one, child))
+                    except Exception as exc:
+                        profile_errors.append(failure_name(exc))
+                        continue
+                    profile_accounts_found += deeper.count("accounts.dat")
+
+    return json.dumps(
+        dict(
+            matched=len(pids),
+            terminated=terminated,
+            exited=exited,
+            attempted=attempted,
+            unprocessed=unprocessed,
+            enumerated=enumerated,
+            enumerate_error=enumerate_error,
+            open_errors=open_errors,
+            terminate_errors=terminate_errors,
+            pid_errors=pid_errors,
+            file_versions=file_versions,
+            file_version_errors=file_version_errors,
+            file_version_exc=file_version_exc,
+            refused=refused,
+            accounts_deleted=accounts_deleted,
+            accounts_missing=accounts_missing,
+            accounts_errors=accounts_errors,
+            trades_deleted=trades_deleted,
+            trades_errors=trades_errors,
+            profile_accounts_found=profile_accounts_found,
+            profile_errors=profile_errors,
+        )
+    )
+"""
+
+#: The scrub's `refused` int, named for the log line. Any other int reads
+#: `"unrecognised"`, never a guess.
+_SCRUB_REFUSAL_REASONS: Final[dict[int, str]] = {
+    0: "none",
+    1: "no_terminal_matched",
+    2: "not_all_terminated",
+    3: "not_all_exited",
+    4: "enumerate_failed",
+}
+
+
+def _scrub_refusal_reason(refused: int) -> str:
+    return _SCRUB_REFUSAL_REASONS.get(refused, "unrecognised")
+
+
+def _parse_scrub_diagnostics(counts: dict[str, Any]) -> dict[str, Any]:
+    """Every scrub verdict field BESIDES the four essential ints (``matched``,
+    ``terminated``, ``exited``, ``refused``), each parsed on its own. ⛔ It cannot
+    raise, for the recycle's R2-SFH-04 reason: by the time it runs the terminate
+    (and perhaps the delete) has already happened, so a malformed field becomes
+    ``"unparsed"`` and every other field is kept."""
+    parsed = _parse_recycle_diagnostics(counts)
+    parsers: tuple[tuple[str, Callable[[Any], Any]], ...] = (
+        ("accounts_deleted", _recycle_int),
+        ("accounts_missing", _recycle_int),
+        ("accounts_errors", _recycle_class_names),
+        ("trades_deleted", _recycle_int),
+        ("trades_errors", _recycle_class_names),
+        ("profile_accounts_found", _recycle_int),
+        ("profile_errors", _recycle_class_names),
+    )
+    for key, parse in parsers:
+        try:
+            parsed[key] = parse(counts[key])
+        except Exception:
+            # Deliberately broad, as in `_parse_recycle_diagnostics`.
             parsed[key] = _RECYCLE_UNPARSED
     return parsed
 
@@ -2863,6 +3370,12 @@ class Mt5Client:
         call had logged in to, so no caller may assume a fixed account after this.
 
         ⛔ NEVER TOUCHES THE PREFIX OR THE VOLUME (D-07, one-way). See the constant.
+        ⚠️ AMENDED 2026-10-04 (Phase 164.6.6.1): 164.6.6 D-03 (2026-09-27)
+        reversed D-07 for saved accounts and history only (the jobs terminal keeps
+        its Journal ``Logs``), and that reversal lives in
+        ``_REMOTE_TERMINAL_SCRUB_SRC`` alone, behind
+        ``scrub_terminal_account_data``. THIS verb still deletes nothing. Once
+        plan 03 ships, the IPC-fault heal calls the scrub, not this verb.
 
         ⚠️ DISRUPTIVE BY DESIGN: the terminal is shared, so this drops the IPC for
         every caller. Call it only under the terminal lease, and only after the
@@ -2971,6 +3484,143 @@ class Mt5Client:
             **diagnostics,
             "authorized": authorized,
             "relaunch_code": relaunch_code,
+        }
+
+    def scrub_terminal_account_data(self, *, delete_trades: int) -> dict[str, Any]:
+        """End the Wine-hosted ``terminal64.exe`` and delete its saved-account
+        database, plus, when ``delete_trades == 1``, its per-account deal caches
+        (Phase 164.6.6.1, MT5SCRUB; 164.6.6 D-03 and D-04 (i)).
+
+        ⛔ IT NEVER RELAUNCHES. Every caller MUST follow it with a CREDENTIALED
+        relaunch (a house ``initialize_with_credentials``). A bare
+        ``initialize()`` against an account-less terminal hangs to the rpyc bound
+        or returns ``-10005`` (CONTEXT S-03(b), S-10), and S-09 measured that a
+        bare call also LAUNCHES the killed terminal, so a bare probe here would
+        waste the caller's budget AND restart the terminal outside its control.
+        This is the recycle's shape minus its trailing bare relaunch, which is
+        exactly what must not follow a scrub.
+
+        ⛔ IT DELETES NOTHING UNDER A LIVE TERMINAL. The committed
+        ``_REMOTE_TERMINAL_SCRUB_SRC`` deletes only when every matched process was
+        terminated AND exited, at least one matched, and the process walk did not
+        fail; otherwise ``refused`` names why (A4: a running terminal can rewrite
+        ``accounts.dat`` from memory).
+
+        ⛔ TAKES NO CREDENTIAL AND STRUCTURALLY CANNOT. Its one parameter is an
+        int flag, keyword-only, and nothing crosses the wire as text.
+
+        ⭐ RELAUNCH DEBT. Immediately before the terminate crosses it marks the
+        terminal as owing a relaunch (``note_mt5_relaunch_debt``). Nothing in this
+        verb clears that mark: a call that raised after crossing may still have
+        ended the terminal, so the debt stays until a house-verified session
+        snapshot proves the relaunch (plan 03).
+
+        Returns the parsed verdict: ``matched``, ``terminated``, ``exited``,
+        ``refused`` (strict ints; malformed ⇒ a typed ``Mt5ClientError``) and the
+        tolerant diagnostics of ``_parse_scrub_diagnostics``.
+
+        ⚠️ DISRUPTIVE BY DESIGN, as the recycle is: call it only under the
+        terminal lease.
+        """
+        # WIZFORM-ABANDON / D-36 — FIRST executable statement. An abandoned scrub
+        # would end the terminal and delete its accounts under whoever holds the
+        # lease now.
+        self._assert_live("terminal_scrub")
+        conn = getattr(self._mt5, "_MetaTrader5__conn", None)
+        if conn is None:
+            # Nothing was sent and nothing was ended, so no debt is recorded.
+            raise Mt5ClientError(
+                0, "MT5 rpyc transport is not reachable for the terminal scrub"
+            )
+        if (
+            isinstance(delete_trades, bool)
+            or not isinstance(delete_trades, int)
+            or delete_trades not in (0, 1)
+        ):
+            raise ValueError("delete_trades must be the int 0 or 1")
+
+        # WR-06 — the recycle's own derivation: three exit waits fit in half of
+        # THIS client's rpyc bound.
+        exit_wait_ms = min(
+            _TERMINAL_EXIT_WAIT_MS,
+            int(self._request_timeout_s * 1000) // _TERMINAL_EXIT_WAIT_DIVISOR,
+        )
+
+        # Criterion 3 — recorded BEFORE anything crosses, so a terminate that
+        # lands and then times out on the wire still leaves the debt behind.
+        note_mt5_relaunch_debt(self.terminal_key)
+
+        def _remote_call() -> str:
+            conn.execute(_REMOTE_TERMINAL_SCRUB_SRC)
+            return cast(
+                str,
+                conn.namespace[_REMOTE_TERMINAL_SCRUB_FN](exit_wait_ms, delete_trades),
+            )
+
+        payload = self._guarded_read(_remote_call, stage="terminal_scrub")
+        # The four essential ints first, strictly: unreadable, the verb does not
+        # know whether anything was deleted and says so.
+        try:
+            counts = json.loads(payload)
+            matched = _recycle_int(counts["matched"])
+            terminated = _recycle_int(counts["terminated"])
+            exited = _recycle_int(counts["exited"])
+            refused = _recycle_int(counts["refused"])
+        except (TypeError, ValueError, KeyError):
+            raise Mt5ClientError(
+                0, "MT5 terminal scrub returned a malformed verdict"
+            ) from None
+        diagnostics = _parse_scrub_diagnostics(counts)
+
+        # Counts, Win32 codes, class names and ints only: no host, port, account,
+        # path or remote message.
+        logger.warning(
+            "Mt5Client.scrub_terminal_account_data: scrub crossed — matched=%d "
+            "terminated=%d exited=%d refused=%d (%s) delete_trades=%d "
+            "accounts_deleted=%s accounts_missing=%s accounts_errors=%s "
+            "trades_deleted=%s trades_errors=%s profile_accounts_found=%s "
+            "profile_errors=%s attempted=%s unprocessed=%s enumerated=%s "
+            "enumerate_error=%s open_errors=%s terminate_errors=%s pid_errors=%s "
+            "file_versions=%s file_version_errors=%s file_version_exc=%s; the "
+            "terminal is NOT relaunched by this verb (a credentialed relaunch is "
+            "owed).",
+            matched,
+            terminated,
+            exited,
+            refused,
+            _scrub_refusal_reason(refused),
+            delete_trades,
+            diagnostics["accounts_deleted"],
+            diagnostics["accounts_missing"],
+            diagnostics["accounts_errors"],
+            diagnostics["trades_deleted"],
+            diagnostics["trades_errors"],
+            diagnostics["profile_accounts_found"],
+            diagnostics["profile_errors"],
+            diagnostics["attempted"],
+            diagnostics["unprocessed"],
+            diagnostics["enumerated"],
+            diagnostics["enumerate_error"],
+            diagnostics["open_errors"],
+            diagnostics["terminate_errors"],
+            diagnostics["pid_errors"],
+            diagnostics["file_versions"],
+            diagnostics["file_version_errors"],
+            diagnostics["file_version_exc"],
+        )
+        # Phase 164.6.6 criterion 1 — a terminate landed, so whoever held the
+        # terminal does not any more. Through the one door, so the epoch guard
+        # applies.
+        if terminated >= 1:
+            _note_terminal_holder(
+                self.terminal_key, holder=HOLDER_UNKNOWN, stage="terminal_scrub"
+            )
+        return {
+            "matched": matched,
+            "terminated": terminated,
+            "exited": exited,
+            "refused": refused,
+            **diagnostics,
         }
 
     @property
