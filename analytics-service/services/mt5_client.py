@@ -609,11 +609,15 @@ def _reset_mt5_epochs_for_tests() -> None:
     ⭐ And the relaunch-debt registry below (Phase 164.6.6.1, the fifth): a debt
     leaked out of one test would make the next test's "no debt recorded"
     assertion pass or fail on someone else's scrub.
+
+    ⭐ And the scrub-owed registry beside it (Phase 164.6.6.1, the sixth), for
+    the same reason.
     """
     _MT5_TERMINAL_EPOCHS.clear()
     _MT5_TERMINAL_ANSWERS.clear()
     _MT5_TERMINAL_HOLDERS.clear()
     _MT5_TERMINAL_RELAUNCH_DEBT.clear()
+    _MT5_TERMINAL_SCRUB_OWED.clear()
 
 
 # --------------------------------------------------------------------------- #
@@ -834,6 +838,41 @@ def clear_mt5_relaunch_debt(terminal_key: str) -> None:
 def mt5_relaunch_debt(terminal_key: str) -> bool:
     """Whether the terminal owes a relaunch. A READ never mints an entry."""
     return terminal_key in _MT5_TERMINAL_RELAUNCH_DEBT
+
+
+# --------------------------------------------------------------------------- #
+# ⭐ Phase 164.6.6.1 (MT5SCRUB, CONTEXT D-08) — SCRUB OWED: a client account's
+# saved data may be on this terminal.
+#
+# A validation login sets it (plans 05 and 06). Only a scrub that DELETED with
+# `refused == 0` and no `accounts_errors`, and that was then followed by a
+# house-verified relaunch, may clear it. The next validation consumes it before
+# its probe (D-08), so a scrub that failed or was skipped after one validation
+# is paid by the next one rather than forgotten.
+#
+# ⛔ LOCK-FREE and IN-PROCESS ONLY, for the relaunch-debt reasons above: a
+# restart loses it. Plan 06 is to cover that by marking the VALIDATION terminal
+# owed at boot (its hook, `mark_validation_terminal_owed_at_boot`), so the first
+# validation after a restart pays the scrub before its probe. Until that hook
+# ships, a restart forgets an owed scrub.
+# --------------------------------------------------------------------------- #
+_MT5_TERMINAL_SCRUB_OWED: set[str] = set()
+
+
+def note_mt5_scrub_owed(terminal_key: str) -> None:
+    """Record that a client account's saved data may be on this terminal."""
+    _MT5_TERMINAL_SCRUB_OWED.add(terminal_key)
+
+
+def clear_mt5_scrub_owed(terminal_key: str) -> None:
+    """Clear the mark: only after a clean scrub AND a house-verified relaunch.
+    ``discard``, so clearing an unknown key is a no-op."""
+    _MT5_TERMINAL_SCRUB_OWED.discard(terminal_key)
+
+
+def mt5_scrub_owed(terminal_key: str) -> bool:
+    """Whether the terminal owes a scrub. A READ never mints an entry."""
+    return terminal_key in _MT5_TERMINAL_SCRUB_OWED
 
 
 class Mt5ClientError(RuntimeError):
@@ -1184,6 +1223,14 @@ def {_REMOTE_MATERIALIZE_FN}(deals):
 # unattended recoveries possible; restoring it after a wipe needs a human at the
 # VNC console, which is exactly the 1h39m manual step this phase removes. It takes
 # NO credential and names no account, server or path.
+#
+# ⚠️ AMENDED 2026-10-04 (Phase 164.6.6.1): 164.6.6 D-03 (founder, 2026-09-27)
+# REVERSED D-07 for saved accounts and history ONLY; the jobs terminal keeps its
+# Journal `Logs`. That reversal lives in `_REMOTE_TERMINAL_SCRUB_SRC` ALONE. This
+# recycle constant is unchanged and still never touches the prefix or the volume.
+# Once plan 03 ships, the IPC-fault heal calls the scrub instead of this verb,
+# because this verb's trailing bare relaunch would relaunch a terminal whose
+# stale saved account is still on disk.
 #
 # ⚠️ 164.6.6 CONSTRAINT (recorded 2026-09-25, 164.6.5 review round 1, IN-07): it
 # ends EVERY `terminal64.exe` in the bridge's wineserver. That is correct while
@@ -3323,6 +3370,12 @@ class Mt5Client:
         call had logged in to, so no caller may assume a fixed account after this.
 
         ⛔ NEVER TOUCHES THE PREFIX OR THE VOLUME (D-07, one-way). See the constant.
+        ⚠️ AMENDED 2026-10-04 (Phase 164.6.6.1): 164.6.6 D-03 (2026-09-27)
+        reversed D-07 for saved accounts and history only (the jobs terminal keeps
+        its Journal ``Logs``), and that reversal lives in
+        ``_REMOTE_TERMINAL_SCRUB_SRC`` alone, behind
+        ``scrub_terminal_account_data``. THIS verb still deletes nothing. Once
+        plan 03 ships, the IPC-fault heal calls the scrub, not this verb.
 
         ⚠️ DISRUPTIVE BY DESIGN: the terminal is shared, so this drops the IPC for
         every caller. Call it only under the terminal lease, and only after the

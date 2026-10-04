@@ -1753,6 +1753,11 @@ def test_public_surface_is_exactly_the_contract():
         # ONE crossing through a committed remote expression, and returns
         # equality verdicts only.
         "session_snapshot",
+        # Phase 164.6.6.1 (MT5SCRUB, 164.6.6 D-03) — the terminal SCRUB. It wraps
+        # no mt5linux trade or read surface: it ends the terminal process and
+        # deletes its saved-account database through ONE committed remote
+        # constant, takes one int flag, and issues no `initialize()` at all.
+        "scrub_terminal_account_data",
     }
 
 
@@ -5452,6 +5457,45 @@ def test_TERMINAL_SCRUB_the_credential_roster_does_not_pick_up_the_scrub_verb():
     assert "scrub_terminal_account_data" not in drivable
     assert "scrub_terminal_account_data" not in residual
     assert drivable, "the derived roster collapsed; this test would pass vacuously"
+
+
+def test_TERMINAL_SCRUB_the_two_registries_are_cleared_by_the_one_reset_home():
+    """Relaunch debt and scrub owed are per-terminal process state; a mark leaked
+    out of one test would make the next test's "no debt" or "owes nothing"
+    assertion read someone else's scrub. Both clear from the ONE reset every
+    test module calls, so a registry cannot be forgotten by a sixth hand-rolled
+    `.clear()`."""
+    key = "reset-home-probe:1"
+    mt5_client_mod.note_mt5_relaunch_debt(key)
+    mt5_client_mod.note_mt5_scrub_owed(key)
+    assert mt5_client_mod.mt5_relaunch_debt(key) and mt5_client_mod.mt5_scrub_owed(key)
+
+    mt5_concurrency.reset_terminal_state_for_tests()
+
+    assert mt5_client_mod.mt5_relaunch_debt(key) is False
+    assert mt5_client_mod.mt5_scrub_owed(key) is False
+
+
+def test_TERMINAL_SCRUB_a_registry_read_never_mints_an_entry():
+    """A READ that minted an entry would make "has anyone ever asked" look like
+    "is a relaunch or a scrub owed". Reads leave both registries untouched, and
+    a clear is the only thing that removes a mark."""
+    key = "read-probe:2"
+    debt_before = set(mt5_client_mod._MT5_TERMINAL_RELAUNCH_DEBT)
+    owed_before = set(mt5_client_mod._MT5_TERMINAL_SCRUB_OWED)
+
+    assert mt5_client_mod.mt5_relaunch_debt(key) is False
+    assert mt5_client_mod.mt5_scrub_owed(key) is False
+
+    assert mt5_client_mod._MT5_TERMINAL_RELAUNCH_DEBT == debt_before
+    assert mt5_client_mod._MT5_TERMINAL_SCRUB_OWED == owed_before
+    mt5_client_mod.note_mt5_scrub_owed(key)
+    mt5_client_mod.note_mt5_relaunch_debt(key)
+    mt5_client_mod.clear_mt5_scrub_owed(key)
+    mt5_client_mod.clear_mt5_relaunch_debt(key)
+    assert not mt5_client_mod.mt5_scrub_owed(key)
+    assert not mt5_client_mod.mt5_relaunch_debt(key)
+    mt5_client_mod.clear_mt5_scrub_owed("never-noted:3")  # discard, not remove
 
 
 # --------------------------------------------------------------------------- #

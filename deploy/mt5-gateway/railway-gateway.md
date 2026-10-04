@@ -102,6 +102,61 @@ gateway).**
 - **`/gsd-secure-phase` must run before Phase 164.6.5 closes.** That is part of what
   ratifying Option 2 ratified.
 
+## ⚠️ T-134-03 POSTURE CHANGE — file deletion under the volume (Phase 164.6.6.1, terminal_scrub)
+
+**Decision.** Ratified by the founder through 164.6.6 D-03 (2026-09-27: saved accounts and
+history are removed, and the jobs terminal keeps its Journal `Logs`) and D-04 (i)
+(2026-10-04: scrub on every `ipc_fault` recycle; the jobs terminal's `trades` caches only
+after Phase 164.6.6.3). D-03 reverses 164.6.5 D-07 for saved accounts and history only.
+The recycle verb above is unchanged and still deletes nothing.
+
+**Why this beat the others.** A credentialed relaunch from a terminal with no
+`accounts.dat` replaces re-saving the house password. That is the ROADMAP's "(or a
+credentialed relaunch)" branch. It was chosen because re-saving needs a terminal that
+answers, and the terminal wedged by L7 did not. Removing the saved-account database is
+what stops a stale saved house password from wedging the terminal again.
+
+**What changes, stated plainly.**
+- The channel is still an unauthenticated arbitrary-remote-code channel. It now also
+  carries a **new class of command**: deletion of `Config/accounts.dat` under the install
+  directory and, behind an int flag, the children of `Bases/<server>/trades` (the
+  per-account deal caches). **No new network exposure is created.** The private-network
+  rule above is unchanged.
+- **ONE verb:** `Mt5Client.scrub_terminal_account_data(*, delete_trades: int)` in
+  `analytics-service/services/mt5_client.py`. **ONE committed constant:**
+  `_REMOTE_TERMINAL_SCRUB_SRC`, bound as `_REMOTE_TERMINAL_SCRUB_FN`. It is a plain string
+  literal with no interpolation. Its two run-time values (the exit wait and the flag)
+  cross as int arguments. It takes no credential.
+- **The literal refuses unless every matched process exited.** It deletes only when at
+  least one `terminal64.exe` matched, every match was terminated and exited, and the
+  process walk did not fail. Otherwise it returns a named refusal and every file stays.
+  A running terminal can rewrite `accounts.dat` from memory (A4).
+- **It never names** the Journal logs, the mail or subscriptions folders, `common.ini`
+  or `servers.dat`. `common.ini` carries the `[Experts]` keys trade-capability
+  classification reads, and `servers.dat` is what the credentialed relaunch needs. The
+  per-user profile directory is only counted, never deleted.
+- **The job path deletes `trades` only after Phase 164.6.6.3 ships** its bounded history
+  wait (RESEARCH Finding C). Until then it passes `delete_trades=0`. The validation path
+  passes `1`.
+- **The verb never relaunches.** It records a per-terminal relaunch debt before the
+  terminate crosses. Every caller must follow it with a CREDENTIALED house relaunch,
+  because a bare `initialize()` against a terminal with no saved account hangs or returns
+  `-10005`.
+- **The launch-mode divergence.** A container restart launches the terminal through
+  `start.sh` with no `/portable`. An `initialize()` relaunch launches
+  `terminal64.exe /portable`. The data directory is the install directory either way
+  (CONTEXT S-07), so the scrub's one target directory is the same under both.
+- `analytics-service/tests/test_mt5_client_contract.py` enforces all of this. Its
+  `TERMINAL_SCRUB` tests run the committed body offline against a scratch tree. They
+  check each refusal (no match, not terminated, not exited, walk failed) and confirm
+  every file survives it. They also check: the flag removes only the `trades` children;
+  the literal names no forbidden target; the signature takes one keyword-only int; no
+  `initialize()` follows the terminate.
+- ⚠️ **Not yet exercised live: the delete issued over the channel.** The 2026-10-04 spike
+  deleted by hand over `railway ssh` (CONTEXT S-02, S-09). The first live run of this verb
+  is the measurement. Until then, treat its `refused`, `accounts_deleted` and
+  `trades_deleted` counts as the only evidence of what was deleted.
+
 ## T-134-03 (Phase 164.6.6, D-07 part 1) — private-host check on the dialling side
 
 **What is now CHECKED.** The analytics service refuses to dial an MT5 gateway at any host
