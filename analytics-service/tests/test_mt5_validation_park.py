@@ -1959,3 +1959,33 @@ async def test_scrub_a_wizard_validation_already_queued_is_refused_quietly_and_o
 
     assert await _call(router, _make_req()) == {"valid": True, "read_only": True}
     await _drain_scheduled_scrubs()
+
+
+async def test_scrub_the_first_wizard_validation_after_boot_pages_once_and_the_next_probes(
+    exchange_router, monkeypatch, scrub_sentry, caplog
+):
+    """⚠️ THE RESTART RESIDUE, PAID BY THE FIRST VALIDATION (Task 3). The boot
+    hook marks the validation terminal owed (a restart forgot whatever a
+    validation left on it). The first wizard validation is refused with the
+    recoverable 424; nothing was pending, so it pages ONCE (the founder-visible
+    cost: one ERROR alert per deploy). Once that scrub verifies, the next
+    validation probes normally."""
+    router = exchange_router
+    order: list[tuple[Any, ...]] = []
+    _install_scrub_double(monkeypatch, order)
+    sink = _install_scrub_sink(monkeypatch)
+
+    mt5_terminal_scrub.mark_validation_terminal_owed_at_boot()
+    assert mt5_scrub_owed(_VAL_KEY)
+
+    await _assert_wizard_owed_refusal(router, monkeypatch, scrub_sentry, caplog)
+    _assert_one_scrub_alert(scrub_sentry, caplog, "owed_validation_refused")
+    await _drain_scheduled_scrubs()
+    assert [r["kind"] for r in _scrub_rows(sink)] == ["scrubbed"]
+    assert _scrub_crossings(order) == 1
+
+    transport = _RecordingMt5(_scenario())
+    _install_real_mt5_client(router, transport)
+    assert await _call(router, _make_req()) == {"valid": True, "read_only": True}
+    assert transport.logins()[0][1] == _CLIENT_LOGIN
+    await _drain_scheduled_scrubs()
