@@ -72,6 +72,7 @@ from services.mt5_client import (
     _scrub_refusal_reason,
     clear_mt5_relaunch_debt,
     is_private_gateway_host,
+    mt5_relaunch_debt,
     mt5_terminal_answer_count,
     mt5_terminal_key,
 )
@@ -99,6 +100,9 @@ from services.mt5_session_episodes import (
     KIND_IPC_FAULT_RECYCLED_STILL_FAULTED,
     KIND_IPC_FAULT_RECYCLED_UNVERIFIED,
     KIND_NO_AUTHORIZED_ACCOUNT,
+    KIND_RELAUNCH_DEBT,
+    KIND_RELAUNCH_DEBT_OUTSTANDING,
+    KIND_RELAUNCH_DEBT_SETTLED,
     KIND_STILL_UNAUTHORIZED,
     IPC_FAULT_RECYCLE_CAP,
     HealOutcome,
@@ -1982,6 +1986,135 @@ def _escalate_ipc_fault(
     return kind
 
 
+def _log_relaunch_debt_outstanding(client: Mt5Client, detail: str) -> None:
+    """⛔ ERROR ON EVERY TICK while the debt is unpaid (164.6.6.1 plan 04,
+    T-164.6.6.1-15). ``detail`` carries kinds, codes and equality verdicts only,
+    never a credential, host, port or account."""
+    if not mt5_relaunch_debt(client.terminal_key):
+        return
+    logger.error(
+        "mt5 session heal: relaunch debt OUTSTANDING — the jobs terminal this "
+        "service ended has not been seen authorized as the house account since, "
+        "so MT5 jobs on it fail until it is. The next tick sends another "
+        "credentialed house relaunch; an OPERATOR is needed if this persists "
+        "(%s).",
+        detail,
+    )
+
+
+def _settle_relaunch_debt(
+    client: Mt5Client, login: int, password: str, server: str, deadline: float
+) -> HealOutcome:
+    """Pay the relaunch debt: ONE credentialed house relaunch and the
+    house-equality check, sent INSTEAD OF the bare first probe (164.6.6.1 plan
+    04, CONTEXT D-10, founder 2026-10-04: "pay debt on any tick").
+
+    ⭐ WHY NO BARE PROBE. This service ended the terminal (the scrub records the
+    debt before its terminate crosses) and has not seen it house-verified since.
+    A terminal relaunched from there has no saved account, and a bare
+    ``initialize()`` against it reads ``-10005`` after about 25 s (S-10) or hangs
+    to the rpyc bound (S-03(b)). It measures nothing, and its ``-10005`` is
+    debounced within the run, so the terminal would stay account-less with
+    nothing acting on it (RESEARCH Pitfall 1).
+
+    ⭐ THE BUDGET IS UNCHANGED. The credentialed call takes the bare probe's
+    two-crossing slot (it plus ``_raise_last``'s ``last_error()``, or it plus the
+    one-crossing house check), and NO poll follows it. A ``-10005`` falls through
+    to the scrub escalation, subject to its debounce and cap: 2 + capture 1 +
+    scrub 3 + credentialed reading 2 = ``_MT5_RELOGIN_ROUND_TRIPS``.
+
+    ⛔ IT TERMINATES NOTHING, so it never claims the escalation and never counts
+    against ``IPC_FAULT_RECYCLE_CAP`` (decision 5). Only the ``-10005``
+    fall-through can end the terminal, and only through ``_escalate_ipc_fault``.
+
+    The debt is cleared ONLY on a house-VERIFIED reading. Every other result
+    keeps it and logs at ERROR, on every tick. ``Mt5SessionAbandoned``
+    propagates (D-42).
+    """
+    try:
+        client.initialize_with_credentials(login, password, server)
+    except Mt5SessionAbandoned:
+        raise
+    except Mt5ClientError as err:
+        code = err.code
+        if code in _RECYCLE_REACHABLE_IPC_CODES:
+            # ⭐ A dialog-wedged terminal: the scrub escalation is what reaches
+            # it, debounced and capped exactly as on a first-probe `-10005`.
+            escalated = _escalate_ipc_fault(
+                client,
+                code,
+                server,
+                deadline,
+                env_login=login,
+                env_password=password,
+            )
+            verdict = _not_healed(
+                f"{KIND_RELAUNCH_DEBT}:code={code}", err, login, password, server
+            )
+            escalation_kind = (
+                escalated if escalated is not None else KIND_RELAUNCH_DEBT_OUTSTANDING
+            )
+        else:
+            verdict = _not_healed(
+                f"{KIND_RELAUNCH_DEBT_OUTSTANDING}:code={code}",
+                err,
+                login,
+                password,
+                server,
+            )
+            escalation_kind = KIND_RELAUNCH_DEBT_OUTSTANDING
+        _log_relaunch_debt_outstanding(
+            client,
+            f"{KIND_RELAUNCH_DEBT} credentialed_relaunch_code={code} "
+            f"escalation={escalation_kind}",
+        )
+        return HealOutcome(
+            verdict=verdict,
+            first_kind=KIND_RELAUNCH_DEBT,
+            first_code=None,
+            final_kind=None,
+            final_code=None,
+            escalation_kind=escalation_kind,
+        )
+    fragment, status = _read_post_relaunch_state(client, login, server, deadline)
+    if status == _POST_RELAUNCH_VERIFIED:
+        clear_mt5_relaunch_debt(client.terminal_key)
+        end_ipc_fault_run()
+        logger.warning(
+            "mt5 session heal: relaunch debt paid — the terminal this service "
+            "ended answered a credentialed house relaunch and was verified as the "
+            "house session (%s; %s).",
+            KIND_RELAUNCH_DEBT_SETTLED,
+            fragment,
+        )
+        return HealOutcome(
+            verdict=_VERDICT_HEALED,
+            first_kind=KIND_RELAUNCH_DEBT,
+            first_code=None,
+            final_kind=KIND_HEALED,
+            final_code=None,
+            escalation_kind=KIND_RELAUNCH_DEBT_SETTLED,
+        )
+    # ⛔ Authorized but NOT the verified house session (degraded or unverified).
+    # There is no client error to hand `_not_healed`, so the same prefix and the
+    # same by-value redaction are applied to the value-free check fragment.
+    detail = _redact_credential_values(fragment, login, password, server)
+    _log_relaunch_debt_outstanding(
+        client, f"{KIND_RELAUNCH_DEBT} post_status={status} {detail}"
+    )
+    return HealOutcome(
+        verdict=(
+            f"{_VERDICT_NOT_HEALED_PREFIX}{KIND_RELAUNCH_DEBT_OUTSTANDING}:"
+            f"code=None:post_status={status}:{detail}"
+        ),
+        first_kind=KIND_RELAUNCH_DEBT,
+        first_code=None,
+        final_kind=None,
+        final_code=None,
+        escalation_kind=KIND_RELAUNCH_DEBT_OUTSTANDING,
+    )
+
+
 def _heal_blocking(
     host: str,
     port: int,
@@ -2057,6 +2190,10 @@ def _heal_blocking(
         deadline = _clock() + _relogin_budget_s()
     client = Mt5Client(host, port)
     try:
+        if mt5_relaunch_debt(client.terminal_key):
+            # ⭐ 164.6.6.1 plan 04 (CONTEXT D-10) — the debt is paid BEFORE the
+            # bare probe, from any source; see `_settle_relaunch_debt`.
+            return _settle_relaunch_debt(client, login, password, server, deadline)
         try:
             client.assert_session_authorized()
         except Mt5ClientError as err:
