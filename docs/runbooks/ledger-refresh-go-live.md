@@ -1305,6 +1305,13 @@ here, but this precondition sits here because this is where a reader would go to
    `db_execute` for `mark_compute_job_failed`, which can queue behind a saturated `_DB_EXECUTOR`.
    The harm probe's zero-member driver exercises none of them. Item 7 makes the residue a
    scheduling precondition.
+   ⛔ **CORRECTED 2026-10-03 (production UAT, Phase 164.6.7 human-verification item 2), the
+   sentence "Whether production composite rows carry `computation_warned = TRUE` is unmeasured"
+   above is kept as lineage.** It is measured now: of the 3 live composite `strategy_analytics`
+   rows on PROD, `computation_warned` was TRUE on 2, FALSE on 1 and NULL on 0 (read-only,
+   2026-10-03 21:31Z). So a production cohort exists that the post-claim retraction fix applies
+   to. The composite fan-out itself had still never been scheduled on that date, so no live run
+   has exercised the fix yet.
 4. ✅ **MET in the tree; ⚠️ the deploy-time check is still yours.** The regression is
    `TestPostClaimRetractionTakesTheLoudPath` in
    `analytics-service/tests/test_ledger_refresh_composite_nondestructive.py`: its retraction, no-row
