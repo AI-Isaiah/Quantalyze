@@ -4,17 +4,17 @@ milestone: v1.20
 milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 164.6.6.1
 current_phase_name: MT5SCRUB
-status: ready_to_execute
-stopped_at: "164.6.6.1 re-planned 2026-10-04 after the scrub spike (8 plans, 6 waves, plan-check passed); next execute, plan 02 S-11 checkpoint first"
-last_updated: "2026-10-03T14:43:50.465Z"
+status: executing
+stopped_at: 164.6.6.1 re-planned 2026-10-04 after the scrub spike (8 plans, 6 waves, plan-check passed); next execute, plan 02 S-11 checkpoint first
+last_updated: "2026-10-04T18:35:34.545Z"
 last_activity: 2026-10-04
-last_activity_desc: 164.6.6 MT5TERMINALISOLATION closed after plan 08 live checks; L7 wedge routed to 164.6.6.1, onboarding regression + L-D05 message routed to 164.6.6.3
-state_head: 1d0c22583ef7b2a1c905320bbf70da0d4f3fb367
+last_activity_desc: Phase 164.6.6.1 execution started
+state_head: 7cac3365de25f1721295a1ac9eda892521473db5
 progress:
   total_phases: 94
   completed_phases: 70
-  total_plans: 477
-  completed_plans: 473
+  total_plans: 494
+  completed_plans: 482
   percent: 74
 ---
 
@@ -179,7 +179,7 @@ both checkboxes updated to match. Not yet marked `completed_phases` in the front
 no VERIFICATION.md exists for this phase yet, and this repo's own rule is that phase completion
 is decided by verification status, never by plan counts.**
 
-Phase: 164.6.6 (MT5TERMINALISOLATION) — EXECUTING (wave 1 of 4, on feat/164.6.6-mt5isolation)
+Phase: 164.6.6.1 (MT5SCRUB) — EXECUTING
 Phase: 164.9.6 (SUBSETMAIN) and 164.5.2.1 (BRIDGERESIDUE) — COMPLETE 2026-10-03 (verification passed; PR #936 v0.120.0.0 and PR #937 v0.121.0.0 merged; migration 20261003120000 applied to TEST and PROD)
 Phase: 164.9.4 (CIOFFMUTEX) — COMPLETE 2026-10-03 (verification passed on the ship run 37072653692; PR #880 merged, v0.119.0.0)
 Phase: 160 / 164.3 / 168 — close-out 2026-10-03 (SECURITY.md for 160 and 164.3; verification frontmatter to convention; 164.3 plan 07 stays deferred)
@@ -189,7 +189,7 @@ Phase: 164.9.3.2 (DEFER40001) — COMPLETE 2026-10-02 (verification passed; PR #
 Phase: 169.1.1 (HYDRATIONTICKS) — COMPLETE 2026-10-02 (verification passed; PR #925 merged, v0.118.1.0)
 Phase: 166.4 (BENCHALIGN) — COMPLETE 2026-09-27 (verification passed; PR #892 merged, v0.108.0.0)
 Phase: 170 (LAYOUT — page layout reads clean and holds on every page) — COMPLETE 2026-10-01
-Plan: 3 of 3
+Plan: 1 of 8
 Phase: 164.9.5 (AUTOREDUMP) — EXECUTING
 Plan: 9 of 9 DONE; VERIFICATION human_needed (4/6 verified, 2 live-only), SECURITY SECURED 37/37; shipped as a PR, not merged
 Phase: 166.2 (COMPUTEONCE) — EXECUTING
@@ -505,7 +505,7 @@ so every "Next is plan NN" below has been discharged:
       NON-ZERO exit is a regression. Next is plan 06 (closure: the false-reading
       `lane-probe: … class is STALE` sentence, the `lane-blocked:` line's own
       prose, [REDUNDER-LANEBLOCKED-BLIND], and the ubuntu measurement).
-Status: Executing Phase 164.6.6
+Status: Executing Phase 164.6.6.1
       ⚠️ RETAINED — this was the `Status:` line until the 2026-09-06 reconciliation, kept as
       lineage: *"164-family re-partition SHIPPED — PR #745 (chore/164-family-repartition,
       v0.77.13.1). Phase 164.4.1 COMPLETE — PR #744 squash-merged as `e01cc2e6` (v0.77.13.0),
@@ -521,7 +521,7 @@ Status: Executing Phase 164.6.6
       closed by PR #743 `3ed6919e`) and 164.4.1 annotated all five remaining files —
       `lane-blocked: 0`, `pending: 0` at `files 44/71`. Read `FILES_FLOOR` / `ARMS_FLOOR` off
       `scripts/mutation-runner/run.mjs`, never off a number restated here.
-Last activity: 2026-10-04 — 14 phases closed after the 2026-10-03 production UAT; 164.6.6 wave 1 executing
+Last activity: 2026-10-04 — Phase 164.6.6.1 execution started
       ⚠️ RETAINED — this was the `Last activity:` line until 2026-09-06:
       *"2026-09-04 — Phase 164.4.1 execution started"*
       all twinned and proven on real pg-lanes with **ZERO waivers** (cumulative 0 across all eight
