@@ -143,8 +143,16 @@ class _FakeNamespace:
         self._entries = entries
 
     def __getitem__(self, name: str):
+        from services import mt5_client as _mt5_client
+
         if self._owner is not None:
-            self._owner._trip("recycle_lookup")
+            # ⭐ 164.6.6.1 plan 03 — the scrub's lookup is its own trip name, so a
+            # path list says WHICH verb ended the terminal.
+            self._owner._trip(
+                "scrub_lookup"
+                if name == _mt5_client._REMOTE_TERMINAL_SCRUB_FN
+                else "recycle_lookup"
+            )
         return self._entries[name]
 
 
@@ -163,6 +171,13 @@ class _FakeRpycConn:
     against. ``recycle_raises`` in the owner's scenario makes the remote call
     raise; a successful call marks the owner ``recycled`` so its next bare
     `initialize()` answers ``initialize_after_recycle``.
+
+    ⭐ 164.6.6.1 plan 03 — IT ALSO CARRIES THE SCRUB SEAM (`_scrub`), so the
+    heal's escalation drives the REAL plan-01 scrub verb. The scrub ends the
+    terminal through the SAME `_end_terminal` body as the recycle and, when it
+    did not refuse, marks the owner's `accounts.dat` deleted. Its trips are
+    named `scrub_execute` / `scrub_lookup` / `scrub` and its calls are recorded
+    in `scrub_calls`.
     """
 
     def __init__(self, owner: "_FakeMt5 | None" = None) -> None:
@@ -171,6 +186,7 @@ class _FakeRpycConn:
         self.executed: list[str] = []
         self.evaluated: list[str] = []
         self.recycle_calls: list[tuple[tuple, dict]] = []
+        self.scrub_calls: list[tuple] = []
 
     def close(self) -> None:
         self.close_calls += 1
@@ -180,8 +196,14 @@ class _FakeRpycConn:
         # counted as one. The double used to record nothing here, so the gate that
         # "counts the path, never restates it" counted 8 because the double
         # under-reported the recycle's three crossings as one.
+        from services import mt5_client as _mt5_client
+
         if self._owner is not None:
-            self._owner._trip("recycle_execute")
+            self._owner._trip(
+                "scrub_execute"
+                if source == _mt5_client._REMOTE_TERMINAL_SCRUB_SRC
+                else "recycle_execute"
+            )
         self.executed.append(source)
 
     def eval(self, source: str) -> object:
@@ -203,17 +225,69 @@ class _FakeRpycConn:
         from services import mt5_client as _mt5_client
 
         return _FakeNamespace(
-            self._owner, {_mt5_client._REMOTE_TERMINAL_RECYCLE_FN: self._recycle}
+            self._owner,
+            {
+                _mt5_client._REMOTE_TERMINAL_RECYCLE_FN: self._recycle,
+                _mt5_client._REMOTE_TERMINAL_SCRUB_FN: self._scrub,
+            },
         )
 
     def _recycle(self, *args, **kwargs) -> str:
         import json as _json
 
         self.recycle_calls.append((args, dict(kwargs)))
+        return _json.dumps(self._end_terminal("recycle"))
+
+    def _scrub(self, *args) -> str:
+        """The scrub's far side: the recycle's process half, then the delete
+        decision the committed literal makes (`refused`, in its order), with
+        knob ``scrub_refused`` overriding it. ``trades_deleted`` is non-zero only
+        when the call's second argument (``delete_trades``) is 1."""
+        import json as _json
+
+        self.scrub_calls.append(args)
         owner = self._owner
-        assert owner is not None, "the recycle seam needs its owning double"
-        owner.call_order.append("recycle")
-        owner._trip("recycle")
+        assert owner is not None, "the scrub seam needs its owning double"
+        verdict = self._end_terminal("scrub")
+        matched = verdict["matched"]
+        if "scrub_refused" in owner._scenario:
+            refused = owner._scenario["scrub_refused"]
+        elif verdict["enumerate_error"] != 0:
+            refused = 4
+        elif matched == 0:
+            refused = 1
+        elif verdict["terminated"] != matched:
+            refused = 2
+        elif verdict["exited"] != matched:
+            refused = 3
+        else:
+            refused = 0
+        if refused == 0:
+            owner.accounts_dat_deleted = True
+            # The stale saved copy went with the file.
+            owner.saved_login_stale = False
+        delete_trades = args[1] if len(args) > 1 else 0
+        return _json.dumps(
+            {
+                **verdict,
+                "refused": refused,
+                "accounts_deleted": 1 if refused == 0 else 0,
+                "accounts_missing": 0,
+                "accounts_errors": [],
+                "trades_deleted": 2 if refused == 0 and delete_trades == 1 else 0,
+                "trades_errors": [],
+                "profile_accounts_found": 0,
+                "profile_errors": [],
+            }
+        )
+
+    def _end_terminal(self, trip: str) -> dict:
+        """The process half both remote verbs share: end the terminal per the
+        scenario's counts and return the recycle's verdict fields."""
+        owner = self._owner
+        assert owner is not None, "the terminal seam needs its owning double"
+        owner.call_order.append(trip)
+        owner._trip(trip)
         exc = owner._scenario.get("recycle_raises")
         if exc is not None:
             raise exc
@@ -230,7 +304,7 @@ class _FakeRpycConn:
             # Nothing was ended, so the next bare `initialize()` attaches to the
             # SAME, still-running terminal: the pre-recycle answers stand.
             owner.recycled = False
-        return _json.dumps(
+        return dict(
             {
                 "matched": matched,
                 "terminated": terminated,
@@ -372,6 +446,35 @@ class _FakeMt5:
                                         ``initialize``)
       ``last_error_after_recycle``   -> the `(code, text)` tuple once recycled
                                         (falls back to ``last_error``)
+      ``saved_house_password_stale`` -> (164.6.6.1) the terminal's SAVED house
+                                        login is stale: once the terminal was
+                                        ended and while its `accounts.dat` is
+                                        still on disk, a relaunch opens the Login
+                                        dialog, so BOTH a bare and a credentialed
+                                        `initialize()` answer False / -10005 (the
+                                        2026-10-04 L7 outage)
+      ``saved_password``             -> (164.6.6.1) the password of the saved copy
+                                        (default the env's `_FAKE_PASSWORD`); a
+                                        different value is a rotation and makes
+                                        the saved copy stale exactly as above
+      ``relaunch_credentialed``      -> (164.6.6.1) what a CREDENTIALED
+                                        `initialize()` answers on the
+                                        account-less terminal a scrub left.
+                                        Falls back to ``initialize_after_recycle``;
+                                        then, when the scenario declared a stale
+                                        saved login, to True (that stale copy WAS
+                                        the wedge, and the scrub deleted it);
+                                        otherwise to ``initialize`` (a wedge that
+                                        persists, the pre-plan default); then True.
+                                        Honours ``relaunch_authorized_after_s``.
+      ``scrub_refused``              -> (164.6.6.1) overrides the scrub literal's
+                                        `refused` decision
+
+    ⭐ 164.6.6.1 plan 03 — THE ACCOUNT-LESS STATE (CONTEXT S-10). After a scrub
+    that deleted `accounts.dat`, a BARE `initialize()` answers False with
+    `last_error` -10005 (the terminal has no account to attach; measured 24.9 s
+    then -10005), and only a CREDENTIALED call can bring it up. A credentialed
+    True rewrites `accounts.dat` (S-11), which ends the account-less state.
 
     ⭐ The bare and credentialed forms are SEPARATE scenario keys because the whole
     branch under test is "answer the detector one way, the heal another". A double
@@ -416,6 +519,19 @@ class _FakeMt5:
         #: 164.6.5 plan 05 — set by a successful remote recycle.
         self.recycled = False
         self.recycled_at = 0.0
+        #: 164.6.6.1 plan 03 — set by a scrub that did not refuse; cleared by a
+        #: credentialed `initialize()` that answered (it rewrites the file).
+        self.accounts_dat_deleted = False
+        #: Whether the saved house login is stale (the L7 state). Fixed at
+        #: construction from the scenario, and cleared by the scrub's delete or
+        #: by a credentialed login that rewrote the saved copy.
+        self.saved_login_stale = bool(
+            scenario.get("saved_house_password_stale")
+        ) or scenario.get("saved_password", _FAKE_PASSWORD) != _FAKE_PASSWORD
+        self._declared_stale_login = self.saved_login_stale
+        #: A `last_error()` answer set by the `initialize()` that just ran (the
+        #: Login dialog, the account-less terminal); reset on every `initialize()`.
+        self._last_error_override: tuple[int, str] | None = None
         self.initialize_kwargs: list[dict] = []
         self.call_order: list[str] = []
         self.credentialed_accepted = False
@@ -443,6 +559,37 @@ class _FakeMt5:
             import time as _time
 
             _time.sleep(sleep_s)
+        self._last_error_override = None
+        if self.recycled and self.saved_login_stale:
+            # ⭐ 164.6.6.1 — the L7 Login dialog: the relaunched terminal tried the
+            # stale saved login and a modal dialog now blocks EVERY IPC call, the
+            # credentialed one included.
+            self._last_error_override = (-10005, "IPC timeout")
+            return False
+        if self.accounts_dat_deleted:
+            # ⭐ 164.6.6.1 — the account-less terminal a scrub left (S-10).
+            if not credentialed:
+                self._last_error_override = (-10005, "IPC timeout")
+                return False
+            exc = self._scenario.get("initialize_credentialed_raises")
+            if exc is not None:
+                raise exc
+            after = self._scenario.get("relaunch_authorized_after_s")
+            if after is not None and _FakeMt5.clock is not None:
+                result = _FakeMt5.clock.now - self.recycled_at >= after
+            elif "relaunch_credentialed" in self._scenario:
+                result = self._scenario["relaunch_credentialed"]
+            elif "initialize_after_recycle" in self._scenario:
+                result = self._scenario["initialize_after_recycle"]
+            elif self._declared_stale_login:
+                result = True
+            else:
+                result = self._scenario.get("initialize", True)
+            if result:
+                self.credentialed_accepted = True
+                self.accounts_dat_deleted = False
+                self.saved_login_stale = False
+            return result
         if not credentialed and self.recycled:
             # ⭐ 164.6.5 plan 05 — the terminal was ended and relaunched; what a
             # bare `initialize()` answers now is the scenario's post-recycle
@@ -505,6 +652,8 @@ class _FakeMt5:
     def _last_error_value(self):
         """What `last_error()` answers, WITHOUT a crossing (the bridge-side view
         reads it inside the one `conn.eval`)."""
+        if self._last_error_override is not None:
+            return self._last_error_override
         if self.recycled and "last_error_after_recycle" in self._scenario:
             return self._scenario["last_error_after_recycle"]
         if self.credentialed_accepted and "last_error_after_heal" in self._scenario:
@@ -1732,6 +1881,10 @@ _ESCALATION_KINDS = (
     mt5_session_episodes.KIND_IPC_FAULT_RECYCLE_CAPPED,
     mt5_session_episodes.KIND_IPC_FAULT_RECYCLED_DEGRADED,
     mt5_session_episodes.KIND_IPC_FAULT_RECYCLED_UNVERIFIED,
+    # ⭐ 164.6.6.1 plan 03 — the credentialed relaunch refused, and the escalation
+    # declining for want of a house triple.
+    mt5_session_episodes.KIND_IPC_FAULT_RECYCLED_HOUSE_REFUSED,
+    mt5_session_episodes.KIND_IPC_FAULT_RECYCLE_NO_HOUSE_CREDENTIALS,
 )
 
 
@@ -1749,12 +1902,73 @@ def _capture_outcomes(monkeypatch: pytest.MonkeyPatch) -> list:
 
 
 def _recycle_count(fake) -> int:
-    return len(fake._MetaTrader5__conn.recycle_calls)
+    """Every remote call that ends the terminal process: the recycle verb's and,
+    since 164.6.6.1 plan 03, the scrub verb's."""
+    conn = fake._MetaTrader5__conn
+    return len(conn.recycle_calls) + len(conn.scrub_calls)
 
 
 async def _heal_n_times(n: int) -> None:
     for _ in range(n):
         assert await mt5_relogin.heal_mt5_terminal_session() is None
+
+
+def _heal_terminal_key() -> str:
+    from services import mt5_client
+
+    return mt5_client.mt5_terminal_key(_FAKE_HOST, int(_FAKE_PORT))
+
+
+async def test_L7_a_stale_saved_house_password_no_longer_wedges_the_jobs_terminal(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """⭐ 164.6.6.1 plan 03, criterion 4 — THE 2026-10-04 L7 OUTAGE, REPRODUCED.
+
+    The jobs terminal's saved house password was stale, so every relaunch from
+    the saved copy opened the Login dialog and read `-10005`. The 164.6.5
+    escalation ended the process and relaunched it BARE, i.e. from that saved
+    copy, and so read `ipc_fault_recycled_still_faulted` and needed a human.
+    RED on the pre-plan code with exactly that kind (recorded in the SUMMARY).
+
+    D-04 (i): the escalation now ends the terminal, deletes `accounts.dat`, and
+    relaunches with the HOUSE credentials. No bare `initialize()` may run after
+    the scrub (a bare call on the account-less terminal reads -10005, S-10), the
+    trades caches are kept (`delete_trades=0`, D-03 / Finding C), and the
+    relaunch debt the verb recorded is paid by the house-verified snapshot."""
+    from services import mt5_client
+
+    _set_full_env(monkeypatch)
+    fake, _c = _install_client(
+        monkeypatch,
+        {
+            **_WEDGED,
+            "saved_house_password_stale": True,
+            "terminal_info": _HOUSE_TERMINAL,
+            "account_info": _HOUSE_ACCOUNT,
+        },
+    )
+    outcomes = _capture_outcomes(monkeypatch)
+
+    with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
+        await _heal_n_times(1)
+
+    assert outcomes[0].escalation_kind == mt5_session_episodes.KIND_IPC_FAULT_RECYCLED
+    conn = fake._MetaTrader5__conn
+    assert len(conn.scrub_calls) == 1, conn.scrub_calls
+    assert conn.scrub_calls[0][1] == 0, (
+        "the jobs terminal's trades caches were deleted (delete_trades must be 0 "
+        "until Phase 164.6.6.3's history wait ships)"
+    )
+    assert conn.recycle_calls == [], "the bare-relaunching recycle verb still ran"
+    after_scrub = fake.call_order[fake.call_order.index("scrub") + 1 :]
+    assert "initialize" not in after_scrub, (
+        f"a BARE initialize() ran after the scrub: {fake.call_order}"
+    )
+    credentialed = [kw for kw in fake.initialize_kwargs if "login" in kw]
+    assert len(credentialed) == 1, fake.initialize_kwargs
+    assert credentialed[0]["password"] == _FAKE_PASSWORD
+    assert mt5_client.mt5_relaunch_debt(_heal_terminal_key()) is False
+    _assert_no_credential_value_escaped(_records(caplog))
 
 
 async def test_ESCALATION_five_consecutive_ipc_timeouts_produce_exactly_ONE_recycle(
