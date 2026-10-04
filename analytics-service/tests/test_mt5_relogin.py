@@ -2411,7 +2411,16 @@ async def test_ESCALATION_never_fires_where_the_recycle_cannot_reach(
     )
     outcomes = _capture_outcomes(monkeypatch)
 
-    await _heal_n_times(1)
+    # ⭐ 164.6.6.1 plan 04 — at BOOT a code `0` now takes CONTEXT D-09's
+    # credentialed house relaunch (it ends nothing and escalates nothing; pinned
+    # by the `test_D09_*` gates). This gate is about the escalation's reach, so
+    # the `0` arm is driven from the session monitor, whose path is unchanged.
+    source = (
+        mt5_relogin.HEAL_SOURCE_SESSION_MONITOR
+        if code == 0
+        else mt5_relogin.HEAL_SOURCE_BOOT
+    )
+    await mt5_relogin.heal_mt5_terminal_session(source=source)
 
     assert _recycle_count(fake) == 0
     assert fake.call_order == ["initialize"], (
@@ -3345,9 +3354,14 @@ async def test_R2_SFH02_the_zero_sentinel_never_starts_a_persistence_run(
     _install_client(monkeypatch, {"initialize": False, "last_error": (0, "unknown")})
     _capture_outcomes(monkeypatch)
 
+    # ⭐ 164.6.6.1 plan 04 — three hours of ticks are the SESSION MONITOR's
+    # (the boot heal runs once per process). At boot a `0` takes CONTEXT D-09's
+    # credentialed relaunch, which is pinned by the `test_D09_*` gates.
     with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
         for _ in range(18):
-            await _heal_n_times(1)
+            await mt5_relogin.heal_mt5_terminal_session(
+                source=mt5_relogin.HEAL_SOURCE_SESSION_MONITOR
+            )
             _fake_clock.now += 600.0
 
     assert not [r for r in _records(caplog) if r.levelno >= logging.ERROR]
@@ -5397,8 +5411,12 @@ async def test_exactly_one_bounded_lease_over_a_client_built_inside_the_thread(
             True,
             id="heal-raises-at-the-transport",
         ),
+        # ⭐ 164.6.6.1 plan 04 — a transport raise on the probe maps to the `0`
+        # sentinel, and at BOOT a `0` now sends CONTEXT D-09's credentialed
+        # house relaunch (the founder's decision is on code `0`, whatever of its
+        # three causes produced it), so a credential is expected here.
         pytest.param(
-            {"initialize_raises": RuntimeError("bridge down")}, False, id="detector-raises"
+            {"initialize_raises": RuntimeError("bridge down")}, True, id="detector-raises"
         ),
     ],
 )
@@ -6843,3 +6861,231 @@ def test_RELAUNCH_DEBT_the_debt_READING_kind_degrades_to_NOT_MEASURED() -> None:
         mt5_session_episodes.KIND_RELAUNCH_DEBT, None
     )
     assert reading.state == mt5_session_episodes.STATE_NOT_MEASURED
+
+
+#: The account-less signature D-09 acts on: the bare first probe answers False
+#: and `last_error()` reads the unattributed code `0` (the `_FakeMt5` default).
+_ACCOUNTLESS_CODE_0 = {"initialize": False}
+
+#: The first-probe `ipc_fault` verdict for code `0`, as `_heal_blocking` composed
+#: it BEFORE this plan. ⛔ A literal on purpose (the
+#: `_PRE_ESCALATION_IPC_TIMEOUT_VERDICT` reasoning): D-09 must not move it.
+_PRE_D09_CODE_0_VERDICT = (
+    "not_healed:ipc_fault:code=0:MT5 client error (code=0): unknown"
+)
+
+
+async def test_D09_at_BOOT_code_0_sends_ONE_credentialed_relaunch_and_a_verified_house_check(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """⭐ CONTEXT D-09 (founder, 2026-10-04). A process restart loses the
+    in-process relaunch debt, so the account-less terminal it left behind would
+    read code `0` on the boot probe and go silent (RESEARCH Pitfall 1). At BOOT
+    ONLY, that reading now sends ONE credentialed house relaunch and the
+    house-equality check. The verdict and the first reading stay what happened:
+    `ipc_fault` / `0`."""
+    _set_full_env(monkeypatch)
+    fake, _c = _install_client(
+        monkeypatch,
+        {
+            **_ACCOUNTLESS_CODE_0,
+            "terminal_info": _HOUSE_TERMINAL,
+            "account_info": _HOUSE_ACCOUNT,
+        },
+    )
+    outcomes = _capture_outcomes(monkeypatch)
+
+    with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
+        assert (
+            await mt5_relogin.heal_mt5_terminal_session(
+                source=mt5_relogin.HEAL_SOURCE_BOOT
+            )
+            is None
+        )
+
+    assert fake.round_trips == [
+        "initialize",
+        "last_error",
+        "initialize_credentialed",
+        "session_snapshot",
+    ], fake.round_trips
+    credentialed = [kw for kw in fake.initialize_kwargs if "login" in kw]
+    assert len(credentialed) == 1, fake.initialize_kwargs
+    assert credentialed[0]["password"] == _FAKE_PASSWORD
+    (outcome,) = outcomes
+    assert (
+        outcome.escalation_kind
+        == mt5_session_episodes.KIND_BOOT_ACCOUNTLESS_RELAUNCHED
+    )
+    assert outcome.verdict == _PRE_D09_CODE_0_VERDICT
+    assert outcome.first_kind == mt5_session_episodes.KIND_IPC_FAULT
+    assert outcome.first_code == 0
+    assert outcome.final_kind == mt5_session_episodes.KIND_HEALED
+    line = next(
+        r for r in _records(caplog) if "boot_accountless_relaunched" in r.getMessage()
+    )
+    assert line.levelno == logging.WARNING
+    assert fake._MetaTrader5__conn.scrub_calls == []
+    assert fake._MetaTrader5__conn.recycle_calls == []
+    _assert_no_credential_value_escaped(_records(caplog))
+
+
+@pytest.mark.parametrize(
+    "relaunch",
+    [
+        # The credentialed call never authorizes (watched to the settle window).
+        pytest.param({"initialize_credentialed": False}, id="never-authorizes"),
+        # It authorizes, but the house check cannot verify it.
+        pytest.param({}, id="authorized-UNVERIFIED"),
+        # It authorizes on ANOTHER account.
+        pytest.param(
+            {"terminal_info": _HOUSE_TERMINAL, "account_info": _OTHER_LOGIN_ACCOUNT},
+            id="authorized-DEGRADED",
+        ),
+    ],
+)
+async def test_D09_at_BOOT_code_0_with_a_relaunch_that_does_not_verify_is_FAILED_at_ERROR_and_ends_nothing(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, relaunch: dict
+) -> None:
+    """D-09's failure arm: `boot_accountless_relaunch_failed` at ERROR. No
+    escalation runs and nothing is terminated (the boot branch ends no
+    process), so no relaunch debt is recorded and the recycle cap is
+    untouched."""
+    from services import mt5_client
+
+    _set_full_env(monkeypatch)
+    fake, _c = _install_client(monkeypatch, {**_ACCOUNTLESS_CODE_0, **relaunch})
+    outcomes = _capture_outcomes(monkeypatch)
+
+    with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
+        await _heal_n_times(1)
+
+    (outcome,) = outcomes
+    assert (
+        outcome.escalation_kind
+        == mt5_session_episodes.KIND_BOOT_ACCOUNTLESS_RELAUNCH_FAILED
+    )
+    assert outcome.verdict == _PRE_D09_CODE_0_VERDICT
+    assert outcome.final_kind is None
+    line = next(
+        r
+        for r in _records(caplog)
+        if "boot_accountless_relaunch_failed" in r.getMessage()
+    )
+    assert line.levelno == logging.ERROR
+    conn = fake._MetaTrader5__conn
+    assert conn.scrub_calls == [] and conn.recycle_calls == []
+    assert fake.call_order.count("initialize") == 1, fake.call_order
+    assert mt5_client.mt5_relaunch_debt(_heal_terminal_key()) is False
+    assert mt5_session_episodes.ipc_fault_escalation_armed() is True
+    _assert_no_credential_value_escaped(_records(caplog))
+
+
+async def test_D09_from_the_SESSION_MONITOR_code_0_without_debt_sends_no_credential(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """⛔ The widening is D-09's BOOT case and the debt case, nothing else. A
+    session-monitor tick that reads code `0` with no debt behaves exactly as
+    before this plan: the one bare probe, no credential, no escalation, and the
+    same verdict."""
+    _set_full_env(monkeypatch)
+    fake, _c = _install_client(
+        monkeypatch,
+        {
+            **_ACCOUNTLESS_CODE_0,
+            "terminal_info": _HOUSE_TERMINAL,
+            "account_info": _HOUSE_ACCOUNT,
+        },
+    )
+    outcomes = _capture_outcomes(monkeypatch)
+
+    with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
+        await mt5_relogin.heal_mt5_terminal_session(
+            source=mt5_relogin.HEAL_SOURCE_SESSION_MONITOR
+        )
+
+    assert fake.call_order == ["initialize"], fake.call_order
+    assert fake.round_trips == ["initialize", "last_error"], fake.round_trips
+    assert not [kw for kw in fake.initialize_kwargs if "login" in kw]
+    (outcome,) = outcomes
+    assert outcome.escalation_kind is None
+    assert outcome.verdict == _PRE_D09_CODE_0_VERDICT
+    assert outcome.first_kind == mt5_session_episodes.KIND_IPC_FAULT
+    assert outcome.first_code == 0
+    assert outcome.final_kind is None
+
+
+async def test_D09_at_BOOT_minus_10005_takes_the_scrub_escalation_never_the_D09_branch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D-09's `-10005` half needs no code: S-10 measured the account-less
+    terminal reading `-10005` under the client's 20 s timeout, and that code
+    already reaches the scrub escalation (D-04 (i)), which relaunches with the
+    house credentials. So at boot a `-10005` scrubs exactly as on any tick."""
+    _set_full_env(monkeypatch)
+    fake, _c = _install_client(
+        monkeypatch,
+        {
+            **_WEDGED,
+            "relaunch_credentialed": True,
+            "terminal_info": _HOUSE_TERMINAL,
+            "account_info": _HOUSE_ACCOUNT,
+        },
+    )
+    outcomes = _capture_outcomes(monkeypatch)
+
+    await mt5_relogin.heal_mt5_terminal_session(source=mt5_relogin.HEAL_SOURCE_BOOT)
+
+    (outcome,) = outcomes
+    assert outcome.escalation_kind == mt5_session_episodes.KIND_IPC_FAULT_RECYCLED
+    assert len(fake._MetaTrader5__conn.scrub_calls) == 1
+    assert fake.round_trips[:3] == ["initialize", "last_error", "session_snapshot"], (
+        "the D-09 branch ran on a -10005 before the escalation's capture"
+    )
+
+
+@pytest.mark.parametrize(
+    "relaunch",
+    [
+        pytest.param(
+            {"terminal_info": _HOUSE_TERMINAL, "account_info": _HOUSE_ACCOUNT},
+            id="verified-on-the-first-call",
+        ),
+        pytest.param({"initialize_credentialed": False}, id="never-authorizes"),
+    ],
+)
+async def test_D09_the_boot_code_0_path_fits_the_budget_at_full_ceilings(
+    monkeypatch: pytest.MonkeyPatch, _fake_clock: "_FakeClock", relaunch: dict
+) -> None:
+    """With every crossing at its full ceiling the boot code-0 path must finish
+    inside the derived default budget. Its UNCONDITIONAL part is the first probe
+    (2) plus one credentialed reading (2) = 4 crossings, under
+    `_MT5_RELOGIN_ROUND_TRIPS`. Credentialed polls are taken only while
+    `_affordable` says one more whole reading fits, so a relaunch that never
+    authorizes still ends inside the budget."""
+    ceiling = mt5_relogin._MT5_REQUEST_TIMEOUT_S
+    monkeypatch.delenv("MT5_RELOGIN_BUDGET_S", raising=False)
+    budget = mt5_relogin._relogin_budget_s()
+    _set_full_env(monkeypatch)
+    fake, _c = _install_client(
+        monkeypatch, {**_ACCOUNTLESS_CODE_0, **relaunch, "crossing_cost_s": ceiling}
+    )
+    _capture_outcomes(monkeypatch)
+    started = _fake_clock.now
+
+    await _heal_n_times(1)
+
+    elapsed = _fake_clock.now - started
+    assert elapsed <= budget, (elapsed, budget, fake.round_trips)
+    assert fake.round_trips[:4] == [
+        "initialize",
+        "last_error",
+        "initialize_credentialed",
+        "session_snapshot" if "terminal_info" in relaunch else "last_error",
+    ], fake.round_trips
+    if "terminal_info" in relaunch:
+        assert len(fake.round_trips) == 4 < mt5_relogin._MT5_RELOGIN_ROUND_TRIPS
+    else:
+        assert len(fake.round_trips) <= mt5_relogin._MT5_RELOGIN_ROUND_TRIPS, (
+            fake.round_trips
+        )

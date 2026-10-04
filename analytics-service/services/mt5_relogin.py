@@ -80,6 +80,8 @@ from services.mt5_concurrency import Mt5TerminalBusyError, mt5_terminal_lease
 from services.mt5_handover import HOLDER_HOUSE, SITE_HEAL
 from services.mt5_session_episodes import (
     KIND_ALREADY_AUTHORIZED,
+    KIND_BOOT_ACCOUNTLESS_RELAUNCH_FAILED,
+    KIND_BOOT_ACCOUNTLESS_RELAUNCHED,
     KIND_BUDGET_ABANDONED,
     KIND_BUSY_SKIP,
     KIND_CREDENTIAL_REFUSED,
@@ -2115,6 +2117,89 @@ def _settle_relaunch_debt(
     )
 
 
+def _boot_accountless_relaunch(
+    client: Mt5Client,
+    err: Mt5ClientError,
+    login: int,
+    password: str,
+    server: str,
+    deadline: float,
+) -> HealOutcome:
+    """CONTEXT D-09 (founder, 2026-10-04): at BOOT ONLY, a first probe that read
+    the unattributed code ``0`` sends a credentialed house relaunch and the
+    house-equality check (164.6.6.1 plan 04).
+
+    ⭐ WHY. The relaunch debt is in-process, so a process restart loses it. The
+    account-less terminal the previous process left behind then reads ``0`` on
+    the boot probe (the rpyc-bound shape, S-03(b)), and before this branch that
+    reading healed nothing and escalated nothing: the terminal went silent
+    (RESEARCH Pitfall 1). The ``-10005`` half of D-09 needs no branch, because
+    that code already reaches the scrub escalation (D-04 (i), S-10).
+
+    ⛔ IT ENDS NOTHING. No scrub, no recycle, no claim and no cap: only
+    ``initialize_with_credentials`` (by-value redaction, T-134-01), polled
+    under ``_affordable`` exactly as the escalation's relaunch is, then one
+    snapshot. The verdict and the first reading stay what the probe measured
+    (``ipc_fault`` / ``0``); the outcome rides on ``escalation_kind`` and its
+    own log line, WARNING when verified and ERROR otherwise.
+    """
+    verdict = _not_healed(
+        f"{KIND_IPC_FAULT}:code={err.code}", err, login, password, server
+    )
+    status = _POST_RELAUNCH_NOT_REACHED
+    if not _affordable(deadline, _CREDENTIALED_RELAUNCH_READING_CROSSINGS):
+        detail = "relaunch=not_read (the heal budget left cannot cover it)"
+    else:
+        authorized, code, polls, settled = _relaunch_as_house(
+            client, (login, password, server), deadline
+        )
+        detail = (
+            f"authorized={authorized} relaunch_code={code} relaunch_polls={polls} "
+            f"settled={settled}"
+        )
+        if authorized:
+            fragment, status = _read_post_relaunch_state(
+                client, login, server, deadline
+            )
+            detail = f"{detail} {fragment}"
+    if status == _POST_RELAUNCH_VERIFIED:
+        clear_mt5_relaunch_debt(client.terminal_key)
+        end_ipc_fault_run()
+        logger.warning(
+            "mt5 boot heal: the first probe read the unattributed code 0 (the "
+            "account-less terminal a restart can leave, CONTEXT D-09); a "
+            "credentialed house relaunch brought it back as the house session — "
+            "%s (%s)",
+            KIND_BOOT_ACCOUNTLESS_RELAUNCHED,
+            detail,
+        )
+        return HealOutcome(
+            verdict=verdict,
+            first_kind=KIND_IPC_FAULT,
+            first_code=err.code,
+            final_kind=KIND_HEALED,
+            final_code=None,
+            escalation_kind=KIND_BOOT_ACCOUNTLESS_RELAUNCHED,
+        )
+    logger.error(
+        "mt5 boot heal: the first probe read the unattributed code 0 (the "
+        "account-less terminal a restart can leave, CONTEXT D-09), and the "
+        "credentialed house relaunch did NOT verify the house session — %s (%s). "
+        "Nothing was ended; MT5 jobs on this terminal fail until it is house "
+        "again, and an OPERATOR is needed if this persists.",
+        KIND_BOOT_ACCOUNTLESS_RELAUNCH_FAILED,
+        _redact_credential_values(detail, login, password, server),
+    )
+    return HealOutcome(
+        verdict=verdict,
+        first_kind=KIND_IPC_FAULT,
+        first_code=err.code,
+        final_kind=None,
+        final_code=None,
+        escalation_kind=KIND_BOOT_ACCOUNTLESS_RELAUNCH_FAILED,
+    )
+
+
 def _heal_blocking(
     host: str,
     port: int,
@@ -2123,6 +2208,7 @@ def _heal_blocking(
     server: str,
     *,
     deadline: float | None = None,
+    source: str | None = None,
 ) -> HealOutcome:
     """The BLOCKING body, run under ``to_thread``. Returns a ``HealOutcome``.
 
@@ -2155,6 +2241,34 @@ def _heal_blocking(
         terminal, a modal dialog). Return a verdict NAMING the code and heal
         NOTHING. Applying the session remedy to an IPC fault re-collapses the
         distinction Phase 164.1 built and Phase 164.8.3 shipped.
+
+    ⭐ AMENDED 2026-10-04 (Phase 164.6.6.1 plan 04) — TWO EXCEPTIONS to "a
+    credential only on ``-6``", and the sentence "a credential sent to a
+    terminal that did not need one is a disclosure surface opened for nothing"
+    above now holds for every reading EXCEPT these two. Each sends the house
+    triple only through ``initialize_with_credentials`` (by-value redaction,
+    T-134-01), over the private-network gateway only.
+
+      (a) RELAUNCH DEBT, CONTEXT D-10 (founder, 2026-10-04, "pay debt on any
+          tick"). When this service ended the terminal and has not seen it
+          house-verified since (``mt5_relaunch_debt``), the tick SKIPS the bare
+          probe, from ANY source, and sends ONE credentialed house relaunch
+          (``_settle_relaunch_debt``). The service ended that terminal itself,
+          and a bare call against an account-less terminal measures nothing: it
+          hangs to the rpyc bound or reads ``-10005`` (S-03(b), S-10). The
+          terminal needed the credential.
+      (b) CONTEXT D-09 (founder, 2026-10-04), at BOOT ONLY
+          (``source == HEAL_SOURCE_BOOT``): a probe that reads the unattributed
+          code ``0`` sends a credentialed house relaunch
+          (``_boot_accountless_relaunch``). A process restart loses the
+          in-process debt, and the account-less terminal it left would otherwise
+          go silent (RESEARCH Pitfall 1). The founder accepted this widening of
+          164.6.2's "credentials only on -6" rule. D-09's ``-10005`` half needs
+          no branch: that code already reaches the scrub escalation, which
+          relaunches with the house credentials (D-04 (i)).
+      (c) Every other reading keeps the original asymmetry. In particular a
+          session-monitor tick that reads ``0`` with no debt sends no credential
+          and escalates nothing, exactly as before.
 
     ⚠️ IN-02 — ``-6`` IS ONLY EVER OBSERVABLE THROUGH ``last_error()``, so the
     branch table above is conditional on that SECOND round-trip working. If
@@ -2197,6 +2311,12 @@ def _heal_blocking(
         try:
             client.assert_session_authorized()
         except Mt5ClientError as err:
+            if source == HEAL_SOURCE_BOOT and err.code == _MT5_UNATTRIBUTED_CODE:
+                # ⭐ 164.6.6.1 plan 04, CONTEXT D-09 — boot only; see THE BRANCH
+                # in this docstring and `_boot_accountless_relaunch`.
+                return _boot_accountless_relaunch(
+                    client, err, login, password, server, deadline
+                )
             if err.code != _MT5_NO_AUTHORIZED_ACCOUNT_CODE:
                 # ⛔ The verdict is COMPOSED FIRST and is byte-identical to the
                 # pre-escalation one: the escalation rides out on
@@ -2541,6 +2661,9 @@ async def heal_mt5_terminal_session(
                         # ⭐ WR-04 — the SAME instant the `wait_for` starts, so the
                         # blocking body's optional reads can never outlive it.
                         deadline=_clock() + budget_s,
+                        # ⭐ 164.6.6.1 plan 04 — D-09's boot-only branch keys
+                        # off the caller.
+                        source=source,
                     ),
                     timeout=budget_s,
                 )
