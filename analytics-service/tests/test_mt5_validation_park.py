@@ -45,12 +45,14 @@ from unittest.mock import MagicMock
 import pytest
 from fastapi import HTTPException
 
-from services import mt5_client, mt5_concurrency, mt5_probe
+from services import mt5_client, mt5_concurrency, mt5_probe, mt5_terminal_scrub
 from services.closed_sets import MT5_MASTER_PASSWORD_DETAIL
 from services.mt5_client import (
     Mt5ClientError,
     Mt5LoginRefusedError,
     Mt5SessionAbandoned,
+    mt5_relaunch_debt,
+    mt5_scrub_owed,
 )
 
 # Harness imported BY NAME (never edited: plan 05 edits those files in the same
@@ -72,6 +74,15 @@ from tests.test_ingestion_mt5 import (
     _FakeNamedTuple,
     _HEALTHY_TERMINAL,
     _INVESTOR_ORDER_CHECK,
+)
+# Phase 164.6.6.1 plan 06 — the SCRUB's wire double (plan 03/05's), imported by
+# symbol and aliased: this module already binds `_FakeMt5` to the probe's double.
+# Only plain helpers are imported, never that module's autouse fixtures.
+from tests.test_mt5_relogin import (
+    _FakeCronRuns,
+    _FakeMt5 as _ScrubWireMt5,
+    _HOUSE_TERMINAL as _SCRUB_HOUSE_TERMINAL,
+    _info_tuple,
 )
 
 # The validation terminal's key, as `Mt5Client.terminal_key` spells it for the
@@ -1349,3 +1360,119 @@ async def test_a_cancelled_park_alerts_and_re_raises_at_the_worker(
     finally:
         blocker.set()
     await _wait_for_thread_event(transport.house_login_returned)
+
+
+# --------------------------------------------------------------------------- #
+# Phase 164.6.6.1 plan 06 — the validation-terminal SCRUB, wired into both
+# validate sites (founder D-08: after the verdict, in its own lease, with a
+# "scrub owed" mark consumed before the next validation's probe).
+#
+# WHY THESE GATES MATTER (Rule 9):
+#   - a validation that logged in leaves a client's saved login (and deal
+#     caches) on the validation terminal until something scrubs it; the site
+#     must schedule that scrub on EVERY post-login exit;
+#   - W-1: a scrub that crosses while the validation's abandoned probe thread is
+#     still logging in deletes `accounts.dat` and the thread writes it straight
+#     back, so the terminal keeps the client's login while the mark says gone;
+#   - an owed scrub must be paid BEFORE the next validation's probe, or a missed
+#     scrub is simply forgotten;
+#   - the scrub is never a second verdict: what the caller sees is the same
+#     whether the scheduled scrub later succeeds, refuses, fails or is skipped.
+# --------------------------------------------------------------------------- #
+
+#: The house account as the SCRUB's wire double reports it after a credentialed
+#: relaunch: the same fabricated triple this module's autouse env sets, so the
+#: relaunch VERIFIES (the house-equality snapshot compares login and server).
+_SCRUB_HOUSE_ACCOUNT = _info_tuple(
+    "AccountInfo", 28, login=_HOUSE_LOGIN, server=_HOUSE_SERVER
+)
+
+_SCRUB_LOGGER = "quantalyze.analytics.mt5_terminal_scrub"
+
+
+def _install_scrub_double(
+    monkeypatch, order: list[tuple[Any, ...]], **scenario_extra: Any
+) -> _ScrubWireMt5:
+    """Point `mt5_terminal_scrub.Mt5Client` at the REAL client over the scrub's
+    in-memory wire double, which answers a credentialed relaunch on the house
+    account. Every scrub crossing appends ``("scrub",)`` to ``order``, the SAME
+    list the validation's `_RecordingMt5` records its logins and its release in,
+    so "the scrub ran after the release" is an ordering, not a reading."""
+    from services.mt5_client import Mt5Client
+
+    def _after_scrub_crossed() -> None:
+        order.append(("scrub",))
+
+    scenario: dict[str, Any] = {
+        "terminal_info": _SCRUB_HOUSE_TERMINAL,
+        "account_info": _SCRUB_HOUSE_ACCOUNT,
+        "after_recycle_crossed": _after_scrub_crossed,
+    }
+    scenario.update(scenario_extra)
+    fake = _ScrubWireMt5(scenario)
+
+    def _factory(host: str, port: int, **kwargs: Any) -> Mt5Client:
+        return Mt5Client(host, port, _connect=lambda **_ignored: fake, **kwargs)
+
+    monkeypatch.setattr(mt5_terminal_scrub, "Mt5Client", _factory)
+    return fake
+
+
+def _install_scrub_sink(monkeypatch) -> _FakeCronRuns:
+    sink = _FakeCronRuns()
+    monkeypatch.setattr(mt5_terminal_scrub, "get_supabase", lambda: sink)
+    return sink
+
+
+def _scrub_rows(sink: _FakeCronRuns) -> list[dict[str, Any]]:
+    return [
+        r["metadata"]
+        for r in sink.rows
+        if r.get("cron_name") == mt5_terminal_scrub.MT5_TERMINAL_SCRUB_CRON_NAME
+    ]
+
+
+async def _drain_scheduled_scrubs() -> list[asyncio.Task[None]]:
+    """Await every scheduled scrub task; return them (empty when none was)."""
+    tasks = list(mt5_terminal_scrub._SCRUB_TASKS)
+    if tasks:
+        await asyncio.gather(*tasks)
+    return tasks
+
+
+def _scrub_crossings(order: list[tuple[Any, ...]]) -> int:
+    return sum(1 for e in order if e == ("scrub",))
+
+
+async def test_scrub_a_wizard_validation_schedules_the_post_verdict_scrub_and_it_runs_after_release(
+    exchange_router, monkeypatch
+):
+    """⭐ THE TRACER (D-08). A read-only wizard validation logs a client in on
+    the validation terminal. After its verdict, a scrub is SCHEDULED; it takes
+    the terminal only once this validation released its client, deletes the
+    saved accounts, relaunches as house, clears the scrub-owed mark and writes
+    one `mt5_terminal_scrub` row. The response is untouched."""
+    router = exchange_router
+    transport = _RecordingMt5(_scenario())
+    _install_real_mt5_client(router, transport)
+    _install_scrub_double(monkeypatch, transport.events)
+    sink = _install_scrub_sink(monkeypatch)
+
+    assert await _call(router, _make_req()) == {"valid": True, "read_only": True}
+
+    tasks = await _drain_scheduled_scrubs()
+    assert len(tasks) == 1, (
+        "the validation logged a client in and scheduled no scrub: the client's "
+        "saved login stays on the validation terminal (D-08)"
+    )
+    kinds = [e[0] for e in transport.events]
+    assert _scrub_crossings(transport.events) == 1, kinds
+    last_release = max(i for i, k in enumerate(kinds) if k == "release")
+    assert last_release < kinds.index("scrub"), (
+        f"the scrub crossed before the validation released its client: {kinds!r}"
+    )
+    assert not mt5_scrub_owed(_VAL_KEY), "a verified scrub must clear the mark"
+    assert not mt5_relaunch_debt(_VAL_KEY)
+    rows = _scrub_rows(sink)
+    assert [r["kind"] for r in rows] == ["scrubbed"], rows
+    assert rows[0]["site"] == _WIZARD
