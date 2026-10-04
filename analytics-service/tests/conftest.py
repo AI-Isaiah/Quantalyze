@@ -117,11 +117,17 @@ def _handover_recorder_never_reaches_a_real_project(monkeypatch):
 # (the pending-key set, the probe-event registry, the task set and the alert
 # window) are NOT covered by `mt5_concurrency.reset_terminal_state_for_tests`, and
 # a pending key leaked from one test would dedupe the next test's schedule onto a
-# dead task, so they are reset around every test. A test that wants a scrub
-# double or rows patches these itself (this fixture runs first, so its patch wins).
+# dead task, so they are reset around every test. So is the per-terminal state in
+# `services.mt5_client` (through the ONE reset, `reset_terminal_state_for_tests`):
+# every validation now SETS the scrub-owed mark and only a verified scrub clears
+# it, so a mark left by one test's validation would refuse the next test's
+# validation of the same fabricated terminal (measured: the C5 wire cases in
+# `test_validate_key_venue_transient.py` went red on exactly that leak).
+# A test that wants a scrub double or rows patches these itself (this fixture runs
+# first, so its patch wins).
 @pytest.fixture(autouse=True)
 def _validation_scrub_never_reaches_a_real_terminal_or_project(monkeypatch):
-    from services import mt5_terminal_scrub
+    from services import mt5_concurrency, mt5_terminal_scrub
 
     def _refuse_project():
         raise RuntimeError(
@@ -135,8 +141,10 @@ def _validation_scrub_never_reaches_a_real_terminal_or_project(monkeypatch):
 
     monkeypatch.setattr(mt5_terminal_scrub, "get_supabase", _refuse_project)
     monkeypatch.setattr(mt5_terminal_scrub, "Mt5Client", _refuse_client)
+    mt5_concurrency.reset_terminal_state_for_tests()
     mt5_terminal_scrub._reset_terminal_scrub_state_for_tests()
     yield
+    mt5_concurrency.reset_terminal_state_for_tests()
     mt5_terminal_scrub._reset_terminal_scrub_state_for_tests()
 
 

@@ -1651,6 +1651,14 @@ async def test_two_concurrent_validates_are_serialized_on_the_terminal(
     client.login = MagicMock(side_effect=_slow_login)
     client.release = MagicMock(side_effect=lambda: events.append("release"))
     _install_mt5_client(router, client)
+    # Phase 164.6.6.1 plan 06 (2026-10-04): the first validation's login now marks
+    # the terminal scrub-owed (D-08), so in production the QUEUED second one is
+    # refused with the recoverable 424 while that scrub waits, the founder-visible
+    # cost pinned by tests/test_mt5_validation_park.py
+    # (`test_scrub_a_wizard_validation_already_queued_is_refused_quietly_and_one_scrub_runs`).
+    # THIS case is about the LEASE serializing the two logins, so the post-verdict
+    # schedule is patched out and both validations reach their probe.
+    router.schedule_validation_terminal_scrub = MagicMock(return_value=None)
 
     results = await asyncio.gather(
         _call(router, _make_req()), _call(router, _make_req())

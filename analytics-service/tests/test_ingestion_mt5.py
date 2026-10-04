@@ -724,6 +724,16 @@ async def test_two_concurrent_ingestion_validates_are_serialized_on_the_terminal
     """
     events: list[str] = []
     _install_shared_terminal(monkeypatch, events)
+    # Phase 164.6.6.1 plan 06 (2026-10-04): the first validate's login now marks
+    # the validation terminal scrub-owed (D-08), so in production the queued second
+    # one pays that scrub INLINE before its probe (decision 6, pinned by
+    # tests/test_mt5_validation_park.py). THIS case is about the LEASE serializing
+    # the two logins, so the post-verdict schedule is patched out and both
+    # validates go straight to their probe.
+    monkeypatch.setattr(
+        "services.ingestion.mt5.schedule_validation_terminal_scrub",
+        lambda *_a, **_k: None,
+    )
 
     results = await asyncio.gather(
         Mt5Adapter().validate(_req()), Mt5Adapter().validate(_req())

@@ -29,6 +29,8 @@ from services.mt5_client import (
     Mt5SessionAbandoned,
     MT5_VALIDATE_REQUEST_TIMEOUT_S,
     emit_mt5_stage_event,
+    mt5_relaunch_debt,
+    mt5_scrub_owed,
     mt5_terminal_key,
 )
 # D-29 — the ONE terminal-lock registry, imported (never re-declared) exactly as the
@@ -44,7 +46,10 @@ from services.mt5_handover import HOLDER_VALIDATION, SITE_VALIDATE_WIZARD
 # Phase 164.6.6.1 D-08 — the validation terminal's post-verdict scrub, scheduled
 # from this site's held lease. A service leaf over mt5_client / mt5_concurrency /
 # mt5_relogin; it never imports `routers.*`.
-from services.mt5_terminal_scrub import schedule_validation_terminal_scrub
+from services.mt5_terminal_scrub import (
+    report_scrub_owed_refusal,
+    schedule_validation_terminal_scrub,
+)
 # Phase 164.6.6 D-02 / D-05 — the ONE reader of the validation terminal's endpoint
 # and the alert this site fires when it is absent. Never the job pair.
 from services.mt5_relogin import (
@@ -1011,6 +1016,46 @@ async def _validate_mt5_key_probe(
             emit_mt5_stage_event(
                 "lease_wait", lease_started_at, ok=True, terminal_key=terminal_key
             )
+            # ⭐ Phase 164.6.6.1 D-08 — THE OWED GATE. A terminal still marked
+            # scrub-owed (a previous validation's scrub has not verified yet) or
+            # carrying relaunch debt (ended and not seen house-verified) may hold a
+            # client's saved login, or no account at all. A probe now would log a
+            # second client in over the first, or hang on an account-less terminal.
+            # So this validation is REFUSED with the existing recoverable 424, and
+            # the owed scrub is scheduled; nothing is connected, logged in or probed.
+            #
+            # ⛔ DECISION 6 — why the wizard refuses rather than paying the scrub
+            # in-request: the scrub and its credentialed relaunch are 5 rpyc
+            # crossings, and at the interactive 55 s rpyc bound that is 275 s,
+            # which fits neither the 75 s deadline / 60 s stage chain nor the
+            # 120 s client ceiling. The worker, with no client budget, pays it
+            # inline instead (`services/ingestion/mt5.py`).
+            #
+            # ⛔ REPORT BEFORE SCHEDULE. The reporter reads whether a scrub was
+            # already pending BEFORE this request: pending (a validation queued
+            # behind the one whose scrub is waiting for the lock) is one WARNING
+            # with no capture; nothing pending (a scrub genuinely missed, or the
+            # boot mark) is ERROR plus a windowed capture. Scheduling first would
+            # mark the key pending and make the ERROR branch unreachable.
+            #
+            # ⚠️ Residue, stated: while the scrub keeps failing (the house
+            # credential unset or wrong, the terminal unreachable), EVERY wizard
+            # validation is refused here; the per-cause ERROR alert is the
+            # operator signal. A validation already queued behind another one is
+            # refused while that one's scrub waits (the founder-visible cost that
+            # partly reverses D-29's queue-instead-of-fail).
+            if mt5_scrub_owed(terminal_key) or mt5_relaunch_debt(terminal_key):
+                report_scrub_owed_refusal(site=SITE_VALIDATE_WIZARD, key=terminal_key)
+                schedule_validation_terminal_scrub(
+                    host, port, site=SITE_VALIDATE_WIZARD, probe_thread_done=None
+                )
+                trace.outcome = "scrub_owed"
+                raise VenueTransientHTTPException(
+                    status_code=424,
+                    code="NETWORK_UNAVAILABLE",
+                    detail=NETWORK_ERROR_DETAIL,
+                    recoverable=True,
+                )
             # D-07 part 2 — where the deadline starts, so the park can read how much
             # of it is still unspent.
             deadline_started_at = _park_clock()
