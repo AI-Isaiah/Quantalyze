@@ -896,6 +896,21 @@ _LEASE_VERB = "mt5_terminal_lease"
 #: booking. The lineage notes ABOVE keep their numbers — they describe what was
 #: true when they were written — but a LIVE claim now names the roster, never its
 #: size. Read the size off the literal.
+#:
+#: ⭐ RE-CUT 2026-10-04 (Phase 164.6.6.1 / D-08, plan 05), THE ROSTER'S QUESTION
+#: ANSWERED. The new entry is `services/mt5_terminal_scrub.py::
+#: scrub_validation_terminal`, the validation terminal's post-verdict scrub in
+#: its OWN lease (held for `house`, site `terminal_scrub`).
+#:
+#: ⭐ *Does the new site touch an `Mt5Client` that was ALREADY touched under a
+#: DIFFERENT lease?* **NO, by construction.** The scrub builds a FRESH
+#: `Mt5Client` inside the `to_thread` body that runs under this one acquisition
+#: (`_scrub_validation_terminal_blocking`), and closes it in that body's
+#: `finally`. It is handed no client from the validation that scheduled it, so
+#: the lazy bind never has to rebind. The worker's inline path
+#: (`run_owed_validation_scrub_in_lease`) takes NO lease of its own: it runs
+#: under the worker's validation lease, and builds its own fresh client the
+#: same way. `scrub_validation_terminal` takes the lease ONCE.
 _PRODUCTION_LEASE_SITES: frozenset[tuple[str, str]] = frozenset(
     {
         ("services/allocator_positions.py", "_fetch_mt5_account_rows"),
@@ -908,6 +923,9 @@ _PRODUCTION_LEASE_SITES: frozenset[tuple[str, str]] = frozenset(
         # Phase 164.5.4 / D-01 — the MT5 full-backfill arm. See the 2026-09-20
         # re-cut note above, which answers the roster's own question.
         ("services/equity_reconstruction.py", "_mt5_fetch_window"),
+        # Phase 164.6.6.1 / D-08 — the validation terminal's post-verdict scrub.
+        # See the 2026-10-04 re-cut note above.
+        ("services/mt5_terminal_scrub.py", "scrub_validation_terminal"),
     }
 )
 
