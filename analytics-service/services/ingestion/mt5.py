@@ -60,10 +60,18 @@ from services.mt5_client import (
     Mt5Client,
     Mt5ClientError,
     Mt5SessionAbandoned,
+    mt5_relaunch_debt,
+    mt5_scrub_owed,
     mt5_terminal_key,
 )
 from services.mt5_concurrency import mt5_terminal_lease
 from services.mt5_handover import HOLDER_VALIDATION, SITE_VALIDATE_WORKER
+# Phase 164.6.6.1 D-08 — the validation terminal's scrub: paid inline before the
+# probe when owed (decision 6), scheduled after the verdict otherwise.
+from services.mt5_terminal_scrub import (
+    run_owed_validation_scrub_in_lease,
+    schedule_validation_terminal_scrub,
+)
 # Phase 164.6.6 D-02 / D-05 — the ONE reader of the validation terminal's endpoint
 # and the alert this site fires when it is absent. Never the job pair.
 from services.mt5_relogin import (
@@ -233,6 +241,26 @@ class Mt5Adapter:
             holder=HOLDER_VALIDATION,
             site=SITE_VALIDATE_WORKER,
         ):
+            # ⭐ Phase 164.6.6.1 D-08, decision 6 — THE OWED GATE, paid INLINE. A
+            # terminal still marked scrub-owed, or carrying relaunch debt, may hold
+            # a previous client's saved login or no account at all. The worker has
+            # no client budget (unlike the wizard, which refuses), so it runs the
+            # owed scrub under the lease it already holds, before it builds its own
+            # client. ⛔ A False answer means "do not probe in this lease": after
+            # `abandoned` the scrub thread may still be running under this lease,
+            # and after `skipped_probe_in_flight` a probe thread is still on the
+            # terminal. So it refuses with the worker's transient disposition and
+            # releases; the next attempt pays the scrub again.
+            if (
+                mt5_scrub_owed(terminal_key) or mt5_relaunch_debt(terminal_key)
+            ) and not await run_owed_validation_scrub_in_lease(
+                host, port, site=SITE_VALIDATE_WORKER
+            ):
+                raise Mt5ClientError(
+                    0,
+                    "MT5 validation terminal is owed a scrub that did not "
+                    "complete; retry later.",
+                )
             # RED-TEAM: _build_client → Mt5Client.__init__ opens the RPyC socket
             # SYNCHRONOUSLY (a blocking connect). Run construction OFF the event loop
             # under a wait_for ceiling; a hung/unreachable gateway connect on the loop
@@ -491,54 +519,72 @@ class Mt5Adapter:
                 # The sequential worker has no client budget, so no floor applies
                 # here: the park is bounded by `_MT5_PROBE_TIMEOUT_S`, which already
                 # has the inner-rpyc-bound-fires-first ordering.
+                # ⭐ Phase 164.6.6.1 D-08 + W-1 — the post-verdict SCRUB, the
+                # wizard's twin (`routers/exchange.py`). Scheduled on every
+                # post-login exit, AFTER the park and the close and still INSIDE
+                # the held lease, so the task queues on the terminal's lock ahead
+                # of any later acquirer and this probe thread's own event is
+                # registered before the scrub can take the terminal. Created,
+                # never awaited (`asyncio.Lock` is not re-entrant). On the
+                # `_MT5_PROBE_TIMEOUT_S` exit the thread may still be logging in;
+                # the scrub waits for its event and skips rather than cross.
                 try:
-                    if login_attempted:
-                        park_skip: str | None = None
-                        if not probe_thread_done.is_set():
-                            # `_MT5_PROBE_TIMEOUT_S` fired with the probe thread
-                            # still on the wire.
-                            park_skip = "probe_in_flight"
-                        elif probe_disqualified is not None:
-                            park_skip = probe_disqualified
-                        if park_skip is not None:
-                            report_park_skipped(park_skip, site=SITE_VALIDATE_WORKER)
-                        else:
-                            try:
-                                await asyncio.wait_for(
-                                    asyncio.to_thread(
-                                        park_on_house_account,
-                                        client,
-                                        house=read_env_mt5_credentials(),
-                                        site=SITE_VALIDATE_WORKER,
-                                        validation_hit_glitch=validation_hit_glitch,
-                                    ),
-                                    timeout=_MT5_PROBE_TIMEOUT_S,
-                                )
-                            except asyncio.TimeoutError:
-                                report_park_skipped("ceiling", site=SITE_VALIDATE_WORKER)
-                            except asyncio.CancelledError:
-                                # Per the founder decision (CONTEXT D-07 part 2 "Park
-                                # alert level"), every other skip or failure still
-                                # pages, and a cancelled park is one; cancellation
-                                # keeps propagating.
-                                report_park_skipped("park_cancelled", site=SITE_VALIDATE_WORKER)
-                                raise
-                except Exception as park_exc:  # noqa: BLE001 — the park must never replace the verdict
-                    logger.error(
-                        "mt5.validate: the D-07 park failed unexpectedly "
-                        "(error_class=%s)",
-                        type(park_exc).__name__,
-                    )
-                    # T-164.6.6-07: the park did not run, so this pages through
-                    # the closed cause set. `report_park_skipped` never raises.
-                    report_park_skipped("unrecognised_cause", site=SITE_VALIDATE_WORKER)
-                finally:
                     try:
-                        await asyncio.wait_for(
-                            asyncio.to_thread(client.close), timeout=_MT5_PROBE_TIMEOUT_S
+                        if login_attempted:
+                            park_skip: str | None = None
+                            if not probe_thread_done.is_set():
+                                # `_MT5_PROBE_TIMEOUT_S` fired with the probe thread
+                                # still on the wire.
+                                park_skip = "probe_in_flight"
+                            elif probe_disqualified is not None:
+                                park_skip = probe_disqualified
+                            if park_skip is not None:
+                                report_park_skipped(park_skip, site=SITE_VALIDATE_WORKER)
+                            else:
+                                try:
+                                    await asyncio.wait_for(
+                                        asyncio.to_thread(
+                                            park_on_house_account,
+                                            client,
+                                            house=read_env_mt5_credentials(),
+                                            site=SITE_VALIDATE_WORKER,
+                                            validation_hit_glitch=validation_hit_glitch,
+                                        ),
+                                        timeout=_MT5_PROBE_TIMEOUT_S,
+                                    )
+                                except asyncio.TimeoutError:
+                                    report_park_skipped("ceiling", site=SITE_VALIDATE_WORKER)
+                                except asyncio.CancelledError:
+                                    # Per the founder decision (CONTEXT D-07 part 2 "Park
+                                    # alert level"), every other skip or failure still
+                                    # pages, and a cancelled park is one; cancellation
+                                    # keeps propagating.
+                                    report_park_skipped("park_cancelled", site=SITE_VALIDATE_WORKER)
+                                    raise
+                    except Exception as park_exc:  # noqa: BLE001 — the park must never replace the verdict
+                        logger.error(
+                            "mt5.validate: the D-07 park failed unexpectedly "
+                            "(error_class=%s)",
+                            type(park_exc).__name__,
                         )
-                    except Exception:  # noqa: BLE001 — close must never mask the verdict
-                        pass
+                        # T-164.6.6-07: the park did not run, so this pages through
+                        # the closed cause set. `report_park_skipped` never raises.
+                        report_park_skipped("unrecognised_cause", site=SITE_VALIDATE_WORKER)
+                    finally:
+                        try:
+                            await asyncio.wait_for(
+                                asyncio.to_thread(client.close), timeout=_MT5_PROBE_TIMEOUT_S
+                            )
+                        except Exception:  # noqa: BLE001 — close must never mask the verdict
+                            pass
+                finally:
+                    if login_attempted:
+                        schedule_validation_terminal_scrub(
+                            host,
+                            port,
+                            site=SITE_VALIDATE_WORKER,
+                            probe_thread_done=probe_thread_done,
+                        )
 
     async def fetch_raw(self, creds_or_file: dict[str, Any]) -> list[Trade]:
         # FAIL LOUD — no synchronous flow routes mt5 to a fill-based Trade list.

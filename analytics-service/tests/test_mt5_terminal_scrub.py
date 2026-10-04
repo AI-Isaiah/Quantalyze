@@ -857,3 +857,138 @@ async def test_TERMINAL_SCRUB_the_row_metadata_key_set_is_closed(
         assert (meta["accounts_deleted"], meta["trades_deleted"]) == (1, 2)
     else:
         assert meta["refused"] is None and meta["relaunch_status"] is None
+
+
+# --------------------------------------------------------------------------- #
+# Plan 06 Task 3 — the validation terminal is marked owed AT BOOT.
+#
+# WHY (Rule 9): the scrub-owed and relaunch-debt marks are in-process, so a
+# restart forgets them, and D-09's boot heal reads only the JOB gateway. Without
+# a boot mark, an account a validation left on the validation terminal survives
+# every deploy unnoticed. The hook only MARKS: a scrub scheduled at boot could
+# kill the terminal under the OLD process's in-flight validation during a
+# Railway deploy overlap, because the lease does not cross processes.
+# --------------------------------------------------------------------------- #
+
+
+def test_TERMINAL_SCRUB_BOOT_marks_the_validation_terminal_owed_and_starts_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Synchronous, with no running loop: the validation terminal ends marked
+    owed, no task was created and no client was built."""
+    _, constructions = _install_scrub_client(monkeypatch, dict(_VERIFIED))
+    assert not mt5_scrub_owed(_VAL_KEY)
+
+    assert mt5_terminal_scrub.mark_validation_terminal_owed_at_boot() is None
+
+    assert mt5_scrub_owed(_VAL_KEY), "the boot hook did not mark the terminal"
+    assert mt5_terminal_scrub._SCRUB_TASKS == set()
+    assert mt5_terminal_scrub._PENDING_SCRUB_KEYS == set()
+    assert constructions == []
+    assert not mt5_scrub_owed(mt5_terminal_key("job-gateway.test", 1)), (
+        "harness: a read never mints an entry"
+    )
+
+
+@pytest.mark.parametrize(
+    ("host", "port"),
+    [(None, str(_VAL_PORT)), (_VAL_HOST, None), (_VAL_HOST, "not-a-port")],
+    ids=["host-unset", "port-unset", "port-malformed"],
+)
+def test_TERMINAL_SCRUB_BOOT_an_unset_or_malformed_endpoint_marks_nothing(
+    monkeypatch: pytest.MonkeyPatch, host: str | None, port: str | None
+) -> None:
+    """No validation gateway configured: nothing to mark, nothing raised (the
+    validate sites already refuse loudly on an unconfigured gateway)."""
+    for name, value in (
+        ("MT5_VALIDATION_GATEWAY_HOST", host),
+        ("MT5_VALIDATION_GATEWAY_PORT", port),
+    ):
+        if value is None:
+            monkeypatch.delenv(name, raising=False)
+        else:
+            monkeypatch.setenv(name, value)
+
+    assert mt5_terminal_scrub.mark_validation_terminal_owed_at_boot() is None
+
+    assert mt5_client._MT5_TERMINAL_SCRUB_OWED == set()
+    assert mt5_terminal_scrub._SCRUB_TASKS == set()
+
+
+def test_TERMINAL_SCRUB_BOOT_a_raising_endpoint_reader_never_escapes(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """It runs synchronously inside `main.lifespan` before the worker loops
+    start, outside any `try`: a raise here would abort uvicorn startup and take
+    `/health` and every loop down for an MT5 instrument. So it never raises, and
+    it names the failure by class only."""
+
+    def _boom() -> None:
+        raise RuntimeError(f"reader broke {_VAL_HOST}")
+
+    monkeypatch.setattr(
+        mt5_terminal_scrub, "read_env_validation_gateway_endpoint", _boom
+    )
+    with caplog.at_level(logging.DEBUG, logger=_LOGGER_NAME):
+        assert mt5_terminal_scrub.mark_validation_terminal_owed_at_boot() is None
+    assert mt5_client._MT5_TERMINAL_SCRUB_OWED == set()
+    rendered = " ".join(r.getMessage() for r in caplog.records)
+    assert "RuntimeError" in rendered
+    for literal in _FORBIDDEN_LITERALS:
+        assert literal not in rendered, literal
+
+
+_BOOT_MARK_SYMBOL = "mark_validation_terminal_owed_at_boot"
+
+
+def _boot_mark_calls(lifespan: Any) -> list[Any]:
+    import ast
+
+    return [
+        node
+        for node in ast.walk(lifespan)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == _BOOT_MARK_SYMBOL
+    ]
+
+
+def test_TERMINAL_SCRUB_BOOT_lifespan_calls_the_boot_mark_once_synchronously_never_as_a_task(
+) -> None:
+    """`main.lifespan` calls the boot mark exactly ONCE, as a plain statement
+    (not awaited, not handed to `create_task`), before the task list is built.
+    In the task list it would inherit `_crash_handler`, and it is not a loop."""
+    import ast
+
+    from tests.test_mt5_relogin import _lifespan_node, _main_source
+
+    lifespan = _lifespan_node(_main_source())
+    calls = _boot_mark_calls(lifespan)
+    assert len(calls) == 1, (
+        f"main.lifespan calls {_BOOT_MARK_SYMBOL} {len(calls)} times, expected 1: "
+        "without it a restart forgets an account a validation left on the "
+        "validation terminal"
+    )
+    statements = [
+        node for node in ast.walk(lifespan)
+        if isinstance(node, ast.Expr) and node.value is calls[0]
+    ]
+    assert statements, "the boot mark must be a plain synchronous statement"
+    for node in ast.walk(lifespan):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "create_task"
+        ):
+            assert all(
+                not (isinstance(a, ast.Call) and a in calls) for a in node.args
+            ), "the boot mark was handed to create_task"
+    task_lists = [
+        node for node in ast.walk(lifespan)
+        if isinstance(node, ast.Assign)
+        and any(isinstance(t, ast.Name) and t.id == "tasks" for t in node.targets)
+    ]
+    assert task_lists, "harness: main.lifespan no longer builds `tasks`"
+    assert calls[0].lineno < task_lists[0].lineno, (
+        "the boot mark must run before the worker tasks are created"
+    )

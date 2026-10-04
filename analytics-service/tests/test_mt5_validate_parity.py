@@ -67,7 +67,7 @@ import pytest
 from fastapi import HTTPException
 from unittest.mock import MagicMock
 
-from services import mt5_concurrency
+from services import mt5_concurrency, mt5_terminal_scrub
 from services.closed_sets import MT5_WRONG_SERVER_DETAIL
 from services.exchange import AUTH_FAILED_DETAIL
 from services.ingestion.adapter import KeySubmissionRequest
@@ -302,6 +302,15 @@ def _drive_both_paths(exchange_module, monkeypatch, make_client):
         )
     except BaseException as exc:  # noqa: BLE001 — the raise IS the disposition
         router_outcome = exc
+
+    # Phase 164.6.6.1 plan 06 (2026-10-04): the router half's login now marks the
+    # validation terminal scrub-owed (D-08), and the adapter half validates the
+    # SAME fabricated terminal, so it would pay that scrub inline first and never
+    # reach the probe this case compares. Each half is about a fresh terminal, so
+    # the per-terminal state is reset between them. The owed gate itself is pinned
+    # in tests/test_mt5_validation_park.py.
+    mt5_concurrency.reset_terminal_state_for_tests()
+    mt5_terminal_scrub._reset_terminal_scrub_state_for_tests()
 
     adapter_client = make_client()
     monkeypatch.setattr(

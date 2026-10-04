@@ -855,6 +855,9 @@ def mt5_relaunch_debt(terminal_key: str) -> bool:
 # owed at boot (its hook, `mark_validation_terminal_owed_at_boot`), so the first
 # validation after a restart pays the scrub before its probe. Until that hook
 # ships, a restart forgets an owed scrub.
+# ✅ SHIPPED 2026-10-04 (plan 06): `services.mt5_terminal_scrub` defines the hook
+# and `main.lifespan` calls it once at startup. The two sentences above are kept
+# as lineage.
 # --------------------------------------------------------------------------- #
 _MT5_TERMINAL_SCRUB_OWED: set[str] = set()
 
