@@ -756,3 +756,64 @@ async def test_TERMINAL_SCRUB_an_unknown_alert_cause_is_never_interpolated(
     assert "cause=unrecognised_cause" in alerts[0].getMessage()
     assert "site=unattributed" in alerts[0].getMessage()
     assert hostile not in captures[0] and "free text" not in captures[0]
+
+
+# --------------------------------------------------------------------------- #
+# Task 3 — the closed row contract.
+# --------------------------------------------------------------------------- #
+
+#: ⛔ The scrub row's metadata keys, as LITERALS (comparing the module's set
+#: with itself would pass whatever it held). A NEW set: the episode and handover
+#: key sets are never widened for this row.
+_SCRUB_ROW_METADATA_KEYS = frozenset(
+    {
+        "schema_version",
+        "kind",
+        "terminal_role",
+        "site",
+        "refused",
+        "accounts_deleted",
+        "accounts_missing",
+        "accounts_errors",
+        "trades_deleted",
+        "profile_accounts_found",
+        "relaunch_status",
+        "records_account_number",
+    }
+)
+
+
+@pytest.mark.parametrize("scenario_id", ["scrubbed", "skipped"])
+async def test_TERMINAL_SCRUB_the_row_metadata_key_set_is_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    sink: _FakeCronRuns,
+    captures: list[str],
+    scenario_id: str,
+) -> None:
+    """One closed POINT EVENT per attempt, whatever the kind: inserted closed
+    (`status='ok'`, `started_at == completed_at`), never a `running` row, and
+    carrying exactly the closed key set with counts, kinds and literals only."""
+    _install_scrub_client(monkeypatch, dict(_VERIFIED))
+    if scenario_id == "skipped":
+        monkeypatch.delenv("MT5_LOGIN")
+    await _schedule_and_drain(_set_event())
+
+    [row] = _scrub_rows(sink)
+    assert row["status"] == "ok"
+    assert row["started_at"] and row["completed_at"] == row["started_at"]
+    assert row["error"] is None
+    assert sink.open_rows() == []
+    meta = row["metadata"]
+    assert set(meta) == _SCRUB_ROW_METADATA_KEYS
+    assert mt5_terminal_scrub._SCRUB_ROW_METADATA_KEYS == _SCRUB_ROW_METADATA_KEYS
+    assert meta["schema_version"] == mt5_terminal_scrub.SCHEMA_VERSION == 1
+    assert meta["terminal_role"] == "validation"
+    assert meta["records_account_number"] is False
+    assert meta["kind"] in mt5_terminal_scrub._SCRUB_KINDS
+    for key in ("refused", "accounts_deleted", "accounts_missing", "accounts_errors",
+                "trades_deleted", "profile_accounts_found"):
+        assert meta[key] is None or type(meta[key]) is int, (key, meta[key])
+    if scenario_id == "scrubbed":
+        assert (meta["accounts_deleted"], meta["trades_deleted"]) == (1, 2)
+    else:
+        assert meta["refused"] is None and meta["relaunch_status"] is None
