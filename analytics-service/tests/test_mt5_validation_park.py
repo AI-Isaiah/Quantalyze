@@ -1791,6 +1791,21 @@ async def test_scrub_worker_owed_gate_refuses_transiently_when_the_inline_scrub_
     assert transport.events == [], transport.events
     assert [r["kind"] for r in _scrub_rows(sink)] == ["failed"]
     assert mt5_scrub_owed(_VAL_KEY)
+    # The refusal is OUR terminal's state, never the user's key, and it must stay
+    # retryable: classified exactly like the worker's existing D-15 transient
+    # (`Mt5ClientError(0, "MT5 capability undetermined ...")`), never auth,
+    # wrong_server or permanent.
+    from services.job_worker import classify_exception
+    from services.mt5_validation import classify_mt5_login_error
+
+    assert classify_mt5_login_error(ei.value) == "transient"
+    d15 = Mt5ClientError(
+        0,
+        "MT5 capability undetermined: the gateway trade-permission signal was "
+        "unavailable, so read-only could not be proven.",
+    )
+    assert classify_exception(ei.value)[0] == classify_exception(d15)[0]
+    assert classify_exception(ei.value)[0] != "permanent"
 
 
 #: How the scheduled scrub is made to end, per invariance mode.
