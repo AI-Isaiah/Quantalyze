@@ -2,20 +2,20 @@
 gsd_state_version: "1.0"
 milestone: v1.20
 milestone_name: Backlog Burndown (Phases 158+)
-current_phase: 164.6.6
-current_phase_name: MT5TERMINALISOLATION
-status: executing
-stopped_at: "164.9.6 (#936) and 164.5.2.1 (#937) landed and closed; 167.1.2-08 landed (#939, post-deploy census pending); 164.6.6 executing wave 1"
+current_phase: 164.6.6.1
+current_phase_name: MT5SCRUB
+status: planning
+stopped_at: "164.6.6 closed (plan 08 live checks 2026-10-04, #946); findings routed to 164.6.6.1 and 164.6.6.3; next 164.6.6.1"
 last_updated: "2026-10-03T14:43:50.465Z"
 last_activity: 2026-10-04
-last_activity_desc: 14 phases closed after the 2026-10-03 production UAT (161, 164.6.7, 166, 166.1, 166.2, 167.1, 167.2, 167.2.1, 169, 169.2, 169.3, 169.4, 169.4.1, 169.5); defects routed to 164.6.6.3 UATFIXES
+last_activity_desc: 164.6.6 MT5TERMINALISOLATION closed after plan 08 live checks; L7 wedge routed to 164.6.6.1, onboarding regression + L-D05 message routed to 164.6.6.3
 state_head: 1d0c22583ef7b2a1c905320bbf70da0d4f3fb367
 progress:
   total_phases: 94
-  completed_phases: 69
+  completed_phases: 70
   total_plans: 477
   completed_plans: 473
-  percent: 73
+  percent: 74
 ---
 
 ## ⭐ STATE lineage
@@ -975,7 +975,7 @@ Prior-phase 141.1 close-out detail (retained; NOT about 142.1):
         after PYAPIFIX-01" ordering is now **SATISFIED**.
         2 WARNING gaps, no BLOCKER. See `140.1-VERIFICATION.md`. Not transitioned (`--no-transition`).
 
-Progress: [███████░░░] 73%
+Progress: [███████░░░] 74%
 
 ### Phase 140.1 close-out — open items (do NOT lose these)
 
