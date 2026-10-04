@@ -4,8 +4,8 @@ milestone: v1.20
 milestone_name: Backlog Burndown (Phases 158+)
 current_phase: 164.6.6.1
 current_phase_name: MT5SCRUB
-status: planning
-stopped_at: "164.6.6 closed (plan 08 live checks 2026-10-04, #946); findings routed to 164.6.6.1 and 164.6.6.3; next 164.6.6.1"
+status: ready_to_execute
+stopped_at: "164.6.6.1 re-planned 2026-10-04 after the scrub spike (8 plans, 6 waves, plan-check passed); next execute, plan 02 S-11 checkpoint first"
 last_updated: "2026-10-03T14:43:50.465Z"
 last_activity: 2026-10-04
 last_activity_desc: 164.6.6 MT5TERMINALISOLATION closed after plan 08 live checks; L7 wedge routed to 164.6.6.1, onboarding regression + L-D05 message routed to 164.6.6.3
