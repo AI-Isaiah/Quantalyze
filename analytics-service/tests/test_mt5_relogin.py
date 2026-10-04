@@ -1914,6 +1914,39 @@ def _capture_outcomes(monkeypatch: pytest.MonkeyPatch) -> list:
     return outcomes
 
 
+def _capture_and_record_outcomes(monkeypatch: pytest.MonkeyPatch) -> list:
+    """⭐ 164.6.6.1 plan 08 — `_capture_outcomes`, but the REAL recorder still
+    runs, so a `sink` fixture in the same test receives the rows. ⛔ Without
+    this, a test that both reads `escalation_kind` and scans the rows for a
+    secret scans an empty store and passes on nothing."""
+    outcomes: list = []
+    real = mt5_relogin.record_mt5_heal_outcome
+
+    async def _record(outcome, *, source, poll_interval_s):
+        outcomes.append(outcome)
+        await real(outcome, source=source, poll_interval_s=poll_interval_s)
+
+    monkeypatch.setattr(mt5_relogin, "record_mt5_heal_outcome", _record)
+    return outcomes
+
+
+def _assert_rows_carry_no_secret(sink) -> None:
+    """⭐ 164.6.6.1 plan 08 — secret hygiene on the ROWS of an `ipc_fault` tick,
+    stated as what it is. The first reading is `ipc_fault`, which classifies
+    `not_measured`, and a not-measured reading writes NOTHING by design
+    (`record_mt5_session_reading`), and the escalation kind never reaches a
+    row. So with the REAL recorder running (`_capture_and_record_outcomes`), the
+    store must stay EMPTY: a row appearing here is a new write path, and it is
+    scanned field by field for every forbidden literal and the rotated saved
+    password before the emptiness assertion names it."""
+    _assert_no_secret_reached_any_row(sink)
+    for row in sink.rows:
+        assert _STALE_SAVED_PASSWORD not in repr(row), row
+    assert sink.rows == [], (
+        f"an ipc_fault tick wrote an episode row, which no path did before: {sink.rows}"
+    )
+
+
 def _recycle_count(fake) -> int:
     """Every remote call that ends the terminal process: the recycle verb's and,
     since 164.6.6.1 plan 03, the scrub verb's."""
@@ -1982,6 +2015,84 @@ async def test_L7_a_stale_saved_house_password_no_longer_wedges_the_jobs_termina
     assert credentialed[0]["password"] == _FAKE_PASSWORD
     assert mt5_client.mt5_relaunch_debt(_heal_terminal_key()) is False
     _assert_no_credential_value_escaped(_records(caplog))
+
+
+#: ⭐ 164.6.6.1 plan 08 — the password the terminal's SAVED copy holds after a
+#: rotation. Obviously fake (this repo is PUBLIC), and deliberately not
+#: `_FAKE_PASSWORD`: the env value is the rotated one.
+_STALE_SAVED_PASSWORD = "n0t-the-saved-copy"
+
+
+@pytest.mark.parametrize(
+    "stale_knobs",
+    [
+        pytest.param(
+            {"saved_house_password_stale": True, "saved_password": _STALE_SAVED_PASSWORD},
+            id="stale-flag-and-rotated-saved-copy",
+        ),
+        # The rotation alone makes the saved copy stale; no second knob masks it.
+        pytest.param(
+            {"saved_password": _STALE_SAVED_PASSWORD}, id="rotation-only"
+        ),
+    ],
+)
+async def test_L7_ROTATION_a_rotated_house_password_heals_through_the_env_value_not_the_saved_copy(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    sink,
+    stale_knobs: dict,
+) -> None:
+    """⭐ 164.6.6.1 plan 08, criterion 4 (SCRUB-C4) — ROTATION, END TO END.
+
+    `MT5_PASSWORD` was rotated at the broker, so the jobs terminal's SAVED house
+    copy no longer matches it, and every relaunch from that copy opens the Login
+    dialog and reads `-10005` (the 2026-10-04 L7 shape). The heal must go first
+    probe -> capture -> scrub -> CREDENTIALED relaunch -> house check, and the
+    only password that may ever reach `initialize()` is the ENV value: a relaunch
+    that fell back on the saved copy would log in with the stale password and
+    re-open the same dialog.
+
+    ⛔ RED under a neuter that makes `_relaunch_as_house` send a BARE
+    `initialize()` instead of `initialize_with_credentials` (recorded in the
+    plan 08 SUMMARY): the account-less terminal then reads `-10005` on every
+    poll and the escalation ends `still_faulted` with the debt still owed."""
+    from services import mt5_client
+
+    _set_full_env(monkeypatch)
+    fake, _c = _install_client(
+        monkeypatch,
+        {
+            **_WEDGED,
+            **stale_knobs,
+            "terminal_info": _HOUSE_TERMINAL,
+            "account_info": _HOUSE_ACCOUNT,
+        },
+    )
+    assert fake.saved_login_stale, "the scenario did not make the saved copy stale"
+    outcomes = _capture_and_record_outcomes(monkeypatch)
+
+    with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
+        await _heal_n_times(1)
+
+    assert outcomes[0].escalation_kind == mt5_session_episodes.KIND_IPC_FAULT_RECYCLED
+    conn = fake._MetaTrader5__conn
+    assert len(conn.scrub_calls) == 1, conn.scrub_calls
+    credentialed = [kw for kw in fake.initialize_kwargs if "login" in kw]
+    assert credentialed, "no credentialed initialize() ran: the relaunch was bare"
+    assert all(kw["password"] == _FAKE_PASSWORD for kw in credentialed), (
+        "a credentialed initialize() carried something other than the ENV password"
+    )
+    assert all(
+        _STALE_SAVED_PASSWORD not in repr(kw) for kw in fake.initialize_kwargs
+    ), "the stale saved password reached initialize()"
+    after_scrub = fake.call_order[fake.call_order.index("scrub") + 1 :]
+    assert "initialize" not in after_scrub, fake.call_order
+    assert mt5_client.mt5_relaunch_debt(_heal_terminal_key()) is False
+    for record in caplog.records:
+        assert _FAKE_PASSWORD not in record.getMessage()
+        assert _STALE_SAVED_PASSWORD not in record.getMessage()
+    _assert_no_credential_value_escaped(_records(caplog))
+    _assert_rows_carry_no_secret(sink)
 
 
 async def test_ESCALATION_five_consecutive_ipc_timeouts_produce_exactly_ONE_recycle(
