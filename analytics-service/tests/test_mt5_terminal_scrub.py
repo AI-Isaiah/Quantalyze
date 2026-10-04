@@ -536,6 +536,46 @@ async def test_TERMINAL_SCRUB_the_scheduled_scrub_takes_the_lock_BEFORE_a_later_
     )
 
 
+async def test_TERMINAL_SCRUB_a_validation_in_the_gap_after_the_lock_release_still_gets_its_scrub(
+    monkeypatch: pytest.MonkeyPatch, sink: _FakeCronRuns, captures: list[str]
+) -> None:
+    """The lease releases the lock and THEN awaits its handover row (up to 5 s
+    on a slow sink). A validation can take the terminal in that gap and
+    schedule its own scrub. If the finished task's key still read as pending
+    then, that schedule would be deduped onto a task that will never scrub
+    again: the mark set, the client's login on the terminal, and no scrub
+    coming. Stand-in: the handover write itself schedules, once."""
+    fake, _ = _install_scrub_client(monkeypatch, dict(_VERIFIED))
+    real_handover = mt5_concurrency.record_mt5_terminal_handover
+    scheduled_in_gap: list[bool] = []
+
+    async def _handover_then_a_validation(**kwargs: Any) -> None:
+        await real_handover(**kwargs)
+        if not scheduled_in_gap:
+            scheduled_in_gap.append(True)
+            mt5_terminal_scrub.schedule_validation_terminal_scrub(
+                _VAL_HOST, _VAL_PORT, site=SITE_VALIDATE_WIZARD, probe_thread_done=None
+            )
+
+    monkeypatch.setattr(
+        mt5_concurrency, "record_mt5_terminal_handover", _handover_then_a_validation
+    )
+    mt5_terminal_scrub.schedule_validation_terminal_scrub(
+        _VAL_HOST, _VAL_PORT, site=SITE_VALIDATE_WIZARD, probe_thread_done=None
+    )
+    for _ in range(3):
+        tasks = list(mt5_terminal_scrub._SCRUB_TASKS)
+        if not tasks:
+            break
+        await asyncio.gather(*tasks)
+    assert scheduled_in_gap == [True], "the stand-in validation never ran"
+    assert len(fake._MetaTrader5__conn.scrub_calls) == 2, (
+        "the schedule made in the gap was deduped onto a finished task"
+    )
+    assert [r["metadata"]["kind"] for r in _scrub_rows(sink)] == ["scrubbed", "scrubbed"]
+    assert not mt5_scrub_owed(_VAL_KEY)
+
+
 def _raising_lease(*_a: Any, **_k: Any) -> Any:
     @asynccontextmanager
     async def _lease() -> AsyncIterator[None]:

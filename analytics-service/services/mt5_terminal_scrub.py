@@ -517,16 +517,29 @@ async def scrub_validation_terminal(host: str, port: int, *, site: str) -> None:
     holds the terminal, and nothing can log in while it scrubs. A raise from the
     lease itself still writes a ``failed`` row. The outer guard is the shared
     never-raises shape (one ``except Exception`` whose body is one nested
-    ``try`` with a ``BaseException`` fallback). The pending key is released in
-    an inner ``finally`` inside the guard.
+    ``try`` with a ``BaseException`` fallback).
+
+    ⛔ The pending key is released INSIDE the lease body, while the lock is
+    still held. The lease's own exit releases the lock and only then awaits the
+    handover row (up to 5 s on a slow sink). A key released after that would
+    still read as pending while the terminal is free: a validation that ran in
+    that gap would schedule, be deduped onto this finished task, and leave the
+    mark set with no scrub coming. A raise before the body ran (the lease's
+    acquisition) releases the key in the outer ``finally`` instead, guarded by
+    ``released`` so it never drops a key a newer task has since taken.
     """
     try:
         key = mt5_terminal_key(host, port)
+        released = False
         try:
             async with mt5_terminal_lease(
                 key, wait_s=None, holder=HOLDER_HOUSE, site=SITE_TERMINAL_SCRUB
             ):
-                await _scrub_under_lease(host, port, site=site)
+                try:
+                    await _scrub_under_lease(host, port, site=site)
+                finally:
+                    _PENDING_SCRUB_KEYS.discard(key)
+                    released = True
         except Exception as lease_error:  # noqa: BLE001 — every exit is a recorded kind
             logger.error(
                 "mt5 validation terminal scrub: the scrub's lease raised "
@@ -538,7 +551,8 @@ async def scrub_validation_terminal(host: str, port: int, *, site: str) -> None:
                 kind=SCRUB_KIND_FAILED, site=site, result=None
             )
         finally:
-            _PENDING_SCRUB_KEYS.discard(key)
+            if not released:
+                _PENDING_SCRUB_KEYS.discard(key)
     except Exception as exc:  # noqa: BLE001 — see the docstring; this is the control
         try:
             logger.error(
