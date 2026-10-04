@@ -51,6 +51,7 @@ import inspect
 import logging
 import math
 import os
+import re
 import textwrap
 import threading
 from contextlib import asynccontextmanager
@@ -1914,6 +1915,39 @@ def _capture_outcomes(monkeypatch: pytest.MonkeyPatch) -> list:
     return outcomes
 
 
+def _capture_and_record_outcomes(monkeypatch: pytest.MonkeyPatch) -> list:
+    """⭐ 164.6.6.1 plan 08 — `_capture_outcomes`, but the REAL recorder still
+    runs, so a `sink` fixture in the same test receives the rows. ⛔ Without
+    this, a test that both reads `escalation_kind` and scans the rows for a
+    secret scans an empty store and passes on nothing."""
+    outcomes: list = []
+    real = mt5_relogin.record_mt5_heal_outcome
+
+    async def _record(outcome, *, source, poll_interval_s):
+        outcomes.append(outcome)
+        await real(outcome, source=source, poll_interval_s=poll_interval_s)
+
+    monkeypatch.setattr(mt5_relogin, "record_mt5_heal_outcome", _record)
+    return outcomes
+
+
+def _assert_rows_carry_no_secret(sink) -> None:
+    """⭐ 164.6.6.1 plan 08 — secret hygiene on the ROWS of an `ipc_fault` tick,
+    stated as what it is. The first reading is `ipc_fault`, which classifies
+    `not_measured`, and a not-measured reading writes NOTHING by design
+    (`record_mt5_session_reading`), and the escalation kind never reaches a
+    row. So with the REAL recorder running (`_capture_and_record_outcomes`), the
+    store must stay EMPTY: a row appearing here is a new write path, and it is
+    scanned field by field for every forbidden literal and the rotated saved
+    password before the emptiness assertion names it."""
+    _assert_no_secret_reached_any_row(sink)
+    for row in sink.rows:
+        assert _STALE_SAVED_PASSWORD not in repr(row), row
+    assert sink.rows == [], (
+        f"an ipc_fault tick wrote an episode row, which no path did before: {sink.rows}"
+    )
+
+
 def _recycle_count(fake) -> int:
     """Every remote call that ends the terminal process: the recycle verb's and,
     since 164.6.6.1 plan 03, the scrub verb's."""
@@ -1982,6 +2016,84 @@ async def test_L7_a_stale_saved_house_password_no_longer_wedges_the_jobs_termina
     assert credentialed[0]["password"] == _FAKE_PASSWORD
     assert mt5_client.mt5_relaunch_debt(_heal_terminal_key()) is False
     _assert_no_credential_value_escaped(_records(caplog))
+
+
+#: ⭐ 164.6.6.1 plan 08 — the password the terminal's SAVED copy holds after a
+#: rotation. Obviously fake (this repo is PUBLIC), and deliberately not
+#: `_FAKE_PASSWORD`: the env value is the rotated one.
+_STALE_SAVED_PASSWORD = "n0t-the-saved-copy"
+
+
+@pytest.mark.parametrize(
+    "stale_knobs",
+    [
+        pytest.param(
+            {"saved_house_password_stale": True, "saved_password": _STALE_SAVED_PASSWORD},
+            id="stale-flag-and-rotated-saved-copy",
+        ),
+        # The rotation alone makes the saved copy stale; no second knob masks it.
+        pytest.param(
+            {"saved_password": _STALE_SAVED_PASSWORD}, id="rotation-only"
+        ),
+    ],
+)
+async def test_L7_ROTATION_a_rotated_house_password_heals_through_the_env_value_not_the_saved_copy(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    sink,
+    stale_knobs: dict,
+) -> None:
+    """⭐ 164.6.6.1 plan 08, criterion 4 (SCRUB-C4) — ROTATION, END TO END.
+
+    `MT5_PASSWORD` was rotated at the broker, so the jobs terminal's SAVED house
+    copy no longer matches it, and every relaunch from that copy opens the Login
+    dialog and reads `-10005` (the 2026-10-04 L7 shape). The heal must go first
+    probe -> capture -> scrub -> CREDENTIALED relaunch -> house check, and the
+    only password that may ever reach `initialize()` is the ENV value: a relaunch
+    that fell back on the saved copy would log in with the stale password and
+    re-open the same dialog.
+
+    ⛔ RED under a neuter that makes `_relaunch_as_house` send a BARE
+    `initialize()` instead of `initialize_with_credentials` (recorded in the
+    plan 08 SUMMARY): the account-less terminal then reads `-10005` on every
+    poll and the escalation ends `still_faulted` with the debt still owed."""
+    from services import mt5_client
+
+    _set_full_env(monkeypatch)
+    fake, _c = _install_client(
+        monkeypatch,
+        {
+            **_WEDGED,
+            **stale_knobs,
+            "terminal_info": _HOUSE_TERMINAL,
+            "account_info": _HOUSE_ACCOUNT,
+        },
+    )
+    assert fake.saved_login_stale, "the scenario did not make the saved copy stale"
+    outcomes = _capture_and_record_outcomes(monkeypatch)
+
+    with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
+        await _heal_n_times(1)
+
+    assert outcomes[0].escalation_kind == mt5_session_episodes.KIND_IPC_FAULT_RECYCLED
+    conn = fake._MetaTrader5__conn
+    assert len(conn.scrub_calls) == 1, conn.scrub_calls
+    credentialed = [kw for kw in fake.initialize_kwargs if "login" in kw]
+    assert credentialed, "no credentialed initialize() ran: the relaunch was bare"
+    assert all(kw["password"] == _FAKE_PASSWORD for kw in credentialed), (
+        "a credentialed initialize() carried something other than the ENV password"
+    )
+    assert all(
+        _STALE_SAVED_PASSWORD not in repr(kw) for kw in fake.initialize_kwargs
+    ), "the stale saved password reached initialize()"
+    after_scrub = fake.call_order[fake.call_order.index("scrub") + 1 :]
+    assert "initialize" not in after_scrub, fake.call_order
+    assert mt5_client.mt5_relaunch_debt(_heal_terminal_key()) is False
+    for record in caplog.records:
+        assert _FAKE_PASSWORD not in record.getMessage()
+        assert _STALE_SAVED_PASSWORD not in record.getMessage()
+    _assert_no_credential_value_escaped(_records(caplog))
+    _assert_rows_carry_no_secret(sink)
 
 
 async def test_ESCALATION_five_consecutive_ipc_timeouts_produce_exactly_ONE_recycle(
@@ -3718,6 +3830,483 @@ async def test_WR04_SCRUB_a_scrub_the_budget_cannot_finish_is_never_started(
     fake._scenario["crossing_cost_s"] = 0.0
     await _heal_n_times(1)
     assert _recycle_count(fake) == 1, "the skipped attempt was spent anyway"
+
+
+# --------------------------------------------------------------------------- #
+# ⭐ 164.6.6.1 plan 08 — THE SCRUB ESCALATION'S OUTCOMES, EACH GATED BY NAME.
+#
+# SCRUB-C3 (W-2): no path may leave the jobs terminal logged out with its saved
+# login deleted WITHOUT the relaunch debt recorded and an ERROR said. The debt
+# is paid by ONE thing only, a house-VERIFIED post-relaunch snapshot.
+# ⛔ Each gate below was seen RED under the neuter its SUMMARY row names.
+# --------------------------------------------------------------------------- #
+
+
+def _spy_debt_clears(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Wrap — never replace — the debt clear `mt5_relogin` calls, recording the
+    key per call. ⛔ Without it a verified arm's "debt is False" is vacuous: it
+    would also read False if the scrub had never recorded a debt at all."""
+    calls: list[str] = []
+    real = mt5_relogin.clear_mt5_relaunch_debt
+
+    def _recording(terminal_key: str) -> None:
+        calls.append(terminal_key)
+        real(terminal_key)
+
+    monkeypatch.setattr(mt5_relogin, "clear_mt5_relaunch_debt", _recording)
+    return calls
+
+
+def _escalation_line(caplog: pytest.LogCaptureFixture) -> logging.LogRecord:
+    lines = [
+        r for r in _records(caplog) if "escalated to a terminal" in r.getMessage()
+    ]
+    assert len(lines) == 1, [r.getMessage() for r in lines]
+    return lines[0]
+
+
+def _assert_env_password_in_no_record(caplog: pytest.LogCaptureFixture) -> None:
+    """EVERY captured record, every logger — not only this module's."""
+    for record in caplog.records:
+        assert _FAKE_PASSWORD not in record.getMessage(), (
+            f"the env password reached a {record.name} record: {record.getMessage()!r}"
+        )
+
+
+_OTHER_LOGIN_ACCOUNT = _info_tuple(
+    "AccountInfo", 28, login=int(_FAKE_LOGIN) + 1, server=_FAKE_SERVER
+)
+_DISCONNECTED_TERMINAL = _info_tuple("TerminalInfo", 22, build=6182, connected=False)
+
+
+@pytest.mark.parametrize(
+    "post_relaunch,expected_kind,debt_paid",
+    [
+        pytest.param(
+            {"terminal_info": _HOUSE_TERMINAL, "account_info": _HOUSE_ACCOUNT},
+            mt5_session_episodes.KIND_IPC_FAULT_RECYCLED,
+            True,
+            id="house-VERIFIED-pays-the-debt",
+        ),
+        pytest.param(
+            {"terminal_info": _HOUSE_TERMINAL, "account_info": _OTHER_LOGIN_ACCOUNT},
+            mt5_session_episodes.KIND_IPC_FAULT_RECYCLED_DEGRADED,
+            False,
+            id="DEGRADED-another-login-keeps-it",
+        ),
+        pytest.param(
+            {"terminal_info": _DISCONNECTED_TERMINAL, "account_info": _HOUSE_ACCOUNT},
+            mt5_session_episodes.KIND_IPC_FAULT_RECYCLED_DEGRADED,
+            False,
+            id="DEGRADED-disconnected-keeps-it",
+        ),
+    ],
+)
+async def test_SCRUB_DEBT_only_a_house_VERIFIED_relaunch_pays_the_debt_a_degraded_one_keeps_it(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    sink,
+    post_relaunch: dict,
+    expected_kind: str,
+    debt_paid: bool,
+) -> None:
+    """⛔ T-164.6.6.1-28. A relaunch that AUTHORIZED is not a relaunch that came
+    back as house: the D-05 record measured a relaunched terminal on another
+    account. If "authorized" paid the debt, the jobs terminal could sit on a
+    client's login, or disconnected, with nothing left owing the house relaunch,
+    and the next tick would not try again. Only the house-VERIFIED arm may clear
+    it, and the degraded arms say so at ERROR.
+
+    RED under a neuter that clears the debt on ANY authorized result (plan 08
+    SUMMARY)."""
+    from services import mt5_client
+
+    _set_full_env(monkeypatch)
+    fake, _c = _install_client(
+        monkeypatch, {**_WEDGED, "relaunch_credentialed": True, **post_relaunch}
+    )
+    outcomes = _capture_and_record_outcomes(monkeypatch)
+    clears = _spy_debt_clears(monkeypatch)
+
+    with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
+        await _heal_n_times(1)
+
+    assert outcomes[0].escalation_kind == expected_kind
+    assert len(fake._MetaTrader5__conn.scrub_calls) == 1
+    line = _escalation_line(caplog)
+    if debt_paid:
+        assert clears == [_heal_terminal_key()], clears
+        assert mt5_client.mt5_relaunch_debt(_heal_terminal_key()) is False
+        assert line.levelno == logging.INFO
+    else:
+        assert clears == [], f"a {expected_kind} relaunch cleared the debt"
+        assert mt5_client.mt5_relaunch_debt(_heal_terminal_key()) is True, (
+            f"a {expected_kind} relaunch left the jobs terminal owing nothing"
+        )
+        assert line.levelno == logging.ERROR
+        assert str(int(_FAKE_LOGIN) + 1) not in line.getMessage(), (
+            "an account number reached the line"
+        )
+    _assert_no_credential_value_escaped(_records(caplog))
+    _assert_env_password_in_no_record(caplog)
+    _assert_rows_carry_no_secret(sink)
+
+
+@pytest.mark.parametrize(
+    "scenario,expected_kind",
+    [
+        pytest.param(
+            # Authorized, but the post-relaunch check cannot complete: the
+            # terminal does not answer `terminal_info`.
+            {"relaunch_credentialed": True},
+            mt5_session_episodes.KIND_IPC_FAULT_RECYCLED_UNVERIFIED,
+            id="UNVERIFIED",
+        ),
+        pytest.param(
+            # Every crossing at its full rpyc ceiling: the budget runs out before
+            # the settle window does, so nothing showed the relaunch fail.
+            {"crossing_cost_s": mt5_relogin._MT5_REQUEST_TIMEOUT_S},
+            mt5_session_episodes.KIND_IPC_FAULT_RECYCLED_RELAUNCH_PENDING,
+            id="PENDING-the-budget-ran-out-first",
+        ),
+        pytest.param(
+            # Watched through the WHOLE settle window and never authorized.
+            {},
+            mt5_session_episodes.KIND_IPC_FAULT_RECYCLED_STILL_FAULTED,
+            id="still-not-authorized-when-the-SETTLE-WINDOW-passed",
+        ),
+    ],
+)
+async def test_SCRUB_DEBT_an_unverified_pending_or_unsettled_relaunch_keeps_the_debt_at_ERROR(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    sink,
+    scenario: dict,
+    expected_kind: str,
+) -> None:
+    """⛔ W-2. The scrub deleted the saved login, so a terminal whose relaunch did
+    not verify will NOT come back unaided; only the next tick's credentialed
+    relaunch can bring it back, and only if the debt says it owes one. Each of
+    these outcomes keeps the debt and is said at ERROR. Before 164.6.6.1 the
+    pending one was a WARNING ("not yet known"), which was true only while the
+    recycled terminal still had its saved account."""
+    from services import mt5_client
+
+    _set_full_env(monkeypatch)
+    fake, _c = _install_client(monkeypatch, {**_WEDGED, **scenario})
+    outcomes = _capture_and_record_outcomes(monkeypatch)
+    clears = _spy_debt_clears(monkeypatch)
+
+    with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
+        await _heal_n_times(1)
+
+    assert outcomes[0].escalation_kind == expected_kind
+    assert len(fake._MetaTrader5__conn.scrub_calls) == 1
+    assert _escalation_line(caplog).levelno == logging.ERROR
+    assert clears == [], f"a {expected_kind} relaunch cleared the debt"
+    assert mt5_client.mt5_relaunch_debt(_heal_terminal_key()) is True
+    assert "initialize" not in fake.call_order[fake.call_order.index("scrub") :]
+    _assert_no_credential_value_escaped(_records(caplog))
+    _assert_env_password_in_no_record(caplog)
+    _assert_rows_carry_no_secret(sink)
+
+
+async def test_ESCALATION_a_house_REFUSED_relaunch_is_its_own_ERROR_kind_with_no_poll_after_the_minus_six(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    sink,
+    _fake_clock: "_FakeClock",
+) -> None:
+    """⛔ The relaunch after a scrub is CREDENTIALED, so `-6` on it is the broker
+    REFUSING the house triple: the credential in Railway is wrong, and no
+    further relaunch can fix that. So it is its own kind,
+    `ipc_fault_recycled_house_refused`, said ONCE at ERROR; NO credentialed poll
+    follows the `-6` (each would re-send a triple the broker just refused); and
+    the debt stays set, because the terminal is up with no account."""
+    from services import mt5_client
+
+    _set_full_env(monkeypatch)
+    fake, _c = _install_client(
+        monkeypatch,
+        {**_WEDGED, "last_error_after_recycle": (-6, "Terminal: Authorization failed")},
+    )
+    outcomes = _capture_and_record_outcomes(monkeypatch)
+    clears = _spy_debt_clears(monkeypatch)
+
+    with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
+        await _heal_n_times(1)
+
+    assert (
+        outcomes[0].escalation_kind
+        == mt5_session_episodes.KIND_IPC_FAULT_RECYCLED_HOUSE_REFUSED
+    )
+    line = _escalation_line(caplog)
+    assert line.levelno == logging.ERROR
+    assert "relaunch_code=-6" in line.getMessage()
+    assert "relaunch_polls=0" in line.getMessage()
+    after_scrub = fake.call_order[fake.call_order.index("scrub") + 1 :]
+    assert after_scrub.count("initialize_credentialed") == 1, (
+        f"a credentialed poll followed the -6: {fake.call_order}"
+    )
+    assert "initialize" not in after_scrub, fake.call_order
+    assert _fake_clock.sleeps == [], "the heal waited to poll after a -6"
+    assert clears == []
+    assert mt5_client.mt5_relaunch_debt(_heal_terminal_key()) is True
+    _assert_no_credential_value_escaped(_records(caplog))
+    _assert_env_password_in_no_record(caplog)
+    _assert_rows_carry_no_secret(sink)
+
+
+@pytest.mark.parametrize(
+    "post_relaunch,expected_kind,debt_paid",
+    [
+        pytest.param(
+            {"terminal_info": _HOUSE_TERMINAL, "account_info": _HOUSE_ACCOUNT},
+            mt5_session_episodes.KIND_IPC_FAULT_RECYCLED,
+            True,
+            id="relaunch-VERIFIED",
+        ),
+        pytest.param(
+            {}, mt5_session_episodes.KIND_IPC_FAULT_RECYCLED_UNVERIFIED, False,
+            id="relaunch-UNVERIFIED",
+        ),
+    ],
+)
+async def test_SCRUB_a_delete_REFUSED_after_the_kill_still_relaunches_and_pays_the_debt_only_if_verified(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    sink,
+    post_relaunch: dict,
+    expected_kind: str,
+    debt_paid: bool,
+) -> None:
+    """⛔ `recycle_counts=(1, 1, 0)`: the scrub ENDED the terminal, but not every
+    match confirmed its exit, so the delete was REFUSED (`refused=3`) and
+    `accounts.dat` was kept. The terminal may still have been killed, so the
+    credentialed relaunch must run anyway: a relaunch keyed on "the scrub did
+    not refuse" would leave a killed terminal down. The line says
+    `accounts_dat_kept=not_all_exited` at ERROR whatever the relaunch did (the
+    stale saved copy may still be on disk), and the debt is paid only when the
+    relaunch verified."""
+    from services import mt5_client
+
+    _set_full_env(monkeypatch)
+    fake, _c = _install_client(
+        monkeypatch, {**_WEDGED, "recycle_counts": (1, 1, 0), **post_relaunch}
+    )
+    outcomes = _capture_and_record_outcomes(monkeypatch)
+    clears = _spy_debt_clears(monkeypatch)
+
+    with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
+        await _heal_n_times(1)
+
+    assert outcomes[0].escalation_kind == expected_kind
+    assert not fake.accounts_dat_deleted, "the refused delete deleted anyway"
+    after_scrub = fake.call_order[fake.call_order.index("scrub") + 1 :]
+    assert "initialize_credentialed" in after_scrub, (
+        f"a refused delete after a kill skipped the relaunch: {fake.call_order}"
+    )
+    assert "initialize" not in after_scrub, fake.call_order
+    line = _escalation_line(caplog)
+    assert "refused=3" in line.getMessage()
+    assert "accounts_dat_kept=not_all_exited" in line.getMessage()
+    assert line.levelno == logging.ERROR
+    assert mt5_client.mt5_relaunch_debt(_heal_terminal_key()) is (not debt_paid)
+    assert clears == ([_heal_terminal_key()] if debt_paid else [])
+    _assert_no_credential_value_escaped(_records(caplog))
+    _assert_env_password_in_no_record(caplog)
+    _assert_rows_carry_no_secret(sink)
+
+
+@pytest.mark.parametrize("unset", ["MT5_LOGIN", "MT5_PASSWORD"])
+async def test_ESCALATION_no_house_credentials_ends_nothing_deletes_nothing_and_keeps_the_claim(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, unset: str
+) -> None:
+    """⛔ A scrub deletes the saved login. Without a house login AND password to
+    relaunch with, it would leave the shared terminal logged out with nothing
+    able to bring it back, so the escalation declines:
+    `ipc_fault_recycle_no_house_credentials` at ERROR, nothing terminated or
+    deleted, no debt, the claim unspent, and NO fall-back to the bare recycle
+    (that is the L7 shape).
+
+    ⚠️ MEASURED: through the heal entry this kind is unreachable today, because
+    an unset `MT5_LOGIN` / `MT5_PASSWORD` stops the heal before any client is
+    built (asserted first, below). The kind is the escalation's own defence for
+    a direct caller, so it is driven directly too."""
+    from services import mt5_client
+
+    # 1. Through the heal: nothing is constructed, nothing crosses.
+    _set_full_env(monkeypatch)
+    monkeypatch.delenv(unset)
+    heal_fake, constructions = _install_client(monkeypatch, dict(_WEDGED))
+    outcomes = _capture_outcomes(monkeypatch)
+    await _heal_n_times(1)
+    assert constructions == [] and outcomes == []
+    assert heal_fake._MetaTrader5__conn.scrub_calls == []
+
+    # 2. Driven directly, with the missing half passed as None.
+    fake = _FakeMt5(dict(_WEDGED))
+    client = _escalation_client(fake)
+    kwargs = {
+        "env_login": None if unset == "MT5_LOGIN" else int(_FAKE_LOGIN),
+        "env_password": None if unset == "MT5_PASSWORD" else _FAKE_PASSWORD,
+    }
+    with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
+        kind = mt5_relogin._escalate_ipc_fault(
+            client, _IPC_TIMEOUT, _FAKE_SERVER, **kwargs
+        )
+
+    assert kind == mt5_session_episodes.KIND_IPC_FAULT_RECYCLE_NO_HOUSE_CREDENTIALS
+    assert any(
+        r.levelno == logging.ERROR
+        and mt5_session_episodes.KIND_IPC_FAULT_RECYCLE_NO_HOUSE_CREDENTIALS
+        in r.getMessage()
+        for r in _records(caplog)
+    ), "the decline was not said at ERROR"
+    conn = fake._MetaTrader5__conn
+    assert conn.executed == [], (
+        f"a remote source crossed (scrub or recycle): {len(conn.executed)}"
+    )
+    assert conn.scrub_calls == [] and conn.recycle_calls == []
+    assert not fake.accounts_dat_deleted
+    assert not [kw for kw in fake.initialize_kwargs if "login" in kw]
+    assert mt5_client.mt5_relaunch_debt(client.terminal_key) is False
+    assert mt5_session_episodes.ipc_fault_escalation_armed(), (
+        "the claim was spent on an escalation that ended nothing"
+    )
+    _assert_no_credential_value_escaped(_records(caplog))
+    _assert_env_password_in_no_record(caplog)
+
+    # The claim really is unspent: the next escalation, with the triple, scrubs.
+    again = mt5_relogin._escalate_ipc_fault(
+        client, _IPC_TIMEOUT, _FAKE_SERVER, **_HOUSE_KW
+    )
+    assert again is not None and len(conn.scrub_calls) == 1
+
+
+#: The ledger entry that owns the job path's `delete_trades` flip.
+_TRADES_SCRUB_TODO_HEADING = "### MT5-JOB-TERMINAL-TRADES-SCRUB-01"
+
+#: A REAL `History wait shipped:` line: the phrase followed by an actual date,
+#: through optional bold or code markup. ⛔ The entry quotes the line's TEMPLATE
+#: in backticks with `<date>`, which must never count, and it does not, because
+#: `<date>` is not a date. ⛔ Not line-anchored and backticks admitted: the
+#: template SHOWS the line in backticks, so a real line copied in that shape
+#: must count, or the pin stays green on 0 forever.
+_HISTORY_WAIT_SHIPPED_RE = re.compile(
+    r"History wait shipped:[\s*`]*\d{4}-\d{2}-\d{2}"
+)
+
+
+def _trades_scrub_entry_dictates(todos_text: str) -> int:
+    """The `delete_trades` value `MT5-JOB-TERMINAL-TRADES-SCRUB-01` dictates:
+    1 once its own entry carries a real `History wait shipped:` line, else 0.
+    Searched inside that entry only (heading to the next `##`/`###` heading). A
+    missing heading FAILS by name: a renamed or deleted entry must not silently
+    pin 0 forever."""
+    lines = todos_text.splitlines()
+    starts = [i for i, ln in enumerate(lines) if ln.startswith(_TRADES_SCRUB_TODO_HEADING)]
+    if len(starts) != 1:
+        pytest.fail(
+            f"TODOS.md carries {len(starts)} `{_TRADES_SCRUB_TODO_HEADING}` headings; "
+            "the trades pin needs exactly one to read who owns the flip"
+        )
+    end = len(lines)
+    for j in range(starts[0] + 1, len(lines)):
+        if re.match(r"^#{2,3} ", lines[j]):
+            end = j
+            break
+    entry = "\n".join(lines[starts[0] : end])
+    return 1 if _HISTORY_WAIT_SHIPPED_RE.search(entry) else 0
+
+
+def test_SCRUB_the_trades_ledger_reader_counts_only_a_REAL_History_wait_line() -> None:
+    """⛔ The pin below is only as good as this reader. A regex that never
+    matches keeps the pin green on 0 forever, and that silently defeats the
+    merge-order guard. A substring match takes the entry's own backticked
+    template for the real line and invites a wrong flip. Both directions are
+    pinned here."""
+    template_only = (
+        f"{_TRADES_SCRUB_TODO_HEADING} — kept until Finding C is fixed\n"
+        "- **164.6.6.3 ships its history wait** and appends one line to this entry:\n"
+        "  `History wait shipped: <date>, <sha>`. If the constant is already on main\n"
+        "\n### NEXT-ENTRY\n"
+    )
+    assert _trades_scrub_entry_dictates(template_only) == 0
+    shipped = template_only.replace(
+        "\n### NEXT-ENTRY", "History wait shipped: 2026-10-09, 0123abcd\n\n### NEXT-ENTRY"
+    )
+    assert _trades_scrub_entry_dictates(shipped) == 1
+    bulleted = template_only.replace(
+        "\n### NEXT-ENTRY", "- **History wait shipped:** 2026-10-09, 0123abcd\n\n### NEXT-ENTRY"
+    )
+    assert _trades_scrub_entry_dictates(bulleted) == 1
+    # Copied in the shape the template shows it: backticked, but dated.
+    backticked = template_only.replace(
+        "\n### NEXT-ENTRY", "`History wait shipped: 2026-10-09, 0123abcd`\n\n### NEXT-ENTRY"
+    )
+    assert _trades_scrub_entry_dictates(backticked) == 1
+    # A real line in ANOTHER entry is not this entry's.
+    elsewhere = template_only + "History wait shipped: 2026-10-09, 0123abcd\n"
+    assert _trades_scrub_entry_dictates(elsewhere) == 0
+    with pytest.raises(pytest.fail.Exception):
+        _trades_scrub_entry_dictates("### SOME-OTHER-ENTRY\n")
+
+
+async def test_SCRUB_the_job_path_keeps_trades_until_MT5_JOB_TERMINAL_TRADES_SCRUB_01(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """⛔ T-164.6.6.1-30 — PINS `_JOB_TERMINAL_DELETE_TRADES`, owned by `TODOS.md`
+    `MT5-JOB-TERMINAL-TRADES-SCRUB-01` (CONTEXT D-04: the per-account `trades`
+    caches are deleted "only after Phase 164.6.6.3 fixes finding C").
+
+    Deleting them before the bounded history wait ships makes every MT5 account
+    new to the jobs terminal on its next derive, and `read_mt5_deal_ledger`
+    reads deals before a fresh login's history has downloaded: a permanent
+    "<2 usable daily-return days" failure on every MT5 strategy.
+
+    ⛔ ANY change of the constant must first turn THIS test RED. The expected
+    value is read from the ledger AT TEST RUN TIME, not fixed when plan 08 ran:
+    0 while the entry carries no real `History wait shipped:` line, 1 once it
+    does. That is what makes the ownership hold in every merge order. Whichever
+    of 164.6.6.1 and 164.6.6.3 merges SECOND is forced to flip, because once the
+    line is on `main` this pin is RED on the 0 until the constant reads 1. A red
+    pin after a rebase is that designed signal, not a flake."""
+    todos = Path(__file__).resolve().parents[2] / "TODOS.md"
+    if not todos.is_file():
+        pytest.fail(
+            "TODOS.md is missing, so MT5-JOB-TERMINAL-TRADES-SCRUB-01 cannot say "
+            "whether the jobs terminal's trades caches may be deleted"
+        )
+    expected = _trades_scrub_entry_dictates(todos.read_text(encoding="utf-8"))
+
+    _set_full_env(monkeypatch)
+    fake, _c = _install_client(
+        monkeypatch,
+        {
+            **_WEDGED,
+            "saved_house_password_stale": True,
+            "terminal_info": _HOUSE_TERMINAL,
+            "account_info": _HOUSE_ACCOUNT,
+        },
+    )
+    _capture_outcomes(monkeypatch)
+    await _heal_n_times(1)
+
+    scrub_calls = fake._MetaTrader5__conn.scrub_calls
+    assert len(scrub_calls) == 1, scrub_calls
+    assert mt5_relogin._JOB_TERMINAL_DELETE_TRADES == expected, (
+        f"_JOB_TERMINAL_DELETE_TRADES is {mt5_relogin._JOB_TERMINAL_DELETE_TRADES} "
+        f"but MT5-JOB-TERMINAL-TRADES-SCRUB-01 dictates {expected}: "
+        + (
+            "the history wait has shipped, so this phase owns the flip to 1"
+            if expected
+            else "the history wait has not shipped, so the trades caches stay"
+        )
+    )
+    assert scrub_calls[0][1] == expected, (
+        "the job path's scrub sent a delete_trades flag the ledger does not allow"
+    )
 
 
 async def test_R2_WR01_a_budget_that_can_NEVER_afford_the_recycle_reaches_ERROR(
