@@ -53,7 +53,7 @@ structurally incapable of raising (the shared never-raises predicate,
 
 WHY THE LEASE LIVES HERE AND NOT IN ``mt5_relogin``. ``mt5_relogin``'s heal
 promises exactly ONE lease acquisition per tick, and its source holds exactly
-one ``mt5_terminal_lease(`` (pinned). The validation scrub reuses that module's
+one call to the lease (pinned). The validation scrub reuses that module's
 ``scrub_and_relaunch_as_house`` under a lease of its own, on a different
 terminal, so it gets its own module and its own roster entry.
 
