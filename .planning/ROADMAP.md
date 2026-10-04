@@ -2783,6 +2783,15 @@ Re-measure each at plan time; the observations are from a browser pass, not a co
    account whose history was already cached produced 194 days. The fix waits, bounded and
    failing loud, for a fresh login's deal history before reading. A failing-first test reproduces
    the race. The wizard's "the fault is in our pipeline" text is wrong for this refusal.
+   **Also owns (routed 2026-10-04 from Phase 164.6.6.1 D-04):** `TODOS.md`
+   `MT5-JOB-TERMINAL-TRADES-SCRUB-01`. When this item's history wait ships, append
+   `History wait shipped: <date>, <sha>` to that entry. If `_JOB_TERMINAL_DELETE_TRADES` is already
+   on `main` when this phase ships, also flip it to 1, failing-first and in the same commit as the
+   line, so the jobs terminal's per-account deal caches are deleted on each `ipc_fault` recycle. If
+   it is not yet on `main`, 164.6.6.1 makes the flip before it merges: its plan 08 pin test reads
+   that entry at run time and goes red on the 0 once the line is on `main` (ownership re-keyed
+   2026-10-04 at 164.6.6.1's plan-check: whichever phase merges second flips). That is the history
+   half of 164.6.6.1's criterion 2.
 7. **L-D05 (a): an unconfigured validation endpoint shows the generic error.** With
    `MT5_VALIDATION_GATEWAY_HOST` unset, `/api/validate-key` answered HTTP 500 and the wizard showed
    `SEAM_INTERNAL_FAULT` instead of "The MetaTrader gateway is not configured". The refusal, the
@@ -2827,6 +2836,39 @@ shipped as planned: W-2 would leave the jobs terminal logged out after a failed 
 risks a lock-up. Both are MUST-FIX here, carried verbatim in `164.6.6.1-CONTEXT.md`. It inherits
 164.6.6 D-03 (164.6.5 D-07 reversed for saved accounts and history only; the jobs terminal keeps its
 `Logs`) and owns D-04 (scrub cadence), OPEN until the founder answers at re-plan.
+⭐ **D-04 ANSWERED 2026-10-04 (founder, AskUserQuestion at re-plan): (i), a scrub on every
+`ipc_fault` recycle.** The sentence above is kept as lineage. The jobs terminal's `trades` caches
+wait for 164.6.6.3 (`TODOS.md` `MT5-JOB-TERMINAL-TRADES-SCRUB-01`). D-08 (the validation scrub runs
+after the verdict in its own lease) and D-09 (the boot heal is widened) were answered the same day.
+All three are in `164.6.6.1-CONTEXT.md`.
+⭐ **D-10 and D-11 ANSWERED 2026-10-04 (founder, AskUserQuestion at plan-check revision), recorded in
+`164.6.6.1-CONTEXT.md` under the deviation policy.** D-10: "Yes, pay debt on any tick" — the
+session monitor pays an outstanding relaunch debt on ANY tick with a credentialed house
+`initialize`, not only at boot. D-11: "Accept, measure after deploy" — the phase ships on S-11's
+validation-terminal measurement as the proxy for the jobs terminal; a slow jobs-terminal launch
+leaves it account-less until the next debt tick (D-10), and plan 07's L-3 records the real
+jobs-terminal kill-to-authorized time.
+**Founder-visible costs of the re-plan (recorded 2026-10-04, deviation policy).** The full list is in
+`164.6.6.1-CONTEXT.md` `## Founder-visible costs of the 2026-10-04 re-plan`. The founder accepts or
+rejects each one at plan 02's Task 2 checkpoint, before any deleting code runs.
+- 164.6.6's D-29 queue-instead-of-fail is partly reversed: a wizard validation already queued
+  behind a finished one is refused with the recoverable 424 while that one's scrub runs.
+- A scrub can hold the validation lease for about 220 s worst case, against the wizard's 20 s
+  lease wait, which gives `lease_busy` refusals.
+- Validation availability now depends on the house credential being set and correct.
+- The first validation after each analytics deploy is refused or scrubbed inline, because the
+  validation terminal is marked owed at boot. The wizard refusal fires one ERROR alert with a
+  Sentry capture per deploy, because no scrub is pending when it happens.
+- 164.6.5 D-08 is reversed for the escalation's relaunch: it is now credentialed.
+- 164.6.2's credentials-only-on-`-6` rule is widened for D-09's boot case (founder) and for the
+  relaunch-debt case (founder, D-10, 2026-10-04; an earlier version of this bullet said it awaited
+  confirmation).
+- The jobs terminal's own relaunch is not measured before ship; S-11 on the validation terminal is
+  the proxy (founder, D-11, accepted 2026-10-04).
+- `recycle_terminal_process` is left with no production caller.
+- The validation scrub keeps `logs`, `mail` and `subscriptions` by default.
+- The jobs terminal's `trades` caches stay until 164.6.6.3; whichever phase merges second flips
+  them (`TODOS.md` `MT5-JOB-TERMINAL-TRADES-SCRUB-01`).
 **Routed in 2026-10-04 from 164.6.6 plan 08 live check L7 (founder, AskUserQuestion "164.6.6.1
 MT5SCRUB (Recommended)").** Measured on PRODUCTION: once the job terminal's Navigator held only the
 house account, and that entry's SAVED password was stale (the founder had rotated it at the broker
@@ -2837,9 +2879,20 @@ is in `164.6.6-CONTEXT.md` `## Live verification 2026-10-04`. Every scrub path t
 must leave the house entry able to log in, which means re-saving the house password from
 `MT5_PASSWORD` (or a credentialed relaunch) before any delete. A rotation of `MT5_PASSWORD` must not
 leave the terminal's saved copy silently stale.
-**Plans:** 4 plans (moved from 164.6.6, NOT re-planned; they predate the spike and the must-fix items)
+**Spike run 2026-10-04, deviation (founder override).** Plan 01's FOUNDER act (Task 2) was run by
+the orchestrator over `railway ssh` on the validation gateway only, at the founder's choice ("Run the
+spike now, then re-plan"; "You run it over railway ssh"). Findings in `164.6.6.1-CONTEXT.md`
+`## Spike findings 2026-10-04`: A4 holds (the scrubbed accounts did not come back). A bare
+`initialize()` hangs on a terminal with no saved account, while a credentialed house `initialize`
+is authorized in 3.4 s: `SCRUB-RELAUNCH-MODE: credentialed`. (A same-day claim that
+`initialize()` cannot launch a killed terminal was withdrawn; whether the credentialed call
+launches it is RESEARCH cell S-09.) S-09 has since been measured: a BARE call launched the killed
+terminal and a credentialed call then logged in within 2.8 s. A launch performed BY the credentialed
+call is still unmeasured, and plan 02's live cell S-11 measures it before any deleting plan runs.
+The 4 plans predate this and are re-planned.
+**Plans:** 8 plans (re-planned 2026-10-04 from scratch after the spike; the 4 moved plans are superseded. Plan 08 was split out of plan 03 at plan-check on 2026-10-04 to keep each plan within budget)
 
-**Success criteria (to be derived properly at planning):**
+**Success criteria (derived at the 2026-10-04 re-plan; the heading said "to be derived properly at planning" until then):**
 
 1. After every validation, the validation terminal lists no client account and holds none of that
    account's saved data (scope of `Logs` there: founder answers at re-plan).
@@ -2853,10 +2906,14 @@ leave the terminal's saved copy silently stale.
 
 Plans:
 
-- [ ] 164.6.6.1-01-PLAN.md — (was 164.6.6-03) validation-gateway runbook + FOUNDER scrub spike; its stand-up half is now delivered by 164.6.6
-- [ ] 164.6.6.1-02-PLAN.md — (was 164.6.6-05) narrow terminate-and-scrub verb over rpyc
-- [ ] 164.6.6.1-03-PLAN.md — (was 164.6.6-06) validation terminal scrubbed inside the lease after every validation
-- [ ] 164.6.6.1-04-PLAN.md — (was 164.6.6-07) job terminal scrubbed on every ipc_fault recovery, credentialed relaunch within budget
+- [ ] 164.6.6.1-01-PLAN.md — (wave 1) the narrow terminate-and-scrub verb (`accounts.dat`, `trades` behind an int flag; never Journal/`common.ini`/`servers.dat`), relaunch-debt and scrub-owed registries, runbook posture
+- [ ] 164.6.6.1-02-PLAN.md — (wave 1, checkpoint) live cell S-11: a CREDENTIALED launch of a killed, scrubbed validation terminal; timing and command-line booleans gate W-2
+- [ ] 164.6.6.1-03-PLAN.md — (wave 2) jobs-terminal `ipc_fault` recycle becomes scrub + credentialed house relaunch (D-04 (i)); L7 failing-first; the existing escalation gates migrated; budget unchanged at 8 crossings
+- [ ] 164.6.6.1-08-PLAN.md — (wave 3) the scrub escalation's new behaviour gates: rotation, debt clearing, house refused, delete refused, no house credentials, `delete_trades == 0`
+- [ ] 164.6.6.1-04-PLAN.md — (wave 4) relaunch debt paid on the next tick with no bare probe; D-09 boot-only credentialed relaunch on code 0
+- [ ] 164.6.6.1-05-PLAN.md — (wave 4) validation-terminal scrub module: post-verdict task in its own lease, W-1 probe-event gate, scrub-owed mark, alert, `cron_runs` row
+- [ ] 164.6.6.1-06-PLAN.md — (wave 5) both validate sites schedule the scrub after the verdict and pay an owed scrub before the next probe (D-08); the validation terminal is marked owed at boot
+- [ ] 164.6.6.1-07-PLAN.md — (wave 6, checkpoint) post-deploy live checks L-1..L-4 and the founder's residue answers
 
 ### Phase 164.6.8: OUTAGEALERT — a shared-terminal MT5 outage reaches a human without one clicking a button (INSERTED)
 

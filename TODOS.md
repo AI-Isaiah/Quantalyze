@@ -5607,6 +5607,39 @@ the job terminal and an outage on it reaches a human without one clicking a butt
 `mt5_terminal_scrub` row reaches a human, with a test that fails first when the reader is removed.
 ⛔ **Not a close:** a log line nobody reads, or a check that only runs when someone validates a key.
 
+### MT5-JOB-TERMINAL-TRADES-SCRUB-01 — the jobs terminal's per-account deal history is kept after every scrub until Finding C is fixed (booked 2026-10-04, Phase 164.6.6.1 D-04)
+
+**Why it is open.** The founder answered Phase 164.6.6.1 D-04 with (i) on 2026-10-04: every
+`ipc_fault` recycle of the jobs terminal deletes `Config/accounts.dat` and relaunches with house
+credentials, and the per-account deal caches (`Bases/<server>/trades/<account>`) are deleted "only
+after Phase 164.6.6.3 fixes finding C". So 164.6.6.1 ships its job-path scrub with
+`_JOB_TERMINAL_DELETE_TRADES = 0` in `services/mt5_relogin.py`, and the history half of its
+success criterion 2 (SCRUB-C2) is not delivered by it. Deleting the caches before the fix would
+make every MT5 account new to the jobs terminal on its next derive, and `read_mt5_deal_ledger`
+reads deals before a fresh login's history has downloaded (164.6.6.3 item 0, `164.6.6-CONTEXT.md`
+Finding C). That would put a permanent "<2 usable daily-return days" failure on every MT5 strategy.
+
+**Owner: whichever of the two phases merges SECOND, judged at its own ship time against
+`origin/main`** (re-keyed 2026-10-04 at 164.6.6.1's plan-check: the earlier "by merge order" wording
+let each side defer to the other if 164.6.6.3 merged after 164.6.6.1's plan 08 ran but before
+164.6.6.1 merged).
+- **164.6.6.3 ships its history wait** and appends one line to this entry:
+  `History wait shipped: <date>, <sha>`. If `_JOB_TERMINAL_DELETE_TRADES` is already on `main` at
+  that moment, 164.6.6.3 also flips it to 1, failing-first, IN THE SAME COMMIT as the line
+  (otherwise the pin goes red on `main`).
+- **If the constant is not yet on `main`**, Phase 164.6.6.1 owns the flip. Its plan 08 pin test
+  reads this entry at TEST RUN TIME, so once the line is on `main`, 164.6.6.1's rebased branch is
+  red on the 0 until it flips, whether plan 08 ran before or after the line landed.
+**Trigger:** the LATER of two merges: (a) 164.6.6.3's bounded, fail-loud history wait for a fresh
+login, and (b) 164.6.6.1's plan 03, which creates the constant.
+**Gate (what closes it):** `_JOB_TERMINAL_DELETE_TRADES` reads 1. The test that pins the job path's
+`delete_trades` argument is changed to 1 and is seen RED against 0 first. A live reading on the
+jobs terminal's next `ipc_fault` escalation shows the per-server `trades` child count fall and the
+next derive of an affected account succeed.
+⛔ **Not a close:** flipping the constant before the history wait is on `main`, or an L-3 reading
+from 164.6.6.1 plan 07 that shows `trades` unchanged. Unchanged is the expected state while this
+entry is open, not evidence that it is done.
+
 
 ### ⛔ DRIFT-02 — a surgical in-place patch means the REPO no longer holds the true function body (booked 2026-08-27)
 
