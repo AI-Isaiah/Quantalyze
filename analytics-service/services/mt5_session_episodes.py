@@ -336,6 +336,40 @@ KIND_IPC_FAULT_RECYCLE_NO_HOUSE_CREDENTIALS: Final[str] = (
     "ipc_fault_recycle_no_house_credentials"
 )
 
+# --------------------------------------------------------------------------- #
+# ⭐ 164.6.6.1 plan 04 — RELAUNCH DEBT (CONTEXT D-10) AND THE BOOT WIDENING
+# (CONTEXT D-09). The kinds the two account-less-terminal branches produce:
+#
+#   * relaunch_debt              -> the READING kind of a tick that SKIPPED the
+#                                   bare first probe because this service ended
+#                                   the terminal and has not seen it
+#                                   house-verified since. The credential-free
+#                                   instrument did not run, so it measured
+#                                   nothing (`not_measured`).
+#   * relaunch_debt_settled      -> the debt tick's ONE credentialed house
+#                                   relaunch answered and the house-equality
+#                                   check VERIFIED it; the debt is cleared.
+#   * relaunch_debt_outstanding  -> the debt tick did NOT verify the house
+#                                   session (or its `-10005` fall-through to the
+#                                   scrub escalation was debounced); the debt is
+#                                   kept and the tick logs at ERROR.
+#   * boot_accountless_relaunched -> D-09: at BOOT ONLY, a first probe read the
+#                                   unattributed code `0`, and the credentialed
+#                                   house relaunch that followed verified.
+#   * boot_accountless_relaunch_failed -> D-09: the same, and the relaunch did
+#                                   not verify. ERROR; nothing was ended.
+#
+# ⚠️ None is a positive class and none carries `-6`, so `classify_reading`
+# degrades each to `not_measured`, exactly as the escalation kinds above.
+# --------------------------------------------------------------------------- #
+KIND_RELAUNCH_DEBT: Final[str] = "relaunch_debt"
+KIND_RELAUNCH_DEBT_SETTLED: Final[str] = "relaunch_debt_settled"
+KIND_RELAUNCH_DEBT_OUTSTANDING: Final[str] = "relaunch_debt_outstanding"
+KIND_BOOT_ACCOUNTLESS_RELAUNCHED: Final[str] = "boot_accountless_relaunched"
+KIND_BOOT_ACCOUNTLESS_RELAUNCH_FAILED: Final[str] = (
+    "boot_accountless_relaunch_failed"
+)
+
 #: The MT5 code meaning "the bridge ANSWERED and NO ACCOUNT IS AUTHORIZED" — the
 #: ONE code that establishes darkness. Re-spelled here rather than imported from
 #: `mt5_relogin` so this module has no import edge back to its own caller.
