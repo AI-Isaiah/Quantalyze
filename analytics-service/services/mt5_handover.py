@@ -100,6 +100,7 @@ __all__ = [
     "SITE_DERIVE",
     "SITE_HEAL",
     "SITE_HOLDINGS",
+    "SITE_TERMINAL_SCRUB",
     "SITE_VALIDATE_WIZARD",
     "SITE_VALIDATE_WORKER",
     "normalize_mt5_holder",
@@ -129,6 +130,9 @@ SITE_BACKFILL: Final[str] = "equity_backfill"
 SITE_VALIDATE_WIZARD: Final[str] = "validate_wizard"
 SITE_VALIDATE_WORKER: Final[str] = "validate_worker"
 SITE_HEAL: Final[str] = "session_heal"
+#: Phase 164.6.6.1 (MT5SCRUB, D-08) — the validation terminal's post-verdict
+#: scrub, in its own lease (`services.mt5_terminal_scrub`).
+SITE_TERMINAL_SCRUB: Final[str] = "terminal_scrub"
 
 _SITES: Final[frozenset[str]] = frozenset(
     {
@@ -139,6 +143,7 @@ _SITES: Final[frozenset[str]] = frozenset(
         SITE_VALIDATE_WIZARD,
         SITE_VALIDATE_WORKER,
         SITE_HEAL,
+        SITE_TERMINAL_SCRUB,
     }
 )
 

@@ -43,7 +43,13 @@ from typing import Any, Callable
 
 import pytest
 
-from services import mt5_handover, mt5_relogin, mt5_session_episodes, mt5_session_monitor
+from services import (
+    mt5_handover,
+    mt5_relogin,
+    mt5_session_episodes,
+    mt5_session_monitor,
+    mt5_terminal_scrub,
+)
 from tests.test_mt5_relogin import (
     _FAKE_HOST,
     _FAKE_LOGIN,
@@ -1628,6 +1634,15 @@ _GUARDED_SYMBOLS = (
     # so a raise there would REPLACE the lease body's own exception. The same
     # one predicate, never a copy of it.
     mt5_handover.record_mt5_terminal_handover,
+    # ⭐ Phase 164.6.6.1 (MT5SCRUB, D-08) — the validation terminal's scrub. The
+    # task is spawned from a validate site and is NOT in `main.lifespan`'s task
+    # list, but an unobserved task exception is still a silent failure; the
+    # recorder is awaited on every scrub exit; the inline path runs inside the
+    # worker's validation lease, where a raise would replace the worker's own
+    # outcome.
+    mt5_terminal_scrub.scrub_validation_terminal,
+    mt5_terminal_scrub.record_mt5_terminal_scrub,
+    mt5_terminal_scrub.run_owed_validation_scrub_in_lease,
 )
 
 

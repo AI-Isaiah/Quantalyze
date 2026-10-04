@@ -435,6 +435,29 @@ async def test_the_row_is_a_CLOSED_point_event_with_a_CLOSED_metadata_key_set(
     assert meta["attribution_limit"] == HANDOVER_ATTRIBUTION_LIMIT
 
 
+def test_the_handover_site_set_is_closed_and_names_the_scrub() -> None:
+    """⭐ Phase 164.6.6.1 plan 05. The site set is pinned by EQUALITY, as eight
+    literals, so a site added without updating this test (or a production lease
+    whose `SITE_*` constant was left out of `_SITES`, and so silently written
+    as `unattributed`) goes red here. PATTERNS recorded that no equality pin
+    existed before. ⛔ Literals, not the constants: comparing the set with
+    itself would pass whatever it held."""
+    assert mt5_handover._SITES == frozenset(
+        {
+            "derive_broker_dailies",
+            "sync_trades_balance",
+            "allocator_holdings",
+            "equity_backfill",
+            "validate_wizard",
+            "validate_worker",
+            "session_heal",
+            "terminal_scrub",
+        }
+    )
+    assert mt5_handover.SITE_TERMINAL_SCRUB == "terminal_scrub"
+    assert "SITE_TERMINAL_SCRUB" in mt5_handover.__all__
+
+
 async def test_a_site_outside_the_closed_set_is_written_as_unattributed(
     sink: _HandoverSink,
 ) -> None:
