@@ -2802,6 +2802,18 @@ Re-measure each at plan time; the observations are from a browser pass, not a co
    spelled "Mt5", from first-letter capitalisation of the exchange id, where the allocator card
    says "MT5". 164.5.3 stays open until these ship and a re-read passes (founder, 2026-10-04).
 
+**Added 2026-10-05 from 164.6.6.1's live checks (founder; record in `164.6.6.1-CONTEXT.md`
+`## Live verification 2026-10-05`).**
+9. **An MT5 key on a broker server the terminals do not know hangs and fails** (`TODOS.md`
+   `MT5-UNKNOWN-BROKER-SERVER-HANG-01`). Three validations at a broker new to the terminals hung
+   45.6 s in `login()` and returned -10005; the validation terminal's Journal shows no
+   authorization attempt on the requested server. Pre-existing, not caused by 164.6.6.1. The wizard
+   says `KEY_SIGN_IN_FAILED`, which points the user at their credentials. Fix: resolve the server
+   headless or add it to both terminals as a runbook step, and name the real cause.
+10. **The owed-scrub refusal reads as a network timeout** (`TODOS.md` `MT5-SCRUB-OWED-COPY-01`).
+   The recoverable 424 after each redeploy shows `KEY_NETWORK_TIMEOUT`, "We could not reach the
+   exchange"; it should say the terminal is briefly busy and to retry. A test pins the mapping.
+
 **Goal:** [Urgent work - to be planned]
 **Requirements**: TBD
 **Depends on:** Phase 164.6.6

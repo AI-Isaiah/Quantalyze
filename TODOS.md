@@ -1375,6 +1375,34 @@ true for 146 and half of 142–145, and **false for 141**.
 
 ## 🟡 FIX MID-TERM
 
+### MT5-UNKNOWN-BROKER-SERVER-HANG-01 — an MT5 key on a broker server the terminals do not know hangs until timeout (booked 2026-10-05, Phase 164.6.6.1 live check)
+
+**Why it is open.** Three wizard validations of an account at a broker new to the terminals on 2026-10-05 each hung in the
+terminal's `login()` for 45.6 s and returned -10005. The validation terminal's Journal shows the
+disconnect from the house server and then no authorization attempt on the requested server at all.
+The terminals have only ever logged into the house broker's servers, and the founder confirmed no
+account at that broker has validated before, so this predates Phase 164.6.6.1. The user sees `KEY_SIGN_IN_FAILED`, which
+points them at their credentials. The jobs terminal would hang the same way on a sync of such a key.
+
+**Owner: Phase 164.6.6.3 item 9** (routed 2026-10-05, founder).
+
+**What closing it means.** Measure why the terminal does not resolve an unknown server headless
+(a server search that needs the GUI, or a missing `servers.dat` entry), then either make validation
+resolve it or add the server to both terminals as a runbook step, and make the wizard name the
+real cause. An investor key at that broker validates `read_only` end to end.
+
+### MT5-SCRUB-OWED-COPY-01 — the wizard shows an owed-scrub refusal as a network timeout (booked 2026-10-05)
+
+**Why it is open.** The recoverable 424 the owed gate returns (Phase 164.6.6.1) reaches the wizard
+as `KEY_NETWORK_TIMEOUT`, "We could not reach the exchange ... did not complete in time". Nothing
+timed out; the terminal was being cleaned and the next attempt goes through. The founder read it as
+a wrong server name during the 2026-10-05 live check.
+
+**Owner: Phase 164.6.6.3 item 10** (routed 2026-10-05, founder).
+
+**What closing it means.** The wizard says the terminal is briefly busy and to retry in a moment,
+with a test pinning the mapping from `scrub_owed` to that copy.
+
 ### UPSTASH-RATELIMIT-KEY-LOCKING-01 — @upstash/ratelimit is held at 2.0.8; 2.2.0's scripts are refused by the CI Redis (booked 2026-10-05, Dependabot #951)
 
 **Why it is open.** Dependabot #951 bumped @upstash/ratelimit 2.0.8 → 2.2.0. The `frontend-seam-redis`

@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.125.0.6] - 2026-10-05 — two MT5 follow-ups routed to Phase 164.6.6.3
+
+### Notes
+- `TODOS.md` `MT5-UNKNOWN-BROKER-SERVER-HANG-01` and `MT5-SCRUB-OWED-COPY-01` now name their owner:
+  Phase 164.6.6.3 UATFIXES items 9 and 10, added to its ROADMAP entry (founder, 2026-10-05).
+
+## [0.125.0.5] - 2026-10-05 — MT5SCRUB live checks L-1/L-2 recorded; two MT5 follow-ups booked
+
+### Notes
+- Phase 164.6.6.1's live checks ran in production. L-1 (a `read_only` validation leaves the
+  validation terminal house-only) and L-2 (the relaunched terminal's command line carries nothing
+  beyond `/portable`) pass. L-3's baseline on the jobs terminal is taken and its 24 h observation
+  window is open. L-4: the founder keeps the validation terminal's Journal logs, mail and
+  subscriptions. Readings are in the phase CONTEXT.
+- `TODOS.md` gains `MT5-UNKNOWN-BROKER-SERVER-HANG-01` (a key on a broker server the terminals do
+  not know hangs 45 s and fails; pre-existing) and `MT5-SCRUB-OWED-COPY-01`
+  (the owed-scrub refusal is shown as a network timeout).
+
 ## [0.125.0.4] - 2026-10-05 — jsdom 30 for the frontend test environment (Dependabot #957)
 
 ### Changed
