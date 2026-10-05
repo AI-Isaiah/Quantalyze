@@ -230,7 +230,7 @@ requests==2.34.2
     #   yfinance
 rich==15.0.0
     # via curl-cffi
-rpyc==5.2.3
+rpyc==5.3.1
     # via -r requirements.in
 scipy==1.18.0
     # via quantstats

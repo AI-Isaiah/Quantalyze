@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.125.0.8] - 2026-10-05 — rpyc 5.3.1 for the analytics service (Dependabot #958)
+
+### Changed
+- `analytics-service` pins rpyc 5.3.1 (was 5.2.3), a patch release.
+- `requirements.txt` recompiled with the repo's own `uv pip compile --universal` command, so only
+  the rpyc pin moves. Dependabot's own recompile had dropped every platform marker and the
+  `tzdata`, `colorama` and `winloop` entries.
+
 ## [0.125.0.7] - 2026-10-05 — @sentry/nextjs 11 (Dependabot #952)
 
 ### Changed
