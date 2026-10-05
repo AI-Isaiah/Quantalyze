@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.125.0.10] - 2026-10-05 — production dependency tree back to zero npm audit findings
+
+### Security
+- The nightly `npm-audit` job (`npm audit --omit=dev --audit-level=high`) had been red since at
+  least 2026-09-30 on 13 findings (11 high, 2 moderate). It now reads `found 0 vulnerabilities`.
+- In-range updates via `npm audit fix`: ip-address 10.2.0 → 10.7.3 (SSRF classification
+  bypasses), nanoid 3.3.16 → 3.3.20, browserslist 4.28.2 → 4.29.3, sharp 0.35.3 → 0.35.5
+  (libheif), brace-expansion, fflate, qs, body-parser, express, js-yaml, plus their transitive
+  patch bumps.
+- New `overrides` entry `basic-ftp: ^6.2.1`. The vulnerable 5.x copy is reached only through
+  puppeteer-core's and @lhci's proxy agents (`get-uri` pins `^5`), so `npm audit fix` cannot reach
+  it. Every method `get-uri` calls (`access`, `list`, `lastMod`, `downloadTo`, `close`) still
+  exists in 6.2.2.
+- The existing `sharp` override floor moves from `^0.35.3` (a vulnerable version) to `^0.35.4`.
+
+### Notes
+- The nightly's other red job, `preflight`, is unchanged. It fails on purpose while
+  `STAGING_BASE_URL` is unset, so the nightly as a whole stays red until that is configured.
+- Lockfile built with npm 11, then an npm 10 pass, so CI's `npm ci` (npm 10) accepts it.
+
 ## [0.125.0.9] - 2026-10-05 — svix 2 for the Resend webhook (Dependabot #954)
 
 ### Changed
