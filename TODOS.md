@@ -1384,6 +1384,8 @@ The terminals have only ever logged into the house broker's servers, and the fou
 account at that broker has validated before, so this predates Phase 164.6.6.1. The user sees `KEY_SIGN_IN_FAILED`, which
 points them at their credentials. The jobs terminal would hang the same way on a sync of such a key.
 
+**Owner: Phase 164.6.6.3 item 9** (routed 2026-10-05, founder).
+
 **What closing it means.** Measure why the terminal does not resolve an unknown server headless
 (a server search that needs the GUI, or a missing `servers.dat` entry), then either make validation
 resolve it or add the server to both terminals as a runbook step, and make the wizard name the
@@ -1395,6 +1397,8 @@ real cause. An investor key at that broker validates `read_only` end to end.
 as `KEY_NETWORK_TIMEOUT`, "We could not reach the exchange ... did not complete in time". Nothing
 timed out; the terminal was being cleaned and the next attempt goes through. The founder read it as
 a wrong server name during the 2026-10-05 live check.
+
+**Owner: Phase 164.6.6.3 item 10** (routed 2026-10-05, founder).
 
 **What closing it means.** The wizard says the terminal is briefly busy and to retry in a moment,
 with a test pinning the mapping from `scrub_owed` to that copy.
