@@ -51,10 +51,8 @@ charset-normalizer==3.4.7
     #   requests
 click==8.4.1
     # via uvicorn
-coincurve==21.0.0 ; python_full_version < '3.14' and implementation_name == 'cpython' and platform_machine != 'x86' and platform_machine in 'x86_64 AMD64 aarch64 arm64 ARM64 i686'
+coincurve==21.0.0
     # via ccxt
-colorama==0.4.6 ; sys_platform == 'win32'
-    # via click
 contourpy==1.3.3
     # via matplotlib
 cryptography==50.0.1
@@ -95,7 +93,7 @@ httpcore==1.0.9
     # via httpx
 httptools==0.8.0
     # via uvicorn
-httpx==0.28.1
+httpx[http2]==0.28.1
     # via
     #   -r requirements.in
     #   postgrest
@@ -143,7 +141,7 @@ numpy==2.5.3
     #   scipy
     #   seaborn
     #   yfinance
-orjson==3.11.9 ; python_full_version < '3.15' and implementation_name == 'cpython' and platform_machine in 'x86_64 AMD64 aarch64 arm64 armv7l i686 ppc64le s390x'
+orjson==3.11.9
     # via ccxt
 packaging==26.2
     # via
@@ -176,9 +174,9 @@ propcache==0.5.2
     #   yarl
 protobuf==7.35.1
     # via yfinance
-psycopg==3.3.6
+psycopg[binary]==3.3.6
     # via -r requirements.in
-psycopg-binary==3.3.6 ; implementation_name != 'pypy'
+psycopg-binary==3.3.6
     # via psycopg
 pycparser==3.0
     # via
@@ -197,7 +195,7 @@ pydantic-core==2.46.5
     # via pydantic
 pygments==2.20.0
     # via rich
-pyjwt==2.13.0
+pyjwt[crypto]==2.13.0
     # via supabase-auth
 pyparsing==3.3.2
     # via matplotlib
@@ -228,13 +226,13 @@ requests==2.34.2
     #   yfinance
 rich==15.0.0
     # via curl-cffi
-rpyc==5.2.3
+rpyc==6.0.2
     # via -r requirements.in
 scipy==1.18.0
     # via quantstats
 seaborn==0.13.2
     # via quantstats
-sentry-sdk==2.70.0
+sentry-sdk[fastapi]==2.70.0
     # via -r requirements.in
 six==1.17.0
     # via python-dateutil
@@ -284,18 +282,14 @@ typing-inspection==0.4.2
     # via
     #   fastapi
     #   pydantic
-tzdata==2026.2 ; sys_platform == 'emscripten' or sys_platform == 'win32'
-    # via
-    #   pandas
-    #   psycopg
 urllib3==2.7.0
     # via
     #   ccxt
     #   requests
     #   sentry-sdk
-uvicorn==0.54.0
+uvicorn[standard]==0.54.0
     # via -r requirements.in
-uvloop==0.22.1 ; (implementation_name == 'cpython' and platform_python_implementation == 'PyPy' and sys_platform != 'win32') or (implementation_name == 'cpython' and sys_platform == 'cygwin') or (platform_python_implementation != 'PyPy' and sys_platform != 'cygwin' and sys_platform != 'win32')
+uvloop==0.22.1
     # via
     #   ccxt
     #   uvicorn
@@ -308,8 +302,6 @@ websockets==14.2
     #   realtime
     #   uvicorn
     #   yfinance
-winloop==0.6.3 ; python_full_version < '3.15' and implementation_name == 'cpython' and platform_machine in 'AMD64 ARM64' and sys_platform == 'win32'
-    # via ccxt
 wrapt==2.2.2
     # via
     #   deprecated

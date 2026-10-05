@@ -98,4 +98,4 @@ aiohttp<3.15
 # --no-deps (its 0.1.9 wheel metadata mis-declares twine/urllib3==1.26.7/six as
 # runtime deps, which conflict with this service's urllib3/six) — so mt5linux does
 # NOT belong in this lock; only rpyc (+its plumbum) does.
-rpyc==5.2.3
+rpyc==6.0.2
