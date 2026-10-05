@@ -287,6 +287,14 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     import main_worker_healthz
     from services.mt5_relogin import heal_mt5_terminal_session
     from services.mt5_session_monitor import mt5_session_monitor_loop
+    from services.mt5_terminal_scrub import mark_validation_terminal_owed_at_boot
+
+    # ⭐ Phase 164.6.6.1 D-08 (plan 06) — the scrub-owed mark is in-process and
+    # D-09's boot heal reads only the JOB gateway, so the VALIDATION terminal is
+    # marked owed here: the first validation after a restart pays the scrub before
+    # its probe. Synchronous and never raises; it only MARKS (no lease, no client,
+    # no task), so it is deliberately NOT in the task list below.
+    mark_validation_terminal_owed_at_boot()
 
     async def _bridge_healthz() -> None:
         global WORKER_LAST_TICK_AT

@@ -106,6 +106,48 @@ def _handover_recorder_never_reaches_a_real_project(monkeypatch):
     yield
 
 
+# Phase 164.6.6.1 plan 06 (2026-10-04): both validate sites now SCHEDULE the
+# validation-terminal scrub after their verdict, so every test that drives a
+# validation past its login spawns a real background scrub task. Unpatched, that
+# task would (a) write its `mt5_terminal_scrub` row through the real
+# `get_supabase()` (the handover hazard above, same reason), and (b) build a REAL
+# `Mt5Client`, whose rpyc connect to a fabricated host has no timeout of its own.
+# The defaults here refuse both, and the scrub's never-raises contract turns each
+# refusal into a recorded `failed` kind. The module's process-local registries
+# (the pending-key set, the probe-event registry, the task set and the alert
+# window) are NOT covered by `mt5_concurrency.reset_terminal_state_for_tests`, and
+# a pending key leaked from one test would dedupe the next test's schedule onto a
+# dead task, so they are reset around every test. So is the per-terminal state in
+# `services.mt5_client` (through the ONE reset, `reset_terminal_state_for_tests`):
+# every validation now SETS the scrub-owed mark and only a verified scrub clears
+# it, so a mark left by one test's validation would refuse the next test's
+# validation of the same fabricated terminal (measured: the C5 wire cases in
+# `test_validate_key_venue_transient.py` went red on exactly that leak).
+# A test that wants a scrub double or rows patches these itself (this fixture runs
+# first, so its patch wins).
+@pytest.fixture(autouse=True)
+def _validation_scrub_never_reaches_a_real_terminal_or_project(monkeypatch):
+    from services import mt5_concurrency, mt5_terminal_scrub
+
+    def _refuse_project():
+        raise RuntimeError(
+            "unit tests never write a scrub row to a real project"
+        )
+
+    def _refuse_client(*_args, **_kwargs):
+        raise RuntimeError(
+            "unit tests never open a real rpyc connection from the validation scrub"
+        )
+
+    monkeypatch.setattr(mt5_terminal_scrub, "get_supabase", _refuse_project)
+    monkeypatch.setattr(mt5_terminal_scrub, "Mt5Client", _refuse_client)
+    mt5_concurrency.reset_terminal_state_for_tests()
+    mt5_terminal_scrub._reset_terminal_scrub_state_for_tests()
+    yield
+    mt5_concurrency.reset_terminal_state_for_tests()
+    mt5_terminal_scrub._reset_terminal_scrub_state_for_tests()
+
+
 # Phase 134 (smoothed_mtm kill-switch): the v1.14 smoothed THIRD pass ships DARK
 # behind SMOOTHED_MTM_ENABLED (services.closed_sets.is_smoothed_mtm_enabled),
 # default OFF. The Phase 131-133 tests were written when the pass ran

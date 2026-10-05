@@ -45,12 +45,14 @@ from unittest.mock import MagicMock
 import pytest
 from fastapi import HTTPException
 
-from services import mt5_client, mt5_concurrency, mt5_probe
+from services import mt5_client, mt5_concurrency, mt5_probe, mt5_terminal_scrub
 from services.closed_sets import MT5_MASTER_PASSWORD_DETAIL
 from services.mt5_client import (
     Mt5ClientError,
     Mt5LoginRefusedError,
     Mt5SessionAbandoned,
+    mt5_relaunch_debt,
+    mt5_scrub_owed,
 )
 
 # Harness imported BY NAME (never edited: plan 05 edits those files in the same
@@ -72,6 +74,15 @@ from tests.test_ingestion_mt5 import (
     _FakeNamedTuple,
     _HEALTHY_TERMINAL,
     _INVESTOR_ORDER_CHECK,
+)
+# Phase 164.6.6.1 plan 06 — the SCRUB's wire double (plan 03/05's), imported by
+# symbol and aliased: this module already binds `_FakeMt5` to the probe's double.
+# Only plain helpers are imported, never that module's autouse fixtures.
+from tests.test_mt5_relogin import (
+    _FakeCronRuns,
+    _FakeMt5 as _ScrubWireMt5,
+    _HOUSE_TERMINAL as _SCRUB_HOUSE_TERMINAL,
+    _info_tuple,
 )
 
 # The validation terminal's key, as `Mt5Client.terminal_key` spells it for the
@@ -1349,3 +1360,647 @@ async def test_a_cancelled_park_alerts_and_re_raises_at_the_worker(
     finally:
         blocker.set()
     await _wait_for_thread_event(transport.house_login_returned)
+
+
+# --------------------------------------------------------------------------- #
+# Phase 164.6.6.1 plan 06 — the validation-terminal SCRUB, wired into both
+# validate sites (founder D-08: after the verdict, in its own lease, with a
+# "scrub owed" mark consumed before the next validation's probe).
+#
+# WHY THESE GATES MATTER (Rule 9):
+#   - a validation that logged in leaves a client's saved login (and deal
+#     caches) on the validation terminal until something scrubs it; the site
+#     must schedule that scrub on EVERY post-login exit;
+#   - W-1: a scrub that crosses while the validation's abandoned probe thread is
+#     still logging in deletes `accounts.dat` and the thread writes it straight
+#     back, so the terminal keeps the client's login while the mark says gone;
+#   - an owed scrub must be paid BEFORE the next validation's probe, or a missed
+#     scrub is simply forgotten;
+#   - the scrub is never a second verdict: what the caller sees is the same
+#     whether the scheduled scrub later succeeds, refuses, fails or is skipped.
+# --------------------------------------------------------------------------- #
+
+#: The house account as the SCRUB's wire double reports it after a credentialed
+#: relaunch: the same fabricated triple this module's autouse env sets, so the
+#: relaunch VERIFIES (the house-equality snapshot compares login and server).
+_SCRUB_HOUSE_ACCOUNT = _info_tuple(
+    "AccountInfo", 28, login=_HOUSE_LOGIN, server=_HOUSE_SERVER
+)
+
+_SCRUB_LOGGER = "quantalyze.analytics.mt5_terminal_scrub"
+
+
+def _install_scrub_double(
+    monkeypatch, order: list[tuple[Any, ...]], **scenario_extra: Any
+) -> _ScrubWireMt5:
+    """Point `mt5_terminal_scrub.Mt5Client` at the REAL client over the scrub's
+    in-memory wire double, which answers a credentialed relaunch on the house
+    account. Every scrub crossing appends ``("scrub",)`` to ``order``, the SAME
+    list the validation's `_RecordingMt5` records its logins and its release in,
+    so "the scrub ran after the release" is an ordering, not a reading."""
+    from services.mt5_client import Mt5Client
+
+    def _after_scrub_crossed() -> None:
+        order.append(("scrub",))
+
+    scenario: dict[str, Any] = {
+        "terminal_info": _SCRUB_HOUSE_TERMINAL,
+        "account_info": _SCRUB_HOUSE_ACCOUNT,
+        "after_recycle_crossed": _after_scrub_crossed,
+    }
+    scenario.update(scenario_extra)
+    fake = _ScrubWireMt5(scenario)
+
+    def _factory(host: str, port: int, **kwargs: Any) -> Mt5Client:
+        return Mt5Client(host, port, _connect=lambda **_ignored: fake, **kwargs)
+
+    monkeypatch.setattr(mt5_terminal_scrub, "Mt5Client", _factory)
+    return fake
+
+
+def _install_scrub_sink(monkeypatch) -> _FakeCronRuns:
+    sink = _FakeCronRuns()
+    monkeypatch.setattr(mt5_terminal_scrub, "get_supabase", lambda: sink)
+    return sink
+
+
+def _scrub_rows(sink: _FakeCronRuns) -> list[dict[str, Any]]:
+    return [
+        r["metadata"]
+        for r in sink.rows
+        if r.get("cron_name") == mt5_terminal_scrub.MT5_TERMINAL_SCRUB_CRON_NAME
+    ]
+
+
+async def _drain_scheduled_scrubs() -> list[asyncio.Task[None]]:
+    """Await every scheduled scrub task; return them (empty when none was)."""
+    tasks = list(mt5_terminal_scrub._SCRUB_TASKS)
+    if tasks:
+        await asyncio.gather(*tasks)
+    return tasks
+
+
+def _scrub_crossings(order: list[tuple[Any, ...]]) -> int:
+    return sum(1 for e in order if e == ("scrub",))
+
+
+async def test_scrub_a_wizard_validation_schedules_the_post_verdict_scrub_and_it_runs_after_release(
+    exchange_router, monkeypatch
+):
+    """⭐ THE TRACER (D-08). A read-only wizard validation logs a client in on
+    the validation terminal. After its verdict, a scrub is SCHEDULED; it takes
+    the terminal only once this validation released its client, deletes the
+    saved accounts, relaunches as house, clears the scrub-owed mark and writes
+    one `mt5_terminal_scrub` row. The response is untouched."""
+    router = exchange_router
+    transport = _RecordingMt5(_scenario())
+    _install_real_mt5_client(router, transport)
+    _install_scrub_double(monkeypatch, transport.events)
+    sink = _install_scrub_sink(monkeypatch)
+
+    assert await _call(router, _make_req()) == {"valid": True, "read_only": True}
+
+    tasks = await _drain_scheduled_scrubs()
+    assert len(tasks) == 1, (
+        "the validation logged a client in and scheduled no scrub: the client's "
+        "saved login stays on the validation terminal (D-08)"
+    )
+    kinds = [e[0] for e in transport.events]
+    assert _scrub_crossings(transport.events) == 1, kinds
+    last_release = max(i for i, k in enumerate(kinds) if k == "release")
+    assert last_release < kinds.index("scrub"), (
+        f"the scrub crossed before the validation released its client: {kinds!r}"
+    )
+    assert not mt5_scrub_owed(_VAL_KEY), "a verified scrub must clear the mark"
+    assert not mt5_relaunch_debt(_VAL_KEY)
+    rows = _scrub_rows(sink)
+    assert [r["kind"] for r in rows] == ["scrubbed"], rows
+    assert rows[0]["site"] == _WIZARD
+
+
+# --- Task 2: W-1 at both sites, the owed gate, the worker wiring, invariance.
+
+
+@pytest.fixture()
+def scrub_sentry(monkeypatch) -> MagicMock:
+    """Spy on the SCRUB module's Sentry handle (a separate channel from the
+    park's `park_sentry`)."""
+    spy = MagicMock()
+    monkeypatch.setattr(mt5_terminal_scrub, "sentry_sdk", spy)
+    return spy
+
+
+def _scrub_records(caplog, level: int) -> list[logging.LogRecord]:
+    return [
+        r for r in caplog.records
+        if r.name == _SCRUB_LOGGER and r.levelno == level and "cause=" in r.getMessage()
+    ]
+
+
+def _assert_one_scrub_alert(scrub_sentry: MagicMock, caplog, cause: str) -> None:
+    """Exactly one scrub ERROR line naming `cause`, and exactly one capture."""
+    errors = _scrub_records(caplog, logging.ERROR)
+    assert [f"cause={cause}" in r.getMessage() for r in errors] == [True], [
+        r.getMessage() for r in errors
+    ]
+    assert scrub_sentry.capture_message.call_count == 1, (
+        scrub_sentry.capture_message.call_args_list
+    )
+    assert f"cause={cause}" in scrub_sentry.capture_message.call_args.args[0]
+
+
+def _assert_transient_424(exc: BaseException) -> None:
+    from services.error_contract import VenueTransientHTTPException
+
+    assert isinstance(exc, VenueTransientHTTPException), repr(exc)
+    assert exc.status_code == 424
+    assert exc.code == "NETWORK_UNAVAILABLE"
+    assert exc.recoverable is True
+
+
+def _capture_outcomes(monkeypatch, router) -> list[str]:
+    """Every `outcome` the wizard's terminal event carries (`trace.outcome`)."""
+    seen: list[str] = []
+    real = router.emit_mt5_stage_event
+
+    def _spy(stage, started_at, **kwargs):
+        if stage == "validate":
+            seen.append(kwargs.get("outcome"))
+        return real(stage, started_at, **kwargs)
+
+    monkeypatch.setattr(router, "emit_mt5_stage_event", _spy)
+    return seen
+
+
+async def _assert_w1_skip(
+    transport: _RecordingMt5, blocker: threading.Event, sink, scrub_sentry, caplog
+) -> None:
+    """The W-1 verdict at a site: the scheduled scrub waited, no scrub source
+    crossed while the probe thread was blocked, the kind is
+    `skipped_probe_in_flight`, the mark stays, one `probe_in_flight` alert. And
+    releasing the probe afterwards still sends no scrub (decided once)."""
+    with caplog.at_level(logging.DEBUG, logger=_SCRUB_LOGGER):
+        tasks = await _drain_scheduled_scrubs()
+    assert len(tasks) == 1, "the post-login exit scheduled no scrub"
+    assert not blocker.is_set()
+    assert _scrub_crossings(transport.events) == 0, (
+        "a scrub source crossed while the probe thread was in flight (W-1)"
+    )
+    assert [r["kind"] for r in _scrub_rows(sink)] == ["skipped_probe_in_flight"]
+    assert mt5_scrub_owed(_VAL_KEY), "a skipped scrub must keep the mark"
+    _assert_one_scrub_alert(scrub_sentry, caplog, "probe_in_flight")
+    blocker.set()
+    await _wait_for_thread_event(transport.client_login_returned)
+    await asyncio.sleep(0.2)
+    assert _scrub_crossings(transport.events) == 0, (
+        "a scrub crossed after the blocked probe was released"
+    )
+
+
+async def test_scrub_W1_wizard_stage_timeout_sends_no_scrub_while_the_probe_is_in_flight(
+    exchange_router, monkeypatch, scrub_sentry, caplog
+):
+    """⛔ THE FOUNDER'S MUST-FIX EXIT (W-1). The inner stage ceiling fires with
+    the probe thread still blocked in the client's login; the site answers the
+    424 and schedules the scrub. The scrub must wait for the thread's OWN event
+    and, at its bound, skip with the mark kept."""
+    router = exchange_router
+    blocker = threading.Event()
+    transport = _RecordingMt5(_scenario(), block_client_login=blocker)
+    _install_real_mt5_client(router, transport)
+    _install_scrub_double(monkeypatch, transport.events)
+    sink = _install_scrub_sink(monkeypatch)
+    monkeypatch.setattr(router, "_MT5_VALIDATE_STAGE_TIMEOUT_S", 0.2)
+    monkeypatch.setattr(mt5_terminal_scrub, "_SCRUB_PROBE_WAIT_S", 0.3)
+    try:
+        with pytest.raises(HTTPException) as ei:
+            await _call(router, _make_req())
+        _assert_transient_424(ei.value)
+        await _assert_w1_skip(transport, blocker, sink, scrub_sentry, caplog)
+    finally:
+        blocker.set()
+
+
+async def test_scrub_W1_wizard_deadline_exit_sends_no_scrub_while_the_probe_is_in_flight(
+    exchange_router, monkeypatch, scrub_sentry, caplog
+):
+    """The end-to-end deadline fires first, with the probe thread still on the
+    wire. Same rule as the stage-timeout exit."""
+    router = exchange_router
+    blocker = threading.Event()
+    transport = _RecordingMt5(_scenario(), block_client_login=blocker)
+    _install_real_mt5_client(router, transport)
+    _install_scrub_double(monkeypatch, transport.events)
+    sink = _install_scrub_sink(monkeypatch)
+    monkeypatch.setattr(router, "_MT5_VALIDATE_DEADLINE_S", 0.2)
+    monkeypatch.setattr(mt5_terminal_scrub, "_SCRUB_PROBE_WAIT_S", 0.3)
+    try:
+        with pytest.raises(HTTPException) as ei:
+            await _call(router, _make_req())
+        _assert_transient_424(ei.value)
+        await _assert_w1_skip(transport, blocker, sink, scrub_sentry, caplog)
+    finally:
+        blocker.set()
+
+
+async def test_scrub_W1_worker_probe_timeout_sends_no_scrub_while_the_probe_is_in_flight(
+    monkeypatch, scrub_sentry, caplog
+):
+    """The worker's `_MT5_PROBE_TIMEOUT_S` fires with the probe thread blocked;
+    the timeout propagates (its transient disposition) and the scheduled scrub,
+    at site `validate_worker`, skips under W-1."""
+    blocker = threading.Event()
+    transport = _RecordingMt5(_scenario(), block_client_login=blocker)
+    _install_worker_transport(monkeypatch, transport)
+    _install_scrub_double(monkeypatch, transport.events)
+    sink = _install_scrub_sink(monkeypatch)
+    monkeypatch.setattr("services.ingestion.mt5._MT5_PROBE_TIMEOUT_S", 0.2)
+    monkeypatch.setattr(mt5_terminal_scrub, "_SCRUB_PROBE_WAIT_S", 0.3)
+    try:
+        with pytest.raises(asyncio.TimeoutError):
+            await _worker_validate()
+        await _assert_w1_skip(transport, blocker, sink, scrub_sentry, caplog)
+        assert [r["site"] for r in _scrub_rows(sink)] == [_WORKER]
+    finally:
+        blocker.set()
+
+
+async def _assert_wizard_owed_refusal(
+    router, monkeypatch, scrub_sentry, caplog
+) -> _RecordingMt5:
+    """Drive one wizard validation against a terminal that owes a scrub and
+    assert the refusal: the recoverable 424, no client built, no login, no
+    probe, `trace.outcome == "scrub_owed"`, and a scrub task scheduled."""
+    transport = _RecordingMt5(_scenario())
+    factory = _install_real_mt5_client(router, transport)
+    outcomes = _capture_outcomes(monkeypatch, router)
+    with caplog.at_level(logging.DEBUG, logger=_SCRUB_LOGGER):
+        with pytest.raises(HTTPException) as ei:
+            await _call(router, _make_req())
+    _assert_transient_424(ei.value)
+    assert factory.call_count == 0, "a client was built for an owed terminal"
+    assert transport.logins() == [], "a login ran on a terminal that owes a scrub"
+    assert outcomes == ["scrub_owed"], outcomes
+    assert len(mt5_terminal_scrub._SCRUB_TASKS) == 1, (
+        "the refusal must schedule the owed scrub"
+    )
+    return transport
+
+
+async def test_scrub_wizard_owed_gate_refuses_without_probing_and_schedules_the_scrub(
+    exchange_router, monkeypatch, scrub_sentry, caplog
+):
+    """D-08 "a missed scrub runs before the next validation". The terminal is
+    marked owed and nothing is queued: the wizard refuses with the existing
+    recoverable 424 BEFORE any connect, alerts, and schedules the scrub, which
+    then clears the mark so the next validation can probe."""
+    router = exchange_router
+    mt5_client.note_mt5_scrub_owed(_VAL_KEY)
+    order: list[tuple[Any, ...]] = []
+    _install_scrub_double(monkeypatch, order)
+    sink = _install_scrub_sink(monkeypatch)
+
+    await _assert_wizard_owed_refusal(router, monkeypatch, scrub_sentry, caplog)
+    _assert_one_scrub_alert(scrub_sentry, caplog, "owed_validation_refused")
+
+    await _drain_scheduled_scrubs()
+    assert [r["kind"] for r in _scrub_rows(sink)] == ["scrubbed"]
+    assert not mt5_scrub_owed(_VAL_KEY)
+
+
+async def test_scrub_wizard_owed_gate_on_a_missed_scrub_pages_once_then_schedules(
+    exchange_router, monkeypatch, scrub_sentry, caplog
+):
+    """THE ERROR BRANCH, at the site. The previous scrub ended
+    `relaunch_unverified` (the delete landed, the house relaunch did not
+    verify), which KEEPS the mark, and nothing is queued: that scrub was
+    genuinely missed. The refusal is ERROR with one capture, which needs the
+    gate to REPORT before it SCHEDULES (scheduling first marks the key pending
+    and turns every missed scrub into a quiet WARNING)."""
+    router = exchange_router
+    stranger = _info_tuple("AccountInfo", 28, login=987654, server=_HOUSE_SERVER)
+    order: list[tuple[Any, ...]] = []
+    _install_scrub_double(monkeypatch, order, account_info=stranger)
+    _install_scrub_sink(monkeypatch)
+    mt5_terminal_scrub.schedule_validation_terminal_scrub(
+        _VAL_HOST, _VAL_PORT, site=_WIZARD, probe_thread_done=None
+    )
+    await _drain_scheduled_scrubs()
+    assert mt5_scrub_owed(_VAL_KEY), "harness: the missed scrub must keep the mark"
+    assert not mt5_terminal_scrub._PENDING_SCRUB_KEYS, "harness: nothing is queued"
+    scrub_sentry.reset_mock()
+    caplog.clear()
+
+    await _assert_wizard_owed_refusal(router, monkeypatch, scrub_sentry, caplog)
+    _assert_one_scrub_alert(scrub_sentry, caplog, "owed_validation_refused")
+    assert _scrub_records(caplog, logging.WARNING) == [], (
+        "a missed scrub was reported as a queued one"
+    )
+    await _drain_scheduled_scrubs()
+
+
+async def test_scrub_wizard_relaunch_debt_alone_refuses_the_same_way(
+    exchange_router, monkeypatch, scrub_sentry, caplog
+):
+    """A terminal this service ended and has not seen house-verified (relaunch
+    debt) is refused the same way, even with no scrub-owed mark: probing an
+    account-less terminal would hang or answer -10005."""
+    router = exchange_router
+    mt5_client.note_mt5_relaunch_debt(_VAL_KEY)
+    assert not mt5_scrub_owed(_VAL_KEY)
+    _install_scrub_double(monkeypatch, [])
+    _install_scrub_sink(monkeypatch)
+
+    await _assert_wizard_owed_refusal(router, monkeypatch, scrub_sentry, caplog)
+    await _drain_scheduled_scrubs()
+    assert not mt5_relaunch_debt(_VAL_KEY)
+
+
+class _HolderRecordingMt5(_RecordingMt5):
+    """Also records who the registry said held the terminal at each login."""
+
+    def __init__(self, scenario: dict[str, Any], **kwargs: Any) -> None:
+        super().__init__(scenario, **kwargs)
+        self.holder_at_login: list[str | None] = []
+
+    def login(self, login, **kwargs):
+        self.holder_at_login.append(mt5_client.mt5_terminal_holder(_VAL_KEY))
+        return super().login(login, **kwargs)
+
+
+def _install_worker_build_spy(monkeypatch, transport: _RecordingMt5) -> None:
+    """`_install_worker_transport`, plus a ``("build",)`` event on the shared
+    order list each time the worker constructs its client."""
+    from services.mt5_client import Mt5Client
+
+    _install_worker_transport(monkeypatch, transport)
+
+    def _build(host: str, port: int) -> Mt5Client:
+        transport.events.append(("build",))
+        return Mt5Client(host, port, _connect=lambda **_ignored: transport)
+
+    monkeypatch.setattr("services.ingestion.mt5._build_client", _build)
+
+
+async def test_scrub_worker_owed_gate_pays_the_scrub_inline_then_probes(
+    monkeypatch, scrub_sentry
+):
+    """Decision 6: the worker has no client budget, so it pays an owed scrub
+    INLINE under its own held lease, and probes only after it verified. The
+    order is inline scrub, then build, then the client login, and the holder
+    already reads `house` when the worker's own login runs. The verdict is the
+    ordinary one."""
+    mt5_client.note_mt5_scrub_owed(_VAL_KEY)
+    transport = _HolderRecordingMt5(_scenario())
+    _install_worker_build_spy(monkeypatch, transport)
+    _install_scrub_double(monkeypatch, transport.events)
+    sink = _install_scrub_sink(monkeypatch)
+
+    result = await _worker_validate()
+
+    assert result.valid is True and result.read_only is True
+    kinds = [e[0] for e in transport.events]
+    assert kinds[:3] == ["scrub", "build", "login"], kinds
+    assert transport.logins()[0][1] == _CLIENT_LOGIN
+    assert transport.holder_at_login[0] == mt5_client.HOLDER_HOUSE, (
+        "the inline scrub did not re-stamp the holder to house before the "
+        "worker's own login"
+    )
+    rows = _scrub_rows(sink)
+    assert rows and rows[0]["kind"] == "scrubbed" and rows[0]["site"] == _WORKER
+    scrub_sentry.capture_message.assert_not_called()
+    await _drain_scheduled_scrubs()
+
+
+async def test_scrub_worker_owed_gate_refuses_transiently_when_the_inline_scrub_fails(
+    monkeypatch, scrub_sentry
+):
+    """An inline scrub that does not end `scrubbed` (here the scrub's client
+    cannot be built: the conftest default refuses it) means "do not probe in
+    this lease": the worker raises its transient `Mt5ClientError(0, ...)`, and
+    no client is built and no login runs."""
+    mt5_client.note_mt5_scrub_owed(_VAL_KEY)
+    transport = _RecordingMt5(_scenario())
+    _install_worker_build_spy(monkeypatch, transport)
+    sink = _install_scrub_sink(monkeypatch)
+
+    with pytest.raises(Mt5ClientError) as ei:
+        await _worker_validate()
+
+    assert ei.value.code == 0
+    assert transport.events == [], transport.events
+    assert [r["kind"] for r in _scrub_rows(sink)] == ["failed"]
+    assert mt5_scrub_owed(_VAL_KEY)
+    # The refusal is OUR terminal's state, never the user's key, and it must stay
+    # retryable: classified exactly like the worker's existing D-15 transient
+    # (`Mt5ClientError(0, "MT5 capability undetermined ...")`), never auth,
+    # wrong_server or permanent.
+    from services.job_worker import classify_exception
+    from services.mt5_validation import classify_mt5_login_error
+
+    assert classify_mt5_login_error(ei.value) == "transient"
+    d15 = Mt5ClientError(
+        0,
+        "MT5 capability undetermined: the gateway trade-permission signal was "
+        "unavailable, so read-only could not be proven.",
+    )
+    assert classify_exception(ei.value)[0] == classify_exception(d15)[0]
+    assert classify_exception(ei.value)[0] != "permanent"
+
+
+#: How the scheduled scrub is made to end, per invariance mode.
+_SCRUB_MODES = ["fail", "refuse", "skip"]
+
+
+def _arm_scrub_mode(monkeypatch, mode: str, order: list[tuple[Any, ...]]) -> str:
+    """Install a scrub that ends in ``mode``; return the kind it must record."""
+    if mode == "fail":
+        _install_scrub_double(
+            monkeypatch, order, recycle_raises=RuntimeError("scrub verb broke")
+        )
+        return "failed"
+    if mode == "refuse":
+        _install_scrub_double(monkeypatch, order, scrub_refused=1)
+        return "refused"
+    _install_scrub_double(monkeypatch, order)
+    monkeypatch.setattr(mt5_terminal_scrub, "read_env_mt5_credentials", lambda: None)
+    return "skipped_no_house_credentials"
+
+
+def _reset_between_runs() -> None:
+    mt5_concurrency.reset_terminal_state_for_tests()
+    mt5_terminal_scrub._reset_terminal_scrub_state_for_tests()
+
+
+@pytest.mark.parametrize("mode", _SCRUB_MODES)
+@pytest.mark.parametrize(
+    "scenario",
+    [_scenario(), _scenario(_MASTER_ACCOUNT), _scenario(terminal=None)],
+    ids=["read_only", "trade_capable", "undetermined"],
+)
+async def test_scrub_never_changes_the_wizard_verdict(
+    exchange_router, monkeypatch, mode, scenario
+):
+    """The scrub is containment, never a second verdict: the wizard's status
+    and body are identical whether the scheduled scrub fails, refuses or is
+    skipped, and identical to a run with the schedule patched out."""
+    router = exchange_router
+    with monkeypatch.context() as m:
+        m.setattr(router, "schedule_validation_terminal_scrub", lambda *a, **k: None)
+        baseline, _ = await _run_wizard(router, scenario)
+    _reset_between_runs()
+
+    transport = _RecordingMt5(scenario)
+    _install_real_mt5_client(router, transport)
+    sink = _install_scrub_sink(monkeypatch)
+    expected_kind = _arm_scrub_mode(monkeypatch, mode, transport.events)
+    try:
+        result: Any = await _call(router, _make_req())
+    except HTTPException as exc:
+        result = exc
+    await _drain_scheduled_scrubs()
+    assert [r["kind"] for r in _scrub_rows(sink)] == [expected_kind]
+    assert _outcome(result) == baseline
+
+
+async def _worker_outcome() -> tuple[Any, ...]:
+    try:
+        return ("result", repr(await _worker_validate()))
+    except Exception as exc:  # noqa: BLE001 — the outcome IS the exception
+        return (type(exc).__name__, repr(getattr(exc, "code", None)), str(exc))
+
+
+@pytest.mark.parametrize("mode", _SCRUB_MODES)
+@pytest.mark.parametrize(
+    "scenario",
+    [_scenario(), _scenario(_MASTER_ACCOUNT), _scenario(terminal=None)],
+    ids=["read_only", "trade_capable", "undetermined"],
+)
+async def test_scrub_never_changes_the_worker_verdict(monkeypatch, mode, scenario):
+    """The same at the worker validate."""
+    with monkeypatch.context() as m:
+        m.setattr(
+            "services.ingestion.mt5.schedule_validation_terminal_scrub",
+            lambda *a, **k: None,
+        )
+        _install_worker_transport(m, _RecordingMt5(scenario))
+        baseline = await _worker_outcome()
+    _reset_between_runs()
+
+    transport = _RecordingMt5(scenario)
+    _install_worker_transport(monkeypatch, transport)
+    sink = _install_scrub_sink(monkeypatch)
+    expected_kind = _arm_scrub_mode(monkeypatch, mode, transport.events)
+    outcome = await _worker_outcome()
+    await _drain_scheduled_scrubs()
+    assert [r["kind"] for r in _scrub_rows(sink)] == [expected_kind]
+    assert outcome == baseline
+
+
+async def test_scrub_nothing_is_scheduled_when_the_login_was_never_attempted(
+    exchange_router, monkeypatch
+):
+    """A connect failure reached no login, so nothing was left on the terminal:
+    no scrub is scheduled and the mark is unchanged, at both sites."""
+    router = exchange_router
+    router.Mt5Client = MagicMock(side_effect=ConnectionRefusedError("refused"))
+    with pytest.raises(HTTPException) as ei:
+        await _call(router, _make_req())
+    assert ei.value.status_code == 503
+
+    def _refused_build(host: str, port: int):
+        raise ConnectionRefusedError("refused")
+
+    _install_worker_transport(monkeypatch, _RecordingMt5(_scenario()))
+    monkeypatch.setattr("services.ingestion.mt5._build_client", _refused_build)
+    with pytest.raises(ConnectionRefusedError):
+        await _worker_validate()
+
+    assert mt5_terminal_scrub._SCRUB_TASKS == set()
+    assert not mt5_scrub_owed(_VAL_KEY)
+
+
+async def _wait_until(predicate, what: str) -> None:
+    for _ in range(200):
+        if predicate():
+            return
+        await asyncio.sleep(0.025)
+    raise AssertionError(f"timed out waiting until {what}")
+
+
+async def test_scrub_a_wizard_validation_already_queued_is_refused_quietly_and_one_scrub_runs(
+    exchange_router, monkeypatch, scrub_sentry, caplog
+):
+    """⚠️ THE FOUNDER-VISIBLE COST (it partly reverses D-29's queue-instead-of-
+    fail). Validation B is already waiting on the lease while A finishes. B gets
+    the lock ahead of A's scrub task (`asyncio.Lock` is FIFO), sees the mark and
+    is refused with the recoverable 424: ONE WARNING and NO capture, because a
+    scrub is pending. Exactly one scrub then runs, after B released, and a
+    third validation started after it probes normally."""
+    router = exchange_router
+    blocker = threading.Event()
+    transport = _RecordingMt5(_scenario(), block_client_login=blocker)
+    _install_real_mt5_client(router, transport)
+    _install_scrub_double(monkeypatch, transport.events)
+    sink = _install_scrub_sink(monkeypatch)
+    try:
+        with caplog.at_level(logging.DEBUG, logger=_SCRUB_LOGGER):
+            a = asyncio.create_task(_call(router, _make_req()))
+            await _wait_until(lambda: transport.logins(), "A's login is on the wire")
+            b = asyncio.create_task(_call(router, _make_req()))
+            lock = mt5_concurrency._MT5_TERMINAL_LOCKS[_VAL_KEY]
+            await _wait_until(
+                lambda: len(getattr(lock, "_waiters", None) or ()) == 1,
+                "B is queued on the lease",
+            )
+            blocker.set()
+            assert await a == {"valid": True, "read_only": True}
+            with pytest.raises(HTTPException) as ei:
+                await b
+            _assert_transient_424(ei.value)
+            tasks = await _drain_scheduled_scrubs()
+    finally:
+        blocker.set()
+
+    assert len(tasks) == 1, "B's refusal must not spawn a second scrub"
+    assert len(transport.logins()) == 2, "B logged in on an owed terminal"
+    warnings = _scrub_records(caplog, logging.WARNING)
+    assert [("cause=owed_validation_refused" in r.getMessage()) for r in warnings] == [True]
+    assert _scrub_records(caplog, logging.ERROR) == []
+    scrub_sentry.capture_message.assert_not_called()
+    kinds = [e[0] for e in transport.events]
+    assert _scrub_crossings(transport.events) == 1, kinds
+    assert [r["kind"] for r in _scrub_rows(sink)] == ["scrubbed"]
+
+    assert await _call(router, _make_req()) == {"valid": True, "read_only": True}
+    await _drain_scheduled_scrubs()
+
+
+async def test_scrub_the_first_wizard_validation_after_boot_pages_once_and_the_next_probes(
+    exchange_router, monkeypatch, scrub_sentry, caplog
+):
+    """⚠️ THE RESTART RESIDUE, PAID BY THE FIRST VALIDATION (Task 3). The boot
+    hook marks the validation terminal owed (a restart forgot whatever a
+    validation left on it). The first wizard validation is refused with the
+    recoverable 424; nothing was pending, so it pages ONCE (the founder-visible
+    cost: one ERROR alert per deploy). Once that scrub verifies, the next
+    validation probes normally."""
+    router = exchange_router
+    order: list[tuple[Any, ...]] = []
+    _install_scrub_double(monkeypatch, order)
+    sink = _install_scrub_sink(monkeypatch)
+
+    mt5_terminal_scrub.mark_validation_terminal_owed_at_boot()
+    assert mt5_scrub_owed(_VAL_KEY)
+
+    await _assert_wizard_owed_refusal(router, monkeypatch, scrub_sentry, caplog)
+    _assert_one_scrub_alert(scrub_sentry, caplog, "owed_validation_refused")
+    await _drain_scheduled_scrubs()
+    assert [r["kind"] for r in _scrub_rows(sink)] == ["scrubbed"]
+    assert _scrub_crossings(order) == 1
+
+    transport = _RecordingMt5(_scenario())
+    _install_real_mt5_client(router, transport)
+    assert await _call(router, _make_req()) == {"valid": True, "read_only": True}
+    assert transport.logins()[0][1] == _CLIENT_LOGIN
+    await _drain_scheduled_scrubs()

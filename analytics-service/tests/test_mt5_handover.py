@@ -435,6 +435,29 @@ async def test_the_row_is_a_CLOSED_point_event_with_a_CLOSED_metadata_key_set(
     assert meta["attribution_limit"] == HANDOVER_ATTRIBUTION_LIMIT
 
 
+def test_the_handover_site_set_is_closed_and_names_the_scrub() -> None:
+    """⭐ Phase 164.6.6.1 plan 05. The site set is pinned by EQUALITY, as eight
+    literals, so a site added without updating this test (or a production lease
+    whose `SITE_*` constant was left out of `_SITES`, and so silently written
+    as `unattributed`) goes red here. PATTERNS recorded that no equality pin
+    existed before. ⛔ Literals, not the constants: comparing the set with
+    itself would pass whatever it held."""
+    assert mt5_handover._SITES == frozenset(
+        {
+            "derive_broker_dailies",
+            "sync_trades_balance",
+            "allocator_holdings",
+            "equity_backfill",
+            "validate_wizard",
+            "validate_worker",
+            "session_heal",
+            "terminal_scrub",
+        }
+    )
+    assert mt5_handover.SITE_TERMINAL_SCRUB == "terminal_scrub"
+    assert "SITE_TERMINAL_SCRUB" in mt5_handover.__all__
+
+
 async def test_a_site_outside_the_closed_set_is_written_as_unattributed(
     sink: _HandoverSink,
 ) -> None:
@@ -757,18 +780,29 @@ async def test_a_HEAL_that_escalates_to_a_RECYCLE_records_a_handover_to_UNKNOWN(
     sink: _HandoverSink, monkeypatch: pytest.MonkeyPatch, heal_env: list
 ) -> None:
     """A recycle relaunches the terminal into whatever account was saved; the
-    record says `unknown` rather than claiming `house`."""
+    record says `unknown` rather than claiming `house`.
+
+    ⭐ 164.6.6.1 plan 03 — the escalation's verb is the SCRUB, which ends the
+    terminal and stamps `unknown` the same way. Its relaunch is credentialed
+    with the house triple; here that relaunch does not answer, so nothing has
+    logged the terminal in and the record stays `unknown`."""
     from services import mt5_relogin
-    from tests.test_mt5_relogin import _install_client
+    from tests.test_mt5_relogin import _install_client, _recycle_count
 
     mt5_client._note_terminal_holder(_heal_key(), holder=_KEY_A)
     fake, _c = _install_client(
-        monkeypatch, {"initialize": False, "last_error": (-10005, "IPC timeout")}
+        monkeypatch,
+        {
+            "initialize": False,
+            "last_error": (-10005, "IPC timeout"),
+            "relaunch_credentialed": False,
+        },
     )
 
     assert await mt5_relogin.heal_mt5_terminal_session() is None
 
-    assert len(fake._MetaTrader5__conn.recycle_calls) == 1
+    assert len(fake._MetaTrader5__conn.scrub_calls) == 1
+    assert _recycle_count(fake) == 1
     assert sink.pairs() == [(_KEY_A, HOLDER_UNKNOWN, SITE_HEAL)]
     assert mt5_terminal_holder(_heal_key()) == HOLDER_UNKNOWN
 

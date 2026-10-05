@@ -2851,6 +2851,9 @@ jobs-terminal kill-to-authorized time.
 **Founder-visible costs of the re-plan (recorded 2026-10-04, deviation policy).** The full list is in
 `164.6.6.1-CONTEXT.md` `## Founder-visible costs of the 2026-10-04 re-plan`. The founder accepts or
 rejects each one at plan 02's Task 2 checkpoint, before any deleting code runs.
+**Founder acknowledgement 2026-10-04: all accepted**, at that checkpoint after S-11 read
+`SCRUB-CREDENTIALED-LAUNCH: PASS` (credentialed relaunch authorized 6.0 s after the kill, nothing
+on the command line beyond `/portable`).
 - 164.6.6's D-29 queue-instead-of-fail is partly reversed: a wizard validation already queued
   behind a finished one is refused with the recoverable 424 while that one's scrub runs.
 - A scrub can hold the validation lease for about 220 s worst case, against the wizard's 20 s

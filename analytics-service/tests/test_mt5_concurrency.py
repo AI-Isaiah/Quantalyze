@@ -896,6 +896,21 @@ _LEASE_VERB = "mt5_terminal_lease"
 #: booking. The lineage notes ABOVE keep their numbers — they describe what was
 #: true when they were written — but a LIVE claim now names the roster, never its
 #: size. Read the size off the literal.
+#:
+#: ⭐ RE-CUT 2026-10-04 (Phase 164.6.6.1 / D-08, plan 05), THE ROSTER'S QUESTION
+#: ANSWERED. The new entry is `services/mt5_terminal_scrub.py::
+#: scrub_validation_terminal`, the validation terminal's post-verdict scrub in
+#: its OWN lease (held for `house`, site `terminal_scrub`).
+#:
+#: ⭐ *Does the new site touch an `Mt5Client` that was ALREADY touched under a
+#: DIFFERENT lease?* **NO, by construction.** The scrub builds a FRESH
+#: `Mt5Client` inside the `to_thread` body that runs under this one acquisition
+#: (`_scrub_validation_terminal_blocking`), and closes it in that body's
+#: `finally`. It is handed no client from the validation that scheduled it, so
+#: the lazy bind never has to rebind. The worker's inline path
+#: (`run_owed_validation_scrub_in_lease`) takes NO lease of its own: it runs
+#: under the worker's validation lease, and builds its own fresh client the
+#: same way. `scrub_validation_terminal` takes the lease ONCE.
 _PRODUCTION_LEASE_SITES: frozenset[tuple[str, str]] = frozenset(
     {
         ("services/allocator_positions.py", "_fetch_mt5_account_rows"),
@@ -908,6 +923,9 @@ _PRODUCTION_LEASE_SITES: frozenset[tuple[str, str]] = frozenset(
         # Phase 164.5.4 / D-01 — the MT5 full-backfill arm. See the 2026-09-20
         # re-cut note above, which answers the roster's own question.
         ("services/equity_reconstruction.py", "_mt5_fetch_window"),
+        # Phase 164.6.6.1 / D-08 — the validation terminal's post-verdict scrub.
+        # See the 2026-10-04 re-cut note above.
+        ("services/mt5_terminal_scrub.py", "scrub_validation_terminal"),
     }
 )
 
@@ -1195,6 +1213,16 @@ _VALIDATE_SITES: frozenset[tuple[str, str]] = frozenset(
         ("services/ingestion/mt5.py", "validate"),
     }
 )
+#: ⭐ Phase 164.6.6.1 plan 06 (2026-10-04) — rule (a) widened by exactly ONE named
+#: entry, kept OUT of `_VALIDATE_SITES` so rule (b) does not reach it. The boot
+#: hook reads the validation endpoint only to MARK that terminal scrub-owed: it
+#: takes no lease, touches no client, and cannot route a job onto the validation
+#: terminal. Any other new reader still reds.
+_VALIDATION_ENDPOINT_MARK_ONLY_READERS: frozenset[tuple[str, str]] = frozenset(
+    {
+        ("services/mt5_terminal_scrub.py", "mark_validation_terminal_owed_at_boot"),
+    }
+)
 
 
 def _called_name(call: ast.Call) -> str | None:
@@ -1237,7 +1265,10 @@ def _validation_endpoint_routing(
             where = (rel, _enclosing_function(node, parents))
             if name == _VALIDATION_ENDPOINT_READER:
                 readers.append(where)
-                if where not in _VALIDATE_SITES:
+                if (
+                    where not in _VALIDATE_SITES
+                    and where not in _VALIDATION_ENDPOINT_MARK_ONLY_READERS
+                ):
                     violations.append((*where, "reads the validation endpoint"))
             elif name == _JOB_ENDPOINT_READER and where in _VALIDATE_SITES:
                 violations.append((*where, "calls the job endpoint reader"))
@@ -1273,9 +1304,10 @@ def test_only_the_validate_sites_read_the_validation_endpoint() -> None:
         f"may read the validation terminal's endpoint, and neither may read the "
         f"job terminal's (D-02 / D-05: refuse, never fall back)."
     )
-    assert set(readers) == _VALIDATE_SITES, (
+    expected = _VALIDATE_SITES | _VALIDATION_ENDPOINT_MARK_ONLY_READERS
+    assert set(readers) == expected, (
         f"the validation endpoint is read at {sorted(set(readers))}, expected "
-        f"exactly {sorted(_VALIDATE_SITES)}: a validate site that stopped reading "
+        f"exactly {sorted(expected)}: a validate site that stopped reading "
         f"it is leasing some other terminal"
     )
 
@@ -1317,6 +1349,22 @@ def test_the_routing_checker_REDS_on_each_rule() -> None:
         [],
         [("services/ingestion/mt5.py", "validate", "calls the job endpoint reader")],
     )
+
+    # 164.6.6.1 plan 06: the mark-only allowance is ONE named function, never the
+    # whole module. A second reader in the same file still reds.
+    other_in_scrub_module = (
+        "async def scrub_validation_terminal(host, port, *, site):\n"
+        "    ep = read_env_validation_gateway_endpoint()\n"
+    )
+    assert _validation_endpoint_routing(
+        other_in_scrub_module, "services/mt5_terminal_scrub.py"
+    )[1] == [
+        (
+            "services/mt5_terminal_scrub.py",
+            "scrub_validation_terminal",
+            "reads the validation endpoint",
+        )
+    ]
 
 
 # ---------------------------------------------------------------------------

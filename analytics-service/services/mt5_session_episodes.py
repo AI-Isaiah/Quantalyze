@@ -251,7 +251,10 @@ KIND_SUPERSEDED: Final[str] = "superseded"
 #                                round 1, WR-02 / SFH-02). "Not yet known", never
 #                                "still faulted": a cold relaunch was MEASURED at
 #                                ~86 s kill-to-authorized, and the next reading
-#                                decides.
+#                                decides. ⚠️ 164.6.6.1 plan 03: after a scrub it
+#                                is logged at ERROR, because a terminal with no
+#                                saved login does not come back unaided; the
+#                                relaunch debt is kept for the next tick (D-10).
 #   * recycle_failed          -> the recycle verb itself raised (the channel, the
 #                                seam, the snapshot, or counts it could not read).
 #                                Whether the process was ended is not known from
@@ -259,6 +262,10 @@ KIND_SUPERSEDED: Final[str] = "superseded"
 #                                budget-gated, credential-free reading follows,
 #                                which relaunches a terminal the failed call may
 #                                have ended; the line says whether it answered.
+#                                ⚠️ 164.6.6.1 plan 03: the verb is the SCRUB
+#                                now, and that follow-up is the CREDENTIALED
+#                                house relaunch (with its budget-gated polls),
+#                                never a bare reading.
 #   * recycle_not_landed      -> the verb RAN and reported that it did not end
 #                                every terminal it matched (`terminated <
 #                                matched`), or matched none at all (164.6.5
@@ -288,6 +295,21 @@ KIND_SUPERSEDED: Final[str] = "superseded"
 #                                SFH-09 / WR-01). Reachable only when
 #                                `MT5_RELOGIN_BUDGET_S` is set below its derived
 #                                default, which is a SERVER misconfiguration.
+#   * recycled_house_refused  -> (164.6.6.1 plan 03, D-04 (i)) the scrub ended
+#                                the terminal and deleted its saved accounts, and
+#                                the CREDENTIALED house relaunch answered `-6`:
+#                                the terminal is up and the broker refused the
+#                                house triple. ERROR: nothing automatic fixes a
+#                                refused `MT5_PASSWORD`.
+#   * recycle_no_house_credentials -> (164.6.6.1 plan 03) the escalation RAN and
+#                                DECLINED because it had no house login or
+#                                password to relaunch with. Nothing was ended or
+#                                deleted and the attempt was not spent; ERROR.
+#
+# ⚠️ 164.6.6.1 plan 03 — `recycled_no_account` is NO LONGER PRODUCED. Since the
+# escalation's relaunch is credentialed, a `-6` there is the broker refusing the
+# house triple (`recycled_house_refused`), not a terminal back up with no
+# account yet. The constant stays: rows and log lines already carry it.
 #
 # ⚠️ NONE OF THEM IS PASSED TO `classify_reading` BY THE HEAL, and if one ever is
 # it DEGRADES TO `not_measured` — none is a positive class and none carries
@@ -309,6 +331,44 @@ KIND_IPC_FAULT_RECYCLE_FAILED: Final[str] = "ipc_fault_recycle_failed"
 KIND_IPC_FAULT_RECYCLE_NOT_LANDED: Final[str] = "ipc_fault_recycle_not_landed"
 KIND_IPC_FAULT_RECYCLE_SKIPPED_BUDGET: Final[str] = "ipc_fault_recycle_skipped_budget"
 KIND_IPC_FAULT_RECYCLE_CAPPED: Final[str] = "ipc_fault_recycle_capped"
+KIND_IPC_FAULT_RECYCLED_HOUSE_REFUSED: Final[str] = "ipc_fault_recycled_house_refused"
+KIND_IPC_FAULT_RECYCLE_NO_HOUSE_CREDENTIALS: Final[str] = (
+    "ipc_fault_recycle_no_house_credentials"
+)
+
+# --------------------------------------------------------------------------- #
+# ⭐ 164.6.6.1 plan 04 — RELAUNCH DEBT (CONTEXT D-10) AND THE BOOT WIDENING
+# (CONTEXT D-09). The kinds the two account-less-terminal branches produce:
+#
+#   * relaunch_debt              -> the READING kind of a tick that SKIPPED the
+#                                   bare first probe because this service ended
+#                                   the terminal and has not seen it
+#                                   house-verified since. The credential-free
+#                                   instrument did not run, so it measured
+#                                   nothing (`not_measured`).
+#   * relaunch_debt_settled      -> the debt tick's ONE credentialed house
+#                                   relaunch answered and the house-equality
+#                                   check VERIFIED it; the debt is cleared.
+#   * relaunch_debt_outstanding  -> the debt tick did NOT verify the house
+#                                   session (or its `-10005` fall-through to the
+#                                   scrub escalation was debounced); the debt is
+#                                   kept and the tick logs at ERROR.
+#   * boot_accountless_relaunched -> D-09: at BOOT ONLY, a first probe read the
+#                                   unattributed code `0`, and the credentialed
+#                                   house relaunch that followed verified.
+#   * boot_accountless_relaunch_failed -> D-09: the same, and the relaunch did
+#                                   not verify. ERROR; nothing was ended.
+#
+# ⚠️ None is a positive class and none carries `-6`, so `classify_reading`
+# degrades each to `not_measured`, exactly as the escalation kinds above.
+# --------------------------------------------------------------------------- #
+KIND_RELAUNCH_DEBT: Final[str] = "relaunch_debt"
+KIND_RELAUNCH_DEBT_SETTLED: Final[str] = "relaunch_debt_settled"
+KIND_RELAUNCH_DEBT_OUTSTANDING: Final[str] = "relaunch_debt_outstanding"
+KIND_BOOT_ACCOUNTLESS_RELAUNCHED: Final[str] = "boot_accountless_relaunched"
+KIND_BOOT_ACCOUNTLESS_RELAUNCH_FAILED: Final[str] = (
+    "boot_accountless_relaunch_failed"
+)
 
 #: The MT5 code meaning "the bridge ANSWERED and NO ACCOUNT IS AUTHORIZED" — the
 #: ONE code that establishes darkness. Re-spelled here rather than imported from

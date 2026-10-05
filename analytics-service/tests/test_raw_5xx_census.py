@@ -258,7 +258,14 @@ EXPECTED_HTTPEXCEPTION_SUBCLASSES = 1
 #: this ninth ``VenueTransientHTTPException(424)`` construction. It reuses an
 #: EXISTING code (no new user-facing code is minted) and it is a 4xx, so blind spot
 #: (b) stays LATENT rather than live.
-EXPECTED_SUBCLASS_CONSTRUCTION_SITES = 13
+#: 13 -> 14 (2026-10-04, Phase 164.6.6.1 plan 06 / D-08): the MT5 wizard validate
+#: gained the OWED GATE. A validation terminal still marked scrub-owed, or carrying
+#: relaunch debt, is refused inside the lease, before any connect, with the
+#: route's EXISTING recoverable ``NETWORK_UNAVAILABLE`` answer while the owed scrub
+#: is scheduled. A tenth ``VenueTransientHTTPException(424)`` construction; it
+#: reuses an existing code (no new user-facing code is minted) and it is a 4xx, so
+#: blind spot (b) stays LATENT rather than live.
+EXPECTED_SUBCLASS_CONSTRUCTION_SITES = 14
 
 #: Vacuity fence. A scanner that matched nothing would report agreement with the
 #: quarantine forever, so the scan must prove it saw the tree. Loose floors on
