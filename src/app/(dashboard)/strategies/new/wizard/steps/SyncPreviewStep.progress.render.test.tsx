@@ -16,7 +16,8 @@
  *     A "degraded" row carries NO reason text (decision 3 — the reason stays
  *     post-completion via the Phase-93 degradedMembers DQ channel).
  *   PROG-03 — route `stalled:true` renders a DISTINCT interrupted state + an
- *     idempotent retry CTA (re-POSTs /api/keys/sync). `stalled:false` NEVER
+ *     idempotent retry CTA (re-POSTs /api/keys/sync; since #857 only once no
+ *     read says a job is in flight). `stalled:false` NEVER
  *     renders it, regardless of elapsed time (RT-1 render half).
  *
  * Harness idioms (chainable pure-stub supabase, fetch mock, fake-timer act
@@ -303,16 +304,49 @@ describe("[95-04] SyncPreviewStep — progress surface (PROG-01/02/03)", () => {
     expect(screen.queryByText(/strategy_id=/)).not.toBeInTheDocument();
   });
 
-  // PROG-03 INTERRUPTED — stalled:true renders the distinct state + retry CTA.
-  it("renders the interrupted state and an idempotent retry CTA on stalled:true", async () => {
+  // PROG-03 INTERRUPTED — stalled:true renders the distinct state; the retry CTA
+  // comes only once no read says a job is in flight.
+  //
+  // 2026-10-05 — `jobStatus: "running"` is the ONLY status a real stalled read
+  // carries (`isStitchStalled` requires `status === "running"`). Since #857
+  // ("Retry only when needed") a live read saying a job is in flight withholds
+  // the Retry, because the server's resync guard would refuse it. This case
+  // used to assert the Retry straight after the read and passed only because
+  // no 1 s tick had yet mirrored the evidence into the render; vitest 5's
+  // timer order runs that tick. So the live half now asserts the #857 answer,
+  // and the CTA is driven the way #857 drove its backstop cases: the channel
+  // goes dark, the last-known stalled read is kept (SF-3), and the in-flight
+  // evidence ages past its 60 s TTL.
+  it("renders the interrupted state on stalled:true and an idempotent retry CTA once the channel goes dark", async () => {
     installWaitingMock("computing");
     progressOutcome = {
       kind: "json",
       body: { jobStatus: "running", stalled: true, memberProgress: MEMBERS_3 },
     };
     await renderWaiting();
+    // Run the 1 s tick explicitly so the live half does not depend on timer
+    // order in either direction.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+
+    // Live channel, stalled stitch: banner up, no Retry the server would refuse.
+    expect(screen.getByTestId("wizard-sync-interrupted")).toBeInTheDocument();
+    expect(screen.getByTestId("wizard-sync-maybe-stuck")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /retry sync/i }),
+    ).not.toBeInTheDocument();
+
+    // The channel goes dark past IN_FLIGHT_EVIDENCE_TTL_MS (60 s) since the last
+    // real read.
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    progressOutcome = { kind: "reject" };
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(70_000);
+    });
 
     expect(screen.getByTestId("wizard-sync-interrupted")).toBeInTheDocument();
+    expect(screen.queryByTestId("wizard-sync-maybe-stuck")).not.toBeInTheDocument();
     const retry = screen.getByRole("button", { name: /retry sync/i });
     expect(retry).toBeInTheDocument();
 
@@ -347,6 +381,7 @@ describe("[95-04] SyncPreviewStep — progress surface (PROG-01/02/03)", () => {
       await vi.advanceTimersByTimeAsync(6000);
     });
     expect(statusPollCount).toBeGreaterThan(pollsBefore);
+    warnSpy.mockRestore();
   });
 
   // SF-2a — the interrupted/taking-longer state uses NEUTRAL, always-true copy.
