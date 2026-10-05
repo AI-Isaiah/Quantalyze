@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.125.0.1] - 2026-10-05 — Python minor/patch dependency group (Dependabot #953)
+
+### Changed
+- `analytics-service` dependencies: quantstats 0.0.81 → 0.0.86, cryptography 50.0.1 → 50.0.2,
+  mypy 2.3.1 → 2.4.0, ccxt 4.5.84 → 4.5.85, fastapi 0.141.1 → 0.142.2, python-dotenv 1.2.3 →
+  1.2.4, sentry-sdk 2.70.0 → 2.71.0.
+
+### Notes
+- quantstats 0.0.85 and 0.0.86 are statistical corrections upstream: `rar()` no longer charges
+  the annual risk-free rate every period, DataFrame trade statistics (average win/loss, payoff,
+  win/loss ratio, CPC, Kelly) no longer depend on other columns, `rolling_greeks()` alpha uses
+  each window's own means, and a time-varying `rf` Series no longer collides in the
+  `_prepare_returns()` cache. The analytics suite's metric gates are the judge of whether any
+  figure this service computes moved.
+
 ## [0.125.0.0] - 2026-10-05 — MT5SCRUB: the MT5 terminals are wiped of client saved accounts (Phase 164.6.6.1)
 
 ⭐ **What changed for whoever reads this next.** Both MT5 terminals now delete the saved-account
