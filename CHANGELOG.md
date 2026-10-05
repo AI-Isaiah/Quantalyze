@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.125.0.9] - 2026-10-05 — svix 2 for the Resend webhook (Dependabot #954)
+
+### Changed
+- svix 1.96.1 → 2.6.2, a major version. `Webhook.verify()` now only checks the signature and
+  returns nothing; in 1.x it also returned the parsed body. `/api/webhooks/resend` now parses the
+  verified raw body itself, inside the same `try`, so a bad signature, a stale timestamp or a
+  body that is not JSON all still answer 401 with the same response.
+- `package-lock.json` regenerated so npm 10 (CI's Node 22) accepts it: npm 11 resolves the bump,
+  then an npm 10 pass restores the nested `puppeteer-core` proxy-agent entries npm 11 drops.
+
+### Tests
+- `route.test.ts` gains a correctly signed non-JSON body → 401 case. It fails with a raw
+  `SyntaxError` when the parse is moved outside the verify `try`.
+
 ## [0.125.0.8] - 2026-10-05 — rpyc 5.3.1 for the analytics service (Dependabot #958)
 
 ### Changed
