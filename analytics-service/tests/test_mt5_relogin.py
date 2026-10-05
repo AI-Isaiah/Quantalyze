@@ -4219,6 +4219,94 @@ async def test_SCRUB_a_delete_REFUSED_after_the_kill_still_relaunches_and_pays_t
     _assert_rows_carry_no_secret(sink)
 
 
+@pytest.mark.parametrize(
+    "overrides,level,qualifiers",
+    [
+        pytest.param(
+            {"accounts_errors": ["PermissionError"]},
+            logging.ERROR,
+            ("accounts_errors=1", "accounts_dat_kept=delete_errored"),
+            id="accounts.dat-delete-ERRORED",
+        ),
+        pytest.param(
+            {"accounts_errors": "not-a-list"},
+            logging.ERROR,
+            ("accounts_errors=None", "accounts_dat_kept=delete_errored"),
+            id="accounts_errors-UNPARSEABLE",
+        ),
+        pytest.param(
+            {"profile_accounts_found": 1},
+            logging.ERROR,
+            ("profile_accounts_found=1", "profile_tripwire=fired"),
+            id="the-PROFILE-tripwire-fired",
+        ),
+        pytest.param(
+            # The jobs terminal passes delete_trades=0, so the verb deletes no
+            # cache and a trades error list says nothing about this scrub.
+            {"trades_errors": ["PermissionError"]},
+            logging.INFO,
+            ("accounts_errors=0",),
+            id="trades_errors-is-NOT-a-jobs-rule",
+        ),
+    ],
+)
+async def test_SCRUB_a_delete_that_ERRORED_after_a_verified_relaunch_is_ERROR_never_a_clean_recycle(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    sink,
+    overrides: dict,
+    level: int,
+    qualifiers: tuple[str, ...],
+) -> None:
+    """⛔ 164.6.6.1 review round 1, SFH-02 / WR-03. The jobs-terminal scrub ended
+    the terminal (`refused=0`), but deleting `accounts.dat` RAISED on the far
+    side, so the stale saved house copy (the L7 Login-dialog wedge source this
+    phase removes) is not proven gone. Before this fix the escalation never read
+    `accounts_errors`: the line was INFO `ipc_fault_recycled` and did not even
+    print the errors. It must say ERROR with `accounts_dat_kept=delete_errored`
+    and the count, using the SAME predicate the validation scrub uses
+    (`scrub_delete_faults`), so the two consumers agree on one verdict. The same
+    for a fired profile tripwire.
+
+    THE DEBT IS PAID, BY DECISION. The debt tracks "this terminal was ended and
+    is not yet house-verified", and the credentialed house relaunch VERIFIED, so
+    it clears exactly as the refused-and-verified precedent above pins. The kind
+    stays `ipc_fault_recycled` (the closed episode kind set is unchanged); the
+    ERROR line and its qualifier are what keep it from reading clean."""
+    from services import mt5_client
+
+    _set_full_env(monkeypatch)
+    _install_client(
+        monkeypatch,
+        {
+            **_WEDGED,
+            "relaunch_credentialed": True,
+            "terminal_info": _HOUSE_TERMINAL,
+            "account_info": _HOUSE_ACCOUNT,
+            "scrub_verdict_overrides": overrides,
+        },
+    )
+    outcomes = _capture_and_record_outcomes(monkeypatch)
+    clears = _spy_debt_clears(monkeypatch)
+
+    with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
+        await _heal_n_times(1)
+
+    assert outcomes[0].escalation_kind == mt5_session_episodes.KIND_IPC_FAULT_RECYCLED
+    line = _escalation_line(caplog)
+    assert line.levelno == level, line.getMessage()
+    for qualifier in qualifiers:
+        assert qualifier in line.getMessage(), (qualifier, line.getMessage())
+    if level == logging.INFO:
+        assert "accounts_dat_kept=" not in line.getMessage()
+        assert "profile_tripwire=" not in line.getMessage()
+    assert clears == [_heal_terminal_key()]
+    assert mt5_client.mt5_relaunch_debt(_heal_terminal_key()) is False
+    _assert_no_credential_value_escaped(_records(caplog))
+    _assert_env_password_in_no_record(caplog)
+    _assert_rows_carry_no_secret(sink)
+
+
 @pytest.mark.parametrize("unset", ["MT5_LOGIN", "MT5_PASSWORD"])
 async def test_ESCALATION_no_house_credentials_ends_nothing_deletes_nothing_and_keeps_the_claim(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, unset: str

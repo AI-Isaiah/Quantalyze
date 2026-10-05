@@ -1945,6 +1945,8 @@ def _escalate_ipc_fault(
             f"exited={verdict.get('exited')} refused={verdict.get('refused')} "
             f"accounts_deleted={verdict.get('accounts_deleted')} "
             f"accounts_missing={verdict.get('accounts_missing')} "
+            # ⭐ 164.6.6.1 review round 1 (SFH-02): the COUNT, always printed.
+            f"accounts_errors={scrub_error_count(verdict, 'accounts_errors')} "
             f"trades_deleted={verdict.get('trades_deleted')} "
             f"profile_accounts_found={verdict.get('profile_accounts_found')} "
             f"{relaunch_part} "
@@ -2023,6 +2025,29 @@ def _escalate_ipc_fault(
         detail = f"{detail} accounts_dat_kept={_scrub_refusal_reason(refused)}"
         if _recycle_landed(verdict):
             level = logging.ERROR
+    if result.verb_exc_class is None:
+        # ⛔ 164.6.6.1 review round 1 (SFH-02 / WR-03) — THE ONE SHARED
+        # PREDICATE the validation scrub classifies by. A delete that ERRORED
+        # did not prove the stale saved copy gone, and a fired or unreadable
+        # profile tripwire means a saved account may sit where the literal never
+        # deletes. Either is ERROR whatever the relaunch said. The kind and the
+        # debt are untouched: a VERIFIED house relaunch still pays the debt
+        # (the terminal is up as house), exactly as a refused-and-verified scrub
+        # does; this line is what keeps the outcome from reading clean.
+        # `_JOB_TERMINAL_DELETE_TRADES` is 0, so no trades rule applies here.
+        # Only a verdict the verb RETURNED is asked: a raised verb's is empty.
+        faults = scrub_delete_faults(
+            verdict, delete_trades=_JOB_TERMINAL_DELETE_TRADES
+        )
+        # A refused delete never ran, so its (empty) error list says nothing and
+        # `accounts_dat_kept` already names the refusal above.
+        if faults.accounts_errored and refused == 0:
+            level = logging.ERROR
+            detail = f"{detail} accounts_dat_kept=delete_errored"
+        # The literal counts the profile directory whether or not it refused.
+        if faults.profile_tripwire:
+            level = logging.ERROR
+            detail = f"{detail} profile_tripwire=fired"
     if recent_recycles >= IPC_FAULT_RECYCLE_CAP:
         # ⛔ CR-01 (164.6.5 review round 2) — THE RECURRENCE IS THE SIGNAL. This
         # is the cap'th recycle inside the window: the last one "worked" and the
