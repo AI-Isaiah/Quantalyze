@@ -14,9 +14,9 @@
 # Dev/test-only deps (pytest, pyarrow, mypy, …) live in requirements-dev.txt and
 # are NOT shipped to prod (Dockerfile installs only requirements.txt).
 
-fastapi==0.141.1
+fastapi==0.142.2
 uvicorn[standard]==0.54.0
-quantstats==0.0.81
+quantstats==0.0.86
 # ccxt parses live broker payloads feeding equity reconstruction + trade
 # ingestion; it releases near-daily and the unified API can change behavior
 # between releases. Pinned exactly (was `>=4.0`) so a rebuild can't float it.
@@ -26,7 +26,7 @@ quantstats==0.0.81
 # opens a PR against requirements.txt, then re-run `make lock` and commit the
 # regenerated lock (Dependabot's own pip-compile won't match the uv/universal
 # format).
-ccxt==4.5.84
+ccxt==4.5.85
 pandas==3.0.3
 numpy==2.5.3
 # NOTE: pyarrow is NOT here — it is a TEST-ONLY dependency (pd.read_parquet of the
@@ -36,11 +36,11 @@ numpy==2.5.3
 # transitive attack surface. pandas 3.0.3 does not require pyarrow at runtime; no
 # production code path reads parquet (trades/positions come from Supabase as JSON).
 pydantic==2.13.5
-python-dotenv==1.2.3
+python-dotenv==1.2.4
 httpx==0.28.1
 slowapi==0.1.10
 supabase==2.31.0
-cryptography>=44.0
+cryptography>=50.0.2
 # Phase 15 / CSV-01..CSV-02: pandera CSV row-schema validation +
 # python-multipart UploadFile parsing for /api/csv/validate (the only
 # multipart route in the service). pandera 0.33.x is compatible with
@@ -64,7 +64,7 @@ psycopg[binary]==3.3.6
 # + before_send PII scrub (FULL mirror of src/lib/admin/pii-scrub.ts: 8 exact keys +
 # DENYLIST_PREFIX sb-ec- + JWT_SHAPE regex + broker signing headers per FIX 7).
 # vcrpy pin lands in Plan 8 (16-08).
-sentry-sdk[fastapi]==2.70.0
+sentry-sdk[fastapi]==2.71.0
 # Phase 16 / OBSERV-08: vcrpy pinned for deterministic local-repro of the unified
 # key flow. Records 12 cassettes (3 brokers × 4 scenarios) at
 # analytics-service/tests/cassettes/ and replays them in CI with NO network
