@@ -2785,14 +2785,38 @@ async def heal_mt5_terminal_session(
             # ⚠️ The lease's own WARNING is NOT changed here. It belongs to a shared
             # helper whose other callers are the INTERACTIVE validate path, where
             # "gave up waiting for the terminal" genuinely is a warning.
-            logger.info(
-                "%s: skipped — the terminal was already in use when "
-                "the bounded acquire expired, so the heal gave up rather than "
-                "queueing ahead of real work. A busy terminal is a terminal "
-                "somebody is already successfully using, which is itself evidence "
-                "the session is fine (D-29).",
-                label,
-            )
+            #
+            # ⛔ T-15 / WR-02 (164.6.6.1) — EXCEPT WHILE A RELAUNCH DEBT IS OWED.
+            # A debt means this service ended the terminal and has not seen it
+            # house-verified since, so the jobs holding the lease are most likely
+            # FAILING against an account-less terminal (a credential-less
+            # `initialize()` there blocks 25-30 s, S-03(b)/S-10), and "busy is
+            # evidence the session is fine" is then false. `_settle_relaunch_debt`
+            # only runs after the lease is won, so without this branch a backlog
+            # that starves every tick's bounded acquire reports the terminal fine
+            # on every tick. The SKIP itself is unchanged (never queue ahead of
+            # real work, and the lease wait is NOT lengthened); only the claim is.
+            # Closed literal text and the source label only: no credential, host,
+            # port or account.
+            if mt5_relaunch_debt(mt5_terminal_key(host, port)):
+                logger.error(
+                    "%s: relaunch debt OUTSTANDING and the heal could not get the "
+                    "terminal lease — the bounded acquire expired while the "
+                    "terminal was in use, so the credentialed house relaunch that "
+                    "pays the debt did not run this tick. The jobs holding the "
+                    "terminal are most likely failing against a terminal with no "
+                    "account; an OPERATOR is needed if this persists.",
+                    label,
+                )
+            else:
+                logger.info(
+                    "%s: skipped — the terminal was already in use when "
+                    "the bounded acquire expired, so the heal gave up rather than "
+                    "queueing ahead of real work. A busy terminal is a terminal "
+                    "somebody is already successfully using, which is itself "
+                    "evidence the session is fine (D-29).",
+                    label,
+                )
             # ⛔ RECORDED AS `not_measured`, AND THE SKIP'S OWN RATIONALE IS
             # DELIBERATELY NOT CARRIED INTO THE RECORD. "A busy terminal is
             # evidence the session is fine" is cheap and defensible for a

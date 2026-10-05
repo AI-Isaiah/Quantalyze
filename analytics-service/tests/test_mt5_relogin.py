@@ -5110,6 +5110,79 @@ async def test_a_BUSY_terminal_is_an_INFO_skip_and_never_a_warning(
     )
 
 
+@pytest.mark.parametrize(
+    "debt_owed",
+    [
+        pytest.param(True, id="relaunch-debt-owed"),
+        pytest.param(False, id="no-relaunch-debt"),
+    ],
+)
+async def test_T15_a_BUSY_tick_with_a_relaunch_debt_owed_logs_ERROR_and_never_session_is_fine(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    debt_owed: bool,
+) -> None:
+    """⛔ T-15 / WR-02 (164.6.6.1) — A LEASE-STARVED TICK MUST NOT CALL A
+    TERMINAL THAT OWES A RELAUNCH "FINE".
+
+    D-10 pays the relaunch debt only inside `_heal_blocking`, i.e. only after the
+    heal WINS the lease. Against a scrubbed, unverified jobs terminal the jobs
+    hold the lease for 25-30 s per credential-less `initialize()` (S-03(b),
+    S-10), so the heal's bounded acquire can expire on EVERY tick. The busy arm
+    used to answer that, every tick, with an INFO saying a busy terminal "is
+    itself evidence the session is fine" — false while a debt is owed, and the
+    only ERROR for an unpaid debt (`_log_relaunch_debt_outstanding`) is
+    unreachable from there.
+
+    Both halves are pinned. Debt owed: ONE outcome record, at ERROR, naming the
+    outstanding debt and the lost lease, and the "session is fine" claim absent.
+    No debt: the WR-05 INFO skip, byte-for-byte the reasoning it carried before.
+    Either way the reading is still `busy_skip` (the tick measured nothing) and
+    the debt is neither cleared nor minted by a tick that never got the lease.
+    """
+    from services import mt5_client
+
+    _set_full_env(monkeypatch)
+    _install_client(monkeypatch, {"initialize": True})
+    _fail_at_lease(monkeypatch)
+    key = _heal_terminal_key()
+    if debt_owed:
+        _owe_relaunch_debt()
+
+    recorded: list[str] = []
+
+    async def _record(kind: str, _code: object, **_k: object) -> None:
+        recorded.append(kind)
+
+    monkeypatch.setattr(mt5_relogin, "record_mt5_session_reading", _record)
+
+    with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
+        assert await mt5_relogin.heal_mt5_terminal_session() is None
+
+    records = _outcome_records(caplog)
+    assert len(records) == 1, [r.getMessage() for r in records]
+    record = records[0]
+    message = record.getMessage()
+    if debt_owed:
+        assert record.levelno == logging.ERROR, (
+            f"a busy tick with a relaunch debt owed logged at {record.levelname}: "
+            f"{message!r} — the terminal is most likely account-less and the "
+            "heal that pays the debt could not run (T-15)"
+        )
+        assert "session is fine" not in message, (
+            f"a busy tick with a relaunch debt owed still claims the session is "
+            f"fine: {message!r} (T-15 / WR-02)"
+        )
+        assert "relaunch debt OUTSTANDING" in message, message
+        assert "could not get the terminal lease" in message, message
+    else:
+        assert record.levelno == logging.INFO, (record.levelname, message)
+        assert "busy terminal" in message and "session is fine" in message, message
+    assert recorded == [mt5_session_episodes.KIND_BUSY_SKIP], recorded
+    assert mt5_client.mt5_relaunch_debt(key) is debt_owed
+    _assert_no_credential_value_escaped(_records(caplog))
+
+
 async def test_a_hung_terminal_is_abandoned_at_the_budget_and_raises_nothing(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
