@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.125.1.1] - 2026-10-06 — SyncPreviewStep Retry tests describe states where #857 shows Retry
+
+### Tests
+- Ten `SyncPreviewStep` tests asserted the banner's Retry on a sync-progress read of
+  `{ jobStatus: "running", stalled: true }`. Since #857 that read withholds Retry, because the
+  server's resync guard would refuse it, and a real stalled read is always `running`
+  (`isStitchStalled`). They passed only while no 1 s interval tick had copied the in-flight evidence
+  into the render: one extra tick reds them on vitest 4, and vitest 5's timer order runs it. That is
+  what blocked Dependabot #959.
+- `progress.render`: PROG-03 now asserts "may be stuck" and no Retry while the read is live, then
+  Retry once the channel goes dark past `IN_FLIGHT_EVIDENCE_TTL_MS`.
+- `retry-sync.runtime`: the fixture is a settled chain (`failed_final`) whose analytics are not
+  computed, past `SETTLED_WITHOUT_COMPLETE_GRACE_MS`, which is the arm where Retry is legitimate.
+- The component is unchanged. 186/186 `SyncPreviewStep` tests pass on vitest 4 and 5, also with an
+  extra 1000 ms tick before the assertions, and three component neuters each red the expected tests.
+
 ## [0.125.1.0] - 2026-10-06 — a wizard Continue race fixed; two shard flakes closed
 
 ### Fixed
