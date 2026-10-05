@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.125.0.3] - 2026-10-05 — npm minor/patch dependency group (Dependabot #951)
+
+### Changed
+- Runtime: @supabase/supabase-js 2.110.1 → 2.117.2, @upstash/ratelimit 2.0.8 → 2.2.0, next 16.3.6 →
+  16.3.8, posthog-js 1.434.13 → 1.435.6, posthog-node 5.53.0 → 5.55.0, resend 6.29.0 → 6.32.0.
+- Dev: eslint-config-next 16.3.6 → 16.3.8, knip 6.38.0 → 6.39.0, ws 8.21.0 → 8.22.0,
+  @types/ws 8.18.1 → 8.18.2, plus @types/node within its range in the lockfile.
+
+### Fixed
+- `package-lock.json` regenerated with npm 10, the npm that CI's Node 22 runs. Dependabot wrote the
+  lock with npm 11, which leaves out puppeteer-core's nested `proxy-agent` 8 / `agent-base` 9 tree,
+  so `npm ci` under npm 10 refused it as out of sync. Both npm 10 and npm 11 accept the
+  regenerated lock (`npm ci --dry-run`).
+
 ## [0.125.0.2] - 2026-10-05 — pyarrow 25 for the analytics test suite (Dependabot #955)
 
 ### Changed
