@@ -5,7 +5,10 @@
 ### Changed
 - `analytics-service` dependencies: quantstats 0.0.81 → 0.0.86, cryptography 50.0.1 → 50.0.2,
   mypy 2.3.1 → 2.4.0, ccxt 4.5.84 → 4.5.85, fastapi 0.141.1 → 0.142.2, python-dotenv 1.2.3 →
-  1.2.4, sentry-sdk 2.70.0 → 2.71.0.
+  1.2.4, sentry-sdk 2.70.0 → 2.71.0. Transitively urllib3 2.7.0 → 2.8.0, tzdata 2026.2 → 2026.5,
+  and `opentelemetry-api` 1.45.0 is newly pulled in by fastapi.
+- `requirements.txt` re-locked with `make lock`, which restores the canonical `uv --universal`
+  markers and extras form that the Dependabot rewrite flattened.
 
 ### Notes
 - quantstats 0.0.85 and 0.0.86 are statistical corrections upstream: `rar()` no longer charges
