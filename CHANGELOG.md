@@ -1,5 +1,59 @@
 # Changelog
 
+## [0.125.0.0] - 2026-10-05 — MT5SCRUB: the MT5 terminals are wiped of client saved accounts (Phase 164.6.6.1)
+
+⭐ **What changed for whoever reads this next.** Both MT5 terminals now delete the saved-account
+database a client's login leaves behind, and come back logged in as the house account without a
+VNC session. The validation terminal is scrubbed after every validation verdict, in its own lease.
+The jobs terminal is scrubbed on every `ipc_fault` recycle. The live readings (plan 07, L-1..L-4)
+run after this deploy; until then the jobs terminal's relaunch timing rests on the validation
+terminal's S-11 measurement (founder decision D-11).
+
+### Added
+- **A terminal scrub verb** (`Mt5Client.scrub_terminal_account_data`). It sends one committed
+  remote literal with no interpolation. The literal terminates `terminal64.exe` and deletes only
+  `accounts.dat` and, when asked, the per-server `trades` children. It refuses every delete when no
+  process matched, a terminate was refused, a process did not exit, or the process walk failed.
+  It takes no credential. A relaunch debt is noted before it crosses.
+- **The validation terminal's post-verdict scrub** (`services/mt5_terminal_scrub.py`). Both the
+  wizard and the worker schedule it after the verdict, gated on a login having been attempted.
+  It waits for unfinished probe threads (W-1), relaunches as house with credentials, and writes a
+  `cron_runs` row named `mt5_terminal_scrub` with a closed kind set. An owed scrub refuses the next
+  wizard validation with the recoverable 424; the worker pays it inline. Boot marks the validation
+  terminal owed.
+- **Relaunch debt (D-10).** Any heal tick pays an outstanding debt with a credentialed house
+  relaunch. The debt clears only when house is verified. Every unpaid tick logs ERROR, including a
+  tick that cannot get the terminal lease (security T-15, review WR-02).
+- **D-09 boot relaunch.** A terminal found account-less at boot (code 0) is relaunched as house.
+- **Runbook posture section** in `deploy/mt5-gateway/railway-gateway.md`: the rpyc channel now
+  carries a deletion command class, bounded by the committed literal. No network exposure changes.
+
+### Changed
+- **The jobs terminal's `ipc_fault` escalation now scrubs before it relaunches.** The sequence is
+  capture, budget gate, scrub (`delete_trades=0`), credentialed relaunch and house check, in 8
+  crossings inside the 300 s ceiling. It keeps the `trades` caches until
+  `TODOS.md` `MT5-JOB-TERMINAL-TRADES-SCRUB-01` is closed by Phase 164.6.6.3.
+- **One shared scrub-delete predicate** (`scrub_delete_faults`) is read by both scrub consumers.
+  An errored `accounts.dat` delete, an errored cache delete or the profile tripwire is a failure,
+  never a success (review SFH-01/02, WR-01/03).
+
+### Fixed
+- A pending relaunch after a scrub logs at ERROR. A debt relaunch the terminal answered ends the
+  fault run. The pending scrub key is released while the lease is still held.
+
+### Tests
+- New `tests/test_mt5_terminal_scrub.py`, a scrub contract family in `test_mt5_client_contract.py`,
+  escalation, debt, D-09 and T-15 gates in `test_mt5_relogin.py`, W-1 and verdict-invariance gates
+  in `test_mt5_validation_park.py`. The raw-5xx census moves 13 → 14 for the owed gate's 424. A
+  rotated `MT5_PASSWORD` heals a stale-password jobs terminal through the env value.
+
+### Notes
+- Carried, recorded rather than fixed (MEDIUM): WR-05, the validation scrub deletes before it
+  checks the relaunch budget; WR-04, nothing refuses equal validation and jobs gateway endpoints;
+  RR2-01, a fired profile tripwire has no distinct cause or runbook step.
+- The validation terminal keeps its Journal `logs`, `mail` and `subscriptions` by default until the
+  founder decides in plan 07.
+
 ## [0.124.0.2] - 2026-10-04 — MT5SCRUB re-plan: Phase 164.6.6.1 planned from the 2026-10-04 scrub spike
 
 ⭐ **What changed for whoever reads this next.** Phase 164.6.6.1 MT5SCRUB is re-planned and ready to
