@@ -1375,6 +1375,24 @@ true for 146 and half of 142–145, and **false for 141**.
 
 ## 🟡 FIX MID-TERM
 
+### QUANTSTATS-0086-REDERIVE-01 — quantstats is held at 0.0.81; adopting 0.0.86 changes reported risk figures (booked 2026-10-05, Dependabot #953)
+
+**Why it is open.** Dependabot #953 bumped quantstats 0.0.81 → 0.0.86. Upstream 0.0.85/0.0.86 are
+statistical corrections, and the repo's own gates went red on them: `test_rank05_quantstats_pin_is_still_0_0_81`,
+the RANK-05 live-parity arm for `cvar` (−0.0279 → −0.0344 on the benign fixture), the Q166 parity
+arms for `serenity_index` and `common_sense_ratio`, `test_q166_rolling_greeks_alpha_differs_from_the_full_sample_form`,
+and the qstats-gate calibration arm for `cvar` (8 tests). The founder chose to hold quantstats and ship
+the rest of the group. `.github/dependabot.yml` ignores quantstats until this closes.
+
+**What closing it means.** Re-derive every inline mirror in `analytics-service/services/metrics.py`
+that cites 0.0.81 source against 0.0.86, decide per metric whether the new upstream figure is the one
+this product reports, move the pin, and remove the Dependabot ignore in the same PR. The reported
+CVaR and the other moved figures change for every strategy on its next recompute, so the PR says so
+in its CHANGELOG entry.
+⛔ **Not a close:** loosening the parity tolerance, or re-pinning the expected values without the
+per-metric decision.
+
+
 - [ ] **`[164.9.3.2.1-OQ1-DEPARTED-KEY-55006-DEFEATS-RETRY]` `set_departed_key_history_inclusion` turns the
       enqueue race-loss 40001 into a 55006 "try again", so the user is asked to retry a race PostgREST 14
       would have absorbed (booked 2026-10-02, Phase 164.9.3.2.1 review WR-02, RESEARCH open question 1).**

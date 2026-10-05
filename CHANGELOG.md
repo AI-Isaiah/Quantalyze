@@ -1,22 +1,23 @@
 # Changelog
 
-## [0.125.0.1] - 2026-10-05 — Python minor/patch dependency group (Dependabot #953)
+## [0.125.0.1] - 2026-10-05 — Python minor/patch dependency group, quantstats held (Dependabot #953)
 
 ### Changed
-- `analytics-service` dependencies: quantstats 0.0.81 → 0.0.86, cryptography 50.0.1 → 50.0.2,
-  mypy 2.3.1 → 2.4.0, ccxt 4.5.84 → 4.5.85, fastapi 0.141.1 → 0.142.2, python-dotenv 1.2.3 →
-  1.2.4, sentry-sdk 2.70.0 → 2.71.0. Transitively urllib3 2.7.0 → 2.8.0, tzdata 2026.2 → 2026.5,
-  and `opentelemetry-api` 1.45.0 is newly pulled in by fastapi.
+- `analytics-service` dependencies: cryptography 50.0.1 → 50.0.2, mypy 2.3.1 → 2.4.0, ccxt 4.5.84 →
+  4.5.85, fastapi 0.141.1 → 0.142.2, python-dotenv 1.2.3 → 1.2.4, sentry-sdk 2.70.0 → 2.71.0.
+  Transitively urllib3 2.7.0 → 2.8.0 and tzdata 2026.2 → 2026.5, and `opentelemetry-api` 1.45.0 is
+  newly pulled in by fastapi.
 - `requirements.txt` re-locked with `make lock`, which restores the canonical `uv --universal`
   markers and extras form that the Dependabot rewrite flattened.
+- `.github/dependabot.yml` pip block gains an `ignore` list: rpyc `>=6` (the MT5 gateways speak the
+  rpyc 5 protocol; #956 declined) and quantstats (held, see below).
 
 ### Notes
-- quantstats 0.0.85 and 0.0.86 are statistical corrections upstream: `rar()` no longer charges
-  the annual risk-free rate every period, DataFrame trade statistics (average win/loss, payoff,
-  win/loss ratio, CPC, Kelly) no longer depend on other columns, `rolling_greeks()` alpha uses
-  each window's own means, and a time-varying `rf` Series no longer collides in the
-  `_prepare_returns()` cache. The analytics suite's metric gates are the judge of whether any
-  figure this service computes moved.
+- **quantstats stays at 0.0.81.** The group proposed 0.0.86, whose upstream statistical corrections
+  moved `cvar`, `serenity_index`, `common_sense_ratio` and rolling alpha away from this service's
+  inline mirrors; 8 metric gates went red, as they are built to. Founder decision 2026-10-05: hold
+  it and ship the rest. `TODOS.md` `QUANTSTATS-0086-REDERIVE-01` owns the re-derivation, which will
+  change reported figures.
 
 ## [0.125.0.0] - 2026-10-05 — MT5SCRUB: the MT5 terminals are wiped of client saved accounts (Phase 164.6.6.1)
 

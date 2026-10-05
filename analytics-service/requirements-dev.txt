@@ -8,12 +8,12 @@
 # Assumption A2 verified via scripts/probe-quantstats-version.sh
 # (qs.stats.sharpe(returns, periods=252) responds with a finite float).
 #
-# Note: quantstats==0.0.86 is also pinned in requirements.txt today
+# Note: quantstats==0.0.81 is also pinned in requirements.txt today
 # (services/metrics.py uses it at runtime). Re-pinning here is a tracking
 # guarantee for the golden-file test suite — if requirements.txt ever
 # drops quantstats, the dev-only pin keeps the reference Sharpe assertion
 # working.
-quantstats==0.0.86
+quantstats==0.0.81
 
 # H-0537 — pyarrow is TEST-ONLY: pd.read_parquet of the golden_252d_input.parquet
 # fixture (tests/conftest.py) + .to_parquet in tests/fixtures/regen_golden.py. Moved

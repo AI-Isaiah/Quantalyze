@@ -16,7 +16,7 @@
 
 fastapi==0.142.2
 uvicorn[standard]==0.54.0
-quantstats==0.0.86
+quantstats==0.0.81
 # ccxt parses live broker payloads feeding equity reconstruction + trade
 # ingestion; it releases near-daily and the unified API can change behavior
 # between releases. Pinned exactly (was `>=4.0`) so a rebuild can't float it.
