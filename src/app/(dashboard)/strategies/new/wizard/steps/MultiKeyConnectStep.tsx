@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { Input } from "@/components/ui/Input";
 import { Button } from "@/components/ui/Button";
@@ -868,10 +868,14 @@ export function MultiKeyConnectStep({
   const [singleDraftDirty, setSingleDraftDirty] = useState(false);
 
   // Latest-panels ref for reads inside event handlers (validate / continue /
-  // add) that must see current state without re-binding callbacks. Synced in an
-  // effect (never written during render).
+  // add) that must see current state without re-binding callbacks. Synced in a
+  // LAYOUT effect (never written during render): it runs inside the commit,
+  // before the browser can dispatch an event at the freshly rendered controls.
+  // A passive effect left a gap after the rehydration commit in which Continue
+  // was already enabled but this ref still held the empty pre-rehydration
+  // panels, so a click there posted `keys: []` and threw on `current[0]`.
   const panelsRef = useRef(panels);
-  useEffect(() => {
+  useLayoutEffect(() => {
     panelsRef.current = panels;
   }, [panels]);
 
