@@ -1270,6 +1270,73 @@ def _recycle_landed(verdict: dict[str, object]) -> bool:
     )
 
 
+class ScrubDeleteFaults(NamedTuple):
+    """Why a scrub verdict's DELETE is not proven clean, one flag per reason
+    (``scrub_delete_faults``). ``refused`` is read separately by each consumer;
+    these are the faults a ``refused == 0`` verdict can still carry.
+
+    * ``accounts_errored``: ``accounts_errors`` is not an empty list, so the
+      saved-account database (``Config/accounts.dat``) is not proven gone.
+    * ``trades_errored``: the verb was asked to delete the deal caches
+      (``delete_trades == 1``) and ``trades_errors`` is not an empty list, so an
+      account-named cache is not proven gone. Always False when the caches
+      were not to be deleted.
+    * ``profile_tripwire``: ``profile_accounts_found`` is not the int 0. The
+      literal counts an ``accounts.dat`` under the per-user profile directory and
+      NEVER deletes one (CONTEXT S-07 measured that directory holding none), so
+      a non-zero or unreadable count means the measured layout no longer holds
+      and a saved account may survive every scrub.
+    """
+
+    accounts_errored: bool
+    trades_errored: bool
+    profile_tripwire: bool
+
+    @property
+    def any(self) -> bool:
+        return self.accounts_errored or self.trades_errored or self.profile_tripwire
+
+
+def scrub_error_count(verdict: dict[str, object], key: str) -> int | None:
+    """The length of one of the verdict's error lists, or ``None`` when the
+    field is missing or unparsed. Counts only: the class names stay in the
+    verb's own log line."""
+    value = verdict.get(key)
+    return len(value) if isinstance(value, list) else None
+
+
+def scrub_delete_faults(
+    verdict: dict[str, object], *, delete_trades: int
+) -> ScrubDeleteFaults:
+    """⛔ THE ONE DEFINITION of a clean scrub delete beyond ``refused == 0``
+    (164.6.6.1 review round 1, SFH-01 / SFH-02 / WR-01 / WR-03). Both scrub
+    consumers call it: the validation scrub's classifier
+    (``mt5_terminal_scrub._classify``) and the jobs-terminal escalation's level
+    ladder (``_escalate_ipc_fault``). Before it existed the two disagreed about
+    the same verdict, and neither read ``trades_errors`` or acted on the profile
+    tripwire.
+
+    FAIL CLOSED. A field that is missing, or that the client's parser turned
+    into ``"unparsed"``, counts as a fault: an unreadable error list did not
+    prove the delete clean. Only meaningful on a verdict the verb RETURNED; a
+    caller whose verb raised has an empty verdict and must not ask."""
+    accounts_errors = verdict.get("accounts_errors")
+    trades_errors = verdict.get("trades_errors")
+    profile_found = verdict.get("profile_accounts_found")
+    return ScrubDeleteFaults(
+        accounts_errored=not (
+            isinstance(accounts_errors, list) and len(accounts_errors) == 0
+        ),
+        trades_errored=delete_trades == 1
+        and not (isinstance(trades_errors, list) and len(trades_errors) == 0),
+        profile_tripwire=not (
+            isinstance(profile_found, int)
+            and not isinstance(profile_found, bool)
+            and profile_found == 0
+        ),
+    )
+
+
 def _relaunch_as_house(
     client: Mt5Client, house: tuple[int, str, str], deadline: float
 ) -> tuple[bool, int | None, int, bool]:

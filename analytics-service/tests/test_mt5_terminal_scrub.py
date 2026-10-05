@@ -461,6 +461,65 @@ async def test_TERMINAL_SCRUB_a_delete_that_reported_ERRORS_is_failed_never_scru
     _assert_one_alert(caplog, captures, "failed")
 
 
+@pytest.mark.parametrize(
+    "overrides,row_counts",
+    [
+        pytest.param(
+            {"trades_errors": ["PermissionError"]},
+            {"trades_errors": 1, "profile_errors": 0, "profile_accounts_found": 0},
+            id="a-deal-cache-delete-ERRORED",
+        ),
+        pytest.param(
+            {"trades_errors": "not-a-list"},
+            {"trades_errors": None, "profile_errors": 0, "profile_accounts_found": 0},
+            id="trades_errors-UNPARSEABLE",
+        ),
+        pytest.param(
+            {"profile_accounts_found": 1},
+            {"trades_errors": 0, "profile_errors": 0, "profile_accounts_found": 1},
+            id="the-PROFILE-tripwire-fired",
+        ),
+        pytest.param(
+            {"profile_accounts_found": "not-an-int", "profile_errors": ["OSError"]},
+            {"trades_errors": 0, "profile_errors": 1, "profile_accounts_found": None},
+            id="the-profile-tripwire-UNREADABLE",
+        ),
+    ],
+)
+async def test_TERMINAL_SCRUB_a_cache_delete_error_or_the_profile_tripwire_is_failed_never_scrubbed(
+    monkeypatch: pytest.MonkeyPatch,
+    sink: _FakeCronRuns,
+    captures: list[str],
+    caplog: pytest.LogCaptureFixture,
+    overrides: dict,
+    row_counts: dict,
+) -> None:
+    """⛔ 164.6.6.1 review round 1, SFH-01 / WR-01. The validation scrub runs with
+    ``delete_trades=1``, so its promise covers the client's DEAL HISTORY too
+    (success criterion 1). A verdict with ``refused == 0``, an empty
+    ``accounts_errors`` and a verified house relaunch, but a deal-cache delete
+    that ERRORED, did not prove the client's account-named cache is gone. Nor
+    did one whose profile tripwire (an ``accounts.dat`` under the per-user
+    profile directory, which the literal counts and never deletes) fired or
+    could not be read. Each is ``failed``: the mark stays, so the next
+    validation owes the scrub, one ERROR alert fires, and the row carries the
+    counts so the audit trail can show why. Before this fix every one of them
+    read ``scrubbed``, cleared the mark and logged INFO."""
+    _install_scrub_client(
+        monkeypatch, {**_VERIFIED, "scrub_verdict_overrides": overrides}
+    )
+    with caplog.at_level(logging.INFO):
+        await _schedule_and_drain(_set_event())
+    assert mt5_scrub_owed(_VAL_KEY), "a scrub that left client data cleared the mark"
+    meta = _the_one_scrub_row(sink)
+    assert meta["kind"] == "failed"
+    assert (meta["refused"], meta["accounts_errors"]) == (0, 0)
+    assert meta["relaunch_status"] == "verified"
+    assert {key: meta[key] for key in row_counts} == row_counts
+    _assert_one_alert(caplog, captures, "failed")
+    _assert_nothing_disclosed(sink, caplog, captures)
+
+
 async def test_TERMINAL_SCRUB_a_scrub_past_its_budget_is_ABANDONED_and_returns(
     monkeypatch: pytest.MonkeyPatch,
     sink: _FakeCronRuns,
@@ -816,7 +875,9 @@ _SCRUB_ROW_METADATA_KEYS = frozenset(
         "accounts_missing",
         "accounts_errors",
         "trades_deleted",
+        "trades_errors",
         "profile_accounts_found",
+        "profile_errors",
         "relaunch_status",
         "records_account_number",
     }
@@ -851,10 +912,12 @@ async def test_TERMINAL_SCRUB_the_row_metadata_key_set_is_closed(
     assert meta["records_account_number"] is False
     assert meta["kind"] in mt5_terminal_scrub._SCRUB_KINDS
     for key in ("refused", "accounts_deleted", "accounts_missing", "accounts_errors",
-                "trades_deleted", "profile_accounts_found"):
+                "trades_deleted", "trades_errors", "profile_accounts_found",
+                "profile_errors"):
         assert meta[key] is None or type(meta[key]) is int, (key, meta[key])
     if scenario_id == "scrubbed":
         assert (meta["accounts_deleted"], meta["trades_deleted"]) == (1, 2)
+        assert (meta["trades_errors"], meta["profile_errors"]) == (0, 0)
     else:
         assert meta["refused"] is None and meta["relaunch_status"] is None
 

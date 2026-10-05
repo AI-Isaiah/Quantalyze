@@ -12,8 +12,9 @@ which marks the terminal "scrub owed" and spawns this module's task. The task
 takes its OWN ``mt5_terminal_lease`` (held for ``house``, site
 ``terminal_scrub``), so it queues behind whatever holds the terminal and nothing
 can log in to the terminal while it scrubs. Only a scrub that DELETED
-(``refused == 0`` and no ``accounts_errors``) and whose house relaunch VERIFIED
-clears the mark, so a missed scrub is visible to the next validation, which
+(``refused == 0`` and no fault ``mt5_relogin.scrub_delete_faults`` names: no
+``accounts_errors``, no ``trades_errors``, and a profile tripwire of 0) and
+whose house relaunch VERIFIED clears the mark, so a missed scrub is visible to the next validation, which
 refuses (wizard) or pays the scrub inline (worker,
 ``run_owed_validation_scrub_in_lease``). Plan 06 wires those call sites.
 
@@ -102,6 +103,8 @@ from services.mt5_relogin import (
     read_env_mt5_credentials,
     read_env_validation_gateway_endpoint,
     scrub_and_relaunch_as_house,
+    scrub_delete_faults,
+    scrub_error_count,
 )
 
 __all__ = [
@@ -245,7 +248,9 @@ _SCRUB_ROW_METADATA_KEYS: Final[frozenset[str]] = frozenset(
         "accounts_missing",
         "accounts_errors",
         "trades_deleted",
+        "trades_errors",
         "profile_accounts_found",
+        "profile_errors",
         "relaunch_status",
         "records_account_number",
     }
@@ -406,20 +411,15 @@ def _scrub_validation_terminal_blocking(
         client.close()
 
 
-def _delete_landed(verdict: dict[str, object]) -> tuple[bool, bool]:
-    """``(refused, errored)`` from the verb's verdict: whether the scrub literal
-    refused the delete, and whether the delete reported an error or an
-    unreadable error field. ⛔ Only an int ``refused == 0`` and an EMPTY
-    ``accounts_errors`` list count as a clean delete."""
+def _delete_refused(verdict: dict[str, object]) -> bool:
+    """Whether the scrub literal refused the delete. ⛔ Only an int
+    ``refused == 0`` counts as not refused."""
     refused_value = verdict.get("refused")
-    refused = not (
+    return not (
         isinstance(refused_value, int)
         and not isinstance(refused_value, bool)
         and refused_value == 0
     )
-    errors = verdict.get("accounts_errors")
-    errored = not (isinstance(errors, list) and len(errors) == 0)
-    return refused, errored
 
 
 def _classify(result: ScrubRelaunchResult) -> str:
@@ -427,11 +427,18 @@ def _classify(result: ScrubRelaunchResult) -> str:
     delete landed cleanly AND the house relaunch verified."""
     if result.verb_exc_class is not None:
         return SCRUB_KIND_FAILED
-    refused, errored = _delete_landed(result.verdict)
-    if refused:
+    if _delete_refused(result.verdict):
         return SCRUB_KIND_REFUSED
-    if errored:
-        # A delete that reported an error did not prove the file is gone.
+    if scrub_delete_faults(
+        result.verdict, delete_trades=_VALIDATION_SCRUB_DELETE_TRADES
+    ).any:
+        # ⛔ 164.6.6.1 review round 1 (SFH-01 / WR-01): the ONE shared predicate.
+        # A delete that reported an error (the saved-account database OR a deal
+        # cache) did not prove the client's data is gone, and a fired or
+        # unreadable profile tripwire means a saved account may sit where the
+        # literal never deletes. ⚠️ The literal never deletes the profile copy,
+        # so once that tripwire fires every later scrub is `failed` too and the
+        # wizard stays refused until an operator acts: fail loud, by intent.
         return SCRUB_KIND_FAILED
     if result.post_status != _POST_RELAUNCH_VERIFIED:
         return SCRUB_KIND_RELAUNCH_UNVERIFIED
@@ -702,7 +709,6 @@ def _scrub_row_metadata(
     *, kind: object, site: object, result: ScrubRelaunchResult | None
 ) -> dict[str, Any]:
     verdict: dict[str, object] = result.verdict if result is not None else {}
-    errors = verdict.get("accounts_errors")
     relaunch_status = (
         result.post_status
         if result is not None and result.post_status in _RELAUNCH_STATUSES
@@ -716,9 +722,11 @@ def _scrub_row_metadata(
         "refused": _count_or_none(verdict, "refused"),
         "accounts_deleted": _count_or_none(verdict, "accounts_deleted"),
         "accounts_missing": _count_or_none(verdict, "accounts_missing"),
-        "accounts_errors": len(errors) if isinstance(errors, list) else None,
+        "accounts_errors": scrub_error_count(verdict, "accounts_errors"),
         "trades_deleted": _count_or_none(verdict, "trades_deleted"),
+        "trades_errors": scrub_error_count(verdict, "trades_errors"),
         "profile_accounts_found": _count_or_none(verdict, "profile_accounts_found"),
+        "profile_errors": scrub_error_count(verdict, "profile_errors"),
         "relaunch_status": relaunch_status,
         "records_account_number": False,
     }

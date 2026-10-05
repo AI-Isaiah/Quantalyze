@@ -279,6 +279,10 @@ class _FakeRpycConn:
                 "trades_errors": [],
                 "profile_accounts_found": 0,
                 "profile_errors": [],
+                # ⭐ 164.6.6.1 review round 1 (SFH-01 / SFH-02) — a knob for the
+                # far side's error lists and the profile tripwire, merged LAST so
+                # a test drives the REAL parser and the REAL verb with them.
+                **owner._scenario.get("scrub_verdict_overrides", {}),
             }
         )
 
