@@ -97,6 +97,17 @@ updates:
     commit-message:
       prefix: "chore(deps-py)"
       include: "scope"
+    ignore:
+      # rpyc must stay on 5.x: the MT5 gateways' Wine-side mt5linux server speaks
+      # the rpyc 5 protocol and rpyc 6 fails the handshake (see the pin note in
+      # requirements.in). Declined as PR #956 on 2026-10-05.
+      - dependency-name: "rpyc"
+        versions: [">=6"]
+      # quantstats is held at 0.0.81 until QUANTSTATS-0086-REDERIVE-01 (TODOS.md)
+      # re-derives the RANK-05 / Q166 inline mirrors: 0.0.86 moved cvar,
+      # serenity_index, common_sense_ratio and rolling alpha (founder, 2026-10-05).
+      # Remove this entry in the PR that adopts the new version.
+      - dependency-name: "quantstats"
     groups:
       pip-security:
         applies-to: security-updates
