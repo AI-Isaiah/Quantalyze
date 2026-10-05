@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.125.0.2] - 2026-10-05 — pyarrow 25 for the analytics test suite (Dependabot #955)
+
+### Changed
+- `analytics-service/requirements-dev.txt`: pyarrow 24.0.0 → 25.0.1. Test-only; the production
+  lock (`requirements.txt`) and the Railway image are unchanged.
+
 ## [0.125.0.1] - 2026-10-05 — Python minor/patch dependency group, quantstats held (Dependabot #953)
 
 ### Changed
