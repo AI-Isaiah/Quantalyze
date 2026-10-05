@@ -1375,6 +1375,20 @@ true for 146 and half of 142–145, and **false for 141**.
 
 ## 🟡 FIX MID-TERM
 
+### UPSTASH-RATELIMIT-KEY-LOCKING-01 — @upstash/ratelimit is held at 2.0.8; 2.2.0's scripts are refused by the CI Redis (booked 2026-10-05, Dependabot #951)
+
+**Why it is open.** Dependabot #951 bumped @upstash/ratelimit 2.0.8 → 2.2.0. The `frontend-seam-redis`
+lane failed: every scripted call returned `ERR Unexpected flag in script shebang: allow-key-locking`
+from the lane's pinned Redis image behind `serverless-redis-http`, and `resilient-fetch` logged that
+the breaker state may be stale. The rest of the group shipped; the package is pinned at 2.0.8 and
+`.github/dependabot.yml` ignores it.
+
+**What closing it means.** Establish whether PROD's Upstash accepts the `allow-key-locking` flag (a
+read against the real service, not an assumption), then either move the lane to a Redis that accepts
+it or keep the hold with the reason measured. Adopt the new version and remove the Dependabot ignore
+in the same PR.
+⛔ **Not a close:** shipping 2.2.0 to production on the strength of the lane being skipped or relaxed.
+
 ### QUANTSTATS-0086-REDERIVE-01 — quantstats is held at 0.0.81; adopting 0.0.86 changes reported risk figures (booked 2026-10-05, Dependabot #953)
 
 **Why it is open.** Dependabot #953 bumped quantstats 0.0.81 → 0.0.86. Upstream 0.0.85/0.0.86 are

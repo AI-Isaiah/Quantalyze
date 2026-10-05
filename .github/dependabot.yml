@@ -71,6 +71,12 @@ updates:
     commit-message:
       prefix: "chore(deps)"
       include: "scope"
+    ignore:
+      # @upstash/ratelimit is held at 2.0.8 until UPSTASH-RATELIMIT-KEY-LOCKING-01
+      # (TODOS.md): 2.2.0's Lua scripts carry a `allow-key-locking` shebang flag
+      # that the frontend-seam-redis lane's pinned Redis rejects (#951, 2026-10-05).
+      # Remove this entry in the PR that adopts the new version.
+      - dependency-name: "@upstash/ratelimit"
     # Same one-page-a-week grouping as github-actions: security advisories
     # collapse into a single PR, routine minor/patch bumps into another.
     groups:
