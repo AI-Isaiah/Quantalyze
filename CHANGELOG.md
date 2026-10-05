@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.125.0.4] - 2026-10-05 — jsdom 30 for the frontend test environment (Dependabot #957)
+
+### Changed
+- jsdom 29.1.1 → 30.1.1 (dev only: vitest's `jsdom` environment). Nothing ships to production.
+- `package-lock.json` regenerated with npm 10, the npm CI's Node 22 runs, as for #951.
+
 ## [0.125.0.3] - 2026-10-05 — npm minor/patch dependency group, @upstash/ratelimit held (Dependabot #951)
 
 ### Changed
