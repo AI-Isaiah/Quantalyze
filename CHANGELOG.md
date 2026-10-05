@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.125.1.0] - 2026-10-06 — a wizard Continue race fixed; two shard flakes closed
+
+### Fixed
+- Strategy wizard, multi-key step: clicking Continue right after back-navigation rehydrated the
+  stored keys could submit nothing. `MultiKeyConnectStep` synced its latest-panels ref in a passive
+  effect, so between the rehydration commit (Continue already enabled) and that effect, a click
+  posted `set-members` with `keys: []`. The route refuses an empty set (400
+  `MULTI_KEY_WINDOWS_INVALID`, so no member data was lost) and the user saw "We couldn't save these
+  key windows"; the handler then threw on `current[0].apiKeyId`. The ref now syncs in a layout
+  effect, which runs inside the commit before any event can reach the new controls.
+
+### Root cause
+- This was the `MultiKeyConnectStep` WIZ-02 "order/shard-sensitive" flake `TODOS.md` tracked. It
+  reddened PR #958's `frontend-test (1)` on 2026-10-05: on a loaded shard the test's click landed in
+  the gap above. The entry is marked resolved.
+
+### Tests
+- `MultiKeyConnectStep.test.tsx` gains a test that clicks Continue from a `MutationObserver` on the
+  very commit that renders it. With the passive effect it fails with the same `apiKeyId` TypeError
+  CI logged; with the layout effect it passes.
+- `drift-check-scripts.test.ts` D-04 now polls up to 5 s for the SIGKILLed stand-in postmaster and
+  treats a zombie as dead. The stand-in is a re-parented `sleep`, so `kill(pid, 0)` still succeeded
+  while init had not yet reaped it, and the single sample reddened PR #962's shard 1. With the
+  SIGKILL removed from `scripts/pg-lane/run.sh` the test still fails.
+
 ## [0.125.0.10] - 2026-10-05 — production dependency tree back to zero npm audit findings
 
 ### Security
