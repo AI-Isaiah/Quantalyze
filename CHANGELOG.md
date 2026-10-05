@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.125.0.7] - 2026-10-05 — @sentry/nextjs 11 (Dependabot #952)
+
+### Changed
+- @sentry/nextjs 10.64.0 → 11.2.0, a major version. Server-side, `dedupeIntegration` is now on by
+  default (a repeated identical error is sent once). CI's typecheck, build and test lanes are the
+  check that nothing this app calls changed shape.
+- `package-lock.json` regenerated with npm 10, the npm CI's Node 22 runs.
+
 ## [0.125.0.6] - 2026-10-05 — two MT5 follow-ups routed to Phase 164.6.6.3
 
 ### Notes
