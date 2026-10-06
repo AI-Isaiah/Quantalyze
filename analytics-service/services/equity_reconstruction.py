@@ -68,6 +68,7 @@ from services.job_worker import (
     AllocatorEquityAction,
     DispatchOutcome,
     DispatchResult,
+    _DERIBIT_EMPTY_LEDGER_FLOOR_USD,
     _allocator_key_preflight,
     _emit_audit,
     _stamp_429,
@@ -2971,6 +2972,7 @@ async def _mt5_fetch_window(
         Mt5ClientError,
         Mt5SessionAbandoned,
         Mt5Session,
+        mt5_history_wait_due,
     )
     from services import mt5_concurrency as _mt5_conc
     from services.mt5_concurrency import (
@@ -2980,7 +2982,7 @@ async def _mt5_fetch_window(
     )
     from services.mt5_deals import Mt5DealClassificationError
     from services.mt5_handover import SITE_BACKFILL
-    from services.mt5_read import read_mt5_deal_ledger
+    from services.mt5_read import Mt5HistoryUnsettledError, read_mt5_deal_ledger
     from services.mt5_validation import classify_mt5_login_error
     from services.nav_twr import NavReconstructionError
 
@@ -3049,11 +3051,31 @@ async def _mt5_fetch_window(
         session.client.terminal_key, holder=api_key_id, site=SITE_BACKFILL
     ):
         try:
+            # ⭐ 164.6.6.3 / D-05, D-15, D-16 (Finding C, backfill half) — the
+            # backfill reads the SAME helper as the derive and fails the same way
+            # for an account new to the jobs terminal, so it takes the same wait.
+            # ⛔ The freshness decision is taken HERE, BEFORE the thread starts,
+            # because `login()` (inside the read) stamps the holder registry with
+            # this very key and would make every read look cached.
+            #
+            # The outer bound is DERIVED from the two symbols, never hand-picked,
+            # and the wait is added only for a fresh login, so a cached read keeps
+            # the plain wedge detector. The helper's own deadline (the wait alone)
+            # fires before this bound, so a healthy but slow download never
+            # reaches the terminal-restart arm below.
+            fresh = mt5_history_wait_due(session.client.terminal_key, api_key_id)
             info, deals = await asyncio.wait_for(
-                asyncio.to_thread(read_mt5_deal_ledger, session, now=now),
+                asyncio.to_thread(
+                    read_mt5_deal_ledger,
+                    session,
+                    now=now,
+                    settle_history=fresh,
+                    material_equity_floor_usd=_DERIBIT_EMPTY_LEDGER_FLOOR_USD,
+                ),
                 # Read through the module so the bound stays ONE constant shared
                 # with the derive branch rather than a second one that can drift.
-                timeout=_mt5_conc._MT5_DERIVE_READ_TIMEOUT_S,
+                timeout=_mt5_conc._MT5_DERIVE_READ_TIMEOUT_S
+                + (_mt5_conc._MT5_HISTORY_WAIT_S if fresh else 0.0),
             )
         except asyncio.TimeoutError:
             # FLIPRETRY-01 / MT5CONC-01. A blocked RPyC/Wine pipe will NOT

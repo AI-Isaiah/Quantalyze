@@ -5671,9 +5671,12 @@ async def test_mt5_backfill_persists_dollar_levels_end_to_end(
     # with BOTH MT5CONC-02 login brackets intact (login → account_info →
     # history_deals_get → account_info) and the shared `finally: aclose_exchange`
     # closing the transport afterwards — the ccxt path's own cleanup, INHERITED.
+    # 164.6.6.3 / D-04: this is a FRESH login on the jobs terminal, so the settle
+    # loop adds one confirmation read (`history_deals_get`, `execute`) before the
+    # POST `account_info`.
     assert transport.calls == [
         "initialize", "login", "account_info", "history_deals_get", "execute",
-        "account_info", "transport_close",
+        "history_deals_get", "execute", "account_info", "transport_close",
     ], transport.calls
 
     # (4) The rows reached persistence through the SHARED sole-key atomic replace —
@@ -5691,6 +5694,50 @@ async def test_mt5_backfill_persists_dollar_levels_end_to_end(
         # history_depth_months_for_venue("mt5") is None — mt5 has no entry in
         # VENUE_HISTORY_DEPTH_MONTHS, which is correct for a full-history fetch.
         assert row["history_depth_months"] is None
+
+
+@pytest.mark.asyncio
+async def test_mt5_backfill_late_history_is_read_once_settled(
+    monkeypatch, _mt5_terminal_state,
+):
+    """164.6.6.3 / D-16 (Finding C, backfill half): the full-backfill job reads the
+    SAME helper as the derive, so a fresh login on the jobs terminal whose deal
+    history arrives AFTER the first read must wait for it too. Here the first
+    `history_deals_get` is empty and every later one is the full ledger: the
+    backfill must read three times (empty, full, full-again as the confirmation)
+    and persist the SAME dollar levels a cached read of that ledger persists.
+
+    Without the wait the single empty read reconstructs a curve from a partial
+    ledger (T-164.6.6.3-07) and persists it. The expected levels are the canonical
+    hand-derived oracle, never read back from the system under test."""
+    monkeypatch.setenv("MT5_ENABLED", "true")
+    monkeypatch.setenv("MT5_SERVER_UTC_OFFSET_S", "0")
+    today = datetime.now(timezone.utc).date()
+    deals, expected_levels = _mt5_canonical_ledger(today)
+    transport = _FakeMt5Transport(
+        account=_mt5_account(), deals=[], deals_by_call=[[], deals],
+    )
+    session = _mt5_session(transport)
+
+    fake_supabase = FakeSupabaseClient()
+    _install_fake_preflight(monkeypatch, "mt5", fake_supabase, session)
+    _install_fake_audit(monkeypatch)
+
+    result = await run_reconstruct_allocator_history_job(_mt5_job())
+
+    from services.job_worker import DispatchOutcome
+
+    assert result.outcome == DispatchOutcome.DONE, (
+        "a late-arriving history must be waited for, not reconstructed from or "
+        f"refused: {result.error_kind} / {result.error_message}"
+    )
+    persisted = _persisted_by_asof(fake_supabase)
+    assert persisted, "the mt5 backfill persisted ZERO rows"
+    for iso, want in expected_levels.items():
+        assert persisted[iso] == pytest.approx(want, abs=0.01), (
+            f"{iso}: persisted {persisted[iso]}, hand oracle {want}"
+        )
+    assert transport.calls.count("history_deals_get") == 3, transport.calls
 
 
 @pytest.mark.asyncio
@@ -6026,6 +6073,9 @@ async def test_mt5_backfill_read_timeout_is_transient_with_bounded_restart(
     # so patching the module attribute really moves it (a patch aimed anywhere
     # else would be a silent no-op and this case would measure nothing).
     monkeypatch.setattr(_mt5_conc, "_MT5_DERIVE_READ_TIMEOUT_S", 0.05)
+    # 164.6.6.3 / D-05: a fresh login adds the history wait to the bound. Zero it
+    # so the bound this case measures stays the 0.05 s read budget.
+    monkeypatch.setattr(_mt5_conc, "_MT5_HISTORY_WAIT_S", 0.0)
     restarts: list[object] = []
     today = datetime.now(timezone.utc).date()
     deals, _expected = _mt5_canonical_ledger(today)
