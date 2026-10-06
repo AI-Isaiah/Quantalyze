@@ -2044,6 +2044,15 @@ def _escalate_ipc_fault(
         if faults.accounts_errored and refused == 0:
             level = logging.ERROR
             detail = f"{detail} accounts_dat_kept=delete_errored"
+        # ⛔ 164.6.6.3 plan 03 (D-07, fail loud) — the job path deletes the
+        # per-account deal caches once `_JOB_TERMINAL_DELETE_TRADES` is 1. A
+        # delete that errored, or whose error list is unreadable, has not proven
+        # an account-named cache gone, and the next derive of that account may
+        # then read a stale or partial history. Like the accounts arm: a refused
+        # delete never ran, so its empty error list says nothing.
+        if faults.trades_errored and refused == 0:
+            level = logging.ERROR
+            detail = f"{detail} trades_kept=delete_errored"
         # The literal counts the profile directory whether or not it refused.
         if faults.profile_tripwire:
             level = logging.ERROR

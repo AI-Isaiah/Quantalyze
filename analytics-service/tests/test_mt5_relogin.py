@@ -4307,6 +4307,65 @@ async def test_SCRUB_a_delete_that_ERRORED_after_a_verified_relaunch_is_ERROR_ne
     _assert_rows_carry_no_secret(sink)
 
 
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        pytest.param({"trades_errors": ["PermissionError"]}, id="trades-delete-ERRORED"),
+        pytest.param({"trades_errors": "not-a-list"}, id="trades_errors-UNPARSEABLE"),
+    ],
+)
+async def test_SCRUB_a_failed_trades_delete_on_the_jobs_path_is_ERROR(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    sink,
+    overrides: dict,
+) -> None:
+    """⛔ 164.6.6.3 plan 03 (D-07). Once the jobs terminal's scrub deletes the
+    per-account deal caches (`delete_trades=1`), a delete that ERRORED, or whose
+    error list could not be read, has not proven an account-named cache gone, so
+    the next derive of that account may still read a stale or partial history.
+    The escalation must say ERROR with `trades_kept=delete_errored`, not a clean
+    INFO recycle.
+
+    The constant is forced to 1 here on purpose: the arm must fire whenever the
+    job path deletes caches, whatever the constant reads today, so this gate does
+    not depend on the flip's own commit. The kind stays `ipc_fault_recycled`
+    (the closed episode kind set is unchanged), and the debt is paid, exactly as
+    for the `accounts_dat_kept=delete_errored` precedent above."""
+    from services import mt5_client
+
+    _set_full_env(monkeypatch)
+    monkeypatch.setattr(mt5_relogin, "_JOB_TERMINAL_DELETE_TRADES", 1)
+    fake, _c = _install_client(
+        monkeypatch,
+        {
+            **_WEDGED,
+            "relaunch_credentialed": True,
+            "terminal_info": _HOUSE_TERMINAL,
+            "account_info": _HOUSE_ACCOUNT,
+            "scrub_verdict_overrides": overrides,
+        },
+    )
+    outcomes = _capture_and_record_outcomes(monkeypatch)
+    clears = _spy_debt_clears(monkeypatch)
+
+    with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
+        await _heal_n_times(1)
+
+    assert fake._MetaTrader5__conn.scrub_calls[0][1] == 1, (
+        "the scrub did not ask for the trades delete this gate is about"
+    )
+    assert outcomes[0].escalation_kind == mt5_session_episodes.KIND_IPC_FAULT_RECYCLED
+    line = _escalation_line(caplog)
+    assert line.levelno == logging.ERROR, line.getMessage()
+    assert "trades_kept=delete_errored" in line.getMessage(), line.getMessage()
+    assert clears == [_heal_terminal_key()]
+    assert mt5_client.mt5_relaunch_debt(_heal_terminal_key()) is False
+    _assert_no_credential_value_escaped(_records(caplog))
+    _assert_env_password_in_no_record(caplog)
+    _assert_rows_carry_no_secret(sink)
+
+
 @pytest.mark.parametrize("unset", ["MT5_LOGIN", "MT5_PASSWORD"])
 async def test_ESCALATION_no_house_credentials_ends_nothing_deletes_nothing_and_keeps_the_claim(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, unset: str
