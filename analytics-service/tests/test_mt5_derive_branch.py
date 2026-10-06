@@ -591,6 +591,38 @@ async def test_the_derive_bound_adds_the_wait_only_for_a_fresh_login(
     )
 
 
+@pytest.mark.asyncio
+async def test_the_fresh_derive_bound_budgets_one_trailing_read(monkeypatch) -> None:
+    """Review WR-01: a fresh read's outer bound is read budget + settle wait + ONE
+    trailing read's own timeout, because the settle loop's last read can start right
+    at its deadline and then run for a whole rpyc timeout.
+
+    The reads take 0.4 s each and a fresh run makes three (1.2 s). Read budget 0.3 s
+    plus wait 0.5 s is 0.8 s: under the OLD formula (no trailing allowance) the outer
+    `wait_for` fires first, the terminal is restarted mid-download and the job
+    reports transient. With a 1.0 s trailing allowance the bound is 1.8 s and the run
+    completes. Both knobs are patched where `jw` reads them at call time."""
+    monkeypatch.setenv("MT5_ENABLED", "true")
+    monkeypatch.setattr(jw, "_MT5_DERIVE_READ_TIMEOUT_S", 0.3)
+    monkeypatch.setattr(jw, "_MT5_HISTORY_WAIT_S", 0.5)
+    monkeypatch.setattr(mt5_conc, "_MT5_HISTORY_TRAILING_READ_S", 1.0)
+    account = {"equity": 110_500.0, "balance": 110_500.0, "login": 123456}
+
+    transport = _FakeMt5Transport(account=account, deals=_canonical_deals(), hang_s=0.4)
+    ctx, _cap = _build_ctx(transport)
+    with _apply(_patches(ctx)):
+        result = await run_derive_broker_dailies_job(_job())
+
+    assert result.outcome == DispatchOutcome.DONE, (
+        result.error_kind,
+        result.error_message,
+    )
+    assert "shutdown" not in transport.calls, (
+        "the outer bound fired mid-settle and restarted the terminal: it does not "
+        "budget the trailing read (review WR-01, D-05)"
+    )
+
+
 # ---------------------------------------------------------------------------
 # 2d — 164.6.6.3 / D-06, D-13: an expired wait is TRANSIENT and LOUD, never
 # permanent, and never restarts the terminal.
@@ -1047,8 +1079,10 @@ async def test_mt5_hung_read_restart_on_timeout(monkeypatch) -> None:
     # real sleep so the abandoned reader thread drains and can never hang CI.
     monkeypatch.setattr(jw, "_MT5_DERIVE_READ_TIMEOUT_S", 0.1)
     # 164.6.6.3 / D-05: a fresh login's bound is the read budget PLUS the settle
-    # wait; zero the wait so the bound this test measures stays 0.1 s.
+    # wait PLUS one trailing read's timeout (review WR-01); zero both so the bound
+    # this test measures stays 0.1 s.
     monkeypatch.setattr(jw, "_MT5_HISTORY_WAIT_S", 0.0)
+    monkeypatch.setattr(mt5_conc, "_MT5_HISTORY_TRAILING_READ_S", 0.0)
     transport = _FakeMt5Transport(
         account={"equity": 110_500.0, "balance": 110_500.0, "login": 123456},
         deals=_canonical_deals(),
@@ -1114,8 +1148,10 @@ async def test_mt5_restart_itself_bounded(monkeypatch) -> None:
     monkeypatch.setenv("MT5_ENABLED", "true")
     monkeypatch.setattr(jw, "_MT5_DERIVE_READ_TIMEOUT_S", 0.1)
     # 164.6.6.3 / D-05: a fresh login's bound is the read budget PLUS the settle
-    # wait; zero the wait so the bound this test measures stays 0.1 s.
+    # wait PLUS one trailing read's timeout (review WR-01); zero both so the bound
+    # this test measures stays 0.1 s.
     monkeypatch.setattr(jw, "_MT5_HISTORY_WAIT_S", 0.0)
+    monkeypatch.setattr(mt5_conc, "_MT5_HISTORY_TRAILING_READ_S", 0.0)
     monkeypatch.setattr(mt5_conc, "_MT5_RESTART_TIMEOUT_S", 0.05)
     read_hang, shutdown_hang = 0.3, 1.0  # genuine hangs the bounds must cut short
     transport = _FakeMt5Transport(

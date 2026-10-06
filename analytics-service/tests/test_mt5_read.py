@@ -695,6 +695,97 @@ def test_a_history_still_growing_never_settles_on_a_short_tail_interval(
         end_mt5_lease_holder(token)
 
 
+class _WorstCaseTrailingReadTransport(_FakeMt5Transport):
+    """The slowest legal run of a fresh read that never settles, in FAKE time.
+
+    The read budget (`_MT5_DERIVE_READ_TIMEOUT_S`) is spent whole on the three
+    round-trips before the loop (login, PRE ``account_info``, first read). The count
+    grows on every read, so nothing ever settles. In-loop reads are instant until one
+    STARTS exactly at the settle deadline, which is the latest the loop allows; that
+    one then takes a whole rpyc timeout, the review's trailing slow read."""
+
+    def __init__(self, clock: Any, read_s: float, request_s: float, **kw: Any) -> None:
+        super().__init__(**kw)
+        self._clock = clock
+        self._pre_cost_s = read_s / 3
+        self._trailing_cost_s = request_s
+        self._reads = 0
+        self.deadline: float | None = None
+        self.read_starts: list[float] = []
+
+    def login(self, login, password=None, server=None, timeout=None):  # noqa: ANN001
+        self._clock.now += self._pre_cost_s
+        return super().login(login, password, server, timeout)
+
+    def account_info(self):
+        out = super().account_info()
+        if self._account_info_calls == 1:
+            self._clock.now += self._pre_cost_s
+        return out
+
+    def history_deals_get(self, from_ts: Any, to_ts: Any) -> Any:
+        self.read_starts.append(self._clock.now)
+        self._reads += 1
+        self._deals = [
+            {"ticket": i, "type": 2, "profit": 1.0, "time": 1_700_000_000}
+            for i in range(self._reads)
+        ]
+        out = super().history_deals_get(from_ts, to_ts)
+        if self._reads == 1:
+            self._clock.now += self._pre_cost_s
+            self.deadline = self._clock.now + _MT5_HISTORY_WAIT_S
+        elif self.deadline is not None and self._clock.now >= self.deadline:
+            self._clock.now += self._trailing_cost_s
+        return out
+
+
+def test_the_fresh_outer_bound_covers_a_trailing_read_that_starts_at_the_deadline(
+    _mt5_read_never_sleeps_for_real,
+) -> None:
+    """Review WR-01, behaviourally. Drive the REAL ``read_mt5_deal_ledger`` through
+    the slowest legal fresh run (see the transport) and require that the clock it
+    consumes before raising ``Mt5HistoryUnsettledError`` fits the outer bound
+    ``mt5_derive_read_bound_s`` hands the call sites' ``asyncio.wait_for``.
+
+    If it does not fit, ``wait_for`` fires first, takes the TIMEOUT arm and restarts
+    the terminal mid-download, which D-05 forbids. The oracle is the elapsed fake time
+    of a real run, not a restatement of the formula; the rpyc timeout is imported from
+    ``mt5_client``."""
+    from services.mt5_client import MT5_REQUEST_TIMEOUT_S
+    from services.mt5_concurrency import (
+        _MT5_DERIVE_READ_TIMEOUT_S,
+        mt5_derive_read_bound_s,
+    )
+
+    clock = _mt5_read_never_sleeps_for_real
+    transport = _WorstCaseTrailingReadTransport(
+        clock,
+        _MT5_DERIVE_READ_TIMEOUT_S,
+        MT5_REQUEST_TIMEOUT_S,
+        account=_account(_EXPECTED_LOGIN),
+        deals=[],
+    )
+    started = clock.now
+
+    with pytest.raises(Mt5HistoryUnsettledError):
+        _settle_read(transport)
+
+    elapsed = clock.now - started
+    assert transport.deadline is not None
+    assert transport.read_starts[-1] >= transport.deadline, (
+        "no read started at the settle deadline: this case did not exercise the "
+        f"trailing read it exists to budget (starts={transport.read_starts!r})"
+    )
+    bound = mt5_derive_read_bound_s(
+        read_s=_MT5_DERIVE_READ_TIMEOUT_S, wait_s=_MT5_HISTORY_WAIT_S, fresh=True
+    )
+    assert elapsed <= bound, (
+        f"a fresh read ran {elapsed}s of clock before settling out, past the outer "
+        f"bound {bound}s: the outer wait_for would fire first and restart the "
+        "terminal mid-download (review WR-01, D-05)"
+    )
+
+
 def test_immaterial_equity_stable_zero_returns_at_once(
     _mt5_read_never_sleeps_for_real,
 ) -> None:

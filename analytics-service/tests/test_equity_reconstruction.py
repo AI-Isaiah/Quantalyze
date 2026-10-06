@@ -6074,9 +6074,11 @@ async def test_mt5_backfill_read_timeout_is_transient_with_bounded_restart(
     # so patching the module attribute really moves it (a patch aimed anywhere
     # else would be a silent no-op and this case would measure nothing).
     monkeypatch.setattr(_mt5_conc, "_MT5_DERIVE_READ_TIMEOUT_S", 0.05)
-    # 164.6.6.3 / D-05: a fresh login adds the history wait to the bound. Zero it
-    # so the bound this case measures stays the 0.05 s read budget.
+    # 164.6.6.3 / D-05: a fresh login adds the history wait and one trailing read's
+    # timeout (review WR-01) to the bound. Zero both so the bound this case measures
+    # stays the 0.05 s read budget.
     monkeypatch.setattr(_mt5_conc, "_MT5_HISTORY_WAIT_S", 0.0)
+    monkeypatch.setattr(_mt5_conc, "_MT5_HISTORY_TRAILING_READ_S", 0.0)
     restarts: list[object] = []
     today = datetime.now(timezone.utc).date()
     deals, _expected = _mt5_canonical_ledger(today)
@@ -6198,6 +6200,44 @@ async def test_the_backfill_bound_adds_the_wait_only_for_a_fresh_login(
         "timeout arm and the bounded terminal restart"
     )
     _assert_nothing_persisted(second_db)
+
+
+@pytest.mark.asyncio
+async def test_the_fresh_backfill_bound_budgets_one_trailing_read(
+    monkeypatch, _mt5_terminal_state,
+):
+    """Review WR-01, backfill half: a fresh read's outer bound is read budget +
+    settle wait + ONE trailing read's own timeout (the loop's last read can start at
+    its deadline and run a whole rpyc timeout).
+
+    Reads take 0.4 s and a fresh run makes three (1.2 s) against 0.3 s + 0.5 s = 0.8 s
+    WITHOUT the trailing allowance, which would fire the outer `wait_for` and restart
+    the terminal mid-download. With a 1.0 s allowance the bound is 1.8 s and the run
+    completes. Patched through `_mt5_conc`, where the call site reads them."""
+    monkeypatch.setenv("MT5_ENABLED", "true")
+    monkeypatch.setenv("MT5_SERVER_UTC_OFFSET_S", "0")
+    from services.job_worker import DispatchOutcome
+
+    monkeypatch.setattr(_mt5_conc, "_MT5_DERIVE_READ_TIMEOUT_S", 0.3)
+    monkeypatch.setattr(_mt5_conc, "_MT5_HISTORY_WAIT_S", 0.5)
+    monkeypatch.setattr(_mt5_conc, "_MT5_HISTORY_TRAILING_READ_S", 1.0)
+    today = datetime.now(timezone.utc).date()
+    deals, _expected = _mt5_canonical_ledger(today)
+
+    transport = _FakeMt5Transport(account=_mt5_account(), deals=deals, hang_s=0.4)
+    restarts: list[object] = []
+    _s, db = _mt5_failed_run(monkeypatch, transport, restart_spy=restarts)
+    result = await run_reconstruct_allocator_history_job(_mt5_job())
+
+    assert result.outcome == DispatchOutcome.DONE, (
+        result.error_kind,
+        result.error_message,
+    )
+    assert restarts == [] and "shutdown" not in transport.calls, (
+        "the outer bound fired mid-settle and restarted the terminal: it does not "
+        "budget the trailing read (review WR-01, D-05)"
+    )
+    assert _persisted_by_asof(db), "the fresh run persisted nothing"
 
 
 @pytest.mark.asyncio

@@ -3066,11 +3066,12 @@ async def _mt5_fetch_window(
             # because `login()` (inside the read) stamps the holder registry with
             # this very key and would make every read look cached.
             #
-            # The outer bound is DERIVED from the two symbols, never hand-picked,
-            # and the wait is added only for a fresh login, so a cached read keeps
-            # the plain wedge detector. The helper's own deadline (the wait alone)
-            # fires before this bound, so a healthy but slow download never
-            # reaches the terminal-restart arm below.
+            # The outer bound is DERIVED (`mt5_derive_read_bound_s`: the read's own
+            # budget plus, for a fresh login only, the wait AND one trailing read's
+            # rpyc timeout), never hand-picked, so a cached read keeps the plain
+            # wedge detector. No read starts after the helper's deadline and the
+            # last one is budgeted here, so a healthy but slow download never
+            # reaches the terminal-restart arm below (review WR-01).
             fresh = mt5_history_wait_due(session.client.terminal_key, api_key_id)
             info, deals = await asyncio.wait_for(
                 asyncio.to_thread(
@@ -3082,8 +3083,11 @@ async def _mt5_fetch_window(
                 ),
                 # Read through the module so the bound stays ONE constant shared
                 # with the derive branch rather than a second one that can drift.
-                timeout=_mt5_conc._MT5_DERIVE_READ_TIMEOUT_S
-                + (_mt5_conc._MT5_HISTORY_WAIT_S if fresh else 0.0),
+                timeout=_mt5_conc.mt5_derive_read_bound_s(
+                    read_s=_mt5_conc._MT5_DERIVE_READ_TIMEOUT_S,
+                    wait_s=_mt5_conc._MT5_HISTORY_WAIT_S,
+                    fresh=fresh,
+                ),
             )
         except asyncio.TimeoutError:
             # FLIPRETRY-01 / MT5CONC-01. A blocked RPyC/Wine pipe will NOT

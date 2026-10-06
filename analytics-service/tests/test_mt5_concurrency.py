@@ -247,9 +247,12 @@ def test_history_wait_bound_is_derived() -> None:
     * the READ budget is untouched: `_MT5_DERIVE_READ_TIMEOUT_S` is still
       `MT5_REQUEST_TIMEOUT_S + 10.0`, because the wait is ADDED at each call site
       for a fresh login only, never folded into the shared constant;
-    * the fresh outer bound strictly exceeds the wait, so the helper's own
-      deadline (the wait alone) fires before the outer `wait_for` and a healthy
-      but slow download never reaches the terminal-restart arm."""
+    * the fresh outer bound covers the read budget (login, PRE, first read, POST),
+      the WHOLE settle wait AND one trailing read's own rpyc timeout: the loop never
+      starts a read after its deadline but the last one can start AT it (review
+      WR-01). A bound short of that lets the outer `wait_for` fire first and restart
+      the terminal mid-download, which D-05 forbids. The oracle's rpyc timeout is
+      imported from `mt5_client`, not read back from the constant under test."""
     from services import mt5_read
     from services.mt5_client import MT5_REQUEST_TIMEOUT_S
 
@@ -279,7 +282,21 @@ def test_history_wait_bound_is_derived() -> None:
     assert (
         mt5_concurrency._MT5_DERIVE_READ_TIMEOUT_S == MT5_REQUEST_TIMEOUT_S + 10.0
     ), "the read budget was edited; the wait must be added at the call site instead"
-    assert mt5_concurrency._MT5_DERIVE_READ_TIMEOUT_S + wait_s > wait_s
+
+    read_s = mt5_concurrency._MT5_DERIVE_READ_TIMEOUT_S
+    fresh_bound = mt5_concurrency.mt5_derive_read_bound_s(
+        read_s=read_s, wait_s=wait_s, fresh=True
+    )
+    cached_bound = mt5_concurrency.mt5_derive_read_bound_s(
+        read_s=read_s, wait_s=wait_s, fresh=False
+    )
+    assert cached_bound == read_s, "a cached read must keep the plain wedge detector"
+    assert fresh_bound >= read_s + wait_s + MT5_REQUEST_TIMEOUT_S, (
+        f"fresh outer bound {fresh_bound}s does not cover the read budget "
+        f"({read_s}s) + settle wait ({wait_s}s) + one trailing read's rpyc timeout "
+        f"({MT5_REQUEST_TIMEOUT_S}s): the outer wait_for can fire mid-settle and "
+        "restart the terminal (review WR-01)"
+    )
 
 
 # --------------------------------------------------------------------------- #

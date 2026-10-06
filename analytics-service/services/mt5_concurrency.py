@@ -98,13 +98,40 @@ _MT5_DERIVE_READ_TIMEOUT_S: Final[float] = float(
 # ONLY (D-05's "about 30 s"), never the outer bound.
 #
 # ⛔ THE OUTER `asyncio.wait_for` BOUND IS NEVER A STORED CONSTANT. Each call site
-# computes it as `_MT5_DERIVE_READ_TIMEOUT_S + _MT5_HISTORY_WAIT_S` (only for a
-# fresh login), reading both module attributes AT CALL TIME, so the tests that move
-# `_MT5_DERIVE_READ_TIMEOUT_S` keep biting. The helper's own deadline (this budget)
-# fires before that bound, so a healthy but slow download never reaches the
-# terminal-restart arm. Plain constant, no env override: RESEARCH A1's tuning is a
-# code change after the founder's live read.
+# computes it with `mt5_derive_read_bound_s` (below), passing its own module's
+# `_MT5_DERIVE_READ_TIMEOUT_S` and `_MT5_HISTORY_WAIT_S` AT CALL TIME, so the tests
+# that move either keep biting. For a fresh login the bound also budgets ONE trailing
+# `history_deals_get` (review WR-01): the settle loop never STARTS a read after its
+# deadline, but the last read can start AT it and then run for its whole rpyc
+# timeout. Without that allowance the outer `wait_for` could fire first and take the
+# terminal-restart arm, killing the very download D-05 says the wait must never
+# interrupt. Plain constant, no env override: RESEARCH A1's tuning is a code change
+# after the founder's live read.
 _MT5_HISTORY_WAIT_S: Final[float] = 30.0
+
+# One trailing `history_deals_get`'s own rpyc timeout (review WR-01): the allowance
+# `mt5_derive_read_bound_s` adds on top of the settle budget for a fresh login.
+# Derived from the rpyc bound, never hand-picked, so a retuned MT5_REQUEST_TIMEOUT_S
+# carries through.
+_MT5_HISTORY_TRAILING_READ_S: Final[float] = _MT5_REQUEST_TIMEOUT_S
+
+
+def mt5_derive_read_bound_s(*, read_s: float, wait_s: float, fresh: bool) -> float:
+    """The outer ``asyncio.wait_for`` bound for ONE ``read_mt5_deal_ledger`` call.
+
+    A cached read keeps the plain wedge detector, ``read_s`` (login + PRE
+    ``account_info`` + one ``history_deals_get`` + POST ``account_info``). A FRESH
+    read adds the whole settle budget ``wait_s`` AND one trailing read's own timeout
+    (``_MT5_HISTORY_TRAILING_READ_S``): the loop's deadline is checked before every
+    sleep, so no read starts after it, but the last one can start right at it.
+
+    ``read_s`` and ``wait_s`` are passed in (not read here) so each call site keeps
+    resolving them from its OWN module; the trailing allowance is read from this
+    module at call time.
+    """
+    if not fresh:
+        return read_s
+    return read_s + wait_s + _MT5_HISTORY_TRAILING_READ_S
 
 # The gap between two settle-loop reads. Also the tunable RESEARCH A1 names: an
 # unchanged non-zero (or immaterial-zero) count across `_MT5_HISTORY_STABLE_INTERVALS`
