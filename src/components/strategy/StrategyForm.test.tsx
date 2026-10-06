@@ -554,3 +554,54 @@ describe("StrategyForm — KEYLINK-01 connected state must match a persisted lin
     expect(strategiesUpdateCalls[0].payload).not.toHaveProperty("api_key_id");
   });
 });
+
+/**
+ * 164.6.6.3.1 item 1 (D-01, D-02) — the edit form must not lie about, or
+ * rewrite, a strategy's name.
+ *
+ * The defect (seen on MM-2x and AI-FX-35, 2026-10-03 UAT): the picker only
+ * offered STRATEGY_NAMES, so a strategy named outside that list rendered as
+ * "Alpha Centauri" while React state still held the real name, and every save
+ * re-sent `name` whatever the user had touched.
+ *
+ * WHY these specs are shaped this way (Rule 9): the DOM value is what the user
+ * sees, so D-01 is asserted on the rendered <select>. D-02 is asserted on the
+ * ABSENCE of the `name` key in the persisted update payload; "payload.name did
+ * not change" would pass with the bug present because state already held the
+ * real name. Every expected literal is typed by hand on purpose.
+ */
+describe("StrategyForm — 164.6.6.3.1 item 1: own name kept, no rename on unrelated save", () => {
+  function nameSelect() {
+    return screen.getByLabelText("Strategy Name") as HTMLSelectElement;
+  }
+  function optionValues(select: HTMLSelectElement) {
+    return Array.from(select.options).map((o) => o.value);
+  }
+  async function saveAndGetUpdatePayload() {
+    fireEvent.click(screen.getByRole("button", { name: /save changes/i }));
+    await waitFor(() => expect(routerPushMock).toHaveBeenCalledWith("/strategies"));
+    expect(strategiesUpdateCalls).toHaveLength(1);
+    return strategiesUpdateCalls[0].payload;
+  }
+
+  it("edit mode: an off-list name is offered verbatim and preselected (D-01)", () => {
+    render(<StrategyForm mode="edit" strategy={EDIT_STRATEGY} />);
+
+    const select = nameSelect();
+    expect(select.value).toBe("Momentum Alpha");
+    expect(select.options[0].value).toBe("Momentum Alpha");
+    expect(select.options[0].textContent).toBe("Momentum Alpha");
+    expect(optionValues(select).filter((v) => v === "Momentum Alpha")).toHaveLength(1);
+  });
+
+  it("edit mode: an unrelated save sends no name key (D-02)", async () => {
+    render(<StrategyForm mode="edit" strategy={EDIT_STRATEGY} />);
+    fireEvent.change(screen.getByLabelText("Description"), {
+      target: { value: "a different description" },
+    });
+
+    const payload = await saveAndGetUpdatePayload();
+    expect(payload.description).toBe("a different description");
+    expect(payload).not.toHaveProperty("name");
+  });
+});
