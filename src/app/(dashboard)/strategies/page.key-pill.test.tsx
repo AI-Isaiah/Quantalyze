@@ -133,6 +133,9 @@ const state = vi.hoisted(() => ({
   keysError: null as { message: string } | null,
   members: [] as MockMemberRow[],
   membersError: null as { message: string } | null,
+  // Phase 164.6.6.3.1 D-05/D-06 Wave 0: the `strategy_shares` read plan 05 adds to the page.
+  shares: [] as { strategy_id: string; revoked_at: string | null }[],
+  sharesError: null as { message: string } | null,
   /** get_user_compute_jobs answers, per p_strategy_id. */
   jobs: {} as Record<string, unknown[]>,
   jobsError: null as { message: string } | null,
@@ -306,6 +309,11 @@ vi.mock("@/lib/supabase/server", () => ({
         result = state.membersError
           ? { data: null, error: state.membersError }
           : { data: state.members, error: null };
+      } else if (table === "strategy_shares") {
+        // Phase 164.6.6.3.1 D-05/D-06 Wave 0, mirroring the strategy_keys arm.
+        result = state.sharesError
+          ? { data: null, error: state.sharesError }
+          : { data: state.shares, error: null };
       } else if (table === "api_keys") {
         result = state.keysError
           ? { data: null, error: state.keysError }
@@ -406,6 +414,9 @@ beforeEach(() => {
   state.keysError = null;
   state.members = [];
   state.membersError = null;
+  // Phase 164.6.6.3.1 D-05/D-06 Wave 0.
+  state.shares = [];
+  state.sharesError = null;
   state.jobs = {};
   state.jobsError = null;
   state.jobsThrow = false;
