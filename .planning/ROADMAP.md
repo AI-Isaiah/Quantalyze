@@ -2997,6 +2997,7 @@ third (D-02). **Scout findings at HEAD `c8e87b19` (2026-10-06; re-measure at pla
   MetaTrader gateway is not configured…" never reaches the wizard.
   - Recommended: a new env-gap wire code and wizard code, keeping `SEAM_INTERNAL_FAULT` honest for
     D-31.
+  - ⭐ **Handoff from 164.6.6.3 plan 05 (2026-10-06): there are now FIVE emitters, not four.** The empty `MT5_KNOWN_SERVERS` list (both `MT5_KNOWN_SERVERS` and `MT5_SERVER` unset or blank) raises the same `service_error(500, "MT5_GATEWAY_UNCONFIGURED", …)` body from the router's known-server pre-check. Its worker twin in `Mt5Adapter.validate` raises a configuration `RuntimeError`. It is an env gap like the first three, so the new env-gap code must cover it too. See `164.6.6.3-05-SUMMARY.md` `## The fifth MT5_GATEWAY_UNCONFIGURED emitter`; re-measure the line numbers at plan time.
 - **Item 10.** `routers/exchange.py` `scrub_owed` (~1052) and `lease_busy` (~1407) both raise 424
   `NETWORK_UNAVAILABLE`, which `wizardErrors.ts` (~4730) shows as `KEY_NETWORK_TIMEOUT`.
   - Recommended: one `MT5_TERMINAL_BUSY`-style code for both, recoverable, with "briefly busy,
