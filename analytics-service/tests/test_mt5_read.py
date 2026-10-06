@@ -28,11 +28,29 @@ from typing import Any
 
 import pytest
 
-from services.mt5_client import Mt5AccountMismatchError, Mt5ClientError
-from services.mt5_concurrency import _Mt5PostReadVerificationError
+from services.mt5_client import (
+    HOLDER_UNKNOWN,
+    Mt5AccountMismatchError,
+    Mt5ClientError,
+    _note_terminal_holder,
+    begin_mt5_lease_holder,
+    begin_mt5_lease_occupancy,
+    bump_mt5_terminal_epoch,
+    end_mt5_lease_holder,
+    end_mt5_lease_occupancy,
+    mt5_history_wait_due,
+    mt5_terminal_holder,
+    note_mt5_history_settled,
+)
+from services.mt5_concurrency import (
+    _MT5_HISTORY_POLL_S,
+    _MT5_HISTORY_WAIT_S,
+    _Mt5PostReadVerificationError,
+)
 from services.mt5_read import (
     _MT5_DEAL_FETCH_MARGIN_S,
     _MT5_MAX_SERVER_UTC_OFFSET_S,
+    Mt5HistoryUnsettledError,
     read_mt5_deal_ledger,
 )
 # The ONE offline transport double (tests/test_mt5_derive_branch.py). Imported
@@ -268,3 +286,267 @@ def test_returns_the_pre_snapshot_and_discards_the_post_one() -> None:
     assert info["login"] == _EXPECTED_LOGIN
     assert [d["ticket"] for d in deals] == [1]
     assert [d["profit"] for d in deals] == [300.0]
+
+
+# ---------------------------------------------------------------------------
+# 164.6.6.3 / D-04, D-06, D-15 — the settle loop and the settled record.
+#
+# ⛔ Same discipline as above: no lease, no `asyncio.wait_for`. The holder context
+# is set with the ContextVar pair the lease itself calls, and the clock is the
+# autouse fake from `conftest.py` (`_mt5_read_never_sleeps_for_real`), so a
+# 30-second budget costs no wall time and a never-settling case cannot spin.
+# ---------------------------------------------------------------------------
+_FLOOR = 100.0  # the derive's `_DERIBIT_EMPTY_LEDGER_FLOOR_USD`
+_KEY = "key-1"
+
+
+def _terminal_key() -> str:
+    transport = _FakeMt5Transport(account=_account(_EXPECTED_LOGIN), deals=[])
+    return _session(transport).client.terminal_key
+
+
+def _settle_read(transport: _FakeMt5Transport) -> list[dict[str, Any]]:
+    _info, deals = read_mt5_deal_ledger(
+        _session(transport),
+        now=_NOW,
+        settle_history=True,
+        material_equity_floor_usd=_FLOOR,
+    )
+    return deals
+
+
+def test_cached_account_reads_once(_mt5_read_never_sleeps_for_real) -> None:
+    """D-04: an account whose history is already cached pays NO wait. With
+    ``settle_history=False`` the helper is today's single read: exactly one
+    ``history_deals_get`` and not one sleep."""
+    transport = _FakeMt5Transport(account=_account(_EXPECTED_LOGIN), deals=_DEALS)
+
+    read_mt5_deal_ledger(_session(transport), now=_NOW)
+
+    assert transport.calls.count("history_deals_get") == 1
+    assert _mt5_read_never_sleeps_for_real.sleeps == []
+
+
+def test_fresh_login_waits_for_history_to_settle(
+    _mt5_read_never_sleeps_for_real,
+) -> None:
+    """Finding C at the helper: empty, empty, then the ledger. Two empty reads a
+    second apart LOOK stable, and under material equity that must not count; the
+    ledger then has to repeat once before it does. Four reads, and the deals the
+    LAST read returned (no extra read after the settle)."""
+    transport = _FakeMt5Transport(
+        account=_account(_EXPECTED_LOGIN),
+        deals=[],
+        deals_by_call=[[], [], _DEALS],
+    )
+
+    deals = _settle_read(transport)
+
+    assert transport.calls.count("history_deals_get") == 4
+    assert [d["ticket"] for d in deals] == [1]
+    assert _mt5_read_never_sleeps_for_real.sleeps == [_MT5_HISTORY_POLL_S] * 3
+
+
+def test_retry_after_unsettled_expiry_waits_again() -> None:
+    """THE D-15 hole. After an expiry the retry sees ITSELF as the terminal's
+    previous holder, so "previous holder == this key" alone would call it cached
+    and read a partial history — a permanent stamp, or worse a plausible wrong
+    series. Only a read whose history SETTLED may make the key cached."""
+    tk = _terminal_key()
+    token = begin_mt5_lease_holder(_KEY)
+    try:
+        with pytest.raises(Mt5HistoryUnsettledError):
+            _settle_read(
+                _FakeMt5Transport(account=_account(_EXPECTED_LOGIN), deals=[])
+            )
+        # The login stamped the holder registry, so the OLD rule would say cached.
+        assert mt5_terminal_holder(tk) == _KEY
+        assert mt5_history_wait_due(tk, _KEY) is True
+
+        _settle_read(
+            _FakeMt5Transport(account=_account(_EXPECTED_LOGIN), deals=_DEALS)
+        )
+        assert mt5_history_wait_due(tk, _KEY) is False
+    finally:
+        end_mt5_lease_holder(token)
+
+
+def test_a_recycle_makes_a_settled_key_fresh_again() -> None:
+    """D-07 flip interaction: a terminal recycle stamps ``HOLDER_UNKNOWN`` and, with
+    the trades scrub on, every account is new to the terminal afterwards. A key that
+    had settled must therefore wait again."""
+    tk = _terminal_key()
+    token = begin_mt5_lease_holder(_KEY)
+    try:
+        _settle_read(
+            _FakeMt5Transport(account=_account(_EXPECTED_LOGIN), deals=_DEALS)
+        )
+        assert mt5_history_wait_due(tk, _KEY) is False
+
+        _note_terminal_holder(tk, HOLDER_UNKNOWN, stage="terminal_recycle")
+
+        assert mt5_history_wait_due(tk, _KEY) is True
+    finally:
+        end_mt5_lease_holder(token)
+
+
+def test_another_holder_in_between_makes_a_settled_key_fresh_again() -> None:
+    """Settled is per (terminal, key) AND the key must still be the terminal's
+    previous holder: if another key logged in meanwhile, this one is new to the
+    terminal again."""
+    tk = _terminal_key()
+    token = begin_mt5_lease_holder(_KEY)
+    try:
+        _settle_read(
+            _FakeMt5Transport(account=_account(_EXPECTED_LOGIN), deals=_DEALS)
+        )
+    finally:
+        end_mt5_lease_holder(token)
+    other = begin_mt5_lease_holder("key-2")
+    try:
+        _note_terminal_holder(tk, stage="login")
+    finally:
+        end_mt5_lease_holder(other)
+
+    assert mt5_history_wait_due(tk, _KEY) is True
+
+
+def test_missing_equity_skips_the_wait_and_records_nothing(
+    _mt5_read_never_sleeps_for_real,
+) -> None:
+    """No usable equity means no way to tell a funded account from an empty one,
+    so the loop does not guess: one read, no sleep, and the key is NOT recorded as
+    settled (the callers' step-(c) guards fail loud on the missing equity)."""
+    tk = _terminal_key()
+    token = begin_mt5_lease_holder(_KEY)
+    try:
+        transport = _FakeMt5Transport(
+            account={"login": _EXPECTED_LOGIN, "balance": 1.0}, deals=_DEALS
+        )
+        _settle_read(transport)
+
+        assert transport.calls.count("history_deals_get") == 1
+        assert _mt5_read_never_sleeps_for_real.sleeps == []
+        assert mt5_history_wait_due(tk, _KEY) is True
+    finally:
+        end_mt5_lease_holder(token)
+
+
+def test_a_single_read_never_records_settled() -> None:
+    """``settle_history=False`` proves nothing about the history, so it must not
+    make the key cached."""
+    tk = _terminal_key()
+    token = begin_mt5_lease_holder(_KEY)
+    try:
+        read_mt5_deal_ledger(
+            _session(
+                _FakeMt5Transport(account=_account(_EXPECTED_LOGIN), deals=_DEALS)
+            ),
+            now=_NOW,
+        )
+        assert mt5_history_wait_due(tk, _KEY) is True
+    finally:
+        end_mt5_lease_holder(token)
+
+
+def test_a_holder_that_is_not_a_real_key_never_records_settled() -> None:
+    """The four ``HOLDER_*`` literals and a missing holder are not api_key_ids: a
+    settled read under one of them must not mint a record that a later REAL key of
+    the same spelling could match."""
+    tk = _terminal_key()
+    _settle_read(_FakeMt5Transport(account=_account(_EXPECTED_LOGIN), deals=_DEALS))
+
+    assert mt5_terminal_holder(tk) == "unattributed"
+    assert mt5_history_wait_due(tk, "unattributed") is True
+    assert mt5_history_wait_due(tk, None) is True
+    assert mt5_history_wait_due(tk, "") is True
+
+
+def test_a_lease_that_already_ended_records_nothing() -> None:
+    """The epoch guard, in the holder registry's own shape: a thread whose lease
+    was released (the epoch bumped) must not record a settled history, or it would
+    be attributed to whoever holds the terminal now."""
+    tk = _terminal_key()
+    holder = begin_mt5_lease_holder(_KEY)
+    occupancy = begin_mt5_lease_occupancy(tk)
+    try:
+        bump_mt5_terminal_epoch(tk)  # the lease "released" under this thread
+        note_mt5_history_settled(tk)
+    finally:
+        end_mt5_lease_occupancy(occupancy)
+        end_mt5_lease_holder(holder)
+    # Make the holder registry agree so ONLY the settled record can answer.
+    holder2 = begin_mt5_lease_holder(_KEY)
+    try:
+        _note_terminal_holder(tk, _KEY)
+    finally:
+        end_mt5_lease_holder(holder2)
+
+    assert mt5_history_wait_due(tk, _KEY) is True
+
+
+def test_zero_deals_under_material_equity_is_not_settled(
+    _mt5_read_never_sleeps_for_real,
+) -> None:
+    """Finding C's exact shape: a funded account (equity 110_500) whose history
+    never arrives. A count stable at ZERO is not settled while equity is material,
+    so the loop runs the whole budget and RAISES: it never returns the empty ledger
+    as if it were the account's history.
+
+    The exception carries counts and a boolean only — never the equity, the login
+    or the server."""
+    transport = _FakeMt5Transport(
+        account=_account(_EXPECTED_LOGIN, equity=110_500.0), deals=[]
+    )
+
+    with pytest.raises(Mt5HistoryUnsettledError) as excinfo:
+        _settle_read(transport)
+
+    exc = excinfo.value
+    assert exc.deal_count == 0
+    assert exc.material is True
+    clock = _mt5_read_never_sleeps_for_real
+    assert sum(clock.sleeps) >= _MT5_HISTORY_WAIT_S
+    assert max(clock.sleeps) <= _MT5_HISTORY_POLL_S
+    text = str(exc)
+    assert "110500" not in text and "110_500" not in text
+    assert str(_EXPECTED_LOGIN) not in text and "Broker-Live" not in text
+    assert not isinstance(exc, (Mt5ClientError, TimeoutError)), (
+        "a plain Exception: an Mt5ClientError is classified as a credential "
+        "verdict, a TimeoutError restarts a healthy terminal"
+    )
+
+
+def test_immaterial_equity_stable_zero_returns_at_once(
+    _mt5_read_never_sleeps_for_real,
+) -> None:
+    """D-06: zero equity is an honest empty result. "At once" means the FIRST stable
+    read (one confirmation after the first read), not "without reading twice" — the
+    clock advances one poll interval and never the whole budget."""
+    tk = _terminal_key()
+    token = begin_mt5_lease_holder(_KEY)
+    try:
+        transport = _FakeMt5Transport(
+            account=_account(_EXPECTED_LOGIN, equity=50.0), deals=[]
+        )
+
+        deals = _settle_read(transport)
+
+        assert deals == []
+        assert transport.calls.count("history_deals_get") == 2
+        assert _mt5_read_never_sleeps_for_real.sleeps == [_MT5_HISTORY_POLL_S]
+        # A settled-at-zero history for a non-material account is settled.
+        assert mt5_history_wait_due(tk, _KEY) is False
+    finally:
+        end_mt5_lease_holder(token)
+
+
+def test_settle_without_a_floor_is_a_caller_bug() -> None:
+    """``settle_history=True`` with no floor cannot tell material from immaterial
+    equity. It raises BEFORE touching the terminal rather than guessing one."""
+    transport = _FakeMt5Transport(account=_account(_EXPECTED_LOGIN), deals=_DEALS)
+
+    with pytest.raises(ValueError):
+        read_mt5_deal_ledger(_session(transport), now=_NOW, settle_history=True)
+
+    assert transport.calls == []

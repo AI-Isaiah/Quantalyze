@@ -612,12 +612,17 @@ def _reset_mt5_epochs_for_tests() -> None:
 
     ⭐ And the scrub-owed registry beside it (Phase 164.6.6.1, the sixth), for
     the same reason.
+
+    ⭐ And the history-settled registry (Phase 164.6.6.3, the seventh): a settled
+    key leaked out of one test would make the next test's first derive of that key
+    skip the wait it must pay.
     """
     _MT5_TERMINAL_EPOCHS.clear()
     _MT5_TERMINAL_ANSWERS.clear()
     _MT5_TERMINAL_HOLDERS.clear()
     _MT5_TERMINAL_RELAUNCH_DEBT.clear()
     _MT5_TERMINAL_SCRUB_OWED.clear()
+    _MT5_TERMINAL_HISTORY_SETTLED.clear()
 
 
 # --------------------------------------------------------------------------- #
@@ -838,6 +843,106 @@ def clear_mt5_relaunch_debt(terminal_key: str) -> None:
 def mt5_relaunch_debt(terminal_key: str) -> bool:
     """Whether the terminal owes a relaunch. A READ never mints an entry."""
     return terminal_key in _MT5_TERMINAL_RELAUNCH_DEBT
+
+
+# --------------------------------------------------------------------------- #
+# ⭐ Phase 164.6.6.3 (UATFIXES, D-04 / D-15) — HISTORY SETTLED: whose deal history
+# last finished downloading on this terminal.
+#
+# WHY IT EXISTS (the D-15 retry hole). "The terminal's previous holder is this key"
+# alone says the account was logged in here before, NOT that its history arrived.
+# After an expired wait the retry sees ITSELF as the previous holder, would call
+# itself cached, skip the wait and read a PARTIAL history: a permanent
+# "<2 usable daily-return days" stamp, or worse a plausible but wrong series.
+#
+# WHAT IT HOLDS. terminal_key -> the api_key_id whose deal history last SETTLED
+# there (`services.mt5_read` settle loop). ONLY that loop's success writes it
+# (`note_mt5_history_settled`), after the stability check AND the POST login
+# bracket passed. `mt5_history_wait_due` is the one reader.
+#
+# ⛔ LOCK-FREE and IN-PROCESS ONLY, for the `_MT5_TERMINAL_HOLDERS` reasons above:
+# every writer runs under the terminal lease, and a dict store is atomic under the
+# GIL. A restart empties it, which reads as FRESH: the safe direction, because
+# polling a history that is already cached is cheap.
+# --------------------------------------------------------------------------- #
+_MT5_TERMINAL_HISTORY_SETTLED: dict[str, str] = {}
+
+
+def _is_real_holder(holder: str | None) -> bool:
+    """True when ``holder`` can be an ``api_key_id``: not None, not blank and not
+    one of the four ``HOLDER_*`` sentinels. A settled record is only ever written
+    for, and only ever matched against, a real holder, so a sentinel can never
+    masquerade as a key."""
+    if holder is None or not holder.strip():
+        return False
+    return holder not in (
+        HOLDER_HOUSE,
+        HOLDER_VALIDATION,
+        HOLDER_UNKNOWN,
+        HOLDER_UNATTRIBUTED,
+    )
+
+
+def note_mt5_history_settled(terminal_key: str) -> None:
+    """Record that the CURRENT lease's key has its deal history settled on this
+    terminal (D-15). Called ONLY by the settle loop's caller after the stability
+    check passed and the POST bracket passed — never on a single read, an equity
+    skip or a raise.
+
+    The holder is the lease's (``_MT5_LEASE_HOLDER``); a holder that is not a real
+    key records nothing.
+
+    ⭐ THE EPOCH GUARD, ``_note_terminal_holder``'s shape verbatim: a ``to_thread``
+    read that outlives its ``wait_for`` finishes AFTER its lease released and bumped
+    the terminal's generation, possibly while the next lease holds the terminal.
+    Recorded, it would vouch for a history on a terminal this read no longer owns.
+    So when the context's occupancy is not exactly ``(terminal_key, current
+    generation)`` this records NOTHING and logs one WARNING carrying the two
+    generation integers only. Occupancy UNSET (a read outside any lease, which no
+    production site does) records what was asked.
+    """
+    holder = _MT5_LEASE_HOLDER.get()
+    if not _is_real_holder(holder):
+        return
+    occupancy = _MT5_LEASE_OCCUPANCY.get()
+    if occupancy is not None:
+        current = _mt5_epoch_for(terminal_key)
+        if occupancy != (terminal_key, current):
+            logger.warning(
+                "Mt5Client: not recording the settled deal history — this "
+                "session's lease was on terminal generation %d and the terminal "
+                "is now on generation %d, so the lease has already been released "
+                "(WIZFORM-ABANDON / D-36; Phase 164.6.6.3).",
+                occupancy[1],
+                current,
+            )
+            return
+    assert holder is not None  # `_is_real_holder` above; narrowed for mypy
+    _MT5_TERMINAL_HISTORY_SETTLED[terminal_key] = holder
+
+
+def mt5_history_wait_due(terminal_key: str, holder: str | None) -> bool:
+    """Whether a read for ``holder`` on this terminal must WAIT for its deal
+    history (D-04, D-15). False only when ALL of these hold:
+
+    * ``holder`` is a real key (``_is_real_holder``);
+    * it is the terminal's previous holder (``mt5_terminal_holder``);
+    * its history last SETTLED here (the record above).
+
+    Everything else is fresh: a first login, another key in between, a recycle or
+    scrub that stamped ``HOLDER_UNKNOWN``, a process restart, and a retry after an
+    expired wait (the D-15 hole: previous holder alone is not enough).
+
+    ⛔ MUST BE CALLED BEFORE ``login()``. A successful login stamps the holder
+    registry with the key being logged in, so asked afterwards every account looks
+    like the previous holder of itself.
+    """
+    if not _is_real_holder(holder):
+        return True
+    return not (
+        mt5_terminal_holder(terminal_key) == holder
+        and _MT5_TERMINAL_HISTORY_SETTLED.get(terminal_key) == holder
+    )
 
 
 # --------------------------------------------------------------------------- #

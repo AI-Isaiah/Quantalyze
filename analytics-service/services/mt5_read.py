@@ -59,7 +59,7 @@ from collections.abc import Callable
 from datetime import datetime
 from typing import Any, Final
 
-from services.mt5_client import Mt5ClientError, Mt5Session
+from services.mt5_client import Mt5ClientError, Mt5Session, note_mt5_history_settled
 from services.mt5_concurrency import (
     _MT5_HISTORY_POLL_S,
     _MT5_HISTORY_WAIT_S,
@@ -126,8 +126,10 @@ def _settle_deal_history(
     *,
     now: datetime,
     material_equity_floor_usd: float,
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], bool]:
     """Re-read ``history_deals_get`` until the count is STABLE (D-04), or raise.
+    Returns ``(deals, settled)``: ``settled`` is False only on the equity skip below,
+    where nothing was proven about the history.
 
     Settled = two consecutive reads of the same count AND (that count is above
     zero OR equity is not material). A count stable at zero under material equity
@@ -139,7 +141,8 @@ def _settle_deal_history(
     the test doubles' ``second_account`` / ``post_read_exc`` mean exactly that.
 
     An absent, non-numeric or non-finite equity skips the wait and returns the
-    first read untouched: the callers' existing step-(c) guards fail loud on it.
+    first read untouched, NOT settled: the callers' existing step-(c) guards fail
+    loud on it.
 
     On expiry it RAISES and returns nothing: never a partial ledger, never an
     invented deal.
@@ -147,9 +150,9 @@ def _settle_deal_history(
     try:
         equity = float(info["equity"])
     except (KeyError, TypeError, ValueError):
-        return first
+        return first, False
     if not math.isfinite(equity):
-        return first
+        return first, False
     material = abs(equity) > material_equity_floor_usd
     deadline = _clock() + _MT5_HISTORY_WAIT_S
     previous = len(first)
@@ -160,7 +163,7 @@ def _settle_deal_history(
         )
         count = len(deals)
         if count == previous and (count > 0 or not material):
-            return deals
+            return deals, True
         if _clock() >= deadline:
             raise Mt5HistoryUnsettledError(count, material)
         previous = count
@@ -222,11 +225,12 @@ def read_mt5_deal_ledger(
     deals = session.client.history_deals_get(
         0, int(now.timestamp()) + _MT5_DEAL_FETCH_MARGIN_S
     )
+    settled = False
     if settle_history:
         # D-04: the poll window sits BEFORE the POST bracket, so the POST bracket
         # also covers it (a mid-wait re-login by another actor is still caught).
         assert material_equity_floor_usd is not None  # narrowed above, for mypy
-        deals = _settle_deal_history(
+        deals, settled = _settle_deal_history(
             session,
             info,
             deals,
@@ -252,4 +256,9 @@ def read_mt5_deal_ledger(
     except Mt5ClientError as exc:
         raise _Mt5PostReadVerificationError(str(exc)) from exc
     assert_expected_login(post_info, login=session.login)
+    if settled:
+        # D-15: ONLY a history that was stable AND whose POST bracket passed makes
+        # this key cached on this terminal. Never on a single read, the equity
+        # skip, or any raise above.
+        note_mt5_history_settled(session.client.terminal_key)
     return info, deals

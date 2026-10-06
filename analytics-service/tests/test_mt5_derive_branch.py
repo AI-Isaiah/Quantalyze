@@ -521,6 +521,74 @@ async def test_fresh_login_history_arriving_late_is_read_once_settled(
 
 
 # ---------------------------------------------------------------------------
+# 2c — 164.6.6.3 / D-04, D-05, D-15: fresh versus cached is decided per
+# (terminal, key) BEFORE login, and only a fresh login pays the wait or the
+# raised bound.
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_a_second_derive_of_a_settled_key_pays_no_wait(monkeypatch) -> None:
+    """D-04 "an account whose history is already cached pays no wait", through the
+    whole job. The first derive of the key is fresh and settles (two reads: the
+    first and its confirmation). The second derive of the SAME key finds it the
+    terminal's previous holder AND settled, so it makes exactly one
+    ``history_deals_get``. If the freshness decision were taken AFTER `login()`
+    (which stamps the holder registry) or ignored the settled record, this count
+    would be wrong in one direction or the other."""
+    monkeypatch.setenv("MT5_ENABLED", "true")
+    account = {"equity": 110_500.0, "balance": 110_500.0, "login": 123456}
+
+    first = _FakeMt5Transport(account=account, deals=_canonical_deals())
+    ctx1, _cap1 = _build_ctx(first)
+    with _apply(_patches(ctx1)):
+        r1 = await run_derive_broker_dailies_job(_job())
+    assert r1.outcome == DispatchOutcome.DONE
+    assert first.calls.count("history_deals_get") == 2
+
+    second = _FakeMt5Transport(account=account, deals=_canonical_deals())
+    ctx2, _cap2 = _build_ctx(second)
+    with _apply(_patches(ctx2)):
+        r2 = await run_derive_broker_dailies_job(_job())
+    assert r2.outcome == DispatchOutcome.DONE
+    assert second.calls.count("history_deals_get") == 1
+
+
+@pytest.mark.asyncio
+async def test_the_derive_bound_adds_the_wait_only_for_a_fresh_login(
+    monkeypatch,
+) -> None:
+    """D-05: the outer bound is the read budget PLUS the settle wait for a fresh
+    login, and the read budget alone for a cached one (the 40 s wedge detector must
+    not slacken for a cached read). Both are read from `jw` at call time.
+
+    Each `history_deals_get` takes 0.4 s against a 0.3 s read budget and a 2.0 s
+    wait. The fresh first run makes two reads (0.8 s) and fits the raised bound.
+    The cached second run makes one read (0.4 s) and must hit the TIMEOUT arm
+    (shutdown, transient) — proof that the wait is added only when fresh."""
+    monkeypatch.setenv("MT5_ENABLED", "true")
+    monkeypatch.setattr(jw, "_MT5_DERIVE_READ_TIMEOUT_S", 0.3)
+    monkeypatch.setattr(jw, "_MT5_HISTORY_WAIT_S", 2.0)
+    account = {"equity": 110_500.0, "balance": 110_500.0, "login": 123456}
+
+    first = _FakeMt5Transport(account=account, deals=_canonical_deals(), hang_s=0.4)
+    ctx1, _cap1 = _build_ctx(first)
+    with _apply(_patches(ctx1)):
+        r1 = await run_derive_broker_dailies_job(_job())
+    assert r1.outcome == DispatchOutcome.DONE, (r1.error_kind, r1.error_message)
+    assert "shutdown" not in first.calls
+
+    second = _FakeMt5Transport(account=account, deals=_canonical_deals(), hang_s=0.4)
+    ctx2, _cap2 = _build_ctx(second)
+    with _apply(_patches(ctx2)):
+        r2 = await run_derive_broker_dailies_job(_job())
+    assert r2.outcome == DispatchOutcome.FAILED
+    assert r2.error_kind == "transient"
+    assert "shutdown" in second.calls, (
+        "a cached read keeps the plain read budget, so its 0.4 s read reaches the "
+        "timeout arm and the terminal restart"
+    )
+
+
+# ---------------------------------------------------------------------------
 # 3 — uPnL wedge → complete_with_warnings.
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio

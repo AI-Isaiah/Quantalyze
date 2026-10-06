@@ -4894,6 +4894,7 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 Mt5AccountMismatchError,
                 Mt5ClientError,
                 Mt5SessionAbandoned,
+                mt5_history_wait_due,
             )
             from services.mt5_deals import (
                 Mt5DealClassificationError,
@@ -4958,21 +4959,30 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 site=SITE_DERIVE,
             ):
                 try:
-                    # ⭐ 164.6.6.3 / D-04, D-05 (Finding C) — a FRESH login waits for
-                    # its deal history to settle, and the outer bound is DERIVED from
-                    # the two symbols (the read's own budget plus the wait), never
-                    # hand-picked. The helper's deadline (the wait alone) fires
-                    # before this bound, so a healthy but slow download never reaches
-                    # the terminal-restart arm below.
+                    # ⭐ 164.6.6.3 / D-04, D-05, D-15 (Finding C) — a FRESH login waits
+                    # for its deal history to settle; a settled (cached) one reads
+                    # once. ⛔ The decision is taken HERE, BEFORE `login()`, because
+                    # `login()` stamps the holder registry with this very key.
+                    #
+                    # The outer bound is DERIVED from the two symbols (the read's own
+                    # budget plus the wait), never hand-picked, and the wait is added
+                    # for this call only and only for a fresh login, so a cached read
+                    # keeps the 40 s wedge detector. The helper's own deadline (the
+                    # wait alone) fires before this bound, so a healthy but slow
+                    # download never reaches the terminal-restart arm below.
+                    _mt5_fresh = mt5_history_wait_due(
+                        _mt5_session.client.terminal_key, ctx.key_row.get("id")
+                    )
                     _mt5_info, _mt5_deals = await asyncio.wait_for(
                         asyncio.to_thread(
                             read_mt5_deal_ledger,
                             _mt5_session,
                             now=_mt5_now,
-                            settle_history=True,
+                            settle_history=_mt5_fresh,
                             material_equity_floor_usd=_DERIBIT_EMPTY_LEDGER_FLOOR_USD,
                         ),
-                        timeout=_MT5_DERIVE_READ_TIMEOUT_S + _MT5_HISTORY_WAIT_S,
+                        timeout=_MT5_DERIVE_READ_TIMEOUT_S
+                        + (_MT5_HISTORY_WAIT_S if _mt5_fresh else 0.0),
                     )
                 except asyncio.TimeoutError:
                     # A hang is a CLASSIFIED, RETRYABLE transient — NEVER permanent,
