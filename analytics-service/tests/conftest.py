@@ -181,6 +181,34 @@ def _mt5_read_never_sleeps_for_real(monkeypatch):
     return clock
 
 
+# Phase 164.6.6.3 plan 05 (D-09, D-14) - the MT5 known-server pre-check fails CLOSED,
+# so a legacy validate test that submits a made-up broker server would be refused as
+# `MT5_SERVER_UNKNOWN` (or, with an empty list, `MT5_GATEWAY_UNCONFIGURED`) before it
+# reached its own subject. The suite's synthetic servers are admitted here once. A new
+# synthetic server that is not added fails by NAMING `MT5_SERVER_UNKNOWN`, which is the
+# loud direction. Each item 9 test sets or deletes `MT5_KNOWN_SERVERS` itself, and its
+# own patch wins because this fixture runs first. The tuple was DERIVED, not counted: the
+# full `pytest tests/` ran with a list that admitted nothing the suite uses, a spy on
+# the refusal's sanitiser recorded every server the router pre-check refused, and those
+# are the entries here (the router path only; plan 06 extends this for the worker
+# adapter). Servers that tests name but that never reach the pre-check, such as the
+# client-contract suite's, are deliberately absent.
+_SUITE_MT5_SERVERS = (
+    "Broker-Demo",
+    "MyBroker-Live",
+)
+
+
+@pytest.fixture(autouse=True)
+def _mt5_known_servers_admit_the_suites_synthetic_servers(monkeypatch):
+    from services import mt5_probe
+
+    monkeypatch.setenv("MT5_KNOWN_SERVERS", ",".join(_SUITE_MT5_SERVERS))
+    mt5_probe._reset_server_unknown_alerts_for_tests()
+    yield
+    mt5_probe._reset_server_unknown_alerts_for_tests()
+
+
 # Phase 134 (smoothed_mtm kill-switch): the v1.14 smoothed THIRD pass ships DARK
 # behind SMOOTHED_MTM_ENABLED (services.closed_sets.is_smoothed_mtm_enabled),
 # default OFF. The Phase 131-133 tests were written when the pass ran

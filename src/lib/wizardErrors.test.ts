@@ -2130,8 +2130,15 @@ describe("[140.3-10 / TRAP-4] the whole copy table, scanned for destructive-only
    * OFF THIS GUARD'S OWN FAILURE MESSAGE after the merge, never counted.
    * Destructive-scan reasoning for the set is unchanged: none of the three
    * carries `start_fresh`, so all sit outside the scanned population.
+   *
+   * ⚠️ 97 → 98 (2026-10-06, Phase 164.6.6.3 plan 05 / item 9): one arrival,
+   * `KEY_MT5_SERVER_UNKNOWN`. Its actions are `clear_and_retry` and `request_call`;
+   * neither is in `DESTRUCTIVE_ACTIONS`, so it sits outside the scanned population
+   * and the "destructive class is FOUR entries" receipt below is unchanged. The
+   * value was re-measured at HEAD (97, from this guard's failure message) before it
+   * moved, and it moves in lockstep with the declaration in the SEAMUX-04 block.
    */
-  const EXPECTED_TABLE_SIZE = 97;
+  const EXPECTED_TABLE_SIZE = 98;
 
   it("the scan actually covers the table — hand-typed size guard", () => {
     expect(
@@ -2258,6 +2265,48 @@ describe("[140.3-12 / SEAMUX-04] no entry in the copy table makes a claim we can
         "never the mechanism's field name.",
     },
   ];
+
+  /**
+   * ⭐ 164.6.6.3 plan 05 (item 9) — the ONE substantiated use of a banned fragment.
+   *
+   * "been notified" is banned because 9 of 15 seam routes captured nothing, so the
+   * words asserted an audit trail that did not exist, and "until a route has one, no
+   * copy reachable from it may claim one." `KEY_MT5_SERVER_UNKNOWN` is the first code
+   * whose claim IS true on every path that reaches it: the wire code is raised only
+   * AFTER `assert_mt5_server_known` (services/mt5_probe.py) logged an ERROR and called
+   * `_capture_server_unknown_once`, which pages Sentry once per server per hour. The
+   * first refusal of any server is therefore always captured, so "we have been
+   * notified" is a fact about that server, not a hope. The exemption is per CODE and per
+   * FRAGMENT, hand-typed, and the next test pins the capture it rests on: delete the
+   * capture and the exemption reddens, rather than the copy lying quietly.
+   * ⚠️ Rewording the copy to a synonym would have kept the claim and dodged this guard,
+   * which is the worse outcome; the guard is narrowed instead, with its reason.
+   */
+  const FORBIDDEN_FRAGMENT_SUBSTANTIATED_FOR: Readonly<
+    Record<string, readonly string[]>
+  > = {
+    KEY_MT5_SERVER_UNKNOWN: ["been notified"],
+  };
+
+  it("[164.6.6.3 / item 9] the substantiated 'been notified' claim rests on a capture that still exists", () => {
+    const src = readFileSync(
+      join(process.cwd(), "analytics-service", "services", "mt5_probe.py"),
+      "utf-8",
+    );
+    const start = src.indexOf("def assert_mt5_server_known(");
+    expect(start, "assert_mt5_server_known moved or was renamed").toBeGreaterThan(-1);
+    const body = src.slice(start);
+    const miss = body.slice(body.indexOf("shown = sanitise_mt5_server_for_log"));
+    expect(
+      miss.includes("_capture_server_unknown_once("),
+      "the unlisted-server arm no longer captures to Sentry, so KEY_MT5_SERVER_UNKNOWN's " +
+        "'we have been notified' is unsubstantiated: restore the capture or reword the copy " +
+        "and drop the exemption above",
+    ).toBe(true);
+    expect(Object.keys(FORBIDDEN_FRAGMENT_SUBSTANTIATED_FOR)).toEqual([
+      "KEY_MT5_SERVER_UNKNOWN",
+    ]);
+  });
 
   /**
    * HAND-TYPED SIZE GUARD, mirroring 140.3-10's. A scan over an emptied table
@@ -2734,8 +2783,15 @@ describe("[140.3-12 / SEAMUX-04] no entry in the copy table makes a claim we can
    * `SUBMITTED_ANALYTICS_NOT_QUEUED` together. The value was READ OFF THIS
    * GUARD'S OWN FAILURE MESSAGE after the merge (the twin guard read the
    * same). Each entry's honesty walk is recorded in its own note above.
+   *
+   * ⚠️ 97 → 98 (2026-10-06, Phase 164.6.6.3 plan 05 / item 9): one arrival,
+   * `KEY_MT5_SERVER_UNKNOWN`. It was read against all four FORBIDDEN fragments by
+   * hand. Three are absent. The fourth, "been notified", IS present, and it is the
+   * one substantiated exception recorded beside `FORBIDDEN_FRAGMENT_SUBSTANTIATED_FOR`
+   * above, with the capture it rests on pinned by its own test. The value was
+   * re-measured at HEAD (97, from this guard's failure message) before it moved.
    */
-  const EXPECTED_TABLE_SIZE = 97;
+  const EXPECTED_TABLE_SIZE = 98;
 
   it("the scan actually covers the table — hand-typed size guard", () => {
     expect(
@@ -2754,6 +2810,7 @@ describe("[140.3-12 / SEAMUX-04] no entry in the copy table makes a claim we can
       const haystack = strings.join("   ").toLowerCase();
 
       for (const { fragment } of FORBIDDEN) {
+        if (FORBIDDEN_FRAGMENT_SUBSTANTIATED_FOR[code]?.includes(fragment)) continue;
         if (haystack.includes(fragment.toLowerCase())) {
           offenders.push(code + " -> " + fragment);
         }

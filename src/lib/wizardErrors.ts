@@ -122,6 +122,18 @@ export type WizardErrorCode =
   // correct for a genuine transport failure, where a retry really can
   // succeed. This is a DISTINCT arm for a fault where it cannot.
   | "KEY_MT5_TERMINAL_UNRESPONSIVE"
+  // Phase 164.6.6.3 / item 9 (D-09, D-10, D-11, D-14) — the FOURTH MT5 sibling: the
+  // broker server the user typed is not one OUR terminals are set up for. Emitted by
+  // the Python known-server pre-check BEFORE `login()`, at both validate sites
+  // (wire code `MT5_SERVER_UNKNOWN`, 424, `recoverable: true`); before it an unlisted
+  // server hung the whole 45.6 s chain and was named as bad credentials.
+  // The subject is OUR terminals' list, so the card never accuses the credentials.
+  // It is recoverable: a corrected spelling, or our adding the server, clears it, and
+  // nothing was sent to the broker. NOT in `OUR_DEFECT_KEY_ERROR_CODES`: the
+  // emitter already captures to Sentry, deduplicated, and a typo is the caller's
+  // doing. `KEY_SIGN_IN_FAILED` still covers a LISTED server whose login is refused
+  // (D-11); the two never share a path.
+  | "KEY_MT5_SERVER_UNKNOWN"
   // Phase 142.2 / MT5-04 (D-05) — THE FOUR CAUSES `KEY_INVALID_FORMAT` USED TO
   // SWALLOW. The two wizard connect routes (`strategies/create-with-key` and
   // `strategies/composite/add-key`) answered ONE code at TWELVE guards each —
@@ -1901,6 +1913,37 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     fixRequires: [null, null, REQUIRES_CONNECT_SURFACE],
     docsHref: "/security#readonly-key",
     actions: ["request_call"],
+  },
+
+  // Phase 164.6.6.3 / item 9 (D-09, D-10, D-11) — the broker server is not on our
+  // terminals' list. Wire `MT5_SERVER_UNKNOWN` (424) maps here through
+  // `VENUE_WIRE_CODE_TO_VERDICT`. The copy is STATIC (T-164.6.6.3-18): it never echoes
+  // the server string the user typed.
+  //
+  // It covers the typo case on purpose. "A typo and a new broker look identical
+  // here" (RESEARCH Pitfall 10), so the card asks for the name to be checked first,
+  // then says that resubmitting the SAME name reaches the same place, which is the
+  // honest answer when the name is right and the server is simply new to us.
+  //
+  // RECOVERABLE, and the two facts agree: `actions` holds `clear_and_retry`, a member
+  // of `RECOVERABLE_ACTIONS` (src/lib/envelope.ts), so `buildEnvelope` derives
+  // `recoverable: true`, and the wire body carries `recoverable: true` too.
+  // ⚠️ Slots 0 and 2 are gated to the connect step: they speak of the submitted form
+  // and of the wizard draft, which the rotate-secret dialog does not have.
+  KEY_MT5_SERVER_UNKNOWN: {
+    title: "Our MetaTrader terminals do not recognise this broker server yet.",
+    cause:
+      "We check every MT5 server name against the servers our terminals are set up for before we try to sign in, and this one is not on that list. Nothing was sent to your broker and nothing was stored. A misspelt server name ends here too, and from here the two look the same.",
+    fix: [
+      "Check the server name against the one shown in your MT5 terminal's login window, character for character, and submit again if it differs.",
+      "If the name is right, we have been notified and will add the server. Submitting the same name again before then reaches the same place.",
+      "Your draft is saved.",
+    ],
+    // Index-aligned to `fix`. Slots 0 and 2 are claims about the wizard form and
+    // draft behind the panel — see the ⚠️ note above.
+    fixRequires: [REQUIRES_CONNECT_SURFACE, null, REQUIRES_CONNECT_SURFACE],
+    docsHref: "/security#readonly-key",
+    actions: ["clear_and_retry", "request_call"],
   },
 
   // ── Phase 142.2 / MT5-04 (D-05) — the four honest causes ──────────────────
@@ -4930,6 +4973,18 @@ export const VENUE_WIRE_CODE_TO_VERDICT: ReadonlyMap<
   // table's stated discipline that the wire answer stays the one the service
   // chose.
   ["SIGN_IN_FAILED", { code: "KEY_SIGN_IN_FAILED", status: 424 }],
+  // Phase 164.6.6.3 / item 9 (D-09, D-10) — minted by the Python known-server
+  // pre-check in `_validate_mt5_key_probe`, before any client, lease or `login()`.
+  // Status 424 on the row, equal to the emitter's own status, per this table's
+  // discipline. Reached from `POST /api/validate-key` (the wizard connect surface);
+  // the rotate-secret route and the worker adapter follow in plan 06.
+  //
+  // ⭐ WHY THE ROW IS NOT OPTIONAL BESIDE THE MINT — same mechanism as the
+  // `SIGN_IN_FAILED` row above: the table is resolved BEFORE the substring cascade, and
+  // the cascade has no branch for this detail (swept clean at the emitter,
+  // `MT5_SERVER_UNKNOWN_DETAIL` in `services/closed_sets.py`). A minted member with no
+  // row here is unreachable, and the user lands on `UNKNOWN`.
+  ["MT5_SERVER_UNKNOWN", { code: "KEY_MT5_SERVER_UNKNOWN", status: 424 }],
 ]);
 
 /**

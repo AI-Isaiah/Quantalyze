@@ -414,6 +414,13 @@ const KNOWN_CREATE_WITH_KEY_CODES: ReadonlySet<WizardErrorCode> =
     "KEY_AUTH_FAILED",
     "KEY_MT5_MASTER_PASSWORD",
     "KEY_MT5_WRONG_SERVER",
+    // 164.6.6.3 / item 9 (D-09, D-10) — admitted HERE IN THE SAME COMMIT the shared
+    // classifier starts returning it. `VENUE_WIRE_CODE_TO_VERDICT` now answers for
+    // `MT5_SERVER_UNKNOWN` (the Python known-server pre-check, before `login()`) with
+    // this code; omit this line and the membership check rejects the honest code, the
+    // step renders `UNKNOWN` — whose copy is recoverable and says nothing about the
+    // server — and the user is told the wrong cause for an unlisted broker server.
+    "KEY_MT5_SERVER_UNKNOWN",
     // 164.6.5 / criterion 5 — admitted HERE IN THE SAME COMMIT the shared
     // classifier starts returning it. `VENUE_WIRE_CODE_TO_VERDICT` now answers
     // for `MT5_TERMINAL_UNRESPONSIVE` (an IPC transport fault raised inside

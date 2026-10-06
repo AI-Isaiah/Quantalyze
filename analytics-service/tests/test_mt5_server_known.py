@@ -19,17 +19,32 @@ What each gate defends:
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 
+from fastapi import HTTPException
+
 from services import mt5_probe
 from services.closed_sets import MT5_SERVER_UNKNOWN_DETAIL
+from services.error_contract import VenueTransientHTTPException
+from services.exchange import SIGN_IN_FAILED_DETAIL
+from services.mt5_client import Mt5LoginRefusedError
 from services.mt5_probe import (
     Mt5KnownServersUnconfigured,
     Mt5ServerUnknownError,
     assert_mt5_server_known,
+)
+
+# Harness imported BY NAME from the router suite (the park suite does the same). The
+# two autouse fixtures register here because their names are bound in this module.
+from tests.test_mt5_validate import (  # noqa: F401 - fixtures register by name
+    _make_client,
+    _make_req,
+    _install_mt5_client,
+    _reset_mt5_terminal_locks,
+    _reset_mt5_validation_alert_state,
+    exchange_router,
 )
 
 _ANALYTICS_LOGGER = "quantalyze.analytics"
@@ -231,11 +246,93 @@ def test_server_unknown_detail_collides_with_no_cascade_needle():
     assert not ("ip" in lower and "allow" in lower), "collides with the ip+allow branch"
 
 
-def test_the_seam_emits_no_wire_code_yet():
-    """Pins the wave-1 boundary only. Plan 05 deletes this test in the SAME commit that
-    adds the emitter, together with every census that names the new wire code."""
-    source = (
-        Path(__file__).resolve().parent.parent / "services" / "mt5_probe.py"
-    ).read_text(encoding="utf-8")
-    assert 'code="MT5_SERVER_UNKNOWN"' not in source
-    assert 'error_code="MT5_SERVER_UNKNOWN"' not in source
+# ---------------------------------------------------------------------------
+# Phase 164.6.6.3 plan 05 (D-09, D-10, D-11, D-14) - the router disposition.
+#
+# The seam above decides; these gates pin what the ROUTER does with the decision.
+# Each drives `_validate_mt5_key_probe` directly so the trace the terminal event
+# is built from is visible.
+# ---------------------------------------------------------------------------
+
+
+async def _probe(router, *, passphrase: str):
+    req = _make_req(passphrase=passphrase)
+    trace = router._Mt5ValidateTrace()
+    try:
+        return await router._validate_mt5_key_probe(
+            req.api_key, req.api_secret, req.passphrase, trace
+        ), trace
+    except HTTPException as exc:
+        return exc, trace
+
+
+class _LeaseTouched(AssertionError):
+    pass
+
+
+async def test_an_unlisted_server_is_refused_at_the_router_before_login(
+    exchange_router, monkeypatch
+):
+    """SC4 / D-09 / D-10: the unlisted server never reaches a client, a lease or
+    `login()`. Today it reaches the terminal and hangs 45.6 s before an unrelated
+    cause is named."""
+    router = exchange_router
+    _set_env(monkeypatch, known="Listed-Live", house="House-Live")
+    factory = MagicMock(side_effect=AssertionError("a client was built"))
+    router.Mt5Client = factory
+
+    def _no_lease(*_a, **_k):
+        raise _LeaseTouched("the terminal lease was taken")
+
+    monkeypatch.setattr(router, "mt5_terminal_lease", _no_lease)
+
+    exc, trace = await _probe(router, passphrase="Unlisted-Live")
+
+    assert isinstance(exc, VenueTransientHTTPException)
+    assert exc.status_code == 424
+    assert exc.code == "MT5_SERVER_UNKNOWN"
+    assert exc.detail == MT5_SERVER_UNKNOWN_DETAIL
+    assert exc.recoverable is True
+    assert trace.outcome == "server_unknown"
+    factory.assert_not_called()
+
+
+async def test_a_listed_servers_login_stage_10005_still_reads_sign_in_failed(
+    exchange_router, monkeypatch
+):
+    """D-11: a LISTED server that refuses at the login stage is still a sign-in
+    failure with no Retry. The new code must not swallow it."""
+    router = exchange_router
+    _set_env(monkeypatch, known="Broker-Demo", house="House-Live")
+    client = _make_client(login_raises=Mt5LoginRefusedError(-10005, "IPC timeout"))
+    _install_mt5_client(router, client)
+
+    exc, trace = await _probe(router, passphrase="Broker-Demo")
+
+    assert isinstance(exc, VenueTransientHTTPException)
+    assert exc.status_code == 424
+    assert exc.code == "SIGN_IN_FAILED"
+    assert exc.detail == SIGN_IN_FAILED_DETAIL
+    assert exc.recoverable is False
+    client.login.assert_called_once()
+
+
+async def test_an_empty_known_server_list_answers_gateway_unconfigured_at_the_router(
+    exchange_router, monkeypatch
+):
+    """D-14 fails CLOSED, and an empty effective list is OUR configuration gap:
+    the existing operator-facing 500 body, never "your server is unknown"."""
+    router = exchange_router
+    _set_env(monkeypatch, known=None, house=None)
+    factory = MagicMock(side_effect=AssertionError("a client was built"))
+    router.Mt5Client = factory
+
+    exc, trace = await _probe(router, passphrase="Anything-Live")
+
+    assert isinstance(exc, HTTPException)
+    assert exc.status_code == 500
+    detail = exc.detail
+    assert isinstance(detail, dict)
+    assert detail["code"] == "MT5_GATEWAY_UNCONFIGURED"
+    assert trace.outcome == "gateway_unconfigured"
+    factory.assert_not_called()
