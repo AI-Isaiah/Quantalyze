@@ -680,8 +680,12 @@ def _capture_server_unknown_once(key: str, message: str, tag: str, value: str) -
             return
     _server_unknown_last_alert_at[key] = now
     try:
-        sentry_sdk.set_tag(tag, value)
-        sentry_sdk.capture_message(message, level="error")
+        # Review WR-03: the tag is scoped to THIS one event. On the worker path there
+        # is no per-request scope, so an unscoped `set_tag` would stay on the
+        # long-lived isolation scope and label every later event the process sends.
+        with sentry_sdk.new_scope() as scope:
+            scope.set_tag(tag, value)
+            sentry_sdk.capture_message(message, level="error")
     except Exception:  # noqa: BLE001 - an alert must never replace the verdict
         pass
 

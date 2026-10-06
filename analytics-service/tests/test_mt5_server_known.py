@@ -140,6 +140,47 @@ def test_the_dedupe_table_is_bounded_against_a_flood_of_distinct_servers(
     assert sentry_spy.capture_message.call_count <= cap
 
 
+def test_the_server_unknown_tag_does_not_leak_onto_a_later_event(monkeypatch):
+    """Review WR-03: the tag belongs to the ONE capture it describes. The worker
+    path (`SITE_VALIDATE_WORKER`) has no per-request scope, so an unscoped
+    `set_tag` stays on the long-lived isolation scope and labels every later event
+    the process sends, which mislabels unrelated failures in alert triage.
+
+    REAL sentry_sdk, not the MagicMock spy: a spy cannot tell a scoped tag from an
+    unscoped one. A client whose `before_send` records and drops each event stands
+    in for the transport."""
+    import sentry_sdk
+
+    events: list[dict] = []
+
+    def _record(event, _hint):
+        events.append(event)
+        return None  # never send anything
+
+    previous = sentry_sdk.get_global_scope().client
+    sentry_sdk.get_global_scope().set_client(
+        sentry_sdk.Client(dsn="http://k@localhost/1", before_send=_record)
+    )
+    try:
+        with sentry_sdk.isolation_scope():
+            mt5_probe._capture_server_unknown_once(
+                "unlisted:Some-Server", "mt5 server unknown", "mt5_server_unknown", "unlisted"
+            )
+            sentry_sdk.capture_message("an unrelated later failure")
+    finally:
+        sentry_sdk.get_global_scope().set_client(previous)
+
+    assert len(events) == 2, f"expected the alert and the later event, got {events!r}"
+    alert, later = events
+    assert alert["tags"].get("mt5_server_unknown") == "unlisted", (
+        "the alert itself must still carry its tag"
+    )
+    assert "mt5_server_unknown" not in (later.get("tags") or {}), (
+        "the tag leaked onto an unrelated later event: it was set on the "
+        "long-lived scope instead of the capture's own (review WR-03)"
+    )
+
+
 def test_the_house_server_is_never_refused(monkeypatch, sentry_spy):
     _set_env(monkeypatch, known=None, house="House-Live")
 
