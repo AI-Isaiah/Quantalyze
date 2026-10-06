@@ -108,7 +108,7 @@ phases below carry the corrections, not the bullets.
 - [ ] **Phase 164.6.2: MT5RELOGIN — the MT5 gateway re-establishes its broker session without a human** (INSERTED) — verification: human_needed
 - [x] **Phase 164.6.3: CIDOCSPATH — a docs-only PR stops running the code gates, and a code PR is proven to still run every one of them** (INSERTED)
 - [x] **Phase 164.6.4: MT5KEEPALIVE — nothing TRIGGERS a recovery, so the terminal sits dark for hours while recovery itself takes minutes** (INSERTED)
-- [ ] **Phase 164.6.5: MT5VALIDATEWEDGE — MT5 key validation stops destroying the shared terminal, and the terminal self-heals** (INSERTED) — verification: human_needed
+- [x] **Phase 164.6.5: MT5VALIDATEWEDGE — MT5 key validation stops destroying the shared terminal, and the terminal self-heals** (INSERTED) — verified 2026-10-06 (completed 2026-10-06; was `human_needed` 2026-09-26 → 2026-10-06)
 - [x] **Phase 164.6.6: MT5TERMINALISOLATION — one client's MT5 validation cannot evict, disturb or expose another client's broker session** (INSERTED) — verified 2026-10-04 (completed 2026-10-04)
 - [ ] **Phase 164.6.6.1: MT5SCRUB — the MT5 terminals are wiped of saved accounts after use without ever leaving the jobs terminal logged out** (INSERTED) — not yet planned (waits for the founder's live scrub spike)
 - [x] **Phase 164.6.7: COMPOSITECLAIMSNAPSHOT — the composite run reads the live job marker, not its claim-time snapshot** (INSERTED) — verification: human_needed (shipped; founder/post-deploy checks pending) (completed 2026-10-04)
@@ -5050,7 +5050,7 @@ kept verbatim.
 | 164.6.2 MT5RELOGIN | 5/5 on main | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed; plan 06 not yet started | v0.77.43.x · #797/#799 |
 | 164.6.3 CIDOCSPATH | 5/5 | Complete | v0.77.40.0 · #791 |
 | 164.6.4 MT5KEEPALIVE | 5/5 | Complete | #800 |
-| 164.6.5 MT5VALIDATEWEDGE | 8/8 | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed | v0.96.0.0 · #863 |
+| 164.6.5 MT5VALIDATEWEDGE | 8/8 | Complete    | 2026-10-06 · v0.96.0.0 · #863 |
 | 164.6.6 MT5TERMINALISOLATION | 9/9 | Complete    | 2026-10-04 |
 | 164.6.6.1 MT5SCRUB | 0/4 (moved, not re-planned) | Waiting — split from 164.6.6 on 2026-09-27 (founder); re-planned only after the founder's live scrub spike | - |
 | 164.6.6.2 BTCNATIVE | 0/? | Queued — booked 2026-10-03 | - |
