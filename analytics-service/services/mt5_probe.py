@@ -552,11 +552,14 @@ def _alert_park_failed(cause: str, *, site: str) -> None:
         return
     _park_last_alert_at[cause] = now
     try:
-        sentry_sdk.set_tag("mt5_validation_park_failed", cause)
-        sentry_sdk.capture_message(
-            f"mt5 validation park failed: cause={cause} site={site}",
-            level="error",
-        )
+        # Review WR-03: scope the tag to THIS capture. The worker has no per-request
+        # scope, so an unscoped `set_tag` would label every later event it sends.
+        with sentry_sdk.new_scope() as scope:
+            scope.set_tag("mt5_validation_park_failed", cause)
+            sentry_sdk.capture_message(
+                f"mt5 validation park failed: cause={cause} site={site}",
+                level="error",
+            )
     except Exception:  # noqa: BLE001 — an alert must never replace the verdict
         pass
 
