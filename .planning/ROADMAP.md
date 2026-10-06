@@ -2869,6 +2869,17 @@ Plans:
 3. A server is learned only from an authorized session (`connected` true), never from a failed or timed-out attempt. An unknown server's attempt is bounded so that it cannot hold the shared validation terminal for the full 45 s or leave it off the house server.
 4. The JOBS terminal can use a learned server before the first sync of such a key, or that sync is refused by name instead of hanging. Each terminal's server store is its own, so learning on one terminal does not teach the other.
 5. Every guard in criteria 2–4 is shown RED once.
+⭐ **Founder direction 2026-10-06 (verbatim intent: "We cannot have a static list. There must be some way, where client enters a new server, and then the backend works and verifies etc till it works, provided that the server name is correct").** The static list is the bridge, not the design. Target flow:
+- **(i) No login on an unseen name.** The wizard accepts an unseen server name, enqueues a resolve job on the VALIDATION terminal and says so ("checking a new broker server"), instead of logging in blind.
+- **(ii) The resolve job tries three candidate routes, measured in criterion 1's order.**
+  - **(a)** Drive the terminal's own "Open an account" broker search on the container display (the VNC display both gateways already run). This is the human procedure, scripted. MT5 then writes the broker's entries into that terminal's `servers.dat` itself.
+  - **(b)** Log in by raw `host:port` address. MT5 accepts it, and Pepperstone's own FAQ instructs it.
+  - **(c)** Use a startup config with `Server=` set.
+- **(iii) A bounded login follows.**
+- **(iv) Success persists, and the jobs terminal is taught too.** On success the server is persisted (criterion 2) AND the same resolve step runs on the JOBS terminal before the key's first sync (criterion 4).
+- **(v) No broker match is a named error.** A name no broker knows becomes a named wizard error, never `KEY_SIGN_IN_FAILED`.
+
+D-14 of 164.6.6.3 ("the service never reads `servers.dat`") stands: the terminal writes its own store through its own search, and the service never parses it. Research input: `164.6.6.3.6-BROKER-SERVERS.md`. It shows that most large brokers assign NUMBERED per-account servers that differ by legal entity, which is why a curated list cannot scale.
 **Plans:** 0 plans
 
 Plans:
