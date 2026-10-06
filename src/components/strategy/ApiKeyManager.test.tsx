@@ -492,6 +492,78 @@ describe("ApiKeyManager — D-03 the first key read is pending, failed, or empty
 });
 
 /**
+ * Phase 164.6.6.3.1 plan 02 / D-10 (UAT item 8) — the key card's venue line
+ * reads the one shared label (`dataSourceLabel`, the allocator card's source),
+ * not a title-cased guess: "Mt5" and "Okx" were the defect. The label map is
+ * for the venues this repo knows; an id outside it renders verbatim so a venue
+ * added to the form before the map is never silently renamed.
+ */
+describe("ApiKeyManager — D-10 the key card's venue line reads the shared label", () => {
+  beforeEach(() => {
+    routerRefreshMock.mockReset();
+    selectResultMock.mockReset();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  function venueRow(id: string, exchange: string) {
+    return {
+      id,
+      user_id: "user-a",
+      exchange,
+      label: `Label ${id}`,
+      is_active: true,
+      sync_status: "complete",
+      last_sync_at: null,
+      account_balance_usdt: 1000,
+      created_at: "2026-01-01T00:00:00Z",
+      sync_error: null,
+      last_429_at: null,
+      disconnected_at: null,
+      venue_account_id: null,
+    };
+  }
+
+  async function renderOne(id: string, exchange: string) {
+    selectResultMock.mockReturnValue({ data: [venueRow(id, exchange)], error: null });
+    await act(async () => {
+      render(<ApiKeyManager strategyId="strat-1" currentKeyId={null} />);
+    });
+    return await screen.findByTestId(`api-key-card-${id}`);
+  }
+
+  // The venue line is the card's `<p>` holding the label. Matching by tag is
+  // deliberate: the avatar span already prints "MT5" / "OKX" (its own icon
+  // map), so a bare text match would pass on the avatar with the venue line
+  // still title-cased.
+  function venueLine(card: HTMLElement, label: string) {
+    return within(card).queryAllByText(label).find((el) => el.tagName === "P");
+  }
+
+  it("an mt5 key's venue line reads MT5, never Mt5", async () => {
+    // Scoped to the card: an mt5 card also prints "MT5 account ..." below the
+    // venue line, so a page-wide match would pass on that line alone.
+    const card = await renderOne("key-mt5", "mt5");
+    expect(venueLine(card, "MT5")).toBeDefined();
+    expect(within(card).queryByText(/Mt5/)).not.toBeInTheDocument();
+  });
+
+  it("an okx key's venue line reads OKX, never Okx", async () => {
+    const card = await renderOne("key-okx", "okx");
+    expect(venueLine(card, "OKX")).toBeDefined();
+    expect(within(card).queryByText(/Okx/)).not.toBeInTheDocument();
+  });
+
+  it("an id outside the label map renders verbatim, never title-cased", async () => {
+    const card = await renderOne("key-kraken", "kraken");
+    expect(venueLine(card, "kraken")).toBeDefined();
+    expect(within(card).queryByText(/Kraken/)).not.toBeInTheDocument();
+  });
+});
+
+/**
  * M-0456 (audit-2026-05-07) — ApiKeyManager swapped its api_keys read from a
  * broad projection to the `API_KEY_USER_COLUMNS` allowlist. The static
  * sec-005-api-keys-projection regex test catches a `.select("*")` regression,

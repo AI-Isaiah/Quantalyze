@@ -31,6 +31,7 @@ import { captureToSentry } from "@/lib/sentry-capture";
 import { AllocatorSyncStatus } from "@/components/exchanges/AllocatorSyncStatus";
 import type { ApiKey } from "@/lib/types";
 import { API_KEY_USER_COLUMNS } from "@/lib/constants";
+import { dataSourceLabel } from "@/lib/api-key-label";
 import { accountShareNote } from "@/lib/account-share-note";
 import { isComputedAnalytics, isUntrustedKeySyncStatus } from "@/lib/closed-sets";
 
@@ -1692,7 +1693,10 @@ export function ApiKeyManager({
               <div>
                 <p className="text-sm font-medium text-text-primary">{key.label}</p>
                 <p className="text-xs text-text-muted">
-                  {key.exchange.charAt(0).toUpperCase() + key.exchange.slice(1)}
+                  {/* D-10 (164.6.6.3.1): the one shared label ("MT5", "OKX"), the
+                      allocator card's source; an id outside the map renders
+                      verbatim. The title-case it replaces read "Mt5" / "Okx". */}
+                  {dataSourceLabel(key).exchange}
                   {key.last_sync_at && ` · Last synced ${new Date(key.last_sync_at).toLocaleDateString()}`}
                 </p>
                 {key.exchange === "mt5" && (
