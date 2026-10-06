@@ -517,6 +517,80 @@ def test_zero_deals_under_material_equity_is_not_settled(
     )
 
 
+class _TimedGrowingTransport(_FakeMt5Transport):
+    """A history that keeps growing in FAKE time, where every read COSTS time.
+
+    The conftest clock makes a read cost 0 s, so every settle iteration lands on a
+    whole poll boundary and the loop's tail is always a full interval: that is the
+    reason CR-01 (a sub-interval sliver before the deadline) hid. Here a read
+    advances the clock by ``cost_s``, so the iteration length is ``poll + cost``
+    and the deadline falls part-way through an interval.
+
+    The count is ONE deal per whole fake second, sampled at the read's START.
+    Two reads a full poll interval (2 s) apart can therefore never be equal, while
+    two reads under a second apart often are: exactly the shape that lets a
+    shortened tail interval fake a stable history."""
+
+    def __init__(
+        self, clock: Any, cost_s: float, offset_s: float = 0.0, **kwargs: Any
+    ) -> None:
+        super().__init__(**kwargs)
+        self._clock = clock
+        self._cost_s = cost_s
+        # Where in its growth second the history is when the read starts, so the
+        # case can place the tail's two reads inside ONE growth second.
+        self._t0 = clock.now - offset_s
+
+    def history_deals_get(self, from_ts: Any, to_ts: Any) -> Any:
+        grown = int(self._clock.now - self._t0)
+        self._deals = [
+            {"ticket": i, "type": 2, "profit": 1.0, "time": 1_700_000_000}
+            for i in range(grown)
+        ]
+        out = super().history_deals_get(from_ts, to_ts)
+        self._clock.now += self._cost_s
+        return out
+
+
+# (read cost, growth-second offset). Measured against the pre-fix loop: 0.3 s with
+# offsets 0.5 and 0.75 RETURNED ``settled=True`` on a still-growing history (the
+# defect itself); the others raised, but only after a sub-interval sleep.
+@pytest.mark.parametrize(
+    ("cost_s", "offset_s"), [(0.3, 0.0), (0.3, 0.5), (0.3, 0.75), (0.45, 0.0)]
+)
+def test_a_history_still_growing_never_settles_on_a_short_tail_interval(
+    _mt5_read_never_sleeps_for_real, cost_s: float, offset_s: float
+) -> None:
+    """CR-01. Every comparison across a FULL poll interval sees the history grow,
+    so the wait must run out and RAISE. The old loop shortened its last sleep to
+    ``deadline - now`` and compared two reads taken almost back to back, which a
+    growing history can satisfy by luck: it returned ``settled=True`` on a partial
+    ledger and ``read_mt5_deal_ledger`` then wrote the settled record.
+
+    The pin is the property, not the arithmetic: no sleep is ever shorter than
+    ``_MT5_HISTORY_POLL_S`` (reads are only compared a full interval apart), the
+    loop raises rather than settles, and the key is not recorded as cached."""
+    clock = _mt5_read_never_sleeps_for_real
+    tk = _terminal_key()
+    token = begin_mt5_lease_holder(_KEY)
+    try:
+        transport = _TimedGrowingTransport(
+            clock, cost_s, offset_s, account=_account(_EXPECTED_LOGIN), deals=[]
+        )
+
+        with pytest.raises(Mt5HistoryUnsettledError):
+            _settle_read(transport)
+
+        assert clock.sleeps, "the loop never slept: this case measured nothing"
+        assert all(s == _MT5_HISTORY_POLL_S for s in clock.sleeps), (
+            "a sleep shorter than the poll interval lets two near-simultaneous "
+            f"reads compare equal (sleeps={clock.sleeps!r})"
+        )
+        assert mt5_history_wait_due(tk, _KEY) is True
+    finally:
+        end_mt5_lease_holder(token)
+
+
 def test_immaterial_equity_stable_zero_returns_at_once(
     _mt5_read_never_sleeps_for_real,
 ) -> None:

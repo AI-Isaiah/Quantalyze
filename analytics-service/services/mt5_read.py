@@ -157,15 +157,21 @@ def _settle_deal_history(
     deadline = _clock() + _MT5_HISTORY_WAIT_S
     previous = len(first)
     while True:
-        _sleep(min(_MT5_HISTORY_POLL_S, max(0.0, deadline - _clock())))
+        # CR-01: expiry is decided BEFORE the sleep, and a sleep is only ever a
+        # FULL poll interval. The loop used to shorten its last sleep to the time
+        # left, so its final comparison could be two reads taken almost back to
+        # back; a history that is still downloading looks stable across such a
+        # gap, and the loop settled on a partial ledger. If a full interval no
+        # longer fits, the history did not settle: raise, never compare.
+        if _clock() + _MT5_HISTORY_POLL_S > deadline:
+            raise Mt5HistoryUnsettledError(previous, material)
+        _sleep(_MT5_HISTORY_POLL_S)
         deals = session.client.history_deals_get(
             0, int(now.timestamp()) + _MT5_DEAL_FETCH_MARGIN_S
         )
         count = len(deals)
         if count == previous and (count > 0 or not material):
             return deals, True
-        if _clock() >= deadline:
-            raise Mt5HistoryUnsettledError(count, material)
         previous = count
 
 
