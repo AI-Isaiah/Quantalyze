@@ -6098,6 +6098,60 @@ async def test_mt5_backfill_read_timeout_is_transient_with_bounded_restart(
 
 
 @pytest.mark.asyncio
+async def test_mt5_backfill_unsettled_history_is_transient(
+    monkeypatch, _mt5_terminal_state, caplog,
+):
+    """164.6.6.3 / D-06, D-13, D-16: a FUNDED account whose deal history never
+    arrives. The wait budget runs out and the backfill must answer with a RETRYABLE
+    transient carrying its own fixed message, one `reconstruct_failed` audit event,
+    one ERROR line and NOTHING persisted (T-164.6.6.3-07).
+
+    ⛔ NO terminal restart: a restart would kill the very download being waited for
+    (`restarts == []`, no `shutdown` on the transport). The helper's own deadline
+    fires before the outer `wait_for` bound, so the timeout arm is never reached.
+
+    D-16's accepted consequence, asserted here as the intended behaviour: a funded
+    account with a truly empty ledger now fails transient after about 30 s instead
+    of reconstructing an empty curve."""
+    monkeypatch.setenv("MT5_ENABLED", "true")
+    from services.equity_reconstruction import _MT5_BACKFILL_MESSAGES
+    from services.job_worker import DispatchOutcome
+
+    restarts: list[object] = []
+    transport = _FakeMt5Transport(account=_mt5_account(), deals=[])
+    _session, fake_supabase = _mt5_failed_run(
+        monkeypatch, transport, restart_spy=restarts
+    )
+    audit_mock = _install_fake_audit(monkeypatch)
+
+    with caplog.at_level(
+        logging.ERROR, logger="quantalyze.analytics.equity_reconstruction"
+    ):
+        result = await run_reconstruct_allocator_history_job(_mt5_job())
+
+    assert result.outcome == DispatchOutcome.FAILED
+    assert result.error_kind == "transient", (
+        "an expired history wait is the most retryable condition there is; "
+        "permanent strands a funded allocator"
+    )
+    assert result.error_message == _MT5_BACKFILL_MESSAGES["history_unsettled"]
+    failed = [
+        c for c in audit_mock.call_args_list
+        if c.kwargs.get("action") == "allocator.equity.reconstruct_failed"
+    ]
+    assert len(failed) == 1, audit_mock.call_args_list
+    assert failed[0].kwargs["metadata"]["error_kind"] == "transient"
+    errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert len(errors) == 1, [r.getMessage() for r in caplog.records]
+    shown = errors[0].getMessage() + (result.error_message or "")
+    assert "110500" not in shown and "110_500" not in shown
+    assert str(_MT5_SYNTHETIC_LOGIN) not in shown
+    _assert_nothing_persisted(fake_supabase)
+    assert restarts == [], "an unsettled history must never restart the terminal"
+    assert "shutdown" not in transport.calls
+
+
+@pytest.mark.asyncio
 async def test_mt5_backfill_unclassifiable_deal_is_permanent(
     monkeypatch, _mt5_terminal_state,
 ):

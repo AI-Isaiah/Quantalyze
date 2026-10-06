@@ -2777,6 +2777,14 @@ _MT5_BACKFILL_MESSAGES: dict[str, str] = {
         "wall-clock bound — retrying rather than wedging the worker "
         "(FLIPRETRY-01)"
     ),
+    # 164.6.6.3 / D-13 — an expired deal-history wait under material equity. The
+    # `error_kind` stays "transient" (a new DB value would be a migration that
+    # auto-applies to PROD); this fixed, classifier-safe text and the distinct
+    # ERROR line are what make the case distinguishable.
+    "history_unsettled": (
+        "reconstruct_allocator_history: the MT5 deal history had not settled "
+        "within its wait budget — retrying"
+    ),
     "account_snapshot": (
         "reconstruct_allocator_history: the MT5 balance snapshot was missing or "
         "non-numeric — refusing to reconstruct from it"
@@ -3090,6 +3098,34 @@ async def _mt5_fetch_window(
             )
             await _mt5_bounded_restart(session.client, log_prefix="reconstruct_allocator_history")
             return _fail("timeout", "transient")
+        except Mt5HistoryUnsettledError as exc:
+            # ⭐ 164.6.6.3 / D-06, D-13 (Finding C, backfill half) — a fresh
+            # login's deal history had not settled when the wait budget ran out,
+            # under material equity. The key is fine and the history is LATE, so
+            # this is a retryable transient with its own fixed message and its own
+            # ERROR line (a deliberate difference from the WARNING arms around it:
+            # this is a failure someone should be able to find). Nothing is
+            # persisted, so a curve can never be reconstructed from a partial
+            # ledger (T-164.6.6.3-07).
+            #
+            # ⛔ NO terminal restart — restarting would kill the very download
+            # being waited for. That is also why the exception is a plain
+            # `Exception` and the helper's deadline fires before the outer
+            # `wait_for` bound: this arm is reached, the timeout arm above is not.
+            #
+            # D-16's accepted consequence: a funded account with a truly empty
+            # ledger now fails transient after about 30 s instead of
+            # reconstructing an empty curve.
+            #
+            # The ERROR carries counts and a boolean only: no amount.
+            logger.error(
+                "reconstruct_allocator_history: mt5 deal history did not settle "
+                "within the wait budget (allocator=%s key=%s deals=%d "
+                "material_equity=%s) — classified transient, retrying, nothing "
+                "persisted, no restart (D-06, D-13)",
+                allocator_id, api_key_id, exc.deal_count, exc.material,
+            )
+            return _fail("history_unsettled", "transient")
         except Mt5SessionAbandoned:
             # ⭐ WIZFORM-ABANDON / D-40. ⛔ NO restart — and this is the deliberate
             # OPPOSITE of the timeout arm above. A timeout means OUR pipe is
