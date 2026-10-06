@@ -19,6 +19,7 @@ What each gate defends:
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -229,3 +230,12 @@ def test_server_unknown_detail_collides_with_no_cascade_needle():
     assert hits == [], f"MT5_SERVER_UNKNOWN_DETAIL collides with cascade needle(s) {hits}"
     assert not ("ip" in lower and "allow" in lower), "collides with the ip+allow branch"
 
+
+def test_the_seam_emits_no_wire_code_yet():
+    """Pins the wave-1 boundary only. Plan 05 deletes this test in the SAME commit that
+    adds the emitter, together with every census that names the new wire code."""
+    source = (
+        Path(__file__).resolve().parent.parent / "services" / "mt5_probe.py"
+    ).read_text(encoding="utf-8")
+    assert 'code="MT5_SERVER_UNKNOWN"' not in source
+    assert 'error_code="MT5_SERVER_UNKNOWN"' not in source
