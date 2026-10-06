@@ -43,6 +43,7 @@ from typing import Any
 
 from services.closed_sets import (
     MT5_MASTER_PASSWORD_DETAIL,
+    MT5_SERVER_UNKNOWN_DETAIL,
     MT5_WRONG_SERVER_DETAIL,
 )
 from services.exchange import AUTH_FAILED_DETAIL
@@ -86,6 +87,9 @@ from services.mt5_relogin import (
 # adapter must NEVER import `routers.*`.
 from services.mt5_probe import (
     Mt5GatewayMisconfigured,
+    Mt5KnownServersUnconfigured,
+    Mt5ServerUnknownError,
+    assert_mt5_server_known,
     is_bridge_glitch,
     mt5_gateway_misconfigured_detail,
     park_on_house_account,
@@ -155,6 +159,21 @@ def _wrong_server() -> ValidationResult:
     )
 
 
+def _server_unknown() -> ValidationResult:
+    return ValidationResult(
+        valid=False,
+        read_only=None,
+        error_code="MT5_SERVER_UNKNOWN",
+        human_message=MT5_SERVER_UNKNOWN_DETAIL,
+        debug_context=None,
+        # Phase 164.6.6.3 D-09: NOT permanent, unlike `_wrong_server()`. A corrected
+        # spelling, or the founder adding the server to the curated list, clears this,
+        # and `long_fetch` treats a stated verdict as authoritative, so `permanent=True`
+        # here would park a key whose only fault is a typo for good.
+        permanent=False,
+    )
+
+
 class Mt5Adapter:
     """MT5 adapter — wraps the Phase-134 read-only ``Mt5Client`` without rewriting.
     Returns are deal-ledger-backed (compute_metrics fails loud until Phase 136)."""
@@ -201,6 +220,24 @@ class Mt5Adapter:
                 "server misconfiguration, never a credential failure."
             )
         host, port = endpoint
+        # ⭐ Phase 164.6.6.3 D-09 (PARITY-01) — the SAME known-server pre-check, at the
+        # SAME position, as `routers/exchange.py::_validate_mt5_key_probe`: after the
+        # endpoint check, before the lease and before any client exists. One shared
+        # function (`services/mt5_probe.py`), two call sites, so the two paths cannot
+        # dispose of one input differently.
+        try:
+            assert_mt5_server_known(server, site=SITE_VALIDATE_WORKER)
+        except Mt5ServerUnknownError:
+            return _server_unknown()
+        except Mt5KnownServersUnconfigured:
+            # D-14: an EMPTY effective list is OUR configuration gap, never the user's
+            # server. A raise, like the endpoint arm above (the seam already logged
+            # and captured it). Names the two variables only, never the server.
+            raise RuntimeError(
+                "MT5 known-server list not configured: MT5_KNOWN_SERVERS and "
+                "MT5_SERVER are both unset or blank. This is a server "
+                "misconfiguration, never a credential failure."
+            ) from None
         # ⭐ D-29 (153.3 review) — TAKE THE TERMINAL LEASE.
         #
         # This is the SIBLING validate path. It logs into the SAME process-global

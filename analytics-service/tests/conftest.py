@@ -189,13 +189,18 @@ def _mt5_read_never_sleeps_for_real(monkeypatch):
 # loud direction. Each item 9 test sets or deletes `MT5_KNOWN_SERVERS` itself, and its
 # own patch wins because this fixture runs first. The tuple was DERIVED, not counted: the
 # full `pytest tests/` ran with a list that admitted nothing the suite uses, a spy on
-# the refusal's sanitiser recorded every server the router pre-check refused, and those
-# are the entries here (the router path only; plan 06 extends this for the worker
-# adapter). Servers that tests name but that never reach the pre-check, such as the
-# client-contract suite's, are deliberately absent.
+# the refusal's sanitiser recorded every server either validate path refused, and those
+# are the entries here. Plan 05 measured the router path (`Broker-Demo`, `MyBroker-Live`);
+# plan 06 re-measured it with the worker adapter wired and the only addition was
+# `SomeBroker-Live 5` (`test_long_fetch.py`'s master-password case, which reaches
+# `Mt5Adapter.validate` for real). `Broker-Live`, which plan 05 expected to be refused on
+# the adapter path, never reaches the pre-check: the suites that name it replace the
+# adapter's `validate`. Servers that tests name but that never reach the pre-check, such
+# as the client-contract suite's, are deliberately absent.
 _SUITE_MT5_SERVERS = (
     "Broker-Demo",
     "MyBroker-Live",
+    "SomeBroker-Live 5",
 )
 
 

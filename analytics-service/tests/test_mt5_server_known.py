@@ -336,3 +336,80 @@ async def test_an_empty_known_server_list_answers_gateway_unconfigured_at_the_ro
     assert detail["code"] == "MT5_GATEWAY_UNCONFIGURED"
     assert trace.outcome == "gateway_unconfigured"
     factory.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Phase 164.6.6.3 plan 06 (D-09, PARITY-01) - the worker adapter's disposition.
+#
+# The router gates above pin one path. The adapter (`Mt5Adapter.validate`, the
+# `long_fetch` onboard/resync path) is the SIBLING validate path and must dispose of
+# the same input the same way, at the same position: after the endpoint check,
+# before the lease and the client.
+# ---------------------------------------------------------------------------
+
+
+def _adapter_request(*, passphrase: str):
+    from services.ingestion.adapter import KeySubmissionRequest
+
+    return KeySubmissionRequest(
+        flow_type="onboard",
+        source="mt5",
+        context={
+            "api_key": "123456",
+            "api_secret": "investor-pw",
+            "passphrase": passphrase,
+        },
+    )
+
+
+def _adapter_env(monkeypatch, *, known: str | None, house: str | None) -> None:
+    _set_env(monkeypatch, known=known, house=house)
+    monkeypatch.setenv("MT5_VALIDATION_GATEWAY_HOST", "mt5-validate-gw.internal")
+    monkeypatch.setenv("MT5_VALIDATION_GATEWAY_PORT", "18813")
+
+
+async def test_the_adapter_refuses_an_unlisted_server_before_building_a_client(
+    monkeypatch,
+):
+    """D-09: the adapter names an unlisted server before any client or lease, with
+    the router's code and detail. `permanent=False` because a corrected spelling, or
+    the founder adding the server, clears it, and `long_fetch` treats a stated
+    verdict as authoritative (so a True here would park a fixable key for good)."""
+    from services.ingestion.mt5 import Mt5Adapter
+
+    _adapter_env(monkeypatch, known="Listed-Live", house="House-Live")
+    factory = MagicMock(side_effect=AssertionError("the adapter built a client"))
+    monkeypatch.setattr("services.ingestion.mt5._build_client", factory)
+
+    def _no_lease(*_a, **_k):
+        raise _LeaseTouched("the terminal lease was taken")
+
+    monkeypatch.setattr("services.ingestion.mt5.mt5_terminal_lease", _no_lease)
+
+    result = await Mt5Adapter().validate(_adapter_request(passphrase="Unlisted-Live"))
+
+    assert result.valid is False
+    assert result.error_code == "MT5_SERVER_UNKNOWN"
+    assert result.human_message == MT5_SERVER_UNKNOWN_DETAIL
+    assert result.permanent is False
+    factory.assert_not_called()
+
+
+async def test_the_adapter_treats_an_empty_list_as_configuration(monkeypatch):
+    """D-14: an empty effective list is OUR gap, never "your server is unknown".
+    The adapter's endpoint arm already raises a configuration `RuntimeError`; this
+    is a second raise site of the same kind, naming the two variables only."""
+    from services.ingestion.mt5 import Mt5Adapter
+
+    _adapter_env(monkeypatch, known=None, house=None)
+    factory = MagicMock(side_effect=AssertionError("the adapter built a client"))
+    monkeypatch.setattr("services.ingestion.mt5._build_client", factory)
+
+    with pytest.raises(RuntimeError) as ei:
+        await Mt5Adapter().validate(_adapter_request(passphrase="Anything-Live"))
+
+    message = str(ei.value)
+    assert "MT5_KNOWN_SERVERS" in message and "MT5_SERVER" in message
+    assert "Anything-Live" not in message, "the user's server must never reach it"
+    assert not isinstance(ei.value, Mt5ServerUnknownError)
+    factory.assert_not_called()

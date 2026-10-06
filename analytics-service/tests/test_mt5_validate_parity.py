@@ -215,6 +215,47 @@ def test_blank_password_rejected_offline_on_both_paths(
     assert result.valid is False
 
 
+def test_an_unlisted_server_disposes_identically_on_both_paths(
+    exchange_module, monkeypatch
+):
+    """Phase 164.6.6.3 plan 06 (D-09, PARITY-01): an unlisted broker server is named
+    the same way, with the same wire code and detail, through the router and through
+    the adapter, and neither path builds a client for it."""
+    from services.closed_sets import MT5_SERVER_UNKNOWN_DETAIL
+
+    monkeypatch.setenv("MT5_KNOWN_SERVERS", "Listed-Live")
+    monkeypatch.setenv("MT5_SERVER", "House-Live")
+    monkeypatch.setenv("MT5_VALIDATION_GATEWAY_HOST", "mt5-validate-gw.internal")
+    monkeypatch.setenv("MT5_VALIDATION_GATEWAY_PORT", "18813")
+    router_factory = MagicMock(
+        side_effect=AssertionError("router must not build a client for an unlisted server")
+    )
+    exchange_module.Mt5Client = router_factory
+    adapter_factory = MagicMock(
+        side_effect=AssertionError("adapter must not build a client for an unlisted server")
+    )
+    monkeypatch.setattr("services.ingestion.mt5._build_client", adapter_factory)
+
+    with pytest.raises(HTTPException) as ei:
+        asyncio.run(
+            exchange_module._validate_mt5_key("123456", "investor-pw", "Unlisted-Live")
+        )
+    result = asyncio.run(
+        Mt5Adapter().validate(
+            _adapter_req(
+                api_key="123456", api_secret="investor-pw", passphrase="Unlisted-Live"
+            )
+        )
+    )
+
+    assert ei.value.status_code == 424
+    assert ei.value.code == result.error_code == "MT5_SERVER_UNKNOWN"
+    assert ei.value.detail == result.human_message == MT5_SERVER_UNKNOWN_DETAIL
+    assert result.valid is False
+    router_factory.assert_not_called()
+    adapter_factory.assert_not_called()
+
+
 # ---------------------------------------------------------------------------
 # Phase 153.6 / PARITY-01 — the SHARED probe body (`services/mt5_probe.py`)
 # ---------------------------------------------------------------------------
