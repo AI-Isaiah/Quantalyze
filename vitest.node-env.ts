@@ -64,6 +64,7 @@ export const NODE_ENV_TEST_FILES: string[] = [
   "src/__tests__/csv-finalize-after-failloud.test.ts",
   "src/__tests__/csv-finalize-c14-regression.test.ts",
   "src/__tests__/csv-finalize-rpc.test.ts",
+  "src/__tests__/dashboard-disclaimer-once.test.ts",
   "src/__tests__/delete-allocator-api-key-rpc.test.ts",
   "src/__tests__/deletion-request-admin-self.test.ts",
   "src/__tests__/e2e-match-queue-no-vacuous-admin-gate.test.ts",
