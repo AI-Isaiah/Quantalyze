@@ -2771,6 +2771,9 @@ split by topic and moved:
 
 Order (D-02): 164.6.6.3, then .1, then .2, then .3. The full list below is kept as lineage; the
 item numbers are what the three new phases cite.
+⚠️ **Deviation 2026-10-06 (founder override, D-12):** the autonomous UI gate flagged this phase as
+frontend from item 1's lineage text. Its UI-SPEC and AI-SPEC hooks were skipped; 164.6.6.3.1 keeps
+the gate.
 
 Founder decision 2026-10-03 (AskUserQuestion "One fix phase, after 164.6.6"): runs right after 164.6.6, before 164.6.6.2 BTCNATIVE and 164.6.6.1 MT5SCRUB. Source: the 2026-10-03 production UAT pass over 17 human_needed phases (browser checks on the deployed app, Vercel production at `7276aa9a`). The phases those checks came from close with each defect routed here. **Defects, in priority order:**
 1. **Rename risk.** The strategy edit page's Strategy Name picker preselects "Alpha Centauri" instead of the strategy's own name (seen on MM-2x and AI-FX-35), so saving that form would likely rename it.
