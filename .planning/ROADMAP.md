@@ -2883,6 +2883,7 @@ time):**
   - Decision owed: copy for "job finished, analytics failed".
 - **Item 6b.** `scenario-factsheet-payload.ts` (~271) `emptyQuantiles()` returns zeros, carried as a
   LOW in `166.2-VERIFICATION.md` ~245. It should be NaN/null rendering "—".
+- Also owns 170.3's OG-card parity half and 170.6's red "—" on OG cards (moved here 2026-10-06; same defects as item 4).
 Never invent data: an uncomputable metric is null.
 
 **Goal:** A factsheet, its share card and its scenario never show a number the data cannot support:
@@ -2950,6 +2951,7 @@ re-measure at plan time):**
 - **Item 8.** `ApiKeyManager.tsx` (~1664) title-cases the exchange id, so "Mt5"; use
   `src/lib/api-key-label.ts`. The key card's left block lacks `min-w-0` and its actions row lacks
   `shrink-0`/wrap. 164.5.3 closes only after a founder re-read.
+- Also owns 170.6's "the recommendations disclaimer renders once" (moved here 2026-10-06; same defect as item 6a).
 DESIGN.md governs every visual change.
 
 **Goal:** The small UI defects from the 2026-10-03 UAT pass are gone, starting with the rename risk:
@@ -4980,6 +4982,11 @@ Plans:
 
 ### Phase 170.6: DISPLAYPOLISH — no signed zero (-0.00, -0.0%) and no non-negative value drawn red on factsheets and OG cards; a comparator overlap too short to annualize reads em-dash (SPX annualized 5 days to Sharpe 10.24); the paired-floor sentence names the date the comparator's prices end (169.4, founder: fix); /recommendations unset-mandate copy reworded (169.3, founder: reword); anonymous /browse never flashes example rows that then vanish; admin Compute Jobs kind filter lists every present kind; the recommendations disclaimer renders once. (INSERTED)
 
+⚠️ **Re-scoped 2026-10-06 (founder, "Ok" to de-duplicating against the 164.6.6.3 split):**
+- "the recommendations disclaimer renders once" **moved to 164.6.6.3.1 UIPOLISH item 6a**;
+- an OG card drawing a non-finite "—" in red **moved to 164.6.6.3.3 FACTSHEETTRUTH item 4**.
+This phase keeps signed zeros and non-negative *values* drawn red, plus its other items.
+
 **Goal:** [Urgent work - to be planned]
 **Requirements**: TBD
 **Depends on:** Phase 170
@@ -5009,6 +5016,12 @@ Plans:
 - [ ] TBD (run /gsd-plan-phase 170.4 to break down)
 
 ### Phase 170.3: OGPUBLIC — a factsheet's share-preview image loads for signed-out visitors and crawlers (today /api/og/factsheet/* answers 307 to /login because /api/og is missing from PUBLIC_ROUTES in src/proxy.ts), and the OG card equals the factsheet (a 24-observation strategy's card shows Sharpe and Max DD as an em-dash while the factsheet shows 0.12 and -3.7%; the description is cut mid-word). Found by the 2026-10-03 PROD browser pass. (INSERTED)
+
+⚠️ **Re-scoped 2026-10-06 (founder, "Ok" to de-duplicating against the 164.6.6.3 split):** the
+OG-card parity half (a 24/25-observation card shows Sharpe and Max DD as "—" while the factsheet
+shows 0.12 and -3.7%) **moved to 164.6.6.3.3 FACTSHEETTRUTH item 4**, which runs earlier. This
+phase keeps the signed-out route (`/api/og` missing from `PUBLIC_ROUTES` in `src/proxy.ts`) and the
+description cut mid-word.
 
 **Goal:** [Urgent work - to be planned]
 **Requirements**: TBD

@@ -6,10 +6,10 @@ current_phase: 164.6.6.1
 current_phase_name: MT5SCRUB
 status: executing
 stopped_at: 164.6.6.1 re-planned 2026-10-04 after the scrub spike (8 plans, 6 waves, plan-check passed); next execute, plan 02 S-11 checkpoint first
-last_updated: "2026-10-06T09:14:41.217Z"
+last_updated: "2026-10-06T09:40:09.233Z"
 last_activity: 2026-10-04
 last_activity_desc: Phase 164.6.6.1 execution started
-state_head: d7fb1308fd78af99bfa725aa4d4c72e38d94a4c3
+state_head: 9a613e5332a8513753c27943adde59b67db5f9f2
 progress:
   total_phases: 94
   completed_phases: 70
@@ -1444,6 +1444,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 164.6.6.3.2 inserted after Phase 164.6.6.3: WIZARDCODES: 164.6.6.3 split B (items 7, 10, item-0 copy); founder 2026-10-06 D-01 (URGENT)
 - Phase 164.6.6.3.3 inserted after Phase 164.6.6.3: FACTSHEETTRUTH: 164.6.6.3 split C (items 2, 3, 4, 5, 6b); founder 2026-10-06 D-01 (URGENT)
 - Phase 164.6.6.3 edited: edited fields: scope (narrowed to items 0 and 9), goal, success_criteria; order D-02: 164.6.6.3, .1, .2, .3
+- Phase 170.3 edited: re-scoped: OG-card parity moved to 164.6.6.3.3 item 4; 170.6: disclaimer moved to 164.6.6.3.1 item 6a, red em-dash on OG cards moved to 164.6.6.3.3 item 4 (founder 2026-10-06)
 
 ### Decisions
 
