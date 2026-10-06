@@ -589,6 +589,68 @@ async def test_the_derive_bound_adds_the_wait_only_for_a_fresh_login(
 
 
 # ---------------------------------------------------------------------------
+# 2d — 164.6.6.3 / D-06, D-13: an expired wait is TRANSIENT and LOUD, never
+# permanent, and never restarts the terminal.
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_unsettled_history_is_transient_error_no_stamp(
+    monkeypatch, caplog
+) -> None:
+    """A funded account (equity 110_500) whose deal history never arrives: the wait
+    budget runs out and the derive must come back as a RETRYABLE transient with its
+    own fixed message and one ERROR line (D-06, D-13).
+
+    * never `permanent` and never a `strategy_analytics` failed stamp — the key is
+      fine and the history is late, so blaming the strategy owner would be wrong;
+    * never a terminal restart — a restart would kill the very download being
+      waited for (`len(connects) == 1`, no `shutdown`);
+    * the message is a fixed constant that classifies blame-free through the REAL
+      `classify_mt5_login_error` (it lands in re-classifiable
+      `compute_jobs.error_message`, D-42), and carries no equity, login or server.
+
+    No new DB `error_kind` (D-13): that would be a migration that auto-applies to
+    PROD with no reviewer gate."""
+    import logging
+
+    from services.mt5_validation import classify_mt5_login_error
+
+    monkeypatch.setenv("MT5_ENABLED", "true")
+    transport = _FakeMt5Transport(
+        account={"equity": 110_500.0, "balance": 110_500.0, "login": 123456},
+        deals=[],
+    )
+    connects: list = []
+    ctx, capture = _build_ctx(transport, connects=connects)
+    with caplog.at_level(logging.ERROR, logger="quantalyze.analytics"):
+        with _apply(_patches(ctx)):
+            result = await run_derive_broker_dailies_job(_job())
+
+    assert result.outcome == DispatchOutcome.FAILED
+    assert result.error_kind == "transient", (
+        "an expired history wait is the most retryable condition there is; "
+        "permanent burns a funded strategy to failed_final"
+    )
+    assert result.error_message == jw._MT5_HISTORY_UNSETTLED_MESSAGE
+    _persisted_nothing(capture)  # no csv series and NO strategy_analytics stamp
+    assert len(connects) == 1 and "shutdown" not in transport.calls, (
+        "the wait expiry must never restart a healthy terminal"
+    )
+    errors = [
+        r for r in caplog.records
+        if r.levelno == logging.ERROR
+        and "did not settle within the wait budget" in r.getMessage()
+    ]
+    assert len(errors) == 1, [r.getMessage() for r in caplog.records]
+    shown = errors[0].getMessage() + (result.error_message or "")
+    assert "110500" not in shown and "110_500" not in shown
+    assert "Broker-Live" not in shown and "123456" not in shown
+    assert (
+        classify_mt5_login_error(Mt5ClientError(0, result.error_message or ""))
+        == "transient"
+    )
+
+
+# ---------------------------------------------------------------------------
 # 3 — uPnL wedge → complete_with_warnings.
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio

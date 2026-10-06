@@ -187,6 +187,7 @@ from services.mt5_probe import (
 from services.mt5_read import (  # noqa: F401 — re-export for the derive regression
     _MT5_DEAL_FETCH_MARGIN_S,
     _MT5_MAX_SERVER_UTC_OFFSET_S,
+    Mt5HistoryUnsettledError,
     read_mt5_deal_ledger,
 )
 from services.sfox_factory import make_sfox_client
@@ -284,6 +285,18 @@ WORKER_FENCE_V2: Final[bool] = (
 # any broker account holding >$100 but producing <2 usable NAV days is a
 # silently-empty (green) track record, never genuine "insufficient history".
 _DERIBIT_EMPTY_LEDGER_FLOOR_USD: Final[float] = 100.0
+
+# Phase 164.6.6.3 / D-13 — the FIXED message of an expired MT5 deal-history wait.
+# `error_kind` stays "transient" (no new DB value: that would be a migration that
+# auto-applies to PROD with no reviewer gate), so this constant and the distinct ERROR
+# line are what make the case distinguishable. ⛔ It lands in re-classifiable
+# `compute_jobs.error_message` (D-42): it must carry NONE of
+# `mt5_validation._WRONG_SERVER_PHRASES` / `_AUTH_PHRASES`, and the test that pins it
+# runs the real `classify_mt5_login_error` over it. No equity, login or server in it.
+_MT5_HISTORY_UNSETTLED_MESSAGE: Final[str] = (
+    "derive_broker_dailies: the MT5 deal history had not settled within its wait "
+    "budget — retrying"
+)
 
 # ── FLIPRETRY-01 per-crawl wall-clock bounds, sized UNDER the outer budget ──
 # derive_broker_dailies runs under a FIXED outer wait_for =
@@ -4926,7 +4939,7 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             # which is NOT an `Mt5ClientError`).
             #
             # ⛔ The helper decides NOTHING about what a failure means. The lease, this
-            # `wait_for` bound and ALL FIVE `except` arms below stay HERE, because the
+            # `wait_for` bound and ALL SIX `except` arms below stay HERE, because the
             # backfill job answers some of the same exceptions differently.
 
             # MT5CONC-02: serialize the ENTIRE terminal-IPC region (the bounded read
@@ -5008,6 +5021,48 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                             "wall-clock bound — retrying rather than wedging the "
                             "worker (FLIPRETRY-01)"
                         ),
+                        error_kind="transient",
+                    )
+                except Mt5HistoryUnsettledError as exc:
+                    # ⭐ 164.6.6.3 / D-06, D-13 (Finding C) — a fresh login's deal
+                    # history had not settled when the wait budget ran out, under
+                    # material equity. The key is fine and the history is LATE, so
+                    # this is a retryable transient with its own fixed message and
+                    # its own ERROR line (a deliberate difference from the WARNING
+                    # arms around it: this is a failure someone should be able to
+                    # find).
+                    #
+                    # ⛔ NO failed-analytics stamp — a user-attributed 'failed' row
+                    # for a fault that is neither the key's nor the strategy's.
+                    #
+                    # ⛔ NO terminal restart — restarting would kill the very
+                    # download being waited for. That is also why the exception is
+                    # a plain `Exception` and the helper's deadline fires before the
+                    # outer `wait_for` bound: this arm is reached, the timeout arm
+                    # above is not.
+                    #
+                    # D-13: transient plus a named message, because a new DB
+                    # `error_kind` would be a migration that auto-applies to PROD.
+                    # D-06: the transient copy the wizard shows is no worse than
+                    # the permanent copy it replaces; Phase 164.6.6.3.2 owns this
+                    # failure's wizard copy.
+                    # D-16's accepted consequence: a funded account with a truly
+                    # empty ledger now fails transient after about 30 s instead of
+                    # permanently at once.
+                    #
+                    # The ERROR carries counts and a boolean only: no amount.
+                    logger.error(
+                        "derive_broker_dailies: mt5 deal history did not settle "
+                        "within the wait budget (label=%s, deals=%d, "
+                        "material_equity=%s) — classified transient, retrying, no "
+                        "stamp, no restart (D-06, D-13)",
+                        funding_label,
+                        exc.deal_count,
+                        exc.material,
+                    )
+                    return DispatchResult(
+                        outcome=DispatchOutcome.FAILED,
+                        error_message=_MT5_HISTORY_UNSETTLED_MESSAGE,
                         error_kind="transient",
                     )
                 except Mt5SessionAbandoned:
