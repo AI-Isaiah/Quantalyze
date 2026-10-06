@@ -446,8 +446,11 @@ async def test_mt5_routes_one_backbone(monkeypatch) -> None:
         # MT5DEAL-01: deals materialize on the FAR side of the wire, so the
         # source crossing is a real round-trip and is recorded as one.
         "execute",
-        # 164.6.6.3 / D-04: this is a FRESH login (the registry is empty), so the
-        # settle loop makes one confirmation read before the POST bracket.
+        # 164.6.6.3 / D-04 + WR-02: this is a FRESH login (the registry is empty), so
+        # the settle loop makes TWO confirmation reads (the count must hold across
+        # two full intervals) before the POST bracket.
+        "history_deals_get",
+        "execute",
         "history_deals_get",
         "execute",
         "account_info",
@@ -488,9 +491,9 @@ async def test_fresh_login_history_arriving_late_is_read_once_settled(
     funded account permanently with "<2 usable daily-return days".
 
     D-04: a fresh login polls until the deal count is stable across consecutive
-    reads. Here the first read is empty and every later one is the full ledger, so
-    the helper must read THREE times (empty, full, full-again-as-the-confirmation)
-    and persist the full series. On the pre-phase code the single empty read was
+    reads (WR-02: across two full intervals). Here the first read is empty and every
+    later one is the full ledger, so the helper must read FOUR times (empty, full,
+    then two full-again confirmations) and persist the full series. On the pre-phase code the single empty read was
     refused permanently."""
     monkeypatch.setenv("MT5_ENABLED", "true")
     transport = _FakeMt5Transport(
@@ -506,7 +509,7 @@ async def test_fresh_login_history_arriving_late_is_read_once_settled(
         f"a late-arriving history must be waited for, not refused; "
         f"kind={result.error_kind!r} msg={result.error_message!r}"
     )
-    assert transport.calls.count("history_deals_get") == 3
+    assert transport.calls.count("history_deals_get") == 4
     rows = _csv_rows(capture)
     # The same hand literals test_mt5_routes_one_backbone asserts (NEVER read back
     # from the SUT).
@@ -528,8 +531,8 @@ async def test_fresh_login_history_arriving_late_is_read_once_settled(
 @pytest.mark.asyncio
 async def test_a_second_derive_of_a_settled_key_pays_no_wait(monkeypatch) -> None:
     """D-04 "an account whose history is already cached pays no wait", through the
-    whole job. The first derive of the key is fresh and settles (two reads: the
-    first and its confirmation). The second derive of the SAME key finds it the
+    whole job. The first derive of the key is fresh and settles (three reads: the
+    first and its two confirmations). The second derive of the SAME key finds it the
     terminal's previous holder AND settled, so it makes exactly one
     ``history_deals_get``. If the freshness decision were taken AFTER `login()`
     (which stamps the holder registry) or ignored the settled record, this count
@@ -542,7 +545,7 @@ async def test_a_second_derive_of_a_settled_key_pays_no_wait(monkeypatch) -> Non
     with _apply(_patches(ctx1)):
         r1 = await run_derive_broker_dailies_job(_job())
     assert r1.outcome == DispatchOutcome.DONE
-    assert first.calls.count("history_deals_get") == 2
+    assert first.calls.count("history_deals_get") == 3
 
     second = _FakeMt5Transport(account=account, deals=_canonical_deals())
     ctx2, _cap2 = _build_ctx(second)
@@ -561,7 +564,7 @@ async def test_the_derive_bound_adds_the_wait_only_for_a_fresh_login(
     not slacken for a cached read). Both are read from `jw` at call time.
 
     Each `history_deals_get` takes 0.4 s against a 0.3 s read budget and a 2.0 s
-    wait. The fresh first run makes two reads (0.8 s) and fits the raised bound.
+    wait. The fresh first run makes three reads (1.2 s, WR-02) and fits the raised bound.
     The cached second run makes one read (0.4 s) and must hit the TIMEOUT arm
     (shutdown, transient) — proof that the wait is added only when fresh."""
     monkeypatch.setenv("MT5_ENABLED", "true")
@@ -1455,9 +1458,9 @@ async def test_mt5_login_bracket_post_hijack(monkeypatch) -> None:
     assert result.error_kind == "transient"
     assert len(connects) == 2, "the POST-bracket mismatch must also restart"
     # The deal read DID run (PRE passed), then the POST bracket re-read and rejected
-    # — the first eight terminal calls are the full read sequence (a trailing
+    # — the first ten terminal calls are the full read sequence (a trailing
     # "shutdown" from the bounded restart follows).
-    assert transport.calls[:8] == [
+    assert transport.calls[:10] == [
         "initialize",
         "login",
         "account_info",
@@ -1465,8 +1468,11 @@ async def test_mt5_login_bracket_post_hijack(monkeypatch) -> None:
         # MT5DEAL-01: deals materialize on the FAR side of the wire, so the
         # source crossing is a real round-trip and is recorded as one.
         "execute",
-        # 164.6.6.3 / D-04: this is a FRESH login (the registry is empty), so the
-        # settle loop makes one confirmation read before the POST bracket.
+        # 164.6.6.3 / D-04 + WR-02: this is a FRESH login (the registry is empty), so
+        # the settle loop makes TWO confirmation reads (the count must hold across
+        # two full intervals) before the POST bracket.
+        "history_deals_get",
+        "execute",
         "history_deals_get",
         "execute",
         "account_info",
@@ -1559,8 +1565,11 @@ async def test_mt5_post_read_transient_blip_is_not_permanent(monkeypatch) -> Non
         # MT5DEAL-01: deals materialize on the FAR side of the wire, so the
         # source crossing is a real round-trip and is recorded as one.
         "execute",
-        # 164.6.6.3 / D-04: this is a FRESH login (the registry is empty), so the
-        # settle loop makes one confirmation read before the POST bracket.
+        # 164.6.6.3 / D-04 + WR-02: this is a FRESH login (the registry is empty), so
+        # the settle loop makes TWO confirmation reads (the count must hold across
+        # two full intervals) before the POST bracket.
+        "history_deals_get",
+        "execute",
         "history_deals_get",
         "execute",
         "account_info",

@@ -332,8 +332,9 @@ def test_fresh_login_waits_for_history_to_settle(
 ) -> None:
     """Finding C at the helper: empty, empty, then the ledger. Two empty reads a
     second apart LOOK stable, and under material equity that must not count; the
-    ledger then has to repeat once before it does. Four reads, and the deals the
-    LAST read returned (no extra read after the settle)."""
+    ledger then has to repeat across two full intervals before it does (WR-02).
+    Five reads, and the deals the LAST read returned (no extra read after the
+    settle)."""
     transport = _FakeMt5Transport(
         account=_account(_EXPECTED_LOGIN),
         deals=[],
@@ -342,9 +343,54 @@ def test_fresh_login_waits_for_history_to_settle(
 
     deals = _settle_read(transport)
 
-    assert transport.calls.count("history_deals_get") == 4
+    assert transport.calls.count("history_deals_get") == 5
     assert [d["ticket"] for d in deals] == [1]
-    assert _mt5_read_never_sleeps_for_real.sleeps == [_MT5_HISTORY_POLL_S] * 3
+    assert _mt5_read_never_sleeps_for_real.sleeps == [_MT5_HISTORY_POLL_S] * 4
+
+
+_TWO_DEALS: list[dict[str, Any]] = _DEALS + [
+    {"ticket": 2, "type": 2, "profit": 50.0, "time": 1_700_000_100},
+]
+
+
+def test_one_stable_interval_is_not_settled(
+    _mt5_read_never_sleeps_for_real,
+) -> None:
+    """WR-02. One equal pair of reads is not proof: a fresh login can be served the
+    account's stale on-disk cache first, and the delta lands later than one poll
+    interval, so the second read repeats the stale count. Settled needs the count
+    to hold across TWO consecutive full intervals (three equal reads).
+
+    Here the count is stable for exactly one interval (1, 1) and then grows (2),
+    so the loop must keep going and return the grown ledger, not the first pair's.
+    Five reads: the stale pair, the growth, then two intervals that agree."""
+    transport = _FakeMt5Transport(
+        account=_account(_EXPECTED_LOGIN),
+        deals=[],
+        deals_by_call=[_DEALS, _DEALS, _TWO_DEALS, _TWO_DEALS, _TWO_DEALS],
+    )
+
+    deals = _settle_read(transport)
+
+    assert [d["ticket"] for d in deals] == [1, 2], (
+        "settled on the stale first pair: the delta that landed after one interval "
+        "was never read"
+    )
+    assert transport.calls.count("history_deals_get") == 5
+    assert _mt5_read_never_sleeps_for_real.sleeps == [_MT5_HISTORY_POLL_S] * 4
+
+
+def test_two_stable_intervals_settle(_mt5_read_never_sleeps_for_real) -> None:
+    """The other edge of WR-02: three equal reads settle, and not one read more."""
+    transport = _FakeMt5Transport(
+        account=_account(_EXPECTED_LOGIN), deals=_DEALS
+    )
+
+    deals = _settle_read(transport)
+
+    assert [d["ticket"] for d in deals] == [1]
+    assert transport.calls.count("history_deals_get") == 3
+    assert _mt5_read_never_sleeps_for_real.sleeps == [_MT5_HISTORY_POLL_S] * 2
 
 
 def test_retry_after_unsettled_expiry_waits_again() -> None:
@@ -595,8 +641,9 @@ def test_immaterial_equity_stable_zero_returns_at_once(
     _mt5_read_never_sleeps_for_real,
 ) -> None:
     """D-06: zero equity is an honest empty result. "At once" means the FIRST stable
-    read (one confirmation after the first read), not "without reading twice" — the
-    clock advances one poll interval and never the whole budget."""
+    read run (two confirmations after the first read, WR-02), not "without reading
+    three times" — the clock advances two poll intervals and never the whole
+    budget."""
     tk = _terminal_key()
     token = begin_mt5_lease_holder(_KEY)
     try:
@@ -607,8 +654,8 @@ def test_immaterial_equity_stable_zero_returns_at_once(
         deals = _settle_read(transport)
 
         assert deals == []
-        assert transport.calls.count("history_deals_get") == 2
-        assert _mt5_read_never_sleeps_for_real.sleeps == [_MT5_HISTORY_POLL_S]
+        assert transport.calls.count("history_deals_get") == 3
+        assert _mt5_read_never_sleeps_for_real.sleeps == [_MT5_HISTORY_POLL_S] * 2
         # A settled-at-zero history for a non-material account is settled.
         assert mt5_history_wait_due(tk, _KEY) is False
     finally:

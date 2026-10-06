@@ -106,10 +106,20 @@ _MT5_DERIVE_READ_TIMEOUT_S: Final[float] = float(
 # code change after the founder's live read.
 _MT5_HISTORY_WAIT_S: Final[float] = 30.0
 
-# The gap between two settle-loop reads. Also the tunable RESEARCH A1 names: one
-# interval of an unchanged non-zero (or immaterial-zero) count is what "settled"
-# means, so a longer interval is a stricter test. Plain constant, no env override.
+# The gap between two settle-loop reads. Also the tunable RESEARCH A1 names: an
+# unchanged non-zero (or immaterial-zero) count across `_MT5_HISTORY_STABLE_INTERVALS`
+# of these is what "settled" means, so a longer interval is a stricter test. Reads are
+# only ever compared exactly this far apart (review CR-01). Plain constant, no env
+# override.
 _MT5_HISTORY_POLL_S: Final[float] = 2.0
+
+# How many CONSECUTIVE full poll intervals the count must hold before the history
+# counts as settled (review WR-02). 2 means three equal reads: one equal pair can be a
+# stale on-disk cache served before the delta lands, or a chunked download's pause.
+# Must fit the budget (`_MT5_HISTORY_STABLE_INTERVALS * _MT5_HISTORY_POLL_S <=
+# _MT5_HISTORY_WAIT_S`, pinned in test_mt5_concurrency.py) or no history could ever
+# settle. Plain constant, no env override.
+_MT5_HISTORY_STABLE_INTERVALS: Final[int] = 2
 
 # MT5CONC-01 (Phase 137 plan 01): the wall-clock ceiling on an ACTIVE terminal
 # restart (bounded shutdown + re-connect) invoked on the derive read-timeout

@@ -5671,12 +5671,13 @@ async def test_mt5_backfill_persists_dollar_levels_end_to_end(
     # with BOTH MT5CONC-02 login brackets intact (login → account_info →
     # history_deals_get → account_info) and the shared `finally: aclose_exchange`
     # closing the transport afterwards — the ccxt path's own cleanup, INHERITED.
-    # 164.6.6.3 / D-04: this is a FRESH login on the jobs terminal, so the settle
-    # loop adds one confirmation read (`history_deals_get`, `execute`) before the
-    # POST `account_info`.
+    # 164.6.6.3 / D-04 + WR-02: this is a FRESH login on the jobs terminal, so the
+    # settle loop adds TWO confirmation reads (`history_deals_get`, `execute` each)
+    # before the POST `account_info`.
     assert transport.calls == [
         "initialize", "login", "account_info", "history_deals_get", "execute",
-        "history_deals_get", "execute", "account_info", "transport_close",
+        "history_deals_get", "execute", "history_deals_get", "execute",
+        "account_info", "transport_close",
     ], transport.calls
 
     # (4) The rows reached persistence through the SHARED sole-key atomic replace —
@@ -5704,7 +5705,7 @@ async def test_mt5_backfill_late_history_is_read_once_settled(
     SAME helper as the derive, so a fresh login on the jobs terminal whose deal
     history arrives AFTER the first read must wait for it too. Here the first
     `history_deals_get` is empty and every later one is the full ledger: the
-    backfill must read three times (empty, full, full-again as the confirmation)
+    backfill must read four times (empty, full, then two full-again confirmations)
     and persist the SAME dollar levels a cached read of that ledger persists.
 
     Without the wait the single empty read reconstructs a curve from a partial
@@ -5737,7 +5738,7 @@ async def test_mt5_backfill_late_history_is_read_once_settled(
         assert persisted[iso] == pytest.approx(want, abs=0.01), (
             f"{iso}: persisted {persisted[iso]}, hand oracle {want}"
         )
-    assert transport.calls.count("history_deals_get") == 3, transport.calls
+    assert transport.calls.count("history_deals_get") == 4, transport.calls
 
 
 @pytest.mark.asyncio
@@ -6164,7 +6165,7 @@ async def test_the_backfill_bound_adds_the_wait_only_for_a_fresh_login(
     measure nothing (the 151 review-E2 note).
 
     Each `history_deals_get` takes 0.4 s against a 0.3 s read budget and a 2.0 s
-    wait. The fresh first run makes two reads (0.8 s) and fits the raised bound.
+    wait. The fresh first run makes three reads (1.2 s, WR-02) and fits the raised bound.
     The cached second run makes one read (0.4 s) and must hit the TIMEOUT arm
     (bounded restart, transient): proof the wait is added only when fresh."""
     monkeypatch.setenv("MT5_ENABLED", "true")

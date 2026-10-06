@@ -62,6 +62,7 @@ from typing import Any, Final
 from services.mt5_client import Mt5ClientError, Mt5Session, note_mt5_history_settled
 from services.mt5_concurrency import (
     _MT5_HISTORY_POLL_S,
+    _MT5_HISTORY_STABLE_INTERVALS,
     _MT5_HISTORY_WAIT_S,
     _Mt5PostReadVerificationError,
 )
@@ -131,10 +132,15 @@ def _settle_deal_history(
     Returns ``(deals, settled)``: ``settled`` is False only on the equity skip below,
     where nothing was proven about the history.
 
-    Settled = two consecutive reads of the same count AND (that count is above
-    zero OR equity is not material). A count stable at zero under material equity
-    is NOT settled: Finding C measured exactly that, two empty reads a second apart
-    on a funded account whose history MT5 had not yet downloaded.
+    Settled = the same count across `_MT5_HISTORY_STABLE_INTERVALS` consecutive FULL
+    poll intervals (three equal reads, WR-02) AND (that count is above zero OR
+    equity is not material). A count stable at zero under material equity is NOT
+    settled: Finding C measured exactly that, two empty reads a second apart on a
+    funded account whose history MT5 had not yet downloaded.
+
+    Reads are only ever compared a full `_MT5_HISTORY_POLL_S` apart (CR-01): the
+    deadline is checked BEFORE each sleep, so a tail that cannot fit a whole
+    interval raises instead of comparing two near-simultaneous reads.
 
     The equity comes from the PRE ``account_info`` already in hand. ⛔ This loop
     never calls ``account_info`` itself: the POST bracket is the only re-read, and
@@ -156,6 +162,7 @@ def _settle_deal_history(
     material = abs(equity) > material_equity_floor_usd
     deadline = _clock() + _MT5_HISTORY_WAIT_S
     previous = len(first)
+    stable_intervals = 0
     while True:
         # CR-01: expiry is decided BEFORE the sleep, and a sleep is only ever a
         # FULL poll interval. The loop used to shorten its last sleep to the time
@@ -170,8 +177,19 @@ def _settle_deal_history(
             0, int(now.timestamp()) + _MT5_DEAL_FETCH_MARGIN_S
         )
         count = len(deals)
+        # WR-02: ONE equal pair is not proof. A fresh login can be served the
+        # account's stale on-disk cache first while the delta is still on its way,
+        # and a chunked download can pause for longer than one interval; both repeat
+        # a count that is not the history. Settled is the count holding across
+        # `_MT5_HISTORY_STABLE_INTERVALS` consecutive full intervals. A zero count
+        # under material equity never counts as stable (Finding C), and any change
+        # restarts the run.
         if count == previous and (count > 0 or not material):
-            return deals, True
+            stable_intervals += 1
+            if stable_intervals >= _MT5_HISTORY_STABLE_INTERVALS:
+                return deals, True
+        else:
+            stable_intervals = 0
         previous = count
 
 

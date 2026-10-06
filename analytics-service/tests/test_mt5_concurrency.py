@@ -262,6 +262,15 @@ def test_history_wait_bound_is_derived() -> None:
         assert isinstance(value, float), f"{name} must be a float"
         assert value == value and value != float("inf"), f"{name} must be finite"
     assert 0 < poll_s < wait_s
+    stable = mt5_concurrency._MT5_HISTORY_STABLE_INTERVALS
+    assert stable == 2, (
+        "one equal pair is not settled (review WR-02): two stable intervals, typed "
+        "here as a literal so a retune is a deliberate two-place edit"
+    )
+    assert stable * poll_s <= wait_s, (
+        "the budget must fit the stability window, or no history could ever settle"
+    )
+    assert mt5_read._MT5_HISTORY_STABLE_INTERVALS is stable
 
     assert jw._MT5_HISTORY_WAIT_S is mt5_concurrency._MT5_HISTORY_WAIT_S
     assert mt5_read._MT5_HISTORY_WAIT_S is mt5_concurrency._MT5_HISTORY_WAIT_S
