@@ -1989,7 +1989,8 @@ async def test_L7_a_stale_saved_house_password_no_longer_wedges_the_jobs_termina
     D-04 (i): the escalation now ends the terminal, deletes `accounts.dat`, and
     relaunches with the HOUSE credentials. No bare `initialize()` may run after
     the scrub (a bare call on the account-less terminal reads -10005, S-10), the
-    trades caches are kept (`delete_trades=0`, D-03 / Finding C), and the
+    trades caches are deleted (`delete_trades=1`, flipped by Phase 164.6.6.3
+    plan 03 once the history wait shipped; it was 0 under D-03 / Finding C), and the
     relaunch debt the verb recorded is paid by the house-verified snapshot."""
     from services import mt5_client
 
@@ -2011,9 +2012,9 @@ async def test_L7_a_stale_saved_house_password_no_longer_wedges_the_jobs_termina
     assert outcomes[0].escalation_kind == mt5_session_episodes.KIND_IPC_FAULT_RECYCLED
     conn = fake._MetaTrader5__conn
     assert len(conn.scrub_calls) == 1, conn.scrub_calls
-    assert conn.scrub_calls[0][1] == 0, (
-        "the jobs terminal's trades caches were deleted (delete_trades must be 0 "
-        "until Phase 164.6.6.3's history wait ships)"
+    assert conn.scrub_calls[0][1] == 1, (
+        "the jobs terminal's scrub did not delete its trades caches "
+        "(delete_trades must be 1 since Phase 164.6.6.3 plan 03 flipped it)"
     )
     assert conn.recycle_calls == [], "the bare-relaunching recycle verb still ran"
     after_scrub = fake.call_order[fake.call_order.index("scrub") + 1 :]
@@ -2737,14 +2738,14 @@ async def test_ESCALATION_no_credential_reaches_the_scrub(
     with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
         await _heal_n_times(1)
 
-    assert verb_calls == [((), {"delete_trades": 0})], (
+    assert verb_calls == [((), {"delete_trades": 1})], (
         "the scrub verb was handed something other than its int flag"
     )
     conn = fake._MetaTrader5__conn
     assert conn.executed == [mt5_client._REMOTE_TERMINAL_SCRUB_SRC], (
         "something other than the committed scrub source crossed the wire"
     )
-    assert conn.scrub_calls == [(mt5_client._TERMINAL_EXIT_WAIT_MS, 0)]
+    assert conn.scrub_calls == [(mt5_client._TERMINAL_EXIT_WAIT_MS, 1)]
     for value in _CREDENTIAL_LITERALS:
         assert value not in mt5_client._REMOTE_TERMINAL_SCRUB_SRC
         assert all(value not in repr(args) for args in conn.scrub_calls)
@@ -4241,12 +4242,13 @@ async def test_SCRUB_a_delete_REFUSED_after_the_kill_still_relaunches_and_pays_t
             id="the-PROFILE-tripwire-fired",
         ),
         pytest.param(
-            # The jobs terminal passes delete_trades=0, so the verb deletes no
-            # cache and a trades error list says nothing about this scrub.
+            # The jobs terminal passes delete_trades=1 since Phase 164.6.6.3
+            # plan 03, so the verb deletes the deal caches and an errored trades
+            # delete has not proven an account-named cache gone.
             {"trades_errors": ["PermissionError"]},
-            logging.INFO,
-            ("accounts_errors=0",),
-            id="trades_errors-is-NOT-a-jobs-rule",
+            logging.ERROR,
+            ("accounts_errors=0", "trades_kept=delete_errored"),
+            id="trades_errors-is-a-jobs-rule",
         ),
     ],
 )

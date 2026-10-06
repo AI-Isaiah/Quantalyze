@@ -5700,6 +5700,15 @@ next derive of an affected account succeed.
 from 164.6.6.1 plan 07 that shows `trades` unchanged. Unchanged is the expected state while this
 entry is open, not evidence that it is done.
 
+History wait shipped: 2026-10-06, Phase 164.6.6.3 plans 01 and 02 (derive 9f1b0fa73, backfill a0db8bc79; branch commits, and the squash sha on main is appended at ship time)
+
+**Status 2026-10-06 (Phase 164.6.6.3 plan 03): human_needed, NOT closed.** The code half shipped:
+`_JOB_TERMINAL_DELETE_TRADES` reads 1 and its pin was seen RED against 0 with the line above
+present, before the flip. The gate's live reading is still owed: the per-server `trades` child count
+falls on the jobs terminal's next `ipc_fault` escalation, and the next derive of an affected account
+succeeds. 164.6.6.1 plan 07's L-3 reading should now expect `trades` to CHANGE, where it used to
+expect it unchanged.
+
 
 ### ⛔ DRIFT-02 — a surgical in-place patch means the REPO no longer holds the true function body (booked 2026-08-27)
 

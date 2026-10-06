@@ -479,13 +479,18 @@ _MT5_RELOGIN_ROUND_TRIPS: Final[int] = (
 _ESCALATION_RESERVE_CROSSINGS: Final[int] = SCRUB_RELAUNCH_RESERVE_CROSSINGS
 
 #: ⭐ 164.6.6.1 plan 03 — the `delete_trades` flag the JOBS terminal's scrub
-#: sends. ⛔ 0, and never flipped in this plan: deleting the per-account `trades`
-#: caches re-opens RESEARCH Finding C (a fresh cache hands back a partial deal
-#: history) until Phase 164.6.6.3's bounded history wait ships (D-03, D-04's
-#: answer, RESEARCH Pitfall 3). The flip to 1 is owned by `TODOS.md`
-#: `MT5-JOB-TERMINAL-TRADES-SCRUB-01`: this phase's plan 08 makes it if
-#: 164.6.6.3's history wait is already on `main`, otherwise Phase 164.6.6.3 does.
-_JOB_TERMINAL_DELETE_TRADES: Final[int] = 0
+#: sends. ⭐ 1, FLIPPED by Phase 164.6.6.3 plan 03 (D-07): every `ipc_fault`
+#: recycle now deletes the per-account deal caches, so each account is new to the
+#: jobs terminal afterwards. That is safe because both callers of
+#: `read_mt5_deal_ledger` (the derive and the backfill) wait for a fresh login's
+#: history to settle (`services/mt5_read.py`, D-04), so a fresh cache no longer
+#: hands back a partial deal history (RESEARCH Finding C). The flip is owned by
+#: `TODOS.md` `MT5-JOB-TERMINAL-TRADES-SCRUB-01`, and its pin
+#: (`test_SCRUB_the_job_path_keeps_trades_until_MT5_JOB_TERMINAL_TRADES_SCRUB_01`)
+#: reads that entry live, so the constant and the ledger line move together. The
+#: validation terminal's scrub already passes 1. ⛔ Never set it back to 0 while
+#: the wait is on `main`: the pin goes RED on the ledger line.
+_JOB_TERMINAL_DELETE_TRADES: Final[int] = 1
 
 #: The heal's clock. ⛔ A module attribute, not a bare `time.monotonic` call, only
 #: so the budget-gated paths can be driven against a clock whose every crossing
@@ -2034,7 +2039,8 @@ def _escalate_ipc_fault(
         # debt are untouched: a VERIFIED house relaunch still pays the debt
         # (the terminal is up as house), exactly as a refused-and-verified scrub
         # does; this line is what keeps the outcome from reading clean.
-        # `_JOB_TERMINAL_DELETE_TRADES` is 0, so no trades rule applies here.
+        # `_JOB_TERMINAL_DELETE_TRADES` is 1 (164.6.6.3 plan 03), so the trades
+        # arm below applies: a failed trades delete is ERROR too.
         # Only a verdict the verb RETURNED is asked: a raised verb's is empty.
         faults = scrub_delete_faults(
             verdict, delete_trades=_JOB_TERMINAL_DELETE_TRADES
