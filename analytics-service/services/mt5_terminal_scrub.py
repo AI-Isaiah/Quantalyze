@@ -139,7 +139,9 @@ SCHEMA_VERSION: Final[int] = 1
 #: ⭐ The validation terminal's deal caches GO. 164.6.6 D-03 lets history go, and
 #: Finding C: the validation terminal never reads deal history (a validation
 #: probes the account and logs out), so nothing on it needs the caches. The jobs
-#: terminal keeps its own (`mt5_relogin._JOB_TERMINAL_DELETE_TRADES`).
+#: terminal deletes its own too since Phase 164.6.6.3 plan 03
+#: (`mt5_relogin._JOB_TERMINAL_DELETE_TRADES` is 1): a fresh login there waits
+#: for its history to settle (`services/mt5_read.py`, D-04).
 _VALIDATION_SCRUB_DELETE_TRADES: Final[int] = 1
 
 #: The connect slack over the crossings: `rpyc.classic.connect` has no timeout

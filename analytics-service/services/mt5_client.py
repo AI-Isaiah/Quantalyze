@@ -1747,8 +1747,10 @@ def _parse_recycle_diagnostics(counts: dict[str, Any]) -> dict[str, Any]:
 #
 # PER-TARGET RULES (the callers pass the flag; this literal cannot see which
 # gateway it runs on):
-#   - the JOB path passes `delete_trades=0` until Phase 164.6.6.3 ships the
-#     bounded history wait (RESEARCH Finding C / Pitfall 3);
+#   - the JOB path passes `1` since Phase 164.6.6.3 plan 03 (it passed 0 until
+#     the bounded history wait shipped; RESEARCH Finding C / Pitfall 3). That is
+#     safe because a fresh login waits for its history to settle
+#     (`services/mt5_read.py`, D-04);
 #   - the VALIDATION path passes `1`;
 #   - the Journal logs, the mail and subscriptions folders, `common.ini` (its
 #     `[Experts]` keys feed trade-capability classification) and `servers.dat`

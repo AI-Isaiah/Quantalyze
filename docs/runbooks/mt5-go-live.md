@@ -645,6 +645,16 @@ Phase 164.6.6.1. The jobs terminal's `Logs` stay even then, by D-03, as Phase 16
 evidence. L7 passes on the Navigator reading. Record the on-disk remainder as a named
 residue owned by Phase 164.6.6.1, not as a failure and not as closed.
 
+⛔ **CORRECTED 2026-10-06 (Phase 164.6.6.3): the job terminal's `trades` caches no longer
+STAY.** The paragraph above is kept as lineage. Since Phase 164.6.6.3 plan 03 the job
+terminal's `ipc_fault` scrub passes `delete_trades=1`, so every recycle deletes the per-account
+deal caches (`Bases/<server>/trades/<account>`), and each account is new to the terminal
+afterwards. A fresh login waits for its deal history to settle, so the next read still
+succeeds. The reading procedure above is unchanged. What changes is what to expect: a
+`trades` child count that FALLS after the next `ipc_fault` escalation is the designed result,
+not a fault. A count that stays put after an escalation is the finding, and when the delete
+errored the escalation's log line carries `trades_kept=delete_errored` at ERROR. The Journal `Logs` still stay (D-03).
+
 ### L-D05 — an unset validation endpoint is refused, WITH an alert a human sees (D-05)
 
 ⚠️ **The cost, stated plainly.** Unsetting and then restoring a Railway variable means TWO

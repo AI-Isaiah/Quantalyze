@@ -107,7 +107,7 @@ gateway).**
 **Decision.** Ratified by the founder through 164.6.6 D-03 (2026-09-27: saved accounts and
 history are removed, and the jobs terminal keeps its Journal `Logs`) and D-04 (i)
 (2026-10-04: scrub on every `ipc_fault` recycle; the jobs terminal's `trades` caches only
-after Phase 164.6.6.3). D-03 reverses 164.6.5 D-07 for saved accounts and history only.
+after Phase 164.6.6.3, which flipped them on in its plan 03). D-03 reverses 164.6.5 D-07 for saved accounts and history only.
 The recycle verb above is unchanged and still deletes nothing.
 
 **Why this beat the others.** A credentialed relaunch from a terminal with no
@@ -135,9 +135,10 @@ what stops a stale saved house password from wedging the terminal again.
   or `servers.dat`. `common.ini` carries the `[Experts]` keys trade-capability
   classification reads, and `servers.dat` is what the credentialed relaunch needs. The
   per-user profile directory is only counted, never deleted.
-- **The job path deletes `trades` only after Phase 164.6.6.3 ships** its bounded history
-  wait (RESEARCH Finding C). Until then it passes `delete_trades=0`. The validation path
-  passes `1`.
+- **The job path deletes `trades` too, since Phase 164.6.6.3 plan 03** (`delete_trades=1`).
+  It passed `delete_trades=0` until the bounded history wait shipped (RESEARCH Finding C).
+  The deletion is safe because a fresh login waits for its history to settle
+  (`services/mt5_read.py`, D-04). The validation path passes `1`.
 - **The verb never relaunches.** It records a per-terminal relaunch debt before the
   terminate crosses. Every caller must follow it with a CREDENTIALED house relaunch,
   because a bare `initialize()` against a terminal with no saved account hangs or returns
