@@ -2958,10 +2958,16 @@ DESIGN.md governs every visual change.
 saving the strategy edit form can no longer change a strategy's name.
 **Requirements**: none in REQUIREMENTS.md; the items above are the spec.
 **Depends on:** Phase 164.6.6.3 (order only, D-02)
-**Plans:** 0 plans
+⭐ **Goal superseded in part, 2026-10-06 (CONTEXT D-01/D-02):** the edit form keeps its name picker and a deliberate pick still renames; only an unrelated save can no longer change the name. The goal sentence above is kept as lineage.
+**Plans:** 6 plans in 2 waves
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 164.6.6.3.1 to break down)
+- [ ] 164.6.6.3.1-01-PLAN.md — item 1: the edit form keeps an off-list name and sends `name` only when the pick changed (D-01, D-02) [wave 1]
+- [ ] 164.6.6.3.1-02-PLAN.md — items 6e + 8: "Loading keys…" until the first key read settles; the venue label from `api-key-label.ts`; the key-card wrap contract (D-03, D-10) [wave 1]
+- [ ] 164.6.6.3.1-03-PLAN.md — items 6a + 6c and 170.6: one footer disclaimer per dashboard route plus a census; the dated batch chip; the bottom-nav label wraps whole (D-07, D-08) [wave 1]
+- [ ] 164.6.6.3.1-04-PLAN.md — item 6d: the α eyebrow reads "α VS BTC"; Wave 0, the /strategies page doubles learn `strategy_shares` (D-09) [wave 1]
+- [ ] 164.6.6.3.1-05-PLAN.md — item 6f: one batched live-share read; "Manage private link" opens the share panel in a "Private link" Modal; row and panel share one live state (D-05, D-06) [wave 2]
+- [ ] 164.6.6.3.1-06-PLAN.md — D-04: the ~20 s key-list read measured read-only on PROD (one founder console step), booked in `TODOS.md` only if real [wave 2, one checkpoint]
 
 ### Phase 164.6.6.2: BTCNATIVE — an MT5 account denominated in BTC (or any non-USD currency) reports its returns in its own unit, not as a dust-guarded USD series (INSERTED)
 
