@@ -564,6 +564,96 @@ describe("ApiKeyManager — D-10 the key card's venue line reads the shared labe
 });
 
 /**
+ * Phase 164.6.6.3.1 plan 02 / D-10 (UAT item 8, layout half) — the key card
+ * wrapped one word per line (the nickname, "Update password", "Use & Sync")
+ * because its left block could not shrink while its action cluster could not
+ * wrap. jsdom has no layout engine, so the class TOKENS are the contract here
+ * and the founder's 1440 px re-read is the proof (human_needed, open: it also
+ * closes 164.5.3). Tokens are compared whole, never as substrings, so
+ * `min-w-0` is not confused with `min-w-[...]`.
+ *
+ * `flex-[1_1_14rem]` is deliberately NOT `flex-1` (the UI-SPEC's first draft):
+ * research measured in Chromium that `flex-1` gives a zero flex-basis, so the
+ * action row never wraps and the nickname still splits at 360 to 560 px. A
+ * 14rem basis lets the whole action row wrap under the left block first.
+ */
+describe("ApiKeyManager — D-10 the key card's layout class contract", () => {
+  beforeEach(() => {
+    routerRefreshMock.mockReset();
+    selectResultMock.mockReset();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  function layoutRow(id: string, exchange: string) {
+    return {
+      id,
+      user_id: "user-a",
+      exchange,
+      label: `Label ${id}`,
+      is_active: true,
+      sync_status: "complete",
+      last_sync_at: null,
+      account_balance_usdt: 1000,
+      created_at: "2026-01-01T00:00:00Z",
+      sync_error: null,
+      last_429_at: null,
+      disconnected_at: null,
+      venue_account_id: null,
+    };
+  }
+
+  const tokens = (el: Element | null) => (el?.getAttribute("class") ?? "").split(/\s+/).filter(Boolean);
+
+  it("the row wraps, the left block shrinks, the actions wrap as a whole row, and every action button holds one line", async () => {
+    // Two cards: a CURRENT mt5 key (Resync, Update password, Delete) and a
+    // non-current binance key (Use & Sync, Delete), so every action label the
+    // card can print is covered.
+    selectResultMock.mockReturnValue({
+      data: [layoutRow("key-cur", "mt5"), layoutRow("key-other", "binance")],
+      error: null,
+    });
+    await act(async () => {
+      render(<ApiKeyManager strategyId="strat-1" currentKeyId="key-cur" />);
+    });
+
+    for (const [id, exchange, labels] of [
+      ["key-cur", "mt5", ["Resync", "Update password", "Delete"]],
+      ["key-other", "binance", ["Use & Sync", "Delete"]],
+    ] as const) {
+      const card = await screen.findByTestId(`api-key-card-${id}`);
+      const avatar = within(card).getByTestId(`api-key-avatar-${exchange}`);
+      const left = avatar.parentElement!;
+      const row = left.parentElement!;
+      const textColumn = avatar.nextElementSibling;
+      const actions = left.nextElementSibling!;
+
+      expect(tokens(row)).toEqual(
+        expect.arrayContaining(["flex", "flex-wrap", "items-center", "justify-between", "gap-x-4", "gap-y-3"]),
+      );
+      expect(tokens(left)).toEqual(
+        expect.arrayContaining(["flex", "min-w-0", "flex-[1_1_14rem]", "items-center", "gap-3"]),
+      );
+      // Not flex-1: its zero basis is the measured defect (see the block above).
+      expect(tokens(left)).not.toContain("flex-1");
+      expect(tokens(avatar)).toContain("shrink-0");
+      expect(tokens(textColumn)).toContain("min-w-0");
+      expect(tokens(actions)).toEqual(
+        expect.arrayContaining(["flex", "max-w-full", "shrink-0", "flex-wrap", "items-center", "gap-2"]),
+      );
+
+      const buttons = Array.from(actions.querySelectorAll("button"));
+      expect(buttons.map((b) => b.textContent)).toEqual(labels);
+      for (const b of buttons) {
+        expect(tokens(b), `${b.textContent} must not split across lines`).toContain("whitespace-nowrap");
+      }
+    }
+  });
+});
+
+/**
  * M-0456 (audit-2026-05-07) — ApiKeyManager swapped its api_keys read from a
  * broad projection to the `API_KEY_USER_COLUMNS` allowlist. The static
  * sec-005-api-keys-projection regex test catches a `.select("*")` regression,

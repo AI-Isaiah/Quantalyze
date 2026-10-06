@@ -1682,15 +1682,20 @@ export function ApiKeyManager({
 
       {listedKeys.map((key) => (
         <Card key={key.id} data-testid={`api-key-card-${key.id}`}>
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-3">
+          {/* D-10 (164.6.6.3.1): the row wraps; the left block may shrink
+              (min-w-0) from a 14rem basis, NOT flex-1: a zero basis never
+              lets the action row wrap and splits the nickname one word per
+              line at 360 to 560 px (measured, RESEARCH Item 8). The actions
+              never shrink and wrap as a whole row, each button on one line. */}
+          <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-3">
+            <div className="flex min-w-0 flex-[1_1_14rem] items-center gap-3">
               <span
                 data-testid={`api-key-avatar-${key.exchange}`}
-                className="flex h-8 w-8 items-center justify-center rounded-md bg-sidebar/10 text-xs font-bold text-text-primary"
+                className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-sidebar/10 text-xs font-bold text-text-primary"
               >
                 {exchangeIcon[key.exchange] ?? "?"}
               </span>
-              <div>
+              <div className="min-w-0">
                 <p className="text-sm font-medium text-text-primary">{key.label}</p>
                 <p className="text-xs text-text-muted">
                   {/* D-10 (164.6.6.3.1): the one shared label ("MT5", "OKX"), the
@@ -1721,12 +1726,13 @@ export function ApiKeyManager({
                 })()}
               </div>
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex max-w-full shrink-0 flex-wrap items-center gap-2">
               {/* KCS-23: no Resync / Use & Sync on a composite or an unknown
                   shape; both write `strategies.api_key_id`. */}
               {!linkControlsAllowed ? null : key.id === currentKeyId ? (
                 <Button
                   size="sm"
+                  className="whitespace-nowrap"
                   variant="ghost"
                   onClick={() => handleSyncTrades(key.id)}
                   // KCS-01 / RESEARCH P7: also while an Add Key is in flight.
@@ -1737,6 +1743,7 @@ export function ApiKeyManager({
               ) : (
                 <Button
                   size="sm"
+                  className="whitespace-nowrap"
                   variant="ghost"
                   onClick={() => handleSyncTrades(key.id)}
                   // KCS-01 / RESEARCH P7: also while an Add Key is in flight.
@@ -1748,6 +1755,7 @@ export function ApiKeyManager({
               {key.exchange === "mt5" && (
                 <Button
                   size="sm"
+                  className="whitespace-nowrap"
                   variant="ghost"
                   onClick={() => setUpdatingKeyId(key.id)}
                   // Phase 167 / 167-06, R4 (167-CONTEXT D-18): a key's password
@@ -1779,6 +1787,7 @@ export function ApiKeyManager({
               )}
               <Button
                 size="sm"
+                className="whitespace-nowrap"
                 variant="ghost"
                 onClick={() => handleDeleteClick(key.id)}
                 // Phase 167 / 167-06, R5 (167-CONTEXT D-18): a key is never
