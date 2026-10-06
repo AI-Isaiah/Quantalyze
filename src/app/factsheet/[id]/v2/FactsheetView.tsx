@@ -1641,9 +1641,16 @@ function KpiStrip() {
             className="px-3 py-3 sm:px-4 sm:py-4 min-w-0"
             style={{ borderRight: "1px solid var(--color-border)", borderTop: "1px solid var(--color-border)" }}
           >
+            {/* 164.6.6.3.1 D-09 (item 6d): the uppercase would turn the alpha glyph
+                into a capital alpha, so the label that starts with it exempts its
+                first letter ("α VS BTC"). Gated on the glyph: on "Sharpe" the same
+                class would render "sHARPE". A `<span className="normal-case">`
+                around the glyph was measured and rejected: it splits the `<p>`'s
+                own text nodes and breaks six `getByText("α vs ...")` locators
+                (FactsheetBody.joint-floor / .basis). Text content stays "α vs BTC". */}
             <p
               data-testid="factsheet-kpi-label"
-              className="text-micro font-mono uppercase tracking-[0.14em] sm:tracking-[0.18em] whitespace-nowrap overflow-hidden text-ellipsis"
+              className={`text-micro font-mono uppercase tracking-[0.14em] sm:tracking-[0.18em] whitespace-nowrap overflow-hidden text-ellipsis${it.label.startsWith("α") ? " first-letter:normal-case" : ""}`}
               style={{ color: "var(--color-text-muted)" }}
             >
               {it.label}

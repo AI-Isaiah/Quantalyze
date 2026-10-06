@@ -1,7 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, fireEvent, within } from "@testing-library/react";
+import { render, fireEvent, within, screen } from "@testing-library/react";
 import type { DailyPoint } from "@/lib/portfolio-math-utils";
-import type { FactsheetPayload } from "@/lib/factsheet/types";
+import type { DailyPrice, DailyReturn, FactsheetPayload } from "@/lib/factsheet/types";
+import { buildFactsheetPayload } from "@/lib/factsheet/build-payload";
+import type { BenchmarkPricesOpt } from "@/lib/factsheet/build-payload";
 import { buildScenarioFactsheetPayload } from "@/app/(dashboard)/allocations/widgets/performance/scenario-factsheet-payload";
 import { FactsheetProvider } from "./factsheet-context";
 import { FactsheetBody } from "./FactsheetView";
@@ -664,5 +666,84 @@ describe("FactsheetView KPI strip — UIFIX-03 (117-03): CUM RETURN extreme valu
     const { valueEl: sharpeEl } = cell(container, "Sharpe");
     expect(sharpeEl.textContent?.trim()).toBe("—");
     expect(sharpeEl.style.color).toBe("var(--color-text-primary)");
+  });
+});
+
+/**
+ * Phase 164.6.6.3.1 plan 04, item 6d (D-09). The alpha cell's eyebrow is CSS
+ * uppercase, and uppercase turns the real alpha glyph into a capital alpha
+ * ("A VS BTC", a different-looking symbol that reads as a misspelt "A"). The
+ * glyph must survive: the label `<p>` carries `first-letter:normal-case`, but
+ * ONLY when the label starts with alpha, because the same pseudo-element on
+ * "Sharpe" would render "sHARPE". The DOM text stays "α vs BTC" (a wrapping
+ * span would change the element's own text nodes and break the six
+ * `getByText("α vs ...")` locators in FactsheetBody.joint-floor / .basis).
+ *
+ * Fixture: a record that pairs with BTC (30 days, benchmark prices from the day
+ * before), so a real "α vs BTC" cell mounts. The scenario payload used above is
+ * built with `benchmark: null` and so has no alpha cell.
+ */
+describe("FactsheetView KPI strip — 164.6.6.3.1 D-09: the alpha eyebrow keeps its glyph under the uppercase", () => {
+  const DAY = 86_400_000;
+  const addDays = (d: string, n: number) =>
+    new Date(Date.parse(`${d}T00:00:00Z`) + n * DAY).toISOString().slice(0, 10);
+
+  function mountWithAlpha() {
+    const start = "2026-04-27";
+    const n = 30;
+    const rows: DailyReturn[] = Array.from({ length: n }, (_, i) => ({
+      date: addDays(start, i),
+      value: ((i % 7) - 3) / 1000,
+    }));
+    const btc: DailyPrice[] = Array.from({ length: n + 1 }, (_, i) => ({
+      date: addDays(start, i - 1),
+      close: 90000 + ((i * 37) % 11) * 250,
+    }));
+    const opt: BenchmarkPricesOpt = { prices: btc, through: btc[btc.length - 1].date, dropped: [] };
+    const payload = buildFactsheetPayload(
+      {
+        id: "s-164-6-6-3-1-d09",
+        name: "Alpha Eyebrow Strategy",
+        types: ["quant"],
+        markets: ["crypto"],
+        computedAt: "2026-09-30T00:00:00Z",
+        trustTier: null,
+        assetClass: "crypto",
+        ingestSource: "api" as const,
+      },
+      rows,
+      { benchmarkPrices: opt },
+    );
+    if (!payload) throw new Error("fixture must build a payload");
+    const active = { ...payload, activeComparator: "btc" as const };
+    return render(
+      <FactsheetProvider payload={active} persist={false}>
+        <FactsheetBody payload={active} hideHeader hideAllocatorSection hideFooter />
+      </FactsheetProvider>,
+    );
+  }
+
+  const tokens = (el: HTMLElement) => el.className.split(/\s+/).filter(Boolean);
+
+  it("D-09: the α label is exempt from the uppercase on its first letter, keeps uppercase + the bounded clip, and its text stays \"α vs BTC\"", () => {
+    mountWithAlpha();
+    const label = screen.getByText("α vs BTC");
+    expect(label.getAttribute("data-testid")).toBe("factsheet-kpi-label");
+    const t = tokens(label);
+    expect(t).toContain("first-letter:normal-case");
+    expect(t).toContain("uppercase");
+    expect(t).toContain("whitespace-nowrap");
+    expect(t).toContain("text-ellipsis");
+    expect(label.textContent).toBe("α vs BTC");
+  });
+
+  it("D-09: a non-α label carries no first-letter exemption (it would render \"sHARPE\")", () => {
+    mountWithAlpha();
+    const sharpe = screen
+      .getAllByTestId("factsheet-kpi-label")
+      .find((el) => el.textContent?.trim() === "Sharpe");
+    expect(sharpe, "the Sharpe KPI cell must mount").toBeDefined();
+    expect(tokens(sharpe!)).not.toContain("first-letter:normal-case");
+    expect(tokens(sharpe!)).toContain("uppercase");
   });
 });
