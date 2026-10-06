@@ -2860,7 +2860,7 @@ Plans:
 ### Phase 164.6.6.3.6: MT5SERVERLEARN — a broker server the terminals can reach is learned on its first successful validation instead of being hand-listed (INSERTED)
 
 **Goal:** A broker server that the terminals can actually reach is learned automatically on its first successful validation, instead of being hand-listed in `MT5_KNOWN_SERVERS`. Phase 164.6.6.3 ships the static list (D-09, D-14) and the Step 2d runbook. This phase replaces the hand-listing, if and only if its first measurement allows it.
-**Source:** founder decision 2026-10-06 (AskUserQuestion "Ship static, book the dynamic phase"). **Order:** runs NEXT, immediately after 164.6.6.3 ships, ahead of 164.6.6.3.1–.5 in the queue (founder 2026-10-06, AskUserQuestion "Next, right after 164.6.6.3 ships").
+**Source:** founder decision 2026-10-06 (AskUserQuestion "Ship static, book the dynamic phase"). **Order:** runs NEXT, immediately after 164.6.6.3 ships, ahead of 164.6.6.3.1–.5 in the queue (founder 2026-10-06, AskUserQuestion "Next, right after 164.6.6.3 ships"). ⛔ **CORRECTED the same day:** 164.6.6.2 BTCNATIVE goes FIRST after 164.6.6.3 merges, and this phase follows it. Its VNC measurement may run alongside.
 **Requirements**: TBD (no v1.20 requirement IDs)
 **Depends on:** Phase 164.6.6.3 (the known-server pre-check and Step 2d must be on `main`)
 **Success criteria:**
@@ -3073,6 +3073,7 @@ Founder request 2026-10-03 (chat, a factsheet screenshot of MM-2x, then "ok, aft
 **Goal:** [Urgent work - to be planned]
 **Requirements**: TBD
 **Depends on:** Phase 164.6.6
+⭐ **Order and scope, founder 2026-10-06 (AskUserQuestion; a client is waiting on MM-2x):** this phase STARTS as soon as 164.6.6.3 merges, AHEAD of every other queued phase (including 164.6.6.3.6 MT5SERVERLEARN and 164.6.6.3.1–.5). Founder's words: "start of 164.6.6.3 merges, then all others". Scope item (4) is ANSWERED: **BTC (native unit) only first, USD view later.** The USD view is a follow-up, to be booked at discuss time. The "before 164.6.6.1" ordering above is kept as lineage; 164.6.6.1 ran first.
 **Plans:** 0 plans
 
 Plans:
