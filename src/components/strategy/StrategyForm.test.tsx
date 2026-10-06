@@ -604,4 +604,44 @@ describe("StrategyForm — 164.6.6.3.1 item 1: own name kept, no rename on unrel
     expect(payload.description).toBe("a different description");
     expect(payload).not.toHaveProperty("name");
   });
+
+  it("edit mode: a deliberate pick sends the new name (D-02)", async () => {
+    render(<StrategyForm mode="edit" strategy={EDIT_STRATEGY} />);
+    fireEvent.change(nameSelect(), { target: { value: "Black Swan" } });
+
+    const payload = await saveAndGetUpdatePayload();
+    expect(payload.name).toBe("Black Swan");
+  });
+
+  it("edit mode: re-picking the original name sends no name key (D-02)", async () => {
+    render(<StrategyForm mode="edit" strategy={EDIT_STRATEGY} />);
+    fireEvent.change(nameSelect(), { target: { value: "Black Swan" } });
+    fireEvent.change(nameSelect(), { target: { value: "Momentum Alpha" } });
+
+    const payload = await saveAndGetUpdatePayload();
+    expect(payload).not.toHaveProperty("name");
+  });
+
+  it("edit mode: an on-list name is not duplicated (D-01)", () => {
+    const onList = {
+      ...(EDIT_STRATEGY as unknown as Record<string, unknown>),
+      name: "Black Swan",
+    } as unknown as Strategy;
+    render(<StrategyForm mode="edit" strategy={onList} />);
+
+    const select = nameSelect();
+    expect(select.value).toBe("Black Swan");
+    expect(optionValues(select).filter((v) => v === "Black Swan")).toHaveLength(1);
+  });
+
+  it("create mode still sends name, defaulting to Alpha Centauri", async () => {
+    render(<StrategyForm mode="create" />);
+    // Create mode needs a data source; the CSV path needs no API key.
+    fireEvent.click(screen.getByRole("button", { name: "Upload CSV" }));
+    fireEvent.click(screen.getByRole("button", { name: /create strategy/i }));
+
+    await waitFor(() => expect(routerPushMock).toHaveBeenCalledWith("/strategies"));
+    expect(strategiesInsertArg).not.toBeNull();
+    expect(strategiesInsertArg!.name).toBe("Alpha Centauri");
+  });
 });
