@@ -1269,6 +1269,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ### Roadmap Evolution
 
+- Phase 164.6.6.3.6 inserted after Phase 164.6.6.3: MT5SERVERLEARN: measure headless resolution of an unknown MT5 server, then learn servers on successful validation (founder 2026-10-06, AskUserQuestion 'Ship static, book the dynamic phase')
 - Phase 164.6.6.3.5 inserted after Phase 164.6.6.3: DOMAINONE: rho redirects to quantalyze.xyz; the 18 quantalyze.com mentions are checked and fixed (founder 2026-10-06, AskUserQuestion 'Book it')
 - Phase 164.6.6.3 UATFIXES **edited 2026-10-05 (/gsd-phase --edit, hand-written)**: items 9 (`MT5-UNKNOWN-BROKER-SERVER-HANG-01`, a key on a broker server the terminals do not know hangs 45.6 s and fails) and 10 (`MT5-SCRUB-OWED-COPY-01`, the owed-scrub 424 reads as a network timeout) added from Phase 164.6.6.1's 2026-10-05 live checks. Founder: book the follow-ups into 164.6.6.3.
 - Phase 169.1.1 HYDRATIONTICKS **inserted 2026-10-02 after Phase 169.1 (URGENT, hand-edited)**: factsheet chart ticks differ between server and browser (`Math.pow(10,n)` engine rounding), React #418 rebuilds the tree and replaces the Overview EquityChart; flakes `e2e/target-size.spec.ts` and turned main CI red. Founder (AskUserQuestion "New phase, first"): runs before 164.9.3.2.1.

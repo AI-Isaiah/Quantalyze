@@ -2857,6 +2857,23 @@ Plans:
 - [ ] 164.6.6.3-06-PLAN.md — item 9 worker-adapter parity, plus the multi-key and rotate-secret surfaces (W3)
 - [ ] 164.6.6.3-07-PLAN.md — runbook Step 2d, STATUS_CONTRACT row, TODOS status, owners for the founder readings, the `MT5_KNOWN_SERVERS` gate before merge, and the optional D-03 measurement (auto-defers) (W4)
 
+### Phase 164.6.6.3.6: MT5SERVERLEARN — a broker server the terminals can reach is learned on its first successful validation instead of being hand-listed (INSERTED)
+
+**Goal:** A broker server that the terminals can actually reach is learned automatically on its first successful validation, instead of being hand-listed in `MT5_KNOWN_SERVERS`. Phase 164.6.6.3 ships the static list (D-09, D-14) and the Step 2d runbook. This phase replaces the hand-listing, if and only if its first measurement allows it.
+**Source:** founder decision 2026-10-06 (AskUserQuestion "Ship static, book the dynamic phase").
+**Requirements**: TBD (no v1.20 requirement IDs)
+**Depends on:** Phase 164.6.6.3 (the known-server pre-check and Step 2d must be on `main`)
+**Success criteria:**
+1. ⛔ **GATE, measured first:** can a headless terminal authorize on a broker server it has never seen? This is `MT5-UNKNOWN-BROKER-SERVER-HANG-01`'s open question and 164.6.6.3 plan 07 Task 3's deferred "measure" option. The measurement must cover: a `login()` with only the server name; the broker search the "Open an account" dialog performs; and supplying the broker's server entry by another route. It runs on the VALIDATION terminal only, never on the jobs terminal. Evidence of 2026-10-05 is three 45.6 s hangs with no authorization attempt in the Journal. If no headless route exists, the phase closes with that measured verdict and builds nothing: the static list plus Step 2d stays the answer.
+2. If a route exists: a validation that authorizes on a server not yet known records the server in a durable, DB-backed known-server set. Both pre-check sites (router and worker adapter) read that set, and the env list becomes a seed only.
+3. A server is learned only from an authorized session (`connected` true), never from a failed or timed-out attempt. An unknown server's attempt is bounded so that it cannot hold the shared validation terminal for the full 45 s or leave it off the house server.
+4. The JOBS terminal can use a learned server before the first sync of such a key, or that sync is refused by name instead of hanging. Each terminal's server store is its own, so learning on one terminal does not teach the other.
+5. Every guard in criteria 2–4 is shown RED once.
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 164.6.6.3.6 to break down)
+
 ### Phase 164.6.6.3.5: DOMAINONE — one canonical address: quantalyze-rho.vercel.app redirects to quantalyze.xyz, and the 18 repo mentions of https://quantalyze.com (a domain we do not own; it resolves to an unrelated server) are corrected or removed after checking each for links, emails, OG/canonical URLs and env defaults (INSERTED)
 
 **Goal:** Everyone lands on one address. `quantalyze.xyz` is the project's only custom domain in Vercel. `quantalyze-rho.vercel.app` is Vercel's default address for the same project, and because a login is tied to its domain, a session started on rho does not carry over to `.xyz`. `quantalyze.com` is NOT ours: measured 2026-10-06, it resolves to an unrelated server (a different IP and server header). The repo still names `https://quantalyze.com` 18 times (orchestrator reading, 2026-10-06).
@@ -2868,6 +2885,7 @@ Plans:
 2. Every `quantalyze.com` mention is re-counted at plan time (the 18 is a reading, not a constant). Each one is classified: a link, an email address, an OG/canonical/metadata URL, an env default, or prose. Each is corrected to `quantalyze.xyz` or removed, and the classification is recorded.
 3. Anything user-facing that pointed at `quantalyze.com` (emails sent, share or OG URLs, auth redirect allow-lists) is checked for live impact, and the result is recorded.
 4. A gate stops a new `quantalyze.com` URL from coming back, and it is shown RED once.
+
 **Plans:** 0 plans
 
 Plans:
