@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.125.1.3] - 2026-10-06 — npm audit: source-map-js advisory cleared
+
+### Security
+- `source-map-js` 1.2.1 → 1.2.2 (GHSA-68fv-2mgg-jv7q, high). The advisory was published after
+  v0.125.0.10 cleared the production audit, so the nightly `npm-audit` job
+  (`npm audit --omit=dev --audit-level=high`) would have gone red again. It now reads
+  `found 0 vulnerabilities`.
+- In-range `npm audit fix` also moved `compression` 1.8.1 → 1.8.2 and `proxy-addr` 2.0.7 → 2.0.8.
+- Lockfile built with npm 11, then an npm 10 pass, so CI's `npm ci` (npm 10) accepts it.
+
 ## [0.125.1.2] - 2026-10-06 — vitest 5 (Dependabot #959)
 
 ### Changed
