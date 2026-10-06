@@ -2762,6 +2762,16 @@ Plans:
 
 ### Phase 164.6.6.3: UATFIXES — the defects the 2026-10-03 production UAT pass found are fixed (INSERTED)
 
+**Scope narrowed 2026-10-06 (founder, smart discuss D-01, "Accept all"; `164.6.6.3-CONTEXT.md`):**
+this phase delivers **items 0 and 9 only**, the MT5 onboarding defects. The rest of the list was
+split by topic and moved:
+- items 1, 6a, 6c, 6d, 6e, 6f and 8 to **164.6.6.3.1 UIPOLISH**;
+- items 7 and 10, plus the wizard copy for item 0, to **164.6.6.3.2 WIZARDCODES**;
+- items 2, 3, 4, 5 and 6b to **164.6.6.3.3 FACTSHEETTRUTH**.
+
+Order (D-02): 164.6.6.3, then .1, then .2, then .3. The full list below is kept as lineage; the
+item numbers are what the three new phases cite.
+
 Founder decision 2026-10-03 (AskUserQuestion "One fix phase, after 164.6.6"): runs right after 164.6.6, before 164.6.6.2 BTCNATIVE and 164.6.6.1 MT5SCRUB. Source: the 2026-10-03 production UAT pass over 17 human_needed phases (browser checks on the deployed app, Vercel production at `7276aa9a`). The phases those checks came from close with each defect routed here. **Defects, in priority order:**
 1. **Rename risk.** The strategy edit page's Strategy Name picker preselects "Alpha Centauri" instead of the strategy's own name (seen on MM-2x and AI-FX-35), so saving that form would likely rename it.
 2. **Composite factsheet contradicts itself (from 169 #1).** Quantum Drift (a 3-key Deribit composite) shows CUM. RETURN +0.0%, CAGR +0.0%, SHARPE 8.10, CALMAR 0.00 in its headline, while the same page shows YTD +2283266.93%, EOY 2025 +9159.64%, 6 Month +8926742.64% and Recovery Factor 2701034.63, plus "Track record under 90 days" on 253 observations; /my-strategies repeats the bad headline.
@@ -2769,6 +2779,7 @@ Founder decision 2026-10-03 (AskUserQuestion "One fix phase, after 164.6.6"): ru
 4. **OG share card (from 169.4.1 #1).** Fibonacci Ghost's card shows Sharpe "—" where its factsheet shows 0.12; every card draws "—" in red, which DESIGN.md forbids.
 5. **Unbuildable factsheet note (from 167.2.1 #2).** A computed-but-unbuildable strategy (Eclipse) pairs "could not be built from its results" with the generic "not available yet" share note instead of the D-02 line.
 6. **Small ones:** the /recommendations disclaimer renders twice and its "Batch: Fresh" chip carries no date (169.3); an empty scenario's P5/P95/Median read "+0.00%" with 0 observations; the "My Allocation" bottom-nav label clips at 320px; "α VS BTC" uppercases to "Α VS BTC"; edit pages flash "No API keys connected." for about 20 s while loading; /strategies offers "Get private link" where the factsheet says a private link is live.
+
 Re-measure each at plan time; the observations are from a browser pass, not a code reading.
 
 **Added 2026-10-04 from 164.6.6 plan 08's live checks (founder, AskUserQuestion; record in
@@ -2814,13 +2825,138 @@ Re-measure each at plan time; the observations are from a browser pass, not a co
    The recoverable 424 after each redeploy shows `KEY_NETWORK_TIMEOUT`, "We could not reach the
    exchange"; it should say the terminal is briefly busy and to retry. A test pins the mapping.
 
-**Goal:** [Urgent work - to be planned]
-**Requirements**: TBD
+**Goal:** Onboarding an MT5 account new to the jobs terminal succeeds: a fresh login waits,
+bounded and failing loud, for its deal history before the derive reads it. The jobs terminal's
+per-account deal caches are then deleted on each `ipc_fault` recycle. A key on a broker server the
+terminals do not know is named as that, at once, instead of hanging 45.6 s and blaming the
+credentials.
+**Requirements**: none in REQUIREMENTS.md; items 0 and 9 above are the spec.
 **Depends on:** Phase 164.6.6
+**Success Criteria** (what must be TRUE):
+1. A failing-first race test shows the derive reading a fresh login's history only once it has
+   settled. History that never settles under material equity is a transient, retryable failure
+   logged at ERROR, never a permanent stamp (D-04 to D-06).
+2. The wait's outer bound derives from the symbols and never trips the terminal-restart branch.
+3. In ONE commit, `TODOS.md` `MT5-JOB-TERMINAL-TRADES-SCRUB-01` gains
+   `History wait shipped: <date>, <sha>` and `_JOB_TERMINAL_DELETE_TRADES` flips to 1,
+   failing-first, as 164.6.6.1's pin test requires (D-07).
+4. A server missing from the terminals' known-server list returns a distinct, recoverable wizard
+   outcome before `login()` runs, with an ERROR line. A known server's -10005 still reads as
+   sign-in failed (D-09 to D-11). A runbook step covers adding a server to both terminals (D-08).
 **Plans:** 0 plans
 
 Plans:
 - [ ] TBD (run /gsd-plan-phase 164.6.6.3 to break down)
+
+### Phase 164.6.6.3.3: FACTSHEETTRUTH — a factsheet, its share card and its scenario never show a number the data cannot support (164.6.6.3 split C: items 2, 3, 4, 5, 6b) (INSERTED)
+
+Split C of 164.6.6.3 (founder, 2026-10-06, `164.6.6.3-CONTEXT.md` D-01). It delivers items **2,
+3, 4, 5 and 6b**, and runs last (D-02): it is the largest, and it needs a PROD recompute. **Scout
+findings at HEAD `c8e87b19` (2026-10-06; PROD reads behind the marker query; re-measure at plan
+time):**
+- **Item 2.** PROD: Quantum Drift's row has `cumulative_return`/`cagr`/`calmar` 0, but `sharpe` 8.10
+  and `six_month_return` 26003.8.
+  - Flags: `twr_chain_broken`, `dust_nav_guard`, `flow_dominated_guard`, `negative_nav_guard`,
+    `composite`.
+  - Hypothesis, not proven: `metrics.py` (~1850) computes cum/CAGR/Calmar on the post-break suffix,
+    while Sharpe/vol/Sortino/window returns use the full series, so the headline mixes bases.
+  - The TS headline trusts finite zeros from `metrics_json_by_basis` (`composite-read-path.ts`).
+  - Decision owed: which stats a fired guard withholds.
+- **Item 3.** `return-stats.ts` `beta()` returns 0 for a flat `y` (166.2 HI-01; pinned by T16), so
+  a flat strategy leg shows Beta/IR/capture/alpha numbers.
+  - `166.2-VERIFICATION.md` (~68 vs ~74) contradicts itself.
+  - Decision owed: a factsheet display gate showing "—" for a no-dispersion strategy leg, keeping
+    `beta()`=0 for allocation math.
+  - The KS test in `style-drift.ts` (~38-44) returns p=0 at D=0; it should return p=1. That is a bug,
+    no decision needed.
+- **Item 4.** PROD: Fibonacci Ghost stores `sharpe` 0.12 on 25 points.
+  - `og-metrics.ts` gates the card behind `values.length >= 30` (`169.4.1-CONTEXT.md` ~107/~115).
+    Decision owed: the card follows the factsheet's stored value.
+  - `api/og/factsheet/[id]/route.tsx` (~233) colours a non-finite CAGR/max-DD "—" red, which
+    DESIGN.md forbids.
+- **Item 5.** PROD: Eclipse's `computation_status` is `failed`. `unbuildableNoteKindOf("not_computed")`
+  returns null (`status-surface-copy.ts` ~420), so the share note falls to the generic tail while the
+  owner line says "could not be built" (D-02 lines, `167.2.1-CONTEXT.md` ~56).
+  - Decision owed: copy for "job finished, analytics failed".
+- **Item 6b.** `scenario-factsheet-payload.ts` (~271) `emptyQuantiles()` returns zeros, carried as a
+  LOW in `166.2-VERIFICATION.md` ~245. It should be NaN/null rendering "—".
+Never invent data: an uncomputable metric is null.
+
+**Goal:** A factsheet, its share card and its scenario never show a number the data cannot support:
+a guarded composite headline is consistent, a flat strategy leg reads "—" where the no-dispersion
+rule says so, the card and the factsheet show one value, and an empty scenario shows "—".
+**Requirements**: none in REQUIREMENTS.md; the items above are the spec.
+**Depends on:** Phase 164.6.6.3 (order only, D-02)
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 164.6.6.3.3 to break down)
+
+### Phase 164.6.6.3.2: WIZARDCODES — the wizard names the real cause for an unconfigured MT5 gateway, a busy terminal and a fresh account whose history is not ready (164.6.6.3 split B: items 7, 10, item-0 copy) (INSERTED)
+
+Split B of 164.6.6.3 (founder, 2026-10-06, `164.6.6.3-CONTEXT.md` D-01). It delivers items **7
+and 10**, plus the wizard copy for item 0's history-not-ready failure (164.6.6.3 D-06), and runs
+third (D-02). **Scout findings at HEAD `c8e87b19` (2026-10-06; re-measure at plan time):**
+- **Item 7.** `wizardErrors.ts` (~4836) maps `MT5_GATEWAY_UNCONFIGURED` to `SEAM_INTERNAL_FAULT`.
+  That wire code has four emitters: three env gaps (`routers/exchange.py` ~531, ~686 and the
+  port-malformed case) and the D-31 `undetermined` arm (~1159). The server-side detail "The
+  MetaTrader gateway is not configured…" never reaches the wizard.
+  - Recommended: a new env-gap wire code and wizard code, keeping `SEAM_INTERNAL_FAULT` honest for
+    D-31.
+- **Item 10.** `routers/exchange.py` `scrub_owed` (~1052) and `lease_busy` (~1407) both raise 424
+  `NETWORK_UNAVAILABLE`, which `wizardErrors.ts` (~4730) shows as `KEY_NETWORK_TIMEOUT`.
+  - Recommended: one `MT5_TERMINAL_BUSY`-style code for both, recoverable, with "briefly busy,
+    retry" copy and a pinning test.
+- **Item 0 copy.** `GATE_ANALYTICS_FAILED`'s "the fault is in our pipeline" (`wizardErrors.ts`
+  ~2786) is wrong for a history that has not settled.
+- Wire-code rosters and census pins move together (`seam-venue-vocabulary.invariant.test.ts`,
+  `EXPECTED_TABLE_SIZE`-style pins). Grep them; never count by hand.
+
+**Goal:** The MT5 wizard names the real cause for an unconfigured validation gateway, for a terminal
+that is briefly busy (an owed scrub or a held lease), and for a fresh account whose history has not
+settled, each with its own wire code and copy, pinned by tests.
+**Requirements**: none in REQUIREMENTS.md; the items above are the spec.
+**Depends on:** Phase 164.6.6.3 (it emits the history-not-ready `error_kind` this phase words)
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 164.6.6.3.2 to break down)
+
+### Phase 164.6.6.3.1: UIPOLISH — the small UI defects from the 2026-10-03 UAT pass are fixed (164.6.6.3 split D: items 1, 6a, 6c, 6d, 6e, 6f, 8) (INSERTED)
+
+Split D of 164.6.6.3 (founder, 2026-10-06, `164.6.6.3-CONTEXT.md` D-01). It delivers items **1,
+6a, 6c, 6d, 6e, 6f and 8** of that phase's list, and runs second (D-02), because item 1 is a rename
+risk and every item is small. **Scout findings at HEAD `c8e87b19` (2026-10-06, code reading;
+re-measure at plan time):**
+- **Item 1.** `StrategyForm.tsx` seeds `name` from `strategy?.name ?? STRATEGY_NAMES[0]` (~84) and
+  renders a `<Select>` of the fixed `STRATEGY_NAMES` list (~315). A name outside the list falls back
+  to "Alpha Centauri", and the edit-mode update writes `name` (~271).
+  - Recommended: the edit form does not own the name; show it read-only and point to Rename
+    (`api/strategies/[id]/name`).
+- **Item 6a.** `recommendations/page.tsx` (~384) renders a `Disclaimer` that `DashboardChrome.tsx`
+  (~168, ~242) already renders; check `portfolios/[id]/page.tsx` (~625) for the same pattern. The
+  "Batch: Fresh" `FreshnessBadge` (~339) carries no date.
+- **Item 6c.** `MobileNav.tsx` (~121): `flex-1` cells at `text-fixed-10`, with no `min-w-0` and no
+  wrap. The clip is unconfirmed from code alone.
+- **Item 6d.** `FactsheetView.tsx` (~1547): `α vs …` sits inside a CSS-`uppercase` container, so α
+  renders as "Α".
+- **Item 6e.** `ApiKeyManager.tsx`: `keys=[]` initially (~301) and the empty state renders before
+  the first load settles (~1633); there is no loaded flag.
+- **Item 6f.** `ShareableLink.tsx` (~234) labels "Get private link" without knowing an active share
+  exists (`strategies/page.tsx` ~807). The factsheet derives `hasActiveShare` from the share row.
+- **Item 8.** `ApiKeyManager.tsx` (~1664) title-cases the exchange id, so "Mt5"; use
+  `src/lib/api-key-label.ts`. The key card's left block lacks `min-w-0` and its actions row lacks
+  `shrink-0`/wrap. 164.5.3 closes only after a founder re-read.
+DESIGN.md governs every visual change.
+
+**Goal:** The small UI defects from the 2026-10-03 UAT pass are gone, starting with the rename risk:
+saving the strategy edit form can no longer change a strategy's name.
+**Requirements**: none in REQUIREMENTS.md; the items above are the spec.
+**Depends on:** Phase 164.6.6.3 (order only, D-02)
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 164.6.6.3.1 to break down)
 
 ### Phase 164.6.6.2: BTCNATIVE — an MT5 account denominated in BTC (or any non-USD currency) reports its returns in its own unit, not as a dust-guarded USD series (INSERTED)
 
