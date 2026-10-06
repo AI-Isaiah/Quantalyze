@@ -740,6 +740,66 @@ stay authorized as the house account, and the job terminal is not logged out.
   none, it is a FAIL routed as a finding.
 - **Record:** "sample observed: yes/no", then each terminal's two yes/no readings.
 
+### Step 2d — add a broker server to BOTH terminals (Phase 164.6.6.3, D-08)
+
+Phase 164.6.6.3 made the analytics service refuse, before any login, a key whose MT5 server is
+not on a curated list. The refusal is the wizard's `KEY_MT5_SERVER_UNKNOWN` card, the wire code
+is `MT5_SERVER_UNKNOWN` (424, recoverable), and the analytics service logs one ERROR line that
+names the sanitised server. This step is the supported remedy: the server goes onto BOTH
+terminals (so the terminal can resolve it) and onto `MT5_KNOWN_SERVERS` (so the pre-check
+admits it). D-08 chose a runbook step over headless resolution, so nothing in the service
+adds a server for you.
+
+⛔ **Every act here is a FOUNDER act.** No agent opens VNC, edits a Railway variable or submits a
+key for you.
+⛔ **Placeholders only.** The repo is public. Write `<Broker>-Live`, `<job-gateway>` and
+`<validation-gateway>` in notes, never a real server name, account number, host or key id.
+⛔ **`servers.dat` is never read by the service (D-14).** The curated list is the only source of
+"known". Reading the terminal's own file is optional measurement, not part of this remedy.
+
+**When it applies.** A validation answered `KEY_MT5_SERVER_UNKNOWN` AND the analytics service's
+ERROR line names the server. A typo and a genuinely new broker look IDENTICAL at that refusal
+(B9). So first confirm with the user that the server name they typed is right, character for
+character. Only then continue.
+
+**Authority and precondition.** Use L7's quiet window, because step 1 holds the job terminal's
+GUI:
+- in the PRODUCTION Supabase project's dashboard Table Editor (a read, so the which-database
+  marker query is not required), `compute_jobs` filtered to `status = running` shows zero rows;
+- the analytics service's Railway logs in the production environment show no MT5 lease
+  activity in the last few minutes.
+
+If either shows activity, wait and re-read. Never open the job terminal's GUI while a job may be
+mid-login.
+
+**Procedure.**
+1. Open VNC to the job gateway (`<job-gateway>`). In the terminal use *File → Open an Account*, search for the
+   broker, select the server, and **stop before creating an account**. Record what the dialog
+   shows, in words (found / not found / needs a further step). RESEARCH A2 is unmeasured: this
+   first run is that measurement, so describe the dialog rather than assuming it.
+2. Do the same on the validation gateway (`<validation-gateway>`).
+3. Tear VNC down on both (remove the port-forward, or the temporary domain). Then take L6's
+   reading.
+4. Add the server's name to `MT5_KNOWN_SERVERS` on the analytics service in Railway. Format:
+   comma-separated; each entry is trimmed and matched case-insensitively; spaces INSIDE a name
+   are kept; the house server (`MT5_SERVER`) is always admitted, so listing it is optional.
+   Example shape: `<Broker>-Live,<Broker>-Demo`. Railway redeploys the service on a variable
+   change, so wait for the redeploy to finish.
+5. Ask the user to submit the key again.
+
+**Post-check.** The analytics ERROR line for that server stops appearing after the redeploy,
+and the new submission reaches the terminal (a lease is taken) instead of being refused.
+
+**Pass criterion, stated so it cannot be over-read.** An investor key at that broker validates
+`read_only` end to end. That is a yes/no reading. A refusal that changes from
+`KEY_MT5_SERVER_UNKNOWN` to some other card is NOT a pass: record the new card's name and route
+it as a finding. A server that is on the list but that a terminal cannot resolve will not
+validate either, which is exactly why steps 1 and 2 come before step 4.
+
+**Record.** "Step 2d: investor key at a newly added broker validates read_only: yes/no", with
+the date, in `164.6.6.3-CONTEXT.md` under `## Live verification`. Paste yes/no, counts and
+kinds only.
+
 ## Step 3 — CREDENTIAL ISOLATION + BROKER ALLOWLISTING (MT5GOLIVE-01)
 
 - The gateway holds ONLY the **one investor login** it syncs (v1 = one serial terminal).

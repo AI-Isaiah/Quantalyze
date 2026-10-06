@@ -1391,6 +1391,8 @@ points them at their credentials. The jobs terminal would hang the same way on a
 resolve it or add the server to both terminals as a runbook step, and make the wizard name the
 real cause. An investor key at that broker validates `read_only` end to end.
 
+**Status 2026-10-06 (Phase 164.6.6.3 plan 07): code half shipped, entry stays human_needed.** Phase 164.6.6.3 plans 04 to 06 shipped the code half: the wizard now names the cause before `login()`, as `KEY_MT5_SERVER_UNKNOWN` (wire code `MT5_SERVER_UNKNOWN`, 424, recoverable), at the router and at the worker adapter. The remedy is runbook Step 2d (`docs/runbooks/mt5-go-live.md`): add the server to BOTH terminals and to `MT5_KNOWN_SERVERS`. This entry closes only on Step 2d's live reading, a founder-run yes/no that an investor key at a newly added broker validates `read_only`. Headless resolution was not attempted (D-08).
+
 ### MT5-SCRUB-OWED-COPY-01 — the wizard shows an owed-scrub refusal as a network timeout (booked 2026-10-05)
 
 **Why it is open.** The recoverable 424 the owed gate returns (Phase 164.6.6.1) reaches the wizard
