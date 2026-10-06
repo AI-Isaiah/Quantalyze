@@ -187,6 +187,13 @@ export function ShareableLink({
         setTimeout(() => setMintFailed(false), 4000);
         return;
       }
+      // Phase 164.6.6.3.1 D-05/D-06 (orchestrator decision 2) — the mint itself
+      // CONFIRMED a live link, so the row reads "Manage private link" once the
+      // copy feedback clears, never "Get private link" over a live link. Set
+      // AFTER the mint resolved (a failed mint returns above and never claims a
+      // live link) and BEFORE the clipboard write: a clipboard failure after a
+      // mint still leaves the link live.
+      setShareLive(true);
       setMinting(false);
     }
     try {
@@ -300,6 +307,16 @@ export function ShareableLink({
           <OwnerUnpublishedPanel
             strategyId={strategyId}
             hasActiveShare={shareLive}
+            // Decision 1 (RESEARCH Q2): a live-to-not-live transition only
+            // arrives after a successful revoke (2xx, or 404 as convergence),
+            // so the Modal closes and the row flips; a failed revoke never
+            // calls this, so the Modal stays open with its alert.
+            // ShareRevokeControl clears its own confirm state before calling
+            // back, so closing in the same tick sets no state after unmount.
+            onShareLiveChange={(live) => {
+              setShareLive(live);
+              if (!live) setPanelOpen(false);
+            }}
           />
         )}
       </Modal>

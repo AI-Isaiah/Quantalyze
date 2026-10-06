@@ -522,7 +522,100 @@ describe("ShareableLink — Manage private link (164.6.6.3.1 D-05)", () => {
     await waitFor(() => expect(closeSpy).toHaveBeenCalledTimes(1));
     expect(screen.queryByRole("button", { name: "Copy share link" })).toBeNull();
     expect(screen.getByRole("button", { name: MANAGE })).toBeTruthy();
-    // keep the minted-url literal referenced for the Task 2 arms below
-    expect(MINTED_URL.length).toBeGreaterThan(0);
   });
+
+  /** Open the Modal from a live row and return the revoke trigger's click path. */
+  async function openLive(): Promise<void> {
+    render(
+      <ShareableLink
+        strategyId={STRATEGY_ID}
+        published={false}
+        hasActiveShare
+        size="sm"
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: MANAGE }));
+    await screen.findByRole("button", { name: "Revoke link" });
+  }
+
+  function confirmRevoke(): void {
+    fireEvent.click(screen.getByRole("button", { name: "Revoke link" }));
+    fireEvent.click(screen.getByRole("button", { name: "Revoke" }));
+  }
+
+  it.each([200, 404])(
+    "a revoke %i closes the Modal through the native close and the row reads Get private link",
+    async (status) => {
+      const closeSpy = vi.spyOn(HTMLDialogElement.prototype, "close");
+      fetchMock.mockResolvedValue({
+        ok: status >= 200 && status < 300,
+        status,
+        json: async () => ({}),
+      });
+      await openLive();
+
+      confirmRevoke();
+
+      await waitFor(() =>
+        expect(screen.getByRole("button", { name: GET })).toBeTruthy(),
+      );
+      expect(closeSpy).toHaveBeenCalledTimes(1);
+      expect(screen.queryByRole("button", { name: "Revoke link" })).toBeNull();
+    },
+  );
+
+  it("a revoke 500 keeps the Modal open with its alert, and the row still reads Manage private link", async () => {
+    const closeSpy = vi.spyOn(HTMLDialogElement.prototype, "close");
+    fetchMock.mockResolvedValue({ ok: false, status: 500, json: async () => ({}) });
+    await openLive();
+
+    confirmRevoke();
+
+    expect(
+      await screen.findByText("Couldn't revoke this link. Try again."),
+    ).toBeTruthy();
+    expect(screen.getByText(MODAL_TITLE)).toBeTruthy();
+    expect(screen.getByRole("button", { name: MANAGE })).toBeTruthy();
+    expect(closeSpy).not.toHaveBeenCalled();
+  });
+
+  it("a successful row mint flips the row to Manage private link once the copy feedback clears", async () => {
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ url: MINTED_URL }),
+    });
+    render(<ShareableLink strategyId={STRATEGY_ID} published={false} size="sm" />);
+
+    fireEvent.click(screen.getByRole("button", { name: GET }));
+
+    await waitFor(() =>
+      expect(screen.getByRole("button").textContent).toMatch(/Link copied!/),
+    );
+    // "Link copied!" clears after 2 s; the idle label must then read Manage,
+    // never "Get private link" over a link the mint just confirmed.
+    await waitFor(
+      () => expect(screen.getByRole("button", { name: MANAGE })).toBeTruthy(),
+      { timeout: 4000 },
+    );
+  });
+
+  it("a failed mint never claims a live link", async () => {
+    fetchMock.mockResolvedValue({ ok: false, status: 500, json: async () => ({}) });
+    render(<ShareableLink strategyId={STRATEGY_ID} published={false} size="sm" />);
+
+    fireEvent.click(screen.getByRole("button", { name: GET }));
+
+    await waitFor(() =>
+      expect(screen.getByRole("button").textContent).toMatch(
+        /Couldn't create the link — try again/,
+      ),
+    );
+    // The failure copy clears after 4 s.
+    await waitFor(
+      () => expect(screen.getByRole("button", { name: GET })).toBeTruthy(),
+      { timeout: 6000 },
+    );
+    expect(screen.queryByRole("button", { name: MANAGE })).toBeNull();
+  }, 10_000);
 });

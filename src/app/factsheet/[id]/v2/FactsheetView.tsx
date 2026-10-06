@@ -893,10 +893,20 @@ export function OwnerUnpublishedNotice({
 export function OwnerUnpublishedPanel({
   strategyId,
   hasActiveShare = false,
+  onShareLiveChange,
   shareNote,
 }: {
   strategyId: string;
   hasActiveShare?: boolean;
+  /**
+   * Phase 164.6.6.3.1 D-05 — a host keeps its OWN label in step with the panel
+   * (the /strategies row's "Manage private link" Modal). Called with the new
+   * live state after a mint (true) and after a revoke 2xx or 404 (false), on
+   * the event path only: never at mount, never inside a state updater, never on
+   * a failed revoke. Absent, nothing is called and every other mount is
+   * byte-identical.
+   */
+  onShareLiveChange?: (live: boolean) => void;
   /**
    * Phase 167.2 / KCS-12 (S7) — what a recipient of this strategy's private
    * link sees right now, rendered as the panel's last child. Only the owner
@@ -905,7 +915,16 @@ export function OwnerUnpublishedPanel({
    */
   shareNote?: string;
 }) {
-  const [shareLive, setShareLive] = React.useState(hasActiveShare);
+  const [shareLive, setShareLiveState] = React.useState(hasActiveShare);
+  // One setter for both children: the panel's own state and the host stay on the
+  // same value. The host callback runs here, on the event path.
+  const setShareLive = React.useCallback(
+    (live: boolean) => {
+      setShareLiveState(live);
+      onShareLiveChange?.(live);
+    },
+    [onShareLiveChange],
+  );
 
   return (
     <div className="mb-6">
