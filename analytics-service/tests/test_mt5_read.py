@@ -29,6 +29,7 @@ from typing import Any
 import pytest
 
 from services.mt5_client import (
+    HOLDER_HOUSE,
     HOLDER_UNKNOWN,
     Mt5AccountMismatchError,
     Mt5ClientError,
@@ -432,6 +433,63 @@ def test_a_recycle_makes_a_settled_key_fresh_again() -> None:
         _note_terminal_holder(tk, HOLDER_UNKNOWN, stage="terminal_recycle")
 
         assert mt5_history_wait_due(tk, _KEY) is True
+    finally:
+        end_mt5_lease_holder(token)
+
+
+@pytest.mark.parametrize(
+    "displacing_holder",
+    [HOLDER_UNKNOWN, HOLDER_HOUSE, "key-2"],
+    ids=["scrub_or_recycle", "house_relaunch", "another_key"],
+)
+def test_a_settled_record_does_not_outlive_the_holder_it_vouched_for(
+    displacing_holder: str,
+) -> None:
+    """SFH-M1. The settled record vouches for a deal cache that sits on the terminal's
+    disk. Any event that moves the holder away from the settled key (a scrub that
+    deletes the trades cache and stamps ``HOLDER_UNKNOWN``, a house relaunch,
+    another key's login) takes that cache away, so the claim must go with it.
+
+    The hole: settle K, scrub, then a FRESH read for K whose wait EXPIRES. That read's
+    login stamps K as the holder again, so "holder == K and settled == K" would call
+    K cached on the next read, which would then take an empty or partial cache as
+    the complete history. Only a read that actually settled may make K cached."""
+    tk = _terminal_key()
+    token = begin_mt5_lease_holder(_KEY)
+    try:
+        _settle_read(
+            _FakeMt5Transport(account=_account(_EXPECTED_LOGIN), deals=_DEALS)
+        )
+        assert mt5_history_wait_due(tk, _KEY) is False
+
+        _note_terminal_holder(tk, displacing_holder, stage="terminal_scrub")
+        assert mt5_history_wait_due(tk, _KEY) is True
+
+        with pytest.raises(Mt5HistoryUnsettledError):
+            _settle_read(
+                _FakeMt5Transport(account=_account(_EXPECTED_LOGIN), deals=[])
+            )
+        # The expired read's login made K the previous holder again; the OLD record
+        # must not be there to complete the pair.
+        assert mt5_terminal_holder(tk) == _KEY
+        assert mt5_history_wait_due(tk, _KEY) is True
+    finally:
+        end_mt5_lease_holder(token)
+
+
+def test_a_re_stamp_of_the_settled_holder_keeps_the_record() -> None:
+    """The invalidation must not over-fire: a lease that logs the SAME settled key in
+    again (the cached read's own login) stamps the same holder, and the key stays
+    cached. Dropping it there would make every cached read pay the wait."""
+    tk = _terminal_key()
+    token = begin_mt5_lease_holder(_KEY)
+    try:
+        _settle_read(
+            _FakeMt5Transport(account=_account(_EXPECTED_LOGIN), deals=_DEALS)
+        )
+        _note_terminal_holder(tk, _KEY, stage="login")
+
+        assert mt5_history_wait_due(tk, _KEY) is False
     finally:
         end_mt5_lease_holder(token)
 

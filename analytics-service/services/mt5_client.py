@@ -789,6 +789,21 @@ def _note_terminal_holder(
             return
     if holder is None:
         holder = _MT5_LEASE_HOLDER.get() or HOLDER_UNATTRIBUTED
+    # ⭐ 164.6.6.3 / D-15 (review SFH-M1) — the settled record vouches for ONE key's
+    # deal cache on this terminal's disk. The moment the terminal is stamped for
+    # anyone else (a scrub or recycle stamps ``HOLDER_UNKNOWN``, a house relaunch
+    # ``HOLDER_HOUSE``, another key's login its own id) that cache is no longer the
+    # one the record vouched for, so the record goes with it. Left in place, a LATER
+    # fresh read of the same key whose wait expired would re-stamp it as the holder
+    # and "holder == key and settled == key" would call an empty or partial cache
+    # complete. Done here, at the one stamping door, because EVERY holder change
+    # passes through it (and an abandoned thread's stamp is refused by the epoch
+    # guard above, so it cannot drop a record it no longer owns). Re-stamping the
+    # SAME key keeps the record: the cached read's own login must not make it pay
+    # the wait. Dropping a claim is always the safe direction (a re-wait), so no
+    # lock is needed beyond the GIL.
+    if _MT5_TERMINAL_HISTORY_SETTLED.get(terminal_key, holder) != holder:
+        _MT5_TERMINAL_HISTORY_SETTLED.pop(terminal_key, None)
     _MT5_TERMINAL_HOLDERS[terminal_key] = holder
 
 
@@ -858,7 +873,9 @@ def mt5_relaunch_debt(terminal_key: str) -> bool:
 # WHAT IT HOLDS. terminal_key -> the api_key_id whose deal history last SETTLED
 # there (`services.mt5_read` settle loop). ONLY that loop's success writes it
 # (`note_mt5_history_settled`), after the stability check AND the POST login
-# bracket passed. `mt5_history_wait_due` is the one reader.
+# bracket passed. `mt5_history_wait_due` is the one reader. It is DROPPED by
+# `_note_terminal_holder` whenever the terminal is stamped for a different holder
+# (review SFH-M1), so a record can never outlive the cache it vouched for.
 #
 # ⛔ LOCK-FREE and IN-PROCESS ONLY, for the `_MT5_TERMINAL_HOLDERS` reasons above:
 # every writer runs under the terminal lease, and a dict store is atomic under the
