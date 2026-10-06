@@ -2959,6 +2959,7 @@ saving the strategy edit form can no longer change a strategy's name.
 **Requirements**: none in REQUIREMENTS.md; the items above are the spec.
 **Depends on:** Phase 164.6.6.3 (order only, D-02)
 ⭐ **Goal superseded in part, 2026-10-06 (CONTEXT D-01/D-02):** the edit form keeps its name picker and a deliberate pick still renames; only an unrelated save can no longer change the name. The goal sentence above is kept as lineage.
+⭐ **Ship decision 2026-10-06 (founder override of the ship gate, AskUserQuestion "Ship open, I check after deploy"):** this phase ships with VERIFICATION `human_needed` (13/13 must-haves). Its 4 UAT items need the deployed site, so the post-deploy reads close it. Detail in `164.6.6.3.1-CONTEXT.md` `## Ship decision`.
 **Plans:** 6 plans in 2 waves
 
 Plans:
