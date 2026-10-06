@@ -298,6 +298,31 @@ describe("StrategiesPage — the share control is always present (SHARE-04)", ()
   });
 });
 
+describe("StrategiesPage — hasActiveShare comes from one read (164.6.6.3.1 D-05)", () => {
+  it("D-05: hasActiveShare reaches each row from one read", async () => {
+    state.strategies = [
+      row("s-a", "draft"),
+      row("s-b", "draft"),
+      row("s-c", "draft"),
+      row("s-p", "published"),
+    ];
+    state.shares = [
+      { strategy_id: "s-a", revoked_at: null },
+      { strategy_id: "s-b", revoked_at: "2026-10-01T00:00:00.000Z" },
+    ];
+
+    await renderPage();
+
+    const byId = new Map(shareProps.map((p) => [p.strategyId, p.hasActiveShare]));
+    expect(byId.get("s-a"), "a non-revoked share is live").toBe(true);
+    // The derivation is in code (`revoked_at === null`), the factsheet's rule:
+    // a revoked row the double hands back must NOT read as live.
+    expect(byId.get("s-b"), "a revoked share is not live").toBe(false);
+    expect(byId.get("s-c"), "no share row is not live").toBe(false);
+    expect(byId.get("s-p"), "a published row is never asked").toBe(false);
+  });
+});
+
 describe("StrategiesPage — N-STRAT row layout (170-05)", () => {
   it("stacks below md, wraps tags whole, and keeps the name link textContent equal to the name", async () => {
     // WHY: at V390 the private-link control overlapped the name, and a
