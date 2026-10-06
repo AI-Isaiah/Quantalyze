@@ -2857,6 +2857,22 @@ Plans:
 - [ ] 164.6.6.3-06-PLAN.md — item 9 worker-adapter parity, plus the multi-key and rotate-secret surfaces (W3)
 - [ ] 164.6.6.3-07-PLAN.md — runbook Step 2d, STATUS_CONTRACT row, TODOS status, owners for the founder readings, the `MT5_KNOWN_SERVERS` gate before merge, and the optional D-03 measurement (auto-defers) (W4)
 
+### Phase 164.6.6.3.5: DOMAINONE — one canonical address: quantalyze-rho.vercel.app redirects to quantalyze.xyz, and the 18 repo mentions of https://quantalyze.com (a domain we do not own; it resolves to an unrelated server) are corrected or removed after checking each for links, emails, OG/canonical URLs and env defaults (INSERTED)
+
+**Goal:** Everyone lands on one address. `quantalyze.xyz` is the project's only custom domain in Vercel. `quantalyze-rho.vercel.app` is Vercel's default address for the same project, and because a login is tied to its domain, a session started on rho does not carry over to `.xyz`. `quantalyze.com` is NOT ours: measured 2026-10-06, it resolves to an unrelated server (a different IP and server header). The repo still names `https://quantalyze.com` 18 times (orchestrator reading, 2026-10-06).
+**Source:** founder decision 2026-10-06 (AskUserQuestion "Book it": redirect rho to quantalyze.xyz and fix the 18 mentions).
+**Requirements**: TBD (no v1.20 requirement IDs)
+**Depends on:** none (ordering only, after 164.6.6.3)
+**Success criteria:**
+1. A request to `quantalyze-rho.vercel.app` (any path) gets a permanent redirect to the same path on `quantalyze.xyz`, measured live. ⚠️ Re-measure at plan time whether preview and per-deployment Vercel URLs must stay reachable, so the redirect does not break preview deploys or the CI checks that use them.
+2. Every `quantalyze.com` mention is re-counted at plan time (the 18 is a reading, not a constant). Each one is classified: a link, an email address, an OG/canonical/metadata URL, an env default, or prose. Each is corrected to `quantalyze.xyz` or removed, and the classification is recorded.
+3. Anything user-facing that pointed at `quantalyze.com` (emails sent, share or OG URLs, auth redirect allow-lists) is checked for live impact, and the result is recorded.
+4. A gate stops a new `quantalyze.com` URL from coming back, and it is shown RED once.
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 164.6.6.3.5 to break down)
+
 ### Phase 164.6.6.3.4: STATUSBRIDGE — a strategy's analytics status reads failed only for an analytics failure: a failed process_key_long is superseded by its later successful follow-on chain, and side kinds that produce no analytics (sync_funding) never pin the analytics status (INSERTED)
 
 Booked 2026-10-06 (founder, via AskUserQuestion). Found by a read-only PROD investigation of AI-FX-35, whose
@@ -2928,6 +2944,7 @@ time):**
 - **Item 6b.** `scenario-factsheet-payload.ts` (~271) `emptyQuantiles()` returns zeros, carried as a
   LOW in `166.2-VERIFICATION.md` ~245. It should be NaN/null rendering "—".
 - Also owns 170.3's OG-card parity half and 170.6's red "—" on OG cards (moved here 2026-10-06; same defects as item 4).
+
 Never invent data: an uncomputable metric is null.
 
 **Goal:** A factsheet, its share card and its scenario never show a number the data cannot support:
@@ -3008,6 +3025,7 @@ re-measure at plan time):**
   `src/lib/api-key-label.ts`. The key card's left block lacks `min-w-0` and its actions row lacks
   `shrink-0`/wrap. 164.5.3 closes only after a founder re-read.
 - Also owns 170.6's "the recommendations disclaimer renders once" (moved here 2026-10-06; same defect as item 6a).
+
 DESIGN.md governs every visual change.
 
 **Goal:** The small UI defects from the 2026-10-03 UAT pass are gone, starting with the rename risk:
@@ -5041,6 +5059,7 @@ Plans:
 ⚠️ **Re-scoped 2026-10-06 (founder, "Ok" to de-duplicating against the 164.6.6.3 split):**
 - "the recommendations disclaimer renders once" **moved to 164.6.6.3.1 UIPOLISH item 6a**;
 - an OG card drawing a non-finite "—" in red **moved to 164.6.6.3.3 FACTSHEETTRUTH item 4**.
+
 This phase keeps signed zeros and non-negative *values* drawn red, plus its other items.
 
 **Goal:** [Urgent work - to be planned]
