@@ -7,11 +7,11 @@
 # Tools -> Options. This reads the same flags in one command.
 #
 # ⛔ READ-ONLY, and deliberately so: it calls initialize() + terminal_info() and
-# NEVER login(). A login() is an "account change"; while
-# `[Experts] Account=1` is armed, MT5 re-clears `Enabled` on every account
-# change, so a probe that logged in would itself re-break the thing it is
-# measuring. That is not hypothetical — it happened during the 2026-08-13
-# investigation, where each diagnostic round re-disabled algo trading.
+# NEVER login(). A login() is an "account change"; while `[Experts] Account=1` is
+# armed, MT5 re-clears `Enabled` on every account change, so a probe that logged
+# in would itself re-break what it measures (2026-08-13: each round re-disabled
+# algo trading). Not armed when re-measured 2026-10-06: trade_allowed stayed true
+# after real per-account logins. Re-check Tools -> Options -> Expert Advisors.
 #
 # ⚠️ Do NOT "improve" this by reading Config/terminal.ini instead. MT5 only
 # rewrites that file on a clean exit, so it can report `Enabled=0` while the
@@ -55,8 +55,10 @@ Reading the result:
   trade_allowed=false  -> THE blocker. Fix in VNC: Tools -> Options -> Expert Advisors,
                           tick "Allow algorithmic trading" AND untick both
                           "...when the account has been changed" / "...when the profile
-                          has been changed". Without those two, the next login turns it
-                          straight back off and you get exactly one working sync.
+                          has been changed". While either is ticked, the next login turns
+                          it straight back off and you get exactly one working sync (both
+                          were unticked when re-measured 2026-10-06: trade_allowed stayed
+                          true after real per-account logins).
   tradeapi_disabled    -> the option the operator-facing error message names. It has been
                           false throughout; it is NOT the blocker. See MT5GW-COPY-01.
 NOTE
