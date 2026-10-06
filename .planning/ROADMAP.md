@@ -2857,6 +2857,41 @@ Plans:
 - [ ] 164.6.6.3-06-PLAN.md — item 9 worker-adapter parity, plus the multi-key and rotate-secret surfaces (W3)
 - [ ] 164.6.6.3-07-PLAN.md — runbook Step 2d, STATUS_CONTRACT row, TODOS status, owners for the founder readings, the `MT5_KNOWN_SERVERS` gate before merge, and the optional D-03 measurement (auto-defers) (W4)
 
+### Phase 164.6.6.3.4: STATUSBRIDGE — a strategy's analytics status reads failed only for an analytics failure: a failed process_key_long is superseded by its later successful follow-on chain, and side kinds that produce no analytics (sync_funding) never pin the analytics status (INSERTED)
+
+Booked 2026-10-06 (founder, via AskUserQuestion). Found by a read-only PROD investigation of AI-FX-35, whose
+analytics row read `failed` while every derive/compute job after its 2026-10-04 password update was `done`.
+**Root cause (at origin/main `12eb8479`; re-measure at plan time):**
+- `sync_strategy_analytics_status` (latest in `supabase/migrations/20261003120000_sync_status_bridge_residues.sql`)
+  has a live-failure CTE (~644-649) that counts every `failed_final` job with no later `done` of the SAME kind.
+  Branch (b) (~914-950) then writes `failed` plus `computation_error_copy(kind)`.
+- AI-FX-35: a `process_key_long` resync failed 2026-10-03 (MT5 -6, the password rotation). Nothing re-runs
+  that kind (the ledger refresh enqueues only derive + compute, and rotate-secret enqueues nothing), so it was
+  never superseded and re-poisoned the row on every successful refresh. Cleared by hand 2026-10-06 ~12:23 UTC:
+  the founder pressed the key card's resync, and the row reads `complete_with_warnings` again. The mechanism stays.
+- Eclipse: `failed` because of 12 non-superseded daily `sync_funding` failures (handler timeout, transient),
+  even though its analytics jobs completed later. Same class.
+- ⛔ The per-kind rule is deliberate: a later `done` of a different kind must never mask a real analytics failure.
+
+**Founder decisions (2026-10-06):**
+- **(i)** A failed `process_key_long` is superseded by a later successful follow-on chain for the same strategy
+  (`derive_broker_dailies` + `compute_analytics_from_csv`), because that chain re-reads the full history.
+- **(ii)** Side kinds that produce no analytics (`sync_funding` and the like) never enter the analytics
+  live-failure set. Their failures surface on the key or job surface instead.
+- Rejected for now: (iii) rotate-secret enqueues a resync.
+
+**Goal:** A strategy's analytics status reads `failed` only for a live analytics failure. A failed
+`process_key_long` is superseded by a later successful follow-on chain, and side kinds never pin the
+analytics status, while a genuine analytics failure is still never masked.
+**Requirements**: TBD
+**Depends on:** Phase 164.6.6.3
+**Gates:** a migration, so migration-reviewer and rls-policy-auditor must be clean before merge. PROD auto-applies
+after `apply-test` with no human stop.
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 164.6.6.3.4 to break down)
+
 ### Phase 164.6.6.3.3: FACTSHEETTRUTH — a factsheet, its share card and its scenario never show a number the data cannot support (164.6.6.3 split C: items 2, 3, 4, 5, 6b) (INSERTED)
 
 Split C of 164.6.6.3 (founder, 2026-10-06, `164.6.6.3-CONTEXT.md` D-01). It delivers items **2,
@@ -2887,6 +2922,9 @@ time):**
   returns null (`status-surface-copy.ts` ~420), so the share note falls to the generic tail while the
   owner line says "could not be built" (D-02 lines, `167.2.1-CONTEXT.md` ~56).
   - Decision owed: copy for "job finished, analytics failed".
+  - ⚠️ 2026-10-06: Eclipse's `failed` comes from the status bridge, not from copy. Twelve non-superseded
+    `sync_funding` failures pin it. Phase 164.6.6.3.4 STATUSBRIDGE owns that mechanism. Re-measure
+    Eclipse after it ships, before deciding the copy here.
 - **Item 6b.** `scenario-factsheet-payload.ts` (~271) `emptyQuantiles()` returns zeros, carried as a
   LOW in `166.2-VERIFICATION.md` ~245. It should be NaN/null rendering "—".
 - Also owns 170.3's OG-card parity half and 170.6's red "—" on OG cards (moved here 2026-10-06; same defects as item 4).
