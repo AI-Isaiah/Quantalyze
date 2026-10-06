@@ -86,6 +86,9 @@ def sfox_enabled_server() -> bool:
 # "probe", "trading", "withdraw") and collide with NONE. Any reword MUST re-run
 # that collision check before landing — a stray "rate"/"trading"/"timeout"
 # substring would silently mis-classify the MT5 failure.
+# MT5_SERVER_UNKNOWN_DETAIL (below) is swept by an EXECUTABLE test,
+# tests/test_mt5_server_known.py::test_server_unknown_detail_collides_with_no_cascade_needle,
+# whose needle list also carries "master password", "broker server" and "etimedout".
 #
 # mt5_enabled_server() mirrors sfox_enabled_server byte-for-byte: fail-CLOSED
 # strict lower-cased "true" (unset / "" / "1" / "on" / "TRUE " all read OFF), read
@@ -101,6 +104,17 @@ MT5_MASTER_PASSWORD_DETAIL = (
 MT5_WRONG_SERVER_DETAIL = (
     "Broker server not found — check the exact server name shown in your MT5 "
     "terminal login window."
+)
+
+# Phase 164.6.6.3 D-09 / D-10 — the refusal for a broker server that is not on the
+# curated list (`services/mt5_probe.py::assert_mt5_server_known`). ⛔ It must NOT
+# contain the words "broker server": `wizardErrors.ts` has a `lower.includes("broker
+# server")` branch (the one MT5_WRONG_SERVER_DETAIL above relies on) that would turn
+# this into KEY_MT5_WRONG_SERVER. `tests/test_mt5_server_known.py::
+# test_server_unknown_detail_collides_with_no_cascade_needle` sweeps every needle.
+MT5_SERVER_UNKNOWN_DETAIL = (
+    "Our MetaTrader terminals do not recognise this server yet. Check the "
+    "spelling of the name; if it is right, we have been notified and will add it."
 )
 
 

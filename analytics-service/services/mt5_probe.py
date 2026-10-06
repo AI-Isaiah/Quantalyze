@@ -45,6 +45,7 @@ their call sites and moving them would delete the rationale.
 from __future__ import annotations
 
 import logging
+import os
 import time
 from collections.abc import Mapping
 from typing import Any, Final
@@ -558,6 +559,180 @@ def _alert_park_failed(cause: str, *, site: str) -> None:
         )
     except Exception:  # noqa: BLE001 — an alert must never replace the verdict
         pass
+
+
+# --------------------------------------------------------------------------- #
+# Phase 164.6.6.3 (D-09, D-10, D-14) - the curated known-server pre-check.
+#
+# ONE function decides whether a broker server is on the list, so the check cannot
+# land on one validate path only (PARITY-01): the router and the worker adapter
+# both call `assert_mt5_server_known`. This block emits NO wire code; the callers
+# translate the two typed refusals below.
+#
+# SOURCE: an env var on the one analytics service (both validate sites run in it),
+# never a committed file, so real broker server names stay out of the public repo.
+# The house server `MT5_SERVER` is always admitted (D-14), so forgetting to list it
+# can never lock the house account out. ⛔ No `servers.dat` reader and no
+# remote-exec of any kind: the list is configuration, not a probe of the terminal.
+#
+# LOGGING SCOPE (read before "fixing" this back to names-only): the sanitised
+# REQUESTED server is logged and captured here, and ONLY here, because D-10 needs
+# the founder to be able to add it, and 153-EVIDENCE-mt5-platform.md B10 records
+# server strings as public reference data. Login and password are NEVER logged. The
+# house server never reaches this line, because it is always admitted, so the value
+# `services/mt5_relogin.py` redacts by value (its broker-server comparison rule,
+# T-164.6.2-12: a value never reaches a log line) stays unlogged for the house
+# session and that rule is unaffected.
+#
+# ⚠️ B9: a typo and a genuinely new broker look IDENTICAL here. The refusal copy
+# says "check the spelling" for that reason.
+# --------------------------------------------------------------------------- #
+
+MT5_KNOWN_SERVERS_ENV: Final[str] = "MT5_KNOWN_SERVERS"
+
+#: The house server's variable NAME, read per call. Only the name is ever logged.
+_MT5_HOUSE_SERVER_ENV: Final[str] = "MT5_SERVER"
+
+_MT5_SERVER_LOG_MAX_CHARS: Final[int] = 64
+
+_SERVER_UNKNOWN_ALERT_WINDOW_S: Final[float] = 3600.0
+
+#: Bound on the dedupe table. The key is user-supplied, so an unbounded dict would be
+#: a memory sink for a flood of distinct junk. At the bound, stale entries are
+#: swept first; if the table is still full the capture is skipped (the ERROR line is
+#: never skipped).
+_SERVER_UNKNOWN_ALERT_MAX_KEYS: Final[int] = 256
+
+_UNCONFIGURED_CAUSE: Final[str] = "known_servers_unconfigured"
+
+_server_unknown_last_alert_at: dict[str, float] = {}
+
+
+def _reset_server_unknown_alerts_for_tests() -> None:
+    """Test-only: forget the per-server capture window."""
+    _server_unknown_last_alert_at.clear()
+
+
+class Mt5ServerUnknownError(Exception):
+    """The requested broker server is not on the curated list.
+
+    A PLAIN ``Exception``: never :class:`Mt5ClientError` (``classify_mt5_login_error``
+    would reroute it to the login-refusal arms) and never ``Mt5ValidationError`` (its
+    ``kind`` Literal is a pinned three-way contract). The message carries no server.
+    """
+
+
+class Mt5KnownServersUnconfigured(Exception):
+    """The effective known-server list is EMPTY: our misconfiguration, not the user's.
+
+    A PLAIN ``Exception`` for the same reasons as :class:`Mt5ServerUnknownError`, and a
+    separate type so a caller never tells every user "your server is unknown" because
+    an operator left ``MT5_KNOWN_SERVERS`` and ``MT5_SERVER`` unset (T-164.6.6.3-17).
+    """
+
+
+def normalise_mt5_server(server: str) -> str:
+    """Trim then case-fold. RESEARCH A3: the terminal's case handling is unmeasured,
+    so the match is forgiving. Spaces inside a name are kept."""
+    return server.strip().casefold()
+
+
+def sanitise_mt5_server_for_log(server: str) -> str:
+    """Printable characters only, at most ``_MT5_SERVER_LOG_MAX_CHARS``.
+
+    The server is user input going onto a log line and into a Sentry message
+    (T-164.6.6.3-12), so newlines and control characters are dropped, not escaped.
+    """
+    printable = "".join(ch for ch in server if ch.isprintable())
+    return printable[:_MT5_SERVER_LOG_MAX_CHARS]
+
+
+def read_env_known_mt5_servers() -> frozenset[str]:
+    """The normalised curated list plus the house server. Read per call; never raises."""
+    names: set[str] = set()
+    for entry in (os.getenv(MT5_KNOWN_SERVERS_ENV) or "").split(","):
+        normalised = normalise_mt5_server(entry)
+        if normalised:
+            names.add(normalised)
+    house = normalise_mt5_server(os.getenv(_MT5_HOUSE_SERVER_ENV) or "")
+    if house:
+        names.add(house)
+    return frozenset(names)
+
+
+def _capture_server_unknown_once(key: str, message: str, tag: str, value: str) -> None:
+    """At most one Sentry capture per ``key`` per window. Never raises."""
+    now = time.monotonic()
+    last = _server_unknown_last_alert_at.get(key)
+    if last is not None and now - last < _SERVER_UNKNOWN_ALERT_WINDOW_S:
+        return
+    if (
+        key not in _server_unknown_last_alert_at
+        and len(_server_unknown_last_alert_at) >= _SERVER_UNKNOWN_ALERT_MAX_KEYS
+    ):
+        for stale in [
+            k
+            for k, at in _server_unknown_last_alert_at.items()
+            if now - at >= _SERVER_UNKNOWN_ALERT_WINDOW_S
+        ]:
+            del _server_unknown_last_alert_at[stale]
+        if len(_server_unknown_last_alert_at) >= _SERVER_UNKNOWN_ALERT_MAX_KEYS:
+            return
+    _server_unknown_last_alert_at[key] = now
+    try:
+        sentry_sdk.set_tag(tag, value)
+        sentry_sdk.capture_message(message, level="error")
+    except Exception:  # noqa: BLE001 - an alert must never replace the verdict
+        pass
+
+
+def assert_mt5_server_known(server: str, *, site: str) -> None:
+    """Raise unless ``server`` is on the curated list or is the house server.
+
+    ``site`` is one of the two closed validate-site literals the callers pass.
+
+    * Empty effective list: one ERROR naming the two variable NAMES only, one deduped
+      capture, :class:`Mt5KnownServersUnconfigured`.
+    * A miss: one ERROR with the sanitised server and the site (on EVERY miss), one
+      capture per sanitised server per window, :class:`Mt5ServerUnknownError`.
+    """
+    known = read_env_known_mt5_servers()
+    if not known:
+        logger.error(
+            "mt5 known-server pre-check: no server is configured to admit (site=%s). "
+            "Set %s and/or %s on the analytics service; every validate is refused "
+            "until one is set",
+            site,
+            MT5_KNOWN_SERVERS_ENV,
+            _MT5_HOUSE_SERVER_ENV,
+        )
+        _capture_server_unknown_once(
+            f"cause:{_UNCONFIGURED_CAUSE}",
+            f"mt5 known-server list is empty: site={site}",
+            "mt5_server_unknown",
+            _UNCONFIGURED_CAUSE,
+        )
+        raise Mt5KnownServersUnconfigured(
+            "no MT5 server is configured to admit"
+        )
+    if normalise_mt5_server(server) in known:
+        return
+    shown = sanitise_mt5_server_for_log(server)
+    logger.error(
+        "mt5 validation refused an unlisted broker server %r (site=%s). A typo and "
+        "a new broker look identical here. To admit it, add it to BOTH MT5 terminals "
+        "and to %s (runbook Step 2d)",
+        shown,
+        site,
+        MT5_KNOWN_SERVERS_ENV,
+    )
+    _capture_server_unknown_once(
+        f"server:{normalise_mt5_server(shown)}",
+        f"mt5 validation refused an unlisted broker server {shown!r}: site={site}",
+        "mt5_server_unknown",
+        "unlisted",
+    )
+    raise Mt5ServerUnknownError("the requested MT5 server is not on the curated list")
 
 
 def is_bridge_glitch(err: Mt5ClientError) -> bool:
