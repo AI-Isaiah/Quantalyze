@@ -232,6 +232,47 @@ def test_timeout_constants_survived_the_move() -> None:
     assert jw._MT5_RESTART_TIMEOUT_S == restart_s
 
 
+def test_history_wait_bound_is_derived() -> None:
+    """164.6.6.3 / D-05, D-15, SC2: the deal-history wait and its poll interval are
+    pinned, and every module that reads them holds the SAME object.
+
+    The expected values are TYPED HERE as literals: the oracle never reads them back
+    from the module under test, so a retune is a deliberate two-place edit.
+
+    * 0 < poll < wait, both finite, so the poll loop can iterate at least once and
+      cannot spin;
+    * `jw` and `mt5_read` re-import the constants from `mt5_concurrency`. An `is`
+      check (not `==`) is what proves neither silently became a second constant
+      that could drift;
+    * the READ budget is untouched: `_MT5_DERIVE_READ_TIMEOUT_S` is still
+      `MT5_REQUEST_TIMEOUT_S + 10.0`, because the wait is ADDED at each call site
+      for a fresh login only, never folded into the shared constant;
+    * the fresh outer bound strictly exceeds the wait, so the helper's own
+      deadline (the wait alone) fires before the outer `wait_for` and a healthy
+      but slow download never reaches the terminal-restart arm."""
+    from services import mt5_read
+    from services.mt5_client import MT5_REQUEST_TIMEOUT_S
+
+    wait_s = mt5_concurrency._MT5_HISTORY_WAIT_S
+    poll_s = mt5_concurrency._MT5_HISTORY_POLL_S
+
+    assert wait_s == 30.0
+    assert poll_s == 2.0
+    for name, value in (("wait", wait_s), ("poll", poll_s)):
+        assert isinstance(value, float), f"{name} must be a float"
+        assert value == value and value != float("inf"), f"{name} must be finite"
+    assert 0 < poll_s < wait_s
+
+    assert jw._MT5_HISTORY_WAIT_S is mt5_concurrency._MT5_HISTORY_WAIT_S
+    assert mt5_read._MT5_HISTORY_WAIT_S is mt5_concurrency._MT5_HISTORY_WAIT_S
+    assert mt5_read._MT5_HISTORY_POLL_S is mt5_concurrency._MT5_HISTORY_POLL_S
+
+    assert (
+        mt5_concurrency._MT5_DERIVE_READ_TIMEOUT_S == MT5_REQUEST_TIMEOUT_S + 10.0
+    ), "the read budget was edited; the wait must be added at the call site instead"
+    assert mt5_concurrency._MT5_DERIVE_READ_TIMEOUT_S + wait_s > wait_s
+
+
 # --------------------------------------------------------------------------- #
 # 5-11 — mt5_terminal_lease (Phase 153.3 plan 04, D-29)
 #

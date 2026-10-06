@@ -6152,6 +6152,54 @@ async def test_mt5_backfill_unsettled_history_is_transient(
 
 
 @pytest.mark.asyncio
+async def test_the_backfill_bound_adds_the_wait_only_for_a_fresh_login(
+    monkeypatch, _mt5_terminal_state,
+):
+    """164.6.6.3 / D-05, D-15, D-16: the backfill's outer bound is the read budget
+    PLUS the settle wait for a fresh login, and the read budget alone for a cached
+    one (the wedge detector must not slacken for a cached read).
+
+    Both are read through `_mt5_conc` at CALL time, which is why they are patched
+    there: a patch aimed anywhere else would be a silent no-op and this case would
+    measure nothing (the 151 review-E2 note).
+
+    Each `history_deals_get` takes 0.4 s against a 0.3 s read budget and a 2.0 s
+    wait. The fresh first run makes two reads (0.8 s) and fits the raised bound.
+    The cached second run makes one read (0.4 s) and must hit the TIMEOUT arm
+    (bounded restart, transient): proof the wait is added only when fresh."""
+    monkeypatch.setenv("MT5_ENABLED", "true")
+    monkeypatch.setenv("MT5_SERVER_UTC_OFFSET_S", "0")
+    from services.job_worker import DispatchOutcome
+
+    monkeypatch.setattr(_mt5_conc, "_MT5_DERIVE_READ_TIMEOUT_S", 0.3)
+    monkeypatch.setattr(_mt5_conc, "_MT5_HISTORY_WAIT_S", 2.0)
+    today = datetime.now(timezone.utc).date()
+    deals, _expected = _mt5_canonical_ledger(today)
+
+    first = _FakeMt5Transport(account=_mt5_account(), deals=deals, hang_s=0.4)
+    first_restarts: list[object] = []
+    _s1, first_db = _mt5_failed_run(monkeypatch, first, restart_spy=first_restarts)
+    r1 = await run_reconstruct_allocator_history_job(_mt5_job())
+    assert r1.outcome == DispatchOutcome.DONE, (r1.error_kind, r1.error_message)
+    assert first_restarts == [] and "shutdown" not in first.calls
+    assert _persisted_by_asof(first_db), "the fresh run persisted nothing"
+
+    second = _FakeMt5Transport(account=_mt5_account(), deals=deals, hang_s=0.4)
+    second_restarts: list[object] = []
+    _s2, second_db = _mt5_failed_run(
+        monkeypatch, second, restart_spy=second_restarts
+    )
+    r2 = await run_reconstruct_allocator_history_job(_mt5_job())
+    assert r2.outcome == DispatchOutcome.FAILED
+    assert r2.error_kind == "transient"
+    assert second_restarts, (
+        "a cached read keeps the plain read budget, so its 0.4 s read reaches the "
+        "timeout arm and the bounded terminal restart"
+    )
+    _assert_nothing_persisted(second_db)
+
+
+@pytest.mark.asyncio
 async def test_mt5_backfill_unclassifiable_deal_is_permanent(
     monkeypatch, _mt5_terminal_state,
 ):
