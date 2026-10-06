@@ -2860,7 +2860,7 @@ Plans:
 ### Phase 164.6.6.3.6: MT5SERVERLEARN — a broker server the terminals can reach is learned on its first successful validation instead of being hand-listed (INSERTED)
 
 **Goal:** A broker server that the terminals can actually reach is learned automatically on its first successful validation, instead of being hand-listed in `MT5_KNOWN_SERVERS`. Phase 164.6.6.3 ships the static list (D-09, D-14) and the Step 2d runbook. This phase replaces the hand-listing, if and only if its first measurement allows it.
-**Source:** founder decision 2026-10-06 (AskUserQuestion "Ship static, book the dynamic phase").
+**Source:** founder decision 2026-10-06 (AskUserQuestion "Ship static, book the dynamic phase"). **Order:** runs NEXT, immediately after 164.6.6.3 ships, ahead of 164.6.6.3.1–.5 in the queue (founder 2026-10-06, AskUserQuestion "Next, right after 164.6.6.3 ships").
 **Requirements**: TBD (no v1.20 requirement IDs)
 **Depends on:** Phase 164.6.6.3 (the known-server pre-check and Step 2d must be on `main`)
 **Success criteria:**
