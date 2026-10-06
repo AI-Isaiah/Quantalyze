@@ -6,10 +6,10 @@ current_phase: 164.6.6.1
 current_phase_name: MT5SCRUB
 status: executing
 stopped_at: 164.6.6.1 re-planned 2026-10-04 after the scrub spike (8 plans, 6 waves, plan-check passed); next execute, plan 02 S-11 checkpoint first
-last_updated: "2026-10-04T18:35:34.545Z"
+last_updated: "2026-10-06T09:14:41.217Z"
 last_activity: 2026-10-04
 last_activity_desc: Phase 164.6.6.1 execution started
-state_head: 7cac3365de25f1721295a1ac9eda892521473db5
+state_head: d7fb1308fd78af99bfa725aa4d4c72e38d94a4c3
 progress:
   total_phases: 94
   completed_phases: 70
@@ -1440,6 +1440,10 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 166.5 inserted after Phase 166: COMPUTEDATSTAMP (founder 2026-10-03) (URGENT)
 - Phase 170.7 inserted after Phase 170: MYSTRATTABLE (founder 2026-10-02) (URGENT)
 - Phase 164.9.6.1 inserted after Phase 164.9.6: SUBSETSHARD: shard the full sql-mutation corpus under the 20-minute cap and let predecessorVerdict tolerate the stale-baseline drift class; founder 2026-10-03, queued after 164.6.6 (URGENT)
+- Phase 164.6.6.3.1 inserted after Phase 164.6.6.3: UIPOLISH: 164.6.6.3 split D (items 1, 6a, 6c-6f, 8); founder 2026-10-06 smart discuss D-01 (URGENT)
+- Phase 164.6.6.3.2 inserted after Phase 164.6.6.3: WIZARDCODES: 164.6.6.3 split B (items 7, 10, item-0 copy); founder 2026-10-06 D-01 (URGENT)
+- Phase 164.6.6.3.3 inserted after Phase 164.6.6.3: FACTSHEETTRUTH: 164.6.6.3 split C (items 2, 3, 4, 5, 6b); founder 2026-10-06 D-01 (URGENT)
+- Phase 164.6.6.3 edited: edited fields: scope (narrowed to items 0 and 9), goal, success_criteria; order D-02: 164.6.6.3, .1, .2, .3
 
 ### Decisions
 
