@@ -58,12 +58,15 @@ export async function POST(req: NextRequest) {
     const wh = new Webhook(secret);
     // verify() throws WebhookVerificationError on bad signature OR if
     // svix-timestamp is older/newer than ±5 minutes (replay-window guard).
-    // On success it returns the parsed JSON payload.
-    payload = wh.verify(rawBody, {
+    // Since svix 2 it returns nothing, so the verified bytes are parsed here;
+    // a body that is not JSON lands in the same catch and 401s, as it did
+    // when verify() parsed it.
+    wh.verify(rawBody, {
       "svix-id": svixId,
       "svix-timestamp": svixTimestamp,
       "svix-signature": svixSignature,
-    }) as ResendWebhookPayload;
+    });
+    payload = JSON.parse(rawBody) as ResendWebhookPayload;
   } catch (err) {
     // Log the verifier exception for ops triage; do NOT echo it in the
     // response (information disclosure). 401 is returned for any failure

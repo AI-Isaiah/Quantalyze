@@ -843,6 +843,44 @@ describe("[WIZ-02] MultiKeyConnectStep — State B rehydration (back-nav)", () =
     ).toBe(false);
   });
 
+  // The race behind the WIZ-02 shard flake (CI, 2026-10-05). `panelsRef` used
+  // to be synced in a passive effect, so a Continue click landing between the
+  // rehydration commit and that effect read the empty pre-rehydration panels:
+  // set-members was posted `keys: []` and `current[0].apiKeyId` threw. The
+  // observer clicks in exactly that gap — synchronously, on the commit that
+  // first renders the button — so the ordering is forced, not left to load.
+  it("a Continue click on the very commit that renders it submits the rehydrated panels", async () => {
+    const fetchSpy = routeRehydrateFetch(MEMBERS);
+    const onSuccess = vi.fn();
+    let clicked = false;
+    const observer = new MutationObserver(() => {
+      const el = document.querySelector('[data-testid="multi-continue"]');
+      if (el && !clicked) {
+        clicked = true;
+        fireEvent.click(el);
+      }
+    });
+    observer.observe(document.body, { childList: true, subtree: true });
+    try {
+      render(
+        <MultiKeyConnectStep
+          wizardSessionId={SESSION}
+          onSuccess={onSuccess}
+          draftStrategyId={STRATEGY_ID}
+        />,
+      );
+      await waitFor(() => expect(onSuccess).toHaveBeenCalled());
+    } finally {
+      observer.disconnect();
+    }
+    expect(clicked).toBe(true);
+    const setCall = fetchSpy.mock.calls.find((c) =>
+      String(c[0]).includes("composite/set-members"),
+    )!;
+    const body = JSON.parse((setCall[1] as RequestInit).body as string);
+    expect(body.keys.map((k: { api_key_id: string }) => k.api_key_id)).toEqual([AK1, AK2]);
+  });
+
   it("stays on single-key State A when the draft has no composite members", async () => {
     const fetchSpy = routeRehydrateFetch([]);
     render(

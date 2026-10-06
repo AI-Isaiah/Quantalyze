@@ -129,6 +129,14 @@ describe("[OBSERV-03] /api/webhooks/resend correlation_id round-trip (Svix-verif
     expect(res.status).toBe(401);
   });
 
+  // svix 2's verify() no longer parses the body, so the route does. A signed
+  // body that is not JSON must still 401 inside the verify catch, never 500.
+  it("rejects a correctly signed body that is not JSON with 401", async () => {
+    const body = "not json";
+    const res = await POST(makeReq(body, signedHeaders(body)) as never);
+    expect(res.status).toBe(401);
+  });
+
   it("Path A: extracts correlation_id from tags array", async () => {
     const body = JSON.stringify({
       type: "email.delivered",

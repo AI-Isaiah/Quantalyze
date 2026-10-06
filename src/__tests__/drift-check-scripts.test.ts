@@ -4473,11 +4473,26 @@ describe("IN-04 — the scratch directory does not survive a fail() path", () =>
         expect(res.stderr).toContain(String(planted));
 
         // The stand-in postmaster is dead, and the data dir is gone.
-        let alive = true;
-        try {
-          process.kill(planted, 0);
-        } catch {
-          alive = false;
+        // Polled, not sampled once: the SIGKILL'd `sleep` was re-parented when
+        // the initdb stub exited, so it lingers as a zombie until init reaps it,
+        // and kill(pid, 0) still succeeds on a zombie. A single sample right
+        // after the lane returned red a CI shard on 2026-10-05 (PR #962) with
+        // the kill already sent. A real D-04 regression leaves `sleep 300`
+        // running, so it still fails after the 5 s budget.
+        const isAliveNotZombie = (pid: number): boolean => {
+          try {
+            process.kill(pid, 0);
+          } catch {
+            return false;
+          }
+          const st = spawnSync("ps", ["-o", "stat=", "-p", String(pid)], { encoding: "utf8" });
+          return !st.stdout.trim().startsWith("Z");
+        };
+        const deadline = Date.now() + 5_000;
+        let alive = isAliveNotZombie(planted);
+        while (alive && Date.now() < deadline) {
+          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+          alive = isAliveNotZombie(planted);
         }
         expect(alive, `the orphan postmaster (pid ${planted}) survived cleanup — D-04 restored`).toBe(false);
         expect(existsSync(join(workdir, "pgd")), "the data dir must still be removed").toBe(false);

@@ -1,5 +1,88 @@
 # Changelog
 
+## [0.125.1.1] - 2026-10-06 — SyncPreviewStep Retry tests describe states where #857 shows Retry
+
+### Tests
+- Ten `SyncPreviewStep` tests asserted the banner's Retry on a sync-progress read of
+  `{ jobStatus: "running", stalled: true }`. Since #857 that read withholds Retry, because the
+  server's resync guard would refuse it, and a real stalled read is always `running`
+  (`isStitchStalled`). They passed only while no 1 s interval tick had copied the in-flight evidence
+  into the render: one extra tick reds them on vitest 4, and vitest 5's timer order runs it. That is
+  what blocked Dependabot #959.
+- `progress.render`: PROG-03 now asserts "may be stuck" and no Retry while the read is live, then
+  Retry once the channel goes dark past `IN_FLIGHT_EVIDENCE_TTL_MS`.
+- `retry-sync.runtime`: the fixture is a settled chain (`failed_final`) whose analytics are not
+  computed, past `SETTLED_WITHOUT_COMPLETE_GRACE_MS`, which is the arm where Retry is legitimate.
+- The component is unchanged. 186/186 `SyncPreviewStep` tests pass on vitest 4 and 5, also with an
+  extra 1000 ms tick before the assertions, and three component neuters each red the expected tests.
+
+## [0.125.1.0] - 2026-10-06 — a wizard Continue race fixed; two shard flakes closed
+
+### Fixed
+- Strategy wizard, multi-key step: clicking Continue right after back-navigation rehydrated the
+  stored keys could submit nothing. `MultiKeyConnectStep` synced its latest-panels ref in a passive
+  effect, so between the rehydration commit (Continue already enabled) and that effect, a click
+  posted `set-members` with `keys: []`. The route refuses an empty set (400
+  `MULTI_KEY_WINDOWS_INVALID`, so no member data was lost) and the user saw "We couldn't save these
+  key windows"; the handler then threw on `current[0].apiKeyId`. The ref now syncs in a layout
+  effect, which runs inside the commit before any event can reach the new controls.
+
+### Root cause
+- This was the `MultiKeyConnectStep` WIZ-02 "order/shard-sensitive" flake `TODOS.md` tracked. It
+  reddened PR #958's `frontend-test (1)` on 2026-10-05: on a loaded shard the test's click landed in
+  the gap above. The entry is marked resolved.
+
+### Tests
+- `MultiKeyConnectStep.test.tsx` gains a test that clicks Continue from a `MutationObserver` on the
+  very commit that renders it. With the passive effect it fails with the same `apiKeyId` TypeError
+  CI logged; with the layout effect it passes.
+- `drift-check-scripts.test.ts` D-04 now polls up to 5 s for the SIGKILLed stand-in postmaster and
+  treats a zombie as dead. The stand-in is a re-parented `sleep`, so `kill(pid, 0)` still succeeded
+  while init had not yet reaped it, and the single sample reddened PR #962's shard 1. With the
+  SIGKILL removed from `scripts/pg-lane/run.sh` the test still fails.
+
+## [0.125.0.10] - 2026-10-05 — production dependency tree back to zero npm audit findings
+
+### Security
+- The nightly `npm-audit` job (`npm audit --omit=dev --audit-level=high`) had been red since at
+  least 2026-09-30 on 13 findings (11 high, 2 moderate). It now reads `found 0 vulnerabilities`.
+- In-range updates via `npm audit fix`: ip-address 10.2.0 → 10.7.3 (SSRF classification
+  bypasses), nanoid 3.3.16 → 3.3.20, browserslist 4.28.2 → 4.29.3, sharp 0.35.3 → 0.35.5
+  (libheif), brace-expansion, fflate, qs, body-parser, express, js-yaml, plus their transitive
+  patch bumps.
+- New `overrides` entry `basic-ftp: ^6.2.1`. The vulnerable 5.x copy is reached only through
+  puppeteer-core's and @lhci's proxy agents (`get-uri` pins `^5`), so `npm audit fix` cannot reach
+  it. Every method `get-uri` calls (`access`, `list`, `lastMod`, `downloadTo`, `close`) still
+  exists in 6.2.2.
+- The existing `sharp` override floor moves from `^0.35.3` (a vulnerable version) to `^0.35.4`.
+
+### Notes
+- The nightly's other red job, `preflight`, is unchanged. It fails on purpose while
+  `STAGING_BASE_URL` is unset, so the nightly as a whole stays red until that is configured.
+- Lockfile built with npm 11, then an npm 10 pass, so CI's `npm ci` (npm 10) accepts it.
+
+## [0.125.0.9] - 2026-10-05 — svix 2 for the Resend webhook (Dependabot #954)
+
+### Changed
+- svix 1.96.1 → 2.6.2, a major version. `Webhook.verify()` now only checks the signature and
+  returns nothing; in 1.x it also returned the parsed body. `/api/webhooks/resend` now parses the
+  verified raw body itself, inside the same `try`, so a bad signature, a stale timestamp or a
+  body that is not JSON all still answer 401 with the same response.
+- `package-lock.json` regenerated so npm 10 (CI's Node 22) accepts it: npm 11 resolves the bump,
+  then an npm 10 pass restores the nested `puppeteer-core` proxy-agent entries npm 11 drops.
+
+### Tests
+- `route.test.ts` gains a correctly signed non-JSON body → 401 case. It fails with a raw
+  `SyntaxError` when the parse is moved outside the verify `try`.
+
+## [0.125.0.8] - 2026-10-05 — rpyc 5.3.1 for the analytics service (Dependabot #958)
+
+### Changed
+- `analytics-service` pins rpyc 5.3.1 (was 5.2.3), a patch release.
+- `requirements.txt` recompiled with the repo's own `uv pip compile --universal` command, so only
+  the rpyc pin moves. Dependabot's own recompile had dropped every platform marker and the
+  `tzdata`, `colorama` and `winloop` entries.
+
 ## [0.125.0.7] - 2026-10-05 — @sentry/nextjs 11 (Dependabot #952)
 
 ### Changed

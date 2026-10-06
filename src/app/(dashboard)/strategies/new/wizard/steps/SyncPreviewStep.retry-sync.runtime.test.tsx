@@ -96,13 +96,25 @@ function installWaitingMock() {
   });
 }
 
-/** `stalled: true` is what renders the interrupted banner + the Retry button. */
-const STALLED_PROGRESS: SyncProgressResponse = {
-  jobStatus: "running",
-  stalled: true,
+/**
+ * The server state in which the banner's Retry legitimately renders: the chain
+ * has settled (`failed_final`) while the analytics status is still not
+ * computed, so after `SETTLED_WITHOUT_COMPLETE_GRACE_MS` (60 s) the banner comes
+ * up with its Retry.
+ *
+ * 2026-10-05 — `jobStatus` is deliberately NOT in flight. This fixture used to
+ * be `{ jobStatus: "running", stalled: true }`, but since #857 ("Retry only
+ * when needed") a read saying a job is in flight withholds the Retry, because
+ * the server's resync guard would refuse it, and a real stalled read is always
+ * `running` (`isStitchStalled`). It passed only while no 1 s tick had mirrored
+ * the evidence into the render; vitest 5's timer order runs that tick.
+ */
+const SETTLED_PROGRESS: SyncProgressResponse = {
+  jobStatus: "failed_final",
+  stalled: false,
   memberProgress: [
     { seq: 1, exchange: "deribit", label: "Key A", status: "successful" },
-    { seq: 2, exchange: "bybit", label: null, status: "in_process" },
+    { seq: 2, exchange: "bybit", label: null, status: "degraded" },
   ],
 };
 
@@ -148,7 +160,7 @@ function installFetchMock() {
         return next;
       }
       if (url.includes("/sync-progress")) {
-        return new Response(JSON.stringify(STALLED_PROGRESS), { status: 200 });
+        return new Response(JSON.stringify(SETTLED_PROGRESS), { status: 200 });
       }
       return new Response("{}", { status: 200 });
     });
@@ -162,8 +174,12 @@ const baseProps = {
   onTryAnotherKey: vi.fn(),
 };
 
-/** Mount, run the kickoff, and let one poll tick surface the stalled banner. */
-async function renderStalled() {
+/**
+ * Mount, run the kickoff, let the first poll tick read the settled chain, then
+ * wait out the 60 s settled-without-complete grace so the banner and its Retry
+ * render.
+ */
+async function renderSettled() {
   render(<SyncPreviewStep {...baseProps} />);
   await act(async () => {
     await vi.advanceTimersByTimeAsync(0);
@@ -173,6 +189,9 @@ async function renderStalled() {
   });
   await act(async () => {
     await vi.advanceTimersByTimeAsync(0);
+  });
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(65_000);
   });
 }
 
@@ -207,7 +226,7 @@ describe("⭐ [140.5-03 / SEAMPROSE-02] SyncPreviewStep.handleRetrySync — the 
     // Without this the three cases below would pass vacuously — a button that
     // never renders cannot be clicked into the wrong behaviour.
     syncPostQueue = [kickoffAccepted()];
-    await renderStalled();
+    await renderSettled();
     expect(screen.getByTestId("wizard-sync-interrupted")).toBeInTheDocument();
     expect(screen.getByTestId("wizard-sync-retry")).toBeInTheDocument();
   });
@@ -219,7 +238,7 @@ describe("⭐ [140.5-03 / SEAMPROSE-02] SyncPreviewStep.handleRetrySync — the 
       kickoffAccepted(),
       denied(429, "RATE_LIMITED", "60"),
     ];
-    await renderStalled();
+    await renderSettled();
     await clickRetrySync();
 
     const envelope = screen.getByTestId("error-envelope");
@@ -235,7 +254,7 @@ describe("⭐ [140.5-03 / SEAMPROSE-02] SyncPreviewStep.handleRetrySync — the 
     // TRAP-3. Naming a duration nobody advertised turns a vague error into a
     // specific lie, so the wait must be ABSENT rather than defaulted.
     syncPostQueue = [kickoffAccepted(), denied(429, "RATE_LIMITED")];
-    await renderStalled();
+    await renderSettled();
     await clickRetrySync();
 
     expect(screen.getByTestId("error-envelope")).toHaveAttribute(
@@ -252,7 +271,7 @@ describe("⭐ [140.5-03 / SEAMPROSE-02] SyncPreviewStep.handleRetrySync — the 
     // map does not pretend to be total, because a map that does turns an
     // unfamiliar code into a silent undefined state.
     syncPostQueue = [kickoffAccepted(), denied(401, "Unauthorized")];
-    await renderStalled();
+    await renderSettled();
     await clickRetrySync();
 
     const envelope = screen.getByTestId("error-envelope");
@@ -267,7 +286,7 @@ describe("⭐ [140.5-03 / SEAMPROSE-02] SyncPreviewStep.handleRetrySync — the 
     // shared table can translate — the roster carries no member for it — so this
     // case fails if the else-branch were given a roster-only lookup.
     syncPostQueue = [kickoffAccepted(), denied(503, "CIRCUIT_OPEN", "30")];
-    await renderStalled();
+    await renderSettled();
     await clickRetrySync();
 
     expect(screen.getByTestId("error-envelope")).toHaveAttribute(
@@ -282,17 +301,18 @@ describe("⭐ [140.5-03 / SEAMPROSE-02] SyncPreviewStep.handleRetrySync — the 
     // change that routed every retry into `gate_failed` would satisfy every
     // assertion above and destroy the happy path.
     syncPostQueue = [kickoffAccepted(), kickoffAccepted()];
-    await renderStalled();
+    await renderSettled();
     await clickRetrySync();
 
     expect(screen.queryByTestId("error-envelope")).toBeNull();
-    // The stalled flag is cleared, so the interrupted banner drops.
+    // The fresh attempt restarts the settled grace, so the interrupted banner
+    // drops.
     expect(screen.queryByTestId("wizard-sync-interrupted")).toBeNull();
   });
 
   it("the retry POST is the SAME idempotent kickoff shape (no new protocol)", async () => {
     syncPostQueue = [kickoffAccepted(), denied(429, "RATE_LIMITED", "60")];
-    await renderStalled();
+    await renderSettled();
     const spy = vi.mocked(globalThis.fetch);
     const before = spy.mock.calls.filter((c) =>
       String(c[0]).includes("/api/keys/sync"),
@@ -344,13 +364,13 @@ describe("[140.5-03 / SEAMPROSE-03] SyncPreviewStep — the fifth transport catc
           throw new Error("offline");
         }
         if (url.includes("/sync-progress")) {
-          return new Response(JSON.stringify(STALLED_PROGRESS), { status: 200 });
+          return new Response(JSON.stringify(SETTLED_PROGRESS), { status: 200 });
         }
         return new Response("{}", { status: 200 });
       },
     );
 
-    await renderStalled();
+    await renderSettled();
     await clickRetrySync();
 
     expect(screen.queryByTestId("error-envelope")).toBeNull();
@@ -371,7 +391,7 @@ describe("[140.5-03 / SEAMPROSE-03] SyncPreviewStep — the fifth transport catc
   it("[164.6.5-07 / D-14] the retry's envelope carries the id sent on THE RETRY, not the kickoff's", async () => {
     syncPostQueue = [kickoffAccepted(), denied(401, "Unauthorized")];
     const fetchSpy = installFetchMock();
-    await renderStalled();
+    await renderSettled();
     await clickRetrySync();
 
     const envelope = screen.getByTestId("error-envelope");
