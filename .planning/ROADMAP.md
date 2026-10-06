@@ -105,7 +105,7 @@ phases below carry the corrections, not the bullets.
 - [x] **Phase 164.5.4: MT5RECON-GAP — the MT5 backfill path and the login-error classifier both fail silently** (INSERTED)
 - [x] **Phase 164.6: GATE-HYGIENE — every gate-hygiene item that left 164.1: the OPS-08 residue, the composite-stamp twin, the reviewer execution-status rule, the RED-UNDER convention's discoverability and the audit allowlist** (INSERTED)
 - [x] **Phase 164.6.1: MYPYSTRICT — the strict gate claims to cover all running-service code and does not cover the module that IS the service** (INSERTED)
-- [ ] **Phase 164.6.2: MT5RELOGIN — the MT5 gateway re-establishes its broker session without a human** (INSERTED) — verification: human_needed
+- [x] **Phase 164.6.2: MT5RELOGIN — the MT5 gateway re-establishes its broker session without a human** (INSERTED) — verified 2026-10-06 (completed 2026-10-06; was `human_needed` 2026-09-15 → 2026-10-06, closed by plan 06)
 - [x] **Phase 164.6.3: CIDOCSPATH — a docs-only PR stops running the code gates, and a code PR is proven to still run every one of them** (INSERTED)
 - [x] **Phase 164.6.4: MT5KEEPALIVE — nothing TRIGGERS a recovery, so the terminal sits dark for hours while recovery itself takes minutes** (INSERTED)
 - [x] **Phase 164.6.5: MT5VALIDATEWEDGE — MT5 key validation stops destroying the shared terminal, and the terminal self-heals** (INSERTED) — verified 2026-10-06 (completed 2026-10-06; was `human_needed` 2026-09-26 → 2026-10-06)
@@ -3058,7 +3058,7 @@ Plans:
 **Requirements**: TBD (no v1.20 requirement IDs) + TODOS `MT5-GATEWAY-LOGIN-01`
 
 **Depends on:** Phase 164.6 (ordering only). ⚠️ Founder-gated at criterion 2 — it can be BUILT without the founder and cannot be CLOSED without them, so it must not block Phase 164.6.3.
-**Plans:** 5/5 plans executed
+**Plans:** 6/6 plans complete
 
 Plans:
 
@@ -5047,7 +5047,7 @@ kept verbatim.
 | 164.5.4 MT5RECON-GAP | 6/6 | Complete | #835 |
 | 164.6 GATE-HYGIENE | 5/5 | Complete | v0.90.0.0 · #854 |
 | 164.6.1 MYPYSTRICT | 2/2 | Complete | v0.87.1.0 · #847 |
-| 164.6.2 MT5RELOGIN | 5/5 on main | Shipped — verification `human_needed`: founder/post-deploy checks pending, not closed; plan 06 not yet started | v0.77.43.x · #797/#799 |
+| 164.6.2 MT5RELOGIN | 6/6 | Complete — plan 06 settled question THREE STALE | 2026-10-06 · v0.77.43.x · #797/#799 |
 | 164.6.3 CIDOCSPATH | 5/5 | Complete | v0.77.40.0 · #791 |
 | 164.6.4 MT5KEEPALIVE | 5/5 | Complete | #800 |
 | 164.6.5 MT5VALIDATEWEDGE | 8/8 | Complete    | 2026-10-06 · v0.96.0.0 · #863 |

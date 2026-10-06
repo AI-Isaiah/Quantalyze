@@ -180,6 +180,7 @@ no VERIFICATION.md exists for this phase yet, and this repo's own rule is that p
 is decided by verification status, never by plan counts.**
 
 Phase: 164.6.6.1 (MT5SCRUB) — EXECUTING
+Phase: 164.6.2 (MT5RELOGIN) — COMPLETE 2026-10-06 (plan 06 settled question THREE as STALE; VERIFICATION passed, verified_at_sha ad37851d; ships with the chore/close-164.6.5-165 PR)
 Phase: 164.9.6 (SUBSETMAIN) and 164.5.2.1 (BRIDGERESIDUE) — COMPLETE 2026-10-03 (verification passed; PR #936 v0.120.0.0 and PR #937 v0.121.0.0 merged; migration 20261003120000 applied to TEST and PROD)
 Phase: 164.9.4 (CIOFFMUTEX) — COMPLETE 2026-10-03 (verification passed on the ship run 37072653692; PR #880 merged, v0.119.0.0)
 Phase: 160 / 164.3 / 168 — close-out 2026-10-03 (SECURITY.md for 160 and 164.3; verification frontmatter to convention; 164.3 plan 07 stays deferred)
