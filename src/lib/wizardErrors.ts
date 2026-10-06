@@ -4976,8 +4976,9 @@ export const VENUE_WIRE_CODE_TO_VERDICT: ReadonlyMap<
   // Phase 164.6.6.3 / item 9 (D-09, D-10) — minted by the Python known-server
   // pre-check in `_validate_mt5_key_probe`, before any client, lease or `login()`.
   // Status 424 on the row, equal to the emitter's own status, per this table's
-  // discipline. Reached from `POST /api/validate-key` (the wizard connect surface);
-  // the rotate-secret route and the worker adapter follow in plan 06.
+  // discipline. Reached from `POST /api/validate-key` (the wizard connect surface)
+  // and, through `_validate_mt5_key`, from `rotate_key_secret`; the worker adapter's
+  // call of the same check and the remaining TypeScript surfaces follow in plan 06.
   //
   // ⭐ WHY THE ROW IS NOT OPTIONAL BESIDE THE MINT — same mechanism as the
   // `SIGN_IN_FAILED` row above: the table is resolved BEFORE the substring cascade, and
