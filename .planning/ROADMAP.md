@@ -2846,10 +2846,16 @@ credentials.
 4. A server missing from the terminals' known-server list returns a distinct, recoverable wizard
    outcome before `login()` runs, with an ERROR line. A known server's -10005 still reads as
    sign-in failed (D-09 to D-11). A runbook step covers adding a server to both terminals (D-08).
-**Plans:** 0 plans
+**Plans:** 7 plans
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 164.6.6.3 to break down)
+- [ ] 164.6.6.3-01-PLAN.md — the history wait on the derive path: settle loop, per-(terminal, key) settled record, conditional derived bound, transient unsettled arm (W1)
+- [ ] 164.6.6.3-02-PLAN.md — the same wait at the full-backfill caller (D-16), plus the bound/constants pin (W2)
+- [ ] 164.6.6.3-03-PLAN.md — the ONE flip commit: `History wait shipped` line + `_JOB_TERMINAL_DELETE_TRADES = 1`, the trades-fault ERROR arm, the prose sweep (W3)
+- [ ] 164.6.6.3-04-PLAN.md — item 9 shared seam: the curated `MT5_KNOWN_SERVERS` pre-check, typed refusals, deduped ERROR/Sentry alert; no wire code yet (W1)
+- [ ] 164.6.6.3-05-PLAN.md — item 9 router end to end: 424 `MT5_SERVER_UNKNOWN` before `login()`, `KEY_MT5_SERVER_UNKNOWN` verdict/copy/connect-step row, every Python and TS census in the same wave (W2)
+- [ ] 164.6.6.3-06-PLAN.md — item 9 worker-adapter parity, plus the multi-key and rotate-secret surfaces (W3)
+- [ ] 164.6.6.3-07-PLAN.md — runbook Step 2d, STATUS_CONTRACT row, TODOS status, owners for the founder readings, the `MT5_KNOWN_SERVERS` gate before merge, and the optional D-03 measurement (auto-defers) (W4)
 
 ### Phase 164.6.6.3.3: FACTSHEETTRUTH — a factsheet, its share card and its scenario never show a number the data cannot support (164.6.6.3 split C: items 2, 3, 4, 5, 6b) (INSERTED)
 
@@ -2915,6 +2921,18 @@ third (D-02). **Scout findings at HEAD `c8e87b19` (2026-10-06; re-measure at pla
   ~2786) is wrong for a history that has not settled.
 - Wire-code rosters and census pins move together (`seam-venue-vocabulary.invariant.test.ts`,
   `EXPECTED_TABLE_SIZE`-style pins). Grep them; never count by hand.
+- ⭐ **Handoff from 164.6.6.3 (planned 2026-10-06; re-measure at plan time).**
+  - 164.6.6.3 plan 05 adds a FIFTH router emitter of `MT5_GATEWAY_UNCONFIGURED`. The trigger is
+    the empty known-server list (`MT5_KNOWN_SERVERS` and `MT5_SERVER` both unset), raised from
+    `_validate_mt5_key_probe` after the endpoint check.
+  - 164.6.6.3 plan 06 adds a second configuration-`RuntimeError` raise to `Mt5Adapter.validate`.
+    That raise is not a wire code.
+  - Item 7's new env-gap code must cover the fifth emitter too.
+  - The item-0 failure this phase words is `error_kind="transient"` plus the fixed message
+    `_MT5_HISTORY_UNSETTLED_MESSAGE` (derive) and `_MT5_BACKFILL_MESSAGES["history_unsettled"]`
+    (backfill). It is not a new DB `error_kind`: 164.6.6.3 D-13 decided against one.
+  - 164.6.6.3 also adds wire `MT5_SERVER_UNKNOWN` and wizard `KEY_MT5_SERVER_UNKNOWN` to the same
+    rosters, so rebase this phase's census moves onto those counts.
 
 **Goal:** The MT5 wizard names the real cause for an unconfigured validation gateway, for a terminal
 that is briefly busy (an owed scrub or a held lease), and for a fresh account whose history has not
