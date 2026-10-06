@@ -358,6 +358,140 @@ describe("ApiKeyManager — H-0395 loud-fail on api_keys load failure", () => {
 });
 
 /**
+ * Phase 164.6.6.3.1 plan 02 / D-03 (UAT item 6e) — the key card must not claim
+ * "No API keys connected." while the FIRST read is still in flight. `keys`
+ * starts as `[]`, so before this fix the empty sentence painted for the whole
+ * read (measured ~20 s on PROD, 2026-10-03) over a user who has keys. The first
+ * read is a three-way fact: pending ("Loading keys…"), failed (the H-0395 error
+ * card), or answered-and-empty (the sentence). Each test renders SYNCHRONOUSLY
+ * (never inside `await act(async ...)`, which would flush the read) so the
+ * pending frame is the one under test.
+ */
+describe("ApiKeyManager — D-03 the first key read is pending, failed, or empty, never all three", () => {
+  beforeEach(() => {
+    routerRefreshMock.mockReset();
+    selectResultMock.mockReset();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  function deferredRead<T>() {
+    let resolve!: (value: T) => void;
+    const promise = new Promise<T>((r) => {
+      resolve = r;
+    });
+    return { promise, resolve };
+  }
+
+  const LOADING = "Loading keys…";
+
+  it("says Loading keys… and never the empty sentence while the first read is pending, then the sentence once a clean read answers empty", async () => {
+    const read = deferredRead<unknown>();
+    selectResultMock.mockReturnValue(read.promise);
+
+    render(<ApiKeyManager strategyId="strat-1" currentKeyId={null} />);
+
+    const caption = screen.getByText(LOADING);
+    expect(caption).toHaveAttribute("role", "status");
+    expect(caption).toHaveAttribute("aria-live", "polite");
+    expect(screen.queryByText(/No API keys connected/)).not.toBeInTheDocument();
+
+    await act(async () => {
+      read.resolve({ data: [], error: null });
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText(/No API keys connected/)).toBeInTheDocument();
+    });
+    expect(screen.queryByText(LOADING)).not.toBeInTheDocument();
+  });
+
+  it("a failed first read shows the error card, never the caption and never the empty sentence", async () => {
+    const read = deferredRead<unknown>();
+    selectResultMock.mockReturnValue(read.promise);
+
+    render(<ApiKeyManager strategyId="strat-1" currentKeyId={null} />);
+    expect(screen.getByText(LOADING)).toBeInTheDocument();
+
+    await act(async () => {
+      read.resolve({ data: null, error: { message: "permission denied for table api_keys" } });
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText(/Couldn't load your API keys/)).toBeInTheDocument();
+    });
+    expect(screen.queryByText(LOADING)).not.toBeInTheDocument();
+    expect(screen.queryByText(/No API keys connected/)).not.toBeInTheDocument();
+  });
+
+  it("a first read that THROWS shows the error card, never a stuck caption and never the empty sentence", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      selectResultMock.mockImplementation(() => {
+        throw new Error("socket hang up");
+      });
+
+      await act(async () => {
+        render(<ApiKeyManager strategyId="strat-1" currentKeyId={null} />);
+      });
+
+      await waitFor(() => {
+        expect(screen.getByText(/Couldn't load your API keys/)).toBeInTheDocument();
+      });
+      expect(screen.queryByText(LOADING)).not.toBeInTheDocument();
+      expect(screen.queryByText(/No API keys connected/)).not.toBeInTheDocument();
+      // The failure is logged, with the error object only (no key id, no label).
+      expect(consoleError).toHaveBeenCalledWith(
+        "[ApiKeyManager] api_keys first read threw:",
+        expect.any(Error),
+      );
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  it("a re-read after the first settled read never brings the caption back", async () => {
+    selectResultMock.mockReturnValueOnce({ data: null, error: { message: "network error" } });
+
+    await act(async () => {
+      render(<ApiKeyManager strategyId="strat-1" currentKeyId={null} />);
+    });
+    await waitFor(() => {
+      expect(screen.getByText(/Couldn't load your API keys/)).toBeInTheDocument();
+    });
+
+    // Hold the Retry read open: this is the frame where a reset flag would
+    // paint the caption again.
+    const retry = deferredRead<unknown>();
+    selectResultMock.mockReturnValueOnce(retry.promise);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /Retry/i }));
+    });
+    expect(screen.queryByText(LOADING)).not.toBeInTheDocument();
+
+    await act(async () => {
+      retry.resolve({
+        data: [
+          {
+            id: "key-1",
+            exchange: "binance",
+            label: "My Binance",
+            last_sync_at: null,
+          },
+        ],
+        error: null,
+      });
+    });
+    await waitFor(() => {
+      expect(screen.getByText("My Binance")).toBeInTheDocument();
+    });
+    expect(screen.queryByText(LOADING)).not.toBeInTheDocument();
+  });
+});
+
+/**
  * M-0456 (audit-2026-05-07) — ApiKeyManager swapped its api_keys read from a
  * broad projection to the `API_KEY_USER_COLUMNS` allowlist. The static
  * sec-005-api-keys-projection regex test catches a `.select("*")` regression,

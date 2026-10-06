@@ -299,6 +299,11 @@ export function ApiKeyManager({
    */
   const linkControlsAllowed = keyShape === "single";
   const [keys, setKeys] = useState<ApiKey[]>([]);
+  // D-03 (164.6.6.3.1): `keys` starts as `[]`, so without this flag the empty
+  // sentence paints for the whole first read over a user who has keys. Set by
+  // every arm that SETTLES a read (clean, failed, thrown), never by the
+  // superseded early return, and never reset: a re-read keeps the list it has.
+  const [firstReadSettled, setFirstReadSettled] = useState(false);
   const [showForm, setShowForm] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -464,6 +469,8 @@ export function ApiKeyManager({
       // Surface a distinct, retryable error state and keep whatever keys we
       // had — never let the failure collapse into the empty "no keys" UI.
       setLoadError(message);
+      // D-03: a failed read is a settled read; the error card owns the screen.
+      setFirstReadSettled(true);
       return { ok: false, subjectStatus: prevStatus, subjectPresent: prevPresent };
     }
     const subjectRow = data.find((k) => k.id === lastAttemptedKeyIdRef.current);
@@ -473,6 +480,8 @@ export function ApiKeyManager({
     // Reached only on a clean response: clear any prior load error so a
     // successful retry restores the normal list / genuine-empty state.
     setLoadError(null);
+    // D-03: a clean read, empty or not, settles the first read.
+    setFirstReadSettled(true);
     if (data) {
       setKeys(data);
       // NEW-C37-04: derive lastSyncAt from the key that was actually synced
@@ -494,7 +503,17 @@ export function ApiKeyManager({
   }, [currentKeyId, retireSuccessIf]);
 
   useEffect(() => {
-    loadKeys();
+    // D-03: a THROWN first read (the client threw before any response) used to
+    // be a dropped promise: no error state and no settled flag, so the card
+    // fell through to "No API keys connected." (H-0395: a failure is never "no
+    // keys"). It settles into the same retryable load-error card instead.
+    // `loadKeys` itself is not wrapped, so the terminal re-read keeps its own
+    // catch and capture. Logs the error object only, no key id or label.
+    loadKeys().catch((err: unknown) => {
+      console.error("[ApiKeyManager] api_keys first read threw:", err);
+      setLoadError(err instanceof Error ? err.message : "The key list read failed.");
+      setFirstReadSettled(true);
+    });
   }, [loadKeys]);
 
   /**
@@ -1637,7 +1656,19 @@ export function ApiKeyManager({
         </Card>
       )}
 
-      {listedKeys.length === 0 && !loadError && !showForm && (
+      {/* D-03 (164.6.6.3.1): the one honest line while the FIRST read is in
+          flight. Same box as the empty state so the swap moves no layout. No
+          spinner or skeleton (DESIGN.md Motion), and muted, never red or amber:
+          waiting is not a fault. */}
+      {!firstReadSettled && !showForm && (
+        <Card>
+          <p role="status" aria-live="polite" className="text-sm text-text-muted text-center py-4">
+            Loading keys…
+          </p>
+        </Card>
+      )}
+
+      {firstReadSettled && listedKeys.length === 0 && !loadError && !showForm && (
         <Card>
           <p className="text-sm text-text-muted text-center py-4">
             {/* H-2: a card with no Add Key never invites one (KCS-EMPTY-NOLINK). */}
