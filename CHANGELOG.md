@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.125.1.2] - 2026-10-06 — vitest 5 (Dependabot #959)
+
+### Changed
+- vitest 4.1.10 → 5.0.3 and `@vitest/coverage-v8` ^4.1.10 → ^5.0.3, a major version. Dependabot
+  left coverage-v8 on ^4, but it peers on the exact vitest version, so both move together.
+- vitest 5 runs fake timers in a different order. That exposed ten `SyncPreviewStep` tests that had
+  passed by timing alone; v0.125.1.1 re-wrote their fixtures first, so this bump changes no test.
+- `package-lock.json`: npm 10 crashes resolving this upgrade (`Cannot read properties of null
+  (reading 'edgesOut')` in arborist's peer-set loader), so npm 11 resolves it and an npm 10 pass
+  then restores the nested `puppeteer-core` proxy-agent entries npm 11 drops. `npm ci` under npm 10
+  (CI's Node 22) accepts the result.
+- CI names the blob-report path on both sides: the `frontend-test` shards write
+  `--outputFile.blob=.vitest-reports/blob-<shard>-2.json` and `frontend-coverage` reads
+  `--merge-reports=.vitest-reports`. vitest 5 moved the blob default from `.vitest-reports/` to
+  `.vitest/blob/`. On the first CI run both shards passed every test (9026 and 9596), then failed
+  their upload step on "No files were found", so coverage had nothing to merge.
+
+### Notes
+- Locally, the full suite on vitest 5 passes apart from the two `compute.conventions` snapshot
+  cases, which fail on vitest 4 too under the local Node 25. CI runs Node 22.
+
 ## [0.125.1.1] - 2026-10-06 — SyncPreviewStep Retry tests describe states where #857 shows Retry
 
 ### Tests
