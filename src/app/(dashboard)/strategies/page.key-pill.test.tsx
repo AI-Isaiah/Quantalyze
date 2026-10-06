@@ -136,6 +136,12 @@ const state = vi.hoisted(() => ({
   // Phase 164.6.6.3.1 D-05/D-06 Wave 0: the `strategy_shares` read plan 05 adds to the page.
   shares: [] as { strategy_id: string; revoked_at: string | null }[],
   sharesError: null as { message: string } | null,
+  /**
+   * Phase 164.6.6.3.1 D-06 (plan-check A1): when set, the `strategy_shares` arm
+   * returns this answer verbatim, so a test can express the non-array answer
+   * `{ data: null, error: null }` that the seeded-error path cannot.
+   */
+  sharesAnswer: null as ReadResult | null,
   /** get_user_compute_jobs answers, per p_strategy_id. */
   jobs: {} as Record<string, unknown[]>,
   jobsError: null as { message: string } | null,
@@ -311,9 +317,11 @@ vi.mock("@/lib/supabase/server", () => ({
           : { data: state.members, error: null };
       } else if (table === "strategy_shares") {
         // Phase 164.6.6.3.1 D-05/D-06 Wave 0, mirroring the strategy_keys arm.
-        result = state.sharesError
-          ? { data: null, error: state.sharesError }
-          : { data: state.shares, error: null };
+        result = state.sharesAnswer
+          ? state.sharesAnswer
+          : state.sharesError
+            ? { data: null, error: state.sharesError }
+            : { data: state.shares, error: null };
       } else if (table === "api_keys") {
         result = state.keysError
           ? { data: null, error: state.keysError }
@@ -417,6 +425,7 @@ beforeEach(() => {
   // Phase 164.6.6.3.1 D-05/D-06 Wave 0.
   state.shares = [];
   state.sharesError = null;
+  state.sharesAnswer = null;
   state.jobs = {};
   state.jobsError = null;
   state.jobsThrow = false;
@@ -1440,5 +1449,119 @@ describe("StrategiesPage — an errored read is never rendered as healthy or emp
 
     expect(container.textContent).not.toContain(KEY_STATUS_UNREADABLE);
     expect(captureToSentryMock).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * Phase 164.6.6.3.1 D-05/D-06 — the live-link read behind "Manage private link".
+ *
+ * WHY these assertions: the row may claim a live link only for a link the page
+ * CONFIRMED. So the read is ONE batched `.in()` over the unpublished ids (no
+ * per-row read, no read at all with nothing to ask about), it selects two
+ * columns and never the token inputs (`nonce`, `generation`), and when it fails
+ * the failure is logged and captured with TAGS ONLY (no id, no row), because an
+ * unlogged failure would read as "no link" and a logged one carrying ids would
+ * leak them. The fail-closed half (every row reads "Get private link") is in
+ * page.share-affordance.test.tsx, where the row probe records `hasActiveShare`.
+ * Literals are typed here, never imported.
+ */
+describe("StrategiesPage — the strategy_shares read (164.6.6.3.1 D-05/D-06)", () => {
+  const shareCalls = () => state.calls.filter((c) => c.table === "strategy_shares");
+
+  it("D-05: one strategy_shares read carries every unpublished id and no published id", async () => {
+    state.strategies = [
+      row("s-draft-1"),
+      row("s-pub", { status: "published" }),
+      row("s-draft-2"),
+      row("s-pending", { status: "pending_review" }),
+    ];
+
+    await renderPage();
+
+    const ins = shareCalls().filter((c) => c.op === "in");
+    expect(ins, "exactly one batched read, never one per row").toHaveLength(1);
+    expect(ins[0].args[0]).toBe("strategy_id");
+    expect([...(ins[0].args[1] as string[])].sort()).toEqual(
+      ["s-draft-1", "s-draft-2", "s-pending"],
+    );
+    expect(ins[0].args[1]).not.toContain("s-pub");
+    const selects = shareCalls().filter((c) => c.op === "select");
+    expect(selects).toHaveLength(1);
+    // Two columns, never `nonce` or `generation` (the MAC inputs).
+    expect(selects[0].args).toEqual(["strategy_id, revoked_at"]);
+  });
+
+  it("zero unpublished rows issue no strategy_shares read", async () => {
+    state.strategies = [
+      row("s-pub-1", { status: "published" }),
+      row("s-pub-2", { status: "published" }),
+    ];
+
+    await renderPage();
+
+    expect(shareCalls()).toEqual([]);
+  });
+
+  it("D-06: a failed share read is logged and captured with tags only", async () => {
+    state.strategies = [row("s-draft-1"), row("s-draft-2")];
+    state.sharesError = { message: "synthetic share read failure" };
+
+    await renderPage();
+
+    expect(consoleError).toHaveBeenCalledWith(
+      "[strategies/page] active-share read failed",
+      "synthetic share read failure",
+    );
+    const captured = captureToSentryMock.mock.calls.filter(
+      (c) => (c[1] as { tags?: { stage?: string } })?.tags?.stage === "active-share",
+    );
+    expect(captured).toHaveLength(1);
+    expect(captured[0][0]).toBeInstanceOf(Error);
+    expect(captured[0][1]).toEqual({
+      tags: { route: "strategies/page", stage: "active-share" },
+    });
+    // Neither the message nor the context may carry a strategy id.
+    const blob = JSON.stringify([
+      (captured[0][0] as Error).message,
+      captured[0][1],
+    ]);
+    expect(blob).not.toContain("s-draft-1");
+    expect(blob).not.toContain("s-draft-2");
+  });
+
+  it("D-06: a non-array answer is a failure too", async () => {
+    state.strategies = [row("s-draft-1")];
+    state.sharesAnswer = { data: null, error: null };
+
+    await renderPage();
+
+    expect(consoleError).toHaveBeenCalledWith(
+      "[strategies/page] active-share read failed",
+      "strategy_shares read returned a non-array answer",
+    );
+    const captured = captureToSentryMock.mock.calls.filter(
+      (c) => (c[1] as { tags?: { stage?: string } })?.tags?.stage === "active-share",
+    );
+    expect(captured).toHaveLength(1);
+    expect(captured[0][1]).toEqual({
+      tags: { route: "strategies/page", stage: "active-share" },
+    });
+  });
+
+  it("a healthy share read logs and captures nothing under active-share", async () => {
+    state.strategies = [row("s-draft-1")];
+    state.shares = [{ strategy_id: "s-draft-1", revoked_at: null }];
+
+    await renderPage();
+
+    expect(consoleError).not.toHaveBeenCalledWith(
+      "[strategies/page] active-share read failed",
+      expect.anything(),
+    );
+    expect(
+      captureToSentryMock.mock.calls.filter(
+        (c) => (c[1] as { tags?: { stage?: string } })?.tags?.stage === "active-share",
+      ),
+    ).toEqual([]);
   });
 });

@@ -26,6 +26,9 @@ import { join } from "node:path";
 import React from "react";
 
 vi.mock("server-only", () => ({}));
+// Phase 164.6.6.3.1 D-06: the page captures a failed share read; this file
+// asserts the fail-closed rows, so it only needs the capture to be inert.
+vi.mock("@/lib/sentry-capture", () => ({ captureToSentry: vi.fn() }));
 
 vi.mock("next/link", () => ({
   default: ({ children, href }: { children: React.ReactNode; href: string }) =>
@@ -320,6 +323,35 @@ describe("StrategiesPage — hasActiveShare comes from one read (164.6.6.3.1 D-0
     expect(byId.get("s-b"), "a revoked share is not live").toBe(false);
     expect(byId.get("s-c"), "no share row is not live").toBe(false);
     expect(byId.get("s-p"), "a published row is never asked").toBe(false);
+  });
+});
+
+describe("StrategiesPage — a failed share read fails closed (164.6.6.3.1 D-06)", () => {
+  it("D-06: a failed share read leaves every row on Get private link, even when rows came back with the error", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      state.strategies = [row("s-a", "draft"), row("s-b", "draft")];
+      // POISONED on purpose (Wave 0 double): the rows come back TOGETHER with
+      // the error. A page that used them despite the error would mark s-a live.
+      state.shares = [{ strategy_id: "s-a", revoked_at: null }];
+      state.sharesError = { message: "synthetic share read failure" };
+
+      await renderPage();
+
+      expect(shareProps).toHaveLength(2);
+      for (const p of shareProps) {
+        expect(
+          p.hasActiveShare,
+          `row ${p.strategyId} must not claim a live link nobody confirmed`,
+        ).toBe(false);
+      }
+      expect(consoleError).toHaveBeenCalledWith(
+        "[strategies/page] active-share read failed",
+        "synthetic share read failure",
+      );
+    } finally {
+      consoleError.mockRestore();
+    }
   });
 });
 
