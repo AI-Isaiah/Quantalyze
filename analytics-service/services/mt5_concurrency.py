@@ -92,6 +92,25 @@ _MT5_DERIVE_READ_TIMEOUT_S: Final[float] = float(
     os.getenv("MT5_DERIVE_READ_TIMEOUT_S", str(_MT5_REQUEST_TIMEOUT_S + 10.0))
 )
 
+# Phase 164.6.6.3 / D-05 (Finding C) — the deal-history SETTLE budget: how long a
+# FRESH login's `read_mt5_deal_ledger` may keep re-reading `history_deals_get`
+# while MT5 finishes downloading a new account's history. It is the settle budget
+# ONLY (D-05's "about 30 s"), never the outer bound.
+#
+# ⛔ THE OUTER `asyncio.wait_for` BOUND IS NEVER A STORED CONSTANT. Each call site
+# computes it as `_MT5_DERIVE_READ_TIMEOUT_S + _MT5_HISTORY_WAIT_S` (only for a
+# fresh login), reading both module attributes AT CALL TIME, so the tests that move
+# `_MT5_DERIVE_READ_TIMEOUT_S` keep biting. The helper's own deadline (this budget)
+# fires before that bound, so a healthy but slow download never reaches the
+# terminal-restart arm. Plain constant, no env override: RESEARCH A1's tuning is a
+# code change after the founder's live read.
+_MT5_HISTORY_WAIT_S: Final[float] = 30.0
+
+# The gap between two settle-loop reads. Also the tunable RESEARCH A1 names: one
+# interval of an unchanged non-zero (or immaterial-zero) count is what "settled"
+# means, so a longer interval is a stricter test. Plain constant, no env override.
+_MT5_HISTORY_POLL_S: Final[float] = 2.0
+
 # MT5CONC-01 (Phase 137 plan 01): the wall-clock ceiling on an ACTIVE terminal
 # restart (bounded shutdown + re-connect) invoked on the derive read-timeout
 # branch. The 10s magnitude mirrors exchange.py:_ACLOSE_TIMEOUT_S — a bounded

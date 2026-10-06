@@ -133,6 +133,11 @@ from services.mt5_client import Mt5Session  # the worker's mt5 exchange holder
 #     `mt5_terminal_lease`, `_Mt5PostReadVerificationError`
 # — and only those four are patchable here.
 #
+# ⭐ 164.6.6.3 — `_MT5_HISTORY_WAIT_S` is a FIFTH name this module reads (the derive
+# call site adds it to the outer bound for a fresh login), so a test that moves the
+# bound patches it HERE (`jw._MT5_HISTORY_WAIT_S`), and one that moves the helper's
+# own settle budget patches `services.mt5_read._MT5_HISTORY_WAIT_S`.
+#
 # `_MT5_RESTART_TIMEOUT_S`, `_MT5_TERMINAL_LOCKS` and — NEW, this is the part
 # that changed — `_mt5_terminal_lock_for` are now re-exports NOTHING here reads.
 # `_mt5_bounded_restart` reads the first from `services.mt5_concurrency`, and
@@ -147,6 +152,7 @@ from services.mt5_client import Mt5Session  # the worker's mt5 exchange holder
 # through this module's binding.
 from services.mt5_concurrency import (
     _MT5_DERIVE_READ_TIMEOUT_S,
+    _MT5_HISTORY_WAIT_S,
     _MT5_RESTART_TIMEOUT_S,
     _MT5_TERMINAL_LOCKS,
     _mt5_bounded_restart,
@@ -4952,11 +4958,21 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 site=SITE_DERIVE,
             ):
                 try:
+                    # ⭐ 164.6.6.3 / D-04, D-05 (Finding C) — a FRESH login waits for
+                    # its deal history to settle, and the outer bound is DERIVED from
+                    # the two symbols (the read's own budget plus the wait), never
+                    # hand-picked. The helper's deadline (the wait alone) fires
+                    # before this bound, so a healthy but slow download never reaches
+                    # the terminal-restart arm below.
                     _mt5_info, _mt5_deals = await asyncio.wait_for(
                         asyncio.to_thread(
-                            read_mt5_deal_ledger, _mt5_session, now=_mt5_now
+                            read_mt5_deal_ledger,
+                            _mt5_session,
+                            now=_mt5_now,
+                            settle_history=True,
+                            material_equity_floor_usd=_DERIBIT_EMPTY_LEDGER_FLOOR_USD,
                         ),
-                        timeout=_MT5_DERIVE_READ_TIMEOUT_S,
+                        timeout=_MT5_DERIVE_READ_TIMEOUT_S + _MT5_HISTORY_WAIT_S,
                     )
                 except asyncio.TimeoutError:
                     # A hang is a CLASSIFIED, RETRYABLE transient — NEVER permanent,

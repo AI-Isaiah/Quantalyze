@@ -148,6 +148,39 @@ def _validation_scrub_never_reaches_a_real_terminal_or_project(monkeypatch):
     mt5_terminal_scrub._reset_terminal_scrub_state_for_tests()
 
 
+# Phase 164.6.6.3 / D-04 — the MT5 deal-history settle loop never sleeps for real.
+#
+# Every derive and backfill test starts FRESH now: `reset_terminal_state_for_tests`
+# (autouse, above) empties the holder registry, so `mt5_history_wait_due` says "wait"
+# and `read_mt5_deal_ledger` polls. A real `time.sleep` would add a poll interval to
+# each of those tests, and a real clock would busy-spin a never-settling case for the
+# whole 30 s budget (RESEARCH Pitfall 1). So the loop gets a per-test fake clock
+# whose sleep ADVANCES time instead of waiting (`tests/test_mt5_relogin.py::_FakeClock`'s
+# shape, copied rather than imported). This fixture runs first, so a test that wants
+# its own clock patches over it.
+class _Mt5ReadFakeClock:
+    def __init__(self) -> None:
+        self.now = 1_000.0
+        self.sleeps: list[float] = []
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+
+@pytest.fixture(autouse=True)
+def _mt5_read_never_sleeps_for_real(monkeypatch):
+    from services import mt5_read
+
+    clock = _Mt5ReadFakeClock()
+    monkeypatch.setattr(mt5_read, "_clock", clock.monotonic)
+    monkeypatch.setattr(mt5_read, "_sleep", clock.sleep)
+    return clock
+
+
 # Phase 134 (smoothed_mtm kill-switch): the v1.14 smoothed THIRD pass ships DARK
 # behind SMOOTHED_MTM_ENABLED (services.closed_sets.is_smoothed_mtm_enabled),
 # default OFF. The Phase 131-133 tests were written when the pass ran

@@ -143,9 +143,16 @@ class _FakeMt5Transport:
         shutdown_hang_s: float = 0.0,
         second_account: dict | None = None,
         post_read_exc: Exception | None = None,
+        deals_by_call: list[list[dict]] | None = None,
     ) -> None:
         self._account = account
         self._deals = deals
+        # 164.6.6.3 / D-04 (Finding C): when set, the Nth `history_deals_get` call
+        # returns the Nth list and the LAST list repeats — a history that arrives
+        # AFTER the first read (a fresh login's download still running). `None`
+        # keeps the single-list `deals` behaviour byte-identical.
+        self._deals_by_call = deals_by_call
+        self._history_calls = 0
         self._login_ok = login_ok
         self._deals_none = deals_none
         self._read_exc = read_exc
@@ -196,6 +203,10 @@ class _FakeMt5Transport:
             raise self._read_exc
         if self._deals_none:
             return None
+        if self._deals_by_call is not None:
+            idx = min(self._history_calls, len(self._deals_by_call) - 1)
+            self._history_calls += 1
+            return tuple(_NT(d) for d in self._deals_by_call[idx])
         return tuple(_NT(d) for d in self._deals)
 
     def order_check(self, **request):  # noqa: ANN001 - unused by the derive branch
@@ -435,6 +446,10 @@ async def test_mt5_routes_one_backbone(monkeypatch) -> None:
         # MT5DEAL-01: deals materialize on the FAR side of the wire, so the
         # source crossing is a real round-trip and is recorded as one.
         "execute",
+        # 164.6.6.3 / D-04: this is a FRESH login (the registry is empty), so the
+        # settle loop makes one confirmation read before the POST bracket.
+        "history_deals_get",
+        "execute",
         "account_info",
     ]
 
@@ -455,6 +470,54 @@ async def test_mt5_routes_one_backbone(monkeypatch) -> None:
     assert any(
         c[1].get("p_kind") == "compute_analytics_from_csv" for c in enqueues
     )
+
+
+# ---------------------------------------------------------------------------
+# 2b — 164.6.6.3 / D-04 (Finding C): a FRESH login's deal history arrives after
+# the first read. THE tracer for item 0.
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_fresh_login_history_arriving_late_is_read_once_settled(
+    monkeypatch,
+) -> None:
+    """Finding C (`164.6.6-CONTEXT.md` `## Live verification 2026-10-04`, measured
+    twice with about 62k and 141k USD of equity): the derive is the jobs terminal's
+    FIRST login of a new account, `history_deals_get` is read about one second
+    after authorization, MT5 has not finished downloading the history, and the
+    read comes back EMPTY. The combine then sees zero usable days and stamps a
+    funded account permanently with "<2 usable daily-return days".
+
+    D-04: a fresh login polls until the deal count is stable across consecutive
+    reads. Here the first read is empty and every later one is the full ledger, so
+    the helper must read THREE times (empty, full, full-again-as-the-confirmation)
+    and persist the full series. On the pre-phase code the single empty read was
+    refused permanently."""
+    monkeypatch.setenv("MT5_ENABLED", "true")
+    transport = _FakeMt5Transport(
+        account={"equity": 110_500.0, "balance": 110_500.0, "login": 123456},
+        deals=[],
+        deals_by_call=[[], _canonical_deals()],
+    )
+    ctx, capture = _build_ctx(transport, asset_class="traditional")
+    with _apply(_patches(ctx)):
+        result = await run_derive_broker_dailies_job(_job())
+
+    assert result.outcome == DispatchOutcome.DONE, (
+        f"a late-arriving history must be waited for, not refused; "
+        f"kind={result.error_kind!r} msg={result.error_message!r}"
+    )
+    assert transport.calls.count("history_deals_get") == 3
+    rows = _csv_rows(capture)
+    # The same hand literals test_mt5_routes_one_backbone asserts (NEVER read back
+    # from the SUT).
+    assert rows["2025-06-02"] == pytest.approx(400 / 100_000, abs=1e-12)
+    assert rows["2025-06-03"] == pytest.approx(0.0, abs=1e-12)
+    assert rows["2025-06-04"] == pytest.approx(300 / 100_400, abs=1e-12)
+    assert rows["2025-06-05"] == pytest.approx(-200 / 110_700, abs=1e-12)
+    # No permanent "failed" stamp on the strategy.
+    for name, payload, _oc in capture["upserts"]:
+        if name == "strategy_analytics" and isinstance(payload, dict):
+            assert payload.get("computation_status") != "failed", payload
 
 
 # ---------------------------------------------------------------------------
@@ -850,6 +913,9 @@ async def test_mt5_hung_read_restart_on_timeout(monkeypatch) -> None:
     # Read bound well under the hang so the wait_for fires; the hang is a BOUNDED
     # real sleep so the abandoned reader thread drains and can never hang CI.
     monkeypatch.setattr(jw, "_MT5_DERIVE_READ_TIMEOUT_S", 0.1)
+    # 164.6.6.3 / D-05: a fresh login's bound is the read budget PLUS the settle
+    # wait; zero the wait so the bound this test measures stays 0.1 s.
+    monkeypatch.setattr(jw, "_MT5_HISTORY_WAIT_S", 0.0)
     transport = _FakeMt5Transport(
         account={"equity": 110_500.0, "balance": 110_500.0, "login": 123456},
         deals=_canonical_deals(),
@@ -914,6 +980,9 @@ async def test_mt5_restart_itself_bounded(monkeypatch) -> None:
     test stops testing what its name claims WITHOUT going red."""
     monkeypatch.setenv("MT5_ENABLED", "true")
     monkeypatch.setattr(jw, "_MT5_DERIVE_READ_TIMEOUT_S", 0.1)
+    # 164.6.6.3 / D-05: a fresh login's bound is the read budget PLUS the settle
+    # wait; zero the wait so the bound this test measures stays 0.1 s.
+    monkeypatch.setattr(jw, "_MT5_HISTORY_WAIT_S", 0.0)
     monkeypatch.setattr(mt5_conc, "_MT5_RESTART_TIMEOUT_S", 0.05)
     read_hang, shutdown_hang = 0.3, 1.0  # genuine hangs the bounds must cut short
     transport = _FakeMt5Transport(
@@ -1256,15 +1325,19 @@ async def test_mt5_login_bracket_post_hijack(monkeypatch) -> None:
     assert result.error_kind == "transient"
     assert len(connects) == 2, "the POST-bracket mismatch must also restart"
     # The deal read DID run (PRE passed), then the POST bracket re-read and rejected
-    # — the first four terminal calls are the full read sequence (a trailing
+    # — the first eight terminal calls are the full read sequence (a trailing
     # "shutdown" from the bounded restart follows).
-    assert transport.calls[:6] == [
+    assert transport.calls[:8] == [
         "initialize",
         "login",
         "account_info",
         "history_deals_get",
         # MT5DEAL-01: deals materialize on the FAR side of the wire, so the
         # source crossing is a real round-trip and is recorded as one.
+        "execute",
+        # 164.6.6.3 / D-04: this is a FRESH login (the registry is empty), so the
+        # settle loop makes one confirmation read before the POST bracket.
+        "history_deals_get",
         "execute",
         "account_info",
     ]
@@ -1355,6 +1428,10 @@ async def test_mt5_post_read_transient_blip_is_not_permanent(monkeypatch) -> Non
         "history_deals_get",
         # MT5DEAL-01: deals materialize on the FAR side of the wire, so the
         # source crossing is a real round-trip and is recorded as one.
+        "execute",
+        # 164.6.6.3 / D-04: this is a FRESH login (the registry is empty), so the
+        # settle loop makes one confirmation read before the POST bracket.
+        "history_deals_get",
         "execute",
         "account_info",
     ]
