@@ -5967,6 +5967,15 @@ const DASHBOARD_DIALOG_ROUTE_CODES: ReadonlyMap<
       // try the last action again: the Retry that 167's D-08 names as the
       // harmful action against a terminal that will not answer.
       "KEY_MT5_TERMINAL_UNRESPONSIVE",
+      // 164.6.6.3 plan 06 (D-09, D-10) — the unlisted-broker-server verdict, on the
+      // same footing as the row above. `rotate_key_secret` runs
+      // `_validate_mt5_key_probe`, which now answers wire `MT5_SERVER_UNKNOWN` (424)
+      // before any terminal is touched, and the code reaches this route through
+      // `seamCode`. Omit this line and the membership check rejects the honest code
+      // and the dialog renders `UNKNOWN`, whose copy names no cause. The copy gates
+      // the connect-surface bullets, so this dialog (no draft, no form) shows Retry
+      // and neither of those two lines.
+      "KEY_MT5_SERVER_UNKNOWN",
     ]),
   ],
 ]);

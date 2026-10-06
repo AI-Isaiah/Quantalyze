@@ -4383,6 +4383,32 @@ describe("[164.6.5 / criterion 5] the wedged-terminal arm renders honest, non-re
 });
 
 /**
+ * [164.6.6.3 plan 06 / D-09, D-10] `KEY_MT5_SERVER_UNKNOWN` — the unlisted-broker-server
+ * verdict, as every key surface receives it.
+ *
+ * The wire body is `{detail, code: "MT5_SERVER_UNKNOWN", recoverable: true}` at 424;
+ * the seam client lifts `code` onto `seamCode`, which is all the classifier reads.
+ * The oracle for "Retry renders" is `buildEnvelope`'s derivation, never the `actions`
+ * array read back (same convention as the wedged-terminal block above).
+ */
+describe("[164.6.6.3 plan 06] the unlisted-server arm is recognised on every key surface", () => {
+  it("a 424 MT5_SERVER_UNKNOWN wire code classifies to KEY_MT5_SERVER_UNKNOWN, by machine code", () => {
+    // The message would classify differently under the substring cascade (it contains
+    // "server" and "sign in" tokens other branches match), so only `seamCode` can win.
+    const result = classifyKeyValidationError({
+      seamCode: "MT5_SERVER_UNKNOWN",
+      message: "could not sign in to this server",
+    });
+    expect(result).toEqual({ code: "KEY_MT5_SERVER_UNKNOWN", status: 424 });
+  });
+
+  it("derives recoverable: true, so the Retry control renders", () => {
+    const envelope = buildEnvelope("KEY_MT5_SERVER_UNKNOWN", "corr-srv-1");
+    expect(envelope.recoverable).toBe(true);
+  });
+});
+
+/**
  * [153.1-04 / WIZFORM-02] THE TEN NEW MEMBERS, AS A CLASS.
  *
  * ⚠️ WHY A SWEEP AND NOT TEN CASES. The plan's acceptance criteria were three

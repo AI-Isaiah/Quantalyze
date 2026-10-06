@@ -282,6 +282,36 @@ describe("UpdateMt5SecretDialog", () => {
     expect(envelope.textContent).not.toMatch(/draft/i);
   });
 
+  // 164.6.6.3 plan 06 (D-09, D-10). `rotate_key_secret` runs the same
+  // `_validate_mt5_key_probe`, which now refuses an unlisted broker server with wire
+  // `MT5_SERVER_UNKNOWN` before any terminal is touched. Without its roster row the
+  // recogniser answers `UNKNOWN` and the owner is told nothing about the server.
+  // Unlike the wedged terminal above, THIS code is recoverable (a corrected spelling
+  // clears it). Expected text is typed here, not read from the table.
+  it("KEY_MT5_SERVER_UNKNOWN is recognised, not UNKNOWN, and hides the connect-surface bullets", async () => {
+    const envelope = await submitAndFailWith("KEY_MT5_SERVER_UNKNOWN");
+    expect(envelope.textContent).toContain(
+      "Our MetaTrader terminals do not recognise this broker server yet.",
+    );
+    expect(envelope.textContent).not.toContain("Try the last action again.");
+    // ⚠️ No Retry-button assertion, and that is deliberate: this dialog passes
+    // `ErrorEnvelope` no `onRetry`, so no code renders a Retry control here, and an
+    // assertion would be a plan premise nothing in the dialog can honour. The
+    // recoverable verdict itself is gated in `wizardErrors.test.ts`
+    // (`buildEnvelope("KEY_MT5_SERVER_UNKNOWN").recoverable === true`).
+    // The connect-surface bullets speak of a submitted form and a wizard draft. This
+    // dialog has neither, so they must not render here (D-10).
+    expect(envelope.textContent).not.toContain(
+      "Check the server name against the one shown in your MT5 terminal",
+    );
+    expect(envelope.textContent).not.toContain("Your draft is saved.");
+    // Non-vacuity: the surface-free bullet still renders, so the two absences above
+    // are about the gated slots and not about an empty list.
+    expect(envelope.textContent).toContain(
+      "If the name is right, we have been notified and will add the server.",
+    );
+  });
+
   it("the submit button is disabled while the field is empty", () => {
     render(
       <UpdateMt5SecretDialog

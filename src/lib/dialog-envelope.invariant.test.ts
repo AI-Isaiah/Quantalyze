@@ -818,7 +818,14 @@ describe("[161-10 / WIZERR-07] the dashboard-dialog envelope population", () => 
     // read `expected 34 to be 33` with the row added and the pin unmoved. The
     // copy entry and the `VENUE_WIRE_CODE_TO_VERDICT` row already existed, so
     // no other census moved (the three sibling suites stayed green).
-    expect(checked).toBe(34);
+    //
+    // 34 -> 35 at 164.6.6.3 plan 06 (D-09, D-10): the rotate-secret roster gained
+    // KEY_MT5_SERVER_UNKNOWN — wire MT5_SERVER_UNKNOWN (424), minted by the same
+    // `_validate_mt5_key_probe` `rotate_key_secret` runs, reached through the same
+    // `seamCode`. 15 -> 16 on that one roster, 34 -> 35 overall. The copy entry and the
+    // `VENUE_WIRE_CODE_TO_VERDICT` row already existed (plan 05), so no other census
+    // moved.
+    expect(checked).toBe(35);
   });
 
   it("B. no rostered code is the generic terminal — that would defeat the roster", () => {
