@@ -1393,6 +1393,8 @@ real cause. An investor key at that broker validates `read_only` end to end.
 
 **Status 2026-10-06 (Phase 164.6.6.3 plan 07): code half shipped, entry stays human_needed.** Phase 164.6.6.3 plans 04 to 06 shipped the code half: the wizard now names the cause before `login()`, as `KEY_MT5_SERVER_UNKNOWN` (wire code `MT5_SERVER_UNKNOWN`, 424, recoverable), at the router and at the worker adapter. The remedy is runbook Step 2d (`docs/runbooks/mt5-go-live.md`): add the server to BOTH terminals and to `MT5_KNOWN_SERVERS`. This entry closes only on Step 2d's live reading, a founder-run yes/no that an investor key at a newly added broker validates `read_only`. Headless resolution was not attempted (D-08).
 
+**2026-10-06 (plan 07, D-03 / D-14): the optional founder-led `servers.dat` / headless-resolution measurement was deferred, not run.** It is optional, never blocks item 0, and could only change the detection SOURCE in a later phase. The founder booked **Phase 164.6.6.3.6 MT5SERVERLEARN** the same day to replace the static `MT5_KNOWN_SERVERS` list with learn-on-successful-validation, gated on this same headless-resolution measurement. Its research input is `.planning/phases/164.6.6.3.6-mt5serverlearn-a-broker-server-the-terminals-can-reach-is-le/164.6.6.3.6-BROKER-SERVERS.md`.
+
 ### MT5-SCRUB-OWED-COPY-01 — the wizard shows an owed-scrub refusal as a network timeout (booked 2026-10-05)
 
 **Why it is open.** The recoverable 424 the owed gate returns (Phase 164.6.6.1) reaches the wizard
