@@ -748,6 +748,7 @@ def reconstruct_mt5_nav_levels(
     account_balance: float,
     *,
     server_utc_offset_s: int = 0,
+    floors: UnitFloors = USD_FLOORS,
 ) -> tuple[pd.Series, dict[str, Any]]:
     """The NAV-**LEVELS** sibling of ``combine_mt5_deal_ledger`` — same ledger, same
     fold, same arithmetic core, but it returns DOLLAR BALANCES instead of daily
@@ -806,6 +807,10 @@ def reconstruct_mt5_nav_levels(
     makes, so the DQ-01 guard flags, the uPnL-wedge flag and the MT5-12
     ``series_completeness`` verdict are identical facts about ONE reconstruction rather
     than two independently-derived opinions that could drift apart.
+
+    ``floors`` is the account unit's threshold row (``services.account_unit``) and is
+    forwarded to that meta call ONLY: the ``reconstruct_nav`` roll above it is
+    unit-neutral arithmetic, so the levels themselves never depend on it.
     """
     daily_pnl_series, flows = _fold_mt5_deals(deals, server_utc_offset_s)
 
@@ -842,6 +847,7 @@ def reconstruct_mt5_nav_levels(
         account_equity,
         external_flows=flows,
         open_unrealized_usd=account_equity - account_balance,
+        floors=floors,
     )
     out_meta = dict(meta)
     # MT5-12 verdict: ``ledger_complete``, for the identical reason the returns combiner

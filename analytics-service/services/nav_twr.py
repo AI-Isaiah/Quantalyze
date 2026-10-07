@@ -601,6 +601,8 @@ def reconcile_flow_residual(
     reconstructed_start: float,
     daily_pnl: pd.Series,
     flows_by_day: pd.Series,
+    *,
+    abs_tol: float = USD_FLOORS.residual_abs_tol,
 ) -> float:
     """DQ-02 CONSTRUCTION self-check — a pure roll-vs-Σ mutation detector.
 
@@ -625,9 +627,14 @@ def reconcile_flow_residual(
     at the Phase 78 golden old-vs-new parity panel on known accounts + founder
     confirmation, and no LTP/production factsheet ships until then.
 
-    Tolerance ``max(1.00, 1e-6 * abs(terminal_nav))`` — an absolute one-dollar
-    floor (``$1.00``, consistent with the DUST_NAV_FLOOR=$1000 scale) plus a
-    relative band that scales with account size. On breach →
+    Tolerance ``max(abs_tol, 1e-6 * abs(terminal_nav))`` — an absolute floor
+    ``abs_tol`` plus a relative band that scales with account size (the relative
+    band is unitless). ``abs_tol`` is the account unit's ``residual_abs_tol``
+    (``services.account_unit``; the default is the USD row, today's $1.00). The
+    absolute band was a HIDDEN USD constant, not on the unit-sized threshold list
+    (Phase 164.6.6.2 Pitfall 2): left at $1.00 it would wave through a dropped
+    0.001 BTC flow on a BTC account. It is threaded per unit, never swapped
+    globally — concurrent jobs of different units share the process. On breach →
     ``NavReconstructionError`` (permanent, loud).
 
     T-76-03-LEAK: the raise message carries NO raw NAV/flow USD value (account-
@@ -645,7 +652,7 @@ def reconcile_flow_residual(
         reconstructed_start, field="reconstructed_start", row={}
     )
     residual = terminal - start - float(pnl.sum()) - float(flows.sum())
-    tol = max(1.00, 1e-6 * abs(terminal))
+    tol = max(abs_tol, 1e-6 * abs(terminal))
     if not np.isfinite(residual) or abs(residual) > tol:
         raise NavReconstructionError(
             "nav_twr DQ-02 construction residual exceeds tolerance — the "
@@ -842,7 +849,7 @@ def reconstruct_nav_and_twr(
     uPnL enters the series, hence NO step discontinuity at the anchor day. No
     per-day historical-uPnL array is ever constructed. When
     ``|open_unrealized_usd| / anchor_nav > UNREALIZED_MATERIALITY_RATIO`` (and the
-    anchor is above ``DUST_NAV_FLOOR``), the wedge is material relative to the
+    anchor is above the unit's ``floors.dust_nav``), the wedge is material relative to the
     reported anchor and ``unrealized_pnl_in_anchor`` is raised
     (-> ``complete_with_warnings``). The flag carries a BOOL only — the raw USD
     wedge is never logged or emitted (account-size leak class T-77-02).
@@ -877,7 +884,11 @@ def reconstruct_nav_and_twr(
     )
     reconstructed_start = float(nav.iloc[0]) - pnl0 - float(flows0)
     reconcile_flow_residual(
-        terminal_nav, reconstructed_start, daily_pnl, flows_by_day
+        terminal_nav,
+        reconstructed_start,
+        daily_pnl,
+        flows_by_day,
+        abs_tol=floors.residual_abs_tol,
     )
     returns, flags = chain_linked_twr(nav, daily_pnl, flows_by_day, floors=floors)
     # DQ-03 (§6.2): the SAME function that computes the honest cumulative decides
@@ -893,6 +904,6 @@ def reconstruct_nav_and_twr(
     # flagged by the DQ-01 dust guard on its own merits. A BOOL is merged (never
     # the raw USD wedge — account-size leak T-77-02); no key when immaterial so the
     # SC-4 zero-wedge default stays byte/status-identical.
-    if anchor > DUST_NAV_FLOOR and abs(upnl) / anchor > UNREALIZED_MATERIALITY_RATIO:
+    if anchor > floors.dust_nav and abs(upnl) / anchor > UNREALIZED_MATERIALITY_RATIO:
         flags = {**flags, "unrealized_pnl_in_anchor": True}
     return returns, _build_nav_meta(flags)

@@ -897,3 +897,26 @@ def test_default_floors_are_the_usd_row() -> None:
     explicit_r, explicit_m = combine_mt5_deal_ledger(deals, floors=USD_FLOORS, **kwargs)
     pd.testing.assert_series_equal(default_r, explicit_r)
     assert default_m == explicit_m
+
+
+def test_nav_levels_meta_reads_the_same_floors_as_the_returns_path() -> None:
+    """``reconstruct_mt5_nav_levels`` takes its meta from the same core call the returns
+    path makes, so it must be handed the same floors: a BTC ledger that is clean under BTC
+    floors must not report a USD dust guard in the LEVELS meta (one reconstruction, one
+    set of facts). Same ledger as the 0.02 / 0.015 oracle: NAVs 0.020 (06-02), 0.015."""
+    deals = [_btc_deal(0.002, 2), _btc_deal(-0.005, 3)]
+    nav, nav_meta = reconstruct_mt5_nav_levels(
+        deals, account_equity=0.015, account_balance=0.015, floors=_BTC
+    )
+    assert nav.iloc[0] == pytest.approx(0.020, abs=1e-12)   # NAV(06-02)
+    assert nav.iloc[-1] == pytest.approx(0.015, abs=1e-12)  # terminal
+    assert not nav_meta.get("dust_nav_guard")
+    _r, ret_meta = combine_mt5_deal_ledger(
+        deals, account_equity=0.015, account_balance=0.015, floors=_BTC
+    )
+    assert nav_meta == ret_meta
+    # Unit-blind default reports dust: the two paths would otherwise disagree.
+    _n, blind_meta = reconstruct_mt5_nav_levels(
+        deals, account_equity=0.015, account_balance=0.015
+    )
+    assert blind_meta.get("dust_nav_guard") is True
