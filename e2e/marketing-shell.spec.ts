@@ -37,6 +37,7 @@ import { test, expect } from "@playwright/test";
 const MARKETING_ROUTES: { path: string; label: string }[] = [
   { path: "/", label: "landing" },
   { path: "/security", label: "security" },
+  { path: "/contact", label: "contact" },
   { path: "/for-quants", label: "for-quants" },
   { path: "/legal/privacy", label: "legal/privacy" },
   { path: "/legal/terms", label: "legal/terms" },
