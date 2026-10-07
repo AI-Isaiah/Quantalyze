@@ -15,8 +15,12 @@ with it. Two guards, both able to fail:
 2. CENSUS (D-06): an AST scan of ``routers/`` and ``services/`` (everything but
    ``services/wealth_returns.py``) that fails when a second parser of the stored
    curve appears, or when a ``returns_series`` reference outside the boundary is
-   not in the allowlist with its exact count and a reason. A docstring or a
-   comment cannot satisfy or trip it: only code (identifiers and string
+   not in the allowlist. Each reference is CLASSIFIED (a ``.select(...)`` string
+   argument, a ``logger.<level>(...)`` string argument, or a site in an enumerated
+   (file, enclosing function)), so swapping a log string for an inline curve
+   parse fails on the new load, not only on a count (WR-04). Every select must
+   also name ``daily_returns`` and ``data_quality_flags`` (WR-03). A docstring or
+   a comment cannot satisfy or trip it: only code (identifiers and string
    constants) is counted.
 """
 
@@ -24,8 +28,10 @@ from __future__ import annotations
 
 import ast
 import re
+from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pandas as pd
@@ -153,56 +159,101 @@ async def test_the_two_methods_are_distinguishable_on_this_input() -> None:
 
 _BOUNDARY = "services/wealth_returns.py"
 _TOKEN = re.compile(r"(?<![A-Za-z0-9_])returns_series(?![A-Za-z0-9_])")
-# A PostgREST column list: identifiers, commas, spaces. Prose never fullmatches.
-_COLUMN_LIST = re.compile(r"[a-z_]+(?:, ?[a-z_]+)+")
 
-# file -> (count, reason). Counted on CODE only (an identifier, or a string
-# constant naming the column), docstrings and comments excluded. Each reason says
-# why the reference is not a value read that bypasses the boundary. A new
-# reference, or a count that moves, fails the census naming the file and lines.
-ALLOWED_RETURNS_SERIES_REFS: dict[str, tuple[int, str]] = {
-    "routers/match.py": (
-        2,
-        "two select column lists: the candidate-universe read (engine metrics "
-        "beside the curve) and the allocator-book read. Both feed "
-        "daily_returns_from_row; no returns_series value is parsed here.",
+# The three kinds of reference a router/service may hold to the stored column
+# (WR-04: a bare count let a log string be swapped for an inline curve parse):
+#   select - a string argument of a ``.select(...)`` call: the column is named so
+#            its rows reach ``daily_returns_from_row``; nothing is parsed here.
+#   log    - a string argument of a ``logger.<level>(...)`` call: prose.
+#   site   - anything else (a ``row["returns_series"]`` / ``.get("returns_series")``
+#            load, a dict key, a local name). A value read or write: allowed only
+#            at an enumerated (file, enclosing function) site below.
+KIND_SELECT = "select"
+KIND_LOG = "log"
+KIND_SITE = "site"
+_LOG_RECEIVERS = {"logger", "log", "logging"}
+_LOG_METHODS = {"debug", "info", "warning", "warn", "error", "exception", "critical", "log"}
+
+
+@dataclass(frozen=True)
+class _Allowance:
+    selects: int
+    logs: int
+    # enclosing function -> number of site references there
+    sites: Mapping[str, int]
+    reason: str
+
+
+# file -> allowance. Counted on CODE only (an identifier, or a string constant
+# naming the column), docstrings and comments excluded. A reference whose KIND is
+# not allowed (a select or log string is fine; a load is not unless its enclosing
+# function is listed under ``sites``) fails the census naming the line, whatever
+# the per-file total is. The counts stay as a secondary tripwire.
+ALLOWED_RETURNS_SERIES_REFS: dict[str, _Allowance] = {
+    "routers/match.py": _Allowance(
+        selects=2,
+        logs=0,
+        sites={},
+        reason=(
+            "two select column lists: the candidate-universe read (engine metrics "
+            "beside the curve) and the allocator-book read. Both feed "
+            "daily_returns_from_row; no returns_series value is parsed here."
+        ),
     ),
-    "routers/portfolio.py": (
-        12,
-        "six select column lists (compute, optimizer x2, bridge x2, verify), "
-        "each naming daily_returns and data_quality_flags beside the curve and "
-        "read through daily_returns_from_row; four log lines naming the column "
-        "in text; the verify trim (_trim_returns_series applied to the "
-        "'returns_series' key twice on one line, before the boundary, so a "
-        "capped row reads exactly like the full one). No value is parsed here.",
+    "routers/portfolio.py": _Allowance(
+        selects=6,
+        logs=4,
+        sites={"verify_strategy": 2},
+        reason=(
+            "six select column lists (compute, optimizer x2, bridge x2, verify), "
+            "each naming daily_returns and data_quality_flags beside the curve and "
+            "read through daily_returns_from_row; four log lines naming the column "
+            "in text; the verify trim (_trim_returns_series applied to the "
+            "'returns_series' key twice on one line, before the boundary, so a "
+            "capped row reads exactly like the full one). No value is parsed here."
+        ),
     ),
-    "routers/simulator.py": (
-        1,
-        "the candidate select column list, read through daily_returns_from_row.",
+    "routers/simulator.py": _Allowance(
+        selects=1,
+        logs=0,
+        sites={},
+        reason="the candidate select column list, read through daily_returns_from_row.",
     ),
-    "services/metrics.py": (
-        6,
-        "the WRITER: compute_all_metrics builds the stored curve (a local list "
-        "of {date, value} points, its downsample, its cap, and the metrics-dict "
-        "key). It produces the column, it does not read one.",
+    "services/metrics.py": _Allowance(
+        selects=0,
+        logs=0,
+        sites={"compute_all_metrics": 6},
+        reason=(
+            "the WRITER: compute_all_metrics builds the stored curve (a local list "
+            "of {date, value} points, its downsample, its cap, and the metrics-dict "
+            "key). It produces the column, it does not read one."
+        ),
     ),
-    "services/strategy_matching.py": (
-        1,
-        "the published-strategy select column list, read through "
-        "daily_returns_from_row.",
+    "services/strategy_matching.py": _Allowance(
+        selects=1,
+        logs=0,
+        sites={},
+        reason=(
+            "the published-strategy select column list, read through "
+            "daily_returns_from_row."
+        ),
     ),
 }
 
 
-def _is_docstring(node: ast.AST, docstrings: set[int]) -> bool:
-    return id(node) in docstrings
+class _Ref(NamedTuple):
+    line: int
+    kind: str
+    function: str
+    # the column list for a select, "" otherwise
+    columns: str
 
 
-def _code_references(path: Path) -> list[int]:
-    """Line numbers of every code reference to the ``returns_series`` column in
-    ``path``: an identifier, or a string constant naming it as a whole word.
-    Docstrings are excluded (they are prose); comments never reach the AST."""
-    tree = ast.parse(path.read_text())
+def _parents(tree: ast.AST) -> dict[ast.AST, ast.AST]:
+    return {c: p for p in ast.walk(tree) for c in ast.iter_child_nodes(p)}
+
+
+def _docstring_ids(tree: ast.AST) -> set[int]:
     docstrings: set[int] = set()
     for n in ast.walk(tree):
         if (
@@ -213,20 +264,101 @@ def _code_references(path: Path) -> list[int]:
             and isinstance(n.body[0].value.value, str)
         ):
             docstrings.add(id(n.body[0].value))
-    lines: list[int] = []
+    return docstrings
+
+
+def _reference_nodes(tree: ast.AST) -> list[ast.AST]:
+    """Every code reference to the ``returns_series`` column: an identifier, or a
+    string constant naming it as a whole word. Docstrings are excluded (prose);
+    comments never reach the AST."""
+    docstrings = _docstring_ids(tree)
+    nodes: list[ast.AST] = []
     for n in ast.walk(tree):
         if isinstance(n, ast.Constant) and isinstance(n.value, str):
-            if not _is_docstring(n, docstrings) and _TOKEN.search(n.value):
-                lines.append(n.lineno)
+            if id(n) not in docstrings and _TOKEN.search(n.value):
+                nodes.append(n)
         elif isinstance(n, ast.Name) and n.id == "returns_series":
-            lines.append(n.lineno)
+            nodes.append(n)
         elif isinstance(n, ast.Attribute) and n.attr == "returns_series":
-            lines.append(n.lineno)
+            nodes.append(n)
         elif isinstance(n, ast.arg) and n.arg == "returns_series":
-            lines.append(n.lineno)
+            nodes.append(n)
         elif isinstance(n, ast.keyword) and n.arg == "returns_series":
-            lines.append(n.lineno)
-    return sorted(lines)
+            nodes.append(n)
+    return nodes
+
+
+def _classify_source(source: str) -> list[_Ref]:
+    tree = ast.parse(source)
+    parents = _parents(tree)
+    refs: list[_Ref] = []
+    for n in _reference_nodes(tree):
+        parent = parents.get(n)
+        kind = KIND_SITE
+        columns = ""
+        if (
+            isinstance(n, ast.Constant)
+            and isinstance(parent, ast.Call)
+            and n in parent.args
+            and isinstance(parent.func, ast.Attribute)
+        ):
+            func = parent.func
+            if func.attr == "select":
+                kind, columns = KIND_SELECT, str(n.value)
+            elif (
+                func.attr in _LOG_METHODS
+                and isinstance(func.value, ast.Name)
+                and func.value.id in _LOG_RECEIVERS
+            ):
+                kind = KIND_LOG
+        function = "<module>"
+        cur: ast.AST | None = parent
+        while cur is not None:
+            if isinstance(cur, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                function = cur.name
+                break
+            cur = parents.get(cur)
+        refs.append(_Ref(getattr(n, "lineno", 0), kind, function, columns))
+    return sorted(refs)
+
+
+def _code_references(path: Path) -> list[int]:
+    """Line numbers of every code reference to the ``returns_series`` column."""
+    return [r.line for r in _classify_source(path.read_text())]
+
+
+def _kind_problems(rel: str, refs: list[_Ref], allowance: _Allowance) -> list[str]:
+    """Why ``refs`` (one file's classified references) do not fit ``allowance``.
+    Kind first (names the offending line), count second (the tripwire)."""
+    problems: list[str] = []
+    allowed_sites = dict(allowance.sites)
+    for r in refs:
+        if r.kind == KIND_SITE and r.function not in allowed_sites:
+            problems.append(
+                f"{rel}:{r.line}: an unclassified returns_series reference (not a select "
+                f"or log argument) in {r.function}() - a load or write of the stored "
+                f"curve outside the boundary, or a reworded select/log; read it through "
+                f"daily_returns_from_row or enumerate the site"
+            )
+    by_kind = {
+        KIND_SELECT: [r for r in refs if r.kind == KIND_SELECT],
+        KIND_LOG: [r for r in refs if r.kind == KIND_LOG],
+    }
+    for kind, want in ((KIND_SELECT, allowance.selects), (KIND_LOG, allowance.logs)):
+        got = by_kind[kind]
+        if len(got) != want:
+            problems.append(
+                f"{rel}: expected {want} {kind} reference(s), found {len(got)} at "
+                f"lines {[r.line for r in got]}"
+            )
+    for fn, want in allowed_sites.items():
+        got_sites = [r for r in refs if r.kind == KIND_SITE and r.function == fn]
+        if len(got_sites) != want:
+            problems.append(
+                f"{rel}: expected {want} site reference(s) in {fn}(), found "
+                f"{len(got_sites)} at lines {[r.line for r in got_sites]}"
+            )
+    return problems
 
 
 def _surface_files() -> list[Path]:
@@ -270,65 +402,133 @@ def test_no_second_parser_of_the_stored_curve_exists() -> None:
 
 def test_every_returns_series_reference_outside_the_boundary_is_allowlisted() -> None:
     root = _repo_root() / "analytics-service"
-    found: dict[str, list[int]] = {}
+    found: dict[str, list[_Ref]] = {}
     for f in _surface_files():
-        lines = _code_references(f)
-        if lines:
-            found[f.relative_to(root).as_posix()] = lines
+        refs = _classify_source(f.read_text())
+        if refs:
+            found[f.relative_to(root).as_posix()] = refs
 
     problems: list[str] = []
-    for rel, lines in sorted(found.items()):
+    for rel, refs in sorted(found.items()):
         if rel not in ALLOWED_RETURNS_SERIES_REFS:
             problems.append(
-                f"{rel}: {len(lines)} unlisted returns_series reference(s) at lines {lines}"
+                f"{rel}: {len(refs)} unlisted returns_series reference(s) at lines "
+                f"{[r.line for r in refs]}"
             )
-        elif len(lines) != ALLOWED_RETURNS_SERIES_REFS[rel][0]:
-            problems.append(
-                f"{rel}: expected {ALLOWED_RETURNS_SERIES_REFS[rel][0]} "
-                f"reference(s), found {len(lines)} at lines {lines}"
-            )
+        else:
+            problems.extend(_kind_problems(rel, refs, ALLOWED_RETURNS_SERIES_REFS[rel]))
     for rel in sorted(set(ALLOWED_RETURNS_SERIES_REFS) - set(found)):
         problems.append(f"{rel}: allowlisted but no reference found (stale entry)")
     assert not problems, (
         "returns_series is the cumulative wealth CURVE, not daily returns: read it "
         "through services.wealth_returns.daily_returns_from_row, or list the new "
-        "reference with a count and a reason. " + " | ".join(problems)
+        "reference with its kind and a reason. " + " | ".join(problems)
     )
 
 
+def test_a_swapped_log_string_for_an_inline_curve_parse_is_caught() -> None:
+    """WR-04: the allowlist used to count references, so deleting the word from a
+    log message and adding an inline parse in the same commit kept the total. The
+    classifier must see the log reference vanish AND the new load appear."""
+    allowance = _Allowance(selects=1, logs=1, sites={}, reason="x " * 10)
+    clean = (
+        "def f(sb, logger, missing):\n"
+        "    sb.table('t').select('strategy_id, returns_series, daily_returns, "
+        "data_quality_flags')\n"
+        "    logger.warning('missing returns_series for %s', missing)\n"
+    )
+    swapped = (
+        "def f(sb, logger, missing, row):\n"
+        "    sb.table('t').select('strategy_id, returns_series, daily_returns, "
+        "data_quality_flags')\n"
+        "    logger.warning('missing curve for %s', missing)\n"
+        "    return {r['date']: r['value'] for r in row['returns_series']}\n"
+    )
+    assert _kind_problems("x.py", _classify_source(clean), allowance) == []
+    problems = _kind_problems("x.py", _classify_source(swapped), allowance)
+    assert any("unclassified returns_series reference" in p and "f()" in p for p in problems), problems
+    assert any("expected 1 log reference" in p for p in problems), problems
+
+
+@pytest.mark.parametrize(
+    "load",
+    [
+        "row['returns_series']",
+        "row.get('returns_series')",
+        "getattr(row, 'returns_series')",
+        "returns_series",
+    ],
+)
+def test_every_load_spelling_is_a_site_not_a_select_or_log(load: str) -> None:
+    refs = _classify_source(f"def g(row, returns_series=None):\n    return {load}\n")
+    assert refs and all(r.kind == KIND_SITE for r in refs), refs
+
+
+def test_an_allowlisted_site_is_pinned_to_its_function() -> None:
+    allowance = _Allowance(selects=0, logs=0, sites={"writer": 1}, reason="x " * 10)
+    ok = "def writer(rows):\n    return {'returns_series': rows}\n"
+    elsewhere = "def other(rows):\n    return {'returns_series': rows}\n"
+    assert _kind_problems("m.py", _classify_source(ok), allowance) == []
+    assert _kind_problems("m.py", _classify_source(elsewhere), allowance)
+
+
 def test_every_allowlist_entry_carries_a_reason() -> None:
-    for rel, (count, reason) in ALLOWED_RETURNS_SERIES_REFS.items():
-        assert count > 0, rel
-        assert len(reason.split()) >= 8, f"{rel}: the reason must say why it is not a bypass"
+    for rel, allowance in ALLOWED_RETURNS_SERIES_REFS.items():
+        total = allowance.selects + allowance.logs + sum(allowance.sites.values())
+        assert total > 0, rel
+        assert len(allowance.reason.split()) >= 8, (
+            f"{rel}: the reason must say why it is not a bypass"
+        )
+
+
+def _select_refs() -> list[tuple[str, Path, _Ref]]:
+    root = _repo_root() / "analytics-service"
+    out: list[tuple[str, Path, _Ref]] = []
+    for f in _surface_files():
+        for r in _classify_source(f.read_text()):
+            if r.kind == KIND_SELECT:
+                out.append((f.relative_to(root).as_posix(), f, r))
+    return out
+
+
+def test_the_select_census_is_not_vacuous() -> None:
+    """The two select guards below loop over this list; an empty one is green by
+    construction (D-04's failure mode)."""
+    assert len(_select_refs()) >= 10
 
 
 def test_a_file_that_selects_the_curve_also_reads_through_the_boundary() -> None:
     """A select naming ``returns_series`` is a stored-curve read: the file must
     call ``daily_returns_from_row`` and the select must name ``daily_returns``
     beside it, so the D-02 order (daily_returns first) is reachable."""
-    root = _repo_root() / "analytics-service"
     problems: list[str] = []
-    for f in _surface_files():
-        rel = f.relative_to(root).as_posix()
-        if rel == "services/metrics.py":
-            continue  # the writer: no select
-        tree = ast.parse(f.read_text())
-        selects = [
-            n for n in ast.walk(tree)
-            if isinstance(n, ast.Constant)
-            and isinstance(n.value, str)
-            and _COLUMN_LIST.fullmatch(n.value)
-            and _TOKEN.search(n.value)
-        ]
-        if not selects:
-            continue
-        if "daily_returns_from_row(" not in "\n".join(
-            ln for ln in f.read_text().splitlines() if not _is_pure_comment(ln)
-        ):
-            problems.append(f"{rel}: selects returns_series but never calls daily_returns_from_row")
-        for s in selects:
-            if "daily_returns" not in str(s.value).replace("returns_series", ""):
-                problems.append(f"{rel}:{s.lineno}: select names returns_series without daily_returns")
+    seen_files: set[Path] = set()
+    for rel, f, ref in _select_refs():
+        if f not in seen_files:
+            seen_files.add(f)
+            if "daily_returns_from_row(" not in "\n".join(
+                ln for ln in f.read_text().splitlines() if not _is_pure_comment(ln)
+            ):
+                problems.append(
+                    f"{rel}: selects returns_series but never calls daily_returns_from_row"
+                )
+        cols = {c.strip() for c in ref.columns.split(",")}
+        if "daily_returns" not in cols:
+            problems.append(f"{rel}:{ref.line}: select names returns_series without daily_returns")
+    assert not problems, "; ".join(problems)
+
+
+def test_every_select_of_the_curve_also_names_the_method_flags() -> None:
+    """WR-03: the curve method is read from ``data_quality_flags`` on the SAME row.
+    A select that omits the column makes ``curve_method_from_flags(None)`` read
+    geometric silently, so every simple curve on that path is read by ratio (D-05
+    keeps the absent-stamp default; the select is where the stamp is lost)."""
+    problems = [
+        f"{rel}:{ref.line}: select names returns_series without data_quality_flags "
+        "(the curve method is unreadable on this path)"
+        for rel, _f, ref in _select_refs()
+        if "data_quality_flags" not in {c.strip() for c in ref.columns.split(",")}
+    ]
     assert not problems, "; ".join(problems)
 
 

@@ -286,3 +286,120 @@ def test_wr02_a_curve_with_no_formable_day_is_none_even_when_absent_days_are_kep
         "data_quality_flags": {"native_unit": "BTC"},
     }
     assert daily_returns_from_row(row, name="s", keep_absent=True) is None
+
+
+# SFH M1: a row that HOLDS a curve but yields no day used to vanish from its
+# blend with no trace. Nothing stored stays silent; stored-but-unusable warns once.
+
+
+def _unusable_warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [
+        r.getMessage()
+        for r in caplog.records
+        if r.levelno == logging.WARNING and "no daily return derivable" in r.getMessage()
+    ]
+
+
+@pytest.mark.parametrize(
+    ("curve", "flags", "points", "method"),
+    [
+        # one point: day 0 has no stored predecessor
+        ([{"date": "2026-03-02", "value": 1.07}], None, 1, "geometric"),
+        # every level non-finite
+        (
+            [{"date": "2026-03-02", "value": None}, {"date": "2026-03-03", "value": "x"}],
+            None,
+            2,
+            "geometric",
+        ),
+        # every pair non-positive: unusable on the geometric curve
+        (
+            [
+                {"date": "2026-03-02", "value": 0.0},
+                {"date": "2026-03-03", "value": -0.5},
+                {"date": "2026-03-04", "value": -0.2},
+            ],
+            {"cumulative_method": "geometric"},
+            3,
+            "geometric",
+        ),
+        # one point on a simple curve names the method that was read
+        (
+            [{"date": "2026-03-02", "value": 1.07}],
+            {"cumulative_method": "simple"},
+            1,
+            "simple",
+        ),
+    ],
+)
+def test_a_stored_curve_with_no_derivable_day_warns_once_naming_the_row(
+    caplog: pytest.LogCaptureFixture,
+    curve: list[dict[str, Any]],
+    flags: dict[str, Any] | None,
+    points: int,
+    method: str,
+) -> None:
+    row = {"returns_series": curve, "data_quality_flags": flags}
+    with caplog.at_level(logging.WARNING, logger="quantalyze.analytics"):
+        assert daily_returns_from_row(row, name="strat-91") is None
+    msgs = _unusable_warnings(caplog)
+    assert len(msgs) == 1, msgs
+    assert "strat-91" in msgs[0]
+    assert f"returns_series points: {points}" in msgs[0]
+    assert f"curve method: {method}" in msgs[0]
+    assert "1.07" not in msgs[0]  # never a stored value
+
+
+def test_non_positive_levels_are_unusable_geometric_but_legal_simple(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The same stored levels warn under one method and derive under the other,
+    so the warning reports the method the row was READ with."""
+    curve = [
+        {"date": "2026-03-02", "value": 0.0},
+        {"date": "2026-03-03", "value": -0.5},
+    ]
+    with caplog.at_level(logging.WARNING, logger="quantalyze.analytics"):
+        simple = daily_returns_from_row(
+            {"returns_series": curve, "data_quality_flags": {"cumulative_method": "simple"}},
+            name="s",
+        )
+    assert simple is not None
+    assert not _unusable_warnings(caplog)
+
+
+def test_a_row_with_nothing_stored_or_a_derivable_curve_stays_silent(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level(logging.WARNING, logger="quantalyze.analytics"):
+        assert daily_returns_from_row({}, name="s") is None
+        assert daily_returns_from_row(None, name="s") is None
+        assert daily_returns_from_row(
+            {"returns_series": None, "daily_returns": []}, name="s"
+        ) is None
+        assert daily_returns_from_row(
+            {"returns_series": [], "daily_returns": {}}, name="s"
+        ) is None
+        ok = daily_returns_from_row(
+            {
+                "returns_series": [
+                    {"date": "2026-03-02", "value": 1.0},
+                    {"date": "2026-03-03", "value": 1.1},
+                ]
+            },
+            name="s",
+        )
+    assert ok is not None
+    assert not _unusable_warnings(caplog)
+
+
+def test_unusable_daily_returns_with_no_curve_warns_too(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """daily_returns holds entries but none is finite, and there is no curve."""
+    row = {"daily_returns": [{"date": "2026-03-03", "value": None}], "returns_series": None}
+    with caplog.at_level(logging.WARNING, logger="quantalyze.analytics"):
+        assert daily_returns_from_row(row, name="strat-5") is None
+    msgs = _unusable_warnings(caplog)
+    assert len(msgs) == 1 and "strat-5" in msgs[0]
+    assert "daily_returns points: 1" in msgs[0]

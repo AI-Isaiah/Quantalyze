@@ -27,7 +27,9 @@ level (the day after a bad level pairs with the bad level, so it is absent too).
 A non-positive level is legal on the simple curve and unusable on the geometric.
 
 Nothing usable returns ``None``, never an empty Series, so each caller's existing
-missing-returns accounting is unchanged.
+missing-returns accounting is unchanged. A row that holds a curve (or daily_returns)
+but yields no day logs one warning naming the series, the point counts and the
+method; a row with nothing stored stays silent.
 
 The shared fixture ``tests/fixtures/wealth_to_returns_oracle.json`` is read by
 this module's tests and by the TypeScript test, with hand-computed ``expected``
@@ -270,11 +272,28 @@ def daily_returns_from_row(
     direct = _normalize_daily_returns(row.get("daily_returns"), name)
     if direct is not None:
         return direct
-    levels = records_to_series(row.get("returns_series"), name, keep_nonfinite=True)
+    raw_curve = row.get("returns_series")
+    levels = records_to_series(raw_curve, name, keep_nonfinite=True)
     flags = row.get("data_quality_flags")
     method = curve_method_from_flags(flags, name=name)
     native = isinstance(flags, Mapping) and parse_native_unit(flags.get("native_unit")) is not None
-    return curve_to_daily_returns(levels, method, keep_absent=keep_absent and native)
+    derived = curve_to_daily_returns(levels, method, keep_absent=keep_absent and native)
+    if derived is None:
+        # A row with NOTHING stored is the normal "no returns" case and stays
+        # silent. A row that HOLDS a curve (or daily_returns) yet yields no day
+        # (one point, every level non-finite, every pair non-positive under
+        # geometric) is dropped from its blend; say so, once, without a value.
+        n_curve = len(raw_curve) if isinstance(raw_curve, (list, dict)) else 0
+        raw_daily = row.get("daily_returns")
+        n_daily = len(raw_daily) if isinstance(raw_daily, (list, dict)) else 0
+        if n_curve or n_daily:
+            logger.warning(
+                "wealth_returns: no daily return derivable for %s "
+                "(returns_series points: %d, daily_returns points: %d, curve method: %s); "
+                "the series is dropped from its blend",
+                name or "<unnamed>", n_curve, n_daily, method,
+            )
+    return derived
 
 
 def equity_from_daily_returns(returns: pd.Series) -> pd.Series:
