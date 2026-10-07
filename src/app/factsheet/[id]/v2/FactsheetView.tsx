@@ -16,6 +16,7 @@ import {
 } from "@/lib/freshness";
 import { TrustTierLabel } from "@/components/strategy/TrustTierLabel";
 import { OwnershipTag } from "@/components/strategy/OwnershipTag";
+import { ReturnsUnitChip } from "@/components/strategy/ReturnsUnitChip";
 import { RenameStrategyDialog } from "@/components/strategy/RenameStrategyDialog";
 // Phase 164 (SHARE-04) — THE ONE SHARE PREDICATE, shared with the other two
 // affordance sites (the strategies page and discovery detail, both of which go
@@ -978,6 +979,8 @@ function FactsheetHeader({
   payload: FactsheetPayload;
 } & Pick<OwnerLaneProps, "ownershipMark" | "renameTarget">) {
   const [renameOpen, setRenameOpen] = React.useState(false);
+  // Phase 164.6.6.2 (D-08, D-09): the ONE field every unit surface reads.
+  const returnsUnit = payload.returnsUnit ?? null;
   const exchanges = payload.supportedExchanges.length > 0 ? payload.supportedExchanges.join(", ") : null;
   const leverage = payload.leverageRange;
   // Lead chip line — types / markets / subtypes / exchanges / leverage. Drop
@@ -1029,6 +1032,7 @@ function FactsheetHeader({
           {renameTarget ? (
             <div className="flex flex-wrap items-baseline gap-3">
               <h1 className={MASTHEAD_H1}>{payload.strategyName}</h1>
+              <ReturnsUnitChip unit={returnsUnit} />
               <button
                 type="button"
                 onClick={() => setRenameOpen(true)}
@@ -1036,6 +1040,14 @@ function FactsheetHeader({
               >
                 Rename…
               </button>
+            </div>
+          ) : returnsUnit ? (
+            // Phase 164.6.6.2 (D-09, UI-SPEC A1): the unit sits WITH the name, in the
+            // same wrapper class the owner arm uses. Only when a unit is set: a USD
+            // render keeps the bare <h1> with no wrapper, byte-for-byte.
+            <div className="flex flex-wrap items-baseline gap-3">
+              <h1 className={MASTHEAD_H1}>{payload.strategyName}</h1>
+              <ReturnsUnitChip unit={returnsUnit} />
             </div>
           ) : (
             <h1 className={MASTHEAD_H1}>{payload.strategyName}</h1>

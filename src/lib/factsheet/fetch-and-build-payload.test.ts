@@ -765,3 +765,45 @@ describe("review round 1 — a persisted-headline defect is captured by a build,
     expect(vi.mocked(captureToSentry), "the probe sent a per-row event").not.toHaveBeenCalled();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Phase 164.6.6.2 plan 05 (D-08, D-09) — the factsheet reads ONE field,
+// `payload.returnsUnit`, set once in `buildFromResolved` from
+// `strategy_analytics.data_quality_flags.native_unit` through `parseReturnsUnit`.
+// A USD payload must not even carry the KEY (a conditional spread, so the
+// build-payload snapshot and every USD cache entry stay byte-identical).
+// ---------------------------------------------------------------------------
+describe("164.6.6.2 plan 05 — native_unit on the analytics row becomes payload.returnsUnit", () => {
+  it("a BTC-flagged row carries returnsUnit BTC", async () => {
+    seed(single({ daily_returns: points(30), data_quality_flags: { native_unit: "BTC" } }));
+    const payload = await fetchAndBuildPayload(STRATEGY_ID, ownerVisibility);
+    expect(payload).not.toBeNull();
+    expect(payload?.returnsUnit).toBe("BTC");
+  });
+
+  it("the unit is whatever the flag says, never a hard-coded BTC", async () => {
+    seed(single({ daily_returns: points(30), data_quality_flags: { native_unit: "ETH" } }));
+    const payload = await fetchAndBuildPayload(STRATEGY_ID, ownerVisibility);
+    expect(payload?.returnsUnit).toBe("ETH");
+  });
+
+  it.each([
+    ["absent flag (a USD strategy)", null],
+    ["a flags blob without native_unit", { insufficient_window: false }],
+    ["a lower-case unit", { native_unit: "btc" }],
+    ["a markup unit", { native_unit: "BTC<script>" }],
+    ["a non-string unit", { native_unit: 5 }],
+    ["a null unit", { native_unit: null }],
+  ])("%s: the payload has no returnsUnit KEY at all", async (_label, flags) => {
+    seed(single({ daily_returns: points(30), data_quality_flags: flags }));
+    const payload = await fetchAndBuildPayload(STRATEGY_ID, ownerVisibility);
+    expect(payload).not.toBeNull();
+    expect("returnsUnit" in (payload as object)).toBe(false);
+  });
+
+  it("the unit comes from the analytics flag and never from the api_keys read", () => {
+    const src = readFileSync(join(__dirname, "fetch-and-build-payload.ts"), "utf8");
+    expect(src).toContain("parseReturnsUnit(dqf?.native_unit)");
+    expect(src).not.toMatch(/account_currency|account_balance_native/);
+  });
+});

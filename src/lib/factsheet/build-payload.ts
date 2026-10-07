@@ -74,6 +74,12 @@ export type BuildFactsheetOpts = {
    */
   cumulativeMethod?: "geometric" | "arithmetic";
   /**
+   * Phase 164.6.6.2 (D-08, D-09) — the native unit of the strategy's returns,
+   * already parsed by `parseReturnsUnit`. Emitted only when set (see the spread
+   * in the payload), so a USD build carries no key.
+   */
+  returnsUnit?: FactsheetCommon["returnsUnit"];
+  /**
    * Phase 169.1 (D-30) — the strategy's day basis; "active" runs vol, Sharpe
    * and Sortino over the non-zero days (the engine's `stat_returns`). Default
    * calendar. Set by the composite reader's conventions resolver.
@@ -803,6 +809,9 @@ function buildFromBuildableSeries(
     // "calendar", so an unconditional emit would add two keys to every geometric
     // composite payload.
     ...(opts?.cumulativeMethod === "arithmetic" ? { cumulativeMethod: "arithmetic" as const } : {}),
+    // Phase 164.6.6.2 (D-08, D-09) — by spread, so a USD payload has no `returnsUnit`
+    // key at all (not `undefined`) and its snapshot and cache entry are unchanged.
+    ...(opts?.returnsUnit ? { returnsUnit: opts.returnsUnit } : {}),
     ...(opts?.dayBasis === "active" ? { dayBasis: "active" as const } : {}),
     // Phase 90.5 (LEV-01/D2) — emit the #597 annualization basis so the client
     // leverage recompute annualizes on the SAME basis the server did. Additive-

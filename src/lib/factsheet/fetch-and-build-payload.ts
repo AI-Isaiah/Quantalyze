@@ -39,6 +39,7 @@ import { isComputedAnalytics } from "@/lib/closed-sets";
 import { buildFactsheetPayload, deriveIngestSource, hasBuildableSeries, MIN_FACTSHEET_SERIES_POINTS } from "./build-payload";
 import type { BuildFactsheetOpts } from "./build-payload";
 import { readFactsheetBenchmark } from "./benchmark-read";
+import { parseReturnsUnit } from "./returns-unit";
 import {
   CompositeSeriesReadError,
   readCompositeFactsheet,
@@ -425,7 +426,7 @@ async function resolveFactsheetInputs(
   // the csv arm with an EXPLICIT `ingestSource:"csv"` at the build call, render
   // the arithmetic running-cumulative curve, and thread the marker/basis fields.
   const dqf = analytics?.data_quality_flags as
-    | { composite?: unknown; mtm_gated_reason?: unknown; per_key?: unknown; gap_spans?: unknown; insufficient_window?: unknown; cumulative_method?: unknown }
+    | { composite?: unknown; mtm_gated_reason?: unknown; per_key?: unknown; gap_spans?: unknown; insufficient_window?: unknown; cumulative_method?: unknown; native_unit?: unknown }
     | null
     | undefined;
   const isComposite = dqf?.composite === true;
@@ -772,6 +773,11 @@ async function buildFromResolved(
   const ingestSource: IngestSource = deriveIngestSource(dailyRaw);
 
   let buildOpts: BuildFactsheetOpts | undefined = resolved.compositeBuildOpts;
+  // Phase 164.6.6.2 (D-08, D-09): the unit the worker recorded beside the series
+  // it computed, parsed at this boundary. The ONE read of it: every surface takes
+  // `payload.returnsUnit`. Single-key only, a composite never carries an MT5
+  // member. The key is emitted by spread, so a USD payload stays byte-identical.
+  const unit = parseReturnsUnit(dqf?.native_unit);
   if (!isComposite) {
     // HARD-04 (#67) / Finding B: single-key strategies persist
     // `insufficient_window` at the analytics_runner CAGR site too, but buildOpts
@@ -790,6 +796,7 @@ async function buildFromResolved(
       ...(buildOpts ?? {}),
       dataQuality: singleKeyDataQuality(dqf),
       ...singleKeyOpts,
+      ...(unit ? { returnsUnit: unit } : {}),
     };
   }
 
