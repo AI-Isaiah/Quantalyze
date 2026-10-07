@@ -4408,8 +4408,9 @@ class TestScoreOneAllocatorNoPreferencesRowLogging:
 
 class TestLoadUniverseAnalyticsSelectOmitsDeadFields:
     """M-0605: the strategy_analytics SELECT must pull ONLY the fields the
-    engine consumes (strategy_id, returns_series, sharpe, max_drawdown) and
-    NOT the dead cumulative_return / cagr / volatility columns."""
+    engine consumes (strategy_id, returns_series, daily_returns, sharpe,
+    max_drawdown) and NOT the dead cumulative_return / cagr / volatility
+    columns."""
 
     def test_select_string_excludes_unused_columns(self, monkeypatch):
         from routers import match as match_mod
@@ -4448,7 +4449,9 @@ class TestLoadUniverseAnalyticsSelectOmitsDeadFields:
             assert dead not in cols, (
                 f"dead select field {dead!r} must be removed (M-0605); got: {cols}"
             )
-        for live in ("strategy_id", "returns_series", "sharpe", "max_drawdown"):
+        # 164.6.6.2.2 (D-02): `daily_returns` joined the engine-consumed fields, so a
+        # row that stores real daily returns is read from them, not from the curve.
+        for live in ("strategy_id", "returns_series", "daily_returns", "sharpe", "max_drawdown"):
             assert live in cols, f"engine-consumed field {live!r} must remain in SELECT"
 
 
@@ -5876,3 +5879,127 @@ class TestAllocatorBookIsScoredOnDailyReturnsFromTheStoredCurve:
                 f"{sid}: the engine must be handed daily returns, not curve levels near 1.0"
             )
         closes_mock.assert_not_awaited()  # USD-only book: nothing to convert
+
+
+def _universe_supabase(strategies, analytics, selects):
+    """A Supabase double for ``_load_candidate_universe``."""
+
+    def _table(name):
+        t = MagicMock()
+        if name == "strategies":
+            t.select.return_value.eq.return_value.execute.return_value = MagicMock(data=strategies)
+            return t
+
+        def _select(cols):
+            selects.append(cols)
+            q = MagicMock()
+            q.in_.return_value.execute.return_value = MagicMock(data=analytics)
+            return q
+
+        t.select.side_effect = _select
+        return t
+
+    sb = MagicMock()
+    sb.table.side_effect = _table
+    return sb
+
+
+class TestCandidateUniverseIsScoredOnDailyReturnsFromTheStoredCurve:
+    @pytest.mark.asyncio
+    async def test_curve_candidate_reaches_score_candidates_as_daily_returns(self, monkeypatch):
+        """A published candidate stored as a curve is handed to the engine as its
+        daily returns; one that stores real ``daily_returns`` is read from them
+        (D-02), whatever its curve says.
+
+        Hand-computed, geometric levels for c-curve (returns [0.0, 0.01, -0.02, 0.03]):
+        1.0, 1.01, 0.9898, 1.019494 -> days 1..3 = 0.01, -0.02, 0.03. c-direct stores
+        daily_returns [0.5, -0.25] verbatim; its curve is a decoy (levels 1.0, 9.0).
+        """
+        from tests._curve_fixtures import curve_from_returns
+
+        from routers import match as match_mod
+
+        selects: list[str] = []
+        strategies = [{"id": "c-curve", "name": "A"}, {"id": "c-direct", "name": "B"}]
+        analytics = [
+            {"strategy_id": "c-curve", "sharpe": 1.0, "max_drawdown": -0.1,
+             "daily_returns": None, "data_quality_flags": {},
+             "returns_series": curve_from_returns([0.0, 0.01, -0.02, 0.03], _CURVE_DATES)},
+            {"strategy_id": "c-direct", "sharpe": 1.0, "max_drawdown": -0.1,
+             "data_quality_flags": {},
+             "daily_returns": [{"date": "2026-02-02", "value": 0.5},
+                               {"date": "2026-02-03", "value": -0.25}],
+             "returns_series": [{"date": "2026-02-01", "value": 1.0},
+                                {"date": "2026-02-02", "value": 9.0}]},
+        ]
+        monkeypatch.setattr(
+            match_mod, "get_supabase",
+            lambda: _universe_supabase(strategies, analytics, selects),
+        )
+        universe = match_mod._load_candidate_universe()
+        assert any("daily_returns" in c for c in selects)
+
+        ctx = {
+            "preferences": {}, "portfolio_strategies": [], "portfolio_weights": {},
+            "portfolio_returns": {}, "native_units": {}, "portfolio_aum": None,
+            "thumbs_down_ids": set(), "_holdings_rows_eligible": [],
+        }
+        seen, _ = await _score_with_spies(ctx, universe, None)
+        cand = seen["score"]["candidate_returns"]
+        assert list(cand["c-curve"].values) == pytest.approx([0.01, -0.02, 0.03], abs=1e-12)
+        assert [d.strftime("%Y-%m-%d") for d in cand["c-curve"].index] == [
+            "2026-02-02", "2026-02-03", "2026-02-04",
+        ]
+        assert list(cand["c-direct"].values) == [0.5, -0.25]
+
+    @pytest.mark.asyncio
+    async def test_a_btc_curve_book_and_candidate_arrive_as_usd_daily_returns(self, monkeypatch):
+        """End to end on curve-shaped storage: select -> boundary -> USD -> engine.
+
+        A BTC account's native daily returns are [0.0, 0.0, 0.10, 0.04] on
+        2026-02-01..04, stored as the curve 1.0, 1.0, 1.1, 1.144. The boundary reads
+        days 1..3: 0.0, 0.10, 0.04 (1.1/1.0 - 1 = 0.10; 1.144/1.1 - 1 = 0.04). BTC
+        closes are 60000 (02-02), 66000 (02-03), 72600 (02-04). The converter drops its
+        first day (no prior priced value), then
+          02-03: (1 + 0.10) * (66000 / 60000) - 1 = 1.1 * 1.1 - 1 = 0.21
+          02-04: (1 + 0.04) * (72600 / 66000) - 1 = 1.04 * 1.1 - 1 = 0.144
+        Weighting the stored level 1.1 as a return would give 1.1, not 0.21.
+        """
+        import pandas as pd
+        from tests._curve_fixtures import curve_from_returns
+
+        from routers import match as match_mod
+
+        btc_curve = curve_from_returns([0.0, 0.0, 0.10, 0.04], _CURVE_DATES)
+        flags = {"native_unit": "BTC"}
+        ps_rows = [{"strategy_id": "btc-b", "current_weight": 1.0, "portfolio_id": "pf-1",
+                    "allocated_amount": 100.0}]
+        book_rows = [{"strategy_id": "btc-b", "daily_returns": None,
+                      "returns_series": btc_curve, "data_quality_flags": flags}]
+        cand_rows = [{"strategy_id": "btc-cand", "sharpe": 1.0, "max_drawdown": -0.1,
+                      "daily_returns": None, "returns_series": btc_curve,
+                      "data_quality_flags": flags}]
+        sels: list[str] = []
+        monkeypatch.setattr(
+            match_mod, "get_supabase",
+            lambda: _allocator_supabase(ps_rows, book_rows, sels),
+        )
+        ctx = match_mod._load_allocator_context("alloc-btc-curve")
+        monkeypatch.setattr(
+            match_mod, "get_supabase",
+            lambda: _universe_supabase([{"id": "btc-cand", "name": "BC"}], cand_rows, sels),
+        )
+        universe = match_mod._load_candidate_universe()
+
+        closes = pd.Series(
+            [60000.0, 66000.0, 72600.0],
+            index=pd.DatetimeIndex(["2026-02-02", "2026-02-03", "2026-02-04"]),
+        )
+        seen, closes_mock = await _score_with_spies(ctx, universe, closes)
+        d1, d2 = pd.Timestamp("2026-02-03"), pd.Timestamp("2026-02-04")
+        for series in (seen["score"]["portfolio_returns"]["btc-b"],
+                       seen["score"]["candidate_returns"]["btc-cand"]):
+            assert series.loc[d1] == pytest.approx(0.21, abs=1e-12)
+            assert series.loc[d2] == pytest.approx(0.144, abs=1e-12)
+            assert len(series) == 2
+        assert closes_mock.await_count == 1

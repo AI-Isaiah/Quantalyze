@@ -485,7 +485,14 @@ def _load_candidate_universe(demo_only: bool = False) -> dict[str, Any]:
             # so a BTC strategy's `native_unit` is read beside the series it
             # describes. It is consumed by `_score_one_allocator`, which converts
             # to USD before the engine weights anything.
-            .select("strategy_id, returns_series, sharpe, max_drawdown, data_quality_flags")
+            # 164.6.6.2.2 (D-01, D-02): `returns_series` is the cumulative wealth
+            # CURVE, so the candidate's daily returns come from `daily_returns`
+            # when stored and are otherwise derived from the curve, never read
+            # as returns.
+            .select(
+                "strategy_id, returns_series, daily_returns, sharpe, max_drawdown, "
+                "data_quality_flags"
+            )
             .in_("strategy_id", _chunk)
         ),
         strategy_ids,
@@ -585,9 +592,9 @@ def _load_candidate_universe(demo_only: bool = False) -> dict[str, Any]:
             "is_example": bool(strategy.get("is_example")),
         }
 
-        returns_series = _records_to_series(analytics.get("returns_series"), name=sid)
-        if returns_series is not None:
-            returns_by_id[sid] = returns_series
+        daily_returns = daily_returns_from_row(analytics, name=sid)
+        if daily_returns is not None:
+            returns_by_id[sid] = daily_returns
 
     return {
         "strategies_by_id": strategies_by_id,
