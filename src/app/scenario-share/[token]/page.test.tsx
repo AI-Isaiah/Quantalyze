@@ -1052,3 +1052,82 @@ describe("ScenarioSharePage — BTC leg shares blend in USD (164.6.6.2 D-22)", (
     expect(html).not.toMatch(/\bin BTC\b/);
   });
 });
+
+// Phase 164.6.6.2 plan 10, T-164.6.6.2-30 (information disclosure): the widened
+// `strategy_analytics` read is a BYPASSRLS read on an anonymous, token-only page.
+// It reads `data_quality_flags`, a jsonb bag of internal quality markers, to learn
+// ONE fact (the unit). Everything else in that bag, and the column name itself,
+// must stay on the server. The assertion walks BOTH the serialised HTML and the
+// props the page hands to every component (client components receive props as
+// serialised RSC payload), so a future change that forwards the bag as a prop is
+// caught even if the stubbed component would not print it.
+describe("ScenarioSharePage — the widened read discloses nothing new (T-164.6.6.2-30)", () => {
+  const DQ_CANARY = "dq-canary-must-not-reach-the-recipient";
+
+  /** Every prop of every element in the tree (children excluded), as one string. */
+  function collectProps(node: unknown, out: string[] = []): string[] {
+    if (Array.isArray(node)) {
+      node.forEach((n) => collectProps(n, out));
+    } else if (node !== null && typeof node === "object" && "props" in node) {
+      const props = (node as { props: Record<string, unknown> }).props;
+      const { children, ...rest } = props;
+      out.push(JSON.stringify(rest));
+      collectProps(children, out);
+    }
+    return out;
+  }
+
+  it("neither the flags column, the unit key, nor any other flag value reaches the HTML or any component prop", async () => {
+    readBtcClosesMock.mockResolvedValue({
+      prices: makeSeries().map((p, i) => ({
+        date: p.date,
+        close: i % 2 === 0 ? 60000 : 66000,
+      })),
+      dropped: [],
+      through: null,
+    });
+    analyticsReadMock.mockResolvedValueOnce({
+      data: [
+        {
+          strategy_id: STRAT_A,
+          returns_series: null,
+          data_quality_flags: {
+            native_unit: "BTC",
+            internal_marker: DQ_CANARY,
+          },
+        },
+      ],
+      error: null,
+    });
+    rpcMock.mockResolvedValueOnce({ data: [okRow()], error: null });
+
+    const { default: ScenarioSharePage } = await import("./page");
+    const element = (await ScenarioSharePage({
+      params: Promise.resolve({ token: "no-leak-flags" }),
+    })) as ReactElement;
+    const html = renderToStaticMarkup(element);
+    const props = collectProps(element).join("\n");
+
+    // Not vacuous: the page DID resolve and convert the BTC leg.
+    expect(html).toContain("My Q3 Blend");
+    expect(readBtcClosesMock).toHaveBeenCalledTimes(1);
+
+    for (const surface of [html, props]) {
+      expect(surface).not.toContain("data_quality_flags");
+      expect(surface).not.toContain("native_unit");
+      expect(surface).not.toContain("internal_marker");
+      expect(surface).not.toContain(DQ_CANARY);
+    }
+
+    // The identity columns are still exactly what the phase-29 leak scan allows:
+    // the strategies read is id + asset_class, the analytics read is bounded to
+    // the RPC's ids, and no table outside the closed allow-list was touched.
+    expect(strategiesReadMock.mock.calls[0]![0]).toBe("id, asset_class");
+    expect(analyticsReadMock.mock.calls[0]![2]).toEqual([STRAT_A]);
+    expect(
+      adminFromMock.mock.calls.every(
+        ([t]) => t === "strategies" || t === "strategy_analytics",
+      ),
+    ).toBe(true);
+  });
+});
