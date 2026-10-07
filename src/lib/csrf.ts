@@ -20,7 +20,7 @@ import { NO_STORE_HEADERS } from "@/lib/api/headers";
  *
  * Red-team 2026-05-17 (red-team:custom-domain-frozen-allowlist, MED conf
  * 8): added NEXT_PUBLIC_ALLOWED_ORIGINS so a future custom-domain rollout
- * (e.g. quantalyze.com alongside quantalyze-rho.vercel.app) doesn't 403
+ * (e.g. quantalyze.xyz alongside quantalyze-rho.vercel.app) doesn't 403
  * every cross-domain manager request with a misleading permission-style
  * error in the UI. Set it as a comma-separated URL list.
  */
