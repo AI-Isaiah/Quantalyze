@@ -2898,10 +2898,22 @@ Plans:
 4. A gate stops a new `quantalyze.com` URL from coming back, and it is shown RED once.
 ⭐ **Scope, founder 2026-10-07 (AskUserQuestion; `164.6.6.3.5-CONTEXT.md` D-01..D-04):** `quantalyze.com`'s mail goes to an unrelated company's server, and `quantalyze.xyz` has no mail records. So the product names NO contact email at all. Every `@quantalyze.com` address (about 158 outside `.planning/`, not 18) becomes a pointer to the contact form, which carries the correlation id; `security.txt`'s `Contact:` becomes the contact page URL. No Resend or mail-domain setup is done or booked (founder: "Dont want to setup resend").
 
-**Plans:** 0 plans
+**Plans:** 13 plans in 5 waves (plan 13 runs after `/land-and-deploy`: verification reads `human_needed` at ship and `passed` after it)
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 164.6.6.3.5 to break down)
+- [ ] 164.6.6.3.5-01-PLAN.md — D-10 canonical-domain gate, shown RED on the unswept tree (wave 1)
+- [ ] 164.6.6.3.5-02-PLAN.md — rho -> xyz host redirect (D-05); PDF/tearsheet/founder-cron allow-lists gain xyz (D-06, D-14); CSRF fixtures (D-07) (wave 1)
+- [ ] 164.6.6.3.5-03-PLAN.md — `for_quants_leads` source/topic/reference + partial dedupe index, SQL gate shown RED, `src/lib/contact.ts` + CHECK parity (D-13) (wave 1)
+- [ ] 164.6.6.3.5-04-PLAN.md — lead route `stored`/`duplicate` contract, contact branch, RequestCallModal by status, CRM columns (wave 2)
+- [ ] 164.6.6.3.5-05-PLAN.md — public `/contact` page and form with id prefill (D-01, D-02), route lockstep, footer link, e2e lists (wave 3)
+- [ ] 164.6.6.3.5-06-PLAN.md — `ContactPointerText`; ErrorEnvelope links carry the correlation/draft id; wizard step copy (wave 2)
+- [ ] 164.6.6.3.5-07-PLAN.md — `wizardErrors.ts` and csv-finalize copy in pointer shapes (wave 1)
+- [ ] 164.6.6.3.5-08-PLAN.md — status-surface and key-card copy, linked at every render site (wave 3)
+- [ ] 164.6.6.3.5-09-PLAN.md — security.txt (D-03), /security, privacy, pending-approval, for-quants; security packet PDF regenerated (D-15); owns `e2e/for-quants-landing.spec.ts`, after plan 04 (wave 3)
+- [ ] 164.6.6.3.5-10-PLAN.md — sender defaults with no fallback (D-04, D-12); URL fallbacks on xyz (D-06) (wave 2)
+- [ ] 164.6.6.3.5-11-PLAN.md — docs and runbooks (D-08); TODOS booking of the address-less strings (D-16) (wave 1)
+- [ ] 164.6.6.3.5-12-PLAN.md — last strays, gate GREEN and wired into `npm run lint`, registered; no-email-in-copy test (wave 4)
+- [ ] 164.6.6.3.5-13-PLAN.md — post-deploy: schema applied, live 308 and contact check, LIVE-IMPACT (D-09), PROD `NEXT_PUBLIC_SITE_URL` to xyz (D-11) (wave 5, non-autonomous)
 
 ### Phase 164.6.6.3.4: STATUSBRIDGE — a strategy's analytics status reads failed only for an analytics failure: a failed process_key_long is superseded by its later successful follow-on chain, and side kinds that produce no analytics (sync_funding) never pin the analytics status (INSERTED)
 
