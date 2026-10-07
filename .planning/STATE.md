@@ -1448,6 +1448,7 @@ Load-bearing sequencing (real dependencies, do not reorder):
 - Phase 164.6.6.3.3 inserted after Phase 164.6.6.3: FACTSHEETTRUTH: 164.6.6.3 split C (items 2, 3, 4, 5, 6b); founder 2026-10-06 D-01 (URGENT)
 - Phase 164.6.6.3 edited: edited fields: scope (narrowed to items 0 and 9), goal, success_criteria; order D-02: 164.6.6.3, .1, .2, .3
 - Phase 170.3 edited: re-scoped: OG-card parity moved to 164.6.6.3.3 item 4; 170.6: disclaimer moved to 164.6.6.3.1 item 6a, red em-dash on OG cards moved to 164.6.6.3.3 item 4 (founder 2026-10-06)
+- Phase 164.6.6.2.2 inserted after Phase 164.6.6.2: WEALTHRETURNS: Python blends read the stored wealth curve as daily returns (164.6.6.2 CR-01); founder 2026-10-07 own phase, ship BTCNATIVE first (URGENT)
 
 ### Decisions
 

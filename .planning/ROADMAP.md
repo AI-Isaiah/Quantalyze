@@ -3093,6 +3093,18 @@ Plans:
 - [ ] 164.6.6.2-12-PLAN.md — post-deploy: MM-2x re-derived via Sync and read live on PROD; D-06 canary (wave 4)
 - [ ] 164.6.6.2-13-PLAN.md — Python twin of the conversion on the shared oracle fixture; portfolio analytics, simulator and match engine convert BTC before weighting (D-23) (wave 2)
 
+### Phase 164.6.6.2.2: WEALTHRETURNS — the Python analytics service reads the stored wealth curve as daily returns in every blend (INSERTED)
+
+**Goal:** Every Python blend reads daily returns, not the stored wealth curve. `strategy_analytics.returns_series` holds the cumprod wealth curve (`(1 + r).cumprod()`, `services/metrics.py`), measured on PROD 2026-10-07 across 32 rows: first value about 1.0, last values averaging about 209k. `routers/simulator.py`, `routers/match.py` and `routers/portfolio.py` (analytics, optimizer, bridge) and the 164.6.6.2 Python BTC twin (`services/native_to_usd.py`) read it as daily returns, so a wealth of 1.30 is weighted as a +130% day. The TypeScript side already converts through `resolveDailyReturnSeries`.
+**Scope:** add the wealth-to-daily-returns step once, at the shared Python boundary, as the twin of the TS conversion; rebuild the router test fixtures from real wealth-curve shapes so a test can tell the two apart; measure the affected outputs on PROD before and after; and fix `_compute_portfolio_analytics` selecting `equity_curve` and `total_aum`, which do not exist on `strategy_analytics`.
+**Origin:** 164.6.6.2 code review CR-01 (pre-existing, not introduced by that phase). Founder 2026-10-07: own phase, ship BTCNATIVE first.
+**Requirements**: TBD
+**Depends on:** Phase 164.6.6.2
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 164.6.6.2.2 to break down)
+
 ### Phase 164.6.6.2.1: BTCUSDVIEW — a native-unit MT5 account also gets a USD view (INSERTED)
 
 Booked 2026-10-07 by Phase 164.6.6.2 decision D-15 (founder 2026-10-06: "BTC only first, USD later").
