@@ -31,6 +31,8 @@ import pytest
 from fastapi import HTTPException
 
 from routers import portfolio as portfolio_mod
+from tests._curve_fixtures import curve_from_returns
+from tests._schema_columns import assert_select_columns, table_columns
 
 # Read the raw source of routers/portfolio.py once for AST/source-level
 # regression checks. _function_source() (below) walks the AST of this text, so
@@ -56,29 +58,21 @@ def _function_source(name: str) -> str:
     raise LookupError(f"function {name} not found in routers/portfolio.py")
 
 
-# Synthetic strategy returns: 60 trading days, two strategies with
-# correlated but distinct profiles.
-def _returns_records(n: int = 60, base: float = 0.001, vol: float = 0.01,
-                    seed: int = 0) -> list[dict]:
+# Synthetic strategy CURVES: 60 trading days, two strategies with correlated but
+# distinct profiles. ``strategy_analytics.returns_series`` is the cumulative wealth
+# curve the analytics worker writes, NOT daily returns (Phase 164.6.6.2.2, CR-01),
+# so every fixture here has the stored shape. Reading it back yields the daily
+# returns of days 1..n-1 (day 0 has no stored predecessor).
+def _curve_records(n: int = 60, base: float = 0.001, vol: float = 0.01,
+                   seed: int = 0) -> list[dict]:
     import numpy as np
     import pandas as pd
     rng = np.random.default_rng(seed)
     rets = rng.normal(base, vol, n)
     dates = pd.bdate_range("2026-01-01", periods=n)
-    return [
-        {"date": d.strftime("%Y-%m-%d"), "value": float(r)}
-        for d, r in zip(dates, rets)
-    ]
-
-
-def _equity_records(returns: list[dict]) -> list[dict]:
-    vals = [1.0]
-    for r in returns:
-        vals.append(vals[-1] * (1 + r["value"]))
-    return [
-        {"date": r["date"], "value": vals[i + 1]}
-        for i, r in enumerate(returns)
-    ]
+    return curve_from_returns(
+        [float(r) for r in rets], [d.strftime("%Y-%m-%d") for d in dates]
+    )
 
 
 def _make_supabase_for_compute(
@@ -109,16 +103,30 @@ def _make_supabase_for_compute(
     pa.update.return_value.eq.return_value.execute.return_value = MagicMock(data=[])
     table_mocks["portfolio_analytics"] = pa
 
+    # Column-strict: a select naming a column the real table lacks RAISES here,
+    # as PostgREST would refuse it (Phase 164.6.6.2.2 D-04). A fake that answers
+    # any select string is what hid `equity_curve` / `total_aum` on
+    # strategy_analytics.
     ps = MagicMock()
-    ps.select.return_value.eq.return_value.execute.return_value = MagicMock(
-        data=portfolio_strategies
-    )
+    ps_chain = MagicMock()
+    ps_chain.eq.return_value.execute.return_value = MagicMock(data=portfolio_strategies)
+
+    def _ps_select(select_str: str, *_a, **_kw):
+        assert_select_columns("portfolio_strategies", select_str)
+        return ps_chain
+
+    ps.select.side_effect = _ps_select
     table_mocks["portfolio_strategies"] = ps
 
     sa = MagicMock()
-    sa.select.return_value.in_.return_value.execute.return_value = MagicMock(
-        data=analytics_rows
-    )
+    sa_chain = MagicMock()
+    sa_chain.in_.return_value.execute.return_value = MagicMock(data=analytics_rows)
+
+    def _sa_select(select_str: str, *_a, **_kw):
+        assert_select_columns("strategy_analytics", select_str)
+        return sa_chain
+
+    sa.select.side_effect = _sa_select
     table_mocks["strategy_analytics"] = sa
 
     pal = MagicMock()
@@ -188,15 +196,15 @@ def _pin_portfolio_module_in_sys_modules():
 class TestComputePortfolioAnalyticsHappyPath:
     @pytest.mark.asyncio
     async def test_two_strategies_full_pipeline(self):
-        ret1 = _returns_records(seed=1)
-        ret2 = _returns_records(seed=2)
+        ret1 = _curve_records(seed=1)
+        ret2 = _curve_records(seed=2)
         ps = [
             {"strategy_id": "s1", "current_weight": 0.6, "strategies": {"id": "s1", "name": "Alpha"}},
             {"strategy_id": "s2", "current_weight": 0.4, "strategies": {"id": "s2", "name": "Beta"}},
         ]
         sa_rows = [
-            {"strategy_id": "s1", "returns_series": ret1, "equity_curve": _equity_records(ret1), "total_aum": 100.0},
-            {"strategy_id": "s2", "returns_series": ret2, "equity_curve": _equity_records(ret2), "total_aum": 50.0},
+            {"strategy_id": "s1", "returns_series": ret1},
+            {"strategy_id": "s2", "returns_series": ret2},
         ]
         sb, tables = _make_supabase_for_compute(
             portfolio_strategies=ps,
@@ -223,6 +231,96 @@ class TestComputePortfolioAnalyticsHappyPath:
         assert update_call["computation_error"] is None
 
 
+async def _run_compute(sb, *, benchmark=None, stale: bool = True, portfolio_id: str = "portfolio-1"):
+    """Drive the real router function against ``sb``.
+
+    ``benchmark`` is the BTC daily-returns Series the stubbed benchmark fetch
+    returns (None with ``stale=True`` means no benchmark comparison). The module is
+    resolved at call time and patched with ``patch.object`` (some tests evict and
+    re-import routers.portfolio, so a dotted-string patch can hit a stale copy).
+    """
+    async def _fake_benchmark(symbol):
+        return benchmark, stale
+
+    with patch.object(portfolio_mod, "get_supabase", return_value=sb), \
+         patch.object(portfolio_mod, "get_benchmark_returns", side_effect=_fake_benchmark):
+        return await portfolio_mod._compute_portfolio_analytics(portfolio_id)
+
+
+_TRACER_DATES = ["2026-01-05", "2026-01-06", "2026-01-07"]
+
+
+class TestCurveShapedBlend:
+    """Tracer (Phase 164.6.6.2.2 Plan 04): a two-strategy portfolio whose
+    ``returns_series`` rows are stored-shape CURVES runs end to end against the
+    column-strict fake: select -> boundary -> blend -> persisted returns."""
+
+    @pytest.mark.asyncio
+    async def test_curve_rows_blend_to_the_hand_computed_daily_returns(self):
+        # A: daily returns [d1 0.02, d2 0.01]; B: [d1 -0.01, d2 0.03] (day 0 has no
+        # stored predecessor). Weights 0.5/0.5:
+        #   d1 = 0.5 * 0.02 + 0.5 * -0.01 = 0.005
+        #   d2 = 0.5 * 0.01 + 0.5 *  0.03 = 0.020
+        ps = [
+            {"strategy_id": "s1", "current_weight": 0.5, "strategies": {"id": "s1", "name": "A"}},
+            {"strategy_id": "s2", "current_weight": 0.5, "strategies": {"id": "s2", "name": "B"}},
+        ]
+        sa_rows = [
+            {"strategy_id": "s1",
+             "returns_series": curve_from_returns([0.0, 0.02, 0.01], _TRACER_DATES)},
+            {"strategy_id": "s2",
+             "returns_series": curve_from_returns([0.0, -0.01, 0.03], _TRACER_DATES)},
+        ]
+        sb, tables = _make_supabase_for_compute(portfolio_strategies=ps, analytics_rows=sa_rows)
+
+        await _run_compute(sb)
+
+        update = tables["portfolio_analytics"].update.call_args[0][0]
+        assert update["computation_status"] == "complete"
+        # The persisted equity curve is (1 + blended daily returns).cumprod():
+        # 1.005, then 1.005 * 1.02 = 1.0251. Read back, those are 0.005 and 0.02.
+        values = [pt["value"] for pt in update["portfolio_equity_curve"]]
+        assert len(values) == 2
+        assert values[0] == pytest.approx(1.005, abs=1e-12)
+        assert values[1] == pytest.approx(1.0251, abs=1e-12)
+        assert values[1] / values[0] - 1.0 == pytest.approx(0.02, abs=1e-12)
+
+
+class TestSchemaStrictFake:
+    """The fake rejects a select naming a column the real table lacks, so
+    re-adding ``equity_curve`` / ``total_aum`` to the strategy_analytics select
+    turns the compute tests RED instead of passing on canned rows."""
+
+    def test_schema_reader_knows_the_real_columns_and_not_the_phantoms(self):
+        cols = table_columns("strategy_analytics")
+        assert {"strategy_id", "returns_series", "daily_returns", "data_quality_flags"} <= cols
+        assert "equity_curve" not in cols
+        assert "total_aum" not in cols
+        assert "allocated_amount" in table_columns("portfolio_strategies")
+        # `alias` is added by a multi-line ALTER TABLE ... ADD COLUMN migration.
+        assert "alias" in table_columns("portfolio_strategies")
+
+    def test_schema_reader_refuses_an_unknown_table_instead_of_returning_empty(self):
+        with pytest.raises(LookupError):
+            table_columns("no_such_table_anywhere")
+
+    def test_strict_select_names_the_unknown_column_and_skips_embeds(self):
+        assert_select_columns(
+            "portfolio_strategies",
+            "strategy_id, current_weight, allocated_amount, strategies(id, name)",
+        )
+        with pytest.raises(AssertionError, match="equity_curve"):
+            assert_select_columns(
+                "strategy_analytics", "strategy_id, returns_series, equity_curve, total_aum"
+            )
+
+    def test_the_compute_select_is_strict_against_the_fake(self):
+        sb, _ = _make_supabase_for_compute(portfolio_strategies=[], analytics_rows=[])
+        sb.table("strategy_analytics").select("strategy_id, returns_series")
+        with pytest.raises(AssertionError, match="total_aum"):
+            sb.table("strategy_analytics").select("strategy_id, total_aum")
+
+
 # ---------------------------------------------------------------------------
 # H-0574 — Missing-strategy renormalization regression
 # ---------------------------------------------------------------------------
@@ -239,14 +337,14 @@ class TestRenormalizationRegression:
         Previously the renormalization was applied silently with no signal;
         the dashboard would render numbers that were really s2-only.
         """
-        ret2 = _returns_records(seed=2)
+        ret2 = _curve_records(seed=2)
         ps = [
             {"strategy_id": "s1", "current_weight": 0.8, "strategies": {"id": "s1", "name": "Alpha"}},
             {"strategy_id": "s2", "current_weight": 0.2, "strategies": {"id": "s2", "name": "Beta"}},
         ]
         # Only s2 has strategy_analytics row.
         sa_rows = [
-            {"strategy_id": "s2", "returns_series": ret2, "equity_curve": _equity_records(ret2), "total_aum": 50.0},
+            {"strategy_id": "s2", "returns_series": ret2},
         ]
         sb, tables = _make_supabase_for_compute(
             portfolio_strategies=ps,
@@ -279,33 +377,33 @@ class TestRenormalizationRegression:
 
 class TestPartialDataTelemetry:
     @pytest.mark.asyncio
-    async def test_missing_equity_curve_is_tracked(self):
-        """Strategy has returns_series but no equity_curve → must surface
-        in data_quality.missing_equity_sids."""
-        ret1 = _returns_records(seed=1)
-        ret2 = _returns_records(seed=2)
+    async def test_no_strategy_with_returns_is_missing_an_equity(self):
+        """D-04: the equity behind each strategy's TWR is DERIVED from its returns,
+        so a strategy that has a curve is never "missing an equity" any more.
+        ``missing_equity_sids`` keeps its key (the persisted shape is unchanged,
+        and the hedge wiring that reads it stays) but this producer leaves it
+        empty, and a fully-populated portfolio is not flagged partial."""
+        ret1 = _curve_records(seed=1)
+        ret2 = _curve_records(seed=2)
         ps = [
             {"strategy_id": "s1", "current_weight": 0.5, "strategies": {"id": "s1", "name": "Alpha"}},
             {"strategy_id": "s2", "current_weight": 0.5, "strategies": {"id": "s2", "name": "Beta"}},
         ]
         sa_rows = [
-            {"strategy_id": "s1", "returns_series": ret1, "equity_curve": _equity_records(ret1)},
-            {"strategy_id": "s2", "returns_series": ret2, "equity_curve": None},  # missing equity
+            {"strategy_id": "s1", "returns_series": ret1},
+            {"strategy_id": "s2", "returns_series": ret2},
         ]
         sb, tables = _make_supabase_for_compute(
             portfolio_strategies=ps,
             analytics_rows=sa_rows,
         )
 
-        async def _fake_benchmark(symbol):
-            return None, True
-        with patch("routers.portfolio.get_supabase", return_value=sb), \
-             patch("routers.portfolio.get_benchmark_returns", side_effect=_fake_benchmark):
-            result = await portfolio_mod._compute_portfolio_analytics("portfolio-1")
+        result = await _run_compute(sb)
 
         dq = result["data_quality"]
-        assert "s2" in dq["missing_equity_sids"]
-        assert dq["partial_data"] is True
+        assert "missing_equity_sids" in dq
+        assert dq["missing_equity_sids"] == []
+        assert dq["partial_data"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -323,15 +421,15 @@ class TestCorrelationHistorySufficientFlag:
 
     @pytest.mark.asyncio
     async def test_full_overlap_flag_true(self):
-        ret1 = _returns_records(seed=1)        # 60 business days
-        ret2 = _returns_records(seed=2)        # 60 business days, full overlap
+        ret1 = _curve_records(seed=1)        # 60 business days
+        ret2 = _curve_records(seed=2)        # 60 business days, full overlap
         ps = [
             {"strategy_id": "s1", "current_weight": 0.6, "strategies": {"id": "s1", "name": "Alpha"}},
             {"strategy_id": "s2", "current_weight": 0.4, "strategies": {"id": "s2", "name": "Beta"}},
         ]
         sa_rows = [
-            {"strategy_id": "s1", "returns_series": ret1, "equity_curve": _equity_records(ret1), "total_aum": 100.0},
-            {"strategy_id": "s2", "returns_series": ret2, "equity_curve": _equity_records(ret2), "total_aum": 50.0},
+            {"strategy_id": "s1", "returns_series": ret1},
+            {"strategy_id": "s2", "returns_series": ret2},
         ]
         sb, _ = _make_supabase_for_compute(portfolio_strategies=ps, analytics_rows=sa_rows)
 
@@ -345,15 +443,15 @@ class TestCorrelationHistorySufficientFlag:
 
     @pytest.mark.asyncio
     async def test_short_overlap_flag_false(self):
-        ret1 = _returns_records(n=60, seed=1)
-        ret2 = _returns_records(n=5, seed=2)   # only 5 days -> overlap 5 < 10
+        ret1 = _curve_records(n=60, seed=1)
+        ret2 = _curve_records(n=5, seed=2)   # only 5 days -> overlap 5 < 10
         ps = [
             {"strategy_id": "s1", "current_weight": 0.6, "strategies": {"id": "s1", "name": "Alpha"}},
             {"strategy_id": "s2", "current_weight": 0.4, "strategies": {"id": "s2", "name": "Beta"}},
         ]
         sa_rows = [
-            {"strategy_id": "s1", "returns_series": ret1, "equity_curve": _equity_records(ret1), "total_aum": 100.0},
-            {"strategy_id": "s2", "returns_series": ret2, "equity_curve": _equity_records(ret2), "total_aum": 50.0},
+            {"strategy_id": "s1", "returns_series": ret1},
+            {"strategy_id": "s2", "returns_series": ret2},
         ]
         sb, _ = _make_supabase_for_compute(portfolio_strategies=ps, analytics_rows=sa_rows)
 
@@ -613,15 +711,15 @@ class TestAlertFailureKeepsAnalyticsComplete:
 
     @pytest.mark.asyncio
     async def test_alert_exception_does_not_mark_row_failed(self, monkeypatch):
-        ret1 = _returns_records(seed=1)
-        ret2 = _returns_records(seed=2)
+        ret1 = _curve_records(seed=1)
+        ret2 = _curve_records(seed=2)
         ps = [
             {"strategy_id": "s1", "current_weight": 0.5, "strategies": {"id": "s1", "name": "Alpha"}},
             {"strategy_id": "s2", "current_weight": 0.5, "strategies": {"id": "s2", "name": "Beta"}},
         ]
         sa_rows = [
-            {"strategy_id": "s1", "returns_series": ret1, "equity_curve": _equity_records(ret1), "total_aum": 100.0},
-            {"strategy_id": "s2", "returns_series": ret2, "equity_curve": _equity_records(ret2), "total_aum": 50.0},
+            {"strategy_id": "s1", "returns_series": ret1},
+            {"strategy_id": "s2", "returns_series": ret2},
         ]
         sb, tables = _make_supabase_for_compute(
             portfolio_strategies=ps,
@@ -897,7 +995,7 @@ class TestAvgPairwiseCorrelationPairCount:
             for sid in ids
         ]
         sa_rows = [
-            {"strategy_id": sid, "returns_series": r, "equity_curve": _equity_records(r),
+            {"strategy_id": sid, "returns_series": r,
              "total_aum": 100.0}
             for sid, r in zip(ids, returns)
         ]
@@ -911,8 +1009,8 @@ class TestAvgPairwiseCorrelationPairCount:
 
     @pytest.mark.asyncio
     async def test_a_flat_leg_is_counted_out_of_the_average(self):
-        flat = _returns_records(base=0.0, vol=0.0, seed=3)
-        result = await self._compute([_returns_records(seed=1), _returns_records(seed=2), flat])
+        flat = _curve_records(base=0.0, vol=0.0, seed=3)
+        result = await self._compute([_curve_records(seed=1), _curve_records(seed=2), flat])
         dq = result["data_quality"]
         assert dq["avg_pairwise_correlation_pairs_used"] == 1
         assert dq["avg_pairwise_correlation_pairs_total"] == 3
@@ -920,7 +1018,7 @@ class TestAvgPairwiseCorrelationPairCount:
 
     @pytest.mark.asyncio
     async def test_a_dispersing_book_uses_every_pair(self):
-        result = await self._compute([_returns_records(seed=1), _returns_records(seed=2)])
+        result = await self._compute([_curve_records(seed=1), _curve_records(seed=2)])
         dq = result["data_quality"]
         assert dq["avg_pairwise_correlation_pairs_used"] == 1
         assert dq["avg_pairwise_correlation_pairs_total"] == 1
