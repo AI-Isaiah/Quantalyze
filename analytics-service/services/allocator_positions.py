@@ -57,6 +57,12 @@ from typing import Any, Awaitable, Callable, ClassVar, Literal, cast
 import ccxt.async_support as ccxt
 from supabase import Client
 
+from services.account_unit import (
+    AccountCurrencyBlank,
+    AccountCurrencyMalformed,
+    AccountCurrencyUnsupported,
+    classify_account_currency,
+)
 from services.closed_sets import (
     MT5_DISABLED_DETAIL,
     NON_CCXT_VENUES,
@@ -681,13 +687,12 @@ async def _fetch_derivative_rows(exchange_name: str, exchange: Any) -> list[dict
     return rows
 
 
-# A plain currency CODE and nothing else. The currency arrives from the broker's
-# terminal and is interpolated into MT5_NON_USD_NOTE — i.e. into
-# ``api_keys.sync_error``, which the browser renders VERBATIM. Anything that is
-# not a bare alphabetic code renders as "unknown" rather than being echoed
-# (T-151-05 / ASVS V7): the copy channel is not a place to pass through
-# third-party text.
-_CURRENCY_CODE_RE = re.compile(r"[A-Za-z]{2,10}")
+# The currency arrives from the broker's terminal and is interpolated into
+# MT5_NON_USD_NOTE — i.e. into ``api_keys.sync_error``, which the browser renders
+# VERBATIM. Anything that is not a bare alphabetic code renders as "unknown" rather
+# than being echoed (T-151-05 / ASVS V7): the copy channel is not a place to pass
+# through third-party text. The code shape is decided by ``classify_account_currency``
+# (164.6.6.2), the one parser, so this module no longer carries its own copy of it.
 
 # The account-scoped ``symbol`` token must satisfy the commit route's
 # HOLDING_REF_RE alphabet (route.ts:81) because holdings fingerprints are
@@ -978,17 +983,27 @@ async def _fetch_mt5_account_rows(
     # this function with no logger call, so a fleet-wide gateway regression that
     # dropped the field would have shown ZERO log/Sentry signal — the only
     # evidence being per-user copy in `api_keys.sync_error`.
+    #
+    # ⭐ 164.6.6.2 / D-01, D-04 — the three decisions above (blank, malformed, a code) are
+    # made by the ONE shared classifier (``services.account_unit``), not a local copy of
+    # its regex. ⛔ What stays LOCAL is the valuation: this poll values positions at a $1.00
+    # mark, which is true for "USD" alone. A USD-FAMILY code that is not "USD" (USDT, USDC,
+    # EURR, DAI) is still skipped here, exactly as before this phase: for the family the
+    # derive treats them as USD, but pricing an EURR holding at $1.00 would invent data.
+    # A native unit (BTC) and an unsupported code (EUR) are skipped the same way, by name.
     raw_ccy = info.get("currency")
     reported_ccy = raw_ccy.strip() if isinstance(raw_ccy, str) else ""
-    if reported_ccy == "":
-        logger.warning(
-            "poll_allocator_positions: mt5 account_info reported no currency "
-            "(absent/blank) — payload degradation, classified transient "
-            "(NOT an FX-support gap)"
-        )
-        raise AllocatorHoldingsSyncTransientError(MT5_UNREACHABLE_NOTE)
-    ccy = reported_ccy.upper()
-    if not _CURRENCY_CODE_RE.fullmatch(ccy):
+    # The blank raise is made OUTSIDE the except arm on purpose: it has no exception worth
+    # classifying (``_must_reach_handler_unwrapped`` is for arms that caught a real fault),
+    # and the D-09 census (``test_every_retry_promising_raise_is_guarded_by_the_classifier``)
+    # names a retry-promising raise from inside an except arm that lacks that guard. It is
+    # the plain-``if`` residual it always was, now fed by the shared classifier.
+    blank = False
+    try:
+        unit = classify_account_currency(raw_ccy)
+    except AccountCurrencyBlank:
+        blank = True
+    except AccountCurrencyMalformed:
         # Bounded, non-echoing diagnostic: enough to recognise a gateway-wide
         # shape regression, never the raw string in full.
         logger.warning(
@@ -998,6 +1013,21 @@ async def _fetch_mt5_account_rows(
             reported_ccy[:8],
         )
         return ([], MT5_NON_USD_NOTE.format(ccy="unknown"))
+    except AccountCurrencyUnsupported as unsupported:
+        logger.info(
+            "poll_allocator_positions: mt5 account denominated in %s — honest "
+            "skip (no FX rate available)",
+            unsupported.code,
+        )
+        return ([], MT5_NON_USD_NOTE.format(ccy=unsupported.code))
+    if blank:
+        logger.warning(
+            "poll_allocator_positions: mt5 account_info reported no currency "
+            "(absent/blank) — payload degradation, classified transient "
+            "(NOT an FX-support gap)"
+        )
+        raise AllocatorHoldingsSyncTransientError(MT5_UNREACHABLE_NOTE)
+    ccy = unit.code
     if ccy != "USD":
         logger.info(
             "poll_allocator_positions: mt5 account denominated in %s — honest "

@@ -299,20 +299,17 @@ _DERIBIT_EMPTY_LEDGER_FLOOR_USD: Final[float] = USD_FLOORS.material_equity
 # Phase 164.6.6.2 / D-01, D-03, D-06 — the FIXED texts of the MT5 account-currency refusals.
 # Every one lands in `compute_jobs.error_message` or `strategy_analytics.computation_error`,
 # both re-classifiable (D-42): none may carry a `mt5_validation._WRONG_SERVER_PHRASES` /
-# `_AUTH_PHRASES` member, and none carries an amount, login or server. The two stamp
-# sentences are the curated, user-visible copy and are the only thing that reaches the wizard.
+# `_AUTH_PHRASES` member, and none carries an amount, login or server. The two curated
+# stamp sentences (the user-visible copy, the only thing that reaches the wizard) are written
+# INLINE at their `_stamp_strategy_analytics_failed` call sites, not as constants here:
+# `tests/test_stamp_io_exhaustive.py` measures every stamp message from the call's own
+# literal or f-string, and a Name argument has to be registered there by hand.
 _MT5_CURRENCY_BLANK_MESSAGE: Final[str] = (
     "derive_broker_dailies: the MT5 account currency was not reported yet — retrying"
 )
 _MT5_CURRENCY_CHANGED_MESSAGE: Final[str] = (
     "derive_broker_dailies: the MT5 account currency differs from the one stored — "
     "refusing to mix two units in one series"
-)
-_MT5_CURRENCY_MALFORMED_STAMP: Final[str] = (
-    "The account currency could not be read as a currency code, so no metric is computed."
-)
-_MT5_CURRENCY_UNSUPPORTED_STAMP: Final[str] = (
-    "Returns in {ccy} are not supported yet, so no metric is computed."
 )
 _MT5_CURRENCY_REFUSED_MESSAGE: Final[str] = (
     "derive_broker_dailies: the MT5 account currency is not supported — no metric computed"
@@ -482,6 +479,35 @@ async def _fetch_mt5_account_balance(
             "sync_trades: mt5 balance read failed — continuing without a "
             "balance snapshot (exc_class=%s scrubbed=%s)",
             type(exc).__name__, scrub_freeform_string(str(exc)),
+        )
+        return None
+
+    # ⭐ 164.6.6.2 / D-14 — ``api_keys.account_balance_usdt`` is a USD field. A native
+    # (BTC) account's equity is a number of BTC, so writing it there would put 0.1 BTC
+    # where the allocator surfaces read 0.1 dollars; an unsupported or unclassifiable
+    # currency has no honest USD reading either. Both fall under this function's own
+    # advisory contract (ANY failure returns ``None``): the sync completes without a balance
+    # snapshot, and the derive stores the native balance beside the unit instead.
+    try:
+        _balance_unit = classify_account_currency(info.get("currency"))
+    except AccountCurrencyUnsupported as _unsupported:
+        logger.info(
+            "sync_trades: mt5 account is denominated in %s, which has no USD "
+            "reading — continuing without a USD balance snapshot (D-14)",
+            _unsupported.code,
+        )
+        return None
+    except (AccountCurrencyBlank, AccountCurrencyMalformed):
+        logger.info(
+            "sync_trades: mt5 account currency is unreadable (unknown) — "
+            "continuing without a USD balance snapshot (D-14)"
+        )
+        return None
+    if _balance_unit.native:
+        logger.info(
+            "sync_trades: mt5 account is denominated in %s, not USD — continuing "
+            "without a USD balance snapshot (D-14)",
+            _balance_unit.code,
         )
         return None
 
@@ -5350,7 +5376,10 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                     "(label=%s) — classified permanent, nothing written (D-06)",
                     funding_label,
                 )
-                await _stamp_strategy_analytics_failed(_MT5_CURRENCY_MALFORMED_STAMP)
+                await _stamp_strategy_analytics_failed(
+                    "The account currency could not be read as a currency code, so no "
+                    "metric is computed."
+                )
                 return DispatchResult(
                     outcome=DispatchOutcome.FAILED,
                     error_message=_MT5_CURRENCY_REFUSED_MESSAGE,
@@ -5368,7 +5397,8 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                     funding_label,
                 )
                 await _stamp_strategy_analytics_failed(
-                    _MT5_CURRENCY_UNSUPPORTED_STAMP.format(ccy=_unsupported.code)
+                    f"Returns in {_unsupported.code} are not supported yet, so no "
+                    "metric is computed."
                 )
                 return DispatchResult(
                     outcome=DispatchOutcome.FAILED,

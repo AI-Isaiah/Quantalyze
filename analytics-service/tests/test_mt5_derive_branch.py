@@ -2184,9 +2184,9 @@ def test_every_new_derive_message_is_blame_free_for_the_mt5_classifier() -> None
         jw._MT5_CURRENCY_BLANK_MESSAGE,
         jw._MT5_CURRENCY_CHANGED_MESSAGE,
         jw._MT5_CURRENCY_REFUSED_MESSAGE,
-        jw._MT5_CURRENCY_MALFORMED_STAMP,
-        jw._MT5_CURRENCY_UNSUPPORTED_STAMP.format(ccy="EUR"),
-        jw._MT5_CURRENCY_UNSUPPORTED_STAMP.format(ccy="BTC"),
+        _MALFORMED_STAMP,
+        "Returns in EUR are not supported yet, so no metric is computed.",
+        "Returns in BTC are not supported yet, so no metric is computed.",
     ]
     for text in texts:
         verdict = classify_mt5_login_error(Mt5ClientError(0, text))

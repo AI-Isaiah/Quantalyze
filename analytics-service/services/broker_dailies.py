@@ -603,7 +603,11 @@ def _fold_mt5_deals(
         ).as_unit("us"),
         name="daily_pnl",
     )
-    # Dated external flows (deposit +, withdrawal −); USD-family so quantity == usd.
+    # Dated external flows (deposit +, withdrawal −), in the ACCOUNT'S OWN unit: USD for a
+    # USD-family account (so quantity == usd there), BTC for a BTC one. ``usd_signed`` is the
+    # engine's field name, not a claim that the number is dollars: for a native unit it is
+    # consumed only inside the unit-consistent NAV/TWR fold, and 164.6.6.2 / D-14 keeps it
+    # out of every USD surface.
     flows = [
         ExternalFlow(utc_day_iso=day, usd_signed=amount)
         for day, amount in sorted(flow_by_day.items())

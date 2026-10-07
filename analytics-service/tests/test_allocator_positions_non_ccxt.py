@@ -956,6 +956,42 @@ async def test_mt5_non_usd_currency_skips_honestly(mt5_enabled):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("code", ["BTC", "USDT", "USDC", "EURR", "DAI"])
+async def test_mt5_poll_values_only_usd_so_every_other_code_stays_skipped(
+    mt5_enabled, code
+):
+    """164.6.6.2 / D-04, "behaviour for those is unchanged". The poll prices positions at
+    a $1.00 mark, which holds for "USD" alone: BTC (a native unit) and the USD-family
+    codes that are not "USD" are skipped by name, exactly as before the shared
+    classifier. Pricing an EURR holding at $1.00 would invent data inside an AUM total.
+    Falsify: replace the ``!= "USD"`` valuation test with a USD-family membership test
+    and the four family codes go red."""
+    from services.allocator_positions import MT5_NON_USD_NOTE
+
+    transport = _RecordingMt5Transport(account=_account(currency=code))
+
+    rows, warning = await fetch_allocator_holdings(
+        "mt5", _session(transport), API_KEY_ID
+    )
+
+    assert rows == []
+    assert warning == MT5_NON_USD_NOTE.format(ccy=code)
+
+
+@pytest.mark.asyncio
+async def test_mt5_poll_still_values_a_usd_account(mt5_enabled):
+    """The other side of the same test: "USD" is the one code that is valued."""
+    transport = _RecordingMt5Transport(account=_account(currency="USD"))
+
+    rows, warning = await fetch_allocator_holdings(
+        "mt5", _session(transport), API_KEY_ID
+    )
+
+    assert rows, "a USD account must still produce its holdings row"
+    assert warning is None or "currency" not in warning.lower()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("bad_ccy", [None, "", "   "])
 async def test_mt5_absent_currency_is_transient_not_an_fx_support_gap(
     mt5_enabled, bad_ccy, caplog
