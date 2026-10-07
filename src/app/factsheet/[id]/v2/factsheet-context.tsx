@@ -324,7 +324,14 @@ export function FactsheetProvider({
       }
     }
     const cmpRaw = get("cmp");
-    if (cmpRaw === "btc" || cmpRaw === "spx" || cmpRaw === "none") {
+    // Phase 164.6.6.2 (D-10, UI-SPEC A7, T-164.6.6.2-20): a strategy whose returns are
+    // in a native unit has no BTC comparator, so a `cmp=btc` from the URL or the stored
+    // view reads as absent and the server default ("none") stands.
+    if (
+      (cmpRaw === "btc" && !payload.returnsUnit) ||
+      cmpRaw === "spx" ||
+      cmpRaw === "none"
+    ) {
       setComparator(cmpRaw);
     }
     const cbRaw = get("cb");
@@ -337,7 +344,7 @@ export function FactsheetProvider({
     }
     // Display defaults to "everything off" — no system-preference inference
     // for dark mode. The user opts in explicitly via the Display popover.
-  }, [payload.strategyId, payload.dates.length, storageHydrated, storedView, persist]);
+  }, [payload.strategyId, payload.dates.length, payload.returnsUnit, storageHydrated, storedView, persist]);
 
   // Debounced write-back — only fires after hydration so we don't blow away
   // URL/stored state before we've read it. The URL half is a synchronous
