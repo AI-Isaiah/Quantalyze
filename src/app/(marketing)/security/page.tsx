@@ -111,7 +111,7 @@ export default function SecurityPage() {
                 are issued by a public CA and rotated automatically before
                 expiry. HSTS is enabled for{" "}
                 <code className="rounded bg-page px-1 py-0.5 font-mono text-caption">
-                  quantalyze.com
+                  quantalyze.xyz
                 </code>{" "}
                 with a one-year max-age.
               </p>
