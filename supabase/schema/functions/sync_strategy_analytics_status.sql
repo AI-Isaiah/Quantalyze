@@ -2,7 +2,7 @@
 -- Canonical current body of this function, replayed from supabase/migrations/**.
 -- Regenerate with `npm run schema:functions`. See tech-debt #2.
 
--- source migration: 20261003120000_sync_status_bridge_residues.sql
+-- source migration: 20261009120000_sync_status_analytics_scope.sql
 -- --------------------------------------------------------------------------
 -- the bridge, re-based on 20260906120000 STEP 2
 -- --------------------------------------------------------------------------
@@ -354,6 +354,26 @@ BEGIN
       FROM compute_jobs f
      WHERE f.strategy_id = p_strategy_id
        AND f.status = 'failed_final'
+       AND f.kind NOT IN ('sync_funding', 'poll_positions', 'reconcile_strategy', 'compute_intro_snapshot')
+       AND NOT (
+         f.kind = 'process_key_long'
+         AND EXISTS (
+           SELECT 1
+             FROM compute_jobs c1
+            WHERE c1.strategy_id = f.strategy_id
+              AND c1.kind = 'derive_broker_dailies'
+              AND c1.status = 'done'
+              AND c1.created_at > f.created_at
+         )
+         AND EXISTS (
+           SELECT 1
+             FROM compute_jobs c2
+            WHERE c2.strategy_id = f.strategy_id
+              AND c2.kind = 'compute_analytics_from_csv'
+              AND c2.status = 'done'
+              AND c2.created_at > f.created_at
+         )
+       )
        AND NOT EXISTS (
          SELECT 1
            FROM compute_jobs d
