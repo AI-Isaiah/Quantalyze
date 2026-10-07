@@ -45,14 +45,18 @@ export const dynamic = "force-dynamic";
  * gate has already run; `withPublishedOnly` repeats it on this read so the
  * guarantee does not depend on call order.
  *
- * Fails soft to "no unit": a tear sheet that cannot learn the unit renders as
- * USD and logs one line rather than failing to print. (A BTC strategy rendered
- * as USD in that window is the documented cost; the log is how it is found.)
+ * Fails CLOSED (SFH-2). "The read succeeded and recorded no unit" (USD family)
+ * and "the unit could not be determined" are different facts and are returned
+ * as different shapes. An undetermined unit logs one line and the page withholds
+ * the return-denominated figures: this is a printable, shareable document, and a
+ * BTC strategy's figures must never be printed unlabelled as if they were USD.
  */
+type ReturnsUnitRead = { determined: true; unit: string | null } | { determined: false };
+
 async function readReturnsUnit(
   supabase: Awaited<ReturnType<typeof createClient>>,
   strategyId: string,
-): Promise<string | null> {
+): Promise<ReturnsUnitRead> {
   try {
     const { data, error } = await withPublishedOnly(
       supabase
@@ -62,19 +66,22 @@ async function readReturnsUnit(
     ).maybeSingle();
     if (error) {
       console.error("[tearsheet] returns unit read failed", { message: error.message });
-      return null;
+      return { determined: false };
     }
     const embed = (data as { strategy_analytics?: unknown } | null)?.strategy_analytics;
     const analytics = (Array.isArray(embed) ? embed[0] : embed) as
       | { data_quality_flags?: { native_unit?: unknown } | null }
       | null
       | undefined;
-    return parseReturnsUnit(analytics?.data_quality_flags?.native_unit);
+    return {
+      determined: true,
+      unit: parseReturnsUnit(analytics?.data_quality_flags?.native_unit),
+    };
   } catch (err) {
     console.error("[tearsheet] returns unit read failed", {
       message: err instanceof Error ? err.message : String(err),
     });
-    return null;
+    return { determined: false };
   }
 }
 
@@ -188,9 +195,16 @@ export default async function TearSheetPage({
   }
 
   const { strategy, analytics, manager, disclosureTier } = result;
-  // Phase 164.6.6.2 plan 07: a null client means the lookup above already threw
-  // and logged; the tear sheet then reads as USD (see readReturnsUnit).
-  const returnsUnit = supabase ? await readReturnsUnit(supabase, strategy.id) : null;
+  // Phase 164.6.6.2 plan 07 / SFH-2: a null client means the lookup above
+  // already threw and logged. That is "unit undetermined", not "USD": fail
+  // closed (see readReturnsUnit).
+  const unitRead: ReturnsUnitRead = supabase
+    ? await readReturnsUnit(supabase, strategy.id)
+    : { determined: false };
+  const unitUndetermined = !unitRead.determined;
+  const returnsUnit = unitRead.determined ? unitRead.unit : null;
+  // Shown in place of every return-denominated figure while the unit is unknown.
+  const WITHHELD = "—";
   // For non-attested callers (anonymous OR logged-in-but-unattested), force
   // the panel into the exploratory (redacted) lane regardless of the
   // strategy's actual disclosure tier. This is the C-0189 closure:
@@ -248,6 +262,11 @@ export default async function TearSheetPage({
           {/* D-09: says, once, that every return and drawdown below is in the
               strategy's native unit. Zero nodes for a USD strategy. */}
           <ReturnsUnitChip unit={returnsUnit} className="mt-1" />
+          {unitUndetermined && (
+            <p className="mt-1 text-fixed-10 text-text-muted">
+              Return unit could not be confirmed; figures withheld. Reload to try again.
+            </p>
+          )}
         </div>
         <div className="shrink-0 text-right">
           {/* STALE-01 — the badge is a claim about WHEN these numbers were
@@ -294,18 +313,21 @@ export default async function TearSheetPage({
 
       {/* Hero metrics */}
       <section className="mb-6 grid grid-cols-4 gap-3">
-        <HeroMetric label={withUnit("CAGR", returnsUnit)} value={formatPercent(analytics.cagr)} />
+        <HeroMetric
+          label={withUnit("CAGR", returnsUnit)}
+          value={unitUndetermined ? WITHHELD : formatPercent(analytics.cagr)}
+        />
         <HeroMetric label="Sharpe" value={formatNumber(analytics.sharpe)} />
         <HeroMetric label="Sortino" value={formatNumber(analytics.sortino)} />
         <HeroMetric
           label="Max DD"
-          value={formatPercent(analytics.max_drawdown)}
+          value={unitUndetermined ? WITHHELD : formatPercent(analytics.max_drawdown)}
           danger
         />
       </section>
 
       {/* Equity curve */}
-      {analytics.sparkline_returns && analytics.sparkline_returns.length > 0 && (
+      {!unitUndetermined && analytics.sparkline_returns && analytics.sparkline_returns.length > 0 && (
         <section className="mb-6 rounded-lg border border-border p-4">
           <div className="mb-2 flex items-center justify-between">
             <h2 className="text-sm font-semibold text-text-primary">{withUnit("Equity Curve", returnsUnit)}</h2>
@@ -347,21 +369,36 @@ export default async function TearSheetPage({
 
       {/* Detail metrics */}
       <section className="mb-6 grid grid-cols-4 gap-3">
-        <DetailMetric label="Volatility" value={formatPercent(analytics.volatility)} />
+        <DetailMetric
+          label="Volatility"
+          value={unitUndetermined ? WITHHELD : formatPercent(analytics.volatility)}
+        />
         <DetailMetric label="Calmar" value={formatNumber(analytics.calmar)} />
-        <DetailMetric label="6 Month" value={formatPercent(analytics.six_month_return)} />
+        <DetailMetric
+          label="6 Month"
+          value={unitUndetermined ? WITHHELD : formatPercent(analytics.six_month_return)}
+        />
         <DetailMetric
           label={withUnit("Cumulative", returnsUnit)}
-          value={formatPercent(analytics.cumulative_return)}
+          value={unitUndetermined ? WITHHELD : formatPercent(analytics.cumulative_return)}
         />
-        <DetailMetric label="VaR (95%)" value={formatPercent(m?.var_1d_95)} />
-        <DetailMetric label="CVaR" value={formatPercent(m?.cvar)} />
-        <DetailMetric label="Best Day" value={formatPercent(m?.best_day)} />
-        <DetailMetric label="Worst Day" value={formatPercent(m?.worst_day)} />
+        <DetailMetric
+          label="VaR (95%)"
+          value={unitUndetermined ? WITHHELD : formatPercent(m?.var_1d_95)}
+        />
+        <DetailMetric label="CVaR" value={unitUndetermined ? WITHHELD : formatPercent(m?.cvar)} />
+        <DetailMetric
+          label="Best Day"
+          value={unitUndetermined ? WITHHELD : formatPercent(m?.best_day)}
+        />
+        <DetailMetric
+          label="Worst Day"
+          value={unitUndetermined ? WITHHELD : formatPercent(m?.worst_day)}
+        />
       </section>
 
       {/* Monthly returns heatmap */}
-      {analytics.monthly_returns && (
+      {!unitUndetermined && analytics.monthly_returns && (
         <section className="mb-6">
           <h2 className="mb-2 text-sm font-semibold text-text-primary">Monthly Returns</h2>
           <div className="overflow-x-auto">
@@ -419,8 +456,8 @@ export default async function TearSheetPage({
           <TermRow
             label="Minimum Allocation"
             value={
-              returnsUnit != null
-                ? "—"
+              unitUndetermined || returnsUnit != null
+                ? WITHHELD
                 : strategy.aum
                   ? `$${Math.round(strategy.aum).toLocaleString()}`
                   : "Negotiable"

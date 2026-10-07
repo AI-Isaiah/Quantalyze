@@ -32,7 +32,7 @@
  * flip from null → non-null, failing the test.
  */
 import { describe, it, expect, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { cleanup, render, screen } from "@testing-library/react";
 import React from "react";
 
 // server-only throws in jsdom; transitively imported via @/lib/queries.
@@ -427,13 +427,33 @@ describe("TearSheet page - returns unit (164.6.6.2-07, D-09, D-21)", () => {
     expect(container.querySelectorAll('[data-returns-unit="BTC"]')).toHaveLength(1);
   });
 
-  it("T6 - a unit read that returns an error renders USD, logs one line, and never throws", async () => {
+  const NOTE = "Return unit could not be confirmed; figures withheld. Reload to try again.";
+
+  /**
+   * SFH-2: the unit is UNDETERMINED. The page must not present return figures
+   * as if they were USD - they are withheld, and Minimum Allocation (a declared
+   * USD amount) is a dash, never a `$`.
+   */
+  function expectWithheld(container: HTMLElement) {
+    expect(container.querySelector("[data-returns-unit]")).toBeNull();
+    expect(screen.getByText(NOTE)).toBeInTheDocument();
+    for (const label of ["CAGR", "Max DD", "Volatility", "6 Month", "Cumulative"]) {
+      const el = screen.getByText(label);
+      expect(el.nextElementSibling?.textContent).toBe("\u2014");
+    }
+    expect(screen.queryByText("Equity Curve")).toBeNull();
+    expect(screen.queryByText("Monthly Returns")).toBeNull();
+    const min = termValue("Minimum Allocation");
+    expect(min).toBe("\u2014");
+    expect(min).not.toContain("$");
+  }
+
+  it("T6 - a unit read that returns an error withholds the figures, logs one line, and never throws", async () => {
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
       stubAuth(ANON, undefined, { data: null, error: { message: "statement timeout" } });
       const { container } = await renderPage();
-      expect(container.querySelector("[data-returns-unit]")).toBeNull();
-      expect(screen.getByText("CAGR")).toBeInTheDocument();
+      expectWithheld(container);
       expect(errSpy).toHaveBeenCalledTimes(1);
       expect(errSpy).toHaveBeenCalledWith("[tearsheet] returns unit read failed", {
         message: "statement timeout",
@@ -443,13 +463,12 @@ describe("TearSheet page - returns unit (164.6.6.2-07, D-09, D-21)", () => {
     }
   });
 
-  it("T7 - a unit read that throws renders USD, logs one line, and never throws", async () => {
+  it("T7 - a unit read that throws withholds the figures, logs one line, and never throws", async () => {
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
       stubAuth(ANON, undefined, "throw");
       const { container } = await renderPage();
-      expect(container.querySelector("[data-returns-unit]")).toBeNull();
-      expect(screen.getByText("CAGR")).toBeInTheDocument();
+      expectWithheld(container);
       expect(errSpy).toHaveBeenCalledTimes(1);
       expect(errSpy).toHaveBeenCalledWith("[tearsheet] returns unit read failed", {
         message: "unit read exploded",
@@ -457,5 +476,34 @@ describe("TearSheet page - returns unit (164.6.6.2-07, D-09, D-21)", () => {
     } finally {
       errSpy.mockRestore();
     }
+  });
+
+  it("T8 - no request client (createClient threw) withholds the figures too", async () => {
+    vi.mocked(createClient).mockImplementationOnce(async () => {
+      throw new Error("supabase outage");
+    });
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const { container } = await renderPage();
+      expectWithheld(container);
+      expect(errSpy).toHaveBeenCalledWith(
+        "[tearsheet] attestation lookup failed:",
+        expect.any(Error),
+      );
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  it("T9 - a determined unit (USD or BTC) never shows the withheld note", async () => {
+    stubAuth(ANON);
+    await renderPage();
+    expect(screen.queryByText(NOTE)).toBeNull();
+    expect(screen.getByText("CAGR").nextElementSibling?.textContent).not.toBe("\u2014");
+    cleanup();
+    stubAuth(ANON, undefined, btcRead);
+    await renderPage();
+    expect(screen.queryByText(NOTE)).toBeNull();
+    expect(screen.getByText("CAGR in BTC").nextElementSibling?.textContent).not.toBe("\u2014");
   });
 });
