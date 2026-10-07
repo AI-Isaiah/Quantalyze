@@ -21,6 +21,7 @@
  */
 import { render, screen, waitFor, act, cleanup } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { MT5_HISTORY_NOT_SETTLED_COMPUTATION_ERROR } from "@/lib/wizardErrors";
 import {
   SyncPreviewStep,
   type SyncPreviewSnapshot,
@@ -446,6 +447,34 @@ describe("[H-0195/H-0197/H-0198] SyncPreviewStep — polling loop dispositions",
     // accordion (code + correlation id) is always present.
     expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
     expect(screen.getByText("Copy diagnostics")).toBeInTheDocument();
+  });
+
+  // 164.6.6.3.2 / D-03, D-06 — the history-not-settled card. The wizard picks it by
+  // EXACT equality of the terminal `computation_error` with the constant it ships
+  // (never a substring). Drives the same failed-terminal path as the H-0195 case.
+  async function driveToFailedEnvelopeWith(error: string | null) {
+    installSupabaseMock(() => ({ kind: "row", status: "failed", error }));
+    render(<SyncPreviewStep {...baseProps} />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(6000);
+    });
+    return screen.getByTestId("error-envelope");
+  }
+
+  it("[164.6.6.3.2 D-03/D-06] a failed terminal stamped with the history-not-settled sentence shows GATE_HISTORY_NOT_SETTLED with Retry", async () => {
+    const envelope = await driveToFailedEnvelopeWith(
+      MT5_HISTORY_NOT_SETTLED_COMPUTATION_ERROR,
+    );
+    expect(envelope.getAttribute("data-error-code")).toBe("GATE_HISTORY_NOT_SETTLED");
+    // Hand-typed, not read from the table: the card names the real cause.
+    const text = envelope.textContent ?? "";
+    expect(text).toContain("Your broker is still sending this account's history.");
+    expect(text).toContain("Nothing is wrong with your key.");
+    expect(text).not.toContain("fault is in our pipeline");
+    expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
   });
 
   // H-0197: repeated thrown polls must escalate to a recoverable SYNC_FAILED

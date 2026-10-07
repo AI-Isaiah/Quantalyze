@@ -9,6 +9,7 @@ import {
   recogniseSeamErrorCode,
   OUR_DEFECT_KEY_ERROR_CODES,
   WIZARD_ERROR_COPY,
+  MT5_HISTORY_NOT_SETTLED_COMPUTATION_ERROR,
   CSV_RULE_LABELS,
   CSV_UPLOAD_STEP_HEADINGS,
   CSV_PREVIEW_STEP_HEADINGS,
@@ -2164,8 +2165,15 @@ describe("[140.3-10 / TRAP-4] the whole copy table, scanned for destructive-only
    * READ OFF THIS GUARD'S OWN FAILURE MESSAGE ("expected 100 to be 99") with the entry
    * added and the pin unmoved, never counted, and it moves in lockstep with the
    * declaration in the SEAMUX-04 block.
+   *
+   * ⚠️ 100 → 101 (2026-10-07, Phase 164.6.6.3.2 plan 04 / item 0): one arrival,
+   * `GATE_HISTORY_NOT_SETTLED`. Its actions are `clear_and_retry` and `request_call`;
+   * neither is in `DESTRUCTIVE_ACTIONS`, so the "destructive class is FOUR entries"
+   * receipt below is unchanged. The value was READ OFF THIS GUARD'S OWN FAILURE MESSAGE
+   * ("expected 101 to be 100") with the entry added and the pin unmoved, never counted,
+   * and it moves in lockstep with the declaration in the SEAMUX-04 block.
    */
-  const EXPECTED_TABLE_SIZE = 100;
+  const EXPECTED_TABLE_SIZE = 101;
 
   it("the scan actually covers the table — hand-typed size guard", () => {
     expect(
@@ -2923,8 +2931,15 @@ describe("[140.3-12 / SEAMUX-04] no entry in the copy table makes a claim we can
    * unchanged" and "wizard_session_id idempotency" are all ABSENT, and it takes no
    * exemption. The value was READ OFF THIS GUARD'S OWN FAILURE MESSAGE ("expected 100
    * to be 99"), never counted.
+   *
+   * ⚠️ 100 → 101 (2026-10-07, Phase 164.6.6.3.2 plan 04 / item 0): one arrival,
+   * `GATE_HISTORY_NOT_SETTLED`, walked against the FORBIDDEN fragments by hand BEFORE the
+   * number moved: "been notified", "been alerted", "we fetched your trades", "data is
+   * unchanged" and "wizard_session_id idempotency" are all ABSENT, and it takes no
+   * exemption. The value was READ OFF THIS GUARD'S OWN FAILURE MESSAGE ("expected 101 to
+   * be 100"), never counted.
    */
-  const EXPECTED_TABLE_SIZE = 100;
+  const EXPECTED_TABLE_SIZE = 101;
 
   it("the scan actually covers the table — hand-typed size guard", () => {
     expect(
@@ -6591,5 +6606,43 @@ describe("[167.1.2 / WR-04 follow-up] KEY_ORPHANED claims only what every path t
     expect(copy).not.toMatch(/whose draft was deleted, leaving/);
     expect(copy).not.toMatch(/attached to nothing/);
     expect(copy).not.toMatch(/nothing uses it/);
+  });
+});
+
+describe("[164.6.6.3.2 D-06] GATE_HISTORY_NOT_SETTLED rests on one sentence two languages must agree on", () => {
+  /**
+   * The Python worker stamps `_MT5_HISTORY_UNSETTLED_USER_SENTENCE` into
+   * `strategy_analytics.computation_error` on the derive job's final failed attempt; the
+   * wizard recognises the cause by EXACT equality with the TypeScript mirror. Changing
+   * either side alone makes the card unreachable (the wizard falls back to the generic
+   * analytics-failed copy), and nothing at runtime would say so. This reads the Python
+   * source the way the item 9 pin reads `mt5_probe.py`.
+   */
+  it("[164.6.6.3.2 D-06] the history-not-settled sentence is byte-equal across Python and TypeScript", () => {
+    const src = readFileSync(
+      join(process.cwd(), "analytics-service", "services", "job_worker.py"),
+      "utf-8",
+    );
+    const decl = src.match(
+      /^_MT5_HISTORY_UNSETTLED_USER_SENTENCE\s*:\s*Final\[str\]\s*=\s*\(\s*\n([\s\S]*?)\n\)/m,
+    );
+    expect(
+      decl,
+      "_MT5_HISTORY_UNSETTLED_USER_SENTENCE was not found as a module-level parenthesised " +
+        "string in analytics-service/services/job_worker.py: it moved, was renamed, or lost " +
+        "its Final[str] annotation. The wizard card for GATE_HISTORY_NOT_SETTLED is " +
+        "unreachable without it.",
+    ).not.toBeNull();
+    const literals = [...decl![1].matchAll(/^\s*"((?:[^"\\]|\\.)*)"\s*$/gm)].map((m) => m[1]);
+    expect(literals.length, "no string literals inside the Python constant").toBeGreaterThan(0);
+    expect(
+      literals.some((l) => l.includes("\\")),
+      "the Python sentence uses an escape sequence; extend this pin before trusting it",
+    ).toBe(false);
+    expect(literals.join("")).toBe(MT5_HISTORY_NOT_SETTLED_COMPUTATION_ERROR);
+  });
+
+  it("[164.6.6.3.2 D-05] the mirror names no email address", () => {
+    expect(MT5_HISTORY_NOT_SETTLED_COMPUTATION_ERROR).not.toContain("@");
   });
 });

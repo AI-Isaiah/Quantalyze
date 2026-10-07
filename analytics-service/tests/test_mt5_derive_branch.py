@@ -697,6 +697,48 @@ async def test_unsettled_history_is_transient_error_no_stamp(
     )
 
 
+@pytest.mark.asyncio
+async def test_unsettled_history_on_the_final_attempt_stamps_the_cause_sentence(
+    monkeypatch,
+) -> None:
+    """Phase 164.6.6.3.2 / D-03, D-06 — on the FINAL attempt (the claim RPC returns the
+    row after ``attempts = attempts + 1``, and ``mark_compute_job_failed`` makes a
+    transient failure final when ``attempts >= max_attempts``) the history-unsettled
+    arm writes ONE failed stamp carrying the curated user sentence and the 164.2
+    provenance pair, so the wizard can name the real cause instead of "the fault is
+    in our pipeline".
+
+    The job still comes back FAILED / transient with the operator message: no new
+    ``error_kind``, no terminal restart (164.6.6.3 D-13)."""
+    from services.strategy_analytics_provenance import provenance_source
+
+    monkeypatch.setenv("MT5_ENABLED", "true")
+    transport = _FakeMt5Transport(
+        account={"equity": 110_500.0, "balance": 110_500.0, "currency": "USD", "login": 123456},
+        deals=[],
+    )
+    connects: list = []
+    ctx, capture = _build_ctx(transport, connects=connects)
+    job = {**_job(), "attempts": 3, "max_attempts": 3}
+    with _apply(_patches(ctx)):
+        result = await run_derive_broker_dailies_job(job)
+
+    assert result.outcome == DispatchOutcome.FAILED
+    assert result.error_kind == "transient"
+    assert result.error_message == jw._MT5_HISTORY_UNSETTLED_MESSAGE
+    stamps = [u for u in capture["upserts"] if u[0] == "strategy_analytics"]
+    assert len(stamps) == 1, [u[0] for u in capture["upserts"]]
+    payload = stamps[0][1]
+    assert payload["computation_status"] == "failed"
+    assert payload["computation_error"] == jw._MT5_HISTORY_UNSETTLED_USER_SENTENCE
+    assert payload["computation_error_job_id"] == "j-mt5"
+    assert payload["computation_error_source"] == provenance_source("j-mt5")
+    assert not any(u[0] == "csv_daily_returns" for u in capture["upserts"])
+    assert len(connects) == 1 and "shutdown" not in transport.calls, (
+        "the wait expiry must never restart a healthy terminal"
+    )
+
+
 # ---------------------------------------------------------------------------
 # 3 — uPnL wedge → complete_with_warnings.
 # ---------------------------------------------------------------------------

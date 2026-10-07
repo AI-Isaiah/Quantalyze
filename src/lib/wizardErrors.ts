@@ -583,6 +583,10 @@ export type WizardErrorCode =
   | "GATE_INSUFFICIENT_TRADES"
   | "GATE_INSUFFICIENT_DAYS"
   | "GATE_ANALYTICS_FAILED"
+  // 164.6.6.3.2 / D-03, D-06 — the failed terminal whose stamped `computation_error` is
+  // exactly MT5_HISTORY_NOT_SETTLED_COMPUTATION_ERROR: a fresh MT5 account whose deal
+  // history had not settled by the derive job's last attempt.
+  | "GATE_HISTORY_NOT_SETTLED"
   | "GATE_NO_DATA_SOURCE"
   // 142.2 review FIX 1 — a daily-return series exists but nothing recorded how
   // it was built. Distinct from GATE_INSUFFICIENT_TRADES on purpose: the
@@ -1661,6 +1665,20 @@ export interface WizardErrorCopy {
   /** Action IDs the UI should render as buttons/links. */
   actions: WizardErrorAction[];
 }
+
+/**
+ * 164.6.6.3.2 / D-06 — the curated sentence the analytics worker stamps into
+ * `strategy_analytics.computation_error` when a derive job's FINAL attempt ends because
+ * the broker had not finished sending the MT5 account's deal history. The wizard shows
+ * `GATE_HISTORY_NOT_SETTLED` for a failed terminal ONLY when `computation_error` is
+ * EXACTLY this string (`SyncPreviewStep`); never a substring match, never `last_error`.
+ *
+ * ⛔ Byte-for-byte mirror of `_MT5_HISTORY_UNSETTLED_USER_SENTENCE` in
+ * `analytics-service/services/job_worker.py`. `wizardErrors.test.ts` reads that file and
+ * fails if the two differ, so change both together. It carries no email address (D-05).
+ */
+export const MT5_HISTORY_NOT_SETTLED_COMPUTATION_ERROR =
+  "Your broker had not finished sending this MT5 account's history when we read it, so the analytics could not run yet. Nothing is wrong with your key. Retry the sync in a few minutes.";
 
 /**
  * Code IDs are STABLE — renaming breaks PostHog `wizard_error { code }`
@@ -2934,6 +2952,25 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
       "The analytics step failed for this draft. We cannot tell from here how much of the sync before it completed. The fault is in our pipeline, not at your exchange.",
     fix: [
       "Retry the sync from this page.",
+      "If it fails again, send the correlation id below through the contact form.",
+    ],
+    docsHref: "/security#sync-timing",
+    actions: ["clear_and_retry", "request_call"],
+  },
+
+  // 164.6.6.3.2 / D-03, D-05, D-06 — shown ONLY for a failed terminal whose stamped
+  // `computation_error` equals MT5_HISTORY_NOT_SETTLED_COMPUTATION_ERROR exactly
+  // (SyncPreviewStep). GATE_ANALYTICS_FAILED keeps every other failure. It replaces that
+  // entry's "the fault is in our pipeline" for this one cause, because here the history is
+  // late at the broker and the condition clears by itself. `clear_and_retry` is the right
+  // remedy: a later sync reads the history once it has arrived. The contact form is the
+  // pointer, and no email address appears anywhere in this copy.
+  GATE_HISTORY_NOT_SETTLED: {
+    title: "Your broker is still sending this account's history.",
+    cause:
+      "Nothing is wrong with your key. The broker had not finished sending this account's deal history when we read it, so the analytics could not run yet.",
+    fix: [
+      "Retry the sync in a few minutes.",
       "If it fails again, send the correlation id below through the contact form.",
     ],
     docsHref: "/security#sync-timing",
