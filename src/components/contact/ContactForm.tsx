@@ -6,6 +6,7 @@ import { Field } from "@/components/ui/Field";
 import { Input } from "@/components/ui/Input";
 import { Select } from "@/components/ui/Select";
 import { Textarea } from "@/components/ui/Textarea";
+import { cn } from "@/lib/utils";
 import {
   CONTACT_REFERENCE_MAX,
   CONTACT_TOPICS,
@@ -35,8 +36,45 @@ import {
  * `error` text or an `Error.message`, so a developer sentence or a browser's
  * `Failed to fetch` can never reach the visitor.
  */
+const ERROR_UNREADABLE =
+  "Our server could not read this submission. Reload the page and send it again; if it is refused again, shorten the message. What you typed is still here until you reload, so copy the message first.";
+const ERROR_RATE_LIMITED =
+  "Too many messages from this connection. Try again in a few minutes; what you typed is still here.";
 const ERROR_SERVER =
   "Your message was not sent. Try again in a minute; what you typed is still here.";
+const ERROR_UNAVAILABLE =
+  "The contact form is unavailable right now. Try again in a few minutes; what you typed is still here.";
+const ERROR_NETWORK =
+  "We could not reach the server. Check your connection and send again; what you typed is still here.";
+
+/**
+ * The `fieldErrors` keys this form draws a control for (UI-SPEC "Rendered-key
+ * rule"). Any other key (`_form`, `topic`, `website`) has nowhere to render, so
+ * a 400 carrying only those must fall to the unreadable alert rather than end
+ * with nothing on screen. `topic` is unrendered on purpose: the Select cannot
+ * produce an invalid value, so a topic error is our fault, not the visitor's.
+ */
+const RENDERED_FIELD_KEYS = [
+  "name",
+  "email",
+  "firm",
+  "reference",
+  "message",
+] as const;
+
+/** The form-level string for a non-2xx status, or null when a field note covers it. */
+function errorForStatus(
+  status: number,
+  drawn: Record<string, string[]>,
+): string | null {
+  if (status === 400) {
+    return Object.keys(drawn).length > 0 ? null : ERROR_UNREADABLE;
+  }
+  if (status === 413) return ERROR_UNREADABLE;
+  if (status === 429) return ERROR_RATE_LIMITED;
+  if (status === 503) return ERROR_UNAVAILABLE;
+  return ERROR_SERVER;
+}
 
 const TOPIC_OPTIONS = CONTACT_TOPICS.map((value) => ({
   value,
@@ -64,6 +102,11 @@ export function ContactForm({
     null,
   );
   const [error, setError] = useState<string | null>(null);
+  // The route answers `Record<string, string[]>` per field; the first issue is
+  // the most actionable, so that is the one drawn under its control.
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string[]>>({});
+  const firstFieldError = (key: (typeof RENDERED_FIELD_KEYS)[number]) =>
+    fieldErrors[key]?.[0];
   const inFlight = useRef(false);
   const successHeading = useRef<HTMLHeadingElement>(null);
 
@@ -78,6 +121,7 @@ export function ContactForm({
     inFlight.current = true;
 
     setError(null);
+    setFieldErrors({});
     setSubmitting(true);
 
     try {
@@ -98,7 +142,22 @@ export function ContactForm({
       const data = (await res.json().catch(() => ({}))) as {
         ok?: boolean;
         status?: string;
+        fieldErrors?: Record<string, string[]>;
       };
+
+      if (!res.ok) {
+        // Only keys this form draws are kept; the rest never render anywhere.
+        const drawn: Record<string, string[]> = {};
+        for (const key of RENDERED_FIELD_KEYS) {
+          const issues = data.fieldErrors?.[key];
+          if (Array.isArray(issues) && issues.length > 0) drawn[key] = issues;
+        }
+        setFieldErrors(drawn);
+        setError(errorForStatus(res.status, drawn));
+        setSubmitting(false);
+        inFlight.current = false;
+        return;
+      }
 
       if (res.ok && data.status === "stored") {
         setSent({ email, reference: reference.trim() });
@@ -107,11 +166,15 @@ export function ContactForm({
         return;
       }
 
+      // A 2xx that is not `stored` (a bare `{ ok: true }`, `duplicate`, an old
+      // route) wrote nothing we can vouch for, so it is never the success view.
       setError(ERROR_SERVER);
       setSubmitting(false);
       inFlight.current = false;
     } catch {
-      setError(ERROR_SERVER);
+      // A failed fetch throws a TypeError carrying browser text ("Failed to
+      // fetch"); the visitor sees the fixed string instead.
+      setError(ERROR_NETWORK);
       setSubmitting(false);
       inFlight.current = false;
     }
@@ -125,6 +188,7 @@ export function ContactForm({
     setMessage("");
     setWebsite("");
     setError(null);
+    setFieldErrors({});
     inFlight.current = false;
     setSent(null);
   }
@@ -191,8 +255,13 @@ export function ContactForm({
         required
         maxLength={200}
         autoComplete="name"
+        error={firstFieldError("name")}
       />
-      <Field label="Email" hint="We reply to this address.">
+      <Field
+        label="Email"
+        hint="We reply to this address."
+        error={firstFieldError("email")}
+      >
         <Input
           type="email"
           value={email}
@@ -200,6 +269,7 @@ export function ContactForm({
           required
           maxLength={320}
           autoComplete="email"
+          className={firstFieldError("email") ? "border-negative" : undefined}
         />
       </Field>
       <Input
@@ -208,16 +278,21 @@ export function ContactForm({
         onChange={(e) => setFirm(e.target.value)}
         maxLength={200}
         autoComplete="organization"
+        error={firstFieldError("firm")}
       />
       <Field
         label="Reference (optional)"
         hint="The correlation id or draft ID from an error message. It is filled in when you arrive from one."
+        error={firstFieldError("reference")}
       >
         <Input
           value={reference}
           onChange={(e) => setReference(e.target.value)}
           maxLength={CONTACT_REFERENCE_MAX}
-          className="font-metric"
+          className={cn(
+            "font-metric",
+            firstFieldError("reference") && "border-negative",
+          )}
         />
       </Field>
       <Textarea
@@ -227,6 +302,7 @@ export function ContactForm({
         required
         rows={6}
         maxLength={2000}
+        error={firstFieldError("message")}
       />
 
       {error && (
