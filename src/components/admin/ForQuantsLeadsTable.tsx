@@ -11,6 +11,20 @@ import {
   minuteBucket,
 } from "@/lib/utils";
 import type { ForQuantsLeadRow } from "@/lib/for-quants-leads-admin";
+import { CONTACT_TOPIC_LABELS, type ContactTopic } from "@/lib/contact";
+
+/** Numbers Contract null rule: an absent value is an em dash, never a blank. */
+const EMPTY = "—";
+
+const SOURCE_LABELS: Record<string, string> = {
+  contact_form: "Contact form",
+  request_call: "Request a call",
+};
+
+function topicLabel(topic: string | null): string {
+  if (!topic) return EMPTY;
+  return CONTACT_TOPIC_LABELS[topic as ContactTopic] ?? topic;
+}
 
 /**
  * Clock state lifted to the table so all rows share one interval
@@ -169,8 +183,11 @@ export function ForQuantsLeadsTable({
                       <h3 className="font-semibold text-text-primary">
                         {lead.name}
                       </h3>
-                      <span className="text-small text-text-secondary">
-                        {lead.firm}
+                      <span
+                        className="text-small text-text-secondary"
+                        data-lead-field="firm"
+                      >
+                        {lead.firm || EMPTY}
                       </span>
                       <span
                         className="text-caption text-text-muted"
@@ -208,6 +225,23 @@ export function ForQuantsLeadsTable({
                       >
                         {lead.email}
                       </a>
+                    </div>
+                    {/* Which form wrote the row, under which topic, about what
+                        (UI-SPEC "Founder CRM visibility"). All text nodes, so a
+                        user-typed reference is React-escaped, never markup. */}
+                    <div className="mt-1 flex flex-wrap items-baseline gap-x-3 gap-y-1 text-caption text-text-muted">
+                      <span data-lead-field="source">
+                        {SOURCE_LABELS[lead.source] ?? lead.source}
+                      </span>
+                      <span data-lead-field="topic">
+                        Topic: {topicLabel(lead.topic)}
+                      </span>
+                      <span data-lead-field="reference">
+                        Reference:{" "}
+                        <span className="font-metric break-all">
+                          {lead.reference || EMPTY}
+                        </span>
+                      </span>
                     </div>
                     {lead.preferred_time && (
                       <div className="mt-1 text-caption text-text-muted">
