@@ -3075,6 +3075,7 @@ Founder request 2026-10-03 (chat, a factsheet screenshot of MM-2x, then "ok, aft
 **Requirements**: TBD
 **Depends on:** Phase 164.6.6
 ⭐ **Order and scope, founder 2026-10-06 (AskUserQuestion; a client is waiting on MM-2x):** this phase STARTS as soon as 164.6.6.3 merges, AHEAD of every other queued phase (including 164.6.6.3.6 MT5SERVERLEARN and 164.6.6.3.1–.5). Founder's words: "start of 164.6.6.3 merges, then all others". Scope item (4) is ANSWERED: **BTC (native unit) only first, USD view later.** The USD view is a follow-up, to be booked at discuss time. The "before 164.6.6.1" ordering above is kept as lineage; 164.6.6.1 ran first.
+⚠️ **Deviation recorded 2026-10-07 (founder override, AskUserQuestion), D-21 in `164.6.6.2-CONTEXT.md`:** D-11 said a BTC strategy's AUM shows in BTC. It shows `—` instead: the factsheet AUM is the manager's declared USD figure, and the only BTC figure is the account's live balance, which the public factsheet has never disclosed. Also decided the same day: the BTC dust floor is 0.001 BTC (D-20, supersedes D-05), and the BTC-to-USD conversion applies on every blending surface (D-22).
 **Plans:** 0 plans
 
 Plans:
