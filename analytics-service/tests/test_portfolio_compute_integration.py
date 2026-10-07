@@ -27,6 +27,7 @@ import pathlib
 import sys
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pandas as pd
 import pytest
 from fastapi import HTTPException
 
@@ -199,8 +200,10 @@ class TestComputePortfolioAnalyticsHappyPath:
         ret1 = _curve_records(seed=1)
         ret2 = _curve_records(seed=2)
         ps = [
-            {"strategy_id": "s1", "current_weight": 0.6, "strategies": {"id": "s1", "name": "Alpha"}},
-            {"strategy_id": "s2", "current_weight": 0.4, "strategies": {"id": "s2", "name": "Beta"}},
+            {"strategy_id": "s1", "current_weight": 0.6, "allocated_amount": 100.0,
+             "strategies": {"id": "s1", "name": "Alpha"}},
+            {"strategy_id": "s2", "current_weight": 0.4, "allocated_amount": 50.0,
+             "strategies": {"id": "s2", "name": "Beta"}},
         ]
         sa_rows = [
             {"strategy_id": "s1", "returns_series": ret1},
@@ -229,6 +232,8 @@ class TestComputePortfolioAnalyticsHappyPath:
         update_call = tables["portfolio_analytics"].update.call_args[0][0]
         assert update_call["computation_status"] == "complete"
         assert update_call["computation_error"] is None
+        # D-07: the allocations 100 + 50 are summed from portfolio_strategies
+        assert update_call["total_aum"] == 150.0
 
 
 async def _run_compute(sb, *, benchmark=None, stale: bool = True, portfolio_id: str = "portfolio-1"):
@@ -284,6 +289,159 @@ class TestCurveShapedBlend:
         assert values[0] == pytest.approx(1.005, abs=1e-12)
         assert values[1] == pytest.approx(1.0251, abs=1e-12)
         assert values[1] / values[0] - 1.0 == pytest.approx(0.02, abs=1e-12)
+
+
+def _levels(levels: list[float], dates: list[str]) -> list[dict]:
+    """A stored-shape curve written out by LEVEL (the hand-written twin of
+    ``curve_from_returns``) so a test can state the curve it means literally."""
+    return [{"date": d, "value": v} for d, v in zip(dates, levels)]
+
+
+def _ps_rows(weights: dict[str, float], amounts: dict[str, float | None] | None = None) -> list[dict]:
+    rows = []
+    for sid, w in weights.items():
+        row = {"strategy_id": sid, "current_weight": w,
+               "strategies": {"id": sid, "name": sid.upper()}}
+        if amounts is not None:
+            row["allocated_amount"] = amounts.get(sid)
+        rows.append(row)
+    return rows
+
+
+class TestTwrWindows:
+    """Phase 164.6.6.2.2 D-04. Every TWR the service compares or shows side by side
+    covers days 1..n (first day INCLUDED): per-strategy TWRs vs the portfolio TWR
+    (attribution), and the portfolio TWR vs the benchmark TWR (a delta on screen).
+    Literals are hand-computed, never read back from the code under test."""
+
+    @pytest.mark.asyncio
+    async def test_a_strategys_twr_is_the_product_of_its_daily_returns(self):
+        # Curve 1.0, 1.1, 1.21 -> daily returns 1.1/1.0 - 1 = 0.10 and
+        # 1.21/1.1 - 1 = 0.10 -> TWR = 1.10 * 1.10 - 1 = 0.21 (= 1.21 / 1.0 - 1).
+        # One strategy at weight 1.0, so its attribution contribution IS its TWR.
+        sb, _ = _make_supabase_for_compute(
+            portfolio_strategies=_ps_rows({"s1": 1.0}),
+            analytics_rows=[{
+                "strategy_id": "s1",
+                "returns_series": _levels([1.0, 1.1, 1.21], _TRACER_DATES),
+            }],
+        )
+        result = await _run_compute(sb)
+        (attr,) = result["attribution_breakdown"]
+        assert attr["contribution"] == pytest.approx(0.21, abs=1e-12)
+
+    @pytest.mark.asyncio
+    async def test_portfolio_twr_covers_the_same_days_as_the_strategy_twrs(self):
+        # Curves on d0..d2: A 1.0, 1.1, 1.1 (daily 0.10, 0.00); B 1.0, 1.0, 1.02
+        # (daily 0.00, 0.02). Weights 0.5 / 0.5.
+        #   strategy TWRs: A = 1.10 * 1.00 - 1 = 0.10;  B = 1.00 * 1.02 - 1 = 0.02
+        #   blend: d1 = 0.5 * 0.10 + 0.5 * 0.00 = 0.05; d2 = 0.5 * 0.00 + 0.5 * 0.02 = 0.01
+        #   portfolio TWR over days 1..n = 1.05 * 1.01 - 1 = 0.0605
+        # The old `(1 + p).cumprod()` endpoint ratio is 1.0605 / 1.05 - 1 = 0.01:
+        # it dropped the first blended day while the strategy TWRs kept theirs.
+        sb, _ = _make_supabase_for_compute(
+            portfolio_strategies=_ps_rows({"s1": 0.5, "s2": 0.5}),
+            analytics_rows=[
+                {"strategy_id": "s1", "returns_series": _levels([1.0, 1.1, 1.1], _TRACER_DATES)},
+                {"strategy_id": "s2", "returns_series": _levels([1.0, 1.0, 1.02], _TRACER_DATES)},
+            ],
+        )
+        result = await _run_compute(sb)
+        assert result["total_return_twr"] == pytest.approx(0.0605, abs=1e-12)
+        contributions = {a["strategy_id"]: a["contribution"] for a in result["attribution_breakdown"]}
+        # contribution = weight * strategy TWR: 0.5 * 0.10 and 0.5 * 0.02
+        assert contributions["s1"] == pytest.approx(0.05, abs=1e-12)
+        assert contributions["s2"] == pytest.approx(0.01, abs=1e-12)
+
+    @pytest.mark.asyncio
+    async def test_allocation_effect_is_measured_against_the_days_1_to_n_portfolio_twr(self):
+        # Same curves, weights 0.6 / 0.4: blend d1 = 0.6 * 0.10 = 0.06, d2 = 0.4 * 0.02 = 0.008;
+        # portfolio TWR = 1.06 * 1.008 - 1 = 0.06848. Equal weight is 0.5, so
+        #   A: (0.6 - 0.5) * (0.10 - 0.06848) =  0.1 * 0.03152  =  0.003152
+        #   B: (0.4 - 0.5) * (0.02 - 0.06848) = -0.1 * -0.04848 =  0.004848
+        sb, _ = _make_supabase_for_compute(
+            portfolio_strategies=_ps_rows({"s1": 0.6, "s2": 0.4}),
+            analytics_rows=[
+                {"strategy_id": "s1", "returns_series": _levels([1.0, 1.1, 1.1], _TRACER_DATES)},
+                {"strategy_id": "s2", "returns_series": _levels([1.0, 1.0, 1.02], _TRACER_DATES)},
+            ],
+        )
+        result = await _run_compute(sb)
+        assert result["total_return_twr"] == pytest.approx(0.06848, abs=1e-12)
+        effects = {a["strategy_id"]: a["allocation_effect"] for a in result["attribution_breakdown"]}
+        assert effects["s1"] == pytest.approx(0.003152, abs=1e-12)
+        assert effects["s2"] == pytest.approx(0.004848, abs=1e-12)
+
+    @pytest.mark.asyncio
+    async def test_benchmark_twr_includes_its_first_day_like_the_portfolio_twr(self):
+        # One strategy whose daily returns are [0.05, 0.0 x 29] on d1..d30 (a curve
+        # of 31 points, so 30 readable days: enough for the `len(aligned) >= 30`
+        # gate). The BTC benchmark on the SAME 30 dates is [0.10, 0.0 x 29].
+        #   portfolio TWR = 1.05 - 1 = 0.05;  benchmark TWR = 1.10 - 1 = 0.10
+        # The old `(1 + b).cumprod()` endpoint ratio is 1.10 / 1.10 - 1 = 0.0.
+        dates = [d.strftime("%Y-%m-%d") for d in pd.bdate_range("2026-01-05", periods=31)]
+        curve = curve_from_returns([0.0, 0.05] + [0.0] * 29, dates)
+        bench = pd.Series(
+            [0.10] + [0.0] * 29, index=pd.DatetimeIndex(dates[1:]), dtype=float
+        )
+        sb, _ = _make_supabase_for_compute(
+            portfolio_strategies=_ps_rows({"s1": 1.0}),
+            analytics_rows=[{"strategy_id": "s1", "returns_series": curve}],
+        )
+        result = await _run_compute(sb, benchmark=bench, stale=False)
+        bc = result["benchmark_comparison"]
+        assert bc is not None
+        assert bc["benchmark_twr"] == pytest.approx(0.10, abs=1e-12)
+        assert bc["portfolio_twr"] == pytest.approx(0.05, abs=1e-12)
+
+
+class TestTotalAumFromAllocations:
+    """Phase 164.6.6.2.2 D-07. ``total_aum`` is the sum of
+    ``portfolio_strategies.allocated_amount`` over EVERY strategy in the portfolio,
+    None unless every allocation is non-null; a 0 counts as present."""
+
+    @staticmethod
+    async def _total_aum(amounts: dict[str, float | None], with_analytics: set[str]) -> float | None:
+        weights = {sid: 1.0 / len(amounts) for sid in amounts}
+        sa_rows = [
+            {"strategy_id": sid, "returns_series": _curve_records(seed=i + 1)}
+            for i, sid in enumerate(amounts) if sid in with_analytics
+        ]
+        sb, tables = _make_supabase_for_compute(
+            portfolio_strategies=_ps_rows(weights, amounts), analytics_rows=sa_rows
+        )
+        await _run_compute(sb)
+        return tables["portfolio_analytics"].update.call_args[0][0]["total_aum"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("amounts", "with_analytics", "expected"),
+        [
+            pytest.param({"a": 100.0, "b": 50.0}, {"a", "b"}, 150.0, id="sum"),
+            pytest.param({"a": 100.0, "b": 0.0}, {"a", "b"}, 100.0, id="a-zero-counts-as-present"),
+            pytest.param({"a": 100.0, "b": None}, {"a", "b"}, None, id="a-null-makes-the-total-null"),
+            pytest.param({"a": 0.0, "b": 0.0}, {"a", "b"}, 0.0, id="all-zero-is-zero-not-none"),
+            pytest.param({"a": 100.0, "b": 50.0}, {"a"}, 150.0, id="allocation-without-an-analytics-row-counts"),
+        ],
+    )
+    async def test_total_aum(self, amounts, with_analytics, expected):
+        assert await self._total_aum(amounts, with_analytics) == expected
+
+    @pytest.mark.asyncio
+    async def test_an_allocation_whose_strategy_has_no_usable_returns_still_counts(self):
+        # b has an analytics row but nothing readable (returns_series None, no
+        # daily_returns): it drops out of the BLEND (missing_returns_sids) yet its
+        # 50 is still part of what the allocator put in the portfolio.
+        sb, tables = _make_supabase_for_compute(
+            portfolio_strategies=_ps_rows({"a": 0.5, "b": 0.5}, {"a": 100.0, "b": 50.0}),
+            analytics_rows=[
+                {"strategy_id": "a", "returns_series": _curve_records(seed=1)},
+                {"strategy_id": "b", "returns_series": None},
+            ],
+        )
+        result = await _run_compute(sb)
+        assert result["data_quality"]["missing_returns_sids"] == ["b"]
+        assert tables["portfolio_analytics"].update.call_args[0][0]["total_aum"] == 150.0
 
 
 class TestSchemaStrictFake:
@@ -366,7 +524,8 @@ class TestRenormalizationRegression:
         assert dq["computed_strategy_count"] == 1
         # Dropped weight total was 0.8 (s1's weight) — within sanitize tolerance
         assert dq["dropped_weight_total"] == pytest.approx(0.8, abs=0.01)
-        # total_aum: not all strategies report → None
+        # total_aum: neither portfolio_strategies row carries an allocated_amount
+        # (null on both, s1 included although it has no analytics row) → None
         update_call = tables["portfolio_analytics"].update.call_args[0][0]
         assert update_call["total_aum"] is None
 
