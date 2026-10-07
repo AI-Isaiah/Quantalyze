@@ -566,6 +566,17 @@ export type SeamBudgetKey =
  *                       `MT5_GATEWAY_UNCONFIGURED`. ⚠️ `_connect_and_probe` is
  *                       the SAME FUNCTION AND SAME DEPENDENCY as the counting
  *                       row above; only the STATUS separates them.
+ *                       ⛔ CORRECTED 2026-10-07 (Phase 164.6.6.3.2 D-01): the line
+ *                       above is kept as lineage. Three of those four 500 raises
+ *                       are the env-gap arms and now carry
+ *                       `MT5_VALIDATION_UNCONFIGURED` (the endpoint arm and the
+ *                       empty known-server list in `_validate_mt5_key_probe`, the
+ *                       inverted timeout chain in `_connect_and_probe`); ONE raise,
+ *                       the D-31 `undetermined` arm in `_validate_mt5_key_probe`,
+ *                       keeps `MT5_GATEWAY_UNCONFIGURED`. Still four `500`s on the
+ *                       same dependency, so nothing here counts and no row moves.
+ *                       The new busy refusal `MT5_TERMINAL_BUSY` is a flat `424`
+ *                       with no `dependency`, so it is breaker-inert as well.
  *   · `424`, never counts, and the name is the CALLER'S VENUE rather than a
  *     dependency of ours (§4 — it must never become a breaker key):
  *       `internal.py` `get_key_permissions` — `EXCHANGE_PROBE_FAILED`;
@@ -620,7 +631,9 @@ export const SEAM_BUDGETS: Record<
     // (EGRESS_PROXY_MISCONFIGURED, egress-proxy) or 424 (EXCHANGE_PROBE_FAILED,
     // venue), neither of which counts, so neither is declared. ⚠️ The SAME
     // function also raises MT5_GATEWAY_UNCONFIGURED at 500 on the same
-    // dependency; the status is the only thing separating them.
+    // dependency; the status is the only thing separating them. (Since Phase
+    // 164.6.6.3.2 only the D-31 arm keeps that code; the env-gap 500s carry
+    // MT5_VALIDATION_UNCONFIGURED, still on the same dependency and still a 500.)
     dependencies: ["mt5-gateway"],
     retries: SEAM_RETRIES,
     notes:
