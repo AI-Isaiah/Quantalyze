@@ -2,6 +2,7 @@ import logging
 import numpy as np
 import pandas as pd
 from datetime import date as _date
+from collections.abc import Iterable, Mapping
 from typing import Any, Optional
 from services.dispersion import (
     average_pairwise_correlation,
@@ -9,9 +10,26 @@ from services.dispersion import (
     dispersion_is_residue,
     pairwise_correlation_or_none,
 )
-from services.metrics import _safe_float
+from services.metrics import (
+    DEFAULT_PERIODS_PER_YEAR,
+    _safe_float,
+    blend_periods_per_year,
+)
 
 logger = logging.getLogger("quantalyze.analytics.portfolio_optimizer")
+
+
+def blend_clock(
+    asset_classes: Optional[Mapping[str, Optional[str]]], sids: Iterable[str]
+) -> int:
+    """Risk-annualization periods/year of the blend of ``sids`` (WR-01).
+
+    ``asset_classes`` maps strategy id -> ``strategies.asset_class``. The blend
+    is 365 if ANY named strategy is crypto, else 252. A strategy absent from the
+    map reads as unknown (252), and ``asset_classes=None`` is the legacy all-252
+    call, so a scorer called without the map keeps its old clock.
+    """
+    return blend_periods_per_year((asset_classes or {}).get(sid) for sid in sids)
 
 
 def find_improvement_candidates(
@@ -20,6 +38,7 @@ def find_improvement_candidates(
     weights: dict[str, float],
     w1: float = 0.4, w2: float = 0.3, w3: float = 0.3,
     add_weight: float = 0.10,
+    asset_classes: Optional[Mapping[str, Optional[str]]] = None,
 ) -> list[dict[str, Any]]:
     # Duplicate-timestamp guard (sibling of bridge_scoring M-0893 / simulator
     # G15-006): the optimizer's series come from `daily_returns_from_row`, whose
@@ -44,7 +63,7 @@ def find_improvement_candidates(
     # Window-alignment correctness (sibling of bridge_scoring.find_replacement_
     # candidates M-0893): the incumbent baseline (sharpe / avg_corr / max_dd) MUST
     # be measured over the SAME window as each candidate's blended metric.
-    # `_compute_sharpe` annualizes ×√252 regardless of sample length, so a baseline
+    # `_compute_sharpe` annualizes ×√periods_per_year regardless of sample length, so a baseline
     # computed once over the FULL port_df window and compared against a candidate
     # scored over its shorter `aligned` overlap window mixes regimes/sample sizes
     # and ranks short-history candidates spuriously. The baseline is therefore
@@ -62,7 +81,11 @@ def find_improvement_candidates(
         if w_new.sum() > 0:
             w_new = w_new / w_new.sum()
         new_port = (aligned * w_new).sum(axis=1)
-        new_sharpe = _compute_sharpe(new_port)
+        # WR-01: the blend's risk clock (365 if the book or the candidate holds
+        # a crypto leg, else 252). The baseline below is scored on the SAME
+        # clock, so `sharpe_lift` measures the candidate and never the clock.
+        blend_ppy = blend_clock(asset_classes, [*port_cols, cid])
+        new_sharpe = _compute_sharpe(new_port, periods_per_year=blend_ppy)
         new_avg_corr = _avg_corr(aligned)
         new_max_dd = _max_drawdown(new_port)
         # M-0701: exclude a degenerate candidate whose OWN aligned returns do
@@ -103,7 +126,7 @@ def find_improvement_candidates(
         # full-window baseline exactly, so it is a no-op there.
         port_cols_aligned = aligned[port_cols]
         port_baseline = (port_cols_aligned * w_arr).sum(axis=1)
-        current_sharpe = _compute_sharpe(port_baseline)
+        current_sharpe = _compute_sharpe(port_baseline, periods_per_year=blend_ppy)
         current_avg_corr = _avg_corr(port_cols_aligned)
         current_max_dd = _max_drawdown(port_baseline)
         # Phase 166.1 (C3, D-02): None when the baseline does not disperse (a
@@ -281,7 +304,11 @@ def generate_narrative(analytics: dict[str, Any]) -> str:
     return ". ".join(parts) + "." if parts else "Portfolio analytics pending computation."
 
 
-def _compute_sharpe(returns: pd.Series, rf: float = 0) -> Optional[float]:
+def _compute_sharpe(
+    returns: pd.Series,
+    rf: float = 0,
+    periods_per_year: int = DEFAULT_PERIODS_PER_YEAR,
+) -> Optional[float]:
     if returns.empty:
         return None
     # Phase 166.1 (S1): a constant yield derived from a compounding NAV has a
@@ -291,7 +318,7 @@ def _compute_sharpe(returns: pd.Series, rf: float = 0) -> Optional[float]:
     sd = float(returns.std())
     if dispersion_is_residue(sd, float(returns.mean())):
         return None
-    return _safe_float(float((returns.mean() - rf) / sd * np.sqrt(252)))
+    return _safe_float(float((returns.mean() - rf) / sd * np.sqrt(periods_per_year)))
 
 
 def _avg_corr(df: pd.DataFrame) -> Optional[float]:

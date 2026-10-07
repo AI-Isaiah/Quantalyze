@@ -765,7 +765,7 @@ class TestOptimizerAndBridgeScoreBtcInUsd:
     async def test_optimizer_hands_the_scorer_usd_series(self):
         seen: dict[str, dict[str, pd.Series]] = {}
 
-        def _spy(portfolio_returns, candidate_returns, weights):
+        def _spy(portfolio_returns, candidate_returns, weights, **_kw):
             seen["p"], seen["c"] = portfolio_returns, candidate_returns
             return []
 
@@ -793,7 +793,7 @@ class TestOptimizerAndBridgeScoreBtcInUsd:
 
         seen: dict[str, dict[str, pd.Series]] = {}
 
-        def _spy(portfolio_returns, candidate_returns, weights, incumbent):
+        def _spy(portfolio_returns, candidate_returns, weights, incumbent, **_kw):
             seen["p"], seen["c"] = portfolio_returns, candidate_returns
             return []
 
@@ -833,7 +833,7 @@ class TestOptimizerAndBridgeReadDailyReturnsNotCurveLevels:
     async def test_optimizer_hands_the_scorer_the_curves_daily_returns(self):
         seen: dict[str, dict[str, pd.Series]] = {}
 
-        def _spy(portfolio_returns, candidate_returns, weights):
+        def _spy(portfolio_returns, candidate_returns, weights, **_kw):
             seen["p"], seen["c"] = portfolio_returns, candidate_returns
             return []
 
@@ -855,7 +855,7 @@ class TestOptimizerAndBridgeReadDailyReturnsNotCurveLevels:
 
         seen: dict[str, dict[str, pd.Series]] = {}
 
-        def _spy(portfolio_returns, candidate_returns, weights, incumbent):
+        def _spy(portfolio_returns, candidate_returns, weights, incumbent, **_kw):
             seen["p"], seen["c"] = portfolio_returns, candidate_returns
             return []
 
@@ -883,11 +883,11 @@ class TestOptimizerAndBridgeReadDailyReturnsNotCurveLevels:
         seen_opt: dict[str, pd.Series] = {}
         seen_bridge: dict[str, pd.Series] = {}
 
-        def _opt_spy(portfolio_returns, candidate_returns, weights):
+        def _opt_spy(portfolio_returns, candidate_returns, weights, **_kw):
             seen_opt.update(candidate_returns)
             return []
 
-        def _bridge_spy(portfolio_returns, candidate_returns, weights, incumbent):
+        def _bridge_spy(portfolio_returns, candidate_returns, weights, incumbent, **_kw):
             seen_bridge.update(candidate_returns)
             return []
 
@@ -926,3 +926,63 @@ class TestOptimizerAndBridgeReadDailyReturnsNotCurveLevels:
         for columns in analytics:
             for column in ("strategy_id", "returns_series", "daily_returns", "data_quality_flags"):
                 assert column in columns, (column, columns)
+
+
+class TestOptimizerAndBridgeHandTheScorersTheAssetClasses:
+    """WR-01 (Phase 164.6.6.2.2): the scorers annualize each Sharpe on the blend's
+    risk clock (365 if any leg is crypto, else 252), so both routes hand them the
+    asset class of every book strategy (embedded `strategies(asset_class)`) and of
+    every published candidate (its own column). A route that drops the map leaves
+    every blend on sqrt(252)."""
+
+    @staticmethod
+    def _tables() -> dict[str, object]:
+        tables = _usd_only_tables()
+        tables["portfolio_strategies"] = [
+            {"strategy_id": "usd-a", "current_weight": 1.0,
+             "strategies": {"asset_class": "traditional"}},
+        ]
+        tables["strategies"] = [{"id": "usd-cand", "name": "UC", "asset_class": "crypto"}]
+        return tables
+
+    @pytest.mark.asyncio
+    async def test_optimizer_passes_book_and_candidate_classes(self):
+        seen: dict[str, object] = {}
+
+        def _spy(portfolio_returns, candidate_returns, weights, **kw):
+            seen.update(kw)
+            return []
+
+        fake = _FakeSupabase(self._tables())
+        req = MagicMock(portfolio_id="pf", user_id="u", weights=None)
+        with patch.object(portfolio_mod, "get_supabase", return_value=fake), \
+             patch.object(portfolio_mod, "find_improvement_candidates", side_effect=_spy), \
+             patch.object(portfolio_mod, "log_audit_event"):
+            await portfolio_mod.portfolio_optimizer.__wrapped__(MagicMock(), req)
+
+        assert seen["asset_classes"] == {"usd-a": "traditional", "usd-cand": "crypto"}
+        selects = dict((t, c) for t, c in fake.selected if t in ("portfolio_strategies", "strategies"))
+        assert "strategies(asset_class)" in selects["portfolio_strategies"]
+        assert "asset_class" in selects["strategies"]
+
+    @pytest.mark.asyncio
+    async def test_bridge_passes_book_and_candidate_classes(self):
+        import services.bridge_scoring as bridge_scoring_mod
+
+        seen: dict[str, object] = {}
+
+        def _spy(portfolio_returns, candidate_returns, weights, incumbent, **kw):
+            seen.update(kw)
+            return []
+
+        fake = _FakeSupabase(self._tables())
+        req = MagicMock(portfolio_id="pf", user_id="bridge-user-clock", underperformer_strategy_id="usd-a")
+        with patch.object(portfolio_mod, "get_supabase", return_value=fake), \
+             patch.object(bridge_scoring_mod, "find_replacement_candidates", side_effect=_spy), \
+             patch.object(portfolio_mod, "log_audit_event"):
+            await portfolio_mod.portfolio_bridge.__wrapped__(MagicMock(), req)
+
+        assert seen["asset_classes"] == {"usd-a": "traditional", "usd-cand": "crypto"}
+        selects = dict((t, c) for t, c in fake.selected if t in ("portfolio_strategies", "strategies"))
+        assert "strategies(asset_class)" in selects["portfolio_strategies"]
+        assert "asset_class" in selects["strategies"]

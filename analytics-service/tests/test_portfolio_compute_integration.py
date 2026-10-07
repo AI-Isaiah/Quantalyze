@@ -297,6 +297,107 @@ class TestCurveShapedBlend:
         assert values[1] / values[0] - 1.0 == pytest.approx(0.02, abs=1e-12)
 
 
+class TestBlendRiskIsAnnualizedOnTheBlendClock:
+    """WR-01 (Phase 164.6.6.2.2). The portfolio headline Sharpe and vol are risk, so
+    they annualize by frequency: crypto 365, traditional 252, and a blend is 365 if
+    ANY blended strategy is crypto. They used to ride the default 252, which understates
+    a crypto book by sqrt(252/365) = 0.831. The expectations are an independent numpy
+    oracle over the blend the test builds, not the production helper."""
+
+    _DATES = [d.strftime("%Y-%m-%d") for d in pd.date_range("2026-01-01", periods=61, freq="D")]
+
+    @staticmethod
+    def _daily(seed: int, mu: float) -> list[float]:
+        import numpy as np
+
+        return [float(r) for r in np.random.default_rng(seed).normal(mu, 0.01, 61)]
+
+    def _rows(self, classes: tuple[str, str]):
+        r1, r2 = self._daily(11, 0.0012), self._daily(12, 0.0007)
+        ps = [
+            {"strategy_id": "s1", "current_weight": 0.5,
+             "strategies": {"id": "s1", "name": "A", "asset_class": classes[0]}},
+            {"strategy_id": "s2", "current_weight": 0.5,
+             "strategies": {"id": "s2", "name": "B", "asset_class": classes[1]}},
+        ]
+        sa = [
+            {"strategy_id": "s1", "returns_series": curve_from_returns(r1, self._DATES)},
+            {"strategy_id": "s2", "returns_series": curve_from_returns(r2, self._DATES)},
+        ]
+        # Reading a curve back yields returns[1:] (day 0 has no stored predecessor).
+        import numpy as np
+
+        blend = 0.5 * np.array(r1[1:]) + 0.5 * np.array(r2[1:])
+        return ps, sa, blend
+
+    @staticmethod
+    def _oracle(blend, clock: int) -> tuple[float, float]:
+        import math
+
+        import numpy as np
+
+        vol = float(np.std(blend, ddof=1)) * math.sqrt(clock)
+        return vol, float(np.mean(blend)) * clock / vol
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "classes, clock",
+        [
+            pytest.param(("crypto", "crypto"), 365, id="crypto-blend-sqrt365"),
+            pytest.param(("traditional", "traditional"), 252, id="traditional-blend-sqrt252"),
+            pytest.param(("traditional", "crypto"), 365, id="mixed-blend-sqrt365"),
+        ],
+    )
+    async def test_headline_vol_and_sharpe_use_the_blend_clock(self, classes, clock):
+        ps, sa, blend = self._rows(classes)
+        sb, tables = _make_supabase_for_compute(portfolio_strategies=ps, analytics_rows=sa)
+
+        await _run_compute(sb)
+
+        update = tables["portfolio_analytics"].update.call_args[0][0]
+        vol, sharpe = self._oracle(blend, clock)
+        assert update["portfolio_volatility"] == pytest.approx(vol, rel=1e-9)
+        assert update["portfolio_sharpe"] == pytest.approx(sharpe, rel=1e-9)
+        if clock == 365:
+            # NOT the old sqrt(252) answer.
+            old_vol, old_sharpe = self._oracle(blend, 252)
+            assert update["portfolio_volatility"] != pytest.approx(old_vol, rel=1e-3)
+            assert update["portfolio_sharpe"] != pytest.approx(old_sharpe, rel=1e-3)
+
+    @pytest.mark.asyncio
+    async def test_a_crypto_strategy_that_is_not_blended_does_not_set_the_clock(self):
+        """The clock follows the strategies actually BLENDED: a crypto member with no
+        analytics row is dropped from the blend (and flagged in data_quality), so the
+        remaining traditional book stays on 252."""
+        ps, sa, _ = self._rows(("traditional", "crypto"))
+        sa = [row for row in sa if row["strategy_id"] == "s1"]
+        r1 = self._daily(11, 0.0012)
+        sb, tables = _make_supabase_for_compute(portfolio_strategies=ps, analytics_rows=sa)
+
+        await _run_compute(sb)
+
+        update = tables["portfolio_analytics"].update.call_args[0][0]
+        assert "s2" in update["data_quality"]["missing_analytics_sids"]
+        import numpy as np
+
+        vol, sharpe = self._oracle(np.array(r1[1:]), 252)
+        assert update["portfolio_volatility"] == pytest.approx(vol, rel=1e-9)
+        assert update["portfolio_sharpe"] == pytest.approx(sharpe, rel=1e-9)
+
+    @pytest.mark.asyncio
+    async def test_the_membership_select_names_asset_class_on_the_embedded_strategy(self):
+        """The clock is read off `strategies.asset_class`; without it in the select
+        every row reads None and every blend silently falls back to 252."""
+        ps, sa, _ = self._rows(("crypto", "crypto"))
+        sb, tables = _make_supabase_for_compute(portfolio_strategies=ps, analytics_rows=sa)
+
+        await _run_compute(sb)
+
+        selected = tables["portfolio_strategies"].select.call_args[0][0]
+        assert "strategies(" in selected and "asset_class" in selected, selected
+        assert "asset_class" in table_columns("strategies")
+
+
 def _levels(levels: list[float], dates: list[str]) -> list[dict]:
     """A stored-shape curve written out by LEVEL (the hand-written twin of
     ``curve_from_returns``) so a test can state the curve it means literally."""

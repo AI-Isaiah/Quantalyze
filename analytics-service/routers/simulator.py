@@ -237,7 +237,7 @@ async def portfolio_simulator(request: Request, req: SimulatorRequest) -> dict[s
         ),
         asyncio.to_thread(
             lambda: supabase.table("strategies")
-            .select("id, name, status")
+            .select("id, name, status, asset_class")
             .eq("id", req.candidate_strategy_id)
             .eq("status", "published")
             .maybe_single()
@@ -245,7 +245,7 @@ async def portfolio_simulator(request: Request, req: SimulatorRequest) -> dict[s
         ),
         asyncio.to_thread(
             lambda: supabase.table("portfolio_strategies")
-            .select("strategy_id, current_weight")
+            .select("strategy_id, current_weight, strategies(asset_class)")
             .eq("portfolio_id", req.portfolio_id)
             .execute()
         ),
@@ -392,6 +392,15 @@ async def portfolio_simulator(request: Request, req: SimulatorRequest) -> dict[s
             candidate_id=req.candidate_strategy_id,
             candidate_returns=candidate_series,
             weights=weights,
+            # WR-01: each blend's Sharpe is annualized on the blend's risk clock
+            # (365 if any leg of the book or the candidate is crypto, else 252).
+            asset_classes={
+                **{
+                    row["strategy_id"]: (row.get("strategies") or {}).get("asset_class")
+                    for row in portfolio_strategies
+                },
+                req.candidate_strategy_id: candidate.get("asset_class"),
+            },
         )
     except Exception as exc:
         logger.exception(
