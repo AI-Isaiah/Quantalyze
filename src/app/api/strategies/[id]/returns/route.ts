@@ -58,6 +58,9 @@ import {
 import { isUuid } from "@/lib/utils";
 import type { DailyPoint } from "@/lib/portfolio-math-utils";
 import { resolveDailyReturnSeries } from "@/lib/factsheet/resolve-series";
+import { readBtcCloses } from "@/lib/factsheet/benchmark-source";
+import { convertNativeReturnsToUsd } from "@/lib/factsheet/native-to-usd";
+import { parseReturnsUnit } from "@/lib/factsheet/returns-unit";
 import {
   deriveEmptySeriesState,
   isRankableAnalyticsRow,
@@ -148,6 +151,29 @@ export interface ReturnsResponse {
    * same `isRankableAnalyticsRow` gate, same never-zero rule as `cagr` above.
    */
   sharpe: number | null;
+  /**
+   * Phase 164.6.6.2 (D-18, D-22, D-23) — the unit this strategy's OWN
+   * `daily_returns` are recorded in: `"BTC"` for a BTC-native account, `null` for
+   * USD. Strictly coerced through `parseReturnsUnit` (anything that is not a
+   * well-formed unit code, a lowercase `"btc"` or a non-string included, reads as
+   * `null`), so a malformed jsonb value can never become label or conversion
+   * input. The RAW `data_quality_flags` blob is still never forwarded. This is
+   * public classification already shown on the factsheet, and it is emitted only
+   * after the published-or-owner probe above, so it adds no disclosure beyond what
+   * the 404 existence-oracle already gates.
+   */
+  returns_unit: string | null;
+  /**
+   * Phase 164.6.6.2 (D-18, D-22, D-23) — for a native-unit strategy, `daily_returns`
+   * converted to USD by `convertNativeReturnsToUsd` on the stored BTC closes (the
+   * same DB-only price window the Python twin reads); `null` for a USD strategy.
+   * The composer blends THIS series for a native leg, never `daily_returns`. A
+   * native strategy whose closes could not be read (or whose series is empty) is
+   * `[]`, not `null`: the leg is native but unpriced, and nothing is invented.
+   * `daily_returns` itself is unchanged, the strategy's own series in its own unit.
+   * Prices are public market data, so the conversion discloses nothing new.
+   */
+  daily_returns_usd: DailyPoint[] | null;
 }
 
 export async function GET(
@@ -436,10 +462,28 @@ export async function GET(
       // CONSTIT-02 — strict `=== true` composite coercion (T-111-04). The raw
       // data_quality_flags blob is read here but only the boolean is emitted.
       const dqf = (data as { data_quality_flags?: unknown } | null)?.data_quality_flags as
-        | { composite?: unknown }
+        | { composite?: unknown; native_unit?: unknown }
         | null
         | undefined;
       const is_composite = dqf?.composite === true;
+
+      // Phase 164.6.6.2 (D-18, D-22, D-23) — the unit, strictly coerced, and for a
+      // native leg the USD series the composer blends. Closes are read ONLY for a
+      // native strategy with a series to convert (a USD strategy costs no read). A
+      // failed or empty price read leaves `daily_returns_usd` as `[]` (native but
+      // unpriced), never `null` and never the raw BTC series.
+      const returns_unit = parseReturnsUnit(dqf?.native_unit);
+      let daily_returns_usd: DailyPoint[] | null = null;
+      if (returns_unit !== null) {
+        daily_returns_usd =
+          daily_returns.length === 0
+            ? []
+            : convertNativeReturnsToUsd(
+                daily_returns,
+                returns_unit,
+                await readBtcCloses(supabase),
+              );
+      }
 
       const body: ReturnsResponse = {
         daily_returns,
@@ -449,6 +493,8 @@ export async function GET(
         series_state,
         cagr,
         sharpe,
+        returns_unit,
+        daily_returns_usd,
       };
       return NextResponse.json(body, { status: 200, headers: NO_STORE_HEADERS });
     },

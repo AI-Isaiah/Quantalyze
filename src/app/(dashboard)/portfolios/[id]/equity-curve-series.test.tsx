@@ -411,3 +411,148 @@ describe("HONEST-04 / C-3 — EquityCurveCoverage caption", () => {
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// Phase 164.6.6.2 plan 09 (D-18, D-22) — a BTC constituent is drawn in USD.
+//
+// WHY: the portfolio chart's axis is USD wealth. A BTC account's own wealth
+// curve is in BTC, so plotting it beside USD strategies puts two units on one
+// axis and no label says so. The constituent's curve is rebuilt from its daily
+// returns converted at the daily BTC close. Expected values are hand-computed
+// literals: NAV 1.0 -> 1.1 in BTC with closes 60000 -> 66000 is
+// (1.1 * 66000) / (1.0 * 60000) - 1 = 0.21, so the cumprod curve ends at 1.21.
+// ---------------------------------------------------------------------------
+describe("164.6.6.2 — a BTC constituent's equity curve is its USD curve", () => {
+  const CLOSES = {
+    prices: [
+      { date: "2026-01-01", close: 60000 },
+      { date: "2026-01-02", close: 66000 },
+    ],
+    dropped: [] as string[],
+  };
+  const nativeAnalytics = {
+    computation_status: "complete",
+    computed_at: "2026-01-02T00:00:00Z",
+    cagr: 0.2,
+    sharpe: 1.1,
+    returns_series: null,
+    daily_returns: [
+      { date: "2026-01-01", value: 0.03 },
+      { date: "2026-01-02", value: 0.1 },
+    ],
+    data_quality_flags: { native_unit: "BTC" },
+  };
+
+  it("cumprods the CONVERTED daily series: [{d1, 1.21}], day 0 dropped", async () => {
+    const { buildEquityCurveSeries } = await import(PAGE);
+    const out = buildEquityCurveSeries([row("btc", "BTC book", nativeAnalytics)], CLOSES);
+    expect(out[0].equityCurve).toHaveLength(1);
+    expect(out[0].equityCurve![0].date).toBe("2026-01-02");
+    expect(out[0].equityCurve![0].value).toBeCloseTo(1.21, 12);
+  });
+
+  it("parity: the curve is the cumprod of convertNativeReturnsToUsd on the same inputs", async () => {
+    const { buildEquityCurveSeries } = await import(PAGE);
+    const { convertNativeReturnsToUsd } = await import("@/lib/factsheet/native-to-usd");
+    const converted = convertNativeReturnsToUsd(nativeAnalytics.daily_returns, "BTC", CLOSES);
+    let c = 1;
+    const expected = converted.map((p: { date: string; value: number }) => {
+      c *= 1 + p.value;
+      return { date: p.date, value: c };
+    });
+    const out = buildEquityCurveSeries([row("btc", "BTC book", nativeAnalytics)], CLOSES);
+    expect(out[0].equityCurve).toEqual(expected);
+  });
+
+  it("a persisted BTC wealth curve is converted from the resolved daily series, never plotted as-is", async () => {
+    const { buildEquityCurveSeries } = await import(PAGE);
+    const btcWealth = [
+      { date: "2026-01-01", value: 1.0 },
+      { date: "2026-01-02", value: 1.1 },
+      { date: "2026-01-03", value: 1.21 },
+    ];
+    const closes = {
+      prices: [
+        { date: "2026-01-01", close: 55000 },
+        { date: "2026-01-02", close: 60000 },
+        { date: "2026-01-03", close: 66000 },
+      ],
+      dropped: [] as string[],
+    };
+    const out = buildEquityCurveSeries(
+      [
+        row("btc", "BTC book", {
+          ...nativeAnalytics,
+          returns_series: btcWealth,
+          daily_returns: null,
+        }),
+      ],
+      closes,
+    );
+    // Resolved daily = [{01-02, 0.1}, {01-03, 0.1}]; day 0 (01-02) is dropped by
+    // the conversion; 01-03 is (1.1 * 66000) / (1.0 * 60000) - 1 = 0.21.
+    expect(out[0].equityCurve).not.toEqual(btcWealth);
+    expect(out[0].equityCurve).toHaveLength(1);
+    expect(out[0].equityCurve![0].date).toBe("2026-01-03");
+    expect(out[0].equityCurve![0].value).toBeCloseTo(1.21, 12);
+  });
+
+  it("a USD constituent beside it is unchanged", async () => {
+    const { buildEquityCurveSeries } = await import(PAGE);
+    const out = buildEquityCurveSeries(
+      [row("usd", "Live", liveAnalytics), row("btc", "BTC book", nativeAnalytics)],
+      CLOSES,
+    );
+    expect(out[0].equityCurve).toEqual([
+      { date: "2026-02-01", value: 1 },
+      { date: "2026-02-02", value: 1.02 },
+      { date: "2026-02-03", value: 1.06 },
+    ]);
+  });
+
+  it("closes unavailable: the BTC constituent has NO line (null), never its raw BTC curve", async () => {
+    const { buildEquityCurveSeries } = await import(PAGE);
+    expect(
+      buildEquityCurveSeries([row("btc", "BTC book", nativeAnalytics)], null)[0].equityCurve,
+    ).toBeNull();
+    // ...and the default (no closes argument at all) is the same honest answer.
+    expect(
+      buildEquityCurveSeries([row("btc", "BTC book", nativeAnalytics)])[0].equityCurve,
+    ).toBeNull();
+  });
+
+  it("a malformed native_unit reads as USD: the series is drawn as it is", async () => {
+    const { buildEquityCurveSeries } = await import(PAGE);
+    const out = buildEquityCurveSeries(
+      [row("x", "Odd", { ...nativeAnalytics, data_quality_flags: { native_unit: "btc" } })],
+      CLOSES,
+    );
+    expect(out[0].equityCurve).toHaveLength(2);
+    expect(out[0].equityCurve![1].value).toBeCloseTo(1.03 * 1.1, 12);
+  });
+
+  it("stripConstituentSeries never lets the raw data_quality_flags blob cross to the client", async () => {
+    const { stripConstituentSeries } = await import(PAGE);
+    const out = stripConstituentSeries([
+      row("btc", "BTC book", {
+        ...nativeAnalytics,
+        data_quality_flags: { native_unit: "BTC", degraded_members: ["okx:BTC"] },
+      }),
+    ]);
+    const analytics = out[0].strategies!.strategy_analytics as Record<string, unknown>;
+    expect("data_quality_flags" in analytics).toBe(false);
+    expect(JSON.stringify(out)).not.toContain("degraded_members");
+    expect(JSON.stringify(out)).not.toContain("native_unit");
+  });
+
+  it("hasNativeUnitConstituent: true only for a well-formed unit (the page reads closes only then)", async () => {
+    const { hasNativeUnitConstituent } = await import(PAGE);
+    expect(hasNativeUnitConstituent([row("u", "USD", liveAnalytics)])).toBe(false);
+    expect(
+      hasNativeUnitConstituent([
+        row("x", "Odd", { ...nativeAnalytics, data_quality_flags: { native_unit: "btc" } }),
+      ]),
+    ).toBe(false);
+    expect(hasNativeUnitConstituent([row("b", "BTC", nativeAnalytics)])).toBe(true);
+  });
+});

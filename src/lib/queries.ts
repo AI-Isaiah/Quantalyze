@@ -19,6 +19,9 @@ import { resolveDailyReturnSeries } from "@/lib/factsheet/resolve-series";
 // Never from `@/lib/factsheet/fetch-and-build-payload`: that module pulls
 // `server-only` (composite-read-path.ts) into every test importing this file.
 import { readFactsheetBenchmark } from "@/lib/factsheet/benchmark-read";
+import { readBtcCloses } from "@/lib/factsheet/benchmark-source";
+import { convertNativeReturnsToUsd } from "@/lib/factsheet/native-to-usd";
+import { parseReturnsUnit } from "@/lib/factsheet/returns-unit";
 import type { BenchmarkPricesOpt } from "@/lib/factsheet/types";
 import { API_KEY_USER_COLUMNS, type ApiKeyUserColumn } from "./constants";
 import {
@@ -2179,7 +2182,7 @@ export async function getPortfolioStrategies(portfolioId: string) {
     .from("portfolio_strategies")
     .select(`
       *, strategies (id, name, status, strategy_types, supported_exchanges, start_date, aum,
-        strategy_analytics (cagr, sharpe, max_drawdown, volatility, cumulative_return, sparkline_returns, computed_at, computation_status, returns_series, daily_returns)
+        strategy_analytics (cagr, sharpe, max_drawdown, volatility, cumulative_return, sparkline_returns, computed_at, computation_status, returns_series, daily_returns, data_quality_flags)
       )
     `)
     .eq("portfolio_id", portfolioId)
@@ -2716,6 +2719,18 @@ export interface MyAllocationDashboardPayload {
        * shipped to the client — only this boolean projection (T-111-03).
        */
       is_composite: boolean;
+      /**
+       * Phase 164.6.6.2 (D-18, D-22) — the unit this strategy's OWN returns are
+       * recorded in: `"BTC"` for a BTC-native account, `null` for USD (and for any
+       * `native_unit` that is not a well-formed code, strictly coerced through
+       * `parseReturnsUnit`). When set, `strategy_analytics.daily_returns` on this
+       * row is the USD-CONVERTED series (the one blend input every composer, compare
+       * and table consumer reads), while the scalar metrics beside it (cagr, sharpe,
+       * volatility, max_drawdown) stay the strategy's own, in its own unit. The RAW
+       * `data_quality_flags` blob is never shipped (T-111-03). Optional only so legacy
+       * hand-built fixtures compile; `getMyAllocationDashboard` ALWAYS sets it.
+       */
+      returns_unit?: string | null;
       /**
        * Phase 147 / SCEN-01 — what an EMPTY `strategy_analytics.daily_returns`
        * MEANS for this book row: a live job ("computing"), or genuine absence
@@ -5350,6 +5365,29 @@ export const getMyAllocationDashboard = cache(
       ),
     );
 
+    // Phase 164.6.6.2 (D-18, D-22, T-164.6.6.2-29): the BTC closes are read ONCE per
+    // request, and only when a book strategy carries a native unit, so a USD-only
+    // dashboard costs no extra read. `null` is "no price source" (read error or no
+    // usable close), never a flat account: every native row then converts to `[]`.
+    const bookHasNativeUnit = (strategiesRes.data ?? []).some((row) => {
+      const rawEmbed = castRow<{ strategy: unknown }>(row, "strategy-join").strategy;
+      const embed = Array.isArray(rawEmbed) ? rawEmbed[0] : rawEmbed;
+      if (!embed) return false;
+      const rawA = castRow<{ strategy_analytics: unknown }>(embed, "analytics-join")
+        ?.strategy_analytics;
+      const a = (Array.isArray(rawA) ? rawA[0] : rawA) as
+        | { data_quality_flags?: { native_unit?: unknown } | null }
+        | null
+        | undefined;
+      return parseReturnsUnit(a?.data_quality_flags?.native_unit) !== null;
+    });
+    const btcCloses = bookHasNativeUnit ? await readBtcCloses(supabase) : null;
+    if (bookHasNativeUnit && btcCloses === null) {
+      console.error(
+        "[queries.getMyAllocationDashboard] BTC closes unavailable; native-unit book rows convert to an empty series (no price, nothing invented)",
+      );
+    }
+
     const strategies = (strategiesRes.data ?? []).flatMap((row) => {
       const rawStrategy = castRow<{ strategy: unknown }>(row, "strategy-join").strategy;
       const strategy = (
@@ -5397,8 +5435,14 @@ export const getMyAllocationDashboard = cache(
       // emitted analytics below so only this boolean crosses to the client
       // (T-111-03: degraded-member venue detail never ships).
       const analyticsObj = (analytics ?? null) as Record<string, unknown> | null;
-      const dqf = analyticsObj?.data_quality_flags as { composite?: unknown } | null | undefined;
+      const dqf = analyticsObj?.data_quality_flags as
+        | { composite?: unknown; native_unit?: unknown }
+        | null
+        | undefined;
       const is_composite = dqf?.composite === true;
+      // Phase 164.6.6.2 (D-18, D-22) — strict coercion, same boundary as the
+      // factsheet: anything that is not a well-formed unit code reads as USD.
+      const returns_unit = parseReturnsUnit(dqf?.native_unit);
       // Phase 147 / SCEN-01 — resolve the series HERE, server-side, and emit it
       // under the SAME `daily_returns` field name. The analytics-service writes
       // the cumprod WEALTH curve to `returns_series` and leaves `daily_returns`
@@ -5433,7 +5477,20 @@ export const getMyAllocationDashboard = cache(
         // client-facing Pick<> never has to admit a raw series column.
         const analyticsForPayload: Record<string, unknown> = {
           ...analyticsRest,
-          daily_returns: resolvedDailyReturns,
+          // Phase 164.6.6.2 (D-18, D-22, D-13): a native-unit strategy's series is
+          // converted to USD HERE, through the ONE conversion, because every
+          // consumer of this payload (composer book legs, scenario compare panel,
+          // the table's MTD) blends or reduces it as USD. The dashboard is a USD
+          // surface, so a BTC strategy's MTD in the table is now a USD MTD; the
+          // list-surface unit chip is Phase 164.6.6.2.1 (D-19). A USD row takes
+          // the same-reference early return. `series_state` below is derived from
+          // the PRE-conversion `resolvedDailyReturns`, so a price outage never reads
+          // as "no series".
+          daily_returns: convertNativeReturnsToUsd(
+            resolvedDailyReturns,
+            returns_unit,
+            btcCloses,
+          ),
         };
         strategyAnalyticsForPayload =
           analyticsForPayload as MyAllocationDashboardPayload["strategies"][number]["strategy"]["strategy_analytics"];
@@ -5557,6 +5614,7 @@ export const getMyAllocationDashboard = cache(
             // the raw verification + flags embeds are stripped above).
             trust_tier,
             is_composite,
+            returns_unit,
             series_state,
             strategy_analytics: strategyAnalyticsForPayload,
           },
