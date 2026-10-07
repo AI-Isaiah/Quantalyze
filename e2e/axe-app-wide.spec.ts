@@ -6,7 +6,7 @@
  * admin-csv-status-axe — all LEFT IN PLACE) to ALL primary routes scanned at
  * BOTH Desktop (1280×800) and a mobile viewport (375×812, Assumption A3):
  *
- *   PUBLIC (run UNSEEDED, no skip): /, /security, /for-quants, /browse, /demo
+ *   PUBLIC (run UNSEEDED, no skip): /, /security, /contact, /for-quants, /browse, /demo
  *   AUTHED (HAS_SEED_ENV self-skip): /allocations, /strategy/[id]/v2,
  *           /discovery/[slug], /strategies/new/wizard
  *   EMBEDDED-FACTSHEET (HAS_SEED_ENV self-skip, scoped serious+critical):
@@ -95,6 +95,7 @@ async function loginViaForm(
 const PUBLIC_ROUTES: { path: string; anchor: string }[] = [
   { path: "/", anchor: "h1" },
   { path: "/security", anchor: "main h1" },
+  { path: "/contact", anchor: "main h1" },
   { path: "/for-quants", anchor: "main h1" },
   { path: "/browse", anchor: "main h1" },
   { path: "/demo", anchor: "#editorial-hero-headline" },

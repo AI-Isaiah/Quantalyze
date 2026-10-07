@@ -96,14 +96,14 @@ describe("S6 — KCS-09 fixed remedies", () => {
     for (const shape of ["single", "composite", "csv", "unknown"] as const) {
       const r = ownerRemedy({ state: "failed", errorKind: "permanent" }, shape, SID);
       expect(r.id).toBe("KCS09-CONTACT-PERMANENT");
-      expect(rendered(r)).toBe("Contact support@quantalyze.com to resolve it.");
+      expect(rendered(r)).toBe("Use the contact form to have it resolved.");
     }
   });
 
   it("KCS09-CONTACT-CHECK for finished without a payload", () => {
     const r = ownerRemedy({ state: "finished" }, "single", SID);
     expect(r.id).toBe("KCS09-CONTACT-CHECK");
-    expect(rendered(r)).toBe("Contact support@quantalyze.com to have it checked.");
+    expect(rendered(r)).toBe("Use the contact form to have it checked.");
   });
 
   it("KCS09-UNREADABLE remedy: Reload this page to try again.", () => {
@@ -168,7 +168,7 @@ describe("S6 — KCS-21 shape remedies", () => {
       expect(r.id).toBe("KCS21-SINGLE");
       expect(r.link).toEqual({ text: "edit page", href: `/strategies/${SID}/edit` });
       expect(rendered(r)).toBe(
-        "Start a new computation with Resync on this strategy's edit page. Contact support@quantalyze.com if it does not complete.",
+        "Start a new computation with Resync on this strategy's edit page. Use the contact form if it does not complete.",
       );
     }
   });
@@ -178,7 +178,7 @@ describe("S6 — KCS-21 shape remedies", () => {
     expect(r.id).toBe("KCS21-UNLINKED");
     expect(r.link).toEqual({ text: "edit page", href: `/strategies/${SID}/edit` });
     expect(rendered(r)).toBe(
-      "Link a key with Use & Sync on this strategy's edit page to start a new computation. Contact support@quantalyze.com if it does not complete.",
+      "Link a key with Use & Sync on this strategy's edit page to start a new computation. Use the contact form if it does not complete.",
     );
   });
 
@@ -187,7 +187,7 @@ describe("S6 — KCS-21 shape remedies", () => {
     expect(r.id).toBe("KCS21-COMPOSITE");
     expect(r.link).toBeUndefined();
     expect(rendered(r)).toBe(
-      "A composite strategy has no self-serve re-run. Contact support@quantalyze.com to start a new computation.",
+      "A composite strategy has no self-serve re-run. Use the contact form to start a new computation.",
     );
   });
 
@@ -199,7 +199,7 @@ describe("S6 — KCS-21 shape remedies", () => {
       href: "/strategies/new/wizard?source=csv",
     });
     expect(rendered(r)).toBe(
-      "A CSV strategy's data is fixed at upload. To publish a corrected series, upload a new CSV strategy, or contact support@quantalyze.com.",
+      "A CSV strategy's data is fixed at upload. To publish a corrected series, upload a new CSV strategy, or use the contact form.",
     );
   });
 
@@ -251,11 +251,11 @@ describe("S5 / S7 — KCS-12 unbuildable share notes (Phase 167.2.1 D-02)", () =
   const UNBUILDABLE_SHORT =
     "Right now, a private link to this strategy shows that its factsheet is not available. The stored results we build its factsheet from hold fewer than 2 days of returns, and a factsheet needs at least 2.";
   const UNBUILDABLE_COMPOSITE =
-    "Right now, a private link to this strategy shows that its factsheet is not available. We cannot build a factsheet from its stored results. Contact support@quantalyze.com to have them checked.";
+    "Right now, a private link to this strategy shows that its factsheet is not available. We cannot build a factsheet from its stored results. Use the contact form to have them checked.";
   const PUBLIC_UNBUILDABLE_SHORT =
     "Right now, this strategy's factsheet link shows that the factsheet is not available. The stored results we build its factsheet from hold fewer than 2 days of returns, and a factsheet needs at least 2.";
   const PUBLIC_UNBUILDABLE_COMPOSITE =
-    "Right now, this strategy's factsheet link shows that the factsheet is not available. We cannot build a factsheet from its stored results. Contact support@quantalyze.com to have them checked.";
+    "Right now, this strategy's factsheet link shows that the factsheet is not available. We cannot build a factsheet from its stored results. Use the contact form to have them checked.";
   const ARMS = ["in_progress", "not_available", "unreadable"] as const;
 
   it("KCS12-UNBUILDABLE-SHORT: private link, single-key series too short, arm not_available", () => {
@@ -307,7 +307,7 @@ describe("S5 / S7 — KCS-12 unbuildable share notes (Phase 167.2.1 D-02)", () =
   const UNBUILDABLE_UNREADABLE_SHORT =
     "Right now, a private link to this strategy shows a placeholder page instead of the numbers. The stored results we build its factsheet from hold fewer than 2 days of returns, and a factsheet needs at least 2.";
   const UNBUILDABLE_UNREADABLE_COMPOSITE =
-    "Right now, a private link to this strategy shows a placeholder page instead of the numbers. We cannot build a factsheet from its stored results. Contact support@quantalyze.com to have them checked.";
+    "Right now, a private link to this strategy shows a placeholder page instead of the numbers. We cannot build a factsheet from its stored results. Use the contact form to have them checked.";
 
   it("KCS12-UNBUILDABLE-UNREADABLE-SHORT: private link, series too short, job state unreadable", () => {
     expect(recipientShareNoteFor("mint-token", "unreadable", "too_short")).toBe(
@@ -532,5 +532,53 @@ describe("totality — every ComputeState variant has a state line and a remedy"
   it("only a permanent failure is red (DESIGN.md § Semantic-color gates)", () => {
     const red = every.filter((s) => ownerStateLine(s).tone === "red");
     expect(red).toEqual([{ state: "failed", errorKind: "permanent" }]);
+  });
+});
+
+describe("Phase 164.6.6.3.5 DOMAINONE — no status surface names an address", () => {
+  // Every remedy and note reaches the contact form by pointer (AD-05): the
+  // phrase `contact form` is what ContactPointerText links, so a string that
+  // sends the reader to support must carry it, and none may carry an address.
+  const SHAPES = ["single", "unlinked", "composite", "csv", "unknown"] as const;
+  const STATES: ComputeState[] = [
+    { state: "failed", errorKind: "permanent" },
+    { state: "failed", errorKind: "transient" },
+    { state: "finished" },
+    { state: "never_started" },
+    { state: "stalled" },
+  ];
+
+  it("no owner remedy contains an address, whatever the state and shape", () => {
+    for (const s of STATES) {
+      for (const shape of SHAPES) {
+        expect(rendered(ownerRemedy(s, shape, SID))).not.toMatch(/@quantalyze\./);
+      }
+    }
+  });
+
+  it("every remedy that sends the owner to support says `contact form` exactly once", () => {
+    const sendsToSupport = [
+      ownerRemedy({ state: "failed", errorKind: "permanent" }, "single", SID),
+      ownerRemedy({ state: "finished" }, "single", SID),
+      ownerRemedy({ state: "failed", errorKind: "transient" }, "single", SID),
+      ownerRemedy({ state: "failed", errorKind: "transient" }, "unlinked", SID),
+      ownerRemedy({ state: "failed", errorKind: "transient" }, "composite", SID),
+      ownerRemedy({ state: "failed", errorKind: "transient" }, "csv", SID),
+    ];
+    for (const r of sendsToSupport) {
+      // ContactPointerText runs over `before` and `after` separately and links
+      // the first phrase in each, so the pair must not hold it twice.
+      expect(rendered(r).split("contact form")).toHaveLength(2);
+    }
+  });
+
+  it("no share note names an address", () => {
+    for (const mode of ["mint-token", "public-url"] as const) {
+      for (const arm of ["in_progress", "not_available", "unreadable"] as const) {
+        for (const kind of [null, "too_short", "cannot_build"] as const) {
+          expect(recipientShareNoteFor(mode, arm, kind)).not.toMatch(/@quantalyze\./);
+        }
+      }
+    }
   });
 });

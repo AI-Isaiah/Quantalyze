@@ -55,10 +55,14 @@ export const PDF_RENDERER_USER_AGENT = "Quantalyze-PDF-Renderer/1.0";
 // Defense-in-depth: even with Vercel's edge host-validation, the route
 // MUST validate locally so the security contract holds on every
 // deployment shape (preview, prod, self-hosted, dev).
+// Phase 164.6.6.3.5 DOMAINONE D-06 / D-14: `quantalyze.xyz` is the canonical
+// production host (PROD's NEXT_PUBLIC_APP_URL). `quantalyze-rho.vercel.app`
+// stays while the redirect to xyz is young (D-14). The old .com hosts were
+// removed: that domain belongs to an unrelated third party, so a request
+// carrying it must never drive puppeteer.
 const APP_URL_ALLOWED_HOSTS: ReadonlySet<string> = new Set([
+  "quantalyze.xyz",
   "quantalyze-rho.vercel.app",
-  "quantalyze.com",
-  "www.quantalyze.com",
 ]);
 
 /** Validates `host` against the production allowlist OR the current

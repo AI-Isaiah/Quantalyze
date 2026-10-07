@@ -18,6 +18,9 @@ interface MobileSidebarDrawerProps {
   /** Phase 09.1 Plan 11 / R5 — passed through to Sidebar so the
    *  drawer-mounted nav also surfaces the My Allocation badge. */
   flaggedCount?: number;
+  /** D-17 — passed through to Sidebar so the drawer-mounted admin nav carries
+   *  the same unprocessed-leads badge as the desktop rail. */
+  unprocessedLeadsCount?: number | null;
   /** Phase 110 CONTRIB-01 — forwarded to the drawer's Sidebar so the
    *  "Add a Strategy" client action works from the mobile drawer too. */
   onNavAction?: (action: NavAction) => void;
@@ -49,6 +52,7 @@ export function MobileSidebarDrawer({
   populatedSlugs,
   triggerRef,
   flaggedCount,
+  unprocessedLeadsCount,
   onNavAction,
 }: MobileSidebarDrawerProps) {
   const pathname = usePathname();
@@ -188,6 +192,7 @@ export function MobileSidebarDrawer({
           isManager={isManager}
           variant="drawer"
           flaggedCount={flaggedCount}
+          unprocessedLeadsCount={unprocessedLeadsCount}
           onNavAction={onNavAction}
         />
       </div>

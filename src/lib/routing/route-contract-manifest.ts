@@ -334,6 +334,12 @@ export const ROUTE_CONTRACT_MANIFEST: readonly RouteEntry[] = [
     notes: "Factsheet tearsheet — covered by the /factsheet PUBLIC_ROUTES prefix.",
   },
   {
+    route: "/contact",
+    class: "public",
+    notes:
+      "Public contact form - in PUBLIC_ROUTES + bounce-exempt. security.txt Contact and every copy pointer land here.",
+  },
+  {
     route: "/factsheet/:id/v2",
     class: "public",
     notes: "Factsheet v2 — covered by the /factsheet PUBLIC_ROUTES prefix.",

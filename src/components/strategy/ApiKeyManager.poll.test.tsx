@@ -1099,8 +1099,12 @@ describe("ApiKeyManager + the REAL job-state read: a deterministic DEGRADED answ
   // Hand-typed from the UI-SPEC round-2 rows.
   const GATE_UNREADABLE =
     "This sync did not start: we could not check whether a sync for this strategy is still running. Try again in a moment.";
+  // The detail holds a contact-form link (164.6.6.3.5), so match the <p> by its
+  // whole textContent, not by its own text nodes.
+  const wholeText = (text: string) => (_content: string, el: Element | null) =>
+    el?.tagName === "P" && el.textContent === text;
   const GATE_PERSISTENT =
-    "This sync did not start: we cannot check whether this strategy has a sync in progress, and trying again will not change that. Contact support@quantalyze.com to start a sync.";
+    "This sync did not start: we cannot check whether this strategy has a sync in progress, and trying again will not change that. Use the contact form to have a sync started.";
 
   async function resyncAgainst(body: Record<string, unknown>) {
     vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -1139,7 +1143,12 @@ describe("ApiKeyManager + the REAL job-state read: a deterministic DEGRADED answ
         degradedReason,
       });
       expect(screen.getByText("Sync not started")).toBeInTheDocument();
-      expect(screen.getByText(GATE_PERSISTENT)).toBeInTheDocument();
+      const detail = screen.getByText(wholeText(GATE_PERSISTENT));
+      expect(detail).toBeInTheDocument();
+      // AD-05: the pointer is a same-tab link carrying this strategy's id.
+      const pointer = within(detail).getByRole("link", { name: "contact form" });
+      expect(pointer).toHaveAttribute("href", "/contact?topic=support&strategy=strat-1");
+      expect(pointer).not.toHaveAttribute("target");
       expect(screen.queryByText(GATE_UNREADABLE)).not.toBeInTheDocument();
       expect(mockState.linkCount).toBe(0);
       expect(fetchMock.mock.calls.some(([url]) => url === "/api/keys/sync")).toBe(false);
@@ -1149,6 +1158,6 @@ describe("ApiKeyManager + the REAL job-state read: a deterministic DEGRADED answ
   it("GATE-TRANSIENT (CONTROL): a DEGRADED body with no reason (a failed read) keeps the \"in a moment\" copy", async () => {
     await resyncAgainst({ jobStatus: null, stalled: false, memberProgress: [], degraded: true });
     expect(screen.getByText(GATE_UNREADABLE)).toBeInTheDocument();
-    expect(screen.queryByText(GATE_PERSISTENT)).not.toBeInTheDocument();
+    expect(screen.queryByText(wholeText(GATE_PERSISTENT))).not.toBeInTheDocument();
   });
 });

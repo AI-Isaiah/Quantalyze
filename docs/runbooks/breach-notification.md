@@ -9,7 +9,9 @@
 > live under stress.
 >
 > **Owners are role-based.** Quantalyze is founder-operated; every role below is
-> currently the **Founder** (`[FOUNDER NAME]`, `security@quantalyze.com`).
+> currently the **Founder** (`[FOUNDER NAME]`, reachable through the contact form
+> at `https://quantalyze.xyz/contact?topic=security`; reports are read at
+> `/admin/for-quants-leads`).
 > Replace the `[…]` placeholders as the team grows — do not leave a role
 > unassigned at incident time.
 
@@ -36,7 +38,8 @@ prompt.
 
 - **Who can declare awareness:** the **Incident Lead** (`[FOUNDER NAME]`). Any
   team member who suspects a breach escalates to the Incident Lead immediately
-  via `security@quantalyze.com` + a direct message.
+  via the contact form (topic Security report; the founder reads it at
+  `/admin/for-quants-leads`) + a direct message.
 - **Record T0** (UTC timestamp) the moment awareness is declared. Every
   downstream deadline is relative to T0.
 
@@ -103,7 +106,7 @@ What data was affected (categories + approximate scope): [e.g. display name,
 Likely consequences: [assessed risk to you]
 What we have done (remediation taken): [containment + fixes]
 What you can do: [actions for the recipient, if any]
-Contact point for follow-up: security@quantalyze.com [+ DPO/contact name]
+Contact point for follow-up: the contact form at https://quantalyze.xyz/contact (topic Security report) [+ DPO/contact name]
 
 We will share further updates as our investigation progresses.
 
@@ -136,8 +139,9 @@ that resolved the blocker].
   dedicated structured security-contact field today** (a product follow-up if
   one is wanted). If no named contact was provided, fall back to the account
   holder email.
-- **Our outbound contact point:** `security@quantalyze.com` (MX/SPF/DKIM/DMARC
-  configured + smoke-tested; see [`security-contact.md`](./security-contact.md)).
+- **Our contact point:** the contact form at `https://quantalyze.xyz/contact`
+  (topic Security report), read by the founder at `/admin/for-quants-leads`. No
+  mailbox exists; see [`security-contact.md`](./security-contact.md).
 
 ## Step 6 — Record-keeping (Article 33(5))
 

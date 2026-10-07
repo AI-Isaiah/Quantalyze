@@ -90,8 +90,8 @@ export async function trackUsageEventServer(
       event,
       properties: {
         ...(properties ?? {}),
-        // M-0487 (sibling): never fall back to "quantalyze.com" (an unrelated WP
-        // site; prod is quantalyze-rho.vercel.app) — that made preview/missing-env
+        // M-0487 (sibling): never fall back to a real domain (the unrelated `.com`
+        // domain, a WP site; prod is quantalyze-rho.vercel.app) — that made preview/missing-env
         // session/intro/alert events masquerade as prod traffic in PostHog funnel
         // attribution. Neutral, filterable, clearly-non-prod sentinel instead.
         $host: process.env.NEXT_PUBLIC_SITE_URL ?? "unknown.local",

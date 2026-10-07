@@ -1,5 +1,100 @@
 # Changelog
 
+## [0.127.0.1] - 2026-10-07 — BASELINE: automated re-dump after the PROD apply of 239106dc
+
+### Changed
+- `supabase/schema/baseline.sql` re-dumped from PRODUCTION by Supabase Migrate run `37667399720`, after the PROD apply of merge `239106dc`: sha256 `5870bb2a…` → `28f356c4…`.
+- Shape, old → new: tables 63 → 63, policies 155 → 155, function statements 125 → 125, distinct function names 123 → 123, data statements 0 → 0.
+- Migrations the dump newly carries, from the marker diff: `20261008120000_for_quants_leads_contact_source.sql`.
+- `supabase/schema/BASELINE.md` gets the new `## Provenance` capture rows and a dated `### Regenerated 2026-10-07` section; `baseline-carried-migrations.txt` is regenerated from the merge tree; VERSION and package.json 0.127.0.0 → 0.127.0.1.
+- The gates on the composed tree, verbatim: `baseline-currency: carried=287 replay=0 marker-sha=match defects=0`, `baseline-content-drift: functions compared 125 — MATCH 122, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`, `baseline-content-drift: findings 0`.
+
+### Notes
+- The dump was taken read-only by the `redump-dump` job after the `apply` job of Supabase Migrate run `37667399720` succeeded, and this entry was composed by the `redump-pr` job. Run `37667399720` is the provenance anchor.
+- The "what it adds" judgment for each newly carried migration is a human one, so it is left to the reviewer. Every figure above is measured.
+
+## [0.127.0.0] - 2026-10-07 — DOMAINONE: one canonical address, and a contact form instead of an email address
+
+Phase 164.6.6.3.5 makes `quantalyze.xyz` the product's one address. `quantalyze.com` is a domain we do
+not own (its mail goes to an unrelated company's server) and `quantalyze.xyz` has no mail records, so
+the product now names no contact email at all. Every place that pointed at an `@quantalyze.com`
+mailbox points at a new contact form instead.
+
+### Added
+- **A public `/contact` page with a contact form.** It says "Message received" only when the lead
+  route actually stored the message. Every other outcome (duplicate, validation error, rate limit,
+  server error) renders its own string. The footer links it, and the page is in the axe,
+  marketing-shell and no-clip sweeps. The proxy keeps both signed-in and anonymous visitors on it.
+- **The lead route stores contact messages.** `for_quants_leads` gains `source`, `topic` and
+  `reference` columns (migration `20261008120000_for_quants_leads_contact_source.sql`, with a
+  rollback). The duplicate-request index now covers only `request_call` rows, so repeated contact
+  messages are not refused as duplicates. A message with no firm stores an empty string and `firm`
+  stays NOT NULL (D-13). `src/lib/contact.ts` is the contract module for topics and reference ids,
+  and a parity test keeps its topic list equal to the migration's CHECK.
+- **Contact pointers carry the context.** An error envelope's "contact form" phrase becomes a
+  new-tab link carrying the correlation id, the wizard passes its draft id, and the key card and
+  sync-stop detail pass the strategy id. The id format accepts the wizard's colon-bearing
+  `wizard:<uuid>` reference.
+- **The founder CRM shows each lead's source, topic and reference**, and the admin "For quants
+  leads" sidebar entry carries an unread badge (D-17), so the founder learns a message arrived
+  without email. A failed count shows a muted "?" marker and reaches Sentry once per process,
+  never a silent zero.
+- **A canonical-domain gate.** `scripts/check-canonical-domain.ts` (also `npm run
+  check:canonical-domain`) fails on any `quantalyze.com` mention in tracked source. It runs inside
+  `npm run lint` and has scratch-tree proofs that it goes RED. A second sweep test,
+  `no-email-in-copy.test.ts`, asserts no exported copy or user-facing source names an email address.
+
+### Changed
+- **`quantalyze-rho.vercel.app` 308-redirects to `https://quantalyze.xyz`**, same path and query.
+  Only that exact host matches (both dots escaped), so preview and per-deployment hosts and Vercel
+  cron requests are never redirected.
+- **Every status remedy, wizard message, CSV finalize message, share note, factsheet owner remedy,
+  RequestCallModal outcome, privacy page, pending-approval page and the for-quants trust row now
+  points at the contact form** instead of a mailbox. The support-address constant is gone.
+- **`security.txt` and `/security` point at the contact page.** `/security` names
+  `quantalyze.xyz` as the host its HSTS header was measured on, and `public/security-packet.pdf` is
+  regenerated with the new contact and a new "Last reviewed" date (D-15).
+- **Server-built links fall back to `quantalyze.xyz`**, and the factsheet PDF, tearsheet and
+  `founder-lp-report` host allow-lists accept `quantalyze.xyz` and refuse the `.com` hosts. The rho
+  alias stays allowed for now (D-14).
+- **No invented sender (D-12).** When `PLATFORM_EMAIL` or `RESEND_ALERT_FROM` is unset, the founder
+  cron, flag monitor and `notify-admin` skip the email with a logged warning and an audited row,
+  never sending from a guessed address. A skipped, rejected or unaddressable founder notification
+  for a new lead is recorded as not sent (`throwOnSkip`, `throwOnFailure`, `recipient_invalid`).
+- `.env.example`, CI's test `PLATFORM_EMAIL`, CSRF fixtures and the docs, demos, pitch and runbooks
+  (`security-contact.md` now describes the contact-form intake path) stop naming the retiring domain.
+
+### Tests
+- New suites: `ContactForm`, `ContactPointerText`, `contact.test.ts`, `/contact` page,
+  `route.founder-skip`, `for-quants-leads-admin`, the dashboard layout's unread-leads count,
+  `legacy-host-redirect`, `security-txt`, `check-canonical-domain`, `no-email-in-copy` and
+  `contact-topics-migration-parity`. New SQL gate `test_for_quants_leads_contact_dedupe.sql`; the
+  mutation floors and every `supabase/tests` census moved with it.
+- Review: three rounds (code reviewer and silent-failure pass). Rounds 1 and 2 fixed WR-01 and the
+  round-2 findings with tests; round 3's remaining finding was accepted and recorded. Migration
+  review and RLS audit were clean. Security audit: 36 threats, 33 closed; T-31..T-33 close in the
+  post-deploy live check.
+
+### Notes
+- **After deploy (D-11):** production `NEXT_PUBLIC_SITE_URL` moves from the rho alias to
+  `https://quantalyze.xyz`, then plan 13 runs the live checks.
+- **Known limits, recorded rather than fixed:** fifteen address-less "contact support" strings are
+  booked as `CONTACT-SUPPORT-POINTERS-01` (D-16), and the `security.txt` Expires renewal as
+  `SECURITY-TXT-EXPIRES-01`.
+
+## [0.126.0.1] - 2026-10-07 — BASELINE: automated re-dump after the PROD apply of db481fe5
+
+### Changed
+- `supabase/schema/baseline.sql` re-dumped from PRODUCTION by Supabase Migrate run `37656080684`, after the PROD apply of merge `db481fe5`: sha256 `2852a8c6…` → `5870bb2a…`.
+- Shape, old → new: tables 63 → 63, policies 155 → 155, function statements 125 → 125, distinct function names 123 → 123, data statements 0 → 0.
+- Migrations the dump newly carries, from the marker diff: `20261007120000_api_keys_account_currency.sql`.
+- `supabase/schema/BASELINE.md` gets the new `## Provenance` capture rows and a dated `### Regenerated 2026-10-07` section; `baseline-carried-migrations.txt` is regenerated from the merge tree; VERSION and package.json 0.126.0.0 → 0.126.0.1.
+- The gates on the composed tree, verbatim: `baseline-currency: carried=286 replay=0 marker-sha=match defects=0`, `baseline-content-drift: functions compared 125 — MATCH 122, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`, `baseline-content-drift: findings 0`.
+
+### Notes
+- The dump was taken read-only by the `redump-dump` job after the `apply` job of Supabase Migrate run `37656080684` succeeded, and this entry was composed by the `redump-pr` job. Run `37656080684` is the provenance anchor.
+- The "what it adds" judgment for each newly carried migration is a human one, so it is left to the reviewer. Every figure above is measured.
+
 ## [0.126.0.0] - 2026-10-07 — BTCNATIVE: an MT5 account denominated in BTC
 
 Phase 164.6.6.2 lets an MT5 account whose deposit currency is BTC produce a strategy. Its returns are

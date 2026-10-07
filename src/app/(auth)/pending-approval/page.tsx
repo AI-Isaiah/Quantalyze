@@ -4,6 +4,7 @@ import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 import { isProfileApproved } from "@/lib/approval";
 import { SignOutButton } from "@/components/auth/SignOutButton";
+import { contactHref } from "@/lib/contact";
 
 /**
  * /pending-approval — task #14 (2026-05-21).
@@ -13,6 +14,9 @@ import { SignOutButton } from "@/components/auth/SignOutButton";
  * gates also redirect any not-yet-verified profile here, so a user who
  * tries to sign in mid-review still gets the same message instead of
  * a 404 / silent dashboard wall.
+ *
+ * Copy honesty (DOMAINONE D-04): no approval email is sent, so the page tells
+ * the applicant to sign back in rather than promising mail.
  *
  * Server-side behaviour:
  *  - No session → /login (no reason to show "your application is being
@@ -73,9 +77,9 @@ export default async function PendingApprovalPage() {
           Thanks for signing up
         </h1>
         <p className="text-sm text-text-muted">
-          Your application is being reviewed. We&rsquo;ll email you as
-          soon as it&rsquo;s approved &mdash; usually within one business
-          day.
+          Your application is being reviewed, usually within one business
+          day. Sign back in to check: once it is approved, signing in takes
+          you into the platform.
         </p>
       </div>
       <div className="rounded-lg border border-border bg-surface p-4 text-left">
@@ -84,20 +88,21 @@ export default async function PendingApprovalPage() {
         </p>
         <ol className="mt-2 space-y-1 text-sm text-text-primary">
           <li>1. A Quantalyze admin reviews your application.</li>
-          <li>2. You receive an email when your account is approved.</li>
-          <li>3. Sign back in to access the platform.</li>
+          <li>2. Sign back in to check whether it has been approved.</li>
+          <li>3. Once it is approved, signing in takes you into the platform.</li>
         </ol>
       </div>
       <div className="flex flex-col items-center gap-3">
         <SignOutButton />
         <p className="text-xs text-text-muted">
-          Questions?{" "}
+          Questions? Use the{" "}
           <Link
-            href="mailto:hello@quantalyze.com"
+            href={contactHref({ topic: "general" })}
             className="text-accent underline"
           >
-            hello@quantalyze.com
+            contact form
           </Link>
+          .
         </p>
       </div>
     </div>

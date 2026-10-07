@@ -183,8 +183,8 @@ export async function trackForQuantsEventServer(
       properties: {
         ...props,
         // M-0487: do NOT fall back to a real domain. PostHog uses $host as the
-        // canonical referrer for funnel attribution; hard-coding "quantalyze.com"
-        // (an unrelated WP site — prod is quantalyze-rho.vercel.app) made
+        // canonical referrer for funnel attribution; hard-coding the unrelated `.com`
+        // domain (a WP site — prod is quantalyze-rho.vercel.app) made
         // preview/missing-env events masquerade as prod traffic. A neutral
         // sentinel keeps them in a clearly-non-prod bucket PostHog can filter.
         $host: process.env.NEXT_PUBLIC_SITE_URL ?? "unknown.local",

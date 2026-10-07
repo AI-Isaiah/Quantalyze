@@ -1,6 +1,11 @@
 const RESEND_API_KEY = Deno.env.get("RESEND_API_KEY") ?? "";
 const ADMIN_EMAIL = Deno.env.get("ADMIN_EMAIL") ?? "";
-const APP_URL = Deno.env.get("APP_URL") ?? "https://quantalyze.vercel.app";
+const APP_URL = Deno.env.get("APP_URL") ?? "https://quantalyze.xyz";
+// D-12 (DOMAINONE, founder): no sender fallback. A default naming a domain we
+// do not own would spoof it, so with no PLATFORM_EMAIL the function answers
+// 503 below, exactly as it does without a Resend key.
+const PLATFORM_NAME = Deno.env.get("PLATFORM_NAME") ?? "Quantalyze";
+const PLATFORM_EMAIL = (Deno.env.get("PLATFORM_EMAIL") ?? "").trim();
 
 Deno.serve(async (req: Request) => {
   if (req.method !== "POST") {
@@ -12,7 +17,7 @@ Deno.serve(async (req: Request) => {
     return new Response("Unauthorized", { status: 401 });
   }
 
-  if (!RESEND_API_KEY || !ADMIN_EMAIL) {
+  if (!RESEND_API_KEY || !ADMIN_EMAIL || !PLATFORM_EMAIL) {
     return new Response(JSON.stringify({ error: "Notification service not configured" }), {
       status: 503,
       headers: { "Content-Type": "application/json" },
@@ -70,7 +75,7 @@ Deno.serve(async (req: Request) => {
       Authorization: `Bearer ${RESEND_API_KEY}`,
     },
     body: JSON.stringify({
-      from: "Quantalyze <notifications@quantalyze.com>",
+      from: `${PLATFORM_NAME} <${PLATFORM_EMAIL}>`,
       to: ADMIN_EMAIL,
       subject,
       html,

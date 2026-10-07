@@ -2591,3 +2591,25 @@ describe("[164.6.5-07 / D-14] ConnectKeyStep — the envelope shows the failed a
     expect(screen.getByText(sentId!)).toBeInTheDocument();
   });
 });
+
+/**
+ * 164.6.6.3.5 DOMAINONE plan 06 / S10 — the trust panel's "Security contact" row
+ * names no address: its sentence points at the contact form, opens it in a new
+ * tab (the wizard holds unsaved state), and files the message under Security.
+ */
+describe("[DOMAINONE S10] ConnectKeyStep — trust panel security contact", () => {
+  it("renders the pointer sentence with a security-topic new-tab link and no address", () => {
+    render(<ConnectKeyStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    const dt = screen.getByText("Security contact");
+    const dd = dt.nextElementSibling as HTMLElement;
+    expect(dd.textContent).toBe(
+      "Questions? Use the contact form (opens in a new tab); we reply within one business day.",
+    );
+    const link = dd.querySelector("a")!;
+    expect(link.textContent).toContain("contact form");
+    expect(link.getAttribute("href")).toBe("/contact?topic=security");
+    expect(link).toHaveAttribute("target", "_blank");
+    expect(link.getAttribute("rel")).toBe("noopener noreferrer");
+    expect(dd.textContent).not.toMatch(/@/);
+  });
+});

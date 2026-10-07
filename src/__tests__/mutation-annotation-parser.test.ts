@@ -1060,7 +1060,8 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
 // ⭐ CURRENCY 2026-10-02 (Phase 164.9.3.2.1 ENQ40001, plan 03): `armsSeen` 553 -> 555 and `stepsSeen` 611 -> 614: the NEW gate test_enqueue_race_loss_40001.sql (2 arms; R1's twin carries two `edit` steps with a `find`, R2's one, 3 file steps). MEASURED: this file's run read `expected 555 to be 553`, then `expected 614 to be 611`.
     // ⭐ CURRENCY 2026-10-02 (Phase 164.9.3.2.1 ENQ40001, review fix WR-01): `armsSeen` 555 -> 556 and `stepsSeen` 614 -> 615: arm R3 in test_enqueue_race_loss_40001.sql, whose twin carries one `edit` step with a `find`. MEASURED: this file's run read `expected 556 to be 555`, then `expected 615 to be 614`.
     // ⭐ CURRENCY 2026-10-03 (Phase 164.5.2.1 BRIDGERESIDUE, plan 05): `armsSeen` 556 -> 574 and `stepsSeen` 615 -> 668: the TWO NEW gates test_sync_status_bridge_residues.sql (16 arms, 49 file steps) and test_sync_status_bridge_lock.sql (2 arms, 4 file steps). MEASURED: this file's run read `expected 574 to be 556` and the needle census below read `expected 668 to be 615`.
-    expect(armsSeen).toBe(574);
+    // ⭐ CURRENCY 2026-10-07 (Phase 164.6.6.3.5 DOMAINONE, plan 03): `armsSeen` 574 -> 578: the NEW gate test_for_quants_leads_contact_dedupe.sql (4 arms, every twin a single `sql` step, so `stepsSeen` is read below).
+    expect(armsSeen).toBe(578);
     expect(stepsSeen).toBe(668);
     // ⚠️ EXPLICIT TIMEOUT, ADDED 2026-09-11 (phase 164.8.6, plan 05) — and it is
     // the FIRST per-test timeout in this suite, so it is a deliberate new shape
@@ -2560,7 +2561,8 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // ⭐ CURRENCY 2026-10-01 (Phase 164.9.3.2 DEFER40001, plan 06): 81 -> 82, the fence-errcode gate file. MEASURED: this file's run read `expected 82 to be 81`, and the full lane run printed `coverage: files 55/82`.
     // ⭐ CURRENCY 2026-10-02 (Phase 164.9.3.2.1 ENQ40001, plan 03): 82 -> 83, the enqueue race-loss gate file. MEASURED: this file's run read `expected 83 to be 82`, and the full lane run printed `coverage: files 56/83` (annotated 56 + pending 0 + unreachable 27 + inert 0 + lane-blocked 0 = 83).
     // ⭐ CURRENCY 2026-10-03 (Phase 164.5.2.1 BRIDGERESIDUE, plan 05): 83 -> 85, the two bridge gate files. MEASURED: this file's run read `expected 85 to be 83`, and the full lane run printed `coverage: files 58/85` (annotated 58 + pending 0 + unreachable 27 + inert 0 + lane-blocked 0 = 85).
-    expect(corpus.filesTotal).toBe(85);
+    // ⭐ CURRENCY 2026-10-07 (Phase 164.6.6.3.5 DOMAINONE, plan 03): 85 -> 86, the contact-dedupe gate file.
+    expect(corpus.filesTotal).toBe(86);
     // ⚠️ CURRENCY 2026-09-05 (plan 164.4.1-03, the SECOND file move): MEASURED
     // `files 42/71`, the other 29 still printed by name (`unreachable:` 27 +
     // `lane-blocked:` 2). The one added is
@@ -2622,7 +2624,8 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // ⭐ CURRENCY 2026-10-01 (Phase 164.9.3.2 DEFER40001, plan 06): 54 -> 55, with the denominator and the by-name list below (test_compute_job_fence_errcode.sql).
     // ⭐ CURRENCY 2026-10-02 (Phase 164.9.3.2.1 ENQ40001, plan 03): 55 -> 56, with the denominator and the by-name list below (test_enqueue_race_loss_40001.sql).
     // ⭐ CURRENCY 2026-10-03 (Phase 164.5.2.1 BRIDGERESIDUE, plan 05): 56 -> 58, with the denominator and the by-name list below (test_sync_status_bridge_lock.sql, test_sync_status_bridge_residues.sql).
-    expect(corpus.filesAnnotated).toBe(58);
+    // ⭐ CURRENCY 2026-10-07 (Phase 164.6.6.3.5 DOMAINONE, plan 03): 58 -> 59 (test_for_quants_leads_contact_dedupe.sql), with the denominator and the by-name list below.
+    expect(corpus.filesAnnotated).toBe(59);
     expect(corpus.annotatedFiles).toEqual([
       "test_allocator_equity_derived_rls.sql",
       "test_allocator_equity_pre_terminus_flag.sql",
@@ -2669,6 +2672,8 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
       "test_derive_allocator_keys_fanout.sql",
       "test_enqueue_compute_job_dedupe_non_terminal.sql",
       "test_enqueue_race_loss_40001.sql",
+      // ⭐ ADDED 2026-10-07 (Phase 164.6.6.3.5 DOMAINONE, plan 03) — the FIFTY-NINTH annotated file: a contact message is never deduplicated, two request_call rows still collide (4 arms).
+      "test_for_quants_leads_contact_dedupe.sql",
       "test_funding_fees_rls.sql",
       "test_get_published_trust_signals.sql",
       "test_get_verified_cohort_rank_gate.sql",
@@ -3123,7 +3128,8 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // ⭐ CURRENCY 2026-10-01 (Phase 164.9.3.2 DEFER40001, plan 06): 81 -> 82, the fence-errcode gate file. MEASURED off the full lane run: annotated 55 + pending 0 + unreachable 27 + inert 0 + lane-blocked 0 = 82.
     // ⭐ CURRENCY 2026-10-02 (Phase 164.9.3.2.1 ENQ40001, plan 03): 82 -> 83, the enqueue race-loss gate file. MEASURED: this file's run read `expected 83 to be 82`, and the full lane run printed `coverage: files 56/83` (annotated 56 + pending 0 + unreachable 27 + inert 0 + lane-blocked 0 = 83).
     // ⭐ CURRENCY 2026-10-03 (Phase 164.5.2.1 BRIDGERESIDUE, plan 05): 83 -> 85, the two bridge gate files. MEASURED: this file's run read `expected 85 to be 83`, and the full lane run printed `coverage: files 58/85` (annotated 58 + pending 0 + unreachable 27 + inert 0 + lane-blocked 0 = 85).
-    expect(corpus.filesTotal).toBe(85);
+    // ⭐ CURRENCY 2026-10-07 (Phase 164.6.6.3.5 DOMAINONE, plan 03): 85 -> 86, the contact-dedupe gate file.
+    expect(corpus.filesTotal).toBe(86);
     expect(corpus.laneBlockedFiles).toHaveLength(0);
     // ⛔ A LENGTH beside an AIM, not instead of one. `toHaveLength(0)` on a class
     // that stopped being computed is indistinguishable from `toHaveLength(0)` on
@@ -3141,7 +3147,8 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // ⭐ CURRENCY 2026-10-01 (Phase 164.9.3.2 DEFER40001, plan 06): 54 -> 55 (test_compute_job_fence_errcode.sql).
     // ⭐ CURRENCY 2026-10-02 (Phase 164.9.3.2.1 ENQ40001, plan 03): 55 -> 56 (test_enqueue_race_loss_40001.sql).
     // ⭐ CURRENCY 2026-10-03 (Phase 164.5.2.1 BRIDGERESIDUE, plan 05): 56 -> 58 (test_sync_status_bridge_lock.sql, test_sync_status_bridge_residues.sql).
-    expect(corpus.annotatedFiles).toHaveLength(58);
+    // ⭐ CURRENCY 2026-10-07 (Phase 164.6.6.3.5 DOMAINONE, plan 03): 58 -> 59 (test_for_quants_leads_contact_dedupe.sql).
+    expect(corpus.annotatedFiles).toHaveLength(59);
   });
 
   it("the five classes PARTITION the corpus, checked against an INDEPENDENT derivation", () => {

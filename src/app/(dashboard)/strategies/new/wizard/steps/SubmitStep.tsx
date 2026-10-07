@@ -829,6 +829,7 @@ export function SubmitStep({
         <div className="mt-4">
           <WizardErrorEnvelope
             envelope={errorEnvelope}
+            contactDraftId={strategyId}
             onRetry={() => setErrorCode(null)}
           />
         </div>

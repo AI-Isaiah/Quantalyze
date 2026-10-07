@@ -4,6 +4,7 @@ import { getPopulatedCategorySlugs } from "@/lib/queries";
 import { createClient } from "@/lib/supabase/server";
 import { isAdminUser } from "@/lib/admin";
 import { isProfileApproved } from "@/lib/approval";
+import { countUnprocessedForQuantsLeads } from "@/lib/for-quants-leads-admin";
 
 export default async function DashboardLayout({
   children,
@@ -72,6 +73,22 @@ export default async function DashboardLayout({
     }
   }
 
+  // D-17: the admin sidebar's unread badge on "For-quants leads". Read ONLY
+  // here, after `isAdmin` is final, so a non-admin never triggers the
+  // service-role read. Three values, all typed:
+  //   number     = measured (0 draws nothing)
+  //   null       = an admin whose read FAILED (the helper logged and reported
+  //                it); the sidebar draws a neutral "?" so a failed read is
+  //                never mistaken for "nothing waiting"
+  //   undefined  = not an admin, nothing to show, no read made
+  // A layout is not re-rendered on soft navigation, so the number refreshes on
+  // a full load or `router.refresh()`; the leads table calls it after every
+  // process/unprocess toggle.
+  let unprocessedLeadsCount: number | null | undefined;
+  if (isAdmin) {
+    unprocessedLeadsCount = await countUnprocessedForQuantsLeads();
+  }
+
   let populatedSlugs: string[] | undefined;
   try {
     const result = await getPopulatedCategorySlugs();
@@ -91,6 +108,7 @@ export default async function DashboardLayout({
       isAdmin={isAdmin}
       isAllocator={isAllocator}
       isManager={isManager}
+      unprocessedLeadsCount={unprocessedLeadsCount}
     >
       {children}
     </DashboardChrome>

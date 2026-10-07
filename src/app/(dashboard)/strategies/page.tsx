@@ -43,6 +43,8 @@ import {
 import { withPublishedOrOwner } from "@/lib/visibility";
 import { PendingIntros } from "@/components/strategy/PendingIntros";
 import Link from "next/link";
+import { ContactPointerText } from "@/components/contact/ContactPointerText";
+import { contactHref } from "@/lib/contact";
 import { redirect } from "next/navigation";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
@@ -892,7 +894,12 @@ export default async function StrategiesPage() {
                         data-testid="strategy-row-share-note"
                         className="text-xs text-text-muted"
                       >
-                        {shareNote}
+                        {/* AD-05: the note's "contact form" phrase links the
+                            support topic with this row's strategy id. */}
+                        <ContactPointerText
+                          text={shareNote}
+                          href={contactHref({ topic: "support", strategy: s.id })}
+                        />
                       </p>
                     )}
                   </div>

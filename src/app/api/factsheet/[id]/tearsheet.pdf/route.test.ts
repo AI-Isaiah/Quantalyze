@@ -171,7 +171,7 @@ describe("GET /api/factsheet/[id]/tearsheet.pdf — SSRF + UUID validation (C-00
   it("C-0092: non-UUID id returns 400 without launching puppeteer or hitting Supabase", async () => {
     const { GET } = await import("./route");
     const req = new NextRequest(
-      "https://quantalyze.com/api/factsheet/not-a-uuid/tearsheet.pdf",
+      "https://quantalyze.xyz/api/factsheet/not-a-uuid/tearsheet.pdf",
       { method: "GET" },
     );
     const res = await GET(req, mkParams("not-a-uuid"));
@@ -191,7 +191,7 @@ describe("GET /api/factsheet/[id]/tearsheet.pdf — SSRF + UUID validation (C-00
     const { GET } = await import("./route");
     const attackerId = "../../api/admin/users";
     const req = new NextRequest(
-      `https://quantalyze.com/api/factsheet/${encodeURIComponent(attackerId)}/tearsheet.pdf`,
+      `https://quantalyze.xyz/api/factsheet/${encodeURIComponent(attackerId)}/tearsheet.pdf`,
       { method: "GET" },
     );
     const res = await GET(req, mkParams(attackerId));
@@ -228,6 +228,42 @@ describe("GET /api/factsheet/[id]/tearsheet.pdf — SSRF + UUID validation (C-00
     expect(goto.mock.calls[0][0]).toBe(
       `https://quantalyze-rho.vercel.app/factsheet/${STRATEGY_ID}/tearsheet`,
     );
+  });
+
+  it("C-0092: production VERCEL_ENV accepts quantalyze.xyz, the canonical host (positive control, D-06)", async () => {
+    // PROD's NEXT_PUBLIC_APP_URL is https://quantalyze.xyz and the rho alias
+    // now 308s to it, so every production tearsheet request arrives here.
+    process.env.VERCEL_ENV = "production";
+    const { GET } = await import("./route");
+    const req = new NextRequest(
+      `https://quantalyze.xyz/api/factsheet/${STRATEGY_ID}/tearsheet.pdf`,
+      { method: "GET" },
+    );
+    const res = await GET(req, mkParams());
+    expect(res.status).toBe(200);
+    expect(goto).toHaveBeenCalledTimes(1);
+    expect(goto.mock.calls[0][0]).toBe(
+      `https://quantalyze.xyz/factsheet/${STRATEGY_ID}/tearsheet`,
+    );
+  });
+
+  it("C-0092: production VERCEL_ENV REFUSES the retired third-party .com hosts (negative control, D-06)", async () => {
+    // The old .com domain belongs to an unrelated third party. Host built
+    // from parts so no retired-domain literal appears in the source.
+    process.env.VERCEL_ENV = "production";
+    const { GET } = await import("./route");
+    for (const host of [
+      ["quantalyze", "com"].join("."),
+      ["www", "quantalyze", "com"].join("."),
+    ]) {
+      const req = new NextRequest(
+        `https://${host}/api/factsheet/${STRATEGY_ID}/tearsheet.pdf`,
+        { method: "GET" },
+      );
+      const res = await GET(req, mkParams());
+      expect(res.status).toBe(500);
+    }
+    expect(goto).not.toHaveBeenCalled();
   });
 
   it("C-0092: production VERCEL_ENV accepts VERCEL_URL for preview-branch deploys", async () => {
@@ -325,7 +361,7 @@ describe("GET /api/factsheet/[id]/tearsheet.pdf — Cache-Control + Vary (C-0093
     // to a few minutes.
     const { GET } = await import("./route");
     const req = new NextRequest(
-      `https://quantalyze.com/api/factsheet/${STRATEGY_ID}/tearsheet.pdf`,
+      `https://quantalyze.xyz/api/factsheet/${STRATEGY_ID}/tearsheet.pdf`,
       { method: "GET" },
     );
     const res = await GET(req, mkParams());
@@ -349,7 +385,7 @@ describe("GET /api/factsheet/[id]/tearsheet.pdf — Cache-Control + Vary (C-0093
     // is the structural defense.
     const { GET } = await import("./route");
     const req = new NextRequest(
-      `https://quantalyze.com/api/factsheet/${STRATEGY_ID}/tearsheet.pdf`,
+      `https://quantalyze.xyz/api/factsheet/${STRATEGY_ID}/tearsheet.pdf`,
       { method: "GET" },
     );
     const res = await GET(req, mkParams());
@@ -371,7 +407,7 @@ describe("GET /api/factsheet/[id]/tearsheet.pdf — Cache-Control + Vary (C-0093
     // serve a preview-aliased PDF to a production-aliased request.
     const { GET } = await import("./route");
     const req = new NextRequest(
-      `https://quantalyze.com/api/factsheet/${STRATEGY_ID}/tearsheet.pdf`,
+      `https://quantalyze.xyz/api/factsheet/${STRATEGY_ID}/tearsheet.pdf`,
       { method: "GET" },
     );
     const res = await GET(req, mkParams());

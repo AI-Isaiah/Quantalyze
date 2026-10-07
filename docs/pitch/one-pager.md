@@ -107,5 +107,5 @@ first conversation.
 
 ## Contact
 
-Founder email: [founder@quantalyze.com]
-Platform: https://quantalyze.com
+Contact: the contact form at https://quantalyze.xyz/contact
+Platform: https://quantalyze.xyz

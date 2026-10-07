@@ -11248,6 +11248,9 @@ CREATE TABLE IF NOT EXISTS "public"."api_keys" (
     "account_shared_with_api_key_id" "uuid",
     "account_share_kind" "text",
     "history_inclusion" "text",
+    "account_currency" "text",
+    "account_balance_native" numeric,
+    CONSTRAINT "api_keys_account_currency_code" CHECK ((("account_currency" IS NULL) OR ("account_currency" ~ '^[A-Z]{2,10}$'::"text"))),
     CONSTRAINT "api_keys_account_share_both_or_neither" CHECK ((("account_shared_with_api_key_id" IS NULL) = ("account_share_kind" IS NULL))),
     CONSTRAINT "api_keys_account_share_kind_valid" CHECK ((("account_share_kind" IS NULL) OR ("account_share_kind" = ANY (ARRAY['duplicate'::"text", 'composite_member'::"text"])))),
     CONSTRAINT "api_keys_account_share_not_self" CHECK ((("account_shared_with_api_key_id" IS NULL) OR ("account_shared_with_api_key_id" <> "id"))),
@@ -11315,6 +11318,14 @@ COMMENT ON COLUMN "public"."api_keys"."account_share_kind" IS 'Phase 167.1.2 D-1
 
 
 COMMENT ON COLUMN "public"."api_keys"."history_inclusion" IS 'Phase 167.1.2 D-05 / D-09. Whether a DEPARTED key''s history counts in the allocator''s rebuilt equity series. Departed means soft-disconnected (disconnected_at set) or credential-revoked (sync_status = ''revoked''). Under D-18 (founder, 2026-09-27) a key that is still connected (disconnected_at NULL) and is is_active false, or whose last sync was sign_in_failed or error, is also departed, but FOR THIS COLUMN ONLY in the sense that its owner MAY record an include/exclude choice for it through set_departed_key_history_inclusion. How the allocator''s history rebuild treats such a still-connected inactive, sign_in_failed or error key is NOT decided by this migration: whether it counts as departed for the rebuild at all, whether the unknown-identity default-exclude applies to it, and what its end day is. That is owned by the Phase 167.1.2 C2 replan of plans 05 and 10 and the C4 replan of plan 09; until it lands, this column states no default for such a key. The END DAY and NULL default rules that follow apply to disconnected and revoked keys, exactly as before. The history runs up to the key''s END DAY, never past it: the UTC day of disconnected_at, or for a revoked key its last returns day. NULL = the default rule: included up to the end day, UNLESS the key''s account identity is unknown (venue_account_id NULL), in which case it is excluded by default, because an unknown account could be one a counted key already reads and would be summed twice (founder-confirmed 2026-09-25). ''include'' / ''exclude'' = the owner''s explicit choice; ''include'' overrides only the unknown-identity default and never re-opens days on which another counted key holds the same known account. Written only by set_departed_key_history_inclusion, and RESET to NULL by reconnect_allocator_api_key: a choice made for one departure never carries over to a later one. That contract binds EVERY path that returns a departed key to live, not only the reconnect RPC. A REVOKED key (disconnected_at NULL) comes back through the rotate-secret route''s service-role update (sync_status back to idle), which must reset this column to NULL in the same write. Adding that reset to the route is owned by Phase 167.1.2 plan 09 (PR C4); until it lands, a choice made while a key was revoked carries over to its next revocation. A key that departed by failing or by is_active false and recovers on an ordinary worker tick passes no reset path, so resetting the choice on recovery is owned by Phase 167.1.2 plan 09 (PR C4), which also ships the only product caller of set_departed_key_history_inclusion; until it lands, no product path stores such a choice.';
+
+
+
+COMMENT ON COLUMN "public"."api_keys"."account_currency" IS 'Phase 164.6.6.2 D-02. The account''s own currency code as the MT5 gateway reports it (upper-case, 2 to 10 letters; api_keys_account_currency_code), e.g. USD or BTC. Written only by the analytics worker''s derive (service role); no client INSERT or UPDATE path exists. NULL is NORMAL: every non-MT5 key, and an MT5 key before its first post-deploy derive. A later read that disagrees with a stored value is refused by the worker (D-03), never silently re-denominated. Deliberately UN-GRANTED to anon and authenticated (20260410225608 column-revoke model); nothing user-scoped reads it.';
+
+
+
+COMMENT ON COLUMN "public"."api_keys"."account_balance_native" IS 'Phase 164.6.6.2 D-14. The account''s live equity in account_currency units (e.g. a BTC amount for a BTC-denominated account), written only by the analytics worker''s derive (service role). A USD-family key leaves this NULL and account_balance_usdt stays the USD figure: a non-USD amount is never written into account_balance_usdt. NULL is NORMAL for every non-MT5 key and for an MT5 key before its first post-deploy derive. Deliberately UN-GRANTED to anon and authenticated (a live balance); nothing user-scoped reads it.';
 
 
 
@@ -11915,7 +11926,13 @@ CREATE TABLE IF NOT EXISTS "public"."for_quants_leads" (
     "wizard_context" "jsonb",
     "notify_attempted_at" timestamp with time zone,
     "notify_succeeded_at" timestamp with time zone,
-    "notify_error" "text"
+    "notify_error" "text",
+    "source" "text" DEFAULT 'request_call'::"text" NOT NULL,
+    "topic" "text",
+    "reference" "text",
+    CONSTRAINT "for_quants_leads_reference_len_check" CHECK ((("reference" IS NULL) OR ("char_length"("reference") <= 200))),
+    CONSTRAINT "for_quants_leads_source_check" CHECK (("source" = ANY (ARRAY['request_call'::"text", 'contact_form'::"text"]))),
+    CONSTRAINT "for_quants_leads_topic_check" CHECK ((("topic" IS NULL) OR ("topic" = ANY (ARRAY['general'::"text", 'support'::"text", 'security'::"text", 'privacy'::"text"]))))
 );
 
 
@@ -11947,6 +11964,18 @@ COMMENT ON COLUMN "public"."for_quants_leads"."notify_succeeded_at" IS 'Timestam
 
 
 COMMENT ON COLUMN "public"."for_quants_leads"."notify_error" IS 'Sanitized error message (max 500 chars) when notifyFounderGeneric threw OR ADMIN_EMAIL was unset. NULL on clean sends.';
+
+
+
+COMMENT ON COLUMN "public"."for_quants_leads"."source" IS 'Which form wrote the row: request_call (the /for-quants Request-a-call modal; deduplicated per email per UTC day) or contact_form (the /contact form; never deduplicated). DEFAULT request_call so a writer that omits it stays a request_call writer. Phase 164.6.6.3.5 DOMAINONE.';
+
+
+
+COMMENT ON COLUMN "public"."for_quants_leads"."topic" IS 'Contact-form topic (general, support, security, privacy). NULL for request_call rows. Mirrors CONTACT_TOPICS in src/lib/contact.ts; a parity test pins the two lists.';
+
+
+
+COMMENT ON COLUMN "public"."for_quants_leads"."reference" IS 'Contact-form pointer text: the strategy / draft / ref ids a page link carried, composed by parseContactPrefill in src/lib/contact.ts. NULL when none. At most 200 characters.';
 
 
 
@@ -13614,11 +13643,11 @@ CREATE INDEX "for_quants_leads_created_at_idx" ON "public"."for_quants_leads" US
 
 
 
-CREATE UNIQUE INDEX "for_quants_leads_email_day_uniq" ON "public"."for_quants_leads" USING "btree" ("lower"("email"), ((("created_at" AT TIME ZONE 'UTC'::"text"))::"date"));
+CREATE UNIQUE INDEX "for_quants_leads_email_day_uniq" ON "public"."for_quants_leads" USING "btree" ("lower"("email"), ((("created_at" AT TIME ZONE 'UTC'::"text"))::"date")) WHERE ("source" = 'request_call'::"text");
 
 
 
-COMMENT ON INDEX "public"."for_quants_leads_email_day_uniq" IS 'M-0324: dedups same-email same-UTC-day lead submissions, collapsing network-retry / double-submit duplicate rows and duplicate founder emails. Day key uses AT TIME ZONE UTC for immutability; lower(email) is defensive.';
+COMMENT ON INDEX "public"."for_quants_leads_email_day_uniq" IS 'M-0324, re-scoped by 164.6.6.3.5: dedups same-email same-UTC-day request_call submissions, collapsing network-retry / double-submit duplicate rows and duplicate founder emails. contact_form rows are outside the index on purpose: a contact message is never deduplicated. Day key uses AT TIME ZONE UTC for immutability; lower(email) is defensive.';
 
 
 
