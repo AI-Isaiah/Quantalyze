@@ -16,7 +16,7 @@
  *   (c) WIZARD_DUPLICATE on a 200 surfaces the duplicate code,
  *   (d) 2xx success calls onSubmitted with no wizard_error.
  */
-import { render, screen, fireEvent } from "@testing-library/react";
+import { render, screen, fireEvent, within } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { SubmitStep, FIELD_BY_CODE } from "./SubmitStep";
 import { WIZARD_ERROR_COPY, type WizardErrorCode } from "@/lib/wizardErrors";
@@ -1528,6 +1528,21 @@ describe("[153.2-05] the envelope names its venue and its surface", () => {
     // shorter list would also satisfy the absence assertion alone, and D-17
     // asks for a true sentence, not for silence.
     expect(screen.getByText(bullet(NO_OTHER_VENUE_BULLET))).toBeInTheDocument();
+  });
+
+  it("[DOMAINONE D-02] the contact pointer carries the draft id SubmitStep holds, in a new tab", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse({ code: "KEY_NETWORK_TIMEOUT", error: "probe failed" }, 502),
+    );
+    renderOnVenue("mt5");
+    fireEvent.click(screen.getByTestId("wizard-submit-for-review"));
+
+    const envelope = await screen.findByTestId("error-envelope");
+    // renderOnVenue mounts strategyId="strat-1". The pointer must exist first.
+    const link = within(envelope).getByRole("link", { name: /contact form/ });
+    expect(link.getAttribute("href")).toMatch(/^\/contact\?topic=support&ref=/);
+    expect(link.getAttribute("href")).toContain("&draft=strat-1");
+    expect(link).toHaveAttribute("target", "_blank");
   });
 
   it("CONTROL — a ccxt venue keeps the incumbent copy byte-for-byte", async () => {
