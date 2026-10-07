@@ -70,6 +70,20 @@ def _zeros_like(leg: pd.Series) -> pd.Series:
     return pd.Series(0.0, index=leg.index, name=leg.name)
 
 
+def _stored_curve(returns: pd.Series) -> list[dict[str, object]]:
+    """The stored SHAPE of ``returns`` (Phase 164.6.6.2.2): the cumulative wealth
+    curve, with a level-1.0 base day one calendar day before the first return so
+    reading it back through ``daily_returns_from_row`` yields ``returns`` on every
+    one of its own dates. For a NAV constant-yield leg the read-back is the same
+    ``w_k / w_{k-1} - 1`` the platform takes, so the ~1e-16 residue the dispersion
+    floor is built for survives the round trip."""
+    base = (returns.index[0] - pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+    return curve_from_returns(
+        [0.0] + [float(v) for v in returns],
+        [base] + [d.strftime("%Y-%m-%d") for d in returns.index],
+    )
+
+
 # ---------------------------------------------------------------------------
 # The two helpers in services/dispersion.py
 # ---------------------------------------------------------------------------
@@ -600,12 +614,23 @@ def test_c7_a_near_identical_noisy_candidate_still_matches() -> None:
 
 
 class _Query:
-    """``table(...).select(...).eq/in_(...).limit(...).execute()`` over fixed rows."""
+    """``table(...).select(...).eq/in_(...).limit(...).execute()`` over fixed rows.
 
-    def __init__(self, data: list[dict[str, object]]) -> None:
+    Column-strict (tests/_schema_columns.py): a select naming a column the real
+    table lacks raises, as PostgREST would refuse it. ``selected`` records every
+    select string so a test can assert the boundary's columns are really read.
+    """
+
+    def __init__(
+        self, table: str, data: list[dict[str, object]], selected: list[str]
+    ) -> None:
+        self._table = table
         self._data = data
+        self._selected = selected
 
-    def select(self, *_a: object, **_k: object) -> "_Query":
+    def select(self, columns: str = "*", *_a: object, **_k: object) -> "_Query":
+        assert_select_columns(self._table, columns)
+        self._selected.append(f"{self._table}: {columns}")
         return self
 
     def eq(self, *_a: object, **_k: object) -> "_Query":
@@ -622,28 +647,51 @@ class _Query:
 
 
 class _StubClient:
-    def __init__(self, candidates: dict[str, pd.Series]) -> None:
-        self._published = [{"id": sid} for sid in candidates]
-        self._analytics = [
+    """``candidates`` are daily-return series stored in the real shape (a curve);
+    ``stored_levels`` are written to ``returns_series`` verbatim, for a candidate
+    whose stored LEVELS are not the curve of its returns."""
+
+    def __init__(
+        self,
+        candidates: dict[str, pd.Series],
+        stored_levels: dict[str, pd.Series] | None = None,
+    ) -> None:
+        levels = stored_levels or {}
+        self._published = [{"id": sid} for sid in [*candidates, *levels]]
+        self._analytics: list[dict[str, object]] = [
+            {"strategy_id": sid, "returns_series": _stored_curve(s)}
+            for sid, s in candidates.items()
+        ]
+        self._analytics += [
             {
                 "strategy_id": sid,
                 "returns_series": [
                     {"date": d.strftime("%Y-%m-%d"), "value": float(v)} for d, v in s.items()
                 ],
             }
-            for sid, s in candidates.items()
+            for sid, s in levels.items()
         ]
+        self.selected: list[str] = []
 
     def table(self, name: str) -> _Query:
-        return _Query(self._published if name == "strategies" else self._analytics)
+        return _Query(
+            name,
+            self._published if name == "strategies" else self._analytics,
+            self.selected,
+        )
 
 
-def _c8(target: pd.Series, candidates: dict[str, pd.Series], caplog: pytest.LogCaptureFixture) -> str | None:
+def _c8(
+    target: pd.Series,
+    candidates: dict[str, pd.Series],
+    caplog: pytest.LogCaptureFixture,
+    stored_levels: dict[str, pd.Series] | None = None,
+) -> str | None:
     caplog.clear()
     caplog.set_level(logging.DEBUG, logger="quantalyze.analytics")
     target = target.copy()
     target.index = pd.DatetimeIndex(target.index.strftime("%Y-%m-%d"))
-    return find_matched_strategy(target, _StubClient(candidates))
+    return find_matched_strategy(target, _StubClient(candidates, stored_levels))
 
 
 def _matching_failed_lines(caplog: pytest.LogCaptureFixture) -> list[str]:
@@ -707,6 +755,55 @@ def test_c8_a_near_identical_noisy_candidate_still_matches(caplog: pytest.LogCap
     near = target + _noise(idx, seed=84, scale=0.0005)
     candidates = {"near": near, "other": _noise(idx, seed=85), "yield": _residue_leg("daily_1e-4")}
     assert _c8(target, candidates, caplog) == "near"
+
+
+def test_c8_a_candidate_stored_as_a_curve_of_the_targets_daily_returns_matches(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Phase 164.6.6.2.2 (D-06) tracer: the published strategy is stored the way the
+    worker stores it (a cumulative curve), and its DAILY RETURNS equal the target's.
+    The matcher compares returns with returns, so it is the match. Read as levels
+    (the CR-01 defect) a curve near 1.0 does not correlate with returns near 0."""
+    idx = nav_constant_yield(1e-4).index
+    target = _noise(idx, seed=87)
+    candidates = {"same": target.copy(), "other": _noise(idx, seed=88)}
+    assert _c8(target, candidates, caplog) == "same"
+    assert _matching_failed_lines(caplog) == []
+
+
+def test_c8_a_candidate_whose_curve_levels_track_the_target_but_whose_returns_do_not_is_not_matched(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """D-06 negative (T-164.6.6.2.2-14): a return-shaped series stored where a curve
+    belongs, so its LEVELS (1 + target_k) track the target's returns exactly. The
+    daily returns derived from those levels are the one-day change in the target
+    over its previous level, which for independent daily noise correlates with the
+    target at about 1/sqrt(2), well under the 0.95 threshold. Correlating levels
+    against returns would report a duplicate; correlating returns with returns must
+    not. Both numbers are asserted as preconditions so the test cannot pass by
+    accident of the fixture."""
+    idx = nav_constant_yield(1e-4).index
+    target = _noise(idx, seed=89)
+    levels = 1.0 + target
+    assert float(levels.corr(target)) > 0.999, "precondition: the stored levels track the target"
+    derived = (levels / levels.shift(1) - 1.0).dropna()
+    derived_corr = float(derived.corr(target.reindex(derived.index)))
+    assert derived_corr < 0.95, f"precondition: derived returns must not track (got {derived_corr})"
+    assert _c8(target, {}, caplog, stored_levels={"levels_track": levels}) is None
+    assert _matching_failed_lines(caplog) == []
+
+
+def test_c8_reads_the_daily_returns_and_flags_columns_of_the_candidates() -> None:
+    """The boundary needs ``daily_returns`` (D-02 order) and ``data_quality_flags``
+    (the curve's cumulative method) off the same row: the select names both, and the
+    column-strict stub proves they are real columns."""
+    idx = nav_constant_yield(1e-4).index
+    stub = _StubClient({"same": _noise(idx, seed=90)})
+    find_matched_strategy(_noise(idx, seed=90), stub)
+    analytics_selects = [c for c in stub.selected if c.startswith("strategy_analytics: ")]
+    assert len(analytics_selects) == 1
+    for column in ("strategy_id", "returns_series", "daily_returns", "data_quality_flags"):
+        assert column in analytics_selects[0], column
 
 
 def test_c8_a_real_failure_still_logs_matching_failed(caplog: pytest.LogCaptureFixture) -> None:
