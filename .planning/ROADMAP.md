@@ -3039,6 +3039,7 @@ that is briefly busy (an owed scrub or a held lease), and for a fresh account wh
 settled, each with its own wire code and copy, pinned by tests.
 **Requirements**: none in REQUIREMENTS.md; the items above are the spec.
 **Depends on:** Phase 164.6.6.3 (it emits the history-not-ready `error_kind` this phase words)
+**Orchestrator note 2026-10-07 (after plan check):** D-03's backfill carrier `_MT5_BACKFILL_MESSAGES["history_unsettled"]` is excluded from the wizard surface: nothing in `src/` reads it, so it stays operator-side (recorded in `164.6.6.3.2-CONTEXT.md`). The derive carrier is stamped on the final attempt only (D-06, founder C2).
 **Plans:** 4 plans
 
 Plans:
