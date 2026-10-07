@@ -431,42 +431,55 @@ class TestGatewayTimeoutCalibration:
 
 
 # ---------------------------------------------------------------------------
-# M-0606 — routers/match.py _records_to_series
+# M-0606 — the record parser the match loaders read through
 # ---------------------------------------------------------------------------
+#
+# 164.6.6.2.2 (D-01): the router's own copy `_records_to_series` is gone. The loaders
+# read a stored row through `services.wealth_returns.daily_returns_from_row`, whose
+# parser is `records_to_series`. The M-0606 / M-0604 cases below keep their inputs and
+# their expectations and now exercise that shared parser.
 
 
 class TestRecordsToSeries:
-    """M-0606 / M-0604 — ``_records_to_series`` converts [{date,value},...]
-    JSONB into a DatetimeIndex pd.Series. It is the only adapter feeding
-    ``_load_candidate_universe`` across the whole strategy universe. The
-    `if not isinstance(raw, list) or not raw` guard handles None/empty/
-    non-list; M-0604 added per-row defensiveness so a malformed JSONB row
-    (missing 'date'/'value' or non-dict) is SKIPPED + logged rather than
-    raising KeyError and aborting the entire cron for that allocator.
+    """M-0606 / M-0604 — ``records_to_series`` converts [{date,value},...]
+    JSONB into a DatetimeIndex pd.Series. It is the only parser feeding
+    ``_load_candidate_universe`` and ``_load_allocator_context`` across the whole
+    strategy universe. The `if not isinstance(raw, list) or not raw` guard handles
+    None/empty/non-list; M-0604 added per-row defensiveness so a malformed JSONB row
+    (missing 'date'/'value' or non-dict) is SKIPPED + logged rather than raising
+    KeyError and aborting the entire cron for that allocator.
     """
 
-    def test_none_returns_none(self):
-        from routers.match import _records_to_series
+    def test_the_router_defines_no_parser_copy(self):
+        from routers import match as match_mod
 
-        assert _records_to_series(None) is None
+        assert not hasattr(match_mod, "_records_to_series"), (
+            "the match router must read a stored row through the shared boundary, "
+            "not through a private parser copy"
+        )
+
+    def test_none_returns_none(self):
+        from services.wealth_returns import records_to_series
+
+        assert records_to_series(None) is None
 
     def test_empty_list_returns_none(self):
-        from routers.match import _records_to_series
+        from services.wealth_returns import records_to_series
 
-        assert _records_to_series([]) is None
+        assert records_to_series([]) is None
 
     def test_non_list_returns_none(self):
-        from routers.match import _records_to_series
+        from services.wealth_returns import records_to_series
 
         # A dict / scalar from storage drift hits the `not isinstance(list)`
         # half of the guard rather than crashing the comprehension.
-        assert _records_to_series({"date": "2026-01-01", "value": 0.01}) is None  # type: ignore[arg-type]
+        assert records_to_series({"date": "2026-01-01", "value": 0.01}) is None
 
     def test_valid_records_build_datetime_index_series(self):
-        from routers.match import _records_to_series
+        from services.wealth_returns import records_to_series
         import pandas as pd
 
-        series = _records_to_series(
+        series = records_to_series(
             [
                 {"date": "2026-01-01", "value": 0.01},
                 {"date": "2026-01-02", "value": -0.005},
@@ -488,10 +501,10 @@ class TestRecordsToSeries:
         """
         import logging
         import pandas as pd
-        from routers.match import _records_to_series
+        from services.wealth_returns import records_to_series
 
         with caplog.at_level(logging.WARNING, logger="quantalyze.analytics"):
-            series = _records_to_series(
+            series = records_to_series(
                 [
                     {"date": "2026-01-01", "value": 0.01},
                     {"value": 0.02},  # missing 'date' — must be skipped
@@ -502,17 +515,20 @@ class TestRecordsToSeries:
         assert series is not None
         assert isinstance(series.index, pd.DatetimeIndex)
         assert list(series.values) == [0.01, 0.03], "only the valid rows survive"
-        assert any("dropped" in r.message for r in caplog.records), (
-            "a WARNING must be logged for the dropped malformed record"
-        )
+        # The shared parser's wording is "skipped N malformed records" (the old
+        # router copy said "dropped"); the contract, a WARNING naming the series,
+        # is unchanged.
+        assert any(
+            "skipped" in r.message and "strat-skip" in r.message for r in caplog.records
+        ), "a WARNING must be logged for the skipped malformed record"
 
     def test_all_malformed_rows_returns_none(self):
         """M-0604: when EVERY record is malformed, return None (treat as
         missing-returns, which the engine handles) rather than raising or
         building an empty Series."""
-        from routers.match import _records_to_series
+        from services.wealth_returns import records_to_series
 
-        assert _records_to_series([{"value": 0.01}, {"date": "2026-01-01"}]) is None
+        assert records_to_series([{"value": 0.01}, {"date": "2026-01-01"}]) is None
 
 
 # ---------------------------------------------------------------------------

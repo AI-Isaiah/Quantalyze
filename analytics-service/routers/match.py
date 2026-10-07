@@ -250,47 +250,6 @@ class RecomputeRequest(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-def _records_to_series(raw: list[Any] | None, name: str = "") -> pd.Series | None:
-    """Convert [{date, value}, ...] JSONB records to a DatetimeIndex pd.Series.
-
-    M-0604: ``returns_series`` is JSONB written by the analytics worker. A
-    single record missing ``date`` or ``value`` (legacy schema, partial
-    backfill, manual SQL fixup) must NOT crash the whole batch — the unguarded
-    ``r["date"]`` comprehension used to raise KeyError, propagate through
-    ``_load_candidate_universe`` / ``_load_allocator_context`` →
-    ``_score_one_allocator`` → ``recompute()`` and 500 the entire cron for
-    every allocator that touched the offending strategy. Skip malformed records
-    with a WARNING and continue; return None (treat as missing-returns, which
-    the engine handles via _compute_portfolio_fit_components) when no usable
-    record survives.
-    """
-    if not isinstance(raw, list) or not raw:
-        return None
-    dates: list[Any] = []
-    vals: list[Any] = []
-    dropped = 0
-    for r in raw:
-        if not isinstance(r, dict):
-            dropped += 1
-            continue
-        d = r.get("date")
-        v = r.get("value")
-        if d is None or v is None:
-            dropped += 1
-            continue
-        dates.append(d)
-        vals.append(v)
-    if dropped:
-        logger.warning(
-            "match: _records_to_series dropped %d/%d malformed record(s) for %s "
-            "(missing 'date'/'value' or non-dict)",
-            dropped, len(raw), name or "<unnamed>",
-        )
-    if not dates:
-        return None
-    return pd.Series(vals, index=pd.DatetimeIndex(dates), name=name)
-
-
 def _parse_supabase_ts(raw: str) -> datetime:
     """Parse a Supabase ISO timestamp/date string into a tz-aware UTC datetime.
 
