@@ -4681,10 +4681,18 @@ version-2 `equity_curve` row and My Allocation leaves "being rebuilt".
 **Founder decisions 2026-10-07 (after research):** FLIP Step 4 (E2GT-01) waived as a pre-gate; one manual fan-out rehearsal before registering; okx bound hits do not hold the cron (booked follow-up); backfill staleness alarm routed to OUTAGEALERT. Detail: `167.1.2.2-CONTEXT.md` D-07..D-10.
 **Requirements**: TBD
 **Depends on:** Phase 167.1.2
-**Plans:** 0 plans
+**Plans:** 9 plans (04 and 05 conditional on the rehearsal showing reclaims)
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 167.1.2.2 to break down)
+- [ ] 167.1.2.2-01-PLAN.md — the derivecron runbook with its PROD statement forms proven read-only (tracer); dated FLIP runbook notes (D-04, D-07)
+- [ ] 167.1.2.2-02-PLAN.md — the D-08 rehearsal: one manual fan-out on PROD, watched to drain, per-venue readings and a verdict
+- [ ] 167.1.2.2-03-PLAN.md — D-05 lineage notes in ROADMAP and TODOS; D-10 staleness alarm booked to OUTAGEALERT; MT5 cross-service contention booked
+- [ ] 167.1.2.2-04-PLAN.md — CONDITIONAL (verdict RECLAIMS): backfill-role claim batch of 1, shipped and deployed
+- [ ] 167.1.2.2-05-PLAN.md — CONDITIONAL (plan 04 taken): re-rehearsal on the batch-of-1 worker
+- [ ] 167.1.2.2-06-PLAN.md — register the cron through the runbook (never a migration) and re-capture the cron manifest in the same session
+- [ ] 167.1.2.2-07-PLAN.md — resolve the 164.4.2 test-vs-ROADMAP entry, book the okx follow-up if earned (D-09), planning-reading tests, ship the phase PR
+- [ ] 167.1.2.2-08-PLAN.md — the first 05:30 UTC run: D-06 reads judged on computed_at, SC-3 verdict
+- [ ] 167.1.2.2-09-PLAN.md — 167.1.2's remaining browser UAT against rebuilt books (SC-4), recorded as a dated addendum
 
 ### Phase 167.1.2.1: RECONMARKER — a per-key "history reconstructed" marker so no key's equity history is lost or skipped (INSERTED)
 
