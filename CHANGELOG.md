@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.126.0.1] - 2026-10-07 — BASELINE: automated re-dump after the PROD apply of db481fe5
+
+### Changed
+- `supabase/schema/baseline.sql` re-dumped from PRODUCTION by Supabase Migrate run `37656080684`, after the PROD apply of merge `db481fe5`: sha256 `2852a8c6…` → `5870bb2a…`.
+- Shape, old → new: tables 63 → 63, policies 155 → 155, function statements 125 → 125, distinct function names 123 → 123, data statements 0 → 0.
+- Migrations the dump newly carries, from the marker diff: `20261007120000_api_keys_account_currency.sql`.
+- `supabase/schema/BASELINE.md` gets the new `## Provenance` capture rows and a dated `### Regenerated 2026-10-07` section; `baseline-carried-migrations.txt` is regenerated from the merge tree; VERSION and package.json 0.126.0.0 → 0.126.0.1.
+- The gates on the composed tree, verbatim: `baseline-currency: carried=286 replay=0 marker-sha=match defects=0`, `baseline-content-drift: functions compared 125 — MATCH 122, DRIFT 3, SNAPSHOT_MISSING 0, SNAPSHOT_ONLY 0, UNCOMPARABLE 0`, `baseline-content-drift: findings 0`.
+
+### Notes
+- The dump was taken read-only by the `redump-dump` job after the `apply` job of Supabase Migrate run `37656080684` succeeded, and this entry was composed by the `redump-pr` job. Run `37656080684` is the provenance anchor.
+- The "what it adds" judgment for each newly carried migration is a human one, so it is left to the reviewer. Every figure above is measured.
+
 ## [0.126.0.0] - 2026-10-07 — BTCNATIVE: an MT5 account denominated in BTC
 
 Phase 164.6.6.2 lets an MT5 account whose deposit currency is BTC produce a strategy. Its returns are
