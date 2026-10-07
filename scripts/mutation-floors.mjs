@@ -2807,7 +2807,24 @@ export const FILES_FLOOR = 60;
 // lane run exits 1 naming `ARMS_FLOOR regression: 591 biting arm(s) < floor
 // 592`. The separation edit was restored from a byte backup and proved with cmp
 // (exit 0). WAIVED_CEILING stays 0 - no waiver was added.
-export const ARMS_FLOOR = 591;
+// RAISED 591 -> 593 2026-10-07 (Phase 164.6.6.3.4 STATUSBRIDGE, founder D-09): TWO arms,
+// D9 and D10, added to the ALREADY-ANNOTATED test_sync_status_analytics_scope.sql (so
+// FILES_FLOOR stays 60 and the denominator stays 87). D9: a failed side-kind job never
+// stamps computed_at or blanks the sentence of a real earlier failure. D10 (guard): a
+// genuine compute created after a lingering failed side job still does. MEASURED by ONE
+// full lane run of `node scripts/mutation-runner/run.mjs`, no file edited during it,
+// constants still at 60 / 591 (the floors read the measurement, never the other way
+// round): `scope: FULL 60/60 annotated files`, `coverage: files 60/87`, `arms:
+// 593/593/0`, `biting: 593`, `lane-invocations: 593 ... plus 60 baseline / 60 restore
+// leg(s)` (the two tallies AGREE), `unreachable: 27`, `lane-blocked: 0`, `per-arm lane
+// time: mean 1.9s over 593 arm run(s)`, `No defects.`, exit 0. Per-file line:
+// `test_sync_status_analytics_scope.sql: sections 15 / judged 15 / annotated 15 /
+// waived 0 / biting 15`. The census pins moved in the same commit:
+// mutation-runner-floors.test.ts (`totalAnchored` and the synthetic run logs),
+// mutation-annotation-parser.test.ts (`armsSeen`, `stepsSeen`, needles),
+// drift-check-scripts.test.ts and ci.yml (ARMS_FLOOR=271 over the sentinel sum) and
+// gate-family-meta.test.ts (the threshold-site string). WAIVED_CEILING stays 0.
+export const ARMS_FLOOR = 593;
 
 // WAIVED_CEILING — PINNED 2026-09-02 BY MEASUREMENT (164.3.1 red team), not
 // chosen. A CEILING, not a floor: it fails when the corpus carries MORE waivers

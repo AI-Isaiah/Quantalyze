@@ -5007,14 +5007,19 @@ jobs:
           #   them. A new sentinel-bearing file, so SENTINEL_FLOOR moves 14 -> 15 and
           #   ARMS_FLOOR moves 256 -> 269, read off the file's own first
           #   `ALL N ARMS EXECUTED` sentinel.
+          # Re-measured 2026-10-07 (phase 164.6.6.3.4 founder D-09), ONE move:
+          #   test_sync_status_analytics_scope.sql gains D9 and D10 (a failed side-kind
+          #   job never stamps computed_at; a genuine compute after it still does), so
+          #   its sentinel reads ALL 15 and ARMS_FLOOR moves 269 -> 271. No file joined,
+          #   so SENTINEL_FLOOR stays 15.
           # Read off each file's own sentinel, never off this table.
           #   test_strategy_shares_rls.sql                    103
-          #   test_sync_status_analytics_scope.sql             13
+          #   test_sync_status_analytics_scope.sql             15
           #   test_sync_status_bridge_residues.sql             16
           #   test_sync_status_curated_sentence_survives.sql    7
           #   test_sync_status_marked_refresh_protected.sql    23
           SENTINEL_FLOOR=15  # files declaring a sentinel
-          ARMS_FLOOR=269     # 13 + 8 + 9 + 3 + 6 + 23 + 26 + 8 + 7 + 4 + 103 + 13 + 16 + 7 + 23
+          ARMS_FLOOR=271     # 13 + 8 + 9 + 3 + 6 + 23 + 26 + 8 + 7 + 4 + 103 + 15 + 16 + 7 + 23
           # RAISING these as arms are added is expected and cheap — and it is not
           # optional: src/__tests__/contracts/ci-anti-skip-gate.contract.test.ts
           # re-derives the table above from the corpus and goes red when a count,

@@ -1062,8 +1062,10 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
     // ⭐ CURRENCY 2026-10-03 (Phase 164.5.2.1 BRIDGERESIDUE, plan 05): `armsSeen` 556 -> 574 and `stepsSeen` 615 -> 668: the TWO NEW gates test_sync_status_bridge_residues.sql (16 arms, 49 file steps) and test_sync_status_bridge_lock.sql (2 arms, 4 file steps). MEASURED: this file's run read `expected 574 to be 556` and the needle census below read `expected 668 to be 615`.
     // ⭐ CURRENCY 2026-10-07 (Phase 164.6.6.3.5 DOMAINONE, plan 03): `armsSeen` 574 -> 578: the NEW gate test_for_quants_leads_contact_dedupe.sql (4 arms, every twin a single `sql` step, so `stepsSeen` is read below).
     // ⭐ CURRENCY 2026-10-07 (Phase 164.6.6.3.4 STATUSBRIDGE, plan 03): `armsSeen` 578 -> 591 and `stepsSeen` 668 -> 700: the NEW gate test_sync_status_analytics_scope.sql (13 arms, 32 file steps). MEASURED: this file's run read `expected 591 to be 578`, then `expected 700 to be 668`.
-    expect(armsSeen).toBe(591);
-    expect(stepsSeen).toBe(700);
+    // ⭐ CURRENCY 2026-10-07 (Phase 164.6.6.3.4 STATUSBRIDGE, founder D-09): `armsSeen` 591 -> 593: arms D9 and D10 in the ALREADY-ANNOTATED test_sync_status_analytics_scope.sql, whose twins each carry one `edit` step (`stepsSeen` is read below).
+    expect(armsSeen).toBe(593);
+    // ⭐ CURRENCY 2026-10-07 (founder D-09): `stepsSeen` 700 -> 702 (D9 and D10, one file step each). MEASURED: this file's run read `expected 702 to be 700`.
+    expect(stepsSeen).toBe(702);
     // ⚠️ EXPLICIT TIMEOUT, ADDED 2026-09-11 (phase 164.8.6, plan 05) — and it is
     // the FIRST per-test timeout in this suite, so it is a deliberate new shape
     // rather than a local convention being followed. MEASURED, not guessed:
@@ -1981,7 +1983,8 @@ describe("GRAMMAR rule 3c — an identity is READ only where the RUNNER's gate r
     // ⭐ CURRENCY 2026-10-02 (Phase 164.9.3.2.1 ENQ40001, review fix WR-01): 614 -> 615, moving WITH `stepsSeen` (R3's one file step). MEASURED: `expected 615 to be 614`.
     // ⭐ CURRENCY 2026-10-03 (Phase 164.5.2.1 BRIDGERESIDUE, plan 05): 615 -> 668, moving WITH `stepsSeen` (the 49 + 4 file steps of the two bridge gates). MEASURED: `expected 668 to be 615`.
     // ⭐ CURRENCY 2026-10-07 (Phase 164.6.6.3.4 STATUSBRIDGE, plan 03): 668 -> 700, moving WITH `stepsSeen` (the new gate's 32 file steps). MEASURED: `expected 700 to be 668`.
-    expect(needles.length).toBe(700);
+    // ⭐ CURRENCY 2026-10-07 (founder D-09): 700 -> 702, moving WITH `stepsSeen` (D9 and D10, one file step each). MEASURED: `expected 702 to be 700`.
+    expect(needles.length).toBe(702);
     expect(needles.filter((n) => /TEST\s+FAILED\s*\(/i.test(n))).toEqual([]);
   });
 });
