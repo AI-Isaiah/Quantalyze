@@ -64,12 +64,18 @@ def test_fixture_is_a_real_oracle() -> None:
         "unsorted_input_is_sorted",
         "unknown_method_string_reads_geometric",
         "native_leg_loses_first_two_days",
+        "native_absent_day_is_priced_over_its_own_day",
     } <= names
 
 
 @pytest.mark.parametrize("case", _CASES, ids=[c["name"] for c in _CASES])
 def test_python_reads_the_oracle(case: dict[str, Any]) -> None:
-    result = daily_returns_from_row(_row(case), name=case["name"])
+    # WR-02: a native leg is read with keep_absent=True, exactly as every router
+    # that hands the series to the converter next does, so an absent day stays a
+    # placeholder and the next day is priced over its own interval.
+    result = daily_returns_from_row(
+        _row(case), name=case["name"], keep_absent="native_unit" in case
+    )
     if "native_unit" in case:
         # Pitfall 7 parity: the boundary, THEN the BTC conversion, which drops its
         # own first day too, so a native leg loses its first two days.
@@ -198,3 +204,85 @@ def test_a_boolean_level_is_not_a_level_of_one() -> None:
         ]
     }
     assert daily_returns_from_row(row, name="s") is None
+
+
+# ---------------------------------------------------------------------------
+# WR-02: an absent day must not widen the next day's price interval.
+# ---------------------------------------------------------------------------
+
+_GAP_CURVE = [
+    {"date": "2026-03-02", "value": 1.0},
+    {"date": "2026-03-03", "value": 1.1},
+    {"date": "2026-03-04", "value": None},
+    {"date": "2026-03-05", "value": 1.2},
+    {"date": "2026-03-06", "value": 1.32},
+]
+_GAP_CLOSES = pd.Series(
+    [100.0, 100.0, 200.0, 400.0, 400.0],
+    index=pd.DatetimeIndex(
+        ["2026-03-02", "2026-03-03", "2026-03-04", "2026-03-05", "2026-03-06"]
+    ),
+)
+
+
+def _gap_row(flags: dict[str, Any]) -> dict[str, Any]:
+    return {"returns_series": _GAP_CURVE, "data_quality_flags": flags}
+
+
+def test_wr02_usd_return_after_an_absent_day_is_the_one_day_return() -> None:
+    """The review's repro, with the expected value written by literal from the
+    independent invariant ``(1 + r_native) * (P_k / P_{k-1}) - 1`` over the SAME
+    day: 03-06's native return is +10% and BTC closed flat that day (400 -> 400),
+    so USD is +10%. Pricing it against 03-03 (close 100) gave +340%."""
+    row = _gap_row({"native_unit": "BTC"})
+    native = daily_returns_from_row(row, name="s", keep_absent=True)
+    assert native is not None
+    out = convert_native_returns_to_usd(native, "BTC", _GAP_CLOSES)
+    assert [d.strftime("%Y-%m-%d") for d in out.index] == ["2026-03-06"]
+    assert math.isclose(float(out.iloc[0]), 0.10, abs_tol=1e-12)
+    assert not out.isna().any()
+
+
+def test_wr02_default_read_still_deletes_the_absent_day_so_a_blend_never_sees_nan() -> None:
+    """``keep_absent`` is opt-in: the default series is exactly the pre-fix one
+    (absent days deleted, no NaN), which is what every non-converting reader gets."""
+    native = daily_returns_from_row(_gap_row({"native_unit": "BTC"}), name="s")
+    assert native is not None
+    assert [d.strftime("%Y-%m-%d") for d in native.index] == ["2026-03-03", "2026-03-06"]
+    assert not native.isna().any()
+
+
+def test_wr02_keep_absent_is_inert_for_a_usd_row() -> None:
+    """A USD row passes the converter untouched, so a NaN placeholder on it would
+    reach a blend. ``keep_absent`` must therefore do nothing without a unit."""
+    for flags in ({}, {"cumulative_method": "geometric"}, {"native_unit": "not-a-code"}):
+        usd = daily_returns_from_row(_gap_row(flags), name="s", keep_absent=True)
+        assert usd is not None
+        assert [d.strftime("%Y-%m-%d") for d in usd.index] == ["2026-03-03", "2026-03-06"], flags
+        assert not usd.isna().any(), flags
+
+
+def test_wr02_keep_absent_does_not_touch_a_daily_returns_column() -> None:
+    row = {
+        "daily_returns": [
+            {"date": "2026-03-03", "value": 0.1},
+            {"date": "2026-03-06", "value": 0.1},
+        ],
+        "returns_series": _GAP_CURVE,
+        "data_quality_flags": {"native_unit": "BTC"},
+    }
+    got = daily_returns_from_row(row, name="s", keep_absent=True)
+    assert got is not None
+    assert not got.isna().any()
+    assert len(got) == 2
+
+
+def test_wr02_a_curve_with_no_formable_day_is_none_even_when_absent_days_are_kept() -> None:
+    row = {
+        "returns_series": [
+            {"date": "2026-03-02", "value": 1.0},
+            {"date": "2026-03-03", "value": None},
+        ],
+        "data_quality_flags": {"native_unit": "BTC"},
+    }
+    assert daily_returns_from_row(row, name="s", keep_absent=True) is None

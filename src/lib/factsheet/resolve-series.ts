@@ -72,10 +72,22 @@ function normalizeCurve(raw: unknown): DailyPoint[] {
  * Returns an empty array when the input has fewer than two points. The default
  * method is geometric, which is also what the allocator's own blended equity
  * wealth (a cumulative product of 1 + r) needs.
+ *
+ * `keepAbsent` (WR-02, 164.6.6.2.2 review): keep every absent day AFTER day 0 in
+ * the output as a `NaN` placeholder at its own date instead of deleting it. The
+ * one consumer is {@link convertNativeReturnsToUsd}, which prices a day's native
+ * return by the BTC move over `[previous series date, this date]`: with the
+ * absent day deleted that interval silently grew to span the whole gap, so a
+ * one-day native return was multiplied by a multi-day price move. With the
+ * placeholder kept, the converter skips the NaN day and prices the next day over
+ * its own single interval. A series built this way carries NaN and MUST go
+ * through the converter (which drops it), never into a blend or a payload.
+ * Twin of `curve_to_daily_returns(keep_absent=True)`.
  */
 export function equityCurveToDailyReturns(
   points: DailyPoint[],
   method: CurveMethod = "geometric",
+  keepAbsent = false,
 ): DailyReturn[] {
   if (!Array.isArray(points) || points.length < 2) return [];
   const sorted = points
@@ -85,14 +97,20 @@ export function equityCurveToDailyReturns(
   for (let i = 1; i < sorted.length; i++) {
     const prev = sorted[i - 1].value;
     const curr = sorted[i].value;
-    if (!Number.isFinite(prev) || !Number.isFinite(curr)) continue;
-    if (method === "simple") {
-      out.push({ date: sorted[i].date, value: curr - prev });
-    } else if (prev > 0 && curr > 0) {
-      out.push({ date: sorted[i].date, value: curr / prev - 1 });
+    const usable =
+      Number.isFinite(prev) &&
+      Number.isFinite(curr) &&
+      (method === "simple" || (prev > 0 && curr > 0));
+    if (usable) {
+      out.push({
+        date: sorted[i].date,
+        value: method === "simple" ? curr - prev : curr / prev - 1,
+      });
+    } else if (keepAbsent) {
+      out.push({ date: sorted[i].date, value: Number.NaN });
     }
   }
-  return out;
+  return keepAbsent && !out.some((p) => Number.isFinite(p.value)) ? [] : out;
 }
 
 /**
@@ -107,13 +125,19 @@ export function equityCurveToDailyReturns(
  * curve is read by the row's own `method` (see {@link curveMethodFromFlags}):
  * pass `curveMethodFromFlags(row.data_quality_flags)`. A curve level is never
  * read as a return: a level of 1.30 is not a +130% day.
+ *
+ * `keepAbsent` is honoured only on the curve-derived path (a winning
+ * `daily_returns` column is returned as stored) and is for the native -> USD
+ * conversion only: see {@link equityCurveToDailyReturns}. Pass it as
+ * `unit != null`, so a USD series can never carry a `NaN` placeholder.
  */
 export function resolveDailyReturnSeries(
   dailyReturnsRaw: unknown,
   returnsSeriesRaw: unknown,
   method: CurveMethod = "geometric",
+  keepAbsent = false,
 ): DailyReturn[] {
   const direct = normalizeDailyReturns(dailyReturnsRaw);
   if (direct.length > 0) return direct;
-  return equityCurveToDailyReturns(normalizeCurve(returnsSeriesRaw), method);
+  return equityCurveToDailyReturns(normalizeCurve(returnsSeriesRaw), method, keepAbsent);
 }

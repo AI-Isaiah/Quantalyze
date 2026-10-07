@@ -28,6 +28,13 @@ priced only when EVERY calendar day in ``[d_{k-1}, d_k]`` has a usable close
 Saturday and Sunday closes too), and a close that is non-finite or not
 positive counts as missing. A non-finite input return is absent too.
 
+A NON-FINITE return is how an absent day is KEPT in the input (WR-02): the
+curve boundary, asked with ``keep_absent=True``, leaves a NaN at the date of a
+day it could not form. This converter skips that day and prices the NEXT day
+against the NaN day's own date, so a one-day native return is multiplied by the
+price move over that same single day, never over the whole gap. The output never
+carries a NaN.
+
 ``unit is None`` is a USD row: the SAME object is returned, untouched. A unit
 with no price source (``btc_closes is None``) returns an EMPTY series, since no
 price is invented: the caller must read that as "no BTC price source", never as

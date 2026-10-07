@@ -551,7 +551,7 @@ def _load_candidate_universe(demo_only: bool = False) -> dict[str, Any]:
             "is_example": bool(strategy.get("is_example")),
         }
 
-        daily_returns = daily_returns_from_row(analytics, name=sid)
+        daily_returns = daily_returns_from_row(analytics, name=sid, keep_absent=True)
         if daily_returns is not None:
             returns_by_id[sid] = daily_returns
 
@@ -829,7 +829,7 @@ def _load_allocator_context(allocator_id: str) -> dict[str, Any]:
                     # this path is for user-created portfolios with partial data.
                     portfolio_weights[sid] = float(row.get("current_weight") or 1.0)
                     sa = analytics_by_sid.get(sid, {})
-                    returns = daily_returns_from_row(sa, name=sid)
+                    returns = daily_returns_from_row(sa, name=sid, keep_absent=True)
                     if returns is not None:
                         portfolio_returns[sid] = returns
                     allocated = row.get("allocated_amount")

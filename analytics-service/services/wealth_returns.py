@@ -41,7 +41,8 @@ oracle uses array curves only; (b) a numeric STRING value is coerced to a number
 here by ``pd.to_numeric`` but is non-finite in TypeScript. Duplicate-date dedupe
 (last record wins) is Python-only: TypeScript does not dedupe.
 
-Pure: pandas, numpy, math and logging only. No Supabase, no I/O, no router import.
+Pure: pandas, numpy, math and logging, plus ``parse_native_unit`` from the equally pure
+``services.native_to_usd``. No Supabase, no I/O, no router import.
 """
 
 from __future__ import annotations
@@ -54,6 +55,8 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+
+from services.native_to_usd import parse_native_unit
 
 logger = logging.getLogger("quantalyze.analytics")
 
@@ -158,7 +161,9 @@ def records_to_series(
     return series[~series.index.duplicated(keep="last")]
 
 
-def curve_to_daily_returns(levels: pd.Series | None, method: str) -> pd.Series | None:
+def curve_to_daily_returns(
+    levels: pd.Series | None, method: str, *, keep_absent: bool = False
+) -> pd.Series | None:
     """Daily returns from a stored cumulative curve (sorted, deduped levels).
 
     ``method`` is :data:`CURVE_GEOMETRIC` or :data:`CURVE_SIMPLE`. Pairs each
@@ -166,6 +171,16 @@ def curve_to_daily_returns(levels: pd.Series | None, method: str) -> pd.Series |
     member (or, geometric, a non-positive one) is absent, so the day after a bad
     level is absent too rather than bridged. Day 0 never emits. Returns None when
     no day is formable.
+
+    ``keep_absent=True`` (WR-02, 164.6.6.2.2 review) keeps each absent day AFTER
+    day 0 in the output as a NaN placeholder at its own date instead of deleting
+    it. The one consumer is the native -> USD converter, which prices a day's
+    native return by the BTC move over the interval ``[previous series date,
+    this date]``: with the absent day deleted that interval silently grew to span
+    the whole gap, so a one-day native return was multiplied by a multi-day price
+    move. With the placeholder kept, the converter skips the NaN day and prices
+    the next day over its own single interval. A series built this way carries
+    NaN and MUST go through the converter (which drops it), never into a blend.
     """
     if levels is None or len(levels) < 2:
         return None
@@ -180,10 +195,15 @@ def curve_to_daily_returns(levels: pd.Series | None, method: str) -> pd.Series |
         mask = both_finite & (cur > 0) & (prev > 0)
         with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
             out = cur / prev - 1.0
-    out = out[mask]
-    out = out[np.isfinite(out)]
-    if out.empty:
-        return None
+    if keep_absent:
+        out = out.where(mask & np.isfinite(out)).iloc[1:]
+        if not np.isfinite(out).any():
+            return None
+    else:
+        out = out[mask]
+        out = out[np.isfinite(out)]
+        if out.empty:
+            return None
     out.name = levels.name
     return out
 
@@ -229,11 +249,21 @@ def daily_returns_from_row(
     row: Mapping[str, Any] | None,
     *,
     name: str,
+    keep_absent: bool = False,
 ) -> pd.Series | None:
     """The row's daily returns (D-02 order; see the module docstring).
 
     ``row`` is a ``strategy_analytics`` row; None, ``{}`` and missing keys are
     tolerated. Returns None when neither source yields a usable day.
+
+    ``keep_absent`` (WR-02): pass True ONLY where the series is handed to
+    :func:`services.native_to_usd.convert_native_returns_to_usd` (or the
+    ``UsdSeriesConverter``) next. It is honoured only for a row that carries a
+    native unit and only on the curve-derived path, where it keeps each absent
+    day as a NaN placeholder so the converter prices the following day over its
+    own single interval, not over the gap (see :func:`curve_to_daily_returns`).
+    A USD row, and a row whose ``daily_returns`` column wins, come back exactly
+    as without it, so a USD series can never carry a NaN placeholder.
     """
     if not isinstance(row, Mapping):
         return None
@@ -241,8 +271,10 @@ def daily_returns_from_row(
     if direct is not None:
         return direct
     levels = records_to_series(row.get("returns_series"), name, keep_nonfinite=True)
-    method = curve_method_from_flags(row.get("data_quality_flags"), name=name)
-    return curve_to_daily_returns(levels, method)
+    flags = row.get("data_quality_flags")
+    method = curve_method_from_flags(flags, name=name)
+    native = isinstance(flags, Mapping) and parse_native_unit(flags.get("native_unit")) is not None
+    return curve_to_daily_returns(levels, method, keep_absent=keep_absent and native)
 
 
 def equity_from_daily_returns(returns: pd.Series) -> pd.Series:

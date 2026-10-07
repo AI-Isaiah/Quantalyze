@@ -332,6 +332,48 @@ def test_a_file_that_selects_the_curve_also_reads_through_the_boundary() -> None
     assert not problems, "; ".join(problems)
 
 
+# WR-02: the router calls to ``daily_returns_from_row`` that do NOT hand their
+# series to the native -> USD converter next, so they read absent days deleted.
+# Every other router call must ask for ``keep_absent=True``: without it an absent
+# day vanishes and the converter prices the day after it over the whole gap.
+_ROUTER_CALLS_THAT_DO_NOT_CONVERT: dict[str, int] = {
+    "routers/portfolio.py": 1,  # verify_strategy's correlation read of the existing book
+}
+
+
+def test_every_converting_router_read_keeps_absent_days_for_the_converter() -> None:
+    root = _repo_root() / "analytics-service"
+    seen_without: dict[str, int] = {}
+    seen_with = 0
+    for f in _surface_files():
+        rel = f.relative_to(root).as_posix()
+        if not rel.startswith("routers/"):
+            continue
+        for n in ast.walk(ast.parse(f.read_text())):
+            if not (
+                isinstance(n, ast.Call)
+                and isinstance(n.func, ast.Name)
+                and n.func.id == "daily_returns_from_row"
+            ):
+                continue
+            keeps = any(
+                kw.arg == "keep_absent"
+                and isinstance(kw.value, ast.Constant)
+                and kw.value.value is True
+                for kw in n.keywords
+            )
+            if keeps:
+                seen_with += 1
+            else:
+                seen_without[rel] = seen_without.get(rel, 0) + 1
+    assert seen_with > 0, "no converting router read found: the scan covers nothing"
+    assert seen_without == _ROUTER_CALLS_THAT_DO_NOT_CONVERT, (
+        "a router read of a stored row that feeds the native -> USD converter must "
+        "pass keep_absent=True (WR-02), or be listed here as a read that never "
+        f"converts. Reads without it: {seen_without}"
+    )
+
+
 def test_no_comment_or_docstring_names_the_deleted_parser() -> None:
     """``_records_to_series`` is deleted; prose still calling it the live parser
     sends the next reader looking for code that is gone. Cite the public

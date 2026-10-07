@@ -1258,6 +1258,45 @@ describe("GET /api/strategies/[id]/returns — 164.6.6.2 native-unit legs", () =
     expect(body.daily_returns_usd[0].value).toBeCloseTo(0.21, 12);
   });
 
+  it("WR-02: a native curve with an absent day prices the day after it over its OWN day (+10%, not +340%)", async () => {
+    // Curve 1.0, 1.1, null, 1.2, 1.32 on 03-02..03-06; BTC closes 100, 100, 200,
+    // 400, 400. 03-06's native return is 1.32 / 1.2 - 1 = 0.1 on a flat BTC day, so
+    // USD is (1 + 0.1) * (400 / 400) - 1 = 0.1; priced across the gap it was 3.4.
+    btcClosesMock.mockResolvedValue({
+      prices: [
+        { date: "2026-03-02", close: 100 },
+        { date: "2026-03-03", close: 100 },
+        { date: "2026-03-04", close: 200 },
+        { date: "2026-03-05", close: 400 },
+        { date: "2026-03-06", close: 400 },
+      ],
+      dropped: [] as string[],
+      through: "2026-03-06",
+    });
+    STATE.analyticsRow = {
+      daily_returns: null,
+      returns_series: [
+        { date: "2026-03-02", value: 1.0 },
+        { date: "2026-03-03", value: 1.1 },
+        { date: "2026-03-04", value: null },
+        { date: "2026-03-05", value: 1.2 },
+        { date: "2026-03-06", value: 1.32 },
+      ],
+      computation_status: "complete",
+      data_quality_flags: { native_unit: "BTC" },
+    };
+    const body = await call();
+    expect(body.daily_returns_usd).toHaveLength(1);
+    expect(body.daily_returns_usd[0].date).toBe("2026-03-06");
+    expect(body.daily_returns_usd[0].value).toBeCloseTo(0.1, 12);
+    // The shipped native series carries no placeholder: absent days are deleted.
+    expect(body.daily_returns.map((p: { date: string }) => p.date)).toEqual([
+      "2026-03-03",
+      "2026-03-06",
+    ]);
+    expect(body.native_unpriced).toBe(false);
+  });
+
   it("parity: daily_returns_usd is exactly convertNativeReturnsToUsd on the same inputs", async () => {
     const { convertNativeReturnsToUsd } = await import("@/lib/factsheet/native-to-usd");
     btcClosesMock.mockResolvedValue(CLOSES);

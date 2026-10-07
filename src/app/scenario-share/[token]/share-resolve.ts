@@ -249,6 +249,9 @@ export function resolveSharedScenario(
           s.daily_returns,
           returnsSeriesById?.[s.strategy_id],
           returnsMethodById?.[s.strategy_id],
+          // WR-02: a native leg keeps its absent days as NaN placeholders into
+          // the conversion; a unit-less leg is read exactly as before.
+          (returnsUnitById?.[s.strategy_id] ?? null) != null,
         ),
         returnsUnitById?.[s.strategy_id] ?? null,
         btc ?? null,

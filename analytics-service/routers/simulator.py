@@ -337,7 +337,7 @@ async def portfolio_simulator(request: Request, req: SimulatorRequest) -> dict[s
         sa_row = rows_by_id.get(sid)
         if sa_row is None:
             continue
-        s = daily_returns_from_row(sa_row, name=sid)
+        s = daily_returns_from_row(sa_row, name=sid, keep_absent=True)
         if s is not None:
             portfolio_returns[sid] = s
 
@@ -366,6 +366,7 @@ async def portfolio_simulator(request: Request, req: SimulatorRequest) -> dict[s
     candidate_series = daily_returns_from_row(
         rows_by_id[req.candidate_strategy_id],
         name=req.candidate_strategy_id,
+        keep_absent=True,
     )
     if candidate_series is not None:
         _converted, _ = await _usd.convert(
