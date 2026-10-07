@@ -1596,6 +1596,109 @@ async def test_a_malformed_native_unit_is_not_carried(bad) -> None:  # type: ign
 
 
 # ===========================================================================
+# Phase 164.6.6.2.2 (D-05) — the single-key row names the cumulative method its
+# curve was built with, as composites already do. Readers default to geometric
+# when the key is absent, so a simple (allocated-capital) curve WITHOUT the stamp
+# would be read with the ratio rule. The stamp is the SAME `_cumulative_method`
+# variable handed to derive_basis_series, never a re-derivation.
+# ===========================================================================
+
+
+async def _run_for_cumulative_method(
+    returns_denominator_config: object | None,
+) -> tuple[dict, MagicMock]:
+    """Run the REAL runner (real derive, real compute) and return the completed
+    upsert payload plus the derive spy, so a test can compare the stamped method
+    with the one derive was actually given."""
+    from services import basis_series
+    from services.analytics_runner import run_csv_strategy_analytics
+
+    sb = _make_broker_supabase_mock(
+        _daily_rows_15(), api_key_id="key-1", asset_class="crypto",
+        returns_denominator_config=returns_denominator_config,
+    )
+    real_derive = basis_series.derive_basis_series
+    spy = MagicMock(side_effect=real_derive)
+    with patch("services.analytics_runner.get_supabase", return_value=sb), \
+         patch("services.analytics_runner.get_benchmark_returns",
+               new=AsyncMock(return_value=(None, True))), \
+         patch("services.basis_series.derive_basis_series", new=spy):
+        await run_csv_strategy_analytics("cumulative-method-uuid")
+    sa = sb.table("strategy_analytics")
+    completed = [
+        c for c in sa.upsert.call_args_list
+        if isinstance(c.args[0], dict)
+        and str(c.args[0].get("computation_status", "")).startswith("complete")
+    ]
+    assert completed, "expected a completed headline upsert"
+    return completed[0].args[0], spy
+
+
+@pytest.mark.asyncio
+async def test_cumulative_method_simple_config_is_stamped_simple() -> None:
+    """TRACER: an allocated-capital config whose cumulative_method is 'simple'
+    stamps 'simple' beside the curve, and it is the very value derive was given."""
+    payload, spy = await _run_for_cumulative_method(_ALLOC_CFG_SIMPLE_ACTIVE)
+    assert payload["data_quality_flags"]["cumulative_method"] == "simple"
+    assert spy.call_args.kwargs["cumulative_method"] == "simple", (
+        "the stamp must name the method the curve was BUILT with"
+    )
+    assert payload["returns_series"], "the stamp rides a row that carries a curve"
+
+
+@pytest.mark.asyncio
+async def test_cumulative_method_no_config_is_stamped_geometric_exactly() -> None:
+    """No config: the flags are exactly csv_source + the geometric stamp, so the
+    stamp adds no other key and never promotes the status (T-164.6.6.2.2-06).
+    Same stubbed-compute setup as the happy-path test, so the exact-equality
+    assertion is not muddied by the real compute's own annotations."""
+    from services.analytics_runner import run_csv_strategy_analytics
+
+    rows = [
+        {"date": "2024-01-01", "daily_return": 0.005},
+        {"date": "2024-01-02", "daily_return": -0.003},
+        {"date": "2024-01-03", "daily_return": 0.008},
+    ] * 5
+    sb = _make_supabase_mock(rows)
+    with patch("services.analytics_runner.get_supabase", return_value=sb), \
+         patch("services.analytics_runner.get_benchmark_returns",
+               new=AsyncMock(return_value=(pd.Series([0.001] * 15), False))), \
+         patch("services.basis_series.compute_all_metrics",
+               return_value=_make_metrics_result()) as compute:
+        await run_csv_strategy_analytics("cumulative-method-geo-uuid")
+    payload = next(
+        c.args[0] for c in sb.table.return_value.upsert.call_args_list
+        if c.args[0].get("computation_status") == "complete"
+    )
+    assert payload["data_quality_flags"] == {
+        "csv_source": True,
+        "cumulative_method": "geometric",
+    }
+    assert compute.call_args.kwargs["cumulative_method"] == "geometric"
+    assert payload["computation_warned"] is False
+
+
+@pytest.mark.asyncio
+async def test_cumulative_method_failure_write_gains_no_stamp() -> None:
+    """A run that wrote no curve must not gain a method stamp: the unrecoverable
+    arm preserves prior flags and adds only csv_source (D-05, plan 02 truth 4)."""
+    from services.analytics_runner import run_csv_strategy_analytics
+
+    rows = [{"date": "2024-01-01", "daily_return": 0.005}]  # 1 row: cannot derive
+    sb = _make_supabase_mock(rows)
+    with patch("services.analytics_runner.get_supabase", return_value=sb):
+        with pytest.raises(HTTPException):
+            await run_csv_strategy_analytics("cumulative-method-fail-uuid")
+    failed = [
+        c for c in sb.table.return_value.upsert.call_args_list
+        if c.args[0].get("computation_status") == "failed"
+    ]
+    assert failed, "expected a failed-status upsert"
+    for c in failed:
+        assert "cumulative_method" not in (c.args[0].get("data_quality_flags") or {})
+
+
+# ===========================================================================
 # Phase 105 (BB-02, collapse #2) — the single-key cash SCALAR path joins the ONE
 # shared derive_basis_series route. Two seam guarantees:
 #   D5 ordering — the cash_settlement SERIES row persists BEFORE the scalar/status
