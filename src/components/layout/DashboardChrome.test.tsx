@@ -254,6 +254,30 @@ describe("DashboardChrome — unprocessed-leads badge forwarding (D-17)", () => 
     expect(screen.getAllByLabelText("3 unprocessed leads").length).toBeGreaterThan(0);
   });
 
+  it("forwards an UNMEASURED count (null) so the desktop rail draws the '?' marker, and the drawer does too", () => {
+    navState.pathname = "/admin";
+    const { unmount } = render(
+      <DashboardChrome isAdmin={true} populatedSlugs={[]} unprocessedLeadsCount={null}>
+        <div>page</div>
+      </DashboardChrome>,
+    );
+    const desktopNav = screen.getByRole("navigation", { name: "Primary" });
+    const link = within(desktopNav).getByText("For-quants leads").closest("a")!;
+    expect(within(link).getByLabelText("Unprocessed lead count unavailable")).toBeInTheDocument();
+    unmount();
+
+    navState.pathname = "/admin/match/abc-123";
+    render(
+      <DashboardChrome isAdmin={true} populatedSlugs={[]} unprocessedLeadsCount={null}>
+        <div>queue</div>
+      </DashboardChrome>,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Open menu" }));
+    expect(
+      screen.getAllByLabelText("Unprocessed lead count unavailable").length,
+    ).toBeGreaterThan(0);
+  });
+
   it("renders no badge when no count was supplied", () => {
     navState.pathname = "/admin";
     render(

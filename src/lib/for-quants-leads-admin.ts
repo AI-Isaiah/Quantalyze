@@ -131,15 +131,53 @@ export async function listForQuantsLeads({
 }
 
 /**
+ * Once-per-process flag for the Sentry report of a failed unprocessed-leads
+ * count (D-17 round 2). The layout reads the count on every admin page load, so
+ * a standing failure would otherwise report once per navigation; the console
+ * line and the sidebar's "?" marker still show every occurrence. Module-scope
+ * so it is shared across requests on a warm instance; tests reset it with
+ * `vi.resetModules()`.
+ */
+let unprocessedCountFailureReported = false;
+
+/**
+ * Lazy `@sentry/nextjs`, so a failed SDK load can never break the layout (the
+ * same pattern as `src/app/api/for-quants-lead/route.ts`'s `captureFailure`).
+ */
+function reportUnprocessedCountFailure(err: unknown): void {
+  if (unprocessedCountFailureReported) return;
+  unprocessedCountFailureReported = true;
+  void import("@sentry/nextjs")
+    .then((Sentry) => {
+      Sentry.captureException(
+        err instanceof Error
+          ? err
+          : new Error(
+              `[for-quants-leads-admin] unprocessed count unavailable: ${
+                err && typeof err === "object" && "message" in err
+                  ? String((err as { message: unknown }).message)
+                  : String(err ?? "no count returned")
+              }`,
+            ),
+        { tags: { area: "for-quants-leads-admin", stage: "unprocessed_count" } },
+      );
+    })
+    .catch(() => {
+      // Already logged via console.error by the caller; do not crash the layout.
+    });
+}
+
+/**
  * D-17: how many leads are still unprocessed, for the admin sidebar's unread
  * badge on the "For-quants leads" entry. A HEAD count, so no lead row (name,
  * email, message) leaves the database for a nav element.
  *
- * Returns `null` on ANY failure, after logging it. `null` is not `0`: the
- * caller must omit the badge rather than render a "nothing waiting" state it
- * did not measure, the same rule `listForQuantsLeads` applies to its error
- * banner. The caller is responsible for the admin check; this function only
- * reads, and only through the service-role chokepoint.
+ * Returns `null` on ANY failure, after logging it and reporting it to Sentry
+ * once per process. `null` is not `0`: the caller must show an "unmeasured"
+ * marker rather than render a "nothing waiting" state it did not measure, the
+ * same rule `listForQuantsLeads` applies to its error banner. The caller is
+ * responsible for the admin check; this function only reads, and only through
+ * the service-role chokepoint.
  */
 export async function countUnprocessedForQuantsLeads(
   client?: SupabaseClient,
@@ -155,11 +193,13 @@ export async function countUnprocessedForQuantsLeads(
         "[for-quants-leads-admin] unprocessed count failed:",
         error ?? "no count returned",
       );
+      reportUnprocessedCountFailure(error ?? "no count returned");
       return null;
     }
     return count;
   } catch (err) {
     console.error("[for-quants-leads-admin] unprocessed count threw:", err);
+    reportUnprocessedCountFailure(err);
     return null;
   }
 }

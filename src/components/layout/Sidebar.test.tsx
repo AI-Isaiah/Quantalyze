@@ -444,9 +444,38 @@ describe("Sidebar unprocessed-leads badge (D-17)", () => {
     expect(within(leadsLink()).queryByLabelText(/unprocessed lead/)).toBeNull();
   });
 
-  it("an unknown count (undefined, e.g. a failed read) shows no badge", () => {
+  it("not applicable (undefined) shows no badge and no marker", () => {
     render(<Sidebar populatedSlugs={[]} isAdmin={true} />);
     expect(within(leadsLink()).queryByLabelText(/unprocessed lead/)).toBeNull();
+    expect(within(leadsLink()).queryByText("?")).toBeNull();
+  });
+
+  // Round 2 (SFH, conf 7): a failed count read used to be indistinguishable
+  // from zero. `null` is the layout's "an admin whose read failed" value.
+  it("an admin whose count read failed (null) sees a muted '?' marker with an accessible name", () => {
+    render(<Sidebar populatedSlugs={[]} isAdmin={true} unprocessedLeadsCount={null} />);
+    const marker = within(leadsLink()).getByLabelText("Unprocessed lead count unavailable");
+    expect(marker).toHaveTextContent("?");
+    // A muted variant of the pill, NOT the accent one that means "N waiting".
+    expect(marker.className).toContain("text-text-muted");
+    expect(marker.className).toContain("bg-surface-subtle");
+    expect(marker.className).not.toContain("bg-accent");
+    // It is not a count: no "N unprocessed leads" name anywhere.
+    expect(within(leadsLink()).queryByLabelText(/^\d+ unprocessed lead/)).toBeNull();
+  });
+
+  it("the unmeasured marker is drawn for an admin only, never for another role", () => {
+    render(
+      <Sidebar populatedSlugs={[]} isAllocator={true} unprocessedLeadsCount={null} />,
+    );
+    expect(screen.queryByText("For-quants leads")).toBeNull();
+    expect(screen.queryByLabelText("Unprocessed lead count unavailable")).toBeNull();
+  });
+
+  it("zero still draws nothing, not even the marker", () => {
+    render(<Sidebar populatedSlugs={[]} isAdmin={true} unprocessedLeadsCount={0} />);
+    expect(within(leadsLink()).queryByText("?")).toBeNull();
+    expect(screen.queryByLabelText("Unprocessed lead count unavailable")).toBeNull();
   });
 
   it("a non-admin never sees the badge or the entry, even if handed a count", () => {

@@ -8,8 +8,9 @@
  *   - the count is read ONLY after the admin check passes: a non-admin never
  *     triggers the service-role read at all;
  *   - an admin gets the measured count handed to DashboardChrome;
- *   - a failed read hands DashboardChrome NO count (never a fake 0 that would
- *     read as "all caught up") and the failure is logged.
+ *   - a failed read hands an ADMIN's DashboardChrome `null` ("unmeasured"; never
+ *     a fake 0 that would read as "all caught up", and distinct from the
+ *     `undefined` a non-admin gets) and the failure is logged.
  *
  * The real `countUnprocessedForQuantsLeads` runs against a stubbed admin
  * client, so "the read" is observable as a call to `createAdminClient`.
@@ -146,24 +147,24 @@ describe("(dashboard)/layout — unprocessed-leads badge count (D-17)", () => {
     expect(state.adminCalls).toBe(0);
   });
 
-  it("a failed count read hands over NO count (not 0) and logs", async () => {
+  it("a failed count read hands an admin null (unmeasured, not 0) and logs", async () => {
     state.profile = ADMIN_PROFILE;
     state.countResult = { count: null, error: { message: "boom" } };
     const props = await renderedProps();
     expect(props.isAdmin).toBe(true);
-    expect(props.unprocessedLeadsCount).toBeUndefined();
+    expect(props.unprocessedLeadsCount).toBeNull();
     expect(errSpy).toHaveBeenCalledWith(
       "[for-quants-leads-admin] unprocessed count failed:",
       { message: "boom" },
     );
   });
 
-  it("an admin client that throws also yields no count, logged, and does not break the layout", async () => {
+  it("an admin client that throws also yields null, logged, and does not break the layout", async () => {
     state.profile = ADMIN_PROFILE;
     state.adminThrows = true;
     const props = await renderedProps();
     expect(props.isAdmin).toBe(true);
-    expect(props.unprocessedLeadsCount).toBeUndefined();
+    expect(props.unprocessedLeadsCount).toBeNull();
     expect(errSpy).toHaveBeenCalled();
   });
 });

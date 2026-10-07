@@ -15,8 +15,12 @@ export type NavAction = "add-strategy";
 interface NavItemBase {
   label: string;
   icon: IconComponent;
-  /** Phase 09.1 Plan 11 / R5 — optional badge rendered next to the label. */
-  badge?: number;
+  /** Phase 09.1 Plan 11 / R5 — optional badge rendered next to the label.
+   *  `null` (D-17 round 2) = the count could not be measured: draws a muted
+   *  "?" pill labelled `badgeUnmeasuredLabel`, never a number or a zero. */
+  badge?: number | null;
+  /** Accessible name for the muted "?" pill drawn when `badge` is `null`. */
+  badgeUnmeasuredLabel?: string;
   /** Accessible name for the badge. Defaults to the flagged-holdings wording,
    *  which is what the "My Allocation" badge has always said. */
   badgeLabel?: (count: number) => string;
@@ -63,13 +67,15 @@ function unprocessedLeadsLabel(count: number): string {
   return `${count} unprocessed lead${count === 1 ? "" : "s"}`;
 }
 
+const UNPROCESSED_LEADS_UNMEASURED_LABEL = "Unprocessed lead count unavailable";
+
 function buildNavSections(
   populatedSlugs?: string[],
   isAdmin?: boolean,
   isAllocator?: boolean,
   flaggedCount?: number,
   isManager?: boolean,
-  unprocessedLeadsCount?: number,
+  unprocessedLeadsCount?: number | null,
 ): NavSection[] {
   // Phase 109 (ROLE-01/02/03): `profiles.role` is the SOLE persona predicate;
   // `is_admin` is an ops-overlay that gates ONLY the Admin section below —
@@ -218,6 +224,7 @@ function buildNavSections(
               // D-17: the unread badge. Same pill as the flagged-holdings one.
               badge: unprocessedLeadsCount,
               badgeLabel: unprocessedLeadsLabel,
+              badgeUnmeasuredLabel: UNPROCESSED_LEADS_UNMEASURED_LABEL,
             },
           ],
         }]
@@ -362,10 +369,12 @@ export function Sidebar({
   flaggedCount?: number;
   /** D-17 — leads with `processed_at IS NULL`, read server-side in
    *  `(dashboard)/layout.tsx` for admins only. Drawn on the admin "For-quants
-   *  leads" entry when > 0. `undefined` means "not measured" (non-admin, or the
-   *  read failed) and draws nothing; it is never coerced to a count. The badge
-   *  also needs `isAdmin`, because the entry itself lives in the ADMIN section. */
-  unprocessedLeadsCount?: number;
+   *  leads" entry when > 0; 0 draws nothing. `null` means the admin's read
+   *  FAILED: a muted "?" pill says so, because a failed read must not look like
+   *  zero. `undefined` means not applicable (non-admin) and draws nothing. It is
+   *  never coerced to a count. The badge also needs `isAdmin`, because the entry
+   *  itself lives in the ADMIN section. */
+  unprocessedLeadsCount?: number | null;
   /** Phase 110 CONTRIB-01 — dispatched when a client-action nav item (e.g.
    *  "Add a Strategy") is activated. DashboardChrome wires this to open the
    *  ContributionWizardOverlay. Undefined on surfaces that carry no action
@@ -481,6 +490,8 @@ function NavItemLink({
 }) {
   const badge = item.badge;
   const showBadge = typeof badge === "number" && badge > 0;
+  // D-17 round 2: `null` = an unmeasured count, drawn as a muted "?" pill.
+  const showUnmeasuredBadge = badge === null;
 
   // Phase 110 CONTRIB-01 — client-action item: a <button> that dispatches
   // onNavAction, never a route. Same visual language as a sibling nav link
@@ -537,6 +548,15 @@ function NavItemLink({
             className="ml-auto inline-flex h-[18px] min-w-[18px] items-center justify-center rounded-sm bg-accent px-1.5 text-fixed-10 font-medium text-white"
           >
             {formatBadgeCount(badge)}
+          </span>
+        )}
+        {showUnmeasuredBadge && (
+          <span
+            aria-label={item.badgeUnmeasuredLabel ?? "Count unavailable"}
+            title={item.badgeUnmeasuredLabel ?? "Count unavailable"}
+            className="ml-auto inline-flex h-[18px] min-w-[18px] items-center justify-center rounded-sm border border-border bg-surface-subtle px-1.5 text-fixed-10 font-medium text-text-muted"
+          >
+            ?
           </span>
         )}
       </Link>

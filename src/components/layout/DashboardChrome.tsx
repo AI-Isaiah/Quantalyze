@@ -17,8 +17,10 @@ interface DashboardChromeProps {
   isAllocator?: boolean;
   isManager?: boolean;
   /** D-17 — unprocessed for-quants leads, supplied by the server layout for
-   *  admins only. `undefined` = not measured; forwarded as-is. */
-  unprocessedLeadsCount?: number;
+   *  admins only. `number` = measured, `null` = the admin's read failed
+   *  (Sidebar draws a neutral "?"), `undefined` = not an admin / not
+   *  applicable. Forwarded as-is; never coerced. */
+  unprocessedLeadsCount?: number | null;
   children: React.ReactNode;
 }
 

@@ -20,7 +20,7 @@ interface MobileSidebarDrawerProps {
   flaggedCount?: number;
   /** D-17 — passed through to Sidebar so the drawer-mounted admin nav carries
    *  the same unprocessed-leads badge as the desktop rail. */
-  unprocessedLeadsCount?: number;
+  unprocessedLeadsCount?: number | null;
   /** Phase 110 CONTRIB-01 — forwarded to the drawer's Sidebar so the
    *  "Add a Strategy" client action works from the mobile drawer too. */
   onNavAction?: (action: NavAction) => void;
