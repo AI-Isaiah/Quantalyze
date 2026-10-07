@@ -45,8 +45,13 @@ describe("contract constants (UI-SPEC, pinned verbatim)", () => {
     expect(CONTACT_FORM_LINK_TEXT).toBe("contact form");
   });
 
-  it("fences ids to the charset and length the lead route already enforces", () => {
-    expect(CONTACT_ID_RE.source).toBe("^[A-Za-z0-9_-]{8,64}$");
+  it("fences ids to the charset and length of the ids the app mints", () => {
+    expect(CONTACT_ID_RE.source).toBe("^[A-Za-z0-9_:-]{8,64}$");
+  });
+
+  it("admits the wizard page-load correlation id, which carries a colon", () => {
+    expect(CONTACT_ID_RE.test("wizard:3f2b8c1e-9d4a-4b7e-8c21-5a6f0e9d1b42")).toBe(true);
+    expect(CONTACT_ID_RE.test("wizard:<script>")).toBe(false);
   });
 });
 

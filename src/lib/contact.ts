@@ -53,10 +53,11 @@ export const CONTACT_FORM_LINK_TEXT = "contact form";
 
 /**
  * The prefill fence (D-02): an id from a link is accepted only in this shape.
- * Same charset `/api/for-quants-lead` enforces on `wizard_session_id`; UUIDs and
- * `cid-…` tokens match.
+ * Charset of the ids the app mints: UUIDs, `cid-…` tokens, and the wizard's
+ * page-load correlation id `wizard:<uuid>` (`src/lib/wizard/wizard-correlation.ts`),
+ * which carries a colon. Without `:` that id would be dropped from the prefill.
  */
-export const CONTACT_ID_RE = /^[A-Za-z0-9_-]{8,64}$/;
+export const CONTACT_ID_RE = /^[A-Za-z0-9_:-]{8,64}$/;
 
 /**
  * The `reference` column's length cap (`for_quants_leads_reference_len_check`).
