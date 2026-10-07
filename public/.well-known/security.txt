@@ -1,13 +1,14 @@
-# Quantalyze Security disclosure policy
-# https://quantalyze.com/security
+# Quantalyze security disclosure policy
+# https://quantalyze.xyz/security
 #
-# If you found a vulnerability, please email security@quantalyze.com.
+# To report a vulnerability, use the contact form at
+# https://quantalyze.xyz/contact?topic=security and choose Security report.
 # We reply within 1 business day and acknowledge researchers who
-# coordinate responsible disclosure at https://quantalyze.com/security.
+# coordinate responsible disclosure at https://quantalyze.xyz/security.
 
-Contact: mailto:security@quantalyze.com
+Contact: https://quantalyze.xyz/contact?topic=security
 Expires: 2027-04-10T00:00:00.000Z
 Preferred-Languages: en
-Canonical: https://quantalyze.com/.well-known/security.txt
-Policy: https://quantalyze.com/security
-Acknowledgments: https://quantalyze.com/security#acknowledgments
+Canonical: https://quantalyze.xyz/.well-known/security.txt
+Policy: https://quantalyze.xyz/security
+Acknowledgments: https://quantalyze.xyz/security#acknowledgments

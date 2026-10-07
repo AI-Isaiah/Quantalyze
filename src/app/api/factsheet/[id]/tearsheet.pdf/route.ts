@@ -22,10 +22,14 @@ export const maxDuration = 30;
 // URL via the `${APP_URL}/factsheet/${id}/tearsheet` interpolation. The
 // per-request `appUrl(req)` resolver below pulls origin from the request
 // and enforces a production allowlist + VERCEL_URL fallback for previews.
+// Phase 164.6.6.3.5 DOMAINONE D-06 / D-14: `quantalyze.xyz` is the canonical
+// production host (PROD's NEXT_PUBLIC_APP_URL). `quantalyze-rho.vercel.app`
+// stays while the redirect to xyz is young (D-14). The old .com hosts were
+// removed: that domain belongs to an unrelated third party, so a request
+// carrying it must never drive puppeteer.
 const APP_URL_ALLOWED_HOSTS: ReadonlySet<string> = new Set([
+  "quantalyze.xyz",
   "quantalyze-rho.vercel.app",
-  "quantalyze.com",
-  "www.quantalyze.com",
 ]);
 
 function isHostAllowed(host: string): boolean {

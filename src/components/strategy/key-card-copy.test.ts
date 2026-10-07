@@ -18,6 +18,7 @@ import {
   formatBoundDuration,
   deleteCompositeWarning,
   DELETE_MEMBERSHIP_UNCHECKED_COPY,
+  COMPOSITE_CARD_NOTE,
   EMPTY_NOLINK_COPY,
   FINISH_UNVERIFIED_NOTE,
   PANEL_STOP_COPY,
@@ -137,7 +138,7 @@ describe("KCS-SLOW (167.2-REVIEW WR-07): the in-flight panel names its own limit
 describe("Review-fix round 1 (2026-09-24): the S3 strings authored for the review findings", () => {
   it("KCS-SHAPE-UNKNOWN (SFH H-2)", () => {
     expect(SHAPE_UNKNOWN_CARD_NOTE).toBe(
-      "We could not confirm whether this strategy is a composite, so keys are not linked or synced from this card. Contact support@quantalyze.com to link a key or start a sync.",
+      "We could not confirm whether this strategy is a composite, so keys are not linked or synced from this card. Use the contact form to link a key or start a sync.",
     );
   });
 
@@ -165,7 +166,7 @@ describe("Review-fix round 2 (2026-09-24, founder decision): the Delete confirm'
         { name: "Synthetic Composite P", status: "published" },
       ]),
     ).toBe(
-      'This key is part of 3 composite strategies: "Synthetic Composite A", a composite whose name could not be read, "Synthetic Composite P". Deleting it removes the key from every composite listed, and a composite with no other key left becomes unlinked. A key used by a published composite cannot be deleted: contact support@quantalyze.com to change that composite\'s keys.',
+      'This key is part of 3 composite strategies: "Synthetic Composite A", a composite whose name could not be read, "Synthetic Composite P". Deleting it removes the key from every composite listed, and a composite with no other key left becomes unlinked. A key used by a published composite cannot be deleted: use the contact form to change that composite\'s keys.',
     );
   });
 
@@ -198,7 +199,7 @@ describe("KCS-GATE (167.2-REVIEW CR-01 / WR-06): the pre-attempt job-state gate 
   it("KCS-GATE-UNREADABLE-PERSISTENT (167.2-REVIEW-R2 IN-04 / SFH-R2 R2-L1): label and detail", () => {
     expect(PANEL_STOP_COPY.chain_unreadable_persistent.label).toBe("Sync not started");
     expect(PANEL_STOP_COPY.chain_unreadable_persistent.detail).toBe(
-      "This sync did not start: we cannot check whether this strategy has a sync in progress, and trying again will not change that. Contact support@quantalyze.com to start a sync.",
+      "This sync did not start: we cannot check whether this strategy has a sync in progress, and trying again will not change that. Use the contact form to have a sync started.",
     );
     expect(PANEL_STOP_COPY.chain_unreadable_persistent.detail).not.toMatch(/in a moment/i);
   });
@@ -246,6 +247,40 @@ describe("KCS-FINISH-UNVERIFIED (167.2-REVIEW-SFH L-1)", () => {
   it("the note a success withheld for an unverified list leaves", () => {
     expect(FINISH_UNVERIFIED_NOTE).toBe(
       "This sync finished, but the key list could not be re-read to confirm the key's status. Reload this page to see it.",
+    );
+  });
+});
+
+describe("Phase 164.6.6.3.5 DOMAINONE: the key card points at the contact form and names no address", () => {
+  // Every string that sends the owner to support carries the phrase
+  // `contact form` once, so ContactPointerText has exactly one thing to link,
+  // and none carries an address. The expected strings themselves are pinned
+  // above as hand-typed literals; this guards the INVARIANT beside them.
+  const published = deleteCompositeWarning([{ name: "Synthetic Composite P", status: "published" }]);
+  const pointers: Array<[string, string]> = [
+    ["COMPOSITE_CARD_NOTE", COMPOSITE_CARD_NOTE],
+    ["SHAPE_UNKNOWN_CARD_NOTE", SHAPE_UNKNOWN_CARD_NOTE],
+    ["chain_unreadable_persistent detail", PANEL_STOP_COPY.chain_unreadable_persistent.detail],
+    ["deleteCompositeWarning (published tail)", published],
+  ];
+
+  it.each(pointers)("%s says `contact form` exactly once", (_name, text) => {
+    expect(text.split("contact form")).toHaveLength(2);
+  });
+
+  it("no key-card string names an address", () => {
+    const all = [
+      ...pointers.map(([, t]) => t),
+      ...Object.values(PANEL_STOP_COPY).map((c) => c.detail),
+      deleteCompositeWarning([{ name: "Synthetic Composite A", status: "draft" }]),
+      DELETE_MEMBERSHIP_UNCHECKED_COPY,
+    ];
+    for (const text of all) expect(text).not.toMatch(/@quantalyze\./);
+  });
+
+  it("a draft composite's delete warning carries no pointer (nothing to link)", () => {
+    expect(deleteCompositeWarning([{ name: "Synthetic Composite A", status: "draft" }])).not.toContain(
+      "contact form",
     );
   });
 });

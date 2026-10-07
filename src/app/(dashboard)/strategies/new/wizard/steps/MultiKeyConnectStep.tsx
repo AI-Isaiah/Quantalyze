@@ -45,6 +45,8 @@ import {
 // D-08 (Phase 164.6.6) — the panel secret slot reads the venue CAPABILITY,
 // never a venue name, to decide whether a paste keeps its edge whitespace.
 import { venueSecretIsVerbatim } from "@/lib/closed-sets";
+import { ContactPointerText } from "@/components/contact/ContactPointerText";
+import { contactHref } from "@/lib/contact";
 
 /**
  * Phase 88 / ONB-01 — the multi-key ConnectKeyStep.
@@ -231,7 +233,7 @@ const TRUST_ATOMS: { title: string; body: string }[] = [
   },
   {
     title: "Security contact",
-    body: "Questions? security@quantalyze.com responds within one business day.",
+    body: "Questions? Use the contact form; we reply within one business day.",
   },
 ];
 
@@ -818,6 +820,11 @@ export function MultiKeyConnectStep({
   const [mode, setMode] = useState<"single" | "multi">("single");
   const [panels, setPanels] = useState<PanelState[]>([]);
   const [strategyId, setStrategyId] = useState<string | null>(null);
+  // 164.6.6.3.5 D-02 — the draft id the error envelopes' contact pointer carries.
+  // `strategyId` is set only after a rehydration or a first validate succeeds, so
+  // fall back to the prop the wizard threads in: a rehydration failure is
+  // exactly when only the prop exists.
+  const contactDraftId = strategyId ?? draftStrategyId ?? null;
   const [announcement, setAnnouncement] = useState("");
   const [continuing, setContinuing] = useState(false);
   const [continueError, setContinueError] = useState<WizardErrorCode | null>(
@@ -1952,6 +1959,7 @@ export function MultiKeyConnectStep({
                 "WIZARD_KEYS_LOAD_FAILED",
                 rehydrateRequestCorrelationId ?? correlationId,
               )}
+              contactDraftId={contactDraftId}
               onRetry={() => {
                 setRehydrateStatus("loading");
                 setRetryTick((t) => t + 1);
@@ -2017,7 +2025,14 @@ export function MultiKeyConnectStep({
               <dt className="text-caption font-medium text-text-primary">
                 {atom.title}
               </dt>
-              <dd className="text-caption text-text-secondary">{atom.body}</dd>
+              <dd className="text-caption text-text-secondary">
+                {/* 164.6.6.3.5 S10 — see ConnectKeyStep's trust panel. */}
+                <ContactPointerText
+                  text={atom.body}
+                  href={contactHref({ topic: "security" })}
+                  newTab
+                />
+              </dd>
             </div>
           ))}
         </dl>
@@ -2032,6 +2047,7 @@ export function MultiKeyConnectStep({
             total={panels.length}
             fieldError={fieldErrors[i]}
             correlationId={correlationId}
+            contactDraftId={contactDraftId}
             registerCardRef={registerCardRef}
             registerValidateRowRef={registerValidateRowRef}
             onUpdate={updatePanel}
@@ -2047,7 +2063,10 @@ export function MultiKeyConnectStep({
 
       {summaryEnvelope && (
         <div id="multi-key-validation-summary" className="mt-6" data-testid="multi-key-validation-summary">
-          <WizardErrorEnvelope envelope={summaryEnvelope} />
+          <WizardErrorEnvelope
+            envelope={summaryEnvelope}
+            contactDraftId={contactDraftId}
+          />
         </div>
       )}
 
@@ -2055,6 +2074,7 @@ export function MultiKeyConnectStep({
         <div className="mt-6">
           <WizardErrorEnvelope
             envelope={continueErrorEnvelope}
+            contactDraftId={contactDraftId}
             onRetry={() => setContinueError(null)}
           />
         </div>
@@ -2111,6 +2131,8 @@ interface KeyPanelProps {
   total: number;
   fieldError?: FieldError;
   correlationId: string;
+  /** 164.6.6.3.5 D-02 — the draft strategy id when the step holds one. */
+  contactDraftId: string | null;
   registerCardRef: (id: string, el: HTMLButtonElement | null) => void;
   /** 153.4-05 — the validate ROW, so a cancelled wait can restore focus to it. */
   registerValidateRowRef: (id: string, el: HTMLDivElement | null) => void;
@@ -2133,6 +2155,7 @@ function KeyPanel({
   total,
   fieldError,
   correlationId,
+  contactDraftId,
   registerCardRef,
   registerValidateRowRef,
   onUpdate,
@@ -2541,6 +2564,7 @@ function KeyPanel({
           <div className="mt-3">
             <WizardErrorEnvelope
               envelope={errorEnvelope}
+              contactDraftId={contactDraftId}
               onRetry={() =>
                 // 140.5-03 — the wait is cleared WITH the code, mirroring
                 // `SyncPreviewStep`'s `handleKickoffRetry`. Belt and braces

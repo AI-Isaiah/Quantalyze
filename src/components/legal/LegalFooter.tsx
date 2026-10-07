@@ -3,8 +3,9 @@ import Link from "next/link";
 const PLATFORM_NAME = process.env.NEXT_PUBLIC_PLATFORM_NAME ?? "Quantalyze";
 
 /**
- * Minimal footer rendered on every public and authenticated page. Three
- * legal links + the platform name. Kept small enough to drop into existing
+ * Minimal footer rendered on every public and authenticated page. Four
+ * legal links, a Contact link (Phase 164.6.6.3.5 AD-07) + the platform name.
+ * The nav wraps so five 44px-tall links never scroll the page sideways at 390px. Kept small enough to drop into existing
  * layouts without rewriting their spacing. Lives under components/legal so
  * the `legal/*` routes can import it too.
  */
@@ -15,7 +16,7 @@ export function LegalFooter() {
         <p>
           © {new Date().getFullYear()} {PLATFORM_NAME}. All rights reserved.
         </p>
-        <nav aria-label="Legal" className="flex items-center gap-1">
+        <nav aria-label="Legal" className="flex flex-wrap items-center gap-1">
           <Link
             href="/security"
             className="inline-flex min-h-[44px] items-center rounded-md px-3 hover:text-text-primary"
@@ -39,6 +40,12 @@ export function LegalFooter() {
             className="inline-flex min-h-[44px] items-center rounded-md px-3 hover:text-text-primary"
           >
             Risk Disclaimer
+          </Link>
+          <Link
+            href="/contact"
+            className="inline-flex min-h-[44px] items-center rounded-md px-3 hover:text-text-primary"
+          >
+            Contact
           </Link>
         </nav>
       </div>

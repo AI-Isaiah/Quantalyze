@@ -1101,6 +1101,10 @@ export type Database = {
       // calls. audit-2026-05-07 G9.B.7 / red-team specialist regression.
       // 2026-08-12: regenerated from PROD (khslejtfbuezsmvmtsdn), which HAS
       // 115 — the three columns survived; only this comment needed re-applying.
+      // 2026-10-08 (Phase 164.6.6.3.5 DOMAINONE plan 04): `source`, `topic` and
+      // `reference` are hand-added from migration 20261008120000, which has NOT
+      // applied to PROD yet. A regen against the linked PROD project drops them
+      // until it does; re-apply them then, as with the notify_* columns above.
       for_quants_leads: {
         Row: {
           created_at: string
@@ -1115,7 +1119,10 @@ export type Database = {
           preferred_time: string | null
           processed_at: string | null
           processed_by: string | null
+          reference: string | null
+          source: string
           source_ip: unknown
+          topic: string | null
           user_agent: string | null
           wizard_context: Json | null
         }
@@ -1132,7 +1139,10 @@ export type Database = {
           preferred_time?: string | null
           processed_at?: string | null
           processed_by?: string | null
+          reference?: string | null
+          source?: string
           source_ip?: unknown
+          topic?: string | null
           user_agent?: string | null
           wizard_context?: Json | null
         }
@@ -1149,7 +1159,10 @@ export type Database = {
           preferred_time?: string | null
           processed_at?: string | null
           processed_by?: string | null
+          reference?: string | null
+          source?: string
           source_ip?: unknown
+          topic?: string | null
           user_agent?: string | null
           wizard_context?: Json | null
         }

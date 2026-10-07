@@ -150,6 +150,7 @@ async function probeNoClip(
 const PUBLIC_ROUTES: { path: string; anchor: string }[] = [
   { path: "/", anchor: "h1" },
   { path: "/security", anchor: "main h1" },
+  { path: "/contact", anchor: "main h1" },
   { path: "/for-quants", anchor: "main h1" },
   { path: "/browse", anchor: "main h1" },
   { path: "/demo", anchor: "#editorial-hero-headline" },
@@ -214,6 +215,7 @@ const AUTHED_ROUTES: { path: string; anchor: string; label: string }[] = [
   { path: "/strategies/new/wizard", anchor: "#wizard-connect-key-heading", label: "onboarding wizard API entry" },
   { path: "/strategies/new/wizard?source=csv", anchor: "#wizard-csv-upload-heading", label: "onboarding wizard CSV entry" },
   { path: "/security", anchor: "main h1", label: "security (authed)" },
+  { path: "/contact", anchor: "main h1", label: "contact (authed)" },
 ];
 
 test.describe("no-clip sweep (VERIFY-03) — authed", () => {

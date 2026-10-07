@@ -222,11 +222,11 @@ npx playwright test e2e/demo-screenshot.spec.ts --update-snapshots   # only if l
 Before the friend meeting day:
 ```bash
 # Staging smoke
-curl -sf https://staging.quantalyze.com/demo | grep -o "editorial hero text" || echo "FAIL"
-curl -sf https://staging.quantalyze.com/demo?persona=cold | grep -o "editorial hero text" || echo "FAIL"
-curl -sf https://staging.quantalyze.com/demo/founder-view > /dev/null && echo "OK" || echo "FAIL"
+curl -sf "$STAGING_BASE_URL/demo" | grep -o "editorial hero text" || echo "FAIL"
+curl -sf "$STAGING_BASE_URL/demo?persona=cold" | grep -o "editorial hero text" || echo "FAIL"
+curl -sf "$STAGING_BASE_URL/demo/founder-view" > /dev/null && echo "OK" || echo "FAIL"
 # PDF cold-start probe
-time curl -sf "https://staging.quantalyze.com/api/demo/portfolio-pdf/{ACTIVE_PORTFOLIO_ID}?token={valid}" -o /tmp/demo.pdf && ls -lh /tmp/demo.pdf
+time curl -sf "$STAGING_BASE_URL/api/demo/portfolio-pdf/{ACTIVE_PORTFOLIO_ID}?token={valid}" -o /tmp/demo.pdf && ls -lh /tmp/demo.pdf
 ```
 
 ---

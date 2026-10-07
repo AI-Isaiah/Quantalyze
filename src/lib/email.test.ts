@@ -69,7 +69,7 @@ const state = vi.hoisted(
     updateShouldThrow: boolean;
     resendShouldFail: boolean;
     resendError: string;
-    sendCalls: Array<{ to: string; subject: string; cc?: unknown }>;
+    sendCalls: Array<{ to: string; subject: string; cc?: unknown; from?: string; html?: string }>;
   } => ({
     rows: [],
     insertShouldFail: false,
@@ -139,8 +139,8 @@ vi.mock("@/lib/supabase/admin", () => ({
 vi.mock("resend", () => ({
   Resend: class MockResend {
     emails = {
-      send: async (payload: { to: string; subject: string; cc?: unknown }) => {
-        state.sendCalls.push({ to: payload.to, subject: payload.subject, cc: payload.cc });
+      send: async (payload: { to: string; subject: string; cc?: unknown; from?: string; html?: string }) => {
+        state.sendCalls.push({ to: payload.to, subject: payload.subject, cc: payload.cc, from: payload.from, html: payload.html });
         if (state.resendShouldFail) {
           return { data: null, error: { message: state.resendError } };
         }
@@ -149,6 +149,13 @@ vi.mock("resend", () => ({
     };
   },
 }));
+
+// D-12 (DOMAINONE): `email.ts` has NO sender fallback any more, so every case
+// that expects a real send needs a configured sender (D-07: an example.com
+// address, never a domain we might own). The no-sender cases unset it again.
+beforeEach(() => {
+  vi.stubEnv("PLATFORM_EMAIL", "test@example.com");
+});
 
 describe("email.ts — notification_dispatches audit trail", () => {
   beforeEach(() => {
@@ -388,6 +395,151 @@ describe("email.ts — notification_dispatches audit trail", () => {
       "[email] Resend not configured — skipping send to",
       "allocator@example.com",
     );
+  });
+
+  it("D-12 no sender: PLATFORM_EMAIL unset skips the send, warns, and marks the row 'failed'", async () => {
+    // Resend IS configured (beforeEach); only the sender is missing.
+    vi.stubEnv("PLATFORM_EMAIL", "");
+    vi.resetModules();
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const { notifyAllocatorIntroStatus } = await import("./email");
+
+    await notifyAllocatorIntroStatus(
+      "allocator@example.com",
+      "Long Vol Macro",
+      "intro_made",
+    );
+
+    // Never sent from an invented address.
+    expect(state.sendCalls).toHaveLength(0);
+    expect(state.rows).toHaveLength(1);
+    expect(state.rows[0].status).toBe("failed");
+    expect(state.rows[0].error).toBe("PLATFORM_EMAIL not configured");
+    expect(warnSpy).toHaveBeenCalledWith(
+      "[email] PLATFORM_EMAIL not configured — skipping send to",
+      "allocator@example.com",
+    );
+  });
+
+  it("D-12 no sender: a throwOnFailure caller gets a throw and an audited 'failed' row", async () => {
+    vi.stubEnv("PLATFORM_EMAIL", undefined);
+    vi.resetModules();
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const { notifyUserSignupApproved } = await import("./email");
+
+    await expect(
+      notifyUserSignupApproved("user@example.com", "manager"),
+    ).rejects.toThrow(/PLATFORM_EMAIL not configured/);
+    expect(state.sendCalls).toHaveLength(0);
+    expect(state.rows[0]?.status).toBe("failed");
+    expect(state.rows[0]?.error).toBe("PLATFORM_EMAIL not configured");
+  });
+
+  it("WR-01 notifyFounderGeneric: a skip is silent by default and an EmailSkippedError with throwOnSkip, for both skip causes", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    // No sender (Resend configured).
+    vi.stubEnv("PLATFORM_EMAIL", "");
+    vi.resetModules();
+    let mod = await import("./email");
+    let skip = await import("./email-skip");
+    await expect(mod.notifyFounderGeneric("Hi", "<p>x</p>")).resolves.toBeUndefined();
+    const noSender = await mod
+      .notifyFounderGeneric("Hi", "<p>x</p>", { throwOnSkip: true })
+      .catch((e: unknown) => e);
+    expect(noSender).toBeInstanceOf(skip.EmailSkippedError);
+    expect((noSender as InstanceType<typeof skip.EmailSkippedError>).reason).toBe(
+      "platform_email_not_configured",
+    );
+
+    // No Resend client (sender configured).
+    vi.stubEnv("PLATFORM_EMAIL", "test@example.com");
+    vi.stubEnv("RESEND_API_KEY", "");
+    vi.resetModules();
+    mod = await import("./email");
+    skip = await import("./email-skip");
+    await expect(mod.notifyFounderGeneric("Hi", "<p>x</p>")).resolves.toBeUndefined();
+    const noResend = await mod
+      .notifyFounderGeneric("Hi", "<p>x</p>", { throwOnSkip: true })
+      .catch((e: unknown) => e);
+    expect(noResend).toBeInstanceOf(skip.EmailSkippedError);
+    expect((noResend as InstanceType<typeof skip.EmailSkippedError>).reason).toBe(
+      "resend_not_configured",
+    );
+    expect(state.sendCalls).toHaveLength(0);
+  });
+
+  it("round 2 notifyFounderGeneric: a malformed recipient is a skip under throwOnSkip, with a fixed message that never echoes the address", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.stubEnv("ADMIN_EMAIL", "not-an-address");
+    vi.resetModules();
+    const mod = await import("./email");
+    const skip = await import("./email-skip");
+
+    // Default: silent, as before.
+    await expect(mod.notifyFounderGeneric("Hi", "<p>x</p>")).resolves.toBeUndefined();
+
+    const err = await mod
+      .notifyFounderGeneric("Hi", "<p>x</p>", { throwOnSkip: true })
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(skip.EmailSkippedError);
+    expect((err as InstanceType<typeof skip.EmailSkippedError>).reason).toBe(
+      "recipient_invalid",
+    );
+    expect((err as Error).message).not.toContain("not-an-address");
+    expect(state.sendCalls).toHaveLength(0);
+  });
+
+  it("round 2 notifyFounderGeneric: throwOnFailure surfaces a real Resend rejection; the default stays silent", async () => {
+    state.resendShouldFail = true;
+    state.resendError = "Rate limit exceeded";
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.useFakeTimers({ toFake: ["setTimeout"] });
+    try {
+      vi.resetModules();
+      const { notifyFounderGeneric } = await import("./email");
+
+      const silent = notifyFounderGeneric("Hi", "<p>x</p>");
+      await vi.advanceTimersByTimeAsync(2000);
+      await expect(silent).resolves.toBeUndefined();
+
+      const loud = notifyFounderGeneric("Hi", "<p>x</p>", { throwOnFailure: true });
+      const assertion = expect(loud).rejects.toThrow(/Send failed after 3 attempts: Rate limit exceeded/);
+      await vi.advanceTimersByTimeAsync(2000);
+      await assertion;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("D-04 the sender is read at send time: an env set after import is honoured", async () => {
+    vi.stubEnv("PLATFORM_EMAIL", "");
+    vi.stubEnv("PLATFORM_NAME", "Acme");
+    vi.resetModules();
+    const { notifyManagerIntroRequest } = await import("./email");
+    // Set AFTER the module was imported.
+    vi.stubEnv("PLATFORM_EMAIL", "late@example.org");
+
+    await notifyManagerIntroRequest("manager@example.com", "Acme Capital", "Long Vol Macro");
+
+    expect(state.sendCalls).toHaveLength(1);
+    expect(state.sendCalls[0].from).toBe("Acme <late@example.org>");
+  });
+
+  it("D-06 link fallback: with NEXT_PUBLIC_APP_URL unset the emailed link lands on quantalyze.xyz", async () => {
+    vi.stubEnv("NEXT_PUBLIC_APP_URL", "");
+    // `??` only falls back on undefined, so truly unset it.
+    delete process.env.NEXT_PUBLIC_APP_URL;
+    vi.resetModules();
+    const { notifyUserSignupApproved } = await import("./email");
+
+    await notifyUserSignupApproved("user@example.com", "allocator");
+
+    expect(state.sendCalls).toHaveLength(1);
+    expect(state.sendCalls[0].html).toContain('href="https://quantalyze.xyz/allocations"');
   });
 
   it("empty recipient short-circuits before any dispatch write or Resend call", async () => {

@@ -255,6 +255,9 @@ describe("proxy public-route gating (anonymous session)", () => {
       "/for-quants/about",
       "/security",
       "/security/contact",
+      // Phase 164.6.6.3.5 (D-01): the one contact form; every pointer and
+      // security.txt land here, so an anonymous visitor must reach it.
+      "/contact",
     ])("%s → next() (no redirect)", async (path) => {
       const req = new NextRequest(`https://example.com${path}`, {
         method: "GET",
@@ -290,6 +293,7 @@ describe("proxy public-route gating (anonymous session)", () => {
       "/browseFAKE", // C-0187: sibling of /browse — must NOT match
       "/legalese", // sibling of /legal
       "/securityaudit", // sibling of /security
+      "/contactus", // sibling of /contact, no separator
       "/for-quants-eval", // sibling of /for-quants
       // SHARE-02/03 sibling-bypass guards. The new /scenario-share +
       // /api/benchmark/btc public entries use the same `=== route ||
@@ -346,6 +350,9 @@ describe("proxy public-route gating (anonymous session)", () => {
       "/for-quants/about",
       "/security",
       "/security/contact",
+      // Phase 164.6.6.3.5 (D-01): a signed-in user following a "use the contact
+      // form" pointer must stay on /contact, not bounce to the dashboard.
+      "/contact",
       // 2026-05-17 UAT regression — these are public-routes (so unauthed
       // share-link viewers can render them) AND must be reachable by the
       // authed user who clicked the in-app button. Pre-fix, the proxy

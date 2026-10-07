@@ -159,6 +159,29 @@ const nextConfig: NextConfig = {
   },
   async redirects() {
     return [
+      // Phase 164.6.6.3.5 DOMAINONE D-05: one canonical address. The ROADMAP
+      // founder decision of 2026-10-06 retires the Vercel alias
+      // `quantalyze-rho.vercel.app` in favour of `https://quantalyze.xyz`, so
+      // every request on the alias 308s to the same path (query kept) on the
+      // canonical origin.
+      // The `host` value is a regex-like string, so BOTH dots are escaped:
+      // unescaped, a look-alike host such as `quantalyze-rhoXvercelXapp` would
+      // match and be sent to our origin. Only the exact alias may match.
+      // Preview and per-deployment hosts
+      // (`quantalyze-<hash>-<team>-projects.vercel.app`) must NEVER match:
+      // Vercel's preview checks run against them. The `missing` clause keeps
+      // cron requests out as belt and braces: Vercel cron arrives on the
+      // per-deployment host and does not follow redirects.
+      // A 308 is cached by browsers, so reverting this rule does not reach
+      // visitors who already followed it. Accepted: the destination is the
+      // same site (RESEARCH Pitfall 7).
+      {
+        source: "/:path*",
+        has: [{ type: "host", value: "quantalyze-rho\\.vercel\\.app" }],
+        missing: [{ type: "header", key: "x-vercel-cron-schedule" }],
+        destination: "https://quantalyze.xyz/:path*",
+        permanent: true,
+      },
       // Phase 51 NAV-01 (FLOW-02 follow-through): the legacy Strategy-Sandbox
       // surface `/scenarios` is consolidated into the unified composer at
       // `/allocations?tab=scenario`. This formalizes the former in-page

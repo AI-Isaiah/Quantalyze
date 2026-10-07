@@ -1269,6 +1269,8 @@ describe("[164.9.4 WR-01 / CR-01] TEST_READ_PLANNING_PATHS matches the planning 
         "never encodes, so moving it into the always-on script would add no protection for the identity that matters",
     ],
     ["scripts/check-planning-hygiene.ts", "whole-tree walker; the always-on frontend-lint runs it on every event"],
+    ["scripts/check-canonical-domain.ts", "whole-tree walker; names `.planning/` only as an exclusion, never as a file it reads"],
+    ["src/__tests__/check-canonical-domain.test.ts", "scratch-tree fixtures; names `.planning/` only as an exclusion, never as a file it reads"],
     [
       "scripts/verify-plan-anchors.mjs",
       "whole-corpus --pending walker; plan-anchor-verify runs it on every PR, NOT on push. A push is covered only " +

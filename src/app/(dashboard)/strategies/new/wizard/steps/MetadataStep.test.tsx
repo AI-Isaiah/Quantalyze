@@ -147,6 +147,38 @@ describe("[H-0191] MetadataStep", () => {
     expect(errored).toBe(false);
   });
 
+  it("[DOMAINONE S10] the category-load error points at the contact form, with the session and draft ids, in a new tab", async () => {
+    orderResult = { data: null, error: { message: "rls denied" } };
+    render(<MetadataStep {...baseProps} />);
+    const alert = await screen.findByText(/Could not load strategy categories\./i);
+    // The whole sentence is the UI-SPEC's verbatim target, with no address.
+    expect(alert.textContent).toBe(
+      "Could not load strategy categories. Refresh the page. If this persists, use the contact form (opens in a new tab).",
+    );
+    const link = alert.querySelector("a")!;
+    expect(link.getAttribute("href")).toBe(
+      "/contact?topic=support&ref=session-1&draft=strat-1",
+    );
+    expect(link).toHaveAttribute("target", "_blank");
+    expect(link.getAttribute("rel")).toBe("noopener noreferrer");
+    expect(alert.textContent).not.toMatch(/@/);
+  });
+
+  it("[DOMAINONE S10] the no-categories block points at the contact form, with the session and draft ids, in a new tab", async () => {
+    orderResult = { data: [], error: null };
+    render(<MetadataStep {...baseProps} />);
+    const block = await screen.findByTestId("metadata-categories-empty");
+    expect(block.textContent).toBe(
+      "No strategy categories are available yet, so this strategy cannot be submitted. Use the contact form (opens in a new tab) and we will add them.",
+    );
+    const link = block.querySelector("a")!;
+    expect(link.getAttribute("href")).toBe(
+      "/contact?topic=support&ref=session-1&draft=strat-1",
+    );
+    expect(link).toHaveAttribute("target", "_blank");
+    expect(block.textContent).not.toMatch(/@/);
+  });
+
   it("[WR-04] does NOT surface the empty-category block when categories load non-empty", async () => {
     orderResult = { data: CATS, error: null };
     render(<MetadataStep {...baseProps} />);

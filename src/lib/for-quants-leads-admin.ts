@@ -48,6 +48,14 @@ export interface ForQuantsLeadRow {
   /** Sanitized error message (max 500 chars) when the send failed
    *  OR ADMIN_EMAIL was unset. NULL on clean sends. */
   notify_error: string | null;
+  /** Which form wrote the row (migration 20261008120000): `request_call`
+   *  or `contact_form`. NOT NULL, DEFAULT 'request_call'. */
+  source: string;
+  /** A CONTACT_TOPICS key on a contact_form row; NULL on request-a-call rows. */
+  topic: string | null;
+  /** The sender's reference (<= 200 chars, user-typed text, render escaped);
+   *  NULL when none was given. */
+  reference: string | null;
 }
 
 /** Hard cap on the `?show=all` view so a growing table doesn't ship
@@ -56,7 +64,7 @@ export interface ForQuantsLeadRow {
 export const FOR_QUANTS_LEADS_FULL_VIEW_CAP = 500;
 
 const LEAD_SELECT =
-  "id, name, firm, email, preferred_time, notes, wizard_context, created_at, processed_at, processed_by, notify_attempted_at, notify_succeeded_at, notify_error";
+  "id, name, firm, email, preferred_time, notes, wizard_context, created_at, processed_at, processed_by, notify_attempted_at, notify_succeeded_at, notify_error, source, topic, reference";
 
 export interface ListForQuantsLeadsResult {
   rows: ForQuantsLeadRow[];
@@ -120,6 +128,80 @@ export async function listForQuantsLeads({
     ? fetched.slice(0, FOR_QUANTS_LEADS_FULL_VIEW_CAP)
     : fetched;
   return { rows, hitCap };
+}
+
+/**
+ * Once-per-process flag for the Sentry report of a failed unprocessed-leads
+ * count (D-17 round 2). The layout reads the count on every admin page load, so
+ * a standing failure would otherwise report once per navigation; the console
+ * line and the sidebar's "?" marker still show every occurrence. Module-scope
+ * so it is shared across requests on a warm instance; tests reset it with
+ * `vi.resetModules()`.
+ */
+let unprocessedCountFailureReported = false;
+
+/**
+ * Lazy `@sentry/nextjs`, so a failed SDK load can never break the layout (the
+ * same pattern as `src/app/api/for-quants-lead/route.ts`'s `captureFailure`).
+ */
+function reportUnprocessedCountFailure(err: unknown): void {
+  if (unprocessedCountFailureReported) return;
+  unprocessedCountFailureReported = true;
+  void import("@sentry/nextjs")
+    .then((Sentry) => {
+      Sentry.captureException(
+        err instanceof Error
+          ? err
+          : new Error(
+              `[for-quants-leads-admin] unprocessed count unavailable: ${
+                err && typeof err === "object" && "message" in err
+                  ? String((err as { message: unknown }).message)
+                  : String(err ?? "no count returned")
+              }`,
+            ),
+        { tags: { area: "for-quants-leads-admin", stage: "unprocessed_count" } },
+      );
+    })
+    .catch(() => {
+      // Already logged via console.error by the caller; do not crash the layout.
+    });
+}
+
+/**
+ * D-17: how many leads are still unprocessed, for the admin sidebar's unread
+ * badge on the "For-quants leads" entry. A HEAD count, so no lead row (name,
+ * email, message) leaves the database for a nav element.
+ *
+ * Returns `null` on ANY failure, after logging it and reporting it to Sentry
+ * once per process. `null` is not `0`: the caller must show an "unmeasured"
+ * marker rather than render a "nothing waiting" state it did not measure, the
+ * same rule `listForQuantsLeads` applies to its error banner. The caller is
+ * responsible for the admin check; this function only reads, and only through
+ * the service-role chokepoint.
+ */
+export async function countUnprocessedForQuantsLeads(
+  client?: SupabaseClient,
+): Promise<number | null> {
+  try {
+    const admin = client ?? createAdminClient();
+    const { count, error } = await admin
+      .from("for_quants_leads")
+      .select("id", { count: "exact", head: true })
+      .is("processed_at", null);
+    if (error || count === null || count === undefined) {
+      console.error(
+        "[for-quants-leads-admin] unprocessed count failed:",
+        error ?? "no count returned",
+      );
+      reportUnprocessedCountFailure(error ?? "no count returned");
+      return null;
+    }
+    return count;
+  } catch (err) {
+    console.error("[for-quants-leads-admin] unprocessed count threw:", err);
+    reportUnprocessedCountFailure(err);
+    return null;
+  }
 }
 
 export type SetLeadProcessedResult =

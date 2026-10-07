@@ -45,9 +45,10 @@ test.describe("/security page", () => {
       page.getByRole("heading", { name: /^Compliance posture$/, level: 2 }),
     ).toBeVisible();
 
-    // Security contact surface
+    // Security contact surface (DOMAINONE D-01: a link to the contact form,
+    // not an address)
     await expect(
-      page.locator("text=security@quantalyze.com").first(),
+      page.locator('a[href="/contact?topic=security"]').first(),
     ).toBeVisible();
   });
 

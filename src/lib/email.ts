@@ -2,6 +2,8 @@ import { after } from "next/server";
 import { Resend } from "resend";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getCorrelationId } from "@/lib/correlation-id";
+import { getPlatformEmail, getPlatformName } from "@/lib/platform";
+import { EmailSkippedError } from "@/lib/email-skip";
 import { SEVERITY_HEX, type AlertSeverity } from "./utils";
 import type { ManagerIdentity } from "@/lib/types";
 
@@ -49,11 +51,13 @@ function getAuditAdminClient(): ReturnType<typeof createAdminClient> | null {
   return _auditAdmin;
 }
 
-// Whitelabel-friendly platform identity. Defaults keep Quantalyze branding;
-// a partner deployment flips these via env vars without touching code.
+// Whitelabel-friendly platform identity. The display name defaults to
+// Quantalyze branding; a partner deployment flips it via env var without
+// touching code. `PLATFORM_NAME` stays a module constant for the email BODY
+// copy; the SENDER is read at send time (`send()`) through
+// `getPlatformEmail()` and has NO default (D-12): unset means the send is
+// skipped with a logged warning and an audited 'failed' row.
 const PLATFORM_NAME = process.env.PLATFORM_NAME ?? "Quantalyze";
-const PLATFORM_EMAIL = process.env.PLATFORM_EMAIL ?? "notifications@quantalyze.com";
-const FROM = `${PLATFORM_NAME} <${PLATFORM_EMAIL}>`;
 /**
  * Runtime read of the founder/admin email so a delayed env-var injection
  * (a race between Vercel's runtime-env wiring and module init, or a test
@@ -68,7 +72,7 @@ const FROM = `${PLATFORM_NAME} <${PLATFORM_EMAIL}>`;
 function founderEmail(): string {
   return process.env.ADMIN_EMAIL ?? "";
 }
-const APP_URL = process.env.NEXT_PUBLIC_APP_URL ?? "https://quantalyze.com";
+const APP_URL = process.env.NEXT_PUBLIC_APP_URL ?? "https://quantalyze.xyz";
 const BRAND_COLOR = "#1B6B5A"; // muted teal, per DESIGN.md
 const SIGNATURE = `<p style="color:#666;font-size:13px;">— ${PLATFORM_NAME}</p>`;
 
@@ -137,6 +141,13 @@ async function insertCorrelationMapping(
  * returns 200 even when the approval email permanently failed — the docstring
  * claimed a 500 the implementation could not produce.
  *
+ * WR-01: pass `throwOnSkip: true` to learn that a send was SKIPPED for want of
+ * configuration (no Resend client, or no PLATFORM_EMAIL sender): send() then
+ * throws EmailSkippedError instead of returning as if the message went out.
+ * Unlike `throwOnFailure` it does NOT make a rejected Resend send throw, so a
+ * caller can record "not sent, not configured" apart from "tried and failed".
+ * Both flags default to false; no existing caller changes behaviour.
+ *
  * The `notificationType` parameter is required so operators can filter the
  * audit trail by category (e.g., "manager_intro_request" vs "alert_digest").
  *
@@ -151,7 +162,10 @@ async function send(
   html: string,
   notificationType: NotificationType,
   cc?: string | string[],
-  { throwOnFailure = false }: { throwOnFailure?: boolean } = {},
+  {
+    throwOnFailure = false,
+    throwOnSkip = false,
+  }: { throwOnFailure?: boolean; throwOnSkip?: boolean } = {},
 ): Promise<void> {
   if (!to) {
     // H1 (red-team): honour throwOnFailure at the empty-recipient guard.
@@ -175,6 +189,18 @@ async function send(
       "[email] recipient rejected by sanitizeEmailRecipient (header-injection guard):",
       JSON.stringify(to),
     );
+    // A set-but-malformed recipient (e.g. a mistyped ADMIN_EMAIL) is a
+    // configuration skip: the send was never attempted. Callers that opt into
+    // `throwOnSkip` get a fixed-message EmailSkippedError that does NOT echo
+    // the address, so the route can record it as not sent without storing or
+    // reporting the value. Takes precedence over throwOnFailure's echoing
+    // message because the recorded text lands in a CRM column.
+    if (throwOnSkip) {
+      throw new EmailSkippedError(
+        "recipient_invalid",
+        "[email] Recipient address rejected by sanitization guard — send skipped",
+      );
+    }
     // SF-F2: honour throwOnFailure here too — a rejected address is a
     // delivery failure from the caller's perspective. Without this, callers
     // that pass throwOnFailure=true (e.g. approve routes) silently received
@@ -275,12 +301,15 @@ async function send(
     // propagates. Without this, a void fire-and-forget leaves the row in
     // 'queued' when the throw races ahead of the update, and operators
     // querying queued+age>threshold find phantom rows that were never sent.
-    if (throwOnFailure) {
+    if (throwOnFailure || throwOnSkip) {
       await markDispatch(admin, dispatchId, {
         status: "failed",
         error: "Resend not configured",
       });
-      throw new Error("[email] Resend not configured — send failed");
+      throw new EmailSkippedError(
+        "resend_not_configured",
+        "[email] Resend not configured — send failed",
+      );
     }
     // Fire-and-forget: on the non-throwing path, audit trail updates must
     // never block the caller — but schedule via `after()` so the write
@@ -293,6 +322,33 @@ async function send(
     );
     return;
   }
+
+  // D-04 / D-12: the sender is read at send time and has no fallback. With no
+  // sender, take the same skip branch as the no-Resend path above (warning,
+  // audited 'failed' row, throw for throwOnFailure callers). We never send
+  // from an address we did not configure.
+  const senderEmail = getPlatformEmail();
+  if (!senderEmail) {
+    console.warn("[email] PLATFORM_EMAIL not configured — skipping send to", safeTo);
+    if (throwOnFailure || throwOnSkip) {
+      await markDispatch(admin, dispatchId, {
+        status: "failed",
+        error: "PLATFORM_EMAIL not configured",
+      });
+      throw new EmailSkippedError(
+        "platform_email_not_configured",
+        "[email] PLATFORM_EMAIL not configured — send failed",
+      );
+    }
+    scheduleDispatchAudit(() =>
+      markDispatch(admin, dispatchId, {
+        status: "failed",
+        error: "PLATFORM_EMAIL not configured",
+      }),
+    );
+    return;
+  }
+  const from = `${getPlatformName()} <${senderEmail}>`;
 
   // Phase 16 / OBSERV-03: resolve correlation_id BEFORE the retry loop so all
   // attempts carry the same cid tag (the same logical email keeps the same
@@ -312,7 +368,7 @@ async function send(
     sendError = null;
     try {
       const result = await resend.emails.send({
-        from: FROM,
+        from,
         to: safeTo,
         // NEW-C33-02: use safeCC (sanitized) instead of raw cc.
         cc: safeCC,
@@ -607,10 +663,11 @@ export async function notifyManagerApproved(
  * /api/admin/allocator-approve and /api/admin/manager-approve routes
  * introduced in PR #266).
  *
- * The /pending-approval page promises "We'll email you as soon as it's
- * approved" — before this helper landed, no email was actually sent, so
- * users polled the page or re-signed-up. The dispatch is `await`ed by the
- * approve routes so a Resend failure surfaces as a 500 instead of being
+ * The /pending-approval page used to promise an approval email ("We'll
+ * email you as soon as it's approved"). With Resend unset (D-04) none is
+ * sent, which is why the page no longer promises one (DOMAINONE plan 09).
+ * Where Resend and a sender ARE configured, the dispatch is `await`ed by the
+ * approve routes so a send failure surfaces as a 500 instead of being
  * silently dropped.
  *
  * `role` controls the next-step copy: an allocator lands on /allocations,
@@ -958,8 +1015,25 @@ export async function sendAlertDigest(
  *
  * The caller is responsible for HTML-escaping any user-supplied fields they
  * interpolate into bodyHtml. The subject is sanitized here for header safety.
+ *
+ * WR-01: `throwOnSkip: true` makes a configuration skip (no Resend client, no
+ * PLATFORM_EMAIL sender) throw EmailSkippedError, so a caller that records a
+ * delivery outcome (the for-quants-lead route) never reads a skip as a send.
+ * A malformed recipient (a set-but-invalid ADMIN_EMAIL) is a skip too and
+ * throws EmailSkippedError("recipient_invalid") with a fixed message.
+ * `throwOnFailure: true` additionally surfaces a REAL Resend rejection (after
+ * the 3 attempts) as a thrown Error, so the caller does not stamp a rejected
+ * send as delivered. The defaults keep the swallow-everything behaviour the
+ * other callers rely on.
  */
-export async function notifyFounderGeneric(subject: string, bodyHtml: string) {
+export async function notifyFounderGeneric(
+  subject: string,
+  bodyHtml: string,
+  {
+    throwOnSkip = false,
+    throwOnFailure = false,
+  }: { throwOnSkip?: boolean; throwOnFailure?: boolean } = {},
+) {
   const founder = founderEmail();
   if (!founder) return;
   await send(
@@ -967,5 +1041,7 @@ export async function notifyFounderGeneric(subject: string, bodyHtml: string) {
     safeSubject(subject),
     `<div style="font-family:'DM Sans',sans-serif;max-width:600px;">${bodyHtml}${SIGNATURE}</div>`,
     "founder_generic",
+    undefined,
+    { throwOnSkip, throwOnFailure },
   );
 }

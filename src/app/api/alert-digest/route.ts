@@ -5,7 +5,7 @@ import { safeCompare } from "@/lib/timing-safe-compare";
 import { signAlertAckToken } from "@/lib/alert-ack-token";
 import { type AlertSeverity } from "@/lib/utils";
 
-const APP_URL = process.env.NEXT_PUBLIC_APP_URL ?? "https://quantalyze.com";
+const APP_URL = process.env.NEXT_PUBLIC_APP_URL ?? "https://quantalyze.xyz";
 
 /**
  * P446 (audit-2026-05-07) — cap the unacked-alert fetch.

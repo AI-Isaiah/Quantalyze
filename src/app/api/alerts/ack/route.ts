@@ -30,7 +30,7 @@ import { logAuditEventAsUser } from "@/lib/audit";
  * rate-limit + origin triangle IS the auth surface for this route.
  */
 
-const APP_URL = process.env.NEXT_PUBLIC_APP_URL ?? "https://quantalyze.com";
+const APP_URL = process.env.NEXT_PUBLIC_APP_URL ?? "https://quantalyze.xyz";
 
 const ACK_REDIRECT = {
   expired: `${APP_URL}/allocations?ack=expired`,

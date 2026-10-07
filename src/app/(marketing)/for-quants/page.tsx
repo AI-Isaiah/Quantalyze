@@ -305,8 +305,8 @@ const TRUST_ATOMS: { title: string; body: string }[] = [
     body: "One click removes the key and the listing. The encrypted credential row is deleted in the same transaction.",
   },
   {
-    title: "Named security contact",
-    body: "Security issues go directly to security@quantalyze.com. We reply within 1 business day and publish acknowledgments at /security.",
+    title: "Security contact",
+    body: "Security issues go through the contact form, marked Security report. We reply within 1 business day and publish acknowledgments at /security.",
   },
 ];
 

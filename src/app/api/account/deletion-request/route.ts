@@ -7,7 +7,7 @@ import { assertSameOrigin } from "@/lib/csrf";
 import { logAuditEventAsUser } from "@/lib/audit";
 import { NO_STORE_HEADERS } from "@/lib/api/headers";
 
-const APP_URL = process.env.NEXT_PUBLIC_APP_URL ?? "https://quantalyze.com";
+const APP_URL = process.env.NEXT_PUBLIC_APP_URL ?? "https://quantalyze.xyz";
 
 /**
  * POST /api/account/deletion-request
