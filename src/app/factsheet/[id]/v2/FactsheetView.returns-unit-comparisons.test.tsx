@@ -20,7 +20,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render } from "@testing-library/react";
 import { buildFactsheetPayload } from "@/lib/factsheet/build-payload";
-import type { FactsheetPayload } from "@/lib/factsheet/types";
+import type { FactsheetPayload, StressWindowPayload } from "@/lib/factsheet/types";
 
 vi.mock("@/hooks/useBreakpoint", () => ({
   useBreakpoint: vi.fn(() => "desktop" as const),
@@ -58,6 +58,8 @@ import { FactsheetBody } from "./FactsheetView";
 import { MetricsColumn } from "./MetricsColumn";
 import { SignaturesSection } from "./SignaturePanels";
 import { CrossSignaturesSection } from "./CrossSignaturePanels";
+import { CorrelationStripPanel, CorrelationsMatrixPanel, EndOfYearBarsPanel } from "./DistributionPanels";
+import { StressWindowsPanel } from "./StressWindowsPanel";
 
 const DAY = 86_400_000;
 const START = Date.parse("2025-06-01T00:00:00Z");
@@ -255,5 +257,201 @@ describe("A5 KPI strip never carries a BTC-relative cell", () => {
       expect(value(unit, label)).toBe(value(plain, label));
       expect(value(unit, label)).not.toBe("—");
     }
+  });
+});
+
+/** The strip's rows: name, the rho text, and whether a bar was drawn. */
+function stripRows(container: HTMLElement) {
+  const groups = [...container.querySelectorAll("svg g")].filter((g) => g.querySelectorAll("text").length === 2);
+  return groups.map((g) => {
+    const t = g.querySelectorAll("text");
+    return { name: t[0].textContent ?? "", rho: t[1].textContent ?? "", bars: g.querySelectorAll("rect").length };
+  });
+}
+
+describe("A17 Cross-Asset Correlation strip", () => {
+  const SENTENCE = "BTC row not measurable: returns are in BTC.";
+  const subtitle = (c: HTMLElement) => c.querySelector("figure header p")!.textContent ?? "";
+
+  it("the BTC row reads '—' with no bar, and the subtitle says why", () => {
+    const { container } = renderIn(makePayload("BTC", "spx"), <CorrelationStripPanel />);
+    const btc = stripRows(container).find((r) => r.name === "BTC")!;
+    expect(btc.rho).toBe("—");
+    expect(btc.bars).toBe(0);
+    expect(subtitle(container)).toContain(SENTENCE);
+  });
+
+  it("ETH, S&P 500, Gold and US 10Y keep the no-unit rows exactly (D-17)", () => {
+    const unit = stripRows(renderIn(makePayload("BTC", "spx"), <CorrelationStripPanel />).container);
+    const plain = stripRows(renderIn(makePayload(null, "spx"), <CorrelationStripPanel />).container);
+    expect(unit.map((r) => r.name)).toEqual(plain.map((r) => r.name));
+    const others = (rows: typeof unit) => rows.filter((r) => r.name !== "BTC");
+    expect(others(unit)).toHaveLength(4);
+    expect(others(unit)).toEqual(others(plain));
+    // Not vacuous: the no-unit BTC row is a measured number with a bar.
+    const plainBtc = plain.find((r) => r.name === "BTC")!;
+    expect(plainBtc.rho).not.toBe("—");
+    expect(plainBtc.bars).toBe(1);
+    // None of the four kept rows went to a dash because of the unit.
+    expect(others(unit).every((r) => r.rho !== "—" && r.bars === 1)).toBe(true);
+  });
+
+  it("a USD strategy's strip carries no such sentence and is otherwise unchanged", () => {
+    const { container } = renderIn(makePayload(null, "spx"), <CorrelationStripPanel />);
+    expect(subtitle(container)).not.toContain("not measurable");
+    expect(subtitle(container)).toBe(
+      "Pearson ρ on aligned daily returns · ρ near 0 implies diversification benefit",
+    );
+  });
+});
+
+/** The matrix as strings: column headers, then each row's label and N cells (text + fill). */
+function matrixOf(container: HTMLElement) {
+  const texts = [...container.querySelectorAll("svg text")];
+  const rows = Math.round((-1 + Math.sqrt(1 + 4 * texts.length)) / 2); // N + N*(N+1) = texts.length
+  const headers = texts.slice(0, rows).map((t) => t.textContent ?? "");
+  const cells: { text: string; fill: string | null }[][] = [];
+  for (let i = 0; i < rows; i++) {
+    const base = rows + i * (rows + 1);
+    cells.push(texts.slice(base + 1, base + 1 + rows).map((t) => ({ text: t.textContent ?? "", fill: t.getAttribute("fill") })));
+  }
+  return { headers, cells };
+}
+
+describe("A18 Correlations matrix", () => {
+  const CAPTION = "Strategy × BTC not measurable: returns are in BTC.";
+
+  it("only the strategy × BTC pair reads '—', untoned; every other cell equals the no-unit build (D-17)", () => {
+    const unit = matrixOf(renderIn(makePayload("BTC", "spx"), <CorrelationsMatrixPanel />).container);
+    const plain = matrixOf(renderIn(makePayload(null, "spx"), <CorrelationsMatrixPanel />).container);
+    expect(unit.headers).toEqual(plain.headers);
+    const b = unit.headers.indexOf("BTC");
+    expect(b).toBeGreaterThan(0);
+    const N = unit.headers.length;
+    for (let i = 0; i < N; i++) {
+      for (let j = 0; j < N; j++) {
+        const pair = (i === 0 && j === b) || (i === b && j === 0);
+        if (pair) {
+          expect(unit.cells[i][j].text, `cell ${i},${j}`).toBe("—");
+          expect(unit.cells[i][j].fill, `cell ${i},${j} is untoned`).toBe("var(--color-text-muted)");
+          // Not vacuous: the no-unit build measures this cell.
+          expect(plain.cells[i][j].text).not.toBe("—");
+        } else {
+          expect(unit.cells[i][j], `cell ${i},${j}`).toEqual(plain.cells[i][j]);
+          expect(unit.cells[i][j].text).not.toBe("—");
+        }
+      }
+    }
+  });
+
+  it("the caption appears once for a BTC strategy and never for a USD one", () => {
+    const unit = renderIn(makePayload("BTC", "spx"), <CorrelationsMatrixPanel />).container;
+    expect((unit.textContent ?? "").split(CAPTION)).toHaveLength(2);
+    const plain = renderIn(makePayload(null, "spx"), <CorrelationsMatrixPanel />).container;
+    expect(plain.textContent).not.toContain("not measurable");
+  });
+});
+
+const STRESS: StressWindowPayload = {
+  windows: [
+    {
+      name: "Aug 2025 unwind",
+      note: "a named event",
+      start: "2025-08-02",
+      end: "2025-08-09",
+      days: 8,
+      expectedCalendarDays: 8,
+      coverage: "full",
+      stratReturn: -0.031,
+      benchReturn: -0.12,
+      stratMaxDD: -0.042,
+      benchMaxDD: -0.2,
+    },
+    {
+      name: "Oct 2025 rally",
+      note: "another named event",
+      start: "2025-10-01",
+      end: "2025-10-08",
+      days: 8,
+      expectedCalendarDays: 8,
+      coverage: "full",
+      stratReturn: 0.05,
+      benchReturn: 0.09,
+      stratMaxDD: -0.01,
+      benchMaxDD: -0.02,
+    },
+  ],
+  benchName: "BTC",
+  totalCatalogued: 2,
+  droppedOutOfRange: 0,
+  droppedPartial: 0,
+};
+
+function stressPayload(unit: string | null): FactsheetPayload {
+  return { ...makePayload(unit, "none"), stressWindows: STRESS };
+}
+
+describe("A19 Stress Windows", () => {
+  const rowCells = (c: HTMLElement) =>
+    Array.from(c.querySelectorAll("tbody tr")).map((tr) => Array.from(tr.querySelectorAll("td")).map((td) => td.textContent ?? ""));
+  const subtitle = (c: HTMLElement) => c.querySelector("figure header p")!.textContent ?? "";
+
+  it("keeps the strategy columns, reads the benchmark cells '—', and the subtitle names the reason", () => {
+    const unit = renderIn(stressPayload("BTC"), <StressWindowsPanel />).container;
+    const plain = renderIn(stressPayload(null), <StressWindowsPanel />).container;
+    const u = rowCells(unit);
+    const p = rowCells(plain);
+    expect(u).toHaveLength(2);
+    for (let r = 0; r < u.length; r++) {
+      // Event, Window, Days, Strategy, Strat DD: the BTC series alone, unchanged.
+      expect(u[r].slice(0, 5)).toEqual(p[r].slice(0, 5));
+      expect(u[r].slice(5)).toEqual(["—", "—"]);
+      // Not vacuous: the no-unit build prints numbers there.
+      expect(p[r].slice(5).every((t) => t !== "—")).toBe(true);
+    }
+    expect(subtitle(unit)).toBe(
+      "strategy compounded return in BTC + max drawdown during named market events · BTC column not shown: returns are in BTC",
+    );
+  });
+
+  it("the withheld benchmark cells carry the muted colour, never a gain or loss colour", () => {
+    const { container } = renderIn(stressPayload("BTC"), <StressWindowsPanel />);
+    for (const tr of Array.from(container.querySelectorAll("tbody tr"))) {
+      const [benchRet, benchDD] = Array.from(tr.querySelectorAll("td")).slice(-2) as HTMLElement[];
+      expect(benchRet.style.color).toBe("var(--color-text-muted)");
+      expect(benchDD.style.color).toBe("var(--color-text-muted)");
+    }
+  });
+
+  it("a USD strategy's subtitle and cells are as today", () => {
+    const { container } = renderIn(stressPayload(null), <StressWindowsPanel />);
+    expect(subtitle(container)).toBe("strategy vs BTC compounded return + max drawdown during named market events");
+  });
+});
+
+/**
+ * The carry-forward decision from plan 05, pinned so a change to it is deliberate.
+ *
+ * D-09 names two places for "in BTC": the equity chart and the return KPI labels, and
+ * UI-SPEC A13/A20 enumerate the rows (Main Metrics `Cumulative Return` and `CAGR`, the
+ * `EOY Returns` table title). UI-SPEC A23 leaves every other panel unchanged, "the
+ * masthead chip covers them". The End-of-Year Returns bars chart and the Cumulative
+ * Return Metrics panel's CAGR row are in no enumeration, so they keep their bare labels.
+ */
+describe("A23 surfaces the unit rule does not name keep their labels", () => {
+  it("the End-of-Year Returns bars chart keeps its title for a BTC strategy", () => {
+    const { container } = renderIn(makePayload("BTC", "none"), <EndOfYearBarsPanel />);
+    expect(container.querySelector("h3")!.textContent).toBe("End-of-Year Returns");
+  });
+
+  it("the Cumulative Return Metrics panel's CAGR row keeps its label, while Main Metrics' CAGR names the unit", () => {
+    const { container } = renderIn(makePayload("BTC", "none"), <MetricsColumn />);
+    const panel = (title: string) =>
+      Array.from(container.querySelectorAll("h3"))
+        .find((h) => h.textContent === title)!
+        .closest("section")!;
+    const labels = (sec: HTMLElement) => Array.from(sec.querySelectorAll("tbody tr td:first-child")).map((td) => td.textContent);
+    expect(labels(panel("Cumulative Return Metrics"))).toContain("CAGR");
+    expect(labels(panel("Main Metrics"))).toContain("CAGR in BTC");
   });
 });

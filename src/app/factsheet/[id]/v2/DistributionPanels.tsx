@@ -7,6 +7,7 @@ import { ResponsiveChartFrame } from "@/components/ResponsiveChartFrame";
 import { useBreakpoint } from "@/hooks/useBreakpoint";
 import { comparatorPartialYear, isoToMonthDay } from "./MetricsColumn";
 import { COMPARATOR_CALENDARS } from "@/lib/factsheet/align";
+import { nativeUnitReason } from "@/lib/factsheet/returns-unit";
 
 /**
  * Three compact analytical panels sharing a common visual language:
@@ -350,13 +351,20 @@ export function CorrelationStripPanel() {
   // are fixed INPUT series, but the STRATEGY leg is the basis-selected dailies, so
   // ρ moves cash→MTM (nothing bypasses the backbone). The per-basis bundle carries
   // correlations now, so this view-read follows MTM with zero panel branching.
-  const view = useBasisSeriesView(usePayload());
+  const payload = usePayload();
+  const view = useBasisSeriesView(payload);
   const isMobile = useBreakpoint() === "mobile";
+  // Phase 164.6.6.2 (D-10, D-17, UI-SPEC A17): for a strategy whose returns are in a
+  // native unit the BTC row is withheld (a BTC series measured in BTC is a flat line,
+  // the USD-priced one mixes units). It takes the non-finite row form below. ETH,
+  // S&P 500, Gold and US 10Y are USD-priced comparisons and stay as measured.
+  const unit = payload.returnsUnit ?? null;
   // Phase 169.5 (SFH-M-04): a benchmark whose rho is not a number (BTC unavailable,
   // or fewer than two paired intervals) keeps its row and reads "—" with no bar,
   // as the correlation matrix shows the same cell. Filtering it out made the strip
   // silently one row shorter than the matrix beside it.
-  const rows = view.correlations;
+  const rows =
+    unit === null ? view.correlations : view.correlations.map(r => (r.name === "BTC" ? { ...r, rho: NaN } : r));
   if (rows.length === 0) return null;
   const VB_W = 880;
   // CHART-03 portrait: taller mobile rows; desktop ROW_H = today's literal (26).
@@ -381,6 +389,7 @@ export function CorrelationStripPanel() {
         </h3>
         <p className="text-micro text-text-muted">
           Pearson ρ on aligned daily returns · ρ near 0 implies diversification benefit
+          {unit !== null && `. BTC row not measurable: ${nativeUnitReason(unit)}.`}
         </p>
       </header>
       <ResponsiveChartFrame
@@ -468,10 +477,19 @@ export function CorrelationsMatrixPanel() {
   // Phase 103 (MTM-04, correction): FOLLOWS the active basis (see
   // CorrelationStripPanel) — the strategy row/column regresses the basis-selected
   // dailies, so the view-merge makes it follow MTM.
-  const view = useBasisSeriesView(usePayload());
+  const payload = usePayload();
+  const view = useBasisSeriesView(payload);
   const isMobile = useBreakpoint() === "mobile";
   const { labels, matrix } = view.correlationMatrix;
   if (labels.length === 0) return null;
+  // Phase 164.6.6.2 (D-10, D-17, UI-SPEC A18): for a strategy whose returns are in a
+  // native unit ONLY the strategy x BTC pair (row 0 is the strategy) is withheld. It
+  // takes the cell's existing non-finite form: "—", untoned. Every other pair, the
+  // strategy x ETH/SPX/Gold/IEF cells included, is measured as before.
+  const unit = payload.returnsUnit ?? null;
+  const btcCol = unit === null ? -1 : labels.indexOf("BTC", 1);
+  const isStrategyBtcPair = (i: number, j: number) =>
+    btcCol > 0 && ((i === 0 && j === btcCol) || (i === btcCol && j === 0));
 
   const N = labels.length;
   // CHART-03 keep-all-cells: cell COUNT is data-driven (N×N) at every breakpoint —
@@ -554,7 +572,8 @@ export function CorrelationsMatrixPanel() {
               >
                 {rowLbl}
               </text>
-              {matrix[i].map((rho, j) => {
+              {matrix[i].map((cell, j) => {
+                const rho = isStrategyBtcPair(i, j) ? NaN : cell;
                 const x = LABEL_W + j * CELL_W;
                 const y = HEADER_H + i * CELL_H;
                 const isDiag = i === j;
@@ -588,6 +607,11 @@ export function CorrelationsMatrixPanel() {
           ))}
         </ResponsiveChartFrame>
       </div>
+      {unit !== null && btcCol > 0 && (
+        <p className="text-micro text-text-muted">
+          Strategy × BTC not measurable: {nativeUnitReason(unit)}.
+        </p>
+      )}
     </figure>
   );
 }
