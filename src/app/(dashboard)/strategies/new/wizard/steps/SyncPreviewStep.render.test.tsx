@@ -465,8 +465,11 @@ describe("[H-0195/H-0197/H-0198] SyncPreviewStep — polling loop dispositions",
   }
 
   it("[164.6.6.3.2 D-03/D-06] a failed terminal stamped with the history-not-settled sentence shows GATE_HISTORY_NOT_SETTLED with Retry", async () => {
+    // The sentence is HAND-TYPED here, as the Python worker stamps it, rather than read from
+    // the mirror: importing the constant would make this case equal to itself and green
+    // against a mirror that had drifted from what the worker writes.
     const envelope = await driveToFailedEnvelopeWith(
-      MT5_HISTORY_NOT_SETTLED_COMPUTATION_ERROR,
+      "Your broker had not finished sending this MT5 account's history when we read it, so the analytics could not run yet. Nothing is wrong with your key. Retry the sync in a few minutes.",
     );
     expect(envelope.getAttribute("data-error-code")).toBe("GATE_HISTORY_NOT_SETTLED");
     // Hand-typed, not read from the table: the card names the real cause.
@@ -476,6 +479,36 @@ describe("[H-0195/H-0197/H-0198] SyncPreviewStep — polling loop dispositions",
     expect(text).not.toContain("fault is in our pipeline");
     expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
   });
+
+  // T-164.6.6.3.2-11 — the card must not appear for any other failure. The generic
+  // transient sentence is copied verbatim from 20260826120000_computation_error_curated_copy.sql
+  // (the sentence a final transient failure carries today), and the near-miss cases prove the
+  // match is exact equality: a substring, prefix or whitespace variant is not the cause stamp.
+  const GENERIC_TRANSIENT_SENTENCE =
+    "Analytics could not complete after several automatic retries. Retry the sync, or contact support if it keeps failing.";
+  it.each([
+    ["the generic transient sentence", GENERIC_TRANSIENT_SENTENCE],
+    ["no computation_error at all", null],
+    [
+      "the exact sentence plus a trailing space",
+      `${MT5_HISTORY_NOT_SETTLED_COMPUTATION_ERROR} `,
+    ],
+    [
+      "the exact sentence embedded in a longer one",
+      `Note: ${MT5_HISTORY_NOT_SETTLED_COMPUTATION_ERROR}`,
+    ],
+    [
+      "the operator message (never recognised)",
+      "derive_broker_dailies: the MT5 deal history had not settled within its wait budget — retrying",
+    ],
+  ])(
+    "[164.6.6.3.2 D-06] a failed terminal with %s keeps GATE_ANALYTICS_FAILED",
+    async (_label, error) => {
+      const envelope = await driveToFailedEnvelopeWith(error);
+      expect(envelope.getAttribute("data-error-code")).toBe("GATE_ANALYTICS_FAILED");
+      expect(envelope.textContent ?? "").not.toContain("still sending this account's history");
+    },
+  );
 
   // H-0197: repeated thrown polls must escalate to a recoverable SYNC_FAILED
   // envelope instead of swallowing the error and spinning forever. Before the
