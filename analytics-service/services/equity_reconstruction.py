@@ -68,7 +68,6 @@ from services.job_worker import (
     AllocatorEquityAction,
     DispatchOutcome,
     DispatchResult,
-    _DERIBIT_EMPTY_LEDGER_FLOOR_USD,
     _allocator_key_preflight,
     _emit_audit,
     _stamp_429,
@@ -3079,7 +3078,6 @@ async def _mt5_fetch_window(
                     session,
                     now=now,
                     settle_history=fresh,
-                    material_equity_floor_usd=_DERIBIT_EMPTY_LEDGER_FLOOR_USD,
                 ),
                 # Read through the module so the bound stays ONE constant shared
                 # with the derive branch rather than a second one that can drift.

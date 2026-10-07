@@ -5073,7 +5073,6 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                             _mt5_session,
                             now=_mt5_now,
                             settle_history=_mt5_fresh,
-                            material_equity_floor_usd=_DERIBIT_EMPTY_LEDGER_FLOOR_USD,
                         ),
                         timeout=mt5_derive_read_bound_s(
                             read_s=_MT5_DERIVE_READ_TIMEOUT_S,
@@ -5327,7 +5326,55 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             # ⭐ 164.6.6.2 / D-01, D-04 — the account's unit, from the PRE ``account_info`` the
             # read already returned (no second ``account_info()``: the session rosters must not
             # move). Decided BEFORE step (c) so every threshold below reads ONE unit.
-            _mt5_unit = classify_account_currency(_mt5_info.get("currency"))
+            try:
+                _mt5_unit = classify_account_currency(_mt5_info.get("currency"))
+            except AccountCurrencyBlank:
+                # D-01: the terminal has not reported a currency. That is a fault of the
+                # read, not a verdict on the account: TRANSIENT, no stamp, nothing written.
+                # Nothing is guessed in its place (a guessed USD is exactly the bug).
+                logger.warning(
+                    "derive_broker_dailies: mt5 account_info carried no currency "
+                    "(label=%s) — classified transient, retrying, nothing written (D-01)",
+                    funding_label,
+                )
+                return DispatchResult(
+                    outcome=DispatchOutcome.FAILED,
+                    error_message=_MT5_CURRENCY_BLANK_MESSAGE,
+                    error_kind="transient",
+                )
+            except AccountCurrencyMalformed:
+                # D-06: not a currency code at all. Permanent with the CURATED sentence; the
+                # raw broker text is in no log, no stamp and no error_message (T-164.6.6.2-11).
+                logger.warning(
+                    "derive_broker_dailies: mt5 account currency is not a currency code "
+                    "(label=%s) — classified permanent, nothing written (D-06)",
+                    funding_label,
+                )
+                await _stamp_strategy_analytics_failed(_MT5_CURRENCY_MALFORMED_STAMP)
+                return DispatchResult(
+                    outcome=DispatchOutcome.FAILED,
+                    error_message=_MT5_CURRENCY_REFUSED_MESSAGE,
+                    error_kind="permanent",
+                )
+            except AccountCurrencyUnsupported as _unsupported:
+                # D-06: a well-formed code we hold no floors for (EUR, ETH). Refused by name:
+                # a failed row with curated copy, never a success row with null metrics. The
+                # code passed the shape check, so it is safe to echo. Key-mode routing of a
+                # non-USD key is plan 04's, which re-points this arm for ``is_key_mode``.
+                logger.warning(
+                    "derive_broker_dailies: mt5 account currency %s has no floors "
+                    "(label=%s) — classified permanent, nothing written (D-06)",
+                    _unsupported.code,
+                    funding_label,
+                )
+                await _stamp_strategy_analytics_failed(
+                    _MT5_CURRENCY_UNSUPPORTED_STAMP.format(ccy=_unsupported.code)
+                )
+                return DispatchResult(
+                    outcome=DispatchOutcome.FAILED,
+                    error_message=_MT5_CURRENCY_REFUSED_MESSAGE,
+                    error_kind="permanent",
+                )
 
             # ⭐ 164.6.6.2 / D-03 — a currency that differs from the one stored for this key
             # means the broker re-denominated the account. Nothing below may run: a series

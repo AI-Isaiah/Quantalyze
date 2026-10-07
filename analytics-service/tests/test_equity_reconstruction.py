@@ -5599,7 +5599,14 @@ def _mt5_account(
     equity: float = _MT5_FIXTURE_BALANCE,
     balance: float = _MT5_FIXTURE_BALANCE,
 ) -> dict:
-    return {"equity": equity, "balance": balance, "login": _MT5_SYNTHETIC_LOGIN}
+    # 164.6.6.2: a real ``account_info()`` always names its currency, and the shared read now
+    # resolves the history-settle materiality from it (a blank one skips the wait).
+    return {
+        "equity": equity,
+        "balance": balance,
+        "currency": "USD",
+        "login": _MT5_SYNTHETIC_LOGIN,
+    }
 
 
 def _mt5_job() -> dict:
