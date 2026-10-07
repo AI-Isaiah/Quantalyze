@@ -2118,6 +2118,91 @@ class TestSimulatorBlendsReturnsDerivedFromTheStoredCurve:
             assert max(abs(v) for v in got) < 0.5
 
 
+class TestSimulatorHandsTheScorerTheAssetClasses:
+    """WR-01 (Phase 164.6.6.2.2): the scorer annualizes each Sharpe on the blend's
+    risk clock (365 if any leg is crypto, else 252), so the route must hand it the
+    asset class of every book strategy (embedded `strategies(asset_class)`) and of
+    the candidate (its own `asset_class`). Without the map every blend silently
+    stays on sqrt(252)."""
+
+    _DATES = ["2026-03-02", "2026-03-03", "2026-03-04", "2026-03-05"]
+
+    async def _run(self, ps_data, candidate_data, sa_portfolio):
+        from routers import simulator as simulator_router
+        from services import simulator_scoring
+
+        curve = curve_from_returns([0.0, 0.02, -0.01, 0.03], self._DATES)
+        sb = MagicMock()
+        _table_router(
+            sb,
+            portfolio_data={"id": "p-1"},
+            candidate_data=candidate_data,
+            portfolio_strategies_data=ps_data,
+            sa_portfolio_data=[
+                {"strategy_id": sid, "returns_series": curve, "daily_returns": None,
+                 "data_quality_flags": {}}
+                for sid in sa_portfolio
+            ],
+            sa_candidate_data={"strategy_id": "c-1", "returns_series": curve,
+                               "daily_returns": None, "data_quality_flags": {}},
+        )
+        spy = MagicMock(wraps=simulator_scoring.simulate_add_candidate)
+        simulator_router._simulator_user_attempts.clear()
+        request = MagicMock()
+        request.headers = {}
+        req = simulator_router.SimulatorRequest(
+            portfolio_id="p-1", candidate_strategy_id="c-1", user_id="u-clock"
+        )
+        with patch.object(simulator_router, "get_supabase", return_value=sb), \
+             patch.object(simulator_router, "simulate_add_candidate", spy), \
+             patch.object(simulator_router, "log_audit_event"):
+            await simulator_router.portfolio_simulator.__wrapped__(request, req)
+        return sb, spy
+
+    @pytest.mark.asyncio
+    async def test_book_and_candidate_classes_reach_the_scorer(self):
+        sb, spy = await self._run(
+            ps_data=[
+                {"strategy_id": "s-1", "current_weight": 0.5,
+                 "strategies": {"asset_class": "traditional"}},
+                {"strategy_id": "s-2", "current_weight": 0.5,
+                 "strategies": {"asset_class": "crypto"}},
+            ],
+            candidate_data={"id": "c-1", "name": "Cand", "status": "published",
+                            "asset_class": "traditional"},
+            sa_portfolio=["s-1", "s-2"],
+        )
+        assert spy.call_args.kwargs["asset_classes"] == {
+            "s-1": "traditional", "s-2": "crypto", "c-1": "traditional",
+        }
+
+    @pytest.mark.asyncio
+    async def test_a_crypto_candidate_is_handed_over_as_crypto(self):
+        _, spy = await self._run(
+            ps_data=[{"strategy_id": "s-1", "current_weight": 1.0,
+                      "strategies": {"asset_class": "traditional"}}],
+            candidate_data={"id": "c-1", "name": "Cand", "status": "published",
+                            "asset_class": "crypto"},
+            sa_portfolio=["s-1"],
+        )
+        assert spy.call_args.kwargs["asset_classes"] == {"s-1": "traditional", "c-1": "crypto"}
+
+    @pytest.mark.asyncio
+    async def test_the_selects_name_asset_class(self):
+        """A select that drops the column reads every class as None (252)."""
+        sb, _ = await self._run(
+            ps_data=[{"strategy_id": "s-1", "current_weight": 1.0,
+                      "strategies": {"asset_class": "crypto"}}],
+            candidate_data={"id": "c-1", "name": "Cand", "status": "published",
+                            "asset_class": "crypto"},
+            sa_portfolio=["s-1"],
+        )
+        strategies_sel = sb.table("strategies").select.call_args[0][0]
+        ps_sel = sb.table("portfolio_strategies").select.call_args[0][0]
+        assert "asset_class" in strategies_sel, strategies_sel
+        assert "strategies(asset_class)" in ps_sel, ps_sel
+
+
 class TestSimulatorPrefersTheStoredDailyReturns:
     """D-02 at a real site: a non-empty ``daily_returns`` column wins over the
     curve, which is ignored when they disagree."""

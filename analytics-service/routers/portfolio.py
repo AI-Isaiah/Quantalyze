@@ -40,6 +40,7 @@ from services.error_contract import VenueTransientHTTPException
 from services.exchange import aclose_exchange, create_exchange, fetch_all_trades, fetch_usdt_balance, validate_key_permissions, PERMANENT_VALIDATION_ERROR_CODES
 from services.metrics import (
     _safe_float,
+    blend_periods_per_year,
     sanitize_metrics,
     sharpe_vol_status_from_backbone,
     total_return_from_equity,
@@ -606,6 +607,24 @@ def _build_normalized_weights(portfolio_strategies: list[dict[str, Any]]) -> dic
     return {sid: w / total for sid, w in raw.items()}
 
 
+def _asset_classes_by_id(
+    portfolio_strategies: list[dict[str, Any]],
+    candidate_rows: list[dict[str, Any]],
+) -> dict[str, str | None]:
+    """{strategy_id: strategies.asset_class} for a portfolio's rows (embedded
+    ``strategies(asset_class)``) and for published-candidate rows (own column).
+
+    WR-01: handed to the scorers so each blend's Sharpe is annualized on the
+    blend's risk clock. A row with no readable class maps to None (252).
+    """
+    classes: dict[str, str | None] = {
+        row["strategy_id"]: (row.get("strategies") or {}).get("asset_class")
+        for row in portfolio_strategies
+    }
+    classes.update({row["id"]: row.get("asset_class") for row in candidate_rows})
+    return classes
+
+
 def _series_to_curve(series: pd.Series) -> list[dict[str, Any]]:
     """Serialize a cumprod Series into JSON-shaped equity-curve records.
 
@@ -708,7 +727,7 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict[str, Any]:
 
     try:
         ps_result = supabase.table("portfolio_strategies").select(
-            "strategy_id, current_weight, allocated_amount, strategies(id, name)"
+            "strategy_id, current_weight, allocated_amount, strategies(id, name, asset_class)"
         ).eq("portfolio_id", portfolio_id).execute()
 
         portfolio_strategies = rows(ps_result)
@@ -1053,7 +1072,17 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict[str, Any]:
         # Portfolio-level sharpe and volatility. Track WHY the metric is None
         # so the dashboard can show the right empty-state instead of conflating
         # "insufficient history" with "flat vol" with "broken compute".
-        vol, sharpe, sharpe_status = sharpe_vol_status_from_backbone(portfolio_returns_series)
+        # WR-01 (founder rule): risk is annualized by frequency, and a blend uses
+        # 365 if ANY strategy blended into it is crypto, else 252. Read from the
+        # strategies actually blended (post-drop), not the whole membership.
+        blend_ppy = blend_periods_per_year(
+            (row.get("strategies") or {}).get("asset_class")
+            for row in portfolio_strategies
+            if row["strategy_id"] in strategy_returns
+        )
+        vol, sharpe, sharpe_status = sharpe_vol_status_from_backbone(
+            portfolio_returns_series, periods_per_year=blend_ppy
+        )
         vol_status = "insufficient_history" if sharpe_status == "insufficient_history" else "ok"
 
         running_max = cumulative.cummax()
@@ -1757,7 +1786,7 @@ async def portfolio_optimizer(request: Request, req: PortfolioOptimizerRequest) 
     portfolio_owner_id = portfolio_result.get("user_id")
 
     ps_result = supabase.table("portfolio_strategies").select(
-        "strategy_id, current_weight"
+        "strategy_id, current_weight, strategies(asset_class)"
     ).eq("portfolio_id", req.portfolio_id).execute()
 
     portfolio_strategies = rows(ps_result)
@@ -1858,7 +1887,7 @@ async def portfolio_optimizer(request: Request, req: PortfolioOptimizerRequest) 
     # behavior; no additional scoping is required.
     # If a future "unlisted but published" visibility tier is introduced, scope
     # this SELECT by that predicate (e.g. `.eq("is_listed", True)`).
-    all_published = supabase.table("strategies").select("id, name").eq(
+    all_published = supabase.table("strategies").select("id, name, asset_class").eq(
         "status", "published"
     ).not_.in_("id", strategy_ids).order(
         "created_at", desc=True
@@ -1867,6 +1896,10 @@ async def portfolio_optimizer(request: Request, req: PortfolioOptimizerRequest) 
     candidate_rows = rows(all_published)
     candidate_ids = [row["id"] for row in candidate_rows]
     candidate_names = {row["id"]: row.get("name", row["id"]) for row in candidate_rows}
+    # WR-01: the scorers annualize risk on the blend's clock (365 if any leg of
+    # the book or the candidate is crypto), so they are handed every strategy's
+    # asset class, portfolio members and candidates alike.
+    asset_classes = _asset_classes_by_id(portfolio_strategies, candidate_rows)
 
     candidate_returns: dict[str, pd.Series] = {}
     # review-fix SF-F5: track published candidates that lack a returns_series so
@@ -1899,7 +1932,9 @@ async def portfolio_optimizer(request: Request, req: PortfolioOptimizerRequest) 
             candidate_missing_returns_count, len(candidate_ids), req.portfolio_id,
         )
 
-    suggestions = find_improvement_candidates(portfolio_returns, candidate_returns, weights)
+    suggestions = find_improvement_candidates(
+        portfolio_returns, candidate_returns, weights, asset_classes=asset_classes
+    )
     # Hydrate suggestions with strategy names so the UI can render them without an extra round-trip.
     for s in suggestions:
         s["strategy_name"] = candidate_names.get(s["strategy_id"], s["strategy_id"])
@@ -2070,7 +2105,7 @@ async def portfolio_bridge(request: Request, req: BridgeRequest) -> dict[str, An
 
     # Verify the underperformer is actually in this portfolio
     ps_result = supabase.table("portfolio_strategies").select(
-        "strategy_id, current_weight"
+        "strategy_id, current_weight, strategies(asset_class)"
     ).eq("portfolio_id", req.portfolio_id).execute()
 
     portfolio_strategies = rows(ps_result)
@@ -2186,7 +2221,7 @@ async def portfolio_bridge(request: Request, req: BridgeRequest) -> dict[str, An
     # derived numeric scores (composite_score, sharpe_delta, etc.) are returned,
     # never the raw return series.  No additional scoping is required until a
     # "unlisted-but-published" visibility tier is added.
-    all_published = supabase.table("strategies").select("id, name").eq(
+    all_published = supabase.table("strategies").select("id, name, asset_class").eq(
         "status", "published"
     ).not_.in_("id", strategy_ids).order(
         "created_at", desc=True
@@ -2195,6 +2230,10 @@ async def portfolio_bridge(request: Request, req: BridgeRequest) -> dict[str, An
     candidate_rows = rows(all_published)
     candidate_ids = [row["id"] for row in candidate_rows]
     candidate_names = {row["id"]: row.get("name", row["id"]) for row in candidate_rows}
+    # WR-01: the scorers annualize risk on the blend's clock (365 if any leg of
+    # the book or the candidate is crypto), so they are handed every strategy's
+    # asset class, portfolio members and candidates alike.
+    asset_classes = _asset_classes_by_id(portfolio_strategies, candidate_rows)
 
     candidate_returns: dict[str, pd.Series] = {}
     if candidate_ids:
@@ -2261,7 +2300,11 @@ async def portfolio_bridge(request: Request, req: BridgeRequest) -> dict[str, An
         }
 
     candidates = find_replacement_candidates(
-        portfolio_returns, candidate_returns, weights, req.underperformer_strategy_id
+        portfolio_returns,
+        candidate_returns,
+        weights,
+        req.underperformer_strategy_id,
+        asset_classes=asset_classes,
     )
 
     # Hydrate with strategy names (allocator-safe, no emails/profiles)
