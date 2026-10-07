@@ -104,7 +104,8 @@ import type {
   ScenarioMandatePayload,
 } from "@/lib/factsheet/types";
 import { normalizeDailyReturns } from "@/lib/portfolio-math-utils";
-import { parseReturnsUnit } from "@/lib/factsheet/returns-unit";
+import { parseReturnsUnit, withUnit } from "@/lib/factsheet/returns-unit";
+import { ReturnsUnitChip } from "@/components/strategy/ReturnsUnitChip";
 import { deriveBlendPanels } from "@/lib/scenario-blend-adapter";
 import {
   computeDiversification,
@@ -2755,6 +2756,12 @@ export function ScenarioComposer({
         // erases them from the engine-input type.
         trust_tier: string | null;
         is_composite: boolean;
+        // 164.6.6.2 plan 11 (D-12, UI-SPEC E1/E2/E5) — the unit this leg's OWN
+        // stored figures are in (null = USD family). Presentation-only like
+        // trust_tier: it labels the row and its CAGR, and is erased by the
+        // bare-Pick cast at every engine call site. It never selects a series;
+        // the conversion happened server-side (see addedStrategyReturnsLookup).
+        returns_unit: string | null;
         // HONEST-05 — what happened to the metric pair for this leg: answered
         // ("settled"), still asking ("pending"), or the fetch failed
         // ("unavailable"). A book leg is answered by the SSR payload itself; a
@@ -2773,6 +2780,7 @@ export function ScenarioComposer({
       > & {
         trust_tier: string | null;
         is_composite: boolean;
+        returns_unit: string | null;
         metricsState: AddedMetricsState;
       }
     > = {};
@@ -2836,6 +2844,15 @@ export function ScenarioComposer({
           found?.strategy.is_composite ??
           addedProvenanceById[a.id]?.is_composite ??
           false,
+        // 164.6.6.2 plan 11 — book wins WHOLE (the payload's `returns_unit` is
+        // authoritative for a book leg, null included: a book USD leg must not
+        // inherit a lazily-fetched unit); a drawer-added leg reads the unit the
+        // returns route named. Both pass the one validator, so a malformed value
+        // is a USD row, never label text.
+        returns_unit:
+          found != null
+            ? parseReturnsUnit(found.strategy.returns_unit)
+            : (addedReturnsUnitById[a.id] ?? null),
       };
     }
     return map;
@@ -2844,6 +2861,7 @@ export function ScenarioComposer({
     strategyById,
     addedAssetClassById,
     addedProvenanceById,
+    addedReturnsUnitById,
     addedMetricsById,
   ]);
 
@@ -2866,6 +2884,17 @@ export function ScenarioComposer({
     },
     [addedStrategyMetadataLookup],
   );
+
+  // 164.6.6.2 plan 11 (UI-SPEC E1/E2/E5) — added-strategy id → the unit its own
+  // figures are in, or null for the USD family. A narrow projection of the
+  // metadata lookup, like addedProvenanceByRef: presentation-only, never engine.
+  const addedReturnsUnitByRef = useMemo<Record<string, string | null>>(() => {
+    const out: Record<string, string | null> = {};
+    for (const [id, meta] of Object.entries(addedStrategyMetadataLookup)) {
+      out[id] = meta.returns_unit;
+    }
+    return out;
+  }, [addedStrategyMetadataLookup]);
 
   /**
    * Phase 152 SCEN-03 — ref → the in-memory metrics the row-detail panel shows.
@@ -6243,6 +6272,7 @@ export function ScenarioComposer({
           mixedPerKeyBook={isMixedPerKeyBook}
           onTogglePerKey={scenario.togglePerKeySource}
           addedProvenanceByRef={addedProvenanceByRef}
+          addedReturnsUnitByRef={addedReturnsUnitByRef}
           addedMetricsByRef={addedMetricsByRef}
           onToggle={scenario.toggleHolding}
           onSetWeight={handleWeightChange}
@@ -6693,6 +6723,12 @@ interface CompositionListProps {
    */
   addedProvenanceByRef: Record<string, ProvenanceTier | null>;
   /**
+   * 164.6.6.2 plan 11 — added-strategy id → the unit its own figures are in
+   * (`"BTC"`), or null for the USD family. Drives the row chip, the detail CAGR
+   * eyebrow and the blend line; never reaches the engine.
+   */
+  addedReturnsUnitByRef: Record<string, string | null>;
+  /**
    * Phase 152 SCEN-03 — added-strategy id → the in-memory metrics the row's
    * detail panel renders. A NARROW `{cagr, sharpe}` projection of the parent's
    * metadata lookup: book strategies carry values, drawer-added legs carry
@@ -6820,6 +6856,7 @@ function CompositionList({
   mixedPerKeyBook,
   onTogglePerKey,
   addedProvenanceByRef,
+  addedReturnsUnitByRef,
   addedMetricsByRef,
   onToggle,
   onSetWeight,
@@ -7720,6 +7757,10 @@ function CompositionList({
             state: "pending" as AddedMetricsState,
           };
           const metricsAbsent = metrics.cagr == null && metrics.sharpe == null;
+          // 164.6.6.2 plan 11 (D-12, UI-SPEC E1/E2/E5) — the unit this row's own
+          // figures are in. null (USD) renders none of the chip, the eyebrow
+          // suffix or the blend line.
+          const unit = addedReturnsUnitByRef[a.id] ?? null;
           // Phase 162 HONEST-05 (UI-SPEC C-4) — the note is a CLAIM about this
           // strategy ("it has no computed metrics"), so it may only render once
           // the answer is in, and only when the answer came from a request that
@@ -7818,11 +7859,17 @@ function CompositionList({
                   trustTier={addedProvenanceByRef[a.id] ?? null}
                   className="shrink-0"
                 />
+                {/* 164.6.6.2 plan 11 (D-09, UI-SPEC E1) — the unit is a persistent
+                    identity fact about the strategy, so it sits with the other
+                    identity facts: after provenance, before ownership and before
+                    coverage state. Null (USD) renders zero nodes. */}
+                <ReturnsUnitChip unit={unit} className="shrink-0" />
                 {/* Phase 152 SCEN-02 — ownership is a persistent FACT, so it
                     wears the rounded-md badge family (the uppercase rounded-sm
                     family next to it is DERIVED state that changes on its own;
-                    ownership never does). Placed after provenance and before
-                    coverage: identity facts first, derived state last.
+                    ownership never does). Placed after provenance and the unit
+                    chip, and before coverage: identity facts first, derived
+                    state last.
 
                     The gate is `=== true`, never `!== false` and never bare
                     truthiness. `false`, `null` and an ABSENT key are three
@@ -8007,7 +8054,12 @@ function CompositionList({
                     {(
                       <>
                         <div className="flex items-center gap-2">
-                          <span className={DETAIL_EYEBROW}>CAGR</span>
+                          {/* UI-SPEC E2 — the value is this strategy's OWN stored
+                              CAGR, in its own unit; the eyebrow says so. The
+                              literal is upper-case (DETAIL_EYEBROW voice). */}
+                          <span className={DETAIL_EYEBROW}>
+                            {withUnit("CAGR", unit).toUpperCase()}
+                          </span>
                           <span
                             data-testid={`scenario-detail-cagr-${a.id}`}
                             // C-4 / Numbers Contract: a real magnitude reads in
@@ -8039,6 +8091,20 @@ function CompositionList({
                       </>
                     )}
                   </div>
+                  {/* UI-SPEC E5 (D-18) — how a native-unit row enters the blend.
+                      Directly below the CAGR / SHARPE pair; neutral, never
+                      amber (a denomination is a steady fact, not a warning).
+                      Composed from the unit so the next unit adds no copy. */}
+                  {unit != null && (
+                    <div className="mt-2">
+                      <p
+                        className="text-xs text-text-muted"
+                        data-testid={`scenario-detail-usd-blend-${a.id}`}
+                      >
+                        {`Blended in USD at the daily ${unit} price.`}
+                      </p>
+                    </div>
+                  )}
                   {/* BOTH missing AND settled → one sentence that names the
                       remedy, instead of two dashes that name nothing.
 
