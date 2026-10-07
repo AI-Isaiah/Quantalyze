@@ -1064,12 +1064,16 @@ def alert_mt5_validation_gateway_unconfigured(*, site: str) -> None:
         return
     _last_mt5_validation_alert_at[site] = now
     try:
-        sentry_sdk.set_tag("mt5_validation_gateway_unconfigured", site)
-        sentry_sdk.capture_message(
-            f"MT5 validation gateway unconfigured at site={site}: {names} is unset "
-            "or malformed; every key validation on this path is refused (D-05)",
-            level="error",
-        )
+        # Review WR-03: scope the tag to THIS capture. The worker has no per-request
+        # scope, so an unscoped `set_tag` would label every later event it sends.
+        with sentry_sdk.new_scope() as scope:
+            scope.set_tag("mt5_validation_gateway_unconfigured", site)
+            sentry_sdk.capture_message(
+                f"MT5 validation gateway unconfigured at site={site}: {names} is "
+                "unset or malformed; every key validation on this path is refused "
+                "(D-05)",
+                level="error",
+            )
     except Exception:
         pass  # never mask the refusal via a Sentry failure
 
