@@ -1145,7 +1145,8 @@ describe("lint-sql-gates: the CI invocation (mode identity)", () => {
     // supabase/tests/test_sync_status_bridge_residues.sql and test_sync_status_bridge_lock.sql
     // joined the corpus. MEASURED on the tree merged with origin/main:
     // `node scripts/lint-sql-gates.mjs` printed `scanned 85 file(s); 0 finding(s)`.
-    expect(res.out).toMatch(/scanned 85 file/);
+    // ⭐ CURRENCY 2026-10-07 (Phase 164.6.6.3.5 DOMAINONE, plan 03): 85 -> 86, `node scripts/lint-sql-gates.mjs` printed `scanned 86 file(s); 0 finding(s)` with the contact-dedupe gate in the corpus.
+    expect(res.out).toMatch(/scanned 86 file/);
     expect(res.status, res.out).toBe(0);
   });
 
