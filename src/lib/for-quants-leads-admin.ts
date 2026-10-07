@@ -48,6 +48,14 @@ export interface ForQuantsLeadRow {
   /** Sanitized error message (max 500 chars) when the send failed
    *  OR ADMIN_EMAIL was unset. NULL on clean sends. */
   notify_error: string | null;
+  /** Which form wrote the row (migration 20261008120000): `request_call`
+   *  or `contact_form`. NOT NULL, DEFAULT 'request_call'. */
+  source: string;
+  /** A CONTACT_TOPICS key on a contact_form row; NULL on request-a-call rows. */
+  topic: string | null;
+  /** The sender's reference (<= 200 chars, user-typed text, render escaped);
+   *  NULL when none was given. */
+  reference: string | null;
 }
 
 /** Hard cap on the `?show=all` view so a growing table doesn't ship
@@ -56,7 +64,7 @@ export interface ForQuantsLeadRow {
 export const FOR_QUANTS_LEADS_FULL_VIEW_CAP = 500;
 
 const LEAD_SELECT =
-  "id, name, firm, email, preferred_time, notes, wizard_context, created_at, processed_at, processed_by, notify_attempted_at, notify_succeeded_at, notify_error";
+  "id, name, firm, email, preferred_time, notes, wizard_context, created_at, processed_at, processed_by, notify_attempted_at, notify_succeeded_at, notify_error, source, topic, reference";
 
 export interface ListForQuantsLeadsResult {
   rows: ForQuantsLeadRow[];

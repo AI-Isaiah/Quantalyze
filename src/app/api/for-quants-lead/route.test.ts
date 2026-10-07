@@ -168,9 +168,12 @@ const emailState = vi.hoisted(
   }),
 );
 
+// escapeHtml is a visible marker (not identity) so a test can prove a field
+// went through it: an interpolated value that is NOT wrapped in `<<…>>` was
+// never escaped.
 vi.mock("@/lib/email", () => ({
-  escapeHtml: (s: string) => s,
-  notifyFounderGeneric: vi.fn(async () => {
+  escapeHtml: (s: string) => `<<${s}>>`,
+  notifyFounderGeneric: vi.fn(async (..._args: [string, string]) => {
     emailState.sends += 1;
     if (emailState.shouldThrow) {
       throw new Error("simulated email failure");
@@ -293,6 +296,8 @@ describe("POST /api/for-quants-lead", () => {
       expect(res.status).toBe(200);
       const body = await res.json();
       expect(body.ok).toBe(true);
+      // D-01/D-02: the client renders success ONLY on `stored`.
+      expect(body.status).toBe("stored");
       // The internal lead UUID must NOT be returned to the client.
       expect(body.id).toBeUndefined();
       // G9.B.17 was scoped to return an opaque idempotency_key here,
@@ -331,6 +336,8 @@ describe("POST /api/for-quants-lead", () => {
       expect(res.status).toBe(200);
       const body = await res.json();
       expect(body.ok).toBe(true);
+      // The one path that answers `duplicate`: a request-a-call 23505.
+      expect(body.status).toBe("duplicate");
       // No row recorded (the insert was rejected) and no founder email sent.
       expect(dbState.inserted).toHaveLength(0);
       await flushMicrotasks();
@@ -376,6 +383,262 @@ describe("POST /api/for-quants-lead", () => {
       );
       expect(res.status).toBe(200);
       expect(dbState.inserted[0].source_ip).toBe("203.0.113.42");
+    });
+  });
+
+  /**
+   * Phase 164.6.6.3.5 DOMAINONE plan 04 (D-01, D-02, D-13) — the contact form's
+   * branch, and the `stored` / `duplicate` contract every client keys on.
+   */
+  const CONTACT_PAYLOAD = {
+    source: "contact_form",
+    topic: "security",
+    name: "Jane Doe",
+    email: "Jane@Acme.example",
+    message: "I found a way to read another account's keys.",
+  };
+
+  describe("contact_form branch (D-02, D-13)", () => {
+    it("stores a contact message with its source, topic, empty firm and the message as notes, and answers `stored`", async () => {
+      const { POST } = await import("./route");
+      const res = await POST(makeRequest(CONTACT_PAYLOAD));
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ ok: true, status: "stored" });
+      expect(dbState.inserted).toHaveLength(1);
+      expect(dbState.inserted[0]).toMatchObject({
+        source: "contact_form",
+        topic: "security",
+        // D-13: firm is NOT NULL in the table, so an absent firm is stored ''.
+        firm: "",
+        email: "jane@acme.example",
+        notes: "I found a way to read another account's keys.",
+      });
+    });
+
+    it("stores the reference when given and null when absent", async () => {
+      const { POST } = await import("./route");
+      await POST(makeRequest({ ...CONTACT_PAYLOAD, reference: "  cid-abc-123  " }));
+      await POST(makeRequest({ ...CONTACT_PAYLOAD, email: "b@acme.example" }));
+      expect(dbState.inserted[0].reference).toBe("cid-abc-123");
+      expect(dbState.inserted[1].reference).toBeNull();
+    });
+
+    it("keeps a firm the sender gave", async () => {
+      const { POST } = await import("./route");
+      await POST(makeRequest({ ...CONTACT_PAYLOAD, firm: "Acme Quant" }));
+      expect(dbState.inserted[0].firm).toBe("Acme Quant");
+    });
+
+    it("a second identical contact message inserts again and answers `stored` (never deduplicated)", async () => {
+      const { POST } = await import("./route");
+      const first = await POST(makeRequest(CONTACT_PAYLOAD));
+      const second = await POST(makeRequest(CONTACT_PAYLOAD));
+      expect((await first.json()).status).toBe("stored");
+      expect((await second.json()).status).toBe("stored");
+      expect(dbState.inserted).toHaveLength(2);
+    });
+
+    it("a 23505 on a contact message is the 500 shape, never `duplicate` (it can only mean the partial index regressed)", async () => {
+      dbState.insertErrorCode = "23505";
+      const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        const { POST } = await import("./route");
+        const res = await POST(makeRequest(CONTACT_PAYLOAD));
+        expect(res.status).toBe(500);
+        const body = await res.json();
+        expect(body.status).toBeUndefined();
+        expect(body.error).not.toContain("@");
+        // The log line names the index so the regression is findable.
+        expect(
+          errSpy.mock.calls.some((args) =>
+            String(args[0]).includes("for_quants_leads_email_day_uniq"),
+          ),
+        ).toBe(true);
+      } finally {
+        errSpy.mockRestore();
+      }
+    });
+
+    it("rejects an empty message with `Enter a message.`", async () => {
+      const { POST } = await import("./route");
+      const res = await POST(makeRequest({ ...CONTACT_PAYLOAD, message: "   " }));
+      expect(res.status).toBe(400);
+      expect((await res.json()).fieldErrors.message[0]).toBe("Enter a message.");
+      expect(dbState.inserted).toHaveLength(0);
+    });
+
+    it("rejects a 2001-character message with `Message is too long` and accepts exactly 2000", async () => {
+      const { POST } = await import("./route");
+      const over = await POST(
+        makeRequest({ ...CONTACT_PAYLOAD, message: "m".repeat(2001) }),
+      );
+      // The 8 KB body cap is not what rejects it: 2001 + envelope < 8192.
+      expect(over.status).toBe(400);
+      expect((await over.json()).fieldErrors.message[0]).toBe(
+        "Message is too long",
+      );
+      const at = await POST(
+        makeRequest({ ...CONTACT_PAYLOAD, message: "m".repeat(2000) }),
+      );
+      expect(at.status).toBe(200);
+    });
+
+    it("rejects a 201-character reference with `Reference is too long` and accepts exactly 200", async () => {
+      const { POST } = await import("./route");
+      const over = await POST(
+        makeRequest({ ...CONTACT_PAYLOAD, reference: "r".repeat(201) }),
+      );
+      expect(over.status).toBe(400);
+      expect((await over.json()).fieldErrors.reference[0]).toBe(
+        "Reference is too long",
+      );
+      const at = await POST(
+        makeRequest({ ...CONTACT_PAYLOAD, reference: "r".repeat(200) }),
+      );
+      expect(at.status).toBe(200);
+    });
+
+    it("rejects a topic outside CONTACT_TOPICS under fieldErrors.topic", async () => {
+      const { POST } = await import("./route");
+      const res = await POST(makeRequest({ ...CONTACT_PAYLOAD, topic: "billing" }));
+      expect(res.status).toBe(400);
+      expect((await res.json()).fieldErrors.topic).toBeDefined();
+      expect(dbState.inserted).toHaveLength(0);
+    });
+
+    it("rejects a missing topic (a contact message always names one)", async () => {
+      const { POST } = await import("./route");
+      const { topic: _omit, ...noTopic } = CONTACT_PAYLOAD;
+      const res = await POST(makeRequest(noTopic));
+      expect(res.status).toBe(400);
+      expect((await res.json()).fieldErrors.topic).toBeDefined();
+    });
+
+    it("rejects an unknown source under fieldErrors.source", async () => {
+      const { POST } = await import("./route");
+      const res = await POST(makeRequest({ ...CONTACT_PAYLOAD, source: "newsletter" }));
+      expect(res.status).toBe(400);
+      expect((await res.json()).fieldErrors.source).toBeDefined();
+      expect(dbState.inserted).toHaveLength(0);
+    });
+
+    it("a populated honeypot on a contact body is dropped `stored`-shaped, nothing inserted", async () => {
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        const { POST } = await import("./route");
+        const res = await POST(
+          makeRequest({ ...CONTACT_PAYLOAD, website: "http://spam.example" }),
+        );
+        expect(await res.json()).toEqual({ ok: true, status: "stored" });
+        expect(dbState.inserted).toHaveLength(0);
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+  });
+
+  describe("request-a-call contract (deploy-window ruling)", () => {
+    it("inserts NO source / topic / reference key, so it relies on the column DEFAULT and keeps working before the migration reaches PROD", async () => {
+      const { POST } = await import("./route");
+      const res = await POST(makeRequest(VALID_PAYLOAD));
+      expect((await res.json()).status).toBe("stored");
+      const keys = Object.keys(dbState.inserted[0]);
+      // Neuter check: setting `source` on the shared payload makes this RED.
+      expect(keys).not.toContain("source");
+      expect(keys).not.toContain("topic");
+      expect(keys).not.toContain("reference");
+    });
+
+    it("an explicit source of request_call is still a request-a-call and still sends no source key", async () => {
+      const { POST } = await import("./route");
+      await POST(makeRequest({ ...VALID_PAYLOAD, source: "request_call" }));
+      expect(Object.keys(dbState.inserted[0])).not.toContain("source");
+    });
+
+    it("keeps Firm required for a call request", async () => {
+      const { POST } = await import("./route");
+      const res = await POST(
+        makeRequest({ name: "Jane", firm: "  ", email: "jane@acme.example" }),
+      );
+      expect(res.status).toBe(400);
+      expect((await res.json()).fieldErrors.firm[0]).toBe("Firm is required");
+    });
+
+    it("a request-a-call body carrying a contact-only field does not store it", async () => {
+      const { POST } = await import("./route");
+      await POST(
+        makeRequest({ ...VALID_PAYLOAD, topic: "security", reference: "x" }),
+      );
+      const keys = Object.keys(dbState.inserted[0]);
+      expect(keys).not.toContain("topic");
+      expect(keys).not.toContain("reference");
+    });
+  });
+
+  describe("required-empty messages (both flows, UI-SPEC)", () => {
+    it.each([
+      ["request-a-call", { ...VALID_PAYLOAD, name: "", email: "" }],
+      ["contact", { ...CONTACT_PAYLOAD, name: "", email: "" }],
+    ])("%s: empty name and email read the UI-SPEC sentences", async (_label, body) => {
+      const { POST } = await import("./route");
+      const res = await POST(makeRequest(body));
+      expect(res.status).toBe(400);
+      const { fieldErrors } = await res.json();
+      expect(fieldErrors.name[0]).toBe("Enter your name.");
+      expect(fieldErrors.email[0]).toBe("Enter your email address.");
+    });
+  });
+
+  describe("founder notification (T-164.6.6.3.5-11)", () => {
+    // Resolved after the route import so it is the same mock instance the
+    // route holds, even in a file that calls vi.resetModules() elsewhere.
+    async function freshNotifyMock() {
+      const { notifyFounderGeneric } = await import("@/lib/email");
+      const m = vi.mocked(notifyFounderGeneric);
+      m.mockClear();
+      return m;
+    }
+
+    it("a contact message is not labelled a call request: subject starts `Contact form` and names the topic label", async () => {
+      const { POST } = await import("./route");
+      const notifyMock = await freshNotifyMock();
+      await POST(makeRequest(CONTACT_PAYLOAD));
+      await flushMicrotasks();
+      expect(notifyMock).toHaveBeenCalledTimes(1);
+      const [subject] = notifyMock.mock.calls[0];
+      expect(subject.startsWith("Contact form")).toBe(true);
+      expect(subject).toContain("Security report");
+      expect(subject).not.toContain("Request a Call");
+    });
+
+    it("every interpolated contact field, including reference and topic, goes through escapeHtml", async () => {
+      const { POST } = await import("./route");
+      const notifyMock = await freshNotifyMock();
+      await POST(
+        makeRequest({
+          ...CONTACT_PAYLOAD,
+          firm: "Acme",
+          reference: "cid-ref-0001",
+        }),
+      );
+      await flushMicrotasks();
+      const [, html] = notifyMock.mock.calls[0];
+      // `escapeHtml` is mocked to wrap in <<…>>; an unwrapped value was never escaped.
+      expect(html).toContain("<<Jane Doe>>");
+      expect(html).toContain("<<jane@acme.example>>");
+      expect(html).toContain("<<Acme>>");
+      expect(html).toContain("<<Security report>>");
+      expect(html).toContain("<<cid-ref-0001>>");
+      expect(html).toContain("<<I found a way to read another account's keys.>>");
+    });
+
+    it("a call request keeps its original subject", async () => {
+      const { POST } = await import("./route");
+      const notifyMock = await freshNotifyMock();
+      await POST(makeRequest(VALID_PAYLOAD));
+      await flushMicrotasks();
+      const [subject] = notifyMock.mock.calls[0];
+      expect(subject).toBe("Request a Call: Jane Doe at Acme Quant");
     });
   });
 
@@ -593,6 +856,8 @@ describe("POST /api/for-quants-lead", () => {
       expect(res.headers.get("Retry-After")).toBe("42");
       const body = await res.json();
       expect(body.error).toContain("Try again in a few minutes");
+      // D-01: a retiring-domain address is never named in a route string.
+      expect(body.error).not.toContain("@");
       expect(dbState.inserted).toHaveLength(0);
     });
   });
@@ -604,7 +869,7 @@ describe("POST /api/for-quants-lead", () => {
       const res = await POST(makeRequest(VALID_PAYLOAD));
       expect(res.status).toBe(503);
       const body = await res.json();
-      expect(body.error).toContain("security@quantalyze.com");
+      expect(body.error).not.toContain("@");
       expect(dbState.inserted).toHaveLength(0);
     });
 
@@ -614,7 +879,7 @@ describe("POST /api/for-quants-lead", () => {
       const res = await POST(makeRequest(VALID_PAYLOAD));
       expect(res.status).toBe(500);
       const body = await res.json();
-      expect(body.error).toContain("security@quantalyze.com");
+      expect(body.error).not.toContain("@");
     });
   });
 
@@ -976,6 +1241,9 @@ describe("POST /api/for-quants-lead", () => {
         expect(res.status).toBe(200);
         const body = await res.json();
         expect(body.ok).toBe(true);
+        // Deliberately `stored`-shaped (UI-SPEC "Success means stored" rule 5):
+        // a bot must not be able to tell it was dropped.
+        expect(body.status).toBe("stored");
         // Load-bearing: no DB row written, no founder notification fired.
         expect(dbState.inserted).toHaveLength(0);
         await flushMicrotasks();
