@@ -30,7 +30,6 @@ from services.dispersion import dispersing_corrwith, pairwise_correlation_or_non
 from services.native_to_usd import (
     UsdSeriesConverter,
     native_units_by_id,
-    usd_equity_from_converted_returns,
 )
 # PYAPI-05 — the shared status contract (analytics-service/docs/STATUS_CONTRACT.md).
 from services.error_contract import RETRY_AFTER_SECONDS, service_error
@@ -55,6 +54,10 @@ from services.portfolio_risk import (
     compute_rolling_correlation,
 )
 from services.transforms import trades_to_daily_returns
+# Phase 164.6.6.2.2 (D-01, D-02, D-04): the one boundary from a stored
+# strategy_analytics row to DAILY RETURNS, plus the endpoint-ratio scaffold the
+# TWRs are read from.
+from services.wealth_returns import daily_returns_from_row, equity_from_daily_returns
 # NEW-C19-07: OWN-membership cap lives in a shared module so every OWN-portfolio
 # O(N^2) path imports the same guard (no router-to-router import / cycle).
 from services.portfolio_limits import (
@@ -743,7 +746,7 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict[str, Any]:
 
     try:
         ps_result = supabase.table("portfolio_strategies").select(
-            "strategy_id, current_weight, strategies(id, name)"
+            "strategy_id, current_weight, allocated_amount, strategies(id, name)"
         ).eq("portfolio_id", portfolio_id).execute()
 
         portfolio_strategies = rows(ps_result)
@@ -776,8 +779,14 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict[str, Any]:
         # D-23: `data_quality_flags` rides the SAME row as `returns_series`, so a
         # BTC-denominated strategy's `native_unit` is read beside the series it
         # describes (never from another query that could disagree).
+        # D-04: only columns `strategy_analytics` really has. It carries no
+        # `equity_curve` and no `total_aum` (the old select named both, so the
+        # query could not run against PROD). `returns_series` is the stored
+        # cumulative CURVE, so it is never weighted as returns directly: the
+        # shared boundary below reads it (and `daily_returns`, which wins) as
+        # daily returns first.
         sa_result = supabase.table("strategy_analytics").select(
-            "strategy_id, returns_series, equity_curve, total_aum, data_quality_flags"
+            "strategy_id, returns_series, daily_returns, data_quality_flags"
         ).in_("strategy_id", strategy_ids).execute()
 
         analytics_rows = {row["strategy_id"]: row for row in rows(sa_result)}
@@ -785,7 +794,21 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict[str, Any]:
         strategy_returns: dict[str, pd.Series] = {}
         strategy_equity: dict[str, pd.Series] = {}
         strategy_twrs: dict[str, float] = {}
-        strategy_aum: dict[str, float] = {}
+
+        # D-07: a strategy's AUM in this portfolio is what the allocator put in it,
+        # `portfolio_strategies.allocated_amount`. (`strategy_analytics` has no
+        # `total_aum`, and `strategies.aum` is the strategy's own book, not this
+        # allocation.) NEW-C19-06 is kept: `is not None`, never a truthiness test,
+        # so a genuine 0 allocation counts as a known reporter and a null does not.
+        # It is filled HERE, from the portfolio rows, BEFORE the per-strategy
+        # analytics loop below: a strategy that has an allocation but no
+        # `strategy_analytics` row (or no usable returns) still counts toward the
+        # total, because the loop's `if not row: continue` would skip it.
+        strategy_aum: dict[str, float] = {
+            row["strategy_id"]: float(row["allocated_amount"])
+            for row in portfolio_strategies
+            if row.get("allocated_amount") is not None
+        }
 
         # Telemetry — record sids dropped at each step so the persisted
         # analytics row can flag partial-data computations. Project memory
@@ -794,6 +817,12 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict[str, Any]:
         # "computed from N of M strategies" badge instead of silently degrading.
         missing_analytics_sids: list[str] = []
         missing_returns_sids: list[str] = []
+        # D-04: an equity is DERIVED from every strategy's returns below, so no
+        # strategy that has returns lacks one and this producer leaves the list
+        # empty. The key and the wiring that reads the local list (partial_data,
+        # the analytics_payload handed to generate_narrative, data_quality) stay
+        # so the persisted shape is unchanged; they simply never fire from this
+        # cause any more.
         missing_equity_sids: list[str] = []
 
         for sid in strategy_ids:
@@ -802,27 +831,11 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict[str, Any]:
                 missing_analytics_sids.append(sid)
                 continue
 
-            s = _records_to_series(row.get("returns_series"), name=sid)
+            s = daily_returns_from_row(row, name=sid)
             if s is not None:
                 strategy_returns[sid] = s
-
-                eq = _records_to_series(row.get("equity_curve"), name=sid)
-                if eq is not None:
-                    strategy_equity[sid] = eq
-                else:
-                    missing_equity_sids.append(sid)
             else:
                 missing_returns_sids.append(sid)
-
-            # NEW-C19-06: use `is not None` so a genuine $0 strategy is counted
-            # as a known reporter, not silently treated as NULL.  A truthy check
-            # (if row.get("total_aum"):) maps $0 → falsy → no entry in
-            # strategy_aum, causing aum_known_count to fall short of
-            # len(strategy_ids) even when every strategy has reported, and
-            # collapsing total_aum to None for any portfolio that contains one
-            # drained strategy.
-            if row.get("total_aum") is not None:
-                strategy_aum[sid] = float(row["total_aum"])
 
         if missing_analytics_sids:
             logger.warning(
@@ -850,22 +863,18 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict[str, Any]:
         # weighted raw and never as a flat account.
         _usd = UsdSeriesConverter(get_btc_closes)
         _native_units = native_units_by_id(analytics_rows.values())
-        _native_series = dict(strategy_returns)
         strategy_returns, _unconvertible_sids = await _usd.convert(
             strategy_returns, _native_units
         )
         for sid in _unconvertible_sids:
-            strategy_equity.pop(sid, None)
-            missing_equity_sids = [m for m in missing_equity_sids if m != sid]
             missing_returns_sids.append(sid)
-        for sid in strategy_returns:
-            # A converted strategy's stored equity_curve is in its NATIVE unit;
-            # its TWR (the attribution input) is rebuilt from the converted
-            # returns instead.
-            if sid in _native_units and sid in strategy_equity:
-                strategy_equity[sid] = usd_equity_from_converted_returns(
-                    _native_series[sid], strategy_returns[sid]
-                )
+        for sid, blend_series in strategy_returns.items():
+            # D-04: every strategy's TWR (the attribution input) is the endpoint
+            # ratio of an equity built from the SAME returns that enter the blend,
+            # i.e. prod(1 + r) - 1 over the post-boundary, post-conversion series.
+            # No stored curve is read, so a native-unit strategy's TWR is already
+            # in USD and every TWR covers the same days (1..n).
+            strategy_equity[sid] = equity_from_daily_returns(blend_series)
 
         if not strategy_returns:
             _fail("No returns data available for strategies in this portfolio.")
@@ -910,9 +919,15 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict[str, Any]:
             name="portfolio",
         )
 
-        # Portfolio TWR
+        # Portfolio TWR over the SAME window as the per-strategy TWRs above, which
+        # `compute_attribution` compares it with: prod(1 + p_k) - 1 over every
+        # blended day (days 1..n). The old `(1 + p).cumprod()` fed straight to
+        # `total_return_from_equity` is an endpoint ratio that drops the first
+        # blended day (that function's day-0 exclusion fits a STORED equity curve,
+        # whose first point is a level, not a return). Deliberate behaviour
+        # change: the displayed portfolio TWR now includes the first blended day.
         portfolio_twr = total_return_from_equity(
-            (1 + portfolio_returns_series).cumprod()
+            equity_from_daily_returns(portfolio_returns_series)
         )
 
         # Period returns
@@ -1032,7 +1047,12 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict[str, Any]:
                     # does not disperse (a constant-yield portfolio), as for
                     # an all-zero one; pandas divides by the residue std.
                     corr = _safe_float(pairwise_correlation_or_none(aligned, b_aligned))
-                    btc_twr = total_return_from_equity((1 + b_aligned).cumprod())
+                    # Same day convention as `portfolio_twr` (days 1..n, first day
+                    # INCLUDED): BenchmarkComparison.tsx shows the two side by
+                    # side as a delta, so the pair must cover the same convention.
+                    btc_twr = total_return_from_equity(
+                        equity_from_daily_returns(b_aligned)
+                    )
                     benchmark_comparison = {
                         "symbol": "BTC",
                         "correlation": corr,
@@ -1057,9 +1077,11 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict[str, Any]:
         cumulative = (1 + portfolio_returns_series).cumprod()
         portfolio_equity_curve = _series_to_curve(cumulative)
 
-        # Total AUM — only meaningful when every strategy reports AUM. A
-        # mix of $0 reporters and NULLs would otherwise collapse to None and
-        # be indistinguishable from "no strategies" / "all missing".
+        # Total AUM (D-07) — the sum of `allocated_amount` over every strategy in
+        # the portfolio, only meaningful when every strategy reports one. A mix
+        # of $0 reporters and NULLs would otherwise collapse to None and be
+        # indistinguishable from "no strategies" / "all missing". Uncomputable is
+        # None, never 0 and never a partial sum.
         aum_known_count = sum(1 for sid in strategy_ids if sid in strategy_aum)
         if aum_known_count == len(strategy_ids):
             total_aum = sum(strategy_aum.get(sid, 0) for sid in strategy_ids) or 0.0
