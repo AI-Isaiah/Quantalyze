@@ -1681,7 +1681,8 @@ async def test_mt5_terminal_busy_refuses_transiently_and_never_constructs_a_clie
     queue wait would blow the client budget (D-26) with no verdict at all.
 
     Three things asserted, each with its own failure mode:
-      * 424 + NETWORK_ERROR_DETAIL — the EXISTING transient arm, honestly
+      * 424 + MT5_TERMINAL_BUSY (Phase 164.6.6.3.2 D-02; it was NETWORK_UNAVAILABLE /
+        NETWORK_ERROR_DETAIL) — honestly
         recoverable ("try again" is real advice: the terminal frees up). NEVER
         valid:true (fail CLOSED) and NEVER the auth arm — a busy terminal is OUR
         infrastructure, not the user's key.
@@ -1709,7 +1710,17 @@ async def test_mt5_terminal_busy_refuses_transiently_and_never_constructs_a_clie
         await _call(router, _make_req())
 
     assert ei.value.status_code == 424
-    assert ei.value.detail == NETWORK_ERROR_DETAIL
+    # Phase 164.6.6.3.2 D-02: this refusal names its cause. It answered
+    # NETWORK_UNAVAILABLE / NETWORK_ERROR_DETAIL, which told the user a network timeout
+    # when OUR terminal was held. The literal is typed here, not imported, so the two
+    # sides are COMPARED rather than sourced from one another.
+    assert ei.value.code == "MT5_TERMINAL_BUSY"
+    assert ei.value.detail == (
+        "Our MetaTrader connection was busy and could not take this check yet. "
+        "Try again in a minute."
+    )
+    assert ei.value.recoverable is True
+    assert ei.value.detail != NETWORK_ERROR_DETAIL
     assert ei.value.status_code != 500
     assert ei.value.detail != AUTH_FAILED_DETAIL
     assert "authentication failed" not in ei.value.detail.lower()

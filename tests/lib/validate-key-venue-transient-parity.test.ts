@@ -226,8 +226,13 @@ const DIVERGENT_WIRE_CODE = "AUTH_FAILED";
  * with a NEW recoverable code `MT5_TERMINAL_BUSY`: `TOTAL_CASES` 16 → 17 and
  * `DISTINCT_WIRE_CODES` 9 → 10, each read off its own guard's failure message
  * ("expected 17 to be 16"). Both non-recoverable counts did not move.
+ *
+ * ⚠️ 164.6.6.3.2 plan 02 then added ONE more case at a NEW site C10, `mt5_lease_busy`,
+ * with the SAME code `MT5_TERMINAL_BUSY` as C9: `TOTAL_CASES` 17 → 18 ("expected 18 to
+ * be 17"). `DISTINCT_WIRE_CODES` did not move (still 10): it is one code. Both
+ * non-recoverable counts did not move either.
  */
-const TOTAL_CASES = 17;
+const TOTAL_CASES = 18;
 const DISTINCT_WIRE_CODES = 10;
 const NON_RECOVERABLE_WIRE_CASES = 3;
 const NON_RECOVERABLE_WIRE_CODES = 2;

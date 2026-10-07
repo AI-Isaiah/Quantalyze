@@ -6,7 +6,7 @@
     "body key set is EXACTLY {detail, code, recoverable} — no more, no fewer.",
     "body.detail is a scalar JSON string, byte-identical to the copy shipped before this contract existed. A reword is a CROSS-LANGUAGE breaking change.",
     "recoverable derives from membership in services/exchange.py's PERMANENT_VALIDATION_ERROR_CODES allow-list, computed in the ROUTER. Non-membership means 'not known to be permanent', which that constant's contract defines as retryable — so an UNKNOWN future code yields recoverable=true (fail-safe). On this route `recoverable` is a RENDER hint (whether to offer a retry affordance), never an automated-retry-loop input; if 140.3 wires it into an automated loop the polarity must be re-derived.",
-    "(2026-10-07, Phase 164.6.6.3.2 D-02: a NINTH site, C9, the owed-scrub terminal-busy refusal, joined this class at 424 too and with a code of its own, MT5_TERMINAL_BUSY. Status is 424 at every site, this one included; the sites above are byte-unchanged.)"
+    "(2026-10-07, Phase 164.6.6.3.2 D-02: a NINTH and a TENTH site, C9 and C10, the two terminal-busy refusals (an owed scrub and a held lease), joined this class at 424 too and with one code of their own, MT5_TERMINAL_BUSY. Status is 424 at every site, those two included; the sites above are byte-unchanged.)"
   ],
   "consumers": [
     "analytics-service/tests/test_validate_key_venue_transient.py — asserts each body equals a REAL full-stack TestClient(main.app) response at the site named by site_id",
@@ -21,7 +21,8 @@
     "C6": "analytics-service/routers/exchange.py — `if result[\"error\"]:` after `validate_key_permissions` on the ccxt path (POST /api/validate-key)",
     "C7": "analytics-service/routers/portfolio.py — `if validation.get(\"error\"):` after `validate_key_permissions` in `verify_strategy`. DEAD ROUTE: no TypeScript caller exists. Included for CLASS INTEGRITY only — a class closed at six of its seven sites re-opens the moment the seventh is revived.",
     "C8": "analytics-service/routers/exchange.py — the known-server pre-check in `_validate_mt5_key_probe`, which raises BEFORE any client, lease or login (Phase 164.6.6.3 plan 05, D-09/D-10). Not part of the C5 login-stage class: nothing was sent to a terminal.",
-    "C9": "analytics-service/routers/exchange.py — the owed-scrub gate in `_validate_mt5_key_probe`, which raises BEFORE any connect, login or probe (Phase 164.6.6.3.2 D-02). The terminal owes a scrub or a relaunch from an earlier check; nothing else is using it, so no sentence about this site may say another check is."
+    "C9": "analytics-service/routers/exchange.py — the owed-scrub gate in `_validate_mt5_key_probe`, which raises BEFORE any connect, login or probe (Phase 164.6.6.3.2 D-02). The terminal owes a scrub or a relaunch from an earlier check; nothing else is using it, so no sentence about this site may say another check is.",
+    "C10": "analytics-service/routers/exchange.py — `except Mt5TerminalBusyError` in `_validate_mt5_key_probe`: the terminal was still held when the interactive lease bound expired (Phase 164.6.6.3.2 D-02). Nothing was sent to the terminal by this request."
   },
   "cases": [
     {
@@ -204,6 +205,17 @@
       "site_id": "C9",
       "trigger": "mt5_scrub_owed",
       "note": "Phase 164.6.6.3.2 D-02. The validation terminal owes a scrub or a relaunch from an earlier check, so a wizard validation is refused before any connect, login or probe and the owed scrub is scheduled. Before this phase the body carried NETWORK_UNAVAILABLE, which told the user a network timeout. recoverable is TRUE: the scrub clears in seconds. The detail is true at this site AND at C10 (nothing else is running here, so it never says another check is), is static, and the cascade-needle sweep in tests/test_mt5_server_known.py keeps it off every substring branch, so it reaches the wizard only through its own code. Every OTHER site and case in this fixture is BYTE-UNCHANGED.",
+      "status": 424,
+      "body": {
+        "detail": "Our MetaTrader connection was busy and could not take this check yet. Try again in a minute.",
+        "code": "MT5_TERMINAL_BUSY",
+        "recoverable": true
+      }
+    },
+    {
+      "site_id": "C10",
+      "trigger": "mt5_lease_busy",
+      "note": "Phase 164.6.6.3.2 D-02. The terminal was still held when the interactive acquisition bound expired, so nothing was sent to it by this request. Same code and same detail as C9 by design: the user's remedy is identical and the detail is true at both. recoverable is TRUE: a lease frees in seconds. trace.outcome stays lease_busy, so Railway logs still tell the two apart.",
       "status": 424,
       "body": {
         "detail": "Our MetaTrader connection was busy and could not take this check yet. Try again in a minute.",

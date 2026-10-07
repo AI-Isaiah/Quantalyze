@@ -258,6 +258,30 @@ def test_the_two_refusals_are_plain_exceptions():
     assert not issubclass(Mt5KnownServersUnconfigured, Mt5ServerUnknownError)
 
 
+# Every substring needle of `wizardErrors.ts::classifyKeyValidationError`'s cascade (the
+# comment in `closed_sets.py` plus the `master password`, `broker server` and `etimedout`
+# branches that comment omits). ONE module-level tuple, so the two detail sweeps below
+# (Phase 164.6.6.3 plan 05 and Phase 164.6.6.3.2 plan 02) read the same list and cannot
+# drift apart. Hoisted byte-identical from the local tuple the first sweep used to carry.
+_CASCADE_NEEDLES = (
+    "signature",
+    "invalid secret",
+    "authentication failed",
+    "invalid_credentials",
+    "rate",
+    "429",
+    "timeout",
+    "etimedout",
+    "could not verify",
+    "permission scope",
+    "probe",
+    "trading",
+    "withdraw",
+    "master password",
+    "broker server",
+)
+
+
 def test_server_unknown_detail_collides_with_no_cascade_needle():
     """`wizardErrors.ts::classifyKeyValidationError` is substring-based. These are
     every needle in that cascade (the comment in `closed_sets.py` plus the
@@ -265,25 +289,23 @@ def test_server_unknown_detail_collides_with_no_cascade_needle():
     A hit would mis-classify this refusal; `broker server` in particular would turn
     it into KEY_MT5_WRONG_SERVER."""
     lower = MT5_SERVER_UNKNOWN_DETAIL.lower()
-    needles = (
-        "signature",
-        "invalid secret",
-        "authentication failed",
-        "invalid_credentials",
-        "rate",
-        "429",
-        "timeout",
-        "etimedout",
-        "could not verify",
-        "permission scope",
-        "probe",
-        "trading",
-        "withdraw",
-        "master password",
-        "broker server",
-    )
-    hits = [n for n in needles if n in lower]
+    hits = [n for n in _CASCADE_NEEDLES if n in lower]
     assert hits == [], f"MT5_SERVER_UNKNOWN_DETAIL collides with cascade needle(s) {hits}"
+    assert not ("ip" in lower and "allow" in lower), "collides with the ip+allow branch"
+
+
+def test_terminal_busy_detail_collides_with_no_cascade_needle():
+    """Phase 164.6.6.3.2 D-02. The busy refusal's detail is forwarded VERBATIM by the
+    dashboard key forms (`src/app/api/keys/validate-and-encrypt/route.ts`), where a 4xx
+    `detail` is classified by the SAME substring cascade. A hit would turn a briefly busy
+    terminal into some other card ("timeout" would put it back on KEY_NETWORK_TIMEOUT,
+    the very cause this code exists to stop reporting), so the wire code must be the only
+    way it is recognised."""
+    from services.closed_sets import MT5_TERMINAL_BUSY_DETAIL
+
+    lower = MT5_TERMINAL_BUSY_DETAIL.lower()
+    hits = [n for n in _CASCADE_NEEDLES if n in lower]
+    assert hits == [], f"MT5_TERMINAL_BUSY_DETAIL collides with cascade needle(s) {hits}"
     assert not ("ip" in lower and "allow" in lower), "collides with the ip+allow branch"
 
 

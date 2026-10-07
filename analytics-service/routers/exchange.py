@@ -1453,6 +1453,15 @@ async def _validate_mt5_key_probe(
         # to the EXISTING transient arm, by cause, minting no new code (153.1 owns
         # the user-facing code table).
         #
+        # ⛔ CORRECTED 2026-10-07 (Phase 164.6.6.3.2 D-02): "minting no new code" is no
+        # longer true. This arm answered NETWORK_UNAVAILABLE, so the wizard told the user
+        # a network timeout while OUR terminal was held. It now answers MT5_TERMINAL_BUSY,
+        # the same code the owed-scrub gate answers (flat 424, recoverable, no
+        # dependency), so the card names the real cause and the remedy is "try again in a
+        # minute". The two sites are two in-place edits, never a shared helper, and
+        # `trace.outcome` stays `lease_busy` so Railway logs still tell them apart. The
+        # paragraph above is kept as lineage.
+        #
         # WHY this arm: it is genuinely RECOVERABLE — the terminal frees up — so
         # "try again" is honest advice rather than a shrug, which is what
         # WIZFORM-04's "copy names an action" requires of the server leg. And it
@@ -1486,8 +1495,8 @@ async def _validate_mt5_key_probe(
         trace.outcome = "lease_busy"
         raise VenueTransientHTTPException(
             status_code=424,
-            code="NETWORK_UNAVAILABLE",
-            detail=NETWORK_ERROR_DETAIL,
+            code="MT5_TERMINAL_BUSY",
+            detail=MT5_TERMINAL_BUSY_DETAIL,
             recoverable=True,
         )
 

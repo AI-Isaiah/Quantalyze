@@ -208,6 +208,7 @@ EXPECTED_FIXTURE_TRIGGERS = {
     "mt5_post_login_client_error",
     "mt5_server_unknown",
     "mt5_scrub_owed",
+    "mt5_lease_busy",
     "ccxt_rate_limited",
     "ccxt_ddos_protection",
     "ccxt_exchange_unavailable",
@@ -883,6 +884,44 @@ def test_c9_mt5_owed_scrub_answers_terminal_busy(app_client, monkeypatch) -> Non
     _assert_flat_venue_body(
         r,
         trigger="mt5_scrub_owed",
+        detail=EXPECTED_MT5_TERMINAL_BUSY_DETAIL,
+        code="MT5_TERMINAL_BUSY",
+        recoverable=True,
+    )
+    factory.assert_not_called()
+
+
+def test_c10_mt5_held_lease_answers_terminal_busy(app_client, monkeypatch) -> None:
+    """C10 - a terminal still held when the interactive lease bound expires refuses the
+    wizard validation, through the real route and the real exception-handler stack,
+    with the SAME code and detail as C9 (an owed scrub): the user's remedy is the same
+    and the detail is true at both. Phase 164.6.6.3.2 D-02; this arm used to answer
+    NETWORK_UNAVAILABLE.
+
+    The lease is replaced by one that raises `Mt5TerminalBusyError` on entry, which is
+    exactly what the real lease does at its bound; the real-lock path has its own test
+    in test_mt5_validate.py. The client double is armed to FAIL if it is ever built: the
+    refusal happens before any client exists."""
+    from contextlib import asynccontextmanager
+    from unittest.mock import MagicMock
+
+    from services.mt5_concurrency import Mt5TerminalBusyError
+
+    @asynccontextmanager
+    async def _held_lease(*args: Any, **kwargs: Any):
+        raise Mt5TerminalBusyError("held")
+        yield  # pragma: no cover - makes this an async generator
+
+    g = _handler_globals("/api/validate-key")
+    factory = MagicMock(side_effect=AssertionError("a client was built"))
+    monkeypatch.setitem(g, "Mt5Client", factory)
+    monkeypatch.setitem(g, "mt5_terminal_lease", _held_lease)
+
+    r = _post_validate_key(app_client, **_MT5_FIELDS)
+
+    _assert_flat_venue_body(
+        r,
+        trigger="mt5_lease_busy",
         detail=EXPECTED_MT5_TERMINAL_BUSY_DETAIL,
         code="MT5_TERMINAL_BUSY",
         recoverable=True,
