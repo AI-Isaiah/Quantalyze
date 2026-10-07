@@ -1375,6 +1375,69 @@ true for 146 and half of 142–145, and **false for 141**.
 
 ## 🟡 FIX MID-TERM
 
+### CONTACT-SUPPORT-POINTERS-01 — fifteen user-facing strings tell a user to "contact support" without saying how (booked 2026-10-07, Phase 164.6.6.3.5)
+
+**Why it is open.** These strings send a user to "contact support" and name no channel. Before Phase
+164.6.6.3.5 that was an unspoken email address; after its D-01 the only channel is the contact form
+(`/contact`), so each string should become the `contact form` pointer, rendered through
+`ContactPointerText` (the phrase `contact form` is the link). Phase 164.6.6.3.5 (D-16, an
+orchestrator-taken research recommendation, not a founder decision) booked them instead of changing
+them, because they sit outside `wizardErrors.ts`, the surface it rewrites. None was changed.
+
+**The list (measured 2026-10-07 at the phase worktree HEAD: 24 raw matching lines, 15 after the
+exclusions below).** Excluded: three comments (`gdpr-export.ts`, `fetch-and-build-payload.ts`, one
+doc comment in `key-card-copy.ts`), `key-card-copy.ts`'s four address-bearing constants and
+`csv-finalize`'s two address-bearing messages (all rewritten by Phase 164.6.6.3.5 plan 07), test
+files and `wizardErrors.ts`. Research counted about 17, which is these 15 plus the two
+`csv-finalize` address-bearing messages (inferred, not re-derived).
+
+- `src/app/api/strategies/csv-finalize/route.ts`: `ENQUEUE_LOST_RACE_USER_COPY` ("Analytics could not
+  complete for this strategy. Retry the sync, or contact support if this persists."). Plan 07 does
+  not touch it (orchestrator ruling I7).
+- `src/app/api/strategies/finalize-wizard/route.ts`: the `computation_error` written for composite
+  strategies on the unified-backbone path ("... Contact support."), around line 2601.
+- `src/app/api/admin/match/send-intro/route.ts`: `audit_warning` (operator-facing), around line 627.
+- `src/app/api/admin/partner-import/route.ts`: `audit_warning` (operator-facing), around line 1037.
+- `src/app/api/account/export/route.ts`: the export-limit message (around line 509) and the
+  "Export manifest drift" error (around line 540).
+- `src/app/(dashboard)/allocations/components/ScenarioCommitDrawer.tsx`: the two commit-outcome
+  remedies, around lines 371 and 372.
+- `src/app/(dashboard)/allocations/components/WeightOptimizerSection.tsx`: the unreadable-optimizer
+  body, around line 119.
+- `src/components/auth/ProfileForm.tsx`: the locked-field help text, around line 116.
+- `src/components/auth/SignupForm.tsx`: the generic signup failure (around line 148) and the
+  locked-after-signup help text (around line 212).
+- `src/components/strategy/ApiKeyManager.tsx`: the sync-start failure copy (around line 86), the
+  delete-failure constant (around line 271) and the still-connected delete failure (around line 1098).
+
+**Owner: unrouted.** Founder to assign.
+
+**What closing it means.** Each string is in a pointer shape (the `contact form` phrase linking to
+`contactHref(...)` with the right topic and reference), the tests that pin the old wording move in the
+same change, the no-email-in-copy sweep that Phase 164.6.6.3.5 added is extended to the touched
+modules, and the regenerate command below returns only comments and fixtures. Server-side strings
+(`audit_warning`, `computation_error`, route error bodies) need the rendering host decided first,
+because `ContactPointerText` is a React component and a JSON field is not.
+
+Regenerate the census with `grep -rni 'contact support' src --include='*.ts' --include='*.tsx' | grep -v 'wizardErrors.ts' | grep -v '[.]test[.]'`
+and drop comments by hand.
+
+### SECURITY-TXT-EXPIRES-01 — `security.txt` Expires lapses on 2027-04-10 and nothing renews it (booked 2026-10-07, Phase 164.6.6.3.5)
+
+**Why it is open.** `public/.well-known/security.txt` carries `Expires: 2027-04-10T00:00:00.000Z`.
+RFC 9116 requires the field and says a file past its Expires date must be treated as stale; it
+RECOMMENDS an Expires less than a year ahead. Phase 164.6.6.3.5 moved the file to the contact form and
+left the date as it found it. Nothing in the repo renews it.
+
+**Owner: unrouted.** Founder to assign.
+
+**Trigger.** Renew by 2027-03-10: set a new `Expires` less than a year after the edit. `src/__tests__/security-txt.test.ts`
+(Phase 164.6.6.3.5 plan 09) is the check that goes red once the date lapses.
+
+**What closing it means.** The `Expires` value is a future date under a year ahead, the same edit
+re-measures `Contact:`, `Canonical`, `Policy` and `Acknowledgments` against the live
+`https://quantalyze.xyz/.well-known/security.txt`, and this entry is re-booked for the next renewal.
+
 ### SENTRY-UNSCOPED-TAG-01 — five pre-existing `sentry_sdk.set_tag` calls label every later event the process sends (booked 2026-10-06)
 
 **Why it is open.** Phase 164.6.6.3 review WR-03 found that an unscoped `sentry_sdk.set_tag` on the
