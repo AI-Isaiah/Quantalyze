@@ -1896,9 +1896,10 @@ async def portfolio_optimizer(request: Request, req: PortfolioOptimizerRequest) 
     candidate_rows = rows(all_published)
     candidate_ids = [row["id"] for row in candidate_rows]
     candidate_names = {row["id"]: row.get("name", row["id"]) for row in candidate_rows}
-    # WR-01: the scorers annualize risk on the blend's clock (365 if any leg of
-    # the book or the candidate is crypto), so they are handed every strategy's
-    # asset class, portfolio members and candidates alike.
+    # WR-01 + D-08: the scorers annualize risk on the EXISTING BOOK's clock (365 if
+    # a book leg is crypto, else 252; a candidate's own class never moves it). They
+    # are still handed every strategy's asset class, portfolio members and
+    # candidates alike, and read only the book legs'.
     asset_classes = _asset_classes_by_id(portfolio_strategies, candidate_rows)
 
     candidate_returns: dict[str, pd.Series] = {}
@@ -2230,9 +2231,10 @@ async def portfolio_bridge(request: Request, req: BridgeRequest) -> dict[str, An
     candidate_rows = rows(all_published)
     candidate_ids = [row["id"] for row in candidate_rows]
     candidate_names = {row["id"]: row.get("name", row["id"]) for row in candidate_rows}
-    # WR-01: the scorers annualize risk on the blend's clock (365 if any leg of
-    # the book or the candidate is crypto), so they are handed every strategy's
-    # asset class, portfolio members and candidates alike.
+    # WR-01 + D-08: the scorers annualize risk on the EXISTING BOOK's clock (365 if
+    # a book leg is crypto, else 252; a candidate's own class never moves it). They
+    # are still handed every strategy's asset class, portfolio members and
+    # candidates alike, and read only the book legs'.
     asset_classes = _asset_classes_by_id(portfolio_strategies, candidate_rows)
 
     candidate_returns: dict[str, pd.Series] = {}

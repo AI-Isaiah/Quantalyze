@@ -53,8 +53,9 @@ def find_replacement_candidates(
     to the client. The Zod BridgeResponseSchema requires it.
 
     ``asset_classes`` ({strategy_id: strategies.asset_class}) sets the risk clock
-    of each Sharpe (WR-01): 365 if the incumbent book or the candidate holds a
-    crypto leg, else 252. Both sides of a delta use the same clock.
+    of each Sharpe (WR-01, D-08): the EXISTING BOOK's, 365 if a book leg
+    (incumbent included) is crypto, else 252. Both sides of every delta and every
+    candidate in the list use it, so a candidate's own class never moves its score.
     """
     # Dedupe duplicate timestamps last-write-wins (the G15-006 idiom in
     # routers/simulator.py + _build_monthly_returns) BEFORE the frame is built:
@@ -104,6 +105,12 @@ def find_replacement_candidates(
     # Pre-compute remaining weights (shared across all candidates)
     base_weights = {sid: weights.get(sid, 0) for sid in remaining_sids}
 
+    # D-08 (founder 2026-10-07, review round 2 R2-01): ONE risk clock for the whole
+    # ranked list and both sides of every swap: the EXISTING BOOK's (the incumbent
+    # included), 365 if a book leg is crypto, else 252. A candidate's own
+    # asset_class never changes it, so identical candidates score equally whatever
+    # their label.
+    book_ppy = blend_clock(asset_classes, list(port_df.columns))
     results: list[dict[str, Any]] = []
     for cid, c_returns in candidate_returns.items():
         if cid in portfolio_sids:
@@ -134,11 +141,9 @@ def find_replacement_candidates(
         # rows. w_arr is unchanged because the column set is identical.
         port_df_aligned = port_df.loc[all_returns.index]
         current_returns = (port_df_aligned * w_arr).sum(axis=1)
-        # WR-01: one risk clock for BOTH sides of the swap, so `sharpe_delta`
-        # measures the candidate and never a change of clock. A crypto leg
-        # anywhere in the incumbent book or in the candidate makes it 365.
-        blend_ppy = blend_clock(asset_classes, [*port_df.columns, cid])
-        current_sharpe = _compute_sharpe(current_returns, periods_per_year=blend_ppy)
+        # WR-01 + D-08: the book's clock (`book_ppy` above) on BOTH sides of the
+        # swap, so `sharpe_delta` measures the candidate and never a clock change.
+        current_sharpe = _compute_sharpe(current_returns, periods_per_year=book_ppy)
         current_corr = _avg_corr(port_df_aligned)
         current_dd = _max_drawdown(current_returns)
 
@@ -150,7 +155,7 @@ def find_replacement_candidates(
             w_new = w_new / w_new_sum
 
         new_port_returns = (all_returns * w_new).sum(axis=1)
-        new_sharpe = _compute_sharpe(new_port_returns, periods_per_year=blend_ppy)
+        new_sharpe = _compute_sharpe(new_port_returns, periods_per_year=book_ppy)
         new_corr = _avg_corr(all_returns)
         new_dd = _max_drawdown(new_port_returns)
 

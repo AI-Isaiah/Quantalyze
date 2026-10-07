@@ -393,8 +393,9 @@ async def portfolio_simulator(request: Request, req: SimulatorRequest) -> dict[s
             candidate_id=req.candidate_strategy_id,
             candidate_returns=candidate_series,
             weights=weights,
-            # WR-01: each blend's Sharpe is annualized on the blend's risk clock
-            # (365 if any leg of the book or the candidate is crypto, else 252).
+            # WR-01 + D-08: both Sharpes are annualized on the EXISTING BOOK's
+            # risk clock (365 if a book leg is crypto, else 252); the candidate's
+            # own class is passed along but never read by the scorer.
             asset_classes={
                 **{
                     row["strategy_id"]: (row.get("strategies") or {}).get("asset_class")

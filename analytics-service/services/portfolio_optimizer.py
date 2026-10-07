@@ -28,6 +28,10 @@ def blend_clock(
     is 365 if ANY named strategy is crypto, else 252. A strategy absent from the
     map reads as unknown (252), and ``asset_classes=None`` is the legacy all-252
     call, so a scorer called without the map keeps its old clock.
+
+    D-08 (founder 2026-10-07): the candidate scorers (optimizer, bridge,
+    simulator) pass the EXISTING BOOK's legs only, never the candidate, so a
+    candidate's own ``asset_class`` cannot move a score or a rank.
     """
     return blend_periods_per_year((asset_classes or {}).get(sid) for sid in sids)
 
@@ -69,6 +73,12 @@ def find_improvement_candidates(
     # and ranks short-history candidates spuriously. The baseline is therefore
     # RESLICED to each candidate's window inside the loop (see port_baseline),
     # never precomputed here.
+    # D-08 (founder 2026-10-07, review round 2 R2-01): ONE risk clock for the whole
+    # ranked list and for both sides of every delta: the EXISTING BOOK's (365 if a
+    # book leg is crypto, else 252). A candidate's own asset_class never changes it,
+    # so two candidates with identical returns score equally whatever their label
+    # (a per-candidate clock gave a crypto-tagged copy a sqrt(365/252) Sharpe bonus).
+    book_ppy = blend_clock(asset_classes, port_cols)
     results: list[dict[str, Any]] = []
     for cid, c_returns in candidate_returns.items():
         c_returns = c_returns[~c_returns.index.duplicated(keep="last")]
@@ -81,11 +91,10 @@ def find_improvement_candidates(
         if w_new.sum() > 0:
             w_new = w_new / w_new.sum()
         new_port = (aligned * w_new).sum(axis=1)
-        # WR-01: the blend's risk clock (365 if the book or the candidate holds
-        # a crypto leg, else 252). The baseline below is scored on the SAME
-        # clock, so `sharpe_lift` measures the candidate and never the clock.
-        blend_ppy = blend_clock(asset_classes, [*port_cols, cid])
-        new_sharpe = _compute_sharpe(new_port, periods_per_year=blend_ppy)
+        # WR-01 + D-08: the proposed blend is scored on the book's clock (see
+        # `book_ppy` above). The baseline below uses the SAME clock, so
+        # `sharpe_lift` measures the candidate and never the clock.
+        new_sharpe = _compute_sharpe(new_port, periods_per_year=book_ppy)
         new_avg_corr = _avg_corr(aligned)
         new_max_dd = _max_drawdown(new_port)
         # M-0701: exclude a degenerate candidate whose OWN aligned returns do
@@ -126,7 +135,7 @@ def find_improvement_candidates(
         # full-window baseline exactly, so it is a no-op there.
         port_cols_aligned = aligned[port_cols]
         port_baseline = (port_cols_aligned * w_arr).sum(axis=1)
-        current_sharpe = _compute_sharpe(port_baseline, periods_per_year=blend_ppy)
+        current_sharpe = _compute_sharpe(port_baseline, periods_per_year=book_ppy)
         current_avg_corr = _avg_corr(port_cols_aligned)
         current_max_dd = _max_drawdown(port_baseline)
         # Phase 166.1 (C3, D-02): None when the baseline does not disperse (a

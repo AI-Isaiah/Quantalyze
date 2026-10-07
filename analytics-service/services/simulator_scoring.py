@@ -71,8 +71,9 @@ def simulate_add_candidate(
             Defaults to 0.10, matching the optimizer's default.
         asset_classes: {strategy_id: strategies.asset_class} for the
             portfolio's strategies and the candidate. Sets the risk clock of
-            both Sharpes (WR-01): 365 if the book or the candidate holds a
-            crypto leg, else 252. Both sides use the same clock.
+            both Sharpes (WR-01, D-08): the EXISTING BOOK's, 365 if a book leg
+            is crypto, else 252. The candidate's own class never changes it,
+            so ``current.sharpe`` equals the portfolio headline for the book.
 
     Returns:
         A dict with:
@@ -141,9 +142,12 @@ def simulate_add_candidate(
         w_arr = w_arr / w_arr.sum()
     current_returns = (port_aligned * w_arr).sum(axis=1)
 
-    # WR-01: ONE risk clock for the current and the proposed blend, so
-    # `sharpe_delta` measures the candidate and never a change of clock.
-    blend_ppy = blend_clock(asset_classes, [*port_aligned.columns, candidate_id])
+    # WR-01 + D-08 (founder 2026-10-07, review round 2 R2-01/R2-02): ONE risk clock
+    # for the current and the proposed blend, and it is the EXISTING BOOK's (365 if
+    # a book leg is crypto, else 252), never the candidate's. `sharpe_delta` then
+    # measures the candidate and never a change of clock, and `current.sharpe`
+    # equals the portfolio headline whatever candidate is being simulated.
+    blend_ppy = blend_clock(asset_classes, list(port_aligned.columns))
     current_sharpe = _compute_sharpe(current_returns, periods_per_year=blend_ppy)
     current_avg_corr = _avg_corr(port_aligned)
     current_max_dd = _max_drawdown(current_returns)
