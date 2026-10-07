@@ -2592,8 +2592,12 @@ async def verify_strategy(request: Request, req: VerifyStrategyRequest) -> dict[
             hit_candidate_cap = len(published_ids) >= _MATCH_CANDIDATE_LIMIT
 
             if published_ids:
+                # Phase 164.6.6.2.2 (D-06): `daily_returns` and
+                # `data_quality_flags` ride the same row so the shared boundary
+                # can read each published strategy as DAILY RETURNS (the stored
+                # `returns_series` is a cumulative curve, not returns).
                 sa_result = supabase.table("strategy_analytics").select(
-                    "strategy_id, returns_series"
+                    "strategy_id, returns_series, daily_returns, data_quality_flags"
                 ).in_("strategy_id", published_ids).execute()
 
                 # Vectorized matching: build a DataFrame of all existing series and
@@ -2609,10 +2613,21 @@ async def verify_strategy(request: Request, req: VerifyStrategyRequest) -> dict[
                 # slice is the relevant window for correlation matching
                 # anyway — older history dilutes the recent-regime
                 # signal verify_strategy is actually looking for.
+                #
+                # Phase 164.6.6.2.2 (D-06): the trim PRECEDES the conversion and
+                # covers BOTH list columns the boundary can read. A curve cut to
+                # its trailing N levels then loses only its own first point at
+                # the boundary (N - 1 returns); converting first would build the
+                # full series in memory, which is what the cap exists to stop.
+                # A dict-shaped `daily_returns` is passed through as stored.
                 existing: dict[str, pd.Series] = {}
                 for row in rows(sa_result):
-                    raw_series = _trim_returns_series(row.get("returns_series"))
-                    s = _records_to_series(raw_series, name=row["strategy_id"])
+                    trimmed_row = {
+                        **row,
+                        "returns_series": _trim_returns_series(row.get("returns_series")),
+                        "daily_returns": _trim_returns_series(row.get("daily_returns")),
+                    }
+                    s = daily_returns_from_row(trimmed_row, name=row["strategy_id"])
                     if s is not None:
                         existing[row["strategy_id"]] = s
 

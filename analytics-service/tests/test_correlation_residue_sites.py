@@ -28,7 +28,7 @@ import logging
 import math
 import sys
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import DEFAULT, MagicMock, patch
 
 import numpy as np
 import pandas as pd
@@ -499,30 +499,55 @@ def test_c6_a_noisy_portfolio_keeps_its_benchmark_correlation() -> None:
 # left green. The source pin below stays as a second, cheaper guard.
 
 
-def _c7_supabase(existing: dict[str, pd.Series]) -> MagicMock:
+def _c7_supabase(
+    existing: dict[str, pd.Series],
+    raw_rows: dict[str, dict[str, object]] | None = None,
+) -> MagicMock:
+    """Published strategies as ``verify_strategy`` reads them. ``existing`` rows are
+    stored in the real shape (a cumulative curve of the given daily returns);
+    ``raw_rows`` are whole ``strategy_analytics`` rows written verbatim, for a case
+    that needs a stored ``daily_returns`` or a hand-built curve."""
+    raw = raw_rows or {}
     strategies = MagicMock()
     (strategies.select.return_value.eq.return_value.order.return_value
      .limit.return_value.execute.return_value) = MagicMock(
-        data=[{"id": sid} for sid in existing]
+        data=[{"id": sid} for sid in [*existing, *raw]]
     )
     analytics = MagicMock()
     analytics.select.return_value.in_.return_value.execute.return_value = MagicMock(data=[
-        {
-            "strategy_id": sid,
-            "returns_series": [
-                {"date": d.strftime("%Y-%m-%d"), "value": float(v)} for d, v in s.items()
-            ],
-        }
-        for sid, s in existing.items()
+        *[
+            {"strategy_id": sid, "returns_series": _stored_curve(s)}
+            for sid, s in existing.items()
+        ],
+        *[{"strategy_id": sid, **row} for sid, row in raw.items()],
     ])
+
+    def _select(columns: str = "*", *_a: object, **_k: object) -> MagicMock:
+        # Column-strict (tests/_schema_columns.py), then hand back the table's own
+        # chain (``DEFAULT``) so the canned rows above are what ``.execute()`` gives.
+        assert_select_columns("strategy_analytics", columns)
+        return DEFAULT
+
+    analytics.select.side_effect = _select
     tables = {"strategies": strategies, "strategy_analytics": analytics}
     sb = MagicMock()
     sb.table.side_effect = lambda name: tables.setdefault(name, MagicMock())
     return sb
 
 
-def _c7_verify(target: pd.Series, existing: dict[str, pd.Series]) -> dict:
-    """``verify_strategy``'s response for a venue whose daily returns are ``target``."""
+def _c7_verify(
+    target: pd.Series,
+    existing: dict[str, pd.Series],
+    *,
+    raw_rows: dict[str, dict[str, object]] | None = None,
+    cap: int | None = None,
+    frames: list[pd.DataFrame] | None = None,
+) -> dict:
+    """``verify_strategy``'s response for a venue whose daily returns are ``target``.
+
+    ``cap`` replaces the H-0594 trailing trim cap for the call; ``frames`` collects
+    the candidate frame each ``dispersing_corrwith`` call receives (a pass-through
+    spy, patched on the module object)."""
     from models.schemas import VerifyStrategyRequest
     from routers import portfolio as portfolio_mod
     from starlette.requests import Request as StarletteRequest
@@ -562,7 +587,19 @@ def _c7_verify(target: pd.Series, existing: dict[str, pd.Series]) -> dict:
         mp.setattr(portfolio_mod, "fetch_all_trades", _trades)
         mp.setattr(portfolio_mod, "fetch_usdt_balance", _balance)
         mp.setattr(portfolio_mod, "trades_to_daily_returns", lambda *a, **kw: target)
-        mp.setattr(portfolio_mod, "get_supabase", lambda: _c7_supabase(existing))
+        mp.setattr(
+            portfolio_mod, "get_supabase", lambda: _c7_supabase(existing, raw_rows)
+        )
+        if cap is not None:
+            mp.setattr(portfolio_mod, "_MATCH_RETURNS_SERIES_MAX_POINTS", cap)
+        if frames is not None:
+            real = portfolio_mod.dispersing_corrwith
+
+            def _spy(candidates: pd.DataFrame, target_series: pd.Series) -> pd.Series:
+                frames.append(candidates.copy())
+                return real(candidates, target_series)
+
+            mp.setattr(portfolio_mod, "dispersing_corrwith", _spy)
         return asyncio.run(portfolio_mod.verify_strategy(request, req))
 
 
@@ -606,6 +643,86 @@ def test_c7_a_near_identical_noisy_candidate_still_matches() -> None:
     near = target + _noise(idx, seed=72, scale=0.0005)
     out = _c7_verify(target, {"near": near, "other": _noise(idx, seed=73)})
     assert (out["matching_status"], out["matched_strategy_id"]) == ("matched", "near")
+
+
+def test_c7_a_candidate_stored_as_a_curve_of_the_targets_daily_returns_matches() -> None:
+    """Phase 164.6.6.2.2 (D-06): verify matching compares returns with returns. The
+    published strategy is a stored curve whose derived daily returns equal the
+    target's; read as levels it would sit near 1.0 against returns near 0."""
+    idx = nav_constant_yield(1e-4).index
+    target = _noise(idx, seed=74)
+    out = _c7_verify(target, {"same": target.copy(), "other": _noise(idx, seed=75)})
+    assert (out["matching_status"], out["matched_strategy_id"]) == ("matched", "same")
+
+
+def test_c7_a_candidate_whose_curve_levels_track_the_target_but_whose_returns_do_not_is_not_matched() -> None:
+    """D-06 negative (T-164.6.6.2.2-14): a return-shaped series stored where a curve
+    belongs. Its LEVELS (1 + target_k) track the target exactly, so the CR-01 read
+    reported a duplicate; its derived daily returns correlate at about 1/sqrt(2)."""
+    idx = nav_constant_yield(1e-4).index
+    target = _noise(idx, seed=76)
+    levels = 1.0 + target
+    out = _c7_verify(
+        target,
+        {},
+        raw_rows={
+            "levels_track": {
+                "returns_series": [
+                    {"date": d.strftime("%Y-%m-%d"), "value": float(v)}
+                    for d, v in levels.items()
+                ]
+            }
+        },
+    )
+    assert (out["matching_status"], out["matched_strategy_id"]) == ("no_match", None)
+
+
+def test_c7_the_trim_runs_before_the_conversion_so_a_curve_loses_only_its_own_first_point() -> None:
+    """H-0594 x D-06: a published curve longer than the cap is cut to its trailing
+    ``cap`` levels FIRST, and the boundary then drops day 0 of what is left, so the
+    frame handed to the correlation has ``cap - 1`` rows, ending on the curve's last
+    date. Converting first and trimming after would hand over ``cap`` rows."""
+    cap = 40
+    idx = pd.date_range("2024-01-02", periods=60, freq="D")
+    target = _noise(idx, seed=77)
+    frames: list[pd.DataFrame] = []
+    out = _c7_verify(target, {"long": target.copy()}, cap=cap, frames=frames)
+    assert len(frames) == 1
+    frame = frames[0]
+    assert len(frame) == cap - 1
+    assert frame.index[-1] == idx[-1]
+    assert frame.index[0] == idx[60 - cap + 1]
+    assert (out["matching_status"], out["matched_strategy_id"]) == ("matched", "long")
+
+
+def test_c7_a_stored_daily_returns_list_is_trimmed_to_the_cap_and_wins_over_the_curve() -> None:
+    """The trim covers BOTH list columns (T-164.6.6.2.2-15). A published row that
+    carries ``daily_returns`` (D-02: it wins, verbatim) is cut to its trailing
+    ``cap`` records, and with no curve day to drop that is ``cap`` rows."""
+    cap = 40
+    idx = pd.date_range("2024-01-02", periods=60, freq="D")
+    target = _noise(idx, seed=78)
+    frames: list[pd.DataFrame] = []
+    out = _c7_verify(
+        target,
+        {},
+        raw_rows={
+            "stored": {
+                "daily_returns": [
+                    {"date": d.strftime("%Y-%m-%d"), "value": float(v)}
+                    for d, v in target.items()
+                ],
+                # A curve that would NOT correlate: proves daily_returns wins.
+                "returns_series": _stored_curve(_noise(idx, seed=79)),
+            }
+        },
+        cap=cap,
+        frames=frames,
+    )
+    assert len(frames) == 1
+    assert len(frames[0]) == cap
+    assert frames[0].index[0] == idx[60 - cap]
+    assert (out["matching_status"], out["matched_strategy_id"]) == ("matched", "stored")
 
 
 # ---------------------------------------------------------------------------
