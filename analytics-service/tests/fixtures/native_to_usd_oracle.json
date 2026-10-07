@@ -1,5 +1,6 @@
 {
   "_comment": "Cross-runtime oracle for the BTC-native -> USD return conversion (Phase 164.6.6.2 D-18, D-22, D-23). Read by src/lib/factsheet/native-to-usd.test.ts and by the Python twin built in plan 164.6.6.2-13. Every `expected` value is a HAND-COMPUTED literal (see each `arithmetic`), never produced by either implementation. usd_k = (1 + r_k) * (1 + btc_k) - 1, where r_k is the account's BTC-denominated daily return and btc_k the BTC close-to-close move over the same interval. A `null` series value stands for a non-finite number (JSON has no NaN).",
+  "closes_source": "benchmark_prices only",
   "tolerance": 1e-12,
   "cases": [
     {
@@ -170,6 +171,24 @@
       ],
       "expected": [],
       "arithmetic": "Fri 2026-01-02 to Mon 2026-01-05 spans three BTC days but Sunday 2026-01-04 has no close. A seven-day calendar is not fully covered, so the interval is unpaired and the day is absent rather than priced from a bridged two-day move."
+    },
+    {
+      "name": "earliest_dates_before_first_stored_close_are_absent",
+      "unit": "BTC",
+      "closes": { "2026-02-04": 100, "2026-02-05": 110, "2026-02-06": 121 },
+      "dropped": [],
+      "series": [
+        { "date": "2026-02-02", "value": 0.0 },
+        { "date": "2026-02-03", "value": 0.3 },
+        { "date": "2026-02-04", "value": 0.3 },
+        { "date": "2026-02-05", "value": 0.5 },
+        { "date": "2026-02-06", "value": 0.2 }
+      ],
+      "expected": [
+        { "date": "2026-02-05", "value": 0.65 },
+        { "date": "2026-02-06", "value": 0.32 }
+      ],
+      "arithmetic": "closes_source is benchmark_prices only: the first stored close is 2026-02-04 and no bundled prefix extends it. 2026-02-03 and 2026-02-04 have no priced interval, so they are absent. 2026-02-05: 1.5 x (110 / 100) - 1 = 0.65. 2026-02-06: 1.2 x (121 / 110) - 1 = 1.32 - 1 = 0.32."
     }
   ]
 }

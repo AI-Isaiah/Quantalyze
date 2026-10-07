@@ -57,6 +57,13 @@ function toBtc(c: OracleCase) {
 }
 
 describe("convertNativeReturnsToUsd: the hand-computed oracle (D-18)", () => {
+  it("pins the ONE price window both runtimes read: stored closes only, no bundled prefix", () => {
+    expect(ORACLE.closes_source).toBe("benchmark_prices only");
+    expect(ORACLE.cases.map((c) => c.name)).toContain(
+      "earliest_dates_before_first_stored_close_are_absent",
+    );
+  });
+
   it("the fixture is a real oracle: tolerance is tight and every case states its arithmetic", () => {
     expect(ORACLE.tolerance).toBeLessThanOrEqual(1e-12);
     expect(ORACLE.cases.length).toBeGreaterThan(0);
