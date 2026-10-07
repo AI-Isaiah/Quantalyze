@@ -6,6 +6,7 @@ import type { FactsheetPayload, JointMetrics } from "@/lib/factsheet/types";
 import { formatRecordLength } from "@/lib/factsheet/record-length";
 import { COMPARATOR_CALENDARS, isPastCoverage, type WeekdayCalendar } from "@/lib/factsheet/align";
 import { pairedFloorReason } from "@/lib/factsheet/joint";
+import { withUnit } from "@/lib/factsheet/returns-unit";
 import { usePayload, useActiveComparator } from "./factsheet-context";
 import { useBasisOrCash, useBasisSeriesView, useWindowedView, type Basis, type RangeScope } from "./basis-context";
 import { CalmarByYearPanel, BootstrapCIPanel, FULL_HISTORY_NOTE, ScopeNote } from "./AnalyticalPanels";
@@ -208,8 +209,8 @@ export function MetricsColumn({ scenarioMode = false }: { scenarioMode?: boolean
             </p>
           )}
           <Kpm>
-            <Row label="Cumulative Return" value={pct(m.cum_ret, true)} bench={pct(b?.cum_ret, true)} />
-            <Row label="CAGR" value={pct(m.cagr, true)} bench={pct(b?.cagr, true)} />
+            <Row label={withUnit("Cumulative Return", payload.returnsUnit ?? null)} value={pct(m.cum_ret, true)} bench={pct(b?.cum_ret, true)} />
+            <Row label={withUnit("CAGR", payload.returnsUnit ?? null)} value={pct(m.cagr, true)} bench={pct(b?.cagr, true)} />
             <Row label="Ann. Volatility" value={pct(m.ann_vol)} bench={pct(b?.ann_vol)} />
             <Row label="Sharpe" value={num(m.sharpe)} bench={num(b?.sharpe)} accent />
             <Row label="Sortino" value={num(m.sortino)} bench={num(b?.sortino)} />
@@ -923,7 +924,8 @@ function EoyReturnsPanel({ scopeNote }: { scopeNote?: string }) {
   // series (`cmp.dailyReturns` compounded on the VIEW's own date axis) come from the
   // view, so strategy + benchmark sit on ONE coherent basis. Under cash the view
   // returns `payload` by reference (byte-identical).
-  const view = useBasisSeriesView(usePayload());
+  const payload = usePayload();
+  const view = useBasisSeriesView(payload);
   const { key: cmpKey } = useActiveComparator();
   const cmp = view.comparators[cmpKey];
   const stratYearly = view.strategyMetrics.yearly;
@@ -942,7 +944,7 @@ function EoyReturnsPanel({ scopeNote }: { scopeNote?: string }) {
   const partialYear = hasBench ? comparatorPartialYear(cmp.through, view.dates, COMPARATOR_CALENDARS[cmpKey]) : null;
   if (years.length === 0) return null;
   return (
-    <Panel title="EOY Returns" benchHeader={hasBench ? cmp.shortName : undefined} scopeNote={scopeNote}>
+    <Panel title={withUnit("EOY Returns", payload.returnsUnit ?? null)} benchHeader={hasBench ? cmp.shortName : undefined} scopeNote={scopeNote}>
       <table className="w-full text-fixed-11">
         <thead>
           <tr className="border-b border-border/60">

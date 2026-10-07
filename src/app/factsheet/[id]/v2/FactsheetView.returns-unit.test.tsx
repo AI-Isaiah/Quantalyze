@@ -81,6 +81,21 @@ function renderFactsheet(
   );
 }
 
+function kpiLabels(container: HTMLElement): HTMLElement[] {
+  return Array.from(container.querySelectorAll<HTMLElement>('[data-testid="factsheet-kpi-label"]'));
+}
+function labelByText(container: HTMLElement, text: string): HTMLElement | undefined {
+  return kpiLabels(container).find((el) => el.textContent === text);
+}
+/** The AUM chip's root: the parent of the `AUM` eyebrow paragraph in the masthead. */
+function aumChip(container: HTMLElement): HTMLElement {
+  const eyebrow = Array.from(container.querySelectorAll("header p")).find((p) =>
+    (p.textContent ?? "").startsWith("AUM"),
+  );
+  expect(eyebrow, "the AUM chip did not render").toBeDefined();
+  return eyebrow!.parentElement as HTMLElement;
+}
+
 describe("A1 — the masthead chip", () => {
   it("a BTC payload renders exactly one chip, with the DOM text, inside the flex-wrap row beside the h1", () => {
     const { container } = renderFactsheet(unitPayload("BTC"));
@@ -136,5 +151,116 @@ describe("A1 — the masthead chip", () => {
     const { container } = renderFactsheet(unitPayload("ETH"));
     expect(container.querySelector('[data-returns-unit="ETH"]')!.textContent).toBe("Returns in ETH");
     expect(container.querySelector('[data-returns-unit="BTC"]')).toBeNull();
+  });
+});
+
+// The wrap-vs-clip contract (UI-SPEC "Label wrap rule"). The shared prefix is the
+// label's own token string, which no label ever changes.
+const LABEL_BASE = "text-micro font-mono uppercase tracking-[0.14em] sm:tracking-[0.18em]";
+const LABEL_CLIP = `${LABEL_BASE} whitespace-nowrap overflow-hidden text-ellipsis`;
+const LABEL_WRAP = `${LABEL_BASE} whitespace-normal break-words`;
+
+describe("A2/A3 — the KPI strip's return labels", () => {
+  it("a BTC strip labels exactly the two return cells in BTC, and they wrap instead of clipping", () => {
+    const { container } = renderFactsheet(unitPayload("BTC"));
+    const cum = labelByText(container, "Cum. Return in BTC");
+    const cagr = labelByText(container, "CAGR in BTC");
+    expect(cum, "Cum. Return in BTC").toBeDefined();
+    expect(cagr, "CAGR in BTC").toBeDefined();
+    for (const el of [cum!, cagr!]) {
+      expect(el.className).toBe(LABEL_WRAP);
+      expect(el.className).not.toContain("text-ellipsis");
+    }
+    // The bare labels are gone, not duplicated.
+    expect(labelByText(container, "Cum. Return")).toBeUndefined();
+    expect(labelByText(container, "CAGR")).toBeUndefined();
+  });
+
+  it("every other label keeps the clip classes byte-for-byte", () => {
+    const { container } = renderFactsheet(unitPayload("BTC"));
+    const others = kpiLabels(container).filter(
+      (el) => el.textContent !== "Cum. Return in BTC" && el.textContent !== "CAGR in BTC",
+    );
+    expect(others.map((el) => el.textContent)).toContain("Sharpe");
+    expect(others.length).toBe(kpiLabels(container).length - 2);
+    for (const el of others) expect(el.className).toBe(LABEL_CLIP);
+  });
+
+  it("a USD strip is unchanged: bare labels, every one on the clip classes", () => {
+    const { container } = renderFactsheet(usdPayload());
+    const labels = kpiLabels(container);
+    expect(labels.map((el) => el.textContent)).toEqual(
+      expect.arrayContaining(["Cum. Return", "CAGR", "Sharpe"]),
+    );
+    for (const el of labels) expect(el.className).toBe(LABEL_CLIP);
+    expect(labels.some((el) => /\bin [A-Z]{2,10}$/.test(el.textContent ?? ""))).toBe(false);
+  });
+
+  it("takes the unit it is given: ETH reads CAGR in ETH and names no BTC", () => {
+    const { container } = renderFactsheet(unitPayload("ETH"));
+    expect(labelByText(container, "CAGR in ETH")).toBeDefined();
+    expect(labelByText(container, "Cum. Return in ETH")).toBeDefined();
+    expect(container.textContent).not.toContain("in BTC");
+  });
+});
+
+describe("A12 / D-21 — the AUM chip never shows a USD figure as if it were BTC", () => {
+  const AUM = { aum: 2_000_000, maxCapacity: 10_000_000 };
+
+  it("a BTC strategy's AUM reads a bare dash: no capacity span, no utilization bar, no dollar sign", () => {
+    const { container } = renderFactsheet(unitPayload("BTC", AUM));
+    const chip = aumChip(container);
+    const value = chip.querySelectorAll("p")[1] as HTMLElement;
+    expect(value.textContent).toBe("—");
+    expect(value.querySelector("span")).toBeNull();
+    expect(chip.querySelector('[aria-label^="Capacity utilization"]')).toBeNull();
+    expect(chip.textContent).not.toContain("$");
+    expect(chip.textContent).not.toContain("/");
+  });
+
+  it("a USD strategy still shows $2M, / $10M and the bar", () => {
+    const { container } = renderFactsheet(usdPayload(AUM));
+    const chip = aumChip(container);
+    expect(chip.querySelectorAll("p")[1].textContent).toBe("$2M/ $10M");
+    expect(chip.querySelector('[aria-label="Capacity utilization 20%"]')).not.toBeNull();
+  });
+
+  it("a unit with no AUM at all still draws no chip, as today", () => {
+    const { container } = renderFactsheet(unitPayload("BTC", { aum: null }));
+    expect(Array.from(container.querySelectorAll("header p")).some((p) => (p.textContent ?? "").startsWith("AUM"))).toBe(false);
+  });
+});
+
+describe("A8-A10, A13, A20 — chart and table titles", () => {
+  it("a BTC factsheet titles the equity charts and tables in BTC, and the aria-label follows the title", () => {
+    const { container, queryByText, getAllByText } = renderFactsheet(unitPayload("BTC"));
+    expect(queryByText("Cumulative Returns in BTC")).not.toBeNull();
+    expect(queryByText("Cumulative Returns")).toBeNull();
+    expect(container.querySelector('[aria-label^="Cumulative Returns in BTC:"]')).not.toBeNull();
+    expect(queryByText("drawdown from running peak, in BTC")).not.toBeNull();
+    expect(
+      queryByText("strategy equity in BTC · shaded bands mark the deepest 10 drawdowns"),
+    ).not.toBeNull();
+    expect(getAllByText("Cumulative Return in BTC").length).toBeGreaterThan(0);
+    expect(getAllByText("CAGR in BTC", { selector: "td, span, div, th" }).length).toBeGreaterThan(0);
+    expect(getAllByText("EOY Returns in BTC", { selector: "h3" }).length).toBeGreaterThan(0);
+  });
+
+  it("a USD factsheet keeps every one of those strings as it is today", () => {
+    const { container, queryByText, getAllByText } = renderFactsheet(usdPayload());
+    expect(queryByText("Cumulative Returns")).not.toBeNull();
+    expect(container.querySelector('[aria-label^="Cumulative Returns:"]')).not.toBeNull();
+    expect(queryByText("drawdown from running peak")).not.toBeNull();
+    expect(queryByText("strategy equity · shaded bands mark the deepest 10 drawdowns")).not.toBeNull();
+    expect(getAllByText("Cumulative Return").length).toBeGreaterThan(0);
+    expect(getAllByText("EOY Returns", { selector: "h3" }).length).toBeGreaterThan(0);
+    expect(container.textContent).not.toMatch(/\bin (BTC|ETH)\b/);
+  });
+
+  it("takes the unit it is given: an ETH factsheet says ETH in every title, and never BTC", () => {
+    const { container, queryByText } = renderFactsheet(unitPayload("ETH"));
+    expect(queryByText("Cumulative Returns in ETH")).not.toBeNull();
+    expect(queryByText("drawdown from running peak, in ETH")).not.toBeNull();
+    expect(container.textContent).not.toContain("in BTC");
   });
 });

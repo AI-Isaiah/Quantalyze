@@ -17,6 +17,7 @@ import {
 import { TrustTierLabel } from "@/components/strategy/TrustTierLabel";
 import { OwnershipTag } from "@/components/strategy/OwnershipTag";
 import { ReturnsUnitChip } from "@/components/strategy/ReturnsUnitChip";
+import { withUnit } from "@/lib/factsheet/returns-unit";
 import { RenameStrategyDialog } from "@/components/strategy/RenameStrategyDialog";
 // Phase 164 (SHARE-04) — THE ONE SHARE PREDICATE, shared with the other two
 // affordance sites (the strategies page and discovery detail, both of which go
@@ -111,7 +112,7 @@ function PanelSkeleton({ h }: { h: number }) {
 }
 import { resolvePalette, paletteToCssVars } from "./palette";
 import { trackFactsheetEvent } from "./factsheet-analytics";
-import { CHART_CONFIGS } from "./chart-configs";
+import { CHART_CONFIGS, applyChartUnit } from "./chart-configs";
 
 /**
  * Editorial layout — refined-minimalism inside the institutional/utilitarian
@@ -652,6 +653,7 @@ function PerformanceCharts() {
     }
   }, [payload.rollingWindow, payload.rollingBetaWindow, payload.strategyId]);
 
+  const returnsUnit = payload.returnsUnit ?? null;
   const volMatchedAbsent = view.comparators[cmpKey]?.volMatched == null;
   // The reason line below is shown only when the comparator HAS a summary, so it
   // has covered returns and the match was skipped for want of a measurable vol.
@@ -687,9 +689,11 @@ function PerformanceCharts() {
           const title = cfg.title.replace(ROLL_LABEL_RE, `(${beta.label})`);
           return { ...cfg, title, warmup: beta.window };
         }
-        return cfg;
+        // Phase 164.6.6.2 (D-09): the three equity charts name the returns unit.
+        // `null` returns `cfg` itself, so a USD chart is the config it always was.
+        return applyChartUnit(cfg, returnsUnit);
       });
-  }, [cmpKey, volMatchedAbsent, roll.enough, roll.label, roll.window, beta.enough, beta.label, beta.window]);
+  }, [cmpKey, volMatchedAbsent, roll.enough, roll.label, roll.window, beta.enough, beta.label, beta.window, returnsUnit]);
 
   return (
     <>
@@ -1113,6 +1117,7 @@ function FactsheetHeader({
               aum={payload.aum}
               maxCapacity={payload.maxCapacity}
               selfReported={isSelfReported}
+              unit={returnsUnit}
             />
           )}
         </div>
@@ -1415,12 +1420,24 @@ function CapacityChip({
   aum,
   maxCapacity,
   selfReported = false,
+  unit = null,
 }: {
   aum: number;
   maxCapacity: number | null;
   selfReported?: boolean;
+  /**
+   * Phase 164.6.6.2 (D-21, UI-SPEC A12): the strategy's returns unit. `null` is
+   * the USD family and keeps today's DOM exactly. With a unit the chip is an
+   * honest `—`: `aum` and `maxCapacity` are declared USD figures
+   * (`strategies.aum`, `strategies.max_capacity`), and the only BTC figure is the
+   * live balance, which a public factsheet has never disclosed. So there is no
+   * value, no `/ capacity` span and no utilization bar (BTC over USD would mix
+   * units). D-21 overrides D-11, which would have shown a native balance.
+   */
+  unit?: string | null;
 }) {
-  const utilization = maxCapacity && maxCapacity > 0 ? Math.min(1, aum / maxCapacity) : null;
+  const nativeUnit = unit != null;
+  const utilization = !nativeUnit && maxCapacity && maxCapacity > 0 ? Math.min(1, aum / maxCapacity) : null;
   const tone =
     utilization == null ? "var(--color-accent)" :
     utilization > 0.9 ? "var(--color-negative)" :
@@ -1432,8 +1449,8 @@ function CapacityChip({
         AUM{selfReported && <span className="ml-1 normal-case" style={{ color: "var(--color-warning, #B45309)" }}>(self-reported)</span>}
       </p>
       <p className="mt-1 text-small font-mono tabular-nums text-text-secondary">
-        {formatUsdCompact(aum)}
-        {maxCapacity != null && (
+        {nativeUnit ? "—" : formatUsdCompact(aum)}
+        {!nativeUnit && maxCapacity != null && (
           <span className="ml-1 text-text-muted">/ {formatUsdCompact(maxCapacity)}</span>
         )}
       </p>
@@ -1528,9 +1545,15 @@ function KpiStrip() {
   const maxDdTone = (v: number | null | undefined): "negative" | undefined =>
     v != null && Number.isFinite(v) && v < 0 ? "negative" : undefined;
 
-  const items: Array<{ label: string; value: string; tone?: "positive" | "negative" }> = [
-    { label: "Cum. Return", value: pctSigned(m.cum_ret, 1), tone: signTone(m.cum_ret) },
-    { label: "CAGR", value: pctSigned(m.cagr, 1), tone: signTone(m.cagr) },
+  // Phase 164.6.6.2 (D-09, UI-SPEC A2, A3): a native-unit strategy's two return
+  // cells name the unit. `unitLabel` marks them so ONLY those labels swap the
+  // bounded-label clip for a wrap (the longer text would ellipsise in the
+  // two-column strip, Phase 170 (j)); `withUnit(label, null)` is the label itself.
+  const returnsUnit = payload.returnsUnit ?? null;
+  const unitLabel = returnsUnit != null;
+  const items: Array<{ label: string; value: string; tone?: "positive" | "negative"; unitLabel?: boolean }> = [
+    { label: withUnit("Cum. Return", returnsUnit), value: pctSigned(m.cum_ret, 1), tone: signTone(m.cum_ret), unitLabel },
+    { label: withUnit("CAGR", returnsUnit), value: pctSigned(m.cagr, 1), tone: signTone(m.cagr), unitLabel },
     { label: "Sharpe", value: num(m.sharpe) },
     { label: "Sortino", value: num(m.sortino) },
     { label: "Calmar", value: num(m.calmar) },
@@ -1655,7 +1678,11 @@ function KpiStrip() {
           >
             <p
               data-testid="factsheet-kpi-label"
-              className="text-micro font-mono uppercase tracking-[0.14em] sm:tracking-[0.18em] whitespace-nowrap overflow-hidden text-ellipsis"
+              className={
+                it.unitLabel
+                  ? "text-micro font-mono uppercase tracking-[0.14em] sm:tracking-[0.18em] whitespace-normal break-words"
+                  : "text-micro font-mono uppercase tracking-[0.14em] sm:tracking-[0.18em] whitespace-nowrap overflow-hidden text-ellipsis"
+              }
               style={{ color: "var(--color-text-muted)" }}
             >
               {it.label}
