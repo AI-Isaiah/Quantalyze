@@ -54,6 +54,14 @@ _BODY_PARSER_SKIP = pytest.mark.skipif(
 )
 
 
+def _two_day_curve(day1: float, day2: float) -> list[dict]:
+    """A stored-shape CURVE whose read-back daily returns are ``[day1, day2]``
+    (a 0.0 first day is applied, then the two returns; day 0 is dropped)."""
+    return curve_from_returns(
+        [0.0, day1, day2], ["2026-01-01", "2026-01-02", "2026-01-03"]
+    )
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -509,17 +517,11 @@ class TestReturnsDataMissing:
             sa_portfolio_data=[
                 {
                     "strategy_id": "s-1",
-                    "returns_series": [
-                        {"date": "2026-01-01", "value": 0.01},
-                        {"date": "2026-01-02", "value": -0.005},
-                    ],
+                    "returns_series": _two_day_curve(0.01, -0.005),
                 },
                 {
                     "strategy_id": "s-2",
-                    "returns_series": [
-                        {"date": "2026-01-01", "value": 0.015},
-                        {"date": "2026-01-02", "value": -0.002},
-                    ],
+                    "returns_series": _two_day_curve(0.015, -0.002),
                 },
             ],
             sa_candidate_data=None,  # candidate row missing
@@ -542,10 +544,7 @@ class TestReturnsDataMissing:
             sa_portfolio_data=[
                 {
                     "strategy_id": "s-1",
-                    "returns_series": [
-                        {"date": "2026-01-01", "value": 0.01},
-                        {"date": "2026-01-02", "value": -0.005},
-                    ],
+                    "returns_series": _two_day_curve(0.01, -0.005),
                 },
             ],
             sa_candidate_data={"strategy_id": "c-1", "returns_series": None},
@@ -562,13 +561,15 @@ class TestReturnsDataMissing:
 
 
 def _build_returns_records(n: int, start: str = "2026-01-01") -> list[dict]:
-    """Build a list of {date,value} records for a synthetic returns series."""
+    """Build the stored CURVE of a synthetic returns series: the daily returns
+    alternate +0.001 / -0.001 and ``returns_series`` holds their cumulative curve
+    (the shape the analytics worker writes), so the boundary reads back days 1..n-1."""
     import pandas as pd
     dates = pd.bdate_range(start, periods=n)
-    return [
-        {"date": d.strftime("%Y-%m-%d"), "value": (0.001 if i % 2 == 0 else -0.001)}
-        for i, d in enumerate(dates)
-    ]
+    return curve_from_returns(
+        [0.001 if i % 2 == 0 else -0.001 for i in range(n)],
+        [d.strftime("%Y-%m-%d") for d in dates],
+    )
 
 
 @_BODY_PARSER_SKIP
@@ -721,12 +722,12 @@ class TestHappyPathAndWeightNormalisation:
 
 
 # ---------------------------------------------------------------------------
-# M-0978 — _records_to_series null/empty branches (direct + integration)
+# M-0978 — records_to_series null/empty branches (direct + integration)
 # ---------------------------------------------------------------------------
 
 
 class TestM0978_RecordsToSeriesNullEmpty:
-    """M-0978 — ``_records_to_series`` returns None for both ``raw=None``
+    """M-0978 — ``records_to_series`` returns None for both ``raw=None``
     and ``raw=[]`` (the `not isinstance(list) or not raw` guard). The
     router uses that None to decide whether to 400 on a missing-candidate
     analytics row. A regression that returned an empty Series instead of
@@ -735,30 +736,30 @@ class TestM0978_RecordsToSeriesNullEmpty:
     degenerate empty-portfolio result.
     """
 
-    def test_records_to_series_none_returns_none(self):
-        from routers.simulator import _records_to_series
+    def testrecords_to_series_none_returns_none(self):
+        from services.wealth_returns import records_to_series
 
-        assert _records_to_series(None, name="s-1") is None
+        assert records_to_series(None, name="s-1") is None
 
-    def test_records_to_series_empty_list_returns_none(self):
-        from routers.simulator import _records_to_series
+    def testrecords_to_series_empty_list_returns_none(self):
+        from services.wealth_returns import records_to_series
 
         # Empty list — NOT an empty Series. The `not raw` half of the guard.
-        assert _records_to_series([], name="s-1") is None
+        assert records_to_series([], name="s-1") is None
 
-    def test_records_to_series_non_list_returns_none(self):
+    def testrecords_to_series_non_list_returns_none(self):
         """A non-list JSONB shape (e.g. a dict or scalar from storage
         drift) must hit the `not isinstance(raw, list)` half of the
         guard and return None rather than crashing in the comprehension."""
-        from routers.simulator import _records_to_series
+        from services.wealth_returns import records_to_series
 
-        assert _records_to_series({"date": "2026-01-01", "value": 0.01}) is None  # type: ignore[arg-type]
+        assert records_to_series({"date": "2026-01-01", "value": 0.01}) is None  # type: ignore[arg-type]
 
-    def test_records_to_series_valid_records_build_datetime_index(self):
-        from routers.simulator import _records_to_series
+    def testrecords_to_series_valid_records_build_datetime_index(self):
+        from services.wealth_returns import records_to_series
         import pandas as pd
 
-        series = _records_to_series(
+        series = records_to_series(
             [{"date": "2026-01-01", "value": 0.01}], name="s-1"
         )
         assert series is not None
@@ -771,7 +772,7 @@ class TestM0978_RecordsToSeriesNullEmpty:
     ):
         """Integration: when the candidate's strategy_analytics row exists
         but ``returns_series`` is ``[]`` (an EMPTY LIST, not None),
-        ``_records_to_series`` returns None and the router 400s with
+        ``records_to_series`` returns None and the router 400s with
         'Candidate has no returns history'. This is the branch distinct
         from the row-missing path (which 400s 'No returns data available
         for the candidate') — the row IS present, just empty.
@@ -786,10 +787,7 @@ class TestM0978_RecordsToSeriesNullEmpty:
             sa_portfolio_data=[
                 {
                     "strategy_id": "s-1",
-                    "returns_series": [
-                        {"date": "2026-01-01", "value": 0.01},
-                        {"date": "2026-01-02", "value": -0.005},
-                    ],
+                    "returns_series": _two_day_curve(0.01, -0.005),
                 },
             ],
             # Row present, returns_series is an EMPTY LIST (not None).
@@ -873,7 +871,7 @@ class TestAnalyticsComputationError:
 
 
 class TestG15_006_RecordsToSeriesSortedAndDeduped:
-    """G15-006 — ``_records_to_series`` must sort by date and dedupe
+    """G15-006 — ``records_to_series`` must sort by date and dedupe
     same-date entries (keep='last'). Storage drift — duplicate-date
     backfill writes or out-of-order imports — would otherwise silently
     break the downstream ``cumprod()`` in ``simulator_scoring._cumulative_curve``.
@@ -882,14 +880,14 @@ class TestG15_006_RecordsToSeriesSortedAndDeduped:
     def test_out_of_order_records_are_sorted(self):
         """Input records in reversed chronological order produce a
         Series with a monotonically increasing DatetimeIndex."""
-        from routers.simulator import _records_to_series
+        from services.wealth_returns import records_to_series
 
         raw = [
             {"date": "2026-01-05", "value": 0.05},
             {"date": "2026-01-01", "value": 0.01},
             {"date": "2026-01-03", "value": 0.03},
         ]
-        series = _records_to_series(raw, name="s-1")
+        series = records_to_series(raw, name="s-1")
         assert series is not None
         assert series.index.is_monotonic_increasing, (
             "Series index must be sorted ascending; pre-fix left it in "
@@ -900,7 +898,7 @@ class TestG15_006_RecordsToSeriesSortedAndDeduped:
         """Two entries with the same date collapse to one; the LATER
         record (by input order) wins. This matches the Series
         construction semantics (last assignment to an index slot)."""
-        from routers.simulator import _records_to_series
+        from services.wealth_returns import records_to_series
 
         raw = [
             {"date": "2026-01-01", "value": 0.01},
@@ -909,7 +907,7 @@ class TestG15_006_RecordsToSeriesSortedAndDeduped:
             {"date": "2026-01-02", "value": 0.99},
             {"date": "2026-01-03", "value": 0.03},
         ]
-        series = _records_to_series(raw, name="s-1")
+        series = records_to_series(raw, name="s-1")
         assert series is not None
         # 3 unique dates in the deduped output.
         assert len(series) == 3
@@ -921,7 +919,7 @@ class TestG15_006_RecordsToSeriesSortedAndDeduped:
         """The hardened version of the test: input is BOTH out-of-order
         AND contains a duplicate. The output is sorted AND the dupe
         collapses to the chronologically-later occurrence."""
-        from routers.simulator import _records_to_series
+        from services.wealth_returns import records_to_series
         import pandas as pd
 
         raw = [
@@ -932,7 +930,7 @@ class TestG15_006_RecordsToSeriesSortedAndDeduped:
             {"date": "2026-01-02", "value": 0.20},
             {"date": "2026-01-02", "value": 0.99},
         ]
-        series = _records_to_series(raw, name="s-1")
+        series = records_to_series(raw, name="s-1")
         assert series is not None
         assert series.index.is_monotonic_increasing
         assert len(series) == 3
@@ -1406,7 +1404,7 @@ class TestG15_007_ExceptionAuditAndCorrelationId:
 
 
 # ---------------------------------------------------------------------------
-# audit-2026-05-07 — M-0975 / M-0976: _records_to_series tolerates malformed
+# audit-2026-05-07 — M-0975 / M-0976: records_to_series tolerates malformed
 # records instead of raising KeyError (unhandled 500)
 # ---------------------------------------------------------------------------
 
@@ -1426,33 +1424,33 @@ class TestM0975_0976_RecordsToSeriesToleratesMalformed:
     """
 
     def test_record_missing_value_key_is_skipped_not_raised(self):
-        from routers.simulator import _records_to_series
+        from services.wealth_returns import records_to_series
 
         raw = [
             {"date": "2026-01-01", "value": 0.01},
             {"date": "2026-01-02"},  # missing 'value' — pre-fix KeyError
             {"date": "2026-01-03", "value": 0.03},
         ]
-        series = _records_to_series(raw, name="s-1")
+        series = records_to_series(raw, name="s-1")
         assert series is not None
         # The two well-formed records survive; the malformed one is dropped.
         assert len(series) == 2
 
     def test_record_missing_date_key_is_skipped_not_raised(self):
-        from routers.simulator import _records_to_series
+        from services.wealth_returns import records_to_series
 
         raw = [
             {"value": 0.01},  # missing 'date' — pre-fix KeyError
             {"date": "2026-01-02", "value": 0.02},
         ]
-        series = _records_to_series(raw, name="s-1")
+        series = records_to_series(raw, name="s-1")
         assert series is not None
         assert len(series) == 1
 
     def test_non_dict_record_is_skipped_not_raised(self):
         """A scalar / list element inside the JSONB array (storage drift)
         must be skipped, not crash with TypeError in ``r.get``."""
-        from routers.simulator import _records_to_series
+        from services.wealth_returns import records_to_series
 
         raw = [
             {"date": "2026-01-01", "value": 0.01},
@@ -1460,7 +1458,7 @@ class TestM0975_0976_RecordsToSeriesToleratesMalformed:
             ["also", "not", "a", "dict"],
             {"date": "2026-01-02", "value": 0.02},
         ]
-        series = _records_to_series(raw, name="s-1")  # type: ignore[list-item]
+        series = records_to_series(raw, name="s-1")  # type: ignore[list-item]
         assert series is not None
         assert len(series) == 2
 
@@ -1469,10 +1467,10 @@ class TestM0975_0976_RecordsToSeriesToleratesMalformed:
         router falls into its 'No returns data available' 400 path — NOT a
         500. This is the contract the finding asked for: degrade to 400,
         don't crash to 500."""
-        from routers.simulator import _records_to_series
+        from services.wealth_returns import records_to_series
 
         raw = [{"ts": "2026-01-01", "val": 0.01}, {"foo": "bar"}]
-        assert _records_to_series(raw, name="s-1") is None
+        assert records_to_series(raw, name="s-1") is None
 
     @_BODY_PARSER_SKIP
     def test_malformed_portfolio_returns_row_does_not_500(
@@ -1927,21 +1925,27 @@ def _btc_closes_series() -> pd.Series:
 
 
 def _usd_records() -> list[dict]:
-    # day 0 flat; then 0.02, 0.01, 0.02, 0.01, ...
+    # The stored CURVE of: day 0 flat; then 0.02, 0.01, 0.02, 0.01, ... The boundary
+    # reads back days 1.. as exactly those returns (day 0 has no stored predecessor).
     vals = [0.0] + [0.02 if k % 2 == 1 else 0.01 for k in range(1, _N_BTC_DAYS)]
-    return [{"date": d, "value": v} for d, v in zip(_btc_dates(), vals)]
+    return curve_from_returns(vals, _btc_dates())
 
 
 def _btc_native_records() -> list[dict]:
-    # the account's own BTC daily return: 0.10, 0.11, 0.12, 0.10, ... (day 0 flat)
+    # The stored CURVE of the account's own BTC daily return: day 0 flat, then
+    # 0.10, 0.11, 0.12, 0.10, ... The boundary reads back days 1.. and the BTC
+    # conversion then drops the first of those (no prior priced day), so the first
+    # converted day is day 2.
     vals = [0.0] + [0.10 + 0.01 * ((k - 1) % 3) for k in range(1, _N_BTC_DAYS)]
-    return [{"date": d, "value": v} for d, v in zip(_btc_dates(), vals)]
+    return curve_from_returns(vals, _btc_dates())
 
 
-# Hand-computed with the shared oracle's arithmetic, usd_k = (1 + r_k) * 1.1 - 1:
-#   BTC account day 1: r = 0.10 -> 0.21 (the oracle's headline 0.21)
-#   BTC account day 2: r = 0.11 -> 1.11 * 1.1 - 1 = 0.221
-_C1, _C2 = 0.21, 0.221
+# Hand-computed with the shared oracle's arithmetic, usd_k = (1 + r_k) * 1.1 - 1.
+# The stored curve loses day 0 at the boundary and the BTC conversion loses the
+# next day (no prior priced day), so the first converted BTC day is day 2:
+#   BTC account day 2: r = 0.11 -> 1.11 * 1.1 - 1 = 1.221 - 1 = 0.221
+#   BTC account day 3: r = 0.12 -> 1.12 * 1.1 - 1 = 1.232 - 1 = 0.232
+_C2, _C3 = 0.221, 0.232
 
 
 async def _simulate(sa_portfolio, sa_candidate, ps_data, closes):
@@ -1985,12 +1989,16 @@ class TestBtcSeriesAreConvertedBeforeTheAddBlend:
             closes=_btc_closes_series(),
         )
         proposed = result["equity_curve_proposed"]
-        # Route add weight 0.10: day 1 = 0.9 * 0.02 + 0.1 * 0.21 = 0.039. The raw
-        # BTC return would give 0.9 * 0.02 + 0.1 * 0.10 = 0.028.
-        d1 = 0.9 * 0.02 + 0.1 * _C1
+        # The window starts at day 2 (USD returns: day 2 = 0.01, day 3 = 0.02).
+        # Route add weight 0.10: day 2 = 0.9 * 0.01 + 0.1 * 0.221 = 0.009 + 0.0221
+        # = 0.0311. The raw BTC return would give 0.9 * 0.01 + 0.1 * 0.11 = 0.020.
+        # Day 3 = 0.9 * 0.02 + 0.1 * 0.232 = 0.018 + 0.0232 = 0.0412.
         d2 = 0.9 * 0.01 + 0.1 * _C2
-        assert proposed[0]["value"] == pytest.approx(1 + d1, abs=1e-12)
-        assert proposed[1]["value"] == pytest.approx((1 + d1) * (1 + d2), abs=1e-12)
+        d3 = 0.9 * 0.02 + 0.1 * _C3
+        assert d2 == pytest.approx(0.0311, abs=1e-12)
+        assert d3 == pytest.approx(0.0412, abs=1e-12)
+        assert proposed[0]["value"] == pytest.approx(1 + d2, abs=1e-12)
+        assert proposed[1]["value"] == pytest.approx((1 + d2) * (1 + d3), abs=1e-12)
         assert closes.await_count == 1
 
     @pytest.mark.asyncio
@@ -2010,8 +2018,10 @@ class TestBtcSeriesAreConvertedBeforeTheAddBlend:
             closes=_btc_closes_series(),
         )
         current = result["equity_curve_current"]
-        # current portfolio, 50/50: day 1 = 0.5 * 0.02 + 0.5 * 0.21 (raw would be 0.06).
-        assert current[0]["value"] == pytest.approx(1 + 0.5 * 0.02 + 0.5 * _C1, abs=1e-12)
+        # current portfolio, 50/50, window starts at day 2 (the BTC leg's first
+        # converted day): 0.5 * 0.01 + 0.5 * 0.221 = 0.005 + 0.1105 = 0.1155
+        # (raw BTC would be 0.5 * 0.01 + 0.5 * 0.11 = 0.06).
+        assert current[0]["value"] == pytest.approx(1 + 0.1155, abs=1e-12)
         assert closes.await_count == 1
 
     @pytest.mark.asyncio
@@ -2025,11 +2035,12 @@ class TestBtcSeriesAreConvertedBeforeTheAddBlend:
             closes=_btc_closes_series(),
         )
         closes.assert_not_awaited()
-        # Nothing converted, so day 0 is kept (a converted series drops it): the
-        # curve is 1.0 on day 0, then 0.9 * 0.02 + 0.1 * 0.02 = 0.02 on day 1.
+        # Nothing converted, so the window starts at the boundary's day 1 (a BTC
+        # conversion would start a day later): day 1 = 0.9 * 0.02 + 0.1 * 0.02 =
+        # 0.02 -> 1.02; day 2 = 0.9 * 0.01 + 0.1 * 0.01 = 0.01 -> 1.02 * 1.01.
         proposed = result["equity_curve_proposed"]
-        assert proposed[0]["value"] == pytest.approx(1.0, abs=1e-12)
-        assert proposed[1]["value"] == pytest.approx(1.02, abs=1e-12)
+        assert proposed[0]["value"] == pytest.approx(1.02, abs=1e-12)
+        assert proposed[1]["value"] == pytest.approx(1.0302, abs=1e-12)
 
     @pytest.mark.asyncio
     async def test_a_btc_candidate_with_no_price_source_has_no_returns_history(self):
@@ -2105,3 +2116,29 @@ class TestSimulatorBlendsReturnsDerivedFromTheStoredCurve:
             assert list(got.to_numpy()) == pytest.approx(want, abs=1e-12)
             # A level (about 1.0) weighted as a return is the CR-01 defect.
             assert max(abs(v) for v in got) < 0.5
+
+
+class TestSimulatorPrefersTheStoredDailyReturns:
+    """D-02 at a real site: a non-empty ``daily_returns`` column wins over the
+    curve, which is ignored when they disagree."""
+
+    @pytest.mark.asyncio
+    async def test_a_non_empty_daily_returns_column_is_blended_not_the_curve(self):
+        dates = [d.strftime("%Y-%m-%d") for d in pd.date_range("2026-02-02", periods=35)]
+        stored = [{"date": d, "value": 0.01} for d in dates]
+        # The curve of a DIFFERENT series (+0.05 a day): were it read, the blend
+        # would be 0.05, not the stored 0.01.
+        disagreeing_curve = curve_from_returns([0.05] * 35, dates)
+        row = {"returns_series": disagreeing_curve, "daily_returns": stored,
+               "data_quality_flags": {}}
+        result, _ = await _simulate(
+            sa_portfolio=[{"strategy_id": "s-1", **row}],
+            sa_candidate={"strategy_id": "c-1", **row},
+            ps_data=[{"strategy_id": "s-1", "current_weight": 1.0}],
+            closes=_btc_closes_series(),
+        )
+        proposed = result["equity_curve_proposed"]
+        # Both legs 0.01 on every day: the blend is 0.01, so day 0 = 1.01 (a
+        # curve read would give 1.05) and day 1 = 1.01 * 1.01 = 1.0201.
+        assert proposed[0]["value"] == pytest.approx(1.01, abs=1e-12)
+        assert proposed[1]["value"] == pytest.approx(1.0201, abs=1e-12)
