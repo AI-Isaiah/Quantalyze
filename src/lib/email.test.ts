@@ -437,6 +437,40 @@ describe("email.ts — notification_dispatches audit trail", () => {
     expect(state.rows[0]?.error).toBe("PLATFORM_EMAIL not configured");
   });
 
+  it("WR-01 notifyFounderGeneric: a skip is silent by default and an EmailSkippedError with throwOnSkip, for both skip causes", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    // No sender (Resend configured).
+    vi.stubEnv("PLATFORM_EMAIL", "");
+    vi.resetModules();
+    let mod = await import("./email");
+    let skip = await import("./email-skip");
+    await expect(mod.notifyFounderGeneric("Hi", "<p>x</p>")).resolves.toBeUndefined();
+    const noSender = await mod
+      .notifyFounderGeneric("Hi", "<p>x</p>", { throwOnSkip: true })
+      .catch((e: unknown) => e);
+    expect(noSender).toBeInstanceOf(skip.EmailSkippedError);
+    expect((noSender as InstanceType<typeof skip.EmailSkippedError>).reason).toBe(
+      "platform_email_not_configured",
+    );
+
+    // No Resend client (sender configured).
+    vi.stubEnv("PLATFORM_EMAIL", "test@example.com");
+    vi.stubEnv("RESEND_API_KEY", "");
+    vi.resetModules();
+    mod = await import("./email");
+    skip = await import("./email-skip");
+    await expect(mod.notifyFounderGeneric("Hi", "<p>x</p>")).resolves.toBeUndefined();
+    const noResend = await mod
+      .notifyFounderGeneric("Hi", "<p>x</p>", { throwOnSkip: true })
+      .catch((e: unknown) => e);
+    expect(noResend).toBeInstanceOf(skip.EmailSkippedError);
+    expect((noResend as InstanceType<typeof skip.EmailSkippedError>).reason).toBe(
+      "resend_not_configured",
+    );
+    expect(state.sendCalls).toHaveLength(0);
+  });
+
   it("D-04 the sender is read at send time: an env set after import is honoured", async () => {
     vi.stubEnv("PLATFORM_EMAIL", "");
     vi.stubEnv("PLATFORM_NAME", "Acme");

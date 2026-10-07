@@ -9,6 +9,7 @@ import {
   sanitizeInetForDb,
 } from "@/lib/ratelimit";
 import { notifyFounderGeneric, escapeHtml } from "@/lib/email";
+import { EmailSkippedError } from "@/lib/email-skip";
 import type { WizardStepKey } from "@/lib/wizard/localStorage";
 import {
   CONTACT_SOURCES,
@@ -29,6 +30,22 @@ import {
  * route segment config (no test-only exports).
  */
 let founderEmailMissingWarned = false;
+
+/**
+ * Once-per-process flag for the "founder email skipped" Sentry report (WR-01).
+ * Resend or PLATFORM_EMAIL being unset is a standing configuration state, not
+ * a per-lead event, so Sentry hears about it once per cold start while every
+ * lead still gets its own `notify_error` marker. Same reset story as above.
+ */
+let founderNotifySkipWarned = false;
+
+/**
+ * Fixed `notify_error` text for a founder email that was never attempted
+ * because Resend or the sender address is not configured. Fixed on purpose:
+ * the CRM shows it to the founder, and no configuration detail belongs there.
+ */
+const FOUNDER_NOTIFY_SKIPPED_REASON =
+  "Founder email not sent: Resend or PLATFORM_EMAIL not configured";
 
 /**
  * Cheap stable hash for user-agent strings, used to scope the
@@ -59,7 +76,12 @@ function hashUserAgent(ua: string | null): string {
  */
 function captureFailure(
   err: unknown,
-  stage: "admin_init" | "db_insert" | "founder_notify" | "founder_email_unset",
+  stage:
+    | "admin_init"
+    | "db_insert"
+    | "founder_notify"
+    | "founder_email_unset"
+    | "founder_notify_skipped",
   extra: Record<string, unknown> = {},
 ): void {
   void import("@sentry/nextjs")
@@ -67,6 +89,17 @@ function captureFailure(
       if (stage === "founder_email_unset") {
         Sentry.captureMessage(
           "[for-quants-lead] ADMIN_EMAIL is unset — founder will not be notified",
+          {
+            level: "error",
+            tags: { route: "for-quants-lead", stage },
+            extra,
+          },
+        );
+        return;
+      }
+      if (stage === "founder_notify_skipped") {
+        Sentry.captureMessage(
+          "[for-quants-lead] Resend or PLATFORM_EMAIL is unset — founder email skipped",
           {
             level: "error",
             tags: { route: "for-quants-lead", stage },
@@ -731,6 +764,7 @@ export async function POST(req: NextRequest) {
          </p>
          <p><strong>Message:</strong><br/>${escapeHtml(parsed.message)}</p>
          <p style="color:#666;font-size:12px;">Lead id: ${leadId}</p>`,
+          { throwOnSkip: true },
         );
       } else {
         await notifyFounderGeneric(
@@ -744,6 +778,7 @@ export async function POST(req: NextRequest) {
          </p>
          ${parsed.notes ? `<p><strong>Notes:</strong><br/>${escapeHtml(parsed.notes)}</p>` : ""}
          <p style="color:#666;font-size:12px;">Lead id: ${leadId}</p>`,
+          { throwOnSkip: true },
         );
       }
       // Clean send — pair the attempt timestamp with a success
@@ -770,15 +805,26 @@ export async function POST(req: NextRequest) {
       }
     } catch (err) {
       console.warn("[for-quants-lead] founder notify failed (non-blocking):", err);
-      captureFailure(err, "founder_notify", { lead_id: leadId });
+      // WR-01: a SKIPPED send (Resend or PLATFORM_EMAIL unset) is recorded as
+      // not sent, with a fixed reason, and reported to Sentry once per
+      // process. It is a standing configuration state, so a per-lead
+      // exception would only bury the real send failures below.
+      const skipped = err instanceof EmailSkippedError;
+      if (skipped) {
+        if (!founderNotifySkipWarned) {
+          founderNotifySkipWarned = true;
+          captureFailure(null, "founder_notify_skipped", { lead_id: leadId });
+        }
+      } else {
+        captureFailure(err, "founder_notify", { lead_id: leadId });
+      }
       // Persist a sanitized error string so the founder CRM can show
       // why the send failed (auth vs network vs body validation)
       // without forcing operators into Sentry archaeology. Truncated
       // to 500 chars to keep the column from absorbing a huge stack.
-      const sanitized = (err instanceof Error ? err.message : String(err)).slice(
-        0,
-        500,
-      );
+      const sanitized = skipped
+        ? FOUNDER_NOTIFY_SKIPPED_REASON
+        : (err instanceof Error ? err.message : String(err)).slice(0, 500);
       // @audit-skip: founder-CRM internal state marker on unauthenticated
       // lead row. See @audit-skip-anchor:lead-insert.
       try {

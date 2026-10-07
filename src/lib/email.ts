@@ -3,6 +3,7 @@ import { Resend } from "resend";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getCorrelationId } from "@/lib/correlation-id";
 import { getPlatformEmail, getPlatformName } from "@/lib/platform";
+import { EmailSkippedError } from "@/lib/email-skip";
 import { SEVERITY_HEX, type AlertSeverity } from "./utils";
 import type { ManagerIdentity } from "@/lib/types";
 
@@ -140,6 +141,13 @@ async function insertCorrelationMapping(
  * returns 200 even when the approval email permanently failed — the docstring
  * claimed a 500 the implementation could not produce.
  *
+ * WR-01: pass `throwOnSkip: true` to learn that a send was SKIPPED for want of
+ * configuration (no Resend client, or no PLATFORM_EMAIL sender): send() then
+ * throws EmailSkippedError instead of returning as if the message went out.
+ * Unlike `throwOnFailure` it does NOT make a rejected Resend send throw, so a
+ * caller can record "not sent, not configured" apart from "tried and failed".
+ * Both flags default to false; no existing caller changes behaviour.
+ *
  * The `notificationType` parameter is required so operators can filter the
  * audit trail by category (e.g., "manager_intro_request" vs "alert_digest").
  *
@@ -154,7 +162,10 @@ async function send(
   html: string,
   notificationType: NotificationType,
   cc?: string | string[],
-  { throwOnFailure = false }: { throwOnFailure?: boolean } = {},
+  {
+    throwOnFailure = false,
+    throwOnSkip = false,
+  }: { throwOnFailure?: boolean; throwOnSkip?: boolean } = {},
 ): Promise<void> {
   if (!to) {
     // H1 (red-team): honour throwOnFailure at the empty-recipient guard.
@@ -278,12 +289,15 @@ async function send(
     // propagates. Without this, a void fire-and-forget leaves the row in
     // 'queued' when the throw races ahead of the update, and operators
     // querying queued+age>threshold find phantom rows that were never sent.
-    if (throwOnFailure) {
+    if (throwOnFailure || throwOnSkip) {
       await markDispatch(admin, dispatchId, {
         status: "failed",
         error: "Resend not configured",
       });
-      throw new Error("[email] Resend not configured — send failed");
+      throw new EmailSkippedError(
+        "resend_not_configured",
+        "[email] Resend not configured — send failed",
+      );
     }
     // Fire-and-forget: on the non-throwing path, audit trail updates must
     // never block the caller — but schedule via `after()` so the write
@@ -304,12 +318,15 @@ async function send(
   const senderEmail = getPlatformEmail();
   if (!senderEmail) {
     console.warn("[email] PLATFORM_EMAIL not configured — skipping send to", safeTo);
-    if (throwOnFailure) {
+    if (throwOnFailure || throwOnSkip) {
       await markDispatch(admin, dispatchId, {
         status: "failed",
         error: "PLATFORM_EMAIL not configured",
       });
-      throw new Error("[email] PLATFORM_EMAIL not configured — send failed");
+      throw new EmailSkippedError(
+        "platform_email_not_configured",
+        "[email] PLATFORM_EMAIL not configured — send failed",
+      );
     }
     scheduleDispatchAudit(() =>
       markDispatch(admin, dispatchId, {
@@ -986,8 +1003,17 @@ export async function sendAlertDigest(
  *
  * The caller is responsible for HTML-escaping any user-supplied fields they
  * interpolate into bodyHtml. The subject is sanitized here for header safety.
+ *
+ * WR-01: `throwOnSkip: true` makes a configuration skip (no Resend client, no
+ * PLATFORM_EMAIL sender) throw EmailSkippedError, so a caller that records a
+ * delivery outcome (the for-quants-lead route) never reads a skip as a send.
+ * The default keeps the swallow-everything behaviour the other callers rely on.
  */
-export async function notifyFounderGeneric(subject: string, bodyHtml: string) {
+export async function notifyFounderGeneric(
+  subject: string,
+  bodyHtml: string,
+  { throwOnSkip = false }: { throwOnSkip?: boolean } = {},
+) {
   const founder = founderEmail();
   if (!founder) return;
   await send(
@@ -995,5 +1021,7 @@ export async function notifyFounderGeneric(subject: string, bodyHtml: string) {
     safeSubject(subject),
     `<div style="font-family:'DM Sans',sans-serif;max-width:600px;">${bodyHtml}${SIGNATURE}</div>`,
     "founder_generic",
+    undefined,
+    { throwOnSkip },
   );
 }
