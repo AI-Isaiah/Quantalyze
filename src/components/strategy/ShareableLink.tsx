@@ -1,7 +1,9 @@
 "use client";
 
 import { useState, useCallback } from "react";
+import dynamic from "next/dynamic";
 import { Button } from "@/components/ui/Button";
+import { Modal } from "@/components/ui/Modal";
 
 /**
  * Phase 164 (SHARE-04) — THE ONE SHARE PREDICATE, and its two consequences.
@@ -40,6 +42,24 @@ export {
   type ShareAffordanceMode,
 } from "@/lib/share-affordance";
 import { shareAffordanceMode } from "@/lib/share-affordance";
+
+// Phase 164.6.6.3.1 D-05 — the share panel the "Manage private link" Modal
+// holds. ⛔ A STATIC import would be a cycle (`FactsheetView.tsx` already
+// imports from this file) and would pull the whole factsheet module into
+// /strategies and the discovery detail page, so it loads lazily, on the first
+// open only. The `{ default }` wrapper is the repo idiom for a named export. The `loading` block is aria-hidden, fixed height, no copy and
+// no spinner (DESIGN.md Motion), so the Modal does not jump when the chunk
+// arrives.
+const OwnerUnpublishedPanel = dynamic(
+  () =>
+    import("@/app/factsheet/[id]/v2/FactsheetView").then((m) => ({
+      default: m.OwnerUnpublishedPanel,
+    })),
+  {
+    ssr: false,
+    loading: () => <div className="h-24" aria-hidden="true" />,
+  },
+);
 
 /**
  * Mint-or-REUSE the private share URL for a strategy (plan 164-03's route).
@@ -102,6 +122,13 @@ interface ShareableLinkProps {
    * surface cannot mount this component while leaving the question unanswered.
    */
   published: boolean;
+  /**
+   * Phase 164.6.6.3.1 D-05 — the server-CONFIRMED fact that this unpublished
+   * strategy has a live (non-revoked) private link. Absent means unknown, which
+   * is today's behaviour: the row reads "Get private link". Ignored for a
+   * published strategy, whose link is the public URL and cannot be revoked.
+   */
+  hasActiveShare?: boolean;
   variant?: "primary" | "secondary";
   /** Default `md` keeps the discovery detail page byte-identical. `/strategies` passes `sm`. */
   size?: "sm" | "md";
@@ -110,10 +137,25 @@ interface ShareableLinkProps {
 export function ShareableLink({
   strategyId,
   published,
+  hasActiveShare,
   variant = "secondary",
   size = "md",
 }: ShareableLinkProps) {
   const [copied, setCopied] = useState(false);
+  // Phase 164.6.6.3.1 D-05 — seeded ONCE from `hasActiveShare` by the `useState`
+  // initialiser: later prop changes are NOT re-read, so after mount the row's
+  // own mint and revoke results are the source of truth, and a server re-render
+  // that remounts the row re-seeds it. Absent reads as NOT live (D-06's
+  // fail-closed value), never as live.
+  const [shareLive, setShareLive] = useState(hasActiveShare === true);
+  // The Modal mounts on the first Manage click and then STAYS mounted, so every
+  // close path (Close button, Esc, a successful revoke) goes through Modal's
+  // `open={false}` effect, which calls the native `dialog.close()`; the browser
+  // then returns focus to the row button. Unmounting an open dialog would skip
+  // that and drop focus to the body.
+  const [modalMounted, setModalMounted] = useState(false);
+  const [panelOpen, setPanelOpen] = useState(false);
+  const managing = !published && shareLive;
 
   const [copyFailed, setCopyFailed] = useState(false);
   // Phase 164 (SHARE-04) — a mint failure gets its OWN state rather than reusing
@@ -145,6 +187,13 @@ export function ShareableLink({
         setTimeout(() => setMintFailed(false), 4000);
         return;
       }
+      // Phase 164.6.6.3.1 D-05/D-06 (orchestrator decision 2) — the mint itself
+      // CONFIRMED a live link, so the row reads "Manage private link" once the
+      // copy feedback clears, never "Get private link" over a live link. Set
+      // AFTER the mint resolved (a failed mint returns above and never claims a
+      // live link) and BEFORE the clipboard write: a clipboard failure after a
+      // mint still leaves the link live.
+      setShareLive(true);
       setMinting(false);
     }
     try {
@@ -187,12 +236,21 @@ export function ShareableLink({
   const iconClass = size === "sm" ? "h-3.5 w-3.5 mr-1.5" : "h-4 w-4 mr-1.5";
 
   return (
+    <>
     <Button
       variant={variant === "primary" ? "primary" : "secondary"}
       size={size}
       className={size === "sm" ? "pointer-coarse:min-h-[44px]" : undefined}
-      onClick={handleCopy}
+      onClick={
+        managing
+          ? () => {
+              setModalMounted(true);
+              setPanelOpen(true);
+            }
+          : handleCopy
+      }
       disabled={minting}
+      aria-haspopup={managing ? "dialog" : undefined}
     >
       {copied ? (
         <>
@@ -231,9 +289,38 @@ export function ShareableLink({
               published label would be a false description of what the click
               does. "Get private link" is true whether the route mints a new
               capability or reuses the live one. */}
-          {published ? "Share Factsheet" : "Get private link"}
+          {published
+            ? "Share Factsheet"
+            : managing
+              ? "Manage private link"
+              : "Get private link"}
         </>
       )}
     </Button>
+    {modalMounted && (
+      <Modal
+        open={panelOpen}
+        onClose={() => setPanelOpen(false)}
+        title="Private link"
+      >
+        {panelOpen && (
+          <OwnerUnpublishedPanel
+            strategyId={strategyId}
+            hasActiveShare={shareLive}
+            // Decision 1 (RESEARCH Q2): a live-to-not-live transition only
+            // arrives after a successful revoke (2xx, or 404 as convergence),
+            // so the Modal closes and the row flips; a failed revoke never
+            // calls this, so the Modal stays open with its alert.
+            // ShareRevokeControl clears its own confirm state before calling
+            // back, so closing in the same tick sets no state after unmount.
+            onShareLiveChange={(live) => {
+              setShareLive(live);
+              if (!live) setPanelOpen(false);
+            }}
+          />
+        )}
+      </Modal>
+    )}
+    </>
   );
 }

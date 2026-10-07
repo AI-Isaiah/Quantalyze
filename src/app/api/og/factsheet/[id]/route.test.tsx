@@ -545,4 +545,65 @@ describe("GET /api/og/factsheet/[id] — failure paths are reported and never ca
     expect(latestCardStrings().filter(s => s === "—")).toHaveLength(3);
     consoleSpy.mockRestore();
   });
+
+});
+
+// Phase 164.6.6.2 plan 07 (D-12, UI-SPEC D1-D4): the card says which unit its
+// CAGR is in, read from the row's own flags and from nothing the caller sent.
+describe("GET /api/og/factsheet/[id] - returns unit", () => {
+  const EYEBROW = "Quantalyze · Institutional Factsheet";
+
+  function rowWithFlags(flags: unknown) {
+    STATE.strategyRow!.strategy_analytics = [
+      {
+        daily_returns: null,
+        returns_series: LONG_WEALTH_INDEX,
+        computation_status: "complete",
+        data_quality_flags: flags,
+      },
+    ];
+  }
+
+  it("U1 - a BTC row: the eyebrow says Returns in BTC and the stat says CAGR in BTC", async () => {
+    rowWithFlags({ native_unit: "BTC" });
+    const { GET } = await import("./route");
+    await GET(makeRequest(), ctx(PUBLISHED_ID));
+    const strings = latestCardStrings();
+    expect(strings).toContain(`${EYEBROW} · Returns in BTC`);
+    expect(strings).toContain("CAGR in BTC");
+    expect(strings).not.toContain("CAGR");
+  });
+
+  it("U2 - a USD row: neither label appears and the old strings are unchanged", async () => {
+    rowWithFlags({});
+    const { GET } = await import("./route");
+    await GET(makeRequest(), ctx(PUBLISHED_ID));
+    const strings = latestCardStrings();
+    expect(strings).toContain(EYEBROW);
+    expect(strings).toContain("CAGR");
+    expect(strings.some((s) => s.includes("Returns in"))).toBe(false);
+    expect(strings.some((s) => s.includes("CAGR in"))).toBe(false);
+  });
+
+  it("U3 - ?u=BTC on a USD row renders the USD card: the param is a cache key, never data", async () => {
+    rowWithFlags({});
+    const { GET } = await import("./route");
+    await GET(
+      new Request(`http://localhost:3000/api/og/factsheet/${PUBLISHED_ID}?u=BTC`),
+      ctx(PUBLISHED_ID),
+    );
+    const strings = latestCardStrings();
+    expect(strings.some((s) => s.includes("Returns in"))).toBe(false);
+    expect(strings).toContain("CAGR");
+  });
+
+  it("U4 - a malformed unit in the row renders the USD card, never the text", async () => {
+    rowWithFlags({ native_unit: "b!tc" });
+    const { GET } = await import("./route");
+    await GET(makeRequest(), ctx(PUBLISHED_ID));
+    const strings = latestCardStrings();
+    expect(strings.some((s) => s.includes("b!tc"))).toBe(false);
+    expect(strings).toContain(EYEBROW);
+    expect(strings).toContain("CAGR");
+  });
 });

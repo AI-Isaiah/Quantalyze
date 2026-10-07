@@ -1,5 +1,6 @@
 import { metricsBasisSeries } from "@/lib/factsheet/compute";
 import type { ComparatorBlock, FactsheetPayload } from "@/lib/factsheet/types";
+import { withUnit } from "@/lib/factsheet/returns-unit";
 
 /**
  * Static configs that drive `<TimeSeriesChart>`. Each entry describes one
@@ -58,6 +59,17 @@ export type ChartConfig = {
   comparatorAsPrimaryPrefix?: string;
   /** Override the comparator legend label by reading a string field off the block (e.g., "volMatchedLabel"). */
   comparatorLabelField?: keyof ComparatorBlock;
+  /**
+   * Phase 164.6.6.2 (D-09, UI-SPEC A8): the title names the strategy's returns
+   * unit when it has one (`Cumulative Returns in BTC`). Applied by
+   * {@link applyChartUnit}; the static config never carries a unit.
+   */
+  unitTitle?: boolean;
+  /**
+   * Phase 164.6.6.2 (D-09, UI-SPEC A9, A10): the subtitle for a strategy with a
+   * returns unit. The unit is the parameter, so no config hard-codes one.
+   */
+  unitSubtitle?: (unit: string) => string;
   /** Close path to baseline and render filled area (used by Underwater chart). */
   fill?: boolean;
   /** Shade payload.strategyWorst10 periods behind the line (Worst-DDs chart). */
@@ -94,10 +106,29 @@ export type ChartConfig = {
   bridgeBasisExcludedDays?: boolean;
 };
 
+/**
+ * Phase 164.6.6.2 (D-09): the config a chart is drawn from for a strategy whose
+ * returns are in `unit`. `null` is the USD family and returns the SAME config
+ * reference, so a USD chart takes the same early return and cannot differ.
+ * `TimeSeriesChart` is a frozen island; it only ever sees the title and subtitle
+ * (and, through `ariaLabel`, the title), exactly as for the rolling-window
+ * relabel `PerformanceCharts` already does.
+ */
+export function applyChartUnit(cfg: ChartConfig, unit: string | null): ChartConfig {
+  if (unit == null) return cfg;
+  if (!cfg.unitTitle && !cfg.unitSubtitle) return cfg;
+  return {
+    ...cfg,
+    title: cfg.unitTitle ? withUnit(cfg.title, unit) : cfg.title,
+    subtitle: cfg.unitSubtitle ? cfg.unitSubtitle(unit) : cfg.subtitle,
+  };
+}
+
 export const CHART_CONFIGS: ChartConfig[] = [
   {
     key: "cumulative",
     title: "Cumulative Returns",
+    unitTitle: true,
     valueFormat: "growth",
     scalable: true,
     defaultScale: "log",
@@ -212,6 +243,7 @@ export const CHART_CONFIGS: ChartConfig[] = [
     key: "worstDDs",
     title: "Worst 10 Drawdown Periods",
     subtitle: "strategy equity · shaded bands mark the deepest 10 drawdowns",
+    unitSubtitle: (unit) => `strategy equity in ${unit} · shaded bands mark the deepest 10 drawdowns`,
     valueFormat: "growth",
     scalable: true,
     defaultScale: "log",
@@ -226,6 +258,7 @@ export const CHART_CONFIGS: ChartConfig[] = [
     key: "underwaterAcc",
     title: "Underwater Chart for Accumulated Capital",
     subtitle: "drawdown from running peak",
+    unitSubtitle: (unit) => `drawdown from running peak, in ${unit}`,
     valueFormat: "percent",
     scalable: false,
     defaultScale: "linear",

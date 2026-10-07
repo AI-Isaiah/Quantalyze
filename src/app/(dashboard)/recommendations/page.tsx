@@ -5,7 +5,6 @@ import { createClient } from "@/lib/supabase/server";
 import { requireRolePage } from "@/lib/auth/requireRolePage";
 import { PageHeader } from "@/components/layout/PageHeader";
 import { Card } from "@/components/ui/Card";
-import { Disclaimer } from "@/components/ui/Disclaimer";
 import { FreshnessBadge } from "@/components/strategy/FreshnessBadge";
 import { SyncBadge } from "@/components/strategy/SyncBadge";
 import { AccreditedInvestorGate } from "@/components/legal/AccreditedInvestorGate";
@@ -341,6 +340,7 @@ export default async function RecommendationsPage() {
               computedAt={batch.computed_at}
               label="Batch"
               variant="pill"
+              showDate
             />
           ) : undefined
         }
@@ -380,8 +380,6 @@ export default async function RecommendationsPage() {
       ) : (
         <NoCandidatesState />
       )}
-
-      <Disclaimer variant="footer" />
     </>
   );
 }

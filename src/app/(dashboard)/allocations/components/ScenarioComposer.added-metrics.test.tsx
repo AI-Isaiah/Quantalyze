@@ -665,3 +665,384 @@ describe("ScenarioComposer — drawer-added metrics (Phase 162 / HONEST-05, UI-S
     expect(panel().textContent).not.toContain("NaN");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Phase 164.6.6.2 plan 11 (D-12, D-18; UI-SPEC E1, E2, E4, E5, E6) — a BTC row
+// states its unit and how it is blended. A USD row is untouched.
+//
+// Literal oracle rule, as above: every label is pinned as the string the
+// allocator reads, never composed by calling the helper under test.
+// ---------------------------------------------------------------------------
+describe("ScenarioComposer — BTC-unit rows (164.6.6.2 plan 11, UI-SPEC E1-E6)", () => {
+  const BLEND_LINE = "Blended in USD at the daily BTC price.";
+  const BOOK_ID = "164-btc-book-leg";
+  const BOOK_NAME = "Native Book Leg";
+
+  const USD_BOOK_ROW = (id: string, name: string, unit: string | null) => ({
+    strategy: {
+      id,
+      name,
+      disclosure_tier: "verified",
+      returns_unit: unit,
+      trust_tier: "api_verified",
+      strategy_analytics: {
+        cagr: 0.2,
+        sharpe: 1.1,
+        daily_returns: SERIES,
+      },
+    },
+  });
+
+  function renderBook(unit: string | null) {
+    const payload = {
+      ...makePayload(),
+      strategies: [USD_BOOK_ROW(BOOK_ID, BOOK_NAME, unit)],
+    } as unknown as MyAllocationDashboardPayload;
+    render(
+      <ScenarioComposer
+        payload={payload}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    add(BOOK_ID, BOOK_NAME);
+    openDetail(BOOK_ID, BOOK_NAME);
+  }
+
+  function eyebrows(id: string): string[] {
+    return Array.from(
+      panel(id).querySelectorAll("span.font-mono.uppercase"),
+    ).map((e) => e.textContent ?? "");
+  }
+
+  it("E1/E2/E5 (lazy BTC leg): one chip after the trust label and before the yours chip, eyebrow `CAGR IN BTC`, and the blend line", async () => {
+    const { fetchMock, answer } = deferredReturnsFetch();
+    vi.stubGlobal("fetch", fetchMock);
+    render(
+      <ScenarioComposer
+        payload={makePayload()}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+    act(() => {
+      browseOnAdd!({
+        id: ADDED_ID,
+        name: ADDED_NAME,
+        markets: ["binance"],
+        strategy_types: ["momentum"],
+        isOwn: true,
+      });
+    });
+    openDetail();
+    // Before the answer the unit is unknown, so nothing is claimed.
+    expect(addedRow().querySelectorAll('[data-returns-unit]').length).toBe(0);
+    await answer(
+      returnsBody({
+        cagr: 0.1842,
+        sharpe: 1.63,
+        trust_tier: "api_verified",
+        returns_unit: "BTC",
+        daily_returns_usd: SERIES,
+      }),
+    );
+
+    await waitFor(() =>
+      expect(addedRow().querySelectorAll('[data-returns-unit="BTC"]').length).toBe(1),
+    );
+    const row = addedRow();
+    const chip = row.querySelector('[data-returns-unit="BTC"]') as HTMLElement;
+    expect(chip.textContent).toBe("Returns in BTC");
+    expect(chip.className).toContain("shrink-0");
+    const trust = row.querySelector("[data-trust-tier]") as HTMLElement;
+    const yours = within(row).getByTestId(`scenario-yours-${ADDED_ID}`);
+    expect(trust, "the trust label must be present for the order check").not.toBeNull();
+    // DOCUMENT_POSITION_FOLLOWING (4): the chip FOLLOWS the trust label...
+    expect(trust.compareDocumentPosition(chip) & 4).toBe(4);
+    // ...and PRECEDES the yours chip (identity facts first, derived state last).
+    expect(chip.compareDocumentPosition(yours) & 4).toBe(4);
+
+    expect(eyebrows(ADDED_ID)).toContain("CAGR IN BTC");
+    expect(eyebrows(ADDED_ID)).not.toContain("CAGR");
+    const line = within(panel()).getByTestId(`scenario-detail-usd-blend-${ADDED_ID}`);
+    expect(line.textContent).toBe(BLEND_LINE);
+    expect(line.className).toContain("text-text-muted");
+    expect(line.className).not.toMatch(/amber|warning/);
+    // SHARPE is unitless and unchanged (E3).
+    expect(eyebrows(ADDED_ID)).toContain("SHARPE");
+    // The stored CAGR is shown in its own unit, as delivered.
+    expect(cagrText()).toBe("+18.4%");
+  });
+
+  it("E1/E2/E5 (book BTC leg): the payload's returns_unit drives the chip, the eyebrow and the blend line", () => {
+    renderBook("BTC");
+    const row = addedRow(BOOK_ID);
+    expect(row.querySelectorAll('[data-returns-unit="BTC"]').length).toBe(1);
+    expect(eyebrows(BOOK_ID)).toContain("CAGR IN BTC");
+    expect(
+      within(panel(BOOK_ID)).getByTestId(`scenario-detail-usd-blend-${BOOK_ID}`)
+        .textContent,
+    ).toBe(BLEND_LINE);
+  });
+
+  it("E1/E2/E5 (USD book leg): no chip, eyebrow `CAGR`, no blend line", () => {
+    renderBook(null);
+    const row = addedRow(BOOK_ID);
+    expect(row.querySelectorAll("[data-returns-unit]").length).toBe(0);
+    expect(eyebrows(BOOK_ID)).toContain("CAGR");
+    expect(eyebrows(BOOK_ID).some((t) => t.includes(" IN "))).toBe(false);
+    expect(
+      screen.queryByTestId(`scenario-detail-usd-blend-${BOOK_ID}`),
+    ).toBeNull();
+  });
+
+  it("E1/E2/E5 (USD lazy leg): a returns body with returns_unit null changes nothing", async () => {
+    const { fetchMock, answer } = deferredReturnsFetch();
+    vi.stubGlobal("fetch", fetchMock);
+    renderScen();
+    add();
+    openDetail();
+    await answer(
+      returnsBody({
+        cagr: 0.1842,
+        sharpe: 1.63,
+        returns_unit: null,
+        daily_returns_usd: null,
+      }),
+    );
+    await waitFor(() => expect(cagrText()).toBe("+18.4%"));
+    expect(addedRow().querySelectorAll("[data-returns-unit]").length).toBe(0);
+    expect(eyebrows(ADDED_ID)).toContain("CAGR");
+    expect(
+      screen.queryByTestId(`scenario-detail-usd-blend-${ADDED_ID}`),
+    ).toBeNull();
+  });
+
+  it("E1 (malformed unit): a lowercase returns_unit renders no chip and no blend line (T-164.6.6.2-34)", async () => {
+    const { fetchMock, answer } = deferredReturnsFetch();
+    vi.stubGlobal("fetch", fetchMock);
+    renderScen();
+    add();
+    openDetail();
+    await answer(
+      returnsBody({ cagr: 0.1842, sharpe: 1.63, returns_unit: "btc" }),
+    );
+    await waitFor(() => expect(cagrText()).toBe("+18.4%"));
+    expect(addedRow().querySelectorAll("[data-returns-unit]").length).toBe(0);
+    expect(
+      screen.queryByTestId(`scenario-detail-usd-blend-${ADDED_ID}`),
+    ).toBeNull();
+  });
+
+  // SFH-1 (164.6.6.2 review). A native leg whose BTC price could not be read
+  // blends as [] and the warm-up gate excludes it, so the line "Blended in USD at
+  // the daily BTC price." would be a claim the blend contradicts. The server says
+  // `native_unpriced: true`; the row then states the omission instead.
+  describe("SFH-1: an unpriced native leg is said to be left out, never shown as blended", () => {
+    const UNPRICED_NOTE =
+      "No BTC price available, so this strategy is left out of the USD blend.";
+    const noteId = (id: string) => `scenario-detail-usd-unpriced-${id}`;
+
+    it("lazy BTC leg, native_unpriced true: the muted note replaces the blend line", async () => {
+      const { fetchMock, answer } = deferredReturnsFetch();
+      vi.stubGlobal("fetch", fetchMock);
+      renderScen();
+      add();
+      openDetail();
+      await answer(
+        returnsBody({
+          cagr: 0.1842,
+          sharpe: 1.63,
+          returns_unit: "BTC",
+          daily_returns_usd: [],
+          native_unpriced: true,
+        }),
+      );
+      await waitFor(() =>
+        expect(within(panel()).queryByTestId(noteId(ADDED_ID))).not.toBeNull(),
+      );
+      const note = within(panel()).getByTestId(noteId(ADDED_ID));
+      expect(note.textContent).toBe(UNPRICED_NOTE);
+      expect(note.className).toContain("text-text-muted");
+      expect(note.className).not.toMatch(/amber|warning|red/);
+      expect(
+        screen.queryByTestId(`scenario-detail-usd-blend-${ADDED_ID}`),
+      ).toBeNull();
+      expect(panel().textContent).not.toContain(BLEND_LINE);
+      // The unit chip still says what the account is denominated in.
+      expect(addedRow().querySelectorAll('[data-returns-unit="BTC"]').length).toBe(1);
+    });
+
+    it("lazy BTC leg, priced (native_unpriced false or absent): the blend line, no note", async () => {
+      for (const extra of [{ native_unpriced: false }, {}]) {
+        cleanup();
+        const { fetchMock, answer } = deferredReturnsFetch();
+        vi.stubGlobal("fetch", fetchMock);
+        renderScen();
+        add();
+        openDetail();
+        await answer(
+          returnsBody({
+            cagr: 0.1842,
+            sharpe: 1.63,
+            returns_unit: "BTC",
+            daily_returns_usd: SERIES,
+            ...extra,
+          }),
+        );
+        await waitFor(() =>
+          expect(
+            within(panel()).queryByTestId(`scenario-detail-usd-blend-${ADDED_ID}`),
+          ).not.toBeNull(),
+        );
+        expect(screen.queryByTestId(noteId(ADDED_ID))).toBeNull();
+      }
+    });
+
+    it("a malformed native_unpriced (a string) is not a claim: the blend line stays", async () => {
+      const { fetchMock, answer } = deferredReturnsFetch();
+      vi.stubGlobal("fetch", fetchMock);
+      renderScen();
+      add();
+      openDetail();
+      await answer(
+        returnsBody({
+          returns_unit: "BTC",
+          daily_returns_usd: SERIES,
+          native_unpriced: "true",
+        }),
+      );
+      await waitFor(() =>
+        expect(
+          within(panel()).queryByTestId(`scenario-detail-usd-blend-${ADDED_ID}`),
+        ).not.toBeNull(),
+      );
+      expect(screen.queryByTestId(noteId(ADDED_ID))).toBeNull();
+    });
+
+    it("lazy USD leg: neither the blend line nor the note, even with a stray native_unpriced", async () => {
+      const { fetchMock, answer } = deferredReturnsFetch();
+      vi.stubGlobal("fetch", fetchMock);
+      renderScen();
+      add();
+      openDetail();
+      await answer(
+        returnsBody({
+          cagr: 0.1842,
+          sharpe: 1.63,
+          returns_unit: null,
+          daily_returns_usd: null,
+          native_unpriced: true,
+        }),
+      );
+      await waitFor(() => expect(cagrText()).toBe("+18.4%"));
+      expect(screen.queryByTestId(noteId(ADDED_ID))).toBeNull();
+      expect(
+        screen.queryByTestId(`scenario-detail-usd-blend-${ADDED_ID}`),
+      ).toBeNull();
+    });
+
+    it("book BTC leg, native_unpriced true: the note, no blend line", () => {
+      const payload = {
+        ...makePayload(),
+        strategies: [
+          {
+            strategy: {
+              id: BOOK_ID,
+              name: BOOK_NAME,
+              disclosure_tier: "verified",
+              returns_unit: "BTC",
+              native_unpriced: true,
+              series_state: "available",
+              trust_tier: "api_verified",
+              strategy_analytics: { cagr: 0.2, sharpe: 1.1, daily_returns: [] },
+            },
+          },
+        ],
+      } as unknown as MyAllocationDashboardPayload;
+      render(
+        <ScenarioComposer
+          payload={payload}
+          allocatorId={ALLOCATOR_A}
+          allocatorMandate={null}
+        />,
+      );
+      add(BOOK_ID, BOOK_NAME);
+      openDetail(BOOK_ID, BOOK_NAME);
+      expect(
+        within(panel(BOOK_ID)).getByTestId(noteId(BOOK_ID)).textContent,
+      ).toBe(UNPRICED_NOTE);
+      expect(
+        screen.queryByTestId(`scenario-detail-usd-blend-${BOOK_ID}`),
+      ).toBeNull();
+    });
+
+    it("book BTC leg, priced: the blend line, no note", () => {
+      renderBook("BTC");
+      expect(
+        within(panel(BOOK_ID)).getByTestId(`scenario-detail-usd-blend-${BOOK_ID}`)
+          .textContent,
+      ).toBe(BLEND_LINE);
+      expect(screen.queryByTestId(noteId(BOOK_ID))).toBeNull();
+    });
+
+    it("remove + re-add purges the flag: while the retry is in flight no stale note shows", async () => {
+      const first = deferredReturnsFetch();
+      vi.stubGlobal("fetch", first.fetchMock);
+      renderScen();
+      add();
+      openDetail();
+      await first.answer(
+        returnsBody({
+          returns_unit: "BTC",
+          daily_returns_usd: [],
+          native_unpriced: true,
+        }),
+      );
+      await waitFor(() =>
+        expect(screen.queryByTestId(noteId(ADDED_ID))).not.toBeNull(),
+      );
+      fireEvent.click(
+        within(addedRow()).getByRole("button", { name: /Remove from scenario/i }),
+      );
+      // The retry never answers while we look.
+      const retry = vi.fn((url: unknown) =>
+        String(url).includes("/returns")
+          ? new Promise(() => {})
+          : Promise.resolve({ ok: true, status: 200, json: async () => ({}) }),
+      );
+      vi.stubGlobal("fetch", retry);
+      add();
+      openDetail();
+      await waitFor(() =>
+        expect(
+          retry.mock.calls.some((c) => String(c[0]).includes("/returns")),
+        ).toBe(true),
+      );
+      expect(screen.queryByTestId(noteId(ADDED_ID))).toBeNull();
+    });
+  });
+
+  it("E4: a BTC row's weight input is enabled and takes part in the blend like a USD row", () => {
+    renderBook("BTC");
+    const input = within(addedRow(BOOK_ID)).getByLabelText(
+      `${BOOK_NAME} weight`,
+    ) as HTMLInputElement;
+    expect(input.disabled).toBe(false);
+    // The toggle switch is on: the row is in the blend, not held out.
+    expect(
+      within(addedRow(BOOK_ID)).getByRole("switch", {
+        name: `Toggle ${BOOK_NAME} on/off in scenario`,
+      }).getAttribute("aria-checked"),
+    ).toBe("true");
+  });
+
+  it("E6: nothing outside the BTC row says `in BTC` (the blend is a USD series)", () => {
+    renderBook("BTC");
+    const clone = document.body.cloneNode(true) as HTMLElement;
+    clone
+      .querySelector(`[data-scope-ref="${BOOK_ID}"]`)
+      ?.remove();
+    expect(clone.textContent ?? "").not.toMatch(/in BTC/i);
+  });
+});

@@ -332,7 +332,9 @@ export type Database = {
       }
       api_keys: {
         Row: {
+          account_balance_native: number | null
           account_balance_usdt: number | null
+          account_currency: string | null
           account_share_kind: string | null
           account_shared_with_api_key_id: string | null
           api_key_encrypted: string
@@ -359,7 +361,9 @@ export type Database = {
           venue_account_id: string | null
         }
         Insert: {
+          account_balance_native?: number | null
           account_balance_usdt?: number | null
+          account_currency?: string | null
           account_share_kind?: string | null
           account_shared_with_api_key_id?: string | null
           api_key_encrypted: string
@@ -386,7 +390,9 @@ export type Database = {
           venue_account_id?: string | null
         }
         Update: {
+          account_balance_native?: number | null
           account_balance_usdt?: number | null
+          account_currency?: string | null
           account_share_kind?: string | null
           account_shared_with_api_key_id?: string | null
           api_key_encrypted?: string

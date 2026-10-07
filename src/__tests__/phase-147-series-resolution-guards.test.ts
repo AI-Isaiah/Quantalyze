@@ -376,7 +376,14 @@ describe("SCEN-01 LAYER B — every series reader resolves through the ONE resol
     );
     // The narrow sibling projection — strategy_id keys the map, returns_series
     // is the payload. Widening this read is a security decision, not a typo.
-    expect(src).toContain('.select("strategy_id, returns_series")');
+    // RE-POINTED 2026-10-07 (phase 164.6.6.2 plan 10, D-18/D-22): widened by
+    // EXACTLY ONE column, `data_quality_flags`, the jsonb the leg's unit lives in.
+    // The page reduces it to the parsed unit server-side and page.test.tsx pins
+    // that no flag reaches the HTML or any prop (T-164.6.6.2-30), so the pin
+    // follows the read rather than being loosened.
+    expect(src).toContain(
+      '.select("strategy_id, returns_series, data_quality_flags")',
+    );
     // Bounded to the ids the SECDEF RPC itself returned (never an arbitrary id).
     expect(src).toContain('.in("strategy_id"');
   });

@@ -23,6 +23,7 @@ import {
   type NotBuildableReason,
 } from "@/lib/factsheet/fetch-and-build-payload";
 import type { FactsheetPayload, TrustTierKind } from "@/lib/factsheet/types";
+import { parseReturnsUnit } from "@/lib/factsheet/returns-unit";
 import {
   deriveComputeState,
   recipientArm,
@@ -224,7 +225,8 @@ function buildFactsheetPayloadCached(
     // covered by its v7→v8 bump (169 D-62) and are not v9 content.
     // Bumped v9→v10 (Phase 169.4 D-71): 169.4-05 and 169.4-06 changed the api-arm panels (null-honest signatures and allocator blends).
     // Bumped v10→v11 (Phase 169.1 D-80): 169.1-03 to 169.1-07 changed the payload's conventions fields and the per-basis, bucket, rolling, bootstrap and stress values.
-    ["factsheet-v2-payload-v11", id, computedAt],
+    // Bumped v11→v12 (Phase 164.6.6.2 BTCNATIVE, 2026-10-07): the payload gained `returnsUnit` (the unit the strategy's returns are measured in, from `data_quality_flags.native_unit`). A v11 entry lacks it, so for the 1 h TTL drain a BTC account's factsheet would read as USD with no chip and bare return labels.
+    ["factsheet-v2-payload-v12", id, computedAt],
     {
       revalidate: 3600,
       tags: ["factsheet-v2", `factsheet-v2:${id}`],
@@ -242,7 +244,11 @@ export async function generateMetadata({
   const { data } = await withPublishedOnly(
     supabase
       .from("strategies")
-      .select("id, name, codename, description, disclosure_tier")
+      // Phase 164.6.6.2 plan 07: `data_quality_flags` joins the probe for ONE
+      // reason, the share card's cache key below. The same published-only read
+      // the OG route itself makes of this column; only the parsed unit leaves
+      // this function.
+      .select("id, name, codename, description, disclosure_tier, strategy_analytics ( data_quality_flags )")
       .eq("id", id),
   )
     .maybeSingle();
@@ -261,7 +267,21 @@ export async function generateMetadata({
   const title = `${name} — Quantalyze Factsheet`;
   // Dynamic OG image — uses the strategy-id-derived endpoint so social shares
   // get a meaningful preview card without baking PNGs at deploy time.
-  const ogImage = `/api/og/factsheet/${id}`;
+  //
+  // Phase 164.6.6.2 plan 07 (D-12, UI-SPEC D, "the OG cache key must include the
+  // unit"): the CDN keeps a card by URL for a day and unfurl caches keep their
+  // own copy for longer, so a card rendered before the unit existed must not be
+  // served under a URL that looks like a USD one. A unit therefore moves the URL.
+  // The route NEVER reads `u` as data; it re-reads the unit from the database,
+  // so a hand-edited `?u=` can change which cache entry answers but not what the
+  // card says. A USD strategy keeps today's URL exactly.
+  const analytics = Array.isArray(data?.strategy_analytics)
+    ? data.strategy_analytics[0]
+    : data?.strategy_analytics;
+  const unit = parseReturnsUnit(
+    (analytics?.data_quality_flags as { native_unit?: unknown } | null | undefined)?.native_unit,
+  );
+  const ogImage = `/api/og/factsheet/${id}${unit == null ? "" : `?u=${encodeURIComponent(unit)}`}`;
   return {
     title,
     description,

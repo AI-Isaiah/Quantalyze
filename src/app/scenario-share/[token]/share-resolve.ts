@@ -46,6 +46,8 @@ import { coverageSpanOf, defaultWindowFor } from "@/lib/scenario-window";
 // network / Next modules — importing the resolver from
 // factsheet/allocator-portfolio-payload would drag build-payload in here.
 import { resolveDailyReturnSeries } from "@/lib/factsheet/resolve-series";
+import { convertNativeReturnsToUsd } from "@/lib/factsheet/native-to-usd";
+import type { BtcCloses } from "@/app/(dashboard)/allocations/lib/scenario-benchmark";
 import { sanitizeLeverageMap } from "@/lib/leverage";
 
 /** One `get_shared_scenario` series row (RPC `series` jsonb element). */
@@ -150,8 +152,10 @@ function neutralDefaultDraft(): ScenarioDraft {
  * Resolve a `get_shared_scenario` RPC row into a render-ready projection or an
  * honest-absence signal. The BTC benchmark series is NOT consumed here: the
  * page passes the resolved `portfolioDaily` to ScenarioBenchmarkSection, which
- * recomputes the benchmark internally from the BTC series. This layer owns only
- * the codec-trichotomy + the scenario projection.
+ * recomputes the benchmark internally from the BTC series. The BTC closes ARE
+ * consumed here, but for ONE purpose only: converting a BTC-denominated leg to
+ * USD before it is blended (164.6.6.2 D-22). This layer owns the codec-trichotomy,
+ * that per-leg conversion and the scenario projection.
  */
 export function resolveSharedScenario(
   row: SharedScenarioRow,
@@ -178,6 +182,22 @@ export function resolveSharedScenario(
    * byte-identical to the pre-147 behavior.
    */
   returnsSeriesById?: Record<string, unknown>,
+  /**
+   * Phase 164.6.6.2 (D-18, D-22) — strategy id → the unit the leg's returns are
+   * in (`parseReturnsUnit(data_quality_flags.native_unit)`: "BTC", or null for
+   * the USD family). Caller-side for the same reason as the two lookups above:
+   * the `get_shared_scenario` RPC cannot be widened (phase-29 frozen-spine gate),
+   * so the page learns the unit from its bounded `strategy_analytics` sibling
+   * read. Absent id / undefined lookup → a USD leg, byte-identical to before.
+   */
+  returnsUnitById?: Record<string, string | null>,
+  /**
+   * Phase 164.6.6.2 (D-18, D-22) — the DB-only BTC closes (`readBtcCloses`, the
+   * one conversion window every seam and the Python twin share). `null` is "no
+   * price source": a leg with a unit then resolves to `[]` (an honest absence),
+   * never to its unconverted BTC returns. Only read when some leg has a unit.
+   */
+  btc?: Pick<BtcCloses, "prices" | "dropped"> | null,
 ): ResolvedSharedScenario {
   // The codec's `decode` takes a raw STRING (localStorage shape). The RPC hands
   // us a parsed jsonb object, so re-serialize it to drive the same trichotomy.
@@ -205,9 +225,18 @@ export function resolveSharedScenario(
     // `returns_series` cumprod wealth index into returns. Forwarding that index
     // raw would read its 1.0 base as a +100% day; the resolver owns the
     // conversion so this page can never diverge from the owner's composer.
+    //
+    // Phase 164.6.6.2 (D-22) — a BTC-denominated leg is converted to USD at the
+    // daily BTC close HERE, before it becomes a builder series, so the shared
+    // blend equals the owner's composer blend for the same draft. A unit-less
+    // leg gets its own array back untouched.
     seriesById.set(
       s.strategy_id,
-      resolveDailyReturnSeries(s.daily_returns, returnsSeriesById?.[s.strategy_id]),
+      convertNativeReturnsToUsd(
+        resolveDailyReturnSeries(s.daily_returns, returnsSeriesById?.[s.strategy_id]),
+        returnsUnitById?.[s.strategy_id] ?? null,
+        btc ?? null,
+      ),
     );
   }
 

@@ -358,6 +358,302 @@ describe("ApiKeyManager — H-0395 loud-fail on api_keys load failure", () => {
 });
 
 /**
+ * Phase 164.6.6.3.1 plan 02 / D-03 (UAT item 6e) — the key card must not claim
+ * "No API keys connected." while the FIRST read is still in flight. `keys`
+ * starts as `[]`, so before this fix the empty sentence painted for the whole
+ * read (measured ~20 s on PROD, 2026-10-03) over a user who has keys. The first
+ * read is a three-way fact: pending ("Loading keys…"), failed (the H-0395 error
+ * card), or answered-and-empty (the sentence). Each test renders SYNCHRONOUSLY
+ * (never inside `await act(async ...)`, which would flush the read) so the
+ * pending frame is the one under test.
+ */
+describe("ApiKeyManager — D-03 the first key read is pending, failed, or empty, never all three", () => {
+  beforeEach(() => {
+    routerRefreshMock.mockReset();
+    selectResultMock.mockReset();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  function deferredRead<T>() {
+    let resolve!: (value: T) => void;
+    const promise = new Promise<T>((r) => {
+      resolve = r;
+    });
+    return { promise, resolve };
+  }
+
+  const LOADING = "Loading keys…";
+
+  it("says Loading keys… and never the empty sentence while the first read is pending, then the sentence once a clean read answers empty", async () => {
+    const read = deferredRead<unknown>();
+    selectResultMock.mockReturnValue(read.promise);
+
+    render(<ApiKeyManager strategyId="strat-1" currentKeyId={null} />);
+
+    const caption = screen.getByText(LOADING);
+    expect(caption).toHaveAttribute("role", "status");
+    expect(caption).toHaveAttribute("aria-live", "polite");
+    expect(screen.queryByText(/No API keys connected/)).not.toBeInTheDocument();
+
+    await act(async () => {
+      read.resolve({ data: [], error: null });
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText(/No API keys connected/)).toBeInTheDocument();
+    });
+    expect(screen.queryByText(LOADING)).not.toBeInTheDocument();
+  });
+
+  it("a failed first read shows the error card, never the caption and never the empty sentence", async () => {
+    const read = deferredRead<unknown>();
+    selectResultMock.mockReturnValue(read.promise);
+
+    render(<ApiKeyManager strategyId="strat-1" currentKeyId={null} />);
+    expect(screen.getByText(LOADING)).toBeInTheDocument();
+
+    await act(async () => {
+      read.resolve({ data: null, error: { message: "permission denied for table api_keys" } });
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText(/Couldn't load your API keys/)).toBeInTheDocument();
+    });
+    expect(screen.queryByText(LOADING)).not.toBeInTheDocument();
+    expect(screen.queryByText(/No API keys connected/)).not.toBeInTheDocument();
+  });
+
+  it("a first read that THROWS shows the error card, never a stuck caption and never the empty sentence", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      selectResultMock.mockImplementation(() => {
+        throw new Error("socket hang up");
+      });
+
+      await act(async () => {
+        render(<ApiKeyManager strategyId="strat-1" currentKeyId={null} />);
+      });
+
+      await waitFor(() => {
+        expect(screen.getByText(/Couldn't load your API keys/)).toBeInTheDocument();
+      });
+      expect(screen.queryByText(LOADING)).not.toBeInTheDocument();
+      expect(screen.queryByText(/No API keys connected/)).not.toBeInTheDocument();
+      // The failure is logged, with the error object only (no key id, no label).
+      expect(consoleError).toHaveBeenCalledWith(
+        "[ApiKeyManager] api_keys first read threw:",
+        expect.any(Error),
+      );
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  it("a re-read after the first settled read never brings the caption back", async () => {
+    selectResultMock.mockReturnValueOnce({ data: null, error: { message: "network error" } });
+
+    await act(async () => {
+      render(<ApiKeyManager strategyId="strat-1" currentKeyId={null} />);
+    });
+    await waitFor(() => {
+      expect(screen.getByText(/Couldn't load your API keys/)).toBeInTheDocument();
+    });
+
+    // Hold the Retry read open: this is the frame where a reset flag would
+    // paint the caption again.
+    const retry = deferredRead<unknown>();
+    selectResultMock.mockReturnValueOnce(retry.promise);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /Retry/i }));
+    });
+    expect(screen.queryByText(LOADING)).not.toBeInTheDocument();
+
+    await act(async () => {
+      retry.resolve({
+        data: [
+          {
+            id: "key-1",
+            exchange: "binance",
+            label: "My Binance",
+            last_sync_at: null,
+          },
+        ],
+        error: null,
+      });
+    });
+    await waitFor(() => {
+      expect(screen.getByText("My Binance")).toBeInTheDocument();
+    });
+    expect(screen.queryByText(LOADING)).not.toBeInTheDocument();
+  });
+});
+
+/**
+ * Phase 164.6.6.3.1 plan 02 / D-10 (UAT item 8) — the key card's venue line
+ * reads the one shared label (`dataSourceLabel`, the allocator card's source),
+ * not a title-cased guess: "Mt5" and "Okx" were the defect. The label map is
+ * for the venues this repo knows; an id outside it renders verbatim so a venue
+ * added to the form before the map is never silently renamed.
+ */
+describe("ApiKeyManager — D-10 the key card's venue line reads the shared label", () => {
+  beforeEach(() => {
+    routerRefreshMock.mockReset();
+    selectResultMock.mockReset();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  function venueRow(id: string, exchange: string) {
+    return {
+      id,
+      user_id: "user-a",
+      exchange,
+      label: `Label ${id}`,
+      is_active: true,
+      sync_status: "complete",
+      last_sync_at: null,
+      account_balance_usdt: 1000,
+      created_at: "2026-01-01T00:00:00Z",
+      sync_error: null,
+      last_429_at: null,
+      disconnected_at: null,
+      venue_account_id: null,
+    };
+  }
+
+  async function renderOne(id: string, exchange: string) {
+    selectResultMock.mockReturnValue({ data: [venueRow(id, exchange)], error: null });
+    await act(async () => {
+      render(<ApiKeyManager strategyId="strat-1" currentKeyId={null} />);
+    });
+    return await screen.findByTestId(`api-key-card-${id}`);
+  }
+
+  // The venue line is the card's `<p>` holding the label. Matching by tag is
+  // deliberate: the avatar span already prints "MT5" / "OKX" (its own icon
+  // map), so a bare text match would pass on the avatar with the venue line
+  // still title-cased.
+  function venueLine(card: HTMLElement, label: string) {
+    return within(card).queryAllByText(label).find((el) => el.tagName === "P");
+  }
+
+  it("an mt5 key's venue line reads MT5, never Mt5", async () => {
+    // Scoped to the card: an mt5 card also prints "MT5 account ..." below the
+    // venue line, so a page-wide match would pass on that line alone.
+    const card = await renderOne("key-mt5", "mt5");
+    expect(venueLine(card, "MT5")).toBeDefined();
+    expect(within(card).queryByText(/Mt5/)).not.toBeInTheDocument();
+  });
+
+  it("an okx key's venue line reads OKX, never Okx", async () => {
+    const card = await renderOne("key-okx", "okx");
+    expect(venueLine(card, "OKX")).toBeDefined();
+    expect(within(card).queryByText(/Okx/)).not.toBeInTheDocument();
+  });
+
+  it("an id outside the label map renders verbatim, never title-cased", async () => {
+    const card = await renderOne("key-kraken", "kraken");
+    expect(venueLine(card, "kraken")).toBeDefined();
+    expect(within(card).queryByText(/Kraken/)).not.toBeInTheDocument();
+  });
+});
+
+/**
+ * Phase 164.6.6.3.1 plan 02 / D-10 (UAT item 8, layout half) — the key card
+ * wrapped one word per line (the nickname, "Update password", "Use & Sync")
+ * because its left block could not shrink while its action cluster could not
+ * wrap. jsdom has no layout engine, so the class TOKENS are the contract here
+ * and the founder's 1440 px re-read is the proof (human_needed, open: it also
+ * closes 164.5.3). Tokens are compared whole, never as substrings, so
+ * `min-w-0` is not confused with `min-w-[...]`.
+ *
+ * `flex-[1_1_14rem]` is deliberately NOT `flex-1` (the UI-SPEC's first draft):
+ * research measured in Chromium that `flex-1` gives a zero flex-basis, so the
+ * action row never wraps and the nickname still splits at 360 to 560 px. A
+ * 14rem basis lets the whole action row wrap under the left block first.
+ */
+describe("ApiKeyManager — D-10 the key card's layout class contract", () => {
+  beforeEach(() => {
+    routerRefreshMock.mockReset();
+    selectResultMock.mockReset();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  function layoutRow(id: string, exchange: string) {
+    return {
+      id,
+      user_id: "user-a",
+      exchange,
+      label: `Label ${id}`,
+      is_active: true,
+      sync_status: "complete",
+      last_sync_at: null,
+      account_balance_usdt: 1000,
+      created_at: "2026-01-01T00:00:00Z",
+      sync_error: null,
+      last_429_at: null,
+      disconnected_at: null,
+      venue_account_id: null,
+    };
+  }
+
+  const tokens = (el: Element | null) => (el?.getAttribute("class") ?? "").split(/\s+/).filter(Boolean);
+
+  it("the row wraps, the left block shrinks, the actions wrap as a whole row, and every action button holds one line", async () => {
+    // Two cards: a CURRENT mt5 key (Resync, Update password, Delete) and a
+    // non-current binance key (Use & Sync, Delete), so every action label the
+    // card can print is covered.
+    selectResultMock.mockReturnValue({
+      data: [layoutRow("key-cur", "mt5"), layoutRow("key-other", "binance")],
+      error: null,
+    });
+    await act(async () => {
+      render(<ApiKeyManager strategyId="strat-1" currentKeyId="key-cur" />);
+    });
+
+    for (const [id, exchange, labels] of [
+      ["key-cur", "mt5", ["Resync", "Update password", "Delete"]],
+      ["key-other", "binance", ["Use & Sync", "Delete"]],
+    ] as const) {
+      const card = await screen.findByTestId(`api-key-card-${id}`);
+      const avatar = within(card).getByTestId(`api-key-avatar-${exchange}`);
+      const left = avatar.parentElement!;
+      const row = left.parentElement!;
+      const textColumn = avatar.nextElementSibling;
+      const actions = left.nextElementSibling!;
+
+      expect(tokens(row)).toEqual(
+        expect.arrayContaining(["flex", "flex-wrap", "items-center", "justify-between", "gap-x-4", "gap-y-3"]),
+      );
+      expect(tokens(left)).toEqual(
+        expect.arrayContaining(["flex", "min-w-0", "flex-[1_1_14rem]", "items-center", "gap-3"]),
+      );
+      // Not flex-1: its zero basis is the measured defect (see the block above).
+      expect(tokens(left)).not.toContain("flex-1");
+      expect(tokens(avatar)).toContain("shrink-0");
+      expect(tokens(textColumn)).toContain("min-w-0");
+      expect(tokens(actions)).toEqual(
+        expect.arrayContaining(["flex", "max-w-full", "shrink-0", "flex-wrap", "items-center", "gap-2"]),
+      );
+
+      const buttons = Array.from(actions.querySelectorAll("button"));
+      expect(buttons.map((b) => b.textContent)).toEqual(labels);
+      for (const b of buttons) {
+        expect(tokens(b), `${b.textContent} must not split across lines`).toContain("whitespace-nowrap");
+      }
+    }
+  });
+});
+
+/**
  * M-0456 (audit-2026-05-07) — ApiKeyManager swapped its api_keys read from a
  * broad projection to the `API_KEY_USER_COLUMNS` allowlist. The static
  * sec-005-api-keys-projection regex test catches a `.select("*")` regression,

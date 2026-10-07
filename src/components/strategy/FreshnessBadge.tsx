@@ -1,4 +1,4 @@
-import { cn } from "@/lib/utils";
+import { cn, formatAbsoluteDate } from "@/lib/utils";
 import {
   computeFreshness,
   freshnessLabel,
@@ -14,7 +14,25 @@ interface FreshnessBadgeProps {
   label?: string;
   /** Compact mode renders a dot + short word ("Fresh"), otherwise a pill badge. */
   variant?: "pill" | "dot";
+  /**
+   * Opt-in, pill arm only: after the freshness word, a `·` and the day the
+   * timestamp falls on ("Batch: Fresh · Oct 6"). Set by the recommendations
+   * batch chip so it names WHICH batch it is. An absent or unparseable
+   * timestamp shows no date at all, never "Invalid Date". Every other caller
+   * leaves it off and renders as before.
+   */
+  showDate?: boolean;
   className?: string;
+}
+
+/** The instant `computedAt` names, read the way `computeFreshness` reads it. */
+function toTimestamp(
+  computedAt: Date | string | number | null | undefined,
+): number {
+  if (computedAt == null) return NaN;
+  if (computedAt instanceof Date) return computedAt.getTime();
+  if (typeof computedAt === "number") return computedAt;
+  return Date.parse(computedAt);
 }
 
 /**
@@ -26,11 +44,19 @@ export function FreshnessBadge({
   computedAt,
   label,
   variant = "pill",
+  showDate = false,
   className,
 }: FreshnessBadgeProps) {
   const freshness: Freshness = computeFreshness(computedAt);
   const colors = FRESHNESS_COLORS[freshness];
   const title = freshnessTooltip(freshness);
+  const ts = toTimestamp(computedAt);
+  // formatAbsoluteDate prints the literal "Invalid Date" for a bad input, so
+  // the finite check has to come first.
+  const date =
+    showDate && Number.isFinite(ts)
+      ? formatAbsoluteDate(new Date(ts).toISOString())
+      : null;
 
   if (variant === "dot") {
     return (
@@ -62,6 +88,12 @@ export function FreshnessBadge({
       <span className={cn("h-1.5 w-1.5 rounded-full shrink-0", colors.dot)} />
       {label ? <span>{label}:</span> : null}
       <span>{freshnessLabel(freshness)}</span>
+      {date ? (
+        <>
+          <span aria-hidden="true">·</span>
+          <span className="font-metric">{date}</span>
+        </>
+      ) : null}
     </span>
   );
 }

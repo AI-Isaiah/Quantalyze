@@ -3,6 +3,7 @@
 import { useMemo } from "react";
 import { usePayload } from "./factsheet-context";
 import { BaseLeverageNote } from "./basis-context";
+import { nativeUnitReason } from "@/lib/factsheet/returns-unit";
 import { SignatureEmptyPanel, SIG_BENCH, BTC_OUTAGE_REASON, btcPricesUnavailable } from "./SignaturePanels";
 import type { EventSignature, EventSignaturesSet } from "@/lib/factsheet/types";
 import { niceStepValues } from "@/lib/chart-ticks";
@@ -35,6 +36,9 @@ const PLOT_W = VB_W - PAD.left - PAD.right;
 const WINDOW = 14;
 const TRACE_LEN = WINDOW * 2 + 1;
 
+const CROSS_SUBTITLE_7D = `mean trajectory comparison · ±14d window · each panel overlays strategy-indexed mean (accent) vs ${SIG_BENCH}-indexed mean (muted)`;
+const CROSS_SUBTITLE_1D = "same overlay applied to single-day win/loss events";
+
 export function CrossSignaturesSection() {
   const payload = usePayload();
   // Review round 2 CR-01: both sets are BTC (see SIG_BENCH), never the active comparator.
@@ -44,6 +48,32 @@ export function CrossSignaturesSection() {
   // parent gates this on ingestSource === "api", so these are type-safety
   // checks, not runtime branches. (RED-TEAM-M3)
   if (payload.ingestSource !== "api") return null;
+  // Phase 164.6.6.2 (D-10, UI-SPEC A16): half of every cross panel is the BTC event
+  // study, so for a strategy whose returns are in a native unit every panel is the
+  // empty form with the stated reason, whatever the comparator.
+  if (payload.returnsUnit) {
+    const reason = nativeUnitReason(payload.returnsUnit);
+    return (
+      <section className="flex flex-col gap-10">
+        <CrossHorizon
+          title="Returns Cross Signatures for 7 Days Horizon"
+          subtitle={CROSS_SUBTITLE_7D}
+          stratSet={null}
+          benchSet={null}
+          btcUnavailable={false}
+          withheldReason={reason}
+        />
+        <CrossHorizon
+          title="Returns Cross Signatures for 1 Day Horizon"
+          subtitle={CROSS_SUBTITLE_1D}
+          stratSet={null}
+          benchSet={null}
+          btcUnavailable={false}
+          withheldReason={reason}
+        />
+      </section>
+    );
+  }
   if (!payload.eventSignatures || !payload.benchEventSignatures) return null;
   return (
     <section className="flex flex-col gap-10">
@@ -53,14 +83,14 @@ export function CrossSignaturesSection() {
       <BaseLeverageNote payload={payload} label="Cross-signature trajectories shown at base 1× leverage" />
       <CrossHorizon
         title="Returns Cross Signatures for 7 Days Horizon"
-        subtitle={`mean trajectory comparison · ±14d window · each panel overlays strategy-indexed mean (accent) vs ${SIG_BENCH}-indexed mean (muted)`}
+        subtitle={CROSS_SUBTITLE_7D}
         stratSet={payload.eventSignatures.h7}
         benchSet={payload.benchEventSignatures.h7}
         btcUnavailable={btcUnavailable}
       />
       <CrossHorizon
         title="Returns Cross Signatures for 1 Day Horizon"
-        subtitle="same overlay applied to single-day win/loss events"
+        subtitle={CROSS_SUBTITLE_1D}
         stratSet={payload.eventSignatures.h1}
         benchSet={payload.benchEventSignatures.h1}
         btcUnavailable={btcUnavailable}
@@ -75,71 +105,84 @@ function CrossHorizon({
   stratSet,
   benchSet,
   btcUnavailable,
+  withheldReason,
 }: {
   title: string;
   subtitle: string;
-  stratSet: EventSignaturesSet;
-  benchSet: EventSignaturesSet;
+  /** `null` only under `withheldReason`, where no population is read. */
+  stratSet: EventSignaturesSet | null;
+  benchSet: EventSignaturesSet | null;
   btcUnavailable: boolean;
+  /** Phase 164.6.6.2 (A16): when set, every panel is the empty form with this reason. */
+  withheldReason?: string;
 }) {
+  // Under a withheld reason nothing is read from either population (see SignatureHorizon).
+  const strat = withheldReason === undefined ? stratSet : null;
+  const bench = withheldReason === undefined ? benchSet : null;
   return (
     <div className="flex flex-col gap-4">
       <header>
         <h3 className="text-sm font-semibold uppercase tracking-wider text-text-primary">{title}</h3>
         <p className="text-micro text-text-muted">{subtitle}</p>
-        <div className="mt-2 flex flex-wrap gap-3 text-micro">
-          <span className="inline-flex items-center gap-1.5">
-            <span aria-hidden className="inline-block w-3 h-0.5" style={{ background: "var(--color-accent)" }} />
-            {/* CR-01 (Phase 169.4): no count in the legend. Each view holds its
-                own population once a benchmark null drops a benchmark trace, so
-                one W · L pair per line describes no single panel; each panel
-                names its own N instead. */}
-            <span className="text-text-2">strategy events</span>
-          </span>
-          <span className="inline-flex items-center gap-1.5">
-            <span aria-hidden className="inline-block w-3 h-0.5" style={{ background: "var(--color-text-muted)" }} />
-            <span className="text-text-2">{SIG_BENCH} events</span>
-          </span>
-        </div>
+        {withheldReason === undefined && (
+          <div className="mt-2 flex flex-wrap gap-3 text-micro">
+            <span className="inline-flex items-center gap-1.5">
+              <span aria-hidden className="inline-block w-3 h-0.5" style={{ background: "var(--color-accent)" }} />
+              {/* CR-01 (Phase 169.4): no count in the legend. Each view holds its
+                  own population once a benchmark null drops a benchmark trace, so
+                  one W · L pair per line describes no single panel; each panel
+                  names its own N instead. */}
+              <span className="text-text-2">strategy events</span>
+            </span>
+            <span className="inline-flex items-center gap-1.5">
+              <span aria-hidden className="inline-block w-3 h-0.5" style={{ background: "var(--color-text-muted)" }} />
+              <span className="text-text-2">{SIG_BENCH} events</span>
+            </span>
+          </div>
+        )}
       </header>
       <div className="grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-6">
         <CrossSlot
           title={`Win Event · of ${SIG_BENCH}`}
-          stratMean={stratSet.winOfBenchmark}
-          stratN={stratSet.benchWinCount}
-          benchMean={benchSet.winOfBenchmark}
-          benchN={benchSet.benchWinCount}
+          stratMean={strat?.winOfBenchmark ?? null}
+          stratN={strat?.benchWinCount ?? 0}
+          benchMean={bench?.winOfBenchmark ?? null}
+          benchN={bench?.benchWinCount ?? 0}
           btcUnavailable={btcUnavailable}
+          withheldReason={withheldReason}
           view={`${SIG_BENCH} prices`}
           tone="positive"
         />
         <CrossSlot
           title={`Loss Event · of ${SIG_BENCH}`}
-          stratMean={stratSet.lossOfBenchmark}
-          stratN={stratSet.benchLossCount}
-          benchMean={benchSet.lossOfBenchmark}
-          benchN={benchSet.benchLossCount}
+          stratMean={strat?.lossOfBenchmark ?? null}
+          stratN={strat?.benchLossCount ?? 0}
+          benchMean={bench?.lossOfBenchmark ?? null}
+          benchN={bench?.benchLossCount ?? 0}
           btcUnavailable={btcUnavailable}
+          withheldReason={withheldReason}
           view={`${SIG_BENCH} prices`}
           tone="negative"
         />
         <CrossSlot
           title="Win Event · of Accumulated Capital"
-          stratMean={stratSet.winOfEquity}
-          stratN={stratSet.winCount}
-          benchMean={benchSet.winOfEquity}
-          benchN={benchSet.winCount}
+          stratMean={strat?.winOfEquity ?? null}
+          stratN={strat?.winCount ?? 0}
+          benchMean={bench?.winOfEquity ?? null}
+          benchN={bench?.winCount ?? 0}
           btcUnavailable={btcUnavailable}
+          withheldReason={withheldReason}
           view="returns"
           tone="positive"
         />
         <CrossSlot
           title="Loss Event · of Accumulated Capital"
-          stratMean={stratSet.lossOfEquity}
-          stratN={stratSet.lossCount}
-          benchMean={benchSet.lossOfEquity}
-          benchN={benchSet.lossCount}
+          stratMean={strat?.lossOfEquity ?? null}
+          stratN={strat?.lossCount ?? 0}
+          benchMean={bench?.lossOfEquity ?? null}
+          benchN={bench?.lossCount ?? 0}
           btcUnavailable={btcUnavailable}
+          withheldReason={withheldReason}
           view="returns"
           tone="negative"
         />
@@ -162,6 +205,7 @@ function CrossSlot({
   benchMean,
   benchN,
   btcUnavailable,
+  withheldReason,
   view,
   tone,
 }: {
@@ -171,9 +215,11 @@ function CrossSlot({
   benchMean: EventSignature | null;
   benchN: number;
   btcUnavailable: boolean;
+  withheldReason?: string;
   view: string;
   tone: "positive" | "negative";
 }) {
+  if (withheldReason !== undefined) return <SignatureEmptyPanel title={title} reason={withheldReason} />;
   if (stratMean === null || benchMean === null) {
     // Review round 2 CR-01: during a BTC outage every BTC event and every BTC
     // trace is gone, so the missing side is BTC's prices, not window completeness

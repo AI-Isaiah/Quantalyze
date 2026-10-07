@@ -82,6 +82,14 @@ interface StrategyFormProps {
 
 export function StrategyForm({ strategy, mode }: StrategyFormProps) {
   const [name, setName] = useState(strategy?.name ?? STRATEGY_NAMES[0]);
+  // D-01 (164.6.6.3.1): a strategy named outside STRATEGY_NAMES (e.g. "MM-2x")
+  // must show its OWN name in the picker. Without this option the <select>
+  // falls back to its first option and displays "Alpha Centauri" while `name`
+  // state still holds the real name.
+  const nameOptions: readonly string[] =
+    strategy?.name && !(STRATEGY_NAMES as readonly string[]).includes(strategy.name)
+      ? [strategy.name, ...STRATEGY_NAMES]
+      : STRATEGY_NAMES;
   const [description, setDescription] = useState(strategy?.description ?? "");
   const [categoryId, setCategoryId] = useState<string>(strategy?.category_id ?? "");
   const [categories, setCategories] = useState<{ id: string; name: string }[]>([]);
@@ -268,7 +276,10 @@ export function StrategyForm({ strategy, mode }: StrategyFormProps) {
 
     const payload = {
       user_id: user.id,
-      name,
+      // D-02 (164.6.6.3.1): create always names the strategy. An edit sends
+      // `name` only when the picker changed, so an unrelated save can never
+      // rename; a deliberate pick still does.
+      ...(mode === "create" || name !== strategy?.name ? { name } : {}),
       description: description || null,
       category_id: categoryId || null,
       strategy_types: selectedTypes,
@@ -313,7 +324,7 @@ export function StrategyForm({ strategy, mode }: StrategyFormProps) {
         <div className="space-y-4">
           <Select
             label="Strategy Name"
-            options={STRATEGY_NAMES.map((n) => ({ value: n, label: n }))}
+            options={nameOptions.map((n) => ({ value: n, label: n }))}
             value={name}
             onChange={(e) => setName(e.target.value)}
           />

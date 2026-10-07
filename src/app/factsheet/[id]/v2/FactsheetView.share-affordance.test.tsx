@@ -654,3 +654,97 @@ describe("REGRESSION — a notice that promises a share link ships the control",
     ).not.toContain("<OwnerUnpublishedNotice");
   });
 });
+
+/**
+ * Phase 164.6.6.3.1 D-05 — `OwnerUnpublishedPanel` reports live-state changes to
+ * a host (the /strategies row's "Manage private link" Modal) so the host's label
+ * can never disagree with the panel. The callback fires on the EVENT path only
+ * (mint success, revoke 2xx/404); an honest failure never calls it.
+ */
+describe("OwnerUnpublishedPanel — onShareLiveChange (164.6.6.3.1 D-05)", () => {
+  function openRevokeConfirm(container: HTMLElement) {
+    fireEvent.click(
+      Array.from(container.querySelectorAll("button")).find(
+        (b) => b.textContent === LABEL_REVOKE,
+      )!,
+    );
+    fireEvent.click(
+      Array.from(container.querySelectorAll("button")).find(
+        (b) => b.textContent === "Revoke",
+      )!,
+    );
+  }
+
+  it("a mint 200 reports live exactly once, with true", async () => {
+    fetchMock.mockResolvedValue(jsonResponse(200, { url: MINTED_URL }));
+    const onShareLiveChange = vi.fn();
+    const { container } = render(
+      <OwnerUnpublishedPanel
+        strategyId={STRATEGY_ID}
+        onShareLiveChange={onShareLiveChange}
+      />,
+    );
+    expect(onShareLiveChange, "no mount-time call").not.toHaveBeenCalled();
+
+    fireEvent.click(shareButton(container));
+
+    await waitFor(() => expect(onShareLiveChange).toHaveBeenCalledTimes(1));
+    expect(onShareLiveChange).toHaveBeenCalledWith(true);
+  });
+
+  it.each([200, 404])(
+    "a revoke %i reports not-live exactly once, with false",
+    async (status) => {
+      fetchMock.mockResolvedValue(jsonResponse(status, {}));
+      const onShareLiveChange = vi.fn();
+      const { container } = render(
+        <OwnerUnpublishedPanel
+          strategyId={STRATEGY_ID}
+          hasActiveShare
+          onShareLiveChange={onShareLiveChange}
+        />,
+      );
+
+      openRevokeConfirm(container);
+
+      await waitFor(() => expect(onShareLiveChange).toHaveBeenCalledTimes(1));
+      expect(onShareLiveChange).toHaveBeenCalledWith(false);
+    },
+  );
+
+  it("a revoke 500 does not report, and the alert shows", async () => {
+    fetchMock.mockResolvedValue(jsonResponse(500, {}));
+    const onShareLiveChange = vi.fn();
+    const { container } = render(
+      <OwnerUnpublishedPanel
+        strategyId={STRATEGY_ID}
+        hasActiveShare
+        onShareLiveChange={onShareLiveChange}
+      />,
+    );
+
+    openRevokeConfirm(container);
+
+    await waitFor(() => expect(container.textContent).toContain(REVOKE_FAILED));
+    expect(
+      onShareLiveChange,
+      "a failed revoke leaves the link live, so no host may be told otherwise",
+    ).not.toHaveBeenCalled();
+  });
+
+  it("an absent prop is byte-identical to a present one", () => {
+    const without = render(
+      <OwnerUnpublishedPanel strategyId={STRATEGY_ID} hasActiveShare />,
+    );
+    const withoutHtml = without.container.innerHTML;
+    without.unmount();
+    const withProp = render(
+      <OwnerUnpublishedPanel
+        strategyId={STRATEGY_ID}
+        hasActiveShare
+        onShareLiveChange={vi.fn()}
+      />,
+    );
+    expect(withProp.container.innerHTML).toBe(withoutHtml);
+  });
+});

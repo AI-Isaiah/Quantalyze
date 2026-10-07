@@ -11,6 +11,9 @@ import { PercentileRankBadge } from "@/components/strategy/PercentileRankBadge";
 import { ManagerIdentityPanel } from "@/components/strategy/ManagerIdentityPanel";
 import { PrintButton } from "@/components/ui/PrintButton";
 import { createClient } from "@/lib/supabase/server";
+import { withPublishedOnly } from "@/lib/visibility";
+import { ReturnsUnitChip } from "@/components/strategy/ReturnsUnitChip";
+import { parseReturnsUnit, withUnit } from "@/lib/factsheet/returns-unit";
 
 const PLATFORM_NAME = process.env.NEXT_PUBLIC_PLATFORM_NAME ?? "Quantalyze";
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -24,6 +27,63 @@ const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "
 // /discovery/layout.tsx pin that gates the rest of the disclosure-tier
 // system on attestation.
 export const dynamic = "force-dynamic";
+
+/**
+ * Phase 164.6.6.2 plan 07 (D-09, D-21) - the unit this strategy's returns are
+ * measured in, or null for the USD family.
+ *
+ * Why a read here and not a wider `getFactsheetDetail`: that projection is
+ * `PUBLIC_ANALYTICS_COLUMNS`, the anon ranked projection, and
+ * `data_quality_flags` is deliberately not in it (it carries internal
+ * data-quality state). Widening it would hand that column to every ranked-list
+ * caller to serve this one page. So the page makes the same request-scoped,
+ * published-only read the OG route makes of this column, bounded to the one
+ * strategy id, and keeps ONLY the parsed unit: nothing else about the flags
+ * leaves this function. No admin client.
+ *
+ * Called after `getFactsheetDetail` has returned a strategy, so the published
+ * gate has already run; `withPublishedOnly` repeats it on this read so the
+ * guarantee does not depend on call order.
+ *
+ * Fails CLOSED (SFH-2). "The read succeeded and recorded no unit" (USD family)
+ * and "the unit could not be determined" are different facts and are returned
+ * as different shapes. An undetermined unit logs one line and the page withholds
+ * the return-denominated figures: this is a printable, shareable document, and a
+ * BTC strategy's figures must never be printed unlabelled as if they were USD.
+ */
+type ReturnsUnitRead = { determined: true; unit: string | null } | { determined: false };
+
+async function readReturnsUnit(
+  supabase: Awaited<ReturnType<typeof createClient>>,
+  strategyId: string,
+): Promise<ReturnsUnitRead> {
+  try {
+    const { data, error } = await withPublishedOnly(
+      supabase
+        .from("strategies")
+        .select("strategy_analytics ( data_quality_flags )")
+        .eq("id", strategyId),
+    ).maybeSingle();
+    if (error) {
+      console.error("[tearsheet] returns unit read failed", { message: error.message });
+      return { determined: false };
+    }
+    const embed = (data as { strategy_analytics?: unknown } | null)?.strategy_analytics;
+    const analytics = (Array.isArray(embed) ? embed[0] : embed) as
+      | { data_quality_flags?: { native_unit?: unknown } | null }
+      | null
+      | undefined;
+    return {
+      determined: true,
+      unit: parseReturnsUnit(analytics?.data_quality_flags?.native_unit),
+    };
+  } catch (err) {
+    console.error("[tearsheet] returns unit read failed", {
+      message: err instanceof Error ? err.message : String(err),
+    });
+    return { determined: false };
+  }
+}
 
 export async function generateMetadata({
   params,
@@ -114,8 +174,10 @@ export default async function TearSheetPage({
   // silently open the leak again. Run AFTER getFactsheetDetail so the
   // 404 path skips this lookup.
   let isAttested = false;
+  // Hoisted so the returns-unit read below shares this request's client.
+  let supabase: Awaited<ReturnType<typeof createClient>> | null = null;
   try {
-    const supabase = await createClient();
+    supabase = await createClient();
     const { data: userData, error: userError } = await supabase.auth.getUser();
     if (!userError && userData?.user != null) {
       const { data: attestation, error: attError } = await supabase
@@ -133,6 +195,16 @@ export default async function TearSheetPage({
   }
 
   const { strategy, analytics, manager, disclosureTier } = result;
+  // Phase 164.6.6.2 plan 07 / SFH-2: a null client means the lookup above
+  // already threw and logged. That is "unit undetermined", not "USD": fail
+  // closed (see readReturnsUnit).
+  const unitRead: ReturnsUnitRead = supabase
+    ? await readReturnsUnit(supabase, strategy.id)
+    : { determined: false };
+  const unitUndetermined = !unitRead.determined;
+  const returnsUnit = unitRead.determined ? unitRead.unit : null;
+  // Shown in place of every return-denominated figure while the unit is unknown.
+  const WITHHELD = "—";
   // For non-attested callers (anonymous OR logged-in-but-unattested), force
   // the panel into the exploratory (redacted) lane regardless of the
   // strategy's actual disclosure tier. This is the C-0189 closure:
@@ -187,6 +259,14 @@ export default async function TearSheetPage({
           <p className="mt-1 text-xs text-text-muted">
             {strategy.strategy_types?.join(" · ")} · {strategy.markets?.join(", ")}
           </p>
+          {/* D-09: says, once, that every return and drawdown below is in the
+              strategy's native unit. Zero nodes for a USD strategy. */}
+          <ReturnsUnitChip unit={returnsUnit} className="mt-1" />
+          {unitUndetermined && (
+            <p className="mt-1 text-fixed-10 text-text-muted">
+              Return unit could not be confirmed; figures withheld. Reload to try again.
+            </p>
+          )}
         </div>
         <div className="shrink-0 text-right">
           {/* STALE-01 — the badge is a claim about WHEN these numbers were
@@ -233,21 +313,24 @@ export default async function TearSheetPage({
 
       {/* Hero metrics */}
       <section className="mb-6 grid grid-cols-4 gap-3">
-        <HeroMetric label="CAGR" value={formatPercent(analytics.cagr)} />
+        <HeroMetric
+          label={withUnit("CAGR", returnsUnit)}
+          value={unitUndetermined ? WITHHELD : formatPercent(analytics.cagr)}
+        />
         <HeroMetric label="Sharpe" value={formatNumber(analytics.sharpe)} />
         <HeroMetric label="Sortino" value={formatNumber(analytics.sortino)} />
         <HeroMetric
           label="Max DD"
-          value={formatPercent(analytics.max_drawdown)}
+          value={unitUndetermined ? WITHHELD : formatPercent(analytics.max_drawdown)}
           danger
         />
       </section>
 
       {/* Equity curve */}
-      {analytics.sparkline_returns && analytics.sparkline_returns.length > 0 && (
+      {!unitUndetermined && analytics.sparkline_returns && analytics.sparkline_returns.length > 0 && (
         <section className="mb-6 rounded-lg border border-border p-4">
           <div className="mb-2 flex items-center justify-between">
-            <h2 className="text-sm font-semibold text-text-primary">Equity Curve</h2>
+            <h2 className="text-sm font-semibold text-text-primary">{withUnit("Equity Curve", returnsUnit)}</h2>
             <span className="text-fixed-10 text-text-muted">
               {strategy.start_date ? `Live since ${strategy.start_date}` : ""}
             </span>
@@ -286,21 +369,36 @@ export default async function TearSheetPage({
 
       {/* Detail metrics */}
       <section className="mb-6 grid grid-cols-4 gap-3">
-        <DetailMetric label="Volatility" value={formatPercent(analytics.volatility)} />
-        <DetailMetric label="Calmar" value={formatNumber(analytics.calmar)} />
-        <DetailMetric label="6 Month" value={formatPercent(analytics.six_month_return)} />
         <DetailMetric
-          label="Cumulative"
-          value={formatPercent(analytics.cumulative_return)}
+          label="Volatility"
+          value={unitUndetermined ? WITHHELD : formatPercent(analytics.volatility)}
         />
-        <DetailMetric label="VaR (95%)" value={formatPercent(m?.var_1d_95)} />
-        <DetailMetric label="CVaR" value={formatPercent(m?.cvar)} />
-        <DetailMetric label="Best Day" value={formatPercent(m?.best_day)} />
-        <DetailMetric label="Worst Day" value={formatPercent(m?.worst_day)} />
+        <DetailMetric label="Calmar" value={formatNumber(analytics.calmar)} />
+        <DetailMetric
+          label="6 Month"
+          value={unitUndetermined ? WITHHELD : formatPercent(analytics.six_month_return)}
+        />
+        <DetailMetric
+          label={withUnit("Cumulative", returnsUnit)}
+          value={unitUndetermined ? WITHHELD : formatPercent(analytics.cumulative_return)}
+        />
+        <DetailMetric
+          label="VaR (95%)"
+          value={unitUndetermined ? WITHHELD : formatPercent(m?.var_1d_95)}
+        />
+        <DetailMetric label="CVaR" value={unitUndetermined ? WITHHELD : formatPercent(m?.cvar)} />
+        <DetailMetric
+          label="Best Day"
+          value={unitUndetermined ? WITHHELD : formatPercent(m?.best_day)}
+        />
+        <DetailMetric
+          label="Worst Day"
+          value={unitUndetermined ? WITHHELD : formatPercent(m?.worst_day)}
+        />
       </section>
 
       {/* Monthly returns heatmap */}
-      {analytics.monthly_returns && (
+      {!unitUndetermined && analytics.monthly_returns && (
         <section className="mb-6">
           <h2 className="mb-2 text-sm font-semibold text-text-primary">Monthly Returns</h2>
           <div className="overflow-x-auto">
@@ -353,7 +451,18 @@ export default async function TearSheetPage({
       <section className="mb-6 rounded-lg border border-border p-4">
         <h2 className="mb-3 text-sm font-semibold text-text-primary">Allocation Terms</h2>
         <dl className="grid grid-cols-2 gap-x-6 gap-y-2 text-xs">
-          <TermRow label="Minimum Allocation" value={strategy.aum ? `$${Math.round(strategy.aum).toLocaleString()}` : "Negotiable"} />
+          {/* D-21: `strategy.aum` is a declared USD figure. Beside a native unit it
+              would read as an amount in that unit, so a unit strategy shows a dash. */}
+          <TermRow
+            label="Minimum Allocation"
+            value={
+              unitUndetermined || returnsUnit != null
+                ? WITHHELD
+                : strategy.aum
+                  ? `$${Math.round(strategy.aum).toLocaleString()}`
+                  : "Negotiable"
+            }
+          />
           <TermRow label="Leverage" value={strategy.leverage_range ?? "Not disclosed"} />
           <TermRow label="Lockup" value="None (read-only API)" />
           <TermRow label="Benchmark" value={strategy.benchmark ?? "BTC"} />

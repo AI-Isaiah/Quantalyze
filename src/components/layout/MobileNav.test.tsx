@@ -247,6 +247,60 @@ describe("MobileNav — role-aware rendering (NAV-01 / SC#4)", () => {
     }
   });
 
+  /**
+   * Phase 164.6.6.3.1 / D-08 — a bottom-nav label wraps WHOLE instead of being
+   * clipped by its neighbours. jsdom has no layout, so these pin the class
+   * contract that produces the layout; the 320px look is a human check.
+   */
+  const tokens = (el: Element) => (el.getAttribute("class") ?? "").split(/\s+/).filter(Boolean);
+
+  function navCells(): HTMLElement[] {
+    const nav = screen.getByRole("navigation", { name: "Primary mobile" });
+    return [
+      ...within(nav).getAllByRole("link"),
+      within(nav).getByText("Add a Strategy").closest("button") as HTMLElement,
+    ];
+  }
+
+  it("D-08: every bottom-nav cell can shrink (link and button arms)", () => {
+    pathnameMock.mockReturnValue("/allocations");
+    render(<MobileNav isAllocator />);
+    const cells = navCells();
+    expect(cells.some((c) => c.tagName === "BUTTON")).toBe(true);
+    expect(cells.some((c) => c.tagName === "A")).toBe(true);
+    for (const cell of cells) {
+      const t = tokens(cell);
+      expect(t, `${cell.textContent} cannot shrink`).toContain("min-w-0");
+      expect(t).toContain("flex-1");
+      expect(t).toContain("min-h-[44px]");
+    }
+  });
+
+  it("D-08: the label wraps whole and centred", () => {
+    pathnameMock.mockReturnValue("/allocations");
+    render(<MobileNav isAllocator />);
+    const label = screen.getByText("My Allocation");
+    const t = tokens(label);
+    expect(t).toContain("text-center");
+    // 1.25 line height keeps two 10px lines inside the 64px bar reservation.
+    expect(t).toContain("leading-tight");
+  });
+
+  it("D-08: nothing clips a label", () => {
+    pathnameMock.mockReturnValue("/allocations");
+    render(<MobileNav isAllocator />);
+    const nav = screen.getByRole("navigation", { name: "Primary mobile" });
+    const clipping = (tok: string) =>
+      ["truncate", "overflow-hidden", "text-ellipsis"].includes(tok) ||
+      tok.startsWith("line-clamp");
+    for (const cell of navCells()) {
+      expect(tokens(cell).filter(clipping), `${cell.textContent} clips`).toEqual([]);
+    }
+    for (const label of within(nav).getAllByText(/^(My Allocation|Risk|Bridge|Add a Strategy|Profile)$/)) {
+      expect(tokens(label).filter(clipping), `${label.textContent} label clips`).toEqual([]);
+    }
+  });
+
   it("renders the My Allocation flagged badge when flaggedCount > 0", () => {
     pathnameMock.mockReturnValue("/allocations");
     render(<MobileNav isAllocator flaggedCount={2} />);

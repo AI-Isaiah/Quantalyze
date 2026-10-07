@@ -3077,23 +3077,79 @@ DESIGN.md governs every visual change.
 saving the strategy edit form can no longer change a strategy's name.
 **Requirements**: none in REQUIREMENTS.md; the items above are the spec.
 **Depends on:** Phase 164.6.6.3 (order only, D-02)
-**Plans:** 0 plans
+⭐ **Goal superseded in part, 2026-10-06 (CONTEXT D-01/D-02):** the edit form keeps its name picker and a deliberate pick still renames; only an unrelated save can no longer change the name. The goal sentence above is kept as lineage.
+⭐ **Ship decision 2026-10-06 (founder override of the ship gate, AskUserQuestion "Ship open, I check after deploy"):** this phase ships with VERIFICATION `human_needed` (13/13 must-haves). Its 4 UAT items need the deployed site, so the post-deploy reads close it. Detail in `164.6.6.3.1-CONTEXT.md` `## Ship decision`.
+**Plans:** 6 plans in 2 waves
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 164.6.6.3.1 to break down)
+- [ ] 164.6.6.3.1-01-PLAN.md — item 1: the edit form keeps an off-list name and sends `name` only when the pick changed (D-01, D-02) [wave 1]
+- [ ] 164.6.6.3.1-02-PLAN.md — items 6e + 8: "Loading keys…" until the first key read settles; the venue label from `api-key-label.ts`; the key-card wrap contract (D-03, D-10) [wave 1]
+- [ ] 164.6.6.3.1-03-PLAN.md — items 6a + 6c and 170.6: one footer disclaimer per dashboard route plus a census; the dated batch chip; the bottom-nav label wraps whole (D-07, D-08) [wave 1]
+- [ ] 164.6.6.3.1-04-PLAN.md — item 6d: the α eyebrow reads "α VS BTC"; Wave 0, the /strategies page doubles learn `strategy_shares` (D-09) [wave 1]
+- [ ] 164.6.6.3.1-05-PLAN.md — item 6f: one batched live-share read; "Manage private link" opens the share panel in a "Private link" Modal; row and panel share one live state (D-05, D-06) [wave 2]
+- [ ] 164.6.6.3.1-06-PLAN.md — D-04: the ~20 s key-list read measured read-only on PROD (one founder console step), booked in `TODOS.md` only if real [wave 2, one checkpoint]
 
 ### Phase 164.6.6.2: BTCNATIVE — an MT5 account denominated in BTC (or any non-USD currency) reports its returns in its own unit, not as a dust-guarded USD series (INSERTED)
 
 Founder request 2026-10-03 (chat, a factsheet screenshot of MM-2x, then "ok, after 164.6.6.1", corrected the same evening to "sorry, it should be after 164.6.6"): runs right AFTER 164.6.6 and BEFORE 164.6.6.1. Both it and 164.6.6.1 change the MT5 ingestion files, so they run one after the other, never in parallel. **Measured read-only on PROD 2026-10-03 (marker query first):** MM-2x's `strategy_analytics` row is `complete_with_warnings` with `cumulative_return`, `volatility` and `max_drawdown` all 0.0 and `data_quality_flags` `{dust_nav_guard: true, insufficient_window: true, csv_source: true}`. **Root cause, from a code reading (re-measure at plan time):** the MT5 path assumes a USD account, so a BTC-sized balance is read as dollars, falls under `nav_twr.py` `DUST_NAV_FLOOR` ($1000), and the dust guard flattens every metric. The positions panel already states the gap: `allocator_positions.py` "MT5 account currency is {ccy} — USD conversion isn't supported yet". **Reuse candidate:** the v1.8/v1.9 native-unit NAV + TWR machinery built for Deribit coin-margined accounts (`services/native_nav.py`, the native-unit adapter in `deribit_ingest.py`). **Scope:** (1) read the MT5 account currency (`account_info().currency`) and carry it with the account; (2) rebuild NAV and TWR from the deal ledger in that native unit, with a per-currency dust floor instead of the USD one; (3) the factsheet shows returns as growth in the native unit ("more BTC") and labels the unit; (4) OPEN for discuss-phase: whether a USD view (native NAV converted at the benchmark BTC price the factsheet already reads) is in scope. Never invent data: an uncomputable metric stays null.
 
-**Goal:** [Urgent work - to be planned]
-**Requirements**: TBD
+**Goal:** An MT5 account denominated in BTC reports its NAV, returns and drawdown in BTC, judged against BTC floors instead of the USD dust floor, and the factsheet, share card, tear sheet and scenario numbers say so; every USD-only surface skips it by name, and every blend converts it to USD at the daily BTC close first. Done when MM-2x's PROD factsheet shows non-zero BTC returns labelled in BTC (D-16).
+**Requirements**: TBD (driven by `164.6.6.2-CONTEXT.md` D-01..D-23)
 **Depends on:** Phase 164.6.6
 ⭐ **Order and scope, founder 2026-10-06 (AskUserQuestion; a client is waiting on MM-2x):** this phase STARTS as soon as 164.6.6.3 merges, AHEAD of every other queued phase (including 164.6.6.3.6 MT5SERVERLEARN and 164.6.6.3.1–.5). Founder's words: "start of 164.6.6.3 merges, then all others". Scope item (4) is ANSWERED: **BTC (native unit) only first, USD view later.** The USD view is a follow-up, to be booked at discuss time. The "before 164.6.6.1" ordering above is kept as lineage; 164.6.6.1 ran first.
+⚠️ **Deviation recorded 2026-10-07 (founder override, AskUserQuestion), D-21 in `164.6.6.2-CONTEXT.md`:** D-11 said a BTC strategy's AUM shows in BTC. It shows `—` instead: the factsheet AUM is the manager's declared USD figure, and the only BTC figure is the account's live balance, which the public factsheet has never disclosed. Also decided the same day: the BTC dust floor is 0.001 BTC (D-20, supersedes D-05), and the BTC-to-USD conversion applies on every blending surface (D-22).
+**Plans:** 13 plans
+
+Plans:
+- [ ] 164.6.6.2-01-PLAN.md — one per-unit floor table and currency classifier; floors threaded through the NAV/TWR engine and the MT5 combiners; Wave-0 fixture commit (wave 1)
+- [ ] 164.6.6.2-02-PLAN.md — DDL-only migration: `api_keys.account_currency` + `account_balance_native`, un-granted; applied on the local lane (wave 1)
+- [ ] 164.6.6.2-03-PLAN.md — derive reads the currency, D-03 change check, D-06 refusals, unit floors, api_keys persistence, `native_unit` pre-stamp; settle wait, sync arm, positions poll on the same classifier (wave 2)
+- [ ] 164.6.6.2-04-PLAN.md — runner carries `native_unit` with no BTC benchmark metrics; key-mode, compose and backfill skip a non-USD key by name (wave 3)
+- [ ] 164.6.6.2-05-PLAN.md — `returnsUnit` payload field, unit chip, BTC return labels and titles, AUM `—` (D-21), cache key v12 (wave 1)
+- [ ] 164.6.6.2-06-PLAN.md — BTC comparisons withheld with reasons; SPX and other comparisons unchanged (D-10, D-17) (wave 2)
+- [ ] 164.6.6.2-07-PLAN.md — share card, tear sheet and v2 panel labelled in BTC (wave 2)
+- [ ] 164.6.6.2-08-PLAN.md — the one BTC-to-USD conversion function, the shared oracle fixture and the DB-only BTC closes reader (D-18, D-22, D-23) (wave 1)
+- [ ] 164.6.6.2-09-PLAN.md — allocator dashboard payload, portfolio page and returns route (`daily_returns_usd`) convert server-side (wave 2)
+- [ ] 164.6.6.2-10-PLAN.md — shared-scenario resolver converts a BTC leg (wave 2)
+- [ ] 164.6.6.2-11-PLAN.md — composer blends the server-converted USD series for BTC legs (no client-side conversion); row chip, `CAGR IN BTC`, USD-blend line (wave 3)
+- [ ] 164.6.6.2-12-PLAN.md — post-deploy: MM-2x re-derived via Sync and read live on PROD; D-06 canary (wave 4)
+- [ ] 164.6.6.2-13-PLAN.md — Python twin of the conversion on the shared oracle fixture; portfolio analytics, simulator and match engine convert BTC before weighting (D-23) (wave 2)
+
+### Phase 164.6.6.2.2: WEALTHRETURNS — the Python analytics service reads the stored wealth curve as daily returns in every blend (INSERTED)
+
+**Goal:** Every Python blend reads daily returns, not the stored wealth curve. `strategy_analytics.returns_series` holds the cumprod wealth curve (`(1 + r).cumprod()`, `services/metrics.py`), measured on PROD 2026-10-07 across 32 rows: first value about 1.0, last values averaging about 209k. `routers/simulator.py`, `routers/match.py` and `routers/portfolio.py` (analytics, optimizer, bridge) and the 164.6.6.2 Python BTC twin (`services/native_to_usd.py`) read it as daily returns, so a wealth of 1.30 is weighted as a +130% day. The TypeScript side already converts through `resolveDailyReturnSeries`.
+**Scope:** add the wealth-to-daily-returns step once, at the shared Python boundary, as the twin of the TS conversion; rebuild the router test fixtures from real wealth-curve shapes so a test can tell the two apart; measure the affected outputs on PROD before and after; and fix `_compute_portfolio_analytics` selecting `equity_curve` and `total_aum`, which do not exist on `strategy_analytics`.
+**Origin:** 164.6.6.2 code review CR-01 (pre-existing, not introduced by that phase). Founder 2026-10-07: own phase, ship BTCNATIVE first.
+**Requirements**: TBD
+**Depends on:** Phase 164.6.6.2
 **Plans:** 0 plans
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 164.6.6.2 to break down)
+- [ ] TBD (run /gsd-plan-phase 164.6.6.2.2 to break down)
+
+### Phase 164.6.6.2.1: BTCUSDVIEW — a native-unit MT5 account also gets a USD view (INSERTED)
+
+Booked 2026-10-07 by Phase 164.6.6.2 decision D-15 (founder 2026-10-06: "BTC only first, USD later").
+164.6.6.2 reports a BTC-denominated MT5 account in BTC and skips it, by name, on every USD-only
+surface (D-13, D-14).
+
+**Goal:** A native-unit MT5 account also gets a USD view. Its native NAV is converted at the daily
+BTC benchmark price, the allocator equity snapshots and dashboard include it instead of skipping it,
+and `api_keys.account_balance_usdt` is populated. Never invent data: a day without a benchmark
+price stays null.
+Also owns the "in BTC" chip on the strategy list surfaces (Discovery, `StrategyTable`), booked
+here by 164.6.6.2 D-19 (founder, 2026-10-07).
+Also owns three known limits booked by 164.6.6.2 (orchestrator, 2026-10-07, after its plan check; not
+blends, so not fixed there): the correlation-only consumers `strategy_matching.find_matched_strategy`
+and `bridge_scoring.find_replacement_candidates` still correlate a BTC-unit series as if USD, and
+`getOwnCapitalStrategies` shows an unlabelled own-capital MTD for a BTC strategy. It also inherits
+`nativeAmount` (the BTC amount formatter) with its first caller.
+**Requirements**: TBD
+**Depends on:** Phase 164.6.6.2
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 164.6.6.2.1 to break down)
 
 ### Phase 164.6.6.1: MT5SCRUB — the MT5 terminals are wiped of saved accounts after use without ever leaving the jobs terminal logged out (INSERTED)
 
