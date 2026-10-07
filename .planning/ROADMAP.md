@@ -2955,6 +2955,8 @@ Plans:
 - [ ] 164.6.6.3.4-03-PLAN.md — snapshot and earned VAC-04 ack, kind-classification drift test, local-stack bridge family, mutation census, release commit
 - [ ] 164.6.6.3.4-04-PLAN.md — post-deploy PROD re-sync of the `failed` rows that have jobs (D-08 as amended), before/after recorded, founder checkpoint
 
+
+⭐ **Founder 2026-10-07 (D-09, CONTEXT):** a call whose only failures are excluded side kinds must not stamp `computed_at` or clear a foreign `computation_error`; fixed before merge.
 ### Phase 164.6.6.3.3: FACTSHEETTRUTH — a factsheet, its share card and its scenario never show a number the data cannot support (164.6.6.3 split C: items 2, 3, 4, 5, 6b) (INSERTED)
 
 Split C of 164.6.6.3 (founder, 2026-10-06, `164.6.6.3-CONTEXT.md` D-01). It delivers items **2,
