@@ -252,7 +252,7 @@ def _build_ctx(
     asset_class: str = "traditional",
     connects: list | None = None,
 ) -> tuple[MagicMock, dict]:
-    capture: dict = {"upserts": [], "rpc_calls": [], "deletes": []}
+    capture: dict = {"upserts": [], "rpc_calls": [], "deletes": [], "updates": []}
     ctx = MagicMock()
     ctx.exchange = _session(transport, connects=connects)
     ctx.supabase = MagicMock()
@@ -280,6 +280,18 @@ def _build_ctx(
             return chain
 
         tbl.delete.side_effect = _delete
+
+        def _update(payload: object, **kw: object) -> MagicMock:
+            # Recorded per table so a write to ``api_keys`` is OBSERVABLE: without this an
+            # "api_keys was updated" assertion passes vacuously on a bare MagicMock
+            # (164.6.6.2 Wave 0). Chainable like the real builder: ``.eq(...).execute()``.
+            capture["updates"].append((name, payload))
+            chain = MagicMock()
+            chain.eq.return_value = chain
+            chain.execute.return_value = MagicMock(data=[payload], count=1)
+            return chain
+
+        tbl.update.side_effect = _update
         return tbl
 
     ctx.supabase.table.side_effect = _table
@@ -403,7 +415,7 @@ def _reset_mt5_terminal_locks():
 async def test_mt5_disabled_fails_closed(monkeypatch) -> None:
     monkeypatch.delenv("MT5_ENABLED", raising=False)
     transport = _FakeMt5Transport(
-        account={"equity": 110_500.0, "balance": 110_500.0, "login": 123456}, deals=_canonical_deals()
+        account={"equity": 110_500.0, "balance": 110_500.0, "currency": "USD", "login": 123456}, deals=_canonical_deals()
     )
     ctx, capture = _build_ctx(transport)
     with _apply(_patches(ctx)):
@@ -426,7 +438,7 @@ async def test_mt5_disabled_fails_closed(monkeypatch) -> None:
 async def test_mt5_routes_one_backbone(monkeypatch) -> None:
     monkeypatch.setenv("MT5_ENABLED", "true")
     transport = _FakeMt5Transport(
-        account={"equity": 110_500.0, "balance": 110_500.0, "login": 123456}, deals=_canonical_deals()
+        account={"equity": 110_500.0, "balance": 110_500.0, "currency": "USD", "login": 123456}, deals=_canonical_deals()
     )
     ctx, capture = _build_ctx(transport, asset_class="traditional")
     series_conventions: dict = {}
@@ -497,7 +509,7 @@ async def test_fresh_login_history_arriving_late_is_read_once_settled(
     refused permanently."""
     monkeypatch.setenv("MT5_ENABLED", "true")
     transport = _FakeMt5Transport(
-        account={"equity": 110_500.0, "balance": 110_500.0, "login": 123456},
+        account={"equity": 110_500.0, "balance": 110_500.0, "currency": "USD", "login": 123456},
         deals=[],
         deals_by_call=[[], _canonical_deals()],
     )
@@ -538,7 +550,7 @@ async def test_a_second_derive_of_a_settled_key_pays_no_wait(monkeypatch) -> Non
     (which stamps the holder registry) or ignored the settled record, this count
     would be wrong in one direction or the other."""
     monkeypatch.setenv("MT5_ENABLED", "true")
-    account = {"equity": 110_500.0, "balance": 110_500.0, "login": 123456}
+    account = {"equity": 110_500.0, "balance": 110_500.0, "currency": "USD", "login": 123456}
 
     first = _FakeMt5Transport(account=account, deals=_canonical_deals())
     ctx1, _cap1 = _build_ctx(first)
@@ -570,7 +582,7 @@ async def test_the_derive_bound_adds_the_wait_only_for_a_fresh_login(
     monkeypatch.setenv("MT5_ENABLED", "true")
     monkeypatch.setattr(jw, "_MT5_DERIVE_READ_TIMEOUT_S", 0.3)
     monkeypatch.setattr(jw, "_MT5_HISTORY_WAIT_S", 2.0)
-    account = {"equity": 110_500.0, "balance": 110_500.0, "login": 123456}
+    account = {"equity": 110_500.0, "balance": 110_500.0, "currency": "USD", "login": 123456}
 
     first = _FakeMt5Transport(account=account, deals=_canonical_deals(), hang_s=0.4)
     ctx1, _cap1 = _build_ctx(first)
@@ -606,7 +618,7 @@ async def test_the_fresh_derive_bound_budgets_one_trailing_read(monkeypatch) -> 
     monkeypatch.setattr(jw, "_MT5_DERIVE_READ_TIMEOUT_S", 0.3)
     monkeypatch.setattr(jw, "_MT5_HISTORY_WAIT_S", 0.5)
     monkeypatch.setattr(mt5_conc, "_MT5_HISTORY_TRAILING_READ_S", 1.0)
-    account = {"equity": 110_500.0, "balance": 110_500.0, "login": 123456}
+    account = {"equity": 110_500.0, "balance": 110_500.0, "currency": "USD", "login": 123456}
 
     transport = _FakeMt5Transport(account=account, deals=_canonical_deals(), hang_s=0.4)
     ctx, _cap = _build_ctx(transport)
@@ -651,7 +663,7 @@ async def test_unsettled_history_is_transient_error_no_stamp(
 
     monkeypatch.setenv("MT5_ENABLED", "true")
     transport = _FakeMt5Transport(
-        account={"equity": 110_500.0, "balance": 110_500.0, "login": 123456},
+        account={"equity": 110_500.0, "balance": 110_500.0, "currency": "USD", "login": 123456},
         deals=[],
     )
     connects: list = []
@@ -694,7 +706,7 @@ async def test_upnl_wedge_flags(monkeypatch) -> None:
     # equity 110_000, balance 100_000 → wedge 10_000; 10_000/110_000 ≈ 0.0909 > 0.05.
     # The canonical 4-day ledger keeps >=2 usable days (floor not tripped).
     transport = _FakeMt5Transport(
-        account={"equity": 110_000.0, "balance": 100_000.0, "login": 123456}, deals=_canonical_deals()
+        account={"equity": 110_000.0, "balance": 100_000.0, "currency": "USD", "login": 123456}, deals=_canonical_deals()
     )
     ctx, capture = _build_ctx(transport)
     with _apply(_patches(ctx)):
@@ -724,7 +736,7 @@ async def test_no_wedge_does_not_flag(monkeypatch) -> None:
     # Same canonical 4-day ledger (>=2 usable days, floor not tripped) as the
     # positive test, so the ONLY difference is the zeroed uPnL wedge.
     transport = _FakeMt5Transport(
-        account={"equity": 100_000.0, "balance": 100_000.0, "login": 123456}, deals=_canonical_deals()
+        account={"equity": 100_000.0, "balance": 100_000.0, "currency": "USD", "login": 123456}, deals=_canonical_deals()
     )
     ctx, capture = _build_ctx(transport)
     with _apply(_patches(ctx)):
@@ -745,7 +757,7 @@ async def test_no_wedge_does_not_flag(monkeypatch) -> None:
 async def test_read_error_fails_whole_job(monkeypatch) -> None:
     monkeypatch.setenv("MT5_ENABLED", "true")
     transport = _FakeMt5Transport(
-        account={"equity": 110_500.0, "balance": 110_500.0, "login": 123456},
+        account={"equity": 110_500.0, "balance": 110_500.0, "currency": "USD", "login": 123456},
         deals=[],
         read_exc=RuntimeError("kaboom mid-read"),  # unrecognized → transient
     )
@@ -782,7 +794,7 @@ async def test_wrong_server_at_derive_is_transient_not_permanent(monkeypatch) ->
     user's to be blamed for."""
     monkeypatch.setenv("MT5_ENABLED", "true")
     transport = _FakeMt5Transport(
-        account={"equity": 110_500.0, "balance": 110_500.0, "login": 123456},
+        account={"equity": 110_500.0, "balance": 110_500.0, "currency": "USD", "login": 123456},
         deals=[],
         # str contains "connection" → the 'connect' wrong_server token.
         read_exc=ConnectionResetError("Connection reset by peer during history read"),
@@ -809,7 +821,7 @@ async def test_balance_flow_with_none_profit_does_not_crash(monkeypatch) -> None
     # The canonical BALANCE deposit (type=2) but with a missing profit field.
     deals[1] = {**deals[1], "profit": None}
     transport = _FakeMt5Transport(
-        account={"equity": 110_500.0, "balance": 110_500.0, "login": 123456}, deals=deals
+        account={"equity": 110_500.0, "balance": 110_500.0, "currency": "USD", "login": 123456}, deals=deals
     )
     ctx, capture = _build_ctx(transport)
     with _apply(_patches(ctx)):
@@ -832,7 +844,7 @@ async def test_unclassifiable_deal_permanent(monkeypatch) -> None:
          "time": _epoch(2025, 6, 5)}
     )
     transport = _FakeMt5Transport(
-        account={"equity": 110_500.0, "balance": 110_500.0, "login": 123456}, deals=deals
+        account={"equity": 110_500.0, "balance": 110_500.0, "currency": "USD", "login": 123456}, deals=deals
     )
     ctx, capture = _build_ctx(transport)
     with _apply(_patches(ctx)):
@@ -864,7 +876,7 @@ async def test_missing_window_masked(monkeypatch) -> None:
          "commission": 0.0, "fee": 0.0, "time": _epoch(2025, 6, 5)},
     ]
     transport = _FakeMt5Transport(
-        account={"equity": 100_250.0, "balance": 100_250.0, "login": 123456}, deals=deals
+        account={"equity": 100_250.0, "balance": 100_250.0, "currency": "USD", "login": 123456}, deals=deals
     )
     ctx, capture = _build_ctx(transport)
     with _apply(_patches(ctx)):
@@ -1030,7 +1042,7 @@ async def test_reconstruction_reconciles_to_equity(monkeypatch) -> None:
     monkeypatch.setenv("MT5_ENABLED", "true")
     terminal_equity = 110_500.0  # account_info().equity — the ground truth
     transport = _FakeMt5Transport(
-        account={"equity": terminal_equity, "balance": terminal_equity, "login": 123456},
+        account={"equity": terminal_equity, "balance": terminal_equity, "currency": "USD", "login": 123456},
         deals=_canonical_deals(),
     )
     ctx, capture = _build_ctx(transport)
@@ -1084,7 +1096,7 @@ async def test_mt5_hung_read_restart_on_timeout(monkeypatch) -> None:
     monkeypatch.setattr(jw, "_MT5_HISTORY_WAIT_S", 0.0)
     monkeypatch.setattr(mt5_conc, "_MT5_HISTORY_TRAILING_READ_S", 0.0)
     transport = _FakeMt5Transport(
-        account={"equity": 110_500.0, "balance": 110_500.0, "login": 123456},
+        account={"equity": 110_500.0, "balance": 110_500.0, "currency": "USD", "login": 123456},
         deals=_canonical_deals(),
         hang_s=1.0,
     )
@@ -1155,7 +1167,7 @@ async def test_mt5_restart_itself_bounded(monkeypatch) -> None:
     monkeypatch.setattr(mt5_conc, "_MT5_RESTART_TIMEOUT_S", 0.05)
     read_hang, shutdown_hang = 0.3, 1.0  # genuine hangs the bounds must cut short
     transport = _FakeMt5Transport(
-        account={"equity": 110_500.0, "balance": 110_500.0, "login": 123456},
+        account={"equity": 110_500.0, "balance": 110_500.0, "currency": "USD", "login": 123456},
         deals=_canonical_deals(),
         hang_s=read_hang,
         shutdown_hang_s=shutdown_hang,
@@ -1238,7 +1250,7 @@ async def _run_two_concurrent_mt5(neuter_lock: bool) -> list:
             tag,
             order=order,
             b_login_done=b_login_done,
-            account={"equity": 110_500.0, "balance": 110_500.0, "login": 123456},
+            account={"equity": 110_500.0, "balance": 110_500.0, "currency": "USD", "login": 123456},
             deals=_canonical_deals(),
         )
         ctx, _cap = _build_ctx(t)
@@ -1395,7 +1407,7 @@ async def test_derive_release_bumps_the_terminal_epoch_exactly_once(
     """
     monkeypatch.setenv("MT5_ENABLED", "true")
     transport = _FakeMt5Transport(
-        account={"equity": 110_500.0, "balance": 110_500.0, "login": 123456},
+        account={"equity": 110_500.0, "balance": 110_500.0, "currency": "USD", "login": 123456},
         deals=_canonical_deals(),
     )
     ctx, capture = _build_ctx(transport)
@@ -1447,7 +1459,7 @@ async def test_mt5_login_bracket_pre_mismatch(monkeypatch) -> None:
     monkeypatch.setenv("MT5_ENABLED", "true")
     # account_info().login (999999) != the connected key's login (123456).
     transport = _FakeMt5Transport(
-        account={"equity": 110_500.0, "balance": 110_500.0, "login": 999_999},
+        account={"equity": 110_500.0, "balance": 110_500.0, "currency": "USD", "login": 999_999},
         deals=_canonical_deals(),
     )
     connects: list = []
@@ -1481,9 +1493,9 @@ async def test_mt5_login_bracket_post_hijack(monkeypatch) -> None:
     # PRE account_info → login 123456 (matches); POST account_info → login 999999
     # (a mid-read hijack). Only the POST bracket can catch this.
     transport = _FakeMt5Transport(
-        account={"equity": 110_500.0, "balance": 110_500.0, "login": 123456},
+        account={"equity": 110_500.0, "balance": 110_500.0, "currency": "USD", "login": 123456},
         deals=_canonical_deals(),
-        second_account={"equity": 110_500.0, "balance": 110_500.0, "login": 999_999},
+        second_account={"equity": 110_500.0, "balance": 110_500.0, "currency": "USD", "login": 999_999},
     )
     connects: list = []
     ctx, capture = _build_ctx(transport, connects=connects)
@@ -1530,7 +1542,7 @@ async def test_mt5_login_field_missing_fails_loud(monkeypatch) -> None:
     monkeypatch.setenv("MT5_ENABLED", "true")
     # No "login" key at all — the bracket must NOT default-match against the key.
     transport = _FakeMt5Transport(
-        account={"equity": 110_500.0, "balance": 110_500.0},
+        account={"equity": 110_500.0, "balance": 110_500.0, "currency": "USD"},
         deals=_canonical_deals(),
     )
     ctx, capture = _build_ctx(transport)
@@ -1575,7 +1587,7 @@ async def test_mt5_post_read_transient_blip_is_not_permanent(monkeypatch) -> Non
     """
     monkeypatch.setenv("MT5_ENABLED", "true")
     transport = _FakeMt5Transport(
-        account={"equity": 110_500.0, "balance": 110_500.0, "login": 123456},
+        account={"equity": 110_500.0, "balance": 110_500.0, "currency": "USD", "login": 123456},
         deals=_canonical_deals(),
         # A raw transport blip on the POST re-read. The client wraps it into a
         # scrubbed Mt5ClientError; its text carries the "connect" token, so the
@@ -1726,7 +1738,7 @@ async def test_mt5_abandoned_session_is_transient_with_no_stamp_and_no_restart(
 
     transport = _EpochBumpingTransport(
         terminal_key="h:1",  # matches `_session`'s Mt5Client("h", 1, ...)
-        account={"equity": 110_500.0, "balance": 110_500.0, "login": 123456},
+        account={"equity": 110_500.0, "balance": 110_500.0, "currency": "USD", "login": 123456},
         deals=_canonical_deals(),
     )
     ctx, capture = _build_ctx(transport)
@@ -1803,7 +1815,7 @@ async def test_the_abandoned_derive_error_message_carries_no_classifier_token(
     monkeypatch.setattr(jw, "_mt5_bounded_restart", _spy_restart)
     transport = _EpochBumpingTransport(
         terminal_key="h:1",
-        account={"equity": 110_500.0, "balance": 110_500.0, "login": 123456},
+        account={"equity": 110_500.0, "balance": 110_500.0, "currency": "USD", "login": 123456},
         deals=_canonical_deals(),
     )
     ctx, _capture = _build_ctx(transport)

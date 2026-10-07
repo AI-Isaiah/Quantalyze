@@ -74,11 +74,13 @@ _DEALS: list[dict[str, Any]] = [
 ]
 
 
-def _account(login: int | None, *, equity: float = 110_500.0) -> dict[str, Any]:
+def _account(
+    login: int | None, *, equity: float = 110_500.0, currency: str = "USD"
+) -> dict[str, Any]:
     """An ``account_info()`` snapshot. ``login=None`` OMITS the field entirely —
     the Pitfall-3 shape, where a bracket that used a default would silently
     match."""
-    snap: dict[str, Any] = {"equity": equity, "balance": equity}
+    snap: dict[str, Any] = {"equity": equity, "balance": equity, "currency": currency}
     if login is not None:
         snap["login"] = login
     return snap
@@ -525,7 +527,8 @@ def test_missing_equity_skips_the_wait_and_records_nothing(
     token = begin_mt5_lease_holder(_KEY)
     try:
         transport = _FakeMt5Transport(
-            account={"login": _EXPECTED_LOGIN, "balance": 1.0}, deals=_DEALS
+            account={"login": _EXPECTED_LOGIN, "balance": 1.0, "currency": "USD"},
+            deals=_DEALS,
         )
         _settle_read(transport)
 

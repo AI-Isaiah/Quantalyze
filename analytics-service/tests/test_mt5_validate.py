@@ -263,7 +263,7 @@ async def _call(router, req):
 # "login": 123456 matches the parsed login from _make_req's api_key="123456" so the
 # RED-TEAM login bracket (account_info().login == expected, pre+post the read) passes
 # on the happy path — the fake terminal IS on the connected account.
-_INVESTOR_ACCOUNT = {"trade_allowed": False, "balance": 1000.0, "login": 123456}
+_INVESTOR_ACCOUNT = {"trade_allowed": False, "balance": 1000.0, "currency": "USD", "login": 123456}
 # An investor order_check is rejected with the DOCUMENTED investor code
 # TRADE_RETCODE_TRADE_DISABLED (10017) — [DOC] enum_trade_return_codes.
 #

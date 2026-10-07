@@ -131,6 +131,7 @@ class _FakeMt5:
         return {
             "equity": self._equity,
             "balance": self._balance,
+            "currency": "USD",
             "login": self._login,
             "trade_allowed": self._trade_allowed,
         }
