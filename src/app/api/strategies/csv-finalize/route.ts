@@ -1035,11 +1035,11 @@ async function finalizeAtomicOrErrorResponse(
               // the fold has no handler clause; the rollback is total. Making
               // this one vague too would be the failure mode on the other
               // side of the same defect.
-              "Your strategy could not be saved. Nothing was saved — the submission rolled back completely, so it is safe to try again. Contact support@quantalyze.com if it persists."
+              "Your strategy could not be saved. Nothing was saved — the submission rolled back completely, so it is safe to try again. Use the contact form if it persists."
             : // CLASSES 2 and 3 — commit-agnostic, in the voice
               // `CSV_SUBMIT_FAILED` already approved. It states what we do not
               // know, then puts the NON-DESTRUCTIVE check first.
-              "We could not confirm whether your strategy was saved. The save step did not report back, so we cannot promise it completed or that it did not. Open your strategies list in another tab first: if the strategy is listed, the save completed and you are done. If it is not listed, submit the same file again — an unchanged resubmit from this wizard resolves to the strategy you already started instead of creating a second one. Contact support@quantalyze.com if it persists.",
+              "We could not confirm whether your strategy was saved. The save step did not report back, so we cannot promise it completed or that it did not. Open your strategies list in another tab first: if the strategy is listed, the save completed and you are done. If it is not listed, submit the same file again — an unchanged resubmit from this wizard resolves to the strategy you already started instead of creating a second one. Use the contact form if it persists.",
         debug_context: {
           rpc_error_code: error?.code ?? null,
           outcome_class: outcomeClass,

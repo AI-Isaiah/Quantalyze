@@ -86,7 +86,7 @@ describe("buildEnvelope (Phase 16 / OBSERV-06)", () => {
           "The exchange asked us to slow down. This is a transient, exchange-side throttle and not a problem with your key.",
         debug_context: [
           "Wait 60 seconds and try again.",
-          "If it persists, try a different exchange account or contact support.",
+          "If it persists, try a different exchange account or use the contact form.",
         ],
         correlation_id: "corr-nowait",
         recoverable: true,

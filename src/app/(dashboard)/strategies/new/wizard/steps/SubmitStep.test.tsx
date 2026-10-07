@@ -1501,9 +1501,9 @@ describe("[153.2-05] the envelope names its venue and its surface", () => {
   }
 
   const SWITCH_VENUE_BULLET =
-    "If it keeps failing, switch to a different exchange or contact support.";
+    "If it keeps failing, switch to a different exchange or use the contact form.";
   const NO_OTHER_VENUE_BULLET =
-    "This is your broker account, so there is no other venue to try. If it keeps failing, email security@quantalyze.com with the correlation id below.";
+    "This is your broker account, so there is no other venue to try. If it keeps failing, send the correlation id below through the contact form.";
 
   it("⭐ D-17 — an MT5 submit is NOT told to switch to a different exchange", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(

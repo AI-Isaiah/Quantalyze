@@ -1430,7 +1430,7 @@ describe("/api/strategies/csv-finalize — daily_returns_series (Phase 19.1)", (
     // D-11: the copy asserts the transaction's TRUE outcome — the fold
     // commits nothing on failure, so the retry invitation is honest.
     expect(json.human_message).toMatch(/Nothing was saved/);
-    expect(json.human_message).toMatch(/support@quantalyze\.com/i);
+    expect(json.human_message).toMatch(/Use the contact form if it persists\.$/);
     // 146.1-05 / A3 — a 5-character SQLSTATE means PostgREST returned a BODY:
     // the fold ran and RAISEd, and with no handler clause the whole
     // transaction rolled back. This class keeps its claim, and the class is
@@ -2147,7 +2147,7 @@ describe("[146.1-05 / A3] the fold-failure arm's copy is commit-agnostic where t
     expect(res.status).toBe(500);
     expect(json.code).toBe("CSV_FINALIZE_FAIL");
     expect(json.human_message).toBe(
-      "Your strategy could not be saved. Nothing was saved — the submission rolled back completely, so it is safe to try again. Contact support@quantalyze.com if it persists.",
+      "Your strategy could not be saved. Nothing was saved — the submission rolled back completely, so it is safe to try again. Use the contact form if it persists.",
     );
     expect(json.debug_context).toMatchObject({
       rpc_error_code: "22023",

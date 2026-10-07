@@ -2691,9 +2691,9 @@ describe("[140.3-12 / SEAMUX-04] no entry in the copy table makes a claim we can
    * is the banned-claims honesty scan, so its question is a different one from
    * its twin's, and the entry was walked against all four FORBIDDEN fragments
    * by hand — title, cause and every fix line — BEFORE the number moved:
-   *   · "been notified" — ABSENT. The third fix line asks the user to email
-   *     security@quantalyze.com, which is the opposite claim: it says nobody
-   *     has been told yet and names who to tell.
+   *   · "been notified" — ABSENT. The third fix line asks the user to send us the
+   *     correlation id through the contact form, which is the opposite claim:
+   *     it says nobody has been told yet and names how to tell us.
    *   · "we fetched your trades" — ABSENT. The entry says nothing about any
    *     fetch stage; the fault it describes fires before a venue is reached.
    *   · "wizard_session_id idempotency" — ABSENT, and the near-misses were
@@ -3159,7 +3159,7 @@ describe("[140.3-15 / TS-38] SEAM_MISCONFIGURED — our fault, permanent, no ret
     const fixText = copy.fix.join(" ").toLowerCase();
     expect(fixText).not.toMatch(/try (the same action|again)/);
     expect(fixText).not.toMatch(/wait a moment/);
-    expect(copy.fix.join(" ")).toContain("security@quantalyze.com");
+    expect(copy.fix.join(" ")).toContain("contact form");
   });
 
   it("is DISTINCT copy from the three near-misses, not an alias of one of them", () => {
@@ -4079,7 +4079,7 @@ describe("[153.1-03 / WIZFORM-03] fix[] requirements — the class, not the inst
     // a static table string — nothing caller-supplied reaches the envelope
     // through `context.venue`, which is read ONLY as a lookup key.
     const REPLACEMENT =
-      "This is your broker account, so there is no other venue to try. If it keeps failing, email security@quantalyze.com with the correlation id below.";
+      "This is your broker account, so there is no other venue to try. If it keeps failing, send the correlation id below through the contact form.";
     for (const code of [
       "KEY_PROBE_FAILED",
       "KEY_RATE_LIMIT",
@@ -4101,7 +4101,7 @@ describe("[153.1-03 / WIZFORM-03] fix[] requirements — the class, not the inst
     // the expected side would assert only that a string equals itself.
     const HEAD_TIMEOUT = [
       "Try again in a moment.",
-      "If it keeps failing, switch to a different exchange or contact support.",
+      "If it keeps failing, switch to a different exchange or use the contact form.",
     ];
     expect(
       formatKeyError("KEY_NETWORK_TIMEOUT", { venue: "binance" }).fix,
@@ -4109,7 +4109,7 @@ describe("[153.1-03 / WIZFORM-03] fix[] requirements — the class, not the inst
     expect(formatKeyError("KEY_NETWORK_TIMEOUT").fix).toEqual(HEAD_TIMEOUT);
     expect(formatKeyError("KEY_RATE_LIMIT", { venue: "okx" }).fix).toEqual([
       "Wait 60 seconds and try again.",
-      "If it persists, try a different exchange account or contact support.",
+      "If it persists, try a different exchange account or use the contact form.",
     ]);
     // An UNKNOWN venue string keeps the incumbent copy too — absence and
     // unresolved both answer `substitutable` with the predicate's default.
@@ -4117,7 +4117,7 @@ describe("[153.1-03 / WIZFORM-03] fix[] requirements — the class, not the inst
       formatKeyError("KEY_PROBE_FAILED", { venue: "kraken" }).fix,
     ).toEqual([
       "Try again in a moment.",
-      "If it keeps failing, switch to a different exchange or contact support.",
+      "If it keeps failing, switch to a different exchange or use the contact form.",
     ]);
   });
 });
@@ -4857,7 +4857,7 @@ describe("[161-05 / WIZERR-03] KEY_ORPHANED offers a remedy that can succeed", (
    * Until 162-06, "Finish setup →" on a stored-but-unused key reopened this
    * wizard onto its credential form, so the owner re-POSTed credentials for a
    * key we already held and landed back on THIS refusal. The copy said so:
-   * `fix[1]` read "To reuse this exact account, email security@quantalyze.com …
+   * `fix[1]` read "To reuse this exact account, email the old security address …
    * releasing the stored key is not something you can do from this page." That
    * was true then and became FALSE the moment the client threaded the owner's
    * own key id — for exactly the users this phase is about.
@@ -4925,7 +4925,7 @@ describe("[161-05 / WIZERR-03] KEY_ORPHANED offers a remedy that can succeed", (
     // matches nothing, the assertion below passes while checking nothing.
     expect(
       claimsIn(
-        "To reuse this exact account, email security@quantalyze.com with the " +
+        "To reuse this exact account, email the old security address with the " +
           "correlation id below: releasing the stored key is not something you " +
           "can do from this page.",
       ),
@@ -5754,7 +5754,7 @@ describe("[161-10 / WIZERR-07] the dashboard-dialog entries say only what is tru
     );
     expect(copy.fix).toEqual([
       "Try the same change again. This kind of fault is often momentary.",
-      "If it keeps failing, email security@quantalyze.com with the correlation id below.",
+      "If it keeps failing, send the correlation id below through the contact form.",
     ]);
     expect(copy.actions as readonly string[]).toContain("clear_and_retry");
   });
