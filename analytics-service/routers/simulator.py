@@ -59,6 +59,7 @@ from services.audit import log_audit_event
 from services.benchmark import get_btc_closes
 from services.db import get_supabase, one, rows
 from services.native_to_usd import UsdSeriesConverter, native_units_by_id
+from services.wealth_returns import daily_returns_from_row
 # PYAPI-05 — the shared status contract (analytics-service/docs/STATUS_CONTRACT.md).
 from services.error_contract import service_error
 from services.portfolio_limits import assert_portfolio_within_cap
@@ -374,7 +375,7 @@ async def portfolio_simulator(request: Request, req: SimulatorRequest) -> dict[s
     portfolio_ids = list(existing_ids)
     sa_result = await asyncio.to_thread(
         lambda: supabase.table("strategy_analytics")
-        .select("strategy_id, returns_series, data_quality_flags")
+        .select("strategy_id, returns_series, daily_returns, data_quality_flags")
         .in_("strategy_id", portfolio_ids + [req.candidate_strategy_id])
         .execute()
     )
@@ -400,7 +401,7 @@ async def portfolio_simulator(request: Request, req: SimulatorRequest) -> dict[s
         sa_row = rows_by_id.get(sid)
         if sa_row is None:
             continue
-        s = _records_to_series(sa_row.get("returns_series"), name=sid)
+        s = daily_returns_from_row(sa_row, name=sid)
         if s is not None:
             portfolio_returns[sid] = s
 
@@ -426,8 +427,8 @@ async def portfolio_simulator(request: Request, req: SimulatorRequest) -> dict[s
             status_code=400,
             detail="No returns data available for the candidate",
         )
-    candidate_series = _records_to_series(
-        rows_by_id[req.candidate_strategy_id].get("returns_series"),
+    candidate_series = daily_returns_from_row(
+        rows_by_id[req.candidate_strategy_id],
         name=req.candidate_strategy_id,
     )
     if candidate_series is not None:

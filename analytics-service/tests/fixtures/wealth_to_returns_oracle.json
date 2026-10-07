@@ -1,0 +1,36 @@
+{
+  "_comment": "Cross-runtime oracle for reading a stored strategy_analytics row as DAILY RETURNS (Phase 164.6.6.2.2 D-01, D-02). `returns_series` is the cumulative CURVE (wealth levels), not returns; `daily_returns`, when non-empty, wins. Read by tests/test_wealth_returns.py and, from plan 164.6.6.2.2-03, by src/lib/factsheet/resolve-series.test.ts. Every `expected` value is a HAND-COMPUTED literal (see each `arithmetic`), never produced by either implementation. A JSON `null` curve value stands for a non-finite level (JSON has no NaN). Day 0 never emits; a day whose stored-adjacent level pair is unusable is ABSENT from `expected` (never 0, never bridged across the bad level). Geometric: r_k = w_k / w_{k-1} - 1 on two finite levels > 0. Simple: r_k = w_k - w_{k-1} on two finite levels.",
+  "tolerance": 1e-12,
+  "cases": [
+    {
+      "name": "geometric_ratio",
+      "data_quality_flags": null,
+      "daily_returns": null,
+      "curve": [
+        { "date": "2026-03-02", "value": 1.0 },
+        { "date": "2026-03-03", "value": 1.1 },
+        { "date": "2026-03-04", "value": 1.21 }
+      ],
+      "expected": [
+        { "date": "2026-03-03", "value": 0.1 },
+        { "date": "2026-03-04", "value": 0.1 }
+      ],
+      "arithmetic": "Geometric (flags absent reads geometric). d1 = 1.1 / 1.0 - 1 = 0.1; d2 = 1.21 / 1.1 - 1 = 0.1. Day 0 (2026-03-02) has no prior level and is dropped."
+    },
+    {
+      "name": "simple_difference",
+      "data_quality_flags": { "cumulative_method": "simple" },
+      "daily_returns": null,
+      "curve": [
+        { "date": "2026-03-02", "value": 1.0 },
+        { "date": "2026-03-03", "value": 1.1 },
+        { "date": "2026-03-04", "value": 1.15 }
+      ],
+      "expected": [
+        { "date": "2026-03-03", "value": 0.1 },
+        { "date": "2026-03-04", "value": 0.05 }
+      ],
+      "arithmetic": "Simple (flags cumulative_method = simple). d1 = 1.1 - 1.0 = 0.1; d2 = 1.15 - 1.1 = 0.05. The geometric ratio would give 0.0454545... for d2."
+    }
+  ]
+}

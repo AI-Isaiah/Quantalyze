@@ -31,6 +31,8 @@ import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
+from tests._curve_fixtures import curve_from_returns
+
 # CI version-drift quarantine. analytics-service pins fastapi==0.115.12 +
 # pydantic==2.11.3. The body-vs-query auto-detection in that version chokes
 # on `req: SimulatorRequest` without `Annotated[..., Body()]`, returning
@@ -2042,3 +2044,64 @@ class TestBtcSeriesAreConvertedBeforeTheAddBlend:
             )
         assert exc.value.status_code == 400
         assert exc.value.detail == "Candidate has no returns history"
+
+
+# ---------------------------------------------------------------------------
+# Phase 164.6.6.2.2 (D-01, D-02, CR-01): the stored column is a CURVE
+# ---------------------------------------------------------------------------
+
+
+class TestSimulatorBlendsReturnsDerivedFromTheStoredCurve:
+    """``returns_series`` is the cumulative wealth curve. The 164.6.6.2 router
+    tests fed return-shaped data into it, so a curve weighted as returns passed
+    every test. These feed the STORED shape and assert on what the scorer is
+    handed."""
+
+    _DATES = ["2026-03-02", "2026-03-03", "2026-03-04", "2026-03-05"]
+    _RETURNS = [0.0, 0.02, -0.01, 0.03]
+
+    async def _spy_run(self, sa_portfolio, sa_candidate):
+        from routers import simulator as simulator_router
+        from services import simulator_scoring
+
+        sb = MagicMock()
+        _table_router(
+            sb,
+            portfolio_data={"id": "p-1"},
+            candidate_data={"id": "c-1", "name": "Cand", "status": "published"},
+            portfolio_strategies_data=[{"strategy_id": "s-1", "current_weight": 1.0}],
+            sa_portfolio_data=sa_portfolio,
+            sa_candidate_data=sa_candidate,
+        )
+        spy = MagicMock(wraps=simulator_scoring.simulate_add_candidate)
+        simulator_router._simulator_user_attempts.clear()
+        request = MagicMock()
+        request.headers = {}
+        req = simulator_router.SimulatorRequest(
+            portfolio_id="p-1", candidate_strategy_id="c-1", user_id="u-curve"
+        )
+        with patch.object(simulator_router, "get_supabase", return_value=sb), \
+             patch.object(simulator_router, "simulate_add_candidate", spy), \
+             patch.object(simulator_router, "log_audit_event"):
+            await simulator_router.portfolio_simulator.__wrapped__(request, req)
+        return spy
+
+    @pytest.mark.asyncio
+    async def test_curve_shaped_rows_reach_the_scorer_as_daily_returns(self):
+        curve = curve_from_returns(self._RETURNS, self._DATES)
+        spy = await self._spy_run(
+            sa_portfolio=[{"strategy_id": "s-1", "returns_series": curve,
+                           "daily_returns": None, "data_quality_flags": {}}],
+            sa_candidate={"strategy_id": "c-1", "returns_series": curve,
+                          "daily_returns": None, "data_quality_flags": {}},
+        )
+        spy.assert_called_once()
+        kwargs = spy.call_args.kwargs
+        # Hand-written: the curve is 1.0, 1.02, 1.0098, 1.040094 (day 0 return 0.0
+        # applied); the stored-adjacent ratios are days 1..3 = 0.02, -0.01, 0.03.
+        want = [0.02, -0.01, 0.03]
+        for got in (kwargs["portfolio_returns"]["s-1"], kwargs["candidate_returns"]):
+            assert [d.strftime("%Y-%m-%d") for d in got.index] == self._DATES[1:]
+            assert list(got.to_numpy()) == pytest.approx(want, abs=1e-12)
+            # A level (about 1.0) weighted as a return is the CR-01 defect.
+            assert max(abs(v) for v in got) < 0.5
