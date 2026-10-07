@@ -3687,6 +3687,7 @@ Plans:
 2. Every install step carries its own `timeout-minutes`, so a hang ends the step, not the job.
 3. Where the runner image already ships the tool (psql measured on the runner first), the install is skipped, with the measurement recorded.
 4. The `sql-mutation` ↔ `sql-mutation-nightly` byte-parity pin and every other ci.yml contract test stay green; the 20-min sql-mutation ceiling is not raised.
+**Deviations from D-03 (recorded 2026-10-07, planner revision; the same text is in 164.9.8-CONTEXT.md):** (1) the two `Acquire shared-test-db mutex` steps carry no step `timeout-minutes`, because they wait up to about 33 min for the shared-TEST lock by design, and the wrapper's 400 s budget bounds their dead-branch apt; (2) Playwright's internal apt is bounded only by the image defaults plus a 10-minute step cap, about 1.9 times the slowest measured cache-miss install (308 s).
 **Requirements**: SC-1, SC-2, SC-3, SC-4 (the four success criteria above, in order)
 **Depends on:** none (ships first in the merge queue, founder 2026-10-07)
 **Plans:** 5 plans
