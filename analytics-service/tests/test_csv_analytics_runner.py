@@ -1477,6 +1477,125 @@ async def test_mtm_gated_reason_absence_is_absence() -> None:
 
 
 # ===========================================================================
+# Phase 164.6.6.2 plan 04 (D-08, D-10) — a native-unit series (a BTC MT5 account)
+# is published as a COMPLETE row flagged `native_unit`, with NO benchmark metrics.
+#
+# WHY the benchmark is withheld: `get_benchmark_returns("BTC")` returns USD BTC
+# returns. Pairing a series measured in BTC against them publishes an alpha / beta
+# / correlation / information ratio that compares two different units, and it
+# would read as a real number. Null is the honest value (D-10, RESEARCH Pitfall 4).
+# WHY the unit is not a warning: it is a property of the account, not a defect of
+# the series (D-08), so it must never reach `_warned` / `computation_warned`.
+# ===========================================================================
+
+
+def _benchmark_returns_aligned_to_daily_rows_15() -> pd.Series:
+    import numpy as np
+
+    idx = pd.date_range("2025-07-30", periods=18, freq="D")
+    return pd.Series(np.random.default_rng(7).normal(0.0, 0.02, len(idx)), index=idx)
+
+
+_BENCHMARK_METRIC_KEYS = ("alpha", "beta", "correlation", "info_ratio")
+
+
+async def _run_with_flags(existing_flags: dict, *, benchmark_available: bool = True):
+    """Run the REAL runner (real derive_basis_series, real compute) against a
+    pre-stamped row. Returns (completed payload, derive spy, benchmark fetch mock)."""
+    from services import basis_series
+    from services.analytics_runner import run_csv_strategy_analytics
+
+    sb = _make_broker_supabase_mock(
+        _daily_rows_15(), api_key_id="key-1", asset_class="crypto",
+        existing_flags=existing_flags,
+    )
+    bench = AsyncMock(
+        return_value=(_benchmark_returns_aligned_to_daily_rows_15(), False)
+        if benchmark_available else (None, True)
+    )
+    real_derive = basis_series.derive_basis_series
+    spy = MagicMock(side_effect=real_derive)
+    with patch("services.analytics_runner.get_supabase", return_value=sb), \
+         patch("services.analytics_runner.get_benchmark_returns", new=bench), \
+         patch("services.basis_series.derive_basis_series", new=spy):
+        await run_csv_strategy_analytics("native-unit-uuid")
+    sa = sb.table("strategy_analytics")
+    completed = [
+        c for c in sa.upsert.call_args_list
+        if isinstance(c.args[0], dict)
+        and str(c.args[0].get("computation_status", "")).startswith("complete")
+    ]
+    assert completed, "expected a completed headline upsert"
+    return completed[0].args[0], spy, bench
+
+
+@pytest.mark.asyncio
+async def test_native_unit_row_is_complete_flagged_and_benchmark_free() -> None:
+    """TRACER: a row pre-stamped {csv_source, native_unit: BTC} comes out complete,
+    not warned, carrying native_unit, with no benchmark outage stamp, derive handed
+    NO benchmark, and every benchmark-relative metric null."""
+    payload, spy, bench = await _run_with_flags(
+        {"csv_source": True, "native_unit": "BTC"}
+    )
+    dq = payload["data_quality_flags"]
+    assert dq.get("native_unit") == "BTC"
+    assert payload["computation_status"] == "complete"
+    assert payload["computation_warned"] is False, (
+        "the unit is a property of the account, not a warning (D-08)"
+    )
+    assert "benchmark_unavailable" not in dq and "benchmark_note" not in dq, (
+        "the benchmark omission is deliberate, not an outage; stamping an outage "
+        f"would tell the reader a feed failed. got {dq!r}"
+    )
+    assert spy.call_args.args[1] is None, (
+        "derive_basis_series must receive benchmark_rets=None for a native-unit "
+        "series (BTC series vs USD BTC returns compares two units)"
+    )
+    bench.assert_not_awaited()
+    for key in _BENCHMARK_METRIC_KEYS:
+        assert payload["metrics_json"].get(key) is None, (
+            f"{key} must persist null for a native-unit series, got "
+            f"{payload['metrics_json'].get(key)!r}"
+        )
+
+
+@pytest.mark.asyncio
+async def test_usd_row_keeps_its_benchmark_path() -> None:
+    """CONTROL: the identical run without the flag pairs against the benchmark, so
+    the null assertions above can only pass because of the native_unit branch."""
+    payload, spy, bench = await _run_with_flags({"csv_source": True})
+    assert spy.call_args.args[1] is not None
+    bench.assert_awaited_once()
+    assert "native_unit" not in payload["data_quality_flags"]
+    nested = payload["metrics_json"]
+    assert nested.get("alpha") is not None and nested.get("beta") is not None
+
+
+@pytest.mark.asyncio
+async def test_native_unit_never_promotes_but_a_guard_flag_still_does() -> None:
+    """The guard promotes, the unit does not: native_unit + dust_nav_guard is
+    complete_with_warnings (the warning is the guard's, carried as before)."""
+    payload, _spy, _bench = await _run_with_flags(
+        {"csv_source": True, "native_unit": "BTC", "dust_nav_guard": True}
+    )
+    assert payload["computation_status"] == "complete_with_warnings"
+    assert payload["computation_warned"] is True
+    dq = payload["data_quality_flags"]
+    assert dq.get("dust_nav_guard") is True and dq.get("native_unit") == "BTC"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad", [5, "", None, ["BTC"], True])
+async def test_a_malformed_native_unit_is_not_carried(bad) -> None:  # type: ignore[no-untyped-def]
+    """Present-only and typed: only a non-empty string carries. Anything else is
+    treated as absent, so the USD benchmark path is unchanged."""
+    payload, spy, bench = await _run_with_flags({"csv_source": True, "native_unit": bad})
+    assert "native_unit" not in payload["data_quality_flags"]
+    assert spy.call_args.args[1] is not None
+    bench.assert_awaited_once()
+
+
+# ===========================================================================
 # Phase 105 (BB-02, collapse #2) — the single-key cash SCALAR path joins the ONE
 # shared derive_basis_series route. Two seam guarantees:
 #   D5 ordering — the cash_settlement SERIES row persists BEFORE the scalar/status

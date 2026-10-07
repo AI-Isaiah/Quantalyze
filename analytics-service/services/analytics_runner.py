@@ -210,6 +210,14 @@ class DataQualityFlags(TypedDict, total=False):
     # annotation ONLY — like insufficient_window it NEVER promotes
     # computation_status. Read by Phase-102's disabled-with-reason toggle. ---
     mtm_gated_reason: str
+    # --- Phase 164.6.6.2 (D-08): the unit this account's series is measured in
+    # when it is NOT USD (an MT5 account denominated in BTC). Stamped by the
+    # broker derive's pre-stamp and carried present-only by
+    # run_csv_strategy_analytics, which rebuilds data_quality_flags wholesale.
+    # A property of the account, NEVER a warning: it is deliberately in neither
+    # NAV_TWR_GUARD_KEYS nor ALLOCATED_CAPITAL_GUARD_KEYS, so it can never promote
+    # computation_status or set computation_warned. ---
+    native_unit: str
     # --- sibling-table batch upsert ---
     sibling_kinds_failed: bool
     sibling_kinds_error: str
@@ -1796,14 +1804,46 @@ async def run_csv_strategy_analytics(
                 returns = returns.reindex(dense_index)
                 returns.name = "returns"
 
-            benchmark_rets, benchmark_stale = None, True
-            try:
-                benchmark_rets, benchmark_stale = await get_benchmark_returns("BTC")
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "csv analytics: benchmark fetch failed for %s: %s",
-                    strategy_id, exc,
+            # Phase 76 / 101 / 164.6.6.2: the broker derive PRE-STAMPS flags onto this
+            # row before enqueuing this run, and this run rebuilds data_quality_flags
+            # wholesale, so they are read here and carried below. Read BEFORE the
+            # benchmark fetch: whether the series has a benchmark at all depends on
+            # the `native_unit` pre-stamp.
+            def _read_existing_flags() -> dict[str, Any]:
+                res = (
+                    supabase.table("strategy_analytics")
+                    .select("data_quality_flags")
+                    .eq("strategy_id", strategy_id)
+                    .maybe_single()
+                    .execute()
                 )
+                row = getattr(res, "data", None) or {}
+                return dict(row.get("data_quality_flags") or {})
+
+            existing_flags = await db_execute(_read_existing_flags)
+
+            # D-10 (RESEARCH Pitfall 4): a native-unit series (a BTC MT5 account) is
+            # NOT paired with the benchmark. get_benchmark_returns("BTC") returns USD
+            # BTC returns, so alpha / beta / correlation / information ratio of a
+            # series measured in BTC against them would compare two units and read as
+            # a real number. benchmark_rets stays None, so those metrics persist null.
+            # Only a non-empty string counts as a unit; anything else is absent.
+            _native_unit_raw = existing_flags.get("native_unit")
+            _native_unit: str | None = (
+                _native_unit_raw
+                if isinstance(_native_unit_raw, str) and _native_unit_raw.strip()
+                else None
+            )
+
+            benchmark_rets, benchmark_stale = None, True
+            if _native_unit is None:
+                try:
+                    benchmark_rets, benchmark_stale = await get_benchmark_returns("BTC")
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "csv analytics: benchmark fetch failed for %s: %s",
+                        strategy_id, exc,
+                    )
 
             # Fix A (v1.8): thread the strategy's metrics CONVENTIONS into the SHIPPED
             # factsheet so it matches the harness-validated path — NOT a geometric /
@@ -1865,7 +1905,9 @@ async def run_csv_strategy_analytics(
             )
 
             data_quality_flags: DataQualityFlags = {"csv_source": True}  # M-0657
-            if benchmark_stale or benchmark_rets is None:
+            # A native-unit series has no benchmark BY DESIGN (D-10): that is not an
+            # outage, so it must not stamp the outage flag or its note.
+            if _native_unit is None and (benchmark_stale or benchmark_rets is None):
                 data_quality_flags["benchmark_unavailable"] = True
                 data_quality_flags["benchmark_note"] = "Benchmark data unavailable."
 
@@ -1878,18 +1920,7 @@ async def run_csv_strategy_analytics(
             # Read each pre-existing flag and PRESERVE it (a full _mark_complete upsert
             # would otherwise wipe it) + promote status to complete_with_warnings when
             # ANY fired (MED-2 bridges the DQ-01 guard flags to the broker factsheet).
-            def _read_existing_flags() -> dict[str, Any]:
-                res = (
-                    supabase.table("strategy_analytics")
-                    .select("data_quality_flags")
-                    .eq("strategy_id", strategy_id)
-                    .maybe_single()
-                    .execute()
-                )
-                row = getattr(res, "data", None) or {}
-                return dict(row.get("data_quality_flags") or {})
-
-            existing_flags = await db_execute(_read_existing_flags)
+            # (existing_flags was read above, before the benchmark fetch.)
             # SHOULD-1: the pre-stamped broker warn flags (the NAV/flow/uPnL guard
             # keys derive_broker_dailies stamps onto strategy_analytics) ride the
             # broker→CSV bridge → complete_with_warnings. Iterate the ONE shared
@@ -1929,6 +1960,13 @@ async def run_csv_strategy_analytics(
             _mtm_reason = existing_flags.get("mtm_gated_reason")
             if _mtm_reason and not _was_composite:
                 data_quality_flags["mtm_gated_reason"] = _mtm_reason
+
+            # Phase 164.6.6.2 (D-08): carry the unit PRESENT-ONLY and OUTSIDE both
+            # `_warned` loops above. It tells the reader what the series is measured
+            # in; it is not a defect, so a clean BTC account stays exact-string
+            # "complete" and computation_warned False.
+            if _native_unit is not None:
+                data_quality_flags["native_unit"] = _native_unit
 
             csv_status = "complete_with_warnings" if _warned else "complete"
 
