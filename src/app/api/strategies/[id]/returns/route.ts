@@ -57,7 +57,10 @@ import {
 } from "@/lib/ratelimit";
 import { isUuid } from "@/lib/utils";
 import type { DailyPoint } from "@/lib/portfolio-math-utils";
-import { resolveDailyReturnSeries } from "@/lib/factsheet/resolve-series";
+import {
+  curveMethodFromFlags,
+  resolveDailyReturnSeries,
+} from "@/lib/factsheet/resolve-series";
 import { readBtcCloses } from "@/lib/factsheet/benchmark-source";
 import {
   convertNativeReturnsToUsd,
@@ -363,6 +366,7 @@ export async function GET(
       const analyticsRow = data as {
         daily_returns?: unknown;
         returns_series?: unknown;
+        data_quality_flags?: unknown;
         computation_status?: unknown;
         cagr?: unknown;
         sharpe?: unknown;
@@ -405,6 +409,9 @@ export async function GET(
         ? resolveDailyReturnSeries(
             analyticsRow?.daily_returns,
             analyticsRow?.returns_series,
+            // 164.6.6.2.2 D-05: the curve is read by the row's own method
+            // (parsed here; the raw flags blob never ships).
+            curveMethodFromFlags(analyticsRow?.data_quality_flags),
           )
         : [];
 

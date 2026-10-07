@@ -811,6 +811,39 @@ describe("GET /api/strategies/[id]/returns", () => {
     expect(body.series_state).toBe("available");
   });
 
+  it("R12c — 164.6.6.2.2 D-05: a `simple` curve is served as DIFFERENCES, not ratios", async () => {
+    // 1 + cumsum curve: levels 1.00, 1.05, 0.95, 1.05. Hand-computed:
+    //   1.05 - 1.00 = +0.05 ; 0.95 - 1.05 = -0.10 ; 1.05 - 0.95 = +0.10
+    // Read by ratio (the geometric default) the middle day would be
+    // 0.95 / 1.05 - 1 = -0.0952..., a different number, so the two readings
+    // cannot be confused.
+    STATE.analyticsRow = {
+      daily_returns: null,
+      returns_series: [
+        { date: "2026-01-01", value: 1.0 },
+        { date: "2026-01-02", value: 1.05 },
+        { date: "2026-01-03", value: 0.95 },
+        { date: "2026-01-04", value: 1.05 },
+      ],
+      data_quality_flags: { cumulative_method: "simple" },
+      computation_status: "complete",
+    };
+    const { GET } = await import("./route");
+    const res = await GET(makeRequest(PUBLISHED_ID), ctx(PUBLISHED_ID));
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.daily_returns.map((p: { date: string }) => p.date)).toEqual([
+      "2026-01-02",
+      "2026-01-03",
+      "2026-01-04",
+    ]);
+    expect(body.daily_returns[0].value).toBeCloseTo(0.05, 10);
+    expect(body.daily_returns[1].value).toBeCloseTo(-0.1, 10);
+    expect(body.daily_returns[2].value).toBeCloseTo(0.1, 10);
+    // The raw flags blob never ships.
+    expect(JSON.stringify(body)).not.toContain("cumulative_method");
+  });
+
   it("R13 — SC3: a wealth index starting at exactly 1.0 is NEVER forwarded raw (no +100% day one)", async () => {
     // The failure mode this pins: forwarding the cumprod curve as if it were a
     // return series makes day one read as +100% (value 1.0 = "the strategy
