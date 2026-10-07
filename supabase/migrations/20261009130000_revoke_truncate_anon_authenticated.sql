@@ -71,8 +71,8 @@
 -- `permission denied to change default privileges` and the apply aborts on TEST and
 -- on PROD.
 --
--- Accepted residual (orchestrator decision, provisional pending founder
--- confirmation at verify time): the platform admin role's own default-ACL row on
+-- Accepted residual (orchestrator decision, confirmed by the founder 2026-10-07,
+-- with a read-only PROD detector booked as follow-up): the platform admin role's own default-ACL row on
 -- public still grants TRUNCATE to anon and authenticated on tables THAT ROLE
 -- creates, and postgres cannot alter it. No such table exists today: all 67 public
 -- relations are owned by postgres and none is extension-owned. This migration

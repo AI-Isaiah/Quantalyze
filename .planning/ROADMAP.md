@@ -3689,6 +3689,8 @@ Plans:
 - [ ] 164.9.7-03-PLAN.md — floors and censuses from one full measured run; D-04 BEFORE reading on PROD; TODOS api_keys annotation
 - [ ] 164.9.7-04-PLAN.md — post-merge: apply-test and apply confirmed, D-04 AFTER reading on PROD, founder confirms the residual
 
+⭐ **Founder 2026-10-07 (after review round 1), recorded in CONTEXT D-05/D-06:** the `supabase_admin` residual is CONFIRMED before merge, with a read-only PROD detector booked. TRIGGER and MAINTAIN on `public` (anon/authenticated) go to a new phase inserted after this one. TRUNCATE on `storage.*`/`net.*` is an accepted platform residual (not revocable by `postgres`); this phase's guarantee is schema `public` only.
+
 ### Phase 164.9.6: SUBSETMAIN — a push to main runs only the SQL gate files its PR changed, and a nightly scheduled job runs the full mutation corpus and enforces FILES_FLOOR / ARMS_FLOOR; the split is printed on every run. Founder decision 2026-10-03 after sql-mutation crossed its 20-minute ceiling on push 98f04db16 (prior main runs 15.2-16.9 min); the timeout is never raised again. (INSERTED)
 
 **Goal:** A push to `main` mutates only the SQL gate files its PR changed, plus the gates whose `RED-UNDER-SETUP` loads a changed migration. A push that changes no mutation input does not mutate at all. A new nightly workflow runs the full corpus under its own 45-minute cap and is where the floors are enforced. Every run prints what it covered and why. The push job's 20-minute `timeout-minutes` stays a ceiling and is never raised.
