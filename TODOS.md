@@ -789,6 +789,12 @@ items were dropped, not carried. Categories: **Fix now** / **Fix mid-term** / **
      migration — an auto-applying migration paired with a silently-skipped worker deploy recreates
      the v1.11 wedge verbatim. A migration doing exactly this was written and DELETED unmerged
      on 2026-08-24 after `migration-reviewer` caught it.
+     ⛔ **AMENDED 2026-10-07 (Phase 167.1.2.2 DERIVECRON, D-05):** the
+     `derive-allocator-key-dailies` cron is being re-registered by 167.1.2.2, see its runbook
+     `docs/runbooks/derivecron-go-live.md`, for allocator books (167.1.2 PR C2's reader accepts
+     only the version-2 row it produces). Item (b) remains correct as a statement about the
+     strategy-refresh problem it sits under: the job still does not stamp `strategy_analytics`.
+     The migration prohibition stands.
    - **Shape of the real fix.** A recurring strategy-keyed enqueuer of `process_key_long` for
      ledger-backed venues (mt5/sfox/deribit), which chains → `derive_broker_dailies` (strategy-mode)
      → `compute_analytics_from_csv` → `strategy_analytics`. ⚠️ Carries the v1.11 worker-wedge risk
