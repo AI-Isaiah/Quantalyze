@@ -1893,6 +1893,249 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
   });
 
   // -------------------------------------------------------------------------
+  // Phase 164.6.6.2 plan 11 (D-18, D-22, D-23) — a BTC strategy enters the blend
+  // in USD, converted ONCE, server-side. The composer holds no conversion code:
+  // a lazily-added leg blends the returns route's `daily_returns_usd`, a book leg
+  // blends the dashboard payload's already-converted series, and neither is ever
+  // converted again here.
+  //
+  // Oracle rule (money math): every expected value is a hand-computed literal.
+  // (1.1 x 66000) / (1.0 x 60000) - 1 = 0.21, so a BTC-unit day of +10% on a day
+  // BTC itself rose 10% is +21% in USD. The expected 0.21 is NEVER produced by
+  // calling the converter; a test that ran the implementation's own formula could
+  // not fail when that formula drifted.
+  // -------------------------------------------------------------------------
+  const NATIVE_RAW = [
+    { date: "2026-02-01", value: 0.05 },
+    { date: "2026-02-02", value: 0.1 },
+  ];
+  const NATIVE_USD = [{ date: "2026-02-02", value: 0.21 }];
+
+  /** Stub fetch so the lazy returns route answers with `body` for LAZY_ID. */
+  function stubLazyReturns(body: Record<string, unknown>) {
+    const fetchMock = vi.fn((url: string) => {
+      if (String(url).startsWith("/api/benchmark/btc/prices")) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => EMPTY_BTC_CLOSES,
+        });
+      }
+      if (String(url).includes(`/api/strategies/${LAZY_ID}/returns`)) {
+        return Promise.resolve({ ok: true, status: 200, json: async () => body });
+      }
+      return Promise.resolve({ ok: true, status: 200, json: async () => ({}) });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    return fetchMock;
+  }
+
+  /** Add LAZY_ID and wait until its returns fetch has been made and settled. */
+  async function addLazyLeg(fetchMock: ReturnType<typeof stubLazyReturns>) {
+    addStrategy({
+      id: LAZY_ID,
+      name: "Lazy Native Strat",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+    await waitFor(() => {
+      expect(
+        fetchMock.mock.calls.some((c) =>
+          String(c[0]).includes(`/api/strategies/${LAZY_ID}/returns`),
+        ),
+      ).toBe(true);
+    });
+    await waitFor(() => {
+      expect(screen.queryByTestId("scenario-loading-returns")).toBeNull();
+    });
+  }
+
+  function renderEmptyBook() {
+    render(
+      <ScenarioComposer
+        payload={makePayload()}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+  }
+
+  it("T_BTC_LAZY_USD a lazily-added BTC leg blends the route's daily_returns_usd, never the raw BTC daily_returns", async () => {
+    const fetchMock = stubLazyReturns({
+      daily_returns: NATIVE_RAW,
+      returns_unit: "BTC",
+      daily_returns_usd: NATIVE_USD,
+    });
+    renderEmptyBook();
+    await addLazyLeg(fetchMock);
+    await waitFor(() => {
+      expect(latestReturnsLookup()[LAZY_ID]).toEqual(NATIVE_USD);
+    });
+  });
+
+  it("T_BTC_LAZY_STALE a lazily-added BTC leg whose body lacks daily_returns_usd (stale deploy) contributes [] and is warm-up-gated, never the raw 0.10", async () => {
+    const fetchMock = stubLazyReturns({
+      daily_returns: NATIVE_RAW,
+      returns_unit: "BTC",
+    });
+    renderEmptyBook();
+    await addLazyLeg(fetchMock);
+    expect(latestReturnsLookup()[LAZY_ID]).toEqual([]);
+  });
+
+  it("T_BTC_LAZY_UNPRICED a native leg with daily_returns_usd [] (no price source) contributes [], not the raw BTC series", async () => {
+    const fetchMock = stubLazyReturns({
+      daily_returns: NATIVE_RAW,
+      returns_unit: "BTC",
+      daily_returns_usd: [],
+    });
+    renderEmptyBook();
+    await addLazyLeg(fetchMock);
+    expect(latestReturnsLookup()[LAZY_ID]).toEqual([]);
+  });
+
+  it("T_BTC_LAZY_MALFORMED_UNIT a malformed returns_unit (lowercase) degrades to a USD leg: the raw series passes through unchanged", async () => {
+    const fetchMock = stubLazyReturns({
+      daily_returns: NATIVE_RAW,
+      returns_unit: "btc",
+      daily_returns_usd: NATIVE_USD,
+    });
+    renderEmptyBook();
+    await addLazyLeg(fetchMock);
+    await waitFor(() => {
+      expect(latestReturnsLookup()[LAZY_ID]).toEqual(NATIVE_RAW);
+    });
+  });
+
+  it("T_BTC_LAZY_USD_LEG a USD lazy leg (returns_unit null, daily_returns_usd null) is identical to today: the route's daily_returns", async () => {
+    const fetchMock = stubLazyReturns({
+      daily_returns: LAZY_SERIES,
+      returns_unit: null,
+      daily_returns_usd: null,
+    });
+    renderEmptyBook();
+    await addLazyLeg(fetchMock);
+    await waitFor(() => {
+      expect(latestReturnsLookup()[LAZY_ID]).toEqual(LAZY_SERIES);
+    });
+  });
+
+  it("T_BTC_LAZY_PURGE remove + re-add purges the fetched unit and USD series: while the retry is in flight the leg is [], not the first answer", async () => {
+    const first = stubLazyReturns({
+      daily_returns: NATIVE_RAW,
+      returns_unit: "BTC",
+      daily_returns_usd: NATIVE_USD,
+    });
+    renderEmptyBook();
+    await addLazyLeg(first);
+    await waitFor(() => {
+      expect(latestReturnsLookup()[LAZY_ID]).toEqual(NATIVE_USD);
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: /Remove from scenario/i }),
+    );
+    // The retry never answers while we look. A leaked unit + USD series would
+    // keep blending the PREVIOUS answer here; a clean purge is [] (warm-up-gated).
+    const retry = vi.fn((url: string) => {
+      if (String(url).startsWith("/api/benchmark/btc/prices")) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => EMPTY_BTC_CLOSES,
+        });
+      }
+      return new Promise(() => {});
+    });
+    vi.stubGlobal("fetch", retry);
+    addStrategy({
+      id: LAZY_ID,
+      name: "Lazy Native Strat",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+    await waitFor(() => {
+      expect(
+        retry.mock.calls.some((c) =>
+          String(c[0]).includes(`/api/strategies/${LAZY_ID}/returns`),
+        ),
+      ).toBe(true);
+    });
+    expect(latestReturnsLookup()[LAZY_ID]).toEqual([]);
+  });
+
+  describe("book legs (the payload series is ALREADY USD)", () => {
+    // Two points: a second conversion pairs day 2 against BTC's own +10% and
+    // would return 1.21 x 1.10 - 1 = 0.331 in place of the payload's 0.21.
+    const BOOK_USD = [
+      { date: "2026-02-01", value: 0.05 },
+      { date: "2026-02-02", value: 0.21 },
+    ];
+    const BTC_CLOSES = {
+      prices: [
+        { date: "2026-02-01", close: 60_000 },
+        { date: "2026-02-02", close: 66_000 },
+      ],
+      dropped: [],
+      through: "2026-02-02",
+    };
+
+    it("T_BTC_BOOK_ONCE a BTC book leg is blended as the payload delivered it: not converted a second time, even with BTC closes in hand", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn((url: string) =>
+          Promise.resolve({
+            ok: true,
+            status: 200,
+            json: async () =>
+              String(url).startsWith("/api/benchmark/btc/prices")
+                ? BTC_CLOSES
+                : {},
+          }),
+        ),
+      );
+      const payload = makePayload({
+        strategies: [
+          {
+            strategy: {
+              id: BOOK_ID,
+              disclosure_tier: "verified",
+              returns_unit: "BTC",
+              strategy_analytics: {
+                cagr: 0.1,
+                sharpe: 1.0,
+                daily_returns: BOOK_USD,
+              },
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            } as any,
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          } as any,
+        ],
+      });
+      render(
+        <ScenarioComposer
+          payload={payload}
+          allocatorId={ALLOCATOR_A}
+          allocatorMandate={null}
+        />,
+      );
+      addStrategy({
+        id: BOOK_ID,
+        name: "Native Book Strat",
+        markets: ["binance"],
+        strategy_types: ["momentum"],
+      });
+      // Let the benchmark closes land in the composer's own `btc` state, so a
+      // client-side conversion would have a window to convert with.
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(latestReturnsLookup()[BOOK_ID]).toEqual(BOOK_USD);
+    });
+  });
+
+  // -------------------------------------------------------------------------
   // WR-04 (Phase 29 review) — opening a saved portfolio whose draft is not
   //   JSON-safe (a BigInt throws in JSON.stringify) must route to the honest
   //   "older format" reset notice rather than letting the TypeError escape (or

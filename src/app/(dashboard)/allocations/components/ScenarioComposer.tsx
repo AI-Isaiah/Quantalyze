@@ -104,6 +104,7 @@ import type {
   ScenarioMandatePayload,
 } from "@/lib/factsheet/types";
 import { normalizeDailyReturns } from "@/lib/portfolio-math-utils";
+import { parseReturnsUnit } from "@/lib/factsheet/returns-unit";
 import { deriveBlendPanels } from "@/lib/scenario-blend-adapter";
 import {
   computeDiversification,
@@ -1254,6 +1255,24 @@ export function ScenarioComposer({
   const [addedProvenanceById, setAddedProvenanceById] = useState<
     Record<string, { trust_tier: string | null; is_composite: boolean }>
   >({});
+  // Phase 164.6.6.2 plan 11 (D-18, D-22, D-23) — the lazily-fetched returns UNIT
+  // and the server-converted USD series for a drawer-added, NON-book strategy,
+  // keyed by id. Exactly the addedProvenanceById lifecycle: written by
+  // fetchAddedReturns' settle from the widened /api/strategies/[id]/returns
+  // response, purged in handleRemoveAdded (a re-add starts clean).
+  //
+  // The conversion happens ONCE, server-side, in the one `convertNativeReturnsToUsd`
+  // on the shared DB-only price window (plan 09), so this composer holds no
+  // conversion code of its own and its blend input is the same function's output
+  // as the dashboard payload's and the shared-scenario resolver's. A native leg
+  // therefore blends `addedUsdReturnsById`, NEVER `addedReturnsById` (the raw
+  // BTC-unit series, kept only because it is the route's `daily_returns`).
+  const [addedReturnsUnitById, setAddedReturnsUnitById] = useState<
+    Record<string, string | null>
+  >({});
+  const [addedUsdReturnsById, setAddedUsdReturnsById] = useState<
+    Record<string, DailyPoint[]>
+  >({});
   // Phase 162 / HONEST-05 — the lazily-fetched headline metric pair (cagr +
   // sharpe) for a drawer-added, NON-book strategy, keyed by id. Exactly the
   // addedProvenanceById lifecycle: written by fetchAddedReturns' settle from the
@@ -1595,8 +1614,14 @@ export function ScenarioComposer({
       provenance: { trust_tier: string | null; is_composite: boolean },
       seriesState: SeriesState,
       metrics: { cagr: number | null; sharpe: number | null },
+      native: { unit: string | null; usdSeries: DailyPoint[] },
     ) => {
       setAddedReturnsById((prev) => ({ ...prev, [id]: series }));
+      // 164.6.6.2 plan 11 — the unit and the server-converted series, beside the
+      // raw one. Written unconditionally (a USD leg writes null / []), so the
+      // settled entry is always a complete answer and a purge is a clean slate.
+      setAddedReturnsUnitById((prev) => ({ ...prev, [id]: native.unit }));
+      setAddedUsdReturnsById((prev) => ({ ...prev, [id]: native.usdSeries }));
       setAddedAssetClassById((prev) => ({ ...prev, [id]: assetClass }));
       // CONSTIT-02 — record the drawer-added leg's provenance beside asset_class.
       setAddedProvenanceById((prev) => ({ ...prev, [id]: provenance }));
@@ -1654,6 +1679,8 @@ export function ScenarioComposer({
           series_state?: unknown;
           cagr?: unknown;
           sharpe?: unknown;
+          returns_unit?: unknown;
+          daily_returns_usd?: unknown;
         }) => {
           // A 200 with a non-array body is a malformed/failed response, NOT a
           // genuine empty series — treat it as a retryable failure (WR-01).
@@ -1696,6 +1723,16 @@ export function ScenarioComposer({
                 ? d.sharpe
                 : null,
           };
+          // 164.6.6.2 plan 11 (D-18, T-164.6.6.2-34) — the unit goes through the
+          // ONE validator at this client boundary: a stale or malformed value
+          // (lowercase, wrong type, absent) degrades to null, i.e. a USD leg.
+          // The USD series goes through the same `normalizeDailyReturns` the raw
+          // series' route boundary uses; absent or malformed -> [] (warm-up-gated
+          // out, T-164.6.6.2-32), never the raw BTC-unit series.
+          const native = {
+            unit: parseReturnsUnit(d.returns_unit),
+            usdSeries: normalizeDailyReturns(d.daily_returns_usd),
+          };
           // A genuine 200 with a real array (including an empty one) settles. An
           // empty array here means the strategy legitimately has no published
           // returns yet — distinct from a failure, so it is cached, not retried.
@@ -1705,6 +1742,7 @@ export function ScenarioComposer({
             provenance,
             seriesState,
             metrics,
+            native,
           );
         },
       )
@@ -2514,11 +2552,31 @@ export function ScenarioComposer({
         // `raw as unknown as DailyPoint[]` cast that silently dropped the
         // year-keyed shape to [].
         const fromBook = normalizeBookReturns(raw);
-        map[a.id] = fromBook ?? addedReturnsById[a.id] ?? [];
+        // 164.6.6.2 plan 11 (D-18, D-22, D-23) — the conversion happens ONCE,
+        // server-side, on the shared price window; this memo never converts and
+        // never blends a raw BTC-unit series.
+        //   - a BOOK leg: `fromBook` as delivered. The dashboard payload's
+        //     `daily_returns` is ALREADY USD (plan 09), so converting it again
+        //     here would apply BTC's own return twice.
+        //   - a lazy NATIVE leg: the route's `daily_returns_usd`; absent (stale
+        //     deploy) or `[]` (unpriced) is `[]`, warm-up-gated out like any leg
+        //     without a series (T-164.6.6.2-32).
+        //   - a lazy USD leg: the route's `daily_returns`, as before.
+        const lazy =
+          addedReturnsUnitById[a.id] != null
+            ? (addedUsdReturnsById[a.id] ?? [])
+            : addedReturnsById[a.id];
+        map[a.id] = fromBook ?? lazy ?? [];
       }
       return map;
     },
-    [scenario.draft.addedStrategies, strategyById, addedReturnsById],
+    [
+      scenario.draft.addedStrategies,
+      strategyById,
+      addedReturnsById,
+      addedReturnsUnitById,
+      addedUsdReturnsById,
+    ],
   );
 
   // Phase 147 / SCEN-01 — the per-row `series_state` the chip + note render
@@ -2636,6 +2694,19 @@ export function ScenarioComposer({
       setAddedProvenanceById((prev) => {
         if (!(id in prev)) return prev;
         const { [id]: _dropProv, ...rest } = prev;
+        return rest;
+      });
+      // 164.6.6.2 plan 11 — purge the fetched unit and USD series identically,
+      // or a re-add would blend (or label) the PREVIOUS answer while the retry is
+      // still in flight.
+      setAddedReturnsUnitById((prev) => {
+        if (!(id in prev)) return prev;
+        const { [id]: _dropUnit, ...rest } = prev;
+        return rest;
+      });
+      setAddedUsdReturnsById((prev) => {
+        if (!(id in prev)) return prev;
+        const { [id]: _dropUsd, ...rest } = prev;
         return rest;
       });
       // SCEN-01 — purge the fetched series_state identically, or a re-add would
