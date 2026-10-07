@@ -2730,3 +2730,225 @@ def test_c3r2_keyset_read_survives_a_server_cap_below_its_page_size() -> None:
     assert pairs == sorted(
         (k, _race_day(i)) for k in _RACE_KEYS for i in range(1, _RACE_DAYS + 1)
     ), pairs
+
+
+# ---------------------------------------------------------------------------
+# Phase 164.6.6.2 plan 04 (D-03, D-13, D-14) — a non-USD MT5 KEY is kept out of the
+# USD allocator curve by name.
+#
+# WHY: the allocator curve is a USD sum. A BTC key's equity is 0.11 BTC, not $0.11,
+# and its returns are in BTC. Adding either as dollars understates the book by the
+# whole account; dropping the key as "DROPPED_KEY" degrades the whole curve for a key
+# that is perfectly healthy. The honest answer is neither: omit it, say why, keep the
+# other keys' curve trustworthy.
+# ---------------------------------------------------------------------------
+
+from contextlib import ExitStack  # noqa: E402
+from unittest.mock import AsyncMock, MagicMock, patch  # noqa: E402
+
+from tests.test_mt5_derive_branch import (  # noqa: E402
+    _BTC_SCALE,
+    _FakeMt5Transport,
+    _btc_account,
+    _canonical_deals,
+    _reset_mt5_terminal_locks,  # noqa: F401  (autouse fixture: clears the terminal registry)
+    _scaled_deals,
+)
+from tests.test_mt5_derive_branch import _build_ctx as _mt5_build_ctx  # noqa: E402
+
+_KEY_JOB = {"id": "j-mt5-key", "kind": "derive_broker_dailies", "api_key_id": "key-mt5"}
+
+
+async def _derive_mt5_key(
+    monkeypatch: pytest.MonkeyPatch,
+    account: dict,
+    *,
+    deals: list[dict] | None = None,
+    stored: str | None = None,
+):
+    """Run the REAL key-mode derive over the offline MT5 transport double."""
+    from services.job_worker import run_derive_broker_dailies_job
+
+    monkeypatch.setenv("MT5_ENABLED", "true")
+    transport = _FakeMt5Transport(
+        account=account, deals=deals if deals is not None else _scaled_deals(_BTC_SCALE)
+    )
+    ctx, capture = _mt5_build_ctx(transport, asset_class="traditional")
+    if stored is not None:
+        ctx.key_row["account_currency"] = stored
+    patchers = [
+        patch(
+            "services.job_worker._allocator_key_preflight",
+            new=AsyncMock(return_value=ctx),
+        ),
+        patch("services.job_worker.aclose_exchange", new=AsyncMock()),
+        patch(
+            "services.job_worker.db_execute",
+            new=AsyncMock(side_effect=lambda fn: fn()),
+        ),
+    ]
+    with ExitStack() as stack:
+        for p in patchers:
+            stack.enter_context(p)
+        result = await run_derive_broker_dailies_job(_KEY_JOB)
+    return result, capture
+
+
+def _api_keys_updates(capture: dict) -> list[dict]:
+    return [p for (name, p) in capture["updates"] if name == "api_keys"]
+
+
+@pytest.mark.asyncio
+async def test_key_mode_btc_key_stores_its_unit_and_a_null_native_anchor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """TRACER (D-03, D-13, D-14): a key-mode derive of a BTC MT5 key runs no combine,
+    writes no per-key series, and issues the SAME api_keys UPDATE the strategy-mode path
+    does, so D-03 has a stored code to compare on the next read. Its key_inputs row names
+    the reason, never a USD anchor and never a BTC flow."""
+    result, capture = await _derive_mt5_key(monkeypatch, _btc_account())
+
+    assert result.outcome.name == "DONE", (result.error_kind, result.error_message)
+    assert not any(u[0] == "csv_daily_returns" for u in capture["upserts"]), (
+        "a BTC key must not write a per-key series (its returns are BTC, the table is USD)"
+    )
+    assert _api_keys_updates(capture) == [
+        {
+            "account_currency": "BTC",
+            "account_balance_native": 0.1105,
+            "account_balance_usdt": None,
+        }
+    ]
+    payload = _persisted_ki_payload(capture)
+    assert payload["anchor_usd"] is None
+    assert payload["anchor_null_reason"] == "native_unit"
+    assert payload["flows"] == [], "BTC flows must never enter the USD curve"
+    assert payload["venue"] == "mt5"
+
+
+@pytest.mark.asyncio
+async def test_key_mode_unsupported_currency_is_skipped_like_a_native_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D-13: any non-USD key is skipped honestly (CONTEXT 'Recorded 2026-10-07 after the
+    plan check'). EUR has no floors, so the strategy path refuses it by name; the KEY path
+    has no series to refuse, so it stores the code and the null anchor instead."""
+    account = _btc_account("EUR")
+    account["equity"], account["balance"] = 12_345.67, 12_345.67
+    result, capture = await _derive_mt5_key(monkeypatch, account, deals=_canonical_deals())
+
+    assert result.outcome.name == "DONE", (result.error_kind, result.error_message)
+    assert not any(u[0] == "csv_daily_returns" for u in capture["upserts"])
+    assert _api_keys_updates(capture) == [
+        {
+            "account_currency": "EUR",
+            "account_balance_native": 12_345.67,
+            "account_balance_usdt": None,
+        }
+    ]
+    payload = _persisted_ki_payload(capture)
+    assert payload["anchor_usd"] is None and payload["anchor_null_reason"] == "native_unit"
+
+
+@pytest.mark.asyncio
+async def test_key_mode_blank_currency_is_still_transient_and_writes_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Plan 03's blank arm applies to key-mode too: a terminal that has not reported a
+    currency is a read fault, not a verdict, so nothing is guessed and nothing written."""
+    result, capture = await _derive_mt5_key(monkeypatch, _btc_account(""))
+    assert result.outcome.name == "FAILED" and result.error_kind == "transient"
+    assert capture["upserts"] == [] and capture["updates"] == []
+
+
+@pytest.mark.asyncio
+async def test_key_mode_btc_key_with_a_nonfinite_equity_persists_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The unit is persisted only with an equity step (c) already validated. A NaN equity
+    refuses on step (c)'s own arm BEFORE the skip, so no 'account_balance_native: NaN' can
+    reach api_keys (Postgres would reject it and loop the job)."""
+    account = _btc_account()
+    account["equity"] = float("nan")
+    result, capture = await _derive_mt5_key(monkeypatch, account)
+    assert result.outcome.name == "FAILED" and result.error_kind == "permanent"
+    assert capture["updates"] == [], capture["updates"]
+    assert not any(u[0] == "allocator_equity_derived" for u in capture["upserts"])
+
+
+@pytest.mark.asyncio
+async def test_key_mode_a_changed_currency_refuses_and_proves_the_write_gave_d03_a_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D-03 in key-mode: stored BTC (what the key-mode skip above writes), now read as USD.
+    ERROR-class refusal, transient, nothing written: the stored series is kept."""
+    account = {"equity": 110_500.0, "balance": 110_500.0, "currency": "USD", "login": 123456}
+    result, capture = await _derive_mt5_key(
+        monkeypatch, account, deals=_canonical_deals(), stored="BTC"
+    )
+    assert result.outcome.name == "FAILED" and result.error_kind == "transient"
+    assert capture["upserts"] == [] and capture["updates"] == []
+
+
+@pytest.mark.asyncio
+async def test_key_mode_usd_key_is_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
+    """CONTROL: a USD-family key derives its per-key series and a real USD anchor exactly
+    as before this plan. No unit write in key-mode (strategy-mode owns it), no reason."""
+    account = {"equity": 110_500.0, "balance": 110_500.0, "currency": "USD", "login": 123456}
+    result, capture = await _derive_mt5_key(monkeypatch, account, deals=_canonical_deals())
+    assert result.outcome.name == "DONE", (result.error_kind, result.error_message)
+    csv = [u for u in capture["upserts"] if u[0] == "csv_daily_returns"]
+    assert csv and all(r["api_key_id"] == "key-mt5" for u in csv for r in u[1])
+    assert capture["updates"] == []
+    payload = _persisted_ki_payload(capture)
+    assert payload["anchor_usd"] == 110_500.0
+    assert payload["anchor_null_reason"] is None
+
+
+# --- compose: the omit rule ------------------------------------------------
+
+
+def _seed_native_sibling(*, with_returns: bool) -> dict[str, list[dict]]:
+    seed = _seed_null_anchor_sibling("native_unit")
+    if with_returns:
+        # A BTC key whose per-key series pre-dates this plan (the interim key-mode path
+        # wrote one): it must be omitted too, not turned into NO_ANCHOR + DROPPED_KEY.
+        seed["csv_daily_returns"] = seed["csv_daily_returns"] + [
+            {"api_key_id": "key-B", "allocator_id": "alloc-nullsib",
+             "date": f"2026-03-0{i + 1}", "daily_return": 0.01}
+            for i in range(3)
+        ]
+    return seed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("with_returns", [False, True])
+async def test_compose_omits_a_native_unit_key_without_degrading(
+    with_returns: bool,
+) -> None:
+    """D-13: the book stays trustworthy over the USD keys, nothing blocks, and the omission
+    is named by a benign flag (T-164.6.6.2-15) so it is never silent."""
+    from services.job_worker import run_derive_allocator_equity_job
+
+    fake = _FakeSupabase(_seed_native_sibling(with_returns=with_returns))
+    job = {"id": "j-nat", "kind": "derive_allocator_equity", "allocator_id": "alloc-nullsib"}
+    with patch("services.job_worker.get_supabase", return_value=fake):
+        result = await run_derive_allocator_equity_job(job)
+
+    assert result.outcome.name == "DONE"
+    curve = [u for u in fake.upserts if _is_equity_curve_upsert(u[1])]
+    assert len(curve) == 1
+    payload = _extract_payload(curve[0][1])
+    assert payload["is_trustworthy"] is True, payload["degrade_reasons"]
+    assert "dropped_key" not in payload["degrade_reasons"]
+    assert "no_anchor" not in payload["degrade_reasons"]
+    assert "native_unit_key_omitted" in payload["flags"]
+
+
+def test_native_unit_is_not_a_no_capital_anchor_reason() -> None:
+    """A funded BTC account has capital. Putting 'native_unit' in this set would let an
+    empty positions poll PROVE an allocator's BTC account was zero and write a $0 row."""
+    from services.equity_reconstruction import _NO_CAPITAL_ANCHOR_REASONS
+
+    assert "native_unit" not in _NO_CAPITAL_ANCHOR_REASONS
+    assert _NO_CAPITAL_ANCHOR_REASONS == frozenset({"dust", "nonpositive"})

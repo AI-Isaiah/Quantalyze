@@ -326,6 +326,10 @@ function unavailableSentence(anchor: DepartedAnchor): string {
       return "History not available: the last balance read before this key stopped was too small to measure its history from.";
     case "flow_drop":
       return "History not available: a deposit or withdrawal on this key could not be read, so its history cannot be measured from its last balance.";
+    case "native_unit":
+      // 164.6.6.2 D-13: the derive stamps this for an account denominated in a non-USD
+      // currency (a BTC MT5 account). The read worked; the balance simply is not dollars.
+      return "History not available: this account is measured in its own currency, not USD, so it cannot be added to a USD history.";
     default:
       return "History not available: the last balance read before this key stopped gave no usable balance to measure its history from.";
   }

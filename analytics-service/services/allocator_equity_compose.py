@@ -67,6 +67,12 @@ _MISSING_RETURN_INSIDE_COVERAGE = "missing_return_inside_coverage"
 # Benign (167.1.2 plan 09, D-05). A departed key's history is in the book up to
 # its end day. Its leaving is an exit, never a return and never a carried level.
 _DEPARTED_HISTORY_INCLUDED = "departed_history_included"
+# Benign (164.6.6.2 D-13). A key whose account is measured in its own non-USD unit (a BTC
+# MT5 account) has a null anchor with reason ``native_unit`` and is left out of the USD
+# book. The omission is named, never silent; the reason shown on the dashboard is the
+# positions poll's ``MT5_NON_USD_NOTE``.
+_NATIVE_UNIT_KEY_OMITTED = "native_unit_key_omitted"
+_NATIVE_UNIT_REASON = "native_unit"
 
 
 class PortfolioReturns(NamedTuple):
@@ -308,6 +314,13 @@ def compose_allocator_equity(
     key must not pin the allocator to legacy), any other reason (or a MISSING token,
     the safe default) DEGRADES the allocator (DROPPED_KEY → legacy fallback).
 
+    164.6.6.2 D-13: a null-anchor key whose reason is ``'native_unit'`` (an account measured
+    in its own non-USD currency) is omitted from BOTH the unanchored-return and the
+    fourth-bucket rules above, whether or not it has a return series, and the benign flag
+    ``native_unit_key_omitted`` records it. It adds no degrade reason, so the book over the
+    USD keys stays trustworthy. The reason a viewer sees for the missing account is the
+    positions poll's ``MT5_NON_USD_NOTE``, not this flag.
+
     ``degrade_reasons`` (optional) are caller-supplied reasons the caller found
     before composing (167.1.2 C2 round 2: a shared account's history that could
     not be stitched). They join the payload's reasons like the core's own, so a
@@ -338,8 +351,23 @@ def compose_allocator_equity(
     # stayed True on an understated curve.
     anchored_keys = [k for k in returns_by_key if anchors_by_key.get(k) is not None]
     # A return-bearing key with no anchor (allocator_equity_curve drops it too).
+    # D-13: a native-unit key is OMITTED from the USD book by name, before either degrade
+    # bucket sees it. Its return series (if any, e.g. one written before the key-mode skip
+    # existed) is in BTC, so blending it would add BTC as dollars; its capital is real but
+    # not dollars, so calling it a "dropped key" would degrade a curve that is correct over
+    # the USD keys. Only a NULL anchor is omitted: a key that somehow carries a USD anchor
+    # is a different fact and keeps the existing rules.
+    native_unit_keys = {
+        k
+        for k, a in anchors_by_key.items()
+        if a is None and _null_reasons.get(k) == _NATIVE_UNIT_REASON
+    }
+    if native_unit_keys:
+        flag_tokens.add(_NATIVE_UNIT_KEY_OMITTED)
     unanchored_return_keys = [
-        k for k in returns_by_key if anchors_by_key.get(k) is None
+        k
+        for k in returns_by_key
+        if anchors_by_key.get(k) is None and k not in native_unit_keys
     ]
     # An anchored key (real capital) with NO return series — cannot be blended, so
     # its capital is missing from the $-total. Iterate anchors_by_key so it is seen.
@@ -376,7 +404,9 @@ def compose_allocator_equity(
     null_anchor_without_returns = [
         k
         for k in anchors_by_key
-        if anchors_by_key.get(k) is None and k not in returns_by_key
+        if anchors_by_key.get(k) is None
+        and k not in returns_by_key
+        and k not in native_unit_keys
     ]
     for k in null_anchor_without_returns:
         if _null_reasons.get(k) == "dust":
