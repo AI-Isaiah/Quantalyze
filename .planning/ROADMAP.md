@@ -3687,12 +3687,16 @@ Plans:
 2. Every install step carries its own `timeout-minutes`, so a hang ends the step, not the job.
 3. Where the runner image already ships the tool (psql measured on the runner first), the install is skipped, with the measurement recorded.
 4. The `sql-mutation` ↔ `sql-mutation-nightly` byte-parity pin and every other ci.yml contract test stay green; the 20-min sql-mutation ceiling is not raised.
-**Requirements**: TBD
+**Requirements**: SC-1, SC-2, SC-3, SC-4 (the four success criteria above, in order)
 **Depends on:** none (ships first in the merge queue, founder 2026-10-07)
-**Plans:** 0 plans
+**Plans:** 5 plans
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 164.9.8 to break down)
+- [ ] 164.9.8-01-PLAN.md — tracer: `scripts/ci-apt.sh` (wall-clock-bounded, retried, psql skip, `--self-test`) wired into ci.yml sql-tests (wave 1)
+- [ ] 164.9.8-02-PLAN.md — ci.yml remaining psql sites, Playwright step limits, `Provision pg_cron` byte-equal in ci.yml and the nightly (wave 2)
+- [ ] 164.9.8-03-PLAN.md — supabase-migrate, test-restore, mutex-probe, prod-prober, nightly.yml; mutex suffix kept identical (wave 2)
+- [ ] 164.9.8-04-PLAN.md — glob-census guard test, neutered RED and restored from a byte backup (wave 3)
+- [ ] 164.9.8-05-PLAN.md — ship: version re-picked from origin/main, CHANGELOG, PR bound by check count, D-04 runner measurement recorded (wave 4)
 
 ### Phase 164.9.7: TRUNCATEREVOKE — anon and authenticated no longer hold TRUNCATE on public tables (measured read-only on PROD 2026-10-03: anon 56 of 63 tables, authenticated 59, api_keys included; RLS never covers TRUNCATE). One migration revokes it and the default privilege; migration-reviewer + rls-policy-auditor + silent-failure-hunter before merge, since merges auto-apply to PROD. (INSERTED)
 
