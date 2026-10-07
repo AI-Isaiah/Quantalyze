@@ -2915,6 +2915,8 @@ Plans:
 - [ ] 164.6.6.3.5-12-PLAN.md — last strays, gate GREEN and wired into `npm run lint`, registered; no-email-in-copy test (wave 4)
 - [ ] 164.6.6.3.5-13-PLAN.md — post-deploy: schema applied, live 308 and contact check, LIVE-IMPACT (D-09), PROD `NEXT_PUBLIC_SITE_URL` to xyz (D-11) (wave 5, non-autonomous)
 
+⭐ **D-17 (founder 2026-10-07, after review):** the founder learns of a new contact message from an unread-count badge on the admin sidebar's leads entry (no email service); a skipped founder email is recorded as not sent, never as a success; the one-business-day reply promise stays. Recorded in the phase CONTEXT.
+
 ### Phase 164.6.6.3.4: STATUSBRIDGE — a strategy's analytics status reads failed only for an analytics failure: a failed process_key_long is superseded by its later successful follow-on chain, and side kinds that produce no analytics (sync_funding) never pin the analytics status (INSERTED)
 
 Booked 2026-10-06 (founder, via AskUserQuestion). Found by a read-only PROD investigation of AI-FX-35, whose
