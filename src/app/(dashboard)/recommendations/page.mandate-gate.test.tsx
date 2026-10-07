@@ -565,3 +565,20 @@ describe("SC8 · /recommendations — every recommended record states where its 
     expect(cols.replace("returns_series->-1->>date", "")).not.toContain("returns_series");
   });
 });
+
+describe("164.6.6.3.1 / D-07 · /recommendations footer and batch chip", () => {
+  it("D-07: /recommendations renders no page-level disclaimer (DashboardChrome owns the one footer)", async () => {
+    await renderPage();
+    expect(screen.queryAllByTestId("disclaimer")).toHaveLength(0);
+  });
+
+  it("D-07: the batch chip carries the batch date", async () => {
+    await renderPage();
+    // The label span is "Batch:"; its parent is the pill. The freshness word
+    // is not asserted: the fixture is stale against a real clock.
+    const pill = screen.getByText("Batch:").parentElement as HTMLElement;
+    const text = pill.textContent ?? "";
+    expect(text).toContain("Sep 25");
+    expect(text).toContain("\u00b7");
+  });
+});

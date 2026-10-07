@@ -7,7 +7,6 @@ import { PortfolioKpiPanel } from "@/components/portfolio/PortfolioKpiPanel";
 import { StrategyBreakdownTable } from "@/components/portfolio/StrategyBreakdownTable";
 import { AlertsList } from "@/components/portfolio/AlertsList";
 import { MorningBriefing } from "@/components/portfolio/MorningBriefing";
-import { Disclaimer } from "@/components/ui/Disclaimer";
 import { FreshnessBadge } from "@/components/strategy/FreshnessBadge";
 import { Skeleton, SkeletonText } from "@/components/ui/Skeleton";
 import {
@@ -705,7 +704,6 @@ export default async function PortfolioDashboardPage({
           btcCloses={btcCloses}
         />
       )}
-      <Disclaimer />
     </>
   );
 }

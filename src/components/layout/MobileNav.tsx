@@ -84,7 +84,10 @@ export function MobileNav({
                   </span>
                 )}
               </span>
-              {item.label}
+              {/* D-08: wraps whole on up to two centred lines. leading-tight
+                  (1.25) keeps two 10px lines inside the 64px bar reservation;
+                  no truncate, line-clamp or overflow-hidden. */}
+              <span className="text-center leading-tight">{item.label}</span>
             </>
           );
 
@@ -98,7 +101,7 @@ export function MobileNav({
                 type="button"
                 onClick={() => onNavAction?.(item.action)}
                 className={cn(
-                  "relative flex flex-1 flex-col items-center justify-center gap-0.5 min-h-[44px] py-2 text-fixed-10 font-medium text-text-muted transition-colors",
+                  "relative flex min-w-0 flex-1 flex-col items-center justify-center gap-0.5 min-h-[44px] py-2 text-fixed-10 font-medium text-text-muted transition-colors",
                   "focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent",
                 )}
               >
@@ -118,7 +121,7 @@ export function MobileNav({
                 // SC#4: min-h-[44px] + justify-center lifts the ~36px stub cell
                 // to the WCAG 2.5.8 floor. focus-visible ring added (the stub
                 // had none) — matches MobileTopBar's accent outline.
-                "relative flex flex-1 flex-col items-center justify-center gap-0.5 min-h-[44px] py-2 text-fixed-10 font-medium transition-colors",
+                "relative flex min-w-0 flex-1 flex-col items-center justify-center gap-0.5 min-h-[44px] py-2 text-fixed-10 font-medium transition-colors",
                 "focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent",
                 active ? "text-accent" : "text-text-muted",
               )}

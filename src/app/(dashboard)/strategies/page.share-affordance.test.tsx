@@ -26,6 +26,9 @@ import { join } from "node:path";
 import React from "react";
 
 vi.mock("server-only", () => ({}));
+// Phase 164.6.6.3.1 D-06: the page captures a failed share read; this file
+// asserts the fail-closed rows, so it only needs the capture to be inert.
+vi.mock("@/lib/sentry-capture", () => ({ captureToSentry: vi.fn() }));
 
 vi.mock("next/link", () => ({
   default: ({ children, href }: { children: React.ReactNode; href: string }) =>
@@ -51,7 +54,14 @@ vi.mock("@/components/strategy/PendingIntros", () => ({
  * page ask the wrong question while this file stayed green.
  */
 const shareProps = vi.hoisted(
-  () => [] as Array<{ strategyId: string; published: boolean; size?: "sm" | "md" }>,
+  () =>
+    [] as Array<{
+      strategyId: string;
+      published: boolean;
+      size?: "sm" | "md";
+      // Phase 164.6.6.3.1 D-05/D-06 Wave 0: plan 05 hands each row a live-share flag.
+      hasActiveShare?: boolean;
+    }>,
 );
 vi.mock("@/components/strategy/ShareableLink", async () => {
   const actual = await vi.importActual<
@@ -63,11 +73,13 @@ vi.mock("@/components/strategy/ShareableLink", async () => {
       strategyId: string;
       published: boolean;
       size?: "sm" | "md";
+      hasActiveShare?: boolean;
     }) => {
       shareProps.push({
         strategyId: props.strategyId,
         published: props.published,
         size: props.size,
+        hasActiveShare: props.hasActiveShare,
       });
       return React.createElement(
         "span",
@@ -150,6 +162,9 @@ interface MockStrategyRow {
 const state = vi.hoisted(() => ({
   user: null as { id: string } | null,
   strategies: [] as MockStrategyRow[],
+  // Phase 164.6.6.3.1 D-05/D-06 Wave 0: the `strategy_shares` read plan 05 adds to the page.
+  shares: [] as { strategy_id: string; revoked_at: string | null }[],
+  sharesError: null as { message: string } | null,
 }));
 
 // Supabase double cloned from page.wizard-draft-banner.test.tsx (same page,
@@ -169,14 +184,23 @@ vi.mock("@/lib/supabase/server", () => ({
         table !== "strategies" &&
         table !== "contact_requests" &&
         table !== "api_keys" &&
-        table !== "strategy_keys"
+        table !== "strategy_keys" &&
+        // Phase 164.6.6.3.1 D-05/D-06 Wave 0: plan 05's page read.
+        table !== "strategy_shares"
       ) {
         throw new Error(`Unexpected table: ${table}`);
       }
+      // Phase 164.6.6.3.1 D-05/D-06 Wave 0. The `strategy_shares` arm is POISONED
+      // on purpose: with an error seeded it answers the seeded rows TOGETHER WITH
+      // the error, `{ data: shares, error }`, never `data: null`. A page that used
+      // the rows despite the error would then mark a row live, so plan 05's
+      // fail-closed test can catch it; with `data: null` it could not.
       const listResult =
         table === "strategies"
           ? { data: state.strategies, error: null }
-          : { data: [], error: null };
+          : table === "strategy_shares"
+            ? { data: state.shares, error: state.sharesError }
+            : { data: [], error: null };
       const builder = {
         select: () => builder,
         eq: () => builder,
@@ -224,6 +248,9 @@ beforeEach(() => {
   // non-UUID id. Synthetic.
   state.user = { id: "00000000-0000-4000-8000-0000000000a1" };
   state.strategies = [];
+  // Phase 164.6.6.3.1 D-05/D-06 Wave 0.
+  state.shares = [];
+  state.sharesError = null;
 });
 
 describe("StrategiesPage — the share control is always present (SHARE-04)", () => {
@@ -271,6 +298,60 @@ describe("StrategiesPage — the share control is always present (SHARE-04)", ()
     await renderPage();
 
     expect(shareProps[0].published).toBe(false);
+  });
+});
+
+describe("StrategiesPage — hasActiveShare comes from one read (164.6.6.3.1 D-05)", () => {
+  it("D-05: hasActiveShare reaches each row from one read", async () => {
+    state.strategies = [
+      row("s-a", "draft"),
+      row("s-b", "draft"),
+      row("s-c", "draft"),
+      row("s-p", "published"),
+    ];
+    state.shares = [
+      { strategy_id: "s-a", revoked_at: null },
+      { strategy_id: "s-b", revoked_at: "2026-10-01T00:00:00.000Z" },
+    ];
+
+    await renderPage();
+
+    const byId = new Map(shareProps.map((p) => [p.strategyId, p.hasActiveShare]));
+    expect(byId.get("s-a"), "a non-revoked share is live").toBe(true);
+    // The derivation is in code (`revoked_at === null`), the factsheet's rule:
+    // a revoked row the double hands back must NOT read as live.
+    expect(byId.get("s-b"), "a revoked share is not live").toBe(false);
+    expect(byId.get("s-c"), "no share row is not live").toBe(false);
+    expect(byId.get("s-p"), "a published row is never asked").toBe(false);
+  });
+});
+
+describe("StrategiesPage — a failed share read fails closed (164.6.6.3.1 D-06)", () => {
+  it("D-06: a failed share read leaves every row on Get private link, even when rows came back with the error", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      state.strategies = [row("s-a", "draft"), row("s-b", "draft")];
+      // POISONED on purpose (Wave 0 double): the rows come back TOGETHER with
+      // the error. A page that used them despite the error would mark s-a live.
+      state.shares = [{ strategy_id: "s-a", revoked_at: null }];
+      state.sharesError = { message: "synthetic share read failure" };
+
+      await renderPage();
+
+      expect(shareProps).toHaveLength(2);
+      for (const p of shareProps) {
+        expect(
+          p.hasActiveShare,
+          `row ${p.strategyId} must not claim a live link nobody confirmed`,
+        ).toBe(false);
+      }
+      expect(consoleError).toHaveBeenCalledWith(
+        "[strategies/page] active-share read failed",
+        "synthetic share read failure",
+      );
+    } finally {
+      consoleError.mockRestore();
+    }
   });
 });
 
