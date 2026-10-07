@@ -1,5 +1,36 @@
 # Changelog
 
+## [0.125.1.4] - 2026-10-06 — MT5RELOGIN closes: question THREE settled STALE; 164.6.5, 165, 165.1 closed
+
+### Fixed
+- The account-change hazard sentence now says what was measured. All four copies (the
+  `mt5-not-authorized` remedy string and the quoted header in `scripts/prod-prober/arms/mt5.mjs`,
+  the header comment and the printed NOTE in `scripts/mt5-diag.sh`) keep the 2026-08-13 history
+  and add `re-measured 2026-10-06`: `trade_allowed` stayed true after real per-account logins, so
+  algorithmic trading is switched off on a login only while the terminal's "account has been
+  changed" option is ticked. Comment and copy only; neither instrument's executable path changed,
+  and the prober self-test (91/91) and wiring test (118) pass.
+
+### Notes
+- Phase 164.6.2 MT5RELOGIN closes (plan 06, VERIFICATION `passed`, bound to `ad37851d`). Question
+  THREE (D-09) is settled `STALE`, not `FALSE`: one terminal's readings refute the claim that every
+  account change disables trading, and say nothing about a terminal whose option is ticked, which
+  is why the copies are conditional. R2 was taken from three prober log archives, read after the
+  self-test banner. The evidence limits are recorded in `164.6.2-MEASUREMENT-WAVE5.md`. The source
+  is the prober's Actions log, because the analytics and gateway logs carry no `trade_allowed`.
+  Which terminal ran the logins is inferred. The reading came about 4 h after the last login, and
+  a terminal-process recycle in that window is not ruled out.
+- The plan-06 executor was killed by a session crash after its two task commits. A second
+  executor re-ran every Task 1 and Task 2 gate, including the licence-bites-both-ways and fence
+  calibration neuters, then wrote the SUMMARY and VERIFICATION in one commit. The PROD handover
+  read and the gateway-restart check are cited from the first executor's record, not repeated.
+- ROADMAP: 164.6.2 criteria 8 and 11 and 164.6.4 criterion 3 carry dated corrections, with their
+  original text kept as lineage.
+- Phase 164.6.5 MT5VALIDATEWEDGE, 165 ACTIONSDEPS and 165.1 PIPDEPS verification reports close as
+  `passed`, with deviations recorded: in 165 and 165.1 the criteria held in substance but landed
+  inside batch PRs (#916, #898), not as separate commits. 165.2 NPMDEPS stays open until a nightly
+  `npm-audit` run is green.
+
 ## [0.125.1.3] - 2026-10-06 — npm audit: source-map-js advisory cleared
 
 ### Security
