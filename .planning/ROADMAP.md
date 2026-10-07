@@ -3090,6 +3090,8 @@ surface (D-13, D-14).
 BTC benchmark price, the allocator equity snapshots and dashboard include it instead of skipping it,
 and `api_keys.account_balance_usdt` is populated. Never invent data: a day without a benchmark
 price stays null.
+Also owns the "in BTC" chip on the strategy list surfaces (Discovery, `StrategyTable`), booked
+here by 164.6.6.2 D-19 (founder, 2026-10-07).
 **Requirements**: TBD
 **Depends on:** Phase 164.6.6.2
 **Plans:** 0 plans
