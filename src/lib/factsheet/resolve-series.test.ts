@@ -76,6 +76,7 @@ describe("resolveDailyReturnSeries: the shared hand-computed oracle (D-01, D-02)
       "daily_returns_empty_list_falls_to_curve",
       "unknown_method_string_reads_geometric",
       "native_leg_loses_first_two_days",
+      "native_absent_day_is_priced_over_its_own_day",
     ]) {
       expect(names, `fixture lacks ${required}`).toContain(required);
     }
@@ -85,7 +86,15 @@ describe("resolveDailyReturnSeries: the shared hand-computed oracle (D-01, D-02)
     // An unknown method string logs one warning by design; keep the run quiet.
     vi.spyOn(console, "warn").mockImplementation(() => {});
     const method = curveMethodFromFlags(c.data_quality_flags);
-    let out = resolveDailyReturnSeries(c.daily_returns, toCurve(c.curve), method);
+    // WR-02: a native leg is read with keepAbsent, exactly as every caller that
+    // hands the series to the converter next does, so an absent day stays a
+    // placeholder and the next day is priced over its own interval.
+    let out = resolveDailyReturnSeries(
+      c.daily_returns,
+      toCurve(c.curve),
+      method,
+      c.native_unit !== undefined,
+    );
     if (c.native_unit !== undefined && c.closes !== undefined) {
       const prices = Object.entries(c.closes)
         .map(([date, close]) => ({ date, close }))
@@ -207,5 +216,81 @@ describe("curveMethodFromFlags: strict literals (D-05)", () => {
     expect(curveMethodFromFlags({ cumulative_method: "SIMPLE-secret-token" })).toBe("geometric");
     expect(warn).toHaveBeenCalledTimes(1);
     expect(JSON.stringify(warn.mock.calls)).not.toContain("secret-token");
+  });
+});
+
+describe("WR-02: an absent day must not widen the next day's price interval", () => {
+  const GAP_CURVE = [
+    { date: "2026-03-02", value: 1.0 },
+    { date: "2026-03-03", value: 1.1 },
+    { date: "2026-03-04", value: Number.NaN },
+    { date: "2026-03-05", value: 1.2 },
+    { date: "2026-03-06", value: 1.32 },
+  ];
+  const GAP_CLOSES = {
+    prices: [
+      { date: "2026-03-02", close: 100 },
+      { date: "2026-03-03", close: 100 },
+      { date: "2026-03-04", close: 200 },
+      { date: "2026-03-05", close: 400 },
+      { date: "2026-03-06", close: 400 },
+    ],
+    dropped: [],
+  };
+
+  it("the review's repro: 03-06 is the one-day native +10% on a flat BTC day, +10% in USD, never +340%", () => {
+    // Independent invariant, written by literal: (1 + r_native) * (P_k / P_{k-1}) - 1
+    // over the SAME day. 03-06's native return is 1.32 / 1.2 - 1 = 0.1 and BTC
+    // closed 400 -> 400 that day, so USD is 1.1 * 1 - 1 = 0.1. Pricing it against
+    // 03-03 (close 100) gave 1.1 * (400 / 100) - 1 = 3.4.
+    const native = resolveDailyReturnSeries(null, GAP_CURVE, "geometric", true);
+    const out = convertNativeReturnsToUsd(native, "BTC", GAP_CLOSES);
+    expect(out.map((p) => p.date)).toEqual(["2026-03-06"]);
+    expect(out[0].value).toBeCloseTo(0.1, 12);
+    expect(out.every((p) => Number.isFinite(p.value))).toBe(true);
+  });
+
+  it("keepAbsent keeps each absent day after day 0 as a NaN placeholder at its own date", () => {
+    const out = equityCurveToDailyReturns(GAP_CURVE, "geometric", true);
+    expect(out.map((p) => p.date)).toEqual([
+      "2026-03-03",
+      "2026-03-04",
+      "2026-03-05",
+      "2026-03-06",
+    ]);
+    expect(out.map((p) => Number.isFinite(p.value))).toEqual([true, false, false, true]);
+  });
+
+  it("the default read still deletes the absent days, so no caller that omits the flag ever sees NaN", () => {
+    const out = equityCurveToDailyReturns(GAP_CURVE, "geometric");
+    expect(out.map((p) => p.date)).toEqual(["2026-03-03", "2026-03-06"]);
+    expect(out.every((p) => Number.isFinite(p.value))).toBe(true);
+  });
+
+  it("keepAbsent is a no-op when a daily_returns column wins", () => {
+    const out = resolveDailyReturnSeries(
+      [
+        { date: "2026-03-03", value: 0.1 },
+        { date: "2026-03-06", value: 0.1 },
+      ],
+      GAP_CURVE,
+      "geometric",
+      true,
+    );
+    expect(out.map((p) => p.date)).toEqual(["2026-03-03", "2026-03-06"]);
+    expect(out.every((p) => Number.isFinite(p.value))).toBe(true);
+  });
+
+  it("a curve with no formable day is [] even when absent days are kept", () => {
+    expect(
+      equityCurveToDailyReturns(
+        [
+          { date: "2026-03-02", value: 1.0 },
+          { date: "2026-03-03", value: Number.NaN },
+        ],
+        "geometric",
+        true,
+      ),
+    ).toEqual([]);
   });
 });

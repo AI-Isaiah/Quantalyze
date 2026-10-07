@@ -307,10 +307,13 @@ function buildUsdWealthPoints(
   unit: string,
   btc: Pick<BtcCloses, "prices" | "dropped"> | null,
 ): { date: string; value: number }[] | null {
+  // WR-02: absent days stay as NaN placeholders into the conversion, so the day
+  // after a gap is priced over its own interval; the conversion drops them.
   const daily = resolveDailyReturnSeries(
     a.daily_returns,
     a.returns_series,
     curveMethodFromFlags(a.data_quality_flags),
+    true,
   );
   const usd = convertNativeReturnsToUsd(daily, unit, btc);
   if (usd.length === 0) return null;

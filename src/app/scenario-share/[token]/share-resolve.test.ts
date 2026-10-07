@@ -1221,6 +1221,42 @@ describe("resolveSharedScenario — BTC leg converts to USD before the blend (16
     });
   });
 
+  it("WR-02: a native curve with absent days prices the day after the gap over its OWN day (+10%, not +120%)", () => {
+    // 24 days (the engine needs 10 overlapping), native +10% every day, so the
+    // geometric curve is 1.1^i, EXCEPT
+    // level 5, which is null: days 5 and 6 are absent (day 6 pairs with the null
+    // level, never bridged). BTC is flat at 60000 until day 5, then jumps to
+    // 120000 on day 6 and stays. Day 7's native return is the one-day +10% and
+    // BTC did not move that day, so USD is (1 + 0.1) * (120000 / 120000) - 1 =
+    // 0.1. Priced across the gap, against the last present date (day 4, close
+    // 60000), it is 1.1 * 2 - 1 = 1.2.
+    const start = new Date("2026-02-01T00:00:00Z");
+    const dates = Array.from({ length: 24 }, (_, i) =>
+      new Date(start.getTime() + i * 86_400_000).toISOString().slice(0, 10),
+    );
+    const curve = dates.map((date, i) => ({
+      date,
+      value: i === 5 ? null : Math.pow(1.1, i),
+    }));
+    const btc = {
+      prices: dates.map((date, i) => ({ date, close: i < 6 ? 60000 : 120000 })),
+      dropped: [] as string[],
+    };
+    const result = resolveSharedScenario(
+      scRow(null),
+      {},
+      { [SC_STRAT]: curve },
+      { [SC_STRAT]: "BTC" },
+      btc,
+    );
+    expect(result.kind).toBe("ok");
+    if (result.kind !== "ok") throw new Error("expected ok");
+    expect(result.portfolioDaily.map((p) => p.date)).toEqual(
+      [2, 3, 4, ...Array.from({ length: 17 }, (_, j) => 7 + j)].map((i) => dates[i]),
+    );
+    for (const p of result.portfolioDaily) expect(p.value).toBeCloseTo(0.1, 9);
+  });
+
   it("parity: the shared blend equals the blend of the same leg handed over already in USD (the owner's composer path)", () => {
     const usdLeg = convertNativeReturnsToUsd(BTC_NATIVE_SERIES, "BTC", BTC_ALTERNATING);
     const shared = resolveSharedScenario(

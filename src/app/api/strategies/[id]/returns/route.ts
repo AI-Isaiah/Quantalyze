@@ -496,11 +496,20 @@ export async function GET(
       let daily_returns_usd: DailyPoint[] | null = null;
       let native_unpriced = false;
       if (returns_unit !== null) {
+        // WR-02: the conversion reads the SAME series with its absent days kept as
+        // NaN placeholders, so the day after a gap is priced over its own single
+        // interval and not over the whole gap. `daily_returns` itself (the
+        // shipped BTC series, and the input to `native_unpriced`) is unchanged.
         daily_returns_usd =
           daily_returns.length === 0
             ? []
             : convertNativeReturnsToUsd(
-                daily_returns,
+                resolveDailyReturnSeries(
+                  analyticsRow?.daily_returns,
+                  analyticsRow?.returns_series,
+                  curveMethodFromFlags(analyticsRow?.data_quality_flags),
+                  true,
+                ),
                 returns_unit,
                 await readBtcCloses(supabase),
               );

@@ -4885,6 +4885,40 @@ describe("getMyAllocationDashboard — 164.6.6.2 BTC-native book rows convert to
     expect(seriesOf(row)).toEqual(convertNativeReturnsToUsd(BTC_SERIES, "BTC", CLOSES));
   });
 
+  it("WR-02: a native curve with an absent day prices the day after it over its OWN day (+10%, not +340%)", async () => {
+    // Curve 1.0, 1.1, null, 1.2, 1.32 on 03-02..03-06; BTC closes 100, 100, 200,
+    // 400, 400. 03-06's native return is 1.32 / 1.2 - 1 = 0.1 and BTC was flat that
+    // day, so USD is (1 + 0.1) * (400 / 400) - 1 = 0.1. Priced across the gap
+    // (against 03-03, close 100) it was 1.1 * 4 - 1 = 3.4.
+    btcCloses.read.mockResolvedValue({
+      prices: [
+        { date: "2026-03-02", close: 100 },
+        { date: "2026-03-03", close: 100 },
+        { date: "2026-03-04", close: 200 },
+        { date: "2026-03-05", close: 400 },
+        { date: "2026-03-06", close: 400 },
+      ],
+      dropped: [] as string[],
+      through: "2026-03-06",
+    });
+    const result = await dashboardFor([
+      {
+        daily_returns: null,
+        returns_series: [
+          { date: "2026-03-02", value: 1.0 },
+          { date: "2026-03-03", value: 1.1 },
+          { date: "2026-03-04", value: null },
+          { date: "2026-03-05", value: 1.2 },
+          { date: "2026-03-06", value: 1.32 },
+        ],
+        data_quality_flags: { native_unit: "BTC" },
+      },
+    ]);
+    const row = result.strategies.find((s) => s.strategy_id === "sc")!;
+    expect(seriesOf(row)).toEqual([{ date: "2026-03-06", value: expect.closeTo(0.1, 12) }]);
+    expect((row.strategy as unknown as { series_state: unknown }).series_state).toBe("available");
+  });
+
   it("a USD row is unchanged, returns_unit is null, and no closes are read", async () => {
     const result = await dashboardFor([
       { daily_returns: BTC_SERIES, data_quality_flags: null },

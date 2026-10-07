@@ -5489,8 +5489,19 @@ export const getMyAllocationDashboard = cache(
         : [];
       // SFH-1 — converted once, here, so the payload series and the unpriced
       // flag beside it are computed from the SAME conversion.
+      // WR-02: a native leg is converted from the same resolve with its absent
+      // days kept as NaN placeholders (so the day after a gap is priced over its
+      // own interval); `resolvedDailyReturns` stays the placeholder-free series
+      // that `series_state` and `native_unpriced` read.
       const usdDailyReturns = convertNativeReturnsToUsd(
-        resolvedDailyReturns,
+        analyticsObj && returns_unit != null
+          ? resolveDailyReturnSeries(
+              analyticsObj.daily_returns,
+              analyticsObj.returns_series,
+              curveMethodFromFlags(dqf),
+              true,
+            )
+          : resolvedDailyReturns,
         returns_unit,
         btcCloses,
       );

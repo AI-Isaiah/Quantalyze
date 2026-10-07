@@ -793,7 +793,7 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict[str, Any]:
                 missing_analytics_sids.append(sid)
                 continue
 
-            s = daily_returns_from_row(row, name=sid)
+            s = daily_returns_from_row(row, name=sid, keep_absent=True)
             if s is not None:
                 strategy_returns[sid] = s
             else:
@@ -1801,7 +1801,7 @@ async def portfolio_optimizer(request: Request, req: PortfolioOptimizerRequest) 
     optimizer_fetched_sids: set[str] = set()
     for row in rows(sa_in_result):
         optimizer_fetched_sids.add(row["strategy_id"])
-        s = daily_returns_from_row(row, name=row["strategy_id"])
+        s = daily_returns_from_row(row, name=row["strategy_id"], keep_absent=True)
         if s is not None:
             portfolio_returns[row["strategy_id"]] = s
         else:
@@ -1880,7 +1880,7 @@ async def portfolio_optimizer(request: Request, req: PortfolioOptimizerRequest) 
         ).in_("strategy_id", candidate_ids).execute()
 
         for row in rows(sa_cand_result):
-            s = daily_returns_from_row(row, name=row["strategy_id"])
+            s = daily_returns_from_row(row, name=row["strategy_id"], keep_absent=True)
             if s is not None:
                 candidate_returns[row["strategy_id"]] = s
             else:
@@ -2096,7 +2096,7 @@ async def portfolio_bridge(request: Request, req: BridgeRequest) -> dict[str, An
     portfolio_returns: dict[str, pd.Series] = {}
     bridge_missing_returns_sids: list[str] = []
     for row in rows(sa_in_result):
-        s = daily_returns_from_row(row, name=row["strategy_id"])
+        s = daily_returns_from_row(row, name=row["strategy_id"], keep_absent=True)
         if s is not None:
             portfolio_returns[row["strategy_id"]] = s
         else:
@@ -2203,7 +2203,7 @@ async def portfolio_bridge(request: Request, req: BridgeRequest) -> dict[str, An
         ).in_("strategy_id", candidate_ids).execute()
 
         for row in rows(sa_cand_result):
-            s = daily_returns_from_row(row, name=row["strategy_id"])
+            s = daily_returns_from_row(row, name=row["strategy_id"], keep_absent=True)
             if s is not None:
                 candidate_returns[row["strategy_id"]] = s
 
