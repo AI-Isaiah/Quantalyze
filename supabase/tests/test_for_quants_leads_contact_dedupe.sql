@@ -183,6 +183,13 @@ BEGIN
   END;
 
   -- ----- 4b. two contact_form rows, same email, same day → BOTH admitted ----
+  -- RED-UNDER: add a SECOND, TOTAL unique index on (lower(email), UTC day) under
+  --            another name — the competing constraint a later migration could
+  --            introduce while for_quants_leads_email_day_uniq itself still looks
+  --            right. Sections 1-3 read only the named index and the CHECKs, so
+  --            they stay GREEN and this behavioural arm is the first failure: the
+  --            first contact_form row collides with the request_call row of 4e.
+  -- RED-UNDER-M: {"arm":"4b","apply":[{"kind":"sql","stmt":"CREATE UNIQUE INDEX for_quants_leads_shadow_total_uniq ON public.for_quants_leads (lower(email), ((created_at AT TIME ZONE 'UTC')::date))"}]}
   BEGIN
     INSERT INTO for_quants_leads (name, firm, email, source, topic)
     VALUES ('contact one', '', v_email, 'contact_form', 'general');

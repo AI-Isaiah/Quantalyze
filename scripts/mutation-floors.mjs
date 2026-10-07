@@ -1060,7 +1060,20 @@
 //                annotated file(s) < floor 59`. The separation edit was restored
 //                from a byte backup and proved with cmp (exit 0).
 //                WAIVED_CEILING stays 0.
-export const FILES_FLOOR = 58;
+//
+// RAISED 58 -> 59 2026-10-07 (Phase 164.6.6.3.5 DOMAINONE, plan 03): the new gate
+// supabase/tests/test_for_quants_leads_contact_dedupe.sql (four annotated arms,
+// all on `sql` steps) took the corpus from 58 to 59 annotated files. MEASURED by
+// ONE full lane run of `node scripts/mutation-runner/run.mjs`, no file edited
+// during it, constants at 59 / 578 (the floors equal the measurement): `scope: FULL 59/59 annotated files`,
+// `coverage: files 59/86`, `arms: 578/578/0`, `biting: 578`, `lane-invocations:
+// 578 ... plus 59 baseline / 59 restore leg(s)` (the two independent tallies
+// AGREE), `lane-blocked: 0`, `lane-probe: pg_cron AVAILABLE`, `unreachable: 27`,
+// `per-arm lane time: mean 1.5s over 578 arm run(s)`, `No defects. Every annotated
+// arm bit its own arm first.`, exit 0. Per-file line:
+// `test_for_quants_leads_contact_dedupe.sql: sections 4 / judged 4 / annotated 4 /
+// waived 0 / biting 4`. WAIVED_CEILING stays 0.
+export const FILES_FLOOR = 59;
 
 // ARMS_FLOOR — PINNED 2026-08-29 BY MEASUREMENT (plan 164.3-08), not chosen.
 //
@@ -2750,7 +2763,17 @@ export const FILES_FLOOR = 58;
 //    naming `ARMS_FLOOR regression: 574 biting arm(s) < floor 575`; restored
 //    from a byte backup and proved with cmp (exit 0).
 //    WAIVED_CEILING stays 0 — no waiver was added.
-export const ARMS_FLOOR = 574;
+//
+// RAISED 574 -> 578 2026-10-07 (Phase 164.6.6.3.5 DOMAINONE, plan 03): FOUR arms
+// from test_for_quants_leads_contact_dedupe.sql (index dropped, index re-made
+// TOTAL, source CHECK dropped, and a competing total unique index that only the
+// behavioural section 4 catches), measured by the same single full run recorded
+// under FILES_FLOOR above: `arms: 578/578/0`, `biting: 578`. The fourth arm is
+// not a flourish: mutation-annotation-parser.test.ts requires every SECTION a
+// file raises for to carry a twin, and section 4 (behavioural) raises. Each arm
+// was also driven by hand on the lane and read RED on its own identity first.
+// WAIVED_CEILING stays 0 - no waiver was added.
+export const ARMS_FLOOR = 578;
 
 // WAIVED_CEILING — PINNED 2026-09-02 BY MEASUREMENT (164.3.1 red team), not
 // chosen. A CEILING, not a floor: it fails when the corpus carries MORE waivers
