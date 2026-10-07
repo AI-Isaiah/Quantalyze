@@ -4678,6 +4678,7 @@ version-2 `equity_curve` row and My Allocation leaves "being rebuilt".
    measured counts-only, and My Allocation renders the history (browser check).
 4. 167.1.2's remaining browser UAT (Overview, Scenario, Exchanges notes, `/allocations` tab switch, 390px / 200%)
    is completed against real rebuilt books.
+**Founder decisions 2026-10-07 (after research):** FLIP Step 4 (E2GT-01) waived as a pre-gate; one manual fan-out rehearsal before registering; okx bound hits do not hold the cron (booked follow-up); backfill staleness alarm routed to OUTAGEALERT. Detail: `167.1.2.2-CONTEXT.md` D-07..D-10.
 **Requirements**: TBD
 **Depends on:** Phase 167.1.2
 **Plans:** 0 plans
