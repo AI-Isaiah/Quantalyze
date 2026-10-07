@@ -566,7 +566,7 @@ async def test_the_derive_job_records_its_switch_against_its_api_key_id(
 
     monkeypatch.setenv("MT5_ENABLED", "true")
     transport = _FakeMt5Transport(
-        account={"equity": 110_500.0, "balance": 110_500.0, "login": 123456},
+        account={"equity": 110_500.0, "balance": 110_500.0, "currency": "USD", "login": 123456},
         deals=_canonical_deals(),
     )
     ctx, _capture = _build_ctx(transport)

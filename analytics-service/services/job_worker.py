@@ -63,6 +63,7 @@ from fastapi import HTTPException
 # on every version (CI's postgrest lacks `CountMethod` at the root), so a root
 # import fails loudly at collection time on a postgrest pin bump.
 from postgrest.base_request_builder import APIResponse
+from postgrest.exceptions import APIError
 from postgrest.types import CountMethod
 from supabase import Client
 
@@ -191,6 +192,14 @@ from services.mt5_read import (  # noqa: F401 — re-export for the derive regre
     Mt5HistoryUnsettledError,
     read_mt5_deal_ledger,
 )
+from services.account_unit import (
+    USD_FLOORS,
+    AccountCurrencyBlank,
+    AccountCurrencyMalformed,
+    AccountCurrencyUnsupported,
+    AccountUnit,
+    classify_account_currency,
+)
 from services.sfox_factory import make_sfox_client
 from services.sfox_read import sfox_transactions_crawl_wallclock_budget_s
 from services.strategy_analytics_provenance import (
@@ -285,7 +294,28 @@ WORKER_FENCE_V2: Final[bool] = (
 # The floor is VENUE-AGNOSTIC (also the sFOX material-balance analog, SFOX-05):
 # any broker account holding >$100 but producing <2 usable NAV days is a
 # silently-empty (green) track record, never genuine "insufficient history".
-_DERIBIT_EMPTY_LEDGER_FLOOR_USD: Final[float] = 100.0
+_DERIBIT_EMPTY_LEDGER_FLOOR_USD: Final[float] = USD_FLOORS.material_equity
+
+# Phase 164.6.6.2 / D-01, D-03, D-06 — the FIXED texts of the MT5 account-currency refusals.
+# Every one lands in `compute_jobs.error_message` or `strategy_analytics.computation_error`,
+# both re-classifiable (D-42): none may carry a `mt5_validation._WRONG_SERVER_PHRASES` /
+# `_AUTH_PHRASES` member, and none carries an amount, login or server. The two curated
+# stamp sentences (the user-visible copy, the only thing that reaches the wizard) are written
+# INLINE at their `_stamp_strategy_analytics_failed` call sites, not as constants here:
+# `tests/test_stamp_io_exhaustive.py` measures every stamp message from the call's own
+# literal or f-string, and a Name argument has to be registered there by hand.
+_MT5_CURRENCY_BLANK_MESSAGE: Final[str] = (
+    "derive_broker_dailies: the MT5 account currency was not reported yet — retrying"
+)
+_MT5_CURRENCY_CHANGED_MESSAGE: Final[str] = (
+    "derive_broker_dailies: the MT5 account currency differs from the one stored — "
+    "refusing to mix two units in one series"
+)
+_MT5_CURRENCY_REFUSED_MESSAGE: Final[str] = (
+    "derive_broker_dailies: the MT5 account currency is not supported — no metric computed"
+)
+# PostgREST's answer to a write naming a column its schema cache does not hold yet.
+_PGRST_SCHEMA_CACHE_MISS: Final[str] = "PGRST204"
 
 # Phase 164.6.6.3 / D-13 — the FIXED message of an expired MT5 deal-history wait.
 # `error_kind` stays "transient" (no new DB value: that would be a migration that
@@ -394,8 +424,9 @@ async def _fetch_mt5_account_balance(
 
     Returns ``account_info().equity`` — balance + floating uPnL of open
     positions (the v1.8 MT5 convention the derive anchor uses) — as the
-    ``api_keys.account_balance_usdt`` analog (MT5 deposit ccy is USD-family,
-    same convention as the derive branch).
+    ``api_keys.account_balance_usdt`` analog, for a USD-family account only
+    (164.6.6.2 / D-14: a native-unit account's balance is never written into a
+    USD field; its derive stores it beside the unit instead).
 
     Error contract mirrors ccxt ``fetch_usdt_balance``'s swallow-with-warning
     semantics: ANY failure (timeout, transport raise, login rejection,
@@ -448,6 +479,35 @@ async def _fetch_mt5_account_balance(
             "sync_trades: mt5 balance read failed — continuing without a "
             "balance snapshot (exc_class=%s scrubbed=%s)",
             type(exc).__name__, scrub_freeform_string(str(exc)),
+        )
+        return None
+
+    # ⭐ 164.6.6.2 / D-14 — ``api_keys.account_balance_usdt`` is a USD field. A native
+    # (BTC) account's equity is a number of BTC, so writing it there would put 0.1 BTC
+    # where the allocator surfaces read 0.1 dollars; an unsupported or unclassifiable
+    # currency has no honest USD reading either. Both fall under this function's own
+    # advisory contract (ANY failure returns ``None``): the sync completes without a balance
+    # snapshot, and the derive stores the native balance beside the unit instead.
+    try:
+        _balance_unit = classify_account_currency(info.get("currency"))
+    except AccountCurrencyUnsupported as _unsupported:
+        logger.info(
+            "sync_trades: mt5 account is denominated in %s, which has no USD "
+            "reading — continuing without a USD balance snapshot (D-14)",
+            _unsupported.code,
+        )
+        return None
+    except (AccountCurrencyBlank, AccountCurrencyMalformed):
+        logger.info(
+            "sync_trades: mt5 account currency is unreadable (unknown) — "
+            "continuing without a USD balance snapshot (D-14)"
+        )
+        return None
+    if _balance_unit.native:
+        logger.info(
+            "sync_trades: mt5 account is denominated in %s, not USD — continuing "
+            "without a USD balance snapshot (D-14)",
+            _balance_unit.code,
         )
         return None
 
@@ -3961,6 +4021,11 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                 error_kind="permanent",
             )
 
+        # Phase 164.6.6.2 / D-01, D-04 — the MT5 account's unit, decided ONCE per derive from
+        # the PRE ``account_info`` the read returns. ``None`` for every other venue (their
+        # pre-stamp and thresholds are untouched), and for MT5 until the classification below.
+        _mt5_unit: AccountUnit | None = None
+
         if venue == "deribit":
             # D-08: realized returns come from the ONE txn-log ledger pass
             # (funding-inclusive settlement cash deltas) — NEVER fetch_all_trades
@@ -4867,8 +4932,9 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             external_flows = _flow_evidence
         elif venue == "mt5":
             # ── MT5RECON-01/03: the MT5 deal-ledger broker-dailies ONE-path ──
-            # MT5 is single-currency (broker deposit ccy, USD-family) with a LIVE
-            # account_info().equity anchor — structurally closest to sFOX (no
+            # MT5 is single-currency (the broker deposit ccy: USD-family OR a native unit
+            # such as BTC, decided per account by ``classify_account_currency``, 164.6.6.2)
+            # with a LIVE account_info().equity anchor — structurally closest to sFOX (no
             # per-currency coin reconstruction), but the return series comes from a
             # deal LEDGER (history_deals_get), reconstructed against equity by
             # combine_mt5_deal_ledger. Modeled line-for-line on the sfox branch:
@@ -4917,6 +4983,45 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             )
             from services.mt5_validation import classify_mt5_login_error
             from services.nav_twr import UNREALIZED_MATERIALITY_RATIO
+
+            # ⭐ 164.6.6.2 / D-02, D-14 — the ONE writer of the account's unit. The caller
+            # passes the equity step (c) has already parsed and checked (numeric, finite):
+            # it is never invoked before that, so no unvalidated number reaches a column.
+            # A USD-family account stores its code ONLY, leaving ``account_balance_usdt``
+            # (the sync arm's field) and ``account_balance_native`` alone (D-04). A native
+            # account stores the code AND its native balance, and nulls
+            # ``account_balance_usdt`` in the SAME statement, so a BTC figure the sync arm
+            # wrote there before this phase is cleared rather than left to be read as
+            # dollars (RESEARCH Q3).
+            #
+            # ⚠️ Single-PR deploy window: the worker can ship before PROD has applied the
+            # migration, and PostgREST answers PGRST204 for a column it does not know and
+            # writes NOTHING. That must not fail every derive (T-164.6.6.2-12): WARNING and
+            # carry on. Code equality, never a message substring. Any other APIError
+            # bubbles, as every other DB fault in this derive does.
+            async def _persist_account_unit(unit: AccountUnit, equity: float) -> None:
+                _unit_payload: dict[str, Any] = {"account_currency": unit.code}
+                if unit.native:
+                    _unit_payload["account_balance_native"] = equity
+                    _unit_payload["account_balance_usdt"] = None
+
+                def _update_account_unit() -> None:
+                    ctx.supabase.table("api_keys").update(_unit_payload).eq(
+                        "id", ctx.key_row["id"]
+                    ).execute()
+
+                try:
+                    await db_execute(_update_account_unit)
+                except APIError as _unit_exc:
+                    if getattr(_unit_exc, "code", None) != _PGRST_SCHEMA_CACHE_MISS:
+                        raise
+                    logger.warning(
+                        "derive_broker_dailies: api_keys does not know the account-unit "
+                        "columns yet (code %s, label=%s) — the unit was NOT stored; this "
+                        "is the deploy window before the migration reaches this database",
+                        _PGRST_SCHEMA_CACHE_MISS,
+                        funding_label,
+                    )
 
             # venue=="mt5" ⇒ the preflight built an Mt5Session (cast narrows the
             # ccxt.Exchange | SfoxClient | Mt5Session union for the .login/.client/
@@ -4994,7 +5099,6 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                             _mt5_session,
                             now=_mt5_now,
                             settle_history=_mt5_fresh,
-                            material_equity_floor_usd=_DERIBIT_EMPTY_LEDGER_FLOOR_USD,
                         ),
                         timeout=mt5_derive_read_bound_s(
                             read_s=_MT5_DERIVE_READ_TIMEOUT_S,
@@ -5245,6 +5349,86 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                         error_kind="transient",
                     )
 
+            # ⭐ 164.6.6.2 / D-01, D-04 — the account's unit, from the PRE ``account_info`` the
+            # read already returned (no second ``account_info()``: the session rosters must not
+            # move). Decided BEFORE step (c) so every threshold below reads ONE unit.
+            try:
+                _mt5_unit = classify_account_currency(_mt5_info.get("currency"))
+            except AccountCurrencyBlank:
+                # D-01: the terminal has not reported a currency. That is a fault of the
+                # read, not a verdict on the account: TRANSIENT, no stamp, nothing written.
+                # Nothing is guessed in its place (a guessed USD is exactly the bug).
+                logger.warning(
+                    "derive_broker_dailies: mt5 account_info carried no currency "
+                    "(label=%s) — classified transient, retrying, nothing written (D-01)",
+                    funding_label,
+                )
+                return DispatchResult(
+                    outcome=DispatchOutcome.FAILED,
+                    error_message=_MT5_CURRENCY_BLANK_MESSAGE,
+                    error_kind="transient",
+                )
+            except AccountCurrencyMalformed:
+                # D-06: not a currency code at all. Permanent with the CURATED sentence; the
+                # raw broker text is in no log, no stamp and no error_message (T-164.6.6.2-11).
+                logger.warning(
+                    "derive_broker_dailies: mt5 account currency is not a currency code "
+                    "(label=%s) — classified permanent, nothing written (D-06)",
+                    funding_label,
+                )
+                await _stamp_strategy_analytics_failed(
+                    "The account currency could not be read as a currency code, so no "
+                    "metric is computed."
+                )
+                return DispatchResult(
+                    outcome=DispatchOutcome.FAILED,
+                    error_message=_MT5_CURRENCY_REFUSED_MESSAGE,
+                    error_kind="permanent",
+                )
+            except AccountCurrencyUnsupported as _unsupported:
+                # D-06: a well-formed code we hold no floors for (EUR, ETH). Refused by name:
+                # a failed row with curated copy, never a success row with null metrics. The
+                # code passed the shape check, so it is safe to echo. Key-mode routing of a
+                # non-USD key is plan 04's, which re-points this arm for ``is_key_mode``.
+                logger.warning(
+                    "derive_broker_dailies: mt5 account currency %s has no floors "
+                    "(label=%s) — classified permanent, nothing written (D-06)",
+                    _unsupported.code,
+                    funding_label,
+                )
+                await _stamp_strategy_analytics_failed(
+                    f"Returns in {_unsupported.code} are not supported yet, so no "
+                    "metric is computed."
+                )
+                return DispatchResult(
+                    outcome=DispatchOutcome.FAILED,
+                    error_message=_MT5_CURRENCY_REFUSED_MESSAGE,
+                    error_kind="permanent",
+                )
+
+            # ⭐ 164.6.6.2 / D-03 — a currency that differs from the one stored for this key
+            # means the broker re-denominated the account. Nothing below may run: a series
+            # must never hold two units. ERROR (someone should find it), the two codes and no
+            # amount, then TRANSIENT (the stored series is kept; a human or a re-save settles
+            # it). Decided BEFORE any write below, and a ``None`` stored value (first derive,
+            # or a database that does not carry the column yet) continues.
+            _stored_ccy = ctx.key_row.get("account_currency")
+            if isinstance(_stored_ccy, str) and _stored_ccy.strip():
+                if _stored_ccy.strip().upper() != _mt5_unit.code:
+                    logger.error(
+                        "derive_broker_dailies: mt5 account currency changed "
+                        "(stored=%s, read=%s, label=%s) — refusing to mix two units in "
+                        "one series, nothing written (D-03)",
+                        _stored_ccy.strip()[:10],
+                        _mt5_unit.code,
+                        funding_label,
+                    )
+                    return DispatchResult(
+                        outcome=DispatchOutcome.FAILED,
+                        error_message=_MT5_CURRENCY_CHANGED_MESSAGE,
+                        error_kind="transient",
+                    )
+
             # (c) Extract equity + balance, fail-loud on non-finite (a NaN/Inf
             # anchor would sail past every downstream NAV-denominator guard as a
             # silent-NaN 'complete' series). open_unrealized_usd = equity − balance
@@ -5295,6 +5479,7 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                     account_equity=_mt5_equity,
                     account_balance=_mt5_balance,
                     server_utc_offset_s=int(os.getenv("MT5_SERVER_UTC_OFFSET_S", "0")),
+                    floors=_mt5_unit.floors,
                 )
             except Mt5DealClassificationError as exc:
                 _scrubbed = str(scrub_freeform_string(str(exc)))
@@ -5337,22 +5522,35 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             # gap-fill defines the usable-day count the downstream gate also uses).
             _mt5_usable_days = int(returns.notna().sum())
             if (
-                abs(_mt5_equity) > _DERIBIT_EMPTY_LEDGER_FLOOR_USD
+                abs(_mt5_equity) > _mt5_unit.floors.material_equity
                 and _mt5_usable_days < 2
             ):
                 await _stamp_strategy_analytics_failed(
                     "MT5 account holds material equity but produced no "
                     "interpretable daily history."
                 )
+                # D-07: the amount is printed in the account's OWN unit. A native account
+                # never reads "~0 USD" (5 BTC is not zero dollars, it is not dollars).
+                _mt5_equity_text = (
+                    f"~{abs(_mt5_equity):.0f} USD"
+                    if not _mt5_unit.native
+                    else f"~{abs(_mt5_equity):.6g} {_mt5_unit.code}"
+                )
                 return DispatchResult(
                     outcome=DispatchOutcome.FAILED,
                     error_message=(
                         "derive_broker_dailies: mt5 account holds material equity "
-                        f"(~{abs(_mt5_equity):.0f} USD) but produced <2 usable "
+                        f"({_mt5_equity_text}) but produced <2 usable "
                         "daily-return days — refusing an empty-but-green track record"
                     ),
                     error_kind="permanent",
                 )
+
+            # ⭐ 164.6.6.2 / D-02, D-14 — persist the unit AFTER the combine and the fail-loud
+            # above accepted this account's numbers, and BEFORE any series is written, so a
+            # series never exists beside a stale or absent unit.
+            if not is_key_mode:
+                await _persist_account_unit(_mt5_unit, _mt5_equity)
 
             # (f) Belt-and-braces uPnL-wedge flag: combine_mt5_deal_ledger already
             # threads open_unrealized_usd through the honest core (which sets
@@ -5362,7 +5560,7 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             # complete_with_warnings even if the core's own flag were ever missed.
             # Never silently reconciled (the v1.8 realized-basis convention).
             if (
-                _mt5_equity > DUST_NAV_FLOOR
+                _mt5_equity > _mt5_unit.floors.dust_nav
                 and abs(open_unrealized_usd) / _mt5_equity
                 > UNREALIZED_MATERIALITY_RATIO
             ):
@@ -6452,6 +6650,13 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
     # wholesale (MED-3), so a stale reason self-heals on the next clean derive.
     if mtm_attempted and mtm_gated_reason is not None:
         _prestamp_flags["mtm_gated_reason"] = mtm_gated_reason
+    # 164.6.6.2 / D-08 — a series in the account's own (non-USD) unit says so. A FLAG that
+    # the factsheet reads, NEVER a member of NAV_TWR_GUARD_KEYS: membership of the guard
+    # sets is what promotes a row to complete_with_warnings, and a native-unit series is
+    # not a warning. Strategy-mode only (key-mode returned before this seam); the prestamp
+    # replaces data_quality_flags wholesale, so a re-derive after a unit change clears it.
+    if _mt5_unit is not None and _mt5_unit.native:
+        _prestamp_flags["native_unit"] = _mt5_unit.code
 
     # MTM-01 (Phase 101): this seam now ALSO owns the single-key by-basis write.
     # The prestamp runs BEFORE the CSV finalizer, and the finalizer's _mark_complete

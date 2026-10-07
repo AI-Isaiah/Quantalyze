@@ -396,3 +396,34 @@ async def test_fetch_mt5_account_balance_read_error_is_best_effort_none(monkeypa
     transport.account_info = _boom  # type: ignore[method-assign]
     value = await jw._fetch_mt5_account_balance(_session(transport))
     assert value is None
+
+
+# ---------------------------------------------------------------------------
+# 164.6.6.2 / D-14 — the sync balance arm never writes a non-USD number into a USD
+# field (api_keys.account_balance_usdt). T-164.6.6.2-09.
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+@pytest.mark.parametrize("currency", ["BTC", "btc", "EUR", "b!tc", "", "   ", None])
+async def test_fetch_mt5_account_balance_is_none_for_a_non_usd_or_unreadable_currency(
+    currency,
+):
+    """A BTC account's equity (0.1105 here) is a number of BTC. Returned as the USD
+    balance it would be written to ``account_balance_usdt`` and read as $0.11. EUR has
+    no USD reading either, and an unreadable currency cannot be assumed USD. All of
+    them return None under the function's own advisory contract, so the sync completes
+    without a snapshot instead of writing a wrong one."""
+    transport = _FakeMt5Transport(
+        account=_account(currency=currency, equity=0.1105, balance=0.1105)
+    )
+    assert await jw._fetch_mt5_account_balance(_session(transport)) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("currency", ["USD", "usd", "USDT", "USDC", "EURR", "DAI"])
+async def test_fetch_mt5_account_balance_still_returns_equity_for_the_usd_family(
+    currency,
+):
+    """D-04: the USD family behaves exactly as before this phase."""
+    transport = _FakeMt5Transport(account=_account(currency=currency))
+    value = await jw._fetch_mt5_account_balance(_session(transport))
+    assert value == pytest.approx(ACCOUNT_EQUITY)

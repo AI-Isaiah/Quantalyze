@@ -1837,3 +1837,357 @@ async def test_the_abandoned_derive_error_message_carries_no_classifier_token(
         "classify_mt5_login_error, a working key gets blamed for our own "
         "abandoned thread (D-42)"
     )
+
+
+# ---------------------------------------------------------------------------
+# 164.6.6.2 / plan 03 — the account's own unit (D-01, D-02, D-08, D-14, D-20).
+# ---------------------------------------------------------------------------
+_BTC_SCALE = 1e-6
+
+
+def _scaled_deals(scale: float) -> list[dict]:
+    """The canonical deal ledger with every money field multiplied by ``scale`` (times
+    are untouched), so a BTC account whose ledger is the USD canonical one in a unit a
+    million times smaller has the SAME return series."""
+    out: list[dict] = []
+    for d in _canonical_deals():
+        row = dict(d)
+        for k in ("profit", "swap", "commission", "fee"):
+            row[k] = row[k] * scale
+        out.append(row)
+    return out
+
+
+def _btc_account(currency: str = "BTC") -> dict:
+    # Canonical anchor 110_500 scaled by 1e-6: initial NAV 0.1 BTC, terminal 0.1105,
+    # every NAV above the 0.001 BTC dust floor and far below the 1000 USD one.
+    return {
+        "equity": 0.1105,
+        "balance": 0.1105,
+        "currency": currency,
+        "login": 123456,
+    }
+
+
+def _api_key_updates(capture: dict) -> list[dict]:
+    return [p for (name, p) in capture["updates"] if name == "api_keys"]
+
+
+@pytest.mark.asyncio
+async def test_btc_account_derives_a_native_series_end_to_end(monkeypatch) -> None:
+    """THE tracer (D-01, D-02, D-08, D-14, D-20). An MT5 account whose PRE
+    ``account_info`` says BTC is judged against BTC floors, not the 1000 USD dust NAV
+    that read every day of a 0.1 BTC account as dust. Hand literals are the canonical
+    USD ones (the ledger is that ledger times 1e-6): 400/100_000 etc. are RATIOS, so
+    they survive the change of unit exactly.
+
+    Also pins the persisted unit: ONE service-role ``api_keys`` UPDATE that stores the
+    code and the native balance AND nulls ``account_balance_usdt`` in the same
+    statement (the sync arm may have written BTC there before this phase), and the
+    ``native_unit`` flag in the pre-stamp, which is a flag and never a dust guard."""
+    monkeypatch.setenv("MT5_ENABLED", "true")
+    transport = _FakeMt5Transport(
+        account=_btc_account(), deals=_scaled_deals(_BTC_SCALE)
+    )
+    ctx, capture = _build_ctx(transport, asset_class="traditional")
+    with _apply(_patches(ctx)):
+        result = await run_derive_broker_dailies_job(_job())
+
+    assert result.outcome == DispatchOutcome.DONE, (
+        f"kind={result.error_kind!r} msg={result.error_message!r}"
+    )
+    rows = _csv_rows(capture)
+    assert rows["2025-06-02"] == pytest.approx(400 / 100_000, abs=1e-12)
+    assert rows["2025-06-03"] == pytest.approx(0.0, abs=1e-12)
+    assert rows["2025-06-04"] == pytest.approx(300 / 100_400, abs=1e-12)
+    assert rows["2025-06-05"] == pytest.approx(-200 / 110_700, abs=1e-12)
+
+    flags = _dq_flags(capture)
+    assert flags.get("native_unit") == "BTC"
+    assert "dust_nav_guard" not in flags, (
+        "a 0.1 BTC account is not dust; the guard fired against a USD-sized floor"
+    )
+    assert _api_key_updates(capture) == [
+        {
+            "account_currency": "BTC",
+            "account_balance_native": 0.1105,
+            "account_balance_usdt": None,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_usd_account_derives_as_before_and_writes_only_its_code(
+    monkeypatch,
+) -> None:
+    """D-04: a USD-family account is byte-identical to today. Its ``api_keys`` UPDATE
+    carries the code alone, so the sync arm's ``account_balance_usdt`` is never touched
+    and no native balance is invented; no ``native_unit`` flag is stamped."""
+    monkeypatch.setenv("MT5_ENABLED", "true")
+    transport = _FakeMt5Transport(
+        account={
+            "equity": 110_500.0, "balance": 110_500.0, "currency": "USD",
+            "login": 123456,
+        },
+        deals=_canonical_deals(),
+    )
+    ctx, capture = _build_ctx(transport, asset_class="traditional")
+    with _apply(_patches(ctx)):
+        result = await run_derive_broker_dailies_job(_job())
+
+    assert result.outcome == DispatchOutcome.DONE
+    rows = _csv_rows(capture)
+    assert rows["2025-06-02"] == pytest.approx(400 / 100_000, abs=1e-12)
+    assert rows["2025-06-05"] == pytest.approx(-200 / 110_700, abs=1e-12)
+    assert "native_unit" not in _dq_flags(capture)
+    assert _api_key_updates(capture) == [{"account_currency": "USD"}]
+
+
+# ---------------------------------------------------------------------------
+# 164.6.6.2 / plan 03 Task 2 — every way a currency read can be wrong ends in a
+# NAMED, correctly-classed failure that writes nothing it should not (D-01, D-03,
+# D-06, D-07).
+# ---------------------------------------------------------------------------
+_MALFORMED_STAMP = (
+    "The account currency could not be read as a currency code, so no metric is computed."
+)
+
+
+def _stamps(capture: dict) -> list[str]:
+    """Every ``computation_error`` the derive wrote to ``strategy_analytics``."""
+    return [
+        p["computation_error"]
+        for (name, p, _oc) in capture["upserts"]
+        if name == "strategy_analytics"
+        and isinstance(p, dict)
+        and p.get("computation_error")
+    ]
+
+
+def _assert_nothing_written(capture: dict) -> None:
+    assert capture["upserts"] == [], capture["upserts"]
+    assert capture["deletes"] == [], capture["deletes"]
+    assert capture["updates"] == [], capture["updates"]
+    assert not any(c[0] == "enqueue_compute_job" for c in capture["rpc_calls"])
+
+
+async def _derive_with_currency(
+    monkeypatch, currency: object, *, stored: str | None = None
+):
+    monkeypatch.setenv("MT5_ENABLED", "true")
+    account = _btc_account()
+    account["currency"] = currency
+    transport = _FakeMt5Transport(account=account, deals=_scaled_deals(_BTC_SCALE))
+    ctx, capture = _build_ctx(transport, asset_class="traditional")
+    if stored is not None:
+        ctx.key_row["account_currency"] = stored
+    with _apply(_patches(ctx)):
+        result = await run_derive_broker_dailies_job(_job())
+    return result, capture
+
+
+@pytest.mark.asyncio
+async def test_blank_currency_fails_transient_and_writes_nothing(
+    monkeypatch, caplog
+) -> None:
+    """D-01: a terminal that has not reported its currency is not a verdict on the
+    account. Transient, no stamp (a user-attributed 'failed' row for a fault that is
+    not theirs), no series write, no api_keys write. One WARNING says why."""
+    with caplog.at_level("WARNING", logger="quantalyze.analytics.job_worker"):
+        result, capture = await _derive_with_currency(monkeypatch, "")
+    assert result.outcome == DispatchOutcome.FAILED
+    assert result.error_kind == "transient"
+    _assert_nothing_written(capture)
+    assert any(
+        r.levelname == "WARNING" and "currency" in r.getMessage() for r in caplog.records
+    )
+
+
+@pytest.mark.asyncio
+async def test_malformed_currency_fails_permanent_with_the_curated_stamp(
+    monkeypatch,
+) -> None:
+    """D-06: text that is not a currency code at all is refused, never looked up. The
+    curated sentence is the ONLY thing that reaches the user; the raw broker text
+    appears nowhere."""
+    result, capture = await _derive_with_currency(monkeypatch, "b!tc")
+    assert result.outcome == DispatchOutcome.FAILED
+    assert result.error_kind == "permanent"
+    assert _stamps(capture) == [_MALFORMED_STAMP]
+    assert "b!tc" not in repr(capture["upserts"]) and "b!tc" not in (
+        result.error_message or ""
+    )
+    assert not any(u[0] == "csv_daily_returns" for u in capture["upserts"])
+    assert capture["updates"] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("code", ["EUR", "ETH"])
+async def test_unsupported_currency_fails_permanent_naming_the_code(
+    monkeypatch, code: str
+) -> None:
+    """D-06: a well-formed code with no floors defined is refused, and the sentence
+    names the code. Never a guess, never a success row with null metrics."""
+    result, capture = await _derive_with_currency(monkeypatch, code)
+    assert result.outcome == DispatchOutcome.FAILED
+    assert result.error_kind == "permanent"
+    assert _stamps(capture) == [
+        f"Returns in {code} are not supported yet, so no metric is computed."
+    ]
+    assert not any(u[0] == "csv_daily_returns" for u in capture["upserts"])
+    assert capture["updates"] == []
+
+
+@pytest.mark.asyncio
+async def test_a_changed_currency_refuses_before_any_write(
+    monkeypatch, caplog
+) -> None:
+    """D-03 / T-164.6.6.2-08: the broker re-denominated the account. Mixing the two
+    units in one series is the harm, so NOTHING may be written: not a csv upsert, not
+    a delete (the existing series is kept), not a stamp, not an api_keys update. The
+    ERROR names both codes and no amount."""
+    with caplog.at_level("ERROR", logger="quantalyze.analytics.job_worker"):
+        result, capture = await _derive_with_currency(monkeypatch, "BTC", stored="USD")
+    assert result.outcome == DispatchOutcome.FAILED
+    assert result.error_kind == "transient"
+    _assert_nothing_written(capture)
+    errors = [r.getMessage() for r in caplog.records if r.levelname == "ERROR"]
+    assert errors and "USD" in errors[0] and "BTC" in errors[0]
+    assert "0.1105" not in errors[0]
+
+
+@pytest.mark.asyncio
+async def test_a_matching_stored_currency_derives_normally(monkeypatch) -> None:
+    """The D-03 compare is a refusal on DIFFERENCE only: the second derive of a BTC key
+    (stored BTC, read BTC, any case or padding) is the normal path."""
+    result, capture = await _derive_with_currency(monkeypatch, " btc ", stored="BTC")
+    assert result.outcome == DispatchOutcome.DONE
+    assert _csv_rows(capture)
+
+
+@pytest.mark.asyncio
+async def test_a_column_missing_from_prod_degrades_to_a_warning(
+    monkeypatch, caplog
+) -> None:
+    """T-164.6.6.2-12: the worker may deploy before PROD has the columns. PostgREST
+    answers PGRST204 and writes nothing; that must not fail every derive."""
+    from postgrest.exceptions import APIError
+
+    monkeypatch.setenv("MT5_ENABLED", "true")
+    transport = _FakeMt5Transport(
+        account=_btc_account(), deals=_scaled_deals(_BTC_SCALE)
+    )
+    ctx, capture = _build_ctx(transport, asset_class="traditional")
+    original = ctx.supabase.table.side_effect
+
+    def _table(name: str) -> MagicMock:
+        tbl = original(name)
+        if name == "api_keys":
+            def _update(payload: object, **kw: object) -> MagicMock:
+                chain = MagicMock()
+                chain.eq.return_value = chain
+                chain.execute.side_effect = APIError(
+                    {"code": "PGRST204", "message": "column not found",
+                     "details": None, "hint": None}
+                )
+                return chain
+
+            tbl.update.side_effect = _update
+        return tbl
+
+    ctx.supabase.table.side_effect = _table
+    with caplog.at_level("WARNING", logger="quantalyze.analytics.job_worker"):
+        with _apply(_patches(ctx)):
+            result = await run_derive_broker_dailies_job(_job())
+    assert result.outcome == DispatchOutcome.DONE
+    assert _csv_rows(capture), "the series is still written in the deploy window"
+    assert any(
+        r.levelname == "WARNING" and "PGRST204" in r.getMessage() for r in caplog.records
+    )
+
+
+@pytest.mark.asyncio
+async def test_any_other_api_error_on_the_unit_write_is_not_swallowed(
+    monkeypatch,
+) -> None:
+    """Only PGRST204 is the deploy window. A permission denial or constraint violation
+    on the same write must surface, not be absorbed as a warning."""
+    from postgrest.exceptions import APIError
+
+    monkeypatch.setenv("MT5_ENABLED", "true")
+    transport = _FakeMt5Transport(
+        account=_btc_account(), deals=_scaled_deals(_BTC_SCALE)
+    )
+    ctx, _capture = _build_ctx(transport, asset_class="traditional")
+    original = ctx.supabase.table.side_effect
+
+    def _table(name: str) -> MagicMock:
+        tbl = original(name)
+        if name == "api_keys":
+            def _update(payload: object, **kw: object) -> MagicMock:
+                chain = MagicMock()
+                chain.eq.return_value = chain
+                chain.execute.side_effect = APIError(
+                    {"code": "23514", "message": "check violation",
+                     "details": None, "hint": None}
+                )
+                return chain
+
+            tbl.update.side_effect = _update
+        return tbl
+
+    ctx.supabase.table.side_effect = _table
+    with _apply(_patches(ctx)):
+        with pytest.raises(APIError):
+            await run_derive_broker_dailies_job(_job())
+
+
+@pytest.mark.asyncio
+async def test_material_btc_equity_with_no_usable_days_fails_loud_in_btc(
+    monkeypatch,
+) -> None:
+    """D-07: a broken key holding 5 BTC still fails loud. The floor is the unit's own
+    (0.0001 BTC), not the 100 USD one that read 5 as 'immaterial'; and the message
+    prints the amount in BTC, never '~5 USD' / '~0 USD'."""
+    monkeypatch.setenv("MT5_ENABLED", "true")
+    one_day = [
+        {"type": 1, "entry": 1, "profit": 0.001, "swap": 0.0, "commission": 0.0,
+         "fee": 0.0, "time": _epoch(2025, 6, 2)},
+    ]
+    transport = _FakeMt5Transport(
+        account={"equity": 5.0, "balance": 5.0, "currency": "BTC", "login": 123456},
+        deals=one_day,
+    )
+    ctx, capture = _build_ctx(transport, asset_class="traditional")
+    with _apply(_patches(ctx)):
+        result = await run_derive_broker_dailies_job(_job())
+    assert result.outcome == DispatchOutcome.FAILED
+    assert result.error_kind == "permanent"
+    msg = result.error_message or ""
+    assert "material equity" in msg and "BTC" in msg and "USD" not in msg, msg
+    assert capture["updates"] == [], "a refused account's unit is not persisted"
+
+
+def test_every_new_derive_message_is_blame_free_for_the_mt5_classifier() -> None:
+    """T-164.6.6.2-10: the fixed texts land in re-classifiable fields
+    (``compute_jobs.error_message``, ``computation_error``). Run through the REAL
+    classifier none may read as a credential or wrong-server verdict, and none may
+    carry an amount, a login or a server."""
+    from services.mt5_validation import (
+        _AUTH_PHRASES,
+        _WRONG_SERVER_PHRASES,
+        classify_mt5_login_error,
+    )
+
+    assert _WRONG_SERVER_PHRASES and _AUTH_PHRASES
+    texts = [
+        jw._MT5_CURRENCY_BLANK_MESSAGE,
+        jw._MT5_CURRENCY_CHANGED_MESSAGE,
+        jw._MT5_CURRENCY_REFUSED_MESSAGE,
+        _MALFORMED_STAMP,
+        "Returns in EUR are not supported yet, so no metric is computed.",
+        "Returns in BTC are not supported yet, so no metric is computed.",
+    ]
+    for text in texts:
+        verdict = classify_mt5_login_error(Mt5ClientError(0, text))
+        assert verdict == "transient", (text, verdict)
