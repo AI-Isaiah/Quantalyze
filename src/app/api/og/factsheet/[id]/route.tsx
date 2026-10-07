@@ -10,6 +10,9 @@ import { isComputedAnalytics } from "@/lib/closed-sets";
 // the ONE series-resolution mechanism without dragging in the factsheet
 // build-payload graph on every unfurl hit.
 import { resolveDailyReturnSeries } from "@/lib/factsheet/resolve-series";
+// Phase 164.6.6.2 plan 07 (D-12) — the one validator and label composer every
+// unit surface shares.
+import { parseReturnsUnit, withUnit } from "@/lib/factsheet/returns-unit";
 
 /**
  * Dynamic OG card for the v2 factsheet. Renders strategy name + headline
@@ -139,6 +142,15 @@ export async function GET(
   let sharpe = NaN;
   let cagr = NaN;
   let maxDd = NaN;
+  // Phase 164.6.6.2 plan 07 (D-12, T-164.6.6.2-22): the unit this card's CAGR is
+  // in. It comes from the row's own `data_quality_flags.native_unit`, through the
+  // one validator, and from NOTHING the caller sent: the page links the card as
+  // `?u=<unit>` purely so the CDN does not answer a BTC strategy with a card
+  // cached before the unit existed (see the factsheet page's `ogImage`), and
+  // this route never reads that param. A malformed value parses to null and
+  // renders the USD card. Assigned inside the try below, so a bad read still
+  // cannot 500.
+  let unit: string | null = null;
   try {
     // The embed unwrap stays — this route reads strategy_analytics as an EMBED
     // (unlike the lazy-returns route, which queries the table directly).
@@ -153,6 +165,10 @@ export async function GET(
     // daily column is null. That fallback is the fix — the old gate tested the
     // daily column for array-ness, a null column failed it, and the metrics
     // were never computed at all, so the card rendered blank.
+    unit = parseReturnsUnit(
+      (analytics?.data_quality_flags as { native_unit?: unknown } | null | undefined)
+        ?.native_unit,
+    );
     const rows = resolveDailyReturnSeries(
       analytics?.daily_returns,
       analytics?.returns_series,
@@ -219,7 +235,9 @@ export async function GET(
         }}
       >
         <div style={{ fontSize: 18, letterSpacing: 4, textTransform: "uppercase", color: "#64748B" }}>
-          Quantalyze · Institutional Factsheet
+          {unit == null
+            ? "Quantalyze · Institutional Factsheet"
+            : `Quantalyze · Institutional Factsheet · Returns in ${unit}`}
         </div>
         <div style={{ marginTop: 24, fontSize: 80, fontWeight: 700, lineHeight: 1, fontFamily: "serif" }}>
           {name}
@@ -231,7 +249,7 @@ export async function GET(
         )}
         <div style={{ marginTop: 48, display: "flex", gap: 56 }}>
           <Stat label="Sharpe" value={fmtNum(sharpe)} />
-          <Stat label="CAGR" value={fmtPct(cagr)} tone={cagr >= 0 ? "pos" : "neg"} />
+          <Stat label={withUnit("CAGR", unit)} value={fmtPct(cagr)} tone={cagr >= 0 ? "pos" : "neg"} />
           <Stat label="Max DD" value={fmtPct(maxDd)} tone="neg" />
         </div>
         <div style={{ marginTop: "auto", display: "flex", alignItems: "center", justifyContent: "space-between" }}>

@@ -72,7 +72,7 @@ vi.mock("@/lib/queries", () => ({
   readPublicVerificationSignals: vi.fn(),
 }));
 
-import FactsheetV2Page from "./page";
+import FactsheetV2Page, { generateMetadata } from "./page";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { readPublicVerificationSignals } from "@/lib/queries";
@@ -268,6 +268,59 @@ describe("WR-02 — the public factsheet cache is keyed by the analytics run it 
 
   it("KEY SHAPE: the key is the shape version, the id and computed_at, and nothing viewer-dependent", async () => {
     await request({ computed_at: T0, computation_status: "complete", daily_returns: CASH_DAILY });
-    expect(cacheKeys).toEqual([["factsheet-v2-payload-v11", STRATEGY_ID, T0]]);
+    expect(cacheKeys).toEqual([["factsheet-v2-payload-v12", STRATEGY_ID, T0]]);
+  });
+});
+
+describe("164.6.6.2-07 - the share card link carries the strategy's unit as a cache key", () => {
+  /** The metadata probe: the published strategy row with its analytics embed. */
+  function mockMetadataClient(analytics: unknown) {
+    const chain = {
+      select: () => chain,
+      eq: () => chain,
+      maybeSingle: () =>
+        Promise.resolve({
+          data: {
+            id: STRATEGY_ID,
+            name: "Synthetic Published",
+            codename: null,
+            description: null,
+            disclosure_tier: "exploratory",
+            strategy_analytics: analytics,
+          },
+          error: null,
+        }),
+    };
+    return { from: () => chain };
+  }
+
+  async function ogUrl(analytics: unknown) {
+    vi.mocked(createClient).mockResolvedValue(mockMetadataClient(analytics) as never);
+    const meta = await generateMetadata({ params: Promise.resolve({ id: STRATEGY_ID }) });
+    const images = meta.openGraph?.images as Array<{ url: string }>;
+    const twitter = meta.twitter?.images as string[];
+    // Both unfurl surfaces must name the same URL.
+    expect(twitter[0]).toBe(images[0].url);
+    return images[0].url;
+  }
+
+  it("a BTC strategy's card URL ends ?u=BTC (object embed and array embed)", async () => {
+    expect(await ogUrl({ data_quality_flags: { native_unit: "BTC" } })).toBe(
+      `/api/og/factsheet/${STRATEGY_ID}?u=BTC`,
+    );
+    expect(await ogUrl([{ data_quality_flags: { native_unit: "BTC" } }])).toBe(
+      `/api/og/factsheet/${STRATEGY_ID}?u=BTC`,
+    );
+  });
+
+  it("a USD strategy's card URL is exactly what it was before this phase", async () => {
+    expect(await ogUrl({ data_quality_flags: {} })).toBe(`/api/og/factsheet/${STRATEGY_ID}`);
+    expect(await ogUrl(null)).toBe(`/api/og/factsheet/${STRATEGY_ID}`);
+  });
+
+  it("a malformed unit never reaches the URL", async () => {
+    expect(await ogUrl({ data_quality_flags: { native_unit: "b!tc&x=1" } })).toBe(
+      `/api/og/factsheet/${STRATEGY_ID}`,
+    );
   });
 });
