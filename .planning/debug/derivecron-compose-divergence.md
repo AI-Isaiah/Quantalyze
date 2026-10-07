@@ -82,3 +82,38 @@ files_changed:
   - analytics-service/services/allocator_equity_derive.py
   - analytics-service/tests/test_allocator_equity_self_check.py
 post_fix_note: "That key carries out_of_window_flows=1 (a flow dated outside its return window; BLOCKING OUT_OF_WINDOW_FLOW), so after the fix the compose ends done with an untrustworthy curve rather than failed_final. That is existing, named behaviour, not this defect." 
+
+## Follow-up 1: the out_of_window_flows=1 on the same key (2026-10-07)
+
+status: decision_needed (no code changed)
+
+### Which flow
+- One DEPOSIT (positive sign), dated the UTC day immediately BEFORE the key's first return day (first return day 2023-06-28, last 2026-10-07; window has 10 interior missing days).
+- Source: the key's `allocator_equity_derived` `key_inputs:<key>` row, `payload.flows` (written by the key-mode derive epilogue from the Deribit transaction-log crawl, `report.dated_external_flows`). Not a stored raw venue row.
+- Size: 0.46 of the replayed level on that day. It is the key's earliest flow.
+
+### Is the date real
+- No stored raw venue record exists to check it against: `trades` / `funding_fees` hold 0 rows for this key (it is not linked to any strategy through `strategy_keys`), and no table stores the raw Deribit ledger. A venue-side check needs a live crawl (key decryption, exchange I/O), out of scope for a read-only pass.
+- Indirect evidence that the date is real and correctly stamped: the deposit is the first ledger event, and the return on that day is undefined BY CONSTRUCTION. `chain_linked_twr` (nav_twr) breaks day 0 when the prior capital is 0 (`negative_nav_guard`), the row is not persisted, so `csv_daily_returns` starts the next day. The same 10 interior missing days are all flow days (flow-dominated guard), the same mechanism.
+- It sits BEFORE the first return day (adjacent), not after the last, not in a gap.
+
+### Is the window wrong, or the date mis-stamped
+- Not a crawl bound: Deribit is `full_history=True` (txn-log reaches inception) and the native core's inception gate passed for this key.
+- Not a timezone / settlement shift: interior flows line up with interior return days, and the population signature below is exactly "one day before" for every Deribit key.
+- The window is "wrong" only in the sense that the compose infers it from persisted return rows, and the writer never persists the funding day's (undefined) return.
+
+### Population (PROD, read only)
+- Anchored keys with returns and flows: deribit 7/7 and mt5 7/7 have their FIRST flow before the first return day (deribit 7/7 exactly one day before; mt5 4/7 one day before, the rest a contiguous 2-day run). bybit 2 and okx 6 have no flows at all.
+- So OUT_OF_WINDOW_FLOW (BLOCKING) fires on every flow-bearing key in PROD. In this allocator it fires on all 5 anchored keys, so the book cannot read ready even with this key removed.
+
+### Independent check: does the curve reconcile to zero capital at inception
+Capital before the first flow, implied by the replay = level(first union day) - that day's flow, as a share of the window day-0 level:
+- the other 4 keys: -0.004, -0.000, -0.004, 0.000 (inception reconciles; the flag is a false positive there)
+- THIS key: 0.551. Its replayed early history does not reconcile to zero at inception. Together with a growth-of-a-dollar of ~14,668x over days 0..1024 and a largest daily return of +164%, its early levels are suspect. So for this key the BLOCKING verdict is right, for a different reason than the flag names.
+
+### Verdict
+Not a simple code defect with one correct fix. The flag's positional rule ("a flow outside [first, last] return day") cannot tell the legitimate inception-funding shape (its own docstring calls it legitimate) from a genuinely suspect pre-window flow, and fires 14/14. Re-defining what blocks is a trust-semantics choice, so options go to the founder:
+- A. Keep as is. Every flow-bearing deribit/mt5 book stays not ready.
+- B. (recommended) For pre-window flows on a contiguous run ending the day before the first return day, replace the positional test with the inception invariant: implied pre-history capital within a band of 0 means benign; outside the band is BLOCKING under a name that says so (e.g. inception_unreconciled). Non-adjacent pre-window flows and post-window flows keep OUT_OF_WINDOW_FLOW. Only for full-history venues (deribit; mt5 if its deal history is confirmed to reach inception). On today's PROD data: 4 keys unblock, this key stays blocked, now for the right reason. The band is a materiality call (clean keys measure <= 0.4%).
+- C. Writer-side provenance: persist the first-ledger day and the native inception-gate verdict in `key_inputs`; the compose takes its window start from it. Strongest provenance, more plumbing (derive epilogue + compose + payload shape).
+Separately: this key's early history (0.551 inception residual, ~14,668x growth) needs its own investigation before any option makes its book ready.
