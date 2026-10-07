@@ -1375,6 +1375,23 @@ true for 146 and half of 142–145, and **false for 141**.
 
 ## 🟡 FIX MID-TERM
 
+### SENTRY-UNSCOPED-TAG-01 — five pre-existing `sentry_sdk.set_tag` calls label every later event the process sends (booked 2026-10-06)
+
+**Why it is open.** Phase 164.6.6.3 review WR-03 found that an unscoped `sentry_sdk.set_tag` on the
+worker path stays on the long-lived isolation scope, so every later event carries the tag. Its fix
+scoped the four MT5 validation sites this phase touches (`new_scope()`, the `job_worker
+_capture_read_failure` idiom). These five predate the phase and were left as found:
+`services/audit.py` (`audit_emit_permission_denied`, `audit_emit_transient`,
+`audit_emit_unexpected`), `routers/cron.py` (`prober_cadence_alert`) and `routers/internal.py`
+(`kek_unavailable`). The router sites may sit inside a per-request scope, which is unmeasured.
+
+**Owner: unrouted.** Founder to assign.
+
+**What closing it means.** Each site sets its tag on a `new_scope()` around its own capture, with a
+real-sdk test (recording `before_send`) showing the tag is absent from a later unrelated event.
+Regenerate the census with `grep -rn "sentry_sdk.set_tag(" --include='*.py' analytics-service`
+excluding tests.
+
 ### MT5-UNKNOWN-BROKER-SERVER-HANG-01 — an MT5 key on a broker server the terminals do not know hangs until timeout (booked 2026-10-05, Phase 164.6.6.1 live check)
 
 **Why it is open.** Three wizard validations of an account at a broker new to the terminals on 2026-10-05 each hung in the
