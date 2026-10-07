@@ -317,3 +317,25 @@ describe("StrategyV2Shell — Phase 14b-06 Task 2 wiring", () => {
     ]);
   });
 });
+
+describe("StrategyV2Shell - returns unit wiring (164.6.6.2-07)", () => {
+  it("passes the parsed native unit to the headline panel, and null when there is none", () => {
+    render(<StrategyV2Shell detail={FIXTURE} />);
+    expect(captured.headline.returnsUnit).toBeNull();
+
+    const withFlags = (flags: unknown): StrategyV2Detail => ({
+      ...FIXTURE,
+      panel6Inputs: {
+        ...FIXTURE.panel6Inputs,
+        data_quality_flags: flags as StrategyV2Detail["panel6Inputs"]["data_quality_flags"],
+      },
+    });
+
+    render(<StrategyV2Shell detail={withFlags({ native_unit: "BTC" })} />);
+    expect(captured.headline.returnsUnit).toBe("BTC");
+
+    // A malformed value is never forwarded as label text.
+    render(<StrategyV2Shell detail={withFlags({ native_unit: "btc<script>" })} />);
+    expect(captured.headline.returnsUnit).toBeNull();
+  });
+});

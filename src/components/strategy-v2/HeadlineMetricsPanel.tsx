@@ -8,6 +8,7 @@ import { RollingMetrics } from "@/components/charts/RollingMetrics";
 import { fetchStrategyLazyMetricsClient } from "@/lib/queries-client";
 import { SegmentedControl } from "./SegmentedControl";
 import { PartialDataBanner } from "./PartialDataBanner";
+import { withUnit } from "@/lib/factsheet/returns-unit";
 
 interface HeadlineMetricsPanelProps {
   /** Strategy id used by the Log returns lazy fetch (panel 2 is eager-mounted; no observer). */
@@ -23,6 +24,14 @@ interface HeadlineMetricsPanelProps {
    */
   rolling_metrics: Record<string, { date: string; value: number }[]> | null;
   history_days: number;
+  /**
+   * Phase 164.6.6.2 plan 07 (D-09, D-10) - the unit this strategy's returns are
+   * measured in (`StrategyV2Shell` parses it from `data_quality_flags.native_unit`
+   * through `parseReturnsUnit`), or null/absent for the USD family. A unit
+   * relabels the return cells and the equity heading, and removes the BTC
+   * overlay: BTC drawn against a series that is already BTC is a flat line.
+   */
+  returnsUnit?: string | null;
 }
 
 const EM_DASH = "—";
@@ -87,6 +96,7 @@ export function HeadlineMetricsPanel({
   panel2Equity,
   rolling_metrics,
   history_days,
+  returnsUnit = null,
 }: HeadlineMetricsPanelProps) {
   const [activeView, setActiveView] = useState<ActiveView>("cumulative");
   const [showBenchmark, setShowBenchmark] = useState<boolean>(true); // default-ON
@@ -167,7 +177,10 @@ export function HeadlineMetricsPanel({
 
   const showKpiBanner = history_days < 30;
   const showChartBanner = history_days < 7 || !panel2Equity.series;
-  const benchmarkAvailable = panel2Equity.btc_overlay !== null;
+  // D-10: a unit strategy has no BTC overlay. Gating `benchmarkAvailable` (not
+  // the two chart props) removes the checkbox, the overlay and the tooltip entry
+  // through the one existing path, so the frozen chart files are not touched.
+  const benchmarkAvailable = panel2Equity.btc_overlay !== null && returnsUnit == null;
 
   const segOptions = [
     { id: "cumulative", label: "Cumulative" },
@@ -187,7 +200,11 @@ export function HeadlineMetricsPanel({
       id="panel-headline-equity"
       tabIndex={-1}
       data-panel="headline-equity"
-      aria-label="Headline metrics & equity vs BTC"
+      aria-label={
+        returnsUnit == null
+          ? "Headline metrics & equity vs BTC"
+          : `Headline metrics & equity in ${returnsUnit}`
+      }
       className="mt-8 rounded-lg border border-border bg-surface p-6 shadow-card"
     >
       <h2 className="text-base font-semibold text-text-primary">Headline metrics</h2>
@@ -202,7 +219,7 @@ export function HeadlineMetricsPanel({
       ) : (
         <dl className="mt-4 grid grid-cols-6 gap-3 max-md:grid-cols-3">
           <div>
-            <dt className="text-xs font-normal text-text-muted">Cum return</dt>
+            <dt className="text-xs font-normal text-text-muted">{withUnit("Cum return", returnsUnit)}</dt>
             <dd
               className={`mt-1 text-lg font-semibold tabular-nums ${signColor(
                 panel2Headline.cumulative_return,
@@ -212,7 +229,7 @@ export function HeadlineMetricsPanel({
             </dd>
           </div>
           <div>
-            <dt className="text-xs font-normal text-text-muted">CAGR</dt>
+            <dt className="text-xs font-normal text-text-muted">{withUnit("CAGR", returnsUnit)}</dt>
             <dd
               className={`mt-1 text-lg font-semibold tabular-nums ${signColor(
                 panel2Headline.cagr,
@@ -251,7 +268,7 @@ export function HeadlineMetricsPanel({
       <hr className="my-4 border-t border-border" />
 
       <h3 className="text-xs font-normal uppercase tracking-wider text-text-secondary">
-        Equity vs BTC
+        {returnsUnit == null ? "Equity vs BTC" : withUnit("Equity", returnsUnit)}
       </h3>
 
       <div className="mt-4 flex items-center justify-between">
