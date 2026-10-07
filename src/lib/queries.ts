@@ -14,7 +14,10 @@ import {
   type SeriesState,
 } from "./closed-sets";
 import { isWorkingHolder, NOT_WORKING_SYNC_STATUSES } from "@/lib/account-share-note";
-import { resolveDailyReturnSeries } from "@/lib/factsheet/resolve-series";
+import {
+  curveMethodFromFlags,
+  resolveDailyReturnSeries,
+} from "@/lib/factsheet/resolve-series";
 // Phase 169.4 plan 02 (D-69, D-77): the ONE BTC read, from its server-safe home.
 // Never from `@/lib/factsheet/fetch-and-build-payload`: that module pulls
 // `server-only` (composite-read-path.ts) into every test importing this file.
@@ -2313,7 +2316,8 @@ export async function getOwnCapitalStrategies(
         sharpe,
         volatility,
         max_drawdown,
-        returns_series
+        returns_series,
+        data_quality_flags
       )
       `,
     )
@@ -2352,15 +2356,20 @@ export async function getOwnCapitalStrategies(
     let strategy_analytics: OwnCapitalStrategy["strategy_analytics"] = null;
     let mtd: number | null = null;
     if (analyticsObj) {
+      // 164.6.6.2.2 D-05: `data_quality_flags` is selected ONLY so the curve is
+      // read by the row's own method; the raw blob is stripped like the series
+      // columns, so it never crosses the RSC boundary (T-111-03).
       const {
         returns_series: _rs,
         daily_returns: _dr,
+        data_quality_flags: _dqf,
         ...analyticsRest
       } = analyticsObj;
       mtd = computeMtd(
         resolveDailyReturnSeries(
           analyticsObj.daily_returns,
           analyticsObj.returns_series,
+          curveMethodFromFlags(analyticsObj.data_quality_flags),
         ),
       );
       strategy_analytics =
@@ -5450,7 +5459,7 @@ export const getMyAllocationDashboard = cache(
       // (T-111-03: degraded-member venue detail never ships).
       const analyticsObj = (analytics ?? null) as Record<string, unknown> | null;
       const dqf = analyticsObj?.data_quality_flags as
-        | { composite?: unknown; native_unit?: unknown }
+        | { composite?: unknown; native_unit?: unknown; cumulative_method?: unknown }
         | null
         | undefined;
       const is_composite = dqf?.composite === true;
@@ -5474,6 +5483,8 @@ export const getMyAllocationDashboard = cache(
         ? resolveDailyReturnSeries(
             analyticsObj.daily_returns,
             analyticsObj.returns_series,
+            // 164.6.6.2.2 D-05: the curve is read by the row's own method.
+            curveMethodFromFlags(dqf),
           )
         : [];
       // SFH-1 — converted once, here, so the payload series and the unpriced

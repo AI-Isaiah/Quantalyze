@@ -20,7 +20,10 @@ import { adaptPortfolioAnalytics } from "@/lib/portfolio-analytics-adapter";
 import { computeFreshness } from "@/lib/freshness";
 import { extractAnalytics, seriesEndOf } from "@/lib/utils";
 import { isRankableAnalyticsRow } from "@/lib/closed-sets";
-import { resolveDailyReturnSeries } from "@/lib/factsheet/resolve-series";
+import {
+  curveMethodFromFlags,
+  resolveDailyReturnSeries,
+} from "@/lib/factsheet/resolve-series";
 import { readBtcCloses } from "@/lib/factsheet/benchmark-source";
 import { convertNativeReturnsToUsd } from "@/lib/factsheet/native-to-usd";
 import { parseReturnsUnit } from "@/lib/factsheet/returns-unit";
@@ -252,7 +255,11 @@ function buildWealthPoints(
   }
   // CSV rows: only daily_returns. Resolve through the shared resolver, then
   // fold to wealth (the cumprod precedent, scenario-blend-adapter.ts:136-140).
-  const daily = resolveDailyReturnSeries(a.daily_returns, a.returns_series);
+  const daily = resolveDailyReturnSeries(
+    a.daily_returns,
+    a.returns_series,
+    curveMethodFromFlags(a.data_quality_flags),
+  );
   if (daily.length === 0) return null;
   let c = 1;
   return daily.map((p) => {
@@ -300,7 +307,11 @@ function buildUsdWealthPoints(
   unit: string,
   btc: Pick<BtcCloses, "prices" | "dropped"> | null,
 ): { date: string; value: number }[] | null {
-  const daily = resolveDailyReturnSeries(a.daily_returns, a.returns_series);
+  const daily = resolveDailyReturnSeries(
+    a.daily_returns,
+    a.returns_series,
+    curveMethodFromFlags(a.data_quality_flags),
+  );
   const usd = convertNativeReturnsToUsd(daily, unit, btc);
   if (usd.length === 0) return null;
   let c = 1;
