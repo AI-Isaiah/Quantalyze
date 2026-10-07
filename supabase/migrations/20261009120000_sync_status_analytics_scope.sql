@@ -472,6 +472,25 @@ BEGIN
      WHERE f.strategy_id = p_strategy_id
        AND f.status = 'failed_final'
        AND f.kind NOT IN ('sync_funding', 'poll_positions', 'reconcile_strategy', 'compute_intro_snapshot')
+       AND NOT (
+         f.kind = 'process_key_long'
+         AND EXISTS (
+           SELECT 1
+             FROM compute_jobs c1
+            WHERE c1.strategy_id = f.strategy_id
+              AND c1.kind = 'derive_broker_dailies'
+              AND c1.status = 'done'
+              AND c1.created_at > f.created_at
+         )
+         AND EXISTS (
+           SELECT 1
+             FROM compute_jobs c2
+            WHERE c2.strategy_id = f.strategy_id
+              AND c2.kind = 'compute_analytics_from_csv'
+              AND c2.status = 'done'
+              AND c2.created_at > f.created_at
+         )
+       )
        AND NOT EXISTS (
          SELECT 1
            FROM compute_jobs d
@@ -957,6 +976,8 @@ DECLARE
   v_side_kinds                 TEXT[];
   v_counting_in_side           BOOLEAN;
   v_side_list_ok               BOOLEAN;
+  v_d06_clause_ok              BOOLEAN;
+  v_pkl_sites                  INTEGER;
 BEGIN
   -- ======================================================================
   -- ⭐ COMMENT-STRIP FIRST (Phase 164.5.2.1 review, SFH L-1). Every anchor in
@@ -1682,6 +1703,27 @@ BEGIN
   v_side_list_ok := COALESCE(v_side_lists = 1 AND v_side_kinds = ARRAY['compute_intro_snapshot', 'poll_positions', 'reconcile_strategy', 'sync_funding'], FALSE);
   IF NOT v_side_list_ok THEN
     RAISE EXCEPTION 'status-bridge: the side-kind NOT-IN list is not the four kinds D-05 names, spelled once. Found % spelling(s) with literals %; expected exactly one list of compute_intro_snapshot, poll_positions, reconcile_strategy and sync_funding. A list that gains a literal hides a failure, one that loses a literal pins an analytics status failed over a job that wrote no analytic, and a second spelling is how two lists drift apart.', v_side_lists, v_side_kinds;
+  END IF;
+
+  -- (xvii) D-06, the supersession as ONE whole expression: a failed
+  -- process_key_long is dropped only when BOTH a later done derive AND a later done
+  -- compute exist for the same strategy, each compared strictly on created_at. One
+  -- regex over the entire clause, never a fragment: a fragment anchor is satisfied
+  -- by this file's own header prose. The clause reads no job metadata, so the
+  -- request-derived source marker cannot influence supersession.
+  v_d06_clause_ok := v_body ~ 'NOT\s*\(\s*f\.kind\s*=\s*''process_key_long''\s+AND\s+EXISTS\s*\(\s*SELECT\s+1\s+FROM\s+compute_jobs\s+c1\s+WHERE\s+c1\.strategy_id\s*=\s*f\.strategy_id\s+AND\s+c1\.kind\s*=\s*''derive_broker_dailies''\s+AND\s+c1\.status\s*=\s*''done''\s+AND\s+c1\.created_at\s*>\s*f\.created_at\s*\)\s+AND\s+EXISTS\s*\(\s*SELECT\s+1\s+FROM\s+compute_jobs\s+c2\s+WHERE\s+c2\.strategy_id\s*=\s*f\.strategy_id\s+AND\s+c2\.kind\s*=\s*''compute_analytics_from_csv''\s+AND\s+c2\.status\s*=\s*''done''\s+AND\s+c2\.created_at\s*>\s*f\.created_at\s*\)\s*\)';
+  IF NOT v_d06_clause_ok THEN
+    RAISE EXCEPTION 'status-bridge: the live_failures CTE does not carry the D-06 supersession as one whole expression. A failed process_key_long may be dropped from the failure set only when BOTH a derive_broker_dailies job AND a compute_analytics_from_csv job for the same strategy are done with created_at strictly later than the failure (and nothing else). Weakening it either leaves a recovered strategy failed (the AI-FX-35 defect) or, worse, hides a genuine failure behind a half-finished chain.';
+  END IF;
+
+  -- (xviii) the process_key_long literal occurs at exactly ONE code site. Measured
+  -- on the comment-stripped body of the file this one re-bases: zero sites, so
+  -- exactly one after this migration. A second site is how the exemption gets
+  -- copied onto another kind by a copy edit.
+  SELECT count(*) INTO v_pkl_sites
+    FROM regexp_matches(v_body, '''process_key_long''', 'g');
+  IF v_pkl_sites <> 1 THEN
+    RAISE EXCEPTION 'status-bridge: the body names the process_key_long literal at % code site(s), not 1. The chain supersession is scoped to that one kind (D-04: a later done of a different kind never masks a real analytics failure); a second site extends it to another kind.', v_pkl_sites;
   END IF;
 
   RAISE NOTICE 'Migration 20261009120000: sync_strategy_analytics_status re-based on its latest body (STATUSBRIDGE, Phase 164.6.6.3.4); every carried anchor passed on the new comment-stripped body, and this file''s own anchors passed after them.';
