@@ -176,6 +176,7 @@ const ENV_KEYS = [
   "SENTRY_ORG_SLUG",
   "RESEND_API_KEY",
   "FOUNDER_LP_REPORT_TO",
+  "RESEND_ALERT_FROM",
 ] as const;
 
 describe("/api/cron/flag-monitor", () => {
@@ -189,6 +190,8 @@ describe("/api/cron/flag-monitor", () => {
     process.env.SENTRY_ORG_SLUG = "quantalyze";
     process.env.RESEND_API_KEY = "re_fake";
     process.env.FOUNDER_LP_REPORT_TO = "founder@example.com";
+    // D-12 (DOMAINONE): the alert sender has no fallback, so a send needs it set.
+    process.env.RESEND_ALERT_FROM = "Alerts <alerts@example.com>";
     sendMock.mockReset();
     sendMock.mockResolvedValue({ id: "email-id" });
     captureMock.mockClear();
