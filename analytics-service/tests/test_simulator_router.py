@@ -1961,9 +1961,9 @@ async def _simulate(sa_portfolio, sa_candidate, ps_data, closes):
     req = simulator_router.SimulatorRequest(
         portfolio_id="p-1", candidate_strategy_id="c-1", user_id="u-btc"
     )
-    with patch("routers.simulator.get_supabase", return_value=sb), \
-         patch("routers.simulator.get_btc_closes", closes_mock), \
-         patch("routers.simulator.log_audit_event"):
+    with patch.object(simulator_router, "get_supabase", return_value=sb), \
+         patch.object(simulator_router, "get_btc_closes", closes_mock), \
+         patch.object(simulator_router, "log_audit_event"):
         result = await simulator_router.portfolio_simulator.__wrapped__(request, req)
     return result, closes_mock
 

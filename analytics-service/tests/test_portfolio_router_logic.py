@@ -565,9 +565,9 @@ async def _run_compute(ps: list[dict], sa: list[dict], closes: pd.Series | None)
         return None, True
 
     portfolio_mod._compute_semaphore = asyncio.Semaphore(3)
-    with patch("routers.portfolio.get_supabase", return_value=sb), \
-         patch("routers.portfolio.get_benchmark_returns", side_effect=_no_benchmark), \
-         patch("routers.portfolio.get_btc_closes", closes_mock):
+    with patch.object(portfolio_mod, "get_supabase", return_value=sb), \
+         patch.object(portfolio_mod, "get_benchmark_returns", side_effect=_no_benchmark), \
+         patch.object(portfolio_mod, "get_btc_closes", closes_mock):
         await portfolio_mod._compute_portfolio_analytics("portfolio-1")
     return tables, closes_mock
 
@@ -723,10 +723,10 @@ class TestOptimizerAndBridgeScoreBtcInUsd:
 
         closes = AsyncMock(return_value=_BTC_CLOSES)
         req = MagicMock(portfolio_id="pf", user_id="u", weights=None)
-        with patch("routers.portfolio.get_supabase", return_value=_FakeSupabase(_blend_tables())), \
-             patch("routers.portfolio.get_btc_closes", closes), \
-             patch("routers.portfolio.find_improvement_candidates", side_effect=_spy), \
-             patch("routers.portfolio.log_audit_event"):
+        with patch.object(portfolio_mod, "get_supabase", return_value=_FakeSupabase(_blend_tables())), \
+             patch.object(portfolio_mod, "get_btc_closes", closes), \
+             patch.object(portfolio_mod, "find_improvement_candidates", side_effect=_spy), \
+             patch.object(portfolio_mod, "log_audit_event"):
             await portfolio_mod.portfolio_optimizer.__wrapped__(MagicMock(), req)
 
         assert _d1(seen["p"]["btc-b"]) == pytest.approx(0.21, abs=1e-12)  # not the raw 0.10
@@ -745,10 +745,10 @@ class TestOptimizerAndBridgeScoreBtcInUsd:
 
         closes = AsyncMock(return_value=_BTC_CLOSES)
         req = MagicMock(portfolio_id="pf", user_id="bridge-user-1", underperformer_strategy_id="btc-b")
-        with patch("routers.portfolio.get_supabase", return_value=_FakeSupabase(_blend_tables())), \
-             patch("routers.portfolio.get_btc_closes", closes), \
+        with patch.object(portfolio_mod, "get_supabase", return_value=_FakeSupabase(_blend_tables())), \
+             patch.object(portfolio_mod, "get_btc_closes", closes), \
              patch("services.bridge_scoring.find_replacement_candidates", side_effect=_spy), \
-             patch("routers.portfolio.log_audit_event"):
+             patch.object(portfolio_mod, "log_audit_event"):
             await portfolio_mod.portfolio_bridge.__wrapped__(MagicMock(), req)
 
         assert _d1(seen["p"]["btc-b"]) == pytest.approx(0.21, abs=1e-12)
@@ -760,9 +760,9 @@ class TestOptimizerAndBridgeScoreBtcInUsd:
     async def test_bridge_incumbent_with_no_price_source_is_no_data_not_raw(self):
         closes = AsyncMock(return_value=None)
         req = MagicMock(portfolio_id="pf", user_id="bridge-user-2", underperformer_strategy_id="btc-b")
-        with patch("routers.portfolio.get_supabase", return_value=_FakeSupabase(_blend_tables())), \
-             patch("routers.portfolio.get_btc_closes", closes), \
-             patch("routers.portfolio.log_audit_event"):
+        with patch.object(portfolio_mod, "get_supabase", return_value=_FakeSupabase(_blend_tables())), \
+             patch.object(portfolio_mod, "get_btc_closes", closes), \
+             patch.object(portfolio_mod, "log_audit_event"):
             out = await portfolio_mod.portfolio_bridge.__wrapped__(MagicMock(), req)
         assert out["status"] == "incumbent_no_data"
         assert out["partial_data"] is True
