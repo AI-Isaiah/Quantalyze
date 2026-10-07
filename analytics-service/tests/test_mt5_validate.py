@@ -2245,7 +2245,7 @@ async def test_mt5_missing_gateway_env_is_permanent_500_and_secret_free(
         await _call(router, _make_req(api_key="123456", api_secret="s3cr3t-pw", passphrase="MyBroker-Live"))
 
     assert ei.value.status_code == 500
-    assert ei.value.detail["code"] == "MT5_GATEWAY_UNCONFIGURED"
+    assert ei.value.detail["code"] == "MT5_VALIDATION_UNCONFIGURED"
     assert ei.value.detail["dependency"] == "mt5-gateway"
     assert ei.value.detail["retryable"] is False
     # R-1: a permanent fault never advertises a wait.
@@ -3334,7 +3334,7 @@ async def test_an_absent_validation_endpoint_refuses_and_never_falls_back(
         await _call(router, _make_req())
 
     assert ei.value.status_code == 500
-    assert ei.value.detail["code"] == "MT5_GATEWAY_UNCONFIGURED"
+    assert ei.value.detail["code"] == "MT5_VALIDATION_UNCONFIGURED"
     assert ei.value.detail["retryable"] is False
     assert seen == [], f"a lease was taken on a refused validation: {seen!r}"
     factory.assert_not_called()
@@ -3356,7 +3356,7 @@ async def test_unset_validation_endpoint_fires_the_d05_alert_on_the_wizard_path(
         for _ in range(2):
             with pytest.raises(HTTPException) as ei:
                 await _call(router, _make_req())
-            assert ei.value.detail["code"] == "MT5_GATEWAY_UNCONFIGURED"
+            assert ei.value.detail["code"] == "MT5_VALIDATION_UNCONFIGURED"
 
     assert spy.capture_message.call_count == 1, (
         "the D-05 alert did not reach Sentry exactly once for two refusals"
@@ -3428,7 +3428,7 @@ async def test_a_raising_sentry_call_does_not_change_the_wizard_refusal(
         await _call(router, _make_req())
 
     assert ei.value.status_code == 500
-    assert ei.value.detail["code"] == "MT5_GATEWAY_UNCONFIGURED"
+    assert ei.value.detail["code"] == "MT5_VALIDATION_UNCONFIGURED"
     assert spy.capture_message.call_count == 1
 
 
@@ -3572,6 +3572,8 @@ def test_the_d05_alert_text_carries_no_env_value(monkeypatch, caplog):
 # `breaker:mt5-gateway`: a permanent misconfiguration reported as transient, the
 # exact class the arm's own comment describes. The reader answering None keeps the
 # refusal on plan 04's 500 MT5_GATEWAY_UNCONFIGURED + D-05 alert disposition.
+# CORRECTED 2026-10-07 (Phase 164.6.6.3.2 D-01): that 500 now answers
+# MT5_VALIDATION_UNCONFIGURED; MT5_GATEWAY_UNCONFIGURED is the D-31 arm's alone.
 # The host is FABRICATED and public-shaped; nothing here opens a socket.
 # --------------------------------------------------------------------------- #
 
@@ -3598,7 +3600,7 @@ async def test_a_public_validation_gateway_host_is_refused_as_misconfiguration(
         f"a public host must be a permanent misconfiguration, got "
         f"{ei.value.status_code}: a 503 here would vote on the gateway breaker"
     )
-    assert ei.value.detail["code"] == "MT5_GATEWAY_UNCONFIGURED"
+    assert ei.value.detail["code"] == "MT5_VALIDATION_UNCONFIGURED"
     assert ei.value.detail["retryable"] is False
     factory.assert_not_called()
     assert seen == [], f"a lease was taken on a refused validation: {seen!r}"

@@ -134,6 +134,25 @@ export type WizardErrorCode =
   // doing. `KEY_SIGN_IN_FAILED` still covers a LISTED server whose login is refused
   // (D-11); the two never share a path.
   | "KEY_MT5_SERVER_UNKNOWN"
+  // Phase 164.6.6.3.2 / item 7 (D-01, D-07) — the FIFTH MT5 sibling: OUR connection
+  // for checking MT5 keys is not set up. Wire `MT5_VALIDATION_UNCONFIGURED` (500,
+  // nested `service_error`, `retryable=False`, `dependency="mt5-gateway"`) maps here
+  // through `VENUE_WIRE_CODE_TO_VERDICT`. THREE env-gap arms of
+  // `_validate_mt5_key_probe` answer it: the validation endpoint unset or malformed,
+  // the empty known-server list, and the inverted IPC timeout chain. It is reached
+  // from create-with-key, composite/add-key and rotate-secret (`rotate_key_secret`
+  // runs the same probe).
+  // NOT RECOVERABLE: every arm fails identically until an operator acts, so the card
+  // offers no Retry (`actions` carries neither `clear_and_retry` nor
+  // `try_another_key`, and `buildEnvelope` derives `recoverable: false`).
+  // IN `OUR_DEFECT_KEY_ERROR_CODES` (D-07): the fault is our operator configuration,
+  // and these three emitters paged through `SEAM_INTERNAL_FAULT` before this code
+  // existed. Leaving the new code out would silently un-page them (the 164.6.5 WR-02
+  // lesson).
+  // ⛔ The D-31 `undetermined` arm does NOT come here. There the terminal ran and
+  // refused to classify, so "not set up" would be false; that arm keeps wire
+  // `MT5_GATEWAY_UNCONFIGURED` and renders `SEAM_INTERNAL_FAULT`.
+  | "KEY_MT5_VALIDATION_UNCONFIGURED"
   // Phase 142.2 / MT5-04 (D-05) — THE FOUR CAUSES `KEY_INVALID_FORMAT` USED TO
   // SWALLOW. The two wizard connect routes (`strategies/create-with-key` and
   // `strategies/composite/add-key`) answered ONE code at TWELVE guards each —
@@ -960,6 +979,11 @@ export type WizardErrorCode =
   //     classify, so "we stopped before sending the request" is false at one of
   //     the four. A member that is true at three of four emitters is exactly the
   //     shape this milestone exists to stop shipping.
+  //     ⛔ CORRECTED 2026-10-07 (Phase 164.6.6.3.2 D-01): the three that fire before
+  //     the gateway is contacted no longer answer this wire code. They answer
+  //     `MT5_VALIDATION_UNCONFIGURED` and render `KEY_MT5_VALIDATION_UNCONFIGURED`
+  //     ("not set up"), so only the D-31 arm still arrives as
+  //     `MT5_GATEWAY_UNCONFIGURED` here. The paragraph above is kept as lineage.
   //
   // WHAT IT DELIBERATELY DOES NOT SAY. It makes no claim about WHERE the fault
   // stopped us, because that is the clause that differs across the three codes.
@@ -1944,6 +1968,41 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     fixRequires: [REQUIRES_CONNECT_SURFACE, null, REQUIRES_CONNECT_SURFACE],
     docsHref: "/security#readonly-key",
     actions: ["clear_and_retry", "request_call"],
+  },
+
+  // Phase 164.6.6.3.2 / item 7 (D-01, D-05, D-07) — our connection for checking MT5
+  // keys is missing part of its setup. Wire `MT5_VALIDATION_UNCONFIGURED` (500) maps
+  // here. The copy is STATIC and must stay true at EVERY emitter that reaches it
+  // (endpoint unset or malformed, empty known-server list, inverted timeout chain):
+  // it names no env var, host, port, route or status, carries no email address
+  // (D-05: "the contact form"), and says nothing about which of the three arms fired.
+  //
+  // "We have been alerted" is a CLAIM, so it is backed at all three arms by a Sentry
+  // capture and pinned by a source-reading test (`[164.6.6.3.2 D-07]` in
+  // `wizardErrors.test.ts`); the `been alerted` fragment is forbidden everywhere else.
+  //
+  // ⚠️ Slot 2 ("Your draft is saved.") is gated to the connect step: the rotate-secret
+  // dialog has no draft. Slot 1 asks for the correlation id; `expand_log` opens it.
+  KEY_MT5_VALIDATION_UNCONFIGURED: {
+    title: "Our MetaTrader connection is not set up yet.",
+    cause:
+      "The connection we use to check MT5 keys is missing part of its setup on our side. This is ours to fix: it is not your key, your password or your broker server, and nothing was stored. We have been alerted.",
+    fix: [
+      "Come back to this later. Submitting the same key now reaches the same place.",
+      "If it still fails then, send the correlation id below through the contact form.",
+      "Your draft is saved.",
+    ],
+    // Index-aligned to `fix`. Slot 2 is a claim about the wizard draft behind the
+    // panel — see the ⚠️ note above.
+    fixRequires: [null, null, REQUIRES_CONNECT_SURFACE],
+    docsHref: "/security",
+    // ⚠️ NO `clear_and_retry` AND NO `try_another_key` — the two members of
+    // `RECOVERABLE_ACTIONS` (src/lib/envelope.ts). Same reasoning as
+    // `SEAM_INTERNAL_FAULT`: the fault repeats until an operator acts, so a Retry
+    // control would offer something that cannot work, and its absence derives
+    // `recoverable: false`. `request_call` keeps a way out; `expand_log` opens the
+    // correlation id the second fix line asks for.
+    actions: ["request_call", "expand_log"],
   },
 
   // ── Phase 142.2 / MT5-04 (D-05) — the four honest causes ──────────────────
@@ -4005,6 +4064,10 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
   //      one clause down:
   //        · `MT5_GATEWAY_UNCONFIGURED` — true. An unset env, a malformed port
   //          and the D-31 refusal all re-run identically until an operator acts.
+  //          ⛔ CORRECTED 2026-10-07 (Phase 164.6.6.3.2 D-01): the unset env and the
+  //          malformed port now arrive as `MT5_VALIDATION_UNCONFIGURED`; of the
+  //          three, only the D-31 refusal still reaches this entry. The claim stays
+  //          true at it. Original kept as lineage.
   //        · `ADAPTER_INIT_FAILED` — FALSE at a third of its own declared cause
   //          set. The emitter's comment (`routers/exchange.py`) enumerates "a
   //          ccxt signature change, an ImportError on a missing extra or an
@@ -4867,6 +4930,12 @@ export const VENUE_WIRE_CODE_TO_VERDICT: ReadonlyMap<
   //     union-member comment for the per-emitter measurement. ⛔ Not
   //     `KEY_PROBE_FAILED`: it is recoverable, so it would render a Retry control
   //     against three faults that fail identically on every attempt.
+  //     ⛔ CORRECTED 2026-10-07 (Phase 164.6.6.3.2 D-01): three of
+  //     `MT5_GATEWAY_UNCONFIGURED`'s four emitters (unset or malformed endpoint, empty
+  //     known-server list, inverted timeout chain) now answer
+  //     `MT5_VALIDATION_UNCONFIGURED` and take `KEY_MT5_VALIDATION_UNCONFIGURED`,
+  //     below. Only the D-31 `undetermined` emitter still takes `SEAM_INTERNAL_FAULT`
+  //     through this row. The paragraph above is kept as lineage.
   //
   // ROSTER COST, measured rather than assumed. `SEAM_MISCONFIGURED` needs NO
   // roster edit at either key step: both read `recogniseSeamErrorCode` FIRST and
@@ -4986,6 +5055,14 @@ export const VENUE_WIRE_CODE_TO_VERDICT: ReadonlyMap<
   // `MT5_SERVER_UNKNOWN_DETAIL` in `services/closed_sets.py`). A minted member with no
   // row here is unreachable, and the user lands on `UNKNOWN`.
   ["MT5_SERVER_UNKNOWN", { code: "KEY_MT5_SERVER_UNKNOWN", status: 424 }],
+  // 164.6.6.3.2 / item 7 (D-01) — the three ENV-GAP arms of `_validate_mt5_key_probe`
+  // (endpoint unset or malformed, empty known-server list, inverted IPC timeout chain)
+  // answer this wire code at 500, and the row's status is the emitter's own. The D-31
+  // `undetermined` arm keeps `MT5_GATEWAY_UNCONFIGURED` above, which maps to
+  // `SEAM_INTERNAL_FAULT`: there the terminal ran and refused to classify, so "not set
+  // up" would be false. ⚠️ Same mechanism as the rows above: the table is resolved
+  // BEFORE the substring cascade, so a minted member with no row here is unreachable.
+  ["MT5_VALIDATION_UNCONFIGURED", { code: "KEY_MT5_VALIDATION_UNCONFIGURED", status: 500 }],
 ]);
 
 /**
@@ -5593,7 +5670,9 @@ export function classifyKeyValidationError(error: unknown): {
  * only when the fault is in code or configuration WE own — never a venue
  * refusal, a caller fault, a breaker trip or a timeout. `SEAM_INTERNAL_FAULT`
  * qualifies at all three of its wire codes (`MT5_GATEWAY_UNCONFIGURED`,
- * `ADAPTER_INIT_FAILED`, `INTERNAL`); `SEAM_MISCONFIGURED` never reaches this
+ * `ADAPTER_INIT_FAILED`, `INTERNAL`) (⛔ CORRECTED 2026-10-07, Phase 164.6.6.3.2:
+ * three of `MT5_GATEWAY_UNCONFIGURED`'s emitters moved to
+ * `KEY_MT5_VALIDATION_UNCONFIGURED`, which is a member below in its own right); `SEAM_MISCONFIGURED` never reaches this
  * check on the key routes (its wire codes are translated at the step, and the
  * classifier hands the route the wizard code directly), so it is deliberately
  * absent rather than forgotten — add it the day a key route can answer it.
@@ -5628,6 +5707,14 @@ export const OUR_DEFECT_KEY_ERROR_CODES: ReadonlySet<WizardErrorCode> =
     // excludes timeouts. That exclusion is for an upstream WE DO NOT own being
     // slow; this is our own terminal, and one wedge takes down every client.
     "KEY_MT5_TERMINAL_UNRESPONSIVE",
+    // 164.6.6.3.2 D-07. Our OPERATOR configuration: the validation endpoint, the
+    // known-server list or the timeout chain. Three emitters that paged through
+    // `SEAM_INTERNAL_FAULT` (via wire `MT5_GATEWAY_UNCONFIGURED`) now answer a wire
+    // code of their own, and leaving the new wizard code out of this set would
+    // silently un-page all three on every key route — the 164.6.5 WR-02 lesson,
+    // for the third time. The card tells the user "we have been alerted"; this
+    // membership is what makes the route-side half of that true.
+    "KEY_MT5_VALIDATION_UNCONFIGURED",
   ]);
 
 /**
@@ -5916,6 +6003,10 @@ const DASHBOARD_DIALOG_ROUTE_CODES: ReadonlyMap<
       //     unset/malformed MT5_VALIDATION_GATEWAY_HOST/PORT (Phase 164.6.6
       //     D-05: refused, never routed to the job terminal's
       //     MT5_GATEWAY_HOST/PORT).
+      //     ⛔ CORRECTED 2026-10-07 (Phase 164.6.6.3.2 D-01): that env cause now
+      //     answers wire MT5_VALIDATION_UNCONFIGURED and renders
+      //     KEY_MT5_VALIDATION_UNCONFIGURED (rostered below). Only the D-31
+      //     `undetermined` arm still reaches this row. Original kept as lineage.
       "KEY_RATE_LIMIT",
       "SEAM_INTERNAL_FAULT",
       // KEK_UNAVAILABLE (wire) already resolves to `SEAM_MISCONFIGURED`
@@ -5976,6 +6067,13 @@ const DASHBOARD_DIALOG_ROUTE_CODES: ReadonlyMap<
       // the connect-surface bullets, so this dialog (no draft, no form) shows Retry
       // and neither of those two lines.
       "KEY_MT5_SERVER_UNKNOWN",
+      // 164.6.6.3.2 D-01 — the three env-gap arms of `_validate_mt5_key_probe`, which
+      // `rotate_key_secret` runs, answer wire `MT5_VALIDATION_UNCONFIGURED` (500), and it
+      // reaches this route through `seamCode`. Omit this line and the membership check
+      // rejects the honest code and the dialog renders `UNKNOWN`, whose copy names no
+      // cause. The copy gates the draft bullet to the connect surface, so this dialog
+      // shows no Retry and no draft claim.
+      "KEY_MT5_VALIDATION_UNCONFIGURED",
     ]),
   ],
 ]);

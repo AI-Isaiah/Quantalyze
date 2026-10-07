@@ -789,6 +789,15 @@ const EXPECTED_EMITTED_CODES: readonly string[] = [
   // Python error_code with no TypeScript disposition falls through the
   // substring cascade, which is what this file exists to prevent.
   "MT5_VALIDATE_INVARIANT_VIOLATION",
+  // 164.6.6.3.2 / item 7 (D-01) — minted by `_validate_mt5_key_probe`'s three ENV-GAP
+  // arms (routers/exchange.py: endpoint unset or malformed, empty known-server list,
+  // inverted IPC timeout chain), each a `service_error(500, ...)` with
+  // `dependency="mt5-gateway"` and `retryable=False`. Takes a
+  // KEY_MT5_VALIDATION_UNCONFIGURED verdict row at 500. The D-31 arm keeps
+  // MT5_GATEWAY_UNCONFIGURED above. Added here because this roster is the ARRIVAL
+  // gate: a new Python error_code with no TypeScript disposition falls through the
+  // substring cascade, which is what this file exists to prevent.
+  "MT5_VALIDATION_UNCONFIGURED",
   "MT5_WRONG_SERVER",
   "NETWORK_UNAVAILABLE",
   "PERMISSION_DENIED",
@@ -873,6 +882,12 @@ const EXPECTED_EMITTED_CODES: readonly string[] = [
  * (`MT5_TERMINAL_UNRESPONSIVE` and `SIGN_IN_FAILED`), 43 codes, and the
  * set-equality assertion below agrees with the derived emitter set at 43.
  * 0.6 × 43 = 25.8, floored to 25 — same rule, no move.
+ *
+ * 27 stays 27 (2026-10-07, Phase 164.6.6.3.2 plan 01 / item 7): `MT5_VALIDATION_UNCONFIGURED`
+ * arrives. The hand-typed roster held 45 codes at HEAD and holds 46 with it, and the
+ * set-equality assertion below agrees with the derived emitter set at 46 (that
+ * assertion's own failure message was read for the count, not a hand tally).
+ * 0.6 x 46 = 27.6, floored to 27 - same rule, no move.
  */
 const DERIVED_FLOOR = 27;
 

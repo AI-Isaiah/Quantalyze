@@ -2137,8 +2137,16 @@ describe("[140.3-10 / TRAP-4] the whole copy table, scanned for destructive-only
    * and the "destructive class is FOUR entries" receipt below is unchanged. The
    * value was re-measured at HEAD (97, from this guard's failure message) before it
    * moved, and it moves in lockstep with the declaration in the SEAMUX-04 block.
+   *
+   * ⚠️ 98 → 99 (2026-10-07, Phase 164.6.6.3.2 plan 01 / item 7): one arrival,
+   * `KEY_MT5_VALIDATION_UNCONFIGURED`. Its actions are `request_call` and `expand_log`;
+   * neither is in `DESTRUCTIVE_ACTIONS`, so it sits outside the scanned population
+   * and the "destructive class is FOUR entries" receipt below is unchanged. The
+   * value was READ OFF THIS GUARD'S OWN FAILURE MESSAGE ("expected 99 to be 98")
+   * with the entry added and the pin unmoved, never counted, and it moves in
+   * lockstep with the declaration in the SEAMUX-04 block.
    */
-  const EXPECTED_TABLE_SIZE = 98;
+  const EXPECTED_TABLE_SIZE = 99;
 
   it("the scan actually covers the table — hand-typed size guard", () => {
     expect(
@@ -2790,8 +2798,18 @@ describe("[140.3-12 / SEAMUX-04] no entry in the copy table makes a claim we can
    * one substantiated exception recorded beside `FORBIDDEN_FRAGMENT_SUBSTANTIATED_FOR`
    * above, with the capture it rests on pinned by its own test. The value was
    * re-measured at HEAD (97, from this guard's failure message) before it moved.
+   *
+   * ⚠️ 98 → 99 (2026-10-07, Phase 164.6.6.3.2 plan 01 / item 7): one arrival,
+   * `KEY_MT5_VALIDATION_UNCONFIGURED`, walked against the FORBIDDEN fragments by hand
+   * BEFORE the number moved. "we fetched your trades", "data is unchanged" and
+   * "wizard_session_id idempotency" are ABSENT. "been notified" is ABSENT, and the
+   * entry's own claim, "We have been alerted", is the synonym that fragment's `why`
+   * warns about: it is recorded as the `been alerted` FORBIDDEN fragment with a
+   * per-code exemption (`FORBIDDEN_FRAGMENT_SUBSTANTIATED_FOR`) whose capture, at all
+   * three env-gap arms, is pinned by `[164.6.6.3.2 D-07]` above. The value was READ OFF
+   * THIS GUARD'S OWN FAILURE MESSAGE ("expected 99 to be 98"), never counted.
    */
-  const EXPECTED_TABLE_SIZE = 98;
+  const EXPECTED_TABLE_SIZE = 99;
 
   it("the scan actually covers the table — hand-typed size guard", () => {
     expect(
@@ -4405,6 +4423,54 @@ describe("[164.6.6.3 plan 06] the unlisted-server arm is recognised on every key
   it("derives recoverable: true, so the Retry control renders", () => {
     const envelope = buildEnvelope("KEY_MT5_SERVER_UNKNOWN", "corr-srv-1");
     expect(envelope.recoverable).toBe(true);
+  });
+});
+
+/**
+ * [164.6.6.3.2 plan 01 / D-01, D-05, D-07] `KEY_MT5_VALIDATION_UNCONFIGURED` — our
+ * connection for checking MT5 keys is not set up, as every key surface receives it.
+ *
+ * The wire body is the nested `service_error` 500 `{detail: {code:
+ * "MT5_VALIDATION_UNCONFIGURED", dependency, retryable: false, detail}}`; the seam
+ * client lifts `code` onto `seamCode`, which is all the classifier reads. The D-31
+ * `undetermined` arm keeps wire `MT5_GATEWAY_UNCONFIGURED` and
+ * `SEAM_INTERNAL_FAULT`: a terminal that ran and refused to classify is not "not set
+ * up", so the control case below pins that the two never merge.
+ */
+describe("[164.6.6.3.2 plan 01] the env-gap arm is recognised on every key surface", () => {
+  it("a 500 MT5_VALIDATION_UNCONFIGURED wire code classifies to KEY_MT5_VALIDATION_UNCONFIGURED, by machine code", () => {
+    // The message would classify differently under the substring cascade ("timeout"
+    // is a network-timeout token and "sign in" a credential token), so only
+    // `seamCode` can win.
+    const result = classifyKeyValidationError({
+      seamCode: "MT5_VALIDATION_UNCONFIGURED",
+      message: "connection timeout while we tried to sign in",
+    });
+    expect(result).toEqual({ code: "KEY_MT5_VALIDATION_UNCONFIGURED", status: 500 });
+  });
+
+  it("derives recoverable: false, so no Retry control renders", () => {
+    const envelope = buildEnvelope("KEY_MT5_VALIDATION_UNCONFIGURED", "corr-unc-1");
+    expect(envelope.recoverable).toBe(false);
+  });
+
+  it("D-31 control: wire MT5_GATEWAY_UNCONFIGURED still renders SEAM_INTERNAL_FAULT at 500", () => {
+    const result = classifyKeyValidationError({
+      seamCode: "MT5_GATEWAY_UNCONFIGURED",
+      message: "connection timeout while we tried to sign in",
+    });
+    expect(result).toEqual({ code: "SEAM_INTERNAL_FAULT", status: 500 });
+  });
+
+  it("the copy says whose fault it is and where to go, and names no setting, host, port, route or address (D-05)", () => {
+    const copy = WIZARD_ERROR_COPY.KEY_MT5_VALIDATION_UNCONFIGURED;
+    const blob = [copy.title, copy.cause, ...copy.fix].join("   ");
+    expect(blob.toLowerCase()).toContain("on our side");
+    expect(blob.toLowerCase()).toContain("contact form");
+    expect(blob).not.toContain("@");
+    expect(blob).not.toMatch(/MT5_[A-Z_]+|_HOST|_PORT|\/api\/|\b\d{3,5}\b/);
+    expect(copy.actions).not.toContain("clear_and_retry");
+    expect(copy.actions).not.toContain("try_another_key");
   });
 });
 

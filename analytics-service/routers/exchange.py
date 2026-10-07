@@ -521,6 +521,15 @@ async def _validate_mt5_key_probe(
     # is exactly half of A-01, where the 503 tripped the ONE global breaker key
     # and denied every Deribit user over an MT5 config gap. R-1: 500,
     # retryable:false. The genuinely transient MT5 arms are S-04/S-05 below.
+    #
+    # ⭐ Phase 164.6.6.3.2 D-01 (2026-10-07) — the three ENV-GAP arms (this one, the
+    # empty known-server list below, and the inverted IPC timeout chain in
+    # `_connect_and_probe`) now carry their OWN wire code, MT5_VALIDATION_UNCONFIGURED,
+    # so the wizard can say the connection is not set up on our side. The D-31
+    # `undetermined` arm alone keeps MT5_GATEWAY_UNCONFIGURED: there the terminal ran
+    # and refused to classify, and a "not set up" card would be false. Status, body
+    # shape, dependency, retryable and the detail string are unchanged; only the code
+    # literal moved.
     endpoint = read_env_validation_gateway_endpoint()
     if endpoint is None:
         # D-05's ALERT, fired BEFORE the refusal; it never raises.
@@ -532,7 +541,7 @@ async def _validate_mt5_key_probe(
         trace.outcome = "gateway_unconfigured"
         raise service_error(
             500,
-            "MT5_GATEWAY_UNCONFIGURED",
+            "MT5_VALIDATION_UNCONFIGURED",
             dependency="mt5-gateway",
             retryable=False,
             detail="The MetaTrader gateway is not configured. This needs an operator, not a retry.",
