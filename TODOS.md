@@ -8613,6 +8613,42 @@ EXECUTED, §str/None follow-through, §Discovery observation).
       branch that inserted the phase, not on this branch.
       **Trigger:** Phase 164.9.3 planning.
 
+## Phase 167.1.2.2 (DERIVECRON) — routed items (logged 2026-10-07)
+
+### 167.1.2.2-BACKFILL-STALENESS-ALARM — a frozen backfill worker stalls every derive job until a human notices (booked 2026-10-07, Phase 167.1.2.2 D-10)
+
+**Why it is open.** Railway healthchecks run only at deploy time. The backfill service's restart
+policy covers process exit and not a frozen loop. No automated reader watches the backfill queue
+(absence not proven; research assumption A3). So a frozen backfill worker stalls every derive job
+until a human notices, and the daily derive makes that worker load-bearing for every allocator book.
+Phase 167.1.2.2 does not build the alarm (D-10); its interim control is the runbook's manual backlog
+read after each run.
+
+**Owner:** Phase 164.6.8 (OUTAGEALERT), routed by the founder on 2026-10-07 (167.1.2.2 D-10).
+**Trigger:** the start of 164.6.8 planning, or the first morning the D-06 backlog read finds open
+derive jobs that stopped moving, whichever comes first.
+**Gate (what closes it):** open backfill-kind jobs that stop moving, or a stale backfill heartbeat,
+reach a human without one running a query, with a test that fails first when the reader is removed.
+⛔ **Not a close:** the manual backlog read in the runbook, or a log line nobody reads.
+
+### 167.1.2.2-MT5-CROSS-SERVICE-TERMINAL — the MT5 terminal lease serializes one process, and the backfill service is a second (booked 2026-10-07, Phase 167.1.2.2 research OQ-5, accepted)
+
+**Why it is open.** The MT5 terminal lease in `analytics-service/services/mt5_concurrency.py`
+serializes only within one process's event loop, and the MT5 runbook pins the analytics service to
+one replica for that reason. Since 2026-10-02 the backfill service is a second process on the one
+job gateway, so a key-mode MT5 derive can overlap the API process's MT5 reads (its session monitor
+runs on a roughly five-minute cadence). The login bracket (`assert_expected_login` before and after
+the read) fails closed as a transient error, not silent corruption, and the research measured no
+login-mismatch failure since the split. Accepted for 167.1.2.2 and booked here.
+
+**Owner:** unrouted; the founder routes it at the next MT5 phase planning.
+**Trigger:** the first `derive_broker_dailies` failure whose error names an MT5 login mismatch, or
+any MT5 phase touching `mt5_concurrency.py`, whichever comes first.
+**Gate (what closes it):** the two processes are proven unable to interleave terminal sessions, by
+a test that fails first when the guard is removed.
+⛔ **Not a close:** a measurement of zero mismatches so far; the fail-closed bracket is why none
+show, and it is not a serialization.
+
 ## ⚪ DON'T FIX — cosmetic, stale, superseded, speculative, or unsound
 
 - **"Do NOT implement" landmines (keep documented, do not touch):** bridge-scoring precompute;
