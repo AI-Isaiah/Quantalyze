@@ -229,10 +229,20 @@ async function captureSentry(
 
 async function sendFailureAlert(
   resend: Resend | null,
+  sender: string | null,
   to: string,
   ctx: { correlation_id: string; error_class: string; error_message: string },
 ): Promise<void> {
   if (!resend || !to) return;
+  // D-12: no sender fallback. With PLATFORM_EMAIL unset the alert email is
+  // skipped (Sentry still fires from dualAlert) rather than sent from an
+  // address we did not configure.
+  if (!sender) {
+    console.warn(
+      "[cron/founder-lp-report] PLATFORM_EMAIL not configured — skipping failure alert email",
+    );
+    return;
+  }
   // Phase 18 / round-2 polish — render the alert HTML via the templated
   // email module so escape-on-interpolation, brand strip, hairline
   // dividers, and the FactSet-aligned typography all live in one place
@@ -248,7 +258,7 @@ async function sendFailureAlert(
     errorMessage: ctx.error_message,
   });
   const send = resend.emails.send({
-    from: `${getPlatformName()} <${getPlatformEmail()}>`,
+    from: `${getPlatformName()} <${sender}>`,
     to,
     subject: `[ALERT] Founder LP cron FAILED — ${new Date().toISOString().slice(0, 10)}`,
     html,
@@ -266,6 +276,7 @@ async function sendFailureAlert(
  */
 async function dualAlert(
   resend: Resend | null,
+  sender: string | null,
   to: string,
   err: unknown,
   ctx: { correlation_id: string; error_class: string; error_message: string },
@@ -283,7 +294,7 @@ async function dualAlert(
     console.error("[cron/founder-lp-report] captureSentry threw:", sentryErr);
   }
   try {
-    await sendFailureAlert(resend, to, ctx);
+    await sendFailureAlert(resend, sender, to, ctx);
   } catch (resendErr) {
     resendThrew = true;
     console.error("[cron/founder-lp-report] sendFailureAlert threw:", resendErr);
@@ -413,6 +424,9 @@ async function handle(req: NextRequest): Promise<NextResponse> {
     const strategy_id = process.env.FOUNDER_LP_STRATEGY_ID;
     const recipient = process.env.FOUNDER_LP_REPORT_TO ?? process.env.ADMIN_EMAIL ?? "";
     const resend = process.env.RESEND_API_KEY ? new Resend(process.env.RESEND_API_KEY) : null;
+    // D-12: no sender fallback. The cron cannot do its job without a sender,
+    // exactly as without a Resend key, so null is a ConfigError below.
+    const sender = getPlatformEmail();
 
     // Phase 18 / silent-prod-misconfig (Claude adversarial 2026-05-07) —
     // when running in production VERCEL_ENV, fall through to localhost is
@@ -433,6 +447,7 @@ async function handle(req: NextRequest): Promise<NextResponse> {
       !strategy_id ||
       !recipient ||
       !resend ||
+      !sender ||
       (isProduction() && (!appUrlIsSet || !appUrlAllowed))
     ) {
       const ctx = buildBoundedCtx({
@@ -442,11 +457,12 @@ async function handle(req: NextRequest): Promise<NextResponse> {
           `missing FOUNDER_LP_STRATEGY_ID=${!!strategy_id} ` +
           `FOUNDER_LP_REPORT_TO=${!!recipient} ` +
           `RESEND_API_KEY=${!!resend} ` +
+          `PLATFORM_EMAIL=${!!sender} ` +
           `NEXT_PUBLIC_APP_URL=${appUrlIsSet} ` +
           `APP_URL_ALLOWED=${appUrlAllowed}`,
       });
       console.error("[cron/founder-lp-report] config error:", ctx);
-      await dualAlert(resend, recipient, new Error(ctx.error_message), ctx);
+      await dualAlert(resend, sender, recipient, new Error(ctx.error_message), ctx);
       return NextResponse.json({ ok: false, ...ctx }, { status: 500 });
     }
 
@@ -463,7 +479,7 @@ async function handle(req: NextRequest): Promise<NextResponse> {
         error_message: readiness.reason,
       });
       console.error("[cron/founder-lp-report] strategy not ready:", ctx);
-      await dualAlert(resend, recipient, new Error(ctx.error_message), ctx);
+      await dualAlert(resend, sender, recipient, new Error(ctx.error_message), ctx);
       return NextResponse.json({ ok: false, ...ctx }, { status: 500 });
     }
 
@@ -512,7 +528,7 @@ async function handle(req: NextRequest): Promise<NextResponse> {
       // surfaces from readiness.ok via the typed `name` field; falls back
       // to a generic phrase when the row's name is null.
       const successSend = resend.emails.send({
-        from: `${getPlatformName()} <${getPlatformEmail()}>`,
+        from: `${getPlatformName()} <${sender}>`,
         to: recipient,
         subject: `Founder LP report — ${monthLabel}`,
         html: renderSuccessEmailHtml({
@@ -558,7 +574,7 @@ async function handle(req: NextRequest): Promise<NextResponse> {
         error_message: err instanceof Error ? err.message : String(err),
       });
       console.error("[cron/founder-lp-report] failure:", ctx);
-      await dualAlert(resend, recipient, err, ctx);
+      await dualAlert(resend, sender, recipient, err, ctx);
       return NextResponse.json({ ok: false, ...ctx }, { status: 500 });
     }
   } finally {

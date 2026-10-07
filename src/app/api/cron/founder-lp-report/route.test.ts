@@ -417,6 +417,50 @@ describe("GET /api/cron/founder-lp-report", () => {
     expect(sendMock).toHaveBeenCalledTimes(1);
   });
 
+  it("D-12 ConfigError: PLATFORM_EMAIL unset reports PLATFORM_EMAIL=false, sends nothing, and warns the failure alert was skipped", async () => {
+    delete process.env.PLATFORM_EMAIL;
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const { GET } = await import("./route");
+    const fetchSpy = globalThis.fetch as ReturnType<typeof vi.fn>;
+    const res = await GET(buildAuthorizedRequest());
+    const json = (await res.json()) as Record<string, unknown>;
+
+    expect(res.status).toBe(500);
+    expect(json.error_class).toBe("ConfigError");
+    expect(String(json.error_message)).toContain("PLATFORM_EMAIL=false");
+    // Never sent from an invented address: neither the report nor the alert.
+    expect(sendMock).not.toHaveBeenCalled();
+    expect(fetchSpy).not.toHaveBeenCalled();
+    // The other alert channel still fires.
+    expect(captureExceptionMock).toHaveBeenCalledTimes(1);
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("PLATFORM_EMAIL not configured"),
+    );
+    warnSpy.mockRestore();
+    errSpy.mockRestore();
+  });
+
+  it("D-12: with PLATFORM_EMAIL set the success send's from is '<name> <PLATFORM_EMAIL>' and the config gate reads PLATFORM_EMAIL=true on a config error", async () => {
+    const { GET } = await import("./route");
+    const fetchSpy = globalThis.fetch as ReturnType<typeof vi.fn>;
+    fetchSpy.mockResolvedValueOnce(pdfResponseOk());
+    const res = await GET(buildAuthorizedRequest());
+    expect(res.status).toBe(200);
+    const sendArgs = sendMock.mock.calls[0][0] as Record<string, unknown>;
+    expect(sendArgs.from).toBe("Quantalyze <noreply@example.com>");
+
+    sendMock.mockClear();
+    delete process.env.FOUNDER_LP_STRATEGY_ID;
+    const res2 = await GET(buildAuthorizedRequest());
+    const json2 = (await res2.json()) as Record<string, unknown>;
+    expect(String(json2.error_message)).toContain("PLATFORM_EMAIL=true");
+    expect((sendMock.mock.calls[0][0] as Record<string, unknown>).from).toBe(
+      "Quantalyze <noreply@example.com>",
+    );
+  });
+
   // -------------------------------------------------------------------
   // Phase 18 / pre-landing review hardening (2026-05-07)
   // -------------------------------------------------------------------

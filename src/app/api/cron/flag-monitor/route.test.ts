@@ -236,6 +236,8 @@ describe.each([["GET"], ["POST"]] as const)(
       process.env.SENTRY_AUTH_TOKEN = "sentry-token";
       process.env.FOUNDER_LP_REPORT_TO = "founder@example.com";
       process.env.RESEND_API_KEY = "resend-key";
+      // D-12: no sender fallback, so every send case needs a configured sender.
+      process.env.RESEND_ALERT_FROM = "Alerts <alerts@example.com>";
       sendEmailSpy.mockClear();
       captureToSentrySpy.mockClear();
       vi.resetModules();
@@ -733,6 +735,70 @@ describe.each([["GET"], ["POST"]] as const)(
       expect(String(alert.subject)).not.toContain("auto-rolled-back");
       // Body directs to manual investigation (auto-rollback is retired).
       expect(String(alert.html).toLowerCase()).toContain("retired");
+    });
+
+    // --- D-12: the alert sender is RESEND_ALERT_FROM, else none -------------
+
+    describe("D-12 alert sender", () => {
+      const sites: Array<{ name: string; auditCount: number; count: number; streak?: string }> = [
+        { name: "WARN", auditCount: 1000, count: 4 },
+        { name: "ALERT", auditCount: 1000, count: 10 },
+        { name: "zero-denominator SEV-2", auditCount: 0, count: 0, streak: "2" },
+      ];
+
+      it.each(sites)(
+        "$name site uses RESEND_ALERT_FROM as the from",
+        async ({ auditCount, count, streak }) => {
+          rec.auditCount = auditCount;
+          if (streak) rec.streakValue = streak;
+          vi.stubGlobal(
+            "fetch",
+            vi.fn(async () =>
+              sentryResponse({ ok: true, json: { data: [{ "count()": count }] } }),
+            ),
+          );
+          const handler = await getHandler();
+          await handler(authedReq());
+          expect(sendEmailSpy).toHaveBeenCalledTimes(1);
+          expect(sendEmailSpy.mock.calls[0][0].from).toBe("Alerts <alerts@example.com>");
+        },
+      );
+
+      it.each(sites)(
+        "$name site with RESEND_ALERT_FROM unset sends nothing and warns, even with PLATFORM_EMAIL set",
+        async ({ auditCount, count, streak }) => {
+          delete process.env.RESEND_ALERT_FROM;
+          process.env.PLATFORM_EMAIL = "platform@example.com";
+          rec.auditCount = auditCount;
+          if (streak) rec.streakValue = streak;
+          vi.stubGlobal(
+            "fetch",
+            vi.fn(async () =>
+              sentryResponse({ ok: true, json: { data: [{ "count()": count }] } }),
+            ),
+          );
+          const handler = await getHandler();
+          await handler(authedReq());
+          expect(sendEmailSpy).not.toHaveBeenCalled();
+          expect(console.warn).toHaveBeenCalledWith(
+            expect.stringContaining("RESEND_ALERT_FROM not configured"),
+          );
+        },
+      );
+
+      it("a blank RESEND_ALERT_FROM counts as unset", async () => {
+        process.env.RESEND_ALERT_FROM = "   ";
+        rec.auditCount = 1000;
+        vi.stubGlobal(
+          "fetch",
+          vi.fn(async () =>
+            sentryResponse({ ok: true, json: { data: [{ "count()": 10 }] } }),
+          ),
+        );
+        const handler = await getHandler();
+        await handler(authedReq());
+        expect(sendEmailSpy).not.toHaveBeenCalled();
+      });
     });
 
     // --- (3) SENTRY_API_BASE region override (regression: silent false-clean) -
