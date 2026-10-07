@@ -6,6 +6,8 @@ import { useStrategySyncPoller } from "@/hooks/useStrategySyncPoller";
 import { readChainJobState } from "./chain-job-state";
 import { captureToSentry } from "@/lib/sentry-capture";
 import { Button } from "@/components/ui/Button";
+import { ContactPointerText } from "@/components/contact/ContactPointerText";
+import { contactHref } from "@/lib/contact";
 import type { StrategyAnalytics } from "@/lib/types";
 import {
   MISSING_ROW_GRACE_POLLS,
@@ -593,7 +595,12 @@ export function SyncProgress({
       {/* KCS-22 / KCS-03: the panel stopped checking, or a bound expired
           before the sync was confirmed. Muted detail, no Retry. */}
       {stopCopy && (
-        <p className="text-xs text-text-secondary mt-1 ml-6">{stopCopy.detail}</p>
+        <p className="text-xs text-text-secondary mt-1 ml-6">
+          <ContactPointerText
+            text={stopCopy.detail}
+            href={contactHref({ topic: "support", strategy: strategyId })}
+          />
+        </p>
       )}
 
       {/* Warnings detail */}

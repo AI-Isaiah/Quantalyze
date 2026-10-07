@@ -99,23 +99,26 @@ const minutesAgo = (m: number) => new Date(NOW_MS - m * 60_000).toISOString();
 // Locked copy, typed as literals (UI-SPEC § KCS-09).
 const FAIL_PERMANENT =
   "The last computation stopped on a problem that retrying alone will not resolve.";
-const CONTACT_PERMANENT = "Contact support@quantalyze.com to resolve it.";
+const CONTACT_PERMANENT = "Use the contact form to have it resolved.";
 const RELOAD = "Reload this page to see the latest status.";
-const CONTACT_CHECK = "Contact support@quantalyze.com to have it checked.";
+const CONTACT_CHECK = "Use the contact form to have it checked.";
 const RETRY_READ = "Reload this page to try again.";
 const UNREADABLE_LINE =
   "The computation status for this strategy could not be read.";
 const FAIL_TRANSIENT =
   "The last computation stopped after its automatic retries ran out.";
 const SHAPE_SINGLE =
-  "Start a new computation with Resync on this strategy's edit page. Contact support@quantalyze.com if it does not complete.";
+  "Start a new computation with Resync on this strategy's edit page. Use the contact form if it does not complete.";
 const SHAPE_UNLINKED =
-  "Link a key with Use & Sync on this strategy's edit page to start a new computation. Contact support@quantalyze.com if it does not complete.";
+  "Link a key with Use & Sync on this strategy's edit page to start a new computation. Use the contact form if it does not complete.";
 const SHAPE_COMPOSITE =
-  "A composite strategy has no self-serve re-run. Contact support@quantalyze.com to start a new computation.";
+  "A composite strategy has no self-serve re-run. Use the contact form to start a new computation.";
 const SHAPE_CSV =
-  "A CSV strategy's data is fixed at upload. To publish a corrected series, upload a new CSV strategy, or contact support@quantalyze.com.";
+  "A CSV strategy's data is fixed at upload. To publish a corrected series, upload a new CSV strategy, or use the contact form.";
 const EDIT_HREF = `/strategies/${STRATEGY_ID}/edit`;
+// Phase 164.6.6.3.5 DOMAINONE (AD-05): the pointer phrase links the contact
+// form, same tab, carrying the strategy id. Hand-typed, never built by contactHref.
+const CONTACT_HREF = `/contact?topic=support&strategy=${STRATEGY_ID}`;
 const CSV_WIZARD_HREF = "/strategies/new/wizard?source=csv";
 /** A linked single key (synthetic). */
 const LINKED_KEY_ID = "00000000-0000-4000-8000-0000000000c1";
@@ -375,6 +378,13 @@ describe("KCS-09 — the owner pending page states the trigger shape's real stat
     expect(stateLine!.className).toContain("text-negative");
     expect(remedyLine!.textContent).toBe(CONTACT_PERMANENT);
     expect(remedyLine!.className).not.toContain("italic");
+    // The pointer is one same-tab link to the contact form with the strategy id.
+    const pointers = remedyLine!.querySelectorAll("a");
+    expect(pointers).toHaveLength(1);
+    expect(pointers[0].textContent).toBe("contact form");
+    expect(pointers[0].getAttribute("href")).toBe(CONTACT_HREF);
+    expect(pointers[0].getAttribute("target")).toBeNull();
+    expect(remedyLine!.textContent).not.toMatch(/@quantalyze\./);
 
     const text = container.textContent ?? "";
     for (const phrase of IN_PROGRESS_PHRASES) {
@@ -608,11 +618,15 @@ describe("KCS-21 — the remedy is keyed on the strategy's shape", () => {
     const { remedyLine } = await renderOwnerPending();
 
     expect(remedyLine!.textContent).toBe(SHAPE_SINGLE);
+    // zero-one-many: the `edit page` link and the contact pointer both render,
+    // in text order (the pointer runs over the `after` segment separately).
     const anchors = remedyLine!.querySelectorAll("a");
-    expect(anchors).toHaveLength(1);
+    expect(anchors).toHaveLength(2);
     expect(anchors[0].getAttribute("href")).toBe(EDIT_HREF);
     expect(anchors[0].textContent).toBe("edit page");
     expect(anchors[0].className).toBe("text-accent underline underline-offset-4");
+    expect(anchors[1].textContent).toBe("contact form");
+    expect(anchors[1].getAttribute("href")).toBe(CONTACT_HREF);
     // The count ran on the request client, inside the owner pending render.
     expect(STATE.observed.requestTables).toContain("strategy_keys");
   });
@@ -626,8 +640,9 @@ describe("KCS-21 — the remedy is keyed on the strategy's shape", () => {
 
     expect(remedyLine!.textContent).toBe(SHAPE_UNLINKED);
     const anchors = remedyLine!.querySelectorAll("a");
-    expect(anchors).toHaveLength(1);
+    expect(anchors).toHaveLength(2);
     expect(anchors[0].getAttribute("href")).toBe(EDIT_HREF);
+    expect(anchors[1].getAttribute("href")).toBe(CONTACT_HREF);
   });
 
   it("KCS21-COMPOSITE: three members -> support, and NO control is linked", async () => {
@@ -638,10 +653,11 @@ describe("KCS-21 — the remedy is keyed on the strategy's shape", () => {
     const { remedyLine } = await renderOwnerPending();
 
     expect(remedyLine!.textContent).toBe(SHAPE_COMPOSITE);
+    // A composite has no self-serve re-run control, so the only link is the
+    // contact-form pointer (164.6.6.3.5).
     expect(
-      remedyLine!.querySelectorAll("a"),
-      "a composite has no self-serve re-run control, so its remedy links none",
-    ).toHaveLength(0);
+      Array.from(remedyLine!.querySelectorAll("a")).map((a) => a.getAttribute("href")),
+    ).toEqual([CONTACT_HREF]);
   });
 
   it("KCS21-CSV: source csv -> the CSV wizard, linked", async () => {
@@ -652,9 +668,10 @@ describe("KCS-21 — the remedy is keyed on the strategy's shape", () => {
 
     expect(remedyLine!.textContent).toBe(SHAPE_CSV);
     const anchors = remedyLine!.querySelectorAll("a");
-    expect(anchors).toHaveLength(1);
+    expect(anchors).toHaveLength(2);
     expect(anchors[0].getAttribute("href")).toBe(CSV_WIZARD_HREF);
     expect(anchors[0].textContent).toBe("upload a new CSV strategy");
+    expect(anchors[1].getAttribute("href")).toBe(CONTACT_HREF);
   });
 
   it("SHAPE-UNKNOWN: the member count read fails -> no shape is guessed, and the failure is logged", async () => {
@@ -719,7 +736,12 @@ describe("167.2-REVIEW-R2 CR-01 — the owner factsheet's history read widens on
 
       const { remedyLine } = await renderOwnerPending();
 
-      expect(remedyLine!.querySelectorAll("a")).toHaveLength(0);
+      // No self-serve control is named; the one link is the contact-form
+      // pointer (164.6.6.3.5), so the assertion is on the control links.
+      const hrefs = Array.from(remedyLine!.querySelectorAll("a")).map((a) =>
+        a.getAttribute("href"),
+      );
+      expect(hrefs).toEqual([CONTACT_HREF]);
       expect(vi.mocked(captureToSentry)).toHaveBeenCalledWith(expect.anything(), {
         tags: { route: "factsheet/v2/page", stage: "composite-history" },
       });
@@ -867,7 +889,7 @@ const PUBLIC_SENTENCE =
 const UNBUILDABLE_SHORT =
   "Right now, a private link to this strategy shows that its factsheet is not available. The stored results we build its factsheet from hold fewer than 2 days of returns, and a factsheet needs at least 2.";
 const UNBUILDABLE_COMPOSITE =
-  "Right now, a private link to this strategy shows that its factsheet is not available. We cannot build a factsheet from its stored results. Contact support@quantalyze.com to have them checked.";
+  "Right now, a private link to this strategy shows that its factsheet is not available. We cannot build a factsheet from its stored results. Use the contact form to have them checked.";
 // 167.2.1-REVIEW-SFH H-2, typed as a literal: the owner build could not read
 // the row, so what a recipient sees is not known.
 const MINT_PROBE_UNREADABLE =
@@ -1012,6 +1034,12 @@ describe("KCS-12 (S7) — the owner's share panel says what a recipient sees rig
       const last = panelOf(container).lastElementChild as HTMLElement;
 
       expect(last.textContent).toBe(UNBUILDABLE_COMPOSITE);
+      // AD-05: the share note's pointer is a same-tab link with the strategy id.
+      const pointers = last.querySelectorAll("a");
+      expect(pointers).toHaveLength(1);
+      expect(pointers[0].textContent).toBe("contact form");
+      expect(pointers[0].getAttribute("href")).toBe(CONTACT_HREF);
+      expect(pointers[0].getAttribute("target")).toBeNull();
       // 167.2.1-REVIEW WR-03: one resolve, so ONE composite csv read, not two.
       expect(vi.mocked(probeFactsheetBuildable)).not.toHaveBeenCalled();
       // 167.2.1-REVIEW-SFH H-1: the refusal the note sends to support is
