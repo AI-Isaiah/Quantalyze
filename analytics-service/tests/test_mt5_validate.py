@@ -2109,7 +2109,9 @@ async def test_inverted_ipc_timeout_chain_is_a_permanent_operator_fault(
         "the self-sustaining trip/expire/re-probe loop A-08/A-25 records"
     )
     body = ei.value.detail
-    assert body["code"] == "MT5_GATEWAY_UNCONFIGURED"
+    # Phase 164.6.6.3.2 D-01: the env-gap arms carry their own wire code; the D-31
+    # `undetermined` arm alone keeps MT5_GATEWAY_UNCONFIGURED (its tests stay on it).
+    assert body["code"] == "MT5_VALIDATION_UNCONFIGURED"
     assert body["dependency"] == "mt5-gateway"
     assert body["retryable"] is False
     # R-1: a permanent fault never advertises a wait.
@@ -2126,6 +2128,78 @@ async def test_inverted_ipc_timeout_chain_is_a_permanent_operator_fault(
     factory.assert_called_once()
     transport.initialize.assert_not_called()
     transport.login.assert_not_called()
+
+
+async def _refuse_inverted_chain(router, monkeypatch):
+    """One validation against the REAL ``Mt5Client`` with the timeout chain inverted
+    (40 s request ceiling BELOW the 45 000 ms initialize ceiling); returns the raised
+    ``HTTPException``. The login and password are distinctive so a leak is attributable;
+    the broker server is the fixture's listed default, because an unlisted one would
+    be refused by the known-server pre-check BEFORE the connect arm is reached."""
+    _install_real_mt5_client(router, MagicMock(name="mt5-transport"))
+    monkeypatch.setattr(router, "MT5_VALIDATE_REQUEST_TIMEOUT_S", 40.0)
+    with pytest.raises(HTTPException) as ei:
+        await _call(
+            router,
+            _make_req(api_key="918273", api_secret="pw-sekrit-77"),
+        )
+    return ei.value
+
+
+async def test_inverted_ipc_timeout_chain_captures_to_sentry_once_per_window(
+    exchange_router, monkeypatch, caplog
+):
+    """Phase 164.6.6.3.2 D-07 - the card for MT5_VALIDATION_UNCONFIGURED says "we have
+    been alerted", and this arm used to only LOG. A log line is a Sentry event only if
+    an SDK integration happens to say so, so the arm now makes its own windowed
+    capture: ONE per window per site, naming the fault class and the site and nothing
+    else (T-153.3-15), while the ERROR line still fires on EVERY refusal."""
+    router = exchange_router
+    spy = _sentry_spy(monkeypatch)
+
+    with caplog.at_level(logging.ERROR, logger=_ANALYTICS_LOGGER):
+        for _ in range(2):
+            exc = await _refuse_inverted_chain(router, monkeypatch)
+            assert exc.status_code == 500
+            assert exc.detail["code"] == "MT5_VALIDATION_UNCONFIGURED"
+
+    assert spy.capture_message.call_count == 1, (
+        "the inverted-chain arm must capture exactly once for two refusals in one window"
+    )
+    assert spy.capture_message.call_args.kwargs.get("level") == "error"
+    message = spy.capture_message.call_args.args[0]
+    assert "timeout" in message.lower() and _WIZARD_SITE_LITERAL in message
+    spy.set_tag.assert_called_once_with(
+        "mt5_validation_timeout_chain_inverted", _WIZARD_SITE_LITERAL
+    )
+    rendered = repr(spy.mock_calls)
+    for leak in ("40.0", "45000", "918273", "pw-sekrit-77", "Broker-Demo"):
+        assert leak not in rendered, f"the capture leaked {leak!r}"
+    router_lines = [
+        r for r in caplog.records
+        if r.name == _ANALYTICS_LOGGER
+        and r.levelno == logging.ERROR
+        and "timeout ordering inverted" in r.getMessage()
+    ]
+    assert len(router_lines) == 2, (
+        f"the arm's ERROR line must fire on EVERY refusal, saw {len(router_lines)}"
+    )
+
+
+async def test_a_raising_sentry_call_does_not_change_the_inverted_chain_refusal(
+    exchange_router, monkeypatch
+):
+    """T-164.6.6-21 for the new capture: a Sentry transport failure leaves the caller
+    seeing the same 500."""
+    router = exchange_router
+    spy = _sentry_spy(monkeypatch)
+    spy.capture_message.side_effect = RuntimeError("sentry transport down")
+
+    exc = await _refuse_inverted_chain(router, monkeypatch)
+
+    assert exc.status_code == 500
+    assert exc.detail["code"] == "MT5_VALIDATION_UNCONFIGURED"
+    assert spy.capture_message.call_count == 1
 
 
 async def test_an_unrelated_construction_valueerror_stays_transient(exchange_router):

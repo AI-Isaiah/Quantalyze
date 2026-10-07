@@ -1415,6 +1415,12 @@ describe("[153.7-02 / WIZFORM-02-CLASS] every code that reaches classifyKeyValid
     // refusal when the gateway terminal has trade permission off. All four are
     // `retryable=False` — an operator must act, so no retry affordance may
     // render.
+    // ⛔ CORRECTED 2026-10-07 (Phase 164.6.6.3.2 D-01): three of those four emitters
+    // (unset-env and malformed-port, the empty known-server list, the IPC ordering
+    // inversion) now answer wire `MT5_VALIDATION_UNCONFIGURED` and render
+    // `KEY_MT5_VALIDATION_UNCONFIGURED`; only the D-31 refusal still arrives as
+    // `MT5_GATEWAY_UNCONFIGURED`. This case sends the wire code itself, so it is the
+    // D-31 path now. Original kept as lineage.
     const detail =
       "The MetaTrader gateway is not configured. This needs an operator, not a retry.";
     expect(classifyKeyValidationError(seamThrow(detail, "MT5_GATEWAY_UNCONFIGURED"))).toEqual({
@@ -1589,6 +1595,10 @@ describe("[153.7-02 / WIZFORM-02-CLASS] every code that reaches classifyKeyValid
    * fix it"* across three wire codes where that is true at ONE:
    *
    *   · `MT5_GATEWAY_UNCONFIGURED` — true (operator faults, all four emitters).
+   *     CORRECTED 2026-10-07 (Phase 164.6.6.3.2 D-01): three of the four emitters now
+   *     answer `MT5_VALIDATION_UNCONFIGURED` and render
+   *     `KEY_MT5_VALIDATION_UNCONFIGURED`; the D-31 emitter alone still reaches
+   *     this member through the old code. The claim stays true at it.
    *   · `ADAPTER_INIT_FAILED` — FALSE at a third of the emitter's OWN declared
    *     cause set: `routers/exchange.py` enumerates "a ccxt signature change,
    *     an ImportError on a missing extra or an **OOM**". An OOM clears.
@@ -2272,6 +2282,13 @@ describe("[140.3-12 / SEAMUX-04] no entry in the copy table makes a claim we can
         "internal column name is not user-facing copy. Say what the user gets, " +
         "never the mechanism's field name.",
     },
+    {
+      fragment: "been alerted",
+      why:
+        "An alert claim asserts an audit trail exactly as 'been notified' does, so a " +
+        "synonym of the banned phrase must not dodge the same rule (164.6.6.3.2 D-07). " +
+        "Reachable only where a capture backs it; see the per-code exemption below.",
+    },
   ];
 
   /**
@@ -2294,6 +2311,13 @@ describe("[140.3-12 / SEAMUX-04] no entry in the copy table makes a claim we can
     Record<string, readonly string[]>
   > = {
     KEY_MT5_SERVER_UNKNOWN: ["been notified"],
+    // 164.6.6.3.2 D-07. "We have been alerted" rests on a Sentry capture at EACH of the
+    // three env-gap arms that answer this code: the endpoint arm's
+    // `alert_mt5_validation_gateway_unconfigured`, the empty-known-server-list arm's
+    // `_capture_server_unknown_once` (inside `assert_mt5_server_known`), and the
+    // inverted-timeout arm's `alert_mt5_validation_timeout_chain_inverted`. The test
+    // below pins all three by name.
+    KEY_MT5_VALIDATION_UNCONFIGURED: ["been alerted"],
   };
 
   it("[164.6.6.3 / item 9] the substantiated 'been notified' claim rests on a capture that still exists", () => {
@@ -2313,7 +2337,82 @@ describe("[140.3-12 / SEAMUX-04] no entry in the copy table makes a claim we can
     ).toBe(true);
     expect(Object.keys(FORBIDDEN_FRAGMENT_SUBSTANTIATED_FOR)).toEqual([
       "KEY_MT5_SERVER_UNKNOWN",
+      "KEY_MT5_VALIDATION_UNCONFIGURED",
     ]);
+  });
+
+  it("[164.6.6.3.2 D-07] every env-gap arm that answers KEY_MT5_VALIDATION_UNCONFIGURED captures to Sentry", () => {
+    const router = readFileSync(
+      join(process.cwd(), "analytics-service", "routers", "exchange.py"),
+      "utf-8",
+    );
+    const probe = readFileSync(
+      join(process.cwd(), "analytics-service", "services", "mt5_probe.py"),
+      "utf-8",
+    );
+    const relogin = readFileSync(
+      join(process.cwd(), "analytics-service", "services", "mt5_relogin.py"),
+      "utf-8",
+    );
+
+    // A call counts only when it STARTS a line: a commented-out call (`# alert(...)`) must
+    // not satisfy the pin, which is the exact neuter this test exists to catch.
+    // The three raise sites, found by their code literal. Exactly three: a fourth would be
+    // an arm this pin does not know to check, and a missing one a lost emitter.
+    const raises: number[] = [];
+    for (const m of router.matchAll(/"MT5_VALIDATION_UNCONFIGURED",/g)) raises.push(m.index!);
+    expect(
+      raises.length,
+      "routers/exchange.py no longer has exactly three MT5_VALIDATION_UNCONFIGURED raises: " +
+        "re-derive which arms the card's 'we have been alerted' rests on",
+    ).toBe(3);
+
+    // Arm 1, the validation endpoint: the alert precedes the raise.
+    const callAt = (src: string, name: string): number =>
+      src.search(new RegExp("^[ \\t]*" + name + "\\(", "m"));
+    const endpointAlert = callAt(router, "alert_mt5_validation_gateway_unconfigured");
+    expect(
+      endpointAlert > -1 && endpointAlert < raises[0],
+      "the unset-or-malformed endpoint arm no longer calls " +
+        "alert_mt5_validation_gateway_unconfigured before it raises, so " +
+        "KEY_MT5_VALIDATION_UNCONFIGURED's 'we have been alerted' is unsubstantiated there",
+    ).toBe(true);
+
+    // Arm 2, the empty known-server list: the arm sits behind assert_mt5_server_known, whose
+    // unconfigured path captures.
+    const guardCall = callAt(router, "assert_mt5_server_known");
+    expect(
+      guardCall > -1 && guardCall < raises[1] && raises[1] - guardCall < 1200,
+      "the empty-known-server-list arm is no longer guarded by assert_mt5_server_known, " +
+        "so its raise has no capture behind it",
+    ).toBe(true);
+    const probeStart = probe.indexOf("def assert_mt5_server_known(");
+    expect(probeStart, "assert_mt5_server_known moved or was renamed").toBeGreaterThan(-1);
+    const probeBody = probe.slice(probeStart);
+    const unconfigured = probeBody.slice(
+      probeBody.indexOf("if not known:"),
+      probeBody.indexOf("raise Mt5KnownServersUnconfigured"),
+    );
+    expect(
+      callAt(unconfigured, "_capture_server_unknown_once") > -1,
+      "assert_mt5_server_known's empty-list path no longer calls _capture_server_unknown_once, " +
+        "so the empty-known-server-list arm answers without a capture",
+    ).toBe(true);
+
+    // Arm 3, the inverted timeout chain: the windowed capture precedes the raise.
+    const invertedAlert = callAt(router, "alert_mt5_validation_timeout_chain_inverted");
+    expect(
+      invertedAlert > -1 && invertedAlert > raises[1] &&invertedAlert < raises[2],
+      "the inverted-timeout-chain arm no longer calls " +
+        "alert_mt5_validation_timeout_chain_inverted before it raises, so " +
+        "KEY_MT5_VALIDATION_UNCONFIGURED's 'we have been alerted' is unsubstantiated there",
+    ).toBe(true);
+    const helperStart = relogin.indexOf("def alert_mt5_validation_timeout_chain_inverted(");
+    expect(helperStart, "the inverted-chain alert helper was removed").toBeGreaterThan(-1);
+    expect(
+      callAt(relogin.slice(helperStart, helperStart + 2500), "sentry_sdk\\.capture_message") > -1,
+      "alert_mt5_validation_timeout_chain_inverted no longer calls sentry_sdk.capture_message",
+    ).toBe(true);
   });
 
   /**

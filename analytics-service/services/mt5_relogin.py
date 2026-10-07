@@ -1078,6 +1078,55 @@ def alert_mt5_validation_gateway_unconfigured(*, site: str) -> None:
         pass  # never mask the refusal via a Sentry failure
 
 
+def alert_mt5_validation_timeout_chain_inverted(*, site: str) -> None:
+    """D-07's ALERT for the inverted IPC timeout chain: a validation was refused
+    because OUR timeout ceilings are ordered wrongly (D-24's guard fired). Called by
+    the wizard validate site BEFORE it raises MT5_VALIDATION_UNCONFIGURED.
+
+    This arm used to only LOG. The wizard card for that code says "we have been
+    alerted", and a log line becomes a Sentry event only if an SDK integration happens
+    to say so, so the claim is backed by an explicit capture here (Phase 164.6.6.3.2
+    D-07), pinned by a source-reading test in ``wizardErrors.test.ts``.
+
+    Cloned from the windowed-capture half of
+    :func:`alert_mt5_validation_gateway_unconfigured`: at most one
+    ``sentry_sdk.capture_message(level="error")`` per ``_MT5_VALIDATION_ALERT_WINDOW_S``
+    PER SITE, inside ``sentry_sdk.new_scope()`` with a tag naming the fault, the capture
+    wrapped so a Sentry failure can never mask or alter the refusal it reports. It
+    NEVER raises. It does NOT log: the caller's existing ERROR line fires on every
+    refusal and is the per-call evidence.
+
+    The window entry is keyed ``f"{site}:timeout-chain"``, distinct from the endpoint
+    alert's bare ``site`` key, so neither can silence the other and
+    :func:`_reset_mt5_validation_alert` still clears both.
+
+    ⛔ Names the fault class and the site only — never a timeout value, login,
+    password or broker server (T-153.3-15).
+
+    ⚠️ CAVEAT THAT MUST STAY ATTACHED (same as its sibling): delivery to a human
+    depends on ``SENTRY_DSN`` staying set on the analytics service; if it is ever unset
+    this alert silently degrades to the caller's ERROR log line alone.
+    """
+    key = f"{site}:timeout-chain"
+    now = time.monotonic()
+    last_at = _last_mt5_validation_alert_at.get(key)
+    if last_at is not None and (now - last_at) < _MT5_VALIDATION_ALERT_WINDOW_S:
+        return
+    _last_mt5_validation_alert_at[key] = now
+    try:
+        # Review WR-03: scope the tag to THIS capture (no per-request scope here).
+        with sentry_sdk.new_scope() as scope:
+            scope.set_tag("mt5_validation_timeout_chain_inverted", site)
+            sentry_sdk.capture_message(
+                f"MT5 validation timeout chain inverted at site={site}: the IPC "
+                "timeout ceilings are ordered wrongly; every key validation on this "
+                "path is refused (D-07)",
+                level="error",
+            )
+    except Exception:
+        pass  # never mask the refusal via a Sentry failure
+
+
 def _not_healed(
     reason: str, err: Mt5ClientError, login: int, password: str, server: str
 ) -> str:

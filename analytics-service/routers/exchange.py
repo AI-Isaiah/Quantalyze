@@ -55,6 +55,7 @@ from services.mt5_terminal_scrub import (
 # and the alert this site fires when it is absent. Never the job pair.
 from services.mt5_relogin import (
     alert_mt5_validation_gateway_unconfigured,
+    alert_mt5_validation_timeout_chain_inverted,
     read_env_mt5_credentials,
     read_env_validation_gateway_endpoint,
 )
@@ -567,6 +568,14 @@ async def _validate_mt5_key_probe(
     # unknown". That gives the wire code its FIFTH router emitter (after the ~531,
     # ~686, port-malformed and D-31 ~1159 sites); Phase 164.6.6.3.2 owns its wizard
     # mapping.
+    #
+    # ⛔ CORRECTED 2026-10-07 (Phase 164.6.6.3.2 D-01): the paragraph above called this
+    # arm the FIFTH emitter of MT5_GATEWAY_UNCONFIGURED and left its wizard mapping to
+    # this phase. It now answers MT5_VALIDATION_UNCONFIGURED, with the other two env-gap
+    # arms, so the wizard names the cause; the D-31 arm alone keeps the old code.
+    # "We have been alerted" holds here because `assert_mt5_server_known` logs ERROR and
+    # calls `_capture_server_unknown_once` on its unconfigured path before it raises.
+    # The original sentences are kept as lineage.
     try:
         assert_mt5_server_known(server, site=SITE_VALIDATE_WIZARD)
     except Mt5ServerUnknownError:
@@ -581,7 +590,7 @@ async def _validate_mt5_key_probe(
         trace.outcome = "gateway_unconfigured"
         raise service_error(
             500,
-            "MT5_GATEWAY_UNCONFIGURED",
+            "MT5_VALIDATION_UNCONFIGURED",
             dependency="mt5-gateway",
             retryable=False,
             detail="The MetaTrader gateway is not configured. This needs an operator, not a retry.",
@@ -725,6 +734,14 @@ async def _validate_mt5_key_probe(
             # user-facing code table), and `outcome` stays inside the existing
             # category set: an inverted timeout chain IS a gateway that is not
             # correctly configured, refused before any client exists.
+            #
+            # ⛔ CORRECTED 2026-10-07 (Phase 164.6.6.3.2 D-01, D-07): the code is no
+            # longer reused from the endpoint arm's old literal. This arm answers
+            # MT5_VALIDATION_UNCONFIGURED with the other two env-gap arms, and the
+            # D-31 arm alone keeps MT5_GATEWAY_UNCONFIGURED. The wizard card for the
+            # new code says "we have been alerted", and this arm only LOGGED, so it now
+            # makes a windowed Sentry capture before it raises. The original sentences
+            # above are kept as lineage.
             if _is_ipc_timeout_ordering_inversion(connect_err):
                 # Names the fault class only — no timeout values, no login,
                 # password or broker server (T-153.3-15).
@@ -732,10 +749,11 @@ async def _validate_mt5_key_probe(
                     "validate_key: MT5 IPC/rpyc timeout ordering inverted "
                     "(server misconfig) — permanent, not a bridge outage"
                 )
+                alert_mt5_validation_timeout_chain_inverted(site=SITE_VALIDATE_WIZARD)
                 trace.outcome = "gateway_unconfigured"
                 raise service_error(
                     500,
-                    "MT5_GATEWAY_UNCONFIGURED",
+                    "MT5_VALIDATION_UNCONFIGURED",
                     dependency="mt5-gateway",
                     retryable=False,
                     detail="The MetaTrader gateway is not configured. This needs an operator, not a retry.",

@@ -358,11 +358,15 @@ async def test_a_listed_servers_login_stage_10005_still_reads_sign_in_failed(
     client.login.assert_called_once()
 
 
-async def test_an_empty_known_server_list_answers_gateway_unconfigured_at_the_router(
+async def test_an_empty_known_server_list_answers_validation_unconfigured_at_the_router(
     exchange_router, monkeypatch
 ):
     """D-14 fails CLOSED, and an empty effective list is OUR configuration gap:
-    the existing operator-facing 500 body, never "your server is unknown"."""
+    an operator-facing 500 body, never "your server is unknown".
+
+    CORRECTED 2026-10-07 (Phase 164.6.6.3.2 D-01): this arm used to reuse the
+    existing MT5_GATEWAY_UNCONFIGURED code; it answers MT5_VALIDATION_UNCONFIGURED
+    now so the wizard can name the cause. Only the D-31 arm keeps the old code."""
     router = exchange_router
     _set_env(monkeypatch, known=None, house=None)
     factory = MagicMock(side_effect=AssertionError("a client was built"))
@@ -374,7 +378,7 @@ async def test_an_empty_known_server_list_answers_gateway_unconfigured_at_the_ro
     assert exc.status_code == 500
     detail = exc.detail
     assert isinstance(detail, dict)
-    assert detail["code"] == "MT5_GATEWAY_UNCONFIGURED"
+    assert detail["code"] == "MT5_VALIDATION_UNCONFIGURED"
     assert trace.outcome == "gateway_unconfigured"
     factory.assert_not_called()
 
