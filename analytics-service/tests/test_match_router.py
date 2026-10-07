@@ -5768,3 +5768,111 @@ class TestLoadersCarryTheNativeUnitFromTheSameRow:
         ctx = match_mod._load_allocator_context("alloc-units")
         assert ctx["native_units"] == {"S1": "BTC"}
         assert any("data_quality_flags" in c and "returns_series" in c for c in selects)
+
+
+# ---------------------------------------------------------------------------
+# Phase 164.6.6.2.2 (D-01, D-02): the loaders read a stored CURVE as daily returns
+# ---------------------------------------------------------------------------
+#
+# CR-01: ``strategy_analytics.returns_series`` is the cumulative wealth CURVE the
+# worker writes, not daily returns. These fixtures are curve-SHAPED (built by
+# ``curve_from_returns``), so a loader that weights the stored column as returns
+# cannot pass: a level of about 1.0 would stand where a return of about 0.01 belongs.
+
+_CURVE_DATES = ["2026-02-01", "2026-02-02", "2026-02-03", "2026-02-04"]
+
+
+def _allocator_supabase(ps_rows, analytics, selects):
+    """A Supabase double for ``_load_allocator_context`` (no holdings, no feedback)."""
+
+    def _table(name):
+        t = MagicMock()
+        if name == "portfolios":
+            t.select.return_value.eq.return_value.execute.return_value = MagicMock(
+                data=[{"id": "pf-1"}]
+            )
+        elif name == "allocator_preferences":
+            t.select.return_value.eq.return_value.maybe_single.return_value.execute.return_value = None
+        elif name == "portfolio_strategies":
+            t.select.return_value.in_.return_value.order.return_value.order.return_value.execute.return_value = MagicMock(
+                data=ps_rows
+            )
+        elif name == "strategy_analytics":
+
+            def _select(cols):
+                selects.append(cols)
+                q = MagicMock()
+                q.in_.return_value.execute.return_value = MagicMock(data=analytics)
+                return q
+
+            t.select.side_effect = _select
+        elif name in ("allocator_holdings", "allocator_equity_snapshots"):
+            t.select.return_value.eq.return_value.order.return_value.execute.return_value = MagicMock(
+                data=[]
+            )
+        elif name == "match_decisions":
+            t.select.return_value.eq.return_value.eq.return_value.execute.return_value = MagicMock(
+                data=[]
+            )
+        return t
+
+    sb = MagicMock()
+    sb.table.side_effect = _table
+    return sb
+
+
+class TestAllocatorBookIsScoredOnDailyReturnsFromTheStoredCurve:
+    @pytest.mark.asyncio
+    async def test_curve_book_reaches_score_candidates_as_daily_returns(self, monkeypatch):
+        """Select -> boundary -> USD pass-through -> ``score_candidates``.
+
+        The two stored curves are built from daily returns r1 = [0.0, 0.01, -0.02, 0.03]
+        and r2 = [0.0, 0.02, 0.0, -0.01] on four dates. Day 0 has no stored predecessor,
+        so the book carries days 1..3 only. Hand-computed, geometric levels:
+          S1: 1.0, 1.01, 0.9898, 1.019494 -> 1.01/1 - 1 = 0.01; 0.9898/1.01 - 1 = -0.02;
+              1.019494/0.9898 - 1 = 0.03
+          S2: 1.0, 1.02, 1.02, 1.0098     -> 0.02; 1.02/1.02 - 1 = 0.0 (a real zero
+              return, kept, not absent); 1.0098/1.02 - 1 = -0.01
+        """
+        from tests._curve_fixtures import curve_from_returns
+
+        from routers import match as match_mod
+
+        selects: list[str] = []
+        ps_rows = [
+            {"strategy_id": "S1", "current_weight": 0.5, "portfolio_id": "pf-1",
+             "allocated_amount": 100.0},
+            {"strategy_id": "S2", "current_weight": 0.5, "portfolio_id": "pf-1",
+             "allocated_amount": 100.0},
+        ]
+        analytics = [
+            {"strategy_id": "S1", "daily_returns": None,
+             "returns_series": curve_from_returns([0.0, 0.01, -0.02, 0.03], _CURVE_DATES),
+             "data_quality_flags": {}},
+            {"strategy_id": "S2", "daily_returns": [],
+             "returns_series": curve_from_returns([0.0, 0.02, 0.0, -0.01], _CURVE_DATES),
+             "data_quality_flags": {}},
+        ]
+        monkeypatch.setattr(
+            match_mod, "get_supabase",
+            lambda: _allocator_supabase(ps_rows, analytics, selects),
+        )
+        ctx = match_mod._load_allocator_context("alloc-curve")
+        assert any("daily_returns" in c and "returns_series" in c for c in selects), (
+            "the allocator-book select must read daily_returns beside the curve (D-02)"
+        )
+
+        universe = {"strategies_by_id": {}, "returns_by_id": {}, "native_units": {}}
+        seen, closes_mock = await _score_with_spies(ctx, universe, None)
+        port = seen["score"]["portfolio_returns"]
+
+        days = ["2026-02-02", "2026-02-03", "2026-02-04"]
+        for sid, want in (("S1", [0.01, -0.02, 0.03]), ("S2", [0.02, 0.0, -0.01])):
+            got = port[sid]
+            assert [d.strftime("%Y-%m-%d") for d in got.index] == days, (
+                "day 0 has no stored predecessor and must not appear"
+            )
+            assert list(got.values) == pytest.approx(want, abs=1e-12), (
+                f"{sid}: the engine must be handed daily returns, not curve levels near 1.0"
+            )
+        closes_mock.assert_not_awaited()  # USD-only book: nothing to convert

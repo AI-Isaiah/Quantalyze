@@ -73,6 +73,7 @@ from services.match_eval import (
 )
 from services.native_to_usd import UsdSeriesConverter, native_units_by_id
 from services.rate_limit import limiter, tenant_or_platform_key
+from services.wealth_returns import daily_returns_from_row
 
 router = APIRouter(prefix="/api/match", tags=["match"])
 logger = logging.getLogger("quantalyze.analytics")
@@ -825,7 +826,11 @@ def _load_allocator_context(allocator_id: str) -> dict[str, Any]:
             _sa = chunked_in_query(
                 lambda _chunk: (
                     supabase.table("strategy_analytics")
-                    .select("strategy_id, returns_series, data_quality_flags")
+                    # 164.6.6.2.2 (D-01, D-02): `returns_series` is the cumulative
+                    # wealth CURVE, not daily returns, so the book is built through
+                    # `daily_returns_from_row`, which prefers the stored
+                    # `daily_returns` and otherwise derives them from the curve.
+                    .select("strategy_id, returns_series, daily_returns, data_quality_flags")
                     .in_("strategy_id", _chunk)
                 ),
                 strategy_ids,
@@ -858,7 +863,7 @@ def _load_allocator_context(allocator_id: str) -> dict[str, Any]:
                     # this path is for user-created portfolios with partial data.
                     portfolio_weights[sid] = float(row.get("current_weight") or 1.0)
                     sa = analytics_by_sid.get(sid, {})
-                    returns = _records_to_series(sa.get("returns_series"), name=sid)
+                    returns = daily_returns_from_row(sa, name=sid)
                     if returns is not None:
                         portfolio_returns[sid] = returns
                     allocated = row.get("allocated_amount")
