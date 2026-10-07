@@ -7,6 +7,7 @@ import {
   ALLOWLIST,
   EXCLUDED_FILES,
   EXCLUDED_PREFIXES,
+  listTrackedFiles,
   runCheck,
 } from "../../scripts/check-canonical-domain";
 
@@ -170,5 +171,18 @@ describe("runCheck - anti-vacuity", () => {
     const r = runCheck(root, ["a.ts", "deleted-in-worktree.ts"]);
     expect(r.filesScanned).toBe(1);
     expect(r.violations).toEqual([]);
+  });
+});
+
+describe("runCheck - the live repository", () => {
+  // The scratch-tree arms above prove the gate CAN fail; this one proves the
+  // real tree is clean, so a stray mention landing on a branch is a red test as
+  // well as a red lint step. process.cwd() is the repo root under vitest.
+  it("lists more than 1000 tracked files and finds no mention outside the allowlist", () => {
+    const tracked = listTrackedFiles(process.cwd());
+    expect(tracked.length).toBeGreaterThan(1000);
+    const r = runCheck(process.cwd());
+    expect(r.violations).toEqual([]);
+    expect(r.filesScanned).toBeGreaterThan(1000);
   });
 });
