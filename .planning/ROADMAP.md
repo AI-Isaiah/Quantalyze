@@ -2896,6 +2896,7 @@ Plans:
 2. Every `quantalyze.com` mention is re-counted at plan time (the 18 is a reading, not a constant). Each one is classified: a link, an email address, an OG/canonical/metadata URL, an env default, or prose. Each is corrected to `quantalyze.xyz` or removed, and the classification is recorded.
 3. Anything user-facing that pointed at `quantalyze.com` (emails sent, share or OG URLs, auth redirect allow-lists) is checked for live impact, and the result is recorded.
 4. A gate stops a new `quantalyze.com` URL from coming back, and it is shown RED once.
+⭐ **Scope, founder 2026-10-07 (AskUserQuestion; `164.6.6.3.5-CONTEXT.md` D-01..D-04):** `quantalyze.com`'s mail goes to an unrelated company's server, and `quantalyze.xyz` has no mail records. So the product names NO contact email at all. Every `@quantalyze.com` address (about 158 outside `.planning/`, not 18) becomes a pointer to the contact form, which carries the correlation id; `security.txt`'s `Contact:` becomes the contact page URL. No Resend or mail-domain setup is done or booked (founder: "Dont want to setup resend").
 
 **Plans:** 0 plans
 
