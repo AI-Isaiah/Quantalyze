@@ -38,6 +38,7 @@ DECLARE
   v_unprotected_job_ids UUID[];
   v_nonterminal_unmarked_count INTEGER;
   v_refresh_keep       BOOLEAN;
+  v_side_failed_only   BOOLEAN;
 BEGIN
   IF p_strategy_id IS NULL THEN
     RAISE EXCEPTION 'sync_strategy_analytics_status: p_strategy_id is required'
@@ -762,12 +763,28 @@ BEGIN
     RETURN;
   END IF;
 
+  -- D-09 (Phase 164.6.6.3.4): is the latest terminal job a failed side-kind job?
+  -- Reaching here means no counting failure is live, so a failed_final that is the
+  -- most recently created terminal job can only be a side kind (a superseded
+  -- failure has a LATER done, which would be the latest instead). TRUE holds
+  -- computed_at, computation_error and both markers below, because nothing was
+  -- computed and the bridge wrote none of that sentence. NULL (no terminal job)
+  -- is FALSE, i.e. today's behaviour.
+  SELECT COALESCE((SELECT j.status = 'failed_final'
+                     FROM compute_jobs j
+                    WHERE j.strategy_id = p_strategy_id
+                      AND j.status IN ('done', 'failed_final')
+                    ORDER BY j.created_at DESC, j.id DESC
+                    LIMIT 1), FALSE)
+    INTO v_side_failed_only;
+
   -- (c) all rows 'done' → terminal SUCCESS. PRESERVE an existing
   -- 'complete_with_warnings' OR a runner-owned computation_warned marker (a
   -- more-informative success the analytics worker already wrote — the marker
   -- read is what closes the failed_final-bounce launder, since branch (b) may
   -- have bounced computation_status to 'failed' in between); otherwise resolve
-  -- to 'complete'. Clears any stale computation_error either way.
+  -- to 'complete'. Clears any stale computation_error either way, EXCEPT when
+  -- v_side_failed_only holds it (D-09, above).
   -- JOB-01 (Phase 142): SQL exit transition #2 — clear the stamp. Both arms of
   -- the status CASE are terminal, so the clear is unconditional here.
   INSERT INTO strategy_analytics (strategy_id, computation_status, computation_error, computing_started_at, computation_error_source, computation_error_job_id)
@@ -779,15 +796,16 @@ BEGIN
            THEN 'complete_with_warnings'
            ELSE 'complete'
          END,
-         computation_error  = NULL,
-         -- Phase 164.2 / criterion 2: UNCONDITIONAL, exactly like the blank on
-         -- the line above and for the same reason. Every live failure is gone;
-         -- there is nothing left for a marker to describe, and one left
-         -- standing here would be read by the NEXT failure's write branch as a
-         -- writer's claim over a sentence that no longer exists.
-         computation_error_source = NULL,
-         computation_error_job_id = NULL,
+         computation_error  = CASE WHEN v_side_failed_only THEN strategy_analytics.computation_error ELSE NULL END,
+         -- Phase 164.2 / criterion 2: the markers go with the sentence, exactly
+         -- like the blank on the line above and for the same reason. Every live
+         -- failure is gone; there is nothing left for a marker to describe, and
+         -- one left standing here would be read by the NEXT failure's write
+         -- branch as a writer's claim over a sentence that no longer exists.
+         -- D-09: a HELD sentence keeps its markers on the same predicate.
+         computation_error_source = CASE WHEN v_side_failed_only THEN strategy_analytics.computation_error_source ELSE NULL END,
+         computation_error_job_id = CASE WHEN v_side_failed_only THEN strategy_analytics.computation_error_job_id ELSE NULL END,
          computing_started_at = NULL,
-         computed_at        = now();
+         computed_at        = CASE WHEN v_side_failed_only THEN strategy_analytics.computed_at ELSE now() END;
 END;
 $$;

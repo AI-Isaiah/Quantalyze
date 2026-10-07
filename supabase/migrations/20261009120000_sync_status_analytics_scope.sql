@@ -4,11 +4,12 @@
 --
 -- WHAT IT CHANGES. One function, `public.sync_strategy_analytics_status(uuid)`,
 -- the SQL bridge every terminal compute-job mark ends in, re-based on its
--- latest body (20261003120000, see RE-BASE). The executable delta is exactly
--- two added conjuncts in the `WHERE` clause of the `live_failures` CTE, the one
--- place a failure enters the verdict. Filtering there keeps is_protected,
--- has_live_successor, the aggregate picks and branches (a), (b), (b-prime) and
--- (c) correct without editing any of them.
+-- latest body (20261003120000, see RE-BASE). The executable delta is two added
+-- conjuncts in the `WHERE` clause of the `live_failures` CTE, the one place a
+-- failure enters the verdict, plus one flag and four assignments in branch (c)
+-- (item (3), founder D-09). Filtering in the CTE keeps is_protected,
+-- has_live_successor, the aggregate picks and branches (a), (b) and (b-prime)
+-- correct without editing any of them.
 --
 --   (1) D-05, side kinds never fail the analytics status. A `failed_final` job
 --       whose kind is one of FOUR named side kinds is dropped from the failure
@@ -54,6 +55,34 @@
 --       Strict comparison: a chain job stamped in the same transaction as the
 --       failure does not supersede it, the safe direction.
 --
+--   (3) D-09 (founder 2026-10-07, after review round 1), a side-kind failure
+--       never stamps freshness. Once (1) drops a side failure from the failure
+--       set, a call whose only failed job is a side kind reaches branch (c), and
+--       branch (c) wrote computed_at = now() and blanked computation_error. A
+--       failing nightly sync_funding therefore made STALE analytics read freshly
+--       computed, and erased the sentence of a real earlier failure. Branch (c)
+--       now reads one flag, v_side_failed_only, immediately before its write:
+--       TRUE when the MOST RECENTLY CREATED terminal job (done or failed_final)
+--       of the strategy is a failed_final, ordered by created_at DESC, id DESC
+--       like the aggregate picks. Branch (c) is reached only when no counting
+--       failure is live, so a failed_final that is the latest terminal job there
+--       can only be a side kind (a counting failure would be live, and a
+--       superseded one has a LATER done, which would be the latest instead). The
+--       flag therefore names no kind and does not respell the D-05 list. When it
+--       is TRUE the branch still resolves computation_status exactly as before
+--       (complete, or complete_with_warnings for a warned row) and still clears
+--       computing_started_at, but HOLDS computed_at, computation_error and both
+--       provenance markers, because nothing was computed and the bridge wrote
+--       none of that sentence. A later job of any other outcome (a done compute,
+--       a done side job) is created after the failure, so the flag reads FALSE
+--       and branch (c) behaves as it always did: the booked stated limit of Phase
+--       166.5 COMPUTEDATSTAMP for a SUCCESSFUL side job is untouched. A genuine
+--       analytics run stamps computed_at itself (job_worker.py), so the hold
+--       costs a recompute nothing. Gate arm D9 of
+--       supabase/tests/test_sync_status_analytics_scope.sql pins it.
+--       Scope note: a strategy with NO strategy_analytics row still gets the
+--       fresh INSERT of branch (c) (the held columns have nothing to hold).
+--
 -- WHY THE KIND FILTER SITS IN THE CTE, DESPITE THE CARRIED CTE COMMENT. The
 -- carried body says the refresh-marker kind scope belongs to is_protected and
 -- NEVER to this CTE's WHERE clause. That rule is about the REFRESH-MARKER scope:
@@ -71,11 +100,13 @@
 --     so a running sync_funding still moves a plain row to `computing`. D-05
 --     scopes the FAILURE set only (RESEARCH Q-B, left for the founder as
 --     awareness).
---   * Branch (c). A strategy whose only failing job is a side kind now falls
---     through to branch (c): `complete`, or `complete_with_warnings` when the row
---     is warned (SI-02), `computation_error` cleared and `computed_at = now()`.
---     That is the transition a SUCCESSFUL side-kind job already produces, and the
---     booked stated limit of Phase 166.5 COMPUTEDATSTAMP applies unchanged.
+--   * Branch (c)'s status resolution and the SUCCESSFUL-side-job transition. A
+--     strategy whose only failing job is a side kind falls through to branch (c)
+--     and reads `complete`, or `complete_with_warnings` when the row is warned
+--     (SI-02), but since D-09 (item (3) above) it no longer blanks
+--     `computation_error` or stamps `computed_at`. A SUCCESSFUL side-kind job
+--     still takes branch (c) unchanged, and the booked stated limit of Phase
+--     166.5 COMPUTEDATSTAMP applies to it as before.
 --   * Per-kind supersession for every other kind (D-04). A later `done` of a
 --     DIFFERENT kind never masks a real analytics failure: a failed sync_trades
 --     followed by a done derive and a done compute stays `failed`, and so does a
@@ -91,7 +122,7 @@
 -- latest CREATE of this function on main and was re-grepped when this file was
 -- written: no later CREATE or ALTER of it exists. The REVOKE and GRANT are
 -- re-issued verbatim and the whole carried self-verify block follows, byte for
--- byte except its final NOTICE, then this phase's anchors (xv) to (xviii). That
+-- byte except its final NOTICE, then this phase's anchors (xv) to (xix). That
 -- block is the proof that the re-base dropped no hardening (membership sites,
 -- hold CASEs, the in-bridge lock, the service_role grant). Transaction style is
 -- the carried one: no explicit BEGIN or COMMIT, the migration runner's own
@@ -116,10 +147,12 @@
 --   node scripts/sql-body-normalize.mjs --diff-bodies \
 --     supabase/schema/functions/sync_strategy_analytics_status.sql <scratch>
 --
--- The row reported 20 differing lines (the normalizer counts lines of the
+-- The row reported 36 differing lines (the normalizer counts lines of the
 -- function body only; the verify block sits outside it): the one-line side-kind
 -- exclusion and the 19-line process_key_long supersession, both conjuncts of
--- the live_failures CTE.
+-- the live_failures CTE, plus the D-09 flag and the four branch (c) assignments.
+-- (It read 20 before D-09 was folded in. The `live` column, which is the hash
+-- acked below, did not move: it is origin/main's body, which D-09 does not touch.)
 --
 -- THE ACKED HASH IS THE `live` COLUMN OF --diff-bodies FOR THE DRIFT ROW (the
 -- fifth tab-separated field), NOT `--hash` OF THE SNAPSHOT FILE (a whole-file
@@ -194,6 +227,7 @@ DECLARE
   v_unprotected_job_ids UUID[];
   v_nonterminal_unmarked_count INTEGER;
   v_refresh_keep       BOOLEAN;
+  v_side_failed_only   BOOLEAN;
 BEGIN
   IF p_strategy_id IS NULL THEN
     RAISE EXCEPTION 'sync_strategy_analytics_status: p_strategy_id is required'
@@ -918,12 +952,28 @@ BEGIN
     RETURN;
   END IF;
 
+  -- D-09 (Phase 164.6.6.3.4): is the latest terminal job a failed side-kind job?
+  -- Reaching here means no counting failure is live, so a failed_final that is the
+  -- most recently created terminal job can only be a side kind (a superseded
+  -- failure has a LATER done, which would be the latest instead). TRUE holds
+  -- computed_at, computation_error and both markers below, because nothing was
+  -- computed and the bridge wrote none of that sentence. NULL (no terminal job)
+  -- is FALSE, i.e. today's behaviour.
+  SELECT COALESCE((SELECT j.status = 'failed_final'
+                     FROM compute_jobs j
+                    WHERE j.strategy_id = p_strategy_id
+                      AND j.status IN ('done', 'failed_final')
+                    ORDER BY j.created_at DESC, j.id DESC
+                    LIMIT 1), FALSE)
+    INTO v_side_failed_only;
+
   -- (c) all rows 'done' → terminal SUCCESS. PRESERVE an existing
   -- 'complete_with_warnings' OR a runner-owned computation_warned marker (a
   -- more-informative success the analytics worker already wrote — the marker
   -- read is what closes the failed_final-bounce launder, since branch (b) may
   -- have bounced computation_status to 'failed' in between); otherwise resolve
-  -- to 'complete'. Clears any stale computation_error either way.
+  -- to 'complete'. Clears any stale computation_error either way, EXCEPT when
+  -- v_side_failed_only holds it (D-09, above).
   -- JOB-01 (Phase 142): SQL exit transition #2 — clear the stamp. Both arms of
   -- the status CASE are terminal, so the clear is unconditional here.
   INSERT INTO strategy_analytics (strategy_id, computation_status, computation_error, computing_started_at, computation_error_source, computation_error_job_id)
@@ -935,16 +985,17 @@ BEGIN
            THEN 'complete_with_warnings'
            ELSE 'complete'
          END,
-         computation_error  = NULL,
-         -- Phase 164.2 / criterion 2: UNCONDITIONAL, exactly like the blank on
-         -- the line above and for the same reason. Every live failure is gone;
-         -- there is nothing left for a marker to describe, and one left
-         -- standing here would be read by the NEXT failure's write branch as a
-         -- writer's claim over a sentence that no longer exists.
-         computation_error_source = NULL,
-         computation_error_job_id = NULL,
+         computation_error  = CASE WHEN v_side_failed_only THEN strategy_analytics.computation_error ELSE NULL END,
+         -- Phase 164.2 / criterion 2: the markers go with the sentence, exactly
+         -- like the blank on the line above and for the same reason. Every live
+         -- failure is gone; there is nothing left for a marker to describe, and
+         -- one left standing here would be read by the NEXT failure's write
+         -- branch as a writer's claim over a sentence that no longer exists.
+         -- D-09: a HELD sentence keeps its markers on the same predicate.
+         computation_error_source = CASE WHEN v_side_failed_only THEN strategy_analytics.computation_error_source ELSE NULL END,
+         computation_error_job_id = CASE WHEN v_side_failed_only THEN strategy_analytics.computation_error_job_id ELSE NULL END,
          computing_started_at = NULL,
-         computed_at        = now();
+         computed_at        = CASE WHEN v_side_failed_only THEN strategy_analytics.computed_at ELSE now() END;
 END;
 $$;
 
@@ -1017,6 +1068,8 @@ DECLARE
   v_side_list_ok               BOOLEAN;
   v_d06_clause_ok              BOOLEAN;
   v_pkl_sites                  INTEGER;
+  v_side_flag_ok               BOOLEAN;
+  v_side_hold_ok               BOOLEAN;
 BEGIN
   -- ======================================================================
   -- ⭐ COMMENT-STRIP FIRST (Phase 164.5.2.1 review, SFH L-1). Every anchor in
@@ -1286,13 +1339,19 @@ BEGIN
   -- holds the sentence and both markers together, and clears both otherwise
   -- (the hold CASEs, anchored as a count at (xiii) below). Branch (c)'s copy is
   -- the one unconditional clear left, and this count still pins it.
+  -- ⚠️ CHANGED 2026-10-07 (Phase 164.6.6.3.4, FOUNDER D-09): branch (c)'s clear is
+  -- no longer unconditional either. It is `CASE WHEN v_side_failed_only THEN
+  -- <the held value> ELSE NULL END`, so a failed side-kind job holds the sentence
+  -- and both markers together (item (3) of the file header) and every other call
+  -- clears both exactly as before. The count is re-keyed on that whole CASE and
+  -- stays 1: the clear still appears in exactly branch (c), with ELSE NULL.
   IF (SELECT count(*)
-        FROM regexp_matches(v_fn, 'computation_error_source\s*=\s*NULL', 'g')) <> 1 THEN
-    RAISE EXCEPTION 'Criterion 2 verification failed: the UNCONDITIONAL source-marker clear must appear in EXACTLY one branch -- (c) the all-done success write (branch (a) clears conditionally since 2026-10-03, anchored at (xiii)). Losing (c)''s copy leaves a stale writer claim over a resolved strategy, where the next failure''s generic is frozen out by a job that no longer has a failure';
+        FROM regexp_matches(v_fn, 'computation_error_source\s*=\s*CASE\s+WHEN\s+v_side_failed_only\s+THEN\s+strategy_analytics\.computation_error_source\s+ELSE\s+NULL\s+END', 'g')) <> 1 THEN
+    RAISE EXCEPTION 'Criterion 2 verification failed: the source-marker clear must appear in EXACTLY one branch -- (c) the all-done success write, as `CASE WHEN v_side_failed_only THEN <held> ELSE NULL END` (branch (a) clears conditionally since 2026-10-03, anchored at (xiii)). Losing (c)''s copy leaves a stale writer claim over a resolved strategy, where the next failure''s generic is frozen out by a job that no longer has a failure';
   END IF;
   IF (SELECT count(*)
-        FROM regexp_matches(v_fn, 'computation_error_job_id\s*=\s*NULL', 'g')) <> 1 THEN
-    RAISE EXCEPTION 'Criterion 2 verification failed: the UNCONDITIONAL job-id-marker clear must appear in EXACTLY one branch -- (c) (branch (a) clears conditionally since 2026-10-03, anchored at (xiii)). A job id left standing over a blanked sentence is a claim about text that no longer exists, and the next equality test will honour it';
+        FROM regexp_matches(v_fn, 'computation_error_job_id\s*=\s*CASE\s+WHEN\s+v_side_failed_only\s+THEN\s+strategy_analytics\.computation_error_job_id\s+ELSE\s+NULL\s+END', 'g')) <> 1 THEN
+    RAISE EXCEPTION 'Criterion 2 verification failed: the job-id-marker clear must appear in EXACTLY one branch -- (c), as `CASE WHEN v_side_failed_only THEN <held> ELSE NULL END` (branch (a) clears conditionally since 2026-10-03, anchored at (xiii)). A job id left standing over a blanked sentence is a claim about text that no longer exists, and the next equality test will honour it';
   END IF;
 
   -- ======================================================================
@@ -1763,6 +1822,22 @@ BEGIN
     FROM regexp_matches(v_body, '''process_key_long''', 'g');
   IF v_pkl_sites <> 1 THEN
     RAISE EXCEPTION 'status-bridge: the body names the process_key_long literal at % code site(s), not 1. The chain supersession is scoped to that one kind (D-04: a later done of a different kind never masks a real analytics failure); a second site extends it to another kind.', v_pkl_sites;
+  END IF;
+
+  -- (xix) D-09, branch (c) holds freshness for a failed side-kind job. Each piece
+  -- is its own whole-expression regex over the comment-stripped body, so no prose
+  -- can satisfy it. The FLAG (the latest-created terminal job is a failed_final,
+  -- ordered like the aggregate picks) and the two columns the markers do not
+  -- cover: the sentence and computed_at. The marker clears are anchored at the
+  -- re-keyed (P2d) counts above.
+  v_side_flag_ok := v_body ~ 'SELECT\s+COALESCE\s*\(\s*\(\s*SELECT\s+j\.status\s*=\s*''failed_final''\s+FROM\s+compute_jobs\s+j\s+WHERE\s+j\.strategy_id\s*=\s*p_strategy_id\s+AND\s+j\.status\s+IN\s*\(\s*''done''\s*,\s*''failed_final''\s*\)\s+ORDER\s+BY\s+j\.created_at\s+DESC\s*,\s*j\.id\s+DESC\s+LIMIT\s+1\s*\)\s*,\s*FALSE\s*\)\s+INTO\s+v_side_failed_only';
+  IF NOT v_side_flag_ok THEN
+    RAISE EXCEPTION 'status-bridge: the v_side_failed_only flag is not the latest-created terminal job being a failed_final (ORDER BY created_at DESC, id DESC LIMIT 1, NULL read as FALSE). A flag that is TRUE too often freezes computed_at after a genuine success, and one that is FALSE too often lets a failing nightly side job make stale analytics look freshly updated (D-09).';
+  END IF;
+  v_side_hold_ok := v_body ~ 'computation_error\s*=\s*CASE\s+WHEN\s+v_side_failed_only\s+THEN\s+strategy_analytics\.computation_error\s+ELSE\s+NULL\s+END'
+                AND v_body ~ 'computed_at\s*=\s*CASE\s+WHEN\s+v_side_failed_only\s+THEN\s+strategy_analytics\.computed_at\s+ELSE\s+now\(\)\s+END';
+  IF NOT v_side_hold_ok THEN
+    RAISE EXCEPTION 'status-bridge: branch (c) does not hold computation_error and computed_at when v_side_failed_only is TRUE (each as CASE WHEN v_side_failed_only THEN <the stored value> ELSE NULL / now() END). Without both, a failed side-kind job stamps freshness over stale analytics and blanks the sentence of a real earlier failure (D-09).';
   END IF;
 
   RAISE NOTICE 'Migration 20261009120000: sync_strategy_analytics_status re-based on its latest body (STATUSBRIDGE, Phase 164.6.6.3.4); every carried anchor passed on the new comment-stripped body, and this file''s own anchors passed after them.';

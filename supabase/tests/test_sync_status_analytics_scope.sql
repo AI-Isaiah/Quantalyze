@@ -52,7 +52,17 @@
 --                 scoped to process_key_long alone.
 --   G3  (guard)   D-04: a genuine compute_analytics_from_csv failure followed by
 --                 a side-kind job driven done stays failed on both.
--- The completion sentinel at the foot counts these thirteen sections.
+--   D9            D-09 (founder 2026-10-07): a ten-day-old row carrying the
+--                 writer-stamped sentence of a real earlier compute failure, then
+--                 a nightly sync_funding that fails. computed_at, the sentence and
+--                 both provenance markers are unchanged. Without the hold the
+--                 branch (c) fall-through stamps computed_at = now() and blanks
+--                 all three: stale analytics read freshly updated.
+--   D10 (guard)   the same row and a lingering failed sync_funding, then a genuine
+--                 compute created after it driven done: computed_at advances and
+--                 the sentence and markers clear. The hold is for the call a side
+--                 job FAILED in, not for any strategy that has a side failure.
+-- The completion sentinel at the foot counts these fifteen sections.
 --
 -- UNKNOWN KIND, RESOLVED LOUD. An unregistered kind cannot be inserted into
 -- compute_jobs at all (the kind column references compute_job_kinds and the
@@ -463,7 +473,7 @@ BEGIN
   --            warning is laundered into a clean success once the side failure no longer
   --            pins failed. No carried count anchor moves (the three computation_warned
   --            reads stay), so the twin is a single edit.
-  -- RED-UNDER-M: {"arm":"S6","apply":[{"kind":"edit","file":"supabase/migrations/20261009120000_sync_status_analytics_scope.sql","find":"           THEN 'complete_with_warnings'\n           ELSE 'complete'\n         END,\n         computation_error  = NULL,","replace":"           THEN 'complete'\n           ELSE 'complete'\n         END,\n         computation_error  = NULL,","occurrences":1}]}
+  -- RED-UNDER-M: {"arm":"S6","apply":[{"kind":"edit","file":"supabase/migrations/20261009120000_sync_status_analytics_scope.sql","find":"           THEN 'complete_with_warnings'\n           ELSE 'complete'\n         END,\n         computation_error  = CASE WHEN v_side_failed_only","replace":"           THEN 'complete'\n           ELSE 'complete'\n         END,\n         computation_error  = CASE WHEN v_side_failed_only","occurrences":1}]}
   IF v_status IS DISTINCT FROM 'complete_with_warnings' OR v_warned IS DISTINCT FROM TRUE THEN
     RAISE EXCEPTION 'TEST FAILED (S6): a warned row whose only failure is a side kind reads % with computation_warned %. With the failure gone the bridge reaches branch (c), which must keep complete_with_warnings and the runner-owned warning flag (SI-02); plain complete would publish a warned factsheet as clean.', COALESCE(v_status, 'NULL'), COALESCE(v_warned::text, 'NULL');
   END IF;
@@ -834,12 +844,148 @@ BEGIN
   END IF;
 END $$;
 
+-- ===== ARM D9 — D-09: a failed side-kind job never stamps freshness ============
+DO $$
+DECLARE
+  uid        UUID := gen_random_uuid();
+  k          UUID;
+  s          UUID;
+  j          UUID;
+  fj         UUID;
+  tok        UUID;
+  v_old_at   TIMESTAMPTZ := now() - interval '10 days';
+  v_err      TEXT := 'seeded sentence of a real earlier compute failure';
+  v_jobstat  TEXT;
+  v_status   TEXT;
+  v_at       TIMESTAMPTZ;
+  v_msg      TEXT;
+  v_src      TEXT;
+  v_mjob     UUID;
+BEGIN
+  INSERT INTO auth.users (id, instance_id, email, created_at, updated_at)
+  VALUES (uid, '00000000-0000-0000-0000-000000000000',
+          'sscope-' || uid::text || '@quantalyze.test', now(), now());
+  INSERT INTO profiles (id, display_name, email, role)
+  VALUES (uid, 'sscope', 'sscope-' || uid::text || '@quantalyze.test', 'manager')
+  ON CONFLICT (id) DO UPDATE SET role = EXCLUDED.role;
+  INSERT INTO api_keys (user_id, exchange, label, api_key_encrypted, is_active)
+  VALUES (uid, 'mt5', 'sscope mt5', 'x', TRUE) RETURNING id INTO k;
+  INSERT INTO strategies (user_id, api_key_id, name) VALUES (uid, k, 'sscope D9') RETURNING id INTO s;
+
+  -- A real earlier analytics failure (superseded by a later done compute, so it is
+  -- no longer live) whose writer-stamped sentence still sits on a ten-day-old row.
+  INSERT INTO compute_jobs (strategy_id, kind, status, attempts, max_attempts, last_error, error_kind, created_at)
+  VALUES (s, 'compute_analytics_from_csv', 'failed_final', 3, 3, 'seeded failure', 'permanent', now() - interval '8 hours')
+  RETURNING id INTO fj;
+  INSERT INTO compute_jobs (strategy_id, kind, status, attempts, max_attempts, created_at)
+  VALUES (s, 'compute_analytics_from_csv', 'done', 1, 3, now() - interval '4 hours');
+  INSERT INTO strategy_analytics (strategy_id, computation_status, computation_warned, computation_error,
+                                  computation_error_source, computation_error_job_id, computed_at)
+  VALUES (s, 'failed', FALSE, v_err, 'writer', fj, v_old_at);
+  INSERT INTO compute_jobs (strategy_id, kind, status, attempts, max_attempts, last_error, error_kind, created_at)
+  VALUES (s, 'sync_funding', 'failed_final', 3, 3, 'handler timeout', 'permanent', now() - interval '2 hours');
+
+  -- The nightly sync_funding that fails now, through the real mark RPC.
+  tok := gen_random_uuid();
+  INSERT INTO compute_jobs (strategy_id, kind, status, claim_token, attempts, max_attempts, created_at)
+  VALUES (s, 'sync_funding', 'running', tok, 1, 3, now())
+  RETURNING id INTO j;
+  PERFORM mark_compute_job_failed(j, 'handler timeout', 'permanent', tok);
+
+  SELECT status INTO v_jobstat FROM compute_jobs WHERE id = j;
+  IF v_jobstat IS DISTINCT FROM 'failed_final' THEN
+    RAISE EXCEPTION 'TEST FAILED (D9-SETUP): the driven sync_funding is % rather than failed_final, so the bridge was never asked to decide a side-only failure and the held-column reads below would pass vacuously.', COALESCE(v_jobstat, 'NULL');
+  END IF;
+
+  SELECT computation_status, computed_at, computation_error, computation_error_source, computation_error_job_id
+    INTO v_status, v_at, v_msg, v_src, v_mjob
+    FROM strategy_analytics WHERE strategy_id = s;
+  IF v_status IS DISTINCT FROM 'complete' THEN
+    RAISE EXCEPTION 'TEST FAILED (D9-SETUP): the row reads % rather than complete after the side-only failure, so the bridge did not reach branch (c) and the held-column reads below would pass vacuously.', COALESCE(v_status, 'NULL');
+  END IF;
+  -- RED-UNDER: the D-09 flag neutered to FALSE: branch (c) stamps computed_at = now() and blanks
+  --            computation_error and both markers over the ten-day-old analytics, i.e. the
+  --            pre-D-09 body, so a failing nightly side job makes stale analytics look
+  --            freshly updated. No anchor needs standing down: the flag read and the four
+  --            CASEs stay intact for (xix); only the value is forced.
+  -- RED-UNDER-M: {"arm":"D9","apply":[{"kind":"edit","file":"supabase/migrations/20261009120000_sync_status_analytics_scope.sql","find":"    INTO v_side_failed_only;\n","replace":"    INTO v_side_failed_only;\n  v_side_failed_only := FALSE;\n","occurrences":1}]}
+  IF v_at IS DISTINCT FROM v_old_at THEN
+    RAISE EXCEPTION 'TEST FAILED (D9): computed_at is % after a failed side-kind job, seeded % (ten days old). A side job that failed computed nothing, so it must not stamp the analytics fresh (D-09, founder 2026-10-07).', COALESCE(v_at::text, 'NULL'), v_old_at;
+  END IF;
+  IF v_msg IS DISTINCT FROM v_err OR v_src IS DISTINCT FROM 'writer' OR v_mjob IS DISTINCT FROM fj THEN
+    RAISE EXCEPTION 'TEST FAILED (D9): the earlier failure''s sentence or its provenance markers changed after a failed side-kind job (sentence %, source %, job %). The bridge did not write that sentence, so a side job that failed must not blank it (D-09).', COALESCE(v_msg, 'NULL'), COALESCE(v_src, 'NULL'), COALESCE(v_mjob::text, 'NULL');
+  END IF;
+END $$;
+
+-- ===== ARM D10 — guard: a genuine compute done after a side failure still stamps ==
+DO $$
+DECLARE
+  uid        UUID := gen_random_uuid();
+  k          UUID;
+  s          UUID;
+  j          UUID;
+  fj         UUID;
+  tok        UUID;
+  v_old_at   TIMESTAMPTZ := now() - interval '10 days';
+  v_jobstat  TEXT;
+  v_status   TEXT;
+  v_at       TIMESTAMPTZ;
+  v_msg      TEXT;
+  v_src      TEXT;
+  v_mjob     UUID;
+BEGIN
+  INSERT INTO auth.users (id, instance_id, email, created_at, updated_at)
+  VALUES (uid, '00000000-0000-0000-0000-000000000000',
+          'sscope-' || uid::text || '@quantalyze.test', now(), now());
+  INSERT INTO profiles (id, display_name, email, role)
+  VALUES (uid, 'sscope', 'sscope-' || uid::text || '@quantalyze.test', 'manager')
+  ON CONFLICT (id) DO UPDATE SET role = EXCLUDED.role;
+  INSERT INTO api_keys (user_id, exchange, label, api_key_encrypted, is_active)
+  VALUES (uid, 'mt5', 'sscope mt5', 'x', TRUE) RETURNING id INTO k;
+  INSERT INTO strategies (user_id, api_key_id, name) VALUES (uid, k, 'sscope D10') RETURNING id INTO s;
+
+  -- The same ten-day-old row with an earlier sentence, and a lingering failed
+  -- side job that no later done sync_funding ever superseded (the Eclipse shape).
+  INSERT INTO compute_jobs (strategy_id, kind, status, attempts, max_attempts, last_error, error_kind, created_at)
+  VALUES (s, 'compute_analytics_from_csv', 'failed_final', 3, 3, 'seeded failure', 'permanent', now() - interval '8 hours')
+  RETURNING id INTO fj;
+  INSERT INTO strategy_analytics (strategy_id, computation_status, computation_warned, computation_error,
+                                  computation_error_source, computation_error_job_id, computed_at)
+  VALUES (s, 'failed', FALSE, 'seeded sentence of a real earlier compute failure', 'writer', fj, v_old_at);
+  INSERT INTO compute_jobs (strategy_id, kind, status, attempts, max_attempts, last_error, error_kind, created_at)
+  VALUES (s, 'sync_funding', 'failed_final', 3, 3, 'handler timeout', 'permanent', now() - interval '2 hours');
+
+  -- A genuine compute, created AFTER the side failure, finishes done now.
+  tok := gen_random_uuid();
+  INSERT INTO compute_jobs (strategy_id, kind, status, claim_token, attempts, max_attempts, created_at)
+  VALUES (s, 'compute_analytics_from_csv', 'running', tok, 1, 3, now())
+  RETURNING id INTO j;
+  PERFORM mark_compute_job_done(j, tok);
+
+  SELECT status INTO v_jobstat FROM compute_jobs WHERE id = j;
+  IF v_jobstat IS DISTINCT FROM 'done' THEN
+    RAISE EXCEPTION 'TEST FAILED (D10-SETUP): the driven compute_analytics_from_csv is % rather than done, so the bridge was never asked to decide after a genuine success.', COALESCE(v_jobstat, 'NULL');
+  END IF;
+
+  SELECT computation_status, computed_at, computation_error, computation_error_source, computation_error_job_id
+    INTO v_status, v_at, v_msg, v_src, v_mjob
+    FROM strategy_analytics WHERE strategy_id = s;
+  -- RED-UNDER: the D-09 flag forced TRUE: a lingering failed side job freezes computed_at and the
+  --            old sentence for good, so a genuine recompute that finishes done never reads
+  --            fresh. The hold is for the call a side job FAILED in, not for the strategy.
+  --            The flag read and the four CASEs stay intact for (xix); only the value is forced.
+  -- RED-UNDER-M: {"arm":"D10","apply":[{"kind":"edit","file":"supabase/migrations/20261009120000_sync_status_analytics_scope.sql","find":"    INTO v_side_failed_only;\n","replace":"    INTO v_side_failed_only;\n  v_side_failed_only := TRUE;\n","occurrences":1}]}
+  IF v_status IS DISTINCT FROM 'complete' OR v_at IS NULL OR v_at <= v_old_at OR v_msg IS NOT NULL OR v_src IS NOT NULL OR v_mjob IS NOT NULL THEN
+    RAISE EXCEPTION 'TEST FAILED (D10): after a genuine compute finished done (created after the failed sync_funding) the row reads status %, computed_at %, sentence %, markers % / %. Branch (c) must still stamp computed_at and clear the sentence and its markers; D-09 holds them only when the latest terminal job is a failed side-kind job.', COALESCE(v_status, 'NULL'), COALESCE(v_at::text, 'NULL'), COALESCE(v_msg, 'NULL'), COALESCE(v_src, 'NULL'), COALESCE(v_mjob::text, 'NULL');
+  END IF;
+END $$;
+
 -- ===== COMPLETION SENTINEL ==================================================
--- Reached only if every arm above passed. Counts the thirteen sections the
+-- Reached only if every arm above passed. Counts the fifteen sections the
 -- mutation runner counts: the -SETUP sub-arms fold into their parent section.
 DO $$
 BEGIN
-  RAISE NOTICE 'ALL 13 ARMS EXECUTED (S1, S2, S3, S4, S5, S6, C1, C2, C3, C4, G1, G2, G3): [164.6.6.3.4 STATUSBRIDGE] a failed side-kind job (sync_funding, poll_positions, reconcile_strategy, compute_intro_snapshot) never pins strategy_analytics.computation_status failed (S1..S4), while a live stitch_composite failure beside it still does (S5) and a warned row keeps complete_with_warnings (S6); a failed process_key_long is cleared only by a later done derive AND a later done compute, ledger-refresh chains included (C1), never by either alone (C2, C3) nor by a chain that predates the failure (C4); and the per-kind rule holds for everything else: the retired compute_analytics still counts (G1), a done chain does not clear a failed sync_trades (G2), and a done side kind does not clear a genuine compute_analytics_from_csv failure (G3).';
+  RAISE NOTICE 'ALL 15 ARMS EXECUTED (S1, S2, S3, S4, S5, S6, C1, C2, C3, C4, G1, G2, G3, D9, D10): [164.6.6.3.4 STATUSBRIDGE] a failed side-kind job (sync_funding, poll_positions, reconcile_strategy, compute_intro_snapshot) never pins strategy_analytics.computation_status failed (S1..S4), while a live stitch_composite failure beside it still does (S5) and a warned row keeps complete_with_warnings (S6); a failed process_key_long is cleared only by a later done derive AND a later done compute, ledger-refresh chains included (C1), never by either alone (C2, C3) nor by a chain that predates the failure (C4); and the per-kind rule holds for everything else: the retired compute_analytics still counts (G1), a done chain does not clear a failed sync_trades (G2), and a done side kind does not clear a genuine compute_analytics_from_csv failure (G3); a failed side-kind job never stamps computed_at or blanks the sentence of a real earlier failure (D9, D-09), while a genuine compute finished done after it still does (D10).';
 END $$;
 
 ROLLBACK;
