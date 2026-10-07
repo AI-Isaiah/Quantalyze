@@ -153,6 +153,23 @@ export type WizardErrorCode =
   // refused to classify, so "not set up" would be false; that arm keeps wire
   // `MT5_GATEWAY_UNCONFIGURED` and renders `SEAM_INTERNAL_FAULT`.
   | "KEY_MT5_VALIDATION_UNCONFIGURED"
+  // Phase 164.6.6.3.2 / item 10 (D-02) — OUR validation terminal cannot take this check
+  // right now. Wire `MT5_TERMINAL_BUSY` (424, flat `VenueTransientHTTPException`,
+  // `recoverable=True`, no `dependency`) maps here through `VENUE_WIRE_CODE_TO_VERDICT`.
+  // TWO emitters in `_validate_mt5_key_probe` answer it: the owed-scrub gate (the
+  // terminal owes a scrub or a relaunch from an EARLIER check, so nothing else is
+  // running) and `except Mt5TerminalBusyError` (the lease was still held when the
+  // interactive bound expired). Both used to answer `NETWORK_UNAVAILABLE` and render
+  // `KEY_NETWORK_TIMEOUT`, which blamed a network blip. `KEY_NETWORK_TIMEOUT` keeps the
+  // other eight `NETWORK_UNAVAILABLE` sites.
+  // RECOVERABLE: a lease frees and a scrub clears in seconds, so "try again in a
+  // minute" is honest advice and the card keeps its Retry (`actions` carries
+  // `clear_and_retry`, so `buildEnvelope` derives `recoverable: true`, agreeing with the
+  // wire). The copy must be TRUE AT BOTH emitters, which is why it never says another
+  // check or another user is using the terminal: at the owed-scrub gate that is false.
+  // NOT in `OUR_DEFECT_KEY_ERROR_CODES`: a held terminal is contention, not our defect, and
+  // the existing scrub-owed alert already pages a scrub that is genuinely missed.
+  | "KEY_MT5_TERMINAL_BUSY"
   // Phase 142.2 / MT5-04 (D-05) — THE FOUR CAUSES `KEY_INVALID_FORMAT` USED TO
   // SWALLOW. The two wizard connect routes (`strategies/create-with-key` and
   // `strategies/composite/add-key`) answered ONE code at TWELVE guards each —
@@ -2003,6 +2020,32 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     // `recoverable: false`. `request_call` keeps a way out; `expand_log` opens the
     // correlation id the second fix line asks for.
     actions: ["request_call", "expand_log"],
+  },
+
+  // Phase 164.6.6.3.2 / item 10 (D-02) — our MetaTrader terminal could not take this
+  // check right now. Wire `MT5_TERMINAL_BUSY` (424) maps here. The copy is STATIC and
+  // must be true at BOTH emitters: the owed-scrub gate, where NOTHING ELSE is running
+  // (the terminal owes a scrub from an earlier check), and the held-lease refusal.
+  // ⛔ So no sentence may say or imply that another check or another user is using the
+  // terminal: that is false at the first emitter. "Was busy and could not take this check
+  // yet" is true at both. `wizardErrors.test.ts` pins that.
+  // Recoverable: the terminal frees up in seconds, so Retry is real advice and renders.
+  // Slot 2 ("Your draft is saved.") is gated to the connect surface: the rotate-secret
+  // dialog has no draft.
+  KEY_MT5_TERMINAL_BUSY: {
+    title: "Our MetaTrader terminal is briefly busy.",
+    cause:
+      "The terminal we check MT5 keys on was busy and could not take this check yet, so it did not run. Nothing was sent to your broker and nothing was stored.",
+    fix: [
+      "Try again in a minute.",
+      "If it is still busy after several tries, send the correlation id below through the contact form.",
+      "Your draft is saved.",
+    ],
+    fixRequires: [null, null, REQUIRES_CONNECT_SURFACE],
+    docsHref: "/security",
+    // `clear_and_retry` is in `RECOVERABLE_ACTIONS` (src/lib/envelope.ts), so
+    // `buildEnvelope` derives `recoverable: true`, agreeing with the wire's `recoverable`.
+    actions: ["clear_and_retry", "request_call"],
   },
 
   // ── Phase 142.2 / MT5-04 (D-05) — the four honest causes ──────────────────
@@ -5063,6 +5106,13 @@ export const VENUE_WIRE_CODE_TO_VERDICT: ReadonlyMap<
   // up" would be false. ⚠️ Same mechanism as the rows above: the table is resolved
   // BEFORE the substring cascade, so a minted member with no row here is unreachable.
   ["MT5_VALIDATION_UNCONFIGURED", { code: "KEY_MT5_VALIDATION_UNCONFIGURED", status: 500 }],
+  // 164.6.6.3.2 / item 10 (D-02) — the two terminal-busy refusals of
+  // `_validate_mt5_key_probe` (the owed-scrub gate and `except Mt5TerminalBusyError`)
+  // answer this wire code at 424, and the row's status is the emitter's own. They used to
+  // answer `NETWORK_UNAVAILABLE`, which stays on the other eight sites and still maps to
+  // `KEY_NETWORK_TIMEOUT`. The table is resolved BEFORE the substring cascade, so this
+  // row is the ONLY recognition path: no cascade needle is added for this cause.
+  ["MT5_TERMINAL_BUSY", { code: "KEY_MT5_TERMINAL_BUSY", status: 424 }],
 ]);
 
 /**
@@ -6074,6 +6124,13 @@ const DASHBOARD_DIALOG_ROUTE_CODES: ReadonlyMap<
       // cause. The copy gates the draft bullet to the connect surface, so this dialog
       // shows no Retry and no draft claim.
       "KEY_MT5_VALIDATION_UNCONFIGURED",
+      // 164.6.6.3.2 D-02 — the two terminal-busy refusals of the same
+      // `_validate_mt5_key_probe` that `rotate_key_secret` runs answer wire
+      // `MT5_TERMINAL_BUSY` (424), and it reaches this route through `seamCode`. Omit this
+      // line and the membership check rejects the honest code and the dialog renders
+      // `UNKNOWN`, whose copy names no cause. The copy gates the draft bullet to the
+      // connect surface, so this dialog shows Retry and no draft claim.
+      "KEY_MT5_TERMINAL_BUSY",
     ]),
   ],
 ]);

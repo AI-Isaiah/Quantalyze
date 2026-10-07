@@ -22,6 +22,7 @@ from services.closed_sets import (
     MT5_MASTER_PASSWORD_DETAIL,
     MT5_WRONG_SERVER_DETAIL,
     MT5_SERVER_UNKNOWN_DETAIL,
+    MT5_TERMINAL_BUSY_DETAIL,
 )
 from services.mt5_client import (
     Mt5Client,
@@ -1125,10 +1126,18 @@ async def _validate_mt5_key_probe(
                     host, port, site=SITE_VALIDATE_WIZARD, probe_thread_done=None
                 )
                 trace.outcome = "scrub_owed"
+                # Phase 164.6.6.3.2 D-02 (2026-10-07): the code now names the cause. This
+                # arm answered NETWORK_UNAVAILABLE, so the wizard told the user a network
+                # timeout when OUR terminal was refusing the check. Same flat 424, still
+                # recoverable (the scrub clears in seconds), `trace.outcome` unchanged so
+                # Railway logs still tell this apart from `lease_busy`. The detail is true
+                # here as well as at the lease site: nothing else is running at THIS arm.
+                # Edited in place; the lease arm below is a second in-place edit, not a
+                # shared helper.
                 raise VenueTransientHTTPException(
                     status_code=424,
-                    code="NETWORK_UNAVAILABLE",
-                    detail=NETWORK_ERROR_DETAIL,
+                    code="MT5_TERMINAL_BUSY",
+                    detail=MT5_TERMINAL_BUSY_DETAIL,
                     recoverable=True,
                 )
             # D-07 part 2 — where the deadline starts, so the park can read how much

@@ -155,6 +155,16 @@ EXPECTED_MT5_SERVER_UNKNOWN_DETAIL = (
     "spelling of the name; if it is right, we have been notified and will add it."
 )
 
+# Phase 164.6.6.3.2 D-02 - the terminal-busy refusals' shared detail, the wire body of
+# C9 (an owed scrub) and C10 (a held lease). Typed here independently of
+# `services/closed_sets.py`; the hoisted-copy pin below COMPARES the two. It is true at
+# BOTH sites: at C9 nothing else is running, the terminal owes a scrub from an earlier
+# check, so it must never say another check is using the connection.
+EXPECTED_MT5_TERMINAL_BUSY_DETAIL = (
+    "Our MetaTrader connection was busy and could not take this check yet. "
+    "Try again in a minute."
+)
+
 # The synthetic unknown-code control. Deliberately NOT a member of any real
 # vocabulary — if a future phase mints this string as a real code, this control
 # stops testing what it claims to and must be re-synthesised.
@@ -197,6 +207,7 @@ EXPECTED_FIXTURE_TRIGGERS = {
     "mt5_client_error_transient",
     "mt5_post_login_client_error",
     "mt5_server_unknown",
+    "mt5_scrub_owed",
     "ccxt_rate_limited",
     "ccxt_ddos_protection",
     "ccxt_exchange_unavailable",
@@ -834,6 +845,46 @@ def test_c8_mt5_unlisted_server_is_refused_before_login(
         trigger="mt5_server_unknown",
         detail=EXPECTED_MT5_SERVER_UNKNOWN_DETAIL,
         code="MT5_SERVER_UNKNOWN",
+        recoverable=True,
+    )
+    factory.assert_not_called()
+
+
+def test_c9_mt5_owed_scrub_answers_terminal_busy(app_client, monkeypatch) -> None:
+    """C9 - a terminal that owes a scrub (or a relaunch) refuses the wizard validation
+    BEFORE any connect, login or probe, through the real route and the real
+    exception-handler stack, and the code names the cause: MT5_TERMINAL_BUSY.
+
+    Phase 164.6.6.3.2 D-02. This arm used to answer NETWORK_UNAVAILABLE, so a user whose
+    check was refused by OUR terminal read "the validation request did not complete in
+    time ... a network blip". The mark is the REAL one (`note_mt5_scrub_owed`, not a
+    patched predicate), so a regression that stopped reading it cannot pass. The
+    scheduler and the reporter are stubbed: this file asserts the WIRE body, and the
+    scrub and its alert have their own tests in test_mt5_validation_park.py.
+
+    The client double is armed to FAIL if it is ever built: nothing may reach the
+    terminal on this path."""
+    from unittest.mock import MagicMock
+
+    from services import mt5_client
+
+    g = _handler_globals("/api/validate-key")
+    factory = MagicMock(side_effect=AssertionError("a client was built"))
+    monkeypatch.setitem(g, "Mt5Client", factory)
+    monkeypatch.setitem(g, "schedule_validation_terminal_scrub", MagicMock())
+    monkeypatch.setitem(g, "report_scrub_owed_refusal", MagicMock())
+    key = mt5_client.mt5_terminal_key("mt5-validate-gw.internal", 18813)
+    mt5_client.note_mt5_scrub_owed(key)
+    try:
+        r = _post_validate_key(app_client, **_MT5_FIELDS)
+    finally:
+        mt5_client.clear_mt5_scrub_owed(key)
+
+    _assert_flat_venue_body(
+        r,
+        trigger="mt5_scrub_owed",
+        detail=EXPECTED_MT5_TERMINAL_BUSY_DETAIL,
+        code="MT5_TERMINAL_BUSY",
         recoverable=True,
     )
     factory.assert_not_called()
@@ -1553,11 +1604,33 @@ def test_hoisted_copy_constants_match_the_literals_pinned_here() -> None:
     from services.closed_sets import MT5_SERVER_UNKNOWN_DETAIL
 
     assert MT5_SERVER_UNKNOWN_DETAIL == EXPECTED_MT5_SERVER_UNKNOWN_DETAIL
+    # Phase 164.6.6.3.2 D-02 - C9/C10's shared detail, hoisted in the same module.
+    from services.closed_sets import MT5_TERMINAL_BUSY_DETAIL
+
+    assert MT5_TERMINAL_BUSY_DETAIL == EXPECTED_MT5_TERMINAL_BUSY_DETAIL
 
     # The substring the cascade actually keys on, asserted separately: equality
     # to a literal proves the string did not move, this proves WHY it matters.
     assert "rate" in RATE_LIMITED_DETAIL.lower()
     assert "authentication failed" in AUTH_FAILED_DETAIL.lower()
+
+
+def test_terminal_busy_detail_claims_nothing_false_at_scrub_owed() -> None:
+    """W1 (plan-check round 1). The busy detail is shared by C9 and C10. At C9 the
+    terminal owes a scrub from an EARLIER check and nothing else is running, so any
+    sentence saying another check, or another user, is using the connection is false
+    there. Every sentence must be true at both sites: "was busy and could not take this
+    check yet" is true of an owed scrub and of a held lease alike."""
+    from services.closed_sets import MT5_TERMINAL_BUSY_DETAIL
+
+    lowered = MT5_TERMINAL_BUSY_DETAIL.lower()
+    for false_at_scrub_owed in ("another", "in use", "someone", "other user", "other check"):
+        assert false_at_scrub_owed not in lowered, (
+            f"the busy detail says {false_at_scrub_owed!r}, which is false at the "
+            "scrub_owed site where nothing else is running"
+        )
+    # It keeps the retry promise D-02 makes, and says nothing the user cannot act on.
+    assert "try again in a minute" in lowered
 
 
 def test_inline_verdict_copy_matches_the_literals_pinned_here() -> None:

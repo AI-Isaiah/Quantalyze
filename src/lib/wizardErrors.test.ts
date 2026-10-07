@@ -7,6 +7,7 @@ import {
   recogniseDashboardDialogCode,
   classifyKeyValidationError,
   recogniseSeamErrorCode,
+  OUR_DEFECT_KEY_ERROR_CODES,
   WIZARD_ERROR_COPY,
   CSV_RULE_LABELS,
   CSV_UPLOAD_STEP_HEADINGS,
@@ -2155,8 +2156,16 @@ describe("[140.3-10 / TRAP-4] the whole copy table, scanned for destructive-only
    * value was READ OFF THIS GUARD'S OWN FAILURE MESSAGE ("expected 99 to be 98")
    * with the entry added and the pin unmoved, never counted, and it moves in
    * lockstep with the declaration in the SEAMUX-04 block.
+   *
+   * ⚠️ 99 → 100 (2026-10-07, Phase 164.6.6.3.2 plan 02 / item 10): one arrival,
+   * `KEY_MT5_TERMINAL_BUSY`. Its actions are `clear_and_retry` and `request_call`;
+   * neither is in `DESTRUCTIVE_ACTIONS`, so it sits outside the scanned population and
+   * the "destructive class is FOUR entries" receipt below is unchanged. The value was
+   * READ OFF THIS GUARD'S OWN FAILURE MESSAGE ("expected 100 to be 99") with the entry
+   * added and the pin unmoved, never counted, and it moves in lockstep with the
+   * declaration in the SEAMUX-04 block.
    */
-  const EXPECTED_TABLE_SIZE = 99;
+  const EXPECTED_TABLE_SIZE = 100;
 
   it("the scan actually covers the table — hand-typed size guard", () => {
     expect(
@@ -2907,8 +2916,15 @@ describe("[140.3-12 / SEAMUX-04] no entry in the copy table makes a claim we can
    * per-code exemption (`FORBIDDEN_FRAGMENT_SUBSTANTIATED_FOR`) whose capture, at all
    * three env-gap arms, is pinned by `[164.6.6.3.2 D-07]` above. The value was READ OFF
    * THIS GUARD'S OWN FAILURE MESSAGE ("expected 99 to be 98"), never counted.
+   *
+   * ⚠️ 99 → 100 (2026-10-07, Phase 164.6.6.3.2 plan 02 / item 10): one arrival,
+   * `KEY_MT5_TERMINAL_BUSY`, walked against the FORBIDDEN fragments by hand BEFORE the
+   * number moved: "been notified", "been alerted", "we fetched your trades", "data is
+   * unchanged" and "wizard_session_id idempotency" are all ABSENT, and it takes no
+   * exemption. The value was READ OFF THIS GUARD'S OWN FAILURE MESSAGE ("expected 100
+   * to be 99"), never counted.
    */
-  const EXPECTED_TABLE_SIZE = 99;
+  const EXPECTED_TABLE_SIZE = 100;
 
   it("the scan actually covers the table — hand-typed size guard", () => {
     expect(
@@ -4570,6 +4586,57 @@ describe("[164.6.6.3.2 plan 01] the env-gap arm is recognised on every key surfa
     expect(blob).not.toMatch(/MT5_[A-Z_]+|_HOST|_PORT|\/api\/|\b\d{3,5}\b/);
     expect(copy.actions).not.toContain("clear_and_retry");
     expect(copy.actions).not.toContain("try_another_key");
+  });
+});
+
+/**
+ * [164.6.6.3.2 plan 02 / D-02] `KEY_MT5_TERMINAL_BUSY` - our validation terminal could
+ * not take this check right now, as every key surface receives it.
+ *
+ * Wire `MT5_TERMINAL_BUSY` is a flat 424 `VenueTransientHTTPException` body
+ * `{detail, code, recoverable: true}` emitted at TWO sites (the owed-scrub gate and the
+ * held-lease refusal). Both used to answer `NETWORK_UNAVAILABLE`, which stays on the other
+ * eight sites and still renders `KEY_NETWORK_TIMEOUT`; the control case pins that the two
+ * never merge. The row is the only recognition path: no substring needle exists for it.
+ */
+describe("[164.6.6.3.2 plan 02] the terminal-busy arms are recognised on every key surface", () => {
+  it("a 424 MT5_TERMINAL_BUSY wire code classifies to KEY_MT5_TERMINAL_BUSY, by machine code", () => {
+    // The message below would classify as KEY_NETWORK_TIMEOUT under the substring cascade
+    // ("timeout"), so only `seamCode` can win.
+    const result = classifyKeyValidationError({
+      seamCode: "MT5_TERMINAL_BUSY",
+      message: "Network error: the request hit a timeout. Check connectivity and try again.",
+    });
+    expect(result).toEqual({ code: "KEY_MT5_TERMINAL_BUSY", status: 424 });
+  });
+
+  it("derives recoverable: true, so the Retry control renders (never read back from `actions`)", () => {
+    const envelope = buildEnvelope("KEY_MT5_TERMINAL_BUSY", "corr-busy-1");
+    expect(envelope.recoverable).toBe(true);
+  });
+
+  it("control: wire NETWORK_UNAVAILABLE still renders KEY_NETWORK_TIMEOUT at 502", () => {
+    const result = classifyKeyValidationError({
+      seamCode: "NETWORK_UNAVAILABLE",
+      message: "Network error reaching the exchange. Check connectivity and try again.",
+    });
+    expect(result).toEqual({ code: "KEY_NETWORK_TIMEOUT", status: 502 });
+  });
+
+  it("is NOT paged: a held terminal is contention, not our defect", () => {
+    expect(OUR_DEFECT_KEY_ERROR_CODES.has("KEY_MT5_TERMINAL_BUSY")).toBe(false);
+  });
+
+  it("the copy is true at BOTH emitters: it says the terminal was busy, never that another check is using it (W1)", () => {
+    const copy = WIZARD_ERROR_COPY.KEY_MT5_TERMINAL_BUSY;
+    const blob = [copy.title, copy.cause, ...copy.fix].join("   ").toLowerCase();
+    // At the owed-scrub gate NOTHING ELSE is running, so either phrase is false there.
+    expect(blob).not.toContain("another");
+    expect(blob).not.toContain("in use");
+    expect(blob).toContain("briefly busy");
+    expect(blob).toContain("try again in a minute");
+    expect(blob).toContain("contact form");
+    expect(blob).not.toContain("@");
   });
 });
 
