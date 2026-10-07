@@ -232,6 +232,73 @@ def test_timeout_constants_survived_the_move() -> None:
     assert jw._MT5_RESTART_TIMEOUT_S == restart_s
 
 
+def test_history_wait_bound_is_derived() -> None:
+    """164.6.6.3 / D-05, D-15, SC2: the deal-history wait and its poll interval are
+    pinned, and every module that reads them holds the SAME object.
+
+    The expected values are TYPED HERE as literals: the oracle never reads them back
+    from the module under test, so a retune is a deliberate two-place edit.
+
+    * 0 < poll < wait, both finite, so the poll loop can iterate at least once and
+      cannot spin;
+    * `jw` and `mt5_read` re-import the constants from `mt5_concurrency`. An `is`
+      check (not `==`) is what proves neither silently became a second constant
+      that could drift;
+    * the READ budget is untouched: `_MT5_DERIVE_READ_TIMEOUT_S` is still
+      `MT5_REQUEST_TIMEOUT_S + 10.0`, because the wait is ADDED at each call site
+      for a fresh login only, never folded into the shared constant;
+    * the fresh outer bound covers the read budget (login, PRE, first read, POST),
+      the WHOLE settle wait AND one trailing read's own rpyc timeout: the loop never
+      starts a read after its deadline but the last one can start AT it (review
+      WR-01). A bound short of that lets the outer `wait_for` fire first and restart
+      the terminal mid-download, which D-05 forbids. The oracle's rpyc timeout is
+      imported from `mt5_client`, not read back from the constant under test."""
+    from services import mt5_read
+    from services.mt5_client import MT5_REQUEST_TIMEOUT_S
+
+    wait_s = mt5_concurrency._MT5_HISTORY_WAIT_S
+    poll_s = mt5_concurrency._MT5_HISTORY_POLL_S
+
+    assert wait_s == 30.0
+    assert poll_s == 2.0
+    for name, value in (("wait", wait_s), ("poll", poll_s)):
+        assert isinstance(value, float), f"{name} must be a float"
+        assert value == value and value != float("inf"), f"{name} must be finite"
+    assert 0 < poll_s < wait_s
+    stable = mt5_concurrency._MT5_HISTORY_STABLE_INTERVALS
+    assert stable == 2, (
+        "one equal pair is not settled (review WR-02): two stable intervals, typed "
+        "here as a literal so a retune is a deliberate two-place edit"
+    )
+    assert stable * poll_s <= wait_s, (
+        "the budget must fit the stability window, or no history could ever settle"
+    )
+    assert mt5_read._MT5_HISTORY_STABLE_INTERVALS is stable
+
+    assert jw._MT5_HISTORY_WAIT_S is mt5_concurrency._MT5_HISTORY_WAIT_S
+    assert mt5_read._MT5_HISTORY_WAIT_S is mt5_concurrency._MT5_HISTORY_WAIT_S
+    assert mt5_read._MT5_HISTORY_POLL_S is mt5_concurrency._MT5_HISTORY_POLL_S
+
+    assert (
+        mt5_concurrency._MT5_DERIVE_READ_TIMEOUT_S == MT5_REQUEST_TIMEOUT_S + 10.0
+    ), "the read budget was edited; the wait must be added at the call site instead"
+
+    read_s = mt5_concurrency._MT5_DERIVE_READ_TIMEOUT_S
+    fresh_bound = mt5_concurrency.mt5_derive_read_bound_s(
+        read_s=read_s, wait_s=wait_s, fresh=True
+    )
+    cached_bound = mt5_concurrency.mt5_derive_read_bound_s(
+        read_s=read_s, wait_s=wait_s, fresh=False
+    )
+    assert cached_bound == read_s, "a cached read must keep the plain wedge detector"
+    assert fresh_bound >= read_s + wait_s + MT5_REQUEST_TIMEOUT_S, (
+        f"fresh outer bound {fresh_bound}s does not cover the read budget "
+        f"({read_s}s) + settle wait ({wait_s}s) + one trailing read's rpyc timeout "
+        f"({MT5_REQUEST_TIMEOUT_S}s): the outer wait_for can fire mid-settle and "
+        "restart the terminal (review WR-01)"
+    )
+
+
 # --------------------------------------------------------------------------- #
 # 5-11 — mt5_terminal_lease (Phase 153.3 plan 04, D-29)
 #

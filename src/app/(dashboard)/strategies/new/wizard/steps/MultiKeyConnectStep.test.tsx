@@ -325,6 +325,41 @@ describe("[ONB-01] MultiKeyConnectStep — per-key validate", () => {
   });
 });
 
+// 164.6.6.3 plan 06 (D-09, D-10) — the multi-key step's roster gate for the
+// unlisted-broker-server verdict. `composite/add-key` answers a wizard code it got from
+// `classifyKeyValidationError`, which names no literal in the route, so the roster-render
+// sweep (population = roster + route literals + alias rows) cannot see this row go
+// missing: it would shrink the population instead of reddening a case. This case is the
+// gate. Without the roster row the step renders `UNKNOWN`, whose copy names no cause.
+describe("[164.6.6.3 / D-10] MultiKeyConnectStep — an unlisted broker server is named, not UNKNOWN", () => {
+  it("renders KEY_MT5_SERVER_UNKNOWN, not UNKNOWN", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse({ code: "KEY_MT5_SERVER_UNKNOWN" }, 424),
+    );
+    render(<MultiKeyConnectStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    fireEvent.click(screen.getByTestId("multi-add-key"));
+    const panel1 = screen.getByTestId("key-panel-1");
+    fireEvent.change(within(panel1).getByTestId("key-1-api-key"), {
+      target: { value: "AK_LIVE_key2" },
+    });
+    fireEvent.change(within(panel1).getByTestId("key-1-api-secret"), {
+      target: { value: "SECRET_key2" },
+    });
+    fireEvent.change(within(panel1).getByTestId("key-1-window-start"), {
+      target: { value: "2024-01-01" },
+    });
+    fireEvent.click(within(panel1).getByTestId("key-1-validate"));
+
+    const envelope = await within(screen.getByTestId("key-panel-1")).findByTestId(
+      "error-envelope",
+    );
+    expect(envelope).toHaveAttribute("data-error-code", "KEY_MT5_SERVER_UNKNOWN");
+    expect(envelope.textContent).toContain(
+      "Our MetaTrader terminals do not recognise this broker server yet.",
+    );
+  });
+});
+
 describe("[ONB-01] MultiKeyConnectStep — reorder (Move ↑/↓, position-derived seq)", () => {
   it("swaps positions and renumbers legends; ends disable move-up/move-down", () => {
     render(<MultiKeyConnectStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);

@@ -135,6 +135,11 @@ def _reset_park_alerts():
 def park_sentry(monkeypatch) -> MagicMock:
     """Spy on the PARK module's Sentry handle (never `mt5_relogin`'s)."""
     spy = MagicMock()
+    # The tag is set on the capture's OWN scope (review WR-03). `spy.set_tag` is that
+    # scope's `set_tag`, so the assertions below keep reading `park_sentry.set_tag`.
+    # A mock cannot tell scoped from unscoped; `test_the_park_tag_does_not_leak_onto_
+    # a_later_event` uses the real sdk for that.
+    spy.set_tag = spy.new_scope.return_value.__enter__.return_value.set_tag
     monkeypatch.setattr(mt5_probe, "sentry_sdk", spy)
     return spy
 
@@ -1039,6 +1044,49 @@ def test_the_park_alert_captures_once_per_cause_per_window_and_logs_every_time(
     assert len(_park_error_records(caplog)) == 4
     tags = [c.args[1] for c in park_sentry.set_tag.call_args_list]
     assert tags == ["probe_in_flight", "budget_exhausted", "probe_in_flight"]
+
+
+def test_the_park_tag_does_not_leak_onto_a_later_event():
+    """Review WR-03, second site: the park tag belongs to the ONE capture it
+    describes. The worker has no per-request scope, so an unscoped `set_tag` stays
+    on the long-lived isolation scope and labels every later event the process
+    sends.
+
+    REAL sentry_sdk, not `park_sentry`: a MagicMock cannot tell a scoped tag from an
+    unscoped one. A client whose `before_send` records and drops each event stands in
+    for the transport."""
+    import sentry_sdk
+
+    events: list[dict] = []
+
+    def _record(event, _hint):
+        events.append(event)
+        return None  # never send anything
+
+    previous = sentry_sdk.get_global_scope().client
+    sentry_sdk.get_global_scope().set_client(
+        sentry_sdk.Client(dsn="http://k@localhost/1", before_send=_record)
+    )
+    try:
+        with sentry_sdk.isolation_scope():
+            mt5_probe.report_park_skipped("probe_in_flight", site=_WIZARD)
+            sentry_sdk.capture_message("an unrelated later failure")
+    finally:
+        sentry_sdk.get_global_scope().set_client(previous)
+
+    # The sdk's own logging integration also turns the ERROR log line into an event,
+    # so pick the two events by message instead of by position.
+    [alert] = [
+        e for e in events if e.get("message", "").startswith("mt5 validation park failed")
+    ]
+    [later] = [e for e in events if e.get("message") == "an unrelated later failure"]
+    assert alert["tags"].get("mt5_validation_park_failed") == "probe_in_flight", (
+        "the alert itself must still carry its tag"
+    )
+    assert "mt5_validation_park_failed" not in (later.get("tags") or {}), (
+        "the tag leaked onto an unrelated later event: it was set on the "
+        "long-lived scope instead of the capture's own (review WR-03)"
+    )
 
 
 def test_a_raising_sentry_never_escapes_the_park_alert(monkeypatch):

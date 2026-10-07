@@ -147,6 +147,14 @@ EXPECTED_SIGN_IN_FAILED_DETAIL = (
     "the credential."
 )
 
+# Phase 164.6.6.3 plan 05 (D-09, D-10) - the known-server pre-check's own detail, the
+# wire body of C8. Typed here independently of `services/closed_sets.py`; the
+# hoisted-copy pin below COMPARES the two. Not an echo of the submitted server.
+EXPECTED_MT5_SERVER_UNKNOWN_DETAIL = (
+    "Our MetaTrader terminals do not recognise this server yet. Check the "
+    "spelling of the name; if it is right, we have been notified and will add it."
+)
+
 # The synthetic unknown-code control. Deliberately NOT a member of any real
 # vocabulary — if a future phase mints this string as a real code, this control
 # stops testing what it claims to and must be re-synthesised.
@@ -188,6 +196,7 @@ EXPECTED_FIXTURE_TRIGGERS = {
     "mt5_account_mismatch",
     "mt5_client_error_transient",
     "mt5_post_login_client_error",
+    "mt5_server_unknown",
     "ccxt_rate_limited",
     "ccxt_ddos_protection",
     "ccxt_exchange_unavailable",
@@ -786,6 +795,48 @@ def test_c5b_ipc_transport_codes_leave_the_venue_transient_class(
     assert "recoverable" not in body["detail"] or body["detail"].get(
         "recoverable"
     ) is not True
+
+
+# --------------------------------------------------------------------------- #
+# C8 - the known-server pre-check (Phase 164.6.6.3 plan 05, D-09 / D-10)
+# --------------------------------------------------------------------------- #
+
+
+def test_c8_mt5_unlisted_server_is_refused_before_login(
+    app_client, monkeypatch
+) -> None:
+    """C8 - a broker server that is not on the curated list is refused at the router
+    BEFORE any client is built or any login is attempted, through the real route and
+    the real exception-handler stack.
+
+    It is its own site, not a C5 case: C5 is the login-stage refusal class, and
+    nothing here reaches a terminal. `recoverable` is TRUE, the opposite of C5's
+    SIGN_IN_FAILED, because a corrected spelling or our adding the server clears it
+    and a resubmit harms nothing. The other seven sites are byte-unchanged.
+
+    The client double is armed to FAIL if it is ever built, so a regression that
+    moved the check after the connect cannot pass by answering the same body."""
+    from unittest.mock import MagicMock
+
+    from services import mt5_probe
+
+    monkeypatch.setenv("MT5_KNOWN_SERVERS", "Some-Other-Live")
+    monkeypatch.delenv("MT5_SERVER", raising=False)
+    mt5_probe._reset_server_unknown_alerts_for_tests()
+    g = _handler_globals("/api/validate-key")
+    factory = MagicMock(side_effect=AssertionError("a client was built"))
+    monkeypatch.setitem(g, "Mt5Client", factory)
+
+    r = _post_validate_key(app_client, **_MT5_FIELDS)
+
+    _assert_flat_venue_body(
+        r,
+        trigger="mt5_server_unknown",
+        detail=EXPECTED_MT5_SERVER_UNKNOWN_DETAIL,
+        code="MT5_SERVER_UNKNOWN",
+        recoverable=True,
+    )
+    factory.assert_not_called()
 
 
 # --------------------------------------------------------------------------- #
@@ -1497,6 +1548,11 @@ def test_hoisted_copy_constants_match_the_literals_pinned_here() -> None:
     # 167-CREDTRUST plan 01 — the C5 arm's own hoisted constant, byte-identical
     # to the wire case's expectation above.
     assert SIGN_IN_FAILED_DETAIL == EXPECTED_SIGN_IN_FAILED_DETAIL
+    # Phase 164.6.6.3 plan 05 - C8's detail, hoisted in `services/closed_sets.py`
+    # and byte-identical to the literal typed above.
+    from services.closed_sets import MT5_SERVER_UNKNOWN_DETAIL
+
+    assert MT5_SERVER_UNKNOWN_DETAIL == EXPECTED_MT5_SERVER_UNKNOWN_DETAIL
 
     # The substring the cascade actually keys on, asserted separately: equality
     # to a literal proves the string did not move, this proves WHY it matters.

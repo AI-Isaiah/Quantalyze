@@ -1375,6 +1375,23 @@ true for 146 and half of 142–145, and **false for 141**.
 
 ## 🟡 FIX MID-TERM
 
+### SENTRY-UNSCOPED-TAG-01 — five pre-existing `sentry_sdk.set_tag` calls label every later event the process sends (booked 2026-10-06)
+
+**Why it is open.** Phase 164.6.6.3 review WR-03 found that an unscoped `sentry_sdk.set_tag` on the
+worker path stays on the long-lived isolation scope, so every later event carries the tag. Its fix
+scoped the four MT5 validation sites this phase touches (`new_scope()`, the `job_worker
+_capture_read_failure` idiom). These five predate the phase and were left as found:
+`services/audit.py` (`audit_emit_permission_denied`, `audit_emit_transient`,
+`audit_emit_unexpected`), `routers/cron.py` (`prober_cadence_alert`) and `routers/internal.py`
+(`kek_unavailable`). The router sites may sit inside a per-request scope, which is unmeasured.
+
+**Owner: unrouted.** Founder to assign.
+
+**What closing it means.** Each site sets its tag on a `new_scope()` around its own capture, with a
+real-sdk test (recording `before_send`) showing the tag is absent from a later unrelated event.
+Regenerate the census with `grep -rn "sentry_sdk.set_tag(" --include='*.py' analytics-service`
+excluding tests.
+
 ### MT5-UNKNOWN-BROKER-SERVER-HANG-01 — an MT5 key on a broker server the terminals do not know hangs until timeout (booked 2026-10-05, Phase 164.6.6.1 live check)
 
 **Why it is open.** Three wizard validations of an account at a broker new to the terminals on 2026-10-05 each hung in the
@@ -1390,6 +1407,10 @@ points them at their credentials. The jobs terminal would hang the same way on a
 (a server search that needs the GUI, or a missing `servers.dat` entry), then either make validation
 resolve it or add the server to both terminals as a runbook step, and make the wizard name the
 real cause. An investor key at that broker validates `read_only` end to end.
+
+**Status 2026-10-06 (Phase 164.6.6.3 plan 07): code half shipped, entry stays human_needed.** Phase 164.6.6.3 plans 04 to 06 shipped the code half: the wizard now names the cause before `login()`, as `KEY_MT5_SERVER_UNKNOWN` (wire code `MT5_SERVER_UNKNOWN`, 424, recoverable), at the router and at the worker adapter. The remedy is runbook Step 2d (`docs/runbooks/mt5-go-live.md`): add the server to BOTH terminals and to `MT5_KNOWN_SERVERS`. This entry closes only on Step 2d's live reading, a founder-run yes/no that an investor key at a newly added broker validates `read_only`. Headless resolution was not attempted (D-08).
+
+**2026-10-06 (plan 07, D-03 / D-14): the optional founder-led `servers.dat` / headless-resolution measurement was deferred, not run.** It is optional, never blocks item 0, and could only change the detection SOURCE in a later phase. The founder booked **Phase 164.6.6.3.6 MT5SERVERLEARN** the same day to replace the static `MT5_KNOWN_SERVERS` list with learn-on-successful-validation, gated on this same headless-resolution measurement. Its research input is `.planning/phases/164.6.6.3.6-mt5serverlearn-a-broker-server-the-terminals-can-reach-is-le/164.6.6.3.6-BROKER-SERVERS.md`.
 
 ### MT5-SCRUB-OWED-COPY-01 — the wizard shows an owed-scrub refusal as a network timeout (booked 2026-10-05)
 
@@ -5699,6 +5720,15 @@ next derive of an affected account succeed.
 ⛔ **Not a close:** flipping the constant before the history wait is on `main`, or an L-3 reading
 from 164.6.6.1 plan 07 that shows `trades` unchanged. Unchanged is the expected state while this
 entry is open, not evidence that it is done.
+
+History wait shipped: 2026-10-06, Phase 164.6.6.3 plans 01 and 02 (derive 9f1b0fa73, backfill a0db8bc79; branch commits, and the squash sha on main is appended at ship time)
+
+**Status 2026-10-06 (Phase 164.6.6.3 plan 03): human_needed, NOT closed.** The code half shipped:
+`_JOB_TERMINAL_DELETE_TRADES` reads 1 and its pin was seen RED against 0 with the line above
+present, before the flip. The gate's live reading is still owed: the per-server `trades` child count
+falls on the jobs terminal's next `ipc_fault` escalation, and the next derive of an affected account
+succeeds. 164.6.6.1 plan 07's L-3 reading should now expect `trades` to CHANGE, where it used to
+expect it unchanged.
 
 
 ### ⛔ DRIFT-02 — a surgical in-place patch means the REPO no longer holds the true function body (booked 2026-08-27)

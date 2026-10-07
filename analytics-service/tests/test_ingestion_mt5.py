@@ -1161,6 +1161,9 @@ def test_unset_validation_endpoint_fires_the_d05_alert_on_the_worker_path(
     from services import mt5_relogin
 
     spy = MagicMock()
+    # The tag is set on the capture's own scope (review WR-03); `spy.set_tag` is that
+    # scope's `set_tag`, so the assertions below keep reading `spy.set_tag`.
+    spy.set_tag = spy.new_scope.return_value.__enter__.return_value.set_tag
     monkeypatch.setattr(mt5_relogin, "sentry_sdk", spy)
     monkeypatch.setenv("MT5_GATEWAY_HOST", "mt5-gw.internal")
     monkeypatch.setenv("MT5_GATEWAY_PORT", "18812")
@@ -1206,6 +1209,9 @@ def test_a_public_validation_gateway_host_is_refused_on_the_worker_path(
 
     monkeypatch.setattr("services.ingestion.mt5._build_client", _boom)
     spy = MagicMock()
+    # The tag is set on the capture's own scope (review WR-03); `spy.set_tag` is that
+    # scope's `set_tag`, so the assertions below keep reading `spy.set_tag`.
+    spy.set_tag = spy.new_scope.return_value.__enter__.return_value.set_tag
     monkeypatch.setattr(mt5_relogin, "sentry_sdk", spy)
     monkeypatch.setenv("MT5_GATEWAY_HOST", "mt5-gw.internal")
     monkeypatch.setenv("MT5_GATEWAY_PORT", "18812")

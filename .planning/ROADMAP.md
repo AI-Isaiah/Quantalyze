@@ -2762,6 +2762,19 @@ Plans:
 
 ### Phase 164.6.6.3: UATFIXES — the defects the 2026-10-03 production UAT pass found are fixed (INSERTED)
 
+**Scope narrowed 2026-10-06 (founder, smart discuss D-01, "Accept all"; `164.6.6.3-CONTEXT.md`):**
+this phase delivers **items 0 and 9 only**, the MT5 onboarding defects. The rest of the list was
+split by topic and moved:
+- items 1, 6a, 6c, 6d, 6e, 6f and 8 to **164.6.6.3.1 UIPOLISH**;
+- items 7 and 10, plus the wizard copy for item 0, to **164.6.6.3.2 WIZARDCODES**;
+- items 2, 3, 4, 5 and 6b to **164.6.6.3.3 FACTSHEETTRUTH**.
+
+Order (D-02): 164.6.6.3, then .1, then .2, then .3. The full list below is kept as lineage; the
+item numbers are what the three new phases cite.
+⚠️ **Deviation 2026-10-06 (founder override, D-12):** the autonomous UI gate flagged this phase as
+frontend from item 1's lineage text. Its UI-SPEC and AI-SPEC hooks were skipped; 164.6.6.3.1 keeps
+the gate.
+
 Founder decision 2026-10-03 (AskUserQuestion "One fix phase, after 164.6.6"): runs right after 164.6.6, before 164.6.6.2 BTCNATIVE and 164.6.6.1 MT5SCRUB. Source: the 2026-10-03 production UAT pass over 17 human_needed phases (browser checks on the deployed app, Vercel production at `7276aa9a`). The phases those checks came from close with each defect routed here. **Defects, in priority order:**
 1. **Rename risk.** The strategy edit page's Strategy Name picker preselects "Alpha Centauri" instead of the strategy's own name (seen on MM-2x and AI-FX-35), so saving that form would likely rename it.
 2. **Composite factsheet contradicts itself (from 169 #1).** Quantum Drift (a 3-key Deribit composite) shows CUM. RETURN +0.0%, CAGR +0.0%, SHARPE 8.10, CALMAR 0.00 in its headline, while the same page shows YTD +2283266.93%, EOY 2025 +9159.64%, 6 Month +8926742.64% and Recovery Factor 2701034.63, plus "Track record under 90 days" on 253 observations; /my-strategies repeats the bad headline.
@@ -2769,6 +2782,7 @@ Founder decision 2026-10-03 (AskUserQuestion "One fix phase, after 164.6.6"): ru
 4. **OG share card (from 169.4.1 #1).** Fibonacci Ghost's card shows Sharpe "—" where its factsheet shows 0.12; every card draws "—" in red, which DESIGN.md forbids.
 5. **Unbuildable factsheet note (from 167.2.1 #2).** A computed-but-unbuildable strategy (Eclipse) pairs "could not be built from its results" with the generic "not available yet" share note instead of the D-02 line.
 6. **Small ones:** the /recommendations disclaimer renders twice and its "Batch: Fresh" chip carries no date (169.3); an empty scenario's P5/P95/Median read "+0.00%" with 0 observations; the "My Allocation" bottom-nav label clips at 320px; "α VS BTC" uppercases to "Α VS BTC"; edit pages flash "No API keys connected." for about 20 s while loading; /strategies offers "Get private link" where the factsheet says a private link is live.
+
 Re-measure each at plan time; the observations are from a browser pass, not a code reading.
 
 **Added 2026-10-04 from 164.6.6 plan 08's live checks (founder, AskUserQuestion; record in
@@ -2814,13 +2828,244 @@ Re-measure each at plan time; the observations are from a browser pass, not a co
    The recoverable 424 after each redeploy shows `KEY_NETWORK_TIMEOUT`, "We could not reach the
    exchange"; it should say the terminal is briefly busy and to retry. A test pins the mapping.
 
-**Goal:** [Urgent work - to be planned]
-**Requirements**: TBD
+**Goal:** Onboarding an MT5 account new to the jobs terminal succeeds: a fresh login waits,
+bounded and failing loud, for its deal history before the derive reads it. The jobs terminal's
+per-account deal caches are then deleted on each `ipc_fault` recycle. A key on a broker server the
+terminals do not know is named as that, at once, instead of hanging 45.6 s and blaming the
+credentials.
+**Requirements**: none in REQUIREMENTS.md; items 0 and 9 above are the spec.
 **Depends on:** Phase 164.6.6
+**Success Criteria** (what must be TRUE):
+1. A failing-first race test shows the derive reading a fresh login's history only once it has
+   settled. History that never settles under material equity is a transient, retryable failure
+   logged at ERROR, never a permanent stamp (D-04 to D-06).
+2. The wait's outer bound derives from the symbols and never trips the terminal-restart branch.
+3. In ONE commit, `TODOS.md` `MT5-JOB-TERMINAL-TRADES-SCRUB-01` gains
+   `History wait shipped: <date>, <sha>` and `_JOB_TERMINAL_DELETE_TRADES` flips to 1,
+   failing-first, as 164.6.6.1's pin test requires (D-07).
+4. A server missing from the terminals' known-server list returns a distinct, recoverable wizard
+   outcome before `login()` runs, with an ERROR line. A known server's -10005 still reads as
+   sign-in failed (D-09 to D-11). A runbook step covers adding a server to both terminals (D-08).
+**Plans:** 7 plans
+
+Plans:
+- [ ] 164.6.6.3-01-PLAN.md — the history wait on the derive path: settle loop, per-(terminal, key) settled record, conditional derived bound, transient unsettled arm (W1)
+- [ ] 164.6.6.3-02-PLAN.md — the same wait at the full-backfill caller (D-16), plus the bound/constants pin (W2)
+- [ ] 164.6.6.3-03-PLAN.md — the ONE flip commit: `History wait shipped` line + `_JOB_TERMINAL_DELETE_TRADES = 1`, the trades-fault ERROR arm, the prose sweep (W3)
+- [ ] 164.6.6.3-04-PLAN.md — item 9 shared seam: the curated `MT5_KNOWN_SERVERS` pre-check, typed refusals, deduped ERROR/Sentry alert; no wire code yet (W1)
+- [ ] 164.6.6.3-05-PLAN.md — item 9 router end to end: 424 `MT5_SERVER_UNKNOWN` before `login()`, `KEY_MT5_SERVER_UNKNOWN` verdict/copy/connect-step row, every Python and TS census in the same wave (W2)
+- [ ] 164.6.6.3-06-PLAN.md — item 9 worker-adapter parity, plus the multi-key and rotate-secret surfaces (W3)
+- [ ] 164.6.6.3-07-PLAN.md — runbook Step 2d, STATUS_CONTRACT row, TODOS status, owners for the founder readings, the `MT5_KNOWN_SERVERS` gate before merge, and the optional D-03 measurement (auto-defers) (W4)
+
+### Phase 164.6.6.3.6: MT5SERVERLEARN — a broker server the terminals can reach is learned on its first successful validation instead of being hand-listed (INSERTED)
+
+**Goal:** A broker server that the terminals can actually reach is learned automatically on its first successful validation, instead of being hand-listed in `MT5_KNOWN_SERVERS`. Phase 164.6.6.3 ships the static list (D-09, D-14) and the Step 2d runbook. This phase replaces the hand-listing, if and only if its first measurement allows it.
+**Source:** founder decision 2026-10-06 (AskUserQuestion "Ship static, book the dynamic phase"). **Order:** runs NEXT, immediately after 164.6.6.3 ships, ahead of 164.6.6.3.1–.5 in the queue (founder 2026-10-06, AskUserQuestion "Next, right after 164.6.6.3 ships"). ⛔ **CORRECTED the same day:** 164.6.6.2 BTCNATIVE goes FIRST after 164.6.6.3 merges, and this phase follows it. Its VNC measurement may run alongside.
+**Requirements**: TBD (no v1.20 requirement IDs)
+**Depends on:** Phase 164.6.6.3 (the known-server pre-check and Step 2d must be on `main`)
+**Success criteria:**
+1. ⛔ **GATE, measured first:** can a headless terminal authorize on a broker server it has never seen? This is `MT5-UNKNOWN-BROKER-SERVER-HANG-01`'s open question and 164.6.6.3 plan 07 Task 3's deferred "measure" option. The measurement must cover: a `login()` with only the server name; the broker search the "Open an account" dialog performs; and supplying the broker's server entry by another route. It runs on the VALIDATION terminal only, never on the jobs terminal. Evidence of 2026-10-05 is three 45.6 s hangs with no authorization attempt in the Journal. If no headless route exists, the phase closes with that measured verdict and builds nothing: the static list plus Step 2d stays the answer.
+2. If a route exists: a validation that authorizes on a server not yet known records the server in a durable, DB-backed known-server set. Both pre-check sites (router and worker adapter) read that set, and the env list becomes a seed only.
+3. A server is learned only from an authorized session (`connected` true), never from a failed or timed-out attempt. An unknown server's attempt is bounded so that it cannot hold the shared validation terminal for the full 45 s or leave it off the house server.
+4. The JOBS terminal can use a learned server before the first sync of such a key, or that sync is refused by name instead of hanging. Each terminal's server store is its own, so learning on one terminal does not teach the other.
+5. Every guard in criteria 2–4 is shown RED once.
+⭐ **Founder direction 2026-10-06 (verbatim intent: "We cannot have a static list. There must be some way, where client enters a new server, and then the backend works and verifies etc till it works, provided that the server name is correct").** The static list is the bridge, not the design. Target flow:
+- **(i) No login on an unseen name.** The wizard accepts an unseen server name, enqueues a resolve job on the VALIDATION terminal and says so ("checking a new broker server"), instead of logging in blind.
+- **(ii) The resolve job tries three candidate routes, measured in criterion 1's order.**
+  - **(a)** Drive the terminal's own "Open an account" broker search on the container display (the VNC display both gateways already run). This is the human procedure, scripted. MT5 then writes the broker's entries into that terminal's `servers.dat` itself.
+  - **(b)** Log in by raw `host:port` address. MT5 accepts it, and Pepperstone's own FAQ instructs it.
+  - **(c)** Use a startup config with `Server=` set.
+- **(iii) A bounded login follows.**
+- **(iv) Success persists, and the jobs terminal is taught too.** On success the server is persisted (criterion 2) AND the same resolve step runs on the JOBS terminal before the key's first sync (criterion 4).
+- **(v) No broker match is a named error.** A name no broker knows becomes a named wizard error, never `KEY_SIGN_IN_FAILED`.
+
+D-14 of 164.6.6.3 ("the service never reads `servers.dat`") stands: the terminal writes its own store through its own search, and the service never parses it. Research input: `164.6.6.3.6-BROKER-SERVERS.md`. It shows that most large brokers assign NUMBERED per-account servers that differ by legal entity, which is why a curated list cannot scale.
 **Plans:** 0 plans
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 164.6.6.3 to break down)
+- [ ] TBD (run /gsd-plan-phase 164.6.6.3.6 to break down)
+
+### Phase 164.6.6.3.5: DOMAINONE — one canonical address: quantalyze-rho.vercel.app redirects to quantalyze.xyz, and the 18 repo mentions of https://quantalyze.com (a domain we do not own; it resolves to an unrelated server) are corrected or removed after checking each for links, emails, OG/canonical URLs and env defaults (INSERTED)
+
+**Goal:** Everyone lands on one address. `quantalyze.xyz` is the project's only custom domain in Vercel. `quantalyze-rho.vercel.app` is Vercel's default address for the same project, and because a login is tied to its domain, a session started on rho does not carry over to `.xyz`. `quantalyze.com` is NOT ours: measured 2026-10-06, it resolves to an unrelated server (a different IP and server header). The repo still names `https://quantalyze.com` 18 times (orchestrator reading, 2026-10-06).
+**Source:** founder decision 2026-10-06 (AskUserQuestion "Book it": redirect rho to quantalyze.xyz and fix the 18 mentions).
+**Requirements**: TBD (no v1.20 requirement IDs)
+**Depends on:** none (ordering only, after 164.6.6.3)
+**Success criteria:**
+1. A request to `quantalyze-rho.vercel.app` (any path) gets a permanent redirect to the same path on `quantalyze.xyz`, measured live. ⚠️ Re-measure at plan time whether preview and per-deployment Vercel URLs must stay reachable, so the redirect does not break preview deploys or the CI checks that use them.
+2. Every `quantalyze.com` mention is re-counted at plan time (the 18 is a reading, not a constant). Each one is classified: a link, an email address, an OG/canonical/metadata URL, an env default, or prose. Each is corrected to `quantalyze.xyz` or removed, and the classification is recorded.
+3. Anything user-facing that pointed at `quantalyze.com` (emails sent, share or OG URLs, auth redirect allow-lists) is checked for live impact, and the result is recorded.
+4. A gate stops a new `quantalyze.com` URL from coming back, and it is shown RED once.
+
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 164.6.6.3.5 to break down)
+
+### Phase 164.6.6.3.4: STATUSBRIDGE — a strategy's analytics status reads failed only for an analytics failure: a failed process_key_long is superseded by its later successful follow-on chain, and side kinds that produce no analytics (sync_funding) never pin the analytics status (INSERTED)
+
+Booked 2026-10-06 (founder, via AskUserQuestion). Found by a read-only PROD investigation of AI-FX-35, whose
+analytics row read `failed` while every derive/compute job after its 2026-10-04 password update was `done`.
+**Root cause (at origin/main `12eb8479`; re-measure at plan time):**
+- `sync_strategy_analytics_status` (latest in `supabase/migrations/20261003120000_sync_status_bridge_residues.sql`)
+  has a live-failure CTE (~644-649) that counts every `failed_final` job with no later `done` of the SAME kind.
+  Branch (b) (~914-950) then writes `failed` plus `computation_error_copy(kind)`.
+- AI-FX-35: a `process_key_long` resync failed 2026-10-03 (MT5 -6, the password rotation). Nothing re-runs
+  that kind (the ledger refresh enqueues only derive + compute, and rotate-secret enqueues nothing), so it was
+  never superseded and re-poisoned the row on every successful refresh. Cleared by hand 2026-10-06 ~12:23 UTC:
+  the founder pressed the key card's resync, and the row reads `complete_with_warnings` again. The mechanism stays.
+- Eclipse: `failed` because of 12 non-superseded daily `sync_funding` failures (handler timeout, transient),
+  even though its analytics jobs completed later. Same class.
+- ⛔ The per-kind rule is deliberate: a later `done` of a different kind must never mask a real analytics failure.
+
+**Founder decisions (2026-10-06):**
+- **(i)** A failed `process_key_long` is superseded by a later successful follow-on chain for the same strategy
+  (`derive_broker_dailies` + `compute_analytics_from_csv`), because that chain re-reads the full history.
+- **(ii)** Side kinds that produce no analytics (`sync_funding` and the like) never enter the analytics
+  live-failure set. Their failures surface on the key or job surface instead.
+- Rejected for now: (iii) rotate-secret enqueues a resync.
+
+**Goal:** A strategy's analytics status reads `failed` only for a live analytics failure. A failed
+`process_key_long` is superseded by a later successful follow-on chain, and side kinds never pin the
+analytics status, while a genuine analytics failure is still never masked.
+**Requirements**: TBD
+**Depends on:** Phase 164.6.6.3
+**Gates:** a migration, so migration-reviewer and rls-policy-auditor must be clean before merge. PROD auto-applies
+after `apply-test` with no human stop.
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 164.6.6.3.4 to break down)
+
+### Phase 164.6.6.3.3: FACTSHEETTRUTH — a factsheet, its share card and its scenario never show a number the data cannot support (164.6.6.3 split C: items 2, 3, 4, 5, 6b) (INSERTED)
+
+Split C of 164.6.6.3 (founder, 2026-10-06, `164.6.6.3-CONTEXT.md` D-01). It delivers items **2,
+3, 4, 5 and 6b**, and runs last (D-02): it is the largest, and it needs a PROD recompute. **Scout
+findings at HEAD `c8e87b19` (2026-10-06; PROD reads behind the marker query; re-measure at plan
+time):**
+- **Item 2.** PROD: Quantum Drift's row has `cumulative_return`/`cagr`/`calmar` 0, but `sharpe` 8.10
+  and `six_month_return` 26003.8.
+  - Flags: `twr_chain_broken`, `dust_nav_guard`, `flow_dominated_guard`, `negative_nav_guard`,
+    `composite`.
+  - Hypothesis, not proven: `metrics.py` (~1850) computes cum/CAGR/Calmar on the post-break suffix,
+    while Sharpe/vol/Sortino/window returns use the full series, so the headline mixes bases.
+  - The TS headline trusts finite zeros from `metrics_json_by_basis` (`composite-read-path.ts`).
+  - Decision owed: which stats a fired guard withholds.
+- **Item 3.** `return-stats.ts` `beta()` returns 0 for a flat `y` (166.2 HI-01; pinned by T16), so
+  a flat strategy leg shows Beta/IR/capture/alpha numbers.
+  - `166.2-VERIFICATION.md` (~68 vs ~74) contradicts itself.
+  - Decision owed: a factsheet display gate showing "—" for a no-dispersion strategy leg, keeping
+    `beta()`=0 for allocation math.
+  - The KS test in `style-drift.ts` (~38-44) returns p=0 at D=0; it should return p=1. That is a bug,
+    no decision needed.
+- **Item 4.** PROD: Fibonacci Ghost stores `sharpe` 0.12 on 25 points.
+  - `og-metrics.ts` gates the card behind `values.length >= 30` (`169.4.1-CONTEXT.md` ~107/~115).
+    Decision owed: the card follows the factsheet's stored value.
+  - `api/og/factsheet/[id]/route.tsx` (~233) colours a non-finite CAGR/max-DD "—" red, which
+    DESIGN.md forbids.
+- **Item 5.** PROD: Eclipse's `computation_status` is `failed`. `unbuildableNoteKindOf("not_computed")`
+  returns null (`status-surface-copy.ts` ~420), so the share note falls to the generic tail while the
+  owner line says "could not be built" (D-02 lines, `167.2.1-CONTEXT.md` ~56).
+  - Decision owed: copy for "job finished, analytics failed".
+  - ⚠️ 2026-10-06: Eclipse's `failed` comes from the status bridge, not from copy. Twelve non-superseded
+    `sync_funding` failures pin it. Phase 164.6.6.3.4 STATUSBRIDGE owns that mechanism. Re-measure
+    Eclipse after it ships, before deciding the copy here.
+- **Item 6b.** `scenario-factsheet-payload.ts` (~271) `emptyQuantiles()` returns zeros, carried as a
+  LOW in `166.2-VERIFICATION.md` ~245. It should be NaN/null rendering "—".
+- Also owns 170.3's OG-card parity half and 170.6's red "—" on OG cards (moved here 2026-10-06; same defects as item 4).
+
+Never invent data: an uncomputable metric is null.
+
+**Goal:** A factsheet, its share card and its scenario never show a number the data cannot support:
+a guarded composite headline is consistent, a flat strategy leg reads "—" where the no-dispersion
+rule says so, the card and the factsheet show one value, and an empty scenario shows "—".
+**Requirements**: none in REQUIREMENTS.md; the items above are the spec.
+**Depends on:** Phase 164.6.6.3 (order only, D-02)
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 164.6.6.3.3 to break down)
+
+### Phase 164.6.6.3.2: WIZARDCODES — the wizard names the real cause for an unconfigured MT5 gateway, a busy terminal and a fresh account whose history is not ready (164.6.6.3 split B: items 7, 10, item-0 copy) (INSERTED)
+
+Split B of 164.6.6.3 (founder, 2026-10-06, `164.6.6.3-CONTEXT.md` D-01). It delivers items **7
+and 10**, plus the wizard copy for item 0's history-not-ready failure (164.6.6.3 D-06), and runs
+third (D-02). **Scout findings at HEAD `c8e87b19` (2026-10-06; re-measure at plan time):**
+- **Item 7.** `wizardErrors.ts` (~4836) maps `MT5_GATEWAY_UNCONFIGURED` to `SEAM_INTERNAL_FAULT`.
+  That wire code has four emitters: three env gaps (`routers/exchange.py` ~531, ~686 and the
+  port-malformed case) and the D-31 `undetermined` arm (~1159). The server-side detail "The
+  MetaTrader gateway is not configured…" never reaches the wizard.
+  - Recommended: a new env-gap wire code and wizard code, keeping `SEAM_INTERNAL_FAULT` honest for
+    D-31.
+  - ⭐ **Handoff from 164.6.6.3 plan 05 (2026-10-06): there are now FIVE emitters, not four.** The empty `MT5_KNOWN_SERVERS` list (both `MT5_KNOWN_SERVERS` and `MT5_SERVER` unset or blank) raises the same `service_error(500, "MT5_GATEWAY_UNCONFIGURED", …)` body from the router's known-server pre-check. Its worker twin in `Mt5Adapter.validate` raises a configuration `RuntimeError`. It is an env gap like the first three, so the new env-gap code must cover it too. See `164.6.6.3-05-SUMMARY.md` `## The fifth MT5_GATEWAY_UNCONFIGURED emitter`; re-measure the line numbers at plan time.
+- **Item 10.** `routers/exchange.py` `scrub_owed` (~1052) and `lease_busy` (~1407) both raise 424
+  `NETWORK_UNAVAILABLE`, which `wizardErrors.ts` (~4730) shows as `KEY_NETWORK_TIMEOUT`.
+  - Recommended: one `MT5_TERMINAL_BUSY`-style code for both, recoverable, with "briefly busy,
+    retry" copy and a pinning test.
+- **Item 0 copy.** `GATE_ANALYTICS_FAILED`'s "the fault is in our pipeline" (`wizardErrors.ts`
+  ~2786) is wrong for a history that has not settled.
+- Wire-code rosters and census pins move together (`seam-venue-vocabulary.invariant.test.ts`,
+  `EXPECTED_TABLE_SIZE`-style pins). Grep them; never count by hand.
+- ⭐ **Handoff from 164.6.6.3 (planned 2026-10-06; re-measure at plan time).**
+  - 164.6.6.3 plan 05 adds a FIFTH router emitter of `MT5_GATEWAY_UNCONFIGURED`. The trigger is
+    the empty known-server list (`MT5_KNOWN_SERVERS` and `MT5_SERVER` both unset), raised from
+    `_validate_mt5_key_probe` after the endpoint check.
+  - 164.6.6.3 plan 06 adds a second configuration-`RuntimeError` raise to `Mt5Adapter.validate`.
+    That raise is not a wire code.
+  - Item 7's new env-gap code must cover the fifth emitter too.
+  - The item-0 failure this phase words is `error_kind="transient"` plus the fixed message
+    `_MT5_HISTORY_UNSETTLED_MESSAGE` (derive) and `_MT5_BACKFILL_MESSAGES["history_unsettled"]`
+    (backfill). It is not a new DB `error_kind`: 164.6.6.3 D-13 decided against one.
+  - 164.6.6.3 also adds wire `MT5_SERVER_UNKNOWN` and wizard `KEY_MT5_SERVER_UNKNOWN` to the same
+    rosters, so rebase this phase's census moves onto those counts.
+
+**Goal:** The MT5 wizard names the real cause for an unconfigured validation gateway, for a terminal
+that is briefly busy (an owed scrub or a held lease), and for a fresh account whose history has not
+settled, each with its own wire code and copy, pinned by tests.
+**Requirements**: none in REQUIREMENTS.md; the items above are the spec.
+**Depends on:** Phase 164.6.6.3 (it emits the history-not-ready `error_kind` this phase words)
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 164.6.6.3.2 to break down)
+
+### Phase 164.6.6.3.1: UIPOLISH — the small UI defects from the 2026-10-03 UAT pass are fixed (164.6.6.3 split D: items 1, 6a, 6c, 6d, 6e, 6f, 8) (INSERTED)
+
+Split D of 164.6.6.3 (founder, 2026-10-06, `164.6.6.3-CONTEXT.md` D-01). It delivers items **1,
+6a, 6c, 6d, 6e, 6f and 8** of that phase's list, and runs second (D-02), because item 1 is a rename
+risk and every item is small. **Scout findings at HEAD `c8e87b19` (2026-10-06, code reading;
+re-measure at plan time):**
+- **Item 1.** `StrategyForm.tsx` seeds `name` from `strategy?.name ?? STRATEGY_NAMES[0]` (~84) and
+  renders a `<Select>` of the fixed `STRATEGY_NAMES` list (~315). A name outside the list falls back
+  to "Alpha Centauri", and the edit-mode update writes `name` (~271).
+  - Recommended: the edit form does not own the name; show it read-only and point to Rename
+    (`api/strategies/[id]/name`).
+- **Item 6a.** `recommendations/page.tsx` (~384) renders a `Disclaimer` that `DashboardChrome.tsx`
+  (~168, ~242) already renders; check `portfolios/[id]/page.tsx` (~625) for the same pattern. The
+  "Batch: Fresh" `FreshnessBadge` (~339) carries no date.
+- **Item 6c.** `MobileNav.tsx` (~121): `flex-1` cells at `text-fixed-10`, with no `min-w-0` and no
+  wrap. The clip is unconfirmed from code alone.
+- **Item 6d.** `FactsheetView.tsx` (~1547): `α vs …` sits inside a CSS-`uppercase` container, so α
+  renders as "Α".
+- **Item 6e.** `ApiKeyManager.tsx`: `keys=[]` initially (~301) and the empty state renders before
+  the first load settles (~1633); there is no loaded flag.
+- **Item 6f.** `ShareableLink.tsx` (~234) labels "Get private link" without knowing an active share
+  exists (`strategies/page.tsx` ~807). The factsheet derives `hasActiveShare` from the share row.
+- **Item 8.** `ApiKeyManager.tsx` (~1664) title-cases the exchange id, so "Mt5"; use
+  `src/lib/api-key-label.ts`. The key card's left block lacks `min-w-0` and its actions row lacks
+  `shrink-0`/wrap. 164.5.3 closes only after a founder re-read.
+- Also owns 170.6's "the recommendations disclaimer renders once" (moved here 2026-10-06; same defect as item 6a).
+
+DESIGN.md governs every visual change.
+
+**Goal:** The small UI defects from the 2026-10-03 UAT pass are gone, starting with the rename risk:
+saving the strategy edit form can no longer change a strategy's name.
+**Requirements**: none in REQUIREMENTS.md; the items above are the spec.
+**Depends on:** Phase 164.6.6.3 (order only, D-02)
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 164.6.6.3.1 to break down)
 
 ### Phase 164.6.6.2: BTCNATIVE — an MT5 account denominated in BTC (or any non-USD currency) reports its returns in its own unit, not as a dust-guarded USD series (INSERTED)
 
@@ -2829,6 +3074,7 @@ Founder request 2026-10-03 (chat, a factsheet screenshot of MM-2x, then "ok, aft
 **Goal:** [Urgent work - to be planned]
 **Requirements**: TBD
 **Depends on:** Phase 164.6.6
+⭐ **Order and scope, founder 2026-10-06 (AskUserQuestion; a client is waiting on MM-2x):** this phase STARTS as soon as 164.6.6.3 merges, AHEAD of every other queued phase (including 164.6.6.3.6 MT5SERVERLEARN and 164.6.6.3.1–.5). Founder's words: "start of 164.6.6.3 merges, then all others". Scope item (4) is ANSWERED: **BTC (native unit) only first, USD view later.** The USD view is a follow-up, to be booked at discuss time. The "before 164.6.6.1" ordering above is kept as lineage; 164.6.6.1 ran first.
 **Plans:** 0 plans
 
 Plans:
@@ -4841,6 +5087,12 @@ Plans:
 
 ### Phase 170.6: DISPLAYPOLISH — no signed zero (-0.00, -0.0%) and no non-negative value drawn red on factsheets and OG cards; a comparator overlap too short to annualize reads em-dash (SPX annualized 5 days to Sharpe 10.24); the paired-floor sentence names the date the comparator's prices end (169.4, founder: fix); /recommendations unset-mandate copy reworded (169.3, founder: reword); anonymous /browse never flashes example rows that then vanish; admin Compute Jobs kind filter lists every present kind; the recommendations disclaimer renders once. (INSERTED)
 
+⚠️ **Re-scoped 2026-10-06 (founder, "Ok" to de-duplicating against the 164.6.6.3 split):**
+- "the recommendations disclaimer renders once" **moved to 164.6.6.3.1 UIPOLISH item 6a**;
+- an OG card drawing a non-finite "—" in red **moved to 164.6.6.3.3 FACTSHEETTRUTH item 4**.
+
+This phase keeps signed zeros and non-negative *values* drawn red, plus its other items.
+
 **Goal:** [Urgent work - to be planned]
 **Requirements**: TBD
 **Depends on:** Phase 170
@@ -4870,6 +5122,12 @@ Plans:
 - [ ] TBD (run /gsd-plan-phase 170.4 to break down)
 
 ### Phase 170.3: OGPUBLIC — a factsheet's share-preview image loads for signed-out visitors and crawlers (today /api/og/factsheet/* answers 307 to /login because /api/og is missing from PUBLIC_ROUTES in src/proxy.ts), and the OG card equals the factsheet (a 24-observation strategy's card shows Sharpe and Max DD as an em-dash while the factsheet shows 0.12 and -3.7%; the description is cut mid-word). Found by the 2026-10-03 PROD browser pass. (INSERTED)
+
+⚠️ **Re-scoped 2026-10-06 (founder, "Ok" to de-duplicating against the 164.6.6.3 split):** the
+OG-card parity half (a 24/25-observation card shows Sharpe and Max DD as "—" while the factsheet
+shows 0.12 and -3.7%) **moved to 164.6.6.3.3 FACTSHEETTRUTH item 4**, which runs earlier. This
+phase keeps the signed-out route (`/api/og` missing from `PUBLIC_ROUTES` in `src/proxy.ts`) and the
+description cut mid-word.
 
 **Goal:** [Urgent work - to be planned]
 **Requirements**: TBD

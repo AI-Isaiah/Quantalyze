@@ -68,6 +68,7 @@ from services.job_worker import (
     AllocatorEquityAction,
     DispatchOutcome,
     DispatchResult,
+    _DERIBIT_EMPTY_LEDGER_FLOOR_USD,
     _allocator_key_preflight,
     _emit_audit,
     _stamp_429,
@@ -2776,6 +2777,14 @@ _MT5_BACKFILL_MESSAGES: dict[str, str] = {
         "wall-clock bound — retrying rather than wedging the worker "
         "(FLIPRETRY-01)"
     ),
+    # 164.6.6.3 / D-13 — an expired deal-history wait under material equity. The
+    # `error_kind` stays "transient" (a new DB value would be a migration that
+    # auto-applies to PROD); this fixed, classifier-safe text and the distinct
+    # ERROR line are what make the case distinguishable.
+    "history_unsettled": (
+        "reconstruct_allocator_history: the MT5 deal history had not settled "
+        "within its wait budget — retrying"
+    ),
     "account_snapshot": (
         "reconstruct_allocator_history: the MT5 balance snapshot was missing or "
         "non-numeric — refusing to reconstruct from it"
@@ -2971,6 +2980,7 @@ async def _mt5_fetch_window(
         Mt5ClientError,
         Mt5SessionAbandoned,
         Mt5Session,
+        mt5_history_wait_due,
     )
     from services import mt5_concurrency as _mt5_conc
     from services.mt5_concurrency import (
@@ -2980,7 +2990,7 @@ async def _mt5_fetch_window(
     )
     from services.mt5_deals import Mt5DealClassificationError
     from services.mt5_handover import SITE_BACKFILL
-    from services.mt5_read import read_mt5_deal_ledger
+    from services.mt5_read import Mt5HistoryUnsettledError, read_mt5_deal_ledger
     from services.mt5_validation import classify_mt5_login_error
     from services.nav_twr import NavReconstructionError
 
@@ -3049,11 +3059,35 @@ async def _mt5_fetch_window(
         session.client.terminal_key, holder=api_key_id, site=SITE_BACKFILL
     ):
         try:
+            # ⭐ 164.6.6.3 / D-05, D-15, D-16 (Finding C, backfill half) — the
+            # backfill reads the SAME helper as the derive and fails the same way
+            # for an account new to the jobs terminal, so it takes the same wait.
+            # ⛔ The freshness decision is taken HERE, BEFORE the thread starts,
+            # because `login()` (inside the read) stamps the holder registry with
+            # this very key and would make every read look cached.
+            #
+            # The outer bound is DERIVED (`mt5_derive_read_bound_s`: the read's own
+            # budget plus, for a fresh login only, the wait AND one trailing read's
+            # rpyc timeout), never hand-picked, so a cached read keeps the plain
+            # wedge detector. No read starts after the helper's deadline and the
+            # last one is budgeted here, so a healthy but slow download never
+            # reaches the terminal-restart arm below (review WR-01).
+            fresh = mt5_history_wait_due(session.client.terminal_key, api_key_id)
             info, deals = await asyncio.wait_for(
-                asyncio.to_thread(read_mt5_deal_ledger, session, now=now),
+                asyncio.to_thread(
+                    read_mt5_deal_ledger,
+                    session,
+                    now=now,
+                    settle_history=fresh,
+                    material_equity_floor_usd=_DERIBIT_EMPTY_LEDGER_FLOOR_USD,
+                ),
                 # Read through the module so the bound stays ONE constant shared
                 # with the derive branch rather than a second one that can drift.
-                timeout=_mt5_conc._MT5_DERIVE_READ_TIMEOUT_S,
+                timeout=_mt5_conc.mt5_derive_read_bound_s(
+                    read_s=_mt5_conc._MT5_DERIVE_READ_TIMEOUT_S,
+                    wait_s=_mt5_conc._MT5_HISTORY_WAIT_S,
+                    fresh=fresh,
+                ),
             )
         except asyncio.TimeoutError:
             # FLIPRETRY-01 / MT5CONC-01. A blocked RPyC/Wine pipe will NOT
@@ -3068,6 +3102,34 @@ async def _mt5_fetch_window(
             )
             await _mt5_bounded_restart(session.client, log_prefix="reconstruct_allocator_history")
             return _fail("timeout", "transient")
+        except Mt5HistoryUnsettledError as exc:
+            # ⭐ 164.6.6.3 / D-06, D-13 (Finding C, backfill half) — a fresh
+            # login's deal history had not settled when the wait budget ran out,
+            # under material equity. The key is fine and the history is LATE, so
+            # this is a retryable transient with its own fixed message and its own
+            # ERROR line (a deliberate difference from the WARNING arms around it:
+            # this is a failure someone should be able to find). Nothing is
+            # persisted, so a curve can never be reconstructed from a partial
+            # ledger (T-164.6.6.3-07).
+            #
+            # ⛔ NO terminal restart — restarting would kill the very download
+            # being waited for. That is also why the exception is a plain
+            # `Exception` and the helper's deadline fires before the outer
+            # `wait_for` bound: this arm is reached, the timeout arm above is not.
+            #
+            # D-16's accepted consequence: a funded account with a truly empty
+            # ledger now fails transient after about 30 s instead of
+            # reconstructing an empty curve.
+            #
+            # The ERROR carries counts and a boolean only: no amount.
+            logger.error(
+                "reconstruct_allocator_history: mt5 deal history did not settle "
+                "within the wait budget (allocator=%s key=%s deals=%d "
+                "material_equity=%s) — classified transient, retrying, nothing "
+                "persisted, no restart (D-06, D-13)",
+                allocator_id, api_key_id, exc.deal_count, exc.material,
+            )
+            return _fail("history_unsettled", "transient")
         except Mt5SessionAbandoned:
             # ⭐ WIZFORM-ABANDON / D-40. ⛔ NO restart — and this is the deliberate
             # OPPOSITE of the timeout arm above. A timeout means OUR pipe is
