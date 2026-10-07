@@ -687,4 +687,159 @@ BEGIN
   END IF;
 END $$;
 
+-- ===== ARM G1 — the retired compute_analytics kind still counts =================
+DO $$
+DECLARE
+  uid        UUID := gen_random_uuid();
+  k          UUID;
+  s          UUID;
+  j          UUID;
+  tok        UUID;
+  v_jobstat  TEXT;
+  v_status   TEXT;
+  v_cnt      INTEGER;
+BEGIN
+  INSERT INTO auth.users (id, instance_id, email, created_at, updated_at)
+  VALUES (uid, '00000000-0000-0000-0000-000000000000',
+          'sscope-' || uid::text || '@quantalyze.test', now(), now());
+  INSERT INTO profiles (id, display_name, email, role)
+  VALUES (uid, 'sscope', 'sscope-' || uid::text || '@quantalyze.test', 'manager')
+  ON CONFLICT (id) DO UPDATE SET role = EXCLUDED.role;
+  INSERT INTO api_keys (user_id, exchange, label, api_key_encrypted, is_active)
+  VALUES (uid, 'mt5', 'sscope mt5', 'x', TRUE) RETURNING id INTO k;
+  INSERT INTO strategies (user_id, api_key_id, name) VALUES (uid, k, 'sscope G1') RETURNING id INTO s;
+
+  INSERT INTO strategy_analytics (strategy_id, computation_status, computation_warned)
+  VALUES (s, 'failed', FALSE);
+
+  INSERT INTO compute_jobs (strategy_id, kind, status, attempts, max_attempts, created_at)
+  VALUES (s, 'compute_analytics_from_csv', 'done', 1, 3, now() - interval '4 hours');
+  tok := gen_random_uuid();
+  INSERT INTO compute_jobs (strategy_id, kind, status, claim_token, attempts, max_attempts, created_at)
+  VALUES (s, 'compute_analytics', 'running', tok, 1, 3, now())
+  RETURNING id INTO j;
+  PERFORM mark_compute_job_failed(j, 'seeded handler failure', 'permanent', tok);
+
+  SELECT count(*) INTO v_cnt FROM compute_jobs WHERE strategy_id = s AND kind = 'compute_analytics' AND status = 'failed_final';
+  IF v_cnt <> 1 THEN
+    RAISE EXCEPTION 'TEST FAILED (G1-SETUP): % failed_final compute_analytics rows exist after the driving mark, not 1, so the retired kind was never decided by the bridge.', v_cnt;
+  END IF;
+
+  SELECT computation_status INTO v_status FROM strategy_analytics WHERE strategy_id = s;
+  -- RED-UNDER: 'compute_analytics' added to the side list: a failure of the retired analytics kind is dropped from the failure set and the row reads complete.
+  --            ⚠️ LAYERED: anchors (xv) and (xvi) are stood down.
+  -- RED-UNDER-M: {"arm":"G1","apply":[{"kind":"edit","file":"supabase/migrations/20261009120000_sync_status_analytics_scope.sql","find":"       AND f.kind NOT IN ('sync_funding', 'poll_positions', 'reconcile_strategy', 'compute_intro_snapshot')\n","replace":"       AND f.kind NOT IN ('sync_funding', 'poll_positions', 'reconcile_strategy', 'compute_intro_snapshot', 'compute_analytics')\n","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261009120000_sync_status_analytics_scope.sql","find":"IF NOT v_side_list_ok THEN","replace":"IF FALSE AND NOT v_side_list_ok THEN","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261009120000_sync_status_analytics_scope.sql","find":"IF v_counting_in_side THEN","replace":"IF FALSE AND v_counting_in_side THEN","occurrences":1}]}
+  IF v_status IS DISTINCT FROM 'failed' THEN
+    RAISE EXCEPTION 'TEST FAILED (G1): the row reads % after a failed compute_analytics. The retired kind is a registered kind that is NOT on the closed side list, so it counts toward failed; a kind that is not named must resolve loud, never silently healthy (D-05).', COALESCE(v_status, 'NULL');
+  END IF;
+END $$;
+
+-- ===== ARM G2 — D-04: a later done chain does not clear a failed sync_trades ====
+DO $$
+DECLARE
+  uid        UUID := gen_random_uuid();
+  k          UUID;
+  s          UUID;
+  j          UUID;
+  tok        UUID;
+  v_jobstat  TEXT;
+  v_status   TEXT;
+  v_chain    INTEGER;
+BEGIN
+  INSERT INTO auth.users (id, instance_id, email, created_at, updated_at)
+  VALUES (uid, '00000000-0000-0000-0000-000000000000',
+          'sscope-' || uid::text || '@quantalyze.test', now(), now());
+  INSERT INTO profiles (id, display_name, email, role)
+  VALUES (uid, 'sscope', 'sscope-' || uid::text || '@quantalyze.test', 'manager')
+  ON CONFLICT (id) DO UPDATE SET role = EXCLUDED.role;
+  INSERT INTO api_keys (user_id, exchange, label, api_key_encrypted, is_active)
+  VALUES (uid, 'mt5', 'sscope mt5', 'x', TRUE) RETURNING id INTO k;
+  INSERT INTO strategies (user_id, api_key_id, name) VALUES (uid, k, 'sscope G2') RETURNING id INTO s;
+
+  INSERT INTO strategy_analytics (strategy_id, computation_status, computation_warned)
+  VALUES (s, 'failed', FALSE);
+
+  INSERT INTO compute_jobs (strategy_id, kind, status, attempts, max_attempts, last_error, error_kind, created_at)
+  VALUES (s, 'sync_trades', 'failed_final', 3, 3, 'seeded failure', 'permanent', now() - interval '6 hours');
+  INSERT INTO compute_jobs (strategy_id, kind, status, attempts, max_attempts, created_at)
+  VALUES (s, 'derive_broker_dailies', 'done', 1, 3, now() - interval '5 hours');
+  tok := gen_random_uuid();
+  INSERT INTO compute_jobs (strategy_id, kind, status, claim_token, attempts, max_attempts, created_at)
+  VALUES (s, 'compute_analytics_from_csv', 'running', tok, 1, 3, now() - interval '4 hours')
+  RETURNING id INTO j;
+  PERFORM mark_compute_job_done(j, tok);
+
+  SELECT count(*) INTO v_chain
+    FROM compute_jobs c
+   WHERE c.strategy_id = s AND c.status = 'done'
+     AND c.kind IN ('derive_broker_dailies', 'compute_analytics_from_csv')
+     AND c.created_at > (SELECT created_at FROM compute_jobs WHERE strategy_id = s AND kind = 'sync_trades');
+  IF v_chain <> 2 THEN
+    RAISE EXCEPTION 'TEST FAILED (G2-SETUP): % chain job(s) are done after the failed sync_trades, not 2, so the shape a widened chain rule would wrongly clear was not seeded.', v_chain;
+  END IF;
+
+  SELECT computation_status INTO v_status FROM strategy_analytics WHERE strategy_id = s;
+  -- RED-UNDER: the process_key_long scope of the chain rule widened to every kind: the later done chain clears the failed sync_trades and the row reads complete.
+  --            ⚠️ LAYERED: anchors (xvii) and (xviii) are stood down (the edit removes the only process_key_long literal).
+  -- RED-UNDER-M: {"arm":"G2","apply":[{"kind":"edit","file":"supabase/migrations/20261009120000_sync_status_analytics_scope.sql","find":"         f.kind = 'process_key_long'\n","replace":"         TRUE\n","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261009120000_sync_status_analytics_scope.sql","find":"IF NOT v_d06_clause_ok THEN","replace":"IF FALSE AND NOT v_d06_clause_ok THEN","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261009120000_sync_status_analytics_scope.sql","find":"IF v_pkl_sites <> 1 THEN","replace":"IF FALSE AND v_pkl_sites <> 1 THEN","occurrences":1}]}
+  IF v_status IS DISTINCT FROM 'failed' THEN
+    RAISE EXCEPTION 'TEST FAILED (G2): the row reads % although a failed sync_trades was followed by a done derive and a done compute. D-04: the chain rule is scoped to process_key_long alone; a later done of a DIFFERENT kind never masks a real failure, and sync_trades keeps only its own same-kind supersession.', COALESCE(v_status, 'NULL');
+  END IF;
+END $$;
+
+-- ===== ARM G3 — D-04: a done side kind does not clear a genuine compute failure ===
+DO $$
+DECLARE
+  uid        UUID := gen_random_uuid();
+  k          UUID;
+  s          UUID;
+  j          UUID;
+  tok        UUID;
+  v_jobstat  TEXT;
+  v_status   TEXT;
+  v_side     TEXT;
+BEGIN
+  INSERT INTO auth.users (id, instance_id, email, created_at, updated_at)
+  VALUES (uid, '00000000-0000-0000-0000-000000000000',
+          'sscope-' || uid::text || '@quantalyze.test', now(), now());
+  INSERT INTO profiles (id, display_name, email, role)
+  VALUES (uid, 'sscope', 'sscope-' || uid::text || '@quantalyze.test', 'manager')
+  ON CONFLICT (id) DO UPDATE SET role = EXCLUDED.role;
+  INSERT INTO api_keys (user_id, exchange, label, api_key_encrypted, is_active)
+  VALUES (uid, 'mt5', 'sscope mt5', 'x', TRUE) RETURNING id INTO k;
+  INSERT INTO strategies (user_id, api_key_id, name) VALUES (uid, k, 'sscope G3') RETURNING id INTO s;
+
+  INSERT INTO strategy_analytics (strategy_id, computation_status, computation_warned)
+  VALUES (s, 'failed', FALSE);
+
+  INSERT INTO compute_jobs (strategy_id, kind, status, attempts, max_attempts, last_error, error_kind, created_at)
+  VALUES (s, 'compute_analytics_from_csv', 'failed_final', 3, 3, 'seeded failure', 'permanent', now() - interval '6 hours');
+  tok := gen_random_uuid();
+  INSERT INTO compute_jobs (strategy_id, kind, status, claim_token, attempts, max_attempts, created_at)
+  VALUES (s, 'sync_funding', 'running', tok, 1, 3, now())
+  RETURNING id INTO j;
+  PERFORM mark_compute_job_done(j, tok);
+
+  SELECT status INTO v_side FROM compute_jobs WHERE id = j;
+  IF v_side IS DISTINCT FROM 'done' THEN
+    RAISE EXCEPTION 'TEST FAILED (G3-SETUP): the driven sync_funding is % rather than done, so the later done side-kind job that must not mask the compute failure was not produced.', COALESCE(v_side, 'NULL');
+  END IF;
+
+  SELECT computation_status INTO v_status FROM strategy_analytics WHERE strategy_id = s;
+  -- RED-UNDER: 'compute_analytics_from_csv' added to the side list: the genuine compute failure is dropped from the failure set and the row reads complete.
+  --            ⚠️ LAYERED: anchors (xv) and (xvi) are stood down.
+  -- RED-UNDER-M: {"arm":"G3","apply":[{"kind":"edit","file":"supabase/migrations/20261009120000_sync_status_analytics_scope.sql","find":"       AND f.kind NOT IN ('sync_funding', 'poll_positions', 'reconcile_strategy', 'compute_intro_snapshot')\n","replace":"       AND f.kind NOT IN ('sync_funding', 'poll_positions', 'reconcile_strategy', 'compute_intro_snapshot', 'compute_analytics_from_csv')\n","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261009120000_sync_status_analytics_scope.sql","find":"IF NOT v_side_list_ok THEN","replace":"IF FALSE AND NOT v_side_list_ok THEN","occurrences":1},{"kind":"edit","file":"supabase/migrations/20261009120000_sync_status_analytics_scope.sql","find":"IF v_counting_in_side THEN","replace":"IF FALSE AND v_counting_in_side THEN","occurrences":1}]}
+  IF v_status IS DISTINCT FROM 'failed' THEN
+    RAISE EXCEPTION 'TEST FAILED (G3): the row reads % although a genuine compute_analytics_from_csv failure is followed only by a done side-kind job. D-04: a later done of a DIFFERENT kind never masks a real analytics failure.', COALESCE(v_status, 'NULL');
+  END IF;
+END $$;
+
+-- ===== COMPLETION SENTINEL ==================================================
+-- Reached only if every arm above passed. Counts the thirteen sections the
+-- mutation runner counts: the -SETUP sub-arms fold into their parent section.
+DO $$
+BEGIN
+  RAISE NOTICE 'ALL 13 ARMS EXECUTED (S1, S2, S3, S4, S5, S6, C1, C2, C3, C4, G1, G2, G3): [164.6.6.3.4 STATUSBRIDGE] a failed side-kind job (sync_funding, poll_positions, reconcile_strategy, compute_intro_snapshot) never pins strategy_analytics.computation_status failed (S1..S4), while a live stitch_composite failure beside it still does (S5) and a warned row keeps complete_with_warnings (S6); a failed process_key_long is cleared only by a later done derive AND a later done compute, ledger-refresh chains included (C1), never by either alone (C2, C3) nor by a chain that predates the failure (C4); and the per-kind rule holds for everything else: the retired compute_analytics still counts (G1), a done chain does not clear a failed sync_trades (G2), and a done side kind does not clear a genuine compute_analytics_from_csv failure (G3).';
+END $$;
+
 ROLLBACK;
