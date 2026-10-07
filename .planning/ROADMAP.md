@@ -3107,10 +3107,16 @@ Plans:
 **Origin:** 164.6.6.2 code review CR-01 (pre-existing, not introduced by that phase). Founder 2026-10-07: own phase, ship BTCNATIVE first.
 **Requirements**: TBD
 **Depends on:** Phase 164.6.6.2
-**Plans:** 0 plans
+**Plans:** 7 plans
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 164.6.6.2.2 to break down)
+- [ ] 164.6.6.2.2-01-PLAN.md — the shared Python boundary `services/wealth_returns.py` + cross-runtime oracle; the simulator reads through it (wave 1)
+- [ ] 164.6.6.2.2-02-PLAN.md — the single-key runner stamps `data_quality_flags.cumulative_method` (D-05) (wave 1)
+- [ ] 164.6.6.2.2-03-PLAN.md — TS `resolveDailyReturnSeries` honours the method on the same oracle; every caller passes the row's method (wave 2)
+- [ ] 164.6.6.2.2-04-PLAN.md — `_compute_portfolio_analytics` on real columns, boundary returns, AUM from `allocated_amount` (D-04, D-07) (wave 2)
+- [ ] 164.6.6.2.2-05-PLAN.md — both correlation matchers (D-06), optimizer and bridge on the boundary (wave 3)
+- [ ] 164.6.6.2.2-06-PLAN.md — the match engine's two loaders on the boundary (wave 2)
+- [ ] 164.6.6.2.2-07-PLAN.md — no-bypass census, write-to-read end-to-end test, PROD before/after measurement (D-03) (wave 4)
 
 ### Phase 164.6.6.2.1: BTCUSDVIEW — a native-unit MT5 account also gets a USD view (INSERTED)
 
