@@ -2195,8 +2195,8 @@ describe("164.3.1-10 — CI re-asserts the cross-check out of process (the anti-
     // ⭐ CURRENCY 2026-10-02 (Phase 164.9.3.2.1 ENQ40001, plan 03): copied from the full run that measured the floors.
     // ⭐ CURRENCY 2026-10-02 (Phase 164.9.3.2.1 ENQ40001, review fix WR-01): copied from the full run that measured the floors.
     // ⭐ CURRENCY 2026-10-03 (Phase 164.5.2.1 BRIDGERESIDUE, plan 05): copied from the full run that measured the floors (mean 1.2s -> 1.1s over 574).
-    // ⭐ CURRENCY 2026-10-07 (Phase 164.6.6.3.5 DOMAINONE, plan 03): copied from the full run that measured the floors (mean 1.1s -> 1.5s over 578).
-    "per-arm lane time: mean 1.5s over 578 arm run(s)",
+    // ⭐ CURRENCY 2026-10-07 (Phase 164.6.6.3.5 DOMAINONE, plan 03): copied from the full run that measured the floors (mean 1.1s -> 2.6s over 578, a loaded host: sibling worktrees were running lanes).
+    "per-arm lane time: mean 2.6s over 578 arm run(s)",
     "",
     "✅ No defects. Every annotated arm bit its own arm first.",
     "",

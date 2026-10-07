@@ -1069,7 +1069,7 @@
 // `coverage: files 59/86`, `arms: 578/578/0`, `biting: 578`, `lane-invocations:
 // 578 ... plus 59 baseline / 59 restore leg(s)` (the two independent tallies
 // AGREE), `lane-blocked: 0`, `lane-probe: pg_cron AVAILABLE`, `unreachable: 27`,
-// `per-arm lane time: mean 1.5s over 578 arm run(s)`, `No defects. Every annotated
+// `per-arm lane time: mean 2.6s over 578 arm run(s)`, `No defects. Every annotated
 // arm bit its own arm first.`, exit 0. Per-file line:
 // `test_for_quants_leads_contact_dedupe.sql: sections 4 / judged 4 / annotated 4 /
 // waived 0 / biting 4`. WAIVED_CEILING stays 0.
