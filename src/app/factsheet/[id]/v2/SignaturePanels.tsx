@@ -3,6 +3,7 @@
 import { useMemo } from "react";
 import { usePayload } from "./factsheet-context";
 import { BaseLeverageNote } from "./basis-context";
+import { nativeUnitReason } from "@/lib/factsheet/returns-unit";
 import type { EventSignature, EventSignaturesSet, FactsheetPayload } from "@/lib/factsheet/types";
 import { niceStepValues } from "@/lib/chart-ticks";
 import { ResponsiveChartFrame } from "@/components/ResponsiveChartFrame";
@@ -62,12 +63,40 @@ export function btcPricesUnavailable(payload: FactsheetPayload): boolean {
   return payload.benchmarkPrices === undefined || "unavailable" in payload.benchmarkPrices;
 }
 
+const SIG_SUBTITLE_7D =
+  "mean + median + 25/75 + 5/95 percentile bands of benchmark or accumulated-capital trajectory around strategy events · ±14d window";
+const SIG_SUBTITLE_1D = "single-day win/loss events · same trajectory aggregations";
+
 export function SignaturesSection() {
   const payload = usePayload();
   // B6 — eventSignatures lives only on the "api" arm; narrowing ingestSource
   // unlocks it (a csv read is a compile error). The parent gates this on
   // ingestSource === "api", so this is type-safety, not a runtime branch. (RED-TEAM-M3)
   if (payload.ingestSource !== "api") return null;
+  // Phase 164.6.6.2 (D-10, UI-SPEC A16): the benchmark of these event studies is BTC by
+  // construction (SIG_BENCH), so for a strategy whose returns are in a native unit every
+  // panel is the empty form with the stated reason, whatever the comparator. No chart,
+  // no count, and nothing to say about leverage because nothing is shown.
+  if (payload.returnsUnit) {
+    return (
+      <section className="flex flex-col gap-10">
+        <SignatureHorizon
+          title="Returns Signatures for 7 Days Horizon"
+          subtitle={SIG_SUBTITLE_7D}
+          set={payload.eventSignatures?.h7 ?? null}
+          btcUnavailable={false}
+          withheldReason={nativeUnitReason(payload.returnsUnit)}
+        />
+        <SignatureHorizon
+          title="Returns Signatures for 1 Day Horizon"
+          subtitle={SIG_SUBTITLE_1D}
+          set={payload.eventSignatures?.h1 ?? null}
+          btcUnavailable={false}
+          withheldReason={nativeUnitReason(payload.returnsUnit)}
+        />
+      </section>
+    );
+  }
   const sigs = payload.eventSignatures;
   if (!sigs) return null;
   return (
@@ -81,13 +110,13 @@ export function SignaturesSection() {
           benchmark trace, so each panel names its own N (see SignatureHorizon). */}
       <SignatureHorizon
         title="Returns Signatures for 7 Days Horizon"
-        subtitle="mean + median + 25/75 + 5/95 percentile bands of benchmark or accumulated-capital trajectory around strategy events · ±14d window"
+        subtitle={SIG_SUBTITLE_7D}
         set={sigs.h7}
         btcUnavailable={btcPricesUnavailable(payload)}
       />
       <SignatureHorizon
         title="Returns Signatures for 1 Day Horizon"
-        subtitle="single-day win/loss events · same trajectory aggregations"
+        subtitle={SIG_SUBTITLE_1D}
         set={sigs.h1}
         btcUnavailable={btcPricesUnavailable(payload)}
       />
@@ -100,12 +129,19 @@ function SignatureHorizon({
   subtitle,
   set,
   btcUnavailable,
+  withheldReason,
 }: {
   title: string;
   subtitle: string;
-  set: EventSignaturesSet;
+  /** `null` only under `withheldReason`, where no population is read. */
+  set: EventSignaturesSet | null;
   btcUnavailable: boolean;
+  /** Phase 164.6.6.2 (A16): when set, every panel is the empty form with this reason. */
+  withheldReason?: string;
 }) {
+  // Under a withheld reason nothing is read from the population: every slot gets a null
+  // trace and the one reason, so no count and no chart can leak through.
+  const sets = withheldReason === undefined ? set : null;
   return (
     <div className="flex flex-col gap-4">
       <header>
@@ -125,30 +161,30 @@ function SignatureHorizon({
       <div className="grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-6">
         <SignatureSlot
           title={`Win Event · of ${SIG_BENCH}`}
-          sig={set.winOfBenchmark}
-          n={set.benchWinCount}
-          emptyReason={btcUnavailable ? BTC_OUTAGE_REASON : `no win event has a complete ±14-day window of ${SIG_BENCH} prices`}
+          sig={sets?.winOfBenchmark ?? null}
+          n={sets?.benchWinCount ?? 0}
+          emptyReason={withheldReason ?? (btcUnavailable ? BTC_OUTAGE_REASON : `no win event has a complete ±14-day window of ${SIG_BENCH} prices`)}
           tone="positive"
         />
         <SignatureSlot
           title={`Loss Event · of ${SIG_BENCH}`}
-          sig={set.lossOfBenchmark}
-          n={set.benchLossCount}
-          emptyReason={btcUnavailable ? BTC_OUTAGE_REASON : `no loss event has a complete ±14-day window of ${SIG_BENCH} prices`}
+          sig={sets?.lossOfBenchmark ?? null}
+          n={sets?.benchLossCount ?? 0}
+          emptyReason={withheldReason ?? (btcUnavailable ? BTC_OUTAGE_REASON : `no loss event has a complete ±14-day window of ${SIG_BENCH} prices`)}
           tone="negative"
         />
         <SignatureSlot
           title="Win Event · of Accumulated Capital"
-          sig={set.winOfEquity}
-          n={set.winCount}
-          emptyReason="no win event has a complete ±14-day window of returns"
+          sig={sets?.winOfEquity ?? null}
+          n={sets?.winCount ?? 0}
+          emptyReason={withheldReason ?? "no win event has a complete ±14-day window of returns"}
           tone="positive"
         />
         <SignatureSlot
           title="Loss Event · of Accumulated Capital"
-          sig={set.lossOfEquity}
-          n={set.lossCount}
-          emptyReason="no loss event has a complete ±14-day window of returns"
+          sig={sets?.lossOfEquity ?? null}
+          n={sets?.lossCount ?? 0}
+          emptyReason={withheldReason ?? "no loss event has a complete ±14-day window of returns"}
           tone="negative"
         />
       </div>

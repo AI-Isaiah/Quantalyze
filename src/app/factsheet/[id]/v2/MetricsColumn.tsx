@@ -6,7 +6,7 @@ import type { FactsheetPayload, JointMetrics } from "@/lib/factsheet/types";
 import { formatRecordLength } from "@/lib/factsheet/record-length";
 import { COMPARATOR_CALENDARS, isPastCoverage, type WeekdayCalendar } from "@/lib/factsheet/align";
 import { pairedFloorReason } from "@/lib/factsheet/joint";
-import { withUnit } from "@/lib/factsheet/returns-unit";
+import { nativeUnitReason, withUnit } from "@/lib/factsheet/returns-unit";
 import { usePayload, useActiveComparator } from "./factsheet-context";
 import { useBasisOrCash, useBasisSeriesView, useWindowedView, type Basis, type RangeScope } from "./basis-context";
 import { CalmarByYearPanel, BootstrapCIPanel, FULL_HISTORY_NOTE, ScopeNote } from "./AnalyticalPanels";
@@ -322,7 +322,18 @@ export function MetricsColumn({ scenarioMode = false }: { scenarioMode?: boolean
         <TermsPanel />
       </EditorialSection>
 
-      {jointCmp.joint ? (
+      {payload.returnsUnit && cmpKey === "none" ? (
+        // Phase 164.6.6.2 (D-10, UI-SPEC A15): a strategy whose returns are in a native
+        // unit has no BTC benchmark (measured in BTC it is a flat line; the USD-priced
+        // one mixes units), so §IV stays, every row reads "—", and one line says why
+        // ("show null with the reason"). With SPX active the arms below render as today.
+        <EditorialSection label="IV" name="Benchmark — vs BTC">
+          <BenchmarkMetricsBody
+            joint={null}
+            withheldReason={`Not measurable: ${nativeUnitReason(payload.returnsUnit)}. A BTC benchmark measured in ${payload.returnsUnit} is a flat line.`}
+          />
+        </EditorialSection>
+      ) : jointCmp.joint ? (
         <EditorialSection label="IV" name={`Benchmark — vs ${bn}`}>
           <BenchmarkMetricsBody joint={jointCmp.joint} />
         </EditorialSection>

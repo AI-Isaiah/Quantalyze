@@ -459,7 +459,10 @@ export function FactsheetBody({
                 real observation at 0% delta. Suppress for CSV to prevent false panels.
                 (Phase 169.4 CR-01: aggregate() now returns null for an empty population
                 and the panels render the em-dash state; the api-arm gate stands.) */}
-            {hasComparator && payload.ingestSource === "api" && (
+            {/* Phase 164.6.6.2 (D-10, UI-SPEC A16): a strategy whose returns are in a native
+                unit renders the section whatever the comparator, because its panels are
+                the withheld form with the stated reason, not an empty page. */}
+            {(hasComparator || payload.returnsUnit != null) && payload.ingestSource === "api" && (
               <CollapsibleSection
                 id="factsheet-signatures"
                 title="Returns Signatures"
@@ -1814,14 +1817,14 @@ function SectionNav() {
   // FINDING-10 (b06-silentfailure): Filter out sections whose content is
   // conditionally suppressed so the nav doesn't contain dead anchors.
   // "Allocator" is only rendered when ingestSource === "api" (no-invented-data).
-  // "Signatures" is only rendered when hasComparator AND ingestSource === "api".
+  // "Signatures" is only rendered when (hasComparator OR a native returns unit) AND ingestSource === "api".
   const hasComparator = cmpKey !== "none";
   const sections: { id: string; label: string }[] = React.useMemo(() => [
     { id: "factsheet-perf", label: "Performance" },
     { id: "factsheet-dist", label: "Distribution" },
     { id: "factsheet-heatmaps", label: "Heatmaps" },
     { id: "factsheet-stress", label: "Stress" },
-    ...(hasComparator && payload.ingestSource === "api"
+    ...((hasComparator || payload.returnsUnit != null) && payload.ingestSource === "api"
       ? [{ id: "factsheet-signatures", label: "Signatures" }]
       : []),
     { id: "factsheet-streak", label: "Streaks" },
@@ -1829,7 +1832,7 @@ function SectionNav() {
       ? [{ id: "factsheet-allocator", label: "Allocator" }]
       : []),
     { id: "factsheet-metrics", label: "Metrics" },
-  ], [payload.ingestSource, hasComparator]);
+  ], [payload.ingestSource, payload.returnsUnit, hasComparator]);
   const [active, setActive] = React.useState<string | null>(null);
 
   React.useEffect(() => {
