@@ -2182,7 +2182,7 @@ export async function getPortfolioStrategies(portfolioId: string) {
     .from("portfolio_strategies")
     .select(`
       *, strategies (id, name, status, strategy_types, supported_exchanges, start_date, aum,
-        strategy_analytics (cagr, sharpe, max_drawdown, volatility, cumulative_return, sparkline_returns, computed_at, computation_status, returns_series, daily_returns)
+        strategy_analytics (cagr, sharpe, max_drawdown, volatility, cumulative_return, sparkline_returns, computed_at, computation_status, returns_series, daily_returns, data_quality_flags)
       )
     `)
     .eq("portfolio_id", portfolioId)

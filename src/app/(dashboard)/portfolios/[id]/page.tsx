@@ -22,6 +22,10 @@ import { computeFreshness } from "@/lib/freshness";
 import { extractAnalytics, seriesEndOf } from "@/lib/utils";
 import { isRankableAnalyticsRow } from "@/lib/closed-sets";
 import { resolveDailyReturnSeries } from "@/lib/factsheet/resolve-series";
+import { readBtcCloses } from "@/lib/factsheet/benchmark-source";
+import { convertNativeReturnsToUsd } from "@/lib/factsheet/native-to-usd";
+import { parseReturnsUnit } from "@/lib/factsheet/returns-unit";
+import type { BtcCloses } from "@/app/(dashboard)/allocations/lib/scenario-benchmark";
 import { normalizeDailyReturns } from "@/lib/portfolio-math-utils";
 import type { StrategyAnalytics } from "@/lib/types";
 import Link from "next/link";
@@ -259,6 +263,55 @@ function buildWealthPoints(
 }
 
 /**
+ * Phase 164.6.6.2 (D-18, D-22) — the unit a constituent's own returns are in,
+ * strictly coerced (`parseReturnsUnit`): `"BTC"` for a BTC-native account, `null`
+ * for USD and for anything that is not a well-formed code. Read off the
+ * constituent's `data_quality_flags`, which `getPortfolioStrategies` now selects
+ * and `stripConstituentSeries` removes before the client boundary.
+ */
+function constituentUnit(a: StrategyAnalytics | null): string | null {
+  return parseReturnsUnit(a?.data_quality_flags?.native_unit);
+}
+
+/**
+ * EXPORTED for test only. True when any constituent carries a native unit, so the
+ * page reads the BTC closes ONLY then (a USD-only portfolio costs no extra read).
+ */
+export function hasNativeUnitConstituent(strategies: PortfolioStrategyRow[]): boolean {
+  return strategies.some(
+    (ps) =>
+      ps.strategies != null &&
+      constituentUnit(extractAnalytics(ps.strategies.strategy_analytics)) !== null,
+  );
+}
+
+/**
+ * Phase 164.6.6.2 (D-18, D-22) — a BTC constituent's wealth curve IN USD, or null.
+ *
+ * The persisted `returns_series` of a BTC account is a BTC wealth curve, and the
+ * chart's axis is USD wealth, so it is never plotted as-is: the daily series is
+ * resolved (differenced from the persisted curve when `daily_returns` is absent),
+ * converted by the ONE conversion at the daily BTC close, and cumprod'd from 1.
+ * Day 0 is consumed by the conversion, so the first point is the first priced
+ * day. Empty (no closes, no usable day) is null: the honest "no line" render and
+ * the coverage caption, never the BTC curve on a USD axis.
+ */
+function buildUsdWealthPoints(
+  a: StrategyAnalytics,
+  unit: string,
+  btc: Pick<BtcCloses, "prices" | "dropped"> | null,
+): { date: string; value: number }[] | null {
+  const daily = resolveDailyReturnSeries(a.daily_returns, a.returns_series);
+  const usd = convertNativeReturnsToUsd(daily, unit, btc);
+  if (usd.length === 0) return null;
+  let c = 1;
+  return usd.map((p) => {
+    c *= 1 + p.value;
+    return { date: p.date, value: c };
+  });
+}
+
+/**
  * HONEST-04 — per-strategy equity curves, gated by the STALE-01 predicate.
  *
  * `isRankableAnalyticsRow` is MANDATORY on this read path. A `failed` analytics
@@ -266,19 +319,29 @@ function buildWealthPoints(
  * measured 17 of 18 published strategies carrying exactly that corpse — so a
  * null/empty check would happily draw a dead run's line beside live ones. These
  * rows do NOT pass through `shapeRowAnalytics`; the gate has to be applied here.
+ *
+ * Phase 164.6.6.2 (D-22): `btc` is the DB-only BTC closes read the page makes
+ * when a constituent has a native unit. A native constituent is drawn from its
+ * USD-converted daily returns; a USD constituent takes the path it always did.
  */
 export function buildEquityCurveSeries(
   strategies: PortfolioStrategyRow[],
+  btc: Pick<BtcCloses, "prices" | "dropped"> | null = null,
 ): { id: string; name: string; equityCurve: { date: string; value: number }[] | null }[] {
   return strategies
     .map((ps) => {
       if (!ps.strategies) return null;
       const a = extractAnalytics(ps.strategies.strategy_analytics);
+      const unit = constituentUnit(a);
       return {
         id: ps.strategies.id,
         name: ps.strategies.name,
         equityCurve:
-          a && isRankableAnalyticsRow(a) ? buildWealthPoints(a) : null,
+          a && isRankableAnalyticsRow(a)
+            ? unit !== null
+              ? buildUsdWealthPoints(a, unit, btc)
+              : buildWealthPoints(a)
+            : null,
       };
     })
     .filter((s): s is NonNullable<typeof s> => s !== null);
@@ -324,6 +387,10 @@ export function stripConstituentSeries<T extends PortfolioStrategyRow>(
       const {
         returns_series: _rs,
         daily_returns: _dr,
+        // Phase 164.6.6.2 (T-164.6.6.2-28): the raw flags blob (degraded-member
+        // venue detail) is read server-side for the unit and never crosses the
+        // RSC boundary (T-111-03 / T-147-10 precedent).
+        data_quality_flags: _dqf,
         ...analyticsRest
       } = obj as Record<string, unknown>;
       return {
@@ -400,9 +467,12 @@ function DashboardContent({
   optimizerSuggestions,
   optimizerComputedAt,
   optimizerStatus,
+  btcCloses,
 }: {
   analytics: PortfolioAnalytics;
   strategies: PortfolioStrategyRow[];
+  /** 164.6.6.2: the BTC closes a native constituent is converted with; null when none was read. */
+  btcCloses: Pick<BtcCloses, "prices" | "dropped"> | null;
   alerts: PortfolioAlert[];
   portfolioId: string;
   optimizerSuggestions: OptimizerSuggestion[] | null;
@@ -419,7 +489,7 @@ function DashboardContent({
   const equityCurve = parsed?.portfolio_equity_curve ?? null;
 
   const compositionRows = buildCompositionRows(strategies, attribution);
-  const equitySeries = buildEquityCurveSeries(strategies);
+  const equitySeries = buildEquityCurveSeries(strategies, btcCloses);
   // Curves are built above from the raw series; nothing below forwards it.
   const clientStrategies = stripConstituentSeries(strategies);
   const strategyNames: Record<string, string> = {};
@@ -551,6 +621,18 @@ export default async function PortfolioDashboardPage({
   const analytics = chooseAnalytics(analyticsBundle);
   const state = resolveDashboardState(strategies, analytics);
 
+  // Phase 164.6.6.2 (D-22, T-164.6.6.2-29): the BTC closes are read ONLY when a
+  // constituent carries a native unit. `null` (no read, a read error, or no usable
+  // close) leaves a BTC constituent with no line rather than a BTC curve on a USD
+  // axis; `readBtcCloses` logs a read error itself.
+  const nativeConstituent = hasNativeUnitConstituent(strategies);
+  const btcCloses = nativeConstituent ? await readBtcCloses(supabase) : null;
+  if (nativeConstituent && btcCloses === null) {
+    console.error(
+      "[portfolios/[id]] BTC closes unavailable; native-unit constituents render without an equity curve",
+    );
+  }
+
   // Surface any constituent strategy whose analytics are stale so the allocator
   // knows the portfolio view may be out of date at the source.
   const staleConstituents: string[] = [];
@@ -620,6 +702,7 @@ export default async function PortfolioDashboardPage({
           }
           optimizerComputedAt={analytics.computed_at ?? null}
           optimizerStatus={null}
+          btcCloses={btcCloses}
         />
       )}
       <Disclaimer />
