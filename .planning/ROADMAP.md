@@ -3681,12 +3681,13 @@ Plans:
 **Goal:** anon and authenticated cannot TRUNCATE any relation in `public`, now or on tables `postgres` creates later (D-01); the migration refuses its own apply if that is not true, reading the catalogue only (D-02); an annotated SQL gate fails on a re-grant and every census it moves is updated by measurement (D-03); PROD holder counts are recorded before the merge and after the apply, marker first (D-04). Accepted residual (provisional, founder confirms at verify): the platform admin role's own default-ACL row, which `postgres` cannot alter. ⚠️ The 56/59 in the title counts RELATIONS: 53/56 tables plus 3 views (research, measured 2026-10-07).
 **Requirements**: none assigned; plans trace to CONTEXT D-01..D-04
 **Depends on:** Phase 164.9
-**Plans:** 3 plans (planned 2026-10-07; 3 waves: W1 01 · W2 02 · W3 03; 03 is post-merge and non-autonomous)
+**Plans:** 4 plans (planned 2026-10-07, revised round 1; 4 waves: W1 01 · W2 02 · W3 03 · W4 04; 04 is post-merge and non-autonomous)
 
 Plans:
-- [ ] 164.9.7-01-PLAN.md — migration (schema-wide + default-privilege revoke, catalogue self-check), exact-prior-set rollback, gate TRUNC 1..6, each guard shown RED, local-stack full-dump proof
-- [ ] 164.9.7-02-PLAN.md — floors and censuses from one full measured run; D-04 BEFORE reading on PROD; TODOS api_keys annotation
-- [ ] 164.9.7-03-PLAN.md — post-merge: apply-test and apply confirmed, D-04 AFTER reading on PROD, founder confirms the residual
+- [ ] 164.9.7-01-PLAN.md — migration (schema-wide + default-privilege revoke, catalogue self-check), gate TRUNC 1..6, each guard shown RED
+- [ ] 164.9.7-02-PLAN.md — exact-prior-set rollback; local-stack full-dump proof (PG 17.6: corpus green, counts 0/0, rollback back to 56/59, gate RED)
+- [ ] 164.9.7-03-PLAN.md — floors and censuses from one full measured run; D-04 BEFORE reading on PROD; TODOS api_keys annotation
+- [ ] 164.9.7-04-PLAN.md — post-merge: apply-test and apply confirmed, D-04 AFTER reading on PROD, founder confirms the residual
 
 ### Phase 164.9.6: SUBSETMAIN — a push to main runs only the SQL gate files its PR changed, and a nightly scheduled job runs the full mutation corpus and enforces FILES_FLOOR / ARMS_FLOOR; the split is printed on every run. Founder decision 2026-10-03 after sql-mutation crossed its 20-minute ceiling on push 98f04db16 (prior main runs 15.2-16.9 min); the timeout is never raised again. (INSERTED)
 
