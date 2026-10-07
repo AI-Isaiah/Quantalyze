@@ -7,8 +7,9 @@
  *
  * S4b (inline egress-IP block per D-07) is DEFERRED in this plan because the
  * analytics-service does not currently advertise static egress IPs. The
- * existing "Email security@quantalyze.com for the current IP set" body is
- * preserved unchanged; the assertions below confirm the deferral state.
+ * contact-form path ("Use the contact form for the current IP set", Phase
+ * 164.6.6.3.5 DOMAINONE S6) is the disclosure channel; the assertions below
+ * confirm the deferral state.
  *
  * Anchor-ID preservation: every `<section aria-labelledby="…">` ID and the
  * `Section id="…"` rendered subsection ID must stay byte-identical because
@@ -22,6 +23,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { render, screen, within } from "@testing-library/react";
 import SecurityPage, { metadata } from "./page";
+import { contactHref } from "@/lib/contact";
 
 describe("Phase 11 / S4a — D-06 SOC-2 status banner", () => {
   it("renders the verbatim SOC-2 banner copy inside the Compliance Posture section", () => {
@@ -39,20 +41,18 @@ describe("Phase 11 / S4a — D-06 SOC-2 status banner", () => {
     // Disambiguate from the existing "Allocators evaluating us under
     // diligence should engage our security contact for a current posture
     // letter under NDA" paragraph that lives below the banner — the banner
-    // fragment ends with an em-dash before the inline mailto link.
+    // fragment ends with an em-dash before the inline contact link.
     expect(
       within(compliance).getByText(/Allocators evaluating us under diligence —/),
     ).toBeInTheDocument();
   });
 
-  it("renders a mailto: link with visible text 'request a posture letter'", () => {
+  it("links 'request a posture letter' to the security contact form (D-01, S6)", () => {
     render(<SecurityPage />);
     const link = screen.getByRole("link", { name: "request a posture letter" });
     expect(link).toBeInTheDocument();
-    expect(link).toHaveAttribute(
-      "href",
-      "mailto:security@quantalyze.com?subject=Posture%20letter%20request",
-    );
+    expect(link).toHaveAttribute("href", contactHref({ topic: "security" }));
+    expect(link.className).toContain("text-accent");
   });
 
   it("renders the banner with role='status' and warning-tinted full-border envelope", () => {
@@ -69,18 +69,23 @@ describe("Phase 11 / S4a — D-06 SOC-2 status banner", () => {
 });
 
 describe("Phase 11 / S4b — DEFERRED (egress-IP body unchanged)", () => {
-  it("preserves the existing email-path body in the #egress-ips section", () => {
+  it("keeps the contact-form path body in the #egress-ips section", () => {
     render(<SecurityPage />);
     // S4b deferral: Plan 11-06 originally specified an inline IP block per
     // D-07. The analytics-service doesn't advertise static egress IPs yet,
-    // so the existing "Email security@quantalyze.com for the current IP
-    // set" body remains the canonical disclosure path. Re-evaluate post
-    // static-IP infrastructure work.
+    // so "Use the contact form for the current IP set" remains the canonical
+    // disclosure path (the mail address it replaced is retired, D-01).
+    // Re-evaluate post static-IP infrastructure work.
     const section = document.getElementById("egress-ips") as HTMLElement;
     expect(section).toBeTruthy();
-    expect(section.textContent).toMatch(/Email/);
-    expect(section.textContent).toMatch(/for the current IP set/);
+    expect(section.textContent).toMatch(
+      /Use the contact form for the current IP set/,
+    );
     expect(section.textContent).toMatch(/rotate infrequently/);
+    expect(section.textContent).not.toMatch(/Email/);
+    expect(
+      within(section).getByRole("link", { name: "contact form" }),
+    ).toHaveAttribute("href", contactHref({ topic: "security" }));
   });
 });
 
@@ -189,7 +194,7 @@ describe("Phase 69 — Deribit readonly setup guide (UX-02)", () => {
  * scope endpoint, so the copy must (a) instruct minting a READ-ONLY token,
  * (b) state the adapter is structurally read-only (no order/withdraw path), and
  * (c) NEVER claim a server-verified read-only scope for sfox. Threat T-122-09:
- * no hardcoded egress IP — the security@ contact channel gates disclosure,
+ * no hardcoded egress IP — the security contact form gates disclosure,
  * mirroring the #egress-ips precedent.
  *
  * Revert-proof: deleting the SubAnchor turns the first test red; softening the
@@ -239,11 +244,10 @@ describe("Phase 122 — sFOX readonly setup guide (SFOX-08, F3)", () => {
     render(<SecurityPage />);
     const block = document.getElementById("sfox-readonly") as HTMLElement;
     expect(block.textContent).toMatch(/static egress IP/i);
+    expect(block.textContent).toMatch(/Use the contact form for the current IP/);
     // Disclosure gated by the contact channel, mirroring #egress-ips.
-    const mailto = within(block).getByRole("link", {
-      name: "security@quantalyze.com",
-    });
-    expect(mailto).toHaveAttribute("href", "mailto:security@quantalyze.com");
+    const contact = within(block).getByRole("link", { name: "contact form" });
+    expect(contact).toHaveAttribute("href", contactHref({ topic: "security" }));
     // No literal IPv4/IPv6 address is baked into the copy.
     expect(block.textContent).not.toMatch(/\b\d{1,3}(?:\.\d{1,3}){3}\b/);
     expect(block.textContent).not.toMatch(/\b[0-9a-f]{1,4}(?::[0-9a-f]{1,4}){4,}\b/i);
@@ -283,7 +287,7 @@ describe("Phase 122 — sFOX guide is founder-gated (F1, SFOX_ENABLED off)", () 
     render(<SecurityPage />);
     // The sfox-only "whitelist our static egress IP … paste the token into the
     // wizard" copy lives ONLY in the gated SubAnchor; the #egress-ips section's
-    // generic email-path copy is unaffected. With the flag off, the sfox phrasing
+    // generic contact-form copy is unaffected. With the flag off, the sfox phrasing
     // must be gone from the whole page.
     expect(document.body.textContent).not.toMatch(/paste the token into the wizard/i);
     expect(document.body.textContent).not.toMatch(/single API token/i);
@@ -423,5 +427,73 @@ describe("Phase 138 — MT5 guide is founder-gated (MT5_ENABLED off)", () => {
     delete process.env.SFOX_ENABLED;
     render(<SecurityPage />);
     expect(document.getElementById("sfox-readonly")).toBeNull();
+  });
+});
+
+/**
+ * Phase 164.6.6.3.5 DOMAINONE (D-01, UI-SPEC S6) — the page names no mailbox.
+ *
+ * Every former address mention (posture-letter banner, Security contact
+ * section, sFOX step, #egress-ips, #sync-timing) is now a link to
+ * `/contact?topic=security`, and nothing on the page renders an `@` or a
+ * mail-scheme link. A researcher or allocator reading this page must land on
+ * the form that writes to the founder CRM, not on a mailbox nobody reads.
+ *
+ * Fails when: any mail-scheme href returns, an `@` appears in rendered text,
+ * the Security contact section drifts from the UI-SPEC sentence, or a pointer
+ * link loses the page's link class (UI-SPEC Color: one link style).
+ */
+describe("Phase 164.6.6.3.5 — /security names no address (D-01, S6)", () => {
+  const SECURITY_HREF = contactHref({ topic: "security" });
+
+  beforeEach(() => {
+    process.env.SFOX_ENABLED = "true";
+  });
+  afterEach(() => {
+    delete process.env.SFOX_ENABLED;
+  });
+
+  it("renders no mail-scheme link and no @ in the text", () => {
+    const { container } = render(<SecurityPage />);
+    // Scheme assembled so no literal mail link sits in this file (the plan's
+    // negative grep reads the file text).
+    const scheme = ["mail", "to:"].join("");
+    expect(container.querySelector(`a[href^="${scheme}"]`)).toBeNull();
+    expect(document.body.textContent).not.toContain("@");
+  });
+
+  it("the Security contact section reads the UI-SPEC sentence and links the form", () => {
+    render(<SecurityPage />);
+    const section = document.getElementById("security-contact")
+      ?.parentElement as HTMLElement;
+    expect(section).toBeTruthy();
+    expect(section.textContent).toContain(
+      "Allocators asking for a posture letter, researchers reporting a vulnerability, and anyone with a concrete security question should use the contact form and choose Security report. We reply within one business day. Acknowledgments for coordinated disclosure are published on this page.",
+    );
+    const link = within(section).getByRole("link", { name: "contact form" });
+    expect(link).toHaveAttribute("href", SECURITY_HREF);
+    expect(link.className).toContain("text-accent underline underline-offset-4");
+  });
+
+  it("#sync-timing ends its sentence with 'when to use the contact form.'", () => {
+    render(<SecurityPage />);
+    const section = document.getElementById("sync-timing") as HTMLElement;
+    expect(section.textContent).toContain("when to use the contact form.");
+    expect(
+      within(section).getByRole("link", { name: "contact form" }),
+    ).toHaveAttribute("href", SECURITY_HREF);
+  });
+
+  it("every contact link on the page goes to the security topic with the page's link class", () => {
+    render(<SecurityPage />);
+    const links = screen
+      .getAllByRole("link")
+      .filter((a) => a.getAttribute("href")?.startsWith("/contact"));
+    // posture letter, Security contact section, sFOX step, #egress-ips, #sync-timing
+    expect(links).toHaveLength(5);
+    for (const a of links) {
+      expect(a).toHaveAttribute("href", SECURITY_HREF);
+      expect(a.className).toContain("text-accent underline underline-offset-4");
+    }
   });
 });
