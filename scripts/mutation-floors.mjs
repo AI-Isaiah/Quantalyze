@@ -1073,7 +1073,22 @@
 // arm bit its own arm first.`, exit 0. Per-file line:
 // `test_for_quants_leads_contact_dedupe.sql: sections 4 / judged 4 / annotated 4 /
 // waived 0 / biting 4`. WAIVED_CEILING stays 0.
-export const FILES_FLOOR = 59;
+//
+// RAISED 59 -> 60 2026-10-07 (Phase 164.9.7 TRUNCATEREVOKE, plan 03): the new gate
+// supabase/tests/test_truncate_revoke_anon_authenticated.sql (six annotated arms,
+// TRUNC 1 to TRUNC 6, all on `sql` steps; migration 20261009130000) took the corpus
+// from 59 to 60 annotated files. MEASURED by ONE full lane run of
+// `node scripts/mutation-runner/run.mjs`, no file edited during it, constants still
+// at 59 / 578 (the census vitest files read RED on those values first, naming
+// `RATCHET STALE: 60 of 87 gate files are now annotated but FILES_FLOOR is still 59`):
+// `scope: FULL 60/60 annotated files`, `coverage: files 60/87`, `arms: 584/584/0`,
+// `biting: 584`, `lane-invocations: 584 ... plus 60 baseline / 60 restore leg(s)` (the
+// two independent tallies AGREE), `lane-blocked: 0`, `lane-probe: pg_cron AVAILABLE`,
+// `unreachable: 27`, `per-arm lane time: mean 3.2s over 584 arm run(s)`, `No defects.
+// Every annotated arm bit its own arm first.`, exit 0, wall clock 9m46s locally at
+// `lane-concurrency: 4`. Per-file line: `test_truncate_revoke_anon_authenticated.sql:
+// sections 6 / judged 6 / annotated 6 / waived 0 / biting 6`. WAIVED_CEILING stays 0.
+export const FILES_FLOOR = 60;
 
 // ARMS_FLOOR — PINNED 2026-08-29 BY MEASUREMENT (plan 164.3-08), not chosen.
 //
@@ -2773,7 +2788,16 @@ export const FILES_FLOOR = 59;
 // file raises for to carry a twin, and section 4 (behavioural) raises. Each arm
 // was also driven by hand on the lane and read RED on its own identity first.
 // WAIVED_CEILING stays 0 - no waiver was added.
-export const ARMS_FLOOR = 578;
+//
+// RAISED 578 -> 584 2026-10-07 (Phase 164.9.7 TRUNCATEREVOKE, plan 03): SIX arms
+// from test_truncate_revoke_anon_authenticated.sql (TRUNC 1 the catalogue sweep over every
+// public relation, TRUNC 2 to 4 a table postgres creates after the migration, TRUNC 5
+// service_role still holding TRUNCATE on cron_runs, TRUNC 6 the SQLSTATE refusal of a
+// TRUNCATE issued as authenticated), measured by the same single full run
+// recorded under FILES_FLOOR above: `arms: 584/584/0`, `biting: 584`. Each arm was
+// also driven on the pg-lane in plan 01 and read RED on its own identity first.
+// WAIVED_CEILING stays 0 - no waiver was added.
+export const ARMS_FLOOR = 584;
 
 // WAIVED_CEILING — PINNED 2026-09-02 BY MEASUREMENT (164.3.1 red team), not
 // chosen. A CEILING, not a floor: it fails when the corpus carries MORE waivers
