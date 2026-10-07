@@ -46,6 +46,7 @@ import pandas as pd
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
 
+from services.benchmark import get_btc_closes
 from services.db import (
     PaginatedSelectTruncated,
     Row,
@@ -70,6 +71,7 @@ from services.match_engine import (
 from services.match_eval import (
     compute_hit_rate_metrics,
 )
+from services.native_to_usd import UsdSeriesConverter, native_units_by_id
 from services.rate_limit import limiter, tenant_or_platform_key
 
 router = APIRouter(prefix="/api/match", tags=["match"])
@@ -435,6 +437,7 @@ def _load_candidate_universe(demo_only: bool = False) -> dict[str, Any]:
     {
       "strategies_by_id": {sid: {...}},
       "returns_by_id": {sid: pd.Series},
+      "native_units": {sid: unit}   # D-23: candidates whose series is not in USD
     }
     """
     supabase = get_supabase()
@@ -477,7 +480,11 @@ def _load_candidate_universe(demo_only: bool = False) -> dict[str, Any]:
             # which are read into strategies_by_id below — dead select fields
             # that bloated every per-page response and misled readers about what
             # the engine actually uses (sharpe, max_drawdown, returns_series).
-            .select("strategy_id, returns_series, sharpe, max_drawdown")
+            # D-23: `data_quality_flags` rides the same row as `returns_series`,
+            # so a BTC strategy's `native_unit` is read beside the series it
+            # describes. It is consumed by `_score_one_allocator`, which converts
+            # to USD before the engine weights anything.
+            .select("strategy_id, returns_series, sharpe, max_drawdown, data_quality_flags")
             .in_("strategy_id", _chunk)
         ),
         strategy_ids,
@@ -584,6 +591,9 @@ def _load_candidate_universe(demo_only: bool = False) -> dict[str, Any]:
     return {
         "strategies_by_id": strategies_by_id,
         "returns_by_id": returns_by_id,
+        # D-23: {sid: native unit} for the candidates whose returns_series is NOT
+        # in USD. Read from the same analytics rows as the series themselves.
+        "native_units": native_units_by_id(analytics_rows),
     }
 
 
@@ -743,6 +753,9 @@ def _load_allocator_context(allocator_id: str) -> dict[str, Any]:
     portfolio_weights: dict[str, float] = {}
     portfolio_returns: dict[str, pd.Series] = {}
     strategy_aum: float = 0.0
+    # D-23: {sid: native unit} for the book's strategies whose returns_series is
+    # NOT in USD, read from the same analytics rows as the series.
+    native_units: dict[str, str] = {}
     # Track raw value per strategy id for combined renormalization
     strategy_raw_values: dict[str, float] = {}
 
@@ -812,7 +825,7 @@ def _load_allocator_context(allocator_id: str) -> dict[str, Any]:
             _sa = chunked_in_query(
                 lambda _chunk: (
                     supabase.table("strategy_analytics")
-                    .select("strategy_id, returns_series")
+                    .select("strategy_id, returns_series, data_quality_flags")
                     .in_("strategy_id", _chunk)
                 ),
                 strategy_ids,
@@ -828,6 +841,7 @@ def _load_allocator_context(allocator_id: str) -> dict[str, Any]:
                     _sa.gap,
                 )
             analytics_by_sid = {row["strategy_id"]: row for row in sa_rows}
+            native_units = native_units_by_id(sa_rows)
         else:
             analytics_by_sid = {}
 
@@ -906,6 +920,7 @@ def _load_allocator_context(allocator_id: str) -> dict[str, Any]:
         "portfolio_strategies": portfolio_strategies,
         "portfolio_weights": portfolio_weights,
         "portfolio_returns": portfolio_returns,
+        "native_units": native_units,
         "portfolio_aum": combined_aum if combined_aum > 0 else None,
         "thumbs_down_ids": thumbs_down_ids,
         # Internal-use: passed to compute_holding_flags in _score_one_allocator (Task 3)
@@ -1104,6 +1119,25 @@ async def _score_one_allocator(
             candidate_strategies = list(universe["strategies_by_id"].values())
             candidate_returns = universe["returns_by_id"]
 
+        # D-23 (founder, 2026-10-07): the engine weights whatever series it is
+        # given (the personalized portfolio series is a weighted sum of
+        # `portfolio_returns`, and each candidate is scored beside it), so every
+        # native-unit (BTC) series is converted to USD HERE, before the call.
+        # `services/match_engine.py` stays a pure function of USD inputs. The
+        # converter lives on the universe, so the BTC closes are read once per
+        # universe (one cron run), and only when some series carries a unit; a
+        # series that cannot be converted (no BTC price source) is left out,
+        # exactly like a strategy with no returns_series, never weighted raw.
+        _usd = universe.get("_usd_converter")
+        if _usd is None:
+            _usd = universe["_usd_converter"] = UsdSeriesConverter(get_btc_closes)
+        portfolio_returns, _ = await _usd.convert(
+            ctx["portfolio_returns"], ctx.get("native_units") or {}
+        )
+        candidate_returns, _ = await _usd.convert(
+            candidate_returns, universe.get("native_units") or {}
+        )
+
         # score_candidates runs pandas/numpy heavy work (DataFrame builds,
         # correlation calcs, min-max normalization across the candidate
         # universe). Off-load so we don't block the event loop per allocator.
@@ -1112,7 +1146,7 @@ async def _score_one_allocator(
             allocator_id=allocator_id,
             preferences=ctx["preferences"],
             portfolio_strategies=ctx["portfolio_strategies"],
-            portfolio_returns=ctx["portfolio_returns"],
+            portfolio_returns=portfolio_returns,
             portfolio_weights=ctx["portfolio_weights"],
             candidate_strategies=candidate_strategies,
             candidate_returns=candidate_returns,
@@ -1143,7 +1177,7 @@ async def _score_one_allocator(
         holding_flags_list = await asyncio.to_thread(
             compute_holding_flags,
             holdings_rows_eligible=holdings_eligible,
-            portfolio_returns=ctx["portfolio_returns"],
+            portfolio_returns=portfolio_returns,  # D-23: the converted book
             portfolio_weights=ctx["portfolio_weights"],
             portfolio_aum=ctx["portfolio_aum"],
             allocator_preferences=ctx["preferences"] or {},

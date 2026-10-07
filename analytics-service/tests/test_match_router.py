@@ -5580,3 +5580,191 @@ async def test_pass_duration_measures_the_pass_not_the_last_tick_gap(monkeypatch
         "a 2.0h pass against a 1.5h freshness window must WARN, not reassure — "
         f"got {kind}: {line}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Phase 164.6.6.2 (D-23): the personalized blend is built from USD series only
+# ---------------------------------------------------------------------------
+
+
+def _usd_conversion_fixture():
+    """Two portfolio strategies (one BTC) and two candidates (one BTC), BTC
+    closes 60000 -> 66000 -> 72600. The BTC account's native d1 return is the
+    shared oracle's r = 0.10, so its USD return is (1 + 0.10) * (66000 / 60000)
+    - 1 = 0.21 (hand-computed, the same literal as native_to_usd_oracle.json)."""
+    import pandas as pd
+
+    idx = pd.DatetimeIndex(["2026-02-02", "2026-02-03", "2026-02-04"])
+    usd = pd.Series([0.0, 0.02, 0.01], index=idx, name="usd")
+    btc = pd.Series([0.0, 0.10, 0.04], index=idx, name="btc")
+    closes = pd.Series([60000.0, 66000.0, 72600.0], index=idx, name="BTC")
+    ctx = {
+        "preferences": {},
+        "portfolio_strategies": [{"strategy_id": "usd-a"}, {"strategy_id": "btc-b"}],
+        "portfolio_weights": {"usd-a": 0.5, "btc-b": 0.5},
+        "portfolio_returns": {"usd-a": usd, "btc-b": btc},
+        "native_units": {"btc-b": "BTC"},
+        "portfolio_aum": None,
+        "thumbs_down_ids": set(),
+        "_holdings_rows_eligible": [],
+    }
+    universe = {
+        "strategies_by_id": {
+            "btc-cand": {"strategy_id": "btc-cand", "name": "BC"},
+            "usd-cand": {"strategy_id": "usd-cand", "name": "UC"},
+        },
+        "returns_by_id": {"btc-cand": btc, "usd-cand": usd},
+        "native_units": {"btc-cand": "BTC"},
+    }
+    return ctx, universe, closes, usd
+
+
+async def _score_with_spies(ctx, universe, closes):
+    from unittest.mock import AsyncMock, patch
+
+    from routers import match as match_mod
+
+    seen: dict[str, Any] = {}
+
+    def _score_spy(**kwargs):
+        seen["score"] = kwargs
+        return {
+            "mode": "personalized", "filter_relaxed": False, "candidates": [], "excluded": [],
+            "effective_preferences": {}, "effective_thresholds": {}, "source_strategy_count": 2,
+        }
+
+    def _flags_spy(**kwargs):
+        seen["flags"] = kwargs
+        return []
+
+    sb = MagicMock()
+    sb.table.return_value.insert.return_value.execute.return_value = MagicMock(
+        data=[{"id": "batch-1"}]
+    )
+    closes_mock = AsyncMock(return_value=closes)
+    with patch.object(match_mod, "get_supabase", return_value=sb), \
+         patch.object(match_mod, "get_btc_closes", closes_mock), \
+         patch.object(match_mod, "score_candidates", _score_spy), \
+         patch.object(match_mod, "compute_holding_flags", _flags_spy):
+        await match_mod._score_one_allocator(
+            "alloc-1", universe, precomputed_ctx=ctx, precomputed_overrides=None
+        )
+        await match_mod._score_one_allocator(
+            "alloc-2", universe, precomputed_ctx=dict(ctx), precomputed_overrides=None
+        )
+    return seen, closes_mock
+
+
+class TestMatchEngineIsHandedUsdSeriesOnly:
+    """`score_candidates` weights the series it is handed into the personalized
+    portfolio series, so the router must convert a BTC strategy first: the
+    engine stays a pure function of USD inputs (D-23)."""
+
+    @pytest.mark.asyncio
+    async def test_portfolio_and_candidate_btc_series_arrive_converted(self):
+        import pandas as pd
+
+        ctx, universe, closes, usd = _usd_conversion_fixture()
+        seen, closes_mock = await _score_with_spies(ctx, universe, closes)
+        d1 = pd.Timestamp("2026-02-03")
+        port = seen["score"]["portfolio_returns"]
+        cand = seen["score"]["candidate_returns"]
+        assert port["btc-b"].loc[d1] == pytest.approx(0.21, abs=1e-12)  # not the raw 0.10
+        assert cand["btc-cand"].loc[d1] == pytest.approx(0.21, abs=1e-12)
+        # USD series reach the engine untouched, day 0 included.
+        assert port["usd-a"] is usd
+        assert cand["usd-cand"] is usd
+        # The holding flags weight the same book, so they get the converted one.
+        assert seen["flags"]["portfolio_returns"]["btc-b"].loc[d1] == pytest.approx(0.21, abs=1e-12)
+        # BTC closes are read once per universe (one cron run), not per allocator.
+        assert closes_mock.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_usd_only_request_reads_no_closes_and_the_engine_sees_todays_series(self):
+        ctx, universe, closes, usd = _usd_conversion_fixture()
+        ctx["native_units"] = {}
+        universe["native_units"] = {}
+        seen, closes_mock = await _score_with_spies(ctx, universe, closes)
+        closes_mock.assert_not_awaited()
+        assert seen["score"]["portfolio_returns"]["btc-b"] is ctx["portfolio_returns"]["btc-b"]
+
+    @pytest.mark.asyncio
+    async def test_a_btc_strategy_with_no_price_source_is_left_out_not_weighted_raw(self):
+        ctx, universe, _closes, _usd = _usd_conversion_fixture()
+        seen, _ = await _score_with_spies(ctx, universe, None)
+        assert "btc-b" not in seen["score"]["portfolio_returns"]
+        assert "btc-cand" not in seen["score"]["candidate_returns"]
+        assert "usd-a" in seen["score"]["portfolio_returns"]
+
+
+class TestLoadersCarryTheNativeUnitFromTheSameRow:
+    def test_candidate_universe_reads_flags_beside_returns(self, monkeypatch):
+        from routers import match as match_mod
+
+        selects: list[str] = []
+        strategies = [{"id": "s-btc", "name": "B"}, {"id": "s-usd", "name": "U"}]
+        analytics = [
+            {"strategy_id": "s-btc", "returns_series": None, "sharpe": 1, "max_drawdown": -0.1,
+             "data_quality_flags": {"native_unit": "BTC"}},
+            {"strategy_id": "s-usd", "returns_series": None, "sharpe": 1, "max_drawdown": -0.1,
+             "data_quality_flags": {"native_unit": "btc"}},  # malformed -> a USD row
+        ]
+
+        def _table(name):
+            t = MagicMock()
+            if name == "strategies":
+                t.select.return_value.eq.return_value.execute.return_value = MagicMock(data=strategies)
+                return t
+
+            def _select(cols):
+                selects.append(cols)
+                q = MagicMock()
+                q.in_.return_value.execute.return_value = MagicMock(data=analytics)
+                return q
+
+            t.select.side_effect = _select
+            return t
+
+        sb = MagicMock()
+        sb.table.side_effect = _table
+        monkeypatch.setattr(match_mod, "get_supabase", lambda: sb)
+        universe = match_mod._load_candidate_universe()
+        assert universe["native_units"] == {"s-btc": "BTC"}
+        assert any("data_quality_flags" in c and "returns_series" in c for c in selects)
+
+    def test_allocator_context_reads_flags_beside_returns(self, monkeypatch):
+        from routers import match as match_mod
+
+        selects: list[str] = []
+        ps_rows = [{"strategy_id": "S1", "current_weight": 1.0, "portfolio_id": "pf-1",
+                    "allocated_amount": 100.0}]
+        analytics = [{"strategy_id": "S1", "returns_series": None,
+                      "data_quality_flags": {"native_unit": "BTC"}}]
+
+        def _table(name):
+            t = MagicMock()
+            if name == "portfolios":
+                t.select.return_value.eq.return_value.execute.return_value = MagicMock(data=[{"id": "pf-1"}])
+            elif name == "allocator_preferences":
+                t.select.return_value.eq.return_value.maybe_single.return_value.execute.return_value = None
+            elif name == "portfolio_strategies":
+                t.select.return_value.in_.return_value.order.return_value.order.return_value.execute.return_value = MagicMock(data=ps_rows)
+            elif name == "strategy_analytics":
+                def _select(cols):
+                    selects.append(cols)
+                    q = MagicMock()
+                    q.in_.return_value.execute.return_value = MagicMock(data=analytics)
+                    return q
+                t.select.side_effect = _select
+            elif name in ("allocator_holdings", "allocator_equity_snapshots"):
+                t.select.return_value.eq.return_value.order.return_value.execute.return_value = MagicMock(data=[])
+            elif name == "match_decisions":
+                t.select.return_value.eq.return_value.eq.return_value.execute.return_value = MagicMock(data=[])
+            return t
+
+        sb = MagicMock()
+        sb.table.side_effect = _table
+        monkeypatch.setattr(match_mod, "get_supabase", lambda: sb)
+        ctx = match_mod._load_allocator_context("alloc-units")
+        assert ctx["native_units"] == {"S1": "BTC"}
+        assert any("data_quality_flags" in c and "returns_series" in c for c in selects)

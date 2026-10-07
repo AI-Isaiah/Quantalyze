@@ -24,10 +24,11 @@ owns; UUID-format validation is upstream (Next.js layer).
 from __future__ import annotations
 
 import os
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
+import pandas as pd
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
 # CI version-drift quarantine. analytics-service pins fastapi==0.115.12 +
@@ -1900,3 +1901,144 @@ class TestS1_PerUserRateLimitIntegration:
         # NAT-shared-bucket starvation S1 eliminates.
         r_bob = _post(client, user_id="bob")
         assert r_bob.status_code == 200, r_bob.text
+
+
+# ---------------------------------------------------------------------------
+# Phase 164.6.6.2 (D-23): a BTC series is converted to USD before the blend
+# ---------------------------------------------------------------------------
+
+_N_BTC_DAYS = 35  # >= the scorer's MIN_DATA_POINTS overlap, so the curves are emitted
+
+
+def _btc_dates() -> list[str]:
+    return [d.strftime("%Y-%m-%d") for d in pd.date_range("2026-02-02", periods=_N_BTC_DAYS)]
+
+
+def _btc_closes_series() -> pd.Series:
+    """BTC +10% every day: close_k = 60000 * 1.1**k."""
+    dates = _btc_dates()
+    return pd.Series(
+        [60000.0 * 1.1**k for k in range(len(dates))],
+        index=pd.DatetimeIndex(dates),
+        name="BTC",
+    )
+
+
+def _usd_records() -> list[dict]:
+    # day 0 flat; then 0.02, 0.01, 0.02, 0.01, ...
+    vals = [0.0] + [0.02 if k % 2 == 1 else 0.01 for k in range(1, _N_BTC_DAYS)]
+    return [{"date": d, "value": v} for d, v in zip(_btc_dates(), vals)]
+
+
+def _btc_native_records() -> list[dict]:
+    # the account's own BTC daily return: 0.10, 0.11, 0.12, 0.10, ... (day 0 flat)
+    vals = [0.0] + [0.10 + 0.01 * ((k - 1) % 3) for k in range(1, _N_BTC_DAYS)]
+    return [{"date": d, "value": v} for d, v in zip(_btc_dates(), vals)]
+
+
+# Hand-computed with the shared oracle's arithmetic, usd_k = (1 + r_k) * 1.1 - 1:
+#   BTC account day 1: r = 0.10 -> 0.21 (the oracle's headline 0.21)
+#   BTC account day 2: r = 0.11 -> 1.11 * 1.1 - 1 = 0.221
+_C1, _C2 = 0.21, 0.221
+
+
+async def _simulate(sa_portfolio, sa_candidate, ps_data, closes):
+    from routers import simulator as simulator_router
+
+    sb = MagicMock()
+    _table_router(
+        sb,
+        portfolio_data={"id": "p-1"},
+        candidate_data={"id": "c-1", "name": "Cand", "status": "published"},
+        portfolio_strategies_data=ps_data,
+        sa_portfolio_data=sa_portfolio,
+        sa_candidate_data=sa_candidate,
+    )
+    closes_mock = AsyncMock(return_value=closes)
+    simulator_router._simulator_user_attempts.clear()
+    request = MagicMock()
+    request.headers = {}
+    req = simulator_router.SimulatorRequest(
+        portfolio_id="p-1", candidate_strategy_id="c-1", user_id="u-btc"
+    )
+    with patch.object(simulator_router, "get_supabase", return_value=sb), \
+         patch.object(simulator_router, "get_btc_closes", closes_mock), \
+         patch.object(simulator_router, "log_audit_event"):
+        result = await simulator_router.portfolio_simulator.__wrapped__(request, req)
+    return result, closes_mock
+
+
+class TestBtcSeriesAreConvertedBeforeTheAddBlend:
+    """simulate_add_candidate weights every series it is handed, so a BTC
+    candidate (and a BTC constituent) must arrive as USD returns."""
+
+    @pytest.mark.asyncio
+    async def test_a_btc_candidate_enters_the_blend_at_its_usd_return(self):
+        result, closes = await _simulate(
+            sa_portfolio=[{"strategy_id": "s-1", "returns_series": _usd_records(),
+                           "data_quality_flags": {}}],
+            sa_candidate={"strategy_id": "c-1", "returns_series": _btc_native_records(),
+                          "data_quality_flags": {"native_unit": "BTC"}},
+            ps_data=[{"strategy_id": "s-1", "current_weight": 1.0}],
+            closes=_btc_closes_series(),
+        )
+        proposed = result["equity_curve_proposed"]
+        # Route add weight 0.10: day 1 = 0.9 * 0.02 + 0.1 * 0.21 = 0.039. The raw
+        # BTC return would give 0.9 * 0.02 + 0.1 * 0.10 = 0.028.
+        d1 = 0.9 * 0.02 + 0.1 * _C1
+        d2 = 0.9 * 0.01 + 0.1 * _C2
+        assert proposed[0]["value"] == pytest.approx(1 + d1, abs=1e-12)
+        assert proposed[1]["value"] == pytest.approx((1 + d1) * (1 + d2), abs=1e-12)
+        assert closes.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_a_btc_constituent_is_converted_the_same_way(self):
+        result, closes = await _simulate(
+            sa_portfolio=[
+                {"strategy_id": "s-1", "returns_series": _usd_records(), "data_quality_flags": {}},
+                {"strategy_id": "s-2", "returns_series": _btc_native_records(),
+                 "data_quality_flags": {"native_unit": "BTC"}},
+            ],
+            sa_candidate={"strategy_id": "c-1", "returns_series": _usd_records(),
+                          "data_quality_flags": None},
+            ps_data=[
+                {"strategy_id": "s-1", "current_weight": 0.5},
+                {"strategy_id": "s-2", "current_weight": 0.5},
+            ],
+            closes=_btc_closes_series(),
+        )
+        current = result["equity_curve_current"]
+        # current portfolio, 50/50: day 1 = 0.5 * 0.02 + 0.5 * 0.21 (raw would be 0.06).
+        assert current[0]["value"] == pytest.approx(1 + 0.5 * 0.02 + 0.5 * _C1, abs=1e-12)
+        assert closes.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_a_usd_only_request_reads_no_closes_and_is_unchanged(self):
+        result, closes = await _simulate(
+            sa_portfolio=[{"strategy_id": "s-1", "returns_series": _usd_records(),
+                           "data_quality_flags": {}}],
+            sa_candidate={"strategy_id": "c-1", "returns_series": _usd_records(),
+                          "data_quality_flags": {}},
+            ps_data=[{"strategy_id": "s-1", "current_weight": 1.0}],
+            closes=_btc_closes_series(),
+        )
+        closes.assert_not_awaited()
+        # Nothing converted, so day 0 is kept (a converted series drops it): the
+        # curve is 1.0 on day 0, then 0.9 * 0.02 + 0.1 * 0.02 = 0.02 on day 1.
+        proposed = result["equity_curve_proposed"]
+        assert proposed[0]["value"] == pytest.approx(1.0, abs=1e-12)
+        assert proposed[1]["value"] == pytest.approx(1.02, abs=1e-12)
+
+    @pytest.mark.asyncio
+    async def test_a_btc_candidate_with_no_price_source_has_no_returns_history(self):
+        with pytest.raises(HTTPException) as exc:
+            await _simulate(
+                sa_portfolio=[{"strategy_id": "s-1", "returns_series": _usd_records(),
+                               "data_quality_flags": {}}],
+                sa_candidate={"strategy_id": "c-1", "returns_series": _btc_native_records(),
+                              "data_quality_flags": {"native_unit": "BTC"}},
+                ps_data=[{"strategy_id": "s-1", "current_weight": 1.0}],
+                closes=None,
+            )
+        assert exc.value.status_code == 400
+        assert exc.value.detail == "Candidate has no returns history"
