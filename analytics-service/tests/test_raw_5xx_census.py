@@ -265,7 +265,18 @@ EXPECTED_HTTPEXCEPTION_SUBCLASSES = 1
 #: is scheduled. A tenth ``VenueTransientHTTPException(424)`` construction; it
 #: reuses an existing code (no new user-facing code is minted) and it is a 4xx, so
 #: blind spot (b) stays LATENT rather than live.
-EXPECTED_SUBCLASS_CONSTRUCTION_SITES = 14
+#: 14 -> 15 (2026-10-06, Phase 164.6.6.3 plan 05 / D-09, D-10): the MT5 wizard
+#: validate gained the KNOWN-SERVER pre-check. A broker server that is not on the
+#: curated list is refused in ``_validate_mt5_key_probe`` itself, after the
+#: validation-endpoint check and before any client, lease or login, with a 424
+#: ``MT5_SERVER_UNKNOWN`` and ``recoverable=True``. An eleventh
+#: ``VenueTransientHTTPException(424)`` construction, and the first since 153 that
+#: MINTS a new user-facing wire code (the wizard maps it to ``KEY_MT5_SERVER_UNKNOWN``
+#: in ``VENUE_WIRE_CODE_TO_VERDICT``); every earlier arrival reused an existing one.
+#: It is a 4xx, so by this file's own definition blind spot (b) stays LATENT rather
+#: than live. The same pre-check's empty-list arm raises through ``service_error``
+#: (500, ``MT5_GATEWAY_UNCONFIGURED``), which this census does not count.
+EXPECTED_SUBCLASS_CONSTRUCTION_SITES = 15
 
 #: Vacuity fence. A scanner that matched nothing would report agreement with the
 #: quarantine forever, so the scan must prove it saw the tree. Loose floors on

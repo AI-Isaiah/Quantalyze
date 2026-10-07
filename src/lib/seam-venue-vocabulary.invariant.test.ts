@@ -768,6 +768,13 @@ const EXPECTED_EMITTED_CODES: readonly string[] = [
   "MT5_GATEWAY_UNCONFIGURED",
   "MT5_GATEWAY_UNREACHABLE",
   "MT5_MASTER_PASSWORD",
+  // 164.6.6.3 / item 9 (D-09, D-10) — minted by `_validate_mt5_key_probe`'s
+  // known-server pre-check (routers/exchange.py), a `VenueTransientHTTPException`
+  // 424 with `recoverable=True`, raised BEFORE any client, lease or `login()`.
+  // Takes a KEY_MT5_SERVER_UNKNOWN verdict row. Added here because this roster is
+  // the ARRIVAL gate: a new Python error_code with no TypeScript disposition falls
+  // through the substring cascade, which is what this file exists to prevent.
+  "MT5_SERVER_UNKNOWN",
   // 164.6.5 / criterion 5 (D-12/D-13) — minted by `_validate_mt5_key_probe`'s
   // `Mt5ClientError` handler when the client error's code is one of MT5's IPC
   // transport codes (our own terminal bridge, never the exchange). Takes a
@@ -851,6 +858,15 @@ const EXPECTED_EMITTED_CODES: readonly string[] = [
  * drifted once at 41 members (it said "0.6 × 40"); corrected to 42 here
  * rather than left to drift a second time.
  *
+ * 25 -> 27 (2026-10-06, Phase 164.6.6.3 plan 05 / item 9): `MT5_SERVER_UNKNOWN`
+ * arrives. The hand-typed roster held 44 codes at HEAD and holds 45 with it, and the
+ * set-equality assertion below agrees with the derived emitter set at 45.
+ * 0.6 x 45 = 27.0, floored to 27 - the whole-number case, where "floored" changes
+ * nothing, but it is still the rule that produced the value. ⚠️ THE FLOOR WAS ALREADY
+ * LOW BEFORE THIS ARRIVAL: at 44 the rule gives 0.6 x 44 = 26.4, floored to 26, yet
+ * the constant read 25 (the assertion is `toBeGreaterThanOrEqual`, so it kept passing
+ * and nothing told the next reader to move it). The move therefore steps over 26.
+ *
  * 25 stays 25 (MERGE 2026-09-23, origin/main into
  * feat/164.6.5-mt5validatewedge): the two notes above each counted ONE arrival
  * onto the same 41-code base and each read 42. The merged roster holds BOTH
@@ -858,7 +874,7 @@ const EXPECTED_EMITTED_CODES: readonly string[] = [
  * set-equality assertion below agrees with the derived emitter set at 43.
  * 0.6 × 43 = 25.8, floored to 25 — same rule, no move.
  */
-const DERIVED_FLOOR = 25;
+const DERIVED_FLOOR = 27;
 
 /**
  * ⭐ THE REACH PIN — hand-typed, because today nothing else asserts WHERE the

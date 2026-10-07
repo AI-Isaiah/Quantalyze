@@ -371,7 +371,7 @@ nullified if 140.2 gets it wrong.
 
 ---
 
-## 7. The full S-01…S-28 site map
+## 7. The full S-01…S-29 site map
 
 The authoritative enumeration of every 5xx-capable site reachable from the seam.
 `140.2` can diff its assumptions against this table.
@@ -424,8 +424,9 @@ reviewer diffs their assumptions against.
 | S-26 | `routers/match.py` `cron_recompute()`, the `except` around `_read_cron_cursor()` | `/api/match/cron-recompute` | **500 `text/plain`** (unhandled) | the batching-cursor read exhausted `db_read_with_retry` | SERVICE-TRANSIENT | **503** `CURSOR_UNAVAILABLE`, `dependency:supabase` + `Retry-After` | **164.5.1** | ✅ |
 | S-27 | `routers/exchange.py` `_validate_mt5_key_probe()`, the `except Mt5ClientError` transient tail (also reached via `rotate_key_secret`'s `_validate_mt5_key` call) | `/api/validate-key`, `/internal/keys/{id}/rotate-secret` | 424 `NETWORK_UNAVAILABLE` | `classify_mt5_login_error` classified the caught `Mt5ClientError` `transient` AND `is_mt5_login_refusal` holds — the terminal answered the sign-in itself falsy with a code outside `_LOGIN_STAGE_NOT_A_REFUSAL_CODES` (the `-10000`…`-10004` IPC-infrastructure family and the success code `1`), and never told us why. A login-stage `-10005` IS such a refusal (D-17: the modal login dialog D-08 measured for a wrong password). **167 WR-01 / D-17:** a post-login read failure, an `initialize()` failure, or a login-stage `-10000`…`-10004` / `1` reaching the same arm keeps the pre-167 424 `NETWORK_UNAVAILABLE`, `recoverable:true` | CALLER'S EXCHANGE (3b FLAT — §2.1) | **424** `SIGN_IN_FAILED`, **`recoverable:false`** — DIVERGES from this class's `recoverable:true` default: a retry re-sends the same credential to a terminal that refused it, or that a wrong password put behind a modal login dialog (D-08, D-17) | **167-CREDTRUST plan 01** | ✅ |
 | S-28 | `routers/cron.py` `benchmark_refresh()` and `_benchmark_refresh_once()`, all six failure arms | `/api/benchmark-refresh` | raw `500` `{detail:"<string>"}` (Phase 169.2 as first shipped) | the BTC refresh returned no series, a stale or empty series, or raised; the stored-date read-back raised or is older than yesterday (UTC); or the 80 s `_BENCHMARK_REFRESH_DEADLINE_S` expired | SERVICE-PERMANENT (W2: never 503, so a stale benchmark cannot trip the shared breaker) | **500** `BENCHMARK_REFRESH_FAILED`, `retryable:false`, no `dependency` | **169.2** | ✅ |
+| S-29 | `routers/exchange.py` `_validate_mt5_key_probe()`, the `assert_mt5_server_known` pre-check (also reached via `rotate_key_secret`'s `_validate_mt5_key` call; the worker adapter `Mt5Adapter.validate` carries the same check and answers through the validation verdict instead of an HTTP raise) | `/api/validate-key`, `/internal/keys/{id}/rotate-secret` | 424 `SIGN_IN_FAILED` after a 45.6 s `login()` hang (the terminal never attempted the unlisted server) | the requested MT5 server is not on `MT5_KNOWN_SERVERS` plus the house `MT5_SERVER`; fires BEFORE the client, the lease and `login_attempted`, so no terminal is touched | CALLER'S EXCHANGE (3b FLAT — §2.1) | **424** `MT5_SERVER_UNKNOWN`, `recoverable:true` (a corrected spelling, or the operator adding the server per runbook Step 2d, clears it) | **164.6.6.3** | ✅ |
 
-**Tally:** 28 rows = **25 explicit editable sites** (S-01…S-20 plus S-25/S-26
+**Tally (as of S-28; S-29 follows below):** 28 rows = **25 explicit editable sites** (S-01…S-20 plus S-25/S-26
 `HTTPException` raises, plus S-28 the six `benchmark-refresh` arms counted as one site because they share one code, plus S-23 the `JSONResponse` literal, plus S-27 the
 `VenueTransientHTTPException` `SIGN_IN_FAILED` raise Phase 167 split out of the existing
 MT5 transient-client-error arm — a new raise, not a new failure) + 2 implicit
@@ -434,6 +435,8 @@ unhandled-500s (S-21, S-22, no edit possible or needed) + 1 deliberately unchang
 24: it misses S-23, which is not an `HTTPException` at all, and S-27, whose raise is
 spelled `raise VenueTransientHTTPException`. That sweep predates S-28 and is not re-measured here; S-28's arms are spelled
 `raise service_error(`.
+
+**S-29 (Phase 164.6.6.3)** is a 424-only site like S-27: `VenueTransientHTTPException`, recoverable. It is a new raise placed BEFORE the MT5 client, lease and `login_attempted`, so it adds one editable site on top of the 25 above (26 now). The empty known-server list (`MT5_KNOWN_SERVERS` and `MT5_SERVER` both unset) is OUR misconfiguration and does not use this row: it reuses the existing `MT5_GATEWAY_UNCONFIGURED` 500 body, so that code now has a fifth router emitter and no new site.
 
 **S-25 and S-26 were added by Phase 164.5.1**, and both are the same shape: a
 Supabase read that has already exhausted `db_read_with_retry`'s gateway-timeout

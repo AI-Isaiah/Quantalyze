@@ -21,6 +21,7 @@ from services.closed_sets import (
     MT5_DISABLED_DETAIL,
     MT5_MASTER_PASSWORD_DETAIL,
     MT5_WRONG_SERVER_DETAIL,
+    MT5_SERVER_UNKNOWN_DETAIL,
 )
 from services.mt5_client import (
     Mt5Client,
@@ -74,6 +75,9 @@ from services.mt5_validation import (
 # on one path only. `services/mt5_probe.py` is a LEAF over mt5_client +
 # mt5_validation and must never import back into `routers.*` (D-07).
 from services.mt5_probe import (
+    Mt5KnownServersUnconfigured,
+    Mt5ServerUnknownError,
+    assert_mt5_server_known,
     is_bridge_glitch,
     mt5_gateway_misconfigured_detail,
     park_on_house_account,
@@ -534,6 +538,45 @@ async def _validate_mt5_key_probe(
             detail="The MetaTrader gateway is not configured. This needs an operator, not a retry.",
         )
     host, port = endpoint
+
+    # ⭐ Phase 164.6.6.3 D-09 / D-10 / D-11 / D-14 — the KNOWN-SERVER pre-check.
+    # An unlisted broker server used to reach the terminal, hang for the whole 45.6 s
+    # chain and then be named as bad credentials (a spoof of the cause). It is now
+    # refused here, by the ONE shared check the worker adapter calls too (PARITY-01).
+    #
+    # PLACEMENT (RESEARCH Pitfall 7): after the kill switch and the
+    # validation-endpoint check, so an MT5-disabled or unconfigured service still
+    # answers its own cause, and BEFORE the client, the lease and `login_attempted`,
+    # so nothing touches a terminal for a server we have no terminal set up for.
+    #
+    # `recoverable=True`: a corrected spelling, or our adding the server, clears it,
+    # and nothing was sent to the broker. D-11: a LISTED server's login-stage -10005
+    # keeps answering SIGN_IN_FAILED below — this arm never sees it.
+    #
+    # An EMPTY effective list is OUR misconfiguration (D-14 fails closed): it answers
+    # the existing MT5_GATEWAY_UNCONFIGURED 500 body, never "your server is
+    # unknown". That gives the wire code its FIFTH router emitter (after the ~531,
+    # ~686, port-malformed and D-31 ~1159 sites); Phase 164.6.6.3.2 owns its wizard
+    # mapping.
+    try:
+        assert_mt5_server_known(server, site=SITE_VALIDATE_WIZARD)
+    except Mt5ServerUnknownError:
+        trace.outcome = "server_unknown"
+        raise VenueTransientHTTPException(
+            status_code=424,
+            code="MT5_SERVER_UNKNOWN",
+            detail=MT5_SERVER_UNKNOWN_DETAIL,
+            recoverable=True,
+        )
+    except Mt5KnownServersUnconfigured:
+        trace.outcome = "gateway_unconfigured"
+        raise service_error(
+            500,
+            "MT5_GATEWAY_UNCONFIGURED",
+            dependency="mt5-gateway",
+            retryable=False,
+            detail="The MetaTrader gateway is not configured. This needs an operator, not a retry.",
+        )
 
     # D-03 — the probe is ONE bounded unit. Connect and probe were previously timed
     # SEPARATELY at the same ceiling (and so was the close), so the honest worst case

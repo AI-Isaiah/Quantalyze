@@ -139,7 +139,9 @@ SCHEMA_VERSION: Final[int] = 1
 #: ⭐ The validation terminal's deal caches GO. 164.6.6 D-03 lets history go, and
 #: Finding C: the validation terminal never reads deal history (a validation
 #: probes the account and logs out), so nothing on it needs the caches. The jobs
-#: terminal keeps its own (`mt5_relogin._JOB_TERMINAL_DELETE_TRADES`).
+#: terminal deletes its own too since Phase 164.6.6.3 plan 03
+#: (`mt5_relogin._JOB_TERMINAL_DELETE_TRADES` is 1): a fresh login there waits
+#: for its history to settle (`services/mt5_read.py`, D-04).
 _VALIDATION_SCRUB_DELETE_TRADES: Final[int] = 1
 
 #: The connect slack over the crossings: `rpyc.classic.connect` has no timeout
@@ -324,11 +326,14 @@ def _alert_scrub_failed(cause: str, *, site: str) -> None:
         if last is not None and now - last < _SCRUB_ALERT_WINDOW_S:
             return
         _scrub_last_alert_at[cause] = now
-        sentry_sdk.set_tag("mt5_validation_scrub_failed", cause)
-        sentry_sdk.capture_message(
-            f"mt5 validation terminal scrub failed: cause={cause} site={site}",
-            level="error",
-        )
+        # Review WR-03: scope the tag to THIS capture. The worker has no per-request
+        # scope, so an unscoped `set_tag` would label every later event it sends.
+        with sentry_sdk.new_scope() as scope:
+            scope.set_tag("mt5_validation_scrub_failed", cause)
+            sentry_sdk.capture_message(
+                f"mt5 validation terminal scrub failed: cause={cause} site={site}",
+                level="error",
+            )
     except Exception:  # noqa: BLE001 — an alert must never replace the outcome
         pass
 

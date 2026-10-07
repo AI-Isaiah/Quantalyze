@@ -148,6 +148,72 @@ def _validation_scrub_never_reaches_a_real_terminal_or_project(monkeypatch):
     mt5_terminal_scrub._reset_terminal_scrub_state_for_tests()
 
 
+# Phase 164.6.6.3 / D-04 — the MT5 deal-history settle loop never sleeps for real.
+#
+# Every derive and backfill test starts FRESH now: `reset_terminal_state_for_tests`
+# (autouse, above) empties the holder registry, so `mt5_history_wait_due` says "wait"
+# and `read_mt5_deal_ledger` polls. A real `time.sleep` would add a poll interval to
+# each of those tests, and a real clock would busy-spin a never-settling case for the
+# whole 30 s budget (RESEARCH Pitfall 1). So the loop gets a per-test fake clock
+# whose sleep ADVANCES time instead of waiting (`tests/test_mt5_relogin.py::_FakeClock`'s
+# shape, copied rather than imported). This fixture runs first, so a test that wants
+# its own clock patches over it.
+class _Mt5ReadFakeClock:
+    def __init__(self) -> None:
+        self.now = 1_000.0
+        self.sleeps: list[float] = []
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+
+@pytest.fixture(autouse=True)
+def _mt5_read_never_sleeps_for_real(monkeypatch):
+    from services import mt5_read
+
+    clock = _Mt5ReadFakeClock()
+    monkeypatch.setattr(mt5_read, "_clock", clock.monotonic)
+    monkeypatch.setattr(mt5_read, "_sleep", clock.sleep)
+    return clock
+
+
+# Phase 164.6.6.3 plan 05 (D-09, D-14) - the MT5 known-server pre-check fails CLOSED,
+# so a legacy validate test that submits a made-up broker server would be refused as
+# `MT5_SERVER_UNKNOWN` (or, with an empty list, `MT5_GATEWAY_UNCONFIGURED`) before it
+# reached its own subject. The suite's synthetic servers are admitted here once. A new
+# synthetic server that is not added fails by NAMING `MT5_SERVER_UNKNOWN`, which is the
+# loud direction. Each item 9 test sets or deletes `MT5_KNOWN_SERVERS` itself, and its
+# own patch wins because this fixture runs first. The tuple was DERIVED, not counted: the
+# full `pytest tests/` ran with a list that admitted nothing the suite uses, a spy on
+# the refusal's sanitiser recorded every server either validate path refused, and those
+# are the entries here. Plan 05 measured the router path (`Broker-Demo`, `MyBroker-Live`);
+# plan 06 re-measured it with the worker adapter wired and the only addition was
+# `SomeBroker-Live 5` (`test_long_fetch.py`'s master-password case, which reaches
+# `Mt5Adapter.validate` for real). `Broker-Live`, which plan 05 expected to be refused on
+# the adapter path, never reaches the pre-check: the suites that name it replace the
+# adapter's `validate`. Servers that tests name but that never reach the pre-check, such
+# as the client-contract suite's, are deliberately absent.
+_SUITE_MT5_SERVERS = (
+    "Broker-Demo",
+    "MyBroker-Live",
+    "SomeBroker-Live 5",
+)
+
+
+@pytest.fixture(autouse=True)
+def _mt5_known_servers_admit_the_suites_synthetic_servers(monkeypatch):
+    from services import mt5_probe
+
+    monkeypatch.setenv("MT5_KNOWN_SERVERS", ",".join(_SUITE_MT5_SERVERS))
+    mt5_probe._reset_server_unknown_alerts_for_tests()
+    yield
+    mt5_probe._reset_server_unknown_alerts_for_tests()
+
+
 # Phase 134 (smoothed_mtm kill-switch): the v1.14 smoothed THIRD pass ships DARK
 # behind SMOOTHED_MTM_ENABLED (services.closed_sets.is_smoothed_mtm_enabled),
 # default OFF. The Phase 131-133 tests were written when the pass ran

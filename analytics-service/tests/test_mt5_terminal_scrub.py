@@ -857,6 +857,53 @@ async def test_TERMINAL_SCRUB_an_unknown_alert_cause_is_never_interpolated(
     assert hostile not in captures[0] and "free text" not in captures[0]
 
 
+async def test_TERMINAL_SCRUB_the_alert_tag_does_not_leak_onto_a_later_event() -> None:
+    """Review WR-03, scrub site: the tag belongs to the ONE capture it describes.
+    The worker has no per-request scope, so an unscoped `set_tag` stays on the
+    long-lived isolation scope and labels every later event the process sends.
+
+    REAL sentry_sdk, not the `captures` fixture (which replaces `set_tag` and
+    `capture_message` outright and so cannot tell a scoped tag from an unscoped
+    one). A client whose `before_send` records and drops each event stands in for
+    the transport."""
+    import sentry_sdk
+
+    events: list[dict] = []
+
+    def _record(event, _hint):
+        events.append(event)
+        return None  # never send anything
+
+    previous = sentry_sdk.get_global_scope().client
+    sentry_sdk.get_global_scope().set_client(
+        sentry_sdk.Client(dsn="http://k@localhost/1", before_send=_record)
+    )
+    try:
+        with sentry_sdk.isolation_scope():
+            mt5_terminal_scrub._alert_scrub_failed(
+                "unrecognised_cause", site=SITE_VALIDATE_WIZARD
+            )
+            sentry_sdk.capture_message("an unrelated later failure")
+    finally:
+        sentry_sdk.get_global_scope().set_client(previous)
+
+    # The sdk's logging integration also turns the ERROR log line into an event, so
+    # pick the two events by message instead of by position.
+    [alert] = [
+        e
+        for e in events
+        if e.get("message", "").startswith("mt5 validation terminal scrub failed")
+    ]
+    [later] = [e for e in events if e.get("message") == "an unrelated later failure"]
+    assert alert["tags"].get("mt5_validation_scrub_failed") == "unrecognised_cause", (
+        "the alert itself must still carry its tag"
+    )
+    assert "mt5_validation_scrub_failed" not in (later.get("tags") or {}), (
+        "the tag leaked onto an unrelated later event: it was set on the "
+        "long-lived scope instead of the capture's own (review WR-03)"
+    )
+
+
 # --------------------------------------------------------------------------- #
 # Task 3 — the closed row contract.
 # --------------------------------------------------------------------------- #

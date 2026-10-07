@@ -357,6 +357,12 @@ const KNOWN_ADD_KEY_CODES: ReadonlySet<WizardErrorCode> =
     // classifier that emits it. Admitted HERE IN THE SAME COMMIT the shared
     // classifier starts returning it.
     "KEY_MT5_TERMINAL_UNRESPONSIVE",
+    // 164.6.6.3 plan 06 (D-09, D-10) — same addition as `KNOWN_CREATE_WITH_KEY_CODES`
+    // (full reasoning there): the shared classifier now returns it for wire
+    // `MT5_SERVER_UNKNOWN`, so it is admitted HERE IN THE SAME COMMIT the second key
+    // surface starts to receive it. Omit this line and the multi-key step renders
+    // `UNKNOWN`, whose copy names no cause, for a server our terminals do not list.
+    "KEY_MT5_SERVER_UNKNOWN",
     "KEY_IP_ALLOWLIST",
     "KEY_NETWORK_TIMEOUT",
     "KEY_PROBE_FAILED",

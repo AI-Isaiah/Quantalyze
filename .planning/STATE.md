@@ -180,6 +180,7 @@ no VERIFICATION.md exists for this phase yet, and this repo's own rule is that p
 is decided by verification status, never by plan counts.**
 
 Phase: 164.6.6.1 (MT5SCRUB) — EXECUTING
+Phase: 164.6.2 (MT5RELOGIN) — COMPLETE 2026-10-06 (plan 06 settled question THREE as STALE; VERIFICATION passed, verified_at_sha ad37851d; ships with the chore/close-164.6.5-165 PR)
 Phase: 164.9.6 (SUBSETMAIN) and 164.5.2.1 (BRIDGERESIDUE) — COMPLETE 2026-10-03 (verification passed; PR #936 v0.120.0.0 and PR #937 v0.121.0.0 merged; migration 20261003120000 applied to TEST and PROD)
 Phase: 164.9.4 (CIOFFMUTEX) — COMPLETE 2026-10-03 (verification passed on the ship run 37072653692; PR #880 merged, v0.119.0.0)
 Phase: 160 / 164.3 / 168 — close-out 2026-10-03 (SECURITY.md for 160 and 164.3; verification frontmatter to convention; 164.3 plan 07 stays deferred)
@@ -1269,6 +1270,8 @@ Load-bearing sequencing (real dependencies, do not reorder):
 
 ### Roadmap Evolution
 
+- Phase 164.6.6.3.6 inserted after Phase 164.6.6.3: MT5SERVERLEARN: measure headless resolution of an unknown MT5 server, then learn servers on successful validation (founder 2026-10-06, AskUserQuestion 'Ship static, book the dynamic phase')
+- Phase 164.6.6.3.5 inserted after Phase 164.6.6.3: DOMAINONE: rho redirects to quantalyze.xyz; the 18 quantalyze.com mentions are checked and fixed (founder 2026-10-06, AskUserQuestion 'Book it')
 - Phase 164.6.6.3 UATFIXES **edited 2026-10-05 (/gsd-phase --edit, hand-written)**: items 9 (`MT5-UNKNOWN-BROKER-SERVER-HANG-01`, a key on a broker server the terminals do not know hangs 45.6 s and fails) and 10 (`MT5-SCRUB-OWED-COPY-01`, the owed-scrub 424 reads as a network timeout) added from Phase 164.6.6.1's 2026-10-05 live checks. Founder: book the follow-ups into 164.6.6.3.
 - Phase 169.1.1 HYDRATIONTICKS **inserted 2026-10-02 after Phase 169.1 (URGENT, hand-edited)**: factsheet chart ticks differ between server and browser (`Math.pow(10,n)` engine rounding), React #418 rebuilds the tree and replaces the Overview EquityChart; flakes `e2e/target-size.spec.ts` and turned main CI red. Founder (AskUserQuestion "New phase, first"): runs before 164.9.3.2.1.
 - Phase 166.3.1 NAVBREACH **inserted 2026-10-01 after Phase 166.3 (URGENT, hand-edited)**: the Deribit composite's `native_nav` inception reconciliation breach, which failed Phase 166.3's R5 recompute on PROD. Founder 2026-10-01: record R5 as a residual and route the breach to a named phase.
