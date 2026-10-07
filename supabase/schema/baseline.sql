@@ -11926,7 +11926,13 @@ CREATE TABLE IF NOT EXISTS "public"."for_quants_leads" (
     "wizard_context" "jsonb",
     "notify_attempted_at" timestamp with time zone,
     "notify_succeeded_at" timestamp with time zone,
-    "notify_error" "text"
+    "notify_error" "text",
+    "source" "text" DEFAULT 'request_call'::"text" NOT NULL,
+    "topic" "text",
+    "reference" "text",
+    CONSTRAINT "for_quants_leads_reference_len_check" CHECK ((("reference" IS NULL) OR ("char_length"("reference") <= 200))),
+    CONSTRAINT "for_quants_leads_source_check" CHECK (("source" = ANY (ARRAY['request_call'::"text", 'contact_form'::"text"]))),
+    CONSTRAINT "for_quants_leads_topic_check" CHECK ((("topic" IS NULL) OR ("topic" = ANY (ARRAY['general'::"text", 'support'::"text", 'security'::"text", 'privacy'::"text"]))))
 );
 
 
@@ -11958,6 +11964,18 @@ COMMENT ON COLUMN "public"."for_quants_leads"."notify_succeeded_at" IS 'Timestam
 
 
 COMMENT ON COLUMN "public"."for_quants_leads"."notify_error" IS 'Sanitized error message (max 500 chars) when notifyFounderGeneric threw OR ADMIN_EMAIL was unset. NULL on clean sends.';
+
+
+
+COMMENT ON COLUMN "public"."for_quants_leads"."source" IS 'Which form wrote the row: request_call (the /for-quants Request-a-call modal; deduplicated per email per UTC day) or contact_form (the /contact form; never deduplicated). DEFAULT request_call so a writer that omits it stays a request_call writer. Phase 164.6.6.3.5 DOMAINONE.';
+
+
+
+COMMENT ON COLUMN "public"."for_quants_leads"."topic" IS 'Contact-form topic (general, support, security, privacy). NULL for request_call rows. Mirrors CONTACT_TOPICS in src/lib/contact.ts; a parity test pins the two lists.';
+
+
+
+COMMENT ON COLUMN "public"."for_quants_leads"."reference" IS 'Contact-form pointer text: the strategy / draft / ref ids a page link carried, composed by parseContactPrefill in src/lib/contact.ts. NULL when none. At most 200 characters.';
 
 
 
@@ -13625,11 +13643,11 @@ CREATE INDEX "for_quants_leads_created_at_idx" ON "public"."for_quants_leads" US
 
 
 
-CREATE UNIQUE INDEX "for_quants_leads_email_day_uniq" ON "public"."for_quants_leads" USING "btree" ("lower"("email"), ((("created_at" AT TIME ZONE 'UTC'::"text"))::"date"));
+CREATE UNIQUE INDEX "for_quants_leads_email_day_uniq" ON "public"."for_quants_leads" USING "btree" ("lower"("email"), ((("created_at" AT TIME ZONE 'UTC'::"text"))::"date")) WHERE ("source" = 'request_call'::"text");
 
 
 
-COMMENT ON INDEX "public"."for_quants_leads_email_day_uniq" IS 'M-0324: dedups same-email same-UTC-day lead submissions, collapsing network-retry / double-submit duplicate rows and duplicate founder emails. Day key uses AT TIME ZONE UTC for immutability; lower(email) is defensive.';
+COMMENT ON INDEX "public"."for_quants_leads_email_day_uniq" IS 'M-0324, re-scoped by 164.6.6.3.5: dedups same-email same-UTC-day request_call submissions, collapsing network-retry / double-submit duplicate rows and duplicate founder emails. contact_form rows are outside the index on purpose: a contact message is never deduplicated. Day key uses AT TIME ZONE UTC for immutability; lower(email) is defensive.';
 
 
 
