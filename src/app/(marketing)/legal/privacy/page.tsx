@@ -1,3 +1,6 @@
+import Link from "next/link";
+import { contactHref } from "@/lib/contact";
+
 const PLATFORM_NAME = process.env.NEXT_PUBLIC_PLATFORM_NAME ?? "Quantalyze";
 
 export const metadata = {
@@ -74,9 +77,10 @@ export default function PrivacyPolicyPage() {
       <p>
         Under GDPR Article 17 you may request deletion of your personal data at
         any time. Use the <em>Request account deletion</em> button in your
-        profile, or email{" "}
-        <a href="mailto:privacy@quantalyze.com">privacy@quantalyze.com</a>. We
-        acknowledge requests within 72 hours and complete them within 30 days.
+        profile, or use the{" "}
+        <Link href={contactHref({ topic: "privacy" })}>contact form</Link> and
+        choose Privacy or data request. We acknowledge requests within 72
+        hours and complete them within 30 days.
       </p>
 
       <h2>International transfers</h2>
@@ -88,8 +92,8 @@ export default function PrivacyPolicyPage() {
 
       <h2>Contact</h2>
       <p>
-        Questions? Reach us at{" "}
-        <a href="mailto:privacy@quantalyze.com">privacy@quantalyze.com</a>.
+        Questions? Use the{" "}
+        <Link href={contactHref({ topic: "privacy" })}>contact form</Link>.
       </p>
     </>
   );
