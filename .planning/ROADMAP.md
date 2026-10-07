@@ -3080,6 +3080,23 @@ Founder request 2026-10-03 (chat, a factsheet screenshot of MM-2x, then "ok, aft
 Plans:
 - [ ] TBD (run /gsd-plan-phase 164.6.6.2 to break down)
 
+### Phase 164.6.6.2.1: BTCUSDVIEW — a native-unit MT5 account also gets a USD view (INSERTED)
+
+Booked 2026-10-07 by Phase 164.6.6.2 decision D-15 (founder 2026-10-06: "BTC only first, USD later").
+164.6.6.2 reports a BTC-denominated MT5 account in BTC and skips it, by name, on every USD-only
+surface (D-13, D-14).
+
+**Goal:** A native-unit MT5 account also gets a USD view. Its native NAV is converted at the daily
+BTC benchmark price, the allocator equity snapshots and dashboard include it instead of skipping it,
+and `api_keys.account_balance_usdt` is populated. Never invent data: a day without a benchmark
+price stays null.
+**Requirements**: TBD
+**Depends on:** Phase 164.6.6.2
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 164.6.6.2.1 to break down)
+
 ### Phase 164.6.6.1: MT5SCRUB — the MT5 terminals are wiped of saved accounts after use without ever leaving the jobs terminal logged out (INSERTED)
 
 **Goal:** The validation terminal is wiped of every validated account after each use, and the jobs
