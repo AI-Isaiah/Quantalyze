@@ -4708,6 +4708,8 @@ Plans:
 - [ ] 167.1.2.2-08-PLAN.md — the first 05:30 UTC run: D-06 reads judged on computed_at, SC-3 verdict
 - [ ] 167.1.2.2-09-PLAN.md — 167.1.2's remaining browser UAT against rebuilt books (SC-4), recorded as a dated addendum
 
+
+⭐ **Rehearsal 2026-10-07 UNCLEAN (2 failed_final): founder D-11/D-12 (CONTEXT).** The bybit key's IP allow-list gains the backfill egress (founder action), and the compose divergence is root-caused before the cron is registered. Plans 04-06 wait on both.
 ### Phase 167.1.2.1: RECONMARKER — a per-key "history reconstructed" marker so no key's equity history is lost or skipped (INSERTED)
 
 **Goal:** Each API key's equity-history reconstruct state is recorded durably, per key, so no key's history is skipped, wiped or left unreconstructed. Today that state is inferred from allocator-wide snapshot counts.
