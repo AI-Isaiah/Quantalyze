@@ -466,6 +466,11 @@ export interface AnalyticsDataQualityFlags {
    *  connector / malicious tenant emitting `is_maker: null` to suppress
    *  the trade_mix panel. Absent when zero. */
   fills_missing_is_maker_pct?: number;
+  /** Phase 164.6.6.2 (D-08): the unit of a native-unit series ("BTC"), written by
+   *  the worker only when the account is not USD-denominated. NOT a degradation
+   *  flag: it is a steady fact, so a consumer must never read its presence as
+   *  "degraded". Read through `parseReturnsUnit`, never trusted raw. */
+  native_unit?: string;
 }
 
 export interface VolumeMetrics {
