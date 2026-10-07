@@ -3107,6 +3107,7 @@ Plans:
 **Origin:** 164.6.6.2 code review CR-01 (pre-existing, not introduced by that phase). Founder 2026-10-07: own phase, ship BTCNATIVE first.
 **Requirements**: TBD
 **Depends on:** Phase 164.6.6.2
+**Founder decision 2026-10-07 (review round 2):** candidate comparisons (optimizer, bridge, simulator) use the existing book's risk clock for every candidate and both sides of a delta; the headline keeps "365 if any leg is crypto". Detail: `164.6.6.2.2-CONTEXT.md` D-08.
 **Plans:** 7 plans
 
 Plans:
