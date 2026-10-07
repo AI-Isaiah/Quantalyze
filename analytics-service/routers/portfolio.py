@@ -429,45 +429,6 @@ def _verify_strategy_idempotency_store(
         _verify_strategy_idempotency.pop(oldest, None)
 
 
-def _records_to_series(raw: list[Any] | None, name: str = "") -> pd.Series | None:
-    """Convert [{date, value}, ...] records to a DatetimeIndex pd.Series.
-
-    Tolerates malformed records by skipping any entry missing ``date`` or
-    ``value`` and emitting a single warning. A single typo (legacy
-    ``{ts, val}`` row) used to raise KeyError that propagated up to the
-    outer catch and overwrote the real exception with the generic
-    "Analytics computation failed" message — masking schema drift.
-    """
-    if not isinstance(raw, list) or not raw:
-        return None
-
-    dates: list[Any] = []
-    vals: list[Any] = []
-    skipped = 0
-    for r in raw:
-        if not isinstance(r, dict):
-            skipped += 1
-            continue
-        d = r.get("date")
-        v = r.get("value")
-        if d is None or v is None:
-            skipped += 1
-            continue
-        dates.append(d)
-        vals.append(v)
-
-    if skipped:
-        logger.warning(
-            "_records_to_series: skipped %d malformed records for %s",
-            skipped, name or "<unnamed>",
-        )
-
-    if not dates:
-        return None
-
-    return pd.Series(vals, index=pd.DatetimeIndex(dates), name=name)
-
-
 def _build_monthly_returns(
     portfolio_returns_series: "pd.Series",
 ) -> dict[str, dict[str, float]]:
@@ -480,9 +441,10 @@ def _build_monthly_returns(
     a cumulative product masquerading as a period return.
 
     audit-2026-05-07 red-team (MED conf 8) — input series may contain
-    DUPLICATE dates. `_records_to_series` does not dedupe; an upstream
-    `returns_series` JSONB with a repeated `date` key (or a future
-    reindex against a non-unique DatetimeIndex) would feed two
+    DUPLICATE dates. The shared boundary parser (`services.wealth_returns`)
+    now sorts and dedupes the stored series, but a series built another way
+    (a reindex against a non-unique DatetimeIndex, a repeated `date` key
+    that reached the caller undeduped) would feed two
     entries for the same calendar day into the cumprod, double-counting
     that day's return in the bucket. We dedupe last-write-wins on the
     raw `(date, value)` stream BEFORE the cumprod so the bucket math
@@ -1831,7 +1793,7 @@ async def portfolio_optimizer(request: Request, req: PortfolioOptimizerRequest) 
     # D-23: `data_quality_flags` rides the same row as `returns_series`, so the
     # native unit is read beside the series it describes.
     sa_in_result = supabase.table("strategy_analytics").select(
-        "strategy_id, returns_series, data_quality_flags"
+        "strategy_id, returns_series, daily_returns, data_quality_flags"
     ).in_("strategy_id", strategy_ids).execute()
 
     portfolio_returns: dict[str, pd.Series] = {}
@@ -1839,7 +1801,7 @@ async def portfolio_optimizer(request: Request, req: PortfolioOptimizerRequest) 
     optimizer_fetched_sids: set[str] = set()
     for row in rows(sa_in_result):
         optimizer_fetched_sids.add(row["strategy_id"])
-        s = _records_to_series(row.get("returns_series"), name=row["strategy_id"])
+        s = daily_returns_from_row(row, name=row["strategy_id"])
         if s is not None:
             portfolio_returns[row["strategy_id"]] = s
         else:
@@ -1914,11 +1876,11 @@ async def portfolio_optimizer(request: Request, req: PortfolioOptimizerRequest) 
     candidate_missing_returns_count = 0
     if candidate_ids:
         sa_cand_result = supabase.table("strategy_analytics").select(
-            "strategy_id, returns_series, data_quality_flags"
+            "strategy_id, returns_series, daily_returns, data_quality_flags"
         ).in_("strategy_id", candidate_ids).execute()
 
         for row in rows(sa_cand_result):
-            s = _records_to_series(row.get("returns_series"), name=row["strategy_id"])
+            s = daily_returns_from_row(row, name=row["strategy_id"])
             if s is not None:
                 candidate_returns[row["strategy_id"]] = s
             else:
@@ -2128,13 +2090,13 @@ async def portfolio_bridge(request: Request, req: BridgeRequest) -> dict[str, An
     # Fetch portfolio strategy returns. D-23: `data_quality_flags` rides the same
     # row as `returns_series`, so the native unit is read beside its series.
     sa_in_result = supabase.table("strategy_analytics").select(
-        "strategy_id, returns_series, data_quality_flags"
+        "strategy_id, returns_series, daily_returns, data_quality_flags"
     ).in_("strategy_id", strategy_ids).execute()
 
     portfolio_returns: dict[str, pd.Series] = {}
     bridge_missing_returns_sids: list[str] = []
     for row in rows(sa_in_result):
-        s = _records_to_series(row.get("returns_series"), name=row["strategy_id"])
+        s = daily_returns_from_row(row, name=row["strategy_id"])
         if s is not None:
             portfolio_returns[row["strategy_id"]] = s
         else:
@@ -2237,11 +2199,11 @@ async def portfolio_bridge(request: Request, req: BridgeRequest) -> dict[str, An
     candidate_returns: dict[str, pd.Series] = {}
     if candidate_ids:
         sa_cand_result = supabase.table("strategy_analytics").select(
-            "strategy_id, returns_series, data_quality_flags"
+            "strategy_id, returns_series, daily_returns, data_quality_flags"
         ).in_("strategy_id", candidate_ids).execute()
 
         for row in rows(sa_cand_result):
-            s = _records_to_series(row.get("returns_series"), name=row["strategy_id"])
+            s = daily_returns_from_row(row, name=row["strategy_id"])
             if s is not None:
                 candidate_returns[row["strategy_id"]] = s
 
@@ -2592,8 +2554,12 @@ async def verify_strategy(request: Request, req: VerifyStrategyRequest) -> dict[
             hit_candidate_cap = len(published_ids) >= _MATCH_CANDIDATE_LIMIT
 
             if published_ids:
+                # Phase 164.6.6.2.2 (D-06): `daily_returns` and
+                # `data_quality_flags` ride the same row so the shared boundary
+                # can read each published strategy as DAILY RETURNS (the stored
+                # `returns_series` is a cumulative curve, not returns).
                 sa_result = supabase.table("strategy_analytics").select(
-                    "strategy_id, returns_series"
+                    "strategy_id, returns_series, daily_returns, data_quality_flags"
                 ).in_("strategy_id", published_ids).execute()
 
                 # Vectorized matching: build a DataFrame of all existing series and
@@ -2609,10 +2575,21 @@ async def verify_strategy(request: Request, req: VerifyStrategyRequest) -> dict[
                 # slice is the relevant window for correlation matching
                 # anyway — older history dilutes the recent-regime
                 # signal verify_strategy is actually looking for.
+                #
+                # Phase 164.6.6.2.2 (D-06): the trim PRECEDES the conversion and
+                # covers BOTH list columns the boundary can read. A curve cut to
+                # its trailing N levels then loses only its own first point at
+                # the boundary (N - 1 returns); converting first would build the
+                # full series in memory, which is what the cap exists to stop.
+                # A dict-shaped `daily_returns` is passed through as stored.
                 existing: dict[str, pd.Series] = {}
                 for row in rows(sa_result):
-                    raw_series = _trim_returns_series(row.get("returns_series"))
-                    s = _records_to_series(raw_series, name=row["strategy_id"])
+                    trimmed_row = {
+                        **row,
+                        "returns_series": _trim_returns_series(row.get("returns_series")),
+                        "daily_returns": _trim_returns_series(row.get("daily_returns")),
+                    }
+                    s = daily_returns_from_row(trimmed_row, name=row["strategy_id"])
                     if s is not None:
                         existing[row["strategy_id"]] = s
 
