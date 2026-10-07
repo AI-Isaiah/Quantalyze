@@ -2932,10 +2932,12 @@ analytics status, while a genuine analytics failure is still never masked.
 **Depends on:** Phase 164.6.6.3
 **Gates:** a migration, so migration-reviewer and rls-policy-auditor must be clean before merge. PROD auto-applies
 after `apply-test` with no human stop.
-**Plans:** 0 plans
+**Plans:** 3 plans
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 164.6.6.3.4 to break down)
+- [ ] 164.6.6.3.4-01-PLAN.md — the re-based bridge migration (side-kind NOT IN list, process_key_long chain supersession), rollback, pg-lane fixture, 13-arm gate with twins, sql-tests roster
+- [ ] 164.6.6.3.4-02-PLAN.md — snapshot and earned VAC-04 ack, kind-classification drift test, local-stack bridge family, mutation census, release commit
+- [ ] 164.6.6.3.4-03-PLAN.md — post-deploy PROD re-sync of the `failed` rows that have jobs (D-08 as amended), before/after recorded, founder checkpoint
 
 ### Phase 164.6.6.3.3: FACTSHEETTRUTH — a factsheet, its share card and its scenario never show a number the data cannot support (164.6.6.3 split C: items 2, 3, 4, 5, 6b) (INSERTED)
 
