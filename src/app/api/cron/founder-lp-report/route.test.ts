@@ -589,6 +589,51 @@ describe("GET /api/cron/founder-lp-report", () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
+  it("D-06: production VERCEL_ENV with NEXT_PUBLIC_APP_URL on quantalyze.xyz is NOT a ConfigError (PROD's own origin)", async () => {
+    // PROD's NEXT_PUBLIC_APP_URL is https://quantalyze.xyz. Before this
+    // allow-list carried it, the cron reported APP_URL_ALLOWED=false on every
+    // tick and never produced the founder LP report.
+    process.env.VERCEL_ENV = "production";
+    process.env.NEXT_PUBLIC_APP_URL = "https://quantalyze.xyz";
+    vi.resetModules();
+    mockSupabasePublishedHappy();
+    const { GET } = await import("./route");
+    const fetchSpy = globalThis.fetch as ReturnType<typeof vi.fn>;
+    fetchSpy.mockResolvedValueOnce(pdfResponseOk());
+
+    const res = await GET(buildAuthorizedRequest());
+    const json = (await res.json()) as Record<string, unknown>;
+
+    expect(res.status).toBe(200);
+    expect(json.error_class).toBeUndefined();
+    expect(String(json.error_message ?? "")).not.toContain("APP_URL_ALLOWED=false");
+    // The internal token is forwarded to the allow-listed host.
+    const [calledUrl, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
+    expect(String(calledUrl).startsWith("https://quantalyze.xyz/")).toBe(true);
+    expect((init.headers as Record<string, string>)["x-internal-token"]).toBe(
+      "test-internal-token",
+    );
+  });
+
+  it("D-06: production VERCEL_ENV with NEXT_PUBLIC_APP_URL on the retired third-party .com host IS a ConfigError (APP_URL_ALLOWED=false)", async () => {
+    // Host built from parts so no retired-domain literal appears in source.
+    process.env.VERCEL_ENV = "production";
+    process.env.NEXT_PUBLIC_APP_URL = `https://${["quantalyze", "com"].join(".")}`;
+    vi.resetModules();
+    mockSupabasePublishedHappy();
+    const { GET } = await import("./route");
+    const fetchSpy = globalThis.fetch as ReturnType<typeof vi.fn>;
+
+    const res = await GET(buildAuthorizedRequest());
+    const json = (await res.json()) as Record<string, unknown>;
+
+    expect(res.status).toBe(500);
+    expect(json.error_class).toBe("ConfigError");
+    expect(String(json.error_message)).toContain("APP_URL_ALLOWED=false");
+    // Never forward the internal token to a host outside the allow-list.
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
   it("WR-02 cleanup: unhandledRejection listener count returns to baseline after handle() (no leak across invocations)", async () => {
     const { GET } = await import("./route");
     const fetchSpy = globalThis.fetch as ReturnType<typeof vi.fn>;

@@ -571,6 +571,43 @@ describe("GET /api/factsheet/[id]/pdf — production host allow-list + cache saf
     );
   });
 
+  it("HIGH#1: production VERCEL_ENV accepts quantalyze.xyz, the canonical host (allowlist positive control, D-06)", async () => {
+    // PROD's NEXT_PUBLIC_APP_URL is https://quantalyze.xyz and the rho alias
+    // now 308s to it, so this is the host every production PDF request
+    // arrives on. Refusing it would 500 every PDF in production.
+    process.env.VERCEL_ENV = "production";
+    const { GET } = await import("./route");
+    const req = new NextRequest(
+      "https://quantalyze.xyz/api/factsheet/00000000-0000-0000-0000-000000000001/pdf",
+      { method: "GET" },
+    );
+    const res = await GET(req, mkParams());
+    expect(res.status).toBe(200);
+    expect(goto).toHaveBeenCalledTimes(1);
+    expect(goto.mock.calls[0][0]).toBe(
+      "https://quantalyze.xyz/factsheet/00000000-0000-0000-0000-000000000001",
+    );
+  });
+
+  it("HIGH#1: production VERCEL_ENV REFUSES the retired third-party .com hosts (negative control, D-06)", async () => {
+    // The old .com domain belongs to an unrelated third party. Host built
+    // from parts so no retired-domain literal appears in the source.
+    process.env.VERCEL_ENV = "production";
+    const { GET } = await import("./route");
+    for (const host of [
+      ["quantalyze", "com"].join("."),
+      ["www", "quantalyze", "com"].join("."),
+    ]) {
+      const req = new NextRequest(
+        `https://${host}/api/factsheet/00000000-0000-0000-0000-000000000001/pdf`,
+        { method: "GET" },
+      );
+      const res = await GET(req, mkParams());
+      expect(res.status).toBe(500);
+    }
+    expect(goto).not.toHaveBeenCalled();
+  });
+
   it("HIGH#1: production VERCEL_ENV accepts the current deployment's VERCEL_URL (preview-branch allowance)", async () => {
     // Preview deployments get ephemeral hosts like
     // `quantalyze-abc123-team.vercel.app`. The allowlist would otherwise
@@ -614,7 +651,7 @@ describe("GET /api/factsheet/[id]/pdf — production host allow-list + cache saf
     process.env.VERCEL_ENV = "production";
     const { GET } = await import("./route");
     const req = new NextRequest(
-      "https://quantalyze.com/api/factsheet/00000000-0000-0000-0000-000000000001/pdf",
+      "https://quantalyze.xyz/api/factsheet/00000000-0000-0000-0000-000000000001/pdf",
       { method: "GET" },
     );
     const res = await GET(req, mkParams());
@@ -628,7 +665,7 @@ describe("GET /api/factsheet/[id]/pdf — production host allow-list + cache saf
     process.env.VERCEL_ENV = "production";
     const { GET } = await import("./route");
     const req = new NextRequest(
-      "https://quantalyze.com/api/factsheet/00000000-0000-0000-0000-000000000001/pdf",
+      "https://quantalyze.xyz/api/factsheet/00000000-0000-0000-0000-000000000001/pdf",
       { method: "GET" },
     );
     const res = await GET(req, mkParams());
@@ -644,7 +681,7 @@ describe("GET /api/factsheet/[id]/pdf — production host allow-list + cache saf
     process.env.VERCEL_ENV = "production";
     const { GET } = await import("./route");
     const req = new NextRequest(
-      "https://quantalyze.com/api/factsheet/00000000-0000-0000-0000-000000000001/pdf",
+      "https://quantalyze.xyz/api/factsheet/00000000-0000-0000-0000-000000000001/pdf",
       {
         method: "GET",
         headers: {
@@ -675,7 +712,7 @@ describe("GET /api/factsheet/[id]/pdf — production host allow-list + cache saf
     singlePublishedComplete({ computed_at: "2026-05-17T12:00:00.000Z" });
     const { GET } = await import("./route");
     const req = new NextRequest(
-      "https://quantalyze.com/api/factsheet/00000000-0000-0000-0000-000000000001/pdf",
+      "https://quantalyze.xyz/api/factsheet/00000000-0000-0000-0000-000000000001/pdf",
       {
         method: "GET",
         headers: {
@@ -756,7 +793,7 @@ describe("GET /api/factsheet/[id]/pdf — self-recursion fence (audit-2026-05-07
     // the source constant so a future rename surfaces here loudly.
     const { GET, PDF_RENDERER_USER_AGENT } = await import("./route");
     const req = new NextRequest(
-      `https://quantalyze.com/api/factsheet/${STRATEGY_ID}/pdf`,
+      `https://quantalyze.xyz/api/factsheet/${STRATEGY_ID}/pdf`,
       {
         method: "GET",
         headers: { "user-agent": PDF_RENDERER_USER_AGENT },
@@ -786,7 +823,7 @@ describe("GET /api/factsheet/[id]/pdf — self-recursion fence (audit-2026-05-07
     // an in-page recursive PDF fetch. Assert the call order explicitly.
     const { GET, PDF_RENDERER_USER_AGENT } = await import("./route");
     const req = new NextRequest(
-      `https://quantalyze.com/api/factsheet/${STRATEGY_ID}/pdf`,
+      `https://quantalyze.xyz/api/factsheet/${STRATEGY_ID}/pdf`,
       { method: "GET" },
     );
     const res = await GET(req, mkParams());
