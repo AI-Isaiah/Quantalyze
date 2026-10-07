@@ -55,6 +55,7 @@ from typing import Any, Literal
 
 import pandas as pd
 
+from services.account_unit import USD_FLOORS, UnitFloors
 from services.allocated_capital import (
     ReturnsDenominatorConfig,
     allocated_capital_returns_and_metrics,
@@ -602,7 +603,11 @@ def _fold_mt5_deals(
         ).as_unit("us"),
         name="daily_pnl",
     )
-    # Dated external flows (deposit +, withdrawal −); USD-family so quantity == usd.
+    # Dated external flows (deposit +, withdrawal −), in the ACCOUNT'S OWN unit: USD for a
+    # USD-family account (so quantity == usd there), BTC for a BTC one. ``usd_signed`` is the
+    # engine's field name, not a claim that the number is dollars: for a native unit it is
+    # consumed only inside the unit-consistent NAV/TWR fold, and 164.6.6.2 / D-14 keeps it
+    # out of every USD surface.
     flows = [
         ExternalFlow(utc_day_iso=day, usd_signed=amount)
         for day, amount in sorted(flow_by_day.items())
@@ -616,6 +621,7 @@ def combine_mt5_deal_ledger(
     account_balance: float,
     *,
     server_utc_offset_s: int = 0,
+    floors: UnitFloors = USD_FLOORS,
 ) -> tuple[pd.Series, dict[str, Any]]:
     """The MT5 sibling of ``combine_native_ledger`` (:174) and
     ``combine_sfox_balance_history`` (:230) — the THIRD broker-dailies combiner.
@@ -625,7 +631,9 @@ def combine_mt5_deal_ledger(
     so EVERYTHING downstream — ``derive_basis_series``, ``compute_all_metrics``,
     persistence, the factsheet — is untouched.
 
-    MT5 is single-currency (broker deposit ccy, USD-family) with a LIVE
+    The account is single-currency in its deposit unit; the caller passes that unit's
+    ``floors`` (``services.account_unit``, D-01..D-07), so a BTC account's NAV is judged
+    against BTC thresholds and never against the USD $1000 dust floor. It has a LIVE
     ``account_info().equity`` anchor — there is NO per-currency coin-margined
     reconstruction (deribit's ``native_nav`` machinery). It is structurally
     CLOSEST to sFOX, but unlike sFOX's SAMPLED NAV it is a ledger-COMPLETE venue,
@@ -723,6 +731,7 @@ def combine_mt5_deal_ledger(
         account_equity,
         external_flows=flows,
         open_unrealized_usd=account_equity - account_balance,
+        floors=floors,
     )
     returns = gap_fill_daily_returns(returns)
     out_meta = dict(meta)
@@ -743,6 +752,7 @@ def reconstruct_mt5_nav_levels(
     account_balance: float,
     *,
     server_utc_offset_s: int = 0,
+    floors: UnitFloors = USD_FLOORS,
 ) -> tuple[pd.Series, dict[str, Any]]:
     """The NAV-**LEVELS** sibling of ``combine_mt5_deal_ledger`` — same ledger, same
     fold, same arithmetic core, but it returns DOLLAR BALANCES instead of daily
@@ -801,6 +811,10 @@ def reconstruct_mt5_nav_levels(
     makes, so the DQ-01 guard flags, the uPnL-wedge flag and the MT5-12
     ``series_completeness`` verdict are identical facts about ONE reconstruction rather
     than two independently-derived opinions that could drift apart.
+
+    ``floors`` is the account unit's threshold row (``services.account_unit``) and is
+    forwarded to that meta call ONLY: the ``reconstruct_nav`` roll above it is
+    unit-neutral arithmetic, so the levels themselves never depend on it.
     """
     daily_pnl_series, flows = _fold_mt5_deals(deals, server_utc_offset_s)
 
@@ -837,6 +851,7 @@ def reconstruct_mt5_nav_levels(
         account_equity,
         external_flows=flows,
         open_unrealized_usd=account_equity - account_balance,
+        floors=floors,
     )
     out_meta = dict(meta)
     # MT5-12 verdict: ``ledger_complete``, for the identical reason the returns combiner

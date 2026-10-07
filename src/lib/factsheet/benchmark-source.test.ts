@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 import {
@@ -6,7 +6,9 @@ import {
   mergeWithFixture,
   pricesToDailyReturns,
   readBenchmarkPrices,
+  readBtcCloses,
 } from "./benchmark-source";
+import { BTC_DAILY } from "./benchmarks";
 
 /**
  * Phase 169.2 / plan 01 (SC3, D-08, D-09) — the one paged reader of
@@ -465,5 +467,121 @@ describe("pricesToDailyReturns", () => {
       [],
     );
     expect(out).toEqual([]);
+  });
+});
+
+/**
+ * Phase 164.6.6.2 (D-18, D-22, D-23): the server-side BTC conversion reads ONE
+ * price window, every usable close stored in `benchmark_prices`, and nothing
+ * else. The Python twin (`get_btc_closes`) reads the same window, because the
+ * analytics image cannot ship the bundled fixture. A reader that merged
+ * `BTC_DAILY` in would price early days in TypeScript that Python leaves
+ * absent, and the two runtimes would blend different numbers.
+ */
+describe("readBtcCloses", () => {
+  it("returns the stored closes exactly as read, with NO bundled BTC_DAILY rows merged in", async () => {
+    // A table that starts well after the bundled fixture's first date.
+    const table: Row[] = Array.from({ length: 5 }, (_, i) => ({
+      date: isoDay(2000 + i),
+      symbol: "BTC",
+      close_price: 30_000 + i,
+    }));
+    const { client } = makeClient(table);
+
+    const res = await readBtcCloses(client);
+
+    expect(BTC_DAILY.length).toBeGreaterThan(0);
+    expect(BTC_DAILY[0].date < table[0].date).toBe(true);
+    expect(res).not.toBeNull();
+    expect(res!.prices.map((p) => p.date)).toEqual(table.map((r) => r.date));
+    expect(res!.prices[0].date).toBe(table[0].date);
+    expect(res!.dropped).toEqual([]);
+    expect(res!.through).toBe(table[4].date);
+  });
+
+  it("carries the dropped dates of a corrupt close through", async () => {
+    const table: Row[] = [
+      { date: "2026-02-02", symbol: "BTC", close_price: 100 },
+      { date: "2026-02-03", symbol: "BTC", close_price: 0 },
+      { date: "2026-02-04", symbol: "BTC", close_price: "121" },
+    ];
+    const { client } = makeClient(table);
+
+    const res = await readBtcCloses(client);
+
+    expect(res!.prices).toEqual([
+      { date: "2026-02-02", close: 100 },
+      { date: "2026-02-04", close: 121 },
+    ]);
+    expect(res!.dropped).toEqual(["2026-02-03"]);
+  });
+
+  it("a read error is null and one console.error, never the bundled fixture", async () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const { client } = makeClient(btcRows(10), { errorOnPage: 1 });
+      const res = await readBtcCloses(client);
+      expect(res).toBeNull();
+      expect(spy).toHaveBeenCalledTimes(1);
+      expect(String(spy.mock.calls[0][0])).toContain("[benchmark-source] BTC closes read failed");
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("zero stored closes is null, not an empty series and not the fixture", async () => {
+    const { client } = makeClient([]);
+    expect(await readBtcCloses(client)).toBeNull();
+  });
+
+  // SFH-1 (164.6.6.2 review): null with NO read error used to be silent, so a
+  // native leg that dropped out of a blend left nothing in the logs to say why.
+  // A read error already logs (above); the other two nulls must too.
+  describe("a null without a read error says so, with the dropped count", () => {
+    const TAG = "[benchmark-source] BTC closes unusable";
+
+    it("an empty table logs once, with dropped=0", async () => {
+      const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        const { client } = makeClient([]);
+        expect(await readBtcCloses(client)).toBeNull();
+        expect(spy).toHaveBeenCalledTimes(1);
+        const line = String(spy.mock.calls[0].join(" "));
+        expect(line).toContain(TAG);
+        expect(line).toContain("dropped=0");
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it("every close dropped logs once, carrying the dropped count", async () => {
+      const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        const table: Row[] = [
+          { date: "2026-02-02", symbol: "BTC", close_price: 0 },
+          { date: "2026-02-03", symbol: "BTC", close_price: -5 },
+          { date: "2026-02-04", symbol: "BTC", close_price: "not a number" },
+        ];
+        const { client } = makeClient(table);
+        expect(await readBtcCloses(client)).toBeNull();
+        expect(spy).toHaveBeenCalledTimes(1);
+        const line = String(spy.mock.calls[0].join(" "));
+        expect(line).toContain(TAG);
+        expect(line).toContain("dropped=3");
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it("a usable read logs nothing", async () => {
+      const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        const { client } = makeClient(btcRows(5));
+        expect(await readBtcCloses(client)).not.toBeNull();
+        expect(spy).not.toHaveBeenCalled();
+      } finally {
+        spy.mockRestore();
+      }
+    });
   });
 });

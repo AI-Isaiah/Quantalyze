@@ -28,6 +28,7 @@ import pandas as pd
 import pytest
 
 from services import nav_twr as nav_twr_mod
+from services.account_unit import USD_FLOORS, classify_account_currency
 from services.nav_twr import (
     BINANCE_DEPOSIT_TERMINUS_DAYS,
     BYBIT_DEPOSIT_TERMINUS_DAYS,
@@ -542,6 +543,14 @@ def test_pnl_dominated_guard_rides_registry() -> None:
     Removing the registry append flips this RED."""
     assert "pnl_dominated_guard" in NAV_TWR_GUARD_KEYS
     assert set(NAV_TWR_GUARD_KEYS) <= set(nav_twr_mod.NavTWRMeta.__annotations__)
+
+
+def test_native_unit_is_not_a_guard_key() -> None:
+    """D-08: the account's unit is a property, not a warning. A ``native_unit`` key in the
+    guard registry would promote every BTC account to ``complete_with_warnings``; in the
+    meta it would be one more field every consumer must know to ignore."""
+    assert "native_unit" not in NAV_TWR_GUARD_KEYS
+    assert "native_unit" not in nav_twr_mod.NavTWRMeta.__annotations__
 
 
 def test_nonfinite_inputs_fail_loud() -> None:
@@ -1524,3 +1533,101 @@ def test_multi_flow_with_one_dominated_day_does_not_poison_neighbors() -> None:
     assert flags == {"twr_chain_broken": True}
     assert value == pytest.approx(expected_suffix)
     assert expected_suffix != pytest.approx(bridged)  # honest suffix != bridge
+
+
+# ---------------------------------------------------------------------------
+# Phase 164.6.6.2 BTCNATIVE plan 01 — the unit-sized thresholds read the unit's floors
+# ---------------------------------------------------------------------------
+
+_BTC_FLOORS = classify_account_currency("BTC").floors
+
+
+def test_reconcile_residual_tolerance_is_per_unit() -> None:
+    """T-164.6.6.2-03. The DQ-02 absolute band was a hidden USD $1.00. A roll that drops a
+    0.001 BTC flow leaves a residual of exactly 0.001 BTC:
+      terminal 0.02, pnl [0.001, -0.0005, 0.0002] (sum 0.0007), flow +0.001 on day 2.
+      true start        = 0.02 - 0.0007 - 0.001 = 0.0183
+      mutant (flow dropped from the roll) start = 0.0183 + 0.001 = 0.0193
+      residual = 0.02 - 0.0193 - 0.0007 - 0.001 = -0.001
+    The BTC band is max(1e-6, 1e-6 * 0.02) = 1e-6, so 0.001 raises. The default (USD)
+    band is 1.00, so the very same input would be waved through: the defect."""
+    daily_pnl = _pnl([0.001, -0.0005, 0.0002])
+    flows = _flows_to_daily_usd([("2026-01-02", 0.001)])
+    terminal = 0.02
+    true_start = _reconstructed_start(daily_pnl, terminal, flows)
+    assert true_start == pytest.approx(0.0183, abs=1e-12)
+    mutant_start = true_start + 0.001  # the roll dropped the flow
+
+    with pytest.raises(NavReconstructionError):
+        reconcile_flow_residual(
+            terminal, mutant_start, daily_pnl, flows,
+            abs_tol=_BTC_FLOORS.residual_abs_tol,
+        )
+    # The default band is the USD row: today's behaviour, pinned.
+    assert reconcile_flow_residual(
+        terminal, mutant_start, daily_pnl, flows
+    ) == pytest.approx(-0.001, abs=1e-12)
+    # A clean BTC roll is still accepted under the tight BTC band.
+    assert reconcile_flow_residual(
+        terminal, true_start, daily_pnl, flows, abs_tol=_BTC_FLOORS.residual_abs_tol
+    ) == pytest.approx(0.0, abs=1e-12)
+
+
+def test_reconcile_wired_with_unit_tolerance(monkeypatch) -> None:
+    """The tolerance is threaded THROUGH ``reconstruct_nav_and_twr``, not merely available:
+    a roll that corrupts early NAV by 0.001 BTC is refused when the BTC floors are passed
+    and accepted (under the USD $1.00 band) when they are not."""
+    real_reconstruct = nav_twr_mod.reconstruct_nav
+
+    def _corrupt_roll(daily_pnl, terminal_nav, flows_by_day):
+        nav = real_reconstruct(daily_pnl, terminal_nav, flows_by_day)
+        vals = nav.to_numpy(dtype=float).copy()
+        vals[:-1] += 0.001
+        return pd.Series(vals, index=nav.index, name="nav")
+
+    monkeypatch.setattr(nav_twr_mod, "reconstruct_nav", _corrupt_roll)
+    pnl = _pnl([0.001, -0.0005, 0.0002])
+    with pytest.raises(NavReconstructionError):
+        reconstruct_nav_and_twr(pnl, anchor_nav=0.02, floors=_BTC_FLOORS)
+    # Unit-blind default: the 0.001 residual sits inside the USD $1.00 band, no raise.
+    reconstruct_nav_and_twr(pnl, anchor_nav=0.02)
+
+
+def test_upnl_materiality_reads_unit_dust_floor() -> None:
+    """The uPnL wedge ratio is only evaluated on a non-dust anchor, and 'non-dust' is
+    per unit. Anchor 0.02 BTC, open uPnL 0.004: |0.004| / 0.02 = 0.20 > the 0.05 ratio.
+    Under BTC floors the anchor (0.02 > 0.001) is material, so the flag fires; under the
+    USD default 0.02 is below $1000, the ratio is not evaluated, no flag."""
+    pnl = _pnl([0.001])
+    _, btc_meta = reconstruct_nav_and_twr(
+        pnl, anchor_nav=0.02, open_unrealized_usd=0.004, floors=_BTC_FLOORS
+    )
+    assert btc_meta.get("unrealized_pnl_in_anchor") is True
+    _, usd_meta = reconstruct_nav_and_twr(
+        pnl, anchor_nav=0.02, open_unrealized_usd=0.004
+    )
+    assert "unrealized_pnl_in_anchor" not in usd_meta
+
+
+def test_floors_keyword_default_is_byte_identical() -> None:
+    """Every venue that does not pass ``floors`` (Deribit, sFOX, ccxt, CSV, native) must
+    equal the explicit USD row: the default-preserving keyword is the whole safety case."""
+    pnl = _pnl([120.0, -80.0, 40.0, 15.0, -30.0])
+    flows = [("2026-01-02", 500.0), ("2026-01-04", -200.0)]
+    default_r, default_m = reconstruct_nav_and_twr(
+        pnl, anchor_nav=10_000.0, external_flows=flows, open_unrealized_usd=300.0
+    )
+    explicit_r, explicit_m = reconstruct_nav_and_twr(
+        pnl, anchor_nav=10_000.0, external_flows=flows, open_unrealized_usd=300.0,
+        floors=USD_FLOORS,
+    )
+    pd.testing.assert_series_equal(default_r, explicit_r)
+    assert default_m == explicit_m
+
+    nav = reconstruct_nav(pnl, 10_000.0, _flows_to_daily_usd(flows))
+    d_r, d_f = chain_linked_twr(nav, pnl, _flows_to_daily_usd(flows))
+    e_r, e_f = chain_linked_twr(
+        nav, pnl, _flows_to_daily_usd(flows), floors=USD_FLOORS
+    )
+    pd.testing.assert_series_equal(d_r, e_r)
+    assert d_f == e_f

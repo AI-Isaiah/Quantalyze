@@ -44,8 +44,8 @@ bounds it.
 
 Leaf-module invariant (mirrors the ``mt5_concurrency.py`` / ``mt5_probe.py``
 convention, and the Phase 151 precedent this move follows): this module's only
-in-tree imports are ``services.mt5_client``, ``services.mt5_concurrency`` and
-``services.mt5_probe``. ⛔ It MUST NEVER import ``services.job_worker`` — nor
+in-tree imports are ``services.account_unit`` (itself a leaf), ``services.mt5_client``,
+``services.mt5_concurrency`` and ``services.mt5_probe``. ⛔ It MUST NEVER import ``services.job_worker`` — nor
 anything that does — because ``job_worker`` imports IT. That is also why the two
 deal-fetch margin constants below MOVED here out of ``job_worker`` rather than
 being imported back from it: importing them from their old home would have closed
@@ -59,6 +59,12 @@ from collections.abc import Callable
 from datetime import datetime
 from typing import Any, Final
 
+from services.account_unit import (
+    AccountCurrencyBlank,
+    AccountCurrencyMalformed,
+    AccountCurrencyUnsupported,
+    classify_account_currency,
+)
 from services.mt5_client import Mt5ClientError, Mt5Session, note_mt5_history_settled
 from services.mt5_concurrency import (
     _MT5_HISTORY_POLL_S,
@@ -126,7 +132,6 @@ def _settle_deal_history(
     first: list[dict[str, Any]],
     *,
     now: datetime,
-    material_equity_floor_usd: float,
 ) -> tuple[list[dict[str, Any]], bool]:
     """Re-read ``history_deals_get`` until the count is STABLE (D-04), or raise.
     Returns ``(deals, settled)``: ``settled`` is False only on the equity skip below,
@@ -150,6 +155,14 @@ def _settle_deal_history(
     first read untouched, NOT settled: the callers' existing step-(c) guards fail
     loud on it.
 
+    ⭐ 164.6.6.2 / D-07 — materiality is the account's OWN unit's: ``info["currency"]``
+    is classified here and ``abs(equity) > unit.floors.material_equity`` decides, so a
+    funded 0.1 BTC login waits for its history exactly as a funded 5000 USD one does
+    (the USD floor of 100 read 0.1 BTC as "immaterial" and returned an empty ledger as
+    if it were the account's history). A blank, malformed or unsupported currency skips
+    the wait exactly like the absent-equity skip: the caller refuses on the same
+    currency right after, so no wait is spent on an account that cannot be derived.
+
     On expiry it RAISES and returns nothing: never a partial ledger, never an
     invented deal.
     """
@@ -159,7 +172,11 @@ def _settle_deal_history(
         return first, False
     if not math.isfinite(equity):
         return first, False
-    material = abs(equity) > material_equity_floor_usd
+    try:
+        unit = classify_account_currency(info.get("currency"))
+    except (AccountCurrencyBlank, AccountCurrencyMalformed, AccountCurrencyUnsupported):
+        return first, False
+    material = abs(equity) > unit.floors.material_equity
     deadline = _clock() + _MT5_HISTORY_WAIT_S
     previous = len(first)
     stable_intervals = 0
@@ -198,7 +215,6 @@ def read_mt5_deal_ledger(
     *,
     now: datetime,
     settle_history: bool = False,
-    material_equity_floor_usd: float | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """Log in and read the FULL deal history, bracketed by the MT5CONC-02 login
     assertions. Returns ``(pre_account_info, deals)``.
@@ -209,8 +225,8 @@ def read_mt5_deal_ledger(
     ``history_deals_get`` can come back short or empty. With it, the deal read
     repeats until the count is stable, inside the POST bracket, or raises
     ``Mt5HistoryUnsettledError`` when ``_MT5_HISTORY_WAIT_S`` runs out under
-    material equity (``material_equity_floor_usd`` is required then; ``None`` is a
-    caller bug and raises ``ValueError``). ``settle_history=False`` is today's
+    material equity, where materiality is decided from the account's own currency
+    (164.6.6.2 / D-07: no floor is passed in any more). ``settle_history=False`` is today's
     single read, byte-for-byte. The helper still decides NOTHING about what the
     raise means: the caller disposes.
 
@@ -223,11 +239,6 @@ def read_mt5_deal_ledger(
 
     ⛔ It is BLOCKING (``Mt5Client`` is blocking RPyC). Run it off the event loop.
     """
-    if settle_history and material_equity_floor_usd is None:
-        raise ValueError(
-            "read_mt5_deal_ledger: settle_history=True needs material_equity_floor_usd "
-            "(a caller bug; it fails loud rather than guessing a floor)"
-        )
     session.client.login(
         session.login,
         session.investor_password,
@@ -253,14 +264,7 @@ def read_mt5_deal_ledger(
     if settle_history:
         # D-04: the poll window sits BEFORE the POST bracket, so the POST bracket
         # also covers it (a mid-wait re-login by another actor is still caught).
-        assert material_equity_floor_usd is not None  # narrowed above, for mypy
-        deals, settled = _settle_deal_history(
-            session,
-            info,
-            deals,
-            now=now,
-            material_equity_floor_usd=material_equity_floor_usd,
-        )
+        deals, settled = _settle_deal_history(session, info, deals, now=now)
     # POST-read login bracket (MT5CONC-02): re-read account_info and
     # re-assert, catching a mid-read terminal re-login by another actor
     # (the cross-process net for the module-level lock's documented

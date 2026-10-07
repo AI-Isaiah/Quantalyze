@@ -1,6 +1,7 @@
 "use client";
 
 import { ResponsiveTable } from "@/components/ResponsiveTable";
+import { nativeUnitReason, withUnit } from "@/lib/factsheet/returns-unit";
 
 import { usePayload } from "./factsheet-context";
 import { useBasisSeriesView } from "./basis-context";
@@ -16,7 +17,13 @@ export function StressWindowsPanel() {
   // recompute from the MTM series → follow the active basis; the benchmark column
   // is basis-invariant BY CONSTRUCTION (same BTC series aligned to the MTM axis, no
   // new math). The whole stressWindows block is in the bundle; cash view === payload.
-  const view = useBasisSeriesView(usePayload());
+  const payload = usePayload();
+  const view = useBasisSeriesView(payload);
+  // Phase 164.6.6.2 (D-10, UI-SPEC A19): the benchmark column is BTC by construction, so
+  // for a strategy whose returns are in a native unit its cells are passed as null and
+  // take the existing null-bench form ("—", muted). The strategy columns are the
+  // strategy's own series and stay.
+  const unit = payload.returnsUnit ?? null;
   const { windows, benchName, totalCatalogued, droppedOutOfRange, droppedPartial } = view.stressWindows;
   // Honest empty state when nothing in our catalogue overlaps the observation
   // window — better to render a one-liner than silently disappear.
@@ -46,7 +53,9 @@ export function StressWindowsPanel() {
           Stress Windows
         </h3>
         <p className="text-fixed-11 text-text-muted">
-          strategy vs {benchName} compounded return + max drawdown during named market events
+          {unit === null
+            ? `strategy vs ${benchName} compounded return + max drawdown during named market events`
+            : `${withUnit("strategy compounded return", unit)} + max drawdown during named market events · ${benchName} column not shown: ${nativeUnitReason(unit)}`}
           {(droppedOutOfRange > 0 || droppedPartial > 0) && (
             <>
               {" "}· evaluating {windows.length} of {totalCatalogued} catalogued events
@@ -84,7 +93,9 @@ export function StressWindowsPanel() {
           </tr>
         </thead>
         <tbody>
-          {windows.map(w => (
+          {windows.map(win => {
+            const w = unit === null ? win : { ...win, benchReturn: null, benchMaxDD: null };
+            return (
             <tr key={w.name} className="border-b border-border/30 last:border-0">
               <td className="py-1.5 pr-2">
                 <div className="font-medium text-text-primary">
@@ -126,7 +137,8 @@ export function StressWindowsPanel() {
                 {pct(w.benchMaxDD)}
               </td>
             </tr>
-          ))}
+            );
+          })}
         </tbody>
       </table>
       </ResponsiveTable>

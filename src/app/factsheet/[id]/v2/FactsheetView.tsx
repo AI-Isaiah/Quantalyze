@@ -16,6 +16,8 @@ import {
 } from "@/lib/freshness";
 import { TrustTierLabel } from "@/components/strategy/TrustTierLabel";
 import { OwnershipTag } from "@/components/strategy/OwnershipTag";
+import { ReturnsUnitChip } from "@/components/strategy/ReturnsUnitChip";
+import { withUnit } from "@/lib/factsheet/returns-unit";
 import { RenameStrategyDialog } from "@/components/strategy/RenameStrategyDialog";
 // Phase 164 (SHARE-04) — THE ONE SHARE PREDICATE, shared with the other two
 // affordance sites (the strategies page and discovery detail, both of which go
@@ -110,7 +112,7 @@ function PanelSkeleton({ h }: { h: number }) {
 }
 import { resolvePalette, paletteToCssVars } from "./palette";
 import { trackFactsheetEvent } from "./factsheet-analytics";
-import { CHART_CONFIGS } from "./chart-configs";
+import { CHART_CONFIGS, applyChartUnit } from "./chart-configs";
 
 /**
  * Editorial layout — refined-minimalism inside the institutional/utilitarian
@@ -457,7 +459,10 @@ export function FactsheetBody({
                 real observation at 0% delta. Suppress for CSV to prevent false panels.
                 (Phase 169.4 CR-01: aggregate() now returns null for an empty population
                 and the panels render the em-dash state; the api-arm gate stands.) */}
-            {hasComparator && payload.ingestSource === "api" && (
+            {/* Phase 164.6.6.2 (D-10, UI-SPEC A16): a strategy whose returns are in a native
+                unit renders the section whatever the comparator, because its panels are
+                the withheld form with the stated reason, not an empty page. */}
+            {(hasComparator || payload.returnsUnit != null) && payload.ingestSource === "api" && (
               <CollapsibleSection
                 id="factsheet-signatures"
                 title="Returns Signatures"
@@ -651,6 +656,7 @@ function PerformanceCharts() {
     }
   }, [payload.rollingWindow, payload.rollingBetaWindow, payload.strategyId]);
 
+  const returnsUnit = payload.returnsUnit ?? null;
   const volMatchedAbsent = view.comparators[cmpKey]?.volMatched == null;
   // The reason line below is shown only when the comparator HAS a summary, so it
   // has covered returns and the match was skipped for want of a measurable vol.
@@ -686,9 +692,11 @@ function PerformanceCharts() {
           const title = cfg.title.replace(ROLL_LABEL_RE, `(${beta.label})`);
           return { ...cfg, title, warmup: beta.window };
         }
-        return cfg;
+        // Phase 164.6.6.2 (D-09): the three equity charts name the returns unit.
+        // `null` returns `cfg` itself, so a USD chart is the config it always was.
+        return applyChartUnit(cfg, returnsUnit);
       });
-  }, [cmpKey, volMatchedAbsent, roll.enough, roll.label, roll.window, beta.enough, beta.label, beta.window]);
+  }, [cmpKey, volMatchedAbsent, roll.enough, roll.label, roll.window, beta.enough, beta.label, beta.window, returnsUnit]);
 
   return (
     <>
@@ -997,6 +1005,8 @@ function FactsheetHeader({
   payload: FactsheetPayload;
 } & Pick<OwnerLaneProps, "ownershipMark" | "renameTarget">) {
   const [renameOpen, setRenameOpen] = React.useState(false);
+  // Phase 164.6.6.2 (D-08, D-09): the ONE field every unit surface reads.
+  const returnsUnit = payload.returnsUnit ?? null;
   const exchanges = payload.supportedExchanges.length > 0 ? payload.supportedExchanges.join(", ") : null;
   const leverage = payload.leverageRange;
   // Lead chip line — types / markets / subtypes / exchanges / leverage. Drop
@@ -1048,6 +1058,7 @@ function FactsheetHeader({
           {renameTarget ? (
             <div className="flex flex-wrap items-baseline gap-3">
               <h1 className={MASTHEAD_H1}>{payload.strategyName}</h1>
+              <ReturnsUnitChip unit={returnsUnit} />
               <button
                 type="button"
                 onClick={() => setRenameOpen(true)}
@@ -1055,6 +1066,14 @@ function FactsheetHeader({
               >
                 Rename…
               </button>
+            </div>
+          ) : returnsUnit ? (
+            // Phase 164.6.6.2 (D-09, UI-SPEC A1): the unit sits WITH the name, in the
+            // same wrapper class the owner arm uses. Only when a unit is set: a USD
+            // render keeps the bare <h1> with no wrapper, byte-for-byte.
+            <div className="flex flex-wrap items-baseline gap-3">
+              <h1 className={MASTHEAD_H1}>{payload.strategyName}</h1>
+              <ReturnsUnitChip unit={returnsUnit} />
             </div>
           ) : (
             <h1 className={MASTHEAD_H1}>{payload.strategyName}</h1>
@@ -1120,6 +1139,7 @@ function FactsheetHeader({
               aum={payload.aum}
               maxCapacity={payload.maxCapacity}
               selfReported={isSelfReported}
+              unit={returnsUnit}
             />
           )}
         </div>
@@ -1422,12 +1442,24 @@ function CapacityChip({
   aum,
   maxCapacity,
   selfReported = false,
+  unit = null,
 }: {
   aum: number;
   maxCapacity: number | null;
   selfReported?: boolean;
+  /**
+   * Phase 164.6.6.2 (D-21, UI-SPEC A12): the strategy's returns unit. `null` is
+   * the USD family and keeps today's DOM exactly. With a unit the chip is an
+   * honest `—`: `aum` and `maxCapacity` are declared USD figures
+   * (`strategies.aum`, `strategies.max_capacity`), and the only BTC figure is the
+   * live balance, which a public factsheet has never disclosed. So there is no
+   * value, no `/ capacity` span and no utilization bar (BTC over USD would mix
+   * units). D-21 overrides D-11, which would have shown a native balance.
+   */
+  unit?: string | null;
 }) {
-  const utilization = maxCapacity && maxCapacity > 0 ? Math.min(1, aum / maxCapacity) : null;
+  const nativeUnit = unit != null;
+  const utilization = !nativeUnit && maxCapacity && maxCapacity > 0 ? Math.min(1, aum / maxCapacity) : null;
   const tone =
     utilization == null ? "var(--color-accent)" :
     utilization > 0.9 ? "var(--color-negative)" :
@@ -1439,8 +1471,8 @@ function CapacityChip({
         AUM{selfReported && <span className="ml-1 normal-case" style={{ color: "var(--color-warning, #B45309)" }}>(self-reported)</span>}
       </p>
       <p className="mt-1 text-small font-mono tabular-nums text-text-secondary">
-        {formatUsdCompact(aum)}
-        {maxCapacity != null && (
+        {nativeUnit ? "—" : formatUsdCompact(aum)}
+        {!nativeUnit && maxCapacity != null && (
           <span className="ml-1 text-text-muted">/ {formatUsdCompact(maxCapacity)}</span>
         )}
       </p>
@@ -1535,9 +1567,15 @@ function KpiStrip() {
   const maxDdTone = (v: number | null | undefined): "negative" | undefined =>
     v != null && Number.isFinite(v) && v < 0 ? "negative" : undefined;
 
-  const items: Array<{ label: string; value: string; tone?: "positive" | "negative" }> = [
-    { label: "Cum. Return", value: pctSigned(m.cum_ret, 1), tone: signTone(m.cum_ret) },
-    { label: "CAGR", value: pctSigned(m.cagr, 1), tone: signTone(m.cagr) },
+  // Phase 164.6.6.2 (D-09, UI-SPEC A2, A3): a native-unit strategy's two return
+  // cells name the unit. `unitLabel` marks them so ONLY those labels swap the
+  // bounded-label clip for a wrap (the longer text would ellipsise in the
+  // two-column strip, Phase 170 (j)); `withUnit(label, null)` is the label itself.
+  const returnsUnit = payload.returnsUnit ?? null;
+  const unitLabel = returnsUnit != null;
+  const items: Array<{ label: string; value: string; tone?: "positive" | "negative"; unitLabel?: boolean }> = [
+    { label: withUnit("Cum. Return", returnsUnit), value: pctSigned(m.cum_ret, 1), tone: signTone(m.cum_ret), unitLabel },
+    { label: withUnit("CAGR", returnsUnit), value: pctSigned(m.cagr, 1), tone: signTone(m.cagr), unitLabel },
     { label: "Sharpe", value: num(m.sharpe) },
     { label: "Sortino", value: num(m.sortino) },
     { label: "Calmar", value: num(m.calmar) },
@@ -1669,7 +1707,11 @@ function KpiStrip() {
                 (FactsheetBody.joint-floor / .basis). Text content stays "α vs BTC". */}
             <p
               data-testid="factsheet-kpi-label"
-              className={`text-micro font-mono uppercase tracking-[0.14em] sm:tracking-[0.18em] whitespace-nowrap overflow-hidden text-ellipsis${it.label.startsWith("α") ? " first-letter:normal-case" : ""}`}
+              className={`${
+                it.unitLabel
+                  ? "text-micro font-mono uppercase tracking-[0.14em] sm:tracking-[0.18em] whitespace-normal break-words"
+                  : "text-micro font-mono uppercase tracking-[0.14em] sm:tracking-[0.18em] whitespace-nowrap overflow-hidden text-ellipsis"
+              }${it.label.startsWith("α") ? " first-letter:normal-case" : ""}`}
               style={{ color: "var(--color-text-muted)" }}
             >
               {it.label}
@@ -1801,14 +1843,14 @@ function SectionNav() {
   // FINDING-10 (b06-silentfailure): Filter out sections whose content is
   // conditionally suppressed so the nav doesn't contain dead anchors.
   // "Allocator" is only rendered when ingestSource === "api" (no-invented-data).
-  // "Signatures" is only rendered when hasComparator AND ingestSource === "api".
+  // "Signatures" is only rendered when (hasComparator OR a native returns unit) AND ingestSource === "api".
   const hasComparator = cmpKey !== "none";
   const sections: { id: string; label: string }[] = React.useMemo(() => [
     { id: "factsheet-perf", label: "Performance" },
     { id: "factsheet-dist", label: "Distribution" },
     { id: "factsheet-heatmaps", label: "Heatmaps" },
     { id: "factsheet-stress", label: "Stress" },
-    ...(hasComparator && payload.ingestSource === "api"
+    ...((hasComparator || payload.returnsUnit != null) && payload.ingestSource === "api"
       ? [{ id: "factsheet-signatures", label: "Signatures" }]
       : []),
     { id: "factsheet-streak", label: "Streaks" },
@@ -1816,7 +1858,7 @@ function SectionNav() {
       ? [{ id: "factsheet-allocator", label: "Allocator" }]
       : []),
     { id: "factsheet-metrics", label: "Metrics" },
-  ], [payload.ingestSource, hasComparator]);
+  ], [payload.ingestSource, payload.returnsUnit, hasComparator]);
   const [active, setActive] = React.useState<string | null>(null);
 
   React.useEffect(() => {

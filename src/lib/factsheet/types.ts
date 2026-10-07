@@ -754,6 +754,16 @@ export type FactsheetCommon = {
    */
   cumulativeMethod?: "geometric" | "arithmetic";
   /**
+   * Phase 164.6.6.2 (D-08, D-09) — the unit this strategy's returns are measured
+   * in, when it is not USD ("BTC" for an account denominated in BTC). Parsed once
+   * in `buildFromResolved` from `strategy_analytics.data_quality_flags.native_unit`
+   * through `parseReturnsUnit`; every surface reads THIS field and none reads the
+   * `api_keys` row, so the masthead chip, the labels and the share card cannot
+   * disagree. Absent for a USD-family strategy (a conditional spread, so the key
+   * is not there at all and a USD payload is byte-identical).
+   */
+  returnsUnit?: string;
+  /**
    * Phase 169.1 (D-30) — the strategy's day basis as the engine computed it,
    * resolved by the same read path. Present ONLY when "active" (vol, Sharpe and
    * Sortino over the non-zero days); absent means calendar, so a calendar

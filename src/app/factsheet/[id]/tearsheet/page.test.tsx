@@ -32,7 +32,7 @@
  * flip from null → non-null, failing the test.
  */
 import { describe, it, expect, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { cleanup, render, screen } from "@testing-library/react";
 import React from "react";
 
 // server-only throws in jsdom; transitively imported via @/lib/queries.
@@ -142,14 +142,60 @@ type AttestationResult = {
  * an authenticated-but-unattested case is the default (the safest sentinel
  * for a fail-closed gate).
  */
+/**
+ * What the tear sheet's returns-unit read (164.6.6.2-07) gets back from
+ * `strategies -> strategy_analytics ( data_quality_flags )`. `"throw"` makes the
+ * query itself throw. The default is a USD strategy: an embed with no flags.
+ */
+type UnitRead =
+  | { data: { strategy_analytics: unknown } | null; error: { message: string } | null }
+  | "throw";
+const USD_UNIT_READ: UnitRead = {
+  data: { strategy_analytics: { data_quality_flags: {} } },
+  error: null,
+};
+
+/** Every filter the unit read applied, so the published gate is observable. */
+const unitReadFilters: Array<[string, unknown]> = [];
+let unitReadSelect: string | null = null;
+
+/**
+ * Stub Supabase. `getUserResult` controls the auth.getUser() response.
+ * `attestationResult` controls the chained `.from("investor_attestations")
+ * .select().eq().maybeSingle()` call. If omitted, defaults to "no row" so
+ * an authenticated-but-unattested case is the default (the safest sentinel
+ * for a fail-closed gate). `unitRead` controls the one-strategy
+ * `.from("strategies")` read of the returns unit.
+ */
 function stubAuth(
   getUserResult: GetUserResult,
   attestationResult: AttestationResult = { data: null, error: null },
+  unitRead: UnitRead = USD_UNIT_READ,
 ) {
-  const maybeSingle = vi.fn().mockResolvedValue(attestationResult);
-  const eq = vi.fn().mockReturnValue({ maybeSingle });
-  const select = vi.fn().mockReturnValue({ eq });
-  const from = vi.fn().mockReturnValue({ select });
+  unitReadFilters.length = 0;
+  unitReadSelect = null;
+  const from = vi.fn((table: string) => {
+    if (table === "investor_attestations") {
+      const maybeSingle = vi.fn().mockResolvedValue(attestationResult);
+      const eq = vi.fn().mockReturnValue({ maybeSingle });
+      return { select: vi.fn().mockReturnValue({ eq }) };
+    }
+    const builder = {
+      select: (cols: string) => {
+        unitReadSelect = cols;
+        return builder;
+      },
+      eq: (col: string, val: unknown) => {
+        unitReadFilters.push([col, val]);
+        return builder;
+      },
+      maybeSingle: async () => {
+        if (unitRead === "throw") throw new Error("unit read exploded");
+        return unitRead;
+      },
+    };
+    return builder;
+  });
   vi.mocked(createClient).mockResolvedValueOnce({
     auth: { getUser: vi.fn().mockResolvedValue(getUserResult) },
     from,
@@ -297,5 +343,167 @@ describe("TearSheet page — C-0189 disclosure-tier redaction", () => {
     await renderPage();
     expect(screen.getByText(/Pseudonymous strategy/i)).toBeInTheDocument();
     expect(screen.queryByText(/Test bio body/i)).toBeNull();
+  });
+});
+
+describe("TearSheet page - returns unit (164.6.6.2-07, D-09, D-21)", () => {
+  const ANON = { data: { user: null }, error: null } as const;
+  const btcRead: UnitRead = {
+    data: { strategy_analytics: { data_quality_flags: { native_unit: "BTC" } } },
+    error: null,
+  };
+
+  /** The `dd` that follows a given `dt` label. */
+  function termValue(label: string): string {
+    const dt = screen.getByText(label, { selector: "dt" });
+    return dt.nextElementSibling?.textContent ?? "";
+  }
+
+  it("T1 - a BTC strategy: one chip after the types/markets line, BTC labels, Minimum Allocation is a dash", async () => {
+    stubAuth(ANON, undefined, btcRead);
+    const { container } = await renderPage();
+
+    const chips = container.querySelectorAll('[data-returns-unit="BTC"]');
+    expect(chips).toHaveLength(1);
+    expect(chips[0].textContent).toBe("Returns in BTC");
+    const typesLine = screen.getByText(/Momentum · BTC/);
+    // The chip follows the types/markets line in document order.
+    expect(
+      typesLine.compareDocumentPosition(chips[0]) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+
+    expect(screen.getByText("CAGR in BTC")).toBeInTheDocument();
+    expect(screen.getByText("Cumulative in BTC")).toBeInTheDocument();
+    expect(screen.getByText("Equity Curve in BTC")).toBeInTheDocument();
+    expect(screen.queryByText("CAGR")).toBeNull();
+
+    // strategy.aum is a declared USD figure (D-21): never shown beside a BTC unit.
+    const min = termValue("Minimum Allocation");
+    expect(min).toBe("—");
+    expect(min).not.toContain("$");
+    // The rank section is untouched (B6): the other hero labels keep their names.
+    expect(screen.getByText("Sharpe")).toBeInTheDocument();
+    expect(screen.getByText("Max DD")).toBeInTheDocument();
+  });
+
+  it("T2 - a USD strategy is exactly as before: no chip, bare labels, a dollar Minimum Allocation", async () => {
+    stubAuth(ANON);
+    const { container } = await renderPage();
+
+    expect(container.querySelector("[data-returns-unit]")).toBeNull();
+    expect(screen.getByText("CAGR")).toBeInTheDocument();
+    expect(screen.getByText("Cumulative")).toBeInTheDocument();
+    expect(screen.getByText("Equity Curve")).toBeInTheDocument();
+    expect(screen.queryByText(/ in BTC/)).toBeNull();
+    expect(termValue("Minimum Allocation")).toBe("$100,000");
+  });
+
+  it("T3 - the unit read is one strategy id, published-only, and selects only the flags", async () => {
+    stubAuth(ANON, undefined, btcRead);
+    await renderPage();
+
+    expect(unitReadFilters).toContainEqual(["id", "s-1"]);
+    expect(unitReadFilters).toContainEqual(["status", "published"]);
+    expect(unitReadSelect).toBe("strategy_analytics ( data_quality_flags )");
+  });
+
+  it("T4 - a malformed unit renders the USD tear sheet and never the text", async () => {
+    stubAuth(ANON, undefined, {
+      data: { strategy_analytics: { data_quality_flags: { native_unit: "b!tc<i>" } } },
+      error: null,
+    });
+    const { container } = await renderPage();
+    expect(container.querySelector("[data-returns-unit]")).toBeNull();
+    expect(screen.queryByText(/b!tc/)).toBeNull();
+    expect(screen.getByText("CAGR")).toBeInTheDocument();
+  });
+
+  it("T5 - an array embed is read like an object embed", async () => {
+    stubAuth(ANON, undefined, {
+      data: { strategy_analytics: [{ data_quality_flags: { native_unit: "BTC" } }] },
+      error: null,
+    });
+    const { container } = await renderPage();
+    expect(container.querySelectorAll('[data-returns-unit="BTC"]')).toHaveLength(1);
+  });
+
+  const NOTE = "Return unit could not be confirmed; figures withheld. Reload to try again.";
+
+  /**
+   * SFH-2: the unit is UNDETERMINED. The page must not present return figures
+   * as if they were USD - they are withheld, and Minimum Allocation (a declared
+   * USD amount) is a dash, never a `$`.
+   */
+  function expectWithheld(container: HTMLElement) {
+    expect(container.querySelector("[data-returns-unit]")).toBeNull();
+    expect(screen.getByText(NOTE)).toBeInTheDocument();
+    for (const label of ["CAGR", "Max DD", "Volatility", "6 Month", "Cumulative"]) {
+      const el = screen.getByText(label);
+      expect(el.nextElementSibling?.textContent).toBe("\u2014");
+    }
+    expect(screen.queryByText("Equity Curve")).toBeNull();
+    expect(screen.queryByText("Monthly Returns")).toBeNull();
+    const min = termValue("Minimum Allocation");
+    expect(min).toBe("\u2014");
+    expect(min).not.toContain("$");
+  }
+
+  it("T6 - a unit read that returns an error withholds the figures, logs one line, and never throws", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      stubAuth(ANON, undefined, { data: null, error: { message: "statement timeout" } });
+      const { container } = await renderPage();
+      expectWithheld(container);
+      expect(errSpy).toHaveBeenCalledTimes(1);
+      expect(errSpy).toHaveBeenCalledWith("[tearsheet] returns unit read failed", {
+        message: "statement timeout",
+      });
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  it("T7 - a unit read that throws withholds the figures, logs one line, and never throws", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      stubAuth(ANON, undefined, "throw");
+      const { container } = await renderPage();
+      expectWithheld(container);
+      expect(errSpy).toHaveBeenCalledTimes(1);
+      expect(errSpy).toHaveBeenCalledWith("[tearsheet] returns unit read failed", {
+        message: "unit read exploded",
+      });
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  it("T8 - no request client (createClient threw) withholds the figures too", async () => {
+    vi.mocked(createClient).mockImplementationOnce(async () => {
+      throw new Error("supabase outage");
+    });
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const { container } = await renderPage();
+      expectWithheld(container);
+      expect(errSpy).toHaveBeenCalledWith(
+        "[tearsheet] attestation lookup failed:",
+        expect.any(Error),
+      );
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  it("T9 - a determined unit (USD or BTC) never shows the withheld note", async () => {
+    stubAuth(ANON);
+    await renderPage();
+    expect(screen.queryByText(NOTE)).toBeNull();
+    expect(screen.getByText("CAGR").nextElementSibling?.textContent).not.toBe("\u2014");
+    cleanup();
+    stubAuth(ANON, undefined, btcRead);
+    await renderPage();
+    expect(screen.queryByText(NOTE)).toBeNull();
+    expect(screen.getByText("CAGR in BTC").nextElementSibling?.textContent).not.toBe("\u2014");
   });
 });

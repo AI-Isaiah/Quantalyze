@@ -74,11 +74,13 @@ _DEALS: list[dict[str, Any]] = [
 ]
 
 
-def _account(login: int | None, *, equity: float = 110_500.0) -> dict[str, Any]:
+def _account(
+    login: int | None, *, equity: float = 110_500.0, currency: str = "USD"
+) -> dict[str, Any]:
     """An ``account_info()`` snapshot. ``login=None`` OMITS the field entirely —
     the Pitfall-3 shape, where a bracket that used a default would silently
     match."""
-    snap: dict[str, Any] = {"equity": equity, "balance": equity}
+    snap: dict[str, Any] = {"equity": equity, "balance": equity, "currency": currency}
     if login is not None:
         snap["login"] = login
     return snap
@@ -297,7 +299,6 @@ def test_returns_the_pre_snapshot_and_discards_the_post_one() -> None:
 # autouse fake from `conftest.py` (`_mt5_read_never_sleeps_for_real`), so a
 # 30-second budget costs no wall time and a never-settling case cannot spin.
 # ---------------------------------------------------------------------------
-_FLOOR = 100.0  # the derive's `_DERIBIT_EMPTY_LEDGER_FLOOR_USD`
 _KEY = "key-1"
 
 
@@ -311,7 +312,6 @@ def _settle_read(transport: _FakeMt5Transport) -> list[dict[str, Any]]:
         _session(transport),
         now=_NOW,
         settle_history=True,
-        material_equity_floor_usd=_FLOOR,
     )
     return deals
 
@@ -525,7 +525,8 @@ def test_missing_equity_skips_the_wait_and_records_nothing(
     token = begin_mt5_lease_holder(_KEY)
     try:
         transport = _FakeMt5Transport(
-            account={"login": _EXPECTED_LOGIN, "balance": 1.0}, deals=_DEALS
+            account={"login": _EXPECTED_LOGIN, "balance": 1.0, "currency": "USD"},
+            deals=_DEALS,
         )
         _settle_read(transport)
 
@@ -811,12 +812,93 @@ def test_immaterial_equity_stable_zero_returns_at_once(
         end_mt5_lease_holder(token)
 
 
-def test_settle_without_a_floor_is_a_caller_bug() -> None:
-    """``settle_history=True`` with no floor cannot tell material from immaterial
-    equity. It raises BEFORE touching the terminal rather than guessing one."""
+def test_no_floor_parameter_is_left_to_pass() -> None:
+    """164.6.6.2 / D-07: materiality is resolved from the account's own currency, so the
+    caller can no longer hand in a USD-sized floor. A stale caller that still passes one
+    fails at once with a TypeError, instead of being quietly obeyed against a BTC
+    account (the very bug the parameter carried)."""
     transport = _FakeMt5Transport(account=_account(_EXPECTED_LOGIN), deals=_DEALS)
 
-    with pytest.raises(ValueError):
-        read_mt5_deal_ledger(_session(transport), now=_NOW, settle_history=True)
+    with pytest.raises(TypeError):
+        read_mt5_deal_ledger(  # type: ignore[call-arg]
+            _session(transport),
+            now=_NOW,
+            settle_history=True,
+            material_equity_floor_usd=100.0,
+        )
 
     assert transport.calls == []
+
+
+def test_funded_fresh_btc_login_waits_for_its_history(
+    _mt5_read_never_sleeps_for_real,
+) -> None:
+    """D-07 / RESEARCH Pitfall 5, at the helper. 0.0105 BTC is far above the BTC
+    material floor (0.0001) and far below the USD one (100): under the old USD floor
+    this login was "immaterial", so three EMPTY reads in a row counted as settled and the
+    empty ledger was returned as its history. The history here arrives only on the fourth
+    read, after three empty ones; materiality is what keeps the loop going through them
+    (an empty stable run is not settled under material equity), so the full ledger is
+    returned after six reads: three empty, then the ledger across two stable intervals."""
+    transport = _FakeMt5Transport(
+        account=_account(_EXPECTED_LOGIN, equity=0.0105, currency="BTC"),
+        deals=[],
+        deals_by_call=[[], [], [], _DEALS],
+    )
+
+    deals = _settle_read(transport)
+
+    assert [d["ticket"] for d in deals] == [1]
+    assert transport.calls.count("history_deals_get") == 6
+    assert _mt5_read_never_sleeps_for_real.sleeps == [_MT5_HISTORY_POLL_S] * 5
+
+
+def test_btc_materiality_is_the_btc_floor_not_the_usd_one(
+    _mt5_read_never_sleeps_for_real,
+) -> None:
+    """The other side of the same floor. A BTC account at 0.00005 is under the BTC
+    material floor (0.0001): an honest empty ledger returns once stable, with no
+    expiry. The USD arm of this (equity 50 returns at once) is
+    ``test_immaterial_equity_stable_zero_returns_at_once``."""
+    transport = _FakeMt5Transport(
+        account=_account(_EXPECTED_LOGIN, equity=0.00005, currency="BTC"), deals=[]
+    )
+
+    deals = _settle_read(transport)
+
+    assert deals == []
+    assert transport.calls.count("history_deals_get") == 3
+
+
+def test_material_btc_equity_with_a_never_arriving_history_raises(
+    _mt5_read_never_sleeps_for_real,
+) -> None:
+    """5 BTC and a history that never arrives is Finding C in BTC. Under the USD floor
+    (100) 5 reads as immaterial and the empty ledger would be returned as true."""
+    transport = _FakeMt5Transport(
+        account=_account(_EXPECTED_LOGIN, equity=5.0, currency="BTC"), deals=[]
+    )
+
+    with pytest.raises(Mt5HistoryUnsettledError) as excinfo:
+        _settle_read(transport)
+
+    assert excinfo.value.material is True
+
+
+@pytest.mark.parametrize("currency", ["", "b!tc", "EUR"])
+def test_an_unclassifiable_currency_skips_the_wait_like_an_absent_equity(
+    currency: str, _mt5_read_never_sleeps_for_real,
+) -> None:
+    """A blank, malformed or unsupported currency cannot be derived (the caller refuses on
+    it right after), so no wait is spent on it: the first read is returned untouched and
+    nothing sleeps, exactly as for an absent equity. It also must not raise, or the
+    caller's named refusal would never be reached."""
+    transport = _FakeMt5Transport(
+        account=_account(_EXPECTED_LOGIN, equity=5000.0, currency=currency), deals=_DEALS
+    )
+
+    deals = _settle_read(transport)
+
+    assert [d["ticket"] for d in deals] == [1]
+    assert transport.calls.count("history_deals_get") == 1
+    assert _mt5_read_never_sleeps_for_real.sleeps == []

@@ -81,13 +81,15 @@ vi.mock("@/components/charts/EquityCurve", () => ({
   },
 }));
 
+let lastDrawdownProps: { benchmarkSeries?: unknown } = {};
 vi.mock("@/components/charts/DrawdownChart", () => ({
   DrawdownChart: (props: {
     data: { date: string; value: number }[];
     benchmarkSeries?: unknown;
-  }) => (
-    <div data-testid="drawdown-chart" data-len={props.data.length} />
-  ),
+  }) => {
+    lastDrawdownProps = props;
+    return <div data-testid="drawdown-chart" data-len={props.data.length} />;
+  },
 }));
 
 let lastRollingProps: {
@@ -152,6 +154,7 @@ beforeEach(() => {
   fetchMock.mockReset();
   equityCurveRenderCount = 0;
   lastEquityCurveProps = {};
+  lastDrawdownProps = {};
   lastRollingProps = {};
 });
 
@@ -397,5 +400,63 @@ describe("HeadlineMetricsPanel — Phase 14b-06 Task 3", () => {
     });
     expect(errorSpy).toHaveBeenCalledTimes(1);
     errorSpy.mockRestore();
+  });
+});
+
+describe("HeadlineMetricsPanel - returns unit (164.6.6.2-07, UI-SPEC C1-C4, D-10)", () => {
+  const clickView = (container: HTMLElement, label: string) =>
+    fireEvent.click(
+      Array.from(container.querySelectorAll("button")).find(
+        (b) => b.textContent?.trim() === label,
+      )!,
+    );
+
+  it("C1/C2: a BTC panel reads Cum return in BTC, CAGR in BTC, Equity in BTC and the BTC aria-label", () => {
+    const { container, getByText, queryByText } = render(
+      <HeadlineMetricsPanel {...BASE_PROPS} returnsUnit="BTC" />,
+    );
+    expect(getByText("Cum return in BTC")).toBeInTheDocument();
+    expect(getByText("CAGR in BTC")).toBeInTheDocument();
+    expect(getByText("Equity in BTC")).toBeInTheDocument();
+    expect(queryByText("Equity vs BTC")).toBeNull();
+    expect(
+      container.querySelector("section")!.getAttribute("aria-label"),
+    ).toBe("Headline metrics & equity in BTC");
+    // The labels that are not returns keep their names.
+    expect(getByText("Sharpe")).toBeInTheDocument();
+    expect(getByText("Max DD")).toBeInTheDocument();
+  });
+
+  it("C3/C4/D-10: with an overlay present, a BTC panel draws no checkbox and passes benchmarkSeries null to both charts", () => {
+    // PANEL2_EQUITY.btc_overlay is non-null: the unit gate has to win over it.
+    expect(PANEL2_EQUITY.btc_overlay).not.toBeNull();
+    const { container, queryByText } = render(
+      <HeadlineMetricsPanel {...BASE_PROPS} returnsUnit="BTC" />,
+    );
+    expect(queryByText("BTC benchmark")).toBeNull();
+    expect(lastEquityCurveProps.benchmarkSeries).toBeNull();
+
+    clickView(container, "Underwater");
+    expect(queryByText("BTC benchmark")).toBeNull();
+    expect(lastDrawdownProps.benchmarkSeries).toBeNull();
+  });
+
+  it("a USD panel is unchanged: labels, aria-label, checkbox and the overlay on both charts", () => {
+    for (const unit of [undefined, null]) {
+      const { container, getByText, queryByText, unmount } = render(
+        <HeadlineMetricsPanel {...BASE_PROPS} returnsUnit={unit} />,
+      );
+      expect(getByText("Cum return")).toBeInTheDocument();
+      expect(getByText("CAGR")).toBeInTheDocument();
+      expect(getByText("Equity vs BTC")).toBeInTheDocument();
+      expect(container.querySelector("section")!.getAttribute("aria-label")).toBe(
+        "Headline metrics & equity vs BTC",
+      );
+      expect(queryByText("BTC benchmark")).not.toBeNull();
+      expect(lastEquityCurveProps.benchmarkSeries).toBe(PANEL2_EQUITY.btc_overlay);
+      clickView(container, "Underwater");
+      expect(lastDrawdownProps.benchmarkSeries).toBe(PANEL2_EQUITY.btc_overlay);
+      unmount();
+    }
   });
 });

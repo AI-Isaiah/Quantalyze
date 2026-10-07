@@ -24,9 +24,14 @@ from models.schemas import (
     VerifyStrategyResponse,
 )
 from services.audit import log_audit_event
-from services.benchmark import get_benchmark_returns
+from services.benchmark import get_benchmark_returns, get_btc_closes
 from services.db import chunked_in_query, get_supabase, one, rows
 from services.dispersion import dispersing_corrwith, pairwise_correlation_or_none
+from services.native_to_usd import (
+    UsdSeriesConverter,
+    native_units_by_id,
+    usd_equity_from_converted_returns,
+)
 # PYAPI-05 — the shared status contract (analytics-service/docs/STATUS_CONTRACT.md).
 from services.error_contract import RETRY_AFTER_SECONDS, service_error
 # PYAPIFIX2-01 — the FLAT venue-transient shape. C7 (the verify-strategy verdict
@@ -768,8 +773,11 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict[str, Any]:
             for row in portfolio_strategies
         }
 
+        # D-23: `data_quality_flags` rides the SAME row as `returns_series`, so a
+        # BTC-denominated strategy's `native_unit` is read beside the series it
+        # describes (never from another query that could disagree).
         sa_result = supabase.table("strategy_analytics").select(
-            "strategy_id, returns_series, equity_curve, total_aum"
+            "strategy_id, returns_series, equity_curve, total_aum, data_quality_flags"
         ).in_("strategy_id", strategy_ids).execute()
 
         analytics_rows = {row["strategy_id"]: row for row in rows(sa_result)}
@@ -832,6 +840,32 @@ async def _compute_portfolio_analytics(portfolio_id: str) -> dict[str, Any]:
                 "portfolio %s missing equity_curve for %d strategies: %s",
                 portfolio_id, len(missing_equity_sids), missing_equity_sids,
             )
+
+        # D-23 (founder, 2026-10-07): no blend weights a raw BTC return beside USD
+        # ones. The weighted sum below, the correlation / covariance / risk
+        # decomposition, the attribution and the equity curve all weight what
+        # they are given, so every native-unit series is converted to USD HERE,
+        # before any of them. A BTC strategy that cannot be converted (no BTC
+        # price source) is dropped through the missing-series path, never
+        # weighted raw and never as a flat account.
+        _usd = UsdSeriesConverter(get_btc_closes)
+        _native_units = native_units_by_id(analytics_rows.values())
+        _native_series = dict(strategy_returns)
+        strategy_returns, _unconvertible_sids = await _usd.convert(
+            strategy_returns, _native_units
+        )
+        for sid in _unconvertible_sids:
+            strategy_equity.pop(sid, None)
+            missing_equity_sids = [m for m in missing_equity_sids if m != sid]
+            missing_returns_sids.append(sid)
+        for sid in strategy_returns:
+            # A converted strategy's stored equity_curve is in its NATIVE unit;
+            # its TWR (the attribution input) is rebuilt from the converted
+            # returns instead.
+            if sid in _native_units and sid in strategy_equity:
+                strategy_equity[sid] = usd_equity_from_converted_returns(
+                    _native_series[sid], strategy_returns[sid]
+                )
 
         if not strategy_returns:
             _fail("No returns data available for strategies in this portfolio.")
@@ -1772,8 +1806,10 @@ async def portfolio_optimizer(request: Request, req: PortfolioOptimizerRequest) 
         total = sum(weights.values()) or 1.0
         weights = {sid: w / total for sid, w in weights.items()}
 
+    # D-23: `data_quality_flags` rides the same row as `returns_series`, so the
+    # native unit is read beside the series it describes.
     sa_in_result = supabase.table("strategy_analytics").select(
-        "strategy_id, returns_series"
+        "strategy_id, returns_series, data_quality_flags"
     ).in_("strategy_id", strategy_ids).execute()
 
     portfolio_returns: dict[str, pd.Series] = {}
@@ -1786,6 +1822,16 @@ async def portfolio_optimizer(request: Request, req: PortfolioOptimizerRequest) 
             portfolio_returns[row["strategy_id"]] = s
         else:
             optimizer_missing_returns_sids.append(row["strategy_id"])
+
+    # D-23: `find_improvement_candidates` weights whatever series it is handed
+    # (the portfolio's weighted sum, then each candidate beside it), so every
+    # native-unit series is converted to USD BEFORE the call. A strategy that
+    # cannot be converted is a missing series, never a raw-BTC or flat one.
+    _usd = UsdSeriesConverter(get_btc_closes)
+    portfolio_returns, _unconvertible = await _usd.convert(
+        portfolio_returns, native_units_by_id(rows(sa_in_result))
+    )
+    optimizer_missing_returns_sids.extend(_unconvertible)
 
     # NEW-C19-09: log dropped strategies at WARNING parity with the analytics path.
     # find_improvement_candidates builds port_df from portfolio_returns (dropna),
@@ -1846,7 +1892,7 @@ async def portfolio_optimizer(request: Request, req: PortfolioOptimizerRequest) 
     candidate_missing_returns_count = 0
     if candidate_ids:
         sa_cand_result = supabase.table("strategy_analytics").select(
-            "strategy_id, returns_series"
+            "strategy_id, returns_series, data_quality_flags"
         ).in_("strategy_id", candidate_ids).execute()
 
         for row in rows(sa_cand_result):
@@ -1855,6 +1901,12 @@ async def portfolio_optimizer(request: Request, req: PortfolioOptimizerRequest) 
                 candidate_returns[row["strategy_id"]] = s
             else:
                 candidate_missing_returns_count += 1
+
+        # D-23: a BTC candidate is scored beside the portfolio in USD.
+        candidate_returns, _unconvertible_candidates = await _usd.convert(
+            candidate_returns, native_units_by_id(rows(sa_cand_result))
+        )
+        candidate_missing_returns_count += len(_unconvertible_candidates)
 
     if candidate_missing_returns_count:
         logger.warning(
@@ -2051,9 +2103,10 @@ async def portfolio_bridge(request: Request, req: BridgeRequest) -> dict[str, An
     # Build weights
     weights = _build_normalized_weights(portfolio_strategies)
 
-    # Fetch portfolio strategy returns
+    # Fetch portfolio strategy returns. D-23: `data_quality_flags` rides the same
+    # row as `returns_series`, so the native unit is read beside its series.
     sa_in_result = supabase.table("strategy_analytics").select(
-        "strategy_id, returns_series"
+        "strategy_id, returns_series, data_quality_flags"
     ).in_("strategy_id", strategy_ids).execute()
 
     portfolio_returns: dict[str, pd.Series] = {}
@@ -2064,6 +2117,15 @@ async def portfolio_bridge(request: Request, req: BridgeRequest) -> dict[str, An
             portfolio_returns[row["strategy_id"]] = s
         else:
             bridge_missing_returns_sids.append(row["strategy_id"])
+
+    # D-23: `find_replacement_candidates` weights whatever series it is handed,
+    # so every native-unit series (the incumbent included) is converted to USD
+    # BEFORE the call. An unconvertible one is a missing series, never raw BTC.
+    _usd = UsdSeriesConverter(get_btc_closes)
+    portfolio_returns, _unconvertible = await _usd.convert(
+        portfolio_returns, native_units_by_id(rows(sa_in_result))
+    )
+    bridge_missing_returns_sids.extend(_unconvertible)
 
     # NEW-C19-02: track strategies that had analytics rows but no returns_series.
     # The scorer (find_replacement_candidates) builds port_df from portfolio_returns,
@@ -2153,13 +2215,18 @@ async def portfolio_bridge(request: Request, req: BridgeRequest) -> dict[str, An
     candidate_returns: dict[str, pd.Series] = {}
     if candidate_ids:
         sa_cand_result = supabase.table("strategy_analytics").select(
-            "strategy_id, returns_series"
+            "strategy_id, returns_series, data_quality_flags"
         ).in_("strategy_id", candidate_ids).execute()
 
         for row in rows(sa_cand_result):
             s = _records_to_series(row.get("returns_series"), name=row["strategy_id"])
             if s is not None:
                 candidate_returns[row["strategy_id"]] = s
+
+        # D-23: a BTC candidate replaces the incumbent in USD.
+        candidate_returns, _ = await _usd.convert(
+            candidate_returns, native_units_by_id(rows(sa_cand_result))
+        )
 
     # /review follow-up (T4-I1): emit the audit event BEFORE the empty-
     # candidates fast-path. "User ran the bridge, got zero candidates"

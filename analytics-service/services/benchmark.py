@@ -309,3 +309,89 @@ async def get_benchmark_returns(
             return prices_to_returns(fallback), True
         logger.warning("All benchmark sources failed: %s. Returning None.", str(e))
         return None, True
+
+
+# Phase 164.6.6.2 (D-18, D-23). The ONE price window the BTC-native -> USD
+# conversion reads, in BOTH runtimes: the stored `benchmark_prices` closes and
+# nothing else. TypeScript `readBtcCloses` (src/lib/factsheet/benchmark-source.ts)
+# reads the same rows and does NOT merge the bundled BTC_DAILY fixture (the
+# analytics image cannot ship that file), and the shared oracle fixture
+# `tests/fixtures/native_to_usd_oracle.json` pins this string as `closes_source`.
+BTC_CLOSES_SOURCE = "benchmark_prices only"
+
+_BTC_CLOSES_PAGE_SIZE = 1000
+_BTC_CLOSES_MAX_PAGES = 50
+
+
+async def get_btc_closes() -> pd.Series | None:
+    """Every stored BTC close, ascending, for the native -> USD conversion.
+
+    The Python twin of TypeScript ``readBtcCloses``: DB-only (``benchmark_prices``
+    for ``BTC``), every stored row with a usable close, no completed-day trimming
+    and no bundled-fixture prefix. A close that is not finite or not positive is
+    dropped (it cannot price a return, and the conversion treats its date as
+    missing, never as bridged). Paged by a keyset on ``date`` newest first,
+    strictly decreasing across pages.
+
+    Returns None when there is no price source: the read failed (logged), or no
+    stored close is usable. The caller converts a BTC leg to an empty series then;
+    nothing is fabricated.
+    """
+    try:
+        supabase = _benchmark_client()
+        if supabase is None:
+            return None  # already logged by `_benchmark_client`
+        found: dict[date, float] = {}
+        before: str | None = None
+        for page in range(_BTC_CLOSES_MAX_PAGES):
+            def _page(cursor: str | None = before) -> Any:
+                query = supabase.table("benchmark_prices").select(
+                    "date, close_price"
+                ).eq("symbol", "BTC")
+                if cursor is not None:
+                    query = query.lt("date", cursor)
+                return query.order("date", desc=True).limit(_BTC_CLOSES_PAGE_SIZE).execute()
+
+            batch = rows(await db_execute(_page))
+            if not batch:
+                break
+            for row in batch:
+                day = str(row["date"])[:10]
+                if before is not None and not day < before:
+                    raise RuntimeError(
+                        f"benchmark_prices page {page + 1} returned {day}, "
+                        f"not strictly older than {before}"
+                    )
+                before = day
+                try:
+                    close = float(row["close_price"])
+                except (TypeError, ValueError):
+                    continue
+                if close > 0 and close < float("inf"):
+                    found[date.fromisoformat(day)] = close
+        else:
+            raise RuntimeError(
+                f"benchmark_prices read exceeded {_BTC_CLOSES_MAX_PAGES} pages "
+                "without an empty page"
+            )
+    except _CACHE_READ_ERRORS as e:
+        logger.warning("BTC closes read failed: %s", str(e))
+        return None
+    except Exception as e:  # noqa: BLE001 — a programming error: loud, then no price source
+        logger.error(
+            "BTC closes read raised a non-DB error (%s); no price source.",
+            type(e).__name__,
+            exc_info=True,
+        )
+        sentry_sdk.capture_exception(e)
+        return None
+
+    if not found:
+        return None
+    ordered = sorted(found)
+    return pd.Series(
+        [found[d] for d in ordered],
+        index=pd.DatetimeIndex([pd.Timestamp(d) for d in ordered]),
+        name="BTC",
+        dtype=float,
+    )

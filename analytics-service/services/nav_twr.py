@@ -44,6 +44,7 @@ import pandas as pd
 # Single shared UTC-day boundary helper for BOTH flow and pnl bucketing. Do NOT
 # fork a second date helper — a divergent midnight boundary would land a flow on
 # the wrong day and silently mis-attribute a return (Pitfall #11).
+from services.account_unit import USD_FLOORS, UnitFloors
 from services.deribit_txn import _row_utc_day
 
 # ReturnsComputationMeta is imported READ-ONLY — the core extends it additively
@@ -54,8 +55,11 @@ from services.transforms import ReturnsComputationMeta
 
 # Dust floor for a NAV denominator (USD). Matches transforms.py
 # ``_DUST_BALANCE_THRESHOLD`` — below this a percentage return is gibberish, so
-# the day is flagged, never divided.
-DUST_NAV_FLOOR = 1000.0
+# the day is flagged, never divided. ALIAS of the USD row of the per-unit table
+# (``services.account_unit.USD_FLOORS``, the only place the number is written);
+# the name is kept so non-MT5 importers are untouched. A non-USD account passes its
+# own unit's floors through the ``floors=`` keyword instead (Phase 164.6.6.2, D-07).
+DUST_NAV_FLOOR = USD_FLOORS.dust_nav
 
 # Flow-dominated guard ratio: when ``|F_t| >= FLOW_DOM_RATIO * NAV_{t-1}`` the
 # external flow dwarfs the prior capital and the day's return is not
@@ -387,6 +391,7 @@ def chain_linked_twr(
     flows_by_day: pd.Series,
     *,
     prev0: float | None = None,
+    floors: UnitFloors = USD_FLOORS,
 ) -> tuple[pd.Series, dict[str, bool]]:
     """Chain-link the daily time-weighted return from a reconstructed NAV series.
 
@@ -445,7 +450,7 @@ def chain_linked_twr(
         else:
             prev = nav_vals[t - 1]  # NAV_{t-1}
 
-        guard_key = _guard_denominator(prev, flow_t)
+        guard_key = _guard_denominator(prev, flow_t, floors.dust_nav)
         if guard_key is not None:
             flags[guard_key] = True
             continue  # break the chain-link for this day; NEVER substitute
@@ -467,7 +472,9 @@ def chain_linked_twr(
     return pd.Series(returns, index=index, name="returns"), flags
 
 
-def _guard_denominator(prev_nav: float, flow: float) -> str | None:
+def _guard_denominator(
+    prev_nav: float, flow: float, dust_floor: float = DUST_NAV_FLOOR
+) -> str | None:
     """Return the DQ-01 flag key if ``prev_nav`` is not a usable denominator,
     else None. Three fail-loud guards, checked BEFORE the denominator divides —
     each breaks the chain-link for that day and flags, NEVER substitutes a base:
@@ -476,8 +483,9 @@ def _guard_denominator(prev_nav: float, flow: float) -> str | None:
         would divide-by-zero) -> ``negative_nav_guard``. This is the honest
         divergence from transforms.py: the ``estimated_start <= 0`` account
         flags here instead of silently substituting today's balance.
-      * dust NAV (``0 < prev_nav < DUST_NAV_FLOOR``) -> ``dust_nav_guard`` — a
-        percentage return on a sub-$1000 base is gibberish.
+      * dust NAV (``0 < prev_nav < dust_floor``) -> ``dust_nav_guard`` — a
+        percentage return on a sub-floor base is gibberish. ``dust_floor`` is the
+        account unit's ``dust_nav`` (default: the USD $1000 row).
       * flow-dominated (``|flow| >= FLOW_DOM_RATIO * prev_nav``) ->
         ``flow_dominated_guard`` — the external flow dwarfs prior capital.
 
@@ -493,7 +501,7 @@ def _guard_denominator(prev_nav: float, flow: float) -> str | None:
     dominating *flow*."""
     if prev_nav <= 0:
         return "negative_nav_guard"
-    if prev_nav < DUST_NAV_FLOOR:
+    if prev_nav < dust_floor:
         return "dust_nav_guard"
     if abs(flow) >= FLOW_DOM_RATIO * prev_nav:
         return "flow_dominated_guard"
@@ -593,6 +601,8 @@ def reconcile_flow_residual(
     reconstructed_start: float,
     daily_pnl: pd.Series,
     flows_by_day: pd.Series,
+    *,
+    abs_tol: float = USD_FLOORS.residual_abs_tol,
 ) -> float:
     """DQ-02 CONSTRUCTION self-check — a pure roll-vs-Σ mutation detector.
 
@@ -617,9 +627,14 @@ def reconcile_flow_residual(
     at the Phase 78 golden old-vs-new parity panel on known accounts + founder
     confirmation, and no LTP/production factsheet ships until then.
 
-    Tolerance ``max(1.00, 1e-6 * abs(terminal_nav))`` — an absolute one-dollar
-    floor (``$1.00``, consistent with the DUST_NAV_FLOOR=$1000 scale) plus a
-    relative band that scales with account size. On breach →
+    Tolerance ``max(abs_tol, 1e-6 * abs(terminal_nav))`` — an absolute floor
+    ``abs_tol`` plus a relative band that scales with account size (the relative
+    band is unitless). ``abs_tol`` is the account unit's ``residual_abs_tol``
+    (``services.account_unit``; the default is the USD row, today's $1.00). The
+    absolute band was a HIDDEN USD constant, not on the unit-sized threshold list
+    (Phase 164.6.6.2 Pitfall 2): left at $1.00 it would wave through a dropped
+    0.001 BTC flow on a BTC account. It is threaded per unit, never swapped
+    globally — concurrent jobs of different units share the process. On breach →
     ``NavReconstructionError`` (permanent, loud).
 
     T-76-03-LEAK: the raise message carries NO raw NAV/flow USD value (account-
@@ -637,7 +652,7 @@ def reconcile_flow_residual(
         reconstructed_start, field="reconstructed_start", row={}
     )
     residual = terminal - start - float(pnl.sum()) - float(flows.sum())
-    tol = max(1.00, 1e-6 * abs(terminal))
+    tol = max(abs_tol, 1e-6 * abs(terminal))
     if not np.isfinite(residual) or abs(residual) > tol:
         raise NavReconstructionError(
             "nav_twr DQ-02 construction residual exceeds tolerance — the "
@@ -812,6 +827,7 @@ def reconstruct_nav_and_twr(
     *,
     external_flows: Sequence[Any] | None = None,
     open_unrealized_usd: float = 0.0,
+    floors: UnitFloors = USD_FLOORS,
 ) -> tuple[pd.Series, NavTWRMeta]:
     """Public entry: reconstruct the daily NAV backward from ``anchor_nav`` and
     chain-link the daily time-weighted return.
@@ -833,7 +849,7 @@ def reconstruct_nav_and_twr(
     uPnL enters the series, hence NO step discontinuity at the anchor day. No
     per-day historical-uPnL array is ever constructed. When
     ``|open_unrealized_usd| / anchor_nav > UNREALIZED_MATERIALITY_RATIO`` (and the
-    anchor is above ``DUST_NAV_FLOOR``), the wedge is material relative to the
+    anchor is above the unit's ``floors.dust_nav``), the wedge is material relative to the
     reported anchor and ``unrealized_pnl_in_anchor`` is raised
     (-> ``complete_with_warnings``). The flag carries a BOOL only — the raw USD
     wedge is never logged or emitted (account-size leak class T-77-02).
@@ -868,9 +884,13 @@ def reconstruct_nav_and_twr(
     )
     reconstructed_start = float(nav.iloc[0]) - pnl0 - float(flows0)
     reconcile_flow_residual(
-        terminal_nav, reconstructed_start, daily_pnl, flows_by_day
+        terminal_nav,
+        reconstructed_start,
+        daily_pnl,
+        flows_by_day,
+        abs_tol=floors.residual_abs_tol,
     )
-    returns, flags = chain_linked_twr(nav, daily_pnl, flows_by_day)
+    returns, flags = chain_linked_twr(nav, daily_pnl, flows_by_day, floors=floors)
     # DQ-03 (§6.2): the SAME function that computes the honest cumulative decides
     # brokenness — ONE break-detection semantics, no forked detector. An INTERIOR
     # break (a guard-NaN flanked by valid returns) merges {"twr_chain_broken":
@@ -884,6 +904,6 @@ def reconstruct_nav_and_twr(
     # flagged by the DQ-01 dust guard on its own merits. A BOOL is merged (never
     # the raw USD wedge — account-size leak T-77-02); no key when immaterial so the
     # SC-4 zero-wedge default stays byte/status-identical.
-    if anchor > DUST_NAV_FLOOR and abs(upnl) / anchor > UNREALIZED_MATERIALITY_RATIO:
+    if anchor > floors.dust_nav and abs(upnl) / anchor > UNREALIZED_MATERIALITY_RATIO:
         flags = {**flags, "unrealized_pnl_in_anchor": True}
     return returns, _build_nav_meta(flags)

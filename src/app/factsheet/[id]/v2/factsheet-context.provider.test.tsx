@@ -303,3 +303,83 @@ describe("FactsheetProvider — persist opt-out (38-02)", () => {
     expect(window.location.search).toBe("");
   });
 });
+
+/**
+ * Phase 164.6.6.2 plan 06 (D-10, UI-SPEC A7, T-164.6.6.2-20) — a strategy whose
+ * returns are in BTC can never have BTC as its active comparator, whichever way
+ * the value arrives: the share URL (user-controlled) or the stored view.
+ * `?cmp=spx` and `?cmp=none` still adopt exactly as today.
+ */
+describe("FactsheetProvider — cmp=btc is ignored for a strategy whose returns are in BTC (A7)", () => {
+  function makeUnitPayload(): FactsheetPayload {
+    const dailyReturns = Array.from({ length: 200 }).map((_, i) => ({
+      date: `2024-${String(((i / 28) | 0) + 1).padStart(2, "0")}-${String(
+        (i % 28) + 1,
+      ).padStart(2, "0")}`,
+      value: Math.sin(i / 9) * 0.005,
+    }));
+    const payload = buildFactsheetPayload(
+      {
+        id: "test-strategy",
+        name: "Test Strategy",
+        types: ["test"],
+        markets: ["crypto"],
+        computedAt: "2026-05-20T00:00:00Z",
+        trustTier: null,
+      },
+      dailyReturns,
+      { returnsUnit: "BTC" },
+    );
+    if (!payload) throw new Error("buildFactsheetPayload returned null in test");
+    return payload;
+  }
+
+  function renderUnit() {
+    return render(
+      <FactsheetProvider payload={makeUnitPayload()}>
+        <PersistHarness />
+      </FactsheetProvider>,
+    );
+  }
+
+  it("starts at none, and a ?cmp=btc URL leaves it at none while the rest of the URL still adopts", async () => {
+    window.history.replaceState(null, "", "/factsheet/test-strategy/v2?cmp=btc&dark=1");
+    act(() => {
+      renderUnit();
+    });
+    // dark=1 is adopted in the SAME effect run that reads cmp, so once it flips
+    // the cmp branch has already been evaluated; asserting after it is not vacuous.
+    await waitFor(() => expect(screen.getByTestId("dark").textContent).toBe("dark"));
+    expect(screen.getByTestId("cmp").textContent).toBe("none");
+  });
+
+  it("a stored cmp of btc is ignored the same way", async () => {
+    lsStore.set(KEY, JSON.stringify({ cmp: "btc", dark: "1" }));
+    act(() => {
+      renderUnit();
+    });
+    await waitFor(() => expect(screen.getByTestId("dark").textContent).toBe("dark"));
+    expect(screen.getByTestId("cmp").textContent).toBe("none");
+  });
+
+  it("?cmp=spx still selects SPX", async () => {
+    window.history.replaceState(null, "", "/factsheet/test-strategy/v2?cmp=spx");
+    act(() => {
+      renderUnit();
+    });
+    await waitFor(() => expect(screen.getByTestId("cmp").textContent).toBe("spx"));
+  });
+
+  it("a USD strategy still adopts ?cmp=btc (the guard is the unit, not the key)", async () => {
+    lsStore.set(KEY, JSON.stringify({ cmp: "spx" }));
+    window.history.replaceState(null, "", "/factsheet/test-strategy/v2?cmp=btc");
+    act(() => {
+      renderProvider();
+    });
+    // Default is already btc, so wait on a stable read: the URL value wins over
+    // the stored spx, which proves the branch ran and adopted btc.
+    await waitFor(() => expect(screen.getByTestId("cmp").textContent).toBe("btc"));
+    await new Promise(r => setTimeout(r, 50));
+    expect(screen.getByTestId("cmp").textContent).toBe("btc");
+  });
+});

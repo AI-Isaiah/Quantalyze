@@ -1,5 +1,82 @@
 # Changelog
 
+## [0.126.0.0] - 2026-10-07 — BTCNATIVE: an MT5 account denominated in BTC
+
+Phase 164.6.6.2 lets an MT5 account whose deposit currency is BTC produce a strategy. Its returns are
+computed and shown in BTC, and wherever it is blended with USD strategies it is converted to USD at the
+daily BTC close.
+
+### Added
+- **A BTC MT5 account derives a native return series.** The derive reads `account_info().currency`
+  once, classifies it through one floors table (`services/account_unit.py`: USD 1000 / 100 / 1.00,
+  BTC 0.001 / 0.0001 / 1e-6), and threads those floors through `nav_twr`, the MT5 combiners, the
+  residual self-check and the history-settle wait. Before this, a BTC account read as dust against the
+  USD floor and produced no series.
+- **The unit is stored on the key.** New worker-owned columns `api_keys.account_currency` and
+  `account_balance_native` (migration `20261007120000`, DDL only, no grant to anon or authenticated,
+  checked by the migration itself). A native account nulls `account_balance_usdt` instead of writing BTC
+  into it. A stored currency that later differs fails the derive by name before any write (D-03).
+- **The analytics row says which unit it is in.** `native_unit` in `data_quality_flags` is a fact, not
+  a warning: the row is `complete`, carries no benchmark-relative metrics against a USD benchmark, and
+  stamps no `benchmark_unavailable`.
+- **Every factsheet surface names the unit.** A "Returns in BTC" chip on the masthead, tear sheet and
+  share card; return labels and chart titles read "in BTC"; AUM and Minimum Allocation show "—" (the
+  declared AUM is a USD figure). The share card reads the unit from the row, never from the URL, and the
+  payload cache key moves v11 → v12.
+- **One conversion, BTC → USD at the daily close.** `convertNativeReturnsToUsd` computes
+  `(1 + r)(1 + btc) - 1` over the BTC calendar from stored closes only (`readBtcCloses`). A day without
+  two priced closes is absent, never 0. The allocator dashboard, the returns route, the portfolio page,
+  the shared-scenario page and the scenario composer each convert exactly once; a book leg already
+  arrives in USD and is never converted again.
+- **A Python twin of the conversion** (`services/native_to_usd.py`), pinned to the same hand-computed
+  oracle fixture (`tests/fixtures/native_to_usd_oracle.json`, including the 0.21 case), wired into the
+  portfolio analytics, optimizer, bridge, simulator and match engine.
+- **The composer says how a BTC row is blended.** "Returns in BTC", "CAGR IN BTC" and a line saying
+  the blend uses USD at the daily BTC price.
+
+### Changed
+- **No BTC comparison for a strategy whose returns are in BTC.** The comparator defaults to none, the
+  picker drops BTC with the stated reason, `?cmp=btc` is ignored, and section IV, the BTC event studies,
+  the strategy-vs-BTC correlation cells and the stress-window bench cells show "—" with the reason. SPX
+  comparisons are unchanged.
+- **USD-only surfaces leave a BTC key out by name.** The allocator equity curve omits it with the flag
+  `native_unit_key_omitted`; the backfill never builds a `value_usd` row from it; the positions poll
+  parses the currency through the shared classifier; departed history explains the omission.
+- **A currency the floors table does not know (EUR, ETH) is refused by name** with a fixed message,
+  never processed against the wrong floors. A blank currency retries.
+
+### Fixed
+- **An unpriced BTC leg is said to be left out, not shown as blended** (review SFH-1). When no BTC price
+  can be read, the returns route and the dashboard carry `native_unpriced`, and the composer shows "No
+  BTC price available, so this strategy is left out of the USD blend." instead of the blend line.
+  `readBtcCloses` now logs when it finds no usable close.
+- **The tear sheet fails closed when it cannot confirm the unit** (review SFH-2). A failed unit read
+  withholds the return figures, Minimum Allocation and the return charts with a note, instead of
+  printing a BTC strategy as USD.
+
+### Tests
+- Every new guard was shown red against a neutered implementation and restored from a byte backup.
+  Full suites on the merged branch: vitest 18,806 passed (the 2 failures are the known pre-existing
+  1-ULP `compute.conventions` B/C), pytest 8,215 passed and 90 skipped, lint and type-check clean.
+- Review: round 1 found 3 HIGH (2 fixed, 1 routed, below) and 3 MEDIUM; round 2 and the silent-failure
+  recheck were clean. Migration review and RLS audit: 0 findings. Security audit: 44 of 47 closed, 3
+  close in the post-deploy check.
+
+### Notes
+- **Post-deploy, founder step:** press Sync on MM-2x. The live read (plan 12) checks the stored unit, a
+  complete BTC-labelled series and the D-06 canary of other MT5 keys refused as an unknown unit.
+- **The migration applies to TEST and then PROD on merge with no human stop.**
+- **Known limits, recorded rather than fixed:**
+  - The Python analytics service reads the stored wealth curve (`returns_series`) as daily returns in
+    every blend, for USD strategies too. Measured on PROD 2026-10-07. Routed to Phase 164.6.6.2.2
+    WEALTHRETURNS (founder: ship BTC first); until then the Python side of the BTC conversion is wrong
+    on real data exactly as every USD leg already is. The website's paths convert correctly.
+  - A BTC key backfilled before this deploy may keep BTC-as-dollars `value_usd` rows (unmeasured).
+  - The simulator and match engine drop an unpriced BTC leg with a log only.
+  - The shared-scenario page drops an unpriced leg with no on-page note (it shows no unit copy).
+  - The USD view of a BTC account (converted NAV, allocator snapshots, `account_balance_usdt`) is
+    Phase 164.6.6.2.1 BTCUSDVIEW.
+
 ## [0.125.2.1] - 2026-10-07 — UIPOLISH: the small UI defects from the 2026-10-03 UAT pass
 
 Phase 164.6.6.3.1 fixes the small UI defects the 2026-10-03 production UAT pass found.

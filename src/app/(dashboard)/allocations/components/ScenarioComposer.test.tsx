@@ -306,6 +306,80 @@ vi.mock("@/lib/sentry-capture", () => ({
   __resetCaptureThrottleForTests: () => {},
 }));
 
+// Phase 164.6.6.2 plan 11 (D-22) — the CROSS-SEAM parity test below runs the REAL
+// returns-route `GET`, the REAL `getMyAllocationDashboard` and the REAL
+// `resolveSharedScenario` against ONE stored BTC series and ONE price window. Only
+// the DATABASE layer is faked: the Supabase client (rows per table) and
+// `readBtcCloses`, which is the stored-closes read and returns the window the
+// database would. No seam's OUTPUT is mocked. Every mock here is inert for the
+// other ~420 cases in this file, which never import a route, a query helper or a
+// server client.
+const parityDb = vi.hoisted(() => ({
+  rows: {} as Record<string, unknown[]>,
+  closes: null as unknown,
+  closesReads: 0,
+}));
+vi.mock("server-only", () => ({}));
+vi.mock("@/lib/supabase/server", () => ({
+  createClient: async () => parityDbClient(),
+}));
+vi.mock("@/lib/supabase/admin", () => ({
+  createAdminClient: () => parityDbClient(),
+}));
+vi.mock("@/lib/ratelimit", () => ({
+  userActionLimiter: { __mock: "userActionLimiter" },
+  checkLimit: async () => ({ success: true, retryAfter: 0 }),
+  isRateLimitMisconfigured: () => false,
+}));
+vi.mock("next/server", async (importActual) => ({
+  ...(await importActual<typeof import("next/server")>()),
+  after: () => {},
+}));
+vi.mock("@/lib/queries", async (importActual) => ({
+  ...(await importActual<typeof import("@/lib/queries")>()),
+  // The route reads the published trust tier through this helper; the dashboard
+  // reads its own embed, so only the route's call is faked (no tier).
+  readPublicVerificationSignals: async () => new Map(),
+}));
+vi.mock("@/lib/factsheet/benchmark-source", async (importActual) => ({
+  ...(await importActual<typeof import("@/lib/factsheet/benchmark-source")>()),
+  readBtcCloses: async () => {
+    parityDb.closesReads += 1;
+    return parityDb.closes;
+  },
+}));
+/** A PostgREST-shaped builder that ignores filters and answers each table with
+ *  the rows `parityDb.rows` holds for it. Enough for the three seams' reads. */
+function parityDbClient() {
+  const builderFor = (table: string) => {
+    const rows = parityDb.rows[table] ?? [];
+    const result = { data: rows, error: null, count: rows.length };
+    const builder: Record<string, unknown> = {};
+    const self = new Proxy(builder, {
+      get(_t, prop: string) {
+        if (prop === "then") {
+          return (res: (v: unknown) => unknown) => Promise.resolve(res(result));
+        }
+        if (prop === "maybeSingle" || prop === "single") {
+          return async () => ({ data: rows[0] ?? null, error: null });
+        }
+        return () => self;
+      },
+    });
+    return self;
+  };
+  return {
+    auth: {
+      getUser: async () => ({
+        data: { user: { id: "user-1" } },
+        error: null,
+      }),
+    },
+    from: (table: string) => builderFor(table),
+    rpc: async () => ({ data: [], error: null }),
+  };
+}
+
 // Phase 167.1 review round 2 WR-01 — `excludedUntrusted` renders nowhere
 // until the founder answers D-06, so the composer's wiring of D-20's
 // manager-side set is observable only at the call. A PASS-THROUGH spy: the real
@@ -1890,6 +1964,471 @@ describe("ScenarioComposer — Phase 10 Plan 06b", () => {
       ),
     ).toBe(true);
     warnSpy.mockRestore();
+  });
+
+  // -------------------------------------------------------------------------
+  // Phase 164.6.6.2 plan 11 (D-18, D-22, D-23) — a BTC strategy enters the blend
+  // in USD, converted ONCE, server-side. The composer holds no conversion code:
+  // a lazily-added leg blends the returns route's `daily_returns_usd`, a book leg
+  // blends the dashboard payload's already-converted series, and neither is ever
+  // converted again here.
+  //
+  // Oracle rule (money math): every expected value is a hand-computed literal.
+  // (1.1 x 66000) / (1.0 x 60000) - 1 = 0.21, so a BTC-unit day of +10% on a day
+  // BTC itself rose 10% is +21% in USD. The expected 0.21 is NEVER produced by
+  // calling the converter; a test that ran the implementation's own formula could
+  // not fail when that formula drifted.
+  // -------------------------------------------------------------------------
+  const NATIVE_RAW = [
+    { date: "2026-02-01", value: 0.05 },
+    { date: "2026-02-02", value: 0.1 },
+  ];
+  const NATIVE_USD = [{ date: "2026-02-02", value: 0.21 }];
+
+  /** Stub fetch so the lazy returns route answers with `body` for LAZY_ID. */
+  function stubLazyReturns(body: Record<string, unknown>) {
+    const fetchMock = vi.fn((url: string) => {
+      if (String(url).startsWith("/api/benchmark/btc/prices")) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => EMPTY_BTC_CLOSES,
+        });
+      }
+      if (String(url).includes(`/api/strategies/${LAZY_ID}/returns`)) {
+        return Promise.resolve({ ok: true, status: 200, json: async () => body });
+      }
+      return Promise.resolve({ ok: true, status: 200, json: async () => ({}) });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    return fetchMock;
+  }
+
+  /** Add LAZY_ID and wait until its returns fetch has been made and settled. */
+  async function addLazyLeg(fetchMock: ReturnType<typeof stubLazyReturns>) {
+    addStrategy({
+      id: LAZY_ID,
+      name: "Lazy Native Strat",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+    await waitFor(() => {
+      expect(
+        fetchMock.mock.calls.some((c) =>
+          String(c[0]).includes(`/api/strategies/${LAZY_ID}/returns`),
+        ),
+      ).toBe(true);
+    });
+    await waitFor(() => {
+      expect(screen.queryByTestId("scenario-loading-returns")).toBeNull();
+    });
+  }
+
+  function renderEmptyBook() {
+    render(
+      <ScenarioComposer
+        payload={makePayload()}
+        allocatorId={ALLOCATOR_A}
+        allocatorMandate={null}
+      />,
+    );
+  }
+
+  it("T_BTC_LAZY_USD a lazily-added BTC leg blends the route's daily_returns_usd, never the raw BTC daily_returns", async () => {
+    const fetchMock = stubLazyReturns({
+      daily_returns: NATIVE_RAW,
+      returns_unit: "BTC",
+      daily_returns_usd: NATIVE_USD,
+    });
+    renderEmptyBook();
+    await addLazyLeg(fetchMock);
+    await waitFor(() => {
+      expect(latestReturnsLookup()[LAZY_ID]).toEqual(NATIVE_USD);
+    });
+  });
+
+  it("T_BTC_LAZY_STALE a lazily-added BTC leg whose body lacks daily_returns_usd (stale deploy) contributes [] and is warm-up-gated, never the raw 0.10", async () => {
+    const fetchMock = stubLazyReturns({
+      daily_returns: NATIVE_RAW,
+      returns_unit: "BTC",
+    });
+    renderEmptyBook();
+    await addLazyLeg(fetchMock);
+    expect(latestReturnsLookup()[LAZY_ID]).toEqual([]);
+  });
+
+  it("T_BTC_LAZY_UNPRICED a native leg with daily_returns_usd [] (no price source) contributes [], not the raw BTC series", async () => {
+    const fetchMock = stubLazyReturns({
+      daily_returns: NATIVE_RAW,
+      returns_unit: "BTC",
+      daily_returns_usd: [],
+    });
+    renderEmptyBook();
+    await addLazyLeg(fetchMock);
+    expect(latestReturnsLookup()[LAZY_ID]).toEqual([]);
+  });
+
+  it("T_BTC_LAZY_MALFORMED_UNIT a malformed returns_unit (lowercase) degrades to a USD leg: the raw series passes through unchanged", async () => {
+    const fetchMock = stubLazyReturns({
+      daily_returns: NATIVE_RAW,
+      returns_unit: "btc",
+      daily_returns_usd: NATIVE_USD,
+    });
+    renderEmptyBook();
+    await addLazyLeg(fetchMock);
+    await waitFor(() => {
+      expect(latestReturnsLookup()[LAZY_ID]).toEqual(NATIVE_RAW);
+    });
+  });
+
+  it("T_BTC_LAZY_USD_LEG a USD lazy leg (returns_unit null, daily_returns_usd null) is identical to today: the route's daily_returns", async () => {
+    const fetchMock = stubLazyReturns({
+      daily_returns: LAZY_SERIES,
+      returns_unit: null,
+      daily_returns_usd: null,
+    });
+    renderEmptyBook();
+    await addLazyLeg(fetchMock);
+    await waitFor(() => {
+      expect(latestReturnsLookup()[LAZY_ID]).toEqual(LAZY_SERIES);
+    });
+  });
+
+  it("T_BTC_LAZY_PURGE remove + re-add purges the fetched unit and USD series: while the retry is in flight the leg is [], not the first answer", async () => {
+    const first = stubLazyReturns({
+      daily_returns: NATIVE_RAW,
+      returns_unit: "BTC",
+      daily_returns_usd: NATIVE_USD,
+    });
+    renderEmptyBook();
+    await addLazyLeg(first);
+    await waitFor(() => {
+      expect(latestReturnsLookup()[LAZY_ID]).toEqual(NATIVE_USD);
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: /Remove from scenario/i }),
+    );
+    // The retry never answers while we look. A leaked unit + USD series would
+    // keep blending the PREVIOUS answer here; a clean purge is [] (warm-up-gated).
+    const retry = vi.fn((url: string) => {
+      if (String(url).startsWith("/api/benchmark/btc/prices")) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => EMPTY_BTC_CLOSES,
+        });
+      }
+      return new Promise(() => {});
+    });
+    vi.stubGlobal("fetch", retry);
+    addStrategy({
+      id: LAZY_ID,
+      name: "Lazy Native Strat",
+      markets: ["binance"],
+      strategy_types: ["momentum"],
+    });
+    await waitFor(() => {
+      expect(
+        retry.mock.calls.some((c) =>
+          String(c[0]).includes(`/api/strategies/${LAZY_ID}/returns`),
+        ),
+      ).toBe(true);
+    });
+    expect(latestReturnsLookup()[LAZY_ID]).toEqual([]);
+  });
+
+  // -------------------------------------------------------------------------
+  // CROSS-SEAM PARITY (D-22). Four seams blend a BTC strategy and they must hand
+  // the engine the SAME USD series for it: the lazy returns route (read by the
+  // composer), the dashboard payload (a book leg), and the shared-scenario
+  // resolver. One stored series, one stored price window, the REAL code on every
+  // seam; only the database is faked (see `parityDb` at the top of the file). The
+  // hand-computed literals are the independent invariant, and
+  // `convertNativeReturnsToUsd` called directly on the same inputs is the second
+  // witness: a parity test that only compared the seams to each other would pass
+  // if all of them were wrong the same way.
+  // -------------------------------------------------------------------------
+  describe("cross-seam parity: one BTC strategy, one price window, four seams", () => {
+    const PARITY_ID = "aaaaaaaa-1111-4222-8333-444444444444";
+    const DAYS = 12;
+    const dates = Array.from({ length: DAYS }, (_, i) =>
+      new Date(Date.UTC(2026, 1, 1 + i)).toISOString().slice(0, 10),
+    );
+    // A flat +10% BTC-unit day, every day. BTC's own close alternates 60000 /
+    // 66000, so an up day is (1 + 0.10) x (66000 / 60000) - 1 = 0.21 and a down
+    // day is (1 + 0.10) x (60000 / 66000) - 1 = 0 exactly. Day 0 has no prior
+    // priced day and drops, leaving 11 USD days.
+    const NATIVE = dates.map((date) => ({ date, value: 0.1 }));
+    const CLOSES = {
+      prices: dates.map((date, i) => ({ date, close: i % 2 === 0 ? 60_000 : 66_000 })),
+      dropped: [] as string[],
+      through: dates[DAYS - 1],
+    };
+    const EXPECTED = dates.slice(1).map((date, k) => ({
+      date,
+      value: (k + 1) % 2 === 1 ? 0.21 : 0,
+    }));
+
+    function expectUsdSeries(got: unknown) {
+      const pts = got as Array<{ date: string; value: number }>;
+      expect(pts.map((p) => p.date)).toEqual(EXPECTED.map((p) => p.date));
+      pts.forEach((p, i) => expect(p.value).toBeCloseTo(EXPECTED[i].value, 12));
+    }
+
+    beforeEach(() => {
+      parityDb.closes = CLOSES;
+      parityDb.closesReads = 0;
+      parityDb.rows = {
+        profiles: [{ role: "allocator" }],
+        strategies: [{ id: PARITY_ID, asset_class: "crypto" }],
+        strategy_analytics: [
+          {
+            daily_returns: NATIVE,
+            returns_series: null,
+            computation_status: "complete",
+            data_quality_flags: { native_unit: "BTC" },
+            cagr: 0.2,
+            sharpe: 1.1,
+          },
+        ],
+        portfolios: [
+          {
+            id: "real-1",
+            user_id: "user-1",
+            name: "Active Allocation",
+            description: null,
+            created_at: "2024-06-01T00:00:00Z",
+            is_test: false,
+          },
+        ],
+        portfolio_strategies: [
+          {
+            portfolio_id: "real-1",
+            strategy_id: PARITY_ID,
+            current_weight: 1,
+            allocated_amount: 30000,
+            alias: null,
+            strategy: {
+              id: PARITY_ID,
+              name: "Native Parity Strat",
+              codename: null,
+              disclosure_tier: "institutional",
+              strategy_types: [],
+              markets: [],
+              start_date: null,
+              asset_class: "crypto",
+              created_at: null,
+              organization: null,
+              strategy_verifications: [],
+              strategy_analytics: {
+                daily_returns: NATIVE,
+                cagr: 0.2,
+                sharpe: 1.1,
+                volatility: 0.2,
+                max_drawdown: -0.1,
+                data_quality_flags: { native_unit: "BTC" },
+                returns_series: null,
+                computation_status: "complete",
+              },
+            },
+          },
+        ],
+      };
+    });
+
+    it("T_BTC_PARITY the composer's lazy leg, the shared-scenario blend and the dashboard payload carry the same USD series, equal to the hand-computed oracle and to the converter on the same inputs", async () => {
+      // Witness 0: the independent invariant, and the converter on the same
+      // inputs, agree with each other before any seam is involved.
+      const { convertNativeReturnsToUsd } = await import(
+        "@/lib/factsheet/native-to-usd"
+      );
+      expectUsdSeries(convertNativeReturnsToUsd(NATIVE, "BTC", CLOSES));
+
+      // Seam 1 — the REAL returns route. Its body goes to the composer UNMODIFIED.
+      const { NextRequest } = await import("next/server");
+      const { GET } = await import("@/app/api/strategies/[id]/returns/route");
+      const res = await GET(
+        new NextRequest(`http://localhost:3000/api/strategies/${PARITY_ID}/returns`, {
+          method: "GET",
+          headers: { origin: "http://localhost:3000" },
+        }),
+        { params: Promise.resolve({ id: PARITY_ID }) },
+      );
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.returns_unit).toBe("BTC");
+      // Non-vacuity: the route really converted, and the raw series is not it.
+      expectUsdSeries(body.daily_returns_usd);
+      expect(body.daily_returns).toEqual(NATIVE);
+
+      // Seam 2 — the composer, fed that body through its lazy fetch.
+      const fetchMock = vi.fn((url: string) =>
+        Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () =>
+            String(url).startsWith("/api/benchmark/btc/prices")
+              ? EMPTY_BTC_CLOSES
+              : body,
+        }),
+      );
+      vi.stubGlobal("fetch", fetchMock);
+      render(
+        <ScenarioComposer
+          payload={makePayload()}
+          allocatorId={ALLOCATOR_A}
+          allocatorMandate={null}
+        />,
+      );
+      addStrategy({
+        id: PARITY_ID,
+        name: "Native Parity Strat",
+        markets: ["binance"],
+        strategy_types: ["momentum"],
+      });
+      await waitFor(() => {
+        expect(
+          (latestReturnsLookup()[PARITY_ID] as unknown[] | undefined)?.length,
+        ).toBe(DAYS - 1);
+      });
+      const composerLeg = latestReturnsLookup()[PARITY_ID];
+      expectUsdSeries(composerLeg);
+
+      // Seam 3 — the REAL shared-scenario resolver, handed the RAW stored series
+      // and the unit (what its page reads), converting on the same window. A
+      // single fully-weighted leg makes the blend IS the leg.
+      const { resolveSharedScenario } = await import(
+        "@/app/scenario-share/[token]/share-resolve"
+      );
+      const { SCENARIO_SCHEMA_VERSION } = await import(
+        "@/app/(dashboard)/allocations/lib/scenario-state"
+      );
+      const shared = resolveSharedScenario(
+        {
+          name: "Parity share",
+          draft: {
+            schema_version: SCENARIO_SCHEMA_VERSION,
+            init_holdings_fingerprint: "",
+            toggleByScopeRef: { [PARITY_ID]: true },
+            addedStrategies: [
+              {
+                id: PARITY_ID as never,
+                name: "Native Parity Strat",
+                markets: ["BTC"],
+                strategy_types: ["trend"],
+              },
+            ],
+            weightOverrides: { [PARITY_ID]: 1 },
+            memberKeyIds: [],
+            lastEditedAt: "2026-06-22T00:00:00.000Z",
+          },
+          schema_version: SCENARIO_SCHEMA_VERSION,
+          series: [{ strategy_id: PARITY_ID, daily_returns: NATIVE }],
+        },
+        {},
+        {},
+        { [PARITY_ID]: "BTC" },
+        CLOSES,
+      );
+      expect(shared.kind).toBe("ok");
+      if (shared.kind !== "ok") throw new Error("expected ok");
+      expectUsdSeries(shared.portfolioDaily);
+
+      // Seam 4 — the REAL dashboard query, reading the stored BTC series of a
+      // book row through the faked database.
+      const { getMyAllocationDashboard } = await import("@/lib/queries");
+      const dash = await getMyAllocationDashboard("user-1");
+      const row = dash.strategies.find((r) => r.strategy_id === PARITY_ID);
+      expect(row, "the book row did not reach the payload").toBeDefined();
+      const dashLeg = (
+        row!.strategy as unknown as {
+          strategy_analytics: { daily_returns: unknown };
+        }
+      ).strategy_analytics.daily_returns;
+      expectUsdSeries(dashLeg);
+      expect((row!.strategy as unknown as { returns_unit: unknown }).returns_unit).toBe(
+        "BTC",
+      );
+
+      // All four, equal to each other point for point.
+      expect(composerLeg).toEqual(body.daily_returns_usd);
+      expect(shared.portfolioDaily.map((p) => p.date)).toEqual(
+        (composerLeg as Array<{ date: string }>).map((p) => p.date),
+      );
+      expect(dashLeg).toEqual(composerLeg);
+    });
+  });
+
+  describe("book legs (the payload series is ALREADY USD)", () => {
+    // Two points: a second conversion pairs day 2 against BTC's own +10% and
+    // would return 1.21 x 1.10 - 1 = 0.331 in place of the payload's 0.21.
+    const BOOK_USD = [
+      { date: "2026-02-01", value: 0.05 },
+      { date: "2026-02-02", value: 0.21 },
+    ];
+    const BTC_CLOSES = {
+      prices: [
+        { date: "2026-02-01", close: 60_000 },
+        { date: "2026-02-02", close: 66_000 },
+      ],
+      dropped: [],
+      through: "2026-02-02",
+    };
+
+    it("T_BTC_BOOK_ONCE a BTC book leg is blended as the payload delivered it: not converted a second time, even with BTC closes in hand", async () => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn((url: string) =>
+          Promise.resolve({
+            ok: true,
+            status: 200,
+            json: async () =>
+              String(url).startsWith("/api/benchmark/btc/prices")
+                ? BTC_CLOSES
+                : {},
+          }),
+        ),
+      );
+      const payload = makePayload({
+        strategies: [
+          {
+            strategy: {
+              id: BOOK_ID,
+              disclosure_tier: "verified",
+              returns_unit: "BTC",
+              strategy_analytics: {
+                cagr: 0.1,
+                sharpe: 1.0,
+                daily_returns: BOOK_USD,
+              },
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            } as any,
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          } as any,
+        ],
+      });
+      render(
+        <ScenarioComposer
+          payload={payload}
+          allocatorId={ALLOCATOR_A}
+          allocatorMandate={null}
+        />,
+      );
+      addStrategy({
+        id: BOOK_ID,
+        name: "Native Book Strat",
+        markets: ["binance"],
+        strategy_types: ["momentum"],
+      });
+      // Let the benchmark closes land in the composer's own `btc` state, so a
+      // client-side conversion would have a window to convert with.
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(latestReturnsLookup()[BOOK_ID]).toEqual(BOOK_USD);
+    });
   });
 
   // -------------------------------------------------------------------------

@@ -497,6 +497,16 @@ vi.mock("next/server", async (importActual) => ({
   },
 }));
 
+// Phase 164.6.6.2 plan 09 (D-18, D-22): the dashboard reads BTC closes through
+// plan 08's DB-only `readBtcCloses`. Mocked here so a test chooses the price
+// window (or a read failure) and counts the reads; every other export of the
+// module stays real.
+const btcCloses = vi.hoisted(() => ({ read: vi.fn() }));
+vi.mock("@/lib/factsheet/benchmark-source", async (importActual) => ({
+  ...(await importActual<typeof import("@/lib/factsheet/benchmark-source")>()),
+  readBtcCloses: btcCloses.read,
+}));
+
 // ------------------------------------------------------------------
 // Tests
 // ------------------------------------------------------------------
@@ -4808,5 +4818,197 @@ describe("getMyAllocationDashboard — Open Positions reads each key's own lates
     expect(
       result.holdingsSummary.map((h) => `${h.api_key_id}:${h.symbol}`),
     ).toEqual(["key-new:ETH"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 164.6.6.2 plan 09 (D-18, D-22, D-13): a BTC-native strategy in the
+// allocator's book reaches the dashboard payload as a USD series.
+//
+// WHY: the composer's book legs, the scenario compare panel and the table's MTD
+// all blend or reduce this payload's `daily_returns`. A BTC account's raw
+// returns blended with USD ones silently drop the BTC price leg (a 10% BTC day
+// on a BTC account is a 21% USD day when BTC itself moved 10%). The expected
+// values are hand-computed literals, never produced by the function under test:
+//   NAV 1.0 -> 1.1 in BTC, closes 60000 -> 66000:  (1.1 * 66000) / (1.0 * 60000) - 1 = 0.21
+// ---------------------------------------------------------------------------
+describe("getMyAllocationDashboard — 164.6.6.2 BTC-native book rows convert to USD", () => {
+  const BTC_SERIES = [
+    { date: "2026-01-01", value: 0.03 },
+    { date: "2026-01-02", value: 0.1 },
+  ];
+  const CLOSES = {
+    prices: [
+      { date: "2026-01-01", close: 60000 },
+      { date: "2026-01-02", close: 66000 },
+    ],
+    dropped: [] as string[],
+    through: "2026-01-02",
+  };
+
+  beforeEach(() => {
+    resetState();
+    state.portfolios = [PORTFOLIO_FIXTURE];
+    btcCloses.read.mockReset();
+    btcCloses.read.mockResolvedValue(CLOSES);
+  });
+
+  async function dashboardFor(rows: Array<Parameters<typeof psProvenance>[0]>) {
+    state.portfolioStrategies = rows.map(
+      (r) => psProvenance(r) as (typeof state.portfolioStrategies)[number],
+    );
+    const { getMyAllocationDashboard } = await import("./queries");
+    return getMyAllocationDashboard("user-1");
+  }
+  const seriesOf = (row: { strategy: unknown }) =>
+    (
+      (row.strategy as { strategy_analytics: { daily_returns: unknown } })
+        .strategy_analytics
+    ).daily_returns;
+
+  it("emits the USD series and returns_unit BTC for a native row (0.21, day 0 dropped)", async () => {
+    const result = await dashboardFor([
+      { daily_returns: BTC_SERIES, data_quality_flags: { native_unit: "BTC" } },
+    ]);
+    const row = result.strategies.find((s) => s.strategy_id === "sc")!;
+    expect(seriesOf(row)).toEqual([{ date: "2026-01-02", value: expect.closeTo(0.21, 12) }]);
+    expect((row.strategy as unknown as { returns_unit: unknown }).returns_unit).toBe("BTC");
+    expect((row.strategy as unknown as { series_state: unknown }).series_state).toBe("available");
+  });
+
+  it("parity: the payload series is exactly convertNativeReturnsToUsd on the same inputs", async () => {
+    const { convertNativeReturnsToUsd } = await import("@/lib/factsheet/native-to-usd");
+    const result = await dashboardFor([
+      { daily_returns: BTC_SERIES, data_quality_flags: { native_unit: "BTC" } },
+    ]);
+    const row = result.strategies.find((s) => s.strategy_id === "sc")!;
+    expect(seriesOf(row)).toEqual(convertNativeReturnsToUsd(BTC_SERIES, "BTC", CLOSES));
+  });
+
+  it("a USD row is unchanged, returns_unit is null, and no closes are read", async () => {
+    const result = await dashboardFor([
+      { daily_returns: BTC_SERIES, data_quality_flags: null },
+    ]);
+    const row = result.strategies.find((s) => s.strategy_id === "sc")!;
+    expect(seriesOf(row)).toEqual(BTC_SERIES);
+    expect((row.strategy as unknown as { returns_unit: unknown }).returns_unit).toBeNull();
+    expect(btcCloses.read).not.toHaveBeenCalled();
+  });
+
+  it("reads the closes ONCE for a book with several native rows", async () => {
+    await dashboardFor([
+      { strategy_id: "n1", daily_returns: BTC_SERIES, data_quality_flags: { native_unit: "BTC" } },
+      { strategy_id: "n2", daily_returns: BTC_SERIES, data_quality_flags: { native_unit: "BTC" } },
+      { strategy_id: "u1", daily_returns: BTC_SERIES },
+    ]);
+    expect(btcCloses.read).toHaveBeenCalledTimes(1);
+  });
+
+  it("a malformed native_unit reads as USD: no conversion, no closes read", async () => {
+    const result = await dashboardFor([
+      { daily_returns: BTC_SERIES, data_quality_flags: { native_unit: "btc" } },
+    ]);
+    const row = result.strategies.find((s) => s.strategy_id === "sc")!;
+    expect(seriesOf(row)).toEqual(BTC_SERIES);
+    expect((row.strategy as unknown as { returns_unit: unknown }).returns_unit).toBeNull();
+    expect(btcCloses.read).not.toHaveBeenCalled();
+  });
+
+  it("a failed closes read converts the BTC leg to [] and logs; series_state stays 'available'", async () => {
+    btcCloses.read.mockResolvedValue(null);
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const result = await dashboardFor([
+        { daily_returns: BTC_SERIES, data_quality_flags: { native_unit: "BTC" } },
+      ]);
+      const row = result.strategies.find((s) => s.strategy_id === "sc")!;
+      expect(seriesOf(row)).toEqual([]);
+      expect((row.strategy as unknown as { series_state: unknown }).series_state).toBe("available");
+      expect((row.strategy as unknown as { returns_unit: unknown }).returns_unit).toBe("BTC");
+      expect(
+        errSpy.mock.calls.some((c) => String(c[0]).includes("BTC closes unavailable")),
+      ).toBe(true);
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  // SFH-1 (164.6.6.2 review): `series_state` is derived from the PRE-conversion
+  // series, so an unpriced native leg reads "available" while its blend series
+  // is []. The row must carry the one honest extra fact: it could not be priced.
+  describe("native_unpriced: a book row whose series priced to nothing", () => {
+    const flagOf = (row: { strategy: unknown }) =>
+      (row.strategy as unknown as { native_unpriced: unknown }).native_unpriced;
+
+    it("true for a native row when the closes read is null", async () => {
+      btcCloses.read.mockResolvedValue(null);
+      const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        const result = await dashboardFor([
+          { daily_returns: BTC_SERIES, data_quality_flags: { native_unit: "BTC" } },
+        ]);
+        const row = result.strategies.find((s) => s.strategy_id === "sc")!;
+        expect(flagOf(row)).toBe(true);
+        expect(seriesOf(row)).toEqual([]);
+      } finally {
+        errSpy.mockRestore();
+      }
+    });
+
+    it("true when stored closes cover none of the row's days", async () => {
+      btcCloses.read.mockResolvedValue({
+        prices: [
+          { date: "2020-01-01", close: 1 },
+          { date: "2020-01-02", close: 2 },
+        ],
+        dropped: [],
+        through: "2020-01-02",
+      });
+      const result = await dashboardFor([
+        { daily_returns: BTC_SERIES, data_quality_flags: { native_unit: "BTC" } },
+      ]);
+      const row = result.strategies.find((s) => s.strategy_id === "sc")!;
+      expect(flagOf(row)).toBe(true);
+    });
+
+    it("false for a priced native row", async () => {
+      const result = await dashboardFor([
+        { daily_returns: BTC_SERIES, data_quality_flags: { native_unit: "BTC" } },
+      ]);
+      const row = result.strategies.find((s) => s.strategy_id === "sc")!;
+      expect(flagOf(row)).toBe(false);
+    });
+
+    it("false for a USD row, and only the unpriced row of a mixed book is flagged", async () => {
+      btcCloses.read.mockResolvedValue(null);
+      const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        const result = await dashboardFor([
+          { strategy_id: "n1", daily_returns: BTC_SERIES, data_quality_flags: { native_unit: "BTC" } },
+          { strategy_id: "u1", daily_returns: BTC_SERIES },
+        ]);
+        expect(flagOf(result.strategies.find((s) => s.strategy_id === "n1")!)).toBe(true);
+        expect(flagOf(result.strategies.find((s) => s.strategy_id === "u1")!)).toBe(false);
+      } finally {
+        errSpy.mockRestore();
+      }
+    });
+
+    it("false for a native row with no series (series_state owns that absence)", async () => {
+      const result = await dashboardFor([
+        { daily_returns: [], data_quality_flags: { native_unit: "BTC" } },
+      ]);
+      const row = result.strategies.find((s) => s.strategy_id === "sc")!;
+      expect(flagOf(row)).toBe(false);
+    });
+  });
+
+  it("never ships the raw data_quality_flags blob", async () => {
+    const result = await dashboardFor([
+      { daily_returns: BTC_SERIES, data_quality_flags: { native_unit: "BTC", composite: false } },
+    ]);
+    const row = result.strategies.find((s) => s.strategy_id === "sc")!;
+    expect(JSON.stringify(row)).not.toContain("data_quality_flags");
+    expect(JSON.stringify(row)).not.toContain("native_unit");
   });
 });

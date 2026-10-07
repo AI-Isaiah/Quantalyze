@@ -56,7 +56,9 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from services.audit import log_audit_event
+from services.benchmark import get_btc_closes
 from services.db import get_supabase, one, rows
+from services.native_to_usd import UsdSeriesConverter, native_units_by_id
 # PYAPI-05 — the shared status contract (analytics-service/docs/STATUS_CONTRACT.md).
 from services.error_contract import service_error
 from services.portfolio_limits import assert_portfolio_within_cap
@@ -372,7 +374,7 @@ async def portfolio_simulator(request: Request, req: SimulatorRequest) -> dict[s
     portfolio_ids = list(existing_ids)
     sa_result = await asyncio.to_thread(
         lambda: supabase.table("strategy_analytics")
-        .select("strategy_id, returns_series")
+        .select("strategy_id, returns_series, data_quality_flags")
         .in_("strategy_id", portfolio_ids + [req.candidate_strategy_id])
         .execute()
     )
@@ -402,6 +404,16 @@ async def portfolio_simulator(request: Request, req: SimulatorRequest) -> dict[s
         if s is not None:
             portfolio_returns[sid] = s
 
+    # D-23 (founder, 2026-10-07): `simulate_add_candidate` weights every series
+    # it is handed, so a native-unit (BTC) constituent and the candidate are
+    # converted to USD HERE, before the blend. `data_quality_flags` rides the
+    # same row as `returns_series`. A series that cannot be converted (no BTC
+    # price source) is dropped: a constituent through the existing "no returns"
+    # path below, the candidate through "Candidate has no returns history".
+    _usd = UsdSeriesConverter(get_btc_closes)
+    _native_units = native_units_by_id(rows_by_id.values())
+    portfolio_returns, _ = await _usd.convert(portfolio_returns, _native_units)
+
     if not portfolio_returns:
         raise HTTPException(
             status_code=400,
@@ -418,6 +430,11 @@ async def portfolio_simulator(request: Request, req: SimulatorRequest) -> dict[s
         rows_by_id[req.candidate_strategy_id].get("returns_series"),
         name=req.candidate_strategy_id,
     )
+    if candidate_series is not None:
+        _converted, _ = await _usd.convert(
+            {req.candidate_strategy_id: candidate_series}, _native_units
+        )
+        candidate_series = _converted.get(req.candidate_strategy_id)
     if candidate_series is None:
         raise HTTPException(
             status_code=400,

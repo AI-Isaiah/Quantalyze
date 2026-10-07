@@ -36,6 +36,7 @@ import {
 import type { StrategyForBuilderId } from "@/app/(dashboard)/allocations/lib/scenario-adapter";
 import { coverageSpanOf, defaultWindowFor } from "@/lib/scenario-window";
 import type { DailyPoint } from "@/lib/scenario";
+import { convertNativeReturnsToUsd } from "@/lib/factsheet/native-to-usd";
 
 // --- Fixtures --------------------------------------------------------------
 
@@ -1136,5 +1137,130 @@ describe("resolveSharedScenario — [167.1.2 SC-4] zero weight mass", () => {
     ]) {
       expect(v === null || Number.isFinite(v)).toBe(true);
     }
+  });
+});
+
+// Phase 164.6.6.2 plan 10 (D-18, D-22): a BTC-denominated leg of a shared
+// scenario is converted to USD at the daily BTC close BEFORE it is blended, so a
+// recipient sees the blend the owner's composer shows for the same draft.
+//
+// WHY the oracle is hand-computed rather than read back from
+// `convertNativeReturnsToUsd`: a parity test that only compares the resolver to
+// the function can pass if both are wrong the same way. The closes ALTERNATE
+// 60000 / 66000, so an up day is (1 + 0.10) x (66000 / 60000) - 1 = 0.21 and a
+// down day is (1 + 0.10) x (60000 / 66000) - 1 = 0 exactly (1.1 x 10 / 11 = 1).
+// Blending the raw BTC return would read 0.10 on every day; two literals that
+// differ by day also fail a swapped or additive formula.
+const BTC_DAYS = 12;
+function btcDates(): string[] {
+  const start = new Date("2026-02-01T00:00:00Z");
+  return Array.from({ length: BTC_DAYS }, (_, i) =>
+    new Date(start.getTime() + i * 86_400_000).toISOString().slice(0, 10),
+  );
+}
+const BTC_NATIVE_SERIES: DailyPoint[] = btcDates().map((date) => ({ date, value: 0.1 }));
+const BTC_ALTERNATING = {
+  prices: btcDates().map((date, i) => ({ date, close: i % 2 === 0 ? 60000 : 66000 })),
+  dropped: [] as string[],
+};
+
+describe("resolveSharedScenario — BTC leg converts to USD before the blend (164.6.6.2 D-22)", () => {
+  it("a BTC leg's blended series is the USD series, hand-computed 0.21 on an up day and 0 on a down day", () => {
+    const result = resolveSharedScenario(
+      scRow(BTC_NATIVE_SERIES),
+      {},
+      {},
+      { [SC_STRAT]: "BTC" },
+      BTC_ALTERNATING,
+    );
+    expect(result.kind).toBe("ok");
+    if (result.kind !== "ok") throw new Error("expected ok");
+    // Day 0 has no prior priced day, so 11 USD days come out of 12.
+    expect(result.portfolioDaily).toHaveLength(BTC_DAYS - 1);
+    result.portfolioDaily.forEach((p, i) => {
+      const upDay = (i + 1) % 2 === 1;
+      expect(p.value).toBeCloseTo(upDay ? 0.21 : 0, 12);
+    });
+  });
+
+  it("parity: the shared blend equals the blend of the same leg handed over already in USD (the owner's composer path)", () => {
+    const usdLeg = convertNativeReturnsToUsd(BTC_NATIVE_SERIES, "BTC", BTC_ALTERNATING);
+    const shared = resolveSharedScenario(
+      scRow(BTC_NATIVE_SERIES),
+      {},
+      {},
+      { [SC_STRAT]: "BTC" },
+      BTC_ALTERNATING,
+    );
+    const owner = resolveSharedScenario(scRow(usdLeg));
+    expect(shared.kind).toBe("ok");
+    expect(owner.kind).toBe("ok");
+    if (shared.kind !== "ok" || owner.kind !== "ok") throw new Error("expected ok");
+    expect(shared.portfolioDaily).toEqual(owner.portfolioDaily);
+    expect(shared.metrics.twr).toBe(owner.metrics.twr);
+    expect(shared.metrics.twr).not.toBeNull();
+  });
+
+  it("a mixed blend converts ONLY the BTC leg; the USD leg passes through untouched", () => {
+    const usdSeries = makeSeriesFrom("2026-02-01", BTC_DAYS, 3);
+    const draft = {
+      ...okDraft(),
+      weightOverrides: { [STRAT_A]: 0.5, [STRAT_B]: 0.5 },
+    };
+    const rowFor = (a: DailyPoint[]) => ({
+      name: "Mixed",
+      draft,
+      schema_version: SCENARIO_SCHEMA_VERSION,
+      series: [
+        { strategy_id: STRAT_A, daily_returns: a },
+        { strategy_id: STRAT_B, daily_returns: usdSeries },
+      ],
+    });
+    const shared = resolveSharedScenario(
+      rowFor(BTC_NATIVE_SERIES),
+      {},
+      {},
+      { [STRAT_A]: "BTC", [STRAT_B]: null },
+      BTC_ALTERNATING,
+    );
+    const owner = resolveSharedScenario(
+      rowFor(convertNativeReturnsToUsd(BTC_NATIVE_SERIES, "BTC", BTC_ALTERNATING)),
+    );
+    const raw = resolveSharedScenario(rowFor(BTC_NATIVE_SERIES));
+    if (shared.kind !== "ok" || owner.kind !== "ok" || raw.kind !== "ok") {
+      throw new Error("expected ok");
+    }
+    expect(shared.portfolioDaily).toEqual(owner.portfolioDaily);
+    // The conversion is not a no-op: the unconverted blend differs.
+    expect(shared.portfolioDaily).not.toEqual(raw.portfolioDaily);
+  });
+
+  it("no unit map, or a null unit, resolves exactly as before (USD family is byte-identical)", () => {
+    const base = resolveSharedScenario(scRow(BTC_NATIVE_SERIES));
+    const withNullUnit = resolveSharedScenario(
+      scRow(BTC_NATIVE_SERIES),
+      {},
+      {},
+      { [SC_STRAT]: null },
+      BTC_ALTERNATING,
+    );
+    const emptyMap = resolveSharedScenario(scRow(BTC_NATIVE_SERIES), {}, {}, {}, BTC_ALTERNATING);
+    expect(withNullUnit).toEqual(base);
+    expect(emptyMap).toEqual(base);
+  });
+
+  it("a BTC leg with NO price source resolves to an empty series, never the raw BTC returns", () => {
+    const result = resolveSharedScenario(
+      scRow(BTC_NATIVE_SERIES),
+      {},
+      {},
+      { [SC_STRAT]: "BTC" },
+      null,
+    );
+    expect(result.kind).toBe("ok");
+    if (result.kind !== "ok") throw new Error("expected ok");
+    expect(result.portfolioDaily).toEqual([]);
+    expect(result.metrics.n).toBe(0);
+    expect(result.metrics.twr).toBeNull();
   });
 });

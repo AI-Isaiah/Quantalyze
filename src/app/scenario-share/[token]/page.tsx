@@ -7,9 +7,11 @@
 // `strategies(id, asset_class)` bounded to those RPC-returned series ids and
 // `status='published'` (via withPublishedOnly), purely for the blend
 // annualization basis; and (3) a Phase-147 sibling read of
-// `strategy_analytics(strategy_id, returns_series)` bounded to the SAME
-// RPC-returned ids, purely to recover the real return series for
-// analytics-service-only legs (whose `daily_returns` is null). Reads (2) and (3)
+// `strategy_analytics(strategy_id, returns_series, data_quality_flags)` bounded
+// to the SAME RPC-returned ids, purely to recover the real return series for
+// analytics-service-only legs (whose `daily_returns` is null) and the unit each
+// leg's returns are in (only the PARSED unit is kept; the raw flags never leave
+// this block). Reads (2) and (3)
 // are BOUNDED BY CONSTRUCTION to the RPC's own id output, so neither can widen
 // what the share token already exposes. NEVER add a query that reads an
 // arbitrary id, NEVER call the allocator-dashboard query helper, and NEVER read
@@ -27,6 +29,8 @@ import {
   getClientIp,
 } from "@/lib/ratelimit";
 import { hashShareToken } from "@/lib/scenario-share-token";
+import { parseReturnsUnit } from "@/lib/factsheet/returns-unit";
+import { readBtcCloses } from "@/lib/factsheet/benchmark-source";
 // toWealth MUST come from the pure @/lib/scenario module, NOT from the
 // EquityChart widget — that widget is "use client", and calling a client
 // module's exported function from this Server Component throws the RSC
@@ -189,6 +193,11 @@ export default async function ScenarioSharePage({
   // seriesIds guard; an empty lookup is the conservative default (the resolver
   // then falls back to the RPC's own daily_returns alone, i.e. pre-147).
   const returnsSeriesById: Record<string, unknown> = {};
+  // Phase 164.6.6.2 (D-18, D-22) — the unit each leg's returns are in ("BTC", or
+  // null for the USD family), parsed server-side from the SAME 3c sibling read.
+  // An empty lookup is the conservative default: every leg resolves as USD,
+  // byte-identical to before this phase.
+  const returnsUnitById: Record<string, string | null> = {};
   const seriesIds = (row.series ?? []).map((s) => s.strategy_id);
   if (seriesIds.length > 0) {
     try {
@@ -248,13 +257,16 @@ export default async function ScenarioSharePage({
     //         such column, so wrapping this read would be a type-level lie, not
     //         a gate. Reading an ARBITRARY strategy_id on this page would be a
     //         disclosure bug — the `.in()` bound is what prevents it.
-    //     The projection stays narrow (strategy_id + returns_series only) and
-    //     the raw index NEVER reaches the client: resolveSharedScenario consumes
-    //     it server-side and emits only resolved DailyPoint arrays.
+    //     The projection stays narrow (strategy_id, returns_series and the one
+    //     flags column the unit lives in) and NONE of it reaches the client:
+    //     resolveSharedScenario consumes the index server-side and emits only
+    //     resolved DailyPoint arrays, and `data_quality_flags` is reduced to the
+    //     parsed unit string right here (164.6.6.2 D-18: the leg's unit is not on
+    //     the RPC and the RPC cannot be widened). The raw flags are never stored.
     try {
       const { data: rsRows, error: rsError } = await admin
         .from("strategy_analytics")
-        .select("strategy_id, returns_series")
+        .select("strategy_id, returns_series, data_quality_flags")
         .in("strategy_id", seriesIds);
       if (rsError) {
         // error-absent ≠ legit-absent (same rule as the asset_class arm above):
@@ -268,8 +280,13 @@ export default async function ScenarioSharePage({
       for (const r of (rsRows ?? []) as Array<{
         strategy_id: string;
         returns_series: unknown;
+        data_quality_flags: { native_unit?: unknown } | null;
       }>) {
         returnsSeriesById[r.strategy_id] = r.returns_series;
+        // Keep ONLY the parsed unit (a malformed value reads as USD).
+        returnsUnitById[r.strategy_id] = parseReturnsUnit(
+          r.data_quality_flags?.native_unit,
+        );
       }
     } catch (e) {
       // Transport/throw path degrades to the empty lookup (→ daily_returns
@@ -286,7 +303,21 @@ export default async function ScenarioSharePage({
   // ScenarioBenchmarkSection from portfolioDaily + the closes); the page fetches
   // them here to feed the chart overlay + the section directly.
   const btc = await fetchBtcCloses();
-  const resolved = resolveSharedScenario(row, assetClassById, returnsSeriesById);
+  // Phase 164.6.6.2 (D-22) — the conversion closes are a DIFFERENT window from
+  // the overlay's `btc` above: DB-only, no bundled fixture prefix, the one window
+  // every conversion seam and the Python twin read. They are read ONLY when a leg
+  // actually has a unit, so an all-USD share does no extra work and resolves
+  // byte-identically. `null` = no price source: a BTC leg then resolves empty.
+  const conversionCloses = Object.values(returnsUnitById).some((u) => u !== null)
+    ? await readBtcCloses(admin)
+    : null;
+  const resolved = resolveSharedScenario(
+    row,
+    assetClassById,
+    returnsSeriesById,
+    returnsUnitById,
+    conversionCloses,
+  );
 
   // DI-23-01 — a version-ahead / undecodable / dangling-ref draft is honest
   // absence, NEVER a live-book substitution and NEVER a 404 (the link IS valid).

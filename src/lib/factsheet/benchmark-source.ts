@@ -1,6 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 
-import type { DailyPrice } from "./types";
+import type { BenchmarkPricesOpt, DailyPrice } from "./types";
 
 /**
  * Phase 169.2 / plan 01 (SC3, D-08, D-09) — the ONE reader of `benchmark_prices`.
@@ -278,4 +278,46 @@ export function mergeWithFixture(
     through: prices.length > 0 ? prices[prices.length - 1].date : null,
     dropped: db.dropped,
   };
+}
+
+/**
+ * Phase 164.6.6.2 (D-18, D-22, D-23): the ONE server-side source of BTC closes
+ * for converting a BTC-native strategy's returns to USD
+ * (`convertNativeReturnsToUsd`, plans 09 and 10).
+ *
+ * The conversion has ONE price window in both runtimes: every usable BTC close
+ * stored in `benchmark_prices`, and nothing else. The Python twin
+ * (`get_btc_closes`, plan 13) reads the same window DB-only, because the
+ * analytics image cannot ship the bundled `BTC_DAILY` file. So this reader does
+ * NOT call `mergeWithFixture`: a bundled prefix would price early days in
+ * TypeScript that Python leaves absent, and the two runtimes would blend
+ * different numbers. The shared oracle fixture pins it
+ * (`closes_source: "benchmark_prices only"`).
+ *
+ * The public `/api/benchmark/btc/prices` route (the benchmark OVERLAY) is a
+ * different contract and keeps the fixture prefix; it is unchanged.
+ *
+ * Returns null when the read errors (one `console.error`, never the fixture,
+ * D-09) or when no usable close is stored (one `console.error` carrying the
+ * dropped count, SFH-1): "no price source", which the conversion turns into an
+ * empty series rather than an invented one.
+ */
+export async function readBtcCloses(
+  client: SupabaseClient,
+): Promise<Extract<BenchmarkPricesOpt, { prices: DailyPrice[] }> | null> {
+  const read = await readBenchmarkPrices(client, "BTC");
+  if (!read.ok) {
+    console.error("[benchmark-source] BTC closes read failed", read.error);
+    return null;
+  }
+  if (read.prices.length === 0) {
+    // SFH-1 (164.6.6.2 review): this null is not an error, so it used to say
+    // nothing, while every native-unit leg downstream silently left its blend.
+    // Name it, with how many closes were refused as corrupt (0 = empty table).
+    console.error(
+      `[benchmark-source] BTC closes unusable: no usable close stored (dropped=${read.dropped.length}); native-unit legs cannot be priced`,
+    );
+    return null;
+  }
+  return { prices: read.prices, dropped: read.dropped, through: read.through };
 }
