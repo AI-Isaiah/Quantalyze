@@ -69,7 +69,7 @@ const state = vi.hoisted(
     updateShouldThrow: boolean;
     resendShouldFail: boolean;
     resendError: string;
-    sendCalls: Array<{ to: string; subject: string; cc?: unknown; from?: string }>;
+    sendCalls: Array<{ to: string; subject: string; cc?: unknown; from?: string; html?: string }>;
   } => ({
     rows: [],
     insertShouldFail: false,
@@ -139,8 +139,8 @@ vi.mock("@/lib/supabase/admin", () => ({
 vi.mock("resend", () => ({
   Resend: class MockResend {
     emails = {
-      send: async (payload: { to: string; subject: string; cc?: unknown; from?: string }) => {
-        state.sendCalls.push({ to: payload.to, subject: payload.subject, cc: payload.cc, from: payload.from });
+      send: async (payload: { to: string; subject: string; cc?: unknown; from?: string; html?: string }) => {
+        state.sendCalls.push({ to: payload.to, subject: payload.subject, cc: payload.cc, from: payload.from, html: payload.html });
         if (state.resendShouldFail) {
           return { data: null, error: { message: state.resendError } };
         }
@@ -449,6 +449,19 @@ describe("email.ts — notification_dispatches audit trail", () => {
 
     expect(state.sendCalls).toHaveLength(1);
     expect(state.sendCalls[0].from).toBe("Acme <late@example.org>");
+  });
+
+  it("D-06 link fallback: with NEXT_PUBLIC_APP_URL unset the emailed link lands on quantalyze.xyz", async () => {
+    vi.stubEnv("NEXT_PUBLIC_APP_URL", "");
+    // `??` only falls back on undefined, so truly unset it.
+    delete process.env.NEXT_PUBLIC_APP_URL;
+    vi.resetModules();
+    const { notifyUserSignupApproved } = await import("./email");
+
+    await notifyUserSignupApproved("user@example.com", "allocator");
+
+    expect(state.sendCalls).toHaveLength(1);
+    expect(state.sendCalls[0].html).toContain('href="https://quantalyze.xyz/allocations"');
   });
 
   it("empty recipient short-circuits before any dispatch write or Resend call", async () => {

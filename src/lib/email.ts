@@ -634,10 +634,11 @@ export async function notifyManagerApproved(
  * /api/admin/allocator-approve and /api/admin/manager-approve routes
  * introduced in PR #266).
  *
- * The /pending-approval page promises "We'll email you as soon as it's
- * approved" — before this helper landed, no email was actually sent, so
- * users polled the page or re-signed-up. The dispatch is `await`ed by the
- * approve routes so a Resend failure surfaces as a 500 instead of being
+ * The /pending-approval page used to promise an approval email ("We'll
+ * email you as soon as it's approved"). With Resend unset (D-04) none is
+ * sent, which is why the page no longer promises one (DOMAINONE plan 09).
+ * Where Resend and a sender ARE configured, the dispatch is `await`ed by the
+ * approve routes so a send failure surfaces as a 500 instead of being
  * silently dropped.
  *
  * `role` controls the next-step copy: an allocator lands on /allocations,
