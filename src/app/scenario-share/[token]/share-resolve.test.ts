@@ -1058,6 +1058,44 @@ describe("resolveSharedScenario — returns_series resolution (SCEN-01)", () => 
     expect(result.metrics.n).toBe(KNOWN_RETURNS.length);
   });
 
+  it("164.6.6.2.2 D-05: returnsMethodById 'simple' reads the stored curve as DIFFERENCES; omitted keeps geometric", () => {
+    // A `simple` curve is 1 + cumsum of the known returns (the inverse of the
+    // difference under test, so the oracle is KNOWN_RETURNS itself, never the
+    // resolver). Head, hand-computed: 1.00, 1.05, 0.95, 1.05.
+    const simpleCurve: DailyPoint[] = [{ date: "2026-01-01", value: 1 }];
+    let level = 1;
+    KNOWN_RETURNS.forEach((r, i) => {
+      level += r;
+      const d = new Date(Date.UTC(2026, 0, 1) + (i + 1) * 86_400_000);
+      simpleCurve.push({ date: d.toISOString().slice(0, 10), value: level });
+    });
+    expect(simpleCurve[1].value).toBeCloseTo(1.05, 10);
+    expect(simpleCurve[2].value).toBeCloseTo(0.95, 10);
+    expect(simpleCurve[3].value).toBeCloseTo(1.05, 10);
+
+    const simple = resolveSharedScenario(
+      scRow(null),
+      {},
+      { [SC_STRAT]: simpleCurve },
+      undefined,
+      undefined,
+      { [SC_STRAT]: "simple" },
+    );
+    expect(simple.kind).toBe("ok");
+    if (simple.kind !== "ok") throw new Error("expected ok");
+    expect(simple.portfolioDaily).toHaveLength(KNOWN_RETURNS.length);
+    simple.portfolioDaily.forEach((p, i) => {
+      expect(p.value).toBeCloseTo(KNOWN_RETURNS[i], 10);
+    });
+
+    // No method map: geometric, so day 2 is 0.95 / 1.05 - 1 = -0.0952..., not -0.1.
+    const geometric = resolveSharedScenario(scRow(null), {}, { [SC_STRAT]: simpleCurve });
+    expect(geometric.kind).toBe("ok");
+    if (geometric.kind !== "ok") throw new Error("expected ok");
+    expect(geometric.portfolioDaily[1].value).toBeCloseTo(0.95 / 1.05 - 1, 10);
+    expect(Math.abs(geometric.portfolioDaily[1].value - -0.1)).toBeGreaterThan(0.004);
+  });
+
   it("returnsSeriesById omitted / id absent → the pre-147 daily_returns-only projection, unchanged", () => {
     // The conservative default: with no lookup (or a lookup that does not carry
     // this id) the resolver falls back to s.daily_returns alone — exactly what

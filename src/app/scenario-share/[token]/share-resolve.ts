@@ -45,7 +45,10 @@ import { coverageSpanOf, defaultWindowFor } from "@/lib/scenario-window";
 // the phase-63 series-space source scan, so its import graph must stay free of
 // network / Next modules — importing the resolver from
 // factsheet/allocator-portfolio-payload would drag build-payload in here.
-import { resolveDailyReturnSeries } from "@/lib/factsheet/resolve-series";
+import {
+  resolveDailyReturnSeries,
+  type CurveMethod,
+} from "@/lib/factsheet/resolve-series";
 import { convertNativeReturnsToUsd } from "@/lib/factsheet/native-to-usd";
 import type { BtcCloses } from "@/app/(dashboard)/allocations/lib/scenario-benchmark";
 import { sanitizeLeverageMap } from "@/lib/leverage";
@@ -198,6 +201,15 @@ export function resolveSharedScenario(
    * never to its unconverted BTC returns. Only read when some leg has a unit.
    */
   btc?: Pick<BtcCloses, "prices" | "dropped"> | null,
+  /**
+   * Phase 164.6.6.2.2 (D-01, D-05) — strategy id -> how that leg's stored curve
+   * was built (`curveMethodFromFlags(data_quality_flags)`: "geometric" or
+   * "simple"). Only the PARSED method crosses into this module, never the raw
+   * flags. Declared after `btc` (not beside `returnsUnitById`) so every
+   * existing positional caller keeps its meaning. Absent id / undefined lookup
+   * -> geometric, byte-identical to before.
+   */
+  returnsMethodById?: Record<string, CurveMethod>,
 ): ResolvedSharedScenario {
   // The codec's `decode` takes a raw STRING (localStorage shape). The RPC hands
   // us a parsed jsonb object, so re-serialize it to drive the same trichotomy.
@@ -233,7 +245,11 @@ export function resolveSharedScenario(
     seriesById.set(
       s.strategy_id,
       convertNativeReturnsToUsd(
-        resolveDailyReturnSeries(s.daily_returns, returnsSeriesById?.[s.strategy_id]),
+        resolveDailyReturnSeries(
+          s.daily_returns,
+          returnsSeriesById?.[s.strategy_id],
+          returnsMethodById?.[s.strategy_id],
+        ),
         returnsUnitById?.[s.strategy_id] ?? null,
         btc ?? null,
       ),
