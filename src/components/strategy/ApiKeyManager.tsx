@@ -7,6 +7,8 @@ import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { Modal } from "@/components/ui/Modal";
 import { ApiKeyForm } from "./ApiKeyForm";
+import { ContactPointerText } from "@/components/contact/ContactPointerText";
+import { contactHref } from "@/lib/contact";
 import {
   addKeyBlockedReason,
   COMPOSITE_CARD_NOTE,
@@ -390,6 +392,10 @@ export function ApiKeyManager({
   // the next attempt's registration, never by a list read.
   const [finishUnverified, setFinishUnverified] = useState(false);
   const router = useRouter();
+  // Phase 164.6.6.3.5 (AD-05): where every "contact form" pointer on this card
+  // goes, with this strategy's id attached. Same tab (UI-SPEC pointer rule for
+  // these surfaces).
+  const supportContactHref = contactHref({ topic: "support", strategy: strategyId });
 
   // 167.2-REVIEW IN-02: an unmount mid-attempt drops the live attempt, so every
   // liveness guard (`attemptRef.current !== attempt`) stops its continuations:
@@ -1592,10 +1598,14 @@ export function ApiKeyManager({
           control with nothing to say why: failing closed on the write is
           right, failing closed SILENTLY was the defect. */}
       {keyShape === "composite" && (
-        <p className="text-xs text-text-muted">{COMPOSITE_CARD_NOTE}</p>
+        <p className="text-xs text-text-muted">
+          <ContactPointerText text={COMPOSITE_CARD_NOTE} href={supportContactHref} />
+        </p>
       )}
       {keyShape === "unknown" && (
-        <p className="text-xs text-text-muted">{SHAPE_UNKNOWN_CARD_NOTE}</p>
+        <p className="text-xs text-text-muted">
+          <ContactPointerText text={SHAPE_UNKNOWN_CARD_NOTE} href={supportContactHref} />
+        </p>
       )}
 
       {linkControlsAllowed && showForm && (
@@ -1869,7 +1879,7 @@ export function ApiKeyManager({
             role="status"
             className="text-sm text-warning mb-4"
           >
-            {deleteCheck.text}
+            <ContactPointerText text={deleteCheck.text} href={supportContactHref} />
           </p>
         )}
         <div className="flex justify-end gap-3">
