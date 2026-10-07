@@ -105,6 +105,6 @@ You are done when:
   download link.
 - `scripts/build-security-packet.html` — source of the PDF.
 - `scripts/build-security-packet.mjs` — build script.
-- `docs/runbooks/security-contact.md` — keeps the
-  `security@quantalyze.com` alias alive. That alias is restated on
+- `docs/runbooks/security-contact.md` — describes the contact-form
+  intake for security reports. That channel is restated on
   the PDF; if it changes, update both.

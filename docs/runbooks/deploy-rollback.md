@@ -18,8 +18,13 @@ regression is schema, go to [migration-failure.md](./migration-failure.md).
 
 ## 1. Vercel (frontend / API routes)
 
-Prod: `https://quantalyze-rho.vercel.app` (the canonical URL — NOT
-`quantalyze.com` or `quantalyze.vercel.app`).
+Prod: `https://quantalyze.xyz` (the canonical URL — NOT the unrelated `.com`
+domain or `quantalyze.vercel.app`). The old `quantalyze-rho.vercel.app` host
+answers every request with a 308 to the same path on `quantalyze.xyz`.
+
+`STAGING_BASE_URL` (read by `nightly.yml`) must never be the rho host: the
+308 would redirect the demo-PDF cold-start canary away from the host it is
+meant to probe.
 
 There is no version/SHA on the frontend health endpoint (`/api/health` returns
 only `{ok, audit_emit_transient_failures}`), so identify the good deployment by
