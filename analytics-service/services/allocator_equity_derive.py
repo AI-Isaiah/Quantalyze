@@ -928,13 +928,22 @@ def _assert_forward_agreement(
     days: Sequence[str],
 ) -> None:
     """DQ-02 construction self-check (``nav_twr.reconcile_flow_residual`` spirit):
-    replay FORWARD from day-0 and assert byte-agreement with the backward roll.
-    Reddens ONLY on a roll-vs-identity code divergence — never on an economically
-    wrong anchor (which shifts every level together). Counts/day-indices only."""
+    every adjacent pair of rolled levels must satisfy the FORWARD identity
+    ``equity_t = equity_{t-1} * (1 + r_t) + F_t`` inside the band. Reddens ONLY on
+    a roll-vs-identity code divergence, at the step where it happens — never on an
+    economically wrong anchor (which shifts every level together).
+    Counts/day-indices only.
+
+    D-12 (167.1.2.2): the check is PER STEP, from the STORED previous level. It
+    used to recompute ``equity_t`` by replaying forward from ``equity_0``, which
+    multiplies ``equity_0``'s rounding by ``equity_0 * prod(1 + r) / equity_t``.
+    After strong growth with the gains withdrawn and then a near-total withdrawal
+    that factor passed 1e7 on PROD data, and a correct roll was refused (an exact
+    rational replay from the same ``equity_0`` missed by the same order). The band
+    is unchanged."""
     vals = series.to_numpy(dtype=float)
-    fwd = float(vals[0])
     for t in range(1, len(days)):
-        fwd = fwd * (1.0 + r.get(days[t], 0.0)) + fbd.get(days[t], 0.0)
+        fwd = float(vals[t - 1]) * (1.0 + r.get(days[t], 0.0)) + fbd.get(days[t], 0.0)
         tol = _SELF_CHECK_ABS + _SELF_CHECK_REL * abs(float(vals[t]))
         if abs(fwd - float(vals[t])) > tol:
             raise NavReconstructionError(
