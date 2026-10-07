@@ -9,6 +9,7 @@ import {
   markLeadProcessed,
   unmarkLeadProcessed,
   leadExists,
+  countUnprocessedForQuantsLeads,
   FOR_QUANTS_LEADS_FULL_VIEW_CAP,
 } from "./for-quants-leads-admin";
 import {
@@ -333,5 +334,85 @@ describe("leadExists (M-0269)", () => {
     ).toBe(false);
     expect(errorSpy).toHaveBeenCalled();
     errorSpy.mockRestore();
+  });
+});
+
+/**
+ * D-17: the admin sidebar's unread badge. The read is a HEAD count with a
+ * `processed_at IS NULL` filter, so no lead row (name, email, message) is ever
+ * fetched for a nav element. The mock store has no count support, so this
+ * block drives a minimal recording client: what matters is the SHAPE of the
+ * query and how each outcome is reported.
+ */
+describe("countUnprocessedForQuantsLeads (D-17)", () => {
+  function recordingClient(result: { count: number | null; error: unknown }) {
+    const calls: Array<[string, ...unknown[]]> = [];
+    const query = {
+      is(col: string, val: unknown) {
+        calls.push(["is", col, val]);
+        return Promise.resolve(result);
+      },
+    };
+    const client = {
+      from(table: string) {
+        calls.push(["from", table]);
+        return {
+          select(cols: string, opts: unknown) {
+            calls.push(["select", cols, opts]);
+            return query;
+          },
+        };
+      },
+    };
+    return { client: client as never, calls };
+  }
+
+  it("returns the head count of processed_at IS NULL rows and selects no row data", async () => {
+    const { client, calls } = recordingClient({ count: 3, error: null });
+    await expect(countUnprocessedForQuantsLeads(client)).resolves.toBe(3);
+    expect(calls).toEqual([
+      ["from", "for_quants_leads"],
+      ["select", "id", { count: "exact", head: true }],
+      ["is", "processed_at", null],
+    ]);
+  });
+
+  it("returns 0 when nothing is unprocessed", async () => {
+    const { client } = recordingClient({ count: 0, error: null });
+    await expect(countUnprocessedForQuantsLeads(client)).resolves.toBe(0);
+  });
+
+  it("returns null (never a fake 0) and logs when the read errors", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { client } = recordingClient({
+      count: null,
+      error: { message: "boom" },
+    });
+    await expect(countUnprocessedForQuantsLeads(client)).resolves.toBeNull();
+    expect(errSpy).toHaveBeenCalledWith(
+      "[for-quants-leads-admin] unprocessed count failed:",
+      { message: "boom" },
+    );
+    errSpy.mockRestore();
+  });
+
+  it("returns null and logs when the count comes back missing without an error", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const { client } = recordingClient({ count: null, error: null });
+    await expect(countUnprocessedForQuantsLeads(client)).resolves.toBeNull();
+    expect(errSpy).toHaveBeenCalled();
+    errSpy.mockRestore();
+  });
+
+  it("returns null and logs when the client throws", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const client = {
+      from() {
+        throw new Error("admin client unavailable");
+      },
+    } as never;
+    await expect(countUnprocessedForQuantsLeads(client)).resolves.toBeNull();
+    expect(errSpy).toHaveBeenCalled();
+    errSpy.mockRestore();
   });
 });

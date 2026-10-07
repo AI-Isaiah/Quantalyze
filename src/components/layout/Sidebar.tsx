@@ -17,6 +17,9 @@ interface NavItemBase {
   icon: IconComponent;
   /** Phase 09.1 Plan 11 / R5 — optional badge rendered next to the label. */
   badge?: number;
+  /** Accessible name for the badge. Defaults to the flagged-holdings wording,
+   *  which is what the "My Allocation" badge has always said. */
+  badgeLabel?: (count: number) => string;
 }
 /** The default nav item: an href-based <Link>. Every pre-Phase-110 item. */
 export interface NavLinkItem extends NavItemBase {
@@ -56,12 +59,17 @@ export function formatBadgeCount(count: number): string {
   return count > 99 ? "99+" : String(count);
 }
 
+function unprocessedLeadsLabel(count: number): string {
+  return `${count} unprocessed lead${count === 1 ? "" : "s"}`;
+}
+
 function buildNavSections(
   populatedSlugs?: string[],
   isAdmin?: boolean,
   isAllocator?: boolean,
   flaggedCount?: number,
   isManager?: boolean,
+  unprocessedLeadsCount?: number,
 ): NavSection[] {
   // Phase 109 (ROLE-01/02/03): `profiles.role` is the SOLE persona predicate;
   // `is_admin` is an ops-overlay that gates ONLY the Admin section below —
@@ -203,7 +211,14 @@ function buildNavSections(
             { label: "Users", href: "/admin/users", icon: UserIcon },
             { label: "Deletion requests", href: "/admin/deletion-requests", icon: ShieldIcon },
             { label: "Match queue", href: "/admin/match", icon: MatchIcon },
-            { label: "For-quants leads", href: "/admin/for-quants-leads", icon: MailIcon },
+            {
+              label: "For-quants leads",
+              href: "/admin/for-quants-leads",
+              icon: MailIcon,
+              // D-17: the unread badge. Same pill as the flagged-holdings one.
+              badge: unprocessedLeadsCount,
+              badgeLabel: unprocessedLeadsLabel,
+            },
           ],
         }]
       : []),
@@ -325,6 +340,7 @@ export function Sidebar({
   isManager,
   variant = "desktop",
   flaggedCount,
+  unprocessedLeadsCount,
   onNavAction,
 }: {
   populatedSlugs?: string[];
@@ -344,6 +360,12 @@ export function Sidebar({
    *  via DashboardChrome's `useFlaggedCountStore()` (no new server
    *  query). Renders as a badge on "My Allocation" when > 0. */
   flaggedCount?: number;
+  /** D-17 — leads with `processed_at IS NULL`, read server-side in
+   *  `(dashboard)/layout.tsx` for admins only. Drawn on the admin "For-quants
+   *  leads" entry when > 0. `undefined` means "not measured" (non-admin, or the
+   *  read failed) and draws nothing; it is never coerced to a count. The badge
+   *  also needs `isAdmin`, because the entry itself lives in the ADMIN section. */
+  unprocessedLeadsCount?: number;
   /** Phase 110 CONTRIB-01 — dispatched when a client-action nav item (e.g.
    *  "Add a Strategy") is activated. DashboardChrome wires this to open the
    *  ContributionWizardOverlay. Undefined on surfaces that carry no action
@@ -352,8 +374,16 @@ export function Sidebar({
 } = {}) {
   const pathname = usePathname();
   const sections = useMemo(
-    () => buildNavSections(populatedSlugs, isAdmin, isAllocator, flaggedCount, isManager),
-    [populatedSlugs, isAdmin, isAllocator, flaggedCount, isManager],
+    () =>
+      buildNavSections(
+        populatedSlugs,
+        isAdmin,
+        isAllocator,
+        flaggedCount,
+        isManager,
+        unprocessedLeadsCount,
+      ),
+    [populatedSlugs, isAdmin, isAllocator, flaggedCount, isManager, unprocessedLeadsCount],
   );
 
   return (
@@ -499,7 +529,11 @@ function NavItemLink({
         <span>{item.label}</span>
         {showBadge && (
           <span
-            aria-label={`${badge} flagged holding${badge === 1 ? "" : "s"}`}
+            aria-label={
+              item.badgeLabel
+                ? item.badgeLabel(badge)
+                : `${badge} flagged holding${badge === 1 ? "" : "s"}`
+            }
             className="ml-auto inline-flex h-[18px] min-w-[18px] items-center justify-center rounded-sm bg-accent px-1.5 text-fixed-10 font-medium text-white"
           >
             {formatBadgeCount(badge)}

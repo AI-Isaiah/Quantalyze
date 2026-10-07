@@ -229,6 +229,42 @@ describe("DashboardChrome — standard vs full-bleed layout (M-0410)", () => {
   });
 });
 
+describe("DashboardChrome — unprocessed-leads badge forwarding (D-17)", () => {
+  it("forwards unprocessedLeadsCount to the desktop Sidebar's For-quants leads entry", () => {
+    navState.pathname = "/admin";
+    render(
+      <DashboardChrome isAdmin={true} populatedSlugs={[]} unprocessedLeadsCount={3}>
+        <div>page</div>
+      </DashboardChrome>,
+    );
+    const desktopNav = screen.getByRole("navigation", { name: "Primary" });
+    const link = within(desktopNav).getByText("For-quants leads").closest("a")!;
+    expect(within(link).getByLabelText("3 unprocessed leads")).toBeInTheDocument();
+  });
+
+  it("forwards it on the full-bleed branch too (the mobile drawer is the only rail there)", () => {
+    navState.pathname = "/admin/match/abc-123";
+    render(
+      <DashboardChrome isAdmin={true} populatedSlugs={[]} unprocessedLeadsCount={3}>
+        <div>queue</div>
+      </DashboardChrome>,
+    );
+    // The drawer's Sidebar only mounts once the hamburger opens it.
+    fireEvent.click(screen.getByRole("button", { name: "Open menu" }));
+    expect(screen.getAllByLabelText("3 unprocessed leads").length).toBeGreaterThan(0);
+  });
+
+  it("renders no badge when no count was supplied", () => {
+    navState.pathname = "/admin";
+    render(
+      <DashboardChrome isAdmin={true} populatedSlugs={[]}>
+        <div>page</div>
+      </DashboardChrome>,
+    );
+    expect(screen.queryByLabelText(/unprocessed lead/)).toBeNull();
+  });
+});
+
 /**
  * Phase 52 (v1.4) — DashboardChrome wide fluid-fill variant.
  *

@@ -130,6 +130,40 @@ export async function listForQuantsLeads({
   return { rows, hitCap };
 }
 
+/**
+ * D-17: how many leads are still unprocessed, for the admin sidebar's unread
+ * badge on the "For-quants leads" entry. A HEAD count, so no lead row (name,
+ * email, message) leaves the database for a nav element.
+ *
+ * Returns `null` on ANY failure, after logging it. `null` is not `0`: the
+ * caller must omit the badge rather than render a "nothing waiting" state it
+ * did not measure, the same rule `listForQuantsLeads` applies to its error
+ * banner. The caller is responsible for the admin check; this function only
+ * reads, and only through the service-role chokepoint.
+ */
+export async function countUnprocessedForQuantsLeads(
+  client?: SupabaseClient,
+): Promise<number | null> {
+  try {
+    const admin = client ?? createAdminClient();
+    const { count, error } = await admin
+      .from("for_quants_leads")
+      .select("id", { count: "exact", head: true })
+      .is("processed_at", null);
+    if (error || count === null || count === undefined) {
+      console.error(
+        "[for-quants-leads-admin] unprocessed count failed:",
+        error ?? "no count returned",
+      );
+      return null;
+    }
+    return count;
+  } catch (err) {
+    console.error("[for-quants-leads-admin] unprocessed count threw:", err);
+    return null;
+  }
+}
+
 export type SetLeadProcessedResult =
   | { ok: true }
   | { ok: false; reason: "not_found" | "db_error" };
