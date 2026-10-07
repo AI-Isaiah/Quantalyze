@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
+import { render, screen, fireEvent, within } from "@testing-library/react";
 import { Sidebar } from "./Sidebar";
 
 /**
@@ -404,6 +404,91 @@ describe("Sidebar flagged-count badge cap (CF-06)", () => {
   it("renders a small count verbatim", () => {
     render(<Sidebar populatedSlugs={[]} isAllocator={true} flaggedCount={5} />);
     expect(screen.getByText("5")).toBeInTheDocument();
+  });
+});
+
+/**
+ * D-17 (DOMAINONE, founder 2026-10-07): the admin "For-quants leads" entry
+ * carries a numeric badge for the leads nobody has processed yet, so the
+ * founder sees a new contact message whenever they are in the app. Reuses the
+ * flagged-count pill (same classes, same "99+" cap); only the label noun
+ * differs. The count is fetched server-side after the admin check; the Sidebar
+ * additionally refuses to draw it for a non-admin, so a stray prop can never
+ * leak "there are N unprocessed leads" into another role's rail.
+ */
+describe("Sidebar unprocessed-leads badge (D-17)", () => {
+  const leadsLink = () => screen.getByText("For-quants leads").closest("a")!;
+
+  it("an admin with N > 0 unprocessed leads sees N on the For-quants leads entry", () => {
+    render(<Sidebar populatedSlugs={[]} isAdmin={true} unprocessedLeadsCount={7} />);
+    const badge = within(leadsLink()).getByLabelText("7 unprocessed leads");
+    expect(badge).toHaveTextContent("7");
+    // Same pill as the flagged-holdings badge: accent fill, 10px, white text.
+    expect(badge.className).toContain("bg-accent");
+    expect(badge.className).toContain("text-fixed-10");
+  });
+
+  it("uses the singular label for exactly one lead", () => {
+    render(<Sidebar populatedSlugs={[]} isAdmin={true} unprocessedLeadsCount={1} />);
+    expect(within(leadsLink()).getByLabelText("1 unprocessed lead")).toBeInTheDocument();
+  });
+
+  it("caps the visible text at 99+ and keeps the true count in the label", () => {
+    render(<Sidebar populatedSlugs={[]} isAdmin={true} unprocessedLeadsCount={120} />);
+    const badge = within(leadsLink()).getByLabelText("120 unprocessed leads");
+    expect(badge).toHaveTextContent("99+");
+  });
+
+  it("zero shows no badge", () => {
+    render(<Sidebar populatedSlugs={[]} isAdmin={true} unprocessedLeadsCount={0} />);
+    expect(within(leadsLink()).queryByLabelText(/unprocessed lead/)).toBeNull();
+  });
+
+  it("not applicable (undefined) shows no badge and no marker", () => {
+    render(<Sidebar populatedSlugs={[]} isAdmin={true} />);
+    expect(within(leadsLink()).queryByLabelText(/unprocessed lead/)).toBeNull();
+    expect(within(leadsLink()).queryByText("?")).toBeNull();
+  });
+
+  // Round 2 (SFH, conf 7): a failed count read used to be indistinguishable
+  // from zero. `null` is the layout's "an admin whose read failed" value.
+  it("an admin whose count read failed (null) sees a muted '?' marker with an accessible name", () => {
+    render(<Sidebar populatedSlugs={[]} isAdmin={true} unprocessedLeadsCount={null} />);
+    const marker = within(leadsLink()).getByLabelText("Unprocessed lead count unavailable");
+    expect(marker).toHaveTextContent("?");
+    // A muted variant of the pill, NOT the accent one that means "N waiting".
+    expect(marker.className).toContain("text-text-muted");
+    expect(marker.className).toContain("bg-surface-subtle");
+    expect(marker.className).not.toContain("bg-accent");
+    // It is not a count: no "N unprocessed leads" name anywhere.
+    expect(within(leadsLink()).queryByLabelText(/^\d+ unprocessed lead/)).toBeNull();
+  });
+
+  it("the unmeasured marker is drawn for an admin only, never for another role", () => {
+    render(
+      <Sidebar populatedSlugs={[]} isAllocator={true} unprocessedLeadsCount={null} />,
+    );
+    expect(screen.queryByText("For-quants leads")).toBeNull();
+    expect(screen.queryByLabelText("Unprocessed lead count unavailable")).toBeNull();
+  });
+
+  it("zero still draws nothing, not even the marker", () => {
+    render(<Sidebar populatedSlugs={[]} isAdmin={true} unprocessedLeadsCount={0} />);
+    expect(within(leadsLink()).queryByText("?")).toBeNull();
+    expect(screen.queryByLabelText("Unprocessed lead count unavailable")).toBeNull();
+  });
+
+  it("a non-admin never sees the badge or the entry, even if handed a count", () => {
+    render(
+      <Sidebar populatedSlugs={[]} isAllocator={true} unprocessedLeadsCount={9} />,
+    );
+    expect(screen.queryByText("For-quants leads")).toBeNull();
+    expect(screen.queryByLabelText(/unprocessed lead/)).toBeNull();
+  });
+
+  it("does not put the badge on any other admin entry", () => {
+    render(<Sidebar populatedSlugs={[]} isAdmin={true} unprocessedLeadsCount={4} />);
+    expect(screen.getAllByLabelText(/unprocessed lead/)).toHaveLength(1);
   });
 });
 

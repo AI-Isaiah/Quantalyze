@@ -1120,7 +1120,7 @@ export type WizardErrorCode =
   // ⚠️ NOT `VALIDATION_FAILED`, which is the closest member in this union and
   // whose title and cause are almost exactly right ("We could not read that
   // request… The fault is in our software"). Its FIX is what disqualifies it:
-  // "Contact security@quantalyze.com with your draft ID". A dashboard dialog
+  // "Contact <the old security address> with your draft ID". A dashboard dialog
   // has no draft and therefore no draft ID, so the one instruction it offers
   // cannot be carried out. Copying that entry and dropping the clause would
   // change what every wizard surface says; minting is the surgical move.
@@ -1732,10 +1732,10 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
       "The permission check against the exchange did not complete — a transient upstream issue, not a problem with your key. We fail closed when we cannot verify, so nothing was saved.",
     fix: [
       "Try again in a moment.",
-      "If it keeps failing, switch to a different exchange or contact support.",
+      "If it keeps failing, switch to a different exchange or use the contact form.",
       // D-17 / Gate C — the truthful replacement for a venue that IS the
       // account. States the truth and invents no remedy.
-      "This is your broker account, so there is no other venue to try. If it keeps failing, email security@quantalyze.com with the correlation id below.",
+      "This is your broker account, so there is no other venue to try. If it keeps failing, send the correlation id below through the contact form.",
     ],
     // D-17 — bullet 1 presupposes another venue exists; bullet 2 presupposes
     // it does not. ONE filter picks; no code branch names mt5.
@@ -2004,7 +2004,7 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
       "Submit again once each one has a value.",
       // ── preselect-only. Two controls exist on that screen and neither is a
       // field, so nothing here asks the reader to type or to resubmit.
-      "Nothing on this screen was left blank — this request carried no fields for you to fill, only the key you picked. Email security@quantalyze.com with the correlation id below: a request of ours that our own server refuses is ours to fix.",
+      "Nothing on this screen was left blank — this request carried no fields for you to fill, only the key you picked. Send the correlation id below through the contact form: a request of ours that our own server refuses is ours to fix.",
       "“Use a different key” on this screen opens the credential form, which is a different request and may well go through. It is not a workaround for the refusal above, and pressing “Continue with this key” again sends the identical thing and is refused identically.",
     ],
     fixRequires: [
@@ -2050,7 +2050,7 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
       "The request this step built was refused by our own service before any work started. Nothing was created, nothing was stored, and nothing was sent to your exchange. The fault is in our software, not in the key you picked.",
     fix: [
       "Reload the page and pick the key again — a fresh page may build the request correctly.",
-      "If it is refused a second time, email security@quantalyze.com with the correlation id below. A request our own page built wrong is ours to fix.",
+      "If it is refused a second time, send the correlation id below through the contact form. A request our own page built wrong is ours to fix.",
     ],
     docsHref: "/security",
     actions: ["leave_and_return", "expand_log"],
@@ -2176,7 +2176,7 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
       "The venue's edge protection refused the request before the exchange itself saw it. It is aimed at where the request came from, not at your key. Your key was not stored and nothing was submitted.",
     fix: [
       "Wait a moment and try again — these blocks are usually short-lived.",
-      "If it keeps failing, contact security@quantalyze.com so we can raise it with the venue.",
+      "If it keeps failing, use the contact form so we can raise it with the venue.",
     ],
     docsHref: "/security#sync-timing",
     actions: ["clear_and_retry", "request_call"],
@@ -2188,10 +2188,10 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
       "The exchange asked us to slow down. This is a transient, exchange-side throttle and not a problem with your key.",
     fix: [
       "Wait 60 seconds and try again.",
-      "If it persists, try a different exchange account or contact support.",
+      "If it persists, try a different exchange account or use the contact form.",
       // D-17 / Gate C — verbatim from the UI-SPEC, identical across all three
       // venue-conditional entries.
-      "This is your broker account, so there is no other venue to try. If it keeps failing, email security@quantalyze.com with the correlation id below.",
+      "This is your broker account, so there is no other venue to try. If it keeps failing, send the correlation id below through the contact form.",
     ],
     // D-17 — "a different exchange ACCOUNT" is the same unwinnable remedy for a
     // venue that is the account.
@@ -2210,10 +2210,10 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
       "The validation request did not complete in time. Usually means a temporary exchange issue or a network blip on our side.",
     fix: [
       "Try again in a moment.",
-      "If it keeps failing, switch to a different exchange or contact support.",
+      "If it keeps failing, switch to a different exchange or use the contact form.",
       // D-17 / Gate C — an MT5 user reads a truthful replacement, not a
       // shorter list. That is why the requirement carries a boolean.
-      "This is your broker account, so there is no other venue to try. If it keeps failing, email security@quantalyze.com with the correlation id below.",
+      "This is your broker account, so there is no other venue to try. If it keeps failing, send the correlation id below through the contact form.",
     ],
     // D-17 — the third instance of the one class; no third code branch.
     fixRequires: [
@@ -2324,7 +2324,7 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
       "Or delete it and start fresh here.",
       // ── preselect-only.
       "Press “Continue with this key” once more. If the draft already open is this key's, we hand that one back and carry on from where it stopped — nothing is created twice.",
-      "If it is refused a second time, the open draft belongs to a different key of yours and this screen cannot reach it. Email security@quantalyze.com with the correlation id below. Nothing was created by this attempt.",
+      "If it is refused a second time, the open draft belongs to a different key of yours and this screen cannot reach it. Send the correlation id below through the contact form. Nothing was created by this attempt.",
     ],
     fixRequires: [
       NOT_ON_PRESELECT_SURFACE,
@@ -2377,7 +2377,7 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
       "This browser is still carrying the wizard session that opened an earlier draft, and it is that draft — not the key you picked — that our records clash with. Nothing was created by this attempt and none of your stored keys changed.",
     fix: [
       "Press “Continue with this key” once more. If the clash was a race with your own first press, we hand that draft back and carry on from where it stopped — nothing is created twice.",
-      "If it is refused a second time, the open draft belongs to a different key of yours and this screen cannot reach it. Email security@quantalyze.com with the correlation id below. Nothing was created by this attempt.",
+      "If it is refused a second time, the open draft belongs to a different key of yours and this screen cannot reach it. Send the correlation id below through the contact form. Nothing was created by this attempt.",
     ],
     docsHref: "/security#draft-resume",
     // ⛔ NEITHER MEMBER OF `RECOVERABLE_ACTIONS`, for the reason the entry above
@@ -2419,7 +2419,7 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
       "Open the strategy that already uses this account from your strategies page — it keeps updating from this same account.",
       // 167.1.2 (D-01): venue-neutral — this refusal now also fires for ccxt keys.
       "To list a second strategy, connect a different account: a separate exchange account or sub-account.",
-      "If you believe this account should be free, email security@quantalyze.com before you disconnect anything — disconnecting it stops the existing strategy from updating.",
+      "If you believe this account should be free, use the contact form before you disconnect anything — disconnecting it stops the existing strategy from updating.",
       // ── 162-06 review / B-2b — preselect-only, and it exists because this
       // entry is NOT recoverable: `actions` carries neither member of
       // `RECOVERABLE_ACTIONS`, so no Retry renders and the reuse arm's own
@@ -2523,7 +2523,7 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
   // summary and REUSES the stored `api_keys` row through `create-with-key`'s
   // reuse arm — it no longer re-POSTs credentials, so it no longer lands here.
   // The sentence that stood in `fix[1]` ("To reuse this exact account, email
-  // security@quantalyze.com … releasing the stored key is not something you can
+  // <the old security address> … releasing the stored key is not something you can
   // do from this page") told exactly the users this phase is about that a remedy
   // they now HAVE does not exist.
   //
@@ -2555,7 +2555,7 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     fix: [
       "Connect this strategy with a different account — one whose key is not already stored here.",
       "If your account includes the My Strategies page, look for this account there under “No strategy yet”: “Finish setup” on that row builds the strategy from the key already stored, with no credentials to enter again.",
-      "If that page is not part of your account, or it does not list this key, email security@quantalyze.com with the correlation id below: releasing the stored key is not something you can do from this page.",
+      "If that page is not part of your account, or it does not list this key, send the correlation id below through the contact form: releasing the stored key is not something you can do from this page.",
     ],
     docsHref: "/security",
     // ⛔ `try_another_key` AND NOT `clear_and_retry`. Both are members of
@@ -2632,7 +2632,7 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     fix: [
       "Choose “Use a different key” on this screen to connect this account with its own API credentials instead.",
       "If you arrived from My Strategies, reload that page first: the key list it showed you is what this request is checked against, and it is now out of date.",
-      "If neither clears it, email security@quantalyze.com with the correlation id below.",
+      "If neither clears it, send the correlation id below through the contact form.",
     ],
     docsHref: "/security",
     // ⛔ `try_another_key` AND NOT `clear_and_retry` — see the union member's
@@ -2666,7 +2666,7 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     fix: [
       "Use the key you already have for this account instead of adding a new one.",
       "To connect a different account, create a key on that account (a separate exchange account or sub-account) and add it.",
-      "If you believe this account should be free to connect fresh, email security@quantalyze.com with the correlation id below before disconnecting anything — the existing key keeps working until you do.",
+      "If you believe this account should be free to connect fresh, send the correlation id below through the contact form before disconnecting anything — the existing key keeps working until you do.",
     ],
     docsHref: "/security",
     // ⛔ NEITHER member of `RECOVERABLE_ACTIONS` (`clear_and_retry`,
@@ -2707,7 +2707,7 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     fix: [
       "Entering the password again here cannot clear this: every attempt reads the same stored copy.",
       "Connect this account again from your keys list, so we hold a copy we can read.",
-      "If it will not connect, email security@quantalyze.com with the correlation id below before deleting anything — your synced history hangs off this key.",
+      "If it will not connect, send the correlation id below through the contact form before deleting anything — your synced history hangs off this key.",
     ],
     docsHref: "/security",
     // ⛔ NEITHER member of `RECOVERABLE_ACTIONS` (`clear_and_retry`,
@@ -2742,7 +2742,7 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
       "Open this account at the venue and confirm its credentials are current — a changed password, an expiry, or a regenerated key all end here.",
       "For MT5 that is the investor (read-only) password: your broker can reset it, and changing the master password changes it too.",
       "Then submit again with the credentials you just confirmed. Submitting the same details unchanged reaches the same place.",
-      "If the credentials are unchanged and this keeps happening, email security@quantalyze.com with the correlation id below — that pattern points at the venue rather than at your account.",
+      "If the credentials are unchanged and this keeps happening, send the correlation id below through the contact form — that pattern points at the venue rather than at your account.",
     ],
     // Index-aligned to `fix`. Slot 1 (the MT5 investor-password naming) is
     // gated on `REQUIRES_MT5` — absent venue suppresses it, per that
@@ -2785,7 +2785,7 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
       "The sync did not complete. We cannot tell from here which step failed or how far it got. Your draft is saved.",
     fix: [
       "Retry the sync from this page.",
-      "If it keeps failing, contact security@quantalyze.com with your draft ID and the diagnostics below.",
+      "If it keeps failing, send the correlation id below through the contact form.",
     ],
     docsHref: "/security#sync-timing",
     actions: ["clear_and_retry", "request_call"],
@@ -2832,7 +2832,7 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
       "The analytics step failed for this draft. We cannot tell from here how much of the sync before it completed. The fault is in our pipeline, not at your exchange.",
     fix: [
       "Retry the sync from this page.",
-      "If it fails again, email security@quantalyze.com with your draft ID and the diagnostics below.",
+      "If it fails again, send the correlation id below through the contact form.",
     ],
     docsHref: "/security#sync-timing",
     actions: ["clear_and_retry", "request_call"],
@@ -3170,7 +3170,7 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     fix: [
       "Reload this page. That is the whole fix: a fresh load replaces the out-of-date code this tab is running.",
       "Add the key again on the reloaded page. Nothing was stored the first time, so there is nothing to undo first.",
-      "If a reload does not clear it, email security@quantalyze.com with the correlation id below — that would mean the page we are serving is the out-of-date one, which is ours to fix.",
+      "If a reload does not clear it, send the correlation id below through the contact form — that would mean the page we are serving is the out-of-date one, which is ours to fix.",
     ],
     docsHref: "/security",
     // ⛔ NEITHER member of `RECOVERABLE_ACTIONS` (`clear_and_retry`,
@@ -3270,7 +3270,7 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
       "A read of your draft failed on our side before anything else ran. Nothing was submitted and nothing was changed — the fault is in our database, not in your key, your exchange or your data. Reads like this usually succeed on the next attempt.",
     fix: [
       "Wait a moment and try again — the read usually succeeds on retry.",
-      "If it keeps failing, email security@quantalyze.com with the correlation id below. Your draft is saved either way.",
+      "If it keeps failing, send the correlation id below through the contact form. Your draft is saved either way.",
     ],
     docsHref: "/security#sync-timing",
     // RECOVERABLE: `clear_and_retry` is a member of `RECOVERABLE_ACTIONS`
@@ -3287,7 +3287,7 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
       "The last write failed, and the database's answer was not one we have a specific reply for. We cannot confirm from here whether anything was recorded, so we are not going to claim either way. The fault is on our side, not in your key or your exchange.",
     fix: [
       "Try again. Submitting is state-guarded: if the first attempt did go through, the next one tells you the draft has already moved on rather than creating a second strategy.",
-      "If it keeps failing, email security@quantalyze.com with the correlation id below.",
+      "If it keeps failing, send the correlation id below through the contact form.",
     ],
     docsHref: "/security",
     // RECOVERABLE, and both halves of that decision were checked rather than
@@ -3313,7 +3313,7 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
       "Your submission is saved: the strategy is waiting for review. The step that queues its analytics did not go through, so the factsheet will not start computing until it does. The fault is on our side, not in your key or your exchange.",
     fix: [
       "Try again. Retrying is safe: your submission is already saved, so it will not be submitted twice, and the retry only queues the analytics.",
-      "If it keeps failing, email security@quantalyze.com with the correlation id below.",
+      "If it keeps failing, send the correlation id below through the contact form.",
     ],
     docsHref: "/security",
     // RECOVERABLE: the Retry replays the finalize, which recognises the
@@ -3362,7 +3362,7 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     cause: "We cap CSV uploads at 10 MB to keep validation fast.",
     fix: [
       "Trim or split your file so it stays under 10 MB.",
-      "If you must upload a larger file, contact support.",
+      "If you must upload a larger file, use the contact form.",
     ],
     docsHref: "/security#csv-format",
     actions: ["clear_and_retry", "request_call"],
@@ -3503,7 +3503,7 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
       "At least one row failed a schema or business-rule check. We report the first rule that failed, not a list of every affected row.",
     fix: [
       "Check your file against the CSV format reference, then upload it again.",
-      "If the reason above is not specific enough to act on, contact security@quantalyze.com with the reference below.",
+      "If the reason above is not specific enough to act on, send the reference below through the contact form.",
     ],
     docsHref: "/security#csv-format",
     actions: ["clear_and_retry"],
@@ -3570,7 +3570,7 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     cause: "The validation request did not complete in time.",
     fix: [
       "Retry — your file is preserved.",
-      "If it keeps failing, contact security@quantalyze.com.",
+      "If it keeps failing, use the contact form.",
     ],
     docsHref: "/security#sync-timing",
     actions: ["clear_and_retry", "request_call"],
@@ -3614,7 +3614,7 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
       "Open /strategies in another tab first. If your strategy is listed, the save did complete and you are done.",
       "If it is not listed, submit the same file again. An unchanged resubmit from this wizard resolves to the strategy you already started instead of creating a second one.",
       "To upload a different file, or to use a different name, start a new strategy. We refuse a changed resubmit from this wizard rather than mixing it into the one you already started.",
-      "If you are unsure, contact security@quantalyze.com with your wizard session id and the diagnostics below.",
+      "If you are unsure, send the correlation id below through the contact form.",
     ],
     docsHref: "/security#sync-timing",
     actions: ["clear_and_retry", "request_call"],
@@ -3686,7 +3686,7 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     fix: [
       "Submit the same file again. On the CSV path an unchanged resubmit of the same wizard session resolves to the strategy that already exists instead of creating a second one.",
       "To upload a different file, or to use a different name, start a new strategy. We refuse a changed resubmit rather than mixing it into the first one.",
-      "If it persists, contact security@quantalyze.com.",
+      "If it persists, use the contact form.",
     ],
     docsHref: "/security#sync-timing",
     actions: ["clear_and_retry", "request_call"],
@@ -3720,7 +3720,7 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     fix: [
       "Open your dashboard to see the strategy and its current status.",
       "If you intended a fresh submission, start a new wizard session from /strategies/new.",
-      "If you think this is a mistake, contact security@quantalyze.com with your draft ID.",
+      "If you think this is a mistake, send the correlation id below through the contact form.",
     ],
     docsHref: "/security#sync-timing",
     actions: ["leave_and_return", "request_call"],
@@ -3744,7 +3744,7 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
       "A transient check couldn't determine whether this draft is a multi-key composite. Your draft is saved and nothing was submitted — this is on our side, not your key.",
     fix: [
       "Wait a moment and try again — the check usually succeeds on retry.",
-      "If it keeps failing, contact security@quantalyze.com with your draft ID.",
+      "If it keeps failing, send the correlation id below through the contact form.",
     ],
     docsHref: "/security#sync-timing",
     // Recoverable transient fault: keep `clear_and_retry` so the Retry control
@@ -3766,7 +3766,7 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     fix: [
       "Go back to the keys step and remove keys until 10 or fewer remain, then submit again.",
       "Splitting the extra keys into a second strategy also works — each strategy carries its own limit of 10.",
-      "If you need more than 10 keys in one strategy, email security@quantalyze.com with your draft ID. The limit is ours, not your exchange's.",
+      "If you need more than 10 keys in one strategy, send the correlation id below through the contact form. The limit is ours, not your exchange's.",
     ],
     docsHref: "/security",
     // ⚠️ NO `clear_and_retry` AND NO `try_another_key` — the two members of
@@ -3792,7 +3792,7 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     cause:
       "This draft has more than one key attached, and the pipeline it was routed through does not support multi-key strategies yet. We stopped and marked the strategy as failed rather than publish half of it. Submitting the same draft again reaches the same refusal.",
     fix: [
-      "Email security@quantalyze.com with the correlation id below — this is a gap on our side, and we can finalize it for you.",
+      "Send the correlation id below through the contact form — this is a gap on our side, and we can finalize it for you.",
       "Your keys are untouched and stay connected. Nothing needs undoing.",
     ],
     docsHref: "/security",
@@ -3811,7 +3811,7 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
       "A transient error stopped us from loading the API keys saved on this draft. Your draft is safe and nothing was submitted — this is on our side, not your keys.",
     fix: [
       "Wait a moment and try again — the load usually succeeds on retry.",
-      "If it keeps failing, contact security@quantalyze.com with your draft ID.",
+      "If it keeps failing, send the correlation id below through the contact form.",
     ],
     docsHref: "/security#sync-timing",
     // Recoverable transient fault: keep `clear_and_retry` so the Retry control
@@ -3835,7 +3835,7 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
       "We paused outbound requests after repeated failures so the service can recover, so this request was never sent. Nothing was submitted — this is on our side, not your key.",
     fix: [
       "Wait a moment, then try the same action again.",
-      "If it is still failing after a few minutes, contact security@quantalyze.com.",
+      "If it is still failing after a few minutes, use the contact form.",
     ],
     docsHref: "/security#sync-timing",
     // Recoverable by definition — the whole point of the code is that a Retry
@@ -3862,7 +3862,7 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     fix: [
       "If you were submitting a strategy, open /strategies before retrying — the request may have completed without answering.",
       "Otherwise, try the same action again.",
-      "If it is still failing after a few minutes, contact security@quantalyze.com with your draft ID.",
+      "If it is still failing after a few minutes, send the correlation id below through the contact form.",
     ],
     // Gate B / 153.1-03 — the live defect: this first bullet rendered on the
     // CONNECT step, where nothing was being submitted, and sent the user on a
@@ -3909,7 +3909,7 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     cause:
       "We sent a request that failed its shape check before any work started. Nothing was submitted and nothing was changed. The fault is in our software, not in your key or your data.",
     fix: [
-      "Contact security@quantalyze.com with your draft ID — a request-shape fault is on our side and retrying the same action will not clear it.",
+      "Send the correlation id below through the contact form — a request-shape fault is on our side and retrying the same action will not clear it.",
     ],
     docsHref: "/security",
     // Deliberately NO retry affordance: the request is malformed, so a retry
@@ -3965,7 +3965,7 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     cause:
       "A setting on our side is wrong, so we stopped before sending the request. Nothing was submitted and nothing was changed. Retrying will not clear it: the setting stays wrong until we fix it and redeploy. This is not your key, your exchange or your data.",
     fix: [
-      "Email security@quantalyze.com with the correlation id below — a configuration fault is ours to fix, and running the same action again will not clear it.",
+      "Send the correlation id below through the contact form — a configuration fault is ours to fix, and running the same action again will not clear it.",
       "Nothing needs undoing on your side. The request never left our servers, so no draft, key or strategy changed.",
     ],
     docsHref: "/security",
@@ -4029,7 +4029,7 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     cause:
       "The check stopped on a fault in our own service — not in your key, your exchange or your data. We never store a key we could not check, so no key was stored. We cannot tell you whether a second attempt would get further, so we are not offering one here.",
     fix: [
-      "Email security@quantalyze.com with the correlation id below. A fault in our own service is ours to fix, whether or not it repeats.",
+      "Send the correlation id below through the contact form. A fault in our own service is ours to fix, whether or not it repeats.",
       "Nothing needs undoing on your side. Your key was not stored.",
     ],
     docsHref: "/security",
@@ -4059,7 +4059,7 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     fix: [
       "Open your strategies list first. If the submission went through, the strategy is there with its review status.",
       "If it is not there after a minute, submit again.",
-      "If this keeps happening, email security@quantalyze.com with the correlation id below.",
+      "If this keeps happening, send the correlation id below through the contact form.",
     ],
     docsHref: "/security",
     // ⛔ NOT recoverable: `actions` carries neither member of
@@ -4111,7 +4111,7 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
       // `surface: "connect"` in the same commit it starts emitting this code or
       // the reassurance the user most needs is silently withheld.
       "Your key details are still on this page.",
-      "Some brokers are slower than the time we allow. Email security@quantalyze.com with the correlation id below and we will raise the limit for your broker.",
+      "Some brokers are slower than the time we allow. Send the correlation id below through the contact form and we will raise the limit for your broker.",
     ],
     fixRequires: [REQUIRES_CONNECT_SURFACE, null],
     docsHref: "/security#sync-timing",
@@ -4204,7 +4204,7 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
       "The request this page built was refused by our own service before any work started. Nothing was saved and nothing was changed. The fault is in our software, not in what you typed.",
     fix: [
       "Reload the page and make the change again — a fresh page may build the request correctly.",
-      "If it happens again, email security@quantalyze.com with the correlation id below. A request our own page built wrong is ours to fix.",
+      "If it happens again, send the correlation id below through the contact form. A request our own page built wrong is ours to fix.",
     ],
     docsHref: "/security",
     // ⛔ Neither member of `RECOVERABLE_ACTIONS`. Re-sending the identical
@@ -4219,7 +4219,7 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
       "Our own service failed part-way through the change and stopped. Nothing was saved — the strategy is as it was before you pressed save. This is a fault on our side, not in your data.",
     fix: [
       "Try the same change again. This kind of fault is often momentary.",
-      "If it keeps failing, email security@quantalyze.com with the correlation id below.",
+      "If it keeps failing, send the correlation id below through the contact form.",
     ],
     docsHref: "/security",
     // ⚠️ `clear_and_retry` IS a member of `RECOVERABLE_ACTIONS`, so this is the
@@ -4256,7 +4256,7 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
     fix: [
       "Close this dialog and reload the page. What the reloaded page shows is the current state.",
       "If the change is not there, make it again. If it is there, nothing needs undoing.",
-      "If this keeps happening, email security@quantalyze.com with the correlation id below.",
+      "If this keeps happening, send the correlation id below through the contact form.",
     ],
     docsHref: "/security",
     // ⛔ NEITHER member of `RECOVERABLE_ACTIONS`, so `buildEnvelope` derives
@@ -4276,7 +4276,7 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
       "What this dialog points at is not there in the form this change needs — it may have been renamed, removed, or moved to a state this action does not apply to since the page loaded. Nothing was saved.",
     fix: [
       "Close this dialog. The list reloads and shows the strategies as they stand now.",
-      "If the row is still listed after the reload and the change still fails, email security@quantalyze.com with the correlation id below.",
+      "If the row is still listed after the reload and the change still fails, send the correlation id below through the contact form.",
     ],
     docsHref: "/security",
     // ⛔ Neither member of `RECOVERABLE_ACTIONS`. The server answers the
@@ -4291,7 +4291,7 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
       "We could not classify this failure, so we cannot tell you what happened or whether your last action took effect.",
     fix: [
       "Try the last action again.",
-      "If it keeps failing, contact security@quantalyze.com with your draft ID and the diagnostics below.",
+      "If it keeps failing, send the correlation id below through the contact form.",
     ],
     docsHref: "/security",
     actions: ["clear_and_retry", "request_call"],

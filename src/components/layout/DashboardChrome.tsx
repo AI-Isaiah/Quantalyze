@@ -16,6 +16,11 @@ interface DashboardChromeProps {
   isAdmin?: boolean;
   isAllocator?: boolean;
   isManager?: boolean;
+  /** D-17 — unprocessed for-quants leads, supplied by the server layout for
+   *  admins only. `number` = measured, `null` = the admin's read failed
+   *  (Sidebar draws a neutral "?"), `undefined` = not an admin / not
+   *  applicable. Forwarded as-is; never coerced. */
+  unprocessedLeadsCount?: number | null;
   children: React.ReactNode;
 }
 
@@ -43,6 +48,7 @@ export function DashboardChrome({
   isAdmin,
   isAllocator,
   isManager,
+  unprocessedLeadsCount,
   children,
 }: DashboardChromeProps) {
   const pathname = usePathname();
@@ -186,6 +192,7 @@ export function DashboardChrome({
           populatedSlugs={populatedSlugs}
           triggerRef={hamburgerRef}
           flaggedCount={flaggedCount}
+          unprocessedLeadsCount={unprocessedLeadsCount}
           onNavAction={openContribute}
         />
         {contributionOverlay}
@@ -211,6 +218,7 @@ export function DashboardChrome({
           isAllocator={isAllocator}
           isManager={isManager}
           flaggedCount={flaggedCount}
+          unprocessedLeadsCount={unprocessedLeadsCount}
           onNavAction={openContribute}
         />
       </div>
@@ -266,6 +274,7 @@ export function DashboardChrome({
         populatedSlugs={populatedSlugs}
         triggerRef={hamburgerRef}
         flaggedCount={flaggedCount}
+        unprocessedLeadsCount={unprocessedLeadsCount}
         onNavAction={openContribute}
       />
       {contributionOverlay}

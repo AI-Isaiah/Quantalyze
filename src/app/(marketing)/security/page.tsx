@@ -1,5 +1,7 @@
 import type { Metadata } from "next";
+import Link from "next/link";
 import { isSfoxEnabledServer, isMt5EnabledServer } from "@/lib/closed-sets";
+import { contactHref } from "@/lib/contact";
 
 /**
  * `/security` — public security practices page.
@@ -37,6 +39,9 @@ export const metadata: Metadata = {
     type: "article",
   },
 };
+
+/** Every "reach us" pointer on this page goes to the security topic of the contact form (D-01). */
+const SECURITY_CONTACT_HREF = contactHref({ topic: "security" });
 
 export default function SecurityPage() {
   // The shared (marketing)/layout.tsx supplies the header + LegalFooter chrome
@@ -106,7 +111,7 @@ export default function SecurityPage() {
                 are issued by a public CA and rotated automatically before
                 expiry. HSTS is enabled for{" "}
                 <code className="rounded bg-page px-1 py-0.5 font-mono text-caption">
-                  quantalyze.com
+                  quantalyze.xyz
                 </code>{" "}
                 with a one-year max-age.
               </p>
@@ -182,12 +187,12 @@ export default function SecurityPage() {
                 </span>{" "}
                 <span className="text-text-secondary">
                   Allocators evaluating us under diligence —{" "}
-                  <a
-                    href="mailto:security@quantalyze.com?subject=Posture%20letter%20request"
+                  <Link
+                    href={SECURITY_CONTACT_HREF}
                     className="text-accent underline underline-offset-4"
                   >
                     request a posture letter
-                  </a>
+                  </Link>
                   .
                 </span>
               </p>
@@ -373,18 +378,18 @@ export default function SecurityPage() {
             <p className="mt-4 text-body leading-relaxed text-text-primary">
               Allocators asking for a posture letter, researchers reporting
               a vulnerability, and anyone with a concrete security question
-              should email{" "}
-              <a
-                href="mailto:security@quantalyze.com"
+              should use the{" "}
+              <Link
+                href={SECURITY_CONTACT_HREF}
                 className="text-accent underline underline-offset-4"
               >
-                security@quantalyze.com
-              </a>
-              . We reply within one business day. Acknowledgments for
+                contact form
+              </Link>{" "}
+              and choose Security report. We reply within one business day. Acknowledgments for
               coordinated disclosure are published on this page.
             </p>
             <p className="mt-3 text-caption text-text-muted">
-              Last reviewed: 2026-04-12.
+              Last reviewed: 2026-10-07.
             </p>
           </section>
         </article>
@@ -514,13 +519,13 @@ export default function SecurityPage() {
                       </li>
                       <li>
                         If your token is IP-restricted (recommended), whitelist our
-                        static egress IP. Email{" "}
-                        <a
-                          href="mailto:security@quantalyze.com"
+                        static egress IP. Use the{" "}
+                        <Link
+                          href={SECURITY_CONTACT_HREF}
                           className="text-accent underline underline-offset-4"
                         >
-                          security@quantalyze.com
-                        </a>{" "}
+                          contact form
+                        </Link>{" "}
                         for the current IP — we rotate infrequently and will notify
                         ahead of any change. Then paste the token into the wizard.
                       </li>
@@ -585,13 +590,13 @@ export default function SecurityPage() {
             <Section id="egress-ips" title="Egress IPs (IP-allowlist keys)">
               <p>
                 If your exchange key is locked to an IP allowlist, allow our
-                analytics service egress range. Email{" "}
-                <a
-                  href="mailto:security@quantalyze.com"
+                analytics service egress range. Use the{" "}
+                <Link
+                  href={SECURITY_CONTACT_HREF}
                   className="text-accent underline underline-offset-4"
                 >
-                  security@quantalyze.com
-                </a>{" "}
+                  contact form
+                </Link>{" "}
                 for the current IP set — we rotate infrequently and will
                 notify ahead of any change.
               </p>
@@ -604,13 +609,13 @@ export default function SecurityPage() {
                 history can take up to 3 minutes. Your draft is saved — you
                 can leave the wizard tab and come back. If sync fails, the
                 wizard error copy tells you exactly what to retry and when
-                to contact{" "}
-                <a
-                  href="mailto:security@quantalyze.com"
+                to use the{" "}
+                <Link
+                  href={SECURITY_CONTACT_HREF}
                   className="text-accent underline underline-offset-4"
                 >
-                  security@quantalyze.com
-                </a>
+                  contact form
+                </Link>
                 .
               </p>
             </Section>

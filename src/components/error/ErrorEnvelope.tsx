@@ -2,7 +2,9 @@
 
 import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/Button";
+import { ContactPointerText } from "@/components/contact/ContactPointerText";
 import { scrubFreeformString } from "@/lib/admin/pii-scrub";
+import { contactHref } from "@/lib/contact";
 import type { ErrorEnvelope as ErrorEnvelopeType } from "@/lib/envelope";
 
 // Phase 17 / DESIGN-02 — canonical surface-agnostic error envelope renderer.
@@ -39,6 +41,13 @@ export interface ErrorEnvelopeProps {
   envelope: ErrorEnvelopeType;
   onRetry?: () => void;
   onCancel?: () => void;
+  /**
+   * 164.6.6.3.5 D-02 — the id of the draft (strategy) the host is working on,
+   * when it knows one. Only the contact pointer in `cause` / `debug_context`
+   * reads it: the link carries `draft=<id>` so the message arrives with the
+   * reference already filled. Other hosts omit it.
+   */
+  contactDraftId?: string | null;
 }
 
 export function buildDiagBlock(envelope: ErrorEnvelopeType): string {
@@ -62,6 +71,7 @@ export function ErrorEnvelope({
   envelope,
   onRetry,
   onCancel,
+  contactDraftId,
 }: ErrorEnvelopeProps) {
   const [copied, setCopied] = useState(false);
   // Phase-16 IN-01: track the 2s "Copied" flash so we can clear it if the
@@ -105,6 +115,16 @@ export function ErrorEnvelope({
     }
   }
 
+  // 164.6.6.3.5 D-02 / AD-04 — where the copy says "contact form", that phrase
+  // links to the form carrying the id the user would otherwise copy by hand. It
+  // opens in a new tab: the envelope sits over unsaved state. `contactHref` is
+  // the one builder and drops an absent draft, so the link is true either way.
+  const pointerHref = contactHref({
+    topic: "support",
+    ref: envelope.correlation_id,
+    draft: contactDraftId,
+  });
+
   const showRetry = envelope.recoverable && Boolean(onRetry);
   const showCancel = Boolean(onCancel);
 
@@ -143,7 +163,9 @@ export function ErrorEnvelope({
       {envelope.cause && (
         // Same secondary token as debug_context — keeps contrast ≥4.5:1
         // on bg-negative/5.
-        <p className="mt-1.5 text-sm text-text-secondary">{envelope.cause}</p>
+        <p className="mt-1.5 text-sm text-text-secondary">
+          <ContactPointerText text={envelope.cause} href={pointerHref} newTab />
+        </p>
       )}
       {envelope.debug_context.length > 0 && (
         // Phase 17 / DESIGN-05: text-text-secondary (#4A5568) on bg-negative/5
@@ -154,7 +176,9 @@ export function ErrorEnvelope({
         // deferred.
         <ul className="mt-2 list-disc space-y-0.5 pl-5 text-xs text-text-secondary">
           {envelope.debug_context.map((step, i) => (
-            <li key={i}>{step}</li>
+            <li key={i}>
+              <ContactPointerText text={step} href={pointerHref} newTab />
+            </li>
           ))}
         </ul>
       )}

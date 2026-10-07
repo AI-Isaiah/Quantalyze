@@ -66,7 +66,7 @@ test("C-0300 sentinel: chromium-linux baselines committed", () => {
  *       export SUPABASE_SERVICE_ROLE_KEY=placeholder_service_role
  *       export ADMIN_EMAIL=test@example.com
  *       export PLATFORM_NAME=Quantalyze
- *       export PLATFORM_EMAIL=test@quantalyze.com
+ *       export PLATFORM_EMAIL=test@example.com
  *       npm ci && npm run build
  *       npm run start > /tmp/server.log 2>&1 &
  *       for i in $(seq 1 60); do

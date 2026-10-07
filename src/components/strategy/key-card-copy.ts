@@ -219,11 +219,11 @@ export const PANEL_STOP_COPY = {
   },
   // Review fix round 2 (167.2-REVIEW-R2 IN-04 / SFH-R2 R2-L1): the route's
   // DETERMINISTIC degrade causes. "Try again in a moment" is false there, so
-  // this names the path that works: support.
+  // this names the path that works: the contact form.
   chain_unreadable_persistent: {
     label: "Sync not started",
     detail:
-      "This sync did not start: we cannot check whether this strategy has a sync in progress, and trying again will not change that. Contact support@quantalyze.com to start a sync.",
+      "This sync did not start: we cannot check whether this strategy has a sync in progress, and trying again will not change that. Use the contact form to have a sync started.",
   },
   // Review fix round 1 (167.2-REVIEW-SFH M-1): the enqueue answered with
   // enqueue evidence after its bound. A job was queued, but the panel is not
@@ -249,11 +249,12 @@ export const PANEL_STOP_COPY = {
 
 /**
  * KCS23-COMPOSITE. Rendered directly under the `Exchange API Keys` header when
- * the strategy is a composite. `support@quantalyze.com` is plain text, not a
- * `mailto:` link, following the shipped csv-finalize precedent.
+ * the strategy is a composite. The phrase `contact form` is the pointer the
+ * render site links (ContactPointerText, Phase 164.6.6.3.5 AD-05); the string
+ * itself names no address.
  */
 export const COMPOSITE_CARD_NOTE =
-  "This composite strategy reads from every key below. Keys are not linked or synced from this card: contact support@quantalyze.com to change which keys it uses or to re-run its computation.";
+  "This composite strategy reads from every key below. Keys are not linked or synced from this card: use the contact form to change which keys it uses or to re-run its computation.";
 
 // ---------------------------------------------------------------------------
 // Review-fix round 1 (2026-09-24, 167.2-REVIEW-SFH H-2): the card with no link
@@ -270,10 +271,10 @@ export const COMPOSITE_CARD_NOTE =
  * to try again", which is false for the DETERMINISTIC ways to reach this
  * shape (a stitch on record for an unlinked strategy; a job history still
  * full at the RPC cap). It now says what the card cannot tell and names the
- * one path that works in every case: support.
+ * one path that works in every case: the contact form.
  */
 export const SHAPE_UNKNOWN_CARD_NOTE =
-  "We could not confirm whether this strategy is a composite, so keys are not linked or synced from this card. Contact support@quantalyze.com to link a key or start a sync.";
+  "We could not confirm whether this strategy is a composite, so keys are not linked or synced from this card. Use the contact form to link a key or start a sync.";
 
 /**
  * KCS-EMPTY-NOLINK. The empty state on a card that offers no Add Key (a
@@ -291,8 +292,8 @@ export const EMPTY_NOLINK_COPY = "No API keys connected.";
  * composite and says what deleting does; the owner may still confirm.
  *
  * Lineage: round 1 (167.2-REVIEW WR-05) REFUSED such a Delete on every card
- * with "This key is part of a composite strategy, so it is not deleted here.
- * Contact support@quantalyze.com to change which keys the composite uses."
+ * with "This key is part of a composite strategy, so it is not deleted here."
+ * and a pointer to support for changing which keys the composite uses.
  * Round 2 first narrowed that refusal (archived composites deletable, a draft
  * pointed at the wizard); the founder then decided: warn by name, never block.
  *
@@ -317,7 +318,7 @@ export function deleteCompositeWarning(
   const consequence =
     " Deleting it removes the key from every composite listed, and a composite with no other key left becomes unlinked.";
   const published = composites.some((c) => c.status === "published")
-    ? " A key used by a published composite cannot be deleted: contact support@quantalyze.com to change that composite's keys."
+    ? " A key used by a published composite cannot be deleted: use the contact form to change that composite's keys."
     : "";
   return head + consequence + published;
 }

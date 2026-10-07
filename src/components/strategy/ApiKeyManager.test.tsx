@@ -3494,7 +3494,7 @@ describe("[167-06] the persisted credential state renders on the manager's key c
     const WARN_ONE_ORACLE =
       'This key is part of 1 composite strategy: "Synthetic Composite A". Deleting it removes the key from every composite listed, and a composite with no other key left becomes unlinked.';
     const WARN_TWO_PUBLISHED_ORACLE =
-      'This key is part of 2 composite strategies: "Synthetic Composite A", "Synthetic Composite P". Deleting it removes the key from every composite listed, and a composite with no other key left becomes unlinked. A key used by a published composite cannot be deleted: contact support@quantalyze.com to change that composite\'s keys.';
+      'This key is part of 2 composite strategies: "Synthetic Composite A", "Synthetic Composite P". Deleting it removes the key from every composite listed, and a composite with no other key left becomes unlinked. A key used by a published composite cannot be deleted: use the contact form to change that composite\'s keys.';
     const WARN_UNCHECKED_ORACLE =
       "We could not check whether this key is part of a composite strategy. If it is, deleting it also removes it from that composite, and a composite with no other key left becomes unlinked.";
 
@@ -3555,6 +3555,14 @@ describe("[167-06] the persisted credential state renders on the manager's key c
             WARN_TWO_PUBLISHED_ORACLE,
           );
         });
+        // AD-05: the published-composite tail points at the contact form, same
+        // tab, with the strategy id this card belongs to.
+        const pointer = within(within(confirmDialog()).getByTestId("delete-composite-warning")).getByRole(
+          "link",
+          { name: "contact form" },
+        );
+        expect(pointer).toHaveAttribute("href", "/contact?topic=support&strategy=strat-1");
+        expect(pointer).not.toHaveAttribute("target");
         expect(within(confirmDialog()).getByRole("button", { name: "Delete" })).toBeEnabled();
       } finally {
         strategyKeysMemberMock.mockReset();
@@ -4787,14 +4795,20 @@ describe("[167-06] the persisted credential state renders on the manager's key c
  * Oracles are hand-typed, never imported from key-card-copy.ts.
  */
 describe("ApiKeyManager — KCS-23 composite key card", () => {
+  // Phase 164.6.6.3.5 (AD-05): a note that carries the contact pointer holds a
+  // link, so its text is spread over several nodes. Match the <p> by its whole
+  // textContent instead of by its own text nodes.
+  const wholeText = (text: string) => (_content: string, el: Element | null) =>
+    el?.tagName === "P" && el.textContent === text;
+  const CONTACT_HREF = "/contact?topic=support&strategy=strat-composite-1";
   const COMPOSITE_NOTE_ORACLE =
-    "This composite strategy reads from every key below. Keys are not linked or synced from this card: contact support@quantalyze.com to change which keys it uses or to re-run its computation.";
+    "This composite strategy reads from every key below. Keys are not linked or synced from this card: use the contact form to change which keys it uses or to re-run its computation.";
   const EMPTY_COPY_ORACLE =
     "No API keys connected. Add a read-only exchange key to import your trading data.";
   // 167.2-REVIEW-SFH H-2: hand-typed from the UI-SPEC review-fix rows.
   const EMPTY_NOLINK_ORACLE = "No API keys connected.";
   const SHAPE_UNKNOWN_ORACLE =
-    "We could not confirm whether this strategy is a composite, so keys are not linked or synced from this card. Contact support@quantalyze.com to link a key or start a sync.";
+    "We could not confirm whether this strategy is a composite, so keys are not linked or synced from this card. Use the contact form to link a key or start a sync.";
 
   function keyRow(overrides: Partial<Record<string, unknown>> = {}) {
     return {
@@ -4907,11 +4921,16 @@ describe("ApiKeyManager — KCS-23 composite key card", () => {
     const note = screen.getByText(/^This composite strategy reads from every key below\./);
     expect(note.tagName).toBe("P");
     expect(note.textContent).toBe(COMPOSITE_NOTE_ORACLE);
+    // AD-05: the pointer is one same-tab link carrying this strategy's id.
+    const pointer = within(note).getByRole("link", { name: "contact form" });
+    expect(pointer).toHaveAttribute("href", CONTACT_HREF);
+    expect(pointer).not.toHaveAttribute("target");
+    expect(note.textContent).not.toMatch(/@quantalyze\./);
     expect(note).toHaveClass("text-xs", "text-text-muted");
     // Directly under the header row, above every key card.
     const header = screen.getByRole("heading", { name: "Exchange API Keys" });
     expect(header.parentElement!.nextElementSibling).toBe(note);
-    expect(screen.getAllByText(COMPOSITE_NOTE_ORACLE)).toHaveLength(1);
+    expect(screen.getAllByText(wholeText(COMPOSITE_NOTE_ORACLE))).toHaveLength(1);
   });
 
   it("COMPOSITE-MEMBERS-ONLY (167.2-REVIEW CR-02): a composite card lists its member keys only, so KCS23-COMPOSITE is true of the list", async () => {
@@ -4943,7 +4962,7 @@ describe("ApiKeyManager — KCS-23 composite key card", () => {
       expect(screen.getByText("Synthetic Member")).toBeInTheDocument();
     });
 
-    expect(screen.getByText(COMPOSITE_NOTE_ORACLE)).toBeInTheDocument();
+    expect(screen.getByText(wholeText(COMPOSITE_NOTE_ORACLE))).toBeInTheDocument();
     expect(screen.queryByText("Synthetic Other")).not.toBeInTheDocument();
     expect(screen.queryByTestId("api-key-card-key-synthetic-x")).not.toBeInTheDocument();
   });
@@ -4957,7 +4976,7 @@ describe("ApiKeyManager — KCS-23 composite key card", () => {
 
     expect(screen.getByText(EMPTY_NOLINK_ORACLE)).toBeInTheDocument();
     expect(screen.queryByText(EMPTY_COPY_ORACLE)).not.toBeInTheDocument();
-    expect(screen.getByText(COMPOSITE_NOTE_ORACLE)).toBeInTheDocument();
+    expect(screen.getByText(wholeText(COMPOSITE_NOTE_ORACLE))).toBeInTheDocument();
     expectNoLinkControls();
     expect(strategiesUpdateMock).not.toHaveBeenCalled();
   });
@@ -5001,8 +5020,11 @@ describe("ApiKeyManager — KCS-23 composite key card", () => {
   it("SHAPE-UNKNOWN-NOTE (167.2-REVIEW-SFH H-2): an unknown shape says why the sync controls are missing, directly under the header", async () => {
     await renderCard([keyRow({ id: "key-synthetic-a", label: "Synthetic Key A" })], "unknown");
 
-    const note = screen.getByText(SHAPE_UNKNOWN_ORACLE);
+    const note = screen.getByText(wholeText(SHAPE_UNKNOWN_ORACLE));
     expect(note.tagName).toBe("P");
+    const pointer = within(note).getByRole("link", { name: "contact form" });
+    expect(pointer).toHaveAttribute("href", CONTACT_HREF);
+    expect(pointer).not.toHaveAttribute("target");
     expect(note).toHaveClass("text-xs", "text-text-muted");
     const header = screen.getByRole("heading", { name: "Exchange API Keys" });
     expect(header.parentElement!.nextElementSibling).toBe(note);
@@ -5017,7 +5039,7 @@ describe("ApiKeyManager — KCS-23 composite key card", () => {
       expect(screen.getByText(EMPTY_NOLINK_ORACLE)).toBeInTheDocument();
     });
     expect(screen.queryByText(EMPTY_COPY_ORACLE)).not.toBeInTheDocument();
-    expect(screen.getByText(SHAPE_UNKNOWN_ORACLE)).toBeInTheDocument();
+    expect(screen.getByText(wholeText(SHAPE_UNKNOWN_ORACLE))).toBeInTheDocument();
   });
 
   it.each([
@@ -5047,7 +5069,7 @@ describe("ApiKeyManager — KCS-23 composite key card", () => {
       ).toBeInTheDocument();
       expect(screen.getByRole("button", { name: "Add Key" })).toBeInTheDocument();
       expect(screen.queryByText(/composite strategy/i)).not.toBeInTheDocument();
-      expect(screen.queryByText(SHAPE_UNKNOWN_ORACLE)).not.toBeInTheDocument();
+      expect(screen.queryByText(wholeText(SHAPE_UNKNOWN_ORACLE))).not.toBeInTheDocument();
     },
   );
 });

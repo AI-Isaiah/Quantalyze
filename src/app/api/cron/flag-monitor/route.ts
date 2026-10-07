@@ -57,11 +57,21 @@ const ZERO_DENOMINATOR_ALERT_AFTER = 2; // alert when streak exceeds this (i.e. 
 
 const ZERO_DENOM_STREAK_KEY = "flag_monitor_zero_denominator_streak";
 
-// M-7: alert From: header. Hoisted near other constants so a domain-rename
-// (e.g. quantalyze.com → quantalyze.app) is a one-line config edit, not a
-// scatter through three hard-coded literals.
-const ALERT_FROM =
-  process.env.RESEND_ALERT_FROM ?? "Quantalyze <alerts@quantalyze.com>";
+// M-7: alert From: header, read at call time from RESEND_ALERT_FROM. D-12
+// (DOMAINONE, founder): there is NO sender fallback. A default naming a domain
+// we do not own would spoof it, so unset or blank means no alert email is
+// sent and a warning is logged (the alert is still visible in the response
+// body and the logs). One accessor, so every send site follows the same rule.
+function getAlertFrom(): string | null {
+  const value = process.env.RESEND_ALERT_FROM?.trim();
+  return value ? value : null;
+}
+
+function warnNoAlertSender(kind: string): void {
+  console.warn(
+    `[cron/flag-monitor] RESEND_ALERT_FROM not configured — skipping ${kind} alert email`,
+  );
+}
 
 /** Resilient parse for Sentry events API response. Probe-verified shape is
  *  `data[0]["count()"]` but Sentry has rotated this twice — also accept
@@ -500,12 +510,17 @@ async function handleZeroDenominator(args: {
     args.resend &&
     args.founderEmail
   ) {
-    await args.resend.emails.send({
-      from: ALERT_FROM,
-      to: args.founderEmail,
-      subject: `[H-2 SEV-2] Phase 19 flag-monitor denominator stuck at 0 for ${newStreak} windows`,
-      html: `<p>The /process-key audit_log denominator has been 0 for ${newStreak} consecutive 15-min windows. Either no traffic is reaching /process-key OR the audit-write at /process-key entry is failing. Auto-rollback cannot trip in this state — investigate before traffic resumes.</p><p>Manual rollback runbook: <code>.planning/phase-19/rollback-runbook.md</code>.</p>`,
-    });
+    const from = getAlertFrom();
+    if (!from) {
+      warnNoAlertSender("zero-denominator");
+    } else {
+      await args.resend.emails.send({
+        from,
+        to: args.founderEmail,
+        subject: `[H-2 SEV-2] Phase 19 flag-monitor denominator stuck at 0 for ${newStreak} windows`,
+        html: `<p>The /process-key audit_log denominator has been 0 for ${newStreak} consecutive 15-min windows. Either no traffic is reaching /process-key OR the audit-write at /process-key entry is failing. Auto-rollback cannot trip in this state — investigate before traffic resumes.</p><p>Manual rollback runbook: <code>.planning/phase-19/rollback-runbook.md</code>.</p>`,
+      });
+    }
   }
   return NextResponse.json({
     ok: false,
@@ -526,9 +541,12 @@ async function sendErrorRateAlert(args: {
   // outage, not a rollback: the unified backbone is the only path). The email
   // directs the founder to investigate manually; rollback = git revert +
   // redeploy.
-  if (args.resend && args.founderEmail) {
+  const from = getAlertFrom();
+  if (args.resend && args.founderEmail && !from) {
+    warnNoAlertSender("error-rate");
+  } else if (args.resend && args.founderEmail && from) {
     await args.resend.emails.send({
-      from: ALERT_FROM,
+      from,
       to: args.founderEmail,
       subject: `[ALERT] Phase 19 backbone error rate ${(args.errorRate * 100).toFixed(2)}% — auto-rollback retired (Phase 106), investigate manually`,
       html: `<p>Error envelope rate <code>${(args.errorRate * 100).toFixed(2)}%</code> exceeded ${(ALERT_THRESHOLD * 100).toFixed(2)}% threshold over the past 15 minutes (${args.errorCount}/${args.total}).</p><p><strong>Auto-rollback was retired in Phase 106.</strong> The unified backbone is the only path and the kill-switch row is inert — this alert is informational. Investigate the error source manually; post-Stage-B rollback is <code>git revert + redeploy</code>. Runbook: <code>.planning/phase-19/rollback-runbook.md</code>.</p>`,
@@ -642,9 +660,12 @@ async function handle(req: NextRequest): Promise<NextResponse> {
   }
 
   if (errorRate > WARN_THRESHOLD && total >= MIN_SAMPLE) {
-    if (resend && founderEmail) {
+    const from = getAlertFrom();
+    if (resend && founderEmail && !from) {
+      warnNoAlertSender("warn");
+    } else if (resend && founderEmail && from) {
       await resend.emails.send({
-        from: ALERT_FROM,
+        from,
         to: founderEmail,
         subject: `[WARN] Phase 19 error rate ${(errorRate * 100).toFixed(2)}% — below alert threshold`,
         html: `<p>Error rate ${errorCount}/${total} = ${(errorRate * 100).toFixed(2)}% — below the ${(ALERT_THRESHOLD * 100).toFixed(2)}% alert threshold but worth a look.</p>`,

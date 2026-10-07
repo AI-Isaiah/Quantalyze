@@ -605,3 +605,133 @@ describe("ErrorEnvelope (DESIGN-02)", () => {
     });
   });
 });
+
+// Phase 164.6.6.3.5 DOMAINONE plan 06 — the pointer. Where an envelope tells the
+// user to use the contact form, the phrase is a link that already carries the id
+// the user would otherwise copy by hand. AD-04: new tab, because the envelope
+// sits over unsaved state.
+describe("ErrorEnvelope contact pointer (DOMAINONE D-02)", () => {
+  const CID = "cid-abcdef12";
+  const DRAFT = "9a2e0000-0000-4000-8000-000000000000";
+  const POINTER = "If it keeps failing, send the correlation id through the contact form.";
+
+  function pointerLinks() {
+    return screen.getAllByRole("link", { name: /^contact form/ });
+  }
+
+  it("links the cause's phrase to /contact with ref=<correlation_id>, in a new tab", () => {
+    render(
+      <ErrorEnvelope
+        envelope={makeEnvelope({ correlation_id: CID, cause: POINTER, debug_context: [] })}
+      />,
+    );
+    const [link] = pointerLinks();
+    expect(link.getAttribute("href")).toBe(`/contact?topic=support&ref=${CID}`);
+    expect(link).toHaveAttribute("target", "_blank");
+    expect(link.getAttribute("rel")).toBe("noopener noreferrer");
+    // textContent is what a browser concatenates into the accessible name
+    // (jsdom's name computation trims the hidden span's leading space).
+    expect(link.textContent).toBe("contact form (opens in a new tab)");
+  });
+
+  it("adds draft=<id> when the host passes contactDraftId", () => {
+    render(
+      <ErrorEnvelope
+        envelope={makeEnvelope({ correlation_id: CID, cause: POINTER, debug_context: [] })}
+        contactDraftId={DRAFT}
+      />,
+    );
+    expect(pointerLinks()[0].getAttribute("href")).toBe(
+      `/contact?topic=support&ref=${CID}&draft=${DRAFT}`,
+    );
+  });
+
+  it("omits draft when contactDraftId is null or absent", () => {
+    render(
+      <ErrorEnvelope
+        envelope={makeEnvelope({ correlation_id: CID, cause: POINTER, debug_context: [] })}
+        contactDraftId={null}
+      />,
+    );
+    expect(pointerLinks()[0].getAttribute("href")).not.toContain("draft=");
+  });
+
+  it("links the phrase in a debug_context bullet the same way", () => {
+    render(
+      <ErrorEnvelope
+        envelope={makeEnvelope({
+          correlation_id: CID,
+          debug_context: ["Step one.", "Ask us through the contact form."],
+        })}
+        contactDraftId={DRAFT}
+      />,
+    );
+    const items = document.querySelectorAll("li");
+    expect(items).toHaveLength(2);
+    expect(items[0].querySelector("a")).toBeNull();
+    const link = items[1].querySelector("a")!;
+    expect(link.getAttribute("href")).toBe(
+      `/contact?topic=support&ref=${CID}&draft=${DRAFT}`,
+    );
+    expect(link).toHaveAttribute("target", "_blank");
+  });
+
+  it("renders a phrase-less envelope exactly as before: no link, same text", () => {
+    render(<ErrorEnvelope envelope={makeEnvelope({ cause: "Plain cause." })} />);
+    expect(screen.queryAllByRole("link")).toHaveLength(0);
+    expect(screen.getByText("Plain cause.")).toBeInTheDocument();
+    expect(screen.getByText("Step one.")).toBeInTheDocument();
+  });
+
+  it("adds no button and leaves Diagnostics and the alert root unchanged", () => {
+    render(
+      <ErrorEnvelope
+        envelope={makeEnvelope({ correlation_id: CID, cause: POINTER })}
+        contactDraftId={DRAFT}
+      />,
+    );
+    // Recoverable but no onRetry and no onCancel: the only button is Copy.
+    const buttons = screen.getAllByRole("button", { hidden: true });
+    expect(buttons.map((b) => b.textContent)).toEqual(["Copy diagnostics"]);
+    expect(screen.getByRole("alert")).toHaveAttribute("data-error-code", "KEY_INVALID_SIGNATURE");
+    expect(screen.getByText("Diagnostics")).toBeInTheDocument();
+  });
+
+  it("the copied diagnostics block names no address", async () => {
+    Object.assign(navigator, {
+      clipboard: { writeText: vi.fn().mockResolvedValue(undefined) },
+    });
+    render(
+      <ErrorEnvelope
+        envelope={makeEnvelope({
+          correlation_id: CID,
+          cause: POINTER,
+          debug_context: ["Ask us through the contact form."],
+        })}
+        contactDraftId={DRAFT}
+      />,
+    );
+    fireEvent.click(screen.getByText("Diagnostics"));
+    fireEvent.click(screen.getByRole("button", { name: "Copy diagnostics" }));
+    await waitFor(() => expect(navigator.clipboard.writeText).toHaveBeenCalled());
+    const written = (navigator.clipboard.writeText as ReturnType<typeof vi.fn>).mock
+      .calls[0][0] as string;
+    expect(written).not.toContain("@");
+  });
+
+  it("link text keeps >= 4.5:1 contrast on the envelope's bg-negative/5 shell", () => {
+    // text-accent #1B6B5A over bg-negative/5 (#DC2626 at 5% over white) = #FDF4F4.
+    const lin = (v: number) => {
+      const c = v / 255;
+      return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+    };
+    const lum = (hex: string) => {
+      const n = (i: number) => parseInt(hex.slice(1 + i * 2, 3 + i * 2), 16);
+      return 0.2126 * lin(n(0)) + 0.7152 * lin(n(1)) + 0.0722 * lin(n(2));
+    };
+    const a = lum("#1B6B5A");
+    const b = lum("#FDF4F4");
+    const ratio = (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
+    expect(ratio).toBeGreaterThanOrEqual(4.5);
+  });
+});

@@ -1,131 +1,92 @@
 # Security Contact Runbook
 
-Operational guide for the `security@quantalyze.com` contact address. The
-product surfaces this alias in ~20 places (see grep audit at the bottom)
-— every one of those is a trust claim that must route to a real human
-within one business day or the marketing copy becomes a lie.
+Operational guide for how security reports reach the founder. Quantalyze has
+**no security mailbox and no contact email address**. The founder decided this
+on 2026-10-07 (Phase 164.6.6.3.5, decisions D-01 and D-04): every report goes
+through the contact form, and no mail domain or mailbox is provisioned or
+booked. This runbook describes the path a report actually takes, so whoever is
+on call checks the right inbox.
 
-## What ships referring to this address
+## The channel
 
-- `/security` page (Request a Call, Responsible Disclosure sections)
-- `/for-quants` page (security commitments block)
-- `/strategies/new/wizard` ConnectKeyStep + MetadataStep contact line
-- `wizardErrors.ts` 16-code error matrix (falls back to security@ on
-  unknown / unrecoverable codes)
-- `/api/for-quants-lead` 429/500/503 copy
-- `RequestCallModal` fallback CTA
+- `https://quantalyze.xyz/contact?topic=security` is the contact form with the
+  topic preselected to **Security report**.
+- `public/.well-known/security.txt` lists that URL as its `Contact:` line
+  (RFC 9116 requires one; an https URL is allowed).
+- The `/security` page, `/for-quants`, the legal footer and the in-product
+  error copy all point at the same form. Nothing in the product prints an
+  address.
+- The pages state a reply within one business day. That is the commitment this
+  runbook exists to keep.
 
-If the address does not accept mail or is not monitored, every one of
-those callouts loses its meaning. This runbook documents the set-up +
-verification so the claim stays honest.
+## Where a report lands
 
-## DNS / provider checklist
+1. The form posts to `/api/for-quants-lead`. A security report writes one row
+   to `for_quants_leads` with source `contact_form` and topic `security`.
+2. The reference field carries any correlation id or draft id the reporter's
+   link included (or that they pasted). It is stored as text and rendered as
+   escaped text only.
+3. A contact-form submission is never deduplicated: two reports from the same
+   person on the same day write two rows.
+4. The route is protected by a per-IP rate limit and a honeypot field. A bot
+   that trips the honeypot receives the same success response as a human and
+   no row is written, so an empty CRM after a burst of traffic is not by itself
+   a fault.
 
-Quantalyze is on a single custom domain (`quantalyze.com`) fronted by
-Vercel. Email is NOT hosted on Vercel — Vercel only manages A/AAAA and
-CNAME records for the app. Mail routing is out-of-band.
+## How the founder reads and closes a report
 
-1. **MX records published for `quantalyze.com`.** Confirm with:
-
-    ```
-    dig +short MX quantalyze.com
-    ```
-
-    Expect at least one `NN mail.provider.tld.` entry. Empty = mail
-    bounces at the edge. If empty, point MX at whatever provider holds
-    the founder's mailbox (Google Workspace, Fastmail, Migadu, etc.).
-
-2. **Alias `security@quantalyze.com` provisioned.** The alias must
-    forward to a mailbox a human actually checks. For Google Workspace:
-    Admin console → Groups (or Users) → create `security` → destination
-    = founder's primary inbox.
-
-3. **SPF / DKIM / DMARC set on the domain so outbound `security@`
-    replies don't land in spam.** Verify:
-
-    ```
-    dig +short TXT quantalyze.com | grep 'v=spf1'
-    dig +short TXT _dmarc.quantalyze.com
-    dig +short TXT google._domainkey.quantalyze.com   # or provider key
-    ```
-
-    - SPF: must include the mail provider's sending host.
-    - DMARC: start at `p=none` to collect reports, upgrade to
-      `p=quarantine` after a week of clean data.
-    - DKIM: provider-specific selector, typically `google` or `mail`.
-
-4. **End-to-end test.** From an external address (personal Gmail,
-    phone, anything not on the domain):
-
-    ```
-    Subject: security-contact runbook test YYYY-MM-DD
-    Body: please ignore, verifying the alias is live
-    ```
-
-    Expect delivery within 60s and a reply from the founder within one
-    business day. If it bounces, check MX + alias first, then SPF/DMARC
-    for the outbound reply.
+- Read it at `/admin/for-quants-leads` (admin sign-in required). Security
+  reports are the rows whose topic is `security`.
+- **No email notification is sent** while Resend is not configured (D-04): the
+  route still writes the row and answers success, and skips the founder
+  notification. The CRM is the inbox. Check it at least once per business day.
+- Reply to the email address the reporter entered in the form, from whatever
+  address the founder uses personally. There is no company mailbox to reply
+  from, so say in the first reply who you are and that the report was received.
+- After the reply, mark the row processed on the same page (this sets
+  `processed_at`). An unprocessed row is the work queue.
 
 ## When something goes wrong
 
-### Symptom: external user reports "I emailed security@ and got no reply"
+### Symptom: a reporter says they sent a report and got no reply
 
-1. Check the founder's spam folder first — DMARC quarantine will
-    silently bucket legitimate inbound while you're ramping the policy.
-2. Confirm the alias still exists in the provider admin console. Group
-    memberships can be dropped by accident on account churn.
-3. Run the dig checks above. A nameserver change on Vercel's side
-    should NOT touch MX, but verify.
-4. Reply to the original reporter from a personal address acknowledging
-    the gap before you fix routing — their trust decays fast.
+1. Open `/admin/for-quants-leads` and look for the row (topic `security`, the
+   reporter's email, or the reference they quote). A row exists and is
+   unprocessed: the gap is ours, reply now and acknowledge the delay.
+2. No row exists: ask them to resend through the form. Check whether the
+   submission was rate limited (the form tells the user so) or hit a 500/503;
+   see the route logs for `/api/for-quants-lead`.
+3. The form itself is unreachable: the page `/contact` must render for an
+   unauthenticated visitor. Check `/contact` first, then `/api/health`.
 
-### Symptom: "security@" replies landing in the recipient's spam
+### Symptom: the CRM is flooded with junk reports
 
-- Almost always SPF/DKIM/DMARC. Run the three TXT-record digs above.
-- If SPF is missing the provider, add `include:_spf.google.com` (or
-  provider equivalent) and re-test.
-- DKIM signature failing = the provider-specific selector TXT record
-  isn't published. Provider admin console → DKIM → copy the key and
-  publish it.
+- Do not remove the form: it is the only channel and `security.txt` points at
+  it. Mark junk rows processed and let the rate limit and honeypot do their
+  work. A genuine disclosure is usually long-form and includes reproduction
+  steps.
 
-### Symptom: flood of spam to `security@` after going live
+### Symptom: someone asks for a security mailbox
 
-- Do NOT disable the alias — it's wired into production error copy.
-  Instead, add a provider-side spam filter rule. Genuine disclosure
-  reports are usually long-form and include a PoC attachment, which is
-  easy to pattern-match for whitelist.
+- The decision is recorded: no mailbox, no mail domain, no booking (D-01, D-04).
+  Revisiting it is a founder decision, and it would also reopen the sender
+  defaults and the `security.txt` `Contact:` line.
 
 ## Acceptance: what "done" looks like
 
-This runbook is satisfied when ALL of the following are true, verified
-by a smoke test on the day of the Month 2 security conversation:
+This runbook is satisfied when all of the following are true:
 
-1. `dig +short MX quantalyze.com` returns at least one entry.
-2. External email to `security@quantalyze.com` is delivered in <60s.
-3. A reply from the address lands in a personal Gmail (DMARC-aligned).
-4. The founder has a Gmail filter / label / priority rule routing any
-    inbound `security@` mail so it can't be missed.
+1. `https://quantalyze.xyz/contact?topic=security` loads for a signed-out
+   visitor with the topic preselected.
+2. A test submission with topic Security report appears in
+   `/admin/for-quants-leads` with the topic and any reference you supplied.
+3. The founder has marked that test row processed.
+4. `public/.well-known/security.txt` still names the contact URL above and has
+   an `Expires` date in the future (renewal is tracked in `TODOS.md` as
+   `SECURITY-TXT-EXPIRES-01`).
 
-Record the smoke-test date inside the TODOS.md entry for Sprint 2 so
-the next Sprint lead can see the last-verified timestamp.
+## Audit: where the contact form is referenced in product copy
 
-## Audit: where the alias is referenced in product copy
-
-Run `rg 'security@quantalyze\.com' src` to regenerate this list
-whenever you touch auth, onboarding, or error messaging. As of
-audit-2026-05-07 PR-1 ship (v0.22.18.0, 2026-05-10) the alias appears in:
-
-- `src/app/(marketing)/security/page.tsx` (×7 — Request Call + Responsible
-  Disclosure + generic contact + per-exchange setup blocks)
-- `src/app/(marketing)/for-quants/page.tsx` (security commitments block)
-- `src/app/(marketing)/for-quants/RequestCallModal.tsx` (×4 — mailto, generic
-  failure, network error, on-screen contact line)
-- `src/app/api/for-quants-lead/route.ts` (×4 — per-UA 429,
-  aggregate-cap 429, 503, 500 copy)
-- `src/app/api/for-quants-lead/route.test.ts` (×2 — regression)
-- `src/app/(dashboard)/strategies/new/wizard/steps/ConnectKeyStep.tsx`
-- `src/app/(dashboard)/strategies/new/wizard/steps/MetadataStep.tsx`
-- `src/app/(dashboard)/strategies/new/wizard/DesktopGate.tsx`
-- `src/lib/wizardErrors.ts` (UNKNOWN + SYNC_FAILED fallbacks)
-
-Every one of those is a contract with the user. Keep the alias alive.
+Regenerate with `grep -rn 'contact?topic=\|contactHref\|ContactPointerText' src`
+whenever you touch auth, onboarding or error messaging. Every one of those is
+a contract with the user: keep the form reachable, and keep the CRM read.

@@ -439,7 +439,7 @@ describe("[H-0195/H-0197/H-0198] SyncPreviewStep — polling loop dispositions",
     expect(text).toContain("Analytics computation failed.");
     expect(text).toContain("The analytics step failed for this draft.");
     expect(text).toContain("Retry the sync from this page.");
-    expect(text).toContain("security@quantalyze.com");
+    expect(text).toContain("contact form");
 
     // The recoverable-state controls are unchanged: GATE_ANALYTICS_FAILED
     // carries `clear_and_retry`, so the Retry CTA renders, and the diagnostics

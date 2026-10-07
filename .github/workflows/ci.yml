@@ -1577,7 +1577,7 @@ jobs:
           SUPABASE_SERVICE_ROLE_KEY: placeholder_service_role
           ADMIN_EMAIL: test@example.com
           PLATFORM_NAME: Quantalyze
-          PLATFORM_EMAIL: test@quantalyze.com
+          PLATFORM_EMAIL: test@example.com
           # Phase 164 / D-02: `src/lib/strategy-share-token.ts` validates this
           # at MODULE SCOPE and throws when absent — deliberately, so a
           # misconfigured deploy fails loudly instead of at the founder's first
@@ -6176,7 +6176,7 @@ jobs:
           SUPABASE_SERVICE_ROLE_KEY: placeholder_service_role
           ADMIN_EMAIL: test@example.com
           PLATFORM_NAME: Quantalyze
-          PLATFORM_EMAIL: test@quantalyze.com
+          PLATFORM_EMAIL: test@example.com
           # Phase 158 / OPS-03 — same mechanism as the seeded step's copy of this
           # line (see the e2e-seeded job's "Run seed-gated specs" env). This job
           # serves the app with `npm run start`, i.e. production mode, so the
@@ -6585,7 +6585,7 @@ jobs:
         env:
           ADMIN_EMAIL: test@example.com
           PLATFORM_NAME: Quantalyze
-          PLATFORM_EMAIL: test@quantalyze.com
+          PLATFORM_EMAIL: test@example.com
           # Phase 164 / D-02 — same reason as the frontend-build step above:
           # the share-token module throws at MODULE SCOPE without this. A fake
           # >= 32-char placeholder; the e2e specs that exercise share links mint
@@ -6865,7 +6865,7 @@ jobs:
           # the seeded suite back to shared TEST with no key held.)
           ADMIN_EMAIL: test@example.com
           PLATFORM_NAME: Quantalyze
-          PLATFORM_EMAIL: test@quantalyze.com
+          PLATFORM_EMAIL: test@example.com
           # Seed-gated server runs in production mode (`npm run start`), so the
           # localhost:3000 auto-allowlist in src/lib/csrf.ts:67 (NODE_ENV !==
           # "production" branch) never fires. The discovery-prefs-isolation
@@ -7044,7 +7044,7 @@ jobs:
           SUPABASE_SERVICE_ROLE_KEY: placeholder_service_role
           ADMIN_EMAIL: test@example.com
           PLATFORM_NAME: Quantalyze
-          PLATFORM_EMAIL: test@quantalyze.com
+          PLATFORM_EMAIL: test@example.com
       # VERIFY-03 re-measure mechanism: upload UNCONDITIONALLY (if: always()),
       # not just on failure. The `.lighthouseci/` manifest.json + *.report.json
       # carry the per-URL 3-run-median `categories.performance.score`; the lhci

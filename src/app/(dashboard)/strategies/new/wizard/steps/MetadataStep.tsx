@@ -24,6 +24,8 @@ import {
 } from "@/lib/closed-sets";
 import { CapitalOwnershipRadioGroup } from "@/components/strategy/CapitalOwnershipRadioGroup";
 import { TEAM_REVIEW, type CapitalOwnership } from "@/lib/capital-ownership";
+import { ContactPointerText } from "@/components/contact/ContactPointerText";
+import { contactHref } from "@/lib/contact";
 
 /**
  * MetadataStep collects the metadata the founder needs to approve a
@@ -385,6 +387,7 @@ export interface MetadataStepProps {
 }
 
 export function MetadataStep({
+  strategyId,
   wizardSessionId,
   initial,
   detectedMarkets,
@@ -468,6 +471,15 @@ export function MetadataStep({
     initial?.capitalOwnership ?? TEAM_REVIEW,
   );
   const [categoryLoadError, setCategoryLoadError] = useState<string | null>(null);
+  // 164.6.6.3.5 D-02 / AD-04 — the two category blocks point at the contact
+  // form. The link carries the wizard session and the draft id so the message
+  // arrives with its reference filled, and opens in a new tab so this form's
+  // unsaved fields survive.
+  const contactPointerHref = contactHref({
+    topic: "support",
+    ref: wizardSessionId,
+    draft: strategyId,
+  });
   // Phase 53 / APPLY-02, generalised by 153.2 — inline per-field validation
   // surfacing for every field with a client-evaluable rule. `blurredFields`
   // gates the per-field on-blur reveal; a submit attempt reveals ALL of them at
@@ -1018,8 +1030,12 @@ export function MetadataStep({
         </Field>
         {categoryLoadError && (
           <p className="text-caption text-negative" role="alert">
-            {categoryLoadError} Refresh the page. If this persists, contact
-            security@quantalyze.com.
+            {categoryLoadError}{" "}
+            <ContactPointerText
+              text="Refresh the page. If this persists, use the contact form."
+              href={contactPointerHref}
+              newTab
+            />
           </p>
         )}
         {/* WR-04 (Phase 53) — an empty-but-readable category list leaves the
@@ -1035,8 +1051,11 @@ export function MetadataStep({
             role="alert"
             data-testid="metadata-categories-empty"
           >
-            No strategy categories are available yet, so this strategy cannot be
-            submitted. Please contact security@quantalyze.com.
+            <ContactPointerText
+              text="No strategy categories are available yet, so this strategy cannot be submitted. Use the contact form and we will add them."
+              href={contactPointerHref}
+              newTab
+            />
           </p>
         )}
 

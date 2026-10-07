@@ -86,7 +86,7 @@ Step 0, and every probe is NL.
 ## Step 2 — EGRESS-03: whitelist ALL 3 at sFOX + prove native-egress key auth
 
 Hand the **FULL 3-IP set** (per the Step-0 whole-set rule) to sFOX via the
-`security@quantalyze.com` handoff / the sFOX dashboard.
+founder's direct channel with sFOX / the sFOX dashboard.
 
 - **Note:** sFOX's per-key IP-restriction count is undocumented — the founder
   confirms with the sFOX trading team that 3 IPs are accepted on one key. If sFOX

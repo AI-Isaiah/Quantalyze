@@ -98,10 +98,14 @@ test.describe("/for-quants landing page", () => {
     await expect(page.getByLabel("Firm")).toBeVisible();
     await expect(page.getByLabel("Email")).toBeVisible();
 
-    // Mailto fallback link
+    // DOMAINONE (plan 04): the modal is already the form, so it carries no mail
+    // fallback and names no address. Scheme assembled so no literal mail link
+    // sits in this file.
+    const dialog = page.getByRole("dialog");
     await expect(
-      page.getByRole("link", { name: /security@quantalyze.com/ }),
-    ).toBeVisible();
+      dialog.locator(`a[href^="${["mail", "to:"].join("")}"]`),
+    ).toHaveCount(0);
+    await expect(dialog).not.toContainText(/@quantalyze/);
   });
 
   test("Request a Call modal can be closed with Escape", async ({ page }) => {
@@ -144,6 +148,8 @@ test.describe("/for-quants landing page", () => {
         contentType: "application/json",
         body: JSON.stringify({
           ok: true,
+          // Plan 04: the modal shows success ONLY on a stored row.
+          status: "stored",
           idempotency_key: "deadbeefdeadbeefdeadbeefdeadbeef",
         }),
       });
@@ -258,10 +264,10 @@ test.describe("/security page + security.txt", () => {
     await expect(
       page.getByRole("heading", { name: /Security practices/, level: 1 }),
     ).toBeVisible();
-    // security@quantalyze.com appears multiple times on the page (intro,
-    // disclosures, footer) — assert at least one is visible.
+    // DOMAINONE D-01: the page names no address; every reach-us pointer is a
+    // link to the security topic of the contact form (several on the page).
     await expect(
-      page.locator("text=security@quantalyze.com").first(),
+      page.locator('a[href="/contact?topic=security"]').first(),
     ).toBeVisible();
   });
 
@@ -269,7 +275,9 @@ test.describe("/security page + security.txt", () => {
     const res = await request.get("/security.txt");
     expect(res.status()).toBeLessThan(400);
     const body = await res.text();
-    expect(body).toContain("Contact: mailto:security@quantalyze.com");
+    expect(body).toContain(
+      "Contact: https://quantalyze.xyz/contact?topic=security",
+    );
     expect(body).toContain("Expires:");
     expect(body).toContain("Canonical:");
   });
@@ -280,6 +288,8 @@ test.describe("/security page + security.txt", () => {
     const res = await request.get("/.well-known/security.txt");
     expect(res.status()).toBeLessThan(400);
     const body = await res.text();
-    expect(body).toContain("Contact: mailto:security@quantalyze.com");
+    expect(body).toContain(
+      "Contact: https://quantalyze.xyz/contact?topic=security",
+    );
   });
 });

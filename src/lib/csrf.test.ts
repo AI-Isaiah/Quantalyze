@@ -54,25 +54,25 @@ describe("assertSameOrigin", () => {
   // domain manager request with a misleading permission-style error.
   it("accepts hosts from NEXT_PUBLIC_ALLOWED_ORIGINS (custom-domain rollout support)", async () => {
     vi.stubEnv("NODE_ENV", "production");
-    vi.stubEnv("NEXT_PUBLIC_SITE_URL", "https://quantalyze-rho.vercel.app");
+    vi.stubEnv("NEXT_PUBLIC_SITE_URL", "https://quantalyze.xyz");
     vi.stubEnv(
       "NEXT_PUBLIC_ALLOWED_ORIGINS",
-      "https://quantalyze.com,https://www.quantalyze.com",
+      "https://example.com,https://www.example.com",
     );
     __resetAllowedHostsForTest();
     // Primary site URL still passes.
     expect(
       assertSameOrigin(
-        makeRequest({ origin: "https://quantalyze-rho.vercel.app" }),
+        makeRequest({ origin: "https://quantalyze.xyz" }),
       ),
     ).toBeNull();
     // Custom domain (configured via NEXT_PUBLIC_ALLOWED_ORIGINS) passes.
     expect(
-      assertSameOrigin(makeRequest({ origin: "https://quantalyze.com" })),
+      assertSameOrigin(makeRequest({ origin: "https://example.com" })),
     ).toBeNull();
     expect(
       assertSameOrigin(
-        makeRequest({ origin: "https://www.quantalyze.com" }),
+        makeRequest({ origin: "https://www.example.com" }),
       ),
     ).toBeNull();
     // A different host is still rejected — the allowlist isn't a wildcard.
@@ -84,11 +84,11 @@ describe("assertSameOrigin", () => {
 
   it("tolerates bare-host entries in NEXT_PUBLIC_ALLOWED_ORIGINS (no scheme)", async () => {
     vi.stubEnv("NODE_ENV", "production");
-    vi.stubEnv("NEXT_PUBLIC_SITE_URL", "https://quantalyze-rho.vercel.app");
-    vi.stubEnv("NEXT_PUBLIC_ALLOWED_ORIGINS", "quantalyze.com");
+    vi.stubEnv("NEXT_PUBLIC_SITE_URL", "https://quantalyze.xyz");
+    vi.stubEnv("NEXT_PUBLIC_ALLOWED_ORIGINS", "example.com");
     __resetAllowedHostsForTest();
     expect(
-      assertSameOrigin(makeRequest({ origin: "https://quantalyze.com" })),
+      assertSameOrigin(makeRequest({ origin: "https://example.com" })),
     ).toBeNull();
   });
 

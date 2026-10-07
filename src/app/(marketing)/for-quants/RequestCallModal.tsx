@@ -11,8 +11,8 @@ import type { WizardStepKey } from "@/lib/wizard/localStorage";
 
 /**
  * Request a Call modal for /for-quants. Structured fields (not a
- * free-text textarea) per the institutional audience, with a mailto
- * fallback for users who prefer email.
+ * free-text textarea) per the institutional audience. It names no email
+ * address (Phase 164.6.6.3.5 DOMAINONE, D-01).
  *
  * Why a child form component:
  *   The inner `<RequestCallForm>` is mounted when the modal opens and
@@ -25,8 +25,53 @@ import type { WizardStepKey } from "@/lib/wizard/localStorage";
  *   is set synchronously so the second click bails immediately.
  */
 
-const MAILTO_HREF =
-  "mailto:security@quantalyze.com?subject=Quantalyze%20onboarding%20call%20request&body=Hi%2C%0A%0AI%27d%20like%20to%20schedule%20an%20onboarding%20call%20for%20my%20quant%20team.%0A%0AName%3A%0AFirm%3A%0APreferred%20time%3A%0ANotes%3A%0A";
+/**
+ * Form-level strings, verbatim from 164.6.6.3.5-UI-SPEC.md "Error rendering
+ * rule" (RequestCallForm column). The form picks one by HTTP status and never
+ * renders the server's `error` text or an `Error.message`, so a developer
+ * sentence or a browser's `Failed to fetch` can never reach the visitor.
+ */
+const ERROR_UNREADABLE =
+  "Our server could not read this request. Reload the page and send it again; if it is refused again, shorten the notes. What you typed is still here until you reload, so copy the notes first.";
+const ERROR_RATE_LIMITED =
+  "Too many requests from this connection. Try again in a few minutes; what you typed is still here.";
+const ERROR_SERVER =
+  "Your request was not sent. Try again in a minute; what you typed is still here.";
+const ERROR_UNAVAILABLE =
+  "Requests are unavailable right now. Try again in a few minutes; what you typed is still here.";
+const ERROR_NETWORK =
+  "We could not reach the server. Check your connection and send again; what you typed is still here.";
+
+/**
+ * The `fieldErrors` keys this form draws a control for (UI-SPEC "Rendered-key
+ * rule"). Any other key (`_form`, `website`, `wizard_context.*`) has nowhere to
+ * render, so a 400 carrying only those must fall to the unreadable alert rather
+ * than end with nothing on screen.
+ */
+const RENDERED_FIELD_KEYS = [
+  "name",
+  "firm",
+  "email",
+  "preferred_time",
+  "notes",
+] as const;
+
+/** The form-level string for a non-2xx status, or null when a field note covers it. */
+function errorForStatus(
+  status: number,
+  fieldErrors: Record<string, string[]> | undefined,
+): string | null {
+  if (status === 400) {
+    const hasRenderedKey = RENDERED_FIELD_KEYS.some(
+      (k) => (fieldErrors?.[k]?.length ?? 0) > 0,
+    );
+    return hasRenderedKey ? null : ERROR_UNREADABLE;
+  }
+  if (status === 413) return ERROR_UNREADABLE;
+  if (status === 429) return ERROR_RATE_LIMITED;
+  if (status === 503) return ERROR_UNAVAILABLE;
+  return ERROR_SERVER;
+}
 
 /**
  * Optional wizard context payload — populated by WizardClient so the
@@ -100,7 +145,9 @@ function RequestCallForm({
   // lead silently (success-shaped 200, no insert, no founder email).
   const [website, setWebsite] = useState("");
   const [submitting, setSubmitting] = useState(false);
-  const [submitted, setSubmitted] = useState(false);
+  // What the server confirmed: `stored` (a row was written) or `duplicate` (an
+  // earlier request from this email is already on record today). Null until then.
+  const [outcome, setOutcome] = useState<"stored" | "duplicate" | null>(null);
   const [error, setError] = useState<string | null>(null);
   // Server returns `Record<string, string[]>` per field so callers can
   // show every Zod issue (e.g., email is both invalid format AND too
@@ -155,49 +202,63 @@ function RequestCallForm({
 
       const data = (await res.json().catch(() => ({}))) as {
         ok?: boolean;
+        status?: string;
         error?: string;
         fieldErrors?: Record<string, string[]>;
       };
 
       if (!res.ok) {
-        if (data.fieldErrors) {
-          setFieldErrors(data.fieldErrors);
+        // Only keys this form draws are kept; the rest never render anywhere.
+        const drawn: Record<string, string[]> = {};
+        for (const key of RENDERED_FIELD_KEYS) {
+          const issues = data.fieldErrors?.[key];
+          if (issues?.length) drawn[key] = issues;
         }
-        setError(
-          data.error ??
-            "Something went wrong. Email security@quantalyze.com directly.",
-        );
+        setFieldErrors(drawn);
+        setError(errorForStatus(res.status, data.fieldErrors));
         setSubmitting(false);
         inFlight.current = false;
         return;
       }
 
-      // Fire the conversion event from the CLIENT (not the server)
-      // so its distinctId is the visitor's PostHog cookie ID — joining
-      // view → click → submit on the same person. Server-side capture
-      // would use a synthetic `lead:<uuid>` distinctId and split the
-      // funnel across three unrelated IDs (G9.B.1).
-      trackForQuantsEventClient("for_quants_lead_submit", {
-        source: "modal",
-        cta_location: ctaLocation,
-      });
+      // A 2xx is success only when the route says what it did. A bare
+      // `{ ok: true }` (an old route, a proxy, a regression) is NOT a stored
+      // request, so it must never show the success view.
+      if (data.status !== "stored" && data.status !== "duplicate") {
+        setError(ERROR_SERVER);
+        setSubmitting(false);
+        inFlight.current = false;
+        return;
+      }
 
-      setSubmitted(true);
+      if (data.status === "stored") {
+        // Fire the conversion event from the CLIENT (not the server)
+        // so its distinctId is the visitor's PostHog cookie ID — joining
+        // view → click → submit on the same person. Server-side capture
+        // would use a synthetic `lead:<uuid>` distinctId and split the
+        // funnel across three unrelated IDs (G9.B.1). Not fired on
+        // `duplicate`: no row was written, so it is not a new conversion.
+        trackForQuantsEventClient("for_quants_lead_submit", {
+          source: "modal",
+          cta_location: ctaLocation,
+        });
+      }
+
+      setOutcome(data.status);
       setSubmitting(false);
-      // Leave inFlight true — the form is replaced by the success view
+      // Leave inFlight true — the form is replaced by the outcome view
       // and should never re-submit.
-    } catch (err) {
-      setError(
-        err instanceof Error
-          ? err.message
-          : "Network error. Email security@quantalyze.com directly.",
-      );
+    } catch {
+      // A failed fetch throws a TypeError carrying browser text ("Failed to
+      // fetch"); the visitor sees the fixed string instead (UI-SPEC).
+      setError(ERROR_NETWORK);
       setSubmitting(false);
       inFlight.current = false;
     }
   }
 
-  if (submitted) {
+  if (outcome) {
+    const duplicate = outcome === "duplicate";
     return (
       <div className="py-4 text-center">
         <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-accent/10">
@@ -216,10 +277,12 @@ function RequestCallForm({
           </svg>
         </div>
         <h3 className="font-display text-base text-text-primary">
-          Request received
+          {duplicate ? "Request already received" : "Request received"}
         </h3>
         <p className="mt-2 text-sm text-text-secondary">
-          Thank you. We&apos;ll be in touch at {email} within 24 hours.
+          {duplicate
+            ? `We already have a call request from ${email} today. The founder will reach out within 24 hours.`
+            : `Thank you. We'll be in touch at ${email} within 24 hours.`}
         </p>
         <Button variant="secondary" onClick={onClose} className="mt-6 w-full">
           Close
@@ -308,28 +371,6 @@ function RequestCallForm({
       <Button type="submit" disabled={submitting} className="w-full">
         {submitting ? "Sending..." : "Send request"}
       </Button>
-
-      <p className="text-center text-xs text-text-muted">
-        Prefer email?{" "}
-        <a
-          href={MAILTO_HREF}
-          className="underline hover:text-text-primary"
-          onClick={() =>
-            // Mailto opens the user's email client — there's no guarantee
-            // they actually compose or send anything. Fire the
-            // `_request_call_click` *intent* event with `source: "mailto"`,
-            // NOT `_lead_submit` which is reserved for paths that hit the
-            // DB. Conflating click → conversion silently inflated CTR
-            // (G9.B.20).
-            trackForQuantsEventClient("for_quants_request_call_click", {
-              source: "mailto",
-              cta_location: ctaLocation,
-            })
-          }
-        >
-          security@quantalyze.com
-        </a>
-      </p>
     </form>
   );
 }
