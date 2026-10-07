@@ -189,6 +189,29 @@ describe("departedHistoryCard — the switch and the line never disagree (SFH-C4
     }
   });
 
+  it("164.6.6.2 D-13: a native-unit key names its real cause, and every other reason keeps its sentence", () => {
+    // The python derive stamps anchor_null_reason "native_unit" for an account measured in
+    // its own currency (a BTC MT5 account). Without its own case it fell through to
+    // "the last balance read ... gave no usable balance", which is false: the read worked.
+    const anchor = departedAnchorOf({
+      payload: { anchor_usd: null, anchor_null_reason: "native_unit" },
+    });
+    expect(anchor).toEqual({ state: "unusable", reason: "native_unit" });
+    const card = departedHistoryCard(knownKey, knownCase.keys, anchor);
+    expect(card.sentence).toBe(
+      "History not available: this account is measured in its own currency, not USD, so it cannot be added to a USD history.",
+    );
+    expect(card.checked).toBe(false);
+    expect(card.toggleTo).toBeNull();
+    const fallback = departedHistoryCard(knownKey, knownCase.keys, {
+      state: "unusable",
+      reason: "something_else",
+    }).sentence;
+    expect(fallback).toBe(
+      "History not available: the last balance read before this key stopped gave no usable balance to measure its history from.",
+    );
+  });
+
   it("a bounded key with no anchor keeps its bound's own reason", () => {
     const c = spec.cases.find((row) => row.name.startsWith("13_"))!;
     const card = departedHistoryCard(c.keys.find((k) => k.id === "k-dep")!, c.keys, {

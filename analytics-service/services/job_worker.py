@@ -4025,6 +4025,11 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         # the PRE ``account_info`` the read returns. ``None`` for every other venue (their
         # pre-stamp and thresholds are untouched), and for MT5 until the classification below.
         _mt5_unit: AccountUnit | None = None
+        # Phase 164.6.6.2 / D-13, D-14 — set by the MT5 branch ONLY in key-mode, for an account
+        # whose unit is not USD-family (native, or a code with no floors). Such a key runs no
+        # combine and writes no per-key series; ``_run_key_mode_compose_epilogue`` reads this
+        # to persist ``anchor_null_reason: "native_unit"`` and no flows.
+        _native_unit_key_skip: bool = False
 
         if venue == "deribit":
             # D-08: realized returns come from the ONE txn-log ledger pass
@@ -5386,25 +5391,43 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                     error_kind="permanent",
                 )
             except AccountCurrencyUnsupported as _unsupported:
-                # D-06: a well-formed code we hold no floors for (EUR, ETH). Refused by name:
-                # a failed row with curated copy, never a success row with null metrics. The
-                # code passed the shape check, so it is safe to echo. Key-mode routing of a
-                # non-USD key is plan 04's, which re-points this arm for ``is_key_mode``.
-                logger.warning(
-                    "derive_broker_dailies: mt5 account currency %s has no floors "
-                    "(label=%s) — classified permanent, nothing written (D-06)",
-                    _unsupported.code,
-                    funding_label,
-                )
-                await _stamp_strategy_analytics_failed(
-                    f"Returns in {_unsupported.code} are not supported yet, so no "
-                    "metric is computed."
-                )
-                return DispatchResult(
-                    outcome=DispatchOutcome.FAILED,
-                    error_message=_MT5_CURRENCY_REFUSED_MESSAGE,
-                    error_kind="permanent",
-                )
+                if is_key_mode:
+                    # D-13: a KEY has no series to refuse. Any non-USD key is skipped
+                    # honestly, like a native one (CONTEXT "Recorded 2026-10-07 after the
+                    # plan check"): its code and balance are stored, its anchor is null
+                    # with reason ``native_unit``, and the allocator curve omits it by
+                    # name. The code passed the shape check, so it is safe to echo. The
+                    # floors are the USD row ONLY to satisfy the type: the skip below
+                    # never runs the combine, the material-equity check or the uPnL flag,
+                    # which are the only readers of ``floors``.
+                    logger.warning(
+                        "derive_broker_dailies: mt5 account currency %s has no floors "
+                        "(label=%s) — key-mode skips it as a native-unit key (D-13)",
+                        _unsupported.code,
+                        funding_label,
+                    )
+                    _mt5_unit = AccountUnit(
+                        code=_unsupported.code, native=True, floors=USD_FLOORS
+                    )
+                else:
+                    # D-06: a well-formed code we hold no floors for (EUR, ETH). Refused by
+                    # name: a failed row with curated copy, never a success row with null
+                    # metrics. The code passed the shape check, so it is safe to echo.
+                    logger.warning(
+                        "derive_broker_dailies: mt5 account currency %s has no floors "
+                        "(label=%s) — classified permanent, nothing written (D-06)",
+                        _unsupported.code,
+                        funding_label,
+                    )
+                    await _stamp_strategy_analytics_failed(
+                        f"Returns in {_unsupported.code} are not supported yet, so no "
+                        "metric is computed."
+                    )
+                    return DispatchResult(
+                        outcome=DispatchOutcome.FAILED,
+                        error_message=_MT5_CURRENCY_REFUSED_MESSAGE,
+                        error_kind="permanent",
+                    )
 
             # ⭐ 164.6.6.2 / D-03 — a currency that differs from the one stored for this key
             # means the broker re-denominated the account. Nothing below may run: a series
@@ -5464,6 +5487,31 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
                     error_kind="permanent",
                 )
 
+            # ⭐ 164.6.6.2 / D-03, D-13, D-14 — a KEY whose unit is not USD-family is skipped
+            # honestly. The allocator curve is a USD sum: a BTC series blended in would be added
+            # as dollars, and a USD anchor of ``0.11`` would understate the book by the whole
+            # account. So the derive stores the unit (so D-03 has a code to compare on the next
+            # read, from the equity step (c) just validated), runs NO combine and writes NO
+            # per-key series, and control falls to the existing <2-day key-mode short-circuit,
+            # which calls the epilogue and returns DONE. The epilogue reads this flag first and
+            # persists ``anchor_null_reason: "native_unit"`` with no flows.
+            #
+            # Every name the short-circuit and the epilogue read is set HERE, explicitly, so
+            # none is undefined or inherited from another venue's branch: ``returns`` (empty),
+            # ``meta``, ``funding`` / ``realized`` (the short-circuit logs their counts),
+            # ``external_flows`` (empty, so no BTC flow is persisted), ``equity`` (the validated
+            # equity; the epilogue ignores it behind the flag), ``balance_error``,
+            # ``upnl_unreadable`` and ``open_unrealized_usd``.
+            if is_key_mode and _mt5_unit.native:
+                await _persist_account_unit(_mt5_unit, _mt5_equity)
+                _native_unit_key_skip = True
+                logger.info(
+                    "derive_broker_dailies: mt5 key unit %s is not USD — no per-key series, "
+                    "null anchor 'native_unit' (label=%s, D-13)",
+                    _mt5_unit.code,
+                    funding_label,
+                )
+
             # (e) THE combine: the deal ledger → cashflow-neutral daily TWR via the
             # EXISTING chain_linked_twr (flow-in-numerator, full DQ-01 guard set)
             # anchored to the LIVE equity. server_utc_offset_s is the [ASSUMED A2]
@@ -5474,13 +5522,23 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             # refusal raises NavReconstructionError → the SHARED terminal
             # disposition (sfox :3156 / ccxt :2934 parity).
             try:
-                returns, meta = combine_mt5_deal_ledger(
-                    _mt5_deals,
-                    account_equity=_mt5_equity,
-                    account_balance=_mt5_balance,
-                    server_utc_offset_s=int(os.getenv("MT5_SERVER_UTC_OFFSET_S", "0")),
-                    floors=_mt5_unit.floors,
-                )
+                if _native_unit_key_skip:
+                    # pandas is imported lazily in this module (the module-level name is
+                    # type-only); an alias keeps this from shadowing it for the whole function.
+                    import pandas as _pandas
+
+                    returns = _pandas.Series(
+                        dtype="float64", index=_pandas.DatetimeIndex([])
+                    )
+                    meta = {}
+                else:
+                    returns, meta = combine_mt5_deal_ledger(
+                        _mt5_deals,
+                        account_equity=_mt5_equity,
+                        account_balance=_mt5_balance,
+                        server_utc_offset_s=int(os.getenv("MT5_SERVER_UTC_OFFSET_S", "0")),
+                        floors=_mt5_unit.floors,
+                    )
             except Mt5DealClassificationError as exc:
                 _scrubbed = str(scrub_freeform_string(str(exc)))
                 await _stamp_strategy_analytics_failed(
@@ -5522,7 +5580,8 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             # gap-fill defines the usable-day count the downstream gate also uses).
             _mt5_usable_days = int(returns.notna().sum())
             if (
-                abs(_mt5_equity) > _mt5_unit.floors.material_equity
+                not _native_unit_key_skip
+                and abs(_mt5_equity) > _mt5_unit.floors.material_equity
                 and _mt5_usable_days < 2
             ):
                 await _stamp_strategy_analytics_failed(
@@ -5560,7 +5619,8 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             # complete_with_warnings even if the core's own flag were ever missed.
             # Never silently reconciled (the v1.8 realized-basis convention).
             if (
-                _mt5_equity > _mt5_unit.floors.dust_nav
+                not _native_unit_key_skip
+                and _mt5_equity > _mt5_unit.floors.dust_nav
                 and abs(open_unrealized_usd) / _mt5_equity
                 > UNREALIZED_MATERIALITY_RATIO
             ):
@@ -5573,7 +5633,9 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
             # INSIDE combine_mt5_deal_ledger; this list is evidence only (mt5 has no
             # retention cap → the DQ-02 terminus is None, so it never re-segments).
             _mt5_flow_by_day: dict[str, float] = {}
-            for _deal in _mt5_deals:
+            # A skipped native-unit key persists NO flows (D-14): its deals are in its own
+            # unit, and the key_inputs flows are USD-signed.
+            for _deal in ([] if _native_unit_key_skip else _mt5_deals):
                 if classify_deal(_deal) == "external_flow":
                     _fday = deal_utc_day(
                         _deal.get("time"),
@@ -6007,7 +6069,12 @@ async def run_derive_broker_dailies_job(job: dict[str, Any]) -> DispatchResult:
         # dust so a small NEGATIVE equity (|equity| <= DUST but a real-capital
         # problem) degrades rather than being silently omitted as dust.
         _anchor_null_reason: str | None = None
-        if balance_error or equity is None:
+        if _native_unit_key_skip:
+            # 164.6.6.2 D-13: FIRST arm, ahead of ``balance_error``. The balance read worked;
+            # it is just not dollars. Never ``dust`` (a funded BTC account is not
+            # immaterial), and never in ``_NO_CAPITAL_ANCHOR_REASONS`` (it has capital).
+            _anchor_null_reason = "native_unit"
+        elif balance_error or equity is None:
             _anchor_null_reason = "balance_error"
         elif not math.isfinite(float(equity)):
             _anchor_null_reason = "nonfinite"
