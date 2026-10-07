@@ -51,9 +51,10 @@ def find_replacement_candidates(
     # `pd.DataFrame(...)` constructor RAISE ("cannot reindex on an axis with
     # duplicate labels") when two strategies dup different dates — and the
     # per-candidate baseline reslice below cartesian-amplify against a repeated
-    # date. routers/portfolio.py documents that `_records_to_series` does NOT
-    # dedupe its JSONB input. A no-op on the unique-date series the analytics
-    # pipeline normally produces.
+    # date. The shared parser (`services.wealth_returns.records_to_series`) sorts
+    # and dedupes keep-last, so a series read through it is already unique; this
+    # guard covers a series that arrives by another path. A no-op on the
+    # unique-date series the analytics pipeline normally produces.
     portfolio_returns = {
         sid: s[~s.index.duplicated(keep="last")]
         for sid, s in portfolio_returns.items()

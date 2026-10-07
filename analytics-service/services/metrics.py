@@ -2696,9 +2696,11 @@ def total_return_from_equity(equity: pd.Series | None) -> float | None:
     deleted forward-TWR scalar normalised the index and built
     ``breakpoints=sorted({start}|cf_dates|{end})``; with no cash flows a series
     whose observations all fall on ONE calendar day collapses to a single
-    breakpoint, yields no sub-period, and returned None. Duplicate-date JSONB is a
-    documented reachable shape (``_records_to_series`` does not dedupe), so this
-    returns None there rather than a spurious endpoint ratio.
+    breakpoint, yields no sub-period, and returned None. A series whose observations
+    all share one calendar day is a reachable shape (the shared parser
+    ``services.wealth_returns.records_to_series`` sorts and dedupes keep-last, but a
+    caller can hand in any equity Series), so this returns None there rather than
+    a spurious endpoint ratio.
 
     INPUT CONTRACT: ``equity`` should be a float64 Series on a sorted, datetime-
     like index (all four call sites satisfy this). The index is normalised via

@@ -22,10 +22,11 @@ def find_improvement_candidates(
     add_weight: float = 0.10,
 ) -> list[dict[str, Any]]:
     # Duplicate-timestamp guard (sibling of bridge_scoring M-0893 / simulator
-    # G15-006): the optimizer's series come from `_records_to_series`, which does
-    # NOT dedupe — duplicate-date JSONB is a documented shape (routers/portfolio
-    # _records_to_series). A non-unique index makes BOTH the multi-strategy
-    # `pd.DataFrame(...)` constructor below RAISE ("cannot reindex on an axis with
+    # G15-006): the optimizer's series come from `daily_returns_from_row`, whose
+    # parser (`services.wealth_returns.records_to_series`) sorts and dedupes
+    # (last record on a date wins); this guard stays as defense in depth for a
+    # series that reaches here by another path. A non-unique index makes BOTH the
+    # multi-strategy `pd.DataFrame(...)` constructor below RAISE ("cannot reindex on an axis with
     # duplicate labels") AND the per-candidate `pd.concat([port_df, c], axis=1)`
     # alignment raise/amplify on the join. Collapse each series to one row per
     # date (last-write-wins) BEFORE the frame is built, so neither can trip.
