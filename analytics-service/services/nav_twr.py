@@ -44,6 +44,7 @@ import pandas as pd
 # Single shared UTC-day boundary helper for BOTH flow and pnl bucketing. Do NOT
 # fork a second date helper — a divergent midnight boundary would land a flow on
 # the wrong day and silently mis-attribute a return (Pitfall #11).
+from services.account_unit import USD_FLOORS, UnitFloors
 from services.deribit_txn import _row_utc_day
 
 # ReturnsComputationMeta is imported READ-ONLY — the core extends it additively
@@ -54,8 +55,11 @@ from services.transforms import ReturnsComputationMeta
 
 # Dust floor for a NAV denominator (USD). Matches transforms.py
 # ``_DUST_BALANCE_THRESHOLD`` — below this a percentage return is gibberish, so
-# the day is flagged, never divided.
-DUST_NAV_FLOOR = 1000.0
+# the day is flagged, never divided. ALIAS of the USD row of the per-unit table
+# (``services.account_unit.USD_FLOORS``, the only place the number is written);
+# the name is kept so non-MT5 importers are untouched. A non-USD account passes its
+# own unit's floors through the ``floors=`` keyword instead (Phase 164.6.6.2, D-07).
+DUST_NAV_FLOOR = USD_FLOORS.dust_nav
 
 # Flow-dominated guard ratio: when ``|F_t| >= FLOW_DOM_RATIO * NAV_{t-1}`` the
 # external flow dwarfs the prior capital and the day's return is not
@@ -387,6 +391,7 @@ def chain_linked_twr(
     flows_by_day: pd.Series,
     *,
     prev0: float | None = None,
+    floors: UnitFloors = USD_FLOORS,
 ) -> tuple[pd.Series, dict[str, bool]]:
     """Chain-link the daily time-weighted return from a reconstructed NAV series.
 
@@ -445,7 +450,7 @@ def chain_linked_twr(
         else:
             prev = nav_vals[t - 1]  # NAV_{t-1}
 
-        guard_key = _guard_denominator(prev, flow_t)
+        guard_key = _guard_denominator(prev, flow_t, floors.dust_nav)
         if guard_key is not None:
             flags[guard_key] = True
             continue  # break the chain-link for this day; NEVER substitute
@@ -467,7 +472,9 @@ def chain_linked_twr(
     return pd.Series(returns, index=index, name="returns"), flags
 
 
-def _guard_denominator(prev_nav: float, flow: float) -> str | None:
+def _guard_denominator(
+    prev_nav: float, flow: float, dust_floor: float = DUST_NAV_FLOOR
+) -> str | None:
     """Return the DQ-01 flag key if ``prev_nav`` is not a usable denominator,
     else None. Three fail-loud guards, checked BEFORE the denominator divides —
     each breaks the chain-link for that day and flags, NEVER substitutes a base:
@@ -476,8 +483,9 @@ def _guard_denominator(prev_nav: float, flow: float) -> str | None:
         would divide-by-zero) -> ``negative_nav_guard``. This is the honest
         divergence from transforms.py: the ``estimated_start <= 0`` account
         flags here instead of silently substituting today's balance.
-      * dust NAV (``0 < prev_nav < DUST_NAV_FLOOR``) -> ``dust_nav_guard`` — a
-        percentage return on a sub-$1000 base is gibberish.
+      * dust NAV (``0 < prev_nav < dust_floor``) -> ``dust_nav_guard`` — a
+        percentage return on a sub-floor base is gibberish. ``dust_floor`` is the
+        account unit's ``dust_nav`` (default: the USD $1000 row).
       * flow-dominated (``|flow| >= FLOW_DOM_RATIO * prev_nav``) ->
         ``flow_dominated_guard`` — the external flow dwarfs prior capital.
 
@@ -493,7 +501,7 @@ def _guard_denominator(prev_nav: float, flow: float) -> str | None:
     dominating *flow*."""
     if prev_nav <= 0:
         return "negative_nav_guard"
-    if prev_nav < DUST_NAV_FLOOR:
+    if prev_nav < dust_floor:
         return "dust_nav_guard"
     if abs(flow) >= FLOW_DOM_RATIO * prev_nav:
         return "flow_dominated_guard"
@@ -812,6 +820,7 @@ def reconstruct_nav_and_twr(
     *,
     external_flows: Sequence[Any] | None = None,
     open_unrealized_usd: float = 0.0,
+    floors: UnitFloors = USD_FLOORS,
 ) -> tuple[pd.Series, NavTWRMeta]:
     """Public entry: reconstruct the daily NAV backward from ``anchor_nav`` and
     chain-link the daily time-weighted return.
@@ -870,7 +879,7 @@ def reconstruct_nav_and_twr(
     reconcile_flow_residual(
         terminal_nav, reconstructed_start, daily_pnl, flows_by_day
     )
-    returns, flags = chain_linked_twr(nav, daily_pnl, flows_by_day)
+    returns, flags = chain_linked_twr(nav, daily_pnl, flows_by_day, floors=floors)
     # DQ-03 (§6.2): the SAME function that computes the honest cumulative decides
     # brokenness — ONE break-detection semantics, no forked detector. An INTERIOR
     # break (a guard-NaN flanked by valid returns) merges {"twr_chain_broken":

@@ -55,6 +55,7 @@ from typing import Any, Literal
 
 import pandas as pd
 
+from services.account_unit import USD_FLOORS, UnitFloors
 from services.allocated_capital import (
     ReturnsDenominatorConfig,
     allocated_capital_returns_and_metrics,
@@ -616,6 +617,7 @@ def combine_mt5_deal_ledger(
     account_balance: float,
     *,
     server_utc_offset_s: int = 0,
+    floors: UnitFloors = USD_FLOORS,
 ) -> tuple[pd.Series, dict[str, Any]]:
     """The MT5 sibling of ``combine_native_ledger`` (:174) and
     ``combine_sfox_balance_history`` (:230) — the THIRD broker-dailies combiner.
@@ -625,7 +627,9 @@ def combine_mt5_deal_ledger(
     so EVERYTHING downstream — ``derive_basis_series``, ``compute_all_metrics``,
     persistence, the factsheet — is untouched.
 
-    MT5 is single-currency (broker deposit ccy, USD-family) with a LIVE
+    The account is single-currency in its deposit unit; the caller passes that unit's
+    ``floors`` (``services.account_unit``, D-01..D-07), so a BTC account's NAV is judged
+    against BTC thresholds and never against the USD $1000 dust floor. It has a LIVE
     ``account_info().equity`` anchor — there is NO per-currency coin-margined
     reconstruction (deribit's ``native_nav`` machinery). It is structurally
     CLOSEST to sFOX, but unlike sFOX's SAMPLED NAV it is a ledger-COMPLETE venue,
@@ -723,6 +727,7 @@ def combine_mt5_deal_ledger(
         account_equity,
         external_flows=flows,
         open_unrealized_usd=account_equity - account_balance,
+        floors=floors,
     )
     returns = gap_fill_daily_returns(returns)
     out_meta = dict(meta)

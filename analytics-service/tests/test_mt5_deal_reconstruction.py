@@ -36,6 +36,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from services.account_unit import USD_FLOORS, classify_account_currency
 from services.allocator_equity_derive import _SELF_CHECK_ABS, _SELF_CHECK_REL
 from services.broker_dailies import (
     combine_mt5_deal_ledger,
@@ -786,3 +787,113 @@ def test_guard_broken_day_still_has_an_honest_level() -> None:
     assert nav_meta.get("flow_dominated_guard") is True
     assert nav_meta["computation_status_hint"] == "complete_with_warnings"
     assert nav_meta["series_completeness"] == "ledger_complete"
+
+
+# ---------------------------------------------------------------------------
+# Phase 164.6.6.2 BTCNATIVE plan 01 — a BTC-sized ledger is judged against BTC floors.
+#
+# The USD $1000 dust floor flattened every NAV of a BTC account (a 0.02 BTC account is
+# "$0.02" to it). The thresholds now come from the account's unit (D-07, D-20: BTC dust
+# floor 0.001). The arithmetic core is unchanged; only the floors are handed in.
+# ---------------------------------------------------------------------------
+
+_BTC = classify_account_currency("BTC").floors
+
+
+def _btc_deal(profit: float, day: int, kind: int = 0) -> dict:
+    return {"type": kind, "entry": 1, "profit": profit, "swap": 0.0,
+            "commission": 0.0, "fee": 0.0, "time": _epoch(2025, 6, day)}
+
+
+def test_btc_account_gets_real_returns_under_btc_floors() -> None:
+    """Equity 0.015 BTC after two days, balance == equity (no uPnL wedge), no flows.
+
+    Hand arithmetic (BTC):
+      day1 (06-02): +0.002   day2 (06-03): -0.005
+      terminal NAV = 0.015
+      backward roll (NAV_{t-1} = NAV_t - pnl_t):
+        NAV(06-03) = 0.015
+        NAV(06-02) = 0.015 - (-0.005) = 0.020
+        base       = 0.020 - 0.002    = 0.018
+      returns r_t = pnl_t / NAV_{t-1}:
+        day1: 0.002 / 0.018 = 1/9 = 0.1111...
+        day2: -0.005 / 0.020 = -0.25
+    Every prior NAV (0.018, 0.020) is above the 0.001 BTC dust floor: no guard.
+    Under the DEFAULT (USD) floors the same input is dust-guarded on both days, which is
+    the defect: 0.018 BTC < 1000.
+    """
+    deals = [_btc_deal(0.002, 2), _btc_deal(-0.005, 3)]
+    returns, meta = combine_mt5_deal_ledger(
+        deals, account_equity=0.015, account_balance=0.015, floors=_BTC
+    )
+    vals = returns.to_numpy()
+    assert len(returns) == 2
+    assert vals[0] == pytest.approx(1 / 9, abs=1e-12)
+    assert vals[1] == pytest.approx(-0.25, abs=1e-12)
+    assert not meta.get("dust_nav_guard")
+    assert int(returns.notna().sum()) == 2
+
+    # The defect, in a test: the unit-blind default judges the same ledger as dust.
+    _r, usd_meta = combine_mt5_deal_ledger(
+        deals, account_equity=0.015, account_balance=0.015
+    )
+    assert usd_meta.get("dust_nav_guard") is True
+
+
+def test_btc_account_below_btc_dust_floor_is_dust_guarded() -> None:
+    """The same shape one decade under the floor. equity 0.0007, day1 +0.0001,
+    day2 -0.0002.
+      NAV(06-03) = 0.0007
+      NAV(06-02) = 0.0007 - (-0.0002) = 0.0009
+      base       = 0.0009 - 0.0001    = 0.0008
+    Both prior NAVs (0.0008, 0.0009) are under 0.001 BTC, so dust_nav_guard fires on both
+    days: 0 usable days. A BTC account this small is dust, exactly as a $500 USD one is."""
+    deals = [_btc_deal(0.0001, 2), _btc_deal(-0.0002, 3)]
+    returns, meta = combine_mt5_deal_ledger(
+        deals, account_equity=0.0007, account_balance=0.0007, floors=_BTC
+    )
+    assert meta.get("dust_nav_guard") is True
+    assert int(returns.notna().sum()) < 2
+    assert meta.get("computation_status_hint") == "complete_with_warnings"
+
+
+def test_scaled_usd_fixture_under_btc_floors_equals_unscaled_under_usd_floors() -> None:
+    """The unit-invariance twin (the MM-2x defect in a test). Take the USD fixture of
+    ``test_sub_1000_equity_reconstructs_off_real_anchor_not_fabricated_base`` (NAVs 2000,
+    1400, 900 and day PnLs -600, -500) and scale every money value by 1e-6, D-20's own
+    ratio: NAVs 0.002, 0.0014, 0.0009 and PnLs -0.0006, -0.0005.
+
+    Every threshold scales by the same 1e-6, so the guard decisions are identical: the
+    return series must match to 1e-12 and the flag set must match exactly. Under the
+    DEFAULT floors the scaled fixture is dust-guarded on every day, which is what flattened
+    MM-2x."""
+    usd = [_btc_deal(-600.0, 2, kind=1), _btc_deal(-500.0, 3, kind=1)]
+    scaled = [_btc_deal(-0.0006, 2, kind=1), _btc_deal(-0.0005, 3, kind=1)]
+
+    usd_returns, usd_meta = combine_mt5_deal_ledger(
+        usd, account_equity=900.0, account_balance=900.0
+    )
+    btc_returns, btc_meta = combine_mt5_deal_ledger(
+        scaled, account_equity=0.0009, account_balance=0.0009, floors=_BTC
+    )
+    assert btc_returns.to_numpy() == pytest.approx(usd_returns.to_numpy(), abs=1e-12)
+    assert btc_meta == usd_meta
+    assert not btc_meta.get("dust_nav_guard")
+
+    # Same scaled fixture, unit-blind: every day dust-guarded (NaN), nothing usable.
+    blind_returns, blind_meta = combine_mt5_deal_ledger(
+        scaled, account_equity=0.0009, account_balance=0.0009
+    )
+    assert blind_meta.get("dust_nav_guard") is True
+    assert int(blind_returns.notna().sum()) == 0
+
+
+def test_default_floors_are_the_usd_row() -> None:
+    """Handing USD_FLOORS explicitly is the same call as handing nothing: the
+    default-preserving keyword is what keeps every other caller byte-identical."""
+    deals = _canonical_deposit_deals()
+    kwargs = dict(account_equity=110_500.0, account_balance=110_500.0)
+    default_r, default_m = combine_mt5_deal_ledger(deals, **kwargs)
+    explicit_r, explicit_m = combine_mt5_deal_ledger(deals, floors=USD_FLOORS, **kwargs)
+    pd.testing.assert_series_equal(default_r, explicit_r)
+    assert default_m == explicit_m
