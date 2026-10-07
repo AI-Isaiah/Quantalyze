@@ -700,7 +700,7 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
 
   // ── Phase 167.2.1 — every probe outcome and share mode (D-02, D-05, D-08) ──
   const UNBUILDABLE_COMPOSITE =
-    "Right now, a private link to this strategy shows that its factsheet is not available. We cannot build a factsheet from its stored results. Contact support@quantalyze.com to have them checked.";
+    "Right now, a private link to this strategy shows that its factsheet is not available. We cannot build a factsheet from its stored results. Use the contact form to have them checked.";
   const PUBLIC_UNBUILDABLE_SHORT =
     "Right now, this strategy's factsheet link shows that the factsheet is not available. The stored results we build its factsheet from hold fewer than 2 days of returns, and a factsheet needs at least 2.";
   const onePoint = (id: string) => ({
@@ -737,6 +737,18 @@ describe("StrategiesPage — KCS-12 the share note on a row without a computed f
     const container = await renderPage();
 
     expect(noteOf(container, "Strategy c-pre86")).toBe(UNBUILDABLE_COMPOSITE);
+    // AD-05: the pointer is one same-tab link carrying this row's strategy id,
+    // and the note names no address.
+    const note = [...container.querySelectorAll("a")]
+      .find((a) => a.textContent === "Strategy c-pre86")
+      ?.closest('[data-testid="strategy-row"]')
+      ?.querySelector('[data-testid="strategy-row-share-note"]');
+    const pointers = note!.querySelectorAll("a");
+    expect(pointers).toHaveLength(1);
+    expect(pointers[0].textContent).toBe("contact form");
+    expect(pointers[0].getAttribute("href")).toBe("/contact?topic=support&strategy=c-pre86");
+    expect(pointers[0].getAttribute("target")).toBeNull();
+    expect(note!.textContent).not.toMatch(/@quantalyze\./);
   });
 
   it("PUBLIC-UNBUILDABLE: a published computed row with one point takes the public unbuildable line and reads no jobs", async () => {

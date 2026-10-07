@@ -32,8 +32,6 @@ import { STALL_THRESHOLD_MS } from "./sync-progress";
 const EM_DASH = "—"; // U+2014 — NOT a hyphen-minus.
 const MIDDLE_DOT = "·"; // U+00B7 — NOT a period or a bullet.
 
-const SUPPORT_EMAIL = "support@quantalyze.com";
-
 /** The stall threshold in whole minutes (720 000 ms → 12). */
 const STALL_MINUTES = STALL_THRESHOLD_MS / 60_000;
 
@@ -305,11 +303,12 @@ function shapeRemedy(shape: StrategyShape, strategyId: string): OwnerRemedy {
       id: "KCS21-UNLINKED",
       before: "Link a key with Use & Sync on this strategy's ",
       link: { text: "edit page", href: editHref },
-      after: ` to start a new computation. Contact ${SUPPORT_EMAIL} if it does not complete.`,
+      after: " to start a new computation. Use the contact form if it does not complete.",
     },
     composite: {
       id: "KCS21-COMPOSITE",
-      before: `A composite strategy has no self-serve re-run. Contact ${SUPPORT_EMAIL} to start a new computation.`,
+      before:
+        "A composite strategy has no self-serve re-run. Use the contact form to start a new computation.",
       after: "",
     },
     csv: {
@@ -320,7 +319,7 @@ function shapeRemedy(shape: StrategyShape, strategyId: string): OwnerRemedy {
         text: "upload a new CSV strategy",
         href: "/strategies/new/wizard?source=csv",
       },
-      after: `, or contact ${SUPPORT_EMAIL}.`,
+      after: ", or use the contact form.",
     },
   } satisfies Record<StrategyShape, OwnerRemedy>;
   return remedies[shape];
@@ -436,7 +435,7 @@ export function unbuildableNoteKindOf(
 // "none is on record" (done jobs are purged after 30 days) or "stopped on a
 // problem" while the analytics row still reads complete. A sentence about the
 // stored results is true beside every one of those lines.
-// 167.2.1-REVIEW IN-02: active voice, and the address is SUPPORT_EMAIL.
+// 167.2.1-REVIEW IN-02: active voice, and the remedies point at the contact form.
 // 167.2.1-REVIEW-SFH-R2 N-5: the SHORT line is about the stored results the
 // builder READS ("we build its factsheet from"), not all of them. A short but
 // valid `daily_returns` beside a long `returns_series` is too short: the
@@ -445,13 +444,15 @@ export function unbuildableNoteKindOf(
 const MINT_UNBUILDABLE_NOTES = {
   too_short:
     "Right now, a private link to this strategy shows that its factsheet is not available. The stored results we build its factsheet from hold fewer than 2 days of returns, and a factsheet needs at least 2.",
-  cannot_build: `Right now, a private link to this strategy shows that its factsheet is not available. We cannot build a factsheet from its stored results. Contact ${SUPPORT_EMAIL} to have them checked.`,
+  cannot_build:
+    "Right now, a private link to this strategy shows that its factsheet is not available. We cannot build a factsheet from its stored results. Use the contact form to have them checked.",
 } as const satisfies Record<UnbuildableNoteKind, string>;
 
 const PUBLIC_UNBUILDABLE_NOTES = {
   too_short:
     "Right now, this strategy's factsheet link shows that the factsheet is not available. The stored results we build its factsheet from hold fewer than 2 days of returns, and a factsheet needs at least 2.",
-  cannot_build: `Right now, this strategy's factsheet link shows that the factsheet is not available. We cannot build a factsheet from its stored results. Contact ${SUPPORT_EMAIL} to have them checked.`,
+  cannot_build:
+    "Right now, this strategy's factsheet link shows that the factsheet is not available. We cannot build a factsheet from its stored results. Use the contact form to have them checked.",
 } as const satisfies Record<UnbuildableNoteKind, string>;
 
 // 167.2.1-REVIEW-SFH H-2 — a private link to an unbuildable row whose job
@@ -463,7 +464,8 @@ const PUBLIC_UNBUILDABLE_NOTES = {
 const MINT_UNBUILDABLE_UNREADABLE_NOTES = {
   too_short:
     "Right now, a private link to this strategy shows a placeholder page instead of the numbers. The stored results we build its factsheet from hold fewer than 2 days of returns, and a factsheet needs at least 2.",
-  cannot_build: `Right now, a private link to this strategy shows a placeholder page instead of the numbers. We cannot build a factsheet from its stored results. Contact ${SUPPORT_EMAIL} to have them checked.`,
+  cannot_build:
+    "Right now, a private link to this strategy shows a placeholder page instead of the numbers. We cannot build a factsheet from its stored results. Use the contact form to have them checked.",
 } as const satisfies Record<UnbuildableNoteKind, string>;
 
 // 167.2.1-REVIEW-SFH H-2 — the buildability check itself failed (the probe

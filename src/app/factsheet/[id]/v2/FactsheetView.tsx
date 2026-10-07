@@ -15,6 +15,8 @@ import {
   SERIES_END_FUTURE_ALLOWANCE_DAYS,
 } from "@/lib/freshness";
 import { TrustTierLabel } from "@/components/strategy/TrustTierLabel";
+import { ContactPointerText } from "@/components/contact/ContactPointerText";
+import { contactHref } from "@/lib/contact";
 import { OwnershipTag } from "@/components/strategy/OwnershipTag";
 import { RenameStrategyDialog } from "@/components/strategy/RenameStrategyDialog";
 // Phase 164 (SHARE-04) — THE ONE SHARE PREDICATE, shared with the other two
@@ -928,7 +930,12 @@ export function OwnerUnpublishedPanel({
         </div>
       </OwnerUnpublishedNotice>
       {shareNote && (
-        <p className="mt-2 text-fixed-12 text-text-muted">{shareNote}</p>
+        <p className="mt-2 text-fixed-12 text-text-muted">
+          <ContactPointerText
+            text={shareNote}
+            href={contactHref({ topic: "support", strategy: strategyId })}
+          />
+        </p>
       )}
     </div>
   );
