@@ -25,6 +25,7 @@ import pytest
 from routers import portfolio as portfolio_mod
 from routers.portfolio import _generate_alerts, _generate_rebalance_drift_alert
 from tests._curve_fixtures import curve_from_returns
+from tests._schema_columns import assert_select_columns
 from tests.test_portfolio_compute_integration import _make_supabase_for_compute
 
 
@@ -514,21 +515,6 @@ class TestRebalanceDriftStrategyNameChunking:
 # Phase 164.6.6.2 (D-23): a BTC strategy enters every portfolio blend as USD
 # ---------------------------------------------------------------------------
 
-_BTC_DATES = ["2026-02-02", "2026-02-03", "2026-02-04"]
-_BTC_CLOSES = pd.Series(
-    [60000.0, 66000.0, 72600.0],
-    index=pd.DatetimeIndex(_BTC_DATES),
-    name="BTC",
-)
-
-
-def _recs(values: list[float]) -> list[dict]:
-    """Return-shaped records. Kept for the optimizer / bridge fixtures below, whose
-    routers still read ``returns_series`` as returns until plan 05 moves them onto
-    the boundary; the COMPUTE path reads a stored curve, see ``_curve`` below."""
-    return [{"date": d, "value": v} for d, v in zip(_BTC_DATES, values)]
-
-
 # --- compute-path fixtures (Phase 164.6.6.2.2): stored-shape CURVES -------------
 # ``strategy_analytics.returns_series`` is the cumulative wealth curve. Reading a
 # curve back through the boundary yields daily returns for days 1..n-1, and the
@@ -669,15 +655,25 @@ class TestPortfolioAnalyticsBlendsBtcInUsd:
 class _TableChain:
     """A chain-agnostic stand-in for one supabase table query: every builder
     method returns itself, `.in_("strategy_id", ids)` narrows the rows, and
-    `.execute()` returns them."""
+    `.execute()` returns them.
 
-    def __init__(self, data, negate: bool = False):
+    Column-strict (tests/_schema_columns.py): `.select(...)` raises for a column
+    the real table lacks, as PostgREST would, and records the select string."""
+
+    def __init__(self, table, data, selected, negate: bool = False):
+        self._table = table
         self._data = data
+        self._selected = selected
         self._negate = negate
 
     @property
     def not_(self):
-        return _TableChain(self._data, negate=True)
+        return _TableChain(self._table, self._data, self._selected, negate=True)
+
+    def select(self, columns="*", *_a, **_k):
+        assert_select_columns(self._table, columns)
+        self._selected.append((self._table, columns))
+        return self
 
     def in_(self, col, ids):
         if isinstance(self._data, list):
@@ -695,15 +691,21 @@ class _TableChain:
 class _FakeSupabase:
     def __init__(self, tables: dict[str, object]):
         self._tables = tables
+        self.selected: list[tuple[str, str]] = []
 
     def table(self, name: str) -> _TableChain:
         data = self._tables.get(name, [])
-        return _TableChain(list(data) if isinstance(data, list) else data)
+        return _TableChain(
+            name, list(data) if isinstance(data, list) else data, self.selected
+        )
 
 
 def _blend_tables() -> dict[str, object]:
-    usd = [0.0, 0.02, 0.01]
-    btc = [0.0, 0.10, 0.04]
+    """Every strategy_analytics row is the STORED shape: a cumulative curve
+    (Phase 164.6.6.2.2, CR-01). Daily returns read back through the boundary:
+    usd d1 0.02, d2 0.01, d3 0.03 and btc (native) d1 0.10, d2 0.10, d3 0.04."""
+    usd = [0.0, 0.02, 0.01, 0.03]
+    btc = [0.0, 0.10, 0.10, 0.04]
     return {
         "portfolios": {"id": "pf", "user_id": "u"},
         "portfolio_strategies": [
@@ -711,12 +713,12 @@ def _blend_tables() -> dict[str, object]:
             {"strategy_id": "btc-b", "current_weight": 0.5},
         ],
         "strategy_analytics": [
-            {"strategy_id": "usd-a", "returns_series": _recs(usd), "data_quality_flags": {}},
-            {"strategy_id": "btc-b", "returns_series": _recs(btc),
+            {"strategy_id": "usd-a", "returns_series": _curve(usd), "data_quality_flags": {}},
+            {"strategy_id": "btc-b", "returns_series": _curve(btc),
              "data_quality_flags": {"native_unit": "BTC"}},
-            {"strategy_id": "btc-cand", "returns_series": _recs(btc),
+            {"strategy_id": "btc-cand", "returns_series": _curve(btc),
              "data_quality_flags": {"native_unit": "BTC"}},
-            {"strategy_id": "usd-cand", "returns_series": _recs(usd), "data_quality_flags": None},
+            {"strategy_id": "usd-cand", "returns_series": _curve(usd), "data_quality_flags": None},
         ],
         "strategies": [
             {"id": "btc-cand", "name": "BC"},
@@ -726,8 +728,32 @@ def _blend_tables() -> dict[str, object]:
     }
 
 
-def _d1(series: pd.Series) -> float:
-    return float(series.loc[pd.Timestamp("2026-02-03")])
+def _usd_only_tables() -> dict[str, object]:
+    """One USD portfolio member and one published USD candidate, both stored as
+    curves of known daily returns (hand-computed in the tests below)."""
+    return {
+        "portfolios": {"id": "pf", "user_id": "u"},
+        "portfolio_strategies": [{"strategy_id": "usd-a", "current_weight": 1.0}],
+        "strategy_analytics": [
+            {"strategy_id": "usd-a", "returns_series": _curve([0.0, 0.02, 0.01, 0.03]),
+             "data_quality_flags": {}},
+            {"strategy_id": "usd-cand", "returns_series": _curve([0.0, -0.01, 0.04, 0.02]),
+             "data_quality_flags": {}},
+        ],
+        "strategies": [{"id": "usd-cand", "name": "UC"}],
+        "portfolio_analytics": [],
+    }
+
+
+_D1, _D2, _D3 = (pd.Timestamp(d) for d in _BTC_COMPUTE_DATES[1:])
+
+
+def _at(series: pd.Series, day: pd.Timestamp) -> float:
+    return float(series.loc[day])
+
+
+def _daily(series: pd.Series) -> list[float]:
+    return [float(v) for v in series.to_numpy()]
 
 
 class TestOptimizerAndBridgeScoreBtcInUsd:
@@ -743,7 +769,7 @@ class TestOptimizerAndBridgeScoreBtcInUsd:
             seen["p"], seen["c"] = portfolio_returns, candidate_returns
             return []
 
-        closes = AsyncMock(return_value=_BTC_CLOSES)
+        closes = AsyncMock(return_value=_BTC_COMPUTE_CLOSES)
         req = MagicMock(portfolio_id="pf", user_id="u", weights=None)
         with patch.object(portfolio_mod, "get_supabase", return_value=_FakeSupabase(_blend_tables())), \
              patch.object(portfolio_mod, "get_btc_closes", closes), \
@@ -751,31 +777,38 @@ class TestOptimizerAndBridgeScoreBtcInUsd:
              patch.object(portfolio_mod, "log_audit_event"):
             await portfolio_mod.portfolio_optimizer.__wrapped__(MagicMock(), req)
 
-        assert _d1(seen["p"]["btc-b"]) == pytest.approx(0.21, abs=1e-12)  # not the raw 0.10
-        assert _d1(seen["c"]["btc-cand"]) == pytest.approx(0.21, abs=1e-12)
-        assert _d1(seen["p"]["usd-a"]) == 0.02  # a USD series is untouched
-        assert _d1(seen["c"]["usd-cand"]) == 0.02
+        # BTC leg: the curve reads back as native 0.10, 0.10, 0.04; the converter has
+        # no prior priced day for the first, so d2 = 1.10 * 1.10 - 1 = 0.21 (not the
+        # raw 0.10) and d3 = 1.04 * 1.10 - 1 = 0.144.
+        assert _at(seen["p"]["btc-b"], _D2) == pytest.approx(0.21, abs=1e-12)
+        assert _at(seen["p"]["btc-b"], _D3) == pytest.approx(0.144, abs=1e-12)
+        assert _at(seen["c"]["btc-cand"], _D2) == pytest.approx(0.21, abs=1e-12)
+        assert _at(seen["p"]["usd-a"], _D1) == pytest.approx(0.02, abs=1e-12)  # USD untouched
+        assert _at(seen["c"]["usd-cand"], _D1) == pytest.approx(0.02, abs=1e-12)
         assert closes.await_count == 1  # one read for portfolio AND candidates
 
     @pytest.mark.asyncio
     async def test_bridge_hands_the_scorer_usd_series(self):
+        import services.bridge_scoring as bridge_scoring_mod
+
         seen: dict[str, dict[str, pd.Series]] = {}
 
         def _spy(portfolio_returns, candidate_returns, weights, incumbent):
             seen["p"], seen["c"] = portfolio_returns, candidate_returns
             return []
 
-        closes = AsyncMock(return_value=_BTC_CLOSES)
+        closes = AsyncMock(return_value=_BTC_COMPUTE_CLOSES)
         req = MagicMock(portfolio_id="pf", user_id="bridge-user-1", underperformer_strategy_id="btc-b")
         with patch.object(portfolio_mod, "get_supabase", return_value=_FakeSupabase(_blend_tables())), \
              patch.object(portfolio_mod, "get_btc_closes", closes), \
-             patch("services.bridge_scoring.find_replacement_candidates", side_effect=_spy), \
+             patch.object(bridge_scoring_mod, "find_replacement_candidates", side_effect=_spy), \
              patch.object(portfolio_mod, "log_audit_event"):
             await portfolio_mod.portfolio_bridge.__wrapped__(MagicMock(), req)
 
-        assert _d1(seen["p"]["btc-b"]) == pytest.approx(0.21, abs=1e-12)
-        assert _d1(seen["c"]["btc-cand"]) == pytest.approx(0.21, abs=1e-12)
-        assert _d1(seen["p"]["usd-a"]) == 0.02
+        assert _at(seen["p"]["btc-b"], _D2) == pytest.approx(0.21, abs=1e-12)
+        assert _at(seen["p"]["btc-b"], _D3) == pytest.approx(0.144, abs=1e-12)
+        assert _at(seen["c"]["btc-cand"], _D2) == pytest.approx(0.21, abs=1e-12)
+        assert _at(seen["p"]["usd-a"], _D1) == pytest.approx(0.02, abs=1e-12)
         assert closes.await_count == 1
 
     @pytest.mark.asyncio
@@ -788,3 +821,108 @@ class TestOptimizerAndBridgeScoreBtcInUsd:
             out = await portfolio_mod.portfolio_bridge.__wrapped__(MagicMock(), req)
         assert out["status"] == "incumbent_no_data"
         assert out["partial_data"] is True
+
+
+class TestOptimizerAndBridgeReadDailyReturnsNotCurveLevels:
+    """CR-01 (Phase 164.6.6.2.2, D-01/D-02): `strategy_analytics.returns_series` is the
+    cumulative wealth curve. The scorers weight whatever they are handed as DAILY
+    RETURNS, so the series handed over must be the curve's daily returns, never its
+    levels (about 1.0)."""
+
+    @pytest.mark.asyncio
+    async def test_optimizer_hands_the_scorer_the_curves_daily_returns(self):
+        seen: dict[str, dict[str, pd.Series]] = {}
+
+        def _spy(portfolio_returns, candidate_returns, weights):
+            seen["p"], seen["c"] = portfolio_returns, candidate_returns
+            return []
+
+        fake = _FakeSupabase(_usd_only_tables())
+        req = MagicMock(portfolio_id="pf", user_id="u", weights=None)
+        with patch.object(portfolio_mod, "get_supabase", return_value=fake), \
+             patch.object(portfolio_mod, "find_improvement_candidates", side_effect=_spy), \
+             patch.object(portfolio_mod, "log_audit_event"):
+            await portfolio_mod.portfolio_optimizer.__wrapped__(MagicMock(), req)
+
+        # Day 0 has no stored predecessor, so the first return is the day-1 ratio:
+        # portfolio 1.02/1.0 - 1, 1.0302/1.02 - 1, 1.061106/1.0302 - 1.
+        assert _daily(seen["p"]["usd-a"]) == pytest.approx([0.02, 0.01, 0.03], abs=1e-12)
+        assert _daily(seen["c"]["usd-cand"]) == pytest.approx([-0.01, 0.04, 0.02], abs=1e-12)
+
+    @pytest.mark.asyncio
+    async def test_bridge_hands_the_scorer_the_curves_daily_returns(self):
+        import services.bridge_scoring as bridge_scoring_mod
+
+        seen: dict[str, dict[str, pd.Series]] = {}
+
+        def _spy(portfolio_returns, candidate_returns, weights, incumbent):
+            seen["p"], seen["c"] = portfolio_returns, candidate_returns
+            return []
+
+        fake = _FakeSupabase(_usd_only_tables())
+        req = MagicMock(portfolio_id="pf", user_id="bridge-user-3", underperformer_strategy_id="usd-a")
+        with patch.object(portfolio_mod, "get_supabase", return_value=fake), \
+             patch.object(bridge_scoring_mod, "find_replacement_candidates", side_effect=_spy), \
+             patch.object(portfolio_mod, "log_audit_event"):
+            await portfolio_mod.portfolio_bridge.__wrapped__(MagicMock(), req)
+
+        assert _daily(seen["p"]["usd-a"]) == pytest.approx([0.02, 0.01, 0.03], abs=1e-12)
+        assert _daily(seen["c"]["usd-cand"]) == pytest.approx([-0.01, 0.04, 0.02], abs=1e-12)
+
+    @pytest.mark.asyncio
+    async def test_a_stored_daily_returns_column_wins_over_the_curve_on_both_endpoints(self):
+        """D-02: a row's non-empty `daily_returns` is read verbatim and the curve is
+        ignored, here a curve of DIFFERENT returns that would be wrong if read."""
+        import services.bridge_scoring as bridge_scoring_mod
+
+        tables = _usd_only_tables()
+        stored = [0.05, -0.03, 0.01]
+        tables["strategy_analytics"][1]["daily_returns"] = [  # type: ignore[index]
+            {"date": d, "value": v} for d, v in zip(_BTC_COMPUTE_DATES[1:], stored)
+        ]
+        seen_opt: dict[str, pd.Series] = {}
+        seen_bridge: dict[str, pd.Series] = {}
+
+        def _opt_spy(portfolio_returns, candidate_returns, weights):
+            seen_opt.update(candidate_returns)
+            return []
+
+        def _bridge_spy(portfolio_returns, candidate_returns, weights, incumbent):
+            seen_bridge.update(candidate_returns)
+            return []
+
+        with patch.object(portfolio_mod, "get_supabase", return_value=_FakeSupabase(tables)), \
+             patch.object(portfolio_mod, "find_improvement_candidates", side_effect=_opt_spy), \
+             patch.object(bridge_scoring_mod, "find_replacement_candidates", side_effect=_bridge_spy), \
+             patch.object(portfolio_mod, "log_audit_event"):
+            await portfolio_mod.portfolio_optimizer.__wrapped__(
+                MagicMock(), MagicMock(portfolio_id="pf", user_id="u", weights=None)
+            )
+            await portfolio_mod.portfolio_bridge.__wrapped__(
+                MagicMock(),
+                MagicMock(portfolio_id="pf", user_id="bridge-user-4", underperformer_strategy_id="usd-a"),
+            )
+
+        assert _daily(seen_opt["usd-cand"]) == pytest.approx(stored, abs=1e-12)
+        assert _daily(seen_bridge["usd-cand"]) == pytest.approx(stored, abs=1e-12)
+
+    @pytest.mark.asyncio
+    async def test_all_four_selects_name_daily_returns_beside_the_flags(self):
+        """Each of the two portfolio reads and the two candidate reads selects
+        `daily_returns` (the boundary's first source) and `data_quality_flags` (the
+        curve's cumulative method and native unit) off the same row."""
+        fake = _FakeSupabase(_usd_only_tables())
+        with patch.object(portfolio_mod, "get_supabase", return_value=fake), \
+             patch.object(portfolio_mod, "log_audit_event"):
+            await portfolio_mod.portfolio_optimizer.__wrapped__(
+                MagicMock(), MagicMock(portfolio_id="pf", user_id="u", weights=None)
+            )
+            await portfolio_mod.portfolio_bridge.__wrapped__(
+                MagicMock(),
+                MagicMock(portfolio_id="pf", user_id="bridge-user-5", underperformer_strategy_id="usd-a"),
+            )
+        analytics = [c for t, c in fake.selected if t == "strategy_analytics"]
+        assert len(analytics) == 4, analytics
+        for columns in analytics:
+            for column in ("strategy_id", "returns_series", "daily_returns", "data_quality_flags"):
+                assert column in columns, (column, columns)
