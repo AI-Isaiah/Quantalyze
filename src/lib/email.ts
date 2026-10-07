@@ -189,6 +189,18 @@ async function send(
       "[email] recipient rejected by sanitizeEmailRecipient (header-injection guard):",
       JSON.stringify(to),
     );
+    // A set-but-malformed recipient (e.g. a mistyped ADMIN_EMAIL) is a
+    // configuration skip: the send was never attempted. Callers that opt into
+    // `throwOnSkip` get a fixed-message EmailSkippedError that does NOT echo
+    // the address, so the route can record it as not sent without storing or
+    // reporting the value. Takes precedence over throwOnFailure's echoing
+    // message because the recorded text lands in a CRM column.
+    if (throwOnSkip) {
+      throw new EmailSkippedError(
+        "recipient_invalid",
+        "[email] Recipient address rejected by sanitization guard — send skipped",
+      );
+    }
     // SF-F2: honour throwOnFailure here too — a rejected address is a
     // delivery failure from the caller's perspective. Without this, callers
     // that pass throwOnFailure=true (e.g. approve routes) silently received
@@ -1007,12 +1019,20 @@ export async function sendAlertDigest(
  * WR-01: `throwOnSkip: true` makes a configuration skip (no Resend client, no
  * PLATFORM_EMAIL sender) throw EmailSkippedError, so a caller that records a
  * delivery outcome (the for-quants-lead route) never reads a skip as a send.
- * The default keeps the swallow-everything behaviour the other callers rely on.
+ * A malformed recipient (a set-but-invalid ADMIN_EMAIL) is a skip too and
+ * throws EmailSkippedError("recipient_invalid") with a fixed message.
+ * `throwOnFailure: true` additionally surfaces a REAL Resend rejection (after
+ * the 3 attempts) as a thrown Error, so the caller does not stamp a rejected
+ * send as delivered. The defaults keep the swallow-everything behaviour the
+ * other callers rely on.
  */
 export async function notifyFounderGeneric(
   subject: string,
   bodyHtml: string,
-  { throwOnSkip = false }: { throwOnSkip?: boolean } = {},
+  {
+    throwOnSkip = false,
+    throwOnFailure = false,
+  }: { throwOnSkip?: boolean; throwOnFailure?: boolean } = {},
 ) {
   const founder = founderEmail();
   if (!founder) return;
@@ -1022,6 +1042,6 @@ export async function notifyFounderGeneric(
     `<div style="font-family:'DM Sans',sans-serif;max-width:600px;">${bodyHtml}${SIGNATURE}</div>`,
     "founder_generic",
     undefined,
-    { throwOnSkip },
+    { throwOnSkip, throwOnFailure },
   );
 }

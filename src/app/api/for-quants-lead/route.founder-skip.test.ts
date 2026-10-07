@@ -68,7 +68,7 @@ vi.mock("@/lib/supabase/admin", () => ({
 }));
 
 const resendState = vi.hoisted(
-  (): { sent: number } => ({ sent: 0 }),
+  (): { sent: number; reject: boolean } => ({ sent: 0, reject: false }),
 );
 
 vi.mock("resend", () => ({
@@ -76,6 +76,12 @@ vi.mock("resend", () => ({
     emails = {
       send: async () => {
         resendState.sent += 1;
+        if (resendState.reject) {
+          return {
+            data: null,
+            error: { name: "validation_error", message: "Resend refused the send" },
+          };
+        }
         return { data: { id: "resend-id" }, error: null };
       },
     };
@@ -158,6 +164,7 @@ describe("POST /api/for-quants-lead — a skipped founder email is recorded as N
     dbState.inserted = [];
     dbState.updates = [];
     resendState.sent = 0;
+    resendState.reject = false;
     sentryState.captures = [];
     vi.stubEnv("ADMIN_EMAIL", "founder-stub@example.test");
     vi.stubEnv("NEXT_PUBLIC_SUPABASE_URL", "http://localhost:54321");
@@ -244,5 +251,111 @@ describe("POST /api/for-quants-lead — a skipped founder email is recorded as N
     expect(typeof succeeded?.payload.notify_succeeded_at).toBe("string");
     expect(errored).toBeUndefined();
     expect(sentryState.captures).toHaveLength(0);
+  });
+
+  // ROUND 2 (SFH, conf 8): `notifyFounderGeneric` swallowed a REAL Resend
+  // rejection after its retries, so the route stamped notify_succeeded_at on a
+  // message that never went out. The route now opts into throwOnFailure.
+  describe("a real Resend rejection (Resend IS configured)", () => {
+    beforeEach(() => {
+      vi.stubEnv("RESEND_API_KEY", "re_test_key");
+      vi.stubEnv("PLATFORM_EMAIL", "sender@example.com");
+      resendState.reject = true;
+      // Only setTimeout is faked: send() backs off 500ms + 1000ms between its
+      // three attempts, and the setImmediate-based flush must keep working.
+      vi.useFakeTimers({ toFake: ["setTimeout"] });
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    async function settle(): Promise<void> {
+      for (let i = 0; i < 4; i += 1) {
+        await vi.advanceTimersByTimeAsync(2000);
+        await flush();
+      }
+    }
+
+    it.each([
+      ["request_call", REQUEST_CALL],
+      ["contact_form", CONTACT_FORM],
+    ])(
+      "%s: writes notify_error, never notify_succeeded_at, and the client still sees stored",
+      async (_source, payload) => {
+        const { POST } = await import("./route");
+        const res = await POST(makeRequest(payload));
+        expect(res.status).toBe(200);
+        expect(await res.json()).toEqual({ ok: true, status: "stored" });
+        await settle();
+
+        expect(resendState.sent).toBe(3); // all three attempts were made
+        const { succeeded, errored } = markersFor("lead-1");
+        expect(succeeded).toBeUndefined();
+        expect(String(errored?.payload.notify_error)).toContain(
+          "Resend refused the send",
+        );
+        expect(String(errored?.payload.notify_error).length).toBeLessThanOrEqual(
+          500,
+        );
+      },
+    );
+
+    it("keeps the per-lead Sentry exception for a real send failure (not the skip message)", async () => {
+      const { POST } = await import("./route");
+      await POST(makeRequest(CONTACT_FORM));
+      await POST(makeRequest({ ...CONTACT_FORM, email: "other@lab.example" }));
+      await settle();
+
+      expect(
+        sentryState.captures.filter((c) => c.stage === "founder_notify"),
+      ).toHaveLength(2);
+      expect(
+        sentryState.captures.filter((c) => c.stage === "founder_notify_skipped"),
+      ).toHaveLength(0);
+    });
+  });
+
+  // ROUND 2 (SFH, conf 7): a set-but-malformed ADMIN_EMAIL fails
+  // sanitizeEmailRecipient, which honoured only throwOnFailure, so the route
+  // stamped a success for a send that was never attempted.
+  describe("a set-but-malformed ADMIN_EMAIL", () => {
+    const MALFORMED = "not-an-address";
+
+    beforeEach(() => {
+      vi.stubEnv("RESEND_API_KEY", "re_test_key");
+      vi.stubEnv("PLATFORM_EMAIL", "sender@example.com");
+      vi.stubEnv("ADMIN_EMAIL", MALFORMED);
+    });
+
+    it("is recorded as not sent, with a fixed message that never echoes the value", async () => {
+      const { POST } = await import("./route");
+      const res = await POST(makeRequest(CONTACT_FORM));
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ ok: true, status: "stored" });
+      await flush();
+
+      expect(resendState.sent).toBe(0);
+      const { succeeded, errored } = markersFor("lead-1");
+      expect(succeeded).toBeUndefined();
+      expect(errored?.payload.notify_error).toBe(
+        "Founder email not sent: ADMIN_EMAIL is not a valid address",
+      );
+      expect(JSON.stringify(errored?.payload)).not.toContain(MALFORMED);
+    });
+
+    it("reports to Sentry once per process as a skip, never as a per-lead exception", async () => {
+      const { POST } = await import("./route");
+      await POST(makeRequest(CONTACT_FORM));
+      await POST(makeRequest({ ...CONTACT_FORM, email: "other@lab.example" }));
+      await flush();
+
+      expect(
+        sentryState.captures.filter((c) => c.stage === "founder_notify_skipped"),
+      ).toHaveLength(1);
+      expect(
+        sentryState.captures.filter((c) => c.stage === "founder_notify"),
+      ).toHaveLength(0);
+    });
   });
 });

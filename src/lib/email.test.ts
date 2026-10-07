@@ -471,6 +471,50 @@ describe("email.ts — notification_dispatches audit trail", () => {
     expect(state.sendCalls).toHaveLength(0);
   });
 
+  it("round 2 notifyFounderGeneric: a malformed recipient is a skip under throwOnSkip, with a fixed message that never echoes the address", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.stubEnv("ADMIN_EMAIL", "not-an-address");
+    vi.resetModules();
+    const mod = await import("./email");
+    const skip = await import("./email-skip");
+
+    // Default: silent, as before.
+    await expect(mod.notifyFounderGeneric("Hi", "<p>x</p>")).resolves.toBeUndefined();
+
+    const err = await mod
+      .notifyFounderGeneric("Hi", "<p>x</p>", { throwOnSkip: true })
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(skip.EmailSkippedError);
+    expect((err as InstanceType<typeof skip.EmailSkippedError>).reason).toBe(
+      "recipient_invalid",
+    );
+    expect((err as Error).message).not.toContain("not-an-address");
+    expect(state.sendCalls).toHaveLength(0);
+  });
+
+  it("round 2 notifyFounderGeneric: throwOnFailure surfaces a real Resend rejection; the default stays silent", async () => {
+    state.resendShouldFail = true;
+    state.resendError = "Rate limit exceeded";
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.useFakeTimers({ toFake: ["setTimeout"] });
+    try {
+      vi.resetModules();
+      const { notifyFounderGeneric } = await import("./email");
+
+      const silent = notifyFounderGeneric("Hi", "<p>x</p>");
+      await vi.advanceTimersByTimeAsync(2000);
+      await expect(silent).resolves.toBeUndefined();
+
+      const loud = notifyFounderGeneric("Hi", "<p>x</p>", { throwOnFailure: true });
+      const assertion = expect(loud).rejects.toThrow(/Send failed after 3 attempts: Rate limit exceeded/);
+      await vi.advanceTimersByTimeAsync(2000);
+      await assertion;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("D-04 the sender is read at send time: an env set after import is honoured", async () => {
     vi.stubEnv("PLATFORM_EMAIL", "");
     vi.stubEnv("PLATFORM_NAME", "Acme");

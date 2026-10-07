@@ -47,6 +47,10 @@ let founderNotifySkipWarned = false;
 const FOUNDER_NOTIFY_SKIPPED_REASON =
   "Founder email not sent: Resend or PLATFORM_EMAIL not configured";
 
+/** Same, for an ADMIN_EMAIL that is set but not a usable address. Never echoes the value. */
+const FOUNDER_NOTIFY_RECIPIENT_INVALID_REASON =
+  "Founder email not sent: ADMIN_EMAIL is not a valid address";
+
 /**
  * Cheap stable hash for user-agent strings, used to scope the
  * rate-limit bucket when the IP is "unknown" (no x-real-ip /
@@ -99,7 +103,7 @@ function captureFailure(
       }
       if (stage === "founder_notify_skipped") {
         Sentry.captureMessage(
-          "[for-quants-lead] Resend or PLATFORM_EMAIL is unset — founder email skipped",
+          "[for-quants-lead] Resend, PLATFORM_EMAIL or ADMIN_EMAIL is not usable — founder email skipped",
           {
             level: "error",
             tags: { route: "for-quants-lead", stage },
@@ -764,7 +768,7 @@ export async function POST(req: NextRequest) {
          </p>
          <p><strong>Message:</strong><br/>${escapeHtml(parsed.message)}</p>
          <p style="color:#666;font-size:12px;">Lead id: ${leadId}</p>`,
-          { throwOnSkip: true },
+          { throwOnSkip: true, throwOnFailure: true },
         );
       } else {
         await notifyFounderGeneric(
@@ -778,7 +782,7 @@ export async function POST(req: NextRequest) {
          </p>
          ${parsed.notes ? `<p><strong>Notes:</strong><br/>${escapeHtml(parsed.notes)}</p>` : ""}
          <p style="color:#666;font-size:12px;">Lead id: ${leadId}</p>`,
-          { throwOnSkip: true },
+          { throwOnSkip: true, throwOnFailure: true },
         );
       }
       // Clean send — pair the attempt timestamp with a success
@@ -813,7 +817,10 @@ export async function POST(req: NextRequest) {
       if (skipped) {
         if (!founderNotifySkipWarned) {
           founderNotifySkipWarned = true;
-          captureFailure(null, "founder_notify_skipped", { lead_id: leadId });
+          captureFailure(null, "founder_notify_skipped", {
+            lead_id: leadId,
+            reason: err.reason,
+          });
         }
       } else {
         captureFailure(err, "founder_notify", { lead_id: leadId });
@@ -823,7 +830,9 @@ export async function POST(req: NextRequest) {
       // without forcing operators into Sentry archaeology. Truncated
       // to 500 chars to keep the column from absorbing a huge stack.
       const sanitized = skipped
-        ? FOUNDER_NOTIFY_SKIPPED_REASON
+        ? err.reason === "recipient_invalid"
+          ? FOUNDER_NOTIFY_RECIPIENT_INVALID_REASON
+          : FOUNDER_NOTIFY_SKIPPED_REASON
         : (err instanceof Error ? err.message : String(err)).slice(0, 500);
       // @audit-skip: founder-CRM internal state marker on unauthenticated
       // lead row. See @audit-skip-anchor:lead-insert.
