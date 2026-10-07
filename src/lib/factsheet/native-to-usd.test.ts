@@ -56,10 +56,6 @@ function toBtc(c: OracleCase) {
   return { prices, dropped: c.dropped };
 }
 
-function casesNamed(prefix: string): OracleCase[] {
-  return ORACLE.cases.filter((c) => c.name.startsWith(prefix));
-}
-
 describe("convertNativeReturnsToUsd: the hand-computed oracle (D-18)", () => {
   it("the fixture is a real oracle: tolerance is tight and every case states its arithmetic", () => {
     expect(ORACLE.tolerance).toBeLessThanOrEqual(1e-12);
@@ -95,5 +91,82 @@ describe("convertNativeReturnsToUsd: the hand-computed oracle (D-18)", () => {
     expect(out[0].value).toBeCloseTo(0.21, 12);
     // The raw BTC return is a different number; a variant that blends it must not pass.
     expect(Math.abs(out[0].value - 0.1)).toBeGreaterThan(0.05);
+  });
+});
+
+describe("convertNativeReturnsToUsd: honesty, an unpriced day is absent and never invented", () => {
+  it("the fixture carries the honesty cases this suite relies on", () => {
+    const names = ORACLE.cases.map((c) => c.name);
+    for (const required of [
+      "missing_close_gap_drops_both_adjacent_days",
+      "dropped_close_is_never_bridged",
+      "days_after_last_close_are_absent",
+      "null_unit_returns_series_unchanged",
+      "unit_without_closes_returns_empty",
+      "empty_series_returns_empty",
+      "one_point_series_returns_empty",
+      "non_finite_input_day_is_absent",
+      "weekend_gap_with_missing_sunday_close_is_absent",
+    ]) {
+      expect(names, `fixture lacks ${required}`).toContain(required);
+    }
+  });
+
+  it("no output value is 0 unless the arithmetic gives 0 (a gap is never filled with 0)", () => {
+    for (const c of ORACLE.cases) {
+      const out = convertNativeReturnsToUsd(toSeries(c.series), c.unit, toBtc(c));
+      const expectedZero = new Set(c.expected.filter((e) => e.value === 0).map((e) => e.date));
+      for (const p of out) {
+        if (p.value === 0) expect(expectedZero.has(p.date), `${c.name}: ${p.date} is a fabricated 0`).toBe(true);
+      }
+    }
+  });
+
+  it("an Infinity input day is absent, like NaN", () => {
+    const out = convertNativeReturnsToUsd(
+      [
+        { date: "2026-02-02", value: 0 },
+        { date: "2026-02-03", value: Number.POSITIVE_INFINITY },
+        { date: "2026-02-04", value: 0.1 },
+      ],
+      "BTC",
+      {
+        prices: [
+          { date: "2026-02-02", close: 100 },
+          { date: "2026-02-03", close: 110 },
+          { date: "2026-02-04", close: 121 },
+        ],
+        dropped: [],
+      },
+    );
+    expect(out.map((p) => p.date)).toEqual(["2026-02-04"]);
+  });
+});
+
+describe("convertNativeReturnsToUsd: a USD row is untouched, no source means nothing", () => {
+  const series: DailyPoint[] = [
+    { date: "2026-02-02", value: 0.01 },
+    { date: "2026-02-03", value: -0.02 },
+  ];
+  const btc = {
+    prices: [
+      { date: "2026-02-02", close: 100 },
+      { date: "2026-02-03", close: 120 },
+    ],
+    dropped: [],
+  };
+
+  it("unit = null returns the SAME array reference, whatever btc holds", () => {
+    expect(convertNativeReturnsToUsd(series, null, btc)).toBe(series);
+    expect(convertNativeReturnsToUsd(series, null, null)).toBe(series);
+  });
+
+  it("a native unit with no price source returns [] (no price is invented)", () => {
+    expect(convertNativeReturnsToUsd(series, "BTC", null)).toEqual([]);
+  });
+
+  it("does not mutate its input", () => {
+    const frozen = Object.freeze(series.map((p) => Object.freeze({ ...p })));
+    expect(() => convertNativeReturnsToUsd(frozen, "BTC", btc)).not.toThrow();
   });
 });

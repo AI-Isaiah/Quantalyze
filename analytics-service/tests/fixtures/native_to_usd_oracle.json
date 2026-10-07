@@ -58,6 +58,118 @@
       ],
       "expected": [{ "date": "2026-01-05", "value": 0.4641 }],
       "arithmetic": "Fri 2026-01-02 to Mon 2026-01-05 covers three BTC days: 1.1 x 1.1 x 1.1 = 1.331 (133.1 / 100). r = 0.10. USD 1.1 x 1.331 - 1 = 1.4641 - 1 = 0.4641."
+    },
+    {
+      "name": "missing_close_gap_drops_both_adjacent_days",
+      "unit": "BTC",
+      "closes": { "2026-02-02": 100, "2026-02-03": 110, "2026-02-05": 121 },
+      "dropped": [],
+      "series": [
+        { "date": "2026-02-02", "value": 0.0 },
+        { "date": "2026-02-03", "value": 0.5 },
+        { "date": "2026-02-04", "value": 0.2 },
+        { "date": "2026-02-05", "value": 0.2 }
+      ],
+      "expected": [{ "date": "2026-02-03", "value": 0.65 }],
+      "arithmetic": "No close on 2026-02-04. Day 2026-02-03 is fully priced: 1.5 x (110 / 100) - 1 = 1.65 - 1 = 0.65. 2026-02-04 has no close, and 2026-02-05's interval starts at the missing close, so both are absent (never 0, never bridged)."
+    },
+    {
+      "name": "dropped_close_is_never_bridged",
+      "unit": "BTC",
+      "closes": { "2026-02-02": 100, "2026-02-04": 121, "2026-02-05": 133.1 },
+      "dropped": ["2026-02-03"],
+      "series": [
+        { "date": "2026-02-02", "value": 0.0 },
+        { "date": "2026-02-03", "value": 0.5 },
+        { "date": "2026-02-04", "value": 0.2 },
+        { "date": "2026-02-05", "value": 0.1 }
+      ],
+      "expected": [{ "date": "2026-02-05", "value": 0.21 }],
+      "arithmetic": "The 2026-02-03 close is corrupt (dropped). 2026-02-03 has no close; 2026-02-04's interval spans the dropped date and is not bridged. 2026-02-05: BTC 133.1 / 121 - 1 = 0.10, r = 0.10, so 1.1 x 1.1 - 1 = 0.21."
+    },
+    {
+      "name": "days_after_last_close_are_absent",
+      "unit": "BTC",
+      "closes": { "2026-02-02": 100, "2026-02-03": 110 },
+      "dropped": [],
+      "series": [
+        { "date": "2026-02-02", "value": 0.0 },
+        { "date": "2026-02-03", "value": 0.5 },
+        { "date": "2026-02-04", "value": 0.5 },
+        { "date": "2026-02-05", "value": 0.5 }
+      ],
+      "expected": [{ "date": "2026-02-03", "value": 0.65 }],
+      "arithmetic": "The last close is 2026-02-03: 1.5 x (110 / 100) - 1 = 0.65. Later days have no close, so they are absent, not carried forward."
+    },
+    {
+      "name": "null_unit_returns_series_unchanged",
+      "unit": null,
+      "closes": { "2026-02-02": 100, "2026-02-03": 110 },
+      "dropped": [],
+      "series": [
+        { "date": "2026-02-02", "value": 0.01 },
+        { "date": "2026-02-03", "value": -0.02 }
+      ],
+      "expected": [
+        { "date": "2026-02-02", "value": 0.01 },
+        { "date": "2026-02-03", "value": -0.02 }
+      ],
+      "arithmetic": "A USD row (unit null) is already USD: the series is returned as it came, day 0 included, whatever closes are supplied."
+    },
+    {
+      "name": "unit_without_closes_returns_empty",
+      "unit": "BTC",
+      "closes": null,
+      "dropped": [],
+      "series": [
+        { "date": "2026-02-02", "value": 0.01 },
+        { "date": "2026-02-03", "value": -0.02 }
+      ],
+      "expected": [],
+      "arithmetic": "A native unit with no price source cannot be converted; nothing is invented, so the output is empty."
+    },
+    {
+      "name": "empty_series_returns_empty",
+      "unit": "BTC",
+      "closes": { "2026-02-02": 100, "2026-02-03": 110 },
+      "dropped": [],
+      "series": [],
+      "expected": [],
+      "arithmetic": "No input days, no output days."
+    },
+    {
+      "name": "one_point_series_returns_empty",
+      "unit": "BTC",
+      "closes": { "2026-02-02": 100, "2026-02-03": 110 },
+      "dropped": [],
+      "series": [{ "date": "2026-02-03", "value": 0.5 }],
+      "expected": [],
+      "arithmetic": "Only day 0 exists, and day 0 has no prior priced USD value, so it yields no USD return."
+    },
+    {
+      "name": "non_finite_input_day_is_absent",
+      "unit": "BTC",
+      "closes": { "2026-02-02": 100, "2026-02-03": 110, "2026-02-04": 121 },
+      "dropped": [],
+      "series": [
+        { "date": "2026-02-02", "value": 0.0 },
+        { "date": "2026-02-03", "value": null },
+        { "date": "2026-02-04", "value": 0.5 }
+      ],
+      "expected": [{ "date": "2026-02-04", "value": 0.65 }],
+      "arithmetic": "2026-02-03's account return is non-finite, so that day is absent. 2026-02-04: BTC 121 / 110 - 1 = 0.10, so 1.5 x 1.1 - 1 = 0.65."
+    },
+    {
+      "name": "weekend_gap_with_missing_sunday_close_is_absent",
+      "unit": "BTC",
+      "closes": { "2026-01-02": 100, "2026-01-03": 110, "2026-01-05": 133.1 },
+      "dropped": [],
+      "series": [
+        { "date": "2026-01-02", "value": 0.0 },
+        { "date": "2026-01-05", "value": 0.1 }
+      ],
+      "expected": [],
+      "arithmetic": "Fri 2026-01-02 to Mon 2026-01-05 spans three BTC days but Sunday 2026-01-04 has no close. A seven-day calendar is not fully covered, so the interval is unpaired and the day is absent rather than priced from a bridged two-day move."
     }
   ]
 }
