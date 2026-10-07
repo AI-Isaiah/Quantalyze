@@ -6329,7 +6329,7 @@ async def test_mt5_backfill_non_finite_anchor_is_refused(
     deals, _expected = _mt5_canonical_ledger(today)
     transport = _FakeMt5Transport(
         account={"equity": float("nan"), "balance": float("nan"),
-                 "login": _MT5_SYNTHETIC_LOGIN},
+                 "currency": "USD", "login": _MT5_SYNTHETIC_LOGIN},
         deals=deals,
     )
     _session, fake_supabase = _mt5_failed_run(monkeypatch, transport)
@@ -6378,7 +6378,7 @@ async def test_mt5_backfill_negative_reconstructed_nav_is_refused(
     ]
     transport = _FakeMt5Transport(
         account={"equity": 1_000.0, "balance": 1_000.0,
-                 "login": _MT5_SYNTHETIC_LOGIN},
+                 "currency": "USD", "login": _MT5_SYNTHETIC_LOGIN},
         deals=deals,
     )
     _session, fake_supabase = _mt5_failed_run(monkeypatch, transport)
@@ -6405,7 +6405,8 @@ async def test_mt5_backfill_account_snapshot_missing_field_is_refused(
     today = datetime.now(timezone.utc).date()
     deals, _expected = _mt5_canonical_ledger(today)
     transport = _FakeMt5Transport(
-        account={"equity": _MT5_FIXTURE_BALANCE, "login": _MT5_SYNTHETIC_LOGIN},
+        account={"equity": _MT5_FIXTURE_BALANCE, "currency": "USD",
+                 "login": _MT5_SYNTHETIC_LOGIN},
         deals=deals,
     )
     _session, fake_supabase = _mt5_failed_run(monkeypatch, transport)
@@ -6415,6 +6416,113 @@ async def test_mt5_backfill_account_snapshot_missing_field_is_refused(
     assert result.outcome == DispatchOutcome.FAILED
     assert result.error_kind == "permanent"
     _assert_nothing_persisted(fake_supabase)
+
+
+# ---------------------------------------------------------------------------
+# Phase 164.6.6.2 plan 04 (D-13) — the backfill never builds a ``value_usd`` row from a
+# non-USD MT5 account.
+#
+# WHY: ``allocator_equity_snapshots.value_usd`` is an absolute DOLLAR balance, read by the
+# dashboard as a real figure. A BTC account's level is 0.11 BTC; ``_mt5_rows_from_levels``
+# would round it to 2 decimals and store ``0.11`` as eleven cents, with no exception and no
+# red test. The skip must therefore come BEFORE any row is built, and an unreadable currency
+# must retry (the terminal has not said what the account is) rather than guess USD.
+# ---------------------------------------------------------------------------
+
+
+def _mt5_scaled_canonical(today: date, scale: float) -> list[dict]:
+    deals, _levels = _mt5_canonical_ledger(today)
+    out: list[dict] = []
+    for d in deals:
+        row = dict(d)
+        for k in ("profit", "swap", "commission", "fee"):
+            row[k] = row[k] * scale
+        out.append(row)
+    return out
+
+
+async def _mt5_backfill_in_currency(monkeypatch, currency: object, *, scale: float = 1e-6):
+    monkeypatch.setenv("MT5_ENABLED", "true")
+    monkeypatch.setenv("MT5_SERVER_UTC_OFFSET_S", "0")
+    today = datetime.now(timezone.utc).date()
+    account = _mt5_account(
+        equity=_MT5_FIXTURE_BALANCE * scale, balance=_MT5_FIXTURE_BALANCE * scale
+    )
+    account["currency"] = currency
+    transport = _FakeMt5Transport(
+        account=account, deals=_mt5_scaled_canonical(today, scale)
+    )
+    session = _mt5_session(transport)
+    fake_supabase = FakeSupabaseClient()
+    _install_fake_preflight(monkeypatch, "mt5", fake_supabase, session)
+    audit_mock = _install_fake_audit(monkeypatch)
+    result = await run_reconstruct_allocator_history_job(_mt5_job())
+    return result, fake_supabase, audit_mock
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("currency", ["BTC", " btc ", "EUR", "ETH", "b!tc"])
+async def test_mt5_backfill_skips_a_non_usd_account_before_any_row_is_built(
+    monkeypatch, _mt5_terminal_state, currency,
+):
+    """D-13: a native, unsupported or malformed currency ends DONE as 'no data', with
+    nothing persisted. Equity 0.1105 would otherwise be stored as eleven cents."""
+    from services.job_worker import DispatchOutcome
+
+    result, fake_supabase, audit_mock = await _mt5_backfill_in_currency(
+        monkeypatch, currency
+    )
+    assert result.outcome == DispatchOutcome.DONE, (result.error_kind, result.error_message)
+    # The EXISTING no-data disposition: the sole-key replace RPC is called with ZERO rows
+    # (the database refuses an empty replace, so existing history is never purged), and no
+    # row of any value exists.
+    assert fake_supabase.rows_for("allocator_equity_snapshots") == []
+    assert all(p["p_rows"] == [] for _n, p in fake_supabase.rpc_calls), fake_supabase.rpc_calls
+    kinds = [c.kwargs["action"] for c in audit_mock.call_args_list]
+    assert kinds == [
+        "allocator.equity.reconstruct_started",
+        "allocator.equity.reconstruct_no_data",
+    ], kinds
+
+
+@pytest.mark.asyncio
+async def test_mt5_backfill_blank_currency_is_transient_with_its_own_message(
+    monkeypatch, _mt5_terminal_state,
+):
+    """D-01: an unreadable currency is a read fault, never a verdict. Retry; guess nothing."""
+    from services.equity_reconstruction import _MT5_BACKFILL_MESSAGES
+    from services.job_worker import DispatchOutcome
+
+    result, fake_supabase, audit_mock = await _mt5_backfill_in_currency(
+        monkeypatch, "", scale=1.0
+    )
+    assert result.outcome == DispatchOutcome.FAILED
+    assert result.error_kind == "transient"
+    assert result.error_message == _MT5_BACKFILL_MESSAGES["currency_unreadable"]
+    _assert_nothing_persisted(fake_supabase)
+    kinds = [c.kwargs["action"] for c in audit_mock.call_args_list]
+    assert kinds == [
+        "allocator.equity.reconstruct_started",
+        "allocator.equity.reconstruct_failed",
+    ], kinds
+
+
+@pytest.mark.asyncio
+async def test_mt5_backfill_still_reconstructs_a_usd_family_account(
+    monkeypatch, _mt5_terminal_state,
+):
+    """CONTROL: USDT is USD-family, so the skip above must not touch it. The dollar levels
+    land exactly as the tracer's hand oracle says."""
+    from services.job_worker import DispatchOutcome
+
+    result, fake_supabase, _audit = await _mt5_backfill_in_currency(
+        monkeypatch, "USDT", scale=1.0
+    )
+    assert result.outcome == DispatchOutcome.DONE
+    _deals, expected = _mt5_canonical_ledger(datetime.now(timezone.utc).date())
+    persisted = _persisted_by_asof(fake_supabase)
+    for iso, want in expected.items():
+        assert persisted[iso] == pytest.approx(want, abs=0.01)
 
 
 def test_no_mt5_backfill_message_is_classifier_matchable():

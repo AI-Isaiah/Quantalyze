@@ -2784,6 +2784,13 @@ _MT5_BACKFILL_MESSAGES: dict[str, str] = {
         "reconstruct_allocator_history: the MT5 deal history had not settled "
         "within its wait budget — retrying"
     ),
+    # 164.6.6.2 / D-01 — the terminal did not report the account's currency. A read
+    # fault, not a verdict on the account, so it retries and nothing is guessed (a
+    # guessed USD is exactly the bug this phase removes). Fixed text, no broker text.
+    "currency_unreadable": (
+        "reconstruct_allocator_history: the MT5 account currency was not readable "
+        "— retrying"
+    ),
     "account_snapshot": (
         "reconstruct_allocator_history: the MT5 balance snapshot was missing or "
         "non-numeric — refusing to reconstruct from it"
@@ -2854,6 +2861,10 @@ def _mt5_rows_from_levels(
 ) -> list[dict[str, Any]]:
     """Turn an MT5 NAV-LEVEL series into ``allocator_equity_snapshots`` rows,
     CLIPPED to ``[start_date, end_date]`` and DENSE across interior quiet days.
+
+    A native-unit account (a BTC MT5 account) never reaches this function:
+    ``_mt5_fetch_window`` skips it first (164.6.6.2 D-13); its USD view is Phase
+    164.6.6.2.1 (D-15).
 
     ⛔ ``value_usd`` is an ABSOLUTE DOLLAR BALANCE. ``nav`` MUST come from
     ``broker_dailies.reconstruct_mt5_nav_levels`` — the LEVELS sibling — never
@@ -2990,6 +3001,12 @@ async def _mt5_fetch_window(
     from services.mt5_deals import Mt5DealClassificationError
     from services.mt5_handover import SITE_BACKFILL
     from services.mt5_read import Mt5HistoryUnsettledError, read_mt5_deal_ledger
+    from services.account_unit import (
+        AccountCurrencyBlank,
+        AccountCurrencyMalformed,
+        AccountCurrencyUnsupported,
+        classify_account_currency,
+    )
     from services.mt5_validation import classify_mt5_login_error
     from services.nav_twr import NavReconstructionError
 
@@ -3230,6 +3247,47 @@ async def _mt5_fetch_window(
     # and holding the one shared terminal through it would needlessly serialize
     # work that needs no terminal.
     #
+    # ⭐ 164.6.6.2 / D-13 — the account's unit, from the PRE `account_info` the shared read
+    # just returned, decided BEFORE any equity is extracted or any row is built.
+    # `allocator_equity_snapshots.value_usd` is an absolute DOLLAR balance, so a BTC level of
+    # 0.11 must never reach `_mt5_rows_from_levels` (its 2-decimal rounding would store it as
+    # eleven cents and flatten the whole curve). A native, unsupported or malformed currency
+    # takes the EXISTING empty-window disposition (the caller's `count == 0 and not rows` ->
+    # `allocator.equity.reconstruct_no_data`, outcome DONE), so the dashboard shows no
+    # fabricated history and the reason it shows is the positions poll's own note. Blank is
+    # a read fault: TRANSIENT, nothing guessed (D-01). Logs carry the validated code or
+    # "unknown" and never an amount or the raw broker text (T-164.6.6.2-11).
+    try:
+        _unit = classify_account_currency(info.get("currency"))
+    except AccountCurrencyBlank:
+        logger.warning(
+            "reconstruct_allocator_history: mt5 account_info carried no currency "
+            "(allocator=%s key=%s) — classified transient, nothing persisted (D-01)",
+            allocator_id, api_key_id,
+        )
+        return _fail("currency_unreadable", "transient")
+    except AccountCurrencyMalformed:
+        logger.info(
+            "reconstruct_allocator_history: mt5 account currency is not a currency code "
+            "(allocator=%s key=%s code=unknown) — no USD history built (D-13)",
+            allocator_id, api_key_id,
+        )
+        return ([], False, _mt5_telemetry())
+    except AccountCurrencyUnsupported as _unsupported:
+        logger.info(
+            "reconstruct_allocator_history: mt5 account currency %s has no USD view "
+            "(allocator=%s key=%s) — no USD history built (D-13)",
+            _unsupported.code, allocator_id, api_key_id,
+        )
+        return ([], False, _mt5_telemetry())
+    if _unit.native:
+        logger.info(
+            "reconstruct_allocator_history: mt5 account is measured in %s "
+            "(allocator=%s key=%s) — no USD history built (D-13)",
+            _unit.code, allocator_id, api_key_id,
+        )
+        return ([], False, _mt5_telemetry())
+
     # ⭐ [Rule 2 — missing critical functionality] The equity/balance guards below
     # are NOT in the plan's `<behavior>` block. They are added because a NaN/Inf
     # anchor sails past every downstream NAV-denominator guard as a silent-NaN
