@@ -10,6 +10,12 @@ import {
 } from "@/lib/ratelimit";
 import { notifyFounderGeneric, escapeHtml } from "@/lib/email";
 import type { WizardStepKey } from "@/lib/wizard/localStorage";
+import {
+  CONTACT_SOURCES,
+  CONTACT_TOPICS,
+  CONTACT_TOPIC_LABELS,
+  CONTACT_REFERENCE_MAX,
+} from "@/lib/contact";
 
 /**
  * Once-per-process flag for the missing-FOUNDER_EMAIL warning. We only
@@ -81,7 +87,15 @@ function captureFailure(
 }
 
 /**
- * POST /api/for-quants-lead — public Request-a-Call endpoint.
+ * POST /api/for-quants-lead — public Request-a-Call and Contact endpoint.
+ *
+ * Two flows share this one validator and one store (Phase 164.6.6.3.5
+ * DOMAINONE, D-01/D-02): a body without `source` (or `source: "request_call"`)
+ * is a request-a-call; `source: "contact_form"` is a /contact message. Every
+ * 2xx answers `{ ok: true, status }` where `status` is `stored` (a row was
+ * written, or the honeypot dropped a bot — deliberately stored-shaped) or
+ * `duplicate` (request-a-call ONLY: an earlier request from this email is
+ * already on record today). Clients render success only on `stored`.
  *
  * Writes a lead to `for_quants_leads` via the service-role client and
  * emails the founder. Cannot reuse `/api/intro` — that route requires
@@ -201,31 +215,59 @@ const WIZARD_CONTEXT_SCHEMA = z
   .nullable()
   .optional();
 
-const LEAD_SCHEMA = z.object({
-  name: z
-    .string()
-    .trim()
-    .min(1, "Name is required")
-    .max(200, "Name is too long"),
+/**
+ * The route's field messages. Name and email are shared by both flows, and
+ * their required-empty sentences are the UI-SPEC's (the route stays the one
+ * validator; the inputs keep `required`, so a browser normally blocks an empty
+ * submit first).
+ */
+const NAME_FIELD = z
+  .string()
+  .trim()
+  .min(1, "Enter your name.")
+  .max(200, "Name is too long");
+
+const EMAIL_FIELD = z
+  .string()
+  .trim()
+  .min(1, "Enter your email address.")
+  .email("Enter a valid email")
+  .max(320, "Email is too long")
+  // Canonicalize to lowercase so the DB row, the idempotency token,
+  // AND the future PR-5 UNIQUE constraint all key on the same string.
+  // Pre-fix the row stored 'Jane@Acme.com' as-typed but the token
+  // hashed 'jane@acme.com', so two same-person retries with different
+  // casing produced the same token but two distinct rows. Per RFC 5321
+  // local-parts may be case-sensitive, but no real-world provider
+  // (Gmail, Outlook, ProtonMail, etc.) treats them as such. Red-team
+  // specialist regression.
+  .transform((v) => v.toLowerCase());
+
+/**
+ * H-0270 honeypot. A decoy field humans never see or fill —
+ * RequestCallModal renders it off-screen with `aria-hidden`,
+ * `tabIndex={-1}` and `autoComplete="off"`. Naive bots that auto-fill
+ * every input populate it. Accept ANY short string here (the field is
+ * stripped by Zod's default `.strip()` if absent from the schema, so
+ * it MUST be declared for `parsed.website` to survive) and bound it to
+ * the same 2KB cap as notes so it can't smuggle a large payload past
+ * the field-level limits. The post-parse check in POST drops a
+ * populated honeypot with a success-shaped 200 — a 400 here would
+ * teach the bot which field to skip. Cheap pre-Turnstile bot filter;
+ * the rotation-proof layer (Turnstile/hCaptcha) is deferred pending
+ * Cloudflare account + env wiring.
+ */
+const HONEYPOT_FIELD = z.string().max(2000).optional();
+
+/** The request-a-call flow — every rule and message it had before, bar the two required-empty sentences. */
+const CALL_SCHEMA = z.object({
+  name: NAME_FIELD,
   firm: z
     .string()
     .trim()
     .min(1, "Firm is required")
     .max(200, "Firm is too long"),
-  email: z
-    .string()
-    .trim()
-    .email("Enter a valid email")
-    .max(320, "Email is too long")
-    // Canonicalize to lowercase so the DB row, the idempotency token,
-    // AND the future PR-5 UNIQUE constraint all key on the same string.
-    // Pre-fix the row stored 'Jane@Acme.com' as-typed but the token
-    // hashed 'jane@acme.com', so two same-person retries with different
-    // casing produced the same token but two distinct rows. Per RFC 5321
-    // local-parts may be case-sensitive, but no real-world provider
-    // (Gmail, Outlook, ProtonMail, etc.) treats them as such. Red-team
-    // specialist regression.
-    .transform((v) => v.toLowerCase()),
+  email: EMAIL_FIELD,
   preferred_time: z
     .string()
     .trim()
@@ -238,21 +280,7 @@ const LEAD_SCHEMA = z.object({
     .max(2000, "Notes are too long")
     .optional()
     .or(z.literal("")),
-  /**
-   * H-0270 honeypot. A decoy field humans never see or fill —
-   * RequestCallModal renders it off-screen with `aria-hidden`,
-   * `tabIndex={-1}` and `autoComplete="off"`. Naive bots that auto-fill
-   * every input populate it. Accept ANY short string here (the field is
-   * stripped by Zod's default `.strip()` if absent from the schema, so
-   * it MUST be declared for `parsed.website` to survive) and bound it to
-   * the same 2KB cap as notes so it can't smuggle a large payload past
-   * the field-level limits. The post-parse check in POST drops a
-   * populated honeypot with a success-shaped 200 — a 400 here would
-   * teach the bot which field to skip. Cheap pre-Turnstile bot filter;
-   * the rotation-proof layer (Turnstile/hCaptcha) is deferred pending
-   * Cloudflare account + env wiring.
-   */
-  website: z.string().max(2000).optional(),
+  website: HONEYPOT_FIELD,
   /**
    * Optional wizard context payload — populated when the lead was
    * captured from inside /strategies/new/wizard. Stored on
@@ -261,6 +289,76 @@ const LEAD_SCHEMA = z.object({
    */
   wizard_context: WIZARD_CONTEXT_SCHEMA,
 });
+
+/**
+ * The /contact flow (D-02). `fieldErrors` keys are the field names the form
+ * draws (`message`, not `notes`); the message is stored in `notes`. Firm is
+ * optional here and stored `''` when absent (D-13: the column is NOT NULL).
+ */
+const CONTACT_SCHEMA = z.object({
+  topic: z.enum(CONTACT_TOPICS, { error: "Choose a topic." }),
+  name: NAME_FIELD,
+  email: EMAIL_FIELD,
+  firm: z.string().trim().max(200, "Firm is too long").optional(),
+  reference: z
+    .string()
+    .trim()
+    .max(CONTACT_REFERENCE_MAX, "Reference is too long")
+    .optional(),
+  message: z
+    .string()
+    .trim()
+    .min(1, "Enter a message.")
+    .max(2000, "Message is too long"),
+  website: HONEYPOT_FIELD,
+});
+
+/** Read first so the body picks its schema; absent means request-a-call. */
+const SOURCE_SCHEMA = z.object({
+  source: z.enum(CONTACT_SOURCES).default("request_call"),
+});
+
+/** The one shape the rest of the handler reads, whichever flow parsed. */
+type ParsedLead =
+  | {
+      source: "request_call";
+      name: string;
+      firm: string;
+      email: string;
+      website?: string;
+      preferred_time?: string;
+      notes?: string;
+      wizard_context?: z.infer<typeof WIZARD_CONTEXT_SCHEMA>;
+    }
+  | {
+      source: "contact_form";
+      name: string;
+      firm: string;
+      email: string;
+      website?: string;
+      topic: (typeof CONTACT_TOPICS)[number];
+      reference: string;
+      message: string;
+    };
+
+function parseLead(body: unknown): ParsedLead {
+  const { source } = SOURCE_SCHEMA.parse(body);
+  if (source === "contact_form") {
+    const c = CONTACT_SCHEMA.parse(body);
+    return {
+      source,
+      name: c.name,
+      firm: c.firm ?? "",
+      email: c.email,
+      website: c.website,
+      topic: c.topic,
+      reference: c.reference ?? "",
+      message: c.message,
+    };
+  }
+  const r = CALL_SCHEMA.parse(body);
+  return { source, ...r };
+}
 
 export async function POST(req: NextRequest) {
   // Layer 1: CSRF (bot filter, not a real CSRF defense for unauth POST)
@@ -290,7 +388,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json(
       {
         error:
-          "Too many requests. Try again in a few minutes, or email security@quantalyze.com directly.",
+          "Too many requests. Try again in a few minutes.",
       },
       {
         status: 429,
@@ -314,7 +412,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json(
         {
           error:
-            "Too many requests. Try again in a few minutes, or email security@quantalyze.com directly.",
+            "Too many requests. Try again in a few minutes.",
         },
         {
           status: 429,
@@ -333,7 +431,7 @@ export async function POST(req: NextRequest) {
   // serverless and 100MB streaming — both far above what this route
   // ever needs. G9.B.12.
   const MAX_BODY_BYTES = 8192;
-  let parsed: z.infer<typeof LEAD_SCHEMA>;
+  let parsed: ParsedLead;
   try {
     const contentLength = req.headers.get("content-length");
     if (contentLength) {
@@ -353,7 +451,7 @@ export async function POST(req: NextRequest) {
       );
     }
     const body = rawBody.length === 0 ? {} : JSON.parse(rawBody);
-    parsed = LEAD_SCHEMA.parse(body);
+    parsed = parseLead(body);
   } catch (err) {
     if (err instanceof z.ZodError) {
       // Flatten to a `field -> message[]` map so the client can show
@@ -413,7 +511,10 @@ export async function POST(req: NextRequest) {
       "[for-quants-lead] honeypot field populated — dropping lead silently",
       { email: parsed.email, ip, ua: req.headers.get("user-agent") },
     );
-    return NextResponse.json({ ok: true });
+    // Deliberately `stored`-shaped (UI-SPEC "Success means stored" rule 5): a
+    // bot must not be able to tell it was dropped. The only `stored` that
+    // wrote no row.
+    return NextResponse.json({ ok: true, status: "stored" });
   }
 
   // Layer 4: service-role insert. Sanitize source_ip to a real INET value
@@ -426,7 +527,7 @@ export async function POST(req: NextRequest) {
     console.error("[for-quants-lead] admin client init failed:", err);
     captureFailure(err, "admin_init");
     return NextResponse.json(
-      { error: "Service unavailable. Email security@quantalyze.com directly." },
+      { error: "Service unavailable. Try again in a few minutes." },
       { status: 503 },
     );
   }
@@ -437,16 +538,41 @@ export async function POST(req: NextRequest) {
   // path stay green even on a hypothetical fresh DB where 031 hasn't
   // applied yet, instead of 500ing every lead with
   // `column "wizard_context" does not exist`. See G9.B.5.
-  const insertPayload: Record<string, unknown> = {
-    name: parsed.name,
-    firm: parsed.firm,
-    email: parsed.email,
-    preferred_time: parsed.preferred_time || null,
-    notes: parsed.notes || null,
-    source_ip: sanitizeInetForDb(ip),
-    user_agent: req.headers.get("user-agent"),
-  };
-  if (parsed.wizard_context) {
+  const insertPayload: Record<string, unknown> =
+    parsed.source === "contact_form"
+      ? {
+          name: parsed.name,
+          // D-13: `firm` is NOT NULL, so an absent firm is stored ''.
+          firm: parsed.firm,
+          email: parsed.email,
+          preferred_time: null,
+          notes: parsed.message,
+          // Only this branch names the three new columns. See the deploy-window
+          // note below for why the request-a-call payload carries none of them.
+          source: parsed.source,
+          topic: parsed.topic,
+          reference: parsed.reference || null,
+          source_ip: sanitizeInetForDb(ip),
+          user_agent: req.headers.get("user-agent"),
+        }
+      : {
+          name: parsed.name,
+          firm: parsed.firm,
+          email: parsed.email,
+          preferred_time: parsed.preferred_time || null,
+          notes: parsed.notes || null,
+          source_ip: sanitizeInetForDb(ip),
+          user_agent: req.headers.get("user-agent"),
+        };
+  // Deploy window: Vercel can serve this route before supabase-migrate has
+  // applied migration 20261008120000 to PROD. In that window a request-a-call
+  // insert that NAMED `source` would fail on the missing column, while one that
+  // omits it keeps working and takes the column DEFAULT 'request_call' once the
+  // column exists. So the request-a-call payload above carries no `source`,
+  // `topic` or `reference` key. A contact message does name them and so fails
+  // in that short window; that is accepted. Do not "tidy" `source` onto the
+  // shared payload.
+  if (parsed.source === "request_call" && parsed.wizard_context) {
     insertPayload.wizard_context = parsed.wizard_context;
   }
 
@@ -471,8 +597,19 @@ export async function POST(req: NextRequest) {
   // today" — return the SAME idempotent success the original POST returned, and
   // fall through BEFORE the after() block so we do NOT fire a second founder
   // email for the duplicate. Distinct days still insert normally.
+  //
+  // `duplicate` is answered ONLY for request-a-call. A contact message is never
+  // deduplicated (the index is partial, WHERE source = 'request_call'), so a
+  // 23505 on one can only mean that index regressed: it falls to the 500 branch
+  // below rather than telling the sender a message that was NOT stored was.
+  if (insertErr?.code === "23505" && parsed.source === "request_call") {
+    return NextResponse.json({ ok: true, status: "duplicate" });
+  }
   if (insertErr?.code === "23505") {
-    return NextResponse.json({ ok: true });
+    console.error(
+      "[for-quants-lead] 23505 on a contact_form insert: for_quants_leads_email_day_uniq is no longer scoped to request_call rows",
+      insertErr,
+    );
   }
 
   if (insertErr || !inserted) {
@@ -482,8 +619,7 @@ export async function POST(req: NextRequest) {
     });
     return NextResponse.json(
       {
-        error:
-          "Something went wrong. Email security@quantalyze.com directly.",
+        error: "Something went wrong. Try again in a minute.",
       },
       { status: 500 },
     );
@@ -581,9 +717,25 @@ export async function POST(req: NextRequest) {
     }
 
     try {
-      await notifyFounderGeneric(
-        `Request a Call: ${parsed.name} at ${parsed.firm}`,
-        `<p>A new /for-quants Request a Call lead was submitted.</p>
+      if (parsed.source === "contact_form") {
+        const topicLabel = CONTACT_TOPIC_LABELS[parsed.topic];
+        await notifyFounderGeneric(
+          `Contact form (${topicLabel}): ${parsed.name}`,
+          `<p>A new /contact form message was submitted.</p>
+         <p>
+           <strong>Topic:</strong> ${escapeHtml(topicLabel)}<br/>
+           <strong>Name:</strong> ${escapeHtml(parsed.name)}<br/>
+           ${parsed.firm ? `<strong>Firm:</strong> ${escapeHtml(parsed.firm)}<br/>` : ""}
+           <strong>Email:</strong> ${escapeHtml(parsed.email)}<br/>
+           ${parsed.reference ? `<strong>Reference:</strong> ${escapeHtml(parsed.reference)}<br/>` : ""}
+         </p>
+         <p><strong>Message:</strong><br/>${escapeHtml(parsed.message)}</p>
+         <p style="color:#666;font-size:12px;">Lead id: ${leadId}</p>`,
+        );
+      } else {
+        await notifyFounderGeneric(
+          `Request a Call: ${parsed.name} at ${parsed.firm}`,
+          `<p>A new /for-quants Request a Call lead was submitted.</p>
          <p>
            <strong>Name:</strong> ${escapeHtml(parsed.name)}<br/>
            <strong>Firm:</strong> ${escapeHtml(parsed.firm)}<br/>
@@ -592,7 +744,8 @@ export async function POST(req: NextRequest) {
          </p>
          ${parsed.notes ? `<p><strong>Notes:</strong><br/>${escapeHtml(parsed.notes)}</p>` : ""}
          <p style="color:#666;font-size:12px;">Lead id: ${leadId}</p>`,
-      );
+        );
+      }
       // Clean send — pair the attempt timestamp with a success
       // timestamp so the CRM's "stuck pending notify" predicate
       // (attempted IS NOT NULL AND succeeded IS NULL) flips false.
@@ -664,5 +817,5 @@ export async function POST(req: NextRequest) {
   // only failure mode where idempotency matters. Drop the token from
   // the response now; PR-5 will re-add it alongside the UNIQUE
   // constraint that ACTUALLY enforces dedup.
-  return NextResponse.json({ ok: true });
+  return NextResponse.json({ ok: true, status: "stored" });
 }
