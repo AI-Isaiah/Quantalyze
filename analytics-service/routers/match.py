@@ -73,6 +73,7 @@ from services.match_eval import (
 )
 from services.native_to_usd import UsdSeriesConverter, native_units_by_id
 from services.rate_limit import limiter, tenant_or_platform_key
+from services.wealth_returns import daily_returns_from_row
 
 router = APIRouter(prefix="/api/match", tags=["match"])
 logger = logging.getLogger("quantalyze.analytics")
@@ -247,47 +248,6 @@ class RecomputeRequest(BaseModel):
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-
-def _records_to_series(raw: list[Any] | None, name: str = "") -> pd.Series | None:
-    """Convert [{date, value}, ...] JSONB records to a DatetimeIndex pd.Series.
-
-    M-0604: ``returns_series`` is JSONB written by the analytics worker. A
-    single record missing ``date`` or ``value`` (legacy schema, partial
-    backfill, manual SQL fixup) must NOT crash the whole batch — the unguarded
-    ``r["date"]`` comprehension used to raise KeyError, propagate through
-    ``_load_candidate_universe`` / ``_load_allocator_context`` →
-    ``_score_one_allocator`` → ``recompute()`` and 500 the entire cron for
-    every allocator that touched the offending strategy. Skip malformed records
-    with a WARNING and continue; return None (treat as missing-returns, which
-    the engine handles via _compute_portfolio_fit_components) when no usable
-    record survives.
-    """
-    if not isinstance(raw, list) or not raw:
-        return None
-    dates: list[Any] = []
-    vals: list[Any] = []
-    dropped = 0
-    for r in raw:
-        if not isinstance(r, dict):
-            dropped += 1
-            continue
-        d = r.get("date")
-        v = r.get("value")
-        if d is None or v is None:
-            dropped += 1
-            continue
-        dates.append(d)
-        vals.append(v)
-    if dropped:
-        logger.warning(
-            "match: _records_to_series dropped %d/%d malformed record(s) for %s "
-            "(missing 'date'/'value' or non-dict)",
-            dropped, len(raw), name or "<unnamed>",
-        )
-    if not dates:
-        return None
-    return pd.Series(vals, index=pd.DatetimeIndex(dates), name=name)
 
 
 def _parse_supabase_ts(raw: str) -> datetime:
@@ -484,7 +444,14 @@ def _load_candidate_universe(demo_only: bool = False) -> dict[str, Any]:
             # so a BTC strategy's `native_unit` is read beside the series it
             # describes. It is consumed by `_score_one_allocator`, which converts
             # to USD before the engine weights anything.
-            .select("strategy_id, returns_series, sharpe, max_drawdown, data_quality_flags")
+            # 164.6.6.2.2 (D-01, D-02): `returns_series` is the cumulative wealth
+            # CURVE, so the candidate's daily returns come from `daily_returns`
+            # when stored and are otherwise derived from the curve, never read
+            # as returns.
+            .select(
+                "strategy_id, returns_series, daily_returns, sharpe, max_drawdown, "
+                "data_quality_flags"
+            )
             .in_("strategy_id", _chunk)
         ),
         strategy_ids,
@@ -584,9 +551,9 @@ def _load_candidate_universe(demo_only: bool = False) -> dict[str, Any]:
             "is_example": bool(strategy.get("is_example")),
         }
 
-        returns_series = _records_to_series(analytics.get("returns_series"), name=sid)
-        if returns_series is not None:
-            returns_by_id[sid] = returns_series
+        daily_returns = daily_returns_from_row(analytics, name=sid)
+        if daily_returns is not None:
+            returns_by_id[sid] = daily_returns
 
     return {
         "strategies_by_id": strategies_by_id,
@@ -825,7 +792,11 @@ def _load_allocator_context(allocator_id: str) -> dict[str, Any]:
             _sa = chunked_in_query(
                 lambda _chunk: (
                     supabase.table("strategy_analytics")
-                    .select("strategy_id, returns_series, data_quality_flags")
+                    # 164.6.6.2.2 (D-01, D-02): `returns_series` is the cumulative
+                    # wealth CURVE, not daily returns, so the book is built through
+                    # `daily_returns_from_row`, which prefers the stored
+                    # `daily_returns` and otherwise derives them from the curve.
+                    .select("strategy_id, returns_series, daily_returns, data_quality_flags")
                     .in_("strategy_id", _chunk)
                 ),
                 strategy_ids,
@@ -858,7 +829,7 @@ def _load_allocator_context(allocator_id: str) -> dict[str, Any]:
                     # this path is for user-created portfolios with partial data.
                     portfolio_weights[sid] = float(row.get("current_weight") or 1.0)
                     sa = analytics_by_sid.get(sid, {})
-                    returns = _records_to_series(sa.get("returns_series"), name=sid)
+                    returns = daily_returns_from_row(sa, name=sid)
                     if returns is not None:
                         portfolio_returns[sid] = returns
                     allocated = row.get("allocated_amount")
