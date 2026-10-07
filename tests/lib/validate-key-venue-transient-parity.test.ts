@@ -154,6 +154,14 @@ const EXPECTED: Readonly<
     wireRecoverable: false,
     envelopeRecoverable: false,
   },
+  // 164.6.6.3 plan 05 (STATUS_CONTRACT S-29) — the known-server pre-check's
+  // 424, case C8. Both `recoverable` columns AGREE (`clear_and_retry` is in
+  // `RECOVERABLE_ACTIONS`), so it is not a second permitted divergence.
+  MT5_SERVER_UNKNOWN: {
+    wizardCode: "KEY_MT5_SERVER_UNKNOWN",
+    wireRecoverable: true,
+    envelopeRecoverable: true,
+  },
   // Correct BY CONSTRUCTION: the contract's own control for a code the table
   // has never seen. It must reach UNKNOWN through the surviving cascade, not
   // through a short-circuit above it.
@@ -200,9 +208,13 @@ const DIVERGENT_WIRE_CODE = "AUTH_FAILED";
  * `recoverable: true`, so only `TOTAL_CASES` moved (14 → 15). Its code already
  * had a row, so `DISTINCT_WIRE_CODES` did not move, and it is recoverable, so
  * neither non-recoverable count moved either.
+ *
+ * ⚠️ 164.6.6.3 plan 05 added ONE case at a NEW site C8, `mt5_server_unknown`,
+ * with a NEW recoverable code `MT5_SERVER_UNKNOWN`: `TOTAL_CASES` 15 → 16 and
+ * `DISTINCT_WIRE_CODES` 8 → 9. Both non-recoverable counts did not move.
  */
-const TOTAL_CASES = 15;
-const DISTINCT_WIRE_CODES = 8;
+const TOTAL_CASES = 16;
+const DISTINCT_WIRE_CODES = 9;
 const NON_RECOVERABLE_WIRE_CASES = 3;
 const NON_RECOVERABLE_WIRE_CODES = 2;
 

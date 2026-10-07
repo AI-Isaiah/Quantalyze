@@ -51,6 +51,8 @@ Phase 164.6.6.3 fixes the MT5 defects the 2026-10-03 production UAT pass found.
   `before_send`, because a mock cannot tell a scoped tag from an unscoped one.
 - Frontend: `wizardErrors`, `MultiKeyConnectStep`, `UpdateMt5SecretDialog` and the two invariant
   tests cover the new code. The 424 is in the wire contract and the raw-5xx census.
+- `tests/lib/validate-key-venue-transient-parity.test.ts` carries the new C8 case: a hand-typed
+  roster row for `MT5_SERVER_UNKNOWN` (both `recoverable` columns true), cases 15 → 16, codes 8 → 9.
 - Review: two rounds. Round 1 found CR-01, WR-01, WR-02, WR-03 and SFH-M1, all fixed with tests
   that failed against the old code first. Round 2 (code reviewer and silent-failure pass) was
   clean. Security audit: 29 threats, 0 open.
