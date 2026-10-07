@@ -1837,3 +1837,107 @@ async def test_the_abandoned_derive_error_message_carries_no_classifier_token(
         "classify_mt5_login_error, a working key gets blamed for our own "
         "abandoned thread (D-42)"
     )
+
+
+# ---------------------------------------------------------------------------
+# 164.6.6.2 / plan 03 — the account's own unit (D-01, D-02, D-08, D-14, D-20).
+# ---------------------------------------------------------------------------
+_BTC_SCALE = 1e-6
+
+
+def _scaled_deals(scale: float) -> list[dict]:
+    """The canonical deal ledger with every money field multiplied by ``scale`` (times
+    are untouched), so a BTC account whose ledger is the USD canonical one in a unit a
+    million times smaller has the SAME return series."""
+    out: list[dict] = []
+    for d in _canonical_deals():
+        row = dict(d)
+        for k in ("profit", "swap", "commission", "fee"):
+            row[k] = row[k] * scale
+        out.append(row)
+    return out
+
+
+def _btc_account(currency: str = "BTC") -> dict:
+    # Canonical anchor 110_500 scaled by 1e-6: initial NAV 0.1 BTC, terminal 0.1105,
+    # every NAV above the 0.001 BTC dust floor and far below the 1000 USD one.
+    return {
+        "equity": 0.1105,
+        "balance": 0.1105,
+        "currency": currency,
+        "login": 123456,
+    }
+
+
+def _api_key_updates(capture: dict) -> list[dict]:
+    return [p for (name, p) in capture["updates"] if name == "api_keys"]
+
+
+@pytest.mark.asyncio
+async def test_btc_account_derives_a_native_series_end_to_end(monkeypatch) -> None:
+    """THE tracer (D-01, D-02, D-08, D-14, D-20). An MT5 account whose PRE
+    ``account_info`` says BTC is judged against BTC floors, not the 1000 USD dust NAV
+    that read every day of a 0.1 BTC account as dust. Hand literals are the canonical
+    USD ones (the ledger is that ledger times 1e-6): 400/100_000 etc. are RATIOS, so
+    they survive the change of unit exactly.
+
+    Also pins the persisted unit: ONE service-role ``api_keys`` UPDATE that stores the
+    code and the native balance AND nulls ``account_balance_usdt`` in the same
+    statement (the sync arm may have written BTC there before this phase), and the
+    ``native_unit`` flag in the pre-stamp, which is a flag and never a dust guard."""
+    monkeypatch.setenv("MT5_ENABLED", "true")
+    transport = _FakeMt5Transport(
+        account=_btc_account(), deals=_scaled_deals(_BTC_SCALE)
+    )
+    ctx, capture = _build_ctx(transport, asset_class="traditional")
+    with _apply(_patches(ctx)):
+        result = await run_derive_broker_dailies_job(_job())
+
+    assert result.outcome == DispatchOutcome.DONE, (
+        f"kind={result.error_kind!r} msg={result.error_message!r}"
+    )
+    rows = _csv_rows(capture)
+    assert rows["2025-06-02"] == pytest.approx(400 / 100_000, abs=1e-12)
+    assert rows["2025-06-03"] == pytest.approx(0.0, abs=1e-12)
+    assert rows["2025-06-04"] == pytest.approx(300 / 100_400, abs=1e-12)
+    assert rows["2025-06-05"] == pytest.approx(-200 / 110_700, abs=1e-12)
+
+    flags = _dq_flags(capture)
+    assert flags.get("native_unit") == "BTC"
+    assert "dust_nav_guard" not in flags, (
+        "a 0.1 BTC account is not dust; the guard fired against a USD-sized floor"
+    )
+    assert _api_key_updates(capture) == [
+        {
+            "account_currency": "BTC",
+            "account_balance_native": 0.1105,
+            "account_balance_usdt": None,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_usd_account_derives_as_before_and_writes_only_its_code(
+    monkeypatch,
+) -> None:
+    """D-04: a USD-family account is byte-identical to today. Its ``api_keys`` UPDATE
+    carries the code alone, so the sync arm's ``account_balance_usdt`` is never touched
+    and no native balance is invented; no ``native_unit`` flag is stamped."""
+    monkeypatch.setenv("MT5_ENABLED", "true")
+    transport = _FakeMt5Transport(
+        account={
+            "equity": 110_500.0, "balance": 110_500.0, "currency": "USD",
+            "login": 123456,
+        },
+        deals=_canonical_deals(),
+    )
+    ctx, capture = _build_ctx(transport, asset_class="traditional")
+    with _apply(_patches(ctx)):
+        result = await run_derive_broker_dailies_job(_job())
+
+    assert result.outcome == DispatchOutcome.DONE
+    rows = _csv_rows(capture)
+    assert rows["2025-06-02"] == pytest.approx(400 / 100_000, abs=1e-12)
+    assert rows["2025-06-05"] == pytest.approx(-200 / 110_700, abs=1e-12)
+    assert "native_unit" not in _dq_flags(capture)
+    assert _api_key_updates(capture) == [{"account_currency": "USD"}]
