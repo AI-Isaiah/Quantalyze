@@ -10,7 +10,6 @@
 -- re-grants it, or that creates a table under a default that grants it, goes RED
 -- here instead of shipping.
 --
--- TRACER SLICE: only arm TRUNC 1 is present in this commit; the remaining arms follow.
 -- THE SIX ARMS, and why each needs the others:
 --   TRUNC 1  catalogue sweep: no public relation of kind r, p, v, m or f lets anon
 --            or authenticated TRUNCATE (has_table_privilege, so PUBLIC grants and
@@ -114,7 +113,87 @@ BEGIN
     RAISE EXCEPTION 'TEST FAILED (TRUNC 1): anon or authenticated can still TRUNCATE public relation(s) (relation/role): %. Row security never evaluates TRUNCATE, so any holder can empty the table whatever its policies say. Fix it at the grant layer: REVOKE TRUNCATE ... FROM anon, authenticated; if the REVOKE printed nothing and changed nothing, the grantor is another role, so find it with aclexplode(relacl) and re-run the REVOKE under SET ROLE <grantor>.', v_held;
   END IF;
 
-  RAISE NOTICE 'TRUNCATE grants OK: no public relation lets anon or authenticated TRUNCATE (TRUNC 1; tracer slice, arms TRUNC 2 to 6 follow).';
+  -- ----- probe: a table postgres creates AFTER the migration ---------------
+  -- Created after TRUNC 1 on purpose: a default-privilege twin changes what NEW
+  -- tables inherit and is not retroactive, so it must not trip the sweep above.
+  CREATE TABLE public.truncate_revoke_probe_16497 (id INTEGER);
+  p_anon_t := has_table_privilege('anon', 'public.truncate_revoke_probe_16497'::regclass, 'TRUNCATE');
+  p_auth_t := has_table_privilege('authenticated', 'public.truncate_revoke_probe_16497'::regclass, 'TRUNCATE');
+  p_sr_t   := has_table_privilege('service_role', 'public.truncate_revoke_probe_16497'::regclass, 'TRUNCATE');
+  p_anon_s := has_table_privilege('anon', 'public.truncate_revoke_probe_16497'::regclass, 'SELECT');
+  p_auth_s := has_table_privilege('authenticated', 'public.truncate_revoke_probe_16497'::regclass, 'SELECT');
+
+  -- ===== ARM TRUNC 2 — a new table grants the client roles no TRUNCATE ====
+  -- RED-UNDER: hand the privilege back through the DEFAULT, not through a table —
+  --            `ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public GRANT
+  --            TRUNCATE ON TABLES TO authenticated`. That is the regression
+  --            where a later migration or a platform change restores the
+  --            bootstrap default, and every future table is born holding it.
+  -- RED-UNDER-M: {"arm":"TRUNC 2","apply":[{"kind":"sql","stmt":"ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public GRANT TRUNCATE ON TABLES TO authenticated"}]}
+  IF p_anon_t OR p_auth_t THEN
+    RAISE EXCEPTION 'TEST FAILED (TRUNC 2): a table postgres created in public after the migration grants TRUNCATE to anon=% authenticated=%. The postgres default privilege for tables still carries the verb, so every table a future migration creates will be born with it and the existing-table sweep (TRUNC 1) will only catch it after the fact.', p_anon_t, p_auth_t;
+  END IF;
+
+  -- ===== ARM TRUNC 3 — a new table still grants service_role TRUNCATE =====
+  -- RED-UNDER: remove the verb from the default for the role that must keep it —
+  --            `ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public
+  --            REVOKE TRUNCATE ON TABLES FROM service_role` — the realistic
+  --            over-broad edit of the migration's own default-privilege line.
+  -- RED-UNDER-M: {"arm":"TRUNC 3","apply":[{"kind":"sql","stmt":"ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public REVOKE TRUNCATE ON TABLES FROM service_role"}]}
+  IF NOT p_sr_t THEN
+    RAISE EXCEPTION 'TEST FAILED (TRUNC 3): a table postgres created in public after the migration does NOT grant TRUNCATE to service_role. The default-privilege change removed the verb from a role that must keep it; the service path (maintenance and reset jobs) loses it on every new table. D-01 removes TRUNCATE from anon and authenticated and from nobody else.';
+  END IF;
+
+  -- ===== ARM TRUNC 4 — a new table still grants the client roles SELECT ===
+  -- RED-UNDER: remove a DIFFERENT verb from the default —
+  --            `ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public
+  --            REVOKE SELECT ON TABLES FROM authenticated`. This is "the REVOKE
+  --            went too far": TRUNC 2 stays green, because a table nobody can
+  --            use also holds no TRUNCATE.
+  -- RED-UNDER-M: {"arm":"TRUNC 4","apply":[{"kind":"sql","stmt":"ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public REVOKE SELECT ON TABLES FROM authenticated"}]}
+  IF NOT (p_anon_s AND p_auth_s) THEN
+    RAISE EXCEPTION 'TEST FAILED (TRUNC 4): a table postgres created in public after the migration does not grant SELECT to anon=% authenticated=%. The default-privilege change removed more than the one verb it was meant to remove, so TRUNC 2 above would read "no TRUNCATE" off a table nobody can use.', p_anon_s, p_auth_s;
+  END IF;
+
+  -- ===== ARM TRUNC 5 — service_role keeps TRUNCATE on an existing table ===
+  v_sr_cron := has_table_privilege('service_role', 'public.cron_runs'::regclass, 'TRUNCATE');
+  -- RED-UNDER: take the verb from service_role on the existing table —
+  --            `REVOKE TRUNCATE ON public.cron_runs FROM service_role` — the
+  --            shape of a REVOKE widened to a role it was not written for.
+  -- RED-UNDER-M: {"arm":"TRUNC 5","apply":[{"kind":"sql","stmt":"REVOKE TRUNCATE ON public.cron_runs FROM service_role"}]}
+  IF NOT v_sr_cron THEN
+    RAISE EXCEPTION 'TEST FAILED (TRUNC 5): service_role no longer holds TRUNCATE on public.cron_runs. The revoke is meant to remove the verb from anon and authenticated only; the migration''s own holder-count check should have refused this apply.';
+  END IF;
+
+  -- ===== ARM TRUNC 6 — the grant layer refuses an authenticated TRUNCATE ===
+  -- ⛔ The handler records state and the SQLSTATE and nothing else. The assertion
+  -- is read AFTER RESET ROLE: probing inside an exception handler is lint rule
+  -- R1, and a probe that runs as the denied role measures the wrong thing.
+  SET LOCAL ROLE authenticated;
+  v_state := NULL;
+  v_sqlstate := NULL;
+  v_msg := NULL;
+  BEGIN
+    TRUNCATE public.cron_runs;
+  EXCEPTION WHEN OTHERS THEN
+    v_state := 'denied';
+    v_sqlstate := SQLSTATE;
+    v_msg := SQLERRM;
+  END;
+  RESET ROLE;
+
+  -- RED-UNDER: hand the verb back on the live lane —
+  --            `GRANT TRUNCATE ON public.cron_runs TO authenticated`. TRUNC 1
+  --            fires first on that grant, so this arm is observed with TRUNC 1
+  --            neutered (GRAMMAR Shape 2): the statement then SUCCEEDS and the
+  --            behavioural arm is what names it, which is what proves the
+  --            catalogue sweep and the real statement agree.
+  -- RED-UNDER-M: {"arm":"TRUNC 6","apply":[{"kind":"sql","stmt":"GRANT TRUNCATE ON public.cron_runs TO authenticated"}],"neuter":[{"arm":"TRUNC 1"}]}
+  IF v_state IS DISTINCT FROM 'denied' OR v_sqlstate IS DISTINCT FROM '42501' OR v_msg NOT LIKE '%permission denied for table cron_runs%' THEN
+    RAISE EXCEPTION 'TEST FAILED (TRUNC 6): an authenticated user''s TRUNCATE of public.cron_runs was % (SQLSTATE %, message %), expected a 42501 refusal naming the table. Row security was never consulted and could not have been: TRUNCATE is refused or allowed at the grant layer alone, so this is the statement an injected query or a pooled session running as the client role would issue.', COALESCE(v_state, 'permitted'), COALESCE(v_sqlstate, 'none'), COALESCE(v_msg, 'none');
+  END IF;
+
+  RAISE NOTICE 'TRUNCATE grants OK: no public relation lets anon or authenticated TRUNCATE (TRUNC 1), a new postgres-created table grants them none (TRUNC 2) while service_role keeps it (TRUNC 3) and the client roles keep SELECT (TRUNC 4), service_role still holds it on cron_runs (TRUNC 5), and authenticated is refused 42501 (TRUNC 6).';
 END $$;
 
 ROLLBACK;
