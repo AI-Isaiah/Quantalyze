@@ -1053,6 +1053,31 @@ describe("[94.1 F3/F4] MultiKeyConnectStep — rehydration status + draft protec
     });
   });
 
+  it("[DOMAINONE D-02] the members-load envelope's contact pointer carries the draft id", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input: RequestInfo | URL) => {
+      if (String(input).includes("composite/members")) {
+        return jsonResponse({}, 500);
+      }
+      return jsonResponse({}, 200);
+    });
+
+    render(
+      <MultiKeyConnectStep
+        wizardSessionId={SESSION}
+        onSuccess={vi.fn()}
+        draftStrategyId={STRATEGY_ID}
+      />,
+    );
+
+    const err = await screen.findByTestId("rehydrate-error");
+    // The pointer must have rendered, or the draft assertion below is vacuous.
+    const link = within(err).getByRole("link", { name: /contact form/ });
+    const href = link.getAttribute("href") ?? "";
+    expect(href).toMatch(/^\/contact\?topic=support&ref=/);
+    expect(href).toContain(`&draft=${STRATEGY_ID}`);
+    expect(link).toHaveAttribute("target", "_blank");
+  });
+
   // F4 — Root cause: the clobber guard only checked `panelsRef.current.length`,
   // but single-key typing lands in `singleDraftRef.current`, never in `panels`.
   // A slow GET resolving mid-typing then flipped mode→multi + replaced panels,
@@ -3387,5 +3412,27 @@ describe("[164.6.5-07 / D-14] MultiKeyConnectStep — each envelope shows its OW
     );
     expect(sentId).toMatch(/^wizard:[0-9a-f-]{36}$/);
     expect(within(envelope).getByText(sentId!)).toBeInTheDocument();
+  });
+});
+
+/**
+ * 164.6.6.3.5 DOMAINONE plan 06 / S10 — the multi-key trust panel carries the
+ * same contact pointer as ConnectKeyStep's, and the envelopes it renders pass the
+ * draft id it already holds (D-02).
+ */
+describe("[DOMAINONE S10] MultiKeyConnectStep — trust panel security contact", () => {
+  it("renders the pointer sentence with a security-topic new-tab link and no address", () => {
+    render(<MultiKeyConnectStep wizardSessionId={SESSION} onSuccess={vi.fn()} />);
+    fireEvent.click(screen.getByTestId("multi-add-key"));
+    const dt = screen.getByText("Security contact");
+    const dd = dt.nextElementSibling as HTMLElement;
+    expect(dd.textContent).toBe(
+      "Questions? Use the contact form (opens in a new tab); we reply within one business day.",
+    );
+    const link = dd.querySelector("a")!;
+    expect(link.getAttribute("href")).toBe("/contact?topic=security");
+    expect(link).toHaveAttribute("target", "_blank");
+    expect(link.getAttribute("rel")).toBe("noopener noreferrer");
+    expect(dd.textContent).not.toMatch(/@/);
   });
 });

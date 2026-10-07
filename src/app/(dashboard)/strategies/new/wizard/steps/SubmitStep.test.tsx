@@ -1505,6 +1505,16 @@ describe("[153.2-05] the envelope names its venue and its surface", () => {
   const NO_OTHER_VENUE_BULLET =
     "This is your broker account, so there is no other venue to try. If it keeps failing, send the correlation id below through the contact form.";
 
+  // 164.6.6.3.5 plan 06 — the phrase "contact form" is now a link, so the bullet
+  // is no longer one text node: the <li> carries the link and its visually hidden
+  // "(opens in a new tab)". Match the bullet by the <li>'s full text with that
+  // announcement removed, which keeps the sentence pinned byte-for-byte.
+  const bullet =
+    (text: string) =>
+    (_content: string, el: Element | null): boolean =>
+      el?.tagName === "LI" &&
+      el.textContent?.replace(" (opens in a new tab)", "") === text;
+
   it("⭐ D-17 — an MT5 submit is NOT told to switch to a different exchange", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       jsonResponse({ code: "KEY_NETWORK_TIMEOUT", error: "probe failed" }, 502),
@@ -1513,11 +1523,11 @@ describe("[153.2-05] the envelope names its venue and its surface", () => {
     fireEvent.click(screen.getByTestId("wizard-submit-for-review"));
 
     await screen.findByText("We could not reach the exchange.");
-    expect(screen.queryByText(SWITCH_VENUE_BULLET)).not.toBeInTheDocument();
+    expect(screen.queryByText(bullet(SWITCH_VENUE_BULLET))).not.toBeInTheDocument();
     // …and the truthful replacement renders instead. Both halves matter: a
     // shorter list would also satisfy the absence assertion alone, and D-17
     // asks for a true sentence, not for silence.
-    expect(screen.getByText(NO_OTHER_VENUE_BULLET)).toBeInTheDocument();
+    expect(screen.getByText(bullet(NO_OTHER_VENUE_BULLET))).toBeInTheDocument();
   });
 
   it("CONTROL — a ccxt venue keeps the incumbent copy byte-for-byte", async () => {
@@ -1530,8 +1540,8 @@ describe("[153.2-05] the envelope names its venue and its surface", () => {
     fireEvent.click(screen.getByTestId("wizard-submit-for-review"));
 
     await screen.findByText("We could not reach the exchange.");
-    expect(screen.getByText(SWITCH_VENUE_BULLET)).toBeInTheDocument();
-    expect(screen.queryByText(NO_OTHER_VENUE_BULLET)).not.toBeInTheDocument();
+    expect(screen.getByText(bullet(SWITCH_VENUE_BULLET))).toBeInTheDocument();
+    expect(screen.queryByText(bullet(NO_OTHER_VENUE_BULLET))).not.toBeInTheDocument();
   });
 
   it("CONTROL — an UNRESOLVED venue keeps the incumbent copy too", async () => {
@@ -1545,7 +1555,7 @@ describe("[153.2-05] the envelope names its venue and its surface", () => {
     fireEvent.click(screen.getByTestId("wizard-submit-for-review"));
 
     await screen.findByText("We could not reach the exchange.");
-    expect(screen.getByText(SWITCH_VENUE_BULLET)).toBeInTheDocument();
+    expect(screen.getByText(bullet(SWITCH_VENUE_BULLET))).toBeInTheDocument();
   });
 
   it("⭐ Gate B — SERVICE_UNREACHABLE's /strategies bullet renders on THIS surface", async () => {
