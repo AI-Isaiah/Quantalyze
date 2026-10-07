@@ -4079,7 +4079,7 @@ describe("[153.1-03 / WIZFORM-03] fix[] requirements — the class, not the inst
     // a static table string — nothing caller-supplied reaches the envelope
     // through `context.venue`, which is read ONLY as a lookup key.
     const REPLACEMENT =
-      "This is your broker account, so there is no other venue to try. If it keeps failing, email security@quantalyze.com with the correlation id below.";
+      "This is your broker account, so there is no other venue to try. If it keeps failing, send the correlation id below through the contact form.";
     for (const code of [
       "KEY_PROBE_FAILED",
       "KEY_RATE_LIMIT",

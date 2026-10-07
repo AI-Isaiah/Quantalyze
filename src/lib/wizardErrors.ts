@@ -1735,7 +1735,7 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
       "If it keeps failing, switch to a different exchange or contact support.",
       // D-17 / Gate C — the truthful replacement for a venue that IS the
       // account. States the truth and invents no remedy.
-      "This is your broker account, so there is no other venue to try. If it keeps failing, email security@quantalyze.com with the correlation id below.",
+      "This is your broker account, so there is no other venue to try. If it keeps failing, send the correlation id below through the contact form.",
     ],
     // D-17 — bullet 1 presupposes another venue exists; bullet 2 presupposes
     // it does not. ONE filter picks; no code branch names mt5.
@@ -2191,7 +2191,7 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
       "If it persists, try a different exchange account or contact support.",
       // D-17 / Gate C — verbatim from the UI-SPEC, identical across all three
       // venue-conditional entries.
-      "This is your broker account, so there is no other venue to try. If it keeps failing, email security@quantalyze.com with the correlation id below.",
+      "This is your broker account, so there is no other venue to try. If it keeps failing, send the correlation id below through the contact form.",
     ],
     // D-17 — "a different exchange ACCOUNT" is the same unwinnable remedy for a
     // venue that is the account.
@@ -2213,7 +2213,7 @@ const WIZARD_ERROR_COPY: Record<WizardErrorCode, WizardErrorCopy> = {
       "If it keeps failing, switch to a different exchange or contact support.",
       // D-17 / Gate C — an MT5 user reads a truthful replacement, not a
       // shorter list. That is why the requirement carries a boolean.
-      "This is your broker account, so there is no other venue to try. If it keeps failing, email security@quantalyze.com with the correlation id below.",
+      "This is your broker account, so there is no other venue to try. If it keeps failing, send the correlation id below through the contact form.",
     ],
     // D-17 — the third instance of the one class; no third code branch.
     fixRequires: [
