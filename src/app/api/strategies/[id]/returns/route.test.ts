@@ -1136,13 +1136,15 @@ describe("GET /api/strategies/[id]/returns", () => {
     // ...and the body gained EXACTLY the two new keys, nothing else (a raw
     // data_quality_flags / computation_status passthrough would show up here).
     // 164.6.6.2 plan 09 added `returns_unit` and `daily_returns_usd` (null for a
-    // USD strategy) to the list; nothing else.
+    // USD strategy) to the list; SFH-1 added the boolean `native_unpriced`.
+    // Nothing else.
     expect(Object.keys(body).sort()).toEqual([
       "asset_class",
       "cagr",
       "daily_returns",
       "daily_returns_usd",
       "is_composite",
+      "native_unpriced",
       "returns_unit",
       "series_state",
       "sharpe",
@@ -1259,6 +1261,75 @@ describe("GET /api/strategies/[id]/returns — 164.6.6.2 native-unit legs", () =
     expect(body.returns_unit).toBe("BTC");
     expect(body.daily_returns_usd).toEqual([]);
     expect(body.daily_returns).toEqual(BTC_DAILY);
+  });
+
+  // SFH-1 (164.6.6.2 review): `daily_returns_usd: []` is ALSO what a native leg
+  // with no series sends, so the composer cannot tell "left out of the blend
+  // because no BTC price exists" from "nothing to blend yet". The server says it.
+  describe("native_unpriced: a native leg the BTC price source could not price", () => {
+    it("true when the closes read is null (no price source)", async () => {
+      btcClosesMock.mockResolvedValue(null);
+      STATE.analyticsRow = {
+        daily_returns: BTC_DAILY,
+        computation_status: "complete",
+        data_quality_flags: { native_unit: "BTC" },
+      };
+      const body = await call();
+      expect(body.native_unpriced).toBe(true);
+      expect(body.daily_returns_usd).toEqual([]);
+    });
+
+    it("true when stored closes cover none of the series' days", async () => {
+      btcClosesMock.mockResolvedValue({
+        prices: [
+          { date: "2020-01-01", close: 1 },
+          { date: "2020-01-02", close: 2 },
+        ],
+        dropped: [],
+        through: "2020-01-02",
+      });
+      STATE.analyticsRow = {
+        daily_returns: BTC_DAILY,
+        computation_status: "complete",
+        data_quality_flags: { native_unit: "BTC" },
+      };
+      const body = await call();
+      expect(body.native_unpriced).toBe(true);
+    });
+
+    it("false for a priced native leg", async () => {
+      btcClosesMock.mockResolvedValue(CLOSES);
+      STATE.analyticsRow = {
+        daily_returns: BTC_DAILY,
+        computation_status: "complete",
+        data_quality_flags: { native_unit: "BTC" },
+      };
+      const body = await call();
+      expect(body.native_unpriced).toBe(false);
+      expect(body.daily_returns_usd).toHaveLength(1);
+    });
+
+    it("false for a USD leg (and no closes are read)", async () => {
+      STATE.analyticsRow = {
+        daily_returns: BTC_DAILY,
+        computation_status: "complete",
+        data_quality_flags: { composite: false },
+      };
+      const body = await call();
+      expect(body.native_unpriced).toBe(false);
+      expect(btcClosesMock).not.toHaveBeenCalled();
+    });
+
+    it("false for a native leg with no series yet (that is series_state's claim, not a price outage)", async () => {
+      STATE.analyticsRow = {
+        daily_returns: [],
+        computation_status: "complete",
+        data_quality_flags: { native_unit: "BTC" },
+      };
+      const body = await call();
+      expect(body.native_unpriced).toBe(false);
+      expect(body.daily_returns_usd).toEqual([]);
+    });
   });
 
   it("native_unit is strictly coerced: lowercase, absent, or a non-string reads as USD", async () => {

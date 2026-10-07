@@ -533,4 +533,55 @@ describe("readBtcCloses", () => {
     const { client } = makeClient([]);
     expect(await readBtcCloses(client)).toBeNull();
   });
+
+  // SFH-1 (164.6.6.2 review): null with NO read error used to be silent, so a
+  // native leg that dropped out of a blend left nothing in the logs to say why.
+  // A read error already logs (above); the other two nulls must too.
+  describe("a null without a read error says so, with the dropped count", () => {
+    const TAG = "[benchmark-source] BTC closes unusable";
+
+    it("an empty table logs once, with dropped=0", async () => {
+      const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        const { client } = makeClient([]);
+        expect(await readBtcCloses(client)).toBeNull();
+        expect(spy).toHaveBeenCalledTimes(1);
+        const line = String(spy.mock.calls[0].join(" "));
+        expect(line).toContain(TAG);
+        expect(line).toContain("dropped=0");
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it("every close dropped logs once, carrying the dropped count", async () => {
+      const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        const table: Row[] = [
+          { date: "2026-02-02", symbol: "BTC", close_price: 0 },
+          { date: "2026-02-03", symbol: "BTC", close_price: -5 },
+          { date: "2026-02-04", symbol: "BTC", close_price: "not a number" },
+        ];
+        const { client } = makeClient(table);
+        expect(await readBtcCloses(client)).toBeNull();
+        expect(spy).toHaveBeenCalledTimes(1);
+        const line = String(spy.mock.calls[0].join(" "));
+        expect(line).toContain(TAG);
+        expect(line).toContain("dropped=3");
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
+    it("a usable read logs nothing", async () => {
+      const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        const { client } = makeClient(btcRows(5));
+        expect(await readBtcCloses(client)).not.toBeNull();
+        expect(spy).not.toHaveBeenCalled();
+      } finally {
+        spy.mockRestore();
+      }
+    });
+  });
 });
