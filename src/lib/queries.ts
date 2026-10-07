@@ -20,7 +20,10 @@ import { resolveDailyReturnSeries } from "@/lib/factsheet/resolve-series";
 // `server-only` (composite-read-path.ts) into every test importing this file.
 import { readFactsheetBenchmark } from "@/lib/factsheet/benchmark-read";
 import { readBtcCloses } from "@/lib/factsheet/benchmark-source";
-import { convertNativeReturnsToUsd } from "@/lib/factsheet/native-to-usd";
+import {
+  convertNativeReturnsToUsd,
+  isNativeLegUnpriced,
+} from "@/lib/factsheet/native-to-usd";
 import { parseReturnsUnit } from "@/lib/factsheet/returns-unit";
 import type { BenchmarkPricesOpt } from "@/lib/factsheet/types";
 import { API_KEY_USER_COLUMNS, type ApiKeyUserColumn } from "./constants";
@@ -2731,6 +2734,17 @@ export interface MyAllocationDashboardPayload {
        * hand-built fixtures compile; `getMyAllocationDashboard` ALWAYS sets it.
        */
       returns_unit?: string | null;
+      /**
+       * SFH-1 (164.6.6.2 review) — true ONLY for a native-unit row that has a
+       * series but whose USD conversion priced nothing (no BTC price source, or no
+       * stored close covering any of its days), so `strategy_analytics.daily_returns`
+       * is `[]` and the row is LEFT OUT of every blend. `series_state` cannot say
+       * this: it is derived from the PRE-conversion series and reads "available".
+       * False for a USD row and for a native row with no series (that absence is
+       * `series_state`'s). Optional only so legacy hand-built fixtures compile;
+       * `getMyAllocationDashboard` ALWAYS sets it.
+       */
+      native_unpriced?: boolean;
       /**
        * Phase 147 / SCEN-01 — what an EMPTY `strategy_analytics.daily_returns`
        * MEANS for this book row: a live job ("computing"), or genuine absence
@@ -5462,6 +5476,18 @@ export const getMyAllocationDashboard = cache(
             analyticsObj.returns_series,
           )
         : [];
+      // SFH-1 — converted once, here, so the payload series and the unpriced
+      // flag beside it are computed from the SAME conversion.
+      const usdDailyReturns = convertNativeReturnsToUsd(
+        resolvedDailyReturns,
+        returns_unit,
+        btcCloses,
+      );
+      const native_unpriced = isNativeLegUnpriced(
+        resolvedDailyReturns,
+        returns_unit,
+        usdDailyReturns,
+      );
       let strategyAnalyticsForPayload:
         | MyAllocationDashboardPayload["strategies"][number]["strategy"]["strategy_analytics"] = null;
       if (analyticsObj) {
@@ -5485,12 +5511,9 @@ export const getMyAllocationDashboard = cache(
           // list-surface unit chip is Phase 164.6.6.2.1 (D-19). A USD row takes
           // the same-reference early return. `series_state` below is derived from
           // the PRE-conversion `resolvedDailyReturns`, so a price outage never reads
-          // as "no series".
-          daily_returns: convertNativeReturnsToUsd(
-            resolvedDailyReturns,
-            returns_unit,
-            btcCloses,
-          ),
+          // as "no series"; the row's `native_unpriced` flag (SFH-1) is what says
+          // the leg left the blend.
+          daily_returns: usdDailyReturns,
         };
         strategyAnalyticsForPayload =
           analyticsForPayload as MyAllocationDashboardPayload["strategies"][number]["strategy"]["strategy_analytics"];
@@ -5615,6 +5638,7 @@ export const getMyAllocationDashboard = cache(
             trust_tier,
             is_composite,
             returns_unit,
+            native_unpriced,
             series_state,
             strategy_analytics: strategyAnalyticsForPayload,
           },

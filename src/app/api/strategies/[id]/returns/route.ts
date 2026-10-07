@@ -59,7 +59,10 @@ import { isUuid } from "@/lib/utils";
 import type { DailyPoint } from "@/lib/portfolio-math-utils";
 import { resolveDailyReturnSeries } from "@/lib/factsheet/resolve-series";
 import { readBtcCloses } from "@/lib/factsheet/benchmark-source";
-import { convertNativeReturnsToUsd } from "@/lib/factsheet/native-to-usd";
+import {
+  convertNativeReturnsToUsd,
+  isNativeLegUnpriced,
+} from "@/lib/factsheet/native-to-usd";
 import { parseReturnsUnit } from "@/lib/factsheet/returns-unit";
 import {
   deriveEmptySeriesState,
@@ -174,6 +177,16 @@ export interface ReturnsResponse {
    * Prices are public market data, so the conversion discloses nothing new.
    */
   daily_returns_usd: DailyPoint[] | null;
+  /**
+   * SFH-1 (164.6.6.2 review) — true ONLY for a native-unit strategy that HAS a
+   * series but whose conversion priced nothing (no BTC price source, or no stored
+   * close covering any of its days). `daily_returns_usd: []` cannot say this on
+   * its own: a native strategy with no series also sends `[]`. Without the flag
+   * the composer would print "Blended in USD at the daily BTC price" for a leg
+   * the blend dropped. Always a boolean (false for USD and for a native leg with
+   * no series, whose absence `series_state` already names).
+   */
+  native_unpriced: boolean;
 }
 
 export async function GET(
@@ -474,6 +487,7 @@ export async function GET(
       // unpriced), never `null` and never the raw BTC series.
       const returns_unit = parseReturnsUnit(dqf?.native_unit);
       let daily_returns_usd: DailyPoint[] | null = null;
+      let native_unpriced = false;
       if (returns_unit !== null) {
         daily_returns_usd =
           daily_returns.length === 0
@@ -483,6 +497,11 @@ export async function GET(
                 returns_unit,
                 await readBtcCloses(supabase),
               );
+        native_unpriced = isNativeLegUnpriced(
+          daily_returns,
+          returns_unit,
+          daily_returns_usd,
+        );
       }
 
       const body: ReturnsResponse = {
@@ -495,6 +514,7 @@ export async function GET(
         sharpe,
         returns_unit,
         daily_returns_usd,
+        native_unpriced,
       };
       return NextResponse.json(body, { status: 200, headers: NO_STORE_HEADERS });
     },

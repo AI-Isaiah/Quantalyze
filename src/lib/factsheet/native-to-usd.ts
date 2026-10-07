@@ -63,3 +63,25 @@ export function convertNativeReturnsToUsd(
   }
   return out;
 }
+
+/**
+ * SFH-1 (164.6.6.2 review): did a native-unit leg's own series price to nothing?
+ *
+ * `convertNativeReturnsToUsd` answers `[]` for a leg it could not price (no
+ * price source, closes that miss every one of the series' days). A leg with no
+ * series at all also answers `[]`, but that is the series state's business
+ * ("Syncing" / "No data"), not a missing price. This predicate is the one place
+ * the two are told apart, so every seam that ships a converted series ships the
+ * SAME boolean beside it and the composer never prints "blended in USD" for a leg
+ * the blend dropped. A series of fewer than two points has nothing to convert
+ * (day 0 is dropped) with or without prices, so it is not "unpriced" either.
+ *
+ * `converted` is the output of the conversion for the same `series` and `unit`.
+ */
+export function isNativeLegUnpriced(
+  series: readonly DailyPoint[],
+  unit: string | null,
+  converted: readonly DailyPoint[],
+): boolean {
+  return unit != null && series.length >= 2 && converted.length === 0;
+}

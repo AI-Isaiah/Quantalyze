@@ -298,8 +298,9 @@ export function mergeWithFixture(
  * different contract and keeps the fixture prefix; it is unchanged.
  *
  * Returns null when the read errors (one `console.error`, never the fixture,
- * D-09) or when no usable close is stored: "no price source", which the
- * conversion turns into an empty series rather than an invented one.
+ * D-09) or when no usable close is stored (one `console.error` carrying the
+ * dropped count, SFH-1): "no price source", which the conversion turns into an
+ * empty series rather than an invented one.
  */
 export async function readBtcCloses(
   client: SupabaseClient,
@@ -309,6 +310,14 @@ export async function readBtcCloses(
     console.error("[benchmark-source] BTC closes read failed", read.error);
     return null;
   }
-  if (read.prices.length === 0) return null;
+  if (read.prices.length === 0) {
+    // SFH-1 (164.6.6.2 review): this null is not an error, so it used to say
+    // nothing, while every native-unit leg downstream silently left its blend.
+    // Name it, with how many closes were refused as corrupt (0 = empty table).
+    console.error(
+      `[benchmark-source] BTC closes unusable: no usable close stored (dropped=${read.dropped.length}); native-unit legs cannot be priced`,
+    );
+    return null;
+  }
   return { prices: read.prices, dropped: read.dropped, through: read.through };
 }

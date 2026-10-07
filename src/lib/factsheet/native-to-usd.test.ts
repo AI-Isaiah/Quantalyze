@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 
 import type { DailyPoint } from "@/lib/portfolio-math-utils";
 
-import { convertNativeReturnsToUsd } from "./native-to-usd";
+import { convertNativeReturnsToUsd, isNativeLegUnpriced } from "./native-to-usd";
 
 /**
  * Phase 164.6.6.2 (D-18, D-22, D-23): the BTC-native -> USD return conversion.
@@ -175,5 +175,52 @@ describe("convertNativeReturnsToUsd: a USD row is untouched, no source means not
   it("does not mutate its input", () => {
     const frozen = Object.freeze(series.map((p) => Object.freeze({ ...p })));
     expect(() => convertNativeReturnsToUsd(frozen, "BTC", btc)).not.toThrow();
+  });
+});
+
+/**
+ * SFH-1 (164.6.6.2 review). `convertNativeReturnsToUsd` returns `[]` for a leg it
+ * could not price, and `[]` is also what a leg with no series at all looks like,
+ * so the two must be told apart at the server or the composer prints "blended"
+ * for a leg that left the blend. This predicate is that one distinction.
+ */
+describe("isNativeLegUnpriced: a native leg with a series that priced to nothing", () => {
+  const series: DailyPoint[] = [
+    { date: "2026-02-02", value: 0.01 },
+    { date: "2026-02-03", value: -0.02 },
+  ];
+  const btc = {
+    prices: [
+      { date: "2026-02-02", close: 100 },
+      { date: "2026-02-03", close: 120 },
+    ],
+    dropped: [],
+  };
+
+  it("no price source: unpriced", () => {
+    const out = convertNativeReturnsToUsd(series, "BTC", null);
+    expect(isNativeLegUnpriced(series, "BTC", out)).toBe(true);
+  });
+
+  it("closes that cover none of the series' days: unpriced", () => {
+    const far = { prices: [{ date: "2020-01-01", close: 1 }, { date: "2020-01-02", close: 2 }], dropped: [] };
+    const out = convertNativeReturnsToUsd(series, "BTC", far);
+    expect(out).toEqual([]);
+    expect(isNativeLegUnpriced(series, "BTC", out)).toBe(true);
+  });
+
+  it("a priced leg: not unpriced", () => {
+    const out = convertNativeReturnsToUsd(series, "BTC", btc);
+    expect(out).toHaveLength(1);
+    expect(isNativeLegUnpriced(series, "BTC", out)).toBe(false);
+  });
+
+  it("a USD leg is never unpriced, even with an empty converted series", () => {
+    expect(isNativeLegUnpriced(series, null, [])).toBe(false);
+  });
+
+  it("a native leg with no series, or one point (nothing to convert), is not 'unpriced'", () => {
+    expect(isNativeLegUnpriced([], "BTC", [])).toBe(false);
+    expect(isNativeLegUnpriced(series.slice(0, 1), "BTC", [])).toBe(false);
   });
 });

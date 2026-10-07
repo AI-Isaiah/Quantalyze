@@ -1274,6 +1274,14 @@ export function ScenarioComposer({
   const [addedUsdReturnsById, setAddedUsdReturnsById] = useState<
     Record<string, DailyPoint[]>
   >({});
+  // SFH-1 (164.6.6.2 review) — the route's `native_unpriced`: this native leg HAS
+  // a series but the BTC price source priced none of it, so it blends as [] and
+  // the warm-up gate leaves it out. Same lifecycle as the unit and USD series
+  // above (settle writes it, handleRemoveAdded purges it). The row then SAYS it
+  // is left out instead of printing the "Blended in USD" line.
+  const [addedNativeUnpricedById, setAddedNativeUnpricedById] = useState<
+    Record<string, boolean>
+  >({});
   // Phase 162 / HONEST-05 — the lazily-fetched headline metric pair (cagr +
   // sharpe) for a drawer-added, NON-book strategy, keyed by id. Exactly the
   // addedProvenanceById lifecycle: written by fetchAddedReturns' settle from the
@@ -1615,7 +1623,7 @@ export function ScenarioComposer({
       provenance: { trust_tier: string | null; is_composite: boolean },
       seriesState: SeriesState,
       metrics: { cagr: number | null; sharpe: number | null },
-      native: { unit: string | null; usdSeries: DailyPoint[] },
+      native: { unit: string | null; usdSeries: DailyPoint[]; unpriced: boolean },
     ) => {
       setAddedReturnsById((prev) => ({ ...prev, [id]: series }));
       // 164.6.6.2 plan 11 — the unit and the server-converted series, beside the
@@ -1623,6 +1631,7 @@ export function ScenarioComposer({
       // settled entry is always a complete answer and a purge is a clean slate.
       setAddedReturnsUnitById((prev) => ({ ...prev, [id]: native.unit }));
       setAddedUsdReturnsById((prev) => ({ ...prev, [id]: native.usdSeries }));
+      setAddedNativeUnpricedById((prev) => ({ ...prev, [id]: native.unpriced }));
       setAddedAssetClassById((prev) => ({ ...prev, [id]: assetClass }));
       // CONSTIT-02 — record the drawer-added leg's provenance beside asset_class.
       setAddedProvenanceById((prev) => ({ ...prev, [id]: provenance }));
@@ -1682,6 +1691,7 @@ export function ScenarioComposer({
           sharpe?: unknown;
           returns_unit?: unknown;
           daily_returns_usd?: unknown;
+          native_unpriced?: unknown;
         }) => {
           // A 200 with a non-array body is a malformed/failed response, NOT a
           // genuine empty series — treat it as a retryable failure (WR-01).
@@ -1733,6 +1743,9 @@ export function ScenarioComposer({
           const native = {
             unit: parseReturnsUnit(d.returns_unit),
             usdSeries: normalizeDailyReturns(d.daily_returns_usd),
+            // SFH-1 — strict boolean true only; absent (stale deploy) or malformed
+            // is "not claimed unpriced", the pre-fix reading.
+            unpriced: d.native_unpriced === true,
           };
           // A genuine 200 with a real array (including an empty one) settles. An
           // empty array here means the strategy legitimately has no published
@@ -2710,6 +2723,11 @@ export function ScenarioComposer({
         const { [id]: _dropUsd, ...rest } = prev;
         return rest;
       });
+      setAddedNativeUnpricedById((prev) => {
+        if (!(id in prev)) return prev;
+        const { [id]: _dropUnpriced, ...rest } = prev;
+        return rest;
+      });
       // SCEN-01 — purge the fetched series_state identically, or a re-add would
       // render a STALE "Syncing" against a retry that has not answered yet.
       setAddedSeriesStateById((prev) => {
@@ -2762,6 +2780,9 @@ export function ScenarioComposer({
         // bare-Pick cast at every engine call site. It never selects a series;
         // the conversion happened server-side (see addedStrategyReturnsLookup).
         returns_unit: string | null;
+        // SFH-1 — true only for a native leg the BTC price source could not price
+        // (it blends as [] and is left out). Presentation-only, like returns_unit.
+        native_unpriced: boolean;
         // HONEST-05 — what happened to the metric pair for this leg: answered
         // ("settled"), still asking ("pending"), or the fetch failed
         // ("unavailable"). A book leg is answered by the SSR payload itself; a
@@ -2781,6 +2802,7 @@ export function ScenarioComposer({
         trust_tier: string | null;
         is_composite: boolean;
         returns_unit: string | null;
+        native_unpriced: boolean;
         metricsState: AddedMetricsState;
       }
     > = {};
@@ -2853,6 +2875,13 @@ export function ScenarioComposer({
           found != null
             ? parseReturnsUnit(found.strategy.returns_unit)
             : (addedReturnsUnitById[a.id] ?? null),
+        // SFH-1 — book wins WHOLE, exactly like returns_unit: the payload's flag
+        // is authoritative for a book leg (a book USD or priced leg must not
+        // inherit a lazily-fetched claim). Strict `=== true`.
+        native_unpriced:
+          found != null
+            ? found.strategy.native_unpriced === true
+            : (addedNativeUnpricedById[a.id] ?? false),
       };
     }
     return map;
@@ -2862,6 +2891,7 @@ export function ScenarioComposer({
     addedAssetClassById,
     addedProvenanceById,
     addedReturnsUnitById,
+    addedNativeUnpricedById,
     addedMetricsById,
   ]);
 
@@ -2892,6 +2922,16 @@ export function ScenarioComposer({
     const out: Record<string, string | null> = {};
     for (const [id, meta] of Object.entries(addedStrategyMetadataLookup)) {
       out[id] = meta.returns_unit;
+    }
+    return out;
+  }, [addedStrategyMetadataLookup]);
+
+  // SFH-1 — added-strategy id → true when the leg is native but could not be
+  // priced (left out of the blend). Same narrow-projection idiom as above.
+  const addedNativeUnpricedByRef = useMemo<Record<string, boolean>>(() => {
+    const out: Record<string, boolean> = {};
+    for (const [id, meta] of Object.entries(addedStrategyMetadataLookup)) {
+      out[id] = meta.native_unpriced;
     }
     return out;
   }, [addedStrategyMetadataLookup]);
@@ -6273,6 +6313,7 @@ export function ScenarioComposer({
           onTogglePerKey={scenario.togglePerKeySource}
           addedProvenanceByRef={addedProvenanceByRef}
           addedReturnsUnitByRef={addedReturnsUnitByRef}
+          addedNativeUnpricedByRef={addedNativeUnpricedByRef}
           addedMetricsByRef={addedMetricsByRef}
           onToggle={scenario.toggleHolding}
           onSetWeight={handleWeightChange}
@@ -6729,6 +6770,12 @@ interface CompositionListProps {
    */
   addedReturnsUnitByRef: Record<string, string | null>;
   /**
+   * SFH-1 (164.6.6.2 review) — added-strategy id → true when the leg is
+   * native-unit but its BTC price could not be read, so it blends as [] and is
+   * LEFT OUT. Swaps the "Blended in USD" line for a muted note saying so.
+   */
+  addedNativeUnpricedByRef: Record<string, boolean>;
+  /**
    * Phase 152 SCEN-03 — added-strategy id → the in-memory metrics the row's
    * detail panel renders. A NARROW `{cagr, sharpe}` projection of the parent's
    * metadata lookup: book strategies carry values, drawer-added legs carry
@@ -6857,6 +6904,7 @@ function CompositionList({
   onTogglePerKey,
   addedProvenanceByRef,
   addedReturnsUnitByRef,
+  addedNativeUnpricedByRef,
   addedMetricsByRef,
   onToggle,
   onSetWeight,
@@ -7761,6 +7809,10 @@ function CompositionList({
           // figures are in. null (USD) renders none of the chip, the eyebrow
           // suffix or the blend line.
           const unit = addedReturnsUnitByRef[a.id] ?? null;
+          // SFH-1 — a native leg whose BTC price could not be read blends as []
+          // and is left out; the row must say so, not claim it is blended.
+          const nativeUnpriced =
+            unit != null && addedNativeUnpricedByRef[a.id] === true;
           // Phase 162 HONEST-05 (UI-SPEC C-4) — the note is a CLAIM about this
           // strategy ("it has no computed metrics"), so it may only render once
           // the answer is in, and only when the answer came from a request that
@@ -8095,13 +8147,28 @@ function CompositionList({
                       Directly below the CAGR / SHARPE pair; neutral, never
                       amber (a denomination is a steady fact, not a warning).
                       Composed from the unit so the next unit adds no copy. */}
-                  {unit != null && (
+                  {unit != null && !nativeUnpriced && (
                     <div className="mt-2">
                       <p
                         className="text-xs text-text-muted"
                         data-testid={`scenario-detail-usd-blend-${a.id}`}
                       >
                         {`Blended in USD at the daily ${unit} price.`}
+                      </p>
+                    </div>
+                  )}
+                  {/* SFH-1 (164.6.6.2 review) — same slot, same muted voice,
+                      swapped in when the leg could not be priced. It is a
+                      steady fact about the data, not a warning, so no amber.
+                      The row's own weight stays editable; it simply
+                      contributes nothing until a price source exists. */}
+                  {nativeUnpriced && (
+                    <div className="mt-2">
+                      <p
+                        className="text-xs text-text-muted"
+                        data-testid={`scenario-detail-usd-unpriced-${a.id}`}
+                      >
+                        {`No ${unit} price available, so this strategy is left out of the USD blend.`}
                       </p>
                     </div>
                   )}
