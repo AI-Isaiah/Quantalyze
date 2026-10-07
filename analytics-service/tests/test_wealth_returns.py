@@ -13,6 +13,7 @@ copies a value out of it.
 from __future__ import annotations
 
 import json
+import logging
 import math
 from pathlib import Path
 from typing import Any
@@ -20,9 +21,12 @@ from typing import Any
 import pandas as pd
 import pytest
 
+from services.native_to_usd import convert_native_returns_to_usd
 from services.wealth_returns import (
+    curve_method_from_flags,
     daily_returns_from_row,
     equity_from_daily_returns,
+    records_to_series,
 )
 
 _FIXTURE = Path(__file__).parent / "fixtures" / "wealth_to_returns_oracle.json"
@@ -50,11 +54,34 @@ def test_fixture_is_a_real_oracle() -> None:
     assert _CASES
     for c in _CASES:
         assert len(c["arithmetic"]) > 10, c["name"]
+    names = {c["name"] for c in _CASES}
+    assert {
+        "geometric_ratio",
+        "simple_difference",
+        "nonpositive_level_mid_series",
+        "nonpositive_level_is_legal_on_simple",
+        "daily_returns_first_wins",
+        "unsorted_input_is_sorted",
+        "unknown_method_string_reads_geometric",
+        "native_leg_loses_first_two_days",
+    } <= names
 
 
 @pytest.mark.parametrize("case", _CASES, ids=[c["name"] for c in _CASES])
 def test_python_reads_the_oracle(case: dict[str, Any]) -> None:
     result = daily_returns_from_row(_row(case), name=case["name"])
+    if "native_unit" in case:
+        # Pitfall 7 parity: the boundary, THEN the BTC conversion, which drops its
+        # own first day too, so a native leg loses its first two days.
+        assert result is not None
+        dates = sorted(case["closes"])
+        closes = pd.Series(
+            [float(case["closes"][d]) for d in dates],
+            index=pd.DatetimeIndex(dates),
+            name="BTC",
+            dtype=float,
+        )
+        result = convert_native_returns_to_usd(result, case["native_unit"], closes)
     got = _pairs(result)
     want = [(e["date"], float(e["value"])) for e in case["expected"]]
     assert [d for d, _ in got] == [d for d, _ in want], case["name"]
@@ -94,3 +121,80 @@ def test_equity_from_daily_returns_endpoint_ratio_is_the_compounded_return() -> 
     assert list(equity.to_numpy()) == pytest.approx([1.0, 1.1, 0.99, 1.0395], abs=1e-12)
     # 1.1 * 0.9 * 1.05 - 1 = 0.0395, written by hand.
     assert total_return_from_equity(equity) == pytest.approx(0.0395, abs=1e-12)
+
+
+# ---------------------------------------------------------------------------
+# Python-only cases (not in the shared oracle: TypeScript does not dedupe,
+# and logging is Python's own contract)
+# ---------------------------------------------------------------------------
+
+
+def test_duplicate_dates_keep_the_last_record_by_input_order() -> None:
+    row = {
+        "returns_series": [
+            {"date": "2026-03-02", "value": 1.0},
+            {"date": "2026-03-03", "value": 9.0},
+            {"date": "2026-03-03", "value": 1.1},
+        ]
+    }
+    result = daily_returns_from_row(row, name="s")
+    assert result is not None
+    # The last record on 03-03 wins (1.1), so d1 = 1.1 / 1.0 - 1 = 0.1, not 8.0.
+    assert list(result.to_numpy()) == pytest.approx([0.1], abs=1e-12)
+
+
+def test_malformed_records_are_skipped_with_one_warning_naming_the_series(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    row = {
+        "returns_series": [
+            "not-a-dict",
+            {"value": 1.05},  # no date
+            {"date": "2026-03-02", "value": 1.0},
+            {"date": "2026-03-03", "value": 1.1},
+        ]
+    }
+    with caplog.at_level(logging.WARNING, logger="quantalyze.analytics"):
+        result = daily_returns_from_row(row, name="strat-77")
+    assert result is not None
+    assert list(result.to_numpy()) == pytest.approx([0.1], abs=1e-12)
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "strat-77" in warnings[0].getMessage()
+    assert "skipped 2 " in warnings[0].getMessage()  # the skipped count
+    assert "1.05" not in warnings[0].getMessage()  # never a stored value
+
+
+def test_method_flag_warns_once_on_an_unexpected_value_and_is_silent_on_absence(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level(logging.WARNING, logger="quantalyze.analytics"):
+        assert curve_method_from_flags(None) == "geometric"
+        assert curve_method_from_flags({}) == "geometric"
+        assert curve_method_from_flags({"cumulative_method": None}) == "geometric"
+        assert curve_method_from_flags("garbage") == "geometric"
+        assert curve_method_from_flags({"cumulative_method": "simple"}) == "simple"
+        assert curve_method_from_flags({"cumulative_method": "geometric"}) == "geometric"
+    assert not [r for r in caplog.records if r.levelno == logging.WARNING]
+    with caplog.at_level(logging.WARNING, logger="quantalyze.analytics"):
+        assert curve_method_from_flags({"cumulative_method": "arithmetic"}) == "geometric"
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "arithmetic" not in warnings[0].getMessage()
+
+
+def test_an_empty_or_missing_row_is_none_never_an_empty_series() -> None:
+    assert daily_returns_from_row({}, name="s") is None
+    assert daily_returns_from_row(None, name="s") is None
+    assert daily_returns_from_row({"returns_series": None, "daily_returns": []}, name="s") is None
+    assert records_to_series([{"date": "2026-03-02", "value": None}], "s") is None
+
+
+def test_a_boolean_level_is_not_a_level_of_one() -> None:
+    row = {
+        "returns_series": [
+            {"date": "2026-03-02", "value": True},
+            {"date": "2026-03-03", "value": 1.1},
+        ]
+    }
+    assert daily_returns_from_row(row, name="s") is None

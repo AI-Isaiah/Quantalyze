@@ -7,30 +7,643 @@
       "data_quality_flags": null,
       "daily_returns": null,
       "curve": [
-        { "date": "2026-03-02", "value": 1.0 },
-        { "date": "2026-03-03", "value": 1.1 },
-        { "date": "2026-03-04", "value": 1.21 }
+        {
+          "date": "2026-03-02",
+          "value": 1.0
+        },
+        {
+          "date": "2026-03-03",
+          "value": 1.1
+        },
+        {
+          "date": "2026-03-04",
+          "value": 1.21
+        }
       ],
       "expected": [
-        { "date": "2026-03-03", "value": 0.1 },
-        { "date": "2026-03-04", "value": 0.1 }
+        {
+          "date": "2026-03-03",
+          "value": 0.1
+        },
+        {
+          "date": "2026-03-04",
+          "value": 0.1
+        }
       ],
       "arithmetic": "Geometric (flags absent reads geometric). d1 = 1.1 / 1.0 - 1 = 0.1; d2 = 1.21 / 1.1 - 1 = 0.1. Day 0 (2026-03-02) has no prior level and is dropped."
     },
     {
       "name": "simple_difference",
-      "data_quality_flags": { "cumulative_method": "simple" },
+      "data_quality_flags": {
+        "cumulative_method": "simple"
+      },
       "daily_returns": null,
       "curve": [
-        { "date": "2026-03-02", "value": 1.0 },
-        { "date": "2026-03-03", "value": 1.1 },
-        { "date": "2026-03-04", "value": 1.15 }
+        {
+          "date": "2026-03-02",
+          "value": 1.0
+        },
+        {
+          "date": "2026-03-03",
+          "value": 1.1
+        },
+        {
+          "date": "2026-03-04",
+          "value": 1.15
+        }
       ],
       "expected": [
-        { "date": "2026-03-03", "value": 0.1 },
-        { "date": "2026-03-04", "value": 0.05 }
+        {
+          "date": "2026-03-03",
+          "value": 0.1
+        },
+        {
+          "date": "2026-03-04",
+          "value": 0.05
+        }
       ],
       "arithmetic": "Simple (flags cumulative_method = simple). d1 = 1.1 - 1.0 = 0.1; d2 = 1.15 - 1.1 = 0.05. The geometric ratio would give 0.0454545... for d2."
+    },
+    {
+      "name": "same_curve_geometric_reads_a_ratio",
+      "data_quality_flags": {
+        "cumulative_method": "geometric"
+      },
+      "daily_returns": null,
+      "curve": [
+        {
+          "date": "2026-03-02",
+          "value": 1.0
+        },
+        {
+          "date": "2026-03-03",
+          "value": 1.1
+        },
+        {
+          "date": "2026-03-04",
+          "value": 1.2
+        }
+      ],
+      "expected": [
+        {
+          "date": "2026-03-03",
+          "value": 0.1
+        },
+        {
+          "date": "2026-03-04",
+          "value": 0.09090909090909091
+        }
+      ],
+      "arithmetic": "Same curve 1.0, 1.1, 1.2 read GEOMETRIC: d1 = 1.1 / 1.0 - 1 = 0.1; d2 = 1.2 / 1.1 - 1 = 1/11 = 0.0909090909090909..."
+    },
+    {
+      "name": "same_curve_simple_reads_a_difference",
+      "data_quality_flags": {
+        "cumulative_method": "simple"
+      },
+      "daily_returns": null,
+      "curve": [
+        {
+          "date": "2026-03-02",
+          "value": 1.0
+        },
+        {
+          "date": "2026-03-03",
+          "value": 1.1
+        },
+        {
+          "date": "2026-03-04",
+          "value": 1.2
+        }
+      ],
+      "expected": [
+        {
+          "date": "2026-03-03",
+          "value": 0.1
+        },
+        {
+          "date": "2026-03-04",
+          "value": 0.1
+        }
+      ],
+      "arithmetic": "Same curve 1.0, 1.1, 1.2 read SIMPLE: d1 = 1.1 - 1.0 = 0.1; d2 = 1.2 - 1.1 = 0.1. The two methods differ on d2 (1/11 vs 0.1)."
+    },
+    {
+      "name": "nonpositive_level_mid_series",
+      "data_quality_flags": null,
+      "daily_returns": null,
+      "curve": [
+        {
+          "date": "2026-03-02",
+          "value": 1.0
+        },
+        {
+          "date": "2026-03-03",
+          "value": 1.1
+        },
+        {
+          "date": "2026-03-04",
+          "value": 0.0
+        },
+        {
+          "date": "2026-03-05",
+          "value": 1.2
+        },
+        {
+          "date": "2026-03-06",
+          "value": 1.32
+        }
+      ],
+      "expected": [
+        {
+          "date": "2026-03-03",
+          "value": 0.1
+        },
+        {
+          "date": "2026-03-06",
+          "value": 0.1
+        }
+      ],
+      "arithmetic": "Geometric levels 1.0, 1.1, 0, 1.2, 1.32. d1 = 1.1 / 1.0 - 1 = 0.1. d2 pairs 0 with 1.1 and d3 pairs 1.2 with 0: a level of 0 is not > 0, so both days are ABSENT (never 0, never bridged as 1.2 / 1.1 - 1). d4 = 1.32 / 1.2 - 1 = 0.1."
+    },
+    {
+      "name": "nonpositive_level_is_legal_on_simple",
+      "data_quality_flags": {
+        "cumulative_method": "simple"
+      },
+      "daily_returns": null,
+      "curve": [
+        {
+          "date": "2026-03-02",
+          "value": 1.0
+        },
+        {
+          "date": "2026-03-03",
+          "value": 0.5
+        },
+        {
+          "date": "2026-03-04",
+          "value": -0.1
+        },
+        {
+          "date": "2026-03-05",
+          "value": 0.2
+        }
+      ],
+      "expected": [
+        {
+          "date": "2026-03-03",
+          "value": -0.5
+        },
+        {
+          "date": "2026-03-04",
+          "value": -0.6
+        },
+        {
+          "date": "2026-03-05",
+          "value": 0.3
+        }
+      ],
+      "arithmetic": "Simple levels 1.0, 0.5, -0.1, 0.2 (a non-positive level is legal on a running-sum curve). d1 = 0.5 - 1.0 = -0.5; d2 = -0.1 - 0.5 = -0.6; d3 = 0.2 - (-0.1) = 0.3."
+    },
+    {
+      "name": "non_finite_level_drops_dependent_days",
+      "data_quality_flags": {
+        "cumulative_method": "geometric"
+      },
+      "daily_returns": null,
+      "curve": [
+        {
+          "date": "2026-03-02",
+          "value": 1.0
+        },
+        {
+          "date": "2026-03-03",
+          "value": 1.1
+        },
+        {
+          "date": "2026-03-04",
+          "value": null
+        },
+        {
+          "date": "2026-03-05",
+          "value": 1.3
+        },
+        {
+          "date": "2026-03-06",
+          "value": 1.43
+        }
+      ],
+      "expected": [
+        {
+          "date": "2026-03-03",
+          "value": 0.1
+        },
+        {
+          "date": "2026-03-06",
+          "value": 0.1
+        }
+      ],
+      "arithmetic": "Geometric levels 1.0, 1.1, null, 1.3, 1.43 (a JSON null is a non-finite level). d1 = 1.1 / 1.0 - 1 = 0.1. d2 and d3 pair with the null level and are ABSENT (d3 is not bridged as 1.3 / 1.1 - 1). d4 = 1.43 / 1.3 - 1 = 0.1."
+    },
+    {
+      "name": "non_finite_level_drops_dependent_days_simple",
+      "data_quality_flags": {
+        "cumulative_method": "simple"
+      },
+      "daily_returns": null,
+      "curve": [
+        {
+          "date": "2026-03-02",
+          "value": 1.0
+        },
+        {
+          "date": "2026-03-03",
+          "value": 1.1
+        },
+        {
+          "date": "2026-03-04",
+          "value": null
+        },
+        {
+          "date": "2026-03-05",
+          "value": 1.3
+        },
+        {
+          "date": "2026-03-06",
+          "value": 1.4
+        }
+      ],
+      "expected": [
+        {
+          "date": "2026-03-03",
+          "value": 0.1
+        },
+        {
+          "date": "2026-03-06",
+          "value": 0.1
+        }
+      ],
+      "arithmetic": "Simple levels 1.0, 1.1, null, 1.3, 1.4. d1 = 1.1 - 1.0 = 0.1. d2 and d3 pair with the null level and are ABSENT (d3 is not bridged as 1.3 - 1.1 = 0.2). d4 = 1.4 - 1.3 = 0.1."
+    },
+    {
+      "name": "daily_returns_first_wins",
+      "data_quality_flags": null,
+      "daily_returns": [
+        {
+          "date": "2026-03-03",
+          "value": 0.03
+        },
+        {
+          "date": "2026-03-04",
+          "value": -0.02
+        }
+      ],
+      "curve": [
+        {
+          "date": "2026-03-02",
+          "value": 1.0
+        },
+        {
+          "date": "2026-03-03",
+          "value": 1.1
+        },
+        {
+          "date": "2026-03-04",
+          "value": 1.21
+        }
+      ],
+      "expected": [
+        {
+          "date": "2026-03-03",
+          "value": 0.03
+        },
+        {
+          "date": "2026-03-04",
+          "value": -0.02
+        }
+      ],
+      "arithmetic": "A non-empty daily_returns is returned verbatim (0.03, -0.02) and the curve (which would read 0.1, 0.1) is ignored."
+    },
+    {
+      "name": "daily_returns_empty_list_falls_to_curve",
+      "data_quality_flags": null,
+      "daily_returns": [],
+      "curve": [
+        {
+          "date": "2026-03-02",
+          "value": 1.0
+        },
+        {
+          "date": "2026-03-03",
+          "value": 1.1
+        },
+        {
+          "date": "2026-03-04",
+          "value": 1.21
+        }
+      ],
+      "expected": [
+        {
+          "date": "2026-03-03",
+          "value": 0.1
+        },
+        {
+          "date": "2026-03-04",
+          "value": 0.1
+        }
+      ],
+      "arithmetic": "daily_returns = [] is empty, so the curve is read geometric: d1 = 1.1 / 1.0 - 1 = 0.1; d2 = 1.21 / 1.1 - 1 = 0.1."
+    },
+    {
+      "name": "daily_returns_empty_dict_falls_to_curve",
+      "data_quality_flags": null,
+      "daily_returns": {},
+      "curve": [
+        {
+          "date": "2026-03-02",
+          "value": 1.0
+        },
+        {
+          "date": "2026-03-03",
+          "value": 1.1
+        },
+        {
+          "date": "2026-03-04",
+          "value": 1.21
+        }
+      ],
+      "expected": [
+        {
+          "date": "2026-03-03",
+          "value": 0.1
+        },
+        {
+          "date": "2026-03-04",
+          "value": 0.1
+        }
+      ],
+      "arithmetic": "daily_returns = {} is empty, so the curve is read geometric: d1 = 0.1; d2 = 0.1."
+    },
+    {
+      "name": "daily_returns_without_a_finite_value_falls_to_curve",
+      "data_quality_flags": null,
+      "daily_returns": [
+        {
+          "date": "2026-03-03",
+          "value": null
+        }
+      ],
+      "curve": [
+        {
+          "date": "2026-03-02",
+          "value": 1.0
+        },
+        {
+          "date": "2026-03-03",
+          "value": 1.1
+        },
+        {
+          "date": "2026-03-04",
+          "value": 1.21
+        }
+      ],
+      "expected": [
+        {
+          "date": "2026-03-03",
+          "value": 0.1
+        },
+        {
+          "date": "2026-03-04",
+          "value": 0.1
+        }
+      ],
+      "arithmetic": "daily_returns holds one record whose value is null (non-finite), so it carries no usable value and the curve is read geometric: d1 = 0.1; d2 = 0.1."
+    },
+    {
+      "name": "daily_returns_flat_dict_shape",
+      "data_quality_flags": null,
+      "daily_returns": {
+        "2026-03-03": 0.03,
+        "2026-03-04": -0.02
+      },
+      "curve": [
+        {
+          "date": "2026-03-02",
+          "value": 1.0
+        },
+        {
+          "date": "2026-03-03",
+          "value": 1.1
+        },
+        {
+          "date": "2026-03-04",
+          "value": 1.21
+        }
+      ],
+      "expected": [
+        {
+          "date": "2026-03-03",
+          "value": 0.03
+        },
+        {
+          "date": "2026-03-04",
+          "value": -0.02
+        }
+      ],
+      "arithmetic": "Flat {date: value} daily_returns {2026-03-03: 0.03, 2026-03-04: -0.02} is read verbatim; the curve is ignored."
+    },
+    {
+      "name": "daily_returns_nested_dict_shape_zero_pads",
+      "data_quality_flags": null,
+      "daily_returns": {
+        "2026": {
+          "3-3": 0.03,
+          "03-04": -0.02
+        }
+      },
+      "curve": [
+        {
+          "date": "2026-03-02",
+          "value": 1.0
+        },
+        {
+          "date": "2026-03-03",
+          "value": 1.1
+        },
+        {
+          "date": "2026-03-04",
+          "value": 1.21
+        }
+      ],
+      "expected": [
+        {
+          "date": "2026-03-03",
+          "value": 0.03
+        },
+        {
+          "date": "2026-03-04",
+          "value": -0.02
+        }
+      ],
+      "arithmetic": "Nested {year: {M-D: value}} daily_returns {2026: {3-3: 0.03, 03-04: -0.02}}: the short key 3-3 is zero-padded to 03-03, so the dates are 2026-03-03 and 2026-03-04 with the verbatim values."
+    },
+    {
+      "name": "unsorted_input_is_sorted",
+      "data_quality_flags": null,
+      "daily_returns": null,
+      "curve": [
+        {
+          "date": "2026-03-04",
+          "value": 1.21
+        },
+        {
+          "date": "2026-03-02",
+          "value": 1.0
+        },
+        {
+          "date": "2026-03-03",
+          "value": 1.1
+        }
+      ],
+      "expected": [
+        {
+          "date": "2026-03-03",
+          "value": 0.1
+        },
+        {
+          "date": "2026-03-04",
+          "value": 0.1
+        }
+      ],
+      "arithmetic": "The curve arrives as 1.21 (03-04), 1.0 (03-02), 1.1 (03-03) and is sorted by date before pairing: d1 = 1.1 / 1.0 - 1 = 0.1; d2 = 1.21 / 1.1 - 1 = 0.1."
+    },
+    {
+      "name": "zero_point_series_is_empty",
+      "data_quality_flags": null,
+      "daily_returns": null,
+      "curve": [],
+      "expected": [],
+      "arithmetic": "No stored point: no day is formable, the result is empty."
+    },
+    {
+      "name": "one_point_series_is_empty",
+      "data_quality_flags": null,
+      "daily_returns": null,
+      "curve": [
+        {
+          "date": "2026-03-02",
+          "value": 1.0
+        }
+      ],
+      "expected": [],
+      "arithmetic": "One stored point has no predecessor: day 0 never emits, the result is empty."
+    },
+    {
+      "name": "unknown_method_string_reads_geometric",
+      "data_quality_flags": {
+        "cumulative_method": "arithmetic"
+      },
+      "daily_returns": null,
+      "curve": [
+        {
+          "date": "2026-03-02",
+          "value": 1.0
+        },
+        {
+          "date": "2026-03-03",
+          "value": 1.1
+        },
+        {
+          "date": "2026-03-04",
+          "value": 1.2
+        }
+      ],
+      "expected": [
+        {
+          "date": "2026-03-03",
+          "value": 0.1
+        },
+        {
+          "date": "2026-03-04",
+          "value": 0.09090909090909091
+        }
+      ],
+      "arithmetic": "cumulative_method = arithmetic is not a recognised literal, so the curve reads geometric: d1 = 0.1; d2 = 1.2 / 1.1 - 1 = 1/11 = 0.0909090909090909... (simple would give 0.1)."
+    },
+    {
+      "name": "absent_method_key_reads_geometric",
+      "data_quality_flags": {
+        "native_unit": null
+      },
+      "daily_returns": null,
+      "curve": [
+        {
+          "date": "2026-03-02",
+          "value": 1.0
+        },
+        {
+          "date": "2026-03-03",
+          "value": 1.1
+        },
+        {
+          "date": "2026-03-04",
+          "value": 1.2
+        }
+      ],
+      "expected": [
+        {
+          "date": "2026-03-03",
+          "value": 0.1
+        },
+        {
+          "date": "2026-03-04",
+          "value": 0.09090909090909091
+        }
+      ],
+      "arithmetic": "data_quality_flags carries no cumulative_method, so the curve reads geometric: d1 = 0.1; d2 = 1.2 / 1.1 - 1 = 1/11 = 0.0909090909090909..."
+    },
+    {
+      "name": "native_leg_loses_first_two_days",
+      "data_quality_flags": {
+        "native_unit": "BTC"
+      },
+      "daily_returns": null,
+      "curve": [
+        {
+          "date": "2026-03-02",
+          "value": 1.0
+        },
+        {
+          "date": "2026-03-03",
+          "value": 1.1
+        },
+        {
+          "date": "2026-03-04",
+          "value": 1.21
+        },
+        {
+          "date": "2026-03-05",
+          "value": 1.331
+        }
+      ],
+      "expected": [
+        {
+          "date": "2026-03-04",
+          "value": 0.21
+        },
+        {
+          "date": "2026-03-05",
+          "value": -0.01
+        }
+      ],
+      "arithmetic": "Geometric curve 1.0, 1.1, 1.21, 1.331 on 03-02..03-05 gives native returns 0.1 on 03-03, 03-04 and 03-05 (day 0 dropped by the curve read). The BTC conversion then drops the first remaining day (03-03 has no prior priced day) and prices the rest: usd = (1 + r) * (close_k / close_{k-1}) - 1 with closes 100 (03-03), 110 (03-04), 99 (03-05). 03-04: 1.1 * (110 / 100) - 1 = 1.21 - 1 = 0.21. 03-05: 1.1 * (99 / 110) - 1 = 1.1 * 0.9 - 1 = -0.01. Only the days from the curve's day 2 on survive.",
+      "native_unit": "BTC",
+      "closes": {
+        "2026-03-03": 100,
+        "2026-03-04": 110,
+        "2026-03-05": 99
+      }
     }
   ]
 }
