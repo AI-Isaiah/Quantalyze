@@ -31,6 +31,7 @@ import { captureToSentry } from "@/lib/sentry-capture";
 import { AllocatorSyncStatus } from "@/components/exchanges/AllocatorSyncStatus";
 import type { ApiKey } from "@/lib/types";
 import { API_KEY_USER_COLUMNS } from "@/lib/constants";
+import { dataSourceLabel } from "@/lib/api-key-label";
 import { accountShareNote } from "@/lib/account-share-note";
 import { isComputedAnalytics, isUntrustedKeySyncStatus } from "@/lib/closed-sets";
 
@@ -299,6 +300,11 @@ export function ApiKeyManager({
    */
   const linkControlsAllowed = keyShape === "single";
   const [keys, setKeys] = useState<ApiKey[]>([]);
+  // D-03 (164.6.6.3.1): `keys` starts as `[]`, so without this flag the empty
+  // sentence paints for the whole first read over a user who has keys. Set by
+  // every arm that SETTLES a read (clean, failed, thrown), never by the
+  // superseded early return, and never reset: a re-read keeps the list it has.
+  const [firstReadSettled, setFirstReadSettled] = useState(false);
   const [showForm, setShowForm] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -464,6 +470,8 @@ export function ApiKeyManager({
       // Surface a distinct, retryable error state and keep whatever keys we
       // had — never let the failure collapse into the empty "no keys" UI.
       setLoadError(message);
+      // D-03: a failed read is a settled read; the error card owns the screen.
+      setFirstReadSettled(true);
       return { ok: false, subjectStatus: prevStatus, subjectPresent: prevPresent };
     }
     const subjectRow = data.find((k) => k.id === lastAttemptedKeyIdRef.current);
@@ -473,6 +481,8 @@ export function ApiKeyManager({
     // Reached only on a clean response: clear any prior load error so a
     // successful retry restores the normal list / genuine-empty state.
     setLoadError(null);
+    // D-03: a clean read, empty or not, settles the first read.
+    setFirstReadSettled(true);
     if (data) {
       setKeys(data);
       // NEW-C37-04: derive lastSyncAt from the key that was actually synced
@@ -494,7 +504,17 @@ export function ApiKeyManager({
   }, [currentKeyId, retireSuccessIf]);
 
   useEffect(() => {
-    loadKeys();
+    // D-03: a THROWN first read (the client threw before any response) used to
+    // be a dropped promise: no error state and no settled flag, so the card
+    // fell through to "No API keys connected." (H-0395: a failure is never "no
+    // keys"). It settles into the same retryable load-error card instead.
+    // `loadKeys` itself is not wrapped, so the terminal re-read keeps its own
+    // catch and capture. Logs the error object only, no key id or label.
+    loadKeys().catch((err: unknown) => {
+      console.error("[ApiKeyManager] api_keys first read threw:", err);
+      setLoadError(err instanceof Error ? err.message : "The key list read failed.");
+      setFirstReadSettled(true);
+    });
   }, [loadKeys]);
 
   /**
@@ -1637,7 +1657,19 @@ export function ApiKeyManager({
         </Card>
       )}
 
-      {listedKeys.length === 0 && !loadError && !showForm && (
+      {/* D-03 (164.6.6.3.1): the one honest line while the FIRST read is in
+          flight. Same box as the empty state so the swap moves no layout. No
+          spinner or skeleton (DESIGN.md Motion), and muted, never red or amber:
+          waiting is not a fault. */}
+      {!firstReadSettled && !showForm && (
+        <Card>
+          <p role="status" aria-live="polite" className="text-sm text-text-muted text-center py-4">
+            Loading keys…
+          </p>
+        </Card>
+      )}
+
+      {firstReadSettled && listedKeys.length === 0 && !loadError && !showForm && (
         <Card>
           <p className="text-sm text-text-muted text-center py-4">
             {/* H-2: a card with no Add Key never invites one (KCS-EMPTY-NOLINK). */}
@@ -1650,18 +1682,26 @@ export function ApiKeyManager({
 
       {listedKeys.map((key) => (
         <Card key={key.id} data-testid={`api-key-card-${key.id}`}>
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-3">
+          {/* D-10 (164.6.6.3.1): the row wraps; the left block may shrink
+              (min-w-0) from a 14rem basis, NOT flex-1: a zero basis never
+              lets the action row wrap and splits the nickname one word per
+              line at 360 to 560 px (measured, RESEARCH Item 8). The actions
+              never shrink and wrap as a whole row, each button on one line. */}
+          <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-3">
+            <div className="flex min-w-0 flex-[1_1_14rem] items-center gap-3">
               <span
                 data-testid={`api-key-avatar-${key.exchange}`}
-                className="flex h-8 w-8 items-center justify-center rounded-md bg-sidebar/10 text-xs font-bold text-text-primary"
+                className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-sidebar/10 text-xs font-bold text-text-primary"
               >
                 {exchangeIcon[key.exchange] ?? "?"}
               </span>
-              <div>
+              <div className="min-w-0">
                 <p className="text-sm font-medium text-text-primary">{key.label}</p>
                 <p className="text-xs text-text-muted">
-                  {key.exchange.charAt(0).toUpperCase() + key.exchange.slice(1)}
+                  {/* D-10 (164.6.6.3.1): the one shared label ("MT5", "OKX"), the
+                      allocator card's source; an id outside the map renders
+                      verbatim. The title-case it replaces read "Mt5" / "Okx". */}
+                  {dataSourceLabel(key).exchange}
                   {key.last_sync_at && ` · Last synced ${new Date(key.last_sync_at).toLocaleDateString()}`}
                 </p>
                 {key.exchange === "mt5" && (
@@ -1686,12 +1726,13 @@ export function ApiKeyManager({
                 })()}
               </div>
             </div>
-            <div className="flex items-center gap-2">
+            <div className="flex max-w-full shrink-0 flex-wrap items-center gap-2">
               {/* KCS-23: no Resync / Use & Sync on a composite or an unknown
                   shape; both write `strategies.api_key_id`. */}
               {!linkControlsAllowed ? null : key.id === currentKeyId ? (
                 <Button
                   size="sm"
+                  className="whitespace-nowrap"
                   variant="ghost"
                   onClick={() => handleSyncTrades(key.id)}
                   // KCS-01 / RESEARCH P7: also while an Add Key is in flight.
@@ -1702,6 +1743,7 @@ export function ApiKeyManager({
               ) : (
                 <Button
                   size="sm"
+                  className="whitespace-nowrap"
                   variant="ghost"
                   onClick={() => handleSyncTrades(key.id)}
                   // KCS-01 / RESEARCH P7: also while an Add Key is in flight.
@@ -1713,6 +1755,7 @@ export function ApiKeyManager({
               {key.exchange === "mt5" && (
                 <Button
                   size="sm"
+                  className="whitespace-nowrap"
                   variant="ghost"
                   onClick={() => setUpdatingKeyId(key.id)}
                   // Phase 167 / 167-06, R4 (167-CONTEXT D-18): a key's password
@@ -1744,6 +1787,7 @@ export function ApiKeyManager({
               )}
               <Button
                 size="sm"
+                className="whitespace-nowrap"
                 variant="ghost"
                 onClick={() => handleDeleteClick(key.id)}
                 // Phase 167 / 167-06, R5 (167-CONTEXT D-18): a key is never

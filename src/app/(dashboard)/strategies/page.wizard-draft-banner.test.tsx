@@ -151,7 +151,10 @@ vi.mock("@/lib/supabase/server", () => ({
         table !== "strategies" &&
         table !== "contact_requests" &&
         table !== "api_keys" &&
-        table !== "strategy_keys"
+        table !== "strategy_keys" &&
+        // Phase 164.6.6.3.1 D-05/D-06 Wave 0: plan 05's page read; the default
+        // empty answer below is what this file wants.
+        table !== "strategy_shares"
       ) {
         throw new Error(`Unexpected table: ${table}`);
       }

@@ -416,6 +416,48 @@ export default async function StrategiesPage() {
 
   const strategyIds = strategies?.map((s) => s.id) ?? [];
 
+  // Phase 164.6.6.3.1 D-05/D-06 (item 6f) — which UNPUBLISHED rows carry a
+  // confirmed live private link, so the row can say "Manage private link".
+  // ONE batched read over the listed unpublished ids, on the request-scoped
+  // client under RLS `strategy_shares_owner` (`created_by = auth.uid()`), and
+  // never the admin client. Only `strategy_id, revoked_at` are selected: the
+  // token inputs (`nonce`, `generation`) never leave the database, and only a
+  // boolean per row crosses to the client component. The live flag is derived
+  // HERE, in code, as `revoked_at === null` (the factsheet's own rule), not in
+  // the query, so a revoked row cannot read as live.
+  // ⛔ D-06: fail CLOSED. `liveShareIds` starts empty and stays empty on any
+  // read failure, so every unpublished row reads "Get private link" rather than
+  // claim a live link nobody confirmed. The failure is logged and captured with
+  // tags only (no id, no row), and no visible note is shown. Zero unpublished
+  // rows means no read at all.
+  const unpublishedIds = (strategies ?? [])
+    .filter((s) => !isPublishedStatus(s.status))
+    .map((s) => s.id);
+  const liveShareIds = new Set<string>();
+  if (unpublishedIds.length > 0) {
+    // The generated types predate `strategy_shares`; the cast is type-only and
+    // the runtime client stays RLS-scoped (as for `strategy_keys` below).
+    const { data: shareRows, error: sharesError } = await (
+      supabase as unknown as SupabaseClient
+    )
+      .from("strategy_shares")
+      .select("strategy_id, revoked_at")
+      .in("strategy_id", unpublishedIds);
+    if (sharesError || !Array.isArray(shareRows)) {
+      const message = sharesError
+        ? sharesError.message
+        : "strategy_shares read returned a non-array answer";
+      console.error("[strategies/page] active-share read failed", message);
+      captureToSentry(new Error(message), {
+        tags: { route: "strategies/page", stage: "active-share" },
+      });
+    } else {
+      for (const r of shareRows as { strategy_id: string; revoked_at: string | null }[]) {
+        if (r.revoked_at === null) liveShareIds.add(r.strategy_id);
+      }
+    }
+  }
+
   const { data: introRequests } = strategyIds.length > 0
     ? await supabase
         .from("contact_requests")
@@ -807,6 +849,7 @@ export default async function StrategiesPage() {
                     <ShareableLink
                       strategyId={s.id}
                       published={isPublishedStatus(s.status)}
+                      hasActiveShare={liveShareIds.has(s.id)}
                       size="sm"
                     />
                     <Badge label={s.status} type="status" />

@@ -1,5 +1,47 @@
 # Changelog
 
+## [0.125.2.1] - 2026-10-07 — UIPOLISH: the small UI defects from the 2026-10-03 UAT pass
+
+Phase 164.6.6.3.1 fixes the small UI defects the 2026-10-03 production UAT pass found.
+
+### Fixed
+- **The strategy edit form no longer renames a strategy on an unrelated save.** A strategy whose
+  name is not on the picker list (for example "MM-2x") showed "Alpha Centauri" in the picker, and
+  any save wrote that back. The picker now offers and preselects the strategy's own name, and an
+  edit sends `name` only when the user actually changed the pick. Creating a strategy still names it.
+- **The key card no longer says "No API keys connected." while the keys are loading.** It says
+  "Loading keys…" until its first read settles. A first read that throws lands in the existing
+  retryable error card, and the console line logs only the error object.
+- **The key card's venue line reads the shared label** ("MT5", "OKX") instead of a title-cased guess,
+  and its actions wrap as one whole row with every button on one line.
+- **/recommendations and /portfolios/[id] print the legal disclaimer once, not twice.** A census
+  test keeps every dashboard route at exactly one.
+- **The recommendations batch chip says which batch it is** ("Batch: Fresh · Oct 6"). A missing or
+  unparseable date shows no date, never "Invalid Date".
+- **The bottom-nav label wraps whole and centred** in both cell layouts.
+- **The factsheet's alpha KPI label reads "α VS BTC"**, with the glyph kept lower-case under the
+  uppercase style. The fix applies only to α labels, so "Sharpe" is untouched.
+- **An unpublished /strategies row with a live private link says "Manage private link"** and opens
+  the share panel in a "Private link" dialog, instead of offering to create a new link. The live
+  flag comes from one RLS-scoped read of two columns (`strategy_id`, `revoked_at`), with no token
+  material, and only a boolean reaches the browser. A failed read fails closed (no live link
+  claimed) and loud (console and Sentry).
+
+### Tests
+- New and extended tests in `StrategyForm`, `ApiKeyManager`, `FreshnessBadge`, the dashboard
+  disclaimer census, `FactsheetView.kpistrip`, `ShareableLink` and the /strategies page. Each new
+  guard was shown failing against the old code first.
+- The three /strategies page test doubles answer a `strategy_shares` read and still throw on any
+  other unexpected table.
+
+### Notes
+- **The reported ~20 s key-list read did not reproduce on PROD** (plan 06, read-only). The database
+  answers in about 0.3 ms, and the browser has the whole list about 0.9–1.4 s after navigation. The
+  "No API keys connected." flash was the real defect, fixed above.
+- **Shipped open by founder decision (2026-10-06).** Four UAT items are read after deploy: three in
+  Chrome by Claude, and the α label in Safari or Firefox by the founder.
+- Security audit: 20 threats, 0 open. No package added.
+
 ## [0.125.2.0] - 2026-10-07 — UATFIXES: a fresh MT5 login waits for its deal history; an unlisted broker server is named, not timed out
 
 Phase 164.6.6.3 fixes the MT5 defects the 2026-10-03 production UAT pass found.

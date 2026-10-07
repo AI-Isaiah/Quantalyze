@@ -37,6 +37,32 @@ import {
 
 import { ShareableLink } from "./ShareableLink";
 
+// Phase 164.6.6.3.1 D-05: the "Manage private link" Modal mounts the REAL
+// OwnerUnpublishedPanel (row and panel must share one state), which lives in
+// FactsheetView.tsx. Its module pulls in sentry capture and next/navigation,
+// stubbed as FactsheetView.share-affordance.test.tsx stubs them.
+vi.mock("@/lib/sentry-capture", () => ({ captureToSentry: vi.fn() }));
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ refresh: vi.fn() }),
+}));
+
+// jsdom (older builds) lacks the native dialog methods Modal calls; same
+// polyfill as FactsheetView.share-affordance.test.tsx.
+if (typeof HTMLDialogElement !== "undefined") {
+  if (!HTMLDialogElement.prototype.showModal) {
+    HTMLDialogElement.prototype.showModal = function showModal() {
+      this.setAttribute("open", "");
+      (this as unknown as { open: boolean }).open = true;
+    };
+  }
+  if (!HTMLDialogElement.prototype.close) {
+    HTMLDialogElement.prototype.close = function close() {
+      this.removeAttribute("open");
+      (this as unknown as { open: boolean }).open = false;
+    };
+  }
+}
+
 const STRATEGY_ID = "11111111-1111-4111-8111-111111111111";
 
 const ORIGINAL_CLIPBOARD = navigator.clipboard;
@@ -398,4 +424,198 @@ describe("ShareableLink — size (170-05)", () => {
     expect(iconClass(screen.getByRole("button"))).toContain("text-negative");
     vi.unstubAllGlobals();
   });
+});
+
+/**
+ * Phase 164.6.6.3.1 D-05 (item 6f) — a row with a CONFIRMED live private link
+ * reads "Manage private link" and manages it in a Modal that reuses the
+ * factsheet's OwnerUnpublishedPanel.
+ *
+ * The labels are typed HERE, never imported, so a copy rewrite can fail this
+ * file. "Opening the Modal makes no fetch" is the load-bearing negative: the
+ * Modal states the link is live and offers copy and revoke, it does not print
+ * the URL, so it must not mint-or-reuse on open.
+ */
+describe("ShareableLink — Manage private link (164.6.6.3.1 D-05)", () => {
+  const MANAGE = "Manage private link";
+  const GET = "Get private link";
+  const MODAL_TITLE = "Private link";
+  const MINTED_URL = "https://quantalyze.xyz/factsheet-share/tok-en-abc";
+
+  let fetchMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    setClipboard({ writeText: vi.fn().mockResolvedValue(undefined) });
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("D-05: a confirmed live link reads Manage private link and opens the Private link Modal without a fetch", async () => {
+    render(
+      <ShareableLink
+        strategyId={STRATEGY_ID}
+        published={false}
+        hasActiveShare
+        size="sm"
+      />,
+    );
+
+    const manage = screen.getByRole("button", { name: MANAGE });
+    expect(manage.getAttribute("aria-haspopup")).toBe("dialog");
+
+    fireEvent.click(manage);
+
+    expect(await screen.findByText(MODAL_TITLE)).toBeTruthy();
+    expect(
+      await screen.findByRole("button", { name: "Copy share link" }),
+    ).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Revoke link" })).toBeTruthy();
+    expect(
+      fetchMock,
+      "opening the Modal must not mint-or-reuse: it prints no URL",
+    ).not.toHaveBeenCalled();
+  });
+
+  it("a published row ignores hasActiveShare", () => {
+    render(
+      <ShareableLink
+        strategyId={STRATEGY_ID}
+        published
+        hasActiveShare
+        size="sm"
+      />,
+    );
+    const button = screen.getByRole("button");
+    expect(button.textContent).toMatch(/Share Factsheet/);
+    expect(button.getAttribute("aria-haspopup")).toBeNull();
+  });
+
+  it("absent hasActiveShare stays Get private link, with no popup and no dialog", () => {
+    const { container } = render(
+      <ShareableLink strategyId={STRATEGY_ID} published={false} size="sm" />,
+    );
+    const button = screen.getByRole("button", { name: GET });
+    expect(button.getAttribute("aria-haspopup")).toBeNull();
+    expect(container.querySelector("dialog")).toBeNull();
+  });
+
+  it("the Close button closes the Modal through the native close", async () => {
+    const closeSpy = vi.spyOn(HTMLDialogElement.prototype, "close");
+    render(
+      <ShareableLink
+        strategyId={STRATEGY_ID}
+        published={false}
+        hasActiveShare
+        size="sm"
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: MANAGE }));
+    await screen.findByRole("button", { name: "Copy share link" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+
+    await waitFor(() => expect(closeSpy).toHaveBeenCalledTimes(1));
+    expect(screen.queryByRole("button", { name: "Copy share link" })).toBeNull();
+    expect(screen.getByRole("button", { name: MANAGE })).toBeTruthy();
+  });
+
+  /** Open the Modal from a live row and return the revoke trigger's click path. */
+  async function openLive(): Promise<void> {
+    render(
+      <ShareableLink
+        strategyId={STRATEGY_ID}
+        published={false}
+        hasActiveShare
+        size="sm"
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: MANAGE }));
+    await screen.findByRole("button", { name: "Revoke link" });
+  }
+
+  function confirmRevoke(): void {
+    fireEvent.click(screen.getByRole("button", { name: "Revoke link" }));
+    fireEvent.click(screen.getByRole("button", { name: "Revoke" }));
+  }
+
+  it.each([200, 404])(
+    "a revoke %i closes the Modal through the native close and the row reads Get private link",
+    async (status) => {
+      const closeSpy = vi.spyOn(HTMLDialogElement.prototype, "close");
+      fetchMock.mockResolvedValue({
+        ok: status >= 200 && status < 300,
+        status,
+        json: async () => ({}),
+      });
+      await openLive();
+
+      confirmRevoke();
+
+      await waitFor(() =>
+        expect(screen.getByRole("button", { name: GET })).toBeTruthy(),
+      );
+      expect(closeSpy).toHaveBeenCalledTimes(1);
+      expect(screen.queryByRole("button", { name: "Revoke link" })).toBeNull();
+    },
+  );
+
+  it("a revoke 500 keeps the Modal open with its alert, and the row still reads Manage private link", async () => {
+    const closeSpy = vi.spyOn(HTMLDialogElement.prototype, "close");
+    fetchMock.mockResolvedValue({ ok: false, status: 500, json: async () => ({}) });
+    await openLive();
+
+    confirmRevoke();
+
+    expect(
+      await screen.findByText("Couldn't revoke this link. Try again."),
+    ).toBeTruthy();
+    expect(screen.getByText(MODAL_TITLE)).toBeTruthy();
+    expect(screen.getByRole("button", { name: MANAGE })).toBeTruthy();
+    expect(closeSpy).not.toHaveBeenCalled();
+  });
+
+  it("a successful row mint flips the row to Manage private link once the copy feedback clears", async () => {
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ url: MINTED_URL }),
+    });
+    render(<ShareableLink strategyId={STRATEGY_ID} published={false} size="sm" />);
+
+    fireEvent.click(screen.getByRole("button", { name: GET }));
+
+    await waitFor(() =>
+      expect(screen.getByRole("button").textContent).toMatch(/Link copied!/),
+    );
+    // "Link copied!" clears after 2 s; the idle label must then read Manage,
+    // never "Get private link" over a link the mint just confirmed.
+    await waitFor(
+      () => expect(screen.getByRole("button", { name: MANAGE })).toBeTruthy(),
+      { timeout: 4000 },
+    );
+  });
+
+  it("a failed mint never claims a live link", async () => {
+    fetchMock.mockResolvedValue({ ok: false, status: 500, json: async () => ({}) });
+    render(<ShareableLink strategyId={STRATEGY_ID} published={false} size="sm" />);
+
+    fireEvent.click(screen.getByRole("button", { name: GET }));
+
+    await waitFor(() =>
+      expect(screen.getByRole("button").textContent).toMatch(
+        /Couldn't create the link — try again/,
+      ),
+    );
+    // The failure copy clears after 4 s.
+    await waitFor(
+      () => expect(screen.getByRole("button", { name: GET })).toBeTruthy(),
+      { timeout: 6000 },
+    );
+    expect(screen.queryByRole("button", { name: MANAGE })).toBeNull();
+  }, 10_000);
 });

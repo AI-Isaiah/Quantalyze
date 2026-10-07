@@ -893,10 +893,20 @@ export function OwnerUnpublishedNotice({
 export function OwnerUnpublishedPanel({
   strategyId,
   hasActiveShare = false,
+  onShareLiveChange,
   shareNote,
 }: {
   strategyId: string;
   hasActiveShare?: boolean;
+  /**
+   * Phase 164.6.6.3.1 D-05 — a host keeps its OWN label in step with the panel
+   * (the /strategies row's "Manage private link" Modal). Called with the new
+   * live state after a mint (true) and after a revoke 2xx or 404 (false), on
+   * the event path only: never at mount, never inside a state updater, never on
+   * a failed revoke. Absent, nothing is called and every other mount is
+   * byte-identical.
+   */
+  onShareLiveChange?: (live: boolean) => void;
   /**
    * Phase 167.2 / KCS-12 (S7) — what a recipient of this strategy's private
    * link sees right now, rendered as the panel's last child. Only the owner
@@ -905,7 +915,16 @@ export function OwnerUnpublishedPanel({
    */
   shareNote?: string;
 }) {
-  const [shareLive, setShareLive] = React.useState(hasActiveShare);
+  const [shareLive, setShareLiveState] = React.useState(hasActiveShare);
+  // One setter for both children: the panel's own state and the host stay on the
+  // same value. The host callback runs here, on the event path.
+  const setShareLive = React.useCallback(
+    (live: boolean) => {
+      setShareLiveState(live);
+      onShareLiveChange?.(live);
+    },
+    [onShareLiveChange],
+  );
 
   return (
     <div className="mb-6">
@@ -1641,9 +1660,16 @@ function KpiStrip() {
             className="px-3 py-3 sm:px-4 sm:py-4 min-w-0"
             style={{ borderRight: "1px solid var(--color-border)", borderTop: "1px solid var(--color-border)" }}
           >
+            {/* 164.6.6.3.1 D-09 (item 6d): the uppercase would turn the alpha glyph
+                into a capital alpha, so the label that starts with it exempts its
+                first letter ("α VS BTC"). Gated on the glyph: on "Sharpe" the same
+                class would render "sHARPE". A `<span className="normal-case">`
+                around the glyph was measured and rejected: it splits the `<p>`'s
+                own text nodes and breaks six `getByText("α vs ...")` locators
+                (FactsheetBody.joint-floor / .basis). Text content stays "α vs BTC". */}
             <p
               data-testid="factsheet-kpi-label"
-              className="text-micro font-mono uppercase tracking-[0.14em] sm:tracking-[0.18em] whitespace-nowrap overflow-hidden text-ellipsis"
+              className={`text-micro font-mono uppercase tracking-[0.14em] sm:tracking-[0.18em] whitespace-nowrap overflow-hidden text-ellipsis${it.label.startsWith("α") ? " first-letter:normal-case" : ""}`}
               style={{ color: "var(--color-text-muted)" }}
             >
               {it.label}
