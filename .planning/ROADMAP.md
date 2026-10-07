@@ -396,6 +396,13 @@ they will correctly discover is untrue, and then discard along with the real con
     `docs/runbooks/flipretry-derived-equity-go-live.md:171` forbids scheduling it from a migration
     (auto-apply + a silently-skipped worker deploy recreates the v1.11 wedge verbatim). A migration
     doing exactly this was written and deleted unmerged on 2026-08-24.
+    ⛔ **AMENDED 2026-10-07 (Phase 167.1.2.2 DERIVECRON, D-01/D-02/D-05):** the cron is being
+    re-registered by 167.1.2.2, see its runbook `docs/runbooks/derivecron-go-live.md` (a runbook
+    step the orchestrator runs, never a migration). It is re-registered because 167.1.2 PR C2's
+    reader accepts only the version-2 row this job produces. The "never from a migration"
+    prohibition stands unchanged. The reason this fence gave (the job is key-mode and never
+    stamps `strategy_analytics`) is still true: re-registering it does not fix the
+    ledger-backed strategy refresh this fence was about.
 
 **⚠️ Risk shape:** fanning jobs at a fixed hour carries the v1.11 worker-wedge shape — MT5
 serializes on ONE shared terminal (`services/mt5_concurrency.py`) at a 15-min timeout per key.
@@ -4676,6 +4683,13 @@ version-2 `equity_curve` row and My Allocation leaves "being rebuilt".
    re-register" notes are superseded by this booking and must be amended where they stand).
 3. The first 05:30 UTC run after registration writes a version-2 `equity_curve` row for every eligible allocator,
    measured counts-only, and My Allocation renders the history (browser check).
+   ⛔ **AMENDED 2026-10-07 (planning, D-06/D-09):** SC-3's "every eligible allocator" is read as
+   every eligible allocator not held by an earlier named gate (census e reasons
+   `rebuilding:duplicate_account`, `rebuilding:key_not_syncing`,
+   `rebuilding:account_identity_pending`); held owners are listed by reason and count, never
+   hidden; per D-09, owners whose only gap is an okx crawl-bound hit are counted under the
+   booked okx follow-up (verdict `PASS-WITH-D09-OKX`). Accepted by the orchestrator under
+   D-06/D-09.
 4. 167.1.2's remaining browser UAT (Overview, Scenario, Exchanges notes, `/allocations` tab switch, 390px / 200%)
    is completed against real rebuilt books.
 **Founder decisions 2026-10-07 (after research):** FLIP Step 4 (E2GT-01) waived as a pre-gate; one manual fan-out rehearsal before registering; okx bound hits do not hold the cron (booked follow-up); backfill staleness alarm routed to OUTAGEALERT. Detail: `167.1.2.2-CONTEXT.md` D-07..D-10.
