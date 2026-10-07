@@ -3039,10 +3039,13 @@ that is briefly busy (an owed scrub or a held lease), and for a fresh account wh
 settled, each with its own wire code and copy, pinned by tests.
 **Requirements**: none in REQUIREMENTS.md; the items above are the spec.
 **Depends on:** Phase 164.6.6.3 (it emits the history-not-ready `error_kind` this phase words)
-**Plans:** 0 plans
+**Plans:** 4 plans
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 164.6.6.3.2 to break down)
+- [ ] 164.6.6.3.2-01-PLAN.md — env-gap: three emitters to `MT5_VALIDATION_UNCONFIGURED` / `KEY_MT5_VALIDATION_UNCONFIGURED`, D-31 stays, paging and the inverted-timeout capture (D-01, D-07) — wave 1
+- [ ] 164.6.6.3.2-02-PLAN.md — busy: `scrub_owed` and `lease_busy` to recoverable `MT5_TERMINAL_BUSY` / `KEY_MT5_TERMINAL_BUSY`, a test per emitter (D-02) — wave 2
+- [ ] 164.6.6.3.2-03-PLAN.md — both new codes proven at every key route and component; STATUS_CONTRACT and runbooks (D-01, D-02, D-07) — wave 3
+- [ ] 164.6.6.3.2-04-PLAN.md — history not settled: final-attempt provenance stamp and `GATE_HISTORY_NOT_SETTLED` (D-03, D-06) — wave 3
 
 ### Phase 164.6.6.3.1: UIPOLISH — the small UI defects from the 2026-10-03 UAT pass are fixed (164.6.6.3 split D: items 1, 6a, 6c, 6d, 6e, 6f, 8) (INSERTED)
 
