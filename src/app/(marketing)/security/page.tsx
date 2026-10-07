@@ -389,7 +389,7 @@ export default function SecurityPage() {
               coordinated disclosure are published on this page.
             </p>
             <p className="mt-3 text-caption text-text-muted">
-              Last reviewed: 2026-04-12.
+              Last reviewed: 2026-10-07.
             </p>
           </section>
         </article>
