@@ -443,8 +443,11 @@ describe("[161-10 / E5] the row of remedies is not truncated at the data layer",
     // trivially, and `"anything".includes("")` would make a blank bullet pass.
     expect(expected.length).toBeGreaterThanOrEqual(2);
 
+    // 164.6.6.3.5 plan 06: "contact form" in a bullet is now a new-tab link whose
+    // visually hidden "(opens in a new tab)" sits in the <li>'s text; strip that
+    // announcement so the copy itself stays pinned byte-for-byte.
     const rendered = Array.from(envelope.querySelectorAll("li")).map((li) =>
-      String(li.textContent),
+      String(li.textContent).replace(" (opens in a new tab)", ""),
     );
     expect(
       rendered.length,

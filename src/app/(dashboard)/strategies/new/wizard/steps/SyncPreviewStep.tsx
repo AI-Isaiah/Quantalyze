@@ -2506,6 +2506,7 @@ export function SyncPreviewStep({
               so the envelope's body is wizardErrors copy and nothing else. */}
           <WizardErrorEnvelope
             envelope={errorEnvelope}
+            contactDraftId={strategyId}
             onRetry={
               kickoffRetryCanChangeTheOutcome ? handleKickoffRetry : undefined
             }

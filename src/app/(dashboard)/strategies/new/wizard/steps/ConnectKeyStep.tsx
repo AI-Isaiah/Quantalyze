@@ -39,6 +39,8 @@ import {
 // D-08 (Phase 164.6.6) — the secret slot reads the venue CAPABILITY, never a
 // venue name, to decide whether a paste keeps its edge whitespace.
 import { venueSecretIsVerbatim } from "@/lib/closed-sets";
+import { ContactPointerText } from "@/components/contact/ContactPointerText";
+import { contactHref } from "@/lib/contact";
 
 /**
  * ConnectKeyStep renders the exchange selector, the inline permission
@@ -204,7 +206,7 @@ const TRUST_ATOMS: { title: string; body: string }[] = [
   },
   {
     title: "Security contact",
-    body: "Questions? security@quantalyze.com responds within one business day.",
+    body: "Questions? Use the contact form; we reply within one business day.",
   },
 ];
 
@@ -1809,7 +1811,16 @@ export function ConnectKeyStep({
               className="grid gap-1 px-4 py-3 md:grid-cols-[180px_1fr] md:gap-6"
             >
               <dt className="text-caption font-medium text-text-primary">{atom.title}</dt>
-              <dd className="text-caption text-text-secondary">{atom.body}</dd>
+              <dd className="text-caption text-text-secondary">
+                {/* 164.6.6.3.5 S10 — the only atom with the phrase is the
+                    security contact; every other body passes through unchanged.
+                    New tab: the wizard holds unsaved state (AD-04). */}
+                <ContactPointerText
+                  text={atom.body}
+                  href={contactHref({ topic: "security" })}
+                  newTab
+                />
+              </dd>
             </div>
           ))}
         </dl>

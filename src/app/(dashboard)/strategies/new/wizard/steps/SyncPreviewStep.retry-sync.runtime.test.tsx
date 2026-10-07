@@ -279,6 +279,23 @@ describe("⭐ [140.5-03 / SEAMPROSE-02] SyncPreviewStep.handleRetrySync — the 
     expect(screen.queryByTestId("wizard-sync-interrupted")).toBeNull();
   });
 
+  it("[DOMAINONE D-02] the envelope's contact pointer carries the draft id this step holds", async () => {
+    // SYNC_FAILED's fix says "send the correlation id ... through the contact
+    // form". The step knows its strategy id, so the link must arrive with
+    // `draft=` already filled. Prove the pointer rendered first, so a copy
+    // change that drops the phrase cannot turn this vacuous.
+    syncPostQueue = [kickoffAccepted(), denied(401, "Unauthorized")];
+    await renderSettled();
+    await clickRetrySync();
+
+    const envelope = screen.getByTestId("error-envelope");
+    const link = within(envelope).getByRole("link", { name: /contact form/ });
+    const href = link.getAttribute("href") ?? "";
+    expect(href).toMatch(/^\/contact\?topic=support&ref=/);
+    expect(href).toContain(`&draft=${baseProps.strategyId}`);
+    expect(link).toHaveAttribute("target", "_blank");
+  });
+
   it("classifies through the SAME wire→wizard hop as the first attempt", async () => {
     // One route, one classifier. A second classification path for the identical
     // request would be two answers to one question, and it is how the two
