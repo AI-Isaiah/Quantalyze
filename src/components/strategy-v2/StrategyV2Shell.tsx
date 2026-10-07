@@ -3,6 +3,7 @@ import { Disclaimer } from "@/components/ui/Disclaimer";
 import { VerifiedBadge } from "@/components/ui/VerifiedBadge";
 import { OverviewPanel } from "./OverviewPanel";
 import { HeadlineMetricsPanel } from "./HeadlineMetricsPanel";
+import { parseReturnsUnit } from "@/lib/factsheet/returns-unit";
 import { DrawdownPanel } from "./DrawdownPanel";
 import { ReturnsDistributionPanel } from "./ReturnsDistributionPanel";
 import { RollingMetricsPanel } from "./RollingMetricsPanel";
@@ -84,6 +85,10 @@ export function StrategyV2Shell({ detail }: StrategyV2ShellProps) {
           panel2Equity={panel2Equity}
           rolling_metrics={panel5Inputs.rolling_metrics}
           history_days={history_days}
+          // Phase 164.6.6.2 plan 07 (D-09, D-10): the flags already reach the
+          // shell; the unit is parsed here, at the boundary, so a malformed
+          // jsonb value reads as USD rather than as label text.
+          returnsUnit={parseReturnsUnit(panel6Inputs.data_quality_flags?.native_unit)}
         />
 
         <DrawdownPanel panel3={panel3} history_days={history_days} />
