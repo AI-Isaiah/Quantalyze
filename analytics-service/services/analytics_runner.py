@@ -1829,7 +1829,7 @@ async def run_csv_strategy_analytics(
             # a real number. benchmark_rets stays None, so those metrics persist null.
             # Only a non-empty string counts as a unit; anything else is absent.
             _native_unit_raw = existing_flags.get("native_unit")
-            _native_unit: str | None = (
+            _native_unit = (
                 _native_unit_raw
                 if isinstance(_native_unit_raw, str) and _native_unit_raw.strip()
                 else None
