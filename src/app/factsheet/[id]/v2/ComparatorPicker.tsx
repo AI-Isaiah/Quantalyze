@@ -5,6 +5,7 @@ import { trackFactsheetEvent } from "./factsheet-analytics";
 import { useBasisSeriesView } from "./basis-context";
 import { isoToMonthDay } from "./MetricsColumn";
 import { COMPARATOR_CALENDARS, isPastCoverage, type WeekdayCalendar } from "@/lib/factsheet/align";
+import { nativeUnitReason } from "@/lib/factsheet/returns-unit";
 
 // The "none" state is reachable by clicking the active comparator chip a
 // second time — toggle-off semantics. An explicit "None" radio used to live
@@ -50,6 +51,12 @@ export function ComparatorPicker() {
   // clamps an MTM or smoothed axis to the cash range (D-64(4) Amendment A), so the
   // cash block can be covered while the active one is not.
   const view = useBasisSeriesView(payload);
+  // Phase 164.6.6.2 (D-10, D-17, UI-SPEC A6): a strategy whose returns are in a native
+  // unit is never offered the BTC comparator. No disabled button (a disabled control is
+  // still a tab stop that does nothing): the key is left out and one span in the same
+  // row states why. This span is the reason for every absent BTC-relative figure.
+  const unit = payload.returnsUnit ?? null;
+  const keys = unit === null ? KEYS : KEYS.filter(key => key !== "btc");
   const caption =
     comparator === "none"
       ? null
@@ -69,7 +76,7 @@ export function ComparatorPicker() {
         <span className="text-micro font-mono uppercase tracking-wider text-text-muted">
           Compare to
         </span>
-        {KEYS.map(key => {
+        {keys.map(key => {
           const active = key === comparator;
           const block = payload.comparators[key];
           // Toggle-off: clicking the active chip clears the comparator. This
@@ -100,6 +107,11 @@ export function ComparatorPicker() {
             </button>
           );
         })}
+        {unit !== null && (
+          <span className="text-micro font-mono uppercase tracking-wider text-text-muted">
+            {`${LABELS.btc} not available: ${nativeUnitReason(unit)}`}
+          </span>
+        )}
       </div>
       {caption !== null && (
         <p className="text-micro font-mono uppercase tracking-wider text-text-muted">

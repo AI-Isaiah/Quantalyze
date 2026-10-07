@@ -779,7 +779,9 @@ function buildFromBuildableSeries(
     strategyDrawdowns: cashBundle.strategyDrawdowns,
     strategyWorst10: cashBundle.strategyWorst10,
     strategyMetrics,
-    activeComparator: "btc",
+    // Phase 164.6.6.2 (D-10, UI-SPEC A7): a BTC strategy measured against BTC is a flat
+    // line, so a unit pins the comparator away from BTC. "none", never silently SPX.
+    activeComparator: opts?.returnsUnit ? "none" : "btc",
     comparators: cashBundle.comparators,
     styleDrift: cashBundle.styleDrift,
     streaks: cashBundle.streaks,
