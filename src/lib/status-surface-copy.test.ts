@@ -96,14 +96,14 @@ describe("S6 — KCS-09 fixed remedies", () => {
     for (const shape of ["single", "composite", "csv", "unknown"] as const) {
       const r = ownerRemedy({ state: "failed", errorKind: "permanent" }, shape, SID);
       expect(r.id).toBe("KCS09-CONTACT-PERMANENT");
-      expect(rendered(r)).toBe("Contact support@quantalyze.com to resolve it.");
+      expect(rendered(r)).toBe("Use the contact form to have it resolved.");
     }
   });
 
   it("KCS09-CONTACT-CHECK for finished without a payload", () => {
     const r = ownerRemedy({ state: "finished" }, "single", SID);
     expect(r.id).toBe("KCS09-CONTACT-CHECK");
-    expect(rendered(r)).toBe("Contact support@quantalyze.com to have it checked.");
+    expect(rendered(r)).toBe("Use the contact form to have it checked.");
   });
 
   it("KCS09-UNREADABLE remedy: Reload this page to try again.", () => {
@@ -168,7 +168,7 @@ describe("S6 — KCS-21 shape remedies", () => {
       expect(r.id).toBe("KCS21-SINGLE");
       expect(r.link).toEqual({ text: "edit page", href: `/strategies/${SID}/edit` });
       expect(rendered(r)).toBe(
-        "Start a new computation with Resync on this strategy's edit page. Contact support@quantalyze.com if it does not complete.",
+        "Start a new computation with Resync on this strategy's edit page. Use the contact form if it does not complete.",
       );
     }
   });

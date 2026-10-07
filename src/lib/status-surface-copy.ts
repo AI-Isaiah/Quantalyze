@@ -241,13 +241,13 @@ const RELOAD_REMEDY = {
 
 const CONTACT_PERMANENT_REMEDY = {
   id: "KCS09-CONTACT-PERMANENT",
-  before: `Contact ${SUPPORT_EMAIL} to resolve it.`,
+  before: "Use the contact form to have it resolved.",
   after: "",
 } as const satisfies OwnerRemedy;
 
 const CONTACT_CHECK_REMEDY = {
   id: "KCS09-CONTACT-CHECK",
-  before: `Contact ${SUPPORT_EMAIL} to have it checked.`,
+  before: "Use the contact form to have it checked.",
   after: "",
 } as const satisfies OwnerRemedy;
 
@@ -299,7 +299,7 @@ function shapeRemedy(shape: StrategyShape, strategyId: string): OwnerRemedy {
       id: "KCS21-SINGLE",
       before: "Start a new computation with Resync on this strategy's ",
       link: { text: "edit page", href: editHref },
-      after: `. Contact ${SUPPORT_EMAIL} if it does not complete.`,
+      after: ". Use the contact form if it does not complete.",
     },
     unlinked: {
       id: "KCS21-UNLINKED",

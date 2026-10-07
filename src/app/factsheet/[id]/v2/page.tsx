@@ -51,6 +51,8 @@ import {
 } from "@/lib/strategy-shape";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { FactsheetView, OwnerUnpublishedPanel } from "./FactsheetView";
+import { ContactPointerText } from "@/components/contact/ContactPointerText";
+import { contactHref } from "@/lib/contact";
 
 /**
  * Phase 167.2 / KCS-09 — the owner state line's colour, by the tone its copy
@@ -624,6 +626,13 @@ export default async function FactsheetV2Page({
     const ownerRemedyLine =
       ownerStatus &&
       ownerRemedy(ownerStatus.state, ownerStatus.shape, signature.id, ownerBuildFacts);
+    // Phase 164.6.6.3.5 (AD-05): the remedy's "contact form" phrase links the
+    // support topic with this strategy's id. Same tab: this page holds no
+    // unsaved state.
+    const supportContactHref = contactHref({
+      topic: "support",
+      strategy: signature.id,
+    });
     return (
       <article className="mx-auto max-w-[760px] px-4 sm:px-6 lg:px-10 py-12">
         {/* WR-02: the owner lane's placeholder must carry the visibility
@@ -674,7 +683,7 @@ export default async function FactsheetV2Page({
               {ownerLine.text}
             </p>
             <p className="mt-3 text-fixed-12 text-text-muted">
-              {ownerRemedyLine.before}
+              <ContactPointerText text={ownerRemedyLine.before} href={supportContactHref} />
               {ownerRemedyLine.link && (
                 <Link
                   href={ownerRemedyLine.link.href}
@@ -683,7 +692,7 @@ export default async function FactsheetV2Page({
                   {ownerRemedyLine.link.text}
                 </Link>
               )}
-              {ownerRemedyLine.after}
+              <ContactPointerText text={ownerRemedyLine.after} href={supportContactHref} />
             </p>
           </section>
         ) : (
