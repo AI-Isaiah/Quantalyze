@@ -246,8 +246,9 @@ export { extractAnalytics, EMPTY_ANALYTICS };
  * reads other managers' published strategies, which is why the requirement
  * names this site alongside the anonymous ones. RLS is ROW-level and cannot
  * hide a column, so an explicit column list is the only control over what
- * leaves the database — `daily_returns`, the `metrics_json` blob and
- * `data_quality_flags` are all absent here and none of them was ever read.
+ * leaves the database — `daily_returns`, the `metrics_json` blob and the
+ * `data_quality_flags` blob are all absent here (only the one
+ * `cumulative_method` scalar alias below is projected).
  *
  * Enumerated from the compare UI at HEAD (enumerate before cutting):
  *   - the nine `METRICS` rows in CompareTable (:27-37), read by DYNAMIC key
@@ -256,13 +257,18 @@ export { extractAnalytics, EMPTY_ANALYTICS };
  *     page.test.tsx.
  *   - `returns_series`, read by BOTH CompareEquityOverlay (:40) and
  *     CompareCorrelationMatrix (:26). Dropping it blanks both charts.
+ *   - `cumulative_method:data_quality_flags->>cumulative_method` (Phase
+ *     164.6.6.2.2 WR-05): ONE scalar out of the flags blob, a JSONB-key alias in
+ *     the `three_month` form, so CompareCorrelationMatrix can difference the
+ *     curve by the row's own method (`curveMethodFromFlags`). The blob itself
+ *     stays out of this projection.
  *
  * Lives here (not in the page file) so every "which analytics columns may
  * leave the DB" list is auditable with one grep of this module, alongside
  * PUBLIC_ANALYTICS_COLUMNS and the STRATEGY_DETAIL_* constants.
  */
 export const COMPARE_ANALYTICS_COLUMNS =
-  "cumulative_return, cagr, sharpe, sortino, calmar, max_drawdown, max_drawdown_duration_days, volatility, six_month_return, returns_series";
+  "cumulative_return, cagr, sharpe, sortino, calmar, max_drawdown, max_drawdown_duration_days, volatility, six_month_return, returns_series, cumulative_method:data_quality_flags->>cumulative_method";
 
 /**
  * Phase 159 (159-03, RANK-02 / decision D-02) — the RANKED-LIST analytics
