@@ -1,5 +1,71 @@
 # Changelog
 
+## [0.125.2.0] - 2026-10-07 — UATFIXES: a fresh MT5 login waits for its deal history; an unlisted broker server is named, not timed out
+
+Phase 164.6.6.3 fixes the MT5 defects the 2026-10-03 production UAT pass found.
+
+### Fixed
+- **A fresh MT5 login no longer reads a half-downloaded deal history.** Right after `login()` the
+  terminal is still pulling the account's deals, so the first `history_deals_get` could return a
+  partial ledger that derive and backfill then wrote down as truth. `read_mt5_deal_ledger` now takes
+  `settle_history`. A fresh read re-reads every `_MT5_HISTORY_POLL_S` (2 s) until the count is
+  unchanged across `_MT5_HISTORY_STABLE_INTERVALS` (2) full intervals, within `_MT5_HISTORY_WAIT_S`
+  (30 s). A zero count on an account above the material-equity floor never counts as settled.
+- **Fresh versus cached is decided per terminal and key** by a settled record in `mt5_client`,
+  stamped only after the POST bracket passes. It is dropped whenever the terminal's holder changes
+  (login of another key, recycle, scrub), so a cached verdict never outlives the session it vouched
+  for. A cached read pays no wait.
+- **An expired wait is transient and loud, never permanent.** `Mt5HistoryUnsettledError` maps to
+  a fixed message on both paths (`_MT5_HISTORY_UNSETTLED_MESSAGE` for derive,
+  `_MT5_BACKFILL_MESSAGES["history_unsettled"]` for backfill), each pinned through the real
+  `classify_mt5_login_error` so it can never read as a credential fault. It logs ERROR, persists
+  nothing and does not restart the terminal.
+- **The outer timeout no longer kills a healthy slow download.** `mt5_derive_read_bound_s` derives
+  the `asyncio.wait_for` bound at both call sites: the read budget for a cached read, plus the wait
+  and one trailing read's rpyc timeout for a fresh one (40 s → 100 s with the defaults).
+- **An MT5 key on a broker server the terminals do not know is refused up front, by name.** It used
+  to hang for about 45 s and surface as a network timeout. One shared `assert_mt5_server_known`
+  runs before the client, the lease and `login()` on both validate paths (the router probe and the
+  worker adapter). It answers a new recoverable 424 `MT5_SERVER_UNKNOWN`, and the wizard, the
+  multi-key step and the rotate-secret dialog all name it instead of rendering `UNKNOWN`. The house
+  `MT5_SERVER` is always admitted. An empty list is an operator fault
+  (`MT5_GATEWAY_UNCONFIGURED`), never "server unknown" for every user. Closes
+  `MT5-UNKNOWN-BROKER-SERVER-HANG-01`.
+- **Four Sentry tags no longer label every later event the worker sends.** `mt5_server_unknown`,
+  `mt5_validation_park_failed`, `mt5_validation_scrub_failed` and
+  `mt5_validation_gateway_unconfigured` are now set on a `new_scope()` around their own capture.
+
+### Changed
+- **The jobs terminal's `ipc_fault` scrub now deletes the per-account deal caches** (D-07), flipped
+  only after both derive and backfill wait for history. A failed trades delete on that path logs
+  ERROR with `trades_kept=delete_errored` and is never reported as a clean recycle.
+- **New required variable on `quantalyze-analytics`: `MT5_KNOWN_SERVERS`**, a comma-separated list
+  of the broker servers both terminals know. It was set on production before this deploy. The
+  user-supplied server is sanitised (printable characters only, 64 max) before it reaches a log line
+  or Sentry, and Sentry captures are deduped to one per server per hour over at most 256 keys.
+
+### Tests
+- Python: 8051 passed, 90 skipped. New and extended suites include `test_mt5_server_known.py`,
+  `test_mt5_read.py`, `test_mt5_derive_branch.py`, `test_equity_reconstruction.py` and
+  `test_mt5_validate_parity.py`. The four Sentry fixes use the real SDK with a recording
+  `before_send`, because a mock cannot tell a scoped tag from an unscoped one.
+- Frontend: `wizardErrors`, `MultiKeyConnectStep`, `UpdateMt5SecretDialog` and the two invariant
+  tests cover the new code. The 424 is in the wire contract and the raw-5xx census.
+- Review: two rounds. Round 1 found CR-01, WR-01, WR-02, WR-03 and SFH-M1, all fixed with tests
+  that failed against the old code first. Round 2 (code reviewer and silent-failure pass) was
+  clean. Security audit: 29 threats, 0 open.
+
+### Notes
+- `docs/runbooks/mt5-go-live.md` Step 2d: how to add a broker server to both terminals.
+  `STATUS_CONTRACT.md` and `deploy/mt5-gateway/railway-gateway.md` carry the new 424 and the variable.
+- **Open, founder-owned live checks:** SC1 (a fresh MT5 onboarding end to end on production) and
+  SC4 (validating a key on a newly added broker server). The D-03 measurement is deferred to them.
+- **Known limits, recorded rather than fixed:**
+  - The server list is static. Phase 164.6.6.3.6 MT5SERVERLEARN makes it learn new servers.
+  - A gateway-side cache loss this process did not cause stays invisible to the settled record
+    (accepted risk AR-02).
+  - Five pre-existing unscoped `sentry_sdk.set_tag` sites are booked as `SENTRY-UNSCOPED-TAG-01`.
+
 ## [0.125.1.4] - 2026-10-06 — MT5RELOGIN closes: question THREE settled STALE; 164.6.5, 165, 165.1 closed
 
 ### Fixed
