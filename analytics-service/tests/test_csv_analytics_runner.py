@@ -141,7 +141,11 @@ async def test_csv_analytics_happy_path() -> None:
     completed = [c for c in upsert_calls if c.args[0].get("computation_status") == "complete"]
     assert len(completed) >= 1, "Expected at least one upsert with status='complete'"
     payload = completed[0].args[0]
-    assert payload["data_quality_flags"] == {"csv_source": True}
+    # Phase 164.6.6.2.2 (D-05): a success write names its curve's cumulative method.
+    assert payload["data_quality_flags"] == {
+        "csv_source": True,
+        "cumulative_method": "geometric",
+    }
     assert payload["trade_metrics"] is None
     assert payload["volume_metrics"] is None
     assert payload["exposure_metrics"] is None
