@@ -2,6 +2,7 @@ import { after } from "next/server";
 import { Resend } from "resend";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { getCorrelationId } from "@/lib/correlation-id";
+import { getPlatformEmail, getPlatformName } from "@/lib/platform";
 import { SEVERITY_HEX, type AlertSeverity } from "./utils";
 import type { ManagerIdentity } from "@/lib/types";
 
@@ -49,11 +50,13 @@ function getAuditAdminClient(): ReturnType<typeof createAdminClient> | null {
   return _auditAdmin;
 }
 
-// Whitelabel-friendly platform identity. Defaults keep Quantalyze branding;
-// a partner deployment flips these via env vars without touching code.
+// Whitelabel-friendly platform identity. The display name defaults to
+// Quantalyze branding; a partner deployment flips it via env var without
+// touching code. `PLATFORM_NAME` stays a module constant for the email BODY
+// copy; the SENDER is read at send time (`send()`) through
+// `getPlatformEmail()` and has NO default (D-12): unset means the send is
+// skipped with a logged warning and an audited 'failed' row.
 const PLATFORM_NAME = process.env.PLATFORM_NAME ?? "Quantalyze";
-const PLATFORM_EMAIL = process.env.PLATFORM_EMAIL ?? "notifications@quantalyze.com";
-const FROM = `${PLATFORM_NAME} <${PLATFORM_EMAIL}>`;
 /**
  * Runtime read of the founder/admin email so a delayed env-var injection
  * (a race between Vercel's runtime-env wiring and module init, or a test
@@ -68,7 +71,7 @@ const FROM = `${PLATFORM_NAME} <${PLATFORM_EMAIL}>`;
 function founderEmail(): string {
   return process.env.ADMIN_EMAIL ?? "";
 }
-const APP_URL = process.env.NEXT_PUBLIC_APP_URL ?? "https://quantalyze.com";
+const APP_URL = process.env.NEXT_PUBLIC_APP_URL ?? "https://quantalyze.xyz";
 const BRAND_COLOR = "#1B6B5A"; // muted teal, per DESIGN.md
 const SIGNATURE = `<p style="color:#666;font-size:13px;">— ${PLATFORM_NAME}</p>`;
 
@@ -294,6 +297,30 @@ async function send(
     return;
   }
 
+  // D-04 / D-12: the sender is read at send time and has no fallback. With no
+  // sender, take the same skip branch as the no-Resend path above (warning,
+  // audited 'failed' row, throw for throwOnFailure callers). We never send
+  // from an address we did not configure.
+  const senderEmail = getPlatformEmail();
+  if (!senderEmail) {
+    console.warn("[email] PLATFORM_EMAIL not configured — skipping send to", safeTo);
+    if (throwOnFailure) {
+      await markDispatch(admin, dispatchId, {
+        status: "failed",
+        error: "PLATFORM_EMAIL not configured",
+      });
+      throw new Error("[email] PLATFORM_EMAIL not configured — send failed");
+    }
+    scheduleDispatchAudit(() =>
+      markDispatch(admin, dispatchId, {
+        status: "failed",
+        error: "PLATFORM_EMAIL not configured",
+      }),
+    );
+    return;
+  }
+  const from = `${getPlatformName()} <${senderEmail}>`;
+
   // Phase 16 / OBSERV-03: resolve correlation_id BEFORE the retry loop so all
   // attempts carry the same cid tag (the same logical email keeps the same
   // chain id even on transient retries).
@@ -312,7 +339,7 @@ async function send(
     sendError = null;
     try {
       const result = await resend.emails.send({
-        from: FROM,
+        from,
         to: safeTo,
         // NEW-C33-02: use safeCC (sanitized) instead of raw cc.
         cc: safeCC,

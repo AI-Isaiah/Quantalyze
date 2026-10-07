@@ -69,7 +69,7 @@ const state = vi.hoisted(
     updateShouldThrow: boolean;
     resendShouldFail: boolean;
     resendError: string;
-    sendCalls: Array<{ to: string; subject: string; cc?: unknown }>;
+    sendCalls: Array<{ to: string; subject: string; cc?: unknown; from?: string }>;
   } => ({
     rows: [],
     insertShouldFail: false,
@@ -139,8 +139,8 @@ vi.mock("@/lib/supabase/admin", () => ({
 vi.mock("resend", () => ({
   Resend: class MockResend {
     emails = {
-      send: async (payload: { to: string; subject: string; cc?: unknown }) => {
-        state.sendCalls.push({ to: payload.to, subject: payload.subject, cc: payload.cc });
+      send: async (payload: { to: string; subject: string; cc?: unknown; from?: string }) => {
+        state.sendCalls.push({ to: payload.to, subject: payload.subject, cc: payload.cc, from: payload.from });
         if (state.resendShouldFail) {
           return { data: null, error: { message: state.resendError } };
         }
@@ -149,6 +149,13 @@ vi.mock("resend", () => ({
     };
   },
 }));
+
+// D-12 (DOMAINONE): `email.ts` has NO sender fallback any more, so every case
+// that expects a real send needs a configured sender (D-07: an example.com
+// address, never a domain we might own). The no-sender cases unset it again.
+beforeEach(() => {
+  vi.stubEnv("PLATFORM_EMAIL", "test@example.com");
+});
 
 describe("email.ts — notification_dispatches audit trail", () => {
   beforeEach(() => {
@@ -388,6 +395,60 @@ describe("email.ts — notification_dispatches audit trail", () => {
       "[email] Resend not configured — skipping send to",
       "allocator@example.com",
     );
+  });
+
+  it("D-12 no sender: PLATFORM_EMAIL unset skips the send, warns, and marks the row 'failed'", async () => {
+    // Resend IS configured (beforeEach); only the sender is missing.
+    vi.stubEnv("PLATFORM_EMAIL", "");
+    vi.resetModules();
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const { notifyAllocatorIntroStatus } = await import("./email");
+
+    await notifyAllocatorIntroStatus(
+      "allocator@example.com",
+      "Long Vol Macro",
+      "intro_made",
+    );
+
+    // Never sent from an invented address.
+    expect(state.sendCalls).toHaveLength(0);
+    expect(state.rows).toHaveLength(1);
+    expect(state.rows[0].status).toBe("failed");
+    expect(state.rows[0].error).toBe("PLATFORM_EMAIL not configured");
+    expect(warnSpy).toHaveBeenCalledWith(
+      "[email] PLATFORM_EMAIL not configured — skipping send to",
+      "allocator@example.com",
+    );
+  });
+
+  it("D-12 no sender: a throwOnFailure caller gets a throw and an audited 'failed' row", async () => {
+    vi.stubEnv("PLATFORM_EMAIL", undefined);
+    vi.resetModules();
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const { notifyUserSignupApproved } = await import("./email");
+
+    await expect(
+      notifyUserSignupApproved("user@example.com", "manager"),
+    ).rejects.toThrow(/PLATFORM_EMAIL not configured/);
+    expect(state.sendCalls).toHaveLength(0);
+    expect(state.rows[0]?.status).toBe("failed");
+    expect(state.rows[0]?.error).toBe("PLATFORM_EMAIL not configured");
+  });
+
+  it("D-04 the sender is read at send time: an env set after import is honoured", async () => {
+    vi.stubEnv("PLATFORM_EMAIL", "");
+    vi.stubEnv("PLATFORM_NAME", "Acme");
+    vi.resetModules();
+    const { notifyManagerIntroRequest } = await import("./email");
+    // Set AFTER the module was imported.
+    vi.stubEnv("PLATFORM_EMAIL", "late@example.org");
+
+    await notifyManagerIntroRequest("manager@example.com", "Acme Capital", "Long Vol Macro");
+
+    expect(state.sendCalls).toHaveLength(1);
+    expect(state.sendCalls[0].from).toBe("Acme <late@example.org>");
   });
 
   it("empty recipient short-circuits before any dispatch write or Resend call", async () => {
