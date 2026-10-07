@@ -25,7 +25,7 @@ from __future__ import annotations
 import asyncio
 import pathlib
 import sys
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import DEFAULT, AsyncMock, MagicMock, patch
 
 import pandas as pd
 import pytest
@@ -108,24 +108,30 @@ def _make_supabase_for_compute(
     # as PostgREST would refuse it (Phase 164.6.6.2.2 D-04). A fake that answers
     # any select string is what hid `equity_curve` / `total_aum` on
     # strategy_analytics.
+    # `side_effect` returns DEFAULT so the mock still hands back its own
+    # `select.return_value` chain: other test files reach into that chain (e.g.
+    # `tables["portfolio_strategies"].select.return_value.eq.return_value.execute
+    # .side_effect = ...`), and that must keep working.
     ps = MagicMock()
-    ps_chain = MagicMock()
-    ps_chain.eq.return_value.execute.return_value = MagicMock(data=portfolio_strategies)
+    ps.select.return_value.eq.return_value.execute.return_value = MagicMock(
+        data=portfolio_strategies
+    )
 
     def _ps_select(select_str: str, *_a, **_kw):
         assert_select_columns("portfolio_strategies", select_str)
-        return ps_chain
+        return DEFAULT
 
     ps.select.side_effect = _ps_select
     table_mocks["portfolio_strategies"] = ps
 
     sa = MagicMock()
-    sa_chain = MagicMock()
-    sa_chain.in_.return_value.execute.return_value = MagicMock(data=analytics_rows)
+    sa.select.return_value.in_.return_value.execute.return_value = MagicMock(
+        data=analytics_rows
+    )
 
     def _sa_select(select_str: str, *_a, **_kw):
         assert_select_columns("strategy_analytics", select_str)
-        return sa_chain
+        return DEFAULT
 
     sa.select.side_effect = _sa_select
     table_mocks["strategy_analytics"] = sa

@@ -24,6 +24,7 @@ import pytest
 
 from routers import portfolio as portfolio_mod
 from routers.portfolio import _generate_alerts, _generate_rebalance_drift_alert
+from tests._curve_fixtures import curve_from_returns
 from tests.test_portfolio_compute_integration import _make_supabase_for_compute
 
 
@@ -514,14 +515,6 @@ class TestRebalanceDriftStrategyNameChunking:
 # ---------------------------------------------------------------------------
 
 _BTC_DATES = ["2026-02-02", "2026-02-03", "2026-02-04"]
-# BTC closes: +10% then +10%. Hand-computed against the shared oracle's
-# arithmetic, usd_k = (1 + r_k) * (P_k / P_{k-1}) - 1:
-#   B (BTC account, native daily returns 0.0, 0.10, 0.04)
-#     d1: 1.10 * 1.10 - 1 = 0.21      (the oracle's 0.21: r = 0.10)
-#     d2: 1.04 * 1.10 - 1 = 0.144
-#   A (USD account) 0.0, 0.02, 0.01; weights 0.5 / 0.5
-#   portfolio d1 = 0.5 * 0.02 + 0.5 * 0.21 = 0.115  (NOT 0.5*0.02 + 0.5*0.10 = 0.06)
-#   portfolio d2 = 0.5 * 0.01 + 0.5 * 0.144 = 0.077
 _BTC_CLOSES = pd.Series(
     [60000.0, 66000.0, 72600.0],
     index=pd.DatetimeIndex(_BTC_DATES),
@@ -530,29 +523,55 @@ _BTC_CLOSES = pd.Series(
 
 
 def _recs(values: list[float]) -> list[dict]:
+    """Return-shaped records. Kept for the optimizer / bridge fixtures below, whose
+    routers still read ``returns_series`` as returns until plan 05 moves them onto
+    the boundary; the COMPUTE path reads a stored curve, see ``_curve`` below."""
     return [{"date": d, "value": v} for d, v in zip(_BTC_DATES, values)]
 
 
-def _eq(values: list[float]) -> list[dict]:
-    out, level = [], 1.0
-    for d, v in zip(_BTC_DATES, values):
-        level *= 1 + v
-        out.append({"date": d, "value": level})
-    return out
+# --- compute-path fixtures (Phase 164.6.6.2.2): stored-shape CURVES -------------
+# ``strategy_analytics.returns_series`` is the cumulative wealth curve. Reading a
+# curve back through the boundary yields daily returns for days 1..n-1, and the
+# native -> USD converter then drops the FIRST day of what it is handed (it has no
+# prior priced value, RESEARCH Pitfall 7). A BTC leg therefore loses its first two
+# stored days: stored day 0 (no predecessor) and the first readable day. The compute
+# fixtures run on four stored days so the converted BTC leg still has two days.
+_BTC_COMPUTE_DATES = ["2026-02-02", "2026-02-03", "2026-02-04", "2026-02-05"]
+# BTC closes: +10% a day. Hand-computed against the shared oracle's arithmetic,
+# usd_k = (1 + r_k) * (P_k / P_{k-1}) - 1:
+#   B (BTC account) native readable returns d1 0.10, d2 0.10, d3 0.04 (curve
+#   1.0, 1.1, 1.21, 1.2584). d1 is lost to the converter (no prior priced day):
+#     d2: 1.10 * 1.10 - 1 = 0.21      (the oracle's 0.21: r = 0.10)
+#     d3: 1.04 * 1.10 - 1 = 0.144
+#   A (USD account) readable returns d1 0.02, d2 0.01, d3 0.03; weights 0.5 / 0.5.
+#   B has no USD return on d1, which the blend's fillna(0) reads as flat:
+#     portfolio d1 = 0.5 * 0.02 + 0.5 * 0     = 0.01
+#     portfolio d2 = 0.5 * 0.01 + 0.5 * 0.21  = 0.110   (NOT 0.5*0.01 + 0.5*0.10 = 0.055)
+#     portfolio d3 = 0.5 * 0.03 + 0.5 * 0.144 = 0.087
+_BTC_COMPUTE_CLOSES = pd.Series(
+    [60000.0, 66000.0, 72600.0, 79860.0],
+    index=pd.DatetimeIndex(_BTC_COMPUTE_DATES),
+    name="BTC",
+)
+
+
+def _curve(values: list[float]) -> list[dict]:
+    return curve_from_returns(values, _BTC_COMPUTE_DATES)
 
 
 def _mixed_portfolio_rows() -> tuple[list[dict], list[dict]]:
-    a = [0.0, 0.02, 0.01]
-    b = [0.0, 0.10, 0.04]  # B's d1 return is the oracle's r = 0.10
+    a = [0.0, 0.02, 0.01, 0.03]
+    b = [0.0, 0.10, 0.10, 0.04]
     ps = [
-        {"strategy_id": "usd-a", "current_weight": 0.5, "strategies": {"id": "usd-a", "name": "A"}},
-        {"strategy_id": "btc-b", "current_weight": 0.5, "strategies": {"id": "btc-b", "name": "B"}},
+        {"strategy_id": "usd-a", "current_weight": 0.5, "allocated_amount": 100.0,
+         "strategies": {"id": "usd-a", "name": "A"}},
+        {"strategy_id": "btc-b", "current_weight": 0.5, "allocated_amount": 50.0,
+         "strategies": {"id": "btc-b", "name": "B"}},
     ]
     sa = [
-        {"strategy_id": "usd-a", "returns_series": _recs(a), "equity_curve": _eq(a),
-         "total_aum": 100.0, "data_quality_flags": {}},
-        {"strategy_id": "btc-b", "returns_series": _recs(b), "equity_curve": _eq(b),
-         "total_aum": 50.0, "data_quality_flags": {"native_unit": "BTC"}},
+        {"strategy_id": "usd-a", "returns_series": _curve(a), "data_quality_flags": {}},
+        {"strategy_id": "btc-b", "returns_series": _curve(b),
+         "data_quality_flags": {"native_unit": "BTC"}},
     ]
     return ps, sa
 
@@ -579,35 +598,37 @@ class TestPortfolioAnalyticsBlendsBtcInUsd:
     @pytest.mark.asyncio
     async def test_portfolio_return_blends_the_converted_021_not_the_raw_010(self):
         ps, sa = _mixed_portfolio_rows()
-        tables, _ = await _run_compute(ps, sa, _BTC_CLOSES)
+        tables, _ = await _run_compute(ps, sa, _BTC_COMPUTE_CLOSES)
         update = tables["portfolio_analytics"].update.call_args[0][0]
         curve = {p["date"][:10]: p["value"] for p in update["portfolio_equity_curve"]}
-        # d1 = 0.5*0.02 + 0.5*0.21 = 0.115 -> equity 1.115. The raw-BTC blend
-        # would give 0.5*0.02 + 0.5*0.10 = 0.06 -> 1.06.
-        assert curve["2026-02-03"] == pytest.approx(1.115, abs=1e-12)
-        assert curve["2026-02-03"] != pytest.approx(1.06, abs=1e-3)
-        # d2 = 0.5*0.01 + 0.5*0.144 = 0.077
-        assert curve["2026-02-04"] == pytest.approx(1.115 * 1.077, abs=1e-12)
+        # d1 = 0.5*0.02 + 0.5*0 = 0.01 (B has no USD return that day) -> 1.01.
+        assert curve["2026-02-03"] == pytest.approx(1.01, abs=1e-12)
+        # d2 = 0.5*0.01 + 0.5*0.21 = 0.110 -> 1.01 * 1.11. The raw-BTC blend would
+        # give 0.5*0.01 + 0.5*0.10 = 0.055 -> 1.01 * 1.055.
+        assert curve["2026-02-04"] == pytest.approx(1.01 * 1.11, abs=1e-12)
+        assert curve["2026-02-04"] != pytest.approx(1.01 * 1.055, abs=1e-3)
+        # d3 = 0.5*0.03 + 0.5*0.144 = 0.087
+        assert curve["2026-02-05"] == pytest.approx(1.01 * 1.11 * 1.087, abs=1e-12)
 
     @pytest.mark.asyncio
     async def test_attribution_uses_the_usd_twr_of_the_btc_strategy(self):
         """compute_attribution's contribution is weight * strategy TWR. The BTC
-        strategy's stored equity_curve is in BTC, so its TWR must be rebuilt from
-        the converted returns: prod(1 + c_k, k>=1) - 1 with c1 = 1.1 * 1.1 - 1 = 0.21
-        and c2 = 1.04 * 1.1 - 1 = 0.144 -> 1.21 * 1.144 - 1 = 0.38424.
-        The raw equity ratio would be 1.10 * 1.04 - 1 = 0.144."""
+        strategy's curve is in BTC, so its TWR is taken from the CONVERTED returns:
+        prod(1 + c_k) - 1 with c2 = 1.1 * 1.1 - 1 = 0.21 and c3 = 1.04 * 1.1 - 1 =
+        0.144 -> 1.21 * 1.144 - 1 = 0.38424. The native returns' product would be
+        1.10 * 1.10 * 1.04 - 1 = 0.25840."""
         ps, sa = _mixed_portfolio_rows()
-        tables, _ = await _run_compute(ps, sa, _BTC_CLOSES)
+        tables, _ = await _run_compute(ps, sa, _BTC_COMPUTE_CLOSES)
         update = tables["portfolio_analytics"].update.call_args[0][0]
         by_id = {a["strategy_id"]: a for a in update["attribution_breakdown"]}
         assert by_id["btc-b"]["contribution"] == pytest.approx(0.5 * 0.38424, abs=1e-9)
-        # The USD strategy is untouched: 1.02 * 1.01 - 1 = 0.0302.
-        assert by_id["usd-a"]["contribution"] == pytest.approx(0.5 * 0.0302, abs=1e-9)
+        # The USD strategy is untouched: 1.02 * 1.01 * 1.03 - 1 = 0.061106.
+        assert by_id["usd-a"]["contribution"] == pytest.approx(0.5 * 0.061106, abs=1e-9)
 
     @pytest.mark.asyncio
     async def test_flags_are_read_from_the_same_row_as_the_returns(self):
         ps, sa = _mixed_portfolio_rows()
-        tables, _ = await _run_compute(ps, sa, _BTC_CLOSES)
+        tables, _ = await _run_compute(ps, sa, _BTC_COMPUTE_CLOSES)
         selected = tables["strategy_analytics"].select.call_args[0][0]
         assert "data_quality_flags" in selected
         assert "returns_series" in selected
@@ -616,18 +637,19 @@ class TestPortfolioAnalyticsBlendsBtcInUsd:
     async def test_a_usd_only_portfolio_reads_no_btc_closes_and_is_unchanged(self):
         ps, sa = _mixed_portfolio_rows()
         sa[1]["data_quality_flags"] = {}
-        tables, closes_mock = await _run_compute(ps, sa, _BTC_CLOSES)
+        tables, closes_mock = await _run_compute(ps, sa, _BTC_COMPUTE_CLOSES)
         closes_mock.assert_not_awaited()
         update = tables["portfolio_analytics"].update.call_args[0][0]
         curve = {p["date"][:10]: p["value"] for p in update["portfolio_equity_curve"]}
-        assert curve["2026-02-03"] == pytest.approx(1.06, abs=1e-12)  # 0.5*0.02 + 0.5*0.10
+        # B read as a USD account: d1 = 0.5*0.02 + 0.5*0.10 = 0.06, untouched.
+        assert curve["2026-02-03"] == pytest.approx(1.06, abs=1e-12)
 
     @pytest.mark.asyncio
     async def test_btc_closes_are_read_once_for_the_whole_request(self):
         ps, sa = _mixed_portfolio_rows()
         sa.append({**sa[1], "strategy_id": "btc-c"})
         ps.append({"strategy_id": "btc-c", "current_weight": 0.2, "strategies": {"id": "btc-c", "name": "C"}})
-        _, closes_mock = await _run_compute(ps, sa, _BTC_CLOSES)
+        _, closes_mock = await _run_compute(ps, sa, _BTC_COMPUTE_CLOSES)
         assert closes_mock.await_count == 1
 
     @pytest.mark.asyncio

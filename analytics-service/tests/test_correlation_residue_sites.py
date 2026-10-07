@@ -44,6 +44,8 @@ from services.match_engine import _compute_corr_with_portfolio
 from services.portfolio_optimizer import _avg_corr, find_improvement_candidates
 from services.portfolio_risk import compute_correlation_matrix, compute_rolling_correlation
 from services.strategy_matching import find_matched_strategy
+from tests._curve_fixtures import curve_from_returns
+from tests._schema_columns import assert_select_columns
 from tests.dispersion_fixtures import CONSTANT_YIELDS, apy, nav_constant_yield
 
 _YIELD_IDS = list(CONSTANT_YIELDS)
@@ -348,24 +350,49 @@ def test_c5_two_correlated_noisy_legs_keep_a_correlation() -> None:
 
 
 def _c6_supabase(returns: pd.Series) -> tuple[MagicMock, MagicMock]:
-    """A stub client for _compute_portfolio_analytics: one strategy at weight 1."""
-    records = [{"date": d.strftime("%Y-%m-%d"), "value": float(v)} for d, v in returns.items()]
-    equity = [
-        {"date": r["date"], "value": float(e)}
-        for r, e in zip(records, (1.0 + returns).cumprod())
-    ]
+    """A stub client for _compute_portfolio_analytics: one strategy at weight 1.
+
+    The strategy row carries the stored SHAPE (Phase 164.6.6.2.2): ``returns_series``
+    is the cumulative wealth curve, not the daily returns. A base day one calendar
+    day before the first return holds level 1.0, so reading the curve back through
+    the boundary yields ``returns`` on every one of its own dates. For a NAV
+    constant-yield leg that read-back is the same ``w_k / w_{k-1} - 1`` the platform
+    takes, with the same ~1e-16 residue the dispersion floor is built for.
+    """
+    base = (returns.index[0] - pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+    records = curve_from_returns(
+        [0.0] + [float(v) for v in returns],
+        [base] + [d.strftime("%Y-%m-%d") for d in returns.index],
+    )
     pa = MagicMock()
     pa.insert.return_value.execute.return_value = MagicMock(data=[{"id": "analytics-1"}])
     pa.select.return_value.eq.return_value.eq.return_value.order.return_value.limit.return_value.execute.return_value = MagicMock(data=[])
     pa.update.return_value.eq.return_value.execute.return_value = MagicMock(data=[])
+    # Column-strict (tests/_schema_columns.py): a select naming a column the real
+    # table lacks raises, as PostgREST would refuse it.
+    ps_chain = MagicMock()
+    ps_chain.eq.return_value.execute.return_value = MagicMock(data=[
+        {"strategy_id": "s1", "current_weight": 1.0, "allocated_amount": 100.0,
+         "strategies": {"id": "s1", "name": "S1"}},
+    ])
     ps = MagicMock()
-    ps.select.return_value.eq.return_value.execute.return_value = MagicMock(data=[
-        {"strategy_id": "s1", "current_weight": 1.0, "strategies": {"id": "s1", "name": "S1"}},
+
+    def _ps_select(select_str: str, *_a: object, **_kw: object) -> MagicMock:
+        assert_select_columns("portfolio_strategies", select_str)
+        return ps_chain
+
+    ps.select.side_effect = _ps_select
+    sa_chain = MagicMock()
+    sa_chain.in_.return_value.execute.return_value = MagicMock(data=[
+        {"strategy_id": "s1", "returns_series": records},
     ])
     sa = MagicMock()
-    sa.select.return_value.in_.return_value.execute.return_value = MagicMock(data=[
-        {"strategy_id": "s1", "returns_series": records, "equity_curve": equity, "total_aum": 100.0},
-    ])
+
+    def _sa_select(select_str: str, *_a: object, **_kw: object) -> MagicMock:
+        assert_select_columns("strategy_analytics", select_str)
+        return sa_chain
+
+    sa.select.side_effect = _sa_select
     pal = MagicMock()
     pal.select.return_value.eq.return_value.eq.return_value.is_.return_value.limit.return_value.execute.return_value = MagicMock(data=[])
     pal.insert.return_value.execute.return_value = MagicMock(data=[{"id": "alert-1"}])
