@@ -46,6 +46,12 @@
  *      worse than no gate: it reports OK forever. The success line always prints
  *      the scanned-file count for the same reason.
  *
+ *   6. ROADMAP-STRUCTURE — `.planning/ROADMAP.md` must carry, for every
+ *      `### Phase N:` heading, a checklist bullet and a Progress-table row, and
+ *      a phase whose VERIFICATION.md says `status: passed` must have its bullet
+ *      ticked. See `checkRoadmapStructure` for the exact reading (it mirrors the
+ *      GSD tooling's own) and the reason this is a gate and not a one-off repair.
+ *
  * Two blind spots this gate is built to avoid
  * -------------------------------------------
  *   - NUL bytes. `grep` and `git grep -I` classify a file containing a NUL as
@@ -155,7 +161,7 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { homedir, userInfo } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { basename, dirname, resolve } from "node:path";
@@ -733,8 +739,212 @@ function findNulViolations(rel: string, contents: string): string[] {
   ];
 }
 
+/**
+ * RULE 6 — ROADMAP-STRUCTURE (founder instruction 2026-10-08, "fix roadmap so it
+ * doesnt happen again").
+ *
+ * WHY THIS IS A GATE. `gsd-tools phase complete N` closes a phase by flipping
+ * exactly two things in ROADMAP.md: the `- [ ] **Phase N: …**` checklist bullet
+ * and the phase's row in the Progress table. A phase that lacks either is not an
+ * error to the tool — it simply stays "open", silently, forever. MEASURED
+ * 2026-10-08: 145 `### Phase N:` headings against 111 `- [ ]/[x] **Phase N:`
+ * bullets (this rule's wider reading, which also accepts carried and struck-through
+ * bullets, still found 25 headings with none), 26 headings with no Progress row,
+ * and three rows reading "Queued"/"Waiting" for phases that had shipped.
+ * The drift accrued one inserted phase at a time, because `/gsd-phase --insert`
+ * writes the heading and the tool that closes it reads the bullet, and nothing
+ * compared the two. This rule compares them on every event: `frontend-lint` is
+ * always-on, so a planning-only PR is checked too.
+ *
+ * It fails when
+ *   (a) a phase heading has no checklist bullet the GSD tooling would match,
+ *   (b) a phase heading has no row in a Progress table, or
+ *   (c) the phase's VERIFICATION.md says `status: passed` and the bullet is not
+ *       ticked (`phase complete` was never run, or was run on a phase it could
+ *       not see).
+ *
+ * READING (mirrors `gsd-core` phase.cjs, not a private dialect):
+ *   - heading : `^ {0,3}#{2,4}\s*Phase\s+N(\s*\(tag\))?:`
+ *   - bullet  : `^[ \t]*-\s*\[<one char>\]\s*(\*\*)?\s*Phase\s+N(\s*\(tag\))?[:\s]`
+ *               phase.cjs flips only `[ ]`; this rule also accepts a ticked or
+ *               carried marker, because a bullet already closed is not missing.
+ *               Lines inside fenced code blocks are ignored, as phase.cjs's
+ *               `updateBullet` ignores them.
+ *   - row     : in any table whose header has the columns Phase, Plans Complete,
+ *               Status, Completed, a row whose FIRST cell matches `^N\.?(\s|$)`.
+ *               (`2` matches `2.` and `2 Alpha`, never `2.5 Extra`.)
+ *
+ * ONE DELIBERATE EXEMPTION, by form and not by name: a bullet written
+ * `**~~Phase N~~:` marks a phase the founder RETIRED (Phases 165, 165.1, 165.2,
+ * 2026-09-27). It satisfies (a), must be ticked, and satisfies (b), because the
+ * roadmap states a retired phase is "not a row of this table". There is no list
+ * of phase numbers here to widen: a phase is exempt only by being struck through
+ * in the roadmap itself, where a reader sees it.
+ *
+ * (c) reads the phase's own VERIFICATION.md (`<dir>/<N>-VERIFICATION.md`). A
+ * phase with no such file is not judged by (c) — fail-open on an absent
+ * ARTIFACT only, so a checkout that does not carry `.planning/phases/` cannot
+ * turn this red. (a) and (b) need nothing but the roadmap.
+ */
+export interface RoadmapStructureReport {
+  headings: number;
+  bullets: number;
+  rows: number;
+  violations: string[];
+}
+
+const ROADMAP_PROGRESS_COLUMNS = ["Phase", "Plans Complete", "Status", "Completed"];
+const ROADMAP_PHASE_TOKEN = "[0-9]+(?:\\.[0-9]+)*";
+const ROADMAP_TAG = "(?:\\s*\\([^)\\n]{0,200}\\))?";
+
+function escapeForRegex(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+export function checkRoadmapStructure(
+  roadmap: string,
+  verificationStatus: (phase: string) => string | null = () => null,
+): RoadmapStructureReport {
+  const lines = roadmap.split("\n");
+
+  // Pass 1 — strip fenced lines from consideration, collect headings.
+  const live: Array<{ text: string; n: number }> = [];
+  let fence: string | null = null;
+  lines.forEach((text, i) => {
+    const f = text.match(/^ {0,3}(`{3,}|~{3,})/);
+    if (f) {
+      const marker = f[1][0];
+      if (fence === null) fence = marker;
+      else if (fence === marker) fence = null;
+      return;
+    }
+    if (fence === null) live.push({ text, n: i + 1 });
+  });
+
+  const headingRe = new RegExp(
+    `^ {0,3}#{2,4}\\s*Phase\\s+(${ROADMAP_PHASE_TOKEN})${ROADMAP_TAG}:`,
+    "i",
+  );
+  const headings: Array<{ phase: string; line: number }> = [];
+  for (const l of live) {
+    const m = l.text.match(headingRe);
+    if (m) headings.push({ phase: m[1], line: l.n });
+  }
+
+  // Pass 2 — Progress-table first cells (tables carrying all four columns).
+  const rowCells: string[] = [];
+  let inProgressTable = false;
+  for (const l of live) {
+    if (!l.text.startsWith("|")) {
+      inProgressTable = false;
+      continue;
+    }
+    const cells = l.text.split("|").slice(1, -1).map((c) => c.trim());
+    if (cells[0] === "Phase") {
+      inProgressTable = ROADMAP_PROGRESS_COLUMNS.every((c) => cells.includes(c));
+      continue;
+    }
+    if (inProgressTable && cells.length > 0) rowCells.push(cells[0]);
+  }
+
+  const violations: string[] = [];
+  let bulletCount = 0;
+  let rowCount = 0;
+  for (const h of headings) {
+    const n = escapeForRegex(h.phase);
+    const bulletRe = new RegExp(
+      `^[ \\t]*-\\s*\\[(.)\\]\\s*(?:\\*\\*)?\\s*Phase\\s+${n}${ROADMAP_TAG}[:\\s]`,
+      "i",
+    );
+    const retiredRe = new RegExp(
+      `^[ \\t]*-\\s*\\[(.)\\]\\s*\\*\\*~~Phase\\s+${n}~~:`,
+      "i",
+    );
+    let marker: string | null = null;
+    let retired = false;
+    for (const l of live) {
+      const b = l.text.match(bulletRe);
+      if (b) { marker = b[1]; break; }
+      const r = l.text.match(retiredRe);
+      if (r) { marker = r[1]; retired = true; break; }
+    }
+    const rowRe = new RegExp(`^${n}\\.?(?:\\s|$)`, "i");
+    const hasRow = rowCells.some((c) => rowRe.test(c));
+    const where = `ROADMAP.md:${h.line} (Phase ${h.phase})`;
+
+    if (marker === null) {
+      violations.push(
+        `ROADMAP-STRUCTURE (rule 6a): ${where} has a \`### Phase\` heading but no \`- [ ] **Phase ${h.phase}: …**\` checklist bullet that \`gsd-tools phase complete\` would match. The tool flips only that bullet, so this phase can never be closed by it. Add the bullet to the phase list of the milestone this heading lives in.`,
+      );
+    } else {
+      bulletCount += 1;
+    }
+    if (hasRow) rowCount += 1;
+    else if (!retired) {
+      violations.push(
+        `ROADMAP-STRUCTURE (rule 6b): ${where} has no row in a Progress table (columns ${ROADMAP_PROGRESS_COLUMNS.join(" | ")}) whose first cell starts with "${h.phase}". \`phase complete\` updates that row, and silently skips a phase that has none.`,
+      );
+    }
+    if (marker !== null && !/^[xX]$/.test(marker)) {
+      const status = verificationStatus(h.phase);
+      if (status === "passed") {
+        violations.push(
+          `ROADMAP-STRUCTURE (rule 6c): ${where} has VERIFICATION status "passed" but its checklist bullet is not ticked. Run \`gsd-tools phase complete ${h.phase}\` (and revert its collateral edits), or tick the bullet and the Progress row by hand.`,
+        );
+      }
+    }
+  }
+
+  return { headings: headings.length, bullets: bulletCount, rows: rowCount, violations };
+}
+
+/** Read `status:` from a VERIFICATION.md's frontmatter; null when absent/unreadable. */
+export function readVerificationStatus(contents: string): string | null {
+  const fm = contents.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+  if (!fm) return null;
+  const m = fm[1].match(/^status:\s*["']?([A-Za-z_]+)/m);
+  return m ? m[1] : null;
+}
+
+/**
+ * Disk-backed entry for Rule 6. Returns `null` when the checkout carries no
+ * `.planning/ROADMAP.md` at all (a fixture tree, a stripped PR branch): there is
+ * nothing to compare, and the rule says so rather than failing a repo that has
+ * no roadmap.
+ */
+export function runRoadmapCheck(rootDir: string): RoadmapStructureReport | null {
+  let roadmap: string;
+  try {
+    roadmap = readFileSync(resolve(rootDir, ".planning", "ROADMAP.md"), "utf-8");
+  } catch {
+    return null;
+  }
+  const phasesDir = resolve(rootDir, ".planning", "phases");
+  let dirs: string[] = [];
+  try {
+    dirs = readdirSync(phasesDir);
+  } catch {
+    dirs = [];
+  }
+  const lookup = (phase: string): string | null => {
+    // `<phase>-` exactly: "164.6.6.1-" cannot match "164.6.6.1.1-".
+    for (const d of dirs.filter((x) => x.startsWith(`${phase}-`))) {
+      try {
+        const file = resolve(phasesDir, d, `${phase}-VERIFICATION.md`);
+        return readVerificationStatus(readFileSync(file, "utf-8"));
+      } catch {
+        // no VERIFICATION.md in this directory
+      }
+    }
+    return null;
+  };
+  return checkRoadmapStructure(roadmap, lookup);
+}
+
 function main(): void {
   const { violations, filesScanned, usernameRule } = runCheck(REPO_ROOT);
+  const roadmap = runRoadmapCheck(REPO_ROOT);
+  if (roadmap) violations.push(...roadmap.violations);
 
   // Loud BEFORE the verdict: a rule that did not run must never be discoverable
   // only by reading the source (Phase 163 WR-01 — the success line must not
@@ -771,6 +981,11 @@ function main(): void {
     usernameRule.active
       ? `[check-planning-hygiene] OK — ${filesScanned} tracked files scanned, none carry the local username or an absolute home path (rule 1 needle: ${usernameRule.reason}).`
       : `[check-planning-hygiene] OK — ${filesScanned} tracked files scanned, none carry an absolute home path. LOCAL-USERNAME (rule 1) was NOT checked; see the warning above.`,
+  );
+  console.log(
+    roadmap
+      ? `[check-planning-hygiene] ROADMAP-STRUCTURE (rule 6) OK — ${roadmap.headings} phase headings, ${roadmap.bullets} checklist bullets, ${roadmap.rows} Progress rows (retired phases carry a struck-through bullet and no row by design).`
+      : `[check-planning-hygiene] ROADMAP-STRUCTURE (rule 6) was NOT checked: no .planning/ROADMAP.md in this checkout.`,
   );
 }
 
