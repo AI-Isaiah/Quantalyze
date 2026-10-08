@@ -4256,6 +4256,8 @@ Plans:
 Plans:
 - [ ] TBD (run /gsd-plan-phase 166.5 to break down)
 
+⚠️ **Routed in from 164.6.6.3.4 STATUSBRIDGE (review round 4, 2026-10-08):** a SUCCESSFUL side-kind job whose sibling side job is still in flight takes the bridge's branch (a) and stamps `computed_at = now()` over stale analytics (and blanks the sentence); a later sibling failure then keeps that stamp under the D-09 hold. Same class as the successful-side-job stamp this phase owns. Also from that review: no gate arm pins the equal boundary of STATUSBRIDGE's D-09 release (`updated_at > computed_at`), and the marker retractions (`long_fetch.py`, `src/lib/ledger-refresh-marker.ts`) update a job by id with no status guard, which can bump a done row's `updated_at`.
+
 ### Phase 166.1: ENGINEFLOOR — every Python ratio site reads the one dispersion floor, so a constant yield never produces a fabricated ratio (INSERTED)
 
 **Goal:** Every Python site outside `services/metrics.py` that divides by a standard deviation (the exact-zero guards S1-S8) or correlates a leg (C1-C8) reads Phase 166's relative dispersion floor from ONE module, `services/dispersion.py`, so a compounding-NAV constant yield produces exactly what an all-zero series produces at that site, each proven by a red test; one release commit ships it.
