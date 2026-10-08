@@ -1147,7 +1147,8 @@ describe("lint-sql-gates: the CI invocation (mode identity)", () => {
     // `node scripts/lint-sql-gates.mjs` printed `scanned 85 file(s); 0 finding(s)`.
     // ⭐ CURRENCY 2026-10-07 (Phase 164.6.6.3.5 DOMAINONE, plan 03): 85 -> 86, `node scripts/lint-sql-gates.mjs` printed `scanned 86 file(s); 0 finding(s)` with the contact-dedupe gate in the corpus.
     // ⭐ CURRENCY 2026-10-07 (Phase 164.6.6.3.4 STATUSBRIDGE, plan 03): 86 -> 87, `node scripts/lint-sql-gates.mjs` printed `scanned 87 file(s); 0 finding(s)` with the side-kind scope gate in the corpus.
-    expect(res.out).toMatch(/scanned 87 file/);
+    // ⭐ CURRENCY 2026-10-08 (Phase 164.9.7 TRUNCATEREVOKE, merge with origin/main): 87 -> 88, `node scripts/lint-sql-gates.mjs` printed `scanned 88 file(s); 0 finding(s)` with the truncate-revoke gate in the corpus beside the side-kind scope gate.
+    expect(res.out).toMatch(/scanned 88 file/);
     expect(res.status, res.out).toBe(0);
   });
 

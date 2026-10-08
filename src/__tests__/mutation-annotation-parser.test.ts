@@ -1065,7 +1065,8 @@ describe("R2-W04 / GRAMMAR rule 3b — a mutation may not REWRITE an arm identit
     // ⭐ CURRENCY 2026-10-07 (Phase 164.6.6.3.4 STATUSBRIDGE, founder D-09): `armsSeen` 591 -> 593: arms D9 and D10 in the ALREADY-ANNOTATED test_sync_status_analytics_scope.sql, whose twins each carry one `edit` step (`stepsSeen` is read below).
     // ⭐ CURRENCY 2026-10-08 (Phase 164.6.6.3.4 STATUSBRIDGE, round 3): `armsSeen` 593 -> 597: arms D11 to D14 in the ALREADY-ANNOTATED test_sync_status_analytics_scope.sql.
     // ⭐ CURRENCY 2026-10-08 (Phase 164.6.6.3.4 STATUSBRIDGE, review fix round 4, founder D-10): `armsSeen` 597 -> 599: arms D15 and D16 in the ALREADY-ANNOTATED test_sync_status_analytics_scope.sql. MEASURED: `expected 599 to be 597`.
-    expect(armsSeen).toBe(599);
+    // ⭐ CURRENCY 2026-10-08 (Phase 164.9.7 TRUNCATEREVOKE, merge with origin/main): `armsSeen` 599 -> 605: the NEW gate test_truncate_revoke_anon_authenticated.sql (6 arms, TRUNC 1 to TRUNC 6, every twin a single `sql` step, so `stepsSeen` stays 716). MEASURED: one full lane run on the merged tree printed `arms: 605/605/0` and `biting: 605`, and this file reads `armsSeen` 605 / `stepsSeen` 716.
+    expect(armsSeen).toBe(605);
     // ⭐ CURRENCY 2026-10-07 (founder D-09): `stepsSeen` 700 -> 702 (D9 and D10, one file step each). MEASURED: this file's run read `expected 702 to be 700`.
     // ⭐ CURRENCY 2026-10-08 (round 3): `stepsSeen` 702 -> 711. The seven new file steps of D11 to D14 (2 + 1 + 2 + 2) and a net +2 from the rewritten S1 to S5, G1 and G3 twins (the side list is one declared constant now, so S1 drops a stand-down and S2 to S4 gain one). MEASURED: this file's run read `expected 711 to be 702`.
     // ⭐ CURRENCY 2026-10-08 (round 4): `stepsSeen` 711 -> 716, the five file steps of the D15 twin (3) and the D16 twin (2); the D10, D11 and D12 twins were retargeted, not grown.
@@ -2574,7 +2575,8 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // ⭐ CURRENCY 2026-10-03 (Phase 164.5.2.1 BRIDGERESIDUE, plan 05): 83 -> 85, the two bridge gate files. MEASURED: this file's run read `expected 85 to be 83`, and the full lane run printed `coverage: files 58/85` (annotated 58 + pending 0 + unreachable 27 + inert 0 + lane-blocked 0 = 85).
     // ⭐ CURRENCY 2026-10-07 (Phase 164.6.6.3.5 DOMAINONE, plan 03): 85 -> 86, the contact-dedupe gate file.
     // ⭐ CURRENCY 2026-10-07 (Phase 164.6.6.3.4 STATUSBRIDGE, plan 03): 86 -> 87, the side-kind scope gate file. MEASURED: this file's run read `expected 87 to be 86`, and the full lane run printed `coverage: files 60/87`.
-    expect(corpus.filesTotal).toBe(87);
+    // ⭐ CURRENCY 2026-10-08 (Phase 164.9.7 TRUNCATEREVOKE, merge with origin/main): 87 -> 88, the truncate-revoke gate file beside the side-kind scope gate. MEASURED: the full lane run on the merged tree printed `coverage: files 61/88`.
+    expect(corpus.filesTotal).toBe(88);
     // ⚠️ CURRENCY 2026-09-05 (plan 164.4.1-03, the SECOND file move): MEASURED
     // `files 42/71`, the other 29 still printed by name (`unreachable:` 27 +
     // `lane-blocked:` 2). The one added is
@@ -2638,7 +2640,8 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // ⭐ CURRENCY 2026-10-03 (Phase 164.5.2.1 BRIDGERESIDUE, plan 05): 56 -> 58, with the denominator and the by-name list below (test_sync_status_bridge_lock.sql, test_sync_status_bridge_residues.sql).
     // ⭐ CURRENCY 2026-10-07 (Phase 164.6.6.3.5 DOMAINONE, plan 03): 58 -> 59 (test_for_quants_leads_contact_dedupe.sql), with the denominator and the by-name list below.
     // ⭐ CURRENCY 2026-10-07 (Phase 164.6.6.3.4 STATUSBRIDGE, plan 03): 59 -> 60 (test_sync_status_analytics_scope.sql), with the denominator and the by-name list below.
-    expect(corpus.filesAnnotated).toBe(60);
+    // ⭐ CURRENCY 2026-10-08 (Phase 164.9.7 TRUNCATEREVOKE, merge with origin/main): 60 -> 61 (test_truncate_revoke_anon_authenticated.sql), with the denominator above and the by-name list below.
+    expect(corpus.filesAnnotated).toBe(61);
     expect(corpus.annotatedFiles).toEqual([
       "test_allocator_equity_derived_rls.sql",
       "test_allocator_equity_pre_terminus_flag.sql",
@@ -2739,6 +2742,7 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
       "test_sync_status_bridge_residues.sql",
       "test_sync_status_curated_sentence_survives.sql",
       "test_sync_status_marked_refresh_protected.sql",
+      "test_truncate_revoke_anon_authenticated.sql",
       "test_user_notes_dashboard_scope.sql",
       "test_weight_snapshot_seed_secdef.sql",
       "test_wizard_composite_fence.sql",
@@ -3144,7 +3148,8 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // ⭐ CURRENCY 2026-10-03 (Phase 164.5.2.1 BRIDGERESIDUE, plan 05): 83 -> 85, the two bridge gate files. MEASURED: this file's run read `expected 85 to be 83`, and the full lane run printed `coverage: files 58/85` (annotated 58 + pending 0 + unreachable 27 + inert 0 + lane-blocked 0 = 85).
     // ⭐ CURRENCY 2026-10-07 (Phase 164.6.6.3.5 DOMAINONE, plan 03): 85 -> 86, the contact-dedupe gate file.
     // ⭐ CURRENCY 2026-10-07 (Phase 164.6.6.3.4 STATUSBRIDGE, plan 03): 86 -> 87, the side-kind scope gate file. MEASURED: this file's run read `expected 87 to be 86`, and the full lane run printed `coverage: files 60/87`.
-    expect(corpus.filesTotal).toBe(87);
+    // ⭐ CURRENCY 2026-10-08 (Phase 164.9.7 TRUNCATEREVOKE, merge with origin/main): 87 -> 88, the truncate-revoke gate file. MEASURED off the full lane run: annotated 61 + pending 0 + unreachable 27 + inert 0 + lane-blocked 0 = 88.
+    expect(corpus.filesTotal).toBe(88);
     expect(corpus.laneBlockedFiles).toHaveLength(0);
     // ⛔ A LENGTH beside an AIM, not instead of one. `toHaveLength(0)` on a class
     // that stopped being computed is indistinguishable from `toHaveLength(0)` on
@@ -3164,7 +3169,8 @@ describe("against the real corpus (reads via node:fs, never shell grep)", () => 
     // ⭐ CURRENCY 2026-10-03 (Phase 164.5.2.1 BRIDGERESIDUE, plan 05): 56 -> 58 (test_sync_status_bridge_lock.sql, test_sync_status_bridge_residues.sql).
     // ⭐ CURRENCY 2026-10-07 (Phase 164.6.6.3.5 DOMAINONE, plan 03): 58 -> 59 (test_for_quants_leads_contact_dedupe.sql).
     // ⭐ CURRENCY 2026-10-07 (Phase 164.6.6.3.4 STATUSBRIDGE, plan 03): 59 -> 60 (test_sync_status_analytics_scope.sql).
-    expect(corpus.annotatedFiles).toHaveLength(60);
+    // ⭐ CURRENCY 2026-10-08 (Phase 164.9.7 TRUNCATEREVOKE, merge with origin/main): 60 -> 61 (test_truncate_revoke_anon_authenticated.sql).
+    expect(corpus.annotatedFiles).toHaveLength(61);
   });
 
   it("the five classes PARTITION the corpus, checked against an INDEPENDENT derivation", () => {

@@ -1088,7 +1088,27 @@
 // first.`, exit 0. Per-file line: `test_sync_status_analytics_scope.sql: sections
 // 13 / judged 13 / annotated 13 / waived 0 / biting 13`. Both directions are
 // recorded under ARMS_FLOOR below. WAIVED_CEILING stays 0.
-export const FILES_FLOOR = 60;
+// RAISED 60 -> 61 2026-10-08 (Phase 164.9.7 TRUNCATEREVOKE, merge with origin/main): the
+// new gate supabase/tests/test_truncate_revoke_anon_authenticated.sql (six annotated
+// arms, TRUNC 1 to TRUNC 6, all on `sql` steps; migration 20261009130000) took the
+// corpus from 60 to 61 annotated files on top of Phase 164.6.6.3.4's 60. The branch had
+// measured 59 -> 60 / 578 -> 584 alone; once main's STATUSBRIDGE gate arrived the two
+// counts COMBINED and were re-measured, never added by hand. MEASURED by ONE full lane
+// run of `node scripts/mutation-runner/run.mjs` on the merged tree, no file edited
+// during it: `scope: FULL 61/61 annotated files`, `lane-concurrency: 4`, `coverage:
+// files 61/88`, `arms: 605/605/0`, `biting: 605`, `lane-invocations: 605 ... plus 61
+// baseline / 61 restore leg(s)` (the two independent tallies AGREE), `lane-blocked: 0`,
+// `lane-probe: pg_cron AVAILABLE`, `unreachable: 27`, `per-arm lane time: mean 1.4s over
+// 605 arm run(s)`, `No defects. Every annotated arm bit its own arm first.`, exit 0.
+// Per-file lines: `test_truncate_revoke_anon_authenticated.sql: sections 6 / judged 6 /
+// annotated 6 / waived 0 / biting 6` and `test_sync_status_analytics_scope.sql: sections
+// 21 / judged 21 / annotated 21 / waived 0 / biting 21`. An EARLIER full run on the same
+// frozen tree read `biting: 604` with `wrong-first-failure N1 1a` on
+// test_strategy_shares_rls.sql ("the lane emitted no TEST FAILED at all") and exited 1;
+// `--file supabase/tests/test_strategy_shares_rls.sql` over that gate then read 45/45/0
+// biting, and the next full run read 605. That is a lane flake, not a census value, and
+// it is recorded here rather than discarded. WAIVED_CEILING stays 0.
+export const FILES_FLOOR = 61;
 
 // ARMS_FLOOR — PINNED 2026-08-29 BY MEASUREMENT (plan 164.3-08), not chosen.
 //
@@ -2857,7 +2877,19 @@ export const FILES_FLOOR = 60;
 // `per-arm lane time: mean 1.7s over 599 arm run(s)`, `No defects.` Per-file line:
 // `test_sync_status_analytics_scope.sql: sections 21 / judged 21 / annotated 21 / waived 0
 // / biting 21`. The census pins moved in the same commit. WAIVED_CEILING stays 0.
-export const ARMS_FLOOR = 599;
+// RAISED 599 -> 605 2026-10-08 (Phase 164.9.7 TRUNCATEREVOKE, merge with origin/main): SIX
+// arms from test_truncate_revoke_anon_authenticated.sql (TRUNC 1 the catalogue sweep over
+// every public relation, TRUNC 2 to 4 a table postgres creates after the migration, TRUNC 5
+// service_role still holding TRUNCATE on cron_runs, TRUNC 6 the SQLSTATE refusal of a
+// TRUNCATE issued as authenticated), on top of main's 599 (STATUSBRIDGE, 21 arms in
+// test_sync_status_analytics_scope.sql). Measured by the same single full run recorded
+// under FILES_FLOOR above: `arms: 605/605/0`, `biting: 605`. Each arm was also driven on
+// the pg-lane in plan 01 and read RED on its own identity first. The too-high direction
+// was observed on the merged tree by accident: the full run above that bit 604 exited 1
+// naming `ARMS_FLOOR regression: 604 biting arm(s) < floor 605` (the lane flake recorded
+// under FILES_FLOOR). The stale-low direction was measured on the branch alone at 59 /
+// 578 (`RATCHET STALE: 60 of 87 gate files are now annotated but FILES_FLOOR is still 59`). WAIVED_CEILING stays 0 - no waiver was added.
+export const ARMS_FLOOR = 605;
 
 // WAIVED_CEILING — PINNED 2026-09-02 BY MEASUREMENT (164.3.1 red team), not
 // chosen. A CEILING, not a floor: it fails when the corpus carries MORE waivers
