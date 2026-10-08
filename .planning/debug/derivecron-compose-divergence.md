@@ -117,3 +117,71 @@ Not a simple code defect with one correct fix. The flag's positional rule ("a fl
 - B. (recommended) For pre-window flows on a contiguous run ending the day before the first return day, replace the positional test with the inception invariant: implied pre-history capital within a band of 0 means benign; outside the band is BLOCKING under a name that says so (e.g. inception_unreconciled). Non-adjacent pre-window flows and post-window flows keep OUT_OF_WINDOW_FLOW. Only for full-history venues (deribit; mt5 if its deal history is confirmed to reach inception). On today's PROD data: 4 keys unblock, this key stays blocked, now for the right reason. The band is a materiality call (clean keys measure <= 0.4%).
 - C. Writer-side provenance: persist the first-ledger day and the native inception-gate verdict in `key_inputs`; the compose takes its window start from it. Strongest provenance, more plumbing (derive epilogue + compose + payload shape).
 Separately: this key's early history (0.551 inception residual, ~14,668x growth) needs its own investigation before any option makes its book ready.
+
+## Follow-up 2: the residual under the D-13/D-14 zero-start check (2026-10-08)
+
+status: diagnosed. No code changed. The fix changes the D-13 invariant, so it is a product decision.
+
+### Symptom (HEAD 2c1c2df9e, PROD rows read 2026-10-08, marker-guarded, read only)
+- 4 Deribit keys imply pre-funding capital of -0.3555%, -0.3554%, -0.3555% and -0.3584% of the first-return-day level. They block as `inception_unreconciled` against the 1e-4 band.
+- All 4 belong to ONE account. They share identical returns on common days and identical flows (one key's window ends 2 months earlier, so it lacks the 2 newest flows). Same first return day, same day-1 return.
+
+### Root cause
+The D-13 check reads "this day has no return row" as "this day had zero P&L". That is false for the days the TWR writer leaves out:
+- **Funding day.** `chain_linked_twr` is given `prev0` near 0, so `negative_nav_guard` drops the day. The account's P&L on that day is still in NAV(d0). So `equity[d0] - F[d0] = pnl(d0)`, not the capital before the first flow.
+- **Flow-dominated interior days** (`|F| >= FLOW_DOM_RATIO (1.0) x prev`). These are also dropped. The replay sets r = 0 there, so that day's P&L moves into every earlier level and ends up in the inception residual, divided by the growth in between.
+
+What the check computes: `implied_start = pnl(d0) + sum over dropped interior days t of pnl(t) / G(d0 -> t-1)`.
+
+What the native §5 gate checks: `B(d0) - pnl(d0) - flow(d0)`. It subtracts the funding day's P&L, which the compose cannot see. On Deribit (`full_history=True`) the writer has already proven a zero start under §5.
+
+So the residual is a day's trading P&L. It is not missing capital.
+
+### Evidence
+- **Exact reproduction through the real writer and replay.** Build a synthetic ledger whose pre-history capital is EXACTLY 0. Give it P&L on the funding day and on one flow-dominated day, and run it through the real `chain_linked_twr` (prev0=0) and the real `replay_key_equity`.
+  - The TWR drops the same two days PROD drops (`negative_nav_guard`, `flow_dominated_guard`).
+  - The replay's implied start equals `pnl(d0) + pnl(t)/(1+r1)` to float precision (exact Fraction oracle).
+  - The check returns `inception_unreconciled`.
+  - Replayed levels after the dropped day equal the true NAV exactly. Levels before it are off by exactly `pnl(t)`.
+- **The PROD account fits only this shape.** Its window has exactly two no-return days: the funding day, and one day 2 days later whose deposit is 2.34x the prior level (flow_dominated). Everything else is a return day.
+  - To explain the residual alone, the funding day would need a P&L of -0.354% of the deposit. The dropped day would need -0.355% of its prior level, or -0.106% after its flow.
+  - This account's mean |daily return| over its first 54 days is about 7.7% (sum |r| = 4.14). A -0.35% day is ordinary for it.
+- **MT5 shows the funding-day half on its own.** One MT5 key has NO dropped interior day and a residual of +2.05%: a pure funding-day P&L or a broker credit. The 5 MT5 keys that reconcile to about 1e-14 have r = 0 on their early days, so they did not trade on the funding day.
+- **Repeated values.** -0.3554/-0.3555% is one account seen through 3 keys whose anchors were read minutes apart. -0.3584% is the 4th key, whose anchor was read 81 days earlier. Same returns, same flows, different anchor.
+
+### Candidates eliminated
+| candidate | verdict | evidence |
+|---|---|---|
+| deposit/transfer fee not recorded | eliminated | The flow is the txn-log `change`, the balance delta actually credited, so a fee is already netted inside it. The residual is -0.3540% of the deposit, which matches no fee schedule. |
+| deposit recorded net vs gross | eliminated | Same reason: `change` is net by construction. |
+| currency conversion at the wrong day's price | eliminated for the funding day | The funding deposit is a USD-family amount (round, passes 1:1 through `txn_change_to_usd`). The later coin deposit is valued at the same-day settlement index on both the flow side and the mark side. |
+| anchor read later than the last return day (gap of 29 days on 3 keys, 10 on the 4th) | minor contributor only | Zeroing the residual would need the anchor 3.34% higher, the SAME for two anchors read 81 days apart on an account that has been nearly idle since month 2 (8 non-zero returns in 229 days). The two anchors disagree by 2.8e-4 relative at a common day, which moves the residual by 3e-5 (0.3 of the band). That explains the -0.3584 vs -0.3555 split, not the residual itself. |
+| §5 inception gate in native_nav accepted something wrong | eliminated | §5 subtracts pnl(d0) (`resid = B(d0) - pnl(d0) - flow(d0)`) against max($1, 1e-4 x anchor NAV), per currency, with a native dust floor. It answers a different and correct question. |
+| implied-start formula off by one day | not a defect | `equity[d0] - F[d0]` is the right level arithmetic. The flaw is the premise "no return row means zero P&L". |
+
+### The D-12 key (55%)
+It is likely the same class, but that is not confirmed. It has 10 dropped interior days, all flow days, and several follow a near-total drain (the prior level is about 0.1% of the flow). To explain 0.55 on its own, a single early dropped day would need a P&L of 17-54% of that day's capital. That is extreme, but this key's largest stored daily return is +164%. Without the native per-day P&L its early history remains separately suspect, as recorded in Follow-up 1.
+
+### Other MT5 keys
+Two flow-bearing MT5 keys also sit outside the band: +12.4% (2 dropped flow days) and +2.05% (no dropped day). The 5 that reconcile to about 1e-14 are the ones that did not trade on their funding day.
+
+### Verdict table (HEAD 2c1c2df9e, unchanged: no fix applied)
+| # | venue | account group | flow days | dropped interior days | implied start / first-return level | verdict |
+|---|---|---|---|---|---|---|
+| 1-3 | deribit | A | 54 | 1 | -3.555e-3 (x3) | inception_unreconciled |
+| 4 | deribit | A | 52 | 1 | -3.584e-3 | inception_unreconciled |
+| 5-7 | deribit | B (D-12) | 85 | 10 | +5.507e-1 (x3) | inception_unreconciled |
+| 8-10 | mt5 | C | 4 | 0 | +8.1e-16 (x3) | opening_flows_reconciled |
+| 11-12 | mt5 | D | 14 | 2 | -3.2e-14 (x2) | opening_flows_reconciled |
+| 13 | mt5 | E | 3 | 2 | +1.240e-1 | inception_unreconciled |
+| 14 | mt5 | F | 3 | 0 | +2.053e-2 | inception_unreconciled |
+
+### Options (founder decision; D-13's formula is the founder's own)
+- **A. Keep D-13 as written.** Account A stays blocked although §5 proved its zero start. Any account that trades on its funding day, or that receives a deposit larger than its prior level, blocks.
+- **B. (recommended) Writer-side provenance.** The derive epilogue already runs the native core. It would persist into `key_inputs` (a) `pnl_usd` for every day the TWR left out (the funding day and each guarded day) and (b) the native §5 verdict. The compose would then:
+  - check the real invariant `level(d0) - pnl(d0) - F(d0)` within D-14's 1e-4;
+  - stop forcing r = 0 on a dropped day, so the early levels are right too. Today they are off by the dropped day's P&L, which is a curve error separate from the verdict.
+  
+  Exact for Deribit (§5 already holds). For MT5 the deal ledger carries per-day P&L. More plumbing: epilogue, payload shape, compose.
+- **C. Widen the band** to absorb a day's P&L. Not recommended: there is no principled width (0.36% for A, 2% for F), it hides the early-level error, and D-14 chose 1e-4 deliberately.
+- **D. Drop the funding day's P&L from the check only** (compare against `level(d0) - F(d0) - pnl(d0)` without the data). Not possible: the compose does not have pnl(d0). That is what B supplies.
